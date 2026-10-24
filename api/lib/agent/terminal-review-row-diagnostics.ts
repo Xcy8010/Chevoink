@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { terminalAddressResponseFields, terminalReviewAddressCatalog, bindTerminalCandidateAddresses } from './terminal-review-addresses.js'
-import { inspectTerminalCandidateEvidence, type TerminalCandidate, type TerminalReviewDiagnostic } from './terminal-state-review.js'
+import { inspectTerminalCandidateEvidence, type TerminalCandidate, type TerminalReviewDiagnostic } from './terminal-review-engine.js'
 import { terminalCoverageRowIssue, terminalDispositionSchema } from './terminal-fact-coverage.js'
 import { terminalProposalRowIssue, terminalProposalDispositionSchema } from './terminal-proposal-review.js'
 import { readTerminalProofVerdicts } from './terminal-proof-verdict.js'

@@ -34,7 +34,7 @@ export function hasTerminalCoverageProtocol(spec: unknown) {
 export function terminalCoverageAuditVersion(validation: unknown): 1 | 2 | undefined {
   const audit = object(object(validation).continuityCriticResponse)
   const version = object(object(audit.terminalEvidence).factCoverage).version
-  return audit.parserVersion === 8 && (version === 1 || version === 2) ? version : undefined
+  return (audit.parserVersion === 8 || audit.parserVersion === 9) && (version === 1 || version === 2) ? version : undefined
 }
 
 export function readTerminalCoverageState(spec: unknown, preparedContext: unknown, chapterId: string): TerminalCoverageState | undefined {

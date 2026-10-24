@@ -1,3 +1,4 @@
+import { nextReviewAction } from '../../../shared/review-lifecycle.js'
 import { COMPILER_CONTINUITY_PROTOCOL } from './compiler-continuity-contract.js'
 import type { ChapterReviewReadiness } from './chapter-review-guard.js'
 import { projectReviewCycle } from './review-cycle.js'
@@ -88,7 +89,11 @@ export function nextReviewDispatch(readiness: ChapterReviewReadiness | null,
   const status = tool.name === 'continuity_validate' ? readiness.continuity : readiness.quality
   const originalKey = reviewDispatchKey(readiness, tool.name)
   const key = recoveryKeys.get(originalKey) ?? originalKey
-  if ((status === 'incomplete' && !recovered.has(originalKey) && !recoveryKeys.has(originalKey)) || attempted.has(key)) {
+  const transition = nextReviewAction({ ownerCurrent: true, cancelled: false, contextCurrent: true,
+    reserved: status === 'incomplete' && !recovered.has(originalKey) && !recoveryKeys.has(originalKey) || attempted.has(key),
+    rawPresent: false, providerComplete: false, billingKnown: false, providerFailed: false, complete: false, sameFailedSubject: false,
+    repairAvailable: false, repairConsumed: false, newRequestAllowed: available.has(tool.name) })
+  if (transition.action === 'pause' && (status === 'incomplete' && !recovered.has(originalKey) && !recoveryKeys.has(originalKey) || attempted.has(key))) {
     return { kind: 'blocked' as const, reason: '当前版本的必要检查未完成或结果尚未确认。正文与进度保留，已停止重复检查请求，未判定检查通过。' }
   }
   if (!available.has(tool.name)) return { kind: 'blocked' as const,

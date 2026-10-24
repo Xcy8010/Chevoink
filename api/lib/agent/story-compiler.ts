@@ -822,6 +822,10 @@ export async function validateStoryContinuity(input: {
         terminalProposalReview: proposalPreparation.state } : compilation.preparedContext },
     compilation.chapter, validation, terminalContext) : undefined
   const terminalReview = terminalContext ? currentTerminalReview(validation, compilation.chapter.content, terminalContext, deliveryBinding) : null
+  if ((validation.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion === 9
+    && validation.independentCheck === 'complete' && !terminalReview) {
+    throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', '原检查响应、所有权或费用尚不能完整认证；保留原始结果，未保存为完整报告。')
+  }
   const nextFactCoverage = terminalReview ? advanceTerminalCoverage(authorRequest?.spec, compilation.preparedContext, compilation.chapter, terminalReview, terminalContext?.factCoverage) : undefined
   const nextProposals = proposalPreparation && (terminalReview && proposalPreparation.changes
     ? advanceTerminalProposals(proposalPreparation.state, proposalPreparation.changes, terminalReview) : proposalPreparation.state)

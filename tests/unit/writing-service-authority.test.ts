@@ -3,11 +3,11 @@ import type { Prisma } from '@prisma/client'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { coordinatedWritingInputSchema, coordinatedWritingManifest } from '../../api/lib/agent/coordinated-writing-input.js'
-import { assertWritingServicePolicy, assertWritingReviewWork, readAdmittedWritingServiceStep, readCommittedWritingBodyProgress } from '../../api/lib/agent/runtime-writing-service.js'
+import { assertWritingServicePolicy, assertWritingReviewWork, readAdmittedWritingServiceStep, readCommittedWritingBodyProgress, readHistoricalWritingServiceSource } from '../../api/lib/agent/runtime-writing-service.js'
 
-const mocks = vi.hoisted(() => ({ admitted: vi.fn(), observation: vi.fn(), original: vi.fn(), state: vi.fn(), policy: vi.fn(), writingTarget: vi.fn() }))
-vi.mock('../../api/lib/agent/writing-scope.js', async original => ({ ...await original<object>(), assertWritingTarget: mocks.writingTarget }))
-vi.mock('../../api/lib/agent/runtime-tool-cursor.js', async original => ({ ...await original<object>(), readAdmittedToolOperation: mocks.admitted }))
+const mocks = vi.hoisted(() => ({ admitted: vi.fn(), historical: vi.fn(), scope: vi.fn(), observation: vi.fn(), original: vi.fn(), state: vi.fn(), policy: vi.fn(), writingTarget: vi.fn() }))
+vi.mock('../../api/lib/agent/writing-scope.js', async original => ({ ...await original<object>(), assertWritingTarget: mocks.writingTarget, readWritingScope: mocks.scope }))
+vi.mock('../../api/lib/agent/runtime-tool-cursor.js', async original => ({ ...await original<object>(), readAdmittedToolOperation: mocks.admitted, readToolOperationSource: mocks.historical }))
 vi.mock('../../api/lib/agent/runtime-observed-baseline.js', async original => ({ ...await original<object>(), readObservedBaseline: mocks.observation }))
 vi.mock('../../api/lib/agent/original-request.js', async original => ({ ...await original<object>(), readOriginalTaskRequest: mocks.original }))
 vi.mock('../../api/lib/agent/runtime-state.js', async original => ({ ...await original<object>(), readExecutionStateInTransaction: mocks.state }))
@@ -38,9 +38,11 @@ beforeEach(() => {
       parentOperationId: parent.id, parentInputHash: parent.inputHash, sourceRevision: 0, sourceSnapshotHash: 'a'.repeat(64), step: 'body', chapterId: 'chapter', source: null } } })
   child = { id: subject.operationId, action: subject.action, kind: 'internal', parentOperationId: 'parent', operationKey: 'writing:parent:body', inputHash: snapshot.hash, inputSnapshot: snapshot.value }
   tx.agentOperation.findFirst.mockImplementation(async ({ where }) => where.id === child.id ? child : where.id === parent.id ? parent : null)
-  tx.agentTaskRoot.findUniqueOrThrow.mockResolvedValue({ novelId: 'novel', sessionId: 'session', specSnapshot: spec })
+  tx.agentTaskRoot.findUniqueOrThrow.mockResolvedValue({ userId: lease.userId, novelId: 'novel', sessionId: 'session', specSnapshot: spec })
   tx.agentSession.findUnique.mockResolvedValue({ userId: lease.userId, novelId: 'novel', sandboxMode: 'workspace', toolPolicy: {} })
   mocks.admitted.mockResolvedValue({ operation: parent, input: original })
+  mocks.historical.mockResolvedValue({ input: original })
+  mocks.scope.mockResolvedValue({ writing: spec.scope.writing })
   mocks.original.mockResolvedValue({ prompt: '完整改写本章', spec })
   mocks.observation.mockResolvedValue({ kind: 'chapter', id: 'chapter', revision: 4 })
   configuration = { mode: 'build', tools: actions.map(name => ({ function: { name } })),
@@ -51,6 +53,21 @@ beforeEach(() => {
 })
 
 describe('internal writing service authority', () => {
+  it('authenticates a closed writer from an old task without acquiring current effect authority', async () => {
+    parent.status = 'succeeded'
+    mocks.admitted.mockRejectedValue(Error('History cannot enter current lease admission'))
+    const read = await readHistoricalWritingServiceSource(transaction, { userId: lease.userId, runId: lease.runId, taskRootId: lease.taskRootId }, subject)
+    expect(read.parent.status).toBe('succeeded')
+    expect(mocks.historical).toHaveBeenCalledWith(transaction, parent)
+    expect(mocks.admitted).not.toHaveBeenCalled(); expect(mocks.writingTarget).not.toHaveBeenCalled()
+    expect(mocks.state).not.toHaveBeenCalled(); expect(tx.$queryRaw).not.toHaveBeenCalled()
+  })
+  it('rejects a historical service whose chapter is outside its original frozen writing scope', async () => {
+    parent.status = 'succeeded'
+    mocks.scope.mockResolvedValueOnce({ writing: { kind: 'bounded', targets: [{ chapterId: 'another', orderIndex: 2 }] } })
+    await expect(readHistoricalWritingServiceSource(transaction, lease, subject)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+    expect(mocks.admitted).not.toHaveBeenCalled(); expect(mocks.writingTarget).not.toHaveBeenCalled()
+  })
   it('accepts only the real writer’s original observed body and checks each actual child action', async () => {
     const assertParent = vi.fn()
     expect((await readAdmittedWritingServiceStep(lease, subject, transaction)).parent.id).toBe('parent')

@@ -1,3 +1,6 @@
+import { observedReviewOutcome } from '../../../../shared/review-lifecycle.js'
+import { buildContinuityReviewManifest, continuityReviewV4Request } from '../continuity-review-v4.js'
+import { inspectAuthenticatedContinuityAssessment, knownFinalContinuityFailure, type AuthenticatedContinuityInspection } from '../authenticated-continuity-assessment.js'
 import { continuityResponseInput4 } from '../continuity-response-repair.js'
 import { terminalReportRecoveryResult } from '../terminal-report-recovery.js'
 import { continuityResponseContract, continuityResponseSystem, continuityResponseInput } from '../continuity-response-contract.js'
@@ -125,12 +128,12 @@ async function dispatchLegacyContinuityCorrection(ctx: ToolContext, input: { ori
 
 export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   chapterId: string; revision: number; bodies: ContinuityBodies; system: string; content: string; terminalCandidate?: TerminalCandidate;
-  parserVersion?: 7 | 8; sourceScope?: ContinuitySourceScope;
+  parserVersion?: 7 | 8 | 9; sourceScope?: ContinuitySourceScope;
   options: Parameters<typeof generateReviewCompletion>[2]; assertCurrent: (db?: Prisma.TransactionClient) => Promise<void>;
   bindingHash?: string;
   assessmentAdmissionId?: string;
   recoverBodies?: (version: FrozenTerminalContract) => ContinuityBodies;
-}): Promise<ReturnType<typeof inspectContinuityResponse> & { recoveryReady?: boolean }> {
+}): Promise<AuthenticatedContinuityInspection & { recoveryReady?: boolean }> {
   const trace = createTextRequestTrace()
   let observedContent: string | undefined
   let observedComplete: boolean | undefined
@@ -161,9 +164,23 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
       const reusable = await prisma.$transaction(tx => readReusableLegacyContinuityAssessment(tx, ctx, prior))
       if (reusable) { ctx.signal.throwIfAborted(); await input.assertCurrent(); return reusable }
     }
-    input = { ...input, system: continuityResponseSystem(input.system, continuityResponseContract(input.bodies, input.terminalCandidate)),
-      content: continuityResponseInput4(input.content, input.bodies, input.terminalCandidate) }
-    frozen = { ...frozen, system: input.system, content: input.content }
+    if (frozen.targetType === 'story_compilation' && input.sourceScope) {
+      const original = await prisma.$transaction(tx => readOriginalTaskRequest(tx, ctx))
+      const evidence = input.bodies.terminalEvidence!
+      const manifest = buildContinuityReviewManifest({ subject: { userId: ctx.userId, novelId: ctx.novelId, taskId: original.taskId,
+        targetType: 'story_compilation', targetId: frozen.targetId, chapterId: input.chapterId, revision: input.revision },
+        bodies: input.bodies, candidate: input.terminalCandidate, sourceScope: input.sourceScope,
+        sourceHash: input.bodies.previous === null ? null : runtimeJson({ previous: input.bodies.previous, source: evidence.previous }).hash,
+        sourceVersions: { current: evidence.current, previous: evidence.previous }, verifiedCoverage: evidence.factCoverage ?? null,
+        draftProposals: evidence.proposalChanges ?? null })
+      const request = continuityReviewV4Request({ manifest, bodies: input.bodies, candidate: input.terminalCandidate, sourceScope: input.sourceScope }, original.prompt, JSON.stringify({ body: input.bodies.current, previous: input.bodies.previous, targetId: frozen.targetId }))
+      frozen = { ...frozen, ...request, parserVersion: 9, reassessmentProtocol: 6, continuityManifest: manifest }
+      input = { ...input, ...request }
+    } else {
+      input = { ...input, system: continuityResponseSystem(input.system, continuityResponseContract(input.bodies, input.terminalCandidate)),
+        content: continuityResponseInput4(input.content, input.bodies, input.terminalCandidate) }
+      frozen = { ...frozen, system: input.system, content: input.content }
+    }
   }
   type Observation = Parameters<typeof observeLegacyContinuityAssessment>[3] & { usageId: string }
   const observations: Observation[] = []
@@ -215,7 +232,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
       admissionId: input.assessmentAdmissionId!, usageIds: trace.records.map(record => record.usageId), observedContent, observedComplete }))
   }
   const last = observations.at(-1)
-  const original = replay?.inspected ?? inspectContinuityResponse(last?.content ?? raw, input.bodies, (frozen.reassessmentProtocol !== 3 && frozen.reassessmentProtocol !== 4 && frozen.reassessmentProtocol !== 5) || !!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length, input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope, frozen.reassessmentProtocol === 3 || frozen.reassessmentProtocol === 4 || frozen.reassessmentProtocol === 5 ? { responseContract: 3 } : {})
+  const original = replay?.inspected ?? inspectAuthenticatedContinuityAssessment(last?.content ?? raw, frozen, frozen.parserVersion !== 9 && frozen.reassessmentProtocol !== 3 && frozen.reassessmentProtocol !== 4 && frozen.reassessmentProtocol !== 5 || !!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length)
   const assessed = await runContinuityReassessment({ original, bodies: input.bodies, system: input.system, content: input.content, reassessmentProtocol: frozen.reassessmentProtocol,
     billingKnown: replay?.billingKnown ?? textRequestsFinished(trace), providerComplete: replay?.providerComplete ?? (!!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length),
     slotUsed: replay?.slotUsed ?? [...stages.values()].some(stage => stage === 'output_recovery'), signal: ctx.signal,
@@ -252,7 +269,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
     } })
   // Re-read the actual full lifecycle before a failed report may become
   // actionable pending work. In-memory traces alone miss an old unknown second.
-  const recovery = assessed.complete || assessed.audit.responseContract !== 3 ? null : await prisma.$transaction(tx => readLegacyContinuityAssessment(tx, ctx, frozen))
+  const recovery = assessed.complete || (assessed.audit.responseContract !== 3 && assessed.audit.responseContract !== 4) ? null : await prisma.$transaction(tx => readLegacyContinuityAssessment(tx, ctx, frozen))
   if (recovery && !recovery.recoveryReady) throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED',
     '原连续性检查仍有未确认的响应或用量，保留原请求等待核实，未再次派发。')
   return { ...bindLegacyContinuityAssessment(assessed, ctx, frozen), ...(recovery?.recoveryReady ? { recoveryReady: true } : {}) }
@@ -789,7 +806,7 @@ export async function readStandaloneContinuityReport(ctx: ToolContext, contextHa
   return metadata.success ? { artifact, findings: metadata.data.findings } : null
 }
 
-export async function saveStandaloneContinuityReport(ctx: ToolContext, context: Pick<Awaited<ReturnType<typeof buildStandaloneContinuityContext>>, 'chapter' | 'contextHash' | 'criticInput'>, parsed: ReturnType<typeof parseIndependentContinuityResult>, db: Prisma.TransactionClient, focus?: string, allowSingleQuotes = true, requirePair = true, criticResponse?: ReturnType<typeof inspectContinuityResponse>['audit'], contextProtocol: 2 | 3 | 4 | 5 = criticResponse?.parserVersion === 7 ? 4 : 3): Promise<import('./types.js').ToolResult> {
+export async function saveStandaloneContinuityReport(ctx: ToolContext, context: Pick<Awaited<ReturnType<typeof buildStandaloneContinuityContext>>, 'chapter' | 'contextHash' | 'criticInput'>, parsed: ReturnType<typeof parseIndependentContinuityResult>, db: Prisma.TransactionClient, focus?: string, allowSingleQuotes = true, requirePair = true, criticResponse?: AuthenticatedContinuityInspection['audit'], contextProtocol: 2 | 3 | 4 | 5 = criticResponse?.parserVersion === 7 ? 4 : 3): Promise<import('./types.js').ToolResult> {
   ctx.signal.throwIfAborted()
   await assertAgentManuscriptCurrent(db, ctx)
   await db.$queryRaw`SELECT id FROM chapters WHERE id = ${context.chapter.id} FOR UPDATE`
@@ -801,6 +818,7 @@ export async function saveStandaloneContinuityReport(ctx: ToolContext, context: 
       content: unconfirmedContinuityOutput, summary: '独立连续性复核未完成', metadata: runtimeJson({ independentCheck: 'unavailable', chapterId: context.chapter.id,
         revision: context.chapter.revision, contextHash: context.contextHash, ...(contextProtocol >= 3 ? { sourceProvenance: current.sourceProvenance } : {}), criticResponse }).value } })
     return { outcome: 'failed', failureCode: criticResponse?.classification === 'source_invalid' ? 'CONTINUITY_EVIDENCE_UNLOCATED' : 'CONTINUITY_REPORT_INCOMPLETE',
+      reviewOutcome: criticResponse?.rawResponse.complete ? 'evidence_repair_required' : 'provider_unresolved',
       summary: '独立连续性复核未完成', output: continuityFailureOutput(criticResponse, unconfirmedContinuityOutput) }
   }
   const cacheProtocol = contextProtocol >= 3 ? 3 : requirePair ? 2 : 1
@@ -811,7 +829,7 @@ export async function saveStandaloneContinuityReport(ctx: ToolContext, context: 
   const warnings = findings.length - errors
   const output = `独立连续性检查《${context.chapter.title}》@r${context.chapter.revision}：${unlocated ? '候选未确认。' : `${errors} 错误、${warnings} 警告。`}${unlocated ? '引用未在对应正文中定位，结论未确认，不能判定通过或据此改稿。' : '仅完成审阅，正文未修改，不需要补建编译或提交章节桥。'}${unlocated ? '' : `\n${findings.map(item => `[${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}`}`
   const artifact = cached?.artifact ?? await db.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: `${context.chapter.title} · 连续性检查`, content: output,
-    summary: unlocated ? '候选未确认' : `${errors} 错误、${warnings} 警告`, metadata: { standaloneContinuity: true, independentCheck: unlocated ? 'unavailable' : 'complete', standaloneKey: standaloneReviewKey(context.contextHash, focus, cacheProtocol), chapterId: context.chapter.id, revision: context.chapter.revision, contextHash: context.contextHash, ...(contextProtocol >= 3 ? { sourceProvenance: current.sourceProvenance } : {}), findings, ...(criticResponse ? { criticResponse } : {}) } } })
+    summary: unlocated ? '候选未确认' : `${errors} 错误、${warnings} 警告`, metadata: runtimeJson({ standaloneContinuity: true, independentCheck: unlocated ? 'unavailable' : 'complete', standaloneKey: standaloneReviewKey(context.contextHash, focus, cacheProtocol), chapterId: context.chapter.id, revision: context.chapter.revision, contextHash: context.contextHash, ...(contextProtocol >= 3 ? { sourceProvenance: current.sourceProvenance } : {}), findings, ...(criticResponse ? { criticResponse } : {}) }).value } })
   ctx.signal.throwIfAborted()
   if (!unlocated && criticResponse) {
     await markLegacyContinuityCorrectionApplied(db, ctx, { originalHash: criticResponse.contentHash,
@@ -819,6 +837,7 @@ export async function saveStandaloneContinuityReport(ctx: ToolContext, context: 
     await markLegacyContinuityAssessmentApplied(db, ctx)
   }
   return { ...(unlocated ? { outcome: 'failed' as const, failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED' } : {}),
+    reviewOutcome: unlocated ? 'evidence_repair_required' : errors || warnings ? 'decision_required' : 'complete',
     summary: unlocated ? '连续性引用待核对' : `独立连续性检查 · ${errors} 错误 ${warnings} 警告`, output: `artifactId=${artifact.id}\n${output}`, observedState: { kind: 'chapter', id: context.chapter.id, revision: context.chapter.revision } }
 }
 
@@ -1010,7 +1029,7 @@ export const continuityValidateTool = defineTool({
         output: '本次未调用检查模型：前章版本已变化、正文为空或场景任务数量不合法。请读取章节桥并修复该前置状态，不要反复请求连续性检查；未判定通过。' }
     }
     const previousAudit = (compilation.validation as Record<string, unknown> | null)?.continuityCriticResponse as Record<string, unknown> | undefined
-    const failedInputDecision = previousAudit?.parserVersion === 8 && previousAudit.classification === 'source_invalid'
+    const failedInputDecision = previousAudit && knownFinalContinuityFailure(previousAudit)
       ? await (await import('../terminal-input-decision.js')).readTerminalInputDecision(prisma, ctx, compilation.id) : null
     if (failedInputDecision && (await import('../terminal-input-decision.js')).sameTerminalInputSubject(failedInputDecision.input,
       { ...failedInputDecision.input, terminalCandidate, sourceScope: compilerEvidenceScope(chapter, sourceChapter),
@@ -1044,6 +1063,7 @@ export const continuityValidateTool = defineTool({
         cacheDeliveryBinding)
       if (terminalFailure) return terminalFailure
       return {
+        reviewOutcome: errorCount || warningCount ? 'decision_required' : 'complete',
         output: `当前 r${chapter.revision} 已完成连续性检查，直接复用结果：${errorCount} 个错误、${warningCount} 个警告；${errorCount ? repairGuidance : '连续性检查已完成；警告保留待审，不自动改正文。'}\n留置绑定 reportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...cachedValidation, checkedChapterId: chapter.id })}；findingId 使用从0开始的编号。\n${findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}`,
         summary: `复用连续性检查 · ${errorCount} 错误 ${warningCount} 警告`,
         display: { kind: 'storyCompiler', compilationId: compilation.id, phase: errorCount > 0 ? 'repair' : 'check', title: '连续性检查', detail: `${errorCount} 错误 · ${warningCount} 警告 · 已复用`, items: findings.map((item) => `${item.severity === 'error' ? '错误' : '警告'}：${item.evidence}`), errorCount, warningCount },
@@ -1098,7 +1118,7 @@ export const continuityValidateTool = defineTool({
         return result
       })
       if (report.independentCheck !== 'complete') return { outcome: 'failed' as const, failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED', summary: '独立连续性复核未完成', output: unconfirmedContinuityOutput }
-      return { summary: `离线复用连续性纠正 · ${report.errorCount} 错误 ${report.warningCount} 警告`,
+      return { reviewOutcome: report.errorCount || report.warningCount ? 'decision_required' : 'complete', summary: `离线复用连续性纠正 · ${report.errorCount} 错误 ${report.warningCount} 警告`,
         output: `已应用此前收到且已结算的引用纠正，正文未修改，未再次调用模型。\n留置绑定 reportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...report, coverage })}；findingId 使用从0开始编号。\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` }
     }
     let continued = terminalCandidate ? null : await prisma.$transaction(tx => readContinuedContinuityEvidence(tx, ctx, { compilationId: compilation.id, focus: args.focus }))
@@ -1255,6 +1275,7 @@ export const continuityValidateTool = defineTool({
       outcome: 'failed' as const,
       failureCode: inspected.audit.classification === 'source_invalid' ? 'CONTINUITY_EVIDENCE_UNLOCATED' : criticFallback ? 'CONTINUITY_REPORT_INCOMPLETE' : 'CONTINUITY_EVIDENCE_UNLOCATED',
       output: continuityFailureOutput(inspected.audit, unconfirmedContinuityOutput, requestBodies),
+      reviewOutcome: observedReviewOutcome({ complete: false, rawPresent: inspected.audit.rawResponse.complete, providerComplete: true, billingKnown: 'recoveryReady' in inspected && inspected.recoveryReady === true }).outcome ?? undefined,
       summary: '独立连续性复核未完成',
     }
     const repairGuidance = result.errorCount > 0 ? await prisma.$transaction(tx => readChapterReviewRevisionGuidance(tx, ctx, chapter)) : ''
@@ -1269,6 +1290,7 @@ export const continuityValidateTool = defineTool({
     if (terminalFailure) return terminalFailure
     const phase = result.errorCount > 0 ? 'repair' : 'check'
     return {
+      reviewOutcome: result.errorCount || result.warningCount ? 'decision_required' : 'complete',
       output: (result.errorCount > 0
         ? `CHECK 发现 ${result.errorCount} 个错误、${result.warningCount} 个警告。${repairGuidance}\n留置绑定 reportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...result, coverage })}；findingId 使用下面从0开始的编号。\n${result.findings.map((item, index) => `${index}. [${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}`
         : `当前正文连续性检查完成：0 个错误、${result.warningCount} 个警告。正文未改动，警告保留待审；写作交付还须完成原请求要求的当前版本质量检查，再核对章节终态，禁止为追求零警告重复修订。${result.warningCount ? `\n${result.findings.map((item, index) => `${index + 1}. [警告/${item.signal}] ${item.evidence}`).join('\n')}` : ''}`),
@@ -1355,7 +1377,7 @@ export const chapterBridgeCommitTool = defineTool({
     const commitAudit = (compilation.validation as { continuityCriticResponse?: { parserVersion?: number } } | null)?.continuityCriticResponse
     const commitRequest = await readOriginalTaskRequest(db, ctx)
     const savedCommitCandidate = readTerminalCandidate(compilation.validation)
-    let commitEvidence = commitAudit?.parserVersion === 8 ? terminalEvidenceContext(compilation.chapter, commitSource, storedContinuityProtocol(compilation.validation) === 11 ? 2 : 1, terminalQuoteAddressVersion(commitRequest.spec),
+    let commitEvidence = commitAudit && [8, 9].includes(commitAudit.parserVersion ?? 0) ? terminalEvidenceContext(compilation.chapter, commitSource, storedContinuityProtocol(compilation.validation) === 11 ? 2 : 1, terminalQuoteAddressVersion(commitRequest.spec),
       terminalCoverageInput(commitRequest.spec, compilation.preparedContext, compilation.chapter, savedCommitCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(commitSource, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined
     if (commitEvidence && savedCommitCandidate) commitEvidence = attachTerminalProposalInput(commitEvidence, { taskId: terminalProposalTaskId(commitRequest.spec, commitRequest.taskId),
       preparedContext: compilation.preparedContext, validation: compilation.validation, candidate: savedCommitCandidate })

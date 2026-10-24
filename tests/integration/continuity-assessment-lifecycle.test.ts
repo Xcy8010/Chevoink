@@ -23,6 +23,8 @@ import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-revi
 import { withHumanAdmission } from '../../api/lib/agent/goal-activation-authority.js'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import { currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
+import { readTerminalDraftBinding } from '../../api/lib/agent/terminal-draft-authority.js'
+import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
 import { readQualityReviewAdmission } from '../../api/lib/agent/quality-review-admission.js'
 
 const runtime: NonNullable<ToolContext['modelRuntime']> = { tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture', baseUrl: 'https://provider.invalid/v1',
@@ -187,23 +189,41 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
     const next = await prisma.agentArtifact.findFirstOrThrow({ where: { runId: f.runId, metadata: { path: ['callId'], equals: continued.callId } } })
     expect(next.metadata).toMatchObject({ input: { reassessmentProtocol: 5 } })
   }))
-  it('persists a new contract3 duplicate projection and commits the same reviewed chapter without buying another check', () => fixture(async f => {
+  it.each(['fresh4', 'frozen3'] as const)('persists %s and commits the same reviewed chapter without buying another check', variant => fixture(async f => {
     const { ctx, compilation } = await retryFixture(f, new AbortController())
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     const candidate = terminalCandidateSchema.parse({ exitState: { action: '人物走进门。' } })
-    const verdict = { claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: '人物走进门' }] }
+    const verdict = { claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] }
     const raw = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind =>
-      ({ kind, result: 'clear', reason: 'Synthetic current-body action check.', findingIndexes: [] })),
-      terminalVerdicts: [verdict, verdict], terminalProofVerdicts: [], terminalDispositions: [] })
+      ({ kind, result: 'clear', reason: 'Synthetic current-body action check.', ...(variant === 'fresh4' ? { findingIds: [] } : { findingIndexes: [] }) })),
+      terminalVerdicts: variant === 'fresh4' ? [verdict] : [verdict, verdict], terminalProofVerdicts: [], terminalDispositions: [] })
     const fetcher = vi.fn(async () => completion(raw))
     vi.stubGlobal('fetch', fetcher)
+    if (variant === 'frozen3') {
+      const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
+      const coverage = compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source: null, terminalCandidate: candidate }, 11)
+      const bodies = { previous: null, current: body, terminalEvidence: terminalEvidenceContext(chapter, null, 2, 1, terminalCoverageInput(f.spec, saved.preparedContext, chapter, candidate, 2, []), 6, 2) }
+      const frozen: lifecycle.LegacyAssessmentInput = { chapterId: chapter.id, revision: chapter.revision, bodies, system: 'Synthetic frozen parser8 contract.', content: body,
+        parserVersion: 8, reassessmentProtocol: 5, terminalCandidate: candidate, sourceScope: compilerEvidenceScope(chapter, null), bindingHash: runtimeJson(coverage).hash,
+        targetType: 'story_compilation', targetId: compilation.id }
+      expect(await prisma.$transaction(tx => lifecycle.reserveLegacyContinuityAssessment(tx, ctx, frozen, async () => {}))).toBe('new')
+      await generateReviewCompletion(frozen.system, frozen.content, { modelRuntime: runtime, explicitModelSelection: true, userId: f.userId, novelId: f.novelId, agentRunId: f.runId,
+        chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id, action: 'agent3ContinuityCritic', signal: ctx.signal,
+        beforeProviderDispatch: async usageId => { await prisma.$transaction(tx => lifecycle.bindLegacyContinuityRequest(tx, ctx, frozen, usageId, 'primary', async () => {})) } })
+      const usage = await prisma.aiUsageLog.findFirstOrThrow({ where: { userId: f.userId, action: 'agent3ContinuityCritic' } })
+      await prisma.$transaction(tx => lifecycle.observeLegacyContinuityAssessment(tx, ctx, frozen, { content: raw, finishReason: 'stop', toolCalls: [] }, [usage.id], 'primary'))
+    }
     const result = await continuityValidateTool.execute(ctx, { compilationId: compilation.id, terminalState: candidate })
     expect(result, JSON.stringify(result)).not.toMatchObject({ outcome: 'failed' })
     const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
-    expect(saved.validation).toMatchObject({ independentCheck: 'complete', continuityCriticResponse: { responseContract: 3,
+    if (variant === 'fresh4') expect(saved.validation).toMatchObject({ independentCheck: 'complete', continuityCriticResponse: { parserVersion: 9, responseContract: 4,
+      rawResponse: { content: JSON.stringify(raw) }, continuityV4: { version: 1, projections: { prose: { valid: true }, currentTerminal: { valid: true }, historicalCoverage: { valid: true }, draftProposals: { valid: true } } } } })
+    else expect(saved.validation).toMatchObject({ independentCheck: 'complete', continuityCriticResponse: { parserVersion: 8, responseContract: 3,
       rawResponse: { content: JSON.stringify(raw) }, responseNormalization: { repeated: [{ field: 'terminalVerdicts', index: 1, originalIndex: 0, address: 0 }] } } })
     const audit = (saved.validation as { continuityCriticResponse: { terminalEvidence: Parameters<typeof currentTerminalReview>[2] } }).continuityCriticResponse
-    expect(currentTerminalReview(saved.validation, body, audit.terminalEvidence)).toMatchObject({ supported: true })
+    if (variant === 'fresh4') expect(currentTerminalReview(saved.validation, body, audit.terminalEvidence)).toBeNull()
+    const deliveryBinding = await readTerminalDraftBinding(prisma, { ...ctx, compilationId: compilation.id }, { taskId: f.spec.id, preparedContext: saved.preparedContext }, chapter, saved.validation, audit.terminalEvidence)
+    expect(currentTerminalReview(saved.validation, body, audit.terminalEvidence, deliveryBinding)).toMatchObject({ supported: true })
     await persistHumanityQualityReport({ ...ctx, chapterId: chapter.id, compilationId: compilation.id, chapterRevision: chapter.revision, mode: 'balanced',
       criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
     expect(await chapterBridgeCommitTool.execute(ctx, { compilationId: compilation.id })).not.toMatchObject({ outcome: 'failed' })
@@ -213,9 +233,9 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
     const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
     const artifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
     const reservation = artifacts.map(row => row.metadata as Record<string, unknown>).find(row => row.continuityAssessmentRequestKey)!
-    expect(reservation.input).toMatchObject({ reassessmentProtocol: 5 })
+    expect(reservation.input).toMatchObject(variant === 'fresh4' ? { parserVersion: 9, reassessmentProtocol: 6, continuityManifest: { version: 1 } } : { parserVersion: 8, reassessmentProtocol: 5 })
     expect(await prisma.$transaction(tx => lifecycle.readReusableLegacyContinuityAssessment(tx, ctx, reservation.input as lifecycle.LegacyAssessmentInput)))
-      .toMatchObject({ complete: true, audit: { responseContract: 3 } })
+      .toMatchObject({ complete: true, audit: { parserVersion: variant === 'fresh4' ? 9 : 8, responseContract: variant === 'fresh4' ? 4 : 3 } })
     expect(await chapterBridgeCommitTool.execute(ctx, { compilationId: compilation.id })).not.toMatchObject({ outcome: 'failed' })
     expect(fetcher).toHaveBeenCalledOnce()
     expect(paid).toHaveLength(1); expect(ledger).toHaveLength(1)
@@ -245,7 +265,7 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
         action: 'agent3ContinuityCritic', targetType: 'chapter' as const, targetId: chapter.id, signal: ctx.signal },
       assertCurrent: async () => { expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).content).toBe(body) } }
     const first = await runLegacyContinuityReview(ctx, input)
-    expect(first).toMatchObject({ complete: true, audit: { responseContract: 3, reassessment: { kind: 'field_repair' } } })
+    expect(first).toMatchObject({ complete: true, audit: { parserVersion: 8, responseContract: 3, reassessment: { kind: 'field_repair' } } })
     expect(JSON.parse(first.audit.rawResponse.content)).toBe(raw)
     expect(fetcher).toHaveBeenCalledTimes(2)
     const payments = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })

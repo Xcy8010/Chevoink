@@ -1,3 +1,5 @@
+import { knownFinalContinuityFailure } from './authenticated-continuity-assessment.js'
+import { observedReviewOutcome } from '../../../shared/review-lifecycle.js'
 import { readRetiredReviewUsageIds } from './cancelled-review-recovery.js'
 import { COMPILER_CONTINUITY_PROTOCOL } from './compiler-continuity-contract.js'
 import { readQualityReviewAdmission } from './quality-review-admission.js'
@@ -125,8 +127,9 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
     // terminal subject. Its authenticated handoff is handled by the loop;
     // missing/unknown witnesses must not fall back to another critic call.
     const terminalAudit = object(validation.continuityCriticResponse)
-    if (terminalAudit.parserVersion === 8 && terminalAudit.classification === 'source_invalid'
-      && object(validation.terminalCandidate).exitState) continue
+    const failedSubject = knownFinalContinuityFailure(terminalAudit) && !!object(validation.terminalCandidate).exitState
+    if (observedReviewOutcome({ complete: false, rawPresent: !!object(terminalAudit.rawResponse).content, providerComplete: false, billingKnown: false,
+      decisionRequired: failedSubject }).action === 'pause' && failedSubject) continue
     if (compilation.status !== 'active' || !compilation.chapterId || validation.independentCheck !== 'unavailable'
       || ![6, 7, COMPILER_CONTINUITY_PROTOCOL, ...(hasContinuitySourceAuthority(original.spec) ? [9] : []), ...(hasTerminalEvidenceProtocol(original.spec) ? [10] : []), ...(terminalEvidenceVersion(original.spec) === 2 ? [11] : [])].includes(Number(coverage.protocolVersion))) continue
     const chapter = await tx.chapter.findFirst({ where: { id: compilation.chapterId, authorId: subject.userId, ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true, orderIndex: true } })

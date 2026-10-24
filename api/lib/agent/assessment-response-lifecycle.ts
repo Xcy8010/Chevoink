@@ -21,8 +21,13 @@ import { terminalEvidenceContextSchema, type TerminalEvidenceContext } from './t
 import { continuitySourceScopeSchema, type ContinuitySourceScope } from './continuity-source-authority.js'
 import { terminalAddressResponseFields } from './terminal-review-addresses.js'
 import { continuityResponseContract, continuityResponseSystem, continuityResponseInput, fixedContinuityResponseFields, assertFixedContinuityResponseFields, continuityReassessmentDiagnostics, continuityReassessmentEnvelope, decisionSchema, continuityReassessmentCandidates } from './continuity-response-contract.js'
+import { inspectAuthenticatedContinuityAssessment, knownFinalContinuityFailure, isContinuityV4Inspection, assertLegacyContinuityInspection, type AuthenticatedContinuityInspection, type LegacyContinuityInspection } from './authenticated-continuity-assessment.js'
+import { continuityReviewManifestSchema, continuityV4RepairRequest, applyContinuityV4Repair, failedContinuityV4Repair,
+  type ContinuityReviewManifest } from './continuity-review-v4.js'
+import { nextReviewAction } from '../../../shared/review-lifecycle.js'
+import { sameContinuitySubject } from './continuity-subject-identity.js'
 
-type Inspection = ReturnType<typeof inspectContinuityResponse>
+type Inspection = AuthenticatedContinuityInspection
 const object = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
 const json = (raw: string) => ({ version: 1, encoding: 'json-string', content: JSON.stringify(raw), complete: true })
 export type LegacyContinuityStage = 'first' | 'output_recovery' | 'reassessment'
@@ -30,6 +35,9 @@ export function legacyContinuityStageForAction(action: string): LegacyContinuity
   return action === 'agent3ContinuityCritic' ? 'first' : action === 'agent3ContinuityCriticSecondPass' ? 'reassessment'
     : ['agent3ContinuityCriticOutputRecovery', 'agent3ContinuityCriticEmptyRecovery'].includes(action) ? 'output_recovery' : null
 }
+const assessmentContractMatches = (input: Record<string, unknown> | LegacyAssessmentInput | null, audit: Record<string, unknown> | null | Inspection['audit']) =>
+  input?.parserVersion === 9 ? input.reassessmentProtocol === 6 && audit?.parserVersion === 9 && audit.responseContract === 4
+    : audit?.parserVersion !== 9 && (input?.reassessmentProtocol === 3 || input?.reassessmentProtocol === 4 || input?.reassessmentProtocol === 5) === (audit?.responseContract === 3)
 const knownAssessmentBilling = (row: Parameters<typeof isKnownRejectedTextRequestAttempt>[0]) =>
   isKnownRejectedTextRequestAttempt(row) || row.usageSource === 'reported' && isKnownTextRequestBilling(row)
 
@@ -41,7 +49,14 @@ export const continuityReassessmentRule = `本次是同一完整输入的一次�
 原候选能解析时，为每个原 index 恰好给一项 decisions：action 为 confirm、retract 或 replace，reason 说明核实原因，sourceEvidence 绑定本次真实原文。confirm 保持 signal/severity/evidence/suggestion 且 findingIndex 指向最终意见；replace 明确说明原判断为何不成立或需更正并指向替代意见；retract 说明撤回原因及原文依据，不给 findingIndex。原回复不能解析时 decisions 必须为空，不编造原意见编号。
 完整复查全部输入，findings 是最终完整报告，可包含独立核实的新问题；每项继续遵守原 JSON 字段、真实引用、同一对象/时刻/维度及两处互斥证据规则。撤回候选不等于正文已改动。严格输出 {"decisions":[{"index":0,"action":"retract","reason":"原判断混淆先后事件，已核对实际原文。","sourceEvidence":[{"source":"current","segmentId":"c0"}]}],"findings":[]}。示例仅说明格式，不能照抄。`
 
-export function continuityReassessmentRequest(system: string, input: string, original: Inspection, bodies: ContinuityBodies, legacyDiagnostics = false, reassessmentProtocol?: 2 | 3 | 4 | 5): { system: string; content: string } {
+export function continuityReassessmentRequest(system: string, input: string, original: Inspection, bodies: ContinuityBodies, legacyDiagnostics = false, reassessmentProtocol?: 2 | 3 | 4 | 5 | 6): { system: string; content: string } {
+  if (reassessmentProtocol === 6) {
+    if (!isContinuityV4Inspection(original)) throw Error('Frozen v4 repair lacks its original manifest')
+    const request = continuityV4RepairRequest(original)
+    if (!request) throw Error('No unambiguous invalid continuity rows remain')
+    return request
+  }
+  assertLegacyContinuityInspection(original)
   const candidates = continuityReassessmentCandidates(JSON.parse(original.audit.rawResponse.content) as string)
   if (reassessmentProtocol === 4 || reassessmentProtocol === 5) return continuitySparseRepairRequest(system, input, original, bodies, reassessmentProtocol === 5 ? 2 : 1)
     ?? continuityReassessmentRequest(system, input, original, bodies, legacyDiagnostics, 3)
@@ -85,14 +100,19 @@ export function freshContinuityResponseContract(reassessment = false, hasCandida
   }).strict(), {io:'input'}))}`
 }
 
-export function applyContinuityReassessment(original: Inspection, raw: string, bodies: ContinuityBodies, reassessmentProtocol?: 2 | 3 | 4 | 5): Inspection {
+export function applyContinuityReassessment(original: Inspection, raw: string, bodies: ContinuityBodies, reassessmentProtocol?: 2 | 3 | 4 | 5 | 6): Inspection {
+  if (reassessmentProtocol === 6) {
+    if (!isContinuityV4Inspection(original)) throw Error('Continuity v4 repair cannot reinterpret a legacy response')
+    return applyContinuityV4Repair(original, raw, true)
+  }
+  assertLegacyContinuityInspection(original)
   if (reassessmentProtocol === 4 || reassessmentProtocol === 5) {
     const repaired = applyContinuitySparseRepair(original, raw, bodies, reassessmentProtocol === 5 ? 2 : 1)
     if (!repaired) return applyContinuityReassessment(original, raw, bodies, 3)
     const result = inspectContinuityResponse(repaired.raw, bodies, true, 8, original.audit.terminalCandidate, original.audit.sourceScope, { responseContract: 3 })
     if (!result.complete) throw new Error('Sparse repair did not produce a valid full independent report')
     return { ...result, audit: { ...result.audit, responseProjection: repaired.projection, reassessment: { version: 1, kind: 'sparse_table_repair', original: original.audit,
-      rawResponse: json(raw), frozenBodies: bodies, projection: repaired.projection } } as Inspection['audit'] }
+      rawResponse: json(raw), frozenBodies: bodies, projection: repaired.projection } } as LegacyContinuityInspection['audit'] }
   }
   if (reassessmentProtocol === 3) {
     if (original.audit.responseContract !== 3 || !original.audit.terminalCandidate || bodies.terminalEvidence?.verdictProtocol !== 6)
@@ -104,7 +124,7 @@ export function applyContinuityReassessment(original: Inspection, raw: string, b
       const result = inspectContinuityResponse(raw, bodies, true, 8, original.audit.terminalCandidate, original.audit.sourceScope, { responseContract: 3 })
       if (!result.complete) throw new Error('Continuity field repair final report is invalid')
       return { ...result, audit: { ...result.audit, reassessment: { version: 1, kind: 'field_repair', original: original.audit,
-        fixedFields: Object.keys(fixed), fixedHash: runtimeJson(fixed).hash, rawResponse: json(raw) } } as Inspection['audit'] }
+        fixedFields: Object.keys(fixed), fixedHash: runtimeJson(fixed).hash, rawResponse: json(raw) } } as LegacyContinuityInspection['audit'] }
     }
     // Source-invalid findings still require the complete explicit disposition
     // protocol below; fixed-field recovery cannot silently drop them.
@@ -116,22 +136,40 @@ export function applyContinuityReassessment(original: Inspection, raw: string, b
     decisions: envelope.decisions, rawResponse: json(raw),
     ...(derivedEmptyDecisions ? { mechanicalRecovery: { version: 1, kind: 'empty_original_dispositions',
       originalResponseHash: original.audit.contentHash, responseHash: createHash('sha256').update(raw).digest('hex'), derived: { decisions: [] } } } : {}),
-  } } as Inspection['audit'] }
+  } } as LegacyContinuityInspection['audit'] }
 }
 
-function failedContinuityReassessment(original: Inspection, raw: string, complete: boolean, bodies: ContinuityBodies, protocol?: 2 | 3 | 4 | 5): Inspection {
+export function failedContinuityReassessment(original: Inspection, raw: string, complete: boolean, bodies: ContinuityBodies, protocol?: 2 | 3 | 4 | 5 | 6): Inspection {
+  if (isContinuityV4Inspection(original)) return failedContinuityV4Repair(original, raw, complete)
   const sparseDiagnostics = (protocol === 4 || protocol === 5) && complete ? continuitySparseRepairDiagnostics(original, raw, bodies, protocol === 5 ? 2 : 1) : null
   return { ...original, audit: { ...original.audit, reassessment: { version: 1,
     ...(sparseDiagnostics ? { kind: 'sparse_table_repair_failed', protocol } : {}),
     classification: complete ? 'invalid' : 'response_incomplete', rawResponse: { ...json(raw), complete },
-    ...((protocol === 3 || protocol === 4 || protocol === 5) && complete ? { diagnostics: sparseDiagnostics ?? continuityReassessmentDiagnostics(original, raw, bodies) } : {}) } } as Inspection['audit'] }
+    ...((protocol === 3 || protocol === 4 || protocol === 5) && complete ? { diagnostics: sparseDiagnostics ?? continuityReassessmentDiagnostics(original, raw, bodies) } : {}) } } as LegacyContinuityInspection['audit'] }
 }
 
-export async function runContinuityReassessment(input: { original: Inspection; bodies: ContinuityBodies; system: string; content: string; reassessmentProtocol?: 2 | 3 | 4 | 5;
+export async function runContinuityReassessment(input: { original: Inspection; bodies: ContinuityBodies; system: string; content: string; reassessmentProtocol?: 2 | 3 | 4 | 5 | 6;
   billingKnown: boolean; providerComplete: boolean; slotUsed: boolean; signal: AbortSignal; assertCurrent: () => Promise<void>;
   claim: (request: { system: string; content: string }) => Promise<boolean>; dispatch: (request: { system: string; content: string }) => Promise<{ content: string; complete: boolean }>;
   notDispatched?: () => Promise<void>;
 }): Promise<Inspection> {
+  if (input.reassessmentProtocol === 6 || isContinuityV4Inspection(input.original)) {
+    if (input.reassessmentProtocol !== 6 || !isContinuityV4Inspection(input.original)) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '独立响应版本与冻结修复合同不一致。')
+    const request = continuityV4RepairRequest(input.original)
+    const transition = nextReviewAction({ ownerCurrent: true, cancelled: input.signal.aborted, contextCurrent: true, reserved: true,
+      rawPresent: input.original.audit.rawResponse.complete, providerComplete: input.providerComplete, billingKnown: input.billingKnown,
+      providerFailed: false, complete: input.original.complete, sameFailedSubject: false, repairAvailable: !!request,
+      repairConsumed: input.slotUsed, newRequestAllowed: false })
+    if (transition.action !== 'repair' || !request) return input.original
+    input.signal.throwIfAborted(); await input.assertCurrent(); input.signal.throwIfAborted()
+    if (!await input.claim(request)) return input.original
+    try { input.signal.throwIfAborted(); await input.assertCurrent() } catch (error) { await input.notDispatched?.(); throw error }
+    const response = await input.dispatch(request)
+    input.signal.throwIfAborted(); await input.assertCurrent()
+    if (response.complete) try { return applyContinuityV4Repair(input.original, response.content, true) } catch { /* Failed paid row repair remains failed. */ }
+    return failedContinuityV4Repair(input.original, response.content, response.complete)
+  }
+  assertLegacyContinuityInspection(input.original)
   if ((input.reassessmentProtocol === 3 || input.reassessmentProtocol === 4 || input.reassessmentProtocol === 5) !== (input.original.audit.responseContract === 3)) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '复核阶段响应版本不一致。')
   if (input.original.complete || !input.billingKnown || !input.providerComplete || input.slotUsed || !input.original.audit.rawResponse.complete) return input.original
   input.signal.throwIfAborted(); await input.assertCurrent()
@@ -151,13 +189,14 @@ export async function runContinuityReassessment(input: { original: Inspection; b
   return result ?? failedContinuityReassessment(input.original, response.content, response.complete, input.bodies, input.reassessmentProtocol)
 }
 
-export type LegacyAssessmentInput = { chapterId: string; revision: number; bodies: ContinuityBodies; system: string; content: string; terminalCandidate?: TerminalCandidate; reassessmentProtocol?: 2 | 3 | 4 | 5;
-  parserVersion?: 7 | 8; sourceScope?: ContinuitySourceScope; bindingHash?: string; targetType: 'chapter' | 'story_compilation'; targetId: string }
+export type LegacyAssessmentInput = { chapterId: string; revision: number; bodies: ContinuityBodies; system: string; content: string; terminalCandidate?: TerminalCandidate; reassessmentProtocol?: 2 | 3 | 4 | 5 | 6;
+  parserVersion?: 7 | 8 | 9; continuityManifest?: ContinuityReviewManifest; sourceScope?: ContinuitySourceScope; bindingHash?: string; targetType: 'chapter' | 'story_compilation'; targetId: string }
 export type FrozenTerminalContract = Pick<TerminalEvidenceContext, 'verdictProtocol' | 'spanAddressProtocol' | 'proposalChanges'> & { coverageVersion: 1 | 2 }
 export const legacyContinuityAssessmentKey = (ctx: Pick<ToolContext, 'runId' | 'callId'>, input: LegacyAssessmentInput) => runtimeJson({ runId: ctx.runId, callId: ctx.callId,
   input: { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system, content: input.content, bindingHash: input.bindingHash ?? null,
     ...(input.parserVersion ? { parserVersion: input.parserVersion, sourceScope: input.sourceScope } : {}),
-    ...(input.reassessmentProtocol ? { reassessmentProtocol: input.reassessmentProtocol } : {}) } }).hash
+    ...(input.reassessmentProtocol ? { reassessmentProtocol: input.reassessmentProtocol } : {}),
+    ...(input.parserVersion === 9 ? { continuityManifest: input.continuityManifest } : {}) } }).hash
 const assessmentKey = legacyContinuityAssessmentKey
 
 /** Existing owned call identities always retain their whole request. Choosing a
@@ -173,17 +212,19 @@ export async function readFrozenLegacyContinuityInput(tx: Prisma.TransactionClie
   const meta = object(reservations[0].metadata)!
   const parsed = z.object({ chapterId: z.string(), revision: z.number().int(),
     bodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }).strict(),
-    system: z.string(), content: z.string(), reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5)]).optional(), parserVersion: z.union([z.literal(7), z.literal(8)]).optional(),
-    sourceScope: continuitySourceScopeSchema.optional(), terminalCandidate: terminalCandidateSchema.optional(), bindingHash: z.string().optional(),
+    system: z.string(), content: z.string(), reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)]).optional(), parserVersion: z.union([z.literal(7), z.literal(8), z.literal(9)]).optional(),
+    sourceScope: continuitySourceScopeSchema.optional(), continuityManifest: continuityReviewManifestSchema.optional(), terminalCandidate: terminalCandidateSchema.optional(), bindingHash: z.string().optional(),
     targetType: z.enum(['chapter', 'story_compilation']), targetId: z.string() }).strict().safeParse(meta.input)
   if (!parsed.success || (parsed.data.reassessmentProtocol === 3 || parsed.data.reassessmentProtocol === 4 || parsed.data.reassessmentProtocol === 5) && (parsed.data.parserVersion !== 8 || parsed.data.bodies.terminalEvidence?.verdictProtocol !== 6 || !parsed.data.terminalCandidate)
+    || parsed.data.parserVersion === 9 && (parsed.data.reassessmentProtocol !== 6 || !parsed.data.continuityManifest || !parsed.data.terminalCandidate || parsed.data.targetType !== 'story_compilation')
+    || parsed.data.parserVersion !== 9 && (parsed.data.reassessmentProtocol === 6 || parsed.data.continuityManifest !== undefined)
     || parsed.data.parserVersion && !parsed.data.sourceScope
     || meta.continuityAssessmentRequestKey !== assessmentKey(ctx, parsed.data)) throw invalid()
   const identity = (input: LegacyAssessmentInput) => {
     const copy = structuredClone(input)
     if (copy.bodies.terminalEvidence?.factCoverage) copy.bodies.terminalEvidence.factCoverage.version = 1
     return { chapterId: copy.chapterId, revision: copy.revision, bodies: copy.bodies, targetType: copy.targetType, targetId: copy.targetId,
-      terminalCandidate: copy.terminalCandidate ?? null, bindingHash: copy.bindingHash ?? null, parserVersion: copy.parserVersion ?? null, sourceScope: copy.sourceScope ?? null }
+      terminalCandidate: copy.terminalCandidate ?? null, bindingHash: copy.bindingHash ?? null, parserVersion: parsed.data.parserVersion === 9 ? null : copy.parserVersion ?? null, sourceScope: copy.sourceScope ?? null }
   }
   const expected = recoverBodies ? { ...proposed, bodies: recoverBodies({ coverageVersion: parsed.data.bodies.terminalEvidence?.factCoverage?.version ?? 1,
     ...(parsed.data.bodies.terminalEvidence?.proposalChanges ? { proposalChanges: parsed.data.bodies.terminalEvidence.proposalChanges } : {}),
@@ -234,9 +275,9 @@ export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionCl
     // later revision of the chapter. Changing focus/selectors/callId is not a
     // new subject. Unknown dispatches and unseen second passes stay fenced.
     const frozen = object(meta.input), frozenBodies = object(frozen?.bodies)
-    if (known && typeof meta.callId === 'string' && (await import('./terminal-input-decision.js')).sameTerminalInputSubject(meta.input, input)) {
+    if (known && typeof meta.callId === 'string' && sameContinuitySubject(meta.input, input)) {
       const prior = await readLegacyContinuityAssessment(tx, { ...ctx, runId: reservation.runId, callId: meta.callId }, frozen as LegacyAssessmentInput)
-      if (!prior.inspected.complete && prior.inspected.audit.classification === 'source_invalid'
+      if (!prior.inspected.complete && knownFinalContinuityFailure(prior.inspected.audit)
         && prior.billingKnown && prior.providerComplete && prior.recoveryReady) sameFailedTerminalInput = true
     }
     const subjectChanged = frozen?.targetType === input.targetType && frozen.targetId === input.targetId
@@ -290,12 +331,21 @@ export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionCl
 }
 
 export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput) {
+  if (input.parserVersion === 9) {
+    const manifest = input.continuityManifest, coverageTaskId = input.bodies.terminalEvidence?.factCoverage?.taskId
+    if (!manifest || manifest.subject.userId !== ctx.userId || manifest.subject.novelId !== ctx.novelId
+      || coverageTaskId !== undefined && manifest.subject.taskId !== coverageTaskId || manifest.subject.targetId !== input.targetId || manifest.subject.chapterId !== input.chapterId
+      || manifest.subject.revision !== input.revision || input.targetType !== 'story_compilation')
+      throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '四投影冻结材料不属于原作者任务和目标。')
+  }
   const key = assessmentKey(ctx, input)
   const observations = await tx.agentArtifact.findMany({ where: { runId: ctx.runId, artifactType: 'continuityReview',
     metadata: { path: ['assessmentKey'], equals: key } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
   const frames = observations.map(row => object(row.metadata)!)
   if (frames.some(frame => {
     const audit = object(frame.audit), response = object(frame.response)
+    if (input.parserVersion === 9) return !object(frame.input) || runtimeJson(frame.input).hash !== runtimeJson(input).hash
+      || typeof response?.content === 'string' && !assessmentContractMatches(input, audit)
     if (input.reassessmentProtocol !== 3 && input.reassessmentProtocol !== 4 && input.reassessmentProtocol !== 5 && audit?.responseContract !== 3) return false
     return !object(frame.input) || runtimeJson(frame.input).hash !== runtimeJson(input).hash
       || typeof response?.content === 'string' && (input.reassessmentProtocol === 3 || input.reassessmentProtocol === 4 || input.reassessmentProtocol === 5) !== (audit?.responseContract === 3)
@@ -321,8 +371,10 @@ export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClien
         && (!isKnownRejectedTextRequestAttempt(row) || object(frame.response)?.content === null)
     })) && (['first', 'output_recovery', 'reassessment'] as const).every(stage => usage.filter(row => legacyContinuityStageForAction(row.action) === stage
       && !isKnownRejectedTextRequestAttempt(row)).length <= 1)
-  const original = inspectContinuityResponse(JSON.parse(response.content) as string, input.bodies, response.transportComplete === true && response.finishReason === 'stop'
-    && Array.isArray(response.toolCalls) && !response.toolCalls.length, input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope, input.reassessmentProtocol === 3 || input.reassessmentProtocol === 4 || input.reassessmentProtocol === 5 ? { responseContract: 3 } : {})
+  const original = inspectAuthenticatedContinuityAssessment(JSON.parse(response.content) as string, input, response.transportComplete === true && response.finishReason === 'stop'
+    && Array.isArray(response.toolCalls) && !response.toolCalls.length)
+  if (input.parserVersion === 9 && (!object(first.audit) || runtimeJson(original.audit).hash !== runtimeJson(first.audit).hash))
+    throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原首份响应与冻结投影审计不一致。')
   const secondFrames = frames.filter(row => row.stage === 'reassessment')
   const second = secondFrames.filter(row => typeof object(row.response)?.content === 'string').at(-1), secondResponse = object(second?.response)
   let inspected = original
@@ -335,18 +387,26 @@ export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClien
     if (secondUsage.length === new Set(secondIds).size && secondUsage.filter(row => !isKnownRejectedTextRequestAttempt(row)).length === 1
       && secondUsage.every(knownAssessmentBilling)) {
       try { inspected = applyContinuityReassessment(original, JSON.parse(secondResponse.content) as string, input.bodies, input.reassessmentProtocol); secondApplied = true }
-      catch { if (input.reassessmentProtocol === 3 || input.reassessmentProtocol === 4 || input.reassessmentProtocol === 5) inspected = failedContinuityReassessment(original, JSON.parse(secondResponse.content) as string, true, input.bodies, input.reassessmentProtocol) }
+      catch { if (input.reassessmentProtocol === 3 || input.reassessmentProtocol === 4 || input.reassessmentProtocol === 5 || input.reassessmentProtocol === 6) inspected = failedContinuityReassessment(original, JSON.parse(secondResponse.content) as string, true, input.bodies, input.reassessmentProtocol) }
     }
   }
   const claimed = await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['fullReassessmentKey'], equals: key } } })
+  if (input.parserVersion === 9 && secondApplied) {
+    const observed = inspectAuthenticatedContinuityAssessment(JSON.parse(secondResponse!.content as string) as string, input, true)
+    const meta = object(claimed?.metadata)
+    if (!second || !object(second.audit) || runtimeJson(observed.audit).hash !== runtimeJson(second.audit).hash
+      || !meta || runtimeJson(meta.input).hash !== runtimeJson(input).hash || runtimeJson(meta.original).hash !== runtimeJson(original.audit).hash
+      || runtimeJson(meta.request).hash !== runtimeJson(continuityReassessmentRequest(input.system, input.content, original, input.bodies, false, 6)).hash)
+      throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原局部修复与唯一请求槽、实际响应不一致。')
+  }
   const completeFrame = (frame: Record<string, unknown> | null) => frame?.transportComplete === true && frame.finishReason === 'stop'
     && typeof frame.content === 'string' && Array.isArray(frame.toolCalls) && !frame.toolCalls.length
-  if (!inspected.complete && known && completeFrame(response) && object(first.audit) && runtimeJson(original.audit).hash === runtimeJson(first.audit).hash
+  if (!isContinuityV4Inspection(original) && !inspected.complete && known && completeFrame(response) && object(first.audit) && runtimeJson(original.audit).hash === runtimeJson(first.audit).hash
     && (claimed ? (input.reassessmentProtocol === 3 || input.reassessmentProtocol === 4 || input.reassessmentProtocol === 5)
       && completeFrame(secondResponse) && second && (() => {
       const meta = object(claimed.metadata)
       const observed = inspectContinuityResponse(JSON.parse(secondResponse!.content as string) as string, input.bodies, true,
-        input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope, { responseContract: 3 })
+        input.parserVersion === 9 ? 8 : input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope, { responseContract: 3 })
       return meta && object(meta.input) && object(meta.original) && object(meta.request)
         && object(second.audit) && runtimeJson(observed.audit).hash === runtimeJson(second.audit).hash
         && runtimeJson(meta.input).hash === runtimeJson(input).hash && runtimeJson(meta.original).hash === runtimeJson(original.audit).hash
@@ -380,7 +440,7 @@ export async function markLegacyContinuityAssessmentApplication(tx: Prisma.Trans
   const meta = object(reservation.metadata)!, key = String(meta.continuityAssessmentRequestKey)
   const frozen = object(meta.input)
   if (!inspected.complete || application?.inputHash !== runtimeJson(frozen).hash
-    || (frozen?.reassessmentProtocol === 3 || frozen?.reassessmentProtocol === 4 || frozen?.reassessmentProtocol === 5) !== (inspected.audit.responseContract === 3)) return
+    || !assessmentContractMatches(frozen, inspected.audit)) return
   const observations = await tx.agentArtifact.findMany({ where: { runId: reservation.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentKey'], equals: key } } })
   const ids = observations.flatMap(row => { const value = object(row.metadata)?.usageIds; return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [] })
   const usage = await tx.aiUsageLog.findMany({ where: { id: { in: ids }, userId: ctx.userId, novelId: ctx.novelId, action: { startsWith: 'agent3ContinuityCritic' } } })
@@ -404,8 +464,11 @@ export async function markLegacyContinuityAssessmentApplication(tx: Prisma.Trans
 }
 
 export function bindLegacyContinuityAssessment(inspected: Inspection, ctx: ToolContext, input: LegacyAssessmentInput): Inspection {
-  if ((input.reassessmentProtocol === 3 || input.reassessmentProtocol === 4 || input.reassessmentProtocol === 5) !== (inspected.audit.responseContract === 3)) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '响应审计版本与原预约不一致。')
-  return { ...inspected, audit: { ...inspected.audit, assessmentRequest: { version: 1, key: assessmentKey(ctx, input), inputHash: runtimeJson(input).hash } } as Inspection['audit'] }
+  if (!assessmentContractMatches(input, inspected.audit)) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '响应审计版本与原预约不一致。')
+  const assessmentRequest = { version: 1, key: assessmentKey(ctx, input), inputHash: runtimeJson(input).hash }
+  if (isContinuityV4Inspection(inspected)) return { ...inspected, audit: { ...inspected.audit, assessmentRequest } }
+  const audit = { ...inspected.audit, assessmentRequest }
+  return { ...inspected, audit }
 }
 
 export async function readReusableLegacyContinuityAssessment(tx: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput) {
@@ -420,17 +483,23 @@ export async function readReusableLegacyContinuityAssessment(tx: Prisma.Transact
   // settled report. Only this versioned projection has a content-only fallback;
   // ordinary reuse keeps its original whole-input equality rule.
   const compatible = reservations.find(row => row.runId === ctx.runId && sameEmptyOptionalProposalInput(object(row.metadata)?.input, input))
-  const latest = exact ?? compatible
+  const crossWire = reservations.find(row => {
+    const frozen = object(object(row.metadata)?.input)
+    return frozen && (frozen.parserVersion === 9 || input.parserVersion === 9) && sameContinuitySubject(frozen, input)
+      && runtimeJson({ bodies: frozen.bodies, candidate: frozen.terminalCandidate, bindingHash: frozen.bindingHash ?? null }).hash
+        === runtimeJson({ bodies: input.bodies, candidate: input.terminalCandidate, bindingHash: input.bindingHash ?? null }).hash
+  })
+  const latest = crossWire ?? exact ?? compatible
   const meta = object(latest?.metadata)
   if (!latest || typeof meta?.callId !== 'string') return null
   const source = { ...ctx, runId: latest.runId, callId: meta.callId }
   try {
-    const frozen = exact ? input : meta.input as LegacyAssessmentInput
-    if (!exact && meta.continuityAssessmentRequestKey !== assessmentKey(source, frozen)) return null
+    const frozen = exact && latest === exact ? input : meta.input as LegacyAssessmentInput
+    if ((latest !== exact) && meta.continuityAssessmentRequestKey !== assessmentKey(source, frozen)) return null
     const result = await readLegacyContinuityAssessment(tx, source, frozen)
     if (!result.billingKnown || !result.providerComplete || !result.inspected.complete) return null
     const projection = object((result.inspected.audit as Record<string, unknown>).formatProjection)
-    if (!exact && (!result.recoveryReady || projection?.kind !== 'empty_optional_proposal_table' || projection.version !== 1
+    if (latest !== exact && latest !== crossWire && (!result.recoveryReady || projection?.kind !== 'empty_optional_proposal_table' || projection.version !== 1
       || !validEmptyOptionalProposalProjection(result.inspected.audit, input.bodies.current, input.bodies.terminalEvidence))) return null
     if (projection?.kind === 'empty_optional_proposal_table' && compatible?.id !== latest.id) return null
     return bindLegacyContinuityAssessment(result.inspected, source, frozen)
@@ -459,7 +528,7 @@ export async function observeLegacyContinuityAssessment(tx: Prisma.TransactionCl
     }
     return prior.id
   }
-  const inspected = response.content === null ? null : inspectContinuityResponse(response.content, input.bodies, response.transportComplete !== false && response.finishReason === 'stop' && !response.toolCalls.length, input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope, input.reassessmentProtocol === 3 || input.reassessmentProtocol === 4 || input.reassessmentProtocol === 5 ? { responseContract: 3 } : {})
+  const inspected = response.content === null ? null : inspectAuthenticatedContinuityAssessment(response.content, input, response.transportComplete !== false && response.finishReason === 'stop' && !response.toolCalls.length)
   const row = await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性检查响应审计', content: '实际检查响应与冻结输入已保存；报告是否可用另行验证。',
     metadata: runtimeJson({ version: 1, assessmentResponseKey: key, assessmentKey: assessmentKey(ctx, input), callId: ctx.callId, stage,
       input, usageIds: usage.map(row => row.id), response: frozenResponse, audit: inspected?.audit ?? null }).value } })
@@ -560,3 +629,10 @@ export async function observeLegacyContinuityFirstNotDispatched(tx: Prisma.Trans
       metadata: runtimeJson({ version: 1, firstAssessmentNotDispatchedKey: key, callId: ctx.callId, usageIds, outcome: 'guard_failed_before_dispatch' }).value } })
   }
 }
+
+export const legacyAssessmentInputSchema = z.object({ chapterId: z.string(), revision: z.number().int(),
+  bodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }).strict(),
+  system: z.string(), content: z.string(), reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)]).optional(),
+  parserVersion: z.union([z.literal(7), z.literal(8), z.literal(9)]).optional(), continuityManifest: continuityReviewManifestSchema.optional(),
+  sourceScope: continuitySourceScopeSchema.optional(), terminalCandidate: terminalCandidateSchema.optional(), bindingHash: z.string().optional(),
+  targetType: z.enum(['chapter', 'story_compilation']), targetId: z.string() }).strict()

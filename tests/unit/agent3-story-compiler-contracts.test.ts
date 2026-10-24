@@ -107,8 +107,11 @@ describe('严谨创作落实连续性警告', () => {
     expect(f.critic).not.toHaveBeenCalled()
     expect(f.write).not.toHaveBeenCalled()
   })
-  it.each(['known', 'unknown'] as const)('canonicalizes %s selected proofs before coverage and paid critic dispatch', async scenario => {
+  it.each(['known', 'unknown'] as const)('canonicalizes %s selected proofs before coverage and frozen parser8 critic dispatch', async scenario => {
     const f = fixture(false)
+    // This parser8 cursor fixture owns its original frozen request. New wire9
+    // receipt authentication is exercised through real lifecycle/PG consumers.
+    vi.spyOn(assessment, 'readFrozenLegacyContinuityInput').mockImplementation(async (_tx, _ctx, input) => input)
     vi.spyOn(originalRequest, 'readOriginalTaskRequest').mockResolvedValue({ prompt: '写完章节', spec: { scope: { terminalEvidenceProtocol: 2, continuityEvidenceProtocol: 1 } }, taskId: 'task', sourceRunId: 'r', parentRunId: null } as never)
     vi.spyOn(continuitySource, 'readCompilerContinuitySource').mockResolvedValue(inheritedSource())
     const canonical = terminalCandidateSchema.parse({ exitState: { openLoops: ['过滤泵检修等零件'] } })

@@ -1,3 +1,4 @@
+import { observedReviewOutcome, projectedReviewAction, type ReviewOutcome } from '../../../shared/review-lifecycle.js'
 import { readSettledQualityReviews } from './quality-review-admission.js'
 import { terminalProcessingExhaustedMessage, terminalProcessingPlan } from './terminal-processing.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
@@ -267,6 +268,7 @@ function reviewPreflightArgs(call: ToolCallRequest, tool?: AgentTool): Record<st
 const CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS = 8
 
 type ToolCallOutcome = {
+  reviewOutcome?: ReviewOutcome
   unresolvedTextRequest?: boolean
   reviewCompleted?: boolean
   reviewRequestFinished?: import('../../../shared/contracts/index.js').AgentReviewRequestReceipt
@@ -426,7 +428,7 @@ export async function handleToolCall(
   let reviewSnapshot: { chapterId: string; revision: number; contentHash: string } | undefined
   let failureCode: string | undefined
   let invalidFields: string[] | undefined
-  const fail = (summary: string, observation: string, status: 'failed' | 'denied', reviewRequestFinished?: ToolCallOutcome['reviewRequestFinished']): ToolCallOutcome => {
+  const fail = (summary: string, observation: string, status: 'failed' | 'denied', reviewRequestFinished?: ToolCallOutcome['reviewRequestFinished'], reviewOutcome?: ReviewOutcome): ToolCallOutcome => {
     if (requestTrace.records.length) reviewRequestFinished = reviewSnapshot && textRequestsFinished(requestTrace) ? {
       version: 1, ...reviewSnapshot, usageIds: requestTrace.records.map(row => row.usageId),
     } : undefined
@@ -439,12 +441,13 @@ export async function handleToolCall(
       summary,
       failureCode,
       invalidFields,
+      ...(reviewOutcome ? { reviewOutcome } : {}),
       ...(reviewRequestFinished ? { reviewRequestFinished } : {}),
       durationMs: Date.now() - startedAt,
       ...subagentMark,
     })
-    return { observation, failureCode, reviewRequestFinished,
-      unresolvedTextRequest: requestTrace.records.length > 0 && !textRequestsFinished(requestTrace), part: { ...basePart, args: parsedArgs, status, summary },
+    return { observation, failureCode, reviewRequestFinished, reviewOutcome,
+      unresolvedTextRequest: reviewOutcome === 'provider_unresolved' || requestTrace.records.length > 0 && !textRequestsFinished(requestTrace), part: { ...basePart, args: parsedArgs, status, summary, ...(reviewOutcome ? { reviewOutcome } : {}) },
       ...(['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED'].includes(failureCode ?? '')
         ? { reviewStopReason: observation } : {}) }
   }
@@ -546,12 +549,15 @@ export async function handleToolCall(
       ctx.signal.throwIfAborted()
       return tool.execute({ ...ctx, inlineChild: Boolean(subagent) }, validated.data)
     })))
+    const reviewOutcome = requestTrace.records.length > 0 && !textRequestsFinished(requestTrace) && result.reviewOutcome
+      ? 'provider_unresolved' as const : result.reviewOutcome
     failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
     if (result.outcome === 'failed') {
       failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
       const recovery = toolFailureRecovery(failureCode)
       return { ...fail(result.summary ?? recovery?.label ?? '执行未完成', wrapToolOutput(tool.name,
-        result.output + (recovery ? `\n${recovery.guidance}` : '')), 'failed', result.reviewRequestFinished), ...(recovery ? { recoveryCode: failureCode } : {}), reviewCompleted: result.reviewCompleted }
+        result.output + (recovery ? `\n${recovery.guidance}` : '')), 'failed', result.reviewRequestFinished, reviewOutcome), ...(recovery ? { recoveryCode: failureCode } : {}), reviewCompleted: result.reviewCompleted,
+        reviewDecisionFeedback: ctx.inlineChild ? undefined : result.reviewDecisionFeedback }
     }
     const durationMs = Date.now() - startedAt
     const summary = result.summary ?? `${tool.title}完成`
@@ -567,6 +573,7 @@ export async function handleToolCall(
       ok: true,
       summary,
       display: result.display,
+      ...(reviewOutcome ? { reviewOutcome } : {}),
       ...(reviewRequestFinished ? { reviewRequestFinished } : {}),
       durationMs,
       ...subagentMark,
@@ -575,7 +582,8 @@ export async function handleToolCall(
     return {
       observation: wrapToolOutput(tool.name, result.output),
       ...(call.name === 'ask_user' && result.failureCode === 'AUTHOR_INPUT_REQUIRED' ? { failureCode: result.failureCode } : {}),
-      unresolvedTextRequest: requestTrace.records.length > 0 && !textRequestsFinished(requestTrace),
+      unresolvedTextRequest: reviewOutcome === 'provider_unresolved' || requestTrace.records.length > 0 && !textRequestsFinished(requestTrace),
+      reviewOutcome,
       reviewCompleted: result.reviewCompleted,
       reviewRequestFinished,
       workflowMilestone: ctx.inlineChild ? undefined : result.workflowMilestone,
@@ -589,6 +597,7 @@ export async function handleToolCall(
         status: 'success',
         summary,
         display: result.display,
+        ...(reviewOutcome ? { reviewOutcome } : {}),
         durationMs,
         // 写操作快照随消息落库，供「回退到本轮对话前」逆序恢复
         snapshot: result.snapshot,
@@ -596,7 +605,7 @@ export async function handleToolCall(
     }
   } catch (error) {
     failureCode = error instanceof DataAccessError ? error.code : 'UNEXPECTED_TOOL_ERROR'
-    if (ctx.signal.aborted) return fail('已中断', '用户已请求暂停，停止后续执行；已保存内容保留。', 'failed')
+    if (ctx.signal.aborted) return fail('已中断', '用户已请求暂停，停止后续执行；已保存内容保留。', 'failed', undefined, STATE_SENSITIVE_VALIDATORS.has(call.name) ? 'stale' : undefined)
     if (error instanceof DataAccessError && error.code.startsWith('CREDITS_')) {
       // 自定义档与 0 倍率免费档的主模型调用不占用平台 Credits：额度类失败只让该工具失败，不终止整个 run。
       const textModel = ctx.modelRuntime?.tier === 'custom' ? '作者已启用的自定义文本模型'
@@ -637,7 +646,13 @@ export async function handleToolCall(
         : ['AI_PROVIDER_TRANSPORT', 'AI_PROVIDER_INCOMPLETE', 'AI_PROVIDER_TIMEOUT'].includes(error.code)
           ? '原调用结果尚未确认，先核对原调用与已保存状态；保留进度并报告检查未完成，不要盲目重发未知付费请求。'
         : '最多重试一次，仍失败则保留进度并报告阻塞。'
-      return { ...fail(label, `工具 ${call.name} 未完成：${label}（${error.code}）。这是模型响应故障，不是正文质量结论；不要修改正文或重建编译来绕过。${guidance}`, 'failed'), providerFailure: true, providerFailureCode: error.code }
+      const confirmedProviderFailure = ['AI_PROVIDER_QUOTA_EXCEEDED', 'AI_PROVIDER_AUTH_ERROR', 'AI_PROVIDER_ERROR',
+        'AI_PROVIDER_OUTPUT_LIMIT', 'AI_PROVIDER_EMPTY_RESPONSE', 'AI_PROVIDER_INVALID_RESPONSE'].includes(error.code)
+      const knownBilling = requestTrace.records.length > 0 && textRequestsFinished(requestTrace)
+      const classification = STATE_SENSITIVE_VALIDATORS.has(call.name) ? observedReviewOutcome({ complete: false, rawPresent: false,
+        billingKnown: knownBilling, providerComplete: knownBilling && confirmedProviderFailure,
+        providerFailed: confirmedProviderFailure }).outcome ?? undefined : undefined
+      return { ...fail(label, `工具 ${call.name} 未完成：${label}（${error.code}）。这是模型响应故障，不是正文质量结论；不要修改正文或重建编译来绕过。${guidance}`, 'failed', undefined, classification), providerFailure: true, providerFailureCode: error.code }
     }
     console.warn('[agent-tool-failure]', { runId, tool: call.name, code: error instanceof DataAccessError ? error.code : 'UNEXPECTED_TOOL_ERROR', durationMs: Date.now() - startedAt })
     if (error instanceof DataAccessError && ['REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED'].includes(error.code)) {
@@ -1719,7 +1734,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     if (continuingTask && !pendingReviews.size && ['write', 'revise'].includes(taskSpec.intent)
       && params.mode === 'build' && !toolContext.inlineChild && toolContext.sandboxMode !== 'read_only') {
       inputDecision = await readInputDecision(currentChapterReview?.compilationId ?? undefined)
-      if (inputDecision && !toolContext.protectedChapterIds?.has(inputDecision.chapterId)
+      const decisionAction = inputDecision ? observedReviewOutcome({ complete: false, rawPresent: true, providerComplete: true, billingKnown: true,
+        decisionRequired: true, cancelled: controller.signal.aborted }).action : null
+      if (inputDecision && decisionAction === 'decision' && !toolContext.protectedChapterIds?.has(inputDecision.chapterId)
         && !inputDecision.nativeClaims.every(claim => automaticReviewAttempts.has(claim))
         && !consumedReviewDecisionFeedback.has(inputDecision.key)) {
         await bus.persist()
@@ -2756,11 +2773,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           && outcome.reviewRequestFinished.revision === reviewDispatch.revision
           && /^[a-f0-9]{64}$/.test(outcome.reviewRequestFinished.contentHash)
         if (requestFinished) await bus.persist()
-        if (reviewDispatch && !outcome.unresolvedTextRequest && (requestFinished || outcome.reviewCompleted || outcome.part.status === 'success' || ['AI_QUALITY_NON_THINKING_UNSUPPORTED', 'CONTINUITY_CHECK_LIMIT',
+        const reviewAction = outcome.reviewOutcome ? projectedReviewAction(outcome.reviewOutcome) : undefined
+        if (reviewDispatch && !outcome.unresolvedTextRequest && (reviewAction === 'decision' || requestFinished || outcome.reviewCompleted || outcome.part.status === 'success' || ['AI_QUALITY_NON_THINKING_UNSUPPORTED', 'CONTINUITY_CHECK_LIMIT',
           'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED',
           'QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? ''))) {
           pendingReviews.delete(`${reviewDispatch.compilationId ?? reviewDispatch.chapterId}:${reviewDispatch.toolName}`)
-          if (outcome.part.status !== 'success' && !outcome.reviewCompleted || outcome.reviewCompleted === false) {
+          if (reviewAction !== 'decision' && (outcome.part.status !== 'success' && !outcome.reviewCompleted || outcome.reviewCompleted === false)) {
             const settledKey = reviewAttemptKey(reviewDispatch, reviewDispatch.toolName)
             settledReviewFailures.add(settledKey)
             if (reviewDispatch.toolName === 'continuity_validate' && outcome.reviewCompleted === false
@@ -2784,7 +2802,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           && ['CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED', 'QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? '')) {
           incompleteReview = { ...reviewDispatch, failureCode: outcome.failureCode! }
         }
-        const localFailure = isLocalToolFailure(outcome.failureCode ?? outcome.recoveryCode)
+        const localFailure = reviewAction !== 'decision' && isLocalToolFailure(outcome.failureCode ?? outcome.recoveryCode)
         if (localFailure) {
           const code = outcome.failureCode ?? outcome.recoveryCode!
           const receivedContinuityFailure = ['CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED'].includes(code)

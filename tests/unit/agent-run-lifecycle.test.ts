@@ -3475,6 +3475,24 @@ describe('P0 rejected edits and unchanged chapter rereads', () => {
 
 
 describe('confirmed review request failures', () => {
+  it.each(['decision_required', 'evidence_repair_required', 'provider_unresolved', 'provider_failed', 'stale'] as const)(
+    'preserves failed %s classification and decision feedback without changing execution status', async reviewOutcome => {
+      const feedback = { key: 'a'.repeat(64), taskId: 'task', userId: 'user', novelId: 'novel', chapterId: 'c', orderIndex: 1,
+        compilationId: 'comp', revision: 3, contentHash: 'b'.repeat(64) }
+      const critic = tool('continuity_validate', async () => ({ output: 'The original verdict and report remain unchanged.', outcome: 'failed',
+        failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewOutcome, reviewDecisionFeedback: feedback, reviewCompleted: reviewOutcome === 'decision_required' }))
+      const outcome = await handleToolCall(call('classified', critic.name), [critic], context(), { emit: mocks.emit }, 'message', 'run')
+      expect(outcome).toMatchObject({ reviewOutcome, reviewDecisionFeedback: feedback, part: { status: 'failed', reviewOutcome },
+        failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', unresolvedTextRequest: reviewOutcome === 'provider_unresolved' })
+      expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', ok: false, reviewOutcome, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' }))
+      expect(critic.execute).toHaveBeenCalledOnce(); expect(mocks.chat).not.toHaveBeenCalled()
+    })
+  it('keeps an authenticated complete report classification on its success event and persisted part', async () => {
+    const critic = tool('continuity_validate', async () => ({ output: 'A complete report.', reviewOutcome: 'complete' }))
+    const outcome = await handleToolCall(call('complete-report', critic.name), [critic], context(), { emit: mocks.emit }, 'message', 'run')
+    expect(outcome).toMatchObject({ reviewOutcome: 'complete', part: { status: 'success', reviewOutcome: 'complete' } })
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', ok: true, reviewOutcome: 'complete' }))
+  })
   it.each(['terminal', 'unknown'] as const)('%s preserves request truth and executes independent work in the same batch', async status => {
     mocks.chat.mockImplementation(async () => response('检查尚未完成，原文保留。'))
     mocks.chapters[0].revision = 3

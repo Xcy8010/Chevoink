@@ -1,3 +1,5 @@
+import { buildContinuityReviewCatalog, validateStoredContinuityV4Projection } from './continuity-review-v4.js'
+import type { AuthenticatedContinuityInspection } from './authenticated-continuity-assessment.js'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { continuityFindingInputSchema, type ContinuityFindingInput } from '../../../shared/contracts/story-compiler-contracts.js'
@@ -5,7 +7,7 @@ import { parseQualityJsonObject } from './quality-evidence.js'
 import { resolveContinuitySources, type ContinuityBodies, type ContinuitySourceRelocation } from './continuity-review-context.js'
 import { unlocatedContinuityEvidence } from './continuity-finding-authority.js'
 import { invalidContinuitySourceClaim, type ContinuitySourceScope } from './continuity-source-authority.js'
-import { inspectTerminalReview, terminalQuoteAddressDiagnostics, terminalResponseFields, type TerminalCandidate, type TerminalReviewDiagnostic } from './terminal-state-review.js'
+import { inspectTerminalReview, terminalQuoteAddressDiagnostics, terminalResponseFields, type TerminalCandidate, type TerminalReviewDiagnostic } from './terminal-review-engine.js'
 import { runtimeJson } from './runtime-common.js'
 import { validContinuitySemanticChecks } from './terminal-evidence-context.js'
 import { terminalAddressResponseFields, normalizeTerminalResponseRows, terminalAddressValidationIssues } from './terminal-review-addresses.js'
@@ -144,8 +146,15 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
 }
 
 /** Internal model observation only; public summaries and saved raw responses stay intact. */
-export function continuityFailureOutput(audit: Partial<ReturnType<typeof inspectContinuityResponse>['audit']> | undefined, fallback: string, bodies?: ContinuityBodies) {
+export function continuityFailureOutput(audit: Partial<AuthenticatedContinuityInspection['audit']> | undefined, fallback: string, bodies?: ContinuityBodies) {
   if (!audit) return fallback
+  if (audit.parserVersion === 9) {
+    const marker = 'continuityV4' in audit ? audit.continuityV4 : undefined
+    if (!marker) return fallback
+    const frozen = marker.frozen, result = validateStoredContinuityV4Projection(audit, bodies?.current ?? frozen.bodies.current, bodies?.terminalEvidence ?? frozen.bodies.terminalEvidence)
+    return result ? fallback + '\n四投影合同尚未完整认证；保留首份响应与唯一局部修复的所有原始记录，不重新购买相同判断。具体诊断及当前只读目录：' + JSON.stringify({ diagnostics: result.parsed?.diagnostics ?? result.audit.classification,
+      projections: result.audit.continuityV4.projections, terminalState: frozen.candidate, catalog: buildContinuityReviewCatalog(frozen.bodies, frozen.candidate) }) : fallback
+  }
   let latest: { classification?: string; terminalReviewDiagnostics?: TerminalReviewDiagnostic[] } = { classification: audit.classification, terminalReviewDiagnostics: audit.terminalReviewDiagnostics }
   const second = (audit as { reassessment?: { classification?: string; rawResponse?: { complete?: boolean; content?: string };
     diagnostics?: { classification: string; terminalReviewDiagnostics?: TerminalReviewDiagnostic[]; fixedFieldError?: string } } }).reassessment

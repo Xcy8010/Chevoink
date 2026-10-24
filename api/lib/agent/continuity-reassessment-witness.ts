@@ -1,3 +1,5 @@
+import { inspectAuthenticatedContinuityAssessment, isContinuityV4Inspection } from './authenticated-continuity-assessment.js'
+import { continuityReviewManifestSchema } from './continuity-review-v4.js'
 import { readCompilerContinuitySource } from './compiler-continuity-source.js'
 import type { AiUsageLog, Prisma } from '@prisma/client'
 import { z } from 'zod'
@@ -36,7 +38,7 @@ export async function readOwnedContinuityReassessment(tx: Prisma.TransactionClie
   if (full.length !== 1) return null
   const claim = full[0], meta = object(claim.metadata)
   const frozen = z.object({ chapterId: z.literal(input.chapterId), revision: z.literal(input.revision), bodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }),
-    system: z.string(), content: z.string(), reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5)]).optional(), parserVersion: z.union([z.literal(7), z.literal(8)]).optional(), sourceScope: continuitySourceScopeSchema.optional(), bindingHash: z.string().optional(), terminalCandidate: terminalCandidateSchema.optional(), targetType: z.enum(['chapter', 'story_compilation']), targetId: z.string() }).strict().safeParse(meta.input)
+    system: z.string(), content: z.string(), reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)]).optional(), parserVersion: z.union([z.literal(7), z.literal(8), z.literal(9)]).optional(), continuityManifest: continuityReviewManifestSchema.optional(), sourceScope: continuitySourceScopeSchema.optional(), bindingHash: z.string().optional(), terminalCandidate: terminalCandidateSchema.optional(), targetType: z.enum(['chapter', 'story_compilation']), targetId: z.string() }).strict().safeParse(meta.input)
   if (!frozen.success || !Array.isArray(meta.usageIds) || !object(meta.request).system || !object(meta.request).content
     || frozen.data.targetId !== (frozen.data.targetType === 'chapter' ? input.chapterId : input.compilationId)
     || meta.fullReassessmentKey !== legacyContinuityAssessmentKey({ runId: input.runId, callId: input.callId }, frozen.data)
@@ -46,21 +48,22 @@ export async function readOwnedContinuityReassessment(tx: Prisma.TransactionClie
     || primaryAttempts.some(row => isKnownRejectedTextRequestAttempt(row) && row.createdAt >= primary[0].createdAt)
     || secondAttempts.some(row => isKnownRejectedTextRequestAttempt(row) && row.createdAt >= second[0].createdAt)) return null
   const original = object(meta.original), raw = object(original.rawResponse)
-  if ((frozen.data.reassessmentProtocol === 3 || frozen.data.reassessmentProtocol === 4 || frozen.data.reassessmentProtocol === 5) !== (original.responseContract === 3)
-    || (frozen.data.reassessmentProtocol === 3 || frozen.data.reassessmentProtocol === 4 || frozen.data.reassessmentProtocol === 5) && (frozen.data.parserVersion !== 8 || frozen.data.bodies.terminalEvidence?.verdictProtocol !== 6 || !frozen.data.terminalCandidate)
+  if ((frozen.data.parserVersion === 9 ? frozen.data.reassessmentProtocol !== 6 || original.responseContract !== 4 || !frozen.data.continuityManifest : ((frozen.data.reassessmentProtocol === 3 || frozen.data.reassessmentProtocol === 4 || frozen.data.reassessmentProtocol === 5) !== (original.responseContract === 3)
+    || (frozen.data.reassessmentProtocol === 3 || frozen.data.reassessmentProtocol === 4 || frozen.data.reassessmentProtocol === 5) && (frozen.data.parserVersion !== 8 || frozen.data.bodies.terminalEvidence?.verdictProtocol !== 6 || !frozen.data.terminalCandidate)))
     || original.parserVersion !== (frozen.data.parserVersion ?? 6) || raw.encoding !== 'json-string' || raw.complete !== true || typeof raw.content !== 'string') return null
   let content: unknown
   try { content = JSON.parse(raw.content) } catch { return null }
   if (typeof content !== 'string') return null
   // A parser correction cannot erase a real historical two-request interval.
   // Authenticate one complete audit/request pair under its own metadata rule.
-  const inspected = [inspectContinuityResponse(content, frozen.data.bodies, true, frozen.data.parserVersion ?? 6, frozen.data.terminalCandidate, frozen.data.sourceScope, frozen.data.reassessmentProtocol === 3 || frozen.data.reassessmentProtocol === 4 || frozen.data.reassessmentProtocol === 5 ? { responseContract: 3 } : {}),
-    inspectContinuityResponse(content, frozen.data.bodies, true, frozen.data.parserVersion ?? 6, frozen.data.terminalCandidate, frozen.data.sourceScope, { frozenCurrentMetadata: true, ...(frozen.data.reassessmentProtocol === 3 || frozen.data.reassessmentProtocol === 4 || frozen.data.reassessmentProtocol === 5 ? { responseContract: 3 as const } : {}) })].find(inspected => {
+  const inspected = (frozen.data.parserVersion === 9 ? [inspectAuthenticatedContinuityAssessment(content, frozen.data, true)] : [inspectContinuityResponse(content, frozen.data.bodies, true, frozen.data.parserVersion ?? 6, frozen.data.terminalCandidate, frozen.data.sourceScope, frozen.data.reassessmentProtocol === 3 || frozen.data.reassessmentProtocol === 4 || frozen.data.reassessmentProtocol === 5 ? { responseContract: 3 } : {}),
+    inspectContinuityResponse(content, frozen.data.bodies, true, frozen.data.parserVersion ?? 6, frozen.data.terminalCandidate, frozen.data.sourceScope, { frozenCurrentMetadata: true, ...(frozen.data.reassessmentProtocol === 3 || frozen.data.reassessmentProtocol === 4 || frozen.data.reassessmentProtocol === 5 ? { responseContract: 3 as const } : {}) })]).find(inspected => {
     if (inspected.complete) return false
     const currentPair = runtimeJson(inspected.audit).hash === runtimeJson(original).hash
       && runtimeJson(meta.request).hash === runtimeJson(continuityReassessmentRequest(frozen.data.system, frozen.data.content, inspected, frozen.data.bodies, false, frozen.data.reassessmentProtocol)).hash
     // The earlier v2 renderer omitted schema-error paths and their prompt field.
     // Authenticate that exact pair; never mix projections or ignore other bytes.
+    if (isContinuityV4Inspection(inspected)) return currentPair
     const legacyAudit = { ...inspected.audit, ...(inspected.audit.terminalReviewDiagnostics ? {
       terminalReviewDiagnostics: inspected.audit.terminalReviewDiagnostics.map(item => {
         const projected = { ...item }

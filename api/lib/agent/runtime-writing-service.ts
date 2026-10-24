@@ -3,12 +3,12 @@ import type { Prisma } from '@prisma/client'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { coordinatedWritingInputSchema, coordinatedWritingManifest, coordinatedWriterActions, writingServiceStepSchema } from './coordinated-writing-input.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
-import { argumentNormalizationSchema, readAdmittedToolOperation } from './runtime-tool-cursor.js'
+import { argumentNormalizationSchema, readAdmittedToolOperation, readToolOperationSource } from './runtime-tool-cursor.js'
 import { readExecutionStateInTransaction } from './runtime-state.js'
 import { readObservedBaseline } from './runtime-observed-baseline.js'
 import { compilerObservationSchema } from './runtime-compiler-observation.js'
 import { readOriginalTaskRequest } from './original-request.js'
-import { assertWritingTarget } from './writing-scope.js'
+import { assertWritingTarget, readWritingScope } from './writing-scope.js'
 import { prepareOperationInTransaction } from './runtime-operations.js'
 import { withManuscriptRunLease, withRunLease, type RunLeaseToken } from './runtime-lease.js'
 
@@ -98,34 +98,38 @@ export async function readCommittedWritingBodyProgress(tx: RuntimeTx, parent: { 
 /** Authenticate service work against a real pending writer and its immutable
  * predecessor receipt. An internal row, target ID or current DB read alone is
  * never a grant or an observation delivered to the model. */
-async function readServiceParent(tx: RuntimeTx, lease: RunLeaseToken, saved: z.infer<typeof inputSchema>) {
+type ServiceProofSubject = Pick<RunLeaseToken, 'userId' | 'runId' | 'taskRootId'>
+async function readServiceParent(tx: RuntimeTx, lease: ServiceProofSubject, saved: z.infer<typeof inputSchema>, verification: { historical: boolean; liveLease?: RunLeaseToken }) {
   const admission = saved.serviceAdmission
-  const parent = await tx.agentOperation.findFirst({ where: { id: admission.parentOperationId, taskRootId: lease.taskRootId, kind: 'tool', status: 'prepared' } })
+  const parent = await tx.agentOperation.findFirst({ where: { id: admission.parentOperationId, taskRootId: lease.taskRootId, kind: 'tool', ...(!verification.historical ? { status: 'prepared' } : {}) } })
   if (!parent || !coordinatedWriterActions.some(name => name === parent.action)) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '内部写作步骤缺少原待执行写入。')
-  const genuine = await readAdmittedToolOperation(lease, { operationId: parent.id, action: parent.action, novelId: saved.novelId, callId: saved.callId }, tx)
+  const genuine = verification.historical ? await readToolOperationSource(tx, parent)
+    : verification.liveLease ? await readAdmittedToolOperation(verification.liveLease, { operationId: parent.id, action: parent.action, novelId: saved.novelId, callId: saved.callId }, tx)
+      : runtimeError('RUNTIME_RECEIPT_INVALID', '当前内部工作缺少原执行租约。')
   const original = genuine.input
   const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
   const spec = taskSpecSchema.parse(root.specSnapshot)
   const request = await readOriginalTaskRequest(tx, { userId: lease.userId, novelId: saved.novelId, runId: lease.runId })
+  if (root.userId !== lease.userId || root.novelId !== saved.novelId || spec.id !== taskSpecSchema.parse(request.spec).id || original.novelId !== saved.novelId || original.callId !== saved.callId) return runtimeError('RUNTIME_RECEIPT_INVALID', '原内部工作不属于同一作者任务。')
   return { parent, original, root, spec, request }
 }
 
 type ServiceIdentity = { operationId: string; action: string; novelId: string; callId: string }
-type ServiceVerification = { parent?: Awaited<ReturnType<typeof readServiceParent>>; proven: Set<string> }
-const serviceVerification = (): ServiceVerification => ({ proven: new Set() })
+type ServiceVerification = { parent?: Awaited<ReturnType<typeof readServiceParent>>; proven: Set<string>; historical: boolean; liveLease?: RunLeaseToken }
+const serviceVerification = (liveLease?: RunLeaseToken, historical = false): ServiceVerification => ({ proven: new Set(), historical, ...(liveLease ? { liveLease } : {}) })
 
 /** Only this read traversal shares proof. Never reuse it between transactions,
  * preparation, effects or provider requests: those boundaries re-read authority. */
-async function verifyPredecessor(tx: RuntimeTx, lease: RunLeaseToken, input: ServiceIdentity, verification: ServiceVerification): Promise<void> {
+async function verifyPredecessor(tx: RuntimeTx, lease: ServiceProofSubject, input: ServiceIdentity, verification: ServiceVerification): Promise<void> {
   const key = JSON.stringify([input.operationId, input.action, input.novelId, input.callId])
   if (verification.proven.has(key)) return
   await readVerifiedServiceStep(lease, input, tx, verification)
   verification.proven.add(key)
 }
 
-async function verifyServiceInput(tx: RuntimeTx, lease: RunLeaseToken, saved: z.infer<typeof inputSchema>, action: string, verification: ServiceVerification) {
+async function verifyServiceInput(tx: RuntimeTx, lease: ServiceProofSubject, saved: z.infer<typeof inputSchema>, action: string, verification: ServiceVerification) {
   const admission = saved.serviceAdmission
-  const common = verification.parent ?? await readServiceParent(tx, lease, saved)
+  const common = verification.parent ?? await readServiceParent(tx, lease, saved, verification)
   const { parent, original, root, spec, request } = common
   if (parent.id !== admission.parentOperationId || original.novelId !== saved.novelId || original.callId !== saved.callId) {
     return runtimeError('RUNTIME_RECEIPT_INVALID', '内部前置步骤与同一父写入或调用不一致。')
@@ -138,7 +142,12 @@ async function verifyServiceInput(tx: RuntimeTx, lease: RunLeaseToken, saved: z.
     || original.normalization.sourceSnapshotHash !== admission.sourceSnapshotHash || action !== actionFor(admission.step, parent.action)) {
     return runtimeError('RUNTIME_RECEIPT_INVALID', '内部步骤与真实写入、目标或原上下文不一致。')
   }
-  await assertWritingTarget(tx, { userId: lease.userId, novelId: saved.novelId, runId: lease.runId },
+  if (verification.historical) {
+    const scope = await readWritingScope(tx, { userId: lease.userId, novelId: saved.novelId, runId: lease.runId })
+    if (scope.writing?.kind !== 'bounded' || !scope.writing.targets.some(target =>
+      (target.chapterId ?? scope.bindings?.targets.find(binding => binding.orderIndex === target.orderIndex)?.chapterId) === chapterId))
+      return runtimeError('RUNTIME_RECEIPT_INVALID', '原内部工作的章节不属于冻结目标。')
+  } else await assertWritingTarget(tx, { userId: lease.userId, novelId: saved.novelId, runId: lease.runId },
     { chapterId, effect: parent.action === 'chapter_write' ? 'replace' : parent.action === 'chapter_append' ? 'append' : 'range' })
   const manifest = manifestSchema.parse(coordinatedWritingManifest({ spec, prompt: request.prompt }, parent.action, chapterId, writing))
   if (runtimeJson(manifest).hash !== runtimeJson(original.writingManifest).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '写作步骤清单与原写入决策不一致。')
@@ -201,7 +210,7 @@ async function verifyServiceInput(tx: RuntimeTx, lease: RunLeaseToken, saved: z.
 
 /** Strict alternate provenance for service cores. Real tool admission is never
  * weakened and no fabricated call or additional main cursor is produced. */
-async function readVerifiedServiceStep(lease: RunLeaseToken, input: ServiceIdentity, tx: RuntimeTx, verification: ServiceVerification) {
+async function readVerifiedServiceStep(lease: ServiceProofSubject, input: ServiceIdentity, tx: RuntimeTx, verification: ServiceVerification) {
   const operation = await tx.agentOperation.findFirst({ where: { id: input.operationId, taskRootId: lease.taskRootId, kind: 'internal', action: input.action } })
   if (!operation || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '内部写作操作缺失或原输入损坏。')
   const envelope = z.object({ kind: z.literal('internal'), action: z.literal(input.action), parentOperationId: z.string(), input: inputSchema }).strict().parse(operation.inputSnapshot)
@@ -215,7 +224,13 @@ async function readVerifiedServiceStep(lease: RunLeaseToken, input: ServiceIdent
 }
 
 export async function readAdmittedWritingServiceStep(lease: RunLeaseToken, input: ServiceIdentity, tx: RuntimeTx) {
-  return readVerifiedServiceStep(lease, input, tx, serviceVerification())
+  return readVerifiedServiceStep(lease, input, tx, serviceVerification(lease))
+}
+
+/** Historical source proof only. It never acquires a lease, admits a provider
+ * request or writes a receipt; live service admission above is unchanged. */
+export async function readHistoricalWritingServiceSource(tx: RuntimeTx, subject: ServiceProofSubject, input: ServiceIdentity) {
+  return readVerifiedServiceStep(subject, input, tx, serviceVerification(undefined, true))
 }
 
 /** Two explicit provenances for existing compiler/review work. Normalization
@@ -242,7 +257,7 @@ export async function prepareWritingServiceStep(lease: RunLeaseToken, value: unk
   const saved = inputSchema.parse(value)
   return withManuscriptRunLease(lease, async tx => {
     const verified = await verifyServiceInput(tx, lease, saved, actionFor(saved.serviceAdmission.step,
-      (await tx.agentOperation.findUniqueOrThrow({ where: { id: saved.serviceAdmission.parentOperationId } })).action), serviceVerification())
+      (await tx.agentOperation.findUniqueOrThrow({ where: { id: saved.serviceAdmission.parentOperationId } })).action), serviceVerification(lease))
     return prepareOperationInTransaction(tx, lease, { key: writingServiceOperationKey(verified.parent.id, saved.serviceAdmission.step),
       kind: 'internal', action: actionFor(saved.serviceAdmission.step, verified.parent.action), parentOperationId: verified.parent.id,
       input: runtimeJson(saved).value })

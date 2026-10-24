@@ -35,6 +35,7 @@ import { AgentMarkdownText } from './AgentMarkdownText'
 import { useAgentStore } from '../agentStore'
 import { projectAgentAuthorParts, projectAgentAuthorText } from '../../../../../shared/agent-author-view.js'
 import { describeToolArguments, getToolTargetTitle } from '../tool-argument-view'
+import { projectedReviewAction, type ReviewOutcome } from '../../../../../shared/review-lifecycle.js'
 
 /**
  * 消息 Parts 渲染器（plan/13 §5.3 + plan/20 §3.3）：
@@ -847,6 +848,14 @@ const toolStatusIcon = {
   denied: <ShieldX className="h-3.5 w-3.5 text-amber-500" />,
 } as const
 
+const reviewOutcomeLabels: Record<Exclude<ReviewOutcome, 'complete'>, string> = {
+  decision_required: '待处理',
+  evidence_repair_required: '证据待修复',
+  provider_unresolved: '调用待核',
+  provider_failed: '调用失败',
+  stale: '版本失效',
+}
+
 const WRITE_TOOL_NAMES = new Set([
   'chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'chapter_rename',
   'chapter_move', 'chapter_move_to_volume', 'chapter_split', 'chapter_merge',
@@ -891,6 +900,10 @@ const ToolCallCard = memo(function ToolCallCard({
   const durationLabel = formatToolDuration(part.durationMs)
   const preparing = part.status === 'running' && part.preparing
   const running = part.status === 'running' && !preparing
+  // Presentation preserves the original execution status and never certifies delivery.
+  const reviewLabel = part.status !== 'running' && part.status !== 'denied' && part.reviewOutcome && part.reviewOutcome !== 'complete'
+    ? reviewOutcomeLabels[part.reviewOutcome] : null
+  const reviewDecision = Boolean(reviewLabel && part.reviewOutcome && projectedReviewAction(part.reviewOutcome) === 'decision')
   const importWaiting = running && part.toolName === 'novel_import' && part.importWaiting
     && /^\/studio\/novel\/[^/?#]+\?/.test(part.importWaiting.url) ? part.importWaiting : null
   const writeTool = WRITE_TOOL_NAMES.has(part.toolName)
@@ -932,12 +945,13 @@ const ToolCallCard = memo(function ToolCallCard({
     <span className="min-w-0 flex-1 truncate text-xs font-medium text-[var(--text-primary)]">{part.title}</span>
     {preparing ? <span className="agent-tool-running-label shrink-0 text-[10px] text-[var(--text-secondary)]">准备中…</span> : null}
     {running ? <span className="agent-tool-running-label shrink-0 text-[10px] font-medium text-[var(--text-secondary)]">{runningLabel}</span> : null}
+    {reviewLabel ? <span className={cn('shrink-0 text-[10px] font-medium', reviewDecision ? 'text-amber-600' : 'text-rose-500')}>{reviewLabel}</span> : null}
     {durationLabel ? <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-secondary)]">{durationLabel}</span> : null}
     {writeTool && !running && !preparing ? <span className={cn(
       'shrink-0 text-[10px] font-medium',
       part.status === 'success' ? 'text-emerald-600' : part.status === 'denied' ? 'text-amber-500' : 'text-rose-500',
     )}>{part.status === 'success' ? (part.accepted ? '已接受' : '已完成') : part.status === 'denied' ? '已拒绝' : '失败'}</span> : null}
-    <span className="shrink-0">{toolStatusIcon[part.status]}</span>
+    <span className="shrink-0">{reviewDecision ? <CircleAlert className="h-3.5 w-3.5 text-amber-600" /> : toolStatusIcon[part.status]}</span>
     {spotlightType !== null ? (
       <SquareStack className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)] transition-colors group-hover:text-[var(--text-primary)]" />
     ) : rowExpandable ? <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)] transition-transform', expanded && 'rotate-180')} /> : null}
@@ -977,7 +991,7 @@ const ToolCallCard = memo(function ToolCallCard({
           className={cn(
             'pb-2 text-[11px] leading-5',
             'pl-[22px]',
-            part.status === 'failed' || part.status === 'denied'
+            reviewDecision ? 'text-amber-600' : part.status === 'failed' || part.status === 'denied'
               ? 'text-rose-500'
               : 'text-[var(--text-secondary)]',
           )}

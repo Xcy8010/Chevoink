@@ -117,6 +117,7 @@ export type ToolResult = {
   observedState?: { kind: 'chapter'; id: string; revision: number } | { kind: 'plan'; id: string; hash: string } | { kind: 'volume'; id: string; revision: number } | { kind: 'novel'; id: string; hash: string } | { kind: 'charter'; id: string; hash: string } | { kind: 'changeset'; id: string; hash: string }
   /** Explicit observed failure; never infer success just because execute resolved. */
   /** A report was received and persisted even if its subsequent local repair failed. */
+  reviewOutcome?: import('../../../../shared/review-lifecycle.js').ReviewOutcome
   reviewCompleted?: boolean
   /** Request ended, but no valid report is certified. */
   reviewRequestFinished?: import('../../../../shared/contracts/index.js').AgentReviewRequestReceipt

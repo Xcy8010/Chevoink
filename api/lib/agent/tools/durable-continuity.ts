@@ -1,3 +1,7 @@
+import { observedReviewOutcome } from '../../../../shared/review-lifecycle.js'
+import { continuitySubjectIdentity, continuityWorkSubjectIdentity } from '../continuity-subject-identity.js'
+import { buildContinuityReviewManifest, continuityReviewV4Request, continuityReviewManifestSchema, validContinuityReviewManifest } from '../continuity-review-v4.js'
+import { inspectAuthenticatedContinuityAssessment, assertLegacyContinuityInspection } from '../authenticated-continuity-assessment.js'
 import { continuityResponseInput4 } from '../continuity-response-repair.js'
 import { terminalReportRecoveryResult } from '../terminal-report-recovery.js'
 import { continuityResponseContract, continuityResponseSystem } from '../continuity-response-contract.js'
@@ -29,7 +33,7 @@ import { compilerContinuityCoverage, compilerContinuityCoverageMatches, hasCurre
 import { normalizeToolInput } from './input-validation.js'
 import { parseIndependentContinuityResult, continuityCriticSystem, continuityReviewTail, CONTINUITY_MAX_OUTPUT_TOKENS, buildStandaloneContinuityContext, saveStandaloneContinuityReport, readStandaloneContinuityReport } from './story-compiler-tools.js'
 import type { AgentTool, ToolContext, ToolResult } from './types.js'
-import { inspectContinuityResponse, continuityUnlocatedCandidateCount, continuityFailureOutput } from '../continuity-format-recovery.js'
+import { continuityUnlocatedCandidateCount, continuityFailureOutput } from '../continuity-format-recovery.js'
 import { runContinuityEvidenceCorrection } from '../continuity-response-correction.js'
 import { runContinuityReassessment, freshContinuityResponseContract } from '../assessment-response-lifecycle.js'
 import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
@@ -44,8 +48,8 @@ const routeSchema = auxiliaryRouteSchema
 const coverageSchema = z.object({ version: z.literal(1), contentHash: hash, charCount: z.number().int().nonnegative(), sourceHash: hash.nullable(), reviewHash: hash.optional(), protocolVersion: z.number().int().positive().optional(), terminalHash: hash.optional() }).strict()
 const workSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rejected'), code: z.string(), message: z.string() }).strict(),
-  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14), z.literal(15), z.literal(16), z.literal(17), z.literal(18), z.literal(19), z.literal(20), z.literal(21)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema, terminalCandidate: terminalCandidateSchema.optional(),
-    sourceBodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }).optional(), reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5)]).optional(), sourceScope: continuitySourceScopeSchema.optional(), sourceId: z.string().nullable(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
+  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14), z.literal(15), z.literal(16), z.literal(17), z.literal(18), z.literal(19), z.literal(20), z.literal(21), z.literal(22)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema, terminalCandidate: terminalCandidateSchema.optional(),
+    sourceBodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }).optional(), reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)]).optional(), continuityManifest: continuityReviewManifestSchema.optional(), sourceScope: continuitySourceScopeSchema.optional(), sourceId: z.string().nullable(), authorRequest: z.string().nullable().optional(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
     cached: z.array(continuityFindingInputSchema).nullable(), route: routeSchema.nullable(), price: tokenPriceSchema.nullable() }).strict(),
 ])
 type Work = Extract<z.infer<typeof workSchema>, { kind: 'check' }>
@@ -118,17 +122,23 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
     if (!chapter || runtimeJson(chapter).hash !== runtimeJson(frozen.chapter).hash || (source ? runtimeJson(source).hash : null) !== frozen.coverage.sourceHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查期间正文或来源章节已变化，未应用旧结果。请读取当前正文和章节桥后重查。')
   }
   const execute = async (frozen: Work) => {
-    if ((frozen.version === 19) !== (frozen.reassessmentProtocol === 3) || (frozen.version === 20) !== (frozen.reassessmentProtocol === 4) || (frozen.version === 21) !== (frozen.reassessmentProtocol === 5)) return failure('RUNTIME_RECEIPT_INVALID', '连续性响应合同与冻结操作版本不一致。')
+    if ((frozen.version === 19) !== (frozen.reassessmentProtocol === 3) || (frozen.version === 20) !== (frozen.reassessmentProtocol === 4) || (frozen.version === 21) !== (frozen.reassessmentProtocol === 5) || (frozen.version === 22) !== (frozen.reassessmentProtocol === 6)) return failure('RUNTIME_RECEIPT_INVALID', '连续性响应合同与冻结操作版本不一致。')
     if ((frozen.reassessmentProtocol === 3 || frozen.reassessmentProtocol === 4 || frozen.reassessmentProtocol === 5) && (frozen.sourceBodies?.terminalEvidence?.verdictProtocol !== 6 || !frozen.terminalCandidate)) return failure('RUNTIME_RECEIPT_INVALID', '响应合同缺少冻结候选或证据目录。')
+    if (frozen.version === 22 && (!frozen.continuityManifest || !frozen.sourceBodies || !frozen.terminalCandidate || !frozen.sourceScope
+      || !validContinuityReviewManifest({ manifest: frozen.continuityManifest, bodies: frozen.sourceBodies, candidate: frozen.terminalCandidate, sourceScope: frozen.sourceScope })))
+      return failure('RUNTIME_RECEIPT_INVALID', '连续性四投影缺少同一冻结材料清单。')
     if (frozen.version >= 12 && !frozen.sourceScope) return failure('RUNTIME_RECEIPT_INVALID', '连续性检查缺少冻结来源边界，不能补造。')
     if (frozen.version >= 4 && !frozen.sourceBodies) return failure('RUNTIME_RECEIPT_INVALID', '连续性检查缺少冻结原文，不能补造引用。')
     if (frozen.compiler && !hasCurrentCompilerContinuityProtocol(frozen.coverage)
       && !(frozen.version === 3 && frozen.coverage.protocolVersion === 6 && typeof frozen.coverage.reviewHash === 'string')) return failure('CONTINUITY_INPUT_STALE',
       '原连续性操作缺少当前检查协议覆盖，未派发新的 Critic 或修订请求；已保存的模型结果与用量仍保留，请读取当前章节桥后复核。')
-    const call = (step: AuxiliaryModelStep, system: string, content: string, temperature: number) => {
+    let providerFailed = false
+    const call = async (step: AuxiliaryModelStep, system: string, content: string, temperature: number) => {
       if (!frozen.route || !frozen.price) return runtimeError('RUNTIME_RECEIPT_INVALID', '独立模型路由或价目缺失。')
-      return callDurableAuxiliary({ lease, parentOperationId: operation.id, step, system, content, temperature,
+      const response = await callDurableAuxiliary({ lease, parentOperationId: operation.id, step, system, content, temperature,
         route: frozen.route, price: frozen.price, signal: ctx.signal, assertCurrent: tx => assertCurrent(tx, frozen) })
+      providerFailed = response.finishReason !== 'stop' || !!response.toolCalls.length
+      return response
     }
     const knownAuxiliaryReceipt = (step: AuxiliaryModelStep) => withRunLease(lease, async tx => {
       const previous = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: `aux:${operation.id}:${step}` } } })
@@ -140,14 +150,16 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
     // Saved provider results are recovered before checking today's DB state; no
     // fresh repair is dispatched if the original business input has since changed.
     const critic = frozen.cached ? null : await call('continuity_critic', frozen.criticSystem, frozen.criticInput, frozen.version >= 4 ? 0 : 0.15)
-    if (frozen.version >= 8 && critic && !await knownAuxiliaryReceipt('continuity_critic')) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED',
+    const firstBillingKnown = !!frozen.cached || !!critic && await knownAuxiliaryReceipt('continuity_critic')
+    if (frozen.version >= 8 && critic && !firstBillingKnown) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED',
       '连续性原响应已保留，但用量和结算尚未确认；未追加检查或应用结果。')
     let parsed = frozen.cached ? { structured: true, findings: frozen.cached } : critic?.finishReason === 'stop' && !critic.toolCalls.length
       ? parseIndependentContinuityResult(critic.content, frozen.version >= 3 ? 2 : 1, frozen.version >= 4 ? frozen.sourceBodies : undefined) : { structured: false, findings: [] }
     let recoveryReady = false
     let inspected = frozen.version >= 5 && critic && frozen.sourceBodies
-      ? inspectContinuityResponse(critic.content, frozen.sourceBodies, critic.finishReason === 'stop' && !critic.toolCalls.length, frozen.version >= 13 ? 8 : frozen.version >= 12 ? 7 : frozen.version >= 8 ? 6 : frozen.version >= 7 ? 5 : frozen.version >= 6 ? 4 : 3, frozen.version >= 10 ? frozen.terminalCandidate : undefined, frozen.version >= 12 ? frozen.sourceScope : undefined, frozen.reassessmentProtocol === 3 || frozen.reassessmentProtocol === 4 || frozen.reassessmentProtocol === 5 ? { responseContract: 3 } : {}) : null
+      ? inspectAuthenticatedContinuityAssessment(critic.content, { bodies: frozen.sourceBodies!, parserVersion: frozen.version === 22 ? 9 : frozen.version >= 13 ? 8 : frozen.version >= 12 ? 7 : frozen.version >= 8 ? 6 : frozen.version >= 7 ? 5 : frozen.version >= 6 ? 4 : 3, terminalCandidate: frozen.version >= 10 ? frozen.terminalCandidate : undefined, sourceScope: frozen.version >= 12 ? frozen.sourceScope : undefined, continuityManifest: frozen.continuityManifest, reassessmentProtocol: frozen.reassessmentProtocol }, critic.finishReason === 'stop' && !critic.toolCalls.length) : null
     if (frozen.version === 7 && inspected && frozen.sourceBodies && inspected.audit.classification === 'source_invalid') {
+      assertLegacyContinuityInspection(inspected)
       const billingKnown = await withRunLease(lease, async tx => {
         const previous = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: `aux:${operation.id}:continuity_critic` } } })
         const attempt = previous && await tx.agentProviderAttempt.findUnique({ where: { operationId_attemptKey: { operationId: previous.id, attemptKey: '1' } }, include: { usageReceipt: true } })
@@ -238,12 +250,13 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
       } })
       const repairGuidance = parsed.structured && report.independentCheck === 'complete' && report.errorCount > 0 ? await readChapterReviewRevisionGuidance(tx, ctx, frozen.chapter) : ''
       const incomplete = !parsed.structured || report.independentCheck !== 'complete'
-      const savedTerminalBinding = frozen.sourceBodies?.terminalEvidence?.proposalChanges
+      const savedTerminalBinding = frozen.sourceBodies?.terminalEvidence
         ? await tx.storyCompilation.findUniqueOrThrow({ where: { id: compiler.id }, select: { preparedContext: true } }) : undefined
+      const originalTerminalTask = frozen.sourceBodies?.terminalEvidence ? await readOriginalTaskRequest(tx, ctx) : undefined
       const terminalFailure = incomplete ? null : terminalReviewFailure({ ...report, ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }, frozen.chapter.content, frozen.sourceBodies?.terminalEvidence,
         { errors: report.errorCount, text: `连续性完整报告：${report.errorCount} 错误、${report.warningCount} 警告。${repairGuidance}\nreportId=${continuityDecisionBinding(compiler.id, frozen.chapter.revision, { ...report, coverage: frozen.coverage })}\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` },
         await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(tx, { ...ctx, compilationId: compiler.id },
-          { taskId: frozen.sourceBodies?.terminalEvidence?.proposalChanges?.taskId ?? '', preparedContext: savedTerminalBinding?.preparedContext }, frozen.chapter,
+          { taskId: originalTerminalTask ? terminalProposalTaskId(originalTerminalTask.spec, originalTerminalTask.taskId) : '', preparedContext: savedTerminalBinding?.preparedContext }, frozen.chapter,
           { ...report, ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }, frozen.sourceBodies?.terminalEvidence))
       const recovery = incomplete && inspected && recoveryReady ? terminalReportRecoveryResult({ ...report, terminalCandidate: frozen.terminalCandidate, continuityCriticResponse: inspected.audit },
         frozen.chapter.content, frozen.sourceBodies?.terminalEvidence, frozen.sourceBodies?.previous ?? null) : null
@@ -253,6 +266,8 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
         : { summary: `连续性检查${frozen.cached ? '（复用）' : ''} · ${report.errorCount} 错误 ${report.warningCount} 警告`,
           output: `检查意见已保存，正文未改动；${repairGuidance || '仅警告不授权改写正文，保留剩余意见交作者决定，不追求零警告。'}${frozen.cached ? '复用当前正文与来源的检查，不重复调用模型。' : ''}\n留置绑定 reportId=${continuityDecisionBinding(compiler.id, frozen.chapter.revision, { ...report, coverage: frozen.coverage })}；findingId 使用从0开始的编号。\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}`,
           display: { kind: 'storyCompiler', compilationId: compiler.id, phase: 'check', title: '连续性检查', detail: `${report.errorCount} 错误 · ${report.warningCount} 警告`, errorCount: report.errorCount, warningCount: report.warningCount, items: report.findings.map(item => item.evidence) } })
+      toolResult.reviewOutcome = terminalFailure?.reviewOutcome ?? (!incomplete && (report.errorCount || report.warningCount) ? 'decision_required'
+        : observedReviewOutcome({ complete: !incomplete, rawPresent: !!frozen.cached || !!critic, providerComplete: !!frozen.cached || !!critic, billingKnown: firstBillingKnown, providerFailed }).outcome ?? undefined)
       const stateHash = await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, compiler.id)
       if (!stateHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '检查后的编译状态缺失。')
       ctx.signal.throwIfAborted()
@@ -350,8 +365,11 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
     const coverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks,
       source, focus: typeof args.focus === 'string' ? args.focus : undefined, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8)
     const cached = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(continuityFindingInputSchema), coverage: coverageSchema }).safeParse(compilation.validation)
+    const cacheDeliveryBinding = cached.success && terminalEvidence ? await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(tx,
+      { ...ctx, compilationId: compilation.id }, { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: compilation.preparedContext },
+      compilation.chapter, compilation.validation, terminalEvidence) : undefined
     const proposalCacheCurrent = !terminalEvidence || !terminalCandidate || terminalProposalCacheMatches({ spec: originalRequest.spec,
-      preparedContext: compilation.preparedContext, validation: compilation.validation, chapter: compilation.chapter, source, candidate: terminalCandidate, nextContext: terminalEvidence })
+      preparedContext: compilation.preparedContext, validation: compilation.validation, chapter: compilation.chapter, source, candidate: terminalCandidate, nextContext: terminalEvidence }, cacheDeliveryBinding)
     const reusable = proposalCacheCurrent && cached.success && cached.data.checkedRevision === compilation.chapter.revision && compilerContinuityCoverageMatches(cached.data.coverage, coverage)
     if (!reusable && terminalEvidence && hasTerminalCoverageProtocol(originalRequest.spec)) terminalEvidence = { ...terminalEvidence,
       factCoverage: terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, 2, terminalCoverageProofs(source, 2))! }
@@ -364,8 +382,35 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
       if (proposals?.changes) terminalEvidence = { ...terminalEvidence, proposalChanges: proposals.changes }
       else delete terminalEvidence.proposalChanges
     }
+    if (!reusable && terminalVersion === 2 && terminalCandidate && terminalEvidence) {
+      const history = await tx.agentOperation.findMany({ where: { taskRootId: lease.taskRootId, kind: { in: ['tool', 'internal'] }, action: 'continuity_validate' },
+        include: { children: { include: { attempts: { include: { usageReceipt: true } } } } }, take: 1001 })
+      if (history.length > 1000) return { kind: 'rejected' as const, code: 'RUNTIME_RECONCILIATION_REQUIRED', message: '原检查历史无法完整核实，未派发新请求。' }
+      const currentSubject = { chapterId: compilation.chapter.id, revision: compilation.chapter.revision, targetType: 'story_compilation', targetId: compilation.id,
+        bodies: { previous: source?.content ?? null, current: compilation.chapter.content, terminalEvidence }, terminalCandidate, sourceScope: compilerEvidenceScope(compilation.chapter, source) }
+      for (const prior of history) {
+        if (runtimeJson(prior.inputSnapshot).hash !== prior.inputHash) return { kind: 'rejected' as const, code: 'RUNTIME_RECEIPT_INVALID', message: '原连续性操作输入损坏，未重新派发。' }
+        const parsed = z.object({ input: z.object({ work: workSchema }) }).safeParse(prior.inputSnapshot)
+        if (!parsed.success) return { kind: 'rejected' as const, code: 'RUNTIME_RECEIPT_INVALID', message: '原连续性冻结工作无法认证，未追加检查。' }
+        if (parsed.data.input.work.kind !== 'check') continue
+        const old = parsed.data.input.work
+        if (old.compiler?.id !== compilation.id || old.chapter.id !== compilation.chapter.id) continue
+        const children = prior.children.filter(child => ['continuity_critic', 'continuity_reassessment', 'continuity_evidence_correction'].includes(child.action))
+        if (children.some(child => child.status !== 'succeeded' || child.attempts.length !== 1 || child.attempts.some(attempt => attempt.status !== 'succeeded'
+          || attempt.usageReceipt?.source !== 'reported' || attempt.usageReceipt.settlementStatus !== 'settled')))
+          return { kind: 'rejected' as const, code: 'RUNTIME_RECONCILIATION_REQUIRED', message: '原连续性请求或费用仍未确认，未追加检查。' }
+        if (children.length && continuityWorkSubjectIdentity(old) !== null && continuityWorkSubjectIdentity(old) === continuitySubjectIdentity(currentSubject))
+          return { kind: 'rejected' as const, code: 'CONTINUITY_REPORT_INCOMPLETE', message: '该候选和证据已有原检查请求；保留原结果，协议、关注点或调用编号变化不能购买相同判断。' }
+      }
+    }
     validatedContinuityCheckRounds(compilation.validation, !reusable)
-    return { kind: 'check' as const, version: terminalVersion === 2 ? terminalCandidate && !reusable ? 21 as const : 18 as const : terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), ...(terminalVersion === 2 ? { reassessmentProtocol: terminalCandidate && !reusable ? 5 as const : 2 as const } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,
+    const continuityManifest = !reusable && terminalVersion === 2 && terminalCandidate && terminalEvidence ? buildContinuityReviewManifest({
+      subject: { userId: ctx.userId, novelId: ctx.novelId, taskId: originalRequest.taskId, targetType: 'story_compilation', targetId: compilation.id,
+        chapterId: compilation.chapter.id, revision: compilation.chapter.revision },
+      bodies: { previous: source?.content ?? null, current: compilation.chapter.content, terminalEvidence }, candidate: terminalCandidate,
+      sourceScope: compilerEvidenceScope(compilation.chapter, source), sourceHash: coverage.sourceHash, sourceVersions: source ? { sourceHash: runtimeJson(source).hash, chapters: 'preceding' in source ? source.preceding : null } : null,
+      verifiedCoverage: terminalEvidence.factCoverage ?? null, draftProposals: terminalEvidence.proposalChanges ?? null }) : undefined
+    return { kind: 'check' as const, version: terminalVersion === 2 ? terminalCandidate && !reusable ? 22 as const : 18 as const : terminalProtocol ? 13 as const : sourceAuthority ? 12 as const : 11 as const, ...(terminalCandidate ? { terminalCandidate } : {}), ...(terminalVersion === 2 ? { reassessmentProtocol: terminalCandidate && !reusable ? 6 as const : 2 as const } : {}), ...(continuityManifest ? { continuityManifest, authorRequest: originalRequest.prompt ?? null } : {}), compiler: baseline, chapter: compilation.chapter, sourceBodies: { previous: source?.content ?? null, current: compilation.chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }, sourceId, coverage,
       ...(sourceAuthority ? { sourceScope: compilerEvidenceScope(compilation.chapter, source) } : {}),
       criticSystem, repairSystem: repairPrompt,
       criticInput: [...((terminalEvidence?.verdictProtocol === 4 || terminalEvidence?.verdictProtocol === 5 || terminalEvidence?.verdictProtocol === 6) ? [freshContinuityResponseContract(false, !!terminalCandidate, terminalEvidence.verdictProtocol, { previous: source?.content ?? null, current: compilation.chapter.content, terminalEvidence }, terminalCandidate)] : []), `章节：《${compilation.chapter.title}》`,
@@ -388,6 +433,11 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
   if (!recoveredWork && work.kind === 'check' && work.reassessmentProtocol === 5 && work.sourceBodies && work.terminalCandidate) work = { ...work,
     criticSystem: continuityResponseSystem(work.criticSystem, continuityResponseContract(work.sourceBodies, work.terminalCandidate)),
     criticInput: continuityResponseInput4(work.criticInput, work.sourceBodies, work.terminalCandidate) }
+  if (!recoveredWork && work.kind === 'check' && work.version === 22 && work.continuityManifest && work.sourceBodies && work.terminalCandidate && work.sourceScope) {
+    const request = continuityReviewV4Request({ manifest: work.continuityManifest, bodies: work.sourceBodies, candidate: work.terminalCandidate, sourceScope: work.sourceScope },
+      work.authorRequest ?? null, JSON.stringify({ body: work.sourceBodies.current, previous: work.sourceBodies.previous, target: work.compiler, coverage: work.coverage }))
+    work = { ...work, criticSystem: request.system, criticInput: request.content }
+  }
   work = workSchema.parse(work)
   return work
 }

@@ -36,10 +36,11 @@ const legacyReviewRuntime: NonNullable<ToolContext['modelRuntime']> = { tier: 's
   reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null }
 
 describe.runIf(available)('durable continuity actual tool chain', () => {
-  it.each(['terminal-contract3', 'terminal-chain-reassessment', 'terminal-reassessment', 'source-authority-reassessment', 'relocated', 'old5-relocated', 'old6-relocated', 'old7-relocated', 'wrapped-report', 'full-report', 'success', 'chapter-only', 'repair', 'warnings', 'fused-repair', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'source-text', 'approval-denied', 'history-over-three', 'single-quotes', 'single-quotes-stale', 'single-quotes-source', 'single-quotes-swapped', 'unavailable-write-recheck'] as const)('%s preserves paid results and atomic business effects', async scenario => {
+  it.each(['terminal-contract4', 'terminal-contract4-repair', 'terminal-chain-reassessment', 'terminal-reassessment', 'source-authority-reassessment', 'relocated', 'old5-relocated', 'old6-relocated', 'old7-relocated', 'wrapped-report', 'full-report', 'success', 'chapter-only', 'repair', 'warnings', 'fused-repair', 'format', 'truncated', 'format-retry', 'unknown', 'stale-chapter', 'stale-compiler', 'rollback-resume', 'late-resume', 'protected', 'missing', 'long', 'repair-stale', 'stale-source', 'source-text', 'approval-denied', 'history-over-three', 'single-quotes', 'single-quotes-stale', 'single-quotes-source', 'single-quotes-swapped', 'unavailable-write-recheck'] as const)('%s preserves paid results and atomic business effects', async scenario => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     await fixture(async f => {
       let lease = await claim(f)
+      const v4 = scenario === 'terminal-contract4' || scenario === 'terminal-contract4-repair'
       const before = ['relocated', 'old5-relocated', 'old6-relocated', 'old7-relocated'].includes(scenario) ? '甲'.repeat(1800) + '唯一引用。' + '乙'.repeat(350) : scenario === 'long' ? '开头锚点' + '长正文'.repeat(6000) + '末尾锚点' : ['repair', 'fused-repair', 'format-retry', 'rollback-resume', 'protected', 'repair-stale'].includes(scenario) ? '原文，门开着，门同时锁着。' : '原文'
       await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: before, wordCount: before.length } })
       let sourceId: string | undefined
@@ -54,9 +55,9 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
       if (scenario === 'history-over-three') await prisma.storyCompilation.update({ where: { id: compilationId }, data: { validation: { checkRounds: 9 } } })
       const tools = [chapterBridgeGetTool, continuityValidateTool, ...(scenario === 'unavailable-write-recheck' ? [chapterReadTool, chapterWriteTool] : [])]
-      const checkArgs = scenario === 'chapter-only' ? { chapterId: f.chapterId } : { compilationId, ...(scenario === 'terminal-contract3' ? { terminalState: { exitState: { action: '原文' } } } : {}) }
+      const checkArgs = scenario === 'chapter-only' ? { chapterId: f.chapterId } : { compilationId, ...(v4 ? { terminalState: { exitState: { action: '原文' } } } : {}) }
       const calls = [{ id: 'bridge', name: 'chapter_bridge_get', arguments: JSON.stringify({ compilationId }) }, { id: 'check', name: 'continuity_validate', arguments: JSON.stringify(checkArgs) }]
-      if (['success', 'chapter-only', 'source-authority-reassessment', 'terminal-reassessment', 'terminal-chain-reassessment', 'terminal-contract3'].includes(scenario)) calls.push({ id: 'cached', name: 'continuity_validate', arguments: JSON.stringify(checkArgs) })
+      if (['success', 'chapter-only', 'source-authority-reassessment', 'terminal-reassessment', 'terminal-chain-reassessment', 'terminal-contract4', 'terminal-contract4-repair'].includes(scenario)) calls.push({ id: 'cached', name: 'continuity_validate', arguments: JSON.stringify(checkArgs) })
       if (scenario === 'unavailable-write-recheck') calls.push(
         { id: 'read-current', name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) },
         { id: 'write-current', name: 'chapter_write', arguments: JSON.stringify({ chapterId: f.chapterId, content: '新文，门已经锁好。' }) },
@@ -107,8 +108,8 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
           : requests === 1 ? JSON.stringify({ findings: scenario === 'warnings' ? ['body', 'object', 'knowledge'].map(signal => ({ signal, severity: 'warning', evidence: '原文存在承接风险', suggestion: '局部澄清', sourceEvidence: [{ source: 'current', quote: '原文' }] }))
             : repairing || scenario === 'protected' ? [{ signal: 'body', severity: 'error', evidence: '原文有身体状态冲突', suggestion: '改成新文', sourceEvidence: [{ source: 'current', quote: '门开着' }, { source: 'current', quote: '门同时锁着' }] }] : [] })
           : '{"patches":[{"oldText":"原文","newText":"新文"}]}'
-        const duplicate = { claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: '原文' }] }
-        const content = scenario === 'terminal-contract3' ? JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic current-body check.', findingIndexes: [] })), terminalVerdicts: [duplicate, duplicate], terminalProofVerdicts: [], terminalDispositions: [] }) : ['terminal-reassessment', 'terminal-chain-reassessment'].includes(scenario) ? JSON.stringify({ ...JSON.parse(originalContent), semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'not_applicable', reason: '已核对匿名原文无相关动作。', findingIndexes: [] })) }) : originalContent
+        const currentVerdict = { claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] }
+        const content = scenario === 'terminal-contract4-repair' && requests === 2 ? JSON.stringify({ corrections: [{ table: 'terminalVerdicts', index: 0, value: currentVerdict }] }) : v4 ? JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic current-body check.', findingIds: [] })), terminalVerdicts: [scenario === 'terminal-contract4-repair' ? { ...currentVerdict, sourceEvidence: [{ segmentId: 'c999' }] } : currentVerdict], terminalProofVerdicts: [], terminalDispositions: [] }) : ['terminal-reassessment', 'terminal-chain-reassessment'].includes(scenario) ? JSON.stringify({ ...JSON.parse(originalContent), semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'not_applicable', reason: '已核对匿名原文无相关动作。', findingIndexes: [] })) }) : originalContent
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: scenario === 'truncated' ? 'length' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
       })
       vi.stubGlobal('fetch', fetchMock)
@@ -174,12 +175,12 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       const result = await step()
       const failed = ['old5-relocated', 'format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source', 'single-quotes-stale', 'single-quotes-swapped'].includes(scenario)
       expect(result).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { summary: expect.stringContaining('连续性检查') } })
-      if (['success', 'chapter-only', 'source-authority-reassessment', 'terminal-reassessment', 'terminal-chain-reassessment', 'terminal-contract3'].includes(scenario)) {
+      if (['success', 'chapter-only', 'source-authority-reassessment', 'terminal-reassessment', 'terminal-chain-reassessment', 'terminal-contract4', 'terminal-contract4-repair'].includes(scenario)) {
         expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({ checkRounds: 1 })
         expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('复用') } })
         expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({ checkRounds: 1 })
       }
-      const expectedRequests = scenario === 'missing' ? 0 : ['format', 'single-quotes-stale', 'single-quotes-swapped', 'source-authority-reassessment', 'terminal-reassessment', 'terminal-chain-reassessment'].includes(scenario) ? 2 : 1
+      const expectedRequests = scenario === 'missing' ? 0 : ['terminal-contract4-repair', 'format', 'single-quotes-stale', 'single-quotes-swapped', 'source-authority-reassessment', 'terminal-reassessment', 'terminal-chain-reassessment'].includes(scenario) ? 2 : 1
       expect(fetchMock).toHaveBeenCalledTimes(expectedRequests)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(expectedRequests)
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
@@ -214,13 +215,12 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
           expect(saved.validation).toMatchObject({ continuityCriticResponse: { terminalEvidence: { protocol: scenario === 'terminal-chain-reassessment' ? 2 : 1, current: { id: f.chapterId }, previous: null } } })
         } else expect(saved.validation).not.toHaveProperty('continuityCriticResponse.terminalEvidence')
       }
-      if (scenario === 'terminal-contract3') {
+      if (v4) {
         const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate' } })
-        expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: 21, reassessmentProtocol: 5 } } })
-        expect(saved.validation).toMatchObject({ independentCheck: 'complete', continuityCriticResponse: { responseContract: 3,
-          responseNormalization: { repeated: [{ field: 'terminalVerdicts', index: 1, originalIndex: 0, address: 0 }] } } })
-        expect(fetchMock).toHaveBeenCalledOnce()
-        expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, kind: 'provider' } })).toBe(1)
+        expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: 22, reassessmentProtocol: 6, continuityManifest: { version: 1 } } } })
+        expect(saved.validation).toMatchObject({ independentCheck: 'complete', continuityCriticResponse: { parserVersion: 9, responseContract: 4, continuityV4: { version: 1, projections: { prose: { valid: true }, currentTerminal: { valid: true }, historicalCoverage: { valid: true }, draftProposals: { valid: true } } } } })
+        expect(fetchMock).toHaveBeenCalledTimes(scenario === 'terminal-contract4-repair' ? 2 : 1)
+        expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, kind: 'provider' } })).toBe(scenario === 'terminal-contract4-repair' ? 2 : 1)
       }
       if (scenario === 'history-over-three') expect(saved.validation).toMatchObject({ checkRounds: 10 })
       if (scenario === 'single-quotes') expect(saved.validation).toMatchObject({ independentCheck: 'complete', warningCount: 1, unlocatedEvidenceCount: 0 })
@@ -241,8 +241,8 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId } })).targetRevision).toBeNull()
       }
       const events = await publishDurableEvents(f.userId, lease.runId)
-      expect(events.filter(event => event.type === 'tool.result' && event.toolName === 'continuity_validate')).toMatchObject(['success', 'chapter-only', 'source-authority-reassessment', 'terminal-reassessment', 'terminal-chain-reassessment', 'terminal-contract3'].includes(scenario) ? [{ ok: true }, { ok: true }] : [{ ok: !failed }])
-    }, undefined, scenario === 'chapter-only' ? '完成当前章节' : '修改本章', ['source-authority-reassessment', 'terminal-reassessment', 'terminal-chain-reassessment', 'terminal-contract3'].includes(scenario) ? { continuityEvidenceProtocol: 1, ...(['terminal-chain-reassessment', 'terminal-contract3'].includes(scenario) ? { terminalEvidenceProtocol: 2 as const } : scenario === 'terminal-reassessment' ? { terminalEvidenceProtocol: 1 as const } : {}) } : undefined)
+      expect(events.filter(event => event.type === 'tool.result' && event.toolName === 'continuity_validate')).toMatchObject(['success', 'chapter-only', 'source-authority-reassessment', 'terminal-reassessment', 'terminal-chain-reassessment', 'terminal-contract4', 'terminal-contract4-repair'].includes(scenario) ? [{ ok: true }, { ok: true }] : [{ ok: !failed }])
+    }, undefined, scenario === 'chapter-only' ? '完成当前章节' : '修改本章', ['source-authority-reassessment', 'terminal-reassessment', 'terminal-chain-reassessment', 'terminal-contract4', 'terminal-contract4-repair'].includes(scenario) ? { continuityEvidenceProtocol: 1, ...(['terminal-chain-reassessment', 'terminal-contract4', 'terminal-contract4-repair'].includes(scenario) ? { terminalEvidenceProtocol: 2 as const } : scenario === 'terminal-reassessment' ? { terminalEvidenceProtocol: 1 as const } : {}) } : undefined)
   })
   it('applies only unique nonoverlapping anchors from original content', () => {
     expect(applyContinuityPatches('原文尾部', [{ oldText: '原文', newText: '新文' }, { oldText: '新文', newText: '注入文本' }, { oldText: '文尾', newText: '重叠' }, { oldText: '尾部', newText: '结尾' }])).toEqual({ after: '新文结尾', applied: 2 })
@@ -620,9 +620,9 @@ describe.runIf(available)('native continuity recovery keeps a complete second re
     let requests = 0
     const network = vi.fn(async () => {
       requests++
-      const wire = { findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic full review.', findingIndexes: [] })),
-        terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] }],
-        terminalProofVerdicts: requests === 1 ? [{ proofIndex: 0, currentState: 'unchanged', reason: 'Wrong table.' }] : [], terminalDispositions: [] }
+      const wire = requests === 1 ? { findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic full review.', findingIds: [] })),
+        terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c999' }] }], terminalProofVerdicts: [], terminalDispositions: [] }
+        : { corrections: [{ table: 'terminalVerdicts', index: 0, value: { claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] } }] }
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(wire) }, finish_reason: 'stop' }],
         ...(requests === 1 ? { usage: { prompt_tokens: 12, completion_tokens: 8 } } : {}) })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
     })

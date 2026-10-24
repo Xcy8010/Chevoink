@@ -1,3 +1,5 @@
+import { validateStoredContinuityV4Projection } from './continuity-review-v4.js'
+import { readAuthenticatedContinuityAssessment } from './authenticated-continuity-assessment.js'
 import { continuitySparseRepairDiagnostics } from './continuity-response-repair.js'
 import { continuityReassessmentDiagnostics } from './continuity-response-contract.js'
 import { DataAccessError } from '../prisma.js'
@@ -76,7 +78,12 @@ export function prepareTerminalProposalInput(input: { spec: unknown; preparedCon
     return undefined
   }
   const original = attachTerminalProposalInput(input.originalContext, { ...input, taskId, candidate: previous })
-  if (!currentTerminalReview(input.validation, originalContent, original)
+  // Proposal staging checks the authenticated response structure. Delivery
+  // still requires the database-minted authority at save/cache/commit gates.
+  const originalReview = object(audit).parserVersion === 9
+    ? readAuthenticatedContinuityAssessment(audit, originalContent, original, object(input.validation).independentCheck === 'complete')
+    : currentTerminalReview(input.validation, originalContent, original)
+  if (!originalReview
     && !terminalCandidateCorrection(input.validation, originalContent, original)
     && !(input.previousContent !== undefined
       && (state?.pending.length ? original.proposalChanges : object(audit).classification === 'terminal_invalid')
@@ -133,6 +140,13 @@ export function terminalProposalCacheMatches(input: Parameters<typeof prepareCom
 function authenticFailedReport(validation: unknown, content: string, previous: string | null,
   terminalEvidence: TerminalEvidenceContext, candidate: TerminalCandidate) {
   const saved = object(validation), audit = object(saved.continuityCriticResponse), raw = object(audit.rawResponse)
+  if (audit.parserVersion === 9) {
+    const result = validateStoredContinuityV4Projection(audit, content, terminalEvidence)
+    return saved.independentCheck === 'unavailable' && !!result && !result.complete
+      && result.audit.rawResponse.complete && result.audit.classification !== 'response_incomplete'
+      && runtimeJson(result.audit.terminalCandidate).hash === runtimeJson(candidate).hash
+      && result.audit.continuityV4.frozen.bodies.previous === previous
+  }
   if (saved.independentCheck !== 'unavailable' || audit.parserVersion !== 8 || raw.complete !== true
     || raw.encoding !== 'json-string' || typeof raw.content !== 'string' || audit.classification === 'response_incomplete') return false
   try {

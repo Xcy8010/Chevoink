@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { REVIEW_OUTCOMES } from '../../../shared/review-lifecycle.js'
 import type { AgentExecutionOutbox } from '@prisma/client'
 import type { AgentStreamEventBody, AgentToolDisplayPayload, AgentMessagePart, AgentRollbackSnapshot } from '../../../shared/contracts/index.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
@@ -43,6 +44,7 @@ export async function persistProjectedMessages(tx: RuntimeTx, source: AgentExecu
         snapshot = historyRollback.parse(receipt.result).toolResult.snapshot
       }
       const result = { status: body.ok ? 'success' as const : 'failed' as const, summary: body.summary,
+        ...(body.reviewOutcome ? { reviewOutcome: body.reviewOutcome } : {}),
         ...(body.durationMs !== undefined ? { durationMs: body.durationMs } : {}), ...(body.display ? { display: body.display } : {}),
         ...(snapshot ? { snapshot } : {}) }
       if (index < 0) parts = [...parts, { type: 'tool-call', callId: body.callId, toolName: body.toolName, title: body.toolName, args: null, ...result }]
@@ -95,11 +97,12 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
     if (appended.role === 'tool') {
       const operation = await tx.agentOperation.findFirst({ where: { id: previous.state.pendingOperationId!, taskRootId: source.taskRootId }, include: { effectReceipt: true } })
       const receipt = operation?.effectReceipt
-      const parsedResult = z.object({ code: z.string().optional(), toolResult: z.object({ summary: z.string(), failureCode: z.string().optional(), display: z.unknown().optional(), outcome: z.literal('failed').optional() }) }).safeParse(receipt?.result)
+      const parsedResult = z.object({ code: z.string().optional(), toolResult: z.object({ summary: z.string(), failureCode: z.string().optional(), reviewOutcome: z.enum(REVIEW_OUTCOMES).optional(), display: z.unknown().optional(), outcome: z.literal('failed').optional() }) }).safeParse(receipt?.result)
       if (!operation || !receipt || !parsedResult.success || !['succeeded', 'failed'].includes(operation.status)
         || runtimeJson(receipt.result).hash !== receipt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '工具结果事件缺少完整回执。')
       return [{ type: 'tool.result', messageId, callId: appended.toolCallId, toolName: operation.action, ok: operation.status === 'succeeded' && parsedResult.data.toolResult.outcome !== 'failed',
         summary: humanizeAgentVisibleText(parsedResult.data.toolResult.summary), durationMs: Math.max(0, receipt.createdAt.getTime() - operation.createdAt.getTime()),
+        ...(parsedResult.data.toolResult.reviewOutcome ? { reviewOutcome: parsedResult.data.toolResult.reviewOutcome } : {}),
         ...(parsedResult.data.code || parsedResult.data.toolResult.failureCode ? { failureCode: parsedResult.data.code ?? parsedResult.data.toolResult.failureCode } : {}),
         ...(operation.status === 'succeeded' && parsedResult.data.toolResult.display ? { display: parsedResult.data.toolResult.display as AgentToolDisplayPayload } : {}) }]
     }

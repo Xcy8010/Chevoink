@@ -1,5 +1,6 @@
 import type { AgentAttachmentMeta } from './agent-attachments.js'
 import type { AgentExecutionMode, EntityId } from './models.js'
+import type { ReviewOutcome } from '../review-lifecycle.js'
 
 /** Server proof that a review request returned, even if its local report write failed.
  * contentHash is SHA-256 of the raw UTF-8 chapter text. Historical continuity
@@ -441,6 +442,7 @@ export type AgentStreamEventBody =
       ok: boolean
       summary: string
       failureCode?: string
+      reviewOutcome?: ReviewOutcome
       reviewRequestFinished?: AgentReviewRequestReceipt
       invalidFields?: string[]
       display?: AgentToolDisplayPayload
@@ -493,6 +495,7 @@ export type AgentMessagePart =
       args: unknown
       status: 'running' | 'success' | 'failed' | 'denied'
       summary?: string
+      reviewOutcome?: ReviewOutcome
       importWaiting?: { url: string; expiresAt: string }
       display?: AgentToolDisplayPayload
       durationMs?: number

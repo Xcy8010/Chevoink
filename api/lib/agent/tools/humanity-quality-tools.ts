@@ -1,3 +1,4 @@
+import { observedReviewOutcome } from '../../../../shared/review-lifecycle.js'
 import { createHash } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import { assertOriginalRepairAuthority } from '../original-request.js'
@@ -181,6 +182,12 @@ export function buildCriticInput(bundle: Awaited<ReturnType<typeof buildHumanity
 
 type FrozenQualityRuntime = Pick<Awaited<ReturnType<typeof resolveDurableAuxiliaryRuntime>>, 'runtime'>
 async function finishQualityReview(ctx: ToolContext, report: QualityReport, bindingSuffix = '', cached = false, allowRepair = true, frozenQuality?: FrozenQualityRuntime): Promise<ToolResult> {
+  const result = await finishQualityReviewResult(ctx, report, bindingSuffix, cached, allowRepair, frozenQuality)
+  const pending = report.findings.some(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected')
+  return { ...result, reviewOutcome: result.semanticTransition || result.outcome === 'failed' ? 'stale' : pending ? 'decision_required' : 'complete' }
+}
+
+async function finishQualityReviewResult(ctx: ToolContext, report: QualityReport, bindingSuffix = '', cached = false, allowRepair = true, frozenQuality?: FrozenQualityRuntime): Promise<ToolResult> {
   ctx.signal.throwIfAborted()
   const checkedRevision = report.chapterRevision
   const warningCount = report.findings.filter(finding => finding.severity === 'warning').length
@@ -424,7 +431,7 @@ export const qualityAnalyzeTool = defineTool({
       && !await prisma.$transaction(tx => hasReconciledQualityRequest(tx, ctx, existing))) {
       formatRecovery = await prisma.$transaction(tx => readQualityFormatRecovery(tx, ctx, { chapterId }))
       if (!formatRecovery || !await prisma.$transaction(tx => claimQualityFormatRecovery(tx, ctx, formatRecovery!))) return {
-        outcome: 'failed' as const, failureCode: 'QUALITY_REPORT_INCOMPLETE', summary: '质量检查尚未完成', display: reportDisplay(await getQualityReport(ctx.userId, ctx.novelId, existing.id)),
+        outcome: 'failed' as const, failureCode: 'QUALITY_REPORT_INCOMPLETE', reviewOutcome: 'evidence_repair_required', summary: '质量检查尚未完成', display: reportDisplay(await getQualityReport(ctx.userId, ctx.novelId, existing.id)),
         output: '当前失败报告已保留；本输入的一次格式恢复不可用或已经使用，不再派发重复检查。检查未完成，不能提交或宣称通过；请暂停并展示真实原因。',
       }
     }
@@ -452,7 +459,8 @@ export const qualityAnalyzeTool = defineTool({
       const current = await buildHumanityQualityContext(ctx.userId, ctx.novelId, chapterId, ctx.runId)
       if (qualityReviewContextHash(current) !== contextHash) throw new DataAccessError(409, 'QUALITY_INPUT_STALE', '正文或当前任务已变化，未重发旧版本质量检查，请读取当前版本。')
     }
-    const callReview = (...input: Parameters<typeof generateReviewCompletion>) => runReviewStep(ctx.signal, reviewSignal, () => generateReviewCompletion(...input))
+    const reviewTrace = createTextRequestTrace()
+    const callReview = (...input: Parameters<typeof generateReviewCompletion>) => withTextRequestTrace(reviewTrace, () => runReviewStep(ctx.signal, reviewSignal, () => generateReviewCompletion(...input)))
     let response: string | null = null
     try {
       await assertCurrent()
@@ -470,7 +478,7 @@ export const qualityAnalyzeTool = defineTool({
       }
       const restored = formatRecovery ? qualityFormatRecoveryPrompt(buildCriticSystem('balanced'), userPrompt, previousResponse) : null
       response = restored ? await callReview(restored.system, restored.content,
-        responseOptions, assertCurrent) : await generateReviewCompletion(
+        responseOptions, assertCurrent) : await callReview(
         buildCriticSystem('balanced'), userPrompt,
         responseOptions, assertCurrent,
       )
@@ -509,7 +517,7 @@ export const qualityAnalyzeTool = defineTool({
       if (!failed) return unsavedReport()
       formatRecovery = await prisma.$transaction(tx => claimCurrentQualityFormatRecovery(tx, ctx, chapterId,
         { callId: ctx.callId, startedAt, contentHash: inspected.diagnostic.contentHash!, characterCount: inspected.diagnostic.characterCount }))
-      if (!formatRecovery) return { outcome: 'failed' as const, failureCode: 'QUALITY_REPORT_INCOMPLETE', summary: '质量报告格式不完整',
+      if (!formatRecovery) return { outcome: 'failed' as const, failureCode: 'QUALITY_REPORT_INCOMPLETE', reviewOutcome: textRequestsFinished(reviewTrace) ? 'evidence_repair_required' : 'provider_unresolved', summary: '质量报告格式不完整',
         output: '完整回复未形成可验证的报告，原失败报告已保存；格式恢复未获已结算响应证明或已使用，未重复请求。检查未完成，不能宣称通过。',
         display: reportDisplay(await getQualityReport(ctx.userId, ctx.novelId, failed.id)) }
       await assertCurrent()
@@ -574,6 +582,7 @@ export const qualityAnalyzeTool = defineTool({
     if (formatRecovery) await prisma.$transaction(tx => bindQualityFormatRecovery(tx, report.id, formatRecovery!))
     if (correctionError) throw correctionError
     if (report.status === 'failed') return { outcome: 'failed' as const,
+      reviewOutcome: observedReviewOutcome({ complete: false, rawPresent: response !== null, providerComplete: response !== null, billingKnown: textRequestsFinished(reviewTrace) }).outcome ?? undefined,
       failureCode: criticFallback ? 'QUALITY_REPORT_INCOMPLETE' : 'QUALITY_EVIDENCE_UNLOCATED',
       output: (criticFallback
         ? `质量模型返回的报告格式不完整，不能判定质量通过。确定性报告和正文已保留；${formatRecovery ? '本次工具执行内的独立计费格式恢复已完成，报告仍不可验证；后续检查须遵守真实作者继续授权、预算与未知结果保护。' : ''}不得重复改写正文来解决格式错误。`

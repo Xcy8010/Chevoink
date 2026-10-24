@@ -8,7 +8,7 @@ import { prepareStoryCompilation, saveSceneTasks, recordStoryCompilerWrite, vali
 import { readLegacyContinuityAssessment, bindLegacyContinuityAssessment, reserveLegacyContinuityAssessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { readTerminalInputDecision } from '../../api/lib/agent/terminal-input-decision.js'
 import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
-import { observeChapterReviewProgress } from '../../api/lib/agent/semantic-progress.js'
+import { observeChapterReviewProgress, observeWritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import { executeAgentRun } from '../../api/lib/agent/loop.js'
 import { recoverRunElapsedMs } from '../../api/lib/agent/checkpoint.js'
@@ -102,6 +102,12 @@ describe.runIf(available)('one persisted decision for a settled invalid terminal
     const oldFeedback = ['e'.repeat(64)], seen = new Set<string>()
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
     observeChapterReviewProgress(seen, readiness!.progressEvidence, { ...f, taskSpec: f.spec, expectedOriginalTaskId: f.spec.id })
+    for (const phase of ['prepare', 'scenes'] as const) {
+      const action = phase === 'prepare' ? 'story_compiler_prepare' : 'scene_task_build'
+      const milestone = { version: 1 as const, userId: f.userId, novelId: f.novelId, runId: f.runId, targetOrderIndex: chapter.orderIndex, phase }
+      expect(observeWritingWorkflowMilestone(seen, action, milestone, { ...f, taskSpec: f.spec })).toBe(true)
+      expect(observeWritingWorkflowMilestone(seen, action, milestone, { ...f, taskSpec: f.spec })).toBe(false)
+    }
     const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: startedAt.getTime(),
       activeExecutionMs: recoverRunElapsedMs(startedAt.getTime(), pause.createdAt.getTime(), [{ type: 'run.paused', at: pause.createdAt.getTime() }]),
       stagnantBatches: stagnant, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
@@ -127,7 +133,7 @@ describe.runIf(available)('one persisted decision for a settled invalid terminal
       const trace = beginTextRequest(row.id).record
       await options.beforeProviderDispatch?.(row.id)
       Object.assign(trace, { status: 'terminal', billingKnown: true })
-      const raw = JSON.stringify({ ...synthetic.secondWire, decisions: undefined, terminalVerdicts: [0, 1].map(claimIndex => ({ claimIndex, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] })) })
+      const raw = JSON.stringify({ ...synthetic.secondWire, decisions: undefined, semanticChecks: Object.entries(synthetic.secondWire.semanticChecks).map(([kind, row]) => ({ kind, result: row.result, reason: row.reason, findingIds: [] })), terminalVerdicts: [0, 1].map(claimIndex => ({ claimIndex, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] })) })
       options.onObservedCompletion?.({ usageId: row.id, content: raw, finishReason: 'stop', toolCalls: [] })
       return raw
     })

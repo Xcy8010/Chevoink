@@ -1,3 +1,5 @@
+import { inspectAuthenticatedContinuityAssessment, knownFinalContinuityFailure } from './authenticated-continuity-assessment.js'
+import { continuityReviewManifestSchema } from './continuity-review-v4.js'
 import { z } from 'zod'
 import { DataAccessError } from '../prisma.js'
 import type { Prisma } from '@prisma/client'
@@ -13,17 +15,17 @@ import { terminalCoverageInput, terminalCoverageProofs } from './terminal-fact-c
 import { readCompilerContinuitySource } from './compiler-continuity-source.js'
 import { compilerContinuityCoverage, storedContinuityProtocol } from './compiler-continuity-contract.js'
 import { attachTerminalProposalInput } from './terminal-proposal-context.js'
-import { inspectContinuityResponse, continuityFailureOutput } from './continuity-format-recovery.js'
+import { continuityFailureOutput } from './continuity-format-recovery.js'
 import { terminalProcessingEpisodeKey } from './terminal-processing.js'
 import type { LegacyAssessmentInput } from './assessment-response-lifecycle.js'
 import { isKnownRejectedTextRequestAttempt, isKnownTextRequestBilling } from './text-request-billing.js'
 import { readRetiredReviewUsageIds } from './cancelled-review-recovery.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
-const inputSchema = z.object({ chapterId: z.string(), revision: z.number().int(), parserVersion: z.literal(8), terminalCandidate: terminalCandidateSchema,
+const inputSchema = z.object({ chapterId: z.string(), revision: z.number().int(), parserVersion: z.union([z.literal(8), z.literal(9)]), continuityManifest: continuityReviewManifestSchema.optional(), terminalCandidate: terminalCandidateSchema,
   bodies: z.object({ current: z.string(), previous: z.string().nullable(), terminalEvidence: terminalEvidenceContextSchema }).strict(),
   sourceScope: continuitySourceScopeSchema, system: z.string(), content: z.string(), bindingHash: z.string().regex(/^[a-f0-9]{64}$/u),
-  reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5)]).optional(), targetType: z.literal('story_compilation'), targetId: z.string() }).strict()
+  reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)]).optional(), targetType: z.literal('story_compilation'), targetId: z.string() }).strict()
 
 /** Selectors, ordering, prompts and focus do not create a different subject.
  * This digest grants nothing: its operands must first be authenticated below. */
@@ -35,7 +37,7 @@ export function terminalInputSemanticKey(value: unknown) {
     segments: [...evidence.previous.segments].sort((a, b) => a.segmentId.localeCompare(b.segmentId)),
     ...(evidence.previous.carried ? { carried: [...evidence.previous.carried].sort((a, b) => a.proofHash.localeCompare(b.proofHash)) } : {}) } : null
   return runtimeJson({ chapterId: input.chapterId, revision: input.revision, targetType: input.targetType, targetId: input.targetId,
-    parserVersion: input.parserVersion, protocol: evidence.protocol, sourceScope: input.sourceScope,
+    parserVersion: 8, protocol: evidence.protocol, sourceScope: input.sourceScope,
     contentHash: runtimeJson({ content: input.bodies.current }).hash, previousContent: input.bodies.previous, previous,
     facts: [...new Map(terminalCandidateFacts(input.terminalCandidate).map(({ id, field, claim }) => [id, { id, field, claim }])).values()].sort((a, b) => a.id.localeCompare(b.id)),
     proofs: terminalProofCatalog(input.terminalCandidate, evidence).map(item => item.fact.proofHash) }).hash
@@ -84,8 +86,8 @@ export async function readTerminalInputDecision(db: Prisma.TransactionClient,
     status: 'active', ...(compilationId ? { id: compilationId } : {}) }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } },
     chapter: { select: { id: true, revision: true, content: true, orderIndex: true, title: true } } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
   const chapter = compilation?.chapter, validation = object(compilation?.validation), audit = object(validation.continuityCriticResponse)
-  if (!compilation || !chapter || !compilation.bridge || validation.independentCheck !== 'unavailable' || audit.classification !== 'source_invalid'
-    || audit.parserVersion !== 8 || validation.checkedChapterId !== chapter.id || validation.checkedRevision !== chapter.revision
+  if (!compilation || !chapter || !compilation.bridge || validation.independentCheck !== 'unavailable' || !knownFinalContinuityFailure(audit)
+    || (audit.parserVersion !== 8 && audit.parserVersion !== 9) || validation.checkedChapterId !== chapter.id || validation.checkedRevision !== chapter.revision
     || !original.writing.targets.some(target => target.orderIndex === chapter.orderIndex
       && (target.chapterId ?? original.bindings?.targets.find(binding => binding.orderIndex === target.orderIndex)?.chapterId) === chapter.id)) return null
   if (await db.agentProviderAttempt.count({ where: { runId: { in: runIds }, status: { in: ['prepared', 'dispatching', 'dispatched', 'unknown'] } } })) return null
@@ -131,7 +133,7 @@ export async function readTerminalInputDecision(db: Prisma.TransactionClient,
       && ['RUNTIME_RECEIPT_INVALID', 'RUNTIME_RECONCILIATION_REQUIRED', 'CONTINUITY_REPORT_INCOMPLETE'].includes(error.code)) return null
     throw error
   }
-  if (received.inspected.complete || received.inspected.audit.classification !== 'source_invalid' || !received.billingKnown
+  if (received.inspected.complete || !knownFinalContinuityFailure(received.inspected.audit) || !received.billingKnown
     || !received.providerComplete || !received.recoveryReady) return null
   const bound = lifecycle.bindLegacyContinuityAssessment(received.inspected, ctx as Parameters<typeof lifecycle.bindLegacyContinuityAssessment>[1], input)
   if (runtimeJson(bound.audit).hash !== runtimeJson(audit).hash) return null
@@ -145,8 +147,7 @@ export async function readTerminalInputDecision(db: Prisma.TransactionClient,
     let raw: unknown
     try { raw = JSON.parse(response.content) } catch { return null }
     if (typeof raw !== 'string') return null
-    const result = inspectContinuityResponse(raw, input.bodies, true, 8, input.terminalCandidate, input.sourceScope,
-      input.reassessmentProtocol === 3 || input.reassessmentProtocol === 4 || input.reassessmentProtocol === 5 ? { responseContract: 3 } : {})
+    const result = inspectAuthenticatedContinuityAssessment(raw, input, true)
     if (runtimeJson(result.audit).hash !== runtimeJson(frame.audit).hash) return null
     inspected.push({ frame, result, raw, at: row.createdAt })
   }

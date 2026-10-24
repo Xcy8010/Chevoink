@@ -354,6 +354,11 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     const deliveryBinding = assessment ? await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(tx,
       { ...subject, compilationId: compilation.id }, { taskId: terminalProposalTaskId(original.spec, original.taskId), preparedContext: compilation.preparedContext }, chapter, validation, evidence, options?.terminalDraftScope) : undefined
     const terminal = assessment ? currentTerminalReview(validation, chapter.content, evidence, deliveryBinding) : null
+    if ((validation?.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion === 9 && !terminal) {
+      readiness.continuity = 'incomplete'
+      readiness.ready = false
+      if (!readiness.requiredTools.some(tool => tool.name === 'continuity_validate')) readiness.requiredTools.push({ name: 'continuity_validate', args: { compilationId: compilation.id } })
+    }
     if (continuity === 'incomplete' && validation && compilerContinuityCoverageMatches(validation.coverage,
       compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source,
         focus: typeof validation.reviewFocus === 'string' ? validation.reviewFocus : undefined, terminalCandidate }, storedContinuityProtocol(validation)))) {

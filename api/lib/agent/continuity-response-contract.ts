@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { continuityCandidateSchema, inspectContinuityResponse } from './continuity-format-recovery.js'
 import { parseQualityJsonObject } from './quality-evidence.js'
-import { terminalResponseFields, terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalVerdictSchema, terminalSpanVerdictSchema, type TerminalCandidate } from './terminal-state-review.js'
+import { terminalResponseFields, terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalVerdictSchema, terminalSpanVerdictSchema, type TerminalCandidate } from './terminal-review-engine.js'
 import { terminalAddressResponseFields, terminalReviewAddressCatalog, normalizeTerminalResponseRows } from './terminal-review-addresses.js'
 import { continuitySourceCatalog, resolveContinuitySources, type ContinuityBodies } from './continuity-review-context.js'
 import { runtimeJson } from './runtime-common.js'

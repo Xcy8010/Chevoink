@@ -1318,7 +1318,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           const previousCall = state.messages.find(message => message.id === event.messageId)?.parts
             .find(part => part.type === 'tool-call' && part.callId === event.callId)
           const resultStatus = event.ok ? 'success' : 'failed'
-          const visibleResultChanged = !previousCall || previousCall.type === 'tool-call' && (previousCall.status !== resultStatus
+          const visibleResultChanged = !previousCall || previousCall.type === 'tool-call' && (previousCall.status !== resultStatus || previousCall.reviewOutcome !== event.reviewOutcome
             || projectAgentToolSummary(previousCall.summary ?? '', previousCall.status) !== projectAgentToolSummary(event.summary, resultStatus))
           const clearQuestion = state.pendingQuestion?.callId === event.callId
           const clearImport = event.toolName === 'novel_import' && state.messages.some(message => message.parts.some(part =>
@@ -1362,7 +1362,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
                 title: previous?.type === 'tool-call' ? previous.title : getAgentToolPresentation(event.toolName).label,
                 args: previous?.type === 'tool-call' ? previous.args : null,
                 status: event.ok ? 'success' : 'failed', preparing: false,
-                summary: event.summary, display: event.display, durationMs: event.durationMs,
+                summary: event.summary, display: event.display, durationMs: event.durationMs, reviewOutcome: event.reviewOutcome,
                 ...(event.subagentCallId ? { subagentCallId: event.subagentCallId } : {}),
               }
               return index < 0 ? [...parts, settled] : parts.map((part, at) => at === index ? settled : part)
