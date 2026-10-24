@@ -1,5 +1,5 @@
 import { readSettledQualityReviews } from './quality-review-admission.js'
-import { terminalProcessingPlan } from './terminal-processing.js'
+import { terminalProcessingExhaustedMessage, terminalProcessingPlan } from './terminal-processing.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
 import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, writingClarificationResolvesInput, readCompletedWritingDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
@@ -1805,7 +1805,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
       if (processing && !processing.claim) {
         forceWrapUpLocal = true
-        await wrapUpAndFinish('当前候选处理仍未取得有效独立结果，已停止重复请求。正文、原检查、费用与处理记录保留，本次工作尚未完成。')
+        await wrapUpAndFinish(terminalProcessingExhaustedMessage(currentReviewState.value, processing)!)
         return
       }
       if (terminalPlan?.kind === 'commit' && tools.some(tool => tool.name === 'chapter_bridge_commit')) {
@@ -2940,14 +2940,16 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           && review.chapterId === incompleteReview.chapterId && review.revision === incompleteReview.revision
           && (review.compilationId ?? null) === (incompleteReview.compilationId ?? null)
           && (incompleteReview.toolName === 'continuity_validate' ? review.continuity : review.quality) === 'incomplete'
-        forceWrapUpReason = sameIncompleteReview
+        const exhaustedProcessing = stagnantBatches >= 4 && tools.some(tool => tool.name === 'continuity_validate')
+          ? terminalProcessingExhaustedMessage(currentReviewState.value, terminalNext) : null
+        forceWrapUpReason = exhaustedProcessing ?? (sameIncompleteReview
           ? (incompleteReview!.toolName === 'continuity_validate' ? '本章连续性复核尚未完成：' : '本章质量复核尚未完成：')
             + (incompleteReview!.toolName === 'continuity_validate' && review?.terminalCorrection
               ? '独立报告已收到，终态候选的证据绑定未通过核验。'
               : incompleteReview!.failureCode.endsWith('EVIDENCE_UNLOCATED') ? '报告中的正文引用尚未确认。' : '独立报告尚未通过完整性校验。')
             + '原始报告和检查记录保留，已停止重复请求；继续时需先恢复或完成这项检查。'
-          : '连续多轮没有推进原任务的内容或必需成果，已停止重复执行，进度保留。'
-        forceWrapUpLocal = !!processing || toolRestrictions.length > 0 || pendingReviews.size > 0 || settledReviewFailures.size > 0
+          : '连续多轮没有推进原任务的内容或必需成果，已停止重复执行，进度保留。')
+        forceWrapUpLocal = !!exhaustedProcessing || !!processing || toolRestrictions.length > 0 || pendingReviews.size > 0 || settledReviewFailures.size > 0
       }
 
       // P0/P1 熔断收尾：结构熔断优先级更高（上方已 return），这里处理重复签名第 4 次/复读二次命中

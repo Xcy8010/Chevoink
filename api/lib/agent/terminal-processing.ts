@@ -57,3 +57,20 @@ export function terminalProcessingPlan(review: ChapterReviewReadiness | null,
       inheritedProofs: input.inherited,
     })}` }
 }
+
+/** Presentation only, after the current owned processing plan has exhausted its
+ * claims. A reserved claim says nothing about dispatch, payment or completion. */
+export function terminalProcessingExhaustedMessage(review: ChapterReviewReadiness | null,
+  plan: ReturnType<typeof terminalProcessingPlan>) {
+  if (plan?.kind !== 'process' || plan.claim || !review?.terminalReview || !review.progressEvidence
+    || review.chapterId !== plan.chapterId || review.compilationId !== plan.compilationId) return null
+  const terminal = review.terminalReview
+  const status = terminal.currentResultVerified === true
+    ? `当前终态复核结果已收到，仍有${terminal.unresolved.length}项未获证实；`
+    : '当前终态复核报告不可验证，尚未取得可验证的当前结果；'
+  const details = terminal.currentResultVerified === true ? terminal.unresolved.filter(item => item.claim).slice(0, 3)
+    .map(item => `「${item.claim!.slice(0, 180)}」${item.reason ? `，独立复核原因：${item.reason.slice(0, 240)}` : ''}`) : []
+  return `第${review.progressEvidence.orderIndex}章（版本${review.revision}）：` + status + '自动候选处理名额已占用，任务保持暂停。'
+    + (details.length ? `未获证实的主张（最多列出3项）：${details.join('；')}。` : '')
+    + '正文、原检查、费用与处理记录保留，终态尚未提交。'
+}

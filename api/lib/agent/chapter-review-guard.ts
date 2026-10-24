@@ -61,7 +61,10 @@ export type ChapterReviewReadiness = {
   terminalProcessing?: TerminalProcessingInput
   terminalCorrection?: TerminalCandidateCorrection
   reviewBoundPlan?: ReviewBoundEditPlan
-  terminalReview?: { state: 'supported' | 'unverified'; unresolved: Array<{ path: string; verdict: string; field?: string; claim?: string; reason?: string }> }
+  terminalReview?: { state: 'supported' | 'unverified';
+    /** True only after replaying the independent response against current bound evidence. */
+    currentResultVerified?: boolean;
+    unresolved: Array<{ path: string; verdict: string; field?: string; claim?: string; reason?: string }> }
   /** Server-only mutation proof projection; ordinary read tools never request it. */
   reviewBoundEvidence?: ReviewBoundEvidence
   reviewCycle?: ReturnType<typeof projectReviewCycle>
@@ -354,7 +357,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
         ?? terminalReportCorrection(validation, chapter.content, evidence, source?.content ?? null)
       if (correction) readiness.terminalCorrection = correction
     }
-    readiness.terminalReview = { state: terminal?.supported ? 'supported' : 'unverified',
+    readiness.terminalReview = { state: terminal?.supported ? 'supported' : 'unverified', currentResultVerified: !!terminal,
       unresolved: [...(terminal?.verdicts.filter(item => item.verdict !== 'supported').map(({ path, verdict }) => ({ path, verdict })) ?? []),
         ...(terminal?.factCoverage?.dispositions.filter(item => item.outcome === 'unknown').map(item => ({ path: `factCoverage.${item.id}`, verdict: 'unknown' }))
           ?? factCoverage?.obligations.map(item => ({ path: `factCoverage.${item.id}`, verdict: 'unknown' })) ?? []),

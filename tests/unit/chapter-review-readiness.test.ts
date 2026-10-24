@@ -17,7 +17,7 @@ import { inspectTerminalReview, terminalCandidateSchema } from '../../api/lib/ag
 import { projectCurrentReviewNextStep, currentReviewNextStepGuidance } from '../../api/lib/agent/review-dispatch.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { prepareTerminalProposalInput } from '../../api/lib/agent/terminal-proposal-context.js'
-import { terminalProcessingPlan } from '../../api/lib/agent/terminal-processing.js'
+import { terminalProcessingExhaustedMessage, terminalProcessingPlan } from '../../api/lib/agent/terminal-processing.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 
 afterEach(() => vi.restoreAllMocks())
@@ -87,7 +87,7 @@ describe('persisted current review readiness', () => {
     f.compilation.preparedContext = { terminalProposalReview: staged.state }
     const before = structuredClone({ validation: f.compilation.validation, preparedContext: f.compilation.preparedContext })
     const readiness = await readChapterReviewReadiness(f.tx, f.subject)
-    expect(readiness).toMatchObject({ continuity: 'complete', terminalReview: { state: 'unverified' } })
+    expect(readiness).toMatchObject({ continuity: 'complete', terminalReview: { state: 'unverified', currentResultVerified: true } })
     expect.soft(readiness?.terminalReview?.unresolved).toEqual(expect.arrayContaining([
       expect.objectContaining({ path: `proposals.${proposal.id}`, verdict: 'unknown', field: proposal.field, claim: proposal.claim, reason }),
     ]))
@@ -108,10 +108,26 @@ describe('persisted current review readiness', () => {
     const exhausted = terminalProcessingPlan(readiness, subject, attempts)
     expect.soft(exhausted).toMatchObject({ kind: 'process', key })
     expect(exhausted?.claim).toBeUndefined()
+    expect(terminalProcessingExhaustedMessage(readiness, exhausted)).toContain('当前终态复核结果已收到，仍有1项未获证实')
     expect({ validation: f.compilation.validation, preparedContext: f.compilation.preparedContext }).toEqual(before)
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
     expect(f.db.chapterBridge.update).not.toHaveBeenCalled()
     expect(f.db.chapterQualityReport.update).not.toHaveBeenCalled()
+    for (const change of ['missing', 'corrupt', 'source-change'] as const) {
+      Object.assign(f.compilation.validation, structuredClone(before.validation))
+      if (change === 'missing') Object.assign(f.compilation.validation, { continuityCriticResponse: undefined })
+      if (change === 'corrupt') Object.assign(f.compilation.validation, { continuityCriticResponse: { ...inspected.audit, rawResponse: { complete: true, content: 'corrupt synthetic response' } } })
+      if (change === 'source-change') f.db.chapter.findMany.mockResolvedValue([{ id: 'new-source', title: 'Earlier', revision: 1,
+        orderIndex: 43, content: 'A newly inserted synthetic predecessor.' }] as never)
+      if (change === 'source-change') {
+        await expect(readChapterReviewReadiness(f.tx, f.subject)).rejects.toMatchObject({ code: 'TERMINAL_STATE_REVIEW_REQUIRED' })
+        continue
+      }
+      const invalid = await readChapterReviewReadiness(f.tx, f.subject)
+      expect(invalid?.terminalReview?.currentResultVerified, change).toBe(false)
+      // Even an old exhausted plan cannot turn an unverifiable report into a received current result.
+      expect(terminalProcessingExhaustedMessage(invalid, exhausted), change).not.toContain('结果已收到')
+    }
   })
   it.each(['检查当前章节', '写下一章，不用检查', '写下一章，跳过质量检查和连续性检查'])(
     'cannot bypass previously supported facts with reprepare and empty commit even when checks were not required: %s', async prompt => {

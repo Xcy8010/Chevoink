@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
-import { terminalProcessingPlan } from '../../api/lib/agent/terminal-processing.js'
+import { terminalProcessingExhaustedMessage, terminalProcessingPlan } from '../../api/lib/agent/terminal-processing.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
@@ -79,4 +79,33 @@ it('schedules actual commit once only after current checks and decisions are rea
   review.decisionPending = false
   review.terminalCommitted = true
   expect(terminalProcessingPlan(review, subject, new Set())).toBeNull()
+})
+
+it('describes verified unknown results only after both current processing claims are occupied, without side effects', () => {
+  const { subject, review } = fixture(), attempts = new Set<string>()
+  review.terminalReview = { state: 'unverified', currentResultVerified: true,
+    unresolved: Array.from({ length: 10 }, (_, index) => ({ path: `proposals.synthetic-${index}`, verdict: 'unknown',
+      field: 'knowledge', claim: `Synthetic unresolved assertion ${index}`, reason: 'The current body does not establish this assertion.' })) }
+  expect(terminalProcessingExhaustedMessage(review, terminalProcessingPlan(review, subject, attempts))).toBeNull()
+  attempts.add(terminalProcessingPlan(review, subject, attempts)!.claim!)
+  expect(terminalProcessingExhaustedMessage(review, terminalProcessingPlan(review, subject, attempts))).toBeNull()
+  attempts.add(terminalProcessingPlan(review, subject, attempts)!.claim!)
+  const before = JSON.stringify({ review, attempts: [...attempts] }), plan = terminalProcessingPlan(review, subject, attempts)
+  const message = terminalProcessingExhaustedMessage(review, plan)!
+  expect(message).toMatch(/^第6章（版本8）：/u)
+  expect(message).toContain('当前终态复核结果已收到，仍有10项未获证实')
+  expect(message).toContain('自动候选处理名额已占用，任务保持暂停')
+  expect(message).toContain('Synthetic unresolved assertion 0')
+  expect(message).toContain('The current body does not establish this assertion.')
+  expect(message).not.toContain('Synthetic unresolved assertion 3')
+  expect(message).not.toMatch(/未取得有效独立结果|两次.*完成|再次.*继续|proposals\.|terminal-processing:|knowledge/u)
+  expect(JSON.stringify({ review, attempts: [...attempts] })).toBe(before)
+  for (const verified of [false, undefined]) {
+    review.terminalReview.currentResultVerified = verified
+    const unavailable = terminalProcessingExhaustedMessage(review, plan)!
+    expect(unavailable).toContain('当前终态复核报告不可验证')
+    expect(unavailable).not.toContain('结果已收到')
+    expect(unavailable).not.toContain('Synthetic unresolved assertion')
+  }
+  expect(terminalProcessingExhaustedMessage(review, null)).toBeNull()
 })
