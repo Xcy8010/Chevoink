@@ -20,6 +20,7 @@ import { continueLoopRun } from '../../api/lib/agent/run-service.js'
 import { readTerminalInheritance } from '../../api/lib/agent/terminal-inheritance-chain.js'
 import { recoverRunElapsedMs } from '../../api/lib/agent/checkpoint.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { allowsChapterOnlyCompletion } from '../../api/lib/agent/writing-scope.js'
 import * as ai from '../../api/lib/ai-service.js'
 import * as credits from '../../api/lib/credits.js'
 import * as prices from '../../api/lib/billing/resolve-token-price.js'
@@ -27,12 +28,16 @@ import * as flags from '../../api/lib/agent2-feature-flags.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
 import * as titles from '../../api/lib/agent/session-title.js'
 
+const recoveryPrompt = '修改第一章，只输出标题和正文'
+
 describe.runIf(available)('Continue reuses a settled empty optional proposal table pair', () => {
   it('applies the two original responses, commits once and preserves raw audits, claims, model, body and fees', () => fixture(async f => {
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
     vi.spyOn(titles, 'autoNameSession').mockResolvedValue(undefined)
-    const prompt = '修改第一章', startedAt = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).createdAt
+    const prompt = recoveryPrompt, startedAt = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).createdAt
+    expect(allowsChapterOnlyCompletion(prompt)).toBe(true)
+    expect(f.spec.scope.writing).toMatchObject({ kind: 'bounded', titleAndBodyOnly: true, targets: [{ chapterId: f.chapterId, orderIndex: 1 }] })
     await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running', runtimeProtocolVersion: 0, taskRootId: null, startRequest: { prompt } } })
     const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { revision: 8, content: 'The packet remains sealed.' } })
     const candidate = emptyProposalFixture().candidate
@@ -96,7 +101,11 @@ describe.runIf(available)('Continue reuses a settled empty optional proposal tab
     const feature = flags.isAgent2FeatureEnabled
     vi.spyOn(flags, 'isAgent2FeatureEnabled').mockImplementation((name, owner) => name === 'storyCompiler' || name !== 'memory2' && feature(name, owner))
     const main = vi.spyOn(ai, 'chatWithTools').mockImplementation(async () => {
-      expect(main).toHaveBeenCalledOnce()
+      const diagnostic = main.mock.calls.length > 1 ? {
+        toolResults: await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'tool.result', seq: { gt: 1 } }, select: { payload: true }, orderBy: { seq: 'asc' } }),
+        readiness: await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id)),
+      } : undefined
+      expect(main, diagnostic ? JSON.stringify(diagnostic) : undefined).toHaveBeenCalledOnce()
       return { content: '', reasoning: '', finishReason: 'tool_calls', toolCalls: [{ id: 'synthetic-resume-new-call', name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilation.id }) }],
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } }
     })
@@ -104,6 +113,8 @@ describe.runIf(available)('Continue reuses a settled empty optional proposal tab
       modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
     const finished = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
     const errors = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'error' }, select: { payload: true } })
+    const failedTools = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'tool.result', seq: { gt: 1 }, payload: { path: ['ok'], equals: false } }, select: { payload: true } })
+    expect(failedTools).toEqual([])
     expect({ status: finished.status, errorMessage: finished.errorMessage, errors }).toEqual({ status: 'completed', errorMessage: null, errors: [] })
     expect(finished).toMatchObject({ taskSpec: beforeRun.taskSpec, modelTier: beforeRun.modelTier, customModelId: beforeRun.customModelId, reasoningEffort: beforeRun.reasoningEffort })
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))).toMatchObject({ terminalCommitted: true, terminalReview: { deliveryEligible: true } })
@@ -123,5 +134,5 @@ describe.runIf(available)('Continue reuses a settled empty optional proposal tab
     expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).toEqual(finished)
     expect(main).toHaveBeenCalledOnce(); expect(network).not.toHaveBeenCalled()
     expect(createHash('sha256').update(synthetic.raw).digest('hex')).toBe(original.audit.contentHash)
-  }, undefined, '修改第一章', { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
+  }, undefined, recoveryPrompt, { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
 })
