@@ -41,6 +41,9 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
     await fixture(async f => {
       let lease = await claim(f)
       const v4 = scenario === 'terminal-contract4' || scenario === 'terminal-contract4-repair'
+      // This fixture invokes tools directly, after the real worker's start
+      // transition. A queued run is not current report-application authority.
+      if (v4) expect(await prisma.agentRun.update({ where: { id: f.runId, status: 'queued' }, data: { status: 'running' } })).toMatchObject({ status: 'running' })
       const before = ['relocated', 'old5-relocated', 'old6-relocated', 'old7-relocated'].includes(scenario) ? '甲'.repeat(1800) + '唯一引用。' + '乙'.repeat(350) : scenario === 'long' ? '开头锚点' + '长正文'.repeat(6000) + '末尾锚点' : ['repair', 'fused-repair', 'format-retry', 'rollback-resume', 'protected', 'repair-stale'].includes(scenario) ? '原文，门开着，门同时锁着。' : '原文'
       await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: before, wordCount: before.length } })
       let sourceId: string | undefined

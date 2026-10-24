@@ -105,7 +105,7 @@ describe.runIf(available)('complete terminal report resumes through processing a
       expect(request.messages.at(-1).content).toContain(body)
       const frozenRequest = JSON.parse(request.messages.at(-1).content)
       expect(frozenRequest.catalog.terminal).toMatchObject({ ordinary: [{ claimIndex: 0, field: 'objects', claim: body }],
-        claims: [{ claimIndex: 0, field: 'objects', claim: body }], proofs: [], obligations: [],
+        candidates: [{ claimIndex: 0, field: 'objects', claim: body }], proofs: [], obligations: [],
         proposals: [{ proposalIndex: 0, field: 'objects', claim: candidate.exitState.objects[0] }] })
     }
     const criticUsage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, agentRunId: f.runId, action: 'agent3ContinuityCritic' } })

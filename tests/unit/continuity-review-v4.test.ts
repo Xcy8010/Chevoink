@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { terminalCandidateSchema, currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { buildContinuityReviewManifest, inspectContinuityV4, applyContinuityV4Repair, buildContinuityInvalidRowRepair,
-  continuityReviewV4Request, validateStoredContinuityV4Projection } from '../../api/lib/agent/continuity-review-v4.js'
+  continuityReviewV4Request, buildContinuityReviewCatalog, validateStoredContinuityV4Projection } from '../../api/lib/agent/continuity-review-v4.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { runContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { continuitySubjectIdentity, continuityWorkSubjectIdentity } from '../../api/lib/agent/continuity-subject-identity.js'
@@ -27,6 +27,29 @@ function fixture() {
 }
 
 describe('continuity v4 one manifest and four authenticated projections', () => {
+  it('renders inherited proof short addresses while keeping the full server catalogue and manifest unchanged', () => {
+    const f = fixture(), prior = 'A reply remains pending.', priorHash = runtimeJson({ content: prior }).hash
+    const candidate = terminalCandidateSchema.parse({ exitState: { ...f.candidate.exitState, openLoops: [prior] } })
+    const proof = { proofHash: 'a'.repeat(64), segmentId: 't0', field: 'openLoops', claim: prior, depth: 1,
+      anchors: [{ chapterId: 'previous', revision: 1, contentHash: priorHash, start: 0, end: prior.length, quote: prior }],
+      nodes: [{ compilationId: 'previous-compilation', chapterId: 'previous', revision: 1, orderIndex: 2, bodyHash: priorHash,
+        candidateHash: 'b'.repeat(64), validationHash: 'c'.repeat(64), stateHash: 'd'.repeat(64), path: 'exitState.openLoops.0', previousChapterId: null }] }
+    const context = { ...f.context, previous: { id: 'previous', revision: 1, orderIndex: 2, contentHash: priorHash, start: 0, end: prior.length, joinedStart: 0, joinedEnd: prior.length,
+      segments: [{ segmentId: 'p0', start: 0, end: prior.length, quote: prior, hash: runtimeJson({ text: prior }).hash }], carried: [proof] } }
+    const bodies = { ...f.bodies, previous: prior, terminalEvidence: context }, manifest = buildContinuityReviewManifest({ ...f.manifest,
+      bodies, candidate, sourceHash: 'e'.repeat(64), sourceVersions: context.previous, verifiedCoverage: context.factCoverage })
+    const frozen = { ...f.frozen, bodies, candidate, manifest }, before = runtimeJson(frozen).hash
+    const server = buildContinuityReviewCatalog(bodies, candidate), request = continuityReviewV4Request(frozen, 'Review this chapter.', 'Full frozen context.')
+    const rendered = JSON.parse(request.content).catalog.terminal
+    expect(rendered.proofs).toEqual([{ proofIndex: 0, field: 'openLoops', claim: prior, paths: ['exitState.openLoops.0'], depth: 1, anchors: [{ quote: prior }] }])
+    expect(request.content).not.toContain(proof.proofHash)
+    expect(server.terminal.proofs[0].fact.proofHash).toBe(proof.proofHash)
+    expect(manifest.catalogHash).toBe(runtimeJson(server).hash)
+    expect(runtimeJson(frozen).hash).toBe(before)
+    const inspected = inspectContinuityV4(JSON.stringify({ ...f.wire, terminalProofVerdicts: [{ proofIndex: 0, currentState: 'unchanged', reason: 'The full current body leaves the original obligation unchanged.' }] }), frozen)
+    expect(inspected.complete).toBe(true)
+    expect(validateStoredContinuityV4Projection(inspected.audit, f.content, context)?.complete).toBe(true)
+  })
   it('replays all consumers through the common manifest reader, without asking the model to calculate a hash', () => {
     const f = fixture(), raw = JSON.stringify(f.wire), result = inspectContinuityV4(raw, f.frozen)
     expect(result.complete).toBe(true)

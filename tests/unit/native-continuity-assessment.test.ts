@@ -56,7 +56,9 @@ function fixture() {
       children: [child(id, 'continuity_critic', JSON.parse(inspection.audit.rawResponse.content), { system: work.criticSystem, content: work.criticInput })] }
   }
   const operations = [operation('origin', originFrozen, origin), operation('current', frozen, current)], artifacts: Array<{ metadata: unknown }> = []
-  const tx = { agentOperation: { findMany: vi.fn(async ({ where }) => operations.filter(row => row.taskRootId === where.taskRootId && where.originRunId.in.includes(row.originRunId))) }, agentRun: { findFirst: vi.fn(async () => ({ id: 'run' })) } }
+  const run = { id: 'run', userId: 'user', novelId: 'novel', taskRootId: taskId, status: 'running' }
+  const tx = { agentOperation: { findMany: vi.fn(async ({ where }) => operations.filter(row => row.taskRootId === where.taskRootId && where.originRunId.in.includes(row.originRunId))) },
+    agentRun: { findFirst: vi.fn(async ({ where }) => Object.entries(where).every(([key, value]) => run[key as keyof typeof run] === value) ? { id: run.id } : null) } }
   mocks.state.mockResolvedValue({ frame: { state: { phase: 'awaiting_operation', pendingOperationId: 'current' } } })
   const read = () => readNativeContinuityAssessments(tx as unknown as Prisma.TransactionClient, subject, taskId, ['run'], { compilationId: 'compilation', chapterId: 'chapter', currentAudit: current.audit, related: () => true }, artifacts)
   const cache = (id: string, from: typeof operations[number]) => {
@@ -67,7 +69,7 @@ function fixture() {
     cloned.events = [{ eventKey: `effect:${id}`, type: 'effect.committed', taskRootId: taskId, operationId: id, payload: { operationId: id, resultHash: cloned.effectReceipt.resultHash } }]
     return cloned
   }
-  return { operations, origin, current, frozen, currentWire, artifacts, read, cache, child, operation, tx }
+  return { operations, origin, current, frozen, currentWire, artifacts, read, cache, child, operation, tx, run }
 }
 
 describe('readonly native continuity provenance', () => {
@@ -93,6 +95,9 @@ describe('readonly native continuity provenance', () => {
     const f = fixture()
     Object.assign(f.operations[1], { status: 'prepared', effectReceipt: null, events: [] })
     expect(await f.read()).toEqual(expect.arrayContaining([expect.objectContaining({ operationId: 'current', current: true, committed: false })]))
+    f.run.status = 'queued'
+    expect(await f.read()).toBeNull()
+    f.run.status = 'running'
     mocks.state.mockResolvedValueOnce({ frame: { state: { phase: 'awaiting_operation', pendingOperationId: 'unrelated' } } })
     expect(await f.read()).toBeNull()
   })

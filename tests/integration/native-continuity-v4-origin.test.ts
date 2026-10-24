@@ -28,6 +28,7 @@ describe.runIf(available)('native continuity origin remains a real operation and
   it.each([21, 22] as const)('authenticates work%s origin, pending current effect, cache and next-task inheritance', version => fixture(async f => {
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     const lease = await claim(f), content = 'The guard waits. The packet remains sealed.'
+    expect(await prisma.agentRun.update({ where: { id: f.runId, status: 'queued' }, data: { status: 'running' } })).toMatchObject({ status: 'running' })
     const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { content, wordCount: content.length } })
     const { compilation } = await prepareStoryCompilation({ ...f, chapterId: chapter.id, mode: 'balanced', intentSummary: 'Review the synthetic chapter.' })
     const empty = terminalCandidateSchema.parse({ exitState: {} }).exitState

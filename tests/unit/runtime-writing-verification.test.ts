@@ -61,14 +61,22 @@ beforeEach(() => {
     return row && Object.entries(where).every(([key, value]) => row[key as keyof Row] === value) ? row : null
   }), findUnique: vi.fn(async ({ where }) => rows.get(where.id) ?? [...rows.values()].find(row => row.taskRootId === where.taskRootId_operationKey?.taskRootId
     && row.operationKey === where.taskRootId_operationKey?.operationKey) ?? null) },
-  agentTaskRoot: { findUniqueOrThrow: vi.fn(async () => ({ novelId: 'novel', specSnapshot: spec })) },
+  agentTaskRoot: { findUniqueOrThrow: vi.fn(async () => ({ userId: lease.userId, novelId: 'novel', specSnapshot: spec })) },
   agentExecutionOutbox: { findUnique: vi.fn(async ({ where }) => events.get(where.eventKey) ?? null) } }
   mocks.admitted.mockImplementation(async () => ({ operation: rows.get('parent'), input }))
-  mocks.original.mockResolvedValue({ prompt: '完整写作本章' })
+  mocks.original.mockResolvedValue({ prompt: '完整写作本章', spec })
   mocks.target.mockResolvedValue(undefined); mocks.baseline.mockResolvedValue({ kind: 'chapter', revision: 4 })
 })
 
 describe('writing provenance bounded to one verification traversal', () => {
+  it.each(['missing-owner', 'foreign-owner', 'different-task'] as const)('rejects an unauthenticated parent %s before traversing its receipts', async failure => {
+    const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
+    if (failure === 'different-task') mocks.original.mockResolvedValue({ prompt: '完整写作本章', spec: { ...root.specSnapshot, id: 'different-task' } })
+    else tx.agentTaskRoot.findUniqueOrThrow.mockResolvedValue({ ...root, userId: failure === 'missing-owner' ? undefined : 'foreign-owner' })
+    await expect(read('quality')).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+    expect(mocks.target).not.toHaveBeenCalled()
+    expect(mocks.baseline).not.toHaveBeenCalled()
+  })
   it.each(['quality', 'commit'] as const)('verifies every distinct %s predecessor once with one genuine parent admission', async step => {
     expect((await read(step)).step.step).toBe(step)
     expect(mocks.admitted).toHaveBeenCalledExactlyOnceWith(lease, { operationId: 'parent', action: 'chapter_write', novelId: 'novel', callId: 'writer' }, tx)

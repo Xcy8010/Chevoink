@@ -15,6 +15,8 @@ import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverag
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { terminalCandidateFacts } from '../../api/lib/agent/terminal-fact-identity.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
+import { compilerEvidenceScope } from '../../api/lib/agent/continuity-source-authority.js'
+import { bindLegacyContinuityAssessment, legacyContinuityAssessmentKey, readLegacyContinuityAssessment, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 import { terminalFeedbackSlots } from '../../api/lib/agent/terminal-feedback-handoff.js'
@@ -272,20 +274,54 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     expect(source?.content).toContain('second door')
     const evidence = terminalEvidenceContext(chapter, source, 2, 1, terminalCoverageInput(original.spec, saved.preparedContext, chapter, bad, 2), 5)
     const rejectedPath = scenario === 'source-address' ? 'exitState.knowledge.0' : scenario === 'objects' ? 'exitState.objects.0' : 'exitState.location'
-    const rejected = { findings: [], semanticChecks: checks, terminalVerdicts: terminalCandidateFacts(bad).map(fact => ({ factId: fact.id, verdict: 'supported',
+    const rejected = { findings: [], semanticChecks: checks, terminalVerdicts: terminalCandidateFacts(bad).map(fact => scenario === 'repeat'
+      ? { factId: fact.id, verdict: 'unknown', sourceEvidence: [] }
+      : { factId: fact.id, verdict: 'supported',
       sourceEvidence: [{ segmentId: 'c0' }, ...(fact.path === rejectedPath ? [{ segmentId: scenario === 'source-address' ? 'p99' : 'p0',
         ...(scenario === 'source-address' ? { quote: source!.content.slice(0, 40) } : {}) }] : [])],
-      ...(scenario === 'source-address' && fact.path === rejectedPath ? { inheritance: { priorEndState: 'established', currentState: 'unchanged' } } : {}) })), terminalProofVerdicts: [], terminalDispositions: [] }
-    const inspected = inspectContinuityResponse(JSON.stringify(rejected), { current: body, previous: source!.content, terminalEvidence: evidence }, true, 8, bad)
-    expect(inspected).toMatchObject({ complete: false, audit: { classification: 'terminal_invalid', terminalReviewDiagnostics: [{
+      ...(scenario === 'source-address' && fact.path === rejectedPath ? { inheritance: { priorEndState: 'established', currentState: 'unchanged' } } : {}) }), terminalProofVerdicts: [], terminalDispositions: [] }
+    const bodies = { current: body, previous: source!.content, terminalEvidence: evidence }, scope = compilerEvidenceScope(chapter, source)
+    const inspected = inspectContinuityResponse(JSON.stringify(rejected), bodies, true, 8, bad, scenario === 'repeat' ? scope : undefined)
+    if (scenario === 'repeat') expect(inspected).toMatchObject({ complete: true, audit: { classification: 'complete' } })
+    else expect(inspected).toMatchObject({ complete: false, audit: { classification: 'terminal_invalid', terminalReviewDiagnostics: [{
       code: scenario === 'source-address' ? 'evidence_quote_invalid' : 'inheritance_invalid', path: rejectedPath }] } })
-    await validateStoryContinuity({ ...f, compilationId: compilation.id, expectedChapterRevision: 8, independentCheck: 'unavailable', findings: [], terminalCandidate: bad,
-      coverage: compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source, terminalCandidate: bad }, 11), continuityCriticResponse: inspected.audit })
+    const coverage = compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source, terminalCandidate: bad }, 11)
+    let audit = inspected.audit
+    let knownRepeatUsage: Awaited<ReturnType<typeof prisma.aiUsageLog.create>> | undefined
+    const knownRepeatArtifacts: Awaited<ReturnType<typeof prisma.agentArtifact.create>>[] = []
+    if (scenario === 'repeat') {
+      // A previously received, settled UNKNOWN is the initial current report.
+      // Its actual frozen frame is authenticated before seeding its genuine
+      // milestone. The separate old unknown-fee row below is never settled.
+      const ctx = { ...f, callId: 'initial-known-unknown' } as Parameters<typeof readLegacyContinuityAssessment>[1]
+      const input: LegacyAssessmentInput = { chapterId: chapter.id, revision: chapter.revision, bodies, terminalCandidate: bad,
+        parserVersion: 8, reassessmentProtocol: 2, sourceScope: scope, system: 'Synthetic frozen UNKNOWN reviewer.', content: 'Synthetic full frozen chapter review.',
+        bindingHash: runtimeJson(coverage).hash, targetType: 'story_compilation', targetId: compilation.id }
+      const key = legacyContinuityAssessmentKey(ctx, input)
+      knownRepeatUsage = await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, agentRunId: f.runId, chapterId: chapter.id,
+        targetType: 'story_compilation', targetId: compilation.id, providerType: 'text', providerMode: 'custom', modelName: 'synthetic-known', modelTier: 'speed',
+        multiplierBps: 10000, action: 'agent3ContinuityCritic', requestTokens: 10, responseTokens: 0, usageSource: 'reported', billingStatus: 'settled',
+        reservedCreditMilli: 0, creditChargeMilli: 0, billingEvidence: { responseObserved: true }, durationMs: 0, createdAt: at(0) } })
+      for (const metadata of [
+        { version: 1, continuityAssessmentRequestKey: key, assessmentChapterId: chapter.id, input, callId: ctx.callId, admissionId: null },
+        { version: 1, assessmentRequestOwnerKey: key, stage: 'first', callId: ctx.callId, usageIds: [knownRepeatUsage.id] },
+        { version: 1, assessmentKey: key, assessmentResponseKey: runtimeJson({ key, stage: 'first' }).hash, input, stage: 'first', callId: ctx.callId,
+          usageIds: [knownRepeatUsage.id], response: { content: JSON.stringify(JSON.stringify(rejected)), encoding: 'json-string', transportComplete: true, finishReason: 'stop', toolCalls: [] }, audit: inspected.audit },
+      ]) knownRepeatArtifacts.push(await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'continuityReview', title: 'Synthetic known UNKNOWN response',
+        content: 'Synthetic frozen response and ownership.', metadata: runtimeJson(metadata).value, createdAt: at(1) } }))
+      const known = await readLegacyContinuityAssessment(prisma, ctx, input)
+      expect(known).toMatchObject({ billingKnown: true, providerComplete: true, recoveryReady: true, inspected: { complete: true } })
+      audit = bindLegacyContinuityAssessment(known.inspected, ctx, input).audit as typeof audit
+    }
+    await validateStoryContinuity({ ...f, compilationId: compilation.id, expectedChapterRevision: 8, independentCheck: scenario === 'repeat' ? 'complete' : 'unavailable', findings: [], terminalCandidate: bad,
+      coverage, continuityCriticResponse: audit })
     await persistHumanityQualityReport({ ...f, compilationId: compilation.id, chapterId: chapter.id, chapterRevision: 8, mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
-    expect(readiness?.terminalCorrection).toMatchObject({ paths: [rejectedPath] })
+    if (scenario === 'repeat') expect(readiness?.terminalReview).toMatchObject({ state: 'unverified', currentResultVerified: true })
+    else expect(readiness?.terminalCorrection).toMatchObject({ paths: [rejectedPath] })
     expect(readiness).toMatchObject({ quality: 'complete', requiredTools: [{ name: 'continuity_validate' }] })
-    expect(readiness?.progressEvidence?.phases).not.toContain('terminal')
+    if (scenario === 'repeat') expect(readiness?.progressEvidence?.phases).toContain('terminal')
+    else expect(readiness?.progressEvidence?.phases).not.toContain('terminal')
     const slots = terminalFeedbackSlots(readiness, { ...f, taskSpec: spec })!
     expect(slots).toHaveLength(4)
     const processingKey = terminalProcessingPlan(readiness, { ...f, taskSpec: spec }, new Set())!.key
@@ -346,17 +382,11 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     let calls = 0
     const network = vi.fn(async () => {
       calls++
+      if (scenario === 'repeat') throw Error('The authenticated current UNKNOWN must not dispatch another critic')
       if (calls > 1) throw Error('No extra critic request is permitted')
       // Historical rejected reports above retain their original v5 identities.
       // Only this newly frozen provider request uses local addresses.
-      // The historical malformed response above has no frozen assessment
-      // reservation. This first newly admitted request is a valid UNKNOWN;
-      // repeating its exact subject must reuse it without another paid call.
-      const parts = scenario === 'repeat' ? { findings: [],
-        semanticChecks: checks.map(({ findingIndexes: _indexes, ...check }) => ({ ...check, findingIds: [] })),
-        terminalVerdicts: badFacts.map((_fact, claimIndex) => ({ claimIndex, verdict: 'unknown', sourceEvidence: [] })),
-        terminalProofVerdicts: [], terminalDispositions: [] }
-        : { findings: [], semanticChecks: checks.map(({ findingIndexes: _indexes, ...check }) => ({ ...check, findingIds: [] })), terminalVerdicts: goodFacts.map((_fact, claimIndex) => ({ claimIndex, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] })), terminalProofVerdicts: [], terminalDispositions: [],
+      const parts = { findings: [], semanticChecks: checks.map(({ findingIndexes: _indexes, ...check }) => ({ ...check, findingIds: [] })), terminalVerdicts: goodFacts.map((_fact, claimIndex) => ({ claimIndex, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] })), terminalProofVerdicts: [], terminalDispositions: [],
           proposalDispositions: badFacts.filter(fact => !goodFacts.some(current => current.id === fact.id)).map((fact, proposalIndex) => {
             const replacement = goodFacts.find(current => current.field === fact.field)
             return { proposalIndex, outcome: replacement ? 'replaced' : 'retracted',
@@ -426,7 +456,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       const afterSeq = events.at(-1)!.seq
       await executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true, authorContinue: { eventId: stop.id, afterSeq }, eventStartSeq: afterSeq, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
     }
-    expect(network).toHaveBeenCalledTimes(scenario === 'no-proposal' ? 0 : 1)
+    expect(network).toHaveBeenCalledTimes(scenario === 'no-proposal' || scenario === 'repeat' ? 0 : 1)
     expect(main).toHaveBeenCalledTimes(scenario === 'restart' ? 3 : scenario === 'no-proposal' || scenario === 'commit-unknown' || scenario === 'consumed-local-candidate' ? 1 : 2)
     if (scenario === 'consumed-local-candidate') {
       const resumed = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).usage as { checkpoint: typeof checkpoint }
@@ -436,16 +466,20 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: old.id } })).toEqual(old)
     expect(await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { lte: pauseSeq } }, orderBy: { seq: 'asc' } })).toEqual(history)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ content: body, revision: 8 })
-    const used = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, id: { not: old.id } } })
+    const used = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, id: { notIn: [old.id, ...(knownRepeatUsage ? [knownRepeatUsage.id] : [])] } } })
     expect(used).toHaveLength(network.mock.calls.length)
     if (scenario === 'repeat') {
       const resumed = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).usage as { checkpoint: typeof checkpoint }
       expect(resumed.checkpoint.reviewAttempts.filter(key => key.startsWith(`terminal-processing:${processingKey}:`))).toHaveLength(2)
       expect(resumed.checkpoint.reviewAttempts).toEqual(expect.arrayContaining(checkpoint.reviewAttempts))
+      expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: knownRepeatUsage!.id } })).toEqual(knownRepeatUsage)
+      expect(await prisma.agentArtifact.findMany({ where: { id: { in: knownRepeatArtifacts.map(row => row.id) } }, orderBy: { id: 'asc' } }))
+        .toEqual([...knownRepeatArtifacts].sort((left, right) => left.id.localeCompare(right.id)))
     }
     expect(used.every(row => row.usageSource === 'reported' && row.billingStatus === 'settled' && row.reservedCreditMilli === 0)).toBe(true)
     expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(network.mock.calls.length)
     const final = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
+    if (scenario === 'repeat') expect((final.validation as { continuityCriticResponse: unknown }).continuityCriticResponse).toEqual(audit)
     const stopped = scenario === 'repeat' || scenario === 'commit-unknown' || scenario === 'no-proposal'
     if (scenario === 'no-proposal') expect((final.validation as { continuityCriticResponse: unknown }).continuityCriticResponse).toEqual(inspected.audit)
     expect(final.bridge!.committedAt === null).toBe(stopped)

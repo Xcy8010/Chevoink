@@ -6,7 +6,7 @@ import { terminalCandidateSchema, type TerminalCandidate } from './terminal-cand
 import { terminalEvidenceContextSchema, validContinuitySemanticChecks } from './terminal-evidence-context.js'
 import { continuitySourceScopeSchema, type ContinuitySourceScope } from './continuity-source-authority.js'
 import { continuitySourceCatalog, type ContinuityBodies } from './continuity-review-context.js'
-import { terminalAddressResponseFields, terminalReviewAddressCatalog } from './terminal-review-addresses.js'
+import { terminalAddressResponseFields, terminalReviewAddressCatalog, terminalReviewAddressInput } from './terminal-review-addresses.js'
 import { inspectTerminalReview, inspectTerminalCandidateEvidence, type TerminalReviewDiagnostic } from './terminal-review-engine.js'
 import { terminalReviewRowDiagnostics } from './terminal-review-row-diagnostics.js'
 import { continuityFindingInputSchema, type ContinuityFindingInput } from '../../../shared/contracts/story-compiler-contracts.js'
@@ -95,7 +95,10 @@ export function continuityReviewV4Request(frozen: ContinuityV4Frozen, authorRequ
 只输出本次完整JSON合同。findings.sourceEvidence只能选服务端目录的segmentId；quote可省略，若提供则必须逐字包含在该段。终态各表的sourceEvidence只返回segmentId，不重抄quote。reason是你的解释，可讨论或引用原意见，其中文字不被服务器冒充原文；只有显式sourceEvidence是正文证据。error必须至少包含一处本章和另一处不同事实证据，不能将仅前文问题指控本章。真实冲突、严重度及未知判断必须完整保留，不为通过而删意见或改判。findings的findingId依次为f0、f1…，semanticChecks用这些ID引用意见。候选/历史事实/proposal按原目录逐项核验；合法unknown不是格式错误。
 ${JSON.stringify(z.toJSONSchema(continuityReviewV4ResponseSchema(frozen), { io: 'input' }))}`,
     content: JSON.stringify({ author_request: { manuscriptEvidence: false, text: authorRequest }, context,
-      manifestSubject: frozen.manifest.subject, catalog: buildContinuityReviewCatalog(frozen.bodies, frozen.candidate) }) }
+      // Rendering uses the existing short addresses. The full server catalogue
+      // still authenticates the manifest and every stored response/repair.
+      manifestSubject: frozen.manifest.subject, catalog: { sources: continuitySourceCatalog(frozen.bodies),
+        terminal: terminalReviewAddressInput(frozen.candidate, frozen.bodies.terminalEvidence!) } }) }
 }
 
 function bindFinding(value: unknown, index: number, frozen: ContinuityV4Frozen, expectedId = `f${index}`) {
