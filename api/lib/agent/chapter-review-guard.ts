@@ -61,7 +61,7 @@ export type ChapterReviewReadiness = {
   terminalProcessing?: TerminalProcessingInput
   terminalCorrection?: TerminalCandidateCorrection
   reviewBoundPlan?: ReviewBoundEditPlan
-  terminalReview?: { state: 'supported' | 'unverified'; unresolved: Array<{ path: string; verdict: string }> }
+  terminalReview?: { state: 'supported' | 'unverified'; unresolved: Array<{ path: string; verdict: string; field?: string; claim?: string; reason?: string }> }
   /** Server-only mutation proof projection; ordinary read tools never request it. */
   reviewBoundEvidence?: ReviewBoundEvidence
   reviewCycle?: ReturnType<typeof projectReviewCycle>
@@ -357,7 +357,12 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     readiness.terminalReview = { state: terminal?.supported ? 'supported' : 'unverified',
       unresolved: [...(terminal?.verdicts.filter(item => item.verdict !== 'supported').map(({ path, verdict }) => ({ path, verdict })) ?? []),
         ...(terminal?.factCoverage?.dispositions.filter(item => item.outcome === 'unknown').map(item => ({ path: `factCoverage.${item.id}`, verdict: 'unknown' }))
-          ?? factCoverage?.obligations.map(item => ({ path: `factCoverage.${item.id}`, verdict: 'unknown' })) ?? [])] }
+          ?? factCoverage?.obligations.map(item => ({ path: `factCoverage.${item.id}`, verdict: 'unknown' })) ?? []),
+        ...(terminal?.proposals?.dispositions.filter(item => item.outcome === 'unknown').map(item => {
+          const proposal = evidence.proposalChanges?.proposals.find(proposal => proposal.id === item.id)
+          return { path: `proposals.${item.id}`, verdict: 'unknown', reason: item.reason,
+            ...(proposal ? { field: proposal.field, claim: proposal.claim } : {}) }
+        }) ?? [])] }
     const committed = compilation.preparedContext as Record<string, unknown> | null
     const commitProof = committed?.terminalReviewProof as Record<string, unknown> | undefined
     readiness.terminalCommitted = !!terminal?.supported && compilation.status === 'completed' && compilation.stage === 'commit'
@@ -381,7 +386,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
           .map(({ proofHash, field, claim }) => ({ proofHash, field, claim })),
         issues: readiness.terminalCorrection
           ? readiness.terminalCorrection.issues ?? readiness.terminalCorrection.paths.map(path => ({ path, reason: 'inheritance_invalid' }))
-          : readiness.terminalReview.unresolved.map(({ path, verdict }) => ({ path, reason: verdict })),
+          : readiness.terminalReview.unresolved.map(({ path, verdict, ...details }) => ({ path, reason: verdict, ...details })),
       }
     }
   }

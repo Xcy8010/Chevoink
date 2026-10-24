@@ -15,6 +15,10 @@ import { advanceTerminalCoverage, terminalCoverageInput } from '../../api/lib/ag
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { inspectTerminalReview, terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { projectCurrentReviewNextStep, currentReviewNextStepGuidance } from '../../api/lib/agent/review-dispatch.js'
+import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
+import { prepareTerminalProposalInput } from '../../api/lib/agent/terminal-proposal-context.js'
+import { terminalProcessingPlan } from '../../api/lib/agent/terminal-processing.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 
 afterEach(() => vi.restoreAllMocks())
 const sha = (text: string) => createHash('sha256').update(text).digest('hex')
@@ -55,6 +59,60 @@ function fixture(prompt = '写下一章') {
 }
 
 describe('persisted current review readiness', () => {
+  it('keeps proposal-only unknown work actionable within the original two processing claims', async () => {
+    const f = fixture('修改第44章。完成连续性与人类感检查。')
+    Object.assign(f.task.scope, { terminalCoverageProtocol: 2, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1 })
+    const base = terminalCandidateSchema.parse({ exitState: { knowledge: ['未获证实的旧线索归属。'] } })
+    const candidate = terminalCandidateSchema.parse({ exitState: { objects: ['门已经锁好'] } })
+    const context = terminalEvidenceContext(f.chapter, null, 2, 1, terminalCoverageInput(f.task, {}, f.chapter, candidate, 2), 5, 2)
+    const response = (selected: typeof candidate, verdict: 'supported' | 'unknown') => ({ findings: [],
+      semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: '核对合成章节全文。', findingIndexes: [] })),
+      terminalVerdicts: [{ path: selected === base ? 'exitState.knowledge.0' : 'exitState.objects.0', verdict,
+        sourceEvidence: verdict === 'supported' ? [{ segmentId: 'c0', quote: candidate.exitState.objects[0] }] : [] }],
+      terminalProofVerdicts: [], terminalDispositions: [] })
+    const prior = inspectContinuityResponse(JSON.stringify(response(base, 'unknown')), { previous: null, current: f.chapter.content, terminalEvidence: context }, true, 8, base)
+    expect(prior.complete).toBe(true)
+    const staged = prepareTerminalProposalInput({ spec: f.task, preparedContext: {},
+      validation: { independentCheck: 'complete', terminalCandidate: base, continuityCriticResponse: prior.audit },
+      content: f.chapter.content, previousContent: null, candidate, originalContext: context, nextContext: context })!
+    expect(staged.changes?.proposals).toHaveLength(1)
+    const proposal = staged.changes!.proposals[0], reason = '当前正文无法确认旧线索归属，保留原提议。'
+    const evidence = { ...context, proposalChanges: staged.changes }
+    const inspected = inspectContinuityResponse(JSON.stringify({ ...response(candidate, 'supported'),
+      proposalDispositions: [{ id: proposal.id, outcome: 'unknown', reason, sourceEvidence: [] }] }),
+    { previous: null, current: f.chapter.content, terminalEvidence: evidence }, true, 8, candidate)
+    expect(inspected.complete).toBe(true)
+    Object.assign(f.compilation.validation, { terminalCandidate: candidate, continuityCriticResponse: inspected.audit,
+      coverage: compilerContinuityCoverage({ chapter: f.chapter, bridge: f.bridge, sceneTasks: f.sceneTasks, source: null, terminalCandidate: candidate }) })
+    f.compilation.preparedContext = { terminalProposalReview: staged.state }
+    const before = structuredClone({ validation: f.compilation.validation, preparedContext: f.compilation.preparedContext })
+    const readiness = await readChapterReviewReadiness(f.tx, f.subject)
+    expect(readiness).toMatchObject({ continuity: 'complete', terminalReview: { state: 'unverified' } })
+    expect.soft(readiness?.terminalReview?.unresolved).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: `proposals.${proposal.id}`, verdict: 'unknown', field: proposal.field, claim: proposal.claim, reason }),
+    ]))
+    expect.soft(readiness?.terminalProcessing?.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: `proposals.${proposal.id}`, reason, field: proposal.field, claim: proposal.claim }),
+    ]))
+    const subject = { userId: f.subject.userId, novelId: f.subject.novelId, taskSpec: f.task }
+    const key = runtimeJson({ kind: 'terminal-processing', version: 1, userId: f.subject.userId, novelId: f.subject.novelId,
+      taskId: f.task.id, chapterId: f.chapter.id, contentHash: runtimeJson({ content: f.chapter.content }).hash,
+      sourceHash: runtimeJson({ previousContent: '', previousChapterId: null }).hash,
+      contractHash: runtimeJson(JSON.parse(JSON.stringify(f.task))).hash }).hash
+    const attempts = new Set([`terminal-processing:${key}:0`])
+    const plan = terminalProcessingPlan(readiness, subject, attempts)
+    expect.soft(plan).toMatchObject({ kind: 'process', claim: `terminal-processing:${key}:1` })
+    expect.soft(plan?.guidance ?? '').toContain(proposal.claim)
+    expect.soft(plan?.guidance ?? '').toContain(reason)
+    attempts.add(`terminal-processing:${key}:1`)
+    const exhausted = terminalProcessingPlan(readiness, subject, attempts)
+    expect.soft(exhausted).toMatchObject({ kind: 'process', key })
+    expect(exhausted?.claim).toBeUndefined()
+    expect({ validation: f.compilation.validation, preparedContext: f.compilation.preparedContext }).toEqual(before)
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    expect(f.db.chapterBridge.update).not.toHaveBeenCalled()
+    expect(f.db.chapterQualityReport.update).not.toHaveBeenCalled()
+  })
   it.each(['检查当前章节', '写下一章，不用检查', '写下一章，跳过质量检查和连续性检查'])(
     'cannot bypass previously supported facts with reprepare and empty commit even when checks were not required: %s', async prompt => {
       const f = fixture(prompt)

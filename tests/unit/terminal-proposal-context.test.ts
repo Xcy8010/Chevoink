@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import type { TaskSpec } from '../../shared/contracts/index.js'
-import { terminalCandidateSchema, currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
+import { terminalCandidateSchema, currentTerminalReview, terminalReviewFailure } from '../../api/lib/agent/terminal-state-review.js'
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { runContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
@@ -48,6 +48,30 @@ it('uses one authenticated producer for request and report reconstruction, witho
   expect(next.changes).toEqual(f.staged.changes)
   expect(next.state.pending).toEqual(f.staged.state.pending)
   expect(currentTerminalReview(f.pendingInput.validation, f.chapter.content, f.evidence)).toBeNull()
+})
+
+it('reports every proposal-only unknown with its original identity and independent reason without changing saved state', () => {
+  const f = fixture()
+  const dispositions = f.staged.changes!.proposals.map(proposal => ({ id: proposal.id, outcome: 'unknown',
+    reason: `The saved body does not establish the original ${proposal.field} proposal.`, sourceEvidence: [] }))
+  const inspected = f.audit(f.candidate, f.evidence, JSON.stringify({ ...f.response(f.candidate), proposalDispositions: dispositions }))
+  expect(inspected.complete).toBe(true)
+  const validation = { independentCheck: 'complete', terminalCandidate: f.candidate, continuityCriticResponse: inspected.audit }
+  const preparedContext = { terminalProposalReview: f.staged.state }
+  const before = structuredClone({ validation, preparedContext })
+  const review = currentTerminalReview(validation, f.chapter.content, f.evidence)!
+  expect(review).toMatchObject({ supported: false, proposals: { complete: false } })
+  expect(review.verdicts.every(item => item.verdict === 'supported')).toBe(true)
+  expect(review.factCoverage?.dispositions).toEqual([])
+  const failure = terminalReviewFailure(validation, f.chapter.content, f.evidence)!
+  expect(failure).toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: true })
+  expect({ validation, preparedContext }).toEqual(before)
+  for (const [index, proposal] of f.staged.changes!.proposals.entries()) {
+    expect.soft(failure.output).toContain(proposal.id)
+    expect.soft(failure.output).toContain(proposal.field)
+    expect.soft(failure.output).toContain(proposal.claim)
+    expect.soft(failure.output).toContain(dispositions[index].reason)
+  }
 })
 
 it.each(['missing-audit', 'wrong-marker', 'raw-corruption', 'unknown-response'] as const)(

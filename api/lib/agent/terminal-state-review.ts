@@ -426,6 +426,10 @@ export function terminalReviewFailure(validation: unknown, content: string, cont
       ...('sourceEvidence' in item ? { sourceEvidence: item.sourceEvidence } : {}) }))
     const unresolved = review.factCoverage?.dispositions.filter(item => item.outcome === 'unknown').map(item => ({ ...item,
       fact: context.factCoverage?.obligations.find(fact => fact.id === item.id) })) ?? []
+    const proposals = review.proposals?.dispositions.filter(item => item.outcome === 'unknown').map(item => {
+      const proposal = context.proposalChanges?.proposals.find(proposal => proposal.id === item.id)
+      return { ...item, ...(proposal ? { field: proposal.field, claim: proposal.claim } : {}) }
+    }) ?? []
     const selectable = context.previous?.carried?.filter(fact => fact.depth < 16
       && context.previous!.carried!.filter(other => other.proofHash === fact.proofHash).length === 1
       && context.previous!.carried!.filter(other => other.field === fact.field && other.claim === fact.claim && other.depth < 16).length === 1
@@ -438,7 +442,7 @@ export function terminalReviewFailure(validation: unknown, content: string, cont
       : '按实际裁决更新 terminalState 后调用 continuity_validate；'
     return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: true,
       summary: '终态候选尚未获独立证实',
-      output: `${proseReport ? proseReport.text + '\n' : ''}本次检查尚未通过：独立正文报告已收到，但终态与持续事实尚未获证实，禁止称检查通过或提交。终态待处理候选或旧事实：${JSON.stringify({ disputed, unresolved, ...('proofChecks' in review ? { proofChecks: review.proofChecks } : {}) })}。其余已支持项无需同义重写。以本章明确完成证据判为 negated 的旧待办，可据该裁决移除或更新；unknown 不能删空，持续事实请使用已有核验的原字段/原主张证明并核对本章是否变化，不要求正文重述历史。保留事实主体、条件和未解决义务，不把状态误改成已完成。${updateGuidance}同一版本检查通过再 chapter_bridge_commit，${proseReport?.errors ? '正文仍有真实错误，按完整报告、当前证据和原授权处理后复核；终态待核不覆盖这些错误。' : '无需为终态候选改正文或重跑已通过的质量检查。'}${selection}` }
+      output: `${proseReport ? proseReport.text + '\n' : ''}本次检查尚未通过：独立正文报告已收到，但终态与持续事实尚未获证实，禁止称检查通过或提交。终态待处理候选或旧事实：${JSON.stringify({ disputed, unresolved, ...(proposals.length ? { proposals } : {}), ...('proofChecks' in review ? { proofChecks: review.proofChecks } : {}) })}。其余已支持项无需同义重写。以本章明确完成证据判为 negated 的旧待办，可据该裁决移除或更新；unknown 不能删空，持续事实请使用已有核验的原字段/原主张证明并核对本章是否变化，不要求正文重述历史。保留事实主体、条件和未解决义务，不把状态误改成已完成。${updateGuidance}同一版本检查通过再 chapter_bridge_commit，${proseReport?.errors ? '正文仍有真实错误，按完整报告、当前证据和原授权处理后复核；终态待核不覆盖这些错误。' : '无需为终态候选改正文或重跑已通过的质量检查。'}${selection}` }
   }
   return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: !!review,
     summary: '终态候选尚未获正文证实',

@@ -12,7 +12,7 @@ export type TerminalProcessingInput = {
   content: string
   previous: string
   inherited: Array<{ proofHash: string; field: string; claim: string }>
-  issues: Array<{ path: string; reason: string }>
+  issues: Array<{ path: string; reason: string; field?: string; claim?: string }>
   recoveryGuidance?: string
 }
 
