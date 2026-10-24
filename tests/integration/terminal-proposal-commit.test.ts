@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
@@ -7,7 +8,7 @@ import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continu
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { terminalCandidateFacts, terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
-import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
+import { terminalCoverageInput, terminalCoverageProofs } from '../../api/lib/agent/terminal-fact-coverage.js'
 import { readTerminalInheritance } from '../../api/lib/agent/terminal-inheritance-chain.js'
 import { prepareCompilerTerminalProposals } from '../../api/lib/agent/terminal-proposal-context.js'
 import { readTerminalProposalState } from '../../api/lib/agent/terminal-proposal-review.js'
@@ -17,6 +18,8 @@ import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quali
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
 import { continuityValidateTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 
 describe.runIf(available)('proposal retraction at the real report and commit transaction', () => {
   it.each([[5, false, false], [5, true, false], [6, false, false], [6, true, false], [5, false, true], [6, false, true]] as const)('freezes v%i before dispatch, retains invalid proposals through reprepare=%s and preserves transient unknown=%s at commit', (protocol, reprepare, preserveDraft) => fixture(async f => {
@@ -25,10 +28,11 @@ describe.runIf(available)('proposal retraction at the real report and commit tra
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
     await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running', runtimeProtocolVersion: 0, taskRootId: null } })
+    const objects = Array.from({ length: 18 }, (_, index) => `Tool${index} stays.`)
     const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { revision: 8,
-      content: 'The gauge reads two. The output remains unchanged. The bent tool remains in the pocket.' } })
+      content: `The gauge reads two. The output remains unchanged. ${objects.join(' ')}` } })
     const base = terminalCandidateSchema.parse({ exitState: { knowledge: ['The two gauges share a combined reading.'],
-      emotion: ['The operator distrusts a distant event.'], objects: ['The bent tool remains in the pocket.'] } })
+      emotion: ['The operator distrusts a distant event.'], objects } })
     const candidate = terminalCandidateSchema.parse({ exitState: { knowledge: ['The gauge reads two.', 'The output remains unchanged.'], objects: base.exitState.objects } })
     const { compilation } = await prepareStoryCompilation({ ...f, chapterId: chapter.id, mode: 'balanced', intentSummary: 'Review the saved synthetic chapter.' })
     let compilationId = compilation.id
@@ -130,6 +134,50 @@ describe.runIf(available)('proposal retraction at the real report and commit tra
     expect((await load()).preparedContext).toMatchObject(passed.preparedContext as object)
     expect((await readTerminalInheritance(prisma, f, chapter)).map(({ field, claim }) => [field, claim]).sort())
       .toEqual(terminalCandidateFacts(candidate).map(({ field, claim }) => [field, claim]).sort())
+    if (preserveDraft) {
+      // Exercise the real save boundary: outer source assertion and validation
+      // both authenticate the same 20-fact predecessor in one default transaction.
+      const predecessor = await load(), predecessorJson = JSON.stringify(predecessor)
+      const next = await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: chapter.volumeId,
+        title: 'Synthetic next inventory', orderIndex: 2, orderInVolume: 2, revision: 1, content: 'The operator closes the inventory.' } })
+      const runId = randomUUID(), prompt = '修改第二章'
+      const spec = buildTaskSpec({ runId, novelId: f.novelId, chapterId: next.id, prompt, continuityEvidenceProtocol: 1,
+        terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 })
+      await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, chapterId: next.id,
+        status: 'running', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', runtimeProtocolVersion: 0,
+        taskSpec: runtimeJson(spec).value, startRequest: { prompt } } })
+      const subject = { userId: f.userId, novelId: f.novelId, runId }
+      const { compilation: nextCompilation } = await prepareStoryCompilation({ ...subject, chapterId: next.id, mode: 'balanced', intentSummary: prompt })
+      await saveSceneTasks({ ...subject, compilationId: nextCompilation.id, tasks: [{ purpose: 'Inventory', entryState: candidate.exitState,
+        goal: 'Record', obstacle: 'Time', choice: 'Close', cost: 'Time', turn: 'Recorded', exitState: candidate.exitState,
+        styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
+      const live = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: nextCompilation.id }, include: { bridge: true, sceneTasks: true } })
+      const source = await readCompilerContinuitySource(prisma, subject, next, live.bridge!.fromChapterId, 11)
+      expect(source && 'terminalInheritance' in source && source.terminalInheritance).toHaveLength(20)
+      const evidence = terminalEvidenceContext(next, source, 2, 1, terminalCoverageInput(spec, live.preparedContext, next,
+        candidate, 2, terminalCoverageProofs(source, 2)), protocol, 2)
+      const raw = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind,
+        result: 'clear', reason: 'Independent synthetic full-body review.', findingIndexes: [] })), terminalVerdicts: [], terminalDispositions: [],
+        terminalProofVerdicts: evidence.previous!.carried!.map((fact, proofIndex) => ({ ...(protocol === 6 ? { proofIndex } : { proofHash: fact.proofHash }),
+          currentState: 'unchanged', reason: 'The complete new body leaves this inventory fact unchanged.' })) })
+      const inspected = inspectContinuityResponse(raw, { previous: source!.content, current: next.content, terminalEvidence: evidence }, true, 8, candidate)
+      expect(inspected.complete).toBe(true)
+      const coverage = compilerContinuityCoverage({ chapter: next, bridge: live.bridge, sceneTasks: live.sceneTasks, source, terminalCandidate: candidate }, 11)
+      await prisma.$transaction(async tx => {
+        const identities = vi.spyOn(tx.agentRun, 'findFirst')
+        try {
+          expect(runtimeJson(await readCompilerContinuitySource(tx, subject, next, live.bridge!.fromChapterId, 11)).hash).toBe(runtimeJson(source).hash)
+          await validateStoryContinuity({ ...subject, compilationId: live.id, expectedChapterRevision: next.revision,
+            independentCheck: 'complete', findings: [], terminalCandidate: candidate, coverage, continuityCriticResponse: inspected.audit }, tx)
+          expect(identities.mock.calls.filter(([args]) => args?.where?.id === f.runId && args.select?.taskRootId === true)).toHaveLength(2)
+        } finally { identities.mockRestore() }
+      })
+      expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: live.id } })).toMatchObject({ stage: 'check', validation: {
+        checkedChapterId: next.id, checkedRevision: 1, independentCheck: 'complete', coverage, continuityCriticResponse: inspected.audit } })
+      expect(JSON.stringify(await load())).toBe(predecessorJson)
+      expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
+      expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+    }
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ revision: 8, content: chapter.content })
     expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
     expect(network).not.toHaveBeenCalled()

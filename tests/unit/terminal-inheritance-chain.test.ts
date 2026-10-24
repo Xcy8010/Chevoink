@@ -1,11 +1,15 @@
 import { createHash } from 'node:crypto'
-import { describe, expect, it } from 'vitest'
-import { buildTerminalFactProofs, terminalAssessmentHash } from '../../api/lib/agent/terminal-inheritance-chain.js'
-import { type TerminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
+import { describe, expect, it, vi } from 'vitest'
+import type { Prisma } from '@prisma/client'
+import { buildTerminalFactProofs, readTerminalInheritance, terminalAssessmentHash } from '../../api/lib/agent/terminal-inheritance-chain.js'
+import { terminalEvidenceContext, type TerminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { terminalCandidateSchema, currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
 import { inspectContinuityResponse, continuityFailureOutput } from '../../api/lib/agent/continuity-format-recovery.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches } from '../../api/lib/agent/compiler-continuity-contract.js'
+import { terminalReviewStateHash } from '../../api/lib/agent/chapter-review-guard.js'
+import { stageTerminalProposals } from '../../api/lib/agent/terminal-proposal-review.js'
+import { DataAccessError } from '../../api/lib/prisma.js'
 
 const checks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'not_applicable', reason: '合成事实继承。', findingIndexes: [] }))
 const initial = terminalCandidateSchema.parse({ exitState: { openLoops: ['过滤泵检修等零件'] } })
@@ -20,7 +24,97 @@ function assessment(chapter: { id: string; orderIndex: number; revision: number;
     terminalCandidate: candidate, independentCheck: 'complete', continuityCriticResponse: inspected.audit }
   return { validation, review: currentTerminalReview(validation, chapter.content, evidence) }
 }
+
+function sharedFactFixture() {
+  const candidate = terminalCandidateSchema.parse({ exitState: { objects: Array.from({ length: 20 }, (_, i) => `物件${i}仍在柜内`) } })
+  const chapter = { id: 'shared-chapter', orderIndex: 1, revision: 1, content: candidate.exitState.objects.join('。') + '。' }
+  const context = terminalEvidenceContext(chapter, null, 2, 1, { version: 2, taskId: 'shared-task', chapterId: chapter.id, obligations: [] }, 5, 2)
+  const proposals = stageTerminalProposals({ preparedContext: {}, identity: { taskId: 'shared-task', chapterId: chapter.id,
+    bodyHash: context.current.contentHash, sourceHash: runtimeJson({ previous: null }).hash }, auditHash: 'a'.repeat(64),
+    base: terminalCandidateSchema.parse({ exitState: { ...candidate.exitState, emotion: ['一个尚未证实的旧情绪提议'] } }), candidate, verifiedFactIds: [] })!
+  const evidence = { ...context, proposalChanges: proposals.changes }
+  const raw = JSON.stringify({ findings: [], semanticChecks: checks, terminalDispositions: [], terminalProofVerdicts: [],
+    terminalVerdicts: candidate.exitState.objects.map((claim, i) => ({ path: `exitState.objects.${i}`, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: claim }] })),
+    proposalDispositions: proposals.changes!.proposals.map(proposal => ({ id: proposal.id, outcome: 'unknown', reason: '原提议没有获得证实。', sourceEvidence: [] })) })
+  const inspected = inspectContinuityResponse(raw, { previous: null, current: chapter.content, terminalEvidence: evidence }, true, 8, candidate)
+  expect(inspected.complete).toBe(true)
+  const bridge = { committedAt: new Date(1), targetRevision: 1 }, sceneTasks: unknown[] = []
+  const stateHash = terminalReviewStateHash(bridge, sceneTasks)
+  const validation = { checkedChapterId: chapter.id, checkedRevision: 1, independentCheck: 'complete', terminalCandidate: candidate,
+    coverage: compilerContinuityCoverage({ chapter, bridge, sceneTasks, source: null, terminalCandidate: candidate }, 11), continuityCriticResponse: inspected.audit }
+  const preparedContext = { terminalProposalReview: proposals.state, terminalCandidateHash: runtimeJson(candidate).hash,
+    terminalContentHash: context.current.contentHash, terminalReviewProof: { version: 2, terminalStateHash: stateHash } }
+  const review = currentTerminalReview(validation, chapter.content, evidence, { taskId: 'shared-task', preparedContext })!
+  expect(review).toMatchObject({ supported: false, deliveryEligibility: { eligible: true, basis: 'current_supported_with_preserved_drafts' } })
+  const proofs = buildTerminalFactProofs({ compilationId: 'shared-compilation', chapter, validation, stateHash, evidence, review })
+  expect(proofs).toHaveLength(20)
+  const compilation = { id: 'shared-compilation', runId: 'shared-run', chapterId: chapter.id, bridge, sceneTasks, validation,
+    preparedContext: { ...preparedContext, terminalFactProofs: proofs } }
+  const run = { id: 'shared-run', sessionId: 'shared-session', taskRootId: null, startRequest: { prompt: '写第一章' }, taskSpec: { id: 'shared-task' } }
+  const tx = { storyCompilation: { findFirst: vi.fn(async ({ where }: { where: { id?: string } }) => !where.id || where.id === compilation.id ? compilation : null) },
+    chapter: { findFirst: vi.fn(async ({ where }: { where: { id?: string } }) => where.id === chapter.id ? chapter : null) },
+    agentRun: { findFirst: vi.fn(async () => run), findFirstOrThrow: vi.fn(async () => run) },
+    agentChildExecutionGrant: { findUnique: vi.fn(async () => null) }, agentSession: { findFirst: vi.fn(async () => null) } }
+  return { chapter, compilation, proofs, tx, read: () => readTerminalInheritance(tx as unknown as Prisma.TransactionClient,
+    { userId: 'author', novelId: 'novel' }, chapter) }
+}
 describe('bounded flat terminal fact chains', () => {
+  it('authenticates each shared compilation once and preserves the full raw report and exact proof output', async () => {
+    const f = sharedFactFixture(), before = JSON.stringify(f.compilation)
+    expect(await f.read()).toEqual(f.proofs)
+    expect(f.tx.agentRun.findFirst).toHaveBeenCalledTimes(1)
+    expect(f.tx.agentRun.findFirstOrThrow).toHaveBeenCalledTimes(2)
+    expect(f.tx.agentChildExecutionGrant.findUnique).toHaveBeenCalledTimes(1)
+    expect(f.tx.agentSession.findFirst).toHaveBeenCalledTimes(1)
+    expect(f.tx.storyCompilation.findFirst).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(f.compilation)).toBe(before)
+    expect(runtimeJson(await f.read()).hash).toBe(runtimeJson(f.proofs).hash)
+    expect(f.tx.agentRun.findFirst).toHaveBeenCalledTimes(2)
+    expect(f.tx.storyCompilation.findFirst).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['stateHash', 'validationHash', 'candidateHash', 'path', 'chapterId'] as const)('does not let a forged first node %s poison later facts', async field => {
+    const f = sharedFactFixture(), first = f.proofs[0], expected = structuredClone(f.proofs.slice(1))
+    first.nodes[0][field] = field === 'path' ? 'exitState.objects.1' : field === 'chapterId' ? 'foreign-chapter' : 'f'.repeat(64)
+    first.proofHash = runtimeJson({ field: first.field, claim: first.claim, anchors: first.anchors, nodes: first.nodes }).hash
+    expect(await f.read()).toEqual(expected.map((fact, i) => ({ ...fact, segmentId: `t${i}` })))
+    expect(f.tx.agentRun.findFirst).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['revision', 'body', 'validation', 'proof', 'proposal'] as const)('freshly rejects %s drift on the next invocation', async tamper => {
+    const f = sharedFactFixture()
+    expect(await f.read()).toEqual(f.proofs)
+    if (tamper === 'revision') f.chapter.revision++
+    if (tamper === 'body') f.chapter.content += '正文已变化。'
+    if (tamper === 'validation') f.compilation.validation.continuityCriticResponse.contentHash = 'f'.repeat(64)
+    if (tamper === 'proof') f.compilation.preparedContext.terminalReviewProof.terminalStateHash = 'f'.repeat(64)
+    if (tamper === 'proposal') f.compilation.preparedContext.terminalProposalReview.lastInput.pendingHash = 'f'.repeat(64)
+    expect(await f.read()).toEqual([])
+    expect(f.tx.storyCompilation.findFirst).toHaveBeenCalledTimes(2)
+  })
+
+  it('never authenticates a compilation as another chapter, then rereads its real identity on a new invocation', async () => {
+    const f = sharedFactFixture(), original = structuredClone(f.proofs), foreign = { ...f.chapter, id: 'foreign-chapter' }
+    f.tx.chapter.findFirst.mockImplementation(async ({ where }) => where.id === foreign.id ? foreign : where.id === f.chapter.id ? f.chapter : null)
+    for (const fact of f.proofs) {
+      fact.nodes[0].chapterId = foreign.id
+      fact.proofHash = runtimeJson({ field: fact.field, claim: fact.claim, anchors: fact.anchors, nodes: fact.nodes }).hash
+    }
+    expect(await readTerminalInheritance(f.tx as unknown as Prisma.TransactionClient, { userId: 'author', novelId: 'novel' }, foreign)).toEqual([])
+    expect(f.tx.agentRun.findFirst).toHaveBeenCalledTimes(1)
+    f.proofs.splice(0, f.proofs.length, ...original)
+    expect(await f.read()).toEqual(original)
+    expect(f.tx.agentRun.findFirst).toHaveBeenCalledTimes(2)
+  })
+
+  it('propagates original task authentication failures without caching a passed fact', async () => {
+    const f = sharedFactFixture(), failure = new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', 'Synthetic original task failure')
+    f.tx.agentRun.findFirst.mockRejectedValueOnce(failure)
+    await expect(f.read()).rejects.toBe(failure)
+    expect(await f.read()).toEqual(f.proofs)
+    expect(f.tx.agentRun.findFirst).toHaveBeenCalledTimes(2)
+  })
+
   it.each(['field', 'claim'])('retains a rejected carried %s binding and exposes its exact internal recovery path', kind => {
     const first = { id: 'first', orderIndex: 1, revision: 1, content: '冷却泵仍待检修。' }
     const evidence = baseContext(first.id, 1, first.content)

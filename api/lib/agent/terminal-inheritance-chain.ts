@@ -104,6 +104,40 @@ export async function readTerminalInheritance(db: Prisma.TransactionClient, subj
   }
   const valid: TerminalCarriedFact[] = []
   const { terminalReviewStateHash } = await import('./chapter-review-guard.js')
+  // The same authenticated compilation can occur in many independent facts.
+  // Rebuild its review/proofs once per invocation, never from a fact's node hash.
+  const authenticated = new Map<string, Awaited<ReturnType<typeof authenticate>>>()
+  async function authenticate(compilationId: string, chapterId: string) {
+    const chapter = await chapterFor(chapterId)
+    if (!compilations.has(compilationId)) {
+      if (compilations.size >= 128) return null
+      compilations.set(compilationId, await loadCompilation(compilationId))
+    }
+    const compilation = compilations.get(compilationId), context = object(compilation?.preparedContext), proof = object(context.terminalReviewProof)
+    const validation = object(compilation?.validation), coverage = object(validation.coverage), audit = object(validation.continuityCriticResponse)
+    let evidence = audit.terminalEvidence as TerminalEvidenceContext | undefined
+    let deliveryBinding: { taskId: string; preparedContext: unknown } | undefined
+    if (evidence && compilation && (evidence.proposalChanges || context.terminalProposalReview)) {
+      if (!compilation.runId) return null
+      const original = await readOriginalTaskRequest(db, { ...subject, runId: compilation.runId })
+      deliveryBinding = { taskId: terminalProposalTaskId(original.spec, original.taskId), preparedContext: compilation.preparedContext }
+      const candidate = readTerminalCandidate(validation)
+      if (!candidate) return null
+      try { evidence = attachTerminalProposalInput(evidence, { taskId: deliveryBinding.taskId,
+        preparedContext: compilation.preparedContext, validation, candidate }) }
+      catch (error) { if (!(error instanceof DataAccessError)) throw error; return null }
+    }
+    const review = compilation && chapter ? currentTerminalReview(compilation.validation, chapter.content, evidence, deliveryBinding) : null
+    if (!chapter || !compilation?.bridge?.committedAt || compilation.chapterId !== chapter.id || compilation.bridge.targetRevision !== chapter.revision
+      || coverage.protocolVersion !== 11 || !review?.deliveryEligibility.eligible || validation.checkedChapterId !== chapter.id || validation.checkedRevision !== chapter.revision
+      || coverage.contentHash !== review.contentHash || coverage.terminalHash !== review.candidateHash
+      || evidence?.protocol !== 2 || evidence.current.id !== chapter.id || evidence.current.revision !== chapter.revision || evidence.current.orderIndex !== chapter.orderIndex
+      || context.terminalCandidateHash !== review.candidateHash || context.terminalContentHash !== review.contentHash || proof.version !== 2) return null
+    const stateHash = terminalReviewStateHash(compilation.bridge, compilation.sceneTasks)
+    if (proof.terminalStateHash !== stateHash) return null
+    return { chapter, review, stateHash, validationHash: terminalAssessmentHash(compilation.validation), bodyHash: bodyHash(chapter.content),
+      rebuilt: buildTerminalFactProofs({ compilationId: compilation.id, chapter, validation: compilation.validation, stateHash, evidence, review }) }
+  }
   for (const fact of parsed.data) {
     if (fact.depth !== fact.nodes.length || fact.nodes[0].compilationId !== latest.id || fact.nodes[0].chapterId !== predecessor.id
       || fact.proofHash !== factHash({ field: fact.field, claim: fact.claim, anchors: fact.anchors, nodes: fact.nodes })
@@ -116,40 +150,16 @@ export async function readTerminalInheritance(db: Prisma.TransactionClient, subj
     }
     for (const [index, node] of fact.nodes.entries()) {
       if (!good) break
-      const chapter = await chapterFor(node.chapterId)
-      if (!compilations.has(node.compilationId)) {
-        if (compilations.size >= 128) { good = false; break }
-        compilations.set(node.compilationId, await loadCompilation(node.compilationId))
-      }
-      const compilation = compilations.get(node.compilationId), context = object(compilation?.preparedContext), proof = object(context.terminalReviewProof)
-      const validation = object(compilation?.validation), coverage = object(validation.coverage), audit = object(validation.continuityCriticResponse)
-      let evidence = audit.terminalEvidence as TerminalEvidenceContext | undefined
-      let deliveryBinding: { taskId: string; preparedContext: unknown } | undefined
-      if (evidence && compilation && (evidence.proposalChanges || context.terminalProposalReview)) {
-        if (!compilation.runId) { good = false; break }
-        const original = await readOriginalTaskRequest(db, { ...subject, runId: compilation.runId })
-        deliveryBinding = { taskId: terminalProposalTaskId(original.spec, original.taskId), preparedContext: compilation.preparedContext }
-        const candidate = readTerminalCandidate(validation)
-        if (!candidate) { good = false; break }
-        try { evidence = attachTerminalProposalInput(evidence, { taskId: terminalProposalTaskId(original.spec, original.taskId),
-          preparedContext: compilation.preparedContext, validation, candidate }) }
-        catch (error) { if (!(error instanceof DataAccessError)) throw error; good = false; break }
-      }
-      const review = compilation && chapter ? currentTerminalReview(compilation.validation, chapter.content, evidence, deliveryBinding) : null
-      if (!chapter || !compilation?.bridge?.committedAt || compilation.chapterId !== chapter.id || compilation.bridge.targetRevision !== chapter.revision
-        || chapter.revision !== node.revision || chapter.orderIndex !== node.orderIndex || bodyHash(chapter.content) !== node.bodyHash
-        || coverage.protocolVersion !== 11 || !review?.deliveryEligibility.eligible || validation.checkedChapterId !== chapter.id || validation.checkedRevision !== chapter.revision
-        || coverage.contentHash !== review.contentHash || coverage.terminalHash !== review.candidateHash
-        || evidence?.protocol !== 2 || evidence.current.id !== chapter.id || evidence.current.revision !== chapter.revision || evidence.current.orderIndex !== chapter.orderIndex
-        || review.candidateHash !== node.candidateHash || context.terminalCandidateHash !== node.candidateHash
-        || context.terminalContentHash !== review.contentHash || terminalAssessmentHash(compilation.validation) !== node.validationHash
-        || proof.version !== 2 || proof.terminalStateHash !== node.stateHash
-        || terminalReviewStateHash(compilation.bridge, compilation.sceneTasks) !== node.stateHash
-        || !terminalClaims(review.candidate).some(claim => claim.path === node.path && claim.path.split('.')[1] === fact.field && claim.claim === fact.claim)) { good = false; break }
-      const rebuilt = buildTerminalFactProofs({ compilationId: compilation.id, chapter, validation: compilation.validation, stateHash: node.stateHash, evidence, review })
-        .find(item => item.field === fact.field && item.claim === fact.claim)
+      const key = JSON.stringify([node.compilationId, node.chapterId])
+      if (!authenticated.has(key)) authenticated.set(key, await authenticate(node.compilationId, node.chapterId))
+      const bound = authenticated.get(key)
+      if (!bound || bound.chapter.revision !== node.revision || bound.chapter.orderIndex !== node.orderIndex || bound.bodyHash !== node.bodyHash
+        || bound.review.candidateHash !== node.candidateHash || bound.validationHash !== node.validationHash || bound.stateHash !== node.stateHash
+        || !terminalClaims(bound.review.candidate).some(claim => claim.path === node.path && claim.path.split('.')[1] === fact.field && claim.claim === fact.claim)) { good = false; break }
+      const rebuilt = bound.rebuilt.find(item => item.field === fact.field && item.claim === fact.claim)
       if (!rebuilt || runtimeJson(rebuilt.anchors).hash !== runtimeJson(fact.anchors).hash || runtimeJson(rebuilt.nodes).hash !== runtimeJson(fact.nodes.slice(index)).hash) { good = false; break }
       if (node.previousChapterId) {
+        const chapter = bound.chapter
         if (!previousIds.has(chapter.id)) previousIds.set(chapter.id, (await db.chapter.findFirst({ where: { authorId: subject.userId,
           ...activeChapterScope(subject.novelId), orderIndex: { lt: chapter.orderIndex } }, orderBy: [{ orderIndex: 'desc' }, { id: 'asc' }], select: { id: true } }))?.id ?? null)
         if (previousIds.get(chapter.id) !== node.previousChapterId || index + 1 < fact.nodes.length
