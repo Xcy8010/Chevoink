@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
+import type { Prisma } from '@prisma/client'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { prepareStoryCompilation, saveSceneTasks, validateStoryContinuity, commitChapterBridge } from '../../api/lib/agent/story-compiler.js'
@@ -163,14 +164,19 @@ describe.runIf(available)('proposal retraction at the real report and commit tra
       const inspected = inspectContinuityResponse(raw, { previous: source!.content, current: next.content, terminalEvidence: evidence }, true, 8, candidate)
       expect(inspected.complete).toBe(true)
       const coverage = compilerContinuityCoverage({ chapter: next, bridge: live.bridge, sceneTasks: live.sceneTasks, source, terminalCandidate: candidate }, 11)
-      await prisma.$transaction(async tx => {
-        const identities = vi.spyOn(tx.agentRun, 'findFirst')
-        try {
-          expect(runtimeJson(await readCompilerContinuitySource(tx, subject, next, live.bridge!.fromChapterId, 11)).hash).toBe(runtimeJson(source).hash)
-          await validateStoryContinuity({ ...subject, compilationId: live.id, expectedChapterRevision: next.revision,
-            independentCheck: 'complete', findings: [], terminalCandidate: candidate, coverage, continuityCriticResponse: inspected.audit }, tx)
-          expect(identities.mock.calls.filter(([args]) => args?.where?.id === f.runId && args.select?.taskRootId === true)).toHaveLength(2)
-        } finally { identities.mockRestore() }
+      let identityReads = 0
+      const measured = prisma.$extends({ query: { agentRun: { async findFirst({ args, query }) {
+        if (args.where?.id === f.runId && args.select?.taskRootId === true) identityReads++
+        return query(args)
+      } } } })
+      await measured.$transaction(async observed => {
+        // Query-only observation preserves every transaction method/result;
+        // helpers accept Prisma's unextended transaction type.
+        const tx = observed as unknown as Prisma.TransactionClient
+        expect(runtimeJson(await readCompilerContinuitySource(tx, subject, next, live.bridge!.fromChapterId, 11)).hash).toBe(runtimeJson(source).hash)
+        await validateStoryContinuity({ ...subject, compilationId: live.id, expectedChapterRevision: next.revision,
+          independentCheck: 'complete', findings: [], terminalCandidate: candidate, coverage, continuityCriticResponse: inspected.audit }, tx)
+        expect(identityReads).toBe(2)
       })
       expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: live.id } })).toMatchObject({ stage: 'check', validation: {
         checkedChapterId: next.id, checkedRevision: 1, independentCheck: 'complete', coverage, continuityCriticResponse: inspected.audit } })
