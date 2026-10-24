@@ -6,7 +6,8 @@ import type { TerminalEvidenceContext } from './terminal-evidence-context.js'
 import { parseQualityJsonObject } from './quality-evidence.js'
 import { continuityResponseInput, fixedContinuityResponseFields } from './continuity-response-contract.js'
 import { terminalAddressResponseFields, terminalReviewAddressCatalog, normalizeTerminalResponseRows } from './terminal-review-addresses.js'
-import type { ContinuityBodies } from './continuity-review-context.js'
+import { continuitySourceCatalog, type ContinuityBodies } from './continuity-review-context.js'
+import { terminalReviewRowDiagnostics } from './terminal-review-row-diagnostics.js'
 
 type Inspection = ReturnType<typeof inspectContinuityResponse>
 const tables = ['terminalVerdicts', 'terminalProofVerdicts', 'terminalDispositions', 'proposalDispositions'] as const
@@ -16,7 +17,7 @@ const object = (v: unknown): Record<string, unknown> | null => v && typeof v ===
 /** Protocol4 only. A reviewer replaces each bad addressed ROW, including its
  * outcome and evidence. The server never chooses a different semantic target.
  * Good rows/opinions are immutable; raw first/second replies remain separate. */
-export function continuityResponseRepairPlan(original: Inspection, bodies: ContinuityBodies) {
+export function continuityResponseRepairPlan(original: Inspection, bodies: ContinuityBodies, version: 1 | 2 = 1) {
   if (original.audit.responseContract !== 3 || original.audit.classification !== 'terminal_invalid'
     || !original.audit.terminalCandidate || bodies.terminalEvidence?.verdictProtocol !== 6
     || !fixedContinuityResponseFields(original)) return null
@@ -30,12 +31,16 @@ export function continuityResponseRepairPlan(original: Inspection, bodies: Conti
     const record = normalized.record, candidate = original.audit.terminalCandidate
     const fields = terminalAddressResponseFields(candidate, bodies.terminalEvidence, undefined, true)
     const catalog = terminalReviewAddressCatalog(candidate, bodies.terminalEvidence)
+    const semantic = version === 2 ? terminalReviewRowDiagnostics(candidate, bodies, record) : null
+    if (version === 2 && !semantic) return null
+    const replacementFields = version === 2 ? terminalAddressResponseFields(candidate, bodies.terminalEvidence,
+      continuitySourceCatalog(bodies).terminalSources.map(row => row.segmentId), true, true) : fields
     const addresses = [catalog.ordinary.map(row => row.claimIndex), catalog.proofs.map(row => row.proofIndex),
       catalog.obligations.map(row => row.obligationIndex), catalog.proposals.map(row => row.proposalIndex)]
     const bad: Array<{ table: typeof tables[number]; key: typeof keys[number]; address: number; index: number; row: unknown; schema: z.ZodType }> = []
     for (const [i, table] of tables.entries()) {
       const schema = fields[table]
-      if (schema.safeParse(record[table]).success) continue
+      if (schema.safeParse(record[table]).success && !semantic?.bad.get(table)?.size) continue
       // Ambiguous/missing/extra addresses require the existing full independent
       // reassessment. Sparse recovery cannot silently discard or invent rows.
       const rows = record[table], key = keys[i], expected = addresses[i]
@@ -45,8 +50,11 @@ export function continuityResponseRepairPlan(original: Inspection, bodies: Conti
       const array = schema instanceof z.ZodDefault ? schema.unwrap() : schema
       if (!(array instanceof z.ZodArray)) return null
       const element = array.element
-      for (const [index, row] of rows.entries()) if (!element.safeParse(row).success) {
-        bad.push({ table, key, address: object(row)![key] as number, index, row, schema: element })
+      const replacementArray = replacementFields[table]
+      const unwrapped = replacementArray instanceof z.ZodDefault ? replacementArray.unwrap() : replacementArray
+      if (!(unwrapped instanceof z.ZodArray)) return null
+      for (const [index, row] of rows.entries()) if (!element.safeParse(row).success || semantic?.bad.get(table)?.has(index)) {
+        bad.push({ table, key, address: object(row)![key] as number, index, row, schema: unwrapped.element })
       }
     }
     if (!bad.length) return null
@@ -64,30 +72,40 @@ export function continuityResponseRepairPlan(original: Inspection, bodies: Conti
       })
     const replacements = catalog.claims.filter(row => ['knowledge', 'body', 'objects', 'relationships', 'openLoops'].includes(row.field))
       .map(({ claimIndex: candidateIndex, field, claim }) => ({ candidateIndex, field, claim }))
-    return { record, bad, schema, replacements }
+    return { record, bad, schema, replacements, diagnostics: semantic?.diagnostics ?? original.audit.terminalReviewDiagnostics ?? [] }
   } catch { return null }
 }
 
-export function continuitySparseRepairRequest(system: string, content: string, original: Inspection, bodies: ContinuityBodies) {
-  const plan = continuityResponseRepairPlan(original, bodies)
+export function continuitySparseRepairRequest(system: string, content: string, original: Inspection, bodies: ContinuityBodies, version: 1 | 2 = 1) {
+  const plan = continuityResponseRepairPlan(original, bodies, version)
   if (!plan) return null
   // Do not feed the failed complete answer back as an apparent template. The
   // full frozen source/candidate remain available, followed by only bad rows.
   const purpose = system.split('\n只输出一个完整 JSON 对象，不编码成带外层引号的字符串。')[0]
-  return { system: `${purpose}\n本次是同一检查唯一第二槽的稀疏响应修复。只输出下列 JSON 合同，不重输 findings、semanticChecks 或其余有效表。每个坏地址须独立核对后替换整行，不能只换整数或把无依据事实改成通过。unknown 保留义务；ended 需要本章明确解除证据；replaced 仅能指向已独立支持的持久候选。\n${JSON.stringify(z.toJSONSchema(plan.schema, { io: 'input' }))}`,
-    content: `${content}\n唯一修复基准 baseResponseHash=${original.audit.contentHash}。其余有效行和独立意见已冻结，不得更改。合法持久替代目标（candidateIndex 与普通 claimIndex 同值，但不能选瞬时动作/地点）：${JSON.stringify(plan.replacements)}\n仅以下坏地址须重新判断 outcome、reason、sourceEvidence、candidateIndex：${JSON.stringify(plan.bad.map(({ table, address, row }) => ({ table, address, originalRow: row })))}。当前诊断：${JSON.stringify(original.audit.terminalReviewDiagnostics ?? [])}` }
+  return { system: `${purpose}\n本次是同一检查唯一第二槽的稀疏响应修复。只输出下列 JSON 合同，不重输 findings、semanticChecks 或其余有效表。每个坏地址须独立核对后替换整行，不能只换整数或把无依据事实改成通过。unknown 保留义务；ended 需要本章明确解除证据；replaced 仅能指向已独立支持的持久候选。\n${version === 2 ? '引用只返回冻结目录中实际选择的 segmentId，不重抄或生成 quote；服务端将该地址绑定原文全文段落。必须独立核对整项含义，选中段落并不代表 supported/ended/replaced。不得为修引用而修改候选、清除事实或把 unknown 改为通过。\n' : ''}${JSON.stringify(z.toJSONSchema(plan.schema, { io: 'input' }))}`,
+    content: `${content}\n唯一修复基准 baseResponseHash=${original.audit.contentHash}。其余有效行和独立意见已冻结，不得更改。合法持久替代目标（candidateIndex 与普通 claimIndex 同值，但不能选瞬时动作/地点）：${JSON.stringify(plan.replacements)}\n仅以下坏地址须重新判断 outcome、reason、sourceEvidence、candidateIndex：${JSON.stringify(plan.bad.map(({ table, address, row }) => ({ table, address, originalRow: row })))}。当前诊断：${JSON.stringify(plan.diagnostics)}` }
 }
 
-export function applyContinuitySparseRepair(original: Inspection, raw: string, bodies: ContinuityBodies) {
-  const plan = continuityResponseRepairPlan(original, bodies)
+export function applyContinuitySparseRepair(original: Inspection, raw: string, bodies: ContinuityBodies, version: 1 | 2 = 1) {
+  const plan = continuityResponseRepairPlan(original, bodies, version)
   if (!plan) return null
   const patch = plan.schema.parse(parseContinuityRepairResponse(raw))
   const record = structuredClone(plan.record)
   for (const item of patch.corrections) {
     const row = plan.bad.find(row => row.table === item.table && row.address === item.address)!
-    ;(record[row.table] as unknown[])[row.index] = item.replacement
+    let replacement: unknown = item.replacement
+    if (version === 2) {
+      const value = object(item.replacement)!
+      if (Array.isArray(value.sourceEvidence)) replacement = { ...value, sourceEvidence: value.sourceEvidence.map(ref => {
+        const id = object(ref)?.segmentId
+        const source = continuitySourceCatalog(bodies).terminalSources.find(part => part.segmentId === id)
+        if (!source || (row.table === 'terminalDispositions' || row.table === 'proposalDispositions') && source.source !== 'current') throw new Error('Repair selected an unavailable frozen source')
+        return { segmentId: source.segmentId, quote: source.quote }
+      }) }
+    }
+    ;(record[row.table] as unknown[])[row.index] = replacement
   }
-  return { raw: JSON.stringify(record), projection: { version: 1, kind: 'addressed_row_repair',
+  return { raw: JSON.stringify(record), projection: { version, kind: 'addressed_row_repair',
     originalResponseHash: original.audit.contentHash, repairResponseHash: createHash('sha256').update(raw).digest('hex'),
     projectedResponseHash: createHash('sha256').update(JSON.stringify(record)).digest('hex'),
     mask: plan.bad.map(({ table, address }) => ({ table, address })) } }
@@ -123,7 +141,8 @@ export function validContinuitySparseProjection(audit: unknown, content: string,
     const rebuilt = inspectContinuityResponse(first, bodies as ContinuityBodies, true, 8, original.terminalCandidate as Inspection['audit']['terminalCandidate'],
       original.sourceScope as Inspection['audit']['sourceScope'], { responseContract: 3 })
     if (runtimeJson(rebuilt.audit).hash !== runtimeJson(original).hash) return false
-    const projection = applyContinuitySparseRepair(rebuilt, second, bodies as ContinuityBodies)
+    if (marker.version !== 1 && marker.version !== 2) return false
+    const projection = applyContinuitySparseRepair(rebuilt, second, bodies as ContinuityBodies, marker.version)
     return !!projection && JSON.parse(projectedRaw.content) === projection.raw
       && runtimeJson(projection.projection).hash === runtimeJson(marker).hash
       && saved.characterCount === projection.raw.length
@@ -132,10 +151,10 @@ export function validContinuitySparseProjection(audit: unknown, content: string,
 }
 
 
-export function continuitySparseRepairDiagnostics(original: Inspection, raw: string, bodies: ContinuityBodies) {
-  if (!continuityResponseRepairPlan(original, bodies)) return null
+export function continuitySparseRepairDiagnostics(original: Inspection, raw: string, bodies: ContinuityBodies, version: 1 | 2 = 1) {
+  if (!continuityResponseRepairPlan(original, bodies, version)) return null
   try {
-    const repaired = applyContinuitySparseRepair(original, raw, bodies)!
+    const repaired = applyContinuitySparseRepair(original, raw, bodies, version)!
     const checked = inspectContinuityResponse(repaired.raw, bodies, true, 8, original.audit.terminalCandidate, original.audit.sourceScope, { responseContract: 3 })
     return { classification: checked.audit.classification, terminalReviewDiagnostics: checked.audit.terminalReviewDiagnostics ?? [] }
   } catch (error) {

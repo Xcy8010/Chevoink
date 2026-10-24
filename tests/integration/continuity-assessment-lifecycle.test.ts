@@ -185,7 +185,7 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
     expect(await prisma.aiUsageLog.findMany({ where: { id: { in: oldPayments.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(oldPayments)
     expect(await prisma.agentArtifact.findMany({ where: { id: { in: oldArtifacts.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(oldArtifacts)
     const next = await prisma.agentArtifact.findFirstOrThrow({ where: { runId: f.runId, metadata: { path: ['callId'], equals: continued.callId } } })
-    expect(next.metadata).toMatchObject({ input: { reassessmentProtocol: 4 } })
+    expect(next.metadata).toMatchObject({ input: { reassessmentProtocol: 5 } })
   }))
   it('persists a new contract3 duplicate projection and commits the same reviewed chapter without buying another check', () => fixture(async f => {
     const { ctx, compilation } = await retryFixture(f, new AbortController())
@@ -213,7 +213,7 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
     const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
     const artifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
     const reservation = artifacts.map(row => row.metadata as Record<string, unknown>).find(row => row.continuityAssessmentRequestKey)!
-    expect(reservation.input).toMatchObject({ reassessmentProtocol: 4 })
+    expect(reservation.input).toMatchObject({ reassessmentProtocol: 5 })
     expect(await prisma.$transaction(tx => lifecycle.readReusableLegacyContinuityAssessment(tx, ctx, reservation.input as lifecycle.LegacyAssessmentInput)))
       .toMatchObject({ complete: true, audit: { responseContract: 3 } })
     expect(await chapterBridgeCommitTool.execute(ctx, { compilationId: compilation.id })).not.toMatchObject({ outcome: 'failed' })

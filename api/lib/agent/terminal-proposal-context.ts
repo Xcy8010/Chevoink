@@ -156,17 +156,17 @@ function authenticFailedReport(validation: unknown, content: string, previous: s
     // failed second response. Validate that exact wrapper, keeping it failed;
     // an incomplete second response is still unknown and cannot enter here.
     const second = z.object({ version: z.literal(1), classification: z.literal('invalid'),
-      kind: z.literal('sparse_table_repair_failed').optional(), protocol: z.literal(4).optional(), rawResponse: z.object({
+      kind: z.literal('sparse_table_repair_failed').optional(), protocol: z.union([z.literal(4), z.literal(5)]).optional(), rawResponse: z.object({
       version: z.literal(1), encoding: z.literal('json-string'), content: z.string(), complete: z.literal(true),
     }).strict(), ...(audit.responseContract === 3 ? { diagnostics: z.object({ classification: z.string(),
       fixedFieldError: z.string().optional(), terminalReviewDiagnostics: z.array(z.object({ code: z.string(), path: z.string().optional(),
         referenceIndex: z.number().optional(), segmentId: z.string().optional(), message: z.string().optional(), expectedCount: z.number().optional(), actualCount: z.number().optional(), expectedFact: z.object({ field: z.string(), claim: z.string() }).optional() }).strict()) }).strict().optional() } : {}) }).strict().safeParse(reassessment)
     if (!second.success || typeof JSON.parse(second.data.rawResponse.content) !== 'string'
-      || (second.data.kind === 'sparse_table_repair_failed') !== (second.data.protocol === 4)) return false
+      || (second.data.kind === 'sparse_table_repair_failed') !== (second.data.protocol === 4 || second.data.protocol === 5)) return false
     if (audit.responseContract === 3 && 'diagnostics' in second.data && second.data.diagnostics !== undefined) {
       const original = reports.find(report => !report.complete && runtimeJson(report.audit).hash === runtimeJson(first).hash)
       if (!original) return false
-      const diagnostics = second.data.protocol === 4 ? continuitySparseRepairDiagnostics(original, JSON.parse(second.data.rawResponse.content) as string, bodies)
+      const diagnostics = second.data.protocol === 4 || second.data.protocol === 5 ? continuitySparseRepairDiagnostics(original, JSON.parse(second.data.rawResponse.content) as string, bodies, second.data.protocol === 5 ? 2 : 1)
         : continuityReassessmentDiagnostics(original, JSON.parse(second.data.rawResponse.content) as string, bodies)
       if (!diagnostics || runtimeJson(second.data.diagnostics).hash !== runtimeJson(diagnostics).hash) return false
     }

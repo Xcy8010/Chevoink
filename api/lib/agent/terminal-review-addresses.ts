@@ -36,20 +36,26 @@ const exhaustive = <T extends z.ZodType>(row: T, count: number, key: string) => 
 
 /** The wire has no claim/proof/proposal hashes to transcribe. Complete sets,
  * strict row shapes and all semantic/evidence checks remain mandatory. */
-export function terminalAddressResponseFields(candidate: TerminalCandidate, context: TerminalEvidenceContext, legalSegmentIds?: string[], conditionalDispositions = false) {
+export function terminalAddressResponseFields(candidate: TerminalCandidate, context: TerminalEvidenceContext, legalSegmentIds?: string[], conditionalDispositions = false, sourceIdsOnly = false) {
   const catalog = terminalReviewAddressCatalog(candidate, context)
   const source = legalSegmentIds ? terminalSpanVerdictSchema.shape.sourceEvidence.element.extend({ segmentId: legalSegmentIds.length
     ? z.enum(legalSegmentIds as [string, ...string[]]) : z.never() }) : terminalSpanVerdictSchema.shape.sourceEvidence.element
   const ordinaryAddress = catalog.ordinary.length ? z.union(catalog.ordinary.map(item => z.literal(item.claimIndex))) : z.never()
-  const verdict = terminalSpanVerdictSchema.omit({ path: true, basis: true }).extend({ claimIndex: ordinaryAddress, sourceEvidence: z.array(source).max(8) }).strict()
+  const verdict = terminalSpanVerdictSchema.omit({ path: true, basis: true }).extend({ claimIndex: ordinaryAddress, sourceEvidence: z.array(sourceIdsOnly ? source.omit({ quote: true }).strict() : source).max(8) }).strict()
   const proof = terminalProofVerdictSchema.omit({ proofHash: true }).extend({ proofIndex: address(catalog.proofs.length) }).strict()
-  const dispositionSource = terminalDispositionSchema.shape.sourceEvidence.element.extend({ quote: terminalDispositionSchema.shape.sourceEvidence.element.shape.quote.optional() })
+  const originalDispositionSource = terminalDispositionSchema.shape.sourceEvidence.element.extend({ quote: terminalDispositionSchema.shape.sourceEvidence.element.shape.quote.optional() })
+  const dispositionSource = sourceIdsOnly ? originalDispositionSource.omit({ quote: true }).extend({ segmentId: legalSegmentIds?.filter(id => /^c[0-9]+$/u.test(id)).length ? z.enum(legalSegmentIds.filter(id => /^c[0-9]+$/u.test(id)) as [string, ...string[]]) : z.never() }).strict() : originalDispositionSource
   const disposition = terminalDispositionSchema.omit({ id: true, candidatePath: true, sourceEvidence: true }).extend({
     obligationIndex: address(catalog.obligations.length), candidateIndex: address(catalog.claims.length).optional(), sourceEvidence: z.array(dispositionSource).max(8),
   }).strict()
-  const proposal = terminalProposalDispositionSchema.omit({ id: true, candidateFactId: true }).extend({
+  const proposalBase = terminalProposalDispositionSchema.omit({ id: true, candidateFactId: true }).extend({
     proposalIndex: address(catalog.proposals.length), candidateIndex: address(catalog.claims.length).optional(),
   }).strict()
+  const proposal = sourceIdsOnly ? z.discriminatedUnion('outcome', [
+    proposalBase.omit({ outcome: true, candidateIndex: true, sourceEvidence: true }).extend({ outcome: z.literal('unknown'), candidateIndex: z.never().optional(), sourceEvidence: z.array(dispositionSource).max(8) }).strict(),
+    proposalBase.omit({ outcome: true, candidateIndex: true, sourceEvidence: true }).extend({ outcome: z.literal('retracted'), candidateIndex: z.never().optional(), sourceEvidence: z.array(dispositionSource).min(1).max(8) }).strict(),
+    proposalBase.omit({ outcome: true, candidateIndex: true, sourceEvidence: true }).extend({ outcome: z.literal('replaced'), candidateIndex: address(catalog.claims.length), sourceEvidence: z.array(dispositionSource).min(1).max(8) }).strict(),
+  ]) : proposalBase
   // New requests expose exactly the same outcome/target constraints enforced
   // by inspectTerminalCoverage, rather than advertising values it must reject.
   const persistent = catalog.claims.filter(item => ['knowledge', 'body', 'objects', 'relationships', 'openLoops'].includes(item.field))

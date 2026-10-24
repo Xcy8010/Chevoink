@@ -83,6 +83,19 @@ export const terminalProposalDispositionSchema = z.object({ id: hash, outcome: z
 }).strict()
 export type TerminalProposalDisposition = z.infer<typeof terminalProposalDispositionSchema>
 
+/** Single-row validation shared with bounded report-field repair. */
+export function terminalProposalRowIssue(input: TerminalProposalChanges, item: TerminalProposalDisposition, candidate: TerminalCandidate,
+  verdicts: readonly { path: string; verdict: string }[], current: Array<{ segmentId: string; quote: string }>) {
+  if (!input.proposals.some(proposal => proposal.id === item.id)) return { code: 'proposal_address_invalid', suffix: '.id' }
+  if (item.sourceEvidence.some(ref => !terminalQuoteRange(ref, current))) return { code: 'proposal_evidence_invalid', suffix: '.sourceEvidence' }
+  if (item.outcome === 'unknown') return item.candidateFactId !== undefined ? { code: 'unknown_proposal_has_target', suffix: '.candidateFactId' } : null
+  if (!item.sourceEvidence.length) return { code: 'proposal_evidence_missing', suffix: '.sourceEvidence' }
+  if (item.outcome === 'retracted') return item.candidateFactId !== undefined ? { code: 'retracted_proposal_has_target', suffix: '.candidateFactId' } : null
+  const target = terminalCandidateFacts(candidate).find(fact => fact.id === item.candidateFactId)
+  return !target || !verdicts.some(verdict => verdict.path === target.path && verdict.verdict === 'supported')
+    ? { code: 'proposal_target_not_supported', suffix: '.candidateFactId' } : null
+}
+
 /** Exact evidence binding and completeness only. The independent critic owns
  * whether a proposal was unfounded or a replacement preserves its full claim.
  * Retraction cannot discharge any verified fact obligation. */
@@ -100,16 +113,8 @@ export function inspectTerminalProposalDispositions(input: TerminalProposalChang
   const parsed = z.array(terminalProposalDispositionSchema).max(200).safeParse(raw)
   if (!parsed.success || parsed.data.length !== input.proposals.length
     || new Set(parsed.data.map(item => item.id)).size !== parsed.data.length) return null
-  const facts = terminalCandidateFacts(candidate), current = segments.filter(segment => /^c[0-9]+$/u.test(segment.segmentId))
-  if (parsed.data.some(item => {
-    if (!input.proposals.some(proposal => proposal.id === item.id)
-      || item.sourceEvidence.some(ref => !terminalQuoteRange(ref, current))) return true
-    if (item.outcome === 'unknown') return item.candidateFactId !== undefined
-    if (!item.sourceEvidence.length) return true
-    if (item.outcome === 'retracted') return item.candidateFactId !== undefined
-    const target = facts.find(fact => fact.id === item.candidateFactId)
-    return !target || !verdicts.some(verdict => verdict.path === target.path && verdict.verdict === 'supported')
-  })) return null
+  const current = segments.filter(segment => /^c[0-9]+$/u.test(segment.segmentId))
+  if (parsed.data.some(item => terminalProposalRowIssue(input, item, candidate, verdicts, current))) return null
   return { inputHash: runtimeJson(input).hash, complete: parsed.data.every(item => item.outcome !== 'unknown'), dispositions: parsed.data }
 }
 

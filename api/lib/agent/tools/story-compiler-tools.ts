@@ -135,18 +135,18 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   let observedContent: string | undefined
   let observedComplete: boolean | undefined
   let frozen: LegacyAssessmentInput = { chapterId: input.chapterId, revision: input.revision, bodies: input.bodies, system: input.system,
-    ...(input.bodies.terminalEvidence?.verdictProtocol === 6 && input.terminalCandidate ? { reassessmentProtocol: 4 as const }
+    ...(input.bodies.terminalEvidence?.verdictProtocol === 6 && input.terminalCandidate ? { reassessmentProtocol: 5 as const }
       : input.bodies.terminalEvidence?.verdictProtocol === 5 ? { reassessmentProtocol: 2 as const } : {}),
     ...(input.parserVersion ? { parserVersion: input.parserVersion, sourceScope: input.sourceScope } : {}),
     ...(input.terminalCandidate ? { terminalCandidate: input.terminalCandidate } : {}),
     content: input.content, ...(input.bindingHash ? { bindingHash: input.bindingHash } : {}),
     targetType: input.options.targetType as 'chapter' | 'story_compilation', targetId: input.options.targetId! }
   let restoredFrozen = false
-  if (frozen.reassessmentProtocol === 2 || frozen.reassessmentProtocol === 3 || frozen.reassessmentProtocol === 4 || input.bodies.terminalEvidence?.factCoverage?.version === 2) {
+  if (frozen.reassessmentProtocol === 2 || frozen.reassessmentProtocol === 3 || frozen.reassessmentProtocol === 4 || frozen.reassessmentProtocol === 5 || input.bodies.terminalEvidence?.factCoverage?.version === 2) {
     const saved = await prisma.$transaction(tx => readFrozenLegacyContinuityInput(tx, ctx, frozen, input.recoverBodies))
     if (saved) { frozen = saved; input = { ...input, ...saved }; restoredFrozen = true }
   }
-  if (!restoredFrozen && frozen.reassessmentProtocol === 4 && input.terminalCandidate) {
+  if (!restoredFrozen && frozen.reassessmentProtocol === 5 && input.terminalCandidate) {
     // A new wire contract does not retire a paid complete historical report.
     // Never cross this compatibility path for an already frozen current call:
     // its own unknown requests/second slot must be reconciled first.
@@ -155,7 +155,9 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
     const old3 = { ...legacy, reassessmentProtocol: 3 as const,
       system: continuityResponseSystem(input.system, continuityResponseContract(input.bodies, input.terminalCandidate)),
       content: continuityResponseInput(input.content, input.bodies, input.terminalCandidate) }
-    for (const prior of [old3, { ...legacy, reassessmentProtocol: 2 as const }, legacy]) {
+    const old4 = { ...old3, reassessmentProtocol: 4 as const,
+      content: continuityResponseInput4(input.content, input.bodies, input.terminalCandidate) }
+    for (const prior of [old4, old3, { ...legacy, reassessmentProtocol: 2 as const }, legacy]) {
       const reusable = await prisma.$transaction(tx => readReusableLegacyContinuityAssessment(tx, ctx, prior))
       if (reusable) { ctx.signal.throwIfAborted(); await input.assertCurrent(); return reusable }
     }
@@ -213,7 +215,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
       admissionId: input.assessmentAdmissionId!, usageIds: trace.records.map(record => record.usageId), observedContent, observedComplete }))
   }
   const last = observations.at(-1)
-  const original = replay?.inspected ?? inspectContinuityResponse(last?.content ?? raw, input.bodies, (frozen.reassessmentProtocol !== 3 && frozen.reassessmentProtocol !== 4) || !!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length, input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope, frozen.reassessmentProtocol === 3 || frozen.reassessmentProtocol === 4 ? { responseContract: 3 } : {})
+  const original = replay?.inspected ?? inspectContinuityResponse(last?.content ?? raw, input.bodies, (frozen.reassessmentProtocol !== 3 && frozen.reassessmentProtocol !== 4 && frozen.reassessmentProtocol !== 5) || !!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length, input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope, frozen.reassessmentProtocol === 3 || frozen.reassessmentProtocol === 4 || frozen.reassessmentProtocol === 5 ? { responseContract: 3 } : {})
   const assessed = await runContinuityReassessment({ original, bodies: input.bodies, system: input.system, content: input.content, reassessmentProtocol: frozen.reassessmentProtocol,
     billingKnown: replay?.billingKnown ?? textRequestsFinished(trace), providerComplete: replay?.providerComplete ?? (!!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length),
     slotUsed: replay?.slotUsed ?? [...stages.values()].some(stage => stage === 'output_recovery'), signal: ctx.signal,
@@ -260,7 +262,7 @@ const independentContinuityResultSchema = z.object({
   findings: z.array(continuityFindingInputSchema).max(30),
 })
 
-export function parseIndependentContinuityResult(content: string, parserVersion: 1 | 2 | 3 | 4 | 5 = 3, bodies?: ContinuityBodies): { findings: z.infer<typeof continuityFindingInputSchema>[]; structured: boolean } {
+export function parseIndependentContinuityResult(content: string, parserVersion: 1 | 2 | 3 | 4 | 5 | 5 = 3, bodies?: ContinuityBodies): { findings: z.infer<typeof continuityFindingInputSchema>[]; structured: boolean } {
   if (parserVersion >= 3) {
     const inspected = inspectContinuityResponse(content, bodies, true, parserVersion as 3 | 4 | 5)
     return { findings: inspected.findings, structured: parserVersion === 5 ? inspected.complete : inspected.structured }
@@ -755,7 +757,7 @@ export const chapterBridgeGetTool = defineTool({
 })
 
 /** 独立审阅只读取当前正文和真实前章，不创建场景任务、不接管旧任务的提交状态。 */
-export async function buildStandaloneContinuityContext(ctx: Pick<ToolContext, 'userId' | 'novelId' | 'runId' | 'chapterId'>, chapterId?: string, db: Prisma.TransactionClient = prisma, protocol: 2 | 3 | 4 = 3) {
+export async function buildStandaloneContinuityContext(ctx: Pick<ToolContext, 'userId' | 'novelId' | 'runId' | 'chapterId'>, chapterId?: string, db: Prisma.TransactionClient = prisma, protocol: 2 | 3 | 4 | 5 = 3) {
   const targetId = await resolveQualityChapterTarget({ ...ctx, chapterId, fallbackChapterId: ctx.chapterId }, db)
   if (!targetId) throw new DataAccessError(400, 'CHAPTER_NOT_FOUND', '请从 chapter_read 或作品目录取得真实 chapterId；无需准备章节写作。')
   const chapter = await db.chapter.findFirst({ where: { id: targetId, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) },
@@ -787,7 +789,7 @@ export async function readStandaloneContinuityReport(ctx: ToolContext, contextHa
   return metadata.success ? { artifact, findings: metadata.data.findings } : null
 }
 
-export async function saveStandaloneContinuityReport(ctx: ToolContext, context: Pick<Awaited<ReturnType<typeof buildStandaloneContinuityContext>>, 'chapter' | 'contextHash' | 'criticInput'>, parsed: ReturnType<typeof parseIndependentContinuityResult>, db: Prisma.TransactionClient, focus?: string, allowSingleQuotes = true, requirePair = true, criticResponse?: ReturnType<typeof inspectContinuityResponse>['audit'], contextProtocol: 2 | 3 | 4 = criticResponse?.parserVersion === 7 ? 4 : 3): Promise<import('./types.js').ToolResult> {
+export async function saveStandaloneContinuityReport(ctx: ToolContext, context: Pick<Awaited<ReturnType<typeof buildStandaloneContinuityContext>>, 'chapter' | 'contextHash' | 'criticInput'>, parsed: ReturnType<typeof parseIndependentContinuityResult>, db: Prisma.TransactionClient, focus?: string, allowSingleQuotes = true, requirePair = true, criticResponse?: ReturnType<typeof inspectContinuityResponse>['audit'], contextProtocol: 2 | 3 | 4 | 5 = criticResponse?.parserVersion === 7 ? 4 : 3): Promise<import('./types.js').ToolResult> {
   ctx.signal.throwIfAborted()
   await assertAgentManuscriptCurrent(db, ctx)
   await db.$queryRaw`SELECT id FROM chapters WHERE id = ${context.chapter.id} FOR UPDATE`
@@ -977,8 +979,9 @@ export const continuityValidateTool = defineTool({
           || await hasLegacyTerminalCallEvidence(prisma, ctx)) throw error
         // This stack has not reached reserve/dispatch, and no prior same-call
         // evidence exists. Do not turn a local delta rejection into unknown fees.
+        const currentCandidate = readTerminalCandidate(compilation.validation)
         return { outcome: 'failed' as const, failureCode: error.code, summary: '章末候选更新未应用',
-          output: `${error.message} 正文未变化；读取当前章节桥取得新候选地址，不改写正文来适配旧候选。`,
+          output: `${error.message} 正文未变化；${currentCandidate ? `当前服务器候选：${JSON.stringify({ baseCandidateHash: runtimeJson(currentCandidate).hash, terminalState: currentCandidate })}。使用此完整候选和新基准。` : '当前尚无已保存候选，请先提供完整 terminalState，不能使用旧基准补丁。'} 不改写正文来适配旧候选。`,
           reviewRequestFinished: { version: 1 as const, chapterId: chapter.id, revision: chapter.revision,
             contentHash: createHash('sha256').update(chapter.content).digest('hex'), usageIds: [] } }
       }

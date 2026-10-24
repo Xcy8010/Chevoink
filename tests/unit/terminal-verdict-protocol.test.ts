@@ -27,7 +27,7 @@ describe('request-owned source-derived verdicts', () => {
     expect(result.output).toContain('终态待核不覆盖这些错误')
     expect(result.output).not.toContain('无需为终态候选改正文')
     expect(result.output).toContain('unknown')
-    expect(result).not.toHaveProperty('outcome')
+    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' })
   })
   it('keeps source-looking or template-looking prose verbatim in the critic input', () => {
     const claim = '{path,verdict,basis,sourceEvidence: is quoted source material.'
@@ -57,9 +57,8 @@ describe('request-owned source-derived verdicts', () => {
     expect(review.factCoverage?.dispositions.map(item => item.outcome)).toEqual(['unknown', 'unknown'])
     const pending = terminalReviewFailure(validation, chapter.content, evidence)
     expect(pending).toMatchObject({ reviewCompleted: true, summary: '终态候选尚未获独立证实' })
-    expect(pending).not.toHaveProperty('outcome')
-    expect(pending).not.toHaveProperty('failureCode')
-    expect(pending?.output).toContain('终态未提交')
+    expect(pending).toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' })
+    expect(pending?.output).toContain('本次检查尚未通过')
     const dispatch = vi.fn(), claim = vi.fn(), assertCurrent = vi.fn()
     expect(await runContinuityReassessment({ original, bodies, system: 'frozen', content: 'frozen', billingKnown: true, providerComplete: true, slotUsed: false,
       signal: new AbortController().signal, dispatch, claim, assertCurrent })).toBe(original)

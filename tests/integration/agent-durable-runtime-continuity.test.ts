@@ -216,7 +216,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       }
       if (scenario === 'terminal-contract3') {
         const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate' } })
-        expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: 20, reassessmentProtocol: 4 } } })
+        expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: 21, reassessmentProtocol: 5 } } })
         expect(saved.validation).toMatchObject({ independentCheck: 'complete', continuityCriticResponse: { responseContract: 3,
           responseNormalization: { repeated: [{ field: 'terminalVerdicts', index: 1, originalIndex: 0, address: 0 }] } } })
         expect(fetchMock).toHaveBeenCalledOnce()

@@ -17,11 +17,11 @@ import * as proposals from '../../api/lib/agent/terminal-proposal-context.js'
 import * as credits from '../../api/lib/credits.js'
 
 describe.runIf(available)('closed local candidate refusal is not an unknown provider request', () => {
-  it('the real tool records a local stale delta without dispatch, charging or changing the manuscript', () => fixture(async f => {
+  it.each([false, true])('the real tool records a local stale delta without dispatch, charging or changing the manuscript; saved candidate=%s', savedCandidate => fixture(async f => {
     await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0 } })
     const { compilation } = await prepareStoryCompilation({ ...f, mode: 'balanced', intentSummary: 'Review the saved chapter.' })
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-    await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: runtimeJson({
+    if (savedCandidate) await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: runtimeJson({
       terminalCandidate: terminalCandidateSchema.parse({ exitState: { objects: ['A sealed packet'] } }),
     }).value } })
     const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
@@ -34,6 +34,7 @@ describe.runIf(available)('closed local candidate refusal is not an unknown prov
     expect(result).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_INPUT_STALE', summary: '章末候选更新未应用',
       reviewRequestFinished: { version: 1, chapterId: chapter.id, revision: chapter.revision,
         contentHash: createHash('sha256').update(chapter.content).digest('hex'), usageIds: [] } })
+    expect(result.output).toContain(savedCandidate ? '当前服务器候选' : '当前尚无已保存候选')
     expect(network).not.toHaveBeenCalled()
     expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
     expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).toEqual(before)

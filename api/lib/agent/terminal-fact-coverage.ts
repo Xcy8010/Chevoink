@@ -92,6 +92,25 @@ export const addressedTerminalDispositionSchema = z.union([
   addressedDisposition.extend({ candidatePath: z.string().max(100).optional() }).strict(),
 ])
 
+/** The same strict single-row rules feed acceptance and repair diagnostics.
+ * A diagnostic result never certifies the whole report or discharges a fact. */
+export function terminalCoverageRowIssue(input: TerminalCoverageInput, item: z.infer<typeof terminalDispositionSchema>, candidate: TerminalCandidate,
+  verdicts: readonly { path: string; verdict: string }[], segments: Array<{ segmentId: string; quote: string }>) {
+  const invalid = (code: string, suffix = '') => ({ code, suffix })
+    const obligation = input.obligations.find(fact => fact.id === item.id)
+    if (!obligation) return invalid('fact_disposition_address_invalid', '.id')
+    if (item.sourceEvidence.some(ref => input.version === 2 ? !terminalQuoteRange(ref, segments)
+      : !segments.some(segment => segment.segmentId === ref.segmentId && segment.quote.includes(ref.quote)))) return invalid('fact_disposition_evidence_invalid', '.sourceEvidence')
+    if (item.outcome === 'unknown') return item.candidatePath !== undefined && invalid('unknown_disposition_has_target', '.candidatePath')
+    if (item.outcome === 'ended') return (item.candidatePath !== undefined || !item.sourceEvidence.length) && invalid('ended_disposition_invalid', '.sourceEvidence')
+    const match = /^exitState\.(knowledge|body|objects|relationships|openLoops)\.([0-9]+)$/u.exec(item.candidatePath ?? '')
+    if (!match || (match[1] !== obligation.field && (input.version !== 2 || !item.sourceEvidence.length))
+      || !candidate.exitState[field.parse(match[1])][Number(match[2])]) return invalid('replacement_target_invalid', '.candidatePath')
+    return !verdicts.some(verdict => verdict.path === item.candidatePath && verdict.verdict === 'supported')
+      && invalid('replacement_target_not_supported', '.candidatePath')
+
+}
+
 /** Quoted source existence is mechanical; the fresh critic owns whether the
  * whole fact ended or is represented by a new independently supported claim. */
 export function inspectTerminalCoverage(input: TerminalCoverageInput | undefined, raw: unknown,
@@ -120,18 +139,9 @@ export function inspectTerminalCoverage(input: TerminalCoverageInput | undefined
     diagnostics?.push({ code: 'fact_disposition_coverage_invalid', path: 'terminalDispositions' }); return null
   }
   if (parsed.data.some((item, index) => {
-    const invalid = (code: string, suffix = '') => { diagnostics?.push({ code, path: `terminalDispositions.${index}${suffix}` }); return true }
-    const obligation = input.obligations.find(fact => fact.id === item.id)
-    if (!obligation) return invalid('fact_disposition_address_invalid', '.id')
-    if (item.sourceEvidence.some(ref => input.version === 2 ? !terminalQuoteRange(ref, segments)
-      : !segments.some(segment => segment.segmentId === ref.segmentId && segment.quote.includes(ref.quote)))) return invalid('fact_disposition_evidence_invalid', '.sourceEvidence')
-    if (item.outcome === 'unknown') return item.candidatePath !== undefined && invalid('unknown_disposition_has_target', '.candidatePath')
-    if (item.outcome === 'ended') return (item.candidatePath !== undefined || !item.sourceEvidence.length) && invalid('ended_disposition_invalid', '.sourceEvidence')
-    const match = /^exitState\.(knowledge|body|objects|relationships|openLoops)\.([0-9]+)$/u.exec(item.candidatePath ?? '')
-    if (!match || (match[1] !== obligation.field && (input.version !== 2 || !item.sourceEvidence.length))
-      || !candidate.exitState[field.parse(match[1])][Number(match[2])]) return invalid('replacement_target_invalid', '.candidatePath')
-    return !verdicts.some(verdict => verdict.path === item.candidatePath && verdict.verdict === 'supported')
-      && invalid('replacement_target_not_supported', '.candidatePath')
+    const issue = terminalCoverageRowIssue(input, item, candidate, verdicts, segments)
+    if (issue) diagnostics?.push({ code: issue.code, path: `terminalDispositions.${index}${issue.suffix}` })
+    return !!issue
   })) return null
   return { ...(input.version === 2 ? { version: 2 as const } : {}), complete: parsed.data.every(item => item.outcome !== 'unknown'), dispositions: parsed.data }
 }

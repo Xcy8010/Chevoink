@@ -287,7 +287,7 @@ export function inspectTerminalReview(candidate: TerminalCandidate, content: str
 /** Shared source/quote/inheritance/exhaustiveness checks. No disposition
  * result and no supported/complete report is produced by this helper. */
 function inspectTerminalCandidateEvidenceBound(candidate: TerminalCandidate, content: string, raw: string, context?: TerminalEvidenceContext,
-  diagnostics?: TerminalReviewDiagnostic[], allowCurrentMetadata = false) {
+  diagnostics?: TerminalReviewDiagnostic[], allowCurrentMetadata = false, collectAll = false) {
   const invalid = (code: string, path?: string, referenceIndex?: number, segmentId?: string, expectedFact?: { field: string; claim: string }) => {
     diagnostics?.push({ code, ...(path ? { path } : {}), ...(referenceIndex !== undefined ? { referenceIndex } : {}), ...(segmentId ? { segmentId } : {}), ...(expectedFact ? { expectedFact } : {}) }); return null
   }
@@ -313,7 +313,7 @@ function inspectTerminalCandidateEvidenceBound(candidate: TerminalCandidate, con
     const claims = terminalClaims(candidate), verdicts = parsed.data
     const segments = [...continuitySourceSegments({ previous: null, current: content }), ...(context?.previous?.segments ?? []),
       ...(context?.previous?.carried ?? []).map(fact => ({ segmentId: fact.segmentId, quote: fact.anchors.map(anchor => anchor.quote).join('\n') }))]
-    for (const item of inheritedItems ?? []) {
+    const checkItem = (item: NonNullable<typeof inheritedItems>[number]) => {
       const supported = item.verdict === 'supported'
       if (item.basis === 'inherited' && ((context?.verdictProtocol === undefined || supported) && !/^exitState\.(knowledge|body|objects|relationships|openLoops)\./u.test(item.path)
         || supported && (item.inheritance?.priorEndState !== 'established' || item.inheritance.currentState !== 'unchanged'))) return invalid('inheritance_invalid', item.path)
@@ -332,7 +332,10 @@ function inspectTerminalCandidateEvidenceBound(candidate: TerminalCandidate, con
         if (context?.factCoverage?.version === 2 && !ref.segmentId.startsWith('t') ? !terminalQuoteRange(ref, segments)
           : !segments.some(segment => segment.segmentId === ref.segmentId && segment.quote.includes(ref.quote))) return invalid('evidence_quote_invalid', item.path, index, ref.segmentId)
       }
+      return undefined
     }
+    if (collectAll) { if ((inheritedItems ?? []).map(checkItem).some(value => value === null)) return null }
+    else for (const item of inheritedItems ?? []) if (checkItem(item) === null) return null
     if (verdicts.length !== claims.length || new Set(verdicts.map(item => item.path)).size !== verdicts.length
       || verdicts.some(item => !claims.some(claim => claim.path === item.path)
         || new Set(item.segmentIds).size !== item.segmentIds.length
@@ -342,10 +345,10 @@ function inspectTerminalCandidateEvidenceBound(candidate: TerminalCandidate, con
   } catch { return invalid('response_invalid') }
 }
 
-export function inspectTerminalCandidateEvidence(candidate: TerminalCandidate, content: string, record: Record<string, unknown>, context: TerminalEvidenceContext) {
+export function inspectTerminalCandidateEvidence(candidate: TerminalCandidate, content: string, record: Record<string, unknown>, context: TerminalEvidenceContext, diagnostics?: TerminalReviewDiagnostic[], collectAll = false) {
   if (context.verdictProtocol !== 6) return null
   const bound = bindTerminalCandidateAddresses(record, candidate, context)
-  return bound ? inspectTerminalCandidateEvidenceBound(candidate, content, JSON.stringify(bound), { ...context, verdictProtocol: 5 }, undefined, true) : null
+  return bound ? inspectTerminalCandidateEvidenceBound(candidate, content, JSON.stringify(bound), { ...context, verdictProtocol: 5 }, diagnostics, true, collectAll) : null
 }
 
 function inspectTerminalReviewBound(candidate: TerminalCandidate, content: string, raw: string, complete: boolean, context?: TerminalEvidenceContext,
@@ -433,9 +436,9 @@ export function terminalReviewFailure(validation: unknown, content: string, cont
     const updateGuidance = context.verdictProtocol === 4 || context.verdictProtocol === 5 || context.verdictProtocol === 6
       ? `按实际裁决用 terminalPatch={baseCandidateHash:${JSON.stringify(runtimeJson(review.candidate).hash)},removeFactIds:[],addFacts:[{field,claim}]} 只更新需要处理的候选，未指定项保留；当前事实地址：${JSON.stringify(terminalCandidateFacts(review.candidate).map(({ id, field, claim }) => ({ factId: id, field, claim })))}。也可提供完整 terminalState。更新后调用 continuity_validate；`
       : '按实际裁决更新 terminalState 后调用 continuity_validate；'
-    return { ...(context.verdictProtocol !== undefined ? {} : { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' }), reviewCompleted: true,
+    return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: true,
       summary: '终态候选尚未获独立证实',
-      output: `${proseReport ? proseReport.text + '\n' : ''}正文独立检查已完成，终态未提交。终态待处理候选或旧事实：${JSON.stringify({ disputed, unresolved, ...('proofChecks' in review ? { proofChecks: review.proofChecks } : {}) })}。其余已支持项无需同义重写。以本章明确完成证据判为 negated 的旧待办，可据该裁决移除或更新；unknown 不能删空，持续事实请使用已有核验的原字段/原主张证明并核对本章是否变化，不要求正文重述历史。保留事实主体、条件和未解决义务，不把状态误改成已完成。${updateGuidance}同一版本检查通过再 chapter_bridge_commit，${proseReport?.errors ? '正文仍有真实错误，按完整报告、当前证据和原授权处理后复核；终态待核不覆盖这些错误。' : '无需为终态候选改正文或重跑已通过的质量检查。'}${selection}` }
+      output: `${proseReport ? proseReport.text + '\n' : ''}本次检查尚未通过：独立正文报告已收到，但终态与持续事实尚未获证实，禁止称检查通过或提交。终态待处理候选或旧事实：${JSON.stringify({ disputed, unresolved, ...('proofChecks' in review ? { proofChecks: review.proofChecks } : {}) })}。其余已支持项无需同义重写。以本章明确完成证据判为 negated 的旧待办，可据该裁决移除或更新；unknown 不能删空，持续事实请使用已有核验的原字段/原主张证明并核对本章是否变化，不要求正文重述历史。保留事实主体、条件和未解决义务，不把状态误改成已完成。${updateGuidance}同一版本检查通过再 chapter_bridge_commit，${proseReport?.errors ? '正文仍有真实错误，按完整报告、当前证据和原授权处理后复核；终态待核不覆盖这些错误。' : '无需为终态候选改正文或重跑已通过的质量检查。'}${selection}` }
   }
   return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: !!review,
     summary: '终态候选尚未获正文证实',

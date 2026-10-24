@@ -80,7 +80,13 @@ describe('production-shaped invalid continuity response recovers without false p
     if (kind === 'raw-hash') validation.continuityCriticResponse.contentHash = 'b'.repeat(64)
     if (kind === 'body') f.content += ' changed'
     if (kind === 'context') f.context.current.revision++
-    expect(terminalReportCorrection(validation, f.content, f.context, null)).toBeNull()
+    const correction = terminalReportCorrection(validation, f.content, f.context, null)
+    if (kind === 'invented-quote') {
+      // An authenticated bad quote is repairable report data, never validated evidence.
+      expect(correction?.issues).toContainEqual({ path: 'exitState.action', reason: 'report_reference_invalid' })
+      expect(terminalReportRecoveryResult(validation, f.content, f.context, null)?.outcome).toBe('failed')
+      expect(currentTerminalReview(validation, f.content, f.context)).toBeNull()
+    } else expect(correction).toBeNull()
   })
   it.each(['billing', 'provider', 'slot'] as const)('keeps one existing paid recovery slot and never dispatches for unknown %s', async kind => {
     const f = continuityRecoveryFixture(), claim = vi.fn(async () => true), dispatch = vi.fn(async () => ({ content: JSON.stringify(f.patch), complete: true }))
