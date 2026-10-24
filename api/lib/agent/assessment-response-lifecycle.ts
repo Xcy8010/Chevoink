@@ -1,4 +1,5 @@
 import { continuitySparseRepairRequest, applyContinuitySparseRepair, continuitySparseRepairDiagnostics } from './continuity-response-repair.js'
+import { recoverEmptyOptionalProposalTable, sameEmptyOptionalProposalInput, validEmptyOptionalProposalProjection } from './continuity-empty-proposal-projection.js'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
@@ -134,6 +135,9 @@ export async function runContinuityReassessment(input: { original: Inspection; b
   if ((input.reassessmentProtocol === 3 || input.reassessmentProtocol === 4 || input.reassessmentProtocol === 5) !== (input.original.audit.responseContract === 3)) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '复核阶段响应版本不一致。')
   if (input.original.complete || !input.billingKnown || !input.providerComplete || input.slotUsed || !input.original.audit.rawResponse.complete) return input.original
   input.signal.throwIfAborted(); await input.assertCurrent()
+  input.signal.throwIfAborted()
+  const formatOnly = recoverEmptyOptionalProposalTable(input.original, input.bodies)
+  if (formatOnly) return formatOnly
   const request = continuityReassessmentRequest(input.system, input.content, input.original, input.bodies, false, input.reassessmentProtocol)
   if (!await input.claim(request)) return input.original
   try { input.signal.throwIfAborted(); await input.assertCurrent() } catch (error) {
@@ -325,13 +329,29 @@ export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClien
     }
   }
   const claimed = await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['fullReassessmentKey'], equals: key } } })
+  const completeFrame = (frame: Record<string, unknown> | null) => frame?.transportComplete === true && frame.finishReason === 'stop'
+    && typeof frame.content === 'string' && Array.isArray(frame.toolCalls) && !frame.toolCalls.length
+  if (!inspected.complete && known && completeFrame(response) && object(first.audit) && runtimeJson(original.audit).hash === runtimeJson(first.audit).hash
+    && (claimed ? (input.reassessmentProtocol === 3 || input.reassessmentProtocol === 4 || input.reassessmentProtocol === 5)
+      && completeFrame(secondResponse) && second && (() => {
+      const meta = object(claimed.metadata)
+      const observed = inspectContinuityResponse(JSON.parse(secondResponse!.content as string) as string, input.bodies, true,
+        input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope, { responseContract: 3 })
+      return meta && object(meta.input) && object(meta.original) && object(meta.request)
+        && object(second.audit) && runtimeJson(observed.audit).hash === runtimeJson(second.audit).hash
+        && runtimeJson(meta.input).hash === runtimeJson(input).hash && runtimeJson(meta.original).hash === runtimeJson(original.audit).hash
+        && runtimeJson(meta.request).hash === runtimeJson(continuityReassessmentRequest(input.system, input.content, original, input.bodies, false, input.reassessmentProtocol)).hash
+    })() : secondFrames.length === 0)) {
+    const projected = recoverEmptyOptionalProposalTable(original, input.bodies, claimed && second
+      && (input.reassessmentProtocol === 3 || input.reassessmentProtocol === 4 || input.reassessmentProtocol === 5)
+      ? { audit: second.audit, protocol: input.reassessmentProtocol } : undefined)
+    if (projected) { inspected = projected; secondApplied = !!claimed }
+  }
   // A newly interpretable primary cannot erase an already claimed second
   // request or its unknown fees. Require the actual complete final report.
   if (original.complete && claimed && !secondApplied || inspected.complete && !known) {
     throw new DataAccessError(409, 'CONTINUITY_REPORT_INCOMPLETE', '原复核仍有未确认请求、用量或无效终态报告；保留原始记录，未复用或重发。')
   }
-  const completeFrame = (frame: Record<string, unknown> | null) => frame?.transportComplete === true && frame.finishReason === 'stop'
-    && typeof frame.content === 'string' && Array.isArray(frame.toolCalls) && !frame.toolCalls.length
   const recoveryReady = known && completeFrame(response) && (!claimed || completeFrame(secondResponse))
     && usage.filter(row => !isKnownRejectedTextRequestAttempt(row)).every(row => frames.some(frame =>
       Array.isArray(frame.usageIds) && frame.usageIds.includes(row.id) && completeFrame(object(frame.response))))
@@ -382,17 +402,28 @@ export async function readReusableLegacyContinuityAssessment(tx: Prisma.Transact
   const task = await readOriginalTaskRequest(tx, ctx), runIds = await originalTaskRunIds(tx, ctx, task)
   const reservations = await tx.agentArtifact.findMany({ where: { runId: { in: runIds }, artifactType: 'continuityReview',
     metadata: { path: ['assessmentChapterId'], equals: input.chapterId } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
-  const latest = reservations.find(row => {
+  const exact = reservations.find(row => {
     const frozen = object(object(row.metadata)?.input)
     return frozen && runtimeJson(frozen).hash === runtimeJson(input).hash
   })
+  // New rendered guidance cannot buy a second interpretation of this exact
+  // settled report. Only this versioned projection has a content-only fallback;
+  // ordinary reuse keeps its original whole-input equality rule.
+  const compatible = reservations.find(row => row.runId === ctx.runId && sameEmptyOptionalProposalInput(object(row.metadata)?.input, input))
+  const latest = exact ?? compatible
   const meta = object(latest?.metadata)
   if (!latest || typeof meta?.callId !== 'string') return null
   const source = { ...ctx, runId: latest.runId, callId: meta.callId }
   try {
-    const result = await readLegacyContinuityAssessment(tx, source, input)
+    const frozen = exact ? input : meta.input as LegacyAssessmentInput
+    if (!exact && meta.continuityAssessmentRequestKey !== assessmentKey(source, frozen)) return null
+    const result = await readLegacyContinuityAssessment(tx, source, frozen)
     if (!result.billingKnown || !result.providerComplete || !result.inspected.complete) return null
-    return bindLegacyContinuityAssessment(result.inspected, source, input)
+    const projection = object((result.inspected.audit as Record<string, unknown>).formatProjection)
+    if (!exact && (!result.recoveryReady || projection?.kind !== 'empty_optional_proposal_table' || projection.version !== 1
+      || !validEmptyOptionalProposalProjection(result.inspected.audit, input.bodies.current, input.bodies.terminalEvidence))) return null
+    if (projection?.kind === 'empty_optional_proposal_table' && compatible?.id !== latest.id) return null
+    return bindLegacyContinuityAssessment(result.inspected, source, frozen)
   } catch { return null }
 }
 

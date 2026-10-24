@@ -16,6 +16,7 @@ import { terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalV
 export { terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalVerdictSchema, terminalSpanVerdictSchema,
   terminalFactVerdictSchema, terminalJointFactVerdictSchema } from './terminal-review-shapes.js'
 import { validContinuitySparseProjection } from './continuity-response-repair.js'
+import { validEmptyOptionalProposalProjection } from './continuity-empty-proposal-projection.js'
 import { bindTerminalCandidateAddresses, bindTerminalReviewAddresses, terminalReviewAddressInput, normalizeTerminalResponseRows } from './terminal-review-addresses.js'
 
 /** Selection is a tool input only; saved candidates and paid audits retain their
@@ -215,7 +216,7 @@ export function terminalClaims(candidate: TerminalCandidate) {
 }
 
 export function terminalReviewInput(candidate?: TerminalCandidate, context?: TerminalEvidenceContext): string {
-  if (candidate && context?.verdictProtocol === 6) return `本次冻结复核目录：${JSON.stringify(terminalReviewAddressInput(candidate, context))}\n只使用目录的短整数地址，不返回或猜测内部hash。ordinary按claimIndex穷尽返回terminalVerdicts={claimIndex,verdict,sourceEvidence:[{segmentId,quote?}],inheritance?}；proofs按proofIndex穷尽返回terminalProofVerdicts={proofIndex,currentState,reason}，独立判断本章是否改变该已认证持续事实，unchanged须核对本章全文，changed/uncertain保持未知，不视为事实已结束。两表由服务端分组，不能串用地址。普通verdict仍为supported/unknown/planned/negated/attributed；当前动作、位置、时间、情绪和未完成动作只能用当前cN；knowledge/body/objects/relationships/openLoops持续事实可结合本章cN与紧邻前章pN，但完整主张与继承状态均须成立，按原证据规则给inheritance。指令、分工、打算、引用和推测不证明动作已完成，完整对象、持有者、时间和方位须一致。\nobligations是已验证事实，按obligationIndex穷尽返回terminalDispositions={obligationIndex,outcome,reason,sourceEvidence,candidateIndex?}，outcome仍为replaced/ended/unknown；替代只能指向本次独立supported的candidateIndex，ended须当前正文证据，未知保留。proposals是未证实旧提议，逐proposalIndex恰好返回proposalDispositions={proposalIndex,outcome,reason,sourceEvidence,candidateIndex?}，outcome为replaced/retracted/unknown；retracted须独立核对当前原文，不能因未提及、地址错误或为了清零而撤回，更不能解除obligations。sourceEvidence保持原cN/pN目录及逐字引文要求，段落地址不等于语义成立。所有地址只在本请求有效；没有某类条目时返回空数组或按schema省略，不能虚构条目。findings与两项semanticChecks仍完整核验，不因终态地址简化而减少独立判断。`
+  if (candidate && context?.verdictProtocol === 6) return `本次冻结复核目录：${JSON.stringify(terminalReviewAddressInput(candidate, context))}\n只使用目录的短整数地址，不返回或猜测内部hash。ordinary按claimIndex穷尽返回terminalVerdicts={claimIndex,verdict,sourceEvidence:[{segmentId,quote?}],inheritance?}；proofs按proofIndex穷尽返回terminalProofVerdicts={proofIndex,currentState,reason}，独立判断本章是否改变该已认证持续事实，unchanged须核对本章全文，changed/uncertain保持未知，不视为事实已结束。两表由服务端分组，不能串用地址。普通verdict仍为supported/unknown/planned/negated/attributed；当前动作、位置、时间、情绪和未完成动作只能用当前cN；knowledge/body/objects/relationships/openLoops持续事实可结合本章cN与紧邻前章pN，但完整主张与继承状态均须成立，按原证据规则给inheritance。指令、分工、打算、引用和推测不证明动作已完成，完整对象、持有者、时间和方位须一致。\nobligations是已验证事实，按obligationIndex穷尽返回terminalDispositions={obligationIndex,outcome,reason,sourceEvidence,candidateIndex?}，outcome仍为replaced/ended/unknown；替代只能指向本次独立supported的candidateIndex，ended须当前正文证据，未知保留。proposals是未证实旧提议，逐proposalIndex恰好返回proposalDispositions={proposalIndex,outcome,reason,sourceEvidence,candidateIndex?}，outcome为replaced/retracted/unknown；retracted须独立核对当前原文，不能因未提及、地址错误或为了清零而撤回，更不能解除obligations。sourceEvidence保持原cN/pN目录及逐字引文要求，段落地址不等于语义成立。所有地址只在本请求有效；没有条目的证明或持续事实表按schema返回空数组；本次没有proposals目录条目时必须省略proposalDispositions字段，不返回空数组，不能虚构条目。findings与两项semanticChecks仍完整核验，不因终态地址简化而减少独立判断。`
   return terminalReviewInputBase(candidate, context) + terminalProposalGuidance(context?.proposalChanges)
 }
 
@@ -438,7 +439,7 @@ export function currentTerminalReview(validation: unknown, content: string, expe
   const candidate = readTerminalCandidate(validation)
   const audit = record.continuityCriticResponse as { parserVersion?: number; terminalEvidence?: unknown; terminalCandidate?: unknown; terminalContentHash?: unknown; rawResponse?: { content?: unknown; complete?: boolean }; responseContract?: unknown } | undefined
   const frozenCandidate = terminalCandidateSchema.safeParse(audit?.terminalCandidate)
-  if (!validContinuitySparseProjection(audit, content, expectedContext)) return null
+  if (!validEmptyOptionalProposalProjection(audit, content, expectedContext) || !validContinuitySparseProjection(audit, content, expectedContext)) return null
   if (!candidate || !frozenCandidate.success || runtimeJson(candidate).hash !== runtimeJson(frozenCandidate.data).hash
     || audit?.terminalContentHash !== runtimeJson({ content }).hash
     || audit?.rawResponse?.complete !== true || typeof audit.rawResponse.content !== 'string') return null
