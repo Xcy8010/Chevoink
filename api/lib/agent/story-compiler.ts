@@ -816,8 +816,12 @@ export async function validateStoryContinuity(input: {
     && runtimeJson((validation.continuityCriticResponse as Record<string, unknown>).terminalEvidence).hash !== runtimeJson(terminalContext).hash) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查期间持续事实覆盖义务已变化；保留原请求和结果，不将旧核验绑定当前候选。')
   }
-  const terminalReview = terminalContext ? currentTerminalReview(validation, compilation.chapter.content, terminalContext,
-    authorRequest ? { taskId: terminalProposalTaskId(authorRequest.spec, authorRequest.taskId), preparedContext: compilation.preparedContext } : undefined) : null
+  const deliveryBinding = terminalContext && authorRequest && input.runId ? await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(db,
+    { ...input, runId: input.runId, compilationId: compilation.id }, { taskId: terminalProposalTaskId(authorRequest.spec, authorRequest.taskId),
+      preparedContext: proposalPreparation ? { ...(compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext : {}),
+        terminalProposalReview: proposalPreparation.state } : compilation.preparedContext },
+    compilation.chapter, validation, terminalContext) : undefined
+  const terminalReview = terminalContext ? currentTerminalReview(validation, compilation.chapter.content, terminalContext, deliveryBinding) : null
   const nextFactCoverage = terminalReview ? advanceTerminalCoverage(authorRequest?.spec, compilation.preparedContext, compilation.chapter, terminalReview, terminalContext?.factCoverage) : undefined
   const nextProposals = proposalPreparation && (terminalReview && proposalPreparation.changes
     ? advanceTerminalProposals(proposalPreparation.state, proposalPreparation.changes, terminalReview) : proposalPreparation.state)
@@ -850,9 +854,11 @@ export async function commitChapterBridge(input: {
   decisionOnly?: true
   requireQuality?: boolean
   qualityReportId?: string
+  terminalDraftScope?: import('./terminal-draft-authority.js').TerminalDraftReadScope
 }, transaction?: Prisma.TransactionClient): Promise<{ compilationId: string; chapterId: string; chapterRevision: number; skippedMemoryCount: number; retainedIssueCount: number; decisionOnly?: true; decisionChanged?: boolean; decisionProgress?: { targetId: string; beforeHash: string; afterHash: string } }> {
   if (!transaction) return prisma.$transaction(tx => commitChapterBridge(input, tx))
   const db = transaction
+  const terminalDraftScope = input.terminalDraftScope ?? new WeakMap()
   await lockNovelActiveScope(db, input.novelId)
   let scope: Prisma.StoryCompilationWhereInput = {}
   if (input.runId) {
@@ -892,10 +898,10 @@ export async function commitChapterBridge(input: {
   const probeRunId = input.runId ?? compilation.runId
   const { readChapterReviewReadiness, readCurrentCompilerContinuity, terminalReviewStateHash, recordChapterReviewDecisions, chapterReviewDecisionGuidance, lockChapterReviewDecisions } = await import('./chapter-review-guard.js')
   const currentContinuityReview = readCurrentCompilerContinuity({ ...compilation, bridge: compilation.bridge }, compilation.chapter, source)
-  let readiness = probeRunId ? await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id) : null
+  let readiness = probeRunId ? await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id, { terminalDraftScope }) : null
   if (readiness?.qualityReportId) {
     await lockChapterReviewDecisions(db, readiness.qualityReportId)
-    readiness = await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId! }, compilation.id)
+    readiness = await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId! }, compilation.id, { terminalDraftScope })
   }
   if (readiness && !readiness.ready) {
     const required = readiness.requiredTools[0]!
@@ -910,7 +916,7 @@ export async function commitChapterBridge(input: {
   if (input.retainedFindings?.length) {
     if (!probeRunId || !readiness) throw new DataAccessError(409, 'REVIEW_DECISION_REQUIRED', '当前任务没有可核验的章节检查记录，未保存留置。')
     decisionChanged = await recordChapterReviewDecisions(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, readiness, input.retainedFindings)
-    readiness = await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id)
+    readiness = await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id, { terminalDraftScope })
 
   }
   if (input.decisionOnly) {
@@ -963,8 +969,10 @@ export async function commitChapterBridge(input: {
     terminalCoverageInput(terminalRequest?.spec, compilation.preparedContext, { ...compilation.chapter, ...chapter }, reviewedCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(source, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined
   if (reviewedEvidence && reviewedCandidate && terminalRequest) reviewedEvidence = attachTerminalProposalInput(reviewedEvidence, { taskId: terminalProposalTaskId(terminalRequest.spec, terminalRequest.taskId),
     preparedContext: compilation.preparedContext, validation: compilation.validation, candidate: reviewedCandidate })
-  const terminalReview = currentTerminalReview(compilation.validation, chapter.content, reviewedEvidence,
-    terminalRequest ? { taskId: terminalProposalTaskId(terminalRequest.spec, terminalRequest.taskId), preparedContext: compilation.preparedContext } : undefined)
+  const deliveryBinding = terminalRequest && probeRunId ? await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(db,
+    { ...input, runId: probeRunId, compilationId: compilation.id }, { taskId: terminalProposalTaskId(terminalRequest.spec, terminalRequest.taskId), preparedContext: compilation.preparedContext },
+    { ...compilation.chapter, ...chapter }, compilation.validation, reviewedEvidence, terminalDraftScope) : undefined
+  const terminalReview = currentTerminalReview(compilation.validation, chapter.content, reviewedEvidence, deliveryBinding)
   if (outstandingFacts || reviewedCandidate || terminalClaims(proposedTerminal).length) {
     if (!currentContinuityReview.assessment || !reviewedCandidate || !terminalReview?.deliveryEligibility.eligible
       || runtimeJson(reviewedCandidate).hash !== runtimeJson(proposedTerminal).hash) {

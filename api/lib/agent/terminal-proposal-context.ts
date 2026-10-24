@@ -3,7 +3,7 @@ import { continuityReassessmentDiagnostics } from './continuity-response-contrac
 import { DataAccessError } from '../prisma.js'
 import { z } from 'zod'
 import { runtimeJson } from './runtime-common.js'
-import { readTerminalCandidate, currentTerminalReview, type TerminalCandidate } from './terminal-state-review.js'
+import { readTerminalCandidate, currentTerminalReview, type TerminalCandidate, type TerminalDeliveryBinding } from './terminal-state-review.js'
 import { terminalCandidateCorrection } from './terminal-candidate-feedback.js'
 import { terminalFactId } from './terminal-fact-identity.js'
 import { readTerminalProposalInput, readTerminalProposalState, stageTerminalProposals, type TerminalProposalState } from './terminal-proposal-review.js'
@@ -115,13 +115,13 @@ export function prepareCompilerTerminalProposals(input: { spec: unknown; prepare
 /** An unresolved proposal upgraded to a verified obligation changes the input
  * even when the manuscript and candidate are identical. Resolved reports keep
  * their original full input and remain reusable without another request. */
-export function terminalProposalCacheMatches(input: Parameters<typeof prepareCompilerTerminalProposals>[0]) {
+export function terminalProposalCacheMatches(input: Parameters<typeof prepareCompilerTerminalProposals>[0], deliveryBinding?: TerminalDeliveryBinding) {
   if (object(input.preparedContext).terminalProposalReview === undefined) return true
   const taskId = terminalProposalTaskId(input.spec)
   const state = readTerminalProposalState(input.preparedContext, { taskId, chapterId: input.chapter.id })
   if (!state?.pending.length) return true
   const current = currentTerminalReview(input.validation, input.chapter.content, input.nextContext,
-    { taskId, preparedContext: input.preparedContext })
+    deliveryBinding ?? { taskId, preparedContext: input.preparedContext })
   if (current?.deliveryEligibility.basis === 'current_supported_with_preserved_drafts') return true
   const proposed = prepareCompilerTerminalProposals(input)
   return runtimeJson({ changes: proposed?.changes ?? null }).hash === runtimeJson({ changes: input.nextContext.proposalChanges ?? null }).hash

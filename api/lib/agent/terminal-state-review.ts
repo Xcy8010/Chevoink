@@ -17,6 +17,7 @@ export { terminalVerdictSchema, inheritedTerminalVerdictSchema, sourcedTerminalV
   terminalFactVerdictSchema, terminalJointFactVerdictSchema } from './terminal-review-shapes.js'
 import { validContinuitySparseProjection } from './continuity-response-repair.js'
 import { validEmptyOptionalProposalProjection } from './continuity-empty-proposal-projection.js'
+import { authenticatedTerminalDraftIds, terminalDraftIdentity } from './terminal-draft-authority.js'
 import { bindTerminalCandidateAddresses, bindTerminalReviewAddresses, terminalReviewAddressInput, normalizeTerminalResponseRows } from './terminal-review-addresses.js'
 
 /** Selection is a tool input only; saved candidates and paid audits retain their
@@ -396,16 +397,23 @@ export function readTerminalCandidate(validation: unknown): TerminalCandidate | 
   return parsed.success ? parsed.data : undefined
 }
 
+/** Ledger/proposal IDs are read-only. Only one exact current field/claim can
+ * supply an edit address; semantic similarity never authorizes a removal. */
+export function currentCandidateEditAddress(candidate: TerminalCandidate, field: string | undefined, claim: string | undefined) {
+  const matches = terminalCandidateFacts(candidate).filter(fact => fact.field === field && fact.claim === claim)
+  return matches.length === 1 ? { factId: matches[0].id } : null
+}
+
 /** Reparse the saved independent response against today's body. A main-agent
  * supplied proof/quote is never accepted as a semantic attestation. */
-export type TerminalDeliveryBinding = { taskId: string; preparedContext: unknown }
+export type TerminalDeliveryBinding = { taskId: string; preparedContext: unknown; userId?: string; novelId?: string; compilationId?: string; draftAuthority?: object }
 export type TerminalDeliveryEligibility = { version: 1; basis: 'fully_supported' | 'current_supported_with_preserved_drafts' | 'blocked';
   eligible: boolean; preservedUnknownProposalIds: string[] }
 
 /** Delivery may preserve superseded, unverified transient drafts. This never
  * changes independent verdicts, resolves a proposal or discharges a real fact. */
 function terminalDeliveryEligibility(review: NonNullable<ReturnType<typeof inspectTerminalReview>>, context?: TerminalEvidenceContext,
-  binding?: TerminalDeliveryBinding): TerminalDeliveryEligibility {
+  binding?: TerminalDeliveryBinding, auditHash = ''): TerminalDeliveryEligibility {
   const unknown = review.proposals?.dispositions.filter(item => item.outcome === 'unknown') ?? []
   const preservedUnknownProposalIds = unknown.map(item => item.id)
   const result = (eligible: boolean, basis: TerminalDeliveryEligibility['basis']): TerminalDeliveryEligibility => ({ version: 1, basis, eligible, preservedUnknownProposalIds })
@@ -423,10 +431,11 @@ function terminalDeliveryEligibility(review: NonNullable<ReturnType<typeof inspe
     const current = new Set(terminalCandidateFacts(review.candidate).map(item => item.id))
     const verified = new Set([...input.verifiedFactIds, ...(context.factCoverage?.obligations.map(item => item.id) ?? []),
       ...(context.previous?.carried?.map(item => terminalFactId(item.field, item.claim)) ?? [])])
+    const authenticatedDrafts = authenticatedTerminalDraftIds(binding.draftAuthority, terminalDraftIdentity(binding, context, review.candidateHash, auditHash))
     const eligible = unknown.every(item => {
       const proposal = input.proposals.find(proposal => proposal.id === item.id)
       return proposal && state.pending.some(pending => runtimeJson(pending).hash === runtimeJson(proposal).hash)
-        && ['action', 'location', 'storyTime', 'emotion'].includes(proposal.field)
+        && (['action', 'location', 'storyTime', 'emotion'].includes(proposal.field) || authenticatedDrafts.includes(proposal.id))
         && !current.has(proposal.id) && !verified.has(proposal.id)
         && proposal.origin.bodyHash === identity.bodyHash && proposal.origin.sourceHash === identity.sourceHash
     })
@@ -447,7 +456,7 @@ export function currentTerminalReview(validation: unknown, content: string, expe
   try {
     const raw: unknown = JSON.parse(audit.rawResponse.content)
     const review = typeof raw === 'string' && (audit.responseContract === undefined || audit.responseContract === 3) ? inspectTerminalReview(candidate, content, raw, record.independentCheck === 'complete', expectedContext, undefined, audit.responseContract === 3 ? { responseContract: 3 } : {}) : null
-    return review ? { ...review, deliveryEligibility: terminalDeliveryEligibility(review, expectedContext, binding) } : null
+    return review ? { ...review, deliveryEligibility: terminalDeliveryEligibility(review, expectedContext, binding, runtimeJson(audit).hash) } : null
   } catch { return null }
 }
 
@@ -462,11 +471,14 @@ export function terminalReviewFailure(validation: unknown, content: string, cont
     const disputed = review.verdicts.filter(item => item.verdict !== 'supported').map(item => ({ path: item.path,
       claim: claims.find(claim => claim.path === item.path)?.claim ?? '', verdict: item.verdict,
       ...('sourceEvidence' in item ? { sourceEvidence: item.sourceEvidence } : {}) }))
-    const unresolved = review.factCoverage?.dispositions.filter(item => item.outcome === 'unknown').map(item => ({ ...item,
-      fact: context.factCoverage?.obligations.find(fact => fact.id === item.id) })) ?? []
+    const unresolved = review.factCoverage?.dispositions.filter(item => item.outcome === 'unknown').map(item => {
+      const fact = context.factCoverage?.obligations.find(fact => fact.id === item.id)
+      return { ...item, readOnlyCoverageId: item.id, fact, currentCandidateEditAddress: currentCandidateEditAddress(review.candidate, fact?.field, fact?.claim) }
+    }) ?? []
     const proposals = review.proposals?.dispositions.filter(item => item.outcome === 'unknown').map(item => {
       const proposal = context.proposalChanges?.proposals.find(proposal => proposal.id === item.id)
-      return { ...item, ...(proposal ? { field: proposal.field, claim: proposal.claim } : {}) }
+      return { ...item, readOnlyProposalId: item.id, ...(proposal ? { field: proposal.field, claim: proposal.claim } : {}),
+        currentCandidateEditAddress: currentCandidateEditAddress(review.candidate, proposal?.field, proposal?.claim) }
     }) ?? []
     const selectable = context.previous?.carried?.filter(fact => fact.depth < 16
       && context.previous!.carried!.filter(other => other.proofHash === fact.proofHash).length === 1
@@ -476,7 +488,7 @@ export function terminalReviewFailure(validation: unknown, content: string, cont
       .map(({ proofHash, field, claim }) => ({ proofHash, field, claim })) ?? []
     const selection = selectable.length ? `\n可显式选择的当前有效证明：${JSON.stringify(selectable)}。保持同一 compilationId，可只传顶层 inheritedProofs=[所选proofHash]，服务端在本任务已保存候选上还原原字段与完整主张；这只是待核选择，仍须独立判断本章是否改变。不要复制临时编号或手拼旧事实。` : ''
     const updateGuidance = context.verdictProtocol === 4 || context.verdictProtocol === 5 || context.verdictProtocol === 6
-      ? `按实际裁决用 terminalPatch={baseCandidateHash:${JSON.stringify(runtimeJson(review.candidate).hash)},removeFactIds:[],addFacts:[{field,claim}]} 只更新需要处理的候选，未指定项保留；当前事实地址：${JSON.stringify(terminalCandidateFacts(review.candidate).map(({ id, field, claim }) => ({ factId: id, field, claim })))}。也可提供完整 terminalState。更新后调用 continuity_validate；`
+      ? `按实际裁决用 terminalPatch={baseCandidateHash:${JSON.stringify(runtimeJson(review.candidate).hash)},removeFactIds:[],addFacts:[{field,claim}]} 只更新需要处理的候选，未指定项保留；当前事实地址：${JSON.stringify(terminalCandidateFacts(review.candidate).map(({ id, field, claim }) => ({ factId: id, field, claim })))}。removeFactIds 只能使用本次当前事实地址或非空 currentCandidateEditAddress.factId；readOnlyCoverageId、readOnlyProposalId 仅用于核对旧记录，不能当作候选删除地址。删除候选不解除持续事实或旧提议的独立处置要求。也可提供完整 terminalState。更新后调用 continuity_validate；`
       : '按实际裁决更新 terminalState 后调用 continuity_validate；'
     return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: true,
       summary: '终态候选尚未获独立证实',

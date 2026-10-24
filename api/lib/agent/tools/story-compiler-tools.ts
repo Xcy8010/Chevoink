@@ -1012,8 +1012,11 @@ export const continuityValidateTool = defineTool({
     const parsedCachedValidation = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number().int(), coverage: z.unknown().optional(),
       findings: z.array(continuityFindingInputSchema), errorCount: z.number().int().nonnegative().optional(), warningCount: z.number().int().nonnegative().optional() }).safeParse(compilation.validation)
     const cachedValidation = parsedCachedValidation.success ? parsedCachedValidation.data : null
+    const cacheDeliveryBinding = cachedValidation ? await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(prisma,
+      { ...ctx, compilationId: compilation.id }, { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: compilation.preparedContext },
+      chapter, compilation.validation, terminalEvidence) : undefined
     const proposalCacheCurrent = !terminalEvidence || !terminalCandidate || terminalProposalCacheMatches({ spec: originalRequest.spec,
-      preparedContext: compilation.preparedContext, validation: compilation.validation, chapter, source: sourceChapter, candidate: terminalCandidate, nextContext: terminalEvidence })
+      preparedContext: compilation.preparedContext, validation: compilation.validation, chapter, source: sourceChapter, candidate: terminalCandidate, nextContext: terminalEvidence }, cacheDeliveryBinding)
     if (sourceUnchanged && proposalCacheCurrent && cachedValidation?.independentCheck === 'complete' && cachedValidation.checkedRevision === chapter.revision && compilerContinuityCoverageMatches(cachedValidation.coverage, coverage)) {
       const findings = cachedValidation.findings ?? []
       const errorCount = cachedValidation.errorCount ?? findings.filter((item) => item.severity === 'error').length
@@ -1027,7 +1030,7 @@ export const continuityValidateTool = defineTool({
       const repairGuidance = errorCount > 0 ? await prisma.$transaction(tx => readChapterReviewRevisionGuidance(tx, ctx, chapter)) : ''
       const terminalFailure = terminalReviewFailure({ ...result, continuityCriticResponse: (compilation.validation as Record<string, unknown>)?.continuityCriticResponse }, chapter.content, cachedEvidence,
         { errors: errorCount, text: `连续性完整报告：${errorCount} 错误、${warningCount} 警告。${repairGuidance}\nreportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...cachedValidation, checkedChapterId: chapter.id })}\n${findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` },
-        { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: compilation.preparedContext })
+        cacheDeliveryBinding)
       if (terminalFailure) return terminalFailure
       return {
         output: `当前 r${chapter.revision} 已完成连续性检查，直接复用结果：${errorCount} 个错误、${warningCount} 个警告；${errorCount ? repairGuidance : '连续性检查已完成；警告保留待审，不自动改正文。'}\n留置绑定 reportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...cachedValidation, checkedChapterId: chapter.id })}；findingId 使用从0开始的编号。\n${findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}`,
@@ -1249,7 +1252,9 @@ export const continuityValidateTool = defineTool({
     const terminalFailure = terminalReviewFailure({ ...result, continuityCriticResponse: continued ? continued.originalAudit : inspected.audit }, chapter.content,
       continued ? terminalEvidence : inspected.audit.terminalEvidence ?? terminalEvidence,
       { errors: result.errorCount, text: `连续性完整报告：${result.errorCount} 错误、${result.warningCount} 警告。${repairGuidance}\nreportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...result, coverage })}\n${result.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` },
-      { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: savedTerminalBinding.preparedContext })
+      await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(prisma, { ...ctx, compilationId: compilation.id },
+        { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: savedTerminalBinding.preparedContext }, chapter,
+        { ...result, continuityCriticResponse: continued ? continued.originalAudit : inspected.audit }, continued ? terminalEvidence : inspected.audit.terminalEvidence ?? terminalEvidence))
     if (terminalFailure) return terminalFailure
     const phase = result.errorCount > 0 ? 'repair' : 'check'
     return {
@@ -1343,8 +1348,9 @@ export const chapterBridgeCommitTool = defineTool({
       terminalCoverageInput(commitRequest.spec, compilation.preparedContext, compilation.chapter, savedCommitCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(commitSource, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined
     if (commitEvidence && savedCommitCandidate) commitEvidence = attachTerminalProposalInput(commitEvidence, { taskId: terminalProposalTaskId(commitRequest.spec, commitRequest.taskId),
       preparedContext: compilation.preparedContext, validation: compilation.validation, candidate: savedCommitCandidate })
-    const reviewedTerminal = currentTerminalReview(compilation.validation, compilation.chapter.content, commitEvidence,
-      { taskId: terminalProposalTaskId(commitRequest.spec, commitRequest.taskId), preparedContext: compilation.preparedContext })
+    const deliveryBinding = await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(db, { ...ctx, compilationId: compilation.id },
+      { taskId: terminalProposalTaskId(commitRequest.spec, commitRequest.taskId), preparedContext: compilation.preparedContext }, compilation.chapter, compilation.validation, commitEvidence)
+    const reviewedTerminal = currentTerminalReview(compilation.validation, compilation.chapter.content, commitEvidence, deliveryBinding)
     const lastExit = storyStateSchema.parse(args.exitState ?? args.terminalState?.exitState ?? reviewedTerminal?.candidate.exitState ?? {})
     const paragraphs = compilation.chapter.content.split(/\n\s*\n/u).map(text => text.trim()).filter(Boolean)
     const terminal = {

@@ -17,7 +17,7 @@ import { hasReadOnlyRevisionAssessment, localEditGuidance, localRevisionAuthorit
 import { beginReviewCycle, projectReviewCycle, projectReviewCycleWrite, readReviewCycle, reviewCycleFinding, reviewCycleRefKey,
   type ReviewCycleFinding } from './review-cycle.js'
 import { observedReviewCycleVerification, prepareReviewCycleTransition } from './review-cycle-store.js'
-import { readTerminalCandidate, currentTerminalReview } from './terminal-state-review.js'
+import { readTerminalCandidate, currentTerminalReview, currentCandidateEditAddress } from './terminal-state-review.js'
 import { terminalEvidenceContext, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalVerdictAuditVersion, terminalSpanAuditVersion } from './terminal-evidence-context.js'
 import { terminalCoverageInput, terminalCoverageAuditVersion, terminalCoverageProofs } from './terminal-fact-coverage.js'
 import { terminalReportCorrection } from './terminal-report-recovery.js'
@@ -65,7 +65,8 @@ export type ChapterReviewReadiness = {
     /** True only after replaying the independent response against current bound evidence. */
     currentResultVerified?: boolean;
     deliveryEligible?: boolean;
-    unresolved: Array<{ path: string; verdict: string; field?: string; claim?: string; reason?: string }> }
+    unresolved: Array<{ path: string; verdict: string; field?: string; claim?: string; reason?: string;
+      readOnlyCoverageId?: string; readOnlyProposalId?: string; currentCandidateEditAddress?: { factId: string } | null }> }
   /** Server-only mutation proof projection; ordinary read tools never request it. */
   reviewBoundEvidence?: ReviewBoundEvidence
   reviewCycle?: ReturnType<typeof projectReviewCycle>
@@ -156,7 +157,7 @@ export function readCurrentCompilerContinuity(compilation: {
  * Callers dispatch only the returned tools through the ordinary tool journal. */
 export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string }, compilationId?: string,
-  options?: { reviewBoundEvidence: true }): Promise<ChapterReviewReadiness | null> {
+  options?: { reviewBoundEvidence?: true; terminalDraftScope?: import('./terminal-draft-authority.js').TerminalDraftReadScope }): Promise<ChapterReviewReadiness | null> {
   const original = await readOriginalTaskRequest(tx, subject)
   const runIds = await originalTaskRunIds(tx, subject, original)
   const compilation = await tx.storyCompilation.findFirst({ where: { userId: subject.userId, novelId: subject.novelId, runId: { in: runIds },
@@ -350,8 +351,9 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
       factCoverage, terminalVerdictAuditVersion(validation), terminalSpanAuditVersion(validation))
     if (terminalCandidate && (validation as { continuityCriticResponse?: { terminalContentHash?: string } } | null)?.continuityCriticResponse?.terminalContentHash === evidence.current.contentHash) evidence = attachTerminalProposalInput(evidence, { taskId: terminalProposalTaskId(original.spec, original.taskId),
       preparedContext: compilation.preparedContext, validation, candidate: terminalCandidate })
-    const terminal = assessment ? currentTerminalReview(validation, chapter.content, evidence,
-      { taskId: terminalProposalTaskId(original.spec, original.taskId), preparedContext: compilation.preparedContext }) : null
+    const deliveryBinding = assessment ? await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(tx,
+      { ...subject, compilationId: compilation.id }, { taskId: terminalProposalTaskId(original.spec, original.taskId), preparedContext: compilation.preparedContext }, chapter, validation, evidence, options?.terminalDraftScope) : undefined
+    const terminal = assessment ? currentTerminalReview(validation, chapter.content, evidence, deliveryBinding) : null
     if (continuity === 'incomplete' && validation && compilerContinuityCoverageMatches(validation.coverage,
       compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source,
         focus: typeof validation.reviewFocus === 'string' ? validation.reviewFocus : undefined, terminalCandidate }, storedContinuityProtocol(validation)))) {
@@ -362,11 +364,16 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     readiness.terminalReview = { state: terminal?.supported ? 'supported' : 'unverified', currentResultVerified: !!terminal,
       deliveryEligible: terminal?.deliveryEligibility.eligible ?? false,
       unresolved: [...(terminal?.verdicts.filter(item => item.verdict !== 'supported').map(({ path, verdict }) => ({ path, verdict })) ?? []),
-        ...(terminal?.factCoverage?.dispositions.filter(item => item.outcome === 'unknown').map(item => ({ path: `factCoverage.${item.id}`, verdict: 'unknown' }))
+        ...(terminal?.factCoverage?.dispositions.filter(item => item.outcome === 'unknown').map(item => {
+          const fact = factCoverage?.obligations.find(fact => fact.id === item.id)
+          return { path: `factCoverage.${item.id}`, verdict: 'unknown', readOnlyCoverageId: item.id,
+            currentCandidateEditAddress: currentCandidateEditAddress(terminalCandidate!, fact?.field, fact?.claim) }
+        })
           ?? factCoverage?.obligations.map(item => ({ path: `factCoverage.${item.id}`, verdict: 'unknown' })) ?? []),
         ...(terminal?.proposals?.dispositions.filter(item => item.outcome === 'unknown').map(item => {
           const proposal = evidence.proposalChanges?.proposals.find(proposal => proposal.id === item.id)
-          return { path: `proposals.${item.id}`, verdict: 'unknown', reason: item.reason,
+          return { path: `proposals.${item.id}`, verdict: 'unknown', reason: item.reason, readOnlyProposalId: item.id,
+            currentCandidateEditAddress: currentCandidateEditAddress(terminalCandidate!, proposal?.field, proposal?.claim),
             ...(proposal ? { field: proposal.field, claim: proposal.claim } : {}) }
         }) ?? [])] }
     const committed = compilation.preparedContext as Record<string, unknown> | null

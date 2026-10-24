@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { activeChapterScope } from '../data/internal.js'
 import { terminalCarriedFactSchema, type TerminalCarriedFact, type TerminalEvidenceContext } from './terminal-evidence-context.js'
-import { currentTerminalReview, terminalClaims, readTerminalCandidate } from './terminal-state-review.js'
+import { currentTerminalReview, terminalClaims, readTerminalCandidate, type TerminalDeliveryBinding } from './terminal-state-review.js'
 import { runtimeJson } from './runtime-common.js'
 import { terminalQuoteRange } from './terminal-quote-range.js'
 import { continuitySourceSegments } from './continuity-review-context.js'
@@ -116,7 +116,7 @@ export async function readTerminalInheritance(db: Prisma.TransactionClient, subj
     const compilation = compilations.get(compilationId), context = object(compilation?.preparedContext), proof = object(context.terminalReviewProof)
     const validation = object(compilation?.validation), coverage = object(validation.coverage), audit = object(validation.continuityCriticResponse)
     let evidence = audit.terminalEvidence as TerminalEvidenceContext | undefined
-    let deliveryBinding: { taskId: string; preparedContext: unknown } | undefined
+    let deliveryBinding: TerminalDeliveryBinding | undefined
     if (evidence && compilation && (evidence.proposalChanges || context.terminalProposalReview)) {
       if (!compilation.runId) return null
       const original = await readOriginalTaskRequest(db, { ...subject, runId: compilation.runId })
@@ -126,6 +126,8 @@ export async function readTerminalInheritance(db: Prisma.TransactionClient, subj
       try { evidence = attachTerminalProposalInput(evidence, { taskId: deliveryBinding.taskId,
         preparedContext: compilation.preparedContext, validation, candidate }) }
       catch (error) { if (!(error instanceof DataAccessError)) throw error; return null }
+      if (chapter) deliveryBinding = await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(db,
+        { ...subject, runId: compilation.runId, compilationId: compilation.id }, deliveryBinding, chapter, validation, evidence)
     }
     const review = compilation && chapter ? currentTerminalReview(compilation.validation, chapter.content, evidence, deliveryBinding) : null
     if (!chapter || !compilation?.bridge?.committedAt || compilation.chapterId !== chapter.id || compilation.bridge.targetRevision !== chapter.revision

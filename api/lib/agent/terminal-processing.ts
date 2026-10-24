@@ -12,7 +12,8 @@ export type TerminalProcessingInput = {
   content: string
   previous: string
   inherited: Array<{ proofHash: string; field: string; claim: string }>
-  issues: Array<{ path: string; reason: string; field?: string; claim?: string }>
+  issues: Array<{ path: string; reason: string; field?: string; claim?: string; readOnlyCoverageId?: string; readOnlyProposalId?: string;
+    currentCandidateEditAddress?: { factId: string } | null }>
   recoveryGuidance?: string
 }
 
