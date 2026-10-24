@@ -44,7 +44,9 @@ describe('terminal verdict quote references and segment projection', () => {
     expect(JSON.parse(inspected.audit.rawResponse.content)).toBe(response)
     const validation = { checkedChapterId: 'current', checkedRevision: 1, independentCheck: 'complete', coverage: {},
       terminalCandidate: candidate, continuityCriticResponse: inspected.audit }
-    expect(currentTerminalReview(validation, current, context)).toEqual(reviewed)
+    expect(reviewed).not.toHaveProperty('deliveryEligibility')
+    expect(currentTerminalReview(validation, current, context)).toEqual({ ...reviewed,
+      deliveryEligibility: { version: 1, basis: 'fully_supported', eligible: true, preservedUnknownProposalIds: [] } })
     const facts = buildTerminalFactProofs({ compilationId: 'commit-current', chapter: { id: 'current', revision: 1, orderIndex: 2, content: current },
       validation, stateHash: 'a'.repeat(64), evidence: context, review: reviewed })
     expect(facts.map(fact => fact.anchors.map(anchor => anchor.quote))).toEqual(verdicts.map(item => item.sourceEvidence.map(ref => ref.quote)))
@@ -141,7 +143,9 @@ describe('fresh terminal exact quote address protocol', () => {
     expect(JSON.parse(inspected.audit.rawResponse.content)).toBe(response)
     const validation = { checkedChapterId: 'current', checkedRevision: 1, independentCheck: 'complete', coverage: {},
       terminalCandidate: candidate, continuityCriticResponse: inspected.audit }
-    expect(currentTerminalReview(validation, current, context)).toEqual(reviewed)
+    expect(reviewed).not.toHaveProperty('deliveryEligibility')
+    expect(currentTerminalReview(validation, current, context)).toEqual({ ...reviewed,
+      deliveryEligibility: { version: 1, basis: 'fully_supported', eligible: true, preservedUnknownProposalIds: [] } })
     const facts = buildTerminalFactProofs({ compilationId: 'canonical-current', chapter: { id: 'current', revision: 1, orderIndex: 2, content: current },
       validation, stateHash: 'b'.repeat(64), evidence: context, review: reviewed })
     expect(facts).toHaveLength(2)

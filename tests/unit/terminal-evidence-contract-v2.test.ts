@@ -81,7 +81,9 @@ describe('fresh terminal fact evidence v2', () => {
       ? [`c${Math.floor(start / 300)}`, `c${Math.floor(start / 300) + 1}`] : [`c${Math.floor(start / 300)}`])
     const inspected = inspectContinuityResponse(response, { previous: null, current: content, terminalEvidence: context }, true, 8, candidate)
     const validation = { checkedChapterId: 'current', checkedRevision: 3, coverage: {}, terminalCandidate: candidate, independentCheck: 'complete', continuityCriticResponse: inspected.audit }
-    expect(currentTerminalReview(validation, content, context)).toEqual(review)
+    expect(review).not.toHaveProperty('deliveryEligibility')
+    expect(currentTerminalReview(validation, content, context)).toEqual({ ...review,
+      deliveryEligibility: { version: 1, basis: 'fully_supported', eligible: true, preservedUnknownProposalIds: [] } })
     const facts = buildTerminalFactProofs({ compilationId: 'commit', chapter: chapter(content), validation, evidence: context, review, stateHash: 'a'.repeat(64) })
     expect(facts[0].anchors).toMatchObject([{ start, end: start + quote.length, quote }])
     expect(facts[0].anchors).toHaveLength(1)

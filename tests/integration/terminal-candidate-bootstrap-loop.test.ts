@@ -21,7 +21,7 @@ import { terminalFeedbackSlots } from '../../api/lib/agent/terminal-feedback-han
 import { terminalProcessingPlan } from '../../api/lib/agent/terminal-processing.js'
 import { prepareTerminalProposalInput } from '../../api/lib/agent/terminal-proposal-context.js'
 import { observeChapterReviewProgress, observeSemanticReadProgress, observeWritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
-import { freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
+import { allowsChapterOnlyCompletion, freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { recoverRunElapsedMs } from '../../api/lib/agent/checkpoint.js'
 import * as ai from '../../api/lib/ai-service.js'
@@ -35,6 +35,7 @@ const fixture: typeof durableFixture = (work, ...rest) => durableFixture(async f
   try { await work(f) } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
 }, ...rest)
 const checks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic whole-body review.', findingIndexes: [] }))
+const recoveryPrompt = '修改第一章'
 
 describe.runIf(available)('authenticated native review hands a rejected current-state candidate back to the original task', () => {
   it.each(['before-turn', 'after-read', 'recover-transient', 'recover-quality-decision', 'recover-unknown-commit', 'recover-missing-commit'] as const)('handles current evidence after exhausted claims and repeated Continue: %s', scenario => fixture(async f => {
@@ -44,9 +45,12 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     const startedAt = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId }, select: { createdAt: true } })).createdAt
     const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: {
       content: 'The packet remains on the desk.', revision: 8, wordCount: 29 } })
-    await prisma.agentRun.update({ where: { id: f.runId }, data: { runtimeProtocolVersion: 0, taskRootId: null, startRequest: { prompt: '修复本章' } } })
+    await prisma.agentRun.update({ where: { id: f.runId }, data: { runtimeProtocolVersion: 0, taskRootId: null, startRequest: { prompt: recoveryPrompt } } })
     const original = await prisma.$transaction(tx => readOriginalTaskRequest(tx, f))
     const spec = original.spec as typeof f.spec
+    expect(chapter.orderIndex).toBe(1)
+    expect(spec.scope.writing).toMatchObject({ kind: 'bounded', targets: [{ orderIndex: chapter.orderIndex }] })
+    if (scenario.startsWith('recover-')) expect(allowsChapterOnlyCompletion(original.prompt, false)).toBe(true)
     const { compilation } = await prepareStoryCompilation({ ...f, mode: 'balanced', intentSummary: 'Review the synthetic saved chapter.' })
     const empty = terminalCandidateSchema.parse({ exitState: {} }).exitState
     await saveSceneTasks({ ...f, compilationId: compilation.id, tasks: [{ purpose: 'Record', entryState: empty, goal: 'Record', obstacle: 'None', choice: 'Wait', cost: 'Time', turn: 'Wait', exitState: empty,
@@ -146,7 +150,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     })
     const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
     const beforeRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
-    const resume = (eventId: string, afterSeq: number) => executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true,
+    const resume = (eventId: string, afterSeq: number) => executeAgentRun({ ...f, prompt: recoveryPrompt, mode: 'build', resume: true,
       authorContinue: { eventId, afterSeq }, eventStartSeq: afterSeq, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
     let afterSeq = pauseSeq
     await resume(pause.id, afterSeq)
@@ -160,6 +164,10 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       expect(saved.bridge!.committedAt !== null).toBe(succeeded)
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
       const finished = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
+      if (succeeded) {
+        const errors = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'error', seq: { gt: pauseSeq } }, select: { payload: true } })
+        expect({ errorMessage: finished.errorMessage, errors }).toEqual({ errorMessage: null, errors: [] })
+      }
       expect(finished).toMatchObject({ status: succeeded ? 'completed' : 'paused', taskSpec: spec,
         modelTier: beforeRun.modelTier, customModelId: beforeRun.customModelId, reasoningEffort: beforeRun.reasoningEffort })
       const attempts = (finished.usage as { checkpoint: { reviewAttempts: string[] } }).checkpoint.reviewAttempts
@@ -220,7 +228,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })).toEqual([historicalUsage])
     expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: account.userId } })).toEqual(account)
     expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId } })).toEqual([historicalCharge])
-  }, undefined, '修复本章', { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
+  }, undefined, recoveryPrompt, { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
 
   it.each([...(['settled', 'unknown'] as const).flatMap(billing => (['commit', 'repeat', 'restart'] as const).map(scenario => [billing, scenario] as const)), ...(['old-slots', 'local-refusal', 'consumed-local-candidate', 'objects', 'source-address', 'commit-reserved', 'commit-unknown', 'multiple-candidates', 'no-proposal'] as const).map(scenario => ['settled', scenario] as const)])(
     'preserves failed requests and permits bounded candidate processing: %s / %s', (billing, scenario) => fixture(async f => {
