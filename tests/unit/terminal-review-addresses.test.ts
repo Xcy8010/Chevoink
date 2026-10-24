@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
-import { terminalReviewAddressCatalog, terminalReviewAddressInput, bindTerminalReviewAddresses } from '../../api/lib/agent/terminal-review-addresses.js'
+import { z } from 'zod'
+import { describe, expect, it, vi } from 'vitest'
+import { terminalReviewAddressCatalog, terminalReviewAddressInput, bindTerminalReviewAddresses, terminalAddressValidationIssues } from '../../api/lib/agent/terminal-review-addresses.js'
 import { terminalCandidateSchema, inspectTerminalReview, currentTerminalReview, terminalReviewInput } from '../../api/lib/agent/terminal-state-review.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import type { TerminalCarriedFact, TerminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
@@ -236,5 +237,42 @@ describe('server-bound terminal review addresses', () => {
     expect(inspectTerminalReview(candidate, content, raw, true, ctx)).toBeNull()
     expect(inspectTerminalReview(candidate, content, JSON.stringify(response()), true, ctx)).toMatchObject({ supported: true })
     expect(runtimeJson(failure.audit).hash).toBe(originalHash)
+  })
+})
+
+
+describe('security-updated bounded array diagnostics retain frozen audit order', () => {
+  it('keeps the original first eight invalid addressed-row diagnostics without admitting the rejected report', () => {
+    const fields = { terminalProofVerdicts: z.array(z.object({ proofIndex: z.never() }).strict()).length(0) }
+    const record = { terminalProofVerdicts: Array.from({ length: 18 }, () => ({ proofHash: 'a'.repeat(64) })) }
+    const parsed = z.object(fields).safeParse(record)
+    expect(parsed.success).toBe(false)
+    if (parsed.success) throw new Error('Invalid rows must remain rejected')
+    expect(terminalAddressValidationIssues(parsed.error.issues, record, fields).map(row => ({ code: row.code, path: row.path.join('.') })))
+      .toEqual(Array.from({ length: 4 }, (_, index) => [
+        { code: 'invalid_type', path: `terminalProofVerdicts.${index}.proofIndex` },
+        { code: 'unrecognized_keys', path: `terminalProofVerdicts.${index}` },
+      ]).flat())
+  })
+  it('retains a too-small rejection after bounded row errors', () => {
+    const fields = { terminalVerdicts: z.array(z.object({ claimIndex: z.number() })).length(2) }, record = { terminalVerdicts: [{}] }
+    const parsed = z.object(fields).safeParse(record)
+    if (parsed.success) throw new Error('Missing row must remain rejected')
+    expect(terminalAddressValidationIssues(parsed.error.issues, record, fields).map(row => row.code)).toEqual(['invalid_type', 'too_small'])
+  })
+  it('retains the original duplicate-address diagnostic after a bounded size failure', () => {
+    const fields = { terminalDispositions: z.array(z.object({ obligationIndex: z.number() })).length(1).superRefine((rows, ctx) => {
+      if (new Set(rows.map(row => row.obligationIndex)).size !== rows.length) ctx.addIssue({ code: 'custom', message: 'Each frozen address must occur exactly once' })
+    }) }, record = { terminalDispositions: [{ obligationIndex: 0 }, { obligationIndex: 0 }] }
+    const parsed = z.object(fields).safeParse(record)
+    if (parsed.success) throw new Error('Duplicate and oversized table must remain rejected')
+    expect(terminalAddressValidationIssues(parsed.error.issues, record, fields).map(row => row.code)).toEqual(['too_big', 'custom'])
+  })
+  it('never walks oversized untrusted rows, preserving security fail-fast behavior', () => {
+    const visit = vi.fn(() => true), fields = { terminalVerdicts: z.array(z.string().refine(visit)).length(0) }
+    const record = { terminalVerdicts: Array.from({ length: 201 }, () => 'untrusted') }, parsed = z.object(fields).safeParse(record)
+    if (parsed.success) throw new Error('Oversized report must remain rejected')
+    expect(terminalAddressValidationIssues(parsed.error.issues, record, fields).map(row => row.code)).toEqual(['too_big'])
+    expect(visit).not.toHaveBeenCalled()
   })
 })

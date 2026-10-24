@@ -8,7 +8,7 @@ import { invalidContinuitySourceClaim, type ContinuitySourceScope } from './cont
 import { inspectTerminalReview, terminalQuoteAddressDiagnostics, terminalResponseFields, type TerminalCandidate, type TerminalReviewDiagnostic } from './terminal-state-review.js'
 import { runtimeJson } from './runtime-common.js'
 import { validContinuitySemanticChecks } from './terminal-evidence-context.js'
-import { terminalAddressResponseFields, normalizeTerminalResponseRows } from './terminal-review-addresses.js'
+import { terminalAddressResponseFields, normalizeTerminalResponseRows, terminalAddressValidationIssues } from './terminal-review-addresses.js'
 
 const sourceReferenceSchema = z.object({ source: z.enum(['previous', 'current']), segmentId: z.string().min(1).optional(), quote: z.string().min(2).max(360).optional() })
   .refine(value => value.segmentId !== undefined || value.quote !== undefined)
@@ -121,7 +121,7 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
       classification = 'terminal_invalid'
       // New requests receive bounded field diagnostics through the existing
       // full-reassessment channel; old frozen request renderings stay identical.
-      if (bodies?.terminalEvidence?.verdictProtocol === 5 || indexed) terminalReviewDiagnostics.push(...parsed.error.issues.slice(0, 8).map(issue => ({
+      if (bodies?.terminalEvidence?.verdictProtocol === 5 || indexed) terminalReviewDiagnostics.push(...(indexed && record ? terminalAddressValidationIssues(parsed.error.issues, record, freshFields) : parsed.error.issues.slice(0, 8)).map(issue => ({
         code: issue.code, path: issue.path.join('.'),
         ...(options.responseContract === 3 ? { message: issue.message,
           ...((issue.code === 'too_big' || issue.code === 'too_small') && issue.path.length === 1 && Array.isArray(record?.[String(issue.path[0])])

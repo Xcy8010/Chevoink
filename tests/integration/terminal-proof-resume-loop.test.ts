@@ -165,7 +165,9 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
     const final=await prisma.storyCompilation.findUniqueOrThrow({where:{id:compilationId},include:{bridge:true}}),run=await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}}),cp=(run.usage as {checkpoint:typeof checkpoint}).checkpoint
     expect(final.validation).toMatchObject({independentCheck:'complete',terminalCandidate:{exitState:{objects:base.exitState.objects,openLoops:[claim]}},
       continuityCriticResponse:{classification:'complete',terminalEvidence:{verdictProtocol:6}}})
-    expect(await prisma.agentRunEvent.count({where:{runId:f.runId,seq:{gt:4},type:'tool.result',payload:{path:['ok'],equals:false}}})).toBe(0)
+    const failedResults=await prisma.agentRunEvent.findMany({where:{runId:f.runId,seq:{gt:4},type:'tool.result',payload:{path:['ok'],equals:false}}})
+    expect(failedResults).toHaveLength(supported?0:1)
+    if(!supported)expect(failedResults[0].payload).toMatchObject({callId:'select-proof-only',toolName:'continuity_validate',ok:false,failureCode:'TERMINAL_STATE_REVIEW_REQUIRED'})
     expect(cp.reviewAttempts).toContain('old-attempt')
     expect(cp.readProgress).toBe(scenario==='fresh-context'?11:7)
     expect(cp.writeProgress).toBe(supported?2:1)

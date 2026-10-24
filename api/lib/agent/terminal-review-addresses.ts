@@ -99,6 +99,46 @@ export function normalizeTerminalResponseRows(record: Record<string, unknown>) {
   } catch { return { record, normalization: null, error: 'Response projection exceeds canonical input limits' } }
 }
 
+
+/** Zod's security fix stops before array elements on a size failure. Frozen
+ * audits retain their original first-eight diagnostic order for bounded tables.
+ * This never changes acceptance: only an already failed parse is described.
+ * Oversized untrusted arrays retain fail-fast behavior, with no row walk. */
+export function terminalAddressValidationIssues(issues: z.ZodError['issues'], record: Record<string, unknown>, fields: Record<string, z.ZodType>) {
+  const result: z.ZodError['issues'] = []
+  const addressKeys: Record<string, string> = { terminalVerdicts: 'claimIndex', terminalProofVerdicts: 'proofIndex', terminalDispositions: 'obligationIndex', proposalDispositions: 'proposalIndex' }
+  for (const issue of issues) {
+    const key = String(issue.path[0]), rows = record[key], schema = fields[key]
+    const array = schema instanceof z.ZodDefault ? schema.unwrap() : schema
+    let duplicate = false, rejectedRow = false
+    const seen = new Set<unknown>()
+    if (issue.code === 'too_big' && issue.path.length === 1
+      && ['terminalVerdicts', 'terminalProofVerdicts', 'terminalDispositions', 'proposalDispositions'].includes(key)
+      && Array.isArray(rows) && rows.length <= 200 && array instanceof z.ZodArray) {
+      for (const [index, row] of rows.entries()) {
+        const parsed = (array.element as z.ZodType).safeParse(row)
+        if (!parsed.success) {
+          rejectedRow = true
+          for (const nested of parsed.error.issues) {
+            result.push({ ...nested, path: [key, index, ...nested.path] })
+            if (result.length === 8) return result
+          }
+        } else {
+          const addressKey = addressKeys[key]
+          const value = (parsed.data as Record<string, unknown>)[addressKey!]
+          if (seen.has(value)) duplicate = true
+          seen.add(value)
+        }
+      }
+    }
+    result.push(issue)
+    if (result.length === 8) break
+    if (duplicate && !rejectedRow) result.push({ code: 'custom', path: issue.path, message: 'Each frozen address must occur exactly once' })
+    if (result.length === 8) break
+  }
+  return result
+}
+
 /** Resolve exact local addresses before the existing independent semantic
  * review. No approximate hash matching, missing-row inference or verdict repair. */
 export function bindTerminalReviewAddresses(record: Record<string, unknown>, candidate: TerminalCandidate, context: TerminalEvidenceContext, responseContract?: 3) {
