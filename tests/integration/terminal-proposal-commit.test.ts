@@ -145,7 +145,7 @@ describe.runIf(available)('proposal retraction at the real report and commit tra
         terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 })
       await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, chapterId: next.id,
         status: 'running', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', runtimeProtocolVersion: 0,
-        taskSpec: runtimeJson(spec).value, startRequest: { prompt } } })
+        taskSpec: JSON.parse(JSON.stringify(spec)), startRequest: { prompt } } })
       const subject = { userId: f.userId, novelId: f.novelId, runId }
       const { compilation: nextCompilation } = await prepareStoryCompilation({ ...subject, chapterId: next.id, mode: 'balanced', intentSummary: prompt })
       await saveSceneTasks({ ...subject, compilationId: nextCompilation.id, tasks: [{ purpose: 'Inventory', entryState: candidate.exitState,
