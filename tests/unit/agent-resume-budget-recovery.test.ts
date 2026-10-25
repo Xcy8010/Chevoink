@@ -13,6 +13,11 @@ describe('legacy resume budget receipts', () => {
     expect(recoverRunElapsedMs(0, 10000, [{ type: 'run.paused', at: 2000 }])).toBe(2000)
     expect(recoverRunElapsedMs(0, 10000, [{ type: 'run.started', at: 11000 }])).toBeNull()
     expect(recoverRunElapsedMs(0, 10000, [{ type: 'run.paused', at: 2000 }, { type: 'run.started', at: 1000 }])).toBeNull()
+    // A checkpoint cannot move the original clock forward after slow paid
+    // review/application while retaining its earlier start event.
+    const originalTiming = [{ type: 'run.started', at: 1000 }, { type: 'run.paused', at: 4000 }]
+    expect(recoverRunElapsedMs(3000, 4000, originalTiming)).toBeNull()
+    expect(recoverRunElapsedMs(500, 4000, originalTiming)).toBe(3500)
   })
   it('recovers all known consumption instead of granting a fresh budget', () => {
     expect(recoverLegacyRunUsage(2, [

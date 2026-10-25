@@ -19,7 +19,7 @@ import { readNormalizedContinuityCoverageOrigins, saveContinuitySourceRecovery }
 import { askUserTool } from '../../api/lib/agent/tools/interact-tools.js'
 import { continuityValidateTool, chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { executeAgentRun, handleToolCall } from '../../api/lib/agent/loop.js'
-import { runCheckpointSchema, recoverRunElapsedMs } from '../../api/lib/agent/checkpoint.js'
+import { runCheckpointSchema, recoverRunElapsedMs, savedRunUsageSchema } from '../../api/lib/agent/checkpoint.js'
 import { reviewDispatchKey } from '../../api/lib/agent/review-dispatch.js'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import { resolveLoopRunQuestion } from '../../api/lib/agent/run-service.js'
@@ -425,15 +425,25 @@ describe.runIf(available)('original persistent supplemental phase: real question
           { userId: f.userId, novelId: f.novelId, runId: f.runId, taskSpec: f.spec })
       const tail = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId }, orderBy: { seq: 'desc' } })
       const pause = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: tail.seq + 1, type: 'run.paused', payload: { reason: 'needs_input' } } })
+      const beforeResume = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
+      // Keep the original execution clock. Moving startedAt to now-1s after
+      // paid review/application can put an earlier real run.started before it.
+      const startedAt = beforeResume.startedAt ?? beforeResume.createdAt
+      const timing = await prisma.agentRunEvent.findMany({ where: { runId: f.runId,
+        type: { in: ['run.started', 'run.paused', 'run.finished'] } }, orderBy: { seq: 'asc' }, select: { type: true, createdAt: true } })
+      const activeExecutionMs = recoverRunElapsedMs(startedAt.getTime(), pause.createdAt.getTime(),
+        timing.map(event => ({ type: event.type, at: event.createdAt.getTime() })))
+      expect(activeExecutionMs, JSON.stringify({ startedAt, pauseAt: pause.createdAt, timing })).not.toBeNull()
+      if (activeExecutionMs === null) throw Error('Original synthetic execution timing is not recoverable')
       const checkpoint = runCheckpointSchema.parse({ version: 2, controlPolicy: 'until_completion', origin: 'system_default',
-        runStartedAt: Date.now() - 1000, activeExecutionMs: 100, stagnantBatches: appliedScenario ? 7 : scenario === 'approve-in-loop' ? 4 : 5,
+        runStartedAt: startedAt.getTime(), activeExecutionMs, stagnantBatches: appliedScenario ? 7 : scenario === 'approve-in-loop' ? 4 : 5,
         resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500, writeProgress: 3, writeBaseline: 0, readProgress: 11, readBaseline: 0,
         progressSignatures: [...signatures], reviewAttempts: ['original-consumed-claim', ...(appliedScenario ? [reviewDispatchKey(review!, 'merged')] : [])], pendingReviews: [],
         consumedReviewDecisionFeedback: ['e'.repeat(64), ...(review?.decisionFeedback ? [review.decisionFeedback.key] : [])],
         inheritedTokens: 0, inheritedTurns: 0, manualResumeCount: 0 })
-      const beforeResume = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
-      await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'paused', currentTurn: 27, startedAt: new Date(checkpoint.runStartedAt),
-        usage: { ...(beforeResume.usage as object), checkpoint: JSON.parse(JSON.stringify(checkpoint)) } } })
+      const resumeUsage = { ...(beforeResume.usage as object), checkpoint: JSON.parse(JSON.stringify(checkpoint)) }
+      expect(savedRunUsageSchema.safeParse(resumeUsage).success).toBe(true)
+      await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'paused', currentTurn: 27, startedAt, usage: resumeUsage } })
       let approvedQuestion = s.question
       const network = vi.fn(async () => {
         if (decisionScenario) throw Error('A known paid whole report cannot dispatch again during free application or ordinary decision')
