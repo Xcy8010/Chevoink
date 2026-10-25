@@ -8,6 +8,7 @@ import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continu
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { taskSpecSchema } from '../../shared/contracts/task-spec-contracts.js'
 import { continuityValidateTool, chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { terminalCandidateSchema, currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
 import { readTerminalDraftBinding } from '../../api/lib/agent/terminal-draft-authority.js'
@@ -43,7 +44,13 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       await prisma.agentMessage.create({ data: { sessionId: f.sessionId, runId: historicalRun.id, role: 'user',
         parts: [{ type: 'text', text: '修改本章' }] } })
       const historical = { userId: f.userId, novelId: f.novelId, runId: historicalRun.id }
-      const historicalSpec = buildTaskSpec({ runId: historicalRun.id, novelId: f.novelId, chapterId: canonicalChapter.id, prompt: '修改本章' })
+      // This parser8 canon uses the legacy scope produced by its original prompt;
+      // JSON persistence omits absent optional fields, without changing f.spec.
+      const historicalSpec = taskSpecSchema.parse(JSON.parse(JSON.stringify(
+        buildTaskSpec({ runId: historicalRun.id, novelId: f.novelId, chapterId: canonicalChapter.id, prompt: '修改本章' }),
+      )))
+      expect(historicalSpec).toMatchObject({ id: expect.any(String), runId: historicalRun.id, intent: 'revise', goals: ['修改本章'] })
+      expect(historicalSpec.scope).toEqual({ novelId: f.novelId, chapterIds: [canonicalChapter.id] })
       await prisma.agentRun.update({ where: { id: historicalRun.id }, data: { taskSpec: runtimeJson(historicalSpec).value } })
       const root = await prepareStoryCompilation({ ...historical, chapterId: canonicalChapter.id, mode: 'balanced', intentSummary: 'Historical manual chapter.' })
       const rootCandidate = terminalCandidateSchema.parse({ exitState: { openLoops: [canonicalClaim] } })
