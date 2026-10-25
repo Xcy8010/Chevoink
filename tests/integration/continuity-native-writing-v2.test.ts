@@ -11,6 +11,8 @@ import { storyCompilerPrepareTool, sceneTaskBuildTool, continuityValidateTool, c
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import { advanceDurableWritingDelivery } from '../../api/lib/agent/runtime-writing-delivery.js'
 import { finalizeDurableTask, pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
+import { runReviewedDurableExecution } from '../../api/lib/agent/runtime-executor.js'
+import { collectDurableCompletionEvidence } from '../../api/lib/agent/runtime-completion-evidence.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import * as continuity from '../../api/lib/agent/tools/durable-continuity.js'
 import * as compiler from '../../api/lib/agent/story-compiler.js'
@@ -160,7 +162,34 @@ describe.runIf(available)('fresh native writing manifest2 actual bounded chain',
     }
     expect(await advanceDurableWritingDelivery(lease)).not.toBeNull()
     const state = await loadExecutionState(f.userId, lease.runId)
-    await finalizeDurableTask(lease, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash })
+    const cursor = { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash }
+    const currentMemoryJobId = z.object({ memoryJobId: z.string().min(1) }).parse(writer.effectReceipt!.result).memoryJobId
+    const beforeEvidence = await collectDurableCompletionEvidence(lease, cursor)
+    expect(beforeEvidence.snapshot).toMatchObject({ blockers: [{ code: 'unresolved_memory_job', reference: currentMemoryJobId }],
+      memoryJobs: [{ id: currentMemoryJobId, chapterId: f.chapterId, chapterRevision: changed ? 3 : 2, verified: false }] })
+    expect((beforeEvidence.snapshot as { blockers: unknown[] }).blockers).toHaveLength(1)
+    expect(await prisma.memoryExtractionJob.findUniqueOrThrow({ where: { id: currentMemoryJobId } })).toMatchObject({ status: 'pending' })
+    await expect(finalizeDurableTask(lease, cursor)).rejects.toMatchObject({ code: 'RUNTIME_COMPLETION_BLOCKED' })
+    const originalAttempts = await prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId } }, include: { usageReceipt: true }, orderBy: { id: 'asc' } })
+    const originalLedger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const historicalJobs = await prisma.memoryExtractionJob.findMany({ where: { novelId: f.novelId, id: { not: currentMemoryJobId } }, orderBy: { id: 'asc' } })
+    // Production schedules the current effect's DB-only memory derivative
+    // before completion review. Direct finalize must not waive that work.
+    expect(await runReviewedDurableExecution(lease, new AbortController().signal)).toMatchObject({ kind: 'completed' })
+    const memory = await prisma.agentOperation.findUniqueOrThrow({ where: { taskRootId_operationKey: { taskRootId: f.rootId, operationKey: `memory:${currentMemoryJobId}` } }, include: { effectReceipt: true } })
+    expect(memory).toMatchObject({ action: 'memory_extract', status: 'succeeded', parentOperationId: writer.id,
+      effectReceipt: { result: { jobId: currentMemoryJobId, status: 'applied', memories: expect.any(Array) } } })
+    expect(z.object({ memories: z.array(z.unknown()).min(2) }).parse(memory.effectReceipt!.result).memories).toHaveLength(2)
+    expect(memory.effectReceipt!.resultHash).toBe(runtimeJson(memory.effectReceipt!.result).hash)
+    expect(await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { eventKey: `effect:${memory.id}` } })).toMatchObject({
+      type: 'effect.committed', operationId: memory.id, payload: { operationId: memory.id, resultHash: memory.effectReceipt!.resultHash } })
+    expect(await prisma.memoryExtractionJob.findUniqueOrThrow({ where: { id: currentMemoryJobId } })).toMatchObject({ status: 'completed' })
+    expect(await prisma.projectMemoryEntry.findFirstOrThrow({ where: { novelId: f.novelId, sourceChapterId: f.chapterId, memoryType: 'chapterSummary' } })).toMatchObject({ content: expect.stringContaining(after) })
+    const finalReceipt = await prisma.agentEffectReceipt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId, action: 'completion_finalize' } } })
+    expect(finalReceipt.result).toMatchObject({ evidence: { blockers: [], memoryJobs: [{ id: currentMemoryJobId, verified: true }] } })
+    expect(await prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId } }, include: { usageReceipt: true }, orderBy: { id: 'asc' } })).toEqual(originalAttempts)
+    expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(originalLedger)
+    expect(await prisma.memoryExtractionJob.findMany({ where: { novelId: f.novelId, id: { not: currentMemoryJobId } }, orderBy: { id: 'asc' } })).toEqual(historicalJobs)
     expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: lease.runId } })).toMatchObject({ status: 'completed' })
     await publishDurableEvents(f.userId, lease.runId, 200)
     const events = await loadPersistedEvents(lease.runId, 0)
