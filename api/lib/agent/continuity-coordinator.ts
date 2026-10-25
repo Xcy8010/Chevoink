@@ -280,7 +280,26 @@ export async function claimLegacyContinuityVerification(db: Prisma.TransactionCl
   // Legacy execution can follow an original native receipt. Its absence from
   // the legacy reservation table is not a new independent-review grant.
   await claimNativeContinuityVerification(db, ctx, input, operationRef)
-  if (!known.length) return // A proved-unsent original phase remains unsent.
+  if (!known.length) {
+    const original = await readOriginalTaskRequest(db, ctx), runs = await originalTaskRunIds(db, ctx, original)
+    const corrections = await db.agentArtifact.findMany({ where: { runId: { in: runs }, artifactType: 'continuityReview', AND: [
+      { metadata: { path: ['state'], equals: 'claimed' } }, { metadata: { path: ['chapterId'], equals: input.chapterId } },
+      { metadata: { path: ['targetType'], equals: input.targetType } }, { metadata: { path: ['targetId'], equals: input.targetId } }] }, take: 1001 })
+    if (corrections.length > 1000) throw blocked('原检查与纠正记录超出有界认证范围。')
+    const correctionUsageIds = [...new Set(corrections.flatMap(row => {
+      const ids = object(row.metadata).usageIds
+      return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : []
+    }))]
+    const legacyFees = await db.aiUsageLog.findMany({ where: { userId: ctx.userId, novelId: ctx.novelId,
+      targetType: input.targetType, targetId: input.targetId, action: { startsWith: 'agent3Continuity' }, OR: [
+        { agentRunId: { in: runs } }, ...(input.targetType === 'story_compilation' ? [{ agentRunId: null }] : []),
+        ...(correctionUsageIds.length ? [{ id: { in: correctionUsageIds } }] : [])] } })
+    const billing = await import('./text-request-billing.js')
+    if (corrections.length || legacyFees.some(fee => !prior.length || fee.billingStatus !== 'not_dispatched'
+      || fee.creditChargeMilli !== 0 || !billing.isKnownTextRequestBilling(fee)))
+      throw blocked('原检查或纠正已有费用或领取，但缺少可认证的原阶段与冻结执行配置；保留原报告、许可与账目，未另买完整判断，也未将未用阶段说成耗尽。')
+    return // Only a proved-unsent original phase, or a genuinely first check.
+  }
   await claimOriginalCycleVerification(db, ctx, input, known, operationRef)
 }
 
@@ -342,8 +361,8 @@ export async function claimNativeContinuityVerification(db: Prisma.TransactionCl
   await claimOriginalCycleVerification(db, ctx, input, entries.map(entry => entry.input), operationRef)
 }
 
-async function claimOriginalCycleVerification(db: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput,
-  known: LegacyAssessmentInput[], operationRef: string) {
+export async function readOriginalCycleContinuityVerification(db: Prisma.TransactionClient, ctx: Subject,
+  input: Pick<LegacyAssessmentInput, 'targetId' | 'chapterId' | 'revision' | 'bodies'>, known: LegacyAssessmentInput[]) {
   const original = await readOriginalTaskRequest(db, ctx), runIds = await originalTaskRunIds(db, ctx, original)
   const saved = await db.storyCompilation.findFirst({ where: { id: input.targetId, userId: ctx.userId, novelId: ctx.novelId,
     chapterId: input.chapterId, runId: { in: runIds } }, include: { chapter: true } })
@@ -355,8 +374,16 @@ async function claimOriginalCycleVerification(db: Prisma.TransactionClient, ctx:
   if (!source || !step?.contiguous || !cycle?.baseline || cycle.baseline.compilationId !== input.targetId
     || step.after.revision !== input.revision || step.after.contentHash !== runtimeJson({ content: input.bodies.current }).hash
     || !known.some(old => old.revision === step.before.revision && runtimeJson({ content: old.bodies.current }).hash === step.before.contentHash)
-    || known.some(old => old.revision >= input.revision)) throw blocked('候选、调用编号或继续任务不能增加完整判断；没有未使用的原周期正文修订与复核授权。')
+    || known.some(old => old.revision >= input.revision)) return null
   const id = runtimeJson({ kind: 'continuity_original_verification', taskId: original.taskId, chapterId: input.chapterId }).hash
+  return { id, taskId: original.taskId, step }
+}
+
+async function claimOriginalCycleVerification(db: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput,
+  known: LegacyAssessmentInput[], operationRef: string) {
+  const authority = await readOriginalCycleContinuityVerification(db, ctx, input, known)
+  if (!authority) throw blocked('候选、调用编号或继续任务不能增加完整判断；没有未使用的原周期正文修订与复核授权。')
+  const { id, taskId, step } = authority
   const prior = await db.agentArtifact.findUnique({ where: { id } })
   if (prior) {
     const receipt = object(object(prior.metadata).legacyContinuityVerification)
@@ -365,7 +392,7 @@ async function claimOriginalCycleVerification(db: Prisma.TransactionClient, ctx:
   }
   await db.agentArtifact.create({ data: { id, runId: ctx.runId, artifactType: 'continuityReview', title: '原周期旧合同复核领取',
     content: '仅实际正文转换打开一次原复核阶段。', metadata: runtimeJson({ version: 1, legacyContinuityVerification: {
-      taskId: original.taskId, chapterId: input.chapterId, operationRef, inputHash: runtimeJson(input).hash, transition: step } }).value } })
+      taskId, chapterId: input.chapterId, operationRef, inputHash: runtimeJson(input).hash, transition: step } }).value } })
 }
 
 export const continuityAssessmentPhase = (input: Pick<LegacyAssessmentInput, 'continuityManifest'>) =>

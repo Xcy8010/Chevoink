@@ -1488,7 +1488,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { reviewAttempts: expect.arrayContaining(['comp:c:3:quality_analyze', 'comp:c:4:quality_analyze']) } })
     expect((mocks.runs.get('run')?.usage as { checkpoint: unknown }).checkpoint).not.toHaveProperty('pendingReviews')
   })
-  it.each(['persisted', 'unavailable', 'already-persisted'] as const)('retires only the exempt cancelled execution lock before a new check: %s', async journal => {
+  it.each(['persisted', 'unavailable', 'already-persisted'] as const)('retires only the exempt cancelled execution lock without a new continuity grant: %s', async journal => {
     mocks.reviewReadiness.mockResolvedValue(readiness('missing', 'complete'))
     const critic = tool('continuity_validate', async () => { throw new Error('old aborted check') })
     mocks.tools = [critic]
@@ -1527,12 +1527,12 @@ describe('server assessment fallback in the real execution loop', () => {
       expect(mocks.chat).not.toHaveBeenCalled()
       expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { pendingReviews: [{ callId: 'cancelled-check' }], tokenBudget: original.tokenBudget } })
     } else {
-      expect(critic.execute).toHaveBeenCalledOnce()
-      expect(events().filter(event => event.type === 'tool.call' && event.toolName === 'continuity_validate')).toHaveLength(1)
-      expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.deferred', callId: 'fresh-check', execution: 'not_dispatched' }))
+      expect(critic.execute).not.toHaveBeenCalled()
+      expect(events().filter(event => event.type === 'tool.call' && event.toolName === 'continuity_validate')).toHaveLength(0)
+      expect(mocks.chat).toHaveBeenCalledOnce()
       expect((mocks.runs.get('run')?.usage as { checkpoint: unknown }).checkpoint).not.toHaveProperty('pendingReviews')
-      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { reviewAttempts: expect.arrayContaining([
-        'review-retired:author-continue:stop:cancelled-check' ]) } })
+      expect((mocks.runs.get('run')?.usage as { checkpoint: { reviewAttempts: string[] } }).checkpoint.reviewAttempts)
+        .not.toContain('review-retired:author-continue:stop:cancelled-check')
     }
   })
   it.each(['direct', 'after-read', 'quality-read', 'old-pauses'] as const)('commits explicit current opinion decisions %s without replacing them or repeating a critic on resume', async path => {

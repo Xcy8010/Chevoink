@@ -132,7 +132,9 @@ describe.runIf(available)('author continuation after current continuity failure'
         providerType: 'text', providerMode: 'custom', modelName: 'synthetic', action: 'agent3ContinuityCritic', requestTokens: 10, responseTokens: 2,
         usageSource: ['unknown', 'quality-unknown'].includes(scenario) ? 'unknown' : 'reported', billingStatus: scenario === 'unknown' ? 'pending_usage' : 'settled', billingEvidence: { responseObserved: scenario !== 'no-response' }, durationMs: 20, createdAt: new Date(start.getTime() + 1000) } })
       const result = await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, f))
-      expect(result).toHaveLength(['settled', 'format', 'deferred'].includes(scenario) ? 1 : 0)
+      expect(result).toHaveLength(0)
+      expect(await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, f, undefined, 'known_source')))
+        .toHaveLength(['settled', 'format', 'deferred'].includes(scenario) ? 1 : 0)
       expect(await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, f))).toEqual(result)
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).validation).toMatchObject({ checkedRevision: chapter.revision })
     } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
@@ -373,7 +375,9 @@ describe.runIf(available)('new reviewer failure after an audited exempt cancella
         const requestRecovery = await prisma.$transaction(tx => readReviewRequestRecovery(tx, f, [current]))
         const authorRecovery = await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, f))
         expect(requestRecovery).toHaveLength(scenario === 'retired' ? 1 : 0)
-        expect(authorRecovery).toHaveLength(scenario === 'retired' ? 1 : 0)
+        expect(authorRecovery).toHaveLength(0)
+        expect(await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, f, undefined, 'known_source')))
+          .toHaveLength(scenario === 'retired' ? 1 : 0)
         if (requestRecovery.length) expect(requestRecovery[0].reconciliation.usageIds).toEqual([usage.id])
         expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(before)
       } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }

@@ -6,8 +6,9 @@ import { readContinuedReviewRecovery, readAuthorContinuedReviewUsageIds } from '
 import { continuityReassessmentRequest, legacyContinuityAssessmentKey } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { createHash } from 'node:crypto'
 
-describe.runIf(available)('ordinary author Continue preserves real unknown billing while retiring only its prior execution slot', () => {
+describe.runIf(available)('ordinary Continue separates historical unknown billing journals from new paid plans', () => {
   it.each(['quality', 'continuity', 'no-author', 'post-admission', 'correction', 'correction-no-claim', 'correction-unknown-source', 'correction-late-claim',
     'correction-rejected-source', 'correction-charged-rejection-source', 'correction-reserved-rejection-source',
     'reassessment', 'reassessment-no-claim', 'reassessment-no-first-response', 'reassessment-unknown-first', 'reassessment-late-claim', 'reassessment-extra-attempt'] as const)('%s uses authenticated PostgreSQL call/admission/input evidence', scenario => fixture(async f => {
@@ -84,7 +85,7 @@ describe.runIf(available)('ordinary author Continue preserves real unknown billi
       const beforeAllUsage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
       const beforeRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
       const recovered = await prisma.$transaction(tx => readContinuedReviewRecovery(tx, f, [pending]))
-      expect(recovered).toHaveLength(['quality', 'continuity', 'correction', 'correction-rejected-source', 'reassessment'].includes(scenario) ? 1 : 0)
+      expect(recovered).toHaveLength(scenario === 'quality' ? 1 : 0)
       if (recovered.length) {
         const first = recovered[0]
         const allUsageIds = knownFirstId ? expect.arrayContaining([usage.id, knownFirstId]) : [usage.id]
@@ -96,6 +97,30 @@ describe.runIf(available)('ordinary author Continue preserves real unknown billi
         await prisma.chapter.update({ where: { id: f.chapterId }, data: { revision: 2, content: '真实保存的修订正文' } })
         expect(await prisma.$transaction(tx => readContinuedReviewRecovery(tx, f, []))).toEqual([])
         expect(await prisma.$transaction(tx => readAuthorContinuedReviewUsageIds(tx, f))).toEqual(new Set(knownFirstId ? [usage.id, knownFirstId] : [usage.id]))
+      }
+      if (['continuity', 'correction', 'correction-rejected-source', 'reassessment'].includes(scenario)) {
+        // This is a historical server journal in the old immutable format,
+        // not a new current recovery plan or author permission. Its opaque
+        // old context hash is retained; the reader reauthenticates the actual
+        // call, admission, usage IDs, raw/claim and source result lineage.
+        const result = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId, seq: 2 } })
+        const admission = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId, seq: 4 } })
+        const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+        const binding = { sourceRunId: f.runId, sourceCallId: pending.callId, sourceResultId: result.id, sourceReportId: null,
+          usageIds: beforeAllUsage.filter(row => row.createdAt >= startAt && row.createdAt <= resultAt).map(row => row.id),
+          admissionId: `author-continue:${pause.id}`, admissionEventId: admission.id, taskId: f.spec.id,
+          currentRevision: chapter.revision, currentContentHash: createHash('sha256').update(chapter.content).digest('hex'), currentContextHash: 'c'.repeat(64) }
+        const receipt = { status: 'author_continued_review', usageOutcome: 'unknown_preserved', ...binding,
+          recoveryKey: `author-continued-review:${runtimeJson(binding).hash}` }
+        await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 5, type: 'review.reconciled', createdAt: new Date(resultAt.getTime() + 1100),
+          payload: runtimeJson({ ...pending, receipt }).value } })
+        expect(await prisma.$transaction(tx => readContinuedReviewRecovery(tx, f, []))).toEqual([])
+        expect(await prisma.$transaction(tx => readAuthorContinuedReviewUsageIds(tx, f)))
+          .toEqual(new Set(binding.usageIds))
+        await prisma.chapter.update({ where: { id: chapter.id }, data: { revision: 2, content: '真实保存的修订正文' } })
+        expect(await prisma.$transaction(tx => readContinuedReviewRecovery(tx, f, []))).toEqual([])
+        expect(await prisma.$transaction(tx => readAuthorContinuedReviewUsageIds(tx, f)))
+          .toEqual(new Set(binding.usageIds))
       }
       expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: usage.id } })).toEqual(beforeUsage)
       expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(beforeAllUsage)

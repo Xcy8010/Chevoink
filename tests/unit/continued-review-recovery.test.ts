@@ -79,6 +79,12 @@ describe('ordinary Continue review retirement', () => {
   })
   it.each(['quality_analyze', 'continuity_validate'] as const)('%s authenticates one prior failed request and leaves old usage/reserve/budget/stagnation intact', async toolName => {
     const f = fixture(toolName), before = f.snapshot(), rows = await f.read()
+    if (toolName === 'continuity_validate') {
+      expect(rows).toEqual([])
+      expect(f.snapshot()).toBe(before)
+      expect(f.db.aiUsageLog.update).not.toHaveBeenCalled(); expect(f.db.agentRun.update).not.toHaveBeenCalled()
+      return
+    }
     expect(rows).toHaveLength(1)
     expect(rows[0].receipt).toMatchObject({ status: 'author_continued_review', usageOutcome: 'unknown_preserved', sourceCallId: 'oldCall',
       sourceResultId: 'old-result', admissionEventId: 'start', taskId: 'task', currentRevision: 4, usageIds: ['unknown'] })

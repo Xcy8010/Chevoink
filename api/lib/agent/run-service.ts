@@ -520,7 +520,11 @@ export async function startLoopRunLocked(
       // contracts and durable continuation never refresh frozen resources.
       await syncBuiltinSkillCatalog(tx)
       const fresh = buildTaskSpec({ runId: created.id, novelId: session.novelId, chapterId,
-        prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1, localEditProtocol: 1, continuityEvidenceProtocol: 1, continuityReportProtocol: 5, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2,
+        prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1, localEditProtocol: 1, continuityEvidenceProtocol: 1,
+        // A delayed first goal start retains its creation-time contract. The
+        // historical v1 HTTP envelope cannot acquire today's paid phases.
+        ...(!options.goal || freshGoal?.continuityReportProtocol === 5 ? { continuityReportProtocol: 5 as const } : {}),
+        terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2,
         researchAdmission, researchNavigationAdmission: researchAdmission, networkAdmission, authorWritingProtocol: 2, creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
       let frozen = fresh
       if (input.selection || fresh.scope.authorEffects?.manuscript) {

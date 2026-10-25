@@ -203,5 +203,5 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
   if (full && (interval.filter(row => row.action === 'agent3ContinuityCritic' && row.usageSource === 'reported' && !isKnownRejectedTextRequestAttempt(row)).length !== 1
     || interval.some(row => !isKnownRejectedTextRequestAttempt(row) && row.action !== 'agent3ContinuityCritic' && (row.action !== 'agent3ContinuityCriticSecondPass' || row.billingStatus !== 'not_dispatched')))) return null
   if (!full && interval.some(row => row.billingStatus !== 'not_dispatched')) return null
-  return { chapter, coverage, sourceCallId: callId, usageIds: ids }
+  return { chapter, coverage, sourceCallId: callId, usageIds: ids, stage: full ? 'reassessment' as const : 'first' as const }
 }

@@ -50,7 +50,7 @@ export async function readOfflineContinuityRecovery(tx: Prisma.TransactionClient
   const inspected = inspectContinuityResponse(raw, bodies, true, 4)
   if (!inspected.structured || inspected.audit.classification !== 'complete' || !inspected.findings.length || !inspected.audit.sourceRelocations?.length) return null
   const currentCalls = await tx.agentRunEvent.findMany({ where: { runId: subject.runId, type: 'tool.call', payload: { path: ['callId'], equals: subject.callId } } })
-  const recovered = await readContinuedContinuityRecovery(tx, subject, currentCalls.length ? { callId: subject.callId, compilationId: compilation.id, chapterId: chapter.id } : undefined)
+  const recovered = await readContinuedContinuityRecovery(tx, subject, currentCalls.length ? { callId: subject.callId, compilationId: compilation.id, chapterId: chapter.id } : undefined, 'known_source')
   const admissionKey = recovered.find(([target]) => target === `${compilation.id}:${chapter.id}:${chapter.revision}:continuity_validate:protocol${COMPILER_CONTINUITY_PROTOCOL}`)?.[1]
   if (!admissionKey) return null
   const events = await tx.agentRunEvent.findMany({ where: { runId: { in: runIds }, type: { in: ['tool.call', 'tool.result'] } }, orderBy: [{ createdAt: 'asc' }, { seq: 'asc' }] })

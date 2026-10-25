@@ -447,7 +447,7 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
       } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
     }))
 
-  it('requires authenticated human Continue to retire an unknown second pass after a known-zero primary retry, preserving every fee', () => fixture(async f => {
+  it('preserves an unknown second pass after a known-zero primary retry without retiring it on Continue', () => fixture(async f => {
     try {
       const controller = new AbortController(), { ctx, compilation } = await retryFixture(f, controller)
       const timers = interceptRetryWait(controller)
@@ -491,10 +491,8 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
       expect(fetcher).toHaveBeenCalledTimes(3)
       const pending = { compilationId: compilation.id, chapterId: f.chapterId, revision: 1, toolName: 'continuity_validate' as const, callId: ctx.callId! }
       const native = await prisma.$transaction(tx => readContinuedReviewRecovery(tx, f, [pending]))
-      expect(native).toHaveLength(1)
-      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 5, type: 'review.reconciled', createdAt: new Date(resultAt.getTime() + 30),
-        payload: JSON.parse(JSON.stringify({ ...pending, receipt: native[0].receipt })) } })
-      await expect(continuityValidateTool.execute(fresh, { compilationId: compilation.id })).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+      expect(native).toHaveLength(0)
+      await expect(continuityValidateTool.execute(fresh, { compilationId: compilation.id })).rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
       await continuityValidateTool.execute(fresh, { compilationId: compilation.id }).catch(() => {})
       expect(fetcher).toHaveBeenCalledTimes(3)
       for (const payment of payments) expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: payment.id } })).toEqual(payment)
@@ -808,13 +806,11 @@ describe('complete continuity assessment lifecycle in actual PostgreSQL', () => 
             expect((await continuityValidateTool.execute(fresh, { compilationId: compilation.id }).catch(() => ({ outcome: 'failed' }))).outcome).toBe('failed')
             expect(sends).toBe(scenario === 'unknown-first' ? 1 : 2)
             const pending = { compilationId: compilation.id, chapterId: f.chapterId, revision: 1, toolName: 'continuity_validate' as const, callId: ctx.callId }
-            // Unknown raw/fees remain unknown. Only the existing authenticated
-            // author Continue producer may retire this exact execution slot.
+            // Generic Continue retains the unresolved operation and cannot
+            // retire unknown continuity usage into a current paid plan.
             const native = await prisma.$transaction(tx => readContinuedReviewRecovery(tx, f, [pending]))
-            expect(native).toHaveLength(1)
-            await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 5, type: 'review.reconciled', createdAt: new Date(resultAt.getTime() + 30),
-              payload: JSON.parse(JSON.stringify({ ...pending, receipt: native[0].receipt })) } })
-          } else if (!['stale-after-claim', 'stale-second-bound'].includes(scenario)) expect(await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, f))).toHaveLength(1)
+            expect(native).toHaveLength(0)
+          } else if (!['stale-after-claim', 'stale-second-bound'].includes(scenario)) expect(await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, f))).toHaveLength(beforeFirst ? 1 : 0)
           fetcher.mockImplementation(async () => { sends++; return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '{"findings":[]}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } }) })
           if (beforeFirst) {
             expect((await continuityValidateTool.execute(fresh, { compilationId: compilation.id })).outcome).not.toBe('failed')

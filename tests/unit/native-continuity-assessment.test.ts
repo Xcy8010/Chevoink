@@ -56,9 +56,14 @@ function fixture() {
       children: [child(id, 'continuity_critic', JSON.parse(inspection.audit.rawResponse.content), { system: work.criticSystem, content: work.criticInput })] }
   }
   const operations = [operation('origin', originFrozen, origin), operation('current', frozen, current)], artifacts: Array<{ metadata: unknown }> = []
-  const run = { id: 'run', userId: 'user', novelId: 'novel', taskRootId: taskId, status: 'running' }
+  const run = { id: 'run', userId: 'user', novelId: 'novel', taskRootId: taskId, runtimeProtocolVersion: 1, status: 'running', usage: {} as Record<string, unknown> }
+  const root = { id: taskId, userId: 'user', novelId: 'novel', authorizationMode: 'legacy', status: 'active' }
+  const matches = (row: object, where: Record<string, unknown>) => Object.entries(where).every(([key, value]) =>
+    value && typeof value === 'object' && 'in' in value ? (value.in as unknown[]).includes((row as Record<string, unknown>)[key])
+      : (row as Record<string, unknown>)[key] === value)
   const tx = { agentOperation: { findMany: vi.fn(async ({ where }) => operations.filter(row => row.taskRootId === where.taskRootId && where.originRunId.in.includes(row.originRunId))) },
-    agentRun: { findFirst: vi.fn(async ({ where }) => Object.entries(where).every(([key, value]) => run[key as keyof typeof run] === value) ? { id: run.id } : null) } }
+    agentRun: { findFirst: vi.fn(async ({ where }) => matches(run, where) ? run : null) },
+    agentTaskRoot: { findFirst: vi.fn(async ({ where }) => matches(root, where) ? root : null) } }
   mocks.state.mockResolvedValue({ frame: { state: { phase: 'awaiting_operation', pendingOperationId: 'current' } } })
   const read = () => readNativeContinuityAssessments(tx as unknown as Prisma.TransactionClient, subject, taskId, ['run'], { compilationId: 'compilation', chapterId: 'chapter', currentAudit: current.audit, related: () => true }, artifacts)
   const cache = (id: string, from: typeof operations[number]) => {
@@ -69,7 +74,7 @@ function fixture() {
     cloned.events = [{ eventKey: `effect:${id}`, type: 'effect.committed', taskRootId: taskId, operationId: id, payload: { operationId: id, resultHash: cloned.effectReceipt.resultHash } }]
     return cloned
   }
-  return { operations, origin, current, frozen, currentWire, artifacts, read, cache, child, operation, tx, run }
+  return { operations, origin, current, frozen, currentWire, artifacts, read, cache, child, operation, tx, run, root }
 }
 
 describe('readonly native continuity provenance', () => {
@@ -104,8 +109,21 @@ describe('readonly native continuity provenance', () => {
     Object.assign(f.operations[1], { status: 'prepared', effectReceipt: null, events: [] })
     expect(await f.read()).toEqual(expect.arrayContaining([expect.objectContaining({ operationId: 'current', current: true, committed: false })]))
     f.run.status = 'queued'
-    expect(await f.read()).toBeNull()
+    expect(await f.read()).toEqual(expect.arrayContaining([expect.objectContaining({ operationId: 'current', current: true, committed: false })]))
+    for (const status of ['paused', 'failed', 'completed']) {
+      f.run.status = status
+      expect(await f.read()).toBeNull()
+    }
     f.run.status = 'running'
+    f.run.usage = { authorEnded: true }
+    expect(await f.read()).toBeNull()
+    f.run.usage = {}
+    f.root.status = 'paused'
+    expect(await f.read()).toBeNull()
+    f.root.status = 'active'
+    f.run.runtimeProtocolVersion = 0
+    expect(await f.read()).toBeNull()
+    f.run.runtimeProtocolVersion = 1
     mocks.state.mockResolvedValueOnce({ frame: { state: { phase: 'awaiting_operation', pendingOperationId: 'unrelated' } } })
     expect(await f.read()).toBeNull()
   })

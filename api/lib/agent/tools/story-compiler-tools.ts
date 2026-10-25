@@ -224,7 +224,13 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   if (reusable) return reusable
   const reservation = await prisma.$transaction(async tx => {
     const admitted = await reserveLegacyContinuityAssessment(tx, ctx, frozen, input.assertCurrent)
-    if (admitted === 'new') await input.onNewRequestReserved?.(tx)
+    if (admitted === 'new') {
+      await input.onNewRequestReserved?.(tx)
+      if (input.assessmentAdmissionId && !await claimContinuedContinuityAssessment(tx, ctx, {
+        chapterId: frozen.chapterId, revision: frozen.revision, bodies: frozen.bodies, bindingHash: frozen.bindingHash,
+      }, input.assessmentAdmissionId, input.assertCurrent))
+        throw new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED', '原已授权复核阶段的兼容回执不能认证；未创建新请求或费用。')
+    }
     return admitted
   })
   if (reservation === 'blocked') throw new DataAccessError(409, 'CONTINUITY_REPORT_INCOMPLETE', '原检查或复评尚未确认，本次未重放模型请求；保留真实记录等待作者继续。')
@@ -983,11 +989,6 @@ export const continuityValidateTool = defineTool({
       const assertCurrent = async (db: Prisma.TransactionClient = prisma) => {
         if ((await buildStandaloneContinuityContext(ctx, context.chapter.id, db, sourceAuthority ? 4 : 3)).contextHash !== context.contextHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查资料已变化，请读取当前版本。')
       }
-      if (standaloneGate.freshAdmissionId && !await prisma.$transaction(tx => claimContinuedContinuityAssessment(tx, ctx,
-        { chapterId: context.chapter.id, revision: context.chapter.revision, bodies: { previous: context.precedingBodies, current: context.chapter.content },
-          bindingHash: standaloneContinuityBindingHash(context.contextHash, args.focus) },
-        standaloneGate.freshAdmissionId!, assertCurrent))) return { outcome: 'failed' as const, failureCode: 'CONTINUITY_REPORT_INCOMPLETE',
-        summary: '独立连续性复核未完成', output: unconfirmedContinuityOutput }
       const modelRuntime = await resolveReviewModelRuntime({ ...ctx, task: 'continuity' })
       const inspected = await runLegacyContinuityReview(ctx, { ...assessmentInput,
         options: { modelRuntime, explicitModelSelection: true, signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityCritic', novelId: ctx.novelId, chapterId: context.chapter.id, targetType: 'chapter', targetId: context.chapter.id, temperature: 0, reasoningEffort: modelRuntime.reasoningEffort }, assertCurrent,
@@ -1162,6 +1163,9 @@ export const continuityValidateTool = defineTool({
     // an old single-source response cannot be relabeled as the new range.
     // Existing correction and assessment reservations still fence unknown work.
     if (continued && !compilerContinuityCoverageMatches(continued.coverage, coverage)) continued = null
+    if (continued && !continued.dispatchAllowed) return { outcome: 'failed' as const, failureCode: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED',
+      summary: '原响应可核对，未增加检查请求',
+      output: '原始报告与已知费用已保留，但缺少本次纠正的原阶段、价目与冻结执行配置；普通继续不补充该许可，未派发模型，也未将未用阶段说成耗尽。' }
     const priorFailedState = z.object({ independentCheck: z.literal('unavailable'), checkedRevision: z.literal(chapter.revision),
       continuityCriticResponse: z.object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) }) }).safeParse(compilation.validation)
     const correctionGate = priorFailedState.success
@@ -1234,10 +1238,6 @@ export const continuityValidateTool = defineTool({
       if (continued && runtimeJson(current?.validation).hash !== continued.validationHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '原失败报告已变化，未纠正或应用旧意见。')
     }
     await assertCurrent()
-    if (correctionGate.freshAdmissionId && !await prisma.$transaction(tx => claimContinuedContinuityAssessment(tx, ctx,
-      { chapterId: chapter.id, revision: chapter.revision, bodies: requestBodies, bindingHash: runtimeJson(coverage).hash }, correctionGate.freshAdmissionId!, assertCurrent))) return {
-      outcome: 'failed' as const, failureCode: 'CONTINUITY_REPORT_INCOMPLETE', summary: '独立连续性复核未完成', output: unconfirmedContinuityOutput,
-    }
     let inspected: AuthenticatedContinuityInspection
     try {
       inspected = continued ? await runContinuityEvidenceCorrection({ original: continued.inspected, bodies, billingKnown: true, signal: ctx.signal,

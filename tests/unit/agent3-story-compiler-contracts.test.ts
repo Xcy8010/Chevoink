@@ -65,6 +65,7 @@ describe('严谨创作落实连续性警告', () => {
       agentRunEvent: { findMany: vi.fn().mockResolvedValue([]) },
       // This legacy-only fixture has no native operations to reclaim.
       agentOperation: { count: vi.fn().mockResolvedValue(0) },
+      aiUsageLog: { findMany: vi.fn().mockResolvedValue([]) },
       agentArtifact: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: 'audit' }) },
       chapter: { findMany: vi.fn((...args: Parameters<typeof prisma.chapter.findMany>) => prisma.chapter.findMany(...args)), findFirst: vi.fn((...args: Parameters<typeof prisma.chapter.findFirst>) => prisma.chapter.findFirst(...args)), updateMany: write, findUniqueOrThrow: vi.fn().mockResolvedValue({ ...chapter, revision: 2 }) },
       storyCompilation: { findFirst: findCompilation, findUniqueOrThrow: vi.fn(async () => compilation),
@@ -256,7 +257,7 @@ describe('严谨创作落实连续性警告', () => {
     expect(f.critic).not.toHaveBeenCalled()
     expect(f.write).not.toHaveBeenCalled()
   })
-  it.each([6, 7] as const)('a real author continuation of protocol %s buys a full current assessment, never relabels old findings', async protocol => {
+  it.each([6, 7] as const)('an unbound protocol %s hint never relabels findings or consumes a previously unused first assessment', async protocol => {
     const f = fixture(false)
     const oldCoverage = compilerContinuityCoverage({ chapter: f.chapter, bridge: f.compilation.bridge, sceneTasks: f.compilation.sceneTasks, source: null }, protocol)
     vi.spyOn(continuedEvidence, 'readContinuedContinuityEvidence').mockResolvedValue({ coverage: oldCoverage, admissionKey: 'verified-author-admission',

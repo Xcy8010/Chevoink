@@ -3,12 +3,17 @@ import { z } from 'zod'
 import { createAgentGoalSchema, agentGoalExecutionOptionsSchema } from '../../../shared/contracts/agent-goal.js'
 import type { StartAgentLoopRunRequest } from '../../../shared/contracts/index.js'
 import { startAgentLoopRunSchema } from '../../../shared/contracts/schemas.js'
+import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { runtimeError, runtimeJson } from './runtime-common.js'
 
 const envelopeSchema = z.object({ operation: z.literal('create'), target: z.union([
   z.object({ sessionId: z.string() }).strict(), z.object({ novelId: z.string() }).strict(),
 ]), body: createAgentGoalSchema }).strict()
-const sourceSchema = z.object({ version: z.literal(1), origin: z.literal('http'), envelope: envelopeSchema }).strict()
+const sourceSchema = z.discriminatedUnion('version', [
+  z.object({ version: z.literal(1), origin: z.literal('http'), envelope: envelopeSchema }).strict(),
+  z.object({ version: z.literal(2), origin: z.literal('http'), envelope: envelopeSchema,
+    continuityReportProtocol: z.literal(5), writingCoordinationProtocol: z.literal(2) }).strict(),
+])
 const object = (raw: Prisma.JsonValue) => raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : null
 
 /** Model assignment is the only normalization admission can make. Selection,
@@ -44,7 +49,9 @@ export async function readFreshGoalSource(tx: Prisma.TransactionClient, goal: Ag
     || runtimeJson(agentGoalExecutionOptionsSchema.parse(request)).hash !== runtimeJson(body.options).hash) {
     return runtimeError('RUNTIME_BOOTSTRAP_SOURCE_REQUIRED', '目标准入与原创建回执不一致。')
   }
-  return { objective: body.objective, options: body.options }
+  return { objective: body.objective, options: body.options,
+    ...(parsed.data.version === 2 ? { continuityReportProtocol: parsed.data.continuityReportProtocol,
+      writingCoordinationProtocol: parsed.data.writingCoordinationProtocol } : {}) }
 }
 
 /** Historical reader: a later goal revision must not invalidate old event
@@ -70,5 +77,11 @@ export async function readFreshGoalBootstrapSource(tx: Prisma.TransactionClient,
     return runtimeError('RUNTIME_BOOTSTRAP_SOURCE_REQUIRED', '目标原始输入与执行记录不一致。')
   }
   assertFreshGoalOptions(saved.data, original.options)
+  const spec = taskSpecSchema.safeParse(run.taskSpec)
+  if (!spec.success || (original.continuityReportProtocol === 5
+    ? spec.data.scope.continuityReportProtocol !== 5
+    : spec.data.scope.continuityReportProtocol !== undefined || spec.data.scope.writingCoordinationProtocol === 2)) {
+    return runtimeError('RUNTIME_BOOTSTRAP_SOURCE_REQUIRED', '目标创建时的写作合同与已冻结执行不一致，未升级或降级原合同。')
+  }
   return { binding, request: saved.data }
 }

@@ -89,7 +89,8 @@ export async function readLegacyContinuityRecovery(tx: Prisma.TransactionClient,
  * Restarting, changing compilers or copying an old request cannot authorize it. */
 export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string },
-  ignoreCurrentCall?: { callId: string; compilationId: string; chapterId: string }): Promise<Array<[string, string]>> {
+  ignoreCurrentCall?: { callId: string; compilationId: string; chapterId: string },
+  purpose: 'new_request' | 'known_source' = 'new_request'): Promise<Array<[string, string]>> {
   const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId } })
   if (!run || run.taskRootId) return []
   const admission = await readQualityReviewAdmission(tx, run)
@@ -213,12 +214,29 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
     if ((!knownCorrection && receipts.filter(item => item.action === 'agent3ContinuityCritic' && !isKnownRejectedTextRequestAttempt(item)).length !== 1)
       || receipts.some(item => !known(item) || !isKnownRejectedTextRequestAttempt(item) && object(item.billingEvidence).responseObserved !== true
         || !['agent3ContinuityCritic', 'agent3ContinuityCriticOutputRecovery', 'agent3ContinuityCriticEmptyRecovery', 'agent3ContinuityEvidenceCorrection', 'agent3ContinuityCriticSecondPass'].includes(item.action))) continue
-    const key = `continuity-author-recovery:${runtimeJson({ taskId: original.taskId, chapterId: chapter.id, contentHash: coverage.contentHash, admissionId: admission.id }).hash}`
+    // A returned response is not another whole-review grant. Use the same
+    // original-cycle predicate as actual reservation before advertising a
+    // dispatch key. Exact known-raw and unsent-stage recovery stay separate.
+    if (purpose === 'new_request') {
+      const lifecycle = await import('./assessment-response-lifecycle.js')
+      const reservations = await tx.agentArtifact.findMany({ where: { runId: { in: runIds }, artifactType: 'continuityReview',
+        metadata: { path: ['assessmentChapterId'], equals: chapter.id } }, take: 1001 })
+      if (reservations.length > 1000) continue
+      const knownInputs = reservations.flatMap(row => {
+        const parsed = lifecycle.legacyAssessmentInputSchema.safeParse(object(row.metadata).input)
+        return parsed.success && parsed.data.targetType === 'story_compilation' && parsed.data.targetId === compilation.id ? [parsed.data] : []
+      })
+      const authority = await (await import('./continuity-coordinator.js')).readOriginalCycleContinuityVerification(tx, subject,
+        { targetId: compilation.id, chapterId: chapter.id, revision: chapter.revision, bodies: { current: chapter.content, previous: null } }, knownInputs)
+      if (!authority || await tx.agentArtifact.findUnique({ where: { id: authority.id } })) continue
+    }
+    const key = `${purpose === 'known_source' ? 'continuity-known-source' : 'continuity-author-recovery'}:${runtimeJson({ taskId: original.taskId, chapterId: chapter.id, contentHash: coverage.contentHash, admissionId: admission.id }).hash}`
     keys.push([`${compilation.id}:${chapter.id}:${chapter.revision}:continuity_validate:protocol${COMPILER_CONTINUITY_PROTOCOL}`, key])
   }
-  for (const compilation of compilations) {
+  for (const compilation of purpose === 'new_request' ? compilations : []) {
     const proof = await readUnsentContinuityAdmission(tx, subject, { runIds, compilationId: compilation.id, admission, retiredUsageIds })
-    if (!proof || !original.writing.targets.some(target => target.orderIndex === proof.chapter.orderIndex
+    // An old second-stage non-dispatch lacks its frozen transport settings.
+    if (!proof || proof.stage !== 'first' || !original.writing.targets.some(target => target.orderIndex === proof.chapter.orderIndex
       && (target.chapterId ?? original.bindings?.targets.find(binding => binding.orderIndex === target.orderIndex)?.chapterId) === proof.chapter.id)) continue
     const target = `${compilation.id}:${proof.chapter.id}:${proof.chapter.revision}:continuity_validate:protocol${COMPILER_CONTINUITY_PROTOCOL}`
     if (!keys.some(([saved]) => saved === target)) keys.push([target, `continuity-author-recovery:${runtimeJson({ taskId: original.taskId,

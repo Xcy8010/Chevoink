@@ -44,8 +44,15 @@ export async function readNativeContinuityAssessments(db: Prisma.TransactionClie
     if (committed) return 'committed' as const
     if (!sameCurrent || operation.status !== 'prepared' || receipt) return null
     const current = await readExecutionStateInTransaction(db, taskId), pendingId = operation.kind === 'tool' ? operation.id : operation.parentOperationId
-    return current.frame.state.phase === 'awaiting_operation' && current.frame.state.pendingOperationId === pendingId
-      && await db.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId, taskRootId: taskId, status: 'running' }, select: { id: true } }) ? 'current' as const : null
+    if (current.frame.state.phase !== 'awaiting_operation' || current.frame.state.pendingOperationId !== pendingId) return null
+    // Read-only provenance follows the canonical native queued/running state.
+    // It grants no effects: report application still holds the exact live lease.
+    const run = await db.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId,
+      taskRootId: taskId, runtimeProtocolVersion: 1, status: { in: ['queued', 'running'] } }, select: { id: true, usage: true } })
+    if (!run || object(run.usage).authorEnded !== undefined) return null
+    const root = await db.agentTaskRoot.findFirst({ where: { id: taskId, userId: subject.userId, novelId: subject.novelId,
+      authorizationMode: 'legacy', status: 'active' }, select: { id: true } })
+    return root ? 'current' as const : null
   }
   for (const operation of operations) {
     const rawWork = object(object(operation.inputSnapshot).input).work, rawChapter = object(object(rawWork).chapter), rawCompiler = object(object(rawWork).compiler)

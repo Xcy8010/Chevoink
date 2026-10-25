@@ -192,6 +192,11 @@ async function readRecovery(tx: Prisma.TransactionClient, subject: Subject, pend
     if (item.success && !candidates.some(saved => saved.callId === item.data.callId)) candidates.push(item.data)
   }
   for (const item of candidates) {
+    // A generic Continue can retain an old unknown-result audit, but cannot
+    // grant another independent continuity request. Known raw application and
+    // the original continuity phases have their own authenticated readers.
+    // Historical journals remain readable; they are never rewritten/cleared.
+    if (item.toolName === 'continuity_validate' && !historical) continue
     const calls = history.filter(event => event.type === 'tool.call' && object(event.payload).callId === item.callId)
     const results = history.filter(event => event.type === 'tool.result' && object(event.payload).callId === item.callId)
     if (calls.length !== 1 || results.length !== 1) continue

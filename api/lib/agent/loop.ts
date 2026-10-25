@@ -1366,7 +1366,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           await bus.persist()
         }
         pendingReviews.delete(`${item.compilationId ?? item.chapterId}:${item.toolName}`)
-        reviewRecoveryKeys.set(reviewDispatchKey(item, item.toolName), `review-retired:${item.retirement.admissionId}:${item.callId}`)
+        if (item.toolName !== 'continuity_validate')
+          reviewRecoveryKeys.set(reviewDispatchKey(item, item.toolName), `review-retired:${item.retirement.admissionId}:${item.callId}`)
       }
       if (retired.length) await persistCheckpoint()
     }

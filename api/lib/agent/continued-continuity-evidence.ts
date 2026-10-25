@@ -39,7 +39,7 @@ export async function readContinuedContinuityEvidence(tx: Prisma.TransactionClie
   const inspected = inspectContinuityResponse(raw, bodies, true, 5)
   if (!inspected.structured || !inspected.candidateFindings.length || !['source_invalid', 'complete'].includes(inspected.audit.classification)) return null
   const currentCalls = await tx.agentRunEvent.findMany({ where: { runId: ctx.runId, type: 'tool.call', payload: { path: ['callId'], equals: ctx.callId } } })
-  const recovered = await readContinuedContinuityRecovery(tx, ctx, currentCalls.length ? { callId: ctx.callId, compilationId: compilation.id, chapterId: chapter.id } : undefined)
+  const recovered = await readContinuedContinuityRecovery(tx, ctx, currentCalls.length ? { callId: ctx.callId, compilationId: compilation.id, chapterId: chapter.id } : undefined, 'known_source')
   const admissionKey = recovered.find(([target]) => target === `${compilation.id}:${chapter.id}:${chapter.revision}:continuity_validate:protocol${COMPILER_CONTINUITY_PROTOCOL}`)?.[1]
   if (!admissionKey) return null
   const checkedAt = new Date(String(validation.checkedAt))
@@ -60,5 +60,9 @@ export async function readContinuedContinuityEvidence(tx: Prisma.TransactionClie
     action: { startsWith: 'agent3ContinuityCritic' }, createdAt: { gte: call.createdAt, lte: result.createdAt } } })
   if (paid.filter(row => row.action === 'agent3ContinuityCritic').length !== 1 || paid.some(row => row.usageSource !== 'reported'
     || !isKnownTextRequestBilling(row) || object(row.billingEvidence).responseObserved !== true)) return null
-  return { inspected, originalAudit: structuredClone(audit), bodies, chapter, coverage, usageIds: paid.map(row => row.id), validationHash: runtimeJson(validation).hash, admissionKey }
+  // A readable old result is not an extra fee grant. These legacy rows do not
+  // freeze an admitted correction stage/route/price. Native work7 retains its
+  // own fully frozen one-child path; known corrections are applied separately.
+  return { inspected, originalAudit: structuredClone(audit), bodies, chapter, coverage, usageIds: paid.map(row => row.id), validationHash: runtimeJson(validation).hash,
+    admissionKey, dispatchAllowed: false as boolean }
 }

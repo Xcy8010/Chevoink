@@ -71,7 +71,8 @@ export async function createAgentGoal(userId: string, target: { sessionId: strin
     const control = body.limits && Object.keys(body.limits).length ? verifiedUserExecutionControl({ tokens: body.limits.tokenLimit === undefined ? null : BigInt(body.limits.tokenLimit),
       turns: null, activeTimeMs: body.limits.activeTimeLimitMs === undefined ? null : BigInt(body.limits.activeTimeLimitMs) }) : untilCompletionControl()
     const nativeAdmission = authorSource?.authenticatedHttp && (await import('./fresh-durable-rollout.js')).isFreshDurableAdmissionEnabled(userId)
-      ? { version: 1, origin: 'http', envelope: { operation: 'create', target, body } } : undefined
+      ? { version: 2, origin: 'http', continuityReportProtocol: 5, writingCoordinationProtocol: 2,
+        envelope: { operation: 'create', target, body } } : undefined
     const request = runtimeJson({ ...body.options, ...(nativeAdmission ? { nativeAdmission } : {}), executionControl: serializeExecutionControl(control), ...(control.origin === 'user'
       ? { executionControlProof: { version: 1, revision: 1, envelope: { operation: 'create', target, body } } } : {}) }).value
     const tokenLimit = BigInt(body.limits?.tokenLimit ?? COMPATIBILITY_TOKEN_LIMIT)

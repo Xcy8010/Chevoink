@@ -53,6 +53,7 @@ describe.runIf(available)('closed local candidate refusal is not an unknown prov
     const callId = 'producer-preflight'
     const reservation = reserved ? await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'continuityReview',
       title: 'Synthetic original reservation', content: '', metadata: { version: 1, callId, continuityAssessmentRequestKey: 'a'.repeat(64) } } }) : null
+    const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
     const prepare = vi.spyOn(proposals, 'prepareCompilerTerminalProposals').mockImplementation(() => {
       throw new DataAccessError(409, 'TERMINAL_STATE_REVIEW_REQUIRED', 'Synthetic local proposal refusal')
     })
@@ -72,9 +73,9 @@ describe.runIf(available)('closed local candidate refusal is not an unknown prov
     expect(network).not.toHaveBeenCalled()
     expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
-    // A local refusal still retains the monotonic check audit; it is not a free reset.
-    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } }))
-      .toMatchObject({ validation: { terminalCandidate: candidate, checkRounds: 1 } })
+    // No new phase/request was admitted. Preserve the original counters and
+    // candidate verbatim; preflight refusal cannot create a business effect.
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).toEqual(before)
     if (reservation) expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: reservation.id } })).toEqual(reservation)
   }, undefined, '修改本章', { freezeWriting: true, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }))
 

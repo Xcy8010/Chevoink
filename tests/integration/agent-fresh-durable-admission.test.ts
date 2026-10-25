@@ -120,7 +120,7 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     } finally { await prisma.agentGoal.delete({ where: { id: goal.id } }) }
   }))
 
-  it.each(['http', 'internal', 'rollout-disabled', 'tampered-command', 'altered-start'] as const)('first goal %s uses its original creation authority, never a user-role inference', scenario => fixture(async f => {
+  it.each(['http', 'legacy-http', 'unmarked-http', 'internal', 'rollout-disabled', 'tampered-command', 'altered-start'] as const)('first goal %s uses its original creation authority, never a user-role inference', scenario => fixture(async f => {
     await ready(f)
     env.agentGoalEnabled = true
     if (scenario === 'rollout-disabled') env.agentDurableRolloutUserIds = []
@@ -130,6 +130,15 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
       options: { mode: 'build', chapterId: f.chapterId, qualityMode: 'balanced', creativeFreedom: 'balanced' } },
     scenario === 'internal' ? undefined : { authenticatedHttp: true })
     try {
+      if (scenario === 'legacy-http' || scenario === 'unmarked-http') {
+        const revision = await prisma.agentGoalRevision.findUniqueOrThrow({ where: { goalId_revision: { goalId: goal.id, revision: 1 } } })
+        const request = revision.request as { nativeAdmission: { envelope: object }; [key: string]: unknown }
+        const { nativeAdmission, ...options } = request
+        const historical = runtimeJson({ ...options, ...(scenario === 'legacy-http'
+          ? { nativeAdmission: { version: 1, origin: 'http', envelope: nativeAdmission.envelope } } : {}) }).value
+        await prisma.agentGoalRevision.update({ where: { goalId_revision: { goalId: goal.id, revision: 1 } }, data: { request: historical,
+          authorityHash: runtimeJson({ objective: revision.objective, request: historical, novelId: f.novelId, userId: f.userId }).hash } })
+      }
       if (scenario === 'tampered-command') await prisma.agentGoalCommand.update({ where: { userId_requestId: { userId: f.userId, requestId } }, data: { requestHash: '0'.repeat(64) } })
       await superviseAgentGoal(f.userId, f.sessionId, goal.id)
       if (scenario === 'tampered-command') {
@@ -140,13 +149,17 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
       }
       const binding = await prisma.agentGoalExecution.findFirstOrThrow({ where: { goalId: goal.id } })
       const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: binding.runId } })
-      if (scenario === 'internal' || scenario === 'rollout-disabled') {
+      if (scenario === 'internal' || scenario === 'rollout-disabled' || scenario === 'unmarked-http') {
         expect(run.runtimeProtocolVersion).toBe(0)
+        expect(taskSpecSchema.parse(run.taskSpec).scope.continuityReportProtocol).toBeUndefined()
         expect(dispatchFreshDurableRun).not.toHaveBeenCalled()
         return
       }
       expect(run).toMatchObject({ runtimeProtocolVersion: 1, status: 'queued', taskRootId: binding.taskRootId })
-      expect(taskSpecSchema.parse(run.taskSpec).scope.writingCoordinationProtocol).toBe(1)
+      const scope = taskSpecSchema.parse(run.taskSpec).scope
+      expect(scope.writingCoordinationProtocol).toBe(scenario === 'legacy-http' ? 1 : 2)
+      if (scenario === 'legacy-http') expect(scope.continuityReportProtocol).toBeUndefined()
+      else expect(scope.continuityReportProtocol).toBe(5)
       expect(binding).toMatchObject({ trigger: 'author', continuationIndex: 1, sourceEventId: `${goal.id}:1:1` })
       if (scenario === 'altered-start') {
         await prisma.agentRun.update({ where: { id: run.id }, data: { startRequest: { ...run.startRequest as object, qualityMode: 'premium' } } })

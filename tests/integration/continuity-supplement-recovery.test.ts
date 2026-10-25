@@ -410,7 +410,7 @@ describe.runIf(available)('original persistent supplemental phase: real question
       expect(restored.pendingReviews ?? []).toEqual([])
       expect((await readContinuitySupplementState(prisma, s.ctx, s.old.key)).kind).toBe('applied')
       expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: s.compilation.id } })).toMatchObject({ committedAt: expect.any(Date) })
-      expect(finished.status).toBe('succeeded')
+      expect(finished.status).toBe('completed')
       const audit = ((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })).validation as Record<string, unknown>).continuityCriticResponse
       expect(await authenticateSupplementalContinuityReport(prisma, s.ctx, audit)).toBe(true)
     }
