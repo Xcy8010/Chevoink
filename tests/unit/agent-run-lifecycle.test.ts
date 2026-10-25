@@ -784,6 +784,67 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(mocks.chat).toHaveBeenCalledOnce()
     expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
   })
+  it('runs ordinary current-report decisions after paid application despite old consumed feedback and stagnant seven', async () => {
+    const { runtimeJson } = await import('../../api/lib/agent/runtime-common.js')
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '修改本章' })
+    mocks.currentOriginal = { prompt: '修改本章', taskSpec }
+    mocks.chapters[0].revision = 4
+    const body = mocks.chapters[0].content
+    const requiredDecisions = [
+      ...Array.from({ length: 4 }, (_, index) => ({ source: 'continuity' as const, reportId: 'authenticated-paid-whole', findingId: String(index) })),
+      ...Array.from({ length: 11 }, (_, index) => ({ source: 'quality' as const, reportId: 'current-passed-quality', findingId: `quality-${index}` })),
+    ]
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 100, stagnantBatches: 7, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 3, writeBaseline: 0, readProgress: 11, readBaseline: 0, progressSignatures: [],
+      reviewAttempts: ['comp:c:4:merged', 'original-full1-consumed'], consumedReviewDecisionFeedback: ['e'.repeat(64)], pendingReviews: [] }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 30, startedAt: new Date(checkpoint.runStartedAt),
+      usage: { promptTokens: 1000, completionTokens: 50, totalTokens: 1050, checkpoint } })
+    let state: ChapterReviewReadiness = { ...readiness('complete', 'complete', 4), reviewProtocol: 1, decisionPending: true, continuityErrorCount: 4, requiredDecisions,
+      decisionDetails: requiredDecisions.map(ref => ({ ...ref, evidence: body, explanation: 'This opinion requires actual current evidence review.',
+        suggestion: 'Do not change facts merely to clear an opinion.', severity: 'error', disposition: 'pending' })),
+      terminalReview: { state: 'unverified', currentResultVerified: true, deliveryEligible: false,
+        unresolved: Array.from({ length: 6 }, (_, index) => ({ path: `historical.${index}`, verdict: 'unknown' })) },
+      progressEvidence: { userId: 'user', novelId: 'novel', taskId: taskSpec.id, chapterId: 'c', orderIndex: 1,
+        contentHash: runtimeJson({ content: body }).hash, phases: [] },
+      terminalProcessing: { contractHash: runtimeJson(JSON.parse(JSON.stringify(taskSpec))).hash, sourceHash: 'a'.repeat(64),
+        content: body, previous: 'An authenticated older chapter.', inherited: [], candidate: terminalCandidateSchema.parse({ exitState: { objects: ['The packet remains sealed.'] } }),
+        issues: [{ path: 'historical.0', reason: 'unknown' }] } }
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    const critic = tool('continuity_validate', async () => { throw Error('Consumed full1 cannot dispatch again') })
+    const commit = tool('chapter_bridge_commit', async () => {
+      expect(mocks.chat).toHaveBeenCalledOnce()
+      state = { ...state, decisionPending: false, terminalCommitted: true,
+        terminalReview: { ...state.terminalReview!, deliveryEligible: true }, terminalProcessing: undefined }
+      mocks.committedChapter.mockResolvedValue(true)
+      return { output: 'The actual current report decisions and bridge were saved.',
+        requiredResult: { targetId: 'c', contentHash: persistedContentHash(body) } }
+    }, false)
+    mocks.tools = [critic, commit]
+    mocks.chat.mockImplementationOnce(async request => {
+      expect(events().filter(event => event.type === 'run.paused')).toEqual([])
+      expect(request.model).toBe('selected-current-model')
+      expect(request.messages.some((message: { content?: string | null }) => message.content?.includes('authenticated-paid-whole') && message.content.includes('retainedFindings'))).toBe(true)
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { stagnantBatches: 7,
+        reviewAttempts: checkpoint.reviewAttempts, consumedReviewDecisionFeedback: checkpoint.consumedReviewDecisionFeedback } })
+      return response('', [call('ordinary-retained-decision', commit.name, JSON.stringify({ compilationId: 'comp', retainedFindings: requiredDecisions.map(ref =>
+        ({ ...ref, reason: 'The full current evidence does not justify changing the manuscript; preserve this independent opinion for the author.' })) }))])
+    })
+    // The loop-only suite supplies its existing explicit committed-delivery
+    // stub; the supplement PostgreSQL case proves the real bridge/delivery.
+    const writing = await import('../../api/lib/agent/writing-scope.js')
+    const delivery = vi.spyOn(writing, 'readCompletedWritingDelivery').mockImplementation((tx, subject) => writing.readCompletedWritingPresentation(tx, subject))
+    try {
+      await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '修改本章', resume: true })
+    } finally { delivery.mockRestore() }
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(commit.execute).toHaveBeenCalledOnce()
+    expect(critic.execute).not.toHaveBeenCalled()
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'ordinary-retained-decision', ok: true }))
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { reviewAttempts: expect.arrayContaining(checkpoint.reviewAttempts),
+      consumedReviewDecisionFeedback: checkpoint.consumedReviewDecisionFeedback } })
+  })
   it('does not attribute a previous revision failure to the current incomplete review', async () => {
     const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
     mocks.currentOriginal = { prompt: '写下一章', taskSpec }
@@ -3680,16 +3741,25 @@ describe('confirmed review request failures', () => {
       const critic = tool('continuity_validate', async () => ({ output: 'The original verdict and report remain unchanged.', outcome: 'failed',
         failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewOutcome, reviewDecisionFeedback: feedback, reviewCompleted: reviewOutcome === 'decision_required' }))
       const outcome = await handleToolCall(call('classified', critic.name), [critic], context(), { emit: mocks.emit }, 'message', 'run')
-      expect(outcome).toMatchObject({ reviewOutcome, reviewDecisionFeedback: feedback, part: { status: 'failed', reviewOutcome },
+      expect(outcome).toMatchObject({ reviewOutcome, reviewDecisionFeedback: feedback, part: { status: 'failed' },
         failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', unresolvedTextRequest: reviewOutcome === 'provider_unresolved' })
-      expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', ok: false, reviewOutcome, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' }))
+      expect(outcome.part).not.toHaveProperty('reviewOutcome')
+      expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', ok: false, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' }))
+      expect(events().find(event => event.type === 'tool.result')).not.toHaveProperty('reviewOutcome')
       expect(critic.execute).toHaveBeenCalledOnce(); expect(mocks.chat).not.toHaveBeenCalled()
     })
-  it('keeps an authenticated complete report classification on its success event and persisted part', async () => {
-    const critic = tool('continuity_validate', async () => ({ output: 'A complete report.', reviewOutcome: 'complete' }))
+  it.each(['continuity_validate', 'chapter_bridge_commit', 'quality_analyze'] as const)('keeps %s execution binary while retaining internal report data', async name => {
+    const critic = tool(name, async () => ({ output: 'A complete result with independent opinions.', reviewOutcome: 'decision_required', reviewCompleted: true }))
     const outcome = await handleToolCall(call('complete-report', critic.name), [critic], context(), { emit: mocks.emit }, 'message', 'run')
-    expect(outcome).toMatchObject({ reviewOutcome: 'complete', part: { status: 'success', reviewOutcome: 'complete' } })
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', ok: true, reviewOutcome: 'complete' }))
+    expect(outcome).toMatchObject({ reviewOutcome: 'decision_required', reviewCompleted: true, part: { status: 'success' } })
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', ok: true }))
+    if (name === 'quality_analyze') {
+      expect(outcome.part).toHaveProperty('reviewOutcome', 'decision_required')
+      expect(events().find(event => event.type === 'tool.result')).toHaveProperty('reviewOutcome', 'decision_required')
+    } else {
+      expect(outcome.part).not.toHaveProperty('reviewOutcome')
+      expect(events().find(event => event.type === 'tool.result')).not.toHaveProperty('reviewOutcome')
+    }
   })
   it.each(['terminal', 'unknown'] as const)('%s preserves request truth and executes independent work in the same batch', async status => {
     mocks.chat.mockImplementation(async () => response('检查尚未完成，原文保留。'))

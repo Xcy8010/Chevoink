@@ -9,6 +9,24 @@ function pending(overrides: Partial<ChapterReviewReadiness> = {}): ChapterReview
     requiredTools: [{ name: 'quality_analyze', args: { compilationId: 'compile' } }], ...overrides }
 }
 describe('server review fallback', () => {
+  it('presents current report decisions before unresolved terminal data without claiming retention completes delivery', () => {
+    const ref = { source: 'continuity' as const, reportId: 'current-whole', findingId: '0' }
+    const review = pending({ ready: true, continuity: 'complete', quality: 'complete', requiredTools: [],
+      decisionPending: true, requiredDecisions: [ref], continuityErrorCount: 1,
+      decisionDetails: [{ ...ref, evidence: 'The packet remains sealed.', explanation: 'The independent opinion must be checked.',
+        suggestion: 'Check the actual evidence before changing the manuscript.', severity: 'error', disposition: 'pending' }],
+      terminalReview: { state: 'unverified', currentResultVerified: true, deliveryEligible: false,
+        unresolved: [{ path: 'factCoverage.old', verdict: 'unknown' }] } })
+    const step = projectCurrentReviewNextStep(review)
+    expect(step).toMatchObject({ state: 'decision_required', pending: [ref], retentionCompletes: false })
+    const guidance = currentReviewNextStepGuidance(step)
+    expect(guidance).toContain('retainedFindings')
+    expect(guidance).toContain('current-whole')
+    expect(guidance).toContain('factCoverage.old')
+    expect(projectCurrentReviewNextStep({ ...review, ready: false }).state).not.toBe('decision_required')
+    expect(projectCurrentReviewNextStep({ ...review, mustPassPending: true }).retentionCompletes).toBe(false)
+    expect(projectCurrentReviewNextStep({ ...review, retainedDecisions: [{ ...ref, reason: 'Keep this opinion pending.' }], decisionPending: false }).state).toBe('terminal_review_required')
+  })
   it.each([false, true])('persists a complete strict JSON observation with optional terminal state=%s', terminal => {
     const step = projectCurrentReviewNextStep(pending(terminal ? { terminalReview: { state: 'unverified', unresolved: [] } } : {}))
     expect(() => runtimeJson(step)).not.toThrow()

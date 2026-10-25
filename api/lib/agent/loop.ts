@@ -1,6 +1,6 @@
 import { observedReviewOutcome, projectedReviewAction, type ReviewOutcome } from '../../../shared/review-lifecycle.js'
 import { readSettledQualityReviews } from './quality-review-admission.js'
-import { terminalProcessingPlan, terminalProcessingPhaseGapMessage } from './terminal-processing.js'
+import { terminalProcessingPlan } from './terminal-processing.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
 import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, writingClarificationResolvesInput, readCompletedWritingDelivery, readRecoveredChapterDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
@@ -428,6 +428,9 @@ export async function handleToolCall(
   bus.emit({ type: 'tool.call', messageId, callId: call.id, toolName: call.name, title: basePart.title, args: parsedArgs, autoApproved, ...subagentMark })
 
   const requestTrace = createTextRequestTrace()
+  // These tools expose execution success/failure. Review judgments remain
+  // report data and internal receipt/reconciliation metadata, not tool states.
+  const exposeReviewOutcome = call.name !== 'continuity_validate' && call.name !== 'chapter_bridge_commit'
   let reviewSnapshot: { chapterId: string; revision: number; contentHash: string } | undefined
   let failureCode: string | undefined
   let invalidFields: string[] | undefined
@@ -444,13 +447,13 @@ export async function handleToolCall(
       summary,
       failureCode,
       invalidFields,
-      ...(reviewOutcome ? { reviewOutcome } : {}),
+      ...(exposeReviewOutcome && reviewOutcome ? { reviewOutcome } : {}),
       ...(reviewRequestFinished ? { reviewRequestFinished } : {}),
       durationMs: Date.now() - startedAt,
       ...subagentMark,
     })
     return { observation, failureCode, reviewRequestFinished, reviewOutcome,
-      unresolvedTextRequest: reviewOutcome === 'provider_unresolved' || requestTrace.records.length > 0 && !textRequestsFinished(requestTrace), part: { ...basePart, args: parsedArgs, status, summary, ...(reviewOutcome ? { reviewOutcome } : {}) },
+      unresolvedTextRequest: reviewOutcome === 'provider_unresolved' || requestTrace.records.length > 0 && !textRequestsFinished(requestTrace), part: { ...basePart, args: parsedArgs, status, summary, ...(exposeReviewOutcome && reviewOutcome ? { reviewOutcome } : {}) },
       ...(['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED'].includes(failureCode ?? '')
         ? { reviewStopReason: observation } : {}) }
   }
@@ -576,7 +579,7 @@ export async function handleToolCall(
       ok: true,
       summary,
       display: result.display,
-      ...(reviewOutcome ? { reviewOutcome } : {}),
+      ...(exposeReviewOutcome && reviewOutcome ? { reviewOutcome } : {}),
       ...(reviewRequestFinished ? { reviewRequestFinished } : {}),
       durationMs,
       ...subagentMark,
@@ -600,7 +603,7 @@ export async function handleToolCall(
         status: 'success',
         summary,
         display: result.display,
-        ...(reviewOutcome ? { reviewOutcome } : {}),
+        ...(exposeReviewOutcome && reviewOutcome ? { reviewOutcome } : {}),
         durationMs,
         // 写操作快照随消息落库，供「回退到本轮对话前」逆序恢复
         snapshot: result.snapshot,
@@ -2099,11 +2102,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           return
         }
       }
-      if (!bootstrapCall && terminalPlan?.kind === 'process') {
-        forceWrapUpLocal = true
-        await wrapUpAndFinish(terminalProcessingPhaseGapMessage(currentReviewState.value))
-        return
-      }
+      // Current report data does not revoke the original main-model task.
+      // Any proposed new critic request still requires its own durable phase
+      // admission at dispatch; ordinary decisions use the existing tool path.
       const configurationChanges = await prisma.agentConfigurationChange.findMany({ where: { runId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
       if (configurationChanges.length) {
         const current = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
@@ -3122,8 +3123,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         }
       }
       const terminalNext = await terminalPlanForCurrentState()
-      const terminalProcessingPending = !!terminalNext && (terminalNext.kind === 'commit' || !!terminalNext.claim) && tools.some(tool =>
-        tool.name === (terminalNext.kind === 'commit' ? 'chapter_bridge_commit' : 'continuity_validate'))
+      const terminalProcessingPending = terminalNext?.kind === 'commit' && tools.some(tool => tool.name === 'chapter_bridge_commit')
+        || !!bootstrapCall && bootstrapCall.name === 'continuity_validate' && review?.ready === true
+          && review.terminalReview?.currentResultVerified === true
+          && parts.some(part => part.type === 'tool-call' && part.callId === bootstrapCall.id && part.status === 'success')
       let supplementalProcessingPending = false
       if (!forceWrapUpReason && blockedRepeat < 4 && !pendingReviews.size && continuityQuestionId && continuityQuestionAssessmentKey
         && bootstrapCall?.name === 'ask_user' && tools.some(tool => tool.name === 'continuity_validate')

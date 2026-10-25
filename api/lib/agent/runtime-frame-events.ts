@@ -44,7 +44,7 @@ export async function persistProjectedMessages(tx: RuntimeTx, source: AgentExecu
         snapshot = historyRollback.parse(receipt.result).toolResult.snapshot
       }
       const result = { status: body.ok ? 'success' as const : 'failed' as const, summary: body.summary,
-        ...(body.reviewOutcome ? { reviewOutcome: body.reviewOutcome } : {}),
+        ...(body.toolName !== 'continuity_validate' && body.toolName !== 'chapter_bridge_commit' && body.reviewOutcome ? { reviewOutcome: body.reviewOutcome } : {}),
         ...(body.durationMs !== undefined ? { durationMs: body.durationMs } : {}), ...(body.display ? { display: body.display } : {}),
         ...(snapshot ? { snapshot } : {}) }
       if (index < 0) parts = [...parts, { type: 'tool-call', callId: body.callId, toolName: body.toolName, title: body.toolName, args: null, ...result }]
@@ -102,7 +102,7 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
         || runtimeJson(receipt.result).hash !== receipt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '工具结果事件缺少完整回执。')
       return [{ type: 'tool.result', messageId, callId: appended.toolCallId, toolName: operation.action, ok: operation.status === 'succeeded' && parsedResult.data.toolResult.outcome !== 'failed',
         summary: humanizeAgentVisibleText(parsedResult.data.toolResult.summary), durationMs: Math.max(0, receipt.createdAt.getTime() - operation.createdAt.getTime()),
-        ...(parsedResult.data.toolResult.reviewOutcome ? { reviewOutcome: parsedResult.data.toolResult.reviewOutcome } : {}),
+        ...(operation.action !== 'continuity_validate' && operation.action !== 'chapter_bridge_commit' && parsedResult.data.toolResult.reviewOutcome ? { reviewOutcome: parsedResult.data.toolResult.reviewOutcome } : {}),
         ...(parsedResult.data.code || parsedResult.data.toolResult.failureCode ? { failureCode: parsedResult.data.code ?? parsedResult.data.toolResult.failureCode } : {}),
         ...(operation.status === 'succeeded' && parsedResult.data.toolResult.display ? { display: parsedResult.data.toolResult.display as AgentToolDisplayPayload } : {}) }]
     }

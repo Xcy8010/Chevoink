@@ -134,8 +134,10 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       await bus.close()
       expect(result).toMatchObject({ reviewCompleted: true, reviewOutcome: completeScenario ? 'complete' : 'decision_required', part: { status: 'success' } })
       expect(result).not.toHaveProperty('failureCode')
-      expect((await loadPersistedEvents(f.runId, 1)).filter(event => event.type === 'tool.result')).toMatchObject([
-        { type: 'tool.result', toolName: 'continuity_validate', ok: true, reviewOutcome: completeScenario ? 'complete' : 'decision_required' }])
+      const reportEvents = (await loadPersistedEvents(f.runId, 1)).filter(event => event.type === 'tool.result')
+      expect(reportEvents).toMatchObject([{ type: 'tool.result', toolName: 'continuity_validate', ok: true }])
+      expect(reportEvents[0]).not.toHaveProperty('reviewOutcome')
+      expect(result.part).not.toHaveProperty('reviewOutcome')
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
       const validation = saved.validation as Record<string, unknown>, audit = validation.continuityCriticResponse as Record<string, unknown>
       expect(validation).toMatchObject({ independentCheck: 'complete', effectiveReport: { version: 1, reportHash: runtimeJson(audit).hash },

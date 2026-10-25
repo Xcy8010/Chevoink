@@ -13,7 +13,11 @@ export function projectCurrentReviewNextStep(readiness: ChapterReviewReadiness) 
     || (readiness.qualityCandidateCount ?? 0) > 0)
   const incomplete = readiness.requiredTools.some(tool => (tool.name === 'quality_analyze' ? readiness.quality : readiness.continuity) === 'incomplete')
   const terminalPending = readiness.terminalReview?.state === 'unverified' && !readiness.terminalReview.deliveryEligible
-  const state = readiness.terminalProcessing && terminalPending
+  // A complete current report may need ordinary decisions before the final
+  // scope/terminal proof can be minted. Those decisions are not a new review.
+  const currentDecisions = readiness.ready && readiness.terminalReview?.currentResultVerified === true
+    && decisionPending && pending.length > 0 && !readiness.mustPassPending
+  const state = currentDecisions ? 'decision_required' : readiness.terminalProcessing && terminalPending
     ? 'terminal_review_required' : !readiness.ready ? incomplete ? 'blocked' : 'check_required'
     : terminalPending ? 'terminal_review_required'
       : readiness.mustPassPending ? 'must_pass_required'
@@ -29,7 +33,7 @@ export function projectCurrentReviewNextStep(readiness: ChapterReviewReadiness) 
     decisionBatchesAvailable: readiness.reviewProtocol === 1,
     retainedCount: retained.length, automaticCandidateCount: readiness.qualityCandidateCount ?? 0,
     completeStrictReview: readiness.completeStrictReview === true, selectionOnly: readiness.selectionOnly === true,
-    retentionCompletes: state === 'decision_required', unresolvedFactErrors: readiness.continuityErrorCount + readiness.qualityErrorCount }
+    retentionCompletes: state === 'decision_required' && !terminalPending, unresolvedFactErrors: readiness.continuityErrorCount + readiness.qualityErrorCount }
 }
 
 export type CurrentReviewNextStep = NonNullable<ReturnType<typeof projectCurrentReviewNextStep>>
@@ -49,6 +53,8 @@ export function currentReviewNextStepGuidance(step: CurrentReviewNextStep) {
   const phase = step.phase === 'verification'
     ? `本周期已经保存真实修订（基线r${step.reviewCycle.baselineRevision}），当前处于最终核验。新出现的纯质量建议须由当前模型逐项核对并写明具体保留原因；不能因每次完整检查又有新措辞就自动开启下一轮润色。首次复核已开始后，正文写入只接受精确落在尚未尝试的原始义务证据或当前完整报告真实错误证据内的改动；仅称为回归、模糊重叠或unknown不授予写入。相同锚点意见延续同一问题，不推断已解决；任何合法再修改仍使最终检查失效。当前意见关系：${JSON.stringify(step.reviewCycle.findings)}。`
     : '当前处于初始评估与意见决策：核对真实意见后，在原授权内完成所需修改；完整修改后进入最终核验。'
+  const terminal = step.terminalReview?.state === 'unverified' && !step.terminalReview.deliveryEligible
+    ? `当前报告的未证实数据仍保留：${JSON.stringify(step.terminalReview.unresolved)}。逐项意见处置不是事实认证；提交工具仍须重新核验全部终态事实和原作用域资格，留置不能豁免真实未满足义务。` : ''
   if (step.state === 'terminal_review_required') return `${facts}${step.continuity === 'complete' ? '正文独立检查已完成' : '当前完整独立检查尚待确认'}；终态候选尚未证实，不能提交。未证实路径：${JSON.stringify(step.terminalReview?.unresolved ?? [])}。这是候选事实核对，不是正文问题或额外改稿依据。保留原候选与证据，核对实际正文和当前报告；不要静默清空已知事实、杜撰结构或为证明候选而改文。候选变更仍须按原预算和恢复准入核验，状态提示不授权重发未知调用。${step.reviewBoundPlan?.guidance ?? ''}`
   if (step.state === 'blocked') return `${facts}${phase}必要检查未确认完成。读取已保存状态与失败证据；不重放未知或已尝试付费请求，不以改文购买新检查，也不以留置替代完整检查。正文与进度保留，尚不能提交为完成。`
   if (step.state === 'check_required') return `${facts}${phase}最终保存版本仍缺必要检查：${JSON.stringify(step.requiredTools)}。先核对当前状态，仅通过原工具、原审批、原预算与恢复准入执行缺项；不重买已完成检查。尚不能提交为完成。`
@@ -57,7 +63,7 @@ export function currentReviewNextStepGuidance(step: CurrentReviewNextStep) {
   const action = step.phase === 'verification'
     ? '先用 chapter_bridge_get / quality_report_get 核对真实引用。对 new_advisory 或 unknown 的纯建议保持当前正文，不调用 chapter_edit_range、chapter_write 或 chapter_append 追改；下一步逐项填写 source、reportId、findingId、reason，通过 chapter_bridge_commit.retainedFindings 作合理保留决定。只有另有精确原始义务或当前真实错误证据时才继续其必要修复，不能把关系标签当许可。'
     : '先用 chapter_bridge_get / quality_report_get 核对真实意见，在原授权内精确应用或通过 chapter_bridge_commit 的 retainedFindings 逐项合理保留。'
-  return `${facts}${phase}${candidates}${scope}${action}${batch}实际修改后复核最终保存版本；正文未变无需重买检查，也不制造无变化正文写入。详情：${JSON.stringify(step.details)}。精确参数模板（仅当前首批最多40项，reason须替换为实际原因）：${JSON.stringify(retentionTemplate)}。留置不是修复，不能声称全部意见已应用。`
+  return `${facts}${phase}${candidates}${scope}${action}${batch}${terminal}实际修改后复核最终保存版本；正文未变无需重买检查，也不制造无变化正文写入。详情：${JSON.stringify(step.details)}。精确参数模板（仅当前首批最多40项，reason须替换为实际原因）：${JSON.stringify(retentionTemplate)}。留置不是修复，不能声称全部意见已应用。`
 }
 
 export function reviewDispatchKey(readiness: { compilationId: string | null; chapterId: string; revision: number }, name: string): string {
