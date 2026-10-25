@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from 'vitest'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
-import { prepareStoryCompilation, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
+import { prepareStoryCompilation, saveSceneTasks, validateStoryContinuity, commitChapterBridge } from '../../api/lib/agent/story-compiler.js'
+import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
+import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
+import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
+import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { continuityValidateTool, chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { terminalCandidateSchema, currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
 import { readTerminalDraftBinding } from '../../api/lib/agent/terminal-draft-authority.js'
@@ -17,15 +21,41 @@ import * as prices from '../../api/lib/billing/resolve-token-price.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 describe.runIf(available)('contract5 actual legacy provider, report CAS and independent bridge gate', () => {
-  it.each(['complete', 'typed-sparse-repair', 'unknown', 'applied-typed-error', 'merged-revision', 'cancel-known-raw', 'wrong-owner'] as const)('%s preserves the original phase and V2 price', scenario => fixture(async f => {
-    const completeScenario = scenario === 'complete' || scenario === 'typed-sparse-repair'
+  it.each(['complete', 'normalized-cross-chunk', 'preserved-canonical', 'typed-sparse-repair', 'unknown', 'applied-typed-error', 'merged-revision', 'cancel-known-raw', 'wrong-owner'] as const)('%s preserves the original phase and V2 price', scenario => fixture(async f => {
+    const completeScenario = scenario === 'complete' || scenario === 'typed-sparse-repair' || scenario === 'normalized-cross-chunk' || scenario === 'preserved-canonical'
     const factual = scenario === 'applied-typed-error' || scenario === 'merged-revision'
-    const content = factual ? 'The packet is sealed. The packet is open.' : 'The sealed packet remains with the guard.'
+    const baseContent = 'The sealed packet remains with the guard.'
+    const content = factual ? 'The packet is sealed. The packet is open.' : scenario === 'normalized-cross-chunk' ? `${'x'.repeat(290)}${baseContent}` : baseContent
     await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0, status: 'running',
       startRequest: { prompt: '修改第一章，只输出标题和正文' } } })
     await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'run.started', payload: { type: 'run.started', seq: 1 } } })
     const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { content, wordCount: content.length, revision: 4 } })
-    const candidate = terminalCandidateSchema.parse({ exitState: { objects: [factual ? 'The packet is sealed.' : 'The sealed packet remains with the guard.'] } })
+    const canonicalClaim = 'The pump awaits a replacement seal.'
+    let canonicalChapter: typeof chapter | undefined
+    if (scenario === 'preserved-canonical') {
+      const rootContent = 'The pump awaits a replacement seal.'
+      canonicalChapter = await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: chapter.volumeId,
+        orderIndex: 0, orderInVolume: 0, title: 'Synthetic committed predecessor', content: rootContent, revision: 1 } })
+      const root = await prepareStoryCompilation({ userId: f.userId, novelId: f.novelId, chapterId: canonicalChapter.id, mode: 'balanced', intentSummary: 'Historical manual chapter.' })
+      const rootCandidate = terminalCandidateSchema.parse({ exitState: { openLoops: [canonicalClaim] } })
+      await saveSceneTasks({ userId: f.userId, novelId: f.novelId, compilationId: root.compilation.id, tasks: [{ purpose: 'Wait', entryState: rootCandidate.exitState,
+        goal: 'Wait', obstacle: 'Parts', choice: 'Wait', cost: 'Time', turn: 'Waiting', exitState: rootCandidate.exitState,
+        styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
+      const savedRoot = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: root.compilation.id }, include: { bridge: true, sceneTasks: true } })
+      const context = terminalEvidenceContext(canonicalChapter, null, 2)
+      const inspected = inspectContinuityResponse(JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind =>
+        ({ kind, result: 'clear', reason: 'The full historical chapter establishes this pending fact.', findingIndexes: [] })),
+      terminalVerdicts: [{ path: 'exitState.openLoops.0', verdict: 'supported', basis: 'current', sourceEvidence: [{ segmentId: 'c0', quote: rootContent }] }] }),
+      { current: rootContent, previous: null, terminalEvidence: context }, true, 8, rootCandidate)
+      expect(inspected.complete).toBe(true)
+      await validateStoryContinuity({ userId: f.userId, novelId: f.novelId, compilationId: savedRoot.id, findings: [], independentCheck: 'complete',
+        terminalCandidate: rootCandidate, continuityCriticResponse: inspected.audit,
+        coverage: compilerContinuityCoverage({ chapter: canonicalChapter, bridge: savedRoot.bridge, sceneTasks: savedRoot.sceneTasks, source: null, terminalCandidate: rootCandidate }, 11) })
+      await commitChapterBridge({ userId: f.userId, novelId: f.novelId, compilationId: savedRoot.id, ...rootCandidate,
+        chapterSummary: rootContent, hookDecision: '', delayedHookReason: '', openingStructure: 'Wait', endingStructure: 'Wait' })
+    }
+    const candidate = terminalCandidateSchema.parse({ exitState: { objects: [factual ? 'The packet is sealed.' : 'The sealed packet remains with the guard.'],
+      ...(scenario === 'preserved-canonical' ? { openLoops: [canonicalClaim] } : {}) } })
     const { compilation } = await prepareStoryCompilation({ ...f, chapterId: chapter.id, mode: 'balanced', intentSummary: 'Synthetic complete review.' })
     await saveSceneTasks({ ...f, compilationId: compilation.id, tasks: [{ purpose: 'Keep', entryState: candidate.exitState, goal: 'Keep', obstacle: 'Time', choice: 'Keep', cost: 'Time', turn: 'Kept',
       exitState: candidate.exitState, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
@@ -43,8 +73,10 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
     const wire = { findings: [] as unknown[], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reasonCode: 'consistent',
       explanation: 'The whole current body is internally consistent.', findingIds: [] as string[] })), terminalVerdicts: [{ claimIndex: 0,
       verdict: scenario === 'unknown' ? 'unknown' : 'supported', reasonCode: scenario === 'unknown' ? 'insufficient_evidence' : 'consistent',
-      explanation: 'Synthetic independent judgment of the whole current claim.', manuscriptEvidence: scenario === 'unknown' ? [] : [{ segmentId: 'c0' }] }],
-      terminalProofVerdicts: [], terminalDispositions: [], issueDispositions: [] }
+      explanation: 'Synthetic independent judgment of the whole current claim.', manuscriptEvidence: scenario === 'unknown' ? []
+        : scenario === 'normalized-cross-chunk' ? [{ segmentId: 'c1', quote: baseContent }] : [{ segmentId: 'c0' }] }],
+      terminalProofVerdicts: scenario === 'preserved-canonical' ? [{ proofIndex: 0, currentState: 'uncertain', reasonCode: 'insufficient_evidence',
+        explanation: `The inherited claim “${canonicalClaim}” is not newly established by this packet scene.` }] : [], terminalDispositions: [], issueDispositions: [] }
     const issueExplanation = 'The packet is described as sealed and open at the same time.'
     if (factual) {
       wire.findings.push({ findingId: 'f0', signal: 'object', severity: 'error', reasonCode: 'manuscript_conflict', explanation: issueExplanation,
@@ -129,9 +161,34 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
           terminalState: terminalCandidateSchema.parse({ exitState: { objects: ['The guard holds a different packet.'] } }) })).rejects.toBeInstanceOf(Error)
         expect(fetchMock).toHaveBeenCalledTimes(3)
       } else if (completeScenario) {
+        if (scenario === 'normalized-cross-chunk') {
+          expect(audit).toMatchObject({ continuityV4: { projectionNormalization: { version: 1, originalParserVersion: 10,
+            mappings: [expect.objectContaining({ kind: 'current_evidence_span', originalSegmentId: 'c1' })] } } })
+          const source = await prisma.$transaction(tx => reconstructContinuitySourceProvenance(tx, ctx,
+            { compilationId: compilation.id, chapterId: chapter.id, preparedContext: saved.preparedContext }))
+          expect(source.latestAppliedReport?.reportHash).toBe(runtimeJson(audit).hash)
+          expect(fetchMock).toHaveBeenCalledOnce()
+        }
         const committed = await chapterBridgeCommitTool.execute({ ...ctx, callId: 'commit-current' }, { compilationId: compilation.id })
         expect(committed).not.toHaveProperty('failureCode')
         expect(committed).not.toMatchObject({ outcome: 'failed' })
+        if (scenario === 'preserved-canonical') {
+          const committedCompilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
+          expect(committedCompilation.preparedContext).toMatchObject({ terminalFactProofs: expect.arrayContaining([
+            expect.objectContaining({ claim: canonicalClaim, depth: 2, nodes: [expect.objectContaining({ preservation: {
+              version: 1, basis: 'preserved_canonical', sourceProofHash: expect.any(String), sourceNodesHash: expect.any(String),
+              auditHash: runtimeJson(audit).hash, policyHash: expect.any(String) } }), expect.objectContaining({ chapterId: canonicalChapter!.id })] })]) })
+          const successor = { orderIndex: chapter.orderIndex + 1 }
+          const source = await readCompilerContinuitySource(prisma, f, successor, chapter.id, 11)
+          expect(source && 'terminalInheritance' in source ? source.terminalInheritance : []).toEqual(expect.arrayContaining([
+            expect.objectContaining({ claim: canonicalClaim, depth: 2 })]))
+          expect(JSON.parse(JSON.parse((audit.rawResponse as { content: string }).content)).terminalProofVerdicts[0].currentState).toBe('uncertain')
+          expect(fetchMock).toHaveBeenCalledOnce()
+          await prisma.chapter.update({ where: { id: canonicalChapter!.id }, data: { content: 'The old canonical chapter has changed.' } })
+          const stale = await readCompilerContinuitySource(prisma, f, successor, chapter.id, 11)
+          expect(stale && 'terminalInheritance' in stale && Array.isArray(stale.terminalInheritance)
+            ? stale.terminalInheritance.some(fact => fact.claim === canonicalClaim) : false).toBe(false)
+        }
       } else {
         const committed = await chapterBridgeCommitTool.execute({ ...ctx, callId: 'commit-current' }, { compilationId: compilation.id })
         expect(committed).toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' })

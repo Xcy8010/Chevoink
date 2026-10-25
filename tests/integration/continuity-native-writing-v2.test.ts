@@ -53,13 +53,14 @@ describe.runIf(available)('fresh native writing manifest2 actual bounded chain',
     expect(fetcher).not.toHaveBeenCalled()
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
   }))
-  it.each(['no-effect', 'ordinary-presentation', 'merged-revision', 'merged-revision-restart'] as const)('%s uses original receipts and deterministic completion', scenario => fixture(async f => {
+  it.each(['no-effect', 'normalized-cross-chunk', 'ordinary-presentation', 'merged-revision', 'merged-revision-restart'] as const)('%s uses original receipts and deterministic completion', scenario => fixture(async f => {
     const reportEffects = vi.spyOn(compiler, 'validateStoryContinuity')
     let lease = await claim(f)
     const changed = scenario === 'merged-revision' || scenario === 'merged-revision-restart'
     const prompt = scenario === 'ordinary-presentation' ? '完整重写当前章节' : '完整重写当前章节，只输出标题和正文。'
     expect(f.spec.scope.writing?.titleAndBodyOnly).toBe(scenario !== 'ordinary-presentation')
-    const content = changed ? '他合上箱盖，核对锁扣。锁扣一直扣紧。锁扣此刻完全松开。' : '他合上箱盖，核对锁扣。锁扣一直扣紧。'
+    const baseContent = '他合上箱盖，核对锁扣。锁扣一直扣紧。'
+    const content = changed ? `${baseContent}锁扣此刻完全松开。` : scenario === 'normalized-cross-chunk' ? `${'x'.repeat(290)}${baseContent}` : baseContent
     const after = changed ? '他合上箱盖，核对锁扣。锁扣一直扣紧。他没有解开锁扣，只把箱子推近灯下。' : content
     const writing = { draftComplete: true, actualOutcomes: { exitState: { objects: ['锁扣一直扣紧。'] } },
       scenes: [{ purpose: '检查箱子', goal: '核对锁扣', obstacle: '灯光不足', choice: '挪近灯光', cost: '时间', turn: '核对完成' }],
@@ -104,7 +105,8 @@ describe.runIf(available)('fresh native writing manifest2 actual bounded chain',
         semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: changed && initial && kind === 'state_progression' ? 'conflict' : 'clear',
           reasonCode: changed && initial && kind === 'state_progression' ? 'manuscript_conflict' : 'consistent', explanation: '独立核对本次完整正文的动作和状态。',
           findingIds: changed && initial && kind === 'state_progression' ? ['f0'] : [] })),
-        terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', reasonCode: 'consistent', explanation: '当前正文直接记载锁扣扣紧。', manuscriptEvidence: [{ segmentId: 'c0' }] }],
+        terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', reasonCode: 'consistent', explanation: '当前正文直接记载锁扣扣紧。',
+          manuscriptEvidence: scenario === 'normalized-cross-chunk' ? [{ segmentId: 'c1', quote: baseContent }] : [{ segmentId: 'c0' }] }],
         terminalProofVerdicts: [], terminalDispositions: [], issueDispositions: input.establishedIssues.map((_issue: unknown, issueIndex: number) =>
           ({ issueIndex, outcome: 'repaired', reasonCode: 'consistent', explanation: '当前原文只保留锁扣扣紧的状态。', manuscriptEvidence: [{ segmentId: 'c0' }] })) }
       } else report = { findings: [] }
@@ -147,6 +149,9 @@ describe.runIf(available)('fresh native writing manifest2 actual bounded chain',
     const compilation = await prisma.storyCompilation.findFirstOrThrow({ where: { userId: f.userId, chapterId: f.chapterId } })
     expect(compilation).toMatchObject({ status: 'completed', validation: { independentCheck: 'complete', checkedRevision: changed ? 3 : 2,
       continuityCriticResponse: { parserVersion: 10, responseContract: 5 } } })
+    if (scenario === 'normalized-cross-chunk') expect(compilation.validation).toMatchObject({ continuityCriticResponse: { continuityV4: {
+      projectionNormalization: { version: 1, originalParserVersion: 10, mappings: [expect.objectContaining({ kind: 'current_evidence_span',
+        originalSegmentId: 'c1', range: { start: 290, end: 290 + baseContent.length, segmentIds: ['c0', 'c1'] } })] } } } })
     expect(reportEffects).toHaveBeenCalledTimes(changed ? 2 : 1)
     for (const [input, tx] of reportEffects.mock.calls) {
       expect(input.expectedContinuityNativeLease).toMatchObject({ userId: f.userId, runId: input.runId, taskRootId: f.rootId })

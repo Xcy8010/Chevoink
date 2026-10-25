@@ -785,6 +785,7 @@ export function effectiveContinuityAudit(validation: unknown): unknown | null {
   return pointer.success && audit.parserVersion === 10 && pointer.data.reportHash === runtimeJson(audit).hash
     && pointer.data.manifestHash === manifest.hash && pointer.data.lineageHash === runtimeJson({ assessmentRequest: audit.assessmentRequest ?? null,
       ...(audit.phaseRequest ? { phaseRequest: audit.phaseRequest } : {}),
+      ...(marker.projectionNormalization ? { projectionNormalization: marker.projectionNormalization } : {}),
       manifest: marker.manifest, first: marker.first, repair: marker.repair ?? null }).hash ? audit : null
 }
 
@@ -801,6 +802,7 @@ export async function stageEffectiveContinuityReport(db: Prisma.TransactionClien
     bodies.terminalEvidence as Parameters<typeof validateStoredContinuityV4Projection>[2])?.complete) throw blocked('完整报告的当前来源与投影不能重建。')
   const reportHash = runtimeJson(audit).hash, lineageHash = runtimeJson({ assessmentRequest: audit.assessmentRequest ?? null,
     ...(audit.phaseRequest ? { phaseRequest: audit.phaseRequest } : {}),
+    ...(marker.projectionNormalization ? { projectionNormalization: marker.projectionNormalization } : {}),
     manifest: marker.manifest, first: marker.first, repair: marker.repair ?? null }).hash
   const id = runtimeJson({ kind: 'continuity_report', compilationId: input.compilationId, reportHash }).hash
   const metadata = runtimeJson({ version: 1, effectiveContinuityReport: { compilationId: input.compilationId, reportHash,
@@ -835,6 +837,11 @@ export async function authenticateEffectiveContinuityReport(db: Prisma.Transacti
  * or certify a fact and does not mint a replacement whole report. */
 export async function reconstructContinuitySourceProvenance(db: Prisma.TransactionClient, subject: Subject,
   target: { compilationId: string; chapterId: string; preparedContext: unknown }) {
+  return rebuildContinuitySourceProvenance(db, subject, target)
+}
+
+async function rebuildContinuitySourceProvenance(db: Prisma.TransactionClient, subject: Subject,
+  target: { compilationId: string; chapterId: string; preparedContext: unknown }, priorLedgerHash?: string) {
   const original = await readOriginalTaskRequest(db, subject), runIds = await originalTaskRunIds(db, subject, original)
   const lifecycle = await import('./assessment-response-lifecycle.js'), coverage = await import('./terminal-fact-coverage.js')
   const rows = await db.agentArtifact.findMany({ where: { runId: { in: runIds }, run: { userId: subject.userId, novelId: subject.novelId },
@@ -863,15 +870,17 @@ export async function reconstructContinuitySourceProvenance(db: Prisma.Transacti
     const context = { ...subject, runId: row.runId, callId: meta.callId } as import('./tools/types.js').ToolContext
     if (lifecycle.legacyContinuityAssessmentKey(context, input) !== key) throw blocked('原报告请求身份无法重建。')
     const result = await lifecycle.readLegacyContinuityAssessment(db, context, input)
-    if (!result.inspected.complete || !result.billingKnown || !result.providerComplete || !result.recoveryReady)
+    const normalization = applications.some(application => object(application.metadata).projectionNormalization !== undefined)
+    const bound = lifecycle.bindLegacyContinuityAssessment(result.inspected, context, input, normalization)
+    if (!bound.complete || !result.billingKnown || !result.providerComplete || !result.recoveryReady)
       throw blocked('原应用记录没有完整且已结算的独立报告来源。')
     if (!applications.every(application => {
       const receipt = object(application.metadata)
       return receipt.version === 1 && receipt.reservationId === row.id && Array.isArray(receipt.usageIds)
+        && (!normalization || runtimeJson(receipt.projectionNormalization).hash === runtimeJson(object(object(bound.audit).continuityV4).projectionNormalization).hash)
         && runtimeJson([...new Set(receipt.usageIds)].sort()).hash === runtimeJson([...new Set(result.usageIds)].sort()).hash
         && receipt.usageIds.length === result.usageIds.length
     })) throw blocked('原报告应用回执的预约或费用归属不一致。')
-    const bound = lifecycle.bindLegacyContinuityAssessment(result.inspected, context, input)
     const review = (await import('./authenticated-continuity-assessment.js')).readAuthenticatedContinuityAssessment(bound.audit,
       input.bodies.current, input.bodies.terminalEvidence, true)
     if (!review || !input.bodies.terminalEvidence?.factCoverage) throw blocked('原报告持续义务不能完整重建。')
@@ -882,8 +891,8 @@ export async function reconstructContinuitySourceProvenance(db: Prisma.Transacti
     const origin = { chapterId: target.chapterId, revision: input.revision, bodyHash: runtimeJson({ content: input.bodies.current }).hash,
       sourceHash: runtimeJson({ previous: input.bodies.terminalEvidence.previous }).hash }
     const classify = (await import('./continuity-finding-authority.js')).classifyContinuityFindingAuthority
-    const rawFindings = 'parsed' in result.inspected && result.inspected.parsed ? result.inspected.parsed.record.findings : null
-    const establishedIssues = result.inspected.findings.flatMap((finding, index) => {
+    const rawFindings = 'parsed' in bound && bound.parsed ? bound.parsed.record.findings : null
+    const establishedIssues = bound.findings.flatMap((finding, index) => {
       const classified = classify(finding, original.prompt, input.bodies)
       if (classified.severity !== 'error') return []
       const raw = Array.isArray(rawFindings) ? object(rawFindings[index]) : null
@@ -898,12 +907,34 @@ export async function reconstructContinuitySourceProvenance(db: Prisma.Transacti
     history.push({ reservationId: row.id, reportHash, ledgerHash: runtimeJson(state).hash, inputHash: runtimeJson(input).hash, usageIds: result.usageIds })
   }
   const current = coverage.readTerminalCoverageState(original.spec, target.preparedContext, target.chapterId)
-  if (!state || !current || runtimeJson(state).hash !== runtimeJson(current).hash || current.facts.some(fact => !origins.has(fact.id)))
+  if (!state || !current || (priorLedgerHash ? runtimeJson(state).hash !== priorLedgerHash
+    : runtimeJson(state).hash !== runtimeJson(current).hash || current.facts.some(fact => !origins.has(fact.id))))
     throw blocked('原持续事实与完整已应用报告的来源重建不一致；未更改原 ledger。')
   return { version: 1 as const, originalTaskId: original.taskId, compilationId: target.compilationId, chapterId: target.chapterId,
-    ledgerHash: runtimeJson(current).hash, origins: [...origins.values()], history,
-    currentFactIds: current.facts.map(fact => fact.id), latestAppliedReport,
+    ledgerHash: runtimeJson(state).hash, origins: [...origins.values()], history,
+    currentFactIds: state.facts.map(fact => fact.id), latestAppliedReport,
     establishedIssues: latestAppliedReport?.establishedIssues ?? [], dependencyScope: 'authenticated_explicit_claims_only' as const }
+}
+
+/** Read-only origins for a marked whole report. The old complete applications
+ * are replayed again; a saved question/projection alone never certifies them.
+ * A new report may advance lastReview without rewriting its prior origins. */
+export async function readNormalizedContinuityCoverageOrigins(db: Prisma.TransactionClient, subject: Subject,
+  target: { compilationId: string; chapterId: string; preparedContext: unknown }, audit: unknown) {
+  if (object(object(object(audit).continuityV4).projectionNormalization).version !== 1) return null
+  const phase = object(object(audit).phaseRequest)
+  if (typeof phase.requestId !== 'string') return reconstructContinuitySourceProvenance(db, subject, target)
+  const question = await readContinuitySupplementConsent(db, subject, phase.requestId)
+  if (!question || question.frozen.input.targetId !== target.compilationId || question.frozen.input.chapterId !== target.chapterId
+    || !await authenticateSupplementalContinuityReport(db, subject, audit)) return null
+  const rows = await db.agentArtifact.findMany({ where: { runId: subject.runId, artifactType: 'continuityReview',
+    metadata: { path: ['continuitySourceRecovery', 'originalAssessmentKey'], equals: question.frozen.originalAssessmentKey } }, take: 101 })
+  if (rows.length > 100) return null
+  const projections = rows.map(row => object(object(row.metadata).continuitySourceRecovery).projection)
+    .filter(value => value && runtimeJson(value).hash === question.frozen.sourceRecoveryHash)
+  if (projections.length !== 1 || typeof object(projections[0]).ledgerHash !== 'string') return null
+  const rebuilt = await rebuildContinuitySourceProvenance(db, subject, target, String(object(projections[0]).ledgerHash))
+  return runtimeJson(rebuilt).hash === question.frozen.sourceRecoveryHash ? rebuilt : null
 }
 
 /** Append audit to the original failed operation; the receipt is deliberately
@@ -1271,7 +1302,7 @@ async function assertSupplementCurrent(db: Prisma.TransactionClient, ctx: ToolCo
   return compilation
 }
 
-async function readSupplementResponse(db: Prisma.TransactionClient, subject: Subject, question: SupplementQuestion) {
+async function readSupplementResponse(db: Prisma.TransactionClient, subject: Subject, question: SupplementQuestion, normalize = false) {
   const plan = question.frozen.input.continuityManifest?.typedLineage?.phasePlan
   if (!plan || !await readContinuityPhaseClaim(db, subject, { plan, chapterId: question.frozen.input.chapterId, phase: 'full_reassessment',
     operationRef: question.frozen.originalAssessmentKey, inputHash: runtimeJson(question.frozen.input).hash })) return null
@@ -1303,7 +1334,17 @@ async function readSupplementResponse(db: Prisma.TransactionClient, subject: Sub
     candidate: input.terminalCandidate!, sourceScope: input.sourceScope! }, value.complete)
   const audit = { ...inspected.audit, phaseRequest: { version: 1 as const, requestId: question.requestId,
     originalAssessmentKey: question.frozen.originalAssessmentKey, inputHash: runtimeJson(input).hash, usageId: usage.id } }
-  return { inspected: { ...inspected, audit }, usage }
+  const originalInspection = { ...inspected, audit }
+  return { inspected: normalize ? v4.normalizeContinuityV4Projection(originalInspection, runtimeJson(input).hash) : originalInspection,
+    originalInspection, usage }
+}
+
+function supplementProjectionApplication(question: SupplementQuestion, result: NonNullable<Awaited<ReturnType<typeof readSupplementResponse>>>) {
+  const normalization = result.inspected.audit.continuityV4.projectionNormalization
+  return normalization ? { version: 1, requestId: question.requestId, requestHash: question.requestHash,
+    originReportHash: runtimeJson(result.originalInspection.audit).hash, reportHash: runtimeJson(result.inspected.audit).hash,
+    frozenInputHash: runtimeJson(question.frozen.input).hash, rawHash: normalization.rawHash,
+    derivationHash: normalization.derivationHash, usageId: result.usage.id, reportComplete: true } : null
 }
 
 export async function knownContinuitySupplementCall(db: Prisma.TransactionClient, subject: Subject, question: SupplementQuestion) {
@@ -1339,8 +1380,23 @@ export async function authenticateSupplementalContinuityReport(db: Prisma.Transa
   if (typeof phase.requestId !== 'string') return false
   const consent = await readContinuitySupplementConsent(db, subject, phase.requestId)
   if (!consent || !await authenticateSupplementOriginal(db, subject, consent)) return false
-  const result = await readSupplementResponse(db, subject, consent)
-  return !!result?.inspected.complete && runtimeJson(result.inspected.audit).hash === runtimeJson(audit).hash
+  const result = await readSupplementResponse(db, subject, consent, object(object(object(audit).continuityV4).projectionNormalization).version === 1)
+  if (!result?.inspected.complete || runtimeJson(result.inspected.audit).hash !== runtimeJson(audit).hash) return false
+  const expected = supplementProjectionApplication(consent, result)
+  if (expected) {
+    const original = await db.agentArtifact.findUnique({ where: { id: supplementReceiptId('continuity_supplement_application', consent) } })
+    const base = object(object(original?.metadata).continuitySupplementApplication)
+    if (base.requestId !== consent.requestId || base.reportComplete !== false || base.reportHash !== expected.originReportHash
+      || base.usageId !== result.usage.id || base.classification !== result.originalInspection.audit.classification) return false
+    const applied = await db.agentArtifact.findUnique({ where: { id: supplementReceiptId('continuity_supplement_projection_application', consent) } })
+    if (applied) return runtimeJson(object(applied.metadata).continuitySupplementProjectionApplication).hash === runtimeJson(expected).hash
+    // Before the report-save CAS, the source is still exactly the old frozen
+    // validation. After it is persisted, the derived application is mandatory;
+    // both are committed in the same existing transaction.
+    const saved = await db.storyCompilation.findFirst({ where: { id: consent.frozen.input.targetId, userId: subject.userId, novelId: subject.novelId }, select: { validation: true } })
+    return !!saved && runtimeJson(saved.validation).hash === consent.frozen.validationHash
+  }
+  return true
 }
 
 export async function readContinuitySupplementState(db: Prisma.TransactionClient, subject: Subject, originalAssessmentKey: string) {
@@ -1350,9 +1406,22 @@ export async function readContinuitySupplementState(db: Prisma.TransactionClient
   for (const row of rows) {
     const question = await readContinuitySupplementConsent(db, subject, row.id)
     if (!question) continue
-    const result = await readSupplementResponse(db, subject, question)
+    const result = await readSupplementResponse(db, subject, question, true)
     const applied = await db.agentArtifact.findUnique({ where: { id: supplementReceiptId('continuity_supplement_application', question) } })
-    if (applied) return { kind: 'applied' as const, question, result }
+    if (applied) {
+      const expected = result && supplementProjectionApplication(question, result)
+      if (expected) {
+        const base = object(object(applied.metadata).continuitySupplementApplication)
+        if (base.requestId !== question.requestId || base.usageId !== result.usage.id || base.reportComplete !== false
+          || base.reportHash !== expected.originReportHash || base.classification !== result.originalInspection.audit.classification)
+          throw blocked('原失败报告的不可变应用回执与派生来源不一致。')
+        const normalized = await db.agentArtifact.findUnique({ where: { id: supplementReceiptId('continuity_supplement_projection_application', question) } })
+        if (!normalized) return { kind: 'known_result' as const, question, result }
+        if (runtimeJson(object(normalized.metadata).continuitySupplementProjectionApplication).hash !== runtimeJson(expected).hash)
+          throw blocked('原完整报告的唯一派生应用回执不一致。')
+      }
+      return { kind: 'applied' as const, question, result }
+    }
     if (result) return { kind: 'known_result' as const, question, result }
     const plan = question.frozen.input.continuityManifest!.typedLineage!.phasePlan
     const claim = await db.agentArtifact.findUnique({ where: { id: continuityPhaseClaimId(plan, question.frozen.input.chapterId, 'full_reassessment') } })
@@ -1421,7 +1490,7 @@ async function accountSupplementUsage(db: Prisma.TransactionClient, question: Su
  * always applied locally; an escaped/unknown dispatch is never sent again. */
 export async function executeContinuitySupplement(ctx: ToolContext, question: SupplementQuestion, dispatchAllowed: boolean) {
   const { prisma } = await import('../prisma.js')
-  let response = await readSupplementResponse(prisma, ctx, question)
+  let response = await readSupplementResponse(prisma, ctx, question, true)
   if (!response) {
     if (!dispatchAllowed) throw blocked('原额外阶段尚无可认证完整结果；未知请求仅核对，不重发。')
     const consent = await readContinuitySupplementConsent(prisma, ctx, question.requestId)
@@ -1479,7 +1548,7 @@ export async function executeContinuitySupplement(ctx: ToolContext, question: Su
       }
       if (dispatchUsageId) await prisma.$transaction(tx => accountSupplementUsage(tx, question, dispatchUsageId!))
     }
-    response = await readSupplementResponse(prisma, ctx, question)
+    response = await readSupplementResponse(prisma, ctx, question, true)
     if (!response) throw blocked('完整结果或真实结算尚未确认；保留原请求，不重发。')
   }
   const received = response
@@ -1496,12 +1565,17 @@ export async function executeContinuitySupplement(ctx: ToolContext, question: Su
   return prisma.$transaction(async tx => {
     await assertSupplementCurrent(tx, ctx, question, received.usage.id)
     const input = question.frozen.input
+    const projection = supplementProjectionApplication(question, received)
+    if (projection) await appendSupplementReceipt(tx, question, 'continuity_supplement_application', 'continuitySupplementApplication', {
+      version: 1, requestId: question.requestId, reportComplete: false, classification: received.originalInspection.audit.classification,
+      reportHash: projection.originReportHash, usageId: received.usage.id })
     const report = await (await import('./story-compiler.js')).validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId,
       runId: ctx.runId, compilationId: input.targetId, expectedChapterRevision: input.revision, expectedContinuityOwnerSeq: ctx.continuityOwnerSeq,
       independentCheck: 'complete', findings: received.inspected.findings, terminalCandidate: input.terminalCandidate,
       continuityCriticResponse: received.inspected.audit, coverage: question.frozen.coverage as Parameters<typeof import('./story-compiler.js')['validateStoryContinuity']>[0]['coverage'],
       focus: question.frozen.focus, signal: ctx.signal }, tx)
-    await appendSupplementReceipt(tx, question, 'continuity_supplement_application', 'continuitySupplementApplication', { version: 1,
+    if (projection) await appendSupplementReceipt(tx, question, 'continuity_supplement_projection_application', 'continuitySupplementProjectionApplication', projection)
+    else await appendSupplementReceipt(tx, question, 'continuity_supplement_application', 'continuitySupplementApplication', { version: 1,
       requestId: question.requestId, reportComplete: report.independentCheck === 'complete', reportHash: runtimeJson(received.inspected.audit).hash, usageId: received.usage.id })
     return { applied: report.independentCheck === 'complete', reportComplete: report.independentCheck === 'complete', reason: '' }
   })
@@ -1516,7 +1590,7 @@ export async function executeContinuitySupplementTool(ctx: ToolContext, args: { 
   const state = await readContinuitySupplementState(prisma, ctx, question.frozen.originalAssessmentKey)
   if (state.question?.requestId !== question.requestId || !['authorized', 'known_result'].includes(state.kind)) throw blocked('原阶段已领取或应用，未重放。')
   const result = await executeContinuitySupplement(ctx, question, capability.dispatchAllowed && state.kind === 'authorized')
-  const response = await readSupplementResponse(prisma, ctx, question)
+  const response = await readSupplementResponse(prisma, ctx, question, true)
   const finished = { version: 1 as const, chapterId: question.frozen.input.chapterId, revision: question.frozen.input.revision,
     contentHash: createHash('sha256').update(question.frozen.input.bodies.current).digest('hex'), usageIds: response ? [response.usage.id] : [] }
   if (!result.applied || !response?.inspected.complete) return { outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE',

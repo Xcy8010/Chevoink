@@ -9,6 +9,8 @@ const hash = z.string().regex(/^[a-f0-9]{64}$/)
 export const terminalFactNodeSchema = z.object({ compilationId: z.string(), chapterId: z.string(), revision: z.number().int(),
   orderIndex: z.number().int(), bodyHash: hash, candidateHash: hash, validationHash: hash, stateHash: hash,
   path: z.string(), previousChapterId: z.string().nullable(),
+  preservation: z.object({ version: z.literal(1), basis: z.literal('preserved_canonical'), sourceProofHash: hash,
+    sourceNodesHash: hash, auditHash: hash, policyHash: hash }).strict().optional(),
 }).strict()
 export const terminalCarriedFactSchema = z.object({ segmentId: z.string().regex(/^t[0-9]+$/), field: z.string(), claim: z.string(),
   proofHash: hash, depth: z.number().int().min(1).max(16),

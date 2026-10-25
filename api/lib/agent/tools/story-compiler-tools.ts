@@ -268,6 +268,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   const last = observations.at(-1)
   const original = replay?.inspected ?? inspectAuthenticatedContinuityAssessment(last?.content ?? raw, frozen, frozen.parserVersion !== 9 && frozen.parserVersion !== 10 && frozen.reassessmentProtocol !== 3 && frozen.reassessmentProtocol !== 4 && frozen.reassessmentProtocol !== 5 || !!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length)
   const assessed = await runContinuityReassessment({ original, bodies: input.bodies, system: input.system, content: input.content, reassessmentProtocol: frozen.reassessmentProtocol,
+    ...(frozen.parserVersion === 10 ? { normalizationInputHash: runtimeJson(frozen).hash } : {}),
     billingKnown: replay?.billingKnown ?? textRequestsFinished(trace), providerComplete: replay?.providerComplete ?? (!!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length),
     slotUsed: replay?.slotUsed ?? [...stages.values()].some(stage => stage === 'output_recovery'), signal: ctx.signal,
     assertCurrent: input.assertCurrent,

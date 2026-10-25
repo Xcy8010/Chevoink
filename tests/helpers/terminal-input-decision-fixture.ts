@@ -24,7 +24,9 @@ export function terminalInputDecisionFixture(input: {
     system: 'Synthetic frozen independent review.', content: 'Synthetic frozen request.', targetType: 'story_compilation', targetId: input.compilationId }
   const common = { semanticChecks: { action_direction: { result: 'clear', reason: 'Complete synthetic manuscript review.', findingIndexes: [] },
     state_progression: { result: 'clear', reason: 'Complete synthetic manuscript review.', findingIndexes: [] } },
-    terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] }], terminalProofVerdicts: [], terminalDispositions: [],
+    terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] }], terminalProofVerdicts: [],
+    terminalDispositions: (context.factCoverage?.obligations ?? []).map((_, obligationIndex) => ({ obligationIndex, outcome: 'unknown',
+      reason: 'This historical pending draft remains unverified.', sourceEvidence: [] })),
     ...(input.proposals ? { proposalDispositions: input.proposals.proposals.map((_, proposalIndex) => ({ proposalIndex, outcome: 'unknown',
       reason: 'The original draft remains unverified.', sourceEvidence: [] })) } : {}) }
   const firstWire = { ...common, findings: [{ signal: 'object', severity: 'warning', evidence: 'The text says “an invented quotation”.',

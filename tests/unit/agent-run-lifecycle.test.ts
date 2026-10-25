@@ -1718,6 +1718,68 @@ describe('server assessment fallback in the real execution loop', () => {
   })
 })
 
+describe('persistent supplemental approval before generic stagnation', () => {
+  it.each(['approve', 'paused-accepted', 'reject', 'expired', 'unknown', 'wrong-target'] as const)(
+    '%s keeps counters and admits only the same authorized phase without a main turn', async scenario => {
+      const coordinator = await import('../../api/lib/agent/continuity-coordinator.js')
+      const decisionReader = await import('../../api/lib/agent/terminal-input-decision.js')
+      const { prisma } = await import('../../api/lib/prisma.js')
+      const prompt = '完整重写当前章节', taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt })
+      taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ chapterId: 'c', orderIndex: 1 }], titleAndBodyOnly: false, repairAuthorized: true }
+      mocks.currentOriginal = { prompt, taskSpec }; mocks.chapters[0].revision = 4
+      mocks.reviewReadiness.mockResolvedValue(readiness('incomplete', 'complete', 4))
+      const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+        activeExecutionMs: 100, stagnantBatches: 4, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+        writeProgress: 3, writeBaseline: 0, readProgress: 11, readBaseline: 0, progressSignatures: [], reviewAttempts: ['original-consumed'],
+        consumedReviewDecisionFeedback: ['e'.repeat(64)] }
+      mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 27, startedAt: new Date(checkpoint.runStartedAt),
+        usage: { promptTokens: 30, completionTokens: 10, totalTokens: 40, checkpoint } })
+      const key = 'a'.repeat(64), requestId = 'b'.repeat(64)
+      let accepted = scenario === 'paused-accepted', questionOwner = 0
+      const question = () => ({ requestId, callId: 'server-question', ownerSeq: questionOwner,
+        frozen: { input: { targetId: scenario === 'wrong-target' ? 'other' : 'comp', chapterId: 'c', revision: 4 } } })
+      const spies = [vi.spyOn(decisionReader, 'readTerminalInputDecision').mockResolvedValue({ compilationId: 'comp', chapterId: 'c' } as never),
+        vi.spyOn(coordinator, 'saveContinuitySourceRecovery').mockResolvedValue({} as never),
+        vi.spyOn(coordinator, 'readContinuitySupplementState').mockImplementation(async (_db, subject) => {
+          if (scenario === 'paused-accepted') questionOwner = subject.continuityOwnerSeq! - 1
+          return (accepted ? { kind: scenario === 'unknown' ? 'unknown' : 'authorized', question: question(), result: null }
+            : { kind: 'no_authority', question: null, result: null }) as never
+        }),
+        vi.spyOn(coordinator, 'buildContinuitySupplementQuestion').mockImplementation(async (_db, subject) => {
+          questionOwner = subject.continuityOwnerSeq!; return question() as never
+        }),
+        vi.spyOn(coordinator, 'persistContinuitySupplementQuestion').mockImplementation(async (_db, _subject, value) => value),
+        vi.spyOn(coordinator, 'continuitySupplementQuestionArgs').mockResolvedValue({ requestId, question: 'Specific full assessment?', options: [] })]
+      // This suite isolates loop ordering. Real question/consent/dispatch
+      // authentication and settlement run in the supplemental PG suite.
+      const compilation = { validation: { continuityCriticResponse: { assessmentRequest: { key } } }, preparedContext: {} }
+      const db = prisma.storyCompilation as unknown as Record<string, unknown>, previousUnique = db.findUniqueOrThrow
+      const compilationRead = vi.mocked(prisma.storyCompilation.findFirst), previousFirst = compilationRead.getMockImplementation()
+      db.findUniqueOrThrow = vi.fn(async () => compilation)
+      compilationRead.mockResolvedValue(compilation as never)
+      const ask = tool('ask_user', async () => { accepted = !['reject', 'expired'].includes(scenario)
+        return { output: 'Author answer saved without content progress.', display: { kind: 'question', question: 'Specific full assessment?', options: [], answer: 'Explicit answer' } } })
+      const critic = tool('continuity_validate', async () => {
+        expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 40, checkpoint: { stagnantBatches: scenario === 'paused-accepted' ? 4 : 5,
+          readProgress: 11, writeProgress: 3, maxTurns: 1, tokenBudget: 500, consumedReviewDecisionFeedback: checkpoint.consumedReviewDecisionFeedback } })
+        throw new DataAccessError(502, 'AI_PROVIDER_TIMEOUT', 'Synthetic dispatched result remains unknown; never resend.')
+      })
+      mocks.tools = [ask, critic]
+      try {
+        await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt, resume: true })
+        expect(critic.execute).toHaveBeenCalledTimes(['approve', 'paused-accepted'].includes(scenario) ? 1 : 0)
+        expect(ask.execute).toHaveBeenCalledTimes(scenario === 'paused-accepted' ? 0 : 1)
+        expect(mocks.chat).not.toHaveBeenCalled()
+        expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 40, checkpoint: { reviewAttempts: expect.arrayContaining(['original-consumed']),
+          consumedReviewDecisionFeedback: checkpoint.consumedReviewDecisionFeedback, readProgress: 11, writeProgress: 3 } })
+      } finally {
+        for (const spy of spies) spy.mockRestore()
+        compilationRead.mockImplementation(previousFirst!)
+        if (previousUnique === undefined) delete db.findUniqueOrThrow; else db.findUniqueOrThrow = previousUnique
+      }
+    })
+})
+
 describe('author Continue bootstraps checks through the real execution loop', () => {
   function restored() {
     const prompt = '修改本章', taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt })

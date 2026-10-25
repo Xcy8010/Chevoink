@@ -1866,6 +1866,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (await finishPersistedWritingIfComplete()) return
       let bootstrapCall: ToolCallRequest | undefined
       let continuityQuestionId: string | undefined
+      let continuityQuestionAssessmentKey: string | undefined
       let continuitySupplement: ToolContext['continuitySupplement']
       let continuityRevision: ToolContext['continuityRevision']
       let continuityKnownResultOnly: ToolContext['continuityKnownResultOnly']
@@ -1952,6 +1953,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const args = await coordinator.continuitySupplementQuestionArgs(prisma, toolContext, question.requestId)
         bootstrapCall = { id: question.callId, name: 'ask_user', arguments: JSON.stringify({ question: args.question, options: args.options }) }
         continuityQuestionId = question.requestId
+        continuityQuestionAssessmentKey = request.key
         automaticReviewAttempts.add(questionKey)
         await persistCheckpoint()
         }
@@ -3122,7 +3124,21 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const terminalNext = await terminalPlanForCurrentState()
       const terminalProcessingPending = !!terminalNext && (terminalNext.kind === 'commit' || !!terminalNext.claim) && tools.some(tool =>
         tool.name === (terminalNext.kind === 'commit' ? 'chapter_bridge_commit' : 'continuity_validate'))
-      if (!forceWrapUpReason && (blockedRepeat >= 4 || stagnantBatches >= 4 && !compatibilityRead && !feedbackRead && !terminalProcessingPending)) {
+      let supplementalProcessingPending = false
+      if (!forceWrapUpReason && blockedRepeat < 4 && !pendingReviews.size && continuityQuestionId && continuityQuestionAssessmentKey
+        && bootstrapCall?.name === 'ask_user' && tools.some(tool => tool.name === 'continuity_validate')
+        && parts.some(part => part.type === 'tool-call' && part.callId === bootstrapCall.id && part.status === 'success')) {
+        const state = await prisma.$transaction(tx => import('./continuity-coordinator.js').then(module =>
+          module.readContinuitySupplementState(tx, toolContext, continuityQuestionAssessmentKey!)))
+        supplementalProcessingPending = state.kind === 'authorized' && state.question.requestId === continuityQuestionId
+          && state.question.callId === bootstrapCall.id && state.question.ownerSeq === toolContext.continuityOwnerSeq
+          && !!review && state.question.frozen.input.targetId === review.compilationId && state.question.frozen.input.chapterId === review.chapterId
+          && state.question.frozen.input.revision === review.revision
+        // Approval is not manuscript progress. Keep the counters and claims;
+        // the next iteration must admit this same persistent phase before a
+        // generic stagnation stop, with all original dispatch guards intact.
+      }
+      if (!forceWrapUpReason && (blockedRepeat >= 4 || stagnantBatches >= 4 && !compatibilityRead && !feedbackRead && !terminalProcessingPending && !supplementalProcessingPending)) {
         const sameIncompleteReview = incompleteReview && review && !review.ready
           && review.chapterId === incompleteReview.chapterId && review.revision === incompleteReview.revision
           && (review.compilationId ?? null) === (incompleteReview.compilationId ?? null)

@@ -7,6 +7,7 @@ import { DataAccessError } from '../prisma.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { runtimeJson } from './runtime-common.js'
+import { normalizeContinuityV4Projection, bindNormalizedContinuityV4Projection } from './continuity-review-v4.js'
 import { isKnownTextRequestBilling, isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
 import { inspectContinuityResponse, continuityCandidateSchema } from './continuity-format-recovery.js'
 import { continuitySourceCatalog, continuitySourceInput, type ContinuityBodies } from './continuity-review-context.js'
@@ -153,10 +154,14 @@ export function failedContinuityReassessment(original: Inspection, raw: string, 
 export async function runContinuityReassessment(input: { original: Inspection; bodies: ContinuityBodies; system: string; content: string; reassessmentProtocol?: 2 | 3 | 4 | 5 | 6 | 7;
   billingKnown: boolean; providerComplete: boolean; slotUsed: boolean; signal: AbortSignal; assertCurrent: () => Promise<void>;
   claim: (request: { system: string; content: string }) => Promise<boolean>; dispatch: (request: { system: string; content: string }) => Promise<{ content: string; complete: boolean }>;
-  notDispatched?: () => Promise<void>;
+  notDispatched?: () => Promise<void>; normalizationInputHash?: string;
 }): Promise<Inspection> {
   if (input.reassessmentProtocol === 6 || input.reassessmentProtocol === 7 || isContinuityV4Inspection(input.original)) {
     if (input.reassessmentProtocol !== (input.original.audit.parserVersion === 10 ? 7 : 6) || !isContinuityV4Inspection(input.original)) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '独立响应版本与冻结修复合同不一致。')
+    if (input.normalizationInputHash && input.billingKnown && input.providerComplete && !input.slotUsed && !input.signal.aborted) {
+      const derived = normalizeContinuityV4Projection(input.original, input.normalizationInputHash)
+      if (derived.complete) return derived
+    }
     const request = continuityV4RepairRequest(input.original)
     const transition = nextReviewAction({ ownerCurrent: true, cancelled: input.signal.aborted, contextCurrent: true, reserved: true,
       rawPresent: input.original.audit.rawResponse.complete, providerComplete: input.providerComplete, billingKnown: input.billingKnown,
@@ -464,7 +469,10 @@ export async function markLegacyContinuityAssessmentApplication(tx: Prisma.Trans
   if (!ids.length || usage.length !== new Set(ids).size || usage.some(row => !knownAssessmentBilling(row))) return
   if (typeof meta.callId !== 'string') return
   const received = await readLegacyContinuityAssessment(tx, { ...ctx, runId: reservation.runId, callId: meta.callId }, frozen as LegacyAssessmentInput)
-  if (!received.billingKnown || !received.providerComplete || !received.inspected.complete) return
+  const projectionNormalization = isContinuityV4Inspection(inspected) ? inspected.audit.continuityV4.projectionNormalization : undefined
+  const rebound = bindLegacyContinuityAssessment(received.inspected, { ...ctx, runId: reservation.runId, callId: meta.callId },
+    frozen as LegacyAssessmentInput, !!projectionNormalization)
+  if (!received.billingKnown || !received.providerComplete || !rebound.complete || runtimeJson(rebound.audit).hash !== runtimeJson(inspected.audit).hash) return
   if (observations.some(observation => {
     const meta = object(observation.metadata)
     return !Array.isArray(meta?.usageIds) || meta.usageIds.some(id => {
@@ -475,15 +483,19 @@ export async function markLegacyContinuityAssessmentApplication(tx: Prisma.Trans
   })) return
   if (!await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentApplicationKey'], equals: key } } })) {
     await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性报告应用审计', content: '完整检查报告已应用到对应当前输入。',
-      metadata: runtimeJson({ version: 1, assessmentApplicationKey: key, reservationId: reservation.id, usageIds: ids }).value } })
+      metadata: runtimeJson({ version: 1, assessmentApplicationKey: key, reservationId: reservation.id, usageIds: ids,
+        ...(projectionNormalization ? { projectionNormalization } : {}) }).value } })
   }
   if (typeof meta.callId === 'string') await markLegacyContinuityAssessmentApplied(tx, { ...ctx, runId: reservation.runId, callId: meta.callId })
 }
 
-export function bindLegacyContinuityAssessment(inspected: Inspection, ctx: ToolContext, input: LegacyAssessmentInput): Inspection {
+export function bindLegacyContinuityAssessment(inspected: Inspection, ctx: ToolContext, input: LegacyAssessmentInput, normalize = false): Inspection {
   if (!assessmentContractMatches(input, inspected.audit)) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '响应审计版本与原预约不一致。')
   const assessmentRequest = { version: 1, key: assessmentKey(ctx, input), inputHash: runtimeJson(input).hash }
-  if (isContinuityV4Inspection(inspected)) return { ...inspected, audit: { ...inspected.audit, assessmentRequest } }
+  if (isContinuityV4Inspection(inspected)) {
+    const bound = bindNormalizedContinuityV4Projection(inspected, { assessmentRequest }, runtimeJson(input).hash)
+    return normalize ? normalizeContinuityV4Projection(bound, runtimeJson(input).hash) : bound
+  }
   const audit = { ...inspected.audit, assessmentRequest }
   return { ...inspected, audit }
 }

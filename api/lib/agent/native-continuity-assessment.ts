@@ -8,7 +8,7 @@ import { terminalCandidateSchema } from './terminal-candidate-contract.js'
 import { terminalEvidenceContextSchema } from './terminal-evidence-context.js'
 import { continuitySourceScopeSchema } from './continuity-source-authority.js'
 import { continuityReviewManifestSchema } from './continuity-review-v4.js'
-import { inspectAuthenticatedContinuityAssessment, type AuthenticatedContinuityInspection } from './authenticated-continuity-assessment.js'
+import { inspectAuthenticatedContinuityAssessment, isContinuityV4Inspection, type AuthenticatedContinuityInspection } from './authenticated-continuity-assessment.js'
 import { applyContinuityReassessment, failedContinuityReassessment, continuityReassessmentRequest, type LegacyAssessmentInput } from './assessment-response-lifecycle.js'
 import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
 import { tokenPriceSchema } from '../billing/token-price.js'
@@ -141,6 +141,15 @@ export async function readNativeContinuityAssessments(db: Prisma.TransactionClie
       // as unverified history; the caller applies its narrow pending-only rule.
       try { inspected = applyContinuityReassessment(original, second.content, work.sourceBodies, work.reassessmentProtocol) }
       catch { inspected = failedContinuityReassessment(original, second.content, true, work.sourceBodies, work.reassessmentProtocol) }
+    }
+    const savedAudit = object(object(operation.effectReceipt?.result).continuityCriticResponse)
+    const expectedNormalization = object(object(savedAudit.continuityV4).projectionNormalization)
+    const currentNormalization = object(object(current.continuityV4).projectionNormalization)
+    if (expectedNormalization.version === 1 || projectsCurrent && currentNormalization.version === 1) {
+      if (!isContinuityV4Inspection(inspected)) return null
+      inspected = (await import('./continuity-review-v4.js')).normalizeContinuityV4Projection(inspected, operation.inputHash)
+      const expected = expectedNormalization.version === 1 ? savedAudit : current
+      if (!inspected.complete || runtimeJson(inspected.audit).hash !== runtimeJson(expected).hash) return null
     }
     const sameCurrent = runtimeJson(inspected.audit).hash === runtimeJson(target.currentAudit).hash
     const effect = await committedOrCurrent(operation, sameCurrent)

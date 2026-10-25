@@ -183,15 +183,19 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
         } })
     }
     if (frozen.version >= 8 && inspected && critic && frozen.sourceBodies && !inspected.complete) {
+      let normalizationInputHash: string | undefined
       const billingKnown = await withRunLease(lease, async tx => {
         const previous = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: `aux:${operation.id}:continuity_critic` } } })
         const attempt = previous && await tx.agentProviderAttempt.findUnique({ where: { operationId_attemptKey: { operationId: previous.id, attemptKey: '1' } }, include: { usageReceipt: true } })
         const usage = attempt?.usageReceipt
+        if (frozen.version === 23 && !await tx.agentArtifact.findFirst({ where: { runId: lease.runId, artifactType: 'continuityReview',
+          metadata: { path: ['fullReassessmentKey'], equals: `durable:${operation.id}:continuity_reassessment` } } })) normalizationInputHash = operation.inputHash
         return previous?.status === 'succeeded' && attempt?.status === 'succeeded' && usage?.source === 'reported' && usage.settlementStatus === 'settled'
           && usage.promptTokens !== null && usage.completionTokens !== null && usage.promptTokens >= 0 && usage.completionTokens >= 0
       })
       recoveryReady = billingKnown && critic.finishReason === 'stop' && !critic.toolCalls.length
       inspected = await runContinuityReassessment({ original: inspected, bodies: frozen.sourceBodies, system: frozen.criticSystem, content: frozen.criticInput, reassessmentProtocol: frozen.reassessmentProtocol,
+        ...(normalizationInputHash ? { normalizationInputHash } : {}),
         billingKnown, providerComplete: critic.finishReason === 'stop' && !critic.toolCalls.length, slotUsed: false, signal: ctx.signal,
         assertCurrent: () => withRunLease(lease, tx => assertCurrent(tx, frozen)),
         claim: request => withRunLease(lease, async tx => {

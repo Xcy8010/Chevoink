@@ -14,6 +14,12 @@ import { DataAccessError } from '../prisma.js'
 export const TERMINAL_INHERITANCE_MAX_DEPTH = 16
 const bodyHash = (content: string) => createHash('sha256').update(content).digest('hex')
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+type InheritanceChapter = NonNullable<Awaited<ReturnType<Prisma.TransactionClient['chapter']['findFirst']>>>
+type AuthenticatedInheritanceChapter = { chapter: InheritanceChapter; review: NonNullable<ReturnType<typeof currentTerminalReview>>;
+  stateHash: string; validationHash: string; bodyHash: string; rebuilt: TerminalCarriedFact[] }
+/** One invocation, including preservation's nested predecessor reads. */
+export type TerminalInheritanceReadScope = { identities: Set<string>; authenticating: Set<string>;
+  authenticated: Map<string, Promise<AuthenticatedInheritanceChapter | null>> }
 
 /** Cache bookkeeping cannot invalidate an otherwise identical paid judgment. */
 export function terminalAssessmentHash(validation: unknown) {
@@ -33,7 +39,11 @@ export function buildTerminalFactProofs(input: { compilationId: string; chapter:
     const field = claim.path.split('.')[1]
     if (!['knowledge', 'body', 'objects', 'relationships', 'openLoops'].includes(field)) continue
     const verdict = input.review.verdicts.find(item => item.path === claim.path)
-    if (!verdict || verdict.verdict !== 'supported' || !('sourceEvidence' in verdict) || !Array.isArray(verdict.sourceEvidence)) continue
+    const preservation = input.review.deliveryEligibility.eligible
+      ? input.review.deliveryEligibility.preservation?.inherited.find(proof => proof.path === claim.path) : undefined
+    if (!verdict || verdict.verdict !== 'supported' && !(verdict.verdict === 'unknown' && 'basis' in verdict && verdict.basis === 'inherited'
+      && preservation && 'inheritance' in verdict && object(verdict.inheritance).currentState === 'uncertain')
+      || !('sourceEvidence' in verdict) || !Array.isArray(verdict.sourceEvidence)) continue
     const refs = verdict.sourceEvidence as Array<{ segmentId: string; quote: string }>
     const anchors: TerminalCarriedFact['anchors'] = []
     let nodes: TerminalCarriedFact['nodes'] = []
@@ -41,6 +51,7 @@ export function buildTerminalFactProofs(input: { compilationId: string; chapter:
       if (ref.segmentId.startsWith('t')) {
         const carried = input.evidence.previous?.carried?.find(part => part.segmentId === ref.segmentId && part.field === field && part.claim === claim.claim)
         if (!carried || refs.length !== 1) return []
+        if (preservation && (preservation.proofHash !== carried.proofHash || preservation.sourceNodesHash !== runtimeJson(carried.nodes).hash)) return []
         anchors.push(...carried.anchors); nodes = [...carried.nodes]
       } else if (ref.segmentId.startsWith('c')) {
         if (input.evidence.factCoverage?.version === 2) {
@@ -73,7 +84,11 @@ export function buildTerminalFactProofs(input: { compilationId: string; chapter:
     nodes.unshift({ compilationId: input.compilationId, chapterId: input.chapter.id, revision: input.chapter.revision,
       orderIndex: input.chapter.orderIndex, bodyHash: bodyHash(input.chapter.content), candidateHash: input.review.candidateHash,
       validationHash: terminalAssessmentHash(input.validation), stateHash: input.stateHash, path: claim.path,
-      previousChapterId: 'basis' in verdict && verdict.basis === 'inherited' ? input.evidence.previous?.id ?? null : null })
+      previousChapterId: 'basis' in verdict && verdict.basis === 'inherited' ? input.evidence.previous?.id ?? null : null,
+      ...(preservation ? { preservation: { version: 1 as const, basis: 'preserved_canonical' as const,
+        sourceProofHash: preservation.proofHash, sourceNodesHash: preservation.sourceNodesHash,
+        auditHash: runtimeJson(input.validation && object(input.validation).continuityCriticResponse).hash,
+        policyHash: input.review.deliveryEligibility.preservation!.policyHash } } : {}) })
     const fact = { field, claim: claim.claim, anchors, nodes }
     facts.push({ ...fact, segmentId: `t${facts.length}`, proofHash: factHash(fact), depth: nodes.length })
   }
@@ -83,7 +98,14 @@ export function buildTerminalFactProofs(input: { compilationId: string; chapter:
 /** Validate facts independently, without recursively rebuilding unrelated
  * sources: <=16 nodes per fact and <=128 distinct identities per request. */
 export async function readTerminalInheritance(db: Prisma.TransactionClient, subject: { userId: string; novelId: string },
-  predecessor: { id: string; revision: number; orderIndex: number; content: string }): Promise<TerminalCarriedFact[]> {
+  predecessor: { id: string; revision: number; orderIndex: number; content: string },
+  readScope: TerminalInheritanceReadScope = { identities: new Set(), authenticating: new Set(), authenticated: new Map() }): Promise<TerminalCarriedFact[]> {
+  const identity = (kind: string, id: string) => {
+    const key = JSON.stringify([subject.userId, subject.novelId, kind, id])
+    if (!readScope.identities.has(key) && readScope.identities.size >= 128) return false
+    readScope.identities.add(key); return true
+  }
+  if (!identity('chapter', predecessor.id)) return []
   const loadCompilation = (id: string) => db.storyCompilation.findFirst({ where: { id, userId: subject.userId, novelId: subject.novelId, status: 'completed', stage: 'commit' },
     include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
   const latest = await db.storyCompilation.findFirst({ where: { userId: subject.userId, novelId: subject.novelId, chapterId: predecessor.id,
@@ -91,13 +113,14 @@ export async function readTerminalInheritance(db: Prisma.TransactionClient, subj
     include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
   const parsed = z.array(terminalCarriedFactSchema).max(200).safeParse(object(latest?.preparedContext).terminalFactProofs)
   if (!latest?.bridge?.committedAt || latest.bridge.targetRevision !== predecessor.revision || !parsed.success) return []
+  if (!identity('compilation', latest.id)) return []
   type Chapter = Awaited<ReturnType<typeof db.chapter.findFirst>>
   const chapters = new Map<string, Chapter>()
   const compilations = new Map<string, Awaited<ReturnType<typeof loadCompilation>>>([[latest.id, latest]])
   const previousIds = new Map<string, string | null>()
   const chapterFor = async (id: string) => {
     if (!chapters.has(id)) {
-      if (chapters.size >= 128) return null
+      if (!identity('chapter', id)) return null
       chapters.set(id, await db.chapter.findFirst({ where: { id, authorId: subject.userId, ...activeChapterScope(subject.novelId) } }))
     }
     return chapters.get(id) ?? null
@@ -106,11 +129,11 @@ export async function readTerminalInheritance(db: Prisma.TransactionClient, subj
   const { terminalReviewStateHash } = await import('./chapter-review-guard.js')
   // The same authenticated compilation can occur in many independent facts.
   // Rebuild its review/proofs once per invocation, never from a fact's node hash.
-  const authenticated = new Map<string, Awaited<ReturnType<typeof authenticate>>>()
-  async function authenticate(compilationId: string, chapterId: string) {
+  const authenticated = readScope.authenticated
+  async function authenticate(compilationId: string, chapterId: string): Promise<AuthenticatedInheritanceChapter | null> {
     const chapter = await chapterFor(chapterId)
     if (!compilations.has(compilationId)) {
-      if (compilations.size >= 128) return null
+      if (!identity('compilation', compilationId)) return null
       compilations.set(compilationId, await loadCompilation(compilationId))
     }
     const compilation = compilations.get(compilationId), context = object(compilation?.preparedContext), proof = object(context.terminalReviewProof)
@@ -127,7 +150,7 @@ export async function readTerminalInheritance(db: Prisma.TransactionClient, subj
         preparedContext: compilation.preparedContext, validation, candidate }) }
       catch (error) { if (!(error instanceof DataAccessError)) throw error; return null }
       if (chapter) deliveryBinding = await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(db,
-        { ...subject, runId: compilation.runId, compilationId: compilation.id }, deliveryBinding, chapter, validation, evidence)
+        { ...subject, runId: compilation.runId, compilationId: compilation.id }, deliveryBinding, chapter, validation, evidence, undefined, readScope)
     }
     const review = compilation && chapter ? currentTerminalReview(compilation.validation, chapter.content, evidence, deliveryBinding) : null
     if (!chapter || !compilation?.bridge?.committedAt || compilation.chapterId !== chapter.id || compilation.bridge.targetRevision !== chapter.revision
@@ -152,9 +175,13 @@ export async function readTerminalInheritance(db: Prisma.TransactionClient, subj
     }
     for (const [index, node] of fact.nodes.entries()) {
       if (!good) break
-      const key = JSON.stringify([node.compilationId, node.chapterId])
-      if (!authenticated.has(key)) authenticated.set(key, await authenticate(node.compilationId, node.chapterId))
-      const bound = authenticated.get(key)
+      const key = JSON.stringify([subject.userId, subject.novelId, node.compilationId, node.chapterId])
+      if (readScope.authenticating.has(key)) { good = false; break }
+      if (!authenticated.has(key)) {
+        readScope.authenticating.add(key)
+        authenticated.set(key, authenticate(node.compilationId, node.chapterId).finally(() => readScope.authenticating.delete(key)))
+      }
+      const bound = await authenticated.get(key)
       if (!bound || bound.chapter.revision !== node.revision || bound.chapter.orderIndex !== node.orderIndex || bound.bodyHash !== node.bodyHash
         || bound.review.candidateHash !== node.candidateHash || bound.validationHash !== node.validationHash || bound.stateHash !== node.stateHash
         || !terminalClaims(bound.review.candidate).some(claim => claim.path === node.path && claim.path.split('.')[1] === fact.field && claim.claim === fact.claim)) { good = false; break }

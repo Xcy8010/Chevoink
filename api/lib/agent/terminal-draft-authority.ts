@@ -2,7 +2,9 @@ import { terminalCandidateSchema as historyCandidateSchema } from './terminal-ca
 import { terminalCandidateFacts as historyCandidateFacts, terminalFactId as historyFactId } from './terminal-fact-identity.js'
 import type { Prisma } from '@prisma/client'
 import type { ToolContext } from './tools/types.js'
-import type { TerminalEvidenceContext } from './terminal-evidence-context.js'
+import { terminalCarriedFactSchema, type TerminalEvidenceContext } from './terminal-evidence-context.js'
+import { z } from 'zod'
+import type { TerminalInheritanceReadScope } from './terminal-inheritance-chain.js'
 import type { TerminalDeliveryBinding } from './terminal-state-review.js'
 import { runtimeJson } from './runtime-common.js'
 import { authenticateEffectiveContinuityReport, effectiveContinuityAudit } from './continuity-coordinator.js'
@@ -10,6 +12,14 @@ import { authenticateEffectiveContinuityReport, effectiveContinuityAudit } from 
 type Identity = { userId: string; novelId: string; taskId: string; compilationId: string; chapterId: string; bodyHash: string;
   sourceHash: string; candidateHash: string; evidenceHash: string; preparedHash: string; auditHash: string; revisionHash: string }
 const reviewAuthority = new WeakMap<object, string>()
+export type TerminalPreservationPolicy = { version: 1; policyHash: string;
+  inherited: Array<{ path: string; proofHash: string; sourceNodesHash: string }>;
+  pendingCoverageIds: string[] }
+const scopeAuthority = new WeakMap<object, { identityHash: string; policy: TerminalPreservationPolicy }>()
+export function authenticatedTerminalPreservation(token: unknown, identity: Identity) {
+  const value = token && typeof token === 'object' ? scopeAuthority.get(token) : undefined
+  return value?.identityHash === runtimeJson(identity).hash ? value.policy : undefined
+}
 export function authenticatedTerminalReviewAuthority(token: unknown, identity: Identity) {
   return !!token && typeof token === 'object' && reviewAuthority.get(token) === runtimeJson(identity).hash
 }
@@ -36,29 +46,176 @@ export function authenticatedTerminalDraftIds(token: unknown, identity: Identity
 export async function readTerminalDraftBinding(db: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string; compilationId: string; signal?: AbortSignal }, binding: TerminalDeliveryBinding,
   chapter: { id: string; revision: number; orderIndex: number; content: string }, validation: unknown,
-  context?: TerminalEvidenceContext, scope?: TerminalDraftReadScope): Promise<TerminalDeliveryBinding> {
+  context?: TerminalEvidenceContext, scope?: TerminalDraftReadScope, inheritanceScope?: TerminalInheritanceReadScope): Promise<TerminalDeliveryBinding> {
   subject.signal?.throwIfAborted()
-  if (!scope) return loadTerminalDraftBinding(db, subject, binding, chapter, validation, context)
+  if (!scope) return loadTerminalDraftBinding(db, subject, binding, chapter, validation, context, inheritanceScope)
   let cache = scope.get(db)
   if (!cache) { cache = new Map(); scope.set(db, cache) }
   const key = runtimeJson({ userId: subject.userId, novelId: subject.novelId, runId: subject.runId, compilationId: subject.compilationId,
     taskId: binding.taskId, chapter: { id: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex, bodyHash: runtimeJson({ content: chapter.content }).hash },
     preparedContext: binding.preparedContext, context: context ?? null,
     audit: object(validation).continuityCriticResponse ?? null, effectiveReport: object(validation).effectiveReport ?? null, candidate: object(validation).terminalCandidate ?? null,
-    newDraftRevision: object(validation).newDraftRevision ?? null }).hash
-  if (!cache.has(key)) cache.set(key, loadTerminalDraftBinding(db, subject, binding, chapter, validation, context))
+    newDraftRevision: object(validation).newDraftRevision ?? null, retainedReviewDecision: object(validation).retainedReviewDecision ?? null }).hash
+  if (!cache.has(key)) cache.set(key, loadTerminalDraftBinding(db, subject, binding, chapter, validation, context, inheritanceScope))
   const result = await cache.get(key)!
   subject.signal?.throwIfAborted()
   return result
 }
 
+async function readPreservationPolicy(db: Prisma.TransactionClient,
+  subject: { userId: string; novelId: string; runId: string; compilationId: string; signal?: AbortSignal },
+  original: Awaited<ReturnType<typeof import('./original-request.js')['readOriginalTaskRequest']>>,
+  chapter: { id: string; revision: number; orderIndex: number; content: string }, validation: unknown,
+  context: TerminalEvidenceContext, binding: TerminalDeliveryBinding, inheritanceScope?: TerminalInheritanceReadScope): Promise<TerminalPreservationPolicy | null> {
+  const audit = effectiveContinuityAudit(validation)
+  const review = (await import('./authenticated-continuity-assessment.js')).readAuthenticatedContinuityAssessment(audit, chapter.content, context, true)
+  if (!review || context.current.id !== chapter.id || context.current.revision !== chapter.revision
+    || context.current.contentHash !== runtimeJson({ content: chapter.content }).hash) return null
+  const projected = (await import('./continuity-review-v4.js')).validateStoredContinuityV4Projection(audit, chapter.content, context)
+  const errors = projected?.findings.flatMap((finding, index) => finding.severity === 'error' ? [String(index)] : []) ?? []
+  if (errors.length) {
+    const guard = await import('./chapter-review-guard.js'), reportId = guard.continuityDecisionBinding(subject.compilationId, chapter.revision, validation)
+    if (!guard.retainedReviewDecisionMatches(validation, chapter, subject.compilationId, undefined,
+      errors.map(findingId => ({ source: 'continuity', reportId, findingId })))) return null
+  }
+  const unknown = review.verdicts.filter(item => item.verdict !== 'supported')
+  const pending = review.factCoverage?.dispositions.filter(item => item.outcome === 'unknown') ?? []
+  if (!unknown.length && !pending.length) return null
+  const source = context.previous ? await (await import('./compiler-continuity-source.js')).readCompilerContinuitySource(db,
+    subject, chapter, context.previous.id, 11, inheritanceScope) : null
+  const parsedProofs = z.array(terminalCarriedFactSchema).max(200).safeParse(source && 'terminalInheritance' in source ? source.terminalInheritance : [])
+  const currentProofs = parsedProofs.success ? parsedProofs.data : []
+  const catalog = (await import('./terminal-proof-verdict.js')).terminalProofCatalog(review.candidate, context)
+  const inherited: TerminalPreservationPolicy['inherited'] = []
+  for (const verdict of unknown) {
+    if (verdict.verdict !== 'unknown' || !('basis' in verdict) || verdict.basis !== 'inherited') continue
+    const matches = catalog.filter(entry => entry.paths.includes(verdict.path))
+    if (matches.length !== 1) continue
+    const fact = matches[0].fact, check = review.proofChecks?.find(item => item.proofHash === fact.proofHash)
+    const verified = currentProofs.filter(item => item.proofHash === fact.proofHash)
+    if (check?.currentState !== 'uncertain' || verified.length !== 1 || runtimeJson(verified[0]).hash !== runtimeJson(fact).hash) continue
+    inherited.push({ path: verdict.path, proofHash: fact.proofHash, sourceNodesHash: runtimeJson(fact.nodes).hash })
+  }
+  const pendingCoverageIds: string[] = []
+  let priorScope: { policyHash?: string; pendingCoverageIds?: string[] } | null = null
+  const spec = object(original.spec), prompt = (original.prompt ?? '').trim()
+  const onlyNextChapter = /^(?:请)?(?:继续)?(?:写|续写)(?:出)?(?:一下)?(?:下|下一)章[。！!\s]*$/u.test(prompt)
+    || /^write the next chapter[.!\s]*$/iu.test(prompt)
+  const onlyRevision = /^(?:请)?(?:修改|改写|修订)第[一二三四五六七八九十百千零〇两0-9]+章(?:[，,]\s*只输出标题和正文)?[。！!\s]*$/u.test(prompt)
+  let boundedRevision = false
+  if (pending.length && onlyRevision) {
+    const scope = await (await import('./writing-scope.js')).readWritingScope(db, subject)
+    boundedRevision = scope.writing?.kind === 'bounded' && scope.writing.targets.some(target => target.chapterId === chapter.id && target.orderIndex === chapter.orderIndex)
+  }
+  const noHardObligations = ['hardConstraints', 'postconditions'].every(key => spec[key] === undefined || Array.isArray(spec[key]) && !spec[key].length)
+  if (pending.length && (onlyNextChapter || boundedRevision) && noHardObligations) {
+    const origins = await (await import('./continuity-coordinator.js')).readNormalizedContinuityCoverageOrigins(db, subject,
+      { compilationId: subject.compilationId, chapterId: chapter.id, preparedContext: binding.preparedContext }, audit)
+    if (origins) priorScope = await uncommittedCoverageHistory(db, subject, chapter, validation)
+    const ledger = (await import('./terminal-fact-coverage.js')).readTerminalCoverageState(original.spec, binding.preparedContext, chapter.id)
+    const facts = historyCandidateFacts(review.candidate)
+    for (const disposition of pending) {
+      const obligation = context.factCoverage?.obligations.find(item => item.id === disposition.id)
+      const origin = origins?.origins.find(item => item.factId === disposition.id)
+      if (!priorScope || !obligation || obligation.field !== 'openLoops' || !origin || origin.revision > chapter.revision
+        || !ledger?.facts.some(item => item.id === obligation.id && item.field === obligation.field && item.claim === obligation.claim)
+        || facts.some(item => item.id === obligation.id) || currentProofs.some(item => historyFactId(item.field, item.claim) === obligation.id)) continue
+      // A completed canonical chapter containing this exact claim makes it a
+      // real inherited obligation, even if the same text also occurred here.
+      const canonical = await db.storyCompilation.count({ where: { userId: subject.userId, novelId: subject.novelId,
+        status: 'completed', stage: 'commit', bridge: { is: { committedAt: { not: null } } },
+        validation: { path: ['terminalCandidate', 'exitState', 'openLoops'], array_contains: [obligation.claim] } } })
+      if (!canonical) pendingCoverageIds.push(obligation.id)
+    }
+  }
+  if (!inherited.length && !pendingCoverageIds.length) return null
+  subject.signal?.throwIfAborted()
+  const { preparedHash: _bookkeeping, ...identity } = terminalDraftIdentity(binding, context, review.candidateHash, runtimeJson(audit).hash,
+    runtimeJson({ newDraftRevision: object(validation).newDraftRevision ?? null, retainedReviewDecision: object(validation).retainedReviewDecision ?? null }).hash)
+  const value = { version: 1 as const, contractHash: runtimeJson({ prompt: original.prompt ?? null, spec: original.spec }).hash,
+    identity, inherited, pendingCoverageIds }
+  const policyHash = runtimeJson(value).hash
+  if (pendingCoverageIds.length && priorScope?.policyHash && (priorScope.policyHash !== policyHash
+    || runtimeJson(priorScope.pendingCoverageIds).hash !== runtimeJson(pendingCoverageIds).hash)) return null
+  return { version: 1, policyHash, inherited, pendingCoverageIds }
+}
+
+/** Reopening clears bridge.committedAt, but it must not erase canonical
+ * history. Negative proofs include retained compiler proofs and both actual
+ * executor receipt paths. An unknown or unbounded history grants nothing. */
+async function uncommittedCoverageHistory(db: Prisma.TransactionClient,
+  subject: { userId: string; novelId: string; runId: string; compilationId: string },
+  chapter: { id: string; revision: number; content: string }, validation: unknown): Promise<{ policyHash?: string; pendingCoverageIds?: string[] } | null> {
+  const audit = effectiveContinuityAudit(validation), pointer = object(object(validation).effectiveReport)
+  const report = await db.agentArtifact.findFirst({ where: { id: String(pointer.reportArtifactId), artifactType: 'continuityReview',
+    run: { userId: subject.userId, novelId: subject.novelId } }, select: { createdAt: true } })
+  if (!report || !Number.isFinite(report.createdAt.getTime())) return null
+  const compilations = await db.storyCompilation.findMany({ where: { userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id },
+    select: { id: true, preparedContext: true, bridge: { select: { committedAt: true, targetRevision: true } },
+      chapter: { select: { revision: true, content: true } } }, take: 129 })
+  if (compilations.length > 128 || !compilations.some(compilation => compilation.id === subject.compilationId)) return null
+  let policyHash: string | undefined
+  let pendingCoverageIds: string[] | undefined
+  for (const compilation of compilations) {
+    const prepared = object(compilation.preparedContext), proof = object(prepared.terminalReviewProof)
+    if (!Object.keys(proof).length && !(Array.isArray(prepared.terminalFactProofs) && prepared.terminalFactProofs.length)
+      && prepared.terminalContentHash === undefined && prepared.terminalCandidateHash === undefined && !compilation.bridge?.committedAt) continue
+    const own = object(proof.scopePreservation)
+    if (compilation.id !== subject.compilationId || own.version !== 1 || own.auditHash !== runtimeJson(audit).hash
+      || typeof own.policyHash !== 'string' || !/^[a-f0-9]{64}$/u.test(own.policyHash)
+      || !Array.isArray(own.pendingCoverageIds) || own.pendingCoverageIds.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/u.test(id))
+      || new Set(own.pendingCoverageIds).size !== own.pendingCoverageIds.length
+      || !compilation.bridge?.committedAt || compilation.bridge.targetRevision !== chapter.revision
+      || compilation.chapter?.revision !== chapter.revision || compilation.chapter.content !== chapter.content) return null
+    policyHash = own.policyHash
+    pendingCoverageIds = own.pendingCoverageIds as string[]
+  }
+  const targetChapter = async (compilationId: unknown) => {
+    if (typeof compilationId !== 'string') return null
+    return db.storyCompilation.findFirst({ where: { id: compilationId, userId: subject.userId, novelId: subject.novelId }, select: { chapterId: true } })
+  }
+  const events = await db.agentRunEvent.findMany({ where: { run: { userId: subject.userId, novelId: subject.novelId }, type: 'tool.result',
+    createdAt: { lt: report.createdAt }, AND: [{ payload: { path: ['toolName'], equals: 'chapter_bridge_commit' } },
+      { payload: { path: ['ok'], equals: true } }] }, take: 1001 })
+  if (events.length > 1000) return null
+  for (const event of events) {
+    const payload = object(event.payload)
+    if (typeof payload.callId !== 'string') return null
+    const calls = await db.agentRunEvent.findMany({ where: { runId: event.runId, type: 'tool.call',
+      payload: { path: ['callId'], equals: payload.callId } }, take: 2 })
+    const call = object(calls[0]?.payload), args = object(call.args), compilationId = object(payload.display).compilationId
+    if (calls.length !== 1 || call.toolName !== 'chapter_bridge_commit' || args.compilationId !== compilationId) return null
+    if (args.decisionOnly === true && object(payload.display).phase === 'check') continue
+    if (args.decisionOnly === true || object(payload.display).phase !== 'commit') return null
+    const target = await targetChapter(compilationId)
+    if (!target || target.chapterId === chapter.id) return null
+  }
+  const effects = await db.agentEffectReceipt.findMany({ where: { createdAt: { lt: report.createdAt },
+    operation: { action: 'chapter_bridge_commit', taskRoot: { userId: subject.userId, novelId: subject.novelId } } },
+  include: { operation: true }, take: 1001 })
+  if (effects.length > 1000) return null
+  for (const effect of effects) {
+    const event = await db.agentExecutionOutbox.findFirst({ where: { operationId: effect.operationId, type: 'effect.committed', eventKey: `effect:${effect.operationId}` } })
+    if (effect.operation.status !== 'succeeded' || runtimeJson(effect.result).hash !== effect.resultHash
+      || object(event?.payload).operationId !== effect.operationId || object(event?.payload).resultHash !== effect.resultHash) return null
+    const display = object(object(object(effect.result).toolResult).display)
+    const args = object(object(object(effect.operation.inputSnapshot).input).args)
+    if (args.decisionOnly === true && display.phase === 'check') continue
+    if (args.decisionOnly === true || display.phase !== 'commit') return null
+    const target = await targetChapter(object(object(object(effect.result).toolResult).display).compilationId)
+    if (!target || target.chapterId === chapter.id) return null
+  }
+  return policyHash ? { policyHash, pendingCoverageIds } : {}
+}
+
 async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string; compilationId: string; signal?: AbortSignal }, binding: TerminalDeliveryBinding,
   chapter: { id: string; revision: number; orderIndex: number; content: string }, validation: unknown,
-  context?: TerminalEvidenceContext): Promise<TerminalDeliveryBinding> {
+  context?: TerminalEvidenceContext, inheritanceScope?: TerminalInheritanceReadScope): Promise<TerminalDeliveryBinding> {
   const base: TerminalDeliveryBinding = { ...binding, userId: subject.userId, novelId: subject.novelId, compilationId: subject.compilationId }
   delete base.draftAuthority
   delete base.reviewAuthority
+  delete base.scopeAuthority
   const currentAudit = object(object(validation).continuityCriticResponse)
   if (object(validation).effectiveReport !== undefined && !effectiveContinuityAudit(validation)) return base
   let nativeEntries: Awaited<ReturnType<typeof import('./native-continuity-assessment.js')['readNativeContinuityAssessments']>> | undefined
@@ -84,8 +241,10 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
         const source = { ...subject, runId: reservations[0].runId, callId: meta.callId } as unknown as ToolContext
         if (lifecycle.legacyContinuityAssessmentKey(source, parsed.data) !== request.key) return base
         const result = await lifecycle.readLegacyContinuityAssessment(db, source, parsed.data)
-        authentic = result.inspected.complete && result.billingKnown && result.providerComplete && result.recoveryReady
-          && runtimeJson(lifecycle.bindLegacyContinuityAssessment(result.inspected, source, parsed.data).audit).hash === runtimeJson(currentAudit).hash
+        const bound = lifecycle.bindLegacyContinuityAssessment(result.inspected, source, parsed.data,
+          object(object(currentAudit.continuityV4).projectionNormalization).version === 1)
+        authentic = bound.complete && result.billingKnown && result.providerComplete && result.recoveryReady
+          && runtimeJson(bound.audit).hash === runtimeJson(currentAudit).hash
       } else {
         const native = await import('./native-continuity-assessment.js')
         const artifacts = await db.agentArtifact.findMany({ where: { runId: { in: runIds }, run: { userId: subject.userId, novelId: subject.novelId }, artifactType: 'continuityReview' }, take: 1001 })
@@ -101,8 +260,18 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
       subject.signal?.throwIfAborted()
       const token = Object.freeze({})
       reviewAuthority.set(token, runtimeJson(terminalDraftIdentity(base, context, runtimeJson(currentAudit.terminalCandidate).hash,
-        runtimeJson(currentAudit).hash, runtimeJson({ newDraftRevision: object(validation).newDraftRevision ?? null }).hash)).hash)
+        runtimeJson(currentAudit).hash, runtimeJson({ newDraftRevision: object(validation).newDraftRevision ?? null, retainedReviewDecision: object(validation).retainedReviewDecision ?? null }).hash)).hash)
       base.reviewAuthority = token
+      if (object(object(currentAudit.continuityV4).projectionNormalization).version === 1) {
+        const policy = await readPreservationPolicy(db, subject, original, chapter, validation, context, base, inheritanceScope)
+        if (policy) {
+          const scopeToken = Object.freeze({})
+          scopeAuthority.set(scopeToken, { identityHash: runtimeJson(terminalDraftIdentity(base, context,
+            runtimeJson(currentAudit.terminalCandidate).hash, runtimeJson(currentAudit).hash,
+            runtimeJson({ newDraftRevision: object(validation).newDraftRevision ?? null, retainedReviewDecision: object(validation).retainedReviewDecision ?? null }).hash)).hash, policy })
+          base.scopeAuthority = scopeToken
+        }
+      }
     } catch (error) {
       subject.signal?.throwIfAborted()
       if (error instanceof (await import('../prisma.js')).DataAccessError && error.code === 'RUNTIME_SCOPE_MISMATCH') throw error
@@ -118,7 +287,9 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
   const review = currentTerminalReview(validation, chapter.content, context, base)
   const unknown = review?.proposals?.dispositions.filter(item => item.outcome === 'unknown') ?? []
   if (!review || review.deliveryEligibility.eligible || !unknown.length || !review.verdicts.length
-    || review.verdicts.some(item => item.verdict !== 'supported') || review.factCoverage?.version !== 2 || !review.factCoverage.complete) return base
+    || review.verdicts.some(item => item.verdict !== 'supported' && !review.deliveryEligibility.preservation?.inherited.some(proof => proof.path === item.path))
+    || review.factCoverage?.version !== 2 || review.factCoverage.dispositions.some(item => item.outcome === 'unknown'
+      && !review.deliveryEligibility.preservation?.pendingCoverageIds.includes(item.id))) return base
   const identity = { taskId: binding.taskId, chapterId: chapter.id, bodyHash: context.current.contentHash,
     sourceHash: runtimeJson({ previous: context.previous }).hash }
   let state: ReturnType<typeof proposals.readTerminalProposalState>
@@ -318,7 +489,7 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
     subject.signal?.throwIfAborted()
     const token = Object.freeze({})
     authority.set(token, { identityHash: runtimeJson(terminalDraftIdentity(base, context, review.candidateHash, runtimeJson(object(validation).continuityCriticResponse).hash,
-      runtimeJson({ newDraftRevision: object(validation).newDraftRevision ?? null }).hash)).hash,
+      runtimeJson({ newDraftRevision: object(validation).newDraftRevision ?? null, retainedReviewDecision: object(validation).retainedReviewDecision ?? null }).hash)).hash,
       ids: Object.freeze([...origins.keys()]), originHashes: Object.freeze([...origins.values()]) })
     return { ...base, draftAuthority: token }
   } catch (error) {

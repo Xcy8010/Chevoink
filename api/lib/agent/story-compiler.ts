@@ -935,6 +935,11 @@ export async function commitChapterBridge(input: {
   if (input.retainedFindings?.length) {
     if (!probeRunId || !readiness) throw new DataAccessError(409, 'REVIEW_DECISION_REQUIRED', '当前任务没有可核验的章节检查记录，未保存留置。')
     decisionChanged = await recordChapterReviewDecisions(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, readiness, input.retainedFindings)
+    if (decisionChanged) {
+      const decided = await db.storyCompilation.findFirst({ where: { id: compilation.id, userId: input.userId, novelId: input.novelId }, select: { validation: true } })
+      if (!decided) throw new DataAccessError(409, 'COMPILATION_NOT_FOUND', '意见决策后编译已变化，终态未提交。')
+      compilation.validation = decided.validation
+    }
     readiness = await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id, { terminalDraftScope })
 
   }
@@ -1026,6 +1031,10 @@ export async function commitChapterBridge(input: {
   const terminalReviewProof = assessment ? { version: 2,
     checkedBridge: continuityStoryInput(currentContinuityReview.checkedBridge),
     terminalStateHash: terminalReviewStateHash({ ...compilation.bridge, ...bridgeData }, orderedScenes),
+    ...(terminalReview?.deliveryEligibility.preservation?.pendingCoverageIds.length ? { scopePreservation: {
+      version: 1, auditHash: runtimeJson(compilation.validation && (compilation.validation as Record<string, unknown>).continuityCriticResponse).hash,
+      policyHash: terminalReview.deliveryEligibility.preservation.policyHash,
+      pendingCoverageIds: terminalReview.deliveryEligibility.preservation.pendingCoverageIds } } : {}),
   } : undefined
   const terminalFactProofs = currentContinuityReview.coverage.protocolVersion === 11 && terminalReview?.deliveryEligibility.eligible && reviewedEvidence
     ? buildTerminalFactProofs({ compilationId: compilation.id, chapter: { ...compilation.chapter, ...chapter }, validation: compilation.validation,

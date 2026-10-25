@@ -137,7 +137,7 @@ describe('严谨创作落实连续性警告', () => {
       expect(f.critic).not.toHaveBeenCalled()
       expect(compiler.validateStoryContinuity).not.toHaveBeenCalled()
     } else {
-      expect(result.outcome).not.toBe('failed')
+      expect(result.outcome, JSON.stringify(result)).not.toBe('failed')
       expect(f.critic).toHaveBeenCalledOnce()
       expect(f.critic.mock.calls[0][1]).toContain('过滤泵检修等零件')
       expect(compiler.validateStoryContinuity).toHaveBeenCalledWith(expect.objectContaining({ terminalCandidate: canonical,

@@ -12,6 +12,7 @@ import { terminalReviewRowDiagnostics } from './terminal-review-row-diagnostics.
 import { continuityFindingInputSchema, type ContinuityFindingInput } from '../../../shared/contracts/story-compiler-contracts.js'
 import type { inspectContinuityResponse } from './continuity-format-recovery.js'
 import { continuityPhasePlanSchema, validContinuityPhasePlan } from './continuity-coordinator.js'
+import { terminalQuoteRange } from './terminal-quote-range.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/u)
 const object = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
@@ -22,6 +23,12 @@ type Table = typeof tables[number]
 type Diagnostic = { table: Table; index: number; code: string; path?: string }
 type V4RepairPlan = { version: 1; manifestHash: string; firstHash: string; mask: Array<{ table: Table; index: number }>;
   fixedHash: string; fixed: Record<string, unknown[]> }
+type ProjectionSourceMapping = { table: Table; index: number; quoteHash: string;
+  kind: 'current_evidence_span' | 'current_explanation_span' | 'proof_claim_audit' | 'proof_anchor_audit' | 'proposal_claim_audit' | 'non_evidentiary_explanation';
+  referenceIndex?: number; explanationQuoteIndex?: number; originalSegmentId?: string;
+  range?: NonNullable<ReturnType<typeof terminalQuoteRange>>; proofHash?: string; anchorIndex?: number; proposalIndex?: number }
+type ProjectionNormalization = { version: 1; originalParserVersion: 10; originReportHash: string; rawHash: string;
+  frozenInputHash: string; mappings: ProjectionSourceMapping[]; derivationHash: string }
 const evidenceReference = z.object({ segmentId: z.string().regex(/^[cp][0-9]+$/u), quote: z.string().min(2).max(300).optional() }).strict()
 const findingSchema = z.object({ findingId: z.string().regex(/^f[0-9]+$/u), signal: continuityFindingInputSchema.shape.signal,
   severity: continuityFindingInputSchema.shape.severity, reason: z.string().trim().min(1).max(400), suggestion: z.string().trim().min(1).max(500),
@@ -49,7 +56,7 @@ type V4Marker = { version: 1; manifest: ContinuityReviewManifest; frozen: Contin
   projections: ReturnType<typeof inspectRecord>['projections'] | null;
   failedRepair?: { response: ReturnType<typeof rawReceipt> };
   repair?: { response: ReturnType<typeof rawReceipt>; plan: V4RepairPlan;
-    dispositions: Array<Record<string, unknown>>; recordHash: string } }
+    dispositions: Array<Record<string, unknown>>; recordHash: string }; projectionNormalization?: ProjectionNormalization }
 export type ContinuityV4Inspection = Omit<LegacyInspection, 'audit'> & { audit: Omit<LegacyInspection['audit'], 'parserVersion' | 'responseContract'> & {
   parserVersion: 9 | 10; responseContract: 4 | 5; continuityV4: V4Marker; assessmentRequest?: { version: number; key: string; inputHash: string };
   phaseRequest?: { version: 1; requestId: string; originalAssessmentKey: string; inputHash: string; usageId: string } };
@@ -141,7 +148,7 @@ export function continuityReviewV4Request(frozen: ContinuityV4Frozen, authorRequ
   const typed = frozen.manifest.typedLineage
   return { system: `你是独立连续性审阅者。完整审阅本次材料，不改正文。author_request与场景计划不是已发生事实。
 只输出本次完整JSON合同。findings.sourceEvidence只能选服务端目录的segmentId；quote可省略，若提供则必须逐字包含在该段。终态各表的sourceEvidence只返回segmentId，不重抄quote。reason是你的解释，可讨论或引用原意见，其中文字不被服务器冒充原文；只有显式sourceEvidence是正文证据。error必须至少包含一处本章和另一处不同事实证据，不能将仅前文问题指控本章。真实冲突、严重度及未知判断必须完整保留，不为通过而删意见或改判。findings的findingId依次为f0、f1…，semanticChecks用这些ID引用意见。候选/历史事实/proposal按原目录逐项核验；合法unknown不是格式错误。
-${typed ? `本次明确使用 contract5：reasonCode/explanation 是分类和解释；manuscriptEvidence 才是正文引用。priorFindingRef 仅引用目录中原意见的逐字文字，不能证明当前事实。解释中带引号的文字必须来自所选正文或精确 priorFindingRef；不能编造引用。不得返回旧 reason/sourceEvidence 字段。逐 issueIndex 处置 establishedIssues：present/retained 必须指向本次真实 findingId，repaired 需要本章证据；repaired 也可明确说明当前证据证明旧判断不成立，不要求为此改稿，也不声称正文已修改。unknown 合法但不解除义务。旧无效回复的文字仅供审计，不自行成为 establishedIssue。openLoops 判断未解决问题是否保留、改述或明确结束；无需要求本章解开原主张未声称已解决的谜。新报告独立判断完整当前候选、全部证明和历史覆盖；不得把 old UNKNOWN 自动匹配为 supported。\n` : ''}${JSON.stringify(z.toJSONSchema(continuityReviewV4ResponseSchema(frozen), { io: 'input' }))}`,
+${typed ? `本次明确使用 contract5：reasonCode/explanation 是分类和解释；manuscriptEvidence 才是正文引用。priorFindingRef 仅引用目录中原意见的逐字文字，不能证明当前事实。解释可以讨论历史主张、草稿和原意见，解释里的引号不自动成为正文锚点或事实认证；不得把它冒充 manuscriptEvidence。显式 manuscriptEvidence/quote 与 priorFindingRef/quote 仍必须逐字符合各自冻结来源，不得编造引用。不得返回旧 reason/sourceEvidence 字段。逐 issueIndex 处置 establishedIssues：present/retained 必须指向本次真实 findingId，repaired 需要本章证据；repaired 也可明确说明当前证据证明旧判断不成立，不要求为此改稿，也不声称正文已修改。unknown 合法但不解除义务。旧无效回复的文字仅供审计，不自行成为 establishedIssue。openLoops 判断未解决问题是否保留、改述或明确结束；无需要求本章解开原主张未声称已解决的谜。新报告独立判断完整当前候选、全部证明和历史覆盖；不得把 old UNKNOWN 自动匹配为 supported。\n` : ''}${JSON.stringify(z.toJSONSchema(continuityReviewV4ResponseSchema(frozen), { io: 'input' }))}`,
     content: JSON.stringify({ author_request: { manuscriptEvidence: false, text: authorRequest }, context,
       // Rendering uses the existing short addresses. The full server catalogue
       // still authenticates the manifest and every stored response/repair.
@@ -149,13 +156,15 @@ ${typed ? `本次明确使用 contract5：reasonCode/explanation 是分类和解
         terminal: terminalReviewAddressInput(frozen.candidate, frozen.bodies.terminalEvidence!) } }) }
 }
 
-function bindFinding(value: unknown, index: number, frozen: ContinuityV4Frozen, expectedId = `f${index}`) {
+function bindFinding(value: unknown, index: number, frozen: ContinuityV4Frozen, expectedId = `f${index}`, allowEvidenceRanges = false) {
   const parsed = findingSchema.safeParse(value)
   if (!parsed.success || parsed.data.findingId !== expectedId) return null
   const row = parsed.data, catalog = continuitySourceCatalog(frozen.bodies).continuitySources
   const refs = row.sourceEvidence.map(ref => {
     const source = catalog.find(part => part.segmentId === ref.segmentId)
-    return source && (ref.quote === undefined || source.quote.includes(ref.quote))
+    return source && (ref.quote === undefined || source.quote.includes(ref.quote)
+      || allowEvidenceRanges && source.source === 'current'
+        && terminalQuoteRange({ segmentId: ref.segmentId, quote: ref.quote }, catalog)?.segmentIds.includes(ref.segmentId))
       ? { source: source.source, quote: ref.quote ?? source.quote } : null
   })
   if (refs.some(ref => !ref || ref.quote.length < 2) || row.severity === 'error'
@@ -168,7 +177,7 @@ function bindFinding(value: unknown, index: number, frozen: ContinuityV4Frozen, 
   return { row, finding }
 }
 
-function inspectNormalizedRecord(record: Record<string, unknown>, frozen: ContinuityV4Frozen, expectedFindingIds?: string[]) {
+function inspectNormalizedRecord(record: Record<string, unknown>, frozen: ContinuityV4Frozen, expectedFindingIds?: string[], allowEvidenceRanges = false) {
   const diagnostics: Diagnostic[] = [], bad = new Map<Table, Set<number>>()
   let repairable = true
   const add = (table: Table, index: number, code: string, path?: string) => {
@@ -184,7 +193,7 @@ function inspectNormalizedRecord(record: Record<string, unknown>, frozen: Contin
   } else for (const [index, row] of findingRows.entries()) {
     const expectedId = expectedFindingIds?.[index] ?? `f${index}`
     if (object(row)?.findingId !== expectedId) { repairable = false; add('findings', index, 'finding_address_invalid'); continue }
-    const bound = bindFinding(row, index, frozen, expectedId)
+    const bound = bindFinding(row, index, frozen, expectedId, allowEvidenceRanges)
     if (!bound) add('findings', index, 'finding_source_or_schema_invalid')
     else findings.push(bound.finding)
   }
@@ -269,7 +278,8 @@ function inspectNormalizedRecord(record: Record<string, unknown>, frozen: Contin
       draftProposals: projection(proposalsValid, { input: frozen.bodies.terminalEvidence!.proposalChanges ?? null, rows: record.proposalDispositions ?? [] }, ['proposalDispositions']) } }
 }
 
-function validTypedReferences(row: Record<string, unknown>, frozen: ContinuityV4Frozen, table: Table) {
+function validTypedReferences(row: Record<string, unknown>, frozen: ContinuityV4Frozen, table: Table,
+  normalization?: { index: number; mappings: ProjectionSourceMapping[] }) {
   try {
     const catalog = continuitySourceCatalog(frozen.bodies), lineage = frozen.manifest.typedLineage
     if (!lineage) return false
@@ -280,13 +290,52 @@ function validTypedReferences(row: Record<string, unknown>, frozen: ContinuityV4
     if (prior && (!priorText || !priorText.includes(prior.quote))) return false
     const refs = Array.isArray(row.manuscriptEvidence) ? row.manuscriptEvidence as Array<z.infer<typeof evidenceReference>> : []
     const selected = refs.map(ref => sources.find(source => source.segmentId === ref.segmentId))
-    if (selected.some((source, i) => !source || refs[i].quote !== undefined && !source.quote.includes(refs[i].quote!))) return false
+    for (const [i, source] of selected.entries()) {
+      if (!source) return false
+      const ref = refs[i]
+      if (ref.quote === undefined || source.quote.includes(ref.quote)) continue
+      const range = normalization && /^c[0-9]+$/u.test(ref.segmentId) ? terminalQuoteRange({ segmentId: ref.segmentId, quote: ref.quote }, sources) : null
+      if (!range || !range.segmentIds.includes(ref.segmentId)) return false
+      normalization!.mappings.push({ table, index: normalization!.index, kind: 'current_evidence_span', referenceIndex: i,
+        originalSegmentId: ref.segmentId, quoteHash: textHash(ref.quote), range })
+    }
     const quotes = [...String(row.explanation).matchAll(/[“「『‘"]([^”」』’"]{2,300})[”」』’"]/gu)].map(match => match[1])
-    return !quotes.some(quote => !selected.some(source => source?.quote.includes(quote)) && !(prior && prior.quote.includes(quote)))
+    for (const [quoteIndex, quote] of quotes.entries()) {
+      if (selected.some(source => source?.quote.includes(quote)) || prior && prior.quote.includes(quote)) continue
+      if (!normalization) return false
+      const base = { table, index: normalization.index, quoteHash: textHash(quote), explanationQuoteIndex: quoteIndex }
+      const addresses = terminalReviewAddressCatalog(frozen.candidate, frozen.bodies.terminalEvidence!)
+      if (table === 'terminalProofVerdicts') {
+        const proof = addresses.proofs.find(part => part.proofIndex === row.proofIndex)?.fact
+        if (proof?.claim.includes(quote)) {
+          normalization.mappings.push({ ...base, kind: 'proof_claim_audit', proofHash: proof.proofHash }); continue
+        }
+        const anchorIndex = proof?.anchors.findIndex(anchor => anchor.quote.includes(quote)) ?? -1
+        if (proof && anchorIndex >= 0) {
+          normalization.mappings.push({ ...base, kind: 'proof_anchor_audit', proofHash: proof.proofHash, anchorIndex }); continue
+        }
+        // Proof wire has no manuscriptEvidence field. This is only an exact
+        // explanation locator, never a new anchor or an unchanged judgment.
+        const start = frozen.bodies.current.indexOf(quote)
+        const current = catalog.terminalSources.filter(part => part.source === 'current')
+        const range = start >= 0 && frozen.bodies.current.indexOf(quote, start + 1) < 0
+          ? terminalQuoteRange({ segmentId: current[0]?.segmentId ?? '', quote }, current) : null
+        if (range) { normalization.mappings.push({ ...base, kind: 'current_explanation_span', range }); continue }
+      }
+      if (table === 'proposalDispositions' && addresses.proposals.find(part => part.proposalIndex === row.proposalIndex)?.claim.includes(quote)) {
+        normalization.mappings.push({ ...base, kind: 'proposal_claim_audit', proposalIndex: Number(row.proposalIndex) }); continue
+      }
+      // The new interpretation keeps explanation separate from manuscript
+      // evidence. Unlocated explanatory quotation is not an anchor, fact,
+      // unchanged judgment or prose-edit authority. Structured refs above
+      // remain mandatory and strict, and the original parser10 is unchanged.
+      normalization.mappings.push({ ...base, kind: 'non_evidentiary_explanation' })
+    }
+    return true
   } catch { return false }
 }
 
-function inspectRecord(record: Record<string, unknown>, frozen: ContinuityV4Frozen, expectedFindingIds?: string[]) {
+function inspectRecord(record: Record<string, unknown>, frozen: ContinuityV4Frozen, expectedFindingIds?: string[], mappings?: ProjectionSourceMapping[]) {
   if (!frozen.manifest.typedLineage) return inspectNormalizedRecord(record, frozen, expectedFindingIds)
   const normalized = { ...record }, invalid: Diagnostic[] = [], schemas = responseFields(frozen)
   const lineage = frozen.manifest.typedLineage
@@ -297,7 +346,7 @@ function inspectRecord(record: Record<string, unknown>, frozen: ContinuityV4Froz
       const parsed = (array.element as z.ZodType).safeParse(raw), row = object(raw)
       const bad = () => { invalid.push({ table, index, code: 'typed_reason_or_provenance_invalid' }); return raw }
       if (!parsed.success || !row) return bad()
-      if (!validTypedReferences(row, frozen, table)) return bad()
+      if (!validTypedReferences(row, frozen, table, mappings ? { index, mappings } : undefined)) return bad()
       if ((row.verdict === 'supported' || row.currentState === 'unchanged' || row.outcome === 'replaced' || row.outcome === 'ended' || row.outcome === 'repaired')
         && ['historical_reference', 'insufficient_evidence', 'proposal_pending'].includes(String(row.reasonCode))) return bad()
       if (table === 'issueDispositions') return raw
@@ -316,7 +365,7 @@ function inspectRecord(record: Record<string, unknown>, frozen: ContinuityV4Froz
           ? { sourceEvidence } : {}) }
     })
   }
-  const result = inspectNormalizedRecord(normalized, frozen, expectedFindingIds)
+  const result = inspectNormalizedRecord(normalized, frozen, expectedFindingIds, mappings !== undefined)
   const issueRows = record.issueDispositions
   if (!Array.isArray(issueRows) || issueRows.length !== lineage.establishedIssues.length
     || new Set(issueRows.map(row => object(row)?.issueIndex)).size !== lineage.establishedIssues.length
@@ -365,6 +414,39 @@ export function inspectContinuityV4(raw: string, frozen: ContinuityV4Frozen, res
       first: rawReceipt(raw, responseComplete), projections: parsed?.projections ?? null } }
   return { findings: parsed?.valid ? parsed.findings : [], structured: !!parsed, complete: !!parsed?.valid,
     candidateFindings: [], invalidSourceReferences: [], terminalReview: parsed?.terminal ?? null, parsed, audit }
+}
+
+/** A new, explicit interpretation of one complete physical report. The frozen
+ * parser10 remains unchanged; no row, verdict, quote or explanation is edited.
+ * The entire report must validate, including every mandatory UNKNOWN. */
+export function normalizeContinuityV4Projection(original: ContinuityV4Inspection, frozenInputHash: string): ContinuityV4Inspection {
+  const marker = original.audit.continuityV4
+  const boundInputHash = original.audit.phaseRequest?.inputHash ?? original.audit.assessmentRequest?.inputHash
+  if (original.complete || original.audit.parserVersion !== 10 || !hash.safeParse(frozenInputHash).success
+    || boundInputHash !== undefined && boundInputHash !== frozenInputHash
+    || !original.audit.rawResponse.complete || !original.parsed || marker.repair || marker.failedRepair || marker.projectionNormalization
+    || !continuityReviewV4ResponseSchema(marker.frozen).safeParse(original.parsed.record).success) return original
+  const mappings: ProjectionSourceMapping[] = []
+  const parsed = inspectRecord(original.parsed.record, marker.frozen, undefined, mappings)
+  if (!parsed.valid || !mappings.length) return original
+  const value = { version: 1 as const, originalParserVersion: 10 as const, originReportHash: runtimeJson(original.audit).hash,
+    rawHash: original.audit.contentHash, frozenInputHash, mappings }
+  const projectionNormalization = { ...value, derivationHash: runtimeJson(value).hash }
+  return { ...original, complete: true, findings: parsed.findings, terminalReview: parsed.terminal, parsed,
+    audit: { ...original.audit, classification: 'complete', terminalReviewDiagnostics: parsed.terminalDiagnostics,
+      continuityV4: { ...marker, projections: parsed.projections, projectionNormalization } } }
+}
+
+/** Binding an already-derived physical response must also bind its original
+ * report hash. It never reinterprets an unmarked historical report by default. */
+export function bindNormalizedContinuityV4Projection(inspected: ContinuityV4Inspection,
+  bindings: Pick<ContinuityV4Inspection['audit'], 'assessmentRequest' | 'phaseRequest'>, frozenInputHash: string) {
+  if (!inspected.audit.continuityV4.projectionNormalization) return { ...inspected, audit: { ...inspected.audit, ...bindings } }
+  const marker = inspected.audit.continuityV4, raw: unknown = JSON.parse(marker.first.content)
+  if (typeof raw !== 'string' || !validateStoredContinuityV4Projection(inspected.audit, marker.frozen.bodies.current, marker.frozen.bodies.terminalEvidence)?.complete)
+    throw Error('Projection normalization lineage cannot be rebound')
+  const strict = inspectContinuityV4(raw, marker.frozen, marker.first.complete)
+  return normalizeContinuityV4Projection({ ...strict, audit: { ...strict.audit, ...bindings } }, frozenInputHash)
 }
 
 export function buildContinuityInvalidRowRepair(first: ContinuityV4Inspection): V4RepairPlan | null {
@@ -475,6 +557,17 @@ export function validateStoredContinuityV4Projection(value: unknown, content: st
     const raw: unknown = JSON.parse(first.content)
     if (typeof raw !== 'string') return null
     let rebuilt = inspectContinuityV4(raw, frozen, true)
+    if (marker.projectionNormalization !== undefined) {
+      const normalization = object(marker.projectionNormalization)
+      if (marker.repair !== undefined || marker.failedRepair !== undefined || normalization?.version !== 1
+        || normalization.originalParserVersion !== 10 || typeof normalization.frozenInputHash !== 'string') return null
+      const bindings = { ...(audit.assessmentRequest ? { assessmentRequest: audit.assessmentRequest as ContinuityV4Inspection['audit']['assessmentRequest'] } : {}),
+        ...(audit.phaseRequest ? { phaseRequest: audit.phaseRequest as ContinuityV4Inspection['audit']['phaseRequest'] } : {}) }
+      const expectedInputHash = object(audit.phaseRequest)?.inputHash ?? object(audit.assessmentRequest)?.inputHash
+      if (expectedInputHash !== undefined && expectedInputHash !== normalization.frozenInputHash) return null
+      rebuilt = normalizeContinuityV4Projection({ ...rebuilt, audit: { ...rebuilt.audit, ...bindings } }, normalization.frozenInputHash)
+      return rebuilt.complete && runtimeJson(audit).hash === runtimeJson(rebuilt.audit).hash ? rebuilt : null
+    }
     if (marker.failedRepair !== undefined) {
       if (marker.repair !== undefined) return null
       const response = object(object(marker.failedRepair)?.response)

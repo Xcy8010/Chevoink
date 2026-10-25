@@ -93,17 +93,19 @@ export type ChapterReviewReadiness = {
   qualityReportId: string | null; requiredTools: Array<{ name: 'continuity_validate' | 'quality_analyze'; args: { compilationId: string } }>
 }
 
-/** Retention is a current, explicit decision; a paid reservation is not one. */
-function retainedReviewDecisionMatches(validation: unknown, chapter: { id: string; revision: number; content: string },
-  compilationId: string, report: { id: string; findings: unknown[] } | null,
+/** Retention is a current, explicit decision; a paid reservation is not one.
+ * Undefined report checks only continuity decisions for canonical preservation;
+ * the ordinary commit caller still supplies the real current quality report. */
+export function retainedReviewDecisionMatches(validation: unknown, chapter: { id: string; revision: number; content: string },
+  compilationId: string, report: { id: string; findings: unknown[] } | null | undefined,
   required: Array<{ source: string; reportId: string; findingId: string }>) {
   const value = validation && typeof validation === 'object' && !Array.isArray(validation) ? validation as Record<string, unknown> : null
   const decision = value?.retainedReviewDecision as Record<string, unknown> | undefined
   if (!decision || decision.version !== 1 || decision.chapterId !== chapter.id || decision.revision !== chapter.revision
     || decision.contentHash !== runtimeJson({ content: chapter.content }).hash
     || decision.continuityBinding !== continuityDecisionBinding(compilationId, chapter.revision, validation)
-    || decision.qualityReportId !== (report?.id ?? null)
-    || decision.qualityReportHash !== (report ? qualityDecisionHash(report.findings) : null)
+    || report !== undefined && (decision.qualityReportId !== (report?.id ?? null)
+      || decision.qualityReportHash !== (report ? qualityDecisionHash(report.findings) : null))
     || !Array.isArray(decision.findings)) return false
   const entries = decision.findings as Array<{ source?: string; reportId?: string; findingId?: string; reason?: string }>
   const key = (item: typeof entries[number]) => `${item.source}:${item.reportId}:${item.findingId}`
