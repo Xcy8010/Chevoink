@@ -87,18 +87,18 @@ export function validatedContinuityCheckRounds(validation: unknown, increment = 
 }
 
 /** Reserve before dispatch; failed checks also consume an attempt. */
-export async function reserveContinuityCheck(userId: string, novelId: string, compilationId: string): Promise<boolean> {
-  return prisma.$transaction(async tx => {
-    await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${compilationId} AND user_id = ${userId} AND novel_id = ${novelId} FOR UPDATE`
-    const compilation = await tx.storyCompilation.findFirst({ where: { id: compilationId, userId, novelId, status: { in: ['active', 'completed'] } } })
-    if (!compilation) return false
-    const previous = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : {}
-    const rounds = validatedContinuityCheckRounds(previous, true)
-    await tx.storyCompilation.update({ where: { id: compilationId }, data: {
-      validation: { ...previous, checkRounds: rounds + 1 } as Prisma.InputJsonValue,
-    } })
-    return true
-  })
+export async function reserveContinuityCheck(userId: string, novelId: string, compilationId: string, transaction?: Prisma.TransactionClient): Promise<boolean> {
+  if (!transaction) return prisma.$transaction(tx => reserveContinuityCheck(userId, novelId, compilationId, tx))
+  const tx = transaction
+  await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${compilationId} AND user_id = ${userId} AND novel_id = ${novelId} FOR UPDATE`
+  const compilation = await tx.storyCompilation.findFirst({ where: { id: compilationId, userId, novelId, status: { in: ['active', 'completed'] } } })
+  if (!compilation) return false
+  const previous = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : {}
+  const rounds = validatedContinuityCheckRounds(previous, true)
+  await tx.storyCompilation.update({ where: { id: compilationId }, data: {
+    validation: { ...previous, checkRounds: rounds + 1 } as Prisma.InputJsonValue,
+  } })
+  return true
 }
 
 /** Reserve before dispatch, so crashes/resumes cannot restart an automatic repair loop. */
@@ -692,6 +692,8 @@ export async function validateStoryContinuity(input: {
   terminalCandidate?: TerminalCandidate
   continuityCriticResponse?: unknown
   expectedContinuityOwnerSeq?: number
+  /** Internal native effect owner; never read from model/tool arguments. */
+  expectedContinuityNativeLease?: import('./runtime-lease.js').RunLeaseToken
   focus?: string
   signal?: AbortSignal
 }, transaction?: Prisma.TransactionClient): Promise<{ checkedChapterId: string; checkedRevision: number; checkedAt: string; independentCheck: 'complete' | 'unavailable'; findings: ContinuityFindingInput[]; errorCount: number; warningCount: number; autoRepairRounds: number; checkRounds: number; effectiveReport?: import('./continuity-coordinator.js').EffectiveContinuityReport }> {
@@ -760,7 +762,8 @@ export async function validateStoryContinuity(input: {
   const nextCheckRounds = validatedContinuityCheckRounds(compilation.validation)
   const previousValidation = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : {}
   if ((input.continuityCriticResponse as { parserVersion?: number } | undefined)?.parserVersion === 10 && input.runId)
-    await (await import('./continuity-coordinator.js')).assertContinuityOwner(db, { ...input, runId: input.runId, continuityOwnerSeq: input.expectedContinuityOwnerSeq })
+    await (await import('./continuity-coordinator.js')).assertContinuityOwner(db, { ...input, runId: input.runId,
+      continuityOwnerSeq: input.expectedContinuityOwnerSeq, continuityNativeLease: input.expectedContinuityNativeLease })
   const sameReviewedInput = previousValidation.checkedRevision === compilation.chapter.revision && previousValidation.independentCheck === 'complete'
     && runtimeJson(previousValidation.findings ?? []).hash === runtimeJson(findings).hash
     && compilerContinuityCoverageMatches(previousValidation.coverage, currentCoverage)

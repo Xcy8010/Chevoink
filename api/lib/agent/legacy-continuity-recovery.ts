@@ -127,7 +127,11 @@ export async function readContinuedContinuityRecovery(tx: Prisma.TransactionClie
     // terminal subject. Its authenticated handoff is handled by the loop;
     // missing/unknown witnesses must not fall back to another critic call.
     const terminalAudit = object(validation.continuityCriticResponse)
-    const failedSubject = knownFinalContinuityFailure(terminalAudit) && !!object(validation.terminalCandidate).exitState
+    // A returned terminal decision is not a missing critic response. Legacy
+    // parser8 keeps its original classification semantics; only this recovery
+    // admission recognizes its terminal-invalid outcome as a final subject.
+    const failedSubject = !!object(validation.terminalCandidate).exitState && (knownFinalContinuityFailure(terminalAudit)
+      || terminalAudit.classification === 'terminal_invalid' && Number(terminalAudit.parserVersion) <= 8)
     if (observedReviewOutcome({ complete: false, rawPresent: !!object(terminalAudit.rawResponse).content, providerComplete: false, billingKnown: false,
       decisionRequired: failedSubject }).action === 'pause' && failedSubject) continue
     if (compilation.status !== 'active' || !compilation.chapterId || validation.independentCheck !== 'unavailable'

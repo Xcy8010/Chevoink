@@ -132,6 +132,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   options: Parameters<typeof generateReviewCompletion>[2]; assertCurrent: (db?: Prisma.TransactionClient) => Promise<void>;
   bindingHash?: string;
   assessmentAdmissionId?: string;
+  onNewRequestReserved?: (tx: Prisma.TransactionClient) => Promise<void>;
   recoverBodies?: (version: FrozenTerminalContract) => ContinuityBodies;
 }): Promise<AuthenticatedContinuityInspection & { recoveryReady?: boolean }> {
   const trace = createTextRequestTrace()
@@ -221,7 +222,11 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
       throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '原完整缓存报告或当前输入已变化，未应用旧结果，也未派发新请求。')
   }
   if (reusable) return reusable
-  const reservation = await prisma.$transaction(tx => reserveLegacyContinuityAssessment(tx, ctx, frozen, input.assertCurrent))
+  const reservation = await prisma.$transaction(async tx => {
+    const admitted = await reserveLegacyContinuityAssessment(tx, ctx, frozen, input.assertCurrent)
+    if (admitted === 'new') await input.onNewRequestReserved?.(tx)
+    return admitted
+  })
   if (reservation === 'blocked') throw new DataAccessError(409, 'CONTINUITY_REPORT_INCOMPLETE', '原检查或复评尚未确认，本次未重放模型请求；保留真实记录等待作者继续。')
   const replay = reservation === 'replay' ? await prisma.$transaction(tx => readLegacyContinuityAssessment(tx, ctx, frozen)) : null
   let raw: string
@@ -1167,16 +1172,6 @@ export const continuityValidateTool = defineTool({
     }
     if (correctionGate.freshAdmissionId) continued = null
     const reviewRuntime = await resolveReviewModelRuntime({ ...ctx, task: 'continuity' })
-    // A check reserves a monotonic audit count; its count is not a dispatch cap.
-    if (!continued && !await reserveContinuityCheck(ctx.userId, ctx.novelId, compilation.id)) {
-      return {
-        outcome: 'failed' as const,
-        failureCode: 'COMPILATION_NOT_FOUND',
-        summary: '本任务连续性检查未执行',
-        output: `当前编译已不存在或不可继续检查，未调用模型；当前 r${chapter.revision} 未获得新复核。请读取本任务章节桥核对真实状态，不使用旧报告宣称新版通过。`,
-        display: { kind: 'storyCompiler', compilationId: compilation.id, phase: 'check', title: '连续性检查', detail: `编译状态需核对 · 当前 r${chapter.revision} 未复核`, items: [] },
-      }
-    }
     const allowRepair = false
     // Only a new request receives the current response contract. Old cache,
     // correction and exact-call replay retain their own full frozen input.
@@ -1243,7 +1238,9 @@ export const continuityValidateTool = defineTool({
       { chapterId: chapter.id, revision: chapter.revision, bodies: requestBodies, bindingHash: runtimeJson(coverage).hash }, correctionGate.freshAdmissionId!, assertCurrent))) return {
       outcome: 'failed' as const, failureCode: 'CONTINUITY_REPORT_INCOMPLETE', summary: '独立连续性复核未完成', output: unconfirmedContinuityOutput,
     }
-    const inspected = continued ? await runContinuityEvidenceCorrection({ original: continued.inspected, bodies, billingKnown: true, signal: ctx.signal,
+    let inspected: AuthenticatedContinuityInspection
+    try {
+      inspected = continued ? await runContinuityEvidenceCorrection({ original: continued.inspected, bodies, billingKnown: true, signal: ctx.signal,
       assertCurrent,
       claim: original => prisma.$transaction(async tx => {
         const proof = await readContinuedContinuityEvidence(tx, ctx, { compilationId: compilation.id, focus: args.focus })
@@ -1268,8 +1265,21 @@ export const continuityValidateTool = defineTool({
         return { ...bodies, terminalEvidence: evidence }
       },
       system: criticSystem, content: criticInput, terminalCandidate, ...(sourceAuthority ? { parserVersion: terminalProtocol ? 8 as const : 7 as const, sourceScope: compilerEvidenceScope(chapter, sourceChapter) } : {}),
+      onNewRequestReserved: async tx => {
+        if (!await reserveContinuityCheck(ctx.userId, ctx.novelId, compilation.id, tx))
+          throw new DataAccessError(409, 'COMPILATION_NOT_FOUND', '当前编译已不存在或不可继续检查；未调用模型，也未增加检查次数。')
+      },
       options: { modelRuntime: reviewRuntime, explicitModelSelection: true, signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityCritic', novelId: ctx.novelId, chapterId: chapter.id, targetType: 'story_compilation', targetId: compilation.id, temperature: 0, reasoningEffort: reviewRuntime.reasoningEffort }, assertCurrent, bindingHash: runtimeJson(coverage).hash,
       assessmentAdmissionId: correctionGate.freshAdmissionId ?? undefined })
+    } catch (error) {
+      // The reservation transaction rolled back. Preserve the tool's existing
+      // local missing-compilation result without swallowing unknown failures.
+      if (!(error instanceof DataAccessError) || error.code !== 'COMPILATION_NOT_FOUND') throw error
+      return { outcome: 'failed' as const, failureCode: error.code, summary: '本任务连续性检查未执行',
+        output: `当前编译已不存在或不可继续检查，未调用模型；当前 r${chapter.revision} 未获得新复核。请读取本任务章节桥核对真实状态，不使用旧报告宣称新版通过。`,
+        display: { kind: 'storyCompiler' as const, compilationId: compilation.id, phase: 'check' as const,
+          title: '连续性检查', detail: `编译状态需核对 · 当前 r${chapter.revision} 未复核`, items: [] } }
+    }
     ctx.signal.throwIfAborted()
     await assertCurrent()
     const parsedCriticResponses = [{ structured: inspected.complete, findings: inspected.findings }]

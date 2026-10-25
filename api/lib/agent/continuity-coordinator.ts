@@ -99,8 +99,18 @@ export async function readKnownContinuityReplay(db: Prisma.TransactionClient, su
     if (input.bindingHash !== runtimeJson(currentCoverage).hash) continue
     const received = await lifecycle.readReusableLegacyContinuityAssessment(db, { ...subject, callId: 'known-result-probe' } as ToolContext, input)
     const binding = object(object(received?.audit).assessmentRequest)
-    if (received?.complete && received.audit.contentHash === audit.contentHash
-      && runtimeJson(received.audit.rawResponse).hash === runtimeJson(raw).hash
+    const projection = object(object(received?.audit).formatProjection)
+    let observedAudit = object(received?.audit)
+    if (projection.kind === 'empty_optional_proposal_table') {
+      // This authenticated format projection has a different rendered hash.
+      // Bind the current failed report to its retained physical response, not
+      // to the projected view or an arbitrary historical good fragment.
+      if (!(await import('./continuity-empty-proposal-projection.js')).validEmptyOptionalProposalProjection(
+        received?.audit, input.bodies.current, context)) continue
+      observedAudit = object(projection.original)
+    }
+    if (received?.complete && observedAudit.contentHash === audit.contentHash
+      && runtimeJson(observedAudit.rawResponse).hash === runtimeJson(raw).hash
       && binding.key === metadata.continuityAssessmentRequestKey && binding.inputHash === runtimeJson(input).hash)
       eligible.set(String(binding.key), { assessmentKey: String(binding.key), inputHash: String(binding.inputHash) })
   }

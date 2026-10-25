@@ -9,13 +9,18 @@ import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format
 import { currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
 import { continuityReassessmentRequest, legacyContinuityAssessmentKey, readLegacyContinuityAssessment, readReusableLegacyContinuityAssessment, runContinuityReassessment, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { buildContinuityReviewManifest } from '../../api/lib/agent/continuity-review-v4.js'
+import { readKnownContinuityReplay } from '../../api/lib/agent/continuity-coordinator.js'
+import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
+import * as originalRequest from '../../api/lib/agent/original-request.js'
+import * as writingScope from '../../api/lib/agent/writing-scope.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 
-function cachedPair() {
+function cachedPair(bindingHash = 'b'.repeat(64)) {
   const base = emptyProposalFixture(), scope = { currentOrderIndex: base.chapter.orderIndex, previous: [] }
   const inspect = (raw: string) => inspectContinuityResponse(raw, base.bodies, true, 8, base.candidate, scope, { responseContract: 3 })
   const f = { ...base, inspect, original: inspect(base.raw) }, ctx = { userId: 'owner', novelId: 'novel', runId: 'run', callId: 'old-call' } as ToolContext
   const input: LegacyAssessmentInput = { chapterId: f.chapter.id, revision: 1, bodies: f.bodies, terminalCandidate: f.candidate,
-    parserVersion: 8, sourceScope: scope, reassessmentProtocol: 5, bindingHash: 'b'.repeat(64), system: 'Frozen synthetic reviewer.', content: 'Frozen synthetic request.', targetType: 'story_compilation', targetId: 'compilation' }
+    parserVersion: 8, sourceScope: scope, reassessmentProtocol: 5, bindingHash, system: 'Frozen synthetic reviewer.', content: 'Frozen synthetic request.', targetType: 'story_compilation', targetId: 'compilation' }
   const key = legacyContinuityAssessmentKey(ctx, input)
   const usage = ['first', 'second'].map((id, i) => ({ id, action: i ? 'agent3ContinuityCriticSecondPass' : 'agent3ContinuityCritic', usageSource: 'reported',
     billingStatus: 'settled', requestTokens: 12, responseTokens: 8, reservedCreditMilli: 0, creditChargeMilli: 23 }))
@@ -41,6 +46,34 @@ function cacheReader(f: ReturnType<typeof cachedPair>) {
 }
 
 describe('versioned empty optional proposal table projection', () => {
+  it('binds free whole replay to the physical original raw, not the different rendered projection hash', async () => {
+    const base = emptyProposalFixture(), bridge = { fromChapterId: null }, sceneTasks: unknown[] = []
+    const coverage = compilerContinuityCoverage({ chapter: base.chapter, bridge, sceneTasks, source: null, terminalCandidate: base.candidate }, 11)
+    const f = cachedPair(runtimeJson(coverage).hash), cache = cacheReader(f)
+    const spec = buildTaskSpec({ runId: 'task', novelId: 'novel', prompt: '修改第一章', terminalEvidenceProtocol: 2,
+      terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 })
+    spec.id = 'task'
+    const original = vi.spyOn(originalRequest, 'readOriginalTaskRequest').mockResolvedValue({ taskId: 'task', spec } as Awaited<ReturnType<typeof originalRequest.readOriginalTaskRequest>>)
+    const runs = vi.spyOn(originalRequest, 'originalTaskRunIds').mockResolvedValue(['run'])
+    const scope = vi.spyOn(writingScope, 'assertWritingTarget').mockResolvedValue(
+      { taskId: 'task', spec } as Awaited<ReturnType<typeof writingScope.assertWritingTarget>>)
+    const saved = { id: 'compilation', runId: 'run', chapter: f.chapter, bridge, sceneTasks, preparedContext: {},
+      validation: { independentCheck: 'unavailable', checkedRevision: 1, terminalCandidate: f.candidate, continuityCriticResponse: f.original.audit, coverage } }
+    const db = { ...cache.tx, storyCompilation: { findFirst: vi.fn(async () => saved) }, chapter: { findMany: vi.fn(async () => []) } }
+    const before = JSON.stringify({ saved, frames: f.frames, claim: f.claim, usage: f.usage })
+    try {
+      const result = await readKnownContinuityReplay(db as unknown as Prisma.TransactionClient, f.ctx, 'compilation')
+      expect(result).toEqual({ assessmentKey: f.key, inputHash: runtimeJson(f.input).hash })
+      expect(JSON.stringify({ saved, frames: f.frames, claim: f.claim, usage: f.usage })).toBe(before)
+      for (const fault of ['raw', 'hash', 'key'] as const) {
+        saved.validation.continuityCriticResponse = structuredClone(f.original.audit)
+        if (fault === 'raw') saved.validation.continuityCriticResponse.rawResponse.content += ' '
+        if (fault === 'hash') saved.validation.continuityCriticResponse.contentHash = 'f'.repeat(64)
+        if (fault === 'key') Object.assign(saved.validation.continuityCriticResponse, { assessmentRequest: { key: 'f'.repeat(64) } })
+        expect(await readKnownContinuityReplay(db as unknown as Prisma.TransactionClient, f.ctx, 'compilation')).toBeNull()
+      }
+    } finally { original.mockRestore(); runs.mockRestore(); scope.mockRestore() }
+  })
   it('keeps the strict old audit and every judgment while omitting only an empty unbound table', () => {
     const f = emptyProposalFixture(), before = JSON.stringify(f.original), projected = recoverEmptyOptionalProposalTable(f.original, f.bodies)!
     expect(f.original).toMatchObject({ complete: false, audit: { classification: 'terminal_invalid' } })

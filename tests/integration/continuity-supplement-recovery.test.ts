@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { inspectContinuityV4 } from '../../api/lib/agent/continuity-review-v4.js'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
 import { terminalInputDecisionFixture } from '../helpers/terminal-input-decision-fixture.js'
 import { terminalDraftFixture } from '../helpers/terminal-draft-fixture.js'
@@ -180,7 +181,7 @@ function wireFor(question: Awaited<ReturnType<typeof originalFailure>>['question
   const finding = { findingId: 'f0', signal: 'object', severity: 'error', reasonCode: 'manuscript_conflict',
     explanation: 'The packet is sealed and open at the same time.', suggestion: 'Resolve the incompatible states within the original scope.',
     manuscriptEvidence: [{ segmentId: 'c0', quote: 'The packet remains sealed.' }, { segmentId: 'c0', quote: 'The packet is open.' }] }
-  return { findings: kind === 'conflict' ? [finding] : [], semanticChecks: ['action_direction', 'state_progression'].map((key, index) => ({ kind: key,
+  const wire = { findings: kind === 'conflict' ? [finding] : [], semanticChecks: ['action_direction', 'state_progression'].map((key, index) => ({ kind: key,
     result: kind === 'conflict' && index === 1 ? 'conflict' : 'clear', reasonCode: kind === 'conflict' && index === 1 ? 'manuscript_conflict' : 'consistent',
     explanation: kind === 'conflict' && index === 1 ? finding.explanation : 'Full manuscript evidence is internally consistent.',
     findingIds: kind === 'conflict' && index === 1 ? ['f0'] : [] })),
@@ -195,6 +196,10 @@ function wireFor(question: Awaited<ReturnType<typeof originalFailure>>['question
       manuscriptEvidence: kind === 'complete' ? [{ segmentId: 'c0' }] : [] })) } : {}),
     issueDispositions: question.frozen.input.continuityManifest!.typedLineage!.establishedIssues.map((_, issueIndex) => ({ issueIndex,
       outcome: 'unknown', reasonCode: 'insufficient_evidence', explanation: 'The established issue remains unverified.', manuscriptEvidence: [] })) }
+  const inspected = inspectContinuityV4(JSON.stringify(wire), { manifest: question.frozen.input.continuityManifest!, bodies: question.frozen.input.bodies,
+    candidate: question.frozen.input.terminalCandidate!, sourceScope: question.frozen.input.sourceScope! })
+  expect(inspected.complete, JSON.stringify({ classification: inspected.audit.classification, diagnostics: inspected.parsed?.diagnostics })).toBe(kind !== 'invalid')
+  return wire
 }
 
 describe.runIf(available)('original persistent supplemental phase: real questions, transport, events and settlement', () => {

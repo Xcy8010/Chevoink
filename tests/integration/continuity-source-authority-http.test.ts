@@ -139,17 +139,20 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
           await prisma.agentRunEvent.create({ data: { runId, seq: lastSeq + 4, type: 'run.started',
             payload: { authorContinue: admission.authorContinue } } })
           await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
-          expect(await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, ctx))).toHaveLength(1)
-          expect((await continuityValidateTool.execute({ ...ctx, callId: 'author-continued' }, { compilationId: compilation.id })).outcome).not.toBe('failed')
-          expect(sends).toBe(3)
+          // Continue is a wake-up, not an additional independent whole grant.
+          // This unchanged subject has no original cycle revision receipt.
+          expect(await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, ctx))).toHaveLength(0)
+          await expect(continuityValidateTool.execute({ ...ctx, callId: 'author-continued' }, { compilationId: compilation.id }))
+            .rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+          expect(sends).toBe(2)
           const recovered = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
-          expect(recovered.validation).toMatchObject({ independentCheck: 'complete', checkedRevision: 4, errorCount: 0,
-            coverage: { protocolVersion: 11 }, continuityCriticResponse: { parserVersion: 8, sourceScope: { currentOrderIndex: 3 } } })
-          await continuityValidateTool.execute({ ...ctx, callId: 'continued-repeat' }, { compilationId: compilation.id })
-          expect(sends).toBe(3)
-          expect(await prisma.aiUsageLog.count({ where: { agentRunId: runId } })).toBe(3)
-          expect(await prisma.creditLedgerEntry.count({ where: { userId } })).toBe(3)
-          for (const payment of payments) expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: payment.id } })).toEqual(payment)
+          expect(recovered.validation).toEqual(saved.validation)
+          expect(recovered.preparedContext).toEqual(saved.preparedContext)
+          await expect(continuityValidateTool.execute({ ...ctx, callId: 'continued-repeat' }, { compilationId: compilation.id }))
+            .rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+          expect(sends).toBe(2)
+          expect(await prisma.aiUsageLog.findMany({ where: { agentRunId: runId }, orderBy: { id: 'asc' } })).toEqual(payments)
+          expect(await prisma.creditLedgerEntry.findMany({ where: { userId }, orderBy: { id: 'asc' } })).toEqual(ledger)
         }
         for (const chapter of chapters.slice(0, 2)) {
           await expect(chapterWriteTool.execute({ ...ctx, callId: `deny-${chapter.id}` }, { chapterId: chapter.id, content: '未授权替换' }))

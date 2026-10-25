@@ -9,6 +9,7 @@ import { effectiveContinuityAudit, continuityPhasePlanSchema, validContinuityPha
 import { inspectAuthenticatedContinuityAssessment } from '../../api/lib/agent/authenticated-continuity-assessment.js'
 import { readAuthenticatedContinuityAssessment } from '../../api/lib/agent/authenticated-continuity-assessment.js'
 import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
+import { terminalDraftFixture } from '../helpers/terminal-draft-fixture.js'
 
 function fixture() {
   const current = 'The sealed packet is held by the guard. The missing map remains unaccounted for.'
@@ -39,6 +40,28 @@ function fixture() {
 }
 
 describe('explicit continuity contract5, frozen <=9 replay', () => {
+  it('accepts a full typed report retracting an unestablished draft with current manuscript evidence', () => {
+    const f = fixture(), draft = terminalDraftFixture('emotion', { chapter: { id: 'chapter', revision: 4, orderIndex: 3, content: f.current },
+      taskId: 'task', ctx: { userId: 'user', novelId: 'novel', runId: 'run' }, compilationId: 'compilation', candidate: f.candidate,
+      originBindingHash: 'b'.repeat(64), currentBindingHash: 'b'.repeat(64) })
+    const context = { ...f.context, proposalChanges: draft.nextContext.proposalChanges }, bodies = { ...f.bodies, terminalEvidence: context }
+    const { hash: _hash, ...oldPlan } = f.plan
+    const planBody = { ...oldPlan, semanticSubjectHash: continuitySubjectIdentity({ chapterId: 'chapter', revision: 4, targetType: 'story_compilation',
+      targetId: 'compilation', bodies, terminalCandidate: f.candidate, sourceScope: f.frozen.sourceScope })! }
+    const manifest = buildContinuityReviewManifest({ ...f.base, bodies, draftProposals: context.proposalChanges,
+      typedLineage: { ...f.frozen.manifest.typedLineage!, phasePlan: { ...planBody, hash: runtimeJson(planBody).hash } } })
+    const wire = { ...f.wire, proposalDispositions: [{ proposalIndex: 0, outcome: 'retracted', reasonCode: 'consistent',
+      explanation: 'The manuscript explicitly records packet and table states; the earlier reply proposal is not established by those states.',
+      manuscriptEvidence: [{ segmentId: 'c0' }] }] }
+    const result = inspectContinuityV4(JSON.stringify(wire), { ...f.frozen, bodies, manifest })
+    expect(result.audit, JSON.stringify(result.parsed?.diagnostics)).toMatchObject({ classification: 'complete' })
+    expect(result.complete).toBe(true)
+    expect(result.parsed?.record).toEqual(wire)
+    for (const manuscriptEvidence of [[{ segmentId: 'c0', quote: 'Invented manuscript quote.' }], [{ segmentId: 'p0' }]]) {
+      const invalid = { ...wire, proposalDispositions: [{ ...wire.proposalDispositions[0], manuscriptEvidence }] }
+      expect(inspectContinuityV4(JSON.stringify(invalid), { ...f.frozen, bodies, manifest }).complete).toBe(false)
+    }
+  })
   it('refuses known-result fallback when the current effective pointer exists but is stale', async () => {
     const db = { storyCompilation: { findFirst: vi.fn(async () => ({ chapter: { revision: 4 }, bridge: {}, runId: 'run',
       validation: { independentCheck: 'unavailable', checkedRevision: 4, effectiveReport: { reportHash: 'stale' },

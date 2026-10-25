@@ -63,6 +63,8 @@ describe('严谨创作落实连续性警告', () => {
     const tx = { $queryRaw: vi.fn().mockResolvedValue([{ id: 'n' }]), agentRun: { findFirst: vi.fn().mockResolvedValue({ id: 'r' }),
       findFirstOrThrow: vi.fn().mockResolvedValue({ id: 'r', novelId: 'n', sessionId: 's', taskRootId: null, startRequest: {} }) },
       agentRunEvent: { findMany: vi.fn().mockResolvedValue([]) },
+      // This legacy-only fixture has no native operations to reclaim.
+      agentOperation: { count: vi.fn().mockResolvedValue(0) },
       agentArtifact: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: 'audit' }) },
       chapter: { findMany: vi.fn((...args: Parameters<typeof prisma.chapter.findMany>) => prisma.chapter.findMany(...args)), findFirst: vi.fn((...args: Parameters<typeof prisma.chapter.findFirst>) => prisma.chapter.findFirst(...args)), updateMany: write, findUniqueOrThrow: vi.fn().mockResolvedValue({ ...chapter, revision: 2 }) },
       storyCompilation: { findFirst: findCompilation, findUniqueOrThrow: vi.fn(async () => compilation),

@@ -13,6 +13,7 @@ import { advanceDurableWritingDelivery } from '../../api/lib/agent/runtime-writi
 import { finalizeDurableTask, pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import * as continuity from '../../api/lib/agent/tools/durable-continuity.js'
+import * as compiler from '../../api/lib/agent/story-compiler.js'
 import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
 import { loadPersistedEvents } from '../../api/lib/agent/events.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
@@ -51,6 +52,7 @@ describe.runIf(available)('fresh native writing manifest2 actual bounded chain',
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
   }))
   it.each(['no-effect', 'merged-revision', 'merged-revision-restart'] as const)('%s uses original receipts and deterministic completion', scenario => fixture(async f => {
+    const reportEffects = vi.spyOn(compiler, 'validateStoryContinuity')
     let lease = await claim(f)
     const changed = scenario !== 'no-effect'
     const content = changed ? '他合上箱盖，核对锁扣。锁扣一直扣紧。锁扣此刻完全松开。' : '他合上箱盖，核对锁扣。锁扣一直扣紧。'
@@ -141,6 +143,11 @@ describe.runIf(available)('fresh native writing manifest2 actual bounded chain',
     const compilation = await prisma.storyCompilation.findFirstOrThrow({ where: { userId: f.userId, chapterId: f.chapterId } })
     expect(compilation).toMatchObject({ status: 'completed', validation: { independentCheck: 'complete', checkedRevision: changed ? 3 : 2,
       continuityCriticResponse: { parserVersion: 10, responseContract: 5 } } })
+    expect(reportEffects).toHaveBeenCalledTimes(changed ? 2 : 1)
+    for (const [input, tx] of reportEffects.mock.calls) {
+      expect(input.expectedContinuityNativeLease).toMatchObject({ userId: f.userId, runId: input.runId, taskRootId: f.rootId })
+      expect(tx).toBeDefined()
+    }
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: after, revision: changed ? 3 : 2 })
     expect(await advanceDurableWritingDelivery(lease)).not.toBeNull()
     const state = await loadExecutionState(f.userId, lease.runId)

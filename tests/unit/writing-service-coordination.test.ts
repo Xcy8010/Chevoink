@@ -114,9 +114,9 @@ describe('one-parent writing service coordination', () => {
     expect((await execute()).result).toMatchObject({ writingCompletion: { status: 'completed', steps: [
       { step: 'body' }, { step: 'continuity' }, { step: 'quality' }, { step: 'commit' }] } })
     expect(order).toEqual(['body', 'continuity', 'quality', 'commit', 'parent'])
-    expect(mocks.qualityWork).toHaveBeenCalledWith(ctx, lease, expect.objectContaining({ serviceReadOnly: true, baseline: { id: 'compilation', hash: stateHash(2) } }))
+    expect(mocks.qualityWork).toHaveBeenCalledWith({ ...ctx, continuityNativeLease: lease }, lease, expect.objectContaining({ serviceReadOnly: true, baseline: { id: 'compilation', hash: stateHash(2) } }))
     expect(mocks.prepare.mock.calls.map(([, saved]) => saved.baseline?.hash ?? null)).toEqual([null, stateHash(1), stateHash(2), stateHash(3)])
-    expect(mocks.body).toHaveBeenCalledWith(ctx, mocks.tx, expect.objectContaining({ expectedRevision: 4 }))
+    expect(mocks.body).toHaveBeenCalledWith({ ...ctx, continuityNativeLease: lease }, mocks.tx, expect.objectContaining({ expectedRevision: 4 }))
     expect(mocks.failure).not.toHaveBeenCalled()
   })
   it('recovers an interruption after the body from its receipt without another body CAS', async () => {

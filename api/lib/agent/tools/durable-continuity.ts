@@ -239,7 +239,8 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
         kind: 'continuity', callId: ctx.callId,
       })
       const report = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compiler.id, findings: parsed.findings,
-        expectedChapterRevision: frozen.chapter.revision, independentCheck: parsed.structured ? 'complete' : 'unavailable', coverage: frozen.coverage, terminalCandidate: frozen.terminalCandidate,
+        expectedChapterRevision: frozen.chapter.revision, expectedContinuityNativeLease: lease,
+        independentCheck: parsed.structured ? 'complete' : 'unavailable', coverage: frozen.coverage, terminalCandidate: frozen.terminalCandidate,
         continuityCriticResponse: inspected?.audit, focus: typeof args.focus === 'string' ? args.focus : undefined, signal: ctx.signal }, tx)
       // durable 在提交事务里累计已完成的检查，零错误也不恢复次数。
       const nextCheckRounds = report.checkRounds + (frozen.cached ? 0 : 1)

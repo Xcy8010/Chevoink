@@ -302,11 +302,18 @@ function inspectRecord(record: Record<string, unknown>, frozen: ContinuityV4Froz
         && ['historical_reference', 'insufficient_evidence', 'proposal_pending'].includes(String(row.reasonCode))) return bad()
       if (table === 'issueDispositions') return raw
       const { reasonCode: _code, explanation, priorFindingRef: _ref, manuscriptEvidence, ...rest } = row
+      // Contract5 explicitly permits address-only manuscript references. The
+      // older internal proposal shape requires quoted text; bind only omitted
+      // quotes from this exact terminal catalogue, preserving the typed raw.
+      const sourceEvidence = table === 'proposalDispositions' && Array.isArray(manuscriptEvidence)
+        ? manuscriptEvidence.map((ref: z.infer<typeof evidenceReference>) => ({ ...ref,
+          quote: ref.quote ?? continuitySourceCatalog(frozen.bodies).terminalSources.find(source => source.segmentId === ref.segmentId)?.quote }))
+        : manuscriptEvidence
       // This is an explicit contract5 interpretation, retained beside the raw.
       // It is never applied to a frozen contract4/legacy response.
       return { ...rest, ...(['terminalVerdicts'].includes(table) ? {} : { reason: explanation }),
         ...(table === 'findings' || table === 'terminalVerdicts' || table === 'terminalDispositions' || table === 'proposalDispositions'
-          ? { sourceEvidence: manuscriptEvidence } : {}) }
+          ? { sourceEvidence } : {}) }
     })
   }
   const result = inspectNormalizedRecord(normalized, frozen, expectedFindingIds)
