@@ -43,7 +43,7 @@ afterAll(async () => { await prisma.$disconnect() })
 const previousGoalEnabled = env.agentGoalEnabled
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); env.agentGoalEnabled = previousGoalEnabled })
 
-async function fixture(work: (f: { userId: string; novelId: string; sessionId: string; modelA: string; modelB: string; definitionId: string }) => Promise<void>) {
+async function fixture(work: (f: { userId: string; novelId: string; sessionId: string; modelA: string; modelB: string; definitionId: string }) => Promise<void>, signal?: AbortSignal) {
   const userId = randomUUID(), novelId = randomUUID(), sessionId = randomUUID(), modelA = randomUUID(), modelB = randomUUID(), definitionId = randomUUID()
   await prisma.user.create({ data: { id: userId, nickname: 'durable-native-isolated', passwordHash: 'test-only' } })
   try {
@@ -57,7 +57,15 @@ async function fixture(work: (f: { userId: string; novelId: string; sessionId: s
     await work({ userId, novelId, sessionId, modelA, modelB, definitionId })
   } finally {
     const children = await prisma.agentChildExecutionGrant.findMany({ where: { childRun: { userId } }, select: { childRunId: true } })
-    await Promise.allSettled(children.map(child => dispatchDurableChild(userId, child.childRunId)))
+    // A failed diagnostic case must not start an unsent child during cleanup.
+    // Join only already-running, fixture-owned workers after cancelling them.
+    const draining = signal?.aborted ? children.filter(child => {
+      const active = getActiveRun(child.childRunId)
+      if (active?.userId !== userId) return false
+      active.controller.abort()
+      return true
+    }) : children
+    await Promise.allSettled(draining.map(child => dispatchDurableChild(userId, child.childRunId)))
     await prisma.agentChildExecutionGrant.deleteMany({ where: { childRun: { userId } } })
     await prisma.agentGoal.deleteMany({ where: { userId } })
     await prisma.agentArtifact.deleteMany({ where: { run: { userId } } })
@@ -128,14 +136,58 @@ async function completeParent(exec: Awaited<ReturnType<typeof execution>>, userI
 }
 
 describe.runIf(available)('durable native child HTTP path in isolated PG', () => {
-  it('keeps public messages, pagination, session state and todo on the main run with a newer inline execution', async () => fixture(async f => {
-    mockProvider()
+  it('keeps public messages, pagination, session state and todo on the main run with a newer inline execution', async context => {
+    const began = performance.now(), controller = new AbortController(), signal = AbortSignal.any([context.signal, controller.signal])
+    let phase = 'fixture.setup', owner: { userId: string } | undefined, snapshot: unknown, capture: Promise<void> | undefined, work: Promise<void> | undefined
+    let fetcher: ReturnType<typeof mockProvider> | undefined
+    const phases: Array<{ phase: string; elapsedMs: number }> = [{ phase, elapsedMs: 0 }], childIds = new Set<string>()
+    const enter = (next: string) => { signal.throwIfAborted(); phase = next; phases.push({ phase, elapsedMs: performance.now() - began }) }
+    const timer = setTimeout(() => {
+      const at = { phase, elapsedMs: performance.now() - began, providerCalls: fetcher?.mock.calls.length ?? 0 }
+      capture = (owner ? prisma.$transaction(async tx => {
+        await tx.$executeRaw`SET TRANSACTION READ ONLY`
+        await tx.$executeRaw`SET LOCAL statement_timeout = '750ms'`
+        const runs = await tx.agentRun.findMany({ where: { userId: owner!.userId }, take: 9,
+          select: { id: true, status: true, taskRootId: true, runtimeProtocolVersion: true } })
+        const ids = runs.map(run => run.id), roots = runs.flatMap(run => run.taskRootId ? [run.taskRootId] : [])
+        const grants = await tx.agentChildExecutionGrant.findMany({ where: { childRun: { userId: owner!.userId } }, take: 8,
+          select: { id: true, status: true, kind: true, childRunId: true, parentOperationId: true } })
+        grants.forEach(grant => childIds.add(grant.childRunId))
+        return { runs, grants, operations: await tx.agentOperation.findMany({ where: { taskRootId: { in: roots } }, take: 16,
+            select: { id: true, taskRootId: true, kind: true, action: true, status: true }, orderBy: { createdAt: 'desc' } }),
+          attempts: await tx.agentProviderAttempt.findMany({ where: { runId: { in: ids } }, take: 16,
+            select: { id: true, operationId: true, status: true }, orderBy: { createdAt: 'desc' } }) }
+      }, { maxWait: 500, timeout: 1000 }) : Promise.resolve({ setupPending: true }))
+        .then(state => { snapshot = { ...at, state } }, error => { snapshot = { ...at, queryFailure: error instanceof Error ? error.name : typeof error } })
+        .then(() => { console.error('[native-inline-timeout-snapshot]', JSON.stringify(snapshot)) })
+    }, 25_000)
+    context.onTestFailed(async () => {
+      clearTimeout(timer)
+      const failedAt = { phase, elapsedMs: performance.now() - began, phases: [...phases], errors: context.task.result?.errors?.map(error => ({ name: error.name, message: error.message })) }
+      controller.abort()
+      for (const id of childIds) { const active = getActiveRun(id); if (active?.userId === owner?.userId) active?.controller.abort() }
+      let drainTimer: ReturnType<typeof setTimeout> | undefined
+      let drained = false
+      try { drained = await Promise.race([Promise.allSettled([work, capture]).then(() => true), new Promise<false>(resolve => { drainTimer = setTimeout(() => resolve(false), 2000) })]) }
+      finally { clearTimeout(drainTimer) }
+      console.error('[native-inline-test-failed]', JSON.stringify({ ...failedAt, snapshot, fixtureDrained: drained }))
+    })
+    try { work = fixture(async f => {
+    owner = f
+    enter('parent.execution')
+    fetcher = mockProvider()
     const exec = await execution(f, subAgentRunTool, { subagentId: f.definitionId, task: '只读报告' })
-    await executeDurableToolStep(exec.lease, new AbortController().signal)
+    enter('inline.execute')
+    await executeDurableToolStep(exec.lease, signal)
+    enter('grant.read')
     const grant = await prisma.agentChildExecutionGrant.findFirstOrThrow({ where: { parentRootId: exec.root.id } })
+    childIds.add(grant.childRunId)
+    enter('inline.events')
     await publishDurableEvents(f.userId, grant.childRunId)
+    enter('inline.private-message')
     await prisma.agentMessage.create({ data: { runId: grant.childRunId, sessionId: f.sessionId, role: 'assistant', parts: [{ type: 'text', text: 'PRIVATE_INLINE_ONLY' }] } })
     for (const options of [{}, { runLimit: 1 }]) {
+      enter(options.runLimit ? 'history.page' : 'history.all')
       const history = await listLoopSessionMessages(f.userId, f.sessionId, options)
       expect(history.activeRunId).toBe(exec.runId)
       expect(history.todoSnapshot?.runId).toBe(exec.runId)
@@ -143,9 +195,14 @@ describe.runIf(available)('durable native child HTTP path in isolated PG', () =>
       expect(JSON.stringify(history)).not.toContain('PRIVATE_INLINE_ONLY')
       expect(history.pagination.hasMore).toBe(false)
     }
+    enter('todo.read')
     expect((await loadCurrentTodoSnapshot(f.userId, f.sessionId))?.runId).toBe(exec.runId)
+    enter('inline.stream-rejected')
     await expect(streamLoopRun(f.userId, grant.childRunId, 0, {} as Parameters<typeof streamLoopRun>[3])).rejects.toMatchObject({ status: 404 })
-  }), 30000)
+    enter('fixture.cleanup')
+    }, signal); await work }
+    finally { clearTimeout(timer); if (capture) await capture }
+  }, 30000)
 
   it.each(['delete', 'rollback'] as const)('atomically removes private inline run and root during public single-turn %s', async action => fixture(async f => {
     mockProvider()
