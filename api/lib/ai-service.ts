@@ -34,7 +34,7 @@ import type {
 import { createCoverAssetsData, ensureNovelOwner } from './data-access.js'
 import { assertCreditAccess, consumeCredits, consumeTokenCredits, reserveTokenCredits, getModelTierRuntime, getAuxiliaryModelRuntime, IMAGE_CALL_MILLI, recordImageRefundIntent, reconcileCreditRefunds } from './credits.js'
 import { FALLBACK_USAGE_POLICY, priceTokenEvidence } from './billing/reservation-policy.js'
-import { tokenPriceSchema, type TokenPrice } from './billing/token-price.js'
+import { tokenPriceSchema, frozenTokenPriceMatchesModel, type TokenPrice } from './billing/token-price.js'
 import type { CreditModelTier } from '../../shared/contracts/index.js'
 import {
   FANQIE_ALL_CATEGORIES,
@@ -80,6 +80,8 @@ type TextCompletionOptions = {
     inputTokenCeiling: number
     maxCreditMilli: number
     beforeDispatch: () => Promise<void>
+    /** Server-only manual continuity repair; never accepted from tool input. */
+    manualReviewRepairOperationId?: string
   }
   /** Actual observed transport payload, including incomplete SSE; completeness and usage remain separate. */
   onObservedCompletion?: (value: { usageId: string; content: string; finishReason: string | null; toolCalls: unknown[]; transportComplete?: false }) => void
@@ -211,12 +213,12 @@ async function prepareTextUsage(input: {
   userId: string; action: string; modelName: string; modelTier: CreditModelTier; multiplierBps: number;
   novelId?: string | null; chapterId?: string | null; targetType?: string; targetId?: string | null;
   agentRunId?: string | null; turn?: number | null; providerName?: string | null;
-  inputEstimate: number; maxOutput: number; frozenPrice?: TokenPrice;
+  inputEstimate: number; maxOutput: number; frozenPrice?: TokenPrice; manualReviewRepairOperationId?: string;
 }) {
-  const { inputEstimate, maxOutput, frozenPrice, ...identity } = input
+  const { inputEstimate, maxOutput, frozenPrice, manualReviewRepairOperationId, ...identity } = input
   const price = frozenPrice ? tokenPriceSchema.parse(frozenPrice) : input.modelTier === 'custom' ? { version: 'byok-exempt' }
     : await resolveTokenPrice(input.modelTier, input.multiplierBps)
-  if (frozenPrice && (frozenPrice.modelTier !== input.modelTier || frozenPrice.multiplierBps !== input.multiplierBps)) {
+  if (frozenPrice && !frozenTokenPriceMatchesModel(frozenPrice, input.modelTier, input.multiplierBps)) {
     throw new DataAccessError(409, 'TEXT_REQUEST_PRICE_CONFLICT', '本次检查的冻结费率与当前模型不一致。')
   }
   const prepared = await prisma.aiUsageLog.create({ data: { ...identity, targetType: input.targetType ?? 'text',
@@ -227,6 +229,7 @@ async function prepareTextUsage(input: {
     await reserveGoalUsage(`legacy:${prepared.id}`, inputEstimate + maxOutput)
     if (input.modelTier !== 'custom') await reserveTokenCredits(input.userId, prepared.id, inputEstimate, maxOutput, frozenPrice ? {
       price: frozenPrice, newCallId: input.targetId!, runId: input.agentRunId!, novelId: input.novelId!, chapterId: input.chapterId!,
+      ...(manualReviewRepairOperationId ? { manualReviewRepairOperationId } : {}),
     } : undefined)
   } catch (error) { await markUnobservedUsage(prepared.id, false); throw error }
   return prepared
@@ -1254,12 +1257,16 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   const authorized = options.authorizedRequest
   if (authorized) {
     const price = tokenPriceSchema.parse(authorized.price)
+    const manualRepair = authorized.manualReviewRepairOperationId !== undefined
+    const allowedOperation = manualRepair
+      ? /^mrr_[a-f0-9]{56}$/u.test(authorized.manualReviewRepairOperationId!) && options.action === 'agent3ContinuityCritic' && options.targetType === 'story_compilation'
+      : options.action === 'agent3HumanityAuthorReplacement' && options.targetType === 'chapter'
     if (!Number.isSafeInteger(authorized.inputTokenCeiling) || authorized.inputTokenCeiling <= 0
-      || options.action !== 'agent3HumanityAuthorReplacement' || options.targetType !== 'chapter'
+      || !allowedOperation
       || [options.userId, options.novelId, options.chapterId, options.agentRunId, options.targetId].some(id => typeof id !== 'string' || !id)
       || !Number.isSafeInteger(authorized.maxCreditMilli) || authorized.maxCreditMilli < 0
       || !Number.isSafeInteger(options.maxOutputTokens) || (options.maxOutputTokens ?? 0) <= 0
-      || price.modelTier !== modelRuntime.tier || price.multiplierBps !== modelRuntime.multiplierBps
+      || !frozenTokenPriceMatchesModel(price, modelRuntime.tier, modelRuntime.multiplierBps)
       || Buffer.byteLength(`${systemPrompt}\n${userPrompt}`, 'utf8') > authorized.inputTokenCeiling
       || priceTokenEvidence(price, authorized.inputTokenCeiling, options.maxOutputTokens!, 0) !== authorized.maxCreditMilli) {
       throw new DataAccessError(409, 'TEXT_REQUEST_AUTHORIZATION_CONFLICT', '正文、当前模型或正常计费报价与本次确认不一致，未派发检查。')
@@ -1277,7 +1284,8 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     modelName: modelRuntime.modelName ?? env.aiTextModel, modelTier: modelRuntime.tier,
     multiplierBps: options.multiplierBps ?? modelRuntime.multiplierBps,
     novelId: options.novelId, chapterId: options.chapterId, agentRunId: options.agentRunId, targetType: options.targetType, targetId: options.targetId,
-    providerName: modelRuntime.provider, frozenPrice: options.authorizedRequest?.price })
+    providerName: modelRuntime.provider, frozenPrice: options.authorizedRequest?.price,
+    manualReviewRepairOperationId: options.authorizedRequest?.manualReviewRepairOperationId })
   let dispatched = false
   const request = beginTextRequest(prepared.id)
   try {

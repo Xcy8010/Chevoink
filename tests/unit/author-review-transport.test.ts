@@ -72,3 +72,35 @@ it.each(['missing-counts', 'over-cap', 'billing-error', 'truncated', 'evidence-d
   if (scenario === 'missing-counts' || scenario === 'over-cap' || scenario === 'evidence-db-error') expect(mocks.charge).not.toHaveBeenCalled()
   expect(mocks.runtime).not.toHaveBeenCalled()
 })
+
+it.each([200, 429, 503])('manual repair uses one physical HTTP for status %i with the authenticated V2 price separate from route metadata', async status => {
+  const itemized: TokenPrice = { version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 11000,
+    rateCardId: 'synthetic-speed-card', rates: { inputNano: 110000, cacheNano: 27500, outputNano: 1100000 }, v1CeilingBps: 11000 }
+  const manualReviewRepairOperationId = `mrr_${'a'.repeat(56)}`
+  const policy = { price: itemized, inputTokenCeiling: 500, maxCreditMilli: priceTokenEvidence(itemized, 500, 64, 0),
+    manualReviewRepairOperationId, beforeDispatch: vi.fn(async () => {}) }
+  const fetcher = vi.fn(async () => new Response(status === 200 ? JSON.stringify({ choices: [{ message: { content: '{"findings":[]}' }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 100, completion_tokens: 20 } }) : '{"error":{"message":"bounded failure"}}', { status }))
+  vi.stubGlobal('fetch', fetcher)
+  const sent = generateTextCompletion('complete rules', 'complete body', { userId: 'author', novelId: 'novel', chapterId: 'chapter', agentRunId: 'run',
+    action: 'agent3ContinuityCritic', targetType: 'story_compilation', targetId: 'compilation', modelRuntime: { ...runtime, tier: 'speed', provider: 'deepseek',
+      modelName: 'synthetic-deepseek', reasoningEffort: 'high', reasoningEfforts: ['none', 'high'], multiplierBps: 15000 },
+    maxOutputTokens: 64, explicitModelSelection: true, authorizedRequest: policy })
+  if (status === 200) await expect(sent).resolves.toBe('{"findings":[]}')
+  else await expect(sent).rejects.toBeDefined()
+  expect(fetcher).toHaveBeenCalledOnce(); expect(policy.beforeDispatch).toHaveBeenCalledOnce()
+  expect(mocks.create.mock.calls[0][0].data).toMatchObject({ multiplierBps: 15000, billingSnapshot: itemized })
+  expect(mocks.reserve.mock.calls[0][4]).toMatchObject({ price: itemized, manualReviewRepairOperationId, newCallId: 'compilation' })
+  expect(mocks.runtime).not.toHaveBeenCalled()
+})
+it.each(['missing-kind', 'wrong-operation', 'wrong-action', 'wrong-target', 'v1-multiplier'] as const)('manual transport refuses %s before reservation or HTTP', async kind => {
+  const policy = { ...envelope(), manualReviewRepairOperationId: `mrr_${'a'.repeat(56)}` }
+  const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher)
+  if (kind === 'wrong-operation') policy.manualReviewRepairOperationId = 'ordinary-continue'
+  const sent = generateTextCompletion('rules', 'body', { userId: 'author', novelId: 'novel', chapterId: 'chapter', agentRunId: 'run',
+    action: kind === 'wrong-action' ? 'ordinary' : 'agent3ContinuityCritic', targetType: kind === 'wrong-target' ? 'chapter' : 'story_compilation', targetId: 'compilation',
+    modelRuntime: kind === 'v1-multiplier' ? { ...runtime, multiplierBps: 15000 } : runtime, maxOutputTokens: 64, explicitModelSelection: true,
+    authorizedRequest: kind === 'missing-kind' ? envelope() : policy })
+  await expect(sent).rejects.toMatchObject({ code: 'TEXT_REQUEST_AUTHORIZATION_CONFLICT' })
+  expect(fetcher).not.toHaveBeenCalled(); expect(mocks.create).not.toHaveBeenCalled(); expect(mocks.reserve).not.toHaveBeenCalled()
+})

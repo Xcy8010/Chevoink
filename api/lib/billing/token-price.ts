@@ -14,3 +14,9 @@ export const itemizedTokenPriceSchema = z.object({ version: z.literal(V2_PRICING
 // BYOK must never enter an itemized platform rate card.
 export const tokenPriceSchema = z.union([z.object({ version: z.literal(V1_PRICING_VERSION), modelTier: tokenPriceTiers, multiplierBps: multiplier }).strict(), itemizedTokenPriceSchema])
 export type TokenPrice = z.infer<typeof tokenPriceSchema>
+
+/** Itemized prices already contain their multiplier. Runtime/usage metadata
+ * may retain the original route multiplier; V1 still requires exact equality. */
+export function frozenTokenPriceMatchesModel(price: TokenPrice, modelTier: string, multiplierBps: number) {
+  return price.modelTier === modelTier && (price.version === 'credits-v2-itemized' || price.multiplierBps === multiplierBps)
+}

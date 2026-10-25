@@ -87,6 +87,8 @@ import { useMessageScroll } from './use-message-scroll'
 import { useComposerInset } from './use-composer-inset'
 import { useRunControls } from './use-run-controls'
 import { AgentRunPauseNotice } from './AgentRunPauseNotice'
+import { AgentManualReviewRepair } from './AgentManualReviewRepair'
+import { useManualReviewRepairRefresh } from './use-manual-review-repair-refresh'
 import { AgentActivityBar } from './AgentActivityBar'
 import { MessageTime, UserMessageActions } from './MessageActions'
 import { AgentComposer } from './AgentComposer'
@@ -407,6 +409,7 @@ export function AgentPanel({
     runId, resumeableRunId, sessionId, phase, pendingApproval, pendingQuestion, connect, setActionError,
     selectedModelRef: continueModelRef,
   })
+  const handleManualReviewStatus = useManualReviewRepairRefresh({ runId, resumeableRunId, sessionId, disconnect })
   // 任务「更多」菜单与重命名弹窗（原 StudioCommandBar 任务三点按钮迁入）
   const [taskMenuOpen, setTaskMenuOpen] = useState(false)
   const [taskRenaming, setTaskRenaming] = useState(false)
@@ -1762,6 +1765,11 @@ export function AgentPanel({
       ) : null}
 
       <AgentRunPauseNotice phase={phase} summary={runSummary} />
+      {(runId ?? resumeableRunId) && sessionId ? <AgentManualReviewRepair
+        key={`${sessionId}:${runId ?? resumeableRunId}`}
+        runId={(runId ?? resumeableRunId)!}
+        onStatusChange={handleManualReviewStatus}
+      /> : null}
 
       {/* 错误提示 */}
       {combinedError ? (

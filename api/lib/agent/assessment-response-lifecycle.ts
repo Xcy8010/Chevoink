@@ -331,6 +331,7 @@ export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionCl
 }
 
 export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput) {
+  if (input.continuityManifest?.manualRepair) await (await import('./manual-review-repair-store.js')).assertManualRepairLineage(tx, ctx, input)
   if (input.parserVersion === 9) {
     const manifest = input.continuityManifest, coverageTaskId = input.bodies.terminalEvidence?.factCoverage?.taskId
     if (!manifest || manifest.subject.userId !== ctx.userId || manifest.subject.novelId !== ctx.novelId
@@ -538,6 +539,7 @@ export async function observeLegacyContinuityAssessment(tx: Prisma.TransactionCl
 
 export async function claimLegacyContinuityReassessment(tx: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput,
   original: Inspection, usageIds: string[], request: { system: string; content: string }, assertCurrent: (tx: Prisma.TransactionClient) => Promise<void>) {
+  if (input.continuityManifest?.manualRepair) throw new DataAccessError(409, 'MANUAL_REVIEW_REPAIR_REFUSED', '作者单次完整修复不具有第二个供应商请求槽。')
   ctx.signal.throwIfAborted(); await lockNovelActiveScope(tx, ctx.novelId); await assertAgentManuscriptCurrent(tx, ctx); await assertCurrent(tx)
   const usage = await tx.aiUsageLog.findMany({ where: { id: { in: usageIds }, userId: ctx.userId, novelId: ctx.novelId,
     targetType: input.targetType, targetId: input.targetId, action: { startsWith: 'agent3ContinuityCritic' } } })

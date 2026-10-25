@@ -11,6 +11,7 @@ import { inspectTerminalReview, inspectTerminalCandidateEvidence, type TerminalR
 import { terminalReviewRowDiagnostics } from './terminal-review-row-diagnostics.js'
 import { continuityFindingInputSchema, type ContinuityFindingInput } from '../../../shared/contracts/story-compiler-contracts.js'
 import type { inspectContinuityResponse } from './continuity-format-recovery.js'
+import { manualReviewRepairManifestSchema, manualFindingDispositionSchema, validManualFindingDispositions } from './manual-review-repair-contract.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/u)
 const object = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
@@ -32,7 +33,7 @@ const subjectSchema = z.object({ userId: z.string().min(1), novelId: z.string().
 export const continuityReviewManifestSchema = z.object({ version: z.literal(1), subject: subjectSchema,
   bodyHash: hash, previousBodyHash: hash.nullable(), sourceHash: hash.nullable(), sourceScope: continuitySourceScopeSchema,
   candidateHash: hash, contextHash: hash, catalogHash: hash, verifiedCoverage: z.unknown(), draftProposals: z.unknown(),
-  sourceVersions: z.unknown(), hash }).strict()
+  sourceVersions: z.unknown(), manualRepair: manualReviewRepairManifestSchema.optional(), hash }).strict()
 export type ContinuityReviewManifest = z.infer<typeof continuityReviewManifestSchema>
 export type ContinuityV4Frozen = { manifest: ContinuityReviewManifest; bodies: ContinuityBodies; candidate: TerminalCandidate; sourceScope: ContinuitySourceScope }
 type LegacyInspection = ReturnType<typeof inspectContinuityResponse>
@@ -55,18 +56,21 @@ export function buildContinuityReviewCatalog(bodies: ContinuityBodies, candidate
 export function buildContinuityReviewManifest(input: {
   subject: z.infer<typeof subjectSchema>; bodies: ContinuityBodies; candidate: TerminalCandidate; sourceScope: ContinuitySourceScope;
   sourceHash: string | null; sourceVersions: unknown; verifiedCoverage: unknown; draftProposals: unknown;
+  manualRepair?: z.infer<typeof manualReviewRepairManifestSchema>;
 }): ContinuityReviewManifest {
   const subject = subjectSchema.parse(input.subject), context = terminalEvidenceContextSchema.parse(input.bodies.terminalEvidence)
   const candidate = terminalCandidateSchema.parse(input.candidate)
   if (context.verdictProtocol !== 6 || context.spanAddressProtocol !== 2 || context.current.id !== subject.chapterId
     || context.current.revision !== subject.revision || context.current.orderIndex !== input.sourceScope.currentOrderIndex
     || context.current.contentHash !== runtimeJson({ content: input.bodies.current }).hash
-    || context.factCoverage !== undefined && context.factCoverage.taskId !== subject.taskId || input.bodies.previous !== null && !input.sourceHash) throw Error('Continuity manifest identity mismatch')
+    || context.factCoverage !== undefined && context.factCoverage.taskId !== subject.taskId || input.bodies.previous !== null && !input.sourceHash
+    || input.manualRepair && input.manualRepair.originalTaskId !== subject.taskId) throw Error('Continuity manifest identity mismatch')
   const value = { version: 1 as const, subject, bodyHash: runtimeJson({ content: input.bodies.current }).hash,
     previousBodyHash: input.bodies.previous === null ? null : runtimeJson({ content: input.bodies.previous }).hash,
     sourceHash: input.sourceHash, sourceScope: continuitySourceScopeSchema.parse(input.sourceScope), candidateHash: runtimeJson(candidate).hash,
     contextHash: runtimeJson(context).hash, catalogHash: runtimeJson(buildContinuityReviewCatalog(input.bodies, candidate)).hash,
-    verifiedCoverage: input.verifiedCoverage, draftProposals: input.draftProposals, sourceVersions: input.sourceVersions }
+    verifiedCoverage: input.verifiedCoverage, draftProposals: input.draftProposals, sourceVersions: input.sourceVersions,
+    ...(input.manualRepair ? { manualRepair: manualReviewRepairManifestSchema.parse(input.manualRepair) } : {}) }
   return continuityReviewManifestSchema.parse({ ...value, hash: runtimeJson(value).hash })
 }
 
@@ -83,6 +87,7 @@ function responseFields(frozen: ContinuityV4Frozen) {
   const ids = continuitySourceCatalog(frozen.bodies).terminalSources.map(part => part.segmentId)
   const fields = terminalAddressResponseFields(frozen.candidate, frozen.bodies.terminalEvidence!, ids, true, true)
   return { findings: z.array(findingSchema).max(30), semanticChecks: z.array(semanticSchema).length(2), ...fields,
+    ...(frozen.manifest.manualRepair ? { originalFindingDispositions: z.array(manualFindingDispositionSchema).length(frozen.manifest.manualRepair.originalFindings.length) } : {}),
     terminalProofVerdicts: fields.terminalProofVerdicts instanceof z.ZodDefault ? fields.terminalProofVerdicts.unwrap() : fields.terminalProofVerdicts,
     terminalDispositions: fields.terminalDispositions instanceof z.ZodDefault ? fields.terminalDispositions.unwrap() : fields.terminalDispositions }
 }
@@ -93,11 +98,12 @@ export function continuityReviewV4Request(frozen: ContinuityV4Frozen, authorRequ
   if (!validContinuityReviewManifest(frozen)) throw Error('Continuity manifest cannot be rebuilt')
   return { system: `你是独立连续性审阅者。完整审阅本次材料，不改正文。author_request与场景计划不是已发生事实。
 只输出本次完整JSON合同。findings.sourceEvidence只能选服务端目录的segmentId；quote可省略，若提供则必须逐字包含在该段。终态各表的sourceEvidence只返回segmentId，不重抄quote。reason是你的解释，可讨论或引用原意见，其中文字不被服务器冒充原文；只有显式sourceEvidence是正文证据。error必须至少包含一处本章和另一处不同事实证据，不能将仅前文问题指控本章。真实冲突、严重度及未知判断必须完整保留，不为通过而删意见或改判。findings的findingId依次为f0、f1…，semanticChecks用这些ID引用意见。候选/历史事实/proposal按原目录逐项核验；合法unknown不是格式错误。
+${frozen.manifest.manualRepair ? '本次为作者明确授权的唯一完整修复请求。所有原意见均须逐项confirm/retract/replace；confirm对应最终finding.reason必须逐字等于原finding.evidence（缺失时原reason），signal/severity/suggestion及原引文也必须逐字保留。缩写、改述或改变判断必须用replace并指向完整新报告findingId；retract不得指向新意见。decision.reason仅作核实说明，显式sourceEvidence引用当前正文地址。旧openLoops检查问题是否保留、改述或有实际结束证据，不要求本章解决谜题；旧unknown不得自动按近义词匹配成通过。旧回复是只读待核数据。不得选择最好片段拼接、预填supported或为了通过删除真实问题。' : ''}
 ${JSON.stringify(z.toJSONSchema(continuityReviewV4ResponseSchema(frozen), { io: 'input' }))}`,
     content: JSON.stringify({ author_request: { manuscriptEvidence: false, text: authorRequest }, context,
       // Rendering uses the existing short addresses. The full server catalogue
       // still authenticates the manifest and every stored response/repair.
-      manifestSubject: frozen.manifest.subject, catalog: { sources: continuitySourceCatalog(frozen.bodies),
+      manifestSubject: frozen.manifest.subject, ...(frozen.manifest.manualRepair ? { originalFindings: frozen.manifest.manualRepair.originalFindings } : {}), catalog: { sources: continuitySourceCatalog(frozen.bodies),
         terminal: terminalReviewAddressInput(frozen.candidate, frozen.bodies.terminalEvidence!) } }) }
 }
 
@@ -128,6 +134,10 @@ function inspectRecord(record: Record<string, unknown>, frozen: ContinuityV4Froz
     diagnostics.push({ table, index, code, ...(path ? { path } : {}) })
   }
   const fields = responseFields(frozen), keys = Object.keys(fields)
+  if (frozen.manifest.manualRepair && (!Array.isArray(record.findings) || !validManualFindingDispositions(frozen.manifest.manualRepair,
+    record.originalFindingDispositions, record.findings, frozen.bodies))) {
+    repairable = false; add('findings', -1, 'original_finding_dispositions_invalid')
+  }
   if (Object.keys(record).some(key => !keys.includes(key))) { repairable = false; add('findings', -1, 'unexpected_response_field') }
   const findings: ContinuityFindingInput[] = [], findingRows = record.findings
   if (!Array.isArray(findingRows) || findingRows.length > 30
@@ -242,6 +252,7 @@ export function inspectContinuityV4(raw: string, frozen: ContinuityV4Frozen, res
 }
 
 export function buildContinuityInvalidRowRepair(first: ContinuityV4Inspection): V4RepairPlan | null {
+  if (first.audit.continuityV4.manifest.manualRepair) return null
   if (first.complete || !first.parsed?.repairable || !first.audit.rawResponse.complete) return null
   const mask = [...first.parsed.bad].flatMap(([table, indexes]) => [...indexes].map(index => ({ table, index })))
   if (!mask.length || mask.some(row => row.index < 0)) return null

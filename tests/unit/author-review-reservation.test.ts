@@ -51,3 +51,21 @@ it('preserves ordinary prepared reservation behavior', async () => {
   await reserveTokenCredits('author', 'usage', 1000, 16384)
   expect(mocks.update).toHaveBeenCalledOnce()
 })
+
+it('admits the exact manual continuity operation with immutable itemized rates and original route multiplier metadata', async () => {
+  const itemized = { version: 'credits-v2-itemized' as const, modelTier: 'speed' as const, multiplierBps: 11000, rateCardId: 'synthetic-speed-card',
+    rates: { inputNano: 110000, cacheNano: 27500, outputNano: 1100000 }, v1CeilingBps: 11000 }
+  const manual = { ...authority, price: itemized, manualReviewRepairOperationId: `mrr_${'a'.repeat(56)}` }
+  mocks.row.mockResolvedValue({ ...prepared(), action: 'agent3ContinuityCritic', targetType: 'story_compilation', modelTier: 'speed',
+    multiplierBps: 15000, billingSnapshot: itemized })
+  await reserveTokenCredits('author', 'usage', 1000, 16384, manual)
+  expect(mocks.update).toHaveBeenCalledOnce()
+  expect(mocks.update.mock.calls[0][0].data.reservedCreditMilli).toBeGreaterThan(0)
+})
+it.each(['no-marker', 'bad-marker', 'wrong-action', 'wrong-target', 'wrong-tier'] as const)('refuses manual reservation %s', async kind => {
+  mocks.row.mockResolvedValue({ ...prepared(), action: kind === 'wrong-action' ? 'ordinary' : 'agent3ContinuityCritic',
+    targetType: kind === 'wrong-target' ? 'chapter' : 'story_compilation', modelTier: kind === 'wrong-tier' ? 'speed' : 'standard' })
+  const manual = kind === 'no-marker' ? authority : { ...authority, manualReviewRepairOperationId: kind === 'bad-marker' ? 'continue' : `mrr_${'a'.repeat(56)}` }
+  await expect(reserveTokenCredits('author', 'usage', 1000, 16384, manual)).rejects.toMatchObject({ code: 'CREDIT_USAGE_MISMATCH' })
+  expect(mocks.update).not.toHaveBeenCalled()
+})

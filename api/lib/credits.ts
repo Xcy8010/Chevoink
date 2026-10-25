@@ -23,7 +23,7 @@ import { decryptSecret } from './secret-box.js'
 import { assertCreditInteger, BillingInputError, calculateV1ChargeMilli, calculateV2UserChargeMilli } from './billing/pricing.js'
 import { equalLegacyMetadata, prepareCreditRequest, readCreditFingerprint } from './billing/credit-request.js'
 import { getActiveTokenPrice, getActiveTokenPrices } from './billing/rate-cards.js'
-import { tokenPriceSchema, type TokenPrice } from './billing/token-price.js'
+import { tokenPriceSchema, frozenTokenPriceMatchesModel, type TokenPrice } from './billing/token-price.js'
 import { fallbackUsageEvidenceSchema, FALLBACK_USAGE_POLICY, RESERVATION_TTL_MS, tokenReservationMilli } from './billing/reservation-policy.js'
 import { presentLedgerPrice, readLedgerPriceMetadata } from './billing/ledger-presentation.js'
 
@@ -565,7 +565,7 @@ async function reservedTokenCredits(db: Pick<Prisma.TransactionClient, 'aiUsageL
 }
 
 /** Serializable admission prevents concurrent calls from reserving the same credit. */
-export type AuthorReviewCreditReservation = { price: TokenPrice; newCallId: string; runId: string; novelId: string; chapterId: string }
+export type AuthorReviewCreditReservation = { price: TokenPrice; newCallId: string; runId: string; novelId: string; chapterId: string; manualReviewRepairOperationId?: string }
 export async function reserveTokenCredits(userId: string, usageId: string, inputEstimate: number, maxOutput: number, authorReview?: AuthorReviewCreditReservation) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -574,12 +574,16 @@ export async function reserveTokenCredits(userId: string, usageId: string, input
         if (authorReview) {
           const evidence = fallbackUsageEvidenceSchema.safeParse(usage.billingEvidence)
           const authorizedPrice = tokenPriceSchema.parse(authorReview.price)
+          const allowedOperation = authorReview.manualReviewRepairOperationId === undefined
+            ? usage.action === 'agent3HumanityAuthorReplacement' && usage.targetType === 'chapter'
+            : /^mrr_[a-f0-9]{56}$/u.test(authorReview.manualReviewRepairOperationId)
+              && usage.action === 'agent3ContinuityCritic' && usage.targetType === 'story_compilation'
           if (usage.billingStatus !== 'authorized_pending' || usage.usageSource !== 'prepared'
             || [authorReview.newCallId, authorReview.runId, authorReview.novelId, authorReview.chapterId].some(id => typeof id !== 'string' || !id)
-            || usage.providerType !== 'text' || usage.action !== 'agent3HumanityAuthorReplacement'
+            || usage.providerType !== 'text' || !allowedOperation
             || usage.agentRunId !== authorReview.runId || usage.novelId !== authorReview.novelId || usage.chapterId !== authorReview.chapterId
-            || usage.targetType !== 'chapter' || usage.targetId !== authorReview.newCallId
-            || usage.modelTier !== authorizedPrice.modelTier || usage.multiplierBps !== authorizedPrice.multiplierBps
+            || usage.targetId !== authorReview.newCallId
+            || !frozenTokenPriceMatchesModel(authorizedPrice, usage.modelTier ?? '', usage.multiplierBps)
             || usage.durationMs !== 0 || usage.requestTokens !== null || usage.responseTokens !== null || usage.creditChargeMilli !== 0
             || !evidence.success || evidence.data.responseObserved || evidence.data.outputEstimate !== 0 || evidence.data.inputEstimate !== inputEstimate
             || JSON.stringify(tokenPriceSchema.parse(usage.billingSnapshot)) !== JSON.stringify(authorizedPrice)

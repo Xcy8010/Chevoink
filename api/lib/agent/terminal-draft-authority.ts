@@ -212,7 +212,9 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
       const evidence = frozen.bodies.terminalEvidence
       if ([...(evidence.proposalChanges?.verifiedFactIds ?? []), ...(evidence.factCoverage?.obligations.map(fact => fact.id) ?? []),
         ...(evidence.previous?.carried?.map(fact => terminalFactId(fact.field, fact.claim)) ?? [])].some(id => ids.has(id))) return base
-      const result = await lifecycle.readLegacyContinuityAssessment(snapshot, ctx, frozen)
+      // Manual repair adds a durable author/dispatch lineage. The old finite
+      // artifact snapshot has no event or ledger readers and cannot certify it.
+      const result = await lifecycle.readLegacyContinuityAssessment(frozen.continuityManifest?.manualRepair ? db : snapshot, ctx, frozen)
       if (!result.billingKnown || !result.providerComplete || !result.recoveryReady) return base
       const bound = lifecycle.bindLegacyContinuityAssessment(result.inspected, ctx, frozen)
       const auditHash = runtimeJson(bound.audit).hash

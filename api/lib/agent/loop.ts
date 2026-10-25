@@ -691,6 +691,7 @@ async function finalizeLegacyRun(
   withFailureNotice = false,
   limitedDelivery?: { subject: { userId: string; novelId: string; runId: string }; expected: LimitedWritingDelivery; signal: AbortSignal; messageId: string },
   pauseReason: 'user_stop' | 'needs_input' | 'review_receipt_pending' = 'user_stop',
+  terminalFence?: (tx: Prisma.TransactionClient) => Promise<void>,
 ) {
   // 事件协议用 succeeded，DB 枚举用 completed
   const dbStatus = status === 'succeeded' ? 'completed' : status
@@ -707,6 +708,7 @@ async function finalizeLegacyRun(
     : { type: 'run.finished' as const, status, usage, artifacts: [], outputSummary, ...(authorEnded ? { authorEnded } : {}), ...(limitedDelivery ? { outcome: limitedDelivery.expected.outcome } : {}) }
   let goalFenced = false
   const committed = await bus.commitTerminal(terminalBody, async tx => {
+    await terminalFence?.(tx)
     if (limitedDelivery) {
       await assertLimitedWritingDelivery(tx, limitedDelivery.subject, limitedDelivery.expected)
       limitedDelivery.signal.throwIfAborted()
@@ -810,6 +812,42 @@ async function finalizeLegacyRun(
     // another terminal event on the now-sealed bus.
     console.error('[agent-loop] 终态事件仍待持久化', { runId, status })
   }
+}
+
+/** The explicit one-request repair has already used ordinary chapter commit.
+ * Reuse the original delivery predicates and atomic terminal writer without a
+ * main-model turn, todo manipulation or post-completion paid context work. */
+export async function finishManualReviewRepairWriting(subject: { userId: string; novelId: string; runId: string }, signal: AbortSignal,
+  assertOwner: (tx: Prisma.TransactionClient) => Promise<void>) {
+  signal.throwIfAborted()
+  const state = await prisma.$transaction(async tx => {
+    const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId,
+      engine: 'loop', runtimeProtocolVersion: 0, taskRootId: null, status: 'running' } })
+    if (!run) return null
+    const delivery = await readCompletedWritingDelivery(tx, subject) ?? await readRecoveredChapterDelivery(tx, subject)
+    const saved = savedRunUsageSchema.safeParse(run.usage)
+    if (!delivery || !saved.success) return null
+    const last = await tx.agentRunEvent.findFirst({ where: { runId: run.id }, orderBy: { seq: 'desc' }, select: { seq: true } })
+    return { run, delivery, usage: saved.data, seq: last?.seq ?? 0 }
+  })
+  if (!state) return false
+  signal.throwIfAborted()
+  const bus = createRunEventBus(subject.runId, state.seq)
+  try {
+    await finalizeLegacyRun(subject.runId, bus, 'succeeded', state.usage, state.run.currentTurn, state.delivery.text.slice(0, 300), undefined,
+      false, state.usage.checkpoint, undefined, { messageId: randomUUID(), subject, expected: state.delivery, signal }, false, undefined, 'user_stop', assertOwner)
+    // The legacy finalizer deliberately retains ambiguous persistence errors.
+    // Its return is not evidence that the transaction reached completion.
+    return prisma.$transaction(async tx => {
+      const confirmed = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId, status: 'completed' } })
+      if (!confirmed) return false
+      const current = state.delivery.presentationKind === 'recovered_chapter_only'
+        ? await readRecoveredChapterDelivery(tx, subject) : await readCompletedWritingDelivery(tx, subject)
+      if (!current || runtimeJson(current).hash !== runtimeJson(state.delivery).hash) return false
+      signal.throwIfAborted()
+      return true
+    })
+  } finally { await disposeRunEventBus(subject.runId) }
 }
 
 /** 启动（或续跑）一次 Agent Loop run：异步执行，调用方不等待 */
