@@ -9,6 +9,7 @@ import { env } from '../../config/env.js'
 import { tokenPriceSchema, frozenTokenPriceMatchesModel, type TokenPrice } from '../billing/token-price.js'
 import type { LegacyAssessmentInput } from './assessment-response-lifecycle.js'
 import type { ToolContext } from './tools/types.js'
+import { parseQualityJsonObject } from './quality-evidence.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/u)
 const compilerReferenceSchema = z.object({ id: z.string().min(1), hash }).strict()
@@ -455,6 +456,19 @@ export const nativeContinuityRevisionWorkSchema = z.discriminatedUnion('kind', [
     system: z.literal(continuityMergedRevisionSystem), content: z.string() }).strict(),
 ])
 
+/** JSONB preserves values, not insertion order. Authenticate the complete
+ * original message without rewriting its bytes or accepting duplicate keys. */
+export function nativeContinuityRevisionMaterialMatches(input: Record<string, unknown>, inputHash: string, content: string) {
+  try {
+    const material: unknown = JSON.parse(content)
+    if (!material || typeof material !== 'object' || Array.isArray(material)) return false
+    // Strict JSON.parse above forbids fragments, syntax repair and trailing
+    // prose; the existing parser additionally rejects duplicate object keys.
+    parseQualityJsonObject(content, 'continuity')
+    return runtimeJson(material).hash === inputHash && runtimeJson(input).hash === inputHash
+  } catch { return false }
+}
+
 export async function prepareNativeContinuityRevisionWork(db: Prisma.TransactionClient, ctx: ToolContext,
   baseline: { id: string; hash: string }, parentOperationId: string) {
   const facts = await mergedRevisionFacts(db, ctx, baseline.id)
@@ -471,7 +485,7 @@ export async function prepareNativeContinuityRevisionWork(db: Prisma.Transaction
   return nativeContinuityRevisionWorkSchema.parse({ kind: 'merged_revision', version: 1, compiler: baseline,
     chapter: { id: facts.saved.chapter!.id, revision: facts.saved.chapter!.revision, content: facts.saved.chapter!.content },
     plan: facts.plan, input: facts.input, inputHash: facts.inputHash, validation: facts.saved.validation,
-    preparedContext: facts.saved.preparedContext, route, price, system: continuityMergedRevisionSystem, content: JSON.stringify(facts.input) })
+    preparedContext: facts.saved.preparedContext, route, price, system: continuityMergedRevisionSystem, content: JSON.stringify(runtimeJson(facts.input).value) })
 }
 
 export async function authenticateNativeContinuityRevisionWork(db: Prisma.TransactionClient, ctx: Subject,
@@ -483,7 +497,7 @@ export async function authenticateNativeContinuityRevisionWork(db: Prisma.Transa
     || work.plan.compilationId !== work.compiler.id || work.plan.chapterId !== work.chapter.id
     || work.plan.phases.find(phase => phase.kind === 'prose_revision')?.limit !== 1
     || work.plan.modelPriceHash !== runtimeJson({ route: work.route, price: work.price }).hash
-    || runtimeJson(work.input).hash !== work.inputHash || work.content !== JSON.stringify(work.input)
+    || !nativeContinuityRevisionMaterialMatches(work.input, work.inputHash, work.content)
     || work.input.planHash !== work.plan.hash || work.input.content !== work.chapter.content || work.input.revision !== work.chapter.revision
     || work.input.validationHash !== runtimeJson(work.validation).hash || work.input.preparedHash !== runtimeJson(work.preparedContext).hash) throw blocked('native 集中修订工作缺少原完整材料与阶段绑定。')
   const audit = object(effectiveContinuityAudit(work.validation)), frozen = object(object(audit.continuityV4).frozen)

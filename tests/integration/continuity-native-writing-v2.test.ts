@@ -51,10 +51,12 @@ describe.runIf(available)('fresh native writing manifest2 actual bounded chain',
     expect(fetcher).not.toHaveBeenCalled()
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
   }))
-  it.each(['no-effect', 'merged-revision', 'merged-revision-restart'] as const)('%s uses original receipts and deterministic completion', scenario => fixture(async f => {
+  it.each(['no-effect', 'ordinary-presentation', 'merged-revision', 'merged-revision-restart'] as const)('%s uses original receipts and deterministic completion', scenario => fixture(async f => {
     const reportEffects = vi.spyOn(compiler, 'validateStoryContinuity')
     let lease = await claim(f)
-    const changed = scenario !== 'no-effect'
+    const changed = scenario === 'merged-revision' || scenario === 'merged-revision-restart'
+    const prompt = scenario === 'ordinary-presentation' ? '完整重写当前章节' : '完整重写当前章节，只输出标题和正文。'
+    expect(f.spec.scope.writing?.titleAndBodyOnly).toBe(scenario !== 'ordinary-presentation')
     const content = changed ? '他合上箱盖，核对锁扣。锁扣一直扣紧。锁扣此刻完全松开。' : '他合上箱盖，核对锁扣。锁扣一直扣紧。'
     const after = changed ? '他合上箱盖，核对锁扣。锁扣一直扣紧。他没有解开锁扣，只把箱子推近灯下。' : content
     const writing = { draftComplete: true, actualOutcomes: { exitState: { objects: ['锁扣一直扣紧。'] } },
@@ -69,7 +71,7 @@ describe.runIf(available)('fresh native writing manifest2 actual bounded chain',
       tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } })),
       toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
       snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
-        successfulToolSignatures: [], messages: [{ role: 'user', content: '完整重写当前章节' }, { role: 'assistant', content: null,
+        successfulToolSignatures: [], messages: [{ role: 'user', content: prompt }, { role: 'assistant', content: null,
           toolCalls: [{ id: 'read', name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) },
             { id: 'write', name: 'chapter_write', arguments: JSON.stringify(args) }] }] } })
     const runtime = { tier: 'speed' as const, multiplierBps: 15000, provider: 'fixture', modelName: 'fixture', baseUrl: 'https://provider.invalid/v1',
@@ -149,6 +151,13 @@ describe.runIf(available)('fresh native writing manifest2 actual bounded chain',
       expect(tx).toBeDefined()
     }
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: after, revision: changed ? 3 : 2 })
+    if (scenario === 'ordinary-presentation') {
+      // A real commit does not enlarge the author's presentation contract.
+      expect(await advanceDurableWritingDelivery(lease)).toBeNull()
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: lease.runId } })).status).not.toBe('completed')
+      expect(fetcher).toHaveBeenCalledTimes(2)
+      return
+    }
     expect(await advanceDurableWritingDelivery(lease)).not.toBeNull()
     const state = await loadExecutionState(f.userId, lease.runId)
     await finalizeDurableTask(lease, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash })
@@ -159,6 +168,6 @@ describe.runIf(available)('fresh native writing manifest2 actual bounded chain',
     expect(fetcher).toHaveBeenCalledTimes(changed ? 5 : 2)
     const first = await prisma.agentOperation.findFirstOrThrow({ where: { parentOperationId: writer.id, action: 'continuity_validate', operationKey: `writing:${writer.id}:continuity` } })
     expect(runtimeJson((first.inputSnapshot as { input: { work: { price: unknown } } }).input.work.price).hash).toBe(runtimeJson(price).hash)
-  }, undefined, '完整重写当前章节', { freezeWriting: true, writingCoordinationProtocol: 2, continuityReportProtocol: 5,
+  }, undefined, scenario === 'ordinary-presentation' ? '完整重写当前章节' : '完整重写当前章节，只输出标题和正文。', { freezeWriting: true, writingCoordinationProtocol: 2, continuityReportProtocol: 5,
     continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
 })

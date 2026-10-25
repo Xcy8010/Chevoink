@@ -5,7 +5,8 @@ import { terminalCandidateSchema } from '../../api/lib/agent/terminal-candidate-
 import { continuitySubjectIdentity } from '../../api/lib/agent/continuity-subject-identity.js'
 import { buildContinuityReviewManifest, continuityReviewV4Request, inspectContinuityV4, applyContinuityV4Repair,
   validateStoredContinuityV4Projection, buildContinuityInvalidRowRepair } from '../../api/lib/agent/continuity-review-v4.js'
-import { effectiveContinuityAudit, continuityPhasePlanSchema, validContinuityPhasePlan, continuityUsageRowHash, continuityQuestionOwner, readKnownContinuityReplay } from '../../api/lib/agent/continuity-coordinator.js'
+import { effectiveContinuityAudit, continuityPhasePlanSchema, validContinuityPhasePlan, continuityUsageRowHash, continuityQuestionOwner, readKnownContinuityReplay,
+  nativeContinuityRevisionMaterialMatches } from '../../api/lib/agent/continuity-coordinator.js'
 import { inspectAuthenticatedContinuityAssessment } from '../../api/lib/agent/authenticated-continuity-assessment.js'
 import { readAuthenticatedContinuityAssessment } from '../../api/lib/agent/authenticated-continuity-assessment.js'
 import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
@@ -40,6 +41,32 @@ function fixture() {
 }
 
 describe('explicit continuity contract5, frozen <=9 replay', () => {
+  it('authenticates original merged-revision message values after JSONB reorders the frozen input', () => {
+    const original = { version: 1, planHash: 'a'.repeat(64), content: 'The packet remains sealed.', revision: 4,
+      findings: [{ source: 'continuity', findingId: 'f0', evidence: { quote: 'sealed', segmentId: 'c0' } }] }
+    const message = JSON.stringify(original), frozen = runtimeJson(original)
+    expect(message).not.toBe(JSON.stringify(frozen.value))
+    expect(nativeContinuityRevisionMaterialMatches(frozen.value as Record<string, unknown>, frozen.hash, message)).toBe(true)
+    expect(nativeContinuityRevisionMaterialMatches(original, frozen.hash, JSON.stringify(frozen.value))).toBe(true)
+    // The original physical request is retained byte-for-byte on replay.
+    expect(message).toBe(JSON.stringify(original))
+  })
+  it.each(['changed-value', 'changed-input', 'wrong-hash', 'missing-field', 'duplicate-key', 'escaped-duplicate-key',
+    'nested-duplicate-key', 'trailing-object', 'trailing-prose', 'malformed', 'array'] as const)('rejects %s merged-revision material', kind => {
+    const input = { version: 1, revision: 4, content: 'Original body.', findings: [{ findingId: 'f0' }] }, frozen = runtimeJson(input)
+    const messages = {
+      'changed-value': JSON.stringify({ ...input, content: 'Changed body.' }),
+      'changed-input': JSON.stringify(input), 'wrong-hash': JSON.stringify(input),
+      'missing-field': JSON.stringify({ version: 1, revision: 4, findings: input.findings }),
+      'duplicate-key': '{"version":1,"revision":3,"revision":4,"content":"Original body.","findings":[{"findingId":"f0"}]}',
+      'escaped-duplicate-key': '{"version":1,"revision":3,"\\u0072evision":4,"content":"Original body.","findings":[{"findingId":"f0"}]}',
+      'nested-duplicate-key': '{"version":1,"revision":4,"content":"Original body.","findings":[{"findingId":"bad","findingId":"f0"}]}',
+      'trailing-object': `${JSON.stringify(input)} {}`, 'trailing-prose': `${JSON.stringify(input)} done`,
+      malformed: JSON.stringify(input).slice(0, -1), array: JSON.stringify([input]),
+    }
+    expect(nativeContinuityRevisionMaterialMatches(kind === 'changed-input' ? { ...input, revision: 5 } : input,
+      kind === 'wrong-hash' ? 'b'.repeat(64) : frozen.hash, messages[kind])).toBe(false)
+  })
   it('accepts a full typed report retracting an unestablished draft with current manuscript evidence', () => {
     const f = fixture(), draft = terminalDraftFixture('emotion', { chapter: { id: 'chapter', revision: 4, orderIndex: 3, content: f.current },
       taskId: 'task', ctx: { userId: 'user', novelId: 'novel', runId: 'run' }, compilationId: 'compilation', candidate: f.candidate,

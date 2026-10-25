@@ -107,11 +107,11 @@ describe.runIf(available)('continuity evidence correction actual PostgreSQL effe
             expect(child.attempts).toHaveLength(1)
             expect(child.attempts[0]).toMatchObject({ attemptKey: '1', status: 'succeeded', usageReceipt: { source: 'reported', settlementStatus: 'settled' } })
           }
-          const frozen = JSON.parse(JSON.stringify(original))
+          const frozen = structuredClone(original)
           await executePreparedContinuityWork({ ...f, callId: 'check', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced',
             signal: new AbortController().signal, emit: () => {} }, lease, original.id)
-          expect(JSON.parse(JSON.stringify(await prisma.agentOperation.findUniqueOrThrow({ where: { id: original.id },
-            include: { children: { include: { attempts: { include: { usageReceipt: true } } } } } })))).toEqual(frozen)
+          expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: original.id },
+            include: { children: { include: { attempts: { include: { usageReceipt: true } } } } } })).toEqual(frozen)
           expect(fetch).toHaveBeenCalledTimes(2)
         }
       }
