@@ -184,12 +184,18 @@ describe.runIf(available)('fresh native writing manifest2 actual bounded chain',
     const memory = await prisma.agentOperation.findUniqueOrThrow({ where: { taskRootId_operationKey: { taskRootId: f.rootId, operationKey: `memory:${currentMemoryJobId}` } }, include: { effectReceipt: true } })
     expect(memory).toMatchObject({ action: 'memory_extract', status: 'succeeded', parentOperationId: writer.id,
       effectReceipt: { result: { jobId: currentMemoryJobId, status: 'applied', memories: expect.any(Array) } } })
-    expect(z.object({ memories: z.array(z.unknown()).min(2) }).parse(memory.effectReceipt!.result).memories).toHaveLength(2)
+    const appliedMemories = z.object({ memories: z.array(z.object({ id: z.string(), version: z.number().int().positive(), hash: z.string() })).min(2) })
+      .parse(memory.effectReceipt!.result).memories
+    expect(appliedMemories).toHaveLength(2)
     expect(memory.effectReceipt!.resultHash).toBe(runtimeJson(memory.effectReceipt!.result).hash)
     expect(await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { eventKey: `effect:${memory.id}` } })).toMatchObject({
       type: 'effect.committed', operationId: memory.id, payload: { operationId: memory.id, resultHash: memory.effectReceipt!.resultHash } })
     expect(await prisma.memoryExtractionJob.findUniqueOrThrow({ where: { id: currentMemoryJobId } })).toMatchObject({ status: 'completed' })
-    expect(await prisma.projectMemoryEntry.findFirstOrThrow({ where: { novelId: f.novelId, sourceChapterId: f.chapterId, memoryType: 'chapterSummary' } })).toMatchObject({ content: expect.stringContaining(after) })
+    const chapterMemory = await prisma.projectMemoryEntry.findFirstOrThrow({ where: { id: { in: appliedMemories.map(item => item.id) },
+      novelId: f.novelId, sourceChapterId: f.chapterId, memoryType: 'chapterSummary' } })
+    expect(chapterMemory).toMatchObject({ content: expect.stringContaining(after) })
+    expect(appliedMemories.find(item => item.id === chapterMemory.id)).toEqual({ id: chapterMemory.id, version: chapterMemory.version,
+      hash: runtimeJson({ title: chapterMemory.title, content: chapterMemory.content }).hash })
     const finalReceipt = await prisma.agentEffectReceipt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId, action: 'completion_finalize' } } })
     expect(finalReceipt.result).toMatchObject({ evidence: { blockers: [], memoryJobs: [{ id: currentMemoryJobId, verified: true }] } })
     expect(await prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId } }, include: { usageReceipt: true }, orderBy: { id: 'asc' } })).toEqual(originalAttempts)

@@ -15,7 +15,7 @@ import { readTerminalInputDecision } from '../../api/lib/agent/terminal-input-de
 import { buildContinuitySupplementQuestion, persistContinuitySupplementQuestion, continuitySupplementQuestionArgs,
   readContinuitySupplementState, knownContinuitySupplementCall, authenticateSupplementalContinuityReport,
   executeContinuitySupplement, executeContinuitySupplementTool, claimContinuityPhase, readKnownContinuityReplay } from '../../api/lib/agent/continuity-coordinator.js'
-import { readNormalizedContinuityCoverageOrigins } from '../../api/lib/agent/continuity-coordinator.js'
+import { readNormalizedContinuityCoverageOrigins, saveContinuitySourceRecovery } from '../../api/lib/agent/continuity-coordinator.js'
 import { askUserTool } from '../../api/lib/agent/tools/interact-tools.js'
 import { continuityValidateTool, chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { executeAgentRun, handleToolCall } from '../../api/lib/agent/loop.js'
@@ -148,6 +148,9 @@ async function originalFailure(f: Fixture, conflict = false, qualityReady = fals
   const decision = await prisma.$transaction(tx => readTerminalInputDecision(tx, ctx, compilation.id))
   expect(decision).not.toBeNull()
   expect(await prisma.$transaction(tx => readKnownContinuityReplay(tx, ctx, compilation.id))).toBeNull()
+  const sourceTarget = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, select: { preparedContext: true } })
+  await prisma.$transaction(tx => saveContinuitySourceRecovery(tx, ctx, { compilationId: compilation.id, chapterId: chapter.id,
+    preparedContext: sourceTarget.preparedContext, originalAssessmentKey: old.key }))
   const question = await prisma.$transaction(tx => buildContinuitySupplementQuestion(tx, ctx, decision!))
   await prisma.$transaction(tx => persistContinuitySupplementQuestion(tx, ctx, question))
   const before = {
@@ -394,7 +397,8 @@ describe.runIf(available)('original persistent supplemental phase: real question
         runStartedAt: Date.now() - 1000, activeExecutionMs: 100, stagnantBatches: scenario === 'approve-in-loop' ? 4 : 5,
         resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500, writeProgress: 3, writeBaseline: 0, readProgress: 11, readBaseline: 0,
         progressSignatures: [...signatures], reviewAttempts: ['original-consumed-claim'], pendingReviews: [],
-        consumedReviewDecisionFeedback: review?.decisionFeedback ? [review.decisionFeedback.key] : [], inheritedTokens: 0, inheritedTurns: 0, manualResumeCount: 0 })
+        consumedReviewDecisionFeedback: ['e'.repeat(64), ...(review?.decisionFeedback ? [review.decisionFeedback.key] : [])],
+        inheritedTokens: 0, inheritedTurns: 0, manualResumeCount: 0 })
       const beforeResume = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
       await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'paused', currentTurn: 27, startedAt: new Date(checkpoint.runStartedAt),
         usage: { ...(beforeResume.usage as object), checkpoint: JSON.parse(JSON.stringify(checkpoint)) } } })

@@ -106,6 +106,8 @@ describe('request-owned joint terminal evidence v5', () => {
       coverage: compilerContinuityCoverage({ chapter, bridge: {}, sceneTasks: [], source: null, terminalCandidate: candidate }, 11),
       terminalCandidate: candidate, independentCheck: 'complete', continuityCriticResponse: parsed.audit }
     const carried = buildTerminalFactProofs({ compilationId: 'second-compile', chapter, validation, stateHash: 'a'.repeat(64), evidence: first, review })
+    expect(review).not.toHaveProperty('deliveryEligibility')
+    expect(carried).toHaveLength(1)
     const next = { id: 'third', orderIndex: 3, revision: 1, content: 'The officer closes the log.' }, old = { field: 'knowledge' as const, claim: 'The circuit resource readings remain on record.', id: terminalFactId('knowledge', 'The circuit resource readings remain on record.') }
     const evidence = terminalEvidenceContext(next, null, 2, 1, { version: 2, taskId: 'task', chapterId: next.id, obligations: [old] }, 5)
     evidence.previous = { ...first.previous!, id: chapter.id, orderIndex: 2, revision: chapter.revision, contentHash: hash(chapter.content), end: chapter.content.length, joinedEnd: chapter.content.length, segments: [], carried }
@@ -114,6 +116,13 @@ describe('request-owned joint terminal evidence v5', () => {
     const report = { findings: [], semanticChecks, terminalVerdicts: [], terminalProofVerdicts: [{ proofHash: carried[0].proofHash, currentState: 'unchanged', reason: 'The whole current body preserves the circuit readings.' }],
       terminalDispositions: [{ id: old.id, outcome: 'replaced', candidateFactId: fact.id, reason: 'The complete unresolved record is carried by this supported candidate.', sourceEvidence: [] }] }
     expect(inspectTerminalReview(candidate, next.content, JSON.stringify(report), true, evidence)?.supported).toBe(true)
+    const unknownReport = { ...report, terminalProofVerdicts: [{ ...report.terminalProofVerdicts[0], currentState: 'uncertain' }],
+      terminalDispositions: [{ id: old.id, outcome: 'unknown', reason: 'No new attestation discharges the old obligation.', sourceEvidence: [] }] }
+    const unknown = inspectTerminalReview(candidate, next.content, JSON.stringify(unknownReport), true, evidence)!
+    expect(unknown).toMatchObject({ supported: false, verdicts: [{ verdict: 'unknown', basis: 'inherited' }] })
+    expect(unknown).not.toHaveProperty('deliveryEligibility')
+    expect(buildTerminalFactProofs({ compilationId: 'unknown-without-authority', chapter: next, validation,
+      stateHash: 'b'.repeat(64), evidence, review: unknown })).toEqual([])
     report.terminalDispositions[0].candidateFactId = old.id
     expect(inspectTerminalReview(candidate, next.content, JSON.stringify(report), true, evidence)).toBeNull()
   })

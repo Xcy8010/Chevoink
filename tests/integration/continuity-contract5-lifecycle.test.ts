@@ -7,6 +7,7 @@ import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-conti
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { continuityValidateTool, chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { terminalCandidateSchema, currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
 import { readTerminalDraftBinding } from '../../api/lib/agent/terminal-draft-authority.js'
@@ -36,9 +37,17 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       const rootContent = 'The pump awaits a replacement seal.'
       canonicalChapter = await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: chapter.volumeId,
         orderIndex: 0, orderInVolume: 0, title: 'Synthetic committed predecessor', content: rootContent, revision: 1 } })
-      const root = await prepareStoryCompilation({ userId: f.userId, novelId: f.novelId, chapterId: canonicalChapter.id, mode: 'balanced', intentSummary: 'Historical manual chapter.' })
+      const historicalRun = await prisma.agentRun.create({ data: { userId: f.userId, novelId: f.novelId, sessionId: f.sessionId,
+        chapterId: canonicalChapter.id, status: 'running', runtimeProtocolVersion: 0, taskRootId: null,
+        mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', startRequest: { prompt: '修改本章' } } })
+      await prisma.agentMessage.create({ data: { sessionId: f.sessionId, runId: historicalRun.id, role: 'user',
+        parts: [{ type: 'text', text: '修改本章' }] } })
+      const historical = { userId: f.userId, novelId: f.novelId, runId: historicalRun.id }
+      const historicalSpec = buildTaskSpec({ runId: historicalRun.id, novelId: f.novelId, chapterId: canonicalChapter.id, prompt: '修改本章' })
+      await prisma.agentRun.update({ where: { id: historicalRun.id }, data: { taskSpec: runtimeJson(historicalSpec).value } })
+      const root = await prepareStoryCompilation({ ...historical, chapterId: canonicalChapter.id, mode: 'balanced', intentSummary: 'Historical manual chapter.' })
       const rootCandidate = terminalCandidateSchema.parse({ exitState: { openLoops: [canonicalClaim] } })
-      await saveSceneTasks({ userId: f.userId, novelId: f.novelId, compilationId: root.compilation.id, tasks: [{ purpose: 'Wait', entryState: rootCandidate.exitState,
+      await saveSceneTasks({ ...historical, compilationId: root.compilation.id, tasks: [{ purpose: 'Wait', entryState: rootCandidate.exitState,
         goal: 'Wait', obstacle: 'Parts', choice: 'Wait', cost: 'Time', turn: 'Waiting', exitState: rootCandidate.exitState,
         styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
       const savedRoot = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: root.compilation.id }, include: { bridge: true, sceneTasks: true } })
@@ -48,10 +57,12 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       terminalVerdicts: [{ path: 'exitState.openLoops.0', verdict: 'supported', basis: 'current', sourceEvidence: [{ segmentId: 'c0', quote: rootContent }] }] }),
       { current: rootContent, previous: null, terminalEvidence: context }, true, 8, rootCandidate)
       expect(inspected.complete).toBe(true)
-      await validateStoryContinuity({ userId: f.userId, novelId: f.novelId, compilationId: savedRoot.id, findings: [], independentCheck: 'complete',
+      await validateStoryContinuity({ ...historical, compilationId: savedRoot.id, findings: [], independentCheck: 'complete',
         terminalCandidate: rootCandidate, continuityCriticResponse: inspected.audit,
         coverage: compilerContinuityCoverage({ chapter: canonicalChapter, bridge: savedRoot.bridge, sceneTasks: savedRoot.sceneTasks, source: null, terminalCandidate: rootCandidate }, 11) })
-      await commitChapterBridge({ userId: f.userId, novelId: f.novelId, compilationId: savedRoot.id, ...rootCandidate,
+      await persistHumanityQualityReport({ ...historical, compilationId: savedRoot.id, chapterId: canonicalChapter.id, chapterRevision: 1,
+        mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
+      await commitChapterBridge({ ...historical, compilationId: savedRoot.id, ...rootCandidate,
         chapterSummary: rootContent, hookDecision: '', delayedHookReason: '', openingStructure: 'Wait', endingStructure: 'Wait' })
     }
     const candidate = terminalCandidateSchema.parse({ exitState: { objects: [factual ? 'The packet is sealed.' : 'The sealed packet remains with the guard.'],
@@ -86,7 +97,7 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
     }
     if (scenario === 'typed-sparse-repair') wire.findings.push({ findingId: 'f0', signal: 'object', severity: 'warning',
       reasonCode: 'historical_reference', explanation: 'The text supposedly says “a wholly nonexistent quoted manuscript passage”.',
-      suggestion: 'Check the original source.', manuscriptEvidence: [{ segmentId: 'c0' }] })
+      suggestion: 'Check the original source.', manuscriptEvidence: [{ segmentId: 'c0', quote: 'a wholly nonexistent quoted manuscript passage' }] })
     const raw = JSON.stringify(wire)
     let requestCount = 0
     const fetchMock = vi.fn(async () => {

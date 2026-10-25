@@ -33,14 +33,17 @@ const factHash = (fact: Pick<TerminalCarriedFact, 'field' | 'claim' | 'anchors' 
 /** Build a flat per-fact chain from this transaction's independent response.
  * New facts establish a new root; a bridge summary never supplies evidence. */
 export function buildTerminalFactProofs(input: { compilationId: string; chapter: { id: string; revision: number; orderIndex: number; content: string };
-  validation: unknown; stateHash: string; evidence: TerminalEvidenceContext; review: NonNullable<ReturnType<typeof currentTerminalReview>> }): TerminalCarriedFact[] {
+  validation: unknown; stateHash: string; evidence: TerminalEvidenceContext;
+  review: Omit<NonNullable<ReturnType<typeof currentTerminalReview>>, 'deliveryEligibility'>
+    & { deliveryEligibility?: NonNullable<ReturnType<typeof currentTerminalReview>>['deliveryEligibility'] } }): TerminalCarriedFact[] {
   const facts: TerminalCarriedFact[] = []
   for (const claim of terminalClaims(input.review.candidate)) {
     const field = claim.path.split('.')[1]
     if (!['knowledge', 'body', 'objects', 'relationships', 'openLoops'].includes(field)) continue
     const verdict = input.review.verdicts.find(item => item.path === claim.path)
-    const preservation = input.review.deliveryEligibility.eligible
-      ? input.review.deliveryEligibility.preservation?.inherited.find(proof => proof.path === claim.path) : undefined
+    const delivery = input.review.deliveryEligibility
+    const preservation = delivery?.eligible
+      ? delivery.preservation?.inherited.find(proof => proof.path === claim.path) : undefined
     if (!verdict || verdict.verdict !== 'supported' && !(verdict.verdict === 'unknown' && 'basis' in verdict && verdict.basis === 'inherited'
       && preservation && 'inheritance' in verdict && object(verdict.inheritance).currentState === 'uncertain')
       || !('sourceEvidence' in verdict) || !Array.isArray(verdict.sourceEvidence)) continue
@@ -85,10 +88,10 @@ export function buildTerminalFactProofs(input: { compilationId: string; chapter:
       orderIndex: input.chapter.orderIndex, bodyHash: bodyHash(input.chapter.content), candidateHash: input.review.candidateHash,
       validationHash: terminalAssessmentHash(input.validation), stateHash: input.stateHash, path: claim.path,
       previousChapterId: 'basis' in verdict && verdict.basis === 'inherited' ? input.evidence.previous?.id ?? null : null,
-      ...(preservation ? { preservation: { version: 1 as const, basis: 'preserved_canonical' as const,
+      ...(preservation && delivery?.preservation ? { preservation: { version: 1 as const, basis: 'preserved_canonical' as const,
         sourceProofHash: preservation.proofHash, sourceNodesHash: preservation.sourceNodesHash,
         auditHash: runtimeJson(input.validation && object(input.validation).continuityCriticResponse).hash,
-        policyHash: input.review.deliveryEligibility.preservation!.policyHash } } : {}) })
+        policyHash: delivery.preservation.policyHash } } : {}) })
     const fact = { field, claim: claim.claim, anchors, nodes }
     facts.push({ ...fact, segmentId: `t${facts.length}`, proofHash: factHash(fact), depth: nodes.length })
   }
