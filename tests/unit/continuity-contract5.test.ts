@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import type { Prisma } from '@prisma/client'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-candidate-contract.js'
 import { continuitySubjectIdentity } from '../../api/lib/agent/continuity-subject-identity.js'
 import { buildContinuityReviewManifest, continuityReviewV4Request, inspectContinuityV4, applyContinuityV4Repair,
   validateStoredContinuityV4Projection, buildContinuityInvalidRowRepair } from '../../api/lib/agent/continuity-review-v4.js'
-import { effectiveContinuityAudit, continuityPhasePlanSchema, validContinuityPhasePlan, continuityUsageRowHash, continuityQuestionOwner } from '../../api/lib/agent/continuity-coordinator.js'
+import { effectiveContinuityAudit, continuityPhasePlanSchema, validContinuityPhasePlan, continuityUsageRowHash, continuityQuestionOwner, readKnownContinuityReplay } from '../../api/lib/agent/continuity-coordinator.js'
 import { inspectAuthenticatedContinuityAssessment } from '../../api/lib/agent/authenticated-continuity-assessment.js'
 import { readAuthenticatedContinuityAssessment } from '../../api/lib/agent/authenticated-continuity-assessment.js'
 import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
@@ -38,6 +39,31 @@ function fixture() {
 }
 
 describe('explicit continuity contract5, frozen <=9 replay', () => {
+  it('refuses known-result fallback when the current effective pointer exists but is stale', async () => {
+    const db = { storyCompilation: { findFirst: vi.fn(async () => ({ chapter: { revision: 4 }, bridge: {}, runId: 'run',
+      validation: { independentCheck: 'unavailable', checkedRevision: 4, effectiveReport: { reportHash: 'stale' },
+        continuityCriticResponse: { contentHash: 'a'.repeat(64), rawResponse: { content: 'unchanged full raw' } } } })) } }
+    // No other delegate exists: choosing another historical report would fail
+    // this direct regression before reaching the immutable source reader.
+    expect(await readKnownContinuityReplay(db as unknown as Prisma.TransactionClient,
+      { userId: 'user', novelId: 'novel', runId: 'run' }, 'compilation')).toBeNull()
+  })
+  it('keeps a truncated transport invalid and repairs only its declared typed finding row', () => {
+    const f = fixture()
+    expect(inspectContinuityV4(JSON.stringify(f.wire), f.frozen, false)).toMatchObject({ complete: false, audit: { classification: 'response_incomplete' } })
+    f.wire.findings.push({ findingId: 'f0', signal: 'object', severity: 'warning', reasonCode: 'historical_reference',
+      explanation: 'The text supposedly says “a wholly nonexistent quoted manuscript passage”.',
+      suggestion: 'Check the original source.', manuscriptEvidence: [{ segmentId: 'c0' }] })
+    const first = inspectContinuityV4(JSON.stringify(f.wire), f.frozen)
+    expect(first.complete).toBe(false)
+    const corrected = applyContinuityV4Repair(first, JSON.stringify({ corrections: [{ table: 'findings', index: 0,
+      value: { findingId: 'f0', action: 'retract', reasonCode: 'insufficient_evidence',
+        explanation: 'The current source does not establish that allegation; the manuscript is unchanged.', manuscriptEvidence: [{ segmentId: 'c0' }] } }] }), true)
+    expect(corrected.complete).toBe(true)
+    expect(corrected.parsed!.record.findings).toEqual([])
+    for (const key of ['semanticChecks', 'terminalVerdicts', 'terminalProofVerdicts', 'terminalDispositions', 'issueDispositions'])
+      expect(corrected.parsed!.record[key]).toEqual((f.wire as Record<string, unknown>)[key])
+  })
   it('serializes only explicit question ownership from a full ToolContext', () => {
     const ctx = { userId: 'user', novelId: 'novel', runId: 'run', continuityOwnerSeq: 7,
       emit: () => {}, modelRuntime: { apiKey: 'private-placeholder' }, protectedChapterIds: new Set(['protected']),

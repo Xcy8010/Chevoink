@@ -18,9 +18,38 @@ import { loadPersistedEvents } from '../../api/lib/agent/events.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import * as credits from '../../api/lib/credits.js'
 import * as prices from '../../api/lib/billing/resolve-token-price.js'
+import { withRunLease } from '../../api/lib/agent/runtime-lease.js'
+import { assertContinuityOwner } from '../../api/lib/agent/continuity-coordinator.js'
 import type { AgentTool } from '../../api/lib/agent/tools/types.js'
 
 describe.runIf(available)('fresh native writing manifest2 actual bounded chain', () => {
+  it('accepts queued only through the exact current native lease and rejects stale, foreign or ended owners', () => fixture(async f => {
+    let lease = await claim(f)
+    await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'balanced',
+      model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+      tools: [], toolAuthority: [], protectedChapterIds: [], pinnedSkillVersions: [] },
+      snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+        messages: [{ role: 'user', content: '修改本章' }], successfulToolSignatures: [] } })
+    const fetcher = vi.fn(() => { throw Error('Owner checks cannot dispatch any provider') }); vi.stubGlobal('fetch', fetcher)
+    await expect(withRunLease(lease, tx => assertContinuityOwner(tx, { ...f, continuityNativeLease: lease }))).resolves.toBeUndefined()
+    await expect(prisma.$transaction(tx => assertContinuityOwner(tx, f))).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+    await expect(withRunLease(lease, tx => assertContinuityOwner(tx, { ...f, novelId: 'another-novel', continuityNativeLease: lease })))
+      .rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+    await expect(withRunLease(lease, tx => assertContinuityOwner(tx, { ...f, continuityNativeLease: { ...lease, ownerId: 'old-owner' } })))
+      .rejects.toMatchObject({ code: 'RUNTIME_LEASE_LOST' })
+    const old = lease
+    await pauseDurableTask(f.userId, f.runId)
+    const paused = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'run.paused' }, orderBy: { sequence: 'desc' } })
+    const resumed = await resumeDurableTask({ userId: f.userId, runId: lease.runId, pauseEventId: paused.id })
+    lease = await claim({ userId: f.userId, runId: resumed.run.id }, 'current-owner')
+    await expect(withRunLease(lease, tx => assertContinuityOwner(tx, { ...f, runId: lease.runId, continuityNativeLease: old })))
+      .rejects.toBeInstanceOf(Error)
+    await prisma.agentRun.update({ where: { id: lease.runId }, data: { usage: { authorEnded: { fulfilled: false } } } })
+    await expect(withRunLease(lease, tx => assertContinuityOwner(tx, { ...f, runId: lease.runId, continuityNativeLease: lease })))
+      .rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+    expect(fetcher).not.toHaveBeenCalled()
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+  }))
   it.each(['no-effect', 'merged-revision', 'merged-revision-restart'] as const)('%s uses original receipts and deterministic completion', scenario => fixture(async f => {
     let lease = await claim(f)
     const changed = scenario !== 'no-effect'

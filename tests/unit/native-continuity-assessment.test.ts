@@ -73,6 +73,14 @@ function fixture() {
 }
 
 describe('readonly native continuity provenance', () => {
+  it('authenticates historical operations without inventing a current audit candidate', async () => {
+    const f = fixture()
+    const entries = await readNativeContinuityAssessments(f.tx as unknown as Prisma.TransactionClient,
+      { userId: 'user', novelId: 'novel', runId: 'run' }, 'task', ['run'],
+      { compilationId: 'compilation', chapterId: 'chapter', currentAudit: {}, related: () => true }, f.artifacts)
+    expect(entries).toHaveLength(2)
+    expect(entries?.every(entry => entry.committed && !entry.current)).toBe(true)
+  })
   it('authenticates an original work21 UNKNOWN from the same real billing snapshot shape', async () => {
     const f = fixture(), origin = f.operations[0], input = origin.inputSnapshot as { input: { work: Record<string, unknown> } }, work = input.input.work
     const context = (work.sourceBodies as typeof f.frozen.bodies).terminalEvidence

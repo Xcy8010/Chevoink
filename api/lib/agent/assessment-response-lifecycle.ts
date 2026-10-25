@@ -413,7 +413,7 @@ export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClien
     const meta = object(claimed?.metadata)
     if (!second || !object(second.audit) || runtimeJson(observed.audit).hash !== runtimeJson(second.audit).hash
       || !meta || runtimeJson(meta.input).hash !== runtimeJson(input).hash || runtimeJson(meta.original).hash !== runtimeJson(original.audit).hash
-      || runtimeJson(meta.request).hash !== runtimeJson(continuityReassessmentRequest(input.system, input.content, original, input.bodies, false, 6)).hash)
+      || runtimeJson(meta.request).hash !== runtimeJson(continuityReassessmentRequest(input.system, input.content, original, input.bodies, false, input.reassessmentProtocol)).hash)
       throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原局部修复与唯一请求槽、实际响应不一致。')
   }
   const completeFrame = (frame: Record<string, unknown> | null) => frame?.transportComplete === true && frame.finishReason === 'stop'

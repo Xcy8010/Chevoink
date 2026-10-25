@@ -138,7 +138,7 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
       .rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
     expect(fetcher).toHaveBeenCalledTimes(2)
   }))
-  it('keeps a closed old2 failure frozen and admits contract3 only after a real author Continue', () => fixture(async f => {
+  it('keeps a closed old2 failure frozen without treating author Continue as a new contract grant', () => fixture(async f => {
     const { ctx } = await retryFixture(f, new AbortController())
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     const candidate = terminalCandidateSchema.parse({ exitState: { action: '人物走进门。' } })
@@ -181,13 +181,12 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
     expect(start.createdAt.getTime()).toBeGreaterThan(Math.max(...oldArtifacts.map(row => row.createdAt.getTime())))
     expect(await prisma.$transaction(async tx => readQualityReviewAdmission(tx, await tx.agentRun.findUniqueOrThrow({ where: { id: f.runId } }))))
       .toEqual({ id: `author-continue:${pause.id}`, at: start.createdAt })
-    expect(await runLegacyContinuityReview(continued, input)).toMatchObject({ complete: true, audit: { responseContract: 3 } })
-    expect(await runLegacyContinuityReview(continued, input)).toMatchObject({ complete: true, audit: { responseContract: 3 } })
-    expect(fetcher).toHaveBeenCalledTimes(3)
+    await expect(runLegacyContinuityReview(continued, input)).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+    await expect(runLegacyContinuityReview(continued, input)).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+    expect(fetcher).toHaveBeenCalledTimes(2)
     expect(await prisma.aiUsageLog.findMany({ where: { id: { in: oldPayments.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(oldPayments)
     expect(await prisma.agentArtifact.findMany({ where: { id: { in: oldArtifacts.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(oldArtifacts)
-    const next = await prisma.agentArtifact.findFirstOrThrow({ where: { runId: f.runId, metadata: { path: ['callId'], equals: continued.callId } } })
-    expect(next.metadata).toMatchObject({ input: { reassessmentProtocol: 5 } })
+    expect(await prisma.agentArtifact.count({ where: { runId: f.runId, metadata: { path: ['callId'], equals: continued.callId } } })).toBe(0)
   }))
   it.each(['fresh4', 'frozen3'] as const)('persists %s and commits the same reviewed chapter without buying another check', variant => fixture(async f => {
     const { ctx, compilation } = await retryFixture(f, new AbortController())
@@ -328,20 +327,15 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
         const next = await continuityValidateTool.execute({ ...ctx, callId: 'changed-input' }, { chapterId: f.chapterId,
           terminalState: scenario === 'known-new-candidate' ? terminalCandidateSchema.parse({ exitState: { action: '人物走进门' } }) : candidate,
           ...(scenario === 'focus-only' ? { focus: '核对当前正文' } : {}) }).catch(error => ({ outcome: 'failed', failureCode: error.code, output: error.message }))
-        const allowed = scenario.startsWith('known-new-body') || scenario === 'known-new-candidate' || scenario === 'delayed-call-persistence'
-        if (allowed) expect(next, JSON.stringify(next)).not.toMatchObject({ outcome: 'failed' })
-        expect(fetcher).toHaveBeenCalledTimes(sends + (allowed ? 1 : 0))
-        expect(next.outcome === 'failed').toBe(!allowed)
+        // These inputs have no authenticated original review-cycle revision.
+        // A direct DB body edit, candidate change or Continue is no fee grant.
+        expect(next.outcome).toBe('failed')
+        expect(fetcher).toHaveBeenCalledTimes(sends)
         const after = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
         expect(after.filter(row => payments.some(old => old.id === row.id))).toEqual(payments)
         expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).taskSpec).toEqual(frozen)
-        expect(after).toHaveLength(payments.length + (allowed ? 1 : 0))
+        expect(after).toHaveLength(payments.length)
         expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(after.filter(row => row.billingStatus === 'settled').length)
-        if (allowed) {
-          const current = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-          expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).validation)
-            .toMatchObject({ independentCheck: 'complete', checkedRevision: current.revision })
-        }
       } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
     }, undefined, '写本章'))
   it('keeps a changed candidate blocked between the observed primary response and the old second-pass claim', () => fixture(async f => {
@@ -437,15 +431,15 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
         if (known) expect(await prisma.$transaction(tx => readContinuedContinuityEvidence(tx, fresh, { compilationId: compilation.id })))
           .toMatchObject({ coverage: { protocolVersion: 7 } })
         const result = await continuityValidateTool.execute(fresh, { compilationId: compilation.id }).catch(error => ({ outcome: 'failed', failureCode: error.code }))
-        expect(result.outcome === 'failed').toBe(!known)
+        expect(result.outcome).toBe('failed')
         if (!known) expect(result).toMatchObject({ failureCode: 'CONTINUITY_REPORT_INCOMPLETE' })
-        expect(fetcher).toHaveBeenCalledTimes(known ? 2 : 1)
+        expect(fetcher).toHaveBeenCalledTimes(1)
         const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
-        expect(saved.validation).toMatchObject({ independentCheck: known ? 'complete' : 'unavailable', coverage: { protocolVersion: known ? 8 : 7 }, ...(known ? { errorCount: 0 } : {}) })
+        expect(saved.validation).toMatchObject({ independentCheck: 'unavailable', coverage: { protocolVersion: 7 } })
         const reservations = await prisma.agentArtifact.findMany({ where: { runId: f.runId, artifactType: 'continuityReview' } })
         const allPayments = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
         await continuityValidateTool.execute(fresh, { compilationId: compilation.id }).catch(() => {})
-        expect(fetcher).toHaveBeenCalledTimes(known ? 2 : 1)
+        expect(fetcher).toHaveBeenCalledTimes(1)
         expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(allPayments)
         expect(await prisma.agentArtifact.count({ where: { runId: f.runId, artifactType: 'continuityReview' } })).toBe(reservations.length)
         expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: payments[0].id } })).toEqual(payments[0])
@@ -500,9 +494,9 @@ describe('legacy continuity zero-fee 429 actual tool lifecycle in PostgreSQL', (
       expect(native).toHaveLength(1)
       await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 5, type: 'review.reconciled', createdAt: new Date(resultAt.getTime() + 30),
         payload: JSON.parse(JSON.stringify({ ...pending, receipt: native[0].receipt })) } })
-      expect((await continuityValidateTool.execute(fresh, { compilationId: compilation.id })).outcome).not.toBe('failed')
-      await continuityValidateTool.execute(fresh, { compilationId: compilation.id })
-      expect(fetcher).toHaveBeenCalledTimes(4)
+      await expect(continuityValidateTool.execute(fresh, { compilationId: compilation.id })).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+      await continuityValidateTool.execute(fresh, { compilationId: compilation.id }).catch(() => {})
+      expect(fetcher).toHaveBeenCalledTimes(3)
       for (const payment of payments) expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: payment.id } })).toEqual(payment)
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(body)
     } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
@@ -822,10 +816,22 @@ describe('complete continuity assessment lifecycle in actual PostgreSQL', () => 
               payload: JSON.parse(JSON.stringify({ ...pending, receipt: native[0].receipt })) } })
           } else if (!['stale-after-claim', 'stale-second-bound'].includes(scenario)) expect(await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, f))).toHaveLength(1)
           fetcher.mockImplementation(async () => { sends++; return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '{"findings":[]}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } }) })
-          expect((await continuityValidateTool.execute(fresh, { compilationId: compilation.id })).outcome).not.toBe('failed')
-          expect(sends).toBe(beforeFirst ? 1 : beforeSecond || scenario === 'unknown-first' ? 2 : 3)
-          await continuityValidateTool.execute(fresh, { compilationId: compilation.id })
-          expect(sends).toBe(beforeFirst ? 1 : beforeSecond || scenario === 'unknown-first' ? 2 : 3)
+          if (beforeFirst) {
+            expect((await continuityValidateTool.execute(fresh, { compilationId: compilation.id })).outcome).not.toBe('failed')
+            await continuityValidateTool.execute(fresh, { compilationId: compilation.id })
+            expect(sends).toBe(1)
+          } else {
+            const resumed = await continuityValidateTool.execute(fresh, { compilationId: compilation.id })
+              .catch(error => ({ outcome: 'failed', failureCode: error.code, output: error.message }))
+            expect(resumed.outcome).toBe('failed')
+            if (beforeSecond && !['stale-after-claim', 'stale-second-bound'].includes(scenario)) {
+              expect(resumed).toMatchObject({ failureCode: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED',
+                output: expect.stringContaining('原第二阶段已确认未发送') })
+              expect(resumed.output).toContain('不能安全重建冻结执行配置')
+            }
+            await continuityValidateTool.execute(fresh, { compilationId: compilation.id }).catch(() => {})
+            expect(sends).toBe(scenario === 'unknown-first' || beforeSecond ? 1 : 2)
+          }
           for (const payment of payments) expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: payment.id } })).toEqual(payment)
         }
       } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }

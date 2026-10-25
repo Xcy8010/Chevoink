@@ -162,7 +162,13 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
       content: continuityResponseInput4(input.content, input.bodies, input.terminalCandidate) }
     for (const prior of [old4, old3, { ...legacy, reassessmentProtocol: 2 as const }, legacy]) {
       const reusable = await prisma.$transaction(tx => readReusableLegacyContinuityAssessment(tx, ctx, prior))
-      if (reusable) { ctx.signal.throwIfAborted(); await input.assertCurrent(); return reusable }
+      if (reusable) {
+        const binding = (reusable.audit as unknown as { assessmentRequest?: { key?: string; inputHash?: string } }).assessmentRequest
+        if (ctx.continuityKnownResultOnly && (binding?.key !== ctx.continuityKnownResultOnly.assessmentKey
+          || binding.inputHash !== ctx.continuityKnownResultOnly.inputHash))
+          throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '原完整缓存报告已变化，未改选其他报告，也未派发新请求。')
+        ctx.signal.throwIfAborted(); await input.assertCurrent(); return reusable
+      }
     }
     if (frozen.targetType === 'story_compilation' && input.sourceScope) {
       const original = await prisma.$transaction(tx => readOriginalTaskRequest(tx, ctx))
@@ -209,6 +215,11 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   }
   await input.assertCurrent()
   const reusable = await prisma.$transaction(tx => readReusableLegacyContinuityAssessment(tx, ctx, frozen))
+  if (ctx.continuityKnownResultOnly) {
+    const binding = (reusable?.audit as unknown as { assessmentRequest?: { key?: string; inputHash?: string } } | undefined)?.assessmentRequest
+    if (!reusable?.complete || binding?.key !== ctx.continuityKnownResultOnly.assessmentKey || binding.inputHash !== ctx.continuityKnownResultOnly.inputHash)
+      throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '原完整缓存报告或当前输入已变化，未应用旧结果，也未派发新请求。')
+  }
   if (reusable) return reusable
   const reservation = await prisma.$transaction(tx => reserveLegacyContinuityAssessment(tx, ctx, frozen, input.assertCurrent))
   if (reservation === 'blocked') throw new DataAccessError(409, 'CONTINUITY_REPORT_INCOMPLETE', '原检查或复评尚未确认，本次未重放模型请求；保留真实记录等待作者继续。')
@@ -244,7 +255,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
       admissionId: input.assessmentAdmissionId!, usageIds: trace.records.map(record => record.usageId), observedContent, observedComplete }))
   }
   const last = observations.at(-1)
-  const original = replay?.inspected ?? inspectAuthenticatedContinuityAssessment(last?.content ?? raw, frozen, frozen.parserVersion !== 9 && frozen.reassessmentProtocol !== 3 && frozen.reassessmentProtocol !== 4 && frozen.reassessmentProtocol !== 5 || !!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length)
+  const original = replay?.inspected ?? inspectAuthenticatedContinuityAssessment(last?.content ?? raw, frozen, frozen.parserVersion !== 9 && frozen.parserVersion !== 10 && frozen.reassessmentProtocol !== 3 && frozen.reassessmentProtocol !== 4 && frozen.reassessmentProtocol !== 5 || !!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length)
   const assessed = await runContinuityReassessment({ original, bodies: input.bodies, system: input.system, content: input.content, reassessmentProtocol: frozen.reassessmentProtocol,
     billingKnown: replay?.billingKnown ?? textRequestsFinished(trace), providerComplete: replay?.providerComplete ?? (!!last && last.transportComplete !== false && last.finishReason === 'stop' && !last.toolCalls.length),
     slotUsed: replay?.slotUsed ?? [...stages.values()].some(stage => stage === 'output_recovery'), signal: ctx.signal,
@@ -1061,6 +1072,12 @@ export const continuityValidateTool = defineTool({
     const proposalCacheCurrent = !terminalEvidence || !terminalCandidate || terminalProposalCacheMatches({ spec: originalRequest.spec,
       preparedContext: compilation.preparedContext, validation: compilation.validation, chapter, source: sourceChapter, candidate: terminalCandidate, nextContext: terminalEvidence }, cacheDeliveryBinding)
     if (sourceUnchanged && proposalCacheCurrent && cachedValidation?.independentCheck === 'complete' && cachedValidation.checkedRevision === chapter.revision && compilerContinuityCoverageMatches(cachedValidation.coverage, coverage)) {
+      if (ctx.continuityKnownResultOnly) {
+        const binding = z.object({ assessmentRequest: z.object({ key: z.string(), inputHash: z.string() }) }).safeParse(previousAudit)
+        if (!binding.success || binding.data.assessmentRequest.key !== ctx.continuityKnownResultOnly.assessmentKey
+          || binding.data.assessmentRequest.inputHash !== ctx.continuityKnownResultOnly.inputHash)
+          throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '当前完整报告已被替换，未改选其他缓存报告或派发请求。')
+      }
       const findings = cachedValidation.findings ?? []
       const errorCount = cachedValidation.errorCount ?? findings.filter((item) => item.severity === 'error').length
       const warningCount = cachedValidation.warningCount ?? findings.filter((item) => item.severity === 'warning').length
@@ -1392,7 +1409,7 @@ export const chapterBridgeCommitTool = defineTool({
     const commitAudit = (compilation.validation as { continuityCriticResponse?: { parserVersion?: number } } | null)?.continuityCriticResponse
     const commitRequest = await readOriginalTaskRequest(db, ctx)
     const savedCommitCandidate = readTerminalCandidate(compilation.validation)
-    let commitEvidence = commitAudit && [8, 9].includes(commitAudit.parserVersion ?? 0) ? terminalEvidenceContext(compilation.chapter, commitSource, storedContinuityProtocol(compilation.validation) === 11 ? 2 : 1, terminalQuoteAddressVersion(commitRequest.spec),
+    let commitEvidence = commitAudit && [8, 9, 10].includes(commitAudit.parserVersion ?? 0) ? terminalEvidenceContext(compilation.chapter, commitSource, storedContinuityProtocol(compilation.validation) === 11 ? 2 : 1, terminalQuoteAddressVersion(commitRequest.spec),
       terminalCoverageInput(commitRequest.spec, compilation.preparedContext, compilation.chapter, savedCommitCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(commitSource, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined
     if (commitEvidence && savedCommitCandidate) commitEvidence = attachTerminalProposalInput(commitEvidence, { taskId: terminalProposalTaskId(commitRequest.spec, commitRequest.taskId),
       preparedContext: compilation.preparedContext, validation: compilation.validation, candidate: savedCommitCandidate })

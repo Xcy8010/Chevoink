@@ -51,7 +51,7 @@ export async function readNativeContinuityAssessments(db: Prisma.TransactionClie
     const rawWork = object(object(operation.inputSnapshot).input).work, rawChapter = object(object(rawWork).chapter), rawCompiler = object(object(rawWork).compiler)
     if (rawChapter.id !== target.chapterId || rawCompiler.id !== target.compilationId) continue
     const current = object(target.currentAudit)
-    const projectsCurrent = runtimeJson(object(rawWork).terminalCandidate ?? null).hash === runtimeJson(current.terminalCandidate ?? null).hash
+    const projectsCurrent = runtimeJson({ candidate: object(rawWork).terminalCandidate ?? null }).hash === runtimeJson({ candidate: current.terminalCandidate ?? null }).hash
       && typeof rawChapter.content === 'string' && runtimeJson({ content: rawChapter.content }).hash === current.terminalContentHash
     if (!projectsCurrent && (!target.related || !target.related({ terminalCandidate: object(rawWork).terminalCandidate, bodies: object(rawWork).sourceBodies }))) continue
     if (runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return null

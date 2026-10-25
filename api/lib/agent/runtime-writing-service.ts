@@ -309,7 +309,8 @@ async function verifyServiceInput(tx: RuntimeTx, lease: ServiceProofSubject, sav
       if (manifest.version !== 2) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '旧写作清单没有集中修订阶段。')
       const coordinator = await import('./continuity-coordinator.js')
       const work = await coordinator.authenticateNativeContinuityRevisionWork(tx,
-        { userId: lease.userId, novelId: saved.novelId, runId: lease.runId }, saved.work, verification.historical)
+        { userId: lease.userId, novelId: saved.novelId, runId: lease.runId,
+          ...(!verification.historical && verification.liveLease ? { continuityNativeLease: verification.liveLease } : {}) }, saved.work, verification.historical)
       if (runtimeJson(work.compiler).hash !== runtimeJson(expectedBaseline).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '集中修订没有同一前置编译回执。')
       if (work.kind === 'merged_revision') {
         const role = await readWritingReviewFrozenPrice(tx, { ...lease, novelId: saved.novelId }, parent.id, 'continuity', work.plan.modelPriceHash)

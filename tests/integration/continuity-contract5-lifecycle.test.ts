@@ -17,7 +17,8 @@ import * as prices from '../../api/lib/billing/resolve-token-price.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 describe.runIf(available)('contract5 actual legacy provider, report CAS and independent bridge gate', () => {
-  it.each(['complete', 'unknown', 'applied-typed-error', 'merged-revision', 'cancel-known-raw', 'wrong-owner'] as const)('%s preserves the original phase and V2 price', scenario => fixture(async f => {
+  it.each(['complete', 'typed-sparse-repair', 'unknown', 'applied-typed-error', 'merged-revision', 'cancel-known-raw', 'wrong-owner'] as const)('%s preserves the original phase and V2 price', scenario => fixture(async f => {
+    const completeScenario = scenario === 'complete' || scenario === 'typed-sparse-repair'
     const factual = scenario === 'applied-typed-error' || scenario === 'merged-revision'
     const content = factual ? 'The packet is sealed. The packet is open.' : 'The sealed packet remains with the guard.'
     await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0, status: 'running',
@@ -51,6 +52,9 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
           { segmentId: 'c0', quote: 'The packet is sealed.' }, { segmentId: 'c0', quote: 'The packet is open.' }] })
       Object.assign(wire.semanticChecks[1], { result: 'conflict', reasonCode: 'manuscript_conflict', explanation: issueExplanation, findingIds: ['f0'] })
     }
+    if (scenario === 'typed-sparse-repair') wire.findings.push({ findingId: 'f0', signal: 'object', severity: 'warning',
+      reasonCode: 'historical_reference', explanation: 'The text supposedly says “a wholly nonexistent quoted manuscript passage”.',
+      suggestion: 'Check the original source.', manuscriptEvidence: [{ segmentId: 'c0' }] })
     const raw = JSON.stringify(wire)
     let requestCount = 0
     const fetchMock = vi.fn(async () => {
@@ -59,7 +63,11 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       if (scenario === 'wrong-owner') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'run.started', payload: { type: 'run.started', seq: 2 } } })
       const revisedWire = { ...wire, findings: [], semanticChecks: wire.semanticChecks.map(row => ({ ...row, result: 'clear', reasonCode: 'consistent', findingIds: [] })),
         issueDispositions: [{ issueIndex: 0, outcome: 'repaired', reasonCode: 'consistent', explanation: 'The current manuscript retains only the sealed state.', manuscriptEvidence: [{ segmentId: 'c0' }] }] }
-      const responseRaw = scenario !== 'merged-revision' || requestCount === 1 ? raw : requestCount === 2
+      const responseRaw = scenario === 'typed-sparse-repair' && requestCount === 2
+        ? JSON.stringify({ corrections: [{ table: 'findings', index: 0, value: { findingId: 'f0', action: 'retract',
+          reasonCode: 'insufficient_evidence', explanation: 'The current source does not establish that allegation; the manuscript is unchanged.',
+          manuscriptEvidence: [{ segmentId: 'c0' }] } }] })
+        : scenario !== 'merged-revision' || requestCount === 1 ? raw : requestCount === 2
         ? JSON.stringify({ patches: [{ oldText: 'The packet is open.', newText: 'The guard keeps the packet sealed.' }], retainedFindings: [] }) : JSON.stringify(revisedWire)
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: responseRaw }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`,
         { headers: { 'content-type': 'text/event-stream' } })
@@ -74,10 +82,10 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       const result = await handleToolCall({ id: ctx.callId, name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilation.id, terminalState: candidate }) },
         [continuityValidateTool], ctx, bus, 'contract5-message', f.runId, undefined, () => bus.persist())
       await bus.close()
-      expect(result).toMatchObject({ reviewCompleted: true, reviewOutcome: scenario === 'complete' ? 'complete' : 'decision_required', part: { status: 'success' } })
+      expect(result).toMatchObject({ reviewCompleted: true, reviewOutcome: completeScenario ? 'complete' : 'decision_required', part: { status: 'success' } })
       expect(result).not.toHaveProperty('failureCode')
       expect((await loadPersistedEvents(f.runId, 1)).filter(event => event.type === 'tool.result')).toMatchObject([
-        { type: 'tool.result', toolName: 'continuity_validate', ok: true, reviewOutcome: scenario === 'complete' ? 'complete' : 'decision_required' }])
+        { type: 'tool.result', toolName: 'continuity_validate', ok: true, reviewOutcome: completeScenario ? 'complete' : 'decision_required' }])
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
       const validation = saved.validation as Record<string, unknown>, audit = validation.continuityCriticResponse as Record<string, unknown>
       expect(validation).toMatchObject({ independentCheck: 'complete', effectiveReport: { version: 1, reportHash: runtimeJson(audit).hash },
@@ -120,7 +128,7 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
         await expect(continuityValidateTool.execute({ ...ctx, callId: 'candidate-only-no-new-grant' }, { compilationId: compilation.id,
           terminalState: terminalCandidateSchema.parse({ exitState: { objects: ['The guard holds a different packet.'] } }) })).rejects.toBeInstanceOf(Error)
         expect(fetchMock).toHaveBeenCalledTimes(3)
-      } else if (scenario === 'complete') {
+      } else if (completeScenario) {
         const committed = await chapterBridgeCommitTool.execute({ ...ctx, callId: 'commit-current' }, { compilationId: compilation.id })
         expect(committed).not.toHaveProperty('failureCode')
         expect(committed).not.toMatchObject({ outcome: 'failed' })
@@ -136,11 +144,12 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       expect(effectiveContinuityAudit(bad)).toBeNull()
       expect(currentTerminalReview(bad, content, audit.terminalEvidence as Parameters<typeof currentTerminalReview>[2], binding)).toBeNull()
     }
-    expect(fetchMock).toHaveBeenCalledTimes(scenario === 'merged-revision' ? 3 : 1)
+    const requestTotal = scenario === 'merged-revision' ? 3 : scenario === 'typed-sparse-repair' ? 2 : 1
+    expect(fetchMock).toHaveBeenCalledTimes(requestTotal)
     const usage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })
-    expect(usage).toHaveLength(scenario === 'merged-revision' ? 3 : 1)
+    expect(usage).toHaveLength(requestTotal)
     expect(usage[0]).toMatchObject({ multiplierBps: 15000, billingSnapshot: price, usageSource: 'reported', billingStatus: 'settled' })
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(scenario === 'merged-revision' ? 3 : 1)
+    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(requestTotal)
     if (scenario !== 'merged-revision') expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
   }, undefined, '修改第一章，只输出标题和正文', { freezeWriting: true, continuityEvidenceProtocol: 1, continuityReportProtocol: 5,
     terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)

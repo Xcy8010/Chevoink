@@ -100,15 +100,7 @@ describe.runIf(available)('Continue reuses a settled empty optional proposal tab
     vi.spyOn(prices, 'resolveTokenPrice').mockResolvedValue({ version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 })
     const feature = flags.isAgent2FeatureEnabled
     vi.spyOn(flags, 'isAgent2FeatureEnabled').mockImplementation((name, owner) => name === 'storyCompiler' || name !== 'memory2' && feature(name, owner))
-    const main = vi.spyOn(ai, 'chatWithTools').mockImplementation(async () => {
-      const diagnostic = main.mock.calls.length > 1 ? {
-        toolResults: await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'tool.result', seq: { gt: 1 } }, select: { payload: true }, orderBy: { seq: 'asc' } }),
-        readiness: await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id)),
-      } : undefined
-      expect(main, diagnostic ? JSON.stringify(diagnostic) : undefined).toHaveBeenCalledOnce()
-      return { content: '', reasoning: '', finishReason: 'tool_calls', toolCalls: [{ id: 'synthetic-resume-new-call', name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilation.id }) }],
-        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } }
-    })
+    const main = vi.spyOn(ai, 'chatWithTools').mockRejectedValue(Error('A known complete whole pair needs no paid main selection turn'))
     await executeAgentRun({ ...f, prompt, mode: 'build', resume: true, authorContinue: { eventId: pause.id, afterSeq: 1 }, eventStartSeq: 1,
       modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
     const finished = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
@@ -132,7 +124,7 @@ describe.runIf(available)('Continue reuses a settled empty optional proposal tab
     expect(calls.map(row => (row.payload as { toolName: string }).toolName)).toEqual(['continuity_validate', 'chapter_bridge_commit'])
     for (let i = 0; i < 2; i++) await expect(continueLoopRun(f.userId, f.runId)).rejects.toMatchObject({ code: 'RUN_NOT_PAUSED' })
     expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).toEqual(finished)
-    expect(main).toHaveBeenCalledOnce(); expect(network).not.toHaveBeenCalled()
+    expect(main).not.toHaveBeenCalled(); expect(network).not.toHaveBeenCalled()
     expect(createHash('sha256').update(synthetic.raw).digest('hex')).toBe(original.audit.contentHash)
   }, undefined, recoveryPrompt, { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
 })

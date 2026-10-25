@@ -6,11 +6,11 @@ import { prisma } from '../../api/lib/prisma.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { prepareStoryCompilation, saveSceneTasks, recordStoryCompilerWrite, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
-import { readLegacyContinuityAssessment, bindLegacyContinuityAssessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { readLegacyContinuityAssessment, bindLegacyContinuityAssessment, markLegacyContinuityAssessmentApplication } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { readTerminalInputDecision } from '../../api/lib/agent/terminal-input-decision.js'
 import { buildContinuitySupplementQuestion, persistContinuitySupplementQuestion, continuitySupplementQuestionArgs,
   readContinuitySupplementState, knownContinuitySupplementCall, authenticateSupplementalContinuityReport,
-  executeContinuitySupplement, executeContinuitySupplementTool, claimContinuityPhase } from '../../api/lib/agent/continuity-coordinator.js'
+  executeContinuitySupplement, executeContinuitySupplementTool, claimContinuityPhase, readKnownContinuityReplay } from '../../api/lib/agent/continuity-coordinator.js'
 import { askUserTool } from '../../api/lib/agent/tools/interact-tools.js'
 import { continuityValidateTool, chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { executeAgentRun, handleToolCall } from '../../api/lib/agent/loop.js'
@@ -112,9 +112,14 @@ async function originalFailure(f: Fixture, conflict = false, qualityReady = fals
   const received = await prisma.$transaction(tx => readLegacyContinuityAssessment(tx, ctx, old.frozen))
   expect(received).toMatchObject({ recoveryReady: true, billingKnown: true, providerComplete: true, inspected: { complete: false } })
   const bound = bindLegacyContinuityAssessment(received.inspected, ctx, old.frozen)
-  await validateStoryContinuity({ ...f, compilationId: compilation.id, expectedChapterRevision: chapter.revision, terminalCandidate: draft.base,
-    findings: [], independentCheck: 'complete', coverage: compilerContinuityCoverage({ chapter, bridge: saved.bridge,
-      sceneTasks: saved.sceneTasks, source: null, terminalCandidate: draft.base }, 11), continuityCriticResponse: draft.bound.audit })
+  await prisma.$transaction(async tx => {
+    await validateStoryContinuity({ ...f, compilationId: compilation.id, expectedChapterRevision: chapter.revision, terminalCandidate: draft.base,
+      findings: [], independentCheck: 'complete', coverage: compilerContinuityCoverage({ chapter, bridge: saved.bridge,
+        sceneTasks: saved.sceneTasks, source: null, terminalCandidate: draft.base }, 11), continuityCriticResponse: draft.bound.audit }, tx)
+    // Direct validation is only the report producer. Reuse the real application
+    // writer in that same transaction, as the actual tool does; no fake receipt.
+    await markLegacyContinuityAssessmentApplication(tx, { ...ctx, callId: 'origin' }, draft.bound)
+  })
   await validateStoryContinuity({ ...f, compilationId: compilation.id, expectedChapterRevision: chapter.revision, terminalCandidate: old.candidate,
     findings: [], independentCheck: 'unavailable', coverage: old.coverage, continuityCriticResponse: bound.audit })
   if (qualityReady) await persistHumanityQualityReport({ ...f, compilationId: compilation.id, chapterId: chapter.id,
@@ -124,6 +129,7 @@ async function originalFailure(f: Fixture, conflict = false, qualityReady = fals
   await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'run.started', payload: { type: 'run.started', seq: 3 } } })
   const decision = await prisma.$transaction(tx => readTerminalInputDecision(tx, ctx, compilation.id))
   expect(decision).not.toBeNull()
+  expect(await prisma.$transaction(tx => readKnownContinuityReplay(tx, ctx, compilation.id))).toBeNull()
   const question = await prisma.$transaction(tx => buildContinuitySupplementQuestion(tx, ctx, decision!))
   await prisma.$transaction(tx => persistContinuitySupplementQuestion(tx, ctx, question))
   const before = {

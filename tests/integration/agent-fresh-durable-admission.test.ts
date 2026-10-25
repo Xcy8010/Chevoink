@@ -226,7 +226,7 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     expect(await prisma.agentExecutionState.count({ where: { taskRootId: spec.id } })).toBe(0)
     const source = await prisma.$transaction(tx => readFreshBootstrapAdmission(tx, f.userId, run.id))
     expect(source.root.requestSnapshot).toEqual([{ type: 'text', text: prompt }])
-    if (scenario === 'bounded-write') expect(spec.scope.writingCoordinationProtocol).toBe(1)
+    if (scenario === 'bounded-write') expect(spec.scope).toMatchObject({ writingCoordinationProtocol: 2, continuityReportProtocol: 5 })
     else expect(spec.scope.writingCoordinationProtocol).toBeUndefined()
     const initial = await initializePersistedLoopRun(f.userId, run.id)
     expect(initial.originalSpec).toEqual(source.root.specSnapshot)
@@ -450,9 +450,10 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
         if (criticCalls > 2) throw Error('A successful current-version report must not be paid twice')
         expect(body.messages[1].content).toContain(content)
         const report = criticCalls === 1 ? { findings: [],
-          semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: '当前全文只说明停在原地并且尚未行动，不把计划或指令当作已发生事件。', findingIds: [] })),
-          terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] }],
-          terminalProofVerdicts: [], terminalDispositions: [] } : { findings: [] }
+          semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reasonCode: 'consistent',
+            explanation: '当前全文只说明停在原地并且尚未行动，不把计划或指令当作已发生事件。', findingIds: [] })),
+          terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', reasonCode: 'consistent', explanation: '本章原文直接记载当前位置。', manuscriptEvidence: [{ segmentId: 'c0' }] }],
+          terminalProofVerdicts: [], terminalDispositions: [], issueDispositions: [] } : { findings: [] }
         delta = { content: JSON.stringify(report) }
       }
       return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: 'tool_calls' in delta ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`,
@@ -461,7 +462,7 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     vi.stubGlobal('fetch', fetcher)
     const admitted = await startLoopRun(f.userId, { sessionId: f.sessionId, novelId: f.novelId, chapterId: f.chapterId, prompt: '完整重写第一章正文。', mode: 'build', qualityMode: 'balanced' }, { humanOrigin: 'http' })
     const initial = await prisma.agentRun.findUniqueOrThrow({ where: { id: admitted.runId } })
-    expect(taskSpecSchema.parse(initial.taskSpec).scope.writingCoordinationProtocol).toBe(1)
+    expect(taskSpecSchema.parse(initial.taskSpec).scope).toMatchObject({ writingCoordinationProtocol: 2, continuityReportProtocol: 5 })
     await realBootstrap.dispatchFreshDurableRun(f.userId, admitted.runId)
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: admitted.runId } })).status,
       await bootstrapDiagnostic(admitted.runId, failures)).toBe('completed')

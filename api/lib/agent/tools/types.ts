@@ -25,11 +25,17 @@ export type ToolContext = {
   /** Current legacy run.started receipt, injected by the loop. It cannot be
    * supplied by tool arguments or reused across an owner restart. */
   continuityOwnerSeq?: number
+  /** Exact native owner captured by the admitted coordinator. Never accepted
+   * from tool arguments or inferred from a taskRootId. */
+  continuityNativeLease?: RunLeaseToken
   /** Dedicated frozen original-operation question. Injected only by the
    * continuity coordinator; never deserialized from model/tool parameters. */
   continuityQuestion?: { requestId: string }
   /** Admitted only from a durable exact answer or known phase response. */
   continuitySupplement?: { requestId: string; dispatchAllowed: boolean }
+  /** Full current-input cached assessment only. Missing/stale cache must stop
+   * before reservation, with no provider fallback. Server populated only. */
+  continuityKnownResultOnly?: { assessmentKey: string; inputHash: string }
   /** Original-cycle repair response selected by the server coordinator. */
   continuityRevision?: { responseArtifactId: string; plan: import('../continuity-coordinator.js').ContinuityPhasePlan }
   nativeContinuityRevision?: { operationId: string; work: unknown }

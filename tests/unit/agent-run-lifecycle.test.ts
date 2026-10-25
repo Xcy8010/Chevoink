@@ -9,7 +9,7 @@
 import { beginTextRequest, createTextRequestTrace, withTextRequestTrace } from '../../api/lib/text-request-trace.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-import type { AgentMessagePart, AgentStreamEventBody, AgentTodoItem, TaskSpec } from '../../shared/contracts/index.js'
+import type { AgentMessagePart, AgentStreamEvent, AgentStreamEventBody, AgentTodoItem, TaskSpec } from '../../shared/contracts/index.js'
 import type { AgentTool, ToolContext, ToolResult } from '../../api/lib/agent/tools/types.js'
 import type { chatWithTools as chatType } from '../../api/lib/ai-service.js'
 import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   update: vi.fn<(input: { data: Record<string, unknown> }) => Promise<{ taskSpec: TaskSpec | null; usage?: unknown; currentTurn?: number; startedAt?: Date; events?: Array<{ type: string; createdAt: Date }> }>>(async () => ({ taskSpec: null })), owner: vi.fn(async () => ({ userId: 'user' })), previous: vi.fn<(input?: { where?: Record<string, unknown> }) => Promise<unknown>>(async () => null),
   committedChapter: vi.fn(async () => false),
   realWritingCompletion: false,
+  terminalCommitting: false,
   savedWorkflow: vi.fn(async (): Promise<WritingWorkflowMilestone[]> => []),
   todos: vi.fn(async (): Promise<AgentTodoItem[]> => []),
   priorRuns: vi.fn(),
@@ -37,6 +38,8 @@ const mocks = vi.hoisted(() => ({
   hiddenTools: [] as AgentTool[],
   skillReceipt: vi.fn(async () => ({})), skillLoads: vi.fn(async (...args: unknown[]) => { void args }),
   db: {} as Record<string, unknown>, runs: new Map<string, Record<string, unknown>>(),
+  buses: new Map<string, { close: () => Promise<void> }>(),
+  runEvents: [] as Array<{ runId: string; seq: number; type: string; payload: AgentStreamEvent; createdAt: Date }>,
   chapters: [] as Array<{ id: string; authorId: string; novelId: string; orderIndex: number; orderInVolume: number; volumeId: string; volume: { orderIndex: number; novelId: string; archivedAt: null }; title: string; content: string; revision: number; archivedAt: null }>,
   admissionPrompt: '', sourcePrompt: null as string | null,
   currentOriginal: null as { prompt: string; taskSpec: TaskSpec } | null,
@@ -108,7 +111,8 @@ vi.mock('../../api/lib/prisma.js', () => {
     }
     if (key === 'volume') return matches(row.volume as Record<string, unknown>, value as Record<string, unknown>)
     if (value && typeof value === 'object' && !Array.isArray(value)) {
-      const clause = value as { in?: unknown[]; not?: unknown }
+      const clause = value as { in?: unknown[]; not?: unknown; path?: string[]; equals?: unknown }
+      if (clause.path) return clause.path.reduce<unknown>((current, part) => (current as Record<string, unknown> | null)?.[part], row[key]) === clause.equals
       if (clause.in) return clause.in.includes(row[key])
       if (Object.hasOwn(clause, 'not')) return row[key] !== clause.not
       throw new Error(`Unsupported fixture predicate: ${key}`)
@@ -141,7 +145,7 @@ vi.mock('../../api/lib/prisma.js', () => {
     update: async (input: Query & { data: Record<string, unknown> }) => {
       const result = await mocks.update(input)
       const id = String(input.where?.id ?? 'run')
-      const row = { ...mocks.runs.get(id), ...input.data, ...result }
+      const row = { ...mocks.runs.get(id), ...result, ...input.data }
       mocks.runs.set(id, row)
       return row
     },
@@ -179,14 +183,31 @@ vi.mock('../../api/lib/prisma.js', () => {
   agentChildExecutionGrant: { findUnique: vi.fn(async () => null), findMany: vi.fn(async () => []) },
   storyCompilation: { findMany: vi.fn(async () => []), findFirst: vi.fn(async () => null) },
   chapterQualityReport: { findFirst: vi.fn(async () => null) },
+  agentArtifact: { findMany: vi.fn(async () => []) },
   agentSession: { update: vi.fn(async () => ({})), findUnique: vi.fn(async () => null),
     findFirst: vi.fn(async (input: Query) => matches({ id: 'session', userId: 'user', novelId: 'novel' }, input.where) ? { spawnedFromRunId: null, spawnedFromSessionId: null } : null) },
   agentMessage: { upsert: mocks.persist, create: mocks.persist, findUnique: vi.fn(async () => null), findFirst: mocks.original, findMany: vi.fn(async () => []) },
+  agentRunEvent: {
+    findFirst: vi.fn(async (input: Query) => {
+      const order = input.orderBy as Record<string, 'asc' | 'desc'> | undefined
+      return mocks.runEvents.filter(row => matches(row, input.where)).sort((a, b) => {
+        const difference = order?.seq ? a.seq - b.seq : a.createdAt.getTime() - b.createdAt.getTime()
+        return Object.values(order ?? {})[0] === 'desc' ? -difference : difference
+      })[0] ?? null
+    }),
+    create: vi.fn(async ({ data }: { data: Omit<typeof mocks.runEvents[number], 'createdAt'> }) => {
+      if (mocks.runEvents.some(row => row.runId === data.runId && row.seq === data.seq)) throw new Error('Duplicate fixture run event')
+      const row = { ...structuredClone(data), createdAt: new Date(data.payload.ts) }
+      mocks.runEvents.push(row)
+      return row
+    }),
+  },
   agentConfigurationChange: { findMany: vi.fn(async () => []) },
   agentSkillRun: { upsert: mocks.skillReceipt },
   aiUsageLog: { findMany: vi.fn(async () => []) },
   $queryRaw: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const sql = strings.join('?').replace(/\s+/gu, ' ').trim()
+    if (sql === 'SELECT id FROM agent_runs WHERE id = ? FOR UPDATE') return mocks.runs.has(String(values[0])) ? [{ id: values[0] }] : []
     if (sql === 'SELECT id FROM novels WHERE id = ? FOR UPDATE') return values[0] === 'novel' ? [{ id: 'novel' }] : []
     if (sql === 'SELECT id FROM agent_runs WHERE id = ? AND user_id = ? AND novel_id = ? FOR UPDATE') {
       const row = mocks.runs.get(String(values[0]))
@@ -195,7 +216,14 @@ vi.mock('../../api/lib/prisma.js', () => {
     if (sql === 'SELECT id FROM chapters WHERE id = ? FOR SHARE') return mocks.chapters.filter(row => row.id === values[0]).map(({ id }) => ({ id }))
     throw new Error(`Unsupported fixture lock: ${sql}`)
   }),
-  $transaction: vi.fn(async (work: (tx: Record<string, unknown>) => Promise<unknown>) => work(db)),
+  $transaction: vi.fn(async (work: (tx: Record<string, unknown>) => Promise<unknown>) => {
+    const runs = structuredClone(mocks.runs), events = structuredClone(mocks.runEvents)
+    try { return await work(db) } catch (error) {
+      mocks.runs = runs
+      mocks.runEvents = events
+      throw error
+    }
+  }),
   }
   mocks.db = db
   return {
@@ -210,7 +238,6 @@ vi.mock('../../api/lib/agent/agents.js', () => ({
   applySessionToolPolicy: (tools: AgentTool[]) => tools,
 }))
 vi.mock('../../api/lib/agent/tools/registry.js', () => ({ allTools: [], getToolByName: (name: string) => [...mocks.tools, ...mocks.hiddenTools].find(tool => tool.name === name), toOpenAITools: mocks.openAITools }))
-vi.mock('../../api/lib/agent/active-runs.js', () => ({ registerActiveRun: vi.fn(), deregisterActiveRun: vi.fn() }))
 vi.mock('../../api/lib/agent/baseline.js', () => ({ clearRunBaselines: vi.fn(), getLastTouchedChapter: () => undefined }))
 vi.mock('../../api/lib/agent/context.js', () => ({ assembleContext: vi.fn(async () => ({ messages: [] })), insertSubagentCatalog: vi.fn() }))
 vi.mock('../../api/lib/agent/skills/receipts.js', () => ({ recordSkillLoads: mocks.skillLoads }))
@@ -262,12 +289,51 @@ vi.mock('../../api/lib/agent/research-sources.js', () => ({ readResearchReportFo
 vi.mock('../../api/lib/agent/research-recovery.js', () => ({ claimResearchReadHandoff: mocks.researchClaim,
   takeResearchReadHandoff: mocks.researchTake, saveResearchLimitationDelivery: mocks.researchPartial }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ resolveAgent2FeatureFlags: () => ({}) }))
-vi.mock('../../api/lib/agent/events.js', () => ({ createRunEventBus: () => ({ emit: mocks.emit, emitTransient: mocks.emit, persist: mocks.journal,
-  commitTerminal: async (body: AgentStreamEventBody, work: (tx: Record<string, unknown>) => Promise<unknown>,
-    preceding: Array<Extract<AgentStreamEventBody, { type: 'message.start' | 'text.final' }>> = []) => ({
-    result: await work(mocks.db), publish: () => { for (const event of [...preceding, body]) mocks.emit(event) },
-  }),
-}), disposeRunEventBus: mocks.dispose }))
+vi.mock('../../api/lib/agent/events.js', () => ({ createRunEventBus: (runId: string, initialSeq = 0) => {
+  let seq = initialSeq
+  const pending: AgentStreamEvent[] = []
+  const emit = (body: AgentStreamEventBody, persist = true) => {
+    const event = { ...body, runId, seq: ++seq, ts: new Date().toISOString() } as AgentStreamEvent
+    if (persist) pending.push(event)
+    mocks.emit(body)
+    return event
+  }
+  const persist = async () => {
+    await mocks.journal()
+    for (const event of pending.splice(0)) {
+      mocks.runEvents.push({ runId, seq: event.seq, type: event.type, payload: structuredClone(event), createdAt: new Date(event.ts) })
+    }
+  }
+  const bus = {
+    emit, emitTransient: (body: AgentStreamEventBody) => emit(body, false), persist,
+    close: persist,
+    get lastSeq() { return seq },
+    publishPersistedStart: (event: Extract<AgentStreamEvent, { type: 'run.started' }>) => {
+      if (event.runId !== runId || event.seq !== seq + 1 || !mocks.runEvents.some(row => row.runId === runId && row.seq === event.seq))
+        throw new Error('Fixture start must already be committed in sequence')
+      seq = event.seq
+      mocks.emit(event)
+    },
+    commitTerminal: async (body: AgentStreamEventBody, work: (tx: Record<string, unknown>) => Promise<unknown>,
+      preceding: Array<Extract<AgentStreamEventBody, { type: 'message.start' | 'text.final' }>> = []) => {
+      await persist()
+      mocks.terminalCommitting = true
+      let result: unknown
+      try { result = await work(mocks.db) } finally { mocks.terminalCommitting = false }
+      return { result, publish: () => { for (const event of [...preceding, body]) emit(event) } }
+    },
+  }
+  mocks.buses.set(runId, bus)
+  return bus
+}, getRunEventBus: (runId: string) => mocks.buses.get(runId),
+  disposeRunEventBus: async (runId: string, expected?: unknown) => {
+    const bus = mocks.buses.get(runId)
+    if (expected && bus !== expected) return
+    await mocks.dispose()
+    await bus?.close()
+    if (mocks.buses.get(runId) === bus) mocks.buses.delete(runId)
+  },
+}))
 vi.mock('../../api/lib/agent/permissions.js', () => ({ cancelAllQuestions: vi.fn(), grantAlwaysAllow: vi.fn(), hasAlwaysAllow: () => false, rejectAllApprovals: vi.fn(), waitForApproval: mocks.approval }))
 vi.mock('../../api/lib/agent/tools/todo-tools.js', () => ({ loadSessionTodoItems: mocks.todos, cancelTaskTodoItems: vi.fn(async () => []), renderTodoItems: (items: AgentTodoItem[]) => JSON.stringify(items) }))
 vi.mock('../../api/lib/agent/task-lineage.js', () => ({ getTaskRunIds: async () => ['run'] }))
@@ -294,7 +360,9 @@ async function executeAgentRun(params: Parameters<typeof executeRealAgentRun>[0]
   if (mocks.currentOriginal) {
     Object.assign(mocks.runs.get('run')!, { startRequest: { prompt: mocks.currentOriginal.prompt }, taskSpec: mocks.currentOriginal.taskSpec })
   }
-  return executeRealAgentRun(params)
+  // Real admission resumes after the existing event journal, never from seq zero.
+  const eventStartSeq = params.eventStartSeq ?? Math.max(0, ...mocks.runEvents.filter(event => event.runId === params.runId).map(event => event.seq))
+  return executeRealAgentRun({ ...params, eventStartSeq })
 }
 function admitCurrentOriginal(prompt: string) {
   mocks.currentOriginal = { prompt, taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt }) }
@@ -355,6 +423,8 @@ beforeEach(() => {
   mocks.assertLimitedDelivery.mockReset().mockResolvedValue(undefined)
   mocks.reviewProbe.mockReset().mockResolvedValue({ open: true })
   mocks.runs.clear()
+  mocks.runEvents = []
+  mocks.buses.clear()
   mocks.chapters = Array.from({ length: 19 }, (_, index) => ({ id: index === 0 ? 'c' : `chapter-${index + 1}`,
     authorId: 'user', novelId: 'novel', orderIndex: index + 1, orderInVolume: index + 1, volumeId: 'volume', volume: { orderIndex: 1, novelId: 'novel', archivedAt: null },
     title: `第${index + 1}章`, content: '当前章节正文', revision: 1, archivedAt: null }))
@@ -362,6 +432,7 @@ beforeEach(() => {
   mocks.todos.mockResolvedValue([])
   mocks.committedChapter.mockResolvedValue(false)
   mocks.realWritingCompletion = false
+  mocks.terminalCommitting = false
   mocks.savedWorkflow.mockReset().mockResolvedValue([])
   mocks.previous.mockResolvedValue(null)
   mocks.priorRuns.mockReset()
@@ -377,6 +448,40 @@ function context(): ToolContext {
     signal: new AbortController().signal, emit: mocks.emit,
   }
 }
+
+describe('legacy startup and owner event fencing in the real execution loop', () => {
+  it.each(['replaced', 'tampered'] as const)('stops an executor after its startup owner is %s without overwriting terminal state', async change => {
+    const read = tool('chapter_read', async () => {
+      const owner = mocks.runEvents.find(event => event.type === 'run.started')!
+      const payload = { ...owner.payload, title: '另一个执行实例' } as AgentStreamEvent
+      if (change === 'replaced') mocks.runEvents.push({ ...owner, seq: 100, payload: { ...payload, seq: 100 } })
+      else owner.payload = payload
+      return { output: '当前章节正文' }
+    })
+    mocks.tools = [read]
+    queue(response('', [call('owner-fenced-read')]), response('不能由旧 owner 提交的终态'))
+    await run()
+    expect(read.execute).toHaveBeenCalledOnce()
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'running' })
+    expect(events().filter(event => event.type === 'run.finished' || event.type === 'run.paused')).toEqual([])
+    expect(mocks.update.mock.calls.flatMap(([input]) => input.data.status ? [input.data.status] : [])).toEqual(['running'])
+    expect(mocks.dispose).toHaveBeenCalledOnce()
+  })
+
+  it('rolls back startup status when the proposed event sequence is already committed', async () => {
+    const payload = { type: 'run.started', runId: 'run', seq: 1, ts: new Date(0).toISOString(),
+      agent: { type: 'test', title: '旧执行', model: 'speed' }, mode: 'build', title: '旧启动' } as const
+    mocks.runEvents.push({ runId: 'run', seq: 1, type: payload.type, payload, createdAt: new Date(0) })
+    await executeRealAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c',
+      mode: 'build', prompt: '检查当前章节', eventStartSeq: 0 })
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'queued', startedAt: null })
+    expect(mocks.runEvents).toEqual([{ runId: 'run', seq: 1, type: payload.type, payload, createdAt: new Date(0) }])
+    expect(mocks.chat).not.toHaveBeenCalled()
+    expect(mocks.persist).not.toHaveBeenCalled()
+    expect(events().filter(event => event.type === 'run.started' || event.type === 'run.finished' || event.type === 'run.paused')).toEqual([])
+  })
+})
 
 describe('server assessment fallback in the real execution loop', () => {
   it('refreshes the same bridge after a failed assessment saves a new candidate', async () => {
@@ -631,7 +736,7 @@ describe('server assessment fallback in the real execution loop', () => {
       inputProtocolRecovery: checkpoint.inputProtocolRecovery } })
     expect((mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews?: unknown[] } }).checkpoint.pendingReviews ?? []).toEqual([])
   })
-  it('processes a received malformed terminal report after stagnation moves from three to four', async () => {
+  it('keeps a malformed terminal report pending without granting a new judgment at the stagnation boundary', async () => {
     const { runtimeJson } = await import('../../api/lib/agent/runtime-common.js')
     const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
     taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 20, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
@@ -671,12 +776,13 @@ describe('server assessment fallback in the real execution loop', () => {
       return { output: '终态已核验提交' }
     }, false)
     mocks.tools = [check, commit]
-    queue(response('', [call('received-report', check.name, '{"compilationId":"comp"}')]),
-      response('', [call('process-candidate', check.name, JSON.stringify({ compilationId: 'comp', inheritedProofs: [proofHash] }))]), response('已保存。'))
+    queue(response('', [call('received-report', check.name, '{"compilationId":"comp"}')]))
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
-    expect(check.execute).toHaveBeenCalledTimes(2); expect(commit.execute).toHaveBeenCalledOnce()
-    expect(events().some(event => event.type === 'run.paused')).toBe(false)
-    expect(events().at(-1), JSON.stringify(events().slice(-8))).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    // No original second judgment/correction grant is present in this old
+    // fixture. A received malformed report cannot buy a new main selector.
+    expect(check.execute).toHaveBeenCalledOnce(); expect(commit.execute).not.toHaveBeenCalled()
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
   })
   it('does not attribute a previous revision failure to the current incomplete review', async () => {
     const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
@@ -1333,7 +1439,12 @@ describe('server assessment fallback in the real execution loop', () => {
     const critic = tool('quality_analyze', async () => ({ output: '报告未保存', outcome: 'failed', failureCode: 'QUALITY_REPORT_SAVE_FAILED',
       reviewRequestFinished: { version: 1, chapterId: 'c', revision: 3, contentHash: 'a'.repeat(64) } }))
     mocks.tools = [critic]
-    mocks.journal.mockRejectedValueOnce(new Error('journal unavailable'))
+    let failed = false
+    mocks.journal.mockImplementation(async () => {
+      if (!failed && events().some(event => event.type === 'tool.result' && event.callId === 'receipt-not-durable')) {
+        failed = true; throw new Error('journal unavailable')
+      }
+    })
     queue(response('', [call('receipt-not-durable', critic.name, '{"compilationId":"comp"}')]))
     await run('写下一章')
     expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { pendingReviews: [{ callId: 'receipt-not-durable' }] } })
@@ -1354,7 +1465,14 @@ describe('server assessment fallback in the real execution loop', () => {
       toolName: 'quality_analyze', reconciliation: receipt }])
     mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'missing', 4))
     mocks.chat.mockClear()
-    if (journal === 'unavailable') mocks.journal.mockRejectedValueOnce(new Error('reconciliation journal unavailable'))
+    if (journal === 'unavailable') {
+      let failed = false
+      mocks.journal.mockImplementation(async () => {
+        if (!failed && events().some(event => event.type === 'review.reconciled' && event.callId === 'old-failure')) {
+          failed = true; throw new Error('reconciliation journal unavailable')
+        }
+      })
+    }
     critic.execute = vi.fn(async () => ({ output: '当前版本仍需复核', outcome: 'failed', failureCode: 'QUALITY_REPORT_INCOMPLETE' }))
     queue(response('', [call('new-version-check', critic.name, '{"compilationId":"comp"}')]), response('检查尚未完成。'))
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
@@ -1386,7 +1504,14 @@ describe('server assessment fallback in the real execution loop', () => {
       toolName: 'continuity_validate', retirement: receipt, persisted: journal === 'already-persisted' }])
     mocks.chat.mockClear()
     mocks.emit.mockClear()
-    if (journal === 'unavailable') mocks.journal.mockRejectedValueOnce(new Error('retirement journal unavailable'))
+    if (journal === 'unavailable') {
+      let failed = false
+      mocks.journal.mockImplementation(async () => {
+        if (!failed && events().some(event => event.type === 'review.reconciled' && event.callId === 'cancelled-check')) {
+          failed = true; throw new Error('retirement journal unavailable')
+        }
+      })
+    }
     critic.execute = vi.fn(async () => {
       // Retirement unlocks execution; it does not certify an assessment or grant progress/budget.
       expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { tokenBudget: original.tokenBudget,
@@ -1471,7 +1596,17 @@ describe('server assessment fallback in the real execution loop', () => {
     mocks.reviewReadiness.mockImplementation(async () => state)
     const reader = tool('quality_report_get', async () => {
       if (scenario === 'stale-feedback') state = { ...state, decisionFeedback: { ...feedback, contentHash: 'c'.repeat(64), key: 'c'.repeat(64) } }
-      if (scenario === 'persist-failure') mocks.journal.mockRejectedValueOnce(new Error('feedback journal unavailable'))
+      if (scenario === 'persist-failure') {
+        const update = mocks.update.getMockImplementation()!
+        let failed = false
+        mocks.update.mockImplementation(async input => {
+          const checkpoint = (input.data.usage as { checkpoint?: { stagnantBatches?: number; consumedReviewDecisionFeedback?: string[] } } | undefined)?.checkpoint
+          if (!failed && checkpoint?.stagnantBatches === 5 && checkpoint.consumedReviewDecisionFeedback?.includes(feedback.key)) {
+            failed = true; throw new Error('feedback checkpoint transaction unavailable')
+          }
+          return update(input)
+        })
+      }
       return { output: '当前报告与具体意见', reviewDecisionFeedback: feedback,
         ...(scenario === 'failed-read' ? { outcome: 'failed' as const, failureCode: 'REPORT_READ_FAILED' } : {}) }
     })
@@ -3152,7 +3287,8 @@ describe('ordinary chapter summary presentation', () => {
     let changed = false
     query.mockImplementation(async (...args) => {
       const sql = (args[0] as TemplateStringsArray).join('?')
-      if (['revision-race', 'report-race'].includes(scenario) && !changed && mocks.chat.mock.calls.length && sql.includes('FROM agent_runs') && sql.includes('FOR UPDATE')) {
+      if (['revision-race', 'report-race'].includes(scenario) && !changed && mocks.chat.mock.calls.length
+        && mocks.terminalCommitting && sql.includes('FROM agent_runs') && sql.includes('FOR UPDATE')) {
         changed = true
         if (scenario === 'revision-race') {
           chapter.revision += 1

@@ -128,7 +128,7 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
         return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '普通正文工具或旧写作清单没有集中修订模型阶段。')
       const coordinator = await import('./continuity-coordinator.js')
       const work = await coordinator.authenticateNativeContinuityRevisionWork(tx,
-        { userId: lease.userId, novelId: service.input.novelId, runId: lease.runId }, service.input.work)
+        { userId: lease.userId, novelId: service.input.novelId, runId: lease.runId, continuityNativeLease: lease }, service.input.work)
       if (work.kind !== 'merged_revision') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '无效果阶段不能调用修订模型。')
       const request = z.object({ endpoint: z.string(), body: z.record(z.string(), z.unknown()) }).parse(captured.request)
       if (runtimeJson(captured.price).hash !== runtimeJson(work.price).hash || request.endpoint !== `${work.route.baseUrl.replace(/\/$/u, '')}/chat/completions`
@@ -136,7 +136,7 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
         || request.body.temperature !== undefined && request.body.temperature !== 0 || request.body.stream !== true
         || runtimeJson(request.body.messages).hash !== runtimeJson([{ role: 'system', content: work.system }, { role: 'user', content: work.content }]).hash)
         return runtimeError('RUNTIME_RECEIPT_INVALID', '集中修订不能替换原当前报告、模型、价目或请求内容。')
-      await claimContinuityPhase(tx, { userId: lease.userId, novelId: service.input.novelId, runId: lease.runId }, {
+      await claimContinuityPhase(tx, { userId: lease.userId, novelId: service.input.novelId, runId: lease.runId, continuityNativeLease: lease }, {
         plan: work.plan, chapterId: work.chapter.id, phase: 'prose_revision', operationRef: parent.id, inputHash: parent.inputHash,
         ownerEpoch: `${lease.ownerId}:${lease.claimId}:${lease.epoch}` })
     }
@@ -286,7 +286,8 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
         }
       }
     }
-    if (parent.action === 'continuity_validate' && ['continuity_critic', 'continuity_reassessment'].includes(captured.step)) {
+    if (parent.action === 'continuity_validate' && ['continuity_critic', 'continuity_reassessment'].includes(captured.step)
+      && object(object(object(parent.inputSnapshot).input).work).version === 23) {
       const frozen = z.object({ input: z.object({ novelId: z.string(), work: z.object({ version: z.number(), chapter: z.object({ id: z.string() }),
         continuityManifest: continuityReviewManifestSchema.optional(), route: z.unknown(), price: z.unknown(), criticSystem: z.string(), criticInput: z.string() }) }) }).parse(parent.inputSnapshot).input
       if (frozen.work.version === 23) {
@@ -304,7 +305,7 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
           terminalCandidate: work.terminalCandidate, sourceScope: work.sourceScope, continuityManifest: frozen.work.continuityManifest,
           system: frozen.work.criticSystem, content: frozen.work.criticInput } as import('./assessment-response-lifecycle.js').LegacyAssessmentInput
         const phase = await coordinator.assertContinuityAssessmentSubject(tx, { userId: lease.userId, novelId: frozen.novelId, runId: lease.runId }, input)
-        await claimContinuityPhase(tx, { userId: lease.userId, novelId: frozen.novelId, runId: lease.runId }, {
+        await claimContinuityPhase(tx, { userId: lease.userId, novelId: frozen.novelId, runId: lease.runId, continuityNativeLease: lease }, {
           plan, chapterId: frozen.work.chapter.id, phase: captured.step === 'continuity_critic' ? phase : 'sparse_repair',
           operationRef: parent.id, inputHash: captured.step === 'continuity_critic' ? parent.inputHash : runtimeJson(request.body.messages).hash,
           ownerEpoch: `${lease.ownerId}:${lease.claimId}:${lease.epoch}` })

@@ -150,7 +150,8 @@ describe.runIf(available)('proof changes never purchase a new independent judgme
     expect(cp.writeProgress).toBe(1)
     expect(cp.progressSignatures).toEqual(expect.arrayContaining(checkpoint.progressSignatures))
     expect(cp.consumedReviewDecisionFeedback ?? []).toEqual(checkpoint.consumedReviewDecisionFeedback)
-    expect(cp.progressSignatures.some(key=>key.endsWith(',"terminal_supported"]'))).toBe(false)
+    expect(cp.progressSignatures.filter(key=>key.endsWith(',"terminal_supported"]')))
+      .toEqual(checkpoint.progressSignatures.filter(key=>key.endsWith(',"terminal_supported"]')))
     const ledger = (final.preparedContext as {terminalFactCoverage:{facts:Array<{id:string}>}}).terminalFactCoverage.facts
     for (const obligation of obligations) expect(ledger.some(fact=>fact.id===obligation.id)).toBe(true)
     expect(await prisma.agentRunEvent.count({where:{runId:f.runId,seq:{gt:4},type:'tool.result',payload:{path:['ok'],equals:false}}})).toBe(0)

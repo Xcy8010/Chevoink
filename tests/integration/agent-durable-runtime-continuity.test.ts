@@ -262,7 +262,8 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
   const criticStep = family !== 'continuity' ? 'quality_critic' : 'continuity_critic'
   const repairStep = family === 'quality-evidence' ? 'quality_evidence_correction' : family !== 'continuity' ? 'quality_repair' : 'continuity_repair'
   const retryStep = family === 'quality-evidence' ? 'quality_evidence_correction' : family !== 'continuity' ? 'quality_repair_retry' : 'continuity_repair_retry'
-  it.each(['replay', 'read-only', 'stop-resume', 'unknown', 'changed-input', 'wrong-attempt', 'wrong-step', 'skip-critic', 'damaged-prerequisite', 'ordered-repair', 'tools-leak', 'history-leak', 'late-result', 'concurrent', 'missing-result-event', 'cross-family', 'prepared-policy-conflict', 'old-paid-replay', 'old-paid-unknown'] as const)('%s binds paid work to the original pending tool', async scenario => {
+  it.each([...(['replay', 'read-only', 'stop-resume', 'unknown', 'changed-input', 'wrong-attempt', 'wrong-step', 'skip-critic', 'damaged-prerequisite', 'ordered-repair', 'tools-leak', 'history-leak', 'late-result', 'concurrent', 'missing-result-event', 'cross-family', 'prepared-policy-conflict', 'old-paid-replay', 'old-paid-unknown'] as const),
+    ...(family === 'continuity' ? ['typed23-missing-novel', 'typed23-missing-work-fields'] as const : [])])('%s binds paid work to the original pending tool', async scenario => {
     await fixture(async f => {
       let lease = await claim(f)
       const window = getCreditWindow()
@@ -275,7 +276,9 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
           messages: [{ role: 'user', content: '检查本章' }, { role: 'assistant', content: null, toolCalls: [{ id: 'critic-call', name: tool.name, arguments: '{}' }] }], successfulToolSignatures: [] } })
       const parent = await prepareToolCursorOperation(lease, { expectedRevision: 0, expectedHash: initial.frame.snapshotHash }, {
         key: 'exec:0', action: tool.name, callId: 'critic-call', targetId: f.chapterId, effectDomain: 'chapter',
-        operationInput: { callId: 'critic-call', args: {} }, effectiveArgs: {}, normalize: parsed => tool.parameters.parse(parsed),
+        operationInput: { callId: 'critic-call', args: {}, ...(scenario === 'typed23-missing-novel' ? { work: { version: 23 } }
+          : scenario === 'typed23-missing-work-fields' ? { novelId: f.novelId, work: { version: 23 } } : {}) },
+        effectiveArgs: {}, normalize: parsed => tool.parameters.parse(parsed),
       })
       const price: DurableTokenPrice = { version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000, rateCardId: 'aux-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } }
       const request = (step: import('../../api/lib/agent/runtime-auxiliary-model.js').AuxiliaryModelStep = criticStep) => ({
@@ -291,6 +294,16 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '{"findings":[]}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
       })
       vi.stubGlobal('fetch', fetchMock)
+      if (scenario === 'typed23-missing-novel' || scenario === 'typed23-missing-work-fields') {
+        await expect(chatWithTools(request())).rejects.toBeInstanceOf(z.ZodError)
+        expect(fetchMock).not.toHaveBeenCalled()
+        expect(await prisma.agentOperation.count({ where: { parentOperationId: parent.operation.id } })).toBe(0)
+        return
+      }
+      if (family === 'continuity') {
+        expect(parent.operation.inputSnapshot).not.toHaveProperty('input.novelId')
+        expect(parent.operation.inputSnapshot).not.toHaveProperty('input.work')
+      }
       if (scenario === 'prepared-policy-conflict' || scenario === 'old-paid-replay' || scenario === 'old-paid-unknown') {
         const original = request()
         const savedRequest = { endpoint: 'https://provider.invalid/v1/chat/completions', body: {
@@ -458,7 +471,7 @@ describe.runIf(available)('auxiliary model route inheritance (isolated PG)', () 
 })
 
 describe.runIf(available)('continuity validation and atomic commit', () => {
-  it('hands the original evidence and actual revision to recheck, then reuses the completed assessment', async () => {
+  it('preserves original evidence without buying a new assessment for an external revision lacking an original cycle receipt', async () => {
     await novelFixture(async f => {
       try {
       const before = '卡余80200，已付房租1800。碗8200成交。银行卡余71700。'
@@ -481,20 +494,18 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
       expect(first.output).toContain('卡余80200')
       expect(first.output).toContain('银行卡余71700')
       expect(first.summary).toContain('1 错误')
+      const original = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
+      const paid = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
       await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: before.replace('71700', '72000'), revision: { increment: 1 } } })
-      expect((await continuityValidateTool.execute(ctx, { compilationId })).summary).toContain('0 错误')
-      const secondInput = JSON.parse(String(vi.mocked(fetch).mock.calls[1][1]?.body)).messages[1].content
-      expect(secondInput).toContain('issueId')
-      expect(secondInput).toContain('before→after')
-      expect(secondInput).toContain('71700')
-      expect(secondInput).toContain('72000')
-      expect((await continuityValidateTool.execute(ctx, { compilationId })).summary).toContain('复用')
-      expect(completion).toHaveBeenCalledTimes(2)
+      await expect(continuityValidateTool.execute(ctx, { compilationId })).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+      await expect(continuityValidateTool.execute(ctx, { compilationId })).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+      expect(completion).toHaveBeenCalledOnce()
       const usage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, action: 'agent3ContinuityCritic' } })
-      expect(usage).toHaveLength(2)
+      expect(usage).toHaveLength(1)
       expect(usage.every(row => row.usageSource === 'reported' && row.billingStatus === 'settled')).toBe(true)
-      expect(await prisma.agentArtifact.count({ where: { runId: f.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentApplicationKey'], string_contains: '' } } })).toBe(2)
-      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({ checkedRevision: 2, checkedContent: before.replace('71700', '72000'), independentCheck: 'complete', checkRounds: 2 })
+      expect(await prisma.agentArtifact.count({ where: { runId: f.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentApplicationKey'], string_contains: '' } } })).toBe(1)
+      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toEqual(original.validation)
+      expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(paid)
       } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
     })
   })

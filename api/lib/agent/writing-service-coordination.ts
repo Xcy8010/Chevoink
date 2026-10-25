@@ -156,6 +156,7 @@ export async function executePreparedWritingBody(ctx: ToolContext, lease: RunLea
  * may reduce only its final parent receipt. Unknown outcomes propagate pending. */
 export async function executeCoordinatedWritingServices(ctx: ToolContext, lease: RunLeaseToken, parentOperationId: string, action: string) {
   if (lease.userId !== ctx.userId || lease.runId !== ctx.runId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '写作协调身份不一致。')
+  ctx = { ...ctx, continuityNativeLease: lease }
   const plan = await withRunLease(lease, async tx => {
     const genuine = await readAdmittedToolOperation(lease, { operationId: parentOperationId, action, novelId: ctx.novelId, callId: ctx.callId }, tx)
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })

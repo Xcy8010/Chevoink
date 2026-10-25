@@ -306,10 +306,12 @@ describe.runIf(available)('continuity evidence correction actual PostgreSQL effe
       expect(applied.some(item => typeof (item.metadata as Record<string, unknown> | null)?.assessmentAppliedReservationId === 'string')).toBe(true)
       if (scenario === 'offline-correction') expect(applied.some(item => typeof (item.metadata as Record<string, unknown> | null)?.assessmentApplicationKey === 'string')).toBe(true)
       await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '作者的新正文，门已经打开。', revision: { increment: 1 } } })
-      expect((await continuityValidateTool.execute({ ...fresh, callId: 'next-revision' }, { chapterId: f.chapterId })).outcome).not.toBe('failed')
-      expect(fetch).toHaveBeenCalledTimes(scenario === 'offline-correction' ? 3 : 2)
-      expect((await continuityValidateTool.execute({ ...fresh, callId: 'same-revision' }, { chapterId: f.chapterId })).outcome).not.toBe('failed')
-      expect(fetch).toHaveBeenCalledTimes(scenario === 'offline-correction' ? 3 : 2)
+      // This is an external edit, with no original review-cycle CAS receipt.
+      // Applying the old report does not grant another independent whole check.
+      await expect(continuityValidateTool.execute({ ...fresh, callId: 'next-revision' }, { chapterId: f.chapterId }))
+        .rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+      await continuityValidateTool.execute({ ...fresh, callId: 'same-revision' }, { chapterId: f.chapterId }).catch(() => {})
+      expect(fetch).toHaveBeenCalledTimes(scenario === 'offline-correction' ? 2 : 1)
     } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
   }))
 

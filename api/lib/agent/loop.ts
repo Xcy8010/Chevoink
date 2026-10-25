@@ -1867,6 +1867,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       let continuityQuestionId: string | undefined
       let continuitySupplement: ToolContext['continuitySupplement']
       let continuityRevision: ToolContext['continuityRevision']
+      let continuityKnownResultOnly: ToolContext['continuityKnownResultOnly']
       if (currentReviewState.value?.continuity === 'incomplete' && currentReviewState.value.compilationId) {
         const saved = await prisma.storyCompilation.findFirst({ where: { id: currentReviewState.value.compilationId,
           userId: params.userId, novelId: params.novelId }, select: { validation: true } })
@@ -2044,12 +2045,28 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       // The next mandatory assessment is a deterministic backend step. It
       // uses the same tool admission/journal below and needs no paid main turn
       // to choose a tool or wait for four stagnant batches.
+      if (!bootstrapCall && !pendingReviews.size && currentReviewState.value?.continuity === 'incomplete'
+        && currentReviewState.value.compilationId && tools.some(tool => tool.name === 'continuity_validate')
+        && params.mode === 'build' && !toolContext.inlineChild && toolContext.sandboxMode !== 'read_only') {
+        const compilationId = currentReviewState.value.compilationId
+        const proof = await prisma.$transaction(tx => import('./continuity-coordinator.js').then(module => module.readKnownContinuityReplay(tx, toolContext, compilationId)))
+        if (proof) {
+          continuityKnownResultOnly = proof
+          bootstrapCall = { id: `known_review_${proof.assessmentKey.slice(0, 40)}`, name: 'continuity_validate', arguments: JSON.stringify({ compilationId }) }
+        }
+      }
       if (!bootstrapCall && !pendingReviews.size && ['write', 'revise'].includes(taskSpec.intent)
         && params.mode === 'build' && !toolContext.inlineChild && toolContext.sandboxMode !== 'read_only'
         && !['conversation_only', 'proposal_only'].includes(taskSpec.writingPacing ?? '')) {
-        const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
-          { userId: params.userId, novelId: params.novelId, runId }))
-        if (readiness && !readiness.ready && readiness.requiredTools.length) {
+        // Observe with the same stale-source tolerance as ordinary progress.
+        // A prepared compiler or pre-existing body cannot precede this task's
+        // actual writer. Incomplete/unknown phases retain their recovery path.
+        const readiness = currentReviewState.value
+        const required = readiness?.requiredTools[0]
+        const status = required?.name === 'continuity_validate' ? readiness?.continuity : readiness?.quality
+        if (readiness?.compilationId && !readiness.ready && required && ['missing', 'stale'].includes(status ?? '')
+          && await prisma.$transaction(tx => import('./continuity-coordinator.js').then(module => module.hasCurrentWritingBodyCheckpoint(tx,
+            toolContext, { compilationId: readiness.compilationId!, chapterId: readiness.chapterId, revision: readiness.revision })))) {
           const next = await currentDispatch(readiness)
           if (next.kind === 'tool') bootstrapCall = { id: `required_${runtimeJson({ taskId: taskSpec.id, key: next.key }).hash.slice(0, 48)}`,
             name: next.tool.name, arguments: JSON.stringify(next.tool.args) }
@@ -2700,7 +2717,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           }
         }
         let reviewDispatch: PendingReviewCall | undefined
-        let explicitTerminalCandidate = Boolean(continuitySupplement && bootstrapCall?.id === call.id)
+        let explicitTerminalCandidate = Boolean((continuitySupplement || continuityKnownResultOnly) && bootstrapCall?.id === call.id)
         if (STATE_SENSITIVE_VALIDATORS.has(call.name)) {
           const validator = tools.find(tool => tool.name === call.name)
           const args = reviewPreflightArgs(call, validator)
@@ -2797,6 +2814,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           ...(continuityQuestionId && bootstrapCall?.id === call.id ? { continuityQuestion: { requestId: continuityQuestionId } } : {}),
           ...(continuitySupplement && bootstrapCall?.id === call.id ? { continuitySupplement } : {}),
           ...(continuityRevision && bootstrapCall?.id === call.id ? { continuityRevision } : {}),
+          ...(continuityKnownResultOnly && bootstrapCall?.id === call.id ? { continuityKnownResultOnly } : {}),
           ...(call.name === 'continuity_validate' && offlineContinuityCalls.has(call.id) ? { offlineContinuityOnly: offlineContinuityCalls.get(call.id) } : {}), callId: call.id, messageId }, bus, messageId, runId, undefined,
           continuitySupplement && bootstrapCall?.id === call.id ? async () => { await bus.persist() } : boundBootstrap ? async () => {
             controller.signal.throwIfAborted()

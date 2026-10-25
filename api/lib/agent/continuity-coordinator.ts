@@ -16,7 +16,8 @@ const object = (value: unknown): Record<string, unknown> => value && typeof valu
 // Prisma Date values cross the same JSON boundary used by existing durable
 // review receipts. runtimeJson remains strict about plain JSON everywhere.
 export const continuityUsageRowHash = (value: unknown) => runtimeJson(JSON.parse(JSON.stringify(value))).hash
-type Subject = { userId: string; novelId: string; runId: string; signal?: AbortSignal; continuityOwnerSeq?: number }
+type Subject = { userId: string; novelId: string; runId: string; signal?: AbortSignal; continuityOwnerSeq?: number;
+  continuityNativeLease?: import('./runtime-lease.js').RunLeaseToken }
 export const continuityQuestionOwner = (subject: Subject) => ({ userId: subject.userId, novelId: subject.novelId,
   runId: subject.runId, ownerSeq: z.number().int().nonnegative().parse(subject.continuityOwnerSeq) })
 export const continuityPhasePlanSchema = z.object({ version: z.literal(1), originalTaskId: z.string().min(1),
@@ -28,13 +29,100 @@ export const continuityPhasePlanSchema = z.object({ version: z.literal(1), origi
     limit: z.number().int().min(0).max(1), authoritySourceRef: z.string().min(1) }).strict()).max(5), hash }).strict()
 export type ContinuityPhasePlan = z.infer<typeof continuityPhasePlanSchema>
 const blocked = (message: string) => new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED', message)
+/** A prepared plan or an old manuscript is not this task's saved body. This
+ * reads the existing writer checkpoint; it grants no review phase or fee. */
+export async function hasCurrentWritingBodyCheckpoint(db: Prisma.TransactionClient, subject: Subject,
+  target: { compilationId: string; chapterId: string; revision: number }) {
+  const saved = await db.storyCompilation.findFirst({ where: { id: target.compilationId, userId: subject.userId,
+    novelId: subject.novelId, chapterId: target.chapterId, status: 'active' },
+    include: { bridge: true, chapter: true, sceneTasks: true } })
+  const current = !!saved?.chapter && saved.chapter.authorId === subject.userId && saved.chapter.novelId === subject.novelId
+    && saved.chapter.revision === target.revision && !!saved.chapter.content.trim()
+    && ['write', 'check', 'repair'].includes(saved.stage) && saved.bridge?.toChapterId === target.chapterId
+    && saved.bridge.targetRevision === target.revision && !saved.bridge.committedAt
+    && saved.sceneTasks.length > 0 && saved.sceneTasks.length <= 4
+    && saved.sceneTasks.every(row => row.chapterId === target.chapterId && row.status === 'writing')
+  if (!current || !saved?.runId) return false
+  const original = await readOriginalTaskRequest(db, subject), runs = await originalTaskRunIds(db, subject, original)
+  await (await import('./writing-scope.js')).assertWritingTarget(db, subject, { chapterId: target.chapterId })
+  return runs.includes(saved.runId)
+}
+
+/** Complete cached bytes may be applied before buying a main selection turn.
+ * This is an exact current-input proof, never permission for another request. */
+export async function readKnownContinuityReplay(db: Prisma.TransactionClient, subject: Subject, compilationId: string) {
+  const saved = await db.storyCompilation.findFirst({ where: { id: compilationId, userId: subject.userId, novelId: subject.novelId,
+    status: 'active' }, include: { chapter: true, bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
+  if (!saved?.chapter || !saved.bridge || !saved.runId || object(saved.validation).independentCheck !== 'unavailable'
+    || object(saved.validation).checkedRevision !== saved.chapter.revision) return null
+  const validation = object(saved.validation), audit = object(validation.continuityCriticResponse), raw = object(audit.rawResponse)
+  // A stale effective pointer is never an invitation to choose an older report.
+  if (Object.prototype.hasOwnProperty.call(validation, 'effectiveReport') || typeof audit.contentHash !== 'string' || typeof raw.content !== 'string') return null
+  const currentKey = object(audit.assessmentRequest).key
+  const eligible = new Map<string, { assessmentKey: string; inputHash: string }>()
+  const original = await readOriginalTaskRequest(db, subject), runs = await originalTaskRunIds(db, subject, original)
+  if (!runs.includes(saved.runId)) return null
+  await (await import('./writing-scope.js')).assertWritingTarget(db, subject, { chapterId: saved.chapter.id })
+  const candidate = (await import('./terminal-candidate-contract.js')).terminalCandidateSchema.safeParse(object(saved.validation).terminalCandidate)
+  if (!candidate.success) return null
+  const lifecycle = await import('./assessment-response-lifecycle.js')
+  const rows = await db.agentArtifact.findMany({ where: { runId: { in: runs }, artifactType: 'continuityReview',
+    metadata: { path: ['assessmentChapterId'], equals: saved.chapter.id } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1001 })
+  if (rows.length > 1000) return null
+  const protocol = object(object(saved.validation).coverage).protocolVersion
+  if (protocol !== 10 && protocol !== 11) return null
+  const source = await (await import('./compiler-continuity-source.js')).readCompilerContinuitySource(db, subject,
+    saved.chapter, saved.bridge.fromChapterId, protocol)
+  const scope = (await import('./continuity-source-authority.js')).compilerEvidenceScope(saved.chapter, source)
+  for (const row of rows) {
+    const metadata = object(row.metadata), parsed = lifecycle.legacyAssessmentInputSchema.safeParse(metadata.input)
+    if (!parsed.success || typeof metadata.callId !== 'string'
+      || currentKey !== undefined && currentKey !== metadata.continuityAssessmentRequestKey) continue
+    const input = parsed.data, context = input.bodies.terminalEvidence
+    if (!context || !input.terminalCandidate || !input.sourceScope || input.targetType !== 'story_compilation' || input.targetId !== compilationId
+      || input.chapterId !== saved.chapter.id || input.revision !== saved.chapter.revision
+      || input.bodies.current !== saved.chapter.content || input.bodies.previous !== (source?.content ?? null)
+      || runtimeJson({ candidate: input.terminalCandidate }).hash !== runtimeJson({ candidate: candidate.data }).hash
+      || runtimeJson(input.sourceScope).hash !== runtimeJson(scope).hash) continue
+    const evidence = await import('./terminal-evidence-context.js'), coverage = await import('./terminal-fact-coverage.js')
+    let current = evidence.terminalEvidenceContext(saved.chapter, source, protocol === 11 ? 2 : 1,
+      evidence.terminalQuoteAddressVersion(original.spec), coverage.terminalCoverageInput(original.spec, saved.preparedContext,
+        saved.chapter, candidate.data, context.factCoverage?.version, coverage.terminalCoverageProofs(source, context.spanAddressProtocol)),
+      context.verdictProtocol, context.spanAddressProtocol)
+    const proposals = await import('./terminal-proposal-context.js')
+    current = proposals.attachTerminalProposalInput(current,
+      { taskId: proposals.terminalProposalTaskId(original.spec, original.taskId), preparedContext: saved.preparedContext, validation: saved.validation, candidate: candidate.data })
+    if (runtimeJson(current).hash !== runtimeJson(context).hash) continue
+    const currentCoverage = (await import('./compiler-continuity-contract.js')).compilerContinuityCoverage({ chapter: saved.chapter,
+      bridge: saved.bridge, sceneTasks: saved.sceneTasks, source, terminalCandidate: candidate.data,
+      focus: String(object(saved.validation).reviewFocus ?? '') || undefined }, protocol)
+    if (input.bindingHash !== runtimeJson(currentCoverage).hash) continue
+    const received = await lifecycle.readReusableLegacyContinuityAssessment(db, { ...subject, callId: 'known-result-probe' } as ToolContext, input)
+    const binding = object(object(received?.audit).assessmentRequest)
+    if (received?.complete && received.audit.contentHash === audit.contentHash
+      && runtimeJson(received.audit.rawResponse).hash === runtimeJson(raw).hash
+      && binding.key === metadata.continuityAssessmentRequestKey && binding.inputHash === runtimeJson(input).hash)
+      eligible.set(String(binding.key), { assessmentKey: String(binding.key), inputHash: String(binding.inputHash) })
+  }
+  return eligible.size === 1 ? [...eligible.values()][0] : null
+}
 export async function assertContinuityOwner(db: Prisma.TransactionClient, subject: Subject) {
   subject.signal?.throwIfAborted()
+  if (subject.continuityNativeLease) {
+    const lease = subject.continuityNativeLease
+    if (lease.userId !== subject.userId || lease.runId !== subject.runId) throw blocked('连续性阶段不属于本 native 执行。')
+    // Preserve native goal -> run/root lock order. Every native caller also
+    // retains the outer lease transaction through its actual phase/effect.
+    return (await import('./runtime-lease.js')).withRunLeaseInTransaction(db, lease, async tx => {
+      const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId,
+        taskRootId: lease.taskRootId, runtimeProtocolVersion: 1, status: { in: ['queued', 'running'] } }, select: { usage: true } })
+      if (!run || object(run.usage).authorEnded !== undefined) throw blocked('当前 native 执行已停止或作者已结束，未应用迟到结果。')
+    })
+  }
   await db.$queryRaw`SELECT id FROM agent_runs WHERE id = ${subject.runId} FOR UPDATE`
   const run = await db.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId,
-    status: 'running' }, select: { id: true, taskRootId: true, usage: true } })
+    taskRootId: null, runtimeProtocolVersion: 0, status: 'running' }, select: { id: true, taskRootId: true, usage: true } })
   if (!run || object(run.usage).authorEnded !== undefined) throw blocked('当前执行已停止或作者已结束，未应用迟到连续性结果。')
-  if (run.taskRootId) return // The native caller holds the existing lease fence.
   const owner = await db.agentRunEvent.findFirst({ where: { runId: subject.runId, type: 'run.started' }, orderBy: { seq: 'desc' }, select: { seq: true } })
   if (subject.continuityOwnerSeq === undefined || owner?.seq !== subject.continuityOwnerSeq)
     throw blocked('原连续性执行 owner 已变化；保留已知费用与原始响应，未应用旧 owner 结果。')
@@ -147,7 +235,7 @@ export async function readContinuityRevisionReceipt(db: Prisma.TransactionClient
  * an actual unconsumed original-cycle transition, not a different candidate. */
 export async function claimLegacyContinuityVerification(db: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput,
   prior: Array<{ runId: string; metadata: unknown }>, operationRef: string) {
-  if (input.parserVersion === 10 || !prior.some(row => typeof object(row.metadata).continuityAssessmentRequestKey === 'string')) return
+  if (input.parserVersion === 10) return
   const known: LegacyAssessmentInput[] = []
   for (const row of prior) {
     const metadata = object(row.metadata)
@@ -157,6 +245,13 @@ export async function claimLegacyContinuityVerification(db: Prisma.TransactionCl
     const source = { ...ctx, runId: row.runId, callId: metadata.callId }
     try {
       const result = await (await import('./assessment-response-lifecycle.js')).readLegacyContinuityAssessment(db, source, old.data)
+      if (await confirmedLegacySecondNotDispatched(db, source, old.data, result.inspected.audit)) {
+        const subject = (value: LegacyAssessmentInput) => ({ chapterId: value.chapterId, revision: value.revision, bodies: value.bodies,
+          terminalCandidate: value.terminalCandidate ?? null, targetType: value.targetType, targetId: value.targetId, sourceScope: value.sourceScope ?? null })
+        if (runtimeJson(subject(old.data)).hash !== runtimeJson(subject(input)).hash)
+          throw blocked('原第二阶段已确认未发送，但当前正文、候选或来源与原预约不同；原许可、首份原始报告和费用保留，未改选新输入或重买首轮检查。')
+        throw blocked('原第二阶段已确认未发送，原许可、首份原始报告和费用均保留；但原不可变记录缺少实际端点、思考编码和上下文配置，不能安全重建冻结执行配置，也未重买首轮检查。')
+      }
       if (!result.billingKnown || !result.providerComplete || !result.recoveryReady) throw blocked('原检查仍有未决响应或费用。')
       known.push(old.data)
     } catch (error) {
@@ -167,11 +262,61 @@ export async function claimLegacyContinuityVerification(db: Prisma.TransactionCl
       const fees = await db.aiUsageLog.findMany({ where: { userId: ctx.userId, novelId: ctx.novelId, agentRunId: row.runId,
         chapterId: input.chapterId, action: { startsWith: 'agent3ContinuityCritic' } } })
       const billing = await import('./text-request-billing.js')
-      if (fees.some(fee => !billing.isKnownRejectedTextRequestAttempt(fee))) throw blocked('未派发证明仍有其他实际请求，不能恢复。')
+      if (fees.some(fee => !billing.isKnownRejectedTextRequestAttempt(fee)
+        && !(fee.billingStatus === 'not_dispatched' && fee.creditChargeMilli === 0 && billing.isKnownTextRequestBilling(fee))))
+        throw blocked('未派发证明仍有其他实际请求，不能恢复。')
     }
   }
+  // Legacy execution can follow an original native receipt. Its absence from
+  // the legacy reservation table is not a new independent-review grant.
+  await claimNativeContinuityVerification(db, ctx, input, operationRef)
   if (!known.length) return // A proved-unsent original phase remains unsent.
   await claimOriginalCycleVerification(db, ctx, input, known, operationRef)
+}
+
+async function confirmedLegacySecondNotDispatched(db: Prisma.TransactionClient, ctx: ToolContext,
+  input: LegacyAssessmentInput, originalAudit: unknown) {
+  const lifecycle = await import('./assessment-response-lifecycle.js'), billing = await import('./text-request-billing.js')
+  const key = lifecycle.legacyContinuityAssessmentKey(ctx, input)
+  const claims = await db.agentArtifact.findMany({ where: { runId: ctx.runId, artifactType: 'continuityReview',
+    metadata: { path: ['fullReassessmentKey'], equals: key } } })
+  const markers = await db.agentArtifact.findMany({ where: { runId: ctx.runId, artifactType: 'continuityReview',
+    metadata: { path: ['fullReassessmentNotDispatchedKey'], equals: key } } })
+  if (claims.length !== 1 || markers.length !== 1) return false
+  const claim = object(claims[0].metadata), marker = object(markers[0].metadata)
+  if (claim.version !== 1 || marker.version !== 1 || claim.callId !== ctx.callId || marker.callId !== ctx.callId
+    || marker.claimId !== claims[0].id || marker.outcome !== 'guard_failed_before_dispatch'
+    || !claim.input || !claim.original || !claim.request
+    || runtimeJson(claim.input).hash !== runtimeJson(input).hash || runtimeJson(claim.original).hash !== runtimeJson(originalAudit).hash
+    || !Array.isArray(claim.usageIds) || !Array.isArray(marker.usageIds)) return false
+  const firstIds = claim.usageIds
+  if (firstIds.some(id => typeof id !== 'string') || new Set(firstIds).size !== firstIds.length) return false
+  const firstFees = await db.aiUsageLog.findMany({ where: { id: { in: firstIds as string[] }, userId: ctx.userId, novelId: ctx.novelId,
+    agentRunId: ctx.runId, targetType: input.targetType, targetId: input.targetId, action: 'agent3ContinuityCritic' } })
+  if (firstFees.length !== firstIds.length || firstFees.some(fee => !billing.isKnownTextRequestBilling(fee))
+    || firstFees.filter(fee => !billing.isKnownRejectedTextRequestAttempt(fee)).length !== 1) return false
+  const raw = object(object(originalAudit).rawResponse)
+  if (raw.complete !== true || raw.encoding !== 'json-string' || typeof raw.content !== 'string') return false
+  let text: unknown
+  try { text = JSON.parse(raw.content) } catch { return false }
+  if (typeof text !== 'string') return false
+  const original = (await import('./authenticated-continuity-assessment.js')).inspectAuthenticatedContinuityAssessment(text, input, true)
+  if (runtimeJson(original.audit).hash !== runtimeJson(originalAudit).hash) return false
+  if (runtimeJson(claim.request).hash !== runtimeJson(lifecycle.continuityReassessmentRequest(input.system, input.content, original,
+    input.bodies, false, input.reassessmentProtocol)).hash) return false
+  const links = await db.agentArtifact.findMany({ where: { runId: ctx.runId, artifactType: 'continuityReview', AND: [
+    { metadata: { path: ['assessmentRequestOwnerKey'], equals: key } }, { metadata: { path: ['stage'], equals: 'reassessment' } }] } })
+  const linkedIds = links.flatMap(row => { const value = object(row.metadata); return value.version === 1 && value.callId === ctx.callId
+    && Array.isArray(value.usageIds) ? value.usageIds : [null] })
+  if (linkedIds.some(id => typeof id !== 'string') || new Set(linkedIds).size !== linkedIds.length
+    || new Set(marker.usageIds).size !== marker.usageIds.length
+    || runtimeJson([...linkedIds].sort()).hash !== runtimeJson([...marker.usageIds].sort()).hash) return false
+  const fees = await db.aiUsageLog.findMany({ where: { userId: ctx.userId, novelId: ctx.novelId, agentRunId: ctx.runId,
+    chapterId: input.chapterId, targetType: input.targetType, targetId: input.targetId,
+    action: 'agent3ContinuityCriticSecondPass', createdAt: { gte: claims[0].createdAt } } })
+  const secondIds = marker.usageIds
+  return fees.length === secondIds.length && fees.every(fee => secondIds.includes(fee.id)
+    && fee.billingStatus === 'not_dispatched' && fee.creditChargeMilli === 0 && billing.isKnownTextRequestBilling(fee))
 }
 
 export async function claimNativeContinuityVerification(db: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput, operationRef: string) {
