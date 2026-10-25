@@ -21,7 +21,7 @@ vi.mock('../../api/lib/agent/runtime-state.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../api/lib/agent/runtime-state.js')>(), readExecutionStateInTransaction: mocks.state, saveExecutionStateInTransaction: mocks.save,
 }))
 import { readCompletedWritingDelivery, readSavedWritingPresentation, readRecoveredChapterDelivery, readCompletedWritingPresentation, completedWritingPresentationText,
-  shouldUseSavedWritingPresentation, savedChapterPresentationProof, savedChapterPresentationSchema } from '../../api/lib/agent/writing-scope.js'
+  shouldUseSavedWritingPresentation, savedChapterPresentationProof, savedChapterPresentationSchema, allowsChapterOnlyCompletion } from '../../api/lib/agent/writing-scope.js'
 import { advanceDurableWritingDelivery } from '../../api/lib/agent/runtime-writing-delivery.js'
 
 const subject = { userId: 'author', novelId: 'novel', runId: 'run' }
@@ -56,6 +56,33 @@ function fixture(prompt = '完成第一章，只输出标题与正文。', title
   return { db: db as unknown as Prisma.TransactionClient, mocks: db, chapter, terminal, quality, spec, state }
 }
 beforeEach(() => { vi.clearAllMocks(); mocks.preference.mockResolvedValue(null) })
+
+it('delivers the authenticated frozen current chapter without requiring a second numbered legacy range', async () => {
+  const prompt = '完整重写当前章节，只输出标题和正文。', f = fixture(prompt)
+  expect(allowsChapterOnlyCompletion(prompt)).toBe(false)
+  expect(f.spec.scope.writing).toMatchObject({ kind: 'bounded', targets: [{ chapterId: 'chapter', orderIndex: 1 }], titleAndBodyOnly: true })
+  expect(f.terminal).toMatchObject({ status: 'completed', stage: 'commit', bridge: { toChapterId: 'chapter', targetRevision: 1 } })
+  expect(await readCompletedWritingDelivery(f.db, subject)).toMatchObject({ chapters: [{ id: 'chapter', revision: 1 }], presentationKind: 'auto' })
+  expect(f.mocks.storyCompilation.findFirst).toHaveBeenCalled()
+  expect(await advanceDurableWritingDelivery(token as never)).toMatchObject({ revision: 8 })
+  expect(mocks.save).toHaveBeenCalledOnce()
+  expect(f.chapter.revision).toBe(1)
+})
+
+it.each(['ordinary-presentation', 'extra-report', 'extra-artifact', 'empty-targets', 'wrong-target', 'bad-bridge', 'pending-provider'] as const)(
+  'frozen current chapter does not bypass %s', async invalid => {
+    const prompt = invalid === 'ordinary-presentation' ? '完整重写当前章节' : invalid === 'extra-report'
+      ? '完整重写当前章节，只输出标题和正文；另外提供分析报告。' : invalid === 'extra-artifact'
+        ? '完整重写当前章节，只输出标题和正文；顺便写首诗。' : '完整重写当前章节，只输出标题和正文。'
+    const f = fixture(prompt, invalid !== 'ordinary-presentation')
+    if (invalid === 'empty-targets') f.spec.scope.writing!.targets = []
+    if (invalid === 'wrong-target') f.mocks.chapter.findFirst.mockResolvedValue(null as never)
+    if (invalid === 'bad-bridge') f.terminal.bridge.targetRevision = 2
+    if (invalid === 'pending-provider') f.mocks.agentProviderAttempt.count.mockResolvedValue(1)
+    expect(await advanceDurableWritingDelivery(token as never)).toBeNull()
+    expect(mocks.save).not.toHaveBeenCalled()
+    expect(f.mocks.agentExecutionOutbox.create).not.toHaveBeenCalled()
+  })
 
 it.each(['修改第一章，另外写报告。', '修改第一章，并生成大纲。', '写第一章，顺便写首诗。', '写第一章，然后检查正文质量。'])(
   'does not finish additional original deliverables through local chapter recovery: %s', async prompt => {

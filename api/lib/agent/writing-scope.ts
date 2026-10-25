@@ -603,7 +603,11 @@ export function questionExpandsWritingScope(question: string, options: Array<{ l
 /** Auto-delivery is limited to a chapter artifact request. Explicit additional
  * human-requested work keeps the ordinary completion checks in control. */
 export function allowsChapterOnlyCompletion(prompt: string | null, requireExclusiveFormat = true): boolean {
-  if (!prompt || !legacyWritingRange(prompt) || (requireExclusiveFormat && !/(?:只(?:要|输出|给|需)|仅(?:输出|给|需)).{0,16}(?:标题|章名).{0,12}(?:正文|内容)|only.{0,20}title.{0,12}(?:body|text)/iu.test(prompt))) return false
+  return !!prompt && !!legacyWritingRange(prompt) && allowsChapterArtifactPresentation(prompt, requireExclusiveFormat)
+}
+
+function allowsChapterArtifactPresentation(prompt: string | null, requireExclusiveFormat: boolean): boolean {
+  if (!prompt || (requireExclusiveFormat && !/(?:只(?:要|输出|给|需)|仅(?:输出|给|需)).{0,16}(?:标题|章名).{0,12}(?:正文|内容)|only.{0,20}title.{0,12}(?:body|text)/iu.test(prompt))) return false
   const positive = prompt.split(/[。！？!?；;\n，,]+/u).filter(clause => !/(?:不要|无需|不用|不必|禁止|不得|不能|do not|don't)/iu.test(clause))
   if (!positive.some(clause => /(?:写|完成|修改|润色|起草|write|draft|revise)/iu.test(clause))) return false
   // A second independent action makes the output contract non-exclusive; do
@@ -903,9 +907,18 @@ export function savedChapterPresentationProof(subject: Subject, delivery: NonNul
 async function readChapterDelivery(tx: Prisma.TransactionClient, subject: Subject, presentationKind: 'auto' | 'completed_saved_only' | 'completed_wrap_up' | 'recovered_chapter_only') {
   await lockNovelActiveScope(tx, subject.novelId)
   const scope = await readWritingScope(tx, subject)
+  const originalSpec = taskSpecSchema.safeParse(scope.spec)
+  const originalWriting = originalSpec.success ? originalSpec.data.scope.writing : undefined
+  // readWritingScope authenticated these original targets and their bindings.
+  // A current-chapter admission has no numbered legacy range to rediscover.
+  // Historical inferred targets cannot create this presentation eligibility.
+  const frozenTargets = originalWriting?.kind === 'bounded' && originalWriting.targets.length > 0 && scope.writing?.kind === 'bounded'
+    && runtimeJson(originalWriting).hash === runtimeJson(scope.writing).hash
   if (scope.writing?.kind !== 'bounded' || !scope.writing.targets.length
     || (presentationKind === 'auto' && !scope.writing.titleAndBodyOnly)
-    || (presentationKind !== 'completed_wrap_up' && !allowsChapterOnlyCompletion(scope.prompt, presentationKind === 'auto'))) return null
+    || (presentationKind !== 'completed_wrap_up' && !(frozenTargets
+      ? allowsChapterArtifactPresentation(scope.prompt, presentationKind === 'auto')
+      : allowsChapterOnlyCompletion(scope.prompt, presentationKind === 'auto')))) return null
   const targets = scope.writing.targets.map(target => ({ ...target, chapterId: target.chapterId ?? scope.bindings?.targets.find(item => item.orderIndex === target.orderIndex)?.chapterId }))
   const presentation = await readWritingPresentation(tx, subject, targets)
   if (presentationKind === 'completed_saved_only' && presentation?.mode !== 'saved_only') return null
