@@ -23,6 +23,7 @@ import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import * as credits from '../../api/lib/credits.js'
 import * as prices from '../../api/lib/billing/resolve-token-price.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
+import { calculateV2UserChargeMilli } from '../../api/lib/billing/pricing.js'
 
 describe.runIf(available)('native continuity origin remains a real operation and receipt chain', () => {
   it.each([21, 22] as const)('authenticates work%s origin, pending current effect, cache and next-task inheritance', version => fixture(async f => {
@@ -97,7 +98,35 @@ describe.runIf(available)('native continuity origin remains a real operation and
     const binding = await readTerminalDraftBinding(prisma, { ...f, compilationId: compilation.id }, { taskId: f.spec.id, preparedContext: saved.preparedContext }, chapter, saved.validation, audit.terminalEvidence)
     expect(currentTerminalReview(saved.validation, content, audit.terminalEvidence, binding)).toMatchObject({ supported: false, proposals: { complete: false }, deliveryEligibility: { eligible: true, basis: 'current_supported_with_preserved_drafts' } })
     const protectedUsage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } }), protectedArtifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
-    expect(protectedUsage).toHaveLength(2)
+    // Native provider results settle through operation receipts, not legacy logs.
+    const nativeAttempts = () => prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId, kind: 'provider' } },
+      include: { usageReceipt: true, operation: { include: { events: { orderBy: { id: 'asc' } } } } }, orderBy: { id: 'asc' } })
+    const nativeLedger = () => prisma.creditLedgerEntry.findMany({ where: { userId: f.userId, kind: 'usage' }, orderBy: { id: 'asc' } })
+    const protectedAttempts = await nativeAttempts(), protectedLedger = await nativeLedger()
+    expect(protectedUsage).toHaveLength(0)
+    expect(protectedAttempts).toHaveLength(2); expect(protectedLedger).toHaveLength(2)
+    expect(new Set(protectedAttempts.map(row => row.operationId)).size).toBe(2)
+    expect(new Set(protectedLedger.map(row => row.idempotencyKey)).size).toBe(2)
+    for (const attempt of protectedAttempts) {
+      expect(attempt).toMatchObject({ attemptKey: '1', status: 'succeeded', runId: f.runId,
+        operation: { taskRootId: f.rootId, kind: 'provider', action: 'continuity_critic', status: 'succeeded' },
+        usageReceipt: { attemptId: attempt.id, source: 'reported', promptTokens: 12, completionTokens: 8, settlementStatus: 'settled' } })
+      expect(attempt.operation.events.filter(event => event.type === 'provider.result.recorded')).toEqual([
+        expect.objectContaining({ eventKey: `result:${attempt.id}:${attempt.resultHash}`, payload: { attemptId: attempt.id, status: 'succeeded', resultHash: attempt.resultHash } }),
+      ])
+      const ledger = protectedLedger.find(row => row.referenceId === attempt.operationId)
+      expect(ledger).toMatchObject({ userId: f.userId, kind: 'usage', sourceType: 'model_tokens', idempotencyKey: `operation:${attempt.operationId}`,
+        requestTokens: 12, responseTokens: 8,
+        metadata: { taskRootId: f.rootId, operationId: attempt.operationId, attemptId: attempt.id, requestHash: attempt.requestHash,
+          pricingVersion: 'credits-v2-itemized', rateCardId: 'native-origin', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 },
+          usageRevision: attempt.usageReceipt!.revision, observationHash: attempt.usageReceipt!.observationHash } })
+      expect(ledger!.deltaMilli).toBe(-calculateV2UserChargeMilli(12, 8, null, { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 }))
+      expect(ledger!.deltaMilli).toBeLessThan(0)
+      expect(attempt.operation.events.filter(event => event.type === 'credit.settled')).toEqual([
+        expect.objectContaining({ eventKey: `settlement:${attempt.operationId}`, payload: expect.objectContaining({ operationId: attempt.operationId,
+          attemptId: attempt.id, usageRevision: attempt.usageReceipt!.revision, amountMilli: -ledger!.deltaMilli, chargedMilli: -ledger!.deltaMilli, shortfallMilli: 0 }) }),
+      ])
+    }
     expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('复用') } })
     // Historical effect loss cannot be replaced by a child provider success.
     await prisma.$transaction(async tx => {
@@ -116,6 +145,8 @@ describe.runIf(available)('native continuity origin remains a real operation and
     expect(source && 'terminalInheritance' in source ? source.terminalInheritance?.map(fact => fact.claim) : []).toEqual(['The packet remains sealed.'])
     expect(network).toHaveBeenCalledTimes(2)
     expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(protectedUsage)
+    expect(await nativeAttempts()).toEqual(protectedAttempts)
+    expect(await nativeLedger()).toEqual(protectedLedger)
     expect(await prisma.agentArtifact.findMany({ where: { id: { in: protectedArtifacts.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(protectedArtifacts)
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).preparedContext).toMatchObject({ terminalProposalReview: { pending: [expect.objectContaining({ field: 'openLoops' })] } })
   }, undefined, '修改第一章，只输出标题和正文', { continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2, freezeWriting: true }))

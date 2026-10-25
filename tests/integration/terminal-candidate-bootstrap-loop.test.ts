@@ -8,6 +8,7 @@ import { readTerminalInheritance } from '../../api/lib/agent/terminal-inheritanc
 import * as agents from '../../api/lib/agent/agents.js'
 import { prepareStoryCompilation, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
 import { readOriginalTaskRequest } from '../../api/lib/agent/original-request.js'
+import { originalChapterReviewRequirements } from '../../api/lib/agent/chapter-review-requirements.js'
 import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
@@ -319,7 +320,10 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
     if (scenario === 'repeat') expect(readiness?.terminalReview).toMatchObject({ state: 'unverified', currentResultVerified: true })
     else expect(readiness?.terminalCorrection).toMatchObject({ paths: [rejectedPath] })
-    expect(readiness).toMatchObject({ quality: 'complete', requiredTools: [{ name: 'continuity_validate' }] })
+    expect(originalChapterReviewRequirements({ prompt: original.prompt, spec })).toEqual({ continuity: true, quality: true })
+    expect(readiness).toMatchObject({ quality: 'complete', requiredTools: scenario === 'repeat' ? [] : [{ name: 'continuity_validate' }] })
+    if (scenario === 'repeat') expect(readiness).toMatchObject({ continuity: 'complete', ready: true,
+      terminalReview: { state: 'unverified', currentResultVerified: true, deliveryEligible: false } })
     if (scenario === 'repeat') expect(readiness?.progressEvidence?.phases).toContain('terminal')
     else expect(readiness?.progressEvidence?.phases).not.toContain('terminal')
     const slots = terminalFeedbackSlots(readiness, { ...f, taskSpec: spec })!

@@ -221,6 +221,9 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       if (v4) {
         const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate' } })
         expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: 22, reassessmentProtocol: 6, continuityManifest: { version: 1 } } } })
+        expect(parent.inputSnapshot).toHaveProperty('input.work.sourceBodies.terminalEvidence')
+        expect(parent.inputSnapshot).not.toHaveProperty('input.work.sourceBodies.terminalEvidence.factCoverage')
+        expect(saved.validation).not.toHaveProperty('continuityCriticResponse.terminalEvidence.factCoverage')
         expect(saved.validation).toMatchObject({ independentCheck: 'complete', continuityCriticResponse: { parserVersion: 9, responseContract: 4, continuityV4: { version: 1, projections: { prose: { valid: true }, currentTerminal: { valid: true }, historicalCoverage: { valid: true }, draftProposals: { valid: true } } } } })
         expect(fetchMock).toHaveBeenCalledTimes(scenario === 'terminal-contract4-repair' ? 2 : 1)
         expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, kind: 'provider' } })).toBe(scenario === 'terminal-contract4-repair' ? 2 : 1)

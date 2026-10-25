@@ -1,5 +1,5 @@
 import { readCompilerContinuitySource } from './compiler-continuity-source.js'
-import { terminalEvidenceContext, terminalQuoteAddressVersion, terminalVerdictAuditVersion, terminalSpanAuditVersion } from './terminal-evidence-context.js'
+import { hasTerminalEvidenceProtocol, terminalEvidenceContext, terminalQuoteAddressVersion, terminalVerdictAuditVersion, terminalSpanAuditVersion } from './terminal-evidence-context.js'
 import { advanceTerminalCoverage, readTerminalCoverageState, terminalCoverageInput, terminalCoverageAuditVersion, terminalCoverageProofs } from './terminal-fact-coverage.js'
 import { attachTerminalProposalInput, prepareCompilerTerminalProposals, terminalProposalTaskId, type TerminalProposalPreparation } from './terminal-proposal-context.js'
 import { advanceTerminalProposals, readTerminalProposalState } from './terminal-proposal-review.js'
@@ -794,7 +794,9 @@ export async function validateStoryContinuity(input: {
   }
   input.signal?.throwIfAborted()
   const factCoverage = terminalCoverageInput(authorRequest?.spec, compilation.preparedContext, compilation.chapter, input.terminalCandidate, terminalCoverageAuditVersion(validation), terminalCoverageProofs(reviewSource, terminalSpanAuditVersion(validation)))
-  let terminalContext = factCoverage ? terminalEvidenceContext(compilation.chapter, reviewSource, protocol === 11 ? 2 : 1,
+  const authenticatedTerminalContext = (validation.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion === 9
+    && hasTerminalEvidenceProtocol(authorRequest?.spec)
+  let terminalContext = factCoverage || authenticatedTerminalContext ? terminalEvidenceContext(compilation.chapter, reviewSource, protocol === 11 ? 2 : 1,
     terminalQuoteAddressVersion(authorRequest?.spec), factCoverage, terminalVerdictAuditVersion(validation), terminalSpanAuditVersion(validation)) : undefined
   let proposalPreparation: TerminalProposalPreparation | undefined
   if (terminalContext && input.terminalCandidate && authorRequest) {
