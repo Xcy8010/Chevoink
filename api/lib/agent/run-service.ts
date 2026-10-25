@@ -520,7 +520,7 @@ export async function startLoopRunLocked(
       // contracts and durable continuation never refresh frozen resources.
       await syncBuiltinSkillCatalog(tx)
       const fresh = buildTaskSpec({ runId: created.id, novelId: session.novelId, chapterId,
-        prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1, localEditProtocol: 1, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2,
+        prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1, localEditProtocol: 1, continuityEvidenceProtocol: 1, continuityReportProtocol: 5, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2,
         researchAdmission, researchNavigationAdmission: researchAdmission, networkAdmission, authorWritingProtocol: 2, creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
       let frozen = fresh
       if (input.selection || fresh.scope.authorEffects?.manuscript) {
@@ -808,6 +808,18 @@ export async function resolveLoopRunQuestion(
   requestId?: string,
 ): Promise<{ resolved: boolean }> {
   const run = await findOwnedLoopRun(userId, runId)
+  const supplement = await prisma.$transaction(tx => import('./continuity-coordinator.js').then(module => module.answerContinuitySupplementQuestion(tx,
+    { userId, novelId: run.novelId, runId }, { requestId, callId, answer })))
+  if (supplement) {
+    if (supplement.newAnswer) {
+      const awakened = resolveQuestionAnswer(runId, callId, answer)
+      if (!awakened && !getActiveRun(runId)) {
+        if (run.status === 'awaiting_approval' || run.status === 'running') await pauseLegacyOrphanRun(userId, runId)
+        if (supplement.accepted) await continueLoopRun(userId, runId)
+      }
+    }
+    return { resolved: true }
+  }
   if (run.runtimeProtocolVersion > 0) {
     if (!requestId) throw new DataAccessError(409, 'QUESTION_REQUEST_REQUIRED', '请刷新原提问卡片后回答。')
     return resolveDurableQuestion({ userId, runId, callId, answer, requestId })

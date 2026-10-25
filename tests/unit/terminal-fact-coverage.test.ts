@@ -70,7 +70,8 @@ describe('fresh bounded terminal fact coverage', () => {
     const unknown = assess(empty, before, next, raw([], [{ id, outcome: 'unknown', reason: '全文不能确定该状态在章末是否持续。', sourceEvidence: [] }]))
     expect(unknown.inspected.complete).toBe(true)
     expect(unknown.review?.supported).toBe(false)
-    expect(terminalReviewFailure(unknown.validation, next.content, unknown.evidence)).toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' })
+    expect(terminalReviewFailure(unknown.validation, next.content, unknown.evidence)).toMatchObject({ reviewCompleted: true, reviewOutcome: 'decision_required' })
+    expect(terminalReviewFailure(unknown.validation, next.content, unknown.evidence)).not.toHaveProperty('failureCode')
     const after = advanceTerminalCoverage(spec, before, next, unknown.review!)!
     expect(after.facts).toEqual(before.terminalFactCoverage.facts)
     expect(after.lastReview.input.obligations).toHaveLength(1)

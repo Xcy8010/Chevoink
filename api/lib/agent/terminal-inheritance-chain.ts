@@ -117,7 +117,7 @@ export async function readTerminalInheritance(db: Prisma.TransactionClient, subj
     const validation = object(compilation?.validation), coverage = object(validation.coverage), audit = object(validation.continuityCriticResponse)
     let evidence = audit.terminalEvidence as TerminalEvidenceContext | undefined
     let deliveryBinding: TerminalDeliveryBinding | undefined
-    if (evidence && compilation && (audit.parserVersion === 9 || evidence.proposalChanges || context.terminalProposalReview)) {
+    if (evidence && compilation && (audit.parserVersion === 9 || audit.parserVersion === 10 || evidence.proposalChanges || context.terminalProposalReview)) {
       if (!compilation.runId) return null
       const original = await readOriginalTaskRequest(db, { ...subject, runId: compilation.runId })
       deliveryBinding = { taskId: terminalProposalTaskId(original.spec, original.taskId), preparedContext: compilation.preparedContext }

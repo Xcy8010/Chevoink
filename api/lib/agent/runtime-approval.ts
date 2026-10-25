@@ -8,11 +8,11 @@ import { parseToolArgsTolerant } from './tool-argument-parser.js'
 import { coerceToolArgumentEnvelope } from './tools/argument-coercion.js'
 import type { AgentStreamEventBody } from '../../../shared/contracts/index.js'
 import type { AgentExecutionOutbox } from '@prisma/client'
+import { writingServiceManifestSchema } from './coordinated-writing-input.js'
 
 const requestSchema = z.object({ version: z.literal(1), callId: z.string(), toolName: z.string(), sourceRevision: z.number().int().nonnegative(),
   sourceHash: z.string(), rawArguments: z.string(), args: z.unknown(), argsHash: z.string(), expiresAt: z.string().datetime(),
-  writingServices: z.object({ version: z.literal(1), chapterId: z.string(), writingHash: z.string().regex(/^[a-f0-9]{64}$/),
-    steps: z.array(z.object({ step: z.enum(['body', 'continuity', 'quality', 'commit']), actions: z.array(z.string()).min(1) }).strict()).min(1).max(4) }).strict().optional() }).strict()
+  writingServices: writingServiceManifestSchema.optional() }).strict()
 const decisionSchema = z.object({ version: z.literal(1), requestId: z.string(), requestHash: z.string(), approved: z.boolean(), userId: z.string(), timedOut: z.literal(true).optional() }).strict()
 // Historical readers validate already saved facts without invoking the active
 // reader below, whose timeout observation can create a new refusal event.
@@ -92,7 +92,7 @@ export async function requestToolApproval(token: RunLeaseToken, input: { expecte
     const { coordinatedWriterActions, coordinatedWritingManifest } = await import('./coordinated-writing-input.js')
     let writingServices: z.infer<typeof requestSchema>['writingServices']
     let serviceConfirmation = false
-    if (originalSpec.success && originalSpec.data.scope.writingCoordinationProtocol === 1 && coordinatedWriterActions.some(name => name === call.name)) {
+    if (originalSpec.success && originalSpec.data.scope.writingCoordinationProtocol && coordinatedWriterActions.some(name => name === call.name)) {
       const spec = originalSpec.data
       const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: token.taskRootId } })
       const original = await (await import('./original-request.js')).readOriginalTaskRequest(tx, { userId: token.userId, novelId: root.novelId, runId: token.runId })
@@ -188,7 +188,7 @@ export async function readWritingServiceRefusal(tx: RuntimeTx, token: RunLeaseTo
   const { coordinatedWriterActions, coordinatedWritingManifest } = await import('./coordinated-writing-input.js')
   const current = await readExecutionStateInTransaction(tx, token.taskRootId)
   const spec = taskSpecSchema.parse(current.originalSpec)
-  if (spec.scope.writingCoordinationProtocol !== 1 || !coordinatedWriterActions.some(action => action === input.toolName)) return null
+  if (!spec.scope.writingCoordinationProtocol || !coordinatedWriterActions.some(action => action === input.toolName)) return null
   const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: token.taskRootId } })
   const request = await (await import('./original-request.js')).readOriginalTaskRequest(tx, { userId: token.userId, novelId: root.novelId, runId: token.runId })
   const writer = z.object({ chapterId: z.string().min(1), writing: z.unknown() }).parse(outcome.requestData.args)

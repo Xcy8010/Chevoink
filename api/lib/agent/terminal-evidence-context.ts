@@ -37,12 +37,12 @@ export type TerminalEvidenceContext = z.infer<typeof terminalEvidenceContextSche
 export function terminalVerdictAuditVersion(validation: unknown): 2 | 3 | 4 | 5 | 6 | undefined {
   const audit = (validation as { continuityCriticResponse?: { parserVersion?: number; terminalEvidence?: { verdictProtocol?: unknown } } } | null)?.continuityCriticResponse
   const version = audit?.terminalEvidence?.verdictProtocol
-  return (audit?.parserVersion === 8 || audit?.parserVersion === 9) && (version === 2 || version === 3 || version === 4 || version === 5 || version === 6) ? version : undefined
+  return (audit?.parserVersion === 8 || audit?.parserVersion === 9 || audit?.parserVersion === 10) && (version === 2 || version === 3 || version === 4 || version === 5 || version === 6) ? version : undefined
 }
 
 export function terminalSpanAuditVersion(validation: unknown): 2 | undefined {
   const audit = (validation as { continuityCriticResponse?: { parserVersion?: number; terminalEvidence?: { spanAddressProtocol?: unknown } } } | null)?.continuityCriticResponse
-  return (audit?.parserVersion === 8 || audit?.parserVersion === 9) && audit.terminalEvidence?.spanAddressProtocol === 2 ? 2 : undefined
+  return (audit?.parserVersion === 8 || audit?.parserVersion === 9 || audit?.parserVersion === 10) && audit.terminalEvidence?.spanAddressProtocol === 2 ? 2 : undefined
 }
 
 /** Only a fresh HTTP admission opts in. Saved contracts are never upgraded. */

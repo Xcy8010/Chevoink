@@ -245,6 +245,7 @@ export function buildTaskSpec(input: {
   manuscriptProtocol?: 1
   reviewProtocol?: 1
   continuityEvidenceProtocol?: 1
+  continuityReportProtocol?: 5
   terminalEvidenceProtocol?: 1 | 2
   terminalQuoteAddressProtocol?: 1
   terminalCoverageProtocol?: 1 | 2
@@ -332,6 +333,7 @@ export function buildTaskSpec(input: {
       ...(input.manuscriptProtocol ? { manuscriptProtocol: input.manuscriptProtocol } : {}),
       ...(input.reviewProtocol ? { reviewProtocol: input.reviewProtocol } : {}),
       ...(input.continuityEvidenceProtocol ? { continuityEvidenceProtocol: input.continuityEvidenceProtocol } : {}),
+      ...(input.continuityReportProtocol ? { continuityReportProtocol: input.continuityReportProtocol } : {}),
       ...(input.terminalEvidenceProtocol ? { terminalEvidenceProtocol: input.terminalEvidenceProtocol } : {}),
       ...(input.terminalQuoteAddressProtocol ? { terminalQuoteAddressProtocol: input.terminalQuoteAddressProtocol } : {}),
       ...(input.terminalCoverageProtocol ? { terminalCoverageProtocol: input.terminalCoverageProtocol } : {}),

@@ -4,13 +4,13 @@ import { sceneTaskInputSchema } from '../../../shared/contracts/story-compiler-c
 import { activeChapterScope } from '../data/internal.js'
 import { DataAccessError } from '../prisma.js'
 import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
-import { coordinatedWritingInputSchema, coordinatedWritingManifest, type WritingServiceStep } from './coordinated-writing-input.js'
+import { coordinatedWritingInputSchema, coordinatedWritingManifest, writingServiceManifestSchema, type WritingServiceStep } from './coordinated-writing-input.js'
 import { compilerObservationSchema, compilerStateHash } from './runtime-compiler-observation.js'
 import { runtimeError, runtimeJson } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { commitOperationEffect, recordToolFailure } from './runtime-operations.js'
 import { readAdmittedToolOperation } from './runtime-tool-cursor.js'
-import { readAdmittedWritingServiceStep, prepareWritingServiceStep, writingServiceOperationKey } from './runtime-writing-service.js'
+import { readAdmittedWritingServiceStep, prepareWritingServiceStep, writingServiceOperationKey, composeWritingBodyEffects, readWritingReviewFrozenPrice } from './runtime-writing-service.js'
 import { readOriginalTaskRequest } from './original-request.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { assertCraftOutputSafe } from './craft-library.js'
@@ -26,12 +26,67 @@ const savedResult = z.object({ toolResult: z.object({ output: z.string(), summar
   outcome: z.literal('failed').optional(), failureCode: z.string().optional() }).passthrough(), compilerState: compilerObservationSchema.optional(),
   outcome: z.literal('failed').optional(), code: z.string().optional() }).passthrough()
 const failed = (result: z.infer<typeof savedResult>) => result.outcome === 'failed' || result.toolResult.outcome === 'failed'
-const manifestSchema = z.object({ steps: z.array(z.object({ step: z.enum(['body', 'continuity', 'quality', 'commit']) })).min(1).max(4) })
+const manifestSchema = writingServiceManifestSchema
 const knownBodyRefusals = new Set(['AUTHOR_SCOPE_PROTECTED', 'AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE',
   'CHAPTER_REVISION_CONFLICT', 'CHAPTER_ANCHOR_CONFLICT', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST',
   'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED', 'REVIEW_CYCLE_DECISION_REQUIRED',
   'SCENE_TASK_COUNT_INVALID', 'COMPILATION_STAGE_CONFLICT', 'COMPILATION_NOT_FOUND', 'INVALID_ARGUMENTS'])
 type Receipt = Awaited<ReturnType<typeof commitOperationEffect>>
+
+async function executePreparedWritingRevision(ctx: ToolContext, lease: RunLeaseToken, operationId: string) {
+  const coordinator = await import('./continuity-coordinator.js')
+  const admitted = await withRunLease(lease, tx => readAdmittedWritingServiceStep(lease,
+    { operationId, action: 'chapter_edit_range', novelId: ctx.novelId, callId: ctx.callId }, tx))
+  if (admitted.manifest.version !== 2 || admitted.input.serviceAdmission.step !== 'prose_revision') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '该旧写作清单没有集中修订。')
+  const existing = await withRunLease(lease, tx => tx.agentEffectReceipt.findUnique({ where: { operationId } }))
+  if (existing) {
+    if (runtimeJson(existing.result).hash !== existing.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '集中修订回执损坏。')
+    return existing
+  }
+  const work = coordinator.nativeContinuityRevisionWorkSchema.parse(admitted.input.work)
+  const noEffect = (reason: string) => commitOperationEffect(lease, operationId, admitted.operation.inputHash, async tx => {
+    ctx.signal.throwIfAborted()
+    await assertAgentManuscriptCurrent(tx, ctx)
+    const hash = await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, work.compiler.id)
+    if (hash !== work.compiler.hash) return runtimeError('TOOL_COMPILER_STALE', '无效果阶段不能采用另一编译状态。')
+    return runtimeJson({ revisionApplied: false, compilerState: work.compiler, toolResult: { output: reason, summary: '集中修订 · 正文未变化' } }).value
+  })
+  if (work.kind === 'revision_skip') return noEffect(`原报告保持：${work.reason}。没有调用修订模型，没有创建正文转换或新版通过证明。`)
+  const auxiliary = await import('./runtime-auxiliary-call.js')
+  await auxiliary.callDurableAuxiliary({ lease, parentOperationId: operationId,
+    step: 'continuity_coordinated_revision', route: auxiliary.auxiliaryRouteSchema.parse(work.route), price: work.price, system: work.system, content: work.content,
+    temperature: 0, signal: ctx.signal, assertCurrent: async tx => { await coordinator.authenticateNativeContinuityRevisionWork(tx, ctx, work) } })
+  const response = await withRunLease(lease, tx => coordinator.readNativeContinuityRevisionResult(tx, operationId))
+  if (!response) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原集中修订响应或费用尚未确认，未重发。')
+  let args: Awaited<ReturnType<typeof coordinator.nativeContinuityRevisionArgs>>
+  try { args = await coordinator.nativeContinuityRevisionArgs(work, response.content) } catch (error) {
+    if (ctx.signal.aborted) throw error
+    return recordToolFailure(lease, { operationId, inputHash: admitted.operation.inputHash, code: 'CONTINUITY_REVISION_INVALID',
+      output: '一次集中修订没有完整安全补丁，原始响应与费用已保留，未追加格式请求或改写正文。', summary: '集中修订未形成安全补丁' })
+  }
+  if (!args) return noEffect('实际改稿响应没有可应用的正文变化；原判断与留置意见仍保留，不代表问题已解决。')
+  return commitOperationEffect(lease, operationId, admitted.operation.inputHash, async tx => {
+    ctx.signal.throwIfAborted()
+    await coordinator.authenticateNativeContinuityRevisionWork(tx, ctx, work)
+    const result = await applyDurableChapterBody({ ...ctx, nativeContinuityRevision: { operationId, work } }, tx,
+      { taskRootId: lease.taskRootId, action: 'chapter_edit_range', args: args!, expectedRevision: work.chapter.revision, anchorProtocol: 2 })
+    const hash = await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, work.compiler.id)
+    if (!hash || result.progress.beforeHash === result.progress.afterHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '集中修订缺少实际正文转换。')
+    return runtimeJson({ ...result, revisionApplied: true, compilerState: { id: work.compiler.id, hash } }).value
+  })
+}
+
+async function executeWritingVerificationSkip(ctx: ToolContext, lease: RunLeaseToken, operationId: string, action: string) {
+  const admitted = await withRunLease(lease, tx => readAdmittedWritingServiceStep(lease,
+    { operationId, action, novelId: ctx.novelId, callId: ctx.callId }, tx))
+  const work = z.object({ kind: z.literal('verification_skip'), version: z.literal(1), compiler: compilerObservationSchema }).strict().parse(admitted.input.work)
+  return commitOperationEffect(lease, operationId, admitted.operation.inputHash, async tx => {
+    const hash = await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, work.compiler.id)
+    if (hash !== work.compiler.hash) return runtimeError('TOOL_COMPILER_STALE', '无正文转换的复核阶段已过期。')
+    return runtimeJson({ compilerState: work.compiler, verificationSkipped: true,
+      toolResult: { output: '未发生原周期正文转换，保留真实当前报告；没有购买复检，也没有制造完成证明。', summary: '正文未变 · 复检无需新请求' } }).value
+  })
+}
 
 /** Internal body transaction: compiler, scenes, manuscript CAS and receipt
  * commit together. It never makes the real parent succeed at the body boundary. */
@@ -115,29 +170,47 @@ export async function executeCoordinatedWritingServices(ctx: ToolContext, lease:
     ctx.signal.throwIfAborted()
     const source = completed.at(-1)
     const baseline = source ? compilerObservationSchema.parse(savedResult.parse(source.receipt.result).compilerState) : null
-    const args = step === 'body' ? plan.input.args : step === 'continuity' ? { compilationId: baseline!.id, terminalState: plan.writing.actualOutcomes }
-      : step === 'quality' ? { compilationId: baseline!.id } : { compilationId: baseline!.id,
+    const continuityStep = step === 'continuity' || step === 'continuity_verify', qualityStep = step === 'quality' || step === 'quality_verify'
+    const verify = step === 'continuity_verify' || step === 'quality_verify'
+    const revision = completed.find(item => item.step === 'prose_revision')
+    const revisionApplied = revision ? z.object({ revisionApplied: z.boolean() }).parse(revision.receipt.result).revisionApplied : false
+    const args = step === 'body' ? plan.input.args : continuityStep ? { compilationId: baseline!.id, terminalState: plan.writing.actualOutcomes }
+      : qualityStep ? { compilationId: baseline!.id } : step === 'prose_revision' ? { chapterId: plan.chapterId } : { compilationId: baseline!.id,
         ...Object.fromEntries(Object.entries(plan.writing).filter(([key]) => ['chapterSummary', 'hookDecision', 'delayedHookReason', 'openingStructure', 'endingStructure'].includes(key))),
         ...(plan.input.args.retainedFindings !== undefined ? { retainedFindings: plan.input.args.retainedFindings } : {}) }
     const key = writingServiceOperationKey(parentOperationId, step)
     const prior = await withRunLease(lease, tx => tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: key } } }))
+    const originalReview = verify && revisionApplied ? await withRunLease(lease, async tx => {
+      const sourceStep = qualityStep ? 'quality' : 'continuity'
+      return readWritingReviewFrozenPrice(tx, { ...lease, novelId: ctx.novelId }, parentOperationId, sourceStep)
+    }) : null
+    const frozenReview = verify && revisionApplied && originalReview ? { route: (await import('./runtime-auxiliary-call.js')).auxiliaryRouteSchema.parse(originalReview.route),
+      price: (await import('../billing/token-price.js')).tokenPriceSchema.parse(originalReview.price) } : undefined
     const work = prior ? z.object({ input: z.object({ work: z.unknown() }) }).parse(prior.inputSnapshot).input.work
-      : step === 'continuity' ? await prepareContinuityWork(ctx, lease, { operationKey: key, observedRevision: plan.input.normalization.sourceRevision, baseline, args })
-        : step === 'quality' ? await prepareQualityWork(ctx, lease, { operationKey: key, observedRevision: plan.input.normalization.sourceRevision, baseline, args, serviceReadOnly: true }) : {}
+      : verify && !revisionApplied ? { kind: 'verification_skip', version: 1, compiler: baseline }
+        : step === 'prose_revision' ? await withRunLease(lease, tx => import('./continuity-coordinator.js').then(module =>
+          module.prepareNativeContinuityRevisionWork(tx, ctx, baseline!, parentOperationId)))
+          : continuityStep ? await prepareContinuityWork(ctx, lease, { operationKey: key, observedRevision: plan.input.normalization.sourceRevision, baseline, args, ...(frozenReview ? { frozenReview } : {}) })
+            : qualityStep ? await prepareQualityWork(ctx, lease, { operationKey: key, observedRevision: plan.input.normalization.sourceRevision, baseline, args, serviceReadOnly: true, ...(frozenReview ? { frozenReview } : {}) }) : {}
     const operation = await prepareWritingServiceStep(lease, { novelId: ctx.novelId, callId: ctx.callId, args, baseline, work,
       serviceAdmission: { version: 1, parentOperationId, parentInputHash: plan.operation.inputHash,
         sourceRevision: plan.input.normalization.sourceRevision, sourceSnapshotHash: plan.input.normalization.sourceSnapshotHash,
         step, chapterId: plan.chapterId, source: source ? { operationId: source.operationId, resultHash: source.resultHash } : null } })
     const receipt = step === 'body' ? await executePreparedWritingBody(ctx, lease, operation.id, action)
-      : step === 'continuity' ? await executePreparedContinuityWork(ctx, lease, operation.id)
-        : step === 'quality' ? await executePreparedQualityWork(ctx, lease, operation.id)
+      : step === 'prose_revision' ? await executePreparedWritingRevision(ctx, lease, operation.id)
+        : verify && !revisionApplied ? await executeWritingVerificationSkip(ctx, lease, operation.id, continuityStep ? 'continuity_validate' : 'quality_analyze')
+          : continuityStep ? await executePreparedContinuityWork(ctx, lease, operation.id)
+            : qualityStep ? await executePreparedQualityWork(ctx, lease, operation.id)
           : await executePreparedCompilerWork(ctx, lease, operation.id, { ...chapterBridgeCommitTool,
             execute: (context, raw) => chapterBridgeCommitTool.execute(context, chapterBridgeCommitTool.parameters.parse(raw)) })
     if (runtimeJson(receipt.result).hash !== receipt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '写作服务结果回执损坏。')
     completed.push({ step, operationId: operation.id, inputHash: operation.inputHash, resultHash: receipt.resultHash, receipt })
     if (failed(savedResult.parse(receipt.result))) break
   }
-  const body = savedResult.parse(completed[0].receipt.result), last = savedResult.parse(completed.at(-1)!.receipt.result)
+  const revision = completed.find(item => item.step === 'prose_revision')
+  const effectiveBody = revision ? composeWritingBodyEffects(completed[0].receipt.result as Record<string, unknown>, revision.receipt.result as Record<string, unknown>)
+    : completed[0].receipt.result as Record<string, unknown>
+  const body = savedResult.parse(effectiveBody), last = savedResult.parse(completed.at(-1)!.receipt.result)
   const bodyFailed = failed(body)
   if (bodyFailed) return recordToolFailure(lease, { operationId: parentOperationId, inputHash: plan.operation.inputHash,
     code: body.toolResult.failureCode ?? z.object({ code: z.string() }).parse(completed[0].receipt.result).code,
@@ -152,7 +225,7 @@ export async function executeCoordinatedWritingServices(ctx: ToolContext, lease:
         return runtimeError('RUNTIME_RECEIPT_INVALID', '写作协调缺少原服务结果，未宣称完成。')
       }
     }
-    return runtimeJson({ ...completed[0].receipt.result as object, ...(last.compilerState ? { compilerState: last.compilerState } : {}),
+    return runtimeJson({ ...effectiveBody, ...(last.compilerState ? { compilerState: last.compilerState } : {}),
       writingCompletion: { version: 1, status: complete ? 'completed' : plan.writing.draftComplete ? 'blocked' : 'draft_saved',
         steps: completed.map(({ step, operationId, resultHash }) => ({ step, operationId, resultHash })) },
       toolResult: { ...body.toolResult, ...(failed(last) ? { outcome: 'failed',

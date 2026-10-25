@@ -219,7 +219,8 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         } else expect(saved.validation).not.toHaveProperty('continuityCriticResponse.terminalEvidence')
       }
       if (v4) {
-        const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate' } })
+        const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate',
+          inputSnapshot: { path: ['input', 'callId'], equals: 'check' } } })
         expect(parent.inputSnapshot).toMatchObject({ input: { work: { version: 22, reassessmentProtocol: 6, continuityManifest: { version: 1 } } } })
         expect(parent.inputSnapshot).toHaveProperty('input.work.sourceBodies.terminalEvidence')
         expect(parent.inputSnapshot).not.toHaveProperty('input.work.sourceBodies.terminalEvidence.factCoverage')

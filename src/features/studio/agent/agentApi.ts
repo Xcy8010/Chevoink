@@ -1,4 +1,3 @@
-import type { ManualReviewRepairPreview, ManualReviewRepairQuote, ManualReviewRepairStatus } from '../../../../shared/contracts/manual-review-repair.js'
 import { buildApiUrl } from '@/app/api-base'
 import { buildAuthHeader } from '@/lib/auth-token'
 import type { AgentQueueAction, AgentQueueSnapshot, EnqueueAgentRequest } from '../../../../shared/contracts/agent-queue.js'
@@ -122,21 +121,6 @@ export function continueAgentLoopRun(runId: string, model?: ContinueAgentLoopRun
   return requestData<StartAgentLoopRunResponse>(`/api/agent/runs/${runId}/continue`, {
     method: 'POST',
     ...(model ? { body: JSON.stringify(model) } : {}),
-  })
-}
-
-/** Read/quote never authorize a provider call. Only the explicit repair intent does. */
-export function fetchManualReviewRepair(runId: string): Promise<ManualReviewRepairPreview> {
-  return requestData(`/api/agent/runs/${runId}/manual-review-repair`)
-}
-
-export function quoteManualReviewRepair(runId: string): Promise<ManualReviewRepairQuote> {
-  return requestData(`/api/agent/runs/${runId}/manual-review-repair/quote`, { method: 'POST', body: '{}' })
-}
-
-export function submitManualReviewRepair(runId: string, quoteToken: string): Promise<ManualReviewRepairStatus> {
-  return requestData(`/api/agent/runs/${runId}/manual-review-repair`, {
-    method: 'POST', body: JSON.stringify({ intent: 'repair_failed_review_once', quoteToken }),
   })
 }
 

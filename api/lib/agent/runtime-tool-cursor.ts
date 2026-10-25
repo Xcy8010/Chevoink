@@ -144,7 +144,7 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
     }
     if (!code && grant) {
       const original = taskSpecSchema.safeParse(current.originalSpec)
-      const markedWriter = original.success && original.data.scope.writingCoordinationProtocol === 1
+      const markedWriter = original.success && !!original.data.scope.writingCoordinationProtocol
         && ['chapter_write', 'chapter_append', 'chapter_edit_range'].includes(call.name)
       const outcome = grant.permission === 'ask' || grant.alwaysConfirm
         ? await readToolApprovalOutcome(tx, token, frame.snapshotHash, call.id, call.name, call.arguments)

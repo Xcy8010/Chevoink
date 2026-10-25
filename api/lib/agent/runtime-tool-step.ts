@@ -179,7 +179,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     const originalSpec = taskSpecSchema.parse(root.specSnapshot)
     const originalScope = originalSpec.scope
-    if (originalScope.writingCoordinationProtocol === 1 && coordinatedWriterActions.some(name => name === call.name)) {
+    if (originalScope.writingCoordinationProtocol && coordinatedWriterActions.some(name => name === call.name)) {
       tool = { ...tool, parameters: coordinatedWriterParameters(tool, originalScope) }
     }
     if (call.name === 'web_read' && originalSpec.researchNavigation?.version === 1 && originalSpec.intent === 'research_analysis') {
@@ -204,7 +204,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
         customModelId: current.configuration.model.customModelId, reasoningEffort: current.configuration.model.reasoningEffort as ModelReasoningEffort,
         provider: current.configuration.model.provider, modelName: current.configuration.model.modelName, routeRevision: current.configuration.model.routeRevision } }
     ctx.modelAssignments = current.configuration.modelAssignments
-    if (originalScope.writingCoordinationProtocol === 1 && coordinatedWriterActions.some(name => name === call.name)) ctx.writingScope = originalScope
+    if (originalScope.writingCoordinationProtocol && coordinatedWriterActions.some(name => name === call.name)) ctx.writingScope = originalScope
     ctx.inlineChild = Boolean(lease.parent)
     const capability = { lease, cursor, operationKey: `exec:${frame.state.nextOperationSequence}` }
     if (call.name === 'agent_configure' || call.name === 'model_assign') ctx.durableConfiguration = capability
@@ -258,7 +258,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       if (admission?.kind === 'decision_required') return { deferred: await deferReviewWriteInTransaction(tx, lease, frame, call, admission.guidance) }
     }
     let serviceConfirmation = false
-    if (ctx.writingScope?.writingCoordinationProtocol === 1 && ctx.durableContent) {
+    if (ctx.writingScope?.writingCoordinationProtocol && ctx.durableContent) {
       const original = await (await import('./original-request.js')).readOriginalTaskRequest(tx, ctx)
       const manifest = z.object({ steps: z.array(z.object({ actions: z.array(z.string()) })) }).parse(
         coordinatedWritingManifest({ spec: originalSpec, prompt: original.prompt }, call.name, ctx.durableContent.chapterId, args.writing))
@@ -313,7 +313,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
   if (selected.ctx.durableCover) return { kind: 'tool' as const, result: await executeDurableCover(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableDossier) return { kind: 'tool' as const, result: await executeDurableDossier(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableExport) return { kind: 'tool' as const, result: await executeDurableExport(selected.ctx, selected.tool, selected.args) }
-  if (selected.ctx.durableContent && selected.ctx.writingScope?.writingCoordinationProtocol === 1
+  if (selected.ctx.durableContent && selected.ctx.writingScope?.writingCoordinationProtocol
     && coordinatedWriterActions.some(name => name === selected.tool.name)) {
     return { kind: 'tool' as const, result: await executeDurableCoordinatedWriter(selected.ctx, selected.tool, selected.args) }
   }

@@ -22,6 +22,17 @@ export type ToolContext = {
   chapterId: string | null
   sessionId: string
   runId: string
+  /** Current legacy run.started receipt, injected by the loop. It cannot be
+   * supplied by tool arguments or reused across an owner restart. */
+  continuityOwnerSeq?: number
+  /** Dedicated frozen original-operation question. Injected only by the
+   * continuity coordinator; never deserialized from model/tool parameters. */
+  continuityQuestion?: { requestId: string }
+  /** Admitted only from a durable exact answer or known phase response. */
+  continuitySupplement?: { requestId: string; dispatchAllowed: boolean }
+  /** Original-cycle repair response selected by the server coordinator. */
+  continuityRevision?: { responseArtifactId: string; plan: import('../continuity-coordinator.js').ContinuityPhasePlan }
+  nativeContinuityRevision?: { operationId: string; work: unknown }
   /** Verified original task scope for input guidance only; never model input. */
   writingScope?: import('../../../../shared/contracts/index.js').TaskSpec['scope']
   /** Server-authenticated per-call offline recovery fence. Never populated

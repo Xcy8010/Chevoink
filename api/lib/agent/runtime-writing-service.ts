@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
-import { coordinatedWritingInputSchema, coordinatedWritingManifest, coordinatedWriterActions, writingServiceStepSchema } from './coordinated-writing-input.js'
+import { coordinatedWritingInputSchema, coordinatedWritingManifest, coordinatedWriterActions, writingServiceStepSchema, writingServiceManifestSchema } from './coordinated-writing-input.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { argumentNormalizationSchema, readAdmittedToolOperation, readToolOperationSource } from './runtime-tool-cursor.js'
 import { readExecutionStateInTransaction } from './runtime-state.js'
@@ -13,8 +13,7 @@ import { prepareOperationInTransaction } from './runtime-operations.js'
 import { withManuscriptRunLease, withRunLease, type RunLeaseToken } from './runtime-lease.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
-const manifestSchema = z.object({ version: z.literal(1), chapterId: z.string().min(1), writingHash: hash,
-  steps: z.array(z.object({ step: writingServiceStepSchema, actions: z.array(z.string().min(1)).min(1) }).strict()).min(1).max(4) }).strict()
+const manifestSchema = writingServiceManifestSchema
 export const writingServiceAdmissionSchema = z.object({ version: z.literal(1), parentOperationId: z.string().min(1), parentInputHash: hash,
   sourceRevision: z.number().int().nonnegative(), sourceSnapshotHash: hash, step: writingServiceStepSchema, chapterId: z.string().min(1),
   source: z.object({ operationId: z.string().min(1), resultHash: hash }).strict().nullable() }).strict()
@@ -22,6 +21,17 @@ const inputSchema = z.object({ novelId: z.string().min(1), callId: z.string().mi
   baseline: compilerObservationSchema.nullable(), serviceAdmission: writingServiceAdmissionSchema, work: z.unknown() }).strict()
 const bodyReceiptSchema = z.object({ toolResult: z.object({ display: z.object({ kind: z.literal('chapterDiff'), chapterId: z.string(),
   revision: z.number().int().positive(), before: z.string(), after: z.string() }) }) })
+export function composeWritingBodyEffects(body: Record<string, unknown>, revision?: Record<string, unknown>) {
+  if (!revision || revision.revisionApplied !== true) return body
+  const first = bodyReceiptSchema.parse(body).toolResult.display, last = bodyReceiptSchema.parse(revision).toolResult.display
+  if (first.chapterId !== last.chapterId || first.after !== last.before || last.revision !== first.revision + 1)
+    return runtimeError('RUNTIME_RECEIPT_INVALID', '写作与集中修订不是同一连续正文转换。')
+  const initialTool = z.record(z.string(), z.unknown()).parse(body.toolResult), initialDisplay = z.record(z.string(), z.unknown()).parse(initialTool.display)
+  return { ...body, ...(revision.memoryJobId ? { memoryJobId: revision.memoryJobId } : {}),
+    progress: { kind: 'content_revision', targetId: first.chapterId, beforeHash: runtimeJson({ content: first.before }).hash,
+      afterHash: runtimeJson({ content: last.after }).hash },
+    toolResult: { ...initialTool, display: { ...initialDisplay, after: last.after, revision: last.revision } } }
+}
 
 /** Reviews may inspect only the body saved by this writer. The service does
  * not silently add an automatic prose-repair decision to a review manifest. */
@@ -39,8 +49,93 @@ export function assertWritingReviewWork(value: unknown, expected: { step: 'conti
   }
 }
 const actionFor = (step: z.infer<typeof writingServiceStepSchema>, writer: string) => ({ body: writer,
-  continuity: 'continuity_validate', quality: 'quality_analyze', commit: 'chapter_bridge_commit' })[step]
+  continuity: 'continuity_validate', quality: 'quality_analyze', prose_revision: 'chapter_edit_range',
+  continuity_verify: 'continuity_validate', quality_verify: 'quality_analyze', commit: 'chapter_bridge_commit' })[step]
 export const writingServiceOperationKey = (parentId: string, step: z.infer<typeof writingServiceStepSchema>) => `writing:${parentId}:${step}`
+
+/** Recover the exact original review role from a no-provider cache. A cache
+ * never substitutes today's model/rate or manufactures another paid phase. */
+export async function readWritingReviewFrozenPrice(tx: RuntimeTx, subject: ServiceProofSubject & { novelId: string }, parentId: string,
+  step: 'continuity' | 'quality', expectedContinuityPriceHash?: string) {
+  const source = await tx.agentOperation.findUniqueOrThrow({ where: { taskRootId_operationKey: {
+    taskRootId: subject.taskRootId, operationKey: writingServiceOperationKey(parentId, step) } }, include: { effectReceipt: true } })
+  const proof = await readHistoricalWritingServiceSource(tx, subject, { operationId: source.id,
+    action: step === 'continuity' ? 'continuity_validate' : 'quality_analyze', novelId: subject.novelId,
+    callId: z.object({ input: z.object({ callId: z.string() }) }).parse(source.inputSnapshot).input.callId })
+  const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+  const work = object(proof.input.work), routeSchema = (await import('./runtime-auxiliary-call.js')).auxiliaryRouteSchema
+  const priceSchema = (await import('../billing/token-price.js')).tokenPriceSchema
+  const directRoute = routeSchema.safeParse(work.route), directPrice = priceSchema.safeParse(work.price)
+  if (directRoute.success && directPrice.success) {
+    const value = { route: directRoute.data, price: directPrice.data }
+    if (expectedContinuityPriceHash && runtimeJson(value).hash !== expectedContinuityPriceHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '首检价目与原阶段不同。')
+    return value
+  }
+  const compilationId = object(work.compiler).id, chapterId = object(work.chapter).id
+  if (typeof compilationId !== 'string' || typeof chapterId !== 'string') return runtimeError('RUNTIME_RECEIPT_INVALID', '缓存检查缺少原编译身份。')
+  let operations: Array<{ inputSnapshot: Prisma.JsonValue; inputHash: string }> = []
+  if (step === 'continuity') {
+    if (!expectedContinuityPriceHash) {
+      const revision = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: {
+        taskRootId: subject.taskRootId, operationKey: writingServiceOperationKey(parentId, 'prose_revision') } } })
+      const compilation = revision ? null : await tx.storyCompilation.findFirst({ where: { id: compilationId, userId: subject.userId, novelId: subject.novelId }, select: { validation: true } })
+      const value = revision ? object(object(revision.inputSnapshot).input).work : object(object(compilation?.validation).continuityCriticResponse).continuityV4
+      const planValue = revision ? object(value).plan : object(object(object(value).manifest).typedLineage).phasePlan
+      const coordinator = await import('./continuity-coordinator.js'), plan = coordinator.continuityPhasePlanSchema.safeParse(planValue)
+      if (!plan.success || !await coordinator.authenticateContinuityPhasePlan(tx, subject, plan.data)) return runtimeError('RUNTIME_RECEIPT_INVALID', '缓存没有原阶段冻结模型价目。')
+      expectedContinuityPriceHash = plan.data.modelPriceHash
+    }
+    const original = await readOriginalTaskRequest(tx, subject), runs = await (await import('./original-request.js')).originalTaskRunIds(tx, subject, original)
+    const artifacts = await tx.agentArtifact.findMany({ where: { runId: { in: runs }, artifactType: 'continuityReview' }, take: 1001 })
+    if (artifacts.length > 1000) return runtimeError('RUNTIME_RECEIPT_INVALID', '缓存来源超出有界认证范围。')
+    const entries = await (await import('./native-continuity-assessment.js')).readNativeContinuityAssessments(tx, subject, subject.taskRootId, runs,
+      { compilationId, chapterId, currentAudit: {}, related: input => {
+        const value = object(input)
+        return runtimeJson({ bodies: value.bodies, candidate: value.terminalCandidate }).hash === runtimeJson({ bodies: work.sourceBodies, candidate: work.terminalCandidate }).hash
+      } }, artifacts)
+    if (!entries) return runtimeError('RUNTIME_RECEIPT_INVALID', '缓存连续性报告的真实原模型结果不能认证。')
+    const eligible = entries.filter(entry => entry.committed && entry.inspected.complete
+      && runtimeJson(entry.input.bodies).hash === runtimeJson(work.sourceBodies).hash
+      && runtimeJson(entry.input.terminalCandidate).hash === runtimeJson(work.terminalCandidate).hash
+      && runtimeJson(entry.coverage).hash === runtimeJson(work.coverage).hash)
+    operations = eligible.length ? await tx.agentOperation.findMany({ where: { id: { in: eligible.map(entry => entry.operationId) } } }) : []
+  } else {
+    const cachedId = object(work.cached).id
+    if (typeof cachedId !== 'string') return runtimeError('RUNTIME_RECEIPT_INVALID', '缓存质量报告缺少原报告身份。')
+    const candidates = await tx.agentOperation.findMany({ where: { taskRootId: subject.taskRootId, action: 'quality_analyze', status: 'succeeded',
+      inputSnapshot: { path: ['input', 'work', 'chapter', 'id'], equals: chapterId } }, include: { effectReceipt: true,
+        children: { include: { attempts: { include: { usageReceipt: true } }, events: true } } }, take: 1001 })
+    if (candidates.length > 1000) return runtimeError('RUNTIME_RECEIPT_INVALID', '缓存质量来源超出有界认证范围。')
+    for (const candidate of candidates) {
+      const saved = object(object(candidate.inputSnapshot).input), frozen = object(saved.work), result = object(candidate.effectReceipt?.result)
+      if (object(object(result.toolResult).display).reportId !== cachedId || frozen.contextHash !== work.contextHash
+        || !candidate.effectReceipt || runtimeJson(candidate.effectReceipt.result).hash !== candidate.effectReceipt.resultHash
+        || !routeSchema.safeParse(frozen.route).success || !priceSchema.safeParse(frozen.price).success) continue
+      const event = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `effect:${candidate.id}` } })
+      if (!event || runtimeJson(event.payload).hash !== runtimeJson({ operationId: candidate.id, resultHash: candidate.effectReceipt.resultHash }).hash) continue
+      const known = candidate.children.some(child => child.kind === 'provider' && child.status === 'succeeded' && child.attempts.length === 1
+        && child.action.startsWith('quality_') && runtimeJson(object(object(child.inputSnapshot).input).billing).hash === runtimeJson(frozen.price).hash
+        && child.attempts.every(attempt => attempt.status === 'succeeded' && attempt.dispatchedAt && attempt.completedAt && attempt.resultHash
+          && runtimeJson(attempt.result).hash === attempt.resultHash && runtimeJson(attempt.requestSnapshot).hash === attempt.requestHash
+          && attempt.usageReceipt?.source === 'reported' && attempt.usageReceipt.settlementStatus === 'settled'
+          && child.events.some(row => row.type === 'provider.result.recorded' && row.eventKey === `result:${attempt.id}:${attempt.resultHash}`)))
+      if (!known || typeof saved.callId !== 'string') continue
+      if (candidate.kind === 'tool') await readToolOperationSource(tx, candidate)
+      else await readHistoricalWritingServiceSource(tx, { ...subject, runId: candidate.originRunId },
+        { operationId: candidate.id, action: 'quality_analyze', novelId: subject.novelId, callId: saved.callId })
+      operations.push(candidate)
+    }
+  }
+  const prices = operations.flatMap(row => {
+    if (runtimeJson(row.inputSnapshot).hash !== row.inputHash) return []
+    const frozen = object(object(row.inputSnapshot).input).work, route = routeSchema.safeParse(object(frozen).route), price = priceSchema.safeParse(object(frozen).price)
+    return route.success && price.success && (!expectedContinuityPriceHash || runtimeJson({ route: route.data, price: price.data }).hash === expectedContinuityPriceHash)
+      ? [{ route: route.data, price: price.data }] : []
+  })
+  const unique = new Map(prices.map(value => [runtimeJson(value).hash, value]))
+  if (unique.size !== 1) return runtimeError('RUNTIME_RECEIPT_INVALID', '缓存没有唯一认证的原模型价目，未替换今日路由或追加请求。')
+  return [...unique.values()][0]
+}
 
 /** Read-only evidence after the parent has closed. This is deliberately not
  * effect admission: a blocked review cannot hide a real saved body, and cannot
@@ -50,7 +145,7 @@ export async function readCommittedWritingBodyProgress(tx: RuntimeTx, parent: { 
     return runtimeError('RUNTIME_RECEIPT_INVALID', '受阻写作进度缺少真实父写入。')
   }
   const completion = z.object({ writingCompletion: z.object({ version: z.literal(1), status: z.literal('blocked'),
-    steps: z.array(z.object({ step: writingServiceStepSchema, operationId: z.string(), resultHash: hash }).strict()).min(2).max(4) }).strict(),
+    steps: z.array(z.object({ step: writingServiceStepSchema, operationId: z.string(), resultHash: hash }).strict()).min(2).max(7) }).strict(),
     progress: z.unknown(), toolResult: z.object({ display: z.unknown() }) }).parse(value)
   const original = z.object({ input: z.object({ novelId: z.string(), callId: z.string(), args: z.record(z.string(), z.unknown()),
     expectedRevision: z.number().int().positive(), writingManifest: manifestSchema, normalization: argumentNormalizationSchema }) }).parse(parent.inputSnapshot).input
@@ -83,10 +178,25 @@ export async function readCommittedWritingBodyProgress(tx: RuntimeTx, parent: { 
     || runtimeJson(event.payload).hash !== runtimeJson({ operationId: body.id, resultHash: receipt.resultHash }).hash) {
     return runtimeError('RUNTIME_RECEIPT_INVALID', '已保存正文缺少真实事务事件。')
   }
-  const saved = bodyReceiptSchema.extend({ progress: z.object({ kind: z.literal('content_revision'), targetId: z.string(), beforeHash: hash, afterHash: hash }).strict() }).parse(receipt.result)
+  const originalBody = bodyReceiptSchema.extend({ progress: z.object({ kind: z.literal('content_revision'), targetId: z.string(), beforeHash: hash, afterHash: hash }).strict() }).parse(receipt.result)
+  if (originalBody.toolResult.display.revision !== original.expectedRevision + (originalBody.toolResult.display.before === originalBody.toolResult.display.after ? 0 : 1))
+    return runtimeError('RUNTIME_RECEIPT_INVALID', '原写作保存回执的正文版本不一致。')
+  let effectiveBody = receipt.result as Record<string, unknown>
+  const declaredRevision = completion.writingCompletion.steps.find(step => step.step === 'prose_revision')
+  if (manifest.version === 2 && declaredRevision) {
+    const revision = await tx.agentOperation.findUnique({ where: { id: declaredRevision.operationId }, include: { effectReceipt: true } })
+    if (!revision || revision.parentOperationId !== parent.id || revision.taskRootId !== parent.taskRootId
+      || !revision.effectReceipt || revision.effectReceipt.resultHash !== declaredRevision.resultHash
+      || runtimeJson(revision.effectReceipt.result).hash !== revision.effectReceipt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '后续修订缺少同一父写入的真实回执。')
+    if (revision.status === 'succeeded') {
+      await readHistoricalWritingServiceSource(tx, { userId: root.userId, runId: revision.originRunId, taskRootId: parent.taskRootId },
+        { operationId: revision.id, action: 'chapter_edit_range', novelId: root.novelId, callId: original.callId })
+      effectiveBody = composeWritingBodyEffects(effectiveBody, revision.effectReceipt.result as Record<string, unknown>)
+    }
+  }
+  const saved = bodyReceiptSchema.extend({ progress: z.object({ kind: z.literal('content_revision'), targetId: z.string(), beforeHash: hash, afterHash: hash }).strict() }).parse(effectiveBody)
   const display = saved.toolResult.display
   if (display.chapterId !== chapterId || saved.progress.targetId !== chapterId
-    || display.revision !== original.expectedRevision + (display.before === display.after ? 0 : 1)
     || saved.progress.beforeHash !== runtimeJson({ content: display.before }).hash || saved.progress.afterHash !== runtimeJson({ content: display.after }).hash
     || runtimeJson(saved.progress).hash !== runtimeJson(completion.progress).hash || runtimeJson(display).hash !== runtimeJson(
       bodyReceiptSchema.parse({ toolResult: { display: completion.toolResult.display } }).toolResult.display).hash) {
@@ -123,8 +233,18 @@ const serviceVerification = (liveLease?: RunLeaseToken, historical = false): Ser
 async function verifyPredecessor(tx: RuntimeTx, lease: ServiceProofSubject, input: ServiceIdentity, verification: ServiceVerification): Promise<void> {
   const key = JSON.stringify([input.operationId, input.action, input.novelId, input.callId])
   if (verification.proven.has(key)) return
-  await readVerifiedServiceStep(lease, input, tx, verification)
+  if (!await hasCommittedServiceReceipt(tx, lease, input.operationId)) return runtimeError('RUNTIME_RECEIPT_INVALID', '前置步骤没有匹配的实际提交回执与持久事件。')
+  await readVerifiedServiceStep(lease, input, tx, { ...verification, historical: true })
   verification.proven.add(key)
+}
+
+async function hasCommittedServiceReceipt(tx: RuntimeTx, subject: ServiceProofSubject, operationId: string) {
+  const row = await tx.agentOperation.findFirst({ where: { id: operationId, taskRootId: subject.taskRootId, kind: 'internal', status: 'succeeded' }, include: { effectReceipt: true } })
+  if (!row?.effectReceipt || runtimeJson(row.inputSnapshot).hash !== row.inputHash
+    || runtimeJson(row.effectReceipt.result).hash !== row.effectReceipt.resultHash) return false
+  const event = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `effect:${row.id}` } })
+  return !!event && event.taskRootId === subject.taskRootId && event.operationId === row.id && event.type === 'effect.committed'
+    && runtimeJson(event.payload).hash === runtimeJson({ operationId: row.id, resultHash: row.effectReceipt.resultHash }).hash
 }
 
 async function verifyServiceInput(tx: RuntimeTx, lease: ServiceProofSubject, saved: z.infer<typeof inputSchema>, action: string, verification: ServiceVerification) {
@@ -179,12 +299,27 @@ async function verifyServiceInput(tx: RuntimeTx, lease: ServiceProofSubject, sav
     }
     const result = z.object({ compilerState: compilerObservationSchema, toolResult: z.object({ outcome: z.never().optional() }).passthrough() }).parse(receipt.result)
     expectedBaseline = result.compilerState
-    expectedArgs = admission.step === 'continuity' ? { compilationId: expectedBaseline.id, terminalState: writing.actualOutcomes }
-      : admission.step === 'quality' ? { compilationId: expectedBaseline.id }
+    expectedArgs = admission.step === 'continuity' || admission.step === 'continuity_verify' ? { compilationId: expectedBaseline.id, terminalState: writing.actualOutcomes }
+      : admission.step === 'quality' || admission.step === 'quality_verify' ? { compilationId: expectedBaseline.id }
+        : admission.step === 'prose_revision' ? { chapterId }
         : { compilationId: expectedBaseline.id, ...Object.fromEntries(Object.entries(writing).filter(([key]) =>
           ['chapterSummary', 'hookDecision', 'delayedHookReason', 'openingStructure', 'endingStructure'].includes(key))),
           ...(original.args.retainedFindings !== undefined ? { retainedFindings: original.args.retainedFindings } : {}) }
-    if (admission.step === 'continuity' || admission.step === 'quality') {
+    if (admission.step === 'prose_revision') {
+      if (manifest.version !== 2) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '旧写作清单没有集中修订阶段。')
+      const coordinator = await import('./continuity-coordinator.js')
+      const work = await coordinator.authenticateNativeContinuityRevisionWork(tx,
+        { userId: lease.userId, novelId: saved.novelId, runId: lease.runId }, saved.work, verification.historical)
+      if (runtimeJson(work.compiler).hash !== runtimeJson(expectedBaseline).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '集中修订没有同一前置编译回执。')
+      if (work.kind === 'merged_revision') {
+        const role = await readWritingReviewFrozenPrice(tx, { ...lease, novelId: saved.novelId }, parent.id, 'continuity', work.plan.modelPriceHash)
+        if (runtimeJson(role).hash !== runtimeJson({ route: work.route, price: work.price }).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '集中修订不能替换首检模型价目。')
+      }
+      if (work.kind === 'merged_revision' && previous === 'quality'
+        && work.input.qualityReportId !== z.object({ toolResult: z.object({ display: z.object({ reportId: z.string() }) }) }).parse(receipt.result).toolResult.display.reportId)
+        return runtimeError('RUNTIME_RECEIPT_INVALID', '集中修订不能替换原质量报告。')
+    }
+    if (['continuity', 'quality', 'continuity_verify', 'quality_verify'].includes(admission.step)) {
       const body = previous === 'body' ? source : await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: {
         taskRootId: lease.taskRootId, operationKey: writingServiceOperationKey(parent.id, 'body') } }, include: { effectReceipt: true } })
       if (!body || body.status !== 'succeeded' || !body.effectReceipt
@@ -193,9 +328,30 @@ async function verifyServiceInput(tx: RuntimeTx, lease: ServiceProofSubject, sav
       }
       if (previous !== 'body') await verifyPredecessor(tx, lease, { operationId: body.id, action: parent.action,
         novelId: saved.novelId, callId: saved.callId }, verification)
-      const display = bodyReceiptSchema.parse(body.effectReceipt.result).toolResult.display
+      let display = bodyReceiptSchema.parse(body.effectReceipt.result).toolResult.display
+      if (admission.step === 'continuity_verify' || admission.step === 'quality_verify') {
+        if (manifest.version !== 2) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '旧写作清单没有新版复核阶段。')
+        const revision = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId,
+          operationKey: writingServiceOperationKey(parent.id, 'prose_revision') } }, include: { effectReceipt: true } })
+        if (!revision?.effectReceipt || revision.status !== 'succeeded') return runtimeError('RUNTIME_RECEIPT_INVALID', '新版复核缺少原集中修订阶段回执。')
+        await verifyPredecessor(tx, lease, { operationId: revision.id, action: 'chapter_edit_range', novelId: saved.novelId, callId: saved.callId }, verification)
+        const effect = z.object({ revisionApplied: z.boolean() }).parse(revision.effectReceipt.result)
+        if (!effect.revisionApplied) {
+          const skip = z.object({ kind: z.literal('verification_skip'), version: z.literal(1), compiler: compilerObservationSchema }).strict().parse(saved.work)
+          if (runtimeJson(skip.compiler).hash !== runtimeJson(expectedBaseline).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '跳过复核不能替换当前编译回执。')
+        } else display = bodyReceiptSchema.parse(revision.effectReceipt.result).toolResult.display
+        if (!effect.revisionApplied) {
+          if (runtimeJson(saved.args).hash !== runtimeJson(expectedArgs).hash || runtimeJson(saved.baseline).hash !== runtimeJson(expectedBaseline).hash)
+            return runtimeError('RUNTIME_RECEIPT_INVALID', '未改稿的无请求阶段参数不匹配。')
+          return { parent, original, manifest, step: manifest.steps[index], input: saved }
+        }
+        const role = await readWritingReviewFrozenPrice(tx, { ...lease, novelId: saved.novelId }, parent.id,
+          admission.step === 'continuity_verify' ? 'continuity' : 'quality')
+        const workRole = z.object({ route: z.unknown(), price: z.unknown() }).parse(saved.work)
+        if (runtimeJson(role).hash !== runtimeJson(workRole).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '新版复检不能替换首检角色路由与价目。')
+      }
       if (display.chapterId !== chapterId) return runtimeError('RUNTIME_RECEIPT_INVALID', '正文回执目标与原写入不一致。')
-      assertWritingReviewWork(saved.work, { step: admission.step, baseline: expectedBaseline, chapterId,
+      assertWritingReviewWork(saved.work, { step: admission.step === 'continuity' || admission.step === 'continuity_verify' ? 'continuity' : 'quality', baseline: expectedBaseline, chapterId,
         revision: display.revision, content: display.after, actualOutcomes: writing.actualOutcomes })
     }
   }
@@ -224,7 +380,8 @@ async function readVerifiedServiceStep(lease: ServiceProofSubject, input: Servic
 }
 
 export async function readAdmittedWritingServiceStep(lease: RunLeaseToken, input: ServiceIdentity, tx: RuntimeTx) {
-  return readVerifiedServiceStep(lease, input, tx, serviceVerification(lease))
+  return readVerifiedServiceStep(lease, input, tx, await hasCommittedServiceReceipt(tx, lease, input.operationId)
+    ? serviceVerification(undefined, true) : serviceVerification(lease))
 }
 
 /** Historical source proof only. It never acquires a lease, admits a provider
@@ -256,6 +413,17 @@ export async function readAdmittedReviewWork(lease: RunLeaseToken, input: { oper
 export async function prepareWritingServiceStep(lease: RunLeaseToken, value: unknown) {
   const saved = inputSchema.parse(value)
   return withManuscriptRunLease(lease, async tx => {
+    const action = actionFor(saved.serviceAdmission.step,
+      (await tx.agentOperation.findUniqueOrThrow({ where: { id: saved.serviceAdmission.parentOperationId } })).action)
+    const existing = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId,
+      operationKey: writingServiceOperationKey(saved.serviceAdmission.parentOperationId, saved.serviceAdmission.step) } } })
+    if (existing && await hasCommittedServiceReceipt(tx, lease, existing.id)) {
+      const expected = runtimeJson({ kind: 'internal', action, parentOperationId: saved.serviceAdmission.parentOperationId, input: saved })
+      if (existing.inputHash !== expected.hash || runtimeJson(existing.inputSnapshot).hash !== expected.hash)
+        return runtimeError('RUNTIME_IDENTITY_CONFLICT', '已提交写作阶段不能替换原冻结输入。')
+      await readHistoricalWritingServiceSource(tx, lease, { operationId: existing.id, action, novelId: saved.novelId, callId: saved.callId })
+      return existing
+    }
     const verified = await verifyServiceInput(tx, lease, saved, actionFor(saved.serviceAdmission.step,
       (await tx.agentOperation.findUniqueOrThrow({ where: { id: saved.serviceAdmission.parentOperationId } })).action), serviceVerification(lease))
     return prepareOperationInTransaction(tx, lease, { key: writingServiceOperationKey(verified.parent.id, saved.serviceAdmission.step),

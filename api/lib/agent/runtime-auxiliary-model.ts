@@ -22,6 +22,8 @@ import { continuityEvidenceCorrectionInput, continuityEvidenceCorrectionSystem }
 import { continuityReassessmentRequest } from './assessment-response-lifecycle.js'
 import { terminalCandidateSchema } from './terminal-state-review.js'
 import { terminalEvidenceContextSchema } from './terminal-evidence-context.js'
+import { claimContinuityPhase } from './continuity-coordinator.js'
+const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 
 const steps = {
   publish_advice: { parent: 'novel_export', previous: null },
@@ -33,6 +35,7 @@ const steps = {
   continuity_reassessment: { parent: 'continuity_validate', previous: 'continuity_critic' },
   continuity_repair: { parent: 'continuity_validate', previous: 'continuity_critic' },
   continuity_repair_retry: { parent: 'continuity_validate', previous: 'continuity_repair' },
+  continuity_coordinated_revision: { parent: 'chapter_edit_range', previous: null },
   quality_critic: { parent: 'quality_analyze', previous: null },
   quality_format_recovery: { parent: 'quality_analyze', previous: 'quality_critic' },
   quality_evidence_correction: { parent: 'quality_analyze', previous: 'quality_critic' },
@@ -40,7 +43,7 @@ const steps = {
   quality_repair_retry: { parent: 'quality_analyze', previous: 'quality_repair' },
 } as const
 export type AuxiliaryModelStep = keyof typeof steps
-const stepSchema = z.enum(['publish_advice', 'research_dossier_synthesis', 'creative_critique', 'creative_revision', 'continuity_critic', 'continuity_evidence_correction', 'continuity_reassessment', 'continuity_repair', 'continuity_repair_retry', 'quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'])
+const stepSchema = z.enum(['publish_advice', 'research_dossier_synthesis', 'creative_critique', 'creative_revision', 'continuity_critic', 'continuity_evidence_correction', 'continuity_reassessment', 'continuity_repair', 'continuity_repair_retry', 'continuity_coordinated_revision', 'quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry'])
 const parentInput = z.object({ input: z.object({ callId: z.string(), args: z.record(z.string(), z.unknown()), normalization: argumentNormalizationSchema }) })
 const isolatedRequest = z.object({ body: z.object({
   messages: z.array(z.object({ role: z.enum(['system', 'user']), content: z.string() })).min(1),
@@ -120,6 +123,23 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
     if (!modeAllowed || !grant || grant.permission === 'deny'
       || !state.configuration.tools.some(tool => tool.function.name === parent.action)) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原任务不允许独立检查或修订。')
     if (!service && (grant.permission === 'ask' || grant.alwaysConfirm)) await assertToolApproval(tx, lease, source.snapshotHash, original.callId, parent.action, call.arguments, original.normalization.normalizedArgsHash)
+    if (captured.step === 'continuity_coordinated_revision') {
+      if (!service || service.manifest.version !== 2 || service.input.serviceAdmission.step !== 'prose_revision')
+        return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '普通正文工具或旧写作清单没有集中修订模型阶段。')
+      const coordinator = await import('./continuity-coordinator.js')
+      const work = await coordinator.authenticateNativeContinuityRevisionWork(tx,
+        { userId: lease.userId, novelId: service.input.novelId, runId: lease.runId }, service.input.work)
+      if (work.kind !== 'merged_revision') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '无效果阶段不能调用修订模型。')
+      const request = z.object({ endpoint: z.string(), body: z.record(z.string(), z.unknown()) }).parse(captured.request)
+      if (runtimeJson(captured.price).hash !== runtimeJson(work.price).hash || request.endpoint !== `${work.route.baseUrl.replace(/\/$/u, '')}/chat/completions`
+        || request.body.model !== work.route.model || (request.body.max_tokens ?? request.body.max_completion_tokens) !== work.route.maxOutputTokens
+        || request.body.temperature !== undefined && request.body.temperature !== 0 || request.body.stream !== true
+        || runtimeJson(request.body.messages).hash !== runtimeJson([{ role: 'system', content: work.system }, { role: 'user', content: work.content }]).hash)
+        return runtimeError('RUNTIME_RECEIPT_INVALID', '集中修订不能替换原当前报告、模型、价目或请求内容。')
+      await claimContinuityPhase(tx, { userId: lease.userId, novelId: service.input.novelId, runId: lease.runId }, {
+        plan: work.plan, chapterId: work.chapter.id, phase: 'prose_revision', operationRef: parent.id, inputHash: parent.inputHash,
+        ownerEpoch: `${lease.ownerId}:${lease.claimId}:${lease.epoch}` })
+    }
     if (captured.step === 'publish_advice') {
       const { exportWorkSchema } = await import('./runtime-export-contract.js')
       const { buildPublishAdviceRequest } = await import('../ai-service.js')
@@ -243,19 +263,19 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
         }
       }
       if (captured.step === 'continuity_reassessment') {
-        const work = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14), z.literal(15), z.literal(16), z.literal(17), z.literal(18), z.literal(19), z.literal(20), z.literal(21), z.literal(22)]), criticSystem: z.string(), criticInput: z.string(), terminalCandidate: terminalCandidateSchema.optional(), sourceScope: continuitySourceScopeSchema.optional(),
-          reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)]).optional(), continuityManifest: continuityReviewManifestSchema.optional(), sourceBodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }) }) }) }).safeParse(parent.inputSnapshot)
+        const work = z.object({ input: z.object({ work: z.object({ kind: z.literal('check'), version: z.union([z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14), z.literal(15), z.literal(16), z.literal(17), z.literal(18), z.literal(19), z.literal(20), z.literal(21), z.literal(22), z.literal(23)]), criticSystem: z.string(), criticInput: z.string(), terminalCandidate: terminalCandidateSchema.optional(), sourceScope: continuitySourceScopeSchema.optional(),
+          reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7)]).optional(), continuityManifest: continuityReviewManifestSchema.optional(), sourceBodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }) }) }) }).safeParse(parent.inputSnapshot)
         const usage = result.usageReceipt, response = parsedResult.data.result
         if (!work.success || usage?.source !== 'reported' || usage.settlementStatus !== 'settled' || usage.promptTokens === null || usage.completionTokens === null
           || usage.promptTokens < 0 || usage.completionTokens < 0 || response.finishReason !== 'stop' || response.toolCalls.length) {
           return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '首个连续性回复尚无完整已结算结果，不能派发完整复评。')
         }
         const frozen = work.data.input.work
-        if ((frozen.version === 19) !== (frozen.reassessmentProtocol === 3) || (frozen.version === 20) !== (frozen.reassessmentProtocol === 4) || (frozen.version === 21) !== (frozen.reassessmentProtocol === 5) || (frozen.version === 22) !== (frozen.reassessmentProtocol === 6)) return runtimeError('RUNTIME_RECEIPT_INVALID', '连续性响应合同与冻结操作版本不一致。')
+        if ((frozen.version === 19) !== (frozen.reassessmentProtocol === 3) || (frozen.version === 20) !== (frozen.reassessmentProtocol === 4) || (frozen.version === 21) !== (frozen.reassessmentProtocol === 5) || (frozen.version === 22) !== (frozen.reassessmentProtocol === 6) || (frozen.version === 23) !== (frozen.reassessmentProtocol === 7)) return runtimeError('RUNTIME_RECEIPT_INVALID', '连续性响应合同与冻结操作版本不一致。')
         if ((frozen.reassessmentProtocol === 3 || frozen.reassessmentProtocol === 4 || frozen.reassessmentProtocol === 5) && (frozen.sourceBodies.terminalEvidence?.verdictProtocol !== 6 || !frozen.terminalCandidate)) return runtimeError('RUNTIME_RECEIPT_INVALID', '响应合同缺少冻结候选或证据目录。')
         if (frozen.version >= 12 && !frozen.sourceScope) return runtimeError('RUNTIME_RECEIPT_INVALID', '连续性来源边界缺失，不能追加复评。')
         if (frozen.version >= 13 && (!frozen.sourceBodies.terminalEvidence || frozen.version >= 14 && frozen.sourceBodies.terminalEvidence.protocol !== 2)) return runtimeError('RUNTIME_RECEIPT_INVALID', '终态继承缺少原冻结证据范围，不能追加复评。')
-        const inspected = inspectAuthenticatedContinuityAssessment(response.content, { bodies: frozen.sourceBodies, parserVersion: frozen.version === 22 ? 9 : frozen.version >= 13 ? 8 : frozen.version >= 12 ? 7 : 6, terminalCandidate: frozen.version >= 10 ? frozen.terminalCandidate : undefined, sourceScope: frozen.version >= 12 ? frozen.sourceScope : undefined, continuityManifest: frozen.continuityManifest, reassessmentProtocol: frozen.reassessmentProtocol }, true)
+        const inspected = inspectAuthenticatedContinuityAssessment(response.content, { bodies: frozen.sourceBodies, parserVersion: frozen.version === 23 ? 10 : frozen.version === 22 ? 9 : frozen.version >= 13 ? 8 : frozen.version >= 12 ? 7 : 6, terminalCandidate: frozen.version >= 10 ? frozen.terminalCandidate : undefined, sourceScope: frozen.version >= 12 ? frozen.sourceScope : undefined, continuityManifest: frozen.continuityManifest, reassessmentProtocol: frozen.reassessmentProtocol }, true)
         const expected = continuityReassessmentRequest(frozen.criticSystem, frozen.criticInput, inspected, frozen.sourceBodies, false, frozen.reassessmentProtocol)
         const request = isolatedRequest.parse(captured.request)
         const claim = await tx.agentArtifact.findFirst({ where: { runId: lease.runId, artifactType: 'continuityReview',
@@ -264,6 +284,30 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
           || runtimeJson(request.body.messages).hash !== runtimeJson([{ role: 'system', content: expected.system }, { role: 'user', content: expected.content }]).hash) {
           return runtimeError('RUNTIME_RECEIPT_INVALID', '完整复评须绑定原响应、完整输入和唯一预约，不能重审已完成报告或借用旧协议。')
         }
+      }
+    }
+    if (parent.action === 'continuity_validate' && ['continuity_critic', 'continuity_reassessment'].includes(captured.step)) {
+      const frozen = z.object({ input: z.object({ novelId: z.string(), work: z.object({ version: z.number(), chapter: z.object({ id: z.string() }),
+        continuityManifest: continuityReviewManifestSchema.optional(), route: z.unknown(), price: z.unknown(), criticSystem: z.string(), criticInput: z.string() }) }) }).parse(parent.inputSnapshot).input
+      if (frozen.work.version === 23) {
+        const plan = frozen.work.continuityManifest?.typedLineage?.phasePlan
+        const request = isolatedRequest.parse(captured.request)
+        const work = object(object(parent.inputSnapshot).input).work as Record<string, unknown>
+        const coordinator = await import('./continuity-coordinator.js')
+        if (!plan || plan.modelPriceHash !== runtimeJson({ route: frozen.work.route, price: frozen.work.price }).hash
+          || runtimeJson(captured.price).hash !== runtimeJson(frozen.work.price).hash
+          || captured.step === 'continuity_critic' && runtimeJson(request.body.messages).hash !== runtimeJson([
+            { role: 'system', content: frozen.work.criticSystem }, { role: 'user', content: frozen.work.criticInput }]).hash)
+          return runtimeError('RUNTIME_RECEIPT_INVALID', '连续性阶段未绑定原冻结模型、价目或完整输入。')
+        const input = { chapterId: frozen.work.chapter.id, revision: object(work.chapter).revision,
+          targetType: 'story_compilation', targetId: object(work.compiler).id, bodies: work.sourceBodies,
+          terminalCandidate: work.terminalCandidate, sourceScope: work.sourceScope, continuityManifest: frozen.work.continuityManifest,
+          system: frozen.work.criticSystem, content: frozen.work.criticInput } as import('./assessment-response-lifecycle.js').LegacyAssessmentInput
+        const phase = await coordinator.assertContinuityAssessmentSubject(tx, { userId: lease.userId, novelId: frozen.novelId, runId: lease.runId }, input)
+        await claimContinuityPhase(tx, { userId: lease.userId, novelId: frozen.novelId, runId: lease.runId }, {
+          plan, chapterId: frozen.work.chapter.id, phase: captured.step === 'continuity_critic' ? phase : 'sparse_repair',
+          operationRef: parent.id, inputHash: captured.step === 'continuity_critic' ? parent.inputHash : runtimeJson(request.body.messages).hash,
+          ownerEpoch: `${lease.ownerId}:${lease.claimId}:${lease.epoch}` })
       }
     }
     return preparePricedProviderOperationInTransaction(tx, lease, captured)

@@ -13,8 +13,6 @@ import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continu
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
-import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
-import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { observeChapterReviewProgress, observeSemanticReadProgress, observeWritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
 import { terminalFeedbackSlots } from '../../api/lib/agent/terminal-feedback-handoff.js'
@@ -51,7 +49,7 @@ async function saveReview(subject:Subject,chapter:Chapter,compilationId:string,c
   return evidence
 }
 
-describe.runIf(available)('original stalled task resolves inherited facts through real tools and commit',()=>{
+describe.runIf(available)('proof changes never purchase a new independent judgment',()=>{
   it('does not issue a supported-progress milestone for an empty candidate and empty obligation set',()=>fixture(async f=>{
     const chapter=await prisma.chapter.update({where:{id:f.chapterId},data:{content:'The crate is sealed.',revision:1}})
     const compilationId=await prepare(f,chapter),candidate=terminalCandidateSchema.parse({exitState:{}})
@@ -131,76 +129,35 @@ describe.runIf(available)('original stalled task resolves inherited facts throug
       return new Response(`data: ${JSON.stringify({choices:[{delta:{content:JSON.stringify(response)},finish_reason:'stop'}],usage:{prompt_tokens:10,completion_tokens:0}})}\n\ndata: [DONE]\n\n`,{headers:{'content-type':'text/event-stream'}})
     })
     vi.stubGlobal('fetch',network)
-    let turn=0
-    let afterReadCheckpoint:unknown
-    const main=vi.spyOn(ai,'chatWithTools').mockImplementation(async()=>{
-      if(++turn>8)throw Error('Repeated unknown must terminate')
-      if(turn===2) {
-        const afterRead=await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}})
-        afterReadCheckpoint=(afterRead.usage as {checkpoint:typeof checkpoint}).checkpoint
-      }
-      const checkTurn=scenario==='fresh-context'?6:2
-      const call=turn===1?{id:'reread-saved-body',name:'chapter_read',arguments:JSON.stringify({chapterId:chapter.id})}
-        :scenario==='fresh-context'&&turn<6?{id:`read-new-range-${turn}`,name:'chapter_read',arguments:JSON.stringify({chapterId:previous.id,offset:(turn-2)*10,limit:10})}
-        :turn===checkTurn?{id:'select-proof-only',name:'continuity_validate',arguments:JSON.stringify({compilationId,inheritedProofs:[proof.proofHash],...(scenario==='patch'?{terminalPatch:{baseCandidateHash:runtimeJson(base).hash,removeFactIds:[terminalFactId('emotion',base.exitState.emotion[0])]}}:{})})}
-        :supported?undefined:{id:`same-report-${turn}`,name:'chapter_bridge_get',arguments:JSON.stringify({compilationId})}
-      // A generic revision uses the normal final reply after the automatic
-      // commit. Only an exclusive title/body request can finish without it.
-      if(!call)expect(await prisma.storyCompilation.findUniqueOrThrow({where:{id:compilationId},include:{bridge:true}}))
-        .toMatchObject({status:'completed',stage:'commit',bridge:{committedAt:expect.any(Date)}})
-      return{content:call?'':'Completed.',reasoning:'',finishReason:call?'tool_calls':'stop',toolCalls:call?[call]:[],usage:{promptTokens:10,completionTokens:0,totalTokens:10,promptCacheHitTokens:null,promptCacheMissTokens:null}}
-    })
+    const frozen = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
+    const main = vi.spyOn(ai,'chatWithTools').mockRejectedValue(Error('A different proof selection is not a fresh judgment grant'))
     await executeAgentRun({...f,prompt:'修改本章',mode:'build',resume:true,eventStartSeq:4,modelTier:'speed',qualityMode:'balanced',creativeFreedom:'balanced'})
-    expect(afterReadCheckpoint).toMatchObject({stagnantBatches:5,readProgress:7,writeProgress:1,
-      reviewAttempts:expect.arrayContaining(['old-attempt'])})
-    expect(main).toHaveBeenCalledTimes(supported?(scenario==='fresh-context'?7:3):2)
-    expect(network).toHaveBeenCalledOnce()
-    expect(JSON.stringify(requests[0])).toContain('proofIndex')
-    expect(JSON.stringify(requests[0])).not.toContain(proof.proofHash)
-    const usage=await prisma.aiUsageLog.findMany({where:{userId:f.userId,agentRunId:f.runId,action:'agent3ContinuityCritic'}})
-    expect(usage).toHaveLength(1)
-    expect(usage[0]).toMatchObject({billingStatus:'settled',usageSource:'reported',requestTokens:10,responseTokens:0,reservedCreditMilli:0})
+    expect(main).not.toHaveBeenCalled()
+    expect(network).not.toHaveBeenCalled()
+    expect(requests).toHaveLength(0)
+    expect(await prisma.aiUsageLog.count({where:{userId:f.userId}})).toBe(0)
     expect(await prisma.agentRunEvent.findMany({where:{runId:f.runId,seq:{lte:4}},orderBy:{seq:'asc'}})).toEqual(history)
     expect(await prisma.chapter.findUniqueOrThrow({where:{id:chapter.id}})).toMatchObject({content:body,revision:15})
-    const final=await prisma.storyCompilation.findUniqueOrThrow({where:{id:compilationId},include:{bridge:true}}),run=await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}}),cp=(run.usage as {checkpoint:typeof checkpoint}).checkpoint
-    expect(final.validation).toMatchObject({independentCheck:'complete',terminalCandidate:{exitState:{objects:base.exitState.objects,openLoops:[claim]}},
-      continuityCriticResponse:{classification:'complete',terminalEvidence:{verdictProtocol:6}}})
-    const failedResults=await prisma.agentRunEvent.findMany({where:{runId:f.runId,seq:{gt:4},type:'tool.result',payload:{path:['ok'],equals:false}}})
-    expect(failedResults).toHaveLength(supported?0:1)
-    if(!supported)expect(failedResults[0].payload).toMatchObject({callId:'select-proof-only',toolName:'continuity_validate',ok:false,failureCode:'TERMINAL_STATE_REVIEW_REQUIRED'})
+    const final = await prisma.storyCompilation.findUniqueOrThrow({where:{id:compilationId},include:{bridge:true}})
+    const run = await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}})
+    const cp = (run.usage as {checkpoint:typeof checkpoint}).checkpoint
+    expect(run.status).toBe('paused')
+    expect(final.bridge?.committedAt).toBeNull()
+    expect(final.validation).toEqual(frozen.validation)
+    expect(final.preparedContext).toEqual(frozen.preparedContext)
     expect(cp.reviewAttempts).toContain('old-attempt')
-    expect(cp.readProgress).toBe(scenario==='fresh-context'?11:7)
-    expect(cp.writeProgress).toBe(supported?2:1)
+    expect(cp.readProgress).toBe(7)
+    expect(cp.writeProgress).toBe(1)
     expect(cp.progressSignatures).toEqual(expect.arrayContaining(checkpoint.progressSignatures))
     expect(cp.consumedReviewDecisionFeedback ?? []).toEqual(checkpoint.consumedReviewDecisionFeedback)
-    expect(cp.reviewAttempts.filter(key=>key.startsWith('terminal-processing:'))).toHaveLength(2)
-    if(supported){
-      const commits=await prisma.agentRunEvent.findMany({where:{runId:f.runId,type:{in:['tool.call','tool.result']},
-        payload:{path:['toolName'],equals:'chapter_bridge_commit'}},orderBy:{seq:'asc'}})
-      expect(commits.map(event=>({type:event.type,payload:event.payload}))).toMatchObject([
-        {type:'tool.call',payload:{callId:expect.stringMatching(/^terminal_commit_[a-f0-9]{40}$/u),toolName:'chapter_bridge_commit'}},
-        {type:'tool.result',payload:{callId:(commits[0].payload as {callId:string}).callId,toolName:'chapter_bridge_commit',ok:true}},
-      ])
-      expect(run.status).toBe('completed')
-      expect(final.bridge).toMatchObject({openLoops:[claim],objectState:base.exitState.objects,committedAt:expect.any(Date)})
-      expect(final.preparedContext).toMatchObject({terminalFactProofs:expect.arrayContaining([expect.objectContaining({field:'openLoops',claim,depth:2})])})
-      expect(cp.progressSignatures.filter(key=>key.endsWith(',"terminal_supported"]'))).toHaveLength(1)
-    }else{
-      expect(run.status).toBe('paused')
-      expect(final.bridge?.committedAt).toBeNull()
-      expect(cp.stagnantBatches).toBeGreaterThanOrEqual(4)
-      expect(cp.progressSignatures.some(key=>key.endsWith(',"terminal_supported"]'))).toBe(false)
-      const ledger=(final.preparedContext as {terminalFactCoverage:{facts:Array<{id:string}>}}).terminalFactCoverage.facts
-      for(const [index,obligation] of obligations.entries())if(scenario!=='alias-unknown'||index===1)expect(ledger.some(fact=>fact.id===obligation.id)).toBe(true)
-      // The same paused body/report cannot buy a fresh window or another
-      // critic on Continue. Historical calls, budgets and fees remain intact.
-      const last=await prisma.agentRunEvent.findFirstOrThrow({where:{runId:f.runId},orderBy:{seq:'desc'}})
-      const calls=main.mock.calls.length,requestsBefore=network.mock.calls.length
-      await executeAgentRun({...f,prompt:'修改本章',mode:'build',resume:true,eventStartSeq:last.seq,modelTier:'speed',qualityMode:'balanced',creativeFreedom:'balanced'})
-      expect(main).toHaveBeenCalledTimes(calls)
-      expect(network).toHaveBeenCalledTimes(requestsBefore)
-      expect(await prisma.aiUsageLog.count({where:{userId:f.userId,agentRunId:f.runId,action:'agent3ContinuityCritic'}})).toBe(1)
-      expect((await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}})).status).toBe('paused')
-    }
+    expect(cp.progressSignatures.some(key=>key.endsWith(',"terminal_supported"]'))).toBe(false)
+    const ledger = (final.preparedContext as {terminalFactCoverage:{facts:Array<{id:string}>}}).terminalFactCoverage.facts
+    for (const obligation of obligations) expect(ledger.some(fact=>fact.id===obligation.id)).toBe(true)
+    expect(await prisma.agentRunEvent.count({where:{runId:f.runId,seq:{gt:4},type:'tool.result',payload:{path:['ok'],equals:false}}})).toBe(0)
+    const last = await prisma.agentRunEvent.findFirstOrThrow({where:{runId:f.runId},orderBy:{seq:'desc'}})
+    await executeAgentRun({...f,prompt:'修改本章',mode:'build',resume:true,eventStartSeq:last.seq,modelTier:'speed',qualityMode:'balanced',creativeFreedom:'balanced',authorContinue:true})
+    expect(main).not.toHaveBeenCalled()
+    expect(network).not.toHaveBeenCalled()
+    expect(await prisma.aiUsageLog.count({where:{userId:f.userId}})).toBe(0)
   },undefined,'修改本章',{continuityEvidenceProtocol:1,terminalEvidenceProtocol:2,terminalQuoteAddressProtocol:1,terminalCoverageProtocol:1}),30000)
 })

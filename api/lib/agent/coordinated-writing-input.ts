@@ -42,10 +42,15 @@ export function issueWritingCoordination(spec: TaskSpec, mode: string, names: Re
     ...(required.continuity ? ['continuity_validate'] : []), ...(required.quality ? ['quality_analyze'] : []),
     ...(spec.scope.writing.targets.some(target => !target.chapterId) ? ['chapter_create'] : [])]
   if (actions.some(action => !names.has(action))) return spec
-  return { ...admitted, scope: { ...admitted.scope, writingCoordinationProtocol: 1 } }
+  return { ...admitted, scope: { ...admitted.scope, writingCoordinationProtocol: spec.scope.continuityReportProtocol === 5 && required.continuity ? 2 : 1 } }
 }
-export const writingServiceStepSchema = z.enum(['body', 'continuity', 'quality', 'commit'])
+export const writingServiceStepSchema = z.enum(['body', 'continuity', 'quality', 'prose_revision', 'continuity_verify', 'quality_verify', 'commit'])
 export type WritingServiceStep = z.infer<typeof writingServiceStepSchema>
+const manifestStep = z.object({ step: writingServiceStepSchema, actions: z.array(z.string().min(1)).min(1) }).strict()
+export const writingServiceManifestSchema = z.discriminatedUnion('version', [
+  z.object({ version: z.literal(1), chapterId: z.string().min(1), writingHash: z.string().regex(/^[a-f0-9]{64}$/), steps: z.array(manifestStep).min(1).max(4) }).strict(),
+  z.object({ version: z.literal(2), chapterId: z.string().min(1), writingHash: z.string().regex(/^[a-f0-9]{64}$/), steps: z.array(manifestStep).min(1).max(7) }).strict(),
+])
 
 /** Literary decisions supplied by the genuine writer. Completion is a request
  * to review this saved version; it never attests a successful check or commit. */
@@ -74,7 +79,7 @@ export type CoordinatedWritingInput = z.infer<typeof coordinatedWritingInputSche
 /** Only the original server marker can publish/parse the additional literary
  * carrier. Unmarked schemas retain their exact objects and hashes. */
 export function coordinatedWriterParameters(tool: Pick<AgentTool, 'name' | 'parameters'>, scope?: TaskSpec['scope']) {
-  if (scope?.writingCoordinationProtocol !== 1 || !coordinatedWriterActions.some(action => action === tool.name)) return tool.parameters
+  if (!scope?.writingCoordinationProtocol || !coordinatedWriterActions.some(action => action === tool.name)) return tool.parameters
   if (!(tool.parameters instanceof z.ZodObject)) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '写作协调字段不能替换另一类工具的原参数。')
   return tool.parameters.safeExtend({ writing: coordinatedWritingInputSchema }).strict()
 }
@@ -83,7 +88,8 @@ export function coordinatedWriterParameters(tool: Pick<AgentTool, 'name' | 'para
  * approval, version and source-receipt checks still happen at every effect. */
 export function coordinatedWritingManifest(original: { spec: TaskSpec; prompt: string | null }, action: string, chapterId: string, value: unknown) {
   const spec = original.spec
-  if (spec.scope.writingCoordinationProtocol !== 1 || !coordinatedWriterActions.some(name => name === action)
+  if (!spec.scope.writingCoordinationProtocol || spec.scope.writingCoordinationProtocol === 2 && spec.scope.continuityReportProtocol !== 5
+    || !coordinatedWriterActions.some(name => name === action)
     || !['write', 'revise'].includes(spec.intent) || spec.writingPacing !== 'explicit_writing'
     || spec.scope.writing?.kind !== 'bounded' || spec.scope.selection || spec.scope.selectionBoundary || spec.scope.localEditBoundary
     || spec.scope.authorEffects?.manuscript === false) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原任务没有完整章节写作协调能力，不能升级旧合同或扩大选区。')
@@ -99,7 +105,12 @@ export function coordinatedWritingManifest(original: { spec: TaskSpec; prompt: s
     { step: 'body', actions: ['story_compiler_prepare', 'scene_task_build', action] },
     ...(writing.draftComplete && required.continuity ? [{ step: 'continuity' as const, actions: ['continuity_validate'] }] : []),
     ...(writing.draftComplete && required.quality ? [{ step: 'quality' as const, actions: ['quality_analyze'] }] : []),
+    ...(writing.draftComplete && spec.scope.writingCoordinationProtocol === 2 ? [
+      { step: 'prose_revision' as const, actions: ['chapter_edit_range'] },
+      ...(required.continuity ? [{ step: 'continuity_verify' as const, actions: ['continuity_validate'] }] : []),
+      ...(required.quality ? [{ step: 'quality_verify' as const, actions: ['quality_analyze'] }] : []),
+    ] : []),
     ...(writing.draftComplete ? [{ step: 'commit' as const, actions: ['chapter_bridge_commit'] }] : []),
   ]
-  return runtimeJson({ version: 1, chapterId, writingHash: runtimeJson(writing).hash, steps }).value
+  return runtimeJson({ version: spec.scope.writingCoordinationProtocol, chapterId, writingHash: runtimeJson(writing).hash, steps }).value
 }

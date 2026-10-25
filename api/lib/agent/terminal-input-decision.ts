@@ -22,10 +22,10 @@ import { isKnownRejectedTextRequestAttempt, isKnownTextRequestBilling } from './
 import { readRetiredReviewUsageIds } from './cancelled-review-recovery.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
-const inputSchema = z.object({ chapterId: z.string(), revision: z.number().int(), parserVersion: z.union([z.literal(8), z.literal(9)]), continuityManifest: continuityReviewManifestSchema.optional(), terminalCandidate: terminalCandidateSchema,
+const inputSchema = z.object({ chapterId: z.string(), revision: z.number().int(), parserVersion: z.union([z.literal(8), z.literal(9), z.literal(10)]), continuityManifest: continuityReviewManifestSchema.optional(), terminalCandidate: terminalCandidateSchema,
   bodies: z.object({ current: z.string(), previous: z.string().nullable(), terminalEvidence: terminalEvidenceContextSchema }).strict(),
   sourceScope: continuitySourceScopeSchema, system: z.string(), content: z.string(), bindingHash: z.string().regex(/^[a-f0-9]{64}$/u),
-  reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)]).optional(), targetType: z.literal('story_compilation'), targetId: z.string() }).strict()
+  reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7)]).optional(), targetType: z.literal('story_compilation'), targetId: z.string() }).strict()
 
 /** Selectors, ordering, prompts and focus do not create a different subject.
  * This digest grants nothing: its operands must first be authenticated below. */

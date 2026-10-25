@@ -345,7 +345,8 @@ export async function executePreparedQualityWork(ctx: ToolContext, lease: RunLea
 /** Freeze the original business input independently of model cursor admission.
  * The caller still admits that exact work before dispatch or any effect. */
 export async function prepareQualityWork(ctx: ToolContext, lease: import('../runtime-lease.js').RunLeaseToken, input: {
-  operationKey: string; observedRevision: number; baseline: z.infer<typeof compilerObservationSchema> | null; args: Record<string, unknown>; serviceReadOnly?: true
+  operationKey: string; observedRevision: number; baseline: z.infer<typeof compilerObservationSchema> | null; args: Record<string, unknown>; serviceReadOnly?: true;
+  frozenReview?: { route: z.infer<typeof auxiliaryRouteSchema>; price: z.infer<typeof tokenPriceSchema> }
 }) {
   ctx = { ...ctx }; lease = { ...lease }; input = { ...input }
   const baseline = input.baseline && { ...input.baseline }, args = structuredClone(input.args)
@@ -408,6 +409,7 @@ export async function prepareQualityWork(ctx: ToolContext, lease: import('../run
     const price = await resolveDurableTokenPrice(lease, `${input.operationKey}:quality-price`, resolved.selection.tier, resolved.runtime.multiplierBps)
     work = { ...work, route: auxiliaryRouteForRuntime(resolved.runtime, resolved.selection, REVIEW_MAX_OUTPUT_TOKENS), price }
   }
+  if (!recoveredWork && input.frozenReview && work.kind === 'check') work = { ...work, ...input.frozenReview }
   work = workSchema.parse(work)
   return work
 }

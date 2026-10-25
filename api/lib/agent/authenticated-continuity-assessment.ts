@@ -10,7 +10,7 @@ import { runtimeJson } from './runtime-common.js'
 
 export type LegacyContinuityInspection = ReturnType<typeof inspectContinuityResponse>
 export type AuthenticatedContinuityInspection = LegacyContinuityInspection | ContinuityV4Inspection
-export const isContinuityV4Inspection = (value: AuthenticatedContinuityInspection): value is ContinuityV4Inspection => value.audit.parserVersion === 9
+export const isContinuityV4Inspection = (value: AuthenticatedContinuityInspection): value is ContinuityV4Inspection => value.audit.parserVersion === 9 || value.audit.parserVersion === 10
 export function assertLegacyContinuityInspection(value: AuthenticatedContinuityInspection): asserts value is LegacyContinuityInspection {
   if (isContinuityV4Inspection(value)) throw Error('A v4 response cannot enter a frozen legacy parser')
 }
@@ -18,11 +18,13 @@ export function assertLegacyContinuityInspection(value: AuthenticatedContinuityI
 /** Exact request version dispatch. Database adapters still authenticate the
  * original owner, reservation, raw transport and known priced usage first. */
 export function inspectAuthenticatedContinuityAssessment(raw: string, input: {
-  bodies: ContinuityBodies; parserVersion?: 3 | 4 | 5 | 6 | 7 | 8 | 9; terminalCandidate?: TerminalCandidate;
-  sourceScope?: ContinuitySourceScope; continuityManifest?: ContinuityReviewManifest; reassessmentProtocol?: 2 | 3 | 4 | 5 | 6;
+  bodies: ContinuityBodies; parserVersion?: 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10; terminalCandidate?: TerminalCandidate;
+  sourceScope?: ContinuitySourceScope; continuityManifest?: ContinuityReviewManifest; reassessmentProtocol?: 2 | 3 | 4 | 5 | 6 | 7;
 }, complete: boolean): AuthenticatedContinuityInspection {
-  if (input.parserVersion === 9) {
-    if (!input.continuityManifest || !input.terminalCandidate || !input.sourceScope || input.reassessmentProtocol !== 6) throw Error('Frozen v4 request missing manifest or contract')
+  if (input.parserVersion === 9 || input.parserVersion === 10) {
+    if (!input.continuityManifest || !input.terminalCandidate || !input.sourceScope
+      || input.reassessmentProtocol !== (input.parserVersion === 10 ? 7 : 6)
+      || (input.parserVersion === 10) !== !!input.continuityManifest.typedLineage) throw Error('Frozen v4 request missing manifest or contract')
     return inspectContinuityV4(raw, { manifest: input.continuityManifest, bodies: input.bodies, candidate: input.terminalCandidate, sourceScope: input.sourceScope }, complete)
   }
   return inspectContinuityResponse(raw, input.bodies, complete, input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope,
@@ -34,9 +36,13 @@ export function inspectAuthenticatedContinuityAssessment(raw: string, input: {
 export function readAuthenticatedContinuityAssessment(value: unknown, content: string, context: ContinuityBodies['terminalEvidence'], complete: boolean) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const audit = value as Record<string, unknown>
-  if (audit.parserVersion === 9 || audit.continuityV4 !== undefined) {
+  if (audit.parserVersion === 9 || audit.parserVersion === 10 || audit.continuityV4 !== undefined) {
     const rebuilt = validateStoredContinuityV4Projection(value, content, context)
-    return complete && rebuilt?.complete ? rebuilt.terminalReview : null
+    return complete && rebuilt?.complete && rebuilt.terminalReview ? { ...rebuilt.terminalReview,
+      ...(audit.parserVersion === 10 ? { establishedIssuesComplete: Array.isArray(rebuilt.parsed?.record.issueDispositions)
+        && rebuilt.parsed.record.issueDispositions.every(row => !!row && typeof row === 'object' && (row as Record<string, unknown>).outcome !== 'unknown'),
+        establishedIssueDispositions: (rebuilt.parsed?.record.issueDispositions as Array<{ issueIndex: number; outcome: string; explanation: string }> ?? []).map(row => ({ ...row,
+          issue: rebuilt.audit.continuityV4.manifest.typedLineage?.establishedIssues[row.issueIndex] })) } : {}) } : null
   }
   if (!validEmptyOptionalProposalProjection(audit, content, context) || !validContinuitySparseProjection(audit, content, context)) return null
   const candidate = terminalCandidateSchema.safeParse(audit.terminalCandidate), rawReceipt = audit.rawResponse as { complete?: unknown; content?: unknown } | undefined
@@ -51,6 +57,6 @@ export function readAuthenticatedContinuityAssessment(value: unknown, content: s
 
 /** A complete returned protocol failure is distinct from a missing response. */
 export function knownFinalContinuityFailure(audit: { parserVersion?: number; classification?: string }) {
-  return audit.parserVersion === 9 ? ['projection_invalid', 'json_invalid', 'duplicate_keys', 'ambiguous_envelope', 'envelope_invalid', 'response_too_large'].includes(audit.classification ?? '')
+  return audit.parserVersion === 9 || audit.parserVersion === 10 ? ['projection_invalid', 'json_invalid', 'duplicate_keys', 'ambiguous_envelope', 'envelope_invalid', 'response_too_large'].includes(audit.classification ?? '')
     : audit.parserVersion === 8 && audit.classification === 'source_invalid'
 }

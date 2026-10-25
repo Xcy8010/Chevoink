@@ -45,7 +45,8 @@ describe('protocol5 repairs strict source failures inside the original second sl
     expect(projected.semanticChecks).toEqual(f.bad.semanticChecks)
     const validation = { independentCheck: 'complete', terminalCandidate: f.candidate, continuityCriticResponse: result.audit }
     expect(currentTerminalReview(validation, f.content, f.context)).toMatchObject({ supported: false, factCoverage: { complete: false }, proposals: { complete: false } })
-    expect(terminalReviewFailure(validation, f.content, f.context)).toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: true })
+    expect(terminalReviewFailure(validation, f.content, f.context)).toMatchObject({ reviewOutcome: 'decision_required', reviewCompleted: true })
+    expect(terminalReviewFailure(validation, f.content, f.context)).not.toHaveProperty('failureCode')
     expect(JSON.stringify(f.original)).toBe(original)
     const audit = structuredClone(result.audit) as typeof result.audit & { responseProjection: { version: number } }
     audit.responseProjection.version = 1

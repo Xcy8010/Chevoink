@@ -26,7 +26,7 @@ import * as memory from '../../api/lib/agent/story-memory.js'
 import { calculateV2UserChargeMilli } from '../../api/lib/billing/pricing.js'
 
 describe.runIf(available)('native continuity origin remains a real operation and receipt chain', () => {
-  it.each([21, 22] as const)('authenticates work%s origin, pending current effect, cache and next-task inheritance', version => fixture(async f => {
+  it.each([21, 22] as const)('authenticates work%s UNKNOWN origin/cache without granting another candidate judgment or inheritance', version => fixture(async f => {
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     const lease = await claim(f), content = 'The guard waits. The packet remains sealed.'
     expect(await prisma.agentRun.update({ where: { id: f.runId, status: 'queued' }, data: { status: 'running' } })).toMatchObject({ status: 'running' })
@@ -79,24 +79,27 @@ describe.runIf(available)('native continuity origin remains a real operation and
       await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
     } else {
       const result = await step()
-      expect(result, JSON.stringify(result)).toMatchObject({ result: { failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' } })
+      expect(result, JSON.stringify(result)).toMatchObject({ result: { reviewCompleted: true, reviewOutcome: 'decision_required' } })
     }
-    const origin = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate' }, include: { effectReceipt: true, events: true, children: { include: { attempts: { include: { usageReceipt: true } }, events: true } } } })
+    const origin = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate',
+      inputSnapshot: { path: ['input', 'callId'], equals: 'origin' } }, include: { effectReceipt: true, events: true, children: { include: { attempts: { include: { usageReceipt: true } }, events: true } } } })
     expect(origin.status).toBe('succeeded'); expect(origin.effectReceipt).not.toBeNull()
     expect(origin.events).toContainEqual(expect.objectContaining({ type: 'effect.committed' }))
     expect(origin.children[0].attempts[0].usageReceipt).toMatchObject({ source: 'reported', settlementStatus: 'settled' })
     const reusedOrigin = await step()
-    expect(reusedOrigin, JSON.stringify(reusedOrigin)).toMatchObject({ result: { failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' } })
+    expect(reusedOrigin, JSON.stringify(reusedOrigin)).toMatchObject({ result: { reviewCompleted: true, reviewOutcome: 'decision_required' } })
     expect(network).toHaveBeenCalledOnce()
     const originCache = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate', operationKey: `exec:2` }, include: { effectReceipt: true, children: true } })
     expect(originCache.inputSnapshot).toMatchObject({ input: { work: { version: 18, cached: [] } } })
     expect(originCache.effectReceipt).not.toBeNull(); expect(originCache.children).toHaveLength(0)
     expect(await step()).toMatchObject({ result: { outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE' } })
     expect(network).toHaveBeenCalledOnce()
-    expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('连续性检查') } })
-    const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } }), audit = (saved.validation as { continuityCriticResponse: { terminalEvidence: Parameters<typeof currentTerminalReview>[2] } }).continuityCriticResponse
+    await expect(step()).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+    expect(network).toHaveBeenCalledOnce()
+    const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
+    const audit = (saved.validation as { continuityCriticResponse: { terminalEvidence: Parameters<typeof currentTerminalReview>[2] } }).continuityCriticResponse
     const binding = await readTerminalDraftBinding(prisma, { ...f, compilationId: compilation.id }, { taskId: f.spec.id, preparedContext: saved.preparedContext }, chapter, saved.validation, audit.terminalEvidence)
-    expect(currentTerminalReview(saved.validation, content, audit.terminalEvidence, binding)).toMatchObject({ supported: false, proposals: { complete: false }, deliveryEligibility: { eligible: true, basis: 'current_supported_with_preserved_drafts' } })
+    expect(currentTerminalReview(saved.validation, content, audit.terminalEvidence, binding)).toMatchObject({ supported: false, deliveryEligibility: { eligible: false } })
     const protectedUsage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } }), protectedArtifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
     // Native provider results settle through operation receipts, not legacy logs.
     const nativeAttempts = () => prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId, kind: 'provider' } },
@@ -104,9 +107,9 @@ describe.runIf(available)('native continuity origin remains a real operation and
     const nativeLedger = () => prisma.creditLedgerEntry.findMany({ where: { userId: f.userId, kind: 'usage' }, orderBy: { id: 'asc' } })
     const protectedAttempts = await nativeAttempts(), protectedLedger = await nativeLedger()
     expect(protectedUsage).toHaveLength(0)
-    expect(protectedAttempts).toHaveLength(2); expect(protectedLedger).toHaveLength(2)
-    expect(new Set(protectedAttempts.map(row => row.operationId)).size).toBe(2)
-    expect(new Set(protectedLedger.map(row => row.idempotencyKey)).size).toBe(2)
+    expect(protectedAttempts).toHaveLength(1); expect(protectedLedger).toHaveLength(1)
+    expect(new Set(protectedAttempts.map(row => row.operationId)).size).toBe(1)
+    expect(new Set(protectedLedger.map(row => row.idempotencyKey)).size).toBe(1)
     for (const attempt of protectedAttempts) {
       expect(attempt).toMatchObject({ attemptKey: '1', status: 'succeeded', runId: f.runId,
         operation: { taskRootId: f.rootId, kind: 'provider', action: 'continuity_critic', status: 'succeeded' },
@@ -127,7 +130,7 @@ describe.runIf(available)('native continuity origin remains a real operation and
           attemptId: attempt.id, usageRevision: attempt.usageReceipt!.revision, amountMilli: -ledger!.deltaMilli, chargedMilli: -ledger!.deltaMilli, shortfallMilli: 0 }) }),
       ])
     }
-    expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('复用') } })
+
     // Historical effect loss cannot be replaced by a child provider success.
     await prisma.$transaction(async tx => {
       await tx.agentEffectReceipt.delete({ where: { operationId: origin.id } })
@@ -136,18 +139,18 @@ describe.runIf(available)('native continuity origin remains a real operation and
       throw Error('rollback synthetic missing-effect probe')
     }).catch(error => { if (!(error instanceof Error) || error.message !== 'rollback synthetic missing-effect probe') throw error })
     await persistHumanityQualityReport({ ...f, compilationId: compilation.id, chapterId: chapter.id, chapterRevision: chapter.revision, mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
-    await commitChapterBridge({ ...f, compilationId: compilation.id, chapterSummary: 'The packet remains sealed.', exitState: candidate.exitState, lastUnfinishedAction: '', hookDecision: 'none', delayedHookReason: '', openingStructure: '', endingStructure: '', requireQuality: true })
+    await expect(commitChapterBridge({ ...f, compilationId: compilation.id, chapterSummary: 'The packet remains sealed.', exitState: candidate.exitState, lastUnfinishedAction: '', hookDecision: 'none', delayedHookReason: '', openingStructure: '', endingStructure: '', requireQuality: true })).rejects.toMatchObject({ code: 'TERMINAL_STATE_REVIEW_REQUIRED' })
     const nextRunId = randomUUID(), next = await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: chapter.volumeId, title: 'Next', content: 'Later.', orderIndex: 2, orderInVolume: 2, wordCount: 6 } })
     const nextSpec = buildTaskSpec({ runId: nextRunId, novelId: f.novelId, chapterId: next.id, prompt: '写下一章', continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalCoverageProtocol: 2 })
     await prisma.agentRun.create({ data: { id: nextRunId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, chapterId: next.id, status: 'running', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', runtimeProtocolVersion: 0, taskSpec: JSON.parse(JSON.stringify(nextSpec)), startRequest: { prompt: '写下一章' } } })
     const nextSubject = { ...f, runId: nextRunId }
     const source = await readCompilerContinuitySource(prisma, nextSubject, next, chapter.id, 11)
-    expect(source && 'terminalInheritance' in source ? source.terminalInheritance?.map(fact => fact.claim) : []).toEqual(['The packet remains sealed.'])
-    expect(network).toHaveBeenCalledTimes(2)
+    expect(source && 'terminalInheritance' in source ? source.terminalInheritance?.map(fact => fact.claim) : []).toEqual([])
+    expect(network).toHaveBeenCalledTimes(1)
     expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(protectedUsage)
     expect(await nativeAttempts()).toEqual(protectedAttempts)
     expect(await nativeLedger()).toEqual(protectedLedger)
     expect(await prisma.agentArtifact.findMany({ where: { id: { in: protectedArtifacts.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(protectedArtifacts)
-    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).preparedContext).toMatchObject({ terminalProposalReview: { pending: [expect.objectContaining({ field: 'openLoops' })] } })
+    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).preparedContext).toEqual(saved.preparedContext)
   }, undefined, '修改第一章，只输出标题和正文', { continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2, freezeWriting: true }))
 })

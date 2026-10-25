@@ -80,7 +80,7 @@ export function prepareTerminalProposalInput(input: { spec: unknown; preparedCon
   const original = attachTerminalProposalInput(input.originalContext, { ...input, taskId, candidate: previous })
   // Proposal staging checks the authenticated response structure. Delivery
   // still requires the database-minted authority at save/cache/commit gates.
-  const originalReview = object(audit).parserVersion === 9
+  const originalReview = (object(audit).parserVersion === 9 || object(audit).parserVersion === 10)
     ? readAuthenticatedContinuityAssessment(audit, originalContent, original, object(input.validation).independentCheck === 'complete')
     : currentTerminalReview(input.validation, originalContent, original)
   if (!originalReview
@@ -140,7 +140,7 @@ export function terminalProposalCacheMatches(input: Parameters<typeof prepareCom
 function authenticFailedReport(validation: unknown, content: string, previous: string | null,
   terminalEvidence: TerminalEvidenceContext, candidate: TerminalCandidate) {
   const saved = object(validation), audit = object(saved.continuityCriticResponse), raw = object(audit.rawResponse)
-  if (audit.parserVersion === 9) {
+  if ((audit.parserVersion === 9 || audit.parserVersion === 10)) {
     const result = validateStoredContinuityV4Projection(audit, content, terminalEvidence)
     return saved.independentCheck === 'unavailable' && !!result && !result.complete
       && result.audit.rawResponse.complete && result.audit.classification !== 'response_incomplete'

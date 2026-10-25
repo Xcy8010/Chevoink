@@ -1,7 +1,6 @@
 import { Router, type Request, type Response } from 'express'
 import styleLearningRouter from './style-learning.js'
 import agentGoalsRouter from './agent-goals.js'
-import manualReviewRepairRouter from './agent-manual-review-repair.js'
 import { z } from 'zod'
 import { patchModelAssignmentsSchema } from '../../shared/contracts/agent-model-assignments.js'
 import { getModelAssignments, patchModelAssignments } from '../lib/agent/model-assignments.js'
@@ -86,7 +85,6 @@ import {
 const router = Router()
 router.use(styleLearningRouter)
 router.use(agentGoalsRouter)
-router.use(manualReviewRepairRouter)
 router.get('/model-assignments', async (req, res) => {
   const requestId = createRequestId()
   try {

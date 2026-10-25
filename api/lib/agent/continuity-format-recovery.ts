@@ -148,7 +148,7 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
 /** Internal model observation only; public summaries and saved raw responses stay intact. */
 export function continuityFailureOutput(audit: Partial<AuthenticatedContinuityInspection['audit']> | undefined, fallback: string, bodies?: ContinuityBodies) {
   if (!audit) return fallback
-  if (audit.parserVersion === 9) {
+  if (audit.parserVersion === 9 || audit.parserVersion === 10) {
     const marker = 'continuityV4' in audit ? audit.continuityV4 : undefined
     if (!marker) return fallback
     const frozen = marker.frozen, result = validateStoredContinuityV4Projection(audit, bodies?.current ?? frozen.bodies.current, bodies?.terminalEvidence ?? frozen.bodies.terminalEvidence)

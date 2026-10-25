@@ -5,6 +5,7 @@ import { createTaskBudgetPolicy } from './runtime-budget.js'
 import { recordTaskContentBaseline } from './runtime-postconditions.js'
 import { assertRunGoalFence } from './goal-fence.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
+import type { AgentStreamEvent } from '../../../shared/contracts/index.js'
 
 /** The existing task identity excludes execution provenance and persists only
  * JSON-safe schema values. All adapters must use this same frozen contract. */
@@ -87,7 +88,8 @@ export function assertLegacyRuntimeCompatible(run: { runtimeProtocolVersion?: nu
 }
 
 /** Atomic admission: checking the version after an unconditional status update is too late. */
-export async function startLegacyRuntimeRun(userId: string, runId: string, resume = false, activation?: { goalId: string; epoch: bigint }) {
+export async function startLegacyRuntimeRun(userId: string, runId: string, resume = false, activation?: { goalId: string; epoch: bigint },
+  startup?: Extract<AgentStreamEvent, { type: 'run.started' }>) {
   try {
     return await runtimeTransaction(async tx => {
       let activationNovelId: string | null = null
@@ -118,6 +120,13 @@ export async function startLegacyRuntimeRun(userId: string, runId: string, resum
         select: { taskSpec: true, taskRootId: true, runtimeProtocolVersion: true, usage: true, currentTurn: true, startedAt: true,
           events: { where: { type: { in: ['run.started', 'run.paused', 'run.finished'] } }, orderBy: { seq: 'asc' }, select: { type: true, createdAt: true } } },
       })
+      if (startup) {
+        if (startup.runId !== runId || startup.type !== 'run.started' || !Number.isSafeInteger(startup.seq) || startup.seq < 1 || startup.seq > 2147483647)
+          return runtimeError('RUNTIME_INPUT_INVALID', '原执行启动事件身份或顺序无效。')
+        const latest = await tx.agentRunEvent.findFirst({ where: { runId }, orderBy: { seq: 'desc' }, select: { seq: true } })
+        if (latest && latest.seq >= startup.seq) return runtimeError('RUNTIME_STATE_CONFLICT', '原执行启动序号已被占用，未接管当前执行。')
+        await tx.agentRunEvent.create({ data: { runId, seq: startup.seq, type: startup.type, payload: runtimeJson(startup).value } })
+      }
       if (activationNovelId) await assertAgentManuscriptCurrent(tx, { userId, novelId: activationNovelId, runId })
       return started
     })

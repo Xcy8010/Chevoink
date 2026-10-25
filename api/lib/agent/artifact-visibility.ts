@@ -6,6 +6,11 @@ export function isInternalAgentArtifact(record: { artifactType: string; metadata
   const meta = record.metadata as Record<string, unknown>
   if (meta.version !== 1) return false
   return meta.kind === 'terminalCandidatePatch' || [
+    'effectiveContinuityReport', 'continuityPhaseClaim', 'continuitySourceRecovery', 'continuitySupplementQuestion',
+    'continuitySupplementAnswer', 'continuitySupplementUsage', 'continuitySupplementDispatch', 'continuitySupplementResponse',
+    'continuitySupplementApplication', 'continuitySupplementExecution', 'continuityUsageAccounted', 'continuityProseRevision',
+    'continuityMergedRevision', 'continuityRevisionApplied', 'legacyContinuityVerification',
+  ].some(key => meta[key] !== null && typeof meta[key] === 'object' && !Array.isArray(meta[key])) || [
     'continuityAssessmentRequestKey', 'assessmentRequestOwnerKey', 'assessmentResponseKey', 'assessmentApplicationKey',
     'firstAssessmentNotDispatchedKey', 'fullReassessmentKey', 'fullReassessmentNotDispatchedKey',
     'evidenceCorrectionKey', 'correctionClaimKey',

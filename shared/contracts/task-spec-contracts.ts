@@ -51,7 +51,7 @@ export const taskScopeSchema = z.object({
   /** Fresh admission binds chapter targets to their requested action, never reference prose. */
   writingTargetProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
   /** Server-only fresh admission. Never added by a tool, resume or migration. */
-  writingCoordinationProtocol: z.literal(1).optional(),
+  writingCoordinationProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
   /** Server-frozen relevance projection. It only narrows existing authority;
    * absent historical tasks keep their original catalog. */
   capabilityCatalog: z.object({ version: z.literal(1), requestHash: z.string().regex(/^[a-f0-9]{64}$/),
@@ -72,6 +72,8 @@ export const taskScopeSchema = z.object({
   }).strict().optional(),
   /** New human admission requires factual claims anchored in the current manuscript. */
   continuityEvidenceProtocol: z.literal(1).optional(),
+  /** Explicit fresh-admission wire; it grants no additional paid phase. */
+  continuityReportProtocol: z.literal(5).optional(),
   terminalEvidenceProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
   /** Fresh admission permits exact, unique same-source terminal quote addressing. */
   terminalQuoteAddressProtocol: z.literal(1).optional(),
@@ -169,7 +171,10 @@ export const taskSpecSchema = z.object({
   if (spec.scope.capabilityCatalog && spec.scope.capabilityCatalog.requestHash !== spec.scope.authorEffects?.requestHash) {
     ctx.addIssue({ code: 'custom', path: ['scope', 'capabilityCatalog'], message: 'The catalog must bind the original author request' })
   }
-  if (spec.scope.writingCoordinationProtocol === 1 && (!['write', 'revise'].includes(spec.intent)
+  if (spec.scope.writingCoordinationProtocol === 2 && spec.scope.continuityReportProtocol !== 5) {
+    ctx.addIssue({ code: 'custom', path: ['scope', 'writingCoordinationProtocol'], message: 'Writing coordination v2 requires the original fresh continuity marker' })
+  }
+  if (spec.scope.writingCoordinationProtocol && (!['write', 'revise'].includes(spec.intent)
     || spec.writingPacing !== 'explicit_writing' || spec.scope.writing?.kind !== 'bounded'
     || spec.scope.selection || spec.scope.selectionBoundary || spec.scope.localEditBoundary
     || spec.scope.authorEffects?.manuscript === false)) {

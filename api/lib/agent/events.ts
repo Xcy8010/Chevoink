@@ -60,6 +60,19 @@ export class RunEventBus {
     return event
   }
 
+  /** Only the legacy start transaction uses this: its status CAS and exact
+   * event already committed together. Publish without another seq or DB write. */
+  publishPersistedStart(event: Extract<AgentStreamEvent, { type: 'run.started' }>): void {
+    if (this.closed || this.committingTerminal || event.runId !== this.runId || event.type !== 'run.started'
+      || event.seq !== this.seq + 1 || !Number.isSafeInteger(event.seq) || event.seq > 2147483647
+      || this.pendingPersist.length || this.flushPromise) throw new Error('已持久启动事件不匹配当前事件顺序')
+    this.seq = event.seq
+    this.history.push(event)
+    for (const listener of this.listeners) {
+      try { listener(event) } catch { /* Publication cannot undo committed start. */ }
+    }
+  }
+
   /**
    * 高频预览事件仅保留最新一份用于 SSE 重连。工具正文参数可能每几个 token 更新一次，
    * 不写 agent_run_events，避免把同一篇正文的所有中间副本反复落库；正式 tool.call/result 仍完整持久化。
@@ -221,8 +234,9 @@ export function getRunEventBus(runId: string): RunEventBus | undefined {
   return busByRun.get(runId)
 }
 
-export async function disposeRunEventBus(runId: string): Promise<void> {
+export async function disposeRunEventBus(runId: string, expectedBus?: RunEventBus): Promise<void> {
   const bus = busByRun.get(runId)
+  if (expectedBus && bus !== expectedBus) return
   if (bus) {
     await bus.close()
     if (busByRun.get(runId) === bus) busByRun.delete(runId)

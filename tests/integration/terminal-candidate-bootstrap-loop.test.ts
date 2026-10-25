@@ -218,7 +218,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
         await resume(stop.id, afterSeq)
       }
     }
-    expect(main).toHaveBeenCalledTimes(scenario === 'after-read' ? 1 : 0)
+    expect(main).not.toHaveBeenCalled()
     expect(network).not.toHaveBeenCalled()
     expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })).toEqual(before)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
@@ -226,7 +226,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     expect(run.status).toBe('paused')
     expect((run.usage as { checkpoint: { reviewAttempts: string[] } }).checkpoint.reviewAttempts).toEqual(claims)
     const toolCalls = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'tool.call' }, orderBy: { seq: 'asc' } })
-    expect(toolCalls.map(event => (event.payload as { toolName: string }).toolName)).toEqual(scenario === 'after-read' ? ['chapter_read'] : [])
+    expect(toolCalls.map(event => (event.payload as { toolName: string }).toolName)).toEqual([])
     expect(await prisma.agentRunEvent.count({ where: { runId: f.runId, type: 'tool.call', payload: { path: ['toolName'], equals: 'chapter_bridge_commit' } } })).toBe(0)
     expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })).toEqual([historicalUsage])
     expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: account.userId } })).toEqual(account)
@@ -234,7 +234,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
   }, undefined, recoveryPrompt, { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
 
   it.each([...(['settled', 'unknown'] as const).flatMap(billing => (['commit', 'repeat', 'restart'] as const).map(scenario => [billing, scenario] as const)), ...(['old-slots', 'local-refusal', 'consumed-local-candidate', 'objects', 'source-address', 'commit-reserved', 'commit-unknown', 'multiple-candidates', 'no-proposal'] as const).map(scenario => ['settled', scenario] as const)])(
-    'preserves failed requests and permits bounded candidate processing: %s / %s', (billing, scenario) => fixture(async f => {
+    'preserves failed requests without converting Continue into a paid phase: %s / %s', (billing, scenario) => fixture(async f => {
     const pendingProvider = billing === 'unknown' && scenario === 'repeat'
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
@@ -401,122 +401,38 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(parts) }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
     })
     vi.stubGlobal('fetch', network)
-    let turn = 0, interrupted = false
-    let firstAttempts: string[] | undefined
-    const main = vi.spyOn(ai, 'chatWithTools').mockImplementation(async ({ messages, tools }) => {
-      if (scenario === 'consumed-local-candidate') {
-        expect(network).toHaveBeenCalledOnce()
-        expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).toMatchObject({ status: 'completed', stage: 'commit' })
-        return { content: 'Completed.', reasoning: '', finishReason: 'stop', toolCalls: [],
-          usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
-      }
-      if (main.mock.calls.length > (scenario === 'restart' ? 4 : 3)) throw Error('Bounded candidate processing must terminate')
-      if (turn === 0) {
-        expect(JSON.stringify(messages)).toContain(body)
-        expect(JSON.stringify(messages)).toContain('terminalPatch')
-        expect(tools.map(tool => tool.function.name)).toEqual(['continuity_validate'])
-        expect(network).not.toHaveBeenCalled()
-        const current = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
-        const cp = (current.usage as { checkpoint: typeof checkpoint }).checkpoint
-        expect(cp.pendingReviews ?? []).toEqual([])
-        expect(cp.consumedReviewDecisionFeedback ?? []).toEqual(checkpoint.consumedReviewDecisionFeedback)
-        expect(cp.stagnantBatches).toBeGreaterThanOrEqual(checkpoint.stagnantBatches)
-        expect(cp.reviewAttempts.filter(key => key.startsWith('terminal-processing:'))).toHaveLength(interrupted ? 2 : 1)
-        if (scenario === 'restart' && !interrupted) {
-          firstAttempts = cp.reviewAttempts
-          interrupted = true
-          throw new DOMException('Synthetic interruption after processing claim', 'AbortError')
-        }
-        if (scenario === 'restart') expect(cp.reviewAttempts).toEqual(expect.arrayContaining(firstAttempts!))
-      }
-      if (scenario === 'no-proposal') return { content: '无法安全确定。', reasoning: '', finishReason: 'stop', toolCalls: [],
-        usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
-      turn++
-      const call = turn === 1 || scenario === 'repeat'
-        ? { id: 'correct-only-candidate-' + turn, name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilation.id,
-          terminalPatch: scenario === 'repeat' ? { baseCandidateHash: runtimeJson(bad).hash }
-            : correction }) }
-        : undefined
-      // This ordinary revision request still needs its natural final reply.
-      // The server has already committed the reviewed candidate before that
-      // reply; the model must consume the receipt rather than submit again.
-      if (!call) expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } }))
-        .toMatchObject({ status: 'completed', stage: 'commit', bridge: { committedAt: expect.any(Date) } })
-      const proposals = call ? [call] : []
-      if (scenario === 'multiple-candidates' && call) proposals.push({ ...call, id: call.id + '-extra' },
-        { id: 'unexpected-body-write', name: 'chapter_append', arguments: JSON.stringify({ chapterId: chapter.id, content: 'Unapproved candidate-processing body change.' }) })
-      return { content: call ? '' : 'Completed.', reasoning: '', finishReason: call ? 'tool_calls' : 'stop', toolCalls: proposals,
-        usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
-    })
-    const beforeContinue = pendingProvider ? await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } }) : null
-    const beforeAccount = pendingProvider ? await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } }) : null
-    await executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true, authorContinue: { eventId: pause.id, afterSeq: pauseSeq }, eventStartSeq: pauseSeq, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
-    if (scenario === 'restart') {
-      expect(main).toHaveBeenCalledOnce()
-      expect(network).not.toHaveBeenCalled()
-      const interruptedRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
-      expect(interruptedRun.status).toBe('paused')
-      expect((interruptedRun.usage as { checkpoint: typeof checkpoint }).checkpoint.reviewAttempts).toEqual(firstAttempts)
-      const events = await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })
-      const stop = events.filter(event => event.type === 'run.paused').at(-1)!
-      expect(stop.seq).toBeGreaterThan(pauseSeq)
-      const afterSeq = events.at(-1)!.seq
-      await executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true, authorContinue: { eventId: stop.id, afterSeq }, eventStartSeq: afterSeq, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
+    const main = vi.spyOn(ai, 'chatWithTools').mockRejectedValue(Error('Continue cannot create another paid candidate decision'))
+    const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
+    const originalUsage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const originalAccount = await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })
+    const originalLedger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    await executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true, authorContinue: { eventId: pause.id, afterSeq: pauseSeq }, eventStartSeq: pauseSeq,
+      modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
+    if (scenario === 'restart' || scenario === 'repeat') {
+      const last = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId }, orderBy: { seq: 'desc' } })
+      await executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true, authorContinue: { eventId: last.id, afterSeq: last.seq }, eventStartSeq: last.seq,
+        modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
     }
-    expect(network).toHaveBeenCalledTimes(scenario === 'no-proposal' || scenario === 'repeat' ? 0 : 1)
-    expect(main).toHaveBeenCalledTimes(pendingProvider ? 0 : scenario === 'restart' ? 3 : scenario === 'no-proposal' || scenario === 'commit-unknown' || scenario === 'consumed-local-candidate' ? 1 : 2)
-    if (scenario === 'consumed-local-candidate') {
-      const resumed = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).usage as { checkpoint: typeof checkpoint }
-      expect(resumed.checkpoint.reviewAttempts.filter(key => key.startsWith(`terminal-processing:${processingKey}:`))).toHaveLength(2)
-      expect(resumed.checkpoint.reviewAttempts.filter(key => key.startsWith('terminal-compatibility:'))).toHaveLength(1)
-    }
+    expect(main).not.toHaveBeenCalled()
+    expect(network).not.toHaveBeenCalled()
+    expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(originalUsage)
+    expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })).toEqual(originalAccount)
+    expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(originalLedger)
     expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: old.id } })).toEqual(old)
     expect(await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { lte: pauseSeq } }, orderBy: { seq: 'asc' } })).toEqual(history)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ content: body, revision: 8 })
-    const used = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, id: { notIn: [old.id, ...(knownRepeatUsage ? [knownRepeatUsage.id] : [])] } } })
-    expect(used).toHaveLength(network.mock.calls.length)
-    if (scenario === 'repeat') {
-      const finished = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
-      const resumed = finished.usage as { checkpoint: typeof checkpoint }
-      // The separately authenticated UNKNOWN does not identify the old unknown
-      // request's usage. Both primary rows overlap its call interval, so pending
-      // receipt recovery must stop before buying a turn or claiming processing.
-      expect(resumed.checkpoint.reviewAttempts.filter(key => key.startsWith(`terminal-processing:${processingKey}:`))).toHaveLength(pendingProvider ? 0 : 2)
-      if (pendingProvider) {
-        expect(resumed.checkpoint.reviewAttempts).toEqual(checkpoint.reviewAttempts)
-        expect(resumed.checkpoint.pendingReviews).toEqual(checkpoint.pendingReviews)
-        expect(finished).toMatchObject({ status: 'paused', currentTurn: beforeContinue!.currentTurn, taskSpec: beforeContinue!.taskSpec,
-          modelTier: beforeContinue!.modelTier, customModelId: beforeContinue!.customModelId, reasoningEffort: beforeContinue!.reasoningEffort })
-        expect(finished.usage).toMatchObject({ promptTokens: 10, completionTokens: 0, totalTokens: 10 })
-        expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })).toEqual(beforeAccount)
-        expect(await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { gt: pauseSeq }, type: 'run.paused' }, orderBy: { seq: 'asc' } }))
-          .toMatchObject([{ payload: { reason: 'review_receipt_pending' } }])
-        expect(await prisma.agentRunEvent.count({ where: { runId: f.runId, seq: { gt: pauseSeq }, type: { in: ['tool.call', 'review.reconciled', 'error'] } } })).toBe(0)
-      }
-      expect(resumed.checkpoint.reviewAttempts).toEqual(expect.arrayContaining(checkpoint.reviewAttempts))
-      expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: knownRepeatUsage!.id } })).toEqual(knownRepeatUsage)
-      expect(await prisma.agentArtifact.findMany({ where: { id: { in: knownRepeatArtifacts.map(row => row.id) } }, orderBy: { id: 'asc' } }))
-        .toEqual([...knownRepeatArtifacts].sort((left, right) => left.id.localeCompare(right.id)))
-    }
-    expect(used.every(row => row.usageSource === 'reported' && row.billingStatus === 'settled' && row.reservedCreditMilli === 0)).toBe(true)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(network.mock.calls.length)
     const final = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
-    if (scenario === 'repeat') expect((final.validation as { continuityCriticResponse: unknown }).continuityCriticResponse).toEqual(audit)
-    const stopped = scenario === 'repeat' || scenario === 'commit-unknown' || scenario === 'no-proposal'
-    if (scenario === 'no-proposal') expect((final.validation as { continuityCriticResponse: unknown }).continuityCriticResponse).toEqual(inspected.audit)
-    expect(final.bridge!.committedAt === null).toBe(stopped)
-    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).status).toBe(stopped ? 'paused' : 'completed')
-    if (!stopped) {
-      const commits = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: { in: ['tool.call', 'tool.result'] },
-        payload: { path: ['toolName'], equals: 'chapter_bridge_commit' } }, orderBy: { seq: 'asc' } })
-      expect(commits.map(event => ({ type: event.type, payload: event.payload }))).toMatchObject([
-        { type: 'tool.call', payload: { callId: `terminal_commit_${processingKey.slice(0, 40)}`, toolName: 'chapter_bridge_commit' } },
-        { type: 'tool.result', payload: { callId: `terminal_commit_${processingKey.slice(0, 40)}`, toolName: 'chapter_bridge_commit', ok: true } },
-      ])
-      expect(final.bridge).toMatchObject({ location: accurate, lastUnfinishedAction: good.lastUnfinishedAction })
-      const committed = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
-      expect(committed?.terminalCommitted).toBe(true)
-      expect(terminalProcessingPlan(committed, { ...f, taskSpec: spec }, new Set())).toBeNull()
-    }
+    const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
+    expect(final).toEqual(before)
+    expect(final.bridge!.committedAt).toBeNull()
+    expect(run.status).toBe('paused')
+    const resumed = run.usage as { checkpoint: typeof checkpoint }
+    expect(resumed.checkpoint.reviewAttempts).toEqual(expect.arrayContaining(checkpoint.reviewAttempts))
+    expect(resumed.checkpoint.consumedReviewDecisionFeedback ?? []).toEqual(checkpoint.consumedReviewDecisionFeedback ?? [])
+    if (pendingProvider) expect(resumed.checkpoint.pendingReviews).toEqual(checkpoint.pendingReviews)
+    if (knownRepeatUsage) expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: knownRepeatUsage.id } })).toEqual(knownRepeatUsage)
+    expect(await prisma.agentArtifact.findMany({ where: { id: { in: knownRepeatArtifacts.map(row => row.id) } }, orderBy: { id: 'asc' } }))
+      .toEqual([...knownRepeatArtifacts].sort((left, right) => left.id.localeCompare(right.id)))
+    expect(await prisma.agentRunEvent.count({ where: { runId: f.runId, seq: { gt: pauseSeq }, type: 'tool.call' } })).toBe(0)
   }, undefined, '修复本章', { continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 1 }), 30000)
 })

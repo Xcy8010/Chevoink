@@ -14,8 +14,9 @@ describe('independent terminal fact evidence', () => {
     const validation = { terminalCandidate: candidate, independentCheck: 'complete', continuityCriticResponse: inspected.audit }
     const before = structuredClone(validation)
     const result = terminalReviewFailure(validation, body)
-    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: true,
+    expect(result).toMatchObject({ reviewOutcome: 'decision_required', reviewCompleted: true,
       summary: '终态候选尚未获正文证实' })
+    expect(result).not.toHaveProperty('failureCode')
     expect(result).not.toHaveProperty('display')
     expect(result?.output).toContain('exitState.body.0')
     expect(result?.output).toContain('unknown')

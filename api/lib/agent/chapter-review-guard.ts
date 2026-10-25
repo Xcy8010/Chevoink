@@ -354,7 +354,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     const deliveryBinding = assessment ? await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(tx,
       { ...subject, compilationId: compilation.id }, { taskId: terminalProposalTaskId(original.spec, original.taskId), preparedContext: compilation.preparedContext }, chapter, validation, evidence, options?.terminalDraftScope) : undefined
     const terminal = assessment ? currentTerminalReview(validation, chapter.content, evidence, deliveryBinding) : null
-    if ((validation?.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion === 9 && !terminal) {
+    if ((validation?.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion !== undefined && [9, 10].includes(Number((validation?.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion)) && !terminal) {
       readiness.continuity = 'incomplete'
       readiness.ready = false
       if (!readiness.requiredTools.some(tool => tool.name === 'continuity_validate')) readiness.requiredTools.push({ name: 'continuity_validate', args: { compilationId: compilation.id } })
@@ -366,7 +366,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
         ?? terminalReportCorrection(validation, chapter.content, evidence, source?.content ?? null)
       if (correction) readiness.terminalCorrection = correction
     }
-    readiness.terminalReview = { state: terminal?.supported ? 'supported' : 'unverified', currentResultVerified: !!terminal,
+    readiness.terminalReview = { state: terminal?.supported && terminal.deliveryEligibility.eligible ? 'supported' : 'unverified', currentResultVerified: !!terminal,
       deliveryEligible: terminal?.deliveryEligibility.eligible ?? false,
       unresolved: [...(terminal?.verdicts.filter(item => item.verdict !== 'supported').map(({ path, verdict }) => ({ path, verdict })) ?? []),
         ...(terminal?.factCoverage?.dispositions.filter(item => item.outcome === 'unknown').map(item => {
@@ -380,7 +380,10 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
           return { path: `proposals.${item.id}`, verdict: 'unknown', reason: item.reason, readOnlyProposalId: item.id,
             currentCandidateEditAddress: currentCandidateEditAddress(terminalCandidate!, proposal?.field, proposal?.claim),
             ...(proposal ? { field: proposal.field, claim: proposal.claim } : {}) }
-        }) ?? [])] }
+        }) ?? []),
+        ...((terminal as { establishedIssueDispositions?: Array<{ issueIndex: number; outcome: string; explanation: string; issue?: { text: string } }> } | null)
+          ?.establishedIssueDispositions?.filter(item => item.outcome === 'unknown').map(item => ({
+            path: `establishedIssues.${item.issueIndex}`, verdict: 'unknown', reason: item.explanation, claim: item.issue?.text })) ?? [])] }
     const committed = compilation.preparedContext as Record<string, unknown> | null
     const commitProof = committed?.terminalReviewProof as Record<string, unknown> | undefined
     readiness.terminalCommitted = !!terminal?.deliveryEligibility.eligible && compilation.status === 'completed' && compilation.stage === 'commit'
@@ -806,7 +809,9 @@ export async function assertChapterReviewRevision(
         const entries = [
           ...(continuity && bound.validation && typeof bound.validation === 'object' && !Array.isArray(bound.validation)
             && Array.isArray(bound.validation.findings) ? bound.validation.findings.map(item => continuityFindingInputSchema.parse(item)) : []).flatMap((finding, index) => finding.severity === 'error' ? [{ source: 'continuity' as const,
-            reportId: continuityBinding, findingId: String(index), evidence: finding.evidence, start: null as number | null, end: null as number | null }] : []),
+            reportId: continuityBinding, findingId: String(index), evidence: [finding.evidence,
+              ...(finding.sourceEvidence ?? []).filter(ref => ref.source === 'current').map(ref => `“${ref.quote}”`)].join('；'),
+            start: null as number | null, end: null as number | null }] : []),
           ...(qualityComplete ? selectAutomaticQualityFindings(latestQuality!.findings).map(finding => ({ source: 'quality' as const,
             reportId: latestQuality!.id, findingId: finding.id, evidence: finding.evidenceExcerpt, start: finding.startOffset, end: finding.endOffset })) : []),
         ]

@@ -21,7 +21,7 @@ export function toOpenAIParameters(parameters: z.ZodType): Record<string, unknow
 export function toOpenAIToolPresentation(tool: Pick<AgentTool, 'name' | 'description' | 'parameters'>, scope?: TaskSpec['scope']): { description: string; parameters: Record<string, unknown> } {
   const parameters = toOpenAIParameters(coordinatedWriterParameters(tool, scope))
   const presented = toolPresentation(tool, parameters, scope)
-  return scope?.writingCoordinationProtocol === 1 && coordinatedWriterActions.some(name => name === tool.name)
+  return !!scope?.writingCoordinationProtocol && coordinatedWriterActions.some(name => name === tool.name)
     ? { ...presented, description: `${presented.description} 本任务把正文保存与后续复核协调在同一次真实写入中：同时填写writing，首次正文提供scenes；draftComplete:false只保存草稿，true须给出actualOutcomes及章末文学决定，请求必要的独立复核和提交。候选只写真实已发生状态，不把场景计划或准备当已完成；不填写内部编译编号、证明哈希或虚构检查成功。以返回的实际保存和复核结果为准。` } : presented
 }
 
@@ -59,7 +59,7 @@ function toolPresentation(tool: Pick<AgentTool, 'name' | 'description'>, paramet
 /** Exact alternatives for immutable legacy or server-frozen presentations.
  * Callers must supply scope from the verified original task, never model input. */
 export function originalToolParameterSchemas(tool: Pick<AgentTool, 'name' | 'description' | 'parameters'>, scope: TaskSpec['scope']): Record<string, unknown>[] {
-  if (scope.writingCoordinationProtocol === 1 && coordinatedWriterActions.some(name => name === tool.name)) {
+  if (scope.writingCoordinationProtocol && coordinatedWriterActions.some(name => name === tool.name)) {
     return [toOpenAIParameters(coordinatedWriterParameters(tool, scope))]
   }
   const current = toOpenAIParameters(tool.parameters)

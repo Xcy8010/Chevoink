@@ -21,6 +21,9 @@ export async function updateOwnedChapterAtRevision(
 ) {
   const apply = async (tx: Prisma.TransactionClient) => {
     ctx.signal.throwIfAborted()
+    const consumeContinuityRevision = ctx.continuityRevision ? await (await import('../continuity-coordinator.js'))
+      .assertContinuityRevisionApplication(tx, ctx, chapter, data.content, review) : ctx.nativeContinuityRevision
+        ? await (await import('../continuity-coordinator.js')).assertNativeContinuityRevisionApplication(tx, ctx, chapter, data.content, review) : undefined
     await assertAgentManuscriptCurrent(tx, ctx)
     await assertWritingTarget(tx, ctx, { chapterId: chapter.id, effect: mutation ?? 'metadata' })
     if (typeof data.content === 'string' && data.content === chapter.content) {
@@ -35,7 +38,9 @@ export async function updateOwnedChapterAtRevision(
       data: { ...data, revision: { increment: 1 } },
     })
     if (result.count !== 1) return null
+    await consumeContinuityRevision?.()
     await consumeReviewRevision?.()
+    if (ctx.continuityRevision) await (await import('../continuity-coordinator.js')).recordContinuityRevisionApplication(tx, ctx, chapter, data.content)
     const updated = await tx.chapter.findFirst({ where: {
       id: chapter.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId, revision: chapter.revision + 1,
     } })

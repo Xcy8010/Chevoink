@@ -77,6 +77,20 @@ describe('original writer decisions and service manifest', () => {
       { step: 'body' }, { step: 'continuity' }, { step: 'quality' }, { step: 'commit' },
     ] })
   })
+  it('issues the bounded revision chain only with the genuine fresh continuity marker', () => {
+    const value = original(), old = structuredClone(value)
+    value.spec.scope.writingCoordinationProtocol = 2
+    expect(() => coordinatedWritingManifest(value, 'chapter_write', 'chapter', completed)).toThrow()
+    value.spec.scope.continuityReportProtocol = 5
+    expect(coordinatedWritingManifest(value, 'chapter_write', 'chapter', completed)).toMatchObject({ version: 2, steps: [
+      { step: 'body' }, { step: 'continuity' }, { step: 'quality' }, { step: 'prose_revision' },
+      { step: 'continuity_verify' }, { step: 'quality_verify' }, { step: 'commit' }] })
+    expect(coordinatedWritingManifest(value, 'chapter_write', 'chapter', { draftComplete: false })).toMatchObject({ version: 2, steps: [{ step: 'body' }] })
+    expect(coordinatedWritingManifest(old, 'chapter_write', 'chapter', completed)).toMatchObject({ version: 1, steps: [
+      { step: 'body' }, { step: 'continuity' }, { step: 'quality' }, { step: 'commit' }] })
+    const missingMarker = { ...value.spec, scope: { ...value.spec.scope, continuityReportProtocol: undefined } }
+    expect(taskSpecSchema.safeParse(missingMarker).success).toBe(false)
+  })
   it('does not infer actual end facts from planned scene exit states', () => {
     const planned = { purpose: '计划归档', goal: '核实归档', obstacle: '尚无证据', choice: '先等', cost: '保持未知', turn: '尚未完成', exitState: { objects: ['已归档'] } }
     expect(coordinatedWritingInputSchema.safeParse({ ...completed, actualOutcomes: undefined, scenes: [planned] }).success).toBe(false)

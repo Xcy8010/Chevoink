@@ -64,7 +64,8 @@ it('reports every proposal-only unknown with its original identity and independe
   expect(review.verdicts.every(item => item.verdict === 'supported')).toBe(true)
   expect(review.factCoverage?.dispositions).toEqual([])
   const failure = terminalReviewFailure(validation, f.chapter.content, f.evidence)!
-  expect(failure).toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED', reviewCompleted: true })
+  expect(failure).toMatchObject({ reviewOutcome: 'decision_required', reviewCompleted: true })
+  expect(failure).not.toHaveProperty('failureCode')
   expect({ validation, preparedContext }).toEqual(before)
   for (const [index, proposal] of f.staged.changes!.proposals.entries()) {
     expect.soft(failure.output).toContain(proposal.id)

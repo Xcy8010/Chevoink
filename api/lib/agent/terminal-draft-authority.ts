@@ -5,6 +5,7 @@ import type { ToolContext } from './tools/types.js'
 import type { TerminalEvidenceContext } from './terminal-evidence-context.js'
 import type { TerminalDeliveryBinding } from './terminal-state-review.js'
 import { runtimeJson } from './runtime-common.js'
+import { authenticateEffectiveContinuityReport, effectiveContinuityAudit } from './continuity-coordinator.js'
 
 type Identity = { userId: string; novelId: string; taskId: string; compilationId: string; chapterId: string; bodyHash: string;
   sourceHash: string; candidateHash: string; evidenceHash: string; preparedHash: string; auditHash: string; revisionHash: string }
@@ -43,7 +44,7 @@ export async function readTerminalDraftBinding(db: Prisma.TransactionClient,
   const key = runtimeJson({ userId: subject.userId, novelId: subject.novelId, runId: subject.runId, compilationId: subject.compilationId,
     taskId: binding.taskId, chapter: { id: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex, bodyHash: runtimeJson({ content: chapter.content }).hash },
     preparedContext: binding.preparedContext, context: context ?? null,
-    audit: object(validation).continuityCriticResponse ?? null, candidate: object(validation).terminalCandidate ?? null,
+    audit: object(validation).continuityCriticResponse ?? null, effectiveReport: object(validation).effectiveReport ?? null, candidate: object(validation).terminalCandidate ?? null,
     newDraftRevision: object(validation).newDraftRevision ?? null }).hash
   if (!cache.has(key)) cache.set(key, loadTerminalDraftBinding(db, subject, binding, chapter, validation, context))
   const result = await cache.get(key)!
@@ -59,22 +60,26 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
   delete base.draftAuthority
   delete base.reviewAuthority
   const currentAudit = object(object(validation).continuityCriticResponse)
+  if (object(validation).effectiveReport !== undefined && !effectiveContinuityAudit(validation)) return base
   let nativeEntries: Awaited<ReturnType<typeof import('./native-continuity-assessment.js')['readNativeContinuityAssessments']>> | undefined
-  if (currentAudit.parserVersion === 9) {
+  if (currentAudit.parserVersion === 9 || currentAudit.parserVersion === 10) {
     if (!context || typeof db.agentArtifact?.findMany !== 'function') return base
     const { readOriginalTaskRequest, originalTaskRunIds } = await import('./original-request.js')
     const original = await readOriginalTaskRequest(db, subject)
     if (original.taskId !== binding.taskId) return base
     const runIds = await originalTaskRunIds(db, subject, original)
     try {
+      if (currentAudit.parserVersion === 10 && !await authenticateEffectiveContinuityReport(db, subject, subject.compilationId, validation, runIds)) return base
       const lifecycle = await import('./assessment-response-lifecycle.js')
       const request = object(currentAudit.assessmentRequest)
       let authentic = false
-      if (typeof request.key === 'string') {
+      if (currentAudit.parserVersion === 10 && object(currentAudit.phaseRequest).version === 1) {
+        authentic = await (await import('./continuity-coordinator.js')).authenticateSupplementalContinuityReport(db, subject, currentAudit)
+      } else if (typeof request.key === 'string') {
         const reservations = await db.agentArtifact.findMany({ where: { runId: { in: runIds }, run: { userId: subject.userId, novelId: subject.novelId },
           artifactType: 'continuityReview', metadata: { path: ['continuityAssessmentRequestKey'], equals: request.key } }, take: 2 })
         const meta = object(reservations[0]?.metadata), parsed = lifecycle.legacyAssessmentInputSchema.safeParse(meta.input)
-        if (reservations.length !== 1 || !parsed.success || parsed.data.parserVersion !== 9 || parsed.data.continuityManifest?.subject.taskId !== original.taskId
+        if (reservations.length !== 1 || !parsed.success || parsed.data.parserVersion !== currentAudit.parserVersion || parsed.data.continuityManifest?.subject.taskId !== original.taskId
           || typeof meta.callId !== 'string' || request.inputHash !== runtimeJson(parsed.data).hash) return base
         const source = { ...subject, runId: reservations[0].runId, callId: meta.callId } as unknown as ToolContext
         if (lifecycle.legacyContinuityAssessmentKey(source, parsed.data) !== request.key) return base
@@ -140,8 +145,8 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
   const { continuitySourceScopeSchema } = await import('./continuity-source-authority.js')
   const { z } = await import('zod')
   const inputSchema = z.object({ chapterId: z.string(), revision: z.number().int(), bodies: z.object({ current: z.string(), previous: z.string().nullable(),
-    terminalEvidence: terminalEvidenceContextSchema }).strict(), system: z.string(), content: z.string(), parserVersion: z.union([z.literal(8), z.literal(9)]), continuityManifest: continuityReviewManifestSchema.optional(),
-    reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)]), terminalCandidate: terminalCandidateSchema.optional(),
+    terminalEvidence: terminalEvidenceContextSchema }).strict(), system: z.string(), content: z.string(), parserVersion: z.union([z.literal(8), z.literal(9), z.literal(10)]), continuityManifest: continuityReviewManifestSchema.optional(),
+    reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7)]), terminalCandidate: terminalCandidateSchema.optional(),
     sourceScope: continuitySourceScopeSchema, bindingHash: z.string().regex(/^[a-f0-9]{64}$/u), targetType: z.literal('story_compilation'), targetId: z.string() }).strict()
   const establishes = (value: unknown) => establishedDraftHistoryInput(value, ids)
   const passesPending = (value: unknown) => passedDraftHistoryInput(value, ids)
@@ -212,9 +217,7 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
       const evidence = frozen.bodies.terminalEvidence
       if ([...(evidence.proposalChanges?.verifiedFactIds ?? []), ...(evidence.factCoverage?.obligations.map(fact => fact.id) ?? []),
         ...(evidence.previous?.carried?.map(fact => terminalFactId(fact.field, fact.claim)) ?? [])].some(id => ids.has(id))) return base
-      // Manual repair adds a durable author/dispatch lineage. The old finite
-      // artifact snapshot has no event or ledger readers and cannot certify it.
-      const result = await lifecycle.readLegacyContinuityAssessment(frozen.continuityManifest?.manualRepair ? db : snapshot, ctx, frozen)
+      const result = await lifecycle.readLegacyContinuityAssessment(snapshot, ctx, frozen)
       if (!result.billingKnown || !result.providerComplete || !result.recoveryReady) return base
       const bound = lifecycle.bindLegacyContinuityAssessment(result.inspected, ctx, frozen)
       const auditHash = runtimeJson(bound.audit).hash

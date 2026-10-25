@@ -128,11 +128,18 @@ export async function commitOperationEffectInTransaction(tx: RuntimeTx, token: R
     else if (operation.kind === 'internal') {
       const envelope = operation.inputSnapshot as Prisma.JsonObject, input = envelope.input as Prisma.JsonObject | undefined
       if (input?.serviceAdmission !== undefined) {
-        const service = await (await import('./runtime-writing-service.js')).readAdmittedWritingServiceStep(token,
-          { operationId: operation.id, action: operation.action, novelId: String(input.novelId), callId: String(input.callId) }, tx)
+        const readers = await import('./runtime-writing-service.js')
+        const admission = readers.writingServiceAdmissionSchema.parse(input.serviceAdmission)
+        const identity = { operationId: operation.id, action: operation.action, novelId: String(input.novelId), callId: String(input.callId) }
+        // The actual prose CAS intentionally invalidates its live pre-CAS
+        // snapshot. Policy and current guards already ran before work(tx);
+        // this post-effect memory binding authenticates immutable lineage.
+        const service = admission.step === 'prose_revision'
+          ? await readers.readHistoricalWritingServiceSource(tx, token, identity)
+          : await readers.readAdmittedWritingServiceStep(token, identity, tx)
         // Bind before the body transaction commits, including while its parent
         // is still pending review. Legacy memory processors must never claim it.
-        if (service.input.serviceAdmission.step === 'body') await bindMemoryJobOwnership(tx, token.taskRootId, service.parent.id, raw)
+        if (service.input.serviceAdmission.step === 'body' || service.input.serviceAdmission.step === 'prose_revision') await bindMemoryJobOwnership(tx, token.taskRootId, service.parent.id, raw)
       }
     }
     const result = runtimeJson(raw)

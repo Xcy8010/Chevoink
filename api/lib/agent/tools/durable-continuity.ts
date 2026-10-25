@@ -48,8 +48,8 @@ const routeSchema = auxiliaryRouteSchema
 const coverageSchema = z.object({ version: z.literal(1), contentHash: hash, charCount: z.number().int().nonnegative(), sourceHash: hash.nullable(), reviewHash: hash.optional(), protocolVersion: z.number().int().positive().optional(), terminalHash: hash.optional() }).strict()
 const workSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rejected'), code: z.string(), message: z.string() }).strict(),
-  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14), z.literal(15), z.literal(16), z.literal(17), z.literal(18), z.literal(19), z.literal(20), z.literal(21), z.literal(22)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema, terminalCandidate: terminalCandidateSchema.optional(),
-    sourceBodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }).optional(), reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)]).optional(), continuityManifest: continuityReviewManifestSchema.optional(), sourceScope: continuitySourceScopeSchema.optional(), sourceId: z.string().nullable(), authorRequest: z.string().nullable().optional(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
+  z.object({ kind: z.literal('check'), version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14), z.literal(15), z.literal(16), z.literal(17), z.literal(18), z.literal(19), z.literal(20), z.literal(21), z.literal(22), z.literal(23)]), compiler: compilerObservationSchema.nullable(), standaloneContextHash: hash.optional(), chapter: chapterSchema, terminalCandidate: terminalCandidateSchema.optional(),
+    sourceBodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema.optional() }).optional(), reassessmentProtocol: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7)]).optional(), continuityManifest: continuityReviewManifestSchema.optional(), sourceScope: continuitySourceScopeSchema.optional(), sourceId: z.string().nullable(), authorRequest: z.string().nullable().optional(), coverage: coverageSchema, criticInput: z.string(), criticSystem: z.string(), repairSystem: z.string(), repair: z.boolean(),
     cached: z.array(continuityFindingInputSchema).nullable(), route: routeSchema.nullable(), price: tokenPriceSchema.nullable() }).strict(),
 ])
 type Work = Extract<z.infer<typeof workSchema>, { kind: 'check' }>
@@ -122,9 +122,9 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
     if (!chapter || runtimeJson(chapter).hash !== runtimeJson(frozen.chapter).hash || (source ? runtimeJson(source).hash : null) !== frozen.coverage.sourceHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查期间正文或来源章节已变化，未应用旧结果。请读取当前正文和章节桥后重查。')
   }
   const execute = async (frozen: Work) => {
-    if ((frozen.version === 19) !== (frozen.reassessmentProtocol === 3) || (frozen.version === 20) !== (frozen.reassessmentProtocol === 4) || (frozen.version === 21) !== (frozen.reassessmentProtocol === 5) || (frozen.version === 22) !== (frozen.reassessmentProtocol === 6)) return failure('RUNTIME_RECEIPT_INVALID', '连续性响应合同与冻结操作版本不一致。')
+    if ((frozen.version === 19) !== (frozen.reassessmentProtocol === 3) || (frozen.version === 20) !== (frozen.reassessmentProtocol === 4) || (frozen.version === 21) !== (frozen.reassessmentProtocol === 5) || (frozen.version === 22) !== (frozen.reassessmentProtocol === 6) || (frozen.version === 23) !== (frozen.reassessmentProtocol === 7)) return failure('RUNTIME_RECEIPT_INVALID', '连续性响应合同与冻结操作版本不一致。')
     if ((frozen.reassessmentProtocol === 3 || frozen.reassessmentProtocol === 4 || frozen.reassessmentProtocol === 5) && (frozen.sourceBodies?.terminalEvidence?.verdictProtocol !== 6 || !frozen.terminalCandidate)) return failure('RUNTIME_RECEIPT_INVALID', '响应合同缺少冻结候选或证据目录。')
-    if (frozen.version === 22 && (!frozen.continuityManifest || !frozen.sourceBodies || !frozen.terminalCandidate || !frozen.sourceScope
+    if ((frozen.version === 22 || frozen.version === 23) && (!frozen.continuityManifest || !frozen.sourceBodies || !frozen.terminalCandidate || !frozen.sourceScope
       || !validContinuityReviewManifest({ manifest: frozen.continuityManifest, bodies: frozen.sourceBodies, candidate: frozen.terminalCandidate, sourceScope: frozen.sourceScope })))
       return failure('RUNTIME_RECEIPT_INVALID', '连续性四投影缺少同一冻结材料清单。')
     if (frozen.version >= 12 && !frozen.sourceScope) return failure('RUNTIME_RECEIPT_INVALID', '连续性检查缺少冻结来源边界，不能补造。')
@@ -157,7 +157,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
       ? parseIndependentContinuityResult(critic.content, frozen.version >= 3 ? 2 : 1, frozen.version >= 4 ? frozen.sourceBodies : undefined) : { structured: false, findings: [] }
     let recoveryReady = false
     let inspected = frozen.version >= 5 && critic && frozen.sourceBodies
-      ? inspectAuthenticatedContinuityAssessment(critic.content, { bodies: frozen.sourceBodies!, parserVersion: frozen.version === 22 ? 9 : frozen.version >= 13 ? 8 : frozen.version >= 12 ? 7 : frozen.version >= 8 ? 6 : frozen.version >= 7 ? 5 : frozen.version >= 6 ? 4 : 3, terminalCandidate: frozen.version >= 10 ? frozen.terminalCandidate : undefined, sourceScope: frozen.version >= 12 ? frozen.sourceScope : undefined, continuityManifest: frozen.continuityManifest, reassessmentProtocol: frozen.reassessmentProtocol }, critic.finishReason === 'stop' && !critic.toolCalls.length) : null
+      ? inspectAuthenticatedContinuityAssessment(critic.content, { bodies: frozen.sourceBodies!, parserVersion: frozen.version === 23 ? 10 : frozen.version === 22 ? 9 : frozen.version >= 13 ? 8 : frozen.version >= 12 ? 7 : frozen.version >= 8 ? 6 : frozen.version >= 7 ? 5 : frozen.version >= 6 ? 4 : 3, terminalCandidate: frozen.version >= 10 ? frozen.terminalCandidate : undefined, sourceScope: frozen.version >= 12 ? frozen.sourceScope : undefined, continuityManifest: frozen.continuityManifest, reassessmentProtocol: frozen.reassessmentProtocol }, critic.finishReason === 'stop' && !critic.toolCalls.length) : null
     if (frozen.version === 7 && inspected && frozen.sourceBodies && inspected.audit.classification === 'source_invalid') {
       assertLegacyContinuityInspection(inspected)
       const billingKnown = await withRunLease(lease, async tx => {
@@ -268,6 +268,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
           display: { kind: 'storyCompiler', compilationId: compiler.id, phase: 'check', title: '连续性检查', detail: `${report.errorCount} 错误 · ${report.warningCount} 警告`, errorCount: report.errorCount, warningCount: report.warningCount, items: report.findings.map(item => item.evidence) } })
       toolResult.reviewOutcome = terminalFailure?.reviewOutcome ?? (!incomplete && (report.errorCount || report.warningCount) ? 'decision_required'
         : observedReviewOutcome({ complete: !incomplete, rawPresent: !!frozen.cached || !!critic, providerComplete: !!frozen.cached || !!critic, billingKnown: firstBillingKnown, providerFailed }).outcome ?? undefined)
+      toolResult.reviewCompleted = !incomplete
       const stateHash = await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, compiler.id)
       if (!stateHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '检查后的编译状态缺失。')
       ctx.signal.throwIfAborted()
@@ -294,7 +295,8 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
 /** Freeze the original business input independently of model cursor admission.
  * The caller still admits that exact work before dispatch or any effect. */
 export async function prepareContinuityWork(ctx: ToolContext, lease: import('../runtime-lease.js').RunLeaseToken, input: {
-  operationKey: string; observedRevision: number; baseline: z.infer<typeof compilerObservationSchema> | null; args: Record<string, unknown>
+  operationKey: string; observedRevision: number; baseline: z.infer<typeof compilerObservationSchema> | null; args: Record<string, unknown>;
+  frozenReview?: { route: z.infer<typeof auxiliaryRouteSchema>; price: z.infer<typeof tokenPriceSchema> }
 }) {
   ctx = { ...ctx }; lease = { ...lease }; input = { ...input }
   const baseline = input.baseline && { ...input.baseline }, args = structuredClone(input.args)
@@ -433,10 +435,25 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
   if (!recoveredWork && work.kind === 'check' && work.reassessmentProtocol === 5 && work.sourceBodies && work.terminalCandidate) work = { ...work,
     criticSystem: continuityResponseSystem(work.criticSystem, continuityResponseContract(work.sourceBodies, work.terminalCandidate)),
     criticInput: continuityResponseInput4(work.criticInput, work.sourceBodies, work.terminalCandidate) }
+  if (!recoveredWork && input.frozenReview && work.kind === 'check') work = { ...work, ...input.frozenReview }
   if (!recoveredWork && work.kind === 'check' && work.version === 22 && work.continuityManifest && work.sourceBodies && work.terminalCandidate && work.sourceScope) {
-    const request = continuityReviewV4Request({ manifest: work.continuityManifest, bodies: work.sourceBodies, candidate: work.terminalCandidate, sourceScope: work.sourceScope },
+    const coordinator = await import('../continuity-coordinator.js')
+    const semanticSubjectHash = continuityWorkSubjectIdentity(work)
+    if (!semanticSubjectHash || !work.route || !work.price || !work.compiler) throw new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED', '原操作缺少完整检查来源、模型或价格。')
+    const frozen = work
+    const original = await withRunLease(lease, tx => readOriginalTaskRequest(tx, ctx))
+    const typed = (original.spec as { scope?: { continuityReportProtocol?: number } }).scope?.continuityReportProtocol === 5
+    if (!typed) await withRunLease(lease, tx => coordinator.claimNativeContinuityVerification(tx, ctx, {
+      chapterId: frozen.chapter.id, revision: frozen.chapter.revision, bodies: frozen.sourceBodies!, terminalCandidate: frozen.terminalCandidate,
+      parserVersion: 9, reassessmentProtocol: 6, continuityManifest: frozen.continuityManifest, sourceScope: frozen.sourceScope,
+      system: frozen.criticSystem, content: frozen.criticInput, targetType: 'story_compilation', targetId: frozen.compiler!.id }, `prepared:${input.operationKey}`))
+    const typedLineage = typed ? await withRunLease(lease, tx => coordinator.prepareContinuityReviewLineage(tx, ctx, { compilationId: frozen.compiler!.id,
+      chapterId: frozen.chapter.id, semanticSubjectHash, modelPriceHash: runtimeJson({ route: frozen.route, price: frozen.price }).hash })) : undefined
+    const manifest = typedLineage ? buildContinuityReviewManifest({ ...work.continuityManifest, bodies: work.sourceBodies, candidate: work.terminalCandidate,
+      typedLineage }) : work.continuityManifest
+    const request = continuityReviewV4Request({ manifest, bodies: work.sourceBodies, candidate: work.terminalCandidate, sourceScope: work.sourceScope },
       work.authorRequest ?? null, JSON.stringify({ body: work.sourceBodies.current, previous: work.sourceBodies.previous, target: work.compiler, coverage: work.coverage }))
-    work = { ...work, criticSystem: request.system, criticInput: request.content }
+    work = { ...work, version: typed ? 23 : 22, reassessmentProtocol: typed ? 7 : 6, continuityManifest: manifest, criticSystem: request.system, criticInput: request.content }
   }
   work = workSchema.parse(work)
   return work

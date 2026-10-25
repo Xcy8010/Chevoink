@@ -691,9 +691,10 @@ export async function validateStoryContinuity(input: {
   coverage?: CompilerContinuityCoverage
   terminalCandidate?: TerminalCandidate
   continuityCriticResponse?: unknown
+  expectedContinuityOwnerSeq?: number
   focus?: string
   signal?: AbortSignal
-}, transaction?: Prisma.TransactionClient): Promise<{ checkedChapterId: string; checkedRevision: number; checkedAt: string; independentCheck: 'complete' | 'unavailable'; findings: ContinuityFindingInput[]; errorCount: number; warningCount: number; autoRepairRounds: number; checkRounds: number }> {
+}, transaction?: Prisma.TransactionClient): Promise<{ checkedChapterId: string; checkedRevision: number; checkedAt: string; independentCheck: 'complete' | 'unavailable'; findings: ContinuityFindingInput[]; errorCount: number; warningCount: number; autoRepairRounds: number; checkRounds: number; effectiveReport?: import('./continuity-coordinator.js').EffectiveContinuityReport }> {
   if (!transaction) return prisma.$transaction(tx => validateStoryContinuity(input, tx))
   const db = transaction
   await lockNovelActiveScope(db, input.novelId)
@@ -758,6 +759,8 @@ export async function validateStoryContinuity(input: {
     (input.coverage?.protocolVersion ?? 0) >= 6, (input.coverage?.protocolVersion ?? 0) >= 7))
   const nextCheckRounds = validatedContinuityCheckRounds(compilation.validation)
   const previousValidation = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : {}
+  if ((input.continuityCriticResponse as { parserVersion?: number } | undefined)?.parserVersion === 10 && input.runId)
+    await (await import('./continuity-coordinator.js')).assertContinuityOwner(db, { ...input, runId: input.runId, continuityOwnerSeq: input.expectedContinuityOwnerSeq })
   const sameReviewedInput = previousValidation.checkedRevision === compilation.chapter.revision && previousValidation.independentCheck === 'complete'
     && runtimeJson(previousValidation.findings ?? []).hash === runtimeJson(findings).hash
     && compilerContinuityCoverageMatches(previousValidation.coverage, currentCoverage)
@@ -770,7 +773,13 @@ export async function validateStoryContinuity(input: {
     && recovery.rawHash === originalAudit.contentHash && recovery.characterCount === originalAudit.characterCount
     && recovery.coverageHash === runtimeJson(currentCoverage).hash && Array.isArray(recovery.sourceRelocations) && recovery.sourceRelocations.length > 0
     && typeof previousValidation.checkedAt === 'string' && Number.isFinite(Date.parse(previousValidation.checkedAt))
+  const effectiveReport = input.runId && input.independentCheck === 'complete' && !unlocated.length && input.continuityCriticResponse
+    ? await (await import('./continuity-coordinator.js')).stageEffectiveContinuityReport(db, { ...input, runId: input.runId },
+      { compilationId: compilation.id, audit: input.continuityCriticResponse, previousValidation })
+    : !input.continuityCriticResponse && sameReviewedInput
+      ? (await import('./continuity-coordinator.js')).effectiveContinuityReportSchema.optional().parse(previousValidation.effectiveReport) : undefined
   const validation = {
+    ...(effectiveReport ? { effectiveReport } : {}),
     ...(input.continuityCriticResponse ? { continuityCriticResponse: runtimeJson(input.continuityCriticResponse).value } : {}),
     ...(sameReviewedInput && previousValidation.retainedReviewDecision ? { retainedReviewDecision: previousValidation.retainedReviewDecision } : {}),
     ...(!input.continuityCriticResponse && sameReviewedInput && previousValidation.continuityCriticResponse ? { continuityCriticResponse: previousValidation.continuityCriticResponse } : {}),
@@ -794,7 +803,8 @@ export async function validateStoryContinuity(input: {
   }
   input.signal?.throwIfAborted()
   const factCoverage = terminalCoverageInput(authorRequest?.spec, compilation.preparedContext, compilation.chapter, input.terminalCandidate, terminalCoverageAuditVersion(validation), terminalCoverageProofs(reviewSource, terminalSpanAuditVersion(validation)))
-  const authenticatedTerminalContext = (validation.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion === 9
+  const currentParser = (validation.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion
+  const authenticatedTerminalContext = (currentParser === 9 || currentParser === 10)
     && hasTerminalEvidenceProtocol(authorRequest?.spec)
   let terminalContext = factCoverage || authenticatedTerminalContext ? terminalEvidenceContext(compilation.chapter, reviewSource, protocol === 11 ? 2 : 1,
     terminalQuoteAddressVersion(authorRequest?.spec), factCoverage, terminalVerdictAuditVersion(validation), terminalSpanAuditVersion(validation)) : undefined
@@ -824,7 +834,7 @@ export async function validateStoryContinuity(input: {
         terminalProposalReview: proposalPreparation.state } : compilation.preparedContext },
     compilation.chapter, validation, terminalContext) : undefined
   const terminalReview = terminalContext ? currentTerminalReview(validation, compilation.chapter.content, terminalContext, deliveryBinding) : null
-  if ((validation.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion === 9
+  if ((currentParser === 9 || currentParser === 10)
     && validation.independentCheck === 'complete' && !terminalReview) {
     throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', '原检查响应、所有权或费用尚不能完整认证；保留原始结果，未保存为完整报告。')
   }

@@ -565,7 +565,7 @@ async function reservedTokenCredits(db: Pick<Prisma.TransactionClient, 'aiUsageL
 }
 
 /** Serializable admission prevents concurrent calls from reserving the same credit. */
-export type AuthorReviewCreditReservation = { price: TokenPrice; newCallId: string; runId: string; novelId: string; chapterId: string; manualReviewRepairOperationId?: string }
+export type AuthorReviewCreditReservation = { price: TokenPrice; newCallId: string; runId: string; novelId: string; chapterId: string; continuityQuestionId?: string; continuityExecutionId?: string }
 export async function reserveTokenCredits(userId: string, usageId: string, inputEstimate: number, maxOutput: number, authorReview?: AuthorReviewCreditReservation) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -574,15 +574,11 @@ export async function reserveTokenCredits(userId: string, usageId: string, input
         if (authorReview) {
           const evidence = fallbackUsageEvidenceSchema.safeParse(usage.billingEvidence)
           const authorizedPrice = tokenPriceSchema.parse(authorReview.price)
-          const allowedOperation = authorReview.manualReviewRepairOperationId === undefined
-            ? usage.action === 'agent3HumanityAuthorReplacement' && usage.targetType === 'chapter'
-            : /^mrr_[a-f0-9]{56}$/u.test(authorReview.manualReviewRepairOperationId)
-              && usage.action === 'agent3ContinuityCritic' && usage.targetType === 'story_compilation'
           if (usage.billingStatus !== 'authorized_pending' || usage.usageSource !== 'prepared'
             || [authorReview.newCallId, authorReview.runId, authorReview.novelId, authorReview.chapterId].some(id => typeof id !== 'string' || !id)
-            || usage.providerType !== 'text' || !allowedOperation
+            || usage.providerType !== 'text' || (authorReview.continuityQuestionId ? usage.action !== 'agent3ContinuityCritic' : usage.action !== 'agent3HumanityAuthorReplacement')
             || usage.agentRunId !== authorReview.runId || usage.novelId !== authorReview.novelId || usage.chapterId !== authorReview.chapterId
-            || usage.targetId !== authorReview.newCallId
+            || usage.targetType !== (authorReview.continuityQuestionId ? 'story_compilation' : 'chapter') || usage.targetId !== authorReview.newCallId
             || !frozenTokenPriceMatchesModel(authorizedPrice, usage.modelTier ?? '', usage.multiplierBps)
             || usage.durationMs !== 0 || usage.requestTokens !== null || usage.responseTokens !== null || usage.creditChargeMilli !== 0
             || !evidence.success || evidence.data.responseObserved || evidence.data.outputEstimate !== 0 || evidence.data.inputEstimate !== inputEstimate
@@ -590,6 +586,8 @@ export async function reserveTokenCredits(userId: string, usageId: string, input
             || await tx.creditLedgerEntry.findUnique({ where: { idempotencyKey: `usage:${usageId}` } })) {
             throw new DataAccessError(409, 'CREDIT_USAGE_MISMATCH', '本次检查的预备账目与确认不一致，未预留额度。')
           }
+          if (authorReview.continuityQuestionId) await (await import('./agent/continuity-coordinator.js')).reserveContinuitySupplementUsage(tx,
+            userId, usageId, authorReview.continuityQuestionId, authorReview.continuityExecutionId)
         }
         if (usage.modelTier === 'custom' || usage.reservedCreditMilli > 0) return
         if (!authorReview && usage.billingStatus !== 'prepared') throw new DataAccessError(409, 'CREDIT_USAGE_MISMATCH', '不能为已执行请求重复预留额度。')
