@@ -83,14 +83,15 @@ export function terminalProcessingExhaustedMessage(review: ChapterReviewReadines
     + '正文、原检查、费用与处理记录保留，终态尚未提交。'
 }
 
-/** Current report validity and missing paid-phase authority are separate. */
+/** No authenticated current decisions or commit step is available. A complete
+ * business UNKNOWN is not an unknown provider request or a new phase grant. */
 export function terminalProcessingPhaseGapMessage(review: ChapterReviewReadiness | null) {
   const terminal = review?.terminalReview
-  if (!review?.progressEvidence || !terminal) return '当前完整报告已保留，尚无适用的原任务后续独立判断授权，未增加主模型或审阅请求。'
+  if (!review?.progressEvidence || !terminal) return '当前报告与原记录已保留，尚未确认可执行的当前意见处置或提交步骤，未增加主模型或审阅请求。'
   const status = terminal.currentResultVerified ? `当前终态复核结果已收到，仍有${terminal.unresolved.length}项未获证实；`
     : '当前报告尚不能认证为完整结果；'
   const details = terminal.currentResultVerified ? terminal.unresolved.filter(item => item.claim).slice(0, 3)
     .map(item => `「${item.claim!.slice(0, 180)}」${item.reason ? `，独立复核原因：${item.reason.slice(0, 240)}` : ''}`).join('；') : ''
   return `第${review.progressEvidence.orderIndex}章（版本${review.revision}）：${status}${details ? `未获证实的主张：${details}。` : ''}`
-    + '当前没有适用的原任务后续独立判断授权与费用上限；业务未知不会当作技术失败重试，也未购买主模型来猜下一工具。正文、原始报告、持续义务和费用均保留，终态尚未提交。'
+    + '尚未确认可直接执行的当前意见处置或提交步骤；先核对原报告完整性、未证实事实与已持久化阶段。未调用主模型猜测新候选，业务未知不会当作技术失败重试。正文、原始报告、持续义务和费用均保留，终态尚未提交。'
 }

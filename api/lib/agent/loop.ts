@@ -1,6 +1,6 @@
 import { observedReviewOutcome, projectedReviewAction, type ReviewOutcome } from '../../../shared/review-lifecycle.js'
 import { readSettledQualityReviews } from './quality-review-admission.js'
-import { terminalProcessingPlan } from './terminal-processing.js'
+import { terminalProcessingPlan, terminalProcessingPhaseGapMessage } from './terminal-processing.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
 import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, writingClarificationResolvesInput, readCompletedWritingDelivery, readRecoveredChapterDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
@@ -70,7 +70,7 @@ import { frozenWritingToolGuidance } from './writing-tool-guidance.js'
 import { findToolRestriction, isLocalToolFailure, isInputScopedFailure, restoreToolRestriction, toolFailureInputHash, toolRestrictionTarget, type ToolRestriction } from './tool-local-failure.js'
 import { assertLimitedWritingDelivery, type LimitedWritingDelivery } from './writing-delivery-limitations.js'
 import { readChapterReviewReadiness, hasPendingChapterReviewDecision, chapterReviewDecisionGuidance, type ChapterReviewReadiness } from './chapter-review-guard.js'
-import { nextMergedReviewReminder, nextReviewDispatch, reviewDispatchKey } from './review-dispatch.js'
+import { nextMergedReviewReminder, nextReviewDispatch, projectCurrentReviewNextStep, reviewDispatchKey } from './review-dispatch.js'
 import { readTerminalInputDecision } from './terminal-input-decision.js'
 import { readQualityFormatRecovery, type QualityFormatRecovery } from './quality-format-recovery.js'
 import { deferToolProposal } from './deferred-tool.js'
@@ -2105,6 +2105,16 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       // Current report data does not revoke the original main-model task.
       // Any proposed new critic request still requires its own durable phase
       // admission at dispatch; ordinary decisions use the existing tool path.
+      if (!bootstrapCall && terminalPlan?.kind === 'process') {
+        const report = currentReviewState.value
+        const decisions = report && projectCurrentReviewNextStep(report)
+        if (report?.ready !== true || report.terminalReview?.currentResultVerified !== true || report.mustPassPending
+          || report.decisionPending !== true || !decisions?.pending.length || !tools.some(tool => tool.name === 'chapter_bridge_commit')) {
+          forceWrapUpLocal = true
+          await wrapUpAndFinish(terminalProcessingPhaseGapMessage(report))
+          return
+        }
+      }
       const configurationChanges = await prisma.agentConfigurationChange.findMany({ where: { runId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
       if (configurationChanges.length) {
         const current = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })

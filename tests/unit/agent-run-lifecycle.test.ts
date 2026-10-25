@@ -784,7 +784,8 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(mocks.chat).toHaveBeenCalledOnce()
     expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
   })
-  it('runs ordinary current-report decisions after paid application despite old consumed feedback and stagnant seven', async () => {
+  it.each(['current-decisions', 'business-unknown', 'unverified-report', 'hard-pass', 'missing-tool'] as const)(
+    'admits only ordinary current-report decisions after paid application despite consumed feedback and stagnant seven: %s', async scenario => {
     const { runtimeJson } = await import('../../api/lib/agent/runtime-common.js')
     const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '修改本章' })
     mocks.currentOriginal = { prompt: '修改本章', taskSpec }
@@ -810,6 +811,9 @@ describe('server assessment fallback in the real execution loop', () => {
       terminalProcessing: { contractHash: runtimeJson(JSON.parse(JSON.stringify(taskSpec))).hash, sourceHash: 'a'.repeat(64),
         content: body, previous: 'An authenticated older chapter.', inherited: [], candidate: terminalCandidateSchema.parse({ exitState: { objects: ['The packet remains sealed.'] } }),
         issues: [{ path: 'historical.0', reason: 'unknown' }] } }
+    if (scenario === 'business-unknown') { state.decisionPending = false; state.requiredDecisions = []; state.continuityErrorCount = 0 }
+    if (scenario === 'unverified-report') state.terminalReview!.currentResultVerified = false
+    if (scenario === 'hard-pass') state.mustPassPending = true
     mocks.reviewReadiness.mockImplementation(async () => state)
     const critic = tool('continuity_validate', async () => { throw Error('Consumed full1 cannot dispatch again') })
     const commit = tool('chapter_bridge_commit', async () => {
@@ -820,7 +824,7 @@ describe('server assessment fallback in the real execution loop', () => {
       return { output: 'The actual current report decisions and bridge were saved.',
         requiredResult: { targetId: 'c', contentHash: persistedContentHash(body) } }
     }, false)
-    mocks.tools = [critic, commit]
+    mocks.tools = scenario === 'missing-tool' ? [critic] : [critic, commit]
     mocks.chat.mockImplementationOnce(async request => {
       expect(events().filter(event => event.type === 'run.paused')).toEqual([])
       expect(request.model).toBe('selected-current-model')
@@ -837,6 +841,15 @@ describe('server assessment fallback in the real execution loop', () => {
     try {
       await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '修改本章', resume: true })
     } finally { delivery.mockRestore() }
+    if (scenario !== 'current-decisions') {
+      expect(mocks.chat).not.toHaveBeenCalled()
+      expect(commit.execute).not.toHaveBeenCalled()
+      expect(critic.execute).not.toHaveBeenCalled()
+      expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1050, checkpoint: { stagnantBatches: 7,
+        reviewAttempts: checkpoint.reviewAttempts, consumedReviewDecisionFeedback: checkpoint.consumedReviewDecisionFeedback } })
+      return
+    }
     expect(mocks.chat).toHaveBeenCalledOnce()
     expect(commit.execute).toHaveBeenCalledOnce()
     expect(critic.execute).not.toHaveBeenCalled()

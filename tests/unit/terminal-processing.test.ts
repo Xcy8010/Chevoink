@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
-import { terminalProcessingExhaustedMessage, terminalProcessingPlan } from '../../api/lib/agent/terminal-processing.js'
+import { terminalProcessingExhaustedMessage, terminalProcessingPhaseGapMessage, terminalProcessingPlan } from '../../api/lib/agent/terminal-processing.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
@@ -21,6 +21,21 @@ function fixture() {
       content, previous: 'A request was issued.', inherited: [], issues: [{ path: 'exitState.objects.0', reason: 'inheritance_invalid' }] } }
   return { subject, review }
 }
+
+it('reports the exact unresolved current fact without inventing a missing main-model fee cap', () => {
+  const { review } = fixture()
+  review.terminalReview = { state: 'unverified', currentResultVerified: true, unresolved: [
+    { path: 'exitState.objects.0', verdict: 'unknown', claim: 'The sensor has been repaired.', reason: 'The current body still shows it offline.' },
+  ] }
+  const before = JSON.stringify(review), message = terminalProcessingPhaseGapMessage(review)
+  expect(message).toContain('第6章（版本8）：当前终态复核结果已收到，仍有1项未获证实')
+  expect(message).toContain('The sensor has been repaired.')
+  expect(message).toContain('The current body still shows it offline.')
+  expect(message).not.toContain('授权与费用上限')
+  expect(JSON.stringify(review)).toBe(before)
+  review.terminalReview.currentResultVerified = false
+  expect(terminalProcessingPhaseGapMessage(review)).toContain('当前报告尚不能认证为完整结果')
+})
 
 it('prepares current source and candidate once per bounded processing proposal, without claiming progress or success', () => {
   const { subject, review } = fixture(), attempts = new Set<string>(), before = JSON.stringify(review)

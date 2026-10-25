@@ -409,6 +409,14 @@ describe.runIf(available)('original persistent supplemental phase: real question
         })
       }
       const review = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, s.compilation.id))
+      if (appliedScenario) {
+        expect(review, JSON.stringify(review)).toMatchObject({ ready: true, reviewProtocol: 1, completeStrictReview: true,
+          continuity: 'complete', quality: 'complete', decisionPending: true, mustPassPending: false, qualityPassRequired: false,
+          qualityErrorCount: 0, continuityErrorCount: 4, requiredTools: [], terminalCommitted: false,
+          terminalReview: { state: 'unverified', currentResultVerified: true, deliveryEligible: false } })
+        expect(review!.requiredDecisions, JSON.stringify(review)).toHaveLength(15)
+        expect(review!.requiredDecisions!.filter(item => item.source === 'quality')).toHaveLength(11)
+      }
       const signatures = new Set<string>()
       observeChapterReviewProgress(signatures, review?.progressEvidence,
         { userId: f.userId, novelId: f.novelId, expectedOriginalTaskId: f.spec.id, taskSpec: f.spec })
@@ -450,7 +458,17 @@ describe.runIf(available)('original persistent supplemental phase: real question
         }
         await running
       } finally { getActiveRun(f.runId)?.controller.abort(); await running }
-      if (decisionScenario) { expect(network).not.toHaveBeenCalled(); expect(s.main).toHaveBeenCalledOnce(); expect(paid).toHaveBeenCalledOnce() }
+      if (decisionScenario) {
+        expect(network).not.toHaveBeenCalled()
+        const returned = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId }, select: { id: true, status: true, taskRootId: true,
+          runtimeProtocolVersion: true, currentTurn: true, errorMessage: true, usage: true } })
+        const stopped = (await loadPersistedEvents(f.runId, pause.seq)).filter(event => ['error', 'run.paused', 'text.final'].includes(event.type))
+        const originalOutbox = await prisma.agentExecutionOutbox.findMany({ where: { taskRootId: f.rootId },
+          select: { eventKey: true, type: true, sequence: true }, orderBy: { sequence: 'desc' }, take: 3 })
+        expect(s.main, JSON.stringify({ rootId: f.rootId, returned, stopped, initialReadiness: review,
+          originalOutbox: originalOutbox.map(row => ({ ...row, sequence: String(row.sequence) })) })).toHaveBeenCalledOnce()
+        expect(paid).toHaveBeenCalledOnce()
+      }
       else { expect(network).toHaveBeenCalledOnce(); expect(s.main).not.toHaveBeenCalled() }
       const events = await loadPersistedEvents(f.runId, pause.seq)
       expect(events.filter(event => event.type === 'tool.call' && event.toolName === 'ask_user')).toHaveLength(scenario === 'approve-in-loop' ? 1 : 0)
