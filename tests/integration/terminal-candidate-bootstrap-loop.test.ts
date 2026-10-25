@@ -235,6 +235,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
 
   it.each([...(['settled', 'unknown'] as const).flatMap(billing => (['commit', 'repeat', 'restart'] as const).map(scenario => [billing, scenario] as const)), ...(['old-slots', 'local-refusal', 'consumed-local-candidate', 'objects', 'source-address', 'commit-reserved', 'commit-unknown', 'multiple-candidates', 'no-proposal'] as const).map(scenario => ['settled', scenario] as const)])(
     'preserves failed requests and permits bounded candidate processing: %s / %s', (billing, scenario) => fixture(async f => {
+    const pendingProvider = billing === 'unknown' && scenario === 'repeat'
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
     vi.spyOn(titles, 'autoNameSession').mockResolvedValue(undefined)
@@ -447,6 +448,8 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       return { content: call ? '' : 'Completed.', reasoning: '', finishReason: call ? 'tool_calls' : 'stop', toolCalls: proposals,
         usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
     })
+    const beforeContinue = pendingProvider ? await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } }) : null
+    const beforeAccount = pendingProvider ? await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } }) : null
     await executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true, authorContinue: { eventId: pause.id, afterSeq: pauseSeq }, eventStartSeq: pauseSeq, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
     if (scenario === 'restart') {
       expect(main).toHaveBeenCalledOnce()
@@ -461,7 +464,7 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       await executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true, authorContinue: { eventId: stop.id, afterSeq }, eventStartSeq: afterSeq, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
     }
     expect(network).toHaveBeenCalledTimes(scenario === 'no-proposal' || scenario === 'repeat' ? 0 : 1)
-    expect(main).toHaveBeenCalledTimes(scenario === 'restart' ? 3 : scenario === 'no-proposal' || scenario === 'commit-unknown' || scenario === 'consumed-local-candidate' ? 1 : 2)
+    expect(main).toHaveBeenCalledTimes(pendingProvider ? 0 : scenario === 'restart' ? 3 : scenario === 'no-proposal' || scenario === 'commit-unknown' || scenario === 'consumed-local-candidate' ? 1 : 2)
     if (scenario === 'consumed-local-candidate') {
       const resumed = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).usage as { checkpoint: typeof checkpoint }
       expect(resumed.checkpoint.reviewAttempts.filter(key => key.startsWith(`terminal-processing:${processingKey}:`))).toHaveLength(2)
@@ -473,8 +476,23 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     const used = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, id: { notIn: [old.id, ...(knownRepeatUsage ? [knownRepeatUsage.id] : [])] } } })
     expect(used).toHaveLength(network.mock.calls.length)
     if (scenario === 'repeat') {
-      const resumed = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).usage as { checkpoint: typeof checkpoint }
-      expect(resumed.checkpoint.reviewAttempts.filter(key => key.startsWith(`terminal-processing:${processingKey}:`))).toHaveLength(2)
+      const finished = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
+      const resumed = finished.usage as { checkpoint: typeof checkpoint }
+      // The separately authenticated UNKNOWN does not identify the old unknown
+      // request's usage. Both primary rows overlap its call interval, so pending
+      // receipt recovery must stop before buying a turn or claiming processing.
+      expect(resumed.checkpoint.reviewAttempts.filter(key => key.startsWith(`terminal-processing:${processingKey}:`))).toHaveLength(pendingProvider ? 0 : 2)
+      if (pendingProvider) {
+        expect(resumed.checkpoint.reviewAttempts).toEqual(checkpoint.reviewAttempts)
+        expect(resumed.checkpoint.pendingReviews).toEqual(checkpoint.pendingReviews)
+        expect(finished).toMatchObject({ status: 'paused', currentTurn: beforeContinue!.currentTurn, taskSpec: beforeContinue!.taskSpec,
+          modelTier: beforeContinue!.modelTier, customModelId: beforeContinue!.customModelId, reasoningEffort: beforeContinue!.reasoningEffort })
+        expect(finished.usage).toMatchObject({ promptTokens: 10, completionTokens: 0, totalTokens: 10 })
+        expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })).toEqual(beforeAccount)
+        expect(await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { gt: pauseSeq }, type: 'run.paused' }, orderBy: { seq: 'asc' } }))
+          .toMatchObject([{ payload: { reason: 'review_receipt_pending' } }])
+        expect(await prisma.agentRunEvent.count({ where: { runId: f.runId, seq: { gt: pauseSeq }, type: { in: ['tool.call', 'review.reconciled', 'error'] } } })).toBe(0)
+      }
       expect(resumed.checkpoint.reviewAttempts).toEqual(expect.arrayContaining(checkpoint.reviewAttempts))
       expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: knownRepeatUsage!.id } })).toEqual(knownRepeatUsage)
       expect(await prisma.agentArtifact.findMany({ where: { id: { in: knownRepeatArtifacts.map(row => row.id) } }, orderBy: { id: 'asc' } }))
