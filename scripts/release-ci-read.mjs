@@ -5,10 +5,55 @@ import { assertReleaseCi } from './release-ci.mjs'
 
 // This deployment entrypoint is scoped to the configured production repository.
 const repository = 'Xcy8010/Chevoink'
-function ghApi(endpoint) {
-  return JSON.parse(execFileSync('gh', ['api', endpoint, '--method', 'GET',
-    '-H', 'Accept: application/vnd.github+json', '-H', 'X-GitHub-Api-Version: 2022-11-28'],
-  { encoding: 'utf8', windowsHide: true, timeout: 60000, maxBuffer: 8 * 1024 * 1024 }))
+const executionOptions = { encoding: 'utf8', windowsHide: true, timeout: 60000, maxBuffer: 8 * 1024 * 1024,
+  stdio: ['pipe', 'pipe', 'pipe'] }
+const metadataEndpoint = /^repos\/Xcy8010\/Chevoink\/actions\/(?:runs\/[1-9]\d*(?:\/jobs\?filter=latest&per_page=100)?|workflows\/ci\.yml\/runs\?head_sha=[a-f0-9]{40}&status=success&per_page=20)$/
+
+function parseMetadata(output) {
+  try { return JSON.parse(output) }
+  catch { throw new Error('GitHub CI metadata response is not valid JSON') }
+}
+
+function nativeMetadata(endpoint, execute) {
+  let token
+  try {
+    token = execute('gh', ['auth', 'token', '--hostname', 'github.com'], { ...executionOptions, timeout: 10000 }).replace(/\r?\n$/, '')
+  } catch { throw new Error('GitHub CLI authentication is unavailable for CI metadata') }
+  if (token.length > 255 || !/^(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|[a-fA-F0-9]{40})$/.test(token)) {
+    throw new Error('GitHub CLI returned an invalid authentication token')
+  }
+  const config = [
+    `url = "https://api.github.com/${endpoint}"`, 'request = "GET"',
+    `header = "Authorization: Bearer ${token}"`, 'header = "Accept: application/vnd.github+json"',
+    'header = "X-GitHub-Api-Version: 2022-11-28"', 'user-agent = "Chevoink-release-ci-read"',
+    'silent', 'show-error', 'connect-timeout = 15', 'max-time = 60', 'proto = "=https"', 'max-redirs = 0',
+    'write-out = "\\n%{http_code}"',
+  ].join('\n') + '\n'
+  let output
+  try {
+    output = execute(path.win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'curl.exe'), ['--disable', '--config', '-'],
+      { ...executionOptions, input: config })
+  } catch { throw new Error('Native HTTPS CI metadata request failed') }
+  const separator = output.lastIndexOf('\n')
+  if (separator < 0 || output.slice(separator + 1) !== '200') throw new Error('Native HTTPS CI metadata did not return HTTP 200')
+  return parseMetadata(output.slice(0, separator))
+}
+
+/** Transport dependencies are injectable for offline tests; callers cannot
+ * select a host, method, credential source or local CI success override. */
+export function ghApi(endpoint, { platform = process.platform, execute = execFileSync } = {}) {
+  if (typeof endpoint !== 'string' || !metadataEndpoint.test(endpoint)) throw new Error('CI metadata endpoint is not allowed')
+  let output
+  try {
+    output = execute('gh', ['api', endpoint, '--hostname', 'github.com', '--method', 'GET',
+      '-H', 'Accept: application/vnd.github+json', '-H', 'X-GitHub-Api-Version: 2022-11-28'], executionOptions)
+  } catch (error) {
+    const stderr = typeof error?.stderr === 'string' ? error.stderr : Buffer.isBuffer(error?.stderr) ? error.stderr.toString('utf8') : ''
+    const eof = [`Get "https://api.github.com/${endpoint}": EOF`, `Get "https://api.github.com/${endpoint}": unexpected EOF`].includes(stderr.trim())
+    if (platform === 'win32' && Number.isInteger(error?.status) && error.status > 0 && eof) return nativeMetadata(endpoint, execute)
+    throw new Error('GitHub CLI CI metadata request failed')
+  }
+  return parseMetadata(output)
 }
 
 /** Live readonly API evidence, using the existing CLI identity. Never accepts a local success override. */
