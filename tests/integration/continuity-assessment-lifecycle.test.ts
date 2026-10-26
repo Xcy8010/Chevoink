@@ -919,8 +919,9 @@ describe('body-only explicit-source paid-result recovery', () => {
         assessmentApplicationKey: lifecycle.legacyContinuityAssessmentKey(ctx, frozen), version: 1 }).value } })
       await prisma.agentArtifact.update({ where: { id: secondFrame.id }, data: { metadata: runtimeJson(metadata).value } })
       expect(await replay(), scenario).toBeNull()
-      await prisma.agentArtifact.update({ where: { id: secondFrame.id }, data: { metadata: secondFrame.metadata! } })
-      await prisma.agentArtifact.update({ where: { id: application.id }, data: { metadata: application.metadata! } })
+      // Restore every synthetic mutation, including Prisma's automatic timestamp.
+      await prisma.agentArtifact.update({ where: { id: secondFrame.id }, data: { metadata: secondFrame.metadata!, updatedAt: secondFrame.updatedAt } })
+      await prisma.agentArtifact.update({ where: { id: application.id }, data: { metadata: application.metadata!, updatedAt: application.updatedAt } })
       await prisma.aiUsageLog.update({ where: { id: second.id }, data: { usageSource: second.usageSource, billingStatus: second.billingStatus } })
     }
     expect(await replay()).toEqual(recovered)
