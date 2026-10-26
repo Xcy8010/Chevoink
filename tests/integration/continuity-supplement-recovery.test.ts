@@ -342,7 +342,8 @@ describe.runIf(available)('original persistent supplemental phase: real question
     const retainedFindings = before!.requiredDecisions!.map(item => ({ ...item,
       reason: 'Retain this independent opinion for author review without claiming repair or factual clearance.' }))
     const first = await chapterBridgeCommitTool.execute({ ...s.ctx, callId: 'carrier-decisions-and-commit' },
-      { compilationId: s.compilation.id, retainedFindings, ...(decisionOnly ? { decisionOnly: true as const } : {}) })
+      { compilationId: s.compilation.id, retainedFindings, lastUnfinishedAction: 'A legacy summary must not replace the reviewed action.',
+        ...(decisionOnly ? { decisionOnly: true as const } : {}) })
     expect(first.outcome, first.output).not.toBe('failed')
     if (decisionOnly) {
       expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: s.compilation.id } })).committedAt).toBeNull()
@@ -360,6 +361,54 @@ describe.runIf(available)('original persistent supplemental phase: real question
     expect(repeated.outcome, repeated.output).not.toBe('failed')
     expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })).toEqual(saved)
     expect(await prisma.agentArtifact.findMany({ where: { id: { in: raw.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(raw)
+    expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(fees)
+    expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(ledger)
+    expect(network).toHaveBeenCalledOnce(); expect(s.main).not.toHaveBeenCalled()
+  }, undefined, prompt, { ...options, reviewProtocol: 1 }), 30000)
+
+  it('commits the whole reviewed candidate without opinions while rejecting explicit state changes', () => fixture(async f => {
+    const s = await originalFailure(f, false, true, false, prompt, 'knowledge')
+    await s.approve()
+    const wire = wireFor(s.question, 'complete')
+    Object.assign(wire.proposalDispositions![0], { outcome: 'unknown', reasonCode: 'insufficient_evidence',
+      explanation: 'The earlier draft “A reply remains pending.” stays unestablished.', manuscriptEvidence: [] })
+    const network = vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(wire) }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 12, completion_tokens: 8 } })))
+    vi.stubGlobal('fetch', network)
+    const strict = vi.spyOn(projections, 'normalizeContinuityV4Projection').mockImplementation(first => first)
+    try { expect(await s.invoke('normal-original-paid-report')).toMatchObject({ failureCode: 'CONTINUITY_REPORT_INCOMPLETE' }) }
+    finally { strict.mockRestore() }
+    expect(await s.invoke('normal-free-report-application', false)).toMatchObject({ reviewCompleted: true, part: { status: 'success' } })
+    const review = await readChapterReviewReadiness(prisma, f, s.compilation.id)
+    expect(review).toMatchObject({ ready: true, decisionPending: false, requiredDecisions: [],
+      terminalReview: { currentResultVerified: true, deliveryEligible: true } })
+    const original = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })
+    const canonical = (original.validation as { terminalCandidate: NonNullable<typeof s.question.frozen.input.terminalCandidate> }).terminalCandidate
+    for (const input of [{ exitState: {} }, { terminalState: { ...canonical, lastUnfinishedAction: 'An unreviewed explicit state change.' } }]) {
+      const args = chapterBridgeCommitTool.parameters.parse({ compilationId: s.compilation.id, ...input })
+      expect(await chapterBridgeCommitTool.execute({ ...s.ctx, callId: 'explicit-state-change-rejected' }, args))
+        .toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' })
+      expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })).toEqual(original)
+      expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: s.compilation.id } })).committedAt).toBeNull()
+    }
+    expect(chapterBridgeCommitTool.parameters.safeParse({ compilationId: s.compilation.id, terminalState: canonical,
+      lastUnfinishedAction: 'A conflicting top-level action.' }).success).toBe(false)
+    const fees = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const args = { compilationId: s.compilation.id, chapterSummary: 'The saved manuscript summary.',
+      lastUnfinishedAction: 'This isolated legacy summary is not a new fact.' }
+    const first = await chapterBridgeCommitTool.execute({ ...s.ctx, callId: 'normal-canonical-commit' }, args)
+    expect(first.outcome, first.output).not.toBe('failed'); expect(first.requiredResult?.targetId).toBe(s.chapter.id)
+    const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })
+    const bridge = await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: s.compilation.id } })
+    expect(saved.status).toBe('completed')
+    expect(bridge).toMatchObject({ committedAt: expect.any(Date), lastUnfinishedAction: canonical.lastUnfinishedAction })
+    expect((saved.preparedContext as { terminalCandidateHash: string }).terminalCandidateHash).toBe(runtimeJson(canonical).hash)
+    expect(saved.validation).toEqual(original.validation)
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: s.chapter.id } })).toEqual(s.chapter)
+    const repeat = await chapterBridgeCommitTool.execute({ ...s.ctx, callId: 'normal-canonical-repeat' }, args)
+    expect(repeat.outcome, repeat.output).not.toBe('failed')
+    expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: s.compilation.id } })).toEqual(bridge)
     expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(fees)
     expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(ledger)
     expect(network).toHaveBeenCalledOnce(); expect(s.main).not.toHaveBeenCalled()
@@ -409,7 +458,7 @@ describe.runIf(available)('original persistent supplemental phase: real question
     expect(network).toHaveBeenCalledOnce(); expect(s.main).not.toHaveBeenCalled()
   }, undefined, '修改第一章', options), 30000)
 
-  it.each(['approve-in-loop', 'paused-accepted-new-owner', 'known-normalized-decision', 'applied-normalized-current-decisions', 'applied-normalized-current-decisions-direct'] as const)(
+  it.each(['approve-in-loop', 'paused-accepted-new-owner', 'known-normalized-decision', 'applied-normalized-current-decisions', 'applied-normalized-current-decisions-direct', 'applied-normalized-current-decisions-legacy-metadata'] as const)(
     '%s advances the existing phase before stagnation without counting approval as content', scenario => fixture(async f => {
       vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
       vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue({ chapterCount: 0, jobCount: 0, entityCount: 0, relationCount: 0, reused: false })
@@ -460,7 +509,8 @@ describe.runIf(available)('original persistent supplemental phase: real question
             expect(await loadPersistedEvents(f.runId, pause.seq)).not.toContainEqual(expect.objectContaining({ type: 'run.paused' }))
           }
           return { content: '', reasoning: '', finishReason: 'tool_calls', toolCalls: [{ id: 'ordinary-current-report-decision', name: 'chapter_bridge_commit',
-            arguments: JSON.stringify({ compilationId: s.compilation.id, ...(appliedScenario && scenario !== 'applied-normalized-current-decisions-direct' ? { decisionOnly: true } : {}), retainedFindings: current!.requiredDecisions!.map(item => ({ ...item,
+            arguments: JSON.stringify({ compilationId: s.compilation.id, ...(scenario === 'applied-normalized-current-decisions-legacy-metadata'
+              ? { lastUnfinishedAction: 'A model summary is not a new reviewed fact.', chapterSummary: 'Saved manuscript summary.' } : {}), ...(scenario === 'applied-normalized-current-decisions' ? { decisionOnly: true } : {}), retainedFindings: current!.requiredDecisions!.map(item => ({ ...item,
               reason: 'Keep this independent opinion and the original wording explicitly pending for the author; no repair or factual clearance is claimed.' })) }) }],
           usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } }
         })
@@ -563,6 +613,8 @@ describe.runIf(available)('original persistent supplemental phase: real question
           continuityCriticResponse: { continuityV4: { projectionNormalization: { version: 1 } } } })
         const decisions = (compiled.validation as { retainedReviewDecision: { findings: Array<{ source: string; findingId: string }> } }).retainedReviewDecision.findings
         expect(decisions).toHaveLength(appliedScenario ? 15 : 1)
+        expect((compiled.preparedContext as { terminalCandidateHash: string }).terminalCandidateHash).toBe(runtimeJson(s.question.frozen.input.terminalCandidate).hash)
+        expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: s.compilation.id } })).lastUnfinishedAction).toBe(s.question.frozen.input.terminalCandidate!.lastUnfinishedAction)
         expect(decisions).toEqual(expect.arrayContaining([{ source: 'continuity', reportId: expect.any(String), findingId: '0', reason: expect.any(String) }]))
       }
     }, undefined, prompt, scenario.startsWith('applied-normalized-current-decisions') ? { ...options, reviewProtocol: 1 } : options), 30000)

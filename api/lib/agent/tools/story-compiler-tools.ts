@@ -1427,13 +1427,18 @@ export const chapterBridgeCommitTool = defineTool({
     const deliveryBinding = await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(db, { ...ctx, compilationId: compilation.id },
       { taskId: terminalProposalTaskId(commitRequest.spec, commitRequest.taskId), preparedContext: compilation.preparedContext }, compilation.chapter, compilation.validation, commitEvidence)
     const reviewedTerminal = currentTerminalReview(compilation.validation, compilation.chapter.content, commitEvidence, deliveryBinding)
-    const lastExit = storyStateSchema.parse(args.exitState ?? args.terminalState?.exitState ?? reviewedTerminal?.candidate.exitState ?? {})
+    // COMMIT consumes the checked candidate atomically. Unpaired legacy
+    // summaries cannot replace a fact; explicit state still must match below.
+    const committedCandidate = args.exitState === undefined && args.terminalState === undefined && reviewedTerminal
+      ? reviewedTerminal.candidate
+      : { exitState: storyStateSchema.parse(args.exitState ?? args.terminalState?.exitState ?? reviewedTerminal?.candidate.exitState ?? {}),
+        lastUnfinishedAction: args.lastUnfinishedAction ?? args.terminalState?.lastUnfinishedAction ?? reviewedTerminal?.candidate.lastUnfinishedAction ?? '' }
     const paragraphs = compilation.chapter.content.split(/\n\s*\n/u).map(text => text.trim()).filter(Boolean)
     const terminal = {
       compilationId: compilation.id,
       chapterSummary: args.chapterSummary?.trim() || `正文摘录：${compilation.chapter.content.slice(0, 1995)}`,
-      exitState: lastExit,
-      lastUnfinishedAction: args.lastUnfinishedAction ?? args.terminalState?.lastUnfinishedAction ?? reviewedTerminal?.candidate.lastUnfinishedAction ?? '',
+      exitState: committedCandidate.exitState,
+      lastUnfinishedAction: committedCandidate.lastUnfinishedAction,
       hookDecision: args.hookDecision ?? '',
       delayedHookReason: args.delayedHookReason ?? '',
       openingStructure: args.openingStructure?.trim() || `开篇摘录：${(paragraphs[0] ?? compilation.chapter.content).slice(0, 295)}`,
