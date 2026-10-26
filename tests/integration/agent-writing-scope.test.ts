@@ -463,6 +463,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     const f = await finalizationFixture(ctx, 1, '写第一章', 1, mode === 'durable')
     const args = { compilationId: f.compilation.id, decisionOnly: true as const, retainedFindings: f.retainedFindings }
     const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const memoryBefore = await prisma.projectMemoryEntry.findMany({ where: { novelId: ctx.novelId }, orderBy: { id: 'asc' } })
     if (f.lease) {
       await initializeExecutionState(f.lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
         model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
@@ -513,14 +514,14 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: f.compilation.id } })).committedAt).toBeNull()
     expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).toMatchObject({ status: 'active', validation: { retainedReviewDecision: { findings: f.retainedFindings } } })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
-    expect(await prisma.projectMemoryEntry.count({ where: { novelId: ctx.novelId } })).toBe(0)
+    expect(await prisma.projectMemoryEntry.findMany({ where: { novelId: ctx.novelId }, orderBy: { id: 'asc' } })).toEqual(memoryBefore)
     expect((await call({ compilationId: f.compilation.id })).outcome).not.toBe('failed')
     const bridge = await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: f.compilation.id } })
     expect(bridge).toMatchObject({ targetRevision: before.revision, committedAt: expect.any(Date) })
-    const memories = await prisma.projectMemoryEntry.count({ where: { novelId: ctx.novelId } })
+    const memories = await prisma.projectMemoryEntry.findMany({ where: { novelId: ctx.novelId }, orderBy: { id: 'asc' } })
     expect((await call({ compilationId: f.compilation.id })).outcome).not.toBe('failed')
     expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: f.compilation.id } })).toEqual(bridge)
-    expect(await prisma.projectMemoryEntry.count({ where: { novelId: ctx.novelId } })).toBe(memories)
+    expect(await prisma.projectMemoryEntry.findMany({ where: { novelId: ctx.novelId }, orderBy: { id: 'asc' } })).toEqual(memories)
     expect(await prisma.aiUsageLog.count({ where: { novelId: ctx.novelId } })).toBe(0)
   }), 30_000)
   it.each(['legacy', 'durable'] as const)('retains all 42 fresh strict references through real decision-only batches via %s without terminal effects or repeated progress', mode => fixture('写第一章', async ctx => {
