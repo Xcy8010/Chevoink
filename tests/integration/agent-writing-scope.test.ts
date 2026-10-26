@@ -492,13 +492,18 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
       }))
       restore = () => slow.mockRestore()
     } else {
-      const original = prisma.$transaction.bind(prisma)
+      const previous = prisma.$transaction, original = previous.bind(prisma)
+      let delayedOnce = false
       const delayed = async (work: unknown, options?: { maxWait?: number; timeout?: number; isolationLevel?: Prisma.TransactionIsolationLevel }) => {
         if (typeof work !== 'function') throw new Error('Expected the real commit callback')
-        return original(async tx => { await tx.$queryRaw`SELECT 1 AS done FROM pg_sleep(5.1)`; return work(tx) }, options)
+        const wait = !delayedOnce
+        delayedOnce = true
+        return original(async tx => { if (wait) await tx.$queryRaw`SELECT 1 AS done FROM pg_sleep(5.1)`; return work(tx) }, options)
       }
-      const slow = vi.spyOn(prisma, '$transaction').mockImplementationOnce(delayed as typeof prisma.$transaction)
-      restore = () => slow.mockRestore()
+      // The Prisma goal proxy exposes a computed method; spy restoration cannot
+      // restore its descriptor. Restore the captured public method explicitly.
+      prisma.$transaction = delayed as typeof prisma.$transaction
+      restore = () => { prisma.$transaction = previous; expect(prisma.$transaction).toBe(previous) }
     }
     let decided: ToolResult
     try { decided = await call(args) } finally { restore() }
