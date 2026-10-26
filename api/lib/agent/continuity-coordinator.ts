@@ -228,7 +228,7 @@ export async function authenticateInitialContinuityHistory(db: Prisma.Transactio
     || object(validation.coverage).contentHash !== runtimeJson({ content: input.bodies.current }).hash
     || !inputs.some(row => row.input.revision === input.revision && row.input.bodies.current === input.bodies.current
       && row.input.bodies.previous === input.bodies.previous && row.audit.contentHash === audit.contentHash
-      && runtimeJson(row.input.bodies.terminalEvidence?.previous ?? null).hash === runtimeJson(input.bodies.terminalEvidence?.previous ?? null).hash))
+      && runtimeJson({ previous: row.input.bodies.terminalEvidence?.previous ?? null }).hash === runtimeJson({ previous: input.bodies.terminalEvidence?.previous ?? null }).hash))
     throw blocked('原完整正文检查不属于当前版本或来源。')
   return true
 }

@@ -326,6 +326,9 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     const content = String(system.content)
     // 固定规则仍在 system
     expect(content).toContain('信道纪律')
+    expect(content).toContain('思考信道和 Agent 回复区都不叙述工具选择')
+    expect(content).not.toContain('工具选择、状态盘点、执行叙述，全部只进思考信道')
+    expect(content).not.toContain('提及工具或系统一律用中文功能名')
     expect(content).toContain('决策策略')
     expect(content).toContain('技能操作：作者明确要求')
     expect(content).toContain('历史工具记录')

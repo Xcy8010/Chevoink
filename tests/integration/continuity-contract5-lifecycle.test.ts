@@ -142,9 +142,8 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       if (scenario === 'body-only-unknown') {
         await prisma.aiUsageLog.update({ where: { id: bodyFees[0].id }, data: { billingStatus: 'pending_settlement' } })
         const before = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
-        const refused = await continuityValidateTool.execute(ctx, { compilationId: compilation.id, terminalState: candidate })
-        expect(refused).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED',
-          reviewRequestFinished: { version: 1, usageIds: [] } })
+        await expect(continuityValidateTool.execute(ctx, { compilationId: compilation.id, terminalState: candidate }))
+          .rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
         expect(fetchMock).toHaveBeenCalledOnce()
         expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(before)
         expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toMatchObject({ committedAt: null })

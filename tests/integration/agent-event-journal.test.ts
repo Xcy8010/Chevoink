@@ -126,8 +126,9 @@ describe.skipIf(!dbAvailable)('R01 real PostgreSQL journal commit and resume', (
       for (const options of [{}, { runLimit: 20 }]) {
         const history = await listLoopSessionMessages(userId, sessionId, options)
         expect(history.messages.filter(message => message.id === messageId)).toEqual([
-          expect.objectContaining({ role: 'assistant', parts: [{ type: 'text', text: reason }] }),
+          expect.objectContaining({ role: 'assistant', parts: [], completedAt: null }),
         ])
+        expect(await prisma.agentMessage.findUniqueOrThrow({ where: { id: messageId } })).toMatchObject({ parts: [{ type: 'text', text: reason }] })
       }
       if (scenario === 'lost-acknowledgement') expect(listener).not.toHaveBeenCalled()
     }

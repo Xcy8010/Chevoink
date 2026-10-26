@@ -88,7 +88,10 @@ describe.runIf(available)('native body report and first terminal review share th
     await step()
     if (scenario === 'unknown-history') {
       await prisma.agentProviderUsageReceipt.update({ where: { attemptId: bodyAttempts[0].id }, data: { settlementStatus: 'pending' } })
-      await expect(step()).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+      const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+      expect(await step()).toMatchObject({ kind: 'tool', result: { outcome: 'failed', failureCode: 'RUNTIME_RECONCILIATION_REQUIRED' } })
+      expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(ledger)
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
       expect(fetcher).toHaveBeenCalledOnce()
       expect(await prisma.agentProviderUsageReceipt.findUniqueOrThrow({ where: { attemptId: bodyAttempts[0].id } })).toMatchObject({ settlementStatus: 'pending' })
       expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toMatchObject({ committedAt: null })

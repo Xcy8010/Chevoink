@@ -183,9 +183,13 @@ describe.runIf(available)('authenticated native review hands a rejected current-
         expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).toEqual(finished)
       } else {
         const events = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { gt: pauseSeq } }, orderBy: { seq: 'asc' } })
-        expect(events.filter(event => event.type === 'error')).toEqual([])
-        expect(events.filter(event => event.type === 'text.final').map(event => (event.payload as { text: string }).text).join('\n'))
+        const notices = events.filter(event => event.type === 'error')
+        expect(notices).toHaveLength(1)
+        const stopped = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
+        expect(notices[0].payload).toMatchObject({ code: 'run_paused', recoverable: true, message: stopped.errorMessage })
+        expect((notices[0].payload as { message: string }).message)
           .toContain(scenario === 'recover-missing-commit' ? '缺少章节终态提交能力' : '已有执行记录但尚未确认完成')
+        expect(events.filter(event => event.type === 'text.final')).toEqual([])
       }
       const calls = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'tool.call', seq: { gt: pauseSeq } } })
       expect(calls.map(event => (event.payload as { toolName: string }).toolName)).toEqual(succeeded ? ['chapter_bridge_commit'] : [])
@@ -199,12 +203,12 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     for (let continuation = 0; continuation < 3; continuation++) {
       const events = await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })
       const currentEvents = events.filter(event => event.seq > afterSeq)
-      expect(currentEvents.filter(event => event.type === 'error').map(event => event.payload)).toEqual([])
-      const replies = currentEvents.filter(event => event.type === 'text.final')
-      expect(replies).toHaveLength(1)
-      const { messageId, text } = replies[0].payload as { messageId: string; text: string }
-      const reply = await prisma.agentMessage.findUniqueOrThrow({ where: { id: messageId } })
-      expect(reply).toMatchObject({ runId: f.runId, role: 'assistant', parts: [{ type: 'text', text }] })
+      const notices = currentEvents.filter(event => event.type === 'error')
+      expect(notices).toHaveLength(1)
+      const stopped = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
+      expect(notices[0].payload).toMatchObject({ code: 'run_paused', recoverable: true, message: stopped.errorMessage })
+      expect(currentEvents.filter(event => event.type === 'text.final')).toEqual([])
+      const { message: text } = notices[0].payload as { message: string }
       expect(text).toContain(`第${chapter.orderIndex}章（版本${chapter.revision}）：`)
       expect(text).toContain('当前终态复核结果已收到，仍有1项未获证实')
       expect(text).toContain(proposal.claim)
