@@ -20,7 +20,7 @@ import { readLimitedWritingDelivery, limitedReviewDependency, verifyRunLimitedWr
  * Same-book legacy tasks never enter this root's completion obligations. */
 export async function collectDurableCompletionEvidence(token: RunLeaseToken, cursor: { expectedRevision: number; expectedHash: string }) {
   const lease = { ...token }, expected = { ...cursor }
-  return withManuscriptRunLease(lease, tx => collectCompletionEvidenceInTransaction(tx, lease, expected))
+  return withManuscriptRunLease(lease, tx => collectCompletionEvidenceInTransaction(tx, lease, expected), { timeoutMs: 20_000 })
 }
 
 /** Caller owns the current lease transaction; unresolved operations are never

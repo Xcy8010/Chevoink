@@ -184,7 +184,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
         const semanticSubjectHash = (await import('../continuity-subject-identity.js')).continuitySubjectIdentity(frozen)
         if (!semanticSubjectHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '原检查完整语义范围不能重建。')
         typedLineage = await prisma.$transaction(tx => coordinator.prepareContinuityReviewLineage(tx, ctx, { compilationId: frozen.targetId,
-          chapterId: input.chapterId, semanticSubjectHash, modelPriceHash: coordinator.continuityModelPriceHash(runtime, price) }))
+          chapterId: input.chapterId, input: frozen, semanticSubjectHash, modelPriceHash: coordinator.continuityModelPriceHash(runtime, price) }))
       }
       const manifest = buildContinuityReviewManifest({ subject: { userId: ctx.userId, novelId: ctx.novelId, taskId: original.taskId,
         targetType: 'story_compilation', targetId: frozen.targetId, chapterId: input.chapterId, revision: input.revision },
@@ -1275,9 +1275,14 @@ export const continuityValidateTool = defineTool({
     } catch (error) {
       // The reservation transaction rolled back. Preserve the tool's existing
       // local missing-compilation result without swallowing unknown failures.
-      if (!(error instanceof DataAccessError) || error.code !== 'COMPILATION_NOT_FOUND') throw error
+      if (!(error instanceof DataAccessError)) throw error
+      const beforeReservation = error.code === 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' && !await hasLegacyTerminalCallEvidence(prisma, ctx)
+      if (error.code !== 'COMPILATION_NOT_FOUND' && !beforeReservation) throw error
       return { outcome: 'failed' as const, failureCode: error.code, summary: '本任务连续性检查未执行',
-        output: `当前编译已不存在或不可继续检查，未调用模型；当前 r${chapter.revision} 未获得新复核。请读取本任务章节桥核对真实状态，不使用旧报告宣称新版通过。`,
+        output: beforeReservation ? error.message
+          : `当前编译已不存在或不可继续检查，未调用模型；当前 r${chapter.revision} 未获得新复核。请读取本任务章节桥核对真实状态，不使用旧报告宣称新版通过。`,
+        ...(beforeReservation ? { reviewRequestFinished: { version: 1 as const, chapterId: chapter.id, revision: chapter.revision,
+          contentHash: createHash('sha256').update(chapter.content).digest('hex'), usageIds: [] } } : {}),
         display: { kind: 'storyCompiler' as const, compilationId: compilation.id, phase: 'check' as const,
           title: '连续性检查', detail: `编译状态需核对 · 当前 r${chapter.revision} 未复核`, items: [] } }
     }

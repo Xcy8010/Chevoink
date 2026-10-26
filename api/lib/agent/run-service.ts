@@ -52,7 +52,7 @@ import { assertAgentManuscriptCurrent, assertAgentManuscriptRevisionCurrent } fr
 import { recoverRunElapsedMs } from './checkpoint.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { assertCreditAccess, getModelTierRuntime } from '../credits.js'
-import { getRunEventBus, loadPersistedEvents, prepareRunEventResume } from './events.js'
+import { getRunEventBus, loadPersistedEvents, prepareRunEventResume, loadServerRunNotices, publicRunEvent } from './events.js'
 import {
   countActiveRunsByUser,
   getActiveRun,
@@ -675,6 +675,7 @@ export async function streamLoopRun(
 
   if ((run.runtimeProtocolVersion ?? 0) !== 0) return streamDurableRun(userId, runId, sinceSeq, res)
 
+  const serverNotices = await loadServerRunNotices(userId, [runId])
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache, no-transform',
@@ -683,11 +684,12 @@ export async function streamLoopRun(
   })
 
   const writeEvent = (event: AgentStreamEvent, onFlushed?: () => void) => {
-    res.write(`id: ${event.seq}\n`)
-    res.write(`event: ${event.type}\n`)
+    const visible = publicRunEvent(event, serverNotices)
+    res.write(`id: ${visible.seq}\n`)
+    res.write(`event: ${visible.type}\n`)
     // 保持三段 SSE 帧写入格式：现有响应适配器以 data 段为事件边界；终态只在
     // 最后一段写入确认后关闭，避免与浏览器/代理的关闭竞态。
-    res.write(`data: ${JSON.stringify(event)}\n\n`, onFlushed)
+    res.write(`data: ${JSON.stringify(visible)}\n\n`, onFlushed)
     ;(res as Response & { flush?: () => void }).flush?.()
   }
 

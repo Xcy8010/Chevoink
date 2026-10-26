@@ -337,6 +337,8 @@ export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionCl
     const plan = input.continuityManifest?.typedLineage?.phasePlan
     if (!plan) throw new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED', '新响应合同缺少原任务完整阶段范围。')
     const phase = await assertContinuityAssessmentSubject(tx, ctx, input)
+    if (phase === 'initial_review') await (await import('./continuity-coordinator.js')).authenticateInitialContinuityHistory(tx, ctx,
+      { compilationId: input.targetId, chapterId: input.chapterId, input })
     await claimContinuityPhase(tx, ctx, { plan, chapterId: input.chapterId, phase, operationRef: key,
       inputHash: runtimeJson(input).hash, ownerEpoch: `${ctx.runId}:${run.startedAt?.toISOString() ?? ''}` })
   }

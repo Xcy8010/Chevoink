@@ -103,7 +103,10 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
     // terminalPatch was introduced with reserve-before-send journaling. A
     // closed local stale refusal on that producer can prove zero dispatch,
     // unlike an arbitrary legacy stale/provider error or an absent usage row.
-    let localPatchRefusal = false
+    let localPatchRefusal = !typed && proof.version === 1 && proof.chapterId === chapter.id && proof.revision === chapter.revision
+      && proof.contentHash === contentHash && Array.isArray(proof.usageIds) && proof.usageIds.length === 0
+      && item.toolName === 'continuity_validate' && !source.taskRootId && source.runtimeProtocolVersion === 0
+      && !await hasLegacyTerminalCallEvidence(tx, { runId: call.runId, callId: item.callId })
     const patch = terminalCandidatePatchSchema.safeParse(args.terminalPatch)
     if (!typed && item.toolName === 'continuity_validate' && ['CONTINUITY_INPUT_STALE', 'TERMINAL_STATE_REVIEW_REQUIRED'].includes(String(payload.failureCode))
       && !source.taskRootId && source.runtimeProtocolVersion === 0 && item.compilationId && patch.success
@@ -149,6 +152,33 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
           localPatchRefusal = !!prepareCompilerTerminalProposals({ spec: original.spec, preparedContext: compiler.preparedContext,
             validation, chapter, source: previous, candidate: proposed, nextContext })?.changes
         } catch { /* An unauthenticated or changed report is still unresolved. */ }
+      }
+    }
+    // Typed review producers reserve before any provider send. This old local
+    // refusal preceded that reservation; authenticate the complete body-only
+    // lifecycle and its unchanged input, rather than treating it as unknown.
+    if (!typed && !localPatchRefusal && item.toolName === 'continuity_validate'
+      && payload.failureCode === 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' && !source.taskRootId && source.runtimeProtocolVersion === 0
+      && item.compilationId && explicit.success && chapter.revision === item.revision && chapter.updatedAt <= call.createdAt
+      && !await hasLegacyTerminalCallEvidence(tx, { runId: call.runId, callId: item.callId })) {
+      const compiler = await tx.storyCompilation.findFirst({ where: { id: item.compilationId, userId: subject.userId,
+        novelId: subject.novelId, runId: { in: ids }, chapterId: chapter.id }, select: { validation: true } })
+      const validation = object(compiler?.validation), audit = object(validation.continuityCriticResponse)
+      if (audit.parserVersion === 8 && validation.independentCheck === 'complete'
+        && typeof validation.checkedAt === 'string' && Date.parse(validation.checkedAt) <= call.createdAt.getTime()
+        && !readTerminalCandidate(validation)) {
+        try {
+          const initial = await import('./continuity-coordinator.js')
+          const reservations = await tx.agentArtifact.findMany({ where: { runId: { in: ids }, artifactType: 'continuityReview',
+            metadata: { path: ['assessmentChapterId'], equals: chapter.id } }, take: 1001 })
+          const inputs = reservations.map(row => object(object(row.metadata).input))
+          const current = inputs.find(input => input.revision === chapter.revision && object(input.bodies).current === chapter.content)
+          if (current) localPatchRefusal = await initial.authenticateInitialContinuityHistory(tx, subject, {
+            compilationId: item.compilationId, chapterId: chapter.id, input: {
+              revision: chapter.revision, bodies: current.bodies as import('./assessment-response-lifecycle.js').LegacyAssessmentInput['bodies'],
+              terminalCandidate: explicit.data.terminalState,
+            } })
+        } catch { /* Missing/unknown/terminal-bearing histories stay unresolved. */ }
       }
     }
     if (payload.reviewRequestFinished !== undefined && !typed && !(localPatchRefusal && proof.version === 1

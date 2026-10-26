@@ -88,7 +88,7 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     await assertChildParentFence(tx, run.id, lease.parent)
     await tx.agentChildExecutionGrant.updateMany({ where: { childRunId: run.id }, data: { status: 'completed' } })
     return { kind: 'completed' as const, frame: next }
-  }, { contentionScope, contentionBackoff: Boolean(lease.parent), deadline: contentionScope?.deadline })
+  }, { contentionScope, contentionBackoff: Boolean(lease.parent), deadline: contentionScope?.deadline, timeoutMs: 20_000 })
 }
 
 /** Close the read/abort/admission race: queued legacy runs cannot migrate after a stop. */

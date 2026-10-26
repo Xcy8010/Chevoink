@@ -305,6 +305,11 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
           terminalCandidate: work.terminalCandidate, sourceScope: work.sourceScope, continuityManifest: frozen.work.continuityManifest,
           system: frozen.work.criticSystem, content: frozen.work.criticInput } as import('./assessment-response-lifecycle.js').LegacyAssessmentInput
         const phase = await coordinator.assertContinuityAssessmentSubject(tx, { userId: lease.userId, novelId: frozen.novelId, runId: lease.runId }, input)
+        const existingInitial = captured.step === 'continuity_critic' && phase === 'initial_review'
+          && await coordinator.readContinuityPhaseClaim(tx, { userId: lease.userId, novelId: frozen.novelId, runId: lease.runId },
+            { plan, chapterId: input.chapterId, phase: 'initial_review', operationRef: parent.id, inputHash: parent.inputHash })
+        if (captured.step === 'continuity_critic' && phase === 'initial_review' && !existingInitial) await coordinator.authenticateInitialContinuityHistory(tx,
+          { userId: lease.userId, novelId: frozen.novelId, runId: lease.runId }, { compilationId: input.targetId, chapterId: input.chapterId, input })
         await claimContinuityPhase(tx, { userId: lease.userId, novelId: frozen.novelId, runId: lease.runId, continuityNativeLease: lease }, {
           plan, chapterId: frozen.work.chapter.id, phase: captured.step === 'continuity_critic' ? phase : 'sparse_repair',
           operationRef: parent.id, inputHash: captured.step === 'continuity_critic' ? parent.inputHash : runtimeJson(request.body.messages).hash,

@@ -453,7 +453,8 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
       parserVersion: 9, reassessmentProtocol: 6, continuityManifest: frozen.continuityManifest, sourceScope: frozen.sourceScope,
       system: frozen.criticSystem, content: frozen.criticInput, targetType: 'story_compilation', targetId: frozen.compiler!.id }, `prepared:${input.operationKey}`))
     const typedLineage = typed ? await withRunLease(lease, tx => coordinator.prepareContinuityReviewLineage(tx, ctx, { compilationId: frozen.compiler!.id,
-      chapterId: frozen.chapter.id, semanticSubjectHash, modelPriceHash: runtimeJson({ route: frozen.route, price: frozen.price }).hash })) : undefined
+      chapterId: frozen.chapter.id, input: { revision: frozen.chapter.revision, bodies: frozen.sourceBodies!, terminalCandidate: frozen.terminalCandidate },
+      semanticSubjectHash, modelPriceHash: runtimeJson({ route: frozen.route, price: frozen.price }).hash })) : undefined
     const manifest = typedLineage ? buildContinuityReviewManifest({ ...work.continuityManifest, bodies: work.sourceBodies, candidate: work.terminalCandidate,
       typedLineage }) : work.continuityManifest
     const request = continuityReviewV4Request({ manifest, bodies: work.sourceBodies, candidate: work.terminalCandidate, sourceScope: work.sourceScope },

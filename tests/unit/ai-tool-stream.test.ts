@@ -234,8 +234,42 @@ describe('lossless tool argument transport', () => {
     expect(JSON.stringify(body.messages)).toContain(call.id)
     expect(JSON.stringify(body.messages)).toContain('0错误0警告')
     expect(JSON.stringify(body.messages)).toContain('尚未提交')
+    expect(JSON.stringify(body.messages)).not.toContain('orphan_result')
+    expect(JSON.stringify(body.messages)).not.toContain('无法唯一配对')
     expect(JSON.stringify(body.messages)).not.toContain('"arguments"')
     expect(messages).toEqual(original)
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+  it.each(['duplicate-marker', 'duplicate-receipt'] as const)('isolates %s instead of certifying an ambiguous scheduled receipt', async scenario => {
+    const call = { id: 'ambiguous-scheduled', name: 'continuity_validate', arguments: '{}' }
+    const [marker] = toolTurnHistory({ content: '', reasoning: '', toolCalls: [call] }, [call], { bootstrap: true })
+    if (marker.role !== 'user' || typeof marker.content !== 'string') throw Error('Expected readonly scheduled history')
+    if (scenario === 'duplicate-marker') {
+      const rows = JSON.parse(marker.content.slice(marker.content.indexOf('\n') + 1))
+      marker.content = marker.content.slice(0, marker.content.indexOf('\n') + 1) + JSON.stringify([...rows, ...rows])
+    }
+    const receipt: ChatMessage = { role: 'tool', toolCallId: call.id, content: 'Actual receipt, not a second execution' }
+    const messages: ChatMessage[] = [marker, receipt, ...(scenario === 'duplicate-receipt' ? [receipt] : [])]
+    stream(`data: ${JSON.stringify(ending('stop'))}\n\n`)
+    await chatWithTools({ messages, tools: [], provider: 'deepseek', model: 'deepseek-flash', reasoningEffort: 'high',
+      providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
+    const sent = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]!.body)).messages
+    expect(JSON.stringify(sent)).toContain('orphan_result')
+    expect(sent.every((message: Record<string, unknown>) => message.role !== 'tool' && !message.tool_calls)).toBe(true)
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+  it('keeps a genuine native call paired when a scheduled marker collides with its ID', async () => {
+    const call = { id: 'collision', name: 'chapter_read', arguments: '{}' }
+    const messages: ChatMessage[] = [...toolTurnHistory({ content: '', reasoning: '', toolCalls: [call] }, [call], { bootstrap: true }),
+      { role: 'assistant', content: null, reasoning: 'Actual provider reasoning', toolCalls: [call] },
+      { role: 'tool', toolCallId: call.id, content: 'Actual native read receipt' }]
+    stream(`data: ${JSON.stringify(ending('stop'))}\n\n`)
+    await chatWithTools({ messages, tools: [], provider: 'deepseek', model: 'deepseek-flash', reasoningEffort: 'high',
+      providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
+    const sent = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]!.body)).messages
+    expect(sent.filter((message: Record<string, unknown>) => message.role === 'tool')).toEqual([
+      { role: 'tool', tool_call_id: call.id, content: 'Actual native read receipt' }])
+    expect(JSON.stringify(sent)).not.toContain('orphan_result')
     expect(fetch).toHaveBeenCalledOnce()
   })
   it.each(['high', 'none'] as const)('keeps original and empty reasoning through mixed native/server history in %s mode', async reasoningEffort => {
@@ -262,6 +296,7 @@ describe('lossless tool argument transport', () => {
     expect(body.messages.filter((message: Record<string, unknown>) => message.role === 'tool')).toEqual([
       { role: 'tool', tool_call_id: native.id, content: '读取成功' }])
     expect(JSON.stringify(body.messages)).toContain('服务端检查成功，正文未修改')
+    expect(JSON.stringify(body.messages)).not.toContain('orphan_result')
     expect(body.thinking.type).toBe(reasoningEffort === 'none' ? 'disabled' : 'enabled')
     expect(fetch).toHaveBeenCalledOnce()
   })

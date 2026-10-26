@@ -17,14 +17,16 @@ import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quali
 import { effectiveContinuityAudit, reconstructContinuitySourceProvenance, prepareContinuityMergedRevision } from '../../api/lib/agent/continuity-coordinator.js'
 import { chapterEditRangeTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { handleToolCall } from '../../api/lib/agent/loop.js'
+import { readReviewRequestRecoveryEvidence } from '../../api/lib/agent/review-request-recovery.js'
 import { RunEventBus, loadPersistedEvents } from '../../api/lib/agent/events.js'
 import * as credits from '../../api/lib/credits.js'
 import * as prices from '../../api/lib/billing/resolve-token-price.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 describe.runIf(available)('contract5 actual legacy provider, report CAS and independent bridge gate', () => {
-  it.each(['complete', 'normalized-cross-chunk', 'preserved-canonical', 'typed-sparse-repair', 'unknown', 'applied-typed-error', 'merged-revision', 'cancel-known-raw', 'wrong-owner'] as const)('%s preserves the original phase and V2 price', scenario => fixture(async f => {
-    const completeScenario = scenario === 'complete' || scenario === 'typed-sparse-repair' || scenario === 'normalized-cross-chunk' || scenario === 'preserved-canonical'
+  it.each(['complete', 'normalized-cross-chunk', 'preserved-canonical', 'typed-sparse-repair', 'unknown', 'applied-typed-error', 'merged-revision', 'cancel-known-raw', 'wrong-owner', 'body-only-first-terminal', 'body-only-unknown', 'body-only-old-local-refusal'] as const)('%s preserves the original phase and V2 price', scenario => fixture(async f => {
+    const bodyOnly = scenario.startsWith('body-only-')
+    const completeScenario = bodyOnly || scenario === 'complete' || scenario === 'typed-sparse-repair' || scenario === 'normalized-cross-chunk' || scenario === 'preserved-canonical'
     const factual = scenario === 'applied-typed-error' || scenario === 'merged-revision'
     const baseContent = 'The sealed packet remains with the guard.'
     const content = factual ? 'The packet is sealed. The packet is open.' : scenario === 'normalized-cross-chunk' ? `${'x'.repeat(290)}${baseContent}` : baseContent
@@ -113,7 +115,11 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       if (scenario === 'wrong-owner') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'run.started', payload: { type: 'run.started', seq: 2 } } })
       const revisedWire = { ...wire, findings: [], semanticChecks: wire.semanticChecks.map(row => ({ ...row, result: 'clear', reasonCode: 'consistent', findingIds: [] })),
         issueDispositions: [{ issueIndex: 0, outcome: 'repaired', reasonCode: 'consistent', explanation: 'The current manuscript retains only the sealed state.', manuscriptEvidence: [{ segmentId: 'c0' }] }] }
-      const responseRaw = scenario === 'typed-sparse-repair' && requestCount === 2
+      const responseRaw = bodyOnly && requestCount === 1 ? JSON.stringify({ findings: [],
+        semanticChecks: { action_direction: { result: 'clear', reason: 'Whole saved body checked.', findingIndexes: [] },
+          state_progression: { result: 'clear', reason: 'Whole saved body checked.', findingIndexes: [] } },
+        terminalVerdicts: [], terminalProofVerdicts: [], terminalDispositions: [] })
+        : scenario === 'typed-sparse-repair' && requestCount === 2
         ? JSON.stringify({ corrections: [{ table: 'findings', index: 0, value: { findingId: 'f0', action: 'retract',
           reasonCode: 'insufficient_evidence', explanation: 'The current source does not establish that allegation; the manuscript is unchanged.',
           manuscriptEvidence: [{ segmentId: 'c0' }] } }] })
@@ -122,19 +128,56 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: responseRaw }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`,
         { headers: { 'content-type': 'text/event-stream' } })
     }); vi.stubGlobal('fetch', fetchMock)
+    let bodyFees: Awaited<ReturnType<typeof prisma.aiUsageLog.findMany>> = []
+    let bodyArtifacts: Awaited<ReturnType<typeof prisma.agentArtifact.findMany>> = []
+    if (bodyOnly) {
+      const checked = await continuityValidateTool.execute({ ...ctx, callId: 'automatic-body-check' }, { compilationId: compilation.id })
+      expect(checked).toMatchObject({ reviewCompleted: true })
+      expect(checked).not.toHaveProperty('failureCode')
+      bodyFees = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+      bodyArtifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
+      const bodySaved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
+      expect(bodySaved.validation).toMatchObject({ independentCheck: 'complete', continuityCriticResponse: { parserVersion: 8 } })
+      expect(bodySaved.validation).not.toHaveProperty('terminalCandidate')
+      if (scenario === 'body-only-unknown') {
+        await prisma.aiUsageLog.update({ where: { id: bodyFees[0].id }, data: { billingStatus: 'pending_settlement' } })
+        const before = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+        const refused = await continuityValidateTool.execute(ctx, { compilationId: compilation.id, terminalState: candidate })
+        expect(refused).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED',
+          reviewRequestFinished: { version: 1, usageIds: [] } })
+        expect(fetchMock).toHaveBeenCalledOnce()
+        expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(before)
+        expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toMatchObject({ committedAt: null })
+        return
+      }
+      if (scenario === 'body-only-old-local-refusal') {
+        const at = new Date(), oldCallId = 'old-typed-pre-reservation-refusal'
+        await prisma.agentRunEvent.createMany({ data: [
+          { runId: f.runId, seq: 2, type: 'tool.call', createdAt: at, payload: { callId: oldCallId, toolName: 'continuity_validate',
+            args: { compilationId: compilation.id, terminalState: candidate } } },
+          { runId: f.runId, seq: 3, type: 'tool.result', createdAt: new Date(at.getTime() + 1), payload: { callId: oldCallId,
+            toolName: 'continuity_validate', ok: false, failureCode: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' } },
+        ] })
+        const recovered = await prisma.$transaction(tx => readReviewRequestRecoveryEvidence(tx, f,
+          [{ callId: oldCallId, toolName: 'continuity_validate', chapterId: chapter.id, revision: chapter.revision, compilationId: compilation.id }]))
+        expect(recovered).toMatchObject([{ callId: oldCallId, notDispatched: true, receipt: { usageIds: [] } }])
+        expect(fetchMock).toHaveBeenCalledOnce()
+        expect(await prisma.agentArtifact.findMany({ where: { id: { in: bodyArtifacts.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(bodyArtifacts)
+      }
+    }
     if (scenario === 'cancel-known-raw' || scenario === 'wrong-owner') {
       await expect(continuityValidateTool.execute(ctx, { compilationId: compilation.id, terminalState: candidate })).rejects.toBeInstanceOf(Error)
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
       expect(saved.validation).not.toHaveProperty('effectiveReport')
       expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toMatchObject({ committedAt: null })
     } else {
-      const bus = new RunEventBus(f.runId, 1)
+      const bus = new RunEventBus(f.runId, scenario === 'body-only-old-local-refusal' ? 3 : 1)
       const result = await handleToolCall({ id: ctx.callId, name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilation.id, terminalState: candidate }) },
         [continuityValidateTool], ctx, bus, 'contract5-message', f.runId, undefined, () => bus.persist())
       await bus.close()
       expect(result).toMatchObject({ reviewCompleted: true, reviewOutcome: completeScenario ? 'complete' : 'decision_required', part: { status: 'success' } })
       expect(result).not.toHaveProperty('failureCode')
-      const reportEvents = (await loadPersistedEvents(f.runId, 1)).filter(event => event.type === 'tool.result')
+      const reportEvents = (await loadPersistedEvents(f.runId, 1)).filter(event => event.type === 'tool.result' && event.callId === ctx.callId)
       expect(reportEvents).toMatchObject([{ type: 'tool.result', toolName: 'continuity_validate', ok: true }])
       expect(reportEvents[0]).not.toHaveProperty('reviewOutcome')
       expect(result.part).not.toHaveProperty('reviewOutcome')
@@ -177,8 +220,8 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
           criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
         expect(await chapterBridgeCommitTool.execute({ ...ctx, callId: 'commit-revised' }, { compilationId: compilation.id })).not.toHaveProperty('failureCode')
         expect(fetchMock).toHaveBeenCalledTimes(3)
-        await expect(continuityValidateTool.execute({ ...ctx, callId: 'candidate-only-no-new-grant' }, { compilationId: compilation.id,
-          terminalState: terminalCandidateSchema.parse({ exitState: { objects: ['The guard holds a different packet.'] } }) })).rejects.toBeInstanceOf(Error)
+        expect(await continuityValidateTool.execute({ ...ctx, callId: 'candidate-only-no-new-grant' }, { compilationId: compilation.id,
+          terminalState: terminalCandidateSchema.parse({ exitState: { objects: ['The guard holds a different packet.'] } }) })).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
         expect(fetchMock).toHaveBeenCalledTimes(3)
       } else if (completeScenario) {
         if (scenario === 'normalized-cross-chunk') {
@@ -221,7 +264,18 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       expect(effectiveContinuityAudit(bad)).toBeNull()
       expect(currentTerminalReview(bad, content, audit.terminalEvidence as Parameters<typeof currentTerminalReview>[2], binding)).toBeNull()
     }
-    const requestTotal = scenario === 'merged-revision' ? 3 : scenario === 'typed-sparse-repair' ? 2 : 1
+    if (bodyOnly) {
+      expect(await prisma.aiUsageLog.findMany({ where: { id: { in: bodyFees.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(bodyFees)
+      expect(await prisma.agentArtifact.findMany({ where: { id: { in: bodyArtifacts.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(bodyArtifacts)
+      const repeat = await continuityValidateTool.execute({ ...ctx, callId: 'same-completed-terminal' }, { compilationId: compilation.id, terminalState: candidate })
+      expect(repeat).toMatchObject({ reviewCompleted: true })
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      const replacement = await continuityValidateTool.execute({ ...ctx, callId: 'changed-candidate-no-new-slot' }, { compilationId: compilation.id,
+        terminalState: terminalCandidateSchema.parse({ exitState: { objects: ['An unrelated new candidate.'] } }) })
+      expect(replacement).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    }
+    const requestTotal = bodyOnly ? 2 : scenario === 'merged-revision' ? 3 : scenario === 'typed-sparse-repair' ? 2 : 1
     expect(fetchMock).toHaveBeenCalledTimes(requestTotal)
     const usage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })
     expect(usage).toHaveLength(requestTotal)

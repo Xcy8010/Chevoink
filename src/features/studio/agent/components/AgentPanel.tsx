@@ -1676,8 +1676,8 @@ export function AgentPanel({
                     // 折叠态下过程进展正文一并收进耗时摘要，只留块内最后一条（结尾总结）的正文
                     textCollapsible={textCollapsible}
                   />
-                  {/* 结论操作条：每个对话块结尾均提供复制与创建分支（纯 icon，悬停 title 说明，流式进行中不显示） */}
-                  {isBlockLast && !messageRunActive && getMessageText(message.parts, message.role) ? (
+                  {/* Only confirmed completed replies expose copy and branch actions. */}
+                  {isBlockLast && !messageRunActive && message.completedAt && getMessageText(message.parts, message.role) ? (
                     <div className="mt-1 flex items-center justify-start gap-0.5">
                       <button
                         type="button"

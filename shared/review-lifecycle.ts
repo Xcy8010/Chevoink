@@ -2,6 +2,16 @@
  * describe evidence; none grants a write, a new budget or semantic progress. */
 export type ReviewOutcome = 'complete' | 'decision_required' | 'evidence_repair_required' | 'provider_unresolved' | 'provider_failed' | 'stale'
 export const REVIEW_OUTCOMES = ['complete', 'decision_required', 'evidence_repair_required', 'provider_unresolved', 'provider_failed', 'stale'] as const
+/** Public tool receipts report execution status; review judgments stay in reports. */
+export function publicReviewExecution<T extends { type: string }>(value: T): T {
+  if (!['tool-call', 'tool.result'].includes(value.type) || !('toolName' in value)
+    || !['quality_analyze', 'continuity_validate', 'chapter_bridge_commit'].includes(String(value.toolName))
+    || !('reviewOutcome' in value)) return value
+  const projected = { ...value }
+  delete (projected as T & { reviewOutcome?: ReviewOutcome }).reviewOutcome
+  return projected
+}
+
 export type ReviewAction = 'reuse' | 'decision' | 'repair' | 'dispatch' | 'pause'
 export type ReviewTransition = {
   ownerCurrent: boolean; cancelled: boolean; contextCurrent: boolean;

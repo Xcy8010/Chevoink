@@ -82,6 +82,17 @@ it('uses terminal event time only for the completed run, keeping creation time u
   expect(messages[2].completedAt).toBeUndefined()
 })
 
+it.each(['failed', 'cancelled'] as const)('does not mark an unfinished %s reply as completed', status => {
+  useAgentStore.setState({ runId: 'unfinished', lastSeq: 0, messages: [{
+    id: 'reply', runId: 'unfinished', role: 'assistant', parts: [{ type: 'text', text: 'Saved novel passage' }],
+    createdAt: '2026-10-26T10:00:00Z', completedAt: null,
+  }] })
+  useAgentStore.getState().applyEvent({ type: 'run.finished', runId: 'unfinished', seq: 1, ts: '2026-10-26T10:01:00Z',
+    status, usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, artifacts: [] })
+  expect(useAgentStore.getState().messages[0].completedAt).toBeNull()
+  expect(useAgentStore.getState().messages[0].parts).toEqual([{ type: 'text', text: 'Saved novel passage' }])
+})
+
 it('treats a trusted author-ended terminal event as cancelled work, not a failed run', () => {
   useAgentStore.setState({
     runId: 'r',

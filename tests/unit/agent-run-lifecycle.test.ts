@@ -374,9 +374,18 @@ const events = () => mocks.emit.mock.calls.map(([event]) => event as AgentStream
 function tool(name: string, execute: () => Promise<ToolResult>, readOnly = true): AgentTool {
   return { name, title: name, description: '', readOnly, parameters: z.any(), permission: { plan: 'allow', build: 'allow', review: 'allow' }, execute: vi.fn(execute) }
 }
-async function run(prompt = '检查当前章节', tokenBudget?: number) {
+function expectStatusNotices(allowInternalFailure = false) {
+  const failures = events().filter(event => event.type === 'error')
+  expect(failures.filter(event => !['run_paused', 'run_failed'].includes(event.code))).toEqual([])
+  for (const failure of failures) {
+    if (!allowInternalFailure) expect(failure.message).not.toContain('任务执行遇到内部异常')
+    expect(failure.message).toBe(mocks.runs.get('run')?.errorMessage ?? mocks.runs.get('run')?.outputSummary)
+    expect(failure.recoverable).toBe(failure.code === 'run_paused')
+  }
+}
+async function run(prompt = '检查当前章节', tokenBudget?: number, allowInternalFailure = false) {
   await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt, tokenBudget })
-  expect(events().filter(event => event.type === 'error')).toEqual([])
+  expectStatusNotices(allowInternalFailure)
 }
 function queue(...responses: Response[]) {
   for (const item of responses) mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
@@ -729,7 +738,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(commit.execute).not.toHaveBeenCalled()
     expect(mocks.chat).toHaveBeenCalledOnce()
     expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: expect.stringContaining('本章连续性复核尚未完成：') }))
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'error', code: 'run_paused', message: expect.stringContaining('本章连续性复核尚未完成：') }))
     expect(events().some(event => event.type === 'text.final' && event.text.includes('连续多轮没有推进'))).toBe(false)
     expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1060, checkpoint: {
       stagnantBatches: 9, writeProgress: 3, readProgress: 3, maxTurns: 1, tokenBudget: 500,
@@ -871,7 +880,7 @@ describe('server assessment fallback in the real execution loop', () => {
     queue(response('', [call('check', check.name, '{"compilationId":"comp"}')]))
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
     expect(events().some(event => event.type === 'text.final' && event.text.includes('本章连续性复核尚未完成：'))).toBe(false)
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: expect.stringContaining('连续多轮没有推进') }))
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'error', code: 'run_paused', message: expect.stringContaining('连续多轮没有推进') }))
   })
   it('settles only a confirmed offline no-request stale receipt without progress or a new retry allowance', async () => {
     const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
@@ -1099,7 +1108,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(edit.execute).toHaveBeenCalledOnce()
     expect(critic.execute).not.toHaveBeenCalled()
     expect(commit.execute).toHaveBeenCalledOnce()
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: '正在核对检查意见的处理结果。' }))
+    expect(events()).not.toContainEqual(expect.objectContaining({ type: 'text.final', text: '正在核对检查意见的处理结果。' }))
     const history = mocks.chat.mock.calls[1][0].messages
     expect(history.some((message: { content?: string }) => message.content === '全部审美建议已经应用。')).toBe(false)
     expect(history.some((message: { reasoning?: string }) => message.reasoning === proposed.reasoning)).toBe(true)
@@ -1209,8 +1218,8 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(critic.execute).toHaveBeenCalledOnce()
     const parts = mocks.persist.mock.calls.flatMap(([input]) => (input as { create?: { parts?: Array<{ type: string; text?: string }> }; data?: { parts?: Array<{ type: string; text?: string }> } }).create?.parts ?? [])
     expect(parts.some(part => part.text === '已完成全部质量检查。')).toBe(false)
-    expect(parts.some(part => part.text === '正文已保存，正在完成当前版本的必要检查。')).toBe(true)
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: '正文已保存，正在完成当前版本的必要检查。' }))
+    expect(parts.some(part => part.text === '正文已保存，正在完成当前版本的必要检查。')).toBe(false)
+    expect(events()).not.toContainEqual(expect.objectContaining({ type: 'text.final', text: '正文已保存，正在完成当前版本的必要检查。' }))
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
   it('saves an authorized patch after rename and reviews only the final saved revision before commit', async () => {
@@ -1437,7 +1446,8 @@ describe('server assessment fallback in the real execution loop', () => {
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章' })
     expect(mocks.chat).toHaveBeenCalledOnce()
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
-    expect(events().filter(event => event.type === 'text.final' && event.text.includes('供应商余额'))).toHaveLength(1)
+    expect(events().filter(event => event.type === 'error' && event.message.includes('供应商余额'))).toHaveLength(1)
+    expect(events().filter(event => event.type === 'text.final' && event.text.includes('供应商余额'))).toHaveLength(0)
     expect(mocks.runs.get('run')?.errorMessage).toContain('上游账户')
   })
   it('does not pay for a fallback before reporting invalid commit parameters', async () => {
@@ -1520,7 +1530,7 @@ describe('server assessment fallback in the real execution loop', () => {
       }
     })
     queue(response('', [call('receipt-not-durable', critic.name, '{"compilationId":"comp"}')]))
-    await run('写下一章')
+    await run('写下一章', undefined, true)
     expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { pendingReviews: [{ callId: 'receipt-not-durable' }] } })
     expect(mocks.chat).toHaveBeenCalledOnce()
   })
@@ -1759,7 +1769,7 @@ describe('server assessment fallback in the real execution loop', () => {
       return {} as never
     })
     queue(response('', [call('not-sent', critic.name, '{"compilationId":"comp"}')]))
-    await run('写下一章')
+    await run('写下一章', undefined, true)
     expect(critic.execute).not.toHaveBeenCalled()
     expect(mocks.chat).toHaveBeenCalledOnce()
     expect((mocks.runs.get('run')?.usage as { checkpoint: unknown }).checkpoint).not.toHaveProperty('pendingReviews')
@@ -1902,13 +1912,13 @@ describe('author Continue bootstraps checks through the real execution loop', ()
     mocks.tools = [continuity, quality]
     mocks.chat.mockImplementationOnce(async () => { order.push('main'); return response('已核对实际当前报告。') })
     await f.execute()
-    expect(events().filter(event => event.type === 'error')).toEqual([])
+    expectStatusNotices()
     expect(order).toEqual(['continuity', 'quality', 'main'])
     expect(continuity.execute).toHaveBeenCalledOnce(); expect(quality.execute).toHaveBeenCalledOnce(); expect(mocks.chat).toHaveBeenCalledOnce()
     expect(events()).toContainEqual(expect.objectContaining({ type: 'review.reconciled', callId: 'old-unknown', receipt: f.item.receipt }))
     expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1060, checkpoint: { stagnantBatches: 0, tokenBudget: 500, maxTurns: 1,
       readProgress: 3, writeProgress: 3, reviewAttempts: expect.arrayContaining(['old-consumed-attempt', f.item.receipt.recoveryKey + ':quality_analyze']) } })
-    expect(events().filter(event => event.type === 'error')).toEqual([])
+    expectStatusNotices()
   })
   it('uses an already complete current assessment without buying another check', async () => {
     const f = restored()
@@ -1931,7 +1941,7 @@ describe('author Continue bootstraps checks through the real execution loop', ()
       expect(quality.execute).not.toHaveBeenCalled(); expect(continuity.execute).not.toHaveBeenCalled()
       if (scenario === 'matching') {
         expect(mocks.chat).toHaveBeenCalledOnce()
-        expect(events().filter(event => event.type === 'error')).toEqual([])
+        expectStatusNotices()
       } else {
         expect(mocks.chat).not.toHaveBeenCalled()
         expect(mocks.runs.get('run')).toMatchObject({ status: 'failed',
@@ -2152,7 +2162,8 @@ describe('original task context on resume', () => {
     expect(events().filter(event => event.type === 'tool.result' && ['commit', 'repeat'].includes(event.callId)).every(event => event.type === 'tool.result' && !event.ok)).toBe(true)
     expect(events()).toContainEqual(expect.objectContaining({ type: 'run.paused' }))
     const stopText = String(mocks.runs.get('run')?.errorMessage)
-    expect(events().filter(event => event.type === 'text.final' && event.text.includes(stopText))).toHaveLength(1)
+    expect(events().filter(event => event.type === 'error' && event.message.includes(stopText))).toHaveLength(1)
+    expect(events().filter(event => event.type === 'text.final' && event.text.includes(stopText))).toHaveLength(0)
   })
   it.each(['quality_analyze', 'continuity_validate', 'creative_critique', 'cover_generate'])('stops the first unknown %s request without dispatching other parameters in the batch', async name => {
     const failing = tool(name, async () => { throw new DataAccessError(502, 'AI_PROVIDER_TIMEOUT', 'gateway timeout') })
@@ -3061,17 +3072,12 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     expect(JSON.stringify(mocks.chat.mock.calls[1][0].messages)).not.toContain('无效思考')
     expect(mocks.update.mock.calls.some(([arg]) => String(arg.data.errorMessage).includes('连续两轮'))).toBe(true)
     const reason = String(mocks.runs.get('run')?.errorMessage)
-    const notice = events().filter(event => event.type === 'text.final' && event.text === reason)
-    expect(notice).toHaveLength(1)
-    expect(notice[0]).toMatchObject({ asReasoning: false })
-    if (notice[0].type !== 'text.final') throw new Error('Missing failure explanation')
-    expect(events().slice(-3)).toEqual([
-      { type: 'message.start', messageId: notice[0].messageId, role: 'assistant' },
-      notice[0], expect.objectContaining({ type: 'run.finished', status: 'failed' }),
+    expect(events().filter(event => event.type === 'text.final' && event.text === reason)).toHaveLength(0)
+    expect(events().slice(-2)).toEqual([
+      { type: 'error', code: 'run_failed', message: reason, recoverable: false },
+      expect.objectContaining({ type: 'run.finished', status: 'failed' }),
     ])
-    expect(mocks.persist).toHaveBeenCalledWith({ data: {
-      id: notice[0].messageId, runId: 'run', sessionId: 'session', role: 'assistant', parts: [{ type: 'text', text: reason }],
-    } })
+    expect(mocks.persist.mock.calls.some(([arg]) => (JSON.stringify(arg.data?.parts) ?? '').includes(reason))).toBe(false)
     expect(mocks.runs.get('run')).toMatchObject({ status: 'failed', currentTurn: 2, usage: { totalTokens: 20 } })
   })
 
@@ -3079,22 +3085,16 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     mocks.chat.mockRejectedValueOnce(kind === 'provider'
       ? new DataAccessError(502, 'AI_PROVIDER_TRANSPORT', '模型连接中断，原调用结果未确认。')
       : new Error('synthetic private implementation detail'))
-    await run()
+    await run('检查当前章节', undefined, kind === 'internal')
     const reason = String(mocks.runs.get('run')?.errorMessage)
     expect(reason).toContain(kind === 'provider' ? '模型连接中断，原调用结果未确认。' : '任务执行遇到内部异常')
     expect(reason).not.toContain('private implementation')
-    const finalEvents = events().slice(-3)
-    expect(finalEvents).toEqual([
-      expect.objectContaining({ type: 'message.start', role: 'assistant' }),
-      expect.objectContaining({ type: 'text.final', text: reason, asReasoning: false }),
+    expect(events().slice(-2)).toEqual([
+      { type: 'error', code: 'run_failed', message: reason, recoverable: false },
       expect.objectContaining({ type: 'run.finished', status: 'failed' }),
     ])
-    if (finalEvents[1].type !== 'text.final') throw new Error('Missing failure explanation')
-    expect(finalEvents[0]).toMatchObject({ messageId: finalEvents[1].messageId })
-    expect(mocks.persist).toHaveBeenCalledWith({ data: {
-      id: finalEvents[1].messageId, runId: 'run', sessionId: 'session', role: 'assistant', parts: [{ type: 'text', text: reason }],
-    } })
-    expect(events().filter(event => event.type === 'text.final' && event.text === reason)).toHaveLength(1)
+    expect(mocks.persist.mock.calls.some(([arg]) => (JSON.stringify(arg.data?.parts) ?? '').includes(reason))).toBe(false)
+    expect(events().filter(event => event.type === 'text.final' && event.text === reason)).toHaveLength(0)
     expect(mocks.chat).toHaveBeenCalledOnce()
     expect(mocks.dispose).toHaveBeenCalledOnce()
   })
@@ -4046,9 +4046,10 @@ describe('independent persisted review phases with unresolved usage', () => {
       tokenBudget: 500, maxTurns: 1, inputProtocolRecovery: f.checkpoint.inputProtocolRecovery, progressSignatures: expect.arrayContaining([f.signature('continuity')]),
       pendingReviews: [{ callId: 'unknown-quality', toolName: 'quality_analyze', revision: 4, chapterId: 'c', compilationId: 'comp' }],
       reviewAttempts: expect.arrayContaining(['old-unconfirmed-attempt', 'comp:c:4:quality_analyze', 'comp:c:4:continuity_validate:protocol8']) } })
-    const finals = events().filter(event => event.type === 'text.final').map(event => event.type === 'text.final' ? event.text : '').join('\n')
-    expect(finals).toContain('质量检查仍有未确认的请求'); expect(finals).toContain('当前连续性检查结果已独立保存')
-    expect(finals).not.toContain('连续多轮没有推进')
+    const notices = events().filter(event => event.type === 'error').map(event => event.message).join('\n')
+    expect(notices).toContain('质量检查仍有未确认的请求'); expect(notices).toContain('当前连续性检查结果已独立保存')
+    expect(notices).not.toContain('连续多轮没有推进')
+    expect(events()).not.toContainEqual(expect.objectContaining({ type: 'text.final', text: expect.stringContaining('质量检查仍有未确认的请求') }))
     expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
     expect(events().find(event => event.type === 'tool.result' && event.callId === 'unknown-quality')).not.toHaveProperty('reviewRequestFinished')
   })

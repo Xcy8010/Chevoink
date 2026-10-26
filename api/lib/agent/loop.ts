@@ -694,17 +694,17 @@ async function finalizeLegacyRun(
   checkpoint?: RunCheckpointState,
   authorEnded?: { fulfilled: boolean; todoItems?: AgentTodoItem[] },
   writingDelivery?: { messageId: string; subject: { userId: string; novelId: string; runId: string }; expected: NonNullable<Awaited<ReturnType<typeof readCompletedWritingDelivery>>>; signal: AbortSignal; parts?: AgentMessagePart[]; replaceCandidate?: boolean; displayText?: string },
-  withFailureNotice = false,
+  withFailureStatus = false,
   limitedDelivery?: { subject: { userId: string; novelId: string; runId: string }; expected: LimitedWritingDelivery; signal: AbortSignal; messageId: string },
   pauseReason: 'user_stop' | 'needs_input' | 'review_receipt_pending' = 'user_stop',
   terminalFence?: (tx: Prisma.TransactionClient) => Promise<void>,
 ) {
   // 事件协议用 succeeded，DB 枚举用 completed
   const dbStatus = status === 'succeeded' ? 'completed' : status
-  // Only callers without an existing explanation request this server notice.
-  // It is published with the confirmed failure, never ahead of its transaction.
-  const failureNotice = status === 'failed' && withFailureNotice && errorMessage
-    ? { messageId: randomUUID(), text: errorMessage } : undefined
+  // Failure explanations belong to the existing run-status channel. Publish
+  // them atomically with the confirmed failure, never as novel prose.
+  const failureStatus = status === 'failed' && withFailureStatus && errorMessage
+    ? { type: 'error' as const, code: 'run_failed', message: errorMessage, recoverable: false } : undefined
   const writingDisplayText = writingDelivery && ['completed_wrap_up', 'recovered_chapter_only'].includes(writingDelivery.expected.presentationKind)
     ? completedWritingPresentationText(writingDelivery.expected, writingDelivery.displayText ?? '')
     : writingDelivery?.displayText ?? writingDelivery?.expected.text
@@ -736,10 +736,6 @@ async function finalizeLegacyRun(
     }
     const owner = await tx.agentRun.findUniqueOrThrow({ where: { id: runId }, select: { userId: true, sessionId: true } })
     await (await import('./goal-fence.js')).assertRunGoalFence(tx, owner.userId, runId)
-    if (failureNotice) await tx.agentMessage.create({ data: {
-      id: failureNotice.messageId, runId, sessionId: owner.sessionId, role: 'assistant',
-      parts: [{ type: 'text', text: failureNotice.text }],
-    } })
     return tx.agentRun.update({
       where: { id: runId, runtimeProtocolVersion: 0, taskRootId: null },
       data: {
@@ -753,13 +749,10 @@ async function finalizeLegacyRun(
       select: { userId: true, sessionId: true, novelId: true, taskSpec: true },
     })
   }, writingDelivery ? [...(writingDelivery.replaceCandidate ? [] : [{ type: 'message.start' as const, messageId: writingDelivery.messageId, role: 'assistant' as const }]),
-    { type: 'text.final', messageId: writingDelivery.messageId, text: writingDisplayText!, asReasoning: false }] : failureNotice ? [
-    { type: 'message.start', messageId: failureNotice.messageId, role: 'assistant' },
-    { type: 'text.final', messageId: failureNotice.messageId, text: failureNotice.text, asReasoning: false },
-  ] : limitedDelivery ? [
+    { type: 'text.final', messageId: writingDelivery.messageId, text: writingDisplayText!, asReasoning: false }] : failureStatus ? [failureStatus] : limitedDelivery ? [
     { type: 'message.start', messageId: limitedDelivery.messageId, role: 'assistant' },
     { type: 'text.final', messageId: limitedDelivery.messageId, text: limitedDelivery.expected.text, asReasoning: false },
-  ] : [])
+  ] : [], writingDelivery || limitedDelivery ? { timeout: 20_000 } : undefined)
     .catch((error) => {
       if ((writingDelivery || limitedDelivery) && (isAbortError(error) || error instanceof DataAccessError && error.code === 'WRITING_DELIVERY_STALE')) throw error
       if (error instanceof DataAccessError && error.code === 'GOAL_EXECUTION_FENCED') {
@@ -1038,14 +1031,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     await persistMessage(live.messageId, runId, params.sessionId, 'assistant', partsToSave).catch(() => {})
   }
 
-  // 预算/续跑边界停止原因落库为可见消息：此前只写 errorMessage，会话里看不到原因，
-  // 作者只能反复盲点「继续」（线上反馈误判为限流）。停止时给一条可读、可执行的说明。
-  const announceStopReason = async (text: string) => {
-    const messageId = randomUUID()
-    bus.emit({ type: 'message.start', messageId, role: 'assistant' })
-    bus.emit({ type: 'text.delta', messageId, delta: text })
-    bus.emit({ type: 'text.final', messageId, text, asReasoning: false })
-    await persistMessage(messageId, runId, params.sessionId, 'assistant', [{ type: 'text', text }]).catch(() => {})
+  const announceStopReason = async (text: string, status: 'paused' | 'failed' = 'paused') => {
+    bus.emit({ type: 'error', code: 'run_' + status, message: text, recoverable: status === 'paused' })
+    await bus.persist()
   }
 
   try {
@@ -1121,7 +1109,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       : null
     if (hasAuthorEnded(previousTask?.usage) || params.resume && hasAuthorEnded(storedRun.usage)) {
       const notice = '原任务已按作者要求结束，不能自动恢复剩余工作。如需继续创作，请发送明确的新任务；已有成果保留。'
-      await announceStopReason(notice)
       await finalizeRun(runId, bus, 'cancelled', usage, turn, notice, undefined, true, undefined, { fulfilled: false })
       return
     }
@@ -1247,14 +1234,15 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         undefined, undefined, undefined, false, undefined, 'needs_input')
       return
     }
+    const readCurrentReviewReadiness = (compilationId?: string) => prisma.$transaction(tx => readChapterReviewReadiness(tx,
+      { userId: params.userId, novelId: params.novelId, runId }, compilationId), { timeout: 20_000 })
     const currentReviewState: { value: ChapterReviewReadiness | null } = { value: null }
     const observePersistedReviewProgress = async () => {
       currentReviewState.value = null
       if (!['write', 'revise'].includes(taskSpec.intent)
         || ['conversation_only', 'proposal_only'].includes(taskSpec.writingPacing ?? '')) return false
       try {
-        const review = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
-          { userId: params.userId, novelId: params.novelId, runId }))
+        const review = await readCurrentReviewReadiness()
         // Pending receipt truth belongs to one chapter/version/phase. A
         // different current persisted assessment remains independently true;
         // no unresolved request can authorize a final decision on its chapter.
@@ -1814,10 +1802,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           novelId: params.novelId, sessionId: params.sessionId, runId }, reasonText) : null
       controller.signal.throwIfAborted()
       const text = researchPartial ?? `${reasonText}已保存的内容保留，本次工作尚未完成。`
-      const messageId = randomUUID()
-      bus.emit({ type: 'message.start', messageId, role: 'assistant' })
-      bus.emit({ type: 'text.final', messageId, text, asReasoning: false })
-      await persistMessage(messageId, runId, params.sessionId, 'assistant', [{ type: 'text', text }])
+      if (researchPartial) {
+        const messageId = randomUUID()
+        bus.emit({ type: 'message.start', messageId, role: 'assistant' })
+        bus.emit({ type: 'text.final', messageId, text, asReasoning: false })
+        await persistMessage(messageId, runId, params.sessionId, 'assistant', [{ type: 'text', text }])
+      } else await announceStopReason(reasonText, forceWrapUpLocal ? 'paused' : 'failed')
       await finalizeRun(runId, bus, forceWrapUpLocal || researchPartial ? 'paused' : 'failed', usage, turn, text.slice(0, 300), reasonText, false,
         undefined, undefined, undefined, false, undefined, forceWrapUpLocal || researchPartial ? 'needs_input' : 'user_stop')
     }
@@ -1834,7 +1824,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         return params.resume && requiresCompletedWritingPresentation(taskSpec) && review?.terminalCommitted
           && review.terminalReview?.state === 'unverified' && review.terminalReview.deliveryEligible
           ? readRecoveredChapterDelivery(tx, subject) : null
-      })
+      }, { timeout: 20_000 })
       let delivery = await readDelivery()
       if (!delivery) return false
       controller.signal.throwIfAborted()
@@ -2006,8 +1996,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       let continuityBootstrap: typeof continuedContinuityBootstrap[number] | undefined
       while (continuedReviewBootstrap.length && !bootstrapCall) {
         const item = continuedReviewBootstrap[0]
-        const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
-          { userId: params.userId, novelId: params.novelId, runId }, item.compilationId ?? undefined))
+        const readiness = await readCurrentReviewReadiness(item.compilationId ?? undefined)
         // Native candidate processing may already have completed this exact
         // target. Its authenticated commit supersedes only the unsent bootstrap
         // plan; the old request, unknown accounting and receipt remain intact.
@@ -2032,8 +2021,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
       while (continuedContinuityBootstrap.length && !bootstrapCall) {
         const item = continuedContinuityBootstrap[0]
-        const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
-          { userId: params.userId, novelId: params.novelId, runId }, item.compilationId))
+        const readiness = await readCurrentReviewReadiness(item.compilationId)
         if (readiness?.continuity === 'complete' || automaticReviewAttempts.has(item.recoveryKey)) { continuedContinuityBootstrap.shift(); continue }
         const proof = await prisma.$transaction(tx => readContinuedContinuityRecovery(tx,
           { userId: params.userId, novelId: params.novelId, runId }))
@@ -2323,7 +2311,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         && effectiveToolCalls.some(call => ['chapter_read', 'chapter_bridge_get'].includes(call.name))
         && !effectiveToolCalls.some(call => call.name === 'continuity_validate')
         && [...reviewRecoveryKeys.values()].some(key => key.startsWith('continuity-author-recovery:'))) {
-        const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, { userId: params.userId, novelId: params.novelId, runId }))
+        const readiness = await readCurrentReviewReadiness()
         const next = await currentDispatch(readiness)
         if (readiness?.compilationId && readiness.continuity === 'incomplete' && next.kind === 'tool'
           && next.tool.name === 'continuity_validate' && next.key.startsWith('continuity-author-recovery:')) {
@@ -2348,7 +2336,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         && params.mode === 'build' && !['conversation_only', 'proposal_only'].includes(taskSpec.writingPacing ?? '')
         && result.finishReason !== 'tool_calls' && !containsAgentProtocolInvocation(result.content)
         && !looksLikePseudoToolCall(result.content, toolNameList)) {
-        const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, { userId: params.userId, novelId: params.novelId, runId }))
+        const readiness = await readCurrentReviewReadiness()
         const next = await currentDispatch(readiness)
         if (next.kind === 'tool') {
           automaticReviewTriggered = true
@@ -2382,7 +2370,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         : normalizeExecutionText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
       // This projection affects publication only. Empty-response, promise and
       // saved-delivery decisions below retain baseline execution normalization.
-      const authorContent = automaticReviewTriggered ? reviewProgressText
+      const authorContent = automaticReviewTriggered ? ''
         : humanizeAgentVisibleText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
 
       // 主流 Agent 标准（Codex 等）：任务过程中的进展正文同样是对话正文信道，作者实时可见、刷新后仍在；
@@ -2447,9 +2435,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         }
 
         const failureText = '模型工具调用格式异常，已达到本轮纠错上限并安全停止。已完成操作保留，异常文本未执行；可继续任务，若再次出现请切换支持工具调用的模型。'
-        bus.emit({ type: 'text.delta', messageId, delta: failureText })
-        bus.emit({ type: 'text.final', messageId, text: failureText, asReasoning: false })
-        await persistMessage(messageId, runId, params.sessionId, 'assistant', [{ type: 'text', text: failureText }])
+        bus.emit({ type: 'error', code: 'run_failed', message: failureText, recoverable: false })
         bus.emit({ type: 'step.finish', turn, usage: result.usage })
         await finalizeRun(runId, bus, 'failed', usage, turn, failureText, failureText)
         return
@@ -2557,7 +2543,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         }
 
         const savedCandidate = !prematureFinish && !report?.content && requiresCompletedWritingPresentation(taskSpec) ? await prisma.$transaction(tx => readCompletedWritingPresentation(tx,
-          { userId: params.userId, novelId: params.novelId, runId })) : null
+          { userId: params.userId, novelId: params.novelId, runId }), { timeout: 20_000 }) : null
         if (!prematureFinish && !report?.content && requiresCompletedWritingPresentation(taskSpec) && !savedCandidate) {
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts.filter(part => part.type !== 'text'))
           bus.emit({ type: 'step.finish', turn, usage: result.usage })
@@ -2673,8 +2659,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             messages.push({ role: 'tool', toolCallId: call.id, content: reason })
             continue
           }
-          const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
-            { userId: params.userId, novelId: params.novelId, runId }, compilationId))
+          const readiness = await readCurrentReviewReadiness(compilationId)
           // Ordinary edits retain their original writing authority. Check the
           // final saved body at COMMIT, without discarding partial edits or
           // spending a fresh paid assessment between each fragment.
@@ -2685,10 +2670,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               deferToolProposal(call, '先完成当前版本检查，读取结果后再提交章节终态。', messageId, bus)
               messages.push({ role: 'tool', toolCallId: call.id, content: '本次未执行提交；先完成当前版本检查，读取结果后再提议提交。' })
               effectiveToolCalls.splice(callIndex, 1, required)
-              const note = '正在完成当前版本的必要检查，之后再核对修订与章节终态。'
               for (let index = parts.length - 1; index >= 0; index--) if (parts[index].type === 'text') parts.splice(index, 1)
-              parts.push({ type: 'text', text: note })
-              bus.emit({ type: 'text.final', messageId, text: note, asReasoning: false })
+              bus.emit({ type: 'text.final', messageId, text: '', asReasoning: false })
               call = required
             } else if (next.kind === 'blocked') {
               const knownContinuityFailure = readiness.requiredTools.some(item => item.name === 'continuity_validate'
@@ -2721,10 +2704,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
                 // An early commit is only a proposal. Read its current decision
                 // state and ask for a new commit; preserve unrelated calls in this batch.
                 effectiveToolCalls.splice(callIndex, 1, required)
-                const note = '正在核对检查意见的处理结果，之后再提交章节终态。'
                 for (let index = parts.length - 1; index >= 0; index--) if (parts[index].type === 'text') parts.splice(index, 1)
-                parts.push({ type: 'text', text: note })
-                bus.emit({ type: 'text.final', messageId, text: note, asReasoning: false })
+                bus.emit({ type: 'text.final', messageId, text: '', asReasoning: false })
                 call = required
               }
             }
@@ -2738,8 +2719,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           const compilationId = args?.compilationId
           if (validator && args && validator.parameters.safeParse(args).success) {
             explicitTerminalCandidate ||= call.name === 'continuity_validate' && (args.terminalState !== undefined || args.inheritedProofs !== undefined || args.terminalPatch !== undefined)
-            const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx,
-              { userId: params.userId, novelId: params.novelId, runId }, typeof compilationId === 'string' ? compilationId : undefined))
+            const readiness = await readCurrentReviewReadiness(typeof compilationId === 'string' ? compilationId : undefined)
             if (readiness && (typeof args.chapterId !== 'string' || args.chapterId === readiness.chapterId)) reviewDispatch = { compilationId: readiness.compilationId, chapterId: readiness.chapterId,
               revision: readiness.revision, toolName: call.name as PendingReviewCall['toolName'], callId: call.id }
             else if (typeof compilationId !== 'string') {
@@ -3079,10 +3059,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const notice = fulfilled
           ? '本任务成果已保存并核验。已按作者要求结束，剩余待办不再执行，未将其标为完成。'
           : '已按作者要求结束，保留已保存内容。剩余工作不再执行，未将未完成成果标为完成。'
-        const endMessageId = randomUUID()
-        bus.emit({ type: 'message.start', messageId: endMessageId, role: 'assistant' })
-        bus.emit({ type: 'text.final', messageId: endMessageId, text: notice, asReasoning: false })
-        await persistMessage(endMessageId, runId, params.sessionId, 'assistant', [{ type: 'text', text: notice }])
         await finalizeRun(runId, bus, fulfilled ? 'succeeded' : 'cancelled', usage, turn, notice, undefined, true, undefined, { fulfilled, todoItems })
         return
       }
@@ -3227,14 +3203,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     }
 
     if (error instanceof DataAccessError && error.code.startsWith('CREDITS_')) {
-      const messageId = randomUUID()
       const message = error.code === 'CREDITS_EXHAUSTED'
         ? '今日创作额度已用尽，任务已安全停止。邀请好友注册可获得额外额度。'
         : error.message
-      bus.emit({ type: 'message.start', messageId, role: 'assistant' })
-      bus.emit({ type: 'text.delta', messageId, delta: message })
-      bus.emit({ type: 'text.final', messageId, text: message, asReasoning: false })
-      await persistMessage(messageId, runId, params.sessionId, 'assistant', [{ type: 'text', text: message }])
       bus.emit({ type: 'error', code: error.code.toLowerCase(), message, recoverable: false })
       await flushLiveTurn()
       await finalizeRun(runId, bus, 'failed', usage, turn, message, message)

@@ -33,5 +33,5 @@ export async function advanceDurableWritingDelivery(token: RunLeaseToken) {
       eventKey: `writing-delivery:${root.id}:${next.revision}`, type: 'writing.delivery.projected', payload: { sourceRevision: state.frame.revision,
         sourceHash: state.frame.snapshotHash, revision: next.revision, snapshotHash: next.snapshotHash, proof: proof.value, proofHash: proof.hash } } })
     return next
-  })
+  }, { timeoutMs: 20_000 })
 }

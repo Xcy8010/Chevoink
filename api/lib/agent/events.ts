@@ -1,3 +1,4 @@
+import { publicReviewExecution } from '../../../shared/review-lifecycle.js'
 import type { AgentStreamEvent, AgentStreamEventBody } from '../../../shared/contracts/index.js'
 import { prisma } from '../prisma.js'
 import type { Prisma } from '@prisma/client'
@@ -8,6 +9,53 @@ import type { Prisma } from '@prisma/client'
  * - live 订阅者实时收到事件；重连用 Last-Event-ID 从 seq+1 续传
  * - 持久化走批量队列，避免 text.delta 高频事件逐条写库
  */
+
+export const legacyExecutionFailureNotice = '任务执行遇到内部异常，已停止后续操作；已保存内容保留，请核对状态后再继续。'
+type StoredNoticeEvent = { runId: string; seq: number; type: string; payload: unknown; run?: { errorMessage: string | null } }
+type ServerRunNotice = { text: string; status: 'paused' | 'failed' | 'cancelled' }
+
+/** Recognize the old server's adjacent start/text/stop transaction. This is a
+ * display projection only; original messages and failure receipts stay intact. */
+export function serverRunNotices(events: readonly StoredNoticeEvent[]): Map<string, ServerRunNotice> {
+  const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+  const positions = new Map(events.map(event => [`${event.runId}:${event.seq}`, event])), notices = new Map<string, ServerRunNotice>()
+  for (const event of events) {
+    if (event.type !== 'text.final') continue
+    const body = object(event.payload), before = positions.get(`${event.runId}:${event.seq - 1}`), after = positions.get(`${event.runId}:${event.seq + 1}`)
+    const start = object(before?.payload), end = object(after?.payload)
+    if (before?.type !== 'message.start' || start.role !== 'assistant' || start.messageId !== body.messageId
+      || typeof body.messageId !== 'string' || typeof body.text !== 'string' || !body.text || body.asReasoning !== false) continue
+    const status = after?.type === 'run.paused' ? 'paused'
+      : after?.type === 'run.finished' && (end.status === 'failed' || end.status === 'cancelled') ? end.status : null
+    const reason = event.run?.errorMessage ?? after?.run?.errorMessage
+    const serverText = body.text === legacyExecutionFailureNotice || Boolean(reason && (body.text === reason
+      || body.text === reason + '已保存的内容保留，本次工作尚未完成。'))
+    if (status && serverText && end.outcome === undefined) notices.set(body.messageId, { text: body.text, status })
+  }
+  return notices
+}
+
+export async function loadServerRunNotices(userId: string, runIds: string[]) {
+  if (!runIds.length) return new Map<string, ServerRunNotice>()
+  const scope = { runId: { in: [...new Set(runIds)] }, run: { userId, runtimeProtocolVersion: 0, taskRootId: null } }
+  const select = { runId: true, seq: true, type: true, payload: true, run: { select: { errorMessage: true } } } as const
+  const endings = (await prisma.agentRunEvent.findMany({ where: { ...scope, type: { in: ['run.paused', 'run.finished'] } }, select }))
+    .filter(event => event.type === 'run.paused' || ['failed', 'cancelled'].includes(String((event.payload as Record<string, unknown>)?.status)))
+  if (!endings.length) return new Map<string, ServerRunNotice>()
+  const neighbors = await prisma.agentRunEvent.findMany({ where: { ...scope, type: { in: ['message.start', 'text.final'] },
+    OR: endings.map(event => ({ runId: event.runId, seq: { in: [event.seq - 2, event.seq - 1].filter(seq => seq > 0) } })) }, select })
+  return serverRunNotices([...endings, ...neighbors])
+}
+
+export function publicRunEvent(event: AgentStreamEvent, notices: ReadonlyMap<string, ServerRunNotice>): AgentStreamEvent {
+  const notice = event.type === 'text.final' ? notices.get(event.messageId) : null
+  if (event.type === 'text.final' && notice?.text === event.text && notice.status === 'cancelled') return { ...event, text: '' }
+  if (event.type === 'text.final' && notice?.text === event.text) return {
+    seq: event.seq, runId: event.runId, ts: event.ts, type: 'error', code: `run_${notice.status}`,
+    message: notice.text, recoverable: notice.status === 'paused',
+  }
+  return publicReviewExecution(event)
+}
 
 type EventListener = (event: AgentStreamEvent) => void
 
@@ -125,7 +173,7 @@ export class RunEventBus {
    * with the caller so existing post-run housekeeping retains its ordering. */
   async commitTerminal<T>(body: Extract<AgentStreamEventBody, { type: 'run.finished' | 'run.paused' }>,
     work: (tx: Prisma.TransactionClient) => Promise<T>,
-    preceding: Array<Extract<AgentStreamEventBody, { type: 'message.start' | 'text.final' }>> = []): Promise<{ result: T; publish: () => void }> {
+    preceding: Array<Extract<AgentStreamEventBody, { type: 'message.start' | 'text.final' | 'error' }>> = [], options?: { timeout?: 20000 }): Promise<{ result: T; publish: () => void }> {
     if (this.closed || this.committingTerminal) throw new Error(`事件总线已关闭：${this.runId}`)
     this.committingTerminal = true
     try {
@@ -136,7 +184,7 @@ export class RunEventBus {
         const value = await work(tx)
         for (const event of events) await tx.agentRunEvent.create({ data: { runId: this.runId, seq: event.seq, type: event.type, payload: event as object } })
         return value
-      })
+      }, options)
       this.terminalWrite = transaction
       const result = await transaction
       let published = false

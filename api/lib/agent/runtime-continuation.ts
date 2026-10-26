@@ -62,7 +62,7 @@ export async function advanceDurableContinuation(token: RunLeaseToken) {
       : promisesFurtherAction(result.content) ? 'promised_action' : todos.some(item => item.status === 'pending' || item.status === 'in_progress') ? 'unfinished_todos' : null
     if (!reason) return null
     return appendContinuation(tx, lease, frame, reason)
-  })
+  }, { timeoutMs: 20_000 })
 }
 
 /** Domain facts select the follow-up, not the caller or the model. Unknown
@@ -89,7 +89,7 @@ export async function advanceDurableCompletionObligations(token: RunLeaseToken, 
     if (configuration.mode !== 'build' || requiredTools.some(name => !configuration.tools.some(tool => tool.function.name === name)
       || !configuration.toolAuthority.some(grant => grant.name === name && grant.permission !== 'deny'))) return { kind: 'reconciliation_required' as const, blockers }
     return appendContinuation(tx, lease, frame, 'domain_incomplete', blockers, observed)
-  })
+  }, { timeoutMs: 20_000 })
 }
 
 async function appendContinuation(tx: RuntimeTx, lease: RunLeaseToken,

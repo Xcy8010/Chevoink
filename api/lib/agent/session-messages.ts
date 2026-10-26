@@ -1,3 +1,5 @@
+import { loadServerRunNotices } from './events.js'
+import { publicReviewExecution } from '../../../shared/review-lifecycle.js'
 import type { Prisma } from '@prisma/client'
 import { readAuthorEnded } from './author-ended.js'
 import { readRunOutcome } from './run-outcome.js'
@@ -37,11 +39,12 @@ function historyGoalMetadata(record: { id: string; role: string; run: {
   }
 }
 
-function visibleHistoryParts(parts: AgentMessagePart[], run: { runtimeProtocolVersion: number; taskRoot: { status: string } | null }): AgentMessagePart[] {
+function visibleHistoryParts(parts: AgentMessagePart[], run: { runtimeProtocolVersion: number; taskRoot: { status: string } | null }, serverNotice = false): AgentMessagePart[] {
+  if (serverNotice) parts = parts.filter(part => part.type !== 'text')
   const stopped = run.runtimeProtocolVersion === 1 && ['paused', 'completed'].includes(run.taskRoot?.status ?? '')
   return parts.map(part => {
     if (part.type !== 'tool-call') return part
-    const visible = part.snapshot ? { ...part, snapshot: undefined } : part
+    const visible = publicReviewExecution(part.snapshot ? { ...part, snapshot: undefined } : part)
     // Match the existing live terminal reducer without marking the operation
     // failed in execution storage: an unknown result still needs reconciliation.
     return stopped && part.status === 'running' ? { ...visible, status: 'failed' as const, summary: run.taskRoot?.status === 'paused' ? '已停止' : '已中断' } : visible
@@ -214,9 +217,10 @@ export async function listLoopSessionMessages(
       : []
 
     const timings = await loadMessageTimings(userId, sessionId, [...pageRunIds, ...records.map(record => record.runId)])
+    const serverNotices = await loadServerRunNotices(userId, records.map(record => record.runId))
     const pagedMessages: AgentUIMessage[] = []
     for (const record of await projectLegacyQualityBodyChanges(userId, records)) {
-      const stripped = visibleHistoryParts(record.parts as unknown as AgentMessagePart[], record.run)
+      const stripped = visibleHistoryParts(record.parts as unknown as AgentMessagePart[], record.run, serverNotices.has(record.id))
       pagedMessages.push({
         id: record.id,
         runId: record.runId,
@@ -280,9 +284,10 @@ export async function listLoopSessionMessages(
   }
 
   const timings = await loadMessageTimings(userId, sessionId, records.map(record => record.runId))
+  const serverNotices = await loadServerRunNotices(userId, records.map(record => record.runId))
   const messages: AgentUIMessage[] = []
   for (const record of await projectLegacyQualityBodyChanges(userId, records)) {
-    const stripped = visibleHistoryParts(record.parts as unknown as AgentMessagePart[], record.run)
+    const stripped = visibleHistoryParts(record.parts as unknown as AgentMessagePart[], record.run, serverNotices.has(record.id))
     messages.push({
       id: record.id,
       runId: record.runId,

@@ -15,22 +15,23 @@ import { tokenPriceSchema } from '../billing/token-price.js'
 import { readContinuityPhaseClaim, continuityAssessmentPhase } from './continuity-coordinator.js'
 
 const object = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
-const workSchema = z.object({ kind: z.literal('check'), version: z.union([z.literal(21), z.literal(22), z.literal(23)]),
+const workSchema = z.object({ kind: z.literal('check'), version: z.union([z.literal(18), z.literal(21), z.literal(22), z.literal(23)]),
   chapter: z.object({ id: z.string(), revision: z.number().int(), content: z.string(), orderIndex: z.number().int() }),
-  compiler: z.object({ id: z.string() }), terminalCandidate: terminalCandidateSchema,
+  compiler: z.object({ id: z.string() }), terminalCandidate: terminalCandidateSchema.optional(),
   sourceBodies: z.object({ previous: z.string().nullable(), current: z.string(), terminalEvidence: terminalEvidenceContextSchema }).strict(),
   sourceScope: continuitySourceScopeSchema, continuityManifest: continuityReviewManifestSchema.optional(),
-  reassessmentProtocol: z.union([z.literal(5), z.literal(6), z.literal(7)]), criticSystem: z.string(), criticInput: z.string(), coverage: z.unknown(),
+  reassessmentProtocol: z.union([z.literal(2), z.literal(5), z.literal(6), z.literal(7)]), criticSystem: z.string(), criticInput: z.string(), coverage: z.unknown(),
   route: z.object({ provider: z.string(), model: z.string(), baseUrl: z.string(), maxOutputTokens: z.number().int() }), price: z.unknown() })
+  .refine(work => (work.version === 18) === (work.terminalCandidate === undefined) && (work.version === 18) === (work.reassessmentProtocol === 2))
 
 /** Native provenance stays native. No lease, admission, billing or state writes.
  * The parent may be pending only for the exact report presently being saved;
  * every historical origin requires its own committed effect and outbox. */
 export async function readNativeContinuityAssessments(db: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string }, taskId: string, runIds: string[],
-  target: { compilationId: string; chapterId: string; currentAudit: unknown; related?: (input: unknown) => boolean }, artifacts: Array<{ metadata: unknown }>) {
+  target: { compilationId: string; chapterId: string; currentAudit: unknown; operationIds?: string[]; related?: (input: unknown) => boolean }, artifacts: Array<{ metadata: unknown }>) {
   const operations = await db.agentOperation.findMany({ where: { taskRootId: taskId, originRunId: { in: runIds },
-    action: 'continuity_validate', kind: { in: ['tool', 'internal'] } }, include: { effectReceipt: true, events: true,
+    action: 'continuity_validate', kind: { in: ['tool', 'internal'] }, ...(target.operationIds ? { id: { in: target.operationIds } } : {}) }, include: { effectReceipt: true, events: true,
     children: { include: { events: true, attempts: { include: { usageReceipt: true } } } } }, orderBy: { createdAt: 'asc' }, take: 1001 })
   if (operations.length > 1000) return null
   const entries: Array<{ input: LegacyAssessmentInput; inspected: AuthenticatedContinuityInspection; inspections: AuthenticatedContinuityInspection[];
@@ -85,7 +86,7 @@ export async function readNativeContinuityAssessments(db: Prisma.TransactionClie
         operationId: operation.id, action: operation.action, novelId: subject.novelId, callId: String(object(object(operation.inputSnapshot).input).callId) })
     if (saved.input.novelId !== subject.novelId) return null
     const input: LegacyAssessmentInput = { chapterId: work.chapter.id, revision: work.chapter.revision, bodies: work.sourceBodies,
-      parserVersion: work.version === 23 ? 10 : work.version === 22 ? 9 : 8, reassessmentProtocol: work.reassessmentProtocol, terminalCandidate: work.terminalCandidate,
+      parserVersion: work.version === 23 ? 10 : work.version === 22 ? 9 : 8, reassessmentProtocol: work.reassessmentProtocol, ...(work.terminalCandidate ? { terminalCandidate: work.terminalCandidate } : {}),
       sourceScope: work.sourceScope, ...(work.continuityManifest ? { continuityManifest: work.continuityManifest } : {}),
       system: work.criticSystem, content: work.criticInput, targetType: 'story_compilation', targetId: work.compiler.id }
     if (work.version === 23) {

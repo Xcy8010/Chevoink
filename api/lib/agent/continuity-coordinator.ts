@@ -171,20 +171,74 @@ export async function authenticateContinuityPhasePlan(db: Prisma.TransactionClie
 /** An upper bound is frozen from the original admission; it is not a wallet
  * reservation. Historical requests never acquire a new phase by upgrading wire
  * format, changing a candidate, continuing, or restarting a worker. */
+type InitialContinuityTarget = {
+  compilationId: string; chapterId: string
+  input?: Pick<LegacyAssessmentInput, 'revision' | 'bodies' | 'terminalCandidate'>
+}
+
+/** Body-only checks do not certify a terminal candidate. Authenticate their
+ * actual receipts before filling that missing part of the same initial review. */
+export async function authenticateInitialContinuityHistory(db: Prisma.TransactionClient, subject: Subject, target: InitialContinuityTarget) {
+  const original = await readOriginalTaskRequest(db, subject), runs = await originalTaskRunIds(db, subject, original)
+  const prior = await db.agentArtifact.findMany({ where: { runId: { in: runs }, artifactType: 'continuityReview',
+    metadata: { path: ['assessmentChapterId'], equals: target.chapterId } }, take: 1001 })
+  const nativeOperations = await db.agentOperation.findMany({ where: { taskRootId: original.taskId, action: 'continuity_validate',
+    inputSnapshot: { path: ['input', 'work', 'chapter', 'id'], equals: target.chapterId }, children: { some: { kind: 'provider' } } },
+    select: { id: true }, take: 1001 })
+  const native = nativeOperations.length
+  if (prior.length > 1000 || native > 1000) throw blocked('原连续性记录无法完整认证。')
+  if (!prior.length && !native) {
+    if (await db.aiUsageLog.count({ where: { userId: subject.userId, novelId: subject.novelId, agentRunId: { in: runs },
+      action: { startsWith: 'agent3Continuity' }, OR: [{ chapterId: target.chapterId }, { targetId: { in: [target.chapterId, target.compilationId] } }] } }))
+      throw blocked('原连续性用量缺少可认证的请求回执。')
+    return false
+  }
+  if (!target.input?.terminalCandidate) throw blocked('已有检查不能重复领取原阶段。')
+  const lifecycle = await import('./assessment-response-lifecycle.js')
+  const inputs: Array<{ input: LegacyAssessmentInput; audit: { contentHash: string } }> = [], usageIds = new Set<string>()
+  for (const row of prior) {
+    const meta = object(row.metadata), parsed = lifecycle.legacyAssessmentInputSchema.safeParse(meta.input)
+    if (!parsed.success || parsed.data.terminalCandidate !== undefined || parsed.data.targetType !== 'story_compilation'
+      || parsed.data.targetId !== target.compilationId || parsed.data.chapterId !== target.chapterId
+      || typeof meta.callId !== 'string') throw blocked('原终态请求或预约仍须按原阶段核对。')
+    const receipt = await lifecycle.readLegacyContinuityAssessment(db, { ...subject, runId: row.runId, callId: meta.callId } as ToolContext, parsed.data)
+    if (!receipt || !receipt.inspected.complete || !receipt.billingKnown || !receipt.providerComplete || !receipt.recoveryReady)
+      throw blocked('原正文检查响应或费用尚未确认。')
+    receipt.usageIds.forEach(id => usageIds.add(id))
+    inputs.push({ input: parsed.data, audit: receipt.inspected.audit })
+  }
+  if (native) {
+    const artifacts = await db.agentArtifact.findMany({ where: { runId: { in: runs }, artifactType: 'continuityReview' }, take: 1001 })
+    if (artifacts.length > 1000) throw blocked('原连续性记录无法完整认证。')
+    const entries = await (await import('./native-continuity-assessment.js')).readNativeContinuityAssessments(db, subject, original.taskId, runs,
+      { compilationId: target.compilationId, chapterId: target.chapterId, currentAudit: {}, operationIds: nativeOperations.map(row => row.id), related: () => true }, artifacts)
+    if (!entries || entries.length !== native || entries.some(entry => !entry.committed || !entry.inspected.complete || entry.input.terminalCandidate !== undefined))
+      throw blocked('原 native 检查尚未完成，或已经包含终态判断。')
+    inputs.push(...entries.map(entry => ({ input: entry.input, audit: entry.inspected.audit })))
+  }
+  const payments = await db.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId, agentRunId: { in: runs },
+    action: { startsWith: 'agent3Continuity' }, OR: [{ chapterId: target.chapterId }, { targetId: { in: [target.chapterId, target.compilationId] } }] },
+    select: { id: true } })
+  if (payments.some(row => !usageIds.has(row.id))) throw blocked('仍有未绑定原回执的连续性用量。')
+  const saved = await db.storyCompilation.findFirst({ where: { id: target.compilationId, userId: subject.userId, novelId: subject.novelId,
+    runId: { in: runs }, chapterId: target.chapterId }, include: { chapter: true } })
+  const validation = object(saved?.validation), audit = object(effectiveContinuityAudit(validation)), input = target.input
+  if (!saved?.chapter || saved.chapter.revision !== input.revision || saved.chapter.content !== input.bodies.current
+    || validation.independentCheck !== 'complete' || validation.checkedChapterId !== target.chapterId || validation.checkedRevision !== input.revision
+    || object(validation.coverage).contentHash !== runtimeJson({ content: input.bodies.current }).hash
+    || !inputs.some(row => row.input.revision === input.revision && row.input.bodies.current === input.bodies.current
+      && row.input.bodies.previous === input.bodies.previous && row.audit.contentHash === audit.contentHash
+      && runtimeJson(row.input.bodies.terminalEvidence?.previous ?? null).hash === runtimeJson(input.bodies.terminalEvidence?.previous ?? null).hash))
+    throw blocked('原完整正文检查不属于当前版本或来源。')
+  return true
+}
+
 export async function prepareContinuityPhasePlan(db: Prisma.TransactionClient, subject: Subject,
-  target: { compilationId: string; chapterId: string; semanticSubjectHash: string; modelPriceHash: string }) {
+  target: InitialContinuityTarget & { semanticSubjectHash: string; modelPriceHash: string }) {
   subject.signal?.throwIfAborted()
   const original = await readOriginalTaskRequest(db, subject), runs = await originalTaskRunIds(db, subject, original)
   await (await import('./writing-scope.js')).assertWritingTarget(db, subject, { chapterId: target.chapterId })
-  const prior = await db.agentArtifact.findMany({ where: { runId: { in: runs }, artifactType: 'continuityReview',
-    metadata: { path: ['assessmentChapterId'], equals: target.chapterId } }, take: 1001 })
-  if (prior.length > 1000) throw blocked('原连续性阶段无法完整认证，未增加检查额度。')
-  const native = await db.agentOperation.count({ where: { taskRootId: original.taskId, action: 'continuity_validate',
-    inputSnapshot: { path: ['input', 'work', 'chapter', 'id'], equals: target.chapterId }, children: { some: { action: 'continuity_critic' } } } })
-  // Existing reservations keep their own first/second allowance and receipt.
-  // This adapter is deliberately unable to convert them into a fresh plan.
-  if (prior.some(row => typeof object(row.metadata).continuityAssessmentRequestKey === 'string') || native)
-    throw blocked('原检查阶段已使用；现有记录没有新的独立判断授权。已保留原报告、费用和持续义务，继续不会新增主模型或审阅请求。')
+  const bodyOnly = await authenticateInitialContinuityHistory(db, subject, target)
   if (!originalChapterReviewRequirements(original).continuity) throw blocked('原任务没有自动连续性检查授权。')
   const compilation = await db.storyCompilation.findFirst({ where: { id: target.compilationId, chapterId: target.chapterId,
     userId: subject.userId, novelId: subject.novelId, runId: { in: runs } }, include: { chapter: true } })
@@ -198,7 +252,7 @@ export async function prepareContinuityPhasePlan(db: Prisma.TransactionClient, s
   // RECHECK_REQUIRED is a temporary prerequisite, checked by the existing
   // guard only after consumed new-draft/quality repair receipts are excluded.
   // This freezes an upper bound; actual dispatch still requires an open probe.
-  const remainingRevision = !!revisionSource && (reachability?.open === true || reachability?.code === 'REVIEW_REPAIR_RECHECK_REQUIRED') && !cycle?.transitions.length
+  const remainingRevision = !bodyOnly && !!revisionSource && (reachability?.open === true || reachability?.code === 'REVIEW_REPAIR_RECHECK_REQUIRED') && !cycle?.transitions.length
     && !cycle?.verificationStarted && !cycle?.attemptedBaselineRefs?.length
   const revisionAuthority = remainingRevision ? { source: sourceKind,
     sourceHash: runtimeJson({ source: sourceKind, taskId: original.taskId, sourceRunId: original.sourceRunId, chapterId: target.chapterId, authority: revisionSource }).hash,
@@ -414,13 +468,24 @@ export async function assertContinuityAssessmentSubject(db: Prisma.TransactionCl
 }
 
 export async function prepareContinuityReviewLineage(db: Prisma.TransactionClient, subject: Subject,
-  target: { compilationId: string; chapterId: string; semanticSubjectHash: string; modelPriceHash: string }) {
+  target: InitialContinuityTarget & { semanticSubjectHash: string; modelPriceHash: string }) {
   const saved = await db.storyCompilation.findFirst({ where: { id: target.compilationId, chapterId: target.chapterId,
     userId: subject.userId, novelId: subject.novelId }, include: { chapter: true } })
   const audit = object(effectiveContinuityAudit(saved?.validation)), old = object(object(audit.continuityV4).frozen)
   const oldManifest = object(old.manifest), parsed = continuityPhasePlanSchema.safeParse(object(oldManifest.typedLineage).phasePlan)
-  if (audit.parserVersion !== 10 || !parsed.success) return { version: 1 as const,
-    phasePlan: await prepareContinuityPhasePlan(db, subject, target), priorFindings: [], establishedIssues: [] }
+  if (audit.parserVersion !== 10 || !parsed.success) {
+    const phasePlan = await prepareContinuityPhasePlan(db, subject, target)
+    const validation = object(saved?.validation), coverage = object(validation.coverage)
+    const findings = target.input && validation.independentCheck === 'complete' && validation.checkedRevision === target.input.revision
+      && coverage.contentHash === runtimeJson({ content: target.input.bodies.current }).hash && Array.isArray(validation.findings)
+      ? validation.findings.map(object) : []
+    const priorFindings = findings.map((row, index) => ({ reportHash: runtimeJson(audit).hash, findingId: String(index),
+      text: String(row.evidence ?? row.suggestion ?? '').slice(0, 3000),
+      origin: { chapterId: target.chapterId, revision: target.input!.revision, bodyHash: String(coverage.contentHash),
+        sourceHash: typeof coverage.sourceHash === 'string' ? coverage.sourceHash : runtimeJson({ previous: target.input!.bodies.previous }).hash } }))
+    return { version: 1 as const, phasePlan, priorFindings,
+      establishedIssues: priorFindings.filter((_row, index) => findings[index].severity === 'error') }
+  }
   const plan = parsed.data, receipt = await readContinuityRevisionReceipt(db, subject, plan)
   if (!saved?.chapter || !receipt || plan.modelPriceHash !== target.modelPriceHash) throw blocked('原检查已完成；没有剩余的同周期新版复核阶段。')
   const bodies = object(old.bodies), context = bodies.terminalEvidence as LegacyAssessmentInput['bodies']['terminalEvidence']
