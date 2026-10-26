@@ -392,7 +392,7 @@ describe.runIf(available)('contract5 unspent initial continuity assessment', () 
     '%s authenticates the original unused phase without rewriting its failure', scenario => fixture(async f => {
       const spec = JSON.parse(JSON.stringify(f.spec)) as typeof f.spec
       if (scenario === 'old-protocol') delete spec.scope.continuityReportProtocol
-      await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'paused', taskRootId: scenario === 'native' ? f.rootId : null,
+      await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running', taskRootId: scenario === 'native' ? f.rootId : null,
         runtimeProtocolVersion: scenario === 'native' ? 2 : 0, taskSpec: JSON.parse(JSON.stringify(spec)), startRequest: { prompt: '修改第一章' } } })
       const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '修改第一章' })
       await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { stage: 'check',
@@ -424,6 +424,9 @@ describe.runIf(available)('contract5 unspent initial continuity assessment', () 
       if (scenario === 'overlap') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'tool.call', createdAt: at(20),
         payload: { toolName: 'quality_analyze', callId: 'overlapping-unknown-quality', args: { chapterId: f.chapterId } } } })
       if (scenario === 'changed-body') await prisma.chapter.update({ where: { id: f.chapterId }, data: { revision: 2, content: 'Changed saved body.', updatedAt: at(150) } })
+      // Setup is an actual active writing stage; only the completed failure
+      // pauses it. A fresh author event then owns the recovery observation.
+      await prisma.agentRun.update({ where: { id: f.runId }, data: { status: ['no-author', 'early-author'].includes(scenario) ? 'paused' : 'running' } })
       const before = { run: await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } }),
         chapter: await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } }),
         compilation: await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } }),
