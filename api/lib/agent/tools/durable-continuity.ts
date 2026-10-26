@@ -371,16 +371,19 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
     if (terminalProtocol) criticSystem += `\n${continuitySemanticRule}`
     const committedReview = compilation.status === 'completed'
       ? (await import('../chapter-review-guard.js')).readCurrentCompilerContinuity({ ...compilation, bridge: compilation.bridge }, compilation.chapter, source) : null
-    const coverage = compilerContinuityCoverage({ chapter: compilation.chapter,
-      bridge: committedReview?.assessment ? committedReview.checkedBridge : compilation.bridge, sceneTasks: compilation.sceneTasks,
+    const currentCoverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks,
       source, focus: typeof args.focus === 'string' ? args.focus : undefined, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8)
+    const cacheCoverage = committedReview?.assessment ? compilerContinuityCoverage({ chapter: compilation.chapter,
+      bridge: committedReview.checkedBridge, sceneTasks: compilation.sceneTasks,
+      source, focus: typeof args.focus === 'string' ? args.focus : undefined, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8) : currentCoverage
     const cached = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(continuityFindingInputSchema), coverage: coverageSchema }).safeParse(compilation.validation)
     const cacheDeliveryBinding = cached.success && terminalEvidence ? await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(tx,
       { ...ctx, compilationId: compilation.id }, { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: compilation.preparedContext },
       compilation.chapter, compilation.validation, terminalEvidence) : undefined
     const proposalCacheCurrent = !terminalEvidence || !terminalCandidate || terminalProposalCacheMatches({ spec: originalRequest.spec,
       preparedContext: compilation.preparedContext, validation: compilation.validation, chapter: compilation.chapter, source, candidate: terminalCandidate, nextContext: terminalEvidence }, cacheDeliveryBinding)
-    const reusable = proposalCacheCurrent && cached.success && cached.data.checkedRevision === compilation.chapter.revision && compilerContinuityCoverageMatches(cached.data.coverage, coverage)
+    const reusable = proposalCacheCurrent && cached.success && cached.data.checkedRevision === compilation.chapter.revision && compilerContinuityCoverageMatches(cached.data.coverage, cacheCoverage)
+    const coverage = reusable ? cacheCoverage : currentCoverage
     if (!reusable && terminalEvidence && hasTerminalCoverageProtocol(originalRequest.spec)) terminalEvidence = { ...terminalEvidence,
       factCoverage: terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, 2, terminalCoverageProofs(source, 2))! }
     const repair = false

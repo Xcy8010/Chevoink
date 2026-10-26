@@ -72,7 +72,7 @@ async function saveTerminalReview(a: Awaited<ReturnType<typeof admit>>, verdict:
   const context = terminalEvidenceContext(chapter, previous, 1)
   const inspected = inspectContinuityResponse(JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind =>
     ({ kind, result: 'not_applicable', reason: '合成正文没有可比较的动作关系。', findingIndexes: [] })),
-    terminalVerdicts: [{ path: 'exitState.action', verdict, sourceEvidence: verdict === 'supported' ? [{ segmentId: 'c0', quote: chapter.content }] : [] }],
+    terminalVerdicts: [{ path: 'exitState.action', verdict, basis: 'current', sourceEvidence: verdict === 'supported' ? [{ segmentId: 'c0', quote: chapter.content }] : [] }],
   }), { current: chapter.content, previous: previous?.content ?? null, terminalEvidence: context }, true, 8, candidate)
   expect(inspected.complete).toBe(true)
   await validateStoryContinuity({ ...a, compilationId: a.compilationId, findings: [], independentCheck: 'complete', terminalCandidate: candidate,

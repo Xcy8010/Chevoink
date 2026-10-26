@@ -1055,8 +1055,12 @@ export const continuityValidateTool = defineTool({
     if (terminalProtocol) criticSystem += `\n${continuitySemanticRule}`
     const committedReview = compilation.status === 'completed'
       ? (await import('../chapter-review-guard.js')).readCurrentCompilerContinuity({ ...compilation, bridge }, chapter, sourceChapter) : null
-    const coverage = compilerContinuityCoverage({ chapter, bridge: committedReview?.assessment ? committedReview.checkedBridge : bridge,
+    const coverage = compilerContinuityCoverage({ chapter, bridge,
       sceneTasks: compilation.sceneTasks, source: sourceChapter, focus: args.focus, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8)
+    // COMMIT proof is only an exact-cache identity. A fresh scope assesses the
+    // current terminal bridge rather than freezing the precommit bridge again.
+    const cacheCoverage = committedReview?.assessment ? compilerContinuityCoverage({ chapter, bridge: committedReview.checkedBridge,
+      sceneTasks: compilation.sceneTasks, source: sourceChapter, focus: args.focus, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8) : coverage
     const sourceUnchanged = !bridge.fromChapterId || sourceChapter?.revision === bridge.sourceRevision
     if (!sourceUnchanged || !chapter.content.trim() || compilation.sceneTasks.length < 1 || compilation.sceneTasks.length > 4) {
       return { outcome: 'failed' as const, summary: '连续性检查前置未满足',
@@ -1081,7 +1085,7 @@ export const continuityValidateTool = defineTool({
       chapter, compilation.validation, terminalEvidence) : undefined
     const proposalCacheCurrent = !terminalEvidence || !terminalCandidate || terminalProposalCacheMatches({ spec: originalRequest.spec,
       preparedContext: compilation.preparedContext, validation: compilation.validation, chapter, source: sourceChapter, candidate: terminalCandidate, nextContext: terminalEvidence }, cacheDeliveryBinding)
-    if (sourceUnchanged && proposalCacheCurrent && cachedValidation?.independentCheck === 'complete' && cachedValidation.checkedRevision === chapter.revision && compilerContinuityCoverageMatches(cachedValidation.coverage, coverage)) {
+    if (sourceUnchanged && proposalCacheCurrent && cachedValidation?.independentCheck === 'complete' && cachedValidation.checkedRevision === chapter.revision && compilerContinuityCoverageMatches(cachedValidation.coverage, cacheCoverage)) {
       if (ctx.continuityKnownResultOnly) {
         const binding = z.object({ assessmentRequest: z.object({ key: z.string(), inputHash: z.string() }) }).safeParse(previousAudit)
         if (!binding.success || binding.data.assessmentRequest.key !== ctx.continuityKnownResultOnly.assessmentKey
@@ -1093,7 +1097,7 @@ export const continuityValidateTool = defineTool({
       const warningCount = cachedValidation.warningCount ?? findings.filter((item) => item.severity === 'warning').length
       ctx.signal.throwIfAborted()
       const result = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id, findings,
-        expectedChapterRevision: chapter.revision, expectedContinuityOwnerSeq: ctx.continuityOwnerSeq, expectedTerminalCandidateHash:patch?.expectedBaseHash, independentCheck: 'complete', reuseCachedReview: true, coverage, terminalCandidate, focus: args.focus, signal: ctx.signal })
+        expectedChapterRevision: chapter.revision, expectedContinuityOwnerSeq: ctx.continuityOwnerSeq, expectedTerminalCandidateHash:patch?.expectedBaseHash, independentCheck: 'complete', reuseCachedReview: true, coverage: cacheCoverage, terminalCandidate, focus: args.focus, signal: ctx.signal })
       if (result.independentCheck !== 'complete') return { outcome: 'failed' as const, failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED',
         summary: '缓存连续性证据未确认', output: '本次只读复核发现缓存引用缺失或不属于当前对应正文，已保留未确认报告；未调用模型、未增加检查次数，不能宣称检查通过或据此改稿。原任务内仍可纠正真实问题，按原预算取得有效复核。' }
       const cachedEvidence = terminalEvidence
