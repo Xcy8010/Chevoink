@@ -232,7 +232,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
         throw new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED', '原已授权复核阶段的兼容回执不能认证；未创建新请求或费用。')
     }
     return admitted
-  })
+  }, { timeout: 20_000 })
   if (reservation === 'blocked') throw new DataAccessError(409, 'CONTINUITY_REPORT_INCOMPLETE', '原检查或复评尚未确认，本次未重放模型请求；保留真实记录等待作者继续。')
   const replay = reservation === 'replay' ? await prisma.$transaction(tx => readLegacyContinuityAssessment(tx, ctx, frozen)) : null
   let raw: string
@@ -246,7 +246,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
     }
     raw = replay ? JSON.parse(replay.inspected.audit.rawResponse.content) as string : await withTextRequestTrace(trace, () => generateReviewCompletion(input.system, input.content, { ...input.options, agentRunId: ctx.runId,
       beforeProviderDispatch: async usageId => {
-        const stage = await prisma.$transaction(tx => bindLegacyContinuityRequest(tx, ctx, frozen, usageId, 'primary', input.assertCurrent))
+        const stage = await prisma.$transaction(tx => bindLegacyContinuityRequest(tx, ctx, frozen, usageId, 'primary', input.assertCurrent), { timeout: 20_000 })
         stages.set(usageId, stage)
       },
       onObservedCompletion: observation => {
@@ -273,7 +273,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
     slotUsed: replay?.slotUsed ?? [...stages.values()].some(stage => stage === 'output_recovery'), signal: ctx.signal,
     assertCurrent: input.assertCurrent,
     claim: request => prisma.$transaction(tx => claimLegacyContinuityReassessment(tx, ctx, frozen, original,
-      replay?.usageIds ?? trace.records.map(record => record.usageId), request, input.assertCurrent)),
+      replay?.usageIds ?? trace.records.map(record => record.usageId), request, input.assertCurrent), { timeout: 20_000 }),
     notDispatched: () => prisma.$transaction(tx => observeLegacyContinuityReassessmentNotDispatched(tx, ctx, frozen)),
     dispatch: async request => {
       const { generateTextCompletion } = await import('../../ai-service.js')
@@ -282,7 +282,7 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
       try {
         const content = await withTextRequestTrace(followupTrace, () => generateTextCompletion(request.system, request.content, {
           ...input.options, agentRunId: ctx.runId, action: 'agent3ContinuityCriticSecondPass', maxOutputTokens: CONTINUITY_MAX_OUTPUT_TOKENS, boundedReview: true, responseFormat: 'json_object',
-          beforeProviderDispatch: async usageId => { await prisma.$transaction(tx => bindLegacyContinuityRequest(tx, ctx, frozen, usageId, 'reassessment', input.assertCurrent)) },
+          beforeProviderDispatch: async usageId => { await prisma.$transaction(tx => bindLegacyContinuityRequest(tx, ctx, frozen, usageId, 'reassessment', input.assertCurrent), { timeout: 20_000 }) },
           onObservedCompletion: value => { followupObservations.push({ ...value, toolCalls: [...value.toolCalls] }); input.options.onObservedCompletion?.(value) },
         }))
         const response = followupObservations.at(-1)
@@ -1161,7 +1161,7 @@ export const continuityValidateTool = defineTool({
           continuityEvidenceRecovery: { version: 1, observationId: reusable.observationId, claimId: reusable.claimId, usageIds: reusable.usageIds,
             originalParserVersion: reusable.originalAudit.parserVersion, audit: reusable.inspected.audit, observedAt: new Date().toISOString(), offline: true } }).value } })
         return result
-      })
+      }, { timeout: 20_000 })
       if (report.independentCheck !== 'complete') return { outcome: 'failed' as const, failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED', summary: '独立连续性复核未完成', output: unconfirmedContinuityOutput }
       return { reviewOutcome: report.errorCount || report.warningCount ? 'decision_required' : 'complete', summary: `离线复用连续性纠正 · ${report.errorCount} 错误 ${report.warningCount} 警告`,
         output: `已应用此前收到且已结算的引用纠正，正文未修改，未再次调用模型。\n留置绑定 reportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...report, coverage })}；findingId 使用从0开始编号。\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` }
@@ -1245,7 +1245,6 @@ export const continuityValidateTool = defineTool({
       if(patch&&(!currentCandidate||runtimeJson(currentCandidate).hash!==patch.expectedBaseHash))throw new DataAccessError(409,'CONTINUITY_INPUT_STALE','检查期间章末候选已变化，未覆盖较新的候选。')
       if (continued && runtimeJson(current?.validation).hash !== continued.validationHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '原失败报告已变化，未纠正或应用旧意见。')
     }
-    await assertCurrent()
     let inspected: AuthenticatedContinuityInspection
     try {
       inspected = continued ? await runContinuityEvidenceCorrection({ original: continued.inspected, bodies, billingKnown: true, signal: ctx.signal,
@@ -1255,7 +1254,7 @@ export const continuityValidateTool = defineTool({
         if (!proof || proof.validationHash !== continued.validationHash || proof.admissionKey !== continued.admissionKey) return false
         return claimLegacyContinuityCorrection(tx, ctx, { chapterId: chapter.id, revision: chapter.revision, bodies, original,
           usageIds: proof.usageIds, targetType: 'story_compilation', targetId: compilation.id, assertCurrent, originalAudit: proof.originalAudit, bindingHash: runtimeJson(coverage).hash })
-      }),
+      }, { timeout: 20_000 }),
       dispatch: (system, content) => dispatchLegacyContinuityCorrection(ctx, { original: continued!.inspected, bodies, system, content,
         options: { modelRuntime: reviewRuntime, explicitModelSelection: true,
           signal: ctx.signal, userId: ctx.userId, action: 'agent3ContinuityEvidenceCorrection', novelId: ctx.novelId, chapterId: chapter.id,
@@ -1294,7 +1293,6 @@ export const continuityValidateTool = defineTool({
           title: '连续性检查', detail: `编译状态需核对 · 当前 r${chapter.revision} 未复核`, items: [] } }
     }
     ctx.signal.throwIfAborted()
-    await assertCurrent()
     const parsedCriticResponses = [{ structured: inspected.complete, findings: inspected.findings }]
     const criticFallback = parsedCriticResponses.some((response) => !response.structured)
     const independentFindings = parsedCriticResponses
@@ -1321,7 +1319,7 @@ export const continuityValidateTool = defineTool({
             originalParserVersion: continued.originalAudit.parserVersion, audit: inspected.audit, observedAt: new Date().toISOString() } } : {}),
         continuityCriticResponse: continued ? continued.originalAudit : inspected.audit }).value } })
       return result
-    })
+    }, { timeout: 20_000 })
     const reportRecovery = criticFallback && !continued && 'recoveryReady' in inspected && inspected.recoveryReady ? terminalReportRecoveryResult({ ...result, terminalCandidate, continuityCriticResponse: inspected.audit },
       chapter.content, requestBodies.terminalEvidence, requestBodies.previous) : null
     if (reportRecovery) return reportRecovery

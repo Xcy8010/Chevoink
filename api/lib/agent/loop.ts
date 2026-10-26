@@ -1266,9 +1266,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     }
     const pendingReviewPauseReason = () => {
       const types = [...new Set([...pendingReviews.values()].map(item => item.toolName === 'quality_analyze' ? '质量' : '连续性'))]
-      const completed = currentReviewState.value?.progressEvidence?.phases.filter(phase => phase === 'continuity' || phase === 'quality')
-        .map(phase => phase === 'continuity' ? '连续性' : '质量') ?? []
-      return `检查未完成；${types.join('、')}检查仍有未确认的请求，模型结果或用量尚未确认。${completed.length ? `当前${[...new Set(completed)].join('、')}检查结果已独立保存；` : ''}正文、进度与原预算保留；先核对原调用回执，不重发未知付费请求、不调用模型作收尾，也未将任务标记完成。`
+      return `${types.join('、') || '章节'}检查未完成。正文已保留。`
     }
     if ((params.resume || previousTask) && (toolRestrictions.some(item => ['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED'].includes(item.code))
       || pendingReviews.size || [...automaticReviewAttempts].some(key => key.endsWith(':continuity_validate')))) {
@@ -1318,8 +1316,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               && restriction.action === 'quality_analyze') restriction.reviewInput = item.changedReviewInput
           }
         }
-        // Closing a proven local refusal grants no provider retry/bootstrap key.
-        if (!item.notDispatched) reviewRecoveryKeys.set(reviewDispatchKey(item, item.toolName), `review-recovery:${item.reconciliation.admissionId}:${item.callId}`)
+        // Only an unspent contract5 first assessment receives the existing
+        // scheduling alias. The original paid phase and attempt remain intact.
+        if (!item.notDispatched || item.initialAssessmentUnspent) reviewRecoveryKeys.set(reviewDispatchKey(item, item.toolName), `review-recovery:${item.reconciliation.admissionId}:${item.callId}`)
       }
       if (recovered.length) await persistCheckpoint()
     }
@@ -3247,7 +3246,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       await flushLiveTurn()
       // Waiting for an original receipt is a pause, not another failed task or
       // assistant notice. This also handles a receipt changing after preflight.
-      await finalizeRun(runId, bus, 'paused', usage, turn, '检查正在等待原请求的结果或用量确认。正文和已完成的检查已保留。', undefined, false,
+      await finalizeRun(runId, bus, 'paused', usage, turn, '章节检查未完成。正文已保留。', undefined, false,
         undefined, undefined, undefined, false, undefined, 'review_receipt_pending')
       return
     }

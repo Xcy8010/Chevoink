@@ -24,6 +24,7 @@ const sensitive = [...reviewers, 'chapter_write', 'chapter_edit_range', 'chapter
 
 export type ReviewRequestRecoveryEvidence = PendingReviewCall & {
   notDispatched?: true
+  initialAssessmentUnspent?: true
   changedReviewInput?: { chapterId: string; revision: number }
   resultAt: Date
   receipt: Omit<AgentReviewFailureReconciliation, 'admissionId'>
@@ -58,7 +59,9 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
         revision: Number(proof.revision), compilationId: typeof args.compilationId === 'string' ? args.compilationId : null })
     } else if (payload.toolName === 'continuity_validate' && typeof args.compilationId === 'string'
       && (payload.failureCode === 'CONTINUITY_INPUT_STALE' && terminalCandidatePatchSchema.safeParse(args.terminalPatch).success
-        || payload.failureCode === 'TERMINAL_STATE_REVIEW_REQUIRED' && (Object.keys(args).length === 1 || explicitStateArgs.safeParse(args).success))) {
+        || payload.failureCode === 'TERMINAL_STATE_REVIEW_REQUIRED' && (Object.keys(args).length === 1 || explicitStateArgs.safeParse(args).success)
+        || payload.failureCode === 'UNEXPECTED_TOOL_ERROR' && Object.keys(args).length === 1
+          && object(object(original.spec).scope).continuityReportProtocol === 5)) {
       // Discover old local refusals even after their pending checkpoint entry
       // was reconciled. The exact same ownership/journal/usage proof below
       // authenticates them; a missing usage row alone proves nothing.
@@ -66,7 +69,9 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
         novelId: subject.novelId, runId: { in: ids } }, select: { chapterId: true, validation: true } })
       // A full candidate can be proposed after a body edit; the old report is
       // still bound to its own checkedRevision, not this refused request.
-      const revision = explicitStateArgs.safeParse(args).success && compiler?.chapterId
+      const initialCompilerFailure = payload.failureCode === 'UNEXPECTED_TOOL_ERROR'
+        && object(object(original.spec).scope).continuityReportProtocol === 5 && Object.keys(args).length === 1
+      const revision = (initialCompilerFailure || explicitStateArgs.safeParse(args).success) && compiler?.chapterId
         ? (await tx.chapter.findFirst({ where: { id: compiler.chapterId, authorId: subject.userId, ...activeChapterScope(subject.novelId) },
           select: { revision: true } }))?.revision : object(compiler?.validation).checkedRevision
       if (compiler?.chapterId && Number.isSafeInteger(revision)) candidates.push({ callId: payload.callId, toolName: 'continuity_validate',
@@ -181,6 +186,28 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
         } catch { /* Missing/unknown/terminal-bearing histories stay unresolved. */ }
       }
     }
+    // Frozen contract5 reserves a compiler assessment before any provider
+    // request. A closed, unchanged initial call with no reservation or usage
+    // has not spent that phase; an error label or absent fee alone proves none.
+    let initialAssessmentUnspent = false
+    if (!typed && !localPatchRefusal && item.toolName === 'continuity_validate'
+      && scope.continuityReportProtocol === 5 && payload.failureCode === 'UNEXPECTED_TOOL_ERROR'
+      && !source.taskRootId && source.runtimeProtocolVersion === 0 && item.compilationId
+      && Object.keys(args).length === 1 && args.compilationId === item.compilationId
+      && chapter.revision === item.revision && chapter.updatedAt <= call.createdAt
+      && !await hasLegacyTerminalCallEvidence(tx, { runId: call.runId, callId: item.callId })) {
+      const compiler = await tx.storyCompilation.findFirst({ where: { id: item.compilationId, userId: subject.userId,
+        novelId: subject.novelId, runId: { in: ids }, chapterId: chapter.id }, include: { bridge: true } })
+      const reserved = await tx.agentArtifact.findFirst({ where: { runId: { in: ids }, artifactType: 'continuityReview',
+        metadata: { path: ['assessmentChapterId'], equals: chapter.id } }, select: { id: true } })
+      const previous = compiler?.bridge?.fromChapterId ? await tx.chapter.findFirst({ where: {
+        id: compiler.bridge.fromChapterId, authorId: subject.userId, ...activeChapterScope(subject.novelId) },
+        select: { revision: true, updatedAt: true } }) : null
+      initialAssessmentUnspent = !!compiler?.bridge && compiler.status === 'active' && compiler.stage === 'check'
+        && compiler.validation === null && compiler.updatedAt <= call.createdAt && !reserved
+        && (!compiler.bridge.fromChapterId || previous?.revision === compiler.bridge.sourceRevision && previous.updatedAt <= call.createdAt)
+      localPatchRefusal = initialAssessmentUnspent
+    }
     if (payload.reviewRequestFinished !== undefined && !typed && !(localPatchRefusal && proof.version === 1
       && proof.chapterId === chapter.id && proof.revision === chapter.revision && proof.contentHash === contentHash
       && Array.isArray(proof.usageIds) && proof.usageIds.length === 0)) continue
@@ -205,7 +232,7 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
     if (localPatchRefusal) {
       if (payments.length || related.some(row => row.createdAt >= call.createdAt && row.createdAt <= result.createdAt)) continue
       relatedByCall.set(item.callId, related)
-      recovered.push({ ...item, notDispatched: true, resultAt: result.createdAt, receipt: { status: 'terminal_failed_billing_known',
+      recovered.push({ ...item, notDispatched: true, ...(initialAssessmentUnspent ? { initialAssessmentUnspent: true as const } : {}), resultAt: result.createdAt, receipt: { status: 'terminal_failed_billing_known',
         sourceRunId: call.runId, sourceResultId: result.id, sourceReportId: null, usageIds: [],
         currentRevision: chapter.revision, currentContentHash: contentHash } })
       continue

@@ -7,6 +7,7 @@ import { prisma } from '../../api/lib/prisma.js'
 import { readContinuedContinuityRecovery, readLegacyContinuityRecovery } from '../../api/lib/agent/legacy-continuity-recovery.js'
 import { prepareStoryCompilation } from '../../api/lib/agent/story-compiler.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
+import { nextReviewDispatch, reviewDispatchKey } from '../../api/lib/agent/review-dispatch.js'
 import type { ToolRestriction } from '../../api/lib/agent/tool-local-failure.js'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
 
@@ -382,4 +383,89 @@ describe.runIf(available)('new reviewer failure after an audited exempt cancella
         expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(before)
       } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
     }))
+})
+
+
+describe.runIf(available)('contract5 unspent initial continuity assessment', () => {
+  it.each(['unspent', 'no-author', 'early-author', 'old-protocol', 'reservation', 'other-call-reservation', 'unknown-fee', 'settled-fee',
+    'overlap', 'changed-body', 'checked', 'extra-args', 'native', 'duplicate-result', 'wrong-proof'] as const)(
+    '%s authenticates the original unused phase without rewriting its failure', scenario => fixture(async f => {
+      const spec = JSON.parse(JSON.stringify(f.spec)) as typeof f.spec
+      if (scenario === 'old-protocol') delete spec.scope.continuityReportProtocol
+      await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'paused', taskRootId: scenario === 'native' ? f.rootId : null,
+        runtimeProtocolVersion: scenario === 'native' ? 2 : 0, taskSpec: JSON.parse(JSON.stringify(spec)), startRequest: { prompt: '修改第一章' } } })
+      const { compilation } = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '修改第一章' })
+      await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { stage: 'check',
+        ...(scenario === 'checked' ? { validation: { independentCheck: 'unavailable', checkedRevision: 1 } } : {}) } })
+      const start = new Date(Date.now() + 1000), at = (offset: number) => new Date(start.getTime() + offset)
+      const pending = { compilationId: compilation.id, chapterId: f.chapterId, revision: 1,
+        toolName: 'continuity_validate' as const, callId: 'original-unspent-check' }
+      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call', createdAt: start,
+        payload: { toolName: pending.toolName, callId: pending.callId, args: { compilationId: compilation.id,
+          ...(scenario === 'extra-args' ? { focus: 'A separate focus is not this ordinary initial path.' } : {}) } } } })
+      const returned = { toolName: pending.toolName, callId: pending.callId, ok: false, failureCode: 'UNEXPECTED_TOOL_ERROR',
+        ...(scenario === 'wrong-proof' ? { reviewRequestFinished: { version: 1, chapterId: f.chapterId, revision: 1,
+          contentHash: 'f'.repeat(64), usageIds: [] } } : {}) }
+      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'tool.result', createdAt: at(100), payload: returned } })
+      if (scenario === 'duplicate-result') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2,
+        type: 'tool.result', createdAt: at(90), payload: returned } })
+      const pause = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 4, type: 'run.paused', createdAt: at(200), payload: {} } })
+      if (scenario !== 'no-author') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 5, type: 'run.started',
+        createdAt: at(scenario === 'early-author' ? 50 : 300), payload: { authorContinue: { eventId: pause.id, afterSeq: 4 } } } })
+      if (scenario.endsWith('reservation')) await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'continuityReview',
+        title: 'Original reservation', content: 'Synthetic immutable reservation.', createdAt: at(10), metadata: { version: 1,
+          callId: scenario === 'reservation' ? pending.callId : 'different-call-same-phase', assessmentChapterId: f.chapterId,
+          continuityAssessmentRequestKey: 'original-reserved-phase' } } })
+      if (scenario.endsWith('fee')) await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, chapterId: f.chapterId,
+        agentRunId: f.runId, targetType: 'story_compilation', targetId: compilation.id, action: 'agent3ContinuityCritic',
+        providerType: 'text', providerMode: 'custom', modelName: 'synthetic-no-network', createdAt: at(20), durationMs: 10,
+        requestTokens: scenario === 'unknown-fee' ? null : 10, responseTokens: scenario === 'unknown-fee' ? null : 2,
+        usageSource: scenario === 'unknown-fee' ? 'unknown' : 'reported', billingStatus: scenario === 'unknown-fee' ? 'pending_usage' : 'settled' } })
+      if (scenario === 'overlap') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'tool.call', createdAt: at(20),
+        payload: { toolName: 'quality_analyze', callId: 'overlapping-unknown-quality', args: { chapterId: f.chapterId } } } })
+      if (scenario === 'changed-body') await prisma.chapter.update({ where: { id: f.chapterId }, data: { revision: 2, content: 'Changed saved body.', updatedAt: at(150) } })
+      const before = { run: await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } }),
+        chapter: await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } }),
+        compilation: await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } }),
+        events: await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } }),
+        artifacts: await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } }),
+        usage: await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } }) }
+      const evidence = await prisma.$transaction(tx => readReviewRequestRecoveryEvidence(tx, f, [pending]))
+      const knownUnused = ['unspent', 'no-author', 'early-author'].includes(scenario)
+      expect(evidence).toHaveLength(knownUnused ? 1 : 0)
+      const recovered = await prisma.$transaction(tx => readReviewRequestRecovery(tx, f, [pending]))
+      expect(recovered).toHaveLength(scenario === 'unspent' ? 1 : 0)
+      const discovered = await prisma.$transaction(tx => readReviewRequestRecoveryEvidence(tx, f, []))
+      expect(discovered).toHaveLength(knownUnused ? 1 : 0)
+      if (scenario === 'unspent') {
+        // Reconciliation can be durable before the scheduling alias is claimed.
+        // A restart has an empty pending list and must rebuild from real history.
+        const audit = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 6, type: 'review.reconciled', createdAt: at(400),
+          payload: runtimeJson({ ...pending, receipt: recovered[0].reconciliation }).value } })
+        before.events.push(audit)
+        const restarted = await prisma.$transaction(tx => readReviewRequestRecovery(tx, f, []))
+        expect(restarted).toEqual(recovered)
+        const state: NonNullable<Parameters<typeof nextReviewDispatch>[0]> = { ready: false, checksRequired: true,
+          compilationId: compilation.id, chapterId: f.chapterId, revision: 1, continuity: 'missing', quality: 'complete',
+          continuityErrorCount: 0, qualityErrorCount: 0, qualityReportId: null,
+          requiredTools: [{ name: 'continuity_validate', args: { compilationId: compilation.id } }] }
+        const originalKey = reviewDispatchKey(state, pending.toolName)
+        const alias = 'review-recovery:' + restarted[0].reconciliation.admissionId + ':' + pending.callId
+        const attempts = new Set([originalKey]), keys = new Map([[originalKey, alias]])
+        expect(nextReviewDispatch(state, new Set(['continuity_validate']), attempts, new Set(), keys)).toMatchObject({ kind: 'tool', key: alias })
+        attempts.add(alias)
+        expect(nextReviewDispatch(state, new Set(['continuity_validate']), attempts, new Set(), keys).kind).toBe('blocked')
+        expect(attempts.has(originalKey)).toBe(true)
+      }
+      if (knownUnused) expect(evidence[0]).toMatchObject({ ...pending, notDispatched: true, initialAssessmentUnspent: true,
+        receipt: { sourceRunId: f.runId, usageIds: [], currentRevision: 1 } })
+      for (const foreign of [{ ...f, userId: randomUUID() }, { ...f, novelId: randomUUID() }, { ...f, runId: randomUUID() }])
+        expect(await prisma.$transaction(tx => readReviewRequestRecoveryEvidence(tx, foreign, [pending]))).toEqual([])
+      expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).toEqual(before.run)
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before.chapter)
+      expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).toEqual(before.compilation)
+      expect(await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })).toEqual(before.events)
+      expect(await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })).toEqual(before.artifacts)
+      expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(before.usage)
+    }, undefined, '修改第一章', { freezeWriting: true, continuityReportProtocol: 5 }))
 })

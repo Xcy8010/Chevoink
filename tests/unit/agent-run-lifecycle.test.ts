@@ -1489,7 +1489,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(critic.execute).toHaveBeenCalledOnce()
     expect(mocks.chat).not.toHaveBeenCalled()
     expect(mocks.runs.get('run')).toMatchObject({ status: 'paused', errorMessage: null })
-    expect(mocks.runs.get('run')?.outputSummary).toContain('检查正在等待原请求的结果或用量确认')
+    expect(mocks.runs.get('run')?.outputSummary).toContain('章节检查未完成。正文已保留。')
     const { activeExecutionMs, ...storedCheckpoint } = savedUsage.checkpoint
     expect(mocks.runs.get('run')?.usage).toMatchObject({ ...savedUsage, checkpoint: storedCheckpoint })
     expect((mocks.runs.get('run')?.usage as typeof savedUsage).checkpoint.activeExecutionMs).toBeGreaterThanOrEqual(activeExecutionMs)
@@ -1746,7 +1746,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(mocks.chat).not.toHaveBeenCalled()
     expect(critic.execute).toHaveBeenCalledOnce()
     expect(mocks.runs.get('run')).toMatchObject({ status: 'paused', errorMessage: null })
-    expect(mocks.runs.get('run')?.outputSummary).toContain('检查正在等待原请求的结果或用量确认')
+    expect(mocks.runs.get('run')?.outputSummary).toContain('章节检查未完成。正文已保留。')
     expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { inheritedTokens: (original.usage as { totalTokens: number }).totalTokens, inheritedTurns: original.currentTurn,
       pendingReviews: [{ compilationId: 'comp', chapterId: 'c', revision: 3, toolName: 'quality_analyze', callId: 'unknown-check' }] } })
   })
@@ -1764,7 +1764,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(mocks.chat).not.toHaveBeenCalled()
     expect(critic.execute).toHaveBeenCalledOnce()
     expect(mocks.runs.get('run')).toMatchObject({ status: 'paused', errorMessage: null })
-    expect(mocks.runs.get('run')?.outputSummary).toContain('检查正在等待原请求的结果或用量确认')
+    expect(mocks.runs.get('run')?.outputSummary).toContain('章节检查未完成。正文已保留。')
   })
   it('sends no critic when pre-dispatch evidence cannot persist and does not invent an unknown request', async () => {
     mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'missing'))
@@ -1804,7 +1804,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(critic.execute).toHaveBeenCalledOnce()
     expect(mocks.chat).not.toHaveBeenCalled()
     expect(mocks.runs.get('run')).toMatchObject({ status: 'paused', errorMessage: null })
-    expect(mocks.runs.get('run')?.outputSummary).toContain('检查正在等待原请求的结果或用量确认')
+    expect(mocks.runs.get('run')?.outputSummary).toContain('章节检查未完成。正文已保留。')
   })
 })
 
@@ -4060,6 +4060,48 @@ describe('independent persisted review phases with unresolved usage', () => {
       state: (phases: Array<'continuity' | 'quality' | 'decision' | 'terminal'>): ChapterReviewReadiness => ({ ...readiness('complete', 'complete', 4), continuityErrorCount: 4,
         progressEvidence: { taskId: taskSpec.id, userId: 'user', novelId: 'novel', chapterId: 'c', orderIndex: 1, contentHash, phases } }) }
   }
+  it.each(['unspent', 'alias-consumed'] as const)('%s retains the old claim and dispatches only the authenticated unused initial assessment', async scenario => {
+    const local = { compilationId: 'comp', chapterId: 'c', revision: 4, toolName: 'continuity_validate' as const, callId: 'initial-zero-call' }
+    const f = saved(0, [local])
+    f.taskSpec.scope.continuityReportProtocol = 5
+    const originalKey = 'comp:c:4:continuity_validate:protocol8'
+    const alias = 'review-recovery:author-continue:initial:initial-zero-call'
+    f.checkpoint.reviewAttempts.push(originalKey, ...(scenario === 'alias-consumed' ? [alias] : []))
+    mocks.update.mockResolvedValueOnce({ taskSpec: f.taskSpec, currentTurn: 11, startedAt: new Date(f.checkpoint.runStartedAt), usage: f.usage })
+    mocks.requestRecovery.mockResolvedValue([{ ...local, notDispatched: true, initialAssessmentUnspent: true, reconciliation: {
+      status: 'terminal_failed_billing_known', sourceRunId: 'run', sourceResultId: 'initial-zero-result', sourceReportId: null,
+      usageIds: [], admissionId: 'author-continue:initial', currentRevision: 4, currentContentHash: f.contentHash,
+    } }])
+    mocks.reviewReadiness.mockResolvedValue(readiness('missing', 'complete', 4))
+    const coordinator = await import('../../api/lib/agent/continuity-coordinator.js')
+    const checkpointRead = vi.spyOn(coordinator, 'hasCurrentWritingBodyCheckpoint').mockResolvedValue(true)
+    try {
+    const critic = tool('continuity_validate', async () => {
+      Object.assign(beginTextRequest('one-original-phase-request').record, { status: 'unknown', billingKnown: false })
+      return { output: 'The original request is now unknown; do not send again.', outcome: 'failed', failureCode: 'AI_PROVIDER_TRANSPORT' }
+    })
+    mocks.tools = [critic]
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt, resume: true })
+    expect(critic.execute).toHaveBeenCalledTimes(scenario === 'unspent' ? 1 : 0)
+    expect(mocks.chat).not.toHaveBeenCalled()
+    const checkpoint = mocks.runs.get('run')?.usage?.checkpoint
+    expect(checkpoint.reviewAttempts).toEqual(expect.arrayContaining([...f.checkpoint.reviewAttempts, alias]))
+    expect(checkpoint.reviewAttempts.filter((key: string) => key === originalKey)).toHaveLength(1)
+    expect(checkpoint.reviewAttempts.filter((key: string) => key === alias)).toHaveLength(1)
+    expect(events().filter(event => event.type === 'review.reconciled')).toHaveLength(1)
+    expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
+    if (scenario === 'unspent') {
+      const notice = String(mocks.runs.get('run')?.errorMessage ?? mocks.runs.get('run')?.outputSummary)
+      expect(notice).toBe('连续性检查未完成。正文已保留。')
+      expect(notice.length).toBeLessThan(40)
+    }
+    const stopped = structuredClone(mocks.runs.get('run')!)
+    mocks.update.mockResolvedValueOnce(stopped as never)
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt, resume: true })
+    expect(critic.execute).toHaveBeenCalledTimes(scenario === 'unspent' ? 1 : 0)
+    expect(mocks.chat).not.toHaveBeenCalled()
+    } finally { checkpointRead.mockRestore() }
+  })
   it('closes only the proven local refusal without creating a paid recovery key or clearing another unknown request', async () => {
     const local = { compilationId: 'comp', chapterId: 'c', revision: 4, toolName: 'continuity_validate' as const, callId: 'local-refusal' }
     const unknown = { ...local, toolName: 'quality_analyze' as const, callId: 'unresolved-quality' }
@@ -4139,9 +4181,10 @@ describe('independent persisted review phases with unresolved usage', () => {
       pendingReviews: [{ callId: 'unknown-quality', toolName: 'quality_analyze', revision: 4, chapterId: 'c', compilationId: 'comp' }],
       reviewAttempts: expect.arrayContaining(['old-unconfirmed-attempt', 'comp:c:4:quality_analyze', 'comp:c:4:continuity_validate:protocol8']) } })
     const notices = events().filter(event => event.type === 'error').map(event => event.message).join('\n')
-    expect(notices).toContain('质量检查仍有未确认的请求'); expect(notices).toContain('当前连续性检查结果已独立保存')
+    expect(notices).toBe('质量检查未完成。正文已保留。')
+    expect(state.continuity).toBe('complete')
     expect(notices).not.toContain('连续多轮没有推进')
-    expect(events()).not.toContainEqual(expect.objectContaining({ type: 'text.final', text: expect.stringContaining('质量检查仍有未确认的请求') }))
+    expect(events()).not.toContainEqual(expect.objectContaining({ type: 'text.final', text: expect.stringContaining('质量检查未完成') }))
     expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
     expect(events().find(event => event.type === 'tool.result' && event.callId === 'unknown-quality')).not.toHaveProperty('reviewRequestFinished')
   })
@@ -4211,7 +4254,7 @@ describe('independent persisted review phases with unresolved usage', () => {
     expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1050, checkpoint: { stagnantBatches: 10, readProgress: 3, writeProgress: 3,
       tokenBudget: 500, maxTurns: 1, inputProtocolRecovery: f.checkpoint.inputProtocolRecovery, pendingReviews: [pending], reviewAttempts: f.checkpoint.reviewAttempts } })
     expect(mocks.runs.get('run')?.errorMessage).toBeNull()
-    expect(mocks.runs.get('run')?.outputSummary).toContain('检查正在等待原请求的结果或用量确认')
+    expect(mocks.runs.get('run')?.outputSummary).toContain('章节检查未完成。正文已保留。')
     expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'review_receipt_pending' })
     expect(events().some(event => event.type === 'text.final')).toBe(false)
   })
