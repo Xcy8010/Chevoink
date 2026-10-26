@@ -359,7 +359,8 @@ describe('persisted current review readiness', () => {
     await expect(commitChapterBridge(f.terminal, f.tx)).resolves.toMatchObject({ chapterRevision: 3 })
   })
   it('a quality-only original waiver retains the continuity obligation', () => {
-    expect(originalChapterReviewRequirements({ prompt: '写下一章，不用质量检查', spec: { intent: 'write', qualityMode: 'premium' } }))
+    expect(originalChapterReviewRequirements({ prompt: '写下一章，不用质量检查', spec: { intent: 'write', qualityMode: 'premium',
+      scope: { writing: { kind: 'bounded', targets: [{ chapterId: 'current', orderIndex: 1 }] } } } }, { id: 'current', orderIndex: 1 }))
       .toEqual({ continuity: true, quality: false })
   })
   it.each(['写下一章，不要跳过质量检查', '写下一章，不得跳过连续性检查', 'Write next chapter. Do not skip any checks'])('mandatory checks cannot be inverted into a waiver: %s', async prompt => {

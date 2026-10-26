@@ -4,7 +4,8 @@ import { coordinatedWritingInputSchema, coordinatedWritingManifest } from '../..
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { assertToolApproval, assertWritingServiceApproval, pollToolApproval, projectApprovalEvent, readWritingServiceRefusal, requestToolApproval } from '../../api/lib/agent/runtime-approval.js'
 
-const mocks = vi.hoisted(() => ({ tx: { agentTaskRoot: { findUniqueOrThrow: vi.fn() }, agentExecutionOutbox: { findUnique: vi.fn(), create: vi.fn() } },
+const mocks = vi.hoisted(() => ({ tx: { agentTaskRoot: { findUniqueOrThrow: vi.fn() }, chapter: { findFirst: vi.fn() },
+  agentExecutionOutbox: { findUnique: vi.fn(), create: vi.fn() } },
   state: vi.fn(), frame: vi.fn(), original: vi.fn(), confirmations: vi.fn(), now: vi.fn() }))
 vi.mock('../../api/lib/agent/runtime-lease.js', async original => ({ ...await original<object>(), withRunLease: async (_lease: unknown, work: (tx: unknown) => unknown) => work(mocks.tx) }))
 vi.mock('../../api/lib/agent/runtime-state.js', () => ({ readExecutionStateInTransaction: mocks.state, readExecutionFrame: mocks.frame }))
@@ -28,6 +29,8 @@ beforeEach(() => {
   mocks.state.mockImplementation(async () => ({ originalSpec: spec, frame, configuration: { toolAuthority: [grant], tools: [{ function: { name: 'chapter_write' } }] } }))
   mocks.frame.mockImplementation(async () => frame)
   mocks.tx.agentTaskRoot.findUniqueOrThrow.mockResolvedValue({ userId: 'user', novelId: 'novel', sessionId: 'session' })
+  mocks.tx.chapter.findFirst.mockImplementation(async ({ where }) => where.id === 'chapter' && where.authorId === 'user'
+    && where.novelId === 'novel' ? { orderIndex: 1 } : null)
   mocks.original.mockImplementation(async () => ({ spec, prompt: '完整重写本章' }))
   mocks.confirmations.mockResolvedValue(['continuity_validate'])
   mocks.now.mockReturnValue(new Date('2026-10-23T00:00:00Z'))
@@ -45,6 +48,7 @@ const assertion = () => ({ sourceHash: frame.snapshotHash, callId: 'writer', too
 describe('explicit composite approval using the existing author decision', () => {
   it('shows the actual review/commit steps when only a child action asks for confirmation', async () => {
     const record = await request()
+    expect(mocks.tx.chapter.findFirst).toHaveBeenCalledWith({ where: { id: 'chapter', authorId: 'user', novelId: 'novel' }, select: { orderIndex: true } })
     expect(record.payload).toMatchObject({ args, argsHash: runtimeJson(args).hash, writingServices: assertion().manifest })
     const projected = await projectApprovalEvent(mocks.tx as never, record, 'user')
     expect(projected).toMatchObject({ type: 'permission.ask', toolName: 'chapter_write', args: { 写入参数: args,
@@ -54,10 +58,27 @@ describe('explicit composite approval using the existing author decision', () =>
     await expect(assertWritingServiceApproval(mocks.tx as never, lease, assertion())).resolves.toBeUndefined()
   })
   it('reuses the exact displayed manifest without extending its expiry', async () => {
-    const record = await request()
+    const record = await request(), originalPayload = structuredClone(record.payload)
+    expect(mocks.tx.chapter.findFirst).toHaveBeenCalledOnce()
+    mocks.tx.chapter.findFirst.mockRejectedValue(new Error('A frozen approval must not query a fresh ordinal'))
     mocks.now.mockReturnValue(new Date('2026-10-23T00:00:30Z'))
     expect(await request()).toBe(record)
+    expect(record.payload).toEqual(originalPayload)
+    expect(record.payload).toHaveProperty('expiresAt', '2026-10-23T00:01:00.000Z')
+    expect(mocks.tx.chapter.findFirst).toHaveBeenCalledOnce()
     expect(mocks.tx.agentExecutionOutbox.create).toHaveBeenCalledOnce()
+  })
+  it.each(['missing', 'foreign'] as const)('refuses a fresh manifest for a %s owned target before creating an approval', async target => {
+    if (target === 'missing') mocks.tx.chapter.findFirst.mockResolvedValueOnce(null)
+    else {
+      args.chapterId = 'another-chapter'
+      frame.state.messages[0].toolCalls![0].arguments = JSON.stringify(args)
+    }
+    await expect(request()).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    expect(mocks.tx.chapter.findFirst).toHaveBeenCalledWith({ where: { id: args.chapterId, authorId: 'user', novelId: 'novel' }, select: { orderIndex: true } })
+    expect(mocks.confirmations).not.toHaveBeenCalled()
+    expect(mocks.tx.agentExecutionOutbox.create).not.toHaveBeenCalled()
+    expect(events.size).toBe(0)
   })
   it('never treats a previously approved ordinary writer as confirmation of its child services', async () => {
     const record = await request()

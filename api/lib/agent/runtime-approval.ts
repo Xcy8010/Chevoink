@@ -90,6 +90,18 @@ export async function requestToolApproval(token: RunLeaseToken, input: { expecte
     const { taskSpecSchema } = await import('../../../shared/contracts/task-spec-contracts.js')
     const originalSpec = taskSpecSchema.safeParse(current.originalSpec)
     const { coordinatedWriterActions, coordinatedWritingManifest } = await import('./coordinated-writing-input.js')
+    const key = requestKey(token.taskRootId, frame.snapshotHash, call.id)
+    const existing = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: key } })
+    let frozenWritingServices: z.infer<typeof requestSchema>['writingServices']
+    if (existing) {
+      const parsed = requestSchema.safeParse(existing.payload)
+      if (existing.taskRootId !== token.taskRootId || existing.type !== 'approval.requested' || !parsed.success
+        || parsed.data.sourceHash !== frame.snapshotHash || parsed.data.sourceRevision !== frame.revision || parsed.data.callId !== call.id
+        || parsed.data.toolName !== call.name || parsed.data.rawArguments !== call.arguments || parsed.data.argsHash !== args.hash
+        || runtimeJson(parsed.data.args).hash !== args.hash
+) runtimeError('RUNTIME_RECEIPT_INVALID', '原审批请求损坏或实际参数已变化。')
+      frozenWritingServices = parsed.data.writingServices
+    }
     let writingServices: z.infer<typeof requestSchema>['writingServices']
     let serviceConfirmation = false
     if (originalSpec.success && originalSpec.data.scope.writingCoordinationProtocol && coordinatedWriterActions.some(name => name === call.name)) {
@@ -97,20 +109,17 @@ export async function requestToolApproval(token: RunLeaseToken, input: { expecte
       const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: token.taskRootId } })
       const original = await (await import('./original-request.js')).readOriginalTaskRequest(tx, { userId: token.userId, novelId: root.novelId, runId: token.runId })
       const writer = z.object({ chapterId: z.string().min(1), writing: z.unknown() }).parse(args.value)
-      writingServices = requestSchema.shape.writingServices.unwrap().parse(coordinatedWritingManifest({ spec, prompt: original.prompt }, call.name, writer.chapterId, writer.writing))
+      const chapter = frozenWritingServices ? null : await tx.chapter.findFirst({ where: { id: writer.chapterId, authorId: token.userId, novelId: root.novelId }, select: { orderIndex: true } })
+      if (!frozenWritingServices && !chapter) return runtimeError('AUTHOR_CHAPTER_SCOPE', '当前写作章节不属于原作品。')
+      writingServices = requestSchema.shape.writingServices.unwrap().parse(coordinatedWritingManifest({ spec, prompt: original.prompt }, call.name, writer.chapterId, writer.writing,
+        { frozenManifest: frozenWritingServices, targetOrderIndex: chapter?.orderIndex }))
       serviceConfirmation = (await (await import('./runtime-writing-service.js')).readWritingServiceConfirmations(tx, token,
         writingServices.steps.flatMap(step => step.actions))).length > 0
     }
     if (grant.permission !== 'ask' && !grant.alwaysConfirm && !serviceConfirmation) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原工具和写作步骤不需要本次确认。')
-    const key = requestKey(token.taskRootId, frame.snapshotHash, call.id)
-    const existing = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: key } })
     if (existing) {
-      const parsed = requestSchema.safeParse(existing.payload)
-      if (existing.taskRootId !== token.taskRootId || existing.type !== 'approval.requested' || !parsed.success
-        || parsed.data.sourceHash !== frame.snapshotHash || parsed.data.sourceRevision !== frame.revision || parsed.data.callId !== call.id
-        || parsed.data.toolName !== call.name || parsed.data.rawArguments !== call.arguments || parsed.data.argsHash !== args.hash
-        || runtimeJson(parsed.data.args).hash !== args.hash
-        || runtimeJson({ manifest: parsed.data.writingServices ?? null }).hash !== runtimeJson({ manifest: writingServices ?? null }).hash) runtimeError('RUNTIME_RECEIPT_INVALID', '原审批请求损坏或实际参数已变化。')
+      if (runtimeJson({ manifest: frozenWritingServices ?? null }).hash !== runtimeJson({ manifest: writingServices ?? null }).hash)
+        return runtimeError('RUNTIME_RECEIPT_INVALID', '原审批请求的写作步骤已变化。')
       return existing // Original expiry is never extended by polling or resume.
     }
     if (current.frame.revision !== frame.revision) runtimeError('RUNTIME_STATE_CONFLICT', '不能为已经离开的执行位置新建审批。')
@@ -192,7 +201,7 @@ export async function readWritingServiceRefusal(tx: RuntimeTx, token: RunLeaseTo
   const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: token.taskRootId } })
   const request = await (await import('./original-request.js')).readOriginalTaskRequest(tx, { userId: token.userId, novelId: root.novelId, runId: token.runId })
   const writer = z.object({ chapterId: z.string().min(1), writing: z.unknown() }).parse(outcome.requestData.args)
-  const manifest = coordinatedWritingManifest({ spec, prompt: request.prompt }, input.toolName, writer.chapterId, writer.writing)
+  const manifest = coordinatedWritingManifest({ spec, prompt: request.prompt }, input.toolName, writer.chapterId, writer.writing, { frozenManifest: outcome.requestData.writingServices })
   if (runtimeJson(manifest).hash !== runtimeJson(outcome.requestData.writingServices).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '组合确认拒绝不匹配原写入步骤。')
   return outcome
 }

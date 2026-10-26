@@ -310,8 +310,10 @@ describe.runIf(available)('durable pre-execution rejection', () => {
       const lease = await claim(f)
       const scene = scenario.startsWith('scene-')
       const name = scene ? 'scene_task_build' : 'chapter_read'
+      const syntheticScene = (goal: string) => ({ purpose: '让守军从城门撤往水渠', goal, obstacle: '城门被封锁',
+        choice: '改走水渠', cost: '放弃补给车，人员无新增伤亡', turn: '撤离队抵达水渠入口' })
       const raw = scene ? JSON.stringify({ arguments: { tasks: scenario === 'scene-overflow'
-        ? Array.from({ length: 5 }, (_, index) => ({ goal: `场景${index + 1}` })) : [{ goal: '守城' }, null] } }) : scenario === 'invalid' ? '{' : '{}'
+        ? Array.from({ length: 5 }, (_, index) => syntheticScene(`场景${index + 1}`)) : [syntheticScene('守城'), null] } }) : scenario === 'invalid' ? '{' : '{}'
       const parameters = scene ? sceneTaskBuildTool.parameters : z.object({ chapterId: z.string().min(1) })
       const candidate: AgentTool = { name, title: '读取', description: '', parameters, readOnly: !scene,
         permission: { build: 'allow', plan: 'allow', review: 'allow' }, execute: vi.fn(async () => ({ output: '不能执行' })),

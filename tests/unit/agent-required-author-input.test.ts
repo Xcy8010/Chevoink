@@ -53,7 +53,9 @@ describe('required legacy author decisions', () => {
     await vi.advanceTimersByTimeAsync(env.agentApprovalTimeoutMs + 1)
     const result = await pending
     expect(result.failureCode).toBeUndefined()
-    expect(result.output).toContain('默认方案继续')
+    expect(result.output).toContain('未回答不等于同意')
+    expect(result.output).toContain('不依赖此决定且已获授权的工作')
+    expect(result.output).not.toContain('默认方案继续')
     expect(mocks.update).toHaveBeenCalledTimes(2)
   })
   it('cannot replace a required decision when the bounded question budget is exhausted', async () => {

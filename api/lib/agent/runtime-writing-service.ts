@@ -154,7 +154,7 @@ export async function readCommittedWritingBodyProgress(tx: RuntimeTx, parent: { 
   const request = await readOriginalTaskRequest(tx, { userId: root.userId, novelId: root.novelId,
     runId: (await tx.agentOperation.findUniqueOrThrow({ where: { id: parent.id } })).originRunId })
   const chapterId = z.string().parse(original.args.chapterId)
-  const manifest = manifestSchema.parse(coordinatedWritingManifest({ spec, prompt: request.prompt }, parent.action, chapterId, writing))
+  const manifest = manifestSchema.parse(coordinatedWritingManifest({ spec, prompt: request.prompt }, parent.action, chapterId, writing, { frozenManifest: original.writingManifest }))
   if (!writing.draftComplete || original.novelId !== root.novelId || runtimeJson(original.args).hash !== original.normalization.normalizedArgsHash
     || runtimeJson(original.writingManifest).hash !== runtimeJson(manifest).hash
     || completion.writingCompletion.steps.some((step, index) => step.step !== manifest.steps[index]?.step)) {
@@ -269,7 +269,7 @@ async function verifyServiceInput(tx: RuntimeTx, lease: ServiceProofSubject, sav
       return runtimeError('RUNTIME_RECEIPT_INVALID', '原内部工作的章节不属于冻结目标。')
   } else await assertWritingTarget(tx, { userId: lease.userId, novelId: saved.novelId, runId: lease.runId },
     { chapterId, effect: parent.action === 'chapter_write' ? 'replace' : parent.action === 'chapter_append' ? 'append' : 'range' })
-  const manifest = manifestSchema.parse(coordinatedWritingManifest({ spec, prompt: request.prompt }, parent.action, chapterId, writing))
+  const manifest = manifestSchema.parse(coordinatedWritingManifest({ spec, prompt: request.prompt }, parent.action, chapterId, writing, { frozenManifest: original.writingManifest }))
   if (runtimeJson(manifest).hash !== runtimeJson(original.writingManifest).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '写作步骤清单与原写入决策不一致。')
   const index = manifest.steps.findIndex(item => item.step === admission.step)
   if (index < 0) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原写入没有授权该内部业务步骤。')

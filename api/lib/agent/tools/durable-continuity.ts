@@ -244,7 +244,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
       })
       const report = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compiler.id, findings: parsed.findings,
         expectedChapterRevision: frozen.chapter.revision, expectedContinuityNativeLease: lease,
-        independentCheck: parsed.structured ? 'complete' : 'unavailable', coverage: frozen.coverage, terminalCandidate: frozen.terminalCandidate,
+        independentCheck: parsed.structured ? 'complete' : 'unavailable', reuseCachedReview: !!frozen.cached, coverage: frozen.coverage, terminalCandidate: frozen.terminalCandidate,
         continuityCriticResponse: inspected?.audit, focus: typeof args.focus === 'string' ? args.focus : undefined, signal: ctx.signal }, tx)
       // durable 在提交事务里累计已完成的检查，零错误也不恢复次数。
       const nextCheckRounds = report.checkRounds + (frozen.cached ? 0 : 1)
@@ -369,7 +369,10 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
         validation: compilation.validation, candidate: terminalCandidate })
     }
     if (terminalProtocol) criticSystem += `\n${continuitySemanticRule}`
-    const coverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks,
+    const committedReview = compilation.status === 'completed'
+      ? (await import('../chapter-review-guard.js')).readCurrentCompilerContinuity({ ...compilation, bridge: compilation.bridge }, compilation.chapter, source) : null
+    const coverage = compilerContinuityCoverage({ chapter: compilation.chapter,
+      bridge: committedReview?.assessment ? committedReview.checkedBridge : compilation.bridge, sceneTasks: compilation.sceneTasks,
       source, focus: typeof args.focus === 'string' ? args.focus : undefined, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8)
     const cached = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(continuityFindingInputSchema), coverage: coverageSchema }).safeParse(compilation.validation)
     const cacheDeliveryBinding = cached.success && terminalEvidence ? await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(tx,

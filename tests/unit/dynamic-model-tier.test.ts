@@ -19,7 +19,7 @@ describe('dynamic built-in model identity compatibility', () => {
     expect(tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier: tier, multiplierBps: 12345 }).modelTier).toBe(tier)
     expect(JSON.stringify(z.toJSONSchema(configureAgentSchema, { io: 'input' }))).toContain('builtin_')
     expect(buildAgentIdentityPrompt(tier)).not.toContain('undefined')
-    expect(buildAgentIdentityPrompt(tier, 'secret-provider-model', '动态名称')).toContain('我是动态名称')
+    expect(buildAgentIdentityPrompt(tier, 'secret-provider-model', '动态名称')).toContain('服务档位为「动态名称」')
     expect(buildAgentIdentityPrompt(tier, 'secret-provider-model', '动态名称')).not.toContain('secret-provider-model')
   })
   it.each(['builtin_0123456789abcde', 'builtin_0123456789abcdef0', 'builtin_0123456789ABCDEf', 'builtin_', 'other', 'basic', 'custom'])('rejects invalid selectable builtin %s', value => {

@@ -630,7 +630,7 @@ export const sceneTaskBuildTool = defineTool({
     if (!next.tasks && Array.isArray(next.scene_tasks)) next.tasks = next.scene_tasks
     if (!Array.isArray(next.tasks) && next.tasks && typeof next.tasks === 'object') next.tasks = [next.tasks]
     if (Array.isArray(next.tasks)) {
-      const asText = (value: unknown, fallback: string) => {
+      const asText = (value: unknown, fallback?: string) => {
         if (typeof value === 'string' && value.trim()) return value.trim().slice(0, 1000)
         if (typeof value === 'number' || typeof value === 'boolean') return String(value).slice(0, 1000)
         return fallback
@@ -650,10 +650,10 @@ export const sceneTaskBuildTool = defineTool({
           objects: asList(state.objects), relationships: asList(state.relationships), openLoops: asList(state.openLoops ?? state.open_loops),
         }).filter(([, item]) => item !== undefined))
       }
-      const normalized = next.tasks.map((value, index) => {
+      const normalized = next.tasks.map((value) => {
         if (!value || typeof value !== 'object' || Array.isArray(value)) return value
         const item = value as Record<string, unknown>
-        const purpose = asText(item.purpose ?? item.intent ?? item.summary, `推进第 ${index + 1} 个场景`)
+        const purpose = asText(item.purpose ?? item.intent ?? item.summary)
         const normalizeBudget = (value: unknown) => {
           const budget = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
           const level = (candidate: unknown, fallback: 'low' | 'medium' | 'high') =>
@@ -664,11 +664,11 @@ export const sceneTaskBuildTool = defineTool({
           ...item,
           purpose,
           entryState: asState(item.entryState ?? item.entry_state),
-          goal: asText(item.goal ?? item.objective, purpose),
-          obstacle: asText(item.obstacle ?? item.resistance ?? item.conflict, '目标受到具体阻力'),
-          choice: asText(item.choice ?? item.decision, '人物必须作出选择'),
-          cost: asText(item.cost ?? item.consequence, '按既有设定记录实际后果，可无额外损失'),
-          turn: asText(item.turn ?? item.twist, '场景状态发生变化'),
+          goal: asText(item.goal ?? item.objective),
+          obstacle: asText(item.obstacle ?? item.resistance ?? item.conflict),
+          choice: asText(item.choice ?? item.decision),
+          cost: asText(item.cost ?? item.consequence),
+          turn: asText(item.turn ?? item.twist),
           exitState: asState(item.exitState ?? item.exit_state),
           styleBudget: normalizeBudget(item.styleBudget ?? item.style_budget),
         }
@@ -1053,7 +1053,10 @@ export const continuityValidateTool = defineTool({
     }
     const bodies = { previous: sourceChapter?.content ?? null, current: chapter.content, ...(terminalEvidence ? { terminalEvidence } : {}) }
     if (terminalProtocol) criticSystem += `\n${continuitySemanticRule}`
-    const coverage = compilerContinuityCoverage({ chapter, bridge, sceneTasks: compilation.sceneTasks, source: sourceChapter, focus: args.focus, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8)
+    const committedReview = compilation.status === 'completed'
+      ? (await import('../chapter-review-guard.js')).readCurrentCompilerContinuity({ ...compilation, bridge }, chapter, sourceChapter) : null
+    const coverage = compilerContinuityCoverage({ chapter, bridge: committedReview?.assessment ? committedReview.checkedBridge : bridge,
+      sceneTasks: compilation.sceneTasks, source: sourceChapter, focus: args.focus, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8)
     const sourceUnchanged = !bridge.fromChapterId || sourceChapter?.revision === bridge.sourceRevision
     if (!sourceUnchanged || !chapter.content.trim() || compilation.sceneTasks.length < 1 || compilation.sceneTasks.length > 4) {
       return { outcome: 'failed' as const, summary: '连续性检查前置未满足',
@@ -1090,7 +1093,7 @@ export const continuityValidateTool = defineTool({
       const warningCount = cachedValidation.warningCount ?? findings.filter((item) => item.severity === 'warning').length
       ctx.signal.throwIfAborted()
       const result = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id, findings,
-        expectedChapterRevision: chapter.revision, expectedContinuityOwnerSeq: ctx.continuityOwnerSeq, expectedTerminalCandidateHash:patch?.expectedBaseHash, independentCheck: 'complete', coverage, terminalCandidate, focus: args.focus, signal: ctx.signal })
+        expectedChapterRevision: chapter.revision, expectedContinuityOwnerSeq: ctx.continuityOwnerSeq, expectedTerminalCandidateHash:patch?.expectedBaseHash, independentCheck: 'complete', reuseCachedReview: true, coverage, terminalCandidate, focus: args.focus, signal: ctx.signal })
       if (result.independentCheck !== 'complete') return { outcome: 'failed' as const, failureCode: 'CONTINUITY_EVIDENCE_UNLOCATED',
         summary: '缓存连续性证据未确认', output: '本次只读复核发现缓存引用缺失或不属于当前对应正文，已保留未确认报告；未调用模型、未增加检查次数，不能宣称检查通过或据此改稿。原任务内仍可纠正真实问题，按原预算取得有效复核。' }
       const cachedEvidence = terminalEvidence

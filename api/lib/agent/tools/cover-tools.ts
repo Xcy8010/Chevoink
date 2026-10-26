@@ -32,7 +32,7 @@ export const coverGenerateTool = defineTool({
     })
 
     if (!novel) {
-      return { output: '未找到当前作品。' }
+      return { outcome: 'failed', failureCode: 'NOVEL_NOT_FOUND', output: '未找到当前作品。' }
     }
 
     // 服务端强制保险：清洗「无文字」类负向短语，并确保提示词要求封面带书名标题文字
@@ -46,7 +46,7 @@ export const coverGenerateTool = defineTool({
     }, { signal: ctx.signal })
 
     if (images.length === 0) {
-      return { output: '封面生成失败：图像服务没有返回结果，可稍后重试或调整提示词。' }
+      return { outcome: 'failed', failureCode: 'COVER_GENERATION_EMPTY', output: '封面生成失败：图像服务没有返回结果，可稍后重试或调整提示词。' }
     }
 
     const candidates = images

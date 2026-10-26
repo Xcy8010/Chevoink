@@ -18,6 +18,50 @@ export type ToolExecutionCursor = { expectedRevision: number; expectedHash: stri
 export const argumentNormalizationSchema = z.object({ version: z.literal(1), rawArguments: z.string(), normalizedArgsHash: z.string().regex(/^[a-f0-9]{64}$/),
   sourceRevision: z.number().int().nonnegative(), sourceSnapshotHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
 
+/** These two tools stopped filling missing literary decisions. Only their
+ * already-prepared calls may reuse admitted args. Caller holds the current lease;
+ * this read grants no effect or approval and leaves fresh normalization intact. */
+export async function readPreparedLiteraryArguments(tx: Prisma.TransactionClient, token: RunLeaseToken, input: {
+  action: string; callId: string; rawArguments: string; cursor: ToolExecutionCursor
+}) {
+  if (!['scene_task_build', 'first_three_prototype_build'].includes(input.action)) return null
+  const current = await readExecutionStateInTransaction(tx, token.taskRootId)
+  if (current.frame.state.phase !== 'awaiting_operation') return null
+  const operation = await tx.agentOperation.findFirst({ where: { id: current.frame.state.pendingOperationId!, taskRootId: token.taskRootId,
+    kind: 'tool', action: input.action, status: 'prepared' } })
+  if (!operation || operation.taskRootId !== token.taskRootId || operation.kind !== 'tool' || operation.action !== input.action
+    || operation.status !== 'prepared' || operation.parentOperationId !== null
+    || runtimeJsonHash(operation.inputSnapshot) !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原文学工具操作缺失或冻结输入损坏。')
+  // Prototype artifact envelopes bind taskRootId rather than novelId. Keep the
+  // existing general reader strict and authenticate this exact legacy shape here.
+  const saved = z.object({ kind: z.literal('tool'), action: z.literal(input.action), parentOperationId: z.null(), input: z.object({
+    callId: z.string(), novelId: z.string().optional(), taskRootId: z.string().optional(), args: z.record(z.string(), z.unknown()),
+    normalization: argumentNormalizationSchema,
+  }).passthrough() }).strict().safeParse(operation.inputSnapshot)
+  if (!saved.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '原文学工具参数准入证据不完整。')
+  const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: token.taskRootId } })
+  const original = taskSpecSchema.parse(current.originalSpec), frozen = saved.data.input, normalization = frozen.normalization
+  if (root.userId !== token.userId || root.novelId !== original.scope.novelId
+    || (input.action === 'scene_task_build' ? frozen.novelId !== root.novelId
+      : frozen.taskRootId !== token.taskRootId || frozen.novelId !== undefined && frozen.novelId !== root.novelId)
+    || frozen.callId !== input.callId || runtimeJsonHash(frozen.args) !== normalization.normalizedArgsHash
+    || normalization.rawArguments !== input.rawArguments || normalization.sourceRevision !== input.cursor.expectedRevision
+    || normalization.sourceSnapshotHash !== input.cursor.expectedHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原文学工具的归属、调用或参数哈希不一致。')
+  const source = await readExecutionFrame(tx, token.taskRootId, normalization.sourceRevision)
+  let index = source.state.messages.length - 1
+  while (index >= 0 && source.state.messages[index].role === 'tool') index--
+  const assistant = source.state.messages[index]
+  const call = assistant?.role === 'assistant' ? assistant.toolCalls?.find(item => !source.state.messages.slice(index + 1)
+    .some(message => message.role === 'tool' && message.toolCallId === item.id)) : undefined
+  if (source.state.phase !== 'idle' || source.snapshotHash !== normalization.sourceSnapshotHash
+    || operation.operationKey !== `exec:${source.state.nextOperationSequence}` || !call || call.id !== frozen.callId
+    || call.name !== input.action || call.incomplete || call.arguments !== normalization.rawArguments
+    || current.frame.revision !== source.revision + 1 || current.frame.state.pendingOperationId !== operation.id
+    || current.frame.state.nextOperationSequence !== source.state.nextOperationSequence + 1 || current.frame.state.turn !== source.state.turn
+    || runtimeJsonHash(current.frame.state.messages) !== runtimeJsonHash(source.state.messages)) return runtimeError('RUNTIME_RECEIPT_INVALID', '原文学工具缺少当前待执行状态与真实来源帧。')
+  return frozen.args
+}
+
 /** Historical identity only; usable by late accounting without fabricating an
  * active lease. This reader grants no new provider/effect/cursor authority. */
 export async function readToolOperationSource(tx: Prisma.TransactionClient, operation: { kind: string; action: string; taskRootId: string; operationKey: string; inputSnapshot: unknown; inputHash: string }) {
@@ -220,10 +264,13 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     const call = assistant?.role === 'assistant' ? assistant.toolCalls?.find(item => !frame.state.messages.slice(index + 1)
       .some(message => message.role === 'tool' && message.toolCallId === item.id)) : undefined
     if (!call || call.id !== input.callId || call.name !== input.action || call.incomplete) runtimeError('RUNTIME_STATE_CONFLICT', '工具不是当前下一条完整待执行调用。')
+    const frozenArgs = await readPreparedLiteraryArguments(tx, token, { action: input.action, callId: input.callId,
+      rawArguments: call!.arguments, cursor })
     let normalized: unknown
-    try { normalized = input.normalize(coerceToolArgumentEnvelope(call!.arguments ? parseToolArgsTolerant(call!.arguments, false) : {})) }
+    try { normalized = input.normalize(frozenArgs ?? coerceToolArgumentEnvelope(call!.arguments ? parseToolArgsTolerant(call!.arguments, false) : {})) }
     catch { return runtimeError('RUNTIME_INPUT_INVALID', '原始工具参数不能安全归一化，未执行。') }
     const normalizedArgsHash = runtimeJsonHash(normalized)
+    if (frozenArgs && normalizedArgsHash !== runtimeJsonHash(frozenArgs)) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原冻结文学参数不能被新归一化改写。')
     if (normalizedArgsHash !== runtimeJsonHash(input.effectiveArgs)) runtimeError('RUNTIME_IDENTITY_CONFLICT', '实际工具参数与原调用的归一化结果不同。')
     if (token.parent) {
       const parentRoot = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: token.parent.taskRootId } })

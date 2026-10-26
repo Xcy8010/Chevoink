@@ -86,7 +86,8 @@ export function coordinatedWriterParameters(tool: Pick<AgentTool, 'name' | 'para
 
 /** Frozen business manifest, not a second grant. Permission, current policy,
  * approval, version and source-receipt checks still happen at every effect. */
-export function coordinatedWritingManifest(original: { spec: TaskSpec; prompt: string | null }, action: string, chapterId: string, value: unknown) {
+export function coordinatedWritingManifest(original: { spec: TaskSpec; prompt: string | null }, action: string, chapterId: string, value: unknown,
+  recovery?: { frozenManifest?: unknown; targetOrderIndex?: number }) {
   const spec = original.spec
   if (!spec.scope.writingCoordinationProtocol || spec.scope.writingCoordinationProtocol === 2 && spec.scope.continuityReportProtocol !== 5
     || !coordinatedWriterActions.some(name => name === action)
@@ -100,7 +101,11 @@ export function coordinatedWritingManifest(original: { spec: TaskSpec; prompt: s
     && !spec.scope.writing.targets.some(target => target.chapterId === chapterId)) {
     return runtimeError('AUTHOR_CHAPTER_SCOPE', '写作目标不在原任务的完整章节范围内。')
   }
-  const required = originalChapterReviewRequirements(original)
+  const frozen = recovery?.frozenManifest === undefined ? null : writingServiceManifestSchema.parse(recovery.frozenManifest)
+  if (frozen && (frozen.version !== spec.scope.writingCoordinationProtocol || frozen.chapterId !== chapterId
+    || frozen.writingHash !== runtimeJson(writing).hash)) return runtimeError('RUNTIME_RECEIPT_INVALID', '原冻结写作清单不属于当前写入。')
+  const required = frozen ? { continuity: frozen.steps.some(item => item.step === 'continuity'), quality: frozen.steps.some(item => item.step === 'quality') }
+    : originalChapterReviewRequirements(original, { id: chapterId, orderIndex: recovery?.targetOrderIndex })
   const steps: Array<{ step: WritingServiceStep; actions: string[] }> = [
     { step: 'body', actions: ['story_compiler_prepare', 'scene_task_build', action] },
     ...(writing.draftComplete && required.continuity ? [{ step: 'continuity' as const, actions: ['continuity_validate'] }] : []),
@@ -112,5 +117,7 @@ export function coordinatedWritingManifest(original: { spec: TaskSpec; prompt: s
     ] : []),
     ...(writing.draftComplete ? [{ step: 'commit' as const, actions: ['chapter_bridge_commit'] }] : []),
   ]
-  return runtimeJson({ version: spec.scope.writingCoordinationProtocol, chapterId, writingHash: runtimeJson(writing).hash, steps }).value
+  const manifest = runtimeJson({ version: spec.scope.writingCoordinationProtocol, chapterId, writingHash: runtimeJson(writing).hash, steps })
+  if (frozen && runtimeJson(frozen).hash !== manifest.hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原冻结写作清单的步骤或顺序已变化。')
+  return manifest.value
 }

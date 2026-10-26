@@ -35,6 +35,8 @@ describe.runIf(available)('native body report and first terminal review share th
       { id: 'quality', name: 'quality_analyze', arguments: JSON.stringify({ chapterId: chapter.id, compilationId: compilation.id }) },
       { id: 'bridge-commit', name: 'chapter_bridge_get', arguments: JSON.stringify(args) },
       { id: 'commit', name: 'chapter_bridge_commit', arguments: JSON.stringify(args) },
+      { id: 'committed-bridge', name: 'chapter_bridge_get', arguments: JSON.stringify(args) },
+      { id: 'committed-review', name: 'continuity_validate', arguments: JSON.stringify({ ...args, terminalState: candidate }) },
     ]
     await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'balanced',
       model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
@@ -97,7 +99,11 @@ describe.runIf(available)('native body report and first terminal review share th
       expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toMatchObject({ committedAt: null })
       return
     }
-    for (let index = 3; index < calls.length; index++) expect(await step()).toMatchObject({ kind: 'tool' })
+    for (let index = 3; index < 8; index++) expect(await step()).toMatchObject({ kind: 'tool' })
+    const committed = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
+    expect(await step()).toMatchObject({ kind: 'tool' })
+    expect(await step()).toMatchObject({ kind: 'tool', result: { reviewCompleted: true } })
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })).toEqual(committed)
     expect(reentered).toBe(true)
     expect(fetcher).toHaveBeenCalledTimes(3)
     expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: bodyParent.id }, include: { effectReceipt: true } })).toEqual(bodyParent)

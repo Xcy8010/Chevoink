@@ -324,7 +324,7 @@ export const taskSpawnTool = defineTool({
   readOnly: false,
   async execute(ctx, args) {
     const blocked = await assertNotSpawnedWindow(ctx.sessionId)
-    if (blocked) return { output: blocked, summary: '派生窗口不能再派生' }
+    if (blocked) return { outcome: 'failed', failureCode: 'TASK_ORCHESTRATION_RECURSION_BLOCKED', output: blocked, summary: '派生窗口不能再派生' }
     const scopeError = await assertOrchestrationResumeGuard(ctx.runId, ctx.sessionId, 'task_spawn')
     if (scopeError) throw new Error(scopeError)
 
@@ -334,6 +334,7 @@ export const taskSpawnTool = defineTool({
 
     if (allowed === 0) {
       return {
+        outcome: 'failed', failureCode: 'TASK_ORCHESTRATION_CAPACITY',
         output:
           remaining === 0
             ? `并行任务窗口已达上限（${env.agentOrchestrationMaxConcurrent} 个同时执行），现在无法派生。请先用 task_wait 等已有窗口结束，或自己顺序完成。`
@@ -350,9 +351,9 @@ export const taskSpawnTool = defineTool({
 
     for (const task of args.tasks.slice(0, allowed)) {
       const title = task.title.slice(0, 160)
+      let sessionId: string | undefined
       try {
         const selectedModel = task.model ? await childModelConfig(ctx, task.model) : await childModelConfig(ctx)
-        let sessionId: string
         if (args.inherit === 'transcript') {
           const forked = await forkAgentSessionData(ctx.userId, ctx.sessionId)
           sessionId = forked.session.id
@@ -394,8 +395,8 @@ export const taskSpawnTool = defineTool({
         )
         spawned.push({ sessionId, runId: started.runId, novelId: ctx.novelId, title, inherit: args.inherit })
       } catch (error) {
-        // 单个窗口拉起失败不该拖垮整批：记为观察让模型决定重试还是自己顺序做
-        failures.push(`${title}：${error instanceof Error ? error.message : '派生失败'}`)
+        // 单个启动异常保留整批已成功窗口及已创建身份，先核对执行和交付再决定后续。
+        failures.push(`${title}：${error instanceof Error ? error.message : '派生失败'}${sessionId ? `；已创建窗口 ${sessionId}，启动结果未确认，请先用 task_wait 核对已有执行和交付，不要重复派生` : ''}`)
       }
     }
 
@@ -404,7 +405,7 @@ export const taskSpawnTool = defineTool({
     const lines = [
       spawned.length > 0
         ? `已派生 ${spawned.length} 个并行任务窗口，它们正在同时执行：`
-        : '没有成功派生任何任务窗口。',
+        : '本次未取得成功启动的任务窗口回执。',
       ...spawned.map((item) => `- ${item.title}｜任务 ID ${item.sessionId}`),
     ]
     if (skipped.length > 0) {
@@ -422,11 +423,13 @@ export const taskSpawnTool = defineTool({
     }
 
     return {
+      ...(failures.length || skipped.length ? { outcome: 'failed' as const,
+        failureCode: spawned.length ? 'TASK_SPAWN_PARTIAL_FAILURE' : 'TASK_SPAWN_FAILED' } : {}),
       output: lines.join('\n'),
       summary: spawned.length > 0 ? `派生 ${spawned.length} 个并行窗口` : '派生失败',
       display: orchestrationDisplay(
         'spawn',
-        spawned.length > 0 ? `${spawned.length} 个任务窗口并行执行中` : '未派生任务窗口',
+        spawned.length > 0 ? `${spawned.length} 个任务窗口并行执行中` : '未取得启动回执',
         spawned.map((item) => ({ sessionId: item.sessionId, title: item.title, status: 'running' as const, inherit: item.inherit })),
       ),
     }
@@ -555,10 +558,10 @@ export const taskSendTool = defineTool({
   readOnly: false,
   async execute(ctx, args) {
     const blocked = await assertNotSpawnedWindow(ctx.sessionId)
-    if (blocked) return { output: blocked, summary: '派生窗口不能调度其他窗口' }
+    if (blocked) return { outcome: 'failed', failureCode: 'TASK_ORCHESTRATION_RECURSION_BLOCKED', output: blocked, summary: '派生窗口不能调度其他窗口' }
 
     if (args.sessionId === ctx.sessionId) {
-      return { output: '不能向当前窗口自己发送提示词，那会导致自我递归。', summary: '目标窗口无效' }
+      return { outcome: 'failed', failureCode: 'TASK_SEND_TARGET_INVALID', output: '不能向当前窗口自己发送提示词，那会导致自我递归。', summary: '目标窗口无效' }
     }
 
     const scopeError = await assertOrchestrationResumeGuard(ctx.runId, ctx.sessionId, 'task_send', args)
@@ -569,11 +572,12 @@ export const taskSendTool = defineTool({
       select: { id: true, title: true, novelId: true },
     })
     if (!target) {
-      return { output: '目标任务窗口不存在或不属于当前作者，无法投递。请先用 task_spawn 派生或让作者确认任务 ID。', summary: '目标窗口不存在' }
+      return { outcome: 'failed', failureCode: 'TASK_SEND_TARGET_NOT_FOUND', output: '目标任务窗口不存在或不属于当前作者，无法投递。请先用 task_spawn 派生或让作者确认任务 ID。', summary: '目标窗口不存在' }
     }
 
     if (hasActiveRunInSession(target.id)) {
       return {
+        outcome: 'failed', failureCode: 'TASK_SEND_TARGET_BUSY',
         output: `「${target.title}」当前正在执行，无法插入新提示词。请先用 task_wait 等它结束，再投递返工要求。`,
         summary: '目标窗口忙',
       }
@@ -581,6 +585,7 @@ export const taskSendTool = defineTool({
 
     if (countActiveRunsByUser(ctx.userId) >= env.agentOrchestrationMaxConcurrent) {
       return {
+        outcome: 'failed', failureCode: 'TASK_ORCHESTRATION_CAPACITY',
         output: `并行任务窗口已达上限（${env.agentOrchestrationMaxConcurrent} 个同时执行），请先用 task_wait 等已有窗口结束再投递。`,
         summary: '并行额度已满',
       }
@@ -618,8 +623,9 @@ export const taskSendTool = defineTool({
       }
     } catch (error) {
       return {
-        output: `投递失败：${error instanceof Error ? error.message : '未知错误'}。可稍后重试或自己接手这部分工作。`,
-        summary: '投递失败',
+        outcome: 'failed', failureCode: 'TASK_SEND_START_UNCONFIRMED',
+        output: `投递启动未确认：${error instanceof Error ? error.message : '未知错误'}。目标窗口 ${target.id} 可能已有执行或交付，请先用 task_wait 核对，不要重复发送或重写已有成果。`,
+        summary: '投递启动未确认',
       }
     }
   },

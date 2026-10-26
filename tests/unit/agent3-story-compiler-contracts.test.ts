@@ -427,9 +427,13 @@ describe('严谨创作落实连续性警告', () => {
 })
 
 describe('Agent 3.0 Story Compiler 契约', () => {
+  const syntheticScene = (goal: string) => ({
+    purpose: '让守军从正门撤往水渠', goal, obstacle: '正门被叛军封锁', choice: '让侦察兵带路绕行水渠',
+    cost: '放弃正门的补给车，人员无新增伤亡', turn: '撤离队伍抵达水渠入口',
+  })
   it('完整字符串化场景数组按等价表示恢复，残文及超额场景仍拒绝', () => {
     const tool = allTools.find(item => item.name === 'scene_task_build')!
-    const tasks = [{ goal: '守住城门' }, { goal: '护送百姓' }]
+    const tasks = [syntheticScene('守住城门'), syntheticScene('护送百姓')]
     expect(tool.parameters.parse(tool.coerceArgs!({ tasks: JSON.stringify(tasks) })))
       .toEqual(tool.parameters.parse(tool.coerceArgs!({ tasks })))
     expect(tool.parameters.parse(normalizeToolInput(tool, { tasks: JSON.stringify(JSON.stringify(tasks)) })))
@@ -467,7 +471,7 @@ describe('Agent 3.0 Story Compiler 契约', () => {
   })
   it.each([null, '遗漏的场景', 7, []])('场景列表保留无效项供校验拒绝，不静默丢弃：%j', invalid => {
     const tool = allTools.find(item => item.name === 'scene_task_build')!
-    const normalized = tool.coerceArgs!({ tasks: [{ goal: '守住城门' }, invalid] }) as { tasks: unknown[] }
+    const normalized = tool.coerceArgs!({ tasks: [syntheticScene('守住城门'), invalid] }) as { tasks: unknown[] }
     expect(normalized.tasks).toHaveLength(2)
     expect(normalized.tasks[1]).toEqual(invalid)
     expect(tool.parameters.safeParse(normalized).success).toBe(false)
@@ -475,7 +479,7 @@ describe('Agent 3.0 Story Compiler 契约', () => {
 
   it('超过四个场景明确校验失败，不截掉后续场景后报成功', () => {
     const tool = allTools.find(item => item.name === 'scene_task_build')!
-    const tasks = Array.from({ length: 5 }, (_, index) => ({ goal: `保留场景${index + 1}` }))
+    const tasks = Array.from({ length: 5 }, (_, index) => syntheticScene(`保留场景${index + 1}`))
     const normalized = tool.coerceArgs!({ arguments: { tasks } }) as { tasks: Array<{ goal: string }> }
     expect(normalized.tasks.map(task => task.goal)).toEqual(tasks.map(task => task.goal))
     expect(tool.parameters.safeParse(normalized).success).toBe(false)
@@ -484,7 +488,7 @@ describe('Agent 3.0 Story Compiler 契约', () => {
 
   it('场景缺省状态省略可选字段，严格JSON回执不因服务端注入undefined失败', () => {
     const tool = allTools.find(item => item.name === 'scene_task_build')!
-    const parsed = tool.parameters.parse(tool.coerceArgs!({ arguments: { tasks: [{ goal: '守住城门' }] } })) as Record<string, unknown>
+    const parsed = tool.parameters.parse(tool.coerceArgs!({ arguments: { tasks: [syntheticScene('守住城门')] } })) as Record<string, unknown>
     const args = Object.fromEntries(Object.entries(parsed).filter(([, value]) => value !== undefined))
     expect(runtimeJson(args).value).toEqual(args)
     const task = (args.tasks as Array<{ entryState: unknown; exitState: unknown }>)[0]

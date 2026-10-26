@@ -76,17 +76,24 @@ describe('Agent 工具协议与结构化输出兜底', () => {
     if (parsed?.success) expect((parsed.data as { queries: string[] }).queries).toHaveLength(1)
   })
 
-  it('前三章试制可修复 snake_case、部分结构项并补齐三章蓝图', () => {
+  it('前三章试制可修复 snake_case 与字符串列表，保留已提供的完整文学决定', () => {
     const tool = getToolByName('first_three_prototype_build')
     const coerced = tool?.coerceArgs?.({
       arguments: JSON.stringify({
         genre_risks: '避免设定堆砌；避免主角全知',
         story_directions: [
-          { id: 'dir-a', name: '边镇旧案', reader_promise: '三章内形成第一次证据反转' },
-          '熟人关系网',
+          { id: 'dir-a', name: '边镇旧案', reader_promise: '三章内形成第一次证据反转', conflict_engine: '失踪卷宗牵涉主角的旧友',
+            unique_point: '主角必须在保密与公开证据之间选择', genre_risk: '不能把旧友身份直接当作罪证' },
+          { name: '熟人关系网', reader_promise: '以邻里证言交叉揭露旧案', conflict_engine: '证人顾虑家人而拒绝出面',
+            unique_point: '每条证词都有可核对的日常物证', genre_risk: '避免巧合代替证据' },
         ],
         selected_direction_id: 'dir-a',
         volume_spine: '旧案重启；关系阻力；证据反转',
+        chapter_blueprints: [1, 2, 3].map(order => ({
+          order_index: order, name: `合成第${order}章`, chapter_job: '让主角确认卷宗缺页', concrete_event: '旧档案室的目录与卷宗页数不符',
+          protagonist_choice: '主角先复制目录再询问旧友', consequence: '询问使旧友知道调查已开始，没有新增人身损失',
+          new_information: '缺失页码对应旧友当年的值班日', exit_hook: '旧友交来另一份签名不同的目录', quality_risks: '不提前认定旧友有罪',
+        })),
       }),
     })
     const parsed = tool?.parameters.safeParse(coerced)
@@ -128,17 +135,19 @@ describe('Agent 工具协议与结构化输出兜底', () => {
 describe('模型身份、排序与聊天区尺寸契约', () => {
   it.each([
     ['lite', '轻量模型'], ['speed', '极速模型'], ['standard', '标准模型'], ['performance', '性能模型'], ['ultimate', '极致模型'],
-  ] as const)('%s 档位先报 Chevoink Agent，追问才报档位名 %s', (tier, label) => {
+  ] as const)('%s 服务档位 %s 不冒充底层模型ID', (tier, label) => {
     const prompt = buildAgentIdentityPrompt(tier)
     expect(prompt).toContain('我是 Chevoink Agent')
-    expect(prompt).toContain(`我是${label}`)
-    expect(prompt).toContain('禁止回答“不披露”')
+    expect(prompt).toContain(`服务档位为「${label}」`)
+    expect(prompt).toContain('产品档位不是真实模型 ID')
+    expect(prompt).not.toContain(`正式模型 ID：「我是${label}`)
   })
 
   it('自定义档如实报出作者自己接入的真实模型 ID', () => {
     const prompt = buildAgentIdentityPrompt('custom', 'deepseek-chat')
     expect(prompt).toContain('deepseek-chat')
-    expect(prompt).toContain('禁止回答“不披露”')
+    expect(prompt).toContain('当前自定义模型标识为')
+    expect(buildAgentIdentityPrompt('custom')).toContain('未提供可核实的模型标识')
   })
 
   it('内置模型使用固定产品顺序而非倍率顺序', () => {

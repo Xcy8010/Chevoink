@@ -327,6 +327,8 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     // 固定规则仍在 system
     expect(content).toContain('信道纪律')
     expect(content).toContain('思考信道和 Agent 回复区都不叙述工具选择')
+    expect(content).toContain('用户明确要求技术信息时据实际记录解释')
+    expect(content).toContain('“只给正文”“不总结”“详细解释”等要求优先于默认表达')
     expect(content).not.toContain('工具选择、状态盘点、执行叙述，全部只进思考信道')
     expect(content).not.toContain('提及工具或系统一律用中文功能名')
     expect(content).toContain('决策策略')

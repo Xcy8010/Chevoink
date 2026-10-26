@@ -173,7 +173,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   if (compilation.bridge.fromChapterId && source?.revision !== compilation.bridge.sourceRevision) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '章节桥来源版本已变化，保留原编译与正文，不能自动重建或沿用旧检查交付。')
   }
-  const requirements = originalChapterReviewRequirements(original)
+  const requirements = originalChapterReviewRequirements(original, chapter)
   const spec = original.spec && typeof original.spec === 'object' && !Array.isArray(original.spec) ? original.spec as Record<string, unknown> : null
   const strictQuality = !['stable', 'bold'].includes(String(spec?.creativeFreedom))
   const scope = spec?.scope && typeof spec.scope === 'object' && !Array.isArray(spec.scope) ? spec.scope as Record<string, unknown> : null
@@ -479,12 +479,12 @@ export async function recordChapterReviewDecisions(tx: Prisma.TransactionClient,
   let cycle = readReviewCycle(context, scope)
   if (!cycle) {
     const chapter = await tx.chapter.findFirst({ where: { id: readiness.chapterId, revision: readiness.revision, authorId: subject.userId,
-      ...activeChapterScope(subject.novelId) }, select: { content: true } })
+      ...activeChapterScope(subject.novelId) }, select: { content: true, orderIndex: true } })
     if (!chapter || runtimeJson({ content: chapter.content }).hash !== readiness.decisionBinding.contentHash) {
       throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '正文在意见决策前变化，未保存旧版本决定。')
     }
     cycle = beginReviewCycle(scope, { compilationId: readiness.compilationId, revision: readiness.revision, content: chapter.content,
-      ready: readiness.ready, binding: readiness.decisionBinding, required: originalChapterReviewRequirements(original), findings: readiness.reviewCycleFindings ?? [],
+      ready: readiness.ready, binding: readiness.decisionBinding, required: originalChapterReviewRequirements(original, { id: readiness.chapterId, orderIndex: chapter.orderIndex }), findings: readiness.reviewCycleFindings ?? [],
       obligations: readiness.requiredDecisions ?? [] })
   }
   await tx.storyCompilation.update({ where: { id: compilation.id }, data: { preparedContext: { ...context, reviewCycle: cycle } as Prisma.InputJsonValue,
@@ -508,7 +508,7 @@ export type ChapterReviewWriteProposal = { chapterId: string; revision: number; 
 export async function readChapterReviewWriteAdmission(tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string }, proposal: ChapterReviewWriteProposal) {
   const chapter = await tx.chapter.findFirst({ where: { id: proposal.chapterId, revision: proposal.revision, authorId: subject.userId,
-    ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true } })
+    ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true, orderIndex: true } })
   if (!chapter) throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '正文版本已变化，复查写入方案不能重绑。')
   if (proposal.after === chapter.content) return { kind: 'allow' as const, basis: 'no_change' as const }
   const original = await readOriginalTaskRequest(tx, subject), runIds = await originalTaskRunIds(tx, subject, original)
@@ -653,7 +653,7 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
     const previous = latest && retainedReviewDecisionMatches(latest.validation, current, latest.id, qualityComplete ? quality! : null, [])
       ? ((latest.validation as Prisma.JsonObject).retainedReviewDecision as { findings: RetainedChapterReviewDecision[] }).findings : []
     const retained = mergeReviewDecisions(entries, previous, options.retainedFindings, 'REVIEW_MERGED_REVISION_REQUIRED')
-    const requirements = originalChapterReviewRequirements(original)
+    const requirements = originalChapterReviewRequirements(original, current)
     if (!newReview && options.after === current.content && latest && (!requirements.continuity || continuity)
       && (!requirements.quality || qualityComplete && quality!.compilationId === latest.id)
       && entries.filter(item => item.required).every(item => retained.some(decision => decisionKey(decision) === decisionKey(item)))) {
@@ -741,7 +741,7 @@ export async function assertChapterReviewRevision(
     const current = await tx.chapter.findFirst({ where: { id: chapter.id, revision: chapter.revision, authorId: subject.userId,
       ...activeChapterScope(subject.novelId) }, select: { id: true, title: true, revision: true, content: true, orderIndex: true } })
     const authority = current?.content.trim() ? await readNewDraftWritingAuthority(tx, subject, current) : null
-    if (authority && current && originalChapterReviewRequirements(original).continuity) {
+    if (authority && current && originalChapterReviewRequirements(original, current).continuity) {
       const bound = compilations.find(item => item.id === options.pendingQuality?.compilationId && item.status === 'active'
         && item.bridge && !item.bridge.committedAt)
       const source = bound?.bridge ? await readCompilerContinuitySource(tx, subject, current, bound.bridge.fromChapterId, storedContinuityProtocol(bound.validation)) : null
@@ -787,7 +787,7 @@ export async function assertChapterReviewRevision(
     }
     const assertMergedMutation = async (bound: typeof compilations[number]) => {
       if (!options?.mutation || !current || !authority) return
-      const requirements = originalChapterReviewRequirements(original)
+      const requirements = originalChapterReviewRequirements(original, current)
       const source = bound?.bridge ? await readCompilerContinuitySource(tx, subject, current, bound.bridge.fromChapterId, storedContinuityProtocol(bound.validation)) : null
       const continuity = bound.bridge && (!bound.bridge.fromChapterId || source?.revision === bound.bridge.sourceRevision)
         ? readCurrentCompilerContinuity({ ...bound, bridge: bound.bridge }, current, source).assessment : null

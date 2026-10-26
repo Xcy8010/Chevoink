@@ -1,3 +1,4 @@
+import { projectCurrentReviewNextStep } from '../../api/lib/agent/review-dispatch.js'
 import { describe, expect, it, vi } from 'vitest'
 import { inspectContinuityV4 } from '../../api/lib/agent/continuity-review-v4.js'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
@@ -504,7 +505,10 @@ describe.runIf(available)('original persistent supplemental phase: real question
           expect(current).toMatchObject({ ready: true, continuity: 'complete', continuityErrorCount: appliedScenario ? 4 : 1, decisionPending: true })
           expect(current!.requiredDecisions).toHaveLength(appliedScenario ? 15 : 1)
           if (appliedScenario) {
-            expect(current).toMatchObject({ quality: 'complete', requiredTools: [], terminalReview: { currentResultVerified: true, deliveryEligible: false } })
+            expect(current).toMatchObject({ quality: 'complete', requiredTools: [], terminalReview: { currentResultVerified: true } })
+            // Eligibility and unresolved review decisions are separate facts.
+            // This dynamic observation must still select the exact 15 decisions.
+            expect(projectCurrentReviewNextStep(current!)).toMatchObject({ state: 'decision_required', pending: current!.requiredDecisions })
             expect(current!.requiredDecisions!.filter(item => item.source === 'quality')).toHaveLength(11)
             expect(await loadPersistedEvents(f.runId, pause.seq)).not.toContainEqual(expect.objectContaining({ type: 'run.paused' }))
           }

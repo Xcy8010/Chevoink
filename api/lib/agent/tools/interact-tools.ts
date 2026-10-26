@@ -126,7 +126,7 @@ export const askUserTool = defineTool({
     if (result.answer === null) {
       const reason = result.timedOut ? '作者长时间未回答' : '本次提问已取消'
       return {
-        output: `${reason}。请基于已有信息选择最合理的默认方案继续完成任务，并在最终说明中简要交代你的假设。不要再重复提问。`,
+        output: `${reason}。未回答不等于同意，不选择依赖该回答的方向或扩大授权。只继续不依赖此决定且已获授权的工作；必要决定仍缺失时保留进度等待作者输入，不重复提问。`,
         summary: '提问未获回答',
         display: {
           kind: 'question',

@@ -239,7 +239,8 @@ vi.mock('../../api/lib/agent/agents.js', () => ({
 }))
 vi.mock('../../api/lib/agent/tools/registry.js', () => ({ allTools: [], getToolByName: (name: string) => [...mocks.tools, ...mocks.hiddenTools].find(tool => tool.name === name), toOpenAITools: mocks.openAITools }))
 vi.mock('../../api/lib/agent/baseline.js', () => ({ clearRunBaselines: vi.fn(), getLastTouchedChapter: () => undefined }))
-vi.mock('../../api/lib/agent/context.js', () => ({ assembleContext: vi.fn(async () => ({ messages: [] })), insertSubagentCatalog: vi.fn() }))
+vi.mock('../../api/lib/agent/context.js', async importOriginal => ({ AGENT_BEHAVIOR_CORE: (await importOriginal<typeof import('../../api/lib/agent/context.js')>()).AGENT_BEHAVIOR_CORE,
+  assembleContext: vi.fn(async () => ({ messages: [] })), insertSubagentCatalog: vi.fn() }))
 vi.mock('../../api/lib/agent/skills/receipts.js', () => ({ recordSkillLoads: mocks.skillLoads }))
 vi.mock('../../api/lib/agent/skills/service.js', async () => {
   const { skillCatalog, SKILL_ROUTER_VERSION } = await import('../../api/lib/agent/skills/index.js')
@@ -4159,5 +4160,67 @@ describe('independent persisted review phases with unresolved usage', () => {
     expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { readProgress: 3, writeProgress: 3, tokenBudget: 500, maxTurns: 1,
       progressSignatures: [f.checkpoint.progressSignatures[0], f.signature('continuity'), f.signature('quality')] } })
     expect(mocks.chat).toHaveBeenCalledOnce()
+  })
+})
+
+
+describe('failed tool observations retain known partial results', () => {
+  it.each([
+    { name: 'task_spawn', failureCode: 'TASK_SPAWN_PARTIAL_FAILURE', output: '已启动窗口 started-child；另一窗口启动结果未确认。',
+      display: { kind: 'taskOrchestration', mode: 'spawn', detail: '一份分工已启动，另一份未确认', windows: [
+        { sessionId: 'started-child', title: '已启动分工', status: 'running', summary: '原窗口已保存的交付仍可核对' },
+      ] } },
+    { name: 'chapter_write', failureCode: 'QUALITY_REPORT_INCOMPLETE', output: '正文已保存到 r2；质量报告未完成，不能冒充整项完成。',
+      display: { kind: 'chapterDiff', chapterId: 'c', chapterTitle: '第一章', before: '当前章节正文', after: '已保存的新正文',
+        appliedDirectly: true, revision: 2 } },
+  ] satisfies Array<{ name: string; failureCode: string; output: string; display: NonNullable<ToolResult['display']> }>) (
+    '$name emits and returns its known display while preserving binary failure without another dispatch', async ({ name, failureCode, output, display }) => {
+      const usageBefore = structuredClone(mocks.runs.get('run')?.usage)
+      const ctx = context(), childStarted = vi.fn()
+      const admitted = tool(name, async () => {
+        if (name === 'task_spawn') {
+          childStarted('started-child', 'started-run')
+          ctx.emit({ type: 'task.spawned', messageId: 'message', callId: 'partial', sessions: [
+            { sessionId: 'started-child', runId: 'started-run', novelId: 'novel', title: '已启动分工' },
+          ] })
+        } else {
+          mocks.chapters[0].content = '已保存的新正文'
+          mocks.chapters[0].revision = 2
+        }
+        return { outcome: 'failed', failureCode, output, summary: '保留已知成果，整项尚未完成', display }
+      }, false)
+      const outcome = await handleToolCall(call('partial', name), [admitted], ctx, { emit: mocks.emit }, 'message', 'run')
+      expect(outcome).toMatchObject({ failureCode, unresolvedTextRequest: false,
+        part: { type: 'tool-call', callId: 'partial', toolName: name, status: 'failed', display } })
+      expect(outcome.observation).toContain(output)
+      expect(events().filter(event => event.type === 'tool.result')).toEqual([
+        expect.objectContaining({ callId: 'partial', toolName: name, ok: false, failureCode, display }),
+      ])
+      expect(events().filter(event => event.type === 'tool.call')).toHaveLength(1)
+      expect(events().some(event => event.type === 'tool.result' && event.ok)).toBe(false)
+      expect(admitted.execute).toHaveBeenCalledOnce()
+      expect(mocks.chat).not.toHaveBeenCalled()
+      expect(mocks.modelRuntime).not.toHaveBeenCalled()
+      expect(mocks.runs.get('run')?.usage).toEqual(usageBefore)
+      if (name === 'task_spawn') {
+        expect(childStarted).toHaveBeenCalledExactlyOnceWith('started-child', 'started-run')
+        expect(events().filter(event => event.type === 'task.spawned')).toHaveLength(1)
+        expect(outcome.observation).toContain('另一窗口启动结果未确认')
+      } else {
+        expect(mocks.chapters[0]).toMatchObject({ content: '已保存的新正文', revision: 2 })
+        expect(childStarted).not.toHaveBeenCalled()
+      }
+    })
+  it('does not fabricate a display or another attempt for an ordinary failure without artifacts', async () => {
+    const admitted = tool('task_spawn', async () => ({ outcome: 'failed', failureCode: 'TASK_SPAWN_FAILED', output: '没有取得成功启动回执。' }), false)
+    const outcome = await handleToolCall(call('no-artifact', admitted.name), [admitted], context(), { emit: mocks.emit }, 'message', 'run')
+    expect(outcome).toMatchObject({ failureCode: 'TASK_SPAWN_FAILED', part: { status: 'failed' } })
+    expect(outcome.part).not.toHaveProperty('display')
+    const results = events().filter(event => event.type === 'tool.result')
+    expect(results).toEqual([expect.objectContaining({ callId: 'no-artifact', ok: false, failureCode: 'TASK_SPAWN_FAILED' })])
+    expect(results[0]).not.toHaveProperty('display')
+    expect(events().filter(event => event.type === 'task.spawned')).toHaveLength(0)
+    expect(admitted.execute).toHaveBeenCalledOnce()
+    expect(mocks.chat).not.toHaveBeenCalled(); expect(mocks.modelRuntime).not.toHaveBeenCalled()
   })
 })

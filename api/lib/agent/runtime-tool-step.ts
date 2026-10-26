@@ -8,7 +8,7 @@ import { runtimeError, runtimeJson } from './runtime-common.js'
 import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
 import { parseToolArgsTolerant } from './tool-argument-parser.js'
 import { normalizeToolInput, validateToolInput } from './tools/input-validation.js'
-import { rejectToolCursorCall } from './runtime-tool-cursor.js'
+import { readPreparedLiteraryArguments, rejectToolCursorCall } from './runtime-tool-cursor.js'
 import { failedToolResultSchema, reduceExecutionReceipt } from './runtime-reducer.js'
 import { readObservedBaseline } from './runtime-observed-baseline.js'
 import { chapterReadTool, planReadTool, novelGetContextTool, chapterListSummariesTool, memorySearchTool } from './tools/read-tools.js'
@@ -192,9 +192,14 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     let raw: unknown
     try { raw = call.arguments ? parseToolArgsTolerant(call.arguments, false) : {} }
     catch { return { reject: { cursor, callId: call.id } } }
-    const validated = validateToolInput(tool, normalizeToolInput(tool, raw))
-    if (!validated.success) return { reject: { cursor, callId: call.id, tool } }
+    const frozenArgs = await readPreparedLiteraryArguments(tx, lease, { action: call.name, callId: call.id, rawArguments: call.arguments, cursor })
+    const validated = validateToolInput(tool, normalizeToolInput(tool, frozenArgs ?? raw))
+    if (!validated.success) {
+      if (frozenArgs) return runtimeError('RUNTIME_RECEIPT_INVALID', '原冻结文学参数不符合原工具合同，不能重新补造。')
+      return { reject: { cursor, callId: call.id, tool } }
+    }
     const args = Object.fromEntries(Object.entries(validated.data as Record<string, unknown>).filter(([, value]) => value !== undefined))
+    if (frozenArgs && runtimeJson(args).hash !== runtimeJson(frozenArgs).hash) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原冻结文学参数不能被新归一化改写。')
     const originalChapterId = originalScope.selection?.chapterId ?? (originalScope.chapterIds?.length === 1 ? originalScope.chapterIds[0] : null)
     const ctx: ToolContext = { userId: lease.userId, runId: lease.runId, novelId: root.novelId, sessionId: root.sessionId,
       chapterId: originalChapterId, callId: call.id, mode: current.configuration.mode, creativeFreedom: current.configuration.creativeFreedom,
@@ -260,8 +265,10 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     let serviceConfirmation = false
     if (ctx.writingScope?.writingCoordinationProtocol && ctx.durableContent) {
       const original = await (await import('./original-request.js')).readOriginalTaskRequest(tx, ctx)
+      const chapter = await tx.chapter.findFirst({ where: { id: ctx.durableContent.chapterId, authorId: ctx.userId, novelId: ctx.novelId }, select: { orderIndex: true } })
+      if (!chapter) return runtimeError('AUTHOR_CHAPTER_SCOPE', '当前写作章节不属于原作品。')
       const manifest = z.object({ steps: z.array(z.object({ actions: z.array(z.string()) })) }).parse(
-        coordinatedWritingManifest({ spec: originalSpec, prompt: original.prompt }, call.name, ctx.durableContent.chapterId, args.writing))
+        coordinatedWritingManifest({ spec: originalSpec, prompt: original.prompt }, call.name, ctx.durableContent.chapterId, args.writing, { targetOrderIndex: chapter.orderIndex }))
       serviceConfirmation = (await (await import('./runtime-writing-service.js')).readWritingServiceConfirmations(tx, lease,
         manifest.steps.flatMap(step => step.actions))).length > 0
     }

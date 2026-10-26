@@ -121,64 +121,42 @@ export const firstThreePrototypeBuildTool = defineTool({
     const record = source as Record<string, unknown>
     const normalizeObjectArray = (value: unknown, aliases: Record<string, string[]>) => Array.isArray(value)
       ? value.map((item, index) => {
-          const current = item && typeof item === 'object' && !Array.isArray(item)
-            ? item as Record<string, unknown>
-            : { title: String(item ?? '').trim() || `方向 ${index + 1}` }
+          if (!item || typeof item !== 'object' || Array.isArray(item)) {
+            if (typeof item !== 'string') return item
+            item = { title: item.trim() }
+          }
+          const current = item as Record<string, unknown>
           const next: Record<string, unknown> = { ...current }
-          for (const [key, keys] of Object.entries(aliases)) next[key] ??= firstDefined(current, keys)
+          for (const [key, keys] of Object.entries(aliases)) {
+            next[key] ??= firstDefined(current, keys)
+          }
           next.id ??= `direction-${index + 1}`
           return next
         })
-      : []
-    const genreRisks = coerceStringList(firstDefined(record, ['genreRisks', 'genre_risks', 'risks']))
-    const volumeSpine = coerceStringList(firstDefined(record, ['volumeSpine', 'volume_spine', 'spine']))
-    const rawDirections = normalizeObjectArray(firstDefined(record, ['directions', 'storyDirections', 'story_directions', 'options']), {
+      : value
+    const directions = normalizeObjectArray(firstDefined(record, ['directions', 'storyDirections', 'story_directions', 'options']), {
       title: ['name', 'label'], readerPromise: ['reader_promise', 'promise'], conflictEngine: ['conflict_engine', 'conflict'],
       differentiation: ['difference', 'uniquePoint', 'unique_point'], risk: ['risks', 'genreRisk', 'genre_risk'],
-    }) as Record<string, unknown>[]
-    while (rawDirections.length < 2) rawDirections.push({ id: `direction-${rawDirections.length + 1}`, title: `方向 ${rawDirections.length + 1}` })
-    const directions = rawDirections.slice(0, 3).map((direction, index) => {
-      const title = String(direction.title ?? `方向 ${index + 1}`).trim()
-      const promise = String(direction.readerPromise ?? `以前三章的连续事件兑现「${title}」的核心吸引力`).trim()
-      return {
-        ...direction,
-        id: String(direction.id ?? `direction-${index + 1}`).slice(0, 48),
-        title: title.slice(0, 160),
-        readerPromise: promise.slice(0, 500),
-        conflictEngine: String(direction.conflictEngine ?? `${title}不断迫使主角在目标、关系与代价之间选择`).slice(0, 800),
-        differentiation: String(direction.differentiation ?? `${title}必须通过具体事件和人物选择呈现，而非设定说明`).slice(0, 500),
-        risk: String(direction.risk ?? genreRisks[index] ?? '避免只有背景介绍而没有可见行动与代价').slice(0, 500),
-      }
     })
     const rawBlueprints = normalizeObjectArray(firstDefined(record, ['chapterBlueprints', 'chapter_blueprints', 'chapters', 'blueprints']), {
       orderIndex: ['order_index', 'order', 'chapterNumber', 'chapter_number'], title: ['name'], chapterJob: ['chapter_job', 'job', 'purpose'],
       concreteEvent: ['concrete_event', 'event'], protagonistChoice: ['protagonist_choice', 'choice'], cost: ['consequence', 'price'],
       newInformation: ['new_information', 'reveal', 'information'], exitHook: ['exit_hook', 'hook'], qualityRisks: ['quality_risks', 'risks'],
-    }) as Record<string, unknown>[]
-    while (rawBlueprints.length < 3) rawBlueprints.push({ orderIndex: rawBlueprints.length + 1, title: `第 ${rawBlueprints.length + 1} 章` })
-    const chapterBlueprints = rawBlueprints.slice(0, 3).map((chapter, index) => {
-      const orderIndex = index + 1
-      const event = String(chapter.concreteEvent ?? volumeSpine[index] ?? `${directions[0].title}在第 ${orderIndex} 章发生可见推进`).trim()
-      return {
-        ...chapter,
-        orderIndex,
-        title: String(chapter.title ?? `第 ${orderIndex} 章`).slice(0, 160),
-        chapterJob: String(chapter.chapterJob ?? `完成第 ${orderIndex} 个开篇推进并改变故事状态`).slice(0, 500),
-        concreteEvent: event.slice(0, 800),
-        protagonistChoice: String(chapter.protagonistChoice ?? `主角针对「${event}」作出会影响后续局势的主动选择`).slice(0, 800),
-        cost: String(chapter.cost ?? '该选择立即带来关系、资源或风险上的可见代价').slice(0, 500),
-        newInformation: String(chapter.newInformation ?? '揭示一条会改变读者和主角判断的新信息').slice(0, 500),
-        exitHook: String(chapter.exitHook ?? '以尚未解决的新变化推动读者进入下一章').slice(0, 500),
-        qualityRisks: coerceStringList(chapter.qualityRisks).slice(0, 6),
-      }
     })
+    const chapterBlueprints = Array.isArray(rawBlueprints) ? rawBlueprints.map((value, index) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+      const chapter = value as Record<string, unknown>
+      return { ...chapter, orderIndex: chapter.orderIndex ?? index + 1, qualityRisks: coerceStringList(chapter.qualityRisks) }
+    }) : rawBlueprints
+    // Only repair representation and technical identities. Missing literary
+    // decisions remain missing so the schema reports their exact field paths.
     return {
       ...record,
       dossierId: firstDefined(record, ['dossierId', 'dossier_id', 'researchDossierId', 'research_dossier_id']),
-      genreRisks: (genreRisks.length ? genreRisks : ['避免前三章只讲设定、缺少事件推进']).slice(0, 12),
+      genreRisks: coerceStringList(firstDefined(record, ['genreRisks', 'genre_risks', 'risks'])),
       directions,
       selectedDirectionId: firstDefined(record, ['selectedDirectionId', 'selected_direction_id', 'directionId', 'direction_id']),
-      volumeSpine: (volumeSpine.length >= 3 ? volumeSpine : [...volumeSpine, '建立主角目标与初始阻力', '让选择产生第一次明确代价', '用新信息改变局势并形成追读钩子']).slice(0, 12),
+      volumeSpine: coerceStringList(firstDefined(record, ['volumeSpine', 'volume_spine', 'spine'])),
       chapterBlueprints,
     }
   },

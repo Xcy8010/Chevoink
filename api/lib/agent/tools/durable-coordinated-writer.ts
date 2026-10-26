@@ -3,9 +3,9 @@ import { taskSpecSchema } from '../../../../shared/contracts/task-spec-contracts
 import { DataAccessError } from '../../prisma.js'
 import { runtimeError, runtimeJson } from '../runtime-common.js'
 import { withRunLease } from '../runtime-lease.js'
-import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
+import { argumentNormalizationSchema, prepareToolCursorOperation, readAdmittedToolOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { failedToolResultSchema, reduceExecutionReceipt } from '../runtime-reducer.js'
-import { coordinatedWritingManifest, coordinatedWriterActions } from '../coordinated-writing-input.js'
+import { coordinatedWritingManifest, coordinatedWriterActions, writingServiceManifestSchema } from '../coordinated-writing-input.js'
 import { readOriginalTaskRequest } from '../original-request.js'
 import { executeCoordinatedWritingServices } from '../writing-service-coordination.js'
 import { normalizeToolInput } from './input-validation.js'
@@ -29,7 +29,26 @@ export async function executeDurableCoordinatedWriter(ctx: ToolContext, tool: Ag
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.userId !== ctx.userId || root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '写作协调不属于原作品会话。')
     const original = await readOriginalTaskRequest(tx, ctx)
-    return coordinatedWritingManifest({ spec: taskSpecSchema.parse(root.specSnapshot), prompt: original.prompt }, tool.name, capability.chapterId, args.writing)
+    const prior = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: {
+      taskRootId: lease.taskRootId, operationKey: capability.operationKey } }, select: { id: true } })
+    if (prior) {
+      // The key only locates a candidate. Authenticate its immutable input and
+      // actual source call under this lease before reading any saved manifest.
+      const admitted = await readAdmittedToolOperation(lease, { operationId: prior.id, action: tool.name,
+        novelId: ctx.novelId, callId: ctx.callId }, tx)
+      const saved = z.object({ args: z.record(z.string(), z.unknown()), expectedRevision: z.number().int().positive(),
+        writingManifest: writingServiceManifestSchema, normalization: argumentNormalizationSchema }).safeParse(admitted.input)
+      if (!saved.success || admitted.operation.operationKey !== capability.operationKey
+        || saved.data.args.chapterId !== capability.chapterId || saved.data.expectedRevision !== capability.expectedRevision
+        || saved.data.normalization.sourceRevision !== cursor.expectedRevision || saved.data.normalization.sourceSnapshotHash !== cursor.expectedHash
+        || runtimeJson(saved.data.args).hash !== runtimeJson(args).hash) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '恢复写作调用与原冻结位置或参数不一致。')
+      return coordinatedWritingManifest({ spec: taskSpecSchema.parse(root.specSnapshot), prompt: original.prompt }, tool.name, capability.chapterId, args.writing,
+        { frozenManifest: saved.data.writingManifest })
+    }
+    const chapter = await tx.chapter.findFirst({ where: { id: capability.chapterId, authorId: ctx.userId, novelId: ctx.novelId }, select: { orderIndex: true } })
+    if (!chapter) return runtimeError('AUTHOR_CHAPTER_SCOPE', '当前写作章节不属于原作品。')
+    return coordinatedWritingManifest({ spec: taskSpecSchema.parse(root.specSnapshot), prompt: original.prompt }, tool.name, capability.chapterId, args.writing,
+      { targetOrderIndex: chapter.orderIndex })
   })
   const prepared = await prepareToolCursorOperation(lease, cursor, { key: capability.operationKey, action: tool.name, callId: ctx.callId,
     targetId: capability.chapterId, effectiveArgs: args, normalize,

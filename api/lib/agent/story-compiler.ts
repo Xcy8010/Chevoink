@@ -1,3 +1,5 @@
+import { z } from 'zod'
+import { continuityFindingInputSchema } from '../../../shared/contracts/index.js'
 import { readCompilerContinuitySource } from './compiler-continuity-source.js'
 import { hasTerminalEvidenceProtocol, terminalEvidenceContext, terminalQuoteAddressVersion, terminalVerdictAuditVersion, terminalSpanAuditVersion } from './terminal-evidence-context.js'
 import { advanceTerminalCoverage, readTerminalCoverageState, terminalCoverageInput, terminalCoverageAuditVersion, terminalCoverageProofs } from './terminal-fact-coverage.js'
@@ -692,12 +694,14 @@ export async function validateStoryContinuity(input: {
   terminalCandidate?: TerminalCandidate
   continuityCriticResponse?: unknown
   expectedContinuityOwnerSeq?: number
+  /** Internal cache reuse only; model arguments never set this flag. */
+  reuseCachedReview?: boolean
   /** Internal native effect owner; never read from model/tool arguments. */
   expectedContinuityNativeLease?: import('./runtime-lease.js').RunLeaseToken
   focus?: string
   signal?: AbortSignal
 }, transaction?: Prisma.TransactionClient): Promise<{ checkedChapterId: string; checkedRevision: number; checkedAt: string; independentCheck: 'complete' | 'unavailable'; findings: ContinuityFindingInput[]; errorCount: number; warningCount: number; autoRepairRounds: number; checkRounds: number; effectiveReport?: import('./continuity-coordinator.js').EffectiveContinuityReport }> {
-  if (!transaction) return prisma.$transaction(tx => validateStoryContinuity(input, tx))
+  if (!transaction) return prisma.$transaction(tx => validateStoryContinuity(input, tx), input.reuseCachedReview ? { timeout: 20_000 } : undefined)
   const db = transaction
   await lockNovelActiveScope(db, input.novelId)
   if (input.runId) await assertAgentManuscriptCurrent(db, { userId: input.userId, novelId: input.novelId, runId: input.runId })
@@ -731,7 +735,11 @@ export async function validateStoryContinuity(input: {
   const protocol = input.coverage?.protocolVersion ?? 8
   if (protocol !== 6 && protocol !== 7 && protocol !== 8 && protocol !== 9 && protocol !== 10 && protocol !== 11) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '未知连续性协议，不能升级或应用旧检查。')
   const reviewSource = await readCompilerContinuitySource(db, input, compilation.chapter, compilation.bridge.fromChapterId, protocol)
-  const currentCoverage = compilerContinuityCoverage({ chapter: compilation.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: reviewSource, focus: input.focus, terminalCandidate: input.terminalCandidate }, protocol)
+  const committedReview = input.reuseCachedReview && compilation.status === 'completed'
+    ? (await import('./chapter-review-guard.js')).readCurrentCompilerContinuity({ ...compilation, bridge: compilation.bridge }, compilation.chapter, reviewSource) : null
+  const currentCoverage = compilerContinuityCoverage({ chapter: compilation.chapter,
+    bridge: committedReview?.assessment ? committedReview.checkedBridge : compilation.bridge,
+    sceneTasks: compilation.sceneTasks, source: reviewSource, focus: input.focus, terminalCandidate: input.terminalCandidate }, protocol)
   if (input.coverage && !compilerContinuityCoverageMatches(input.coverage, currentCoverage)) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文、章节桥、场景或检查范围已变化，旧检查不能绑定当前编译。')
   const deterministic: ContinuityFindingInput[] = []
   if (compilation.sceneTasks.length < 1 || compilation.sceneTasks.length > 4) {
@@ -767,6 +775,18 @@ export async function validateStoryContinuity(input: {
   const sameReviewedInput = previousValidation.checkedRevision === compilation.chapter.revision && previousValidation.independentCheck === 'complete'
     && runtimeJson(previousValidation.findings ?? []).hash === runtimeJson(findings).hash
     && compilerContinuityCoverageMatches(previousValidation.coverage, currentCoverage)
+  if (input.reuseCachedReview && compilation.status === 'completed') {
+    if (!committedReview?.assessment || !sameReviewedInput || unlocated.length || input.independentCheck !== 'complete'
+      || input.continuityCriticResponse !== undefined) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '已提交检查的正文、来源、候选或原报告已变化，未复用旧结果。')
+    input.signal?.throwIfAborted()
+    // The lock, original task/owner and exact current source/candidate checks
+    // above still apply. Preserve the committed report and every old receipt.
+    return z.object({ checkedChapterId: z.string(), checkedRevision: z.number().int(), checkedAt: z.string().datetime(),
+      independentCheck: z.literal('complete'), findings: z.array(continuityFindingInputSchema),
+      errorCount: z.number().int().nonnegative(), warningCount: z.number().int().nonnegative(),
+      autoRepairRounds: z.number().int().nonnegative(), checkRounds: z.number().int().nonnegative(),
+    }).passthrough().parse(previousValidation)
+  }
   const recovery = previousValidation.continuityFormatRecovery
   const originalAudit = previousValidation.continuityCriticResponse
   const preservedRecovery = sameReviewedInput && recovery && typeof recovery === 'object' && !Array.isArray(recovery)

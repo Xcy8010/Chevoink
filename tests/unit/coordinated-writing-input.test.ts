@@ -129,3 +129,40 @@ describe('original writer decisions and service manifest', () => {
     expect(coordinatedWritingInputSchema.safeParse({ ...completed, skipQuality: true }).success).toBe(false)
   })
 })
+
+describe('target-bound review requirements preserve frozen writer steps', () => {
+  it('uses current target requirements for fresh manifests and preserves an authenticated old full manifest', () => {
+    const value = original('完整改写本章，本章不用质量检查。')
+    const old = coordinatedWritingManifest({ ...value, prompt: '完整改写本章并检查。' }, 'chapter_write', 'chapter', completed)
+    const frozen = structuredClone(old)
+    const fresh = coordinatedWritingManifest(value, 'chapter_write', 'chapter', completed) as { steps: Array<{ step: string }> }
+    expect(fresh.steps.map(item => item.step)).toEqual(['body', 'continuity', 'commit'])
+    expect(coordinatedWritingManifest(value, 'chapter_write', 'chapter', completed, { frozenManifest: old })).toEqual(old)
+    expect(old).toEqual(frozen)
+  })
+  it.each(['chapter', 'writing', 'sequence'] as const)('rejects a mismatched frozen %s', kind => {
+    const value = original()
+    const old = coordinatedWritingManifest(value, 'chapter_write', 'chapter', completed) as { chapterId: string; writingHash: string; steps: Array<{ step: string; actions: string[] }> }
+    const changed = structuredClone(old)
+    if (kind === 'chapter') changed.chapterId = 'other'
+    else if (kind === 'writing') changed.writingHash = '0'.repeat(64)
+    else changed.steps.reverse()
+    expect(() => coordinatedWritingManifest(value, 'chapter_write', 'chapter', completed, { frozenManifest: changed })).toThrow()
+    expect(coordinatedWritingManifest(value, 'chapter_write', 'chapter', completed)).toEqual(old)
+  })
+  it('binds different uncreated targets by the real chapter order without dropping root capabilities', () => {
+    const value = original('改写第1章和第2章，第1章不用质量检查。')
+    value.spec.scope.writing = { ...value.spec.scope.writing!, kind: 'bounded',
+      targets: [{ chapterId: null, orderIndex: 1 }, { chapterId: null, orderIndex: 2 }] }
+    const first = coordinatedWritingManifest(value, 'chapter_write', 'new1', completed, { targetOrderIndex: 1 }) as { steps: Array<{ step: string }> }
+    const second = coordinatedWritingManifest(value, 'chapter_write', 'new2', completed, { targetOrderIndex: 2 }) as { steps: Array<{ step: string }> }
+    expect(first.steps.map(item => item.step)).toEqual(['body', 'continuity', 'commit'])
+    expect(second.steps.map(item => item.step)).toEqual(['body', 'continuity', 'quality', 'commit'])
+    const names = new Set(['chapter_read', 'chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range',
+      'story_compiler_prepare', 'scene_task_build', 'continuity_validate', 'chapter_bridge_commit'])
+    const undecided = { ...value.spec, scope: { ...value.spec.scope, writingCoordinationProtocol: undefined,
+      authorEffects: { version: 1 as const, requestHash: 'a'.repeat(64), manuscript: true, structure: false } } }
+    expect(issueWritingCoordination(undecided, 'build', names, value.prompt)).toBe(undecided)
+    expect(issueWritingCoordination(undecided, 'build', new Set([...names, 'quality_analyze']), value.prompt).scope.writingCoordinationProtocol).toBe(1)
+  })
+})

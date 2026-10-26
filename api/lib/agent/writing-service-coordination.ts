@@ -162,7 +162,7 @@ export async function executeCoordinatedWritingServices(ctx: ToolContext, lease:
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     const spec = taskSpecSchema.parse(root.specSnapshot), request = await readOriginalTaskRequest(tx, ctx)
     const args = genuine.input.args, writing = coordinatedWritingInputSchema.parse(args.writing), chapterId = z.string().min(1).parse(args.chapterId)
-    const manifest = coordinatedWritingManifest({ spec, prompt: request.prompt }, action, chapterId, writing)
+    const manifest = coordinatedWritingManifest({ spec, prompt: request.prompt }, action, chapterId, writing, { frozenManifest: genuine.input.writingManifest })
     if (runtimeJson(manifest).hash !== runtimeJson(genuine.input.writingManifest).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '协调清单与原写入不一致。')
     return { ...genuine, writing, chapterId, manifest: manifestSchema.parse(manifest) }
   })

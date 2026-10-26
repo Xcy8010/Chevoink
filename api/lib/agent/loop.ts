@@ -37,7 +37,7 @@ import { readManagedImageDataUrl } from '../agent-attachment-storage.js'
 import { applySessionToolPolicy, getAgentDefinition, getToolsForAgent, type AgentDefinition } from './agents.js'
 import { deregisterActiveRun, registerActiveRun, getActiveRun } from './active-runs.js'
 import { clearRunBaselines, getLastTouchedChapter } from './baseline.js'
-import { assembleContext, insertSubagentCatalog } from './context.js'
+import { AGENT_BEHAVIOR_CORE, assembleContext, insertSubagentCatalog } from './context.js'
 import { captureUserDirectives, compactSessionContext } from './context-engine.js'
 import { syncNovelMemoryProjection } from './story-memory.js'
 import { resolveAgent2FeatureFlags } from '../agent2-feature-flags.js'
@@ -434,7 +434,7 @@ export async function handleToolCall(
   let reviewSnapshot: { chapterId: string; revision: number; contentHash: string } | undefined
   let failureCode: string | undefined
   let invalidFields: string[] | undefined
-  const fail = (summary: string, observation: string, status: 'failed' | 'denied', reviewRequestFinished?: ToolCallOutcome['reviewRequestFinished'], reviewOutcome?: ReviewOutcome): ToolCallOutcome => {
+  const fail = (summary: string, observation: string, status: 'failed' | 'denied', reviewRequestFinished?: ToolCallOutcome['reviewRequestFinished'], reviewOutcome?: ReviewOutcome, display?: ToolCallOutcome['part']['display']): ToolCallOutcome => {
     if (requestTrace.records.length) reviewRequestFinished = reviewSnapshot && textRequestsFinished(requestTrace) ? {
       version: 1, ...reviewSnapshot, usageIds: requestTrace.records.map(row => row.usageId),
     } : undefined
@@ -445,6 +445,7 @@ export async function handleToolCall(
       toolName: call.name,
       ok: false,
       summary,
+      ...(display ? { display } : {}),
       failureCode,
       invalidFields,
       ...(exposeReviewOutcome && reviewOutcome ? { reviewOutcome } : {}),
@@ -453,7 +454,7 @@ export async function handleToolCall(
       ...subagentMark,
     })
     return { observation, failureCode, reviewRequestFinished, reviewOutcome,
-      unresolvedTextRequest: reviewOutcome === 'provider_unresolved' || requestTrace.records.length > 0 && !textRequestsFinished(requestTrace), part: { ...basePart, args: parsedArgs, status, summary, ...(exposeReviewOutcome && reviewOutcome ? { reviewOutcome } : {}) },
+      unresolvedTextRequest: reviewOutcome === 'provider_unresolved' || requestTrace.records.length > 0 && !textRequestsFinished(requestTrace), part: { ...basePart, args: parsedArgs, status, summary, ...(display ? { display } : {}), ...(exposeReviewOutcome && reviewOutcome ? { reviewOutcome } : {}) },
       ...(['CONTINUITY_CHECK_LIMIT', 'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED'].includes(failureCode ?? '')
         ? { reviewStopReason: observation } : {}) }
   }
@@ -562,7 +563,7 @@ export async function handleToolCall(
       failureCode = result.failureCode ?? 'TOOL_EXECUTION_REJECTED'
       const recovery = toolFailureRecovery(failureCode)
       return { ...fail(result.summary ?? recovery?.label ?? '执行未完成', wrapToolOutput(tool.name,
-        result.output + (recovery ? `\n${recovery.guidance}` : '')), 'failed', result.reviewRequestFinished, reviewOutcome), ...(recovery ? { recoveryCode: failureCode } : {}), reviewCompleted: result.reviewCompleted,
+        result.output + (recovery ? `\n${recovery.guidance}` : '')), 'failed', result.reviewRequestFinished, reviewOutcome, result.display), ...(recovery ? { recoveryCode: failureCode } : {}), reviewCompleted: result.reviewCompleted,
         reviewDecisionFeedback: ctx.inlineChild ? undefined : result.reviewDecisionFeedback }
     }
     const durationMs = Date.now() - startedAt
@@ -1772,7 +1773,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     // A4：长上下文提醒消息（单实例，每轮移除后重新追加到队尾，保证只存在一条且最靠近当前轮）
     const contextReminder: ChatMessage = {
       role: 'user',
-      content: `[系统提醒] 对话已较长，重申信道纪律：思考区与 Agent 回复区只围绕当前作品的创作判断与成果，不叙述工具选择、调用、检查、保存和提交过程；技术运行信息留在现有执行卡与状态详情，两条信道执行中都可以为空；执行类任务收尾写简短交付说明（不超过 2 句 80 字）；写作收尾先概括本次已保存正文中的实际剧情推进、人物变化或具体修订，不编造，不以工具调用、检查进度、版本号或终态提交代替创作成果。若作者要求提问、检查、对比、分析或报告，正文就是交付物，须完整输出结论与证据，不受80字限制，可用标准Markdown但不用原始HTML或远程图片；不得用泛化文字填补来源缺口。规划产出走 plan_save，修订带 planId；需要作者决策用 ask_user。当前模式：${params.mode}。`,
+      content: `[系统提醒] 对话已较长，继续遵守同一行为核心：\n${AGENT_BEHAVIOR_CORE}\n当前模式：${params.mode}。任务范围、工具权限和原回执保持。`,
     }
 
     /** P1 信道重复命中处置：观察模式只记日志零干预；干预模式首次提醒、二次命中强制收尾 */

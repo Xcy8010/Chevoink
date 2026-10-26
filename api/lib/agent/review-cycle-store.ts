@@ -54,7 +54,7 @@ export async function markChapterReviewCycleVerification(tx: Prisma.TransactionC
 /** Caller already holds the manuscript/compilation locks and has independently
  * authorized its mutation. This is bookkeeping, never mutation admission. */
 export async function prepareReviewCycleTransition(tx: Prisma.TransactionClient,
-  subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number; content: string },
+  subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number; content: string; orderIndex: number },
   compilationId: string, after: string, ranges?: Array<{ start: number; end: number; newText: string }>) {
   if (chapter.content === after) return
   const original = await readOriginalTaskRequest(tx, subject)
@@ -71,7 +71,7 @@ export async function prepareReviewCycleTransition(tx: Prisma.TransactionClient,
     review = await readChapterReviewReadiness(tx, subject, compilationId)
   }
   let cycle = existing ?? (review?.ready && review.decisionBinding ? beginReviewCycle(scope, { compilationId, revision: chapter.revision,
-    content: chapter.content, ready: true, binding: review.decisionBinding, required: originalChapterReviewRequirements(original),
+    content: chapter.content, ready: true, binding: review.decisionBinding, required: originalChapterReviewRequirements(original, chapter),
     findings: review.reviewCycleFindings ?? [], obligations: review.requiredDecisions ?? [] }) : null)
   if (!cycle) return
   if (!cycle.verificationStarted && review?.reviewCycle?.verificationStarted) {

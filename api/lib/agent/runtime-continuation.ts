@@ -12,12 +12,13 @@ import { readDurableTodoItems } from './tools/durable-todo.js'
 import { collectDurableToolEvidence } from './runtime-evidence.js'
 import { collectCompletionEvidenceInTransaction } from './runtime-completion-evidence.js'
 import { readCompletedWritingDelivery } from './writing-scope.js'
+import { currentReviewStepStates } from './review-dispatch.js'
 import { readLimitedWritingDelivery } from './writing-delivery-limitations.js'
 
 const resultSchema = z.object({ outcome: z.literal('succeeded'), result: durableChatResultSchema }).strict()
 const reviewObservationSchema = z.object({ version: z.literal(1), fingerprint: z.string().regex(/^[a-f0-9]{64}$/), observations: z.array(z.object({
   compilationId: z.string(), chapterId: z.string(), revision: z.number().int().positive(),
-  state: z.enum(['blocked', 'check_required', 'must_pass_required', 'decision_required', 'commit_available']),
+  state: z.enum(currentReviewStepStates),
   requiredToolNames: z.array(z.enum(['continuity_validate', 'quality_analyze'])), selectionOnly: z.boolean(),
   facts: z.record(z.string(), z.unknown()), content: z.string(),
 }).strict()).min(1) }).strict()
@@ -81,7 +82,13 @@ export async function advanceDurableCompletionObligations(token: RunLeaseToken, 
     if (observed) {
       if (runtimeJson(observed.observations).hash !== observed.fingerprint) return runtimeError('RUNTIME_RECEIPT_INVALID', '当前审查观察指纹不一致。')
       if (observed.observations.some(item => item.state === 'blocked')) return { kind: 'reconciliation_required' as const, blockers }
-      for (const item of observed.observations) if (item.state === 'check_required') requiredTools.push(...item.requiredToolNames)
+      for (const item of observed.observations) {
+        if (item.state === 'check_required') requiredTools.push(...item.requiredToolNames)
+        // An unverified terminal candidate is still a blocker. This only makes
+        // the existing review tool available to the original continuation;
+        // its phase, usage and candidate authorization remain unchanged.
+        if (item.state === 'terminal_review_required') requiredTools.push('continuity_validate', ...item.requiredToolNames)
+      }
       if (observed.observations.some(item => item.state === 'must_pass_required'
         && !['chapter_edit_range', ...(item.selectionOnly ? [] : ['chapter_write'])].some(name => configuration.tools.some(tool => tool.function.name === name)
           && configuration.toolAuthority.some(grant => grant.name === name && grant.permission !== 'deny')))) return { kind: 'reconciliation_required' as const, blockers }

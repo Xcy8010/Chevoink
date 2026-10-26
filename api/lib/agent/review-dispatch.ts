@@ -3,6 +3,9 @@ import { COMPILER_CONTINUITY_PROTOCOL } from './compiler-continuity-contract.js'
 import type { ChapterReviewReadiness } from './chapter-review-guard.js'
 import { projectReviewCycle } from './review-cycle.js'
 
+export const currentReviewStepStates = ['blocked', 'check_required', 'terminal_review_required', 'must_pass_required', 'decision_required', 'commit_available'] as const
+type CurrentReviewState = typeof currentReviewStepStates[number]
+
 /** Current facts only. This is neither a writing grant nor a retry/paid-call instruction. */
 export function projectCurrentReviewNextStep(readiness: ChapterReviewReadiness) {
   const retained = readiness.retainedDecisions ?? []
@@ -17,7 +20,7 @@ export function projectCurrentReviewNextStep(readiness: ChapterReviewReadiness) 
   // scope/terminal proof can be minted. Those decisions are not a new review.
   const currentDecisions = readiness.ready && readiness.terminalReview?.currentResultVerified === true
     && decisionPending && pending.length > 0 && !readiness.mustPassPending
-  const state = currentDecisions ? 'decision_required' : readiness.terminalProcessing && terminalPending
+  const state: CurrentReviewState = currentDecisions ? 'decision_required' : readiness.terminalProcessing && terminalPending
     ? 'terminal_review_required' : !readiness.ready ? incomplete ? 'blocked' : 'check_required'
     : terminalPending ? 'terminal_review_required'
       : readiness.mustPassPending ? 'must_pass_required'

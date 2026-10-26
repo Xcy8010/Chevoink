@@ -14,7 +14,7 @@ import { continuitySubjectIdentity } from '../../api/lib/agent/continuity-subjec
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-candidate-contract.js'
 import { buildContinuityReviewManifest } from '../../api/lib/agent/continuity-review-v4.js'
 import { answerContinuitySupplementQuestion, assertContinuitySupplementTransport, authenticateContinuityPhasePlan,
-  claimContinuityPhase, continuityModelPriceHash, continuitySupplementQuestionArgs, executeContinuitySupplementTool,
+  claimContinuityPhase, readContinuityPhaseClaim, continuityModelPriceHash, continuitySupplementQuestionArgs, executeContinuitySupplementTool,
   canResumeUnsentContinuitySupplement,
   createContinuitySupplementUsage,
   persistContinuitySupplementQuestion, readContinuitySupplementState, reserveContinuitySupplementUsage,
@@ -283,6 +283,58 @@ describe('one exact original supplemental phase crosses the paid transport bound
     const before = structuredClone([...f.rows.values()])
     await expect(createContinuitySupplementUsage(f.tx, { ...input, executionId: currentExecution }, f.preparedData('duplicate-usage'))).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
     expect(f.usageCreate).toHaveBeenCalledOnce(); expect([...f.usage.keys()]).toEqual(['only-usage'])
+    expect([...f.rows.values()]).toEqual(before); expect(fetch).not.toHaveBeenCalled()
+  })
+})
+
+describe('historical target-specific waiver keeps only existing phase claims', () => {
+  function oldClaim(seed = true) {
+    const f = fixture(), chapterId = f.frozen.input.chapterId
+    const admitted = { ...original, prompt: '改写第13章，第13章不用连续性检查。',
+      spec: { id: original.taskId, intent: 'revise', qualityMode: 'premium',
+        scope: { writing: { kind: 'bounded', targets: [{ chapterId, orderIndex: 13 }] } } } }
+    boundary.original.mockResolvedValue(admitted)
+    Object.assign(f.tx, { chapter: { findFirst: vi.fn(async ({ where }: { where: { id: string; authorId: string; novelId: string } }) =>
+      where.id === chapterId && where.authorId === f.subject.userId && where.novelId === f.subject.novelId ? { id: chapterId, orderIndex: 13 } : null) } })
+    const { hash: _old, supplementalSourceKey: _supplement, revisionAuthority: _revision, ...base } = f.plan
+    const body = { ...base, authorityHash: runtimeJson({ spec: admitted.spec, prompt: admitted.prompt }).hash,
+      phases: [{ kind: 'initial_review' as const, limit: 1, authoritySourceRef: 'original-admission:' + original.sourceRunId },
+        { kind: 'sparse_repair' as const, limit: 1, authoritySourceRef: 'original-admission:' + original.sourceRunId }] }
+    const plan = { ...body, hash: runtimeJson(body).hash }
+    const id = runtimeJson({ kind: 'continuity_phase', taskId: original.taskId, chapterId, phase: 'initial_review', ordinal: 0 }).hash
+    const claim = { version: 1, planHash: plan.hash, originalTaskId: original.taskId, phase: 'initial_review', ordinal: 0,
+      operationRef: 'old-request', exactInputHash: 'a'.repeat(64), ownerEpoch: '7' }
+    if (seed) f.rows.set(id, { id, runId: f.subject.runId, artifactType: 'continuityReview', metadata: { version: 1, continuityPhaseClaim: claim } })
+    return { ...f, chapterId, plan, id, claim }
+  }
+  it.each(['pending_settlement', 'settled'] as const)('reads the exact old claim without changing %s usage or granting another phase', async billingStatus => {
+    const f = oldClaim()
+    f.prepare('old-usage'); f.usage.get('old-usage')!.billingStatus = billingStatus
+    const before = structuredClone([...f.rows.values()]), fees = structuredClone([...f.usage.values()])
+    expect(await authenticateContinuityPhasePlan(f.tx, f.subject, f.plan)).toBe(true)
+    expect(await readContinuityPhaseClaim(f.tx, f.subject, { plan: f.plan, chapterId: f.chapterId, phase: 'initial_review',
+      operationRef: f.claim.operationRef, inputHash: f.claim.exactInputHash })).toBe(true)
+    expect(await claimContinuityPhase(f.tx, f.subject, { plan: f.plan, chapterId: f.chapterId, phase: 'initial_review',
+      operationRef: f.claim.operationRef, inputHash: f.claim.exactInputHash, ownerEpoch: '7' })).toBe(false)
+    await expect(claimContinuityPhase(f.tx, f.subject, { plan: f.plan, chapterId: f.chapterId, phase: 'sparse_repair',
+      operationRef: 'new-request', inputHash: 'b'.repeat(64), ownerEpoch: '7' })).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+    expect([...f.rows.values()]).toEqual(before); expect([...f.usage.values()]).toEqual(fees)
+    expect(f.usageCreate).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled()
+  })
+  it('cannot treat an unclaimed old plan as a new paid allowance', async () => {
+    const f = oldClaim(false)
+    expect(await authenticateContinuityPhasePlan(f.tx, f.subject, f.plan)).toBe(false)
+    await expect(claimContinuityPhase(f.tx, f.subject, { plan: f.plan, chapterId: f.chapterId, phase: 'initial_review',
+      operationRef: 'new', inputHash: 'a'.repeat(64), ownerEpoch: '7' })).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+    expect(f.rows.size).toBe(0); expect(f.usageCreate).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled()
+  })
+  it.each(['foreign-run', 'planHash', 'phase', 'ordinal'] as const)('rejects an invalid historical %s claim', async kind => {
+    const f = oldClaim(), row = f.rows.get(f.id)!
+    if (kind === 'foreign-run') row.runId = 'another-task'
+    else (row.metadata.continuityPhaseClaim as Record<string, unknown>)[kind] =
+      kind === 'planHash' ? '0'.repeat(64) : kind === 'phase' ? 'sparse_repair' : 1
+    const before = structuredClone([...f.rows.values()])
+    expect(await authenticateContinuityPhasePlan(f.tx, f.subject, f.plan)).toBe(false)
     expect([...f.rows.values()]).toEqual(before); expect(fetch).not.toHaveBeenCalled()
   })
 })

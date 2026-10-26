@@ -152,9 +152,10 @@ export async function authenticateContinuityPhasePlan(db: Prisma.TransactionClie
       && phase?.kind === 'full_reassessment' && phase.limit === 1
       && runtimeJson(consent.frozen.input.continuityManifest?.typedLineage?.phasePlan).hash === runtimeJson(plan).hash
   }
+  const chapter = await db.chapter.findFirst({ where: { id: plan.chapterId, authorId: subject.userId, novelId: subject.novelId }, select: { id: true, orderIndex: true } })
+  if (!chapter) return false
   let revisionAuthority = false
   if (plan.revisionAuthority) {
-    const chapter = await db.chapter.findFirst({ where: { id: plan.chapterId, authorId: subject.userId, novelId: subject.novelId }, select: { id: true, orderIndex: true } })
     const authority = plan.revisionAuthority.source === 'original_repair' ? originalRepairAuthority(original) ? { taskId: original.taskId } : null
       : chapter ? await (await import('./writing-scope.js')).readNewDraftWritingAuthority(db, subject, chapter) : null
     revisionAuthority = !!authority && plan.revisionAuthority.sourceHash === runtimeJson({ source: plan.revisionAuthority.source,
@@ -162,7 +163,8 @@ export async function authenticateContinuityPhasePlan(db: Prisma.TransactionClie
   }
   return validContinuityPhasePlan(plan) && original.taskId === plan.originalTaskId && original.sourceRunId === plan.originalAdmissionId
     && plan.budgetOwner === original.taskId && plan.authorityHash === runtimeJson({ spec: original.spec, prompt: original.prompt }).hash
-    && originalChapterReviewRequirements(original).continuity && plan.phases.every(phase => phase.limit === 0
+    && (originalChapterReviewRequirements(original, chapter).continuity
+      || !!await readOriginalContinuityPhaseClaim(db, subject, plan, plan.chapterId, 'initial_review')) && plan.phases.every(phase => phase.limit === 0
       || ['initial_review', 'sparse_repair'].includes(phase.kind) && phase.authoritySourceRef === `original-admission:${original.sourceRunId}`
       || ['prose_revision', 'reverify'].includes(phase.kind) && revisionAuthority
         && phase.authoritySourceRef === `original-revision:${original.sourceRunId}:${plan.revisionAuthority!.sourceHash}`)
@@ -239,10 +241,10 @@ export async function prepareContinuityPhasePlan(db: Prisma.TransactionClient, s
   const original = await readOriginalTaskRequest(db, subject), runs = await originalTaskRunIds(db, subject, original)
   await (await import('./writing-scope.js')).assertWritingTarget(db, subject, { chapterId: target.chapterId })
   const bodyOnly = await authenticateInitialContinuityHistory(db, subject, target)
-  if (!originalChapterReviewRequirements(original).continuity) throw blocked('原任务没有自动连续性检查授权。')
   const compilation = await db.storyCompilation.findFirst({ where: { id: target.compilationId, chapterId: target.chapterId,
     userId: subject.userId, novelId: subject.novelId, runId: { in: runs } }, include: { chapter: true } })
   if (!compilation?.chapter) throw blocked('原自动检查没有当前写作编译与正文绑定。')
+  if (!originalChapterReviewRequirements(original, compilation.chapter).continuity) throw blocked('原任务没有自动连续性检查授权。')
   const cycle = (await import('./review-cycle.js')).readReviewCycle(compilation.preparedContext,
     { taskId: original.taskId, userId: subject.userId, novelId: subject.novelId, chapterId: target.chapterId })
   const sourceKind = originalRepairAuthority(original) ? 'original_repair' as const : 'original_new_draft' as const
@@ -648,7 +650,7 @@ async function mergedRevisionFacts(db: Prisma.TransactionClient, ctx: ToolContex
   const current = saved.chapter, context = object(frozen.bodies).terminalEvidence as LegacyAssessmentInput['bodies']['terminalEvidence']
   if (!context || object(saved.validation).checkedRevision !== current.revision || object(saved.validation).independentCheck !== 'complete') return null
   const guard = await import('./chapter-review-guard.js'), readiness = await guard.readChapterReviewReadiness(db, ctx, compilationId)
-  const requirements = originalChapterReviewRequirements(original)
+  const requirements = originalChapterReviewRequirements(original, current)
   if (!readiness || readiness.continuity !== 'complete' || requirements.quality && readiness.quality !== 'complete') return null
   const binding = await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(db, { ...ctx, compilationId },
     { taskId: original.taskId, preparedContext: saved.preparedContext }, current, saved.validation, context)
@@ -813,10 +815,16 @@ export async function claimContinuityPhase(db: Prisma.TransactionClient, subject
     operationRef: input.operationRef, exactInputHash: input.inputHash, ownerEpoch: input.ownerEpoch }
   const prior = await db.agentArtifact.findUnique({ where: { id } })
   if (prior) {
-    const saved = object(object(prior.metadata).continuityPhaseClaim)
-    if (saved.planHash !== plan.hash || saved.operationRef !== input.operationRef || saved.exactInputHash !== input.inputHash)
+    const saved = await readOriginalContinuityPhaseClaim(db, subject, plan, input.chapterId, input.phase, prior)
+    if (!saved || saved.operationRef !== input.operationRef || saved.exactInputHash !== input.inputHash)
       throw blocked('该原任务阶段已经领取；重启、候选或调用编号变化不能新增付费判断。')
     return false
+  }
+  if (!plan.supplementalSourceKey) {
+    const original = await readOriginalTaskRequest(db, subject)
+    const chapter = await db.chapter.findFirst({ where: { id: input.chapterId, authorId: subject.userId, novelId: subject.novelId }, select: { id: true, orderIndex: true } })
+    if (!chapter || !originalChapterReviewRequirements(original, chapter).continuity)
+      throw blocked('原阶段回执可核对，但当前原始要求不允许领取新的付费检查阶段。')
   }
   await db.agentArtifact.create({ data: { id, runId: subject.runId, artifactType: 'continuityReview', title: '连续性原阶段领取',
     content: '仅领取原任务已有阶段；不增加预算。', metadata: runtimeJson({ version: 1, continuityPhaseClaim: value }).value } })
@@ -827,10 +835,25 @@ export async function readContinuityPhaseClaim(db: Prisma.TransactionClient, sub
   plan: ContinuityPhasePlan; chapterId: string; phase: ContinuityPhasePlan['phases'][number]['kind']; operationRef: string; inputHash: string;
 }) {
   if (!await authenticateContinuityPhasePlan(db, subject, input.plan)) return false
-  const id = continuityPhaseClaimId(input.plan, input.chapterId, input.phase)
-  const row = await db.agentArtifact.findUnique({ where: { id } }), claim = object(object(row?.metadata).continuityPhaseClaim)
-  return claim.planHash === input.plan.hash && claim.operationRef === input.operationRef && claim.exactInputHash === input.inputHash
+  const claim = await readOriginalContinuityPhaseClaim(db, subject, input.plan, input.chapterId, input.phase)
+  return !!claim && claim.operationRef === input.operationRef && claim.exactInputHash === input.inputHash
 }
+/** Read the one existing claim without recursing into plan authentication.
+ * A historical claim proves its old phase identity, never another paid slot. */
+async function readOriginalContinuityPhaseClaim(db: Prisma.TransactionClient, subject: Subject, plan: ContinuityPhasePlan, chapterId: string,
+  phase: ContinuityPhasePlan['phases'][number]['kind'], savedRow?: { runId: string; artifactType: string; metadata: unknown }) {
+  const original = await readOriginalTaskRequest(db, subject)
+  if (!validContinuityPhasePlan(plan) || plan.originalTaskId !== original.taskId || plan.chapterId !== chapterId) return null
+  const row = savedRow ?? await db.agentArtifact.findUnique({ where: { id: continuityPhaseClaimId(plan, chapterId, phase) } })
+  if (!row || row.artifactType !== 'continuityReview' || object(row.metadata).version !== 1
+    || !(await originalTaskRunIds(db, subject, original)).includes(row.runId)) return null
+  const claim = z.object({ version: z.literal(1), planHash: hash, originalTaskId: z.string().min(1), phase: z.string().min(1),
+    ordinal: z.literal(0), operationRef: z.string().min(1), exactInputHash: hash, ownerEpoch: z.string().min(1) }).strict()
+    .safeParse(object(row.metadata).continuityPhaseClaim)
+  return claim.success && claim.data.planHash === plan.hash && claim.data.originalTaskId === original.taskId
+    && claim.data.phase === phase ? claim.data : null
+}
+
 function continuityPhaseClaimId(plan: ContinuityPhasePlan, chapterId: string, phase: ContinuityPhasePlan['phases'][number]['kind']) {
   return runtimeJson({ kind: 'continuity_phase', taskId: plan.originalTaskId, chapterId, phase, ordinal: 0,
     ...(phase === 'full_reassessment' ? { originalFailedSubject: plan.supplementalSourceKey } : {}) }).hash
