@@ -34,6 +34,27 @@ function fixture(runs = [run('rewrite', '重写第一章，突出爽文。', 30)
 }
 
 describe('owned author presentation', () => {
+  it.each(['default', 'saved_only'] as const)('keeps a natural story wrap-up without repeating prose: %s', mode => {
+    const preference = mode === 'saved_only' ? { mode, sourceRunId: 'author', sourceMessageId: 'message' } : null
+    const text = renderWritingPresentation(preference, true)
+    expect(text).toContain('默认用一两句概括本次实际写成或修改的内容')
+    expect(text).toContain('人物变化、主要事件或情节推进')
+    expect(text).toContain('不要在聊天重复')
+    expect(text).toContain('作者明确要求只给正文、不总结或指定格式时，以其要求为准')
+    expect(text).not.toContain('只简短确认')
+    expect(text).not.toContain('核实保存后简短确认')
+  })
+  it('keeps explicit full-text presentation without adding a mandatory summary', () => {
+    const text = renderWritingPresentation({ mode: 'full_text', sourceRunId: 'author', sourceMessageId: 'message' }, true)
+    expect(text).toContain('作者明确要求在聊天展示章节全文')
+    expect(text).toContain('可输出标题与正文')
+    expect(text).toContain('这不改变原始任务、章节目标、写入权限或完成检查')
+    expect(text).not.toContain('默认用一两句')
+    expect(text).not.toContain('不要在聊天重复')
+  })
+  it('leaves presentation unset when neither preference nor saved-only default applies', () => {
+    expect(renderWritingPresentation(null)).toBeNull()
+  })
   it.each(['例如“只输出标题与正文”', '> 不要重复正文', '小说里角色说“不要贴全文”', '如果作者说不要输出正文', '不要使用“输出全文”这个示例'])('does not infer from quoted or hypothetical text: %s', text => {
     expect(writingPresentationPreference(text)).toBeNull()
   })

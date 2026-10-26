@@ -168,8 +168,9 @@ export function renderChapterWritingBackground(background: ChapterWritingBackgro
 }
 
 export function renderWritingPresentation(preference: WritingPresentation | null, defaultSavedOnly = false): string | null {
-  if (!preference) return defaultSavedOnly ? '[本次聊天交付] 写入章节不等于在聊天贴全文。本次未明确要求展示全文时，核实保存后简短确认；同章历史请求的标题正文格式不跨新任务继承。' : null
+  const wrapUp = '默认用一两句概括本次实际写成或修改的内容，如人物变化、主要事件或情节推进；作者明确要求只给正文、不总结或指定格式时，以其要求为准。'
+  if (!preference) return defaultSavedOnly ? `[本次聊天交付] 写入章节不等于在聊天贴全文。本次未明确要求展示全文时，核实保存后不要在聊天重复整章正文；${wrapUp}同章历史请求的标题正文格式不跨新任务继承。` : null
   return `[最新真实作者展示偏好；只控制聊天交付]\n${preference.mode === 'saved_only'
-    ? '章节写入并核实后，只简短确认已保存；不要在聊天重复标题加整章正文。旧请求中的“只输出标题与正文”已被此展示偏好撤回；后续重写指令不会自行恢复它。'
+    ? `章节写入并核实后，不要在聊天重复标题加整章正文；${wrapUp}旧请求中的“只输出标题与正文”已被此展示偏好撤回；后续重写指令不会自行恢复它。`
     : '作者明确要求在聊天展示章节全文；章节写入并核实后可输出标题与正文。'}\n这不改变原始任务、章节目标、写入权限或完成检查。`
 }

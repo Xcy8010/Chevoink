@@ -9,6 +9,7 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { prepareStoryCompilation, saveSceneTasks, recordStoryCompilerWrite, validateStoryContinuity, readPersistedWritingWorkflowMilestones } from '../../api/lib/agent/story-compiler.js'
 import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
+import { readRecoveredChapterDelivery } from '../../api/lib/agent/writing-scope.js'
 import { observeChapterReviewProgress, observeWritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
 import { getActiveRun } from '../../api/lib/agent/active-runs.js'
 import { readLegacyContinuityAssessment, bindLegacyContinuityAssessment, markLegacyContinuityAssessmentApplication } from '../../api/lib/agent/assessment-response-lifecycle.js'
@@ -80,7 +81,7 @@ async function originalFailure(f: Fixture, conflict = false, qualityReady = fals
   const content = (conflict ? 'The packet remains sealed. The packet is open. The table remains dry.' : 'The packet remains sealed. The table remains dry.')
     + (pendingFact ? ' A reply remains pending.' : '')
   const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { revision: 4, content, wordCount: content.length } })
-  const { compilation } = await prepareStoryCompilation({ ...f, chapterId: chapter.id, mode: 'balanced', intentSummary: prompt })
+  const { compilation } = await prepareStoryCompilation({ ...f, chapterId: chapter.id, mode: 'balanced', intentSummary: originalPrompt })
   const state = { knowledge: [], emotion: [], body: [], objects: ['The packet remains sealed.'], relationships: [], openLoops: [] }
   await saveSceneTasks({ ...f, compilationId: compilation.id, tasks: [{ purpose: 'Inventory', entryState: state, goal: 'Read', obstacle: 'Time',
     choice: 'Record', cost: 'Time', turn: 'Recorded', exitState: state, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
@@ -459,8 +460,9 @@ describe.runIf(available)('original persistent supplemental phase: real question
     expect(network).toHaveBeenCalledOnce(); expect(s.main).not.toHaveBeenCalled()
   }, undefined, '修改第一章', options), 30000)
 
-  it.each(['approve-in-loop', 'paused-accepted-new-owner', 'known-normalized-decision', 'applied-normalized-current-decisions', 'applied-normalized-current-decisions-direct', 'applied-normalized-current-decisions-legacy-metadata'] as const)(
-    '%s advances the existing phase before stagnation without counting approval as content', scenario => fixture(async f => {
+  it.each((['approve-in-loop', 'paused-accepted-new-owner', 'known-normalized-decision', 'applied-normalized-current-decisions', 'applied-normalized-current-decisions-direct', 'applied-normalized-current-decisions-legacy-metadata'] as const)
+    .flatMap(scenario => (['only-prose', 'default'] as const).map(outputMode => ({ scenario, outputMode, requestPrompt: outputMode === 'default' ? '修改第一章' : prompt }))))(
+    '$scenario/$outputMode advances the existing phase before stagnation without counting approval as content', ({ scenario, outputMode, requestPrompt }) => fixture(async f => {
       vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
       vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue({ chapterCount: 0, jobCount: 0, entityCount: 0, relationCount: 0, reused: false })
       vi.spyOn(titles, 'autoNameSession').mockResolvedValue(undefined)
@@ -468,7 +470,13 @@ describe.runIf(available)('original persistent supplemental phase: real question
       vi.spyOn(flags, 'isAgent2FeatureEnabled').mockImplementation((name, owner) => name === 'storyCompiler' || name !== 'memory2' && enabled(name, owner))
       const appliedScenario = scenario.startsWith('applied-normalized-current-decisions')
       const decisionScenario = scenario === 'known-normalized-decision' || appliedScenario
-      const s = await originalFailure(f, decisionScenario, true, appliedScenario)
+      const s = await originalFailure(f, decisionScenario, true, appliedScenario, requestPrompt)
+      const mainPhases: Array<'decision' | 'closing'> = []
+      let closingAfterSeq: number | null = null
+      const closingSummary = decisionScenario
+        ? appliedScenario ? '包裹状态的描写仍留待作者取舍，等待回复的悬念继续保留，桌面依旧干燥。'
+          : '包裹封闭与打开的矛盾留待作者取舍，桌面依旧干燥。'
+        : '本章保留包裹封闭、桌面干燥的场面，没有增加新的事件。'
       if (scenario !== 'approve-in-loop') await s.approve()
       const paid = vi.fn(async () => {
         const wire = wireFor(s.question, 'conflict')
@@ -500,25 +508,41 @@ describe.runIf(available)('original persistent supplemental phase: real question
           expect(await s.invoke('successful-free-application-before-resume', false)).toMatchObject({ reviewCompleted: true, part: { status: 'success' } })
           expect((await readContinuitySupplementState(prisma, s.ctx, s.old.key)).kind).toBe('applied')
         }
-        s.main.mockImplementation(async () => {
-          const current = await readChapterReviewReadiness(prisma, f, s.compilation.id)
-          expect(current).toMatchObject({ ready: true, continuity: 'complete', continuityErrorCount: appliedScenario ? 4 : 1, decisionPending: true })
-          expect(current!.requiredDecisions).toHaveLength(appliedScenario ? 15 : 1)
-          if (appliedScenario) {
-            expect(current).toMatchObject({ quality: 'complete', requiredTools: [], terminalReview: { currentResultVerified: true } })
-            // Eligibility and unresolved review decisions are separate facts.
-            // This dynamic observation must still select the exact 15 decisions.
-            expect(projectCurrentReviewNextStep(current!)).toMatchObject({ state: 'decision_required', pending: current!.requiredDecisions })
-            expect(current!.requiredDecisions!.filter(item => item.source === 'quality')).toHaveLength(11)
-            expect(await loadPersistedEvents(f.runId, pause.seq)).not.toContainEqual(expect.objectContaining({ type: 'run.paused' }))
-          }
-          return { content: '', reasoning: '', finishReason: 'tool_calls', toolCalls: [{ id: 'ordinary-current-report-decision', name: 'chapter_bridge_commit',
-            arguments: JSON.stringify({ compilationId: s.compilation.id, ...(scenario === 'applied-normalized-current-decisions-legacy-metadata'
-              ? { lastUnfinishedAction: 'A model summary is not a new reviewed fact.', chapterSummary: 'Saved manuscript summary.' } : {}), ...(scenario === 'applied-normalized-current-decisions' ? { decisionOnly: true } : {}), retainedFindings: current!.requiredDecisions!.map(item => ({ ...item,
-              reason: 'Keep this independent opinion and the original wording explicitly pending for the author; no repair or factual clearance is claimed.' })) }) }],
-          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } }
-        })
       }
+      s.main.mockImplementation(async request => {
+        expect(request).toMatchObject({ model: runtime.modelName, provider: runtime.provider, reasoningEffort: runtime.reasoningEffort,
+          usageLog: { userId: f.userId, agentRunId: f.runId, modelTier: runtime.tier, multiplierBps: runtime.multiplierBps } })
+        const current = await readChapterReviewReadiness(prisma, f, s.compilation.id)
+        const capture = current?.terminalCommitted
+          ? await prisma.$transaction(tx => readRecoveredChapterDelivery(tx, f)) : null
+        if (current?.terminalCommitted && capture) {
+          expect(outputMode).toBe('default')
+          expect(current).toMatchObject({ ready: true, decisionPending: false })
+          expect(capture.chapters).toMatchObject([{ id: s.chapter.id, revision: s.chapter.revision, content: s.chapter.content }])
+          expect(mainPhases.filter(phase => phase === 'closing')).toHaveLength(0)
+          mainPhases.push('closing')
+          closingAfterSeq = (await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId }, orderBy: { seq: 'desc' } })).seq
+          return { content: closingSummary, reasoning: '', finishReason: 'stop', toolCalls: [],
+            usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } }
+        }
+        expect(decisionScenario).toBe(true)
+        mainPhases.push('decision')
+        expect(current).toMatchObject({ ready: true, continuity: 'complete', continuityErrorCount: appliedScenario ? 4 : 1, decisionPending: true })
+        expect(current!.requiredDecisions).toHaveLength(appliedScenario ? 15 : 1)
+        if (appliedScenario) {
+          expect(current).toMatchObject({ quality: 'complete', requiredTools: [], terminalReview: { currentResultVerified: true } })
+          // Eligibility and unresolved review decisions are separate facts.
+          // This dynamic observation must still select the exact 15 decisions.
+          expect(projectCurrentReviewNextStep(current!)).toMatchObject({ state: 'decision_required', pending: current!.requiredDecisions })
+          expect(current!.requiredDecisions!.filter(item => item.source === 'quality')).toHaveLength(11)
+          expect(await loadPersistedEvents(f.runId, pause.seq)).not.toContainEqual(expect.objectContaining({ type: 'run.paused' }))
+        }
+        return { content: '', reasoning: '', finishReason: 'tool_calls', toolCalls: [{ id: 'ordinary-current-report-decision', name: 'chapter_bridge_commit',
+          arguments: JSON.stringify({ compilationId: s.compilation.id, ...(scenario === 'applied-normalized-current-decisions-legacy-metadata'
+            ? { lastUnfinishedAction: 'A model summary is not a new reviewed fact.', chapterSummary: 'Saved manuscript summary.' } : {}), ...(scenario === 'applied-normalized-current-decisions' ? { decisionOnly: true } : {}), retainedFindings: current!.requiredDecisions!.map(item => ({ ...item,
+            reason: 'Keep this independent opinion and the original wording explicitly pending for the author; no repair or factual clearance is claimed.' })) }) }],
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } }
+      })
       const review = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, s.compilation.id))
       if (appliedScenario) {
         expect(review, JSON.stringify(review)).toMatchObject({ ready: true, reviewProtocol: 1, completeStrictReview: true,
@@ -565,7 +589,7 @@ describe.runIf(available)('original persistent supplemental phase: real question
         return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(wireFor(approvedQuestion, 'complete')) }, finish_reason: 'stop' }],
           usage: { prompt_tokens: 12, completion_tokens: 8 } }))
       }); vi.stubGlobal('fetch', network)
-      const running = executeAgentRun({ ...f, prompt, mode: 'build', resume: true, authorContinue: { eventId: pause.id, afterSeq: pause.seq },
+      const running = executeAgentRun({ ...f, prompt: requestPrompt, mode: 'build', resume: true, authorContinue: { eventId: pause.id, afterSeq: pause.seq },
         eventStartSeq: pause.seq, modelTier: 'speed', reasoningEffort: 'high', qualityMode: 'balanced', creativeFreedom: 'balanced' })
       try {
         if (scenario === 'approve-in-loop') {
@@ -587,11 +611,23 @@ describe.runIf(available)('original persistent supplemental phase: real question
         const originalOutbox = await prisma.agentExecutionOutbox.findMany({ where: { taskRootId: f.rootId },
           select: { eventKey: true, type: true, sequence: true }, orderBy: { sequence: 'desc' }, take: 3 })
         expect(s.main, JSON.stringify({ rootId: f.rootId, returned, stopped, initialReadiness: review,
-          originalOutbox: originalOutbox.map(row => ({ ...row, sequence: String(row.sequence) })) })).toHaveBeenCalledOnce()
+          originalOutbox: originalOutbox.map(row => ({ ...row, sequence: String(row.sequence) })) })).toHaveBeenCalledTimes(outputMode === 'default' ? 2 : 1)
         expect(paid).toHaveBeenCalledOnce()
       }
-      else { expect(network).toHaveBeenCalledOnce(); expect(s.main).not.toHaveBeenCalled() }
+      else {
+        expect(network).toHaveBeenCalledOnce()
+        if (outputMode === 'default') expect(s.main).toHaveBeenCalledOnce()
+        else expect(s.main).not.toHaveBeenCalled()
+      }
+      expect(mainPhases).toEqual([...(decisionScenario ? ['decision'] : []), ...(outputMode === 'default' ? ['closing'] : [])])
       const events = await loadPersistedEvents(f.runId, pause.seq)
+      if (outputMode === 'default') {
+        expect(events.filter(event => event.type === 'text.final' && event.text === closingSummary)).toHaveLength(1)
+        expect(events).toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'succeeded', outputSummary: closingSummary }))
+        expect(closingAfterSeq).not.toBeNull()
+        expect(events.filter(event => event.type === 'tool.call' && event.seq > closingAfterSeq!)).toEqual([])
+      }
+      expect(events.filter(event => event.type === 'tool.call' && event.callId === 'ordinary-current-report-decision')).toHaveLength(decisionScenario ? 1 : 0)
       expect(events.filter(event => event.type === 'tool.call' && event.toolName === 'ask_user')).toHaveLength(scenario === 'approve-in-loop' ? 1 : 0)
       const reviews = events.filter(event => event.type === 'tool.result' && event.toolName === 'continuity_validate')
       if (appliedScenario) expect(reviews).toEqual([])
@@ -621,7 +657,7 @@ describe.runIf(available)('original persistent supplemental phase: real question
         expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: s.compilation.id } })).lastUnfinishedAction).toBe(s.question.frozen.input.terminalCandidate!.lastUnfinishedAction)
         expect(decisions).toEqual(expect.arrayContaining([{ source: 'continuity', reportId: expect.any(String), findingId: '0', reason: expect.any(String) }]))
       }
-    }, undefined, prompt, scenario.startsWith('applied-normalized-current-decisions') ? { ...options, reviewProtocol: 1 } : options), 30000)
+    }, undefined, requestPrompt, scenario.startsWith('applied-normalized-current-decisions') ? { ...options, reviewProtocol: 1 } : options), 30000)
 
   it('requires the dedicated question endpoint answer; reject/replay/ordinary Continue buy zero calls', () => fixture(async f => {
     const s = await originalFailure(f)

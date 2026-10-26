@@ -844,6 +844,10 @@ describe('server assessment fallback in the real execution loop', () => {
       return response('', [call('ordinary-retained-decision', commit.name, JSON.stringify({ compilationId: 'comp', retainedFindings: requiredDecisions.map(ref =>
         ({ ...ref, reason: 'The full current evidence does not justify changing the manuscript; preserve this independent opinion for the author.' })) }))])
     })
+    mocks.chat.mockImplementationOnce(async request => {
+      expect(request.messages.some(message => message.content?.includes('[当前已核验交付') && message.content.includes(body))).toBe(true)
+      return response('本章延续人物的选择，让后续线索逐步展开。')
+    })
     // The loop-only suite supplies its existing explicit committed-delivery
     // stub; the supplement PostgreSQL case proves the real bridge/delivery.
     const writing = await import('../../api/lib/agent/writing-scope.js')
@@ -860,9 +864,10 @@ describe('server assessment fallback in the real execution loop', () => {
         reviewAttempts: checkpoint.reviewAttempts, consumedReviewDecisionFeedback: checkpoint.consumedReviewDecisionFeedback } })
       return
     }
-    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
     expect(commit.execute).toHaveBeenCalledOnce()
     expect(critic.execute).not.toHaveBeenCalled()
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: '本章延续人物的选择，让后续线索逐步展开。' }))
     expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'ordinary-retained-decision', ok: true }))
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { reviewAttempts: expect.arrayContaining(checkpoint.reviewAttempts),
@@ -3396,15 +3401,91 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
 })
 
 
+describe('recovered committed writing uses the ordinary creative wrap-up', () => {
+  it.each(['summary', 'empty', 'length', 'unused-tool', 'no-summary', 'only-prose', 'auto-saved-only', 'batch-only-prose'] as const)('%s preserves delivery without another chapter effect or summary retry', async scenario => {
+    const prompt = ['only-prose', 'auto-saved-only', 'batch-only-prose'].includes(scenario) ? '修改本章，只输出标题与正文。'
+      : scenario === 'no-summary' ? '修改本章，不要总结。' : '修改本章。'
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt })
+    mocks.currentOriginal = { prompt, taskSpec }
+    mocks.chapters[0].title = '旧碗'
+    mocks.chapters[0].content = '林辰把旧碗放回柜中，决定去寻找收据。'
+    mocks.committedChapter.mockResolvedValue(scenario !== 'batch-only-prose')
+    const claims = ['original-body-review', 'original-terminal-review']
+    const startedAt = Date.now() - 1000
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 30, startedAt: new Date(startedAt),
+      usage: { promptTokens: 1000, completionTokens: 50, totalTokens: 1050,
+        checkpoint: { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: startedAt,
+          activeExecutionMs: 100, stagnantBatches: 7, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+          writeProgress: 3, writeBaseline: 0, readProgress: 11, readBaseline: 0, progressSignatures: [],
+          reviewAttempts: claims, consumedReviewDecisionFeedback: ['e'.repeat(64)], pendingReviews: [] } } })
+    const write = tool('chapter_write', async () => { throw Error('Committed chapter must not be rewritten for a reply') }, false)
+    const critic = tool('continuity_validate', async () => { throw Error('Committed report must not be purchased again') })
+    const commit = tool('chapter_bridge_commit', async () => {
+      mocks.committedChapter.mockResolvedValue(true)
+      return { output: 'The original chapter was committed once.', requiredResult: { targetId: 'c', contentHash: persistedContentHash(mocks.chapters[0].content) } }
+    }, false)
+    mocks.tools = scenario === 'batch-only-prose' ? [commit, write, critic] : [write, critic]
+    const summary = '林辰留下旧碗，转而寻找收据，调查有了新的方向。'
+    const candidate = scenario === 'empty' ? '' : scenario === 'no-summary' ? '《旧碗》已经写妥。'
+      : scenario === 'auto-saved-only' ? `旧碗\n\n${mocks.chapters[0].content}`
+      : scenario === 'batch-only-prose' ? '这是不应覆盖作者精确正文要求的模型说明。' : summary
+    const unused = call('unused-after-commit', 'chapter_write', '{"chapterId":"c","content":"不得写入"}')
+    const model = response(candidate, scenario === 'unused-tool' ? [unused] : scenario === 'batch-only-prose'
+      ? [call('single-commit', 'chapter_bridge_commit', '{"compilationId":"comp"}'), unused] : [])
+    if (scenario === 'length') model.finishReason = 'length'
+    mocks.chat.mockImplementationOnce(async request => {
+      expect(request.model).toBe('selected-current-model')
+      expect(request.toolChoice).not.toBe('required')
+      expect(request.messages.some(message => message.content?.includes('[当前已核验交付') && message.content.includes(mocks.chapters[0].content))).toBe(scenario !== 'batch-only-prose')
+      return model
+    })
+    const writing = await import('../../api/lib/agent/writing-scope.js')
+    const delivery = vi.spyOn(writing, 'readCompletedWritingDelivery').mockImplementation(async (tx, subject) => {
+      const actual = await writing.readCompletedWritingPresentation(tx, subject)
+      if (!actual) return actual
+      if (scenario === 'auto-saved-only') return { ...actual, titleAndBodyOnly: true, presentationKind: 'auto' as const,
+        presentation: { mode: 'saved_only' as const, sourceRunId: 'run', sourceMessageId: 'current-author-withdrawal' }, text: '已保存《旧碗》。' }
+      return ['only-prose', 'batch-only-prose'].includes(scenario) ? { ...actual, titleAndBodyOnly: true, presentationKind: 'auto' as const,
+        text: actual.chapters.map(chapter => `${chapter.title}\n\n${chapter.content}`).join('\n\n') } : actual
+    })
+    const chapterBefore = structuredClone(mocks.chapters[0])
+    try {
+      await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt, resume: true })
+    } finally { delivery.mockRestore() }
+    expect(mocks.chat).toHaveBeenCalledTimes(scenario === 'only-prose' ? 0 : 1)
+    expect(write.execute).not.toHaveBeenCalled()
+    expect(critic.execute).not.toHaveBeenCalled()
+    expect(commit.execute).toHaveBeenCalledTimes(scenario === 'batch-only-prose' ? 1 : 0)
+    expect(mocks.chapters[0]).toEqual(chapterBefore)
+    const toolEvents = events().filter(event => event.type === 'tool.call' || event.type === 'tool.result')
+    if (scenario === 'batch-only-prose') {
+      expect(toolEvents.filter(event => event.type === 'tool.call')).toEqual([expect.objectContaining({ callId: 'single-commit', toolName: 'chapter_bridge_commit' })])
+      expect(toolEvents.filter(event => event.type === 'tool.result')).toEqual([expect.objectContaining({ callId: 'single-commit', ok: true })])
+    } else expect(toolEvents).toEqual([])
+    expect(events().filter(event => event.type === 'run.paused' || event.type === 'error')).toEqual([])
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    const text = events().filter((event): event is Extract<AgentStreamEventBody, { type: 'text.final' }> => event.type === 'text.final' && !event.asReasoning).at(-1)?.text
+    expect(text).toBe(['only-prose', 'batch-only-prose'].includes(scenario) ? `旧碗\n\n${chapterBefore.content}`
+      : ['empty', 'auto-saved-only'].includes(scenario) ? '已完成《旧碗》。' : candidate)
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: {
+      reviewAttempts: expect.arrayContaining(claims), consumedReviewDecisionFeedback: ['e'.repeat(64)] } })
+    // Unused native requests remain only in the original model response; they
+    // are neither dispatched nor paired with invented successful tool receipts.
+    if (scenario === 'unused-tool') expect(model.toolCalls).toEqual([call('unused-after-commit', 'chapter_write', '{"chapterId":"c","content":"不得写入"}')])
+  })
+})
+
 describe('ordinary chapter summary presentation', () => {
-  it.each(['current', 'stale-summary', 'revision-race', 'report-race', 'missing-commit'] as const)('binds summary and replay to current committed proof: %s', async scenario => {
+  it.each(['current', 'stale-summary', 'revision-race', 'report-race', 'missing-commit', 'recovered-current', 'recovered-revision-race', 'recovered-report-race'] as const)('binds summary and replay to current committed proof: %s', async scenario => {
+    const recovering = scenario.startsWith('recovered-')
+    const caseKind = scenario.replace(/^recovered-/u, '')
     mocks.realWritingCompletion = true
     const { prisma } = await import('../../api/lib/prisma.js')
     const { withHumanAdmission } = await import('../../api/lib/agent/goal-activation-authority.js')
     const { runtimeJson } = await import('../../api/lib/agent/runtime-common.js')
     const { readSavedWritingPresentation, readCompletedWritingPresentation, completedWritingPresentationText, freezeWritingScope } = await import('../../api/lib/agent/writing-scope.js')
     const prompt = '写第一章。只保存到章节。'
-    const summary = scenario === 'stale-summary'
+    const summary = caseKind === 'stale-summary'
       ? '正文改为「铜钱清脆地落在地上」。\n\n结尾让人物的选择自然落地。'
       : '已保存《十五块的碗》（r1，3541 字）。本章保留了旧碗与铜钱的细节，结尾让人物的选择自然落地。'
     const chapter = mocks.chapters[0]
@@ -3424,10 +3505,10 @@ describe('ordinary chapter summary presentation', () => {
     let changed = false
     query.mockImplementation(async (...args) => {
       const sql = (args[0] as TemplateStringsArray).join('?')
-      if (['revision-race', 'report-race'].includes(scenario) && !changed && mocks.chat.mock.calls.length
+      if (['revision-race', 'report-race'].includes(caseKind) && !changed && mocks.chat.mock.calls.length
         && mocks.terminalCommitting && sql.includes('FROM agent_runs') && sql.includes('FOR UPDATE')) {
         changed = true
-        if (scenario === 'revision-race') {
+        if (caseKind === 'revision-race') {
           chapter.revision += 1
           chapter.content += '作者在交付时补了一句。'
         } else mocks.reviewReadiness.mockResolvedValue({ ...readiness('complete', 'complete', chapter.revision), qualityReportId: 'replacement-report' })
@@ -3435,10 +3516,20 @@ describe('ordinary chapter summary presentation', () => {
       return previousQuery!(...args)
     })
     messages.mockResolvedValue([{ id: 'author-message', runId: 'run', sessionId: 'session', role: 'user', parts: [{ type: 'text', text: prompt }] }] as never)
-    compilations.mockResolvedValue({ id: 'comp', userId: 'user', novelId: 'novel', runId: 'run', chapterId: 'c', status: scenario === 'missing-commit' ? 'active' : 'completed', stage: 'commit',
+    compilations.mockResolvedValue({ id: 'comp', userId: 'user', novelId: 'novel', runId: 'run', chapterId: 'c', status: caseKind === 'missing-commit' ? 'active' : 'completed', stage: 'commit',
       preparedContext: { terminalContentHash: runtimeJson({ content: chapter.content }).hash },
       bridge: { toChapterId: 'c', targetRevision: chapter.revision, committedAt: new Date(), fromChapterId: null } } as never)
-    mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'complete', chapter.revision))
+    const currentReadiness = readiness('complete', 'complete', chapter.revision)
+    mocks.reviewReadiness.mockResolvedValue(recovering ? { ...currentReadiness, terminalCommitted: true,
+      terminalReview: { state: 'unverified', currentResultVerified: true, deliveryEligible: true, unresolved: [] } } : currentReadiness)
+    if (recovering) {
+      const startedAt = Date.now() - 1000
+      mocks.update.mockResolvedValueOnce({ taskSpec: mocks.runs.get('run')!.taskSpec, currentTurn: 3, startedAt: new Date(startedAt),
+        usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, checkpoint: {
+          version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: startedAt, activeExecutionMs: 100,
+          stagnantBatches: 7, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+          writeProgress: 1, writeBaseline: 0, readProgress: 1, readBaseline: 0, progressSignatures: [], reviewAttempts: [], pendingReviews: [] } } })
+    }
     mocks.committedChapter.mockResolvedValue(true)
     mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
       input.onChunk?.({ type: 'text-delta', delta: summary.slice(0, 12) })
@@ -3448,13 +3539,13 @@ describe('ordinary chapter summary presentation', () => {
     try {
       const capture = await prisma.$transaction(tx => readCompletedWritingPresentation(tx, { userId: 'user', novelId: 'novel', runId: 'run' }))
       const displayed = capture ? completedWritingPresentationText(capture, summary) : null
-      await executeRealAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt })
+      await executeRealAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt, resume: recovering })
       const { readWritingPresentation } = await import('../../api/lib/agent/writing-request-context.js')
       expect(await prisma.$transaction(tx => readWritingPresentation(tx, { userId: 'user', novelId: 'novel', runId: 'run' }, [{ chapterId: 'c', orderIndex: 1 }]))).toMatchObject({ mode: 'saved_only' })
       const { readWritingScope } = await import('../../api/lib/agent/writing-scope.js')
       expect(await prisma.$transaction(tx => readWritingScope(tx, { userId: 'user', novelId: 'novel', runId: 'run' }))).toMatchObject({ writing: { kind: 'bounded', targets: [{ chapterId: 'c', orderIndex: 1 }] } })
-      if (['revision-race', 'report-race', 'missing-commit'].includes(scenario)) {
-        expect(changed).toBe(scenario !== 'missing-commit')
+      if (['revision-race', 'report-race', 'missing-commit'].includes(caseKind)) {
+        expect(changed).toBe(caseKind !== 'missing-commit')
         expect(events()).not.toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'succeeded' }))
         expect(mocks.runs.get('run')?.status).not.toBe('completed')
         expect(mocks.update.mock.calls.some(([input]) => input.data.status === 'completed')).toBe(false)
@@ -3476,7 +3567,7 @@ describe('ordinary chapter summary presentation', () => {
       for (const final of finals) expect(final).toMatchObject({ messageId, text: displayed })
       expect(JSON.stringify(finals)).not.toContain('铜钱清脆地落在地上')
       expect(displayed).toContain('结尾让人物的选择自然落地。')
-      if (scenario !== 'stale-summary') expect(displayed).toBe('已保存《十五块的碗》（3541 字）。本章保留了旧碗与铜钱的细节，结尾让人物的选择自然落地。')
+      if (caseKind !== 'stale-summary') expect(displayed).toBe('已保存《十五块的碗》（3541 字）。本章保留了旧碗与铜钱的细节，结尾让人物的选择自然落地。')
       expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: displayed })
       expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', outputSummary: displayed })
       const persisted = mocks.persist.mock.calls as unknown as Array<[{ create?: { role?: string; parts?: AgentMessagePart[] }; update?: { parts?: AgentMessagePart[] } }]>
