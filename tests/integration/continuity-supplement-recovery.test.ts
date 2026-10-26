@@ -324,9 +324,14 @@ describe.runIf(available)('original persistent supplemental phase: real question
     expect(await s.invoke('free-carrier-report-application', false)).toMatchObject({ reviewCompleted: true, part: { status: 'success' } })
     const before = await readChapterReviewReadiness(prisma, f, s.compilation.id)
     expect(before).toMatchObject({ ready: true, continuity: 'complete', decisionPending: true,
-      terminalReview: { currentResultVerified: true, deliveryEligible: false } })
+      terminalReview: { currentResultVerified: true, deliveryEligible: true } })
     expect(before!.terminalReview!.unresolved).toContainEqual(expect.objectContaining({ field: 'knowledge', verdict: 'unknown' }))
     const original = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })
+    // Factual eligibility does not replace the outstanding opinion decision.
+    const undecided = await chapterBridgeCommitTool.execute({ ...s.ctx, callId: 'carrier-missing-decisions' }, { compilationId: s.compilation.id })
+    expect(undecided).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_ERRORS_REMAIN' })
+    expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: s.compilation.id } })).committedAt).toBeNull()
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })).toEqual(original)
     const audit = (original.validation as { continuityCriticResponse: projections.ContinuityV4Inspection['audit'] }).continuityCriticResponse
     expect(await authenticateSupplementalContinuityReport(prisma, s.ctx, audit)).toBe(true)
     expect(await authenticateSupplementalContinuityReport(prisma, s.ctx, { ...audit,
