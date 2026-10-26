@@ -875,7 +875,7 @@ export async function commitChapterBridge(input: {
   qualityReportId?: string
   terminalDraftScope?: import('./terminal-draft-authority.js').TerminalDraftReadScope
 }, transaction?: Prisma.TransactionClient): Promise<{ compilationId: string; chapterId: string; chapterRevision: number; skippedMemoryCount: number; retainedIssueCount: number; decisionOnly?: true; decisionChanged?: boolean; decisionProgress?: { targetId: string; beforeHash: string; afterHash: string } }> {
-  if (!transaction) return prisma.$transaction(tx => commitChapterBridge(input, tx))
+  if (!transaction) return prisma.$transaction(tx => commitChapterBridge(input, tx), { timeout: 20_000 })
   const db = transaction
   const terminalDraftScope = input.terminalDraftScope ?? new WeakMap()
   await lockNovelActiveScope(db, input.novelId)
@@ -931,23 +931,31 @@ export async function commitChapterBridge(input: {
     throw new DataAccessError(409, 'REVIEW_DECISION_REQUIRED', '分批决定须由原任务冻结的严格意见协议允许，并引用当前完整报告的真实意见与具体保留原因；未提交章节终态。')
   }
   let decisionChanged = false
+  let savedDecisions: typeof input.retainedFindings
   const beforeDecisions = readiness
   if (input.retainedFindings?.length) {
     if (!probeRunId || !readiness) throw new DataAccessError(409, 'REVIEW_DECISION_REQUIRED', '当前任务没有可核验的章节检查记录，未保存留置。')
-    decisionChanged = await recordChapterReviewDecisions(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, readiness, input.retainedFindings)
-    if (decisionChanged) {
-      const decided = await db.storyCompilation.findFirst({ where: { id: compilation.id, userId: input.userId, novelId: input.novelId }, select: { validation: true } })
-      if (!decided) throw new DataAccessError(409, 'COMPILATION_NOT_FOUND', '意见决策后编译已变化，终态未提交。')
-      compilation.validation = decided.validation
+    const decision = await recordChapterReviewDecisions(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, readiness, input.retainedFindings)
+    decisionChanged = decision.changed
+    savedDecisions = decision.findings
+    // A decision-only effect reports the exact persisted decisions. It does
+    // not certify delivery; ordinary commit still rereads the full authority.
+    if (!input.decisionOnly) {
+      if (decisionChanged) {
+        const decided = await db.storyCompilation.findFirst({ where: { id: compilation.id, userId: input.userId, novelId: input.novelId }, select: { validation: true } })
+        if (!decided) throw new DataAccessError(409, 'COMPILATION_NOT_FOUND', '意见决策后编译已变化，终态未提交。')
+        compilation.validation = decided.validation
+      }
+      readiness = await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id, { terminalDraftScope })
     }
-    readiness = await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id, { terminalDraftScope })
 
   }
   if (input.decisionOnly) {
     const { chapterReviewDecisionTransition } = await import('./chapter-review-guard.js')
-    const decisionProgress = beforeDecisions && readiness ? chapterReviewDecisionTransition(beforeDecisions, readiness) : undefined
+    const afterDecisions = beforeDecisions && savedDecisions ? { ...beforeDecisions, retainedDecisions: savedDecisions } : null
+    const decisionProgress = beforeDecisions && afterDecisions ? chapterReviewDecisionTransition(beforeDecisions, afterDecisions) : undefined
     return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: chapter.revision,
-      skippedMemoryCount: 0, retainedIssueCount: readiness?.retainedDecisions?.length ?? 0, decisionOnly: true, decisionChanged,
+      skippedMemoryCount: 0, retainedIssueCount: savedDecisions?.length ?? 0, decisionOnly: true, decisionChanged,
       ...(decisionProgress ? { decisionProgress } : {}) }
   }
   // Manual/legacy tasks retain optional checks. Writing delivery requirements

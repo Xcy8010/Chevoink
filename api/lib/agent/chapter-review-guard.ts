@@ -469,7 +469,7 @@ export async function recordChapterReviewDecisions(tx: Prisma.TransactionClient,
     if (error instanceof DataAccessError) throw new DataAccessError(error.status, error.code, `${error.message} ${chapterReviewDecisionGuidance(readiness)}`)
     throw error
   }
-  if (runtimeJson(findings).hash === runtimeJson(readiness.retainedDecisions ?? []).hash) return false
+  if (runtimeJson(findings).hash === runtimeJson(readiness.retainedDecisions ?? []).hash) return { changed: false, findings }
   const original = await readOriginalTaskRequest(tx, subject), runIds = await originalTaskRunIds(tx, subject, original)
   const compilation = await tx.storyCompilation.findFirstOrThrow({ where: { id: readiness.compilationId, userId: subject.userId,
     novelId: subject.novelId, chapterId: readiness.chapterId, runId: { in: runIds } } })
@@ -491,7 +491,7 @@ export async function recordChapterReviewDecisions(tx: Prisma.TransactionClient,
     validation: { ...validation,
     retainedReviewDecision: { version: 1, chapterId: readiness.chapterId, revision: readiness.revision, ...readiness.decisionBinding, findings },
   } as Prisma.InputJsonValue } })
-  return true
+  return { changed: true, findings }
 }
 
 export function continuityDecisionBinding(compilationId: string, revision: number, validation: unknown) {

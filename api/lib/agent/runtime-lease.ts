@@ -67,8 +67,8 @@ export async function withRunLease<T>(token: RunLeaseToken, work: (tx: RuntimeTx
 
 /** Manuscript adapters order domain locks before parent/run/root locks. The
  * preliminary owned identity is read again by the lease fence in this TX. */
-export async function withManuscriptRunLease<T>(token: RunLeaseToken, work: (tx: RuntimeTx) => Promise<T>): Promise<T> {
-  const captured = { ...token }
+export async function withManuscriptRunLease<T>(token: RunLeaseToken, work: (tx: RuntimeTx) => Promise<T>, options?: { timeoutMs?: 20000 }): Promise<T> {
+  const captured = { ...token }, timeoutMs = options?.timeoutMs
   const contentionScope = await readParentContentionScope(captured.userId, captured.runId, true)
   return runtimeTransaction(async tx => {
     const run = await tx.agentRun.findFirst({ where: { id: captured.runId, userId: captured.userId, taskRootId: captured.taskRootId }, select: { novelId: true } })
@@ -77,7 +77,7 @@ export async function withManuscriptRunLease<T>(token: RunLeaseToken, work: (tx:
     const { lockWritingRunLineage } = await import('./writing-scope.js')
     await lockWritingRunLineage(tx, { userId: captured.userId, novelId: run.novelId, runId: captured.runId })
     return withRunLeaseInTransaction(tx, captured, work)
-  }, { contentionBackoff: Boolean(captured.parent), contentionScope, deadline: contentionScope?.deadline })
+  }, { contentionBackoff: Boolean(captured.parent), contentionScope, deadline: contentionScope?.deadline, ...(timeoutMs ? { timeoutMs } : {}) })
 }
 
 /** Allows a dedicated adapter to acquire user/manuscript/session/goal first.

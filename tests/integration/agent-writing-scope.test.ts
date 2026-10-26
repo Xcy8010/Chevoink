@@ -19,6 +19,7 @@ import { originalToolParameterSchemas } from '../../api/lib/agent/tool-schema.js
 import { lockNovelActiveScope } from '../../api/lib/data/novel-write-lock.js'
 import type { ToolContext, ToolResult } from '../../api/lib/agent/tools/types.js'
 import * as executionReducer from '../../api/lib/agent/runtime-reducer.js'
+import * as runtimeOperations from '../../api/lib/agent/runtime-operations.js'
 import { collectDurableToolEvidence } from '../../api/lib/agent/runtime-evidence.js'
 import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
 import { acquireRunLease } from '../../api/lib/agent/runtime-lease.js'
@@ -458,6 +459,65 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).toMatchObject({ status: 'completed', validation: { checkRounds: 1, autoRepairRounds: 0 } })
     expect(await prisma.aiUsageLog.count({ where: { novelId: ctx.novelId } })).toBe(0)
   }))
+  it.each(['legacy', 'durable'] as const)('%s saves decisions across the old transaction deadline before a separately authenticated real commit', mode => fixture('写第一章', async ctx => {
+    const f = await finalizationFixture(ctx, 1, '写第一章', 1, mode === 'durable')
+    const args = { compilationId: f.compilation.id, decisionOnly: true as const, retainedFindings: f.retainedFindings }
+    const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    if (f.lease) {
+      await initializeExecutionState(f.lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+        model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+        tools: toOpenAITools([chapterBridgeGetTool, chapterBridgeCommitTool], f.spec.scope),
+        toolAuthority: [chapterBridgeGetTool, chapterBridgeCommitTool].map(tool => ({ name: tool.name, permission: 'allow' as const, alwaysConfirm: false, dangerous: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
+        snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null, successfulToolSignatures: [], messages: [
+          { role: 'user', content: '写第一章' }, { role: 'assistant', content: '', toolCalls: [
+            { id: 'read', name: chapterBridgeGetTool.name, arguments: JSON.stringify({ compilationId: f.compilation.id }) },
+            { id: 'decide', name: chapterBridgeCommitTool.name, arguments: JSON.stringify(args) },
+            { id: 'commit', name: chapterBridgeCommitTool.name, arguments: JSON.stringify({ compilationId: f.compilation.id }) },
+            { id: 'repeat', name: chapterBridgeCommitTool.name, arguments: JSON.stringify({ compilationId: f.compilation.id }) },
+          ] }] } })
+      expect((await executeDurableToolStep(f.lease, ctx.signal)).kind).toBe('tool')
+    }
+    const call = async (input: typeof args | { compilationId: string }) => {
+      if (!f.lease) return chapterBridgeCommitTool.execute(ctx, input)
+      const step = await executeDurableToolStep(f.lease, ctx.signal)
+      if (step.kind !== 'tool') throw new Error('Expected the real tool effect')
+      return step.result
+    }
+    let restore: () => void
+    if (f.lease) {
+      const original = runtimeOperations.commitOperationEffect
+      const slow = vi.spyOn(runtimeOperations, 'commitOperationEffect').mockImplementationOnce((token, id, hash, work) => original(token, id, hash, async tx => {
+        await tx.$queryRaw`SELECT 1 AS done FROM pg_sleep(10.1)`
+        return work(tx)
+      }))
+      restore = () => slow.mockRestore()
+    } else {
+      const original = prisma.$transaction.bind(prisma)
+      const delayed = async (work: unknown, options?: { maxWait?: number; timeout?: number; isolationLevel?: Prisma.TransactionIsolationLevel }) => {
+        if (typeof work !== 'function') throw new Error('Expected the real commit callback')
+        return original(async tx => { await tx.$queryRaw`SELECT 1 AS done FROM pg_sleep(5.1)`; return work(tx) }, options)
+      }
+      const slow = vi.spyOn(prisma, '$transaction').mockImplementationOnce(delayed as typeof prisma.$transaction)
+      restore = () => slow.mockRestore()
+    }
+    let decided: ToolResult
+    try { decided = await call(args) } finally { restore() }
+    expect(decided.outcome).not.toBe('failed')
+    expect(decided.requiredResult).toBeUndefined()
+    expect(decided.semanticTransition).toBeDefined()
+    expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: f.compilation.id } })).committedAt).toBeNull()
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).toMatchObject({ status: 'active', validation: { retainedReviewDecision: { findings: f.retainedFindings } } })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
+    expect(await prisma.projectMemoryEntry.count({ where: { novelId: ctx.novelId } })).toBe(0)
+    expect((await call({ compilationId: f.compilation.id })).outcome).not.toBe('failed')
+    const bridge = await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: f.compilation.id } })
+    expect(bridge).toMatchObject({ targetRevision: before.revision, committedAt: expect.any(Date) })
+    const memories = await prisma.projectMemoryEntry.count({ where: { novelId: ctx.novelId } })
+    expect((await call({ compilationId: f.compilation.id })).outcome).not.toBe('failed')
+    expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: f.compilation.id } })).toEqual(bridge)
+    expect(await prisma.projectMemoryEntry.count({ where: { novelId: ctx.novelId } })).toBe(memories)
+    expect(await prisma.aiUsageLog.count({ where: { novelId: ctx.novelId } })).toBe(0)
+  }), 30_000)
   it.each(['legacy', 'durable'] as const)('retains all 42 fresh strict references through real decision-only batches via %s without terminal effects or repeated progress', mode => fixture('写第一章', async ctx => {
     const f = await finalizationFixture(ctx, 42, '写第一章', 1, mode === 'durable')
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })

@@ -70,7 +70,7 @@ export function runtimeJson(value: unknown): { value: Prisma.InputJsonValue; has
 
 /** The callback is database-only: it may retry. Never put a provider/network call here. */
 export async function runtimeTransaction<T>(work: (tx: RuntimeTx) => Promise<T>, options: {
-  contentionBackoff?: boolean; contentionScope?: ParentContentionScope; signal?: AbortSignal; deadline?: number
+  contentionBackoff?: boolean; contentionScope?: ParentContentionScope; signal?: AbortSignal; deadline?: number; timeoutMs?: 20000
 } = {}): Promise<T> {
   options = { ...options, ...(options.contentionScope ? { contentionScope: { ...options.contentionScope } } : {}) }
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -84,7 +84,7 @@ export async function runtimeTransaction<T>(work: (tx: RuntimeTx) => Promise<T>,
         if (permit && options.signal?.aborted) runtimeError('RUNTIME_CONTENTION_ABORTED', '数据库等待已取消，尚未执行。')
         const maxWait = permit ? Math.floor(deadline - Date.now()) : 5000
         if (maxWait <= 0) runtimeError('RUNTIME_CONTENTION_TIMEOUT', '数据库等待已超时，尚未执行。')
-        return await prisma.$transaction(work, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait, timeout: 10000 })
+        return await prisma.$transaction(work, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait, timeout: options.timeoutMs ?? 10000 })
       } finally { permit?.release() }
     } catch (error) {
       // Raw SELECT ... FOR UPDATE can surface PostgreSQL serialization/deadlock

@@ -13,6 +13,14 @@ beforeEach(() => { vi.restoreAllMocks(); mocks.transaction.mockReset(); mocks.de
 afterEach(() => { vi.useRealTimers() })
 
 describe('bounded child DB contention timing', () => {
+  it('keeps the ordinary transaction bound while permitting the fixed chapter bridge budget', async () => {
+    mocks.transaction.mockResolvedValue('committed')
+    await runtimeTransaction(async () => undefined, { timeoutMs: 20_000 })
+    expect(mocks.transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'Serializable', maxWait: 5000, timeout: 20000 })
+    await runtimeTransaction(async () => undefined)
+    expect(mocks.transaction.mock.calls[1][1]).toEqual({ isolationLevel: 'Serializable', maxWait: 5000, timeout: 10000 })
+    expect(mocks.delay).not.toHaveBeenCalled()
+  })
   it('shares the original connection allowance with permit waiting and uses an earlier deadline', async () => {
     vi.useFakeTimers()
     const contentionScope = { userId: 'author', parentRootId: 'deadline-root' }

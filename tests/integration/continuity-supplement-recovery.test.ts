@@ -403,7 +403,7 @@ describe.runIf(available)('original persistent supplemental phase: real question
             expect(await loadPersistedEvents(f.runId, pause.seq)).not.toContainEqual(expect.objectContaining({ type: 'run.paused' }))
           }
           return { content: '', reasoning: '', finishReason: 'tool_calls', toolCalls: [{ id: 'ordinary-current-report-decision', name: 'chapter_bridge_commit',
-            arguments: JSON.stringify({ compilationId: s.compilation.id, retainedFindings: current!.requiredDecisions!.map(item => ({ ...item,
+            arguments: JSON.stringify({ compilationId: s.compilation.id, ...(appliedScenario ? { decisionOnly: true } : {}), retainedFindings: current!.requiredDecisions!.map(item => ({ ...item,
               reason: 'Keep this independent opinion and the original wording explicitly pending for the author; no repair or factual clearance is claimed.' })) }) }],
           usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } }
         })
