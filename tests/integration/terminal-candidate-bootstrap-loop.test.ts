@@ -24,7 +24,7 @@ import { terminalFeedbackSlots } from '../../api/lib/agent/terminal-feedback-han
 import { terminalProcessingPlan } from '../../api/lib/agent/terminal-processing.js'
 import { prepareTerminalProposalInput } from '../../api/lib/agent/terminal-proposal-context.js'
 import { observeChapterReviewProgress, observeSemanticReadProgress, observeWritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
-import { allowsChapterOnlyCompletion, freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
+import { allowsChapterOnlyCompletion, freezeWritingScope, readRecoveredChapterDelivery } from '../../api/lib/agent/writing-scope.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { recoverRunElapsedMs } from '../../api/lib/agent/checkpoint.js'
 import * as ai from '../../api/lib/ai-service.js'
@@ -138,7 +138,26 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       const availableTools = agents.getToolsForAgent
       vi.spyOn(agents, 'getToolsForAgent').mockImplementation((...args) => availableTools(...args).filter(tool => tool.name !== 'chapter_bridge_commit'))
     }
-    const main = vi.spyOn(ai, 'chatWithTools').mockImplementation(async ({ messages }) => {
+    let closingCalls = 0
+    const closingSummary = 'The packet remains on the desk; its location stays unchanged.'
+    const main = vi.spyOn(ai, 'chatWithTools').mockImplementation(async request => {
+      const { messages } = request
+      const current = await readChapterReviewReadiness(prisma, f, compilation.id)
+      if (current?.terminalCommitted) {
+        // A default creative wrap-up follows a real commit. It is not another
+        // candidate decision, continuity request or manuscript mutation.
+        expect(['recover-transient', 'recover-quality-decision']).toContain(scenario)
+        expect(current).toMatchObject({ ready: true, decisionPending: false, terminalReview: { deliveryEligible: true } })
+        const capture = await prisma.$transaction(tx => readRecoveredChapterDelivery(tx, f))
+        expect(capture?.chapters).toMatchObject([{ id: chapter.id, revision: chapter.revision, content: chapter.content }])
+        expect(JSON.stringify(messages)).toContain(chapter.content)
+        expect(request).toMatchObject({ model: 'fixture', provider: 'fixture', usageLog: {
+          userId: f.userId, agentRunId: f.runId, modelTier: 'speed', multiplierBps: 10000 } })
+        expect(closingCalls++).toBe(0)
+        expect(main).toHaveBeenCalledTimes(scenario === 'recover-quality-decision' ? 2 : 1)
+        return { content: closingSummary, reasoning: '', finishReason: 'stop', toolCalls: [],
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } }
+      }
       if (scenario === 'recover-quality-decision') {
         expect(main).toHaveBeenCalledOnce()
         expect(JSON.stringify(messages)).toContain('The saved beat is quiet.')
@@ -170,6 +189,9 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       if (succeeded) {
         const errors = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'error', seq: { gt: pauseSeq } }, select: { payload: true } })
         expect({ errorMessage: finished.errorMessage, errors }).toEqual({ errorMessage: null, errors: [] })
+        const finals = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'text.final', seq: { gt: pauseSeq } } })
+        expect(finals.filter(event => !(event.payload as { asReasoning?: boolean }).asReasoning)
+          .map(event => (event.payload as { text: string }).text)).toEqual([closingSummary])
       }
       expect(finished).toMatchObject({ status: succeeded ? 'completed' : 'paused', taskSpec: spec,
         modelTier: beforeRun.modelTier, customModelId: beforeRun.customModelId, reasoningEffort: beforeRun.reasoningEffort })
@@ -193,7 +215,8 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       }
       const calls = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'tool.call', seq: { gt: pauseSeq } } })
       expect(calls.map(event => (event.payload as { toolName: string }).toolName)).toEqual(succeeded ? ['chapter_bridge_commit'] : [])
-      expect(main).toHaveBeenCalledTimes(scenario === 'recover-quality-decision' ? 1 : 0)
+      expect(closingCalls).toBe(succeeded ? 1 : 0)
+      expect(main).toHaveBeenCalledTimes(scenario === 'recover-quality-decision' ? 2 : succeeded ? 1 : 0)
       expect(network).not.toHaveBeenCalled()
       expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })).toEqual([historicalUsage])
       expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })).toEqual(account)
