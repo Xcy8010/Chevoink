@@ -100,7 +100,11 @@ export function continuityReassessmentCandidates(raw: string): unknown[] | null 
     } catch { return null }
   }
 }
-export function continuityReassessmentEnvelope(original: ReturnType<typeof inspectContinuityResponse>, raw: string, bodies: ContinuityBodies, reassessmentProtocol?: 2 | 3) {
+export function continuityReassessmentEnvelope(original: ReturnType<typeof inspectContinuityResponse>, raw: string, bodies: ContinuityBodies, reassessmentProtocol?: 2 | 3, options?: { dispositionProofs: 'diagnose_unapplied_body_only' }) {
+  const diagnose = options?.dispositionProofs === 'diagnose_unapplied_body_only'
+  if (diagnose && (reassessmentProtocol !== 2 || original.audit.parserVersion !== 8 || original.audit.classification !== 'source_invalid'
+    || original.audit.terminalCandidate || bodies.terminalEvidence?.verdictProtocol !== 5)) throw new Error('Disposition diagnostics require an unapplied body-only failure')
+  const dispositionDiagnostics: Array<{ index: number; code: 'retract_source_proof_invalid' }> = []
   const candidates = continuityReassessmentCandidates(JSON.parse(original.audit.rawResponse.content) as string)
   const wire = parseQualityJsonObject(raw, 'findings', 3)
   const projection = reassessmentProtocol === 3 && object(wire) ? normalizeTerminalResponseRows(object(wire)!) : null
@@ -130,6 +134,7 @@ export function continuityReassessmentEnvelope(original: ReturnType<typeof inspe
     return runtimeJson({ signal: item?.signal, severity: item?.severity, evidence: item?.evidence, suggestion: item?.suggestion }).hash
   }
   for (const decision of envelope.decisions) {
+    try {
     if (original.audit.parserVersion >= 7 && (decision.sourceEvidence.some(ref => !ref.quote)
       || !decision.sourceEvidence.some(ref => ref.source === 'current'))) throw new Error('Reassessment disposition requires current manuscript quotations')
     const proof = resolveContinuitySources({ signal: 'object', severity: 'warning', evidence: '复评原文依据', suggestion: '核对实际事件', sourceEvidence: decision.sourceEvidence }, bodies, 4)
@@ -138,6 +143,13 @@ export function continuityReassessmentEnvelope(original: ReturnType<typeof inspe
     if (original.audit.parserVersion >= 7 && invalidContinuitySourceClaim({ ...bound, evidence: decision.reason }, bodies, decision.sourceEvidence, original.audit.sourceScope)) {
       throw new Error('Reassessment disposition quotes unsupported manuscript evidence')
     }
+    } catch (error) {
+      // An un-applied failed opinion is not an established manuscript fact.
+      // Retain a bad withdrawal proof as audit data, never as certification.
+      // Structural identities and every retained/replacement finding stay strict.
+      if (!diagnose || decision.action !== 'retract') throw error
+      dispositionDiagnostics.push({ index: decision.index, code: 'retract_source_proof_invalid' })
+    }
     if (decision.action === 'retract') {
       if (decision.findingIndex !== undefined) throw new Error('Retracted candidate cannot become a final finding')
     } else {
@@ -145,5 +157,5 @@ export function continuityReassessmentEnvelope(original: ReturnType<typeof inspe
       if (decision.action === 'confirm' && semantic(candidates![decision.index]) !== semantic(envelope.findings[decision.findingIndex])) throw new Error('Confirmed candidate changed its judgment')
     }
   }
-  return { envelope, derivedEmptyDecisions: response !== parsed }
+  return { envelope, derivedEmptyDecisions: response !== parsed, ...(diagnose ? { dispositionDiagnostics } : {}) }
 }

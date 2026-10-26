@@ -66,12 +66,14 @@ export function continuityAuthorRequirements(prompt: string | null) {
   return `原始作者要求（授权与硬性检查门槛仍有效；其中描述的旧稿、历史问题和引文不是当前正文事实，须在本轮 current 重新定位）：\n${JSON.stringify({ source: 'author_request', manuscriptEvidence: false, text: prompt ?? '' })}`
 }
 
+export type ContinuitySourceCheckPolicy = 'explicit_source_evidence_v1'
+
 /** Quoted prose is evidence only when it occurs in the explicitly selected
  * current/previous spans. A segment address alone, an author request, a prior
  * report or a matching revision hash cannot substantiate a factual accusation.
  * This is a location/authority check, not a semantic proof of contradiction. */
 export function invalidContinuitySourceClaim(finding: ContinuityFindingInput, bodies: ContinuityBodies,
-  references: Array<{ source: 'previous' | 'current'; quote?: string }> | undefined, scope?: ContinuitySourceScope): boolean {
+  references: Array<{ source: 'previous' | 'current'; quote?: string }> | undefined, scope?: ContinuitySourceScope, policy?: ContinuitySourceCheckPolicy): boolean {
   if (!references?.length || references.some(ref => !ref.quote || !(bodies[ref.source] ?? '').includes(ref.quote))) return true
   const quotes = attributedQuotes(finding.evidence, scope)
   // Never let an unrelated valid span launder a historical/invented quotation.
@@ -89,7 +91,7 @@ export function invalidContinuitySourceClaim(finding: ContinuityFindingInput, bo
   const current = references.filter(ref => ref.source === 'current')
   const distinct = new Set(references.map(ref => `${ref.source}:${ref.quote}`))
   return distinct.size < 2 || !current.length
-    || !quotes.some(({ quote, source }) => (source === undefined || source === 'current') && current.some(ref => ref.quote!.includes(quote)))
+    || policy !== 'explicit_source_evidence_v1' && !quotes.some(({ quote, source }) => (source === undefined || source === 'current') && current.some(ref => ref.quote!.includes(quote)))
 }
 
 export const continuitySourceAuthorityRule = `证据来源协议：author_request 是作者授权及要求，不能当作 previous/current 原文；历史旧句、旧报告和桥接摘要即使写着“第几章”也须在本轮原文重新定位。当前章以本轮 chapterId/revision/contentHash 及 current 原文为唯一依据。每项 sourceEvidence 必须同时给 source、segmentId 和逐字短 quote；段落编号不能代替具体事实引文。error 须包含至少一处 current 及另一处不同事实引用，可为 previous/current 或 current/current；只有前文错误不能指控当前章。evidence 中用引号逐字引用当前指控的具体短句，所有引号内文本必须来自这些 sourceEvidence；前文引文在引号前明确标记“前文”或“第N章”（服务器全书章序），未标明来源的引文按当前正文核对。复评理由也遵守同样来源规则，不能借正确段落地址夹入旧句或编造免责句。原文不支持则撤回候选并说明依据，不改稿凑证据、不放宽硬性检查通过要求。`

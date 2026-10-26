@@ -2055,7 +2055,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         && currentReviewState.value.compilationId && tools.some(tool => tool.name === 'continuity_validate')
         && params.mode === 'build' && !toolContext.inlineChild && toolContext.sandboxMode !== 'read_only') {
         const compilationId = currentReviewState.value.compilationId
-        const proof = await prisma.$transaction(tx => import('./continuity-coordinator.js').then(module => module.readKnownContinuityReplay(tx, toolContext, compilationId)))
+        const proof = await prisma.$transaction(tx => import('./continuity-coordinator.js').then(module => module.readKnownContinuityReplay(tx, toolContext, compilationId)), { timeout: 20_000 })
         if (proof) {
           continuityKnownResultOnly = proof
           bootstrapCall = { id: `known_review_${proof.assessmentKey.slice(0, 40)}`, name: 'continuity_validate', arguments: JSON.stringify({ compilationId }) }

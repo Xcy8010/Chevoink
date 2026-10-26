@@ -1,3 +1,6 @@
+import { validateStoredExplicitSourceProjection } from './continuity-explicit-source-projection.js'
+import { classifyContinuityFindingAuthority } from './continuity-finding-authority.js'
+import type { TerminalEvidenceContext } from './terminal-evidence-context.js'
 import { runtimeJson } from './runtime-common.js'
 import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
 import type { TerminalCandidate } from './terminal-state-review.js'
@@ -53,6 +56,34 @@ export function storedContinuityProtocol(validation: unknown): 8 | 9 | 10 | 11 {
   return protocol === 11 ? 11 : protocol === 10 ? 10 : protocol === 9 ? 9 : 8
 }
 
+/** The free body report is useful only while its complete immutable lineage
+ * still rebuilds. This also protects body-only readiness/cache consumers which
+ * deliberately do not enter the terminal fact-certification reader. */
+export function validCompilerContinuitySourceProjection(validation: unknown, content?: string): boolean {
+  if (!validation || typeof validation !== 'object' || Array.isArray(validation)) return true
+  const value = validation as Record<string, unknown>, audit = value.continuityCriticResponse as Record<string, unknown> | undefined
+  if (!audit || audit.sourceProjection === undefined && audit.sourceCheckPolicy === undefined) return true
+  try {
+    const marker = audit.sourceProjection as { frozenBodies?: { current?: unknown; previous?: string | null } } | undefined
+    const body = content ?? marker?.frozenBodies?.current
+    if (typeof body !== 'string') return false
+    const rebuilt = validateStoredExplicitSourceProjection(audit, body, audit.terminalEvidence as TerminalEvidenceContext | undefined)
+    if (!rebuilt || !Array.isArray(value.findings)) return false
+    const remaining = [...value.findings]
+    for (const finding of rebuilt.findings) {
+      const hashes = [finding, classifyContinuityFindingAuthority(finding, undefined,
+        { current: body, previous: marker?.frozenBodies?.previous ?? null })].map(item => runtimeJson(item).hash)
+      const index = remaining.findIndex(item => hashes.includes(runtimeJson(item).hash))
+      if (index < 0) return false
+      remaining.splice(index, 1)
+    }
+    const coverage = value.coverage as Record<string, unknown> | undefined
+    return coverage?.contentHash === runtimeJson({ content: body }).hash
+      && (audit.terminalEvidence === undefined || (audit.terminalEvidence as TerminalEvidenceContext).current.id === value.checkedChapterId
+        && (audit.terminalEvidence as TerminalEvidenceContext).current.revision === value.checkedRevision)
+  } catch { return false }
+}
+
 /** COMPLETE requires a valid findings envelope, not just a status string. */
 export function completeCompilerContinuityAssessment(validation: unknown): { errorCount: number; warningCount: number } | null {
   if (!validation || typeof validation !== 'object' || Array.isArray(validation)) return null
@@ -60,6 +91,7 @@ export function completeCompilerContinuityAssessment(validation: unknown): { err
   if (value.independentCheck !== 'complete' || typeof value.checkedChapterId !== 'string' || !Number.isSafeInteger(value.checkedRevision)
     || !Array.isArray(value.findings) || !value.coverage || typeof value.coverage !== 'object' || Array.isArray(value.coverage)
     || typeof (value.coverage as Record<string, unknown>).reviewHash !== 'string') return null
+  if (!validCompilerContinuitySourceProjection(validation)) return null
   const findings = value.findings.map(item => continuityFindingInputSchema.safeParse(item))
   if (findings.some(item => !item.success)) return null
   const errorCount = findings.filter(item => item.success && item.data.severity === 'error').length
@@ -67,9 +99,9 @@ export function completeCompilerContinuityAssessment(validation: unknown): { err
   return value.errorCount === errorCount && value.warningCount === warningCount ? { errorCount, warningCount } : null
 }
 
-export function currentCompilerContinuityAssessment(validation: unknown, chapter: { id: string; revision: number }, coverage: CompilerContinuityCoverage): { errorCount: number; warningCount: number } | null {
+export function currentCompilerContinuityAssessment(validation: unknown, chapter: { id: string; revision: number; content?: string }, coverage: CompilerContinuityCoverage): { errorCount: number; warningCount: number } | null {
   const assessment = completeCompilerContinuityAssessment(validation)
-  if (!assessment) return null
+  if (!assessment || !validCompilerContinuitySourceProjection(validation, chapter.content)) return null
   const value = validation as Record<string, unknown>
   return value.checkedChapterId === chapter.id && value.checkedRevision === chapter.revision && compilerContinuityCoverageMatches(value.coverage, coverage) ? assessment : null
 }

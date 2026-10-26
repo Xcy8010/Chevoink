@@ -64,8 +64,10 @@ export async function readKnownContinuityReplay(db: Prisma.TransactionClient, su
   const original = await readOriginalTaskRequest(db, subject), runs = await originalTaskRunIds(db, subject, original)
   if (!runs.includes(saved.runId)) return null
   await (await import('./writing-scope.js')).assertWritingTarget(db, subject, { chapterId: saved.chapter.id })
-  const candidate = (await import('./terminal-candidate-contract.js')).terminalCandidateSchema.safeParse(object(saved.validation).terminalCandidate)
-  if (!candidate.success) return null
+  const storedCandidate = validation.terminalCandidate
+  const parsedCandidate = (await import('./terminal-candidate-contract.js')).terminalCandidateSchema.safeParse(storedCandidate)
+  if (storedCandidate !== undefined && storedCandidate !== null && !parsedCandidate.success) return null
+  const candidate = parsedCandidate.success ? parsedCandidate.data : undefined
   const lifecycle = await import('./assessment-response-lifecycle.js')
   const rows = await db.agentArtifact.findMany({ where: { runId: { in: runs }, artifactType: 'continuityReview',
     metadata: { path: ['assessmentChapterId'], equals: saved.chapter.id } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1001 })
@@ -80,22 +82,22 @@ export async function readKnownContinuityReplay(db: Prisma.TransactionClient, su
     if (!parsed.success || typeof metadata.callId !== 'string'
       || currentKey !== undefined && currentKey !== metadata.continuityAssessmentRequestKey) continue
     const input = parsed.data, context = input.bodies.terminalEvidence
-    if (!context || !input.terminalCandidate || !input.sourceScope || input.targetType !== 'story_compilation' || input.targetId !== compilationId
+    if (!context || !!input.terminalCandidate !== !!candidate || !input.sourceScope || input.targetType !== 'story_compilation' || input.targetId !== compilationId
       || input.chapterId !== saved.chapter.id || input.revision !== saved.chapter.revision
       || input.bodies.current !== saved.chapter.content || input.bodies.previous !== (source?.content ?? null)
-      || runtimeJson({ candidate: input.terminalCandidate }).hash !== runtimeJson({ candidate: candidate.data }).hash
+      || runtimeJson({ candidate: input.terminalCandidate ?? null }).hash !== runtimeJson({ candidate: candidate ?? null }).hash
       || runtimeJson(input.sourceScope).hash !== runtimeJson(scope).hash) continue
     const evidence = await import('./terminal-evidence-context.js'), coverage = await import('./terminal-fact-coverage.js')
     let current = evidence.terminalEvidenceContext(saved.chapter, source, protocol === 11 ? 2 : 1,
       evidence.terminalQuoteAddressVersion(original.spec), coverage.terminalCoverageInput(original.spec, saved.preparedContext,
-        saved.chapter, candidate.data, context.factCoverage?.version, coverage.terminalCoverageProofs(source, context.spanAddressProtocol)),
+        saved.chapter, candidate, context.factCoverage?.version, coverage.terminalCoverageProofs(source, context.spanAddressProtocol)),
       context.verdictProtocol, context.spanAddressProtocol)
     const proposals = await import('./terminal-proposal-context.js')
-    current = proposals.attachTerminalProposalInput(current,
-      { taskId: proposals.terminalProposalTaskId(original.spec, original.taskId), preparedContext: saved.preparedContext, validation: saved.validation, candidate: candidate.data })
+    if (candidate) current = proposals.attachTerminalProposalInput(current,
+      { taskId: proposals.terminalProposalTaskId(original.spec, original.taskId), preparedContext: saved.preparedContext, validation: saved.validation, candidate })
     if (runtimeJson(current).hash !== runtimeJson(context).hash) continue
     const currentCoverage = (await import('./compiler-continuity-contract.js')).compilerContinuityCoverage({ chapter: saved.chapter,
-      bridge: saved.bridge, sceneTasks: saved.sceneTasks, source, terminalCandidate: candidate.data,
+      bridge: saved.bridge, sceneTasks: saved.sceneTasks, source, terminalCandidate: candidate,
       focus: String(object(saved.validation).reviewFocus ?? '') || undefined }, protocol)
     if (input.bindingHash !== runtimeJson(currentCoverage).hash) continue
     const received = await lifecycle.readReusableLegacyContinuityAssessment(db, { ...subject, callId: 'known-result-probe' } as ToolContext, input)
@@ -109,6 +111,12 @@ export async function readKnownContinuityReplay(db: Prisma.TransactionClient, su
       if (!(await import('./continuity-empty-proposal-projection.js')).validEmptyOptionalProposalProjection(
         received?.audit, input.bodies.current, context)) continue
       observedAudit = object(projection.original)
+    }
+    const explicit = object(object(received?.audit).sourceProjection)
+    if (explicit.kind === 'explicit_source_evidence') {
+      if (candidate || !(await import('./continuity-explicit-source-projection.js')).validateStoredExplicitSourceProjection(
+        received?.audit, input.bodies.current, context)) continue
+      observedAudit = object(explicit.originalAudit)
     }
     if (received?.complete && observedAudit.contentHash === audit.contentHash
       && runtimeJson(observedAudit.rawResponse).hash === runtimeJson(raw).hash

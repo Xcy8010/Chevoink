@@ -6,6 +6,7 @@ import type { ContinuityBodies } from './continuity-review-context.js'
 import type { ContinuitySourceScope } from './continuity-source-authority.js'
 import { validContinuitySparseProjection } from './continuity-response-repair.js'
 import { validEmptyOptionalProposalProjection } from './continuity-empty-proposal-projection.js'
+import { validateStoredExplicitSourceProjection } from './continuity-explicit-source-projection.js'
 import { runtimeJson } from './runtime-common.js'
 
 export type LegacyContinuityInspection = ReturnType<typeof inspectContinuityResponse>
@@ -44,6 +45,7 @@ export function readAuthenticatedContinuityAssessment(value: unknown, content: s
         establishedIssueDispositions: (rebuilt.parsed?.record.issueDispositions as Array<{ issueIndex: number; outcome: string; explanation: string }> ?? []).map(row => ({ ...row,
           issue: rebuilt.audit.continuityV4.manifest.typedLineage?.establishedIssues[row.issueIndex] })) } : {}) } : null
   }
+  if (audit.sourceProjection !== undefined && !validateStoredExplicitSourceProjection(audit, content, context)) return null
   if (!validEmptyOptionalProposalProjection(audit, content, context) || !validContinuitySparseProjection(audit, content, context)) return null
   const candidate = terminalCandidateSchema.safeParse(audit.terminalCandidate), rawReceipt = audit.rawResponse as { complete?: unknown; content?: unknown } | undefined
   if (!candidate.success || audit.terminalContentHash !== runtimeJson({ content }).hash || rawReceipt?.complete !== true || typeof rawReceipt.content !== 'string'

@@ -24,6 +24,8 @@ import { observeLegacyContinuityReassessmentNotDispatched, observeLegacyContinui
 import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
 import { createTextRequestTrace, withTextRequestTrace, textRequestsFinished } from '../../text-request-trace.js'
 import { readOfflineContinuityRecovery, applyOfflineContinuityRecovery } from '../continuity-offline-recovery.js'
+import { validCompilerContinuitySourceProjection } from '../compiler-continuity-contract.js'
+import { validateStoredExplicitSourceProjection } from '../continuity-explicit-source-projection.js'
 import { runtimeJson } from '../runtime-common.js'
 import { persistedContentHash } from '../semantic-progress.js'
 import { terminalCandidateFacts } from '../terminal-fact-identity.js'
@@ -838,7 +840,17 @@ export async function readStandaloneContinuityReport(ctx: ToolContext, contextHa
     metadata: { path: ['standaloneKey'], equals: standaloneReviewKey(contextHash, focus, protocol) } }, orderBy: { createdAt: 'desc' } })
   if (!artifact) return null
   const metadata = z.object({ independentCheck: z.literal('complete'), findings: z.array(continuityFindingInputSchema) }).safeParse(artifact.metadata)
-  return metadata.success ? { artifact, findings: metadata.data.findings } : null
+  const saved = artifact.metadata as Record<string, unknown> | null, audit = saved?.criticResponse as Record<string, unknown> | undefined
+  const sourceProjected = audit && (audit.sourceProjection !== undefined || audit.sourceCheckPolicy !== undefined)
+  if (sourceProjected) {
+    const marker = audit.sourceProjection as { frozenBodies?: { current?: string; previous?: string | null } } | undefined
+    if (!metadata.success || !validateStoredExplicitSourceProjection(audit, marker?.frozenBodies?.current ?? '')) return null
+    const current = await buildStandaloneContinuityContext(ctx, String(saved?.chapterId), db, audit.parserVersion === 7 ? 4 : 3)
+    const rebuilt = validateStoredExplicitSourceProjection(audit, current.chapter.content)
+    if (current.contextHash !== contextHash || marker?.frozenBodies?.previous !== current.precedingBodies || !rebuilt || runtimeJson(rebuilt.findings).hash !== runtimeJson(metadata.success ? metadata.data.findings : []).hash) return null
+  }
+  return metadata.success ? { artifact, findings: metadata.data.findings,
+    ...(sourceProjected ? { criticResponse: audit as AuthenticatedContinuityInspection['audit'] } : {}) } : null
 }
 
 export async function saveStandaloneContinuityReport(ctx: ToolContext, context: Pick<Awaited<ReturnType<typeof buildStandaloneContinuityContext>>, 'chapter' | 'contextHash' | 'criticInput'>, parsed: ReturnType<typeof parseIndependentContinuityResult>, db: Prisma.TransactionClient, focus?: string, allowSingleQuotes = true, requirePair = true, criticResponse?: AuthenticatedContinuityInspection['audit'], contextProtocol: 2 | 3 | 4 | 5 = criticResponse?.parserVersion === 7 ? 4 : 3): Promise<import('./types.js').ToolResult> {
@@ -958,7 +970,7 @@ export const continuityValidateTool = defineTool({
       if (args.terminalState || args.terminalPatch || args.inheritedProofs !== undefined) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND', output: '终态候选必须绑定本任务写作编译；独立审阅不提交终态。' }
       const context = await buildStandaloneContinuityContext(ctx, args.chapterId, prisma, sourceAuthority ? 4 : 3)
       const cached = await readStandaloneContinuityReport(ctx, context.contextHash, args.focus)
-      if (cached) return prisma.$transaction(tx => saveStandaloneContinuityReport(ctx, context, { structured: true, findings: cached.findings }, tx, args.focus, true, true, undefined, sourceAuthority ? 4 : 3))
+      if (cached) return prisma.$transaction(tx => saveStandaloneContinuityReport(ctx, context, { structured: true, findings: cached.findings }, tx, args.focus, true, true, cached.criticResponse, sourceAuthority ? 4 : 3))
       const assessmentInput: LegacyAssessmentInput = { chapterId: context.chapter.id, revision: context.chapter.revision,
         bodies: { previous: context.precedingBodies, current: context.chapter.content }, system: criticSystem,
         ...(sourceAuthority ? { parserVersion: 7 as const, sourceScope: context.sourceScope } : {}),
@@ -1079,7 +1091,7 @@ export const continuityValidateTool = defineTool({
     }
     const parsedCachedValidation = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number().int(), coverage: z.unknown().optional(),
       findings: z.array(continuityFindingInputSchema), errorCount: z.number().int().nonnegative().optional(), warningCount: z.number().int().nonnegative().optional() }).safeParse(compilation.validation)
-    const cachedValidation = parsedCachedValidation.success ? parsedCachedValidation.data : null
+    const cachedValidation = parsedCachedValidation.success && validCompilerContinuitySourceProjection(compilation.validation, chapter.content) ? parsedCachedValidation.data : null
     const cacheDeliveryBinding = cachedValidation ? await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(prisma,
       { ...ctx, compilationId: compilation.id }, { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: compilation.preparedContext },
       chapter, compilation.validation, terminalEvidence) : undefined

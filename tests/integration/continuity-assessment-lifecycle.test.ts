@@ -833,3 +833,97 @@ describe('complete continuity assessment lifecycle in actual PostgreSQL', () => 
       } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
     }))
 })
+
+// These are already received historical requests, not fresh paid retries.
+// Exercise JSONB persistence, authentic billing/claim lineage and application
+// idempotence against the isolated PostgreSQL fixture used by the full CI.
+describe('body-only explicit-source paid-result recovery', () => {
+  it('keeps a bad retract proof as audit data, retains the real finding and never repurchases either report', () => fixture(async f => {
+    const { ctx } = await retryFixture(f, new AbortController())
+    const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const retained = { signal: 'object', severity: 'error', evidence: '所述物品状态需要统一。', suggestion: '核对同一时刻的物品状态。',
+      sourceEvidence: [{ source: 'current', segmentId: 'c0', quote: '门先锁着' }, { source: 'current', segmentId: 'c0', quote: '门打开' }] }
+    const old = { ...retained, evidence: '旧意见尚未得到完整认证。', suggestion: '核对事件先后。' }
+    const semanticChecks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: kind === 'state_progression' ? 'conflict' : 'clear',
+      reason: 'Synthetic complete manuscript review.', findingIndexes: kind === 'state_progression' ? [0] : [] }))
+    const firstRaw = JSON.stringify({ findings: [retained, old], semanticChecks, terminalVerdicts: [] })
+    const secondWire = { findings: [retained], semanticChecks, terminalVerdicts: [], decisions: [
+      { index: 0, action: 'confirm', reason: '保留真实原文对应的意见。', sourceEvidence: retained.sourceEvidence, findingIndex: 0 },
+      { index: 1, action: 'retract', reason: '旧解释与实际事件不一致。', sourceEvidence: [{ source: 'current', segmentId: 'c0', quote: '正文不存在的引文' }] },
+    ] }
+    const secondRaw = JSON.stringify(secondWire)
+    const frozen: lifecycle.LegacyAssessmentInput = { chapterId: chapter.id, revision: chapter.revision,
+      bodies: { current: body, previous: null, terminalEvidence: terminalEvidenceContext(chapter, null, 2, undefined, undefined, 5) },
+      system: 'Frozen body-only full review.', content: 'Frozen original complete manuscript.', parserVersion: 8,
+      sourceScope: compilerEvidenceScope(chapter, null), reassessmentProtocol: 2, bindingHash: 'a'.repeat(64), targetType: 'chapter', targetId: chapter.id }
+    const inspect = (raw: string) => inspectContinuityResponse(raw, frozen.bodies, true, 8, undefined, frozen.sourceScope)
+    const first = inspect(firstRaw)
+    expect(first.audit.classification).toBe('source_invalid')
+    expect(inspect(secondRaw).audit.classification).toBe('source_invalid')
+    const fetcher = vi.fn().mockImplementationOnce(async () => completion(firstRaw)).mockImplementationOnce(async () => completion(secondRaw))
+    vi.stubGlobal('fetch', fetcher)
+    const assertCurrent = async () => {}
+    expect(await prisma.$transaction(tx => lifecycle.reserveLegacyContinuityAssessment(tx, ctx, frozen, assertCurrent))).toBe('new')
+    const purchase = async (raw: string, action: string) => {
+      await generateReviewCompletion(frozen.system, frozen.content, { modelRuntime: runtime, explicitModelSelection: true, signal: ctx.signal,
+        userId: f.userId, novelId: f.novelId, chapterId: f.chapterId, agentRunId: f.runId, action, targetType: 'chapter', targetId: chapter.id,
+        beforeProviderDispatch: id => prisma.$transaction(tx => lifecycle.bindLegacyContinuityRequest(tx, ctx, frozen, id, action === 'agent3ContinuityCritic' ? 'primary' : 'reassessment', assertCurrent)).then(() => {}),
+      })
+      const payment = await prisma.aiUsageLog.findFirstOrThrow({ where: { userId: f.userId, action } })
+      await prisma.$transaction(tx => lifecycle.observeLegacyContinuityAssessment(tx, ctx, frozen,
+        { content: raw, finishReason: 'stop', toolCalls: [] }, [payment.id], action === 'agent3ContinuityCritic' ? 'primary' : 'reassessment'))
+      return payment
+    }
+    const primary = await purchase(firstRaw, 'agent3ContinuityCritic')
+    expect(await prisma.$transaction(tx => lifecycle.claimLegacyContinuityReassessment(tx, ctx, frozen, first, [primary.id],
+      lifecycle.continuityReassessmentRequest(frozen.system, frozen.content, first, frozen.bodies, false, 2), assertCurrent))).toBe(true)
+    const second = await purchase(secondRaw, 'agent3ContinuityCriticSecondPass')
+    const protectedRows = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
+    const protectedPayments = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const protectedLedger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const replay = () => prisma.$transaction(tx => lifecycle.readReusableLegacyContinuityAssessment(tx, { ...ctx, callId: 'resumed-call' },
+      { ...frozen, content: 'Changed rendered guidance, same frozen business input.' }))
+    const recovered = await replay()
+    expect(recovered).toMatchObject({ complete: true, findings: [retained], audit: { sourceProjection: {
+      scope: 'unapplied_body_only_final_report', dispositionDiagnostics: [{ index: 1, code: 'retract_source_proof_invalid' }],
+    } } })
+    expect(recovered?.audit.rawResponse.content).toBe(JSON.stringify(secondRaw))
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    await prisma.$transaction(tx => lifecycle.markLegacyContinuityAssessmentApplication(tx, ctx, recovered!))
+    expect(await replay()).toEqual(recovered)
+    await prisma.$transaction(tx => lifecycle.markLegacyContinuityAssessmentApplication(tx, ctx, recovered!))
+    const applications = await prisma.agentArtifact.findMany({ where: { runId: f.runId, artifactType: 'continuityReview',
+      metadata: { path: ['assessmentApplicationKey'], equals: lifecycle.legacyContinuityAssessmentKey(ctx, frozen) } } })
+    expect(applications).toHaveLength(1)
+    const application = applications[0]
+    expect(application.metadata).toMatchObject({ sourceProjectionHash: expect.stringMatching(/^[a-f0-9]{64}$/u) })
+    for (const scenario of ['unknown-fee', 'incomplete-response', 'bad-final-quote', 'changed-confirm', 'old-certified-application'] as const) {
+      const secondFrame = protectedRows.find(row => (row.metadata as Record<string, unknown>).stage === 'reassessment'
+        && (row.metadata as Record<string, unknown>).assessmentResponseKey)!
+      const metadata = structuredClone(secondFrame.metadata) as Record<string, unknown>
+      if (scenario === 'unknown-fee') await prisma.aiUsageLog.update({ where: { id: second.id }, data: { usageSource: 'unknown', billingStatus: 'pending_usage' } })
+      if (scenario === 'incomplete-response') (metadata.response as Record<string, unknown>).transportComplete = false
+      if (scenario === 'bad-final-quote' || scenario === 'changed-confirm') {
+        const wire = structuredClone(secondWire)
+        if (scenario === 'bad-final-quote') wire.findings[0].sourceEvidence[0].quote = '伪造当前正文引用'
+        else wire.findings[0].suggestion = '改变原意见后伪称confirm'
+        const raw = JSON.stringify(wire)
+        ;(metadata.response as Record<string, unknown>).content = JSON.stringify(raw)
+        metadata.audit = inspect(raw).audit
+      }
+      if (scenario === 'old-certified-application') await prisma.agentArtifact.update({ where: { id: application.id }, data: { metadata: runtimeJson({
+        assessmentApplicationKey: lifecycle.legacyContinuityAssessmentKey(ctx, frozen), version: 1 }).value } })
+      await prisma.agentArtifact.update({ where: { id: secondFrame.id }, data: { metadata: runtimeJson(metadata).value } })
+      expect(await replay(), scenario).toBeNull()
+      await prisma.agentArtifact.update({ where: { id: secondFrame.id }, data: { metadata: secondFrame.metadata! } })
+      await prisma.agentArtifact.update({ where: { id: application.id }, data: { metadata: application.metadata! } })
+      await prisma.aiUsageLog.update({ where: { id: second.id }, data: { usageSource: second.usageSource, billingStatus: second.billingStatus } })
+    }
+    expect(await replay()).toEqual(recovered)
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(protectedPayments)
+    expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(protectedLedger)
+    expect(await prisma.agentArtifact.findMany({ where: { id: { in: protectedRows.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(protectedRows)
+    expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).content).toBe(body)
+  }))
+})

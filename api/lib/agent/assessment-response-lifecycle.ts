@@ -1,4 +1,5 @@
 import { continuitySparseRepairRequest, applyContinuitySparseRepair, continuitySparseRepairDiagnostics } from './continuity-response-repair.js'
+import { recoverExplicitSourceEvidence, sameExplicitSourceInput, validateStoredExplicitSourceProjection } from './continuity-explicit-source-projection.js'
 import { recoverEmptyOptionalProposalTable, sameEmptyOptionalProposalInput, validEmptyOptionalProposalProjection } from './continuity-empty-proposal-projection.js'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
@@ -182,6 +183,7 @@ export async function runContinuityReassessment(input: { original: Inspection; b
   input.signal.throwIfAborted(); await input.assertCurrent()
   input.signal.throwIfAborted()
   const formatOnly = recoverEmptyOptionalProposalTable(input.original, input.bodies)
+    ?? recoverExplicitSourceEvidence(input.original, input.bodies)
   if (formatOnly) return formatOnly
   const request = continuityReassessmentRequest(input.system, input.content, input.original, input.bodies, false, input.reassessmentProtocol)
   if (!await input.claim(request)) return input.original
@@ -441,6 +443,37 @@ export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClien
       ? { audit: second.audit, protocol: input.reassessmentProtocol } : undefined)
     if (projected) { inspected = projected; secondApplied = !!claimed }
   }
+  // A current body report is separate from certification of an unapplied old
+  // accusation. Keep the full paid final response and its failed retract proof
+  // in versioned lineage; never use it to discharge a certified obligation.
+  if (!isContinuityV4Inspection(original) && !inspected.complete && known && (input.parserVersion === 7 || input.parserVersion === 8)
+    && (input.parserVersion === 8 && input.reassessmentProtocol === 2 || input.parserVersion === 7 && input.reassessmentProtocol === undefined)
+    && !input.terminalCandidate && completeFrame(response)
+    && object(first.audit) && runtimeJson(original.audit).hash === runtimeJson(first.audit).hash) {
+    const originalTask = await readOriginalTaskRequest(tx, ctx), applicationRuns = await originalTaskRunIds(tx, ctx, originalTask)
+    const applications = await tx.agentArtifact.findMany({ where: { runId: { in: applicationRuns }, artifactType: 'continuityReview',
+      metadata: { path: ['assessmentApplicationKey'], equals: key } } })
+    const reservations = await tx.agentArtifact.findMany({ where: { runId: ctx.runId, artifactType: 'continuityReview',
+      metadata: { path: ['continuityAssessmentRequestKey'], equals: key } } })
+    const reservation = reservations.length === 1 ? reservations[0] : null
+    const boundReservation = reservation && object(reservation.metadata)?.callId === ctx.callId
+      && runtimeJson(object(reservation.metadata)?.input).hash === runtimeJson(input).hash
+    const secondBound = claimed ? input.parserVersion === 8 && input.reassessmentProtocol === 2 && completeFrame(secondResponse) && second && (() => {
+      const meta = object(claimed.metadata)
+      const observed = inspectAuthenticatedContinuityAssessment(JSON.parse(secondResponse!.content as string) as string, input, true)
+      return meta && object(second.audit) && runtimeJson(observed.audit).hash === runtimeJson(second.audit).hash
+        && runtimeJson(meta.input).hash === runtimeJson(input).hash && runtimeJson(meta.original).hash === runtimeJson(original.audit).hash
+        && runtimeJson(meta.request).hash === runtimeJson(continuityReassessmentRequest(input.system, input.content, original, legacyAssessmentInputSchema.parse(input).bodies, false, 2)).hash
+    })() : secondFrames.length === 0
+    if (boundReservation && secondBound) {
+      const projected = recoverExplicitSourceEvidence(original, input.bodies, claimed && second ? { audit: second.audit, protocol: 2 } : undefined)
+      if (projected && applications.every(applied => object(applied.metadata)?.sourceProjectionHash
+        === runtimeJson((projected.audit as Record<string, unknown>).sourceProjection).hash
+        && object(applied.metadata)?.reservationId === reservation!.id)) {
+        inspected = projected; secondApplied = !!claimed
+      }
+    }
+  }
   // A newly interpretable primary cannot erase an already claimed second
   // request or its unknown fees. Require the actual complete final report.
   if (original.complete && claimed && !secondApplied || inspected.complete && !known) {
@@ -471,6 +504,9 @@ export async function markLegacyContinuityAssessmentApplication(tx: Prisma.Trans
   if (!ids.length || usage.length !== new Set(ids).size || usage.some(row => !knownAssessmentBilling(row))) return
   if (typeof meta.callId !== 'string') return
   const received = await readLegacyContinuityAssessment(tx, { ...ctx, runId: reservation.runId, callId: meta.callId }, frozen as LegacyAssessmentInput)
+  const sourceProjectionHash = object((inspected.audit as Record<string, unknown>).sourceProjection)
+    && validateStoredExplicitSourceProjection(inspected.audit, (frozen as LegacyAssessmentInput).bodies.current, (frozen as LegacyAssessmentInput).bodies.terminalEvidence)
+    ? runtimeJson((inspected.audit as Record<string, unknown>).sourceProjection).hash : undefined
   const projectionNormalization = isContinuityV4Inspection(inspected) ? inspected.audit.continuityV4.projectionNormalization : undefined
   const rebound = bindLegacyContinuityAssessment(received.inspected, { ...ctx, runId: reservation.runId, callId: meta.callId },
     frozen as LegacyAssessmentInput, !!projectionNormalization)
@@ -486,7 +522,7 @@ export async function markLegacyContinuityAssessmentApplication(tx: Prisma.Trans
   if (!await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentApplicationKey'], equals: key } } })) {
     await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性报告应用审计', content: '完整检查报告已应用到对应当前输入。',
       metadata: runtimeJson({ version: 1, assessmentApplicationKey: key, reservationId: reservation.id, usageIds: ids,
-        ...(projectionNormalization ? { projectionNormalization } : {}) }).value } })
+        ...(projectionNormalization ? { projectionNormalization } : {}), ...(sourceProjectionHash ? { sourceProjectionHash } : {}) }).value } })
   }
   if (typeof meta.callId === 'string') await markLegacyContinuityAssessmentApplied(tx, { ...ctx, runId: reservation.runId, callId: meta.callId })
 }
@@ -514,13 +550,14 @@ export async function readReusableLegacyContinuityAssessment(tx: Prisma.Transact
   // settled report. Only this versioned projection has a content-only fallback;
   // ordinary reuse keeps its original whole-input equality rule.
   const compatible = reservations.find(row => row.runId === ctx.runId && sameEmptyOptionalProposalInput(object(row.metadata)?.input, input))
+  const explicitCompatible = reservations.find(row => row.runId === ctx.runId && sameExplicitSourceInput(object(row.metadata)?.input, input))
   const crossWire = reservations.find(row => {
     const frozen = object(object(row.metadata)?.input)
     return frozen && ((frozen.parserVersion === 9 || frozen.parserVersion === 10) || (input.parserVersion === 9 || input.parserVersion === 10)) && sameContinuitySubject(frozen, input)
       && runtimeJson({ bodies: frozen.bodies, candidate: frozen.terminalCandidate, bindingHash: frozen.bindingHash ?? null }).hash
         === runtimeJson({ bodies: input.bodies, candidate: input.terminalCandidate, bindingHash: input.bindingHash ?? null }).hash
   })
-  const latest = crossWire ?? exact ?? compatible
+  const latest = crossWire ?? exact ?? compatible ?? explicitCompatible
   const meta = object(latest?.metadata)
   if (!latest || typeof meta?.callId !== 'string') return null
   const source = { ...ctx, runId: latest.runId, callId: meta.callId }
@@ -530,8 +567,12 @@ export async function readReusableLegacyContinuityAssessment(tx: Prisma.Transact
     const result = await readLegacyContinuityAssessment(tx, source, frozen)
     if (!result.billingKnown || !result.providerComplete || !result.inspected.complete) return null
     const projection = object((result.inspected.audit as Record<string, unknown>).formatProjection)
-    if (latest !== exact && latest !== crossWire && (!result.recoveryReady || projection?.kind !== 'empty_optional_proposal_table' || projection.version !== 1
-      || !validEmptyOptionalProposalProjection(result.inspected.audit, input.bodies.current, input.bodies.terminalEvidence))) return null
+    const explicit = object((result.inspected.audit as Record<string, unknown>).sourceProjection)
+    const validExplicit = explicit?.kind === 'explicit_source_evidence' && !!validateStoredExplicitSourceProjection(result.inspected.audit,
+      input.bodies.current, input.bodies.terminalEvidence)
+    if (latest !== exact && latest !== crossWire && (!result.recoveryReady || !validExplicit && (projection?.kind !== 'empty_optional_proposal_table' || projection.version !== 1
+      || !validEmptyOptionalProposalProjection(result.inspected.audit, input.bodies.current, input.bodies.terminalEvidence)))) return null
+    if (explicit && (!validExplicit || latest !== exact && explicitCompatible?.id !== latest.id)) return null
     if (projection?.kind === 'empty_optional_proposal_table' && (latest !== crossWire && compatible?.id !== latest.id
       || !validEmptyOptionalProposalProjection(result.inspected.audit, input.bodies.current, input.bodies.terminalEvidence))) return null
     return bindLegacyContinuityAssessment(result.inspected, source, frozen)
