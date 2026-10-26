@@ -219,6 +219,7 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
   const currentAudit = object(object(validation).continuityCriticResponse)
   if (object(validation).effectiveReport !== undefined && !effectiveContinuityAudit(validation)) return base
   let nativeEntries: Awaited<ReturnType<typeof import('./native-continuity-assessment.js')['readNativeContinuityAssessments']>> | undefined
+  let authenticatedSupplemental = false
   if (currentAudit.parserVersion === 9 || currentAudit.parserVersion === 10) {
     if (!context || typeof db.agentArtifact?.findMany !== 'function') return base
     const { readOriginalTaskRequest, originalTaskRunIds } = await import('./original-request.js')
@@ -231,7 +232,8 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
       const request = object(currentAudit.assessmentRequest)
       let authentic = false
       if (currentAudit.parserVersion === 10 && object(currentAudit.phaseRequest).version === 1) {
-        authentic = await (await import('./continuity-coordinator.js')).authenticateSupplementalContinuityReport(db, subject, currentAudit)
+        authenticatedSupplemental = await (await import('./continuity-coordinator.js')).authenticateSupplementalContinuityReport(db, subject, currentAudit)
+        authentic = authenticatedSupplemental
       } else if (typeof request.key === 'string') {
         const reservations = await db.agentArtifact.findMany({ where: { runId: { in: runIds }, run: { userId: subject.userId, novelId: subject.novelId },
           artifactType: 'continuityReview', metadata: { path: ['continuityAssessmentRequestKey'], equals: request.key } }, take: 2 })
@@ -334,7 +336,10 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
   if (!reservations.length && !nativeEntries?.length) return base
   const keys = new Set(reservations.map(row => String(object(row.metadata).continuityAssessmentRequestKey)))
   const currentRequest = object(object(object(validation).continuityCriticResponse).assessmentRequest)
-  if (!keys.has(String(currentRequest.key)) && !nativeEntries?.some(entry => entry.current && entry.inspected.complete)) return base
+  // Only the current carrier is authenticated here. Historical origins,
+  // charges and body transitions still must pass below before minting authority.
+  if (!keys.has(String(currentRequest.key)) && !authenticatedSupplemental
+    && !nativeEntries?.some(entry => entry.current && entry.inspected.complete)) return base
   if (keys.size !== reservations.length || related.some(row => {
     const meta = object(row.metadata)
     return meta.assessmentKey !== undefined && !keys.has(String(meta.assessmentKey))

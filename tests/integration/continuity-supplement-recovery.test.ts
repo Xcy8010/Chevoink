@@ -69,7 +69,7 @@ async function assertSupplementSettlement(userId: string, compilationId: string,
 // The same project-native synthetic legacy pair used by the exhausted-input
 // regression is applied through the real report producer. No old admission,
 // claim, raw response, price or coverage ledger is upgraded to contract5.
-async function originalFailure(f: Fixture, conflict = false, qualityReady = false, pendingFact = false, originalPrompt = prompt) {
+async function originalFailure(f: Fixture, conflict = false, qualityReady = false, pendingFact = false, originalPrompt = prompt, draftField: 'emotion' | 'knowledge' = 'emotion') {
   vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(runtime)
   vi.spyOn(prices, 'resolveTokenPrice').mockResolvedValue({ ...price, rateCardId: 'new-admin-price-must-not-replace-original' })
   const main = vi.spyOn(ai, 'chatWithTools').mockRejectedValue(Error('No main-model turn is authorized by this phase'))
@@ -85,10 +85,10 @@ async function originalFailure(f: Fixture, conflict = false, qualityReady = fals
     choice: 'Record', cost: 'Time', turn: 'Recorded', exitState: state, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
   await recordStoryCompilerWrite({ ...f, chapterOrderIndex: 1, chapterRevision: chapter.revision })
   const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
-  const draft = terminalDraftFixture(pendingFact ? 'openLoops' : 'emotion', { chapter, taskId: f.spec.id, ctx: f, compilationId: compilation.id,
+  const draft = terminalDraftFixture(pendingFact ? 'openLoops' : draftField, { chapter, taskId: f.spec.id, ctx: f, compilationId: compilation.id,
     candidate: terminalDraftFixture().candidate,
     originBindingHash: runtimeJson(compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source: null,
-      terminalCandidate: terminalDraftFixture(pendingFact ? 'openLoops' : 'emotion').base }, 11)).hash,
+      terminalCandidate: terminalDraftFixture(pendingFact ? 'openLoops' : draftField).base }, 11)).hash,
     currentBindingHash: runtimeJson(compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source: null,
       terminalCandidate: terminalDraftFixture().candidate }, 11)).hash })
   const originWire = pendingFact ? { ...draft.originWire, terminalVerdicts: [{ claimIndex: 0, verdict: 'supported',
@@ -308,6 +308,58 @@ describe.runIf(available)('original persistent supplemental phase: real question
       await s.unchangedOriginal()
     }, undefined, prompt, options), 30000)
 
+  it.each([false, true] as const)('authenticates a supplemental carrier before the existing draft history checks, decisionOnly=%s', decisionOnly => fixture(async f => {
+    // A knowledge draft needs historical authority even in the same revision.
+    // The supplemental report carries it, but never establishes it.
+    const s = await originalFailure(f, true, true, false, prompt, 'knowledge')
+    await s.approve()
+    const wire = wireFor(s.question, 'conflict')
+    wire.proposalDispositions![0].explanation = 'The earlier draft “A reply remains pending.” was not independently established.'
+    const network = vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(wire) }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 12, completion_tokens: 8 } })))
+    vi.stubGlobal('fetch', network)
+    const strict = vi.spyOn(projections, 'normalizeContinuityV4Projection').mockImplementation(first => first)
+    try { expect(await s.invoke('original-paid-carrier-report')).toMatchObject({ failureCode: 'CONTINUITY_REPORT_INCOMPLETE' }) }
+    finally { strict.mockRestore() }
+    expect(await s.invoke('free-carrier-report-application', false)).toMatchObject({ reviewCompleted: true, part: { status: 'success' } })
+    const before = await readChapterReviewReadiness(prisma, f, s.compilation.id)
+    expect(before).toMatchObject({ ready: true, continuity: 'complete', decisionPending: true,
+      terminalReview: { currentResultVerified: true, deliveryEligible: false } })
+    expect(before!.terminalReview!.unresolved).toContainEqual(expect.objectContaining({ field: 'knowledge', verdict: 'unknown' }))
+    const original = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })
+    const audit = (original.validation as { continuityCriticResponse: projections.ContinuityV4Inspection['audit'] }).continuityCriticResponse
+    expect(await authenticateSupplementalContinuityReport(prisma, s.ctx, audit)).toBe(true)
+    expect(await authenticateSupplementalContinuityReport(prisma, s.ctx, { ...audit,
+      phaseRequest: { version: 1, requestId: 'unrelated-supplemental-request' } })).toBe(false)
+    const raw = await prisma.agentArtifact.findMany({ where: { runId: f.runId, artifactType: 'continuityReview' }, orderBy: { id: 'asc' } })
+    const fees = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const retainedFindings = before!.requiredDecisions!.map(item => ({ ...item,
+      reason: 'Retain this independent opinion for author review without claiming repair or factual clearance.' }))
+    const first = await chapterBridgeCommitTool.execute({ ...s.ctx, callId: 'carrier-decisions-and-commit' },
+      { compilationId: s.compilation.id, retainedFindings, ...(decisionOnly ? { decisionOnly: true as const } : {}) })
+    expect(first.outcome, first.output).not.toBe('failed')
+    if (decisionOnly) {
+      expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: s.compilation.id } })).committedAt).toBeNull()
+      expect((await readChapterReviewReadiness(prisma, f, s.compilation.id))?.terminalReview?.deliveryEligible).toBe(true)
+      const committed = await chapterBridgeCommitTool.execute({ ...s.ctx, callId: 'carrier-real-commit' }, { compilationId: s.compilation.id })
+      expect(committed.outcome, committed.output).not.toBe('failed')
+      expect(committed.requiredResult?.targetId).toBe(s.chapter.id)
+    } else expect(first.requiredResult?.targetId).toBe(s.chapter.id)
+    const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })
+    expect(saved.status).toBe('completed')
+    expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: s.compilation.id } })).committedAt).toEqual(expect.any(Date))
+    expect(saved.validation).toMatchObject({ continuityCriticResponse: audit, retainedReviewDecision: { findings: retainedFindings } })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: s.chapter.id } })).toEqual(s.chapter)
+    const repeated = await chapterBridgeCommitTool.execute({ ...s.ctx, callId: 'carrier-repeat-commit' }, { compilationId: s.compilation.id })
+    expect(repeated.outcome, repeated.output).not.toBe('failed')
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })).toEqual(saved)
+    expect(await prisma.agentArtifact.findMany({ where: { id: { in: raw.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(raw)
+    expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(fees)
+    expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(ledger)
+    expect(network).toHaveBeenCalledOnce(); expect(s.main).not.toHaveBeenCalled()
+  }, undefined, prompt, { ...options, reviewProtocol: 1 }), 30000)
+
   it('preserves uncommitted draft coverage through same-call retention, bridge and successor reads', () => fixture(async f => {
     const s = await originalFailure(f, true, true, true, '修改第一章')
     expect(f.spec.hardConstraints).toEqual([]); expect(f.spec.postconditions).toEqual([])
@@ -352,14 +404,14 @@ describe.runIf(available)('original persistent supplemental phase: real question
     expect(network).toHaveBeenCalledOnce(); expect(s.main).not.toHaveBeenCalled()
   }, undefined, '修改第一章', options), 30000)
 
-  it.each(['approve-in-loop', 'paused-accepted-new-owner', 'known-normalized-decision', 'applied-normalized-current-decisions'] as const)(
+  it.each(['approve-in-loop', 'paused-accepted-new-owner', 'known-normalized-decision', 'applied-normalized-current-decisions', 'applied-normalized-current-decisions-direct'] as const)(
     '%s advances the existing phase before stagnation without counting approval as content', scenario => fixture(async f => {
       vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
       vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue({ chapterCount: 0, jobCount: 0, entityCount: 0, relationCount: 0, reused: false })
       vi.spyOn(titles, 'autoNameSession').mockResolvedValue(undefined)
       const enabled = flags.isAgent2FeatureEnabled
       vi.spyOn(flags, 'isAgent2FeatureEnabled').mockImplementation((name, owner) => name === 'storyCompiler' || name !== 'memory2' && enabled(name, owner))
-      const appliedScenario = scenario === 'applied-normalized-current-decisions'
+      const appliedScenario = scenario.startsWith('applied-normalized-current-decisions')
       const decisionScenario = scenario === 'known-normalized-decision' || appliedScenario
       const s = await originalFailure(f, decisionScenario, true, appliedScenario)
       if (scenario !== 'approve-in-loop') await s.approve()
@@ -403,7 +455,7 @@ describe.runIf(available)('original persistent supplemental phase: real question
             expect(await loadPersistedEvents(f.runId, pause.seq)).not.toContainEqual(expect.objectContaining({ type: 'run.paused' }))
           }
           return { content: '', reasoning: '', finishReason: 'tool_calls', toolCalls: [{ id: 'ordinary-current-report-decision', name: 'chapter_bridge_commit',
-            arguments: JSON.stringify({ compilationId: s.compilation.id, ...(appliedScenario ? { decisionOnly: true } : {}), retainedFindings: current!.requiredDecisions!.map(item => ({ ...item,
+            arguments: JSON.stringify({ compilationId: s.compilation.id, ...(appliedScenario && scenario !== 'applied-normalized-current-decisions-direct' ? { decisionOnly: true } : {}), retainedFindings: current!.requiredDecisions!.map(item => ({ ...item,
               reason: 'Keep this independent opinion and the original wording explicitly pending for the author; no repair or factual clearance is claimed.' })) }) }],
           usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } }
         })
@@ -508,7 +560,7 @@ describe.runIf(available)('original persistent supplemental phase: real question
         expect(decisions).toHaveLength(appliedScenario ? 15 : 1)
         expect(decisions).toEqual(expect.arrayContaining([{ source: 'continuity', reportId: expect.any(String), findingId: '0', reason: expect.any(String) }]))
       }
-    }, undefined, prompt, scenario === 'applied-normalized-current-decisions' ? { ...options, reviewProtocol: 1 } : options), 30000)
+    }, undefined, prompt, scenario.startsWith('applied-normalized-current-decisions') ? { ...options, reviewProtocol: 1 } : options), 30000)
 
   it('requires the dedicated question endpoint answer; reject/replay/ordinary Continue buy zero calls', () => fixture(async f => {
     const s = await originalFailure(f)
