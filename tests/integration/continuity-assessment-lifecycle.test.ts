@@ -884,7 +884,11 @@ describe('body-only explicit-source paid-result recovery', () => {
     const replay = () => prisma.$transaction(tx => lifecycle.readReusableLegacyContinuityAssessment(tx, { ...ctx, callId: 'resumed-call' },
       { ...frozen, content: 'Changed rendered guidance, same frozen business input.' }))
     const recovered = await replay()
-    expect(recovered).toMatchObject({ complete: true, findings: [retained], audit: { sourceProjection: {
+    // Public normalized findings retain source/quote; raw segment addresses
+    // remain in the separately preserved physical response and strict audits.
+    expect(recovered).toMatchObject({ complete: true, findings: [{ ...retained, sourceEvidence: [
+      { source: 'current', quote: '门先锁着' }, { source: 'current', quote: '门打开' },
+    ] }], audit: { sourceProjection: {
       scope: 'unapplied_body_only_final_report', dispositionDiagnostics: [{ index: 1, code: 'retract_source_proof_invalid' }],
     } } })
     expect(recovered?.audit.rawResponse.content).toBe(JSON.stringify(secondRaw))
