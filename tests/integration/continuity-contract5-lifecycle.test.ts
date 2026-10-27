@@ -237,10 +237,10 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
           finally { await recoveryBus.close() }
         }
         const noOp = await recover('same-base-noop-recovery', { terminalPatch: { baseCandidateHash: runtimeJson(candidate).hash, removeFactIds: [], addFacts: [] } })
-        expect(noOp).toMatchObject({ reviewCompleted: true, part: { status: 'success' } }); expect(noOp).not.toHaveProperty('failureCode')
+        expect(noOp, JSON.stringify(noOp)).toMatchObject({ reviewCompleted: true, part: { status: 'success' } }); expect(noOp).not.toHaveProperty('failureCode')
         reportCallId = 'same-base-explicit-recovery'
         result = await recover(reportCallId, { terminalState: candidate })
-        expect(result).toMatchObject({ reviewCompleted: true, part: { status: 'success', summary: expect.stringContaining('复用') } })
+        expect(result, JSON.stringify(result)).toMatchObject({ reviewCompleted: true, part: { status: 'success', summary: expect.stringContaining('复用') } })
         expect(fetchMock).toHaveBeenCalledTimes(2)
         expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(originalFees)
         expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(originalLedger)

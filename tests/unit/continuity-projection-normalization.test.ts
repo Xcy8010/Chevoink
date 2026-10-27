@@ -540,10 +540,15 @@ describe('explicit version2 physical sparse-repair interpretation', () => {
       } finally { mocks.forEach(mock => mock.mockRestore()) }
     })
 
-it.each(['known', 'unknown-fee', 'missing-claim', 'changed-claim', 'changed-second', 'truncated-second'] as const)(
+it.each(['known', 'unknown-fee', 'missing-claim', 'changed-claim', 'changed-claim-input', 'changed-second', 'truncated-second'] as const)(
   'reconstructs the actual legacy two-response reader before free derivation: %s', async scenario => {
     const f = repairedBackgroundFixture(), ctx = { userId: 'user', novelId: 'novel', runId: 'run', callId: 'original' } as ToolContext
     const phase = vi.spyOn(coordinator, 'readContinuityPhaseClaim').mockResolvedValue(true)
+    const original = vi.spyOn(originalRequests, 'readOriginalTaskRequest').mockResolvedValue({ taskId: 'task', sourceRunId: 'run', parentRunId: null,
+      prompt: '写下一章', spec: { id: 'task', scope: { terminalCoverageProtocol: 2 }, hardConstraints: [], postconditions: [] } } as never)
+    const runs = vi.spyOn(originalRequests, 'originalTaskRunIds').mockResolvedValue(['run'])
+    const reservation = { id: 'original-reservation', runId: ctx.runId, metadata: { input: f.input, callId: ctx.callId,
+      continuityAssessmentRequestKey: lifecycle.legacyContinuityAssessmentKey(ctx, f.input) } }
     const response = (raw: string) => ({ content: JSON.stringify(raw), finishReason: 'stop', transportComplete: true, toolCalls: [] })
     const frames = [{ stage: 'first', input: f.input, usageIds: ['first'], audit: f.first.audit, response: response(JSON.stringify(f.firstRecord)) },
       { stage: 'reassessment', input: f.input, usageIds: ['second'], audit: inspectContinuityV4(f.second, f.frozen).audit, response: response(f.second) }]
@@ -552,10 +557,12 @@ it.each(['known', 'unknown-fee', 'missing-claim', 'changed-claim', 'changed-seco
     const claim = { input: f.input, original: f.first.audit,
       request: lifecycle.continuityReassessmentRequest(f.input.system, f.input.content, f.first, f.input.bodies, false, 7) }
     if (scenario === 'changed-claim') claim.request = { ...claim.request, content: 'Different request' }
+    if (scenario === 'changed-claim-input') claim.input = { ...claim.input, content: 'Different frozen input' }
     const usage = ['first', 'second'].map((id, index) => ({ id, action: index ? 'agent3ContinuityCriticSecondPass' : 'agent3ContinuityCritic',
       usageSource: scenario === 'unknown-fee' && index === 1 ? 'unknown' : 'reported', billingStatus: scenario === 'unknown-fee' && index === 1 ? 'pending_usage' : 'settled',
       requestTokens: 10, responseTokens: 10, reservedCreditMilli: 0, creditChargeMilli: 1 }))
     const db = { agentArtifact: { findMany: vi.fn(async ({ where }: { where: { metadata: { path: string[] } } }) => {
+      if (where.metadata.path[0] === 'assessmentChapterId') return [reservation]
       if (where.metadata.path[0] === 'assessmentKey') return frames.map(metadata => ({ metadata }))
       if (where.metadata.path[0] === 'assessmentRequestOwnerKey') return frames.map(frame => ({ metadata: { stage: frame.stage, usageIds: frame.usageIds } }))
       throw Error('Unexpected synthetic metadata path')
@@ -572,8 +579,22 @@ it.each(['known', 'unknown-fee', 'missing-claim', 'changed-claim', 'changed-seco
         expect(actual.inspected.terminalReview?.factCoverage?.serverRejectedReplacements).toHaveLength(1)
         expect(actual.usageIds).toEqual(['first', 'second'])
       }
+      const crossWire: LegacyAssessmentInput = { ...f.input, parserVersion: 8, reassessmentProtocol: 5,
+        system: 'Synthetic earlier rendered contract', content: 'Synthetic earlier rendered request' }
+      delete crossWire.continuityManifest
+      expect(continuitySubjectIdentity(crossWire)).toBe(continuitySubjectIdentity(f.input))
+      for (const proposed of [f.input, crossWire]) {
+        const reusable = await lifecycle.readReusableLegacyContinuityAssessment(db, { ...ctx, callId: 'new-noop-call' }, proposed)
+        if (scenario === 'known') {
+          expect(reusable, JSON.stringify({ parser: proposed.parserVersion, actual })).not.toBeNull()
+          expect(reusable!.audit).toEqual(bindLegacyContinuityAssessment(actual.inspected, ctx, f.input).audit)
+          expect(reusable!.complete).toBe(true)
+          expect((reusable!.audit as { assessmentRequest: { key: string } }).assessmentRequest.key)
+            .toBe(lifecycle.legacyContinuityAssessmentKey(ctx, f.input))
+        } else expect(reusable).toBeNull()
+      }
       expect(JSON.stringify({ frames, usage, claim })).toBe(before)
-    } finally { phase.mockRestore() }
+    } finally { phase.mockRestore(); original.mockRestore(); runs.mockRestore() }
   })
 
 function scopeOnlyBackgroundFixture(mode: 'single' | 'repaired') {
