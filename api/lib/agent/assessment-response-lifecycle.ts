@@ -353,6 +353,14 @@ export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionCl
 }
 
 export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput) {
+  if (input.parserVersion === 9 || input.parserVersion === 10) {
+    // jsonb reorders object keys; restore the producer's schema order before
+    // rebuilding the exact repair request, without changing its frozen values.
+    const parsed = legacyAssessmentInputSchema.safeParse(input)
+    if (!parsed.success || runtimeJson(parsed.data).hash !== runtimeJson(input).hash)
+      throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原完整检查冻结输入不能等价重建。')
+    input = parsed.data
+  }
   if (input.parserVersion === 10) {
     const plan = input.continuityManifest?.typedLineage?.phasePlan
     if (!plan || !await readContinuityPhaseClaim(tx, ctx, { plan, chapterId: input.chapterId, phase: continuityAssessmentPhase(input),

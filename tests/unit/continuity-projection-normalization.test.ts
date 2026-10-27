@@ -540,7 +540,7 @@ describe('explicit version2 physical sparse-repair interpretation', () => {
       } finally { mocks.forEach(mock => mock.mockRestore()) }
     })
 
-it.each(['known', 'unknown-fee', 'missing-claim', 'changed-claim', 'changed-claim-input', 'changed-second', 'truncated-second'] as const)(
+it.each(['known', 'jsonb-known', 'unknown-fee', 'missing-claim', 'changed-claim', 'changed-claim-input', 'changed-second', 'truncated-second'] as const)(
   'reconstructs the actual legacy two-response reader before free derivation: %s', async scenario => {
     const f = repairedBackgroundFixture(), ctx = { userId: 'user', novelId: 'novel', runId: 'run', callId: 'original' } as ToolContext
     const phase = vi.spyOn(coordinator, 'readContinuityPhaseClaim').mockResolvedValue(true)
@@ -561,6 +561,23 @@ it.each(['known', 'unknown-fee', 'missing-claim', 'changed-claim', 'changed-clai
     const usage = ['first', 'second'].map((id, index) => ({ id, action: index ? 'agent3ContinuityCriticSecondPass' : 'agent3ContinuityCritic',
       usageSource: scenario === 'unknown-fee' && index === 1 ? 'unknown' : 'reported', billingStatus: scenario === 'unknown-fee' && index === 1 ? 'pending_usage' : 'settled',
       requestTokens: 10, responseTokens: 10, reservedCreditMilli: 0, creditChargeMilli: 1 }))
+    // PostgreSQL jsonb sorts object keys by UTF-8 byte length, then bytes;
+    // arrays and the physical response/request strings remain unchanged.
+    const jsonb = (value: unknown): unknown => Array.isArray(value) ? value.map(jsonb)
+      : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) =>
+        Buffer.byteLength(a) - Buffer.byteLength(b) || Buffer.compare(Buffer.from(a), Buffer.from(b)))
+        .map(([key, item]) => [key, jsonb(item)])) : value
+    const physicalRequest = claim.request.content
+    if (scenario === 'jsonb-known') {
+      frames.splice(0, frames.length, ...jsonb(frames) as typeof frames)
+      Object.assign(claim, jsonb(claim)); Object.assign(reservation, jsonb(reservation))
+    }
+    const storedInput = reservation.metadata.input
+    expect(runtimeJson(storedInput).hash).toBe(runtimeJson(f.input).hash)
+    expect(claim.request.content).toBe(physicalRequest)
+    const replayFirst = inspectContinuityV4(JSON.stringify(f.firstRecord), { bodies: storedInput.bodies,
+      candidate: storedInput.terminalCandidate!, manifest: storedInput.continuityManifest!, sourceScope: storedInput.sourceScope! })
+    const replayRequest = lifecycle.continuityReassessmentRequest(storedInput.system, storedInput.content, replayFirst, storedInput.bodies, false, 7)
     const db = { agentArtifact: { findMany: vi.fn(async ({ where }: { where: { metadata: { path: string[] } } }) => {
       if (where.metadata.path[0] === 'assessmentChapterId') return [reservation]
       if (where.metadata.path[0] === 'assessmentKey') return frames.map(metadata => ({ metadata }))
@@ -570,10 +587,12 @@ it.each(['known', 'unknown-fee', 'missing-claim', 'changed-claim', 'changed-clai
     aiUsageLog: { findMany: vi.fn(async ({ where }: { where: { id: { in: string[] } } }) => usage.filter(row => where.id.in.includes(row.id))) } } as unknown as Prisma.TransactionClient
     const before = JSON.stringify({ frames, usage, claim })
     try {
-      const actual = await lifecycle.readLegacyContinuityAssessment(db, ctx, f.input)
-      expect(actual.inspected.complete).toBe(scenario === 'known')
+      const actual = await lifecycle.readLegacyContinuityAssessment(db, ctx, storedInput)
+      expect(actual.inspected.complete, JSON.stringify({ requestMatches: runtimeJson(claim.request).hash === runtimeJson(replayRequest).hash,
+        firstAuditMatches: runtimeJson(replayFirst.audit).hash === runtimeJson(frames[0].audit).hash, inputMatches: runtimeJson(storedInput).hash === runtimeJson(f.input).hash }))
+        .toBe(scenario === 'known' || scenario === 'jsonb-known')
       expect(actual.billingKnown).toBe(scenario !== 'unknown-fee')
-      if (scenario === 'known') {
+      if (scenario === 'known' || scenario === 'jsonb-known') {
         if (!isContinuityV4Inspection(actual.inspected)) throw Error('Expected the authenticated frozen v4 result')
         expect(actual.inspected.audit.continuityV4.projectionNormalization?.version).toBe(2)
         expect(actual.inspected.terminalReview?.factCoverage?.serverRejectedReplacements).toHaveLength(1)
@@ -585,7 +604,7 @@ it.each(['known', 'unknown-fee', 'missing-claim', 'changed-claim', 'changed-clai
       expect(continuitySubjectIdentity(crossWire)).toBe(continuitySubjectIdentity(f.input))
       for (const proposed of [f.input, crossWire]) {
         const reusable = await lifecycle.readReusableLegacyContinuityAssessment(db, { ...ctx, callId: 'new-noop-call' }, proposed)
-        if (scenario === 'known') {
+        if (scenario === 'known' || scenario === 'jsonb-known') {
           expect(reusable, JSON.stringify({ parser: proposed.parserVersion, actual })).not.toBeNull()
           expect(reusable!.audit).toEqual(bindLegacyContinuityAssessment(actual.inspected, ctx, f.input).audit)
           expect(reusable!.complete).toBe(true)
@@ -596,6 +615,21 @@ it.each(['known', 'unknown-fee', 'missing-claim', 'changed-claim', 'changed-clai
       expect(JSON.stringify({ frames, usage, claim })).toBe(before)
     } finally { phase.mockRestore(); original.mockRestore(); runs.mockRestore() }
   })
+
+it.each([9, 10] as const)('typed parser%s rejects malformed or default-expanded frozen inputs before reading receipts', async parserVersion => {
+  const f = repairedBackgroundFixture(), ctx = { userId: 'user', novelId: 'novel', runId: 'run', callId: 'original' } as ToolContext
+  const read = vi.fn(() => { throw Error('Non-equivalent input must not reach database receipts') })
+  const db = { agentArtifact: { findMany: read }, aiUsageLog: { findMany: read } } as unknown as Prisma.TransactionClient
+  for (const change of ['unknown-key', 'missing-default', 'invalid-context'] as const) {
+    const input = structuredClone(f.input) as LegacyAssessmentInput & Record<string, unknown>
+    input.parserVersion = parserVersion
+    if (change === 'unknown-key') input.extra = 'not in the original contract'
+    if (change === 'missing-default') delete (input.terminalCandidate as unknown as Record<string, unknown>).lastUnfinishedAction
+    if (change === 'invalid-context') input.bodies.terminalEvidence!.current.revision = 1.5
+    await expect(lifecycle.readLegacyContinuityAssessment(db, ctx, input)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+    expect(read).not.toHaveBeenCalled()
+  }
+})
 
 function scopeOnlyBackgroundFixture(mode: 'single' | 'repaired') {
   const f = repairedBackgroundFixture(), record = structuredClone(f.record)
