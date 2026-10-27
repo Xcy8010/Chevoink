@@ -15,7 +15,7 @@ import * as originalRequest from '../../api/lib/agent/original-request.js'
 import * as continuitySource from '../../api/lib/agent/compiler-continuity-source.js'
 import * as flags from '../../api/lib/agent2-feature-flags.js'
 import * as novelTools from '../../api/lib/agent/tools/novel-tools.js'
-import { runLegacyContinuityReview, continuityValidateTool, continuityReviewTail, continuityCriticSystem, chapterBridgeCommitTool, chapterBridgeGetTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { runLegacyContinuityReview, continuityValidateTool, continuityReviewTail, continuityCriticSystem, chapterBridgeCommitTool, chapterBridgeGetTool, readChapterBridgeCommitPrerequisite } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 import { sceneTaskInputSchema, storyStateSchema } from '../../shared/contracts/index.js'
@@ -31,7 +31,7 @@ import * as assessment from '../../api/lib/agent/assessment-response-lifecycle.j
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { compilerEvidenceScope } from '../../api/lib/agent/continuity-source-authority.js'
-import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
+import { terminalCandidateSchema, terminalClaims } from '../../api/lib/agent/terminal-state-review.js'
 
 describe('严谨创作落实连续性警告', () => {
   afterEach(() => vi.restoreAllMocks())
@@ -383,6 +383,30 @@ describe('严谨创作落实连续性警告', () => {
     expect(f.critic).not.toHaveBeenCalled()
     expect(f.write).not.toHaveBeenCalled()
   })
+
+  it.each(['implicit-arrays', 'explicit-arrays', 'different-fact', 'unverified', 'missing-raw', 'invalid-raw', 'stale-body'] as const)(
+    'candidate preflight preserves an authenticated protocol6 report without a new readiness flag: %s', async scenario => {
+      const f = fixture(true), candidate = terminalCandidateSchema.parse({ exitState: { action: '等待回应', location: '门口' }, lastUnfinishedAction: '等待回应' })
+      const raw = JSON.stringify({ findings: [], terminalVerdicts: terminalClaims(candidate).map(item => ({ path: item.path, verdict: 'supported', segmentIds: ['c0'] })) })
+      const audit = inspectContinuityResponse(raw, { previous: null, current: f.chapter.content }, true, 6, candidate).audit
+      Object.assign(f.validation, { terminalCandidate: candidate, continuityCriticResponse: audit })
+      if (scenario === 'missing-raw') delete (f.validation as Record<string, unknown>).continuityCriticResponse
+      if (scenario === 'invalid-raw') audit.rawResponse.complete = false
+      const state: readiness.ChapterReviewReadiness = { ready: true, checksRequired: true, compilationId: 'comp', chapterId: 'c', revision: 1,
+        continuity: 'complete', quality: 'complete', continuityErrorCount: 0, qualityErrorCount: 0, qualityReportId: 'q', requiredTools: [],
+        decisionBinding: { contentHash: runtimeJson({ content: f.chapter.content }).hash,
+          continuityBinding: readiness.continuityDecisionBinding('comp', 1, f.validation), qualityReportId: 'q', qualityReportHash: null } }
+      if (scenario === 'unverified') state.terminalReview = { state: 'unverified', currentResultVerified: false, deliveryEligible: false, unresolved: [] }
+      if (scenario === 'stale-body') f.chapter.content += '变化'
+      const args = { compilationId: 'comp', lastUnfinishedAction: candidate.lastUnfinishedAction,
+        exitState: scenario === 'implicit-arrays' ? { action: '等待回应', location: '门口' } : { ...candidate.exitState,
+          ...(scenario === 'different-fact' ? { location: '旧仓库' } : {}) } }
+      const before = JSON.stringify(f.validation), result = await readChapterBridgeCommitPrerequisite(f.ctx, args, state)
+      expect(result).toMatchObject({ kind: scenario === 'stale-body' ? 'blocked' : ['implicit-arrays', 'explicit-arrays'].includes(scenario) ? 'ready' : 'check' })
+      if (result?.kind === 'ready') expect(result.candidate).toEqual(candidate)
+      expect(JSON.stringify(f.validation)).toBe(before)
+      expect(f.critic).not.toHaveBeenCalled(); expect(f.repair).not.toHaveBeenCalled(); expect(f.write).not.toHaveBeenCalled()
+    })
   it.each(['quality', 'continuity'] as const)('未修订的可选 %s 警告不强制增加正文工作', async family => {
     const f = fixture(true)
     vi.mocked(flags.isAgent2FeatureEnabled).mockReturnValue(true)

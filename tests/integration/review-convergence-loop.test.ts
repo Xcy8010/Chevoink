@@ -255,6 +255,7 @@ describe('legacy review convergence through actual loop and terminal delivery', 
     expect(events.filter(event => ['tool.call', 'tool.result'].includes(event.type) && String((event.payload as { callId: string }).callId).startsWith('polish-'))).toEqual([])
     expect(events.filter(event => event.type === 'tool.result').map(event => event.payload)).toContainEqual(expect.objectContaining({ callId: 'actual-retained-commit', ok: true }))
     expect(provider).not.toHaveBeenCalled()
+    expect(events.filter(event => event.type === 'tool.call' && (event.payload as { toolName: string }).toolName === 'continuity_validate')).toEqual([])
     expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).toMatchObject({ status: 'completed' })
     expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, f))).toMatchObject({ chapters: [{ id: f.chapterId, revision: 13, content: body }] })
     expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: finalReport.id }, include: { findings: true } })).toEqual(finalReport)

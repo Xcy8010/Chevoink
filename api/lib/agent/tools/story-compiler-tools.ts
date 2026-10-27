@@ -1397,9 +1397,13 @@ export async function readChapterBridgeCommitPrerequisite(ctx: ToolContext, valu
     || continuityDecisionBinding(current.id, current.chapter.revision, current.validation) !== readiness.decisionBinding.continuityBinding) return {
     kind: 'blocked' as const, code: 'CONTINUITY_INPUT_STALE', reason: '提交提案的正文、编译或当前报告已变化；未调度检查，也未提交旧候选。' }
   const saved = readTerminalCandidate(current.validation)
-  const candidate = resolveChapterBridgeCommitCandidate(args, readiness.terminalReview?.currentResultVerified ? saved : undefined)
+  // Pre-evidence-protocol tasks have no terminalReview readiness projection.
+  // Reuse their original raw/body validator; an explicit false never falls back.
+  const currentResultVerified = readiness.terminalReview === undefined
+    ? !!currentTerminalReview(current.validation, current.chapter.content) : readiness.terminalReview.currentResultVerified === true
+  const candidate = resolveChapterBridgeCommitCandidate(args, currentResultVerified ? saved : undefined)
   if ((!saved && !terminalClaims(candidate).length && !readiness.terminalReview)
-    || readiness.continuity === 'complete' && readiness.terminalReview?.currentResultVerified
+    || readiness.continuity === 'complete' && currentResultVerified
       && saved && runtimeJson(saved).hash === runtimeJson(candidate).hash) return { kind: 'ready' as const, candidate }
   return { kind: 'check' as const, candidate, args: { compilationId: current.id, terminalState: candidate },
     chapterId: current.chapter.id, revision: current.chapter.revision,

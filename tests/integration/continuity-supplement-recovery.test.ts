@@ -236,8 +236,9 @@ describe.runIf(available)('original persistent supplemental phase: real question
       // This first call reproduces the already-deployed strict parser10
       // consumer, while all real grant/dispatch/fee/application writes run.
       const strict = vi.spyOn(projections, 'normalizeContinuityV4Projection').mockImplementation(first => first)
+      const strictV2 = vi.spyOn(projections, 'normalizeContinuityV4ProjectionV2').mockImplementation(first => first)
       try { expect(await s.invoke('original-strict-paid-report')).toMatchObject({ part: { status: 'failed' }, failureCode: 'CONTINUITY_REPORT_INCOMPLETE' }) }
-      finally { strict.mockRestore() }
+      finally { strictV2.mockRestore(); strict.mockRestore() }
       const before = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
       const failure = before.find(row => (row.metadata as { continuitySupplementApplication?: { reportComplete?: boolean } }).continuitySupplementApplication?.reportComplete === false)!
       expect(failure).toBeDefined()
@@ -321,8 +322,9 @@ describe.runIf(available)('original persistent supplemental phase: real question
       usage: { prompt_tokens: 12, completion_tokens: 8 } })))
     vi.stubGlobal('fetch', network)
     const strict = vi.spyOn(projections, 'normalizeContinuityV4Projection').mockImplementation(first => first)
+    const strictV2 = vi.spyOn(projections, 'normalizeContinuityV4ProjectionV2').mockImplementation(first => first)
     try { expect(await s.invoke('original-paid-carrier-report')).toMatchObject({ failureCode: 'CONTINUITY_REPORT_INCOMPLETE' }) }
-    finally { strict.mockRestore() }
+    finally { strictV2.mockRestore(); strict.mockRestore() }
     expect(await s.invoke('free-carrier-report-application', false)).toMatchObject({ reviewCompleted: true, part: { status: 'success' } })
     const before = await readChapterReviewReadiness(prisma, f, s.compilation.id)
     expect(before).toMatchObject({ ready: true, continuity: 'complete', decisionPending: true,
@@ -378,8 +380,9 @@ describe.runIf(available)('original persistent supplemental phase: real question
       usage: { prompt_tokens: 12, completion_tokens: 8 } })))
     vi.stubGlobal('fetch', network)
     const strict = vi.spyOn(projections, 'normalizeContinuityV4Projection').mockImplementation(first => first)
+    const strictV2 = vi.spyOn(projections, 'normalizeContinuityV4ProjectionV2').mockImplementation(first => first)
     try { expect(await s.invoke('normal-original-paid-report')).toMatchObject({ failureCode: 'CONTINUITY_REPORT_INCOMPLETE' }) }
-    finally { strict.mockRestore() }
+    finally { strictV2.mockRestore(); strict.mockRestore() }
     expect(await s.invoke('normal-free-report-application', false)).toMatchObject({ reviewCompleted: true, part: { status: 'success' } })
     const review = await readChapterReviewReadiness(prisma, f, s.compilation.id)
     expect(review).toMatchObject({ ready: true, decisionPending: false, requiredDecisions: [],
@@ -426,8 +429,9 @@ describe.runIf(available)('original persistent supplemental phase: real question
       usage: { prompt_tokens: 12, completion_tokens: 8 } })))
     vi.stubGlobal('fetch', network)
     const strict = vi.spyOn(projections, 'normalizeContinuityV4Projection').mockImplementation(first => first)
+    const strictV2 = vi.spyOn(projections, 'normalizeContinuityV4ProjectionV2').mockImplementation(first => first)
     try { expect(await s.invoke('old-strict-paid-draft-report')).toMatchObject({ failureCode: 'CONTINUITY_REPORT_INCOMPLETE' }) }
-    finally { strict.mockRestore() }
+    finally { strictV2.mockRestore(); strict.mockRestore() }
     const originals = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
     const fees = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
     const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
@@ -442,9 +446,9 @@ describe.runIf(available)('original persistent supplemental phase: real question
     const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })
     const pendingId = terminalFactId('openLoops', 'A reply remains pending.')
     expect(saved.validation).toMatchObject({ errorCount: 1, retainedReviewDecision: { findings: retainedFindings }, continuityCriticResponse: {
-      continuityV4: { projectionNormalization: { version: 1 } } } })
+      continuityV4: { projectionNormalization: { version: 2, mode: 'single_report' } } } })
     expect(saved.preparedContext).toMatchObject({ terminalFactCoverage: { facts: expect.arrayContaining([{ id: pendingId,
-      field: 'openLoops', claim: 'A reply remains pending.' }]) }, terminalReviewProof: { scopePreservation: { version: 1, pendingCoverageIds: [pendingId] } } })
+      field: 'openLoops', claim: 'A reply remains pending.' }]) }, terminalReviewProof: { scopePreservation: { version: 2, pendingCoverageIds: [pendingId] } } })
     const audit = (saved.validation as { continuityCriticResponse: projections.ContinuityV4Inspection['audit'] }).continuityCriticResponse
     expect(projections.validateStoredContinuityV4Projection(audit, s.chapter.content, s.question.frozen.input.bodies.terminalEvidence)?.parsed?.record).toEqual(wire)
     const source = await readCompilerContinuitySource(prisma, f, { orderIndex: s.chapter.orderIndex + 1 }, s.chapter.id, 11)
@@ -496,8 +500,9 @@ describe.runIf(available)('original persistent supplemental phase: real question
       if (decisionScenario) {
         vi.stubGlobal('fetch', paid)
         const strict = vi.spyOn(projections, 'normalizeContinuityV4Projection').mockImplementation(first => first)
+        const strictV2 = vi.spyOn(projections, 'normalizeContinuityV4ProjectionV2').mockImplementation(first => first)
         try { expect(await s.invoke('original-paid-format-failure')).toMatchObject({ failureCode: 'CONTINUITY_REPORT_INCOMPLETE' }) }
-        finally { strict.mockRestore() }
+        finally { strictV2.mockRestore(); strict.mockRestore() }
         expect(paid).toHaveBeenCalledOnce()
         if (appliedScenario) {
           const quotes = ['The packet remains sealed.', 'packet remains sealed.', 'remains sealed.', 'The packet is open.', 'packet is open.',
@@ -672,7 +677,8 @@ describe.runIf(available)('original persistent supplemental phase: real question
       if (decisionScenario) {
         const compiled = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })
         expect(compiled.validation).toMatchObject({ errorCount: appliedScenario ? 4 : 1,
-          continuityCriticResponse: { continuityV4: { projectionNormalization: { version: 1 } } } })
+          continuityCriticResponse: { continuityV4: { projectionNormalization: { version: appliedScenario ? 2 : 1,
+            ...(appliedScenario ? { mode: 'single_report' } : {}) } } } })
         const decisions = (compiled.validation as { retainedReviewDecision: { findings: Array<{ source: string; findingId: string }> } }).retainedReviewDecision.findings
         expect(decisions).toHaveLength(appliedScenario ? 15 : 1)
         expect((compiled.preparedContext as { terminalCandidateHash: string }).terminalCandidateHash).toBe(runtimeJson(s.question.frozen.input.terminalCandidate).hash)
