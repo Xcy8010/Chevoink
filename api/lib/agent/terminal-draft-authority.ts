@@ -85,8 +85,8 @@ async function readPreservationPolicy(db: Prisma.TransactionClient,
   if (!unknown.length && !pending.length || explicitBackground && unknown.length) return null
   const source = context.previous ? await (await import('./compiler-continuity-source.js')).readCompilerContinuitySource(db,
     subject, chapter, context.previous.id, 11, inheritanceScope) : null
-  if (explicitBackground && runtimeJson((await import('./terminal-evidence-context.js')).terminalEvidenceContext(chapter, source, 2,
-    context.quoteAddressProtocol, context.factCoverage, context.verdictProtocol, context.spanAddressProtocol).previous).hash !== runtimeJson(context.previous).hash) return null
+  if (explicitBackground && runtimeJson({ previous: (await import('./terminal-evidence-context.js')).terminalEvidenceContext(chapter, source, 2,
+    context.quoteAddressProtocol, context.factCoverage, context.verdictProtocol, context.spanAddressProtocol).previous }).hash !== runtimeJson({ previous: context.previous }).hash) return null
   const parsedProofs = z.array(terminalCarriedFactSchema).max(200).safeParse(source && 'terminalInheritance' in source ? source.terminalInheritance : [])
   const currentProofs = parsedProofs.success ? parsedProofs.data : []
   const catalog = (await import('./terminal-proof-verdict.js')).terminalProofCatalog(review.candidate, context)

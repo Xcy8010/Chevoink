@@ -740,3 +740,61 @@ it.each(['legacy', 'legacy-application', 'issued-v2', 'wrong-marker', 'wrong-res
       expect(JSON.stringify({ frames, claim, usage, app })).toBe(before)
     } finally { phase.mockRestore() }
   })
+
+
+it.each(['retained', 'unretained', 'changed-previous'] as const)(
+  'the real first-chapter binding retains historical unknown only with exact null-source evidence: %s', async scenario => {
+    const f = repairedBackgroundFixture(), candidate = terminalCandidateSchema.parse({ exitState: { objects: ['The brass seal remains intact.'], location: 'The clerk waits.' } })
+    const context: TerminalEvidenceContext = { ...f.context, current: { ...f.context.current, orderIndex: 1 }, previous: null }
+    const bodies = { previous: null, current: f.current, terminalEvidence: context }, sourceScope = { currentOrderIndex: 1, previous: [] }
+    const manifest = buildContinuityReviewManifest({ ...f.frozen.manifest, bodies, candidate, sourceScope, sourceHash: null,
+      sourceVersions: { current: context.current, previous: null }, verifiedCoverage: context.factCoverage, draftProposals: null })
+    const record = { findings: [{ findingId: 'f0', signal: 'object', severity: 'error', reasonCode: 'manuscript_conflict',
+      explanation: 'The independent synthetic opinion compares these current observations.', suggestion: 'Review the retained opinion within the original scope.',
+      manuscriptEvidence: [{ segmentId: 'c1', quote: 'seal remains intact.' }, { segmentId: 'c1', quote: 'The clerk waits.' }] }],
+    semanticChecks: ['action_direction', 'state_progression'].map((kind, index) => ({ kind, result: index ? 'conflict' : 'clear',
+      reasonCode: index ? 'manuscript_conflict' : 'consistent', explanation: 'The complete synthetic report keeps the original opinion.', findingIds: index ? ['f0'] : [] })),
+    terminalVerdicts: terminalReviewAddressCatalog(candidate, context).claims.map(row => ({ claimIndex: row.claimIndex, verdict: 'supported',
+      reasonCode: 'consistent', explanation: 'The current body supports this actual claim.', manuscriptEvidence: [{ segmentId: 'c1' }] })), terminalProofVerdicts: [],
+    terminalDispositions: [{ obligationIndex: 0, outcome: 'unknown', reasonCode: 'historical_reference',
+      explanation: 'The original knowledge remains historical background without a current resolution.', manuscriptEvidence: [] }], issueDispositions: [] }
+    const first = inspectContinuityV4(JSON.stringify(record), { manifest, bodies, candidate, sourceScope })
+    expect(first.complete, JSON.stringify(first.parsed?.diagnostics)).toBe(true)
+    const input = { ...f.input, bodies, terminalCandidate: candidate, continuityManifest: manifest, sourceScope }, ctx = { userId: 'user', novelId: 'novel', runId: 'run', callId: 'original' } as ToolContext
+    const derived = bindLegacyContinuityAssessment(normalizeContinuityV4ProjectionV2(first, runtimeJson(input).hash), ctx, input)
+    const validation: Record<string, unknown> = { independentCheck: 'complete', checkedChapterId: 'chapter', checkedRevision: 4, errorCount: 1,
+      coverage: { protocolVersion: 11, contentHash: context.current.contentHash, terminalHash: runtimeJson(candidate).hash }, terminalCandidate: candidate, continuityCriticResponse: derived.audit }
+    validation.effectiveReport = await coordinator.stageEffectiveContinuityReport({ agentArtifact: { findUnique: async () => null, create: async () => ({}) } } as unknown as Prisma.TransactionClient,
+      ctx, { compilationId: 'compilation', audit: derived.audit, previousValidation: {} })
+    const reportId = continuityDecisionBinding('compilation', 4, validation)
+    if (scenario !== 'unretained') validation.retainedReviewDecision = { version: 1, chapterId: 'chapter', revision: 4, contentHash: context.current.contentHash,
+      continuityBinding: reportId, qualityReportId: null, qualityReportHash: null,
+      findings: [{ source: 'continuity', reportId, findingId: '0', reason: 'Retain the actual independent opinion without claiming it was repaired.' }] }
+    const spec = { id: 'task', scope: { terminalCoverageProtocol: 2 }, hardConstraints: [], postconditions: [] }, preparedContext = {
+      terminalFactCoverage: { version: 1, taskId: 'task', chapterId: 'chapter', facts: [], lastReview: { bodyHash: context.current.contentHash,
+        candidateHash: runtimeJson(candidate).hash, input: context.factCoverage } } }
+    const mocks = [vi.spyOn(originalRequests, 'readOriginalTaskRequest').mockResolvedValue({ taskId: 'task', sourceRunId: 'run', parentRunId: null, prompt: '写下一章', spec } as never),
+      vi.spyOn(originalRequests, 'originalTaskRunIds').mockResolvedValue(['run']), vi.spyOn(coordinator, 'authenticateEffectiveContinuityReport').mockResolvedValue(true),
+      vi.spyOn(coordinator, 'readNormalizedContinuityCoverageOrigins').mockResolvedValue({ origins: [{ factId: f.obligation.id, revision: 3 }] } as never),
+      vi.spyOn(lifecycle, 'readLegacyContinuityAssessment').mockResolvedValue({ inspected: first, billingKnown: true, providerComplete: true, recoveryReady: true } as never),
+      vi.spyOn(sources, 'readCompilerContinuitySource').mockResolvedValue(null)]
+    const db = { agentArtifact: { findMany: vi.fn(async () => [{ runId: 'run', metadata: { input, callId: 'original' } }]) } } as unknown as Prisma.TransactionClient
+    try {
+      const expectedContext = scenario === 'changed-previous' ? { ...context, previous: f.context.previous } : context
+      const before = runtimeJson({ validation, preparedContext, input }).hash
+      const chapter = { id: 'chapter', revision: 4, orderIndex: 1, content: f.current }
+      const binding = await readTerminalDraftBinding(db, { ...ctx, compilationId: 'compilation' }, { taskId: 'task', preparedContext }, chapter, validation, expectedContext)
+      const review = currentTerminalReview(validation, f.current, expectedContext, binding)
+      expect(review?.deliveryEligibility.eligible ?? false).toBe(scenario === 'retained')
+      if (scenario === 'retained') {
+        expect(binding.scopeAuthority).toBeDefined()
+        expect(review).toMatchObject({ supported: false, deliveryEligibility: { eligible: true,
+          preservation: { version: 2, pendingCoverageIds: [f.obligation.id] } }, factCoverage: { dispositions: [{ outcome: 'unknown' }] } })
+        expect(advanceTerminalCoverage(spec, preparedContext, chapter, review!, context.factCoverage)?.facts).toContainEqual(f.obligation)
+        expect(buildTerminalFactProofs({ compilationId: 'compilation', chapter, validation, stateHash: 'a'.repeat(64), evidence: context, review: review! })
+          .some(proof => terminalFactId(proof.field, proof.claim) === f.obligation.id)).toBe(false)
+        expect(mocks[5]).not.toHaveBeenCalled()
+      } else expect(binding.scopeAuthority).toBeUndefined()
+      expect(runtimeJson({ validation, preparedContext, input }).hash).toBe(before)
+    } finally { mocks.forEach(mock => mock.mockRestore()) }
+  })
