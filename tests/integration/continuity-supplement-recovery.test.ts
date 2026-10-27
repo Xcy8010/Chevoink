@@ -461,8 +461,10 @@ describe.runIf(available)('original persistent supplemental phase: real question
   }, undefined, '修改第一章', options), 30000)
 
   it.each((['approve-in-loop', 'paused-accepted-new-owner', 'known-normalized-decision', 'applied-normalized-current-decisions', 'applied-normalized-current-decisions-direct', 'applied-normalized-current-decisions-legacy-metadata'] as const)
-    .flatMap(scenario => (['only-prose', 'default'] as const).map(outputMode => ({ scenario, outputMode, requestPrompt: outputMode === 'default' ? '修改第一章' : prompt }))))(
-    '$scenario/$outputMode advances the existing phase before stagnation without counting approval as content', ({ scenario, outputMode, requestPrompt }) => fixture(async f => {
+    .flatMap(scenario => (['only-prose', 'default'] as const).flatMap(outputMode =>
+      Array.from({ length: scenario.startsWith('applied-normalized-current-decisions') && outputMode === 'default' ? 3 : 1 }, (_, index) =>
+        ({ scenario, outputMode, replica: index + 1, requestPrompt: outputMode === 'default' ? '修改第一章' : prompt })))))(
+    '$scenario/$outputMode/replica-$replica advances the existing phase before stagnation without counting approval as content', ({ scenario, outputMode, replica, requestPrompt }) => fixture(async f => {
       vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
       vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue({ chapterCount: 0, jobCount: 0, entityCount: 0, relationCount: 0, reused: false })
       vi.spyOn(titles, 'autoNameSession').mockResolvedValue(undefined)
@@ -472,6 +474,7 @@ describe.runIf(available)('original persistent supplemental phase: real question
       const decisionScenario = scenario === 'known-normalized-decision' || appliedScenario
       const s = await originalFailure(f, decisionScenario, true, appliedScenario, requestPrompt)
       const mainPhases: Array<'decision' | 'closing'> = []
+      const mainObservations: Array<Record<string, unknown>> = []
       let closingAfterSeq: number | null = null
       const closingSummary = decisionScenario
         ? appliedScenario ? '包裹状态的描写仍留待作者取舍，等待回复的悬念继续保留，桌面依旧干燥。'
@@ -515,6 +518,25 @@ describe.runIf(available)('original persistent supplemental phase: real question
         const current = await readChapterReviewReadiness(prisma, f, s.compilation.id)
         const capture = current?.terminalCommitted
           ? await prisma.$transaction(tx => readRecoveredChapterDelivery(tx, f)) : null
+        const observation: Record<string, unknown> = { scenario, outputMode, replica, entry: mainObservations.length + 1,
+          current, captureAttempted: current?.terminalCommitted === true, capture }
+        mainObservations.push(observation)
+        if (!(current?.terminalCommitted && capture) && current?.decisionPending !== true) {
+          const compiled = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id },
+            select: { status: true, stage: true, preparedContext: true, bridge: { select: { committedAt: true, targetRevision: true } } } })
+          const prepared = compiled.preparedContext && typeof compiled.preparedContext === 'object' && !Array.isArray(compiled.preparedContext)
+            ? compiled.preparedContext as Record<string, unknown> : {}
+          const toolEvents = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: { in: ['tool.call', 'tool.result'] } },
+            orderBy: { seq: 'asc' }, select: { seq: true, type: true, createdAt: true, payload: true } })
+          observation.compilation = { id: s.compilation.id, status: compiled.status, stage: compiled.stage, bridge: compiled.bridge,
+            preparedContext: { terminalReviewProof: prepared.terminalReviewProof, terminalContentHash: prepared.terminalContentHash,
+              terminalCandidateHash: prepared.terminalCandidateHash, terminalFactCoverage: prepared.terminalFactCoverage } }
+          observation.toolEvents = toolEvents.map(event => {
+            const payload = event.payload as Record<string, unknown>
+            return { seq: event.seq, type: event.type, at: event.createdAt, callId: payload.callId, name: payload.toolName,
+              ok: payload.ok, failureCode: payload.failureCode, code: payload.code }
+          })
+        }
         if (current?.terminalCommitted && capture) {
           expect(outputMode).toBe('default')
           expect(current).toMatchObject({ ready: true, decisionPending: false })
@@ -527,7 +549,7 @@ describe.runIf(available)('original persistent supplemental phase: real question
         }
         expect(decisionScenario).toBe(true)
         mainPhases.push('decision')
-        expect(current).toMatchObject({ ready: true, continuity: 'complete', continuityErrorCount: appliedScenario ? 4 : 1, decisionPending: true })
+        expect(current, JSON.stringify({ scenario, outputMode, replica, mainObservations })).toMatchObject({ ready: true, continuity: 'complete', continuityErrorCount: appliedScenario ? 4 : 1, decisionPending: true })
         expect(current!.requiredDecisions).toHaveLength(appliedScenario ? 15 : 1)
         if (appliedScenario) {
           expect(current).toMatchObject({ quality: 'complete', requiredTools: [], terminalReview: { currentResultVerified: true } })
@@ -619,7 +641,7 @@ describe.runIf(available)('original persistent supplemental phase: real question
         if (outputMode === 'default') expect(s.main).toHaveBeenCalledOnce()
         else expect(s.main).not.toHaveBeenCalled()
       }
-      expect(mainPhases).toEqual([...(decisionScenario ? ['decision'] : []), ...(outputMode === 'default' ? ['closing'] : [])])
+      expect(mainPhases, JSON.stringify({ scenario, outputMode, replica, mainObservations })).toEqual([...(decisionScenario ? ['decision'] : []), ...(outputMode === 'default' ? ['closing'] : [])])
       const events = await loadPersistedEvents(f.runId, pause.seq)
       if (outputMode === 'default') {
         expect(events.filter(event => event.type === 'text.final' && event.text === closingSummary)).toHaveLength(1)
