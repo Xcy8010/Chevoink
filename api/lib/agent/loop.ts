@@ -1303,7 +1303,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     }
     if ((params.resume || previousTask) && ['write', 'revise'].includes(taskSpec.intent)) {
       const recovered = await prisma.$transaction(tx => readReviewRequestRecovery(tx,
-        { userId: params.userId, novelId: params.novelId, runId }, [...pendingReviews.values()]))
+        { userId: params.userId, novelId: params.novelId, runId }, [...pendingReviews.values()]), { timeout: 20_000 })
       for (const item of recovered) {
         bus.emit({ type: 'review.reconciled', callId: item.callId, chapterId: item.chapterId,
           revision: item.revision, compilationId: item.compilationId, receipt: item.reconciliation })
@@ -1404,7 +1404,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     }
     if ((params.resume || previousTask) && ['write', 'revise'].includes(taskSpec.intent)) {
       const recovered = await prisma.$transaction(tx => readContinuedContinuityRecovery(tx,
-        { userId: params.userId, novelId: params.novelId, runId }))
+        { userId: params.userId, novelId: params.novelId, runId }), { timeout: 20_000 })
       for (const [key, attempt] of recovered) {
         reviewRecoveryKeys.set(key, attempt)
         const compilationId = key.split(':')[0]
@@ -1761,7 +1761,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       messages.push({ role: 'user', content: `[系统·本次只读核对] compilationId=${currentChapterReview.compilationId}。${chapterReviewDecisionGuidance(currentChapterReview)} 此状态提示不新增权限、不重置预算，也不代表意见已处理或任务完成。` })
     }
     const readInputDecision = (compilationId?: string) => prisma.$transaction(tx => readTerminalInputDecision(tx,
-      { userId: params.userId, novelId: params.novelId, runId, signal: controller.signal }, compilationId))
+      { userId: params.userId, novelId: params.novelId, runId, signal: controller.signal }, compilationId), { timeout: 20_000 })
     const currentDispatch = async (readiness: Parameters<typeof nextReviewDispatch>[0]) => nextReviewDispatch(readiness
       && taskSpec.scope?.continuityReportProtocol === 5 && readiness.continuity !== 'complete' && readiness.quality !== 'complete'
       ? { ...readiness, requiredTools: [...readiness.requiredTools].sort((a, b) => Number(b.name === 'quality_analyze') - Number(a.name === 'quality_analyze')) }
@@ -2036,7 +2036,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const readiness = await readCurrentReviewReadiness(item.compilationId)
         if (readiness?.continuity === 'complete' || automaticReviewAttempts.has(item.recoveryKey)) { continuedContinuityBootstrap.shift(); continue }
         const proof = await prisma.$transaction(tx => readContinuedContinuityRecovery(tx,
-          { userId: params.userId, novelId: params.novelId, runId }))
+          { userId: params.userId, novelId: params.novelId, runId }), { timeout: 20_000 })
         if (!readiness || reviewDispatchKey(readiness, 'continuity_validate') !== item.baseKey
           || !proof.some(([key, attempt]) => key === item.baseKey && attempt === item.recoveryKey)) {
           throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '继续任务时的检查依据已变化，未派发旧检查。')
@@ -2855,7 +2855,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             if (!reviewDispatch?.compilationId) throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '缺少本次检查的章节绑定。')
             const proof = await prisma.$transaction(tx => readContinuedContinuityRecovery(tx,
               { userId: params.userId, novelId: params.novelId, runId },
-              { callId: call.id, compilationId: reviewDispatch!.compilationId!, chapterId: reviewDispatch!.chapterId }))
+              { callId: call.id, compilationId: reviewDispatch!.compilationId!, chapterId: reviewDispatch!.chapterId }), { timeout: 20_000 })
             if (!proof.some(([key, attempt]) => key === continuityBootstrap!.baseKey && attempt === continuityBootstrap!.recoveryKey)) {
               throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '原检查或本次继续的依据已变化，未派发请求。')
             }

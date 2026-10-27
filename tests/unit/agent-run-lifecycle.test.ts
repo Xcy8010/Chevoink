@@ -345,7 +345,7 @@ const { executeAgentRun: executeRealAgentRun, handleToolCall } = await import('.
 const { runSubagentInline } = await import('../../api/lib/agent/subagent-runner.js')
 const { env } = await import('../../api/config/env.js')
 const { buildTaskSpec } = await import('../../api/lib/agent/task-spec.js')
-const { DataAccessError } = await import('../../api/lib/prisma.js')
+const { DataAccessError, prisma } = await import('../../api/lib/prisma.js')
 const { assembleContext } = await import('../../api/lib/agent/context.js')
 
 function seedAdmission(prompt: string, chapterId: string | null = null) {
@@ -4136,13 +4136,24 @@ describe('independent persisted review phases with unresolved usage', () => {
     let state = scenario === 'bootstrap' ? readiness('incomplete', 'complete', 4) : complete()
     mocks.reviewReadiness.mockImplementation(async () => state)
     const recovery = 'continuity-author-recovery:' + 'e'.repeat(64)
-    if (scenario === 'bootstrap') mocks.continuedContinuity.mockResolvedValue([['comp:c:4:continuity_validate:protocol8', recovery]])
+    const sourceBudgets: number[] = []
+    if (scenario === 'bootstrap') mocks.continuedContinuity.mockImplementation(async () => {
+      const invocation = vi.mocked(prisma.$transaction).mock.calls.at(-1) as unknown[] | undefined
+      const timeout = (invocation?.[1] as { timeout?: number } | undefined)?.timeout ?? 5_000
+      sourceBudgets.push(timeout)
+      if (timeout < 7_600) throw new DataAccessError(409, 'P2028', 'Recorded full-source workload exceeds transaction budget')
+      return [['comp:c:4:continuity_validate:protocol8', recovery]]
+    })
     const check = tool('continuity_validate', async () => { state = complete(); return { output: '完整终态报告已保存，unknown仍未获支持，未提交。', reviewCompleted: true } })
     const read = tool('chapter_bridge_get', async () => ({ output: '完整报告和候选原样保留；unknown需要按真实证据处理。' }), true)
     mocks.tools = [check, read]
     queue(...Array.from({ length: 7 }, (_, index) => response('', [call(`handle-terminal-${index}`, read.name, '{"compilationId":"comp"}')])) )
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt, resume: true })
     expect(check.execute).toHaveBeenCalledTimes(scenario === 'bootstrap' ? 1 : 0)
+    if (scenario === 'bootstrap') {
+      expect(sourceBudgets).toHaveLength(3)
+      expect(sourceBudgets.every(timeout => timeout >= 7_600)).toBe(true)
+    }
     expect(read.execute).toHaveBeenCalledOnce()
     expect(mocks.chat.mock.calls.length).toBeGreaterThan(0)
     expect(mocks.chat.mock.calls.length).toBeLessThanOrEqual(7)

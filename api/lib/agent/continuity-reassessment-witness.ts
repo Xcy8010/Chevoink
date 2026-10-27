@@ -112,8 +112,6 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
     include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: true } })
   if (!compilation?.chapter || !compilation.bridge) return null
   const chapter = compilation.chapter
-  let source = await readCompilerContinuitySource(tx, subject, compilation.chapter, compilation.bridge.fromChapterId)
-  if (compilation.bridge.fromChapterId && source?.revision !== compilation.bridge.sourceRevision) return null
   const calls = await tx.agentRunEvent.findMany({ where: { runId: { in: input.runIds }, type: 'tool.call' }, orderBy: [{ createdAt: 'desc' }, { seq: 'desc' }] })
   const call = calls.find(row => {
     const args = object(object(row.payload).args)
@@ -129,15 +127,40 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
   const reservation = reservations.filter(row => typeof object(row.metadata).continuityAssessmentRequestKey === 'string')
   if (reservation.length !== 1) return null
   const meta = object(reservation[0].metadata), frozen = object(meta.input), bodies = object(frozen.bodies), key = meta.continuityAssessmentRequestKey
-  const chainProtocol = frozen.parserVersion === 8 && object(bodies.terminalEvidence).protocol === 2
-  if (chainProtocol) source = await readCompilerContinuitySource(tx, subject, chapter, compilation.bridge.fromChapterId, 11)
-  const original = chainProtocol ? await readOriginalTaskRequest(tx, { ...subject, runId: call.runId }) : null
+  if (meta.admissionId === input.admission.id || frozen.chapterId !== chapter.id || frozen.revision !== chapter.revision || bodies.current !== chapter.content
+    || frozen.targetType !== 'story_compilation' || frozen.targetId !== compilation.id
+    || typeof frozen.bindingHash !== 'string' || !/^[a-f0-9]{64}$/u.test(frozen.bindingHash)
+    || bodies.previous !== null && typeof bodies.previous !== 'string') return null
+  // Only a positively witnessed unsent interval needs full source authentication.
+  // Missing or contradictory non-dispatch evidence must not trigger that read.
+  const receipt = reservations.filter(row => object(row.metadata).firstAssessmentNotDispatchedKey === key || object(row.metadata).fullReassessmentNotDispatchedKey === key)
+  if (receipt.length !== 1 || receipt[0].createdAt < call.createdAt || receipt[0].createdAt > results[0].createdAt) return null
+  const links = reservations.filter(row => object(row.metadata).assessmentRequestOwnerKey === key || object(row.metadata).assessmentKey === key)
+  const ids = [...new Set(links.flatMap(row => { const ids = object(row.metadata).usageIds; return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : [] }))]
+  const paid = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId, action: { startsWith: 'agent3Continuity' },
+    OR: [{ chapterId: chapter.id }, { targetId: compilation.id }] } })
+  if (paid.some(row => !isKnownTextRequestBilling(row) && !input.retiredUsageIds.has(row.id))) return null
+  const interval = paid.filter(row => row.createdAt >= call.createdAt && row.createdAt <= results[0].createdAt)
+  if (interval.length !== ids.length || interval.some(row => !ids.includes(row.id) || row.agentRunId !== call.runId || !isKnownTextRequestBilling(row))) return null
+  const full = object(receipt[0].metadata).fullReassessmentNotDispatchedKey === key
+  if (full) {
+    const claims = reservations.filter(row => object(row.metadata).fullReassessmentKey === key)
+    if (claims.length !== 1 || object(receipt[0].metadata).claimId !== claims[0].id || claims[0].createdAt > receipt[0].createdAt) return null
+  }
+  if (full && (interval.filter(row => row.action === 'agent3ContinuityCritic' && row.usageSource === 'reported' && !isKnownRejectedTextRequestAttempt(row)).length !== 1
+    || interval.some(row => !isKnownRejectedTextRequestAttempt(row) && row.action !== 'agent3ContinuityCritic' && (row.action !== 'agent3ContinuityCriticSecondPass' || row.billingStatus !== 'not_dispatched')))) return null
+  if (!full && interval.some(row => row.billingStatus !== 'not_dispatched')) return null
   const explicit = terminalCandidateInputSchema.optional().safeParse(args.terminalState)
   const proofs = terminalCandidateInputSchema.shape.inheritedProofs.safeParse(args.inheritedProofs)
   if (!explicit.success || !proofs.success) return null
   const savedCandidate = readTerminalCandidate(compilation.validation)
   const patchInput = terminalCandidatePatchSchema.optional().safeParse(args.terminalPatch)
   if (!patchInput.success || patchInput.data && explicit.data) return null
+  const chainProtocol = frozen.parserVersion === 8 && object(bodies.terminalEvidence).protocol === 2
+  const sourceProtocol = chainProtocol ? 11 : frozen.parserVersion === 8 ? 10 : frozen.parserVersion === 7 ? 9 : 8
+  const source = await readCompilerContinuitySource(tx, subject, chapter, compilation.bridge.fromChapterId, sourceProtocol)
+  if (compilation.bridge.fromChapterId && source?.revision !== compilation.bridge.sourceRevision) return null
+  const original = chainProtocol ? await readOriginalTaskRequest(tx, { ...subject, runId: call.runId }) : null
   let patchedCandidate
   if (patchInput.data) {
     try {
@@ -156,7 +179,7 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
   coverageInput.terminalCandidate ??= terminalCoverageInput(original?.spec, compilation.preparedContext, chapter)?.obligations.length
     ? terminalCandidateSchema.parse({ exitState: {} }) : undefined
   if (runtimeJson({ candidate: frozen.terminalCandidate ?? null }).hash !== runtimeJson({ candidate: coverageInput.terminalCandidate ?? null }).hash) return null
-  const coverage = compilerContinuityCoverage({ ...coverageInput, source }, chainProtocol ? 11 : frozen.parserVersion === 8 ? 10 : frozen.parserVersion === 7 ? 9 : 8)
+  const coverage = compilerContinuityCoverage({ ...coverageInput, source }, sourceProtocol)
   let sourceMatches = bodies.previous === (source?.content ?? null) && frozen.bindingHash === runtimeJson(coverage).hash
   if (chainProtocol) {
     let evidence = terminalEvidenceContext(chapter, source, 2, terminalQuoteAddressVersion(original?.spec),
@@ -183,25 +206,6 @@ export async function readUnsentContinuityAdmission(tx: Prisma.TransactionClient
       terminalCandidate: coverageInput.terminalCandidate }, 7)
     sourceMatches = bodies.previous === (previousSource?.content ?? null) && frozen.bindingHash === runtimeJson(previousCoverage).hash
   }
-  if (meta.admissionId === input.admission.id || frozen.chapterId !== chapter.id || frozen.revision !== chapter.revision || bodies.current !== chapter.content
-    || !sourceMatches
-    || frozen.targetType !== 'story_compilation' || frozen.targetId !== compilation.id) return null
-  const receipt = reservations.filter(row => object(row.metadata).firstAssessmentNotDispatchedKey === key || object(row.metadata).fullReassessmentNotDispatchedKey === key)
-  if (receipt.length !== 1 || receipt[0].createdAt < call.createdAt || receipt[0].createdAt > results[0].createdAt) return null
-  const links = reservations.filter(row => object(row.metadata).assessmentRequestOwnerKey === key || object(row.metadata).assessmentKey === key)
-  const ids = [...new Set(links.flatMap(row => { const ids = object(row.metadata).usageIds; return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : [] }))]
-  const paid = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId, action: { startsWith: 'agent3Continuity' },
-    OR: [{ chapterId: chapter.id }, { targetId: compilation.id }] } })
-  if (paid.some(row => !isKnownTextRequestBilling(row) && !input.retiredUsageIds.has(row.id))) return null
-  const interval = paid.filter(row => row.createdAt >= call.createdAt && row.createdAt <= results[0].createdAt)
-  if (interval.length !== ids.length || interval.some(row => !ids.includes(row.id) || row.agentRunId !== call.runId || !isKnownTextRequestBilling(row))) return null
-  const full = object(receipt[0].metadata).fullReassessmentNotDispatchedKey === key
-  if (full) {
-    const claims = reservations.filter(row => object(row.metadata).fullReassessmentKey === key)
-    if (claims.length !== 1 || object(receipt[0].metadata).claimId !== claims[0].id || claims[0].createdAt > receipt[0].createdAt) return null
-  }
-  if (full && (interval.filter(row => row.action === 'agent3ContinuityCritic' && row.usageSource === 'reported' && !isKnownRejectedTextRequestAttempt(row)).length !== 1
-    || interval.some(row => !isKnownRejectedTextRequestAttempt(row) && row.action !== 'agent3ContinuityCritic' && (row.action !== 'agent3ContinuityCriticSecondPass' || row.billingStatus !== 'not_dispatched')))) return null
-  if (!full && interval.some(row => row.billingStatus !== 'not_dispatched')) return null
+  if (!sourceMatches) return null
   return { chapter, coverage, sourceCallId: callId, usageIds: ids, stage: full ? 'reassessment' as const : 'first' as const }
 }
