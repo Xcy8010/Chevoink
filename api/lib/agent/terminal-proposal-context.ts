@@ -86,7 +86,8 @@ export function prepareTerminalProposalInput(input: { spec: unknown; preparedCon
   if (!originalReview
     && !terminalCandidateCorrection(input.validation, originalContent, original)
     && !(input.previousContent !== undefined
-      && (state?.pending.length ? original.proposalChanges : object(audit).classification === 'terminal_invalid')
+      && (state?.pending.length ? original.proposalChanges
+        : object(audit).classification === 'terminal_invalid' || object(audit).parserVersion === 9 || object(audit).parserVersion === 10)
       && authenticFailedReport(input.validation, originalContent, input.previousContent, original, previous))) throw blocked()
   const verified = verifiedTerminalProposalFactIds(input.nextContext, input.spec, input.preparedContext)
   const staged = stageTerminalProposals({ preparedContext: input.preparedContext, identity,

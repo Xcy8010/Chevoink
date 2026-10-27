@@ -18,6 +18,8 @@ import { effectiveContinuityAudit, reconstructContinuitySourceProvenance, prepar
 import { chapterEditRangeTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { handleToolCall } from '../../api/lib/agent/loop.js'
 import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
+import * as normalizations from '../../api/lib/agent/continuity-review-v4.js'
+import { prepareCompilerTerminalProposals } from '../../api/lib/agent/terminal-proposal-context.js'
 import { buildContinuityInvalidRowRepair, inspectContinuityV4, validateStoredContinuityV4Projection } from '../../api/lib/agent/continuity-review-v4.js'
 import { legacyAssessmentInputSchema } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { readReviewRequestRecoveryEvidence } from '../../api/lib/agent/review-request-recovery.js'
@@ -27,8 +29,10 @@ import * as prices from '../../api/lib/billing/resolve-token-price.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 describe.runIf(available)('contract5 actual legacy provider, report CAS and independent bridge gate', () => {
-  it.each(['complete', 'normalized-cross-chunk', 'preserved-canonical', 'typed-sparse-repair', 'repaired-background', 'single-background', 'unknown', 'applied-typed-error', 'merged-revision', 'cancel-known-raw', 'wrong-owner', 'body-only-first-terminal', 'body-only-unknown', 'body-only-old-local-refusal'] as const)('%s preserves the original phase and V2 price', scenario => fixture(async f => {
-    const bodyOnly = scenario.startsWith('body-only-'), background = scenario === 'repaired-background' || scenario === 'single-background'
+  it.each(['complete', 'normalized-cross-chunk', 'preserved-canonical', 'typed-sparse-repair', 'repaired-background', 'single-background', 'recovered-failed-background', 'unknown', 'applied-typed-error', 'merged-revision', 'cancel-known-raw', 'wrong-owner', 'body-only-first-terminal', 'body-only-unknown', 'body-only-old-local-refusal'] as const)('%s preserves the original phase and V2 price', scenario => fixture(async f => {
+    const bodyOnly = scenario.startsWith('body-only-'), recoveringPair = scenario === 'recovered-failed-background'
+    const pairedBackground = scenario === 'repaired-background' || recoveringPair
+    const background = pairedBackground || scenario === 'single-background'
     const prompt = background ? '修改第一章' : '修改第一章，只输出标题和正文'
     const completeScenario = background || bodyOnly || scenario === 'complete' || scenario === 'typed-sparse-repair' || scenario === 'normalized-cross-chunk' || scenario === 'preserved-canonical'
     const factual = scenario === 'applied-typed-error' || scenario === 'merged-revision'
@@ -127,11 +131,12 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
     let requestCount = 0
     const fetchMock = vi.fn(async () => {
       requestCount++
+      if (recoveringPair && requestCount > 2) throw Error('The original two physical responses must recover without another provider slot')
       if (scenario === 'cancel-known-raw') await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'paused' } })
       if (scenario === 'wrong-owner') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'run.started', payload: { type: 'run.started', seq: 2 } } })
       const revisedWire = { ...wire, findings: [], semanticChecks: wire.semanticChecks.map(row => ({ ...row, result: 'clear', reasonCode: 'consistent', findingIds: [] })),
         issueDispositions: [{ issueIndex: 0, outcome: 'repaired', reasonCode: 'consistent', explanation: 'The current manuscript retains only the sealed state.', manuscriptEvidence: [{ segmentId: 'c0' }] }] }
-      if (scenario === 'repaired-background' && requestCount === 2) {
+      if (pairedBackground && requestCount === 2) {
         const rows = await prisma.agentArtifact.findMany({ where: { runId: f.runId, artifactType: 'continuityReview', metadata: { path: ['stage'], equals: 'first' } } })
         const metadata = rows.map(row => row.metadata as Record<string, unknown>).find(value => value.response && value.input)!
         const input = legacyAssessmentInputSchema.parse(metadata.input)
@@ -142,7 +147,7 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
           explanation: 'The old knowledge was incorrectly assigned to a current location.', manuscriptEvidence: [{ segmentId: 'c2', quote: 'The clerk waits.' }] }] }
         backgroundSecond = JSON.stringify({ corrections: plan.mask.map(item => ({ ...item, value: (corrected[item.table as keyof typeof corrected] as unknown[])[item.index] })) })
       }
-      const responseRaw = scenario === 'repaired-background' && requestCount === 2 ? backgroundSecond : bodyOnly && requestCount === 1 ? JSON.stringify({ findings: [],
+      const responseRaw = pairedBackground && requestCount === 2 ? backgroundSecond : bodyOnly && requestCount === 1 ? JSON.stringify({ findings: [],
         semanticChecks: { action_direction: { result: 'clear', reason: 'Whole saved body checked.', findingIndexes: [] },
           state_progression: { result: 'clear', reason: 'Whole saved body checked.', findingIndexes: [] } },
         terminalVerdicts: [], terminalProofVerdicts: [], terminalDispositions: [] })
@@ -198,12 +203,54 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toMatchObject({ committedAt: null })
     } else {
       const bus = new RunEventBus(f.runId, scenario === 'body-only-old-local-refusal' ? 3 : 1)
-      const result = await handleToolCall({ id: ctx.callId, name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilation.id, terminalState: candidate }) },
-        [continuityValidateTool], ctx, bus, 'contract5-message', f.runId, undefined, () => bus.persist())
-      await bus.close()
+      const strict = recoveringPair ? [vi.spyOn(normalizations, 'normalizeContinuityV4Projection').mockImplementation(first => first),
+        vi.spyOn(normalizations, 'normalizeContinuityV4ProjectionV2').mockImplementation(first => first)] : []
+      let result: Awaited<ReturnType<typeof handleToolCall>>, reportCallId = ctx.callId
+      try {
+        result = await handleToolCall({ id: ctx.callId, name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilation.id, terminalState: candidate }) },
+          [continuityValidateTool], ctx, bus, 'contract5-message', f.runId, undefined, () => bus.persist())
+      } finally { await bus.close(); strict.reverse().forEach(mock => mock.mockRestore()) }
+      if (recoveringPair) {
+        expect(result).toMatchObject({ failureCode: 'CONTINUITY_REPORT_INCOMPLETE', part: { status: 'failed' } })
+        const failed = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
+        const audit = (failed.validation as { continuityCriticResponse: normalizations.ContinuityV4Inspection['audit'] }).continuityCriticResponse
+        expect(failed.validation).toMatchObject({ independentCheck: 'unavailable', continuityCriticResponse: { parserVersion: 10,
+          classification: 'projection_invalid', continuityV4: { first: { complete: true }, failedRepair: { response: { complete: true } } } } })
+        expect(failed.preparedContext).not.toHaveProperty('terminalProposalReview')
+        expect(validateStoredContinuityV4Projection(audit, content, audit.terminalEvidence)?.complete).toBe(false)
+        const originalArtifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId, artifactType: 'continuityReview' }, orderBy: { id: 'asc' } })
+        expect(originalArtifacts.filter(row => typeof (row.metadata as Record<string, unknown>).continuityAssessmentRequestKey === 'string')).toHaveLength(1)
+        expect(originalArtifacts.filter(row => typeof (row.metadata as Record<string, unknown>).fullReassessmentKey === 'string')).toHaveLength(1)
+        const originalFees = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+        const originalLedger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+        const originalBudget = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })
+        expect(originalFees).toHaveLength(2); expect(originalLedger).toHaveLength(2); expect(fetchMock).toHaveBeenCalledTimes(2)
+        const frozenHash = runtimeJson(audit).hash
+        expect(prepareCompilerTerminalProposals({ spec: f.spec, preparedContext: failed.preparedContext, validation: failed.validation,
+          chapter, source: await readCompilerContinuitySource(prisma, ctx, chapter, canonicalChapter!.id, 11), candidate,
+          nextContext: audit.terminalEvidence! })).toBeUndefined()
+        const recover = async (callId: string, args: Record<string, unknown>) => {
+          const tail = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId }, orderBy: { seq: 'desc' } })
+          const recoveryBus = new RunEventBus(f.runId, tail.seq)
+          try { return await handleToolCall({ id: callId, name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilation.id, ...args }) },
+            [{ ...continuityValidateTool, execute: (toolContext: ToolContext, raw: unknown) => continuityValidateTool.execute(toolContext, continuityValidateTool.parameters.parse(raw)) }], { ...ctx, callId }, recoveryBus, 'same-pair-recovery', f.runId, undefined, () => recoveryBus.persist()) }
+          finally { await recoveryBus.close() }
+        }
+        const noOp = await recover('same-base-noop-recovery', { terminalPatch: { baseCandidateHash: runtimeJson(candidate).hash, removeFactIds: [], addFacts: [] } })
+        expect(noOp).toMatchObject({ reviewCompleted: true, part: { status: 'success' } }); expect(noOp).not.toHaveProperty('failureCode')
+        reportCallId = 'same-base-explicit-recovery'
+        result = await recover(reportCallId, { terminalState: candidate })
+        expect(result).toMatchObject({ reviewCompleted: true, part: { status: 'success', summary: expect.stringContaining('复用') } })
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(originalFees)
+        expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(originalLedger)
+        expect(await prisma.agentArtifact.findMany({ where: { id: { in: originalArtifacts.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(originalArtifacts)
+        expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })).toEqual(originalBudget)
+        expect(runtimeJson(audit).hash).toBe(frozenHash)
+      }
       expect(result).toMatchObject({ reviewCompleted: true, reviewOutcome: completeScenario ? 'complete' : 'decision_required', part: { status: 'success' } })
       expect(result).not.toHaveProperty('failureCode')
-      const reportEvents = (await loadPersistedEvents(f.runId, 1)).filter(event => event.type === 'tool.result' && event.callId === ctx.callId)
+      const reportEvents = (await loadPersistedEvents(f.runId, 1)).filter(event => event.type === 'tool.result' && event.callId === reportCallId)
       expect(reportEvents).toMatchObject([{ type: 'tool.result', toolName: 'continuity_validate', ok: true }])
       expect(reportEvents[0]).not.toHaveProperty('reviewOutcome')
       expect(result.part).not.toHaveProperty('reviewOutcome')
@@ -251,7 +298,7 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
         expect(fetchMock).toHaveBeenCalledTimes(3)
       } else if (completeScenario) {
         if (background) {
-          if (scenario === 'repaired-background') expect(audit).toMatchObject({ continuityV4: { failedRepair: { response: { content: JSON.stringify(backgroundSecond) } }, projectionNormalization: {
+          if (pairedBackground) expect(audit).toMatchObject({ continuityV4: { failedRepair: { response: { content: JSON.stringify(backgroundSecond) } }, projectionNormalization: {
             version: 2, serverRejectedReplacements: [{ id: terminalFactId('knowledge', canonicalClaim), code: 'replacement_target_invalid' }] } } })
           else {
             expect(audit).toMatchObject({ continuityV4: { projectionNormalization: { version: 2, mode: 'single_report', mappings: [] } } })
@@ -334,13 +381,13 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       expect(replacement).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
       expect(fetchMock).toHaveBeenCalledTimes(2)
     }
-    const requestTotal = bodyOnly ? 2 : scenario === 'merged-revision' ? 3 : scenario === 'typed-sparse-repair' || scenario === 'repaired-background' ? 2 : 1
+    const requestTotal = bodyOnly ? 2 : scenario === 'merged-revision' ? 3 : scenario === 'typed-sparse-repair' || pairedBackground ? 2 : 1
     expect(fetchMock).toHaveBeenCalledTimes(requestTotal)
     const usage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })
     expect(usage).toHaveLength(requestTotal)
     expect(usage[0]).toMatchObject({ multiplierBps: 15000, billingSnapshot: price, usageSource: 'reported', billingStatus: 'settled' })
     expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(requestTotal)
     if (scenario !== 'merged-revision') expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
-  }, undefined, (scenario === 'repaired-background' || scenario === 'single-background') ? '修改第一章' : '修改第一章，只输出标题和正文', { freezeWriting: true, continuityEvidenceProtocol: 1, continuityReportProtocol: 5,
+  }, undefined, (['repaired-background', 'single-background', 'recovered-failed-background'].includes(scenario)) ? '修改第一章' : '修改第一章，只输出标题和正文', { freezeWriting: true, continuityEvidenceProtocol: 1, continuityReportProtocol: 5,
     terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
 })

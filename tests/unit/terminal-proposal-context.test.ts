@@ -3,6 +3,11 @@ import type { TaskSpec } from '../../shared/contracts/index.js'
 import { terminalCandidateSchema, currentTerminalReview, terminalReviewFailure } from '../../api/lib/agent/terminal-state-review.js'
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
+import { bindLegacyContinuityAssessment, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { buildContinuityReviewManifest, buildContinuityInvalidRowRepair, inspectContinuityV4, failedContinuityV4Repair, applyContinuityV4Repair, validateStoredContinuityV4Projection } from '../../api/lib/agent/continuity-review-v4.js'
+import { isContinuityV4Inspection } from '../../api/lib/agent/authenticated-continuity-assessment.js'
+import { continuitySubjectIdentity } from '../../api/lib/agent/continuity-subject-identity.js'
+import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { runContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { terminalCandidateFacts } from '../../api/lib/agent/terminal-fact-identity.js'
@@ -212,4 +217,90 @@ it.each(['known', 'corrupt-hash', 'corrupt-raw', 'incomplete', 'wrong-classifica
       chapter, source: null, candidate: f.candidate, nextContext })!
     expect(afterEdit.state.pending).toHaveLength(2)
     expect(afterEdit.changes?.bodyHash).toBe(nextContext.current.contentHash)
+  })
+
+
+function failedProjectionFixture(version: 9 | 10, paired = false) {
+  const f = fixture(), context = terminalEvidenceContext(f.chapter, null, 2, 1, f.context.factCoverage, 6, 2)
+  const bodies = { previous: null, current: f.chapter.content, terminalEvidence: context }, sourceScope = { currentOrderIndex: f.chapter.orderIndex, previous: [] }
+  const planValue = { version: 1 as const, originalTaskId: f.spec.id, originalAdmissionId: 'run', chapterId: f.chapter.id, compilationId: 'compilation',
+    authorityHash: runtimeJson({ spec: f.spec }).hash, semanticSubjectHash: continuitySubjectIdentity({ chapterId: f.chapter.id, revision: f.chapter.revision,
+      targetType: 'story_compilation', targetId: 'compilation', bodies, terminalCandidate: f.base, sourceScope })!, modelPriceHash: 'b'.repeat(64), budgetOwner: f.spec.id,
+    phases: [{ kind: 'initial_review' as const, limit: 1, authoritySourceRef: 'original-admission:run' },
+      { kind: 'sparse_repair' as const, limit: 1, authoritySourceRef: 'original-admission:run' }] }
+  const manifest = buildContinuityReviewManifest({ subject: { userId: 'u', novelId: 'n', taskId: f.spec.id, targetType: 'story_compilation',
+    targetId: 'compilation', chapterId: f.chapter.id, revision: f.chapter.revision }, bodies, candidate: f.base, sourceScope, sourceHash: null,
+    sourceVersions: { current: context.current }, verifiedCoverage: context.factCoverage, draftProposals: null,
+    ...(version === 10 ? { typedLineage: { version: 1 as const, phasePlan: { ...planValue, hash: runtimeJson(planValue).hash }, priorFindings: [], establishedIssues: [] } } : {}) })
+  const finding = { findingId: 'f0', signal: 'object', severity: 'warning', suggestion: 'Keep the original source error pending.',
+    ...(version === 10 ? { reasonCode: 'historical_reference', explanation: 'The submitted source address does not locate this original opinion.', manuscriptEvidence: [{ segmentId: 'c999' }] }
+      : { reason: 'The original opinion has no located source address.', sourceEvidence: [{ segmentId: 'c999' }] }) }
+  const wire = { findings: [finding], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', findingIds: [],
+    ...(version === 10 ? { reasonCode: 'consistent', explanation: 'The complete original report preserves the independent unknowns.' } : { reason: 'The complete original report preserves the independent unknowns.' }) })),
+  terminalVerdicts: terminalCandidateFacts(f.base).map((_, claimIndex) => ({ claimIndex, verdict: 'unknown',
+    ...(version === 10 ? { reasonCode: 'insufficient_evidence', explanation: 'The current body does not establish this proposed knowledge.', manuscriptEvidence: [] } : { sourceEvidence: [] }) })),
+  terminalProofVerdicts: [], terminalDispositions: [], ...(version === 10 ? { issueDispositions: [] } : {}) }
+  const first = inspectContinuityV4(JSON.stringify(wire), { manifest, bodies, candidate: f.base, sourceScope })
+  expect(first.audit).toMatchObject({ parserVersion: version, classification: 'projection_invalid' })
+  expect(first.complete).toBe(false)
+  const plan = buildContinuityInvalidRowRepair(first)!
+  expect(plan.mask).toEqual([{ table: 'findings', index: 0 }])
+  const second = JSON.stringify({ corrections: [{ table: 'findings', index: 0, value: finding }] })
+  const observed = paired ? failedContinuityV4Repair(first, second, true) : first
+  const frozen: LegacyAssessmentInput = { chapterId: f.chapter.id, revision: f.chapter.revision, targetType: 'story_compilation', targetId: 'compilation',
+    bodies, terminalCandidate: f.base, sourceScope, parserVersion: version, reassessmentProtocol: version === 10 ? 7 : 6,
+    continuityManifest: manifest, system: 'Frozen original reviewer', content: 'Synthetic complete source and exact candidate' }
+  const inspected = bindLegacyContinuityAssessment(observed, { userId: 'u', novelId: 'n', runId: 'run', callId: 'original' } as ToolContext, frozen)
+  if (!isContinuityV4Inspection(inspected)) throw Error('Expected the original frozen four-projection report')
+  expect(validateStoredContinuityV4Projection(inspected.audit, f.chapter.content, context)?.complete).toBe(false)
+  const validation = { independentCheck: 'unavailable', checkedChapterId: f.chapter.id, checkedRevision: f.chapter.revision, checkedContent: f.chapter.content,
+    terminalCandidate: f.base, continuityCriticResponse: inspected.audit }
+  return { ...f, context, first, second, frozen, inspected, validation,
+    request: { spec: f.spec, preparedContext: {}, validation, content: f.chapter.content, previousContent: null, candidate: f.candidate, originalContext: context, nextContext: context } }
+}
+
+it.each(([9, 10] as const).flatMap(version => [false, true].flatMap(paired => [false, true].map(same => ({ version, paired, same }))))) (
+  'rebuilds complete version$version failed reports without prior pending state, pair=$paired sameBase=$same', ({ version, paired, same }) => {
+    const f = failedProjectionFixture(version, paired), request = { ...f.request, candidate: same ? f.base : f.candidate }
+    const before = runtimeJson({ validation: f.validation, frozen: f.frozen }).hash
+    const staged = prepareTerminalProposalInput(request)
+    if (same) expect(staged).toBeUndefined()
+    else {
+      expect(staged!.state.pending.map(row => row.claim).sort()).toEqual([...f.base.exitState.knowledge].sort())
+      expect(staged!.state.pending.every(row => row.origin.auditHash === runtimeJson(f.inspected.audit).hash)).toBe(true)
+    }
+    expect(prepareCompilerTerminalProposals({ spec: f.spec, preparedContext: {}, validation: f.validation,
+      chapter: f.chapter, source: null, candidate: request.candidate, nextContext: f.context })).toEqual(staged)
+    expect(prepareTerminalProposalInput(request)).toEqual(staged)
+    expect(currentTerminalReview(f.validation, f.chapter.content, f.context)).toBeNull()
+    expect(f.inspected.complete).toBe(false)
+    expect(f.inspected.audit.rawResponse.complete).toBe(true)
+    expect(runtimeJson({ validation: f.validation, frozen: f.frozen }).hash).toBe(before)
+  })
+
+it.each(([9, 10] as const).flatMap(version => ['first-raw', 'first-hash', 'second-valid-mislabelled', 'second-truncated', 'manifest', 'previous', 'saved-candidate', 'body', 'pretend-complete'].map(fault => ({ version, fault })))) (
+  'rejects version$version failed-report $fault without authority or mutation', ({ version, fault }) => {
+    const f = failedProjectionFixture(version, true), request = structuredClone(f.request), audit = request.validation.continuityCriticResponse
+    if (fault === 'first-raw') audit.continuityV4.first.content = JSON.stringify('{}')
+    if (fault === 'first-hash') audit.contentHash = 'f'.repeat(64)
+    if (fault === 'second-valid-mislabelled') {
+      // The reservation reader authenticates the physical response identity.
+      // At this pure boundary a valid exact-mask response cannot be relabelled
+      // as a failed repair to open proposal preparation from a false lineage.
+      const value = { findingId: 'f0', signal: 'object', severity: 'warning', suggestion: 'Retain the current opinion.',
+        ...(version === 10 ? { reasonCode: 'historical_reference', explanation: 'The current source supports this recorded opinion.', manuscriptEvidence: [{ segmentId: 'c0' }] }
+          : { reason: 'The current source supports this recorded opinion.', sourceEvidence: [{ segmentId: 'c0' }] }) }
+      const second = JSON.stringify({ corrections: [{ table: 'findings', index: 0, value }] })
+      expect(applyContinuityV4Repair(f.first, second, true).complete).toBe(true)
+      audit.continuityV4.failedRepair!.response.content = JSON.stringify(second)
+    }
+    if (fault === 'second-truncated') audit.continuityV4.failedRepair!.response.complete = false
+    if (fault === 'manifest') audit.continuityV4.manifest.subject.chapterId = 'other-chapter'
+    if (fault === 'previous') Object.assign(request, { previousContent: 'A changed previous source.' })
+    if (fault === 'saved-candidate') request.validation.terminalCandidate.exitState.knowledge.push('An altered original candidate.')
+    if (fault === 'body') request.content += ' Another current body.'
+    if (fault === 'pretend-complete') request.validation.independentCheck = 'complete'
+    const before = runtimeJson(request).hash
+    expect(() => prepareTerminalProposalInput(request)).toThrow(expect.objectContaining({ code: 'TERMINAL_STATE_REVIEW_REQUIRED' }))
+    expect(runtimeJson(request).hash).toBe(before)
   })
