@@ -4,7 +4,7 @@ import type { beginDurableChat as Begin } from '../../api/lib/agent/runtime-prov
 import type { RuntimeTx } from '../../api/lib/agent/runtime-common.js'
 
 const mocks = vi.hoisted(() => ({
-  runtime: vi.fn(), access: vi.fn(), begin: vi.fn<typeof Begin>(),
+  runtime: vi.fn(), access: vi.fn(), manuscriptBudget: vi.fn(), begin: vi.fn<typeof Begin>(),
   existing: null as null | { status: string; inputSnapshot: unknown; inputHash: string },
 }))
 vi.mock('../../api/lib/credits.js', () => ({ getModelTierRuntime: mocks.runtime, assertCreditAccess: mocks.access }))
@@ -19,7 +19,7 @@ vi.mock('../../api/lib/agent/runtime-heartbeat.js', () => ({
 }))
 vi.mock('../../api/lib/agent/runtime-lease.js', () => ({
   withRunLease: (_lease: unknown, work: (tx: RuntimeTx) => unknown) => work({ agentOperation: { findUnique: async () => mocks.existing } } as unknown as RuntimeTx),
-  withManuscriptRunLease: (_lease: unknown, work: (tx: RuntimeTx) => unknown) => work({} as RuntimeTx),
+  withManuscriptRunLease: (_lease: unknown, work: (tx: RuntimeTx) => unknown, options?: { timeoutMs?: number }) => { mocks.manuscriptBudget(options); return work({} as RuntimeTx) },
 }))
 
 import { chatWithTools } from '../../api/lib/ai-service.js'
@@ -44,6 +44,7 @@ const input = (step: typeof steps[number] = 'quality_critic') => ({ lease, paren
   system: '合成检查规则', content: '合成完整原文', temperature: 0.15, signal: new AbortController().signal, assertCurrent: vi.fn(async () => {}) })
 
 beforeEach(() => {
+  mocks.manuscriptBudget.mockReset()
   mocks.existing = null
   mocks.runtime.mockReset().mockResolvedValue(structuredClone(runtime))
   mocks.access.mockReset().mockResolvedValue(undefined)
@@ -63,10 +64,18 @@ describe('durable reviewer non-thinking policy without rewriting old paid reques
     mocks.runtime.mockResolvedValue(mimo)
     const request = { ...input(step), route: auxiliaryRouteForRuntime(mimo, selection, 1024) }
     expect(request.route.responseFormat).toBe('json_object')
+    // This exact original review alone receives the full-source DB budget.
     await callDurableAuxiliary(request)
     const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
     expect(body).toMatchObject({ model: mimo.modelName, response_format: { type: 'json_object' } })
     expect(mocks.begin.mock.calls[0][0].request).toMatchObject({ body })
+    expect(mocks.manuscriptBudget).toHaveBeenCalledExactlyOnceWith({ timeoutMs: 20_000 })
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it.each(['publish_advice', 'research_dossier_synthesis', 'creative_critique', 'creative_revision'] as const)('keeps unrelated %s admission on the ordinary DB budget', async step => {
+    await callDurableAuxiliary({ ...input(), step })
+    expect(mocks.manuscriptBudget).toHaveBeenCalledExactlyOnceWith(undefined)
     expect(fetch).toHaveBeenCalledOnce()
   })
 

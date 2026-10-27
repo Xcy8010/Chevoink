@@ -59,10 +59,10 @@ export async function acquireRunLease(input: { userId: string; runId: string; ow
 }
 
 /** Serializes revocation and effects; expiry is rechecked before transaction commit. */
-export async function withRunLease<T>(token: RunLeaseToken, work: (tx: RuntimeTx) => Promise<T>): Promise<T> {
+export async function withRunLease<T>(token: RunLeaseToken, work: (tx: RuntimeTx) => Promise<T>, options?: { timeoutMs?: 20000 }): Promise<T> {
   const captured = { ...token }
   const contentionScope = await readParentContentionScope(captured.userId, captured.runId, true)
-  return runtimeTransaction(tx => withRunLeaseInTransaction(tx, captured, work), { contentionBackoff: Boolean(captured.parent), contentionScope, deadline: contentionScope?.deadline })
+  return runtimeTransaction(tx => withRunLeaseInTransaction(tx, captured, work), { contentionBackoff: Boolean(captured.parent), contentionScope, deadline: contentionScope?.deadline, ...(options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) })
 }
 
 /** Manuscript adapters order domain locks before parent/run/root locks. The

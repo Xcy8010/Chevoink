@@ -317,5 +317,5 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
       }
     }
     return preparePricedProviderOperationInTransaction(tx, lease, captured)
-  })
+  }, captured.step === 'continuity_coordinated_revision' ? { timeoutMs: 20_000 } : undefined)
 }

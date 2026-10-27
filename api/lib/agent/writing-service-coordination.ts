@@ -1,3 +1,4 @@
+import { createChapterReviewReadScope } from './chapter-review-guard.js'
 import { z } from 'zod'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { sceneTaskInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
@@ -67,9 +68,10 @@ async function executePreparedWritingRevision(ctx: ToolContext, lease: RunLeaseT
   if (!args) return noEffect('实际改稿响应没有可应用的正文变化；原判断与留置意见仍保留，不代表问题已解决。')
   return commitOperationEffect(lease, operationId, admitted.operation.inputHash, async tx => {
     ctx.signal.throwIfAborted()
-    await coordinator.authenticateNativeContinuityRevisionWork(tx, ctx, work)
+    const readScope = createChapterReviewReadScope()
+    await coordinator.authenticateNativeContinuityRevisionWork(tx, ctx, work, false, readScope)
     const result = await applyDurableChapterBody({ ...ctx, nativeContinuityRevision: { operationId, work } }, tx,
-      { taskRootId: lease.taskRootId, action: 'chapter_edit_range', args: args!, expectedRevision: work.chapter.revision, anchorProtocol: 2 })
+      { taskRootId: lease.taskRootId, action: 'chapter_edit_range', args: args!, expectedRevision: work.chapter.revision, anchorProtocol: 2 }, readScope)
     const hash = await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, work.compiler.id)
     if (!hash || result.progress.beforeHash === result.progress.afterHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '集中修订缺少实际正文转换。')
     return runtimeJson({ ...result, revisionApplied: true, compilerState: { id: work.compiler.id, hash } }).value
@@ -190,7 +192,7 @@ export async function executeCoordinatedWritingServices(ctx: ToolContext, lease:
     const work = prior ? z.object({ input: z.object({ work: z.unknown() }) }).parse(prior.inputSnapshot).input.work
       : verify && !revisionApplied ? { kind: 'verification_skip', version: 1, compiler: baseline }
         : step === 'prose_revision' ? await withRunLease(lease, tx => import('./continuity-coordinator.js').then(module =>
-          module.prepareNativeContinuityRevisionWork(tx, ctx, baseline!, parentOperationId)))
+          module.prepareNativeContinuityRevisionWork(tx, ctx, baseline!, parentOperationId)), { timeoutMs: 20_000 })
           : continuityStep ? await prepareContinuityWork(ctx, lease, { operationKey: key, observedRevision: plan.input.normalization.sourceRevision, baseline, args, ...(frozenReview ? { frozenReview } : {}) })
             : qualityStep ? await prepareQualityWork(ctx, lease, { operationKey: key, observedRevision: plan.input.normalization.sourceRevision, baseline, args, serviceReadOnly: true, ...(frozenReview ? { frozenReview } : {}) }) : {}
     const operation = await prepareWritingServiceStep(lease, { novelId: ctx.novelId, callId: ctx.callId, args, baseline, work,

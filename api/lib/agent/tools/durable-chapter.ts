@@ -1,3 +1,4 @@
+import { createChapterReviewReadScope, type ChapterReviewReadScope } from '../chapter-review-guard.js'
 import { assertWritingTarget, readWritingScope, originalSelectionBoundary } from '../writing-scope.js'
 import { assertLocalEditArguments, originalLocalEditBoundary } from '../local-edit-scope.js'
 import { z } from 'zod'
@@ -164,7 +165,8 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
  * child. It never admits/reduces a cursor, dispatches HTTP or certifies review. */
 export async function applyDurableChapterBody(ctx: ToolContext, tx: RuntimeTx, input: {
   taskRootId: string; action: Action; args: z.infer<typeof argsSchema>; expectedRevision: number; anchorProtocol: 1 | 2
-}) {
+}, sourceReadScope?: ChapterReviewReadScope) {
+  const readScope = sourceReadScope ?? createChapterReviewReadScope()
   const { action, args, expectedRevision, anchorProtocol } = input
   ctx.signal.throwIfAborted()
   await assertAgentManuscriptCurrent(tx, ctx)
@@ -181,7 +183,7 @@ export async function applyDurableChapterBody(ctx: ToolContext, tx: RuntimeTx, i
   const changed = before !== after
   const updated = await updateOwnedChapterAtRevision({ ...ctx, transaction: tx }, chapter, { content: after, wordCount: after.length },
     action === 'chapter_write' ? 'replace' : action === 'chapter_append' ? 'append' : 'range', !!args.patches,
-    { editRanges, retainedFindings: args.retainedFindings })
+    { editRanges, retainedFindings: args.retainedFindings }, readScope)
   if (!updated) runtimeError('CHAPTER_REVISION_CONFLICT', '章节已变化或归档，正文写入未执行。')
   if (changed) await recalculateNovelStats(tx, ctx.novelId)
   const revision = updated.revision

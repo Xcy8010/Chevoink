@@ -1,5 +1,5 @@
 import { assertWritingTarget } from './writing-scope.js'
-import { assertChapterReviewRevision, readChapterReviewReadiness } from './chapter-review-guard.js'
+import { assertChapterReviewRevision, readChapterReviewReadiness, createChapterReviewReadScope } from './chapter-review-guard.js'
 import { verificationQualityAdviceRequiresDecision, readReviewCycle, qualityReviewCycleContext } from './review-cycle.js'
 import { prepareReviewCycleTransition } from './review-cycle-store.js'
 import { readOriginalTaskRequest } from './original-request.js'
@@ -548,7 +548,7 @@ export async function reserveQualityAutoRepair(input: { userId: string; novelId:
       deterministicMetrics: { ...metrics, autoRepairAttempted: true },
     } })
     return true
-  })
+  }, { timeout: 20_000 })
 }
 
 export async function selectQualityFindings(userId: string, novelId: string, reportId: string, selectedIds: string[]) {
@@ -631,14 +631,15 @@ export async function applyQualityRepair(input: {
     if (input.expectedContextHash && qualityReviewContextHash(await buildHumanityQualityContext(input.userId, input.novelId, report.chapterId, input.runId ?? undefined, tx)) !== input.expectedContextHash) {
       throw new DataAccessError(409, 'QUALITY_SOURCE_STALE', '邻章、作者要求或修订参考已变化，未应用旧上下文生成的补丁。')
     }
+    const readScope = createChapterReviewReadScope()
     const consumeReviewRevision = input.runId ? await assertChapterReviewRevision(tx, { userId: input.userId, novelId: input.novelId, runId: input.runId }, report.chapter, {
-      requireQualityChannel: true, mutation: 'replace', after,
+      requireQualityChannel: true, mutation: 'replace', after, readScope,
       editRanges: patches.map(patch => ({ start: patch.finding.startOffset, end: patch.finding.endOffset, newText: patch.replacement })),
       retainedFindings: input.retainedFindings,
     }) : undefined
     const recordCycle = input.runId && report.compilationId ? await prepareReviewCycleTransition(tx,
       { userId: input.userId, novelId: input.novelId, runId: input.runId }, report.chapter, report.compilationId, after,
-      patches.map(patch => ({ start: patch.finding.startOffset, end: patch.finding.endOffset, newText: patch.replacement }))) : undefined
+      patches.map(patch => ({ start: patch.finding.startOffset, end: patch.finding.endOffset, newText: patch.replacement })), readScope) : undefined
     const write = await tx.chapter.updateMany({
       where: { id: report.chapter.id, ...activeChapterScope(input.novelId), authorId: input.userId, revision: report.chapterRevision, content: report.chapter.content },
       data: { content: after, wordCount: after.length, revision: { increment: 1 } },
@@ -681,7 +682,7 @@ export async function applyQualityRepair(input: {
     input.signal?.throwIfAborted()
     return updatedChapter
   }
-  const updated = transaction ? await apply(transaction) : await prisma.$transaction(apply)
+  const updated = transaction ? await apply(transaction) : await prisma.$transaction(apply, { timeout: 20_000 })
   return { report, updated, before: report.chapter.content, after, repairedFindingIds: patches.map((patch) => patch.finding.id) }
 }
 

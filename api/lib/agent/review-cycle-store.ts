@@ -1,3 +1,4 @@
+import type { ChapterReviewReadScope } from './chapter-review-guard.js'
 import type { Prisma } from '@prisma/client'
 import { DataAccessError } from '../prisma.js'
 import { activeChapterScope } from '../data/internal.js'
@@ -55,7 +56,7 @@ export async function markChapterReviewCycleVerification(tx: Prisma.TransactionC
  * authorized its mutation. This is bookkeeping, never mutation admission. */
 export async function prepareReviewCycleTransition(tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number; content: string; orderIndex: number },
-  compilationId: string, after: string, ranges?: Array<{ start: number; end: number; newText: string }>) {
+  compilationId: string, after: string, ranges?: Array<{ start: number; end: number; newText: string }>, readScope?: ChapterReviewReadScope) {
   if (chapter.content === after) return
   const original = await readOriginalTaskRequest(tx, subject)
   const runIds = await originalTaskRunIds(tx, subject, original)
@@ -64,11 +65,12 @@ export async function prepareReviewCycleTransition(tx: Prisma.TransactionClient,
   if (!compilation) throw new DataAccessError(409, 'REVIEW_CYCLE_CONFLICT', '修订编译不属于当前原任务，未记录复查转换。')
   const scope = { taskId: original.taskId, userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id }
   const existing = readReviewCycle(compilation.preparedContext, scope)
-  const { readChapterReviewReadiness, originalChapterReviewRequirements, lockChapterReviewDecisions } = await import('./chapter-review-guard.js')
-  let review = await readChapterReviewReadiness(tx, subject, compilationId)
+  const { readChapterReviewReadiness, originalChapterReviewRequirements, lockChapterReviewDecisions, createChapterReviewReadScope } = await import('./chapter-review-guard.js')
+  readScope ??= createChapterReviewReadScope()
+  let review = await readChapterReviewReadiness(tx, subject, compilationId, { readScope })
   if (review?.qualityReportId) {
     await lockChapterReviewDecisions(tx, review.qualityReportId)
-    review = await readChapterReviewReadiness(tx, subject, compilationId)
+    review = await readChapterReviewReadiness(tx, subject, compilationId, { readScope })
   }
   let cycle = existing ?? (review?.ready && review.decisionBinding ? beginReviewCycle(scope, { compilationId, revision: chapter.revision,
     content: chapter.content, ready: true, binding: review.decisionBinding, required: originalChapterReviewRequirements(original, chapter),

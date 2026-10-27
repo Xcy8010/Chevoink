@@ -9,7 +9,7 @@ import { retainedFindings } from './chapter-arguments.js'
 import { readTerminalCandidate, terminalCandidateSchema, terminalCandidateInputSchema, resolveTerminalCandidate, reviewTerminalSelection, terminalReviewInput, currentTerminalReview, terminalReviewFailure, type TerminalCandidate } from '../terminal-state-review.js'
 import { terminalCoverageInput, terminalCoverageAuditVersion, terminalCoverageProofs, hasTerminalCoverageProtocol } from '../terminal-fact-coverage.js'
 import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalEvidenceContext, terminalVerdictAuditVersion, terminalSpanAuditVersion, continuitySemanticRule, type TerminalCarriedFact } from '../terminal-evidence-context.js'
-import { readChapterReviewReadiness, chapterReviewDecisionGuidance, qualityDecisionSnapshotHash } from '../chapter-review-guard.js'
+import { readChapterReviewReadiness, chapterReviewDecisionGuidance, qualityDecisionSnapshotHash, createChapterReviewReadScope, type ChapterReviewReadScope } from '../chapter-review-guard.js'
 import { parseQualityJsonObject } from '../quality-evidence.js'
 import { inspectContinuityResponse, continuityUnlocatedCandidateCount, continuityFailureOutput } from '../continuity-format-recovery.js'
 import { hasContinuitySourceAuthority, continuitySourceAuthorityRule, continuityAuthorRequirements, compilerEvidenceScope, type ContinuitySourceScope } from '../continuity-source-authority.js'
@@ -1158,12 +1158,13 @@ export const continuityValidateTool = defineTool({
         if (bridge.fromChapterId) await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${bridge.fromChapterId} FOR SHARE`
         const current = await tx.storyCompilation.findUnique({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } },
           chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } } })
-        const source = await readCompilerContinuitySource(tx, ctx, chapter, bridge.fromChapterId, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : 8)
+        const readScope = createChapterReviewReadScope()
+        const source = await readCompilerContinuitySource(tx, ctx, chapter, bridge.fromChapterId, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : 8, readScope.inheritanceScope)
         if (reviewInput(current) !== frozenReviewInput || runtimeJson({ validation: current?.validation }).hash !== runtimeJson({ validation: compilation.validation }).hash
           || runtimeJson({ source }).hash !== runtimeJson({ source: sourceChapter }).hash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '已收到的纠正报告上下文变化，未离线应用。')
         const result = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id,
           findings: reusable.inspected.findings, expectedChapterRevision: chapter.revision, independentCheck: 'complete', coverage, terminalCandidate,
-          continuityCriticResponse: reusable.inspected.audit, expectedContinuityOwnerSeq: ctx.continuityOwnerSeq, focus: args.focus, signal: ctx.signal }, tx)
+          continuityCriticResponse: reusable.inspected.audit, expectedContinuityOwnerSeq: ctx.continuityOwnerSeq, focus: args.focus, signal: ctx.signal }, tx, readScope)
         if (result.independentCheck === 'complete') {
           await markLegacyContinuityCorrectionApplied(tx, ctx, { observationId: reusable.observationId })
         }
@@ -1242,14 +1243,14 @@ export const continuityValidateTool = defineTool({
         continuitySourceInput(requestBodies),
         terminalReviewInput(terminalCandidate, requestBodies.terminalEvidence),
       ].filter(Boolean).join('\n')
-    const assertCurrent = async (db: Prisma.TransactionClient = prisma) => {
+    const assertCurrent = async (db: Prisma.TransactionClient = prisma, readScope?: ChapterReviewReadScope) => {
       const current = await db.storyCompilation.findFirst({
         where: { id: compilation.id, userId: ctx.userId, novelId: ctx.novelId, status: compilation.status,
           ...await qualityCompilationScope(db, ctx.userId, ctx.novelId, ctx.runId),
           chapter: { authorId: ctx.userId, ...activeChapterScope(ctx.novelId) } },
         include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } },
       })
-      const source = await readCompilerContinuitySource(db, ctx, chapter, bridge.fromChapterId, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : 8)
+      const source = await readCompilerContinuitySource(db, ctx, chapter, bridge.fromChapterId, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : 8, readScope?.inheritanceScope)
       if (reviewInput(current) !== frozenReviewInput || runtimeJson({ source }).hash !== runtimeJson({ source: sourceChapter }).hash) {
         throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文或章节桥已变化，未应用或重发旧版本连续性检查，请读取当前版本。')
       }
@@ -1313,10 +1314,11 @@ export const continuityValidateTool = defineTool({
       ctx.signal.throwIfAborted()
       await assertAgentManuscriptCurrent(tx, ctx)
       await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${compilation.id} FOR UPDATE`
-      await assertCurrent(tx)
+      const readScope = createChapterReviewReadScope()
+      await assertCurrent(tx, readScope)
       const result = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, compilationId: compilation.id, findings: independentFindings,
         runId: ctx.runId, expectedChapterRevision: chapter.revision, expectedTerminalCandidateHash:patch?.expectedBaseHash, independentCheck: criticFallback ? 'unavailable' : 'complete', coverage, terminalCandidate,
-        continuityCriticResponse: continued ? continued.originalAudit : inspected.audit, expectedContinuityOwnerSeq: ctx.continuityOwnerSeq, focus: args.focus, signal: ctx.signal }, tx)
+        continuityCriticResponse: continued ? continued.originalAudit : inspected.audit, expectedContinuityOwnerSeq: ctx.continuityOwnerSeq, focus: args.focus, signal: ctx.signal }, tx, readScope)
       if (result.independentCheck === 'complete') {
         await markLegacyContinuityCorrectionApplied(tx, ctx, { originalHash: inspected.audit.contentHash,
           correctionHash: ((inspected.audit as unknown as Record<string, unknown>).evidenceCorrection as { contentHash?: string } | undefined)?.contentHash })
@@ -1438,7 +1440,8 @@ export const chapterBridgeCommitTool = defineTool({
     }
     // Scene tasks describe intent; only explicit terminal state may become facts.
     // Omitted state remains unknown, including after a revision diverged from BEAT.
-    const commitSource = await readCompilerContinuitySource(db, ctx, compilation.chapter, compilation.bridge.fromChapterId, storedContinuityProtocol(compilation.validation))
+    const commitReadScope = ctx.transaction ? createChapterReviewReadScope() : undefined
+    const commitSource = await readCompilerContinuitySource(db, ctx, compilation.chapter, compilation.bridge.fromChapterId, storedContinuityProtocol(compilation.validation), commitReadScope?.inheritanceScope)
     const commitAudit = (compilation.validation as { continuityCriticResponse?: { parserVersion?: number } } | null)?.continuityCriticResponse
     const commitRequest = await readOriginalTaskRequest(db, ctx)
     const savedCommitCandidate = readTerminalCandidate(compilation.validation)
@@ -1447,7 +1450,7 @@ export const chapterBridgeCommitTool = defineTool({
     if (commitEvidence && savedCommitCandidate) commitEvidence = attachTerminalProposalInput(commitEvidence, { taskId: terminalProposalTaskId(commitRequest.spec, commitRequest.taskId),
       preparedContext: compilation.preparedContext, validation: compilation.validation, candidate: savedCommitCandidate })
     const deliveryBinding = await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(db, { ...ctx, compilationId: compilation.id },
-      { taskId: terminalProposalTaskId(commitRequest.spec, commitRequest.taskId), preparedContext: compilation.preparedContext }, compilation.chapter, compilation.validation, commitEvidence)
+      { taskId: terminalProposalTaskId(commitRequest.spec, commitRequest.taskId), preparedContext: compilation.preparedContext }, compilation.chapter, compilation.validation, commitEvidence, commitReadScope?.terminalDraftScope, commitReadScope?.inheritanceScope)
     const reviewedTerminal = currentTerminalReview(compilation.validation, compilation.chapter.content, commitEvidence, deliveryBinding)
     // COMMIT consumes the checked candidate atomically. Unpaired legacy
     // summaries cannot replace a fact; explicit state still must match below.
@@ -1468,7 +1471,7 @@ export const chapterBridgeCommitTool = defineTool({
     }
     try {
       const result = await commitChapterBridge({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, ...terminal, retainedFindings: args.retainedFindings,
-        ...(args.decisionOnly ? { decisionOnly: true } : {}), expectedChapterRevision: compilation.chapter.revision, expectedContentHash: createHash('sha256').update(compilation.chapter.content).digest('hex') }, ctx.transaction)
+        ...(args.decisionOnly ? { decisionOnly: true } : {}), expectedChapterRevision: compilation.chapter.revision, expectedContentHash: createHash('sha256').update(compilation.chapter.content).digest('hex') }, ctx.transaction, ctx.transaction ? commitReadScope : undefined)
       if (result.decisionOnly) return {
         output: `已${result.decisionChanged ? '记录' : '核对原有'} ${result.retainedIssueCount} 条当前意见保留决定。正文、章节桥、Scene Task及故事记忆未提交，检查意见未被修复或判定通过；普通提交仍须全部当前意见决策与原硬通过要求。`,
         summary: result.decisionChanged ? '记录当前意见决定 · 章节未提交' : '原意见决定未变化 · 章节未提交',

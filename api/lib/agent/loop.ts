@@ -1,5 +1,5 @@
 import { observedReviewOutcome, projectedReviewAction, type ReviewOutcome } from '../../../shared/review-lifecycle.js'
-import { readSettledQualityReviews } from './quality-review-admission.js'
+import { readSettledQualityReviews, readQualityReviewAdmission } from './quality-review-admission.js'
 import { terminalProcessingPlan, terminalProcessingPhaseGapMessage } from './terminal-processing.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
 import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, writingClarificationResolvesInput, readCompletedWritingDelivery, readRecoveredChapterDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
@@ -864,6 +864,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   const consumedReviewDecisionFeedback = new Set<string>()
   let blockedRepeat = 0
   let stagnantBatches = 0
+  let authorContinueStagnantBatches: number | null = null
   let researchReadBootstrap: { sourceId: string; receiptId: string } | null = null
   let researchHandoffChecked = false
   const argumentFailures = new Map<string, number>()
@@ -1710,6 +1711,31 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     const continuityOwner = await prisma.agentRunEvent.findFirst({ where: { runId, type: 'run.started' }, orderBy: { seq: 'desc' }, select: { seq: true, payload: true } })
     if (continuityOwner?.seq !== continuityStartEvent.seq || runtimeJson(continuityOwner.payload).hash !== runtimeJson(continuityStartEvent).hash)
       throw new DataAccessError(409, 'CONTINUITY_OWNER_STALE', '当前执行启动回执已变化；未借用其他 owner 的启动记录。')
+    if (params.resume && params.authorContinue && ['write', 'revise'].includes(taskSpec.intent)
+      && Number.isSafeInteger(params.authorContinue.afterSeq) && continuityOwner.seq === params.authorContinue.afterSeq + 1) {
+      // The original counter remains historical evidence. Only this already
+      // admitted human Continue gets its ordinary consecutive-batch window.
+      // Recover prior consumption from its FIRST start, never the latest worker.
+      authorContinueStagnantBatches = await prisma.$transaction(async tx => {
+        await assertLegacyOwnerReceipt(tx)
+        const run = await tx.agentRun.findFirst({ where: { id: runId, userId: params.userId, novelId: params.novelId,
+          runtimeProtocolVersion: 0, taskRootId: null, status: 'running' } })
+        const terminal = await tx.agentRunEvent.findFirst({ where: { id: params.authorContinue!.eventId, runId,
+          type: { in: ['run.paused', 'run.finished'] }, seq: { lte: params.authorContinue!.afterSeq } } })
+        const latestTerminal = await tx.agentRunEvent.findFirst({ where: { runId, type: { in: ['run.paused', 'run.finished'] },
+          seq: { lt: continuityOwner.seq } }, orderBy: { seq: 'desc' } })
+        if (!run || !terminal || latestTerminal?.id !== terminal.id) return null
+        const admission = await readQualityReviewAdmission(tx, run)
+        if (admission?.id !== 'author-continue:' + terminal.id) return null
+        const first = await tx.agentRunEvent.findFirst({ where: { runId, type: 'run.started',
+          seq: { gt: terminal.seq, lte: continuityOwner.seq }, payload: { path: ['authorContinue', 'eventId'], equals: terminal.id } }, orderBy: { seq: 'asc' } })
+        const marker = (first?.payload as { authorContinue?: { eventId?: unknown; afterSeq?: unknown } } | null)?.authorContinue
+        if (!first || marker?.eventId !== terminal.id || !Number.isSafeInteger(marker.afterSeq)
+          || first.seq !== Number(marker.afterSeq) + 1) return null
+        const completed = await tx.agentRunEvent.count({ where: { runId, type: 'step.finish', seq: { gt: first.seq, lt: continuityOwner.seq } } })
+        return Math.min(stagnantBatches, completed)
+      })
+    }
     const toolContext: ToolContext = {
       planContentHashes: new Map(),
       userId: params.userId,
@@ -3029,6 +3055,21 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         }
       }
       await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
+      // Persist the ordinary batch counter before its completion receipt, so a
+      // restarted owner cannot replay a finished batch with a stale checkpoint.
+      if (!authorInputRequired && !pendingReviews.size && !reviewStopReason && !authorEndRequested) {
+        const waitingForChild = effectiveToolCalls.some(call => ['task_wait', 'task_get', 'task_list'].includes(call.name))
+          && await prisma.agentRun.count({ where: { userId: params.userId, novelId: params.novelId, OR: [{ session: { spawnedFromRunId: runId } }, { incomingChildGrant: { currentParentRunId: runId } }],
+            status: { in: ['queued', 'running', 'awaiting_approval'] } } }) > 0
+        const reviewProgress = await observePersistedReviewProgress()
+        if (reviewProgress) {
+          batchProgress = true
+          blockedRepeat = 0
+          todoReminders = 0
+        }
+        stagnantBatches = nextStagnantBatch(stagnantBatches, batchProgress, waitingForChild)
+        if (authorContinueStagnantBatches !== null) authorContinueStagnantBatches = nextStagnantBatch(authorContinueStagnantBatches, batchProgress, waitingForChild)
+      }
       await persistCheckpoint()
       bus.emit({ type: 'step.finish', turn, usage: result.usage })
 
@@ -3045,6 +3086,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const reviewProgress = await observePersistedReviewProgress()
         batchProgress = reviewProgress || batchProgress
         stagnantBatches = nextStagnantBatch(stagnantBatches, batchProgress, false)
+        if (authorContinueStagnantBatches !== null) authorContinueStagnantBatches = nextStagnantBatch(authorContinueStagnantBatches, batchProgress, false)
         await persistCheckpoint()
         forceWrapUpLocal = true
         await wrapUpAndFinish(pendingReviewPauseReason())
@@ -3094,17 +3136,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         return
       }
 
-      const waitingForChild = effectiveToolCalls.some(call => ['task_wait', 'task_get', 'task_list'].includes(call.name))
-        && await prisma.agentRun.count({ where: { userId: params.userId, novelId: params.novelId, OR: [{ session: { spawnedFromRunId: runId } }, { incomingChildGrant: { currentParentRunId: runId } }],
-          status: { in: ['queued', 'running', 'awaiting_approval'] } } }) > 0
-      const reviewProgress = await observePersistedReviewProgress()
-      if (reviewProgress) {
-        batchProgress = true
-        blockedRepeat = 0
-        todoReminders = 0
-      }
-      stagnantBatches = nextStagnantBatch(stagnantBatches, batchProgress, waitingForChild)
-      if (reviewProgress) await persistCheckpoint()
+
       // A just-read, current decision needs to reach the model before the stop
       // test. This consumes feedback once; it creates no progress or allowance.
       const review = currentReviewState.value
@@ -3158,7 +3190,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         // the next iteration must admit this same persistent phase before a
         // generic stagnation stop, with all original dispatch guards intact.
       }
-      if (!forceWrapUpReason && (blockedRepeat >= 4 || stagnantBatches >= 4 && !compatibilityRead && !feedbackRead && !terminalProcessingPending && !supplementalProcessingPending)) {
+      if (!forceWrapUpReason && (blockedRepeat >= 4 || (authorContinueStagnantBatches ?? stagnantBatches) >= 4 && !compatibilityRead && !feedbackRead && !terminalProcessingPending && !supplementalProcessingPending)) {
         const sameIncompleteReview = incompleteReview && review && !review.ready
           && review.chapterId === incompleteReview.chapterId && review.revision === incompleteReview.revision
           && (review.compilationId ?? null) === (incompleteReview.compilationId ?? null)

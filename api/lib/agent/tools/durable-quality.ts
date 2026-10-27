@@ -224,7 +224,7 @@ export async function executePreparedQualityWork(ctx: ToolContext, lease: RunLea
         const probe = await withRunLease(lease, tx => probeChapterReviewRevision(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId },
           { id: frozen.chapter.id, revision: frozen.chapter.revision },
           { requireQualityChannel: true, requireCurrentContinuity: true,
-            ...(frozen.compiler ? { pendingQuality: { compilationId: frozen.compiler.id, candidates: selected.length } } : {}) }))
+            ...(frozen.compiler ? { pendingQuality: { compilationId: frozen.compiler.id, candidates: selected.length } } : {}) }), { timeoutMs: 20_000 })
         canRepair = probe.open
         if (!probe.open) repairNote = probe.message
       }
@@ -242,7 +242,7 @@ export async function executePreparedQualityWork(ctx: ToolContext, lease: RunLea
         if (saved) return null
         const review = await readChapterReviewReadiness(tx, ctx, frozen.compiler?.id)
         return review?.chapterId === frozen.chapter.id && verificationQualityAdviceRequiresDecision(review, missingPatch) ? chapterReviewDecisionGuidance(review) : null
-      })
+      }, { timeoutMs: 20_000 })
       if (defer) { repairNote = defer; if (!patches.size) canRepair = false; break }
       const patchInput = missingPatch.map(item => ({ key: item.key, evidence: frozen.chapter.content.slice(item.start, item.end), explanation: item.explanation, suggestion: item.suggestion,
         ...(frozen.version >= 9 ? qualityRepairSurroundings(frozen.chapter.content, item.start, item.end) : {}) }))

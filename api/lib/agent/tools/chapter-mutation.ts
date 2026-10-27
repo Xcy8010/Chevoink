@@ -1,10 +1,11 @@
 import type { Prisma } from '@prisma/client'
 import { DataAccessError, prisma } from '../../prisma.js'
 import { activeChapterScope } from '../../data/internal.js'
+import { lockNovelActiveScope } from '../../data/novel-write-lock.js'
 import { isAgent2FeatureEnabled } from '../../agent2-feature-flags.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
 import { assertWritingTarget } from '../writing-scope.js'
-import { assertChapterManuscriptRevision, type ChapterReviewRevisionOptions } from '../chapter-review-guard.js'
+import { assertChapterManuscriptRevision, createChapterReviewReadScope, type ChapterReviewReadScope, type ChapterReviewRevisionOptions } from '../chapter-review-guard.js'
 import { recordStoryCompilerWrite } from '../story-compiler.js'
 import type { ToolContext } from './types.js'
 
@@ -18,19 +19,22 @@ export async function updateOwnedChapterAtRevision(
   mutation?: ChapterReviewRevisionOptions['mutation'],
   mergedBatch = false,
   review?: Pick<ChapterReviewRevisionOptions, 'retainedFindings' | 'editRanges'>,
+  sourceReadScope?: ChapterReviewReadScope,
 ) {
   const apply = async (tx: Prisma.TransactionClient) => {
     ctx.signal.throwIfAborted()
+    if (ctx.continuityRevision || ctx.nativeContinuityRevision) await lockNovelActiveScope(tx, ctx.novelId)
+    const readScope = sourceReadScope ?? createChapterReviewReadScope()
     const consumeContinuityRevision = ctx.continuityRevision ? await (await import('../continuity-coordinator.js'))
-      .assertContinuityRevisionApplication(tx, ctx, chapter, data.content, review) : ctx.nativeContinuityRevision
-        ? await (await import('../continuity-coordinator.js')).assertNativeContinuityRevisionApplication(tx, ctx, chapter, data.content, review) : undefined
+      .assertContinuityRevisionApplication(tx, ctx, chapter, data.content, review, readScope) : ctx.nativeContinuityRevision
+        ? await (await import('../continuity-coordinator.js')).assertNativeContinuityRevisionApplication(tx, ctx, chapter, data.content, review, readScope) : undefined
     await assertAgentManuscriptCurrent(tx, ctx)
     await assertWritingTarget(tx, ctx, { chapterId: chapter.id, effect: mutation ?? 'metadata' })
     if (typeof data.content === 'string' && data.content === chapter.content) {
-      await assertChapterManuscriptRevision(tx, ctx, chapter, { mutation, mergedBatch, ...review, after: data.content })
+      await assertChapterManuscriptRevision(tx, ctx, chapter, { mutation, mergedBatch, ...review, after: data.content, readScope })
       return tx.chapter.findFirst({ where: { id: chapter.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId, revision: chapter.revision } })
     }
-    const consumeReviewRevision = data.content !== undefined ? await assertChapterManuscriptRevision(tx, ctx, chapter, { mutation, mergedBatch, ...review,
+    const consumeReviewRevision = data.content !== undefined ? await assertChapterManuscriptRevision(tx, ctx, chapter, { mutation, mergedBatch, ...review, readScope,
       ...(typeof data.content === 'string' ? { after: data.content } : {}) }) : undefined
     ctx.signal.throwIfAborted()
     const result = await tx.chapter.updateMany({
@@ -52,5 +56,8 @@ export async function updateOwnedChapterAtRevision(
     ctx.signal.throwIfAborted()
     return updated
   }
-  return ctx.transaction ? apply(ctx.transaction) : prisma.$transaction(apply)
+  if (ctx.transaction) return apply(ctx.transaction)
+  // A body effect authenticates its complete review-source lineage before CAS.
+  // Keep that operation's bounded budget local; metadata retains the default.
+  return data.content !== undefined ? prisma.$transaction(apply, { timeout: 20_000 }) : prisma.$transaction(apply)
 }

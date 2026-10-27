@@ -114,7 +114,7 @@ export async function callDurableAuxiliary(input: {
     return replay.replay
   }
   const preparedRequest = existing ? z.object({ input: z.object({ request: z.object({ endpoint: z.string(), body: z.record(z.string(), z.unknown()) }) }) }).parse(existing.inputSnapshot).input.request : undefined
-  await withManuscriptRunLease(lease, input.assertCurrent)
+  await withManuscriptRunLease(lease, input.assertCurrent, step.startsWith('continuity_') || step.startsWith('quality_') ? { timeoutMs: 20_000 } : undefined)
   const routeTier = (input.route.tier ?? 'speed') as CreditModelTier
   const routeCustomModelId = input.route.customModelId ?? null
   const routeReasoningEffort = (input.route.reasoningEffort ?? 'low') as ModelReasoningEffort

@@ -2,7 +2,7 @@ import { readCompilerContinuitySource } from './compiler-continuity-source.js'
 import { createHash } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import { currentReviewNextStepGuidance, projectCurrentReviewNextStep } from './review-dispatch.js'
-import { DataAccessError } from '../prisma.js'
+import { DataAccessError, prisma } from '../prisma.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { continuityCheckRounds, continuityRepairRounds } from './story-compiler.js'
 import { readOriginalTaskRequest, originalTaskRunIds, originalRepairAuthority } from './original-request.js'
@@ -44,7 +44,18 @@ function qualityDecisionHash(findings: unknown[]) {
 export function qualityDecisionSnapshotHash(findings: unknown[]) {
   return runtimeJson(findings.map(item => JSON.stringify(item)).sort()).hash
 }
+/** Single chapter, same transaction, before its body CAS only. Never retain
+ * this scope on a context or reuse it after a manuscript/source write. */
+export type ChapterReviewReadScope = {
+  inheritanceScope: import('./terminal-inheritance-chain.js').TerminalInheritanceReadScope
+  terminalDraftScope: import('./terminal-draft-authority.js').TerminalDraftReadScope
+}
+export function createChapterReviewReadScope(): ChapterReviewReadScope {
+  return { inheritanceScope: { identities: new Set(), authenticating: new Set(), authenticated: new Map() }, terminalDraftScope: new WeakMap() }
+}
+
 export type ChapterReviewRevisionOptions = {
+  readScope?: ChapterReviewReadScope
   requireQualityChannel?: boolean
   /** Pending quality has no persisted report yet; check required continuity
    * before paying for a repair, without treating candidates as a report. */
@@ -159,7 +170,8 @@ export function readCurrentCompilerContinuity(compilation: {
  * Callers dispatch only the returned tools through the ordinary tool journal. */
 export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string }, compilationId?: string,
-  options?: { reviewBoundEvidence?: true; terminalDraftScope?: import('./terminal-draft-authority.js').TerminalDraftReadScope }): Promise<ChapterReviewReadiness | null> {
+  options?: { reviewBoundEvidence?: true; readScope?: ChapterReviewReadScope; terminalDraftScope?: import('./terminal-draft-authority.js').TerminalDraftReadScope }): Promise<ChapterReviewReadiness | null> {
+  const readScope = tx === prisma ? undefined : options?.readScope ?? createChapterReviewReadScope()
   const original = await readOriginalTaskRequest(tx, subject)
   const runIds = await originalTaskRunIds(tx, subject, original)
   const compilation = await tx.storyCompilation.findFirst({ where: { userId: subject.userId, novelId: subject.novelId, runId: { in: runIds },
@@ -169,7 +181,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   const chapter = await tx.chapter.findFirst({ where: { id: compilation.chapterId, authorId: subject.userId, ...activeChapterScope(subject.novelId) },
     select: { id: true, title: true, revision: true, content: true, orderIndex: true } })
   if (!chapter?.content.trim()) return null
-  const source = await readCompilerContinuitySource(tx, subject, chapter, compilation.bridge.fromChapterId, storedContinuityProtocol(compilation.validation))
+  const source = await readCompilerContinuitySource(tx, subject, chapter, compilation.bridge.fromChapterId, storedContinuityProtocol(compilation.validation), readScope?.inheritanceScope)
   if (compilation.bridge.fromChapterId && source?.revision !== compilation.bridge.sourceRevision) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '章节桥来源版本已变化，保留原编译与正文，不能自动重建或沿用旧检查交付。')
   }
@@ -354,7 +366,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     if (terminalCandidate && (validation as { continuityCriticResponse?: { terminalContentHash?: string } } | null)?.continuityCriticResponse?.terminalContentHash === evidence.current.contentHash) evidence = attachTerminalProposalInput(evidence, { taskId: terminalProposalTaskId(original.spec, original.taskId),
       preparedContext: compilation.preparedContext, validation, candidate: terminalCandidate })
     const deliveryBinding = assessment ? await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(tx,
-      { ...subject, compilationId: compilation.id }, { taskId: terminalProposalTaskId(original.spec, original.taskId), preparedContext: compilation.preparedContext }, chapter, validation, evidence, options?.terminalDraftScope) : undefined
+      { ...subject, compilationId: compilation.id }, { taskId: terminalProposalTaskId(original.spec, original.taskId), preparedContext: compilation.preparedContext }, chapter, validation, evidence, options?.terminalDraftScope ?? readScope?.terminalDraftScope, readScope?.inheritanceScope) : undefined
     const terminal = assessment ? currentTerminalReview(validation, chapter.content, evidence, deliveryBinding) : null
     if ((validation?.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion !== undefined && [9, 10].includes(Number((validation?.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion)) && !terminal) {
       readiness.continuity = 'incomplete'
@@ -506,7 +518,8 @@ export type ChapterReviewWriteProposal = { chapterId: string; revision: number; 
 /** Read-only coordination decision for the loop. It neither grants writing nor
  * consumes a finding; the ordinary effect transaction runs it again. */
 export async function readChapterReviewWriteAdmission(tx: Prisma.TransactionClient,
-  subject: { userId: string; novelId: string; runId: string }, proposal: ChapterReviewWriteProposal) {
+  subject: { userId: string; novelId: string; runId: string }, proposal: ChapterReviewWriteProposal,
+  readScope: ChapterReviewReadScope = createChapterReviewReadScope()) {
   const chapter = await tx.chapter.findFirst({ where: { id: proposal.chapterId, revision: proposal.revision, authorId: subject.userId,
     ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true, orderIndex: true } })
   if (!chapter) throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '正文版本已变化，复查写入方案不能重绑。')
@@ -519,7 +532,7 @@ export async function readChapterReviewWriteAdmission(tx: Prisma.TransactionClie
   const cycle = readReviewCycle(compilation.preparedContext, { taskId: original.taskId, userId: subject.userId,
     novelId: subject.novelId, chapterId: chapter.id })
   if (!cycle) return { kind: 'allow' as const, basis: 'original_writing' as const }
-  const readiness = await readChapterReviewReadiness(tx, subject, compilation.id)
+  const readiness = await readChapterReviewReadiness(tx, subject, compilation.id, { readScope })
   if (!readiness?.reviewCycle?.verificationStarted) return { kind: 'allow' as const, basis: 'original_writing' as const }
   let obligations = cycle.baseline?.obligations ?? []
   if (cycle.baseline && !cycle.baseline.obligations) {
@@ -574,8 +587,9 @@ export async function readChapterReviewWriteAdmission(tx: Prisma.TransactionClie
 }
 
 export async function assertChapterReviewWriteAdmission(tx: Prisma.TransactionClient,
-  subject: { userId: string; novelId: string; runId: string }, proposal: ChapterReviewWriteProposal) {
-  const decision = await readChapterReviewWriteAdmission(tx, subject, proposal)
+  subject: { userId: string; novelId: string; runId: string }, proposal: ChapterReviewWriteProposal,
+  readScope: ChapterReviewReadScope = createChapterReviewReadScope()) {
+  const decision = await readChapterReviewWriteAdmission(tx, subject, proposal, readScope)
   if (decision.kind === 'decision_required') throw new DataAccessError(409, decision.code, decision.guidance)
   return decision
 }
@@ -586,6 +600,7 @@ export async function assertChapterReviewWriteAdmission(tx: Prisma.TransactionCl
 export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number },
   options: ChapterReviewRevisionOptions) {
+  const readScope = options.readScope ?? createChapterReviewReadScope()
   await lockNovelActiveScope(tx, subject.novelId)
   const conditionalAuthority = await assertSelectionBodyEffect(tx, subject, chapter, options)
   const original = await readOriginalTaskRequest(tx, subject)
@@ -636,9 +651,9 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
   const latest = compilations.find(item => ['active', 'completed'].includes(item.status) && item.bridge)
   const quality = latest ? reports.find(report => report.compilationId === latest.id) : reports[0]
   if (options.after !== undefined) await assertChapterReviewWriteAdmission(tx, subject, { chapterId: current.id,
-    revision: current.revision, after: options.after, editRanges: options.editRanges, ...(latest ? { compilationId: latest.id } : {}) })
+    revision: current.revision, after: options.after, editRanges: options.editRanges, ...(latest ? { compilationId: latest.id } : {}) }, readScope)
   if (options.retainedFindings?.length) {
-    const source = latest?.bridge ? await readCompilerContinuitySource(tx, subject, current, latest.bridge.fromChapterId, storedContinuityProtocol(latest.validation)) : null
+    const source = latest?.bridge ? await readCompilerContinuitySource(tx, subject, current, latest.bridge.fromChapterId, storedContinuityProtocol(latest.validation), readScope.inheritanceScope) : null
     const continuity = latest?.bridge && (!latest.bridge.fromChapterId || source?.revision === latest.bridge.sourceRevision)
       ? readCurrentCompilerContinuity({ ...latest, bridge: latest.bridge }, current, source).assessment : null
     const qualityComplete = !!quality && qualityReportCheckedCurrentContent(quality, current.revision, current.content)
@@ -670,7 +685,7 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
   // allowances. A complete baseline is captured before the actual body CAS.
   if (latest && options.after !== undefined && options.after !== current.content) {
     if (quality) await lockChapterReviewDecisions(tx, quality.id)
-    const recordCycle = await prepareReviewCycleTransition(tx, subject, current, latest.id, options.after, options.editRanges)
+    const recordCycle = await prepareReviewCycleTransition(tx, subject, current, latest.id, options.after, options.editRanges, readScope)
     const mintReceipt = authority && reviewed && !receipts.some(Boolean)
     if (!mintReceipt) return recordCycle
     const before = current.content, beforeRevision = current.revision, after = options.after
@@ -707,6 +722,7 @@ export async function assertChapterReviewRevision(
   chapter: { id: string; revision: number },
   options?: ChapterReviewRevisionOptions,
 ) {
+  const readScope = options?.readScope ?? createChapterReviewReadScope()
   await lockNovelActiveScope(tx, subject.novelId)
   await assertSelectionBodyEffect(tx, subject, chapter, options ?? {}, true)
   const original = await readOriginalTaskRequest(tx, subject)
@@ -722,7 +738,7 @@ export async function assertChapterReviewRevision(
   if (typeof options?.after === 'string' && compilations.some(item => item.preparedContext && typeof item.preparedContext === 'object'
     && !Array.isArray(item.preparedContext) && 'reviewCycle' in item.preparedContext)) await assertChapterReviewWriteAdmission(tx, subject, {
     chapterId: chapter.id, revision: chapter.revision, after: options.after, editRanges: options.editRanges,
-  })
+  }, readScope)
   const { readNewDraftRevision, readNewDraftWritingAuthority } = await import('./writing-scope.js')
   if (compilations.some(item => readNewDraftRevision(item.validation))) {
     throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本任务新稿已处理过本轮自动修订决定，不再触发额外自动修订。原授权正文工具仍可依据当前正文连续修改；复核、父子任务或重新准备不能补充付费自动修订额度。剩余意见保持真实状态，不能宣称已通过。')
@@ -744,7 +760,7 @@ export async function assertChapterReviewRevision(
     if (authority && current && originalChapterReviewRequirements(original, current).continuity) {
       const bound = compilations.find(item => item.id === options.pendingQuality?.compilationId && item.status === 'active'
         && item.bridge && !item.bridge.committedAt)
-      const source = bound?.bridge ? await readCompilerContinuitySource(tx, subject, current, bound.bridge.fromChapterId, storedContinuityProtocol(bound.validation)) : null
+      const source = bound?.bridge ? await readCompilerContinuitySource(tx, subject, current, bound.bridge.fromChapterId, storedContinuityProtocol(bound.validation), readScope.inheritanceScope) : null
       const complete = bound?.bridge && (!bound.bridge.fromChapterId || source?.revision === bound.bridge.sourceRevision)
         && readCurrentCompilerContinuity({ ...bound, bridge: bound.bridge }, current, source).assessment
       if (!complete) throw new DataAccessError(409, 'REVIEW_REPAIR_RECHECK_REQUIRED', '质量报告照常保存；同一编译的当前正文尚未完成原要求连续性检查，不预约或付费自动修订。先完成 continuity_validate，再根据全部当前报告合并一次尚未执行的授权修订；累计检查与用量记录保留。')
@@ -788,7 +804,7 @@ export async function assertChapterReviewRevision(
     const assertMergedMutation = async (bound: typeof compilations[number]) => {
       if (!options?.mutation || !current || !authority) return
       const requirements = originalChapterReviewRequirements(original, current)
-      const source = bound?.bridge ? await readCompilerContinuitySource(tx, subject, current, bound.bridge.fromChapterId, storedContinuityProtocol(bound.validation)) : null
+      const source = bound?.bridge ? await readCompilerContinuitySource(tx, subject, current, bound.bridge.fromChapterId, storedContinuityProtocol(bound.validation), readScope.inheritanceScope) : null
       const continuity = bound.bridge && (!bound.bridge.fromChapterId || source?.revision === bound.bridge.sourceRevision)
         ? readCurrentCompilerContinuity({ ...bound, bridge: bound.bridge }, current, source).assessment : null
       const qualityComplete = latestQuality?.compilationId === bound.id
@@ -863,7 +879,7 @@ export async function assertChapterReviewRevision(
       && validation?.independentCheck === 'complete' && validation.checkedChapterId === current.id
       && validation.checkedRevision === current.revision && errorCount > 0 && validation.errorCount === errorCount
       && findings?.every(item => item.success)) {
-      const source = await readCompilerContinuitySource(tx, subject, current, latest.bridge.fromChapterId, storedContinuityProtocol(latest.validation))
+      const source = await readCompilerContinuitySource(tx, subject, current, latest.bridge.fromChapterId, storedContinuityProtocol(latest.validation), readScope.inheritanceScope)
       const sourceCurrent = !latest.bridge.fromChapterId || source?.revision === latest.bridge.sourceRevision
       if (sourceCurrent && compilerContinuityCoverageMatches(validation.coverage, compilerContinuityCoverage({ chapter: current,
         bridge: latest.bridge, sceneTasks: latest.sceneTasks, source, focus: typeof validation.reviewFocus === 'string' ? validation.reviewFocus : undefined, terminalCandidate: readTerminalCandidate(validation) }, storedContinuityProtocol(validation)))) {
@@ -937,8 +953,9 @@ export async function assertChapterReviewRevision(
 export async function probeChapterReviewRevision(tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number },
   options?: ChapterReviewRevisionOptions): Promise<{ open: true } | { open: false; code: string; message: string }> {
+  const readScope = options?.readScope ?? createChapterReviewReadScope()
   try {
-    await assertChapterReviewRevision(tx, subject, chapter, options)
+    await assertChapterReviewRevision(tx, subject, chapter, { ...options, readScope })
     const original = await readOriginalTaskRequest(tx, subject)
     if (!originalRepairAuthority(original)) {
       // Closure evidence narrows automatic reachability only. It never adds
@@ -963,7 +980,7 @@ export async function probeChapterReviewRevision(tx: Prisma.TransactionClient,
           && configuration.tools.some(tool => tool.function.name === 'quality_analyze')
           && configuration.toolAuthority.some(grant => grant.name === 'quality_analyze' && grant.permission === 'allow' && !grant.alwaysConfirm)
           && (await tx.agentChildExecutionGrant.findUnique({ where: { childRunId: subject.runId } }))?.kind !== 'inline'
-          && (await readChapterReviewReadiness(tx, subject))?.continuityErrorCount === 0
+          && (await readChapterReviewReadiness(tx, subject, undefined, { readScope }))?.continuityErrorCount === 0
         closed ||= configuration.mode !== 'build' || configuration.protectedChapterIds.includes(chapter.id)
           || (!contentWritable && !qualityWritable)
       }

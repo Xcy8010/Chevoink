@@ -700,8 +700,8 @@ export async function validateStoryContinuity(input: {
   expectedContinuityNativeLease?: import('./runtime-lease.js').RunLeaseToken
   focus?: string
   signal?: AbortSignal
-}, transaction?: Prisma.TransactionClient): Promise<{ checkedChapterId: string; checkedRevision: number; checkedAt: string; independentCheck: 'complete' | 'unavailable'; findings: ContinuityFindingInput[]; errorCount: number; warningCount: number; autoRepairRounds: number; checkRounds: number; effectiveReport?: import('./continuity-coordinator.js').EffectiveContinuityReport }> {
-  if (!transaction) return prisma.$transaction(tx => validateStoryContinuity(input, tx), input.reuseCachedReview ? { timeout: 20_000 } : undefined)
+}, transaction?: Prisma.TransactionClient, sourceReadScope?: import('./chapter-review-guard.js').ChapterReviewReadScope): Promise<{ checkedChapterId: string; checkedRevision: number; checkedAt: string; independentCheck: 'complete' | 'unavailable'; findings: ContinuityFindingInput[]; errorCount: number; warningCount: number; autoRepairRounds: number; checkRounds: number; effectiveReport?: import('./continuity-coordinator.js').EffectiveContinuityReport }> {
+  if (!transaction) return prisma.$transaction(tx => validateStoryContinuity(input, tx), { timeout: 20_000 })
   const db = transaction
   await lockNovelActiveScope(db, input.novelId)
   if (input.runId) await assertAgentManuscriptCurrent(db, { userId: input.userId, novelId: input.novelId, runId: input.runId })
@@ -732,9 +732,10 @@ export async function validateStoryContinuity(input: {
   if (input.expectedChapterRevision !== undefined && compilation.chapter.revision !== input.expectedChapterRevision) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '独立检查期间正文已变化，旧结果不能验证新revision。请重新检查当前正文。')
   }
+  const readScope = sourceReadScope ?? (await import('./chapter-review-guard.js')).createChapterReviewReadScope()
   const protocol = input.coverage?.protocolVersion ?? 8
   if (protocol !== 6 && protocol !== 7 && protocol !== 8 && protocol !== 9 && protocol !== 10 && protocol !== 11) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '未知连续性协议，不能升级或应用旧检查。')
-  const reviewSource = await readCompilerContinuitySource(db, input, compilation.chapter, compilation.bridge.fromChapterId, protocol)
+  const reviewSource = await readCompilerContinuitySource(db, input, compilation.chapter, compilation.bridge.fromChapterId, protocol, readScope.inheritanceScope)
   const committedReview = input.reuseCachedReview && compilation.status === 'completed'
     ? (await import('./chapter-review-guard.js')).readCurrentCompilerContinuity({ ...compilation, bridge: compilation.bridge }, compilation.chapter, reviewSource) : null
   const currentCoverage = compilerContinuityCoverage({ chapter: compilation.chapter,
@@ -855,7 +856,7 @@ export async function validateStoryContinuity(input: {
     { ...input, runId: input.runId, compilationId: compilation.id }, { taskId: terminalProposalTaskId(authorRequest.spec, authorRequest.taskId),
       preparedContext: proposalPreparation ? { ...(compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext : {}),
         terminalProposalReview: proposalPreparation.state } : compilation.preparedContext },
-    compilation.chapter, validation, terminalContext) : undefined
+    compilation.chapter, validation, terminalContext, readScope.terminalDraftScope, readScope.inheritanceScope) : undefined
   const terminalReview = terminalContext ? currentTerminalReview(validation, compilation.chapter.content, terminalContext, deliveryBinding) : null
   if ((currentParser === 9 || currentParser === 10)
     && validation.independentCheck === 'complete' && !terminalReview) {
@@ -894,10 +895,11 @@ export async function commitChapterBridge(input: {
   requireQuality?: boolean
   qualityReportId?: string
   terminalDraftScope?: import('./terminal-draft-authority.js').TerminalDraftReadScope
-}, transaction?: Prisma.TransactionClient): Promise<{ compilationId: string; chapterId: string; chapterRevision: number; skippedMemoryCount: number; retainedIssueCount: number; decisionOnly?: true; decisionChanged?: boolean; decisionProgress?: { targetId: string; beforeHash: string; afterHash: string } }> {
+}, transaction?: Prisma.TransactionClient, sourceReadScope?: import('./chapter-review-guard.js').ChapterReviewReadScope): Promise<{ compilationId: string; chapterId: string; chapterRevision: number; skippedMemoryCount: number; retainedIssueCount: number; decisionOnly?: true; decisionChanged?: boolean; decisionProgress?: { targetId: string; beforeHash: string; afterHash: string } }> {
   if (!transaction) return prisma.$transaction(tx => commitChapterBridge(input, tx), { timeout: 20_000 })
   const db = transaction
-  const terminalDraftScope = input.terminalDraftScope ?? new WeakMap()
+  const readScope = sourceReadScope ?? (await import('./chapter-review-guard.js')).createChapterReviewReadScope()
+  const terminalDraftScope = input.terminalDraftScope ?? readScope.terminalDraftScope
   await lockNovelActiveScope(db, input.novelId)
   let scope: Prisma.StoryCompilationWhereInput = {}
   if (input.runId) {
@@ -929,7 +931,7 @@ export async function commitChapterBridge(input: {
     || input.expectedContentHash !== undefined && createHash('sha256').update(chapter.content).digest('hex') !== input.expectedContentHash) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文在终态推导后变化，未提交旧版本终态。')
   }
-  const source = await readCompilerContinuitySource(db, input, compilation.chapter, compilation.bridge.fromChapterId, storedContinuityProtocol(compilation.validation))
+  const source = await readCompilerContinuitySource(db, input, compilation.chapter, compilation.bridge.fromChapterId, storedContinuityProtocol(compilation.validation), readScope.inheritanceScope)
   if (compilation.bridge.fromChapterId && (!source || source.revision !== compilation.bridge.sourceRevision)) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '桥接来源章节已变化，不能沿用旧来源提交终态。')
   }
@@ -937,10 +939,10 @@ export async function commitChapterBridge(input: {
   const probeRunId = input.runId ?? compilation.runId
   const { readChapterReviewReadiness, readCurrentCompilerContinuity, terminalReviewStateHash, recordChapterReviewDecisions, chapterReviewDecisionGuidance, lockChapterReviewDecisions } = await import('./chapter-review-guard.js')
   const currentContinuityReview = readCurrentCompilerContinuity({ ...compilation, bridge: compilation.bridge }, compilation.chapter, source)
-  let readiness = probeRunId ? await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id, { terminalDraftScope }) : null
+  let readiness = probeRunId ? await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id, { terminalDraftScope, readScope }) : null
   if (readiness?.qualityReportId) {
     await lockChapterReviewDecisions(db, readiness.qualityReportId)
-    readiness = await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId! }, compilation.id, { terminalDraftScope })
+    readiness = await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId! }, compilation.id, { terminalDraftScope, readScope })
   }
   if (readiness && !readiness.ready) {
     const required = readiness.requiredTools[0]!
@@ -966,7 +968,7 @@ export async function commitChapterBridge(input: {
         if (!decided) throw new DataAccessError(409, 'COMPILATION_NOT_FOUND', '意见决策后编译已变化，终态未提交。')
         compilation.validation = decided.validation
       }
-      readiness = await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id, { terminalDraftScope })
+      readiness = await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id, { terminalDraftScope, readScope })
     }
 
   }
@@ -1023,7 +1025,7 @@ export async function commitChapterBridge(input: {
     preparedContext: compilation.preparedContext, validation: compilation.validation, candidate: reviewedCandidate })
   const deliveryBinding = terminalRequest && probeRunId ? await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(db,
     { ...input, runId: probeRunId, compilationId: compilation.id }, { taskId: terminalProposalTaskId(terminalRequest.spec, terminalRequest.taskId), preparedContext: compilation.preparedContext },
-    { ...compilation.chapter, ...chapter }, compilation.validation, reviewedEvidence, terminalDraftScope) : undefined
+    { ...compilation.chapter, ...chapter }, compilation.validation, reviewedEvidence, terminalDraftScope, readScope.inheritanceScope) : undefined
   const terminalReview = currentTerminalReview(compilation.validation, chapter.content, reviewedEvidence, deliveryBinding)
   if (outstandingFacts || reviewedCandidate || terminalClaims(proposedTerminal).length) {
     if (!currentContinuityReview.assessment || !reviewedCandidate || !terminalReview?.deliveryEligibility.eligible

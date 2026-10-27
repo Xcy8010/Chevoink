@@ -202,14 +202,14 @@ async function finishQualityReviewResult(ctx: ToolContext, report: QualityReport
   if (selected.length) {
     ctx.signal.throwIfAborted()
     try {
-      const review = await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, report.compilationId ?? undefined))
+      const review = await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, report.compilationId ?? undefined), { timeout: 20_000 })
       if (review?.chapterId === report.chapterId && verificationQualityAdviceRequiresDecision(review, selected)) return { reviewCompleted: true,
         output: `质量报告 ${report.id}已保存。当前属于最终核验的质量建议，保留正文并逐项决定，不自动开启新一轮润色。不要为这些纯建议再调用正文写入工具；下一步按当前精确引用填写 retainedFindings 的 source、reportId、findingId、reason，再提交章节终态。涉及解释负担时，保留理由分别说明事实为何必要、当前表达为何仍合适，并考虑保留事实而减少负担的方案；只说信息不能丢不足以论证原说法，当前阶段也不因此获得改文权限。真实错误或尚未尝试原始义务仍按原证据与原权限处理，留置不能替代硬通过要求。${review ? chapterReviewDecisionGuidance(review) : decisionGuidance}${bindingSuffix}\n${renderQualityReportFindings(report)}`,
         summary: '质量核验 · 意见待决定', display: reportDisplay(report) }
       // 付费前只读探测：同一次合并修订的准入由守卫统一判定（新稿质量通道或原始修复
       // 授权），被拒时不预约、不调用修订模型，正文与报告保持原样。
       const probe = await prisma.$transaction(tx => probeChapterReviewRevision(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId },
-        { id: report.chapterId, revision: report.chapterRevision }, { requireQualityChannel: true, mutation: 'replace' }))
+        { id: report.chapterId, revision: report.chapterRevision }, { requireQualityChannel: true, mutation: 'replace' }), { timeout: 20_000 })
       if (!probe.open) return { output: `质量报告 ${report.id}已保留，自动修订未应用：${probe.message}剩余意见保留待审，不重复自动改写。${decisionGuidance}${bindingSuffix}\n${renderQualityReportFindings(report)}`,
         summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
       if (await reserveQualityAutoRepair({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, reportId: report.id })) {

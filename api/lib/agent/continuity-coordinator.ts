@@ -1,3 +1,4 @@
+import type { ChapterReviewReadScope } from './chapter-review-guard.js'
 import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
@@ -564,7 +565,8 @@ export async function prepareNativeContinuityRevisionWork(db: Prisma.Transaction
 }
 
 export async function authenticateNativeContinuityRevisionWork(db: Prisma.TransactionClient, ctx: Subject,
-  value: unknown, historical = false) {
+  value: unknown, historical = false, sourceReadScope?: ChapterReviewReadScope) {
+  const readScope = sourceReadScope ?? (await import('./chapter-review-guard.js')).createChapterReviewReadScope()
   const work = nativeContinuityRevisionWorkSchema.parse(value)
   if (work.kind === 'revision_skip') return work
   const route = (await import('./runtime-auxiliary-call.js')).auxiliaryRouteSchema.parse(work.route)
@@ -591,9 +593,9 @@ export async function authenticateNativeContinuityRevisionWork(db: Prisma.Transa
     { compilationId: work.compiler.id, chapterId: work.chapter.id, currentAudit: audit }, artifacts)
   if (!entries?.some(entry => entry.current && entry.committed && entry.inspected.complete)) throw blocked('native 集中修订原模型判断来源不能认证。')
   if (!historical) {
-    const facts = await mergedRevisionFacts(db, ctx as ToolContext, work.compiler.id)
+    const facts = await mergedRevisionFacts(db, ctx as ToolContext, work.compiler.id, readScope)
     if (!facts || facts.inputHash !== work.inputHash) throw blocked('native 集中修订前全部当前报告或正文已变化。')
-    const probe = await (await import('./chapter-review-guard.js')).probeChapterReviewRevision(db, ctx, work.chapter, { mutation: 'range', mergedBatch: true })
+    const probe = await (await import('./chapter-review-guard.js')).probeChapterReviewRevision(db, ctx, work.chapter, { mutation: 'range', mergedBatch: true, readScope })
     if (!probe.open) throw blocked(probe.message)
   }
   return { ...work, route }
@@ -626,10 +628,12 @@ export async function readNativeContinuityRevisionResult(db: Prisma.TransactionC
 
 export async function assertNativeContinuityRevisionApplication(db: Prisma.TransactionClient, ctx: ToolContext,
   chapter: { id: string; revision: number; content?: string }, after: unknown,
-  review?: Pick<import('./chapter-review-guard.js').ChapterReviewRevisionOptions, 'retainedFindings' | 'editRanges'>) {
+  review?: Pick<import('./chapter-review-guard.js').ChapterReviewRevisionOptions, 'retainedFindings' | 'editRanges'>,
+  sourceReadScope?: ChapterReviewReadScope) {
+  const readScope = sourceReadScope ?? (await import('./chapter-review-guard.js')).createChapterReviewReadScope()
   const capability = ctx.nativeContinuityRevision
   if (!capability || typeof after !== 'string') throw blocked('native 改稿没有实际正文效果。')
-  const work = await authenticateNativeContinuityRevisionWork(db, ctx, capability.work)
+  const work = await authenticateNativeContinuityRevisionWork(db, ctx, capability.work, false, readScope)
   if (work.kind !== 'merged_revision' || chapter.id !== work.chapter.id || chapter.revision !== work.chapter.revision || chapter.content !== work.chapter.content)
     throw blocked('native 改稿实际正文与原阶段不一致。')
   const parent = await db.agentOperation.findFirst({ where: { id: capability.operationId, kind: 'internal', action: 'chapter_edit_range', taskRootId: work.plan.originalTaskId } })
@@ -644,10 +648,11 @@ export async function assertNativeContinuityRevisionApplication(db: Prisma.Trans
   for (const patch of patches) expected = expected.slice(0, patch.start) + patch.newText + expected.slice(patch.start + patch.oldText.length)
   if (after !== expected) throw blocked('native 实际正文不能替换认证修订候选。')
   return (await import('./chapter-review-guard.js')).assertChapterReviewRevision(db, ctx, chapter,
-    { mutation: 'range', mergedBatch: true, after, ...review })
+    { mutation: 'range', mergedBatch: true, after, ...review, readScope })
 }
 
-async function mergedRevisionFacts(db: Prisma.TransactionClient, ctx: ToolContext, compilationId: string) {
+async function mergedRevisionFacts(db: Prisma.TransactionClient, ctx: ToolContext, compilationId: string, sourceReadScope?: ChapterReviewReadScope) {
+  const readScope = sourceReadScope ?? (await import('./chapter-review-guard.js')).createChapterReviewReadScope()
   await assertContinuityOwner(db, ctx)
   const original = await readOriginalTaskRequest(db, ctx), runs = await originalTaskRunIds(db, ctx, original)
   const saved = await db.storyCompilation.findFirst({ where: { id: compilationId, userId: ctx.userId, novelId: ctx.novelId,
@@ -657,11 +662,11 @@ async function mergedRevisionFacts(db: Prisma.TransactionClient, ctx: ToolContex
   if (!saved?.chapter || audit.parserVersion !== 10 || !plan.success || plan.data.supplementalSourceKey) return null
   const current = saved.chapter, context = object(frozen.bodies).terminalEvidence as LegacyAssessmentInput['bodies']['terminalEvidence']
   if (!context || object(saved.validation).checkedRevision !== current.revision || object(saved.validation).independentCheck !== 'complete') return null
-  const guard = await import('./chapter-review-guard.js'), readiness = await guard.readChapterReviewReadiness(db, ctx, compilationId)
+  const guard = await import('./chapter-review-guard.js'), readiness = await guard.readChapterReviewReadiness(db, ctx, compilationId, { readScope })
   const requirements = originalChapterReviewRequirements(original, current)
   if (!readiness || readiness.continuity !== 'complete' || requirements.quality && readiness.quality !== 'complete') return null
   const binding = await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(db, { ...ctx, compilationId },
-    { taskId: original.taskId, preparedContext: saved.preparedContext }, current, saved.validation, context)
+    { taskId: original.taskId, preparedContext: saved.preparedContext }, current, saved.validation, context, readScope.terminalDraftScope, readScope.inheritanceScope)
   if (!binding.reviewAuthority || !await authenticateContinuityPhasePlan(db, ctx, plan.data)) throw blocked('本轮完整报告未通过真实来源认证，未购买改稿。')
   const quality = readiness.qualityReportId ? await db.chapterQualityReport.findFirst({ where: { id: readiness.qualityReportId,
     userId: ctx.userId, novelId: ctx.novelId, chapterRevision: current.revision, compilationId }, include: { findings: true } }) : null
@@ -687,11 +692,11 @@ async function mergedRevisionFacts(db: Prisma.TransactionClient, ctx: ToolContex
 export async function prepareContinuityMergedRevision(ctx: ToolContext, compilationId: string) {
   const { prisma } = await import('../prisma.js')
   if (ctx.inlineChild || ctx.mode !== 'build' || ctx.sandboxMode === 'read_only') return null
-  const facts = await prisma.$transaction(tx => mergedRevisionFacts(tx, ctx, compilationId))
+  const facts = await prisma.$transaction(tx => mergedRevisionFacts(tx, ctx, compilationId), { timeout: 20_000 })
   if (!facts?.findings.length) return null
   const plan = facts.plan
   const probe = await prisma.$transaction(tx => import('./chapter-review-guard.js').then(module => module.probeChapterReviewRevision(tx, ctx,
-    facts.saved.chapter!, { mutation: 'range', mergedBatch: true })))
+    facts.saved.chapter!, { mutation: 'range', mergedBatch: true })), { timeout: 20_000 })
   if (plan.phases.find(phase => phase.kind === 'prose_revision')?.limit !== 1 || !probe.open)
     return { kind: 'blocked' as const, reason: !probe.open ? probe.message : '原任务没有尚未使用的集中修订阶段。' }
   const id = runtimeJson({ kind: 'continuity_merged_revision', planHash: plan.hash }).hash
@@ -707,7 +712,7 @@ export async function prepareContinuityMergedRevision(ctx: ToolContext, compilat
       if (current?.inputHash !== facts.inputHash) throw blocked('全部当前报告在改稿前已变化。')
       if (!await claimContinuityPhase(tx, ctx, { plan, chapterId: facts.input.chapterId, phase: 'prose_revision', operationRef: id,
         inputHash: facts.inputHash, ownerEpoch: String(ctx.continuityOwnerSeq) })) throw blocked('原集中修订已领取；未知结果不能重发。')
-    })
+    }, { timeout: 20_000 })
     type Observation = Parameters<NonNullable<Parameters<typeof import('../ai-service.js')['generateTextCompletion']>[2]['onObservedCompletion']>>[0]
     let observed: Observation | undefined
     try {
@@ -722,7 +727,7 @@ export async function prepareContinuityMergedRevision(ctx: ToolContext, compilat
               action: 'agent3ContinuityRepair', targetType: 'story_compilation', targetId: compilationId } })
             if (!fee || continuityModelPriceHash({ tier: fee.modelTier!, provider: fee.providerName!, modelName: fee.modelName,
               multiplierBps: fee.multiplierBps }, fee.billingSnapshot) !== plan.modelPriceHash) throw blocked('派发前实际预备费用与原冻结模型价目不一致。')
-          }) }, onObservedCompletion: value => { observed = value } })
+          }, { timeout: 20_000 }) }, onObservedCompletion: value => { observed = value } })
     } finally {
       if (observed) {
         const value = observed
@@ -753,10 +758,12 @@ export async function prepareContinuityMergedRevision(ctx: ToolContext, compilat
 
 export async function assertContinuityRevisionApplication(db: Prisma.TransactionClient, ctx: ToolContext,
   chapter: { id: string; revision: number; content?: string }, after: unknown,
-  review?: Pick<import('./chapter-review-guard.js').ChapterReviewRevisionOptions, 'retainedFindings' | 'editRanges'>) {
+  review?: Pick<import('./chapter-review-guard.js').ChapterReviewRevisionOptions, 'retainedFindings' | 'editRanges'>,
+  sourceReadScope?: ChapterReviewReadScope) {
+  const readScope = sourceReadScope ?? (await import('./chapter-review-guard.js')).createChapterReviewReadScope()
   const capability = ctx.continuityRevision
   if (!capability || typeof after !== 'string') throw blocked('缺少原集中修订实际正文。')
-  const facts = await mergedRevisionFacts(db, ctx, capability.plan.compilationId)
+  const facts = await mergedRevisionFacts(db, ctx, capability.plan.compilationId, readScope)
   const row = await db.agentArtifact.findFirst({ where: { id: capability.responseArtifactId, runId: ctx.runId, artifactType: 'continuityReview' } })
   const stored = object(object(row?.metadata).continuityMergedRevision)
   if (!facts || stored.inputHash !== facts.inputHash || chapter.id !== facts.input.chapterId || chapter.revision !== facts.input.revision
@@ -777,7 +784,7 @@ export async function assertContinuityRevisionApplication(db: Prisma.Transaction
   for (const patch of ordered) expected = expected.slice(0, patch.start) + patch.newText + expected.slice(patch.start + patch.oldText.length)
   if (after !== expected) throw blocked('实际正文效果不能替换冻结的原集中补丁。')
   return (await import('./chapter-review-guard.js')).assertChapterReviewRevision(db, ctx, chapter,
-    { mutation: 'range', mergedBatch: true, after, ...review })
+    { mutation: 'range', mergedBatch: true, after, ...review, readScope })
 }
 
 async function accountMergedRevisionUsage(db: Prisma.TransactionClient, ctx: Subject, usageId: string, compilationId: string) {

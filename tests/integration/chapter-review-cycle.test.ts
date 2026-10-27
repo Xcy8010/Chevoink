@@ -1,7 +1,10 @@
+import * as sourceReads from '../../api/lib/agent/compiler-continuity-source.js'
+import * as featureFlags from '../../api/lib/agent2-feature-flags.js'
+import { chapterWriteTool, chapterAppendTool, chapterEditRangeTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { createHash } from 'node:crypto'
 import { saveSyntheticTerminalReview } from '../support/terminal-review-fixture.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { fixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { assertChapterManuscriptRevision, readChapterReviewReadiness, recordChapterReviewDecisions, readChapterReviewWriteAdmission } from '../../api/lib/agent/chapter-review-guard.js'
@@ -17,6 +20,64 @@ const sha = (content: string) => createHash('sha256').update(content).digest('he
 // Mandatory PostgreSQL contracts: no skip/availability gate. Local unavailable
 // PostgreSQL is not passing evidence; these run on the whole same-SHA CI gate.
 describe('chapter review cycle persisted CAS and reprepare', () => {
+  it.each(['write', 'append', 'range', 'cancelled', 'changed-source'] as const)('authenticates the whole source before one atomic %s body effect with no provider or new fees', scenario => fixture(async f => {
+    vi.spyOn(featureFlags, 'isAgent2FeatureEnabled').mockImplementation(name => name === 'storyCompiler')
+    await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running', taskRootId: null, runtimeProtocolVersion: 0 } })
+    const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { revision: 4, content: 'The guard waits at the door.', wordCount: 6 } })
+    const previous = await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: chapter.volumeId,
+      title: 'Synthetic previous', content: 'The door remains closed.', revision: 2, orderIndex: 0, orderInVolume: 0 } })
+    const { compilation } = await prepareStoryCompilation({ ...f, mode: 'balanced', intentSummary: 'Revise the synthetic current chapter.' })
+    const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
+    await saveSceneTasks({ ...f, compilationId: compilation.id, tasks: [{ purpose: 'Wait', entryState: state, goal: 'Enter', obstacle: 'Door',
+      choice: 'Wait', cost: 'Time', turn: 'Open', exitState: state, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
+    await saveSyntheticTerminalReview(f, compilation.id, terminalCandidateSchema.parse({ exitState: {} }))
+    const quality = await prisma.chapterQualityReport.create({ data: { userId: f.userId, novelId: f.novelId, runId: f.runId, compilationId: compilation.id,
+      chapterId: chapter.id, chapterRevision: chapter.revision, status: 'passed', deterministicMetrics: { independentCheck: 'complete', contentHash: sha(chapter.content) } } })
+    const originalValidation = (await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).validation as Record<string, unknown>
+    const fees = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const artifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
+    const controller = new AbortController(), readSource = sourceReads.readCompilerContinuitySource
+    const scopes: unknown[] = [], elapsed: number[] = []
+    const slow = ['write', 'append', 'range'].includes(scenario)
+    vi.spyOn(sourceReads, 'readCompilerContinuitySource').mockImplementation(async (...args) => {
+      expect(args[0]).not.toBe(prisma)
+      scopes.push(args[5])
+      if (scopes.length === 1) {
+        const started = performance.now()
+        if (slow) await args[0].$queryRaw`SELECT 1 FROM pg_sleep(5.1)`
+        if (scenario === 'cancelled') controller.abort(new DOMException('Synthetic cancellation', 'AbortError'))
+        if (scenario === 'changed-source') await prisma.chapter.update({ where: { id: previous.id }, data: { content: 'A changed source.', revision: { increment: 1 } } })
+        elapsed.push(performance.now() - started)
+      }
+      return readSource(...args)
+    })
+    const provider = vi.fn(() => { throw Error('No provider is needed for a manuscript CAS') }); vi.stubGlobal('fetch', provider)
+    const context: ToolContext = { ...f, callId: 'guarded-body-' + scenario, mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', signal: controller.signal, emit: () => {} }
+    const after = scenario === 'append' ? chapter.content + '\n\nThe door opens.' : 'The guard opens the door.'
+    const effect = scenario === 'append' ? chapterAppendTool.execute(context, { chapterId: chapter.id, content: 'The door opens.' })
+      : scenario === 'range' ? chapterEditRangeTool.execute(context, { chapterId: chapter.id, oldText: 'waits at', newText: 'opens' })
+        : chapterWriteTool.execute(context, { chapterId: chapter.id, content: after })
+    if (scenario === 'cancelled') await expect(effect).rejects.toThrow()
+    else if (scenario === 'changed-source') await expect(effect).rejects.toMatchObject({ code: 'CONTINUITY_INPUT_STALE' })
+    else {
+      expect(await effect).toMatchObject({ display: { before: chapter.content, after, revision: 5 } })
+      expect(elapsed[0]).toBeGreaterThan(5000)
+      expect(scopes.length).toBeGreaterThanOrEqual(2)
+      expect(scopes[0]).toBeDefined()
+      expect(scopes.every(scope => scope === scopes[0])).toBe(true)
+    }
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ content: slow ? after : chapter.content, revision: slow ? 5 : 4 })
+    const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
+    expect((saved.validation as Record<string, unknown>).continuityCriticResponse).toEqual(originalValidation.continuityCriticResponse)
+    expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: quality.id } })).toEqual(quality)
+    expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(fees)
+    expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(ledger)
+    expect(await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })).toEqual(artifacts)
+    if (!slow) expect(saved.validation).toEqual(originalValidation)
+    expect(provider).not.toHaveBeenCalled()
+  }, undefined, '修改第一章，只要标题和正文。', { freezeWriting: true }), 30000)
+
   it.each(['legacy', 'durable'] as const)('delivers a retained final assessment after ordinary r4 to r7 edits, then preserves %s cycle on reprepare', async protocol => fixture(async f => {
     const chapterId = f.chapterId
     const body = '门锁仍在。屋里没有灯。她没有回答。'

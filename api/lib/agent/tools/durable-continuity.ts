@@ -8,7 +8,7 @@ import { continuityResponseContract, continuityResponseSystem } from '../continu
 import { readCompilerContinuitySource, compilerContinuitySourceScope } from '../compiler-continuity-source.js'
 import { continuityFindingText, continuitySourceInput, unconfirmedContinuityOutput } from '../continuity-review-context.js'
 import { z } from 'zod'
-import { readChapterReviewRevisionGuidance, continuityDecisionBinding, readChapterReviewReadiness } from '../chapter-review-guard.js'
+import { readChapterReviewRevisionGuidance, continuityDecisionBinding, readChapterReviewReadiness, createChapterReviewReadScope, type ChapterReviewReadScope } from '../chapter-review-guard.js'
 import { readOriginalTaskRequest } from '../original-request.js'
 import { terminalCoverageInput, terminalCoverageAuditVersion, terminalCoverageProofs, hasTerminalCoverageProtocol } from '../terminal-fact-coverage.js'
 import { hasContinuitySourceAuthority, continuitySourceAuthorityRule, continuityAuthorRequirements, compilerEvidenceScope, continuitySourceScopeSchema } from '../continuity-source-authority.js'
@@ -109,7 +109,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
   const { operation, input } = await readAdmittedReviewWork(lease, { operationId, action: 'continuity_validate', novelId: ctx.novelId, callId: ctx.callId })
   const { args, work } = z.object({ args: z.record(z.string(), z.unknown()), work: workSchema }).parse(input)
   const failure = (code: string, output: string) => recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code, output, summary: '连续性检查未执行' })
-  const assertCurrent = async (tx: RuntimeTx, frozen: Work) => {
+  const assertCurrent = async (tx: RuntimeTx, frozen: Work, readScope: ChapterReviewReadScope = createChapterReviewReadScope()) => {
     const compiler = frozen.compiler
     if (!compiler) {
       const current = await buildStandaloneContinuityContext(ctx, frozen.chapter.id, tx, frozen.version >= 12 ? 4 : frozen.version >= 9 ? 3 : 2)
@@ -118,7 +118,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
     }
     if (await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, compiler.id) !== compiler.hash) throw new DataAccessError(409, 'TOOL_COMPILER_STALE', '检查期间章节桥或场景已变化，原结果未应用；请重新读取章节桥。')
     const chapter = await tx.chapter.findFirst({ where: { id: frozen.chapter.id, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) }, select: { id: true, title: true, revision: true, content: true, orderIndex: true } })
-    const source = await readCompilerContinuitySource(tx, ctx, frozen.chapter, frozen.sourceId, frozen.coverage.protocolVersion === 11 ? 11 : frozen.version >= 11 ? 8 : frozen.coverage.protocolVersion === 6 ? 6 : 7)
+    const source = await readCompilerContinuitySource(tx, ctx, frozen.chapter, frozen.sourceId, frozen.coverage.protocolVersion === 11 ? 11 : frozen.version >= 11 ? 8 : frozen.coverage.protocolVersion === 6 ? 6 : 7, readScope.inheritanceScope)
     if (!chapter || runtimeJson(chapter).hash !== runtimeJson(frozen.chapter).hash || (source ? runtimeJson(source).hash : null) !== frozen.coverage.sourceHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查期间正文或来源章节已变化，未应用旧结果。请读取当前正文和章节桥后重查。')
   }
   const execute = async (frozen: Work) => {
@@ -166,7 +166,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
         return previous?.status === 'succeeded' && attempt?.status === 'succeeded' && attempt.usageReceipt?.source === 'reported' && attempt.usageReceipt.settlementStatus === 'settled'
       })
       inspected = await runContinuityEvidenceCorrection({ original: inspected, bodies: frozen.sourceBodies, billingKnown, signal: ctx.signal,
-        assertCurrent: () => withRunLease(lease, tx => assertCurrent(tx, frozen)),
+        assertCurrent: () => withRunLease(lease, tx => assertCurrent(tx, frozen), { timeoutMs: 20_000 }),
         claim: original => withRunLease(lease, async tx => {
           await assertCurrent(tx, frozen)
           const key = `durable:${operation.id}:continuity_evidence_correction`
@@ -176,7 +176,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
             content: unconfirmedContinuityOutput, metadata: runtimeJson({ version: 1, evidenceCorrectionKey: key, operationId: operation.id,
               chapterId: frozen.chapter.id, revision: frozen.chapter.revision, original: original.audit }).value } })
           return true
-        }),
+        }, { timeoutMs: 20_000 }),
         dispatch: async (system, content) => {
           const response = await call('continuity_evidence_correction', system, content, 0)
           return { content: response.content, complete: response.finishReason === 'stop' && !response.toolCalls.length }
@@ -197,7 +197,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
       inspected = await runContinuityReassessment({ original: inspected, bodies: frozen.sourceBodies, system: frozen.criticSystem, content: frozen.criticInput, reassessmentProtocol: frozen.reassessmentProtocol,
         ...(normalizationInputHash ? { normalizationInputHash } : {}),
         billingKnown, providerComplete: critic.finishReason === 'stop' && !critic.toolCalls.length, slotUsed: false, signal: ctx.signal,
-        assertCurrent: () => withRunLease(lease, tx => assertCurrent(tx, frozen)),
+        assertCurrent: () => withRunLease(lease, tx => assertCurrent(tx, frozen), { timeoutMs: 20_000 }),
         claim: request => withRunLease(lease, async tx => {
           await assertCurrent(tx, frozen)
           const key = `durable:${operation.id}:continuity_reassessment`
@@ -207,7 +207,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
             metadata: runtimeJson({ version: 1, fullReassessmentKey: key, operationId: operation.id, original: inspected!.audit,
               frozenInput: { system: frozen.criticSystem, content: frozen.criticInput, bodies: frozen.sourceBodies, coverage: frozen.coverage }, request }).value } })
           return true
-        }),
+        }, { timeoutMs: 20_000 }),
         notDispatched: () => withRunLease(lease, async tx => {
           const key = `durable:${operation.id}:continuity_reassessment`
           if (await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId,
@@ -233,11 +233,12 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
     })
     return commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {
       ctx.signal.throwIfAborted()
+      const readScope = createChapterReviewReadScope()
       await assertAgentManuscriptCurrent(tx, ctx)
       await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${compiler.id} FOR UPDATE`
       await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${frozen.chapter.id} FOR UPDATE`
       if (frozen.sourceId) await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${frozen.sourceId} FOR SHARE`
-      await assertCurrent(tx, frozen)
+      await assertCurrent(tx, frozen, readScope)
       if (frozen.version >= 8 && !frozen.cached) await markChapterReviewCycleVerification(tx, ctx, {
         compilationId: compiler.id, chapterId: frozen.chapter.id, revision: frozen.chapter.revision, contentHash: frozen.coverage.contentHash,
         kind: 'continuity', callId: ctx.callId,
@@ -245,7 +246,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
       const report = await validateStoryContinuity({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compiler.id, findings: parsed.findings,
         expectedChapterRevision: frozen.chapter.revision, expectedContinuityNativeLease: lease,
         independentCheck: parsed.structured ? 'complete' : 'unavailable', reuseCachedReview: !!frozen.cached, coverage: frozen.coverage, terminalCandidate: frozen.terminalCandidate,
-        continuityCriticResponse: inspected?.audit, focus: typeof args.focus === 'string' ? args.focus : undefined, signal: ctx.signal }, tx)
+        continuityCriticResponse: inspected?.audit, focus: typeof args.focus === 'string' ? args.focus : undefined, signal: ctx.signal }, tx, readScope)
       // durable 在提交事务里累计已完成的检查，零错误也不恢复次数。
       const nextCheckRounds = report.checkRounds + (frozen.cached ? 0 : 1)
       if (nextCheckRounds !== report.checkRounds || inspected) await tx.storyCompilation.update({ where: { id: compiler.id }, data: {
@@ -262,7 +263,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
         { errors: report.errorCount, text: `连续性完整报告：${report.errorCount} 错误、${report.warningCount} 警告。${repairGuidance}\nreportId=${continuityDecisionBinding(compiler.id, frozen.chapter.revision, { ...report, coverage: frozen.coverage })}\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` },
         await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(tx, { ...ctx, compilationId: compiler.id },
           { taskId: originalTerminalTask ? terminalProposalTaskId(originalTerminalTask.spec, originalTerminalTask.taskId) : '', preparedContext: savedTerminalBinding?.preparedContext }, frozen.chapter,
-          { ...report, ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }, frozen.sourceBodies?.terminalEvidence))
+          { ...report, ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }, frozen.sourceBodies?.terminalEvidence, readScope.terminalDraftScope, readScope.inheritanceScope))
       const recovery = incomplete && inspected && recoveryReady ? terminalReportRecoveryResult({ ...report, terminalCandidate: frozen.terminalCandidate, continuityCriticResponse: inspected.audit },
         frozen.chapter.content, frozen.sourceBodies?.terminalEvidence, frozen.sourceBodies?.previous ?? null) : null
       const toolResult: ToolResult = recovery ?? terminalFailure ?? (incomplete
@@ -278,7 +279,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
       if (!stateHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '检查后的编译状态缺失。')
       ctx.signal.throwIfAborted()
       if (toolResult.outcome !== 'failed' && frozen.sourceBodies?.terminalEvidence?.verdictProtocol !== undefined) {
-        const readiness = await readChapterReviewReadiness(tx, ctx, compiler.id)
+        const readiness = await readChapterReviewReadiness(tx, ctx, compiler.id, { readScope })
         if (readiness?.progressEvidence) toolResult.reviewProgress = { ...readiness.progressEvidence,
           phases: readiness.progressEvidence.phases.filter(phase => phase === 'continuity' || phase === 'terminal' || phase === 'terminal_supported') }
       }
@@ -308,6 +309,7 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
   if (lease.userId !== ctx.userId || lease.runId !== ctx.runId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '复核准备不属于当前执行身份。')
   let recoveredWork = false
   let work = await withRunLease(lease, async tx => {
+    const readScope = createChapterReviewReadScope()
     const existing = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: input.operationKey } } })
     if (existing) {
       recoveredWork = true
@@ -344,7 +346,7 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
     if (await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, baseline.id) !== baseline.hash) return { kind: 'rejected' as const, code: 'TOOL_COMPILER_STALE', message: '编译状态已变化，请先 chapter_bridge_get 读取当前章节桥，未执行检查。' }
     if (args.chapterId && args.chapterId !== compilation.chapter.id) return { kind: 'rejected' as const, code: 'QUALITY_TARGET_AMBIGUOUS', message: 'chapterId 与 compilationId 不对应；未检查其他章节。' }
     const sourceId = compilation.bridge.fromChapterId
-    const source = await readCompilerContinuitySource(tx, ctx, compilation.chapter, sourceId, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : 8)
+    const source = await readCompilerContinuitySource(tx, ctx, compilation.chapter, sourceId, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : 8, readScope.inheritanceScope)
     if (!compilation.chapter.content.trim() || compilation.sceneTasks.length < 1 || compilation.sceneTasks.length > 4
       || sourceId && source?.revision !== compilation.bridge.sourceRevision) return {
       kind: 'rejected' as const, code: 'CONTINUITY_INPUT_STALE', message: '正文为空、场景数量不合法或前章版本变化；先修复章节桥前置状态，不启动正文修订。',
@@ -379,7 +381,7 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
     const cached = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(continuityFindingInputSchema), coverage: coverageSchema }).safeParse(compilation.validation)
     const cacheDeliveryBinding = cached.success && terminalEvidence ? await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(tx,
       { ...ctx, compilationId: compilation.id }, { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: compilation.preparedContext },
-      compilation.chapter, compilation.validation, terminalEvidence) : undefined
+      compilation.chapter, compilation.validation, terminalEvidence, readScope.terminalDraftScope, readScope.inheritanceScope) : undefined
     const proposalCacheCurrent = !terminalEvidence || !terminalCandidate || terminalProposalCacheMatches({ spec: originalRequest.spec,
       preparedContext: compilation.preparedContext, validation: compilation.validation, chapter: compilation.chapter, source, candidate: terminalCandidate, nextContext: terminalEvidence }, cacheDeliveryBinding)
     const reusable = proposalCacheCurrent && cached.success && cached.data.checkedRevision === compilation.chapter.revision && compilerContinuityCoverageMatches(cached.data.coverage, cacheCoverage)
@@ -434,7 +436,7 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
         compilerContinuitySourceScope(source), continuitySourceInput({ previous: source?.content ?? null, current: compilation.chapter.content, terminalEvidence }), terminalReviewInput(terminalCandidate, terminalEvidence)].join('\n'),
       repair,
       cached: reusable ? cached.data.findings : null, route: null, price: null }
-  }).catch(error => {
+  }, { timeoutMs: 20_000 }).catch(error => {
     if (!(error instanceof DataAccessError) || !knownFailures.has(error.code)) throw error
     return { kind: 'rejected' as const, code: error.code, message: error.message }
   })

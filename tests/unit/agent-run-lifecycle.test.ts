@@ -39,7 +39,7 @@ const mocks = vi.hoisted(() => ({
   skillReceipt: vi.fn(async () => ({})), skillLoads: vi.fn(async (...args: unknown[]) => { void args }),
   db: {} as Record<string, unknown>, runs: new Map<string, Record<string, unknown>>(),
   buses: new Map<string, { close: () => Promise<void> }>(),
-  runEvents: [] as Array<{ runId: string; seq: number; type: string; payload: AgentStreamEvent; createdAt: Date }>,
+  runEvents: [] as Array<{ id?: string; runId: string; seq: number; type: string; payload: AgentStreamEvent; createdAt: Date }>,
   chapters: [] as Array<{ id: string; authorId: string; novelId: string; orderIndex: number; orderInVolume: number; volumeId: string; volume: { orderIndex: number; novelId: string; archivedAt: null }; title: string; content: string; revision: number; archivedAt: null }>,
   admissionPrompt: '', sourcePrompt: null as string | null,
   currentOriginal: null as { prompt: string; taskSpec: TaskSpec } | null,
@@ -88,7 +88,9 @@ vi.mock('../../api/lib/agent/tools/chapter-tools.js', () => ({ preflightChapterR
 // These loop-only fixtures contain no settled report witness.
 vi.mock('../../api/lib/agent/review-request-recovery.js', () => ({ readReviewRequestRecovery: mocks.requestRecovery }))
 vi.mock('../../api/lib/agent/cancelled-review-recovery.js', () => ({ readCancelledReviewRetirements: mocks.cancelledReviews }))
-vi.mock('../../api/lib/agent/quality-review-admission.js', () => ({ readSettledQualityReviews: mocks.settledQuality }))
+vi.mock('../../api/lib/agent/quality-review-admission.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../api/lib/agent/quality-review-admission.js')>(), readSettledQualityReviews: mocks.settledQuality,
+}))
 vi.mock('../../api/lib/agent/author-review-replacement.js', () => ({ readAuthorReviewReplacements: mocks.replacementReviews }))
 vi.mock('../../api/lib/agent/continued-review-recovery.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../api/lib/agent/continued-review-recovery.js')>(),
@@ -114,6 +116,12 @@ vi.mock('../../api/lib/prisma.js', () => {
       const clause = value as { in?: unknown[]; not?: unknown; path?: string[]; equals?: unknown }
       if (clause.path) return clause.path.reduce<unknown>((current, part) => (current as Record<string, unknown> | null)?.[part], row[key]) === clause.equals
       if (clause.in) return clause.in.includes(row[key])
+      const numeric = clause as Record<string, unknown>
+      const bounds = ['gt', 'gte', 'lt', 'lte'].filter(name => Object.hasOwn(numeric, name))
+      if (bounds.length) return typeof row[key] === 'number' && bounds.every(name => {
+        const actual = row[key] as number, bound = numeric[name]
+        return typeof bound === 'number' && (name === 'gt' ? actual > bound : name === 'gte' ? actual >= bound : name === 'lt' ? actual < bound : actual <= bound)
+      })
       if (Object.hasOwn(clause, 'not')) return row[key] !== clause.not
       throw new Error(`Unsupported fixture predicate: ${key}`)
     }
@@ -188,6 +196,11 @@ vi.mock('../../api/lib/prisma.js', () => {
     findFirst: vi.fn(async (input: Query) => matches({ id: 'session', userId: 'user', novelId: 'novel' }, input.where) ? { spawnedFromRunId: null, spawnedFromSessionId: null } : null) },
   agentMessage: { upsert: mocks.persist, create: mocks.persist, findUnique: vi.fn(async () => null), findFirst: mocks.original, findMany: vi.fn(async () => []) },
   agentRunEvent: {
+    findMany: vi.fn(async (input: Query) => {
+      const order = input.orderBy as Record<string, 'asc' | 'desc'> | undefined
+      return mocks.runEvents.filter(row => matches(row, input.where)).sort((a, b) => order?.seq === 'desc' ? b.seq - a.seq : a.seq - b.seq)
+    }),
+    count: vi.fn(async (input: Query) => mocks.runEvents.filter(row => matches(row, input.where)).length),
     findFirst: vi.fn(async (input: Query) => {
       const order = input.orderBy as Record<string, 'asc' | 'desc'> | undefined
       return mocks.runEvents.filter(row => matches(row, input.where)).sort((a, b) => {
@@ -4367,5 +4380,156 @@ describe('failed tool observations retain known partial results', () => {
     expect(events().filter(event => event.type === 'task.spawned')).toHaveLength(0)
     expect(admitted.execute).toHaveBeenCalledOnce()
     expect(mocks.chat).not.toHaveBeenCalled(); expect(mocks.modelRuntime).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('authenticated human Continue has an ordinary local convergence window', () => {
+  function failed20(priorBatches = 0) {
+    const prompt = '修改第一章', taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt })
+    taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 1, chapterId: 'c' }], titleAndBodyOnly: false, repairAuthorized: true }
+    mocks.currentOriginal = { prompt, taskSpec }; mocks.chapters[0].revision = 3
+    const feedback = { key: 'b'.repeat(64), taskId: taskSpec.id, userId: 'user', novelId: 'novel', chapterId: 'c',
+      orderIndex: 1, compilationId: 'comp', revision: 3, contentHash: persistedContentHash(mocks.chapters[0].content) }
+    const observedChapterRange = { targetId: 'c', contentHash: feedback.contentHash, start: 0, end: mocks.chapters[0].content.length }
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 2000,
+      activeExecutionMs: 100, stagnantBatches: 4 + priorBatches, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+      writeProgress: 3, writeBaseline: 0, readProgress: 7, readBaseline: 0, progressSignatures: ['read-range:' + JSON.stringify(['c', feedback.contentHash]) + ':0-' + observedChapterRange.end], consumedReviewDecisionFeedback: [feedback.key],
+      reviewAttempts: ['original-paid-first', 'original-paid-second'], pendingReviews: [], toolRestrictions: [] }
+    const usage = { promptTokens: 1000, completionTokens: 50, totalTokens: 1050, checkpoint }
+    const at = (seq: number) => new Date(checkpoint.runStartedAt + seq * 10)
+    const add = (id: string, seq: number, body: AgentStreamEventBody) => mocks.runEvents.push({ id, runId: 'run', seq,
+      type: body.type, payload: { ...body, runId: 'run', seq, ts: at(seq).toISOString() }, createdAt: at(seq) })
+    add('failed20', 1, { type: 'run.finished', status: 'failed', usage: { promptTokens: 1000, completionTokens: 50, totalTokens: 1050 }, artifacts: [], outputSummary: '' })
+    if (priorBatches) {
+      add('first-author-start', 2, { type: 'run.started', agent: { type: 'test', title: 'Test', model: 'speed' }, mode: 'build', title: 'Continue',
+        authorContinue: { eventId: 'failed20', afterSeq: 1 } })
+      for (let index = 0; index < priorBatches; index++) add('finished-batch-' + index, index + 3, { type: 'step.finish', turn: 21 + index,
+        usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10 } })
+    }
+    const state = { ...readiness('complete', 'complete', 3), continuityErrorCount: 1, decisionPending: true, decisionFeedback: feedback }
+    mocks.reviewReadiness.mockResolvedValue(state)
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 20 + priorBatches, startedAt: new Date(checkpoint.runStartedAt), usage })
+    const params = (author = true) => ({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build' as const,
+      prompt: '继续', resume: true, ...(author ? { authorContinue: { eventId: 'failed20', afterSeq: Math.max(...mocks.runEvents.map(event => event.seq)) } } : {}) })
+    const protectedEvidence = () => expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: {
+      consumedReviewDecisionFeedback: [feedback.key], reviewAttempts: checkpoint.reviewAttempts, tokenBudget: 500, maxTurns: 1 } })
+    return { checkpoint, feedback, state, usage, params, add, observedChapterRange, protectedEvidence }
+  }
+
+  it.each(['chapter_edit_range', 'chapter_write'] as const)('allows read then %s CAS at old stagnant four without consuming feedback or paying for another check', async action => {
+    const f = failed20(), before = mocks.chapters[0].content, after = 'Actual revised synthetic body.'
+    const cas = vi.fn(async () => {
+      expect(mocks.chapters[0]).toMatchObject({ revision: 3, content: before })
+      Object.assign(mocks.chapters[0], { revision: 4, content: after })
+    })
+    const read = tool('chapter_read', async () => { f.protectedEvidence(); return { output: before, reviewDecisionFeedback: f.feedback, observedChapterRange: f.observedChapterRange } })
+    const write = tool(action, async () => {
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { stagnantBatches: 5, writeProgress: 3 } })
+      await cas()
+      return { output: 'Body saved at r4; no new assessment or commit claimed.', display: { kind: 'chapterDiff', chapterId: 'c', chapterTitle: 'Synthetic',
+        before, after, revision: 4, appliedDirectly: true } }
+    }, false)
+    const critic = tool('continuity_validate', async () => { throw Error('Original paid claims must not dispatch again') })
+    const commit = tool('chapter_bridge_commit', async () => { throw Error('No terminal commit has been requested') }, false)
+    mocks.tools = [read, write, critic, commit]
+    queue(response('', [call('current-read', read.name, '{"chapterId":"c"}')]), response('', [call('ordinary-patch', action,
+      action === 'chapter_edit_range' ? JSON.stringify({ chapterId: 'c', oldText: before, newText: after }) : JSON.stringify({ chapterId: 'c', content: after }))]))
+    mocks.chat.mockImplementationOnce(async () => {
+      expect(cas).toHaveBeenCalledOnce()
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { stagnantBatches: 0, writeProgress: 4 } })
+      throw new DOMException('Synthetic user stop after the confirmed effect', 'AbortError')
+    })
+    await executeAgentRun(f.params())
+    expect(read.execute).toHaveBeenCalledOnce(); expect(write.execute).toHaveBeenCalledOnce(); expect(cas).toHaveBeenCalledOnce()
+    expect(critic.execute).not.toHaveBeenCalled(); expect(commit.execute).not.toHaveBeenCalled()
+    expect(mocks.chapters[0]).toMatchObject({ content: after, revision: 4 })
+    f.protectedEvidence()
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1070, checkpoint: { stagnantBatches: 0, writeProgress: 4 } })
+    expect(events().at(-1), JSON.stringify({ modelCalls: mocks.chat.mock.calls.length, notices: events().filter(event => event.type === 'error') })).toMatchObject({ type: 'run.paused' })
+  })
+
+  it.each([0, 1, 3])('uses only the remaining normal read-only window after %s finished batches of the same admission', async prior => {
+    const f = failed20(prior), read = tool('chapter_read', async () => ({ output: 'Same current r3 report; observation is not an effect.', reviewDecisionFeedback: f.feedback, observedChapterRange: f.observedChapterRange }))
+    const critic = tool('continuity_validate', async () => { throw Error('No new paid check') }), commit = tool('chapter_bridge_commit', async () => { throw Error('No new commit') }, false)
+    mocks.tools = [read, critic, commit]
+    queue(...Array.from({ length: 5 }, (_, index) => response('', [call('read-' + index, read.name, JSON.stringify({ chapterId: 'c', start: index }))])))
+    await executeAgentRun(f.params())
+    expect(mocks.chat).toHaveBeenCalledTimes(4 - prior)
+    expect(read.execute).toHaveBeenCalledTimes(4 - prior)
+    expect(critic.execute).not.toHaveBeenCalled(); expect(commit.execute).not.toHaveBeenCalled()
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { stagnantBatches: 8, writeProgress: 3 } })
+    f.protectedEvidence()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    if (prior === 0) {
+      const stopped = structuredClone(mocks.runs.get('run')!)
+      mocks.chat.mockReset(); mocks.update.mockResolvedValueOnce(stopped as never)
+      queue(response('', [call('replayed-admission-read', read.name, '{"chapterId":"c","start":99}')]))
+      await executeAgentRun(f.params())
+      expect(mocks.chat).toHaveBeenCalledOnce()
+      expect(read.execute).toHaveBeenCalledTimes(5)
+      f.protectedEvidence()
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { stagnantBatches: 9, writeProgress: 3 } })
+      expect(critic.execute).not.toHaveBeenCalled(); expect(commit.execute).not.toHaveBeenCalled()
+    }
+  })
+
+  it.each([0, 1])('persists the new batch count before finish and restores only three remaining batches from historical %s', async historical => {
+    const f = failed20()
+    f.checkpoint.stagnantBatches = historical
+    const read = tool('chapter_read', async () => ({ output: 'Same known body; no new progress.', reviewDecisionFeedback: f.feedback, observedChapterRange: f.observedChapterRange }))
+    const critic = tool('continuity_validate', async () => { throw Error('No new paid check') })
+    mocks.tools = [read, critic]
+    let saved: typeof mocks.runs extends Map<string, infer Row> ? Row | undefined : never
+    mocks.emit.mockImplementation(body => {
+      if (body.type === 'step.finish' && !saved) saved = structuredClone(mocks.runs.get('run')!)
+    })
+    queue(response('', [call('before-crash-read', read.name, '{"chapterId":"c","start":0}')]))
+    mocks.chat.mockImplementationOnce(async () => { throw new DOMException('Synthetic crash after first persisted finish', 'AbortError') })
+    await executeAgentRun(f.params())
+    expect(saved?.usage).toMatchObject({ checkpoint: { stagnantBatches: historical + 1, writeProgress: 3,
+      consumedReviewDecisionFeedback: [f.feedback.key], reviewAttempts: f.checkpoint.reviewAttempts } })
+    const finished = mocks.runEvents.find(event => event.type === 'step.finish')!
+    expect(finished).toBeDefined()
+    // Reconstruct the exact post-finish crash boundary, excluding the later synthetic stop.
+    mocks.runEvents.splice(0, mocks.runEvents.length, ...mocks.runEvents.filter(event => event.seq <= finished.seq))
+    mocks.chat.mockReset(); mocks.update.mockResolvedValueOnce(saved as never)
+    queue(...Array.from({ length: 4 }, (_, index) => response('', [call('after-crash-read-' + index, read.name,
+      JSON.stringify({ chapterId: 'c', start: index + 1 }))])))
+    await executeAgentRun(f.params())
+    expect(mocks.chat).toHaveBeenCalledTimes(3)
+    expect(read.execute).toHaveBeenCalledTimes(4)
+    expect(critic.execute).not.toHaveBeenCalled()
+    f.protectedEvidence()
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { stagnantBatches: historical + 4, writeProgress: 3 } })
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+  })
+
+  it.each(['automatic', 'wrong-event', 'wrong-sequence', 'newer-terminal'] as const)('%s cannot replenish the original historical stop window', async scenario => {
+    const f = failed20()
+    if (scenario === 'newer-terminal') f.add('newer-stop', 2, { type: 'run.paused', reason: 'user_stop' })
+    const read = tool('chapter_read', async () => ({ output: 'Current read only', reviewDecisionFeedback: f.feedback, observedChapterRange: f.observedChapterRange }))
+    const write = tool('chapter_write', async () => { throw Error('Unadmitted grace cannot reach a second main turn') }, false)
+    mocks.tools = [read, write]
+    queue(response('', [call('one-read', read.name, '{"chapterId":"c"}')]), response('', [call('unadmitted-write', write.name, '{"chapterId":"c","content":"unadmitted"}')]))
+    const params = f.params(scenario !== 'automatic')
+    if (scenario === 'wrong-event') params.authorContinue!.eventId = 'missing-stop'
+    if (scenario === 'wrong-sequence') params.authorContinue!.afterSeq = 0
+    await executeAgentRun(params)
+    expect(mocks.chat).toHaveBeenCalledOnce(); expect(write.execute).not.toHaveBeenCalled()
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { stagnantBatches: 5, writeProgress: 3 } })
+    f.protectedEvidence()
+  })
+
+  it('keeps unknown pending outcome ahead of the new human local window with zero model/tool dispatch', async () => {
+    const f = failed20(), unknown = { compilationId: 'comp', chapterId: 'c', revision: 3, toolName: 'continuity_validate' as const, callId: 'old-unknown' }
+    Object.assign(f.checkpoint, { pendingReviews: [unknown] })
+    const read = tool('chapter_read', async () => { throw Error('Unknown outcome blocks ordinary execution') })
+    mocks.tools = [read]
+    await executeAgentRun(f.params())
+    expect(mocks.chat).not.toHaveBeenCalled(); expect(read.execute).not.toHaveBeenCalled()
+    expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1050, checkpoint: { stagnantBatches: 4, pendingReviews: [unknown] } })
+    f.protectedEvidence()
+    expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
   })
 })

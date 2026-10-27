@@ -13,6 +13,7 @@ import { selectAutomaticQualityFindings, qualityAutoRepairPending } from '../../
 const guard = vi.hoisted(() => ({ probe: vi.fn(), assert: vi.fn(), channel: vi.fn(), guidance: vi.fn(),
   readiness: vi.fn().mockResolvedValue(null), decisions: vi.fn().mockReturnValue('当前报告须逐项写明保留原因。') }))
 vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({
+  createChapterReviewReadScope: () => ({ inheritanceScope: { identities: new Set(), authenticating: new Set(), authenticated: new Map() }, terminalDraftScope: new WeakMap() }),
   probeChapterReviewRevision: guard.probe, assertChapterReviewRevision: guard.assert,
   isChapterRevisionChannelOpen: guard.channel, readChapterReviewRevisionGuidance: guard.guidance,
   readChapterReviewReadiness: guard.readiness, chapterReviewDecisionGuidance: guard.decisions,

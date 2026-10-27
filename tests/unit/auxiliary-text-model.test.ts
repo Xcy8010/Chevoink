@@ -15,6 +15,7 @@ vi.mock('../../api/lib/agent/humanity-quality.js', async original => ({
 // 自动修订前的准入探测在真实事务里读守卫表；本组只验证模型运行时继承，按模块隔离守卫。
 const guard = vi.hoisted(() => ({ probe: vi.fn(async () => ({ open: true })) }))
 vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({
+  createChapterReviewReadScope: () => ({ inheritanceScope: { identities: new Set(), authenticating: new Set(), authenticated: new Map() }, terminalDraftScope: new WeakMap() }),
   probeChapterReviewRevision: guard.probe, assertChapterReviewRevision: vi.fn(async () => undefined),
   isChapterRevisionChannelOpen: vi.fn(async () => true), readChapterReviewRevisionGuidance: vi.fn(async () => ''),
   readChapterReviewReadiness: vi.fn(async () => null),

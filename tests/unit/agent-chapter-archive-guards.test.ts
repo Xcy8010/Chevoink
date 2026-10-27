@@ -26,7 +26,8 @@ vi.mock('../../api/lib/data/internal.js', async original => ({
 vi.mock('../../api/lib/data/volume.js', () => ({ resolveChapterPlacement: m.placement, placeCreatedChapter: m.place }))
 vi.mock('../../api/lib/agent/story-memory.js', () => ({ enqueueChapterMemoryExtraction: m.memory }))
 vi.mock('../../api/lib/agent/story-compiler.js', () => ({ recordStoryCompilerWrite: m.compiler }))
-vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({ assertChapterManuscriptRevision: m.reviewGuard }))
+vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({
+  createChapterReviewReadScope: () => ({ inheritanceScope: { identities: new Set(), authenticating: new Set(), authenticated: new Map() }, terminalDraftScope: new WeakMap() }), assertChapterManuscriptRevision: m.reviewGuard }))
 vi.mock('../../api/lib/agent/craft-library.js', () => ({ assertCraftOutputSafe: m.craft }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ isAgent2FeatureEnabled: m.flags }))
 vi.mock('../../api/lib/agent/runtime-operations.js', () => ({ prepareOperation: m.prepare, commitOperationEffect: m.commit, recordToolFailure: m.failure }))
@@ -122,6 +123,61 @@ function expectCas() {
   expect(data.revision).toEqual({ increment: 1 })
   for (const key of ['archivedAt', 'archivedByImportId', 'status', 'visibility', 'publishedContent', 'publishedRevision']) expect(data).not.toHaveProperty(key)
 }
+
+describe('chapter body source-authentication transaction boundary', () => {
+  it.each(actions)('%s completes one guarded CAS after source work exceeds five seconds', async action => {
+    let timeout = 5000, elapsed = 0
+    const consume = vi.fn().mockResolvedValue(undefined)
+    m.db.$transaction.mockImplementation(async (work, options) => {
+      timeout = options?.timeout ?? 5000
+      return work(tx)
+    })
+    m.reviewGuard.mockImplementation(async () => {
+      // Model actual elapsed source reads without sleeping or weakening the guard.
+      elapsed += 6100
+      if (elapsed > timeout) throw Object.assign(new Error('Synthetic expired transaction'), { code: 'P2028' })
+      return consume
+    })
+    const after = action === 'chapter_append' ? 'Before\n\nAfter' : 'After'
+    m.tx.chapter.findFirst.mockImplementation(async ({ where }) => where.revision === 5 ? { ...row, content: after, revision: 5 } : row)
+    const result = action === 'chapter_write' ? await chapterWriteTool.execute(ctx(), { chapterId: 'c', content: 'After' })
+      : action === 'chapter_append' ? await chapterAppendTool.execute(ctx(), { chapterId: 'c', content: 'After' })
+        : await chapterEditRangeTool.execute(ctx(), { chapterId: 'c', oldText: 'Before', newText: 'After' })
+    expect(result.display).toMatchObject({ before: 'Before', after, revision: 5 })
+    expect(elapsed).toBeGreaterThan(5000)
+    expect(m.db.$transaction).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { timeout: 20_000 })
+    expect(m.reviewGuard).toHaveBeenCalledOnce()
+    expect(m.reviewGuard.mock.calls[0][0]).toBe(tx)
+    expect(m.tx.chapter.updateMany).toHaveBeenCalledOnce()
+    expect(consume).toHaveBeenCalledOnce()
+    expect(m.tx.chapter.updateMany.mock.invocationCallOrder[0]).toBeLessThan(consume.mock.invocationCallOrder[0])
+    expectCas()
+  })
+
+  it.each(actions)('%s preserves the caller effect transaction without nesting or retrying', async action => {
+    const consume = vi.fn().mockResolvedValue(undefined)
+    m.reviewGuard.mockResolvedValue(consume)
+    const context = ctx({ transaction: tx })
+    const result = action === 'chapter_write' ? await chapterWriteTool.execute(context, { chapterId: 'c', content: 'After' })
+      : action === 'chapter_append' ? await chapterAppendTool.execute(context, { chapterId: 'c', content: 'After' })
+        : await chapterEditRangeTool.execute(context, { chapterId: 'c', oldText: 'Before', newText: 'After' })
+    expect(result.outcome).toBeUndefined()
+    expect(m.db.$transaction).not.toHaveBeenCalled()
+    expect(m.reviewGuard).toHaveBeenCalledOnce()
+    expect(m.reviewGuard.mock.calls[0][0]).toBe(tx)
+    expect(m.tx.chapter.updateMany).toHaveBeenCalledOnce()
+    expect(consume).toHaveBeenCalledOnce()
+    expectCas()
+  })
+
+  it('keeps a metadata-only rename on the ordinary transaction budget', async () => {
+    await chapterRenameTool.execute(ctx(), { chapterId: 'c', title: 'After' })
+    expect(m.db.$transaction).toHaveBeenCalledExactlyOnceWith(expect.any(Function))
+    expect(m.reviewGuard).not.toHaveBeenCalled()
+    expect(m.tx.chapter.updateMany).toHaveBeenCalledOnce()
+    expectCas()
+  })
+})
 
 describe('legacy Agent chapter archive guards', () => {
   it.each(['legacy', 'durable'].flatMap(executor => actions.map(action => ({ executor, action }))))('projects the same applied body facts for $executor $action without changing canonical results', async ({ executor, action }) => {

@@ -105,7 +105,7 @@ export async function commitOperationEffect(token: RunLeaseToken, operationId: s
   const manuscript = operation && [...STRUCTURE_MUTATIONS, 'chapter_create', 'chapter_rename', 'chapter_write', 'chapter_append', 'chapter_edit_range',
     'novel_create', 'novel_publish', 'novel_archive', 'research_dossier_build', 'creative_critique', 'creative_revision_draft', 'story_compiler_prepare', 'scene_task_build', 'chapter_bridge_get', 'chapter_bridge_commit', 'quality_analyze', 'continuity_validate', 'changeset_apply', 'changeset_rollback'].includes(operation.action)
   const effect = (tx: RuntimeTx) => commitOperationEffectInTransaction(tx, token, operationId, inputHash, work)
-  if (operation && ['chapter_bridge_get', 'chapter_bridge_commit'].includes(operation.action)) return withManuscriptRunLease(token, effect, { timeoutMs: 20_000 })
+  if (operation && ['chapter_bridge_get', 'chapter_bridge_commit', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'quality_analyze', 'continuity_validate'].includes(operation.action)) return withManuscriptRunLease(token, effect, { timeoutMs: 20_000 })
   return (manuscript ? withManuscriptRunLease : withRunLease)(token, effect)
 }
 

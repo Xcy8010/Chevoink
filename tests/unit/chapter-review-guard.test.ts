@@ -1,10 +1,12 @@
+import { beginReviewCycle } from '../../api/lib/agent/review-cycle.js'
+import * as sourceReads from '../../api/lib/agent/compiler-continuity-source.js'
 import { createHash } from 'node:crypto'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import type { Prisma } from '@prisma/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as original from '../../api/lib/agent/original-request.js'
 import * as lock from '../../api/lib/data/novel-write-lock.js'
-import { assertChapterManuscriptRevision, assertChapterReviewRevision, probeChapterReviewRevision, continuityDecisionBinding } from '../../api/lib/agent/chapter-review-guard.js'
+import { assertChapterManuscriptRevision, assertChapterReviewRevision, probeChapterReviewRevision, continuityDecisionBinding, readChapterReviewReadiness, originalChapterReviewRequirements } from '../../api/lib/agent/chapter-review-guard.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { readNewDraftRevision, readNewDraftWritingAuthority, prohibitsNewDraftRevision } from '../../api/lib/agent/writing-scope.js'
@@ -112,6 +114,34 @@ describe('one atomic factual correction in the original new draft', () => {
     f.db.chapterQualityReport.findMany.mockResolvedValue([report] as never)
     return report
   }
+  it('shares inheritance authentication only inside each pre-CAS chapter admission while rereading current source', async () => {
+    const f = fixture(), quality = completeQuality(f, 1)
+    const baseline = await readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)
+    expect(baseline?.ready).toBe(true)
+    f.compilation.preparedContext.reviewCycle = beginReviewCycle({ taskId: f.spec.id, userId: f.subject.userId,
+      novelId: f.subject.novelId, chapterId: f.chapter.id }, { compilationId: f.compilation.id, revision: f.chapter.revision,
+      content: f.chapter.content, ready: true, binding: baseline!.decisionBinding!, required: originalChapterReviewRequirements(f.request, f.chapter),
+      findings: baseline!.reviewCycleFindings ?? [], obligations: baseline!.requiredDecisions ?? [] })
+    const originalRevision = f.chapter.revision
+    const sourceRead = vi.spyOn(sourceReads, 'readCompilerContinuitySource').mockResolvedValue(null)
+    const retainedFindings = [{ source: 'quality' as const, reportId: quality.id, findingId: quality.findings[0].id, reason: 'Keep the original voice.' }]
+    const first = await assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'range', after: 'First legitimate change.', retainedFindings })
+    expect(first).toBeTypeOf('function')
+    const firstCalls = sourceRead.mock.calls.slice()
+    expect(firstCalls).toHaveLength(4)
+    const firstScope = firstCalls[0][5]
+    expect(firstScope).toMatchObject({ identities: expect.any(Set), authenticated: expect.any(Map), authenticating: expect.any(Set) })
+    for (const call of firstCalls) { expect(call[0]).toBe(f.tx); expect(call[5]).toBe(firstScope) }
+    const second = await assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'range', after: 'Second legitimate change.', retainedFindings })
+    expect(second).toBeTypeOf('function')
+    const nextCalls = sourceRead.mock.calls.slice(firstCalls.length)
+    expect(nextCalls).toHaveLength(4)
+    expect(nextCalls[0][5]).not.toBe(firstScope)
+    for (const call of nextCalls) { expect(call[0]).toBe(f.tx); expect(call[5]).toBe(nextCalls[0][5]) }
+    // Neither admission consumed a revision or cached the whole readiness.
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    expect(f.chapter.revision).toBe(originalRevision)
+  })
   it('separates repeated original manuscript authority from the bounded automatic decision and paid counters', async () => {
     const f = fixture(), report = completeQuality(f, 2)
     f.validation.checkRounds = 3
