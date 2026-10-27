@@ -279,3 +279,129 @@ export async function readReviewRequestRecovery(tx: Prisma.TransactionClient,
   return (await readReviewRequestRecoveryEvidence(tx, subject, pending)).filter(item => admission.at > item.resultAt)
     .map(({ receipt, resultAt: _resultAt, ...item }) => ({ ...item, reconciliation: { ...receipt, admissionId: admission.id } }))
 }
+
+/** Retire a received successful request, never grant another paid attempt. */
+export async function readCompletedReviewRequestRecovery(tx: Prisma.TransactionClient,
+  subject: { userId: string; novelId: string; runId: string }, pending: readonly PendingReviewCall[]) {
+  if (!pending.length) return []
+  const original = await readOriginalTaskRequest(tx, subject), ids = await originalTaskRunIds(tx, subject, original)
+  if (!await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId, status: 'running' } })
+    || await tx.agentProviderAttempt.count({ where: { runId: { in: ids }, status: { in: ['prepared', 'dispatching', 'unknown'] } } })) return []
+  const history = await tx.agentRunEvent.findMany({ where: { runId: { in: ids }, type: { in: ['tool.call', 'tool.result'] },
+    OR: [...new Set(pending.map(item => item.callId))].map(callId => ({ payload: { path: ['callId'], equals: callId } })) },
+    orderBy: [{ createdAt: 'asc' }, { seq: 'asc' }] })
+  const guard = await import('./chapter-review-guard.js'), lifecycle = await import('./assessment-response-lifecycle.js')
+  const states = new Map<string, Awaited<ReturnType<typeof guard.readChapterReviewReadiness>>>()
+  const completed: PendingReviewCall[] = []
+  for (const item of pending) {
+    const calls = history.filter(row => row.type === 'tool.call' && object(row.payload).callId === item.callId)
+    const results = history.filter(row => row.type === 'tool.result' && object(row.payload).callId === item.callId)
+    if (calls.length !== 1 || results.length !== 1 || !item.compilationId) continue
+    const call = calls[0], result = results[0], payload = object(result.payload), args = object(object(call.payload).args)
+    if (call.runId !== result.runId || result.seq <= call.seq || result.createdAt < call.createdAt || payload.ok !== true
+      || payload.toolName !== item.toolName || object(call.payload).toolName !== item.toolName
+      || args.compilationId !== undefined && args.compilationId !== item.compilationId
+      || args.chapterId !== undefined && args.chapterId !== item.chapterId
+      || args.compilationId !== item.compilationId && args.chapterId !== item.chapterId) continue
+    const chapter = await tx.chapter.findFirst({ where: { id: item.chapterId, authorId: subject.userId, ...activeChapterScope(subject.novelId) } })
+    const compiler = await tx.storyCompilation.findFirst({ where: { id: item.compilationId, userId: subject.userId, novelId: subject.novelId,
+      runId: { in: ids }, chapterId: item.chapterId }, select: { validation: true } })
+    const repair = item.toolName === 'quality_analyze' ? (await import('../../../shared/agent-applied-body-change.js')).qualityAppliedBodyChange(payload.display) : null
+    const repaired = repair?.sourceRevision === item.revision && repair.targetRevision === chapter?.revision && repair.after === chapter.content && repair.chapterId === chapter.id
+    if (!chapter || !compiler || chapter.revision !== item.revision && !repaired) continue
+    const scope = object(object(original.spec).scope), writing = object(scope.writing)
+    if (scope.novelId !== subject.novelId || !(writing.kind === 'bounded' ? Array.isArray(writing.targets) && writing.targets.some(value => {
+      const target = object(value)
+      return target.orderIndex === chapter.orderIndex && (target.chapterId == null || target.chapterId === chapter.id)
+    }) : writing.kind === 'unbounded' || Array.isArray(scope.chapterIds) && scope.chapterIds.includes(chapter.id))) continue
+    const key = JSON.stringify([item.compilationId, chapter.id, chapter.revision])
+    if (!states.has(key)) states.set(key, await guard.readChapterReviewReadiness(tx, subject, item.compilationId, { readScope: guard.createChapterReviewReadScope() }))
+    const state = states.get(key)
+    if (!state || state.chapterId !== chapter.id || state.revision !== chapter.revision
+      || state.decisionBinding?.contentHash !== runtimeJson({ content: chapter.content }).hash
+      || (item.toolName === 'continuity_validate' ? state.continuity : state.quality) !== 'complete' && !repaired) continue
+    const proof = object(payload.reviewRequestFinished)
+    if (item.toolName === 'quality_analyze') {
+      if (payload.reviewRequestFinished !== undefined && (proof.version !== 1 || proof.chapterId !== chapter.id || proof.revision !== item.revision
+        || proof.contentHash !== createHash('sha256').update(repaired && repair ? repair.before : chapter.content).digest('hex')
+        || !Array.isArray(proof.usageIds) || !proof.usageIds.length || new Set(proof.usageIds).size !== proof.usageIds.length
+        || proof.usageIds.some(id => typeof id !== 'string'))) continue
+      const report = await tx.chapterQualityReport.findFirst({ where: { id: repaired ? String(object(payload.display).reportId) : state.qualityReportId!, userId: subject.userId, novelId: subject.novelId,
+        runId: { in: ids }, chapterId: chapter.id, chapterRevision: chapter.revision, compilationId: item.compilationId },
+        include: { findings: true, chapter: { select: { title: true } } } })
+      const sourceCallId = object(object(report?.deterministicMetrics).criticResponse).callId
+      if (!report || typeof sourceCallId !== 'string' || typeof report.runId !== 'string' || !ids.includes(report.runId)) continue
+      const cached = sourceCallId !== item.callId || report.runId !== call.runId
+      if (cached && repaired) continue
+      const sourceHistory = cached ? await tx.agentRunEvent.findMany({ where: { runId: report.runId, type: { in: ['tool.call', 'tool.result'] },
+        payload: { path: ['callId'], equals: sourceCallId } }, orderBy: { seq: 'asc' } }) : [call, result]
+      const sourceCalls = sourceHistory.filter(row => row.type === 'tool.call' && object(row.payload).callId === sourceCallId)
+      const sourceResults = sourceHistory.filter(row => row.type === 'tool.result' && object(row.payload).callId === sourceCallId)
+      if (sourceCalls.length !== 1 || sourceResults.length !== 1) continue
+      const sourceCall = sourceCalls[0], sourceResult = sourceResults[0], sourceArgs = object(object(sourceCall.payload).args)
+      if (sourceCall.runId !== report.runId || sourceResult.runId !== report.runId || sourceResult.seq <= sourceCall.seq
+        || sourceResult.createdAt < sourceCall.createdAt || object(sourceCall.payload).toolName !== 'quality_analyze'
+        || object(sourceResult.payload).toolName !== 'quality_analyze' || object(sourceResult.payload).ok !== true
+        || sourceArgs.compilationId !== item.compilationId && sourceArgs.chapterId !== chapter.id) continue
+      if (repaired && repair) {
+        const artifacts = await tx.agentArtifact.findMany({ where: { runId: call.runId, run: { userId: subject.userId, novelId: subject.novelId }, artifactType: 'rewriteSelection',
+          metadata: { path: ['reportId'], equals: report.id } }, take: 2 })
+        const display = object(payload.display)
+        const part = { type: 'tool-call' as const, callId: item.callId, toolName: 'quality_analyze', title: '', args,
+          status: 'success' as const, display: { ...display, appliedBodyChange: undefined },
+          snapshot: { target: 'chapter' as const, targetId: chapter.id, field: 'content', previousValue: repair.before } }
+        const rebuilt = (await import('./quality-body-change-history.js')).recoverQualityBodyChange(call.runId,
+          part as import('../../../shared/contracts/index.js').AgentMessagePart & { type: 'tool-call' }, report, artifacts)
+        const change = (await import('../../../shared/agent-applied-body-change.js')).qualityAppliedBodyChange(rebuilt.display)
+        if (!change || runtimeJson(change).hash !== runtimeJson(repair).hash) continue
+      }
+      const usage = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId, action: { startsWith: 'agent3Humanity' },
+        agentRunId: sourceCall.runId, targetId: { in: [chapter.id, report.id] }, createdAt: { gte: sourceCall.createdAt, lte: sourceResult.createdAt } } })
+      if (!usage.length || new Set(usage.map(row => row.id)).size !== usage.length || usage.some(row => row.usageSource !== 'reported'
+        || !isKnownTextRequestBilling(row) || row.durationMs < 0 || row.createdAt.getTime() + row.durationMs > sourceResult.createdAt.getTime())) continue
+      if (payload.reviewRequestFinished !== undefined && (proof.usageIds as string[]).some(id => !usage.some(row => row.id === id))
+        || payload.reviewRequestFinished !== undefined && (proof.usageIds as string[]).length !== usage.length) continue
+      if (cached && (await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
+        action: { startsWith: 'agent3Humanity' }, agentRunId: call.runId, targetId: { in: [chapter.id, report.id] },
+        createdAt: { gte: call.createdAt, lte: result.createdAt } } })).length) continue
+    } else {
+      const audit = (await import('./continuity-coordinator.js')).effectiveContinuityAudit(compiler.validation), request = object(object(audit).assessmentRequest)
+      if (request.version !== 1 || typeof request.key !== 'string' || typeof request.inputHash !== 'string') continue
+      const rows = await tx.agentArtifact.findMany({ where: { runId: { in: ids }, run: { userId: subject.userId, novelId: subject.novelId }, artifactType: 'continuityReview',
+        metadata: { path: ['continuityAssessmentRequestKey'], equals: request.key } }, take: 2 })
+      const meta = object(rows[0]?.metadata), input = lifecycle.legacyAssessmentInputSchema.safeParse(meta.input)
+      const proposed = args.terminalState === undefined ? null : terminalCandidateSchema.safeParse(args.terminalState)
+      if (rows.length !== 1 || !input.success || typeof meta.callId !== 'string' || input.data.chapterId !== chapter.id
+        || input.data.targetType !== 'story_compilation' || input.data.targetId !== item.compilationId || input.data.revision !== chapter.revision
+        || input.data.bodies.current !== chapter.content || runtimeJson(input.data).hash !== request.inputHash
+        || proposed && (!proposed.success || runtimeJson(proposed.data).hash !== runtimeJson(input.data.terminalCandidate ?? null).hash)
+        || (args.focus ?? '') !== (object(compiler.validation).reviewFocus ?? '')) continue
+      const cached = rows[0].runId !== call.runId || meta.callId !== item.callId
+      const currentUsage = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
+        action: { startsWith: 'agent3ContinuityCritic' }, agentRunId: call.runId, targetType: input.data.targetType, targetId: input.data.targetId,
+        createdAt: { gte: call.createdAt, lte: result.createdAt } } })
+      if (cached && (currentUsage.length || (await tx.agentArtifact.findMany({ where: { runId: call.runId, artifactType: 'continuityReview',
+        metadata: { path: ['callId'], equals: item.callId } }, take: 1 })).length)) continue
+      const source = { ...subject, runId: rows[0].runId, callId: meta.callId } as import('./tools/types.js').ToolContext
+      if (lifecycle.legacyContinuityAssessmentKey(source, input.data) !== request.key) continue
+      let observed: Awaited<ReturnType<typeof lifecycle.readLegacyContinuityAssessment>>
+      try { observed = await lifecycle.readLegacyContinuityAssessment(tx, source, input.data) }
+      catch (error) {
+        if (!(error instanceof DataAccessError) || !['RUNTIME_RECEIPT_INVALID', 'RUNTIME_RECONCILIATION_REQUIRED', 'CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_INPUT_STALE'].includes(error.code)) throw error
+        continue
+      }
+      const bound = lifecycle.bindLegacyContinuityAssessment(observed.inspected, source, input.data,
+        object(object(object(audit).continuityV4).projectionNormalization).version === 2 ? 2 : object(object(object(audit).continuityV4).projectionNormalization).version === 1)
+      if (!observed.billingKnown || !observed.providerComplete || !observed.recoveryReady || !bound.complete
+        || runtimeJson(bound.audit).hash !== runtimeJson(audit).hash) continue
+      if (!cached && (currentUsage.length !== observed.usageIds.length || currentUsage.some(row => !observed.usageIds.includes(row.id)
+        || row.usageSource !== 'reported' || !isKnownTextRequestBilling(row)))) continue
+      if (payload.reviewRequestFinished !== undefined && (proof.version !== 1 || proof.chapterId !== chapter.id || proof.revision !== chapter.revision
+        || ![createHash('sha256').update(chapter.content).digest('hex'), runtimeJson({ content: chapter.content }).hash].includes(String(proof.contentHash))
+        || !Array.isArray(proof.usageIds) || !proof.usageIds.length || new Set(proof.usageIds).size !== proof.usageIds.length
+        || proof.usageIds.length !== observed.usageIds.length || proof.usageIds.some(id => !observed.usageIds.includes(String(id))))) continue
+    }
+    completed.push(item)
+  }
+  return completed
+}

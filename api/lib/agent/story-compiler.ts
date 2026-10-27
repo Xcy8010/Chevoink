@@ -1062,7 +1062,7 @@ export async function commitChapterBridge(input: {
     checkedBridge: continuityStoryInput(currentContinuityReview.checkedBridge),
     terminalStateHash: terminalReviewStateHash({ ...compilation.bridge, ...bridgeData }, orderedScenes),
     ...(terminalReview?.deliveryEligibility.preservation?.pendingCoverageIds.length ? { scopePreservation: {
-      version: 1, auditHash: runtimeJson(compilation.validation && (compilation.validation as Record<string, unknown>).continuityCriticResponse).hash,
+      version: terminalReview.deliveryEligibility.preservation.version, auditHash: runtimeJson(compilation.validation && (compilation.validation as Record<string, unknown>).continuityCriticResponse).hash,
       policyHash: terminalReview.deliveryEligibility.preservation.policyHash,
       pendingCoverageIds: terminalReview.deliveryEligibility.preservation.pendingCoverageIds } } : {}),
   } : undefined

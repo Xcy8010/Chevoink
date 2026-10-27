@@ -205,7 +205,7 @@ async function finishQualityReviewResult(ctx: ToolContext, report: QualityReport
       const review = await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, report.compilationId ?? undefined), { timeout: 20_000 })
       if (review?.chapterId === report.chapterId && verificationQualityAdviceRequiresDecision(review, selected)) return { reviewCompleted: true,
         output: `质量报告 ${report.id}已保存。当前属于最终核验的质量建议，保留正文并逐项决定，不自动开启新一轮润色。不要为这些纯建议再调用正文写入工具；下一步按当前精确引用填写 retainedFindings 的 source、reportId、findingId、reason，再提交章节终态。涉及解释负担时，保留理由分别说明事实为何必要、当前表达为何仍合适，并考虑保留事实而减少负担的方案；只说信息不能丢不足以论证原说法，当前阶段也不因此获得改文权限。真实错误或尚未尝试原始义务仍按原证据与原权限处理，留置不能替代硬通过要求。${review ? chapterReviewDecisionGuidance(review) : decisionGuidance}${bindingSuffix}\n${renderQualityReportFindings(report)}`,
-        summary: '质量核验 · 意见待决定', display: reportDisplay(report) }
+        summary: `质量核验完成 · ${warningCount} 关注 ${advisoryCount} 建议`, display: reportDisplay(report) }
       // 付费前只读探测：同一次合并修订的准入由守卫统一判定（新稿质量通道或原始修复
       // 授权），被拒时不预约、不调用修订模型，正文与报告保持原样。
       const probe = await prisma.$transaction(tx => probeChapterReviewRevision(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId },
@@ -242,7 +242,7 @@ async function finishQualityReviewResult(ctx: ToolContext, report: QualityReport
   const reason = !automatic ? '本次只保存检查意见，正文未改动；修订须由原始请求明确授权'
     : report.findings.length ? '自动修订已尝试、报告不属于当前修订任务或没有待处理的安全候选；剩余意见仍保留待审' : '未发现有证据的问题'
   return { output: `质量报告 ${report.id}${cached ? '已复用' : '已完成'}，绑定 r${report.chapterRevision}，状态=${report.status}：${warningCount} 个需关注、${advisoryCount} 个建议。${reason}，不重复调用模型；工具执行成功只表示报告已取得，${report.findings.length ? '检查完成仍有意见，不能宣称全部建议已应用或全部问题已解决；剩余意见保留待审，不要求为清零意见改稿' : '本次完整检查未发现有证据的问题'}。${report.status === 'needs_repair' ? '不能宣称质量检查通过。' : ''}${decisionGuidance}${bindingSuffix}\n${renderQualityReportFindings(report)}`,
-    summary: cached ? '复用当前质量报告' : `人类感质量检查 · ${warningCount} 关注 ${advisoryCount} 建议`, display: reportDisplay(report) }
+    summary: `人类感质量检查完成${cached ? '（复用）' : ''} · ${warningCount} 关注 ${advisoryCount} 建议`, display: reportDisplay(report) }
 }
 
 async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityReport, selected: QualityReport['findings'], frozenQuality?: FrozenQualityRuntime) {

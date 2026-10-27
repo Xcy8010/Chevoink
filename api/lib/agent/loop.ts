@@ -5,7 +5,7 @@ import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequ
 import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, writingClarificationResolvesInput, readCompletedWritingDelivery, readRecoveredChapterDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
 import { createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
-import { readReviewRequestRecovery } from './review-request-recovery.js'
+import { readReviewRequestRecovery, readCompletedReviewRequestRecovery } from './review-request-recovery.js'
 import { readAuthorReviewReplacements } from './author-review-replacement.js'
 import { readContinuedReviewRecovery, readContinuedReviewDispatchWitness, readContinuedReviewRepairHandoff, continuedReviewAttemptKey, continuedReviewCallId,
   type ContinuedReviewRecovery, type ContinuedReviewDispatchWitness } from './continued-review-recovery.js'
@@ -57,6 +57,7 @@ import { normalizeToolInput, validateToolInput } from './tools/input-validation.
 import { loadSessionTodoItems, renderTodoItems, cancelTaskTodoItems } from './tools/todo-tools.js'
 import { parseToolArgsTolerant } from './tool-argument-parser.js'
 import { preflightChapterReviewWrite } from './tools/chapter-tools.js'
+import { readChapterBridgeCommitPrerequisite } from './tools/story-compiler-tools.js'
 import { getTaskRunIds } from './task-lineage.js'
 import type { AgentTool, ToolContext } from './tools/types.js'
 import { ORCHESTRATION_TOOL_NAMES, assertOrchestrationResumeGuard, buildOrchestrationResumeNote } from './tools/task-orchestration-tools.js'
@@ -267,6 +268,10 @@ function reviewPreflightArgs(call: ToolCallRequest, tool?: AgentTool): Record<st
 
 /** 瘦身时保留最近 N 条工具输出不动：近期结果是当前决策的主要依据 */
 const CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS = 8
+
+/** Only this executor can defer its already-journaled COMMIT proposal after a
+ * valid nested report. Provider/user error names cannot impersonate it. */
+class DeferredCommitReview extends Error {}
 
 type ToolCallOutcome = {
   reviewOutcome?: ReviewOutcome
@@ -568,7 +573,7 @@ export async function handleToolCall(
     }
     const durationMs = Date.now() - startedAt
     const summary = result.summary ?? `${tool.title}完成`
-    const reviewRequestFinished = result.reviewRequestFinished ?? (result.reviewCompleted === false && reviewSnapshot
+    const reviewRequestFinished = result.reviewRequestFinished ?? (reviewSnapshot
       && requestTrace.records.length > 0 && textRequestsFinished(requestTrace) ? { version: 1 as const, ...reviewSnapshot,
         usageIds: requestTrace.records.map(row => row.usageId) } : undefined)
 
@@ -611,6 +616,10 @@ export async function handleToolCall(
       },
     }
   } catch (error) {
+    if (error instanceof DeferredCommitReview) {
+      deferToolProposal(call, error.message, messageId, bus)
+      throw error
+    }
     failureCode = error instanceof DataAccessError ? error.code : 'UNEXPECTED_TOOL_ERROR'
     if (ctx.signal.aborted) return fail('已中断', '用户已请求暂停，停止后续执行；已保存内容保留。', 'failed', undefined, STATE_SENSITIVE_VALIDATORS.has(call.name) ? 'stale' : undefined)
     if (error instanceof DataAccessError && error.code.startsWith('CREDITS_')) {
@@ -1301,6 +1310,15 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         }
       }
       if (replacements.length) await persistCheckpoint()
+    }
+    if ((params.resume || previousTask) && pendingReviews.size) {
+      const completed = await prisma.$transaction(tx => readCompletedReviewRequestRecovery(tx,
+        { userId: params.userId, novelId: params.novelId, runId }, [...pendingReviews.values()]), { timeout: 20_000 })
+      for (const item of completed) {
+        const key = (item.compilationId ?? item.chapterId) + ':' + item.toolName
+        if (pendingReviews.get(key)?.callId === item.callId) pendingReviews.delete(key)
+      }
+      if (completed.length) await persistCheckpoint()
     }
     if ((params.resume || previousTask) && ['write', 'revise'].includes(taskSpec.intent)) {
       const recovered = await prisma.$transaction(tx => readReviewRequestRecovery(tx,
@@ -2406,6 +2424,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
       const reviewProgressText = mergedReviewReminder ? '正在核对检查意见的处理结果。' : '正文已保存，正在完成当前版本的必要检查。'
 
+      const toolHistoryStart = messages.length
       messages.push(...toolTurnHistory(result, effectiveToolCalls, { bootstrap: Boolean(bootstrapCall),
         recoveredText: recoveredToolCalls.length > 0, withholdText: automaticReviewTriggered }))
 
@@ -2650,6 +2669,102 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       let batchProgress = false
       const decisionFeedback: NonNullable<ToolCallOutcome['reviewDecisionFeedback']>[] = []
       let compatibilityReadObserved = false
+      const admitRegisteredReview = async (dispatch: PendingReviewCall, explicit: boolean) => {
+        const attemptKey = reviewAttemptKey(dispatch, dispatch.toolName), pendingKey = `${dispatch.compilationId ?? dispatch.chapterId}:${dispatch.toolName}`
+        const unconfirmed = [...pendingReviews.values()].some(item => item.toolName === dispatch.toolName && item.chapterId === dispatch.chapterId)
+        if (unconfirmed || (!explicit && automaticReviewAttempts.has(attemptKey) && settledReviewFailures.has(attemptKey))) return unconfirmed
+          ? '此前的检查请求结果尚未确认，未重放付费请求。'
+          : '本次检查返回的报告尚未完成有效核验；检查自身的格式或引用问题不代表正文需要修改。保留检查结果与费用记录，不通过改稿重新触发同一检查。'
+        const alreadyAttempted = automaticReviewAttempts.has(attemptKey)
+        automaticReviewAttempts.add(attemptKey); pendingReviews.set(pendingKey, dispatch)
+        try { await persistCheckpoint() } catch (error) {
+          pendingReviews.delete(pendingKey)
+          if (!alreadyAttempted) automaticReviewAttempts.delete(attemptKey)
+          throw error
+        }
+        return null
+      }
+      const settleRegisteredReview = async (reviewDispatch: PendingReviewCall | undefined, outcome: ToolCallOutcome) => {
+        const requestFinished = reviewDispatch && outcome.reviewRequestFinished?.version === 1
+          && outcome.reviewRequestFinished.chapterId === reviewDispatch.chapterId
+          && outcome.reviewRequestFinished.revision === reviewDispatch.revision
+          && /^[a-f0-9]{64}$/.test(outcome.reviewRequestFinished.contentHash)
+        if (requestFinished) await bus.persist()
+        const reviewAction = outcome.reviewOutcome ? projectedReviewAction(outcome.reviewOutcome) : undefined
+        if (reviewDispatch && !outcome.unresolvedTextRequest && (reviewAction === 'decision' || requestFinished || outcome.reviewCompleted || outcome.part.status === 'success' || ['AI_QUALITY_NON_THINKING_UNSUPPORTED', 'CONTINUITY_CHECK_LIMIT',
+          'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED',
+          'QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? ''))) {
+          pendingReviews.delete(`${reviewDispatch.compilationId ?? reviewDispatch.chapterId}:${reviewDispatch.toolName}`)
+          if (reviewAction !== 'decision' && (outcome.part.status !== 'success' && !outcome.reviewCompleted || outcome.reviewCompleted === false)) {
+            const settledKey = reviewAttemptKey(reviewDispatch, reviewDispatch.toolName)
+            settledReviewFailures.add(settledKey)
+            if (reviewDispatch.toolName === 'continuity_validate' && outcome.reviewCompleted === false
+              || ['CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? '')) automaticReviewAttempts.add(`settled-continuity:${settledKey}`)
+          }
+          await persistCheckpoint()
+        }
+        return reviewAction
+      }
+      const coordinateCommit = (original: AgentTool, originalCall: ToolCallRequest): AgentTool => ({ ...original,
+        execute: async (context, args) => {
+          // The registered outer handler has already checked its original
+          // authority, schema and approval. Persist its complete proposal before
+          // any nested review can reserve/send; no new checkpoint phase exists.
+          if (context.transaction) return original.execute(context, args)
+          await bus.persist()
+          const completedInputs = new Set<string>()
+          for (;;) {
+            context.signal.throwIfAborted()
+            const record = args as Record<string, unknown>
+            const state = await readCurrentReviewReadiness(typeof record.compilationId === 'string' ? record.compilationId : undefined)
+            if (!state) return { outcome: 'failed', failureCode: 'COMPILATION_NOT_FOUND', output: '原提交编译已不存在；未派发检查或提交。' }
+            const proposed = Array.isArray(record.retainedFindings) ? record.retainedFindings as Array<{ source: string; reportId: string; findingId: string }> : []
+            if (state.ready && state.continuity === 'complete' && state.quality === 'complete' && hasPendingChapterReviewDecision(state) && (state.mustPassPending
+              || !state.requiredDecisions?.length || state.requiredDecisions.some(ref => !proposed.some(item => item.source === ref.source
+                && item.reportId === ref.reportId && item.findingId === ref.findingId))))
+              throw new DeferredCommitReview('本次真实检查报告已保存，原提交提案未执行；新增或当前必要意见须在原授权内由写者处理，不能将旧留置理由套用到新报告。' + chapterReviewDecisionGuidance(state))
+            const prerequisite = await prisma.$transaction(tx => readChapterBridgeCommitPrerequisite({ ...context, transaction: tx }, args, state), { timeout: 20_000 })
+            if (prerequisite?.kind === 'blocked') return { outcome: 'failed', failureCode: prerequisite.code, output: prerequisite.reason }
+            const next = await currentDispatch(state)
+            if (next.kind === 'blocked') return { outcome: 'failed', failureCode: 'REVIEW_DEPENDENCY_UNAVAILABLE', output: next.reason }
+            const needed = next.kind === 'tool' ? next.tool : prerequisite?.kind === 'check'
+              ? { name: 'continuity_validate' as const, args: prerequisite.args } : null
+            if (!needed) return original.execute(context, args)
+
+            const registered = tools.find(tool => tool.name === needed.name)
+            const authorized = registered && context.toolAuthority ? intersectToolAuthority([registered], context.mode, context.toolAuthority)[0] : registered
+            if (!authorized || authorized.permission[context.mode] === 'deny') return { outcome: 'failed', failureCode: 'REVIEW_DEPENDENCY_UNAVAILABLE',
+              output: '原任务未授权必要检查工具，未扩大权限或提交未核验候选。' }
+            const checkArgs = needed.name === 'continuity_validate' && prerequisite ? { ...needed.args, terminalState: prerequisite.candidate } : needed.args
+            if (!authorized.parameters.safeParse(checkArgs).success) return { outcome: 'failed', failureCode: 'TOOL_SCHEMA_INVALID', output: '原候选不符合已注册检查参数；未派发或提交。' }
+            const inputKey = runtimeJson({ name: needed.name, chapterId: state.chapterId, revision: state.revision,
+              bodyHash: state.decisionBinding?.contentHash ?? null, candidate: prerequisite?.candidate ?? null, args: checkArgs }).hash
+            if (completedInputs.has(inputKey)) return { outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED',
+              output: '同一正文与候选的真实检查仍未形成可提交结果；原报告和提案保留，未重复检查或提交。' }
+            const restricted = findToolRestriction(effectiveRestrictions(), needed.name, checkArgs, state.chapterId, state)
+            if (restricted) return { outcome: 'failed', failureCode: restricted.code, output: restricted.reason }
+            const check: ToolCallRequest = { id: 'commit_review_' + runtimeJson({ runId, callId: originalCall.id, name: needed.name,
+              chapterId: state.chapterId, revision: state.revision, args: checkArgs }).hash.slice(0, 40), name: needed.name, arguments: JSON.stringify(checkArgs) }
+            const dispatch: PendingReviewCall = { compilationId: state.compilationId, chapterId: state.chapterId, revision: state.revision,
+              toolName: needed.name, callId: check.id }
+            const blocked = await admitRegisteredReview(dispatch, needed.name === 'continuity_validate')
+            if (blocked) return { outcome: 'failed', failureCode: [...pendingReviews.values()].some(item => item.toolName === dispatch.toolName && item.chapterId === dispatch.chapterId)
+              ? 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED' : 'REVIEW_DEPENDENCY_UNAVAILABLE', output: blocked }
+            messages.splice(toolHistoryStart, 0, ...toolTurnHistory({ content: '', reasoning: '', toolCalls: [] }, [check], { bootstrap: true }))
+            const checked = await handleToolCall(check, tools, { ...context, callId: check.id, messageId }, bus, messageId, runId, undefined, async () => {
+              context.signal.throwIfAborted(); await bus.persist()
+              await prisma.$transaction(tx => assertLegacyOwnerReceipt(tx))
+            })
+            parts.push(checked.part, ...(checked.extraParts ?? []))
+            messages.push({ role: 'tool', toolCallId: check.id, content: checked.observation })
+            admission.invalidateStateReads()
+            await settleRegisteredReview(dispatch, checked)
+            completedInputs.add(inputKey)
+            if (checked.part.status !== 'success' || checked.unresolvedTextRequest) return { outcome: 'failed',
+              failureCode: checked.failureCode ?? (checked.unresolvedTextRequest ? 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED' : 'REVIEW_DEPENDENCY_UNAVAILABLE'),
+              output: checked.observation, reviewOutcome: checked.reviewOutcome, reviewCompleted: checked.reviewCompleted }
+          }
+        } })
       for (let callIndex = 0; callIndex < effectiveToolCalls.length; callIndex += 1) {
         let call = effectiveToolCalls[callIndex]
         if (await finishPersistedWritingIfComplete(async () => {
@@ -2661,6 +2776,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         if (controller.signal.aborted) {
           throw new DOMException('run aborted', 'AbortError')
         }
+        let coordinatedCommit: AgentTool | undefined
         const preflightTool = tools.find(tool => tool.name === call.name)
         const preflightArgs = reviewPreflightArgs(call, preflightTool)
         if (pendingReviews.size) {
@@ -2717,10 +2833,18 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             continue
           }
           const readiness = await readCurrentReviewReadiness(compilationId)
+          const admittedCommit = preflightTool && toolContext.toolAuthority ? intersectToolAuthority([preflightTool], toolContext.mode, toolContext.toolAuthority)[0] : preflightTool
+          if (readiness && admittedCommit && admittedCommit.permission[toolContext.mode] !== 'deny' && ['write', 'revise'].includes(taskSpec.intent)
+            && params.mode === 'build' && !toolContext.inlineChild && toolContext.sandboxMode !== 'read_only'
+            && !toolContext.protectedChapterIds?.has(readiness.chapterId)
+            && !parsed.decisionOnly && (parsed.terminalState !== undefined || parsed.exitState !== undefined || parsed.lastUnfinishedAction !== undefined)) {
+            const prerequisite = await prisma.$transaction(tx => readChapterBridgeCommitPrerequisite({ ...toolContext, transaction: tx }, parsed, readiness), { timeout: 20_000 })
+            if (prerequisite) coordinatedCommit = coordinateCommit(preflightTool, call)
+          }
           // Ordinary edits retain their original writing authority. Check the
           // final saved body at COMMIT, without discarding partial edits or
           // spending a fresh paid assessment between each fragment.
-          if (readiness?.checksRequired) {
+          if (readiness?.checksRequired && !coordinatedCommit) {
             const next = await currentDispatch(readiness)
             if (next.kind === 'tool') {
               const required = { id: `review_${messageId}_${callIndex}_${randomUUID()}`, name: next.tool.name, arguments: JSON.stringify(next.tool.args) }
@@ -2832,36 +2956,18 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           continue
         }
         if (reviewDispatch) {
-          // Commit evidence BEFORE the handler can reserve/send a paid chain.
-          // A crash leaves it pending across same-run and typed continuations.
-          const attemptKey = reviewAttemptKey(reviewDispatch, reviewDispatch.toolName)
-          const pendingKey = `${reviewDispatch.compilationId ?? reviewDispatch.chapterId}:${reviewDispatch.toolName}`
-          const unconfirmed = [...pendingReviews.values()].some(item => item.toolName === reviewDispatch.toolName && item.chapterId === reviewDispatch.chapterId)
-          // Explicit candidate corrections reach the authoritative persisted
-          // input/response/billing fence. The revision-only in-memory key cannot
-          // decide whether a candidate changed. Unknown work still blocks first.
-          if (unconfirmed || (!explicitTerminalCandidate && automaticReviewAttempts.has(attemptKey) && settledReviewFailures.has(attemptKey))) {
-            const reason = unconfirmed ? '此前的检查请求结果尚未确认，未重放付费请求。'
-              : '本次检查返回的报告尚未完成有效核验；检查自身的格式或引用问题不代表正文需要修改。保留检查结果与费用记录，不通过改稿重新触发同一检查。'
+          const reason = await admitRegisteredReview(reviewDispatch, explicitTerminalCandidate)
+          if (reason) {
             deferToolProposal(call, reason, messageId, bus)
             messages.push({ role: 'tool', toolCallId: call.id, content: `[系统] ${reason} 当前检查未判定通过，继续其余可执行工作。` })
             blockedRepeat += 1
             continue
           }
-          const alreadyAttempted = automaticReviewAttempts.has(attemptKey)
-          automaticReviewAttempts.add(attemptKey)
-          pendingReviews.set(pendingKey, reviewDispatch)
-          try { await persistCheckpoint() }
-          catch (error) {
-            // No handler has run, so this particular request was never sent.
-            pendingReviews.delete(pendingKey)
-            if (!alreadyAttempted) automaticReviewAttempts.delete(attemptKey)
-            throw error
-          }
         }
         let bootstrapWitness: ContinuedReviewDispatchWitness | null = null
         const boundBootstrap = bootstrapCall?.id === call.id ? bootstrapItem : undefined
-        const outcome = await handleToolCall(call, tools, { ...toolContext,
+        const executionTools = coordinatedCommit ? tools.map(tool => tool.name === call.name ? coordinatedCommit! : tool) : tools
+        const outcome = await handleToolCall(call, executionTools, { ...toolContext,
           ...(continuityQuestionId && bootstrapCall?.id === call.id ? { continuityQuestion: { requestId: continuityQuestionId } } : {}),
           ...(continuitySupplement && bootstrapCall?.id === call.id ? { continuitySupplement } : {}),
           ...(continuityRevision && bootstrapCall?.id === call.id ? { continuityRevision } : {}),
@@ -2885,7 +2991,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             if (!proof.some(([key, attempt]) => key === continuityBootstrap!.baseKey && attempt === continuityBootstrap!.recoveryKey)) {
               throw new DataAccessError(409, 'CONTINUED_REVIEW_INPUT_STALE', '原检查或本次继续的依据已变化，未派发请求。')
             }
-          } : bootstrapCall?.id === call.id && call.name === 'chapter_bridge_commit' ? async () => { await bus.persist() } : undefined)
+          } : bootstrapCall?.id === call.id && call.name === 'chapter_bridge_commit' ? async () => { await bus.persist() } : undefined).catch(error => {
+          if (!(error instanceof DeferredCommitReview)) throw error
+          messages.push({ role: 'tool', toolCallId: call.id, content: '[系统调度回执] ' + error.message })
+          return null
+        })
+        if (!outcome) continue
         if ((continuitySupplement || continuityRevision) && bootstrapCall?.id === call.id) {
           const saved = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId }, select: { usage: true } })
           const current = saved.usage as Record<string, unknown> | null
@@ -2906,24 +3017,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             if (continuedReviewBootstrap[index].chapterId === controlledRepair.chapterId) continuedReviewBootstrap.splice(index, 1)
           }
         }
-        const requestFinished = reviewDispatch && outcome.reviewRequestFinished?.version === 1
-          && outcome.reviewRequestFinished.chapterId === reviewDispatch.chapterId
-          && outcome.reviewRequestFinished.revision === reviewDispatch.revision
-          && /^[a-f0-9]{64}$/.test(outcome.reviewRequestFinished.contentHash)
-        if (requestFinished) await bus.persist()
-        const reviewAction = outcome.reviewOutcome ? projectedReviewAction(outcome.reviewOutcome) : undefined
-        if (reviewDispatch && !outcome.unresolvedTextRequest && (reviewAction === 'decision' || requestFinished || outcome.reviewCompleted || outcome.part.status === 'success' || ['AI_QUALITY_NON_THINKING_UNSUPPORTED', 'CONTINUITY_CHECK_LIMIT',
-          'CONTINUITY_CHECK_BUDGET_EXCEEDED', 'CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED',
-          'QUALITY_REPORT_INCOMPLETE', 'QUALITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? ''))) {
-          pendingReviews.delete(`${reviewDispatch.compilationId ?? reviewDispatch.chapterId}:${reviewDispatch.toolName}`)
-          if (reviewAction !== 'decision' && (outcome.part.status !== 'success' && !outcome.reviewCompleted || outcome.reviewCompleted === false)) {
-            const settledKey = reviewAttemptKey(reviewDispatch, reviewDispatch.toolName)
-            settledReviewFailures.add(settledKey)
-            if (reviewDispatch.toolName === 'continuity_validate' && outcome.reviewCompleted === false
-              || ['CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_EVIDENCE_UNLOCATED'].includes(outcome.failureCode ?? '')) automaticReviewAttempts.add(`settled-continuity:${settledKey}`)
-          }
-          await persistCheckpoint()
-        }
+        const reviewAction = await settleRegisteredReview(reviewDispatch, outcome)
         if (qualityRecovery && reviewDispatch?.toolName === 'quality_analyze' && reviewDispatch.chapterId === qualityRecovery.chapterId
           && reviewDispatch.revision === qualityRecovery.chapterRevision && (outcome.reviewCompleted || outcome.part.status === 'success')) {
           // The original audit events remain intact. Only the now-resolved local

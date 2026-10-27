@@ -1292,7 +1292,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             ...base,
             liveToolDrafts: Object.fromEntries(Object.entries(state.liveToolDrafts).filter(([callId]) => !callIds.has(callId))),
             messages: updateMessageParts(state.messages, event.messageId, parts => parts.filter(part =>
-              !(part.type === 'tool-call' && part.preparing && callIds.has(part.callId)))),
+              !(part.type === 'tool-call' && callIds.has(part.callId)
+                && (part.preparing || event.type === 'tool.deferred' && part.status === 'running')))),
           }
         }
 

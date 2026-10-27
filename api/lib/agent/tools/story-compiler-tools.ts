@@ -6,10 +6,10 @@ import { terminalReportRecoveryResult } from '../terminal-report-recovery.js'
 import { continuityResponseContract, continuityResponseSystem, continuityResponseInput } from '../continuity-response-contract.js'
 import { readCompilerContinuitySource, compilerContinuitySourceScope } from '../compiler-continuity-source.js'
 import { retainedFindings } from './chapter-arguments.js'
-import { readTerminalCandidate, terminalCandidateSchema, terminalCandidateInputSchema, resolveTerminalCandidate, reviewTerminalSelection, terminalReviewInput, currentTerminalReview, terminalReviewFailure, type TerminalCandidate } from '../terminal-state-review.js'
+import { readTerminalCandidate, terminalCandidateSchema, terminalCandidateInputSchema, resolveTerminalCandidate, reviewTerminalSelection, terminalReviewInput, currentTerminalReview, terminalReviewFailure, terminalClaims, type TerminalCandidate } from '../terminal-state-review.js'
 import { terminalCoverageInput, terminalCoverageAuditVersion, terminalCoverageProofs, hasTerminalCoverageProtocol } from '../terminal-fact-coverage.js'
 import { hasTerminalEvidenceProtocol, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalEvidenceContext, terminalVerdictAuditVersion, terminalSpanAuditVersion, continuitySemanticRule, type TerminalCarriedFact } from '../terminal-evidence-context.js'
-import { readChapterReviewReadiness, chapterReviewDecisionGuidance, qualityDecisionSnapshotHash, createChapterReviewReadScope, type ChapterReviewReadScope } from '../chapter-review-guard.js'
+import { readChapterReviewReadiness, chapterReviewDecisionGuidance, qualityDecisionSnapshotHash, createChapterReviewReadScope, type ChapterReviewReadScope, type ChapterReviewReadiness } from '../chapter-review-guard.js'
 import { parseQualityJsonObject } from '../quality-evidence.js'
 import { inspectContinuityResponse, continuityUnlocatedCandidateCount, continuityFailureOutput } from '../continuity-format-recovery.js'
 import { hasContinuitySourceAuthority, continuitySourceAuthorityRule, continuityAuthorRequirements, compilerEvidenceScope, type ContinuitySourceScope } from '../continuity-source-authority.js'
@@ -1345,7 +1345,8 @@ export const continuityValidateTool = defineTool({
       summary: '独立连续性复核未完成',
     }
     const repairGuidance = result.errorCount > 0 ? await prisma.$transaction(tx => readChapterReviewRevisionGuidance(tx, ctx, chapter)) : ''
-    const savedTerminalBinding = (continued ? terminalEvidence : inspected.audit.terminalEvidence ?? terminalEvidence)?.proposalChanges
+    const savedTerminalBinding = ((continued ? terminalEvidence : inspected.audit.terminalEvidence ?? terminalEvidence)?.proposalChanges
+      || 'continuityV4' in inspected.audit && inspected.audit.continuityV4.projectionNormalization?.version === 2)
       ? await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, select: { preparedContext: true } }) : compilation
     const terminalFailure = terminalReviewFailure({ ...result, continuityCriticResponse: continued ? continued.originalAudit : inspected.audit }, chapter.content,
       continued ? terminalEvidence : inspected.audit.terminalEvidence ?? terminalEvidence,
@@ -1371,6 +1372,39 @@ export const continuityValidateTool = defineTool({
     }
   },
 })
+
+/** The checked candidate and the submitted candidate use one normalization.
+ * An unpaired legacy lastUnfinishedAction cannot replace a checked state. */
+export function resolveChapterBridgeCommitCandidate(args: { exitState?: TerminalCandidate['exitState']; terminalState?: TerminalCandidate;
+  lastUnfinishedAction?: string }, reviewed?: TerminalCandidate): TerminalCandidate {
+  return args.exitState === undefined && args.terminalState === undefined && reviewed ? reviewed
+    : { exitState: storyStateSchema.parse(args.exitState ?? args.terminalState?.exitState ?? reviewed?.exitState ?? {}),
+      lastUnfinishedAction: args.lastUnfinishedAction ?? args.terminalState?.lastUnfinishedAction ?? reviewed?.lastUnfinishedAction ?? '' }
+}
+
+/** Read-only executor preflight. This grants neither a provider request nor a
+ * commit: both still enter their registered handlers and current effect guards. */
+export async function readChapterBridgeCommitPrerequisite(ctx: ToolContext, value: unknown, readiness: ChapterReviewReadiness) {
+  const parsed = chapterBridgeCommitTool.parameters.safeParse(value)
+  if (!parsed.success || parsed.data.decisionOnly || parsed.data.exitState === undefined && parsed.data.terminalState === undefined
+    && parsed.data.lastUnfinishedAction === undefined) return null
+  const args = parsed.data, db = ctx.transaction ?? prisma
+  const scope = await qualityCompilationScope(db, ctx.userId, ctx.novelId, ctx.runId)
+  const current = await db.storyCompilation.findFirst({ where: { id: readiness.compilationId, userId: ctx.userId, novelId: ctx.novelId,
+    chapterId: readiness.chapterId, ...scope }, include: { chapter: true } })
+  if (!current?.chapter || current.chapter.revision !== readiness.revision
+    || runtimeJson({ content: current.chapter.content }).hash !== readiness.decisionBinding?.contentHash
+    || continuityDecisionBinding(current.id, current.chapter.revision, current.validation) !== readiness.decisionBinding.continuityBinding) return {
+    kind: 'blocked' as const, code: 'CONTINUITY_INPUT_STALE', reason: '提交提案的正文、编译或当前报告已变化；未调度检查，也未提交旧候选。' }
+  const saved = readTerminalCandidate(current.validation)
+  const candidate = resolveChapterBridgeCommitCandidate(args, readiness.terminalReview?.currentResultVerified ? saved : undefined)
+  if ((!saved && !terminalClaims(candidate).length && !readiness.terminalReview)
+    || readiness.continuity === 'complete' && readiness.terminalReview?.currentResultVerified
+      && saved && runtimeJson(saved).hash === runtimeJson(candidate).hash) return { kind: 'ready' as const, candidate }
+  return { kind: 'check' as const, candidate, args: { compilationId: current.id, terminalState: candidate },
+    chapterId: current.chapter.id, revision: current.chapter.revision,
+    contentHash: readiness.decisionBinding.contentHash }
+}
 
 export const chapterBridgeCommitTool = defineTool({
   name: 'chapter_bridge_commit',
@@ -1454,10 +1488,7 @@ export const chapterBridgeCommitTool = defineTool({
     const reviewedTerminal = currentTerminalReview(compilation.validation, compilation.chapter.content, commitEvidence, deliveryBinding)
     // COMMIT consumes the checked candidate atomically. Unpaired legacy
     // summaries cannot replace a fact; explicit state still must match below.
-    const committedCandidate = args.exitState === undefined && args.terminalState === undefined && reviewedTerminal
-      ? reviewedTerminal.candidate
-      : { exitState: storyStateSchema.parse(args.exitState ?? args.terminalState?.exitState ?? reviewedTerminal?.candidate.exitState ?? {}),
-        lastUnfinishedAction: args.lastUnfinishedAction ?? args.terminalState?.lastUnfinishedAction ?? reviewedTerminal?.candidate.lastUnfinishedAction ?? '' }
+    const committedCandidate = resolveChapterBridgeCommitCandidate(args, reviewedTerminal?.candidate)
     const paragraphs = compilation.chapter.content.split(/\n\s*\n/u).map(text => text.trim()).filter(Boolean)
     const terminal = {
       compilationId: compilation.id,

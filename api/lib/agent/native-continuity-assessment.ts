@@ -146,10 +146,12 @@ export async function readNativeContinuityAssessments(db: Prisma.TransactionClie
     const savedAudit = object(object(operation.effectReceipt?.result).continuityCriticResponse)
     const expectedNormalization = object(object(savedAudit.continuityV4).projectionNormalization)
     const currentNormalization = object(object(current.continuityV4).projectionNormalization)
-    if (expectedNormalization.version === 1 || projectsCurrent && currentNormalization.version === 1) {
+    if ([1, 2].includes(expectedNormalization.version as number) || projectsCurrent && [1, 2].includes(currentNormalization.version as number)) {
       if (!isContinuityV4Inspection(inspected)) return null
-      inspected = (await import('./continuity-review-v4.js')).normalizeContinuityV4Projection(inspected, operation.inputHash)
-      const expected = expectedNormalization.version === 1 ? savedAudit : current
+      const v4 = await import('./continuity-review-v4.js')
+      const normalization = [1, 2].includes(expectedNormalization.version as number) ? expectedNormalization : currentNormalization
+      inspected = normalization.version === 2 ? v4.normalizeContinuityV4ProjectionV2(inspected, operation.inputHash) : v4.normalizeContinuityV4Projection(inspected, operation.inputHash)
+      const expected = [1, 2].includes(expectedNormalization.version as number) ? savedAudit : current
       if (!inspected.complete || runtimeJson(inspected.audit).hash !== runtimeJson(expected).hash) return null
     }
     const sameCurrent = runtimeJson(inspected.audit).hash === runtimeJson(target.currentAudit).hash

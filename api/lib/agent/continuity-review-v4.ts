@@ -12,6 +12,7 @@ import { terminalReviewRowDiagnostics } from './terminal-review-row-diagnostics.
 import { continuityFindingInputSchema, type ContinuityFindingInput } from '../../../shared/contracts/story-compiler-contracts.js'
 import type { inspectContinuityResponse } from './continuity-format-recovery.js'
 import { continuityPhasePlanSchema, validContinuityPhasePlan } from './continuity-coordinator.js'
+import { terminalFactId as historyFactIdentity } from './terminal-fact-identity.js'
 import { terminalQuoteRange } from './terminal-quote-range.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/u)
@@ -24,11 +25,13 @@ type Diagnostic = { table: Table; index: number; code: string; path?: string }
 type V4RepairPlan = { version: 1; manifestHash: string; firstHash: string; mask: Array<{ table: Table; index: number }>;
   fixedHash: string; fixed: Record<string, unknown[]> }
 type ProjectionSourceMapping = { table: Table; index: number; quoteHash: string;
-  kind: 'current_evidence_span' | 'current_explanation_span' | 'proof_claim_audit' | 'proof_anchor_audit' | 'proposal_claim_audit' | 'non_evidentiary_explanation';
+  kind: 'current_evidence_relocated' | 'current_evidence_span' | 'current_explanation_span' | 'proof_claim_audit' | 'proof_anchor_audit' | 'proposal_claim_audit' | 'non_evidentiary_explanation';
   referenceIndex?: number; explanationQuoteIndex?: number; originalSegmentId?: string;
   range?: NonNullable<ReturnType<typeof terminalQuoteRange>>; proofHash?: string; anchorIndex?: number; proposalIndex?: number }
-type ProjectionNormalization = { version: 1; originalParserVersion: 10; originReportHash: string; rawHash: string;
-  frozenInputHash: string; mappings: ProjectionSourceMapping[]; derivationHash: string }
+type RejectedReplacement = { id: string; obligationIndex: number; originalRowHash: string; code: 'replacement_target_invalid' }
+type ProjectionNormalization = { version: 1 | 2; originalParserVersion: 10; originReportHash: string; rawHash: string;
+  frozenInputHash: string; mappings: ProjectionSourceMapping[]; derivationHash: string;
+  mode?: 'single_report' | 'sparse_repair'; originalDiagnostics?: Diagnostic[]; serverRejectedReplacements?: RejectedReplacement[]; repairPlanHash?: string; repairResponseHash?: string }
 const evidenceReference = z.object({ segmentId: z.string().regex(/^[cp][0-9]+$/u), quote: z.string().min(2).max(300).optional() }).strict()
 const findingSchema = z.object({ findingId: z.string().regex(/^f[0-9]+$/u), signal: continuityFindingInputSchema.shape.signal,
   severity: continuityFindingInputSchema.shape.severity, reason: z.string().trim().min(1).max(400), suggestion: z.string().trim().min(1).max(500),
@@ -279,7 +282,7 @@ function inspectNormalizedRecord(record: Record<string, unknown>, frozen: Contin
 }
 
 function validTypedReferences(row: Record<string, unknown>, frozen: ContinuityV4Frozen, table: Table,
-  normalization?: { index: number; mappings: ProjectionSourceMapping[] }) {
+  normalization?: { index: number; mappings: ProjectionSourceMapping[]; relocate?: boolean }) {
   try {
     const catalog = continuitySourceCatalog(frozen.bodies), lineage = frozen.manifest.typedLineage
     if (!lineage) return false
@@ -295,8 +298,10 @@ function validTypedReferences(row: Record<string, unknown>, frozen: ContinuityV4
       const ref = refs[i]
       if (ref.quote === undefined || source.quote.includes(ref.quote)) continue
       const range = normalization && /^c[0-9]+$/u.test(ref.segmentId) ? terminalQuoteRange({ segmentId: ref.segmentId, quote: ref.quote }, sources) : null
-      if (!range || !range.segmentIds.includes(ref.segmentId)) return false
-      normalization!.mappings.push({ table, index: normalization!.index, kind: 'current_evidence_span', referenceIndex: i,
+      if (!range || !range.segmentIds.includes(ref.segmentId) && !normalization?.relocate
+        || normalization?.relocate && (frozen.bodies.current.indexOf(ref.quote) !== range.start
+          || frozen.bodies.current.indexOf(ref.quote, range.start + 1) >= 0)) return false
+      normalization!.mappings.push({ table, index: normalization!.index, kind: range.segmentIds.includes(ref.segmentId) ? 'current_evidence_span' : 'current_evidence_relocated', referenceIndex: i,
         originalSegmentId: ref.segmentId, quoteHash: textHash(ref.quote), range })
     }
     const quotes = [...String(row.explanation).matchAll(/[“「『‘"]([^”」』’"]{2,300})[”」』’"]/gu)].map(match => match[1])
@@ -335,7 +340,7 @@ function validTypedReferences(row: Record<string, unknown>, frozen: ContinuityV4
   } catch { return false }
 }
 
-function inspectRecord(record: Record<string, unknown>, frozen: ContinuityV4Frozen, expectedFindingIds?: string[], mappings?: ProjectionSourceMapping[]) {
+function inspectRecord(record: Record<string, unknown>, frozen: ContinuityV4Frozen, expectedFindingIds?: string[], mappings?: ProjectionSourceMapping[], relocate = false) {
   if (!frozen.manifest.typedLineage) return inspectNormalizedRecord(record, frozen, expectedFindingIds)
   const normalized = { ...record }, invalid: Diagnostic[] = [], schemas = responseFields(frozen)
   const lineage = frozen.manifest.typedLineage
@@ -346,7 +351,7 @@ function inspectRecord(record: Record<string, unknown>, frozen: ContinuityV4Froz
       const parsed = (array.element as z.ZodType).safeParse(raw), row = object(raw)
       const bad = () => { invalid.push({ table, index, code: 'typed_reason_or_provenance_invalid' }); return raw }
       if (!parsed.success || !row) return bad()
-      if (!validTypedReferences(row, frozen, table, mappings ? { index, mappings } : undefined)) return bad()
+      if (!validTypedReferences(row, frozen, table, mappings ? { index, mappings, relocate } : undefined)) return bad()
       if ((row.verdict === 'supported' || row.currentState === 'unchanged' || row.outcome === 'replaced' || row.outcome === 'ended' || row.outcome === 'repaired')
         && ['historical_reference', 'insufficient_evidence', 'proposal_pending'].includes(String(row.reasonCode))) return bad()
       if (table === 'issueDispositions') return raw
@@ -354,10 +359,14 @@ function inspectRecord(record: Record<string, unknown>, frozen: ContinuityV4Froz
       // Contract5 explicitly permits address-only manuscript references. The
       // older internal proposal shape requires quoted text; bind only omitted
       // quotes from this exact terminal catalogue, preserving the typed raw.
-      const sourceEvidence = table === 'proposalDispositions' && Array.isArray(manuscriptEvidence)
-        ? manuscriptEvidence.map((ref: z.infer<typeof evidenceReference>) => ({ ...ref,
+      const references = relocate && Array.isArray(manuscriptEvidence) ? manuscriptEvidence.map((ref: z.infer<typeof evidenceReference>) => {
+        const mapping = mappings?.find(item => item.table === table && item.index === index && item.referenceIndex === manuscriptEvidence.indexOf(ref))
+        return mapping?.range ? { ...ref, segmentId: mapping.range.segmentIds[0] } : ref
+      }) : manuscriptEvidence
+      const sourceEvidence = table === 'proposalDispositions' && Array.isArray(references)
+        ? references.map((ref: z.infer<typeof evidenceReference>) => ({ ...ref,
           quote: ref.quote ?? continuitySourceCatalog(frozen.bodies).terminalSources.find(source => source.segmentId === ref.segmentId)?.quote }))
-        : manuscriptEvidence
+        : references
       // This is an explicit contract5 interpretation, retained beside the raw.
       // It is never applied to a frozen contract4/legacy response.
       return { ...rest, ...(['terminalVerdicts'].includes(table) ? {} : { reason: explanation }),
@@ -387,9 +396,20 @@ function inspectRecord(record: Record<string, unknown>, frozen: ContinuityV4Froz
   }
   if (invalid.length) {
     result.valid = false
-    result.findings = []
-    result.projections = Object.fromEntries(Object.entries(result.projections).map(([key, projection]) => [key,
-      { ...projection, valid: false, diagnostics: [...projection.diagnostics, ...invalid] }])) as typeof result.projections
+    if (!relocate) {
+      result.findings = []
+      result.projections = Object.fromEntries(Object.entries(result.projections).map(([key, projection]) => [key,
+        { ...projection, valid: false, diagnostics: [...projection.diagnostics, ...invalid] }])) as typeof result.projections
+    } else {
+      const scopes = { prose: ['findings', 'semanticChecks', 'issueDispositions'], currentTerminal: ['terminalVerdicts', 'terminalProofVerdicts'],
+        historicalCoverage: ['terminalDispositions'], draftProposals: ['proposalDispositions'] }
+      for (const key of Object.keys(scopes) as Array<keyof typeof scopes>) {
+        const diagnostics = invalid.filter(item => scopes[key].includes(item.table))
+        if (diagnostics.length) result.projections[key] = { ...result.projections[key], valid: false,
+          diagnostics: [...result.projections[key].diagnostics, ...diagnostics] }
+      }
+      if (!result.projections.prose.valid) result.findings = []
+    }
   }
   // Raw typed rows are the only repair/supersession input; the normalized view
   // cannot be mistaken for another provider response.
@@ -421,6 +441,7 @@ export function inspectContinuityV4(raw: string, frozen: ContinuityV4Frozen, res
  * The entire report must validate, including every mandatory UNKNOWN. */
 export function normalizeContinuityV4Projection(original: ContinuityV4Inspection, frozenInputHash: string): ContinuityV4Inspection {
   const marker = original.audit.continuityV4
+  if (marker.repair || marker.failedRepair) return normalizeContinuityV4RepairProjection(original, frozenInputHash)
   const boundInputHash = original.audit.phaseRequest?.inputHash ?? original.audit.assessmentRequest?.inputHash
   if (original.complete || original.audit.parserVersion !== 10 || !hash.safeParse(frozenInputHash).success
     || boundInputHash !== undefined && boundInputHash !== frozenInputHash
@@ -443,10 +464,19 @@ export function bindNormalizedContinuityV4Projection(inspected: ContinuityV4Insp
   bindings: Pick<ContinuityV4Inspection['audit'], 'assessmentRequest' | 'phaseRequest'>, frozenInputHash: string) {
   if (!inspected.audit.continuityV4.projectionNormalization) return { ...inspected, audit: { ...inspected.audit, ...bindings } }
   const marker = inspected.audit.continuityV4, raw: unknown = JSON.parse(marker.first.content)
-  if (typeof raw !== 'string' || !validateStoredContinuityV4Projection(inspected.audit, marker.frozen.bodies.current, marker.frozen.bodies.terminalEvidence)?.complete)
+  if (typeof raw !== 'string' || !validateStoredContinuityV4Projection(inspected.audit, marker.frozen.bodies.current, marker.frozen.bodies.terminalEvidence))
     throw Error('Projection normalization lineage cannot be rebound')
-  const strict = inspectContinuityV4(raw, marker.frozen, marker.first.complete)
-  return normalizeContinuityV4Projection({ ...strict, audit: { ...strict.audit, ...bindings } }, frozenInputHash)
+  let strict = inspectContinuityV4(raw, marker.frozen, marker.first.complete)
+  if (marker.projectionNormalization?.version === 2 && marker.projectionNormalization.mode !== 'single_report') {
+    const receipt = marker.failedRepair?.response ?? marker.repair?.response
+    if (!receipt) throw Error('Missing physical repair lineage')
+    const second: unknown = JSON.parse(receipt.content)
+    if (typeof second !== 'string') throw Error('Invalid physical repair lineage')
+    try { strict = applyContinuityV4Repair(strict, second, receipt.complete) }
+    catch { strict = failedContinuityV4Repair(strict, second, receipt.complete) }
+  }
+  const bound = { ...strict, audit: { ...strict.audit, ...bindings } }
+  return marker.projectionNormalization?.version === 2 ? normalizeContinuityV4ProjectionV2(bound, frozenInputHash) : normalizeContinuityV4Projection(bound, frozenInputHash)
 }
 
 export function buildContinuityInvalidRowRepair(first: ContinuityV4Inspection): V4RepairPlan | null {
@@ -482,6 +512,10 @@ export function continuityV4RepairRequest(first: ContinuityV4Inspection) {
 }
 
 export function applyContinuityV4Repair(first: ContinuityV4Inspection, raw: string, complete: boolean): ContinuityV4Inspection {
+  return projectContinuityV4Repair(first, raw, complete)
+}
+function projectContinuityV4Repair(first: ContinuityV4Inspection, raw: string, complete: boolean,
+  interpret: typeof inspectRecord = inspectRecord, allowIncomplete = false): ContinuityV4Inspection {
   const plan = buildContinuityInvalidRowRepair(first)
   if (!plan || !complete) throw Error('No complete one-slot continuity repair')
   JSON.parse(raw)
@@ -530,11 +564,11 @@ export function applyContinuityV4Repair(first: ContinuityV4Inspection, raw: stri
     expectedFindingIds = kept.map(row => String(object(row)?.findingId))
     record.findings = kept
   }
-  const inspected = inspectRecord(record, frozen, expectedFindingIds)
-  if (!inspected.valid) throw Error('Continuity repaired rows remain invalid')
-  const audit = { ...first.audit, classification: 'complete', continuityV4: { ...first.audit.continuityV4,
+  const inspected = interpret(record, frozen, expectedFindingIds)
+  if (!inspected.valid && !allowIncomplete) throw Error('Continuity repaired rows remain invalid')
+  const audit = { ...first.audit, classification: inspected.valid ? 'complete' : 'projection_invalid', continuityV4: { ...first.audit.continuityV4,
     repair: { response: rawReceipt(raw, true), plan, dispositions, recordHash: runtimeJson(record).hash }, projections: inspected.projections } }
-  return { ...first, complete: true, structured: true, findings: inspected.findings, terminalReview: inspected.terminal, parsed: inspected, audit }
+  return { ...first, complete: inspected.valid, structured: true, findings: inspected.findings, terminalReview: inspected.terminal, parsed: inspected, audit }
 }
 
 export function failedContinuityV4Repair(first: ContinuityV4Inspection, raw: string, complete: boolean): ContinuityV4Inspection {
@@ -557,6 +591,31 @@ export function validateStoredContinuityV4Projection(value: unknown, content: st
     const raw: unknown = JSON.parse(first.content)
     if (typeof raw !== 'string') return null
     let rebuilt = inspectContinuityV4(raw, frozen, true)
+    if (marker.projectionNormalization !== undefined && object(marker.projectionNormalization)?.version === 2) {
+      const normalization = object(marker.projectionNormalization)!
+      if (normalization.mode === 'single_report') {
+        if (marker.repair !== undefined || marker.failedRepair !== undefined || normalization.originalParserVersion !== 10
+          || typeof normalization.frozenInputHash !== 'string' || normalization.repairPlanHash !== undefined
+          || normalization.repairResponseHash !== undefined || normalization.serverRejectedReplacements !== undefined) return null
+        const bindings = { ...(audit.assessmentRequest ? { assessmentRequest: audit.assessmentRequest as ContinuityV4Inspection['audit']['assessmentRequest'] } : {}),
+          ...(audit.phaseRequest ? { phaseRequest: audit.phaseRequest as ContinuityV4Inspection['audit']['phaseRequest'] } : {}) }
+        rebuilt = normalizeContinuityV4ProjectionV2({ ...rebuilt, audit: { ...rebuilt.audit, ...bindings } }, normalization.frozenInputHash)
+        return runtimeJson(audit).hash === runtimeJson(rebuilt.audit).hash ? rebuilt : null
+      }
+      if (normalization.mode !== 'sparse_repair') return null
+      const receipt = object(object(marker.failedRepair ?? marker.repair)?.response)
+      if (normalization.originalParserVersion !== 10 || typeof normalization.frozenInputHash !== 'string'
+        || receipt?.complete !== true || receipt.encoding !== 'json-string' || typeof receipt.content !== 'string'
+        || marker.failedRepair !== undefined && marker.repair !== undefined) return null
+      const second: unknown = JSON.parse(receipt.content)
+      if (typeof second !== 'string') return null
+      try { rebuilt = applyContinuityV4Repair(rebuilt, second, true) }
+      catch { rebuilt = failedContinuityV4Repair(rebuilt, second, true) }
+      const bindings = { ...(audit.assessmentRequest ? { assessmentRequest: audit.assessmentRequest as ContinuityV4Inspection['audit']['assessmentRequest'] } : {}),
+        ...(audit.phaseRequest ? { phaseRequest: audit.phaseRequest as ContinuityV4Inspection['audit']['phaseRequest'] } : {}) }
+      rebuilt = normalizeContinuityV4RepairProjection({ ...rebuilt, audit: { ...rebuilt.audit, ...bindings } }, normalization.frozenInputHash)
+      return runtimeJson(audit).hash === runtimeJson(rebuilt.audit).hash ? rebuilt : null
+    }
     if (marker.projectionNormalization !== undefined) {
       const normalization = object(marker.projectionNormalization)
       if (marker.repair !== undefined || marker.failedRepair !== undefined || normalization?.version !== 1
@@ -591,4 +650,96 @@ export function validateStoredContinuityV4Projection(value: unknown, content: st
     const { assessmentRequest: _request, phaseRequest: _phase, ...stored } = audit
     return runtimeJson(stored).hash === runtimeJson(rebuilt.audit).hash ? rebuilt : null
   } catch { return null }
+}
+
+/** A free interpretation of the original, complete, exact-mask repair. The
+ * provider's invalid replacement remains a rejected row, never a new verdict.
+ * Eligibility still requires live task-scope authentication outside this parser. */
+export function normalizeContinuityV4RepairProjection(original: ContinuityV4Inspection, frozenInputHash: string): ContinuityV4Inspection {
+  const marker = original.audit.continuityV4, receipt = marker.failedRepair?.response ?? marker.repair?.response
+  const bound = original.audit.phaseRequest?.inputHash ?? original.audit.assessmentRequest?.inputHash
+  if (original.audit.parserVersion !== 10 || !hash.safeParse(frozenInputHash).success || bound !== undefined && bound !== frozenInputHash
+    || marker.projectionNormalization || !receipt?.complete || !marker.first.complete) return original
+  try {
+    const raw: unknown = JSON.parse(marker.first.content), second: unknown = JSON.parse(receipt.content)
+    if (typeof raw !== 'string' || typeof second !== 'string') return original
+    const first = inspectContinuityV4(raw, marker.frozen, true), plan = buildContinuityInvalidRowRepair(first)
+    if (!plan) return original
+    let strict: ContinuityV4Inspection
+    try { strict = applyContinuityV4Repair(first, second, true) } catch { strict = failedContinuityV4Repair(first, second, true) }
+    const { assessmentRequest: _assessmentRequest, phaseRequest: _phaseRequest, ...unbound } = original.audit
+    if (runtimeJson(unbound).hash !== runtimeJson(strict.audit).hash) return original
+    const mappings: ProjectionSourceMapping[] = [], rejected: RejectedReplacement[] = []
+    const interpret: typeof inspectRecord = (record, frozen, expectedIds) => {
+      const effective = structuredClone(record), rows = effective.terminalDispositions
+      const catalog = terminalReviewAddressCatalog(frozen.candidate, frozen.bodies.terminalEvidence!)
+      if (!Array.isArray(rows)) return inspectRecord(record, frozen, expectedIds, mappings, true)
+      for (const [index, value] of rows.entries()) {
+        const row = object(value), array = responseFields(frozen).terminalDispositions
+        if (!row || !(array instanceof z.ZodArray) || (array.element as z.ZodType).safeParse(row).success) continue
+        const shape = z.object({ obligationIndex: z.number().int().nonnegative(), outcome: z.literal('replaced'),
+          candidateIndex: z.number().int().nonnegative(), ...typedExplanation, manuscriptEvidence: z.array(evidenceReference).max(8) }).strict().safeParse(row)
+        const obligation = catalog.obligations.find(item => item.obligationIndex === row.obligationIndex)
+        const target = catalog.claims.find(item => item.claimIndex === row.candidateIndex)
+        if (!shape.success || !obligation || !target || ['knowledge', 'body', 'objects', 'relationships', 'openLoops'].includes(target.field)
+          || catalog.claims.some(item => item.id === obligation.id) || catalog.proofs.some(item => historyFactIdentity(item.fact.field, item.fact.claim) === obligation.id)
+          || !validTypedReferences(row, frozen, 'terminalDispositions', { index, mappings, relocate: true })
+          || ['historical_reference', 'insufficient_evidence', 'proposal_pending'].includes(String(row.reasonCode))) continue
+        rejected.push({ id: obligation.id, obligationIndex: obligation.obligationIndex, originalRowHash: runtimeJson(row).hash, code: 'replacement_target_invalid' })
+        // Only a mechanical validator placeholder; removed from model judgments
+        // below and represented exclusively by serverRejectedReplacements.
+        const { candidateIndex: _target, ...rest } = row
+        rows[index] = { ...rest, outcome: 'unknown' }
+      }
+      const parsed = inspectRecord(effective, frozen, expectedIds, mappings, true)
+      if (!parsed.valid || !parsed.terminal) return { ...parsed, record }
+      if (rejected.length) {
+        const coverage = parsed.terminal.factCoverage
+        if (!coverage || coverage.dispositions.length !== catalog.obligations.length) return { ...parsed, valid: false, record }
+        const ids = new Set(rejected.map(item => item.id))
+        parsed.terminal = { ...parsed.terminal, supported: false, factCoverage: { ...coverage, complete: false,
+          dispositions: coverage.dispositions.filter(item => !ids.has(item.id)), serverRejectedReplacements: rejected } }
+        parsed.projections.historicalCoverage.value = { input: frozen.bodies.terminalEvidence!.factCoverage, rows: record.terminalDispositions,
+          serverRejectedReplacements: rejected }
+      }
+      return { ...parsed, record }
+    }
+    const projected = projectContinuityV4Repair(first, second, true, interpret, true)
+    if (!mappings.length && !rejected.length && !projected.terminalReview?.factCoverage?.dispositions.some(item => item.outcome === 'unknown')) return original
+    const value = { version: 2 as const, mode: 'sparse_repair' as const, originalParserVersion: 10 as const, originReportHash: runtimeJson(original.audit).hash,
+      rawHash: original.audit.contentHash, frozenInputHash, mappings, originalDiagnostics: first.parsed?.diagnostics ?? [],
+      serverRejectedReplacements: rejected, repairPlanHash: runtimeJson(plan).hash, repairResponseHash: textHash(second) }
+    return { ...projected, audit: { ...original.audit, classification: projected.complete ? 'complete' : 'projection_invalid', terminalReviewDiagnostics: projected.parsed?.terminalDiagnostics ?? [],
+      continuityV4: { ...marker, projections: projected.parsed!.projections,
+        projectionNormalization: { ...value, derivationHash: runtimeJson(value).hash } } } }
+  } catch { return original }
+}
+
+/** Explicit live v2 admission. Stored v1 replay keeps the original interpreter.
+ * A single physical full report needs no invented repair or second response. */
+export function normalizeContinuityV4ProjectionV2(original: ContinuityV4Inspection, frozenInputHash: string): ContinuityV4Inspection {
+  const marker = original.audit.continuityV4
+  if (marker.projectionNormalization) return original
+  if (marker.repair || marker.failedRepair) return normalizeContinuityV4RepairProjection(original, frozenInputHash)
+  const bound = original.audit.phaseRequest?.inputHash ?? original.audit.assessmentRequest?.inputHash
+  if (original.audit.parserVersion !== 10 || !hash.safeParse(frozenInputHash).success || bound !== undefined && bound !== frozenInputHash
+    || !marker.first.complete || !original.parsed || !continuityReviewV4ResponseSchema(marker.frozen).safeParse(original.parsed.record).success)
+    return normalizeContinuityV4Projection(original, frozenInputHash)
+  try {
+    const raw: unknown = JSON.parse(marker.first.content)
+    if (typeof raw !== 'string') return original
+    const strict = inspectContinuityV4(raw, marker.frozen, true)
+    const { assessmentRequest: _assessmentRequest, phaseRequest: _phaseRequest, ...unbound } = original.audit
+    if (runtimeJson(unbound).hash !== runtimeJson(strict.audit).hash) return original
+  } catch { return original }
+  const mappings: ProjectionSourceMapping[] = []
+  const parsed = inspectRecord(original.parsed.record, marker.frozen, undefined, mappings, true)
+  if (!parsed.valid || !parsed.terminal?.factCoverage?.dispositions.some(item => item.outcome === 'unknown'))
+    return normalizeContinuityV4Projection(original, frozenInputHash)
+  const value = { version: 2 as const, mode: 'single_report' as const, originalParserVersion: 10 as const,
+    originReportHash: runtimeJson(original.audit).hash, rawHash: original.audit.contentHash, frozenInputHash, mappings,
+    originalDiagnostics: original.parsed.diagnostics }
+  return { ...original, complete: true, findings: parsed.findings, terminalReview: parsed.terminal, parsed,
+    audit: { ...original.audit, classification: 'complete', terminalReviewDiagnostics: parsed.terminalDiagnostics,
+      continuityV4: { ...marker, projections: parsed.projections, projectionNormalization: { ...value, derivationHash: runtimeJson(value).hash } } } }
 }

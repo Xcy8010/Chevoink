@@ -12,7 +12,7 @@ import { authenticateEffectiveContinuityReport, effectiveContinuityAudit } from 
 type Identity = { userId: string; novelId: string; taskId: string; compilationId: string; chapterId: string; bodyHash: string;
   sourceHash: string; candidateHash: string; evidenceHash: string; preparedHash: string; auditHash: string; revisionHash: string }
 const reviewAuthority = new WeakMap<object, string>()
-export type TerminalPreservationPolicy = { version: 1; policyHash: string;
+export type TerminalPreservationPolicy = { version: 1 | 2; policyHash: string;
   inherited: Array<{ path: string; proofHash: string; sourceNodesHash: string }>;
   pendingCoverageIds: string[] }
 const scopeAuthority = new WeakMap<object, { identityHash: string; policy: TerminalPreservationPolicy }>()
@@ -79,10 +79,14 @@ async function readPreservationPolicy(db: Prisma.TransactionClient,
       errors.map(findingId => ({ source: 'continuity', reportId, findingId })))) return null
   }
   const unknown = review.verdicts.filter(item => item.verdict !== 'supported')
-  const pending = review.factCoverage?.dispositions.filter(item => item.outcome === 'unknown') ?? []
-  if (!unknown.length && !pending.length) return null
+  const rejected = review.factCoverage?.serverRejectedReplacements ?? []
+  const pending = [...(review.factCoverage?.dispositions.filter(item => item.outcome === 'unknown') ?? []), ...rejected]
+  const explicitBackground = object(object(object(audit).continuityV4).projectionNormalization).version === 2
+  if (!unknown.length && !pending.length || explicitBackground && unknown.length) return null
   const source = context.previous ? await (await import('./compiler-continuity-source.js')).readCompilerContinuitySource(db,
     subject, chapter, context.previous.id, 11, inheritanceScope) : null
+  if (explicitBackground && runtimeJson((await import('./terminal-evidence-context.js')).terminalEvidenceContext(chapter, source, 2,
+    context.quoteAddressProtocol, context.factCoverage, context.verdictProtocol, context.spanAddressProtocol).previous).hash !== runtimeJson(context.previous).hash) return null
   const parsedProofs = z.array(terminalCarriedFactSchema).max(200).safeParse(source && 'terminalInheritance' in source ? source.terminalInheritance : [])
   const currentProofs = parsedProofs.success ? parsedProofs.data : []
   const catalog = (await import('./terminal-proof-verdict.js')).terminalProofCatalog(review.candidate, context)
@@ -111,15 +115,20 @@ async function readPreservationPolicy(db: Prisma.TransactionClient,
   if (pending.length && (onlyNextChapter || boundedRevision) && noHardObligations) {
     const origins = await (await import('./continuity-coordinator.js')).readNormalizedContinuityCoverageOrigins(db, subject,
       { compilationId: subject.compilationId, chapterId: chapter.id, preparedContext: binding.preparedContext }, audit)
-    if (origins) priorScope = await uncommittedCoverageHistory(db, subject, chapter, validation)
+    if (origins && !explicitBackground) priorScope = await uncommittedCoverageHistory(db, subject, chapter, validation)
     const ledger = (await import('./terminal-fact-coverage.js')).readTerminalCoverageState(original.spec, binding.preparedContext, chapter.id)
     const facts = historyCandidateFacts(review.candidate)
     for (const disposition of pending) {
       const obligation = context.factCoverage?.obligations.find(item => item.id === disposition.id)
       const origin = origins?.origins.find(item => item.factId === disposition.id)
-      if (!priorScope || !obligation || obligation.field !== 'openLoops' || !origin || origin.revision > chapter.revision
-        || !ledger?.facts.some(item => item.id === obligation.id && item.field === obligation.field && item.claim === obligation.claim)
-        || facts.some(item => item.id === obligation.id) || currentProofs.some(item => historyFactId(item.field, item.claim) === obligation.id)) continue
+      if (!obligation || !origin || origin.revision > chapter.revision
+        || !(explicitBackground ? [...(ledger?.facts ?? []), ...context.factCoverage!.obligations] : ledger?.facts ?? [])
+          .some(item => item.id === obligation.id && item.field === obligation.field && item.claim === obligation.claim)
+        || facts.some(item => item.id === obligation.id)
+        || (explicitBackground ? catalog.some(item => historyFactId(item.fact.field, item.fact.claim) === obligation.id)
+          : currentProofs.some(item => historyFactId(item.field, item.claim) === obligation.id))) continue
+      if (explicitBackground) { pendingCoverageIds.push(obligation.id); continue }
+      if (!priorScope || obligation.field !== 'openLoops') continue
       // A completed canonical chapter containing this exact claim makes it a
       // real inherited obligation, even if the same text also occurred here.
       const canonical = await db.storyCompilation.count({ where: { userId: subject.userId, novelId: subject.novelId,
@@ -132,12 +141,16 @@ async function readPreservationPolicy(db: Prisma.TransactionClient,
   subject.signal?.throwIfAborted()
   const { preparedHash: _bookkeeping, ...identity } = terminalDraftIdentity(binding, context, review.candidateHash, runtimeJson(audit).hash,
     runtimeJson({ newDraftRevision: object(validation).newDraftRevision ?? null, retainedReviewDecision: object(validation).retainedReviewDecision ?? null }).hash)
-  const value = { version: 1 as const, contractHash: runtimeJson({ prompt: original.prompt ?? null, spec: original.spec }).hash,
+  const policyVersion = explicitBackground ? 2 as const : 1 as const
+  const value = { version: policyVersion, contractHash: runtimeJson({ prompt: original.prompt ?? null, spec: original.spec }).hash,
     identity, inherited, pendingCoverageIds }
   const policyHash = runtimeJson(value).hash
+  const savedScope = object(object(object(binding.preparedContext).terminalReviewProof).scopePreservation)
+  if (explicitBackground && Object.keys(savedScope).length && (savedScope.version !== 2 || savedScope.auditHash !== runtimeJson(audit).hash
+    || savedScope.policyHash !== policyHash || runtimeJson(savedScope.pendingCoverageIds).hash !== runtimeJson(pendingCoverageIds).hash)) return null
   if (pendingCoverageIds.length && priorScope?.policyHash && (priorScope.policyHash !== policyHash
     || runtimeJson(priorScope.pendingCoverageIds).hash !== runtimeJson(pendingCoverageIds).hash)) return null
-  return { version: 1, policyHash, inherited, pendingCoverageIds }
+  return { version: policyVersion, policyHash, inherited, pendingCoverageIds }
 }
 
 /** Reopening clears bridge.committedAt, but it must not erase canonical
@@ -244,7 +257,7 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
         if (lifecycle.legacyContinuityAssessmentKey(source, parsed.data) !== request.key) return base
         const result = await lifecycle.readLegacyContinuityAssessment(db, source, parsed.data)
         const bound = lifecycle.bindLegacyContinuityAssessment(result.inspected, source, parsed.data,
-          object(object(currentAudit.continuityV4).projectionNormalization).version === 1)
+          object(object(currentAudit.continuityV4).projectionNormalization).version === 2 ? 2 : object(object(currentAudit.continuityV4).projectionNormalization).version === 1)
         authentic = bound.complete && result.billingKnown && result.providerComplete && result.recoveryReady
           && runtimeJson(bound.audit).hash === runtimeJson(currentAudit).hash
       } else {
@@ -264,7 +277,7 @@ async function loadTerminalDraftBinding(db: Prisma.TransactionClient,
       reviewAuthority.set(token, runtimeJson(terminalDraftIdentity(base, context, runtimeJson(currentAudit.terminalCandidate).hash,
         runtimeJson(currentAudit).hash, runtimeJson({ newDraftRevision: object(validation).newDraftRevision ?? null, retainedReviewDecision: object(validation).retainedReviewDecision ?? null }).hash)).hash)
       base.reviewAuthority = token
-      if (object(object(currentAudit.continuityV4).projectionNormalization).version === 1) {
+      if ([1, 2].includes(object(object(currentAudit.continuityV4).projectionNormalization).version as number)) {
         const policy = await readPreservationPolicy(db, subject, original, chapter, validation, context, base, inheritanceScope)
         if (policy) {
           const scopeToken = Object.freeze({})

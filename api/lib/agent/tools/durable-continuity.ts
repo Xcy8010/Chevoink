@@ -1,7 +1,7 @@
 import { observedReviewOutcome } from '../../../../shared/review-lifecycle.js'
 import { continuitySubjectIdentity, continuityWorkSubjectIdentity } from '../continuity-subject-identity.js'
-import { buildContinuityReviewManifest, continuityReviewV4Request, continuityReviewManifestSchema, validContinuityReviewManifest } from '../continuity-review-v4.js'
-import { inspectAuthenticatedContinuityAssessment, assertLegacyContinuityInspection } from '../authenticated-continuity-assessment.js'
+import { buildContinuityReviewManifest, continuityReviewV4Request, continuityReviewManifestSchema, validContinuityReviewManifest, normalizeContinuityV4ProjectionV2 } from '../continuity-review-v4.js'
+import { inspectAuthenticatedContinuityAssessment, assertLegacyContinuityInspection, isContinuityV4Inspection } from '../authenticated-continuity-assessment.js'
 import { continuityResponseInput4 } from '../continuity-response-repair.js'
 import { terminalReportRecoveryResult } from '../terminal-report-recovery.js'
 import { continuityResponseContract, continuityResponseSystem } from '../continuity-response-contract.js'
@@ -158,6 +158,15 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
     let recoveryReady = false
     let inspected = frozen.version >= 5 && critic && frozen.sourceBodies
       ? inspectAuthenticatedContinuityAssessment(critic.content, { bodies: frozen.sourceBodies!, parserVersion: frozen.version === 23 ? 10 : frozen.version === 22 ? 9 : frozen.version >= 13 ? 8 : frozen.version >= 12 ? 7 : frozen.version >= 8 ? 6 : frozen.version >= 7 ? 5 : frozen.version >= 6 ? 4 : 3, terminalCandidate: frozen.version >= 10 ? frozen.terminalCandidate : undefined, sourceScope: frozen.version >= 12 ? frozen.sourceScope : undefined, continuityManifest: frozen.continuityManifest, reassessmentProtocol: frozen.reassessmentProtocol }, critic.finishReason === 'stop' && !critic.toolCalls.length) : null
+    if (frozen.version === 23 && inspected?.complete && isContinuityV4Inspection(inspected) && firstBillingKnown
+      && critic?.finishReason === 'stop' && !critic.toolCalls.length) {
+      const secondExists = await withRunLease(lease, async tx => !!await tx.agentArtifact.findFirst({ where: { runId: lease.runId, artifactType: 'continuityReview',
+        metadata: { path: ['fullReassessmentKey'], equals: `durable:${operation.id}:continuity_reassessment` } } })
+        || !!await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId,
+          operationKey: `aux:${operation.id}:continuity_reassessment` } } }))
+      if (secondExists) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原第二响应请求已存在，不能仅凭第一包签发新的派生；原请求和回执均保留。')
+      inspected = normalizeContinuityV4ProjectionV2(inspected, operation.inputHash)
+    }
     if (frozen.version === 7 && inspected && frozen.sourceBodies && inspected.audit.classification === 'source_invalid') {
       assertLegacyContinuityInspection(inspected)
       const billingKnown = await withRunLease(lease, async tx => {
@@ -188,8 +197,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
         const previous = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: `aux:${operation.id}:continuity_critic` } } })
         const attempt = previous && await tx.agentProviderAttempt.findUnique({ where: { operationId_attemptKey: { operationId: previous.id, attemptKey: '1' } }, include: { usageReceipt: true } })
         const usage = attempt?.usageReceipt
-        if (frozen.version === 23 && !await tx.agentArtifact.findFirst({ where: { runId: lease.runId, artifactType: 'continuityReview',
-          metadata: { path: ['fullReassessmentKey'], equals: `durable:${operation.id}:continuity_reassessment` } } })) normalizationInputHash = operation.inputHash
+        if (frozen.version === 23) normalizationInputHash = operation.inputHash
         return previous?.status === 'succeeded' && attempt?.status === 'succeeded' && usage?.source === 'reported' && usage.settlementStatus === 'settled'
           && usage.promptTokens !== null && usage.completionTokens !== null && usage.promptTokens >= 0 && usage.completionTokens >= 0
       })

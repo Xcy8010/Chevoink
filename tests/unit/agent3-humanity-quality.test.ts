@@ -227,6 +227,8 @@ describe('严谨创作自动落实质量建议', () => {
     guard.readiness.mockResolvedValue({ chapterId: 'c', ready: true, reviewCycle: { edited: true }, qualityPassRequired: false, mustPassPending: false })
     const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
     expect(result.output).toContain('当前属于最终核验的质量建议')
+    expect(result.summary).toBe('质量核验完成 · 0 关注 8 建议')
+    expect(result.summary).not.toContain('待决定')
     expect(result.output).toContain('不要为这些纯建议再调用正文写入工具')
     expect(result.output).toContain('source、reportId、findingId、reason')
     expect(result.output).toContain('逐项写明保留原因')
@@ -236,6 +238,16 @@ describe('严谨创作自动落实质量建议', () => {
     expect(f.write).not.toHaveBeenCalled()
     expect(f.report.chapterRevision).toBe(1)
     expect(f.report.findings.every(item => item.disposition === 'pending')).toBe(true)
+  })
+  it.each([true, false])('reports completed cached=%s advice counts without an author-approval summary', async cached => {
+    const f = fixture(cached); f.ctx.creativeFreedom = 'stable'
+    const before = JSON.stringify(f.report)
+    const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+    expect(result.summary).toBe('人类感质量检查完成' + (cached ? '（复用）' : '') + ' · 0 关注 8 建议')
+    expect(result.summary).not.toContain('待决定')
+    expect(result.output).toContain('8 个建议')
+    expect(f.reserve).not.toHaveBeenCalled(); expect(f.model).not.toHaveBeenCalled(); expect(f.write).not.toHaveBeenCalled()
+    expect(JSON.stringify(f.report)).toBe(before)
   })
   it('does not waive a genuine error or explicit mandatory pass at final verification', async () => {
     const f = fixture(true)

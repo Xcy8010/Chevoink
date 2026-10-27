@@ -143,7 +143,7 @@ export function inspectTerminalCoverage(input: TerminalCoverageInput | undefined
     if (issue) diagnostics?.push({ code: issue.code, path: `terminalDispositions.${index}${issue.suffix}` })
     return !!issue
   })) return null
-  return { ...(input.version === 2 ? { version: 2 as const } : {}), complete: parsed.data.every(item => item.outcome !== 'unknown'), dispositions: parsed.data }
+  return { ...(input.version === 2 ? { version: 2 as const } : {}), ...({} as { serverRejectedReplacements?: Array<{ id: string; obligationIndex: number; originalRowHash: string; code: 'replacement_target_invalid' }> }), complete: parsed.data.every(item => item.outcome !== 'unknown'), dispositions: parsed.data }
 }
 
 export function terminalCoverageGuidance(input: TerminalCoverageInput | undefined) {
@@ -165,7 +165,7 @@ export function advanceTerminalCoverage(spec: unknown, preparedContext: unknown,
     || input.version !== (review.factCoverage?.version ?? 1)) throw blocked()
   const old = readTerminalCoverageState(spec, preparedContext, chapter.id)
   const resolved = new Set(review.factCoverage?.dispositions.filter(item => item.outcome !== 'unknown').map(item => item.id))
-  const facts = new Map((old?.facts ?? []).filter(item => !resolved.has(item.id)).map(item => [item.id, item]))
+  const facts = new Map([...(old?.facts ?? []), ...input.obligations].filter(item => !resolved.has(item.id)).map(item => [item.id, item]))
   for (const item of review.verdicts) {
     const match = /^exitState\.(knowledge|body|objects|relationships|openLoops)\.([0-9]+)$/u.exec(item.path)
     if (item.verdict !== 'supported' || !match) continue

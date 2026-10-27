@@ -77,3 +77,25 @@ it('stops nonrecoverable errors without changing body or billing', () => {
   expect(useAgentStore.getState().messages[0].parts).toEqual([])
   expect(useAgentStore.getState().usage.totalTokens).toBe(0)
 })
+
+it('removes only a deferred running proposal after a real child CHECK result, preserving that result and late terminal cards', () => {
+  const apply = useAgentStore.getState().applyEvent
+  apply(start(1, 0))
+  apply({ type: 'message.start', runId: 'r', seq: 2, ts: ts(1), messageId: 'a', role: 'assistant' })
+  apply({ type: 'tool.call', runId: 'r', seq: 3, ts: ts(2), messageId: 'a', callId: 'commit', toolName: 'chapter_bridge_commit', title: '提交', args: { terminalState: {} } })
+  apply({ type: 'tool.call', runId: 'r', seq: 4, ts: ts(3), messageId: 'a', callId: 'check', toolName: 'continuity_validate', title: '核验', args: {} })
+  apply({ type: 'tool.result', runId: 'r', seq: 5, ts: ts(4), messageId: 'a', callId: 'check', toolName: 'continuity_validate', ok: true, summary: '真实报告完成', durationMs: 1 })
+  apply({ type: 'tool.deferred', runId: 'r', seq: 6, ts: ts(5), messageId: 'a', callId: 'commit', toolName: 'chapter_bridge_commit', execution: 'not_dispatched', reason: '当前真实意见交回写者' })
+  expect(useAgentStore.getState().messages[1].parts.filter(part => part.type === 'tool-call')).toEqual([
+    expect.objectContaining({ callId: 'check', status: 'success' }),
+  ])
+  for (const [index, ok] of [true, false].entries()) {
+    const callId = 'actual-' + index
+    apply({ type: 'tool.call', runId: 'r', seq: 7 + index * 3, ts: ts(6), messageId: 'a', callId, toolName: 'chapter_bridge_commit', title: '提交', args: {} })
+    apply({ type: 'tool.result', runId: 'r', seq: 8 + index * 3, ts: ts(7), messageId: 'a', callId, toolName: 'chapter_bridge_commit', ok, summary: '真实结果', durationMs: 1 })
+    apply({ type: 'tool.deferred', runId: 'r', seq: 9 + index * 3, ts: ts(8), messageId: 'a', callId, toolName: 'chapter_bridge_commit', execution: 'not_dispatched', reason: '迟到事件不能抹去真实执行' })
+  }
+  expect(useAgentStore.getState().messages[1].parts.filter(part => part.type === 'tool-call').map(part => [part.callId, part.status])).toEqual([
+    ['check', 'success'], ['actual-0', 'success'], ['actual-1', 'failed'],
+  ])
+})

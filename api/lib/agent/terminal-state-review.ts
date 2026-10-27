@@ -43,8 +43,12 @@ function terminalDeliveryEligibility(review: NonNullable<ReturnType<typeof inspe
   if (review.supported) return result(true, 'fully_supported')
   const currentComplete = review.verdicts.every(item => item.verdict === 'supported'
     || item.verdict === 'unknown' && preservation?.inherited.some(proof => proof.path === item.path))
-  const coverageComplete = review.factCoverage?.version === 2 && review.factCoverage.dispositions.every(item => item.outcome !== 'unknown'
-    || preservation?.pendingCoverageIds.includes(item.id))
+  const coverageIds = [...(review.factCoverage?.dispositions.map(item => item.id) ?? []),
+    ...(review.factCoverage?.serverRejectedReplacements?.map(item => item.id) ?? [])]
+  const coverageComplete = review.factCoverage?.version === 2 && coverageIds.length === context?.factCoverage?.obligations.length
+    && new Set(coverageIds).size === coverageIds.length && context.factCoverage.obligations.every(item => coverageIds.includes(item.id))
+    && review.factCoverage.dispositions.every(item => item.outcome !== 'unknown' || preservation?.pendingCoverageIds.includes(item.id))
+    && (review.factCoverage.serverRejectedReplacements ?? []).every(item => preservation?.version === 2 && preservation.pendingCoverageIds.includes(item.id))
   if (preservation && currentComplete && coverageComplete && !unknown.length)
     return result(true, 'preserved_canonical_with_pending_scope')
   const input = context?.proposalChanges

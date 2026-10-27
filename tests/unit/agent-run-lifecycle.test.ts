@@ -16,6 +16,7 @@ import type { ChapterReviewReadiness } from '../../api/lib/agent/chapter-review-
 import type { WritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
 import { persistedContentHash } from '../../api/lib/agent/semantic-progress.js'
 import { toolFailureInputHash } from '../../api/lib/agent/tool-local-failure.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
 
@@ -47,6 +48,7 @@ const mocks = vi.hoisted(() => ({
   reviewWritePreflight: vi.fn(async (): Promise<{ kind: 'decision_required'; guidance: string } | null> => null),
   limitedDelivery: vi.fn(async () => null as import('../../api/lib/agent/writing-delivery-limitations.js').LimitedWritingDelivery | null),
   qualityRecovery: vi.fn(async () => null as import('../../api/lib/agent/quality-format-recovery.js').QualityFormatRecovery | null),
+  completedRequests: vi.fn(async (): Promise<import('../../api/lib/agent/checkpoint.js').PendingReviewCall[]> => []),
   requestRecovery: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/review-request-recovery.js').readReviewRequestRecovery>>> => []),
   cancelledReviews: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/cancelled-review-recovery.js').readCancelledReviewRetirements>>> => []),
   settledQuality: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/quality-review-admission.js').readSettledQualityReviews>>> => []),
@@ -86,7 +88,7 @@ vi.mock('../../api/lib/agent/chapter-review-guard.js', async importOriginal => (
 vi.mock('../../api/lib/agent/tools/chapter-tools.js', () => ({ preflightChapterReviewWrite: mocks.reviewWritePreflight }))
 // Database call/result authentication is covered by the PostgreSQL recovery suite.
 // These loop-only fixtures contain no settled report witness.
-vi.mock('../../api/lib/agent/review-request-recovery.js', () => ({ readReviewRequestRecovery: mocks.requestRecovery }))
+vi.mock('../../api/lib/agent/review-request-recovery.js', () => ({ readReviewRequestRecovery: mocks.requestRecovery, readCompletedReviewRequestRecovery: mocks.completedRequests }))
 vi.mock('../../api/lib/agent/cancelled-review-recovery.js', () => ({ readCancelledReviewRetirements: mocks.cancelledReviews }))
 vi.mock('../../api/lib/agent/quality-review-admission.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../api/lib/agent/quality-review-admission.js')>(), readSettledQualityReviews: mocks.settledQuality,
@@ -273,7 +275,7 @@ vi.mock('../../api/lib/agent/story-compiler.js', async (importOriginal) => ({
 vi.mock('../../api/lib/agent/legacy-continuity-recovery.js', () => ({ readLegacyContinuityRecovery: mocks.continuityRecovery, readContinuedContinuityRecovery: mocks.continuedContinuity }))
 vi.mock('../../api/lib/agent/legacy-input-recovery.js', () => ({ readLegacyAnchorInputRecovery: mocks.legacyAnchorRecovery }))
 vi.mock('../../api/lib/agent/continuity-offline-recovery.js', () => ({ readOfflineContinuityRecovery: mocks.offlineContinuity }))
-vi.mock('../../api/lib/agent/humanity-quality.js', () => ({ hasCommittedTaskChapter: mocks.committedChapter }))
+vi.mock('../../api/lib/agent/humanity-quality.js', () => ({ hasCommittedTaskChapter: mocks.committedChapter, qualityCompilationScope: vi.fn(async () => ({ runId: 'run' })) }))
 // Most cases isolate dispatch/recovery and already model a successful compiler
 // commit with committedChapter. Give that explicit fixture its corresponding
 // read-only delivery receipt. The presentation/CAS cases below use the actual
@@ -432,6 +434,7 @@ beforeEach(() => {
   mocks.settledQuality.mockReset().mockResolvedValue([])
   mocks.replacementReviews.mockReset().mockResolvedValue([])
   mocks.requestRecovery.mockReset().mockResolvedValue([])
+  mocks.completedRequests.mockReset().mockResolvedValue([])
   mocks.cancelledReviews.mockReset().mockResolvedValue([])
   mocks.continuedContinuity.mockReset().mockResolvedValue([])
   mocks.continuedReviews.mockReset().mockResolvedValue([])
@@ -4532,4 +4535,221 @@ describe('authenticated human Continue has an ordinary local convergence window'
     f.protectedEvidence()
     expect(events().at(-1)).toMatchObject({ type: 'run.paused' })
   })
+})
+
+async function lateCandidateCommitFixture() {
+  const { continuityDecisionBinding } = await import('../../api/lib/agent/chapter-review-guard.js')
+  const { chapterBridgeCommitTool } = await import('../../api/lib/agent/tools/story-compiler-tools.js')
+  const candidate = terminalCandidateSchema.parse({ exitState: { location: 'The clerk is beside the sealed desk.' } })
+  const chapter = { id: 'c', revision: 3, content: 'The clerk is beside the sealed desk.' }
+  Object.assign(mocks.chapters[0], chapter)
+  let validation: Record<string, unknown> = { independentCheck: 'complete', checkedRevision: 3 }
+  let state = readiness('complete', 'complete')
+  const update = (reviewed = false) => { state = { ...state, revision: chapter.revision, decisionBinding: { contentHash: runtimeJson({ content: chapter.content }).hash,
+    continuityBinding: continuityDecisionBinding('comp', chapter.revision, validation), qualityReportId: 'report', qualityReportHash: null },
+    ...(reviewed ? { terminalReview: { state: 'supported' as const, currentResultVerified: true, deliveryEligible: true, unresolved: [] } } : {}) } }
+  update()
+  mocks.reviewReadiness.mockImplementation(async () => state)
+  const compilation = vi.mocked((mocks.db.storyCompilation as { findFirst: ReturnType<typeof vi.fn> }).findFirst)
+  compilation.mockImplementation(async ({ where }: { where: Record<string, unknown> }) => {
+    expect(where).toMatchObject({ id: 'comp', userId: 'user', novelId: 'novel' })
+    if (where.chapterId !== undefined) expect(where).toMatchObject({ chapterId: 'c', runId: 'run' })
+    return { id: 'comp', runId: 'run', chapterId: 'c', chapter, validation }
+  })
+  const checked = tool('continuity_validate', async () => {
+    validation = { ...validation, terminalCandidate: candidate }; update(true)
+    return { output: 'Same body and proposed candidate independently checked.', reviewCompleted: true }
+  })
+  const original = { compilationId: 'comp', terminalState: candidate, chapterSummary: 'The clerk waits beside the sealed desk.',
+    retainedFindings: [{ source: 'quality', reportId: 'report', findingId: 'advice', reason: 'The current phrasing is intentional.' }] }
+  const committed = tool('chapter_bridge_commit', async () => {
+    expect(state.terminalReview?.deliveryEligible).toBe(true)
+    expect(mocks.runEvents.some(event => event.type === 'tool.call' && (event.payload as { args?: unknown }).args
+      && runtimeJson((event.payload as { args: unknown }).args).hash === runtimeJson(original).hash)).toBe(true)
+    state = { ...state, decisionPending: false, mustPassPending: false }
+    mocks.committedChapter.mockResolvedValue(true)
+    return { output: 'The unchanged proposal has been committed.' }
+  }, false)
+  committed.parameters = chapterBridgeCommitTool.parameters
+  mocks.tools = [checked, committed]
+  return { candidate, original, checked, committed, chapter, state: () => state, reviewed: () => { validation = { ...validation, terminalCandidate: candidate }; update(true) },
+    setState: (patch: Partial<ChapterReviewReadiness>) => { state = { ...state, ...patch }; update(state.terminalReview?.currentResultVerified === true) },
+    restore: () => compilation.mockReset().mockResolvedValue(null) }
+}
+
+describe('late COMMIT candidate uses the registered review executor before its original effect', () => {
+  it('checks a body-only report candidate once and commits the exact original reasons in the same main batch', async () => {
+    const f = await lateCandidateCommitFixture()
+    try {
+      queue(response('', [call('original-commit', 'chapter_bridge_commit', JSON.stringify(f.original))]), response('The saved chapter is complete.'))
+      await run('写下一章')
+      expect(f.checked.execute, JSON.stringify(events().filter(event => ['tool.call', 'tool.result', 'tool.deferred', 'error'].includes(event.type)))).toHaveBeenCalledOnce(); expect(f.committed.execute).toHaveBeenCalledOnce()
+      expect(f.checked.execute).toHaveBeenCalledWith(expect.objectContaining({ callId: expect.stringMatching(/^commit_review_/u) }), { compilationId: 'comp', terminalState: f.candidate })
+      expect(vi.mocked(f.checked.execute).mock.calls[0][0].transaction).toBeUndefined()
+      expect(f.committed.execute).toHaveBeenCalledWith(expect.anything(), f.original)
+      expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['chapter_bridge_commit', 'continuity_validate'])
+      expect(events().filter(event => event.type === 'tool.result').map(event => [event.toolName, event.ok])).toEqual([['continuity_validate', true], ['chapter_bridge_commit', true]])
+      expect(mocks.chat).toHaveBeenCalledTimes(2)
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    } finally { f.restore() }
+  })
+  it('reuses the authenticated same-candidate result without another registered check', async () => {
+    const f = await lateCandidateCommitFixture(); f.reviewed()
+    try {
+      queue(response('', [call('original-commit', 'chapter_bridge_commit', JSON.stringify(f.original))]), response('Complete.'))
+      await run('写下一章')
+      expect(f.checked.execute).not.toHaveBeenCalled(); expect(f.committed.execute).toHaveBeenCalledOnce()
+    } finally { f.restore() }
+  })
+  it.each(['denied-commit', 'approval-denied', 'denied-check', 'failed-check', 'body-changed', 'still-unverified'] as const)(
+    'does not submit or repeat the check after %s', async scenario => {
+      const f = await lateCandidateCommitFixture()
+      if (scenario === 'denied-commit') f.committed.permission.build = 'deny'
+      if (scenario === 'approval-denied') { f.committed.permission.build = 'ask'; f.committed.alwaysConfirm = true }
+      if (scenario === 'denied-check') f.checked.permission.build = 'deny'
+      if (scenario === 'failed-check') vi.mocked(f.checked.execute).mockResolvedValue({ outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE', output: 'Physical reply invalid; retained.' })
+      if (scenario === 'body-changed') vi.mocked(f.checked.execute).mockImplementation(async () => { f.chapter.revision++; return { output: 'Old body review completed.', reviewCompleted: true } })
+      if (scenario === 'still-unverified') vi.mocked(f.checked.execute).mockResolvedValue({ output: 'Current candidate remains unknown.', reviewCompleted: true })
+      try {
+        mocks.chat.mockImplementation(async () => response('Current chapter remains saved; no further action.'))
+        queue(response('', [call('original-commit', 'chapter_bridge_commit', JSON.stringify(f.original))]), response('Stopped with the saved proposal.'))
+        await run('写下一章')
+        expect(f.committed.execute).not.toHaveBeenCalled()
+        expect(f.checked.execute).toHaveBeenCalledTimes(['denied-commit', 'approval-denied', 'denied-check'].includes(scenario) ? 0 : 1)
+        const commitResult = events().find(event => event.type === 'tool.result' && event.toolName === 'chapter_bridge_commit')
+        expect(commitResult).toMatchObject({ ok: false })
+      } finally { f.restore() }
+    })
+  it('returns newly reported prose opinions to the Writer and commits only after real current reasons are supplied', async () => {
+    const f = await lateCandidateCommitFixture()
+    const fresh = { source: 'continuity' as const, reportId: 'current-continuity', findingId: '0' }
+    vi.mocked(f.checked.execute).mockImplementation(async () => { f.reviewed(); f.setState({ decisionPending: true, continuityErrorCount: 1, requiredDecisions: [fresh] });
+      return { output: 'A current prose error remains for ordinary Writer handling.', reviewCompleted: true } })
+    const resolved = { ...f.original, retainedFindings: [...f.original.retainedFindings, { ...fresh, reason: 'The original author scope retains this verified issue explicitly.' }] }
+    const logger = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      queue(response('', [call('original-commit', 'chapter_bridge_commit', JSON.stringify(f.original))]),
+        response('', [call('resolved-commit', 'chapter_bridge_commit', JSON.stringify(resolved))]), response('The saved chapter is complete.'))
+      await run('写下一章', undefined, true)
+      expect(logger.mock.calls.map(args => String(args.at(-1))), JSON.stringify(logger.mock.calls.map(args => String(args.at(-1))))).toEqual([])
+      expect(f.checked.execute).toHaveBeenCalledOnce(); expect(f.committed.execute).toHaveBeenCalledOnce()
+      expect(f.committed.execute).toHaveBeenCalledWith(expect.anything(), resolved)
+      expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.deferred', callId: 'original-commit', execution: 'not_dispatched' }))
+      expect(events().filter(event => event.type === 'tool.result' && event.callId === 'original-commit')).toEqual([])
+      expect(events().filter(event => event.type === 'tool.result' && event.toolName === 'chapter_bridge_commit')).toEqual([expect.objectContaining({ callId: 'resolved-commit', ok: true })])
+      const messages = mocks.chat.mock.calls[1][0].messages as Parameters<typeof chatType>[0]['messages']
+      const nativeIndex = messages.findIndex(message => message.role === 'assistant' && message.toolCalls?.some(item => item.id === 'original-commit'))
+      const following = messages.slice(nativeIndex + 1)
+      const boundary = following.findIndex(message => message.role !== 'tool')
+      const receipts = following.slice(0, boundary < 0 ? following.length : boundary).filter(message => message.role === 'tool')
+      expect(receipts.map(message => message.toolCallId)).toEqual([expect.stringMatching(/^commit_review_/u), 'original-commit'])
+      expect(messages.slice(0, nativeIndex).some(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('系统调度历史'))).toBe(true)
+      expect(messages[nativeIndex]).toMatchObject({ role: 'assistant', toolCalls: [{ id: 'original-commit', name: 'chapter_bridge_commit', arguments: JSON.stringify(f.original) }] })
+      expect(messages.filter(message => message.role === 'assistant').flatMap(message => message.toolCalls ?? []).map(item => item.id)).toEqual(['original-commit', 'resolved-commit'])
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    } finally { logger.mockRestore(); f.restore() }
+  })
+  it('rechecks the new revision after a real quality effect instead of treating its tool name as a repeat', async () => {
+    const f = await lateCandidateCommitFixture()
+    f.setState({ ready: false, continuity: 'missing', quality: 'missing', requiredTools: [
+      { name: 'continuity_validate', args: { compilationId: 'comp' } }, { name: 'quality_analyze', args: { compilationId: 'comp' } }] })
+    let checks = 0
+    vi.mocked(f.checked.execute).mockImplementation(async () => { checks++; f.reviewed();
+      f.setState({ continuity: 'complete', ready: checks > 1, requiredTools: checks === 1 ? [{ name: 'quality_analyze', args: { compilationId: 'comp' } }] : [] })
+      return { output: 'The actual saved body and candidate are checked.', reviewCompleted: true } })
+    const quality = tool('quality_analyze', async () => {
+      f.chapter.revision++; f.chapter.content += ' The seal holds.'; Object.assign(mocks.chapters[0], f.chapter)
+      f.setState({ continuity: 'missing', quality: 'complete', ready: false, requiredTools: [{ name: 'continuity_validate', args: { compilationId: 'comp' } }] })
+      return { output: 'One genuine quality repair saved a new revision.', reviewCompleted: true }
+    })
+    mocks.tools.push(quality)
+    try {
+      queue(response('', [call('original-commit', 'chapter_bridge_commit', JSON.stringify(f.original))]), response('The chapter is complete.'))
+      await run('写下一章')
+      expect(f.checked.execute).toHaveBeenCalledTimes(2); expect(quality.execute).toHaveBeenCalledOnce(); expect(f.committed.execute).toHaveBeenCalledOnce()
+      expect(f.chapter.revision).toBe(4)
+      const calls = events().filter(event => event.type === 'tool.call').filter(event => event.toolName === 'continuity_validate')
+      expect(new Set(calls.map(event => event.callId)).size).toBe(2)
+    } finally { f.restore() }
+  })
+  it.each(['after-result-before-checkpoint', 'after-deferred-before-message'] as const)('resumes the authenticated saved report after %s without repeating its CHECK or original COMMIT', async gap => {
+    const f = await lateCandidateCommitFixture(); f.reviewed()
+    const prompt = '修改第一章', taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt })
+    taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 1, chapterId: 'c' }], titleAndBodyOnly: false, repairAuthorized: true }
+    mocks.currentOriginal = { prompt, taskSpec }
+    const pending = { compilationId: 'comp', chapterId: 'c', revision: 3, toolName: 'continuity_validate' as const, callId: 'commit_review_saved' }
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
+      activeExecutionMs: 100, stagnantBatches: 0, resumeCount: 0, compactionCount: 0, maxTurns: 20, tokenBudget: 10000,
+      writeProgress: 1, writeBaseline: 0, readProgress: 1, readBaseline: 0, progressSignatures: [],
+      consumedReviewDecisionFeedback: ['b'.repeat(64)], reviewAttempts: ['original-paid-check'], pendingReviews: gap === 'after-result-before-checkpoint' ? [pending] : [], toolRestrictions: [] }
+    const atTime = new Date(Date.now() - 500), bodies: AgentStreamEventBody[] = [
+      { type: 'tool.call', messageId: 'interrupted', callId: 'original-commit', toolName: 'chapter_bridge_commit', title: '提交', args: f.original },
+      { type: 'tool.call', messageId: 'interrupted', callId: pending.callId, toolName: 'continuity_validate', title: '核验', args: { compilationId: 'comp', terminalState: f.candidate } },
+      { type: 'tool.result', messageId: 'interrupted', callId: pending.callId, toolName: 'continuity_validate', ok: true, summary: '原独立报告已保存', durationMs: 1 },
+      ...(gap === 'after-deferred-before-message' ? [{ type: 'tool.deferred' as const, messageId: 'interrupted', callId: 'original-commit', toolName: 'chapter_bridge_commit',
+        execution: 'not_dispatched' as const, reason: '新意见交回写者' }] : []),
+    ]
+    bodies.forEach((body, index) => mocks.runEvents.push({ id: 'saved-' + index, runId: 'run', seq: index + 1, type: body.type,
+      payload: { ...body, runId: 'run', seq: index + 1, ts: atTime.toISOString() }, createdAt: atTime }))
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 1, startedAt: new Date(checkpoint.runStartedAt),
+      usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, checkpoint } })
+    if (gap === 'after-result-before-checkpoint') mocks.completedRequests.mockResolvedValue([pending])
+    try {
+      queue(response('', [call('resumed-commit', 'chapter_bridge_commit', JSON.stringify(f.original))]), response('Saved chapter complete.'))
+      await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
+      expect(f.checked.execute).not.toHaveBeenCalled(); expect(f.committed.execute, JSON.stringify(events().filter(event => ['tool.call', 'tool.result', 'tool.deferred', 'error'].includes(event.type)))).toHaveBeenCalledOnce()
+      expect(events().filter(event => event.type === 'tool.call' && event.toolName === 'continuity_validate')).toHaveLength(0)
+      expect(mocks.runEvents.filter(event => event.type === 'tool.call' && (event.payload as { callId?: string }).callId === 'original-commit')).toHaveLength(1)
+      expect(mocks.runEvents.filter(event => event.type === 'tool.result' && (event.payload as { callId?: string }).callId === 'original-commit')).toHaveLength(0)
+      expect(mocks.runs.get('run')?.usage, JSON.stringify(mocks.runs.get('run')?.usage)).toMatchObject({ checkpoint: { consumedReviewDecisionFeedback: ['b'.repeat(64)], reviewAttempts: ['original-paid-check'] } })
+      expect(((mocks.runs.get('run')?.usage as { checkpoint?: { pendingReviews?: unknown[] } })?.checkpoint?.pendingReviews ?? [])).toEqual([])
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    } finally { f.restore() }
+  })
+  it('leaves an ordinary separate review task on its original single-tool path', async () => {
+    const f = await lateCandidateCommitFixture()
+    try {
+      queue(response('', [call('separate-review', 'continuity_validate', JSON.stringify({ compilationId: 'comp', terminalState: f.candidate }))]), response('Review complete.'))
+      await run('检查当前章节')
+      expect(f.checked.execute).toHaveBeenCalledOnce(); expect(f.committed.execute).not.toHaveBeenCalled()
+    } finally { f.restore() }
+  })
+})
+
+
+it.each(['paid', 'cache', 'cache-unknown'] as const)('feeds a real successful handler journal into the completed reader: %s', async scenario => {
+  const originals = await import('../../api/lib/agent/original-request.js')
+  const actualReader = await vi.importActual<typeof import('../../api/lib/agent/review-request-recovery.js')>('../../api/lib/agent/review-request-recovery.js')
+  const chapter = mocks.chapters[0]; chapter.revision = 3
+  const journal: Array<{ id: string; runId: string; seq: number; type: string; payload: AgentStreamEventBody; createdAt: Date }> = []
+  const bus = { emit: (payload: AgentStreamEventBody) => journal.push({ id: String(journal.length + 1), runId: 'run', seq: journal.length + 1,
+    type: payload.type, payload, createdAt: new Date(1000 + journal.length * 100) }) }
+  const check = tool('quality_analyze', async () => {
+    const { record } = beginTextRequest('actual-quality-usage'); record.status = 'terminal'; record.billingKnown = true
+    return { output: 'The complete quality report remains available.', reviewOutcome: 'decision_required' }
+  })
+  const first = await handleToolCall(call('paid-source', check.name, '{"chapterId":"c","compilationId":"comp"}'), [check], context(), bus, 'message', 'run')
+  expect(first.reviewRequestFinished).toMatchObject({ chapterId: 'c', revision: 3, usageIds: ['actual-quality-usage'] })
+  if (scenario !== 'paid') {
+    vi.mocked(check.execute).mockResolvedValue({ output: 'The exact current owned report was reused.', reviewOutcome: 'decision_required' })
+    const cached = await handleToolCall(call('cache-check', check.name, '{"chapterId":"c","compilationId":"comp"}'), [check], context(), bus, 'message', 'run')
+    expect(cached.reviewRequestFinished).toBeUndefined()
+  }
+  const report = { id: 'quality', runId: 'run', deterministicMetrics: { criticResponse: { callId: 'paid-source' } } }
+  const usage = [{ id: 'actual-quality-usage', createdAt: new Date(journal[0].createdAt.getTime() + 1), durationMs: 0,
+    usageSource: 'reported', billingStatus: 'settled', requestTokens: 12, responseTokens: 8, creditChargeMilli: 1, reservedCreditMilli: 0 }]
+  if (scenario === 'cache-unknown') usage.push({ ...usage[0], id: 'unresolved-current-call', usageSource: 'unknown', billingStatus: 'pending_usage', createdAt: new Date(journal[2].createdAt.getTime() + 1) })
+  mocks.reviewReadiness.mockResolvedValue({ ...readiness('missing', 'complete'), ready: false, qualityReportId: 'quality',
+    decisionBinding: { contentHash: runtimeJson({ content: chapter.content }).hash, continuityBinding: '', qualityReportId: 'quality', qualityReportHash: null } })
+  const spies = [vi.spyOn(originals, 'readOriginalTaskRequest').mockResolvedValue({ taskId: 'task', spec: { scope: { novelId: 'novel', chapterIds: ['c'] } } } as never),
+    vi.spyOn(originals, 'originalTaskRunIds').mockResolvedValue(['run'])]
+  const db = { agentRun: { findFirst: async () => ({ id: 'run' }) }, agentProviderAttempt: { count: async () => 0 },
+    chapter: { findFirst: async () => chapter }, storyCompilation: { findFirst: async () => ({ validation: {} }) }, chapterQualityReport: { findFirst: async () => report },
+    agentRunEvent: { findMany: async ({ where }: { where: { payload?: { equals: string }; OR?: Array<{ payload: { equals: string } }> } }) =>
+      journal.filter(row => { const payload = row.payload; return 'callId' in payload && (where.payload ? payload.callId === where.payload.equals : where.OR?.some(value => payload.callId === value.payload.equals)) }) },
+    aiUsageLog: { findMany: async ({ where }: { where: { createdAt: { gte: Date; lte: Date } } }) => usage.filter(row => row.createdAt >= where.createdAt.gte && row.createdAt <= where.createdAt.lte) } }
+  const pending = { callId: scenario === 'paid' ? 'paid-source' : 'cache-check', toolName: 'quality_analyze' as const, chapterId: 'c', compilationId: 'comp', revision: 3 }
+  try {
+    expect(await actualReader.readCompletedReviewRequestRecovery(db as never, context(), [pending])).toEqual(scenario === 'cache-unknown' ? [] : [pending])
+  } finally { spies.forEach(spy => spy.mockRestore()) }
 })
