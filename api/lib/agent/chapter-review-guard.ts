@@ -15,7 +15,7 @@ import { runtimeJson } from './runtime-common.js'
 import { assertSelectionBodyEffect, effectiveWritingTaskSpec, originalSelectionBoundary } from './writing-scope.js'
 import { hasReadOnlyRevisionAssessment, localEditGuidance, localRevisionAuthorityText, originalLocalEditBoundary } from './local-edit-scope.js'
 import { beginReviewCycle, projectReviewCycle, projectReviewCycleWrite, readReviewCycle, reviewCycleFinding, reviewCycleRefKey,
-  type ReviewCycleFinding } from './review-cycle.js'
+  type ReviewCycleFinding, type ReviewCycle, type ReviewCycleBinding } from './review-cycle.js'
 import { observedReviewCycleVerification, prepareReviewCycleTransition } from './review-cycle-store.js'
 import { readTerminalCandidate, currentTerminalReview, currentCandidateEditAddress } from './terminal-state-review.js'
 import { terminalEvidenceContext, terminalEvidenceVersion, terminalQuoteAddressVersion, terminalVerdictAuditVersion, terminalSpanAuditVersion } from './terminal-evidence-context.js'
@@ -37,8 +37,34 @@ export type ReviewDecisionFeedback = { key: string; taskId: string; userId: stri
 export type ChapterReviewDecisionDetail = ChapterReviewDecision & { evidence: string; explanation: string; suggestion: string; severity: string; disposition: string; startOffset?: number; endOffset?: number }
 type ReviewStatus = 'complete' | 'missing' | 'stale' | 'incomplete'
 // Prisma rows contain Dates; persist only JSON-safe finding data in the binding.
-function qualityDecisionHash(findings: unknown[]) {
-  return runtimeJson(JSON.parse(JSON.stringify(findings))).hash
+function qualityDecisionHash(findings: unknown[], version?: 2) {
+  const safe = JSON.parse(JSON.stringify(findings)) as unknown[]
+  return runtimeJson(version === 2 ? safe.map(row => JSON.stringify(runtimeJson(row).value)).sort() : safe).hash
+}
+
+/** v1 keeps its original array meaning. A scoped frozen baseline can prove
+ * that only the database return order changed; it cannot repair changed rows. */
+function qualityBindingMatches(binding: { qualityReportId?: unknown; qualityReportHash?: unknown; qualityReportHashVersion?: unknown;
+  contentHash?: unknown; continuityBinding?: unknown }, report: { id: string; findings: unknown[] } | null,
+  compilationId: string, chapter: { id: string; revision: number; contentHash: string }, cycle?: ReviewCycle | null) {
+  if (binding.qualityReportHashVersion !== undefined && binding.qualityReportHashVersion !== 2) return false
+  if (binding.qualityReportId !== (report?.id ?? null)) return false
+  if (!report) return binding.qualityReportHash === null
+  if (binding.qualityReportHash === qualityDecisionHash(report.findings, binding.qualityReportHashVersion)) return true
+  const baseline = cycle?.baseline
+  if (binding.qualityReportHashVersion !== undefined || !baseline || cycle!.scope.chapterId !== chapter.id
+    || baseline.compilationId !== compilationId || baseline.body.revision !== chapter.revision || baseline.body.contentHash !== chapter.contentHash
+    || baseline.binding.contentHash !== binding.contentHash || baseline.binding.continuityBinding !== binding.continuityBinding
+    || baseline.binding.qualityReportHashVersion !== undefined || baseline.binding.qualityReportId !== report.id
+    || baseline.binding.qualityReportHash !== binding.qualityReportHash) return false
+  const refs = baseline.findings.filter(finding => finding.source === 'quality')
+  const rows = report.findings.map(row => row && typeof row === 'object' && !Array.isArray(row) ? row as Record<string, unknown> : null)
+  if (refs.length !== rows.length || refs.some(ref => ref.reportId !== report.id)
+    || rows.some(row => !row || typeof row.id !== 'string' || !row.id) || new Set(rows.map(row => row!.id)).size !== rows.length
+    || new Set(refs.map(ref => ref.findingId)).size !== refs.length) return false
+  const byId = new Map(rows.map(row => [row!.id, row!]))
+  if (refs.some(ref => !byId.has(ref.findingId))) return false
+  return qualityDecisionHash(refs.map(ref => byId.get(ref.findingId)!)) === binding.qualityReportHash
 }
 /** Read tools order findings for presentation; compare the full persisted set. */
 export function qualityDecisionSnapshotHash(findings: unknown[]) {
@@ -99,7 +125,7 @@ export type ChapterReviewReadiness = {
   decisionEntries?: ChapterReviewDecision[]
   mustPassPending?: boolean
   qualityPassRequired?: boolean
-  decisionBinding?: { contentHash: string; continuityBinding: string; qualityReportId: string | null; qualityReportHash: string | null }
+  decisionBinding?: ReviewCycleBinding
   continuityExhausted?: boolean
   qualityReportId: string | null; requiredTools: Array<{ name: 'continuity_validate' | 'quality_analyze'; args: { compilationId: string } }>
 }
@@ -109,14 +135,15 @@ export type ChapterReviewReadiness = {
  * the ordinary commit caller still supplies the real current quality report. */
 export function retainedReviewDecisionMatches(validation: unknown, chapter: { id: string; revision: number; content: string },
   compilationId: string, report: { id: string; findings: unknown[] } | null | undefined,
-  required: Array<{ source: string; reportId: string; findingId: string }>) {
+  required: Array<{ source: string; reportId: string; findingId: string }>, cycle?: ReviewCycle | null) {
   const value = validation && typeof validation === 'object' && !Array.isArray(validation) ? validation as Record<string, unknown> : null
   const decision = value?.retainedReviewDecision as Record<string, unknown> | undefined
   if (!decision || decision.version !== 1 || decision.chapterId !== chapter.id || decision.revision !== chapter.revision
     || decision.contentHash !== runtimeJson({ content: chapter.content }).hash
     || decision.continuityBinding !== continuityDecisionBinding(compilationId, chapter.revision, validation)
-    || report !== undefined && (decision.qualityReportId !== (report?.id ?? null)
-      || decision.qualityReportHash !== (report ? qualityDecisionHash(report.findings) : null))
+    || decision.qualityReportHashVersion !== undefined && decision.qualityReportHashVersion !== 2
+    || report !== undefined && !qualityBindingMatches(decision, report, compilationId,
+      { id: chapter.id, revision: chapter.revision, contentHash: runtimeJson({ content: chapter.content }).hash }, cycle)
     || !Array.isArray(decision.findings)) return false
   const entries = decision.findings as Array<{ source?: string; reportId?: string; findingId?: string; reason?: string }>
   const key = (item: typeof entries[number]) => `${item.source}:${item.reportId}:${item.findingId}`
@@ -208,8 +235,11 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     : !completeCompilerContinuityAssessment(validation) ? 'incomplete' : 'stale'
   // Latest assessment wins. A failed later attempt must not resurrect an older
   // complete report, and repairedContentHash certifies no new critic call.
-  const report = await tx.chapterQualityReport.findFirst({ where: { userId: subject.userId, novelId: subject.novelId, compilationId: compilation.id,
+  const rawReport = await tx.chapterQualityReport.findFirst({ where: { userId: subject.userId, novelId: subject.novelId, compilationId: compilation.id,
     chapterId: chapter.id, runId: { in: runIds } }, include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+  // The raw array retains v1 receipt meaning; only the derived current projection
+  // has set order. Never mutate the persisted rows or the frozen cycle baseline.
+  const report = rawReport ? { ...rawReport, findings: [...rawReport.findings].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0) } : null
   const metrics = report?.deterministicMetrics && typeof report.deterministicMetrics === 'object' && !Array.isArray(report.deterministicMetrics) ? report.deterministicMetrics : null
   const quality: ReviewStatus = report && qualityReportCheckedCurrentContent(report, chapter.revision, chapter.content) ? 'complete'
     // A failed old assessment still wins the audit lookup, but cannot describe
@@ -234,12 +264,14 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
       ({ source: 'continuity' as const, reportId: continuityBinding, findingId: String(index) })) : []),
     ...(quality === 'complete' ? report!.findings.map(finding => ({ source: 'quality' as const, reportId: report!.id, findingId: finding.id })) : []),
   ]
-  const retainedDecisions = retainedReviewDecisionMatches(compilation.validation, chapter, compilation.id, quality === 'complete' ? report! : null, [])
+  const savedCycle = readReviewCycle(compilation.preparedContext, { taskId: original.taskId,
+    userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id })
+  const retainedDecisions = retainedReviewDecisionMatches(compilation.validation, chapter, compilation.id, quality === 'complete' ? rawReport! : null, [], savedCycle)
     ? (validation!.retainedReviewDecision as { findings: RetainedChapterReviewDecision[] }).findings : []
   const mandatoryReviewPending = mustPassContinuity && (assessment?.errorCount ?? 0) > 0
     || mustPassQuality && quality === 'complete' && report!.status !== 'passed'
   const decisionPending = mandatoryReviewPending || requiredDecisions.length > 0 && !retainedReviewDecisionMatches(compilation.validation, chapter,
-    compilation.id, quality === 'complete' ? report! : null, requiredDecisions)
+    compilation.id, quality === 'complete' ? rawReport! : null, requiredDecisions, savedCycle)
   // Progress is stricter than historical delivery compatibility: a quality
   // milestone needs its saved context binding, not just a revision counter.
   let qualityContextCurrent = false
@@ -294,8 +326,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
       return projected
     }) : []),
   ]
-  const savedCycle = readReviewCycle(compilation.preparedContext, { taskId: original.taskId,
-    userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id })
+
   const reviewCycle = { ...projectReviewCycle(savedCycle, { revision: chapter.revision, contentHash,
     ready: !requiredTools.length, pending: decisionPending, findings: cycleFindings.filter(item => requiredDecisions.some(ref =>
       ref.source === item.source && ref.reportId === item.reportId && ref.findingId === item.findingId)) }),
@@ -347,7 +378,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     ...(decisionFeedback ? { decisionFeedback } : {}), decisionDetails, requiredDecisions, retainedDecisions, decisionEntries, mustPassPending: mandatoryReviewPending,
     qualityPassRequired: mustPassQuality,
     decisionBinding: { contentHash: runtimeJson({ content: chapter.content }).hash, continuityBinding,
-      qualityReportId: quality === 'complete' ? report!.id : null, qualityReportHash: quality === 'complete' ? qualityDecisionHash(report!.findings) : null },
+      qualityReportHashVersion: 2, qualityReportId: quality === 'complete' ? report!.id : null, qualityReportHash: quality === 'complete' ? qualityDecisionHash(report!.findings, 2) : null },
     progressEvidence: { taskId: original.taskId, userId: subject.userId, novelId: subject.novelId,
       chapterId: chapter.id, orderIndex: chapter.orderIndex, contentHash: runtimeJson({ content: chapter.content }).hash, phases },
     continuityExhausted: false,
@@ -547,7 +578,8 @@ export async function readChapterReviewWriteAdmission(tx: Prisma.TransactionClie
       const baselineReport = await tx.chapterQualityReport.findFirst({ where: { id: cycle.baseline.binding.qualityReportId,
         userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, compilationId: cycle.baseline.compilationId,
         chapterRevision: cycle.baseline.body.revision, runId: { in: runIds } }, include: { findings: true } })
-      if (baselineReport && qualityDecisionHash(baselineReport.findings) === cycle.baseline.binding.qualityReportHash) {
+      if (baselineReport && qualityBindingMatches(cycle.baseline.binding, baselineReport, cycle.baseline.compilationId,
+        { id: chapter.id, revision: cycle.baseline.body.revision, contentHash: cycle.baseline.body.contentHash }, cycle)) {
         const selected = full ? baselineReport.findings.filter(item => item.disposition !== 'repaired') : selectAutomaticQualityFindings(baselineReport.findings)
         obligations.push(...selected.filter(item => item.severity === 'error' || strict && cycle.baseline!.required.quality).map(item =>
           ({ source: 'quality' as const, reportId: baselineReport.id, findingId: item.id })))
@@ -665,7 +697,9 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
       ...(qualityComplete ? quality!.findings.map(finding => ({ source: 'quality' as const, reportId: quality!.id, findingId: finding.id,
         required: selectAutomaticQualityFindings(quality!.findings).some(item => item.id === finding.id) })) : []),
     ]
-    const previous = latest && retainedReviewDecisionMatches(latest.validation, current, latest.id, qualityComplete ? quality! : null, [])
+    const decisionCycle = latest ? readReviewCycle(latest.preparedContext, { taskId: original.taskId, userId: subject.userId,
+      novelId: subject.novelId, chapterId: current.id }) : null
+    const previous = latest && retainedReviewDecisionMatches(latest.validation, current, latest.id, qualityComplete ? quality! : null, [], decisionCycle)
       ? ((latest.validation as Prisma.JsonObject).retainedReviewDecision as { findings: RetainedChapterReviewDecision[] }).findings : []
     const retained = mergeReviewDecisions(entries, previous, options.retainedFindings, 'REVIEW_MERGED_REVISION_REQUIRED')
     const requirements = originalChapterReviewRequirements(original, current)
@@ -676,7 +710,7 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
         ...(latest.validation && typeof latest.validation === 'object' && !Array.isArray(latest.validation) ? latest.validation : {}),
         retainedReviewDecision: { version: 1, chapterId: current.id, revision: current.revision,
           contentHash: runtimeJson({ content: current.content }).hash, continuityBinding: binding,
-          qualityReportId: qualityComplete ? quality!.id : null, qualityReportHash: qualityComplete ? qualityDecisionHash(quality!.findings) : null,
+          qualityReportHashVersion: 2, qualityReportId: qualityComplete ? quality!.id : null, qualityReportHash: qualityComplete ? qualityDecisionHash(quality!.findings, 2) : null,
           findings: retained },
       } as Prisma.InputJsonValue } })
     }
@@ -793,12 +827,13 @@ export async function assertChapterReviewRevision(
     const decisionValidation = decisionBound?.validation && typeof decisionBound.validation === 'object' && !Array.isArray(decisionBound.validation)
       ? decisionBound.validation as Record<string, unknown> : null
     const decision = decisionValidation?.retainedReviewDecision as Record<string, unknown> | undefined
+    const decisionCycle = current && decisionBound ? readReviewCycle(decisionBound.preparedContext, { taskId: original.taskId,
+      userId: subject.userId, novelId: subject.novelId, chapterId: current.id }) : null
     if (current && decisionBound && decision?.chapterId === current.id && decision.revision === current.revision
       && decision.contentHash === runtimeJson({ content: current.content }).hash
       && decision.continuityBinding === continuityDecisionBinding(decisionBound.id, current.revision, decisionBound.validation)
-      && decision.qualityReportId === (latestQuality && qualityReportCheckedCurrentContent(latestQuality, current.revision, current.content) ? latestQuality.id : null)
-      && decision.qualityReportHash === (latestQuality && qualityReportCheckedCurrentContent(latestQuality, current.revision, current.content)
-        ? qualityDecisionHash(latestQuality.findings) : null)) {
+      && qualityBindingMatches(decision, latestQuality && qualityReportCheckedCurrentContent(latestQuality, current.revision, current.content)
+        ? latestQuality : null, decisionBound.id, { id: current.id, revision: current.revision, contentHash: runtimeJson({ content: current.content }).hash }, decisionCycle)) {
       throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '当前全部候选已有逐项安全留置决定，正文未改变，原修订额度未消费；保留真实意见与原因交作者决定，不重复自动改写或宣称问题已解决。')
     }
     const assertMergedMutation = async (bound: typeof compilations[number]) => {
@@ -859,7 +894,7 @@ export async function assertChapterReviewRevision(
             ...(bound.validation && typeof bound.validation === 'object' && !Array.isArray(bound.validation) ? bound.validation : {}),
             retainedReviewDecision: { version: 1, chapterId: current.id, revision: current.revision,
               contentHash: runtimeJson({ content: before }).hash, continuityBinding, qualityReportId: qualityComplete ? latestQuality!.id : null,
-              qualityReportHash: qualityComplete ? qualityDecisionHash(latestQuality!.findings) : null, findings: retained },
+              qualityReportHashVersion: 2, qualityReportHash: qualityComplete ? qualityDecisionHash(latestQuality!.findings, 2) : null, findings: retained },
           } as Prisma.InputJsonValue } })
         }
       }

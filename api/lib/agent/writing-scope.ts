@@ -931,7 +931,7 @@ async function readChapterDelivery(tx: Prisma.TransactionClient, subject: Subjec
     await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${id} FOR SHARE`
     const chapter = await tx.chapter.findFirst({ where: { id, authorId: subject.userId, ...activeChapterScope(subject.novelId) }, select: { id: true, title: true, content: true, revision: true, orderIndex: true } })
     const terminal = await tx.storyCompilation.findFirst({ where: { userId: subject.userId, novelId: subject.novelId, runId: { in: runIds }, chapterId: id,
-      status: { not: 'abandoned' } }, include: { bridge: true, sceneTasks: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+      status: { not: 'abandoned' } }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
     if (!chapter?.content.trim() || terminal?.status !== 'completed' || terminal.stage !== 'commit'
       || terminal.bridge?.toChapterId !== id || !terminal.bridge.committedAt || terminal.bridge.targetRevision !== chapter.revision) return null
     const context = terminal.preparedContext && typeof terminal.preparedContext === 'object' && !Array.isArray(terminal.preparedContext) ? terminal.preparedContext : null

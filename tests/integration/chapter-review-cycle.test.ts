@@ -1,3 +1,5 @@
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import type { Prisma } from '@prisma/client'
 import * as sourceReads from '../../api/lib/agent/compiler-continuity-source.js'
 import * as featureFlags from '../../api/lib/agent2-feature-flags.js'
 import { chapterWriteTool, chapterAppendTool, chapterEditRangeTool } from '../../api/lib/agent/tools/chapter-tools.js'
@@ -12,7 +14,7 @@ import { prepareStoryCompilation, recordStoryCompilerWrite, saveSceneTasks } fro
 import { readOriginalTaskRequest } from '../../api/lib/agent/original-request.js'
 import { readReviewCycle } from '../../api/lib/agent/review-cycle.js'
 import { projectCurrentReviewNextStep } from '../../api/lib/agent/review-dispatch.js'
-import { assertCompletedWritingDelivery, readCompletedWritingDelivery } from '../../api/lib/agent/writing-scope.js'
+import { assertCompletedWritingDelivery, readCompletedWritingDelivery, readRecoveredChapterDelivery } from '../../api/lib/agent/writing-scope.js'
 import { chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
@@ -211,4 +213,88 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
     expect(current.preparedContext).toEqual(prepared.compilation.preparedContext)
     expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).revision).toBe(chapter.revision + 1)
   }))
+})
+
+
+describe('retained quality binding survives real PostgreSQL row order', () => {
+  it.each(['version2', 'version1-proven', 'version1-unproven'] as const)('preserves full commit and billing evidence under %s reordered reads', mode => fixture(async f => {
+    await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running' } })
+    const body = 'The guard waits at the door. The table remains dry.'
+    const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: body, revision: 4, wordCount: 10 } })
+    const prepared = await prepareStoryCompilation({ ...f, chapterId: chapter.id, mode: 'balanced', intentSummary: 'Modify this synthetic chapter.' })
+    await saveSceneTasks({ ...f, compilationId: prepared.compilation.id, tasks: [{ purpose: 'Guard the door', entryState: terminalCandidateSchema.parse({ exitState: {} }).exitState, goal: 'Wait',
+      obstacle: 'No reply', choice: 'Remain', cost: 'Time', turn: 'The room stays quiet', exitState: terminalCandidateSchema.parse({ exitState: {} }).exitState, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
+    await saveSyntheticTerminalReview(f, prepared.compilation.id, terminalCandidateSchema.parse({ exitState: {} }))
+    const quality = await prisma.chapterQualityReport.create({ data: { userId: f.userId, novelId: f.novelId, runId: f.runId,
+      compilationId: prepared.compilation.id, chapterId: chapter.id, chapterRevision: chapter.revision, status: 'needs_repair',
+      deterministicMetrics: { independentCheck: 'complete', contentHash: sha(body) }, findings: { create: [0, 4, 10].map((start, index) => ({
+        userId: f.userId, novelId: f.novelId, source: 'critic', signal: 'emotion_grounding', severity: 'advisory', confidence: 0.9,
+        evidenceExcerpt: body.slice(start, start + 8), evidenceHash: sha(body.slice(start, start + 8)), startOffset: start, endOffset: start + 8,
+        explanation: 'Synthetic current advice ' + index, suggestion: 'Retain the deliberate voice', createdAt: new Date(1), updatedAt: new Date(1) })) } }, include: { findings: { orderBy: { id: 'asc' } } } })
+    const current = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, prepared.compilation.id))
+    expect(current).toMatchObject({ ready: true, decisionPending: true, decisionBinding: { qualityReportHashVersion: 2 } })
+    const original = await prisma.$transaction(tx => readOriginalTaskRequest(tx, f))
+    const scope = { taskId: original.taskId, userId: f.userId, novelId: f.novelId, chapterId: chapter.id }
+    await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${prepared.compilation.id} FOR UPDATE`
+      await recordChapterReviewDecisions(tx, f, current!, current!.requiredDecisions!.map(ref => ({ ...ref, reason: 'Keep this synthetic current opinion.' })))
+      if (mode !== 'version2') {
+        const saved = await tx.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id } })
+        const cycle = readReviewCycle(saved.preparedContext, scope)!, byId = new Map(quality.findings.map(row => [row.id, row]))
+        const oldHash = runtimeJson(JSON.parse(JSON.stringify(cycle.baseline!.findings.filter(row => row.source === 'quality').map(ref => byId.get(ref.findingId))))).hash
+        cycle.baseline!.binding.qualityReportHash = oldHash; delete cycle.baseline!.binding.qualityReportHashVersion
+        const validation = saved.validation as Record<string, unknown>, decision = validation.retainedReviewDecision as Record<string, unknown>
+        decision.qualityReportHash = oldHash; delete decision.qualityReportHashVersion
+        await tx.storyCompilation.update({ where: { id: saved.id }, data: { validation: validation as Prisma.InputJsonValue,
+          preparedContext: { ...(saved.preparedContext as Record<string, unknown>), reviewCycle: cycle } as Prisma.InputJsonValue } })
+      }
+    })
+    const fees = await prisma.aiUsageLog.findMany({ where: { agentRunId: f.runId }, orderBy: { id: 'asc' } })
+    const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const artifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
+    const result = await chapterBridgeCommitTool.execute({ ...f, callId: 'order-commit', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced',
+      signal: new AbortController().signal, emit: () => {} }, { compilationId: prepared.compilation.id })
+    expect(result.outcome).not.toBe('failed')
+    expect(result.display).toMatchObject({ kind: 'storyCompiler', phase: 'commit' })
+    const committed = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id }, include: { bridge: true } })
+    expect(committed).toMatchObject({ status: 'completed', stage: 'commit', bridge: { targetRevision: 4 } })
+    expect(committed.bridge?.committedAt).toBeInstanceOf(Date)
+    const originalCapture = await prisma.$transaction(tx => readRecoveredChapterDelivery(tx, f))
+    expect(originalCapture).not.toBeNull()
+    if (mode === 'version1-unproven') {
+      const context = { ...(committed.preparedContext as Record<string, unknown>) }; delete context.reviewCycle
+      await prisma.storyCompilation.update({ where: { id: committed.id }, data: { preparedContext: context as Prisma.InputJsonValue } })
+    }
+    let reordered = false
+    const capture = await prisma.$transaction(tx => {
+      const db = new Proxy(tx, { get(target, key, receiver) {
+        if (key !== 'chapterQualityReport') return Reflect.get(target, key, receiver)
+        return new Proxy(target.chapterQualityReport, { get(delegate, field, inner) {
+          if (field !== 'findFirst') return Reflect.get(delegate, field, inner)
+          return async (...args: Parameters<typeof tx.chapterQualityReport.findFirst>) => {
+            const report = await tx.chapterQualityReport.findFirst(...args)
+            if (!report || !('findings' in report) || !Array.isArray(report.findings)) return report
+            const rows = report.findings, refs = current!.reviewCycleFindings!.filter(ref => ref.source === 'quality')
+            const byId = new Map(rows.map(row => [(row as { id: string }).id, row]))
+            reordered = true
+            return { ...report, findings: [...refs].reverse().map(ref => byId.get(ref.findingId)) }
+          }
+        } })
+      } })
+      return (async () => {
+        const observed = await readRecoveredChapterDelivery(db, f)
+        if (mode === 'version1-unproven') await expect(assertCompletedWritingDelivery(db, f, originalCapture!)).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
+        else await expect(assertCompletedWritingDelivery(db, f, originalCapture!)).resolves.toBeUndefined()
+        return observed
+      })()
+    })
+    expect(reordered).toBe(true)
+    if (mode === 'version1-unproven') expect(capture).toBeNull()
+    else expect(capture).toMatchObject({ chapters: [{ id: chapter.id, revision: 4, content: body }] })
+    expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: quality.id }, include: { findings: { orderBy: { id: 'asc' } } } })).toEqual(quality)
+    expect(await prisma.aiUsageLog.findMany({ where: { agentRunId: f.runId }, orderBy: { id: 'asc' } })).toEqual(fees)
+    expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(ledger)
+    expect(await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })).toEqual(artifacts)
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ revision: 4, content: body })
+  }, undefined, '修改第一章，只输出标题和正文。', { freezeWriting: true, reviewProtocol: 1 }), 30000)
 })

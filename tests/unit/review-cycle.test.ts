@@ -293,3 +293,18 @@ describe('server review cycle lineage and final verification', () => {
       binding: baseline().baseline!.binding, required: { continuity: true, quality: true }, findings: [] })).toThrow()
   })
 })
+
+describe('quality report binding hash version compatibility', () => {
+  it('retains old unversioned binding bytes while preserving explicit version2', () => {
+    const old = baseline(), before = JSON.stringify(old)
+    expect(readReviewCycle({ reviewCycle: old }, scope)).toEqual(old)
+    expect(JSON.stringify(old)).toBe(before)
+    const current = structuredClone(old); current.baseline!.binding.qualityReportHashVersion = 2
+    expect(readReviewCycle({ reviewCycle: current }, scope)?.baseline?.binding).toEqual(current.baseline!.binding)
+  })
+  it('rejects an unknown stored hash version instead of treating it as legacy', () => {
+    const cycle = baseline()
+    Object.assign(cycle.baseline!.binding, { qualityReportHashVersion: 3 })
+    expect(() => readReviewCycle({ reviewCycle: cycle }, scope)).toThrowError(expect.objectContaining({ code: 'REVIEW_CYCLE_CONFLICT' }))
+  })
+})

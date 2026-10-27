@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
 import { terminalDraftFixture, terminalDraftRevisionFixture } from '../helpers/terminal-draft-fixture.js'
-import { readTerminalDraftBinding } from '../../api/lib/agent/terminal-draft-authority.js'
+import { readTerminalDraftBinding, type TerminalDraftReadScope } from '../../api/lib/agent/terminal-draft-authority.js'
 import { currentTerminalReview, currentCandidateEditAddress, terminalCandidateSchema, terminalReviewFailure } from '../../api/lib/agent/terminal-state-review.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { terminalProposalCacheMatches } from '../../api/lib/agent/terminal-proposal-context.js'
@@ -287,5 +287,54 @@ describe('candidate edit addresses are separate from read-only history IDs', () 
     expect(failure.output).toContain('readOnlyProposalId')
     expect(failure.output).toContain('"currentCandidateEditAddress":null')
     expect(failure.output).toContain('删除候选不解除持续事实或旧提议的独立处置要求')
+  })
+})
+
+describe('scoped terminal draft binding with absent prepared context', () => {
+  it.each([undefined, null])('preserves the original unscoped result for preparedContext=%s without new authority', async preparedContext => {
+    const f = terminalDraftFixture(), db = database(f), binding = { ...f.binding, preparedContext }
+    const before = JSON.stringify({ rows: f.rows, usage: f.usage, validation: f.validation })
+    const read = (scope?: TerminalDraftReadScope) => readTerminalDraftBinding(
+      db.tx as unknown as Prisma.TransactionClient, { ...f.ctx, compilationId: 'compilation' }, binding, f.chapter, f.validation, f.nextContext, scope)
+    const unscoped = await read(), scoped = await read(new WeakMap())
+    expect(scoped).toEqual(unscoped)
+    expect(scoped.draftAuthority).toBeUndefined(); expect(scoped.reviewAuthority).toBeUndefined(); expect(scoped.scopeAuthority).toBeUndefined()
+    expect(review(f, scoped)?.deliveryEligibility.eligible).toBe(false)
+    expect(JSON.stringify({ rows: f.rows, usage: f.usage, validation: f.validation })).toBe(before)
+  })
+
+  it.each([undefined, null])('does not substitute the first absent value when the same scope starts at %s', async first => {
+    const f = terminalDraftFixture(), db = database(f), scope = new WeakMap()
+    for (const preparedContext of [first, first === undefined ? null : undefined]) {
+      const binding = { ...f.binding, preparedContext }, subject = { ...f.ctx, compilationId: 'compilation' }
+      const plain = await readTerminalDraftBinding(db.tx as unknown as Prisma.TransactionClient, subject, binding, f.chapter, f.validation, f.nextContext)
+      const scoped = await readTerminalDraftBinding(db.tx as unknown as Prisma.TransactionClient, subject, binding, f.chapter, f.validation, f.nextContext, scope)
+      expect(scoped).toEqual(plain)
+      expect(scoped.preparedContext).toBe(preparedContext)
+      expect(scoped.draftAuthority).toBeUndefined(); expect(scoped.reviewAuthority).toBeUndefined(); expect(scoped.scopeAuthority).toBeUndefined()
+    }
+  })
+
+  it('authenticates fresh material after an absent binding instead of caching empty authority', async () => {
+    const f = terminalDraftFixture(), db = database(f), scope = new WeakMap(), subject = { ...f.ctx, compilationId: 'compilation' }
+    const absent = await readTerminalDraftBinding(db.tx as unknown as Prisma.TransactionClient, subject, { ...f.binding, preparedContext: undefined },
+      f.chapter, f.validation, f.nextContext, scope)
+    expect(absent.draftAuthority).toBeUndefined()
+    const valid = await readTerminalDraftBinding(db.tx as unknown as Prisma.TransactionClient, subject, f.binding, f.chapter, f.validation, f.nextContext, scope)
+    expect(valid.draftAuthority).toBeDefined()
+    expect(review(f, valid)?.deliveryEligibility.eligible).toBe(true)
+    const repeated = await readTerminalDraftBinding(db.tx as unknown as Prisma.TransactionClient, subject, f.binding, f.chapter, f.validation, f.nextContext, scope)
+    expect(repeated.draftAuthority).toBe(valid.draftAuthority)
+    expect(db.tx.agentArtifact.findMany).toHaveBeenCalledOnce()
+  })
+
+  it('honors cancellation before a cached absent binding can return', async () => {
+    const f = terminalDraftFixture(), db = database(f), scope = new WeakMap(), controller = new AbortController()
+    const read = () => readTerminalDraftBinding(db.tx as unknown as Prisma.TransactionClient,
+      { ...f.ctx, compilationId: 'compilation', signal: controller.signal }, { ...f.binding, preparedContext: undefined },
+      f.chapter, f.validation, f.nextContext, scope)
+    expect((await read()).draftAuthority).toBeUndefined()
+    controller.abort()
+    await expect(read()).rejects.toMatchObject({ name: 'AbortError' })
   })
 })

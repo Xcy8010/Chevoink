@@ -8,7 +8,7 @@ const refSchema = z.object({ source: z.enum(['continuity', 'quality']), reportId
 const findingSchema = refSchema.extend({ signal: z.string(), severity: z.string(), evidence: z.string(),
   explanation: z.string().optional(), suggestion: z.string().optional(),
   anchor: z.object({ start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), text: z.string().min(1) }).nullable() })
-const bindingSchema = z.object({ contentHash: hash, continuityBinding: z.string(), qualityReportId: z.string().nullable(), qualityReportHash: hash.nullable() })
+const bindingSchema = z.object({ contentHash: hash, continuityBinding: z.string(), qualityReportId: z.string().nullable(), qualityReportHash: hash.nullable(), qualityReportHashVersion: z.literal(2).optional() })
 const bodySchema = z.object({ revision: z.number().int().nonnegative(), contentHash: hash })
 const cycleSchema = z.object({ version: z.literal(1), scope: scopeSchema,
   baseline: z.object({ compilationId: z.string().min(1), body: bodySchema, binding: bindingSchema,

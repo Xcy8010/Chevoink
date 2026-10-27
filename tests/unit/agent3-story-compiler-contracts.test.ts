@@ -36,6 +36,8 @@ import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-revi
 describe('严谨创作落实连续性警告', () => {
   afterEach(() => vi.restoreAllMocks())
   function fixture(cached: boolean) {
+    const createReadScope = readiness.createChapterReviewReadScope
+    const readScopes = vi.spyOn(readiness, 'createChapterReviewReadScope').mockImplementation(createReadScope)
     vi.spyOn(originalRequest, 'readOriginalTaskRequest').mockResolvedValue({ prompt: '写本章，人物寻找线索。', spec: null,
       taskId: 'task', sourceRunId: 'r', parentRunId: null })
     vi.spyOn(originalRequest, 'originalTaskRunIds').mockResolvedValue(['r'])
@@ -68,7 +70,7 @@ describe('严谨创作落实连续性警告', () => {
       aiUsageLog: { findMany: vi.fn().mockResolvedValue([]) },
       agentArtifact: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: 'audit' }) },
       chapter: { findMany: vi.fn((...args: Parameters<typeof prisma.chapter.findMany>) => prisma.chapter.findMany(...args)), findFirst: vi.fn((...args: Parameters<typeof prisma.chapter.findFirst>) => prisma.chapter.findFirst(...args)), updateMany: write, findUniqueOrThrow: vi.fn().mockResolvedValue({ ...chapter, revision: 2 }) },
-      storyCompilation: { findFirst: findCompilation, findUniqueOrThrow: vi.fn(async () => compilation),
+      storyCompilation: { findFirst: findCompilation, findMany: vi.fn((...args: Parameters<typeof prisma.storyCompilation.findMany>) => prisma.storyCompilation.findMany(...args)), findUniqueOrThrow: vi.fn(async () => compilation),
         update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => { Object.assign(compilation, data); return compilation }),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }) } } as unknown as Prisma.TransactionClient
     vi.spyOn(prisma, '$transaction').mockImplementation(async callback => (callback as (db: Prisma.TransactionClient) => Promise<unknown>)(tx))
@@ -78,7 +80,7 @@ describe('严谨创作落实连续性警告', () => {
     const ctx: ToolContext = { userId: 'u', novelId: 'n', runId: 'r', sessionId: 's', callId: 'check', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {},
       modelRuntime: { tier: 'speed', provider: 'selected-fixture', modelName: 'selected', baseUrl: 'https://selected.invalid', apiKey: 'fixture-only',
         multiplierBps: 10000, reasoningEffort: 'high', reasoningEfforts: ['none', 'high'], thinkingEnabled: true, reasoningParameterMode: 'native', visionEnabled: false, contextWindowTokens: 64000 } }
-    return { ctx, chapter, compilation, validation, qualityReport, reserve, critic, repair, write, findCompilation, tx, sourceQuery }
+    return { ctx, chapter, compilation, validation, qualityReport, reserve, critic, repair, write, findCompilation, tx, sourceQuery, readScopes }
   }
   function inheritedSource() {
     const content = '过滤泵仍待检修。'
@@ -142,10 +144,11 @@ describe('严谨创作落实连续性警告', () => {
       expect(f.critic.mock.calls[0][1]).toContain('过滤泵检修等零件')
       expect(compiler.validateStoryContinuity).toHaveBeenCalledWith(expect.objectContaining({ terminalCandidate: canonical,
         coverage: expect.objectContaining({ terminalHash: runtimeJson(canonical).hash }),
-        continuityCriticResponse: expect.objectContaining({ classification: 'complete', terminalEvidence: expect.objectContaining({ verdictProtocol: 6 }) }) }), f.tx)
+        continuityCriticResponse: expect.objectContaining({ classification: 'complete', terminalEvidence: expect.objectContaining({ verdictProtocol: 6 }) }) }), f.tx, f.readScopes.mock.results.at(-1)!.value)
+      expect(vi.mocked(compiler.validateStoryContinuity).mock.calls.at(-1)![2]).toBe(f.readScopes.mock.results.at(-1)!.value)
       const commit = vi.spyOn(compiler, 'commitChapterBridge').mockResolvedValue({ compilationId: 'comp', chapterId: 'c', chapterRevision: 1, skippedMemoryCount: 0, retainedIssueCount: 0 })
       await chapterBridgeCommitTool.execute(f.ctx, { compilationId: 'comp' })
-      expect(commit).toHaveBeenCalledWith(expect.objectContaining({ exitState: canonical.exitState, lastUnfinishedAction: canonical.lastUnfinishedAction }), undefined)
+      expect(commit).toHaveBeenCalledWith(expect.objectContaining({ exitState: canonical.exitState, lastUnfinishedAction: canonical.lastUnfinishedAction }), undefined, undefined)
     }
     expect(f.write).not.toHaveBeenCalled()
     expect(f.repair).not.toHaveBeenCalled()
@@ -184,8 +187,10 @@ describe('严谨创作落实连续性警告', () => {
     await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
     expect(f.repair).not.toHaveBeenCalled()
   })
-  it.each([false, true])('commits explicit terminal facts or unknown state rather than a scene plan (explicit=%s)', async explicit => {
+  it.each([false, true].flatMap(explicit => [false, true].map(transactional => ({ explicit, transactional }))))(
+    'commits explicit terminal facts or unknown state rather than a scene plan (explicit=$explicit, transaction=$transactional)', async ({ explicit, transactional }) => {
     const f = fixture(true)
+    if (transactional) f.ctx.transaction = f.tx
     Object.assign(f.chapter, { revision: 2, content: '她留在渡口。\n\n钥匙已经交还船夫。' })
     Object.assign(f.compilation.bridge, { location: '旧仓库', objectState: ['她持有钥匙'], openLoops: ['计划进仓库'] })
     Object.assign(f.compilation.sceneTasks[0], { purpose: '进入仓库', turn: '她用钥匙开门',
@@ -196,7 +201,8 @@ describe('严谨创作落实连续性警告', () => {
     expect(commit).toHaveBeenCalledWith(expect.objectContaining({ expectedChapterRevision: 2,
       expectedContentHash: createHash('sha256').update(f.chapter.content).digest('hex'),
       exitState: explicit ? actualState : storyStateSchema.parse({}), chapterSummary: `正文摘录：${f.chapter.content}`,
-      openingStructure: '开篇摘录：她留在渡口。', endingStructure: '结尾摘录：钥匙已经交还船夫。', lastUnfinishedAction: '', hookDecision: '' }), undefined)
+      openingStructure: '开篇摘录：她留在渡口。', endingStructure: '结尾摘录：钥匙已经交还船夫。', lastUnfinishedAction: '', hookDecision: '' }), transactional ? f.tx : undefined, transactional ? f.readScopes.mock.results.at(-1)!.value : undefined)
+    expect(commit.mock.calls[0][2]).toBe(transactional ? f.readScopes.mock.results.at(-1)!.value : undefined)
     expect(result.output).toContain(`本章内容资料：正文摘录：${f.chapter.content}`)
     expect(result.output).toContain('概括实际剧情推进或具体修订')
     expect(result.output).toContain('不要额外调用模型')
@@ -328,7 +334,8 @@ describe('严谨创作落实连续性警告', () => {
     await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
     expect(f.repair).toHaveBeenCalledTimes(2)
     expect(f.repair.mock.calls[1][2]).toMatchObject({ action: 'agent3ContinuityCriticOutputRecovery', boundedReview: true, maxOutputTokens: 32768 })
-    expect(compiler.validateStoryContinuity).toHaveBeenCalledWith(expect.objectContaining({ independentCheck: 'complete', expectedChapterRevision: 1 }), f.tx)
+    expect(compiler.validateStoryContinuity).toHaveBeenCalledWith(expect.objectContaining({ independentCheck: 'complete', expectedChapterRevision: 1 }), f.tx, f.readScopes.mock.results.at(-1)!.value)
+    expect(vi.mocked(compiler.validateStoryContinuity).mock.calls.at(-1)![2]).toBe(f.readScopes.mock.results.at(-1)!.value)
     expect(f.write).not.toHaveBeenCalled()
   })
   it.each(['chapter', 'bridge', 'scenes', 'removed', 'after-response'] as const)('rejects genuinely changed %s before recovery or applying the result', async change => {

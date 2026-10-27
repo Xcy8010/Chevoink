@@ -53,7 +53,7 @@ export async function readTerminalDraftBinding(db: Prisma.TransactionClient,
   if (!cache) { cache = new Map(); scope.set(db, cache) }
   const key = runtimeJson({ userId: subject.userId, novelId: subject.novelId, runId: subject.runId, compilationId: subject.compilationId,
     taskId: binding.taskId, chapter: { id: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex, bodyHash: runtimeJson({ content: chapter.content }).hash },
-    preparedContext: binding.preparedContext, context: context ?? null,
+    ...(binding.preparedContext === undefined ? {} : { preparedContext: binding.preparedContext }), context: context ?? null,
     audit: object(validation).continuityCriticResponse ?? null, effectiveReport: object(validation).effectiveReport ?? null, candidate: object(validation).terminalCandidate ?? null,
     newDraftRevision: object(validation).newDraftRevision ?? null, retainedReviewDecision: object(validation).retainedReviewDecision ?? null }).hash
   if (!cache.has(key)) cache.set(key, loadTerminalDraftBinding(db, subject, binding, chapter, validation, context, inheritanceScope))

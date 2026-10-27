@@ -1,7 +1,9 @@
+import { readRecoveredChapterDelivery, assertCompletedWritingDelivery } from '../../api/lib/agent/writing-scope.js'
+import { readReviewCycle } from '../../api/lib/agent/review-cycle.js'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { assertChapterReviewRevision, originalChapterReviewRequirements, readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
+import { assertChapterReviewRevision, originalChapterReviewRequirements, readChapterReviewReadiness, recordChapterReviewDecisions, retainedReviewDecisionMatches } from '../../api/lib/agent/chapter-review-guard.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { qualityReportCheckedCurrentContent, qualityReportMatchesContent } from '../../api/lib/agent/quality-report-contract.js'
 import { commitChapterBridge } from '../../api/lib/agent/story-compiler.js'
@@ -39,9 +41,9 @@ function fixture(prompt = '写下一章') {
   vi.spyOn(lock, 'lockNovelActiveScope').mockResolvedValue(undefined)
   const report = { id: 'q3', chapterId: chapter.id, compilationId: compilation.id, chapterRevision: 3, status: 'passed', repairRound: 0,
     deterministicMetrics: { independentCheck: 'complete', contentHash: sha(chapter.content) }, findings: [] }
-  const db = { $queryRaw: vi.fn().mockResolvedValue([]),
-    agentRun: { findFirstOrThrow: vi.fn().mockResolvedValue({ writingBindings: { version: 1, taskId: task.id, targets: [{ orderIndex: 44, chapterId: chapter.id }] } }),
-      findFirst: vi.fn().mockResolvedValue({ mode: 'act', taskRootId: null, session: { userId: 'u', novelId: 'n', sandboxMode: 'workspace', toolPolicy: null } }) },
+  const db = { $queryRaw: vi.fn().mockResolvedValue([]), agentGoalExecution: { findUnique: vi.fn().mockResolvedValue(null) },
+    agentRun: { findMany: vi.fn().mockResolvedValue([]), findFirstOrThrow: vi.fn().mockResolvedValue({ writingBindings: { version: 1, taskId: task.id, targets: [{ orderIndex: 44, chapterId: chapter.id }] } }),
+      findFirst: vi.fn().mockResolvedValue({ id: subject.runId, userId: subject.userId, novelId: subject.novelId, status: 'running', manuscriptRevision: 0, novel: { authorId: subject.userId, manuscriptRevision: 0 }, mode: 'act', taskRootId: null, session: { userId: 'u', novelId: 'n', sandboxMode: 'workspace', toolPolicy: null } }) },
     chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(chapter), update: vi.fn() },
     storyCompilation: { findFirst: vi.fn().mockResolvedValue(compilation), findFirstOrThrow: vi.fn().mockResolvedValue(compilation), findMany: vi.fn().mockResolvedValue([compilation]),
       update: vi.fn(async ({ data }) => Object.assign(compilation, data)) },
@@ -374,4 +376,150 @@ describe('persisted current review readiness', () => {
     expect(originalChapterReviewRequirements({ prompt, spec: { intent: 'write', qualityMode: 'premium' } }))
       .toEqual({ continuity: true, quality: true })
   })
+})
+
+describe('retained quality report order is not decision identity', () => {
+  function retainedFixture() {
+    const f = fixture('修改第44章')
+    f.task.scope.reviewProtocol = 1
+    const findings = Array.from({ length: 3 }, (_, index) => ({ id: 'quality-row-' + index, reportId: f.report.id,
+      source: 'critic', signal: 'emotion_grounding', severity: 'warning', disposition: 'pending', authorFeedback: null,
+      evidenceExcerpt: f.chapter.content.slice(index, index + 3), startOffset: index, endOffset: index + 3,
+      explanation: 'Synthetic opinion ' + index, suggestion: 'Preserve the deliberate voice ' + index,
+      confidence: 0.9, createdAt: new Date(1), updatedAt: new Date(1) }))
+    Object.assign(f.report, { findings, status: 'needs_repair' })
+    vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'synthetic-memory' } as never)
+    const retain = async () => {
+      const current = await readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)
+      expect(current).toMatchObject({ ready: true, decisionPending: true })
+      expect(current!.requiredDecisions!.filter(ref => ref.source === 'quality')).toHaveLength(3)
+      await recordChapterReviewDecisions(f.tx, f.subject, current!, current!.requiredDecisions!.map(ref => ({ ...ref, reason: 'Retain this current synthetic opinion deliberately.' })))
+      return current!
+    }
+    return { ...f, findings, retain }
+  }
+
+  it('keeps actual recovered delivery available when the same retained report is returned in reverse order', async () => {
+    const f = retainedFixture(), before = JSON.stringify(f.report)
+    await f.retain()
+    await expect(commitChapterBridge(f.terminal, f.tx)).resolves.toMatchObject({ chapterRevision: 3 })
+    const capture = await readRecoveredChapterDelivery(f.tx, f.subject)
+    expect(capture).not.toBeNull()
+    Object.assign(f.report, { findings: [...f.findings].reverse() })
+    expect(await readRecoveredChapterDelivery(f.tx, f.subject)).toEqual(capture)
+    await expect(assertCompletedWritingDelivery(f.tx, f.subject, capture!)).resolves.toBeUndefined()
+    expect(f.db.storyCompilation.findFirst).toHaveBeenCalledWith(expect.objectContaining({ include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } }))
+    expect(f.compilation).toMatchObject({ status: 'completed', stage: 'commit' })
+    expect(f.chapter.revision).toBe(3)
+    expect([...f.report.findings].reverse()).toEqual(f.findings)
+    expect(JSON.stringify({ ...f.report, findings: [...f.report.findings].reverse() })).toBe(before)
+  })
+
+  function legacyBinding(f: ReturnType<typeof retainedFixture>, current: NonNullable<Awaited<ReturnType<typeof readChapterReviewReadiness>>>) {
+    const binding = { ...current.decisionBinding!, qualityReportHash: runtimeJson(JSON.parse(JSON.stringify(f.findings))).hash }
+    delete binding.qualityReportHashVersion
+    const validation = f.compilation.validation as unknown as Record<string, unknown>
+    const saved = validation.retainedReviewDecision as Record<string, unknown>
+    validation.retainedReviewDecision = { ...saved, ...binding }
+    delete (validation.retainedReviewDecision as Record<string, unknown>).qualityReportHashVersion
+    const cycle = readReviewCycle(f.compilation.preparedContext, { taskId: f.task.id, userId: f.subject.userId,
+      novelId: f.subject.novelId, chapterId: f.chapter.id })!
+    cycle.baseline!.binding = binding
+    Object.assign(f.compilation, { preparedContext: { ...f.compilation.preparedContext, reviewCycle: cycle } })
+    return cycle
+  }
+
+  it.each(['interleave', 'canonical-keys'] as const)('keeps version2 full-row identity under same-createdAt %s ordering', async order => {
+    const f = retainedFixture(), current = await f.retain()
+    expect(current.decisionBinding).toHaveProperty('qualityReportHashVersion', 2)
+    const rows = [f.findings[1], f.findings[2], f.findings[0]]
+    Object.assign(f.report, { findings: order === 'canonical-keys' ? rows.map(row => Object.fromEntries(Object.entries(row).reverse())) : rows })
+    expect((await readChapterReviewReadiness(f.tx, f.subject))?.decisionBinding).toEqual(current.decisionBinding)
+    await expect(commitChapterBridge(f.terminal, f.tx)).resolves.toMatchObject({ chapterRevision: 3 })
+    expect(await readRecoveredChapterDelivery(f.tx, f.subject)).not.toBeNull()
+  })
+
+  it.each(['id', 'reportId', 'source', 'signal', 'severity', 'disposition', 'authorFeedback', 'evidenceExcerpt',
+    'startOffset', 'endOffset', 'explanation', 'suggestion', 'confidence', 'createdAt', 'updatedAt', 'extra'] as const)(
+    'rejects changed complete-row field %s without another write or assessment', async field => {
+      const f = retainedFixture(); await f.retain(); await commitChapterBridge(f.terminal, f.tx)
+      const capture = await readRecoveredChapterDelivery(f.tx, f.subject)
+      expect(capture).not.toBeNull()
+      const row = f.findings[0] as Record<string, unknown>, value = row[field]
+      row[field] = value instanceof Date ? new Date(value.getTime() + 1) : typeof value === 'number' ? value + 1 : String(value) + '-changed'
+      const writes = f.db.storyCompilation.update.mock.calls.length
+      expect(await readRecoveredChapterDelivery(f.tx, f.subject)).toBeNull()
+      await expect(assertCompletedWritingDelivery(f.tx, f.subject, capture!)).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
+      expect(f.db.storyCompilation.update).toHaveBeenCalledTimes(writes)
+      expect(f.chapter.revision).toBe(3)
+    })
+
+  it.each(['body', 'revision', 'report', 'added-row', 'removed-row', 'duplicate-row', 'obligation'] as const)(
+    'does not let stable row ordering mask changed %s', async change => {
+      const f = retainedFixture(); await f.retain(); await commitChapterBridge(f.terminal, f.tx)
+      if (change === 'body') f.chapter.content += 'Changed actual body.'
+      if (change === 'revision') f.chapter.revision++
+      if (change === 'report') f.report.id += '-other'
+      if (change === 'added-row') Object.assign(f.report, { findings: [...f.findings, { ...f.findings[0], id: 'new-row' }] })
+      if (change === 'removed-row') Object.assign(f.report, { findings: f.findings.slice(1) })
+      if (change === 'duplicate-row') Object.assign(f.report, { findings: [...f.findings, f.findings[0]] })
+      if (change === 'obligation') mocksOriginalRequirement(f)
+      expect(await readRecoveredChapterDelivery(f.tx, f.subject)).toBeNull()
+    })
+
+  function mocksOriginalRequirement(f: ReturnType<typeof retainedFixture>) {
+    vi.mocked(original.readOriginalTaskRequest).mockResolvedValue({ prompt: '修改第44章，必须通过人类感质量检查。', spec: f.task,
+      taskId: f.task.id, sourceRunId: 'original', parentRunId: null })
+  }
+
+  it.each(['exact-no-baseline', 'reordered-proven', 'reordered-unproven'] as const)('preserves old version1 only with %s evidence', async kind => {
+    const f = retainedFixture(), current = await f.retain(); legacyBinding(f, current)
+    await commitChapterBridge(f.terminal, f.tx)
+    if (kind !== 'exact-no-baseline') Object.assign(f.report, { findings: [...f.findings].reverse() })
+    if (kind !== 'reordered-proven') {
+      const context = { ...f.compilation.preparedContext } as Record<string, unknown>; delete context.reviewCycle
+      Object.assign(f.compilation, { preparedContext: context })
+    }
+    const before = JSON.stringify(f.compilation.validation)
+    const result = await readRecoveredChapterDelivery(f.tx, f.subject)
+    if (kind === 'reordered-unproven') expect(result).toBeNull()
+    else expect(result).not.toBeNull()
+    expect(JSON.stringify(f.compilation.validation)).toBe(before)
+    expect((f.compilation.validation as unknown as { retainedReviewDecision: Record<string, unknown> }).retainedReviewDecision).not.toHaveProperty('qualityReportHashVersion')
+  })
+
+  it.each(['compilation', 'body', 'revision', 'continuity', 'report', 'hash', 'missing-ref', 'duplicate-ref', 'foreign-ref',
+    'changed-row', 'added-row', 'removed-row', 'duplicate-row', 'missing-baseline', 'required-ref', 'unknown-version'] as const)(
+    'refuses version1 order recovery after %s instead of migrating old evidence', async change => {
+      const f = retainedFixture(), current = await f.retain(), cycle = legacyBinding(f, current)
+      Object.assign(f.report, { findings: [...f.findings].reverse() })
+      const baseline = cycle.baseline!, validation = f.compilation.validation as unknown as Record<string, unknown>
+      if (change === 'compilation') baseline.compilationId += '-other'
+      if (change === 'body') { baseline.body.contentHash = 'a'.repeat(64); baseline.binding.contentHash = 'a'.repeat(64) }
+      if (change === 'revision') baseline.body.revision++
+      if (change === 'continuity') baseline.binding.continuityBinding += '-other'
+      if (change === 'report') baseline.binding.qualityReportId += '-other'
+      if (change === 'hash') baseline.binding.qualityReportHash = 'a'.repeat(64)
+      if (change === 'missing-ref') baseline.findings = baseline.findings.slice(1)
+      if (change === 'duplicate-ref') baseline.findings.push(baseline.findings[0])
+      if (change === 'foreign-ref') baseline.findings[0].reportId += '-other'
+      if (change === 'changed-row') f.findings[0].confidence -= 0.1
+      if (change === 'added-row') Object.assign(f.report, { findings: [...f.report.findings, { ...f.findings[0], id: 'new-row' }] })
+      if (change === 'removed-row') Object.assign(f.report, { findings: f.report.findings.slice(1) })
+      if (change === 'duplicate-row') Object.assign(f.report, { findings: [...f.report.findings, f.report.findings[0]] })
+      if (change === 'missing-baseline') cycle.baseline = null
+      if (change === 'unknown-version') (validation.retainedReviewDecision as Record<string, unknown>).qualityReportHashVersion = 3
+      const required = change === 'required-ref' ? [{ source: 'quality', reportId: f.report.id, findingId: 'unadmitted-obligation' }] : current.requiredDecisions!
+      const before = JSON.stringify({ cycle, validation })
+      expect(retainedReviewDecisionMatches(validation, f.chapter, f.compilation.id, f.report, required, cycle)).toBe(false)
+      expect(JSON.stringify({ cycle, validation })).toBe(before)
+    })
+
+  it.each(['taskId', 'userId', 'novelId', 'chapterId'] as const)('cannot use a baseline from another %s', async field => {
+    const f = retainedFixture(), current = await f.retain(), cycle = legacyBinding(f, current)
+    Object.assign(f.report, { findings: [...f.findings].reverse() })
+    cycle.scope[field] += '-foreign'
+    await expect(readChapterReviewReadiness(f.tx, f.subject)).rejects.toMatchObject({ code: 'REVIEW_CYCLE_CONFLICT' })
+  })
+
 })
