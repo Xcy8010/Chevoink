@@ -8,7 +8,7 @@ describe('advisory requests with an editor chapter', () => {
     '作为开发者，我应该怎样优化Agent的工具结果展示？',
   ])('answers without acquiring chapter obligations: %s', prompt => {
     const spec = buildTaskSpec({ runId: 'r', novelId: 'n', chapterId: 'c', prompt, authorWritingProtocol: 2 })
-    expect(spec).toMatchObject({ writingPacing: 'conversation_only', scope: { authorEffects: { manuscript: false, structure: false } } })
+    expect(spec).toMatchObject({ scope: { authorEffects: { manuscript: false, structure: false } } })
     expect(requiresManuscriptDelivery(spec)).toBe(false)
     const frozen = structuredClone(spec)
     delete frozen.writingPacing

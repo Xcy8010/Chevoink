@@ -3649,7 +3649,8 @@ describe('author-directed task ending in the real execution loop', () => {
   it.each(['fresh-code', 'frozen-code', 'frozen-inline'] as const)('keeps a developer conclusion with tool JSON visible without a forced tool round: %s', async scenario => {
     const prompt = '我是Chevoink Agent的开发者，对于我来说我如何优化和修复才能避免这些问题？'
     const spec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt, authorWritingProtocol: 2 })
-    if (scenario !== 'fresh-code') delete spec.writingPacing
+    if (scenario === 'fresh-code') spec.writingPacing = 'conversation_only'
+    else delete spec.writingPacing
     const frozen = structuredClone(spec)
     mocks.currentOriginal = { prompt, taskSpec: spec }
     const bridge = tool('chapter_bridge_get', async () => { throw Error('Advice does not require a chapter bridge') })

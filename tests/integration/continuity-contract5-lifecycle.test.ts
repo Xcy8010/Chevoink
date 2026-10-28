@@ -302,6 +302,10 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
         if (scenario === 'spent-revision') {
           const before = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
           const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+          const appliedId = runtimeJson({ kind: 'continuity_revision_applied', planHash: revision.capability.plan.hash }).hash
+          expect((await prisma.agentArtifact.findUniqueOrThrow({ where: { id: appliedId } })).metadata).toMatchObject({
+            continuityRevisionApplied: { chapterId: chapter.id, beforeRevision: chapter.revision, afterRevision: revised.revision },
+          })
           expect(await prepareContinuityMergedRevision(ctx, compilation.id)).toBeNull()
           expect(await prepareContinuityMergedRevision(ctx, compilation.id)).toBeNull()
           expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(before)

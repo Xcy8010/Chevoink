@@ -695,6 +695,8 @@ export async function prepareContinuityMergedRevision(ctx: ToolContext, compilat
   const facts = await prisma.$transaction(tx => mergedRevisionFacts(tx, ctx, compilationId), { timeout: 20_000 })
   if (!facts?.findings.length) return null
   const plan = facts.plan
+  const appliedId = runtimeJson({ kind: 'continuity_revision_applied', planHash: plan.hash }).hash
+  if (await prisma.agentArtifact.findUnique({ where: { id: appliedId } })) return null
   const probe = await prisma.$transaction(tx => import('./chapter-review-guard.js').then(module => module.probeChapterReviewRevision(tx, ctx,
     facts.saved.chapter!, { mutation: 'range', mergedBatch: true })), { timeout: 20_000 })
   // An unavailable paid revision leaves ordinary author-directed work open,

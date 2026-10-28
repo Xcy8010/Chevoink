@@ -283,7 +283,7 @@ export function buildTaskSpec(input: {
       && operation.targetIndices.some(index => writingRequest.evidence.targets[index].kind === 'book'))
   const writingPacing = freshResearch ? undefined : !writingRequest ? legacyPacing
     : bookProposal ? 'proposal_only' as const : manuscriptRequested ? legacyPacing === 'explicit_writing' ? legacyPacing : undefined
-      : structureRequested || artifactRequested || writingRequest.intent === 'review' ? undefined : 'conversation_only' as const
+      : structureRequested || artifactRequested ? undefined : legacyPacing === 'conversation_only' ? legacyPacing : undefined
   const inferredIntent = freshResearch ? 'research_analysis' : writingPacing === 'proposal_only' ? 'plan'
     : writingPacing === 'explicit_writing' && boundedSceneRequest(input.prompt) ? 'write' : classifyIntent(input.prompt, input.researchAdmission === 1)
   const intent = !writingRequest ? inferredIntent : freshResearch ? 'research_analysis'
