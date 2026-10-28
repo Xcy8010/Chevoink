@@ -48,6 +48,9 @@ import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-c
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { buildTerminalFactProofs } from '../../api/lib/agent/terminal-inheritance-chain.js'
 import { qualityNeighborContext } from '../../api/lib/agent/quality-neighbor-context.js'
+import * as storyCompiler from '../../api/lib/agent/story-compiler.js'
+import * as humanityQuality from '../../api/lib/agent/humanity-quality.js'
+import { taskSpecSchema } from '../../shared/contracts/task-spec-contracts.js'
 
 type Fixture = Parameters<Parameters<typeof fixture>[0]>[0]
 const prompt = '修改第一章，只输出标题和正文'
@@ -76,7 +79,9 @@ async function seedLegacyCoveragePredecessor(f: Fixture, target: { volumeId: str
     continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1 })
   await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId,
     chapterId: chapter.id, status: 'running', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop',
-    runtimeProtocolVersion: 0, taskSpec: runtimeJson(spec).value, startRequest: { prompt: sourcePrompt } } })
+    // Match ordinary admission: optional fields in a newly built TaskSpec can
+    // be undefined; persist its JSON representation before hashing/validation.
+    runtimeProtocolVersion: 0, taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value, startRequest: { prompt: sourcePrompt } } })
   await prisma.agentMessage.create({ data: { runId, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: sourcePrompt }] } })
   const subject = { userId: f.userId, novelId: f.novelId, runId }
   const candidate = terminalCandidateSchema.parse({ exitState: { knowledge: [inheritedClaim] } })
@@ -314,24 +319,54 @@ function wireFor(question: Awaited<ReturnType<typeof originalFailure>>['question
   return wire
 }
 
-it('binds synthetic predecessor fixtures to the real coverage context while preserving the legacy ledger difference', () => {
-  const prologue = { id: 'synthetic-prologue', title: 'Synthetic prologue', revision: 1, orderIndex: 0, content: inheritedClaim }
-  const candidate = terminalCandidateSchema.parse({ exitState: { knowledge: [inheritedClaim] } })
+it('serializes the complete synthetic predecessor seed before mocked persistence and binds coverage without erasing the legacy ledger difference', async () => {
+  // Invoke the very same seed as PostgreSQL coverage, checking its actual
+  // payloads before mocked persistence. This is no claim of database acceptance.
+  const prologue = { id: 'synthetic-prologue', title: 'Synthetic prologue', revision: 1, orderIndex: 0, orderInVolume: 0,
+    content: inheritedClaim, volumeId: 'volume', authorId: 'owner', novelId: 'novel', wordCount: inheritedClaim.length }
+  const chapterWrite = vi.spyOn(prisma.chapter, 'create').mockResolvedValue(prologue as Awaited<ReturnType<typeof prisma.chapter.create>>)
+  const runWrite = vi.spyOn(prisma.agentRun, 'create').mockResolvedValue({} as Awaited<ReturnType<typeof prisma.agentRun.create>>)
+  const messageWrite = vi.spyOn(prisma.agentMessage, 'create').mockResolvedValue({} as Awaited<ReturnType<typeof prisma.agentMessage.create>>)
+  const prepare = vi.spyOn(storyCompiler, 'prepareStoryCompilation').mockResolvedValue({ compilation: { id: 'synthetic-prologue-compilation' } } as Awaited<ReturnType<typeof prepareStoryCompilation>>)
+  const scenes = vi.spyOn(storyCompiler, 'saveSceneTasks').mockResolvedValue([])
+  vi.spyOn(prisma.storyCompilation, 'findUniqueOrThrow').mockResolvedValue({ id: 'synthetic-prologue-compilation', bridge: null, sceneTasks: [] } as unknown as Awaited<ReturnType<typeof prisma.storyCompilation.findUniqueOrThrow>>)
+  const validate = vi.spyOn(storyCompiler, 'validateStoryContinuity').mockResolvedValue({} as Awaited<ReturnType<typeof validateStoryContinuity>>)
+  const quality = vi.spyOn(humanityQuality, 'persistHumanityQualityReport').mockResolvedValue({} as Awaited<ReturnType<typeof persistHumanityQualityReport>>)
+  const commit = vi.spyOn(storyCompiler, 'commitChapterBridge').mockResolvedValue({} as Awaited<ReturnType<typeof commitChapterBridge>>)
+  const usage = vi.spyOn(prisma.aiUsageLog, 'count').mockResolvedValue(0)
+  const f = { userId: 'owner', novelId: 'novel', sessionId: 'session' } as Fixture
+  expect(await seedLegacyCoveragePredecessor(f, prologue)).toEqual(prologue)
+  for (const operation of [chapterWrite, runWrite, messageWrite, prepare, scenes, validate, quality, commit]) expect(operation).toHaveBeenCalledOnce()
+  expect(usage).toHaveBeenCalledOnce()
+  for (const payload of [chapterWrite.mock.calls[0][0].data, runWrite.mock.calls[0][0].data, messageWrite.mock.calls[0][0].data,
+    prepare.mock.calls[0][0], scenes.mock.calls[0][0], validate.mock.calls[0][0], quality.mock.calls[0][0], commit.mock.calls[0][0]]) {
+    expect(() => runtimeJson(payload)).not.toThrow()
+  }
+  const persisted = runWrite.mock.calls[0][0].data
+  const savedSpec = taskSpecSchema.parse(persisted.taskSpec)
+  expect(savedSpec).toMatchObject({ runId: persisted.id, goals: ['修改本章'], scope: { novelId: f.novelId,
+    chapterIds: [prologue.id], continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1 } })
+  expect(persisted.taskSpec).not.toHaveProperty('scope.selection')
+  expect(persisted.taskSpec).not.toHaveProperty('scope.terminalCoverageProtocol')
+  expect(savedSpec.runId).toBeDefined()
+  const unpersisted = buildTaskSpec({ runId: savedSpec.runId!, novelId: f.novelId, chapterId: prologue.id, prompt: '修改本章',
+    continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1 })
+  expect(unpersisted.scope).toHaveProperty('selection', undefined)
+  expect(() => runtimeJson(unpersisted)).toThrow(expect.objectContaining({ code: 'RUNTIME_INPUT_INVALID' }))
+  const report = validate.mock.calls[0][0]
+  const candidate = terminalCandidateSchema.parse(report.terminalCandidate)
+  const audit = report.continuityCriticResponse as ReturnType<typeof inspectContinuityResponse>['audit']
   const evidence = terminalEvidenceContext(prologue, null, 2, 1, undefined, 6, 2)
-  const inspected = inspectContinuityResponse(JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({
-    kind, result: 'clear', reason: 'Independent synthetic prologue review.', findingIndexes: [] })),
-    terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] }], terminalProofVerdicts: [] }),
-    { previous: null, current: prologue.content, terminalEvidence: evidence }, true, 8, candidate)
-  const review = readAuthenticatedContinuityAssessment(inspected.audit, prologue.content, evidence, true)!
-  expect(inspected.complete).toBe(true); expect(review).not.toBeNull()
+  expect(runtimeJson(audit.terminalEvidence).hash).toBe(runtimeJson(evidence).hash)
+  const review = readAuthenticatedContinuityAssessment(audit, prologue.content, evidence, true)!
+  expect(review).not.toBeNull()
   const { content: previous, ...neighbor } = qualityNeighborContext([prologue])[0]
   const source = { id: prologue.id, revision: prologue.revision, content: previous,
     scope: 'current_and_previous_3_bounded' as const, targetOrderIndex: 1,
     preceding: [{ ...neighbor, joinedStart: 0, joinedEnd: previous.length }], bridgeSource: prologue,
     terminalInheritance: buildTerminalFactProofs({ compilationId: 'synthetic-prologue-compilation', chapter: prologue,
       validation: { checkedChapterId: prologue.id, checkedRevision: prologue.revision, terminalCandidate: candidate,
-        independentCheck: 'complete', continuityCriticResponse: inspected.audit,
-        coverage: compilerContinuityCoverage({ chapter: prologue, bridge: null, sceneTasks: [], source: null, terminalCandidate: candidate }, 11) },
+        independentCheck: 'complete', continuityCriticResponse: audit, coverage: report.coverage },
       stateHash: 'a'.repeat(64), evidence, review }) }
   expect(source.terminalInheritance).toMatchObject([{ field: 'knowledge', claim: inheritedClaim, depth: 1 }])
   const chapter = { id: 'chapter', title: 'Synthetic current', revision: 4, orderIndex: 1,
