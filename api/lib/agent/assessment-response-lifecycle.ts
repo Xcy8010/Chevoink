@@ -338,8 +338,11 @@ export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionCl
   // A new Continue admission retires no semantic failure. Call IDs, prompt,
   // focus and table ordering cannot buy the same terminal judgment again.
   // Unknown requests above retain their original priority and reconciliation.
-  if (sameFailedReviewedInput) throw new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED',
-    '当前版本的复核报告未通过，本次未重复检查，正文与报告已保留。')
+  if (sameFailedReviewedInput) {
+    if (input.parserVersion === 10 && continuityAssessmentPhase(input) === null) throw new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED',
+      '当前版本的复核报告未通过，本次未重复检查，正文与报告已保留。')
+    return 'blocked' as const
+  }
   await (await import('./continuity-coordinator.js')).claimLegacyContinuityVerification(tx, ctx, input, reservations, key)
   if (input.parserVersion === 10) {
     await assertContinuityOwner(tx, ctx)
