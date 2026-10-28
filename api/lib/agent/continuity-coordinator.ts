@@ -943,8 +943,17 @@ export async function reconstructContinuitySourceProvenance(db: Prisma.Transacti
   return rebuildContinuitySourceProvenance(db, subject, target)
 }
 
+const frozenSourceHistorySchema = z.array(z.object({ reservationId: z.string().min(1), reportHash: hash, ledgerHash: hash,
+  inputHash: hash, usageIds: z.array(z.string().min(1)) }).strict()).min(1).max(1000)
+type FrozenSourceHistory = z.infer<typeof frozenSourceHistorySchema>
+type AppliedSourceReport = { reservationId: string; reportHash: string; revision: number; bodyHash: string;
+  establishedIssues: Array<{ reportHash: string; findingId: string; text: string;
+    origin: { chapterId: string; revision: number; bodyHash: string; sourceHash: string } }> }
+const sourceLedgerMismatch = () => blocked('原持续事实与完整已应用报告的来源重建不一致；未更改原 ledger。')
+
 async function rebuildContinuitySourceProvenance(db: Prisma.TransactionClient, subject: Subject,
-  target: { compilationId: string; chapterId: string; preparedContext: unknown }, priorLedgerHash?: string) {
+  target: { compilationId: string; chapterId: string; preparedContext: unknown }, priorLedgerHash?: string,
+  snapshot?: { history: FrozenSourceHistory }) {
   const original = await readOriginalTaskRequest(db, subject), runIds = await originalTaskRunIds(db, subject, original)
   const lifecycle = await import('./assessment-response-lifecycle.js'), coverage = await import('./terminal-fact-coverage.js')
   const rows = await db.agentArtifact.findMany({ where: { runId: { in: runIds }, run: { userId: subject.userId, novelId: subject.novelId },
@@ -953,9 +962,9 @@ async function rebuildContinuitySourceProvenance(db: Prisma.TransactionClient, s
   let state: import('./terminal-fact-coverage.js').TerminalCoverageState | undefined
   const origins = new Map<string, { factId: string; reservationId: string; reportHash: string; bodyHash: string; sourceHash: string; candidateHash: string; revision: number }>()
   const history: Array<{ reservationId: string; reportHash: string; ledgerHash: string; inputHash: string; usageIds: string[] }> = []
-  let latestAppliedReport: { reservationId: string; reportHash: string; revision: number; bodyHash: string;
-    establishedIssues: Array<{ reportHash: string; findingId: string; text: string;
-      origin: { chapterId: string; revision: number; bodyHash: string; sourceHash: string } }> } | null = null
+  let latestAppliedReport: AppliedSourceReport | null = null
+  const replayLegacyReceipts: Array<() => void> = []
+  const snapshotIds = snapshot ? new Set(snapshot.history.map(item => item.reservationId)) : undefined
   const applicationTime = (row: typeof rows[number]) => {
     const key = object(row.metadata).continuityAssessmentRequestKey
     return rows.find(application => object(application.metadata).assessmentApplicationKey === key)?.createdAt.getTime() ?? Number.MAX_SAFE_INTEGER
@@ -984,15 +993,21 @@ async function rebuildContinuitySourceProvenance(db: Prisma.TransactionClient, s
         && runtimeJson([...new Set(receipt.usageIds)].sort()).hash === runtimeJson([...new Set(result.usageIds)].sort()).hash
         && receipt.usageIds.length === result.usageIds.length
     })) throw blocked('原报告应用回执的预约或费用归属不一致。')
+    const evidence = input.bodies.terminalEvidence
     const review = (await import('./authenticated-continuity-assessment.js')).readAuthenticatedContinuityAssessment(bound.audit,
-      input.bodies.current, input.bodies.terminalEvidence, true)
-    if (!review || !input.bodies.terminalEvidence?.factCoverage) throw blocked('原报告持续义务不能完整重建。')
-    state = coverage.advanceTerminalCoverage(original.spec, state ? { terminalFactCoverage: state } : {},
-      { id: target.chapterId, content: input.bodies.current }, review, input.bodies.terminalEvidence.factCoverage)
-    if (!state) throw blocked('原持续事实合同缺失。')
-    const reportHash = runtimeJson(bound.audit).hash
+      input.bodies.current, evidence, true)
+    if (!review || !evidence?.factCoverage) throw blocked('原报告持续义务不能完整重建。')
+    const frozenCoverage = evidence.factCoverage
+    // Later authenticated applications belong to their own ledger. They must
+    // not be interpreted or included in this previously frozen source.
+    if (snapshotIds && !snapshotIds.has(row.id)) continue
+    const reportHash = runtimeJson(bound.audit).hash, inputHash = runtimeJson(input).hash
+    const frozenEntry = snapshot?.history[history.length]
+    if (snapshot && (!frozenEntry || frozenEntry.reservationId !== row.id || frozenEntry.reportHash !== reportHash
+      || frozenEntry.inputHash !== inputHash || runtimeJson(frozenEntry.usageIds).hash !== runtimeJson(result.usageIds).hash))
+      throw sourceLedgerMismatch()
     const origin = { chapterId: target.chapterId, revision: input.revision, bodyHash: runtimeJson({ content: input.bodies.current }).hash,
-      sourceHash: runtimeJson({ previous: input.bodies.terminalEvidence.previous }).hash }
+      sourceHash: runtimeJson({ previous: evidence.previous }).hash }
     const classify = (await import('./continuity-finding-authority.js')).classifyContinuityFindingAuthority
     const rawFindings = 'parsed' in bound && bound.parsed ? bound.parsed.record.findings : null
     const establishedIssues = bound.findings.flatMap((finding, index) => {
@@ -1003,20 +1018,41 @@ async function rebuildContinuitySourceProvenance(db: Prisma.TransactionClient, s
         text: bound.audit.parserVersion === 10 && typeof raw?.explanation === 'string' ? raw.explanation
           : typeof raw?.reason === 'string' ? raw.reason : finding.evidence, origin }]
     })
-    latestAppliedReport = { reservationId: row.id, reportHash, revision: input.revision, bodyHash: origin.bodyHash, establishedIssues }
-    for (const fact of state.facts) if (!origins.has(fact.id)) origins.set(fact.id, { factId: fact.id, reservationId: row.id, reportHash,
-      bodyHash: runtimeJson({ content: input.bodies.current }).hash, sourceHash: runtimeJson({ previous: input.bodies.terminalEvidence.previous }).hash,
-      candidateHash: runtimeJson(input.terminalCandidate).hash, revision: input.revision })
-    history.push({ reservationId: row.id, reportHash, ledgerHash: runtimeJson(state).hash, inputHash: runtimeJson(input).hash, usageIds: result.usageIds })
+    const applyReceipt = (legacy: boolean) => {
+      const chapter = { id: target.chapterId, content: input.bodies.current }, prepared = state ? { terminalFactCoverage: state } : {}
+      state = legacy
+        ? coverage.replayLegacyTerminalCoverageReceipt(original.spec, prepared, chapter, review, frozenCoverage)
+        : coverage.advanceTerminalCoverage(original.spec, prepared, chapter, review, frozenCoverage)
+      if (!state) throw blocked('原持续事实合同缺失。')
+      if (legacy && frozenEntry && frozenEntry.ledgerHash !== runtimeJson(state).hash) throw sourceLedgerMismatch()
+      latestAppliedReport = { reservationId: row.id, reportHash, revision: input.revision, bodyHash: origin.bodyHash, establishedIssues }
+      for (const fact of state.facts) if (!origins.has(fact.id)) origins.set(fact.id, { factId: fact.id, reservationId: row.id, reportHash,
+        bodyHash: origin.bodyHash, sourceHash: origin.sourceHash, candidateHash: runtimeJson(input.terminalCandidate).hash, revision: input.revision })
+      history.push({ reservationId: row.id, reportHash, ledgerHash: runtimeJson(state).hash, inputHash, usageIds: result.usageIds })
+    }
+    applyReceipt(false)
+    if (snapshot) replayLegacyReceipts.push(() => applyReceipt(true))
   }
+  if (snapshot && history.length !== snapshot.history.length) throw sourceLedgerMismatch()
   const current = coverage.readTerminalCoverageState(original.spec, target.preparedContext, target.chapterId)
-  if (!state || !current || (priorLedgerHash ? runtimeJson(state).hash !== priorLedgerHash
-    : runtimeJson(state).hash !== runtimeJson(current).hash || current.facts.some(fact => !origins.has(fact.id))))
-    throw blocked('原持续事实与完整已应用报告的来源重建不一致；未更改原 ledger。')
+  const currentState = state as import('./terminal-fact-coverage.js').TerminalCoverageState | undefined
+  if (!currentState || !current) throw sourceLedgerMismatch()
+  const ledgerMatches = priorLedgerHash ? runtimeJson(currentState).hash === priorLedgerHash
+    : runtimeJson(currentState).hash === runtimeJson(current).hash && current.facts.every(fact => origins.has(fact.id))
+  if (!ledgerMatches) {
+    if (!priorLedgerHash || !snapshot) throw sourceLedgerMismatch()
+    // The whole current walk has authenticated every applied receipt. Replay
+    // only those same frozen receipts in memory; do not repeat database reads.
+    state = undefined; origins.clear(); history.length = 0; latestAppliedReport = null
+    for (const replay of replayLegacyReceipts) { subject.signal?.throwIfAborted(); replay() }
+  }
+  const finalState = state as import('./terminal-fact-coverage.js').TerminalCoverageState | undefined
+  if (!finalState || priorLedgerHash && runtimeJson(finalState).hash !== priorLedgerHash) throw sourceLedgerMismatch()
+  const finalReport = latestAppliedReport as AppliedSourceReport | null
   return { version: 1 as const, originalTaskId: original.taskId, compilationId: target.compilationId, chapterId: target.chapterId,
-    ledgerHash: runtimeJson(state).hash, origins: [...origins.values()], history,
-    currentFactIds: state.facts.map(fact => fact.id), latestAppliedReport,
-    establishedIssues: latestAppliedReport?.establishedIssues ?? [], dependencyScope: 'authenticated_explicit_claims_only' as const }
+    ledgerHash: runtimeJson(finalState).hash, origins: [...origins.values()], history,
+    currentFactIds: finalState.facts.map(fact => fact.id), latestAppliedReport: finalReport,
+    establishedIssues: finalReport?.establishedIssues ?? [], dependencyScope: 'authenticated_explicit_claims_only' as const }
 }
 
 /** Read-only origins for a marked whole report. The old complete applications
@@ -1036,7 +1072,11 @@ export async function readNormalizedContinuityCoverageOrigins(db: Prisma.Transac
   const projections = rows.map(row => object(object(row.metadata).continuitySourceRecovery).projection)
     .filter(value => value && runtimeJson(value).hash === question.frozen.sourceRecoveryHash)
   if (projections.length !== 1 || typeof object(projections[0]).ledgerHash !== 'string') return null
-  const rebuilt = await rebuildContinuitySourceProvenance(db, subject, target, String(object(projections[0]).ledgerHash))
+  const frozen = object(projections[0]), priorLedgerHash = String(frozen.ledgerHash)
+  const history = frozenSourceHistorySchema.safeParse(frozen.history)
+  if (frozen.version !== 1 || !history.success
+    || new Set(history.data.map(item => item.reservationId)).size !== history.data.length) throw sourceLedgerMismatch()
+  const rebuilt = await rebuildContinuitySourceProvenance(db, subject, target, priorLedgerHash, { history: history.data })
   return runtimeJson(rebuilt).hash === question.frozen.sourceRecoveryHash ? rebuilt : null
 }
 

@@ -156,6 +156,19 @@ export function terminalCoverageGuidance(input: TerminalCoverageInput | undefine
  * independent audit. Unresolved facts survive; no main-model disposition exists. */
 export function advanceTerminalCoverage(spec: unknown, preparedContext: unknown, chapter: { id: string; content: string },
   review: NonNullable<ReturnType<typeof inspectTerminalReview>>, frozenInput?: TerminalCoverageInput): TerminalCoverageState | undefined {
+  return advanceCoverage(spec, preparedContext, chapter, review, frozenInput, true)
+}
+
+/** Replay only an authenticated historical application whose frozen source
+ * receipt recorded the original algorithm. Never use this for a new report. */
+export function replayLegacyTerminalCoverageReceipt(spec: unknown, preparedContext: unknown, chapter: { id: string; content: string },
+  review: NonNullable<ReturnType<typeof inspectTerminalReview>>, frozenInput: TerminalCoverageInput): TerminalCoverageState | undefined {
+  return advanceCoverage(spec, preparedContext, chapter, review, frozenInput, false)
+}
+
+function advanceCoverage(spec: unknown, preparedContext: unknown, chapter: { id: string; content: string },
+  review: NonNullable<ReturnType<typeof inspectTerminalReview>>, frozenInput: TerminalCoverageInput | undefined,
+  includeInputObligations: boolean): TerminalCoverageState | undefined {
   if (!hasTerminalCoverageProtocol(spec)) return undefined
   // A resolved omission leaves the fact ledger. Preserve the exact reviewed
   // request so the next guard can still bind its disposition and proof scope.
@@ -165,7 +178,8 @@ export function advanceTerminalCoverage(spec: unknown, preparedContext: unknown,
     || input.version !== (review.factCoverage?.version ?? 1)) throw blocked()
   const old = readTerminalCoverageState(spec, preparedContext, chapter.id)
   const resolved = new Set(review.factCoverage?.dispositions.filter(item => item.outcome !== 'unknown').map(item => item.id))
-  const facts = new Map([...(old?.facts ?? []), ...input.obligations].filter(item => !resolved.has(item.id)).map(item => [item.id, item]))
+  const facts = new Map([...(old?.facts ?? []), ...(includeInputObligations ? input.obligations : [])]
+    .filter(item => !resolved.has(item.id)).map(item => [item.id, item]))
   for (const item of review.verdicts) {
     const match = /^exitState\.(knowledge|body|objects|relationships|openLoops)\.([0-9]+)$/u.exec(item.path)
     if (item.verdict !== 'supported' || !match) continue
