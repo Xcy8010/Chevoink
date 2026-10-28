@@ -52,10 +52,10 @@ describe.runIf(available)('native body report and first terminal review share th
     vi.spyOn(prices, 'resolveDurableTokenPrice').mockResolvedValue(price)
     const window = credits.getCreditWindow()
     await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
-    let requests = 0, reentered = false
+    let requests = 0, reentered = false, bodyReentered = false
     const fetcher = vi.fn(async () => {
       requests++
-      if (requests === 2) {
+      if (requests <= 2) {
         const child = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, kind: 'provider', action: 'continuity_critic' },
           orderBy: { createdAt: 'desc' } })
         const frozen = child.inputSnapshot as { input: { request: Prisma.InputJsonValue; billing: DurableTokenPrice } }
@@ -65,11 +65,11 @@ describe.runIf(available)('native body report and first terminal review share th
         expect(again.id).toBe(child.id)
         expect(await prisma.agentProviderAttempt.findMany({ where: { operationId: child.id }, orderBy: { id: 'asc' } })).toEqual(attempts)
         reentered = true
+        if (requests === 1) bodyReentered = true
       }
       const report = requests === 1 ? { findings: [],
-        semanticChecks: { action_direction: { result: 'clear', reason: 'Saved body checked.', findingIndexes: [] },
-          state_progression: { result: 'clear', reason: 'Saved body checked.', findingIndexes: [] } },
-        terminalVerdicts: [], terminalProofVerdicts: [], terminalDispositions: [] }
+        semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reasonCode: 'consistent',
+          explanation: 'The old opinion "the packet vanished" is not supported by this saved body.', findingIds: [] })), issueDispositions: [] }
         : requests === 2 ? { findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear',
           reasonCode: 'consistent', explanation: 'The saved body is consistent.', findingIds: [] })),
           terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', reasonCode: 'consistent', explanation: 'The packet is still sealed.',
@@ -83,8 +83,13 @@ describe.runIf(available)('native body report and first terminal review share th
     await step()
     expect(await step()).toMatchObject({ kind: 'tool' })
     const bodyParent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate' }, include: { effectReceipt: true } })
-    expect(bodyParent.inputSnapshot).toMatchObject({ input: { work: { version: 18, reassessmentProtocol: 2 } } })
+    expect(bodyParent.inputSnapshot).toMatchObject({ input: { work: { version: 23, reassessmentProtocol: 7,
+      continuityManifest: { candidateHash: null } } } })
     expect(bodyParent.inputSnapshot).not.toHaveProperty('input.work.terminalCandidate')
+    expect(await prisma.agentArtifact.count({ where: { runId: f.runId, artifactType: 'continuityReview',
+      metadata: { path: ['continuityPhaseClaim', 'phase'], equals: 'initial_review' } } })).toBe(0)
+    expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toMatchObject({ committedAt: null })
+    expect(bodyReentered).toBe(true)
     const bodyChildren = await prisma.agentOperation.findMany({ where: { parentOperationId: bodyParent.id }, orderBy: { id: 'asc' } })
     const bodyAttempts = await prisma.agentProviderAttempt.findMany({ where: { operationId: { in: bodyChildren.map(row => row.id) } }, include: { usageReceipt: true }, orderBy: { id: 'asc' } })
     await step()

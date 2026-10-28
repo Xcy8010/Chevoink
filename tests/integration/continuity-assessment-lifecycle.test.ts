@@ -838,6 +838,44 @@ describe('complete continuity assessment lifecycle in actual PostgreSQL', () => 
 // Exercise JSONB persistence, authentic billing/claim lineage and application
 // idempotence against the isolated PostgreSQL fixture used by the full CI.
 describe('body-only explicit-source paid-result recovery', () => {
+  it('returns the authenticated complete second report in the original call without another purchase', () => fixture(async f => {
+    const { ctx } = await retryFixture(f, new AbortController())
+    const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const sourceEvidence = [{ source: 'current', segmentId: 'c0', quote: '门先锁着' }, { source: 'current', segmentId: 'c0', quote: '门打开' }]
+    const semanticChecks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: '核对实际事件顺序。', findingIndexes: [] }))
+    const firstRaw = JSON.stringify({ findings: [{ signal: 'object', severity: 'warning', evidence: '门的状态需要核对。',
+      suggestion: '确认先锁门后开门。', sourceEvidence }], semanticChecks, terminalVerdicts: [] })
+    const secondRaw = JSON.stringify({ findings: [], semanticChecks, terminalVerdicts: [], decisions: [{ index: 0, action: 'retract',
+      reason: '旧意见“人物始终在门外”超出了实际原文，撤回这条意见。', sourceEvidence }] })
+    const bodies = { current: body, previous: null, terminalEvidence: terminalEvidenceContext(chapter, null, 2, undefined, undefined, 5) }
+    const sourceScope = compilerEvidenceScope(chapter, null)
+    expect(inspectContinuityResponse(firstRaw, bodies, true, 8, undefined, sourceScope).audit.classification).toBe('source_invalid')
+    expect(inspectContinuityResponse(secondRaw, bodies, true, 8, undefined, sourceScope).audit.classification).toBe('complete')
+    const fetcher = vi.fn().mockImplementationOnce(async () => completion(firstRaw)).mockImplementationOnce(async () => completion(secondRaw))
+    vi.stubGlobal('fetch', fetcher)
+    const input = { chapterId: chapter.id, revision: chapter.revision, bodies, sourceScope, parserVersion: 8 as const,
+      system: 'Frozen body-only review.', content: body, bindingHash: 'a'.repeat(64),
+      options: { modelRuntime: runtime, explicitModelSelection: true, signal: ctx.signal, userId: f.userId, novelId: f.novelId,
+        chapterId: chapter.id, action: 'agent3ContinuityCritic', targetType: 'chapter' as const, targetId: chapter.id },
+      assertCurrent: async () => {} }
+    const result = await runLegacyContinuityReview(ctx, input)
+    expect(result).toMatchObject({ complete: true, findings: [], recoveryReady: true, audit: { sourceProjection: {
+      scope: 'unapplied_body_only_final_report', dispositionDiagnostics: [{ index: 0, code: 'retract_source_proof_invalid' }],
+    } } })
+    expect(result.audit.rawResponse.content).toBe(JSON.stringify(secondRaw))
+    expect(result.audit).not.toHaveProperty('terminalCandidate')
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    const payments = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const artifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
+    expect(payments).toHaveLength(2)
+    expect(payments.every(row => row.billingStatus === 'settled' && row.usageSource === 'reported')).toBe(true)
+    expect(await runLegacyContinuityReview({ ...ctx, callId: 'same-report-replay' }, input)).toMatchObject({ complete: true, findings: [] })
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(payments)
+    expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(ledger)
+    expect(await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })).toEqual(artifacts)
+  }))
   it('keeps a bad retract proof as audit data, retains the real finding and never repurchases either report', () => fixture(async f => {
     const { ctx } = await retryFixture(f, new AbortController())
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })

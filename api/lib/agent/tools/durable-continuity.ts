@@ -124,7 +124,8 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
   const execute = async (frozen: Work) => {
     if ((frozen.version === 19) !== (frozen.reassessmentProtocol === 3) || (frozen.version === 20) !== (frozen.reassessmentProtocol === 4) || (frozen.version === 21) !== (frozen.reassessmentProtocol === 5) || (frozen.version === 22) !== (frozen.reassessmentProtocol === 6) || (frozen.version === 23) !== (frozen.reassessmentProtocol === 7)) return failure('RUNTIME_RECEIPT_INVALID', '连续性响应合同与冻结操作版本不一致。')
     if ((frozen.reassessmentProtocol === 3 || frozen.reassessmentProtocol === 4 || frozen.reassessmentProtocol === 5) && (frozen.sourceBodies?.terminalEvidence?.verdictProtocol !== 6 || !frozen.terminalCandidate)) return failure('RUNTIME_RECEIPT_INVALID', '响应合同缺少冻结候选或证据目录。')
-    if ((frozen.version === 22 || frozen.version === 23) && (!frozen.continuityManifest || !frozen.sourceBodies || !frozen.terminalCandidate || !frozen.sourceScope
+    if ((frozen.version === 22 || frozen.version === 23) && (!frozen.continuityManifest || !frozen.sourceBodies || !frozen.sourceScope
+      || !frozen.terminalCandidate && !(frozen.version === 23 && frozen.continuityManifest.candidateHash === null)
       || !validContinuityReviewManifest({ manifest: frozen.continuityManifest, bodies: frozen.sourceBodies, candidate: frozen.terminalCandidate, sourceScope: frozen.sourceScope })))
       return failure('RUNTIME_RECEIPT_INVALID', '连续性四投影缺少同一冻结材料清单。')
     if (frozen.version >= 12 && !frozen.sourceScope) return failure('RUNTIME_RECEIPT_INVALID', '连续性检查缺少冻结来源边界，不能补造。')
@@ -269,9 +270,9 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
       const originalTerminalTask = frozen.sourceBodies?.terminalEvidence ? await readOriginalTaskRequest(tx, ctx) : undefined
       const terminalFailure = incomplete ? null : terminalReviewFailure({ ...report, ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }, frozen.chapter.content, frozen.sourceBodies?.terminalEvidence,
         { errors: report.errorCount, text: `连续性完整报告：${report.errorCount} 错误、${report.warningCount} 警告。${repairGuidance}\nreportId=${continuityDecisionBinding(compiler.id, frozen.chapter.revision, { ...report, coverage: frozen.coverage })}\n${report.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` },
-        await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(tx, { ...ctx, compilationId: compiler.id },
+        frozen.terminalCandidate ? await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(tx, { ...ctx, compilationId: compiler.id },
           { taskId: originalTerminalTask ? terminalProposalTaskId(originalTerminalTask.spec, originalTerminalTask.taskId) : '', preparedContext: savedTerminalBinding?.preparedContext }, frozen.chapter,
-          { ...report, ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }, frozen.sourceBodies?.terminalEvidence, readScope.terminalDraftScope, readScope.inheritanceScope))
+          { ...report, ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }, frozen.sourceBodies?.terminalEvidence, readScope.terminalDraftScope, readScope.inheritanceScope) : undefined)
       const recovery = incomplete && inspected && recoveryReady ? terminalReportRecoveryResult({ ...report, terminalCandidate: frozen.terminalCandidate, continuityCriticResponse: inspected.audit },
         frozen.chapter.content, frozen.sourceBodies?.terminalEvidence, frozen.sourceBodies?.previous ?? null) : null
       const toolResult: ToolResult = recovery ?? terminalFailure ?? (incomplete
@@ -291,7 +292,8 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: imp
         if (readiness?.progressEvidence) toolResult.reviewProgress = { ...readiness.progressEvidence,
           phases: readiness.progressEvidence.phases.filter(phase => phase === 'continuity' || phase === 'terminal' || phase === 'terminal_supported') }
       }
-      return runtimeJson({ compilerState: { id: compiler.id, hash: stateHash }, toolResult, memoryJobId: null }).value
+      return runtimeJson({ compilerState: { id: compiler.id, hash: stateHash }, toolResult, memoryJobId: null,
+        ...(inspected ? { continuityCriticResponse: inspected.audit } : {}) }).value
     })
   }
   const committed = await withRunLease(lease, async tx => {
@@ -370,7 +372,8 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
       source && 'preceding' in source && 'terminalInheritance' in source ? source.terminalInheritance : [], terminalVersion) : undefined
     if (selectedTerminal && !selectedTerminal.ok) return { kind: 'rejected' as const, code: 'TERMINAL_STATE_REVIEW_REQUIRED', message: selectedTerminal.reason }
     const terminalCandidate = (selectedTerminal?.ok ? selectedTerminal.candidate : readTerminalCandidate(compilation.validation))
-      ?? (terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter)?.obligations.length ? terminalCandidateSchema.parse({ exitState: {} }) : undefined)
+      ?? ((originalRequest.spec as { scope?: { continuityReportProtocol?: number } } | null)?.scope?.continuityReportProtocol !== 5
+        && terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter)?.obligations.length ? terminalCandidateSchema.parse({ exitState: {} }) : undefined)
     let terminalEvidence = terminalProtocol ? terminalEvidenceContext(compilation.chapter, source, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
       terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(source, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined
     if (terminalEvidence && terminalCandidate && savedCandidate && runtimeJson(terminalCandidate).hash === runtimeJson(savedCandidate).hash
@@ -387,7 +390,7 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
       bridge: committedReview.checkedBridge, sceneTasks: compilation.sceneTasks,
       source, focus: typeof args.focus === 'string' ? args.focus : undefined, terminalCandidate }, terminalVersion === 2 ? 11 : terminalProtocol ? 10 : sourceAuthority ? 9 : 8) : currentCoverage
     const cached = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number(), findings: z.array(continuityFindingInputSchema), coverage: coverageSchema }).safeParse(compilation.validation)
-    const cacheDeliveryBinding = cached.success && terminalEvidence ? await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(tx,
+    const cacheDeliveryBinding = cached.success && terminalEvidence && terminalCandidate ? await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(tx,
       { ...ctx, compilationId: compilation.id }, { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: compilation.preparedContext },
       compilation.chapter, compilation.validation, terminalEvidence, readScope.terminalDraftScope, readScope.inheritanceScope) : undefined
     const proposalCacheCurrent = !terminalEvidence || !terminalCandidate || terminalProposalCacheMatches({ spec: originalRequest.spec,
@@ -398,7 +401,8 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
       factCoverage: terminalCoverageInput(originalRequest.spec, compilation.preparedContext, compilation.chapter, terminalCandidate, 2, terminalCoverageProofs(source, 2))! }
     const repair = false
     if (!reusable && terminalVersion === 2 && terminalEvidence) terminalEvidence = terminalEvidenceContext(compilation.chapter, source, terminalVersion,
-      terminalQuoteAddressVersion(originalRequest.spec), terminalEvidence.factCoverage, terminalCandidate ? 6 : 5, 2)
+      terminalQuoteAddressVersion(originalRequest.spec), terminalEvidence.factCoverage,
+      terminalCandidate || (originalRequest.spec as { scope?: { continuityReportProtocol?: number } } | null)?.scope?.continuityReportProtocol === 5 ? 6 : 5, 2)
     if (!reusable && terminalCandidate && terminalEvidence) {
       const proposals = prepareCompilerTerminalProposals({ spec: originalRequest.spec, preparedContext: compilation.preparedContext,
         validation: compilation.validation, chapter: compilation.chapter, source, candidate: terminalCandidate, nextContext: terminalEvidence })
@@ -457,7 +461,9 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
     criticSystem: continuityResponseSystem(work.criticSystem, continuityResponseContract(work.sourceBodies, work.terminalCandidate)),
     criticInput: continuityResponseInput4(work.criticInput, work.sourceBodies, work.terminalCandidate) }
   if (!recoveredWork && input.frozenReview && work.kind === 'check') work = { ...work, ...input.frozenReview }
-  if (!recoveredWork && work.kind === 'check' && work.version === 22 && work.continuityManifest && work.sourceBodies && work.terminalCandidate && work.sourceScope) {
+  if (!recoveredWork && work.kind === 'check' && work.sourceBodies && work.sourceScope
+    && (work.version === 22 && work.continuityManifest && work.terminalCandidate
+      || work.version === 18 && !work.cached && !work.terminalCandidate && work.sourceBodies.terminalEvidence?.verdictProtocol === 6)) {
     const coordinator = await import('../continuity-coordinator.js')
     const semanticSubjectHash = continuityWorkSubjectIdentity(work)
     if (!semanticSubjectHash || !work.route || !work.price || !work.compiler) throw new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED', '原操作缺少完整检查来源、模型或价格。')
@@ -471,10 +477,15 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: import('../
     const typedLineage = typed ? await withRunLease(lease, tx => coordinator.prepareContinuityReviewLineage(tx, ctx, { compilationId: frozen.compiler!.id,
       chapterId: frozen.chapter.id, input: { revision: frozen.chapter.revision, bodies: frozen.sourceBodies!, terminalCandidate: frozen.terminalCandidate },
       semanticSubjectHash, modelPriceHash: runtimeJson({ route: frozen.route, price: frozen.price }).hash })) : undefined
-    const manifest = typedLineage ? buildContinuityReviewManifest({ ...work.continuityManifest, bodies: work.sourceBodies, candidate: work.terminalCandidate,
-      typedLineage }) : work.continuityManifest
+    const manifest = typedLineage ? buildContinuityReviewManifest({ ...(work.continuityManifest ?? {
+      subject: { userId: ctx.userId, novelId: ctx.novelId, taskId: original.taskId, targetType: 'story_compilation' as const,
+        targetId: frozen.compiler!.id, chapterId: frozen.chapter.id, revision: frozen.chapter.revision },
+      sourceScope: work.sourceScope, sourceHash: work.coverage.sourceHash,
+      sourceVersions: { current: work.sourceBodies.terminalEvidence!.current, previous: work.sourceBodies.terminalEvidence!.previous },
+      verifiedCoverage: work.sourceBodies.terminalEvidence!.factCoverage ?? null, draftProposals: null,
+    }), bodies: work.sourceBodies, candidate: work.terminalCandidate, typedLineage }) : work.continuityManifest!
     const request = continuityReviewV4Request({ manifest, bodies: work.sourceBodies, candidate: work.terminalCandidate, sourceScope: work.sourceScope },
-      work.authorRequest ?? null, JSON.stringify({ body: work.sourceBodies.current, previous: work.sourceBodies.previous, target: work.compiler, coverage: work.coverage }))
+      work.authorRequest ?? original.prompt ?? null, JSON.stringify({ body: work.sourceBodies.current, previous: work.sourceBodies.previous, target: work.compiler, coverage: work.coverage }))
     work = { ...work, version: typed ? 23 : 22, reassessmentProtocol: typed ? 7 : 6, continuityManifest: manifest, criticSystem: request.system, criticInput: request.content }
   }
   work = workSchema.parse(work)

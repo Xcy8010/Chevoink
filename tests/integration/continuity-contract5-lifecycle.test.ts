@@ -29,10 +29,11 @@ import * as prices from '../../api/lib/billing/resolve-token-price.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 describe.runIf(available)('contract5 actual legacy provider, report CAS and independent bridge gate', () => {
-  it.each(['complete', 'normalized-cross-chunk', 'preserved-canonical', 'typed-sparse-repair', 'repaired-background', 'single-background', 'recovered-failed-background', 'unknown', 'applied-typed-error', 'merged-revision', 'spent-revision', 'cancel-known-raw', 'wrong-owner', 'body-only-first-terminal', 'body-only-unknown', 'body-only-old-local-refusal'] as const)('%s preserves the original phase and V2 price', scenario => fixture(async f => {
+  it.each(['complete', 'normalized-cross-chunk', 'preserved-canonical', 'typed-sparse-repair', 'repaired-background', 'single-background', 'recovered-failed-background', 'unknown', 'applied-typed-error', 'merged-revision', 'spent-revision', 'cancel-known-raw', 'wrong-owner', 'body-only-first-terminal', 'body-only-unknown', 'body-only-old-local-refusal', 'body-only-with-obligation'] as const)('%s preserves the original phase and V2 price', scenario => fixture(async f => {
     const bodyOnly = scenario.startsWith('body-only-'), recoveringPair = scenario === 'recovered-failed-background'
     const pairedBackground = scenario === 'repaired-background' || recoveringPair
-    const background = pairedBackground || scenario === 'single-background'
+    const singleBackground = scenario === 'single-background' || scenario === 'body-only-with-obligation'
+    const background = pairedBackground || singleBackground
     const prompt = background ? '修改第一章' : '修改第一章，只输出标题和正文'
     const completeScenario = background || bodyOnly || scenario === 'complete' || scenario === 'typed-sparse-repair' || scenario === 'normalized-cross-chunk' || scenario === 'preserved-canonical'
     const mergedRevision = scenario === 'merged-revision' || scenario === 'spent-revision'
@@ -119,10 +120,10 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       suggestion: 'Check the original source.', manuscriptEvidence: [{ segmentId: 'c0', quote: 'a wholly nonexistent quoted manuscript passage' }] })
     if (background) {
       wire.terminalVerdicts[0].claimIndex = 1
-      wire.terminalVerdicts[0].manuscriptEvidence = scenario === 'single-background' ? [{ segmentId: 'c1' }] : [{ segmentId: 'c1', quote: baseContent }]
+      wire.terminalVerdicts[0].manuscriptEvidence = singleBackground ? [{ segmentId: 'c1' }] : [{ segmentId: 'c1', quote: baseContent }]
       wire.terminalVerdicts.push({ claimIndex: 0, verdict: 'supported', reasonCode: 'consistent', explanation: 'The current scene establishes this literal location.',
         manuscriptEvidence: [{ segmentId: 'c1', quote: 'The clerk waits.' }] })
-      Object.assign(wire, { terminalDispositions: scenario === 'single-background'
+      Object.assign(wire, { terminalDispositions: singleBackground
         ? [{ obligationIndex: 0, outcome: 'unknown', reasonCode: 'historical_reference', explanation: 'The prior knowledge remains background; the current chapter does not resolve it.', manuscriptEvidence: [] }]
         : [{ obligationIndex: 0, outcome: 'ended', reasonCode: 'completed_obligation',
           explanation: 'A malformed original location.', manuscriptEvidence: [{ segmentId: 'c999' }] }] })
@@ -156,9 +157,7 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
         backgroundSecond = JSON.stringify({ corrections: plan.mask.map(item => ({ ...item, value: (corrected[item.table as keyof typeof corrected] as unknown[])[item.index] })) })
       }
       const responseRaw = pairedBackground && requestCount === 2 ? backgroundSecond : bodyOnly && requestCount === 1 ? JSON.stringify({ findings: [],
-        semanticChecks: { action_direction: { result: 'clear', reason: 'Whole saved body checked.', findingIndexes: [] },
-          state_progression: { result: 'clear', reason: 'Whole saved body checked.', findingIndexes: [] } },
-        terminalVerdicts: [], terminalProofVerdicts: [], terminalDispositions: [] })
+        semanticChecks: wire.semanticChecks, issueDispositions: [] })
         : scenario === 'typed-sparse-repair' && requestCount === 2
         ? JSON.stringify({ corrections: [{ table: 'findings', index: 0, value: { findingId: 'f0', action: 'retract',
           reasonCode: 'insufficient_evidence', explanation: 'The current source does not establish that allegation; the manuscript is unchanged.',
@@ -177,8 +176,22 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       bodyFees = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
       bodyArtifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
       const bodySaved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
-      expect(bodySaved.validation).toMatchObject({ independentCheck: 'complete', continuityCriticResponse: { parserVersion: 8 } })
+      expect(bodySaved.validation).toMatchObject({ independentCheck: 'complete', continuityCriticResponse: { parserVersion: 10,
+        responseContract: 5, continuityV4: { manifest: { candidateHash: null, typedLineage: { phasePlan: { phases: [
+          { kind: 'initial_review', limit: 1 }, { kind: 'sparse_repair', limit: 1 },
+        ] } } } } } })
       expect(bodySaved.validation).not.toHaveProperty('terminalCandidate')
+      if (scenario === 'body-only-with-obligation') expect(bodySaved.validation).toMatchObject({ continuityCriticResponse: {
+        terminalEvidence: { factCoverage: { obligations: [expect.objectContaining({ field: 'knowledge', claim: canonicalClaim })] } },
+      } })
+      if (scenario === 'body-only-with-obligation') {
+        const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, compilation.id))
+        expect(readiness).toMatchObject({ continuity: 'complete', terminalReview: { state: 'unverified', currentResultVerified: false, deliveryEligible: false },
+          terminalCommitted: false })
+        expect(readiness!.requiredTools.some(tool => tool.name === 'continuity_validate')).toBe(false)
+      }
+      expect(bodyArtifacts.some(row => !!(row.metadata as Record<string, unknown>).continuityPhaseClaim)).toBe(false)
+      expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toMatchObject({ committedAt: null })
       if (scenario === 'body-only-unknown') {
         await prisma.aiUsageLog.update({ where: { id: bodyFees[0].id }, data: { billingStatus: 'pending_settlement' } })
         const before = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
@@ -415,6 +428,6 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
     expect(usage[0]).toMatchObject({ multiplierBps: 15000, billingSnapshot: price, usageSource: 'reported', billingStatus: 'settled' })
     expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(requestTotal)
     if (!mergedRevision) expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
-  }, undefined, (['repaired-background', 'single-background', 'recovered-failed-background'].includes(scenario)) ? '修改第一章' : '修改第一章，只输出标题和正文', { freezeWriting: true, continuityEvidenceProtocol: 1, continuityReportProtocol: 5,
+  }, undefined, (['repaired-background', 'single-background', 'recovered-failed-background', 'body-only-with-obligation'].includes(scenario)) ? '修改第一章' : '修改第一章，只输出标题和正文', { freezeWriting: true, continuityEvidenceProtocol: 1, continuityReportProtocol: 5,
     terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
 })

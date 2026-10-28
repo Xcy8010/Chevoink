@@ -828,6 +828,8 @@ export async function validateStoryContinuity(input: {
   input.signal?.throwIfAborted()
   const factCoverage = terminalCoverageInput(authorRequest?.spec, compilation.preparedContext, compilation.chapter, input.terminalCandidate, terminalCoverageAuditVersion(validation), terminalCoverageProofs(reviewSource, terminalSpanAuditVersion(validation)))
   const currentParser = (validation.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion
+  const bodyOnlyReport = currentParser === 10 && !input.terminalCandidate && !!effectiveReport
+    && (validation.continuityCriticResponse as { continuityV4?: { manifest?: { candidateHash?: unknown } } })?.continuityV4?.manifest?.candidateHash === null
   const authenticatedTerminalContext = (currentParser === 9 || currentParser === 10)
     && hasTerminalEvidenceProtocol(authorRequest?.spec)
   let terminalContext = factCoverage || authenticatedTerminalContext ? terminalEvidenceContext(compilation.chapter, reviewSource, protocol === 11 ? 2 : 1,
@@ -852,14 +854,14 @@ export async function validateStoryContinuity(input: {
     && runtimeJson((validation.continuityCriticResponse as Record<string, unknown>).terminalEvidence).hash !== runtimeJson(terminalContext).hash) {
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查期间持续事实覆盖义务已变化；保留原请求和结果，不将旧核验绑定当前候选。')
   }
-  const deliveryBinding = terminalContext && authorRequest && input.runId ? await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(db,
+  const deliveryBinding = terminalContext && authorRequest && input.runId && !bodyOnlyReport ? await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(db,
     { ...input, runId: input.runId, compilationId: compilation.id }, { taskId: terminalProposalTaskId(authorRequest.spec, authorRequest.taskId),
       preparedContext: proposalPreparation ? { ...(compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext : {}),
         terminalProposalReview: proposalPreparation.state } : compilation.preparedContext },
     compilation.chapter, validation, terminalContext, readScope.terminalDraftScope, readScope.inheritanceScope) : undefined
   const terminalReview = terminalContext ? currentTerminalReview(validation, compilation.chapter.content, terminalContext, deliveryBinding) : null
   if ((currentParser === 9 || currentParser === 10)
-    && validation.independentCheck === 'complete' && !terminalReview) {
+    && validation.independentCheck === 'complete' && !terminalReview && !bodyOnlyReport) {
     throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', '原检查响应、所有权或费用尚不能完整认证；保留原始结果，未保存为完整报告。')
   }
   const nextFactCoverage = terminalReview ? advanceTerminalCoverage(authorRequest?.spec, compilation.preparedContext, compilation.chapter, terminalReview, terminalContext?.factCoverage) : undefined

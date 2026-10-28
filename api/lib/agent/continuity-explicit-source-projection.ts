@@ -32,9 +32,9 @@ export function sameExplicitSourceInput(stored: unknown, proposed: LegacyAssessm
   catch { return false }
 }
 
-function replayAudit(value: unknown, bodies: ContinuityBodies): Inspection | null {
+function replayAudit(value: unknown, bodies: ContinuityBodies, final = false): Inspection | null {
   const audit = object(value), raw = object(audit?.rawResponse)
-  if (!audit || audit.classification !== 'source_invalid' || raw?.complete !== true
+  if (!audit || !(audit.classification === 'source_invalid' || final && audit.classification === 'complete') || raw?.complete !== true
     || raw.encoding !== 'json-string' || typeof raw.content !== 'string'
     || !(audit.parserVersion === 7 && !hasOwn(bodies, 'terminalEvidence') && !hasOwn(audit, 'terminalEvidence')
       || audit.parserVersion === 8 && bodies.terminalEvidence?.verdictProtocol === 5)
@@ -63,7 +63,7 @@ export function recoverExplicitSourceEvidence(original: Inspection, bodies: Cont
     let dispositionDiagnostics: NonNullable<ReturnType<typeof continuityReassessmentEnvelope>['dispositionDiagnostics']> | undefined
     if (second) {
       if (strict.audit.parserVersion !== 8 || second.protocol !== 2) return null
-      const final = replayAudit(second.audit, frozen)
+      const final = replayAudit(second.audit, frozen, true)
       if (!final) return null
       const envelope = continuityReassessmentEnvelope(strict, JSON.parse(final.audit.rawResponse.content) as string, frozen, 2,
         { dispositionProofs: 'diagnose_unapplied_body_only' })

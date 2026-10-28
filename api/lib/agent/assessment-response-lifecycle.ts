@@ -227,7 +227,8 @@ export async function readFrozenLegacyContinuityInput(tx: Prisma.TransactionClie
     sourceScope: continuitySourceScopeSchema.optional(), continuityManifest: continuityReviewManifestSchema.optional(), terminalCandidate: terminalCandidateSchema.optional(), bindingHash: z.string().optional(),
     targetType: z.enum(['chapter', 'story_compilation']), targetId: z.string() }).strict().safeParse(meta.input)
   if (!parsed.success || (parsed.data.reassessmentProtocol === 3 || parsed.data.reassessmentProtocol === 4 || parsed.data.reassessmentProtocol === 5) && (parsed.data.parserVersion !== 8 || parsed.data.bodies.terminalEvidence?.verdictProtocol !== 6 || !parsed.data.terminalCandidate)
-    || (parsed.data.parserVersion === 9 || parsed.data.parserVersion === 10) && (parsed.data.reassessmentProtocol !== (parsed.data.parserVersion === 10 ? 7 : 6) || !parsed.data.continuityManifest || !parsed.data.terminalCandidate || parsed.data.targetType !== 'story_compilation')
+    || (parsed.data.parserVersion === 9 || parsed.data.parserVersion === 10) && (parsed.data.reassessmentProtocol !== (parsed.data.parserVersion === 10 ? 7 : 6) || !parsed.data.continuityManifest
+      || !parsed.data.terminalCandidate && !(parsed.data.parserVersion === 10 && parsed.data.continuityManifest.candidateHash === null) || parsed.data.targetType !== 'story_compilation')
     || parsed.data.parserVersion !== 9 && parsed.data.parserVersion !== 10 && (parsed.data.reassessmentProtocol === 6 || parsed.data.reassessmentProtocol === 7 || parsed.data.continuityManifest !== undefined)
     || parsed.data.parserVersion && !parsed.data.sourceScope
     || meta.continuityAssessmentRequestKey !== assessmentKey(ctx, parsed.data)) throw invalid()
@@ -341,9 +342,9 @@ export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionCl
     const plan = input.continuityManifest?.typedLineage?.phasePlan
     if (!plan) throw new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED', '新响应合同缺少原任务完整阶段范围。')
     const phase = await assertContinuityAssessmentSubject(tx, ctx, input)
-    if (phase === 'initial_review') await (await import('./continuity-coordinator.js')).authenticateInitialContinuityHistory(tx, ctx,
+    if (phase === null || phase === 'initial_review') await (await import('./continuity-coordinator.js')).authenticateInitialContinuityHistory(tx, ctx,
       { compilationId: input.targetId, chapterId: input.chapterId, input })
-    await claimContinuityPhase(tx, ctx, { plan, chapterId: input.chapterId, phase, operationRef: key,
+    if (phase !== null) await claimContinuityPhase(tx, ctx, { plan, chapterId: input.chapterId, phase, operationRef: key,
       inputHash: runtimeJson(input).hash, ownerEpoch: `${ctx.runId}:${run.startedAt?.toISOString() ?? ''}` })
   }
   await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性检查请求审计', content: '本次原工具检查已预约；未知请求不能重放。',
@@ -363,8 +364,10 @@ export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClien
   }
   if (input.parserVersion === 10) {
     const plan = input.continuityManifest?.typedLineage?.phasePlan
-    if (!plan || !await readContinuityPhaseClaim(tx, ctx, { plan, chapterId: input.chapterId, phase: continuityAssessmentPhase(input),
-      operationRef: assessmentKey(ctx, input), inputHash: runtimeJson(input).hash }))
+    const phase = continuityAssessmentPhase(input)
+    if (!plan || (phase === null ? await assertContinuityAssessmentSubject(tx, ctx, input) !== null
+      : !await readContinuityPhaseClaim(tx, ctx, { plan, chapterId: input.chapterId, phase,
+        operationRef: assessmentKey(ctx, input), inputHash: runtimeJson(input).hash })))
       throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '新完整报告缺少认证原任务阶段，未解释为成功。')
   }
   if ((input.parserVersion === 9 || input.parserVersion === 10)) {
@@ -589,8 +592,8 @@ export async function readReusableLegacyContinuityAssessment(tx: Prisma.Transact
   const crossWire = reservations.find(row => {
     const frozen = object(object(row.metadata)?.input)
     return frozen && ((frozen.parserVersion === 9 || frozen.parserVersion === 10) || (input.parserVersion === 9 || input.parserVersion === 10)) && sameContinuitySubject(frozen, input)
-      && runtimeJson({ bodies: frozen.bodies, candidate: frozen.terminalCandidate, bindingHash: frozen.bindingHash ?? null }).hash
-        === runtimeJson({ bodies: input.bodies, candidate: input.terminalCandidate, bindingHash: input.bindingHash ?? null }).hash
+      && runtimeJson({ bodies: frozen.bodies, candidate: frozen.terminalCandidate ?? null, bindingHash: frozen.bindingHash ?? null }).hash
+        === runtimeJson({ bodies: input.bodies, candidate: input.terminalCandidate ?? null, bindingHash: input.bindingHash ?? null }).hash
   })
   const latest = crossWire ?? exact ?? compatible ?? explicitCompatible
   const meta = object(latest?.metadata)
@@ -662,7 +665,9 @@ export async function claimLegacyContinuityReassessment(tx: Prisma.TransactionCl
   if (input.parserVersion === 10) {
     const plan = input.continuityManifest?.typedLineage?.phasePlan
     if (!plan) return false
-    await claimContinuityPhase(tx, ctx, { plan, chapterId: input.chapterId, phase: 'sparse_repair', operationRef: key,
+    const phase = continuityAssessmentPhase(input)
+    if (phase === null) await assertContinuityAssessmentSubject(tx, ctx, input)
+    else await claimContinuityPhase(tx, ctx, { plan, chapterId: input.chapterId, phase: 'sparse_repair', operationRef: key,
       inputHash: runtimeJson(request).hash, ownerEpoch: ctx.runId })
   }
   await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性复评请求审计', content: '本次原工具的一次完整复评已预约；不改写正文，不重复派发。',

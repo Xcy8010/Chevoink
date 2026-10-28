@@ -2,18 +2,20 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-candidate-contract.js'
-import { buildContinuityReviewManifest, inspectContinuityV4 } from '../../api/lib/agent/continuity-review-v4.js'
+import { buildContinuityReviewManifest, inspectContinuityV4, normalizeContinuityV4ProjectionV2, type ContinuityV4Frozen } from '../../api/lib/agent/continuity-review-v4.js'
+import { continuitySubjectIdentity } from '../../api/lib/agent/continuity-subject-identity.js'
 import { stageTerminalProposals } from '../../api/lib/agent/terminal-proposal-review.js'
 import { continuityReassessmentRequest, failedContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { readNativeContinuityAssessments } from '../../api/lib/agent/native-continuity-assessment.js'
 import { isContinuityV4Inspection, readAuthenticatedContinuityAssessment } from '../../api/lib/agent/authenticated-continuity-assessment.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 
-const mocks = vi.hoisted(() => ({ source: vi.fn(async (_db, row) => ({ input: row.inputSnapshot.input })), state: vi.fn() }))
+const mocks = vi.hoisted(() => ({ source: vi.fn(async (_db, row) => ({ input: row.inputSnapshot.input })), state: vi.fn(), original: vi.fn() }))
 // Cursor/source verification has its own real PG chain. This unit exercises
 // immutable native provider/effect authentication, never provider admission.
 vi.mock('../../api/lib/agent/runtime-tool-cursor.js', async original => ({ ...await original<object>(), readToolOperationSource: mocks.source }))
 vi.mock('../../api/lib/agent/runtime-state.js', async original => ({ ...await original<object>(), readExecutionStateInTransaction: mocks.state }))
+vi.mock('../../api/lib/agent/original-request.js', async original => ({ ...await original<object>(), readOriginalTaskRequest: mocks.original }))
 
 function fixture() {
   const content = 'The guard waits. The packet remains sealed.', taskId = 'task'
@@ -47,10 +49,10 @@ function fixture() {
         usageReceipt: { ...measurement, settlementStatus: 'settled', observationHash: runtimeJson(measurement).hash } }],
       events: [{ eventKey: `result:${id}-attempt:${result.hash}`, type: 'provider.result.recorded', taskRootId: taskId, operationId: id, payload: { attemptId: `${id}-attempt`, status: 'succeeded', resultHash: result.hash } }] }
   }
-  const operation = (id: string, frozenInput: typeof frozen, inspection: typeof current) => {
-    const work = { kind: 'check', version: 22, chapter: { id: 'chapter', revision: 4, content, orderIndex: 1 }, compiler: { id: 'compilation' }, terminalCandidate: frozenInput.candidate,
+  const operation = (id: string, frozenInput: ContinuityV4Frozen, inspection: typeof current) => {
+    const work = { kind: 'check', version: 22, chapter: { id: 'chapter', revision: 4, content, orderIndex: 1 }, compiler: { id: 'compilation' }, ...(frozenInput.candidate ? { terminalCandidate: frozenInput.candidate } : {}),
       sourceBodies: frozenInput.bodies, sourceScope, continuityManifest: frozenInput.manifest, reassessmentProtocol: 6, criticSystem: `system:${id}`, criticInput: `input:${id}`, coverage: { binding: 'unchanged' }, route, price }
-    const snapshot = runtimeJson({ kind: 'tool', input: { work, novelId: subject.novelId, callId: id } }), effect = runtimeJson({ toolResult: { ...(!inspection.terminalReview?.supported ? { outcome: 'failed' } : {}), summary: 'Synthetic report.' } })
+    const snapshot = runtimeJson({ kind: 'tool', input: { work, novelId: subject.novelId, callId: id } }), effect = runtimeJson({ toolResult: { ...(inspection.terminalReview && !inspection.terminalReview.supported ? { outcome: 'failed' } : {}), summary: 'Synthetic report.' } })
     return { id, originRunId: 'run', taskRootId: taskId, kind: 'tool', action: 'continuity_validate', status: 'succeeded', parentOperationId: null, operationKey: `exec:${id}`, inputSnapshot: snapshot.value, inputHash: snapshot.hash,
       effectReceipt: { runId: 'run', result: effect.value, resultHash: effect.hash }, events: [{ eventKey: `effect:${id}`, type: 'effect.committed', taskRootId: taskId, operationId: id, payload: { operationId: id, resultHash: effect.hash } }],
       children: [child(id, 'continuity_critic', JSON.parse(inspection.audit.rawResponse.content), { system: work.criticSystem, content: work.criticInput })] }
@@ -78,6 +80,67 @@ function fixture() {
 }
 
 describe('readonly native continuity provenance', () => {
+  it.each(['complete', 'pending', 'cached', 'unknown-fee', 'changed-price', 'changed-subject', 'normalized-history',
+    'normalized-unknown-fee', 'normalized-current-pointer', 'normalized-saved-audit', 'normalized-no-audit'] as const)('authenticates typed body %s without a terminal phase claim', async kind => {
+    const f = fixture(), original = { taskId: 'task', sourceRunId: 'run', parentRunId: null, prompt: 'Write the next chapter.',
+      spec: { id: 'task', intent: 'write', qualityMode: 'balanced', scope: { writing: { targets: [{ chapterId: 'chapter', orderIndex: 1 }] } } } }
+    mocks.original.mockResolvedValue(original)
+    const source = f.operations[0].inputSnapshot as { input: { work: Record<string, unknown> } }, work = source.input.work
+    const bodies = { ...f.frozen.bodies, terminalEvidence: { ...f.frozen.bodies.terminalEvidence!, proposalChanges: undefined } }
+    delete bodies.terminalEvidence.proposalChanges
+    const planBody = { version: 1 as const, originalTaskId: 'task', originalAdmissionId: 'run', chapterId: 'chapter', compilationId: 'compilation',
+      authorityHash: runtimeJson({ spec: original.spec, prompt: original.prompt }).hash, modelPriceHash: kind === 'changed-price' ? 'c'.repeat(64) : runtimeJson({ route: work.route, price: work.price }).hash,
+      semanticSubjectHash: kind === 'changed-subject' ? 'd'.repeat(64) : continuitySubjectIdentity({ chapterId: 'chapter', revision: 4, targetType: 'story_compilation',
+        targetId: 'compilation', bodies, sourceScope: f.frozen.sourceScope })!, budgetOwner: 'task',
+      phases: [{ kind: 'initial_review' as const, limit: 1, authoritySourceRef: 'original-admission:run' }, { kind: 'sparse_repair' as const, limit: 1, authoritySourceRef: 'original-admission:run' }] }
+    const manifest = buildContinuityReviewManifest({ ...f.frozen.manifest, bodies, draftProposals: null, typedLineage: { version: 1,
+      phasePlan: { ...planBody, hash: runtimeJson(planBody).hash }, priorFindings: [], establishedIssues: [] } })
+    const normalized = kind.startsWith('normalized-')
+    const raw = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear',
+      reasonCode: 'consistent', explanation: normalized ? 'The old opinion "the packet vanished" is not a manuscript fact.' : 'The complete manuscript is consistent.',
+      findingIds: [] })), issueDispositions: [] })
+    const inspection = inspectContinuityV4(raw, { manifest, bodies, sourceScope: f.frozen.sourceScope })
+    expect(inspection.complete).toBe(!normalized); expect(inspection.terminalReview).toBeNull()
+    const body = f.operation('body', { manifest, bodies, sourceScope: f.frozen.sourceScope }, inspection)
+    const input = body.inputSnapshot as { input: { work: Record<string, unknown> } }
+    input.input.work.version = 23; input.input.work.reassessmentProtocol = 7; body.inputHash = runtimeJson(body.inputSnapshot).hash
+    const applied = normalized ? normalizeContinuityV4ProjectionV2(inspection, body.inputHash) : inspection
+    if (normalized) {
+      expect(applied.complete).toBe(true)
+      expect(applied.audit.rawResponse.content).toBe(JSON.stringify(raw))
+      // Match the producer's immutable business effect. The historical reader
+      // must replay its actual audit; a green tool summary alone is no report.
+      const effect = runtimeJson({ compilerState: { id: 'compilation', hash: 'e'.repeat(64) }, memoryJobId: null,
+        toolResult: { reviewCompleted: true, summary: 'The body was reviewed.' },
+        ...(kind === 'normalized-no-audit' ? {} : { continuityCriticResponse: kind === 'normalized-saved-audit'
+          ? { ...applied.audit, contentHash: 'f'.repeat(64) } : applied.audit }) })
+      body.effectReceipt.result = effect.value; body.effectReceipt.resultHash = effect.hash
+      body.events[0].payload = { operationId: body.id, resultHash: effect.hash }
+    }
+    if (kind === 'unknown-fee' || kind === 'normalized-unknown-fee') body.children[0].attempts[0].usageReceipt.settlementStatus = 'pending'
+    f.operations.splice(0, f.operations.length, body)
+    if (kind === 'pending') {
+      Object.assign(body, { status: 'prepared', effectReceipt: null, events: [] })
+      mocks.state.mockResolvedValue({ frame: { state: { phase: 'awaiting_operation', pendingOperationId: 'body' } } })
+    }
+    if (kind === 'cached') f.operations.push(f.cache('body-cache', body))
+    Object.assign(f.tx, { chapter: { findFirst: vi.fn(async () => ({ id: 'chapter', orderIndex: 1 })) },
+      agentArtifact: { findUnique: vi.fn(async () => null) } })
+    const currentAudit = normalized ? kind === 'normalized-current-pointer' ? { ...applied.audit, contentHash: 'a'.repeat(64) } : {} : inspection.audit
+    const before = structuredClone(f.operations)
+    const read = () => readNativeContinuityAssessments(f.tx as unknown as Prisma.TransactionClient, { userId: 'user', novelId: 'novel', runId: 'run' }, 'task', ['run'],
+      { compilationId: 'compilation', chapterId: 'chapter', currentAudit, related: () => true }, [])
+    if (['complete', 'pending', 'cached'].includes(kind)) {
+      expect(await read()).toEqual([expect.objectContaining({ operationId: 'body', committed: kind !== 'pending', current: true, inspected: expect.objectContaining({ complete: true, terminalReview: null }) })])
+      expect((f.tx as unknown as { agentArtifact: { findUnique: ReturnType<typeof vi.fn> } }).agentArtifact.findUnique).not.toHaveBeenCalled()
+    } else if (kind === 'normalized-history' || kind === 'normalized-current-pointer') {
+      expect(await read()).toEqual([expect.objectContaining({ committed: true, current: false,
+        inspected: expect.objectContaining({ complete: true, terminalReview: null, audit: applied.audit }) })])
+    } else if (kind === 'normalized-no-audit') {
+      expect(await read()).toEqual([expect.objectContaining({ committed: true, current: false, inspected: expect.objectContaining({ complete: false }) })])
+    } else expect(await read()).toBeNull()
+    expect(f.operations).toEqual(before)
+  })
   it('authenticates historical operations without inventing a current audit candidate', async () => {
     const f = fixture()
     const entries = await readNativeContinuityAssessments(f.tx as unknown as Prisma.TransactionClient,

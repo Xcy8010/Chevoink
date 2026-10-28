@@ -23,10 +23,12 @@ export function inspectAuthenticatedContinuityAssessment(raw: string, input: {
   sourceScope?: ContinuitySourceScope; continuityManifest?: ContinuityReviewManifest; reassessmentProtocol?: 2 | 3 | 4 | 5 | 6 | 7;
 }, complete: boolean): AuthenticatedContinuityInspection {
   if (input.parserVersion === 9 || input.parserVersion === 10) {
-    if (!input.continuityManifest || !input.terminalCandidate || !input.sourceScope
+    if (!input.continuityManifest || !input.sourceScope
+      || !input.terminalCandidate && !(input.parserVersion === 10 && input.continuityManifest.candidateHash === null)
       || input.reassessmentProtocol !== (input.parserVersion === 10 ? 7 : 6)
       || (input.parserVersion === 10) !== !!input.continuityManifest.typedLineage) throw Error('Frozen v4 request missing manifest or contract')
-    return inspectContinuityV4(raw, { manifest: input.continuityManifest, bodies: input.bodies, candidate: input.terminalCandidate, sourceScope: input.sourceScope }, complete)
+    return inspectContinuityV4(raw, { manifest: input.continuityManifest, bodies: input.bodies,
+      ...(input.terminalCandidate ? { candidate: input.terminalCandidate } : {}), sourceScope: input.sourceScope }, complete)
   }
   return inspectContinuityResponse(raw, input.bodies, complete, input.parserVersion ?? 6, input.terminalCandidate, input.sourceScope,
     input.reassessmentProtocol === 3 || input.reassessmentProtocol === 4 || input.reassessmentProtocol === 5 ? { responseContract: 3 } : {})

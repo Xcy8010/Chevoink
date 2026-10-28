@@ -12,7 +12,7 @@ import { inspectAuthenticatedContinuityAssessment, isContinuityV4Inspection, typ
 import { applyContinuityReassessment, failedContinuityReassessment, continuityReassessmentRequest, type LegacyAssessmentInput } from './assessment-response-lifecycle.js'
 import { continuityFindingInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
 import { tokenPriceSchema } from '../billing/token-price.js'
-import { readContinuityPhaseClaim, continuityAssessmentPhase } from './continuity-coordinator.js'
+import { readContinuityPhaseClaim, continuityAssessmentPhase, assertContinuityAssessmentSubject } from './continuity-coordinator.js'
 
 const object = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
 const workSchema = z.object({ kind: z.literal('check'), version: z.union([z.literal(18), z.literal(21), z.literal(22), z.literal(23)]),
@@ -22,7 +22,9 @@ const workSchema = z.object({ kind: z.literal('check'), version: z.union([z.lite
   sourceScope: continuitySourceScopeSchema, continuityManifest: continuityReviewManifestSchema.optional(),
   reassessmentProtocol: z.union([z.literal(2), z.literal(5), z.literal(6), z.literal(7)]), criticSystem: z.string(), criticInput: z.string(), coverage: z.unknown(),
   route: z.object({ provider: z.string(), model: z.string(), baseUrl: z.string(), maxOutputTokens: z.number().int() }), price: z.unknown() })
-  .refine(work => (work.version === 18) === (work.terminalCandidate === undefined) && (work.version === 18) === (work.reassessmentProtocol === 2))
+  .refine(work => (work.version === 18) === (work.reassessmentProtocol === 2)
+    && (work.terminalCandidate === undefined ? work.version === 18 || work.version === 23 && work.continuityManifest?.candidateHash === null
+      : work.version !== 18 && work.continuityManifest?.candidateHash !== null))
 
 /** Native provenance stays native. No lease, admission, billing or state writes.
  * The parent may be pending only for the exact report presently being saved;
@@ -59,8 +61,11 @@ export async function readNativeContinuityAssessments(db: Prisma.TransactionClie
     const rawWork = object(object(operation.inputSnapshot).input).work, rawChapter = object(object(rawWork).chapter), rawCompiler = object(object(rawWork).compiler)
     if (rawChapter.id !== target.chapterId || rawCompiler.id !== target.compilationId) continue
     const current = object(target.currentAudit)
+    const currentManifest = object(object(current.continuityV4).manifest)
+    const currentContentHash = current.parserVersion === 10 && current.terminalCandidate === undefined && currentManifest.candidateHash === null
+      ? currentManifest.bodyHash : current.terminalContentHash
     const projectsCurrent = runtimeJson({ candidate: object(rawWork).terminalCandidate ?? null }).hash === runtimeJson({ candidate: current.terminalCandidate ?? null }).hash
-      && typeof rawChapter.content === 'string' && runtimeJson({ content: rawChapter.content }).hash === current.terminalContentHash
+      && typeof rawChapter.content === 'string' && runtimeJson({ content: rawChapter.content }).hash === currentContentHash
     if (!projectsCurrent && (!target.related || !target.related({ terminalCandidate: object(rawWork).terminalCandidate, bodies: object(rawWork).sourceBodies }))) continue
     if (runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return null
     const raw = object(rawWork)
@@ -91,9 +96,13 @@ export async function readNativeContinuityAssessments(db: Prisma.TransactionClie
       system: work.criticSystem, content: work.criticInput, targetType: 'story_compilation', targetId: work.compiler.id }
     if (work.version === 23) {
       const plan = work.continuityManifest?.typedLineage?.phasePlan
-      if (!plan || plan.modelPriceHash !== runtimeJson({ route: object(rawWork).route, price: object(rawWork).price }).hash
-        || !await readContinuityPhaseClaim(db, subject, { plan, chapterId: work.chapter.id, phase: continuityAssessmentPhase(input),
-          operationRef: operation.id, inputHash: operation.inputHash })) return null
+      if (!plan || plan.modelPriceHash !== runtimeJson({ route: object(rawWork).route, price: object(rawWork).price }).hash) return null
+      const phase = continuityAssessmentPhase(input)
+      if (phase === null) {
+        try { if (await assertContinuityAssessmentSubject(db, subject, input) !== null) return null }
+        catch { return null }
+      } else if (!await readContinuityPhaseClaim(db, subject, { plan, chapterId: work.chapter.id, phase,
+        operationRef: operation.id, inputHash: operation.inputHash })) return null
     }
     const children = operation.children.filter(child => child.action.startsWith('continuity_'))
     if (children.some(child => !['continuity_critic', 'continuity_reassessment'].includes(child.action))
@@ -165,7 +174,7 @@ export async function readNativeContinuityAssessments(db: Prisma.TransactionClie
     && runtimeJson(work.cached).hash === runtimeJson(entry.inspected.findings).hash
     && runtimeJson(work.coverage).hash === runtimeJson(entry.coverage).hash
     && runtimeJson(work.sourceBodies).hash === runtimeJson(entry.input.bodies).hash
-    && runtimeJson(work.terminalCandidate).hash === runtimeJson(entry.input.terminalCandidate).hash
+    && runtimeJson({ candidate: work.terminalCandidate ?? null }).hash === runtimeJson({ candidate: entry.input.terminalCandidate ?? null }).hash
     && runtimeJson(work.sourceScope).hash === runtimeJson(entry.input.sourceScope).hash))) return null
   return entries
 }

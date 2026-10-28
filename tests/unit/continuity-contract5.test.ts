@@ -4,7 +4,7 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-candidate-contract.js'
 import { continuitySubjectIdentity } from '../../api/lib/agent/continuity-subject-identity.js'
 import { buildContinuityReviewManifest, continuityReviewV4Request, inspectContinuityV4, applyContinuityV4Repair,
-  validateStoredContinuityV4Projection, buildContinuityInvalidRowRepair } from '../../api/lib/agent/continuity-review-v4.js'
+  validateStoredContinuityV4Projection, buildContinuityInvalidRowRepair, normalizeContinuityV4ProjectionV2 } from '../../api/lib/agent/continuity-review-v4.js'
 import { effectiveContinuityAudit, continuityPhasePlanSchema, validContinuityPhasePlan, continuityUsageRowHash, continuityQuestionOwner, readKnownContinuityReplay,
   nativeContinuityRevisionMaterialMatches } from '../../api/lib/agent/continuity-coordinator.js'
 import { inspectAuthenticatedContinuityAssessment } from '../../api/lib/agent/authenticated-continuity-assessment.js'
@@ -41,6 +41,37 @@ function fixture() {
 }
 
 describe('explicit continuity contract5, frozen <=9 replay', () => {
+  it('reviews the whole body with typed evidence while terminal certification remains unrequested', () => {
+    const f = fixture(), { hash: _hash, ...oldPlan } = f.plan
+    const planValue = { ...oldPlan, semanticSubjectHash: continuitySubjectIdentity({ chapterId: 'chapter', revision: 4,
+      targetType: 'story_compilation', targetId: 'compilation', bodies: f.bodies, sourceScope: f.base.sourceScope })! }
+    const plan = continuityPhasePlanSchema.parse({ ...planValue, hash: runtimeJson(planValue).hash })
+    const manifest = buildContinuityReviewManifest({ ...f.base, candidate: undefined,
+      typedLineage: { ...f.frozen.manifest.typedLineage!, phasePlan: plan } })
+    const frozen = { manifest, bodies: f.bodies, sourceScope: f.base.sourceScope }
+    const wire = { findings: [], semanticChecks: f.wire.semanticChecks, issueDispositions: [] }
+    const request = JSON.parse(continuityReviewV4Request(frozen, 'Review the saved body.', f.current).content)
+    expect(request).toMatchObject({ reviewScope: 'body_only', terminalCertification: 'not_requested', catalog: { terminal: null } })
+    expect(manifest.candidateHash).toBeNull()
+    const result = inspectContinuityV4(JSON.stringify(wire), frozen)
+    expect(result).toMatchObject({ complete: true, findings: [], terminalReview: null,
+      audit: { parserVersion: 10, responseContract: 5, continuityV4: { projections: {
+        prose: { valid: true }, currentTerminal: { valid: false }, historicalCoverage: { valid: false }, draftProposals: { valid: false },
+      } } } })
+    expect(result.audit).not.toHaveProperty('terminalCandidate')
+    expect(result.audit).not.toHaveProperty('terminalContentHash')
+    expect(validateStoredContinuityV4Projection(result.audit, f.current, f.context)).toEqual(result)
+    expect(inspectContinuityV4(JSON.stringify({ ...wire, terminalVerdicts: [] }), frozen).complete).toBe(false)
+    const explained = { ...wire, semanticChecks: wire.semanticChecks.map(row => ({ ...row,
+      explanation: 'The old opinion "the packet vanished" is not a manuscript fact.' })) }
+    const restored = normalizeContinuityV4ProjectionV2(inspectContinuityV4(JSON.stringify(explained), frozen), 'a'.repeat(64))
+    expect(restored).toMatchObject({ complete: true, terminalReview: null })
+    expect(restored.audit.rawResponse.content).toBe(JSON.stringify(JSON.stringify(explained)))
+    expect(validateStoredContinuityV4Projection(restored.audit, f.current, f.context)).toEqual(restored)
+    const falseQuote = { ...wire, findings: [{ findingId: 'f0', signal: 'object', severity: 'warning', reasonCode: 'insufficient_evidence',
+      explanation: 'Check the actual packet.', suggestion: 'Keep the current state.', manuscriptEvidence: [{ segmentId: 'c0', quote: 'The packet vanished.' }] }] }
+    expect(normalizeContinuityV4ProjectionV2(inspectContinuityV4(JSON.stringify(falseQuote), frozen), 'a'.repeat(64)).complete).toBe(false)
+  })
   it('authenticates original merged-revision message values after JSONB reorders the frozen input', () => {
     const original = { version: 1, planHash: 'a'.repeat(64), content: 'The packet remains sealed.', revision: 4,
       findings: [{ source: 'continuity', findingId: 'f0', evidence: { quote: 'sealed', segmentId: 'c0' } }] }

@@ -152,52 +152,57 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
     const saved = await prisma.$transaction(tx => readFrozenLegacyContinuityInput(tx, ctx, frozen, input.recoverBodies))
     if (saved) { frozen = saved; input = { ...input, ...saved }; restoredFrozen = true }
   }
-  if (!restoredFrozen && frozen.reassessmentProtocol === 5 && input.terminalCandidate) {
+  if (!restoredFrozen && input.bodies.terminalEvidence?.verdictProtocol === 6
+    && (input.terminalCandidate || frozen.targetType === 'story_compilation' && input.sourceScope)) {
     // A new wire contract does not retire a paid complete historical report.
     // Never cross this compatibility path for an already frozen current call:
     // its own unknown requests/second slot must be reconciled first.
     ctx.signal.throwIfAborted(); await input.assertCurrent()
-    const legacy = { ...frozen }; delete legacy.reassessmentProtocol
-    const old3 = { ...legacy, reassessmentProtocol: 3 as const,
-      system: continuityResponseSystem(input.system, continuityResponseContract(input.bodies, input.terminalCandidate)),
-      content: continuityResponseInput(input.content, input.bodies, input.terminalCandidate) }
-    const old4 = { ...old3, reassessmentProtocol: 4 as const,
-      content: continuityResponseInput4(input.content, input.bodies, input.terminalCandidate) }
-    for (const prior of [old4, old3, { ...legacy, reassessmentProtocol: 2 as const }, legacy]) {
-      const reusable = await prisma.$transaction(tx => readReusableLegacyContinuityAssessment(tx, ctx, prior))
-      if (reusable) {
-        const binding = (reusable.audit as unknown as { assessmentRequest?: { key?: string; inputHash?: string } }).assessmentRequest
-        if (ctx.continuityKnownResultOnly && (binding?.key !== ctx.continuityKnownResultOnly.assessmentKey
-          || binding.inputHash !== ctx.continuityKnownResultOnly.inputHash))
-          throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '原完整缓存报告已变化，未改选其他报告，也未派发新请求。')
-        ctx.signal.throwIfAborted(); await input.assertCurrent(); return reusable
+    if (input.terminalCandidate) {
+      const legacy = { ...frozen }; delete legacy.reassessmentProtocol
+      const old3 = { ...legacy, reassessmentProtocol: 3 as const,
+        system: continuityResponseSystem(input.system, continuityResponseContract(input.bodies, input.terminalCandidate)),
+        content: continuityResponseInput(input.content, input.bodies, input.terminalCandidate) }
+      const old4 = { ...old3, reassessmentProtocol: 4 as const,
+        content: continuityResponseInput4(input.content, input.bodies, input.terminalCandidate) }
+      for (const prior of [old4, old3, { ...legacy, reassessmentProtocol: 2 as const }, legacy]) {
+        const reusable = await prisma.$transaction(tx => readReusableLegacyContinuityAssessment(tx, ctx, prior))
+        if (reusable) {
+          const binding = (reusable.audit as unknown as { assessmentRequest?: { key?: string; inputHash?: string } }).assessmentRequest
+          if (ctx.continuityKnownResultOnly && (binding?.key !== ctx.continuityKnownResultOnly.assessmentKey
+            || binding.inputHash !== ctx.continuityKnownResultOnly.inputHash))
+            throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '原完整缓存报告已变化，未改选其他报告，也未派发新请求。')
+          ctx.signal.throwIfAborted(); await input.assertCurrent(); return reusable
+        }
       }
     }
     if (frozen.targetType === 'story_compilation' && input.sourceScope) {
       const original = await prisma.$transaction(tx => readOriginalTaskRequest(tx, ctx))
       const evidence = input.bodies.terminalEvidence!
       const typed = (original.spec as { scope?: { continuityReportProtocol?: number } }).scope?.continuityReportProtocol === 5
-      let typedLineage: import('../continuity-review-v4.js').ContinuityReviewManifest['typedLineage']
-      if (typed) {
-        const coordinator = await import('../continuity-coordinator.js'), runtime = input.options.modelRuntime
-        if (!runtime) throw new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED', '原检查模型身份缺失，未派发请求。')
-        const price = runtime.tier === 'custom' ? { version: 'byok-exempt' as const }
-          : await (await import('../../billing/resolve-token-price.js')).resolveTokenPrice(runtime.tier, runtime.multiplierBps)
-        const semanticSubjectHash = (await import('../continuity-subject-identity.js')).continuitySubjectIdentity(frozen)
-        if (!semanticSubjectHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '原检查完整语义范围不能重建。')
-        typedLineage = await prisma.$transaction(tx => coordinator.prepareContinuityReviewLineage(tx, ctx, { compilationId: frozen.targetId,
-          chapterId: input.chapterId, input: frozen, semanticSubjectHash, modelPriceHash: coordinator.continuityModelPriceHash(runtime, price) }))
+      if (input.terminalCandidate || typed) {
+        let typedLineage: import('../continuity-review-v4.js').ContinuityReviewManifest['typedLineage']
+        if (typed) {
+          const coordinator = await import('../continuity-coordinator.js'), runtime = input.options.modelRuntime
+          if (!runtime) throw new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED', '原检查模型身份缺失，未派发请求。')
+          const price = runtime.tier === 'custom' ? { version: 'byok-exempt' as const }
+            : await (await import('../../billing/resolve-token-price.js')).resolveTokenPrice(runtime.tier, runtime.multiplierBps)
+          const semanticSubjectHash = (await import('../continuity-subject-identity.js')).continuitySubjectIdentity(frozen)
+          if (!semanticSubjectHash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '原检查完整语义范围不能重建。')
+          typedLineage = await prisma.$transaction(tx => coordinator.prepareContinuityReviewLineage(tx, ctx, { compilationId: frozen.targetId,
+            chapterId: input.chapterId, input: frozen, semanticSubjectHash, modelPriceHash: coordinator.continuityModelPriceHash(runtime, price) }))
+        }
+        const manifest = buildContinuityReviewManifest({ subject: { userId: ctx.userId, novelId: ctx.novelId, taskId: original.taskId,
+          targetType: 'story_compilation', targetId: frozen.targetId, chapterId: input.chapterId, revision: input.revision },
+          bodies: input.bodies, candidate: input.terminalCandidate, sourceScope: input.sourceScope,
+          sourceHash: input.bodies.previous === null ? null : runtimeJson({ previous: input.bodies.previous, source: evidence.previous }).hash,
+          sourceVersions: { current: evidence.current, previous: evidence.previous }, verifiedCoverage: evidence.factCoverage ?? null,
+          draftProposals: evidence.proposalChanges ?? null, ...(typedLineage ? { typedLineage } : {}) })
+        const request = continuityReviewV4Request({ manifest, bodies: input.bodies, candidate: input.terminalCandidate, sourceScope: input.sourceScope }, original.prompt, JSON.stringify({ body: input.bodies.current, previous: input.bodies.previous, targetId: frozen.targetId }))
+        frozen = { ...frozen, ...request, parserVersion: typed ? 10 : 9, reassessmentProtocol: typed ? 7 : 6, continuityManifest: manifest }
+        input = { ...input, ...request }
       }
-      const manifest = buildContinuityReviewManifest({ subject: { userId: ctx.userId, novelId: ctx.novelId, taskId: original.taskId,
-        targetType: 'story_compilation', targetId: frozen.targetId, chapterId: input.chapterId, revision: input.revision },
-        bodies: input.bodies, candidate: input.terminalCandidate, sourceScope: input.sourceScope,
-        sourceHash: input.bodies.previous === null ? null : runtimeJson({ previous: input.bodies.previous, source: evidence.previous }).hash,
-        sourceVersions: { current: evidence.current, previous: evidence.previous }, verifiedCoverage: evidence.factCoverage ?? null,
-        draftProposals: evidence.proposalChanges ?? null, ...(typedLineage ? { typedLineage } : {}) })
-      const request = continuityReviewV4Request({ manifest, bodies: input.bodies, candidate: input.terminalCandidate, sourceScope: input.sourceScope }, original.prompt, JSON.stringify({ body: input.bodies.current, previous: input.bodies.previous, targetId: frozen.targetId }))
-      frozen = { ...frozen, ...request, parserVersion: typed ? 10 : 9, reassessmentProtocol: typed ? 7 : 6, continuityManifest: manifest }
-      input = { ...input, ...request }
-    } else {
+    } else if (input.terminalCandidate) {
       input = { ...input, system: continuityResponseSystem(input.system, continuityResponseContract(input.bodies, input.terminalCandidate)),
         content: continuityResponseInput4(input.content, input.bodies, input.terminalCandidate) }
       frozen = { ...frozen, system: input.system, content: input.content }
@@ -306,10 +311,11 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
     } })
   // Re-read the actual full lifecycle before a failed report may become
   // actionable pending work. In-memory traces alone miss an old unknown second.
-  const recovery = assessed.complete || (assessed.audit.responseContract !== 3 && assessed.audit.responseContract !== 4) ? null : await prisma.$transaction(tx => readLegacyContinuityAssessment(tx, ctx, frozen))
-  if (recovery && !recovery.recoveryReady) throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED',
+  const bodyOnlyReport = frozen.parserVersion === 10 && frozen.continuityManifest?.candidateHash === null && !frozen.terminalCandidate
+  const recovery = assessed.complete && !bodyOnlyReport ? null : await prisma.$transaction(tx => readLegacyContinuityAssessment(tx, ctx, frozen))
+  if (bodyOnlyReport && !recovery || recovery && !recovery.recoveryReady) throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED',
     '原连续性检查仍有未确认的响应或用量，保留原请求等待核实，未再次派发。')
-  return { ...bindLegacyContinuityAssessment(assessed, ctx, frozen), ...(recovery?.recoveryReady ? { recoveryReady: true } : {}) }
+  return { ...bindLegacyContinuityAssessment(recovery?.inspected.complete ? recovery.inspected : assessed, ctx, frozen), ...(recovery?.recoveryReady ? { recoveryReady: true } : {}) }
 }
 
 const independentContinuityResultSchema = z.object({
@@ -1054,7 +1060,8 @@ export const continuityValidateTool = defineTool({
     if (selectedTerminal && !selectedTerminal.ok) return { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED',
       summary: '终态证明选择未通过', output: selectedTerminal.reason }
     const terminalCandidate = patch?.candidate ?? (selectedTerminal?.ok ? selectedTerminal.candidate : readTerminalCandidate(compilation.validation))
-      ?? (terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter)?.obligations.length ? terminalCandidateSchema.parse({ exitState: {} }) : undefined)
+      ?? ((originalRequest.spec as { scope?: { continuityReportProtocol?: number } } | null)?.scope?.continuityReportProtocol !== 5
+        && terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter)?.obligations.length ? terminalCandidateSchema.parse({ exitState: {} }) : undefined)
     let terminalEvidence = terminalProtocol ? terminalEvidenceContext(chapter, sourceChapter, terminalVersion, terminalQuoteAddressVersion(originalRequest.spec),
       terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(sourceChapter, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined
     const savedReviewCandidate = readTerminalCandidate(compilation.validation)
@@ -1092,7 +1099,7 @@ export const continuityValidateTool = defineTool({
     const parsedCachedValidation = z.object({ independentCheck: z.literal('complete'), checkedRevision: z.number().int(), coverage: z.unknown().optional(),
       findings: z.array(continuityFindingInputSchema), errorCount: z.number().int().nonnegative().optional(), warningCount: z.number().int().nonnegative().optional() }).safeParse(compilation.validation)
     const cachedValidation = parsedCachedValidation.success && validCompilerContinuitySourceProjection(compilation.validation, chapter.content) ? parsedCachedValidation.data : null
-    const cacheDeliveryBinding = cachedValidation ? await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(prisma,
+    const cacheDeliveryBinding = cachedValidation && terminalCandidate ? await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(prisma,
       { ...ctx, compilationId: compilation.id }, { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: compilation.preparedContext },
       chapter, compilation.validation, terminalEvidence) : undefined
     const proposalCacheCurrent = !terminalEvidence || !terminalCandidate || terminalProposalCacheMatches({ spec: originalRequest.spec,
@@ -1202,7 +1209,8 @@ export const continuityValidateTool = defineTool({
     // correction and exact-call replay retain their own full frozen input.
     const requestBodies = structuredClone(bodies)
     if (!continued && terminalVersion === 2 && requestBodies.terminalEvidence) requestBodies.terminalEvidence = terminalEvidenceContext(chapter, sourceChapter,
-      terminalVersion, terminalQuoteAddressVersion(originalRequest.spec), requestBodies.terminalEvidence.factCoverage, terminalCandidate ? 6 : 5, 2)
+      terminalVersion, terminalQuoteAddressVersion(originalRequest.spec), requestBodies.terminalEvidence.factCoverage,
+      terminalCandidate || (originalRequest.spec as { scope?: { continuityReportProtocol?: number } } | null)?.scope?.continuityReportProtocol === 5 ? 6 : 5, 2)
     if (!continued && requestBodies.terminalEvidence && hasTerminalCoverageProtocol(originalRequest.spec)) {
       requestBodies.terminalEvidence.factCoverage = terminalCoverageInput(originalRequest.spec, compilation.preparedContext, chapter, terminalCandidate, 2, terminalCoverageProofs(sourceChapter, requestBodies.terminalEvidence.spanAddressProtocol))
     }
@@ -1351,9 +1359,9 @@ export const continuityValidateTool = defineTool({
     const terminalFailure = terminalReviewFailure({ ...result, continuityCriticResponse: continued ? continued.originalAudit : inspected.audit }, chapter.content,
       continued ? terminalEvidence : inspected.audit.terminalEvidence ?? terminalEvidence,
       { errors: result.errorCount, text: `连续性完整报告：${result.errorCount} 错误、${result.warningCount} 警告。${repairGuidance}\nreportId=${continuityDecisionBinding(compilation.id, chapter.revision, { ...result, coverage })}\n${result.findings.map((item, index) => `[${index}/${item.severity}/${item.signal}] ${continuityFindingText(item)}`).join('\n')}` },
-      await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(prisma, { ...ctx, compilationId: compilation.id },
+      terminalCandidate ? await (await import('../terminal-draft-authority.js')).readTerminalDraftBinding(prisma, { ...ctx, compilationId: compilation.id },
         { taskId: terminalProposalTaskId(originalRequest.spec, originalRequest.taskId), preparedContext: savedTerminalBinding.preparedContext }, chapter,
-        { ...result, continuityCriticResponse: continued ? continued.originalAudit : inspected.audit }, continued ? terminalEvidence : inspected.audit.terminalEvidence ?? terminalEvidence))
+        { ...result, continuityCriticResponse: continued ? continued.originalAudit : inspected.audit }, continued ? terminalEvidence : inspected.audit.terminalEvidence ?? terminalEvidence) : undefined)
     if (terminalFailure) return terminalFailure
     const phase = result.errorCount > 0 ? 'repair' : 'check'
     return {

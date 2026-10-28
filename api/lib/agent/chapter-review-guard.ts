@@ -396,10 +396,12 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
       factCoverage, terminalVerdictAuditVersion(validation), terminalSpanAuditVersion(validation))
     if (terminalCandidate && (validation as { continuityCriticResponse?: { terminalContentHash?: string } } | null)?.continuityCriticResponse?.terminalContentHash === evidence.current.contentHash) evidence = attachTerminalProposalInput(evidence, { taskId: terminalProposalTaskId(original.spec, original.taskId),
       preparedContext: compilation.preparedContext, validation, candidate: terminalCandidate })
-    const deliveryBinding = assessment ? await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(tx,
+    const bodyOnlyReport = assessment && !terminalCandidate && (validation?.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion === 10
+      ? (await import('./continuity-review-v4.js')).validateStoredContinuityV4Projection(validation?.continuityCriticResponse, chapter.content, evidence) : null
+    const deliveryBinding = assessment && terminalCandidate ? await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(tx,
       { ...subject, compilationId: compilation.id }, { taskId: terminalProposalTaskId(original.spec, original.taskId), preparedContext: compilation.preparedContext }, chapter, validation, evidence, options?.terminalDraftScope ?? readScope?.terminalDraftScope, readScope?.inheritanceScope) : undefined
     const terminal = assessment ? currentTerminalReview(validation, chapter.content, evidence, deliveryBinding) : null
-    if ((validation?.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion !== undefined && [9, 10].includes(Number((validation?.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion)) && !terminal) {
+    if ((validation?.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion !== undefined && [9, 10].includes(Number((validation?.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion)) && !terminal && !bodyOnlyReport?.complete) {
       readiness.continuity = 'incomplete'
       readiness.ready = false
       if (!readiness.requiredTools.some(tool => tool.name === 'continuity_validate')) readiness.requiredTools.push({ name: 'continuity_validate', args: { compilationId: compilation.id } })
@@ -775,13 +777,13 @@ export async function assertChapterReviewRevision(
   }, readScope)
   const { readNewDraftRevision, readNewDraftWritingAuthority } = await import('./writing-scope.js')
   if (compilations.some(item => readNewDraftRevision(item.validation))) {
-    throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本任务新稿已处理过本轮自动修订决定，不再触发额外自动修订。原授权正文工具仍可依据当前正文连续修改；复核、父子任务或重新准备不能补充付费自动修订额度。剩余意见保持真实状态，不能宣称已通过。')
+    throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本轮自动改稿已结束；正文已保留，仍可继续编辑。')
   }
   const reports = await tx.chapterQualityReport.findMany({ where: {
     userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, runId: { in: runIds },
   }, select: { chapterRevision: true, repairRound: true } })
   if (reports.some(report => report.repairRound >= 1)) {
-    throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本章已有一次付费自动修订，已停止追加自动修订。原授权正文工具仍可依据当前正文连续修改；换工具或重新准备不能补充付费自动修订额度，剩余意见不能冒充已通过。')
+    throw new DataAccessError(409, 'REVIEW_AUTOMATION_STOPPED', '本轮自动改稿已结束；正文已保留，仍可继续编辑。')
   }
   const validations = compilations.flatMap(item => {
     const value = item.validation

@@ -302,7 +302,8 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
           return runtimeError('RUNTIME_RECEIPT_INVALID', '连续性阶段未绑定原冻结模型、价目或完整输入。')
         const input = { chapterId: frozen.work.chapter.id, revision: object(work.chapter).revision,
           targetType: 'story_compilation', targetId: object(work.compiler).id, bodies: work.sourceBodies,
-          terminalCandidate: work.terminalCandidate, sourceScope: work.sourceScope, continuityManifest: frozen.work.continuityManifest,
+          ...(work.terminalCandidate ? { terminalCandidate: work.terminalCandidate } : {}), sourceScope: work.sourceScope, continuityManifest: frozen.work.continuityManifest,
+          parserVersion: 10, reassessmentProtocol: 7,
           system: frozen.work.criticSystem, content: frozen.work.criticInput } as import('./assessment-response-lifecycle.js').LegacyAssessmentInput
         const phase = await coordinator.assertContinuityAssessmentSubject(tx, { userId: lease.userId, novelId: frozen.novelId, runId: lease.runId }, input)
         const existingInitial = captured.step === 'continuity_critic' && phase === 'initial_review'
@@ -310,7 +311,13 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
             { plan, chapterId: input.chapterId, phase: 'initial_review', operationRef: parent.id, inputHash: parent.inputHash })
         if (captured.step === 'continuity_critic' && phase === 'initial_review' && !existingInitial) await coordinator.authenticateInitialContinuityHistory(tx,
           { userId: lease.userId, novelId: frozen.novelId, runId: lease.runId }, { compilationId: input.targetId, chapterId: input.chapterId, input })
-        await claimContinuityPhase(tx, { userId: lease.userId, novelId: frozen.novelId, runId: lease.runId, continuityNativeLease: lease }, {
+        if (phase === null) {
+          await coordinator.assertContinuityOwner(tx, { userId: lease.userId, novelId: frozen.novelId, runId: lease.runId, continuityNativeLease: lease })
+          const existing = captured.step === 'continuity_critic' && await tx.agentOperation.findUnique({ where: {
+            taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: captured.key } }, select: { id: true } })
+          if (captured.step === 'continuity_critic' && !existing) await coordinator.authenticateInitialContinuityHistory(tx,
+            { userId: lease.userId, novelId: frozen.novelId, runId: lease.runId }, { compilationId: input.targetId, chapterId: input.chapterId, input }, parent.id)
+        } else await claimContinuityPhase(tx, { userId: lease.userId, novelId: frozen.novelId, runId: lease.runId, continuityNativeLease: lease }, {
           plan, chapterId: frozen.work.chapter.id, phase: captured.step === 'continuity_critic' ? phase : 'sparse_repair',
           operationRef: parent.id, inputHash: captured.step === 'continuity_critic' ? parent.inputHash : runtimeJson(request.body.messages).hash,
           ownerEpoch: `${lease.ownerId}:${lease.claimId}:${lease.epoch}` })

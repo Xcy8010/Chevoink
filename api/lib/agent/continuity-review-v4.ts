@@ -50,10 +50,10 @@ export const continuityTypedLineageSchema = z.object({ version: z.literal(1), ph
   establishedIssues: z.array(priorFindingSchema).max(200) }).strict()
 export const continuityReviewManifestSchema = z.object({ version: z.literal(1), subject: subjectSchema,
   bodyHash: hash, previousBodyHash: hash.nullable(), sourceHash: hash.nullable(), sourceScope: continuitySourceScopeSchema,
-  candidateHash: hash, contextHash: hash, catalogHash: hash, verifiedCoverage: z.unknown(), draftProposals: z.unknown(),
+  candidateHash: hash.nullable(), contextHash: hash, catalogHash: hash, verifiedCoverage: z.unknown(), draftProposals: z.unknown(),
   sourceVersions: z.unknown(), typedLineage: continuityTypedLineageSchema.optional(), hash }).strict()
 export type ContinuityReviewManifest = z.infer<typeof continuityReviewManifestSchema>
-export type ContinuityV4Frozen = { manifest: ContinuityReviewManifest; bodies: ContinuityBodies; candidate: TerminalCandidate; sourceScope: ContinuitySourceScope }
+export type ContinuityV4Frozen = { manifest: ContinuityReviewManifest; bodies: ContinuityBodies; candidate?: TerminalCandidate; sourceScope: ContinuitySourceScope }
 type LegacyInspection = ReturnType<typeof inspectContinuityResponse>
 type V4Marker = { version: 1; manifest: ContinuityReviewManifest; frozen: ContinuityV4Frozen; first: ReturnType<typeof rawReceipt>;
   projections: ReturnType<typeof inspectRecord>['projections'] | null;
@@ -65,27 +65,28 @@ export type ContinuityV4Inspection = Omit<LegacyInspection, 'audit'> & { audit: 
   phaseRequest?: { version: 1; requestId: string; originalAssessmentKey: string; inputHash: string; usageId: string } };
   terminalReview: ReturnType<typeof inspectTerminalReview>; parsed: ReturnType<typeof inspectRecord> | null }
 
-export function buildContinuityReviewCatalog(bodies: ContinuityBodies, candidate: TerminalCandidate) {
+export function buildContinuityReviewCatalog(bodies: ContinuityBodies, candidate?: TerminalCandidate) {
   const context = terminalEvidenceContextSchema.parse(bodies.terminalEvidence)
-  return { sources: continuitySourceCatalog(bodies), terminal: terminalReviewAddressCatalog(terminalCandidateSchema.parse(candidate), context) }
+  return { sources: continuitySourceCatalog(bodies), terminal: candidate ? terminalReviewAddressCatalog(terminalCandidateSchema.parse(candidate), context) : null }
 }
 
 /** The server freezes hashes. The model receives short catalogue addresses and
  * never computes or echoes a manifest/proof hash to authenticate its answer. */
 export function buildContinuityReviewManifest(input: {
-  subject: z.infer<typeof subjectSchema>; bodies: ContinuityBodies; candidate: TerminalCandidate; sourceScope: ContinuitySourceScope;
+  subject: z.infer<typeof subjectSchema>; bodies: ContinuityBodies; candidate?: TerminalCandidate; sourceScope: ContinuitySourceScope;
   sourceHash: string | null; sourceVersions: unknown; verifiedCoverage: unknown; draftProposals: unknown;
   typedLineage?: z.infer<typeof continuityTypedLineageSchema>;
 }): ContinuityReviewManifest {
   const subject = subjectSchema.parse(input.subject), context = terminalEvidenceContextSchema.parse(input.bodies.terminalEvidence)
-  const candidate = terminalCandidateSchema.parse(input.candidate)
+  const candidate = input.candidate === undefined ? undefined : terminalCandidateSchema.parse(input.candidate)
+  if (!candidate && !input.typedLineage) throw Error('Body-only review requires the typed report contract')
   if (context.verdictProtocol !== 6 || context.spanAddressProtocol !== 2 || context.current.id !== subject.chapterId
     || context.current.revision !== subject.revision || context.current.orderIndex !== input.sourceScope.currentOrderIndex
     || context.current.contentHash !== runtimeJson({ content: input.bodies.current }).hash
     || context.factCoverage !== undefined && context.factCoverage.taskId !== subject.taskId || input.bodies.previous !== null && !input.sourceHash) throw Error('Continuity manifest identity mismatch')
   const value = { version: 1 as const, subject, bodyHash: runtimeJson({ content: input.bodies.current }).hash,
     previousBodyHash: input.bodies.previous === null ? null : runtimeJson({ content: input.bodies.previous }).hash,
-    sourceHash: input.sourceHash, sourceScope: continuitySourceScopeSchema.parse(input.sourceScope), candidateHash: runtimeJson(candidate).hash,
+    sourceHash: input.sourceHash, sourceScope: continuitySourceScopeSchema.parse(input.sourceScope), candidateHash: candidate ? runtimeJson(candidate).hash : null,
     contextHash: runtimeJson(context).hash, catalogHash: runtimeJson(buildContinuityReviewCatalog(input.bodies, candidate)).hash,
     verifiedCoverage: input.verifiedCoverage, draftProposals: input.draftProposals, sourceVersions: input.sourceVersions,
     ...(input.typedLineage ? { typedLineage: continuityTypedLineageSchema.parse(input.typedLineage) } : {}) }
@@ -104,7 +105,9 @@ export function validContinuityReviewManifest(frozen: ContinuityV4Frozen) {
   } catch { return false }
 }
 
-function legacyResponseFields(frozen: ContinuityV4Frozen) {
+function legacyResponseFields(frozen: ContinuityV4Frozen): Record<string, z.ZodType> {
+  if (!frozen.candidate) return { findings: z.array(findingSchema).max(30), semanticChecks: z.array(semanticSchema).length(2),
+    issueDispositions: z.array(issueDispositionSchema).max(200) }
   const ids = continuitySourceCatalog(frozen.bodies).terminalSources.map(part => part.segmentId)
   const fields = terminalAddressResponseFields(frozen.candidate, frozen.bodies.terminalEvidence!, ids, true, !frozen.manifest.typedLineage)
   return { findings: z.array(findingSchema).max(30), semanticChecks: z.array(semanticSchema).length(2), ...fields,
@@ -128,6 +131,7 @@ function responseFields(frozen: ContinuityV4Frozen): Record<string, z.ZodType> {
   const semantic = semanticSchema.omit({ reason: true }).extend({ ...typedExplanation, manuscriptEvidence: z.array(evidenceReference).max(8).optional() }).strict()
   const result: Record<string, z.ZodType> = { findings: z.array(finding).max(30), semanticChecks: z.array(semantic).length(2),
     issueDispositions: z.array(issueDispositionSchema).length(frozen.manifest.typedLineage.establishedIssues.length) }
+  if (!frozen.candidate) return result
   for (const key of ['terminalVerdicts', 'terminalProofVerdicts', 'terminalDispositions', 'proposalDispositions'] as const) {
     let array: z.ZodType = legacy[key]
     if (array instanceof z.ZodDefault) array = array.unwrap() as z.ZodType
@@ -150,13 +154,14 @@ export function continuityReviewV4Request(frozen: ContinuityV4Frozen, authorRequ
   if (!validContinuityReviewManifest(frozen)) throw Error('Continuity manifest cannot be rebuilt')
   const typed = frozen.manifest.typedLineage
   return { system: `你是独立连续性审阅者。完整审阅本次材料，不改正文。author_request与场景计划不是已发生事实。
-只输出本次完整JSON合同。findings.sourceEvidence只能选服务端目录的segmentId；quote可省略，若提供则必须逐字包含在该段。终态各表的sourceEvidence只返回segmentId，不重抄quote。reason是你的解释，可讨论或引用原意见，其中文字不被服务器冒充原文；只有显式sourceEvidence是正文证据。error必须至少包含一处本章和另一处不同事实证据，不能将仅前文问题指控本章。真实冲突、严重度及未知判断必须完整保留，不为通过而删意见或改判。findings的findingId依次为f0、f1…，semanticChecks用这些ID引用意见。候选/历史事实/proposal按原目录逐项核验；合法unknown不是格式错误。
+只输出本次完整JSON合同。${!frozen.candidate ? '本次仅审阅正文与已有意见；章末候选尚未提供，只返回 findings、semanticChecks、issueDispositions，不返回终态表。' : ''}findings.sourceEvidence只能选服务端目录的segmentId；quote可省略，若提供则必须逐字包含在该段。终态各表的sourceEvidence只返回segmentId，不重抄quote。reason是你的解释，可讨论或引用原意见，其中文字不被服务器冒充原文；只有显式sourceEvidence是正文证据。error必须至少包含一处本章和另一处不同事实证据，不能将仅前文问题指控本章。真实冲突、严重度及未知判断必须完整保留，不为通过而删意见或改判。findings的findingId依次为f0、f1…，semanticChecks用这些ID引用意见。候选/历史事实/proposal按原目录逐项核验；合法unknown不是格式错误。
 ${typed ? `本次明确使用 contract5：reasonCode/explanation 是分类和解释；manuscriptEvidence 才是正文引用。priorFindingRef 仅引用目录中原意见的逐字文字，不能证明当前事实。解释可以讨论历史主张、草稿和原意见，解释里的引号不自动成为正文锚点或事实认证；不得把它冒充 manuscriptEvidence。显式 manuscriptEvidence/quote 与 priorFindingRef/quote 仍必须逐字符合各自冻结来源，不得编造引用。不得返回旧 reason/sourceEvidence 字段。逐 issueIndex 处置 establishedIssues：present/retained 必须指向本次真实 findingId，repaired 需要本章证据；repaired 也可明确说明当前证据证明旧判断不成立，不要求为此改稿，也不声称正文已修改。unknown 合法但不解除义务。旧无效回复的文字仅供审计，不自行成为 establishedIssue。openLoops 判断未解决问题是否保留、改述或明确结束；无需要求本章解开原主张未声称已解决的谜。新报告独立判断完整当前候选、全部证明和历史覆盖；不得把 old UNKNOWN 自动匹配为 supported。\n` : ''}${JSON.stringify(z.toJSONSchema(continuityReviewV4ResponseSchema(frozen), { io: 'input' }))}`,
     content: JSON.stringify({ author_request: { manuscriptEvidence: false, text: authorRequest }, context,
+      ...(!frozen.candidate ? { reviewScope: 'body_only', terminalCertification: 'not_requested' } : {}),
       // Rendering uses the existing short addresses. The full server catalogue
       // still authenticates the manifest and every stored response/repair.
       manifestSubject: frozen.manifest.subject, ...(typed ? { priorFindings: typed.priorFindings, establishedIssues: typed.establishedIssues } : {}), catalog: { sources: continuitySourceCatalog(frozen.bodies),
-        terminal: terminalReviewAddressInput(frozen.candidate, frozen.bodies.terminalEvidence!) } }) }
+        terminal: frozen.candidate ? terminalReviewAddressInput(frozen.candidate, frozen.bodies.terminalEvidence!) : null } }) }
 }
 
 function bindFinding(value: unknown, index: number, frozen: ContinuityV4Frozen, expectedId = `f${index}`, allowEvidenceRanges = false) {
@@ -214,6 +219,14 @@ function inspectNormalizedRecord(record: Record<string, unknown>, frozen: Contin
       : row.findingIds.length !== 0)) add('semanticChecks', index, 'semantic_finding_binding_invalid')
     else normalizedSemantic.push({ kind: row.kind, result: row.result, reason: row.reason, findingIndexes: indexes })
   }
+  const proseValid = !bad.has('findings') && !bad.has('semanticChecks')
+    && normalizedSemantic.length === 2 && validContinuitySemanticChecks(normalizedSemantic, findings, 2, false)
+  if (!frozen.candidate) return { record, terminal: null, findings: proseValid ? findings : [], bad, repairable, diagnostics,
+    terminalDiagnostics: [] as TerminalReviewDiagnostic[], valid: proseValid,
+    projections: { prose: { valid: proseValid, value: { findings, semanticChecks: normalizedSemantic }, diagnostics },
+      currentTerminal: { valid: false, value: null, diagnostics: [] as Diagnostic[] },
+      historicalCoverage: { valid: false, value: null, diagnostics: [] as Diagnostic[] },
+      draftProposals: { valid: false, value: null, diagnostics: [] as Diagnostic[] } } }
   const rowFields = ['terminalVerdicts', 'terminalProofVerdicts', 'terminalDispositions', 'proposalDispositions'] as const
   const addresses = { terminalVerdicts: 'claimIndex', terminalProofVerdicts: 'proofIndex', terminalDispositions: 'obligationIndex', proposalDispositions: 'proposalIndex' }
   const catalog = terminalReviewAddressCatalog(frozen.candidate, frozen.bodies.terminalEvidence!)
@@ -260,8 +273,6 @@ function inspectNormalizedRecord(record: Record<string, unknown>, frozen: Contin
   const rows = terminalReviewRowDiagnostics(frozen.candidate, frozen.bodies, engineRecord)
   if (rows) for (const [table, indexes] of rows.bad) for (const index of indexes) add(table, index, 'terminal_evidence_invalid')
   if (!terminal && !rowFields.some(table => bad.has(table))) { repairable = false; add('terminalVerdicts', -1, 'terminal_binding_invalid') }
-  const proseValid = !bad.has('findings') && !bad.has('semanticChecks')
-    && normalizedSemantic.length === 2 && validContinuitySemanticChecks(normalizedSemantic, findings, 2, false)
   const currentValid = !bad.has('terminalVerdicts') && !bad.has('terminalProofVerdicts') && !!candidateEvidence
   const coverageValid = !bad.has('terminalDispositions') && !!candidateEvidence && !!rows
   const proposalsValid = !bad.has('proposalDispositions') && !!candidateEvidence && !!rows
@@ -309,9 +320,9 @@ function validTypedReferences(row: Record<string, unknown>, frozen: ContinuityV4
       if (selected.some(source => source?.quote.includes(quote)) || prior && prior.quote.includes(quote)) continue
       if (!normalization) return false
       const base = { table, index: normalization.index, quoteHash: textHash(quote), explanationQuoteIndex: quoteIndex }
-      const addresses = terminalReviewAddressCatalog(frozen.candidate, frozen.bodies.terminalEvidence!)
+      const addresses = frozen.candidate ? terminalReviewAddressCatalog(frozen.candidate, frozen.bodies.terminalEvidence!) : null
       if (table === 'terminalProofVerdicts') {
-        const proof = addresses.proofs.find(part => part.proofIndex === row.proofIndex)?.fact
+        const proof = addresses?.proofs.find(part => part.proofIndex === row.proofIndex)?.fact
         if (proof?.claim.includes(quote)) {
           normalization.mappings.push({ ...base, kind: 'proof_claim_audit', proofHash: proof.proofHash }); continue
         }
@@ -327,7 +338,7 @@ function validTypedReferences(row: Record<string, unknown>, frozen: ContinuityV4
           ? terminalQuoteRange({ segmentId: current[0]?.segmentId ?? '', quote }, current) : null
         if (range) { normalization.mappings.push({ ...base, kind: 'current_explanation_span', range }); continue }
       }
-      if (table === 'proposalDispositions' && addresses.proposals.find(part => part.proposalIndex === row.proposalIndex)?.claim.includes(quote)) {
+      if (table === 'proposalDispositions' && addresses?.proposals.find(part => part.proposalIndex === row.proposalIndex)?.claim.includes(quote)) {
         normalization.mappings.push({ ...base, kind: 'proposal_claim_audit', proposalIndex: Number(row.proposalIndex) }); continue
       }
       // The new interpretation keeps explanation separate from manuscript
@@ -427,7 +438,7 @@ export function inspectContinuityV4(raw: string, frozen: ContinuityV4Frozen, res
   if (raw.length > 262_144) classification = 'response_too_large'
   const audit: ContinuityV4Inspection['audit'] = { version: 1, parserVersion: frozen.manifest.typedLineage ? 10 : 9, responseContract: frozen.manifest.typedLineage ? 5 : 4, classification,
     rawResponse: rawReceipt(raw, responseComplete), contentHash: textHash(raw), characterCount: raw.length, unwrapped: false,
-    terminalCandidate: frozen.candidate, terminalContentHash: runtimeJson({ content: frozen.bodies.current }).hash,
+    ...(frozen.candidate ? { terminalCandidate: frozen.candidate, terminalContentHash: runtimeJson({ content: frozen.bodies.current }).hash } : {}),
     terminalEvidence: frozen.bodies.terminalEvidence!, sourceScope: frozen.sourceScope,
     terminalReviewDiagnostics: parsed?.terminalDiagnostics ?? [], candidateFindings: [], invalidSourceReferences: [], sourceRelocations: [],
     continuityV4: { version: 1 as const, manifest: frozen.manifest, frozen,
@@ -585,7 +596,9 @@ export function validateStoredContinuityV4Projection(value: unknown, content: st
     const frozen = marker.frozen as ContinuityV4Frozen
     if ((audit.parserVersion === 10) !== !!frozen.manifest.typedLineage) return null
     if (frozen.bodies.current !== content || runtimeJson(frozen.bodies.terminalEvidence).hash !== runtimeJson(context).hash
-      || runtimeJson(audit.terminalCandidate).hash !== frozen.manifest.candidateHash || runtimeJson(marker.manifest).hash !== runtimeJson(frozen.manifest).hash) return null
+      || (frozen.candidate ? runtimeJson(audit.terminalCandidate).hash !== frozen.manifest.candidateHash
+        : audit.terminalCandidate !== undefined || audit.terminalContentHash !== undefined || frozen.manifest.candidateHash !== null)
+      || runtimeJson(marker.manifest).hash !== runtimeJson(frozen.manifest).hash) return null
     const first = object(marker.first)
     if (first?.complete !== true || first.encoding !== 'json-string' || typeof first.content !== 'string') return null
     const raw: unknown = JSON.parse(first.content)
@@ -672,15 +685,15 @@ export function normalizeContinuityV4RepairProjection(original: ContinuityV4Insp
     const mappings: ProjectionSourceMapping[] = [], rejected: RejectedReplacement[] = []
     const interpret: typeof inspectRecord = (record, frozen, expectedIds) => {
       const effective = structuredClone(record), rows = effective.terminalDispositions
-      const catalog = terminalReviewAddressCatalog(frozen.candidate, frozen.bodies.terminalEvidence!)
-      if (!Array.isArray(rows)) return inspectRecord(record, frozen, expectedIds, mappings, true)
+      const catalog = frozen.candidate ? terminalReviewAddressCatalog(frozen.candidate, frozen.bodies.terminalEvidence!) : null
+      if (!Array.isArray(rows) || !catalog) return inspectRecord(record, frozen, expectedIds, mappings, true)
       for (const [index, value] of rows.entries()) {
         const row = object(value), array = responseFields(frozen).terminalDispositions
         if (!row || !(array instanceof z.ZodArray) || (array.element as z.ZodType).safeParse(row).success) continue
         const shape = z.object({ obligationIndex: z.number().int().nonnegative(), outcome: z.literal('replaced'),
           candidateIndex: z.number().int().nonnegative(), ...typedExplanation, manuscriptEvidence: z.array(evidenceReference).max(8) }).strict().safeParse(row)
         const obligation = catalog.obligations.find(item => item.obligationIndex === row.obligationIndex)
-        const target = catalog.claims.find(item => item.claimIndex === row.candidateIndex)
+        const target = catalog?.claims.find(item => item.claimIndex === row.candidateIndex)
         if (!shape.success || !obligation || !target || ['knowledge', 'body', 'objects', 'relationships', 'openLoops'].includes(target.field)
           || catalog.claims.some(item => item.id === obligation.id) || catalog.proofs.some(item => historyFactIdentity(item.fact.field, item.fact.claim) === obligation.id)
           || !validTypedReferences(row, frozen, 'terminalDispositions', { index, mappings, relocate: true })

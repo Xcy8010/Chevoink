@@ -64,7 +64,7 @@ describe('production-shaped invalid continuity response recovers without false p
     expect(correction.guidance).toContain('"reported"')
     expect(correction.guidance).toContain('"outcome":"unknown"')
     expect(correction.guidance).toContain('inheritedProofs')
-    expect(terminalReportRecoveryResult(f.validation, f.content, f.context, null)).toMatchObject({ reviewCompleted: false, summary: expect.stringContaining('待处理') })
+    expect(terminalReportRecoveryResult(f.validation, f.content, f.context, null)).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE', reviewCompleted: false, summary: '连续性检查失败' })
     expect(currentTerminalReview(f.validation, f.content, f.context)).toBeNull()
     expect(JSON.stringify(f.validation)).toBe(before)
   })

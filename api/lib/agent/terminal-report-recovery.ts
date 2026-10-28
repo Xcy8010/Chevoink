@@ -61,7 +61,10 @@ export function terminalReportCorrection(validation: unknown, content: string, c
       .map(({ claimIndex: candidateIndex, field, claim }) => ({ candidateIndex, field, claim }))
     return { version: 1, candidateHash: runtimeJson(candidate).hash, contentHash: createHash('sha256').update(content).digest('hex'),
       paths: issues.map(row => row.path), issues,
-      guidance: `独立响应已收到，正文意见已保留；终态处置表未通过核验，检查尚未通过，不能提交。该问题不要求改写正文，也不允许重复相同付费检查。具体诊断（全部坏行）：${JSON.stringify(rows.diagnostics.length ? rows.diagnostics : diagnostics)}。引用或地址错误属于独立报告，不证明候选事实错误；不要缩减 terminalState 或丢掉 inheritedProofs 来修报告。当前完整候选和新基准：${JSON.stringify({ baseCandidateHash: runtimeJson(candidate).hash, terminalState: candidate })}。合法持久替代目录：${JSON.stringify(replacements)}。需要处理的旧事实和提议（reported为原始未获完整认证的意见，不能自动作为裁决）：${JSON.stringify({ obligations: unresolved, proposals })}。结合当前全文与原前章逐项处理：旧事实仍成立时显式选择可用 inheritedProofs 还原原字段和完整主张；事实确有改变时用 terminalPatch 添加有据的持久候选，再由独立检查确认替代或解除。动作、地点、未完成动作不能直接充当持久事实替代。unknown 和格式错误都不是删除旧义务的许可；不得自动判未变或通过。保留全部有效候选、原报告、账务和原有有限处理次数。` }
+      guidance: `正文已保存；终态报告未通过核验，本章尚未提交。请处理下列引用或处置错误；继承事实可显式选择 inheritedProofs。\n${JSON.stringify({
+        diagnostics: rows.diagnostics.length ? rows.diagnostics : diagnostics,
+        baseCandidateHash: runtimeJson(candidate).hash, terminalState: candidate, replacements, obligations: unresolved, proposals,
+      })}` }
   } catch { return null }
 }
 
@@ -70,5 +73,5 @@ export function terminalReportCorrection(validation: unknown, content: string, c
  * block commit. Explicit false also fences unchanged review redispatch. */
 export function terminalReportRecoveryResult(validation: unknown, content: string, context: TerminalEvidenceContext | undefined, previous: string | null) {
   const correction = context ? terminalReportCorrection(validation, content, context, previous) : null
-  return correction ? { outcome: 'failed' as const, failureCode: 'CONTINUITY_REPORT_INCOMPLETE', reviewCompleted: false, summary: '连续性报告未通过核验 · 待处理', output: correction.guidance } : null
+  return correction ? { outcome: 'failed' as const, failureCode: 'CONTINUITY_REPORT_INCOMPLETE', reviewCompleted: false, summary: '连续性检查失败', output: correction.guidance } : null
 }

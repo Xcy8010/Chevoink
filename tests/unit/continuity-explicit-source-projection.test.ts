@@ -72,6 +72,24 @@ describe('versioned free explicit-source report projection', () => {
     expect(f.inspect(f.raw)).toEqual(f.original)
     expect(validateStoredExplicitSourceProjection(projected.audit, f.chapter.content, f.context)).toEqual(projected)
   })
+  it('uses a complete final body report when its withdrawal reason quotes the old accusation', () => {
+    const f = fixture()
+    const wire = { findings: [], semanticChecks: f.wire.semanticChecks.map(item => ({ ...item, result: 'clear', findingIndexes: [] })),
+      terminalVerdicts: [], terminalProofVerdicts: [], terminalDispositions: [], decisions: [{ index: 0, action: 'retract',
+        reason: 'The old opinion "The guard paid no coins." is not supported by the current manuscript.',
+        sourceEvidence: f.finding.sourceEvidence }] }
+    const raw = JSON.stringify(wire), second = { audit: f.inspect(raw).audit, protocol: 2 as const }
+    expect(second.audit.classification).toBe('complete')
+    expect(() => continuityReassessmentEnvelope(f.original, raw, f.bodies, 2)).toThrow('unsupported manuscript evidence')
+    const projected = recoverExplicitSourceEvidence(f.original, f.bodies, second)!
+    expect(projected).toMatchObject({ complete: true, findings: [], audit: { sourceProjection: {
+      originalAudit: f.original.audit, second, scope: 'unapplied_body_only_final_report',
+      dispositionDiagnostics: [{ index: 0, code: 'retract_source_proof_invalid' }],
+    } } })
+    expect(projected.audit.rawResponse).toEqual(second.audit.rawResponse)
+    expect(projected.audit).not.toHaveProperty('terminalCandidate')
+    expect(validateStoredExplicitSourceProjection(projected.audit, f.chapter.content, f.context)).toEqual(projected)
+  })
   it.each(['fake-summary-quote', 'wrong-attribution', 'wrong-source', 'only-previous', 'duplicate-pair', 'missing-quote', 'wrong-segment', 'missing-evidence'] as const)(
     'does not relax actual source proof: %s', fault => {
       const f = fixture(), wire = structuredClone(f.wire), bodies = structuredClone(f.bodies)
