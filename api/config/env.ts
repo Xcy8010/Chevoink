@@ -94,8 +94,8 @@ export const env = {
   aiTextTimeoutMs: parsePositiveNumber(process.env.AI_TEXT_TIMEOUT_MS, 240000),
   // 流式响应 chunk 间最大静默：超过视为网关挂死，主动中止并释放并发（区别于整次调用的总时限）
   aiTextStreamIdleMs: parsePositiveNumber(process.env.AI_TEXT_STREAM_IDLE_MS, 90000),
-  // 单轮 LLM 调用的最大输出 token：不传时 DeepSeek 默认仅 4096，写长章节时工具参数会被截断；
-  // deepseek-chat 输出上限 8192，默认拉满，换更强模型时可通过环境变量上调
+  // 单次调用的默认输出预算，并非模型容量或作者设置的任务限制。
+  // 思考与正文共享预算；主循环可在确认截断后按同一预算更新请求、上下文和费用预留。
   aiTextMaxOutputTokens: parsePositiveNumber(process.env.AI_TEXT_MAX_OUTPUT_TOKENS, 8192),
   // 视觉推理旁路（Agent view_image 工具）：DeepSeek 本体无视觉，图片统一发给 GLM 视觉模型换回文字描述（ds-vision-skill 模式）
   aiVisionBaseUrl: process.env.AI_VISION_BASE_URL ?? 'https://open.bigmodel.cn/api/paas/v4',

@@ -68,6 +68,7 @@ export function getCreditActivityModelLabel(providerType: 'text' | 'image', mode
 
 export type ModelCapabilities = {
   thinkingEnabled?: boolean
+  maxOutputTokens?: number
   outputTokenParameter?: 'max_tokens' | 'max_completion_tokens'
   reasoningParameterMode?: 'native' | 'omit'
   reasoningEfforts: ModelReasoningEffort[]
@@ -89,7 +90,10 @@ export function parseModelCapabilities(metadata: Prisma.JsonValue | null | undef
   const configuredDefault = typeof record.defaultReasoningEffort === 'string' && MODEL_REASONING_EFFORTS.has(record.defaultReasoningEffort as ModelReasoningEffort)
     ? record.defaultReasoningEffort as ModelReasoningEffort
     : 'high'
+  const maxOutputTokens = record.max_output_tokens ?? record.maxOutputTokens
   return {
+    ...(typeof maxOutputTokens === 'number' && Number.isSafeInteger(maxOutputTokens) && maxOutputTokens > 0
+      ? { maxOutputTokens } : {}),
     ...(typeof record.thinkingEnabled === 'boolean' ? { thinkingEnabled: record.thinkingEnabled } : {}),
     ...(record.outputTokenParameter === 'max_tokens' || record.outputTokenParameter === 'max_completion_tokens'
       ? { outputTokenParameter: record.outputTokenParameter } : {}),
@@ -662,6 +666,7 @@ export async function resolveAuxiliaryModelSelection(userId: string) {
 
 export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userId?: string, customModelId?: string | null, requestedReasoningEffort?: ModelReasoningEffort): Promise<{
   thinkingEnabled?: boolean
+  maxOutputTokens?: number
   outputTokenParameter?: 'max_tokens' | 'max_completion_tokens'
   reasoningParameterMode?: 'native' | 'omit'
   tier: CreditModelTier

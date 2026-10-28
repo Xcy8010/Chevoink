@@ -12,7 +12,8 @@ import { chatWithTools, generateTextCompletion, generateCoverImageData } from '.
 import { env } from '../../api/config/env.js'
 import { TEXT_ACTION_TASKS, withModelAssignmentContext } from '../../api/lib/agent/model-assignment-context.js'
 import { generateReviewCompletion } from '../../api/lib/agent/review-completion.js'
-import { createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../../api/lib/text-request-trace.js'
+import { consumeTextRequestRecovery, createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../../api/lib/text-request-trace.js'
+import { reserveTokenCredits } from '../../api/lib/credits.js'
 
 beforeEach(() => {
   mocks.findModel.mockReset().mockResolvedValue(null)
@@ -27,6 +28,33 @@ beforeEach(() => {
   mocks.charge.mockReset().mockResolvedValue({ chargedMilli: 0, remainingMilli: 1000, exhausted: false })
 })
 afterEach(() => vi.unstubAllGlobals())
+
+it.each(['settled', 'pending_settlement', 'pending_usage'] as const)('binds the empty main response recovery to its original %s reservation and uses one output allowance for the body and credit hold', async billingStatus => {
+  vi.mocked(reserveTokenCredits).mockClear()
+  mocks.findUsage.mockResolvedValue({ usageSource: billingStatus === 'pending_usage' ? 'unknown' : 'reported', billingStatus,
+    requestTokens: 12, responseTokens: 8192, reservedCreditMilli: billingStatus === 'settled' ? 0 : 100 })
+  const frame = { choices: [{ delta: { reasoning_content: 'Synthetic unfinished reasoning.' }, finish_reason: 'length' }],
+    usage: { prompt_tokens: 12, completion_tokens: 8192, total_tokens: 8204 } }
+  const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response(`data: ${JSON.stringify(frame)}\n\ndata: [DONE]\n\n`))
+  vi.stubGlobal('fetch', fetcher)
+  const params = { messages: [{ role: 'user' as const, content: 'Read the current chapter.' }], tools: [{ type: 'function' as const,
+    function: { name: 'chapter_read', description: 'Read current text.', parameters: { type: 'object', properties: {} } } }],
+    providerApiKey: 'fixture-only', providerBaseUrl: 'https://api.deepseek.com/v1', provider: 'deepseek', model: 'deepseek-flash',
+    reasoningEffort: 'high' as const, thinkingEnabled: true, toolChoice: 'required' as const, maxOutputTokens: 32768,
+    usageLog: { userId: 'test', action: 'agentLoopTurn', modelTier: 'speed' as const, multiplierBps: 10000, targetId: 'run' } }
+  const system = JSON.stringify(params.messages), content = JSON.stringify(params.tools), result = await chatWithTools(params)
+  const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body))
+  expect(body).toMatchObject({ model: 'deepseek-flash', max_tokens: 32768, thinking: { type: 'enabled' }, reasoning_effort: 'high', tools: params.tools })
+  expect(body).not.toHaveProperty('tool_choice')
+  expect(vi.mocked(reserveTokenCredits).mock.calls.at(-1)?.[3]).toBe(32768)
+  expect(mocks.create.mock.calls[0][0].data.billingSnapshot).toEqual({ version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 })
+  expect(mocks.charge).toHaveBeenCalledWith(expect.objectContaining({ usageLogId: 'test-usage', modelTier: 'speed', multiplierBps: 10000,
+    requestTokens: 12, responseTokens: 8192 }))
+  expect(consumeTextRequestRecovery(result, system, content + 'changed', params.usageLog)).toBe(false)
+  expect(consumeTextRequestRecovery(result, system, content, params.usageLog)).toBe(billingStatus === 'settled')
+  expect(consumeTextRequestRecovery(result, system, content, params.usageLog)).toBe(false)
+  expect(fetcher).toHaveBeenCalledOnce()
+})
 
 async function invoke(usages: Array<Record<string, unknown>>) {
   const frames = usages.map(usage => `data: ${JSON.stringify({ usage, choices: [] })}\n\n`).join('')

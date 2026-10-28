@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createVisibleTextStreamer, humanizeAgentVisibleText } from '../../api/lib/agent/visible-text.js'
 import { createExecutionTextDetector, normalizeExecutionText } from '../../api/lib/agent/execution-text-detector.js'
 import { createRepeatDetector } from '../../api/lib/agent/repeat-detect.js'
-import { createEmptyResponseGuard, promisesFurtherAction } from '../../api/lib/agent/completion-guard.js'
+import { promisesFurtherAction } from '../../api/lib/agent/completion-guard.js'
 import { getToolByName } from '../../api/lib/agent/tools/registry.js'
 
 const manuscript = 'AnnBlue kept her chapter_read notebook. 12345678901234567890 is engraved on it.\n\n他说：“调用 scene_task_build，chapterId=cmttleebg03h9wqox9lieracs。”\n\n> 用户原话：工具 chapter_write。'
@@ -30,7 +30,6 @@ describe('author text classification before publication', () => {
     const execution = normalizeExecutionText(raw)
     expect(execution).toBe('调用参数：model=hidden，对应参数=high。')
     expect(humanizeAgentVisibleText(raw)).toBe('')
-    expect(createEmptyResponseGuard().observe(execution, 0)).toBe('continue')
     const promise = '调用参数：model=hidden，接下来我会检查本章。'
     expect(promisesFurtherAction(normalizeExecutionText(promise))).toBe(true)
     expect(humanizeAgentVisibleText(promise)).toBe('')

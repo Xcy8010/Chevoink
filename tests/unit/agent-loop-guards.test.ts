@@ -11,7 +11,20 @@ import {
 } from '../../api/lib/agent/checkpoint.js'
 import { createRepeatDetector } from '../../api/lib/agent/repeat-detect.js'
 import { toolSignature, ToolAdmissionGuard } from '../../api/lib/agent/tool-signature.js'
-import { createProtocolRecoveryGuard, isContinuationRequest, promisesFurtherAction, requiresNextChapterDelivery } from '../../api/lib/agent/completion-guard.js'
+import { createProtocolRecoveryGuard, emptyResponseRecoveryOutputTokens, isContinuationRequest, promisesFurtherAction, requiresNextChapterDelivery } from '../../api/lib/agent/completion-guard.js'
+
+it('strictly increases truncated output within declared capacity and actual remaining context', () => {
+  expect(emptyResponseRecoveryOutputTokens(8192, undefined, 128000)).toBe(16384)
+  expect(emptyResponseRecoveryOutputTokens(16384, undefined, 128000)).toBe(32768)
+  expect(emptyResponseRecoveryOutputTokens(32768, undefined, 128000)).toBe(65536)
+  expect(emptyResponseRecoveryOutputTokens(65536, undefined, 128000)).toBe(121600)
+  expect(emptyResponseRecoveryOutputTokens(8192, 393216, 128000)).toBe(16384)
+  expect(emptyResponseRecoveryOutputTokens(8192, 16000, 128000)).toBe(16000)
+  expect(emptyResponseRecoveryOutputTokens(8192, 8192, 128000)).toBeNull()
+  expect(emptyResponseRecoveryOutputTokens(16384, undefined, 128000, 100000)).toBe(21600)
+  expect(emptyResponseRecoveryOutputTokens(8192, undefined, 128000, 113408)).toBeNull()
+  expect(emptyResponseRecoveryOutputTokens(65536, 393216, 128000, 70000)).toBeNull()
+})
 
 it('invalidates stale report reads independently of write admission and progress', () => {
   const guard = new ToolAdmissionGuard(), signature = toolSignature('chapter_bridge_get', '{"compilationId":"c"}')

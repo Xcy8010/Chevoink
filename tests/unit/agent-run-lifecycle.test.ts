@@ -6,7 +6,7 @@
       ...(quality === 'complete' ? [] : [{ name: 'quality_analyze' as const, args: { compilationId: 'comp' } }]) ],
   })
 
-import { beginTextRequest, createTextRequestTrace, withTextRequestTrace } from '../../api/lib/text-request-trace.js'
+import { beginTextRequest, createTextRequestTrace, recordTextRequestFailure, withTextRequestTrace } from '../../api/lib/text-request-trace.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import type { AgentMessagePart, AgentStreamEvent, AgentStreamEventBody, AgentTodoItem, TaskSpec } from '../../shared/contracts/index.js'
@@ -406,6 +406,9 @@ async function run(prompt = '检查当前章节', tokenBudget?: number, allowInt
 function queue(...responses: Response[]) {
   for (const item of responses) mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
     for (const pending of item.toolCalls) input.onChunk?.({ type: 'tool-call-start', id: pending.id, name: pending.name })
+    if (!item.content.trim() && item.toolCalls.length === 0) recordTextRequestFailure(item,
+      { usageId: `settled-main-${mocks.chat.mock.calls.length}`, status: 'terminal', billingKnown: true },
+      JSON.stringify(input.messages), JSON.stringify(input.tools), input.usageLog)
     return item
   })
 }
@@ -3085,14 +3088,15 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
   })
 
-  it.each(['stop', 'length'] as const)('bounds thinking-only %s responses without replaying their reasoning or claiming completion', async finishReason => {
-    const empty = { ...response(''), reasoning: '无效思考'.repeat(1000), finishReason }
+  it('corrects an ordinary empty stop once without replaying its reasoning or claiming completion', async () => {
+    const empty = { ...response(''), reasoning: '无效思考'.repeat(1000), finishReason: 'stop' as const }
     queue(empty, empty)
     await run()
     expect(mocks.chat).toHaveBeenCalledTimes(2)
+    expect(mocks.chat.mock.calls.map(([input]) => input.maxOutputTokens)).toEqual([8192, 8192])
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
     expect(JSON.stringify(mocks.chat.mock.calls[1][0].messages)).not.toContain('无效思考')
-    expect(mocks.update.mock.calls.some(([arg]) => String(arg.data.errorMessage).includes('连续两轮'))).toBe(true)
+    expect(mocks.update.mock.calls.some(([arg]) => String(arg.data.errorMessage).includes('任务未完成'))).toBe(true)
     const reason = String(mocks.runs.get('run')?.errorMessage)
     expect(events().filter(event => event.type === 'text.final' && event.text === reason)).toHaveLength(0)
     expect(events().slice(-2)).toEqual([
@@ -3101,6 +3105,92 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     ])
     expect(mocks.persist.mock.calls.some(([arg]) => (JSON.stringify(arg.data?.parts) ?? '').includes(reason))).toBe(false)
     expect(mocks.runs.get('run')).toMatchObject({ status: 'failed', currentTurn: 2, usage: { totalTokens: 20 } })
+  })
+
+  it.each([undefined, 16000])('recovers the actual thinking-only ceiling with a viable output allowance, declared capacity=%s', async maxOutputTokens => {
+    const runtime = { tier: 'speed', provider: 'deepseek', modelName: 'deepseek-flash', baseUrl: 'https://api.deepseek.com/v1', apiKey: 'fixture-only',
+      reasoningEffort: 'high', thinkingEnabled: true, multiplierBps: 10000, contextWindowTokens: 128000,
+      ...(maxOutputTokens ? { maxOutputTokens } : {}) }
+    const before = structuredClone(runtime)
+    mocks.modelRuntime.mockResolvedValue(runtime)
+    const empty = { ...response('', [], 8192), reasoning: 'Synthetic unfinished reasoning.', finishReason: 'length' as const }
+    queue(empty)
+    mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
+      if ((input.maxOutputTokens ?? 8192) <= 8192) {
+        recordTextRequestFailure(empty, { usageId: 'settled-second-empty', status: 'terminal', billingKnown: true },
+          JSON.stringify(input.messages), JSON.stringify(input.tools), input.usageLog)
+        return empty
+      }
+      return response('', [call('actual-after-truncation')])
+    })
+    queue(response('检查已完成。'))
+    await run()
+    expect(mocks.chat).toHaveBeenCalledTimes(3)
+    expect(mocks.chat.mock.calls.map(([input]) => input.maxOutputTokens)).toEqual([8192, maxOutputTokens ?? 16384, maxOutputTokens ?? 16384])
+    expect(mocks.tools[0].execute).toHaveBeenCalledOnce()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    for (const [input] of mocks.chat.mock.calls) {
+      expect(input).toMatchObject({ model: 'deepseek-flash', provider: 'deepseek', reasoningEffort: 'high', thinkingEnabled: true,
+        usageLog: { modelTier: 'speed', multiplierBps: 10000 } })
+      expect(input).not.toHaveProperty('boundedReview')
+    }
+    expect(runtime).toEqual(before)
+    expect(JSON.stringify(mocks.chat.mock.calls[1][0].messages)).not.toContain(empty.reasoning)
+  })
+
+  it('recovers three thinking-only truncations with strictly larger requests and retains the viable budget after real tool progress', async () => {
+    mocks.modelRuntime.mockResolvedValue({ tier: 'speed', provider: 'deepseek', modelName: 'deepseek-flash',
+      baseUrl: 'https://api.deepseek.com/v1', apiKey: 'fixture-only', reasoningEffort: 'high', thinkingEnabled: true,
+      multiplierBps: 10000, contextWindowTokens: 128000 })
+    const empty = { ...response(''), reasoning: 'Synthetic unfinished reasoning.', finishReason: 'length' as const }
+    queue(empty, { ...empty }, { ...empty }, response('', [call('actual-after-three-truncations')]), response('检查已完成。'))
+    await run()
+    expect(mocks.chat.mock.calls.map(([input]) => input.maxOutputTokens)).toEqual([8192, 16384, 32768, 65536, 65536])
+    expect(mocks.tools[0].execute).toHaveBeenCalledOnce()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    for (const [input] of mocks.chat.mock.calls) {
+      expect(input).toMatchObject({ provider: 'deepseek', model: 'deepseek-flash', reasoningEffort: 'high', thinkingEnabled: true,
+        usageLog: { modelTier: 'speed', multiplierBps: 10000 } })
+      expect(input).not.toHaveProperty('boundedReview')
+      expect(JSON.stringify(input.messages)).not.toContain(empty.reasoning)
+    }
+  })
+
+  it('reports actual declared output exhaustion without buying another identical truncated request', async () => {
+    mocks.modelRuntime.mockResolvedValue({ tier: 'speed', multiplierBps: 10000, modelName: 'fixture-main',
+      contextWindowTokens: 128000, maxOutputTokens: 16384 })
+    const empty = { ...response(''), reasoning: 'Synthetic unfinished reasoning.', finishReason: 'length' as const }
+    queue(empty, { ...empty })
+    await run()
+    expect(mocks.chat.mock.calls.map(([input]) => input.maxOutputTokens)).toEqual([8192, 16384])
+    expect(mocks.tools[0].execute).not.toHaveBeenCalled()
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'failed', currentTurn: 2 })
+    expect(String(mocks.runs.get('run')?.errorMessage)).toContain('可用输出上限')
+  })
+
+  it('requires the original settled proof again after earlier truncation recoveries', async () => {
+    const empty = { ...response(''), reasoning: 'Synthetic unfinished reasoning.', finishReason: 'length' as const }
+    queue(empty, { ...empty })
+    mocks.chat.mockImplementationOnce(async () => ({ ...empty }))
+    await run()
+    expect(mocks.chat.mock.calls.map(([input]) => input.maxOutputTokens)).toEqual([8192, 16384, 32768])
+    expect(mocks.tools[0].execute).not.toHaveBeenCalled()
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'failed', currentTurn: 3 })
+    expect(String(mocks.runs.get('run')?.errorMessage)).toContain('尚未确认')
+  })
+
+  it.each(['unknown', 'pending-settlement'] as const)('does not retry thinking-only length without the original known billing proof: %s', async kind => {
+    mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
+      const empty = { ...response(''), reasoning: 'Synthetic unfinished reasoning.', finishReason: 'length' as const }
+      if (kind === 'pending-settlement') recordTextRequestFailure(empty,
+        { usageId: 'pending-original', status: 'unknown', billingKnown: false }, JSON.stringify(input.messages), JSON.stringify(input.tools), input.usageLog)
+      return empty
+    })
+    await run()
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(mocks.tools[0].execute).not.toHaveBeenCalled()
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'failed', currentTurn: 1 })
+    expect(String(mocks.runs.get('run')?.errorMessage)).toContain('尚未确认')
   })
 
   it.each(['internal', 'provider'] as const)('publishes a single persisted server explanation before the ordinary %s failure closes the stream', async kind => {
@@ -3130,7 +3220,7 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     queue(response(''), response(''))
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '检查当前章节' })
     expect(events().filter(event => event.type === 'run.finished' || event.type === 'run.paused')).toHaveLength(0)
-    expect(events().filter(event => event.type === 'text.final' && event.text.includes('连续两轮'))).toHaveLength(0)
+    expect(events().filter(event => event.type === 'text.final' && event.text.includes('任务未完成'))).toHaveLength(0)
     expect(events().at(-1)).toMatchObject({ type: 'error', code: 'run_status_unconfirmed' })
     expect(mocks.update.mock.calls.filter(([input]) => input.data.status === 'failed')).toHaveLength(1)
     expect(mocks.chat).toHaveBeenCalledTimes(2)

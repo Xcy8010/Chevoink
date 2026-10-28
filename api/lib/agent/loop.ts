@@ -4,7 +4,7 @@ import { terminalProcessingPlan, terminalProcessingPhaseGapMessage } from './ter
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
 import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, writingClarificationResolvesInput, readCompletedWritingDelivery, readRecoveredChapterDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
-import { createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
+import { consumeTextRequestRecovery, createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
 import { readReviewRequestRecovery, readCompletedReviewRequestRecovery } from './review-request-recovery.js'
 import { readAuthorReviewReplacements } from './author-review-replacement.js'
 import { readContinuedReviewRecovery, readContinuedReviewDispatchWitness, readContinuedReviewRepairHandoff, continuedReviewAttemptKey, continuedReviewCallId,
@@ -65,7 +65,7 @@ import { createVisibleTextStreamer, humanizeAgentVisibleText } from './visible-t
 import { createExecutionTextDetector, normalizeExecutionText } from './execution-text-detector.js'
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
 import { toolTurnHistory } from './tool-turn-history.js'
-import { createEmptyResponseGuard, createProtocolRecoveryGuard, isContinuationRequest, isExplicitAuthorEnd, hasAuthorEnded, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
+import { emptyResponseRecoveryOutputTokens, createProtocolRecoveryGuard, isContinuationRequest, isExplicitAuthorEnd, hasAuthorEnded, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
 import { toolFailureRecovery, toolRecoveryKey } from './tool-failure-recovery.js'
 import { frozenWritingToolGuidance } from './writing-tool-guidance.js'
 import { findToolRestriction, isLocalToolFailure, isInputScopedFailure, restoreToolRestriction, toolFailureInputHash, toolRestrictionTarget, type ToolRestriction } from './tool-local-failure.js'
@@ -105,6 +105,7 @@ import {
   estimateChatMessageTokens,
   estimateToolDefinitionTokens,
   resolveAgentContextBudget,
+  resolveDurableInputLimit,
   releaseCompletedReasoning,
 } from './context-budget.js'
 
@@ -1661,7 +1662,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     // This run's published tool definitions are immutable. Reuse only their
     // estimate; messages are measured afresh after steering/skill updates.
     const toolDefinitionTokens = estimateToolDefinitionTokens(openAITools)
-    const contextBudget = resolveAgentContextBudget(modelRuntime.contextWindowTokens ?? env.agentContextWindowTokens, env.aiTextMaxOutputTokens)
+    const contextWindowTokens = modelRuntime.contextWindowTokens ?? env.agentContextWindowTokens
+    let requestOutputTokens = Math.min(env.aiTextMaxOutputTokens, modelRuntime.maxOutputTokens ?? env.aiTextMaxOutputTokens)
+    let outputRecoveryFrom: number | undefined
+    const resolveRequestContextBudget = () => {
+      const budget = resolveAgentContextBudget(contextWindowTokens, requestOutputTokens)
+      return { ...budget, hardRequestTokens: Math.min(budget.hardRequestTokens, resolveDurableInputLimit(contextWindowTokens, requestOutputTokens)) }
+    }
+    let contextBudget = resolveRequestContextBudget()
 
     /**
      * Provider-independent in-run compaction for DeepSeek, GLM and custom
@@ -1765,7 +1773,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     let lastAssistantText = ''
     // 模型把工具调用写成正文文本而非真正 function calling 时的纠偏重试次数
     const protocolRecovery = createProtocolRecoveryGuard()
-    const emptyResponseRecovery = createEmptyResponseGuard()
+    let emptyFormatCorrectionUsed = false
     let requireNativeToolCall = false
     // C3：规划类任务必须以 plan_save 落盘收尾，只聊天不落盘时回填提醒
     const expectsPlanSave = taskSpec.intent !== 'research_analysis' && params.mode === 'plan' && /(规划|大纲|计划)/.test(params.prompt)
@@ -2203,10 +2211,21 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         estimatedRequestTokens += estimateChatMessageTokens(contextReminder)
       }
       // 在发往供应商之前执行模型窗口感知的压缩；仍超限则安全收尾，不把必失败请求交给供应商。
-      const requestBudget = prepareContextForRequest(estimatedRequestTokens, 'turn')
+      let requestBudget = prepareContextForRequest(estimatedRequestTokens, 'turn')
+      if (!bootstrapCall && outputRecoveryFrom !== undefined) {
+        const fittingOutput = emptyResponseRecoveryOutputTokens(outputRecoveryFrom, modelRuntime.maxOutputTokens, contextWindowTokens, requestBudget.afterTokens)
+        if (fittingOutput === null) {
+          await finalizeFailedWithNotice('当前上下文空间不足，生成未完成，进度已保留。')
+          return
+        }
+        requestOutputTokens = fittingOutput
+        contextBudget = resolveRequestContextBudget()
+        requestBudget = { ...requestBudget, fits: requestBudget.afterTokens <= contextBudget.hardRequestTokens }
+      }
       console.info('[agent-request-context]', {
         turn, messages: messages.length, tools: openAITools.length, toolTokens: toolDefinitionTokens,
         beforeTokens: requestBudget.beforeTokens, afterTokens: requestBudget.afterTokens,
+        maxOutputTokens: requestOutputTokens,
         budgetMs: performance.now() - budgetStarted,
       })
       if (!bootstrapCall && !requestBudget.fits) {
@@ -2243,6 +2262,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const executionReasoningDetector = createExecutionTextDetector()
 
       const observeTurnUsage = trackRequestUsage(usage)
+      const recoverySystem = JSON.stringify(messages), recoveryContent = JSON.stringify(openAITools)
       const result = bootstrapCall ? { content: '', reasoning: '', toolCalls: [bootstrapCall], finishReason: 'tool_calls' as const,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } } : await chatWithTools({
         freePromotion: modelRuntime.freePromotion,
@@ -2258,6 +2278,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         reasoningParameterMode: modelRuntime.reasoningParameterMode,
         thinkingEnabled: modelRuntime.thinkingEnabled,
         outputTokenParameter: modelRuntime.outputTokenParameter,
+        maxOutputTokens: requestOutputTokens,
         temperature: taskSpec.creativeFreedom === 'stable' ? 0.45 : taskSpec.creativeFreedom === 'bold' ? 0.85 : 0.65,
         onChunk: (chunk) => {
           if (chunk.type === 'text-delta') {
@@ -2496,26 +2517,42 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
       if (cleanContent) lastAssistantText = authorContent
 
-      const emptyDecision = emptyResponseRecovery.observe(cleanContent, effectiveToolCalls.length)
-      if (emptyDecision !== 'continue') {
+      if (!cleanContent.trim() && effectiveToolCalls.length === 0) {
         // Preserve diagnosis, but do not replay unproductive reasoning into a
         // growing request. Model and reasoning settings remain unchanged.
         messages.pop()
         await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
         bus.emit({ type: 'step.finish', turn, usage: result.usage })
+        const recoveryReady = consumeTextRequestRecovery(result, recoverySystem, recoveryContent,
+          { userId: params.userId, action: 'agentLoopTurn', targetId: runId })
         console.warn('[agent-empty-response]', { runId, turn, finishReason: result.finishReason,
-          reasoningChars: result.reasoning.length, completionTokens: result.usage.completionTokens, decision: emptyDecision })
-        if (emptyDecision === 'stop') {
-          const reason = result.finishReason === 'length'
-            ? '模型连续两轮未返回正文或工具调用，本轮又达到单次输出上限；已停止重复消耗，任务未完成。已保存内容保留，请检查模型输出上限或选择合适的推理档位后再继续。'
-            : '模型连续两轮未返回正文或工具调用，已停止重复消耗；任务未完成，已保存内容保留。请检查模型服务后再继续。'
-          await finalizeFailedWithNotice(reason)
+          reasoningChars: result.reasoning.length, completionTokens: result.usage.completionTokens, maxOutputTokens: requestOutputTokens,
+          recoveryReady })
+        if (!recoveryReady) {
+          await finalizeFailedWithNotice('本次生成的用量或费用尚未确认，已停止重试，进度已保留。')
           return
+        }
+        if (result.finishReason === 'length' && result.reasoning.trim()) {
+          const recoveryOutput = emptyResponseRecoveryOutputTokens(requestOutputTokens, modelRuntime.maxOutputTokens, contextWindowTokens)
+          if (recoveryOutput === null) {
+            await finalizeFailedWithNotice('本次生成已达到可用输出上限，任务未完成，进度已保留。')
+            return
+          }
+          outputRecoveryFrom = requestOutputTokens
+          requestOutputTokens = recoveryOutput
+          contextBudget = resolveRequestContextBudget()
+        } else if (emptyFormatCorrectionUsed) {
+          await finalizeFailedWithNotice('模型未返回可用内容，任务未完成，进度已保留。')
+          return
+        } else {
+          emptyFormatCorrectionUsed = true
         }
         requireNativeToolCall = true
         messages.push({ role: 'user', content: '[系统] 上轮只返回思考或空响应，没有正文和工具调用，不构成任何已完成工作。请直接执行原授权范围内一个必要的工具步骤，或给出有效答复；如受内容限制或缺少必要信息，请明确说明，不要继续长篇空转思考。' })
         continue
       }
+      outputRecoveryFrom = undefined
+      emptyFormatCorrectionUsed = false
 
       if (effectiveToolCalls.length === 0) {
         // C3：规划类任务未经 plan_save 落盘就想收尾，回填提醒（最多 2 次）防止全程只聊天不落盘

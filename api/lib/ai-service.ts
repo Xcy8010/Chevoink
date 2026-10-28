@@ -836,6 +836,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   }
 
   const startedAt = Date.now()
+  const recoverySystem = JSON.stringify(params.messages), recoveryContent = JSON.stringify(params.tools)
   const model = params.model ?? env.aiTextModel
   const endpoint = `${(params.providerBaseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`
 
@@ -1215,7 +1216,15 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
 
   await recordStreamUsage(true)
 
-  return { content, reasoning, toolCalls, finishReason, usage }
+  const result = { content, reasoning, toolCalls, finishReason, usage }
+  if (params.usageLog.action === 'agentLoopTurn' && !content.trim() && toolCalls.length === 0 && prepared) {
+    // Reuse the single-use bounded-review proof. A returned stream alone does
+    // not prove that its original reservation has settled.
+    const request = beginTextRequest(prepared.id)
+    await finishTextRequest(request.record, true)
+    recordTextRequestFailure(result, request.record, recoverySystem, recoveryContent, params.usageLog)
+  }
+  return result
 }
 
 export async function generateTextCompletion(

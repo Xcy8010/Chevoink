@@ -10,6 +10,14 @@ import {
 } from '../../api/lib/credits.js'
 
 describe('custom model verified capabilities', () => {
+  it('reads declared output capacity without writing or confusing it with the request allowance', () => {
+    const metadata = { max_output_tokens: 393216, contextWindowTokens: 128000 }, before = structuredClone(metadata)
+    expect(parseModelCapabilities(metadata, 'deepseek')).toMatchObject({ maxOutputTokens: 393216, contextWindowTokens: 128000 })
+    expect(parseModelCapabilities({ maxOutputTokens: 16384 })).toMatchObject({ maxOutputTokens: 16384 })
+    expect(metadata).toEqual(before)
+    for (const value of [null, 0, -1, 8192.5, '393216', Number.MAX_SAFE_INTEGER + 1])
+      expect(parseModelCapabilities({ max_output_tokens: value })).not.toHaveProperty('maxOutputTokens')
+  })
   it('adapts unavailable effort labels without rejecting a valid configured model', () => {
     expect(resolveCustomReasoningEffort('max', ['low', 'medium', 'high'])).toBe('high')
     expect(resolveCustomReasoningEffort('medium', ['low', 'high', 'max'])).toBe('low')
