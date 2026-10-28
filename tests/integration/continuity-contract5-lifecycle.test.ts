@@ -22,6 +22,7 @@ import * as normalizations from '../../api/lib/agent/continuity-review-v4.js'
 import { prepareCompilerTerminalProposals } from '../../api/lib/agent/terminal-proposal-context.js'
 import { buildContinuityInvalidRowRepair, inspectContinuityV4, validateStoredContinuityV4Projection } from '../../api/lib/agent/continuity-review-v4.js'
 import { legacyAssessmentInputSchema } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { freezeWritingScope, bindWritingChapter } from '../../api/lib/agent/writing-scope.js'
 import { readReviewRequestRecoveryEvidence } from '../../api/lib/agent/review-request-recovery.js'
 import { RunEventBus, loadPersistedEvents } from '../../api/lib/agent/events.js'
 import * as credits from '../../api/lib/credits.js'
@@ -29,6 +30,100 @@ import * as prices from '../../api/lib/billing/resolve-token-price.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 describe.runIf(available)('contract5 actual legacy provider, report CAS and independent bridge gate', () => {
+  it('preserves a failed known body pair through eight real edits, one original verification and the first candidate commit', () => fixture(async f => {
+    const prompt = '写第一章', content = Array.from({ length: 8 }, (_, i) => `Entry ${i} remains pending.`).join(' ')
+    const old = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    await prisma.$transaction(async tx => {
+      await tx.chapter.delete({ where: { id: old.id } })
+      f.spec = await freezeWritingScope(tx, f, f.spec, prompt)
+      expect(f.spec.scope.writing).toMatchObject({ kind: 'bounded', targets: [{ chapterId: null, orderIndex: 1 }] })
+      await tx.agentRun.update({ where: { id: f.runId }, data: { taskSpec: JSON.parse(JSON.stringify(f.spec)), chapterId: null,
+        status: 'running', taskRootId: null, runtimeProtocolVersion: 0, startRequest: { prompt } } })
+      await tx.chapter.create({ data: { id: old.id, authorId: f.userId, novelId: f.novelId, volumeId: old.volumeId, title: old.title,
+        orderIndex: 1, orderInVolume: 1, content, wordCount: content.length, revision: 3 } })
+      await bindWritingChapter(tx, f, 1, old.id)
+      await tx.agentRun.update({ where: { id: f.runId }, data: { chapterId: old.id } })
+    })
+    await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'run.started', payload: { type: 'run.started', seq: 1 } } })
+    const { compilation } = await prepareStoryCompilation({ ...f, chapterId: old.id, mode: 'balanced', intentSummary: 'Save and verify the authorized new draft.' })
+    const candidate = terminalCandidateSchema.parse({ exitState: { objects: ['Entry 0 remains recorded.'] } })
+    await saveSceneTasks({ ...f, compilationId: compilation.id, tasks: [{ purpose: 'Record the entries', entryState: candidate.exitState, goal: 'Record', obstacle: 'Delay',
+      choice: 'Record', cost: 'Time', turn: 'Recorded', exitState: candidate.exitState, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
+    const runtime: NonNullable<ToolContext['modelRuntime']> = { tier: 'speed', multiplierBps: 15000, provider: 'fixture', modelName: 'fixture',
+      baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-only', reasoningEffort: 'high', reasoningEfforts: ['none', 'high'],
+      reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: 128000 }
+    const price = { version: 'credits-v2-itemized' as const, modelTier: 'speed' as const, multiplierBps: 11000, rateCardId: 'failed-body-cycle-fixture',
+      rates: { inputNano: 110000, cacheNano: 27500, outputNano: 1100000 } }
+    vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(runtime)
+    vi.spyOn(prices, 'resolveTokenPrice').mockResolvedValue(price)
+    const window = credits.getCreditWindow()
+    await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+    const ctx: ToolContext = { ...f, continuityOwnerSeq: 1, callId: 'failed-body', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced',
+      modelRuntime: runtime, signal: new AbortController().signal, emit: () => {} }
+    const semanticChecks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reasonCode: 'consistent',
+      explanation: 'The full current manuscript has no incompatible events.', findingIds: [] }))
+    const invalidReference = { segmentId: 'c0', quote: 'A nonexistent explicit manuscript quotation.' }
+    const firstRaw = JSON.stringify({ findings: [{ findingId: 'f0', signal: 'object', severity: 'warning', reasonCode: 'insufficient_evidence',
+      explanation: 'An unsupported independent allegation.', suggestion: 'Read the real source.', manuscriptEvidence: [invalidReference] }], semanticChecks, issueDispositions: [] })
+    const secondRaw = JSON.stringify({ corrections: [{ table: 'findings', index: 0, value: { findingId: 'f0', action: 'retract', reasonCode: 'insufficient_evidence',
+      explanation: 'The old opinion “a prior hypothesis” is retracted, but its explicit quote remains invalid.', manuscriptEvidence: [invalidReference] } }] })
+    const bodyRaw = JSON.stringify({ findings: [], semanticChecks, issueDispositions: [] })
+    const candidateRaw = JSON.stringify({ findings: [], semanticChecks, issueDispositions: [], terminalVerdicts: [{ claimIndex: 0, verdict: 'supported',
+      reasonCode: 'consistent', explanation: 'The saved current body explicitly records this entry.', manuscriptEvidence: [{ segmentId: 'c0', quote: 'Entry 0 remains recorded.' }] }],
+    terminalProofVerdicts: [], terminalDispositions: [] })
+    const responses = [firstRaw, secondRaw, bodyRaw, candidateRaw]
+    const fetchMock = vi.fn(async () => {
+      const raw = responses[fetchMock.mock.calls.length - 1]
+      if (!raw) throw Error('A completed original cycle must not purchase another physical request')
+      return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: raw }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`,
+        { headers: { 'content-type': 'text/event-stream' } })
+    }); vi.stubGlobal('fetch', fetchMock)
+    expect(await continuityValidateTool.execute(ctx, { compilationId: compilation.id })).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE' })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const failed = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
+    expect(failed.validation).toMatchObject({ independentCheck: 'unavailable', checkedRevision: 3,
+      continuityCriticResponse: { parserVersion: 10, classification: 'projection_invalid', continuityV4: { failedRepair: { response: { content: JSON.stringify(secondRaw) } } } } })
+    expect(failed.preparedContext).not.toHaveProperty('reviewCycle')
+    const originalFees = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const originalArtifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
+    const originalLedger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    expect(originalFees).toHaveLength(2)
+    expect(originalFees.every(row => row.billingStatus === 'settled' && row.usageSource === 'reported')).toBe(true)
+    expect(originalArtifacts.some(row => !!(row.metadata as Record<string, unknown>).continuityPhaseClaim)).toBe(false)
+    const patches = Array.from({ length: 8 }, (_, i) => ({ oldText: `Entry ${i} remains pending.`, newText: `Entry ${i} remains recorded.` }))
+    expect(await chapterEditRangeTool.execute({ ...ctx, callId: 'eight-authorized-edits' }, { chapterId: old.id, patches })).not.toMatchObject({ outcome: 'failed' })
+    const revised = await prisma.chapter.findUniqueOrThrow({ where: { id: old.id } })
+    const edited = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
+    expect(revised).toMatchObject({ revision: 4, content: patches.map(patch => patch.newText).join(' ') })
+    expect(edited.preparedContext).not.toHaveProperty('reviewCycle')
+    expect(edited.validation).toMatchObject({ independentCheck: 'unavailable', newDraftRevision: { taskId: f.spec.id, chapterId: old.id,
+      compilationId: compilation.id, checkedRevision: 3, beforeHash: runtimeJson({ content }).hash, afterHash: runtimeJson({ content: revised.content }).hash } })
+    expect(await continuityValidateTool.execute({ ...ctx, callId: 'one-original-body-verification' }, { compilationId: compilation.id })).toMatchObject({ reviewCompleted: true })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    const verified = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
+    expect(verified.validation).toMatchObject({ independentCheck: 'complete', checkedRevision: 4 })
+    expect(verified.validation).not.toHaveProperty('terminalCandidate')
+    const claims = await prisma.agentArtifact.findMany({ where: { runId: f.runId } })
+    expect(claims.filter(row => !!(row.metadata as Record<string, unknown>).legacyContinuityVerification)).toHaveLength(1)
+    expect(claims.filter(row => !!(row.metadata as Record<string, unknown>).continuityPhaseClaim)).toHaveLength(0)
+    expect(await continuityValidateTool.execute({ ...ctx, callId: 'repeat-current-body' }, { compilationId: compilation.id })).toMatchObject({ reviewCompleted: true })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    await persistHumanityQualityReport({ ...f, compilationId: compilation.id, chapterId: old.id, chapterRevision: revised.revision, mode: 'balanced',
+      criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
+    expect(await continuityValidateTool.execute({ ...ctx, callId: 'first-real-candidate' }, { compilationId: compilation.id, terminalState: candidate })).toMatchObject({ reviewCompleted: true })
+    expect(await chapterBridgeCommitTool.execute({ ...ctx, callId: 'commit-current' }, { compilationId: compilation.id })).not.toMatchObject({ outcome: 'failed' })
+    expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toMatchObject({ committedAt: expect.any(Date), targetRevision: 4 })
+    expect(await continuityValidateTool.execute({ ...ctx, callId: 'changed-candidate' }, { compilationId: compilation.id,
+      terminalState: terminalCandidateSchema.parse({ exitState: { objects: ['A different unsupported entry.'] } }) }))
+      .toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(await prisma.aiUsageLog.findMany({ where: { id: { in: originalFees.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(originalFees)
+    expect(await prisma.agentArtifact.findMany({ where: { id: { in: originalArtifacts.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(originalArtifacts)
+    expect(await prisma.creditLedgerEntry.findMany({ where: { id: { in: originalLedger.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(originalLedger)
+    expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(4)
+    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(4)
+  }, undefined, '写第一章', { continuityEvidenceProtocol: 1, continuityReportProtocol: 5, terminalEvidenceProtocol: 2,
+    terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
   it.each(['complete', 'normalized-cross-chunk', 'preserved-canonical', 'typed-sparse-repair', 'repaired-background', 'single-background', 'recovered-failed-background', 'unknown', 'applied-typed-error', 'merged-revision', 'spent-revision', 'cancel-known-raw', 'wrong-owner', 'body-only-first-terminal', 'body-only-unknown', 'body-only-old-local-refusal', 'body-only-with-obligation'] as const)('%s preserves the original phase and V2 price', scenario => fixture(async f => {
     const bodyOnly = scenario.startsWith('body-only-'), recoveringPair = scenario === 'recovered-failed-background'
     const pairedBackground = scenario === 'repaired-background' || recoveringPair

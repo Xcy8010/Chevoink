@@ -4,7 +4,7 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-candidate-contract.js'
 import { continuitySubjectIdentity } from '../../api/lib/agent/continuity-subject-identity.js'
 import { buildContinuityReviewManifest, continuityReviewV4Request, inspectContinuityV4, applyContinuityV4Repair,
-  validateStoredContinuityV4Projection, buildContinuityInvalidRowRepair, normalizeContinuityV4ProjectionV2 } from '../../api/lib/agent/continuity-review-v4.js'
+  validateStoredContinuityV4Projection, buildContinuityInvalidRowRepair, normalizeContinuityV4ProjectionV2, failedContinuityV4Repair } from '../../api/lib/agent/continuity-review-v4.js'
 import { effectiveContinuityAudit, continuityPhasePlanSchema, validContinuityPhasePlan, continuityUsageRowHash, continuityQuestionOwner, readKnownContinuityReplay,
   nativeContinuityRevisionMaterialMatches } from '../../api/lib/agent/continuity-coordinator.js'
 import { inspectAuthenticatedContinuityAssessment } from '../../api/lib/agent/authenticated-continuity-assessment.js'
@@ -41,6 +41,52 @@ function fixture() {
 }
 
 describe('explicit continuity contract5, frozen <=9 replay', () => {
+  it.each(['body', 'candidate'] as const)('uses the same live typed explanation rule for a %s report and explicit retraction while replaying strict parser10 unchanged', scope => {
+    const f = fixture(), manifest = scope === 'body' ? buildContinuityReviewManifest({ ...f.base, candidate: undefined,
+      typedLineage: f.frozen.manifest.typedLineage }) : f.frozen.manifest
+    const frozen = { manifest, bodies: f.bodies, sourceScope: f.base.sourceScope, ...(scope === 'candidate' ? { candidate: f.candidate } : {}) }
+    const plain = { findings: [], semanticChecks: f.wire.semanticChecks, issueDispositions: [], ...(scope === 'candidate' ? {
+      terminalVerdicts: f.wire.terminalVerdicts, terminalProofVerdicts: [], terminalDispositions: [] } : {}) }
+    const explained = { ...plain, semanticChecks: plain.semanticChecks.map(row => ({ ...row,
+      explanation: 'The label “a prior hypothesis” is explanatory data, not a manuscript quotation.' })) }
+    const strictFirst = inspectContinuityV4(JSON.stringify(explained), frozen), strictHash = runtimeJson(strictFirst.audit).hash
+    expect(strictFirst.complete).toBe(false)
+    const firstProjection = normalizeContinuityV4ProjectionV2(strictFirst, 'a'.repeat(64))
+    expect(firstProjection.complete).toBe(true)
+    expect(validateStoredContinuityV4Projection(firstProjection.audit, f.current, f.context)?.audit).toEqual(firstProjection.audit)
+    expect(runtimeJson(validateStoredContinuityV4Projection(strictFirst.audit, f.current, f.context)!.audit).hash).toBe(strictHash)
+
+    const raw = JSON.stringify({ ...plain, findings: [{ findingId: 'f0', signal: 'object', severity: 'warning', reasonCode: 'insufficient_evidence',
+      explanation: 'An unverified hypothesis remains only an opinion.', suggestion: 'Read the full source.',
+      manuscriptEvidence: [{ segmentId: 'c0', quote: 'An invented explicit quotation.' }] }] })
+    const first = inspectContinuityV4(raw, frozen), plan = buildContinuityInvalidRowRepair(first)!
+    expect(plan.mask).toEqual([{ table: 'findings', index: 0 }])
+    const decision = { findingId: 'f0', action: 'retract', reasonCode: 'insufficient_evidence',
+      explanation: 'The old opinion “an invented explicit quotation” is unsupported; this explanation does not certify it.',
+      manuscriptEvidence: [{ segmentId: 'c0', quote: 'The sealed packet is held by the guard.' }] }
+    const second = JSON.stringify({ corrections: [{ table: 'findings', index: 0, value: decision }] })
+    expect(() => applyContinuityV4Repair(first, second, true)).toThrow('Typed retraction lacks authentic source references')
+    const failed = failedContinuityV4Repair(first, second, true), failedHash = runtimeJson(failed.audit).hash
+    const projected = normalizeContinuityV4ProjectionV2(failed, 'a'.repeat(64))
+    expect(projected).toMatchObject({ complete: true, findings: [], audit: { continuityV4: { projectionNormalization: { version: 2, mode: 'sparse_repair',
+      mappings: [expect.objectContaining({ kind: 'non_evidentiary_explanation', table: 'findings', index: 0 })] } } } })
+    expect(projected.audit.rawResponse).toEqual(first.audit.rawResponse)
+    expect(projected.audit.continuityV4.failedRepair!.response.content).toBe(JSON.stringify(second))
+    expect(validateStoredContinuityV4Projection(projected.audit, f.current, f.context)?.audit).toEqual(projected.audit)
+    expect(runtimeJson(failed.audit).hash).toBe(failedHash)
+    expect(runtimeJson(validateStoredContinuityV4Projection(failed.audit, f.current, f.context)!.audit).hash).toBe(failedHash)
+    expect(() => applyContinuityV4Repair(first, second, true)).toThrow('Typed retraction lacks authentic source references')
+    for (const kind of ['bad-quote', 'wrong-prior', 'dangling-finding'] as const) {
+      const value = { ...decision, ...(kind === 'bad-quote' ? { manuscriptEvidence: [{ segmentId: 'c0', quote: 'A second invented explicit quote.' }] } : {}),
+        ...(kind === 'wrong-prior' ? { priorFindingRef: { reportHash: f.prior.reportHash, findingId: f.prior.findingId, quote: 'Not the frozen earlier opinion.' } } : {}) }
+      const malformedFirst = kind === 'dangling-finding' ? inspectContinuityV4(JSON.stringify({ ...JSON.parse(raw), semanticChecks: plain.semanticChecks.map(row =>
+        row.kind === 'state_progression' ? { ...row, result: 'conflict', findingIds: ['f0'] } : row) }), frozen) : first
+      const mask = buildContinuityInvalidRowRepair(malformedFirst)!
+      const malformedSecond = JSON.stringify({ corrections: mask.mask.map(item => ({ ...item,
+        value: item.table === 'findings' ? value : (malformedFirst.parsed!.record.semanticChecks as unknown[])[item.index] })) })
+      expect(normalizeContinuityV4ProjectionV2(failedContinuityV4Repair(malformedFirst, malformedSecond, true), 'a'.repeat(64)).complete).toBe(false)
+    }
+  })
   it('reviews the whole body with typed evidence while terminal certification remains unrequested', () => {
     const f = fixture(), { hash: _hash, ...oldPlan } = f.plan
     const planValue = { ...oldPlan, semanticSubjectHash: continuitySubjectIdentity({ chapterId: 'chapter', revision: 4,

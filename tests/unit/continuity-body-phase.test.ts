@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
 import type { LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
-import { legacyContinuityAssessmentKey, readReusableLegacyContinuityAssessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { legacyContinuityAssessmentKey, readReusableLegacyContinuityAssessment, continuityReassessmentRequest } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 const boundary = vi.hoisted(() => ({ original: vi.fn(), runs: vi.fn() }))
@@ -14,7 +14,7 @@ vi.mock('../../api/lib/agent/chapter-review-guard.js', async original => ({ ...a
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-candidate-contract.js'
 import { continuitySubjectIdentity, continuityWorkSubjectIdentity } from '../../api/lib/agent/continuity-subject-identity.js'
-import { buildContinuityReviewManifest, inspectContinuityV4 } from '../../api/lib/agent/continuity-review-v4.js'
+import { buildContinuityReviewManifest, inspectContinuityV4, buildContinuityInvalidRowRepair, failedContinuityV4Repair } from '../../api/lib/agent/continuity-review-v4.js'
 import { assertContinuityAssessmentSubject, claimContinuityPhase, continuityAssessmentPhase, effectiveContinuityAudit,
   prepareContinuityPhasePlan, prepareContinuityReviewLineage, stageEffectiveContinuityReport, authenticateEffectiveContinuityReport,
   reconstructContinuitySourceProvenance, authenticateInitialContinuityHistory, claimLegacyContinuityVerification } from '../../api/lib/agent/continuity-coordinator.js'
@@ -110,6 +110,43 @@ async function bodyRecheck(f: Awaited<ReturnType<typeof fixture>>, base: ReturnT
     system: 'Frozen original-cycle body verification.', content: base.bodies.current }
 }
 
+function reserveBodyRecheck(f: Awaited<ReturnType<typeof fixture>>, input: LegacyAssessmentInput) {
+  const ctx = { ...f.subject, callId: 'body-recheck' } as ToolContext
+  return claimLegacyContinuityVerification(f.tx, ctx, input, f.rows.filter(row => row.metadata.assessmentChapterId), legacyContinuityAssessmentKey(ctx, input))
+}
+
+function failBodyPair(f: Awaited<ReturnType<typeof fixture>>) {
+  const record = JSON.parse(f.raw)
+  record.findings[0].manuscriptEvidence[0].quote = 'A nonexistent manuscript quote.'
+  const raw = JSON.stringify(record), frozen = { manifest: f.input.continuityManifest!, bodies: f.bodies, sourceScope: f.sourceScope }
+  const first = inspectContinuityV4(raw, frozen), plan = buildContinuityInvalidRowRepair(first)!
+  expect(first.complete).toBe(false)
+  const second = JSON.stringify({ corrections: plan.mask.map(item => ({ ...item, value: record[item.table][item.index] })) })
+  const failed = failedContinuityV4Repair(first, second, true)
+  f.rows[1].metadata.audit = first.audit
+  f.rows[1].metadata.response = { content: JSON.stringify(raw), transportComplete: true, finishReason: 'stop', toolCalls: [] }
+  f.fees.push({ ...f.fees[0], id: 'second-fee', action: 'agent3ContinuityCriticSecondPass' })
+  f.rows.push({ id: 'second-claim', runId: f.subject.runId, artifactType: 'continuityReview', createdAt: new Date(3), metadata: {
+    fullReassessmentKey: f.key, callId: 'body', input: f.input, original: first.audit,
+    request: continuityReassessmentRequest(f.input.system, f.input.content, first, f.bodies, false, 7), usageIds: ['body-fee'] } },
+  { id: 'second-response', runId: f.subject.runId, artifactType: 'continuityReview', createdAt: new Date(4), metadata: {
+    assessmentKey: f.key, stage: 'reassessment', callId: 'body', input: f.input, usageIds: ['second-fee'],
+    audit: inspectContinuityV4(second, frozen).audit,
+    response: { content: JSON.stringify(second), transportComplete: true, finishReason: 'stop', toolCalls: [] } } })
+  f.saved.validation = { ...f.saved.validation, independentCheck: 'unavailable', findings: [], continuityCriticResponse: failed.audit }
+  delete f.saved.validation.effectiveReport
+  return { raw, second, failed }
+}
+
+function editWithNewDraftReceipt(f: Awaited<ReturnType<typeof fixture>>) {
+  const base = editBody(f)
+  f.saved.preparedContext = {}
+  f.saved.validation.newDraftRevision = { version: 1, taskId: f.original.taskId, chapterId: f.chapter.id,
+    compilationId: f.base.targetId, checkedRevision: f.context.current.revision,
+    beforeHash: f.context.current.contentHash, afterHash: base.bodies.terminalEvidence.current.contentHash }
+  return base
+}
+
 describe('typed body review retains the original terminal phases', () => {
   it('distinguishes absent and empty candidates while preserving all existing candidate identities', async () => {
     const f = await fixture(), candidate = terminalCandidateSchema.parse({ exitState: {} }), input = { ...f.base, terminalCandidate: candidate }
@@ -191,9 +228,8 @@ describe('typed body review retains the original terminal phases', () => {
   })
   it('cannot buy a second body check after the original complete body receipt', async () => {
     const f = await fixture(), before = structuredClone({ rows: f.rows, fees: f.fees })
-    await expect(prepareContinuityReviewLineage(f.tx, f.subject, { compilationId: f.base.targetId, chapterId: f.chapter.id,
-      input: f.input, semanticSubjectHash: continuitySubjectIdentity(f.input)!, modelPriceHash: f.plan.modelPriceHash }))
-      .rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+    const input = await bodyRecheck(f, f.base)
+    await expect(reserveBodyRecheck(f, input)).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
     expect({ rows: f.rows, fees: f.fees }).toEqual(before)
   })
   it.each([{ adapter: 'legacy', outcome: 'repaired' }, { adapter: 'native', outcome: 'repaired' }, { adapter: 'legacy', outcome: 'unknown' }] as const)(
@@ -250,8 +286,63 @@ describe('typed body review retains the original terminal phases', () => {
   })
   it('does not open the original-cycle body verification while the old price-known receipt is unresolved', async () => {
     const f = await fixture(true), base = editBody(f); f.fees[0].billingStatus = 'pending_settlement'
-    await expect(bodyRecheck(f, base)).rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
+    const before = structuredClone({ rows: f.rows, fees: f.fees }), input = await bodyRecheck(f, base)
+    expect({ rows: f.rows, fees: f.fees }).toEqual(before)
+    await expect(reserveBodyRecheck(f, input)).rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
     expect(f.rows.filter(row => row.metadata.legacyContinuityVerification || row.metadata.continuityPhaseClaim)).toEqual([])
+  })
+  it.each(['legacy', 'native'] as const)('admits one %s body verification after a known failed pair and the actual new-draft CAS receipt', async adapter => {
+    const f = await fixture(true), pair = failBodyPair(f), base = editWithNewDraftReceipt(f)
+    const before = structuredClone({ rows: f.rows, fees: f.fees }), input = await bodyRecheck(f, base)
+    expect(input.continuityManifest.typedLineage).toMatchObject({ priorFindings: [], establishedIssues: [] })
+    expect(f.saved.validation).toMatchObject({ independentCheck: 'unavailable', continuityCriticResponse: pair.failed.audit })
+    expect({ rows: f.rows, fees: f.fees }).toEqual(before)
+    const ctx = { ...f.subject, callId: 'one-original-body-verification' } as ToolContext
+    const operationRef = adapter === 'native' ? 'original-native-parent' : legacyContinuityAssessmentKey(ctx, input)
+    const reserve = (reference: string) => adapter === 'native'
+      ? authenticateInitialContinuityHistory(f.tx, f.subject, { compilationId: base.targetId, chapterId: base.chapterId, input }, reference)
+      : claimLegacyContinuityVerification(f.tx, ctx, input, f.rows.filter(row => row.metadata.assessmentChapterId), reference)
+    await reserve(operationRef); await reserve(operationRef)
+    expect(f.rows.filter(row => row.metadata.legacyContinuityVerification)).toMatchObject([{ metadata: {
+      legacyContinuityVerification: { operationRef, transition: { before: { revision: 4 }, after: { revision: 5 } } } } }])
+    await expect(reserve('another-call')).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+    expect(f.rows.filter(row => row.metadata.continuityPhaseClaim)).toEqual([])
+    expect(f.fees).toEqual(before.fees)
+    const candidate = terminalCandidateSchema.parse({ exitState: { objects: ['The packet remains sealed.'] } })
+    await expect(prepareContinuityReviewLineage(f.tx, f.subject, { compilationId: base.targetId, chapterId: base.chapterId,
+      input: { ...input, terminalCandidate: candidate }, semanticSubjectHash: continuitySubjectIdentity({ ...input, terminalCandidate: candidate })!,
+      modelPriceHash: f.plan.modelPriceHash })).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+    expect(f.rows.find(row => row.id === 'body-response')!.metadata.response).toEqual(before.rows.find(row => row.id === 'body-response')!.metadata.response)
+  })
+  it.each(['same-revision', 'no-receipt', 'wrong-task', 'wrong-chapter', 'wrong-compilation', 'wrong-before', 'wrong-after', 'later-revision',
+    'unknown-fee', 'unbound-fee', 'incomplete-first', 'incomplete-second'] as const)('does not turn a failed pair into a new body allowance: %s', async kind => {
+    const f = await fixture(true); failBodyPair(f)
+    const base = kind === 'same-revision' ? f.base : editWithNewDraftReceipt(f)
+    const receipt = f.saved.validation.newDraftRevision as Record<string, unknown> | undefined
+    if (kind === 'no-receipt') delete f.saved.validation.newDraftRevision
+    if (kind === 'wrong-task') receipt!.taskId = 'other-task'
+    if (kind === 'wrong-chapter') receipt!.chapterId = 'other-chapter'
+    if (kind === 'wrong-compilation') receipt!.compilationId = 'other-compilation'
+    if (kind === 'wrong-before') receipt!.beforeHash = '0'.repeat(64)
+    if (kind === 'wrong-after') receipt!.afterHash = '0'.repeat(64)
+    if (kind === 'later-revision') { f.chapter.revision++; base.revision++; base.bodies.terminalEvidence.current.revision = base.revision }
+    if (kind === 'unknown-fee') f.fees[1].billingStatus = 'pending_settlement'
+    if (kind === 'unbound-fee') f.fees.push({ ...f.fees[0], id: 'unbound-continuity-fee', billingStatus: 'pending_settlement' })
+    if (kind === 'incomplete-first' || kind === 'incomplete-second') {
+      const row = f.rows.find(row => row.id === (kind === 'incomplete-first' ? 'body-response' : 'second-response'))!
+      const audit = row.metadata.audit as typeof f.inspected.audit
+      const raw = JSON.parse(audit.rawResponse.content) as string
+      row.metadata.audit = inspectContinuityV4(raw, { manifest: f.input.continuityManifest!, bodies: f.bodies, sourceScope: f.sourceScope }, false).audit
+      ;(row.metadata.response as { transportComplete: boolean }).transportComplete = false
+    }
+    const before = structuredClone({ rows: f.rows, fees: f.fees })
+    const calls = { requests: f.db.agentArtifact.findMany.mock.calls.length, payments: f.db.aiUsageLog.findMany.mock.calls.length }
+    const input = await bodyRecheck(f, base)
+    expect(f.db.agentArtifact.findMany.mock.calls).toHaveLength(calls.requests)
+    expect(f.db.aiUsageLog.findMany.mock.calls).toHaveLength(calls.payments)
+    expect({ rows: f.rows, fees: f.fees }).toEqual(before)
+    await expect(reserveBodyRecheck(f, input)).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+    expect({ rows: f.rows, fees: f.fees }).toEqual(before)
   })
   it('authenticates an applied body report without converting it into a terminal fact ledger', async () => {
     const f = await fixture(true)

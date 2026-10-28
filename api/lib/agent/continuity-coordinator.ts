@@ -205,26 +205,26 @@ export async function authenticateInitialContinuityHistory(db: Prisma.Transactio
     return false
   }
   const lifecycle = await import('./assessment-response-lifecycle.js')
-  const inputs: Array<{ input: LegacyAssessmentInput; audit: { contentHash: string } }> = [], usageIds = new Set<string>()
+  const inputs: Array<{ input: LegacyAssessmentInput; audit: { contentHash: string }; complete: boolean }> = [], usageIds = new Set<string>()
   for (const row of prior) {
     const meta = object(row.metadata), parsed = lifecycle.legacyAssessmentInputSchema.safeParse(meta.input)
     if (!parsed.success || parsed.data.terminalCandidate !== undefined || parsed.data.targetType !== 'story_compilation'
       || parsed.data.targetId !== target.compilationId || parsed.data.chapterId !== target.chapterId
       || typeof meta.callId !== 'string') throw blocked('原终态请求或预约仍须按原阶段核对。')
     const receipt = await lifecycle.readLegacyContinuityAssessment(db, { ...subject, runId: row.runId, callId: meta.callId } as ToolContext, parsed.data)
-    if (!receipt || !receipt.inspected.complete || !receipt.billingKnown || !receipt.providerComplete || !receipt.recoveryReady)
+    if (!receipt || !receipt.billingKnown || !receipt.providerComplete || !receipt.recoveryReady)
       throw blocked('原正文检查响应或费用尚未确认。')
     receipt.usageIds.forEach(id => usageIds.add(id))
-    inputs.push({ input: parsed.data, audit: receipt.inspected.audit })
+    inputs.push({ input: parsed.data, audit: receipt.inspected.audit, complete: receipt.inspected.complete })
   }
   if (native) {
     const artifacts = await db.agentArtifact.findMany({ where: { runId: { in: runs }, artifactType: 'continuityReview' }, take: 1001 })
     if (artifacts.length > 1000) throw blocked('原连续性记录无法完整认证。')
     const entries = await (await import('./native-continuity-assessment.js')).readNativeContinuityAssessments(db, subject, original.taskId, runs,
       { compilationId: target.compilationId, chapterId: target.chapterId, currentAudit: {}, operationIds: nativeOperations.map(row => row.id), related: () => true }, artifacts)
-    if (!entries || entries.length !== native || entries.some(entry => !entry.committed || !entry.inspected.complete || entry.input.terminalCandidate !== undefined))
+    if (!entries || entries.length !== native || entries.some(entry => !entry.committed || entry.input.terminalCandidate !== undefined))
       throw blocked('原 native 检查尚未完成，或已经包含终态判断。')
-    inputs.push(...entries.map(entry => ({ input: entry.input, audit: entry.inspected.audit })))
+    inputs.push(...entries.map(entry => ({ input: entry.input, audit: entry.inspected.audit, complete: entry.inspected.complete })))
   }
   const payments = await db.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId, agentRunId: { in: runs },
     action: { startsWith: 'agent3Continuity' }, OR: [{ chapterId: target.chapterId }, { targetId: { in: [target.chapterId, target.compilationId] } }] },
@@ -247,7 +247,7 @@ export async function authenticateInitialContinuityHistory(db: Prisma.Transactio
   if (!saved?.chapter || saved.chapter.revision !== input.revision || saved.chapter.content !== input.bodies.current
     || validation.independentCheck !== 'complete' || validation.checkedChapterId !== target.chapterId || validation.checkedRevision !== input.revision
     || object(validation.coverage).contentHash !== runtimeJson({ content: input.bodies.current }).hash
-    || !inputs.some(row => row.input.revision === input.revision && row.input.bodies.current === input.bodies.current
+    || !inputs.some(row => row.complete && row.input.revision === input.revision && row.input.bodies.current === input.bodies.current
       && row.input.bodies.previous === input.bodies.previous && row.audit.contentHash === audit.contentHash
       && runtimeJson({ previous: row.input.bodies.terminalEvidence?.previous ?? null }).hash === runtimeJson({ previous: input.bodies.terminalEvidence?.previous ?? null }).hash))
     throw blocked('原完整正文检查不属于当前版本或来源。')
@@ -259,7 +259,7 @@ export async function prepareContinuityPhasePlan(db: Prisma.TransactionClient, s
   subject.signal?.throwIfAborted()
   const original = await readOriginalTaskRequest(db, subject), runs = await originalTaskRunIds(db, subject, original)
   await (await import('./writing-scope.js')).assertWritingTarget(db, subject, { chapterId: target.chapterId })
-  const bodyOnly = await authenticateInitialContinuityHistory(db, subject, target)
+  const bodyOnly = target.input?.terminalCandidate !== undefined && await authenticateInitialContinuityHistory(db, subject, target)
   const compilation = await db.storyCompilation.findFirst({ where: { id: target.compilationId, chapterId: target.chapterId,
     userId: subject.userId, novelId: subject.novelId, runId: { in: runs } }, include: { chapter: true } })
   if (!compilation?.chapter) throw blocked('原自动检查没有当前写作编译与正文绑定。')
@@ -322,7 +322,7 @@ export async function readContinuityRevisionReceipt(db: Prisma.TransactionClient
 export async function claimLegacyContinuityVerification(db: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput,
   prior: Array<{ runId: string; metadata: unknown }>, operationRef: string) {
   if (input.parserVersion === 10 && continuityAssessmentPhase(input) !== null) return
-  const known: LegacyAssessmentInput[] = []
+  const known: LegacyAssessmentInput[] = [], usageIds = new Set<string>()
   for (const row of prior) {
     const metadata = object(row.metadata)
     if (typeof metadata.continuityAssessmentRequestKey !== 'string') continue
@@ -339,6 +339,7 @@ export async function claimLegacyContinuityVerification(db: Prisma.TransactionCl
         throw blocked('原第二阶段已确认未发送，原许可、首份原始报告和费用均保留；但原不可变记录缺少实际端点、思考编码和上下文配置，不能安全重建冻结执行配置，也未重买首轮检查。')
       }
       if (!result.billingKnown || !result.providerComplete || !result.recoveryReady) throw blocked('原检查仍有未决响应或费用。')
+      result.usageIds.forEach(id => usageIds.add(id))
       known.push(old.data)
     } catch (error) {
       if (!(error instanceof DataAccessError) || error.code !== 'RUNTIME_RECONCILIATION_REQUIRED') throw error
@@ -352,6 +353,13 @@ export async function claimLegacyContinuityVerification(db: Prisma.TransactionCl
         && !(fee.billingStatus === 'not_dispatched' && fee.creditChargeMilli === 0 && billing.isKnownTextRequestBilling(fee))))
         throw blocked('未派发证明仍有其他实际请求，不能恢复。')
     }
+  }
+  if (known.length) {
+    const original = await readOriginalTaskRequest(db, ctx), runs = await originalTaskRunIds(db, ctx, original)
+    const payments = await db.aiUsageLog.findMany({ where: { userId: ctx.userId, novelId: ctx.novelId, agentRunId: { in: runs },
+      action: { startsWith: 'agent3Continuity' }, OR: [{ chapterId: input.chapterId }, { targetId: { in: [input.chapterId, input.targetId] } }] },
+      select: { id: true } })
+    if (payments.some(row => !usageIds.has(row.id))) throw blocked('仍有未绑定原回执的连续性用量。')
   }
   // Legacy execution can follow an original native receipt. Its absence from
   // the legacy reservation table is not a new independent-review grant.
@@ -446,8 +454,15 @@ export async function readOriginalCycleContinuityVerification(db: Prisma.Transac
     { taskId: original.taskId, userId: ctx.userId, novelId: ctx.novelId, chapterId: input.chapterId }) : null
   const source = originalRepairAuthority(original) ? { taskId: original.taskId }
     : saved?.chapter ? await (await import('./writing-scope.js')).readNewDraftWritingAuthority(db, ctx, saved.chapter) : null
-  const step = cycle?.transitions.length === 1 ? cycle.transitions[0] : null
-  if (!source || !step?.contiguous || !cycle?.baseline || cycle.baseline.compilationId !== input.targetId
+  const revision = saved && !cycle ? (await import('./writing-scope.js')).readNewDraftRevision(saved.validation) : null
+  // An incomplete required report cannot create a ready reviewCycle. The
+  // ordinary writing CAS still records this same one original draft revision.
+  const step = cycle?.transitions.length === 1 ? cycle.transitions[0]
+    : !cycle && revision?.taskId === original.taskId && revision.chapterId === input.chapterId && revision.compilationId === input.targetId
+      && revision.beforeHash && revision.afterHash && revision.beforeHash !== revision.afterHash
+      ? { before: { revision: revision.checkedRevision, contentHash: revision.beforeHash },
+        after: { revision: revision.checkedRevision + 1, contentHash: revision.afterHash }, contiguous: true } : null
+  if (!source || !step?.contiguous || cycle && (!cycle.baseline || cycle.baseline.compilationId !== input.targetId)
     || step.after.revision !== input.revision || step.after.contentHash !== runtimeJson({ content: input.bodies.current }).hash
     || !known.some(old => old.revision === step.before.revision && runtimeJson({ content: old.bodies.current }).hash === step.before.contentHash)
     || known.some(old => old.revision >= input.revision)) return null
@@ -515,7 +530,13 @@ export async function prepareContinuityReviewLineage(db: Prisma.TransactionClien
       const projection = typeof bodies.current === 'string' && context
         ? (await import('./continuity-review-v4.js')).validateStoredContinuityV4Projection(audit, bodies.current, context) : null
       const rows = projection?.parsed?.record.findings
-      if (!projection?.complete || !Array.isArray(rows)) throw blocked('原完整正文意见不能重建，未购买候选检查。')
+      if (!projection?.complete || !Array.isArray(rows)) {
+        if (target.input?.terminalCandidate !== undefined) throw blocked('原完整正文意见不能重建，未购买候选检查。')
+        const lineage = (await import('./continuity-review-v4.js')).continuityTypedLineageSchema.parse(oldManifest.typedLineage)
+        // Reservation authenticates physical completion before dispatch.
+        // Invalid new opinions never become established issues or a pass.
+        return { version: 1 as const, phasePlan, priorFindings: lineage.priorFindings, establishedIssues: lineage.establishedIssues }
+      }
       const findings = rows.map(object), currentFindings = findings.map(row => ({ reportHash: runtimeJson(audit).hash,
         findingId: String(row.findingId), text: String(row.explanation).slice(0, 3000),
         origin: { chapterId: context!.current.id, revision: context!.current.revision, bodyHash: context!.current.contentHash,

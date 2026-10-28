@@ -526,7 +526,8 @@ export function applyContinuityV4Repair(first: ContinuityV4Inspection, raw: stri
   return projectContinuityV4Repair(first, raw, complete)
 }
 function projectContinuityV4Repair(first: ContinuityV4Inspection, raw: string, complete: boolean,
-  interpret: typeof inspectRecord = inspectRecord, allowIncomplete = false): ContinuityV4Inspection {
+  interpret: typeof inspectRecord = inspectRecord, allowIncomplete = false,
+  retractionReferences = (row: Record<string, unknown>, frozen: ContinuityV4Frozen, _index: number) => validTypedReferences(row, frozen, 'findings')): ContinuityV4Inspection {
   const plan = buildContinuityInvalidRowRepair(first)
   if (!plan || !complete) throw Error('No complete one-slot continuity repair')
   JSON.parse(raw)
@@ -545,7 +546,7 @@ function projectContinuityV4Repair(first: ContinuityV4Inspection, raw: string, c
       if (first.audit.parserVersion === 10) {
         const decision = typedRetractionSchema.parse(row.value)
         if (decision.findingId !== object((record.findings as unknown[])[row.index])?.findingId
-          || !validTypedReferences(decision, first.audit.continuityV4.frozen, 'findings')) throw Error('Typed retraction lacks authentic source references')
+          || !retractionReferences(decision, first.audit.continuityV4.frozen, row.index)) throw Error('Typed retraction lacks authentic source references')
         dispositions.push(decision); retracted.add(decision.findingId)
         continue
       }
@@ -717,7 +718,10 @@ export function normalizeContinuityV4RepairProjection(original: ContinuityV4Insp
       }
       return { ...parsed, record }
     }
-    const projected = projectContinuityV4Repair(first, second, true, interpret, true)
+    // The live typed interpreter treats explanations consistently in full rows
+    // and explicit retractions. Strict parser10 replay above remains frozen.
+    const projected = projectContinuityV4Repair(first, second, true, interpret, true,
+      (row, frozen, index) => validTypedReferences(row, frozen, 'findings', { index, mappings, relocate: true }))
     if (!mappings.length && !rejected.length && !projected.terminalReview?.factCoverage?.dispositions.some(item => item.outcome === 'unknown')) return original
     const value = { version: 2 as const, mode: 'sparse_repair' as const, originalParserVersion: 10 as const, originReportHash: runtimeJson(original.audit).hash,
       rawHash: original.audit.contentHash, frozenInputHash, mappings, originalDiagnostics: first.parsed?.diagnostics ?? [],
