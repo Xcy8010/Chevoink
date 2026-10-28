@@ -40,6 +40,14 @@ import * as terminalCoverage from '../../api/lib/agent/terminal-fact-coverage.js
 import { readAuthenticatedContinuityAssessment } from '../../api/lib/agent/authenticated-continuity-assessment.js'
 import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
 import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
+import { randomUUID } from 'node:crypto'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { commitChapterBridge } from '../../api/lib/agent/story-compiler.js'
+import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
+import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
+import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
+import { buildTerminalFactProofs } from '../../api/lib/agent/terminal-inheritance-chain.js'
+import { qualityNeighborContext } from '../../api/lib/agent/quality-neighbor-context.js'
 
 type Fixture = Parameters<Parameters<typeof fixture>[0]>[0]
 const prompt = '修改第一章，只输出标题和正文'
@@ -55,6 +63,46 @@ const price = { version: 'credits-v2-itemized' as const, modelTier: 'speed' as c
 const chargeMilli = priceTokenEvidence(price, 12, 8, null)
 const ledgerPrice = { pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates,
   cacheHitTokens: null, cacheMissTokens: null, cachePricingPolicy: 'unknown-cache-discount-2026-09-09', platformAbsorbsDifference: true }
+const inheritedClaim = 'A synthetic historical obligation remains unverified.'
+
+// An independently supported synthetic prologue supplies the omitted fact.
+// Its older contract needs no paid-assessment receipt; the original task keeps
+// its frozen first-chapter target and never acquires authority over the prologue.
+async function seedLegacyCoveragePredecessor(f: Fixture, target: { volumeId: string }) {
+  const chapter = await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: target.volumeId,
+    title: 'Synthetic prologue', orderIndex: 0, orderInVolume: 0, revision: 1, content: inheritedClaim, wordCount: inheritedClaim.length } })
+  const runId = randomUUID(), sourcePrompt = '修改本章'
+  const spec = buildTaskSpec({ runId, novelId: f.novelId, chapterId: chapter.id, prompt: sourcePrompt,
+    continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1 })
+  await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId,
+    chapterId: chapter.id, status: 'running', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop',
+    runtimeProtocolVersion: 0, taskSpec: runtimeJson(spec).value, startRequest: { prompt: sourcePrompt } } })
+  await prisma.agentMessage.create({ data: { runId, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: sourcePrompt }] } })
+  const subject = { userId: f.userId, novelId: f.novelId, runId }
+  const candidate = terminalCandidateSchema.parse({ exitState: { knowledge: [inheritedClaim] } })
+  const { compilation } = await prepareStoryCompilation({ ...subject, chapterId: chapter.id, mode: 'balanced', intentSummary: sourcePrompt })
+  await saveSceneTasks({ ...subject, compilationId: compilation.id, tasks: [{ purpose: 'Record the synthetic fact', entryState: candidate.exitState,
+    goal: 'Record', obstacle: 'Time', choice: 'Record', cost: 'Time', turn: 'Recorded', exitState: candidate.exitState,
+    styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
+  const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: true } })
+  const evidence = terminalEvidenceContext(chapter, null, 2, 1, undefined, 6, 2)
+  const inspected = inspectContinuityResponse(JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({
+    kind, result: 'clear', reason: 'Independent synthetic prologue review.', findingIndexes: [] })),
+    terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] }], terminalProofVerdicts: [] }),
+    { previous: null, current: chapter.content, terminalEvidence: evidence }, true, 8, candidate)
+  expect(inspected.complete).toBe(true)
+  await validateStoryContinuity({ ...subject, compilationId: compilation.id, expectedChapterRevision: chapter.revision,
+    terminalCandidate: candidate, independentCheck: 'complete', findings: [], continuityCriticResponse: inspected.audit,
+    coverage: compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source: null, terminalCandidate: candidate }, 11) })
+  await persistHumanityQualityReport({ ...subject, compilationId: compilation.id, chapterId: chapter.id, chapterRevision: chapter.revision,
+    mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
+  const extraction = vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
+  try { await commitChapterBridge({ ...subject, compilationId: compilation.id, ...candidate, chapterSummary: 'The synthetic fact is recorded.',
+    hookDecision: '', delayedHookReason: '', openingStructure: 'Record', endingStructure: 'Record' }) }
+  finally { extraction.mockRestore() }
+  expect(await prisma.aiUsageLog.count({ where: { agentRunId: runId } })).toBe(0)
+  return chapter
+}
 
 async function assertSupplementSettlement(userId: string, compilationId: string, usage: { id: string; creditChargeMilli: number }) {
   const rows = await prisma.creditLedgerEntry.findMany({ where: { idempotencyKey: `usage:${usage.id}` } })
@@ -83,22 +131,30 @@ async function originalFailure(f: Fixture, conflict = false, qualityReady = fals
   const content = (conflict ? 'The packet remains sealed. The packet is open. The table remains dry.' : 'The packet remains sealed. The table remains dry.')
     + (pendingFact ? ' A reply remains pending.' : '')
   const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { revision: 4, content, wordCount: content.length } })
+  const predecessor = legacyReceipt ? await seedLegacyCoveragePredecessor(f, chapter) : null
   const { compilation } = await prepareStoryCompilation({ ...f, chapterId: chapter.id, mode: 'balanced', intentSummary: originalPrompt })
   const state = { knowledge: [], emotion: [], body: [], objects: ['The packet remains sealed.'], relationships: [], openLoops: [] }
   await saveSceneTasks({ ...f, compilationId: compilation.id, tasks: [{ purpose: 'Inventory', entryState: state, goal: 'Read', obstacle: 'Time',
     choice: 'Record', cost: 'Time', turn: 'Recorded', exitState: state, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
   await recordStoryCompilerWrite({ ...f, chapterOrderIndex: 1, chapterRevision: chapter.revision })
   const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
+  const source = await readCompilerContinuitySource(prisma, f, chapter, saved.bridge!.fromChapterId, 11)
+  if (predecessor) {
+    expect(source).toMatchObject({ id: predecessor.id, preceding: [expect.objectContaining({ id: predecessor.id, orderIndex: 0 })],
+      terminalInheritance: [expect.objectContaining({ field: 'knowledge', claim: inheritedClaim, depth: 1 })] })
+  }
   const draft = terminalDraftFixture(pendingFact ? 'openLoops' : draftField, { chapter, taskId: f.spec.id, ctx: f, compilationId: compilation.id,
-    candidate: terminalDraftFixture().candidate,
-    originBindingHash: runtimeJson(compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source: null,
+    candidate: terminalDraftFixture().candidate, source,
+    originBindingHash: runtimeJson(compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source,
       terminalCandidate: terminalDraftFixture(pendingFact ? 'openLoops' : draftField).base }, 11)).hash,
-    currentBindingHash: runtimeJson(compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source: null,
+    currentBindingHash: runtimeJson(compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source,
       terminalCandidate: terminalDraftFixture().candidate }, 11)).hash })
-  const inherited = { id: terminalFactId('knowledge', 'A synthetic historical obligation remains unverified.'),
-    field: 'knowledge' as const, claim: 'A synthetic historical obligation remains unverified.' }
-  const originInput = legacyReceipt ? { ...draft.input, bodies: { ...draft.input.bodies,
-    terminalEvidence: { ...draft.context, factCoverage: { ...draft.context.factCoverage!, obligations: [inherited] } } } } : draft.input
+  const inherited = { id: terminalFactId('knowledge', inheritedClaim), field: 'knowledge' as const, claim: inheritedClaim }
+  const originInput = draft.input
+  const currentContext = terminalEvidenceContext(chapter, source, 2, 1,
+    terminalCoverage.terminalCoverageInput(f.spec, saved.preparedContext, chapter, draft.base, 2, terminalCoverage.terminalCoverageProofs(source, 2)), 6, 2)
+  expect(runtimeJson(originInput.bodies.terminalEvidence).hash).toBe(runtimeJson(currentContext).hash)
+  if (legacyReceipt) expect(currentContext.factCoverage?.obligations).toEqual([inherited])
   const baseWire = pendingFact ? { ...draft.originWire, terminalVerdicts: [{ claimIndex: 0, verdict: 'supported',
     sourceEvidence: [{ segmentId: 'c0', quote: 'A reply remains pending.' }] }] } : draft.originWire
   const originWire = legacyReceipt ? { ...baseWire, terminalDispositions: [{ obligationIndex: 0, outcome: 'unknown',
@@ -112,7 +168,7 @@ async function originalFailure(f: Fixture, conflict = false, qualityReady = fals
   const preparedContext = { ...(saved.preparedContext as Record<string, unknown>), ...(pendingFact ? {} : draft.preparedContext),
     ...(pendingFact ? { terminalFactCoverage: legacyReceipt ? { ...originState!, facts: originState!.facts.filter(fact => fact.id !== inherited.id) } : originState } : {}) }
   const old = terminalInputDecisionFixture({ runId: f.runId, taskSpec: f.spec, chapter, compilationId: compilation.id,
-    bridge: saved.bridge, scenes: saved.sceneTasks, preparedContext, proposals: pendingFact ? undefined : draft.nextContext.proposalChanges })
+    bridge: saved.bridge, scenes: saved.sceneTasks, source, preparedContext, proposals: pendingFact ? undefined : draft.nextContext.proposalChanges })
   await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call', payload: { callId: old.callId,
     toolName: 'continuity_validate', args: { compilationId: compilation.id } } } })
   const window = credits.getCreditWindow()
@@ -158,14 +214,17 @@ async function originalFailure(f: Fixture, conflict = false, qualityReady = fals
       return [terminalFactId(field, review.candidate.exitState[field][Number(match[2])])]
     })
     const kept = new Set([...oldIds, ...supportedIds])
-    return { ...result, facts: result.facts.filter(fact => kept.has(fact.id)) }
+    const legacy = { ...result, facts: result.facts.filter(fact => kept.has(fact.id)) }
+    expect(result.facts).toContainEqual(inherited)
+    expect(legacy.facts).not.toContainEqual(inherited)
+    return legacy
   }) : undefined
   let question: Awaited<ReturnType<typeof buildContinuitySupplementQuestion>>
   try {
     await prisma.$transaction(async tx => {
       await validateStoryContinuity({ ...f, compilationId: compilation.id, expectedChapterRevision: chapter.revision, terminalCandidate: draft.base,
         findings: [], independentCheck: 'complete', coverage: compilerContinuityCoverage({ chapter, bridge: saved.bridge,
-          sceneTasks: saved.sceneTasks, source: null, terminalCandidate: draft.base }, 11), continuityCriticResponse: originBound.audit }, tx)
+          sceneTasks: saved.sceneTasks, source, terminalCandidate: draft.base }, 11), continuityCriticResponse: originBound.audit }, tx)
       // Direct validation is only the report producer. Reuse the real application
       // writer in that same transaction, as the actual tool does; no fake receipt.
       await markLegacyContinuityAssessmentApplication(tx, { ...ctx, callId: originCall }, originBound)
@@ -254,6 +313,59 @@ function wireFor(question: Awaited<ReturnType<typeof originalFailure>>['question
   expect(inspected.complete, JSON.stringify({ classification: inspected.audit.classification, diagnostics: inspected.parsed?.diagnostics })).toBe(kind !== 'invalid')
   return wire
 }
+
+it('binds synthetic predecessor fixtures to the real coverage context while preserving the legacy ledger difference', () => {
+  const prologue = { id: 'synthetic-prologue', title: 'Synthetic prologue', revision: 1, orderIndex: 0, content: inheritedClaim }
+  const candidate = terminalCandidateSchema.parse({ exitState: { knowledge: [inheritedClaim] } })
+  const evidence = terminalEvidenceContext(prologue, null, 2, 1, undefined, 6, 2)
+  const inspected = inspectContinuityResponse(JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({
+    kind, result: 'clear', reason: 'Independent synthetic prologue review.', findingIndexes: [] })),
+    terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] }], terminalProofVerdicts: [] }),
+    { previous: null, current: prologue.content, terminalEvidence: evidence }, true, 8, candidate)
+  const review = readAuthenticatedContinuityAssessment(inspected.audit, prologue.content, evidence, true)!
+  expect(inspected.complete).toBe(true); expect(review).not.toBeNull()
+  const { content: previous, ...neighbor } = qualityNeighborContext([prologue])[0]
+  const source = { id: prologue.id, revision: prologue.revision, content: previous,
+    scope: 'current_and_previous_3_bounded' as const, targetOrderIndex: 1,
+    preceding: [{ ...neighbor, joinedStart: 0, joinedEnd: previous.length }], bridgeSource: prologue,
+    terminalInheritance: buildTerminalFactProofs({ compilationId: 'synthetic-prologue-compilation', chapter: prologue,
+      validation: { checkedChapterId: prologue.id, checkedRevision: prologue.revision, terminalCandidate: candidate,
+        independentCheck: 'complete', continuityCriticResponse: inspected.audit,
+        coverage: compilerContinuityCoverage({ chapter: prologue, bridge: null, sceneTasks: [], source: null, terminalCandidate: candidate }, 11) },
+      stateHash: 'a'.repeat(64), evidence, review }) }
+  expect(source.terminalInheritance).toMatchObject([{ field: 'knowledge', claim: inheritedClaim, depth: 1 }])
+  const chapter = { id: 'chapter', title: 'Synthetic current', revision: 4, orderIndex: 1,
+    content: 'The packet remains sealed. A reply remains pending.' }
+  const spec = { id: 'task', scope: { terminalCoverageProtocol: 2 } }
+  const draft = terminalDraftFixture('openLoops', { chapter, taskId: spec.id,
+    ctx: { userId: 'owner', novelId: 'novel', runId: 'run' }, compilationId: 'compilation', source,
+    candidate: terminalDraftFixture().candidate, originBindingHash: 'b'.repeat(64), currentBindingHash: 'c'.repeat(64) })
+  const context = terminalEvidenceContext(chapter, source, 2, 1,
+    terminalCoverage.terminalCoverageInput(spec, {}, chapter, draft.base, 2, terminalCoverage.terminalCoverageProofs(source, 2)), 6, 2)
+  expect(runtimeJson(draft.input.bodies.terminalEvidence).hash).toBe(runtimeJson(context).hash)
+  expect(draft.input.bodies.previous).toBe(prologue.content)
+  expect(draft.input.sourceScope?.previous).toEqual([{ orderIndex: 0, startOffset: 0, endOffset: prologue.content.length }])
+  const bound = draft.inspect({ ...draft.originWire, terminalVerdicts: [{ claimIndex: 0, verdict: 'supported',
+    sourceEvidence: [{ segmentId: 'c0', quote: 'A reply remains pending.' }] }] }, draft.input)
+  const origin = readAuthenticatedContinuityAssessment(bound.audit, chapter.content, context, true)!
+  expect(bound.complete).toBe(true); expect(origin).not.toBeNull()
+  const modern = terminalCoverage.advanceTerminalCoverage(spec, {}, chapter, origin, context.factCoverage)!
+  const legacy = terminalCoverage.replayLegacyTerminalCoverageReceipt(spec, {}, chapter, origin, context.factCoverage!)!
+  const inherited = { id: terminalFactId('knowledge', inheritedClaim), field: 'knowledge', claim: inheritedClaim }
+  expect(modern.facts).toContainEqual(inherited); expect(legacy.facts).not.toContainEqual(inherited)
+  for (const state of [modern, legacy]) {
+    const old = terminalInputDecisionFixture({ runId: 'run', taskSpec: spec, chapter, compilationId: 'compilation',
+      bridge: null, scenes: [], source, preparedContext: { terminalFactCoverage: state } })
+    const actual = terminalEvidenceContext(chapter, source, 2, 1,
+      terminalCoverage.terminalCoverageInput(spec, { terminalFactCoverage: state }, chapter, old.candidate, 2,
+        terminalCoverage.terminalCoverageProofs(source, 2)), 6, 2)
+    expect(runtimeJson(old.frozen.bodies.terminalEvidence).hash).toBe(runtimeJson(actual).hash)
+    expect(old.context.factCoverage?.obligations).toContainEqual(inherited)
+    expect(old.frozen.bodies.previous).toBe(prologue.content)
+  }
+  const missingSource = terminalEvidenceContext(chapter, null, 2, 1, terminalCoverage.terminalCoverageInput(spec, {}, chapter, draft.base, 2), 6, 2)
+  expect(runtimeJson(missingSource).hash).not.toBe(runtimeJson(context).hash)
+})
 
 describe.runIf(available)('original persistent supplemental phase: real questions, transport, events and settlement', () => {
   it.each(['same-owner', 'new-owner-expired'] as const)(
@@ -709,9 +821,10 @@ describe.runIf(available)('original persistent supplemental phase: real question
       expect(await prisma.agentArtifact.findMany({ where: { id: { in: s.before.artifacts.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(s.before.artifacts)
       expect(await prisma.aiUsageLog.findMany({ where: { id: { in: s.before.usage.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(s.before.usage)
       expect(await prisma.creditLedgerEntry.findMany({ where: { id: { in: s.before.ledger.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(s.before.ledger)
+      if (decisionScenario) expect(checkpoint.consumedReviewDecisionFeedback).toBeDefined()
       expect(runCheckpointSchema.parse((run.usage as { checkpoint: unknown }).checkpoint)).toMatchObject({ tokenBudget: 500, maxTurns: 1,
         reviewAttempts: expect.arrayContaining(['original-consumed-claim']), consumedReviewDecisionFeedback: decisionScenario
-          ? expect.arrayContaining(checkpoint.consumedReviewDecisionFeedback) : checkpoint.consumedReviewDecisionFeedback })
+          ? expect.arrayContaining(checkpoint.consumedReviewDecisionFeedback!) : checkpoint.consumedReviewDecisionFeedback })
       if (decisionScenario) {
         const compiled = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })
         expect(compiled.validation).toMatchObject({ errorCount: appliedScenario ? 4 : 1,

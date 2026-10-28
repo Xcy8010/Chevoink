@@ -1,6 +1,7 @@
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-candidate-contract.js'
 import { terminalEvidenceContext, type TerminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
-import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
+import { terminalCoverageInput, terminalCoverageProofs } from '../../api/lib/agent/terminal-fact-coverage.js'
+import type { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { compilerEvidenceScope } from '../../api/lib/agent/continuity-source-authority.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
@@ -12,15 +13,17 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 export function terminalInputDecisionFixture(input: {
   runId: string; taskSpec: { id: string }; chapter: { id: string; revision: number; orderIndex: number; title: string; content: string };
   compilationId: string; bridge: unknown; scenes: unknown[]; preparedContext: unknown; proposals?: TerminalEvidenceContext['proposalChanges'];
+  source?: Awaited<ReturnType<typeof readCompilerContinuitySource>>;
 }) {
   const candidate = terminalCandidateSchema.parse({ exitState: { objects: ['The packet remains sealed.'] } })
-  const context = terminalEvidenceContext(input.chapter, null, 2, 1,
-    terminalCoverageInput(input.taskSpec, input.preparedContext, input.chapter, candidate, 2), 6, 2)
+  const source = input.source ?? null
+  const context = terminalEvidenceContext(input.chapter, source, 2, 1,
+    terminalCoverageInput(input.taskSpec, input.preparedContext, input.chapter, candidate, 2, terminalCoverageProofs(source, 2)), 6, 2)
   if (input.proposals) context.proposalChanges = input.proposals
-  const coverage = compilerContinuityCoverage({ chapter: input.chapter, bridge: input.bridge, sceneTasks: input.scenes, source: null, terminalCandidate: candidate }, 11)
+  const coverage = compilerContinuityCoverage({ chapter: input.chapter, bridge: input.bridge, sceneTasks: input.scenes, source, terminalCandidate: candidate }, 11)
   const frozen: LegacyAssessmentInput = { chapterId: input.chapter.id, revision: input.chapter.revision, parserVersion: 8, reassessmentProtocol: 5,
-    bodies: { current: input.chapter.content, previous: null, terminalEvidence: context }, terminalCandidate: candidate,
-    sourceScope: compilerEvidenceScope(input.chapter, null), bindingHash: runtimeJson(coverage).hash,
+    bodies: { current: input.chapter.content, previous: source?.content ?? null, terminalEvidence: context }, terminalCandidate: candidate,
+    sourceScope: compilerEvidenceScope(input.chapter, source), bindingHash: runtimeJson(coverage).hash,
     system: 'Synthetic frozen independent review.', content: 'Synthetic frozen request.', targetType: 'story_compilation', targetId: input.compilationId }
   const common = { semanticChecks: { action_direction: { result: 'clear', reason: 'Complete synthetic manuscript review.', findingIndexes: [] },
     state_progression: { result: 'clear', reason: 'Complete synthetic manuscript review.', findingIndexes: [] } },

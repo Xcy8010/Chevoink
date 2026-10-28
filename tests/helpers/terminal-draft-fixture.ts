@@ -9,11 +9,15 @@ import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import type { TerminalCandidate } from '../../api/lib/agent/terminal-state-review.js'
 import { createHash } from 'node:crypto'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { terminalCoverageInput, terminalCoverageProofs } from '../../api/lib/agent/terminal-fact-coverage.js'
+import { compilerEvidenceScope } from '../../api/lib/agent/continuity-source-authority.js'
+import type { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
 
 export function terminalDraftFixture(field = 'openLoops', options?: {
   chapter: { id: string; revision: number; orderIndex: number; content: string }; taskId: string; ctx: Pick<ToolContext, 'userId' | 'novelId' | 'runId'>;
   compilationId: string; candidate: TerminalCandidate; originBindingHash: string; currentBindingHash: string;
   originChapter?: { id: string; revision: number; orderIndex: number; content: string }
+  source?: Awaited<ReturnType<typeof readCompilerContinuitySource>>
 }) {
   const chapter = options?.chapter ?? { id: 'chapter', revision: 4, orderIndex: 1, content: 'The packet remains sealed.' }, taskId = options?.taskId ?? 'task'
   const ctx = { ...(options?.ctx ?? { userId: 'owner', novelId: 'novel', runId: 'run' }), callId: 'origin' } as ToolContext
@@ -21,25 +25,28 @@ export function terminalDraftFixture(field = 'openLoops', options?: {
     : { exitState: { [field]: ['A reply remains pending.'] } })
   const candidate = options?.candidate ?? terminalCandidateSchema.parse({ exitState: { objects: [chapter.content] } })
   const originChapter = options?.originChapter ?? chapter
-  const context = terminalEvidenceContext(originChapter, null, 2, 1, { version: 2, taskId, chapterId: chapter.id, obligations: [] }, 6, 2)
-  const currentContext = terminalEvidenceContext(chapter, null, 2, 1, context.factCoverage, 6, 2)
-  const bodies = { previous: null, current: originChapter.content, terminalEvidence: context }, sourceScope = { currentOrderIndex: chapter.orderIndex, previous: [] }
+  const source = options?.source ?? null
+  const coverage = terminalCoverageInput({ id: taskId, scope: { terminalCoverageProtocol: 2 } }, {}, originChapter, base, 2, terminalCoverageProofs(source, 2))
+  const context = terminalEvidenceContext(originChapter, source, 2, 1, coverage, 6, 2)
+  const currentContext = terminalEvidenceContext(chapter, source, 2, 1, context.factCoverage, 6, 2)
+  const bodies = { previous: source?.content ?? null, current: originChapter.content, terminalEvidence: context }, sourceScope = compilerEvidenceScope(chapter, source)
   const input: LegacyAssessmentInput = { chapterId: chapter.id, revision: originChapter.revision, bodies, terminalCandidate: base, parserVersion: 8,
     sourceScope, reassessmentProtocol: 5, bindingHash: options?.originBindingHash ?? 'b'.repeat(64), system: 'Synthetic frozen reviewer.', content: 'Synthetic original request.', targetType: 'story_compilation', targetId: options?.compilationId ?? 'compilation' }
   const checks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic full-body independent review.', findingIndexes: [] }))
   const originWire = { findings: [], semanticChecks: checks, terminalVerdicts: terminalCandidateFacts(base).map((_, claimIndex) => ({ claimIndex, verdict: 'unknown', sourceEvidence: [] })),
-    terminalProofVerdicts: [], terminalDispositions: [] }
+    terminalProofVerdicts: [], terminalDispositions: (coverage?.obligations ?? []).map((_, obligationIndex) => ({ obligationIndex,
+      outcome: 'unknown', reason: 'The prior obligation remains independently unverified.', sourceEvidence: [] })) }
   const inspect = (wire: unknown, frozen: LegacyAssessmentInput) => inspectContinuityResponse(JSON.stringify(wire), frozen.bodies, true, 8, frozen.terminalCandidate, frozen.sourceScope, { responseContract: 3 })
   const origin = inspect(originWire, input), bound = bindLegacyContinuityAssessment(origin, ctx, input)
   const staged = stageTerminalProposals({ preparedContext: {}, identity: { taskId, chapterId: chapter.id, bodyHash: currentContext.current.contentHash,
-    sourceHash: runtimeJson({ previous: null }).hash }, auditHash: runtimeJson(bound.audit).hash, base, candidate, verifiedFactIds: [],
-    origin: { bodyHash: context.current.contentHash, sourceHash: runtimeJson({ previous: null }).hash } })!
+    sourceHash: runtimeJson({ previous: currentContext.previous }).hash }, auditHash: runtimeJson(bound.audit).hash, base, candidate, verifiedFactIds: [],
+    origin: { bodyHash: context.current.contentHash, sourceHash: runtimeJson({ previous: context.previous }).hash } })!
   const nextContext = { ...currentContext, proposalChanges: staged.changes! }, nextInput = { ...input, revision: chapter.revision,
     bodies: { ...bodies, current: chapter.content, terminalEvidence: nextContext }, terminalCandidate: candidate,
     bindingHash: options?.currentBindingHash ?? input.bindingHash, content: 'Synthetic current request.' }
   const currentWire = { findings: [], semanticChecks: checks, terminalVerdicts: terminalCandidateFacts(candidate).map((fact, claimIndex) => ({ claimIndex,
     verdict: 'supported', sourceEvidence: [{ segmentId: `c${Math.floor(Math.max(0, chapter.content.indexOf(fact.claim)) / 300)}` }] })),
-    terminalProofVerdicts: [], terminalDispositions: [], proposalDispositions: [{ proposalIndex: 0, outcome: 'unknown', reason: 'The old draft was not established.', sourceEvidence: [] }] }
+    terminalProofVerdicts: [], terminalDispositions: originWire.terminalDispositions, proposalDispositions: [{ proposalIndex: 0, outcome: 'unknown', reason: 'The old draft was not established.', sourceEvidence: [] }] }
   const current = inspect(currentWire, nextInput), currentBound = bindLegacyContinuityAssessment(current, { ...ctx, callId: 'current' }, nextInput)
   const preparedContext = { terminalProposalReview: staged.state }, binding = { taskId, preparedContext }
   const validation = { independentCheck: 'complete', terminalCandidate: candidate, continuityCriticResponse: currentBound.audit }

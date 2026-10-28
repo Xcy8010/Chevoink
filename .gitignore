@@ -77,3 +77,6 @@ desktop/windows/test-results/
 .env.*
 !.env*.example
 *connector.local.json
+
+# Local project orchestration skill; keep files on this computer
+/.agents/skills/project-orchestrator/

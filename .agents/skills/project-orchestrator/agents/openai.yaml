@@ -1,6 +1,0 @@
-interface:
-  display_name: "Project Orchestrator"
-  short_description: "多模型协作、项目规范适配与安全上下文交接"
-  default_prompt: "Use $project-orchestrator to inspect this project's actual standards and continue the scoped engineering task."
-policy:
-  allow_implicit_invocation: true
