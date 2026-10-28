@@ -13,20 +13,64 @@ import * as lifecycle from '../../api/lib/agent/assessment-response-lifecycle.js
 import * as originals from '../../api/lib/agent/original-request.js'
 import { buildContinuityReviewManifest, inspectContinuityV4, normalizeContinuityV4ProjectionV2 } from '../../api/lib/agent/continuity-review-v4.js'
 import { continuitySubjectIdentity } from '../../api/lib/agent/continuity-subject-identity.js'
-import { continuityModelPriceHash, continuityUsageRowHash, readNormalizedContinuityCoverageOrigins, reconstructContinuitySourceProvenance } from '../../api/lib/agent/continuity-coordinator.js'
+import { authenticateEffectiveContinuityReport, authenticateSupplementalContinuityReport, continuityModelPriceHash, continuityUsageRowHash,
+  readNormalizedContinuityCoverageOrigins, reconstructContinuitySourceProvenance, stageEffectiveContinuityReport } from '../../api/lib/agent/continuity-coordinator.js'
 import { terminalInputDecisionFixture } from '../helpers/terminal-input-decision-fixture.js'
+import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
+import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
+import { compilerEvidenceScope } from '../../api/lib/agent/continuity-source-authority.js'
+import { buildTerminalFactProofs } from '../../api/lib/agent/terminal-inheritance-chain.js'
+import { terminalReviewStateHash } from '../../api/lib/agent/chapter-review-guard.js'
+import { currentTerminalReview, terminalReviewFailure } from '../../api/lib/agent/terminal-state-review.js'
+import { readTerminalDraftBinding } from '../../api/lib/agent/terminal-draft-authority.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { taskSpecSchema } from '../../shared/contracts/task-spec-contracts.js'
 
 type Row = { id: string; runId: string; artifactType: string; createdAt: Date; metadata: Record<string, unknown> }
 const obj = (v: unknown): Record<string, unknown> => v && typeof v === 'object' ? v as Record<string, unknown> : {}
 afterEach(() => vi.restoreAllMocks())
 
-async function fixture(damage?: 'ledger' | 'history' | 'projection' | 'current' | 'duplicate') {
+function canonicalPredecessor(subject: { userId: string; novelId: string }, inherited: { field: 'openLoops'; claim: string }) {
+  const chapter = { id: 'predecessor', title: 'Synthetic predecessor', orderIndex: 0, revision: 1,
+    authorId: subject.userId, novelId: subject.novelId, content: inherited.claim }
+  const candidate = terminalCandidateSchema.parse({ exitState: { openLoops: [inherited.claim] } })
+  const evidence = terminalEvidenceContext(chapter, null, 2, 1, undefined, 6, 2)
+  const inspected = inspectContinuityResponse(JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind =>
+    ({ kind, result: 'clear', reason: 'Independent synthetic predecessor review.', findingIndexes: [] })),
+  terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] }], terminalProofVerdicts: [] }),
+  { previous: null, current: chapter.content, terminalEvidence: evidence }, true, 8, candidate)
+  expect(inspected.complete).toBe(true)
+  const bridge = { committedAt: new Date(1), targetRevision: chapter.revision }, sceneTasks: unknown[] = []
+  const stateHash = terminalReviewStateHash(bridge, sceneTasks)
+  const validation = { checkedChapterId: chapter.id, checkedRevision: chapter.revision, terminalCandidate: candidate,
+    independentCheck: 'complete', continuityCriticResponse: inspected.audit,
+    coverage: compilerContinuityCoverage({ chapter, bridge, sceneTasks, source: null, terminalCandidate: candidate }, 11) }
+  const review = currentTerminalReview(validation, chapter.content, evidence)!
+  expect(review?.deliveryEligibility.eligible).toBe(true)
+  const proofs = buildTerminalFactProofs({ compilationId: 'predecessor-compilation', chapter, validation, stateHash, evidence, review })
+  expect(proofs).toHaveLength(1)
+  return { chapter, proofs, compilation: { id: 'predecessor-compilation', userId: subject.userId, novelId: subject.novelId,
+    chapterId: chapter.id, runId: 'predecessor-run',
+    status: 'completed', stage: 'commit', bridge, sceneTasks, validation, preparedContext: { terminalFactProofs: proofs,
+      terminalCandidateHash: runtimeJson(candidate).hash, terminalContentHash: evidence.current.contentHash,
+      terminalReviewProof: { version: 2, terminalStateHash: stateHash } } } }
+}
+
+type PreservationProfile = 'bounded_revision' | 'next_chapter' | 'outside' | 'hard' | 'future_origin'
+async function fixture(damage?: 'ledger' | 'history' | 'projection' | 'current' | 'duplicate', profile?: PreservationProfile) {
   const subject = { userId: 'synthetic-user', novelId: 'synthetic-novel', runId: 'synthetic-run', continuityOwnerSeq: 7 }
-  const spec = { id: 'synthetic-task', scope: { terminalCoverageProtocol: 2 } }
-  const original = { taskId: spec.id, sourceRunId: subject.runId, parentRunId: null, spec, prompt: 'Synthetic task' }
+  const prompt = profile === 'next_chapter' ? '写下一章' : profile === 'outside' ? '分析这一章' : profile ? '修改第一章' : 'Synthetic task'
+  const admitted = buildTaskSpec({ runId: subject.runId, novelId: subject.novelId, chapterId: 'chapter', prompt, terminalCoverageProtocol: 2 })
+  const spec = profile ? taskSpecSchema.parse(JSON.parse(JSON.stringify({ ...admitted, id: 'synthetic-task', createdAt: '2029-01-01T00:00:00.000Z',
+    scope: { ...admitted.scope, writingTargetProtocol: 1, writing: { version: 1, kind: 'bounded',
+      targets: [{ chapterId: 'chapter', orderIndex: 1 }], titleAndBodyOnly: false, repairAuthorized: false } },
+    ...(profile === 'hard' ? { postconditions: [{ code: 'SYNTHETIC_REQUIRED_FACT', description: 'The inherited obligation must be verified.', severity: 'error' }] } : {}) })))
+    : { id: 'synthetic-task', scope: { terminalCoverageProtocol: 2 } }
+  const original = { taskId: spec.id, sourceRunId: subject.runId, parentRunId: null, spec, prompt }
   vi.spyOn(originals, 'readOriginalTaskRequest').mockResolvedValue(original as Awaited<ReturnType<typeof originals.readOriginalTaskRequest>>)
   vi.spyOn(originals, 'originalTaskRunIds').mockResolvedValue([subject.runId])
   const rows: Row[] = [], fees: Array<Record<string, unknown>> = []
+  let canonical: ReturnType<typeof canonicalPredecessor> | null = null
   const write = vi.fn(() => { throw Error('Source recovery must not write or create fees') })
   const add = (id: string, metadata: Record<string, unknown>, time = rows.length + 1) =>
     rows.push({ id, runId: subject.runId, artifactType: 'continuityReview', createdAt: new Date(time), metadata })
@@ -61,22 +105,42 @@ async function fixture(damage?: 'ledger' | 'history' | 'projection' | 'current' 
       Object.entries(where).every(([key, value]) => row[key] === value)) ?? null),
     create: write, update: write, delete: write,
   }, agentRunEvent: { findMany: vi.fn(async () => [{ payload: { callId: 'physical-call', toolName: 'continuity_validate',
-    args: { compilationId: 'compilation' } } }]) } } as unknown as Prisma.TransactionClient
+    args: { compilationId: 'compilation' } } }]) }, chapter: {
+    findFirst: vi.fn(async ({ where }: { where: Record<string, unknown> }) =>
+      where.authorId !== subject.userId || where.novelId !== subject.novelId ? null
+        : canonical && where.id === canonical.chapter.id ? canonical.chapter : where.id === chapter.id ? chapter : null),
+    findMany: vi.fn(async ({ where }: { where: Record<string, unknown> }) => {
+      if (where.authorId !== subject.userId || where.novelId !== subject.novelId) return []
+      const before = obj(where.orderIndex).lt
+      return canonical && canonical.chapter.authorId === where.authorId && canonical.chapter.novelId === where.novelId
+        && typeof before === 'number' && canonical.chapter.orderIndex < before ? [canonical.chapter] : []
+    }), create: write, update: write, delete: write,
+  }, storyCompilation: {
+    findFirst: vi.fn(async ({ where }: { where: Record<string, unknown> }) => !canonical || where.userId !== canonical.compilation.userId
+      || where.novelId !== canonical.compilation.novelId || where.id && where.id !== canonical.compilation.id
+      || where.chapterId && where.chapterId !== canonical.chapter.id ? null : canonical.compilation),
+    create: write, update: write, delete: write,
+  }, agentRun: { findFirstOrThrow: vi.fn(async () => ({ id: subject.runId, chapterId: 'chapter', manuscriptRevision: 1,
+    taskRootId: null, sessionId: 'session', writingBindings: null })) } } as unknown as Prisma.TransactionClient
   const inherited = { id: terminalFactId('openLoops', 'An inherited synthetic issue remains open.'), field: 'openLoops' as const,
     claim: 'An inherited synthetic issue remains open.' }
   const chapter = { id: 'chapter', revision: 4, orderIndex: 1, title: 'Synthetic chapter', content: 'The packet remains sealed. The guard waits.' }
   const candidate = terminalCandidateSchema.parse({ exitState: { objects: ['The packet remains sealed.'] } })
-  const coverage = { version: 2 as const, taskId: spec.id, chapterId: chapter.id, obligations: [inherited] }
+  canonical = profile ? canonicalPredecessor(subject, inherited) : null
+  const source = canonical ? await readCompilerContinuitySource(db, subject, chapter, canonical.chapter.id, 11) : null
+  if (canonical) expect(source && 'terminalInheritance' in source ? source.terminalInheritance : []).toEqual(canonical.proofs)
+  const coverage = source ? coverageModule.terminalCoverageInput(spec, {}, chapter, candidate, 2,
+    coverageModule.terminalCoverageProofs(source, 2))! : { version: 2 as const, taskId: spec.id, chapterId: chapter.id, obligations: [inherited] }
   const fact = { id: terminalFactId('objects', candidate.exitState.objects[0]), field: 'objects' as const, claim: candidate.exitState.objects[0] }
   const history: Array<Record<string, unknown>> = [], origins: Array<Record<string, unknown>> = []
   let latest: Record<string, unknown> | null = null
   let state: ReturnType<typeof advanceTerminalCoverage>
   for (const [index, content] of ['The packet remains sealed.', chapter.content].entries()) {
-    const current = { ...chapter, revision: index + 1, content }
-    const evidence = terminalEvidenceContext(current, null, 2, 1, coverage, 6, 2)
-    const input = { chapterId: chapter.id, revision: current.revision, bodies: { previous: null, current: content, terminalEvidence: evidence },
+    const current = { ...chapter, revision: index + (profile === 'future_origin' ? 5 : 1), content }
+    const evidence = terminalEvidenceContext(current, source, 2, 1, coverage, 6, 2)
+    const input = { chapterId: chapter.id, revision: current.revision, bodies: { previous: source?.content ?? null, current: content, terminalEvidence: evidence },
       system: 'Synthetic reviewer.', content: 'Synthetic request ' + index, terminalCandidate: candidate, parserVersion: 8 as const,
-      reassessmentProtocol: 5 as const, sourceScope: { currentOrderIndex: 1, previous: [] }, targetType: 'story_compilation' as const, targetId: 'compilation' }
+      reassessmentProtocol: 5 as const, sourceScope: compilerEvidenceScope(chapter, source), targetType: 'story_compilation' as const, targetId: 'compilation' }
     const wire = { findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind =>
       ({ kind, result: 'clear', reason: 'Complete independent review.', findingIndexes: [] })),
     terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] }], terminalProofVerdicts: [],
@@ -100,7 +164,7 @@ async function fixture(damage?: 'ledger' | 'history' | 'projection' | 'current' 
     const reportHash = runtimeJson(bound.audit).hash, bodyHash = runtimeJson({ content }).hash
     for (const item of state!.facts) if (!origins.some(origin => origin.factId === item.id))
       origins.push({ factId: item.id, reservationId, reportHash, bodyHash,
-        sourceHash: runtimeJson({ previous: null }).hash, candidateHash: runtimeJson(candidate).hash, revision: current.revision })
+        sourceHash: runtimeJson({ previous: evidence.previous }).hash, candidateHash: runtimeJson(candidate).hash, revision: current.revision })
     history.push({ reservationId, reportHash, ledgerHash: runtimeJson(state).hash, inputHash: runtimeJson(input).hash, usageIds: [fee.id] })
     latest = { reservationId, reportHash, revision: current.revision, bodyHash, establishedIssues: [] }
   }
@@ -113,15 +177,15 @@ async function fixture(damage?: 'ledger' | 'history' | 'projection' | 'current' 
   if (damage === 'duplicate') history[1].reservationId = history[0].reservationId
   const target = { compilationId: 'compilation', chapterId: chapter.id, preparedContext: { terminalFactCoverage: state } }
   const failed = terminalInputDecisionFixture({ runId: subject.runId, taskSpec: spec, chapter, compilationId: 'compilation',
-    bridge: { fromChapterId: null, sourceRevision: null }, scenes: [], preparedContext: target.preparedContext })
+    bridge: { fromChapterId: source?.id ?? null, sourceRevision: source?.revision ?? null }, scenes: [], source, preparedContext: target.preparedContext })
   for (const [i, meta] of failed.metadata.entries()) add('failed-' + i, meta, 50 + i)
   fees.push(usage('first-usage'), usage('second-usage', 'agent3ContinuityCriticSecondPass'))
   const oldResult = await lifecycle.readLegacyContinuityAssessment(db, { ...subject, callId: failed.callId } as ToolContext, failed.frozen)
   expect(oldResult).toMatchObject({ billingKnown: true, providerComplete: true, recoveryReady: true, slotUsed: true, inspected: { complete: false } })
   const requestId = 'a'.repeat(64), family = 'b'.repeat(64)
-  const evidence = terminalEvidenceContext(chapter, null, 2, 1, coverage, 6, 2)
-  const base = { chapterId: chapter.id, revision: chapter.revision, bodies: { current: chapter.content, previous: null, terminalEvidence: evidence },
-    terminalCandidate: candidate, sourceScope: { currentOrderIndex: 1, previous: [] }, targetType: 'story_compilation' as const, targetId: 'compilation' }
+  const evidence = terminalEvidenceContext(chapter, source, 2, 1, coverage, 6, 2)
+  const base = { chapterId: chapter.id, revision: chapter.revision, bodies: { current: chapter.content, previous: source?.content ?? null, terminalEvidence: evidence },
+    terminalCandidate: candidate, sourceScope: compilerEvidenceScope(chapter, source), targetType: 'story_compilation' as const, targetId: 'compilation' }
   const model = { tier: 'speed' as const, provider: 'fixture', modelName: 'fixture', multiplierBps: 15000,
     reasoningEffort: 'high' as const, baseUrl: 'https://provider.invalid/v1', contextWindowTokens: 128000 }
   const price = { version: 'credits-v2-itemized' as const, modelTier: 'speed' as const, multiplierBps: 11000,
@@ -133,7 +197,9 @@ async function fixture(damage?: 'ledger' | 'history' | 'projection' | 'current' 
   const plan = { ...planBody, hash: runtimeJson(planBody).hash }
   const manifest = buildContinuityReviewManifest({ subject: { userId: subject.userId, novelId: subject.novelId, taskId: spec.id,
     targetType: base.targetType, targetId: base.targetId, chapterId: chapter.id, revision: chapter.revision },
-  bodies: base.bodies, candidate, sourceScope: base.sourceScope, sourceHash: null, sourceVersions: { current: evidence.current },
+  bodies: base.bodies, candidate, sourceScope: base.sourceScope,
+  sourceHash: source ? runtimeJson({ previous: evidence.previous }).hash : null,
+  sourceVersions: { current: evidence.current, ...(source ? { previous: evidence.previous } : {}) },
   verifiedCoverage: coverage, draftProposals: null, typedLineage: { version: 1, phasePlan: plan, priorFindings: [], establishedIssues: [] } })
   const input = { ...base, parserVersion: 10 as const, reassessmentProtocol: 7 as const, system: 'Synthetic full reviewer.',
     content: 'Synthetic full request.', continuityManifest: manifest }
@@ -181,7 +247,18 @@ async function fixture(damage?: 'ledger' | 'history' | 'projection' | 'current' 
     version: 1, requestId, requestHash: question.requestHash, originReportHash: runtimeJson(originAudit).hash,
     reportHash: runtimeJson(normalized.audit).hash, frozenInputHash: inputHash, rawHash: marker.rawHash, derivationHash: marker.derivationHash,
     usageId: fee.id, reportComplete: true } })
-  return { subject, spec, db, rows, fees, projection, target, audit: normalized.audit, frozen, candidate, chapter, coverage, inherited, write }
+  const stagingDb = { ...db, agentArtifact: { ...db.agentArtifact, create: vi.fn(async ({ data }: { data: { id: string; metadata: unknown } }) => {
+    add(data.id, obj(data.metadata)); return rows.at(-1)
+  }) } } as unknown as Prisma.TransactionClient
+  const validation = { checkedChapterId: chapter.id, checkedRevision: chapter.revision, independentCheck: 'complete',
+    terminalCandidate: candidate, continuityCriticResponse: normalized.audit,
+    coverage: compilerContinuityCoverage({ chapter, bridge: { fromChapterId: source?.id ?? null, sourceRevision: source?.revision ?? null },
+      sceneTasks: [], source, terminalCandidate: candidate }, 11),
+    effectiveReport: await stageEffectiveContinuityReport(stagingDb, subject, { compilationId: target.compilationId,
+      audit: normalized.audit, previousValidation: {} }) }
+  expect(validation.effectiveReport).toBeDefined()
+  return { subject, spec, db, rows, fees, projection, target, audit: normalized.audit, frozen, candidate, chapter, coverage, inherited, write,
+    canonical, source, evidence, validation }
 }
 
 describe('authenticated historical source replay', () => {
@@ -325,4 +402,83 @@ describe('authenticated historical source replay', () => {
     await expect(readNormalizedContinuityCoverageOrigins(f.db, f.subject, f.target, f.audit)).rejects.toBeDefined()
     expect(replay).not.toHaveBeenCalled()
   })
+  it.each(['bounded_revision', 'next_chapter'] as const)(
+    'preserves the authenticated omitted canonical obligation under %s without changing its unknown verdict', async profile => {
+      const legacy = await fixture(undefined, profile), current = await fixture('current', profile)
+      expect(runtimeJson(legacy.frozen.input).hash).toBe(runtimeJson(current.frozen.input).hash)
+      for (const [kind, f] of [['current', current], ['legacy', legacy]] as const) {
+        const before = JSON.stringify({ rows: f.rows, fees: f.fees, canonical: f.canonical, prepared: f.target.preparedContext })
+        const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(Error('No new request is authorized'))
+        expect(await authenticateEffectiveContinuityReport(f.db, f.subject, f.target.compilationId, f.validation, [f.subject.runId])).toBe(true)
+        expect(await authenticateSupplementalContinuityReport(f.db, f.subject, f.audit)).toBe(true)
+        const origins = await readNormalizedContinuityCoverageOrigins(f.db, f.subject, f.target, f.audit)
+        expect(origins).toEqual(f.projection)
+        const source = await readCompilerContinuitySource(f.db, f.subject, f.chapter, f.canonical!.chapter.id, 11)
+        const currentProofIds = source && 'terminalInheritance' in source
+          ? (source.terminalInheritance ?? []).map(fact => terminalFactId(fact.field, fact.claim)) : []
+        expect(currentProofIds).toContain(f.inherited.id)
+        expect(coverageModule.terminalCoverageInput(f.spec, f.target.preparedContext, f.chapter, f.candidate, 2,
+          coverageModule.terminalCoverageProofs(source, 2))).toEqual(f.evidence.factCoverage)
+        const binding = await readTerminalDraftBinding(f.db, { ...f.subject, compilationId: f.target.compilationId },
+          { taskId: f.spec.id, preparedContext: f.target.preparedContext }, f.chapter, f.validation, f.evidence)
+        const review = currentTerminalReview(f.validation, f.chapter.content, f.evidence, binding)
+        expect(binding.reviewAuthority).toBeDefined()
+        expect(review?.factCoverage?.dispositions).toMatchObject([{ id: f.inherited.id, outcome: 'unknown' }])
+        const observed = { currentResultVerified: !!review, reviewAuthority: !!binding.reviewAuthority,
+          scopeAuthority: !!binding.scopeAuthority, eligible: review?.deliveryEligibility.eligible,
+          pendingCoverageIds: review?.deliveryEligibility.preservation?.pendingCoverageIds ?? [],
+          originIds: origins!.origins.map(origin => origin.factId), currentProofIds }
+        expect(observed).toMatchObject({ currentResultVerified: true, reviewAuthority: true,
+          scopeAuthority: true, eligible: true, pendingCoverageIds: [f.inherited.id] })
+        expect(review?.deliveryEligibility).toMatchObject({ basis: 'preserved_canonical_with_pending_scope', preservation: { version: 2 } })
+        expect(observed.originIds.includes(f.inherited.id)).toBe(kind === 'current')
+        const failure = terminalReviewFailure(f.validation, f.chapter.content, f.evidence, undefined, binding)
+        expect(failure).toBeNull()
+        expect(f.evidence.factCoverage?.obligations).toContainEqual(f.inherited)
+        expect(f.target.preparedContext.terminalFactCoverage!.facts.some(fact => fact.id === f.inherited.id)).toBe(kind === 'current')
+        const currentFacts = buildTerminalFactProofs({ compilationId: f.target.compilationId, chapter: f.chapter,
+          validation: f.validation, stateHash: 'f'.repeat(64), evidence: f.evidence, review: review! })
+        expect(currentFacts.map(fact => terminalFactId(fact.field, fact.claim))).not.toContain(f.inherited.id)
+        expect(JSON.stringify({ rows: f.rows, fees: f.fees, canonical: f.canonical, prepared: f.target.preparedContext })).toBe(before)
+        expect(f.write).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled()
+      }
+    })
+  it.each(['missing-proof', 'source-revision', 'source-owner', 'source-recovery', 'future-origin', 'wrong-owner', 'wrong-model',
+    'wrong-price', 'unknown-fee', 'unreviewed-candidate', 'hard', 'outside'] as const)(
+    'continues to reject the canonical preservation boundary after %s', async damage => {
+      const f = await fixture('current', damage === 'future-origin' ? 'future_origin'
+        : damage === 'hard' || damage === 'outside' ? damage : 'bounded_revision')
+      if (damage === 'missing-proof') f.canonical!.compilation.preparedContext.terminalFactProofs = []
+      if (damage === 'source-revision') f.canonical!.chapter.revision++
+      if (damage === 'source-owner') f.canonical!.compilation.userId = 'other-owner'
+      if (damage === 'source-recovery') obj(obj(f.rows.find(row => row.id === 'recovery')!.metadata).continuitySourceRecovery).projection = {
+        ...f.projection, ledgerHash: '0'.repeat(64) }
+      if (damage === 'wrong-model') f.fees.find(fee => fee.id === 'supplement-fee')!.modelName = 'unapproved-model'
+      if (damage === 'wrong-price') f.fees.find(fee => fee.id === 'supplement-fee')!.billingSnapshot = { ...f.frozen.price, multiplierBps: 22000 }
+      if (damage === 'unknown-fee') f.fees.find(fee => fee.id === 'supplement-fee')!.billingStatus = 'pending_usage'
+      const validation = damage === 'unreviewed-candidate' ? { ...f.validation,
+        terminalCandidate: terminalCandidateSchema.parse({ exitState: { objects: ['An unreviewed new claim.'] } }) } : f.validation
+      const before = JSON.stringify({ rows: f.rows, fees: f.fees, canonical: f.canonical })
+      const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(Error('No new request is authorized'))
+      const subject = damage === 'wrong-owner' ? { ...f.subject, userId: 'other-owner' } : f.subject
+      const binding = await readTerminalDraftBinding(f.db, { ...subject, compilationId: f.target.compilationId },
+        { taskId: f.spec.id, preparedContext: f.target.preparedContext }, f.chapter, validation, f.evidence)
+      const review = currentTerminalReview(validation, f.chapter.content, f.evidence, binding)
+      expect(review?.deliveryEligibility.eligible ?? false).toBe(false)
+      if (damage === 'unreviewed-candidate') expect(review).toBeNull()
+      else expect(binding.scopeAuthority).toBeUndefined()
+      if (damage === 'missing-proof' || damage === 'source-revision' || damage === 'source-owner') {
+        const source = await readCompilerContinuitySource(f.db, f.subject, f.chapter, f.canonical!.chapter.id, 11)
+        expect(source && 'terminalInheritance' in source ? source.terminalInheritance : []).toEqual([])
+      }
+      if (damage === 'future-origin') {
+        const origins = await readNormalizedContinuityCoverageOrigins(f.db, f.subject, f.target, f.audit)
+        expect(origins).toEqual(f.projection)
+        expect(origins!.origins.find(origin => origin.factId === f.inherited.id)!.revision).toBeGreaterThan(f.chapter.revision)
+        expect(binding.reviewAuthority).toBeDefined()
+      }
+      if (damage === 'wrong-owner' || damage === 'wrong-model' || damage === 'wrong-price' || damage === 'unknown-fee') expect(binding.reviewAuthority).toBeUndefined()
+      expect(JSON.stringify({ rows: f.rows, fees: f.fees, canonical: f.canonical })).toBe(before)
+      expect(f.write).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled()
+    })
 })

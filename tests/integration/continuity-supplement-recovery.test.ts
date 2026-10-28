@@ -644,7 +644,12 @@ describe.runIf(available)('original persistent supplemental phase: real question
     expect(saved.validation).toMatchObject({ errorCount: 1, retainedReviewDecision: { findings: retainedFindings }, continuityCriticResponse: {
       continuityV4: { projectionNormalization: { version: 2, mode: 'single_report' } } } })
     expect(saved.preparedContext).toMatchObject({ terminalFactCoverage: { facts: expect.arrayContaining([{ id: pendingId,
-      field: 'openLoops', claim: 'A reply remains pending.' }]) }, terminalReviewProof: { scopePreservation: { version: 2, pendingCoverageIds: [pendingId] } } })
+      field: 'openLoops', claim: 'A reply remains pending.' }]) }, terminalReviewProof: { scopePreservation: { version: 2 } } })
+    const pendingCoverageIds = (saved.preparedContext as { terminalReviewProof: { scopePreservation: { pendingCoverageIds: string[] } } })
+      .terminalReviewProof.scopePreservation.pendingCoverageIds
+    expect([...pendingCoverageIds].sort()).toEqual((scenario === 'legacy' ? [pendingId, s.inherited.id] : [pendingId]).sort())
+    if (scenario === 'legacy') expect((saved.preparedContext as { terminalFactCoverage: { facts: unknown[] } }).terminalFactCoverage.facts)
+      .toContainEqual(s.inherited)
     const audit = (saved.validation as { continuityCriticResponse: projections.ContinuityV4Inspection['audit'] }).continuityCriticResponse
     expect(projections.validateStoredContinuityV4Projection(audit, s.chapter.content, s.question.frozen.input.bodies.terminalEvidence)?.parsed?.record).toEqual(wire)
     const frozenSource = originals.find(row => (row.metadata as { continuitySourceRecovery?: { originalAssessmentKey?: string } })

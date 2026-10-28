@@ -121,7 +121,16 @@ async function readPreservationPolicy(db: Prisma.TransactionClient,
     for (const disposition of pending) {
       const obligation = context.factCoverage?.obligations.find(item => item.id === disposition.id)
       const origin = origins?.origins.find(item => item.factId === disposition.id)
-      if (!obligation || !origin || origin.revision > chapter.revision
+      if (!obligation) continue
+      // An old ledger can omit an obligation supplied by its canonical source.
+      // Reauthenticate its exact frozen proof without rewriting the old origins
+      // or turning this report's unknown disposition into current support.
+      const canonicalProofs = origins && explicitBackground && !origin ? currentProofs.filter(item => item.field === obligation.field
+        && item.claim === obligation.claim && historyFactId(item.field, item.claim) === obligation.id) : []
+      const frozenCanonical = context.previous?.carried?.filter(item => item.field === obligation.field && item.claim === obligation.claim) ?? []
+      const canonicalOrigin = canonicalProofs.length === 1 && frozenCanonical.length === 1
+        && runtimeJson(canonicalProofs[0]).hash === runtimeJson(frozenCanonical[0]).hash
+      if (!origin && !canonicalOrigin || origin && origin.revision > chapter.revision
         || !(explicitBackground ? [...(ledger?.facts ?? []), ...context.factCoverage!.obligations] : ledger?.facts ?? [])
           .some(item => item.id === obligation.id && item.field === obligation.field && item.claim === obligation.claim)
         || facts.some(item => item.id === obligation.id)
