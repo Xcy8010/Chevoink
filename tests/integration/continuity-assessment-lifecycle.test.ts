@@ -26,6 +26,7 @@ import { currentTerminalReview } from '../../api/lib/agent/terminal-state-review
 import { readTerminalDraftBinding } from '../../api/lib/agent/terminal-draft-authority.js'
 import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
 import { readQualityReviewAdmission } from '../../api/lib/agent/quality-review-admission.js'
+import { recoverExplicitSourceEvidence } from '../../api/lib/agent/continuity-explicit-source-projection.js'
 
 const runtime: NonNullable<ToolContext['modelRuntime']> = { tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture', baseUrl: 'https://provider.invalid/v1',
   apiKey: 'fixture-only', reasoningEffort: 'high', reasoningEfforts: ['none', 'high'], reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null }
@@ -843,13 +844,15 @@ describe('body-only explicit-source paid-result recovery', () => {
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     const sourceEvidence = [{ source: 'current', segmentId: 'c0', quote: '门先锁着' }, { source: 'current', segmentId: 'c0', quote: '门打开' }]
     const semanticChecks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: '核对实际事件顺序。', findingIndexes: [] }))
-    const firstRaw = JSON.stringify({ findings: [{ signal: 'object', severity: 'warning', evidence: '门的状态需要核对。',
-      suggestion: '确认先锁门后开门。', sourceEvidence }], semanticChecks, terminalVerdicts: [] })
+    const firstRaw = JSON.stringify({ findings: [{ signal: 'object', severity: 'warning', evidence: '旧意见“人物始终在门外”需要与当前正文核对。',
+      suggestion: '确认先锁门后开门。', sourceEvidence: [{ ...sourceEvidence[0], quote: '正文不存在的旧指控' }, sourceEvidence[1]] }], semanticChecks, terminalVerdicts: [] })
     const secondRaw = JSON.stringify({ findings: [], semanticChecks, terminalVerdicts: [], decisions: [{ index: 0, action: 'retract',
       reason: '旧意见“人物始终在门外”超出了实际原文，撤回这条意见。', sourceEvidence }] })
     const bodies = { current: body, previous: null, terminalEvidence: terminalEvidenceContext(chapter, null, 2, undefined, undefined, 5) }
     const sourceScope = compilerEvidenceScope(chapter, null)
-    expect(inspectContinuityResponse(firstRaw, bodies, true, 8, undefined, sourceScope).audit.classification).toBe('source_invalid')
+    const first = inspectContinuityResponse(firstRaw, bodies, true, 8, undefined, sourceScope)
+    expect(first.audit.classification).toBe('source_invalid')
+    expect(recoverExplicitSourceEvidence(first, bodies)).toBeNull()
     expect(inspectContinuityResponse(secondRaw, bodies, true, 8, undefined, sourceScope).audit.classification).toBe('complete')
     const fetcher = vi.fn().mockImplementationOnce(async () => completion(firstRaw)).mockImplementationOnce(async () => completion(secondRaw))
     vi.stubGlobal('fetch', fetcher)

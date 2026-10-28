@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
-const mocks = vi.hoisted(() => ({ reserve: vi.fn(), reusable: vi.fn(), completion: vi.fn(), cycle: vi.fn(),
+const mocks = vi.hoisted(() => ({ reserve: vi.fn(), reusable: vi.fn(), read: vi.fn(), completion: vi.fn(), cycle: vi.fn(),
   state: { validation: { checkRounds: 1, autoRepairRounds: 0 } as Record<string, unknown>, claim: false, missing: false }, tx: {} as Record<string, unknown> }))
 vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<object>(), prisma: {
   $transaction: async (work: (tx: unknown) => Promise<unknown>) => {
@@ -11,6 +11,7 @@ vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<object
 } }))
 vi.mock('../../api/lib/agent/assessment-response-lifecycle.js', async original => ({ ...await original<object>(),
   readReusableLegacyContinuityAssessment: mocks.reusable, reserveLegacyContinuityAssessment: mocks.reserve,
+  readLegacyContinuityAssessment: mocks.read,
   observeLegacyContinuityFirstNotDispatched: vi.fn(async () => {}),
 }))
 vi.mock('../../api/lib/agent/review-completion.js', async original => ({ ...await original<object>(), generateReviewCompletion: mocks.completion }))
@@ -28,6 +29,7 @@ beforeEach(() => {
     update: vi.fn(async ({ data }) => { mocks.state.validation = data.validation; return {} }),
   } }
   mocks.reusable.mockResolvedValue(null)
+  mocks.read.mockRejectedValue(new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', 'Synthetic absent response'))
   mocks.reserve.mockImplementation(async () => { mocks.state.claim = true; return 'new' })
   mocks.completion.mockImplementation(async () => { throw Error('synthetic provider boundary') })
 })
@@ -41,6 +43,13 @@ function invoke() {
 }
 
 describe('continuity check counter shares actual new-request admission', () => {
+  it('returns the real legacy format failure without trying to reconstruct an absent observation', async () => {
+    mocks.completion.mockResolvedValue('not JSON')
+    await expect(invoke()).resolves.toMatchObject({ complete: false, audit: { classification: 'json_invalid' } })
+    expect(mocks.read).not.toHaveBeenCalled()
+    expect(mocks.completion).toHaveBeenCalledOnce()
+    expect(mocks.state.validation.checkRounds).toBe(2)
+  })
   it.each(['denied', 'blocked', 'cached'] as const)('%s leaves the counter, claim and provider untouched', async kind => {
     if (kind === 'denied') mocks.reserve.mockRejectedValue(new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED', 'No original phase'))
     if (kind === 'blocked') mocks.reserve.mockResolvedValue('blocked')

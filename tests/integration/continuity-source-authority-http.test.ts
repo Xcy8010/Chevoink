@@ -25,10 +25,27 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 const runtime: NonNullable<ToolContext['modelRuntime']> = { tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
   baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-only', reasoningEffort: 'high', reasoningEfforts: ['none', 'high'],
   reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null }
-const semanticChecks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'not_applicable', reason: '本用例仅核对钥匙可用性，未出现方向或到达主张。', findingIndexes: [] }))
+const semanticChecks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'not_applicable', reasonCode: 'consistent',
+  explanation: '本用例仅核对钥匙可用性，未出现方向或到达主张。', findingIds: [] as string[] }))
 const safeBody = '她在库门外等候。库门仍然关闭。'
 const obsolete = '她用旧钥匙开门'
 const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
+
+function sourceReviewResponse(scenario: string, round: number) {
+  const invalid = { findingId: 'f0', signal: 'object', severity: 'error', reasonCode: 'manuscript_conflict',
+    explanation: `第3章却写“${obsolete}”，与前文熔毁事实矛盾。`, suggestion: '根据实际原文核对钥匙。',
+    manuscriptEvidence: [{ segmentId: 'p0', quote: '钥匙已经熔毁' }, { segmentId: 'c0', quote: obsolete }] }
+  const misattributed = { ...invalid, explanation: '第3章仍写“钥匙已经熔毁”，同时写“库门仍然关闭”，同一时刻互斥。',
+    manuscriptEvidence: [{ segmentId: 'p0', quote: '库门只能用这把钥匙开启' }, { segmentId: 'c0', quote: '钥匙已经熔毁' }] }
+  if (round === 1) return { findings: [scenario === 'previous-misattributed' ? misattributed : invalid],
+    semanticChecks: scenario === 'real-conflict' ? semanticChecks.map(row => row.kind === 'state_progression' ? { ...row,
+      result: 'conflict', reasonCode: 'manuscript_conflict', explanation: '钥匙已熔毁且唯一可用，本章却用该钥匙开门。', findingIds: ['f0'] } : row) : semanticChecks,
+    issueDispositions: [] }
+  return { corrections: [{ table: 'findings', index: 0, value: scenario === 'history-confirm-rejected' ? invalid
+    : { findingId: 'f0', action: 'retract', reasonCode: 'historical_reference',
+      explanation: '原引文来自历史问题描述；当前稿明确库门关闭，未发生旧钥匙开门。',
+      manuscriptEvidence: [{ segmentId: 'c0', quote: '库门仍然关闭' }] } }] }
+}
 
 describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source review', () => {
   it.each(['history-retracted', 'previous-misattributed', 'history-confirm-rejected', 'real-conflict', 'changed-during-provider'] as const)(
@@ -55,10 +72,15 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
         expect(admitted.status).toBe(200)
         const runId = admitted.body.data.runId as string
         const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
+        expect(run).toMatchObject({ runtimeProtocolVersion: 0, taskRootId: null })
         expect(taskSpecSchema.parse(run.taskSpec).scope).toMatchObject({ continuityEvidenceProtocol: 1,
+          continuityReportProtocol: 5,
           writing: { kind: 'bounded', targets: [{ chapterId: chapters[2].id, orderIndex: 3 }] } })
         await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
+        const ownerSeq = ((await prisma.agentRunEvent.aggregate({ where: { runId }, _max: { seq: true } }))._max.seq ?? 0) + 1
+        await prisma.agentRunEvent.create({ data: { runId, seq: ownerSeq, type: 'run.started', payload: { type: 'run.started', seq: ownerSeq } } })
         const ctx: ToolContext = { userId, novelId, sessionId, runId, chapterId: chapters[2].id, callId: 'source-check',
+          continuityOwnerSeq: ownerSeq,
           mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', modelRuntime: runtime,
           signal: new AbortController().signal, emit: () => {} }
         const { compilation } = await prepareStoryCompilation({ ...ctx, mode: 'balanced', intentSummary: '只检查第三章合成稿' })
@@ -68,31 +90,19 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
         const lastSeq = (await prisma.agentRunEvent.aggregate({ where: { runId }, _max: { seq: true } }))._max.seq ?? 0
         await prisma.agentRunEvent.create({ data: { runId, seq: lastSeq + 1, type: 'tool.call',
           payload: { toolName: 'continuity_validate', callId: ctx.callId, args: { compilationId: compilation.id } } } })
-        const invalid = { signal: 'object', severity: 'error', evidence: `第3章却写“${obsolete}”，与前文熔毁事实矛盾。`,
-          suggestion: '根据实际原文核对钥匙。', sourceEvidence: [{ source: 'previous', segmentId: 'p0' }, { source: 'current', segmentId: 'c0' }] }
-        const actual = { ...invalid, sourceEvidence: [
-          { source: 'previous', segmentId: 'p0', quote: '钥匙已经熔毁' },
-          { source: 'current', segmentId: 'c0', quote: obsolete },
-        ] }
         let sends = 0
         vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init: RequestInit) => {
           sends++
           const wire = JSON.parse(String(init.body))
-          expect(wire.messages[0].content).toContain('证据来源协议')
-          expect(wire.messages[1].content).toContain('"manuscriptEvidence":false')
-          expect(wire.messages[1].content).toContain(`"chapterId":"${chapters[2].id}"`)
-          expect(wire.messages[1].content).toContain('"revision":4')
+          expect(wire.messages[0].content).toContain('contract5')
+          const input = JSON.parse(wire.messages[1].content)
+          if (sends === 1) expect(input).toMatchObject({ author_request: { manuscriptEvidence: false, text: prompt },
+            manifestSubject: { chapterId: chapters[2].id, revision: 4 }, reviewScope: 'body_only', terminalCertification: 'not_requested' })
+          else expect(input).toMatchObject({ invalid: [{ table: 'findings', index: 0, original: { findingId: 'f0' } }],
+            fixed: { semanticChecks, issueDispositions: [] } })
           if (scenario === 'changed-during-provider') await prisma.chapter.update({ where: { id: chapters[2].id },
             data: { content: safeBody + '后来收到消息。', revision: { increment: 1 } } })
-          const decision = { index: 0, action: scenario === 'history-confirm-rejected' ? 'confirm' : 'retract',
-            reason: '原引文来自历史问题描述；当前稿明确库门关闭，未发生旧钥匙开门。',
-            sourceEvidence: [{ source: 'current', segmentId: 'c0', quote: '库门仍然关闭' }],
-            ...(scenario === 'history-confirm-rejected' ? { findingIndex: 0 } : {}) }
-          const misattributed = { ...invalid, evidence: '第3章仍写“钥匙已经熔毁”，同时写“库门仍然关闭”，同一时刻互斥。',
-            sourceEvidence: [{ source: 'previous', segmentId: 'p0', quote: '钥匙已经熔毁' }, { source: 'current', segmentId: 'c0', quote: '库门仍然关闭' }] }
-          const oldContent = sends > 2 ? '{"findings":[]}' : sends === 1 ? JSON.stringify({ findings: [scenario === 'real-conflict' ? actual : scenario === 'previous-misattributed' ? misattributed : invalid] })
-            : JSON.stringify({ decisions: [decision], findings: scenario === 'history-confirm-rejected' ? [invalid] : [] })
-          const content = JSON.stringify({ ...JSON.parse(oldContent), semanticChecks })
+          const content = JSON.stringify(sourceReviewResponse(scenario, sends))
           return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }],
             usage: { prompt_tokens: 24, completion_tokens: 12 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
         }))
@@ -105,7 +115,7 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
         expect(sends).toBe(scenario === 'real-conflict' || scenario === 'changed-during-provider' ? 1 : 2)
         const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
         if (scenario !== 'changed-during-provider') expect(saved.validation).toMatchObject({
-          checkedRevision: 4, coverage: { protocolVersion: 11 }, continuityCriticResponse: { parserVersion: 8 },
+          checkedRevision: 4, coverage: { protocolVersion: 11 }, continuityCriticResponse: { parserVersion: 10, responseContract: 5 },
           independentCheck: scenario === 'history-confirm-rejected' ? 'unavailable' : 'complete',
           ...(scenario === 'real-conflict' ? { errorCount: 1 } : ['history-retracted', 'previous-misattributed'].includes(scenario) ? { errorCount: 0 } : {}),
         })
@@ -138,6 +148,7 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
           // marker, then exercise the production recovery reader and tool.
           await prisma.agentRunEvent.create({ data: { runId, seq: lastSeq + 4, type: 'run.started',
             payload: { authorContinue: admission.authorContinue } } })
+          ctx.continuityOwnerSeq = lastSeq + 4
           await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
           // Continue is a wake-up, not an additional independent whole grant.
           // This unchanged subject has no original cycle revision receipt.

@@ -312,7 +312,10 @@ export async function runLegacyContinuityReview(ctx: ToolContext, input: {
   // Re-read the actual full lifecycle before a failed report may become
   // actionable pending work. In-memory traces alone miss an old unknown second.
   const bodyOnlyReport = frozen.parserVersion === 10 && frozen.continuityManifest?.candidateHash === null && !frozen.terminalCandidate
-  const recovery = assessed.complete && !bodyOnlyReport ? null : await prisma.$transaction(tx => readLegacyContinuityAssessment(tx, ctx, frozen))
+  const recoveryRequired = bodyOnlyReport || !assessed.complete && (assessed.audit.responseContract === 3 || assessed.audit.responseContract === 4
+    || frozen.parserVersion === 8 && frozen.reassessmentProtocol === 2 && !frozen.terminalCandidate && assessed.audit.classification === 'source_invalid'
+      && assessed.audit.rawResponse.complete)
+  const recovery = recoveryRequired ? await prisma.$transaction(tx => readLegacyContinuityAssessment(tx, ctx, frozen)) : null
   if (bodyOnlyReport && !recovery || recovery && !recovery.recoveryReady) throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED',
     '原连续性检查仍有未确认的响应或用量，保留原请求等待核实，未再次派发。')
   return { ...bindLegacyContinuityAssessment(recovery?.inspected.complete ? recovery.inspected : assessed, ctx, frozen), ...(recovery?.recoveryReady ? { recoveryReady: true } : {}) }
@@ -1232,7 +1235,7 @@ export const continuityValidateTool = defineTool({
       }
     }
     const criticInput = [
-        ...((requestBodies.terminalEvidence?.verdictProtocol === 4 || requestBodies.terminalEvidence?.verdictProtocol === 5 || requestBodies.terminalEvidence?.verdictProtocol === 6) ? [freshContinuityResponseContract(false, !!terminalCandidate, requestBodies.terminalEvidence.verdictProtocol, requestBodies, terminalCandidate)] : []),
+        ...((requestBodies.terminalEvidence?.verdictProtocol === 4 || requestBodies.terminalEvidence?.verdictProtocol === 5 || requestBodies.terminalEvidence?.verdictProtocol === 6 && !!terminalCandidate) ? [freshContinuityResponseContract(false, !!terminalCandidate, requestBodies.terminalEvidence.verdictProtocol, requestBodies, terminalCandidate)] : []),
         sourceAuthority ? continuityAuthorRequirements(originalRequest.prompt) : `原始作者明确要求（硬要求优先，不能被生成场景计划推翻）：${originalRequest.prompt ?? '未提供，不臆造'}`,
         ...(sourceAuthority ? [`唯一当前正文身份：${JSON.stringify({ source: 'current', chapterId: chapter.id, revision: chapter.revision, orderIndex: chapter.orderIndex, contentHash: coverage.contentHash })}`] : []),
         `章节：${chapter.title}`,
