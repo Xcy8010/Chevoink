@@ -638,7 +638,7 @@ describe.runIf(available)('original persistent supplemental phase: real question
     const retainedFindings = before!.requiredDecisions!.map(item => ({ ...item,
       reason: 'Retain the independent opinion explicitly for the author; no wording repair or completion of the pending reply is claimed.' }))
     const committed = await chapterBridgeCommitTool.execute({ ...s.ctx, callId: 'same-call-retention-and-commit' }, { compilationId: s.compilation.id, retainedFindings })
-    expect(committed).not.toMatchObject({ outcome: 'failed' }); expect(committed).not.toHaveProperty('failureCode')
+    expect(committed.outcome, JSON.stringify({ committed, terminalReview: before?.terminalReview, requiredDecisions: before?.requiredDecisions })).not.toBe('failed'); expect(committed).not.toHaveProperty('failureCode')
     const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })
     const pendingId = terminalFactId('openLoops', 'A reply remains pending.')
     expect(saved.validation).toMatchObject({ errorCount: 1, retainedReviewDecision: { findings: retainedFindings }, continuityCriticResponse: {
