@@ -307,7 +307,7 @@ describe('story compiler task identity', () => {
     expect(await chapterBridgeGetTool.execute(ctx, {})).toMatchObject({ outcome: 'failed', failureCode: 'COMPILATION_NOT_FOUND' })
   })
   it('marks a missing cross-task continuity compilation as failed instead of showing tool success', async () => {
-    expect(await continuityValidateTool.execute(ctx, { compilationId: 'foreign' })).toMatchObject({ outcome: 'failed', summary: '本任务连续性检查未执行' })
+    expect(await continuityValidateTool.execute(ctx, { compilationId: 'foreign' })).toMatchObject({ outcome: 'failed', summary: '本次连续性检查未执行' })
     expect(db.storyCompilation.create).not.toHaveBeenCalled()
   })
   it('keeps no-run digest compatibility read-only without guessing an active task', async () => {

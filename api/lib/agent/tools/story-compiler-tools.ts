@@ -1021,7 +1021,7 @@ export const continuityValidateTool = defineTool({
         return result
       })
     }
-    if (!compilation?.chapter || !compilation.bridge) return { outcome: 'failed' as const, summary: '本任务连续性检查未执行', output: '指定编译不属于本任务或尚未写入正文。独立检查既有章节请省略 compilationId、传真实 chapterId；不要为检查创建新章或接管旧编译。' }
+    if (!compilation?.chapter || !compilation.bridge) return { outcome: 'failed' as const, summary: '本次连续性检查未执行', output: '指定编译不属于本任务或尚未写入正文。独立检查既有章节请省略 compilationId、传真实 chapterId；不要为检查创建新章或接管旧编译。' }
     const chapter = compilation.chapter
     // Compare the review's actual inputs, not bookkeeping modified by our own
     // reserveContinuityCheck (validation.checkRounds / updatedAt).
@@ -1308,7 +1308,7 @@ export const continuityValidateTool = defineTool({
       if (!(error instanceof DataAccessError)) throw error
       const beforeReservation = error.code === 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' && !await hasLegacyTerminalCallEvidence(prisma, ctx)
       if (error.code !== 'COMPILATION_NOT_FOUND' && !beforeReservation) throw error
-      return { outcome: 'failed' as const, failureCode: error.code, summary: '本任务连续性检查未执行',
+      return { outcome: 'failed' as const, failureCode: error.code, summary: '本次连续性检查未执行',
         output: beforeReservation ? error.message
           : `当前编译已不存在或不可继续检查，未调用模型；当前 r${chapter.revision} 未获得新复核。请读取本任务章节桥核对真实状态，不使用旧报告宣称新版通过。`,
         ...(beforeReservation ? { reviewRequestFinished: { version: 1 as const, chapterId: chapter.id, revision: chapter.revision,

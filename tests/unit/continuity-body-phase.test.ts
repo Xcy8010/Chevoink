@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
 import type { LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
-import { legacyContinuityAssessmentKey, readReusableLegacyContinuityAssessment, continuityReassessmentRequest } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { legacyContinuityAssessmentKey, readReusableLegacyContinuityAssessment, continuityReassessmentRequest, reserveLegacyContinuityAssessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
+import * as manuscript from '../../api/lib/agent/manuscript-scope.js'
+import * as admissions from '../../api/lib/agent/quality-review-admission.js'
+import * as continued from '../../api/lib/agent/continued-review-recovery.js'
 
 const boundary = vi.hoisted(() => ({ original: vi.fn(), runs: vi.fn() }))
 vi.mock('../../api/lib/agent/original-request.js', async original => ({ ...await original<object>(),
@@ -313,6 +316,33 @@ describe('typed body review retains the original terminal phases', () => {
       input: { ...input, terminalCandidate: candidate }, semanticSubjectHash: continuitySubjectIdentity({ ...input, terminalCandidate: candidate })!,
       modelPriceHash: f.plan.modelPriceHash })).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
     expect(f.rows.find(row => row.id === 'body-response')!.metadata.response).toEqual(before.rows.find(row => row.id === 'body-response')!.metadata.response)
+  })
+  it.each(['same-admission', 'author-continue', 'unknown-pair', 'unknown-after-known'] as const)(
+    'classifies the actual body reservation without repurchasing the reviewed input: %s', async kind => {
+    const f = await fixture(true); failBodyPair(f)
+    f.rows.find(row => row.id === 'body-request')!.metadata.admissionId = 'original-admission'
+    if (kind === 'unknown-pair') f.fees[1].billingStatus = 'pending_settlement'
+    if (kind === 'unknown-after-known') f.rows.push({ id: 'unconfirmed-body-request', runId: f.subject.runId, artifactType: 'continuityReview',
+      createdAt: new Date(9), metadata: { assessmentChapterId: f.chapter.id, input: f.input, callId: 'unknown-call', admissionId: 'original-admission',
+        continuityAssessmentRequestKey: legacyContinuityAssessmentKey({ ...f.subject, callId: 'unknown-call' } as ToolContext, f.input) } })
+    Object.assign(f.db.agentRun, { findFirstOrThrow: vi.fn(async () => ({ id: f.subject.runId, userId: f.subject.userId,
+      novelId: f.subject.novelId, sessionId: 'session', taskRootId: null, runtimeProtocolVersion: 0, status: 'running' })) })
+    f.db.$queryRaw.mockResolvedValue([{ id: f.subject.novelId }])
+    const mocks = [vi.spyOn(manuscript, 'assertAgentManuscriptCurrent').mockResolvedValue(undefined),
+      vi.spyOn(admissions, 'readQualityReviewAdmission').mockResolvedValue({
+        id: kind === 'author-continue' ? 'author-continue:pause' : 'original-admission', at: new Date(kind === 'author-continue' ? 20 : 0) }),
+      vi.spyOn(continued, 'readAuthorContinuedReviewUsageIds').mockResolvedValue(new Set<string>())]
+    const before = structuredClone({ rows: f.rows, fees: f.fees }), createCount = f.db.agentArtifact.create.mock.calls.length
+    try {
+      for (const callId of ['different-call', 'another-different-call']) {
+        const attempt = reserveLegacyContinuityAssessment(f.tx,
+          { ...f.subject, callId, signal: new AbortController().signal } as ToolContext, f.input, async () => {})
+        if (kind.startsWith('unknown')) await expect(attempt).resolves.toBe('blocked')
+        else await expect(attempt).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+      }
+      expect({ rows: f.rows, fees: f.fees }).toEqual(before)
+      expect(f.db.agentArtifact.create).toHaveBeenCalledTimes(createCount)
+    } finally { mocks.reverse().forEach(mock => mock.mockRestore()) }
   })
   it.each(['same-revision', 'no-receipt', 'wrong-task', 'wrong-chapter', 'wrong-compilation', 'wrong-before', 'wrong-after', 'later-revision',
     'unknown-fee', 'unbound-fee', 'incomplete-first', 'incomplete-second'] as const)('does not turn a failed pair into a new body allowance: %s', async kind => {

@@ -259,7 +259,7 @@ export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionCl
   const exact = reservations.find(row => object(row.metadata)?.continuityAssessmentRequestKey === key)
   if (exact) return 'replay' as const
   const retired = reservations.length ? await readAuthorContinuedReviewUsageIds(tx, ctx) : new Set<string>()
-  let sameFailedTerminalInput = false
+  let sameFailedReviewedInput = false
   for (const reservation of reservations) {
     const meta = object(reservation.metadata)
     if (typeof meta?.continuityAssessmentRequestKey !== 'string') continue
@@ -290,7 +290,10 @@ export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionCl
     if (known && typeof meta.callId === 'string' && sameContinuitySubject(meta.input, input)) {
       const prior = await readLegacyContinuityAssessment(tx, { ...ctx, runId: reservation.runId, callId: meta.callId }, frozen as LegacyAssessmentInput)
       if (!prior.inspected.complete && knownFinalContinuityFailure(prior.inspected.audit)
-        && prior.billingKnown && prior.providerComplete && prior.recoveryReady) sameFailedTerminalInput = true
+        && prior.billingKnown && prior.providerComplete && prior.recoveryReady) {
+        sameFailedReviewedInput = true
+        continue
+      }
     }
     const subjectChanged = frozen?.targetType === input.targetType && frozen.targetId === input.targetId
       && frozen.chapterId === input.chapterId && typeof frozenBodies?.current === 'string'
@@ -335,7 +338,8 @@ export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionCl
   // A new Continue admission retires no semantic failure. Call IDs, prompt,
   // focus and table ordering cannot buy the same terminal judgment again.
   // Unknown requests above retain their original priority and reconciliation.
-  if (sameFailedTerminalInput) return 'blocked' as const
+  if (sameFailedReviewedInput) throw new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED',
+    '当前版本的复核报告未通过，本次未重复检查，正文与报告已保留。')
   await (await import('./continuity-coordinator.js')).claimLegacyContinuityVerification(tx, ctx, input, reservations, key)
   if (input.parserVersion === 10) {
     await assertContinuityOwner(tx, ctx)

@@ -23,6 +23,8 @@ import { prepareCompilerTerminalProposals } from '../../api/lib/agent/terminal-p
 import { buildContinuityInvalidRowRepair, inspectContinuityV4, validateStoredContinuityV4Projection } from '../../api/lib/agent/continuity-review-v4.js'
 import { legacyAssessmentInputSchema } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { freezeWritingScope, bindWritingChapter } from '../../api/lib/agent/writing-scope.js'
+import { withHumanAdmission, readHumanAdmission } from '../../api/lib/agent/goal-activation-authority.js'
+import { readQualityReviewAdmission } from '../../api/lib/agent/quality-review-admission.js'
 import { readReviewRequestRecoveryEvidence } from '../../api/lib/agent/review-request-recovery.js'
 import { RunEventBus, loadPersistedEvents } from '../../api/lib/agent/events.js'
 import * as credits from '../../api/lib/credits.js'
@@ -32,19 +34,23 @@ import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 describe.runIf(available)('contract5 actual legacy provider, report CAS and independent bridge gate', () => {
   it('preserves a failed known body pair through eight real edits, one original verification and the first candidate commit', () => fixture(async f => {
     const prompt = '写第一章', content = Array.from({ length: 8 }, (_, i) => `Entry ${i} remains pending.`).join(' ')
+    const startRequest = withHumanAdmission({ prompt, sessionId: f.sessionId, novelId: f.novelId, mode: 'build' })
     const old = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     await prisma.$transaction(async tx => {
       await tx.chapter.delete({ where: { id: old.id } })
       f.spec = await freezeWritingScope(tx, f, f.spec, prompt)
       expect(f.spec.scope.writing).toMatchObject({ kind: 'bounded', targets: [{ chapterId: null, orderIndex: 1 }] })
       await tx.agentRun.update({ where: { id: f.runId }, data: { taskSpec: JSON.parse(JSON.stringify(f.spec)), chapterId: null,
-        status: 'running', taskRootId: null, runtimeProtocolVersion: 0, startRequest: { prompt } } })
+        status: 'running', taskRootId: null, runtimeProtocolVersion: 0, startRequest: JSON.parse(JSON.stringify(startRequest)) } })
       await tx.chapter.create({ data: { id: old.id, authorId: f.userId, novelId: f.novelId, volumeId: old.volumeId, title: old.title,
         orderIndex: 1, orderInVolume: 1, content, wordCount: content.length, revision: 3 } })
       await bindWritingChapter(tx, f, 1, old.id)
       await tx.agentRun.update({ where: { id: f.runId }, data: { chapterId: old.id } })
     })
     await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'run.started', payload: { type: 'run.started', seq: 1 } } })
+    const admittedRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
+    expect(readHumanAdmission(admittedRun.startRequest)).toMatchObject({ request: { prompt, sessionId: f.sessionId, novelId: f.novelId, mode: 'build' } })
+    expect(await prisma.$transaction(tx => readQualityReviewAdmission(tx, admittedRun))).toMatchObject({ id: `author-message:${f.sourceMessageId}` })
     const { compilation } = await prepareStoryCompilation({ ...f, chapterId: old.id, mode: 'balanced', intentSummary: 'Save and verify the authorized new draft.' })
     const candidate = terminalCandidateSchema.parse({ exitState: { objects: ['Entry 0 remains recorded.'] } })
     await saveSceneTasks({ ...f, compilationId: compilation.id, tasks: [{ purpose: 'Record the entries', entryState: candidate.exitState, goal: 'Record', obstacle: 'Delay',
@@ -78,7 +84,16 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: raw }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`,
         { headers: { 'content-type': 'text/event-stream' } })
     }); vi.stubGlobal('fetch', fetchMock)
-    expect(await continuityValidateTool.execute(ctx, { compilationId: compilation.id })).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE' })
+    const firstBus = new RunEventBus(f.runId, 1)
+    let firstResult: Awaited<ReturnType<typeof handleToolCall>>
+    try {
+      firstResult = await handleToolCall({ id: ctx.callId, name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilation.id }) },
+        [continuityValidateTool], ctx, firstBus, 'failed-body-message', f.runId, undefined, () => firstBus.persist())
+    } finally { await firstBus.close() }
+    expect(firstResult).toMatchObject({ part: { status: 'failed' }, failureCode: 'CONTINUITY_REPORT_INCOMPLETE' })
+    const firstEvents = (await loadPersistedEvents(f.runId, 1)).filter(event => (event.type === 'tool.call' || event.type === 'tool.result') && event.callId === ctx.callId)
+    expect(firstEvents.map(event => event.type)).toEqual(['tool.call', 'tool.result'])
+    expect(firstEvents[1]).toMatchObject({ ok: false, failureCode: 'CONTINUITY_REPORT_INCOMPLETE' })
     expect(fetchMock).toHaveBeenCalledTimes(2)
     const failed = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
     expect(failed.validation).toMatchObject({ independentCheck: 'unavailable', checkedRevision: 3,
