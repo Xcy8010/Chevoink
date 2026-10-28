@@ -646,7 +646,7 @@ export async function readRecoveredChapterDelivery(tx: Prisma.TransactionClient,
 }
 
 export function requiresCompletedWritingPresentation(spec: TaskSpec): boolean {
-  return ['write', 'revise'].includes(spec.intent) && spec.scope.writing?.kind === 'bounded'
+  return spec.scope.authorEffects?.manuscript !== false && ['write', 'revise'].includes(spec.intent) && spec.scope.writing?.kind === 'bounded'
     && !['proposal_only', 'conversation_only'].includes(spec.writingPacing ?? '')
     // Legacy intent defaults may say write for a plain summary or observation.
     // They do not create a manuscript completion obligation by themselves.

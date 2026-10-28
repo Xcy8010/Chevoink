@@ -283,7 +283,7 @@ export function buildTaskSpec(input: {
       && operation.targetIndices.some(index => writingRequest.evidence.targets[index].kind === 'book'))
   const writingPacing = freshResearch ? undefined : !writingRequest ? legacyPacing
     : bookProposal ? 'proposal_only' as const : manuscriptRequested ? legacyPacing === 'explicit_writing' ? legacyPacing : undefined
-      : structureRequested || artifactRequested ? undefined : legacyPacing === 'conversation_only' ? legacyPacing : undefined
+      : structureRequested || artifactRequested || writingRequest.intent === 'review' ? undefined : 'conversation_only' as const
   const inferredIntent = freshResearch ? 'research_analysis' : writingPacing === 'proposal_only' ? 'plan'
     : writingPacing === 'explicit_writing' && boundedSceneRequest(input.prompt) ? 'write' : classifyIntent(input.prompt, input.researchAdmission === 1)
   const intent = !writingRequest ? inferredIntent : freshResearch ? 'research_analysis'
@@ -367,6 +367,12 @@ export function buildTaskSpec(input: {
     qualityMode: input.qualityMode ?? 'premium',
     createdAt: new Date().toISOString(),
   }
+}
+
+/** A legacy write label alone creates no chapter-delivery obligation. */
+export function requiresManuscriptDelivery(spec: Pick<TaskSpec, 'intent' | 'scope' | 'writingPacing'>): boolean {
+  return spec.scope.authorEffects?.manuscript !== false && ['write', 'revise'].includes(spec.intent)
+    && !['conversation_only', 'proposal_only'].includes(spec.writingPacing ?? '')
 }
 
 export function renderTaskSpec(spec: TaskSpec): string {

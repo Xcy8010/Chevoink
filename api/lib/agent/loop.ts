@@ -92,7 +92,7 @@ import {
 import { COMPATIBILITY_TOKEN_LIMIT, untilCompletionControl } from './execution-control.js'
 import { autoNameSession } from './session-title.js'
 import { withModelAssignmentContext, updateModelAssignmentContext } from './model-assignment-context.js'
-import { buildTaskSpec, narrowLegacyResearchTask, narrowLegacyConversationTask } from './task-spec.js'
+import { buildTaskSpec, narrowLegacyResearchTask, narrowLegacyConversationTask, requiresManuscriptDelivery } from './task-spec.js'
 import { buildSkillExecutionDigest, routeSkills, type SkillPhase } from './skills/index.js'
 import { resolveRuntimeSkillContext } from './skills/service.js'
 import { nextSkillPhase, phaseIntent, phaseSignals } from './skills/lifecycle.js'
@@ -208,25 +208,6 @@ async function persistMessage(
 /** 工具输出包裹来源标注：正文/记忆里的指令性文字不构成新指令（plan/13 §4.10） */
 function wrapToolOutput(toolName: string, output: string): string {
   return `<tool_output tool="${toolName}">\n${output}\n</tool_output>`
-}
-
-/**
- * 伪工具调用检测（plan/14 §五 C1）：模型把调用写进正文而没有真正发起 function calling。
- * 多模式覆盖：历史压缩标记格式、工具名+参数 JSON 同段出现、“我现在调用 xx”句式。
- */
-function looksLikePseudoToolCall(content: string, toolNames: string[]): boolean {
-  const mentioned = toolNames.filter((name) => content.includes(name))
-  if (mentioned.length > 0) {
-    // 工具名与参数 JSON（如 {"title": …）同时出现：大概率在文本里模拟调用
-    if (/[{｛]\s*["'“”]?\w+["'“”]?\s*[:：]/.test(content)) {
-      return true
-    }
-    if (mentioned.some((name) => new RegExp(`我(现在|将|马上|立[即刻]|来)?\\s*(调用|发起|执行|使用)[^。\\n]{0,20}${name}`).test(content))) {
-      return true
-    }
-  }
-
-  return /我(现在|将|马上|立[即刻])\s*(调用|发起|执行)[^。\n]{0,12}工具/.test(content)
 }
 
 /** 工具参数流式进度的节流步长：每多生成这么多参数字符才发一次 tool.delta，控制事件量 */
@@ -1250,8 +1231,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     const currentReviewState: { value: ChapterReviewReadiness | null } = { value: null }
     const observePersistedReviewProgress = async () => {
       currentReviewState.value = null
-      if (!['write', 'revise'].includes(taskSpec.intent)
-        || ['conversation_only', 'proposal_only'].includes(taskSpec.writingPacing ?? '')) return false
+      if (!requiresManuscriptDelivery(taskSpec)) return false
       try {
         const review = await readCurrentReviewReadiness()
         // Pending receipt truth belongs to one chapter/version/phase. A
@@ -1320,7 +1300,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
       if (completed.length) await persistCheckpoint()
     }
-    if ((params.resume || previousTask) && ['write', 'revise'].includes(taskSpec.intent)) {
+    if ((params.resume || previousTask) && requiresManuscriptDelivery(taskSpec)) {
       const recovered = await prisma.$transaction(tx => readReviewRequestRecovery(tx,
         { userId: params.userId, novelId: params.novelId, runId }, [...pendingReviews.values()]), { timeout: 20_000 })
       for (const item of recovered) {
@@ -1421,7 +1401,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (await observePersistedReviewProgress()) await persistCheckpoint()
       throw new DataAccessError(409, 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED', pendingReviewPauseReason())
     }
-    if ((params.resume || previousTask) && ['write', 'revise'].includes(taskSpec.intent)) {
+    if ((params.resume || previousTask) && requiresManuscriptDelivery(taskSpec)) {
       const recovered = await prisma.$transaction(tx => readContinuedContinuityRecovery(tx,
         { userId: params.userId, novelId: params.novelId, runId }), { timeout: 20_000 })
       for (const [key, attempt] of recovered) {
@@ -1437,7 +1417,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (!reviewRecoveryKeys.get(key)?.startsWith('author-continued-review:')) reviewRecoveryKeys.set(key, continuedReviewAttemptKey(item.receipt, name))
     }
     if (params.resume && stagnantBatches >= 4 && !inputProtocolRecovery && !compatibilityReadTargets
-      && ['write', 'revise'].includes(taskSpec.intent)) {
+      && requiresManuscriptDelivery(taskSpec)) {
       // Older tool cards retained a confirmed locator failure without saving
       // a checkpoint restriction. Authenticate original-task evidence;
       // Continue itself grants neither progress nor another budget allowance.
@@ -1729,7 +1709,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     const continuityOwner = await prisma.agentRunEvent.findFirst({ where: { runId, type: 'run.started' }, orderBy: { seq: 'desc' }, select: { seq: true, payload: true } })
     if (continuityOwner?.seq !== continuityStartEvent.seq || runtimeJson(continuityOwner.payload).hash !== runtimeJson(continuityStartEvent).hash)
       throw new DataAccessError(409, 'CONTINUITY_OWNER_STALE', '当前执行启动回执已变化；未借用其他 owner 的启动记录。')
-    if (params.resume && params.authorContinue && ['write', 'revise'].includes(taskSpec.intent)
+    if (params.resume && params.authorContinue && requiresManuscriptDelivery(taskSpec)
       && Number.isSafeInteger(params.authorContinue.afterSeq) && continuityOwner.seq === params.authorContinue.afterSeq + 1) {
       // The original counter remains historical evidence. Only this already
       // admitted human Continue gets its ordinary consecutive-batch window.
@@ -1787,7 +1767,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     const protocolRecovery = createProtocolRecoveryGuard()
     const emptyResponseRecovery = createEmptyResponseGuard()
     let requireNativeToolCall = false
-    const toolNameList = tools.map((tool) => tool.name)
     // C3：规划类任务必须以 plan_save 落盘收尾，只聊天不落盘时回填提醒
     const expectsPlanSave = taskSpec.intent !== 'research_analysis' && params.mode === 'plan' && /(规划|大纲|计划)/.test(params.prompt)
     let planSavePerformed = false
@@ -2105,9 +2084,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           bootstrapCall = { id: `known_review_${proof.assessmentKey.slice(0, 40)}`, name: 'continuity_validate', arguments: JSON.stringify({ compilationId }) }
         }
       }
-      if (!completedWritingWrapUp.value && !bootstrapCall && !pendingReviews.size && ['write', 'revise'].includes(taskSpec.intent)
-        && params.mode === 'build' && !toolContext.inlineChild && toolContext.sandboxMode !== 'read_only'
-        && !['conversation_only', 'proposal_only'].includes(taskSpec.writingPacing ?? '')) {
+      if (!completedWritingWrapUp.value && !bootstrapCall && !pendingReviews.size && requiresManuscriptDelivery(taskSpec)
+        && params.mode === 'build' && !toolContext.inlineChild && toolContext.sandboxMode !== 'read_only') {
         // Observe with the same stale-source tolerance as ordinary progress.
         // A prepared compiler or pre-existing body cannot precede this task's
         // actual writer. Incomplete/unknown phases retain their recovery path.
@@ -2127,7 +2105,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           }
         }
       }
-      if (!completedWritingWrapUp.value && !bootstrapCall && !pendingReviews.size && currentReviewState.value?.compilationId
+      if (!completedWritingWrapUp.value && !bootstrapCall && !pendingReviews.size && requiresManuscriptDelivery(taskSpec) && currentReviewState.value?.compilationId
         && taskSpec.scope?.continuityReportProtocol === 5 && tools.some(tool => tool.name === 'chapter_edit_range')) {
         let revision: Awaited<ReturnType<typeof import('./continuity-coordinator.js')['prepareContinuityMergedRevision']>>
         try {
@@ -2366,7 +2344,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       // before its tool executes. Only a fresh authenticated author proof can
       // schedule this zero-provider path; execution rechecks the frozen proof
       // and must fail without a paid fallback if any binding has changed.
-      if (!completedWritingWrapUp.value && stagnantBatches >= 4 && !pendingReviews.size && ['write', 'revise'].includes(taskSpec.intent)
+      if (!completedWritingWrapUp.value && stagnantBatches >= 4 && !pendingReviews.size && requiresManuscriptDelivery(taskSpec)
         && params.mode === 'build' && !toolContext.inlineChild && toolContext.sandboxMode !== 'read_only'
         && effectiveToolCalls.length > 0 && effectiveToolCalls.every(call => tools.find(tool => tool.name === call.name)?.readOnly)
         && effectiveToolCalls.some(call => ['chapter_read', 'chapter_bridge_get'].includes(call.name))
@@ -2393,10 +2371,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       // A weak tool caller cannot skip the delivery assessments by returning
       // prose. These calls use the same original tool ceiling and ordinary
       // journal, approvals, billing and compiler counters as model calls.
-      if (!completedWritingWrapUp.value && effectiveToolCalls.length === 0 && ['write', 'revise'].includes(taskSpec.intent)
-        && params.mode === 'build' && !['conversation_only', 'proposal_only'].includes(taskSpec.writingPacing ?? '')
-        && result.finishReason !== 'tool_calls' && !containsAgentProtocolInvocation(result.content)
-        && !looksLikePseudoToolCall(result.content, toolNameList)) {
+      if (!completedWritingWrapUp.value && effectiveToolCalls.length === 0 && requiresManuscriptDelivery(taskSpec)
+        && params.mode === 'build'
+        && result.finishReason !== 'tool_calls' && !containsAgentProtocolInvocation(result.content)) {
         const readiness = await readCurrentReviewReadiness()
         const next = await currentDispatch(readiness)
         if (next.kind === 'tool') {
@@ -2483,7 +2460,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
       const invalidToolProtocol =
         effectiveToolCalls.length === 0 &&
-        (result.finishReason === 'tool_calls' || containsAgentProtocolInvocation(result.content) || looksLikePseudoToolCall(result.content, toolNameList))
+        (result.finishReason === 'tool_calls' || containsAgentProtocolInvocation(result.content))
       const protocolDecision = protocolRecovery.observe(effectiveToolCalls.length > 0, invalidToolProtocol)
       if (effectiveToolCalls.length > 0) requireNativeToolCall = false
 
@@ -2576,7 +2553,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           await wrapUpAndFinish(pendingReviewPauseReason())
           return
         }
-        const nextChapterRequired = requiresNextChapterDelivery(taskSpec.goals)
+        const nextChapterRequired = requiresManuscriptDelivery(taskSpec) && requiresNextChapterDelivery(taskSpec.goals)
         const chapterIncomplete = nextChapterRequired
           && !await (await import('./humanity-quality.js')).hasCommittedTaskChapter(prisma, params.userId, params.novelId, runId)
         if (toolRestrictions.length && !(nextChapterRequired && !chapterIncomplete) && !report?.content) {
@@ -2834,7 +2811,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           }
           const readiness = await readCurrentReviewReadiness(compilationId)
           const admittedCommit = preflightTool && toolContext.toolAuthority ? intersectToolAuthority([preflightTool], toolContext.mode, toolContext.toolAuthority)[0] : preflightTool
-          if (readiness && admittedCommit && admittedCommit.permission[toolContext.mode] !== 'deny' && ['write', 'revise'].includes(taskSpec.intent)
+          if (readiness && admittedCommit && admittedCommit.permission[toolContext.mode] !== 'deny' && requiresManuscriptDelivery(taskSpec)
             && params.mode === 'build' && !toolContext.inlineChild && toolContext.sandboxMode !== 'read_only'
             && !toolContext.protectedChapterIds?.has(readiness.chapterId)
             && !parsed.decisionOnly && (parsed.terminalState !== undefined || parsed.exitState !== undefined || parsed.lastUnfinishedAction !== undefined)) {
@@ -3211,7 +3188,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         // This control decision comes only from the actual authenticated answer,
         // never from model prose, a todo completion claim or a historical reply.
         todoItems = await cancelTaskTodoItems(params.sessionId, await getTaskRunIds(params.sessionId, runId), '作者明确要求结束，剩余工作不再执行')
-        const chapterRequired = requiresNextChapterDelivery(taskSpec.goals)
+        const chapterRequired = requiresManuscriptDelivery(taskSpec) && requiresNextChapterDelivery(taskSpec.goals)
         const reportRequired = taskSpec.intent === 'research_analysis'
         const report = reportRequired ? await (await import('./research-sources.js')).readResearchReportForDelivery({
           userId: params.userId, novelId: params.novelId, sessionId: params.sessionId, runId,

@@ -135,12 +135,12 @@ export function terminalReviewFailure(validation: unknown, content: string, cont
       ? `按实际裁决用 terminalPatch={baseCandidateHash:${JSON.stringify(runtimeJson(review.candidate).hash)},removeFactIds:[],addFacts:[{field,claim}]} 只更新需要处理的候选，未指定项保留；当前事实地址：${JSON.stringify(terminalCandidateFacts(review.candidate).map(({ id, field, claim }) => ({ factId: id, field, claim })))}。removeFactIds 只能使用本次当前事实地址或非空 currentCandidateEditAddress.factId；readOnlyCoverageId、readOnlyProposalId 仅用于核对旧记录，不能当作候选删除地址。删除候选不解除持续事实或旧提议的独立处置要求。也可提供完整 terminalState。更新后调用 continuity_validate；`
       : '按实际裁决更新 terminalState 后调用 continuity_validate；'
     return { reviewCompleted: true, reviewOutcome: 'decision_required' as const,
-      summary: '终态候选尚未获独立证实',
+      summary: '连续性检查完成 · 章节尚未提交',
       output: `${proseReport ? proseReport.text + '\n' : ''}本次检查尚未通过：独立正文报告已收到，但终态与持续事实尚未获证实，禁止称检查通过或提交。终态待处理候选或旧事实：${JSON.stringify({ disputed, unresolved, ...(proposals.length ? { proposals } : {}), ...(establishedIssues.length ? { establishedIssues } : {}), ...('proofChecks' in review ? { proofChecks: review.proofChecks } : {}) })}。其余已支持项无需同义重写。以本章明确完成证据判为 negated 的旧待办，可据该裁决移除或更新；unknown 不能删空，持续事实请使用已有核验的原字段/原主张证明并核对本章是否变化，不要求正文重述历史。保留事实主体、条件和未解决义务，不把状态误改成已完成。${updateGuidance}同一版本检查通过再 chapter_bridge_commit，${proseReport?.errors ? '正文仍有真实错误，按完整报告、当前证据和原授权处理后复核；终态待核不覆盖这些错误。' : '无需为终态候选改正文或重跑已通过的质量检查。'}${selection}` }
   }
   return { ...(review ? {} : { outcome: 'failed' as const, failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' }), reviewCompleted: !!review,
     reviewOutcome: review ? 'decision_required' as const : 'evidence_repair_required' as const,
-    summary: '终态候选尚未获正文证实',
+    summary: review ? '连续性检查完成 · 章节尚未提交' : '连续性检查失败',
     output: `正文与候选均保留，终态未提交；不把连续性 findings 为空当作终态通过。${review
       ? `逐项核验：${JSON.stringify(review.verdicts.map(item => ({ path: item.path, verdict: item.verdict, evidence: item.evidence })))}${review.factCoverage ? `；持续事实处置：${JSON.stringify(review.factCoverage.dispositions)}` : ''}`
       : `独立响应缺少完整逐项判定或有效 current 原文编号，不能补造证据。${diagnostics?.length ? `终态证据诊断：${JSON.stringify(diagnostics)}。` : ''}`}核对真实正文后，调用 continuity_validate，以 terminalState={exitState,lastUnfinishedAction} 传入完整准确候选重检。候选任何改动（含删除未知项）都须重新核验；重检通过后才可 chapter_bridge_commit，提交同一候选或省略状态复用。不得把计划、推断或转述改称实况，也不要清空已知状态绕过核验。` }

@@ -697,8 +697,10 @@ export async function prepareContinuityMergedRevision(ctx: ToolContext, compilat
   const plan = facts.plan
   const probe = await prisma.$transaction(tx => import('./chapter-review-guard.js').then(module => module.probeChapterReviewRevision(tx, ctx,
     facts.saved.chapter!, { mutation: 'range', mergedBatch: true })), { timeout: 20_000 })
+  // An unavailable paid revision leaves ordinary author-directed work open,
+  // just as revision_skip does in the native coordinator.
   if (plan.phases.find(phase => phase.kind === 'prose_revision')?.limit !== 1 || !probe.open)
-    return { kind: 'blocked' as const, reason: !probe.open ? probe.message : '原任务没有尚未使用的集中修订阶段。' }
+    return null
   const id = runtimeJson({ kind: 'continuity_merged_revision', planHash: plan.hash }).hash
   const prior = await prisma.agentArtifact.findUnique({ where: { id } })
   let stored = object(object(prior?.metadata).continuityMergedRevision)

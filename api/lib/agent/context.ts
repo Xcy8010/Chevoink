@@ -22,7 +22,7 @@ import {
   renderCheckpointDigest,
   renderDirectiveDigest,
 } from './context-engine.js'
-import { renderTaskSpec } from './task-spec.js'
+import { renderTaskSpec, requiresManuscriptDelivery } from './task-spec.js'
 import { effectiveWritingTaskSpec } from './writing-scope.js'
 import { searchStoryMemory } from './story-memory.js'
 import { isAgent2FeatureEnabled } from '../agent2-feature-flags.js'
@@ -449,8 +449,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   const hasCapability = (...names: string[]) => !focused || names.some(name => catalog.names.includes(name))
   const writingResources = !focused || catalog.kind === 'writing'
   const writingTargets = input.taskSpec.scope.writing?.targets ?? []
-  const frozenWriting = ['write', 'revise'].includes(input.taskSpec.intent)
-    && !['conversation_only', 'proposal_only'].includes(input.taskSpec.writingPacing ?? '')
+  const frozenWriting = requiresManuscriptDelivery(input.taskSpec)
     && input.taskSpec.scope.writing?.kind === 'bounded'
   const writingTaskRunIds = frozenWriting ? new Set(await getTaskRunIds(input.sessionId, input.runId)) : undefined
   const [ruleBundleSplit, memoryDigest, planDigest, coverDigest, todoDigest, directives, history, chapter, storyCompilerDigest, goalMessages, localWritingContext] = await Promise.all([
@@ -559,8 +558,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     chapterLine,
   })
 
-  const chapterWriting = ['write', 'revise'].includes(input.taskSpec.intent)
-    && !['conversation_only', 'proposal_only'].includes(input.taskSpec.writingPacing ?? '')
+  const chapterWriting = requiresManuscriptDelivery(input.taskSpec)
     && (writingTargets.length > 0 || input.taskSpec.scope.chapterIds?.includes(input.chapterId ?? ''))
   const writingChapterId = writingTargets.length === 1 ? writingTargets[0].chapterId ?? null : writingTargets.length > 1 ? null : input.chapterId
   const subject = { userId: input.userId, novelId: input.novelId, runId: input.runId }

@@ -15,7 +15,7 @@ describe('independent terminal fact evidence', () => {
     const before = structuredClone(validation)
     const result = terminalReviewFailure(validation, body)
     expect(result).toMatchObject({ reviewOutcome: 'decision_required', reviewCompleted: true,
-      summary: '终态候选尚未获正文证实' })
+      summary: '连续性检查完成 · 章节尚未提交' })
     expect(result).not.toHaveProperty('failureCode')
     expect(result).not.toHaveProperty('display')
     expect(result?.output).toContain('exitState.body.0')

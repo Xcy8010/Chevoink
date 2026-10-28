@@ -460,6 +460,18 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     await assembleContext(input)
     expect(readChapterWritingBackground).toHaveBeenCalledWith(expect.anything(), { userId: 'user-1', novelId: 'novel-1', runId: 'run-1' }, null)
   })
+  it('does not inject chapter delivery instructions into a frozen developer consultation', async () => {
+    const input = buildInput()
+    input.taskSpec.intent = 'write'
+    delete input.taskSpec.writingPacing
+    input.taskSpec.scope.authorEffects = { version: 1, requestHash: 'a'.repeat(64), manuscript: false, structure: false }
+    input.prompt = '我是Agent的开发者，我如何优化和修复这些问题？'
+    const { messages } = await assembleContext(input)
+    expect(readChapterWritingBackground).not.toHaveBeenCalled()
+    expect(readWritingPresentation).not.toHaveBeenCalled()
+    expect(String(messages.at(-1)?.content)).not.toContain('本次聊天交付')
+    expect(String(messages.at(-1)?.content)).toContain(input.prompt)
+  })
   it('does not inject chapter background or saved-only delivery instructions into a research task', async () => {
     const input = buildInput()
     input.taskSpec.intent = 'research_analysis'

@@ -1,6 +1,27 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildTaskSpec, extractDirectiveCandidates, narrowLegacyResearchTask, renderTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { buildTaskSpec, extractDirectiveCandidates, narrowLegacyResearchTask, renderTaskSpec, requiresManuscriptDelivery } from '../../api/lib/agent/task-spec.js'
+
+describe('advisory requests with an editor chapter', () => {
+  it.each([
+    '我是Chevoink Agent的开发者，对于我来说我如何优化和修复才能避免这些问题？',
+    '作为开发者，我应该怎样优化Agent的工具结果展示？',
+  ])('answers without acquiring chapter obligations: %s', prompt => {
+    const spec = buildTaskSpec({ runId: 'r', novelId: 'n', chapterId: 'c', prompt, authorWritingProtocol: 2 })
+    expect(spec).toMatchObject({ writingPacing: 'conversation_only', scope: { authorEffects: { manuscript: false, structure: false } } })
+    expect(requiresManuscriptDelivery(spec)).toBe(false)
+    const frozen = structuredClone(spec)
+    delete frozen.writingPacing
+    const before = structuredClone(frozen)
+    expect(requiresManuscriptDelivery(frozen)).toBe(false)
+    expect(frozen).toEqual(before)
+    expect(renderTaskSpec(spec)).toContain('无需先确定章节')
+  })
+  it.each(['写下一章', '修改第1章正文'])('keeps real manuscript delivery required: %s', prompt => {
+    const spec = buildTaskSpec({ runId: 'r', novelId: 'n', chapterId: 'c', prompt, authorWritingProtocol: 2 })
+    expect(requiresManuscriptDelivery(spec)).toBe(true)
+  })
+})
 
 describe('fresh external craft research admission', () => {
   it.each(['先只搜索番茄小说页面链接，不读正文，也不要自动打开链接', '禁止读取正文', '只返回搜索链接', "don't open links"])(

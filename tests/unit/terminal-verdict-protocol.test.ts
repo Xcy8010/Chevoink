@@ -57,7 +57,7 @@ describe('request-owned source-derived verdicts', () => {
     expect(review.verdicts.at(-1)).toMatchObject({ verdict: 'unknown', basis: 'current', inheritance: { currentState: 'uncertain' } })
     expect(review.factCoverage?.dispositions.map(item => item.outcome)).toEqual(['unknown', 'unknown'])
     const pending = terminalReviewFailure(validation, chapter.content, evidence)
-    expect(pending).toMatchObject({ reviewCompleted: true, summary: '终态候选尚未获独立证实' })
+    expect(pending).toMatchObject({ reviewCompleted: true, summary: '连续性检查完成 · 章节尚未提交' })
     expect(pending).toMatchObject({ reviewCompleted: true, reviewOutcome: 'decision_required' })
     expect(pending).not.toHaveProperty('failureCode')
     expect(pending?.output).toContain('本次检查尚未通过')

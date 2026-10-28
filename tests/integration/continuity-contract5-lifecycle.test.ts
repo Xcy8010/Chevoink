@@ -29,13 +29,14 @@ import * as prices from '../../api/lib/billing/resolve-token-price.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 describe.runIf(available)('contract5 actual legacy provider, report CAS and independent bridge gate', () => {
-  it.each(['complete', 'normalized-cross-chunk', 'preserved-canonical', 'typed-sparse-repair', 'repaired-background', 'single-background', 'recovered-failed-background', 'unknown', 'applied-typed-error', 'merged-revision', 'cancel-known-raw', 'wrong-owner', 'body-only-first-terminal', 'body-only-unknown', 'body-only-old-local-refusal'] as const)('%s preserves the original phase and V2 price', scenario => fixture(async f => {
+  it.each(['complete', 'normalized-cross-chunk', 'preserved-canonical', 'typed-sparse-repair', 'repaired-background', 'single-background', 'recovered-failed-background', 'unknown', 'applied-typed-error', 'merged-revision', 'spent-revision', 'cancel-known-raw', 'wrong-owner', 'body-only-first-terminal', 'body-only-unknown', 'body-only-old-local-refusal'] as const)('%s preserves the original phase and V2 price', scenario => fixture(async f => {
     const bodyOnly = scenario.startsWith('body-only-'), recoveringPair = scenario === 'recovered-failed-background'
     const pairedBackground = scenario === 'repaired-background' || recoveringPair
     const background = pairedBackground || scenario === 'single-background'
     const prompt = background ? '修改第一章' : '修改第一章，只输出标题和正文'
     const completeScenario = background || bodyOnly || scenario === 'complete' || scenario === 'typed-sparse-repair' || scenario === 'normalized-cross-chunk' || scenario === 'preserved-canonical'
-    const factual = scenario === 'applied-typed-error' || scenario === 'merged-revision'
+    const mergedRevision = scenario === 'merged-revision' || scenario === 'spent-revision'
+    const factual = scenario === 'applied-typed-error' || mergedRevision
     const baseContent = 'The sealed packet remains with the guard.'
     const content = background ? 'x'.repeat(290) + baseContent + ' The clerk waits.' + 'z'.repeat(400)
       : factual ? 'The packet is sealed. The packet is open.' : scenario === 'normalized-cross-chunk' ? `${'x'.repeat(290)}${baseContent}` : baseContent
@@ -134,8 +135,15 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       if (recoveringPair && requestCount > 2) throw Error('The original two physical responses must recover without another provider slot')
       if (scenario === 'cancel-known-raw') await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'paused' } })
       if (scenario === 'wrong-owner') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'run.started', payload: { type: 'run.started', seq: 2 } } })
-      const revisedWire = { ...wire, findings: [], semanticChecks: wire.semanticChecks.map(row => ({ ...row, result: 'clear', reasonCode: 'consistent', findingIds: [] })),
+      const revisedWire = { ...wire, findings: [] as unknown[], semanticChecks: wire.semanticChecks.map(row => ({ ...row, result: 'clear', reasonCode: 'consistent', findingIds: [] as string[] })),
         issueDispositions: [{ issueIndex: 0, outcome: 'repaired', reasonCode: 'consistent', explanation: 'The current manuscript retains only the sealed state.', manuscriptEvidence: [{ segmentId: 'c0' }] }] }
+      if (scenario === 'spent-revision') {
+        revisedWire.findings.push({ findingId: 'f0', signal: 'object', severity: 'error', reasonCode: 'manuscript_conflict',
+          explanation: 'The independent reviewer still questions the packet state.', suggestion: 'Read the current evidence before deciding.',
+          manuscriptEvidence: [{ segmentId: 'c0', quote: 'The packet is sealed.' },
+            { segmentId: 'c0', quote: 'The guard keeps the packet sealed.' }] })
+        Object.assign(revisedWire.semanticChecks[1], { result: 'conflict', reasonCode: 'manuscript_conflict', findingIds: ['f0'] })
+      }
       if (pairedBackground && requestCount === 2) {
         const rows = await prisma.agentArtifact.findMany({ where: { runId: f.runId, artifactType: 'continuityReview', metadata: { path: ['stage'], equals: 'first' } } })
         const metadata = rows.map(row => row.metadata as Record<string, unknown>).find(value => value.response && value.input)!
@@ -155,7 +163,7 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
         ? JSON.stringify({ corrections: [{ table: 'findings', index: 0, value: { findingId: 'f0', action: 'retract',
           reasonCode: 'insufficient_evidence', explanation: 'The current source does not establish that allegation; the manuscript is unchanged.',
           manuscriptEvidence: [{ segmentId: 'c0' }] } }] })
-        : scenario !== 'merged-revision' || requestCount === 1 ? raw : requestCount === 2
+        : !mergedRevision || requestCount === 1 ? raw : requestCount === 2
         ? JSON.stringify({ patches: [{ oldText: 'The packet is open.', newText: 'The guard keeps the packet sealed.' }], retainedFindings: [] }) : JSON.stringify(revisedWire)
       return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: responseRaw }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 8 } })}\n\ndata: [DONE]\n\n`,
         { headers: { 'content-type': 'text/event-stream' } })
@@ -271,7 +279,7 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
           reportHash: runtimeJson(audit).hash, origin: expect.objectContaining({ chapterId: chapter.id, revision: 4, bodyHash: runtimeJson({ content }).hash }) })])
         expect(source.establishedIssues[0].text).not.toContain('独立意见')
         expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(feesBefore)
-      } else if (scenario === 'merged-revision') {
+      } else if (mergedRevision) {
         const originals = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
         const revision = await prepareContinuityMergedRevision(ctx, compilation.id)
         expect(revision?.kind).toBe('tool')
@@ -282,7 +290,7 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
         expect(revised).toMatchObject({ revision: 5, content: 'The packet is sealed. The guard keeps the packet sealed.' })
         expect(fetchMock).toHaveBeenCalledTimes(2)
         const verified = await continuityValidateTool.execute({ ...ctx, callId: 'original-cycle-reverify' }, { compilationId: compilation.id, terminalState: candidate })
-        expect(verified).toMatchObject({ reviewCompleted: true, reviewOutcome: 'complete' })
+        expect(verified).toMatchObject({ reviewCompleted: true, reviewOutcome: scenario === 'spent-revision' ? 'decision_required' : 'complete' })
         expect(verified).not.toHaveProperty('failureCode')
         const verifiedCompilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
         const verifiedAudit = (verifiedCompilation.validation as Record<string, unknown>).continuityCriticResponse as Record<string, unknown>
@@ -291,7 +299,22 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
         expect(await prisma.aiUsageLog.findMany({ where: { id: { in: originals.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(originals)
         await persistHumanityQualityReport({ ...f, compilationId: compilation.id, chapterId: chapter.id, chapterRevision: revised.revision, mode: 'balanced',
           criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
-        expect(await chapterBridgeCommitTool.execute({ ...ctx, callId: 'commit-revised' }, { compilationId: compilation.id })).not.toHaveProperty('failureCode')
+        if (scenario === 'spent-revision') {
+          const before = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+          const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+          expect(await prepareContinuityMergedRevision(ctx, compilation.id)).toBeNull()
+          expect(await prepareContinuityMergedRevision(ctx, compilation.id)).toBeNull()
+          expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(before)
+          expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(ledger)
+          expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).toEqual(verifiedCompilation)
+          const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, compilation.id))
+          expect(readiness).toMatchObject({ ready: true, decisionPending: true, continuityErrorCount: 1, terminalCommitted: false })
+          // The remaining opinion reaches the ordinary decision path; the paid
+          // revision's refusal neither accepts it nor pauses the entire run.
+          expect(readiness!.requiredDecisions).toHaveLength(1)
+        } else {
+          expect(await chapterBridgeCommitTool.execute({ ...ctx, callId: 'commit-revised' }, { compilationId: compilation.id })).not.toHaveProperty('failureCode')
+        }
         expect(fetchMock).toHaveBeenCalledTimes(3)
         expect(await continuityValidateTool.execute({ ...ctx, callId: 'candidate-only-no-new-grant' }, { compilationId: compilation.id,
           terminalState: terminalCandidateSchema.parse({ exitState: { objects: ['The guard holds a different packet.'] } }) })).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
@@ -381,13 +404,13 @@ describe.runIf(available)('contract5 actual legacy provider, report CAS and inde
       expect(replacement).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
       expect(fetchMock).toHaveBeenCalledTimes(2)
     }
-    const requestTotal = bodyOnly ? 2 : scenario === 'merged-revision' ? 3 : scenario === 'typed-sparse-repair' || pairedBackground ? 2 : 1
+    const requestTotal = bodyOnly ? 2 : mergedRevision ? 3 : scenario === 'typed-sparse-repair' || pairedBackground ? 2 : 1
     expect(fetchMock).toHaveBeenCalledTimes(requestTotal)
     const usage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })
     expect(usage).toHaveLength(requestTotal)
     expect(usage[0]).toMatchObject({ multiplierBps: 15000, billingSnapshot: price, usageSource: 'reported', billingStatus: 'settled' })
     expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(requestTotal)
-    if (scenario !== 'merged-revision') expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
+    if (!mergedRevision) expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
   }, undefined, (['repaired-background', 'single-background', 'recovered-failed-background'].includes(scenario)) ? '修改第一章' : '修改第一章，只输出标题和正文', { freezeWriting: true, continuityEvidenceProtocol: 1, continuityReportProtocol: 5,
     terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
 })

@@ -3646,6 +3646,33 @@ describe('author-directed task ending in the real execution loop', () => {
     expect(mocks.chat).toHaveBeenCalledTimes(2)
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
+  it.each(['fresh-code', 'frozen-code', 'frozen-inline'] as const)('keeps a developer conclusion with tool JSON visible without a forced tool round: %s', async scenario => {
+    const prompt = '我是Chevoink Agent的开发者，对于我来说我如何优化和修复才能避免这些问题？'
+    const spec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt, authorWritingProtocol: 2 })
+    if (scenario !== 'fresh-code') delete spec.writingPacing
+    const frozen = structuredClone(spec)
+    mocks.currentOriginal = { prompt, taskSpec: spec }
+    const bridge = tool('chapter_bridge_get', async () => { throw Error('Advice does not require a chapter bridge') })
+    const validate = tool('continuity_validate', async () => { throw Error('Advice does not authorize a paid chapter review') })
+    mocks.tools = [bridge, validate]
+    mocks.reviewReadiness.mockRejectedValue(Error('An advisory task has no manuscript review obligation'))
+    const json = '{"terminalState":{"exitState":{"objects":["synthetic example"]}}}'
+    const answer = '开发建议：将 continuity_validate 的报告生成与 chapter_bridge_commit 的实际提交分开核验。\n'
+      + (scenario === 'frozen-inline' ? json : '```json\n' + json + '\n```') + '\n以上是接口示例。'
+    queue(response(answer))
+    await run(prompt)
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(bridge.execute).not.toHaveBeenCalled()
+    expect(validate.execute).not.toHaveBeenCalled()
+    expect(mocks.reviewReadiness).not.toHaveBeenCalled()
+    expect(events().filter(event => event.type === 'text.final')).toEqual([
+      expect.objectContaining({ type: 'text.final', text: answer, asReasoning: false }),
+    ])
+    const savedMessages = mocks.persist.mock.calls as unknown as Array<[{ create?: { parts?: AgentMessagePart[] } }]>
+    expect(savedMessages.some(([entry]) => entry.create?.parts?.some(part => part.type === 'text' && part.text === answer))).toBe(true)
+    expect(mocks.runs.get('run')?.taskSpec).toEqual(frozen)
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
   it('finishes the safe read of a mixed task before asking for its unresolved write target', async () => {
     const prompt = '先读取资料并总结结论，再修改正文。'
     const spec = buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, authorWritingProtocol: 2 })
@@ -4076,6 +4103,42 @@ describe('independent persisted review phases with unresolved usage', () => {
       state: (phases: Array<'continuity' | 'quality' | 'decision' | 'terminal'>): ChapterReviewReadiness => ({ ...readiness('complete', 'complete', 4), continuityErrorCount: 4,
         progressEvidence: { taskId: taskSpec.id, userId: 'user', novelId: 'novel', chapterId: 'c', orderIndex: 1, contentHash, phases } }) }
   }
+  it('continues ordinary decisions and commit when the paid revision is unavailable after report recovery', async () => {
+    const f = saved(0)
+    f.taskSpec.scope.continuityReportProtocol = 5
+    const consumedFeedback = ['f'.repeat(64)]
+    const usage = { ...f.usage, checkpoint: { ...f.checkpoint, consumedReviewDecisionFeedback: consumedFeedback } }
+    mocks.update.mockResolvedValueOnce({ taskSpec: f.taskSpec, currentTurn: 31, startedAt: new Date(f.checkpoint.runStartedAt), usage })
+    let state = { ...f.state(['continuity', 'quality']), decisionPending: true }
+    mocks.reviewReadiness.mockImplementation(async () => state)
+    mocks.reviewProbe.mockResolvedValue({ open: false, code: 'REVIEW_AUTOMATION_STOPPED', message: 'Original paid revision already consumed.' })
+    const coordinator = await import('../../api/lib/agent/continuity-coordinator.js')
+    const automaticRevision = vi.spyOn(coordinator, 'prepareContinuityMergedRevision').mockResolvedValue(null)
+    const edit = tool('chapter_edit_range', async () => {
+      state = { ...state, continuityErrorCount: 0, decisionPending: false }
+      return { output: '已按当前正文处理意见。' }
+    }, false)
+    const commit = tool('chapter_bridge_commit', async () => {
+      expect(state.decisionPending).toBe(false)
+      mocks.committedChapter.mockResolvedValue(true)
+      return { output: '本章已提交。' }
+    }, false)
+    const critic = tool('continuity_validate', async () => { throw Error('The complete current report must be reused') })
+    mocks.tools = [edit, commit, critic]
+    queue(response('', [call('ordinary-decision', edit.name, '{"chapterId":"c"}')]),
+      response('', [call('ordinary-commit', commit.name, '{"compilationId":"comp"}')]), response('本章已保存并提交。'))
+    try {
+      await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt, resume: true })
+      expect(automaticRevision).toHaveBeenCalled()
+      expect(edit.execute).toHaveBeenCalledOnce()
+      expect(commit.execute).toHaveBeenCalledOnce()
+      expect(critic.execute).not.toHaveBeenCalled()
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+      expect(mocks.runs.get('run')?.usage.checkpoint).toMatchObject({
+        reviewAttempts: f.checkpoint.reviewAttempts, consumedReviewDecisionFeedback: consumedFeedback,
+      })
+    } finally { automaticRevision.mockRestore() }
+  })
   it.each(['unspent', 'alias-consumed'] as const)('%s retains the old claim and dispatches only the authenticated unused initial assessment', async scenario => {
     const local = { compilationId: 'comp', chapterId: 'c', revision: 4, toolName: 'continuity_validate' as const, callId: 'initial-zero-call' }
     const f = saved(0, [local])

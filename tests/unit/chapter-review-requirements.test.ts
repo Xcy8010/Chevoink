@@ -9,6 +9,14 @@ const both = { continuity: true, quality: true }
 const current = { id: 'c13', orderIndex: 13 }
 
 describe('original author requirements bind one real chapter', () => {
+  it('does not attach manuscript delivery checks to a frozen advisory request with a write label', () => {
+    const value = spec()
+    const original = { prompt: '解释连续性检查失败的原因并给出开发建议。',
+      spec: { ...value, writingPacing: undefined, scope: { ...value.scope,
+        authorEffects: { version: 1, requestHash: 'a'.repeat(64), manuscript: false, structure: false } } } }
+    expect(originalChapterReviewRequirements(original, current)).toEqual({ continuity: false, quality: false })
+    expect(originalChapterReviewRequirements(original)).toEqual({ continuity: false, quality: false })
+  })
   it.each([
     ['写第13章。', both],
     ['写第13章，本章不用质量检查。', { continuity: true, quality: false }],

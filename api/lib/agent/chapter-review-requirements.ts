@@ -9,6 +9,7 @@ const object = (value: unknown): Record<string, unknown> => value && typeof valu
 export function originalChapterReviewRequirements(original: { prompt: string | null; spec: unknown }, target?: ReviewTarget): { continuity: boolean; quality: boolean } {
   const spec = object(original.spec), scope = object(spec.scope), writingScope = object(scope.writing)
   const writing = ['write', 'revise'].includes(String(spec.intent)) && !['conversation_only', 'proposal_only'].includes(String(spec.writingPacing))
+    && object(scope.authorEffects).manuscript !== false
     && ['balanced', 'premium'].includes(String(spec.qualityMode))
   const targets = (Array.isArray(writingScope.targets) ? writingScope.targets : []).map(object)
     .filter(item => Number.isSafeInteger(item.orderIndex) && Number(item.orderIndex) > 0)
