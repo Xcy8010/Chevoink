@@ -168,8 +168,8 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
       && !await hasLegacyTerminalCallEvidence(tx, { runId: call.runId, callId: item.callId })) {
       const compiler = await tx.storyCompilation.findFirst({ where: { id: item.compilationId, userId: subject.userId,
         novelId: subject.novelId, runId: { in: ids }, chapterId: chapter.id }, select: { validation: true } })
-      const validation = object(compiler?.validation), audit = object(validation.continuityCriticResponse)
-      if (audit.parserVersion === 8 && validation.independentCheck === 'complete'
+      const validation = object(compiler?.validation)
+      if (validation.independentCheck === 'complete'
         && typeof validation.checkedAt === 'string' && Date.parse(validation.checkedAt) <= call.createdAt.getTime()
         && !readTerminalCandidate(validation)) {
         try {
