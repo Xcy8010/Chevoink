@@ -71,25 +71,26 @@ const inheritedClaim = 'A synthetic historical obligation remains unverified.'
 // An independently supported synthetic prologue supplies the omitted fact.
 // Its older contract needs no paid-assessment receipt; the original task keeps
 // its frozen first-chapter target and never acquires authority over the prologue.
-async function seedLegacyCoveragePredecessor(f: Fixture, target: { volumeId: string }) {
-  const chapter = await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: target.volumeId,
+type LegacyPredecessorStore = Pick<typeof prisma, 'chapter' | 'agentRun' | 'agentMessage' | 'storyCompilation' | 'aiUsageLog'>
+async function seedLegacyCoveragePredecessor(f: Fixture, target: { volumeId: string }, db: LegacyPredecessorStore = prisma) {
+  const chapter = await db.chapter.create({ data: { authorId: f.userId, novelId: f.novelId, volumeId: target.volumeId,
     title: 'Synthetic prologue', orderIndex: 0, orderInVolume: 0, revision: 1, content: inheritedClaim, wordCount: inheritedClaim.length } })
   const runId = randomUUID(), sourcePrompt = '修改本章'
   const spec = buildTaskSpec({ runId, novelId: f.novelId, chapterId: chapter.id, prompt: sourcePrompt,
     continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1 })
-  await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId,
+  await db.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId,
     chapterId: chapter.id, status: 'running', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop',
     // Match ordinary admission: optional fields in a newly built TaskSpec can
     // be undefined; persist its JSON representation before hashing/validation.
     runtimeProtocolVersion: 0, taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value, startRequest: { prompt: sourcePrompt } } })
-  await prisma.agentMessage.create({ data: { runId, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: sourcePrompt }] } })
+  await db.agentMessage.create({ data: { runId, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: sourcePrompt }] } })
   const subject = { userId: f.userId, novelId: f.novelId, runId }
   const candidate = terminalCandidateSchema.parse({ exitState: { knowledge: [inheritedClaim] } })
   const { compilation } = await prepareStoryCompilation({ ...subject, chapterId: chapter.id, mode: 'balanced', intentSummary: sourcePrompt })
   await saveSceneTasks({ ...subject, compilationId: compilation.id, tasks: [{ purpose: 'Record the synthetic fact', entryState: candidate.exitState,
     goal: 'Record', obstacle: 'Time', choice: 'Record', cost: 'Time', turn: 'Recorded', exitState: candidate.exitState,
     styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
-  const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: true } })
+  const saved = await db.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: true } })
   const evidence = terminalEvidenceContext(chapter, null, 2, 1, undefined, 6, 2)
   const inspected = inspectContinuityResponse(JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({
     kind, result: 'clear', reason: 'Independent synthetic prologue review.', findingIndexes: [] })),
@@ -105,7 +106,7 @@ async function seedLegacyCoveragePredecessor(f: Fixture, target: { volumeId: str
   try { await commitChapterBridge({ ...subject, compilationId: compilation.id, ...candidate, chapterSummary: 'The synthetic fact is recorded.',
     hookDecision: '', delayedHookReason: '', openingStructure: 'Record', endingStructure: 'Record' }) }
   finally { extraction.mockRestore() }
-  expect(await prisma.aiUsageLog.count({ where: { agentRunId: runId } })).toBe(0)
+  expect(await db.aiUsageLog.count({ where: { agentRunId: runId } })).toBe(0)
   return chapter
 }
 
@@ -324,18 +325,28 @@ it('serializes the complete synthetic predecessor seed before mocked persistence
   // payloads before mocked persistence. This is no claim of database acceptance.
   const prologue = { id: 'synthetic-prologue', title: 'Synthetic prologue', revision: 1, orderIndex: 0, orderInVolume: 0,
     content: inheritedClaim, volumeId: 'volume', authorId: 'owner', novelId: 'novel', wordCount: inheritedClaim.length }
-  const chapterWrite = vi.spyOn(prisma.chapter, 'create').mockResolvedValue(prologue as Awaited<ReturnType<typeof prisma.chapter.create>>)
-  const runWrite = vi.spyOn(prisma.agentRun, 'create').mockResolvedValue({} as Awaited<ReturnType<typeof prisma.agentRun.create>>)
-  const messageWrite = vi.spyOn(prisma.agentMessage, 'create').mockResolvedValue({} as Awaited<ReturnType<typeof prisma.agentMessage.create>>)
+  const chapterWrite = vi.fn<typeof prisma.chapter.create>().mockResolvedValue(prologue as Awaited<ReturnType<typeof prisma.chapter.create>>)
+  const runWrite = vi.fn<typeof prisma.agentRun.create>().mockResolvedValue({} as Awaited<ReturnType<typeof prisma.agentRun.create>>)
+  const messageWrite = vi.fn<typeof prisma.agentMessage.create>().mockResolvedValue({} as Awaited<ReturnType<typeof prisma.agentMessage.create>>)
   const prepare = vi.spyOn(storyCompiler, 'prepareStoryCompilation').mockResolvedValue({ compilation: { id: 'synthetic-prologue-compilation' } } as Awaited<ReturnType<typeof prepareStoryCompilation>>)
   const scenes = vi.spyOn(storyCompiler, 'saveSceneTasks').mockResolvedValue([])
-  vi.spyOn(prisma.storyCompilation, 'findUniqueOrThrow').mockResolvedValue({ id: 'synthetic-prologue-compilation', bridge: null, sceneTasks: [] } as unknown as Awaited<ReturnType<typeof prisma.storyCompilation.findUniqueOrThrow>>)
+  const compilationRead = vi.fn<typeof prisma.storyCompilation.findUniqueOrThrow>().mockResolvedValue({ id: 'synthetic-prologue-compilation', bridge: null, sceneTasks: [] } as unknown as Awaited<ReturnType<typeof prisma.storyCompilation.findUniqueOrThrow>>)
   const validate = vi.spyOn(storyCompiler, 'validateStoryContinuity').mockResolvedValue({} as Awaited<ReturnType<typeof validateStoryContinuity>>)
   const quality = vi.spyOn(humanityQuality, 'persistHumanityQualityReport').mockResolvedValue({} as Awaited<ReturnType<typeof persistHumanityQualityReport>>)
   const commit = vi.spyOn(storyCompiler, 'commitChapterBridge').mockResolvedValue({} as Awaited<ReturnType<typeof commitChapterBridge>>)
-  const usage = vi.spyOn(prisma.aiUsageLog, 'count').mockResolvedValue(0)
+  const usage = vi.fn<typeof prisma.aiUsageLog.count>().mockResolvedValue(0)
   const f = { userId: 'owner', novelId: 'novel', sessionId: 'session' } as Fixture
-  expect(await seedLegacyCoveragePredecessor(f, prologue)).toEqual(prologue)
+  // Prisma delegates are proxies: spying on them can restore an undefined
+  // method and break later real PostgreSQL fixtures. Keep this store private.
+  const db = { chapter: { create: chapterWrite }, agentRun: { create: runWrite }, agentMessage: { create: messageWrite },
+    storyCompilation: { findUniqueOrThrow: compilationRead }, aiUsageLog: { count: usage } } as unknown as LegacyPredecessorStore
+  expect(await seedLegacyCoveragePredecessor(f, prologue, db)).toEqual(prologue)
+  expect(compilationRead).toHaveBeenCalledOnce()
+  for (const method of [prisma.chapter.create, prisma.agentRun.create, prisma.agentMessage.create,
+    prisma.storyCompilation.findUniqueOrThrow, prisma.aiUsageLog.count]) {
+    expect(typeof method).toBe('function')
+    expect(vi.isMockFunction(method)).toBe(false)
+  }
   for (const operation of [chapterWrite, runWrite, messageWrite, prepare, scenes, validate, quality, commit]) expect(operation).toHaveBeenCalledOnce()
   expect(usage).toHaveBeenCalledOnce()
   for (const payload of [chapterWrite.mock.calls[0][0].data, runWrite.mock.calls[0][0].data, messageWrite.mock.calls[0][0].data,
@@ -400,6 +411,13 @@ it('serializes the complete synthetic predecessor seed before mocked persistence
   }
   const missingSource = terminalEvidenceContext(chapter, null, 2, 1, terminalCoverage.terminalCoverageInput(spec, {}, chapter, draft.base, 2), 6, 2)
   expect(runtimeJson(missingSource).hash).not.toBe(runtimeJson(context).hash)
+  // Exercise the same restoration that runs before the real PG cases.
+  vi.restoreAllMocks()
+  for (const method of [prisma.chapter.create, prisma.agentRun.create, prisma.agentMessage.create,
+    prisma.storyCompilation.findUniqueOrThrow, prisma.aiUsageLog.count]) {
+    expect(typeof method).toBe('function')
+    expect(vi.isMockFunction(method)).toBe(false)
+  }
 })
 
 describe.runIf(available)('original persistent supplemental phase: real questions, transport, events and settlement', () => {
