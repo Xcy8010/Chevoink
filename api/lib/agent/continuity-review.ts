@@ -74,15 +74,17 @@ export function correctContinuitySourceIds(opinions: ContinuityOpinion[], invali
 
 export async function buildContinuitySnapshot(ctx: Pick<ToolContext, 'userId' | 'novelId' | 'runId' | 'chapterId'>,
   args: ContinuityReviewArgs, db: Prisma.TransactionClient = prisma) {
-  const chapterId = await resolveQualityChapterTarget({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, ...args, fallbackChapterId: ctx.chapterId }, db)
+  const original = await readOriginalTaskRequest(db, ctx), runIds = await originalTaskRunIds(db, ctx, original)
+  const compilationScope = { ...await qualityCompilationScope(db, ctx.userId, ctx.novelId, original.sourceRunId),
+    run: { id: { in: runIds }, userId: ctx.userId, novelId: ctx.novelId } }
+  const chapterId = await resolveQualityChapterTarget({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, ...args, fallbackChapterId: ctx.chapterId }, db, compilationScope)
   if (!chapterId) throw new DataAccessError(404, 'CHAPTER_NOT_FOUND', '没有可检查的当前章节正文。')
   const chapter = await db.chapter.findFirst({ where: { id: chapterId, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) } })
   if (!chapter?.content.trim()) throw new DataAccessError(404, 'CHAPTER_NOT_FOUND', '没有可检查的当前章节正文。')
-  const original = await readOriginalTaskRequest(db, ctx), runIds = await originalTaskRunIds(db, ctx, original)
   const [previous, compilation] = await Promise.all([
     db.chapter.findMany({ where: { authorId: ctx.userId, ...activeChapterScope(ctx.novelId), orderIndex: { lt: chapter.orderIndex } },
       orderBy: { orderIndex: 'desc' }, take: 3, select: { id: true, title: true, revision: true, content: true, orderIndex: true } }),
-    db.storyCompilation.findFirst({ where: { userId: ctx.userId, novelId: ctx.novelId, chapterId, ...await qualityCompilationScope(db, ctx.userId, ctx.novelId, ctx.runId),
+    db.storyCompilation.findFirst({ where: { userId: ctx.userId, novelId: ctx.novelId, chapterId, ...compilationScope,
       ...(args.compilationId ? { id: args.compilationId } : {}), status: { in: ['active', 'completed'] } }, orderBy: { createdAt: 'desc' } }),
   ])
   if (args.compilationId && !compilation) throw new DataAccessError(409, 'COMPILATION_NOT_FOUND', '编译任务不属于当前章节与作者任务。')

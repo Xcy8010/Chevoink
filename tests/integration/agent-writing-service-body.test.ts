@@ -74,7 +74,8 @@ describe.runIf(available)('ordinary writer actual PG body and original task curs
       const fetcher = vi.fn(async (_url: unknown, init: RequestInit) => {
         const body = JSON.parse(String(init.body))
         expect(body.messages.map((item: { role: string }) => item.role)).toEqual(['system', 'user'])
-        expect(body.tools).toBeUndefined(); expect(body.reasoning_effort).toBe('high')
+        expect(body.tools).toBeUndefined(); expect(body.reasoning_effort).toBe('none')
+        expect(credits.getModelTierRuntime).toHaveBeenCalledWith('speed', f.userId, null, 'high')
         expect(body.messages[1].content).toContain(args.content)
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '{"findings":[]}' }, finish_reason: 'stop' }],
           usage: { prompt_tokens: 20, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })

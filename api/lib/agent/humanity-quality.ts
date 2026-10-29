@@ -288,6 +288,7 @@ export async function hasCommittedTaskChapter(db: Prisma.TransactionClient, user
 export async function resolveQualityChapterTarget(
   input: { userId: string; novelId: string; runId?: string; chapterId?: string; compilationId?: string; fallbackChapterId?: string | null },
   db: Prisma.TransactionClient = prisma,
+  compilationScope?: Prisma.StoryCompilationWhereInput,
 ) {
   if (input.compilationId && !input.runId) throw new DataAccessError(409, 'QUALITY_RUN_SCOPE_INVALID', '编译编号必须属于当前任务；独立审阅仅传真实 chapterId。')
   if (input.runId) {
@@ -296,7 +297,7 @@ export async function resolveQualityChapterTarget(
       throw error
     })
     if (task && requiresNextChapterDelivery(task.goals)) {
-      const scope = await qualityCompilationScope(db, input.userId, input.novelId, input.runId)
+      const scope = compilationScope ?? await qualityCompilationScope(db, input.userId, input.novelId, input.runId)
       const targets = await db.storyCompilation.findMany({
         where: { userId: input.userId, novelId: input.novelId, status: { in: ['active', 'completed'] }, ...scope,
           ...(input.chapterId ? { chapterId: input.chapterId } : {}), ...(input.compilationId ? { id: input.compilationId } : {}) },
@@ -309,7 +310,7 @@ export async function resolveQualityChapterTarget(
   if (input.chapterId) {
     if (input.compilationId) {
       const compilation = await db.storyCompilation.findFirst({ where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, status: { in: ['active', 'completed'] },
-        ...await qualityCompilationScope(db, input.userId, input.novelId, input.runId) }, select: { chapterId: true } })
+        ...(compilationScope ?? await qualityCompilationScope(db, input.userId, input.novelId, input.runId)) }, select: { chapterId: true } })
       if (!compilation || compilation.chapterId !== input.chapterId) throw new DataAccessError(409, 'QUALITY_TARGET_AMBIGUOUS', 'chapterId 与 compilationId 不对应或编译不属于本任务；章节编号与编译编号不可混用。独立检查既有章只传 chapter_read 返回的 chapterId，无需准备编译。')
     }
     return input.chapterId
@@ -318,7 +319,7 @@ export async function resolveQualityChapterTarget(
     if (input.compilationId) throw new DataAccessError(409, 'QUALITY_RUN_SCOPE_INVALID', '请在当前任务中指定质量检查的章节。')
     return input.fallbackChapterId
   }
-  const scope = await qualityCompilationScope(db, input.userId, input.novelId, input.runId)
+  const scope = compilationScope ?? await qualityCompilationScope(db, input.userId, input.novelId, input.runId)
   const candidates = await db.storyCompilation.findMany({
     where: { userId: input.userId, novelId: input.novelId, status: { in: ['active', 'completed'] }, ...scope, ...(input.compilationId ? { id: input.compilationId } : {}) },
     select: { chapterId: true }, take: 2,

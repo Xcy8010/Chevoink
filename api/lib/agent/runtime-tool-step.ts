@@ -10,7 +10,7 @@ import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-s
 import { parseToolArgsTolerant } from './tool-argument-parser.js'
 import { normalizeToolInput, validateToolInput } from './tools/input-validation.js'
 import { readPreparedLiteraryArguments, rejectToolCursorCall } from './runtime-tool-cursor.js'
-import { failedToolResultSchema, reduceExecutionReceipt } from './runtime-reducer.js'
+import { readFailedToolResult, reduceExecutionReceipt } from './runtime-reducer.js'
 import { readObservedBaseline } from './runtime-observed-baseline.js'
 import { chapterReadTool, planReadTool, novelGetContextTool, chapterListSummariesTool, memorySearchTool } from './tools/read-tools.js'
 import { chapterWriteTool, chapterAppendTool, chapterEditRangeTool, chapterCreateTool, chapterRenameTool, preflightChapterReviewWrite } from './tools/chapter-tools.js'
@@ -297,7 +297,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     const refusal = selected.reject!
     const rejected = await rejectToolCursorCall(lease, refusal.cursor, refusal.callId, refusal.tool)
     await reduceExecutionReceipt(lease, { expectedRevision: rejected.pending.revision, expectedHash: rejected.pending.snapshotHash, operationId: rejected.operation.id })
-    return { kind: 'tool' as const, result: { ...failedToolResultSchema.parse(rejected.receipt.result).toolResult, outcome: 'failed' as const } }
+    return { kind: 'tool' as const, result: readFailedToolResult(rejected.receipt.result) }
   }
   if ('idle' in selected) return { kind: 'idle' as const }
   signal.throwIfAborted()
@@ -317,7 +317,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       // mutable business input inside a paid auxiliary-tool adapter.
       const rejected = await rejectToolCursorCall(lease, selected.cursor, selected.ctx.callId)
       await reduceExecutionReceipt(lease, { expectedRevision: rejected.pending.revision, expectedHash: rejected.pending.snapshotHash, operationId: rejected.operation.id })
-      return { kind: 'tool' as const, result: { ...failedToolResultSchema.parse(rejected.receipt.result).toolResult, outcome: 'failed' as const } }
+      return { kind: 'tool' as const, result: readFailedToolResult(rejected.receipt.result) }
     }
     // Actual adapter checks the saved decision again at effect admission.
   }

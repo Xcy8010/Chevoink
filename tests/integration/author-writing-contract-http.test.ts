@@ -409,7 +409,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: before[3].id } })
     expect(final).toMatchObject({ status: 'completed', stage: 'commit', bridge: { toChapterId: chapter.id, targetRevision: chapter.revision } })
     expect(final.bridge?.committedAt).toBeInstanceOf(Date)
-    expect(await chapterBridgeGetTool.execute(ctx, {})).toMatchObject({ display: { title: '章节桥 · 已提交终态' } })
+    expect(await chapterBridgeGetTool.execute(ctx, {})).toMatchObject({ display: { title: '章节已提交' } })
     expect(chapter.content).toBe(repair ? body.replace('向左走', '向右走') : body)
     expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(0, 3).map(item => item.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(0, 3))
   }))

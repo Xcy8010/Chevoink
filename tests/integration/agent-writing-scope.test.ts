@@ -1137,6 +1137,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     const childCtx = { ...ctx, runId: child.id, sessionId: session.id, chapterId: f.chapterId }
     // Review evidence and the first writer are deliberately opposite.
     if (writer === 'parent') await prisma.storyCompilation.update({ where: { id: f.compilation.id }, data: { runId: child.id } })
+    const originalReview = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })
     const subject = writer === 'parent' ? ctx : childCtx
     expect((await chapterWriteTool.execute(subject, { chapterId: f.chapterId, content: '同一扇门已经锁上。他随后用钥匙开门。' })).outcome).not.toBe('failed')
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
@@ -1144,7 +1145,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     await chapterReadTool.execute(opposite, { chapterId: f.chapterId })
     await expect(chapterWriteTool.execute(opposite, { chapterId: f.chapterId, content: '另一执行在原权限内继续修改。' })).resolves.toBeTruthy()
     const prepared = await prepareStoryCompilation({ ...ctx, chapterId: f.chapterId, mode: 'balanced', intentSummary: '写第一章' })
-    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: old.id } })).validation).toEqual(old.validation)
+    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: originalReview.id } })).validation).toEqual(originalReview.validation)
     expect(prepared.compilation.validation ?? {}).not.toHaveProperty('checkRounds')
     expect(readNewDraftRevision(prepared.compilation.validation)).toBeNull()
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: '另一执行在原权限内继续修改。', revision: chapter.revision + 1 })

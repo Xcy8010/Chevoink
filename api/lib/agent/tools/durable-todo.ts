@@ -3,7 +3,7 @@ import type { AgentTool, ToolContext, ToolResult } from './types.js'
 import { runtimeError, runtimeJson, TASK_ARTIFACT_ACTIONS, type RuntimeTx } from '../runtime-common.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
-import { failedToolResultSchema, reduceExecutionReceipt } from '../runtime-reducer.js'
+import { failedToolResultSchema, readFailedToolResult, reduceExecutionReceipt } from '../runtime-reducer.js'
 import { readExecutionFrame } from '../runtime-state.js'
 import { formatDurableToolObservation } from '../runtime-common.js'
 import { DataAccessError } from '../../prisma.js'
@@ -86,7 +86,7 @@ export async function executeDurableTodo(ctx: ToolContext, raw: unknown): Promis
     if (!(error instanceof DataAccessError) || !['RUNTIME_APPROVAL_DENIED', 'RUNTIME_APPROVAL_EXPIRED'].includes(error.code)) throw error
     const rejected = await rejectToolCursorCall(lease, cursor, ctx.callId)
     await reduceExecutionReceipt(lease, { expectedRevision: rejected.pending.revision, expectedHash: rejected.pending.snapshotHash, operationId: rejected.operation.id })
-    return { rejected: { ...failedToolResultSchema.parse(rejected.receipt.result).toolResult, outcome: 'failed' as const } }
+    return { rejected: readFailedToolResult(rejected.receipt.result) }
   })
   if ('rejected' in prepared) return prepared.rejected
   const receipt = await commitOperationEffect(lease, prepared.operation.id, prepared.operation.inputHash, async tx => {

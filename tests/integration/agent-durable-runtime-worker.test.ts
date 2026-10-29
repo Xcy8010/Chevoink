@@ -95,6 +95,7 @@ describe.runIf(available)('durable worker orchestration', () => {
         ? { version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 }
         : { version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000, rateCardId: 'worker-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
       let requests = 0
+      let verifyHistoricalContinuation = false
       const fetch = vi.fn(async (_url: unknown, init: RequestInit) => {
         requests++
         if (scenario === 'unknown') throw new Error('fixture disconnected')
@@ -108,7 +109,7 @@ describe.runIf(available)('durable worker orchestration', () => {
         const delta = requests === 1 ? { tool_calls: [{ index: 0, id: 'read', type: 'function', function: { name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) } },
           ...(writes ? [{ index: 1, id: 'write', type: 'function', function: { name: 'chapter_write', arguments: JSON.stringify({ chapterId: f.chapterId, content: '检查点前实际写入正文' }) } }] : []),
           ...(scenario === 'checkpoint-noop' ? [{ index: 2, id: 'noop', type: 'function', function: { name: 'chapter_write', arguments: JSON.stringify({ chapterId: f.chapterId, content: '检查点前实际写入正文' }) } }] : []),
-        ] } : { content: continues && (requests === 2 || scenario === 'continuation-stagnant' && requests < 8) ? scenario === 'continuation-empty' ? '' : '接下来读取正文。' : '检查结果已生成' }
+        ] } : { content: continues && (requests === 2 || scenario === 'continuation-stagnant' && (requests < 8 || verifyHistoricalContinuation)) ? scenario === 'continuation-empty' ? '' : '接下来读取正文。' : '检查结果已生成' }
         return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: requests === 1 ? 'tool_calls' : scenario === 'continuation-length' && requests === 2 ? 'length' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
       })
       vi.stubGlobal('fetch', fetch)
@@ -219,10 +220,11 @@ describe.runIf(available)('durable worker orchestration', () => {
         const lastDecision = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'execution.continuation' }, orderBy: { sequence: 'desc' } })
         await prisma.agentExecutionOutbox.update({ where: { id: lastDecision.id }, data: { payload: { ...(lastDecision.payload as Prisma.JsonObject), reminderIndex: 1 } } })
         const beforeTamperRead = await loadExecutionState(f.userId, lease.runId)
+        verifyHistoricalContinuation = true
         await saveExecutionState(lease, { expectedRevision: beforeTamperRead.frame.revision, expectedHash: beforeTamperRead.frame.snapshotHash,
-          snapshot: { ...beforeTamperRead.frame.state, messages: [...beforeTamperRead.frame.state.messages, { role: 'assistant', content: '接下来读取正文。' }] } })
+          snapshot: { ...beforeTamperRead.frame.state, messages: [...beforeTamperRead.frame.state.messages, { role: 'system', content: '继续核对原任务，交付本章的实际检查结果。' }] } })
         await expect(runDurableExecution(lease, new AbortController().signal)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
-        expect(fetch).toHaveBeenCalledTimes(8)
+        expect(fetch).toHaveBeenCalledTimes(9)
       }
     }) } finally { env.agentMaxTurns = previousTurns }
   }, 30_000)

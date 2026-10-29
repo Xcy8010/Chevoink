@@ -41,7 +41,7 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
   // duplicate action. The critic must see its real source row; the repair must
   // delete that exact second paragraph through the normal quality CAS path.
   const originalSource = buildQualityEvidenceSources({ userId: f.userId, novelId: f.novelId, chapterId: original.id, chapterRevision: original.revision }, original.content)
-  const duplicated = original.content + '\n\n' + originalSource.entries.at(-1)!.text
+  const duplicated = original.content + '\n\n' + originalSource.entries.filter(entry => entry.text.trim()).at(-1)!.text
   if (!input.unknown && !input.missingCommit) {
     await prisma.chapter.update({ where: { id: original.id }, data: { content: duplicated, wordCount: duplicated.length, revision: { increment: 1 } } })
     await recordStoryCompilerWrite({ ...f, chapterOrderIndex: original.orderIndex, chapterRevision: original.revision + 1 })
@@ -76,16 +76,19 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
     trace.status = 'terminal'; trace.billingKnown = true
     if (options.action === 'agent3HumanityCritic') {
       const source = buildQualityEvidenceSources({ userId: f.userId, novelId: f.novelId, chapterId: chapter.id, chapterRevision: chapter.revision }, chapter.content)
-      const repeated = chapter.content === duplicated ? source.entries.at(-1) : null
+      const repeated = chapter.content === duplicated ? source.entries.filter(entry => entry.text.trim()).at(-1) : null
       if (repeated) expect(content).toContain(repeated.id.slice(0, 13))
       return JSON.stringify({ findings: repeated ? [{ signal: 'explanation_echo', severity: 'warning', sourceId: repeated.id.slice(0, 13),
         explanation: 'This paragraph repeats the saved action without a new event.', suggestion: 'Remove this duplicate paragraph and retain the original action.', confidence: 0.99 }] : [] })
     }
     if (options.action === 'agent3HumanityRevision') {
-      const findings = JSON.parse(content.slice(content.lastIndexOf('\n[') + 1)) as Array<{ findingId: string; evidence: string }>
-      expect(findings).toHaveLength(1)
-      expect(findings[0].evidence).toBeTruthy()
-      return JSON.stringify({ patches: [{ findingId: findings[0].findingId, replacement: '' }] })
+      const findings = JSON.parse(content.slice(content.lastIndexOf('\n[') + 1)) as Array<{ findingId: string; evidence: string; explanation: string }>
+      const duplicate = findings.filter(finding => finding.explanation === 'This paragraph repeats the saved action without a new event.')
+      expect(duplicate).toHaveLength(1)
+      expect(duplicate[0].evidence).toBeTruthy()
+      return JSON.stringify({ patches: [{ findingId: duplicate[0].findingId, replacement: '' }],
+        retainedFindings: findings.filter(finding => finding.findingId !== duplicate[0].findingId).map(finding => ({ findingId: finding.findingId,
+          reason: 'Retain this additional actual quality opinion for the author; this repair only removes the independently located duplicate action.' })) })
     }
     if (options.action === 'agent3ContinuityCritic') {
       const request = JSON.parse(content) as { authorRequest: string; currentChapter: string; sources: typeof continuityRequests[number] }
@@ -97,7 +100,7 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
           source: row.id === chapter.id ? 'current' : 'previous', content: row.content })))
       for (const source of request.sources) {
         const table = buildQualityEvidenceSources({ userId: f.userId, novelId: f.novelId, chapterId: source.chapterId, chapterRevision: source.revision }, source.content)
-        for (const entry of table.entries) expect(source.evidence).toContain(entry.id.slice(0, 13))
+        for (const entry of table.entries.filter(entry => entry.text.trim())) expect(source.evidence).toContain(entry.id.slice(0, 13))
       }
       continuityRequests.push(request.sources)
       return '{"findings":[]}'

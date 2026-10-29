@@ -6,7 +6,7 @@ import { compilerStateHash, compilerObservationSchema } from '../runtime-compile
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { readAdmittedReviewWork } from '../runtime-writing-service.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
-import { failedToolResultSchema, reduceExecutionReceipt } from '../runtime-reducer.js'
+import { failedToolResultSchema, readFailedToolResult, reduceExecutionReceipt } from '../runtime-reducer.js'
 import { normalizeToolInput } from './input-validation.js'
 import type { AgentTool, ToolContext, ToolResult } from './types.js'
 
@@ -95,7 +95,7 @@ export async function executeDurableCompiler(ctx: ToolContext, tool: AgentTool, 
     if (!(error instanceof DataAccessError) || !['RUNTIME_APPROVAL_DENIED', 'RUNTIME_APPROVAL_EXPIRED'].includes(error.code)) throw error
     const rejected = await rejectToolCursorCall(lease, cursor, ctx.callId)
     await reduceExecutionReceipt(lease, { expectedRevision: rejected.pending.revision, expectedHash: rejected.pending.snapshotHash, operationId: rejected.operation.id })
-    return { rejected: { ...failedToolResultSchema.parse(rejected.receipt.result).toolResult, outcome: 'failed' as const } }
+    return { rejected: readFailedToolResult(rejected.receipt.result) }
   })
   if ('rejected' in prepared) return prepared.rejected
   const receipt = await executePreparedCompilerWork(ctx, lease, prepared.operation.id, tool)

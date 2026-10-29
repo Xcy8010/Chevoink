@@ -71,6 +71,9 @@ describe.runIf(available)('ordinary continuity reports preserve frozen contract5
     const prompt = '写第一章', content = Array.from({ length: 8 }, (_, i) => 'Entry ' + i + ' remains pending.').join(' ')
     const old = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     await prisma.$transaction(async tx => {
+      // The isolated legacy fixture must freeze the task it actually executes,
+      // rather than retain the unrelated initial durable root's unresolved target.
+      await tx.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0 } })
       await tx.chapter.delete({ where: { id: old.id } })
       f.spec = await freezeWritingScope(tx, f, f.spec, prompt)
       expect(f.spec.scope.writing).toMatchObject({ kind: 'bounded', targets: [{ chapterId: null, orderIndex: 1 }] })
@@ -151,13 +154,13 @@ describe.runIf(available)('ordinary continuity reports preserve frozen contract5
         { runId: f.runId, seq: 3, type: 'tool.result', payload: { callId: 'old-local', toolName: 'continuity_validate', ok: false, failureCode: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' } },
       ] })
       if (scenario === 'cancel-known-raw') {
-        const update = prisma.agentArtifact.update.bind(prisma.agentArtifact)
-        vi.spyOn(prisma.agentArtifact, 'update').mockImplementation(async args => {
-          const row = await update(args)
-          const metadata = row.metadata as { continuityReport?: ContinuityReport }
-          if (metadata.continuityReport?.rawResponses.length === 1) s.controller.abort()
-          return row
-        })
+        s.ctx.assertCurrentExecution = async tx => {
+          await owner(f, 1)(tx)
+          const physical = await tx.agentArtifact.findFirst({ where: { runId: f.runId, artifactType: 'continuityReview',
+            metadata: { path: ['continuityReport', 'chapterId'], equals: s.chapter.id } } })
+          if ((physical?.metadata as { continuityReport?: ContinuityReport } | undefined)?.continuityReport?.rawResponses.length === 1) s.controller.abort()
+          s.controller.signal.throwIfAborted()
+        }
       }
       const requests: Array<Record<string, unknown>> = []
       const network = vi.fn(async (_url: unknown, init: RequestInit) => {

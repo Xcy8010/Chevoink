@@ -21,6 +21,12 @@ const toolResult = z.object({ toolResult: z.object({ output: z.string() }) })
 export const failedToolResultSchema = z.object({ outcome: z.literal('failed'), effectApplied: z.literal(false), code: z.string(),
   toolResult: z.object({ output: z.string(), summary: z.string() }) }).strict()
 
+/** Project a saved failure without dropping its machine-readable cause. */
+export function readFailedToolResult(value: unknown) {
+  const failure = failedToolResultSchema.parse(value)
+  return { ...failure.toolResult, outcome: 'failed' as const, failureCode: failure.code }
+}
+
 /** Reduce a specific saved pending frame, never the latest conversational summary.
  * A retry names the same revision/hash/operation, even after the head has moved.
  * Children validate and append under one parent/child lease transaction. Main

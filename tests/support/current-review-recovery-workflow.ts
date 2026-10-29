@@ -13,6 +13,7 @@ import * as flags from '../../api/lib/agent2-feature-flags.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
 import * as titles from '../../api/lib/agent/session-title.js'
 import { persistCurrentContinuityReport } from './current-continuity-report.js'
+import { readContinuityReport } from '../../api/lib/agent/continuity-review.js'
 
 type Subject = { userId: string; novelId: string; sessionId: string; runId: string; chapterId: string }
 
@@ -36,7 +37,7 @@ export async function continueCurrentReviewWorkflow(f: Subject, input: {
   // duplicate action. The critic must see its real source row; the repair must
   // delete that exact second paragraph through the normal quality CAS path.
   const originalSource = buildQualityEvidenceSources({ userId: f.userId, novelId: f.novelId, chapterId: original.id, chapterRevision: original.revision }, original.content)
-  const duplicated = original.content + '\n\n' + originalSource.entries.at(-1)!.text
+  const duplicated = original.content + '\n\n' + originalSource.entries.filter(entry => entry.text.trim()).at(-1)!.text
   if (!input.unknown && !input.missingCommit) {
     await prisma.chapter.update({ where: { id: original.id }, data: { content: duplicated, wordCount: duplicated.length, revision: { increment: 1 } } })
     await recordStoryCompilerWrite({ ...f, chapterOrderIndex: original.orderIndex, chapterRevision: original.revision + 1 })
@@ -64,19 +65,22 @@ export async function continueCurrentReviewWorkflow(f: Subject, input: {
     trace.status = 'terminal'; trace.billingKnown = true
     if (options.action === 'agent3HumanityCritic') {
       const source = buildQualityEvidenceSources({ userId: f.userId, novelId: f.novelId, chapterId: chapter.id, chapterRevision: chapter.revision }, chapter.content)
-      const repeated = chapter.content === duplicated ? source.entries.at(-1) : null
+      const repeated = chapter.content === duplicated ? source.entries.filter(entry => entry.text.trim()).at(-1) : null
       if (repeated) expect(content).toContain(repeated.id.slice(0, 13))
-      const finalAdvice = input.currentDecisions && !repeated ? source.entries.slice(0, 11).map((entry, index) => ({ signal: 'emotion_grounding', severity: 'advisory', sourceId: entry.id.slice(0, 13),
+      const finalAdvice = input.currentDecisions && !repeated ? source.entries.filter(entry => entry.text.trim()).slice(0, 11).map((entry, index) => ({ signal: 'emotion_grounding', severity: 'advisory', sourceId: entry.id.slice(0, 13),
         explanation: `Current independent advice ${index + 1} for ${input.scenario ?? 'recovery'}.`, suggestion: 'Retain this actual passage for author judgment; no factual correction is implied.', confidence: 0.8 })) : []
       if (input.currentDecisions && !repeated) expect(finalAdvice).toHaveLength(11)
       return JSON.stringify({ findings: repeated ? [{ signal: 'explanation_echo', severity: 'warning', sourceId: repeated.id.slice(0, 13),
         explanation: 'This paragraph repeats the saved action without a new event.', suggestion: 'Remove this duplicate paragraph and retain the original action.', confidence: 0.99 }] : finalAdvice })
     }
     if (options.action === 'agent3HumanityRevision') {
-      const findings = JSON.parse(content.slice(content.lastIndexOf('\n[') + 1)) as Array<{ findingId: string; evidence: string }>
-      expect(findings).toHaveLength(1)
-      expect(findings[0].evidence).toBeTruthy()
-      return JSON.stringify({ patches: [{ findingId: findings[0].findingId, replacement: '' }] })
+      const findings = JSON.parse(content.slice(content.lastIndexOf('\n[') + 1)) as Array<{ findingId: string; evidence: string; explanation: string }>
+      const duplicate = findings.filter(finding => finding.explanation === 'This paragraph repeats the saved action without a new event.')
+      expect(duplicate).toHaveLength(1)
+      expect(duplicate[0].evidence).toBeTruthy()
+      return JSON.stringify({ patches: [{ findingId: duplicate[0].findingId, replacement: '' }],
+        retainedFindings: findings.filter(finding => finding.findingId !== duplicate[0].findingId).map(finding => ({ findingId: finding.findingId,
+          reason: 'Retain this additional actual quality opinion for the author; this repair only removes the independently located duplicate action.' })) })
     }
     if (options.action === 'agent3ContinuityCritic') {
       if (!input.currentDecisions) return '{"findings":[]}'
@@ -121,10 +125,17 @@ export async function continueCurrentReviewWorkflow(f: Subject, input: {
         }
         expect(details?.length).toBeGreaterThan(0)
         if (input.currentDecisions) {
-          expect(details).toHaveLength(15)
-          expect(details!.filter(item => item.source === 'quality')).toHaveLength(11)
-          expect(details!.filter(item => item.source === 'continuity')).toHaveLength(4)
-          expect(new Set(details!.map(item => `${item.source}:${item.reportId}:${item.findingId}`)).size).toBe(15)
+          const currentChapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+          const quality = await prisma.chapterQualityReport.findFirstOrThrow({ where: { userId: f.userId, compilationId: input.compilationId,
+            chapterId: f.chapterId, chapterRevision: currentChapter.revision }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], include: { findings: true } })
+          const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: input.compilationId } })
+          const continuity = readContinuityReport(saved.validation, currentChapter)!
+          expect(quality.findings.filter(finding => finding.explanation.startsWith('Current independent advice '))).toHaveLength(11)
+          expect(continuity.findings).toHaveLength(4)
+          const expected = [...quality.findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected')
+            .map(finding => `quality:${quality.id}:${finding.id}`), ...continuity.findings.map(finding => `continuity:${continuity.id}:${finding.id}`)].sort()
+          expect(details!.map(item => `${item.source}:${item.reportId}:${item.findingId}`).sort()).toEqual(expected)
+          expect(new Set(expected).size).toBe(expected.length)
         }
         retainedFindings = details!.map(({ source, reportId, findingId }) => ({ source, reportId, findingId,
           reason: '保留这项实际报告建议：本次只删除明确重复动作，保留其余叙事节奏，供作者继续判断；未声称该建议已修复。' }))
@@ -164,9 +175,15 @@ export async function continueCurrentReviewWorkflow(f: Subject, input: {
     if (input.currentDecisions) {
       const quality = await prisma.chapterQualityReport.findFirstOrThrow({ where: { compilationId: compilation.id, chapterRevision: chapter.revision },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], include: { findings: true } })
-      expect(quality.findings).toHaveLength(11)
+      expect(quality.findings.filter(finding => finding.explanation.startsWith('Current independent advice '))).toHaveLength(11)
       expect(compilation.validation).toMatchObject({ continuityReport: { revision: chapter.revision, complete: true, findings: Array.from({ length: 4 }, () => expect.any(Object)) },
-        retainedReviewDecision: { revision: chapter.revision, findings: Array.from({ length: 15 }, () => expect.any(Object)) } })
+        retainedReviewDecision: { revision: chapter.revision } })
+      const currentContinuity = readContinuityReport(compilation.validation, chapter)!
+      const retained = (compilation.validation as unknown as { retainedReviewDecision: { findings: Array<{ source: string; reportId: string; findingId: string }> } }).retainedReviewDecision.findings
+      expect(retained.map(item => `${item.source}:${item.reportId}:${item.findingId}`).sort()).toEqual([
+        ...quality.findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').map(finding => `quality:${quality.id}:${finding.id}`),
+        ...currentContinuity.findings.map(finding => `continuity:${currentContinuity.id}:${finding.id}`),
+      ].sort())
     }
     expect(await prisma.$transaction(tx => readCompletedWritingPresentation(tx, f))).toMatchObject({ chapters: [{ id: chapter.id, revision: chapter.revision, content: chapter.content }] })
     expect(events.filter(event => event.type === 'tool.result' && (event.payload as { toolName: string; ok: boolean }).toolName === 'chapter_bridge_commit'

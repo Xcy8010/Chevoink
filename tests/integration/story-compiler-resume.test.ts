@@ -308,7 +308,7 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       expect((await getLatestQualityReport(f.ctx.userId, f.ctx.novelId, f.chapter.id, prisma, f.compilationId))?.id).toBe(report.id)
       await expect(chapterBridgeCommitTool.execute(f.ctx, { compilationId: other.compilation.id })).rejects.toMatchObject({ code: 'COMPILATION_NOT_FOUND' })
       await expect(chapterBridgeCommitTool.execute(f.ctx, { compilationId: f.chapter.id })).rejects.toMatchObject({ code: 'COMPILATION_NOT_FOUND' })
-      await expect(chapterBridgeCommitTool.execute({ ...f.ctx, novelId: 'wrong-novel' }, {})).rejects.toMatchObject({ code: 'QUALITY_RUN_SCOPE_INVALID' })
+      await expect(chapterBridgeCommitTool.execute({ ...f.ctx, novelId: 'wrong-novel' }, {})).rejects.toMatchObject({ code: 'RUN_NOT_FOUND' })
       expect(await chapterBridgeCommitTool.execute(f.ctx, {})).toMatchObject({ summary: '章节已提交', display: { compilationId: f.compilationId } })
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: other.compilation.id } })).status).toBe('active')
     })

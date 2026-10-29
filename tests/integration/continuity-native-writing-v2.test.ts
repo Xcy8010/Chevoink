@@ -96,10 +96,16 @@ describe.runIf(available)('current native writing and historical configuration a
           { name: 'scene_task_build', args: { tasks: [{ purpose: '检查箱子', entryState: {}, goal: '核对锁扣', obstacle: '灯光不足', choice: '挪近灯光', cost: '时间', turn: '核对完成', exitState: {}, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] } },
           { name: 'chapter_read', args: { chapterId: f.chapterId } }, { name: 'chapter_write', args: { chapterId: f.chapterId, content } },
         ] : [{ name: 'chapter_bridge_commit', args: { compilationId } }]
-        if (observations) { expect(compilationId).toBeTruthy(); expect(observations).toContain('chapter_write'); expect(observations).toContain(content) }
+        if (observations) {
+          expect(compilationId).toBeTruthy(); expect(observations).toContain('chapter_write')
+          expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content, revision: 2 })
+        }
         return new Response(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: calls.map((call, index) => ({ index, id: `main-${mainRequests}-${index}`, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.args) } })) }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 20, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`)
       }
       requests++
+      // The selected main runtime stays high; both auxiliary reviewers use the established non-thinking encoding.
+      expect(body.reasoning_effort).toBe('none')
+      expect(credits.getModelTierRuntime).toHaveBeenCalledWith('speed', f.userId, null, 'high')
       const system = String(body.messages[0].content), material = String(body.messages[1].content)
       let report: unknown = { findings: [] }
       if (system.includes('你是中文小说连续性编辑')) {

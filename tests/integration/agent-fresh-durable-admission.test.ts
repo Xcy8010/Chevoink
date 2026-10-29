@@ -442,8 +442,8 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     vi.spyOn(prices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
       rateCardId: 'fresh-writer-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
     const content = '他停在原地，尚未行动。'
-    const writing = { draftComplete: true, scenes: [{ purpose: '等候', goal: '保留当前位置', obstacle: '尚未行动', choice: '继续等待', cost: '耗费时间', turn: '停在原地' }],
-      actualOutcomes: { exitState: { location: '原地' } }, chapterSummary: '仍停在原地', hookDecision: '', delayedHookReason: '', openingStructure: '停步', endingStructure: '等待' }
+    const scene = { purpose: '等候', goal: '保留当前位置', obstacle: '尚未行动', choice: '继续等待', cost: '耗费时间', turn: '停在原地',
+      entryState: {}, exitState: {}, styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }
     let mainCalls = 0, criticCalls = 0
     const fetcher = vi.fn(async (_url: unknown, init: RequestInit) => {
       lifecycle.mockRequest()
@@ -452,9 +452,14 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
       if (body.tools) {
         mainCalls++
         if (mainCalls > 2) throw Error('Fresh completion must not request another main-model loop')
+        const visible = body.tools.map((tool: { function: { name: string } }) => tool.function.name)
+        for (const name of ['story_compiler_prepare', 'scene_task_build', 'chapter_read', 'chapter_write', 'chapter_bridge_commit']) expect(visible).toContain(name)
         delta = mainCalls === 1 ? { tool_calls: [
-          { index: 0, id: 'fresh-read', type: 'function', function: { name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) } },
-          { index: 1, id: 'fresh-writer', type: 'function', function: { name: 'chapter_write', arguments: JSON.stringify({ chapterId: f.chapterId, content, writing }) } },
+          { index: 0, id: 'fresh-prepare', type: 'function', function: { name: 'story_compiler_prepare', arguments: JSON.stringify({ chapterId: f.chapterId, intentSummary: '完整重写第一章正文' }) } },
+          { index: 1, id: 'fresh-scenes', type: 'function', function: { name: 'scene_task_build', arguments: JSON.stringify({ tasks: [scene] }) } },
+          { index: 2, id: 'fresh-read', type: 'function', function: { name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) } },
+          { index: 3, id: 'fresh-writer', type: 'function', function: { name: 'chapter_write', arguments: JSON.stringify({ chapterId: f.chapterId, content }) } },
+          { index: 4, id: 'fresh-commit', type: 'function', function: { name: 'chapter_bridge_commit', arguments: JSON.stringify({ chapterSummary: '仍停在原地' }) } },
         ] } : { content: '第一章已保存并完成核对。' }
       } else {
         criticCalls++
@@ -462,12 +467,7 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
         expect(body.thinking?.type).not.toBe('enabled')
         if (criticCalls > 2) throw Error('A successful current-version report must not be paid twice')
         expect(body.messages[1].content).toContain(content)
-        const report = criticCalls === 1 ? { findings: [],
-          semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reasonCode: 'consistent',
-            explanation: '当前全文只说明停在原地并且尚未行动，不把计划或指令当作已发生事件。', findingIds: [] })),
-          terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', reasonCode: 'consistent', explanation: '本章原文直接记载当前位置。', manuscriptEvidence: [{ segmentId: 'c0' }] }],
-          terminalProofVerdicts: [], terminalDispositions: [], issueDispositions: [] } : { findings: [] }
-        delta = { content: JSON.stringify(report) }
+        delta = { content: '{"findings":[]}' }
       }
       return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: 'tool_calls' in delta ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`,
         { headers: { 'content-type': 'text/event-stream' } })

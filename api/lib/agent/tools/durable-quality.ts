@@ -16,7 +16,7 @@ import { readObservedBaseline } from '../runtime-observed-baseline.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { readAdmittedReviewWork } from '../runtime-writing-service.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
-import { failedToolResultSchema, reduceExecutionReceipt } from '../runtime-reducer.js'
+import { failedToolResultSchema, readFailedToolResult, reduceExecutionReceipt } from '../runtime-reducer.js'
 import { auxiliaryRouteSchema, auxiliaryRouteForRuntime, callDurableAuxiliary, resolveDurableAuxiliaryRuntime } from '../runtime-auxiliary-call.js'
 import type { AuxiliaryModelStep } from '../runtime-auxiliary-model.js'
 import { analyzeDeterministicQuality, applyQualityRepair, buildHumanityQualityContext, calibrateCriticFindings, HUMANITY_PROMPT_PROTOCOL,
@@ -98,7 +98,7 @@ export async function executeDurableQuality(ctx: ToolContext, tool: AgentTool, r
       if (!(error instanceof DataAccessError) || !['RUNTIME_APPROVAL_DENIED', 'RUNTIME_APPROVAL_EXPIRED'].includes(error.code)) throw error
       const rejected = await rejectToolCursorCall(lease, cursor, ctx.callId)
       await reduceExecutionReceipt(lease, { expectedRevision: rejected.pending.revision, expectedHash: rejected.pending.snapshotHash, operationId: rejected.operation.id })
-      return { rejected: { ...failedToolResultSchema.parse(rejected.receipt.result).toolResult, outcome: 'failed' as const } }
+      return { rejected: readFailedToolResult(rejected.receipt.result) }
     })
   if ('rejected' in prepared) return prepared.rejected
   const { operation, pending } = prepared

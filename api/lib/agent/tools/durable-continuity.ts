@@ -9,7 +9,7 @@ import { compilerObservationSchema, compilerStateHash } from '../runtime-compile
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { readAdmittedReviewWork } from '../runtime-writing-service.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
-import { failedToolResultSchema, reduceExecutionReceipt } from '../runtime-reducer.js'
+import { failedToolResultSchema, readFailedToolResult, reduceExecutionReceipt } from '../runtime-reducer.js'
 import { auxiliaryRouteSchema, auxiliaryRouteForRuntime, resolveDurableAuxiliaryRuntime, callDurableAuxiliary } from '../runtime-auxiliary-call.js'
 import type { AuxiliaryModelStep } from '../runtime-auxiliary-model.js'
 import { REVIEW_MAX_OUTPUT_TOKENS } from '../review-completion.js'
@@ -175,7 +175,7 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: Pick<Agen
     if (!(error instanceof DataAccessError) || !['RUNTIME_APPROVAL_DENIED', 'RUNTIME_APPROVAL_EXPIRED'].includes(error.code)) throw error
     const rejected = await rejectToolCursorCall(lease, cursor, ctx.callId)
     await reduceExecutionReceipt(lease, { expectedRevision: rejected.pending.revision, expectedHash: rejected.pending.snapshotHash, operationId: rejected.operation.id })
-    return { rejected: { ...failedToolResultSchema.parse(rejected.receipt.result).toolResult, outcome: 'failed' as const } }
+    return { rejected: readFailedToolResult(rejected.receipt.result) }
   })
   if ('rejected' in prepared) return prepared.rejected
   const receipt = await executePreparedContinuityWork(ctx, lease, prepared.operation.id)

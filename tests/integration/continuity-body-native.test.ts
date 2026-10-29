@@ -193,10 +193,33 @@ describe.runIf(available)('ordinary native continuity review on an existing task
     expect(ledger).toHaveLength(attempts.length)
     const count = fetcher.mock.calls.length
     await model([{ id: 'reread-current', name: 'continuity_validate', arguments: JSON.stringify(args) }, { id: 'same-commit', name: 'chapter_bridge_commit', arguments: JSON.stringify(args) }])
-    expect(await step()).toMatchObject({ result: { reviewCompleted: true } })
+    if (ask) {
+      const waiting = await step()
+      expect(waiting.kind).toBe('waiting_approval')
+      if (waiting.kind !== 'waiting_approval') throw new Error('Missing approval for the new standalone review call')
+      const approval = await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { id: waiting.approvalId } })
+      expect(approval.payload).toMatchObject({ toolName: 'continuity_validate', callId: 'reread-current', args })
+      expect(fetcher).toHaveBeenCalledTimes(count)
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(saved)
+      expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })).toEqual(committed)
+      await resolveDurableApproval({ userId: f.userId, runId: f.runId, requestId: waiting.approvalId, callId: 'reread-current', approved: true, alwaysAllow: false })
+    }
+    expect(await step()).toMatchObject({ result: { reviewCompleted: true, output: expect.stringContaining('复用已保存报告') } })
     expect(await step()).toMatchObject({ result: { summary: '章节已提交' } })
     expect(fetcher).toHaveBeenCalledTimes(count)
-    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })).toEqual(committed)
+    const refreshed = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
+    const originalValidation = committed.validation as Prisma.JsonObject, refreshedValidation = refreshed.validation as Prisma.JsonObject
+    expect(refreshedValidation.checkedAt).toEqual(expect.any(String))
+    expect(Date.parse(String(refreshedValidation.checkedAt))).toBeGreaterThanOrEqual(Date.parse(String(originalValidation.checkedAt)))
+    expect(refreshed.updatedAt.getTime()).toBeGreaterThanOrEqual(committed.updatedAt.getTime())
+    // A new read can refresh only report-check timestamps; delivery, bridge, findings and historical fields stay exact.
+    expect({ ...refreshed, updatedAt: committed.updatedAt, validation: { ...refreshedValidation, checkedAt: originalValidation.checkedAt } }).toEqual(committed)
+    const refreshedAttempts = await prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId } }, include: { usageReceipt: true }, orderBy: { id: 'asc' } })
+    const refreshedLedger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    expect(refreshedAttempts).toHaveLength(attempts.length + 1) // Only the recorded main assistant request is new.
+    expect(refreshedLedger).toHaveLength(ledger.length + 1)
+    expect(refreshedAttempts.filter(row => attempts.some(original => original.id === row.id))).toEqual(attempts)
+    expect(refreshedLedger.filter(row => ledger.some(original => original.id === row.id))).toEqual(ledger)
     expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: parent.id }, include: { effectReceipt: true } })).toEqual(parent)
     expect((await loadExecutionState(f.userId, f.runId)).head.configurationHash).toBe(originalConfigHash)
     expect(reentered).toBe(true)

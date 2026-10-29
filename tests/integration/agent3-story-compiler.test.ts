@@ -376,7 +376,14 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       expect(repeated).toEqual(first)
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })).bridge?.committedAt).toEqual(saved.bridge?.committedAt)
       const captured = await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))
-      const memoryCount = await prisma.projectMemoryEntry.count({ where: { sourceChapterId: chapter.id } })
+      const readMemories = () => prisma.projectMemoryEntry.findMany({ where: { sourceChapterId: chapter.id },
+        orderBy: { id: 'asc' }, include: { evidence: { orderBy: { id: 'asc' } } } })
+      const originalMemories = await readMemories()
+      expect(originalMemories).toHaveLength(2)
+      expect(originalMemories).toEqual(expect.arrayContaining([
+        expect.objectContaining({ memoryType: 'chapterSummary', content: terminal.chapterSummary, status: 'inferred', reviewStatus: 'pending' }),
+        expect.objectContaining({ memoryType: 'sceneState', content: chapter.content, status: 'inferred', reviewStatus: 'pending' }),
+      ]))
       await prisma.chapter.update({ where: { id: chapter.id }, data: { content: '同版本号下作者改变了正文。' } })
       expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toBeNull()
       await expect(prisma.$transaction(tx => assertCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }, captured!))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
@@ -384,12 +391,22 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       await completeChecks()
       await commitChapterBridge(terminal)
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).preparedContext).toMatchObject({ terminalContentHash: runtimeJson({ content: '同版本号下作者改变了正文。' }).hash })
-      expect(await prisma.projectMemoryEntry.count({ where: { sourceChapterId: chapter.id } })).toBe(memoryCount)
+      // A changed body creates an editorial proposal; it does not overwrite or
+      // certify the earlier scene. Identical summary proposals remain deduplicated.
+      const editedMemories = await readMemories()
+      expect(editedMemories.filter(memory => originalMemories.some(original => original.id === memory.id))).toEqual(originalMemories)
+      const newProposals = editedMemories.filter(memory => !originalMemories.some(original => original.id === memory.id))
+      expect(newProposals).toHaveLength(1)
+      expect(newProposals[0]).toMatchObject({ runId: run.id, sourceChapterId: chapter.id, memoryType: 'sceneState',
+        content: '同版本号下作者改变了正文。', status: 'inferred', reviewStatus: 'pending', confidence: 0.8,
+        evidence: [{ sourceType: 'chapter', sourceId: chapter.id, revision: chapter.revision }] })
+      await commitChapterBridge(terminal)
+      expect(await readMemories()).toEqual(editedMemories)
       await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { preparedContext: {} } })
       expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toBeNull()
       await persistCurrentContinuityReport({ userId, novelId, runId: run.id, compilationId: compilation.id })
       await commitChapterBridge(terminal)
-      expect(await prisma.projectMemoryEntry.count({ where: { sourceChapterId: chapter.id } })).toBe(memoryCount)
+      expect(await readMemories()).toEqual(editedMemories)
       const corrected = await prisma.chapter.update({ where: { id: chapter.id }, data: { content: '她松开门把手，依然没有询问价格。', revision: { increment: 1 } } })
       await expect(commitChapterBridge({ ...terminal, expectedChapterRevision: chapter.revision })).rejects.toMatchObject({ code: 'CONTINUITY_INPUT_STALE' })
       await completeChecks()

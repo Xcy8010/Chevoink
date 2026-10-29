@@ -45,6 +45,8 @@ describe('authorized current-report workflow through the real model loop', () =>
     vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(runtime)
     vi.spyOn(prices, 'resolveTokenPrice').mockResolvedValue({ provider: 'fixture', modelName: 'fixture-model', inputPerMillion: 1,
       outputPerMillion: 1, cacheReadPerMillion: 1, cacheWritePerMillion: 1, source: 'fixture', revision: 'fixture' } as Awaited<ReturnType<typeof prices.resolveTokenPrice>>)
+    const window = credits.getCreditWindow()
+    const account = await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
     const actions: string[] = []
     const summary = scenario === 'final-advisory' ? finalText + '最终报告另有一条节奏建议，已引用实际报告明确保留；该建议没有冒充已修复。' : finalText
     vi.spyOn(ai, 'generateTextCompletion').mockImplementation(async (_system, content, options) => {
@@ -159,6 +161,7 @@ describe('authorized current-report workflow through the real model loop', () =>
       return { content: next ? '' : summary, reasoning: '', toolCalls: next ? [{ id: next.args.retainedFindings ? 'walk-retained-commit' : `walk-${next.name}`, name: next.name, arguments: JSON.stringify(next.args) }] : [],
         finishReason: next ? 'tool_calls' : 'stop', usage: { promptTokens: 10, completionTokens: 2, totalTokens: 12, promptCacheHitTokens: null, promptCacheMissTokens: null } }
     })
+    if (scenario !== 'legacy-phase-checkpoint') await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'queued' } })
     await executeAgentRun({ ...f, chapterId: f.chapterId, mode: 'build', prompt, modelTier: 'speed', creativeFreedom: 'balanced', qualityMode: 'premium', ...resume })
     const current = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     expect(current.revision).toBe(7)
