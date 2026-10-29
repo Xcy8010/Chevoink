@@ -1,6 +1,6 @@
 import { currentReviewReadinessFixture } from '../helpers/current-review-readiness-fixture.js'
 import { readRecoveredChapterDelivery, assertCompletedWritingDelivery } from '../../api/lib/agent/writing-scope.js'
-import { beginReviewCycle } from '../../api/lib/agent/review-cycle.js'
+import { advanceReviewCycle, beginReviewCycle } from '../../api/lib/agent/review-cycle.js'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -10,7 +10,7 @@ import { qualityReportCheckedCurrentContent, qualityReportMatchesContent } from 
 import { commitChapterBridge } from '../../api/lib/agent/story-compiler.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import * as original from '../../api/lib/agent/original-request.js'
-import { nextReviewDispatch, reviewDispatchKey } from '../../api/lib/agent/review-dispatch.js'
+import { currentReviewNextStepGuidance, nextReviewDispatch, projectCurrentReviewNextStep, reviewDispatchKey } from '../../api/lib/agent/review-dispatch.js'
 import * as lock from '../../api/lib/data/novel-write-lock.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
 import * as humanity from '../../api/lib/agent/humanity-quality.js'
@@ -63,6 +63,50 @@ async function fixture(prompt = '写下一章') {
 }
 
 describe('persisted current review readiness', () => {
+  it.each(['advice', 'continuity-error', 'quality-error', 'hard-quality', 'missing-quality', 'incomplete-continuity', 'untracked-revision'] as const)(
+    'finishes revised drafts with advice while preserving the %s delivery condition', async scenario => {
+      const f = await fixture(scenario === 'hard-quality' ? '写下一章，质量检查必须通过。' : '写下一章')
+      f.task.scope.reviewProtocol = 1
+      const baseline = (await readChapterReviewReadiness(f.tx, f.subject))!
+      const before = f.chapter.content, after = before + '他在墙根记下脚印的方向。'
+      const cycle = beginReviewCycle({ taskId: f.task.id, userId: f.subject.userId, novelId: f.subject.novelId, chapterId: f.chapter.id },
+        { compilationId: f.compilation.id, revision: f.chapter.revision, content: before, ready: baseline.ready,
+          binding: baseline.decisionBinding!, required: { continuity: true, quality: true }, findings: baseline.reviewCycleFindings! })
+      f.chapter.content = after; f.chapter.revision++
+      f.compilation.preparedContext = { reviewCycle: scenario === 'untracked-revision' ? cycle : advanceReviewCycle(cycle,
+        { beforeRevision: 3, before, afterRevision: 4, after }) }
+      f.report.id = 'q-final'; f.report.chapterRevision = 4; f.report.status = 'needs_repair'
+      f.report.deterministicMetrics.contentHash = sha(after)
+      f.report.findings = [{ id: 'optional-quality', signal: 'emotion_grounding', severity: scenario === 'quality-error' ? 'error' : 'advisory',
+        disposition: 'pending', evidenceExcerpt: after.slice(0, 6), startOffset: 0, endOffset: 6,
+        explanation: '可考虑调整叙述节奏', suggestion: '保留供作者参考', authorFeedback: null }] as never
+      const continuity = await currentReviewReadinessFixture(f.tx, f.subject, f.compilation, snapshot => [{
+        signal: 'location_time', severity: scenario === 'continuity-error' ? 'error' : 'warning', explanation: '核对场景衔接',
+        suggestion: '可考虑补充动作', evidence: [{ sourceId: snapshot.sources[0].table.entries[0].id }] }])
+      if (scenario === 'missing-quality') f.db.chapterQualityReport.findFirst.mockResolvedValue(null as never)
+      if (scenario === 'incomplete-continuity') continuity.complete = false
+      const originalQuality = structuredClone(f.report), originalContinuity = structuredClone(continuity)
+      const readiness = (await readChapterReviewReadiness(f.tx, f.subject))!
+      const step = projectCurrentReviewNextStep(readiness)
+      if (scenario === 'advice') {
+        expect(step).toMatchObject({ state: 'commit_available', pending: [], reviewCycle: { edited: true } })
+        expect(readiness.decisionEntries).toHaveLength(2)
+        expect(currentReviewNextStepGuidance(step)).toContain('无需为清零建议继续改稿或逐项填写保留理由')
+        vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'synthetic-memory' } as never)
+        await expect(commitChapterBridge(f.terminal, f.tx)).resolves.toMatchObject({ chapterRevision: 4 })
+        expect(f.bridge).toMatchObject({ targetRevision: 4, committedAt: expect.any(Date) })
+        expect(f.compilation.validation).not.toHaveProperty('retainedReviewDecision')
+        expect(f.db.chapter.update).not.toHaveBeenCalled()
+      } else {
+        expect(step.state).toBe(scenario === 'missing-quality' || scenario === 'incomplete-continuity' ? 'check_required'
+          : scenario === 'hard-quality' ? 'must_pass_required' : 'decision_required')
+        await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toBeInstanceOf(Error)
+        expect(f.bridge.committedAt).toBeNull()
+      }
+      expect(f.report).toEqual(originalQuality)
+      expect(continuity).toEqual(originalContinuity)
+      expect(f.db.chapterQualityReport.update).not.toHaveBeenCalled()
+    })
   it('preserves the frozen historical unknown proposal and its read-only processing projection', async () => {
     const f = await fixture('修改第44章。完成连续性与人类感检查。')
     Object.assign(f.task.scope, { terminalCoverageProtocol: 2, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1 })

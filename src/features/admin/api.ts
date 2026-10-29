@@ -150,6 +150,9 @@ export function updateAdminModel(modelId: string, payload: {
   routes?: import('../../../shared/contracts/model-routes').ModelRouteInput[]
   provider?: string; displayName?: string; modelName?: string; baseUrl?: string | null; apiKey?: string
   multiplier?: number; enabled?: boolean; selectable?: boolean; isDefault?: boolean
+  reasoningParameterMode?: 'native' | 'omit' | null
+  outputTokenParameter?: 'max_tokens' | 'max_completion_tokens' | null
+  thinkingEnabled?: boolean | null
   reasoningEfforts?: import('../../../shared/contracts').ModelReasoningEffort[]
   defaultReasoningEffort?: import('../../../shared/contracts').ModelReasoningEffort
   visionEnabled?: boolean

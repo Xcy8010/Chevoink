@@ -9,6 +9,19 @@ function pending(overrides: Partial<ChapterReviewReadiness> = {}): ChapterReview
     requiredTools: [{ name: 'quality_analyze', args: { compilationId: 'compile' } }], ...overrides }
 }
 describe('server review fallback', () => {
+  it('directs final checked advice to commit instead of starting another edit/decision cycle', () => {
+    const state = pending({ ready: true, quality: 'complete', requiredTools: [], requiredDecisions: [], decisionPending: false,
+      reviewCycle: { version: 1, phase: 'resolution', baselineRevision: 2, edited: true, verificationStarted: true,
+        attemptedBaselineCount: 1, transitionCount: 1, findings: [] } })
+    const step = projectCurrentReviewNextStep(state)
+    expect(step.state).toBe('commit_available')
+    const text = currentReviewNextStepGuidance(step)
+    expect(text).toContain('下一步调用一次 chapter_bridge_commit')
+    expect(text).toContain('剩余警告与建议保留在报告中供作者参考')
+    expect(text).toContain('无需为清零建议继续改稿或逐项填写保留理由')
+    expect(nextMergedReviewReminder(state, new Set(['chapter_bridge_commit', 'chapter_edit_range']), new Set(), true)).toBeNull()
+    expect(projectCurrentReviewNextStep({ ...state, mustPassPending: true }).state).toBe('must_pass_required')
+  })
   it('keeps current decisions actionable without a separate terminal candidate review', () => {
     const ref = { source: 'continuity' as const, reportId: 'current-whole', findingId: '0' }
     const review = pending({ ready: true, continuity: 'complete', quality: 'complete', requiredTools: [],

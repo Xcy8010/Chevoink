@@ -232,5 +232,13 @@ export function useAgentStream(
 
   useEffect(() => disconnect, [disconnect])
 
+  useEffect(() => {
+    // A frame scheduled in the foreground can be suspended when the window is
+    // hidden. Release that batch at the transition so later background deltas
+    // can use the timer path, and flush a throttled timer immediately on return.
+    document.addEventListener('visibilitychange', flushPending)
+    return () => document.removeEventListener('visibilitychange', flushPending)
+  }, [flushPending])
+
   return { connect, disconnect }
 }

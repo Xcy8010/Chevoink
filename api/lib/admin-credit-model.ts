@@ -308,6 +308,9 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
         enabled: model.enabled || Boolean(fallback), selectable: model.selectable, isDefault: model.isDefault,
         apiKeyConfigured: Boolean(model.apiKeyCiphertext) || Boolean(fallback?.apiKeyConfigured), requestCount: row?._count._all ?? 0,
         requestTokens: row?._sum.requestTokens ?? 0, responseTokens: row?._sum.responseTokens ?? 0,
+        ...(capabilities.reasoningParameterMode ? { reasoningParameterMode: capabilities.reasoningParameterMode } : {}),
+        ...(capabilities.outputTokenParameter ? { outputTokenParameter: capabilities.outputTokenParameter } : {}),
+        ...(capabilities.thinkingEnabled !== undefined ? { thinkingEnabled: capabilities.thinkingEnabled } : {}),
         reasoningEfforts: capabilities.reasoningEfforts, defaultReasoningEffort: capabilities.defaultReasoningEffort,
         visionEnabled: capabilities.visionEnabled,
         contextWindowTokens: capabilities.contextWindowTokens,
@@ -331,6 +334,9 @@ export type UpdateAdminModelInput = {
   enabled?: boolean
   selectable?: boolean
   isDefault?: boolean
+  reasoningParameterMode?: 'native' | 'omit' | null
+  outputTokenParameter?: 'max_tokens' | 'max_completion_tokens' | null
+  thinkingEnabled?: boolean | null
   reasoningEfforts?: ModelReasoningEffort[]
   defaultReasoningEffort?: ModelReasoningEffort
   visionEnabled?: boolean
@@ -397,6 +403,9 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
           ...(model.metadata && typeof model.metadata === 'object' && !Array.isArray(model.metadata) ? model.metadata : {}),
           ...(routes ? { routes } : {}),
           freePromotion,
+          ...(input.reasoningParameterMode !== undefined ? { reasoningParameterMode: input.reasoningParameterMode } : {}),
+          ...(input.outputTokenParameter !== undefined ? { outputTokenParameter: input.outputTokenParameter } : {}),
+          ...(input.thinkingEnabled !== undefined ? { thinkingEnabled: input.thinkingEnabled } : {}),
           reasoningEfforts,
           defaultReasoningEffort,
           visionEnabled: input.visionEnabled ?? currentCapabilities.visionEnabled,

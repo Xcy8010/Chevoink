@@ -28,7 +28,7 @@ beforeEach(() => {
   vi.stubGlobal('EventSource', Source)
   useAgentStore.setState({ runId: 'run-a', activeSessionId: 'session-a', phase: 'running', lastSeq: 0, messages: [] })
 })
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); localStorage.clear() })
 
 it('rejects callbacks and errors from an old source even when a new connection resumes the same run', () => {
   const received = vi.fn(), error = vi.fn()
@@ -147,4 +147,67 @@ it('filters old and duplicate deltas before merging the next animation-frame bat
   act(() => { source.send(delta(5, '旧')); source.send(delta(6, '新')); source.send(delta(6, '重复')); source.send(delta(7, '内容\n\n')); frame?.(0) })
   expect(received).toHaveBeenCalledExactlyOnceWith(delta(7, '新内容\n\n'))
   expect(useAgentStore.getState().messages[0].parts).toEqual([{ type: 'text', text: '新内容\n\n' }])
+})
+
+it('flushes a scheduled visible frame when hidden, then keeps background deltas flowing without rAF', () => {
+  vi.useFakeTimers()
+  let hidden = false
+  vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden)
+  const frame = vi.fn(() => 41), cancel = vi.fn()
+  vi.stubGlobal('requestAnimationFrame', frame)
+  vi.stubGlobal('cancelAnimationFrame', cancel)
+  const received = vi.fn(), hook = renderHook(() => useAgentStream(received))
+  act(() => {
+    useAgentStore.setState({ messages: [{ id: 'm', runId: 'run-a', role: 'assistant', parts: [], createdAt: '' }] })
+    hook.result.current.connect('run-a')
+  })
+  const source = Source.opened[0]
+  const delta = (seq: number): AgentStreamEvent => ({ type: 'text.delta', runId: 'run-a', messageId: 'm', seq, delta: `第${seq}段。\n\n`, ts: '' })
+  act(() => source.send(delta(1)))
+  expect(frame).toHaveBeenCalledOnce()
+  expect(received).not.toHaveBeenCalled()
+  act(() => { hidden = true; document.dispatchEvent(new Event('visibilitychange')) })
+  expect(cancel).toHaveBeenCalledWith(41)
+  expect(received).toHaveBeenCalledExactlyOnceWith(delta(1))
+  act(() => { source.send(delta(2)); vi.advanceTimersByTime(100) })
+  expect(received).toHaveBeenCalledTimes(2)
+  expect(useAgentStore.getState().lastSeq).toBe(2)
+  expect(frame).toHaveBeenCalledOnce()
+  act(() => source.send(delta(3)))
+  expect(vi.getTimerCount()).toBe(1)
+  act(() => { hidden = false; document.dispatchEvent(new Event('visibilitychange')) })
+  expect(received).toHaveBeenCalledTimes(3)
+  expect(vi.getTimerCount()).toBe(0)
+  expect(useAgentStore.getState().messages[0].parts).toEqual([{ type: 'text', text: '第1段。\n\n第2段。\n\n第3段。\n\n' }])
+  hook.unmount()
+  act(() => document.dispatchEvent(new Event('visibilitychange')))
+  expect(received).toHaveBeenCalledTimes(3)
+})
+
+it('clears a background batch before cancellation and cannot deliver it into a switched run', () => {
+  vi.useFakeTimers()
+  vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+  const received = vi.fn(), hook = renderHook(() => useAgentStream(received))
+  act(() => hook.result.current.connect('run-a'))
+  const source = Source.opened[0]
+  const delta: AgentStreamEvent = { type: 'reasoning.delta', runId: 'run-a', messageId: 'm', seq: 1, delta: '合成思考。', ts: '' }
+  const cancelled: AgentStreamEvent = { type: 'run.finished', runId: 'run-a', seq: 2, ts: '', status: 'cancelled',
+    usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, artifacts: [], outputSummary: '' }
+  act(() => source.send(delta))
+  expect(vi.getTimerCount()).toBe(1)
+  act(() => source.send(cancelled))
+  expect(received.mock.calls.map(call => call[0])).toEqual([delta, cancelled])
+  expect(source.close).toHaveBeenCalledOnce()
+  expect(vi.getTimerCount()).toBe(0)
+  act(() => {
+    useAgentStore.setState({ runId: 'run-b', phase: 'running', lastSeq: 0, messages: [] })
+    hook.result.current.connect('run-b')
+    source.send({ ...delta, seq: 3 })
+    document.dispatchEvent(new Event('visibilitychange'))
+    vi.runOnlyPendingTimers()
+  })
+  expect(received).toHaveBeenCalledTimes(2)
+  expect(useAgentStore.getState()).toMatchObject({ runId: 'run-b', lastSeq: 0, messages: [] })
+  hook.unmount()
+  expect(vi.getTimerCount()).toBe(0)
 })

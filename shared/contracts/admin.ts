@@ -438,6 +438,9 @@ export type AdminModelManagementPayload = {
     requestCount: number
     requestTokens: number
     responseTokens: number
+    reasoningParameterMode?: 'native' | 'omit'
+    outputTokenParameter?: 'max_tokens' | 'max_completion_tokens'
+    thinkingEnabled?: boolean
     reasoningEfforts: import('./credits.js').ModelReasoningEffort[]
     defaultReasoningEffort: import('./credits.js').ModelReasoningEffort
     visionEnabled: boolean

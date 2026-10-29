@@ -847,7 +847,10 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     providerBaseUrl: params.providerBaseUrl ?? env.aiTextBaseUrl, reasoningEffort: 'none' }) : undefined
   const body: Record<string, unknown> = frozenRequest ? structuredClone(frozenRequest.body) : {
     model,
-    ...(params.reasoningParameterMode ? {} : { temperature: params.temperature ?? 0.6 }),
+    // Sampling is optional and not universally supported with reasoning. A
+    // missing protocol declaration must not force a sampling parameter onto
+    // an active reasoning request. Frozen requests above retain their body.
+    ...(params.reasoningParameterMode || reasoningEffort !== 'none' ? {} : { temperature: params.temperature ?? 0.6 }),
     // 显式拉满单轮输出上限：不传时 DeepSeek 默认仅 4096，
     // Agent 写 3000+ 字长章时工具参数 JSON 会被 length 截断导致写入失败
     [params.outputTokenParameter ?? 'max_tokens']: params.maxOutputTokens ?? env.aiTextMaxOutputTokens,
@@ -1324,7 +1327,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     body: JSON.stringify({
       model: modelRuntime.modelName ?? env.aiTextModel,
       ...reviewResponseFormatPayload(options.responseFormat, modelRuntime.baseUrl ?? env.aiTextBaseUrl, modelRuntime.modelName ?? env.aiTextModel),
-      ...(modelRuntime.reasoningParameterMode ? {} : { temperature: options.temperature ?? 0.7 }),
+      ...(modelRuntime.reasoningParameterMode || completionReasoning !== 'none' ? {} : { temperature: options.temperature ?? 0.7 }),
       // 与主循环 chatWithTools、durable 质量路径一致：显式传入时下发输出上限，避免评审/修订输出失控膨胀；
       // MiMo 网关需用 max_completion_tokens（思考+回答共享预算），其余供应商保持 max_tokens
       [outputTokenParameter]: options.maxOutputTokens ?? env.aiTextMaxOutputTokens,

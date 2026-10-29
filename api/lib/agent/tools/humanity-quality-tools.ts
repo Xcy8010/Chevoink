@@ -204,7 +204,7 @@ async function finishQualityReviewResult(ctx: ToolContext, report: QualityReport
     try {
       const review = await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, report.compilationId ?? undefined), { timeout: 20_000 })
       if (review?.chapterId === report.chapterId && verificationQualityAdviceRequiresDecision(review, selected)) return { reviewCompleted: true,
-        output: `质量报告 ${report.id}已保存。本次最终核验只报告意见，不自动开启新一轮润色。可在原作者授权范围内据当前证据继续改稿，修改后复查连续性与人类感，再提交章节。若保留意见，按当前 source、reportId、findingId、reason 逐项写明具体保留理由。涉及解释负担时，说明事实为何必要、当前表达为何仍合适，并考虑保留事实而减少负担的方案。留置不能替代明确的硬通过要求。${review ? chapterReviewDecisionGuidance(review) : decisionGuidance}${bindingSuffix}\n${renderQualityReportFindings(report)}`,
+        output: `质量报告 ${report.id}已保存。修订后的核验意见保留供作者参考，无需为清零建议继续润色。${chapterReviewDecisionGuidance(review)}${bindingSuffix}\n${renderQualityReportFindings(report)}`,
         summary: `质量核验完成 · ${warningCount} 关注 ${advisoryCount} 建议`, display: reportDisplay(report) }
       // 付费前只读探测：同一次合并修订的准入由守卫统一判定（新稿质量通道或原始修复
       // 授权），被拒时不预约、不调用修订模型，正文与报告保持原样。

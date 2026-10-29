@@ -238,10 +238,17 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   const strictQuality = !['stable', 'bold'].includes(String(spec.creativeFreedom))
   const completeStrictReview = scope.reviewProtocol === 1 && strictQuality
   const automaticQuality = qualityComplete ? selectAutomaticQualityFindings(qualityReport!.findings) : []
+  const contentHash = runtimeJson({ content: chapter.content }).hash
+  const lastReviewedEdit = cycle?.transitions.at(-1)?.after
+  const verifyingEditedBody = !!cycle?.baseline && lastReviewedEdit?.revision === chapter.revision && lastReviewedEdit.contentHash === contentHash
+  // A final check can discover fresh advice on an already revised draft.
+  // Keep it in the real report without turning each new suggestion into
+  // another mandatory edit/decision cycle. Errors and explicit hard-pass
+  // requirements below remain delivery obligations.
   const requiredDecisions = entries.filter(entry => entry.source === 'continuity'
-    ? entry.severity === 'error' || completeStrictReview && requirements.continuity
+    ? entry.severity === 'error' || !verifyingEditedBody && completeStrictReview && requirements.continuity
     : (completeStrictReview || automaticQuality.some(finding => finding.id === entry.findingId))
-      && (entry.severity === 'error' || requirements.quality && strictQuality))
+      && (entry.severity === 'error' || requirements.quality && strictQuality) && (!verifyingEditedBody || entry.severity === 'error'))
     .map(({ source, reportId, findingId }) => ({ source, reportId, findingId }))
   const { requiresCompletedReview } = await import('./writing-delivery-limitations.js')
   const constraints = [original.prompt ?? '',
@@ -259,7 +266,6 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   if (requirements.continuity && continuity !== 'complete') requiredTools.push({ name: 'continuity_validate', args: { compilationId: compilation.id } })
   if (requirements.quality && quality !== 'complete') requiredTools.push({ name: 'quality_analyze', args: { compilationId: compilation.id } })
   const ready = !requiredTools.length
-  const contentHash = runtimeJson({ content: chapter.content }).hash
   const semanticFindings = [
     ...(report?.complete ? report.findings.map(finding => ({ source: 'continuity', signal: finding.signal, severity: finding.severity,
       evidence: finding.evidence, suggestion: finding.suggestion })) : []),

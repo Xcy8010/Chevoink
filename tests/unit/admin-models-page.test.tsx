@@ -11,6 +11,16 @@ const row = (id: string, tier: 'speed' | 'builtin_0123456789abcdef', displayName
 function mount() { const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } }); return render(<QueryClientProvider client={client}><AdminModelsPage /></QueryClientProvider>) }
 beforeEach(() => { vi.clearAllMocks(); mocks.get.mockResolvedValue({ models: [row('a', 'speed', '极速'), row('b', 'builtin_0123456789abcdef', '动态模型')], trend: [] }); mocks.create.mockResolvedValue({ id: 'new', tier: 'builtin_fedcba9876543210' }); mocks.reorder.mockResolvedValue({ ok: true }); mocks.update.mockResolvedValue({ ok: true }) })
 afterEach(cleanup)
+it('restores and saves builtin protocol declarations without replacing unknown capabilities with guesses', async () => {
+  mocks.get.mockResolvedValue({ models: [{ ...row('a', 'speed', '极速'), reasoningParameterMode: 'native', outputTokenParameter: 'max_completion_tokens', thinkingEnabled: false }], trend: [] })
+  mount(); await screen.findByText('极速')
+  fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+  expect((screen.getByRole('combobox', { name: '推理参数协议' }) as HTMLSelectElement).value).toBe('native')
+  expect((screen.getByRole('combobox', { name: '输出上限参数' }) as HTMLSelectElement).value).toBe('max_completion_tokens')
+  expect((screen.getByRole('combobox', { name: 'thinking 参数' }) as HTMLSelectElement).value).toBe('disabled')
+  fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+  await waitFor(() => expect(mocks.update).toHaveBeenCalledWith('a', expect.objectContaining({ reasoningParameterMode: 'native', outputTokenParameter: 'max_completion_tokens', thinkingEnabled: false })))
+})
 it('edits Fetch as an independent tool and submits its dedicated endpoint without changing the text catalog', async () => {
   mocks.get.mockResolvedValue({ models: [{ ...row('fetch', 'speed', 'Fetch tool'), tier: 'tool_fetch', modelKind: 'web_fetch',
     provider: 'deepseek', modelName: 'deepseek-fetch', baseUrl: 'https://api.deepseek.com', selectable: false, isDefault: false }], trend: [] })

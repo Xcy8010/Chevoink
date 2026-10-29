@@ -84,7 +84,7 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
     expect(provider).not.toHaveBeenCalled()
   }, undefined, '修改第一章，只要标题和正文。', { freezeWriting: true }), 30000)
 
-  it.each(['legacy', 'durable'] as const)('delivers a retained final assessment after ordinary r4 to r7 edits, then preserves %s cycle on reprepare', async protocol => fixture(async f => {
+  it.each(['legacy', 'durable'] as const)('delivers final advice after ordinary r4 to r7 edits without reopening revisions, then preserves %s cycle on reprepare', async protocol => fixture(async f => {
     const chapterId = f.chapterId
     const body = '门锁仍在。屋里没有灯。她没有回答。'
     if (protocol === 'legacy') {
@@ -143,24 +143,16 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id } })).preparedContext).toEqual(saved.preparedContext)
     await assess(prepared.compilation.id, '灯光落在桌上')
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f))
-    expect(projectCurrentReviewNextStep(readiness!)).toMatchObject({ phase: 'verification', state: 'decision_required',
+    expect(projectCurrentReviewNextStep(readiness!)).toMatchObject({ phase: 'resolution', state: 'commit_available', pending: [],
       reviewCycle: { findings: [expect.objectContaining({ relation: 'new_advisory' })] } })
-    const ref = readiness!.requiredDecisions![0]
-    // The report is complete; unresolved actual advice still fences delivery.
-    // Ordinary author-owned edits retain their separate revision authority.
-    expect(await chapterBridgeCommitTool.execute({ ...f, callId: 'pending-opinion-cannot-commit', mode: 'build',
-      creativeFreedom: 'balanced', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} },
-    { compilationId: prepared.compilation.id })).toMatchObject({ outcome: 'failed' })
+    // Advice remains in the real report. It does not require a fabricated
+    // retention decision or another editorial revision after final checks.
+    expect(readiness!.decisionEntries).toHaveLength(1)
+    expect(readiness!.retainedDecisions).toEqual([])
     expect(await prisma.$transaction(tx => readChapterReviewWriteAdmission(tx, f, { chapterId, revision: 7,
       after: finalBody.replace('灯光落在桌上', '灯光照着桌面') }))).toMatchObject({ kind: 'allow' })
-    await prisma.$transaction(async tx => {
-      // Same transaction locking contract as terminal decisions.
-      await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${prepared.compilation.id} FOR UPDATE`
-      await recordChapterReviewDecisions(tx, f, readiness!, [{ ...ref, reason: '保留灯光落点以呼应门口视线，不额外添加动作。' }])
-    })
     expect((await prisma.$transaction(tx => readChapterReviewReadiness(tx, f)))?.decisionPending).toBe(false)
-    // Retention alone is not delivery. Exercise the actual terminal tool and
-    // current delivery proof; do not stop the lifecycle at decisionPending=false.
+    // Reports alone are not delivery: exercise the actual atomic commit.
     expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, f))).toBeNull()
     const finalReport = await prisma.chapterQualityReport.findFirstOrThrow({ where: { compilationId: prepared.compilation.id,
       chapterRevision: 7 }, include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
@@ -178,8 +170,8 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
     const terminal = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id }, include: { bridge: true } })
     expect(terminal).toMatchObject({ status: 'completed', stage: 'commit', bridge: { targetRevision: 7, toChapterId: chapterId } })
     expect(terminal.bridge?.committedAt).toBeInstanceOf(Date)
-    expect(terminal.validation).toMatchObject({ independentCheck: 'complete', checkedRevision: 7,
-      retainedReviewDecision: { revision: 7, findings: [{ ...ref, reason: '保留灯光落点以呼应门口视线，不额外添加动作。' }] } })
+    expect(terminal.validation).toMatchObject({ independentCheck: 'complete', checkedRevision: 7 })
+    expect(terminal.validation).not.toHaveProperty('retainedReviewDecision')
     expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: finalReport.id }, include: { findings: true } })).toEqual(reportBeforeCommit)
     expect(finalReport.status).toBe('needs_repair')
     expect(finalReport.repairRound).toBe(0)

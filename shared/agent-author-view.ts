@@ -127,25 +127,42 @@ export function createAgentAuthorTextStream() {
   }
 }
 
+// Message updates replace the changed part; completed parts retain their identity.
+// Cache at this shared presentation boundary so store, transcript and copy do not
+// repeatedly parse all previous prose on every new token. Weak keys retain no history.
+const authorPartCache = new WeakMap<AgentMessagePart, AgentMessagePart | null>()
+const streamingReasoningPartCache = new WeakMap<AgentMessagePart, AgentMessagePart | null>()
+
+function projectAuthorPart(part: AgentMessagePart, streamingReasoning: boolean): AgentMessagePart | null {
+  const cache = part.type === 'reasoning' && streamingReasoning ? streamingReasoningPartCache : authorPartCache
+  if (cache.has(part)) return cache.get(part)!
+  let projected: AgentMessagePart | null = part
+  if (part.type === 'text' || part.type === 'reasoning') {
+    // Classify complete accumulated paragraphs while thinking is streaming.
+    // An incomplete protocol/quote prefix must never escape expanded UI.
+    const text = part.type === 'reasoning' && streamingReasoning
+      ? createAgentAuthorTextStream().push(part.text) : projectAgentAuthorText(part.text)
+    projected = text.trim() || part.type === 'reasoning' && streamingReasoning && part.text.trim()
+      ? text === part.text ? part : { ...part, text } : null
+  } else if (part.type === 'tool-call') {
+    const title = getAgentToolPresentation(part.toolName).label
+    const summary = part.summary ? projectAgentToolSummary(part.summary, part.status) : undefined
+    projected = title === part.title && summary === part.summary ? part
+      : { ...part, title, ...(summary !== undefined ? { summary } : {}) }
+  }
+  cache.set(part, projected)
+  // The projected object can pass through another consumer before a new event.
+  if (projected) cache.set(projected, projected)
+  return projected
+}
+
 export function projectAgentAuthorParts(parts: readonly AgentMessagePart[], streamingReasoning = false, options?: { includePreparing?: boolean }): AgentMessagePart[] {
   const visible: AgentMessagePart[] = []
   for (const part of parts) {
-    if (part.type === 'text' || part.type === 'reasoning') {
-      // Classify complete accumulated paragraphs while thinking is streaming.
-      // An incomplete protocol/quote prefix must never escape expanded UI.
-      const text = part.type === 'reasoning' && streamingReasoning
-        ? createAgentAuthorTextStream().push(part.text) : projectAgentAuthorText(part.text)
-      if (text.trim() || part.type === 'reasoning' && streamingReasoning && part.text.trim()) {
-        visible.push(text === part.text ? part : { ...part, text })
-      }
-    } else if (part.type === 'tool-call') {
-      // Argument generation is a model stage, not an execution witness.
-      if (part.preparing && !options?.includePreparing) continue
-      const title = getAgentToolPresentation(part.toolName).label
-      const summary = part.summary ? projectAgentToolSummary(part.summary, part.status) : undefined
-      visible.push(title === part.title && summary === part.summary ? part
-        : { ...part, title, ...(summary !== undefined ? { summary } : {}) })
-    } else visible.push(part)
+    // Argument generation is a model stage, not an execution witness.
+    if (part.type === 'tool-call' && part.preparing && !options?.includePreparing) continue
+    const projected = projectAuthorPart(part, streamingReasoning)
+    if (projected) visible.push(projected)
   }
   return visible
 }

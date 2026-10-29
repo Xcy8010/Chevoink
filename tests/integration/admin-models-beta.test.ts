@@ -42,6 +42,22 @@ async function expiredAccount(userId: string, balance = 10000) {
 function gate() { let release!: () => void; const promise = new Promise<void>(resolve => { release = resolve }); return { promise, release } }
 
 describe.runIf(available)('admin dynamic catalog and independent public beta on isolated PostgreSQL', () => {
+  it('validates and persists builtin protocol declarations through the authenticated admin API', async () => fixture(async f => {
+    const added = await createAdminModel(f.adminId, input, await order()); f.created.push(added.id)
+    const cookie = `chevoink_session=${(await import('../../api/lib/auth-session.js')).buildSessionTokens(f.adminId, 0).accessToken}`
+    const protocol = { reasoningParameterMode: 'native', outputTokenParameter: 'max_completion_tokens', thinkingEnabled: false }
+    await request(app).patch(`/api/admin/models/${added.id}`).set('Cookie', cookie).send(protocol).expect(200)
+    expect((await getAdminModelManagement()).models.find(row => row.id === added.id)).toMatchObject(protocol)
+    expect(await getModelTierRuntime(added.tier as CreditModelTier, f.userId)).toMatchObject(protocol)
+    await request(app).patch(`/api/admin/models/${added.id}`).set('Cookie', cookie).send({ reasoningParameterMode: 'guess' }).expect(400)
+    expect(await getModelTierRuntime(added.tier as CreditModelTier, f.userId)).toMatchObject(protocol)
+    await request(app).patch(`/api/admin/models/${added.id}`).set('Cookie', cookie)
+      .send({ reasoningParameterMode: null, outputTokenParameter: null, thinkingEnabled: null }).expect(200)
+    const cleared = await getModelTierRuntime(added.tier as CreditModelTier, f.userId)
+    expect(cleared).not.toHaveProperty('reasoningParameterMode')
+    expect(cleared).not.toHaveProperty('outputTokenParameter')
+    expect(cleared).not.toHaveProperty('thinkingEnabled')
+  }))
   it('creates an encrypted stable model at the tail without changing old defaults or prices; reorders only ranks', async () => fixture(async f => {
     const original = await prisma.aiModelConfig.findMany({ where: { ownerUserId: null } })
     const expected = await order()

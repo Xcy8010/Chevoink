@@ -186,7 +186,7 @@ function reportResult(snapshot: ContinuitySnapshot, report: ContinuityReport, ca
     reviewRequestFinished: report.billingKnown ? { version: 1, chapterId: report.chapterId, revision: report.revision, contentHash: report.contentHash } : undefined,
     summary: report.complete ? `连续性检查完成 · ${errors} 错误 ${warnings} 警告` : '连续性报告未完成',
     output: `reportId=${report.id}；chapterId=${report.chapterId}；revision=${report.revision}\n所检 r${report.revision}${cached ? '复用已保存报告' : '已保存连续性报告'}：${errors} 个错误、${warnings} 个警告。${report.complete
-      ? report.findings.length ? '报告已保存，以下问题待处理。' : '未发现连续性问题。'
+      ? errors ? '报告已保存，请核对以下事实问题。' : warnings ? '以下为连续性建议，已保留在报告中；不要求反复改稿将建议清零。' : '未发现连续性问题。'
       : `有 ${report.unlocatedIndexes.length} 条意见未定位，报告未完成。`}
 ${report.findings.map(finding => `[${finding.id}/${finding.severity}/${finding.signal}] ${finding.startOffset >= 0 ? `本章范围[${finding.startOffset},${finding.endOffset})` : '前文意见'}；原文：${JSON.stringify(finding.evidence)}\n证据：${JSON.stringify(finding.references)}\n解释：${finding.explanation}\n建议：${finding.suggestion}`).join('\n')}
 ${report.unlocatedIndexes.map(index => `未定位意见[${index}]：${JSON.stringify(report.opinions[index])}`).join('\n')}
