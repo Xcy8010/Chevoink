@@ -334,7 +334,7 @@ describe.runIf(available)('historical candidate judgments preserve the original 
       expect(originalUsage.every(row => row.billingStatus === 'settled' && row.usageSource === 'reported' && row.reservedCreditMilli === 0)).toBe(true)
     }
     const completed = await continueCurrentReviewWorkflow(f, { compilationId: compilation.id, prompt: '修复本章', afterSeq: pauseSeq,
-      authorContinue: { eventId: pause.id, afterSeq: pauseSeq }, unknown, readFirst: scenario === 'restart' })
+      authorContinue: { eventId: pause.id, afterSeq: pauseSeq }, unknown, readFirst: scenario === 'restart', setupAfterRecovery: scenario === 'local-refusal' })
     if (scenario === 'restart' || scenario === 'repeat') {
       const last = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId }, orderBy: { seq: 'desc' } })
       const mainCalls = completed.main.mock.calls.length, criticCalls = completed.critic.mock.calls.length

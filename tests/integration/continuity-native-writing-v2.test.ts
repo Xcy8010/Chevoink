@@ -140,12 +140,14 @@ describe.runIf(available)('current native writing and historical configuration a
     const writer = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, kind: 'tool', action: 'chapter_write' }, include: { effectReceipt: true } })
     expect(writer.inputSnapshot).not.toHaveProperty('input.writingManifest')
     expect(writer.effectReceipt?.result).toMatchObject({ toolResult: { display: { kind: 'chapterDiff', after: content, revision: 2 } } })
-    let previousMemoryJobId: string | undefined
+    let previousMemoryJobId: string | undefined, previousMemorySourceOperationId: string | undefined
     if (changed) {
       expect(await advanceDurableMemory(lease)).not.toBeNull()
       const previousMemory = await prisma.memoryExtractionJob.findUniqueOrThrow({ where: { idempotencyKey: `${f.chapterId}:2` } })
       expect(previousMemory.status).toBe('completed')
       previousMemoryJobId = previousMemory.id
+      const previousEffect = await prisma.agentEffectReceipt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId }, result: { path: ['memoryJobId'], equals: previousMemory.id } } })
+      previousMemorySourceOperationId = previousEffect.operationId
     }
     await model()
     let oldRequests: Awaited<ReturnType<typeof prisma.agentProviderAttempt.findMany>> | undefined
@@ -196,9 +198,10 @@ describe.runIf(available)('current native writing and historical configuration a
     const currentMemoryJobId = (await prisma.memoryExtractionJob.findFirstOrThrow({ where: { novelId: f.novelId, chapterId: f.chapterId, chapterRevision: changed ? 3 : 2 } })).id
     const sourceEffect = await prisma.agentEffectReceipt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId }, result: { path: ['memoryJobId'], equals: currentMemoryJobId } } })
     const beforeEvidence = await collectDurableCompletionEvidence(lease, cursor)
+    const expectedMemoryJobs = [{ id: currentMemoryJobId, sourceOperationId: sourceEffect.operationId, chapterId: f.chapterId, chapterRevision: changed ? 3 : 2, verified: false },
+      ...(previousMemoryJobId ? [{ id: previousMemoryJobId, sourceOperationId: previousMemorySourceOperationId, chapterId: f.chapterId, chapterRevision: 2, verified: true }] : [])]
     expect(beforeEvidence.snapshot).toMatchObject({ blockers: [{ code: 'unresolved_memory_job', reference: currentMemoryJobId }],
-      memoryJobs: expect.arrayContaining([{ id: currentMemoryJobId, chapterId: f.chapterId, chapterRevision: changed ? 3 : 2, verified: false },
-        ...(previousMemoryJobId ? [{ id: previousMemoryJobId, chapterId: f.chapterId, chapterRevision: 2, verified: true }] : [])]) })
+      memoryJobs: expect.arrayContaining(expectedMemoryJobs) })
     expect((beforeEvidence.snapshot as { memoryJobs: unknown[] }).memoryJobs).toHaveLength(previousMemoryJobId ? 2 : 1)
     expect((beforeEvidence.snapshot as { blockers: unknown[] }).blockers).toHaveLength(1)
     expect(await prisma.memoryExtractionJob.findUniqueOrThrow({ where: { id: currentMemoryJobId } })).toMatchObject({ status: 'pending' })
@@ -225,8 +228,7 @@ describe.runIf(available)('current native writing and historical configuration a
     expect(appliedMemories.find(item => item.id === chapterMemory.id)).toEqual({ id: chapterMemory.id, version: chapterMemory.version,
       hash: runtimeJson({ title: chapterMemory.title, content: chapterMemory.content }).hash })
     const finalReceipt = await prisma.agentEffectReceipt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId, action: 'completion_finalize' } } })
-    expect(finalReceipt.result).toMatchObject({ evidence: { blockers: [], memoryJobs: expect.arrayContaining([{ id: currentMemoryJobId, verified: true },
-      ...(previousMemoryJobId ? [{ id: previousMemoryJobId, verified: true }] : [])]) } })
+    expect(finalReceipt.result).toMatchObject({ evidence: { blockers: [], memoryJobs: expect.arrayContaining(expectedMemoryJobs.map(job => ({ ...job, verified: true }))) } })
     expect((finalReceipt.result as { evidence: { memoryJobs: unknown[] } }).evidence.memoryJobs).toHaveLength(previousMemoryJobId ? 2 : 1)
     expect(await prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId } }, include: { usageReceipt: true }, orderBy: { id: 'asc' } })).toEqual(originalAttempts)
     expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(originalLedger)

@@ -233,7 +233,20 @@ describe.runIf(available)('new-draft quality-first prepayment admission', () => 
       if (scenario === 'legacy') {
         const reserve = vi.spyOn(humanityQuality, 'reserveQualityAutoRepair')
         const critic = vi.spyOn(reviewCompletion, 'generateReviewCompletion').mockResolvedValue(JSON.stringify({ findings: [finding] }))
-        const repair = vi.spyOn(aiService, 'generateTextCompletion').mockResolvedValue('{"patches":[{"key":"emotion_grounding:6:10","replacement":"握紧手指"}]}')
+        const repair = vi.spyOn(aiService, 'generateTextCompletion').mockImplementation(async (_system, material, options) => {
+          const marker = '待修订证据（只有 evidence 可替换，before/after 不可改写）：\n'
+          expect(material).toContain(marker)
+          const candidates = z.array(z.object({ findingId: z.string().min(1), signal: z.literal('emotion_grounding'), evidence: z.literal('停了一会') }))
+            .parse(JSON.parse(material.slice(material.indexOf(marker) + marker.length)))
+          expect(candidates).toHaveLength(1)
+          if (!options?.targetId) throw new Error('The repair request must identify its saved quality report')
+          expect(options.action).toBe('agent3HumanityRevision')
+          expect(options.modelRuntime).toMatchObject({ tier: selectedRuntime.tier, provider: selectedRuntime.provider,
+            modelName: selectedRuntime.modelName, reasoningEffort: selectedRuntime.reasoningEffort, multiplierBps: selectedRuntime.multiplierBps })
+          const original = await getQualityReport(base.userId, base.novelId, options.targetId)
+          expect(original.findings).toContainEqual(expect.objectContaining({ id: candidates[0].findingId, evidenceExcerpt: '停了一会', startOffset: 6, endOffset: 10 }))
+          return JSON.stringify({ patches: candidates.map(candidate => ({ findingId: candidate.findingId, replacement: '握紧手指' })) })
+        })
         const result = await qualityAnalyzeTool.execute({ ...ctx, callId: 'quality-first' }, { compilationId })
         expect(result).toMatchObject({ summary: expect.stringContaining('需复检') })
         expect(result.outcome).toBeUndefined()

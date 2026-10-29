@@ -1,4 +1,5 @@
 import { expect, vi } from 'vitest'
+import { currentReviewRepairResponse } from './current-review-repair-response.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { executeAgentRun } from '../../api/lib/agent/loop.js'
 import { recordStoryCompilerWrite } from '../../api/lib/agent/story-compiler.js'
@@ -55,7 +56,7 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
   const originalConfig = { taskSpec: originalRun.taskSpec, modelTier: originalRun.modelTier,
     customModelId: originalRun.customModelId, reasoningEffort: originalRun.reasoningEffort }
   const actions: string[] = []
-  const criticFailures: unknown[] = []
+  const modelFailures: unknown[] = []
   const continuityRequests: Array<{ chapterId: string; revision: number; orderIndex: number; source: string; content: string; evidence: string }[]> = []
   const critic = vi.spyOn(ai, 'generateTextCompletion').mockImplementation(async (_system, content, options) => {
     try {
@@ -82,18 +83,8 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
         explanation: 'This paragraph repeats the saved action without a new event.', suggestion: 'Remove this duplicate paragraph and retain the original action.', confidence: 0.99 }] : [] })
     }
     if (options.action === 'agent3HumanityRevision') {
-      const findings = JSON.parse(content.slice(content.lastIndexOf('\n[') + 1)) as Array<{ findingId: string; evidence: string; explanation: string }>
-      const duplicate = findings.filter(finding => finding.explanation.includes('This paragraph repeats the saved action without a new event.'))
-      if (chapter.content === duplicated) {
-        expect(duplicate).toHaveLength(1)
-        expect(duplicate[0].evidence).toBeTruthy()
-      } else {
-        expect(chapter.content.trim()).toBe(original.content.trim())
-        expect(duplicate).toEqual([])
-      }
-      return JSON.stringify({ patches: duplicate.map(finding => ({ findingId: finding.findingId, replacement: '' })),
-        retainedFindings: findings.filter(finding => !duplicate.some(item => item.findingId === finding.findingId)).map(finding => ({ findingId: finding.findingId,
-          reason: 'Retain this additional actual quality opinion for the author; this repair only removes the independently located duplicate action.' })) })
+      const findings = JSON.parse(content.slice(content.lastIndexOf('\n[') + 1)) as Array<{ findingId: string; evidence: string; start: number; end: number }>
+      return currentReviewRepairResponse(original.content, duplicated, chapter.content, findings)
     }
     if (options.action === 'agent3ContinuityCritic') {
       const request = JSON.parse(content) as { authorRequest: string; currentChapter: string; sources: typeof continuityRequests[number] }
@@ -111,11 +102,12 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
       return '{"findings":[]}'
     }
     throw new Error('Unexpected auxiliary request: ' + options.action)
-    } catch (error) { criticFailures.push(error); throw error }
+    } catch (error) { modelFailures.push(error); throw error }
   })
   const summary = input.missingCommit ? '当前任务没有提交权限，正文与历史检查原件保留，尚未完成提交。' : '已删除重复动作，最终版本已完成两项检查并实际提交。'
   const calls: string[] = []
   const main = vi.spyOn(ai, 'chatWithTools').mockImplementation(async request => {
+    try {
     expect(request).toMatchObject({ model: 'fixture', provider: 'fixture', reasoningEffort: 'high', reasoningParameterMode: 'native', thinkingEnabled: true, usageLog: {
       userId: f.userId, agentRunId: f.runId, modelTier: 'speed', multiplierBps: 10000 } })
     const last = [...request.messages].reverse().find(message => message.role === 'tool')
@@ -150,10 +142,11 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
     return { content: next ? '' : summary, reasoning: '', toolCalls: next ? [{ id: retainedFindings ? 'current-recovery-retained-commit' : `current-recovery-${next}`, name: next,
       arguments: JSON.stringify({ compilationId: input.compilationId, ...(retainedFindings ? { retainedFindings } : {}) }) }] : [], finishReason: next ? 'tool_calls' : 'stop',
       usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
+    } catch (error) { modelFailures.push(error); throw error }
   })
   await executeAgentRun({ ...f, prompt: input.prompt, mode: 'build', resume: true, eventStartSeq: input.afterSeq,
     ...(input.authorContinue ? { authorContinue: input.authorContinue } : {}), modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
-  if (criticFailures.length) throw criticFailures[0]
+  if (modelFailures.length) throw modelFailures[0]
   const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
   const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
   const compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: input.compilationId }, include: { bridge: true } })
