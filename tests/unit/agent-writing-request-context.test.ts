@@ -37,7 +37,9 @@ describe('owned author presentation', () => {
   it.each(['default', 'saved_only'] as const)('keeps a natural story wrap-up without repeating prose: %s', mode => {
     const preference = mode === 'saved_only' ? { mode, sourceRunId: 'author', sourceMessageId: 'message' } : null
     const text = renderWritingPresentation(preference, true)
-    expect(text).toContain('默认用一两句概括本次实际写成或修改的内容')
+    expect(text).toContain('默认先说明实际完成了哪一章或哪些修改')
+    expect(text).toContain('再用一两句概括本章的')
+    expect(text).toContain('不盘点工具调用或检查步骤')
     expect(text).toContain('人物变化、主要事件或情节推进')
     expect(text).toContain('不要在聊天重复')
     expect(text).toContain('作者明确要求只给正文、不总结或指定格式时，以其要求为准')

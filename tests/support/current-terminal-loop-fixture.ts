@@ -254,7 +254,8 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
     expect(events.filter(event => event.type === 'tool.result' && (event.payload as { toolName: string; ok: boolean }).toolName === 'chapter_bridge_commit'
       && (event.payload as { ok: boolean }).ok)).toHaveLength(1)
     expect(events.some(event => event.type === 'text.final' && (/只输出标题和正文/u.test(input.prompt)
-      ? (event.payload as { text: string }).text.includes(chapter.content.trim()) : (event.payload as { text: string }).text === summary))).toBe(true)
+      ? (event.payload as { text: string }).text.includes(chapter.content.trim())
+      : (event.payload as { text: string }).text === `已完成第${chapter.orderIndex}章《${chapter.title}》。\n\n${summary}`))).toBe(true)
     expect((await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })).dailyUsedMilli).toBe(beforeCharge + actions.length * 7)
   }
   return { run, chapter, compilation, events, actions, main, critic, continuityRequests }
