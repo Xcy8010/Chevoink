@@ -24,6 +24,42 @@ beforeEach(() => {
   mocks.operation = { id: 'op', taskRootId: 'root', kind: 'provider', status: 'prepared', operationKey: 'exec:0', inputSnapshot: snapshot, inputHash: runtimeJson(snapshot).hash }
 })
 describe('current model request tools and exact prepared-request recovery', () => {
+  it.each(['implicit', 'current', 'constraint', 'description', 'required', 'strict-true', 'explicit-false-removed', 'explicit-true-removed', 'order'] as const)('checks the complete idle %s candidate without mutating cursor, frames or configuration', async scenario => {
+    const implicit = structuredClone(mocks.projected)
+    const projected = implicit.map(definition => ({ ...definition, function: { ...definition.function, strict: false } }))
+    const explicit = { type: 'function' as const, function: { name: 'private', description: 'custom', strict: scenario === 'explicit-true-removed', parameters: { type: 'object' } } }
+    const frozen = [...implicit, explicit]
+    const expected = [...projected, explicit]
+    const originalProjected = mocks.projected
+    mocks.projected = expected
+    const configuration = mocks.current.configuration as { tools: unknown }
+    configuration.tools = frozen
+    const supplied = structuredClone(scenario === 'current' ? expected : frozen)
+    if (scenario === 'constraint') supplied[0].function.parameters = { type: 'object', properties: { content: { type: 'string', minLength: 999 } } }
+    if (scenario === 'description') supplied[0].function.description += ' changed'
+    if (scenario === 'required') supplied[0].function.parameters.required = ['content']
+    if (scenario === 'strict-true') Object.assign(supplied[0].function, { strict: true })
+    if (scenario === 'explicit-false-removed' || scenario === 'explicit-true-removed') Reflect.deleteProperty(supplied[1].function, 'strict')
+    if (scenario === 'order') supplied.reverse()
+    const before = runtimeJson(JSON.parse(JSON.stringify(mocks.current))).hash, cursorBefore = structuredClone(cursor)
+    try {
+      const result = validateModelCursor(token, cursor, { ...input(), tools: supplied })
+      if (scenario === 'implicit' || scenario === 'current') await expect(result).resolves.toEqual(mocks.frame)
+      else await expect(result).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+      expect(runtimeJson(JSON.parse(JSON.stringify(mocks.current))).hash).toBe(before)
+      expect(cursor).toEqual(cursorBefore)
+    } finally { mocks.projected = originalProjected }
+  })
+  it('does not add the implicit compatibility candidate to an already prepared explicit-false request', async () => {
+    const preparedTools = mocks.projected.map(definition => ({ ...definition, function: { ...definition.function, strict: false } }))
+    const snapshot = { kind: 'provider', action: 'workspaceAgent', parentOperationId: null, input: { request: { body: { tools: preparedTools } } } }
+    mocks.operation.inputSnapshot = snapshot; mocks.operation.inputHash = runtimeJson(snapshot).hash
+    mocks.current.frame = { revision: 1, state: { phase: 'awaiting_operation', pendingOperationId: 'op', messages } }
+    const before = runtimeJson(mocks.operation).hash
+    await expect(validateModelCursor(token, cursor, { ...input(), tools: preparedTools })).resolves.toEqual(mocks.frame)
+    await expect(validateModelCursor(token, cursor, input())).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+    expect(runtimeJson(mocks.operation).hash).toBe(before)
+  })
   it('sends only the exact current presentation while leaving the frozen configuration unchanged', async () => {
     const hash = runtimeJson(JSON.parse(JSON.stringify(mocks.current))).hash
     await expect(validateModelCursor(token, cursor, input())).resolves.toEqual(mocks.frame)

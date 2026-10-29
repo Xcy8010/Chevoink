@@ -70,10 +70,20 @@ export async function currentNativeToolViews(frozen: readonly NativeToolView[], 
   }), scope)
 }
 
+/** The exact previous Chat presentation: only this release's newly explicit
+ * non-strict default is removed. Original explicit choices stay significant. */
+export function previousImplicitStrictToolViews(frozen: readonly NativeToolView[], current: readonly NativeToolView[]): NativeToolView[] {
+  return current.map((definition, index) => {
+    if (frozen[index].function.strict !== undefined || definition.function.strict !== false) return definition
+    const { strict: _strict, ...fn } = definition.function
+    return { ...definition, function: fn }
+  })
+}
+
 export async function needsNativeToolProjection(frozen: readonly NativeToolView[], scope: TaskSpec['scope'], action: string): Promise<boolean> {
   if (!usesCurrentNativeView(action)) return false
   const original = frozen.find(tool => tool.function.name === action)
-  const current = (await currentNativeToolViews(frozen, scope)).find(tool => tool.function.name === action)
+  const current = previousImplicitStrictToolViews(frozen, await currentNativeToolViews(frozen, scope)).find(tool => tool.function.name === action)
   return !!original && !!current && runtimeJson(original).hash !== runtimeJson(current).hash
 }
 
@@ -147,11 +157,7 @@ export async function verifiedAssistantToolViews(tx: RuntimeTx, taskRootId: stri
   // non-strict default implicit. Authenticate that exact view as well when
   // consuming an already paid assistant result. Never strip an explicit
   // original strict choice or normalize any source request in place.
-  const previous = current.map((definition, index) => {
-    if (frozen[index].function.strict !== undefined || definition.function.strict !== false) return definition
-    const { strict: _strict, ...fn } = definition.function
-    return { ...definition, function: fn }
-  })
+  const previous = previousImplicitStrictToolViews(frozen, current)
   if (hash !== runtimeJson(previous).hash) {
     return runtimeError('RUNTIME_IDENTITY_CONFLICT', '实际模型工具视图不属于原配置或当前投影。')
   }

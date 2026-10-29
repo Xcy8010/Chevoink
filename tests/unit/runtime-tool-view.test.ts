@@ -3,7 +3,7 @@ import type { RunLeaseToken } from '../../api/lib/agent/runtime-lease.js'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { retainedFindingSchema } from '../../api/lib/agent/tools/chapter-arguments.js'
-import { projectNativeToolViews, currentNativeToolViews, verifiedAssistantToolViews, readFrozenModelToolViews, readAssistantToolViews, toolWithNativeView, type NativeToolView } from '../../api/lib/agent/runtime-tool-view.js'
+import { projectNativeToolViews, currentNativeToolViews, previousImplicitStrictToolViews, needsNativeToolProjection, verifiedAssistantToolViews, readFrozenModelToolViews, readAssistantToolViews, toolWithNativeView, type NativeToolView } from '../../api/lib/agent/runtime-tool-view.js'
 import { runtimeJson, type RuntimeTx } from '../../api/lib/agent/runtime-common.js'
 import { toOpenAIParameters } from '../../api/lib/agent/tool-schema.js'
 import { readExecutionFrame } from '../../api/lib/agent/runtime-state.js'
@@ -14,6 +14,29 @@ vi.mock('../../api/lib/agent/runtime-state.js', () => ({ readExecutionFrame: vi.
 const view = (name: string, parameters: Record<string, unknown>, description = '旧平台说明'): NativeToolView => ({ type: 'function', function: { name, parameters, description } })
 
 describe('current native built-in presentation', () => {
+  it.each(['chapter_write', 'chapter_append', 'chapter_edit_range', 'continuity_validate', 'chapter_bridge_commit'])('does not require a new provider source frame for metadata-only %s clarification', async action => {
+    const { getToolByName } = await import('../../api/lib/agent/tools/registry.js')
+    const tool = getToolByName(action)!, scope = { novelId: 'n' }
+    const { strict: _strict, ...implicit } = (await currentNativeToolViews([view(action, toOpenAIParameters(tool.parameters))], scope))[0].function
+    const frozen: NativeToolView[] = [{ type: 'function', function: implicit }]
+    const original = runtimeJson(frozen).hash
+    const projected = await currentNativeToolViews(frozen, scope)
+    expect(projected[0].function.strict).toBe(false)
+    expect(runtimeJson(projected).hash).not.toBe(original)
+    expect(await needsNativeToolProjection(frozen, scope, action)).toBe(false)
+    expect(previousImplicitStrictToolViews(frozen, projected)).toEqual(frozen)
+    expect(runtimeJson(frozen).hash).toBe(original)
+  })
+  it('still requires exact source authentication for real schema or description changes', async () => {
+    const parameters = toOpenAIParameters(chapterWriteTool.parameters)
+    for (const frozen of [[view('chapter_write', { ...parameters, required: ['content', 'writing'],
+      properties: { ...(parameters.properties as object), writing: { type: 'object' } } })], [view('chapter_write', parameters, 'Different original instruction')]]) {
+      expect(await needsNativeToolProjection(frozen, { novelId: 'n' }, 'chapter_write')).toBe(true)
+      const f = sourceFixture({ tools: frozen })
+      f.tx.agentOperation.findFirst.mockResolvedValue(null)
+      await expect(verifiedAssistantToolViews(f.tx as unknown as RuntimeTx, 'root', f.frame, frozen, { novelId: 'n' })).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+    }
+  })
   it('removes only platform coordination while preserving frozen identity and custom constraints', () => {
     const frozen = [view('chapter_write', { ...toOpenAIParameters(chapterWriteTool.parameters), required: ['content', 'writing', 'reviewer'],
       properties: { ...(toOpenAIParameters(chapterWriteTool.parameters).properties as object), writing: { type: 'object' }, reviewer: { type: 'string', enum: ['author'] }, content: { type: 'string', minLength: 4, maxLength: 30 } } }),
