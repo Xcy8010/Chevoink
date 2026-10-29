@@ -73,7 +73,11 @@ describe.runIf(available)('frozen continuity sparse-repair history remains read-
       if (scenario === 'missing-second-frame') await prisma.agentArtifact.delete({ where: { id: artifacts.at(-1)!.id } })
       const before = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
       const rawRows = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
-      if (scenario === 'missing-second-frame') await expect(readLegacyContinuityAssessment(prisma, ctx, input)).rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
+      if (scenario === 'missing-second-frame') {
+        const incomplete = await readLegacyContinuityAssessment(prisma, ctx, input)
+        expect(incomplete).toMatchObject({ inspected: { complete: false }, recoveryReady: false })
+        expect(currentTerminalReview({ independentCheck: 'unavailable', terminalCandidate: shape.candidate, continuityCriticResponse: incomplete.inspected.audit }, chapter.content, context)?.deliveryEligibility.eligible).not.toBe(true)
+      }
       else if (scenario === 'unknown-second') expect(await readLegacyContinuityAssessment(prisma, ctx, input)).toMatchObject({ billingKnown: false, recoveryReady: false })
       else expect(await readLegacyContinuityAssessment(prisma, ctx, input)).toEqual(read)
       expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(before)

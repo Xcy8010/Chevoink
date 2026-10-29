@@ -158,12 +158,12 @@ export async function executeDurableContinuity(ctx: ToolContext, tool: Pick<Agen
     return runtimeError('RUNTIME_SCOPE_MISMATCH', '连续性工具缺少原任务执行能力。')
   const lease = { ...capability.lease }, cursor = { ...capability.cursor }, baseline = capability.baseline && { ...capability.baseline }
   const prior = await withRunLease(lease, tx => tx.agentOperation.findUnique({ where: { taskRootId_operationKey: {
-    taskRootId: lease.taskRootId, operationKey: capability.operationKey } } }))
-  if (prior && object(object(prior.inputSnapshot).input).work && object(object(object(prior.inputSnapshot).input).work).kind !== 'continuityReview') {
-    const receipt = await executePreparedContinuityWork(ctx, lease, prior.id)
-    const source = z.object({ input: z.object({ normalization: z.object({ sourceRevision: z.number().int() }) }) }).parse(prior.inputSnapshot)
-    const pending = await withRunLease(lease, tx => readExecutionFrame(tx, lease.taskRootId, source.input.normalization.sourceRevision + 1))
-    await reduceExecutionReceipt(lease, { expectedRevision: pending.revision, expectedHash: pending.snapshotHash, operationId: prior.id })
+    taskRootId: lease.taskRootId, operationKey: capability.operationKey } }, select: { id: true } }))
+  const admitted = prior ? await readAdmittedReviewWork(lease, { operationId: prior.id, action: tool.name, novelId: ctx.novelId, callId: ctx.callId }) : null
+  if (admitted && object(admitted.input.work).kind !== 'continuityReview') {
+    const receipt = await executePreparedContinuityWork(ctx, lease, admitted.operation.id)
+    const pending = await withRunLease(lease, tx => readExecutionFrame(tx, lease.taskRootId, admitted.input.normalization.sourceRevision + 1))
+    await reduceExecutionReceipt(lease, { expectedRevision: pending.revision, expectedHash: pending.snapshotHash, operationId: admitted.operation.id })
     const failed = failedToolResultSchema.safeParse(receipt.result)
     return failed.success ? { ...failed.data.toolResult, outcome: 'failed', failureCode: failed.data.code }
       : z.object({ toolResult: z.custom<ToolResult>() }).parse(receipt.result).toolResult

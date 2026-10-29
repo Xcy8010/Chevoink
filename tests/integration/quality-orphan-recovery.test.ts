@@ -230,14 +230,16 @@ describe.runIf(available).each(['clean', 'pending-decision'] as const)('typed co
     if (scenario === 'pending-decision') {
       const calls = await prisma.agentRunEvent.findMany({ where: { runId: seeded.subject.runId, type: 'tool.call' }, orderBy: { seq: 'asc' } })
       expect(calls.map(event => (event.payload as { callId: string }).callId)).toContain('independent-read')
-      expect(calls.some(event => (event.payload as { callId: string }).callId === 'early-commit')).toBe(false)
-      expect(results.some(event => (event.payload as { callId: string }).callId === 'early-commit')).toBe(false)
-      const deferred = await prisma.agentRunEvent.findMany({ where: { runId: seeded.subject.runId, type: 'tool.deferred' } })
-      expect(deferred.map(event => event.payload)).toEqual(expect.arrayContaining([
-        expect.objectContaining({ callId: 'early-commit', toolName: 'chapter_bridge_commit', execution: 'not_dispatched', reason: expect.any(String) }),
-      ]))
+      const early = calls.find(event => (event.payload as { callId: string }).callId === 'early-commit')
+      expect(early).toBeDefined()
+      const refused = results.find(event => (event.payload as { callId: string }).callId === 'early-commit')
+      expect(refused?.payload).toMatchObject({ callId: 'early-commit', toolName: 'chapter_bridge_commit', ok: false, failureCode: 'REVIEW_DECISION_REQUIRED' })
+      expect(results.filter(event => (event.payload as { toolName: string; ok: boolean }).toolName === 'chapter_bridge_commit'
+        && (event.payload as { ok: boolean }).ok).map(event => (event.payload as { callId: string }).callId)).toEqual(['decided-commit'])
       const writer = calls.find(event => (event.payload as { callId: string }).callId === 'writer-decision')!
       const commit = calls.find(event => (event.payload as { callId: string }).callId === 'decided-commit')!
+      expect(early!.seq).toBeLessThan(writer.seq)
+      expect(refused!.seq).toBeLessThan(writer.seq)
       expect(writer.seq).toBeLessThan(commit.seq)
     }
     expect(fetchMock).toHaveBeenCalledTimes(scenario === 'clean' ? 1 : 3)

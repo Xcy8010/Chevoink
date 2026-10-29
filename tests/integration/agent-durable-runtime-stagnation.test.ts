@@ -12,7 +12,7 @@ import { prisma } from '../../api/lib/prisma.js'
 import { available,claim,fixture } from '../support/agent-durable-runtime-fixture.js'
 
 describe.runIf(available)('durable stagnation evidence', () => {
-  it.each(['repeat-read', 'changed-read', 'noop-write'] as const)('%s only resets on new evidence', async scenario => {
+  it.each(['repeat-read', 'changed-read', 'noop-write'] as const)('%s only resets on new evidence and continues to the report', async scenario => {
     await fixture(async f => {
       const lease = await claim(f)
       const tools = [chapterReadTool, chapterWriteTool]
@@ -27,20 +27,22 @@ describe.runIf(available)('durable stagnation evidence', () => {
       vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture', baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'high', reasoningEfforts: ['high'], visionEnabled: false, contextWindowTokens: null })
       vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000, rateCardId: 'stagnation-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
       let calls = 0
+      const finalCall = scenario === 'changed-read' ? 16 : 12
       vi.stubGlobal('fetch', vi.fn(async () => {
         calls++
-        if (calls > 14) throw new Error('Repeated observations must not extend stagnation forever')
+        if (calls > finalCall) throw new Error('The completed report must reach completion review without another model request')
         if (scenario === 'changed-read' && calls === 5) await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '用户提供的新证据', revision: { increment: 1 } } })
         const delta = calls % 2 ? { tool_calls: [{ index: 0, id: `read-${calls}`, type: 'function', function: { name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) } },
           ...(scenario === 'noop-write' ? [{ index: 1, id: `noop-${calls}`, type: 'function', function: { name: 'chapter_write', arguments: JSON.stringify({ chapterId: f.chapterId, content: '原文' }) } }] : [])] }
-          : { content: '接下来读取正文。' }
+          : { content: calls === finalCall ? '已核对当前正文，检查结果已生成。' : '接下来读取正文。' }
         return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: calls % 2 ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
       }))
-      expect(await runDurableExecution(lease, new AbortController().signal)).toMatchObject({ kind: 'needs_attention' })
-      expect(calls).toBe(scenario === 'changed-read' ? 13 : 9)
+      expect(await runDurableExecution(lease, new AbortController().signal)).toMatchObject({ kind: 'completion_review' })
+      expect(calls).toBe(finalCall)
       const reminders = await prisma.agentExecutionOutbox.findMany({ where: { taskRootId: f.rootId, type: 'execution.continuation' }, orderBy: { sequence: 'asc' } })
-      expect(reminders.map(item => (item.payload as { reminderIndex: number }).reminderIndex)).toEqual(scenario === 'changed-read' ? [1, 2, 1, 2, 3, 4] : [1, 2, 3, 4])
-      expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })).status).toBe('paused')
+      expect(reminders.map(item => (item.payload as { reminderIndex: number }).reminderIndex)).toEqual(scenario === 'changed-read' ? [1, 2, 1, 2, 3, 4, 5] : [1, 2, 3, 4, 5])
+      expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })).status).toBe('active')
+      expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'run.paused' } })).toBe(0)
     })
   }, 30000)
 })

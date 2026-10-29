@@ -1,3 +1,4 @@
+import { readQualityReviewAdmission } from '../../api/lib/agent/quality-review-admission.js'
 import { describe, expect, it, vi } from 'vitest'
 import { prisma, DataAccessError } from '../../api/lib/prisma.js'
 import * as credits from '../../api/lib/credits.js'
@@ -52,7 +53,7 @@ async function setup(f: Fixture, controller = new AbortController()) {
 }
 const paid = (f: Fixture) => prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { createdAt: 'asc' } })
 async function stored(compilationId: string) {
-  return ((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation as { continuityReport?: ContinuityReport }).continuityReport
+  return ((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation as { continuityReport?: ContinuityReport } | null)?.continuityReport
 }
 function idFromRequest(init: RequestInit) {
   const request = JSON.parse(String(init.body)), payload = JSON.parse(request.messages[1].content)
@@ -182,10 +183,17 @@ describe('legacy historical reports and ordinary current review lifecycle in Pos
       if (scenario.startsWith('known-new-body')) expect(await chapterEditRangeTool.execute({ ...s.ctx, sandboxMode: undefined },
         { chapterId: f.chapterId, oldText: '人物走进门', newText: '人物平静地走进门' })).not.toMatchObject({ outcome: 'failed' })
       if (scenario === 'revision-only') await prisma.chapter.update({ where: { id: f.chapterId }, data: { revision: { increment: 1 } } })
-      if (scenario === 'no-author-admission') await prisma.agentMessage.delete({ where: { id: f.sourceMessageId } })
+      if (scenario === 'no-author-admission') {
+        await prisma.agentMessage.delete({ where: { id: f.sourceMessageId } })
+        const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
+        const network = vi.fn(() => { throw Error('Historical admission inspection cannot dispatch') }); vi.stubGlobal('fetch', network)
+        expect(await prisma.$transaction(tx => readQualityReviewAdmission(tx, run))).toBeNull()
+        await unchanged(f, h); expect(network).not.toHaveBeenCalled()
+        return
+      }
       const network = vi.fn(async () => completion('{"findings":[]}')); vi.stubGlobal('fetch', network)
       const checked = await result(s.ctx, { ...s.args, ...(scenario === 'focus-only' ? { focus: '只核事件时序' } : {}) })
-      const blocked = scenario.startsWith('unknown-') || scenario === 'no-author-admission'
+      const blocked = scenario.startsWith('unknown-')
       expect(checked).toMatchObject(blocked ? { outcome: 'failed' } : { reviewCompleted: true })
       expect(network).toHaveBeenCalledTimes(blocked ? 0 : 1)
       if (scenario !== 'incomplete-second' && !scenario.startsWith('unknown-')) await unchanged(f, h)
@@ -233,7 +241,8 @@ describe('legacy historical reports and ordinary current review lifecycle in Pos
         ...(rejectsSecond ? [rateLimited(scenario === 'second-zero' ? { prompt_tokens: 0, completion_tokens: 0 } : undefined)] : []) ]
       const network = vi.fn(async (_url: unknown, init: RequestInit) => {
         const request = JSON.parse(String(init.body))
-        expect(request.model).toBe(runtime.modelName); expect(request.reasoning_effort).toBe('none')
+        expect(request.model).toBe(runtime.modelName)
+        expect(request.reasoning_effort).toBe(request.messages[0].content.startsWith('只为原意见') ? runtime.reasoningEffort : 'none')
         if (queue.length) return queue.shift()!
         return completion(correction ? JSON.stringify({ corrections: [{ index: 0, evidence: [{ sourceId: idFromRequest(init) }] }] }) : '{"findings":[]}')
       }); vi.stubGlobal('fetch', network)

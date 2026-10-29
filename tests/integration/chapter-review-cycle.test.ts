@@ -12,7 +12,7 @@ import { prisma } from '../../api/lib/prisma.js'
 import { assertChapterManuscriptRevision, readChapterReviewReadiness, recordChapterReviewDecisions, readChapterReviewWriteAdmission } from '../../api/lib/agent/chapter-review-guard.js'
 import { prepareStoryCompilation, recordStoryCompilerWrite, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
 import { readOriginalTaskRequest } from '../../api/lib/agent/original-request.js'
-import { readReviewCycle } from '../../api/lib/agent/review-cycle.js'
+import { beginReviewCycle, readReviewCycle } from '../../api/lib/agent/review-cycle.js'
 import { projectCurrentReviewNextStep } from '../../api/lib/agent/review-dispatch.js'
 import { assertCompletedWritingDelivery, readCompletedWritingDelivery, readRecoveredChapterDelivery } from '../../api/lib/agent/writing-scope.js'
 import { chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
@@ -197,7 +197,8 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
     const carried = readReviewCycle(rePrepared.compilation.preparedContext, scope)!
     expect(carried.baseline).toEqual(cycle.baseline)
     expect(carried.transitions).toEqual(cycle.transitions)
-    expect(carried.verificationStarted).toEqual(cycle.transitions.at(-1)!.after)
+    expect(carried.verificationStarted).toEqual(cycle.verificationStarted)
+    expect(carried).toEqual(cycle)
     expect(await prisma.$transaction(tx => readChapterReviewWriteAdmission(tx, f, { chapterId, revision: 7,
       after: finalBody.replace('灯光落在桌上', '灯光照着桌面') }))).toMatchObject({ kind: 'allow' })
     expect((await prisma.$transaction(tx => readChapterReviewReadiness(tx, f)))?.ready).toBe(false)
@@ -248,7 +249,7 @@ describe('retained quality binding survives real PostgreSQL row order', () => {
       await recordChapterReviewDecisions(tx, f, current!, current!.requiredDecisions!.map(ref => ({ ...ref, reason: 'Keep this synthetic current opinion.' })))
       if (mode !== 'version2') {
         const saved = await tx.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id } })
-        const cycle = readReviewCycle(saved.preparedContext, scope)!, byId = new Map(quality.findings.map(row => [row.id, row]))
+        const cycle = beginReviewCycle(scope, { compilationId: prepared.compilation.id, revision: chapter.revision, content: body, ready: true, binding: current!.decisionBinding!, required: { continuity: true, quality: true }, findings: current!.reviewCycleFindings! }), byId = new Map(quality.findings.map(row => [row.id, row]))
         const oldHash = runtimeJson(JSON.parse(JSON.stringify(cycle.baseline!.findings.filter(row => row.source === 'quality').map(ref => byId.get(ref.findingId))))).hash
         cycle.baseline!.binding.qualityReportHash = oldHash; delete cycle.baseline!.binding.qualityReportHashVersion
         const validation = saved.validation as Record<string, unknown>, decision = validation.retainedReviewDecision as Record<string, unknown>

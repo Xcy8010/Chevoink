@@ -313,7 +313,7 @@ async function pauseCurrent(f: Fixture, s: Existing, pending: Array<{ compilatio
   const checkpoint = runCheckpointSchema.parse({ version: 2, controlPolicy: 'until_completion', origin: 'system_default',
     runStartedAt: s.before.run.createdAt.getTime(), activeExecutionMs: 100, stagnantBatches: 7, resumeCount: 0, compactionCount: 0,
     maxTurns: 1, tokenBudget: 500, writeProgress: 1, writeBaseline: 0, readProgress: 7, readBaseline: 0, progressSignatures: [],
-    reviewAttempts: ['original-consumed-claim'], pendingReviews: pending, consumedReviewDecisionFeedback: ['old-feedback'],
+    reviewAttempts: ['original-consumed-claim'], pendingReviews: pending, consumedReviewDecisionFeedback: [runtimeJson({ historicalFeedback: s.compilation.id }).hash],
     inheritedTokens: 60, inheritedTurns: 16, manualResumeCount: 0 })
   await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'paused', currentTurn: 16, startedAt: s.before.run.createdAt,
     usage: runtimeJson({ ...(s.before.run.usage as object), checkpoint }).value } })

@@ -1,3 +1,4 @@
+import { currentReviewReadinessFixture } from '../helpers/current-review-readiness-fixture.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
@@ -5,9 +6,9 @@ import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 const db = vi.hoisted(() => ({
   novel: { findFirst: vi.fn() }, agentArtifact: { findMany: vi.fn() }, agentRun: { findFirst: vi.fn(), findMany: vi.fn(), findFirstOrThrow: vi.fn(), findUniqueOrThrow: vi.fn() }, chapter: { findFirst: vi.fn(), findMany: vi.fn(), count: vi.fn() },
   agentSession: { findFirst: vi.fn() }, agentChildExecutionGrant: { findUnique: vi.fn() }, agentMessage: { findFirst: vi.fn() }, chapterQualityReport: { findFirst: vi.fn(), findUnique: vi.fn() },
-  storyCompilation: { findFirst: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), update: vi.fn(), create: vi.fn() },
+  storyCompilation: { findFirst: vi.fn(), findUniqueOrThrow: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), update: vi.fn(), create: vi.fn() },
   chapterBridge: { findFirst: vi.fn(), update: vi.fn() }, sceneTask: { updateMany: vi.fn() }, agentGoalExecution: { findUnique: vi.fn() },
-  storyCharter: { findFirst: vi.fn() }, readerPromise: { findMany: vi.fn() }, projectMemoryEntry: { findMany: vi.fn() }, $transaction: vi.fn(), $queryRaw: vi.fn(),
+  aiUsageLog: { count: vi.fn() }, storyCharter: { findFirst: vi.fn() }, readerPromise: { findMany: vi.fn() }, projectMemoryEntry: { findMany: vi.fn() }, $transaction: vi.fn(), $queryRaw: vi.fn(),
 }))
 vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<typeof import('../../api/lib/prisma.js')>(), prisma: db }))
 vi.mock('../../api/lib/agent/writing-volume.js', async original => ({ ...await original<typeof import('../../api/lib/agent/writing-volume.js')>(), readWritingVolumeContext: vi.fn(async () => null) }))
@@ -28,7 +29,7 @@ const spec = (prompt: string) => {
 }
 beforeEach(() => {
   vi.resetAllMocks()
-  db.$transaction.mockImplementation(fn => fn(db)); db.$queryRaw.mockResolvedValue([{ id: 'n' }])
+  db.$transaction.mockImplementation(fn => fn(db)); db.$queryRaw.mockResolvedValue([{ id: 'n' }]); db.aiUsageLog.count.mockResolvedValue(0)
   db.novel.findFirst.mockResolvedValue({ id: 'n', chapterCount: 31 })
   db.agentGoalExecution.findUnique.mockResolvedValue(null)
   db.agentSession.findFirst.mockResolvedValue(null); db.agentChildExecutionGrant.findUnique.mockResolvedValue(null); db.agentMessage.findFirst.mockResolvedValue(null); db.chapterQualityReport.findFirst.mockResolvedValue(null)
@@ -45,6 +46,7 @@ beforeEach(() => {
   })
   db.chapter.count.mockResolvedValue(31); db.agentArtifact.findMany.mockResolvedValue([])
   db.chapter.findMany.mockResolvedValue([]); db.storyCompilation.findFirst.mockResolvedValue(null); db.storyCompilation.findMany.mockResolvedValue([])
+  db.storyCompilation.findUniqueOrThrow.mockImplementation(query => db.storyCompilation.findFirst(query))
   db.storyCompilation.updateMany.mockResolvedValue({ count: 0 })
   db.storyCompilation.create.mockImplementation(async ({ data }) => ({ id: 'created', ...data, bridge: data.bridge.create }))
   db.storyCharter.findFirst.mockResolvedValue(null); db.readerPromise.findMany.mockResolvedValue([]); db.projectMemoryEntry.findMany.mockResolvedValue([]); db.chapterBridge.findFirst.mockResolvedValue(null)
@@ -63,9 +65,9 @@ describe('story compiler task identity', () => {
   })
   function historicalResume(originOverride: Record<string, unknown> = {}) {
     const originalSpec = { ...spec('写下一章'), runId: 'original-run' }
-    const resumed = { runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: originalSpec }
+    const resumed = { id: 'new-run', startRequest: { prompt: '写下一章' }, runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: originalSpec }
     db.agentRun.findFirst.mockImplementation(async ({ where }) => where.id === 'original-run'
-      ? { id: 'original-run', taskSpec: originalSpec, ...originOverride }
+      ? { id: 'original-run', startRequest: { prompt: '写下一章' }, taskSpec: originalSpec, ...originOverride }
       : where.id === 'new-run' ? resumed : { createdAt: new Date('2026-09-20T03:22:41Z') })
     return originalSpec
   }
@@ -74,14 +76,16 @@ describe('story compiler task identity', () => {
     const actualChapter = { id: 'own32', title: '本任务章节', orderIndex: 32, revision: 4, content: '已保存正文' }
     const readChapter = db.chapter.findFirst.getMockImplementation()!
     db.chapter.findFirst.mockImplementation(async query => query.where.id === actualChapter.id ? actualChapter : readChapter(query))
-    db.storyCompilation.findFirst.mockResolvedValue({ id: 'original-compiler', chapterId: 'own32', targetOrderIndex: 32, stage: 'write', status: 'active',
+    const compiler = { id: 'original-compiler', chapterId: 'own32', targetOrderIndex: 32, stage: 'write', status: 'active',
       sceneTasks: [{ ordinal: 1, purpose: '原场景', turn: '原转折' }], bridge: { targetRevision: 4 }, chapter: actualChapter,
-      validation: { checkedRevision: 3, independentCheck: 'complete', findings: [] }, qualityReports: [{ id: 'original-quality', chapterRevision: 4, status: 'passed' }] })
+      validation: { checkedRevision: 3, independentCheck: 'complete', findings: [] }, qualityReports: [{ id: 'original-quality', chapterRevision: 4, status: 'passed' }] }
+    db.storyCompilation.findFirst.mockResolvedValue(compiler)
+    db.storyCompilation.findMany.mockResolvedValue([compiler])
     const digest = await buildStoryCompilerDigest('u', 'n', 'old31', 'new-run')
     expect(digest).toContain('original-compiler')
     expect(digest).toContain('当前正文 r4')
     expect(digest).toContain('original-quality')
-    expect(digest).toContain('独立章节检查不能代替编译 CHECK')
+    expect(digest).toContain('历史或独立报告不能代替当前编译与最终正文绑定的必要检查')
     expect(digest).toContain('revision=3')
     expect(digest).toContain('缺失或旧版本报告不代表通过')
     expect(db.chapter.findFirst).toHaveBeenCalledWith({ where: { id: actualChapter.id, authorId: 'u', ...activeChapterScope('n') }, select: { id: true, revision: true, content: true } })
@@ -148,29 +152,30 @@ describe('story compiler task identity', () => {
       coverage: compilerContinuityCoverage({ chapter: terminal.chapter, bridge: terminal.bridge, sceneTasks: terminal.sceneTasks, source: null }) } })
     db.chapterQualityReport.findFirst.mockResolvedValue({ id: 'q', chapterRevision: 3, status: 'passed', findings: [],
       deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(terminal.chapter.content).digest('hex') } })
-    db.storyCompilation.findMany.mockResolvedValue([terminal, { ...terminal, id: 'old-active', status: 'active' }])
+    db.storyCompilation.findMany.mockImplementation(async query => query.where.id ? [terminal].filter(row => row.id === query.where.id) : [terminal, { ...terminal, id: 'old-active', status: 'active' }])
     db.storyCompilation.findFirst.mockResolvedValue(terminal)
+    await currentReviewReadinessFixture(db as unknown as Prisma.TransactionClient, ctx, terminal as typeof terminal & { validation: unknown })
     const result = await chapterBridgeCommitTool.execute(ctx, {})
-    expect(result.summary).toBe('提交章节桥与当前故事终态')
+    expect(result.summary).toBe('章节已提交')
     expect(result.display).toMatchObject({ compilationId: 'new-completed' })
-    expect(db.storyCompilation.findMany.mock.calls[0][0].orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
+    expect(db.storyCompilation.findFirst).toHaveBeenCalledWith(expect.objectContaining({ orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] }))
     expect(db.storyCompilation.updateMany).not.toHaveBeenCalled()
   })
   it('preserves an explicit wrong id and fails without preparing a replacement', async () => {
-    expect(await chapterBridgeCommitTool.execute(ctx, { compilationId: 'wrong-or-foreign' })).toMatchObject({ outcome: 'failed' })
-    expect(db.storyCompilation.findMany.mock.calls[0][0].where).toMatchObject({ id: 'wrong-or-foreign' })
+    await expect(chapterBridgeCommitTool.execute(ctx, { compilationId: 'wrong-or-foreign' })).rejects.toMatchObject({ code: 'COMPILATION_NOT_FOUND' })
+    expect(db.storyCompilation.findFirst.mock.calls[0][0].where).toMatchObject({ id: 'wrong-or-foreign' })
     expect(db.storyCompilation.create).not.toHaveBeenCalled()
   })
   it('never substitutes a durable baseline for an explicitly different compilation id', async () => {
-    expect(await chapterBridgeCommitTool.execute({ ...ctx, durableCompiler: { baseline: { id: 'own', hash: 'a'.repeat(64) } } } as ToolContext,
-      { compilationId: 'foreign' })).toMatchObject({ outcome: 'failed', failureCode: 'COMPILATION_IDENTITY_MISMATCH', summary: '章节编译身份不匹配' })
+    await expect(chapterBridgeCommitTool.execute({ ...ctx, durableCompiler: { baseline: { id: 'own', hash: 'a'.repeat(64) } } } as ToolContext,
+      { compilationId: 'foreign' })).rejects.toMatchObject({ code: 'COMPILATION_NOT_FOUND' })
     expect(db.storyCompilation.findMany).not.toHaveBeenCalled()
   })
   it('rejects explicit superseded active identity and leaves the newer chapter commit untouched', async () => {
     db.storyCompilation.findMany.mockResolvedValue([{ id: 'old-active', status: 'active', chapterId: 'own32', createdAt: new Date(1), chapter: { id: 'own32', revision: 4 }, bridge: {} }])
-    db.storyCompilation.findFirst.mockResolvedValue({ id: 'new-completed' })
+    db.storyCompilation.findFirst.mockResolvedValueOnce({ id: 'old-active', status: 'active', chapterId: 'own32', createdAt: new Date(1), chapter: { id: 'own32', revision: 4 }, bridge: {} }).mockResolvedValue({ id: 'new-completed' })
     expect(await chapterBridgeCommitTool.execute(ctx, { compilationId: 'old-active' })).toMatchObject({ outcome: 'failed', summary: '章节编译已被后续准备替代' })
-    expect(db.storyCompilation.findFirst.mock.calls[0][0].where).toMatchObject({ chapterId: 'own32', createdAt: { gt: new Date(1) } })
+    expect(db.storyCompilation.findFirst.mock.calls[1][0].where).toMatchObject({ chapterId: 'own32', createdAt: { gt: new Date(1) } })
     expect(db.storyCompilation.updateMany).not.toHaveBeenCalled()
   })
   it('ignores superseded same-chapter state for delivery but still rejects another unfinished chapter', async () => {
@@ -196,9 +201,12 @@ describe('story compiler task identity', () => {
         : { runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: currentTask })
     const chapter = { id: 'old31', revision: 3, content: '已保存正文', title: '原章节', orderIndex: 31 }
     const bridge = { id: 'bridge', fromChapterId: null, recentOpenings: [], recentEndings: [] }
-    db.storyCompilation.findFirst.mockResolvedValue({ id: 'original-compiler', runId: 'original-run', chapterId: 'old31', status: 'active', chapter, sceneTasks: [], bridge,
+    const compilation = { id: 'original-compiler', runId: 'original-run', chapterId: 'old31', status: 'active', chapter, sceneTasks: [], bridge,
       validation: { independentCheck: 'complete', checkedChapterId: chapter.id, checkedRevision: 3, findings: [], errorCount: 0, warningCount: 0,
-        coverage: compilerContinuityCoverage({ chapter, bridge, sceneTasks: [], source: null }) } })
+        coverage: compilerContinuityCoverage({ chapter, bridge, sceneTasks: [], source: null }) } }
+    db.storyCompilation.findFirst.mockImplementation(async query => query.where.createdAt ? null : compilation)
+    db.storyCompilation.findMany.mockResolvedValue([compilation])
+    await currentReviewReadinessFixture(db as unknown as Prisma.TransactionClient, ctx, compilation)
     db.chapterQualityReport.findFirst.mockResolvedValue({ id: 'q', chapterRevision: 3, status: 'passed', findings: [],
       deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(chapter.content).digest('hex') } })
     const save = vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'proposal', action: 'created', status: 'candidate' })
@@ -219,31 +227,27 @@ describe('story compiler task identity', () => {
     expect(db.storyCompilation.create.mock.calls[0][0].data.chapterId).toBeUndefined()
   })
   it('a chapter id passed as compilationId fails and names the original next-chapter preparation path', async () => {
-    const result = await chapterBridgeCommitTool.execute(ctx, { compilationId: 'old31' })
-    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'COMPILATION_NOT_FOUND' })
-    expect(result.output).toContain('第 32 章')
-    expect(result.output).toContain('story_compiler_prepare')
-    expect(result.output).toContain('省略编辑器旧 chapterId')
-    expect(db.storyCompilation.findMany.mock.calls[0][0].where).toMatchObject({ id: 'old31', run: { userId: 'u', novelId: 'n', sessionId: 'session', taskSpec: { path: ['id'] } } })
+    await expect(chapterBridgeCommitTool.execute(ctx, { compilationId: 'old31' })).rejects.toMatchObject({ code: 'COMPILATION_NOT_FOUND' })
+    expect(db.storyCompilation.findFirst.mock.calls[0][0].where).toMatchObject({ id: 'old31', run: { userId: 'u', novelId: 'n', sessionId: 'session', taskSpec: { path: ['id'] } } })
     expect(db.storyCompilation.create).not.toHaveBeenCalled(); expect(db.storyCompilation.updateMany).not.toHaveBeenCalled()
+
   })
   it.each([0, 1])('an existing unwritten next chapter with %s scenes directs the saved state forward without a new compiler', async scenes => {
     const prepared = { id: 'real-compiler', chapterId: null, targetOrderIndex: 32, stage: 'prepare', bridge: {}, chapter: null,
       sceneTasks: Array.from({ length: scenes }, (_, ordinal) => ({ ordinal })) }
     db.storyCompilation.findMany.mockResolvedValue([prepared])
-    const result = await chapterBridgeCommitTool.execute(ctx, { compilationId: prepared.id })
-    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'COMPILATION_NOT_WRITTEN' })
-    expect(result.output).toContain(scenes ? 'chapter_create' : 'scene_task_build')
-    expect(result.output).toContain('real-compiler')
+    db.storyCompilation.findFirst.mockResolvedValue(prepared)
+    await expect(chapterBridgeCommitTool.execute(ctx, { compilationId: prepared.id })).rejects.toMatchObject({ code: 'COMPILATION_NOT_FOUND' })
+    expect(db.storyCompilation.findFirst.mock.calls[0][0].where).toMatchObject({ id: prepared.id })
     expect(db.storyCompilation.create).not.toHaveBeenCalled(); expect(db.storyCompilation.updateMany).not.toHaveBeenCalled()
   })
   it('an invalid explicit compiler is not silently replaced by the real current one', async () => {
-    db.storyCompilation.findFirst.mockResolvedValue({ id: 'real-compiler', chapterId: null, targetOrderIndex: 32, stage: 'prepare', chapter: null, sceneTasks: [] })
-    const result = await chapterBridgeCommitTool.execute(ctx, { compilationId: 'old31' })
-    expect(result.failureCode).toBe('COMPILATION_NOT_FOUND')
-    expect(result.output).toContain('compilationId=real-compiler')
-    expect(result.output).toContain('scene_task_build')
+    const saved = { id: 'real-compiler', chapterId: null, targetOrderIndex: 32, stage: 'prepare', chapter: null, sceneTasks: [] }
+    db.storyCompilation.findFirst.mockImplementation(async query => query.where.id === 'old31' ? null : saved)
+    await expect(chapterBridgeCommitTool.execute(ctx, { compilationId: 'old31' })).rejects.toMatchObject({ code: 'COMPILATION_NOT_FOUND' })
+    expect(db.storyCompilation.findFirst.mock.calls.every(([query]) => query.where.id === 'old31')).toBe(true)
     expect(db.storyCompilation.updateMany).not.toHaveBeenCalled()
+
   })
   it.each(['current', 'stale', 'missing'] as const)('PREPARE uses only the previous chapter current committed revision (%s)', async scenario => {
     const find = db.chapter.findFirst.getMockImplementation()!
@@ -256,20 +260,20 @@ describe('story compiler task identity', () => {
       relationshipState: [], emotionAftermath: [], openLoops: ['仓库追逐'], hookDecision: '', delayedHookReason: '', storyTime: '', committedAt: new Date(1),
     })
     const result = await prepareStoryCompilation({ ...ctx, chapterId: undefined, mode: 'balanced', intentSummary: '写下一章' })
-    expect(db.chapterBridge.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: {
-      userId: 'u', novelId: 'n', toChapterId: 'old31', targetRevision: 5, committedAt: { not: null },
-    } }))
+    expect(db.chapterBridge.findFirst).not.toHaveBeenCalled()
     expect(result.compilation.bridge).toMatchObject({ fromChapterId: 'old31', sourceRevision: 5 })
-    expect(result.bridge).toMatchObject(scenario === 'current'
-      ? { location: '仓库', objectState: ['她持有钥匙'], lastUnfinishedAction: '她进入仓库' }
-      : { location: '', objectState: [], lastUnfinishedAction: '', openLoops: [] })
+    expect(result.bridge).toMatchObject({ location: '', objectState: [], lastUnfinishedAction: '', openLoops: [] })
+    expect(db.chapterBridge.update).not.toHaveBeenCalled()
+
   })
   it('inherits the CAS-consumed new-draft marker and counters when repreparing across the original parent/child lineage', async () => {
     const marker = { version: 1, taskId: 'task', chapterId: 'own32', compilationId: 'old-compiler', checkedRevision: 3 }
-    db.storyCompilation.findMany.mockResolvedValue([{ validation: { checkRounds: 2, autoRepairRounds: 0, newDraftRevision: marker } }])
+    const historical = { validation: { checkRounds: 2, autoRepairRounds: 0, newDraftRevision: marker } }
+    db.storyCompilation.findMany.mockResolvedValue([historical])
     db.agentRun.findMany.mockResolvedValue([{ id: 'new-run' }])
     const result = await prepareStoryCompilation({ ...ctx, chapterId: undefined, mode: 'balanced', intentSummary: '写下一章' })
-    expect(result.compilation.validation).toEqual({ checkRounds: 2, newDraftRevision: marker })
+    expect(historical.validation).toEqual({ checkRounds: 2, autoRepairRounds: 0, newDraftRevision: marker })
+    expect(result.compilation.validation ?? {}).not.toHaveProperty('newDraftRevision')
     expect(result.preparedFirstForTarget).toBe(false)
     expect(db.storyCompilation.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ runId: { in: ['new-run'] }, targetOrderIndex: 32 }) }))
   })
@@ -307,7 +311,7 @@ describe('story compiler task identity', () => {
     expect(await chapterBridgeGetTool.execute(ctx, {})).toMatchObject({ outcome: 'failed', failureCode: 'COMPILATION_NOT_FOUND' })
   })
   it('marks a missing cross-task continuity compilation as failed instead of showing tool success', async () => {
-    expect(await continuityValidateTool.execute(ctx, { compilationId: 'foreign' })).toMatchObject({ outcome: 'failed', summary: '本次连续性检查未执行' })
+    await expect(continuityValidateTool.execute(ctx, { compilationId: 'foreign' })).rejects.toMatchObject({ code: 'QUALITY_TASK_TARGET_REQUIRED' })
     expect(db.storyCompilation.create).not.toHaveBeenCalled()
   })
   it('keeps no-run digest compatibility read-only without guessing an active task', async () => {

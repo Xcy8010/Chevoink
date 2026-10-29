@@ -202,7 +202,7 @@ describe.runIf(available)('current saved writing and read-only historical review
     expect(compiler.status).toBe('active')
     expect(compiler.bridge!.committedAt).toBeNull()
     expect(compiler.sceneTasks.map(scene => scene.status)).toEqual(['writing', 'writing', 'writing'])
-    expect(compiler.validation).toMatchObject({ checkRounds: 4, checkedRevision: c.chapter.revision - 1 })
+    expect(compiler.validation).toEqual(stillStale.validation)
     expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })).toEqual(budget)
     expect(model).not.toHaveBeenCalled()
   }))

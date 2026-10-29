@@ -55,8 +55,10 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
   const originalConfig = { taskSpec: originalRun.taskSpec, modelTier: originalRun.modelTier,
     customModelId: originalRun.customModelId, reasoningEffort: originalRun.reasoningEffort }
   const actions: string[] = []
+  const criticFailures: unknown[] = []
   const continuityRequests: Array<{ chapterId: string; revision: number; orderIndex: number; source: string; content: string; evidence: string }[]> = []
   const critic = vi.spyOn(ai, 'generateTextCompletion').mockImplementation(async (_system, content, options) => {
+    try {
     options.signal?.throwIfAborted()
     expect(options).toMatchObject({ explicitModelSelection: true, userId: f.userId, agentRunId: f.runId,
       modelRuntime: { tier: 'speed', provider: 'fixture', modelName: 'fixture', multiplierBps: 10000,
@@ -101,6 +103,7 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
       return '{"findings":[]}'
     }
     throw new Error('Unexpected auxiliary request: ' + options.action)
+    } catch (error) { criticFailures.push(error); throw error }
   })
   const summary = input.missingCommit ? '当前任务没有提交权限，正文与历史检查原件保留，尚未完成提交。' : '已删除重复动作，最终版本已完成两项检查并实际提交。'
   const calls: string[] = []
@@ -142,6 +145,7 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
   })
   await executeAgentRun({ ...f, prompt: input.prompt, mode: 'build', resume: true, eventStartSeq: input.afterSeq,
     ...(input.authorContinue ? { authorContinue: input.authorContinue } : {}), modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
+  if (criticFailures.length) throw criticFailures[0]
   const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
   const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
   const compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: input.compilationId }, include: { bridge: true } })

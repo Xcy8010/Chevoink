@@ -120,10 +120,13 @@ describe('mandatory quality pass through persisted current warning repair', () =
     expect(await admission()).toMatchObject({ kind: 'allow', basis: 'original_writing' })
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilationId))).toMatchObject({ ready: false, quality: 'incomplete' })
     // A complete report from outside the original task remains outside its grant.
+    const earlierOwned = await prisma.chapterQualityReport.findMany({ where: { compilationId, id: { not: warningReport.id }, runId: f.runId }, select: { id: true, runId: true } })
+    await prisma.chapterQualityReport.updateMany({ where: { id: { in: earlierOwned.map(report => report.id) } }, data: { runId: null } })
     await prisma.chapterQualityReport.update({ where: { id: warningReport.id }, data: { deterministicMetrics: warningReport.deterministicMetrics!, runId: null } })
     expect(await admission()).toMatchObject({ kind: 'allow', basis: 'original_writing' })
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilationId))).toMatchObject({ ready: false, quality: 'missing' })
     await prisma.chapterQualityReport.update({ where: { id: warningReport.id }, data: { runId: f.runId } })
+    for (const report of earlierOwned) await prisma.chapterQualityReport.update({ where: { id: report.id }, data: { runId: report.runId } })
     await expect(mutate(after, ranges, true)).rejects.toThrow('synthetic rollback after mandatory-warning CAS')
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ revision: 5, content: finalBody })
     await mutate(after, ranges)
@@ -252,9 +255,7 @@ describe('legacy review convergence through actual loop and terminal delivery', 
         ...Array.from({ length: 6 }, (_, index) => ({ id: `polish-${index}`, name: 'chapter_edit_range',
           arguments: JSON.stringify({ chapterId: f.chapterId, oldText: `absent-anchor-${index}`, newText: '未应用' }) })),
         { id: 'actual-retained-commit', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId: prepared.compilation.id,
-          retainedFindings: retained, chapterSummary: '她在门口等待回应。', lastUnfinishedAction: '等待回应',
-          exitState: { action: '等待回应', location: '门口', knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
-          hookDecision: '', delayedHookReason: '', openingStructure: '进屋', endingStructure: '等待' }) },
+          retainedFindings: retained, chapterSummary: '她在门口等待回应。' }) },
       ] : []
       return { content: calls.length ? '' : '本章完成。', reasoning: '', finishReason: calls.length ? 'tool_calls' : 'stop', toolCalls: calls,
         usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }

@@ -119,7 +119,8 @@ describe.skipIf(!available)('versioned original author selection effect', () => 
     await invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, patches: [{ oldText: '片段第', newText: '新' }, { oldText: '9轮😀', newText: '片段' }] })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toMatchObject({ revision: 12,
       content: `${body.slice(0, start)}新片段。重复。${body.slice(end)}` })
-    expect(await prisma.$transaction(tx => probeChapterReviewRevision(tx, ctx, before))).toMatchObject({ open: false, code: 'AUTHOR_LOCAL_SCOPE' })
+    const current = await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })
+    expect(await prisma.$transaction(tx => probeChapterReviewRevision(tx, ctx, current, { mutation: 'replace' }))).toMatchObject({ open: false, code: 'AUTHOR_LOCAL_SCOPE' })
   }, false, '只润色第一章第二段'))
 
   it.each(['legacy', 'durable'] as const)('denies local wholebody/metadata/append/outside/coordinates/ambiguous/formatting bypass via %s', mode => fixture(mode, async (ctx, _spec, invoke) => {
@@ -364,7 +365,7 @@ describe.skipIf(!available)('versioned original author selection effect', () => 
     await invoke(chapterEditRangeTool, { chapterId: ctx.chapterId, oldText, newText: oldText })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toEqual(before)
     expect((await readWritingScope(prisma, ctx)).spec).toMatchObject({ scope: { selectionBoundary: spec.scope.selectionBoundary } })
-    const probe = await prisma.$transaction(tx => probeChapterReviewRevision(tx, ctx, before))
+    const probe = await prisma.$transaction(tx => probeChapterReviewRevision(tx, ctx, before, { mutation: 'replace' }))
     expect(probe).toMatchObject({ open: false, code: 'AUTHOR_SELECTION_SCOPE' })
   }))
 

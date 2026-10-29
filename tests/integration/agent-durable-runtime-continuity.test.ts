@@ -102,7 +102,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         const body = JSON.parse(String(init.body)), system = String(body.messages[0].content)
         expect(body.max_tokens).toBe(16_384)
         expect(body.tools).toBeUndefined()
-        expect(body.reasoning_effort).toBe('none')
+        expect(body.reasoning_effort).toBe('high')
         expect(body.messages.map((item: { role: string }) => item.role)).toEqual(['system', 'user'])
         const repair = system.includes('只替换列出的本章原文片段'), correction = system.startsWith('只为原意见'), format = system.includes('只纠正这份原回复')
         if (!repair && !correction && !format) {

@@ -216,10 +216,12 @@ describe.runIf(available)('durable domain continuation', () => {
               lease = await claim({ userId: f.userId, runId: resumed.run.id })
             }
             expect(await advanceDurableCompletionObligations(lease, { expectedRevision: candidate.revision, expectedHash: candidate.snapshotHash }))
-              .toMatchObject({ kind: index === 5 ? 'needs_attention' : 'continued' })
+              .toMatchObject({ kind: 'continued' })
           }
           const events = await prisma.agentExecutionOutbox.findMany({ where: { taskRootId: f.rootId, type: 'execution.continuation' }, orderBy: { sequence: 'asc' } })
-          expect(events.map(item => (item.payload as { reminderIndex: number }).reminderIndex)).toEqual([1, 2, 3, 4])
+          expect(events.map(item => (item.payload as { reminderIndex: number }).reminderIndex)).toEqual([1, 2, 3, 4, 5])
+          expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })).status).toBe('active')
+          expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'execution.completion.decided' } })).toBe(0)
         }
       }
       expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)

@@ -461,7 +461,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
   }))
   it.each(['legacy', 'durable'] as const)('%s atomically saves decisions and real delivery across the old transaction deadline', mode => fixture('写第一章', async ctx => {
     const f = await finalizationFixture(ctx, 1, '写第一章', 1, mode === 'durable')
-    const args = { compilationId: f.compilation.id, decisionOnly: true as const, retainedFindings: f.retainedFindings }
+    const args = { compilationId: f.compilation.id, retainedFindings: f.retainedFindings }
     const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     const memoryBefore = await prisma.projectMemoryEntry.count({ where: { novelId: ctx.novelId } })
     if (f.lease) {
@@ -544,7 +544,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
       const tool = read ? chapterBridgeGetTool : chapterBridgeCommitTool, callId = randomUUID()
       frame = await saveExecutionState(f.lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
         snapshot: { ...frame.state, messages: [...frame.state.messages, { role: 'assistant', content: '', toolCalls: [{ id: callId, name: tool.name, arguments: JSON.stringify(args) }] }] } })
-      if (args.decisionOnly && !faultInjected) {
+      if (Array.isArray(args.retainedFindings) && args.retainedFindings.length === 40 && !faultInjected) {
         faultInjected = true
         const fault = vi.spyOn(executionReducer, 'reduceExecutionReceipt').mockRejectedValueOnce(new Error('decision receipt saved before cursor reduction'))
         try { await expect(executeDurableToolStep(f.lease, ctx.signal)).rejects.toThrow('decision receipt saved before cursor reduction') }
@@ -574,7 +574,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     }
     if (f.lease) await call({ compilationId: f.compilation.id }, true)
     const first = f.retainedFindings.slice(0, 40)
-    const result = await call({ compilationId: f.compilation.id, decisionOnly: true, retainedFindings: first })
+    const result = await call({ compilationId: f.compilation.id, retainedFindings: first })
     expect(result).toMatchObject({ outcome: 'failed', failureCode: 'REVIEW_DECISION_REQUIRED' })
     expect(result.requiredResult).toBeUndefined()
     expect(result.semanticTransition).toBeUndefined()
@@ -584,7 +584,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     expect(partial.status).toBe('active')
     expect(partial.validation).not.toHaveProperty('retainedReviewDecision')
     expect((await readChapterReviewReadiness(prisma, ctx, f.compilation.id))?.decisionPending).toBe(true)
-    const repeat = await call({ compilationId: f.compilation.id, decisionOnly: true, retainedFindings: first })
+    const repeat = await call({ compilationId: f.compilation.id, retainedFindings: first })
     expect(repeat.semanticTransition).toBeUndefined()
     expect(repeat.requiredResult).toBeUndefined()
     if (f.lease && frame) expect((await collectDurableToolEvidence(prisma, f.lease.taskRootId, frame.revision)).progressSequence).toBe(firstProgress)
@@ -635,7 +635,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
           ] },
         ] } })
       expect(await executeDurableToolStep(f.lease, ctx.signal)).toMatchObject({ kind: 'tool' })
-      expect(await executeDurableToolStep(f.lease, ctx.signal)).toMatchObject({ kind: 'tool', result: { outcome: 'failed', failureCode: 'REVIEW_DECISION_REQUIRED' } })
+      expect(await executeDurableToolStep(f.lease, ctx.signal)).toMatchObject({ kind: 'tool', result: { outcome: 'failed', failureCode: 'TOOL_CONTRACT_RETIRED' } })
       expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).toEqual(before)
       const final = await executeDurableToolStep(f.lease, ctx.signal)
       expect(final).toMatchObject({ kind: 'tool', result: { display: { phase: 'commit', compilationId: f.compilation.id } } })
@@ -1144,7 +1144,8 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     await chapterReadTool.execute(opposite, { chapterId: f.chapterId })
     await expect(chapterWriteTool.execute(opposite, { chapterId: f.chapterId, content: '另一执行在原权限内继续修改。' })).resolves.toBeTruthy()
     const prepared = await prepareStoryCompilation({ ...ctx, chapterId: f.chapterId, mode: 'balanced', intentSummary: '写第一章' })
-    expect(prepared.compilation.validation).toMatchObject({ checkRounds: 1 })
+    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: old.id } })).validation).toEqual(old.validation)
+    expect(prepared.compilation.validation ?? {}).not.toHaveProperty('checkRounds')
     expect(readNewDraftRevision(prepared.compilation.validation)).toBeNull()
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: '另一执行在原权限内继续修改。', revision: chapter.revision + 1 })
   }))
@@ -1183,7 +1184,8 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     expect(await chapterWriteTool.execute(ctx, { chapterId, content: '合成已保存的完整修订。' })).not.toMatchObject({ outcome: 'failed' })
     const prepared = await prepareStoryCompilation({ ...ctx, chapterId, mode: 'balanced', intentSummary: prompt })
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: old.id } })).status).toBe('abandoned')
-    expect(prepared.compilation.validation).toMatchObject({ checkRounds: 1 })
+    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: old.id } })).validation).toEqual(old.validation)
+    expect(prepared.compilation.validation ?? {}).not.toHaveProperty('checkRounds')
     const current = await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })
     await expect(chapterWriteTool.execute(ctx, { chapterId, content: '原授权修订可以继续。' })).resolves.toBeTruthy()
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })).toMatchObject({ content: '原授权修订可以继续。', revision: current.revision + 1 })

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { runtimeJson, type RuntimeTx } from '../../api/lib/agent/runtime-common.js'
 import type { RunLeaseToken } from '../../api/lib/agent/runtime-lease.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../../api/lib/agent/runtime-tool-cursor.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { reduceExecutionReceipt } from '../../api/lib/agent/runtime-reducer.js'
 
 const lease = vi.hoisted(() => ({ withRunLease: vi.fn() }))
@@ -21,7 +22,7 @@ function fixture(action: 'prepare' | 'reject' | 'reduce') {
     tools: [{ type: 'function', function: { name: 'chapter_read', description: '', parameters: { type: 'object' } } }],
     toolAuthority: [{ name: 'chapter_read', permission: action === 'reject' ? 'deny' : 'allow', alwaysConfirm: false, dangerous: false }],
     protectedChapterIds: [], pinnedSkillVersions: [] }
-  const root = { specSnapshot: { fixture: true }, requestSnapshot: { content: '合成原始请求' }, inputHash: '' }
+  const root = { specSnapshot: JSON.parse(JSON.stringify(buildTaskSpec({ runId: 'run', novelId: 'novel', prompt: '合成原始请求' }))), requestSnapshot: { content: '合成原始请求' }, inputHash: '' }
   root.inputHash = runtimeJson({ spec: root.specSnapshot, request: root.requestSnapshot }).hash
   const head = { revision: latest.revision, configuration, configurationHash: runtimeJson({ configuration, inputHash: root.inputHash }).hash }
   const events = [first, latest].map(frame => ({ taskRootId: 'root', type: 'execution.state.saved',

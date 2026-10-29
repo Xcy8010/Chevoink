@@ -44,7 +44,7 @@ async function frozenCorrection(f: Fixture, input: { chapterId: string; revision
   const claimRow = await prisma.agentArtifact.create({ data: { content: 'Frozen synthetic test evidence.', runId: f.runId, artifactType: 'continuityReview', title: 'Frozen historical correction claim',
     metadata: runtimeJson({ version: 1, state: 'claimed', evidenceCorrectionKey: 'frozen-key', chapterId: input.chapterId, revision: input.revision,
       sourceHash: correctionsModule.continuitySourceHash(bodies), bodies, usageIds: [primary.id], original: interpretation.audit,
-      interpretation: interpretation.audit, admissionId: null, callId: 'original-correction', targetType, targetId, bindingHash: input.bindingHash }).value } })
+      interpretation: interpretation.audit, admissionId: null, callId: 'original-correction', targetType, targetId, ...(input.bindingHash ? { bindingHash: input.bindingHash } : {}) }).value } })
   const followup = await prisma.aiUsageLog.create({ data: { ...usageData, action: 'agent3ContinuityEvidenceCorrection',
     ...(input.unknown ? { usageSource: 'unknown', billingStatus: 'pending_usage', requestTokens: null, responseTokens: null } : {}),
     ...(input.reserved ? { reservedCreditMilli: 17 } : {}), ...(input.knownZero ? { requestTokens: 0, responseTokens: 0 } : {}) } })
@@ -145,7 +145,7 @@ describe.runIf(available)('continuity evidence correction actual PostgreSQL effe
       expect(report).toMatchObject({ complete: true, billingKnown: true, rawResponses: [currentRaw,
         JSON.stringify({ corrections: [{ index: 0, evidence: [{ sourceId: currentSourceId }] }] })],
       findings: [{ signal: finding.signal, severity: finding.severity, explanation: finding.evidence,
-        suggestion: finding.suggestion, references: [{ sourceId: expect.any(String), quote: body, source: 'current' }] }] })
+        suggestion: `${finding.evidence}\n${finding.suggestion}`, references: [{ sourceId: expect.any(String), quote: '门开着。', source: 'current' }] }] })
       expect(report.opinions).toEqual([{ ...opinion, evidence: [{ sourceId: currentSourceId }] }])
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(body)
     } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }

@@ -735,15 +735,18 @@ export async function buildStoryCompilerDigest(userId: string, novelId: string, 
         ? `保留此编译和场景，不重复 PREPARE/BEAT；尚无合法非空正文，下一步${chapter ? '' : '按冻结目标 chapter_create 后'}调用 chapter_write 保存正文，不能宣称已写完或完成。`
         : active.bridge?.targetRevision !== chapter?.revision
           ? `保留此编译和场景，不重复 PREPARE/BEAT；当前正文与本编译绑定写入版本（${active.bridge?.targetRevision ?? '未记录'}）不一致。先核对正文和原请求，再补缺失步骤；终态未核验，不能宣称完成。`
-          : `保留此编译、场景和已保存正文，不重复 PREPARE/BEAT 或整章写入；终态尚未提交。使用当前连续性与人类感报告处理具体意见；chapter_bridge_commit会补齐必要检查、复查修改后的正文并实际提交。取得报告不表示问题都已解决。`
+          : `保留此编译、场景和已保存正文，不重复 PREPARE/BEAT 或整章写入；终态尚未提交。使用当前连续性与人类感报告处理具体意见；调用 chapter_bridge_commit；工具会补齐必要检查、复查修改后的正文并实际提交。取得报告不表示问题都已解决，取得实际提交回执前不能宣称完成。`
   const review = runId && active ? await (await import('./chapter-review-guard.js')).readChapterReviewReadiness(prisma, { userId, novelId, runId }, active.id) : null
+  const historicalValidation = active?.validation && typeof active.validation === 'object' && !Array.isArray(active.validation) ? active.validation : {}
+  const latestQuality = active?.qualityReports[0]
   const lines = [
     'Story Compiler 3.0 状态：',
     volumeContext ? `本章必须审视卷目标：当前《${volumeContext.volumeTitle}》，已写 ${volumeContext.chapterCount} 章（仅提醒，绝非切卷阈值）；卷目标：${volumeContext.summary || '未保存，须结合真实正文判断'}；${volumeContext.planStatus}。最新章 ${volumeContext.previousChapter.id} r${volumeContext.previousChapter.revision}，末尾：${volumeContext.previousChapter.ending}。已保存计划：${JSON.stringify(volumeContext.plans)}。PREPARE明确 volumeDecision：continue并解释未收束原因，或new_volume列已完成卷目标、前章精确收束引用和下一主困局。原目标已创建、旧任务无冻结新尾卷能力或缺真实收束证据时保留原卷；独立volume_create不能绕过此限制。` : '',
     bundle.charter ? `创作宪章 r${bundle.charter.revision}：${clip(bundle.charter.oneLinePromise, 240)}` : '创作宪章：尚未建立（新书长纲前应先建立）',
     bundle.promises.length ? `待兑现读者承诺：${bundle.promises.slice(0, 5).map((item) => `${item.title}（${item.payoffHorizon}）`).join('；')}` : '待兑现读者承诺：无',
     active ? `本任务编译：${active.id}，chapterId=${active.chapterId ?? '尚未创建'}，目标第 ${active.targetOrderIndex} 章，阶段 ${active.stage}，状态 ${active.status}，Scene Task ${active.sceneTasks.length} 个。${resume}` : '本任务尚未建立编译；历史检查失败不构成恢复旧任务的授权。写下一章时以前文为参考，为新章建立本任务编译。',
-    chapter ? `当前正文 r${chapter.revision}，${hasBody ? `非空 ${chapter.content.trim().length} 字` : '正文为空'}；当前连续性报告=${review?.continuity ?? 'missing'}，人类感质量报告=${review?.quality ?? 'missing'}；报告剩余意见=${review?.decisionEntries?.length ?? 0}，已明确保留=${review?.retainedDecisions?.length ?? 0}。报告完成、意见已修复、明确保留和章节已提交分别说明。${review?.requiredTools.length ? `当前需补齐：${review.requiredTools.map(tool => tool.name).join('、')}。` : ''}` : '',
+    chapter ? `当前正文 r${chapter.revision}，${hasBody ? `非空 ${chapter.content.trim().length} 字` : '正文为空，未写完'}；当前连续性报告=${review?.continuity ?? 'missing'}，人类感质量报告=${review?.quality ?? 'missing'}；报告剩余意见=${review?.decisionEntries?.length ?? 0}，已明确保留=${review?.retainedDecisions?.length ?? 0}。报告完成、意见已修复、明确保留和章节已提交分别说明。${review?.requiredTools.length ? `当前需补齐：${review.requiredTools.map(tool => tool.name).join('、')}。` : ''}` : '',
+    active && chapter ? `当前有效质量报告编号=${review?.qualityReportId ?? '无'}；最近已存质量报告=${latestQuality ? `${latestQuality.id}（revision=${latestQuality.chapterRevision}，${latestQuality.status}）` : '无'}；历史连续性记录 revision=${historicalValidation.checkedRevision ?? '未知'}。历史或独立报告不能代替当前编译与最终正文绑定的必要检查；缺失或旧版本报告不代表通过。` : '',
     active ? '初稿流程：本任务冻结的新建目标章可在原写作权限内持续修订。先核对对象身份与原文证据，仅将同一对象同一维度的互斥事实视为冲突，不照 suggestion 机械改剧情。相关修法优先合并为 chapter_edit_range patches（每次最多8处），也可连续单片段替换或 chapter_write；不硬性限定一次调用。每次使用当前正文与版本，不要求每次覆盖全部意见；全部修改后复核最终版本。已有章节与明确禁止修改的请求仍按原权限处理。自动局部修订后复查最终版本，原用量或费用未知时先核对，不为清零警告循环改写，剩余意见保留真实状态。' : '',
     latestBridge?.toChapter ? `最近已提交桥（仅作背景，不证明本任务完成）：第 ${latestBridge.toChapter.orderIndex} 章《${latestBridge.toChapter.title}》，提交 r${latestBridge.targetRevision ?? '未知'}，当前 r${latestBridge.toChapter.revision}；未完成动作：${latestBridge.lastUnfinishedAction || '无'}；开放钩子：${asStringArray(latestBridge.openLoops).slice(0, 4).join('、') || '无'}` : '',
   ].filter(Boolean)

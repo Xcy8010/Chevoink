@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 
 import { Prisma } from '@prisma/client'
 import { currentReviewNextStepGuidance, projectCurrentReviewNextStep } from './review-dispatch.js'
@@ -199,12 +200,25 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   const chapter = compilation.chapter
   const { buildContinuitySnapshot, readContinuityReport } = await import('./continuity-review.js')
   const raw = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : {}
-  const snapshot = await buildContinuitySnapshot({ ...subject, chapterId: chapter.id }, { compilationId: compilation.id,
+  const snapshot = await buildContinuitySnapshot({ ...subject, chapterId: chapter.id }, { compilationId: compilation.id, chapterId: chapter.id,
     ...(typeof raw.reviewFocus === 'string' ? { focus: raw.reviewFocus } : {}) }, tx)
   const report = readContinuityReport(raw, chapter, snapshot.contextHash), requirements = originalChapterReviewRequirements(original, chapter)
   const qualityReport = await tx.chapterQualityReport.findFirst({ where: { userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id,
     compilationId: compilation.id, runId: { in: runIds } }, include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
-  const qualityComplete = !!qualityReport && qualityReportCheckedCurrentContent(qualityReport, chapter.revision, chapter.content)
+  const metrics = qualityReport?.deterministicMetrics && typeof qualityReport.deterministicMetrics === 'object' && !Array.isArray(qualityReport.deterministicMetrics)
+    ? qualityReport.deterministicMetrics : {}
+  let qualityContextCurrent = false
+  const qualityBodyCurrent = !!qualityReport && qualityReportCheckedCurrentContent(qualityReport, chapter.revision, chapter.content)
+  if (qualityBodyCurrent && typeof metrics.qualityContextHash === 'string') {
+    const { buildHumanityQualityContext, qualityReviewContextHash } = await import('./humanity-quality.js')
+    qualityContextCurrent = metrics.qualityContextHash === qualityReviewContextHash(await buildHumanityQualityContext(subject.userId, subject.novelId, chapter.id, subject.runId, tx),
+      metrics.criticPromptProtocol === 'humanity-context.v2' || metrics.criticPromptProtocol === 'humanity-context.v3'
+        || metrics.criticPromptProtocol === 'humanity-context.v4' || metrics.criticPromptProtocol === 'humanity-context.v5'
+        || metrics.criticPromptProtocol === 'humanity-context.v6' ? metrics.criticPromptProtocol : undefined)
+  }
+  // Historical delivery compatibility remains bound to the saved body.
+  // Context matching is required below before deriving executable edit proof.
+  const qualityComplete = qualityBodyCurrent
   const continuity: ReviewStatus = report ? report.complete && report.billingKnown ? 'complete' : 'incomplete' : raw.checkedRevision !== undefined ? 'stale' : 'missing'
   const quality: ReviewStatus = qualityComplete ? 'complete' : !qualityReport ? 'missing' : qualityReport.chapterRevision !== chapter.revision ? 'stale' : 'incomplete'
   const entries: ChapterReviewDecisionDetail[] = [
@@ -228,6 +242,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     ? entry.severity === 'error' || completeStrictReview && requirements.continuity
     : (completeStrictReview || automaticQuality.some(finding => finding.id === entry.findingId))
       && (entry.severity === 'error' || requirements.quality && strictQuality))
+    .map(({ source, reportId, findingId }) => ({ source, reportId, findingId }))
   const { requiresCompletedReview } = await import('./writing-delivery-limitations.js')
   const constraints = [original.prompt ?? '',
     ...(Array.isArray(spec.hardConstraints) ? spec.hardConstraints.flatMap(item => item && typeof item === 'object' && typeof item.text === 'string' ? [item.text] : []) : []),
@@ -245,13 +260,6 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   if (requirements.quality && quality !== 'complete') requiredTools.push({ name: 'quality_analyze', args: { compilationId: compilation.id } })
   const ready = !requiredTools.length
   const contentHash = runtimeJson({ content: chapter.content }).hash
-  const metrics = qualityReport?.deterministicMetrics && typeof qualityReport.deterministicMetrics === 'object' && !Array.isArray(qualityReport.deterministicMetrics)
-    ? qualityReport.deterministicMetrics : {}
-  let qualityContextCurrent = false
-  if (qualityComplete && typeof metrics.qualityContextHash === 'string') {
-    const { buildHumanityQualityContext, qualityReviewContextHash } = await import('./humanity-quality.js')
-    qualityContextCurrent = metrics.qualityContextHash === qualityReviewContextHash(await buildHumanityQualityContext(subject.userId, subject.novelId, chapter.id, subject.runId, tx))
-  }
   const semanticFindings = [
     ...(report?.complete ? report.findings.map(finding => ({ source: 'continuity', signal: finding.signal, severity: finding.severity,
       evidence: finding.evidence, suggestion: finding.suggestion })) : []),
@@ -263,15 +271,29 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     ? { key: runtimeJson({ taskId: original.taskId, userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, contentHash, findings: semanticFindings }).hash,
       taskId: original.taskId, userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, orderIndex: chapter.orderIndex,
       compilationId: compilation.id, revision: chapter.revision, contentHash } : undefined
-  const cycleFindings = entries.map(entry => reviewCycleFinding({ source: entry.source, reportId: entry.reportId, findingId: entry.findingId,
-    signal: entry.source === 'quality' ? qualityReport!.findings.find(finding => finding.id === entry.findingId)!.signal
-      : report!.findings.find(finding => finding.id === entry.findingId)!.signal,
-    severity: entry.severity, evidence: entry.evidence, explanation: entry.explanation, suggestion: entry.suggestion,
-    startOffset: entry.startOffset, endOffset: entry.endOffset }, chapter.content))
+  const cycleFindings = entries.map(entry => {
+    const finding = reviewCycleFinding({ source: entry.source, reportId: entry.reportId, findingId: entry.findingId,
+      signal: entry.source === 'quality' ? qualityReport!.findings.find(row => row.id === entry.findingId)!.signal
+        : report!.findings.find(row => row.id === entry.findingId)!.signal,
+      severity: entry.severity, evidence: entry.evidence, explanation: entry.explanation, suggestion: entry.suggestion,
+      startOffset: entry.startOffset, endOffset: entry.endOffset }, chapter.content)
+    const qualityFinding = entry.source === 'quality' ? qualityReport!.findings.find(row => row.id === entry.findingId) : null
+    if (qualityFinding && Number.isInteger(entry.startOffset) && Number.isInteger(entry.endOffset)
+      && entry.startOffset !== undefined && entry.endOffset !== undefined && entry.startOffset >= 0 && entry.endOffset > entry.startOffset
+      && chapter.content.slice(entry.startOffset, entry.endOffset) === entry.evidence
+      && qualityFinding.evidenceHash === createHash('sha256').update(entry.evidence).digest('hex')) {
+      finding.anchor = { start: entry.startOffset, end: entry.endOffset, text: entry.evidence }
+    }
+    return finding
+  })
   const reviewCycle = { ...projectReviewCycle(cycle, { revision: chapter.revision, contentHash, ready, pending: decisionPending, findings: cycleFindings }),
     verificationStarted: observedReviewCycleVerification(cycle, raw, qualityReport, chapter) }
-  const anchors: ReviewBoundEvidence['anchors'] = entries.flatMap(entry => entry.startOffset !== undefined && entry.endOffset !== undefined
-    && entry.startOffset >= 0 && chapter.content.slice(entry.startOffset, entry.endOffset) === entry.evidence
+  const anchors: ReviewBoundEvidence['anchors'] = entries.flatMap(entry => (entry.source !== 'quality' || qualityContextCurrent
+    && qualityReport!.findings.some(finding => finding.id === entry.findingId && finding.authorFeedback !== 'rejected'
+      && finding.evidenceHash === createHash('sha256').update(entry.evidence).digest('hex')))
+    && Number.isInteger(entry.startOffset) && Number.isInteger(entry.endOffset) && entry.startOffset !== undefined && entry.endOffset !== undefined
+    && entry.startOffset >= 0 && entry.endOffset > entry.startOffset && entry.endOffset <= chapter.content.length
+    && chapter.content.slice(entry.startOffset, entry.endOffset) === entry.evidence
     ? [{ start: entry.startOffset, end: entry.endOffset, text: entry.evidence, source: entry.source, reportId: entry.reportId, findingId: entry.findingId }] : [])
   const boundary = originalLocalEditBoundary(original.spec)
   const decisionBinding: ReviewCycleBinding = { contentHash, continuityBinding: report?.id ?? continuityDecisionBinding(compilation.id, chapter.revision, raw),
@@ -287,14 +309,14 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   const readiness: ChapterReviewReadiness = { ready, checksRequired: requirements.continuity || requirements.quality, compilationId: compilation.id, chapterId: chapter.id, revision: chapter.revision,
     continuity, quality, continuityErrorCount: report?.complete ? report.findings.filter(finding => finding.severity === 'error').length : 0,
     qualityErrorCount: qualityComplete ? qualityReport!.findings.filter(finding => finding.severity === 'error' && finding.disposition !== 'repaired').length : 0,
-    qualityCandidateCount: qualityComplete ? entries.filter(entry => entry.source === 'quality').length : 0, qualityReportId: qualityComplete ? qualityReport!.id : null,
+    qualityCandidateCount: automaticQuality.length, qualityReportId: qualityComplete ? qualityReport!.id : null,
     requiredTools, decisionPending, requiredDecisions, retainedDecisions: retained, decisionDetails: entries, decisionEntries: entries,
     ...(qualityComplete ? { decisionFeedbackSnapshotHash: qualityDecisionSnapshotHash(qualityReport!.findings) } : {}),
     ...(decisionFeedback ? { decisionFeedback } : {}),
     decisionBinding, reviewCycle, reviewCycleFindings: cycleFindings, mustPassPending: mandatoryReviewPending, qualityPassRequired: mustPassQuality,
     ...(scope.reviewProtocol === 1 ? { reviewProtocol: 1 as const, completeStrictReview } : {}),
     ...(options?.reviewBoundEvidence ? { reviewBoundEvidence: { contentHash, anchors, cycle } } : {}),
-    terminalCommitted,
+    terminalCommitted, selectionOnly: !!boundary || !!originalSelectionBoundary(original.spec),
     progressEvidence: { taskId: original.taskId, userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, orderIndex: chapter.orderIndex,
       contentHash, phases } }
   if (boundary?.version === 3) readiness.reviewBoundPlan = projectReviewBoundEditPlan(boundary, chapter,
@@ -458,13 +480,8 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
     ? prepareReviewCycleTransition(tx, subject, current, latest.id, options.after, options.editRanges, options.readScope) : undefined
 }
 
-/** A review cannot enlarge the author's request. Paid automatic repair and
- * read-only automatic reachability use this bounded decision guard. Ordinary
- * manuscript tools use their distinct server-only admission above.
- * It never promotes failed/stale reports into a current quality conclusion.
- * A fresh draft may spend one merged correction on either a current-version
- * factual error or a complete current quality report; strict-mode quality
- * repair declares itself so it never consumes the factual channel first. */
+/** Automatic repair keeps the author's manuscript scope. Ordinary manuscript
+ * tools and review tools share that scope; a report never grants new writes. */
 export async function assertChapterReviewRevision(
   tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string },
@@ -474,12 +491,8 @@ export async function assertChapterReviewRevision(
   return assertChapterManuscriptRevision(tx, subject, chapter, options ?? {})
 }
 
-/** Shared read-only probe for commit gates and pre-payment tool checks: it runs
- * the same admission checks and returns the rejection reason without ever
- * consuming the correction. Quality repair callers pass requireQualityChannel
- * so a pending factual error keeps its own channel; durable callers add
- * pendingQuality only to check pre-payment reachability. Actual mutations pass
- * their shape and require the final persisted assessments. */
+/** Read-only projection of current manuscript authority before automatic repair.
+ * It does not reserve a repair or alter the saved report. */
 export async function probeChapterReviewRevision(tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number },
   options?: ChapterReviewRevisionOptions): Promise<{ open: true } | { open: false; code: string; message: string }> {

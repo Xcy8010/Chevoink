@@ -947,9 +947,16 @@ async function readChapterDelivery(tx: Prisma.TransactionClient, subject: Subjec
     if (!readiness?.ready) return null
     if (hasPendingChapterReviewDecision(readiness)) return null
     if (length && (chapter.content.trim().length < Number(length[1]) || chapter.content.trim().length > Number(length[2]))) return null
+    // Database finding order has no editorial meaning. Keep every reviewed
+    // value while making this completion capture stable across row ordering.
+    const reviewSets = new Set(['decisionDetails', 'decisionEntries', 'requiredDecisions', 'retainedDecisions', 'reviewCycleFindings'])
+    const orderedReviewRows = (rows: unknown[]) => [...rows].sort((a, b) => runtimeJson(a).hash.localeCompare(runtimeJson(b).hash))
+    const reviewSnapshot = { ...Object.fromEntries(Object.entries(readiness).map(([key, value]) => [key,
+      reviewSets.has(key) && Array.isArray(value) ? orderedReviewRows(value) : value])),
+      ...(readiness.reviewCycle ? { reviewCycle: { ...readiness.reviewCycle, findings: orderedReviewRows(readiness.reviewCycle.findings) } } : {}) }
     chapters.push({ ...chapter, contentHash: runtimeJson({ content: chapter.content }).hash,
       completion: { compilationId: terminal.id, qualityReportId: readiness.qualityReportId,
-        commitHash: runtimeJson(JSON.parse(JSON.stringify(terminal))).hash, reviewHash: runtimeJson(readiness).hash,
+        commitHash: runtimeJson(JSON.parse(JSON.stringify(terminal))).hash, reviewHash: runtimeJson(reviewSnapshot).hash,
         continuity: readiness.continuity, quality: readiness.quality, continuityErrors: readiness.continuityErrorCount,
         qualityErrors: readiness.qualityErrorCount, openFindings: readiness.reviewCycleFindings?.length ?? null } })
   }

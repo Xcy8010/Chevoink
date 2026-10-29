@@ -424,8 +424,9 @@ async function readVerifiedServiceStep(lease: ServiceProofSubject, input: Servic
   if (!operation || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '内部写作操作缺失或原输入损坏。')
   const envelope = z.object({ kind: z.literal('internal'), action: z.literal(input.action), parentOperationId: z.string(), input: inputSchema }).strict().parse(operation.inputSnapshot)
   const saved = envelope.input
-  const parent = await tx.agentOperation.findUniqueOrThrow({ where: { id: saved.serviceAdmission.parentOperationId } })
-  const contextHash = parent.action === 'chapter_bridge_commit' ? z.object({ contextHash: z.string() }).parse(saved.work).contextHash : undefined
+  const common = verification.parent ?? await readServiceParent(tx, lease, saved, verification)
+  verification.parent = common
+  const contextHash = common.parent.action === 'chapter_bridge_commit' ? z.object({ contextHash: z.string() }).parse(saved.work).contextHash : undefined
   if (saved.novelId !== input.novelId || saved.callId !== input.callId || operation.parentOperationId !== saved.serviceAdmission.parentOperationId
     || envelope.parentOperationId !== operation.parentOperationId || operation.operationKey !== writingServiceOperationKey(operation.parentOperationId, saved.serviceAdmission.step, contextHash)) {
     return runtimeError('RUNTIME_RECEIPT_INVALID', '内部写作操作的父归属、调用或步骤键不一致。')

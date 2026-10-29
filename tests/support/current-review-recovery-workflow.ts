@@ -47,7 +47,9 @@ export async function continueCurrentReviewWorkflow(f: Subject, input: {
       periodStartedAt: credits.getCreditWindow().startedAt, periodEndsAt: credits.getCreditWindow().endsAt } })
   const beforeCharge = account.dailyUsedMilli
   const actions: string[] = []
+  const criticFailures: unknown[] = []
   const critic = vi.spyOn(ai, 'generateTextCompletion').mockImplementation(async (_system, content, options) => {
+    try {
     options.signal?.throwIfAborted()
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     actions.push(options.action)
@@ -90,6 +92,7 @@ export async function continueCurrentReviewWorkflow(f: Subject, input: {
         reason: 'The current passage remains an author decision; the model has no safe factual correction.' })) })
     }
     throw new Error('Unexpected auxiliary request: ' + options.action)
+    } catch (error) { criticFailures.push(error); throw error }
   })
   const summary = input.missingCommit ? '当前任务没有提交权限，正文与历史检查原件保留，尚未完成提交。' : '已删除重复动作，最终版本已完成两项检查并实际提交。'
   const calls: string[] = []
@@ -135,6 +138,7 @@ export async function continueCurrentReviewWorkflow(f: Subject, input: {
   })
   await executeAgentRun({ ...f, prompt: input.prompt, mode: 'build', resume: true, eventStartSeq: input.afterSeq,
     modelTier: 'speed', qualityMode: 'premium', creativeFreedom: 'balanced' })
+  if (criticFailures.length) throw criticFailures[0]
   const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
   const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
   const compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: input.compilationId }, include: { bridge: true } })

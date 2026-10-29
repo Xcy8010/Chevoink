@@ -44,7 +44,10 @@ describe.runIf(available)('full continuity source authentication uses the operat
     const observed = new Map<Phase, number>()
     let fences = 0
     ctx.assertCurrentExecution = async db => {
-      const phase = phases[Math.min(fences++, 2)]
+      // Registration and dispatch fence on the root client. Only the actual
+      // report-binding transaction is the application boundary; additional
+      // pre-dispatch source checks must not be mistaken for a transaction.
+      const phase: Phase = db !== prisma ? 'application' : fences++ === 0 ? 'registration' : 'dispatch'
       if (observed.has(phase)) return
       observed.set(phase, 0)
       const started = performance.now()

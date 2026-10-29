@@ -446,6 +446,16 @@ export const continuityValidateTool = defineTool({
   description: '检查指定已保存章节及真实前文，返回完整连续性报告。有原作者写入授权时可按已定位问题自动局部修订；正文变化后复查最终版本。报告完成与问题已解决分别说明。',
   parameters: z.object({ chapterId: z.string().min(1).optional(), compilationId: z.string().min(1).optional(), focus: z.string().max(500).optional() }).passthrough(),
   permission: ALL_READ, readOnly: true,
+  coerceArgs(raw) {
+    const value = coerceToolArgumentEnvelope(raw)
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+    const result = { ...value } as Record<string, unknown>
+    const chapterId = result.chapterId ?? result.chapter_id ?? result.chapter
+    const compilationId = result.compilationId ?? result.compilation_id ?? result.compilation
+    if (chapterId !== undefined) result.chapterId = chapterId
+    if (compilationId !== undefined) result.compilationId = compilationId
+    return result
+  },
   async execute(ctx, args): Promise<ToolResult> {
     if (ctx.durableCompiler) return (await import('./durable-continuity.js')).executeDurableContinuity(ctx, continuityValidateTool, args)
     return reviewContinuity(ctx, args)
@@ -455,7 +465,8 @@ export const continuityValidateTool = defineTool({
 export async function prepareChapterCommitReviews(ctx: ToolContext, args: { compilationId?: string }): Promise<ToolResult | undefined> {
   const scope = await compilationRunScope(prisma, ctx)
   const compilation = await prisma.storyCompilation.findFirst({ where: { userId: ctx.userId, novelId: ctx.novelId, ...scope,
-    ...(args.compilationId ? { id: args.compilationId } : {}), status: { in: ['active', 'completed'] } }, include: { chapter: true, bridge: true } })
+    ...(args.compilationId ? { id: args.compilationId } : {}), status: { in: ['active', 'completed'] } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], include: { chapter: true, bridge: true } })
   if (!compilation?.chapter || !compilation.bridge) throw new DataAccessError(404, 'COMPILATION_NOT_FOUND', '没有本任务可提交的已保存章节。')
   if (compilation.status === 'active' && await prisma.storyCompilation.findFirst({ where: { userId: ctx.userId, novelId: ctx.novelId, ...scope,
     chapterId: compilation.chapterId, createdAt: { gt: compilation.createdAt } }, select: { id: true } }))
@@ -495,7 +506,8 @@ export const chapterBridgeCommitTool = defineTool({
     const db = ctx.transaction ?? prisma
     const scope = await compilationRunScope(db, ctx)
     let compilation = await db.storyCompilation.findFirst({ where: { userId: ctx.userId, novelId: ctx.novelId, ...scope,
-      ...(args.compilationId ? { id: args.compilationId } : {}), status: { in: ['active', 'completed'] } }, include: { chapter: true, bridge: true } })
+      ...(args.compilationId ? { id: args.compilationId } : {}), status: { in: ['active', 'completed'] } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], include: { chapter: true, bridge: true } })
     if (!compilation?.chapter || !compilation.bridge) throw new DataAccessError(404, 'COMPILATION_NOT_FOUND', '没有本任务可提交的已保存章节。')
     compilation = await db.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { chapter: true, bridge: true } })
     const chapter = compilation.chapter!

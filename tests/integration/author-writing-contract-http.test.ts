@@ -400,7 +400,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       await assess(false)
     }
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx))).toMatchObject({ ready: true,
-      terminalReview: { state: 'supported' }, reviewBoundPlan: { state: 'no_proven_findings', anchors: [] } })
+      continuity: 'complete', quality: 'complete', reviewBoundPlan: { state: 'no_proven_findings', anchors: [] } })
     const result = await chapterBridgeCommitTool.execute({ ...ctx, callId: 'conditional-real-commit' }, { compilationId: compilation.id,
       chapterSummary: '两人仍在长廊等待。', exitState: candidate.exitState, lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '',
       openingStructure: '钟声', endingStructure: '等待' })

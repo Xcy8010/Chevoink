@@ -81,6 +81,7 @@ describe('严谨创作落实连续性警告', () => {
     const fees = vi.spyOn(prisma.aiUsageLog, 'findMany').mockResolvedValue([])
     vi.spyOn(prisma.agentOperation, 'findMany').mockResolvedValue([])
     vi.spyOn(prisma.agentRunEvent, 'findFirst').mockResolvedValue(null)
+    vi.spyOn(prisma.agentSession, 'findUnique').mockResolvedValue({ userId: 'u', novelId: 'n', sandboxMode: 'workspace', toolPolicy: { contentWrite: 'allow' } } as never)
     vi.spyOn(readiness, 'readChapterReviewReadiness').mockResolvedValue(completeReadiness())
     const commit = vi.spyOn(compiler, 'commitChapterBridge').mockResolvedValue({ compilationId: 'comp', chapterId: 'c', chapterRevision: 1, skippedMemoryCount: 0, retainedIssueCount: 0 })
     const tx = { $queryRaw: vi.fn().mockResolvedValue([{ id: 'n' }]), agentRun: { findFirst: vi.fn().mockResolvedValue({ id: 'r' }),

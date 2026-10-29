@@ -174,7 +174,7 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       const critic = vi.spyOn(review, 'generateReviewCompletion')
       if (scenario === 'archived') await prisma.chapter.update({ where: { id: f.chapter.id }, data: { archivedAt: new Date() } })
       const compilationId = scenario === 'foreign' ? randomUUID() : f.compilationId
-      await expect(continuityValidateTool.execute(f.ctx, { compilationId })).rejects.toMatchObject({ code: expect.stringMatching(/CHAPTER_NOT_FOUND|COMPILATION_NOT_FOUND/) })
+      await expect(continuityValidateTool.execute(f.ctx, { compilationId })).rejects.toMatchObject({ code: scenario === 'foreign' ? 'QUALITY_TARGET_AMBIGUOUS' : 'CHAPTER_NOT_FOUND' })
       if (scenario === 'foreign') expect(await qualityAnalyzeTool.execute(f.ctx, { compilationId })).toMatchObject({ outcome: 'failed' })
       else await expect(qualityAnalyzeTool.execute(f.ctx, { compilationId })).rejects.toMatchObject({ code: 'CHAPTER_NOT_FOUND' })
       expect(critic).not.toHaveBeenCalled()
@@ -306,8 +306,8 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       await persistHumanityQualityReport({ ...f.ctx, chapterId: f.chapter.id, runId: otherRun.id, compilationId: other.compilation.id, chapterRevision: f.chapter.revision,
         mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
       expect((await getLatestQualityReport(f.ctx.userId, f.ctx.novelId, f.chapter.id, prisma, f.compilationId))?.id).toBe(report.id)
-      expect(await chapterBridgeCommitTool.execute(f.ctx, { compilationId: other.compilation.id })).toMatchObject({ outcome: 'failed' })
-      expect(await chapterBridgeCommitTool.execute(f.ctx, { compilationId: f.chapter.id })).toMatchObject({ outcome: 'failed' })
+      await expect(chapterBridgeCommitTool.execute(f.ctx, { compilationId: other.compilation.id })).rejects.toMatchObject({ code: 'COMPILATION_NOT_FOUND' })
+      await expect(chapterBridgeCommitTool.execute(f.ctx, { compilationId: f.chapter.id })).rejects.toMatchObject({ code: 'COMPILATION_NOT_FOUND' })
       await expect(chapterBridgeCommitTool.execute({ ...f.ctx, novelId: 'wrong-novel' }, {})).rejects.toMatchObject({ code: 'QUALITY_RUN_SCOPE_INVALID' })
       expect(await chapterBridgeCommitTool.execute(f.ctx, {})).toMatchObject({ summary: '章节已提交', display: { compilationId: f.compilationId } })
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: other.compilation.id } })).status).toBe('active')

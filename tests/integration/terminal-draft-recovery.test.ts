@@ -126,7 +126,7 @@ describe.runIf(available)('authenticated never-verified persistent draft recover
     const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', activeExecutionMs: 100,
       runStartedAt: startedAt.getTime(), stagnantBatches: 7, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
       writeProgress: 1, writeBaseline: 0, readProgress: 7, readBaseline: 0, progressSignatures: [], reviewAttempts: ['terminal-processing:old:0', 'terminal-processing:old:1'],
-      consumedReviewDecisionFeedback: ['old-consumed-feedback'], pendingReviews: [], inheritedTokens: 10, inheritedTurns: 16, manualResumeCount: 0 }
+      consumedReviewDecisionFeedback: [runtimeJson({ historicalFeedback: compilation.id }).hash], pendingReviews: [], inheritedTokens: 10, inheritedTurns: 16, manualResumeCount: 0 }
     await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'paused', currentTurn: 16, startedAt,
       usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, checkpoint } } })
     const beforeRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })

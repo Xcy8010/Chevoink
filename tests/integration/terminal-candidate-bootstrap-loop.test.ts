@@ -95,7 +95,7 @@ describe.runIf(available)('historical candidate judgments preserve the original 
       expect(readiness?.requiredDecisions).toHaveLength(1)
     }
     const key = runtimeJson({ kind: 'terminal-processing', version: 1, userId: f.userId, novelId: f.novelId, taskId: spec.id, chapterId: chapter.id,
-      contentHash: runtimeJson({ content: chapter.content }).hash, sourceHash: runtimeJson(source).hash,
+      contentHash: runtimeJson({ content: chapter.content }).hash, sourceHash: runtimeJson({ source }).hash,
       contractHash: runtimeJson(inspected.audit).hash }).hash
     const claims = [0, 1].map(index => `terminal-processing:${key}:${index}`)
     const seen = new Set<string>()

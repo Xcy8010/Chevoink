@@ -1,3 +1,4 @@
+import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
@@ -25,6 +26,7 @@ async function fixture(work: (f: Awaited<ReturnType<typeof seed>>) => Promise<vo
     expect(await prisma.chapter.findMany({ where: { authorId: userId, orderIndex: { in: [1, 2] } }, orderBy: { orderIndex: 'asc' } })).toEqual(earlier)
     expect(await prisma.aiUsageLog.count({ where: { userId } })).toBe(0)
   } finally {
+    await prisma.agentArtifact.deleteMany({ where: { run: { userId } } })
     await prisma.agentRun.deleteMany({ where: { userId } })
     await prisma.agentSession.deleteMany({ where: { userId } })
     await prisma.chapter.deleteMany({ where: { authorId: userId } })
@@ -62,6 +64,7 @@ async function seed(userId: string) {
   await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: json({ independentCheck: 'complete', checkedChapterId: chapter.id,
     checkedRevision: chapter.revision, checkRounds: 1, autoRepairRounds: 0, errorCount: 0, warningCount: 0, findings: [],
     coverage: compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source }) }) } })
+  await persistCurrentContinuityReport({ ...subject, compilationId: compilation.id, expectedChapterRevision: chapter.revision })
   const report = await prisma.chapterQualityReport.create({ data: { ...subject, compilationId: compilation.id, chapterId: chapter.id,
     chapterRevision: chapter.revision, status: 'passed', deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(chapter.content).digest('hex') } } })
   expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, subject, compilation.id))).toMatchObject({

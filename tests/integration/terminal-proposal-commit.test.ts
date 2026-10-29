@@ -124,7 +124,7 @@ describe.runIf(available)('frozen proposal history and ordinary current report c
         const runId = randomUUID(), prompt = '修改第二章', spec = buildTaskSpec({ runId, novelId: f.novelId, chapterId: next.id, prompt })
         await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, chapterId: next.id,
           status: 'running', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', runtimeProtocolVersion: 0,
-          taskSpec: runtimeJson(spec).value, startRequest: { prompt } } })
+          taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value, startRequest: { prompt } } })
         await prisma.agentMessage.create({ data: { runId, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
         const subject = { userId: f.userId, novelId: f.novelId, runId }, prepared = await prepareStoryCompilation({ ...subject, chapterId: next.id, mode: 'balanced', intentSummary: prompt })
         await saveSceneTasks({ ...subject, compilationId: prepared.compilation.id, tasks: [{ purpose: 'Close', entryState: state, goal: 'Record', obstacle: 'Time', choice: 'Close',

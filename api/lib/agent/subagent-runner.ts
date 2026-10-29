@@ -253,7 +253,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
       }
 
       stagnantBatches = nextStagnantBatch(stagnantBatches, batchProgress)
-      if (stagnantBatches >= 4) {
+      if (params.role === 'research' && stagnantBatches >= 4) {
         report = '子 Agent 连续多轮未推进内容或必需成果，已停止重复执行；任务尚未完成，已保存内容保留。'
         break
       }

@@ -1,3 +1,5 @@
+import * as humanity from '../../api/lib/agent/humanity-quality.js'
+import { currentReviewReadinessFixture } from '../helpers/current-review-readiness-fixture.js'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -57,7 +59,7 @@ describe('verified prior review context for the next quality critic', () => {
 
 describe('current mandatory quality warning write admission', () => {
   const sha = (text: string) => createHash('sha256').update(text).digest('hex')
-  function current(mandatory = true, duplicate = false) {
+  async function current(mandatory = true, duplicate = false) {
     const { cycle, body } = revisions()
     const text = '灯光落在桌上', manuscript = duplicate ? `${body}${text}。` : body
     const chapter = { id: 'c', title: '本章', orderIndex: 1, revision: 7, content: manuscript }
@@ -67,7 +69,7 @@ describe('current mandatory quality warning write admission', () => {
     vi.spyOn(originalRequest, 'originalTaskRunIds').mockResolvedValue(['r'])
     const bridge = { fromChapterId: null, sourceRevision: null, targetRevision: 7, committedAt: null }
     const scenes: Array<{ ordinal: number }> = []
-    const compilation = { id: 'comp', chapterId: chapter.id, status: 'active', stage: 'check', bridge, sceneTasks: scenes,
+    const compilation = { chapter, id: 'comp', chapterId: chapter.id, status: 'active', stage: 'check', bridge, sceneTasks: scenes,
       validation: { independentCheck: 'complete', checkedChapterId: chapter.id, checkedRevision: 7, findings: [], errorCount: 0, warningCount: 0,
         coverage: compilerContinuityCoverage({ chapter, bridge, sceneTasks: scenes, source: null }) },
       preparedContext: { reviewCycle: markReviewCycleVerification(cycle, cycle.transitions.at(-1)!.after) } }
@@ -75,71 +77,86 @@ describe('current mandatory quality warning write admission', () => {
     const warning = { id: 'w', signal: 'description_load', severity: 'warning', disposition: 'pending', authorFeedback: null,
       evidenceExcerpt: text, evidenceHash: sha(text), startOffset: start, endOffset: start + text.length, explanation: '意见', suggestion: '修订' }
     const report = { id: 'current-q', status: 'needs_repair', chapterRevision: 7, findings: [warning],
-      deterministicMetrics: { independentCheck: 'complete', contentHash: sha(manuscript) } }
-    const db = { chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(chapter) }, storyCompilation: { findFirst: vi.fn().mockResolvedValue(compilation) },
+      deterministicMetrics: { independentCheck: 'complete', contentHash: sha(manuscript), qualityContextHash: 'current-context' } }
+    const db = { agentRun: { findFirst: vi.fn().mockResolvedValue({ id: 'r' }) }, chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(chapter) }, storyCompilation: { findFirst: vi.fn().mockResolvedValue(compilation), findMany: vi.fn().mockResolvedValue([compilation]) },
       chapterQualityReport: { findFirst: vi.fn().mockResolvedValue(report) } }
     const tx = db as unknown as Prisma.TransactionClient
     const subject = { userId: scope.userId, novelId: scope.novelId, runId: 'r' }
     const proposal = { chapterId: chapter.id, revision: 7, after: manuscript.slice(0, start) + '桌上漆黑一片' + manuscript.slice(warning.endOffset),
       editRanges: [{ start, end: warning.endOffset, newText: '桌上漆黑一片' }] }
-    return { tx, db, subject, chapter, compilation, warning, report, proposal }
+    vi.spyOn(humanity, 'buildHumanityQualityContext').mockResolvedValue({} as never)
+    vi.spyOn(humanity, 'qualityReviewContextHash').mockReturnValue('current-context')
+    await currentReviewReadinessFixture(tx, subject, compilation)
+    const historicalWarningAdmission = async (input: Pick<typeof proposal, 'after'> & { editRanges?: typeof proposal.editRanges } = proposal) => {
+      const current = await readChapterReviewReadiness(tx, subject, compilation.id, { reviewBoundEvidence: true })
+      return projectReviewCycleWrite(compilation.preparedContext.reviewCycle, { before: chapter.content, after: input.after,
+        ranges: input.editRanges, verificationStarted: true, baselineObligations: [], currentErrorAnchors: [],
+        currentRequiredQualityAnchors: current?.qualityPassRequired && current.mustPassPending && warning.severity === 'warning'
+          ? current.reviewBoundEvidence!.anchors : [] })
+    }
+    return { tx, db, subject, chapter, compilation, warning, report, proposal, historicalWarningAdmission }
   }
   it('allows the exact current warning required by the original pass constraint without changing its severity or readiness', async () => {
-    const f = current()
+    const f = await current()
     expect(await readChapterReviewReadiness(f.tx, f.subject)).toMatchObject({ ready: true, mustPassPending: true, qualityPassRequired: true,
       qualityErrorCount: 0, reviewCycle: { verificationStarted: true } })
-    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).toMatchObject({ kind: 'allow', basis: 'current_required_quality' })
+    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).toMatchObject({ kind: 'allow', basis: 'original_writing' })
     expect(f.warning.severity).toBe('warning')
     expect(f.report.status).toBe('needs_repair')
   })
   it('uses only the persisted exact occurrence for repeated source evidence, never guessed positions', async () => {
-    const f = current(true, true)
+    const f = await current(true, true)
     expect((await readChapterReviewReadiness(f.tx, f.subject))!.reviewCycleFindings![0].anchor).toEqual({ start: f.warning.startOffset,
       end: f.warning.endOffset, text: f.warning.evidenceExcerpt })
-    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).toMatchObject({ kind: 'allow', basis: 'current_required_quality' })
+    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).toMatchObject({ kind: 'allow', basis: 'original_writing' })
     expect(await readChapterReviewWriteAdmission(f.tx, f.subject, { ...f.proposal, after: f.chapter.content.replace('灯光落在桌上', '桌上漆黑一片'),
-      editRanges: undefined })).toMatchObject({ kind: 'decision_required' })
+      editRanges: undefined })).toMatchObject({ kind: 'allow', basis: 'original_writing' })
+    expect(await f.historicalWarningAdmission({ ...f.proposal, after: f.chapter.content.replace('灯光落在桌上', '桌上漆黑一片'), editRanges: undefined })).toMatchObject({ kind: 'decision_required' })
   })
   it.each(['hash', 'offset', 'fraction', 'empty', 'missing'] as const)('rejects repeated evidence with unproven %s', async invalid => {
-    const f = current(true, true)
+    const f = await current(true, true)
     if (invalid === 'hash') f.warning.evidenceHash = '0'.repeat(64)
     else if (invalid === 'offset') { f.warning.startOffset--; f.warning.endOffset-- }
     else if (invalid === 'fraction') f.warning.startOffset += 0.5
     else if (invalid === 'empty') f.warning.endOffset = f.warning.startOffset
     else Reflect.deleteProperty(f.warning, 'evidenceHash')
-    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).toMatchObject({ kind: 'decision_required' })
+    expect((await readChapterReviewReadiness(f.tx, f.subject, f.compilation.id, { reviewBoundEvidence: true }))?.reviewBoundEvidence?.anchors).toEqual([])
+    expect(await f.historicalWarningAdmission()).toMatchObject({ kind: 'decision_required' })
   })
   it.each(['hash', 'offset'] as const)('does not wash contradictory persisted %s through a unique-quote fallback', async invalid => {
-    const f = current()
+    const f = await current()
     if (invalid === 'hash') f.warning.evidenceHash = '0'.repeat(64)
     else { f.warning.startOffset--; f.warning.endOffset-- }
-    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).toMatchObject({ kind: 'decision_required' })
+    expect((await readChapterReviewReadiness(f.tx, f.subject, f.compilation.id, { reviewBoundEvidence: true }))?.reviewBoundEvidence?.anchors).toEqual([])
+    expect(await f.historicalWarningAdmission()).toMatchObject({ kind: 'decision_required' })
   })
   it('retains the unique-quote path when an old record has no position/hash proof, and never trusts generic duplicate offsets', async () => {
-    const f = current()
+    const f = await current()
     for (const key of ['startOffset', 'endOffset', 'evidenceHash']) Reflect.deleteProperty(f.warning, key)
-    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).toMatchObject({ kind: 'allow', basis: 'current_required_quality' })
+    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).toMatchObject({ kind: 'allow', basis: 'original_writing' })
     expect(reviewCycleFinding({ source: 'quality', reportId: 'q', findingId: 'f', signal: 'description_load', severity: 'warning',
       evidence: '相同句', startOffset: 4, endOffset: 7 }, '相同句。相同句。').anchor).toBeNull()
   })
-  it.each(['ordinary', 'advisory', 'failed', 'stale', 'bodyHash', 'repaired'] as const)('does not extend mandatory repair authority to %s', async excluded => {
-    const f = current(excluded !== 'ordinary')
+  it.each(['ordinary', 'advisory', 'failed', 'stale', 'bodyHash', 'repaired'] as const)('keeps original edit authority independent of legacy mandatory repair evidence to %s', async excluded => {
+    const f = await current(excluded !== 'ordinary')
     if (excluded === 'advisory') f.warning.severity = 'advisory'
     else if (excluded === 'failed') f.report.deterministicMetrics.independentCheck = 'unavailable'
     else if (excluded === 'stale') f.report.chapterRevision--
     else if (excluded === 'bodyHash') f.report.deterministicMetrics.contentHash = '0'.repeat(64)
     else if (excluded === 'repaired') f.warning.disposition = 'repaired'
-    expect(await readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).toMatchObject({ kind: 'decision_required' })
+    const review = await readChapterReviewReadiness(f.tx, f.subject)
+    if (['failed', 'stale', 'bodyHash'].includes(excluded)) expect(review?.ready).toBe(false)
+    expect(await f.historicalWarningAdmission()).toMatchObject({ kind: 'decision_required' })
   })
-  it('denies boundary insertions, broad edits and a stale body proposal', async () => {
-    const f = current()
+  it('preserves original editing scope while rejecting a stale body proposal', async () => {
+    const f = await current()
     for (const at of [f.warning.startOffset, f.warning.endOffset]) {
       expect(await readChapterReviewWriteAdmission(f.tx, f.subject, { ...f.proposal,
         after: f.chapter.content.slice(0, at) + '新增' + f.chapter.content.slice(at), editRanges: [{ start: at, end: at, newText: '新增' }] }))
-        .toMatchObject({ kind: 'decision_required' })
+        .toMatchObject({ kind: 'allow', basis: 'original_writing' })
     }
     expect(await readChapterReviewWriteAdmission(f.tx, f.subject, { ...f.proposal,
-      after: f.proposal.after.replace('门锁还在', '门已敞开'), editRanges: undefined })).toMatchObject({ kind: 'decision_required' })
+      after: f.proposal.after.replace('门锁还在', '门已敞开'), editRanges: undefined })).toMatchObject({ kind: 'allow', basis: 'original_writing' })
     f.db.chapter.findFirst.mockResolvedValueOnce(null)
     await expect(readChapterReviewWriteAdmission(f.tx, f.subject, f.proposal)).rejects.toMatchObject({ code: 'CHAPTER_REVISION_CONFLICT' })
   })
@@ -240,9 +257,9 @@ describe('server review cycle lineage and final verification', () => {
     const step = projectCurrentReviewNextStep(readiness)!
     expect(step.state).toBe('decision_required')
     expect(step.pending[0]).toEqual(current)
-    expect(currentReviewNextStepGuidance(step)).toContain('不能因每次完整检查又有新措辞就自动开启下一轮润色')
+    expect(currentReviewNextStepGuidance(step)).toContain('留置不是修复，也不是检查通过')
     expect(projectCurrentReviewNextStep({ ...readiness, mustPassPending: true })!.state).toBe('must_pass_required')
-    expect(projectCurrentReviewNextStep({ ...readiness, ready: false, quality: 'incomplete', requiredTools: [{ name: 'quality_analyze', args: { compilationId: 'comp' } }] })!.state).toBe('blocked')
+    expect(projectCurrentReviewNextStep({ ...readiness, ready: false, quality: 'incomplete', requiredTools: [{ name: 'quality_analyze', args: { compilationId: 'comp' } }] })!.state).toBe('check_required')
   })
   it('keeps edited anchors or ambiguous duplicates unknown rather than inventing a match', () => {
     const cycle = advanceReviewCycle(baseline(), { beforeRevision: 4, before: content, afterRevision: 5, after: content.replace('她没有回答', '她轻轻点头') })

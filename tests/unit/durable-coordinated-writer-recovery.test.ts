@@ -12,6 +12,7 @@ vi.mock('../../api/lib/agent/runtime-lease.js', async original => ({ ...await or
   withRunLease: async (_lease: unknown, work: (tx: unknown) => unknown) => work(mocks.tx) }))
 vi.mock('../../api/lib/agent/runtime-tool-cursor.js', async original => ({ ...await original<object>(),
   readAdmittedToolOperation: mocks.admitted, prepareToolCursorOperation: mocks.prepare, rejectToolCursorCall: mocks.reject }))
+vi.mock('../../api/lib/agent/runtime-state.js', async original => ({ ...await original<object>(), readExecutionFrame: vi.fn(async () => ({ revision: 3, snapshotHash: 'b'.repeat(64) })) }))
 vi.mock('../../api/lib/agent/original-request.js', () => ({ readOriginalTaskRequest: mocks.original }))
 vi.mock('../../api/lib/agent/writing-service-coordination.js', () => ({ executeCoordinatedWritingServices: mocks.execute }))
 vi.mock('../../api/lib/agent/runtime-reducer.js', async () => {
@@ -71,7 +72,7 @@ const noWork = () => {
 }
 
 describe('authenticated prepared writer manifest recovery', () => {
-  it('authenticates before reading a saved manifest, preserves old steps and then uses ordinary cursor/input-hash admission', async () => {
+  it('authenticates before reading a saved manifest and replays the exact original receipt without preparing more work', async () => {
     const before = structuredClone(parent), originalInput = structuredClone(saved)
     expect(coordinatedWritingManifest({ spec, prompt }, tool.name, 'chapter', args.writing)).not.toEqual(saved.writingManifest)
     mocks.tx.agentOperation.findUnique.mockImplementation(async () => {
@@ -80,11 +81,10 @@ describe('authenticated prepared writer manifest recovery', () => {
     })
     mocks.tx.chapter.findFirst.mockRejectedValue(Error('Recovery must not derive a fresh ordinal'))
     expect(await execute()).toMatchObject({ output: '复用原父操作的已知交付' })
-    expect(order).toEqual(['original', 'lookup', 'authenticated', 'prepare', 'execute', 'reduce'])
+    expect(order).toEqual(['lookup', 'authenticated', 'execute', 'reduce'])
     expect(mocks.tx.agentOperation.findUnique).toHaveBeenCalledWith({ where: { taskRootId_operationKey: { taskRootId: 'root', operationKey: 'exec:2' } }, select: { id: true } })
     expect(mocks.admitted).toHaveBeenCalledWith(lease, { operationId: 'parent', action: 'chapter_write', novelId: 'novel', callId: 'writer' }, mocks.tx)
-    expect(mocks.prepare).toHaveBeenCalledWith(lease, source, expect.objectContaining({ key: 'exec:2', action: tool.name, callId: 'writer', targetId: 'chapter',
-      effectiveArgs: args, operationInput: { novelId: 'novel', callId: 'writer', args, expectedRevision: 4, writingManifest: saved.writingManifest } }))
+    expect(mocks.prepare).not.toHaveBeenCalled()
     expect(mocks.execute).toHaveBeenCalledWith(ctx, lease, 'parent', tool.name)
     expect(mocks.reduce).toHaveBeenCalledWith(lease, { expectedRevision: pending.revision, expectedHash: pending.snapshotHash, operationId: 'parent' })
     expect(mocks.tx.chapter.findFirst).not.toHaveBeenCalled()
@@ -116,40 +116,38 @@ describe('authenticated prepared writer manifest recovery', () => {
       if (changed === 'step-order') manifest.steps.reverse()
       saved.writingManifest = manifest
     }
+    const snapshot = runtimeJson({ kind: 'tool', action: tool.name, parentOperationId: null, input: saved })
+    parent.inputSnapshot = snapshot.value; parent.inputHash = snapshot.hash
     await expect(execute()).rejects.toMatchObject({ code: changed === 'missing-manifest' ? 'RUNTIME_IDENTITY_CONFLICT' : 'RUNTIME_RECEIPT_INVALID' })
     noWork()
   })
-  it('retains the ordinary inputHash refusal even after original-reader authentication', async () => {
+  it('retains the immutable inputHash refusal even after original-reader authentication', async () => {
     parent.inputHash = '0'.repeat(64)
     await expect(execute()).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
     expect(mocks.admitted).toHaveBeenCalledOnce()
-    expect(mocks.prepare).toHaveBeenCalledOnce()
+    expect(mocks.prepare).not.toHaveBeenCalled()
     expect(mocks.execute).not.toHaveBeenCalled(); expect(mocks.reduce).not.toHaveBeenCalled()
   })
-  it('retains the ordinary approval-denied rejection and receipt reduction path', async () => {
-    mocks.prepare.mockRejectedValue(new DataAccessError(409, 'RUNTIME_APPROVAL_DENIED', 'Author declined'))
+  it('replays an original approval-denied receipt without requesting another approval', async () => {
     const result = { outcome: 'failed', effectApplied: false, code: 'TOOL_APPROVAL_DENIED', toolResult: { output: '原审批拒绝，未执行。', summary: '作者拒绝' } }
-    mocks.reject.mockResolvedValue({ operation: parent, pending, receipt: { operationId: 'parent', result, resultHash: runtimeJson(result).hash } })
+    mocks.execute.mockResolvedValue({ operationId: 'parent', result, resultHash: runtimeJson(result).hash })
     expect(await execute()).toMatchObject({ outcome: 'failed', output: result.toolResult.output,
       resultSemantics: { kind: 'failed', reasonCode: 'TOOL_APPROVAL_DENIED', effectState: 'known_not_applied' } })
-    expect(mocks.reject).toHaveBeenCalledWith(lease, source, ctx.callId)
-    expect(mocks.reduce).toHaveBeenCalledOnce(); expect(mocks.execute).not.toHaveBeenCalled()
+    expect(mocks.reject).not.toHaveBeenCalled()
+    expect(mocks.prepare).not.toHaveBeenCalled()
+    expect(mocks.reduce).toHaveBeenCalledOnce(); expect(mocks.execute).toHaveBeenCalledOnce()
   })
-  it('derives fresh requirements only when no prior operation exists, using the real owned chapter order', async () => {
+  it('refuses fresh coordinated work without deriving another manifest or chapter observation', async () => {
     recovering = false
-    await execute()
+    await expect(execute()).rejects.toMatchObject({ code: 'RUNTIME_EFFECT_NOT_AUTHORIZED' })
     expect(mocks.admitted).not.toHaveBeenCalled()
-    expect(mocks.tx.chapter.findFirst).toHaveBeenCalledWith({ where: { id: 'chapter', authorId: 'user', novelId: 'novel' }, select: { orderIndex: true } })
-    const prepared = mocks.prepare.mock.calls[0][2]
-    expect(prepared.operationInput.writingManifest.steps.map((step: { step: string }) => step.step)).toEqual(['body', 'continuity', 'commit'])
-    expect(prepared.effectiveArgs).toEqual(args)
-    expect(mocks.prepare).toHaveBeenCalledOnce(); expect(mocks.execute).toHaveBeenCalledOnce()
+    noWork()
   })
-  it('refuses a fresh operation when its owned chapter cannot be located', async () => {
+  it('does not look for another target when the original operation cannot be located', async () => {
     recovering = false; mocks.tx.chapter.findFirst.mockResolvedValue(null)
-    await expect(execute()).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
-    expect(mocks.admitted).not.toHaveBeenCalled(); expect(mocks.prepare).not.toHaveBeenCalled()
-    expect(mocks.execute).not.toHaveBeenCalled(); expect(mocks.reduce).not.toHaveBeenCalled()
+    await expect(execute()).rejects.toMatchObject({ code: 'RUNTIME_EFFECT_NOT_AUTHORIZED' })
+    expect(mocks.admitted).not.toHaveBeenCalled()
+    noWork()
   })
   it('rejects another root session before looking up a prior operation', async () => {
     mocks.tx.agentTaskRoot.findUniqueOrThrow.mockResolvedValue({ userId: 'user', novelId: 'novel', sessionId: 'another-session', specSnapshot: spec })

@@ -1,3 +1,4 @@
+import { terminalCandidateSchema, terminalReviewFailure } from '../../api/lib/agent/terminal-state-review.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { freezeLocalEditBoundary, localEditGuidance, originalLocalEditBoundary } from '../../api/lib/agent/local-edit-scope.js'
 import { reviewBoundEditAllowed, projectReviewBoundEditPlan, unprovenReviewBoundPatchIndexes, type ReviewBoundEvidence } from '../../api/lib/agent/review-bound-edit.js'
@@ -80,13 +81,17 @@ describe('finding-conditioned local repair effects', () => {
     const f = fixture(), review = ready({ ...f.evidence, anchors: [] })
     review.terminalReview = { state: 'unverified', unresolved: [{ path: 'exitState.emotion.0', verdict: 'unknown' }] }
     const step = projectCurrentReviewNextStep(review)
-    expect(step.state).toBe('terminal_review_required')
+    // A manually supplied historical UNKNOWN cannot certify a candidate or
+    // create a new runtime delivery gate. Its original reader still rejects.
+    const candidate = terminalCandidateSchema.parse({ exitState: { emotion: ['迟疑'] } })
+    expect(terminalReviewFailure({ terminalCandidate: candidate }, body)).toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' })
+    expect(step.terminalReview).toEqual(review.terminalReview)
+    expect(step.state).toBe('commit_available')
     expect(step.requiredTools).toEqual([])
-    expect(currentReviewNextStepGuidance(step)).toContain('exitState.emotion.0')
-    expect(currentReviewNextStepGuidance(step)).toContain('不是正文问题')
+    expect(review.terminalReview.unresolved).toEqual([{ path: 'exitState.emotion.0', verdict: 'unknown' }])
     expect(projectReviewBoundEditPlan(f.boundary, chapter, review).anchors).toEqual([])
     review.ready = false; review.quality = 'incomplete'; review.requiredTools = [{ name: 'quality_analyze', args: { compilationId: review.compilationId } }]
-    expect(projectCurrentReviewNextStep(review).state).toBe('blocked')
+    expect(projectCurrentReviewNextStep(review).state).toBe('check_required')
   })
   it('identifies the unproven patch without authorizing any part of a rejected batch', () => {
     const f = fixture(), ranges = [f.range, { start: 0, end: 1, newText: '窗' }]

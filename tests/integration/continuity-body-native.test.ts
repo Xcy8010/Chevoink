@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { available, claim, fixture, reported } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
-import { initializeExecutionState, loadExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { initializeExecutionState, loadExecutionState, readExecutionStateInTransaction } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { modelRouteRevision, prepareModelCursorOperation, validateModelCursor } from '../../api/lib/agent/runtime-model-cursor.js'
 import { currentNativeToolViews, type NativeToolView } from '../../api/lib/agent/runtime-tool-view.js'
@@ -182,7 +182,7 @@ describe.runIf(available)('ordinary native continuity review on an existing task
     const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'chapter_bridge_commit' }, include: { effectReceipt: true }, orderBy: { createdAt: 'asc' } })
     const repair = await prisma.agentOperation.findFirstOrThrow({ where: { parentOperationId: parent.id, action: 'continuity_validate', kind: 'internal' }, include: { effectReceipt: true }, orderBy: { createdAt: 'asc' } })
     expect(repair.effectReceipt?.result).toHaveProperty('progress.kind', 'content_revision')
-    const evidence = await withRunLease(lease, async tx => collectDurableToolEvidence(tx, f.rootId, (await loadExecutionState(f.userId, f.runId)).frame.revision))
+    const evidence = await withRunLease(lease, async tx => collectDurableToolEvidence(tx, f.rootId, (await readExecutionStateInTransaction(tx, f.rootId)).frame.revision))
     expect(evidence.effects.some(effect => effect.operationId === repair.id)).toBe(true)
     const jobs = await prisma.memoryExtractionJob.findMany({ where: { chapterId: chapter.id, chapterRevision: 6 } })
     expect(jobs).toHaveLength(1)

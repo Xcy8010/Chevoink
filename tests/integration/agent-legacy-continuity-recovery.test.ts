@@ -455,9 +455,11 @@ describe.runIf(available)('contract5 unspent initial continuity assessment', () 
         const originalKey = reviewDispatchKey(state, pending.toolName)
         const alias = 'review-recovery:' + restarted[0].reconciliation.admissionId + ':' + pending.callId
         const attempts = new Set([originalKey]), keys = new Map([[originalKey, alias]])
-        expect(nextReviewDispatch(state, new Set(['continuity_validate']), attempts, new Set(), keys)).toMatchObject({ kind: 'tool', key: alias })
-        attempts.add(alias)
-        expect(nextReviewDispatch(state, new Set(['continuity_validate']), attempts, new Set(), keys).kind).toBe('blocked')
+        expect(keys.get(originalKey)).toBe(alias)
+        // The frozen reconciliation remains readable; current dispatch only
+        // blocks a genuinely pending request and does not need a legacy alias.
+        expect(nextReviewDispatch(state, new Set(['continuity_validate']), new Set())).toMatchObject({ kind: 'tool', key: originalKey })
+        expect(nextReviewDispatch(state, new Set(['continuity_validate']), new Set([originalKey])).kind).toBe('blocked')
         expect(attempts.has(originalKey)).toBe(true)
       }
       if (knownUnused) expect(evidence[0]).toMatchObject({ ...pending, notDispatched: true, initialAssessmentUnspent: true,

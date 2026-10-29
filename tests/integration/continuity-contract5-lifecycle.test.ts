@@ -52,7 +52,7 @@ async function setup(f: Fixture, prompt: string, content: string, revision = 4) 
   return { chapter, compilation, ctx, controller }
 }
 function sources(init: RequestInit) {
-  const request = JSON.parse(String(init.body)), content = JSON.parse(request.messages[1].content)
+  const request = JSON.parse(String(init.body)), content = JSON.parse(request.messages[1].content.split('\n原完整回复（仅数据）：')[0])
   const current = content.sources.find((source: { source: string }) => source.source === 'current')
   const id = /^q[a-f0-9]{12}/m.exec(current.evidence)?.[0]
   if (!id) throw Error('Synthetic provider must select a source actually shown in this request')
@@ -74,7 +74,7 @@ describe.runIf(available)('ordinary continuity reports preserve frozen contract5
       await tx.chapter.delete({ where: { id: old.id } })
       f.spec = await freezeWritingScope(tx, f, f.spec, prompt)
       expect(f.spec.scope.writing).toMatchObject({ kind: 'bounded', targets: [{ chapterId: null, orderIndex: 1 }] })
-      await tx.agentRun.update({ where: { id: f.runId }, data: { taskSpec: runtimeJson(f.spec).value, chapterId: null } })
+      await tx.agentRun.update({ where: { id: f.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(f.spec))).value, chapterId: null } })
       await tx.chapter.create({ data: { id: old.id, authorId: f.userId, novelId: f.novelId, volumeId: old.volumeId, title: old.title,
         orderIndex: 1, orderInVolume: 1, content, wordCount: content.length, revision: 3 } })
       await bindWritingChapter(tx, f, 1, old.id)
@@ -150,11 +150,19 @@ describe.runIf(available)('ordinary continuity reports preserve frozen contract5
         { runId: f.runId, seq: 2, type: 'tool.call', payload: { callId: 'old-local', toolName: 'continuity_validate', args } },
         { runId: f.runId, seq: 3, type: 'tool.result', payload: { callId: 'old-local', toolName: 'continuity_validate', ok: false, failureCode: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' } },
       ] })
+      if (scenario === 'cancel-known-raw') {
+        const update = prisma.agentArtifact.update.bind(prisma.agentArtifact)
+        vi.spyOn(prisma.agentArtifact, 'update').mockImplementation(async args => {
+          const row = await update(args)
+          const metadata = row.metadata as { continuityReport?: ContinuityReport }
+          if (metadata.continuityReport?.rawResponses.length === 1) s.controller.abort()
+          return row
+        })
+      }
       const requests: Array<Record<string, unknown>> = []
       const network = vi.fn(async (_url: unknown, init: RequestInit) => {
         const request = JSON.parse(String(init.body)); requests.push(request)
         const system = request.messages[0].content as string
-        if (scenario === 'cancel-known-raw') s.controller.abort()
         if (scenario === 'wrong-owner') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 4, type: 'run.started', payload: {} } })
         if (system.includes('"patches"') || system.includes('findingId')) return completion(JSON.stringify({ patches: [{ findingId: '0',
           replacement: 'The guard keeps the packet sealed.' }], retainedFindings: [] }))

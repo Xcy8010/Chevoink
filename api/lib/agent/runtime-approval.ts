@@ -198,6 +198,15 @@ export async function readWritingServiceRefusal(tx: RuntimeTx, token: RunLeaseTo
 }) {
   const outcome = await readToolApprovalOutcome(tx, token, input.sourceHash, input.callId, input.toolName, input.rawArguments)
   if (!outcome?.requestData.writingServices || !['denied', 'expired'].includes(outcome.status)) return null
+  if (input.toolName === 'chapter_bridge_commit') {
+    const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: token.taskRootId } })
+    const args = z.object({ compilationId: z.string().optional() }).parse(outcome.requestData.args)
+    const manifest = await (await import('./runtime-writing-service.js')).requiredCommitReviewManifest(tx,
+      { userId: token.userId, novelId: root.novelId, runId: token.runId }, args.compilationId)
+    if (runtimeJson(manifest).hash !== runtimeJson(outcome.requestData.writingServices).hash)
+      return runtimeError('RUNTIME_RECEIPT_INVALID', '原提交确认不匹配当前任务的必要检查。')
+    return outcome
+  }
   const { taskSpecSchema } = await import('../../../shared/contracts/task-spec-contracts.js')
   const { coordinatedWriterActions, coordinatedWritingManifest } = await import('./coordinated-writing-input.js')
   const current = await readExecutionStateInTransaction(tx, token.taskRootId)

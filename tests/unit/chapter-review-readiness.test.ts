@@ -1,9 +1,10 @@
+import { currentReviewReadinessFixture } from '../helpers/current-review-readiness-fixture.js'
 import { readRecoveredChapterDelivery, assertCompletedWritingDelivery } from '../../api/lib/agent/writing-scope.js'
-import { readReviewCycle } from '../../api/lib/agent/review-cycle.js'
+import { beginReviewCycle } from '../../api/lib/agent/review-cycle.js'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { assertChapterReviewRevision, originalChapterReviewRequirements, readChapterReviewReadiness, recordChapterReviewDecisions, retainedReviewDecisionMatches } from '../../api/lib/agent/chapter-review-guard.js'
+import { originalChapterReviewRequirements, probeChapterReviewRevision, readCurrentCompilerContinuity, readChapterReviewReadiness, recordChapterReviewDecisions, retainedReviewDecisionMatches } from '../../api/lib/agent/chapter-review-guard.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { qualityReportCheckedCurrentContent, qualityReportMatchesContent } from '../../api/lib/agent/quality-report-contract.js'
 import { commitChapterBridge } from '../../api/lib/agent/story-compiler.js'
@@ -15,8 +16,7 @@ import * as memory from '../../api/lib/agent/story-memory.js'
 import * as humanity from '../../api/lib/agent/humanity-quality.js'
 import { advanceTerminalCoverage, terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
-import { inspectTerminalReview, terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
-import { projectCurrentReviewNextStep, currentReviewNextStepGuidance } from '../../api/lib/agent/review-dispatch.js'
+import { currentTerminalReview, inspectTerminalReview, terminalCandidateSchema, terminalReviewFailure } from '../../api/lib/agent/terminal-state-review.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { prepareTerminalProposalInput } from '../../api/lib/agent/terminal-proposal-context.js'
 import { terminalProcessingExhaustedMessage, terminalProcessingPlan } from '../../api/lib/agent/terminal-processing.js'
@@ -24,7 +24,7 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 
 afterEach(() => vi.restoreAllMocks())
 const sha = (text: string) => createHash('sha256').update(text).digest('hex')
-function fixture(prompt = '写下一章') {
+async function fixture(prompt = '写下一章') {
   const subject = { userId: 'u', novelId: 'n', runId: 'resumed' }
   const chapter = { id: 'c44', title: '门后的脚印', revision: 3, orderIndex: 44, content: '门已经锁好。他绕到墙根，在泥地里找到了一串脚印。' }
   const bridge = { id: 'bridge', toChapterId: chapter.id, targetRevision: 3, fromChapterId: null, sourceRevision: null, committedAt: null,
@@ -45,7 +45,8 @@ function fixture(prompt = '写下一章') {
     agentRun: { findMany: vi.fn().mockResolvedValue([]), findFirstOrThrow: vi.fn().mockResolvedValue({ writingBindings: { version: 1, taskId: task.id, targets: [{ orderIndex: 44, chapterId: chapter.id }] } }),
       findFirst: vi.fn().mockResolvedValue({ id: subject.runId, userId: subject.userId, novelId: subject.novelId, status: 'running', manuscriptRevision: 0, novel: { authorId: subject.userId, manuscriptRevision: 0 }, mode: 'act', taskRootId: null, session: { userId: 'u', novelId: 'n', sandboxMode: 'workspace', toolPolicy: null } }) },
     chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(chapter), update: vi.fn() },
-    storyCompilation: { findFirst: vi.fn().mockResolvedValue(compilation), findFirstOrThrow: vi.fn().mockResolvedValue(compilation), findMany: vi.fn().mockResolvedValue([compilation]),
+    aiUsageLog: { count: vi.fn().mockResolvedValue(0) },
+    storyCompilation: { findFirst: vi.fn(async (query) => query.where.createdAt ? null : compilation), findFirstOrThrow: vi.fn().mockResolvedValue(compilation), findMany: vi.fn().mockResolvedValue([compilation]),
       update: vi.fn(async ({ data }) => Object.assign(compilation, data)) },
     chapterQualityReport: { findUnique: vi.fn().mockResolvedValue(report), findFirst: vi.fn().mockResolvedValue(report), findMany: vi.fn().mockResolvedValue([]), update: vi.fn() },
     chapterBridge: { update: vi.fn(async ({ data }) => Object.assign(bridge, data)) },
@@ -55,14 +56,15 @@ function fixture(prompt = '写下一章') {
   const terminal = { userId: 'u', novelId: 'n', compilationId: compilation.id, chapterSummary: '寻找门外线索',
     exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
     lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '锁门', endingStructure: '脚印' }
-  const refreshContinuity = () => { Object.assign(compilation.validation, { checkedRevision: chapter.revision,
-    coverage: compilerContinuityCoverage({ chapter, bridge, sceneTasks, source: null }) }) }
-  return { subject, chapter, bridge, sceneTasks, compilation, task, report, db, tx, terminal, refreshContinuity }
+  const refreshContinuity = async () => { Object.assign(compilation.validation, { checkedRevision: chapter.revision,
+    coverage: compilerContinuityCoverage({ chapter, bridge, sceneTasks, source: null }) }); await currentReviewReadinessFixture(tx, subject, compilation) }
+  const currentReport = await currentReviewReadinessFixture(tx, subject, compilation)
+  return { currentReport, subject, chapter, bridge, sceneTasks, compilation, task, report, db, tx, terminal, refreshContinuity }
 }
 
 describe('persisted current review readiness', () => {
-  it('keeps proposal-only unknown work actionable within the original two processing claims', async () => {
-    const f = fixture('修改第44章。完成连续性与人类感检查。')
+  it('preserves the frozen historical unknown proposal and its read-only processing projection', async () => {
+    const f = await fixture('修改第44章。完成连续性与人类感检查。')
     Object.assign(f.task.scope, { terminalCoverageProtocol: 2, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1 })
     const base = terminalCandidateSchema.parse({ exitState: { knowledge: ['未获证实的旧线索归属。'] } })
     const candidate = terminalCandidateSchema.parse({ exitState: { objects: ['门已经锁好'] } })
@@ -88,7 +90,19 @@ describe('persisted current review readiness', () => {
       coverage: compilerContinuityCoverage({ chapter: f.chapter, bridge: f.bridge, sceneTasks: f.sceneTasks, source: null, terminalCandidate: candidate }) })
     f.compilation.preparedContext = { terminalProposalReview: staged.state }
     const before = structuredClone({ validation: f.compilation.validation, preparedContext: f.compilation.preparedContext })
-    const readiness = await readChapterReviewReadiness(f.tx, f.subject)
+    const current = await readChapterReviewReadiness(f.tx, f.subject)
+    expect(current).toMatchObject({ ready: true, continuity: 'complete', quality: 'complete' })
+    expect(current?.terminalReview).toBeUndefined()
+    // Replay the immutable old audit for historical readers only. The current
+    // prose API never uses this projection to authorize writing or delivery.
+    const replay = currentTerminalReview(f.compilation.validation, f.chapter.content, evidence)!
+    expect(replay.supported).toBe(false)
+    expect(replay.proposals?.dispositions).toContainEqual(expect.objectContaining({ id: proposal.id, outcome: 'unknown', reason }))
+    const unresolved = [{ path: `proposals.${proposal.id}`, verdict: 'unknown', field: proposal.field, claim: proposal.claim, reason }]
+    const readiness = { ...current!, terminalReview: { state: 'unverified' as const, currentResultVerified: true, unresolved },
+      terminalProcessing: { contractHash: runtimeJson(JSON.parse(JSON.stringify(f.task))).hash,
+        sourceHash: runtimeJson({ previousContent: '', previousChapterId: null }).hash, candidate, content: f.chapter.content, previous: '', inherited: [],
+        issues: unresolved } }
     expect(readiness).toMatchObject({ continuity: 'complete', terminalReview: { state: 'unverified', currentResultVerified: true } })
     expect.soft(readiness?.terminalReview?.unresolved).toEqual(expect.arrayContaining([
       expect.objectContaining({ path: `proposals.${proposal.id}`, verdict: 'unknown', field: proposal.field, claim: proposal.claim, reason }),
@@ -121,19 +135,16 @@ describe('persisted current review readiness', () => {
       if (change === 'corrupt') Object.assign(f.compilation.validation, { continuityCriticResponse: { ...inspected.audit, rawResponse: { complete: true, content: 'corrupt synthetic response' } } })
       if (change === 'source-change') f.db.chapter.findMany.mockResolvedValue([{ id: 'new-source', title: 'Earlier', revision: 1,
         orderIndex: 43, content: 'A newly inserted synthetic predecessor.' }] as never)
-      if (change === 'source-change') {
-        await expect(readChapterReviewReadiness(f.tx, f.subject)).rejects.toMatchObject({ code: 'TERMINAL_STATE_REVIEW_REQUIRED' })
-        continue
-      }
-      const invalid = await readChapterReviewReadiness(f.tx, f.subject)
-      expect(invalid?.terminalReview?.currentResultVerified, change).toBe(false)
-      // Even an old exhausted plan cannot turn an unverifiable report into a received current result.
+      const changedContext = change === 'source-change' ? { ...evidence, current: { ...evidence.current, revision: f.chapter.revision + 1 } } : evidence
+      expect(currentTerminalReview(f.compilation.validation, f.chapter.content, changedContext), change).toBeNull()
+      const invalid = { ...readiness, terminalReview: { ...readiness.terminalReview, currentResultVerified: false } }
       expect(terminalProcessingExhaustedMessage(invalid, exhausted), change).not.toContain('结果已收到')
+
     }
   })
   it.each(['检查当前章节', '写下一章，不用检查', '写下一章，跳过质量检查和连续性检查'])(
-    'cannot bypass previously supported facts with reprepare and empty commit even when checks were not required: %s', async prompt => {
-      const f = fixture(prompt)
+    'historical missing assessment cannot certify its retained facts even when current checks were waived: %s', async prompt => {
+      const f = await fixture(prompt)
       Object.assign(f.task.scope, { terminalCoverageProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1 })
       const candidate = terminalCandidateSchema.parse({ exitState: { objects: ['门已经锁好'] } })
       const evidence = terminalEvidenceContext(f.chapter, null, 2, 1, terminalCoverageInput(f.task, {}, f.chapter, candidate))
@@ -142,17 +153,20 @@ describe('persisted current review readiness', () => {
       f.compilation.preparedContext = { terminalFactCoverage: advanceTerminalCoverage(f.task, {}, f.chapter, reviewed) }
       f.compilation.validation = null as never
       const readiness = await readChapterReviewReadiness(f.tx, f.subject)
-      expect(readiness).toMatchObject({ ready: true, checksRequired: false, terminalReview: { state: 'unverified' } })
-      const step = projectCurrentReviewNextStep(readiness!)
-      expect(step.state).toBe('terminal_review_required')
-      expect(currentReviewNextStepGuidance(step)).toContain('当前完整独立检查尚待确认')
-      await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'TERMINAL_STATE_REVIEW_REQUIRED' })
+      expect(readiness).toMatchObject({ ready: true, checksRequired: false })
+      const legacyValidation = { terminalCandidate: candidate }
+      expect(currentTerminalReview(legacyValidation, f.chapter.content, evidence)).toBeNull()
+      expect(terminalReviewFailure(legacyValidation, f.chapter.content, evidence)).toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' })
+      const input = terminalCoverageInput(f.task, f.compilation.preparedContext, f.chapter, terminalCandidateSchema.parse({ exitState: {} }))!
+      expect(input.obligations).toHaveLength(1)
+      expect(input.obligations[0]).toMatchObject({ field: 'objects', claim: '门已经锁好' })
       expect(f.db.chapterBridge.update).not.toHaveBeenCalled()
       expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+
     })
   it.each(['current', 'repaired', 'rejected', 'wrong-hash', 'wrong-offset', 'stale-context', 'latest-failed', 'stale-revision'])(
     'projects conditional quality edit evidence only from an owned complete current report: %s', async scenario => {
-      const f = fixture('修改第44章。完成连续性与人类感检查。')
+      const f = await fixture('修改第44章。完成连续性与人类感检查。')
       Object.assign(f.report.deterministicMetrics, { qualityContextHash: 'current-context' })
       vi.spyOn(humanity, 'buildHumanityQualityContext').mockResolvedValue({} as never)
       vi.spyOn(humanity, 'qualityReviewContextHash').mockReturnValue(scenario === 'stale-context' ? 'changed-context' : 'current-context')
@@ -174,17 +188,21 @@ describe('persisted current review readiness', () => {
     })
   it.each(['current', 'previous', 'narrative-only', 'unlocated', 'failed-coverage', 'plan-calibration'])(
     'uses structured current continuity quotes without a narrative/previous-source fallback: %s', async scenario => {
-      const f = fixture('修改第44章。无需人类感检查。')
+      const f = await fixture('修改第44章。无需人类感检查。')
       const text = '门已经锁好'
       Object.assign(f.compilation.validation, { findings: [{ signal: 'location_time', severity: scenario === 'plan-calibration' ? 'warning' : 'error', evidence: `本章“${text}”需复核`, suggestion: '核对',
         ...(scenario === 'narrative-only' ? {} : { sourceEvidence: [{ source: scenario === 'previous' ? 'previous' : 'current', quote: scenario === 'unlocated' ? '不存在原文' : text }] }) }],
         errorCount: scenario === 'plan-calibration' ? 0 : 1, warningCount: scenario === 'plan-calibration' ? 1 : 0 })
-      if (scenario === 'failed-coverage') f.chapter.title += '新标题'
+      if (scenario === 'previous') f.db.chapter.findMany.mockResolvedValue([{ id: 'previous', title: '前章', orderIndex: 43, revision: 1, content: '前章门锁状态。' }] as never)
+      const current = !['narrative-only', 'plan-calibration'].includes(scenario) ? await currentReviewReadinessFixture(f.tx, f.subject, f.compilation,
+        snapshot => [{ signal: 'location_time', severity: 'error', explanation: '门锁需复核', suggestion: '核对', evidence: [{
+          sourceId: scenario === 'unlocated' ? 'absent-source' : snapshot.sources[scenario === 'previous' ? 1 : 0].table.entries[0].id }] }]) : null
+      if (scenario === 'failed-coverage') current!.complete = false
       const result = await readChapterReviewReadiness(f.tx, f.subject, undefined, { reviewBoundEvidence: true })
       expect(result?.reviewBoundEvidence?.anchors).toHaveLength(scenario === 'current' ? 1 : 0)
     })
   it('keeps old automatic-window interpretation while fresh strict requires every actual unhandled report ref', async () => {
-    const f = fixture()
+    const f = await fixture()
     const findings = Array.from({ length: 10 }, (_, i) => ({ id: `f${i}`, source: 'critic', signal: 'emotion_grounding', severity: 'advisory',
       disposition: 'pending', authorFeedback: null, feedbackReason: null, startOffset: i * 2, endOffset: i * 2 + 1,
       evidenceExcerpt: '门', explanation: '动作不足', suggestion: '补动作', confidence: 0.9 }))
@@ -204,7 +222,7 @@ describe('persisted current review readiness', () => {
     expect((await readChapterReviewReadiness(f.tx, f.subject))?.completeStrictReview).toBe(false)
   })
   it('reads server-owned original lineage without reserving or consuming any budget', async () => {
-    const f = fixture()
+    const f = await fixture()
     await expect(readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)).resolves.toMatchObject({ ready: true, checksRequired: true,
       continuity: 'complete', quality: 'complete', requiredTools: [] })
     expect(f.db.storyCompilation.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({
@@ -215,7 +233,7 @@ describe('persisted current review readiness', () => {
     expect(f.compilation.validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0 })
   })
   it.each(['missing', 'failed', 'analyzing', 'repaired', 'wrong-hash', 'old-revision'] as const)('blocks delivery with %s quality, even when the revision channel is closed', async scenario => {
-    const f = fixture()
+    const f = await fixture()
     if (scenario === 'missing') f.db.chapterQualityReport.findFirst.mockResolvedValue(null as never)
     if (scenario === 'failed') f.report.status = 'failed'
     if (scenario === 'analyzing') f.report.status = 'analyzing'
@@ -235,21 +253,26 @@ describe('persisted current review readiness', () => {
     expect(proposal).not.toHaveBeenCalled()
   })
   it.each(['missing', 'failed', 'body', 'title', 'scenes', 'malformed-findings', 'count-mismatch'] as const)('requires a complete current continuity check after %s', async scenario => {
-    const f = fixture()
+    const f = await fixture()
     if (scenario === 'missing') f.compilation.validation = null as never
-    if (scenario === 'failed') f.compilation.validation.independentCheck = 'unavailable'
+    if (scenario === 'failed') { f.compilation.validation.independentCheck = 'unavailable'; f.currentReport.complete = false }
     if (scenario === 'body') f.chapter.content += '他停住了。'
     if (scenario === 'title') { f.chapter.title = '新章名'; f.chapter.revision++ }
     if (scenario === 'scenes') f.sceneTasks[0].goal = '救出同伴'
     if (scenario === 'malformed-findings') f.compilation.validation.findings = [{ severity: 'error' }] as never
     if (scenario === 'count-mismatch') f.compilation.validation.errorCount = 1
+    // A malformed historical assessment alone cannot stand in for a current report.
+    if (['scenes', 'malformed-findings', 'count-mismatch'].includes(scenario)) {
+      expect(readCurrentCompilerContinuity(f.compilation, f.chapter, null).assessment).toBeNull()
+      Reflect.deleteProperty(f.compilation.validation, 'continuityReport')
+    }
     await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ ready: false,
       requiredTools: expect.arrayContaining([{ name: 'continuity_validate', args: { compilationId: 'compiler' } }]) })
     await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
   it('a latest failed assessment cannot revive an earlier passing report by filtering on revision', async () => {
-    const f = fixture()
+    const f = await fixture()
     f.report.status = 'failed'; f.report.chapterRevision--
     await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ ready: false, quality: 'stale', qualityReportId: null })
     const query = f.db.chapterQualityReport.findFirst.mock.calls[0][0]
@@ -257,16 +280,16 @@ describe('persisted current review readiness', () => {
     expect(query.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
   })
   it.each(['failed', 'analyzing'] as const)('keeps current %s quality blocked, but permits only the new revision assessment', async status => {
-    const f = fixture()
+    const f = await fixture()
     f.report.status = status
     Object.assign(f.report.deterministicMetrics, { independentCheck: 'unavailable' })
     const before = structuredClone(f.report)
     const available = new Set(['quality_analyze'])
     const current = await readChapterReviewReadiness(f.tx, f.subject)
     expect(current).toMatchObject({ ready: false, quality: 'incomplete', qualityReportId: null })
-    expect(nextReviewDispatch(current, available, new Set()).kind).toBe('blocked')
+    expect(nextReviewDispatch(current, available, new Set([reviewDispatchKey(current!, 'quality_analyze')])).kind).toBe('blocked')
     f.chapter.content += '他继续追查脚印。'; f.chapter.revision++
-    f.refreshContinuity()
+    await f.refreshContinuity()
     const next = await readChapterReviewReadiness(f.tx, f.subject)
     expect(next).toMatchObject({ ready: false, quality: 'stale', qualityReportId: null, requiredTools: [{ name: 'quality_analyze', args: { compilationId: f.compilation.id } }] })
     expect(nextReviewDispatch(next, available, new Set([reviewDispatchKey(current!, 'quality_analyze')])).kind).toBe('tool')
@@ -278,38 +301,41 @@ describe('persisted current review readiness', () => {
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
   it('keeps current unavailable continuity incomplete but makes it stale after a legitimate new revision', async () => {
-    const f = fixture()
+    const f = await fixture()
     f.compilation.validation.independentCheck = 'unavailable'
     f.compilation.validation.checkRounds = 9
-    await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ continuity: 'incomplete', continuityExhausted: false })
+    f.currentReport.complete = false
+    await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ continuity: 'incomplete' })
     f.chapter.content += '他保存了新线索。'; f.chapter.revision++
-    await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ continuity: 'stale', continuityExhausted: false,
+    await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ continuity: 'stale',
       requiredTools: expect.arrayContaining([{ name: 'continuity_validate', args: { compilationId: f.compilation.id } }]) })
     expect(f.compilation.validation).toMatchObject({ checkedRevision: 3, checkRounds: 9, independentCheck: 'unavailable' })
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
   it('denied stale repair then missing quality cannot commit, and a recheck consumes no correction', async () => {
-    const f = fixture()
+    const f = await fixture()
     Object.assign(f.compilation.validation, { errorCount: 1, findings: [{ signal: 'object', severity: 'error', evidence: '同一门锁状态冲突', suggestion: '保留锁门事实' }] })
     f.chapter.title = '第四十四章 门后'; f.chapter.revision++
     f.db.chapterQualityReport.findFirst.mockResolvedValue(null as never)
-    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REVIEW_REPAIR_RECHECK_REQUIRED' })
+    const run = await f.db.agentRun.findFirst()
+    run.session.sandboxMode = 'read_only'
+    expect(await probeChapterReviewRevision(f.tx, f.subject, f.chapter)).toMatchObject({ open: false, code: 'REPAIR_NOT_AUTHORIZED' })
     await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
-    Object.assign(f.compilation.validation, { errorCount: 0, findings: [] }); f.refreshContinuity()
+    Object.assign(f.compilation.validation, { errorCount: 0, findings: [] }); await f.refreshContinuity()
     await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
     expect(f.compilation.validation).not.toHaveProperty('newDraftRevision')
     expect(f.compilation.validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0 })
   })
   it('requires a fresh critic after body repair, keeping patch receipts separate from assessment evidence', async () => {
-    const f = fixture(), before = f.chapter.content
+    const f = await fixture(), before = f.chapter.content
     f.chapter.content += '他顺着墙根往前走。'; f.chapter.revision++
     Object.assign(f.report, { chapterRevision: f.chapter.revision, status: 'repaired', repairRound: 1 })
     Object.assign(f.report.deterministicMetrics, { repairedContentHash: sha(f.chapter.content), sourceRevision: 3 })
     expect(qualityReportMatchesContent(f.report, f.chapter.revision, f.chapter.content)).toBe(true)
     expect(qualityReportCheckedCurrentContent(f.report, f.chapter.revision, f.chapter.content)).toBe(false)
     expect(f.report.deterministicMetrics.contentHash).toBe(sha(before))
-    f.refreshContinuity()
+    await f.refreshContinuity()
     await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
     const checkedReport = { ...f.report, id: 'q4', status: 'passed', repairRound: 0,
       deterministicMetrics: { independentCheck: 'complete', contentHash: sha(f.chapter.content) } }
@@ -317,7 +343,7 @@ describe('persisted current review readiness', () => {
     await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ ready: true, qualityReportId: 'q4' })
   })
   it('preserves checked input across COMMIT and invalidates the terminal proof on later story-state changes', async () => {
-    const f = fixture(), originalCoverage = structuredClone(f.compilation.validation.coverage)
+    const f = await fixture(), originalCoverage = structuredClone(f.compilation.validation.coverage)
     vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'candidate' } as never)
     await expect(commitChapterBridge(f.terminal, f.tx)).resolves.toMatchObject({ chapterRevision: 3 })
     expect(f.compilation.validation.coverage).toEqual(originalCoverage)
@@ -326,20 +352,24 @@ describe('persisted current review readiness', () => {
     await expect(commitChapterBridge(f.terminal, f.tx)).resolves.toMatchObject({ chapterRevision: 3 })
     expect(f.db.storyCompilation.update).toHaveBeenCalledTimes(beforeWrites)
     f.bridge.location = '城门'
+    expect(readCurrentCompilerContinuity(f.compilation, f.chapter, null).assessment).toBeNull()
+    // The current prose report instead depends on actual predecessor sources.
+    f.db.chapter.findMany.mockResolvedValue([{ id: 'prior', title: '前章', revision: 1, orderIndex: 43, content: '发生了真实前文变化。' }] as never)
     await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ ready: false, continuity: 'stale' })
   })
   it('terminal evidence uses scene ordinals even when the database returns commit scenes in another order', async () => {
-    const f = fixture()
+    const f = await fixture()
     f.sceneTasks.push({ ordinal: 2, goal: '跟踪脚印', turn: '抵达街口', status: 'checked' })
-    f.refreshContinuity(); f.sceneTasks.reverse()
+    await f.refreshContinuity(); f.sceneTasks.reverse()
     vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'candidate' } as never)
     await expect(commitChapterBridge(f.terminal, f.tx)).resolves.toMatchObject({ chapterRevision: 3 })
     await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ ready: true, continuity: 'complete' })
   })
   it('blocks unchecked retention after automatic correction is consumed without changing findings', async () => {
-    const f = fixture()
+    const f = await fixture()
     Object.assign(f.compilation.validation, { errorCount: 1, findings: [{ signal: 'object', severity: 'error', evidence: '同一物件状态仍冲突', suggestion: '交作者确认' }],
       newDraftRevision: { version: 1, taskId: f.task.id, chapterId: f.chapter.id, compilationId: f.compilation.id, checkedRevision: 2 } })
+    await currentReviewReadinessFixture(f.tx, f.subject, f.compilation, snapshot => [{ signal: 'object', severity: 'error', explanation: '同一物件状态仍冲突', suggestion: '交作者确认', evidence: [{ sourceId: snapshot.sources[0].table.entries[0].id }] }])
     vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'candidate' } as never)
     await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
     expect(memory.saveStoryMemory).not.toHaveBeenCalled()
@@ -349,12 +379,12 @@ describe('persisted current review readiness', () => {
     await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ ready: true, continuityErrorCount: 1, quality: 'complete' })
   })
   it.each(['balanced', 'premium'] as const)('mode %s cannot be waived by compiler/model arguments', async mode => {
-    const f = fixture(); f.task.qualityMode = mode
+    const f = await fixture(); f.task.qualityMode = mode
     f.db.chapterQualityReport.findFirst.mockResolvedValue(null as never)
     await expect(commitChapterBridge({ ...f.terminal, requireQuality: false }, f.tx)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
   })
   it.each(['检查当前章节', '写下一章，不用检查', '写下一章，跳过质量检查和连续性检查'])('preserves original non-writing or explicit skip: %s', async prompt => {
-    const f = fixture(prompt)
+    const f = await fixture(prompt)
     f.compilation.validation = null as never; f.db.chapterQualityReport.findFirst.mockResolvedValue(null as never)
     await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ ready: true, checksRequired: false, requiredTools: [] })
     vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'candidate' } as never)
@@ -366,7 +396,7 @@ describe('persisted current review readiness', () => {
       .toEqual({ continuity: true, quality: false })
   })
   it.each(['写下一章，不要跳过质量检查', '写下一章，不得跳过连续性检查', 'Write next chapter. Do not skip any checks'])('mandatory checks cannot be inverted into a waiver: %s', async prompt => {
-    const f = fixture(prompt)
+    const f = await fixture(prompt)
     f.db.chapterQualityReport.findFirst.mockResolvedValue(null as never)
     expect(originalChapterReviewRequirements({ prompt, spec: { intent: 'write', qualityMode: 'premium' } })).toEqual({ continuity: true, quality: true })
     await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
@@ -379,8 +409,8 @@ describe('persisted current review readiness', () => {
 })
 
 describe('retained quality report order is not decision identity', () => {
-  function retainedFixture() {
-    const f = fixture('修改第44章')
+  async function retainedFixture() {
+    const f = await fixture('修改第44章')
     f.task.scope.reviewProtocol = 1
     const findings = Array.from({ length: 3 }, (_, index) => ({ id: 'quality-row-' + index, reportId: f.report.id,
       source: 'critic', signal: 'emotion_grounding', severity: 'warning', disposition: 'pending', authorFeedback: null,
@@ -400,7 +430,7 @@ describe('retained quality report order is not decision identity', () => {
   }
 
   it('keeps actual recovered delivery available when the same retained report is returned in reverse order', async () => {
-    const f = retainedFixture(), before = JSON.stringify(f.report)
+    const f = await retainedFixture(), before = JSON.stringify(f.report)
     await f.retain()
     await expect(commitChapterBridge(f.terminal, f.tx)).resolves.toMatchObject({ chapterRevision: 3 })
     const capture = await readRecoveredChapterDelivery(f.tx, f.subject)
@@ -415,22 +445,22 @@ describe('retained quality report order is not decision identity', () => {
     expect(JSON.stringify({ ...f.report, findings: [...f.report.findings].reverse() })).toBe(before)
   })
 
-  function legacyBinding(f: ReturnType<typeof retainedFixture>, current: NonNullable<Awaited<ReturnType<typeof readChapterReviewReadiness>>>) {
+  function legacyBinding(f: Awaited<ReturnType<typeof retainedFixture>>, current: NonNullable<Awaited<ReturnType<typeof readChapterReviewReadiness>>>) {
     const binding = { ...current.decisionBinding!, qualityReportHash: runtimeJson(JSON.parse(JSON.stringify(f.findings))).hash }
     delete binding.qualityReportHashVersion
     const validation = f.compilation.validation as unknown as Record<string, unknown>
     const saved = validation.retainedReviewDecision as Record<string, unknown>
     validation.retainedReviewDecision = { ...saved, ...binding }
     delete (validation.retainedReviewDecision as Record<string, unknown>).qualityReportHashVersion
-    const cycle = readReviewCycle(f.compilation.preparedContext, { taskId: f.task.id, userId: f.subject.userId,
-      novelId: f.subject.novelId, chapterId: f.chapter.id })!
+    const cycle = beginReviewCycle({ taskId: f.task.id, userId: f.subject.userId, novelId: f.subject.novelId, chapterId: f.chapter.id },
+      { compilationId: f.compilation.id, revision: f.chapter.revision, content: f.chapter.content, ready: true, required: { continuity: true, quality: true }, binding, findings: current.reviewCycleFindings! })
     cycle.baseline!.binding = binding
     Object.assign(f.compilation, { preparedContext: { ...f.compilation.preparedContext, reviewCycle: cycle } })
     return cycle
   }
 
   it.each(['interleave', 'canonical-keys'] as const)('keeps version2 full-row identity under same-createdAt %s ordering', async order => {
-    const f = retainedFixture(), current = await f.retain()
+    const f = await retainedFixture(), current = await f.retain()
     expect(current.decisionBinding).toHaveProperty('qualityReportHashVersion', 2)
     const rows = [f.findings[1], f.findings[2], f.findings[0]]
     Object.assign(f.report, { findings: order === 'canonical-keys' ? rows.map(row => Object.fromEntries(Object.entries(row).reverse())) : rows })
@@ -442,7 +472,7 @@ describe('retained quality report order is not decision identity', () => {
   it.each(['id', 'reportId', 'source', 'signal', 'severity', 'disposition', 'authorFeedback', 'evidenceExcerpt',
     'startOffset', 'endOffset', 'explanation', 'suggestion', 'confidence', 'createdAt', 'updatedAt', 'extra'] as const)(
     'rejects changed complete-row field %s without another write or assessment', async field => {
-      const f = retainedFixture(); await f.retain(); await commitChapterBridge(f.terminal, f.tx)
+      const f = await retainedFixture(); await f.retain(); await commitChapterBridge(f.terminal, f.tx)
       const capture = await readRecoveredChapterDelivery(f.tx, f.subject)
       expect(capture).not.toBeNull()
       const row = f.findings[0] as Record<string, unknown>, value = row[field]
@@ -456,7 +486,7 @@ describe('retained quality report order is not decision identity', () => {
 
   it.each(['body', 'revision', 'report', 'added-row', 'removed-row', 'duplicate-row', 'obligation'] as const)(
     'does not let stable row ordering mask changed %s', async change => {
-      const f = retainedFixture(); await f.retain(); await commitChapterBridge(f.terminal, f.tx)
+      const f = await retainedFixture(); await f.retain(); await commitChapterBridge(f.terminal, f.tx)
       if (change === 'body') f.chapter.content += 'Changed actual body.'
       if (change === 'revision') f.chapter.revision++
       if (change === 'report') f.report.id += '-other'
@@ -467,13 +497,13 @@ describe('retained quality report order is not decision identity', () => {
       expect(await readRecoveredChapterDelivery(f.tx, f.subject)).toBeNull()
     })
 
-  function mocksOriginalRequirement(f: ReturnType<typeof retainedFixture>) {
+  function mocksOriginalRequirement(f: Awaited<ReturnType<typeof retainedFixture>>) {
     vi.mocked(original.readOriginalTaskRequest).mockResolvedValue({ prompt: '修改第44章，必须通过人类感质量检查。', spec: f.task,
       taskId: f.task.id, sourceRunId: 'original', parentRunId: null })
   }
 
   it.each(['exact-no-baseline', 'reordered-proven', 'reordered-unproven'] as const)('preserves old version1 only with %s evidence', async kind => {
-    const f = retainedFixture(), current = await f.retain(); legacyBinding(f, current)
+    const f = await retainedFixture(), current = await f.retain(); legacyBinding(f, current)
     await commitChapterBridge(f.terminal, f.tx)
     if (kind !== 'exact-no-baseline') Object.assign(f.report, { findings: [...f.findings].reverse() })
     if (kind !== 'reordered-proven') {
@@ -491,7 +521,7 @@ describe('retained quality report order is not decision identity', () => {
   it.each(['compilation', 'body', 'revision', 'continuity', 'report', 'hash', 'missing-ref', 'duplicate-ref', 'foreign-ref',
     'changed-row', 'added-row', 'removed-row', 'duplicate-row', 'missing-baseline', 'required-ref', 'unknown-version'] as const)(
     'refuses version1 order recovery after %s instead of migrating old evidence', async change => {
-      const f = retainedFixture(), current = await f.retain(), cycle = legacyBinding(f, current)
+      const f = await retainedFixture(), current = await f.retain(), cycle = legacyBinding(f, current)
       Object.assign(f.report, { findings: [...f.findings].reverse() })
       const baseline = cycle.baseline!, validation = f.compilation.validation as unknown as Record<string, unknown>
       if (change === 'compilation') baseline.compilationId += '-other'
@@ -516,7 +546,7 @@ describe('retained quality report order is not decision identity', () => {
     })
 
   it.each(['taskId', 'userId', 'novelId', 'chapterId'] as const)('cannot use a baseline from another %s', async field => {
-    const f = retainedFixture(), current = await f.retain(), cycle = legacyBinding(f, current)
+    const f = await retainedFixture(), current = await f.retain(), cycle = legacyBinding(f, current)
     Object.assign(f.report, { findings: [...f.findings].reverse() })
     cycle.scope[field] += '-foreign'
     await expect(readChapterReviewReadiness(f.tx, f.subject)).rejects.toMatchObject({ code: 'REVIEW_CYCLE_CONFLICT' })

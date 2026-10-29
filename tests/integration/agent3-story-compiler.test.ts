@@ -404,6 +404,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'RUNTIME_SCOPE_MISMATCH' })
     } finally {
       await prisma.projectMemoryEntry.deleteMany({ where: { sourceChapterId: chapter.id } })
+      await prisma.agentArtifact.deleteMany({ where: { runId: { in: [...displayRuns, run.id] } } })
       await prisma.agentRun.deleteMany({ where: { id: { in: displayRuns } } })
       await prisma.agentRun.delete({ where: { id: run.id } })
       await prisma.chapter.delete({ where: { id: chapter.id } })

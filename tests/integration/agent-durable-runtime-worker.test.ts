@@ -12,7 +12,7 @@ import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { modelRouteRevision } from '../../api/lib/agent/runtime-model-cursor.js'
 import * as runtimeOperations from '../../api/lib/agent/runtime-operations.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
-import { initializeExecutionState,loadExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { initializeExecutionState,loadExecutionState,saveExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { prepareStoryCompilation } from '../../api/lib/agent/story-compiler.js'
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
 import { chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
@@ -25,7 +25,7 @@ import { prisma } from '../../api/lib/prisma.js'
 import { available,claim,fixture } from '../support/agent-durable-runtime-fixture.js'
 
 describe.runIf(available)('durable worker orchestration', () => {
-  it.each(['todo-finish', 'todo-noop-stall'] as const)('%s checks only the current task list without buying endless retries', async scenario => {
+  it.each(['todo-finish', 'todo-noop-stall'] as const)('%s checks the actual task list and continues past repeated no-op observations', async scenario => {
     await fixture(async f => {
       const lease = await claim(f)
       const window = getCreditWindow()
@@ -48,19 +48,20 @@ describe.runIf(available)('durable worker orchestration', () => {
         expect(body.messages.filter((item: { role: string }) => item.role === 'user')).toHaveLength(1)
         const toolCall = requests % 2 === 1
         if (requests === 3) expect(body.messages.at(-1).content).toContain('本任务已建立的待办仍有未完成项')
-        const items = ['步骤一', '步骤二'].map(content => ({ content, status: scenario === 'todo-finish' && requests > 1 ? 'completed' : 'pending' }))
+        const items = ['步骤一', '步骤二'].map(content => ({ content, status: requests >= (scenario === 'todo-finish' ? 3 : 9) ? 'completed' : 'pending' }))
         const delta = toolCall ? { tool_calls: [{ index: 0, id: `todo-${requests}`, type: 'function', function: { name: 'todo_write', arguments: JSON.stringify({ items }) } }] } : { content: '处理结果已生成。' }
         return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: toolCall ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
       }))
       const result = await runDurableExecution(lease, new AbortController().signal)
-      expect(result.kind).toBe(scenario === 'todo-finish' ? 'completion_review' : 'needs_attention')
-      expect(requests).toBe(scenario === 'todo-finish' ? 4 : 7)
+      expect(result.kind).toBe('completion_review')
+      expect(requests).toBe(scenario === 'todo-finish' ? 4 : 10)
       expect(await prisma.agentRuntimeCheckpoint.count({ where: { taskRootId: f.rootId } })).toBe(0)
       const reminders = await prisma.agentExecutionOutbox.findMany({ where: { taskRootId: f.rootId, type: 'execution.continuation' }, orderBy: { sequence: 'asc' } })
-      expect(reminders).toHaveLength(scenario === 'todo-finish' ? 1 : 3)
+      expect(reminders).toHaveLength(scenario === 'todo-finish' ? 1 : 4)
       reminders.forEach((event, index) => expect(event.payload).toMatchObject({ reason: 'unfinished_todos', reminderIndex: index + 1, progressSequence: '0' }))
       // A completed model-maintained list is only a review candidate, not a completion receipt.
-      expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })).status).toBe(scenario === 'todo-finish' ? 'active' : 'paused')
+      expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })).status).toBe('active')
+      expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'run.paused' } })).toBe(0)
     })
   }, 30_000) // Ten real-PG model/tool transactions, like the adjacent orchestration matrix.
 
@@ -77,7 +78,7 @@ describe.runIf(available)('durable worker orchestration', () => {
       // failed, the attempt is closed as unsent and the run remains blocked
       // until an explicit reconciliation, so it cannot be treated as done.
       const completes = ['complete', 'prepare-gap', 'v1-price', 'checkpoint', 'checkpoint-gap', 'checkpoint-noop', 'checkpoint-no-progress'].includes(scenario) || continues && scenario !== 'continuation-stagnant'
-      const expectedRequests = scenario === 'attempt-gap' ? 0 : continues ? scenario === 'continuation-stagnant' ? 6 : 3 : completes ? 2 : scenario === 'approval' || scenario === 'unknown' ? 1 : 0
+      const expectedRequests = scenario === 'attempt-gap' ? 0 : continues ? scenario === 'continuation-stagnant' ? 8 : 3 : completes ? 2 : scenario === 'approval' || scenario === 'unknown' ? 1 : 0
       const writes = scenario === 'checkpoint' || scenario === 'checkpoint-gap' || scenario === 'checkpoint-noop'
       const tools = writes ? [chapterReadTool, chapterWriteTool] : [chapterReadTool]
       const window = getCreditWindow()
@@ -107,7 +108,7 @@ describe.runIf(available)('durable worker orchestration', () => {
         const delta = requests === 1 ? { tool_calls: [{ index: 0, id: 'read', type: 'function', function: { name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) } },
           ...(writes ? [{ index: 1, id: 'write', type: 'function', function: { name: 'chapter_write', arguments: JSON.stringify({ chapterId: f.chapterId, content: '检查点前实际写入正文' }) } }] : []),
           ...(scenario === 'checkpoint-noop' ? [{ index: 2, id: 'noop', type: 'function', function: { name: 'chapter_write', arguments: JSON.stringify({ chapterId: f.chapterId, content: '检查点前实际写入正文' }) } }] : []),
-        ] } : { content: continues && (requests === 2 || scenario === 'continuation-stagnant') ? scenario === 'continuation-empty' ? '' : '接下来读取正文。' : '检查结果已生成' }
+        ] } : { content: continues && (requests === 2 || scenario === 'continuation-stagnant' && requests < 8) ? scenario === 'continuation-empty' ? '' : '接下来读取正文。' : '检查结果已生成' }
         return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: requests === 1 ? 'tool_calls' : scenario === 'continuation-length' && requests === 2 ? 'length' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`)
       })
       vi.stubGlobal('fetch', fetch)
@@ -153,10 +154,10 @@ describe.runIf(available)('durable worker orchestration', () => {
       if (scenario === 'unknown') await expect(run).rejects.toThrow()
             else if (scenario === 'route-change') await expect(run).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
       else if (scenario === 'attempt-gap') await expect(run).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
-      else expect(await run).toMatchObject({ kind: scenario === 'approval' ? 'waiting_approval' : scenario === 'continuation-stagnant' ? 'needs_attention' : 'completion_review' })
+      else expect(await run).toMatchObject({ kind: scenario === 'approval' ? 'waiting_approval' : 'completion_review' })
       expect(fetch).toHaveBeenCalledTimes(expectedRequests)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(scenario === 'unknown' ? 0 : expectedRequests)
-      expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })).status).toBe(scenario === 'continuation-stagnant' ? 'paused' : 'active')
+      expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })).status).toBe('active')
       if (scenario === 'approval') {
         const waiting = await runDurableExecution(lease, new AbortController().signal)
         if (waiting.kind !== 'waiting_approval') throw new Error('Expected original approval')
@@ -199,25 +200,29 @@ describe.runIf(available)('durable worker orchestration', () => {
         }
         expect(fetch).toHaveBeenCalledTimes(expectedRequests)
       }
-      if (continues) expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'execution.continuation' } })).toBe(scenario === 'continuation-stagnant' ? 4 : 1)
+      if (continues) expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'execution.continuation' } })).toBe(scenario === 'continuation-stagnant' ? 6 : 1)
       if (scenario === 'continuation-stagnant') {
-        expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: lease.runId } })).status).toBe('paused')
+        expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'run.paused' } })).toBe(0)
+        await pauseDurableTask(f.userId, lease.runId)
         expect(await prisma.agentRunLease.count({ where: { run: { taskRootId: f.rootId }, enabled: true } })).toBe(0)
         const projected = await publishDurableEvents(f.userId, lease.runId)
-        expect(projected.at(-1)).toMatchObject({ type: 'run.paused', reason: 'model_stalled' })
-        await pauseDurableTask(f.userId, lease.runId)
+        expect(projected.at(-1)).toMatchObject({ type: 'run.paused', reason: 'user_stop' })
         const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { runId: lease.runId, type: 'run.paused' } })
         const resumed = await resumeDurableTask({ userId: f.userId, runId: lease.runId, pauseEventId: pause.id })
         lease = await claim({ userId: f.userId, runId: resumed.run.id }, 'stagnation-worker')
-        expect(await runDurableExecution(lease, new AbortController().signal)).toMatchObject({ kind: 'needs_attention' })
-        expect(fetch).toHaveBeenCalledTimes(6)
+        expect(await runDurableExecution(lease, new AbortController().signal)).toMatchObject({ kind: 'completion_review' })
+        expect(fetch).toHaveBeenCalledTimes(8)
+        await pauseDurableTask(f.userId, lease.runId)
         const secondPause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { runId: lease.runId, type: 'run.paused' }, orderBy: { sequence: 'desc' } })
         const third = await resumeDurableTask({ userId: f.userId, runId: lease.runId, pauseEventId: secondPause.id })
         lease = await claim({ userId: f.userId, runId: third.run.id }, 'stagnation-integrity-worker')
         const lastDecision = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'execution.continuation' }, orderBy: { sequence: 'desc' } })
         await prisma.agentExecutionOutbox.update({ where: { id: lastDecision.id }, data: { payload: { ...(lastDecision.payload as Prisma.JsonObject), reminderIndex: 1 } } })
+        const beforeTamperRead = await loadExecutionState(f.userId, lease.runId)
+        await saveExecutionState(lease, { expectedRevision: beforeTamperRead.frame.revision, expectedHash: beforeTamperRead.frame.snapshotHash,
+          snapshot: { ...beforeTamperRead.frame.state, messages: [...beforeTamperRead.frame.state.messages, { role: 'assistant', content: '接下来读取正文。' }] } })
         await expect(runDurableExecution(lease, new AbortController().signal)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
-        expect(fetch).toHaveBeenCalledTimes(6)
+        expect(fetch).toHaveBeenCalledTimes(8)
       }
     }) } finally { env.agentMaxTurns = previousTurns }
   }, 30_000)

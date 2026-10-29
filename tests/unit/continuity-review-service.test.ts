@@ -16,6 +16,7 @@ import * as internal from '../../api/lib/data/internal.js'
 import * as flags from '../../api/lib/agent2-feature-flags.js'
 import * as reviewCompletion from '../../api/lib/agent/review-completion.js'
 import * as auxiliaryRuntime from '../../api/lib/agent/runtime-auxiliary-call.js'
+import * as ai from '../../api/lib/ai-service.js'
 import { beginTextRequest } from '../../api/lib/text-request-trace.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
@@ -180,6 +181,29 @@ function runnerFixture() {
 }
 
 describe('known failure recovery preserves report and paid evidence', () => {
+  it('runs the real legacy adapter with the admitted model and current evidence packet', async () => {
+    const f = runnerFixture()
+    f.ctx.modelRuntime = { tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
+      baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-only', reasoningEffort: 'high', reasoningEfforts: ['high'],
+      reasoningParameterMode: 'native', thinkingEnabled: true, visionEnabled: false, contextWindowTokens: 128000 }
+    const generate = vi.spyOn(ai, 'generateTextCompletion').mockImplementation(async (_system, content, options) => {
+      await options.beforeProviderDispatch?.()
+      expect(options).toMatchObject({ explicitModelSelection: true, userId: 'u', agentRunId: 'r', action: 'agent3ContinuityCritic',
+        modelRuntime: { tier: 'speed', provider: 'fixture', modelName: 'fixture', reasoningEffort: 'high', thinkingEnabled: true } })
+      const request = JSON.parse(content)
+      expect(request).toMatchObject({ authorRequest: '检查并修复本章', currentChapter: 'c',
+        sources: [{ chapterId: 'c', revision: 4, orderIndex: 1, source: 'current', content: body }] })
+      for (const entry of table().entries) expect(request.sources[0].evidence).toContain(entry.id.slice(0, 13))
+      f.fees.push({ id: 'legacy-fee', usageSource: 'reported', billingStatus: 'settled', requestTokens: 12, responseTokens: 8, reservedCreditMilli: 0 })
+      const trace = beginTextRequest('legacy-fee').record; trace.status = 'terminal'; trace.billingKnown = true
+      return '{"findings":[]}'
+    })
+    const result = await reviewContinuity(f.ctx, { compilationId: 'comp' }, { allowRepair: false })
+    expect(result).toMatchObject({ reviewCompleted: true, summary: '连续性检查完成 · 0 错误 0 警告' })
+    expect(generate).toHaveBeenCalledOnce()
+    expect(f.report()).toMatchObject({ complete: true, billingKnown: true, rawResponses: ['{"findings":[]}'], usageIds: ['legacy-fee'] })
+    expect(f.chapter.revision).toBe(4); expect(f.chapter.content).toBe(body)
+  })
   it('resumes the same admitted native call interrupted before its first provider registration', async () => {
     const f = runnerFixture(), snapshot = await buildContinuitySnapshot(f.ctx, { compilationId: 'comp' })
     f.ctx.continuityNativeLease = { runId: 'r', userId: 'u' } as NonNullable<ToolContext['continuityNativeLease']>

@@ -49,9 +49,13 @@ describe.each([
 ])('$kind saved review work', ({ action, execute, prepare }) => {
   it('returns the original known failed receipt without advancing a model cursor or asking the provider again', async () => {
     const { receipt } = saved(action)
+    mocks.effect.mockResolvedValueOnce(receipt)
     expect(await execute(context, lease, 'operation')).toEqual(receipt)
     expect(mocks.reduce).not.toHaveBeenCalled()
-    expect(mocks.effect).not.toHaveBeenCalled()
+    if (action === 'continuity_validate') {
+      expect(mocks.effect).toHaveBeenCalledExactlyOnceWith(lease, 'operation', expect.any(String), expect.any(Function))
+      await expect(mocks.effect.mock.calls[0][3](mocks.tx)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+    } else expect(mocks.effect).not.toHaveBeenCalled()
     expect(mocks.failure).not.toHaveBeenCalled()
     expect(mocks.provider).not.toHaveBeenCalled()
   })

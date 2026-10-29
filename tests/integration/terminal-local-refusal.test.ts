@@ -1,23 +1,22 @@
+import { applyTerminalCandidatePatch, hasLegacyTerminalCallEvidence } from '../../api/lib/agent/terminal-candidate-patch.js'
 import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
-import { DataAccessError, prisma } from '../../api/lib/prisma.js'
+import { prisma } from '../../api/lib/prisma.js'
 import { prepareStoryCompilation, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { readReviewRequestRecoveryEvidence, readReviewRequestRecovery } from '../../api/lib/agent/review-request-recovery.js'
 import { listAgentSessionHistoryData } from '../../api/lib/agent/run-service.js'
-import { continuityValidateTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { prepareTerminalProposalInput } from '../../api/lib/agent/terminal-proposal-context.js'
 import { terminalCandidateFacts } from '../../api/lib/agent/terminal-fact-identity.js'
 import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
 import * as proposals from '../../api/lib/agent/terminal-proposal-context.js'
-import * as credits from '../../api/lib/credits.js'
 
 describe.runIf(available)('closed local candidate refusal is not an unknown provider request', () => {
-  it.each([false, true])('the real tool records a local stale delta without dispatch, charging or changing the manuscript; saved candidate=%s', savedCandidate => fixture(async f => {
+  it.each([false, true])('the historical delta reader refuses a stale address without dispatch, charging or changing the manuscript; saved candidate=%s', savedCandidate => fixture(async f => {
     await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0 } })
     const { compilation } = await prepareStoryCompilation({ ...f, mode: 'balanced', intentSummary: 'Review the saved chapter.' })
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
@@ -27,20 +26,15 @@ describe.runIf(available)('closed local candidate refusal is not an unknown prov
     const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
     const network = vi.fn(() => { throw Error('Local refusal must not dispatch') })
     vi.stubGlobal('fetch', network)
-    const result = await continuityValidateTool.execute({ ...f, callId: 'local-live', mode: 'build',
-      creativeFreedom: 'balanced', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }, {
-      compilationId: compilation.id, terminalPatch: { baseCandidateHash: 'f'.repeat(64), removeFactIds: [], addFacts: [] },
-    })
-    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_INPUT_STALE', summary: '章末候选更新未应用',
-      reviewRequestFinished: { version: 1, chapterId: chapter.id, revision: chapter.revision,
-        contentHash: createHash('sha256').update(chapter.content).digest('hex'), usageIds: [] } })
-    expect(result.output).toContain(savedCandidate ? '当前服务器候选' : '当前尚无已保存候选')
+    const base = terminalCandidateSchema.parse({ exitState: savedCandidate ? { objects: ['A sealed packet'] } : {} })
+    expect(() => applyTerminalCandidatePatch(base, { baseCandidateHash: 'f'.repeat(64), removeFactIds: [], addFacts: [] }))
+      .toThrow(expect.objectContaining({ code: 'CONTINUITY_INPUT_STALE' }))
     expect(network).not.toHaveBeenCalled()
     expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
     expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).toEqual(before)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
   }))
-  it.each([false, true])('real proposal preflight with existing reservation=%s preserves dispatch uncertainty', reserved => fixture(async f => {
+  it.each([false, true])('historical invalid proposal input with existing reservation=%s preserves dispatch uncertainty', reserved => fixture(async f => {
     await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0 } })
     const { compilation } = await prepareStoryCompilation({ ...f, chapterId: f.chapterId, mode: 'balanced', intentSummary: 'Review the saved chapter.' })
     const candidate = terminalCandidateSchema.parse({ exitState: { objects: ['A sealed packet'] } })
@@ -53,23 +47,16 @@ describe.runIf(available)('closed local candidate refusal is not an unknown prov
     const callId = 'producer-preflight'
     const reservation = reserved ? await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'continuityReview',
       title: 'Synthetic original reservation', content: '', metadata: { version: 1, callId, continuityAssessmentRequestKey: 'a'.repeat(64) } } }) : null
+    const stored = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
+    await prisma.storyCompilation.update({ where: { id: stored.id }, data: { preparedContext: {
+      ...(stored.preparedContext as object), terminalProposalReview: { version: 1, pending: 'invalid frozen proposal input' } } } })
     const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
-    const prepare = vi.spyOn(proposals, 'prepareCompilerTerminalProposals').mockImplementation(() => {
-      throw new DataAccessError(409, 'TERMINAL_STATE_REVIEW_REQUIRED', 'Synthetic local proposal refusal')
-    })
-    vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
-      baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'high', reasoningEfforts: ['none', 'high'],
-      reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null })
-    const network = vi.fn(() => { throw Error('Local preflight must not dispatch') })
-    vi.stubGlobal('fetch', network)
-    const operation = continuityValidateTool.execute({ ...f, callId, mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced',
-      modelSelection: { tier: 'speed', customModelId: null, reasoningEffort: 'high', provider: 'fixture', modelName: 'fixture', routeRevision: 'a'.repeat(64) },
-      signal: new AbortController().signal, emit: () => {} }, { compilationId: compilation.id, terminalState: candidate })
-    if (reserved) await expect(operation).rejects.toMatchObject({ code: 'TERMINAL_STATE_REVIEW_REQUIRED' })
-    else expect(await operation).toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED',
-      reviewRequestFinished: { version: 1, chapterId: chapter.id, revision: chapter.revision,
-        contentHash: createHash('sha256').update(chapter.content).digest('hex'), usageIds: [] } })
-    expect(prepare).toHaveBeenCalledOnce()
+    const network = vi.fn(() => { throw Error('Historical preflight cannot dispatch') }); vi.stubGlobal('fetch', network)
+    expect(await hasLegacyTerminalCallEvidence(prisma, { runId: f.runId, callId })).toBe(reserved)
+    const context = terminalEvidenceContext(chapter, null, 2, 1)
+    expect(() => proposals.prepareCompilerTerminalProposals({ spec: f.spec, preparedContext: before.preparedContext,
+      validation: before.validation, chapter, source: null, candidate, nextContext: context }))
+      .toThrow(expect.objectContaining({ code: 'TERMINAL_STATE_REVIEW_REQUIRED' }))
     expect(network).not.toHaveBeenCalled()
     expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)

@@ -32,7 +32,7 @@ export function projectCurrentReviewNextStep(readiness: ChapterReviewReadiness) 
 
 export type CurrentReviewNextStep = NonNullable<ReturnType<typeof projectCurrentReviewNextStep>>
 export function currentReviewNextStepGuidance(step: CurrentReviewNextStep) {
-  const facts = `当前 compilationId=${step.compilationId}、chapterId=${step.chapterId}、r${step.revision}：连续性=${step.continuity}，人类感=${step.quality}。`
+  const facts = `当前 compilationId=${step.compilationId}、chapterId=${step.chapterId}、r${step.revision}：连续性=${step.continuity}，人类感=${step.quality}。${step.reviewBoundPlan?.guidance ?? ''}`
   const scope = step.selectionOnly
     ? '原任务仅授权局部范围，使用 chapter_edit_range 的当前唯一逐字锚点，保留范围外正文；不得使用 chapter_write 或 chapter_append 扩大范围。'
     : '根据当前真实报告，在原作者授权内按当前正文的唯一逐字锚点修订；报告本身不扩大写入权限。'

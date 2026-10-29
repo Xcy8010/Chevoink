@@ -6,17 +6,18 @@ import { DataAccessError } from '../../api/lib/prisma.js'
 import { executeCoordinatedWritingServices } from '../../api/lib/agent/writing-service-coordination.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
-const mocks = vi.hoisted(() => ({ tx: { agentOperation: { findUnique: vi.fn(), findUniqueOrThrow: vi.fn() },
+const mocks = vi.hoisted(() => ({ tx: { creditLedgerEntry: { findUnique: vi.fn() }, aiUsageLog: { findMany: vi.fn() }, agentArtifact: { findMany: vi.fn() }, agentOperation: { findMany: vi.fn(), findUnique: vi.fn(), findUniqueOrThrow: vi.fn() },
   agentEffectReceipt: { findUnique: vi.fn() }, agentTaskRoot: { findUniqueOrThrow: vi.fn() }, storyCompilation: { findFirst: vi.fn() }, chapter: { findFirstOrThrow: vi.fn() } },
   admitted: vi.fn(), prepare: vi.fn(), readService: vi.fn(), effect: vi.fn(), failure: vi.fn(), original: vi.fn(), body: vi.fn(),
   continuityWork: vi.fn(), continuity: vi.fn(), qualityWork: vi.fn(), quality: vi.fn(), commit: vi.fn(), compilerHash: vi.fn(), scenes: vi.fn() }))
 vi.mock('../../api/lib/agent/runtime-lease.js', async original => ({ ...await original<object>(), withRunLease: async (_lease: unknown, work: (tx: unknown) => unknown) => work(mocks.tx) }))
-vi.mock('../../api/lib/agent/runtime-tool-cursor.js', () => ({ readAdmittedToolOperation: mocks.admitted }))
+vi.mock('../../api/lib/agent/runtime-tool-cursor.js', async original => ({ ...await original<object>(), readAdmittedToolOperation: mocks.admitted }))
 vi.mock('../../api/lib/agent/runtime-writing-service.js', () => ({ readAdmittedWritingServiceStep: mocks.readService, prepareWritingServiceStep: mocks.prepare,
   writingServiceOperationKey: (parentId: string, step: string) => `writing:${parentId}:${step}` }))
 vi.mock('../../api/lib/agent/runtime-operations.js', () => ({ commitOperationEffect: mocks.effect, recordToolFailure: mocks.failure }))
 vi.mock('../../api/lib/agent/runtime-compiler-observation.js', async original => ({ ...await original<object>(), compilerStateHash: mocks.compilerHash }))
-vi.mock('../../api/lib/agent/original-request.js', () => ({ readOriginalTaskRequest: mocks.original }))
+vi.mock('../../api/lib/agent/original-request.js', async original => ({ ...await original<object>(), readOriginalTaskRequest: mocks.original,
+  originalTaskRunIds: async () => ['run'] }))
 vi.mock('../../api/lib/agent/manuscript-scope.js', () => ({ assertAgentManuscriptCurrent: vi.fn() }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ isAgent2FeatureEnabled: () => false }))
 vi.mock('../../api/lib/agent/tools/durable-chapter.js', () => ({ applyDurableChapterBody: mocks.body }))
@@ -56,6 +57,10 @@ function refreshParent(draftComplete = true) {
 }
 beforeEach(() => {
   vi.resetAllMocks(); operations = new Map(); receipts = new Map(); keys = new Map(); order = []
+  mocks.tx.creditLedgerEntry.findUnique.mockResolvedValue(null)
+  mocks.tx.aiUsageLog.findMany.mockResolvedValue([])
+  mocks.tx.agentArtifact.findMany.mockResolvedValue([])
+  mocks.tx.agentOperation.findMany.mockResolvedValue([])
   ctx = { userId: 'user', novelId: 'novel', chapterId: 'chapter', runId: 'run', sessionId: 'session', callId: 'writer', mode: 'build', qualityMode: 'balanced',
     creativeFreedom: 'balanced', emit: vi.fn(), signal: new AbortController().signal, protectedChapterIds: new Set() }
   spec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'chapter', prompt: '完整写作本章' })
@@ -103,64 +108,102 @@ beforeEach(() => {
 })
 
 const execute = () => executeCoordinatedWritingServices(ctx, lease, 'parent', 'chapter_write')
-describe('one-parent writing service coordination', () => {
-  it('saves a draft without claiming review or commit', async () => {
+const noDispatch = () => {
+  for (const mock of [mocks.prepare, mocks.body, mocks.continuityWork, mocks.continuity, mocks.qualityWork, mocks.quality, mocks.commit]) expect(mock).not.toHaveBeenCalled()
+}
+const bodyResult = () => ({ compilerState: { id: 'compilation', hash: stateHash(1) }, memoryJobId: 'original-memory-job',
+  progress: { kind: 'content_revision', targetId: 'chapter', beforeHash: runtimeJson({ content: '旧正文' }).hash, afterHash: runtimeJson({ content: '新正文' }).hash },
+  toolResult: { output: '正文已保存', summary: '原已保存正文', display: { kind: 'chapterDiff', chapterId: 'chapter', chapterTitle: '章',
+    before: '旧正文', after: '新正文', appliedDirectly: true, revision: 5 } } })
+function historicalStep(step: 'body' | 'continuity' | 'quality' | 'commit', result: unknown, status = 'succeeded') {
+  const action = step === 'body' ? 'chapter_write' : step === 'continuity' ? 'continuity_validate' : step === 'quality' ? 'quality_analyze' : 'chapter_bridge_commit'
+  const snapshot = runtimeJson({ kind: 'internal', action, parentOperationId: 'parent', input: { historical: true, step } })
+  operations.set(step, { id: step, taskRootId: 'root', parentOperationId: 'parent', action, status, inputHash: snapshot.hash, inputSnapshot: snapshot.value })
+  keys.set('writing:parent:' + step, step)
+  return save(step, result, status)
+}
+function historicalParent(status: 'draft_saved' | 'completed' | 'blocked', failedStage?: 'continuity' | 'quality' | 'commit') {
+  const body = bodyResult()
+  const steps = [{ step: 'body', operationId: 'body', resultHash: historicalStep('body', body).resultHash }]
+  if (status !== 'draft_saved') for (const stage of ['continuity', 'quality', 'commit'] as const) {
+    const result = stage === failedStage ? { outcome: 'failed', effectApplied: false, code: 'ORIGINAL_REFUSAL', toolResult: { output: stage + ' original refusal', summary: 'Original refusal' } }
+      : { compilerState: { id: 'compilation', hash: stateHash(2) }, toolResult: { output: stage + ' original report', summary: stage } }
+    steps.push({ step: stage, operationId: stage, resultHash: historicalStep(stage, result, stage === failedStage ? 'failed' : 'succeeded').resultHash })
+    if (stage === failedStage) break
+  }
+  return save('parent', { ...body, writingCompletion: { version: 1, status, steps }, toolResult: { ...body.toolResult,
+    ...(failedStage ? { outcome: 'failed', failureCode: 'ORIGINAL_REFUSAL', output: failedStage + ' original refusal; original saved body retained' } : {}) } })
+}
+
+describe('historical one-parent writing service coordination', () => {
+  it('replays a saved draft without claiming a new review or commit', async () => {
     refreshParent(false)
-    const receipt = await execute()
-    expect(receipt.result).toMatchObject({ writingCompletion: { status: 'draft_saved' } })
-    expect(order).toEqual(['body', 'parent']); expect(mocks.continuity).not.toHaveBeenCalled(); expect(mocks.commit).not.toHaveBeenCalled()
+    const saved = historicalParent('draft_saved'), before = structuredClone(saved), originalOrder = [...order]
+    expect(await execute()).toEqual(saved)
+    expect(saved).toEqual(before); expect(order).toEqual(originalOrder)
+    expect(mocks.effect).toHaveBeenCalledWith(lease, 'parent', operations.get('parent')!.inputHash, expect.any(Function))
+    await expect(mocks.effect.mock.calls[0][3](mocks.tx)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+    expect(mocks.failure).not.toHaveBeenCalled(); noDispatch()
   })
-  it('binds each next step to its genuine predecessor receipt and closes the parent last', async () => {
-    expect((await execute()).result).toMatchObject({ writingCompletion: { status: 'completed', steps: [
-      { step: 'body' }, { step: 'continuity' }, { step: 'quality' }, { step: 'commit' }] } })
-    expect(order).toEqual(['body', 'continuity', 'quality', 'commit', 'parent'])
-    expect(mocks.qualityWork).toHaveBeenCalledWith({ ...ctx, continuityNativeLease: lease }, lease, expect.objectContaining({ serviceReadOnly: true, baseline: { id: 'compilation', hash: stateHash(2) } }))
-    expect(mocks.prepare.mock.calls.map(([, saved]) => saved.baseline?.hash ?? null)).toEqual([null, stateHash(1), stateHash(2), stateHash(3)])
-    expect(mocks.body).toHaveBeenCalledWith({ ...ctx, continuityNativeLease: lease }, mocks.tx, expect.objectContaining({ expectedRevision: 4 }))
-    expect(mocks.failure).not.toHaveBeenCalled()
+  it('retains each genuine predecessor receipt and the closed parent without executing the former chain', async () => {
+    const saved = historicalParent('completed'), originalRows = structuredClone([...operations]), originalReceipts = structuredClone([...receipts])
+    expect(await execute()).toEqual(saved)
+    expect([...operations]).toEqual(originalRows); expect([...receipts]).toEqual(originalReceipts)
+    expect(mocks.failure).not.toHaveBeenCalled(); noDispatch()
   })
-  it('recovers an interruption after the body from its receipt without another body CAS', async () => {
-    mocks.continuityWork.mockRejectedValueOnce(Error('interrupted after body'))
-    await expect(execute()).rejects.toThrow('interrupted after body')
-    expect(operations.get('parent')!.status).toBe('prepared'); expect(receipts.has('body')).toBe(true)
-    expect((await execute()).result).toMatchObject({ writingCompletion: { status: 'completed' } })
-    expect(mocks.body).toHaveBeenCalledOnce(); expect(mocks.continuity).toHaveBeenCalledOnce()
+  it('closes known unfinished historical work after its body without another body CAS', async () => {
+    const body = historicalStep('body', bodyResult()), originalBody = structuredClone(body)
+    const first = await execute()
+    expect(first.result).toMatchObject({ outcome: 'failed', effectApplied: false, code: 'CONTINUITY_REPORT_INCOMPLETE' })
+    expect(await execute()).toEqual(first)
+    expect(receipts.get('body')).toEqual(originalBody)
+    expect(operations.get('body')!.status).toBe('succeeded')
+    expect(mocks.failure).toHaveBeenCalledOnce(); noDispatch()
   })
   it('leaves an unknown provider outcome pending without replaying its saved body', async () => {
-    mocks.continuity.mockRejectedValueOnce(Error('provider result unknown')).mockRejectedValueOnce(new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', 'Original dispatched request'))
-    await expect(execute()).rejects.toThrow('provider result unknown')
+    const body = historicalStep('body', bodyResult()), originalBody = structuredClone(body)
+    const request = runtimeJson({ provider: 'fixture', model: 'fixture', request: { body: { messages: [] } } })
+    const snapshot = runtimeJson({ kind: 'provider', action: 'continuity_critic', parentOperationId: 'continuity', input: {
+      request: request.value, billing: { version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 } } })
+    const physical = { id: 'original-provider', kind: 'provider', status: 'unknown', inputSnapshot: snapshot.value, inputHash: snapshot.hash,
+      attempts: [{ id: 'original-attempt', status: 'unknown', requestSnapshot: request.value, requestHash: request.hash,
+        result: null, resultHash: null, usageReceipt: null }], events: [] }
+    const original = structuredClone(physical)
+    mocks.tx.agentOperation.findMany.mockResolvedValue([physical])
     await expect(execute()).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
-    expect(mocks.body).toHaveBeenCalledOnce(); expect(mocks.quality).not.toHaveBeenCalled(); expect(mocks.commit).not.toHaveBeenCalled()
-    expect(receipts.has('parent')).toBe(false); expect(mocks.failure).not.toHaveBeenCalled()
+    expect(receipts.get('body')).toEqual(originalBody); expect(physical).toEqual(original)
+    expect(receipts.has('parent')).toBe(false); expect(mocks.failure).not.toHaveBeenCalled(); noDispatch()
   })
-  it.each(['continuity', 'quality', 'commit'] as const)('retains a saved body when %s returns a known failed receipt', async stage => {
-    mocks[stage].mockImplementation(async (_ctx, _lease, id) => knownFailure(id, 'ORIGINAL_REFUSAL'))
-    const receipt = await execute()
-    expect(receipt.result).toMatchObject({ writingCompletion: { status: 'blocked' }, toolResult: { outcome: 'failed', failureCode: 'ORIGINAL_REFUSAL',
-      display: { chapterId: 'chapter', revision: 5, after: '新正文' }, output: expect.stringContaining(`${stage} known refusal`) } })
-    expect(receipt.result).not.toHaveProperty('effectApplied', false)
-    expect(operations.get('parent')!.status).toBe('succeeded') // Real saved effect with an explicitly blocked completion.
-    expect(mocks.failure).not.toHaveBeenCalled()
-    if (stage === 'continuity') expect(mocks.quality).not.toHaveBeenCalled()
-    if (stage !== 'commit') expect(mocks.commit).not.toHaveBeenCalled()
+  it.each(['continuity', 'quality', 'commit'] as const)('retains a saved body and original %s failed receipt without restarting that stage', async stage => {
+    const saved = historicalParent('blocked', stage), original = structuredClone(saved), originalRows = structuredClone([...operations])
+    expect(await execute()).toEqual(original)
+    expect(saved.result).toMatchObject({ writingCompletion: { status: 'blocked' }, memoryJobId: 'original-memory-job',
+      progress: { kind: 'content_revision' }, toolResult: { outcome: 'failed', failureCode: 'ORIGINAL_REFUSAL', display: { chapterId: 'chapter', revision: 5, after: '新正文' } } })
+    expect(saved.result).not.toHaveProperty('effectApplied', false)
+    expect([...operations]).toEqual(originalRows); expect(mocks.failure).not.toHaveBeenCalled(); noDispatch()
   })
-  it('does not commit after an incomplete report saved as a business effect', async () => {
-    mocks.continuity.mockImplementation(async (_ctx, _lease, id) => save(id, { compilerState: { id: 'compilation', hash: stateHash(2) },
-      toolResult: { output: 'Original incomplete report', outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE' } }))
-    expect((await execute()).result).toMatchObject({ writingCompletion: { status: 'blocked' } })
-    expect(mocks.commit).not.toHaveBeenCalled(); expect(mocks.failure).not.toHaveBeenCalled()
+  it('does not commit after an incomplete historical report saved as a business effect', async () => {
+    const body = historicalStep('body', bodyResult()), originalBody = structuredClone(body)
+    const report = historicalStep('continuity', { compilerState: { id: 'compilation', hash: stateHash(2) },
+      toolResult: { output: 'Original incomplete report', outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE' } })
+    const originalReport = structuredClone(report)
+    expect((await execute()).result).toMatchObject({ outcome: 'failed', effectApplied: false, code: 'CONTINUITY_REPORT_INCOMPLETE' })
+    expect(receipts.get('body')).toEqual(originalBody); expect(receipts.get('continuity')).toEqual(originalReport)
+    noDispatch()
   })
-  it('records a confirmed body refusal without inventing saved prose or starting a review', async () => {
-    mocks.body.mockRejectedValueOnce(new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', 'User edited the chapter'))
-    expect((await execute()).result).toMatchObject({ outcome: 'failed', effectApplied: false, code: 'CHAPTER_REVISION_CONFLICT' })
-    expect(mocks.continuity).not.toHaveBeenCalled(); expect(mocks.commit).not.toHaveBeenCalled()
-    expect(receipts.get('parent')!.result).not.toHaveProperty('writingCompletion')
+  it('replays a confirmed body refusal without inventing saved prose or starting a review', async () => {
+    const refusal = new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', 'User edited the chapter')
+    const saved = knownFailure('parent', refusal.code), original = structuredClone(saved)
+    expect(await execute()).toEqual(original)
+    expect(saved.result).toMatchObject({ outcome: 'failed', effectApplied: false, code: 'CHAPTER_REVISION_CONFLICT' })
+    expect(receipts.has('body')).toBe(false); expect(mocks.failure).not.toHaveBeenCalled(); noDispatch()
   })
-  it('recovers a lost body-commit reply by reading the durable receipt', async () => {
-    const original = mocks.effect.getMockImplementation()!
-    mocks.effect.mockImplementationOnce(async (...args) => { await original(...args); throw Error('body commit reply lost') })
-    await expect(execute()).rejects.toThrow('body commit reply lost')
-    expect((await execute()).result).toMatchObject({ writingCompletion: { status: 'completed' } })
-    expect(mocks.body).toHaveBeenCalledOnce(); expect(mocks.failure).not.toHaveBeenCalled()
+  it('recovers a lost original receipt reply without another body transaction', async () => {
+    const saved = historicalParent('completed'), originalReceipt = structuredClone(saved), original = mocks.effect.getMockImplementation()!
+    mocks.effect.mockImplementationOnce(async (...args) => { await original(...args); throw Error('original receipt reply lost') })
+    await expect(execute()).rejects.toThrow('original receipt reply lost')
+    expect(await execute()).toEqual(originalReceipt)
+    expect(receipts.get('body')).toMatchObject({ result: { memoryJobId: 'original-memory-job', progress: { kind: 'content_revision' } } })
+    expect(mocks.failure).not.toHaveBeenCalled(); noDispatch()
   })
 })

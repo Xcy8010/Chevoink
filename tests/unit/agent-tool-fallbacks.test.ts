@@ -4,6 +4,7 @@ import { buildAgentIdentityPrompt } from '../../api/lib/agent/context.js'
 import { parseResearchSynthesis } from '../../api/lib/agent/research-dossier.js'
 import { coerceToolArgumentEnvelope } from '../../api/lib/agent/tools/argument-coercion.js'
 import { getToolByName } from '../../api/lib/agent/tools/registry.js'
+import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.js'
 import { parseIndependentContinuityResult, parseContinuityPatches, continuityReviewTail, continuityCriticSystem } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { BUILT_IN_MODEL_TIERS, type ResearchDossierBuild } from '../../shared/contracts/index.js'
 import { AGENT_PANEL_WIDTH_LIMITS, WORK_CONVERSATION_WIDTH_LIMITS } from '../../src/features/studio/panel-widths.js'
@@ -127,7 +128,7 @@ describe('Agent 工具协议与结构化输出兜底', () => {
     expect(parseIndependentContinuityResult('{"findings":[]}')).toEqual({ findings: [], structured: true })
     expect(parseIndependentContinuityResult(JSON.stringify({ issues: [{ signal: 'body', severity: 'warning', evidence: '伤势前后不一致', suggestion: '保留伤势限制' }] }))).toMatchObject({ structured: true, findings: [{ signal: 'body' }] })
     const tool = getToolByName('continuity_validate')
-    expect(tool?.parameters.safeParse(tool.coerceArgs?.({ compilation_id: 'compilation-1' })).success).toBe(true)
+    expect(tool?.parameters.parse(normalizeToolInput(tool!, { compilation_id: 'compilation-1' }))).toMatchObject({ compilationId: 'compilation-1' })
     expect(tool?.parameters.safeParse({}).success).toBe(true)
   })
 })
