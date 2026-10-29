@@ -1,3 +1,5 @@
+import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
+import { currentNativeToolViews, readFrozenModelToolViews } from './runtime-tool-view.js'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -265,7 +267,8 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
       || state.frame.state.turn !== source.state.turn + 1 || state.frame.state.nextOperationSequence !== source.state.nextOperationSequence + 1
       || runtimeJson(state.frame.state.messages).hash !== runtimeJson(source.state.messages).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '未派发模型请求缺少原准入位置。')
     await assertProviderBudget(tx, lease.taskRootId)
-    return { state: { ...state, frame: source } }
+    if (runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原模型请求输入损坏。')
+    return { state: { ...state, frame: source }, preparedTools: readFrozenModelToolViews(operation.inputSnapshot) }
   })
   if (!prepared) {
     const writingDelivery = await advanceDurableWritingDelivery(lease)
@@ -274,8 +277,7 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
     if (memory) return memory
     const tool = await executeDurableToolStep(lease, signal)
     if (tool.kind !== 'idle') return tool
-    const stagnation = await advanceDurableToolStagnation(lease)
-    if (stagnation) return stagnation
+    await advanceDurableToolStagnation(lease)
     const context = await advanceDurableContext(lease)
     if (context) return { kind: 'context' as const, frame: context }
     const checkpoint = await advanceDurableCheckpoint(lease)
@@ -294,7 +296,7 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
     await assertProviderBudget(tx, lease.taskRootId)
     return { state }
   })
-  if ('review' in current) return { kind: 'completion_review' as const, frame: current.frame,
+  if ('review' in current && current.review === true) return { kind: 'completion_review' as const, frame: current.frame,
     evidence: await collectDurableCompletionEvidence(lease, { expectedRevision: current.frame.revision, expectedHash: current.frame.snapshotHash }) }
   const { configuration, frame } = current.state
   const tier = durableModelTier.safeParse(configuration.model.tier)
@@ -314,7 +316,8 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
     const compacted = await advanceDurableContext(lease, inputLimit)
     if (compacted) return { kind: 'context' as const, frame: compacted }
   }
-  if (estimateChatMessagesTokens(frame.state.messages) + estimateToolDefinitionTokens(configuration.tools) > inputLimit) {
+  const tools = prepared?.preparedTools ?? await currentNativeToolViews(configuration.tools, taskSpecSchema.parse(current.state.originalSpec).scope)
+  if (estimateChatMessagesTokens(frame.state.messages) + estimateToolDefinitionTokens(tools) > inputLimit) {
     return runtimeError('RUNTIME_CONTEXT_LIMIT', '原请求、工具定义或不可再归档内容超过模型输入预算；已保留完整原文，不截掉要求或盲目重试模型。')
   }
   const operationKey = `exec:${frame.state.nextOperationSequence}`
@@ -322,7 +325,7 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   const price = child ? verifyChildGrant(child).price : await resolveDurableTokenPrice(lease, operationKey, tier.data, runtime.multiplierBps)
   if (price.modelTier !== tier.data) return runtimeError('RUNTIME_PRICE_INVALID', '冻结价目与当前模型身份不一致。')
   signal.throwIfAborted()
-  const result = await chatWithTools({ messages: frame.state.messages, tools: configuration.tools,
+  const result = await chatWithTools({ messages: frame.state.messages, tools,
     provider: runtime.provider, model: runtime.modelName ?? env.aiTextModel, providerBaseUrl: runtime.baseUrl,
     providerApiKey: runtime.apiKey, reasoningEffort: effort.data, maxOutputTokens, signal,
     durableExecution: { lease, operationKey, attemptKey: '1', price, cursor: { expectedRevision: frame.revision, expectedHash: frame.snapshotHash } },
@@ -414,11 +417,6 @@ export async function runReviewedDurableExecution(token: RunLeaseToken, signal: 
       await pauseDurableTaskForAttention(lease, { expectedRevision: step.frame.revision, expectedHash: step.frame.snapshotHash }, 'needs_input')
       return { kind: 'needs_attention' as const, reason: '原任务存在待核对操作或缺少有效权限，已保留进度；不能盲目重试或宣称完成。',
         frame: step.frame, blockers: obligation.blockers }
-    }
-    if (obligation?.kind === 'needs_attention') {
-      signal.throwIfAborted()
-      await pauseDurableTaskForAttention(lease, { expectedRevision: obligation.frame.revision, expectedHash: obligation.frame.snapshotHash })
-      return obligation
     }
     signal.throwIfAborted()
     // Finalization revokes the lease: it must run after the heartbeat has stopped.

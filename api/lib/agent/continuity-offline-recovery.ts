@@ -6,12 +6,10 @@ import { activeChapterScope } from '../data/internal.js'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches, COMPILER_CONTINUITY_PROTOCOL } from './compiler-continuity-contract.js'
 import { inspectContinuityResponse } from './continuity-format-recovery.js'
 import { readContinuedContinuityRecovery } from './legacy-continuity-recovery.js'
-import { readWritingScope, lockWritingRunLineage } from './writing-scope.js'
+import { readWritingScope } from './writing-scope.js'
 import { originalTaskRunIds } from './original-request.js'
 import { runtimeJson } from './runtime-common.js'
-import { validateStoryContinuity, validatedContinuityCheckRounds } from './story-compiler.js'
-import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
-import { DataAccessError } from '../prisma.js'
+import { validatedContinuityCheckRounds } from './story-compiler.js'
 import { isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
@@ -73,28 +71,4 @@ export async function readOfflineContinuityRecovery(tx: Prisma.TransactionClient
     originalParserVersion: 3, classification: 'complete', admissionKey, sourceCallId: String(callPayload.callId), sourceRunId: call.runId,
     sourceResultId: result.id, usageIds: paid.map(row => row.id), rawHash: inspected.audit.contentHash, characterCount: inspected.audit.characterCount,
     coverageHash: runtimeJson(coverage).hash, sourceRelocations: inspected.audit.sourceRelocations }, chapter, coverage }
-}
-
-/** Final proof and report application share the chapter/compiler locks. No
- * model request, reserve, manuscript mutation or ledger mutation is involved. */
-export async function applyOfflineContinuityRecovery(tx: Prisma.TransactionClient, subject: Subject & { signal?: AbortSignal }, input: Input,
-  expected: NonNullable<Awaited<ReturnType<typeof readOfflineContinuityRecovery>>>) {
-  await lockWritingRunLineage(tx, subject)
-  await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${input.compilationId} FOR UPDATE`
-  await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${expected.chapter.id} FOR UPDATE`
-  const bridge = await tx.chapterBridge.findUnique({ where: { compilationId: input.compilationId } })
-  if (bridge?.fromChapterId) await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${bridge.fromChapterId} FOR SHARE`
-  await assertAgentManuscriptCurrent(tx, subject)
-  subject.signal?.throwIfAborted()
-  const current = await readOfflineContinuityRecovery(tx, subject, input)
-  if (!current || current.validationHash !== expected.validationHash || runtimeJson(current.audit).hash !== runtimeJson(expected.audit).hash) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '原连续性响应或作者继续凭据已变化，未离线应用旧结果。')
-  const row = await tx.storyCompilation.findUniqueOrThrow({ where: { id: input.compilationId } }), prior = object(row.validation)
-  const report = await validateStoryContinuity({ ...subject, ...input, findings: current.findings, expectedChapterRevision: current.chapter.revision,
-    independentCheck: 'complete', coverage: current.coverage }, tx)
-  if (report.independentCheck !== 'complete') throw new DataAccessError(409, 'CONTINUITY_EVIDENCE_UNLOCATED', '原引文未完成当前正文核对，未应用离线恢复。')
-  const preserved = { ...prior, ...report, checkedAt: prior.checkedAt, checkRounds: prior.checkRounds, autoRepairRounds: prior.autoRepairRounds,
-    continuityCriticResponse: prior.continuityCriticResponse, continuityFormatRecovery: { ...current.audit, recoveredAt: new Date().toISOString() } }
-  await tx.storyCompilation.update({ where: { id: input.compilationId }, data: { validation: runtimeJson(preserved).value } })
-  subject.signal?.throwIfAborted()
-  return { ...report, checkedAt: String(prior.checkedAt) }
 }

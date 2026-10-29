@@ -1,3 +1,4 @@
+import { historicalEffectiveReportFixture } from '../helpers/historical-effective-report-fixture.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
@@ -14,7 +15,7 @@ import * as originals from '../../api/lib/agent/original-request.js'
 import { buildContinuityReviewManifest, inspectContinuityV4, normalizeContinuityV4ProjectionV2 } from '../../api/lib/agent/continuity-review-v4.js'
 import { continuitySubjectIdentity } from '../../api/lib/agent/continuity-subject-identity.js'
 import { authenticateEffectiveContinuityReport, authenticateSupplementalContinuityReport, continuityModelPriceHash, continuityUsageRowHash,
-  readNormalizedContinuityCoverageOrigins, reconstructContinuitySourceProvenance, stageEffectiveContinuityReport } from '../../api/lib/agent/continuity-coordinator.js'
+  readNormalizedContinuityCoverageOrigins, reconstructContinuitySourceProvenance } from '../../api/lib/agent/continuity-coordinator.js'
 import { terminalInputDecisionFixture } from '../helpers/terminal-input-decision-fixture.js'
 import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
@@ -247,15 +248,13 @@ async function fixture(damage?: 'ledger' | 'history' | 'projection' | 'current' 
     version: 1, requestId, requestHash: question.requestHash, originReportHash: runtimeJson(originAudit).hash,
     reportHash: runtimeJson(normalized.audit).hash, frozenInputHash: inputHash, rawHash: marker.rawHash, derivationHash: marker.derivationHash,
     usageId: fee.id, reportComplete: true } })
-  const stagingDb = { ...db, agentArtifact: { ...db.agentArtifact, create: vi.fn(async ({ data }: { data: { id: string; metadata: unknown } }) => {
-    add(data.id, obj(data.metadata)); return rows.at(-1)
-  }) } } as unknown as Prisma.TransactionClient
+  const historical = historicalEffectiveReportFixture({ runId: subject.runId, compilationId: target.compilationId, audit: normalized.audit, previousValidation: {} })
+  add(historical.artifact.id, obj(historical.artifact.metadata))
   const validation = { checkedChapterId: chapter.id, checkedRevision: chapter.revision, independentCheck: 'complete',
     terminalCandidate: candidate, continuityCriticResponse: normalized.audit,
     coverage: compilerContinuityCoverage({ chapter, bridge: { fromChapterId: source?.id ?? null, sourceRevision: source?.revision ?? null },
       sceneTasks: [], source, terminalCandidate: candidate }, 11),
-    effectiveReport: await stageEffectiveContinuityReport(stagingDb, subject, { compilationId: target.compilationId,
-      audit: normalized.audit, previousValidation: {} }) }
+    effectiveReport: historical.pointer }
   expect(validation.effectiveReport).toBeDefined()
   return { subject, spec, db, rows, fees, projection, target, audit: normalized.audit, frozen, candidate, chapter, coverage, inherited, write,
     canonical, source, evidence, validation }

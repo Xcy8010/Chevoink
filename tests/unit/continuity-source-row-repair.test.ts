@@ -1,8 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { continuityRecoveryFixture } from '../helpers/continuity-recovery-fixture.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { continuityResponseRepairPlan, applyContinuitySparseRepair } from '../../api/lib/agent/continuity-response-repair.js'
-import { applyContinuityReassessment, runContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { applyContinuityReassessment, failedContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { currentTerminalReview, terminalReviewFailure } from '../../api/lib/agent/terminal-state-review.js'
 import { terminalReportRecoveryResult } from '../../api/lib/agent/terminal-report-recovery.js'
 
@@ -68,17 +68,19 @@ describe('protocol5 repairs strict source failures inside the original second sl
     expect(terminalReportRecoveryResult(validation, f.content, f.context, null)).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE', reviewCompleted: false })
     expect(currentTerminalReview(validation, f.content, f.context)).toBeNull()
   })
-  it.each(['billing', 'provider', 'slot'] as const)('does not claim or dispatch a second request with unknown %s', async kind => {
-    const f = semanticFixture(), claim = vi.fn(async () => true), dispatch = vi.fn(async () => ({ content: JSON.stringify(f.patch), complete: true }))
-    const result = await runContinuityReassessment({ original: f.original, bodies: f.bodies, system: 'Independent reviewer.', content: 'Frozen source.', reassessmentProtocol: 5,
-      billingKnown: kind !== 'billing', providerComplete: kind !== 'provider', slotUsed: kind === 'slot', signal: new AbortController().signal, assertCurrent: async () => {}, claim, dispatch })
-    expect(result).toBe(f.original); expect(claim).not.toHaveBeenCalled(); expect(dispatch).not.toHaveBeenCalled()
+  it.each(['billing', 'provider', 'slot'] as const)('replays existing source-invalid data with historical unresolved %s unchanged', async kind => {
+    const f = semanticFixture(), receipt = { billingKnown: kind !== 'billing', providerComplete: kind !== 'provider', slotUsed: kind === 'slot' }
+    const before = JSON.stringify({ receipt, audit: f.original.audit })
+    const result = inspectContinuityResponse(f.raw, f.bodies, true, 8, f.candidate, undefined, { responseContract: 3 })
+    expect(result).toEqual(f.original); expect(result.complete).toBe(false)
+    expect(JSON.parse(result.audit.rawResponse.content)).toBe(f.raw)
+    expect(JSON.stringify({ receipt, audit: f.original.audit })).toBe(before)
   })
-  it('uses exactly one claimed second request and retains failed5 diagnostics when its response remains invalid', async () => {
-    const f = semanticFixture(), dispatch = vi.fn(async () => ({ content: f.raw, complete: true })), claim = vi.fn(async () => true)
-    const result = await runContinuityReassessment({ original: f.original, bodies: f.bodies, system: 'Independent reviewer.', content: 'Frozen source.', reassessmentProtocol: 5,
-      billingKnown: true, providerComplete: true, slotUsed: false, signal: new AbortController().signal, assertCurrent: async () => {}, claim, dispatch })
+  it('replays the actual second response and retains failed5 diagnostics when it remains invalid', async () => {
+    const f = semanticFixture()
+    const result = failedContinuityReassessment(f.original, f.raw, true, f.bodies, 5)
     expect(result).toMatchObject({ complete: false, audit: { reassessment: { protocol: 5, kind: 'sparse_table_repair_failed' } } })
-    expect(claim).toHaveBeenCalledOnce(); expect(dispatch).toHaveBeenCalledOnce()
+    expect(result.audit).toMatchObject({ reassessment: { rawResponse: { content: JSON.stringify(f.raw), complete: true } } })
+    expect(JSON.parse(f.original.audit.rawResponse.content)).toBe(f.raw)
   })
 })

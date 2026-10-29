@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
-import { validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { terminalCandidateSchema, currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
@@ -68,39 +67,44 @@ function fixture(parser: 8 | 9 = 9) {
       && where.agentRunId === usage.agentRunId && where.targetId === usage.targetId && where.targetType === usage.targetType ? [usage] : []) },
   }
   const coverage = compilerContinuityCoverage({ chapter, bridge, sceneTasks, source: null, terminalCandidate: candidate }, 11)
-  const save = () => validateStoryContinuity({ ...subject, expectedChapterRevision: chapter.revision, terminalCandidate: candidate,
-    coverage, independentCheck: 'complete', findings: [], continuityCriticResponse: bound.audit }, db as unknown as Prisma.TransactionClient)
-  return { subject, spec, chapter, candidate, context, rows, usage, db, update, save, bound }
+  const validation = { checkedChapterId: chapter.id, checkedRevision: chapter.revision, terminalCandidate: candidate, coverage,
+    independentCheck: 'complete', findings: [], continuityCriticResponse: bound.audit }
+  const read = async () => {
+    const binding = await authority.readTerminalDraftBinding(db as unknown as Prisma.TransactionClient, subject,
+      { taskId: spec.id, preparedContext: {} }, chapter, validation, context)
+    return { binding, review: currentTerminalReview(validation, chapter.content, context, binding) }
+  }
+  return { subject, spec, chapter, candidate, context, rows, usage, db, update, read, bound, validation }
+
 }
 
-describe('compiler save preserves optional terminal coverage semantics', () => {
-  it('authenticates and saves parser9 without inventing optional coverage', async () => {
-    const f = fixture(), read = vi.spyOn(authority, 'readTerminalDraftBinding')
-    const validation = await f.save()
-    expect(read).toHaveBeenCalledOnce()
+describe('read-only compiler history preserves optional terminal coverage', () => {
+  it('authenticates the stored parser9 report without inventing optional coverage or saving it as current', async () => {
+    const f = fixture(), original = JSON.stringify({ rows: f.rows, usage: f.usage, validation: f.validation })
+    const result = await f.read()
+    expect(result.binding.reviewAuthority).toBeDefined()
+    expect(result.review).toMatchObject({ supported: true })
     expect(f.db.aiUsageLog.findMany).toHaveBeenCalledOnce()
-    const binding = await read.mock.results[0].value
-    expect(binding.reviewAuthority).toBeDefined()
-    expect(currentTerminalReview(validation, f.chapter.content, f.context, binding)).toMatchObject({ supported: true })
-    expect(validation).toMatchObject({ independentCheck: 'complete', continuityCriticResponse: f.bound.audit })
-    expect(f.update).toHaveBeenCalledOnce()
-    expect(f.update.mock.calls[0][0].data).not.toHaveProperty('preparedContext')
     expect(f.context).not.toHaveProperty('factCoverage')
+    expect(f.update).not.toHaveBeenCalled()
+    expect(JSON.stringify({ rows: f.rows, usage: f.usage, validation: f.validation })).toBe(original)
   })
-  it.each(['missing-grant', 'unknown-billing', 'context-drift'] as const)('refuses %s before saving the complete report', async fault => {
+  it.each(['missing-grant', 'unknown-billing', 'context-drift'] as const)('cannot interpret %s as an authenticated historical report', async fault => {
     const f = fixture()
     if (fault === 'missing-grant') f.rows.splice(0, 1)
     if (fault === 'unknown-billing') f.usage.usageSource = 'unknown'
     if (fault === 'context-drift') f.context.current.revision++
-    await expect(f.save()).rejects.toMatchObject({ code: fault === 'context-drift' ? 'CONTINUITY_INPUT_STALE' : 'RUNTIME_RECONCILIATION_REQUIRED' })
+    const result = await f.read()
+    expect(result.review).toBeNull()
+    expect(result.binding.reviewAuthority).toBeUndefined()
     expect(f.update).not.toHaveBeenCalled()
   })
-  it('retains the frozen parser8 save path when optional coverage is absent', async () => {
-    const f = fixture(8), read = vi.spyOn(authority, 'readTerminalDraftBinding')
-    const validation = await f.save()
-    expect(validation).toMatchObject({ independentCheck: 'complete', continuityCriticResponse: f.bound.audit })
-    expect(read).not.toHaveBeenCalled()
-    expect(f.db.agentArtifact.findMany).not.toHaveBeenCalled()
-    expect(f.update).toHaveBeenCalledOnce()
+  it('retains the exact parser8 audit and optional-coverage absence without applying or upgrading it', async () => {
+    const f = fixture(8), before = JSON.stringify(f.bound.audit)
+    expect(f.bound).toMatchObject({ complete: true, audit: { parserVersion: 8 } })
+    expect(f.context).not.toHaveProperty('factCoverage')
+    expect(inspectAuthenticatedContinuityAssessment(JSON.parse(f.bound.audit.rawResponse.content), f.rows[0].metadata.input!, true).audit.parserVersion).toBe(8)
+    expect(JSON.stringify(f.bound.audit)).toBe(before)
+    expect(f.update).not.toHaveBeenCalled()
   })
 })

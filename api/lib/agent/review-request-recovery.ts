@@ -186,6 +186,15 @@ export async function readReviewRequestRecoveryEvidence(tx: Prisma.TransactionCl
         } catch { /* Missing/unknown/terminal-bearing histories stay unresolved. */ }
       }
     }
+    // The old body-only producer rejected this phase before reserve/send.
+    // Authenticate the closed owned call and unchanged source, exact absence
+    // of its reservation, and (below) every related actual billing receipt.
+    if (!typed && !localPatchRefusal && item.toolName === 'continuity_validate'
+      && payload.failureCode === 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' && scope.continuityReportProtocol === 5
+      && !source.taskRootId && source.runtimeProtocolVersion === 0 && item.compilationId
+      && Object.keys(args).length === 1 && args.compilationId === item.compilationId
+      && chapter.revision === item.revision && chapter.updatedAt <= call.createdAt
+      && !await hasLegacyTerminalCallEvidence(tx, { runId: call.runId, callId: item.callId })) localPatchRefusal = true
     // Frozen contract5 reserves a compiler assessment before any provider
     // request. A closed, unchanged initial call with no reservation or usage
     // has not spent that phase; an error label or absent fee alone proves none.

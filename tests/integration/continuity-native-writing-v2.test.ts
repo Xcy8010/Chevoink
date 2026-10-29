@@ -1,12 +1,16 @@
+import * as nativeQuality from '../../api/lib/agent/tools/durable-quality.js'
+import { chatWithTools } from '../../api/lib/ai-service.js'
+import { modelRouteRevision } from '../../api/lib/agent/runtime-model-cursor.js'
+import { currentNativeToolViews } from '../../api/lib/agent/runtime-tool-view.js'
+import { advanceDurableMemory } from '../../api/lib/agent/runtime-memory.js'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { available, claim, fixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { initializeExecutionState, loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
-import { coordinatedWriterParameters } from '../../api/lib/agent/coordinated-writing-input.js'
 import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
-import { chapterWriteTool, chapterEditRangeTool } from '../../api/lib/agent/tools/chapter-tools.js'
+import { chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { storyCompilerPrepareTool, sceneTaskBuildTool, continuityValidateTool, chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import { advanceDurableWritingDelivery } from '../../api/lib/agent/runtime-writing-delivery.js'
@@ -14,8 +18,6 @@ import { finalizeDurableTask, pauseDurableTask } from '../../api/lib/agent/runti
 import { runReviewedDurableExecution } from '../../api/lib/agent/runtime-executor.js'
 import { collectDurableCompletionEvidence } from '../../api/lib/agent/runtime-completion-evidence.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
-import * as continuity from '../../api/lib/agent/tools/durable-continuity.js'
-import * as compiler from '../../api/lib/agent/story-compiler.js'
 import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
 import { loadPersistedEvents } from '../../api/lib/agent/events.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
@@ -25,7 +27,7 @@ import { withRunLease } from '../../api/lib/agent/runtime-lease.js'
 import { assertContinuityOwner } from '../../api/lib/agent/continuity-coordinator.js'
 import type { AgentTool } from '../../api/lib/agent/tools/types.js'
 
-describe.runIf(available)('fresh native writing manifest2 actual bounded chain', () => {
+describe.runIf(available)('current native writing and historical configuration actual bounded chain', () => {
   it('accepts queued only through the exact current native lease and rejects stale, foreign or ended owners', () => fixture(async f => {
     let lease = await claim(f)
     await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'balanced',
@@ -54,7 +56,6 @@ describe.runIf(available)('fresh native writing manifest2 actual bounded chain',
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
   }))
   it.each(['no-effect', 'normalized-cross-chunk', 'ordinary-presentation', 'merged-revision', 'merged-revision-restart'] as const)('%s uses original receipts and deterministic completion', scenario => fixture(async f => {
-    const reportEffects = vi.spyOn(compiler, 'validateStoryContinuity')
     let lease = await claim(f)
     const changed = scenario === 'merged-revision' || scenario === 'merged-revision-restart'
     const prompt = scenario === 'ordinary-presentation' ? '完整重写当前章节' : '完整重写当前章节，只输出标题和正文。'
@@ -62,21 +63,15 @@ describe.runIf(available)('fresh native writing manifest2 actual bounded chain',
     const baseContent = '他合上箱盖，核对锁扣。锁扣一直扣紧。'
     const content = changed ? `${baseContent}锁扣此刻完全松开。` : scenario === 'normalized-cross-chunk' ? `${'x'.repeat(290)}${baseContent}` : baseContent
     const after = changed ? '他合上箱盖，核对锁扣。锁扣一直扣紧。他没有解开锁扣，只把箱子推近灯下。' : content
-    const writing = { draftComplete: true, actualOutcomes: { exitState: { objects: ['锁扣一直扣紧。'] } },
-      scenes: [{ purpose: '检查箱子', goal: '核对锁扣', obstacle: '灯光不足', choice: '挪近灯光', cost: '时间', turn: '核对完成' }],
-      chapterSummary: '他核对箱子的锁扣，箱子仍然锁着。', hookDecision: '', delayedHookReason: '', openingStructure: '核对锁扣', endingStructure: '箱子保持锁好' }
-    const args = { chapterId: f.chapterId, content, writing }
-    const tools: AgentTool[] = [chapterReadTool, { ...chapterWriteTool, parameters: coordinatedWriterParameters(chapterWriteTool, f.spec.scope) },
-      { ...chapterEditRangeTool, parameters: coordinatedWriterParameters(chapterEditRangeTool, f.spec.scope) }, storyCompilerPrepareTool,
-      sceneTaskBuildTool, continuityValidateTool, qualityAnalyzeTool, chapterBridgeCommitTool]
-    await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'balanced',
-      model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+    const tools: AgentTool[] = [chapterReadTool, chapterWriteTool, storyCompilerPrepareTool, sceneTaskBuildTool, continuityValidateTool, qualityAnalyzeTool, chapterBridgeCommitTool]
+    const route = { provider: 'fixture', model: 'fixture', endpoint: 'https://provider.invalid/v1/chat/completions', reasoningEffort: 'high' }
+    const initialized = await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'balanced',
+      model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: modelRouteRevision(route) },
       tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } })),
       toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
       snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
-        successfulToolSignatures: [], messages: [{ role: 'user', content: prompt }, { role: 'assistant', content: null,
-          toolCalls: [{ id: 'read', name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) },
-            { id: 'write', name: 'chapter_write', arguments: JSON.stringify(args) }] }] } })
+        successfulToolSignatures: [], messages: [{ role: 'user', content: prompt }] } })
+    const configurationHash = initialized.head.configurationHash
     const runtime = { tier: 'speed' as const, multiplierBps: 15000, provider: 'fixture', modelName: 'fixture', baseUrl: 'https://provider.invalid/v1',
       apiKey: 'isolated-placeholder', reasoningEffort: 'high' as const, reasoningEfforts: ['none', 'high'] as Array<'none' | 'high'>,
       reasoningParameterMode: 'native' as const, thinkingEnabled: false, visionEnabled: false, contextWindowTokens: 128000 }
@@ -86,89 +81,108 @@ describe.runIf(available)('fresh native writing manifest2 actual bounded chain',
     vi.spyOn(prices, 'resolveDurableTokenPrice').mockResolvedValue(price)
     const window = credits.getCreditWindow()
     await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
-    let requests = 0
+    let requests = 0, mainRequests = 0
     const fetcher = vi.fn(async (_url: unknown, init: RequestInit) => {
+      const body = JSON.parse(String(init.body))
+      if (body.tools) {
+        mainRequests++
+        expect(body.reasoning_effort).toBe('high')
+        expect(JSON.stringify(body.tools)).not.toContain('actualOutcomes')
+        expect(body.tools.find((tool: { function: { name: string } }) => tool.function.name === 'chapter_write').function.parameters.properties).not.toHaveProperty('writing')
+        const observations = body.messages.filter((message: { role: string }) => message.role === 'tool').map((message: { content: string }) => message.content).join('\n')
+        const compilationId = observations.match(/compilationId=([a-zA-Z0-9_-]+)/u)?.[1]
+        const calls = !observations ? [
+          { name: 'story_compiler_prepare', args: { chapterId: f.chapterId, intentSummary: '核对箱子锁扣' } },
+          { name: 'scene_task_build', args: { tasks: [{ purpose: '检查箱子', entryState: {}, goal: '核对锁扣', obstacle: '灯光不足', choice: '挪近灯光', cost: '时间', turn: '核对完成', exitState: {}, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] } },
+          { name: 'chapter_read', args: { chapterId: f.chapterId } }, { name: 'chapter_write', args: { chapterId: f.chapterId, content } },
+        ] : [{ name: 'chapter_bridge_commit', args: { compilationId } }]
+        if (observations) { expect(compilationId).toBeTruthy(); expect(observations).toContain('保存') }
+        return new Response(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: calls.map((call, index) => ({ index, id: `main-${mainRequests}-${index}`, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.args) } })) }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 20, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`)
+      }
       requests++
-      const body = JSON.parse(String(init.body)), system = String(body.messages[0].content), material = String(body.messages[1].content)
-      expect(body.tools).toBeUndefined()
-      let report: unknown
-      if (system.includes('一次集中局部修订编辑')) {
+      const system = String(body.messages[0].content), material = String(body.messages[1].content)
+      let report: unknown = { findings: [] }
+      if (system.includes('你是中文小说连续性编辑')) {
+        const input = JSON.parse(material), current = input.sources.find((source: { source: string }) => source.source === 'current')
+        expect(current.content).toContain(changed && current.content.includes('完全松开') ? '锁扣此刻完全松开。' : '锁扣一直扣紧。')
+        const entries = String(current.evidence).split('\n').flatMap(line => { const match = line.match(/^(q[a-f0-9]{12}) (.+)$/u); return match ? [{ sourceId: match[1], text: JSON.parse(match[2]) as string }] : [] })
+        expect(entries.map(entry => entry.text).join('')).toBe(current.content)
+        const conflict = entries.find(entry => entry.text === '锁扣此刻完全松开。'), baseline = entries.find(entry => entry.text === '锁扣一直扣紧。')
+        if (changed && current.content.includes('完全松开')) { expect(conflict).toBeDefined(); expect(baseline).toBeDefined() }
+        if (scenario === 'normalized-cross-chunk') { expect(current.content.indexOf(baseContent)).toBe(290); expect(entries.length).toBeGreaterThan(1) }
+        report = { findings: changed && current.content.includes('完全松开') ? [{ signal: 'object', severity: 'error',
+          explanation: '同一时刻锁扣被描述为扣紧和完全松开。', suggestion: '保留扣紧的已有动作，把箱子推到灯下核对。', evidence: [{ sourceId: conflict!.sourceId }, { sourceId: baseline!.sourceId }] }] : [] }
+      } else if (system.includes('"patches"') && material.startsWith('{')) {
         const input = JSON.parse(material)
-        report = { patches: [{ oldText: '锁扣此刻完全松开。', newText: '他没有解开锁扣，只把箱子推近灯下。' }],
-          retainedFindings: input.findings.filter((finding: { source: string }) => finding.source === 'quality').map((finding: { source: string; reportId: string; findingId: string }) =>
-            ({ source: finding.source, reportId: finding.reportId, findingId: finding.findingId, reason: '保留本次朴素核对动作的原表达，未声称质量意见已消失。' })) }
-      } else if (system.includes('contract5')) {
-        const input = JSON.parse(material), initial = requests === 1
-        report = { findings: changed && initial ? [{ findingId: 'f0', signal: 'object', severity: 'error', reasonCode: 'manuscript_conflict',
-          explanation: '同一时刻锁扣被描述为扣紧和完全松开。', suggestion: '根据本章实际动作统一锁扣状态。',
-          manuscriptEvidence: [{ segmentId: 'c0', quote: '锁扣一直扣紧。' }, { segmentId: 'c0', quote: '锁扣此刻完全松开。' }] }] : [],
-        semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: changed && initial && kind === 'state_progression' ? 'conflict' : 'clear',
-          reasonCode: changed && initial && kind === 'state_progression' ? 'manuscript_conflict' : 'consistent', explanation: '独立核对本次完整正文的动作和状态。',
-          findingIds: changed && initial && kind === 'state_progression' ? ['f0'] : [] })),
-        terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', reasonCode: 'consistent', explanation: '当前正文直接记载锁扣扣紧。',
-          manuscriptEvidence: scenario === 'normalized-cross-chunk' ? [{ segmentId: 'c1', quote: baseContent }] : [{ segmentId: 'c0' }] }],
-        terminalProofVerdicts: [], terminalDispositions: [], issueDispositions: input.establishedIssues.map((_issue: unknown, issueIndex: number) =>
-          ({ issueIndex, outcome: 'repaired', reasonCode: 'consistent', explanation: '当前原文只保留锁扣扣紧的状态。', manuscriptEvidence: [{ segmentId: 'c0' }] })) }
-      } else report = { findings: [] }
-      return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(report) }, finish_reason: 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`,
-        { headers: { 'content-type': 'text/event-stream' } })
+        expect(input.findings[0].original).toContain('锁扣此刻完全松开。')
+        report = { patches: [{ findingId: input.findings[0].findingId, replacement: input.findings[0].original.replace('锁扣此刻完全松开。', '他没有解开锁扣，只把箱子推近灯下。') }] }
+      }
+      return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(report) }, finish_reason: 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`)
     }); vi.stubGlobal('fetch', fetcher)
-    await executeDurableToolStep(lease, new AbortController().signal)
+    const model = async () => {
+      const state = await loadExecutionState(f.userId, lease.runId), frame = state.frame
+      return chatWithTools({ messages: frame.state.messages, tools: await currentNativeToolViews(state.configuration.tools, f.spec.scope),
+        provider: 'fixture', model: 'fixture', providerBaseUrl: runtime.baseUrl, providerApiKey: runtime.apiKey, reasoningEffort: 'high', reasoningParameterMode: 'native', signal: new AbortController().signal,
+        durableExecution: { lease, operationKey: `exec:${frame.state.nextOperationSequence}`, attemptKey: '1', price, cursor: { expectedRevision: frame.revision, expectedHash: frame.snapshotHash } },
+        usageLog: { userId: f.userId, agentRunId: lease.runId, action: 'workspaceAgent', modelTier: 'speed', multiplierBps: price.multiplierBps } })
+    }
+    await model()
+    for (let index = 0; index < 4; index++) {
+      const step = await executeDurableToolStep(lease, new AbortController().signal)
+      expect(step.kind).toBe('tool'); if (step.kind === 'tool') expect(step.result.outcome).not.toBe('failed')
+    }
+    const writer = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, kind: 'tool', action: 'chapter_write' }, include: { effectReceipt: true } })
+    expect(writer.inputSnapshot).not.toHaveProperty('input.writingManifest')
+    expect(writer.effectReceipt?.result).toMatchObject({ toolResult: { display: { kind: 'chapterDiff', after: content, revision: 2 } } })
+    if (changed) expect(await advanceDurableMemory(lease)).not.toBeNull()
+    await model()
     let oldRequests: Awaited<ReturnType<typeof prisma.agentProviderAttempt.findMany>> | undefined
     if (scenario === 'merged-revision-restart') {
-      const prepare = continuity.prepareContinuityWork
-      let interrupted = false
-      vi.spyOn(continuity, 'prepareContinuityWork').mockImplementation(async (...args) => {
-        if (!interrupted && args[2].operationKey.endsWith(':continuity_verify')) {
-          interrupted = true
-          throw Error('interrupted after actual merged CAS')
-        }
+      const prepare = nativeQuality.prepareQualityWork; let interrupted = false
+      vi.spyOn(nativeQuality, 'prepareQualityWork').mockImplementation(async (...args) => {
+        if (!interrupted && (await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).revision === 3) { interrupted = true; throw Error('interrupted after actual continuity CAS') }
         return prepare(...args)
       })
-      await expect(executeDurableToolStep(lease, new AbortController().signal)).rejects.toThrow('interrupted after actual merged CAS')
-      expect(fetcher).toHaveBeenCalledTimes(3)
+      await expect(executeDurableToolStep(lease, new AbortController().signal)).rejects.toThrow('interrupted after actual continuity CAS')
+      expect(requests).toBe(3)
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: after, revision: 3 })
       oldRequests = await prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId } }, orderBy: { id: 'asc' } })
       await pauseDurableTask(f.userId, lease.runId)
       const paused = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'run.paused' }, orderBy: { sequence: 'desc' } })
       const resumed = await resumeDurableTask({ userId: f.userId, runId: lease.runId, pauseEventId: paused.id })
-      lease = await claim({ userId: f.userId, runId: resumed.run.id }, 'after-merged-cas')
+      lease = await claim({ userId: f.userId, runId: resumed.run.id }, 'after-current-cas')
     }
     const result = await executeDurableToolStep(lease, new AbortController().signal)
-    expect(result).toMatchObject({ kind: 'tool', result: { summary: '正文已保存并提交', display: { after, revision: changed ? 3 : 2 } } })
+    expect(result).toMatchObject({ kind: 'tool', result: { summary: '章节已提交' } })
     expect(result).not.toHaveProperty('result.outcome', 'failed')
-    const writer = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, kind: 'tool', action: 'chapter_write' }, include: { effectReceipt: true } })
-    expect(writer.inputSnapshot).toMatchObject({ input: { writingManifest: { version: 2 } } })
-    expect(writer.effectReceipt?.result).toMatchObject({ writingCompletion: { status: 'completed', steps: [
-      { step: 'body' }, { step: 'continuity' }, { step: 'quality' }, { step: 'prose_revision' },
-      { step: 'continuity_verify' }, { step: 'quality_verify' }, { step: 'commit' }] } })
-    expect(fetcher).toHaveBeenCalledTimes(changed ? 5 : 2)
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(changed ? 5 : 2)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, kind: 'usage' } })).toBe(changed ? 5 : 2)
+    const expectedReviews = changed ? 5 : 2
+    expect(mainRequests).toBe(2); expect(requests).toBe(expectedReviews)
+    expect(fetcher).toHaveBeenCalledTimes(expectedReviews + mainRequests)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(expectedReviews + mainRequests)
+    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, kind: 'usage' } })).toBe(expectedReviews + mainRequests)
     if (oldRequests) expect(await prisma.agentProviderAttempt.findMany({ where: { id: { in: oldRequests.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(oldRequests)
     const compilation = await prisma.storyCompilation.findFirstOrThrow({ where: { userId: f.userId, chapterId: f.chapterId } })
-    expect(compilation).toMatchObject({ status: 'completed', validation: { independentCheck: 'complete', checkedRevision: changed ? 3 : 2,
-      continuityCriticResponse: { parserVersion: 10, responseContract: 5 } } })
-    if (scenario === 'normalized-cross-chunk') expect(compilation.validation).toMatchObject({ continuityCriticResponse: { continuityV4: {
-      projectionNormalization: { version: 1, originalParserVersion: 10, mappings: [expect.objectContaining({ kind: 'current_evidence_span',
-        originalSegmentId: 'c1', range: { start: 290, end: 290 + baseContent.length, segmentIds: ['c0', 'c1'] } })] } } } })
-    expect(reportEffects).toHaveBeenCalledTimes(changed ? 2 : 1)
-    for (const [input, tx] of reportEffects.mock.calls) {
-      expect(input.expectedContinuityNativeLease).toMatchObject({ userId: f.userId, runId: input.runId, taskRootId: f.rootId })
-      expect(tx).toBeDefined()
-    }
+    expect(compilation).toMatchObject({ status: 'completed', stage: 'commit', validation: { independentCheck: 'complete', checkedRevision: changed ? 3 : 2,
+      continuityReport: { complete: true, revision: changed ? 3 : 2, findings: [] } } })
+    expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'chapter_bridge_commit', status: 'succeeded' } })).toBe(1)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: after, revision: changed ? 3 : 2 })
+    expect((await loadExecutionState(f.userId, lease.runId)).head.configurationHash).toBe(configurationHash)
+    const commitOperation = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'chapter_bridge_commit' } })
+    const reportOperations = await prisma.agentOperation.findMany({ where: { parentOperationId: commitOperation.id, action: 'continuity_validate' } })
+    for (const operation of reportOperations) expect(operation.inputSnapshot).toMatchObject({ input: { work: { kind: 'continuityReview', chapterId: f.chapterId,
+      price: { modelTier: 'speed', multiplierBps: price.multiplierBps, rateCardId: price.rateCardId } } } })
     if (scenario === 'ordinary-presentation') {
       // A real commit does not enlarge the author's presentation contract.
       expect(await advanceDurableWritingDelivery(lease)).toBeNull()
       expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: lease.runId } })).status).not.toBe('completed')
-      expect(fetcher).toHaveBeenCalledTimes(2)
+      expect(fetcher).toHaveBeenCalledTimes(expectedReviews + mainRequests)
       return
     }
     expect(await advanceDurableWritingDelivery(lease)).not.toBeNull()
     const state = await loadExecutionState(f.userId, lease.runId)
     const cursor = { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash }
-    const currentMemoryJobId = z.object({ memoryJobId: z.string().min(1) }).parse(writer.effectReceipt!.result).memoryJobId
+    const currentMemoryJobId = (await prisma.memoryExtractionJob.findFirstOrThrow({ where: { novelId: f.novelId, chapterId: f.chapterId, chapterRevision: changed ? 3 : 2 } })).id
+    const sourceEffect = await prisma.agentEffectReceipt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId }, result: { path: ['memoryJobId'], equals: currentMemoryJobId } } })
     const beforeEvidence = await collectDurableCompletionEvidence(lease, cursor)
     expect(beforeEvidence.snapshot).toMatchObject({ blockers: [{ code: 'unresolved_memory_job', reference: currentMemoryJobId }],
       memoryJobs: [{ id: currentMemoryJobId, chapterId: f.chapterId, chapterRevision: changed ? 3 : 2, verified: false }] })
@@ -182,7 +196,7 @@ describe.runIf(available)('fresh native writing manifest2 actual bounded chain',
     // before completion review. Direct finalize must not waive that work.
     expect(await runReviewedDurableExecution(lease, new AbortController().signal)).toMatchObject({ kind: 'completed' })
     const memory = await prisma.agentOperation.findUniqueOrThrow({ where: { taskRootId_operationKey: { taskRootId: f.rootId, operationKey: `memory:${currentMemoryJobId}` } }, include: { effectReceipt: true } })
-    expect(memory).toMatchObject({ action: 'memory_extract', status: 'succeeded', parentOperationId: writer.id,
+    expect(memory).toMatchObject({ action: 'memory_extract', status: 'succeeded', parentOperationId: sourceEffect.operationId,
       effectReceipt: { result: { jobId: currentMemoryJobId, status: 'applied', memories: expect.any(Array) } } })
     const appliedMemories = z.object({ memories: z.array(z.object({ id: z.string(), version: z.number().int().positive(), hash: z.string() })).min(2) })
       .parse(memory.effectReceipt!.result).memories
@@ -205,8 +219,8 @@ describe.runIf(available)('fresh native writing manifest2 actual bounded chain',
     await publishDurableEvents(f.userId, lease.runId, 200)
     const events = await loadPersistedEvents(lease.runId, 0)
     expect(events.filter(event => event.type === 'tool.result' && event.toolName === 'chapter_write')).toMatchObject([{ ok: true }])
-    expect(fetcher).toHaveBeenCalledTimes(changed ? 5 : 2)
-    const first = await prisma.agentOperation.findFirstOrThrow({ where: { parentOperationId: writer.id, action: 'continuity_validate', operationKey: `writing:${writer.id}:continuity` } })
+    expect(fetcher).toHaveBeenCalledTimes(expectedReviews + mainRequests)
+    const first = await prisma.agentOperation.findFirstOrThrow({ where: { parentOperationId: commitOperation.id, action: 'continuity_validate' }, orderBy: { createdAt: 'asc' } })
     expect(runtimeJson((first.inputSnapshot as { input: { work: { price: unknown } } }).input.work.price).hash).toBe(runtimeJson(price).hash)
   }, undefined, scenario === 'ordinary-presentation' ? '完整重写当前章节' : '完整重写当前章节，只输出标题和正文。', { freezeWriting: true, writingCoordinationProtocol: 2, continuityReportProtocol: 5,
     continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)

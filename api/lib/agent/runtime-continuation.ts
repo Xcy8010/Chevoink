@@ -84,10 +84,6 @@ export async function advanceDurableCompletionObligations(token: RunLeaseToken, 
       if (observed.observations.some(item => item.state === 'blocked')) return { kind: 'reconciliation_required' as const, blockers }
       for (const item of observed.observations) {
         if (item.state === 'check_required') requiredTools.push(...item.requiredToolNames)
-        // An unverified terminal candidate is still a blocker. This only makes
-        // the existing review tool available to the original continuation;
-        // its phase, usage and candidate authorization remain unchanged.
-        if (item.state === 'terminal_review_required') requiredTools.push('continuity_validate', ...item.requiredToolNames)
       }
       if (observed.observations.some(item => item.state === 'must_pass_required'
         && !['chapter_edit_range', ...(item.selectionOnly ? [] : ['chapter_write'])].some(name => configuration.tools.some(tool => tool.function.name === name)
@@ -102,8 +98,8 @@ export async function advanceDurableCompletionObligations(token: RunLeaseToken, 
 async function appendContinuation(tx: RuntimeTx, lease: RunLeaseToken,
   frame: Awaited<ReturnType<typeof readExecutionFrame>>, reason: z.infer<typeof continuationSchema>['reason'],
   blockers?: z.infer<typeof continuationSchema>['blockers'], observation?: ReviewObservation) {
-    // Preserve the old four-reminder ceiling, durably across runs. A confirmed
-    // tool observation resets stagnation, while chatter/todo bookkeeping does not.
+    // Keep the immutable observation history across runs. Reminder counts
+    // describe prior observations; they do not revoke current task authority.
     const { progressSequence } = await collectDurableToolEvidence(tx, lease.taskRootId, frame.revision)
     const previous = await tx.agentExecutionOutbox.findFirst({ where: { taskRootId: lease.taskRootId, type: 'execution.continuation' }, orderBy: { sequence: 'desc' } })
     let reminderIndex = 1
@@ -127,7 +123,6 @@ async function appendContinuation(tx: RuntimeTx, lease: RunLeaseToken,
       }
       if (prior.data.progressSequence === progressSequence) reminderIndex = prior.data.reminderIndex + 1
     }
-    if (reminderIndex > 4) return { kind: 'needs_attention' as const, reason: '模型连续未执行承诺的动作或输出不完整；任务未完成，保留原状态待处理。', frame }
     const payload: z.infer<typeof continuationSchema> = { version: 1, sourceRevision: frame.revision, sourceHash: frame.snapshotHash, reason, progressSequence, reminderIndex, ...(blockers ? { blockers } : {}) }
     await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: lease.taskRootId, runId: lease.runId,
       eventKey: `continuation:${lease.taskRootId}:${frame.revision}`, type: 'execution.continuation', payload: runtimeJson(payload).value } })
@@ -179,8 +174,7 @@ export async function advanceDurableToolStagnation(token: RunLeaseToken) {
       }
       // Compaction/proof ticks do not execute another native operation. Only a
       // genuinely new fully observed tool batch can consume another recovery.
-      if (frame.state.nextOperationSequence === source.state.nextOperationSequence && frame.state.turn === source.state.turn) return prior.stagnantBatches >= 4
-        ? { kind: 'needs_attention' as const, reason: '连续多轮没有推进原任务的内容或必需成果，任务尚未完成，已停止重复执行。', frame } : null
+      if (frame.state.nextOperationSequence === source.state.nextOperationSequence && frame.state.turn === source.state.turn) return null
     }
     let healthyChildWaiting = false
     if (assistant.toolCalls.some(call => ['task_wait', 'task_get', 'task_list'].includes(call.name))) {
@@ -196,9 +190,8 @@ export async function advanceDurableToolStagnation(token: RunLeaseToken) {
     await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: lease.taskRootId, runId: lease.runId,
       eventKey: `stagnation:${lease.taskRootId}:${frame.revision}`, type: 'execution.stagnation', payload: runtimeJson(payload).value } })
     const proof = runtimeJson(payload)
-    const next = await saveExecutionStateInTransaction(tx, lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
+    await saveExecutionStateInTransaction(tx, lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
       snapshot: { ...frame.state, stagnation: { sourceRevision: frame.revision, payloadHash: proof.hash } } })
-    return stagnantBatches >= 4 ? { kind: 'needs_attention' as const,
-      reason: '连续多轮没有推进原任务的内容或必需成果，任务尚未完成，已停止重复执行。', frame: next } : null
+    return null
   })
 }

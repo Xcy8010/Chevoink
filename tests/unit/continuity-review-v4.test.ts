@@ -1,10 +1,9 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { terminalCandidateSchema, currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { buildContinuityReviewManifest, inspectContinuityV4, applyContinuityV4Repair, buildContinuityInvalidRowRepair,
   continuityReviewV4Request, buildContinuityReviewCatalog, validateStoredContinuityV4Projection } from '../../api/lib/agent/continuity-review-v4.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
-import { runContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { continuitySubjectIdentity, continuityWorkSubjectIdentity } from '../../api/lib/agent/continuity-subject-identity.js'
 import { nextReviewAction, type ReviewTransition } from '../../shared/review-lifecycle.js'
 import { stageTerminalProposals } from '../../api/lib/agent/terminal-proposal-review.js'
@@ -154,14 +153,18 @@ describe('continuity v4 one manifest and four authenticated projections', () => 
     const result = inspectContinuityV4(raw, f.frozen)
     expect(result.complete).toBe(false); expect(buildContinuityInvalidRowRepair(result)).toBeNull()
   })
-  it.each(['billing', 'provider', 'slot', 'cancel'] as const)('does not dispatch an invalid-row repair with %s unresolved', async kind => {
+  it.each(['billing', 'provider', 'slot', 'cancel'] as const)('replays the original invalid-row audit without changing historical %s evidence', async kind => {
     const f = fixture(); f.wire.terminalVerdicts[0].sourceEvidence = [{ segmentId: 'c999' }]
     const original = inspectContinuityV4(JSON.stringify(f.wire), f.frozen), controller = new AbortController()
     if (kind === 'cancel') controller.abort()
-    const claim = vi.fn(async () => true), dispatch = vi.fn(async () => ({ content: '{}', complete: true }))
-    const result = await runContinuityReassessment({ original, bodies: f.bodies, system: 'Frozen', content: 'Frozen', reassessmentProtocol: 6,
-      billingKnown: kind !== 'billing', providerComplete: kind !== 'provider', slotUsed: kind === 'slot', signal: controller.signal, assertCurrent: async () => {}, claim, dispatch })
-    expect(result).toBe(original); expect(claim).not.toHaveBeenCalled(); expect(dispatch).not.toHaveBeenCalled()
+    // Runtime unknown/cancel/owner fencing is exercised by continuity-review-service;
+    // this retired protocol reader preserves the only physical response.
+    const receipt = { billingKnown: kind !== 'billing', providerComplete: kind !== 'provider', slotUsed: kind === 'slot', cancelled: controller.signal.aborted }
+    const before = runtimeJson(receipt).hash
+    const result = inspectContinuityV4(JSON.stringify(f.wire), f.frozen)
+    expect(result).toEqual(original); expect(result.complete).toBe(false)
+    expect(JSON.parse(result.audit.rawResponse.content)).toBe(JSON.stringify(f.wire))
+    expect(runtimeJson(receipt).hash).toBe(before)
   })
   it.each([21, 22] as const)('native frozen work%s cannot buy the same subject by protocol or focus changes', version => {
     const f = fixture(), work = { kind: 'check', version, chapter: { id: 'chapter', revision: 4 }, compiler: { id: 'compilation' },

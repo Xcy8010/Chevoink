@@ -77,7 +77,6 @@ export const askUserTool = defineTool({
   permission: { plan: 'allow', build: 'allow', review: 'allow' },
   readOnly: true,
   async execute(ctx, args) {
-    if (ctx.continuityQuestion) return (await import('../continuity-coordinator.js')).waitForContinuitySupplementAnswer(ctx, args)
     await prisma.$transaction(tx => assertQuestionWritingScope(tx, ctx, args.question, args.options))
     const scope = await prisma.$transaction(tx => readWritingScope(tx, ctx))
     const spec = taskSpecSchema.safeParse(scope.spec)

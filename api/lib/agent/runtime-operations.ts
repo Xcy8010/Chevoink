@@ -136,12 +136,13 @@ export async function commitOperationEffectInTransaction(tx: RuntimeTx, token: R
         // The actual prose CAS intentionally invalidates its live pre-CAS
         // snapshot. Policy and current guards already ran before work(tx);
         // this post-effect memory binding authenticates immutable lineage.
-        const service = admission.step === 'prose_revision'
+        const service = ['prose_revision', 'continuity', 'quality', 'continuity_verify', 'quality_verify'].includes(admission.step)
           ? await readers.readHistoricalWritingServiceSource(tx, token, identity)
           : await readers.readAdmittedWritingServiceStep(token, identity, tx)
         // Bind before the body transaction commits, including while its parent
         // is still pending review. Legacy memory processors must never claim it.
         if (service.input.serviceAdmission.step === 'body' || service.input.serviceAdmission.step === 'prose_revision') await bindMemoryJobOwnership(tx, token.taskRootId, service.parent.id, raw)
+        else if (['continuity', 'quality', 'continuity_verify', 'quality_verify'].includes(service.input.serviceAdmission.step)) await bindMemoryJobOwnership(tx, token.taskRootId, operation.id, raw)
       }
     }
     const result = runtimeJson(raw)

@@ -1,8 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { terminalCandidateSchema, inspectTerminalReview, currentTerminalReview, terminalReviewFailure, terminalReviewInput, terminalQuoteAddressDiagnostics } from '../../api/lib/agent/terminal-state-review.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
-import { applyContinuityReassessment, runContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { applyContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 
 const chapter = { id: 'chapter', revision: 15, orderIndex: 5, content: 'The sensor remains offline. The maintenance status is uncertain.' }
@@ -61,10 +61,9 @@ describe('request-owned source-derived verdicts', () => {
     expect(pending).toMatchObject({ reviewCompleted: true, reviewOutcome: 'decision_required' })
     expect(pending).not.toHaveProperty('failureCode')
     expect(pending?.output).toContain('本次检查尚未通过')
-    const dispatch = vi.fn(), claim = vi.fn(), assertCurrent = vi.fn()
-    expect(await runContinuityReassessment({ original, bodies, system: 'frozen', content: 'frozen', billingKnown: true, providerComplete: true, slotUsed: false,
-      signal: new AbortController().signal, dispatch, claim, assertCurrent })).toBe(original)
-    expect(dispatch).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled(); expect(assertCurrent).not.toHaveBeenCalled()
+    const replayed = inspectContinuityResponse(response, bodies, true, 8, candidate)
+    expect(replayed).toEqual(original)
+    expect(inspectTerminalReview(candidate, chapter.content, response, true, bodies.terminalEvidence)?.verdicts.map(item => item.verdict)).toEqual([...Array(18).fill('supported'), 'unknown'])
     expect(JSON.parse(original.audit.rawResponse.content)).toBe(response)
     const old = inspectContinuityResponse(response, { ...bodies, terminalEvidence: context(false) }, true, 8, candidate)
     expect(old).toMatchObject({ complete: false, audit: { terminalReviewDiagnostics: [{ code: 'inheritance_invalid', path: 'exitState.openLoops.0' }] } })

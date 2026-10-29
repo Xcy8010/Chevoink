@@ -85,8 +85,6 @@ type TextCompletionOptions = {
     maxCreditMilli: number
     beforeDispatch: () => Promise<void>
     /** Authenticated exact answer on the original continuity operation. */
-    continuityQuestionId?: string
-    continuityExecutionId?: string
   }
   /** Actual observed transport payload, including incomplete SSE; completeness and usage remain separate. */
   onObservedCompletion?: (value: { usageId: string; content: string; finishReason: string | null; toolCalls: unknown[]; transportComplete?: false }) => void
@@ -218,9 +216,9 @@ async function prepareTextUsage(input: {
   userId: string; action: string; modelName: string; modelTier: CreditModelTier; multiplierBps: number;
   novelId?: string | null; chapterId?: string | null; targetType?: string; targetId?: string | null;
   agentRunId?: string | null; turn?: number | null; providerName?: string | null;
-  inputEstimate: number; maxOutput: number; frozenPrice?: TokenPrice; continuityQuestionId?: string; continuityExecutionId?: string;
+  inputEstimate: number; maxOutput: number; frozenPrice?: TokenPrice;
 }) {
-  const { inputEstimate, maxOutput, frozenPrice, continuityQuestionId, continuityExecutionId, ...identity } = input
+  const { inputEstimate, maxOutput, frozenPrice, ...identity } = input
   const price = frozenPrice ? tokenPriceSchema.parse(frozenPrice) : input.modelTier === 'custom' ? { version: 'byok-exempt' }
     : await resolveTokenPrice(input.modelTier, input.multiplierBps)
   if (frozenPrice && !frozenTokenPriceMatchesModel(frozenPrice, input.modelTier, input.multiplierBps)) {
@@ -230,16 +228,11 @@ async function prepareTextUsage(input: {
     providerType: 'text', providerMode: env.aiProviderMode, durationMs: 0,
     billingEvidence: { policy: FALLBACK_USAGE_POLICY, inputEstimate, outputEstimate: 0, responseObserved: false },
     billingSnapshot: price, usageSource: 'prepared', billingStatus: frozenPrice ? 'authorized_pending' : 'prepared' }
-  if (continuityQuestionId && (!continuityExecutionId || !input.agentRunId || !input.novelId))
-    throw new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED', '具体检查缺少唯一当前执行身份，未创建费用行。')
-  const prepared = continuityQuestionId ? await prisma.$transaction(tx => import('./agent/continuity-coordinator.js').then(module =>
-    module.createContinuitySupplementUsage(tx, { userId: input.userId, novelId: input.novelId!, runId: input.agentRunId!,
-      requestId: continuityQuestionId, executionId: continuityExecutionId! }, data))) : await prisma.aiUsageLog.create({ data })
+  const prepared = await prisma.aiUsageLog.create({ data })
   try {
     await reserveGoalUsage(`legacy:${prepared.id}`, inputEstimate + maxOutput)
     if (input.modelTier !== 'custom') await reserveTokenCredits(input.userId, prepared.id, inputEstimate, maxOutput, frozenPrice ? {
       price: frozenPrice, newCallId: input.targetId!, runId: input.agentRunId!, novelId: input.novelId!, chapterId: input.chapterId!,
-      ...(continuityQuestionId ? { continuityQuestionId, continuityExecutionId } : {}),
     } : undefined)
   } catch (error) { await markUnobservedUsage(prepared.id, false); throw error }
   return prepared
@@ -1217,7 +1210,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   await recordStreamUsage(true)
 
   const result = { content, reasoning, toolCalls, finishReason, usage }
-  if (params.usageLog.action === 'agentLoopTurn' && !content.trim() && toolCalls.length === 0 && prepared) {
+  if (params.usageLog.action === 'agentLoopTurn' && toolCalls.length === 0 && prepared) {
     // Reuse the single-use bounded-review proof. A returned stream alone does
     // not prove that its original reservation has settled.
     const request = beginTextRequest(prepared.id)
@@ -1288,10 +1281,8 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   const authorized = options.authorizedRequest
   if (authorized) {
     const price = tokenPriceSchema.parse(authorized.price)
-    const continuity = authorized.continuityQuestionId !== undefined
     if (!Number.isSafeInteger(authorized.inputTokenCeiling) || authorized.inputTokenCeiling <= 0
-      || (continuity ? options.action !== 'agent3ContinuityCritic' || options.targetType !== 'story_compilation'
-        : options.action !== 'agent3HumanityAuthorReplacement' || options.targetType !== 'chapter')
+      || options.action !== 'agent3HumanityAuthorReplacement' || options.targetType !== 'chapter'
       || [options.userId, options.novelId, options.chapterId, options.agentRunId, options.targetId].some(id => typeof id !== 'string' || !id)
       || !Number.isSafeInteger(authorized.maxCreditMilli) || authorized.maxCreditMilli < 0
       || !Number.isSafeInteger(options.maxOutputTokens) || (options.maxOutputTokens ?? 0) <= 0
@@ -1300,10 +1291,6 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
       || priceTokenEvidence(price, authorized.inputTokenCeiling, options.maxOutputTokens!, 0) !== authorized.maxCreditMilli) {
       throw new DataAccessError(409, 'TEXT_REQUEST_AUTHORIZATION_CONFLICT', '正文、当前模型或正常计费报价与本次确认不一致，未派发检查。')
     }
-    if (continuity) await (await import('./agent/continuity-coordinator.js')).assertContinuitySupplementTransport(prisma, {
-      userId: options.userId, novelId: options.novelId!, runId: options.agentRunId!, requestId: authorized.continuityQuestionId!,
-      chapterId: options.chapterId!, targetId: options.targetId!, system: systemPrompt, content: userPrompt, model: modelRuntime,
-      price, inputTokenCeiling: authorized.inputTokenCeiling, maximumCreditMilli: authorized.maxCreditMilli, maxOutputTokens: options.maxOutputTokens! })
   }
   await assertCreditAccess(options.userId, modelRuntime.tier, false)
 
@@ -1317,8 +1304,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     modelName: modelRuntime.modelName ?? env.aiTextModel, modelTier: modelRuntime.tier,
     multiplierBps: options.multiplierBps ?? modelRuntime.multiplierBps,
     novelId: options.novelId, chapterId: options.chapterId, agentRunId: options.agentRunId, targetType: options.targetType, targetId: options.targetId,
-    providerName: modelRuntime.provider, frozenPrice: options.authorizedRequest?.price, continuityQuestionId: options.authorizedRequest?.continuityQuestionId,
-    continuityExecutionId: options.authorizedRequest?.continuityExecutionId })
+    providerName: modelRuntime.provider, frozenPrice: options.authorizedRequest?.price })
   let dispatched = false
   const request = beginTextRequest(prepared.id)
   try {

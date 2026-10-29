@@ -1,43 +1,23 @@
-import { z } from 'zod'
-import { continuityFindingInputSchema } from '../../../shared/contracts/index.js'
-import { readCompilerContinuitySource } from './compiler-continuity-source.js'
-import { hasTerminalEvidenceProtocol, terminalEvidenceContext, terminalQuoteAddressVersion, terminalVerdictAuditVersion, terminalSpanAuditVersion } from './terminal-evidence-context.js'
-import { advanceTerminalCoverage, readTerminalCoverageState, terminalCoverageInput, terminalCoverageAuditVersion, terminalCoverageProofs } from './terminal-fact-coverage.js'
-import { attachTerminalProposalInput, prepareCompilerTerminalProposals, terminalProposalTaskId, type TerminalProposalPreparation } from './terminal-proposal-context.js'
-import { advanceTerminalProposals, readTerminalProposalState } from './terminal-proposal-review.js'
-import { buildTerminalFactProofs } from './terminal-inheritance-chain.js'
-import { continuityRecheckBaseline } from './continuity-review-context.js'
-import { assertWritingTarget, readWritingScope, lockWritingRunLineage, readNewDraftRevision } from './writing-scope.js'
-import { classifyContinuityFindingAuthority, unlocatedContinuityEvidence } from './continuity-finding-authority.js'
-import { readOriginalTaskRequest } from './original-request.js'
+
+import { assertWritingTarget, readWritingScope, lockWritingRunLineage } from './writing-scope.js'
+import { readOriginalTaskRequest, originalTaskRunIds } from './original-request.js'
 import { createHash } from 'node:crypto'
 
 import { Prisma, type StoryCompilationStage, type StoryCharter, type ReaderPromise, type SceneTask } from '@prisma/client'
 
-import type {
-  ContinuityFindingInput,
-  ReaderPromiseInput,
-  SceneTaskInput,
-  StoryCharterInput,
-  StoryCompilerMode,
-  StoryState,
-} from '../../../shared/contracts/index.js'
+import type { ReaderPromiseInput, SceneTaskInput, StoryCharterInput, StoryCompilerMode, StoryState } from '../../../shared/contracts/index.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { activeChapterScope } from '../data/internal.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
-import { saveStoryMemory } from './story-memory.js'
-import { qualityReportMatchesContent } from './quality-report-contract.js'
 import { taskSpecSchema, sceneTaskInputSchema } from '../../../shared/contracts/index.js'
 import { requiresNextChapterDelivery } from './completion-guard.js'
 import { runtimeJson } from './runtime-common.js'
-import { currentTerminalReview, readTerminalCandidate, terminalCandidateSchema, terminalClaims, type TerminalCandidate } from './terminal-state-review.js'
 import type { WritingWorkflowMilestone } from './semantic-progress.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
-import { compilerContinuityCoverage, compilerContinuityCoverageMatches, continuityStoryInput, storedContinuityProtocol, type CompilerContinuityCoverage } from './compiler-continuity-contract.js'
 import { readWritingVolumeContext, assertWritingVolumeBoundary, isWritingVolumeTargetOrderIndex } from './writing-volume.js'
 import { writingVolumeDecisionSchema, type WritingVolumeDecision } from '../../../shared/contracts/writing-volume-contracts.js'
-import { readReviewCycle, markReviewCycleVerification } from './review-cycle.js'
-import { observedReviewCycleVerificationBody } from './review-cycle-store.js'
+import { readReviewCycle } from './review-cycle.js'
+import { saveStoryMemory } from './story-memory.js'
 
 type PreparedBridge = {
   lastUnfinishedAction: string
@@ -86,35 +66,6 @@ export function validatedContinuityCheckRounds(validation: unknown, increment = 
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '连续性检查历史计数无法核实，未重置记录或派发检查。')
   }
   return continuityCheckRounds(previous)
-}
-
-/** Reserve before dispatch; failed checks also consume an attempt. */
-export async function reserveContinuityCheck(userId: string, novelId: string, compilationId: string, transaction?: Prisma.TransactionClient): Promise<boolean> {
-  if (!transaction) return prisma.$transaction(tx => reserveContinuityCheck(userId, novelId, compilationId, tx))
-  const tx = transaction
-  await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${compilationId} AND user_id = ${userId} AND novel_id = ${novelId} FOR UPDATE`
-  const compilation = await tx.storyCompilation.findFirst({ where: { id: compilationId, userId, novelId, status: { in: ['active', 'completed'] } } })
-  if (!compilation) return false
-  const previous = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : {}
-  const rounds = validatedContinuityCheckRounds(previous, true)
-  await tx.storyCompilation.update({ where: { id: compilationId }, data: {
-    validation: { ...previous, checkRounds: rounds + 1 } as Prisma.InputJsonValue,
-  } })
-  return true
-}
-
-/** Reserve before dispatch, so crashes/resumes cannot restart an automatic repair loop. */
-export async function reserveContinuityRepair(userId: string, novelId: string, compilationId: string) {
-  return prisma.$transaction(async tx => {
-    await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${compilationId} AND user_id = ${userId} AND novel_id = ${novelId} FOR UPDATE`
-    const compilation = await tx.storyCompilation.findFirst({ where: { id: compilationId, userId, novelId, status: 'active' } })
-    if (!compilation || continuityRepairRounds(compilation.validation) >= MAX_CONTINUITY_AUTO_REPAIRS) return false
-    const previous = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : {}
-    await tx.storyCompilation.update({ where: { id: compilationId }, data: {
-      validation: { ...previous, autoRepairRounds: continuityRepairRounds(previous) + 1 } as Prisma.InputJsonValue,
-    } })
-    return true
-  })
 }
 
 const promptHash = (value: string): string =>
@@ -280,15 +231,6 @@ export async function prepareStoryCompilation(input: {
       select: { title: true, content: true },
     }),
   ])
-  const priorBridgeCandidate = previousChapter
-    ? await db.chapterBridge.findFirst({
-        where: { userId: input.userId, novelId: input.novelId, toChapterId: previousChapter.id, targetRevision: previousChapter.revision, committedAt: { not: null } },
-        orderBy: { committedAt: 'desc' },
-      })
-    : null
-  // A revision on the new bridge describes the prose actually used, not a
-  // fresh label for terminal state committed before that prose was edited.
-  const priorBridge = priorBridgeCandidate?.targetRevision === previousChapter?.revision ? priorBridgeCandidate : null
   const volumeContext = previousChapter ? await readWritingVolumeContext(db, input, target.targetOrderIndex) : null
   if (writing.writing?.tailVolume && !input.volumeDecision) {
     throw new DataAccessError(400, 'INVALID_ARGUMENTS', `请在PREPARE显式提交volumeDecision及理由，审视本卷目标是否收束；章数不能代替故事边界。当前卷上下文：${JSON.stringify(volumeContext)}`)
@@ -309,19 +251,19 @@ export async function prepareStoryCompilation(input: {
   })
 
   const bridge: PreparedBridge = {
-    lastUnfinishedAction: priorBridge?.lastUnfinishedAction ?? '',
-    location: priorBridge?.location ?? '',
-    storyTime: priorBridge?.storyTime ?? '',
-    knowledgeState: asStringArray(priorBridge?.knowledgeState),
-    bodyState: asStringArray(priorBridge?.bodyState),
-    objectState: asStringArray(priorBridge?.objectState),
-    relationshipState: asStringArray(priorBridge?.relationshipState),
-    emotionAftermath: asStringArray(priorBridge?.emotionAftermath),
-    hookDecision: priorBridge?.hookDecision ?? '',
-    delayedHookReason: priorBridge?.delayedHookReason ?? '',
+    lastUnfinishedAction: '',
+    location: '',
+    storyTime: '',
+    knowledgeState: [],
+    bodyState: [],
+    objectState: [],
+    relationshipState: [],
+    emotionAftermath: [],
+    hookDecision: '',
+    delayedHookReason: '',
     recentOpenings: recentChapters.map((chapter) => `${chapter.title}：${firstParagraph(chapter.content)}`).filter((item) => !item.endsWith('：')),
     recentEndings: recentChapters.map((chapter) => `${chapter.title}：${lastParagraph(chapter.content)}`).filter((item) => !item.endsWith('：')),
-    openLoops: priorBridge ? asStringArray(priorBridge.openLoops) : memory.filter((item) => item.memoryType === 'foreshadowing').map((item) => `${item.title}：${clip(item.content, 240)}`),
+    openLoops: memory.filter((item) => item.memoryType === 'foreshadowing').map((item) => `${item.title}：${clip(item.content, 240)}`),
   }
 
   const originalRunIds = await (await import('./original-request.js')).originalTaskRunIds(db, input, writing)
@@ -331,32 +273,14 @@ export async function prepareStoryCompilation(input: {
     where: { userId: input.userId, novelId: input.novelId, runId: { in: originalRunIds }, targetOrderIndex: target.targetOrderIndex },
     select: { validation: true, preparedContext: true, chapterId: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
   })
-  let priorCycle = target.chapter ? priorRepairStates.map(item => readReviewCycle(item.preparedContext, {
+  const priorCycle = target.chapter ? priorRepairStates.map(item => readReviewCycle(item.preparedContext, {
     taskId: writing.taskId, userId: input.userId, novelId: input.novelId, chapterId: target.chapter!.id,
   })).find(Boolean) : null
-  if (priorCycle && !priorCycle.verificationStarted && target.chapter) {
-    const report = await db.chapterQualityReport.findFirst({ where: { userId: input.userId, novelId: input.novelId,
-      chapterId: target.chapter.id, runId: { in: originalRunIds } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
-    const evidence = priorRepairStates.map(item => observedReviewCycleVerificationBody(priorCycle!, item.validation, report, target.chapter!)).find(Boolean)
-    if (evidence) priorCycle = markReviewCycleVerification(priorCycle, evidence)
-  }
-  // 同目标章节的修复与检查额度跨重准备继承：否则重新 prepare 就能重置预算、绕开收敛保险丝。
-  const autoRepairRounds = Math.max(0, ...priorRepairStates.map(item => continuityRepairRounds(item.validation)))
-  const checkRounds = Math.max(0, ...priorRepairStates.map(item => validatedContinuityCheckRounds(item.validation)))
-  const newDraftRevision = priorRepairStates.map(item => readNewDraftRevision(item.validation)).find(Boolean)
-  const priorFactCoverage = target.chapter ? priorRepairStates.filter(item => item.chapterId === target.chapter!.id)
-    .map(item => readTerminalCoverageState(writing.spec, item.preparedContext, target.chapter!.id)).find(Boolean) : undefined
-  const priorProposals = target.chapter ? priorRepairStates.filter(item => item.chapterId === target.chapter!.id).flatMap(item => {
-    const state = readTerminalProposalState(item.preparedContext, { taskId: terminalProposalTaskId(writing.spec, writing.taskId), chapterId: target.chapter!.id })
-    return state ? [{ state, validation: item.validation }] : []
-  })[0] : undefined
   await db.storyCompilation.updateMany({
     where: { userId: input.userId, novelId: input.novelId, ...scope, status: 'active' },
     data: { status: 'abandoned' },
   })
   const preparedContext = {
-    ...(priorFactCoverage ? { terminalFactCoverage: priorFactCoverage } : {}),
-    ...(priorProposals ? { terminalProposalReview: priorProposals.state } : {}),
     ...(priorCycle ? { reviewCycle: priorCycle } : {}),
     volumeContext, volumeDecision,
     charterRevision: bundle.charter?.revision ?? null,
@@ -376,15 +300,6 @@ export async function prepareStoryCompilation(input: {
       targetOrderIndex: target.targetOrderIndex,
       mode: input.mode,
       sourcePromptHash: promptHash(input.intentSummary),
-      ...(autoRepairRounds > 0 || checkRounds > 0 || newDraftRevision || priorProposals?.state.pending.length ? { validation: {
-        // Reprepare cannot erase unresolved proposals or their authenticated
-        // source audit. Old coverage remains old; it cannot certify this bridge.
-        ...(priorProposals?.state.pending.length && priorProposals.validation && typeof priorProposals.validation === 'object'
-          && !Array.isArray(priorProposals.validation) ? priorProposals.validation : {}),
-        ...(autoRepairRounds > 0 ? { autoRepairRounds } : {}),
-        ...(checkRounds > 0 ? { checkRounds } : {}),
-        ...(newDraftRevision ? { newDraftRevision } : {}),
-      } } : {}),
       preparedContext: preparedContext as Prisma.InputJsonValue,
       bridge: {
         create: {
@@ -681,202 +596,6 @@ export async function recordStoryCompilerWrite(input: {
   return { compilationId: compilation.id, stage }
 }
 
-export async function validateStoryContinuity(input: {
-  userId: string
-  novelId: string
-  runId?: string
-  compilationId: string
-  findings: ContinuityFindingInput[]
-  expectedChapterRevision?: number
-  expectedTerminalCandidateHash?: string
-  independentCheck?: 'complete' | 'unavailable'
-  coverage?: CompilerContinuityCoverage
-  terminalCandidate?: TerminalCandidate
-  continuityCriticResponse?: unknown
-  expectedContinuityOwnerSeq?: number
-  /** Internal cache reuse only; model arguments never set this flag. */
-  reuseCachedReview?: boolean
-  /** Internal native effect owner; never read from model/tool arguments. */
-  expectedContinuityNativeLease?: import('./runtime-lease.js').RunLeaseToken
-  focus?: string
-  signal?: AbortSignal
-}, transaction?: Prisma.TransactionClient, sourceReadScope?: import('./chapter-review-guard.js').ChapterReviewReadScope): Promise<{ checkedChapterId: string; checkedRevision: number; checkedAt: string; independentCheck: 'complete' | 'unavailable'; findings: ContinuityFindingInput[]; errorCount: number; warningCount: number; autoRepairRounds: number; checkRounds: number; effectiveReport?: import('./continuity-coordinator.js').EffectiveContinuityReport }> {
-  if (!transaction) return prisma.$transaction(tx => validateStoryContinuity(input, tx), { timeout: 20_000 })
-  const db = transaction
-  await lockNovelActiveScope(db, input.novelId)
-  if (input.runId) await assertAgentManuscriptCurrent(db, { userId: input.userId, novelId: input.novelId, runId: input.runId })
-  const scope = input.runId ? await compilationRunScope(db, { ...input, runId: input.runId }) : {}
-  if (input.runId) await db.$queryRaw`SELECT id FROM agent_runs WHERE id = ${input.runId} AND user_id = ${input.userId} AND novel_id = ${input.novelId} FOR UPDATE`
-  if (input.runId && !await db.agentRun.findFirst({ where: { id: input.runId, userId: input.userId, novelId: input.novelId,
-    status: { in: ['queued', 'running', 'awaiting_approval'] } }, select: { id: true } })) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '连续性检查执行已暂停或结束，旧结果不能绑定编译。')
-  await db.$queryRaw`SELECT id FROM story_compilations WHERE id = ${input.compilationId} AND user_id = ${input.userId} AND novel_id = ${input.novelId} FOR UPDATE`
-  const compilation = await db.storyCompilation.findFirst({
-    where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, status: { in: ['active', 'completed'] }, ...scope },
-    include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: { select: { id: true, title: true, revision: true, content: true, orderIndex: true } } },
-  })
-  if (!compilation) throw new DataAccessError(404, 'COMPILATION_NOT_FOUND', '写作编译任务不存在、已结束或不属于当前作品。')
-  const savedTerminalCandidate = readTerminalCandidate(compilation.validation)
-  if (input.expectedTerminalCandidateHash !== undefined && (!savedTerminalCandidate || runtimeJson(savedTerminalCandidate).hash !== input.expectedTerminalCandidateHash)) {
-    throw new DataAccessError(409,'CONTINUITY_INPUT_STALE','检查期间章末候选已变化，未覆盖较新的候选。')
-  }
-  if (!compilation.chapter || !compilation.bridge) {
-    throw new DataAccessError(409, 'COMPILATION_NOT_WRITTEN', '目标章节尚未完成写入，不能进入连续性检查。')
-  }
-  if (compilation.status === 'completed') {
-    if (!input.runId) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '已提交编译的只读复核需要当前原任务身份，不能接管旧章。')
-    await assertWritingTarget(db, { userId: input.userId, novelId: input.novelId, runId: input.runId }, { chapterId: compilation.chapter.id })
-  }
-  if (!await db.chapter.findFirst({ where: { id: compilation.chapter.id, authorId: input.userId, ...activeChapterScope(input.novelId) }, select: { id: true } })) {
-    throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '目标章节已归档，旧检查不能作用于当前稿件。')
-  }
-  if (input.expectedChapterRevision !== undefined && compilation.chapter.revision !== input.expectedChapterRevision) {
-    throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '独立检查期间正文已变化，旧结果不能验证新revision。请重新检查当前正文。')
-  }
-  const readScope = sourceReadScope ?? (await import('./chapter-review-guard.js')).createChapterReviewReadScope()
-  const protocol = input.coverage?.protocolVersion ?? 8
-  if (protocol !== 6 && protocol !== 7 && protocol !== 8 && protocol !== 9 && protocol !== 10 && protocol !== 11) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '未知连续性协议，不能升级或应用旧检查。')
-  const reviewSource = await readCompilerContinuitySource(db, input, compilation.chapter, compilation.bridge.fromChapterId, protocol, readScope.inheritanceScope)
-  const committedReview = input.reuseCachedReview && compilation.status === 'completed'
-    ? (await import('./chapter-review-guard.js')).readCurrentCompilerContinuity({ ...compilation, bridge: compilation.bridge }, compilation.chapter, reviewSource) : null
-  const currentCoverage = compilerContinuityCoverage({ chapter: compilation.chapter,
-    bridge: committedReview?.assessment ? committedReview.checkedBridge : compilation.bridge,
-    sceneTasks: compilation.sceneTasks, source: reviewSource, focus: input.focus, terminalCandidate: input.terminalCandidate }, protocol)
-  if (input.coverage && !compilerContinuityCoverageMatches(input.coverage, currentCoverage)) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文、章节桥、场景或检查范围已变化，旧检查不能绑定当前编译。')
-  const deterministic: ContinuityFindingInput[] = []
-  if (compilation.sceneTasks.length < 1 || compilation.sceneTasks.length > 4) {
-    deterministic.push({ signal: 'structure', severity: 'error', evidence: `场景任务数量为 ${compilation.sceneTasks.length}，要求 1–4 个。`, suggestion: '先补齐或收敛 Scene Task 再检查正文。' })
-  }
-  if (compilation.chapter.orderIndex !== compilation.targetOrderIndex) {
-    deterministic.push({ signal: 'structure', severity: 'error', evidence: `目标为全书第 ${compilation.targetOrderIndex} 章，实际写入第 ${compilation.chapter.orderIndex} 章。`, suggestion: '停止提交并核对卷章位置。' })
-  }
-  if (!compilation.chapter.content.trim()) {
-    deterministic.push({ signal: 'structure', severity: 'error', evidence: '目标章节正文为空。', suggestion: '完成正文后再提交章节桥。' })
-  }
-  if (compilation.bridge.fromChapterId && compilation.bridge.sourceRevision !== null) {
-    const source = await db.chapter.findFirst({
-      where: { id: compilation.bridge.fromChapterId, ...activeChapterScope(input.novelId) },
-      select: { revision: true, title: true },
-    })
-    if (!source || source.revision !== compilation.bridge.sourceRevision) {
-      deterministic.push({ signal: 'structure', severity: 'error', evidence: source ? `桥接来源《${source.title}》已从 r${compilation.bridge.sourceRevision} 变为 r${source.revision}。` : '桥接来源章节已不存在。', suggestion: '重新执行 story_compiler_prepare，基于最新前章生成桥接。' })
-    }
-  }
-  const authorRequest = (input.coverage?.protocolVersion ?? 0) >= 4 && input.runId ? await readOriginalTaskRequest(db, { ...input, runId: input.runId }) : null
-  const findings = [...deterministic, ...(authorRequest
-    ? input.findings.map(finding => classifyContinuityFindingAuthority(finding, authorRequest.prompt,
-      { previous: reviewSource?.content ?? null, current: compilation.chapter!.content })) : input.findings)]
-  const unlocated = input.findings.filter(finding => unlocatedContinuityEvidence(finding,
-    { previous: reviewSource?.content ?? null, current: compilation.chapter!.content }, (input.coverage?.protocolVersion ?? 0) >= 5,
-    (input.coverage?.protocolVersion ?? 0) >= 6, (input.coverage?.protocolVersion ?? 0) >= 7))
-  const nextCheckRounds = validatedContinuityCheckRounds(compilation.validation)
-  const previousValidation = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : {}
-  if ((input.continuityCriticResponse as { parserVersion?: number } | undefined)?.parserVersion === 10 && input.runId)
-    await (await import('./continuity-coordinator.js')).assertContinuityOwner(db, { ...input, runId: input.runId,
-      continuityOwnerSeq: input.expectedContinuityOwnerSeq, continuityNativeLease: input.expectedContinuityNativeLease })
-  const sameReviewedInput = previousValidation.checkedRevision === compilation.chapter.revision && previousValidation.independentCheck === 'complete'
-    && runtimeJson(previousValidation.findings ?? []).hash === runtimeJson(findings).hash
-    && compilerContinuityCoverageMatches(previousValidation.coverage, currentCoverage)
-  if (input.reuseCachedReview && compilation.status === 'completed') {
-    if (!committedReview?.assessment || !sameReviewedInput || unlocated.length || input.independentCheck !== 'complete'
-      || input.continuityCriticResponse !== undefined) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '已提交检查的正文、来源、候选或原报告已变化，未复用旧结果。')
-    input.signal?.throwIfAborted()
-    // The lock, original task/owner and exact current source/candidate checks
-    // above still apply. Preserve the committed report and every old receipt.
-    return z.object({ checkedChapterId: z.string(), checkedRevision: z.number().int(), checkedAt: z.string().datetime(),
-      independentCheck: z.literal('complete'), findings: z.array(continuityFindingInputSchema),
-      errorCount: z.number().int().nonnegative(), warningCount: z.number().int().nonnegative(),
-      autoRepairRounds: z.number().int().nonnegative(), checkRounds: z.number().int().nonnegative(),
-    }).passthrough().parse(previousValidation)
-  }
-  const recovery = previousValidation.continuityFormatRecovery
-  const originalAudit = previousValidation.continuityCriticResponse
-  const preservedRecovery = sameReviewedInput && recovery && typeof recovery === 'object' && !Array.isArray(recovery)
-    && originalAudit && typeof originalAudit === 'object' && !Array.isArray(originalAudit)
-    && recovery.version === 1 && recovery.parserVersion === 4 && recovery.originalParserVersion === 3
-    && originalAudit.parserVersion === 3 && originalAudit.classification === 'findings_invalid'
-    && recovery.rawHash === originalAudit.contentHash && recovery.characterCount === originalAudit.characterCount
-    && recovery.coverageHash === runtimeJson(currentCoverage).hash && Array.isArray(recovery.sourceRelocations) && recovery.sourceRelocations.length > 0
-    && typeof previousValidation.checkedAt === 'string' && Number.isFinite(Date.parse(previousValidation.checkedAt))
-  const effectiveReport = input.runId && input.independentCheck === 'complete' && !unlocated.length && input.continuityCriticResponse
-    ? await (await import('./continuity-coordinator.js')).stageEffectiveContinuityReport(db, { ...input, runId: input.runId },
-      { compilationId: compilation.id, audit: input.continuityCriticResponse, previousValidation })
-    : !input.continuityCriticResponse && sameReviewedInput
-      ? (await import('./continuity-coordinator.js')).effectiveContinuityReportSchema.optional().parse(previousValidation.effectiveReport) : undefined
-  const validation = {
-    ...(effectiveReport ? { effectiveReport } : {}),
-    ...(input.continuityCriticResponse ? { continuityCriticResponse: runtimeJson(input.continuityCriticResponse).value } : {}),
-    ...(sameReviewedInput && previousValidation.retainedReviewDecision ? { retainedReviewDecision: previousValidation.retainedReviewDecision } : {}),
-    ...(!input.continuityCriticResponse && sameReviewedInput && previousValidation.continuityCriticResponse ? { continuityCriticResponse: previousValidation.continuityCriticResponse } : {}),
-    ...(preservedRecovery ? { continuityFormatRecovery: recovery } : {}),
-    ...(readNewDraftRevision(compilation.validation) ? { newDraftRevision: readNewDraftRevision(compilation.validation) } : {}),
-    autoRepairRounds: continuityRepairRounds(compilation.validation),
-    checkRounds: nextCheckRounds,
-    checkedChapterId: compilation.chapter.id,
-    checkedRevision: compilation.chapter.revision,
-    checkedAt: preservedRecovery ? previousValidation.checkedAt as string : new Date().toISOString(),
-    independentCheck: unlocated.length ? 'unavailable' as const : input.independentCheck ?? 'unavailable' as const,
-    unlocatedEvidenceCount: unlocated.length,
-    checkedContent: compilation.chapter.content,
-    ...(unlocated.length || input.independentCheck !== 'complete' ? { previousAssessment: continuityRecheckBaseline(compilation.validation) } : {}),
-    coverage: currentCoverage,
-    ...(input.terminalCandidate ? { terminalCandidate: input.terminalCandidate } : {}),
-    reviewFocus: input.focus ?? '',
-    findings,
-    errorCount: findings.filter((item) => item.severity === 'error').length,
-    warningCount: findings.filter((item) => item.severity === 'warning').length,
-  }
-  input.signal?.throwIfAborted()
-  const factCoverage = terminalCoverageInput(authorRequest?.spec, compilation.preparedContext, compilation.chapter, input.terminalCandidate, terminalCoverageAuditVersion(validation), terminalCoverageProofs(reviewSource, terminalSpanAuditVersion(validation)))
-  const currentParser = (validation.continuityCriticResponse as { parserVersion?: unknown } | undefined)?.parserVersion
-  const bodyOnlyReport = currentParser === 10 && !input.terminalCandidate && !!effectiveReport
-    && (validation.continuityCriticResponse as { continuityV4?: { manifest?: { candidateHash?: unknown } } })?.continuityV4?.manifest?.candidateHash === null
-  const authenticatedTerminalContext = (currentParser === 9 || currentParser === 10)
-    && hasTerminalEvidenceProtocol(authorRequest?.spec)
-  let terminalContext = factCoverage || authenticatedTerminalContext ? terminalEvidenceContext(compilation.chapter, reviewSource, protocol === 11 ? 2 : 1,
-    terminalQuoteAddressVersion(authorRequest?.spec), factCoverage, terminalVerdictAuditVersion(validation), terminalSpanAuditVersion(validation)) : undefined
-  let proposalPreparation: TerminalProposalPreparation | undefined
-  if (terminalContext && input.terminalCandidate && authorRequest) {
-    const sameAudit = runtimeJson({ audit: validation.continuityCriticResponse ?? null }).hash === runtimeJson({ audit: previousValidation.continuityCriticResponse ?? null }).hash
-    if (sameAudit) terminalContext = attachTerminalProposalInput(terminalContext, { taskId: terminalProposalTaskId(authorRequest.spec, authorRequest.taskId),
-      preparedContext: compilation.preparedContext, validation, candidate: input.terminalCandidate })
-    else {
-      const marker = (validation.continuityCriticResponse as Record<string, unknown> | undefined)?.terminalEvidence as Record<string, unknown> | undefined
-      const oldProposals = readTerminalProposalState(compilation.preparedContext, { taskId: terminalProposalTaskId(authorRequest.spec, authorRequest.taskId), chapterId: compilation.chapter.id })
-      if (marker?.proposalChanges !== undefined || oldProposals) {
-        proposalPreparation = prepareCompilerTerminalProposals({ spec: authorRequest.spec, preparedContext: compilation.preparedContext,
-          validation: compilation.validation, chapter: compilation.chapter, source: reviewSource, candidate: input.terminalCandidate, nextContext: terminalContext })
-        if (proposalPreparation?.changes) terminalContext = { ...terminalContext, proposalChanges: proposalPreparation.changes }
-        if (oldProposals?.pending.length && !proposalPreparation) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '待复核候选记录不能在报告保存时丢失。')
-      }
-    }
-  }
-  if (terminalContext && validation.continuityCriticResponse
-    && runtimeJson((validation.continuityCriticResponse as Record<string, unknown>).terminalEvidence).hash !== runtimeJson(terminalContext).hash) {
-    throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '检查期间持续事实覆盖义务已变化；保留原请求和结果，不将旧核验绑定当前候选。')
-  }
-  const deliveryBinding = terminalContext && authorRequest && input.runId && !bodyOnlyReport ? await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(db,
-    { ...input, runId: input.runId, compilationId: compilation.id }, { taskId: terminalProposalTaskId(authorRequest.spec, authorRequest.taskId),
-      preparedContext: proposalPreparation ? { ...(compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext : {}),
-        terminalProposalReview: proposalPreparation.state } : compilation.preparedContext },
-    compilation.chapter, validation, terminalContext, readScope.terminalDraftScope, readScope.inheritanceScope) : undefined
-  const terminalReview = terminalContext ? currentTerminalReview(validation, compilation.chapter.content, terminalContext, deliveryBinding) : null
-  if ((currentParser === 9 || currentParser === 10)
-    && validation.independentCheck === 'complete' && !terminalReview && !bodyOnlyReport) {
-    throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', '原检查响应、所有权或费用尚不能完整认证；保留原始结果，未保存为完整报告。')
-  }
-  const nextFactCoverage = terminalReview ? advanceTerminalCoverage(authorRequest?.spec, compilation.preparedContext, compilation.chapter, terminalReview, terminalContext?.factCoverage) : undefined
-  const nextProposals = proposalPreparation && (terminalReview && proposalPreparation.changes
-    ? advanceTerminalProposals(proposalPreparation.state, proposalPreparation.changes, terminalReview) : proposalPreparation.state)
-  await db.storyCompilation.update({
-    where: { id: compilation.id },
-    data: { stage: compilation.status === 'completed' ? 'commit' : 'check', validation: validation as Prisma.InputJsonValue,
-      ...(nextFactCoverage || nextProposals ? { preparedContext: runtimeJson({ ...(compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext : {}),
-        ...(nextFactCoverage ? { terminalFactCoverage: nextFactCoverage } : {}), ...(nextProposals ? { terminalProposalReview: nextProposals } : {}) }).value } : {}) },
-  })
-  input.signal?.throwIfAborted()
-  return validation
-}
-
 export async function commitChapterBridge(input: {
   userId: string
   novelId: string
@@ -898,238 +617,82 @@ export async function commitChapterBridge(input: {
   qualityReportId?: string
   terminalDraftScope?: import('./terminal-draft-authority.js').TerminalDraftReadScope
 }, transaction?: Prisma.TransactionClient, sourceReadScope?: import('./chapter-review-guard.js').ChapterReviewReadScope): Promise<{ compilationId: string; chapterId: string; chapterRevision: number; skippedMemoryCount: number; retainedIssueCount: number; decisionOnly?: true; decisionChanged?: boolean; decisionProgress?: { targetId: string; beforeHash: string; afterHash: string } }> {
-  if (!transaction) return prisma.$transaction(tx => commitChapterBridge(input, tx), { timeout: 20_000 })
+  if (!transaction) return prisma.$transaction(tx => commitChapterBridge(input, tx), { timeout: 20000 })
+  void sourceReadScope
   const db = transaction
-  const readScope = sourceReadScope ?? (await import('./chapter-review-guard.js')).createChapterReviewReadScope()
-  const terminalDraftScope = input.terminalDraftScope ?? readScope.terminalDraftScope
   await lockNovelActiveScope(db, input.novelId)
-  let scope: Prisma.StoryCompilationWhereInput = {}
-  if (input.runId) {
-    await lockWritingRunLineage(db, { userId: input.userId, novelId: input.novelId, runId: input.runId })
-    await assertAgentManuscriptCurrent(db, { userId: input.userId, novelId: input.novelId, runId: input.runId })
-    await db.$queryRaw`SELECT id FROM agent_runs WHERE id = ${input.runId} AND user_id = ${input.userId} AND novel_id = ${input.novelId} FOR UPDATE`
-    if (!await db.agentRun.findFirst({ where: { id: input.runId, userId: input.userId, novelId: input.novelId,
-      status: { in: ['queued', 'running', 'awaiting_approval'] } }, select: { id: true } })) {
-      throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '提交执行已暂停或结束，不能再产生章节终态与记忆。')
-    }
-    scope = await compilationRunScope(db, { ...input, runId: input.runId })
-  }
+  if (input.runId) { await assertAgentManuscriptCurrent(db, { ...input, runId: input.runId }); await lockWritingRunLineage(db, { ...input, runId: input.runId }) }
+  const scope = input.runId ? await compilationRunScope(db, { ...input, runId: input.runId }) : {}
   await db.$queryRaw`SELECT id FROM story_compilations WHERE id = ${input.compilationId} AND user_id = ${input.userId} AND novel_id = ${input.novelId} FOR UPDATE`
-  const compilation = await db.storyCompilation.findFirst({
-    where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, status: { in: ['active', 'completed'] }, ...scope },
-    include: { bridge: true, sceneTasks: true, chapter: true },
-  })
-  if (!compilation?.chapter || !compilation.bridge) {
-    throw new DataAccessError(404, 'COMPILATION_NOT_FOUND', '写作编译任务不存在、未写入章节或不属于当前作品。')
-  }
-  if (input.runId) await assertWritingTarget(db, { userId: input.userId, novelId: input.novelId, runId: input.runId }, { chapterId: compilation.chapter.id })
+  const compilation = await db.storyCompilation.findFirst({ where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, ...scope },
+    include: { bridge: true, chapter: true } })
+  if (!compilation?.chapter || !compilation.bridge) throw new DataAccessError(404, 'COMPILATION_NOT_FOUND', '没有当前任务可提交的正文。')
+  const runId = input.runId ?? compilation.runId
+  if (!runId) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '提交缺少原任务归属。')
+  const run = await db.agentRun.findFirst({ where: { id: runId, userId: input.userId, novelId: input.novelId, status: { in: ['queued','running','awaiting_approval'] } } })
+  if (!run) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '当前执行已停止，正文未提交。')
+  if (compilation.status === 'active' && await db.storyCompilation.findFirst({ where: { userId: input.userId, novelId: input.novelId,
+    ...(input.runId ? scope : await compilationRunScope(db, { ...input, runId })), chapterId: compilation.chapterId,
+    createdAt: { gt: compilation.createdAt } }, select: { id: true } }))
+    throw new DataAccessError(409, 'COMPILATION_STAGE_CONFLICT', '该章已有本任务后续准备的编译，旧编译未覆盖当前身份。')
+  await assertWritingTarget(db, { ...input, runId }, { chapterId: compilation.chapter.id })
   await db.$queryRaw`SELECT id FROM chapters WHERE id = ${compilation.chapter.id} FOR UPDATE`
-  const chapter = await db.chapter.findFirst({ where: { id: compilation.chapter.id, authorId: input.userId, ...activeChapterScope(input.novelId) }, select: { revision: true, content: true } })
-  if (!chapter) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '目标章节已归档，不能提交旧章节桥。')
-  if (!chapter.content.trim() || chapter.revision !== compilation.chapter.revision || chapter.content !== compilation.chapter.content) {
-    throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '当前正文为空或已变化，终态未提交。')
+  const chapter = await db.chapter.findFirst({ where: { id: compilation.chapter.id, authorId: input.userId, ...activeChapterScope(input.novelId) } })
+  if (!chapter?.content.trim() || input.expectedChapterRevision !== undefined && chapter.revision !== input.expectedChapterRevision
+    || input.expectedContentHash !== undefined && runtimeJson({ content: chapter.content }).hash !== input.expectedContentHash)
+    throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文已变化，未提交旧版本。')
+  const { readChapterReviewReadiness, recordChapterReviewDecisions } = await import('./chapter-review-guard.js')
+  let readiness = await readChapterReviewReadiness(db, { ...input, runId }, compilation.id)
+  if (input.retainedFindings?.length && readiness) {
+    await recordChapterReviewDecisions(db, { ...input, runId }, readiness, input.retainedFindings)
+    readiness = await readChapterReviewReadiness(db, { ...input, runId }, compilation.id)
   }
-  if (input.expectedChapterRevision !== undefined && chapter.revision !== input.expectedChapterRevision
-    || input.expectedContentHash !== undefined && createHash('sha256').update(chapter.content).digest('hex') !== input.expectedContentHash) {
-    throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文在终态推导后变化，未提交旧版本终态。')
-  }
-  const source = await readCompilerContinuitySource(db, input, compilation.chapter, compilation.bridge.fromChapterId, storedContinuityProtocol(compilation.validation), readScope.inheritanceScope)
-  if (compilation.bridge.fromChapterId && (!source || source.revision !== compilation.bridge.sourceRevision)) {
-    throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '桥接来源章节已变化，不能沿用旧来源提交终态。')
-  }
-  const orderedScenes = [...compilation.sceneTasks].sort((a, b) => a.ordinal - b.ordinal)
-  const probeRunId = input.runId ?? compilation.runId
-  const { readChapterReviewReadiness, readCurrentCompilerContinuity, terminalReviewStateHash, recordChapterReviewDecisions, chapterReviewDecisionGuidance, lockChapterReviewDecisions } = await import('./chapter-review-guard.js')
-  const currentContinuityReview = readCurrentCompilerContinuity({ ...compilation, bridge: compilation.bridge }, compilation.chapter, source)
-  let readiness = probeRunId ? await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id, { terminalDraftScope, readScope }) : null
-  if (readiness?.qualityReportId) {
-    await lockChapterReviewDecisions(db, readiness.qualityReportId)
-    readiness = await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId! }, compilation.id, { terminalDraftScope, readScope })
-  }
-  if (readiness && !readiness.ready) {
-    const required = readiness.requiredTools[0]!
-    throw new DataAccessError(409, required.name === 'continuity_validate' ? 'CONTINUITY_CHECK_REQUIRED' : 'QUALITY_CHECK_REQUIRED',
-      `当前 r${chapter.revision} 缺少完整且匹配的${required.name === 'continuity_validate' ? '连续性' : '质量'}检查（${required.name === 'continuity_validate' ? readiness.continuity : readiness.quality}）。保留正文；先调用 ${required.name}，compilationId=${compilation.id}，再重新核验交付，不能沿用旧报告或把失败当作通过。`)
-  }
-  if (input.decisionOnly && (!input.runId || readiness?.reviewProtocol !== 1 || !input.retainedFindings?.length)) {
-    throw new DataAccessError(409, 'REVIEW_DECISION_REQUIRED', '分批决定须由原任务冻结的严格意见协议允许，并引用当前完整报告的真实意见与具体保留原因；未提交章节终态。')
-  }
-  let decisionChanged = false
-  let savedDecisions: typeof input.retainedFindings
-  const beforeDecisions = readiness
-  if (input.retainedFindings?.length) {
-    if (!probeRunId || !readiness) throw new DataAccessError(409, 'REVIEW_DECISION_REQUIRED', '当前任务没有可核验的章节检查记录，未保存留置。')
-    const decision = await recordChapterReviewDecisions(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, readiness, input.retainedFindings)
-    decisionChanged = decision.changed
-    savedDecisions = decision.findings
-    // A decision-only effect reports the exact persisted decisions. It does
-    // not certify delivery; ordinary commit still rereads the full authority.
-    if (!input.decisionOnly) {
-      if (decisionChanged) {
-        const decided = await db.storyCompilation.findFirst({ where: { id: compilation.id, userId: input.userId, novelId: input.novelId }, select: { validation: true } })
-        if (!decided) throw new DataAccessError(409, 'COMPILATION_NOT_FOUND', '意见决策后编译已变化，终态未提交。')
-        compilation.validation = decided.validation
-      }
-      readiness = await readChapterReviewReadiness(db, { userId: input.userId, novelId: input.novelId, runId: probeRunId }, compilation.id, { terminalDraftScope, readScope })
-    }
-
-  }
-  if (input.decisionOnly) {
-    const { chapterReviewDecisionTransition } = await import('./chapter-review-guard.js')
-    const afterDecisions = beforeDecisions && savedDecisions ? { ...beforeDecisions, retainedDecisions: savedDecisions } : null
-    const decisionProgress = beforeDecisions && afterDecisions ? chapterReviewDecisionTransition(beforeDecisions, afterDecisions) : undefined
-    return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: chapter.revision,
-      skippedMemoryCount: 0, retainedIssueCount: savedDecisions?.length ?? 0, decisionOnly: true, decisionChanged,
-      ...(decisionProgress ? { decisionProgress } : {}) }
-  }
-  // Manual/legacy tasks retain optional checks. Writing delivery requirements
-  // come exclusively from the authenticated original contract, never tool flags.
-  const continuityErrorCount = readiness?.continuityErrorCount ?? currentContinuityReview.assessment?.errorCount ?? 0
-  const report = readiness?.qualityReportId ? await db.chapterQualityReport.findUnique({ where: { id: readiness.qualityReportId }, include: { findings: true } })
-    : readiness ? null : await db.chapterQualityReport.findFirst({ where: { userId: input.userId, novelId: input.novelId, compilationId: compilation.id,
-      chapterId: compilation.chapter.id, chapterRevision: chapter.revision }, include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
-  const qualityErrorCount = readiness?.qualityErrorCount ?? (report && qualityReportMatchesContent(report, chapter.revision, chapter.content)
-    ? report.findings.filter(finding => finding.severity === 'error' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length : 0)
-  const unresolvedQualityCount = report?.findings.filter(finding => finding.disposition !== 'repaired'
-    && (readiness?.reviewProtocol === 1 || finding.authorFeedback !== 'rejected')).length
-  let retainedIssueCount = unresolvedQualityCount ?? 0
-  const { hasPendingChapterReviewDecision } = await import('./chapter-review-guard.js')
-  if (readiness ? hasPendingChapterReviewDecision(readiness) : continuityErrorCount > 0 || qualityErrorCount > 0) {
-    const code = continuityErrorCount > 0 ? 'CONTINUITY_ERRORS_REMAIN'
-      : qualityErrorCount > 0 || readiness?.mustPassPending ? 'QUALITY_CHECK_REQUIRED' : 'REVIEW_DECISION_REQUIRED'
-    throw new DataAccessError(409, code, readiness ? chapterReviewDecisionGuidance(readiness)
-      : continuityErrorCount > 0 ? '当前完整连续性检查仍有事实错误，尚未修订或明确处置，终态未提交。'
-        : '当前检查意见尚未处理；请核对当前报告，明确修订或逐项留置。')
-  }
-  if (continuityErrorCount > 0 || qualityErrorCount > 0) {
-    retainedIssueCount = continuityErrorCount + (unresolvedQualityCount ?? qualityErrorCount)
-  }
-  if (readiness?.reviewProtocol === 1) retainedIssueCount = new Set([
-    ...(report?.findings.filter(finding => finding.disposition !== 'repaired').map(finding => `quality:${report.id}:${finding.id}`) ?? []),
-    ...(readiness.requiredDecisions ?? []).map(item => `${item.source}:${item.reportId}:${item.findingId}`),
-    ...(readiness.retainedDecisions ?? []).map(item => `${item.source}:${item.reportId}:${item.findingId}`),
-  ]).size
-  // Empty state is explicitly unknown. Asserted state must be exactly the
-  // independent critic's candidate, bound to this body's full coverage.
-  const proposedTerminal = terminalCandidateSchema.parse({ exitState: input.exitState, lastUnfinishedAction: input.lastUnfinishedAction })
-  const reviewedCandidate = readTerminalCandidate(compilation.validation)
-  // Legacy/manual error gates need no new task lookup. Read the frozen address
-  // policy only when this producer actually carries terminal evidence context.
-  const hasStoredFactCoverage = compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext)
-    && 'terminalFactCoverage' in compilation.preparedContext
-  const terminalRequest = ((currentContinuityReview.coverage.protocolVersion ?? 0) >= 10 || hasStoredFactCoverage) && probeRunId
-    ? await readOriginalTaskRequest(db, { ...input, runId: probeRunId }) : undefined
-  const outstandingFacts = readTerminalCoverageState(terminalRequest?.spec, compilation.preparedContext, compilation.chapter.id)?.facts.length ?? 0
-  const terminalAddressProtocol = terminalQuoteAddressVersion(terminalRequest?.spec)
-  let reviewedEvidence = (currentContinuityReview.coverage.protocolVersion ?? 0) >= 10 ? terminalEvidenceContext({ ...compilation.chapter, ...chapter }, source, currentContinuityReview.coverage.protocolVersion === 11 ? 2 : 1, terminalAddressProtocol,
-    terminalCoverageInput(terminalRequest?.spec, compilation.preparedContext, { ...compilation.chapter, ...chapter }, reviewedCandidate, terminalCoverageAuditVersion(compilation.validation), terminalCoverageProofs(source, terminalSpanAuditVersion(compilation.validation))), terminalVerdictAuditVersion(compilation.validation), terminalSpanAuditVersion(compilation.validation)) : undefined
-  if (reviewedEvidence && reviewedCandidate && terminalRequest) reviewedEvidence = attachTerminalProposalInput(reviewedEvidence, { taskId: terminalProposalTaskId(terminalRequest.spec, terminalRequest.taskId),
-    preparedContext: compilation.preparedContext, validation: compilation.validation, candidate: reviewedCandidate })
-  const deliveryBinding = terminalRequest && probeRunId ? await (await import('./terminal-draft-authority.js')).readTerminalDraftBinding(db,
-    { ...input, runId: probeRunId, compilationId: compilation.id }, { taskId: terminalProposalTaskId(terminalRequest.spec, terminalRequest.taskId), preparedContext: compilation.preparedContext },
-    { ...compilation.chapter, ...chapter }, compilation.validation, reviewedEvidence, terminalDraftScope, readScope.inheritanceScope) : undefined
-  const terminalReview = currentTerminalReview(compilation.validation, chapter.content, reviewedEvidence, deliveryBinding)
-  if (outstandingFacts || reviewedCandidate || terminalClaims(proposedTerminal).length) {
-    if (!currentContinuityReview.assessment || !reviewedCandidate || !terminalReview?.deliveryEligibility.eligible
-      || runtimeJson(reviewedCandidate).hash !== runtimeJson(proposedTerminal).hash) {
-      throw new DataAccessError(409, 'TERMINAL_STATE_REVIEW_REQUIRED', '终态包含尚未由当前正文独立核验的事实，或与检查候选不同。正文与原终态保留；调用 continuity_validate，terminalState={exitState,lastUnfinishedAction} 传入准确候选，核对逐项正文证据后再提交。计划、推测、否定或仅转述不能作为实况；不要静默清空已知状态绕过核验。')
-    }
-  }
-  const latestCompilation = await db.storyCompilation.findFirst({ where: { id: compilation.id, userId: input.userId, novelId: input.novelId } })
-  if (!latestCompilation) throw new DataAccessError(409, 'COMPILATION_NOT_FOUND', '意见决策后编译已变化，终态未提交。')
-  const terminalContext = latestCompilation.preparedContext && typeof latestCompilation.preparedContext === 'object' && !Array.isArray(latestCompilation.preparedContext) ? latestCompilation.preparedContext as Record<string, Prisma.JsonValue> : {}
-  const terminalContentHash = runtimeJson({ content: chapter.content }).hash
-  const sameTerminal = compilation.status === 'completed' && !!compilation.bridge.committedAt && compilation.bridge.targetRevision === chapter.revision
-  const terminalCandidateHash = runtimeJson(proposedTerminal).hash
+  if (!readiness?.ready || readiness.decisionPending) throw new DataAccessError(409, readiness?.requiredTools[0]?.name === 'quality_analyze' ? 'QUALITY_CHECK_REQUIRED'
+    : !readiness || readiness.requiredTools.length ? 'CONTINUITY_CHECK_REQUIRED' : readiness.continuityErrorCount ? 'CONTINUITY_ERRORS_REMAIN'
+      : readiness.qualityErrorCount || readiness.mustPassPending && readiness.qualityPassRequired ? 'QUALITY_CHECK_REQUIRED' : 'REVIEW_DECISION_REQUIRED',
+    '当前正文的检查或真实问题尚未完成，报告和正文已保留，本次未提交。')
+  const original = await readOriginalTaskRequest(db, { ...input, runId }), runIds = await originalTaskRunIds(db, { ...input, runId }, original)
+  if (await db.aiUsageLog.count({ where: { userId: input.userId, novelId: input.novelId, agentRunId: { in: runIds },
+    billingStatus: { in: ['pending_usage','pending_settlement','pending_authorization'] } } })) throw new DataAccessError(409, 'AI_PROVIDER_BILLING_UNCONFIRMED', '原请求用量或费用未确认，正文未提交。')
+  const hash = runtimeJson({ content: chapter.content }).hash
+  const prepared = compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext : {}
+  if (compilation.bridge.committedAt && compilation.bridge.targetRevision === chapter.revision && prepared.terminalContentHash === hash)
+    return { compilationId: compilation.id, chapterId: chapter.id, chapterRevision: chapter.revision, skippedMemoryCount: 0, retainedIssueCount: readiness.retainedDecisions?.length ?? 0 }
   const now = new Date()
-  const bridgeData = {
-        targetRevision: compilation.chapter.revision,
-        lastUnfinishedAction: input.lastUnfinishedAction,
-        location: input.exitState.location ?? '',
-        storyTime: input.exitState.storyTime ?? '',
-        knowledgeState: input.exitState.knowledge,
-        bodyState: input.exitState.body,
-        objectState: input.exitState.objects,
-        relationshipState: input.exitState.relationships,
-        emotionAftermath: input.exitState.emotion,
-        hookDecision: input.hookDecision,
-        delayedHookReason: input.delayedHookReason,
-        recentOpenings: [...asStringArray(compilation.bridge.recentOpenings), input.openingStructure].filter(Boolean).slice(-3),
-        recentEndings: [...asStringArray(compilation.bridge.recentEndings), input.endingStructure].filter(Boolean).slice(-3),
-        openLoops: input.exitState.openLoops,
-        committedAt: now,
-      }
-  const assessment = currentContinuityReview.assessment
-  const terminalReviewProof = assessment ? { version: 2,
-    checkedBridge: continuityStoryInput(currentContinuityReview.checkedBridge),
-    terminalStateHash: terminalReviewStateHash({ ...compilation.bridge, ...bridgeData }, orderedScenes),
-    ...(terminalReview?.deliveryEligibility.preservation?.pendingCoverageIds.length ? { scopePreservation: {
-      version: terminalReview.deliveryEligibility.preservation.version, auditHash: runtimeJson(compilation.validation && (compilation.validation as Record<string, unknown>).continuityCriticResponse).hash,
-      policyHash: terminalReview.deliveryEligibility.preservation.policyHash,
-      pendingCoverageIds: terminalReview.deliveryEligibility.preservation.pendingCoverageIds } } : {}),
-  } : undefined
-  const terminalFactProofs = currentContinuityReview.coverage.protocolVersion === 11 && terminalReview?.deliveryEligibility.eligible && reviewedEvidence
-    ? buildTerminalFactProofs({ compilationId: compilation.id, chapter: { ...compilation.chapter, ...chapter }, validation: compilation.validation,
-      stateHash: terminalReviewStateHash(sameTerminal ? compilation.bridge : { ...compilation.bridge, ...bridgeData }, orderedScenes),
-      evidence: reviewedEvidence, review: terminalReview }) : undefined
-  if (sameTerminal && terminalContext.terminalContentHash === terminalContentHash && terminalContext.terminalCandidateHash === terminalCandidateHash) {
-    if (terminalFactProofs && runtimeJson({ facts: terminalContext.terminalFactProofs ?? null }).hash !== runtimeJson({ facts: terminalFactProofs }).hash) {
-      await db.storyCompilation.update({ where: { id: compilation.id }, data: { preparedContext: runtimeJson({ ...terminalContext, terminalFactProofs }).value } })
-    }
-    return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: chapter.revision, skippedMemoryCount: 0, retainedIssueCount }
-  }
-  await Promise.all([
-    db.chapterBridge.update({ where: { id: compilation.bridge.id }, data: bridgeData }),
-    db.sceneTask.updateMany({ where: { compilationId: compilation.id }, data: { status: 'completed' } }),
-    db.storyCompilation.update({
-      where: { id: compilation.id },
-      data: { stage: 'commit', status: 'completed', completedAt: now, preparedContext: { ...terminalContext, terminalContentHash, terminalCandidateHash,
-        ...(terminalFactProofs ? { terminalFactProofs: runtimeJson(terminalFactProofs).value } : {}),
-        ...(terminalReviewProof ? { terminalReviewProof: terminalReviewProof as Prisma.InputJsonValue } : {}) } },
-    }),
-  ])
-  if (sameTerminal) return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: chapter.revision, skippedMemoryCount: 0, retainedIssueCount }
-  // Optional memory proposals must respect author tombstones without rolling
-  // back an independently validated chapter. All other errors still roll back.
+  const source = compilation.bridge.fromChapterId ? await db.chapter.findFirst({ where: { id: compilation.bridge.fromChapterId,
+    authorId: input.userId, ...activeChapterScope(input.novelId) }, select: { revision: true } }) : null
+  if (compilation.bridge.fromChapterId && !source) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '衔接来源已归档，章节未提交。')
+  // Commit manuscript delivery. Keep historical fact ledgers/proofs and
+  // original bridge facts; report advice never becomes a supported fact.
+  await db.chapterBridge.update({ where: { id: compilation.bridge.id }, data: { targetRevision: chapter.revision, committedAt: now,
+    ...(source ? { sourceRevision: source.revision } : {}),
+    recentOpenings: [...asStringArray(compilation.bridge.recentOpenings), input.openingStructure].filter(Boolean).slice(-3),
+    recentEndings: [...asStringArray(compilation.bridge.recentEndings), input.endingStructure].filter(Boolean).slice(-3) } })
+  await db.sceneTask.updateMany({ where: { compilationId: compilation.id }, data: { status: 'completed' } })
+  await db.storyCompilation.update({ where: { id: compilation.id }, data: { stage: 'commit', status: 'completed', completedAt: now,
+    preparedContext: runtimeJson({ ...prepared, terminalContentHash: hash }).value } })
+  // These are the existing editorial memory proposals, not certified facts.
+  // Keep the author's tombstones and the exact source revision while allowing
+  // delivery independently of whether a proposal is later accepted.
   let skippedMemoryCount = 0
   const saveProposal = async (memory: Parameters<typeof saveStoryMemory>[0]) => {
     try { await saveStoryMemory({ ...memory, agentGenerated: true }, db) }
     catch (error) {
       if (!(error instanceof DataAccessError) || error.code !== 'MEMORY_DELETED') throw error
-      skippedMemoryCount += 1
+      skippedMemoryCount++
     }
   }
-  await Promise.all([
-    saveProposal({
-      userId: input.userId,
-      novelId: input.novelId,
-      runId: input.runId ?? compilation.runId,
-      sourceChapterId: compilation.chapter.id,
-      memoryType: 'chapterSummary',
-      layer: 'L2',
-      title: compilation.chapter.title,
-      content: input.chapterSummary,
-      importance: 75,
-      confidence: 1,
-      status: 'confirmed',
-      evidence: { sourceType: 'chapter', sourceId: compilation.chapter.id, revision: compilation.chapter.revision, confidence: 1 },
-    }),
-    saveProposal({
-      userId: input.userId,
-      novelId: input.novelId,
-      runId: input.runId ?? compilation.runId,
-      sourceChapterId: compilation.chapter.id,
-      memoryType: 'sceneState',
-      layer: 'L2',
-      title: `${compilation.chapter.title}终态`,
-      content: [input.exitState.action, input.exitState.location, input.exitState.storyTime, ...input.exitState.openLoops].filter(Boolean).join('；') || input.chapterSummary,
-      importance: 80,
-      confidence: 1,
-      status: 'confirmed',
-      evidence: { sourceType: 'chapter', sourceId: compilation.chapter.id, revision: compilation.chapter.revision, confidence: 1 },
-    }),
-  ])
-  return { compilationId: compilation.id, chapterId: compilation.chapter.id, chapterRevision: compilation.chapter.revision, skippedMemoryCount, retainedIssueCount }
+  const evidence = { sourceType: 'chapter' as const, sourceId: chapter.id, revision: chapter.revision, confidence: 1 }
+  await saveProposal({ userId: input.userId, novelId: input.novelId, runId, sourceChapterId: chapter.id,
+    memoryType: 'chapterSummary', layer: 'L2', title: chapter.title, content: input.chapterSummary,
+    importance: 75, confidence: 1, status: 'inferred', evidence })
+  await saveProposal({ userId: input.userId, novelId: input.novelId, runId, sourceChapterId: chapter.id,
+    memoryType: 'sceneState', layer: 'L2', title: `${chapter.title}终态`,
+    content: [input.exitState.action, input.exitState.location, input.exitState.storyTime, input.lastUnfinishedAction,
+      ...input.exitState.knowledge, ...input.exitState.emotion, ...input.exitState.body, ...input.exitState.objects,
+      ...input.exitState.relationships, ...input.exitState.openLoops, input.hookDecision, input.delayedHookReason].filter(Boolean).join('；') || lastParagraph(chapter.content),
+    importance: 80, confidence: 1, status: 'inferred', evidence })
+  return { compilationId: compilation.id, chapterId: chapter.id, chapterRevision: chapter.revision, skippedMemoryCount, retainedIssueCount: readiness.retainedDecisions?.length ?? 0 }
 }
 
 export async function buildStoryCompilerDigest(userId: string, novelId: string, _chapterId: string | null, runId?: string) {
@@ -1172,16 +735,16 @@ export async function buildStoryCompilerDigest(userId: string, novelId: string, 
         ? `保留此编译和场景，不重复 PREPARE/BEAT；尚无合法非空正文，下一步${chapter ? '' : '按冻结目标 chapter_create 后'}调用 chapter_write 保存正文，不能宣称已写完或完成。`
         : active.bridge?.targetRevision !== chapter?.revision
           ? `保留此编译和场景，不重复 PREPARE/BEAT；当前正文与本编译绑定写入版本（${active.bridge?.targetRevision ?? '未记录'}）不一致。先核对正文和原请求，再补缺失步骤；终态未核验，不能宣称完成。`
-          : `保留此编译、场景和已保存正文，不重复 PREPARE/BEAT 或整章写入；终态尚未提交。以当前检查状态决定先处理候选、复核或提交，只有当前版本必需检查及事实核验完成后才能调用 chapter_bridge_commit；终态未核验，不能宣称完成。`
-  const validation = active?.validation as { checkedRevision?: number; independentCheck?: string; errorCount?: number; warningCount?: number } | null
+          : `保留此编译、场景和已保存正文，不重复 PREPARE/BEAT 或整章写入；终态尚未提交。使用当前连续性与人类感报告处理具体意见；chapter_bridge_commit会补齐必要检查、复查修改后的正文并实际提交。取得报告不表示问题都已解决。`
+  const review = runId && active ? await (await import('./chapter-review-guard.js')).readChapterReviewReadiness(prisma, { userId, novelId, runId }, active.id) : null
   const lines = [
     'Story Compiler 3.0 状态：',
     volumeContext ? `本章必须审视卷目标：当前《${volumeContext.volumeTitle}》，已写 ${volumeContext.chapterCount} 章（仅提醒，绝非切卷阈值）；卷目标：${volumeContext.summary || '未保存，须结合真实正文判断'}；${volumeContext.planStatus}。最新章 ${volumeContext.previousChapter.id} r${volumeContext.previousChapter.revision}，末尾：${volumeContext.previousChapter.ending}。已保存计划：${JSON.stringify(volumeContext.plans)}。PREPARE明确 volumeDecision：continue并解释未收束原因，或new_volume列已完成卷目标、前章精确收束引用和下一主困局。原目标已创建、旧任务无冻结新尾卷能力或缺真实收束证据时保留原卷；独立volume_create不能绕过此限制。` : '',
     bundle.charter ? `创作宪章 r${bundle.charter.revision}：${clip(bundle.charter.oneLinePromise, 240)}` : '创作宪章：尚未建立（新书长纲前应先建立）',
     bundle.promises.length ? `待兑现读者承诺：${bundle.promises.slice(0, 5).map((item) => `${item.title}（${item.payoffHorizon}）`).join('；')}` : '待兑现读者承诺：无',
     active ? `本任务编译：${active.id}，chapterId=${active.chapterId ?? '尚未创建'}，目标第 ${active.targetOrderIndex} 章，阶段 ${active.stage}，状态 ${active.status}，Scene Task ${active.sceneTasks.length} 个。${resume}` : '本任务尚未建立编译；历史检查失败不构成恢复旧任务的授权。写下一章时以前文为参考，为新章建立本任务编译。',
-    chapter ? `当前正文 r${chapter.revision}，${hasBody ? `非空 ${chapter.content.trim().length} 字（已保存不等于本任务完成）` : '正文为空，未写完'}；连续性检查 revision=${validation?.checkedRevision ?? '未检查'}，状态=${validation?.independentCheck ?? '未完成'}，${validation?.independentCheck === 'complete' ? `错误=${validation.errorCount ?? '未知'}，警告=${validation.warningCount ?? '未知'}` : '候选意见未确认，不能据此改稿'}；本编译质量报告 ${JSON.stringify(active?.qualityReports?.[0] ?? null)}。缺失或旧版本报告不代表通过；流水线复核请传 compilationId=${active?.id}，独立章节检查不能代替编译 CHECK。该状态仅描述此章节，其他目标仍须分别验收。` : '',
-    active ? '初稿流程：本任务冻结的新建目标章可在原写作权限内持续修订。先核对对象身份与原文证据，仅将同一对象同一维度的互斥事实视为冲突，不照 suggestion 机械改剧情。相关修法优先合并为 chapter_edit_range patches（每次最多8处），也可连续单片段替换或 chapter_write；不硬性限定一次调用。每次使用当前正文与版本，不要求每次覆盖全部意见；全部修改后复核最终版本。已有章节与明确禁止修改的请求仍按原权限处理。付费自动修订、检查次数及未知调用保护不变，不为清零警告循环改写，剩余意见保留真实状态。' : '',
+    chapter ? `当前正文 r${chapter.revision}，${hasBody ? `非空 ${chapter.content.trim().length} 字` : '正文为空'}；当前连续性报告=${review?.continuity ?? 'missing'}，人类感质量报告=${review?.quality ?? 'missing'}；报告剩余意见=${review?.decisionEntries?.length ?? 0}，已明确保留=${review?.retainedDecisions?.length ?? 0}。报告完成、意见已修复、明确保留和章节已提交分别说明。${review?.requiredTools.length ? `当前需补齐：${review.requiredTools.map(tool => tool.name).join('、')}。` : ''}` : '',
+    active ? '初稿流程：本任务冻结的新建目标章可在原写作权限内持续修订。先核对对象身份与原文证据，仅将同一对象同一维度的互斥事实视为冲突，不照 suggestion 机械改剧情。相关修法优先合并为 chapter_edit_range patches（每次最多8处），也可连续单片段替换或 chapter_write；不硬性限定一次调用。每次使用当前正文与版本，不要求每次覆盖全部意见；全部修改后复核最终版本。已有章节与明确禁止修改的请求仍按原权限处理。自动局部修订后复查最终版本，原用量或费用未知时先核对，不为清零警告循环改写，剩余意见保留真实状态。' : '',
     latestBridge?.toChapter ? `最近已提交桥（仅作背景，不证明本任务完成）：第 ${latestBridge.toChapter.orderIndex} 章《${latestBridge.toChapter.title}》，提交 r${latestBridge.targetRevision ?? '未知'}，当前 r${latestBridge.toChapter.revision}；未完成动作：${latestBridge.lastUnfinishedAction || '无'}；开放钩子：${asStringArray(latestBridge.openLoops).slice(0, 4).join('、') || '无'}` : '',
   ].filter(Boolean)
   return lines.join('\n')

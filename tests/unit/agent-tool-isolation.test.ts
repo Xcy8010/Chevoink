@@ -10,7 +10,7 @@ describe('local tool restrictions and truthful delivery outcome', () => {
     expect(isLocalToolFailure('QUALITY_REPORT_INCOMPLETE')).toBe(true)
   })
   it('keeps a restriction on its exact action and normalized target', () => {
-    const restriction = { action: 'continuity_validate', target: 'chapter', code: 'CONTINUITY_CHECK_LIMIT', reason: '次数已用完' }
+    const restriction = { action: 'chapter_create', target: 'chapter', code: 'AUTHOR_CHAPTER_SCOPE', reason: '次数已用完' }
     expect(findToolRestriction([restriction], restriction.action, { chapterId: ' chapter ' })).toBe(restriction)
     expect(findToolRestriction([restriction], restriction.action, { chapterId: 'other' })).toBeUndefined()
     expect(findToolRestriction([restriction], 'chapter_read', { chapterId: 'chapter' })).toBeUndefined()

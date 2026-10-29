@@ -65,15 +65,17 @@ export async function prepareReviewCycleTransition(tx: Prisma.TransactionClient,
   if (!compilation) throw new DataAccessError(409, 'REVIEW_CYCLE_CONFLICT', '修订编译不属于当前原任务，未记录复查转换。')
   const scope = { taskId: original.taskId, userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id }
   const existing = readReviewCycle(compilation.preparedContext, scope)
-  const { readChapterReviewReadiness, originalChapterReviewRequirements, lockChapterReviewDecisions, createChapterReviewReadScope } = await import('./chapter-review-guard.js')
+  const { readChapterReviewReadiness, lockChapterReviewDecisions, createChapterReviewReadScope } = await import('./chapter-review-guard.js')
   readScope ??= createChapterReviewReadScope()
   let review = await readChapterReviewReadiness(tx, subject, compilationId, { readScope })
   if (review?.qualityReportId) {
     await lockChapterReviewDecisions(tx, review.qualityReportId)
     review = await readChapterReviewReadiness(tx, subject, compilationId, { readScope })
   }
-  let cycle = existing ?? (review?.ready && review.decisionBinding ? beginReviewCycle(scope, { compilationId, revision: chapter.revision,
-    content: chapter.content, ready: true, binding: review.decisionBinding, required: originalChapterReviewRequirements(original, chapter),
+  // Record actual manuscript transitions even when the other independent
+  // report has not run yet. This context is not writing or paid authority.
+  let cycle = existing ?? (review?.decisionBinding && (review.quality === 'complete' || review.continuity === 'complete') ? beginReviewCycle(scope, { compilationId, revision: chapter.revision,
+    content: chapter.content, ready: true, binding: review.decisionBinding, required: { continuity: review.continuity === 'complete', quality: review.quality === 'complete' },
     findings: review.reviewCycleFindings ?? [], obligations: review.requiredDecisions ?? [] }) : null)
   if (!cycle) return
   if (!cycle.verificationStarted && review?.reviewCycle?.verificationStarted) {

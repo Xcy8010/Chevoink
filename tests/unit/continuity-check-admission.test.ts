@@ -1,80 +1,52 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ToolContext } from '../../api/lib/agent/tools/types.js'
-
-const mocks = vi.hoisted(() => ({ reserve: vi.fn(), reusable: vi.fn(), read: vi.fn(), completion: vi.fn(), cycle: vi.fn(),
-  state: { validation: { checkRounds: 1, autoRepairRounds: 0 } as Record<string, unknown>, claim: false, missing: false }, tx: {} as Record<string, unknown> }))
-vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<object>(), prisma: {
-  $transaction: async (work: (tx: unknown) => Promise<unknown>) => {
-    const before = structuredClone(mocks.state)
-    try { return await work(mocks.tx) } catch (error) { Object.assign(mocks.state, before); throw error }
-  },
-} }))
-vi.mock('../../api/lib/agent/assessment-response-lifecycle.js', async original => ({ ...await original<object>(),
-  readReusableLegacyContinuityAssessment: mocks.reusable, reserveLegacyContinuityAssessment: mocks.reserve,
-  readLegacyContinuityAssessment: mocks.read,
-  observeLegacyContinuityFirstNotDispatched: vi.fn(async () => {}),
-}))
-vi.mock('../../api/lib/agent/review-completion.js', async original => ({ ...await original<object>(), generateReviewCompletion: mocks.completion }))
-vi.mock('../../api/lib/agent/review-cycle-store.js', async original => ({ ...await original<object>(), markChapterReviewCycleVerification: mocks.cycle }))
-
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DataAccessError } from '../../api/lib/prisma.js'
-import { reserveContinuityCheck } from '../../api/lib/agent/story-compiler.js'
-import { runLegacyContinuityReview } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { reviewContinuity } from '../../api/lib/agent/continuity-review.js'
+import { currentContinuityRunnerFixture } from '../helpers/current-continuity-runner-fixture.js'
 
-beforeEach(() => {
-  vi.clearAllMocks()
-  Object.assign(mocks.state, { validation: { checkRounds: 1, autoRepairRounds: 0 }, claim: false, missing: false })
-  mocks.tx = { $queryRaw: vi.fn(async () => []), storyCompilation: {
-    findFirst: vi.fn(async () => mocks.state.missing ? null : { id: 'compilation', validation: mocks.state.validation }),
-    update: vi.fn(async ({ data }) => { mocks.state.validation = data.validation; return {} }),
-  } }
-  mocks.reusable.mockResolvedValue(null)
-  mocks.read.mockRejectedValue(new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', 'Synthetic absent response'))
-  mocks.reserve.mockImplementation(async () => { mocks.state.claim = true; return 'new' })
-  mocks.completion.mockImplementation(async () => { throw Error('synthetic provider boundary') })
-})
-function invoke() {
-  const ctx = { userId: 'user', novelId: 'novel', runId: 'run', callId: 'call', signal: new AbortController().signal } as ToolContext
-  return runLegacyContinuityReview(ctx, { chapterId: 'chapter', revision: 1, bodies: { current: 'Synthetic saved body.', previous: null },
-    system: 'Synthetic frozen reviewer.', content: 'Synthetic request.', options: { userId: 'user', novelId: 'novel', targetType: 'story_compilation', targetId: 'compilation' },
-    assertCurrent: async () => {}, onNewRequestReserved: async tx => {
-      if (!await reserveContinuityCheck('user', 'novel', 'compilation', tx)) throw new DataAccessError(409, 'COMPILATION_NOT_FOUND', 'Synthetic missing compilation')
-    } })
-}
+afterEach(() => vi.restoreAllMocks())
 
-describe('continuity check counter shares actual new-request admission', () => {
-  it('returns the real legacy format failure without trying to reconstruct an absent observation', async () => {
-    mocks.completion.mockResolvedValue('not JSON')
-    await expect(invoke()).resolves.toMatchObject({ complete: false, audit: { classification: 'json_invalid' } })
-    expect(mocks.read).not.toHaveBeenCalled()
-    expect(mocks.completion).toHaveBeenCalledOnce()
-    expect(mocks.state.validation.checkRounds).toBe(2)
+describe('current continuity request admission without a historical phase counter', () => {
+  it('returns the real format failure and preserves the historical counter and paid replies', async () => {
+    const f = currentContinuityRunnerFixture(), original = { checkRounds: 9, autoRepairRounds: 1 }
+    f.compilation.validation = structuredClone(original)
+    const result = await reviewContinuity(f.ctx, { compilationId: 'compilation' }, { allowRepair: false, dispatch: f.dispatch(() => 'not JSON') })
+    expect(result).toMatchObject({ outcome: 'failed', reviewCompleted: false, failureCode: 'CONTINUITY_REPORT_INCOMPLETE' })
+    expect(f.requests.map(row => row.action)).toEqual(['agent3ContinuityCritic', 'agent3ContinuityFormatRecovery'])
+    expect(f.compilation.validation).toMatchObject(original)
+    expect(f.report().rawResponses).toEqual(['not JSON', 'not JSON'])
+    expect(f.fees).toHaveLength(2)
   })
-  it.each(['denied', 'blocked', 'cached'] as const)('%s leaves the counter, claim and provider untouched', async kind => {
-    if (kind === 'denied') mocks.reserve.mockRejectedValue(new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED', 'No original phase'))
-    if (kind === 'blocked') mocks.reserve.mockResolvedValue('blocked')
-    if (kind === 'cached') mocks.reusable.mockResolvedValue({ complete: true })
-    const before = structuredClone(mocks.state)
-    if (kind === 'cached') await expect(invoke()).resolves.toMatchObject({ complete: true })
-    else await expect(invoke()).rejects.toMatchObject({ code: kind === 'denied' ? 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' : 'CONTINUITY_REPORT_INCOMPLETE' })
-    expect(mocks.state).toEqual(before)
-    expect(mocks.completion).not.toHaveBeenCalled()
-    expect(mocks.cycle).not.toHaveBeenCalled()
+  it.each(['denied', 'blocked', 'cached'] as const)('%s leaves original counters and provider history untouched', async kind => {
+    const f = currentContinuityRunnerFixture(), original = { checkRounds: 3, autoRepairRounds: 1 }
+    f.compilation.validation = structuredClone(original)
+    if (kind === 'cached') await reviewContinuity(f.ctx, { compilationId: 'compilation' }, { allowRepair: false, dispatch: f.dispatch(() => '{"findings":[]}') })
+    if (kind === 'blocked') f.fees.push({ id: 'unknown', usageSource: 'unknown', billingStatus: 'pending_usage', reservedCreditMilli: 7 })
+    const beforeFees = structuredClone(f.fees), beforeRequests = f.requests.length
+    const input = reviewContinuity(kind === 'denied' ? { ...f.ctx, runId: 'another-task' } : f.ctx,
+      { compilationId: 'compilation' }, { allowRepair: false, dispatch: f.dispatch(() => '{"findings":[]}') })
+    if (kind === 'cached') expect(await input).toMatchObject({ reviewCompleted: true })
+    else await expect(input).rejects.toMatchObject({ code: kind === 'denied' ? 'COMPILATION_NOT_FOUND' : 'AI_PROVIDER_BILLING_UNCONFIRMED' })
+    expect(f.requests).toHaveLength(beforeRequests)
+    expect(f.fees).toEqual(beforeFees)
+    expect(f.compilation.validation).toMatchObject(original)
   })
-  it('counts an admitted actual attempt once even when the provider boundary fails', async () => {
-    mocks.completion.mockImplementation(async () => {
-      expect(mocks.state).toMatchObject({ claim: true, validation: { checkRounds: 2, autoRepairRounds: 0 } })
-      throw Error('synthetic provider boundary')
-    })
-    await expect(invoke()).rejects.toThrow('synthetic provider boundary')
-    expect(mocks.state.validation).toEqual({ checkRounds: 2, autoRepairRounds: 0 })
-    expect(mocks.completion).toHaveBeenCalledOnce()
+  it('keeps a known failed physical attempt and can check the same body after it ends', async () => {
+    const f = currentContinuityRunnerFixture()
+    f.compilation.validation = { checkRounds: 3, autoRepairRounds: 1 }
+    await expect(reviewContinuity(f.ctx, { compilationId: 'compilation' }, { allowRepair: false,
+      dispatch: f.dispatch(() => { throw new DataAccessError(502, 'AI_PROVIDER_ERROR', '供应商明确拒绝该请求') }) })).rejects.toMatchObject({ code: 'AI_PROVIDER_ERROR' })
+    const originalFees = structuredClone(f.fees)
+    expect(f.report()).toMatchObject({ complete: false, billingKnown: true })
+    expect(await reviewContinuity({ ...f.ctx, callId: 'next-call' }, { compilationId: 'compilation' }, { allowRepair: false,
+      dispatch: f.dispatch(() => '{"findings":[]}') })).toMatchObject({ reviewCompleted: true })
+    expect(f.fees.slice(0, originalFees.length)).toEqual(originalFees)
+    expect(f.requests).toHaveLength(2)
+    expect(f.compilation.validation).toMatchObject({ checkRounds: 3, autoRepairRounds: 1 })
   })
-  it('rolls back the phase reservation when its compilation counter cannot be reserved', async () => {
-    mocks.state.missing = true
-    const before = structuredClone(mocks.state)
-    await expect(invoke()).rejects.toMatchObject({ code: 'COMPILATION_NOT_FOUND' })
-    expect(mocks.state).toEqual(before)
-    expect(mocks.completion).not.toHaveBeenCalled()
+  it('does not register a request when the actual compilation is missing', async () => {
+    const f = currentContinuityRunnerFixture()
+    await expect(reviewContinuity(f.ctx, { compilationId: 'missing' }, { allowRepair: false,
+      dispatch: f.dispatch(() => '{"findings":[]}') })).rejects.toMatchObject({ code: 'COMPILATION_NOT_FOUND' })
+    expect(f.artifacts.size).toBe(0); expect(f.requests).toEqual([]); expect(f.fees).toEqual([])
   })
 })

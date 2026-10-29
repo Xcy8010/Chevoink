@@ -5,8 +5,8 @@ import { prisma } from '../../api/lib/prisma.js'
 import { available, claim, fixture } from '../support/agent-durable-runtime-fixture.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { initializeExecutionState, loadExecutionState, saveExecutionState } from '../../api/lib/agent/runtime-state.js'
-import { prepareStoryCompilation, reserveContinuityCheck, validateStoryContinuity, commitChapterBridge, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
-import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
+import { prepareStoryCompilation, commitChapterBridge, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
+import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
 import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import { chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
@@ -25,18 +25,25 @@ import { readDurableTodoItems } from '../../api/lib/agent/tools/durable-todo.js'
 import { buildHumanityQualityContext, qualityReviewContextHash, HUMANITY_CRITIC_VERSION } from '../../api/lib/agent/humanity-quality.js'
 import { readQualityUnavailableProof } from '../../api/lib/agent/quality-unavailable-proof.js'
 
-describe.runIf(available)('current saved writing with exhausted continuity review', () => {
+describe.runIf(available)('current saved writing and read-only historical review limitations', () => {
+  async function currentContinuity(subject: { userId: string; novelId: string; runId: string; sessionId: string; chapterId: string }, compilationId: string) {
+    // Only the provider bytes are synthetic. Current manuscript/source reads,
+    // report persistence, task scope and subsequent delivery checks are real.
+    const { result } = await persistCurrentContinuityReport({ ...subject, compilationId })
+    expect(result).toMatchObject({ reviewCompleted: true })
+    const compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
+    expect(compilation.validation).toMatchObject({ checkRounds: 3, continuityReport: { complete: true, billingKnown: true, chapterId: subject.chapterId } })
+  }
   async function capped(f: Parameters<Parameters<typeof fixture>[0]>[0], finishMemory = true) {
     const lease = await claim(f)
-    const original = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     const prepared = await prepareStoryCompilation({ ...f, mode: 'premium', intentSummary: '修改本章正文' })
     const state = { knowledge: [], body: [], objects: [], relationships: [], emotion: [], openLoops: [] }
     await saveSceneTasks({ ...f, compilationId: prepared.compilation.id, tasks: [1, 2, 3].map(n => ({ purpose: `真实准备场景${n}`, entryState: state,
       goal: '登上山路', obstacle: '夜色渐深', choice: '交出钥匙', cost: '放弃返回', turn: '独自登山', exitState: state, styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } })) })
     const compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
-    for (let n = 0; n < 3; n++) expect(await reserveContinuityCheck(f.userId, f.novelId, compilation.id)).toBe(true)
-    await validateStoryContinuity({ ...f, compilationId: compilation.id, independentCheck: 'complete', expectedChapterRevision: original.revision,
-      findings: [], coverage: compilerContinuityCoverage({ chapter: original, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: null }) })
+    // Preserve the old count as history; it grants neither a phase nor delivery.
+    await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: { checkRounds: 3 } } })
+    await currentContinuity(f, compilation.id)
     const tools = [chapterReadTool, chapterWriteTool, todoWriteTool, chapterBridgeCommitTool]
     await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
       model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
@@ -59,9 +66,7 @@ describe.runIf(available)('current saved writing with exhausted continuity revie
   async function failedQuality(f: Parameters<Parameters<typeof fixture>[0]>[0], c: Awaited<ReturnType<typeof capped>>, completeContinuity = false) {
     await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0, engine: 'loop', startRequest: { prompt: '修改本章' } } })
     if (completeContinuity) {
-      const compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: c.compilationId }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
-      await validateStoryContinuity({ ...f, compilationId: c.compilationId, expectedChapterRevision: c.chapter.revision, independentCheck: 'complete', findings: [],
-        coverage: compilerContinuityCoverage({ chapter: c.chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: null }) })
+      await currentContinuity(f, c.compilationId)
     }
     const started = new Date(Date.now() + 10), created = new Date(started.getTime() + 10), finished = new Date(started.getTime() + 30)
     const context = await buildHumanityQualityContext(f.userId, f.novelId, f.chapterId, f.runId)
@@ -169,7 +174,8 @@ describe.runIf(available)('current saved writing with exhausted continuity revie
     const historical = await historicalProofShape(f, c)
     expect(readRunLimitedWritingOutcome({ outcome: historical.outcome, deliveryProof: historical })).toEqual(historical)
     expect(() => readRunLimitedWritingOutcome({ outcome: { ...historical.outcome, summary: '伪造' }, deliveryProof: historical })).toThrow()
-    expect(await reserveContinuityCheck(f.userId, f.novelId, c.compilationId)).toBe(true)
+    const stillStale = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: c.compilationId } })
+    expect(stillStale.validation).toMatchObject({ checkRounds: 3, continuityReport: { revision: c.chapter.revision - 1 } })
     await expect(commitChapterBridge({ ...f, compilationId: c.compilationId, chapterSummary: '不得提交未复核正文', exitState: { knowledge: [], body: [], objects: [], relationships: [], emotion: [], openLoops: [] },
       lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '', endingStructure: '' })).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
     const budget = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })
@@ -320,10 +326,8 @@ describe.runIf(available)('current saved writing with exhausted continuity revie
       callId: 'legacy-save', mode: 'build' as const, creativeFreedom: 'balanced' as const, qualityMode: 'premium' as const, emit: () => {}, signal: new AbortController().signal }
     const prepared = await prepareStoryCompilation({ ...ctx, mode: 'premium', intentSummary: prompt })
     const compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id }, include: { bridge: true, sceneTasks: true } })
-    const original = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-    for (let n = 0; n < 3; n++) expect(await reserveContinuityCheck(f.userId, f.novelId, compilation.id)).toBe(true)
-    await validateStoryContinuity({ ...ctx, compilationId: compilation.id, independentCheck: 'complete', expectedChapterRevision: original.revision,
-      findings: [], coverage: compilerContinuityCoverage({ chapter: original, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: null }) })
+    await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: { checkRounds: 3 } } })
+    await currentContinuity(ctx, compilation.id)
     await chapterReadTool.execute(ctx, { chapterId: f.chapterId })
     await chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: '真实保存的当前正文。钥匙交给守门人，山路仍通向高处。' })
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })

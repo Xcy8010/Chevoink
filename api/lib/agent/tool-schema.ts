@@ -19,18 +19,10 @@ export function toOpenAIParameters(parameters: z.ZodType): Record<string, unknow
 /** Only a deterministic server-frozen global slot gets simpler presentation.
  * Execution still parses the original full schema and validates scope. */
 export function toOpenAIToolPresentation(tool: Pick<AgentTool, 'name' | 'description' | 'parameters'>, scope?: TaskSpec['scope']): { description: string; parameters: Record<string, unknown> } {
-  const parameters = toOpenAIParameters(coordinatedWriterParameters(tool, scope))
-  const presented = toolPresentation(tool, parameters, scope)
-  return !!scope?.writingCoordinationProtocol && coordinatedWriterActions.some(name => name === tool.name)
-    ? { ...presented, description: `${presented.description} 本任务把正文保存与后续复核协调在同一次真实写入中：同时填写writing，首次正文提供scenes；draftComplete:false只保存草稿，true须给出actualOutcomes及章末文学决定，请求必要的独立复核和提交。候选只写真实已发生状态，不把场景计划或准备当已完成；不填写内部编译编号、证明哈希或虚构检查成功。以返回的实际保存和复核结果为准。` } : presented
+  return toolPresentation(tool, toOpenAIParameters(tool.parameters), scope)
 }
 
 function toolPresentation(tool: Pick<AgentTool, 'name' | 'description'>, parameters: Record<string, unknown>, scope?: TaskSpec['scope']): { description: string; parameters: Record<string, unknown> } {
-  if (tool.name === 'chapter_bridge_commit') {
-    const properties = parameters.properties as Record<string, unknown>
-    return scope?.reviewProtocol === 1 ? { description: `${tool.description} 新严格意见协议可传decisionOnly:true与每批最多40条retainedFindings，仅保存当前真实意见保留决定，不提交章节桥、正文或记忆；随后普通提交仍校验全部意见和硬通过要求。`, parameters }
-      : { description: tool.description, parameters: { ...parameters, properties: Object.fromEntries(Object.entries(properties).filter(([key]) => key !== 'decisionOnly')) } }
-  }
   const writing = scope?.writing
   const target = writing?.kind === 'bounded' && writing.targets.length === 1 ? writing.targets[0] : undefined
   const globalNewChapter = target?.chapterId === null && Number.isSafeInteger(target.orderIndex) && target.orderIndex > 0
@@ -60,7 +52,7 @@ function toolPresentation(tool: Pick<AgentTool, 'name' | 'description'>, paramet
  * Callers must supply scope from the verified original task, never model input. */
 export function originalToolParameterSchemas(tool: Pick<AgentTool, 'name' | 'description' | 'parameters'>, scope: TaskSpec['scope']): Record<string, unknown>[] {
   if (scope.writingCoordinationProtocol && coordinatedWriterActions.some(name => name === tool.name)) {
-    return [toOpenAIParameters(coordinatedWriterParameters(tool, scope))]
+    return [toOpenAIParameters(tool.parameters), toOpenAIParameters(coordinatedWriterParameters(tool, scope))]
   }
   const current = toOpenAIParameters(tool.parameters)
   const additive = tool.name === 'chapter_create' ? 'newVolume' : tool.name === 'story_compiler_prepare' ? 'volumeDecision' : tool.name === 'chapter_bridge_commit' ? 'decisionOnly' : null

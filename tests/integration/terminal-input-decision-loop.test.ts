@@ -4,8 +4,10 @@ import { terminalInputDecisionFixture } from '../helpers/terminal-input-decision
 import { terminalDraftFixture } from '../helpers/terminal-draft-fixture.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { prisma } from '../../api/lib/prisma.js'
-import { prepareStoryCompilation, saveSceneTasks, recordStoryCompilerWrite, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
-import { readLegacyContinuityAssessment, bindLegacyContinuityAssessment, reserveLegacyContinuityAssessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { prepareStoryCompilation, saveSceneTasks, recordStoryCompilerWrite } from '../../api/lib/agent/story-compiler.js'
+import { persistHistoricalContinuityAudit as validateStoryContinuity } from '../support/historical-continuity-audit.js'
+import { continueCurrentTerminalLoop as continueCurrentReviewWorkflow } from '../support/current-terminal-loop-fixture.js'
+import { readLegacyContinuityAssessment, bindLegacyContinuityAssessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { readTerminalInputDecision } from '../../api/lib/agent/terminal-input-decision.js'
 import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 import { observeChapterReviewProgress, observeWritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
@@ -14,9 +16,7 @@ import { executeAgentRun } from '../../api/lib/agent/loop.js'
 import { recoverRunElapsedMs } from '../../api/lib/agent/checkpoint.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
-import * as ai from '../../api/lib/ai-service.js'
 import * as credits from '../../api/lib/credits.js'
-import * as prices from '../../api/lib/billing/resolve-token-price.js'
 import * as flags from '../../api/lib/agent2-feature-flags.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
 import * as titles from '../../api/lib/agent/session-title.js'
@@ -25,10 +25,10 @@ const prompt = '修改第一章，只输出标题和正文'
 const scenarios = [{ stagnant: 0, action: 'unused-control' }, { stagnant: 3, action: 'consumed-control' },
   { stagnant: 4, action: 'unused-control' }, { stagnant: 4, action: 'native-exhausted' }] as const
 
-describe.runIf(available)('exhausted original continuity input has no implicit paid continuation', () => {
+describe.runIf(available)('known invalid historical input does not revoke current report and manuscript authority', () => {
   it.each(scenarios)('preserves source, accounting and consumed controls at stagnant=$stagnant, action=$action', ({ stagnant, action }) => fixture(async f => {
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
-    vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
+    vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue({ chapterCount: 0, jobCount: 0, entityCount: 0, relationCount: 0, reused: false })
     vi.spyOn(titles, 'autoNameSession').mockResolvedValue(undefined)
     const feature = flags.isAgent2FeatureEnabled
     vi.spyOn(flags, 'isAgent2FeatureEnabled').mockImplementation((name, owner) => name === 'storyCompiler' || name !== 'memory2' && feature(name, owner))
@@ -76,7 +76,8 @@ describe.runIf(available)('exhausted original continuity input has no implicit p
       artifacts.push(await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'continuityReview', title: 'Synthetic original independent evidence',
         content: 'Synthetic independent evidence.', metadata: runtimeJson(metadata).value } }))
     }
-    const ctx = { ...f, callId: synthetic.callId, signal: new AbortController().signal } as ToolContext
+    const ctx: ToolContext = { ...f, callId: synthetic.callId, signal: new AbortController().signal,
+      mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {} }
     const received = await prisma.$transaction(tx => readLegacyContinuityAssessment(tx, ctx, synthetic.frozen))
     expect(received).toMatchObject({ recoveryReady: true, billingKnown: true, providerComplete: true, inspected: { complete: false, audit: { classification: 'source_invalid' } } })
     const bound = bindLegacyContinuityAssessment(received.inspected, ctx, synthetic.frozen)
@@ -117,15 +118,10 @@ describe.runIf(available)('exhausted original continuity input has no implicit p
     const originalPending = ((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).preparedContext as {
       terminalProposalReview: { pending: unknown[] } }).terminalProposalReview.pending
     expect(originalPending).toHaveLength(1)
-    vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', provider: 'fixture', modelName: 'fixture', baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture',
-      multiplierBps: 10000, reasoningEffort: 'low', reasoningEfforts: ['none', 'low'], reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: 128000 })
-    vi.spyOn(prices, 'resolveTokenPrice').mockResolvedValue({ version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 })
-    const network = vi.fn(() => { throw Error('No network request is authorized') }); vi.stubGlobal('fetch', network)
-    const critic = vi.spyOn(ai, 'generateTextCompletion').mockRejectedValue(Error('No extra independent judgment is authorized'))
-    const main = vi.spyOn(ai, 'chatWithTools').mockRejectedValue(Error('No paid main action-selection turn is authorized'))
     const execute = (eventId: string, afterSeq: number, author = true) => executeAgentRun({ ...f, prompt, mode: 'build', resume: true,
       ...(author ? { authorContinue: { eventId, afterSeq } } : {}), eventStartSeq: afterSeq, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
-    await execute(pause.id, 3)
+    const history = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { lte: 3 } }, orderBy: { seq: 'asc' } })
+    const completed = await continueCurrentReviewWorkflow(f, { compilationId: compilation.id, prompt, afterSeq: 3 })
     const finished = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
     const failedTools = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'tool.result', seq: { gt: 3 } }, select: { payload: true }, orderBy: { seq: 'asc' } })
     const savedCheckpoint = (finished.usage as { checkpoint: typeof checkpoint }).checkpoint
@@ -133,30 +129,29 @@ describe.runIf(available)('exhausted original continuity input has no implicit p
     expect(savedCheckpoint.reviewAttempts).toEqual(expect.arrayContaining(oldClaims))
     expect(savedCheckpoint.reviewAttempts.filter(item => item.startsWith('terminal-processing:'))).toEqual(action === 'native-exhausted' ? plan!.nativeClaims : [])
     expect(savedCheckpoint.consumedReviewDecisionFeedback).toEqual(oldFeedback)
-    expect({ status: finished.status, error: finished.errorMessage, failedTools }).toMatchObject({ status: 'paused' })
-    expect(main).not.toHaveBeenCalled(); expect(critic).not.toHaveBeenCalled()
+    expect({ status: finished.status, error: finished.errorMessage, failedTools }).toMatchObject({ status: 'completed', error: null })
+    expect(completed.main).toHaveBeenCalled()
+    expect(completed.critic).toHaveBeenCalled()
     expect(failedTools).toEqual([])
+    const completedFees = await prisma.aiUsageLog.count({ where: { userId: f.userId } })
     for (const author of [true, false]) {
-      const latest = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId, type: 'run.paused' }, orderBy: { seq: 'desc' } })
       const tail = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId }, orderBy: { seq: 'desc' } })
-      await execute(latest.id, tail.seq, author)
-      expect(main).not.toHaveBeenCalled(); expect(critic).not.toHaveBeenCalled()
+      await execute(pause.id, tail.seq, author)
+      expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(completedFees)
       const resumed = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
-      expect(resumed.status).toBe('paused')
+      expect(resumed.status).toBe('completed')
       expect((resumed.usage as { checkpoint: typeof checkpoint }).checkpoint.consumedReviewDecisionFeedback).toEqual(oldFeedback)
     }
-    await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running' } })
-    expect(await prisma.$transaction(tx => reserveLegacyContinuityAssessment(tx, { ...ctx, callId: 'different-call' },
-      { ...synthetic.frozen, content: 'Different rendering.', bindingHash: 'b'.repeat(64) }, async () => {}))).toBe('blocked')
-    expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(41)
-    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
+    expect(completedFees).toBe(41 + completed.actions.length)
+    expect(completed.chapter.content.trim()).toBe(chapter.content)
+    expect(completed.chapter.revision).toBe(chapter.revision + 2)
     expect(((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).preparedContext as {
       terminalProposalReview: { pending: unknown[] } }).terminalProposalReview.pending).toEqual(originalPending)
     const byId = <T extends { id: string }>(rows: T[]) => [...rows].sort((a, b) => a.id.localeCompare(b.id))
     expect(await prisma.agentArtifact.findMany({ where: { id: { in: artifacts.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(byId(artifacts))
     expect(await prisma.aiUsageLog.findMany({ where: { id: { in: usage.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(byId(usage))
     expect(await prisma.creditLedgerEntry.findMany({ where: { id: { in: ledger.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(byId(ledger))
-    expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })).toEqual(account)
-    expect(network).not.toHaveBeenCalled()
+    expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })).toMatchObject({ ...account, dailyUsedMilli: account.dailyUsedMilli + completed.actions.length * 7 })
+    expect(await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { lte: 3 } }, orderBy: { seq: 'asc' } })).toEqual(history)
   }, undefined, prompt, { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
 })

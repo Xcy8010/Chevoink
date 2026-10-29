@@ -8,7 +8,7 @@ import { buildContinuityReviewManifest, buildContinuityInvalidRowRepair, inspect
 import { isContinuityV4Inspection } from '../../api/lib/agent/authenticated-continuity-assessment.js'
 import { continuitySubjectIdentity } from '../../api/lib/agent/continuity-subject-identity.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
-import { runContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { failedContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { terminalCandidateFacts } from '../../api/lib/agent/terminal-fact-identity.js'
 import { attachTerminalProposalInput, prepareCompilerTerminalProposals, prepareTerminalProposalInput,
@@ -158,10 +158,8 @@ it.each(['body', 'source', 'task', 'chapter', 'candidate'] as const)('blocks sta
 
 it.each([true, false])('retains the actual reassessment wrapper while distinguishing known invalid from unknown: complete=%s', async complete => {
   const f = fixture(), original = f.audit(f.candidate, f.evidence)
-  const observed = await runContinuityReassessment({ original, bodies: { previous: null, current: f.chapter.content, terminalEvidence: f.evidence },
-    system: 'Synthetic independent critic', content: 'Frozen synthetic input', reassessmentProtocol: 2,
-    billingKnown: true, providerComplete: true, slotUsed: false, signal: new AbortController().signal,
-    assertCurrent: async () => {}, claim: async () => true, dispatch: async () => ({ content: 'invalid-json', complete }) })
+  const observed = failedContinuityReassessment(original, 'invalid-json', complete,
+    { previous: null, current: f.chapter.content, terminalEvidence: f.evidence }, 2)
   // Production lifecycle appends this identity after the parser and before
   // persisting either a complete or failed second response.
   const retained = { ...observed.audit, assessmentRequest: { version: 1, key: 'a'.repeat(64), inputHash: 'b'.repeat(64) } }

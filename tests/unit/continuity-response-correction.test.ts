@@ -1,6 +1,11 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { reviewContinuity } from '../../api/lib/agent/continuity-review.js'
+import { currentContinuityRunnerFixture } from '../helpers/current-continuity-runner-fixture.js'
+
 import { inspectContinuityResponse, continuityUnlocatedCandidateCount } from '../../api/lib/agent/continuity-format-recovery.js'
-import { applyContinuityEvidenceCorrection, runContinuityEvidenceCorrection, continuityCorrectionRecoveryDecision } from '../../api/lib/agent/continuity-response-correction.js'
+import { applyContinuityEvidenceCorrection, continuityCorrectionRecoveryDecision } from '../../api/lib/agent/continuity-response-correction.js'
+
+afterEach(() => vi.restoreAllMocks())
 
 const bodies = { previous: '上一章门打开。', current: '这一章门锁住。' }
 const finding = { signal: 'object', severity: 'error', evidence: '同一门状态互斥。', suggestion: '统一实际状态。', sourceEvidence: [
@@ -53,47 +58,57 @@ describe('continuity typed response and evidence correction', () => {
     if (scenario === 'invented') expect(applyContinuityEvidenceCorrection(original(), JSON.stringify(value), bodies).complete).toBe(false)
     else expect(() => applyContinuityEvidenceCorrection(original(), JSON.stringify(value), bodies)).toThrow()
   })
-  it.each(['legacy', 'durable'] as const)('%s uses one claimed source-only dispatch and denies restart dispatch', async () => {
-    let claimed = false
-    const journal: unknown[] = []
-    const dispatch = vi.fn(async () => { expect(journal).toEqual([original().audit]); return { content: JSON.stringify(corrections()), complete: true } })
-    const input = { original: original(), bodies, billingKnown: true, signal: new AbortController().signal, assertCurrent: vi.fn(async () => {}),
-      claim: async (inspection: ReturnType<typeof original>) => { if (claimed) return false; claimed = true; journal.push(inspection.audit); return true }, dispatch }
-    expect((await runContinuityEvidenceCorrection(input)).complete).toBe(true)
-    expect((await runContinuityEvidenceCorrection(input)).complete).toBe(false)
-    expect(dispatch).toHaveBeenCalledTimes(1)
+  it.each(['same-call', 'new-call'] as const)('reuses the full corrected report for %s without another request', async identity => {
+    const f = currentContinuityRunnerFixture(), unknown = { ...f.opinion(), evidence: [{ sourceId: 'missing-source-id' }] }
+    const dispatch = f.dispatch(request => request.action === 'agent3ContinuityCritic' ? JSON.stringify({ findings: [unknown] })
+      : JSON.stringify({ corrections: [{ index: 0, evidence: f.opinion().evidence }] }))
+    expect(await reviewContinuity(f.ctx, { compilationId: 'compilation' }, { allowRepair: false, dispatch })).toMatchObject({ reviewCompleted: true })
+    const original = structuredClone(f.report()), fees = structuredClone(f.fees)
+    expect(await reviewContinuity({ ...f.ctx, callId: identity === 'same-call' ? f.ctx.callId : 'new-call' }, { compilationId: 'compilation' },
+      { allowRepair: false, dispatch })).toMatchObject({ reviewCompleted: true })
+    expect(f.report()).toEqual(original); expect(f.fees).toEqual(fees)
+    expect(f.requests.map(row => row.action)).toEqual(['agent3ContinuityCritic', 'agent3ContinuityEvidenceCorrection'])
+    expect(f.report().opinions[0].explanation).toBe(unknown.explanation)
   })
-  it.each(['usage-unknown', 'incomplete', 'aborted', 'current-changed', 'previous-changed'] as const)('denies dispatch for %s', async scenario => {
-    const controller = new AbortController()
-    if (scenario === 'aborted') controller.abort()
-    const dispatch = vi.fn(async () => ({ content: '', complete: false }))
-    const input = { original: scenario === 'incomplete' ? inspectContinuityResponse(raw, bodies, false, 5) : original(), bodies,
-      billingKnown: scenario !== 'usage-unknown', signal: controller.signal,
-      assertCurrent: async () => { if (scenario.endsWith('changed')) throw new Error('Frozen source changed') }, claim: vi.fn(async () => true), dispatch }
-    if (['aborted', 'current-changed', 'previous-changed'].includes(scenario)) await expect(runContinuityEvidenceCorrection(input)).rejects.toThrow()
-    else expect((await runContinuityEvidenceCorrection(input)).complete).toBe(false)
-    expect(dispatch).not.toHaveBeenCalled()
-    expect(input.claim).not.toHaveBeenCalled()
+  it.each(['usage-unknown', 'incomplete', 'aborted', 'current-changed', 'previous-changed'] as const)('does not dispatch current correction work for %s', async scenario => {
+    const f = currentContinuityRunnerFixture()
+    if (scenario === 'usage-unknown' || scenario === 'incomplete') f.fees.push({ id: 'old', usageSource: scenario === 'incomplete' ? 'partial' : 'unknown',
+      billingStatus: 'pending_usage', requestTokens: scenario === 'incomplete' ? 12 : null, responseTokens: null, reservedCreditMilli: 7 })
+    if (scenario === 'aborted') f.controller.abort()
+    f.ctx.assertCurrentExecution = async () => {
+      if (scenario === 'current-changed') f.chapter.content += '作者已更新。'
+      if (scenario === 'previous-changed') f.previous[0].content += '作者更正前文。'
+    }
+    await expect(reviewContinuity(f.ctx, { compilationId: 'compilation' }, { allowRepair: false, dispatch: f.dispatch(() => '{"findings":[]}') })).rejects.toBeDefined()
+    expect(f.requests).toEqual([]); expect(f.artifacts.size).toBe(0)
   })
-  it('keeps invalid/unfinished followup honestly incomplete and never retries', async () => {
+  it('keeps invalid and unfinished source-only replies incomplete without changing any opinion', async () => {
     for (const complete of [true, false]) {
-      const dispatch = vi.fn(async () => ({ content: '{"corrections":[]}', complete }))
-      const result = await runContinuityEvidenceCorrection({ original: original(), bodies, billingKnown: true, signal: new AbortController().signal,
-        assertCurrent: async () => {}, claim: async () => true, dispatch })
-      expect(result.complete).toBe(false)
-      expect(result.candidateFindings).toEqual(JSON.parse(raw).findings)
-      expect(dispatch).toHaveBeenCalledTimes(1)
+      vi.restoreAllMocks()
+      const f = currentContinuityRunnerFixture(), unknown = { ...f.opinion(), evidence: [{ sourceId: 'not-a-real-source' }] }
+      const base = f.dispatch(request => request.action === 'agent3ContinuityCritic' ? JSON.stringify({ findings: [unknown] }) : '{"corrections":[]}')
+      const result = await reviewContinuity(f.ctx, { compilationId: 'compilation' }, { allowRepair: false,
+        dispatch: async request => ({ ...await base(request), ...(request.action === 'agent3ContinuityEvidenceCorrection' ? { providerComplete: complete } : {}) }) })
+      expect(result).toMatchObject({ outcome: 'failed', reviewCompleted: false })
+      expect(f.report().opinions).toEqual([unknown]); expect(f.report().unlocatedIndexes).toEqual([0])
+      expect(f.requests).toHaveLength(2); expect(f.fees).toHaveLength(2)
     }
   })
-  it.each(['aborted', 'body-changed', 'apply-failed'] as const)('journals received correction before %s guards', async scenario => {
-    const controller = new AbortController()
-    const observation: unknown[] = []
-    let assertions = 0
-    const input = { original: original(), bodies, billingKnown: true, signal: controller.signal,
-      assertCurrent: async () => { assertions++; if (assertions === 3 && scenario !== 'aborted') throw new Error('application cannot proceed') },
-      claim: async () => true, dispatch: async () => { if (scenario === 'aborted') controller.abort(); return { content: JSON.stringify(corrections()), complete: true } },
-      observe: async (response: { content: string; complete: boolean }) => { observation.push(response) } }
-    await expect(runContinuityEvidenceCorrection(input)).rejects.toThrow()
-    expect(observation).toEqual([{ content: JSON.stringify(corrections()), complete: true }])
+  it.each(['aborted', 'body-changed', 'apply-failed'] as const)('preserves received correction raw and fees before %s application', async scenario => {
+    const f = currentContinuityRunnerFixture(), unknown = { ...f.opinion(), evidence: [{ sourceId: 'missing-source' }] }
+    const baseBind = f.bind.getMockImplementation()!
+    if (scenario === 'apply-failed') f.bind.mockImplementationOnce(baseBind).mockRejectedValueOnce(new Error('synthetic report binding failed'))
+    const first = JSON.stringify({ findings: [unknown] }), second = JSON.stringify({ corrections: [{ index: 0, evidence: f.opinion().evidence }] })
+    await expect(reviewContinuity(f.ctx, { compilationId: 'compilation' }, { allowRepair: false, dispatch: f.dispatch(request => {
+      if (request.action === 'agent3ContinuityEvidenceCorrection') {
+        if (scenario === 'aborted') f.controller.abort()
+        if (scenario === 'body-changed') f.chapter.content += '作者新文。'
+        return second
+      }
+      return first
+    }) })).rejects.toBeDefined()
+    expect(f.report().rawResponses).toEqual([first, second]); expect(f.fees).toHaveLength(2)
+    expect(f.report().opinions[0].explanation).toBe(unknown.explanation)
+    expect(f.report().complete).toBe(false)
   })
 })

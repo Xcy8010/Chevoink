@@ -1,3 +1,6 @@
+import { chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { advanceDurableMemory } from '../../api/lib/agent/runtime-memory.js'
+import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
 import { taskSpawnTool, taskWaitTool } from '../../api/lib/agent/tools/task-orchestration-tools.js'
 import { prepareToolCursorOperation } from '../../api/lib/agent/runtime-tool-cursor.js'
 import { admitChildExecution } from '../../api/lib/agent/runtime-child.js'
@@ -32,7 +35,7 @@ import { withHumanAdmission } from '../../api/lib/agent/goal-activation-authorit
 import { freezeWritingScope, readCompletedWritingDelivery, readSavedWritingPresentation } from '../../api/lib/agent/writing-scope.js'
 import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
 import { durableMessageId } from '../../api/lib/agent/runtime-frame-events.js'
-import { validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
+
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 
@@ -100,21 +103,23 @@ describe.runIf(available)('real durable default execution control', () => {
       const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { title: '第一章 旧罗盘', content, revision: { increment: 1 }, wordCount: content.length } })
       const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
       const compilation = await prisma.storyCompilation.create({ data: { userId: f.userId, novelId: f.novelId, runId: f.runId, chapterId: f.chapterId, targetOrderIndex: 1,
-        mode: 'balanced', status: 'completed', stage: 'commit', sourcePromptHash: runtimeJson({ prompt: '重写第一章，突出捡漏爽文。' }).hash,
+        mode: 'balanced', status: 'active', stage: 'write', sourcePromptHash: runtimeJson({ prompt: '重写第一章，突出捡漏爽文。' }).hash,
         preparedContext: { terminalContentHash: runtimeJson({ content }).hash }, completedAt: new Date(),
         sceneTasks: { create: { userId: f.userId, novelId: f.novelId, chapterId: f.chapterId, ordinal: 1, status: 'completed',
           purpose: '展现独享的鉴宝机会', entryState: state, goal: '辨识罗盘价值', obstacle: '尚不知卖价', choice: '决定把握机会',
           cost: '需要继续询价', turn: '发现独享优势', exitState: state, styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } } },
-        bridge: { create: { userId: f.userId, novelId: f.novelId, targetOrderIndex: 1, toChapterId: f.chapterId, targetRevision: chapter.revision, committedAt: new Date(),
+        bridge: { create: { userId: f.userId, novelId: f.novelId, targetOrderIndex: 1, toChapterId: f.chapterId, targetRevision: chapter.revision, committedAt: null,
           knowledgeState: [], bodyState: [], objectState: [], relationshipState: [], emotionAftermath: [], recentOpenings: [], recentEndings: [], openLoops: [] } } } })
       // A saved confirmation still requires the same current independent
       // assessments as full prose delivery. Persist real revision-bound fixture
-      // responses through the production validators; no provider is dispatched.
-      await validateStoryContinuity({ userId: f.userId, novelId: f.novelId, runId: f.runId, compilationId: compilation.id,
-        expectedChapterRevision: chapter.revision, independentCheck: 'complete', findings: [] })
+      // responses through the shared runner, then perform the real commit; no provider is dispatched.
+      await persistCurrentContinuityReport({ userId: f.userId, novelId: f.novelId, runId: f.runId, compilationId: compilation.id, expectedChapterRevision: chapter.revision, independentCheck: 'complete', opinions: [] })
       await persistHumanityQualityReport({ userId: f.userId, novelId: f.novelId, runId: f.runId, compilationId: compilation.id,
         chapterId: chapter.id, chapterRevision: chapter.revision, mode: 'balanced', criticComplete: true,
         criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
+      const committed = await chapterBridgeCommitTool.execute({ ...f, chapterId: f.chapterId, callId: 'fixture-current-commit', mode: 'build', creativeFreedom: 'balanced',
+        qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }, { compilationId: compilation.id })
+      expect(committed).toMatchObject({ summary: '章节已提交' })
       expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, { userId: f.userId, novelId: f.novelId, runId: f.runId }, compilation.id)))
         .toMatchObject({ ready: true, continuity: 'complete', quality: 'complete' })
       const lease = await claim(f)
@@ -130,6 +135,7 @@ describe.runIf(available)('real durable default execution control', () => {
         role: 'assistant', parts: [{ type: 'text', text: candidate }] } })
       expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId: f.userId, novelId: f.novelId, runId: f.runId }))).toBeNull()
       expect(await prisma.$transaction(tx => readSavedWritingPresentation(tx, { userId: f.userId, novelId: f.novelId, runId: f.runId }))).toMatchObject({ text: '已保存《第一章 旧罗盘》。' })
+      while (await advanceDurableMemory(lease)) { /* Complete only actual DB derivatives from this fixture's real commit. */ }
       const before = await loadExecutionState(f.userId, f.runId)
       const originalRoot = await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId }, select: { requestSnapshot: true, specSnapshot: true, inputHash: true } })
       expect(await finalizeDurableTask(lease, { expectedRevision: before.frame.revision, expectedHash: before.frame.snapshotHash })).toMatchObject({ kind: 'completed' })
@@ -207,7 +213,7 @@ describe.runIf(available)('real durable default execution control', () => {
     })
   })
 
-  it('parks unchanged full/subset chapter reads with durable replay proof', async () => {
+  it('records unchanged full/subset chapter reads without suspending the task and preserves durable replay proof', async () => {
     await fixture(async f => {
       const body = '原文'.repeat(440) + '。'
       await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: body, wordCount: body.length } })
@@ -231,7 +237,7 @@ describe.runIf(available)('real durable default execution control', () => {
         if (index === 0) firstProgress = evidence.progressSequence
         expect(evidence.progressSequence).toBe(firstProgress)
         const decision = await advanceDurableToolStagnation(token)
-        expect(decision?.kind ?? null).toBe(index === 4 ? 'needs_attention' : null)
+        expect(decision).toBeNull()
         expect(await advanceDurableToolStagnation(token)).toEqual(decision)
       }
       expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'execution.stagnation' } })).toBe(5)
@@ -246,7 +252,7 @@ describe.runIf(available)('real durable default execution control', () => {
       const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'run.paused' }, orderBy: { sequence: 'desc' } })
       const resumed = await resumeDurableTask({ userId: f.userId, runId: f.runId, pauseEventId: pause.id })
       const restarted = await acquireRunLease({ userId: f.userId, runId: resumed.run.id, ownerId: 'restart-worker', claimId: randomUUID() })
-      expect((await advanceDurableToolStagnation(restarted))?.kind).toBe('needs_attention')
+      expect(await advanceDurableToolStagnation(restarted)).toBeNull()
       expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'execution.stagnation' } })).toBe(5)
     })
   }, 15000)

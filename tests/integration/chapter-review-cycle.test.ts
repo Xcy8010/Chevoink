@@ -1,6 +1,6 @@
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import type { Prisma } from '@prisma/client'
-import * as sourceReads from '../../api/lib/agent/compiler-continuity-source.js'
+import * as manuscriptScope from '../../api/lib/agent/manuscript-scope.js'
 import * as featureFlags from '../../api/lib/agent2-feature-flags.js'
 import { chapterWriteTool, chapterAppendTool, chapterEditRangeTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { createHash } from 'node:crypto'
@@ -22,7 +22,7 @@ const sha = (content: string) => createHash('sha256').update(content).digest('he
 // Mandatory PostgreSQL contracts: no skip/availability gate. Local unavailable
 // PostgreSQL is not passing evidence; these run on the whole same-SHA CI gate.
 describe('chapter review cycle persisted CAS and reprepare', () => {
-  it.each(['write', 'append', 'range', 'cancelled', 'changed-source'] as const)('authenticates the whole source before one atomic %s body effect with no provider or new fees', scenario => fixture(async f => {
+  it.each(['write', 'append', 'range', 'cancelled', 'changed-source'] as const)('keeps the author fence and one atomic %s body effect while old reports remain immutable', scenario => fixture(async f => {
     vi.spyOn(featureFlags, 'isAgent2FeatureEnabled').mockImplementation(name => name === 'storyCompiler')
     await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running', taskRootId: null, runtimeProtocolVersion: 0 } })
     const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { revision: 4, content: 'The guard waits at the door.', wordCount: 6 } })
@@ -39,12 +39,12 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
     const fees = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
     const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
     const artifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
-    const controller = new AbortController(), readSource = sourceReads.readCompilerContinuitySource
+    const controller = new AbortController(), readFence = manuscriptScope.assertAgentManuscriptCurrent
     const scopes: unknown[] = [], elapsed: number[] = []
-    const slow = ['write', 'append', 'range'].includes(scenario)
-    vi.spyOn(sourceReads, 'readCompilerContinuitySource').mockImplementation(async (...args) => {
+    const slow = ['write', 'append', 'range'].includes(scenario), writes = scenario !== 'cancelled'
+    vi.spyOn(manuscriptScope, 'assertAgentManuscriptCurrent').mockImplementation(async (...args) => {
       expect(args[0]).not.toBe(prisma)
-      scopes.push(args[5])
+      scopes.push(args[0])
       if (scopes.length === 1) {
         const started = performance.now()
         if (slow) await args[0].$queryRaw`SELECT 1 FROM pg_sleep(5.1)`
@@ -52,7 +52,7 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
         if (scenario === 'changed-source') await prisma.chapter.update({ where: { id: previous.id }, data: { content: 'A changed source.', revision: { increment: 1 } } })
         elapsed.push(performance.now() - started)
       }
-      return readSource(...args)
+      return readFence(...args)
     })
     const provider = vi.fn(() => { throw Error('No provider is needed for a manuscript CAS') }); vi.stubGlobal('fetch', provider)
     const context: ToolContext = { ...f, callId: 'guarded-body-' + scenario, mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', signal: controller.signal, emit: () => {} }
@@ -61,22 +61,26 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
       : scenario === 'range' ? chapterEditRangeTool.execute(context, { chapterId: chapter.id, oldText: 'waits at', newText: 'opens' })
         : chapterWriteTool.execute(context, { chapterId: chapter.id, content: after })
     if (scenario === 'cancelled') await expect(effect).rejects.toThrow()
-    else if (scenario === 'changed-source') await expect(effect).rejects.toMatchObject({ code: 'CONTINUITY_INPUT_STALE' })
     else {
       expect(await effect).toMatchObject({ display: { before: chapter.content, after, revision: 5 } })
-      expect(elapsed[0]).toBeGreaterThan(5000)
-      expect(scopes.length).toBeGreaterThanOrEqual(2)
+      if (slow) expect(elapsed[0]).toBeGreaterThan(5000)
+      expect(scopes.length).toBeGreaterThanOrEqual(1)
       expect(scopes[0]).toBeDefined()
       expect(scopes.every(scope => scope === scopes[0])).toBe(true)
     }
-    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ content: slow ? after : chapter.content, revision: slow ? 5 : 4 })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ content: writes ? after : chapter.content, revision: writes ? 5 : 4 })
     const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
-    expect((saved.validation as Record<string, unknown>).continuityCriticResponse).toEqual(originalValidation.continuityCriticResponse)
+    expect((saved.validation as Record<string, unknown>).continuityReport).toEqual(originalValidation.continuityReport)
     expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: quality.id } })).toEqual(quality)
     expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(fees)
     expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(ledger)
     expect(await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })).toEqual(artifacts)
-    if (!slow) expect(saved.validation).toEqual(originalValidation)
+    if (scenario === 'cancelled') expect(saved.validation).toEqual(originalValidation)
+    if (scenario === 'changed-source') {
+      expect(await chapterBridgeCommitTool.execute({ ...context, callId: 'stale-source-cannot-commit' }, { compilationId: compilation.id }))
+        .toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_CHECK_REQUIRED' })
+      expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).committedAt).toBeNull()
+    }
     expect(provider).not.toHaveBeenCalled()
   }, undefined, '修改第一章，只要标题和正文。', { freezeWriting: true }), 30000)
 
@@ -95,8 +99,8 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
     await prisma.chapter.update({ where: { id: chapterId }, data: { content: body, revision: 4, wordCount: body.length } })
     const input = { ...f, chapterId, mode: 'balanced' as const, intentSummary: '修改本章' }
     const prepared = await prepareStoryCompilation(input)
-    await saveSceneTasks({ ...f, compilationId: prepared.compilation.id, tasks: [{ purpose: '合成场景', entryState: { action: '进屋' },
-      goal: '核对门锁', obstacle: '灯灭了', choice: '等她回应', cost: '失去时间', turn: '灯光亮起', exitState: { action: '等回应' },
+    await saveSceneTasks({ ...f, compilationId: prepared.compilation.id, tasks: [{ purpose: '合成场景', entryState: terminalCandidateSchema.parse({ exitState: { action: '进屋' } }).exitState,
+      goal: '核对门锁', obstacle: '灯灭了', choice: '等她回应', cost: '失去时间', turn: '灯光亮起', exitState: terminalCandidateSchema.parse({ exitState: { action: '等回应' } }).exitState,
       styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
     const assess = async (compilationId: string, evidence: string, signal = 'emotion_grounding') => {
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })
@@ -142,9 +146,13 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
     expect(projectCurrentReviewNextStep(readiness!)).toMatchObject({ phase: 'verification', state: 'decision_required',
       reviewCycle: { findings: [expect.objectContaining({ relation: 'new_advisory' })] } })
     const ref = readiness!.requiredDecisions![0]
-    // Real complete final reports close the original ordinary writing stage,
-    // even when an old v1 snapshot lacks the newly explicit phase marker.
-    await expect(mutate(7, finalBody.replace('灯光落在桌上', '灯光照着桌面'))).rejects.toMatchObject({ code: 'REVIEW_CYCLE_DECISION_REQUIRED' })
+    // The report is complete; unresolved actual advice still fences delivery.
+    // Ordinary author-owned edits retain their separate revision authority.
+    expect(await chapterBridgeCommitTool.execute({ ...f, callId: 'pending-opinion-cannot-commit', mode: 'build',
+      creativeFreedom: 'balanced', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} },
+    { compilationId: prepared.compilation.id })).toMatchObject({ outcome: 'failed' })
+    expect(await prisma.$transaction(tx => readChapterReviewWriteAdmission(tx, f, { chapterId, revision: 7,
+      after: finalBody.replace('灯光落在桌上', '灯光照着桌面') }))).toMatchObject({ kind: 'allow' })
     await prisma.$transaction(async tx => {
       // Same transaction locking contract as terminal decisions.
       await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${prepared.compilation.id} FOR UPDATE`
@@ -165,12 +173,12 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
       exitState: { action: '等待回应', location: '门口', knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
       hookDecision: '', delayedHookReason: '', openingStructure: '核对门锁', endingStructure: '保留沉默' })
     expect(committed.outcome).not.toBe('failed')
-    expect(committed.requiredResult).toMatchObject({ targetId: chapterId })
+    expect(committed.display).toMatchObject({ compilationId: prepared.compilation.id })
     expect(committed.display).toMatchObject({ kind: 'storyCompiler', phase: 'commit' })
     const terminal = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id }, include: { bridge: true } })
     expect(terminal).toMatchObject({ status: 'completed', stage: 'commit', bridge: { targetRevision: 7, toChapterId: chapterId } })
     expect(terminal.bridge?.committedAt).toBeInstanceOf(Date)
-    expect(terminal.validation).toMatchObject({ independentCheck: 'complete', checkedRevision: 7, autoRepairRounds: 0,
+    expect(terminal.validation).toMatchObject({ independentCheck: 'complete', checkedRevision: 7,
       retainedReviewDecision: { revision: 7, findings: [{ ...ref, reason: '保留灯光落点以呼应门口视线，不额外添加动作。' }] } })
     expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: finalReport.id }, include: { findings: true } })).toEqual(reportBeforeCommit)
     expect(finalReport.status).toBe('needs_repair')
@@ -191,7 +199,7 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
     expect(carried.transitions).toEqual(cycle.transitions)
     expect(carried.verificationStarted).toEqual(cycle.transitions.at(-1)!.after)
     expect(await prisma.$transaction(tx => readChapterReviewWriteAdmission(tx, f, { chapterId, revision: 7,
-      after: finalBody.replace('灯光落在桌上', '灯光照着桌面') }))).toMatchObject({ kind: 'decision_required' })
+      after: finalBody.replace('灯光落在桌上', '灯光照着桌面') }))).toMatchObject({ kind: 'allow' })
     expect((await prisma.$transaction(tx => readChapterReviewReadiness(tx, f)))?.ready).toBe(false)
   }, undefined, '修改第一章，只要标题和正文。', { freezeWriting: true }))
   it('records exactly one concurrent CAS and preserves unrelated prepared context', async () => fixture(async f => {

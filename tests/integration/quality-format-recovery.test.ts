@@ -9,7 +9,8 @@ import * as recoveryClaims from '../../api/lib/agent/quality-format-recovery.js'
 import { buildHumanityQualityContext, qualityReviewContextHash } from '../../api/lib/agent/humanity-quality.js'
 import { readQualityFormatRecovery, claimQualityFormatRecovery } from '../../api/lib/agent/quality-format-recovery.js'
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
-import { prepareStoryCompilation, recordStoryCompilerWrite, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
+import { prepareStoryCompilation, recordStoryCompilerWrite } from '../../api/lib/agent/story-compiler.js'
+import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { tokenPriceSchema } from '../../api/lib/billing/token-price.js'
 import { priceTokenEvidence } from '../../api/lib/billing/reservation-policy.js'
@@ -40,13 +41,22 @@ function interceptQualityRetryWait() {
   return waits
 }
 
+async function currentContinuity(f: Parameters<Parameters<typeof fixture>[0]>[0], compilationId: string) {
+  const { result } = await persistCurrentContinuityReport({ ...f, compilationId })
+  expect(result).toMatchObject({ reviewCompleted: true })
+  const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+  const compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
+  expect(compilation.validation).toMatchObject({ continuityReport: { chapterId: chapter.id, revision: chapter.revision,
+    contentHash: createHash('sha256').update(chapter.content).digest('hex'), complete: true, billingKnown: true } })
+}
+
 async function prepareRetryQuality(f: Parameters<Parameters<typeof fixture>[0]>[0]) {
   vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
   await prisma.agentRun.update({ where: { id: f.runId }, data: { taskRootId: null, runtimeProtocolVersion: 0, status: 'running' } })
   const prepared = await prepareStoryCompilation({ ...f, chapterId: f.chapterId, mode: 'balanced', intentSummary: '完整质量检查' })
   const compilationId = prepared.compilation.id
   await recordStoryCompilerWrite({ ...f, chapterId: f.chapterId, chapterOrderIndex: 1, chapterRevision: 1 })
-  await validateStoryContinuity({ ...f, compilationId, findings: [], expectedChapterRevision: 1, independentCheck: 'complete' })
+  await currentContinuity(f, compilationId)
   const window = credits.getCreditWindow()
   await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
   const ctx: ToolContext = { ...f, callId: 'rate-limit-quality', mode: 'build', creativeFreedom: 'stable', qualityMode: 'premium', modelRuntime: retryRuntime,
@@ -177,7 +187,7 @@ describe.runIf(available)('settled legacy quality format recovery', () => {
       const prepared = await prepareStoryCompilation({ ...f, chapterId: f.chapterId, mode: 'balanced', intentSummary: '检查并按原授权修订本章' })
       const compilationId = prepared.compilation.id
       await recordStoryCompilerWrite({ ...f, chapterId: f.chapterId, chapterOrderIndex: 1, chapterRevision: 1 })
-      await validateStoryContinuity({ ...f, compilationId, findings: [], expectedChapterRevision: 1, independentCheck: 'complete' })
+      await currentContinuity(f, compilationId)
       const window = credits.getCreditWindow()
       await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
       const runtime = { tier: 'speed' as const, provider: 'fixture', modelName: 'fixture', baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real',

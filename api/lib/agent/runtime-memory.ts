@@ -134,7 +134,9 @@ export async function advanceDurableMemory(token: RunLeaseToken) {
   return withRunLease(lease, async tx => {
     // Even non-memory tool receipts must pass the original integrity gate
     // before another native call. Only a root with no successful tools is empty.
-    if (!await tx.agentOperation.count({ where: { taskRootId: lease.taskRootId, kind: 'tool', status: 'succeeded' } })) return null
+    if (!await tx.agentOperation.count({ where: { taskRootId: lease.taskRootId, kind: 'tool', status: 'succeeded' } })
+      && !await tx.agentOperation.count({ where: { taskRootId: lease.taskRootId, kind: 'internal', action: { in: ['continuity_validate', 'quality_analyze'] },
+        status: 'succeeded', parent: { kind: 'tool', action: 'chapter_bridge_commit', status: { in: ['succeeded', 'failed'] } } } })) return null
     const state = await readExecutionStateInTransaction(tx, lease.taskRootId)
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     const effects = await collectDurableToolEvidence(tx, root.id, state.frame.revision)

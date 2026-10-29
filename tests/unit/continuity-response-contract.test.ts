@@ -1,9 +1,9 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { terminalCandidateSchema, currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
 import { terminalAddressResponseFields, terminalReviewAddressCatalog } from '../../api/lib/agent/terminal-review-addresses.js'
 import { inspectContinuityResponse, continuityFailureOutput } from '../../api/lib/agent/continuity-format-recovery.js'
 import { continuityResponseContract, continuityResponseInput, continuityResponseSystem, continuityReassessmentDiagnostics } from '../../api/lib/agent/continuity-response-contract.js'
-import { runContinuityReassessment, applyContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { continuityReassessmentRequest, failedContinuityReassessment, applyContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import type { TerminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 
@@ -103,44 +103,47 @@ describe('coherent frozen continuity response contract', () => {
   })
 })
 
-describe('one bounded field recovery under the original request budget', () => {
+describe('historical field-repair response pairs preserve the frozen contract', () => {
   function work() {
     const f = fixture(), bad = { ...f.wire, terminalProofVerdicts: Array.from({ length: 18 }, (_, proofIndex) => ({ proofIndex, currentState: 'unchanged', reason: 'Wrong response table.' })) }
-    const original = f.inspect(bad, 3), claim = vi.fn(async (_request: { system: string; content: string }) => true), dispatch = vi.fn(async (_request: { system: string; content: string }) => ({ content: JSON.stringify(f.wire), complete: true }))
-    const args = { original, bodies: f.bodies, system: 'Independent editor.', content: 'Frozen complete source input.', reassessmentProtocol: 3 as const,
-      billingKnown: true, providerComplete: true, slotUsed: false, signal: new AbortController().signal, assertCurrent: vi.fn(async () => {}), claim, dispatch }
-    return { ...f, bad, original, args, claim, dispatch }
+    const original = f.inspect(bad, 3)
+    const args = { bodies: f.bodies, system: 'Independent editor.', content: 'Frozen complete source input.' }
+    return { ...f, bad, original, args }
   }
   it('repairs the requested tables once without changing valid opinions/semantic checks or inventing a model response', async () => {
-    const f = work(), raw = JSON.stringify(f.wire), result = await runContinuityReassessment(f.args)
+    const f = work(), raw = JSON.stringify(f.wire), result = applyContinuityReassessment(f.original, raw, f.bodies, 3)
     expect(f.original.complete).toBe(false)
     expect(result).toMatchObject({ complete: true, audit: { responseContract: 3, reassessment: { kind: 'field_repair', fixedFields: ['findings', 'semanticChecks'] } } })
     expect(JSON.parse(result.audit.rawResponse.content)).toBe(raw)
-    expect(f.claim).toHaveBeenCalledOnce(); expect(f.dispatch).toHaveBeenCalledOnce()
-    expect(f.dispatch.mock.calls[0]?.[0]).toEqual(f.claim.mock.calls[0]?.[0])
-    expect(f.claim.mock.calls[0]).toHaveLength(1)
-    expect(JSON.stringify(f.claim.mock.calls)).toContain('本次待回复表精确行数')
+    const request = continuityReassessmentRequest(f.args.system, f.args.content, f.original, f.bodies, false, 3)
+    expect(request.content).toContain('本次待回复表精确行数')
+    expect(request.content).toContain(JSON.stringify(f.bad))
+    expect(result.audit).toMatchObject({ reassessment: { original: f.original.audit } })
   })
-  it.each(['unknown-billing', 'incomplete-provider', 'slot-used'])('does not buy another response for %s', async kind => {
+  it.each(['unknown-billing', 'incomplete-provider', 'slot-used'])('preserves the only raw response while historical %s remains unresolved', async kind => {
     const f = work()
-    const result = await runContinuityReassessment({ ...f.args, ...(kind === 'unknown-billing' ? { billingKnown: false } : kind === 'incomplete-provider' ? { providerComplete: false } : { slotUsed: true }) })
-    expect(result).toBe(f.original); expect(f.claim).not.toHaveBeenCalled(); expect(f.dispatch).not.toHaveBeenCalled()
+    const receipt = { billingKnown: kind !== 'unknown-billing', providerComplete: kind !== 'incomplete-provider', slotUsed: kind === 'slot-used' }
+    const before = runtimeJson({ receipt, audit: f.original.audit }).hash
+    const replayed = f.inspect(f.bad, 3)
+    expect(replayed).toEqual(f.original); expect(replayed.complete).toBe(false)
+    expect(JSON.parse(replayed.audit.rawResponse.content)).toBe(JSON.stringify(f.bad))
+    expect(runtimeJson({ receipt, audit: f.original.audit }).hash).toBe(before)
   })
-  it('rejects audit/request marker mismatches before claiming or dispatching', async () => {
+  it('rejects frozen historical field-repair audit and context marker mismatches', async () => {
     const f = work(), old = f.inspect(f.bad)
-    await expect(runContinuityReassessment({ ...f.args, original: old })).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
-    await expect(runContinuityReassessment({ ...f.args, reassessmentProtocol: 2 })).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
-    expect(f.claim).not.toHaveBeenCalled(); expect(f.dispatch).not.toHaveBeenCalled()
+    expect(() => applyContinuityReassessment(old, JSON.stringify(f.wire), f.bodies, 3)).toThrow(expect.objectContaining({ code: 'RUNTIME_RECEIPT_INVALID' }))
+    expect(() => continuityReassessmentRequest(f.args.system, f.args.content, f.original,
+      { ...f.bodies, terminalEvidence: { ...f.context, verdictProtocol: 5 } }, false, 3)).toThrow(expect.objectContaining({ code: 'RUNTIME_RECEIPT_INVALID' }))
+    expect(JSON.parse(old.audit.rawResponse.content)).toBe(JSON.stringify(f.bad))
   })
   it('retains the latest second-response diagnosis instead of repeatedly showing the old proof-table error', async () => {
     const f = work(), bad = { ...f.wire, terminalDispositions: f.wire.terminalDispositions.map((row, index) => index ? row : { ...row, candidateIndex: 1 }) }
-    f.dispatch.mockResolvedValueOnce({ content: JSON.stringify(bad), complete: true })
-    const result = await runContinuityReassessment(f.args), visible = continuityFailureOutput(result.audit, 'Unconfirmed.', f.bodies)
+    const result = failedContinuityReassessment(f.original, JSON.stringify(bad), true, f.bodies, 3), visible = continuityFailureOutput(result.audit, 'Unconfirmed.', f.bodies)
     expect(result.complete).toBe(false)
     expect(visible).toContain('最新一次复评')
     expect(visible).toContain('terminalDispositions')
     expect(visible).not.toContain('terminalProofVerdicts')
-    expect(f.dispatch).toHaveBeenCalledOnce()
+    expect(result.audit).toMatchObject({ reassessment: { rawResponse: { content: JSON.stringify(JSON.stringify(bad)), complete: true } } })
   })
   it('uses the same full decision validator for source-invalid recovery, exact duplicates and latest failure diagnostics', () => {
     const f = work(), original = f.inspect({ ...f.wire, findings: [{ signal: 'object', severity: 'error',
@@ -160,8 +163,7 @@ describe('one bounded field recovery under the original request budget', () => {
   it('does not silently delete or change previously valid reviewer findings during field repair', async () => {
     const f = work(), changed = { ...f.wire, findings: [{ invented: true }] }
     expect(() => applyContinuityReassessment(f.original, JSON.stringify(changed), f.bodies, 3)).toThrow('changed frozen findings')
-    f.dispatch.mockResolvedValueOnce({ content: JSON.stringify(changed), complete: true })
-    const result = await runContinuityReassessment(f.args)
+    const result = failedContinuityReassessment(f.original, JSON.stringify(changed), true, f.bodies, 3)
     expect(result.complete).toBe(false)
     expect(continuityFailureOutput(result.audit, 'Unconfirmed.', f.bodies)).toContain('改变了已冻结')
   })

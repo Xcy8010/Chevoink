@@ -9,7 +9,7 @@ function pending(overrides: Partial<ChapterReviewReadiness> = {}): ChapterReview
     requiredTools: [{ name: 'quality_analyze', args: { compilationId: 'compile' } }], ...overrides }
 }
 describe('server review fallback', () => {
-  it('presents current report decisions before unresolved terminal data without claiming retention completes delivery', () => {
+  it('keeps current decisions actionable without a separate terminal candidate review', () => {
     const ref = { source: 'continuity' as const, reportId: 'current-whole', findingId: '0' }
     const review = pending({ ready: true, continuity: 'complete', quality: 'complete', requiredTools: [],
       decisionPending: true, requiredDecisions: [ref], continuityErrorCount: 1,
@@ -18,14 +18,14 @@ describe('server review fallback', () => {
       terminalReview: { state: 'unverified', currentResultVerified: true, deliveryEligible: false,
         unresolved: [{ path: 'factCoverage.old', verdict: 'unknown' }] } })
     const step = projectCurrentReviewNextStep(review)
-    expect(step).toMatchObject({ state: 'decision_required', pending: [ref], retentionCompletes: false })
+    expect(step).toMatchObject({ state: 'decision_required', pending: [ref], retentionCompletes: true })
     const guidance = currentReviewNextStepGuidance(step)
     expect(guidance).toContain('retainedFindings')
     expect(guidance).toContain('current-whole')
-    expect(guidance).toContain('factCoverage.old')
+    expect(guidance).not.toContain('factCoverage.old')
     expect(projectCurrentReviewNextStep({ ...review, ready: false }).state).not.toBe('decision_required')
     expect(projectCurrentReviewNextStep({ ...review, mustPassPending: true }).retentionCompletes).toBe(false)
-    expect(projectCurrentReviewNextStep({ ...review, retainedDecisions: [{ ...ref, reason: 'Keep this opinion pending.' }], decisionPending: false }).state).toBe('terminal_review_required')
+    expect(projectCurrentReviewNextStep({ ...review, retainedDecisions: [{ ...ref, reason: 'Keep this opinion pending.' }], decisionPending: false }).state).toBe('commit_available')
   })
   it.each([false, true])('persists a complete strict JSON observation with optional terminal state=%s', terminal => {
     const step = projectCurrentReviewNextStep(pending(terminal ? { terminalReview: { state: 'unverified', unresolved: [] } } : {}))
@@ -35,15 +35,15 @@ describe('server review fallback', () => {
     else expect(step).not.toHaveProperty('terminalReview')
     expect(() => runtimeJson({ ...step, reviewBoundPlan: undefined })).toThrow()
   })
-  it('directs final pure advice to exact retention instead of inviting another manuscript proposal', () => {
+  it('keeps current evidence and author scope visible after a new revision', () => {
     const ref = { source: 'quality' as const, reportId: 'q', findingId: 'f' }
     const state = pending({ ready: true, quality: 'complete', requiredTools: [], decisionPending: true, requiredDecisions: [ref],
       reviewCycle: { version: 1, phase: 'verification', baselineRevision: 3, edited: true, verificationStarted: true,
         attemptedBaselineCount: 1, transitionCount: 1, findings: [{ ...ref, relation: 'new_advisory', baselineRef: null }] } })
     const guidance = currentReviewNextStepGuidance(projectCurrentReviewNextStep(state))
-    expect(guidance).toContain('不调用 chapter_edit_range、chapter_write 或 chapter_append 追改')
+    expect(guidance).toContain('唯一逐字锚点')
     expect(guidance).toContain('source、reportId、findingId、reason')
-    expect(guidance).toContain('只有另有精确原始义务或当前真实错误证据时')
+    expect(guidance).toContain('原作者授权')
     expect(guidance).not.toContain('在原授权内精确应用或')
     expect(currentReviewNextStepGuidance(projectCurrentReviewNextStep({ ...state, selectionOnly: true }))).toContain('不得使用 chapter_write')
     const required = currentReviewNextStepGuidance(projectCurrentReviewNextStep({ ...state, mustPassPending: true, qualityErrorCount: 1 }))
@@ -58,9 +58,9 @@ describe('server review fallback', () => {
     const step = projectCurrentReviewNextStep(state)!
     expect(step).toMatchObject({ state: 'decision_required', automaticCandidateCount: 8, pending: refs.slice(2), retainedCount: 2, retentionCompletes: true })
     const text = currentReviewNextStepGuidance(step)
-    expect(text).toContain('decisionOnly:true')
+    expect(text).not.toContain('decisionOnly:true')
     expect(text).toContain('不得使用 chapter_write')
-    expect(text).toContain('rejected 仅为反馈态度')
+    expect(text).toContain('留置不是修复')
     expect(nextMergedReviewReminder({ ...state, qualityCandidateCount: 0 }, new Set(['chapter_bridge_commit']), new Set(), true)).toBe('compile:chapter:4:merged')
   })
   it('does not turn retained decisions into hard pass or incomplete assessment completion', () => {
@@ -68,11 +68,11 @@ describe('server review fallback', () => {
     expect(hard).toMatchObject({ state: 'must_pass_required', retentionCompletes: false })
     expect(currentReviewNextStepGuidance(hard)).toContain('不能替代硬通过要求')
     const incomplete = projectCurrentReviewNextStep(pending({ reviewProtocol: 1, quality: 'incomplete' }))!
-    expect(incomplete).toMatchObject({ state: 'blocked', retentionCompletes: false })
-    expect(currentReviewNextStepGuidance(incomplete)).toContain('不重放未知或已尝试付费请求')
+    expect(incomplete).toMatchObject({ state: 'check_required', retentionCompletes: false })
+    expect(currentReviewNextStepGuidance(incomplete)).toContain('不能重放未知请求')
     expect(projectCurrentReviewNextStep(pending({ reviewProtocol: 1, continuity: 'missing', quality: 'incomplete', requiredTools: [
       { name: 'continuity_validate', args: { compilationId: 'compile' } }, { name: 'quality_analyze', args: { compilationId: 'compile' } },
-    ] }))?.state).toBe('blocked')
+    ] }))?.state).toBe('check_required')
     const missing = projectCurrentReviewNextStep(pending({ reviewProtocol: 1 }))!
     expect(missing).toMatchObject({ state: 'check_required', requiredTools: [{ name: 'quality_analyze', args: { compilationId: 'compile' } }] })
     const complete = projectCurrentReviewNextStep(pending({ reviewProtocol: 1, ready: true, quality: 'complete', requiredTools: [] }))!
@@ -83,12 +83,12 @@ describe('server review fallback', () => {
     const legacy = projectCurrentReviewNextStep(pending({ ready: true, quality: 'complete', requiredTools: [], decisionPending: true,
       requiredDecisions: refs }))!
     expect(legacy).toMatchObject({ state: 'decision_required', phase: 'decisions', pending: refs, decisionBatchesAvailable: false })
-    expect(currentReviewNextStepGuidance(legacy)).toContain('原任务未开放 decisionOnly 分批能力')
+    expect(currentReviewNextStepGuidance(legacy)).toContain('一次 chapter_bridge_commit')
     expect(currentReviewNextStepGuidance(legacy)).not.toContain('decisionOnly:true')
     const marked = projectCurrentReviewNextStep(pending({ reviewProtocol: 1, ready: true, quality: 'complete', requiredTools: [],
       decisionPending: true, requiredDecisions: refs }))!
     expect(marked.decisionBatchesAvailable).toBe(true)
-    expect(currentReviewNextStepGuidance(marked)).toContain('decisionOnly:true')
+    expect(currentReviewNextStepGuidance(marked)).not.toContain('decisionOnly:true')
   })
   it('keeps current hard-pass evidence visible after explicit retention consumes decision refs', () => {
     const ref = { source: 'quality' as const, reportId: 'current-quality', findingId: 'current-error' }
@@ -101,24 +101,22 @@ describe('server review fallback', () => {
     expect(currentReviewNextStepGuidance(step)).toContain('current-error')
     expect(currentReviewNextStepGuidance(step)).toContain('不能替代硬通过要求')
   })
-  it('keeps every strict ref as a fact but offers a legally sized first retention batch', () => {
+  it('keeps every current opinion visible without imposing a second decision-only commit', () => {
     const refs = Array.from({ length: 81 }, (_, i) => ({ source: 'quality' as const, reportId: 'q', findingId: `f${i}` }))
     const step = projectCurrentReviewNextStep(pending({ reviewProtocol: 1, ready: true, requiredTools: [], decisionPending: true, requiredDecisions: refs }))!
     const text = currentReviewNextStepGuidance(step)
-    const template = JSON.parse(text.split('reason须替换为实际原因）：')[1].split('。留置不是修复')[0])
-    expect(template).toMatchObject({ decisionOnly: true })
-    expect(template.retainedFindings.map((item: { findingId: string }) => item.findingId)).toEqual(refs.slice(0, 40).map(item => item.findingId))
+    expect(text).not.toContain('decisionOnly')
     expect(step.pending).toEqual(refs)
-    expect(text).toContain('当前尚需处置81项')
-    expect(text).toContain('每批后重读当前待处理引用')
+    expect(step.pending).toHaveLength(81)
+    expect(text).toContain('一次 chapter_bridge_commit')
   })
   const available = new Set(['quality_analyze', 'continuity_validate'])
   it('runs a missing current assessment through its original compiler', () => {
     expect(nextReviewDispatch(pending(), available, new Set())).toMatchObject({ kind: 'tool',
       tool: { name: 'quality_analyze', args: { compilationId: 'compile' } } })
   })
-  it('never repeats an incomplete or unconfirmed assessment', () => {
-    expect(nextReviewDispatch(pending({ quality: 'incomplete' }), available, new Set()).kind).toBe('blocked')
+  it('allows a known failed assessment to continue while fencing unresolved requests', () => {
+    expect(nextReviewDispatch(pending({ quality: 'incomplete' }), available, new Set()).kind).toBe('tool')
     expect(nextReviewDispatch(pending(), available, new Set([reviewDispatchKey(pending(), 'quality_analyze')])).kind).toBe('blocked')
   })
   it('allows a new version to receive its own assessment without resetting the compiler', () => {
@@ -148,14 +146,12 @@ describe('server review fallback', () => {
     expect(nextReviewDispatch({ ...state, quality: 'complete', requiredTools: state.requiredTools.slice(0, 1) }, available, new Set()).kind).toBe('tool')
     expect(state.ready).toBe(false)
   })
-  it('admits one authenticated protocol recovery while retaining historical attempts and blocking the new attempt on resume', () => {
+  it('does not require an old protocol recovery alias for a known format failure', () => {
     const state = pending({ continuity: 'incomplete', requiredTools: [{ name: 'continuity_validate', args: { compilationId: 'compile' } }] })
-    const old = new Set(['compile:chapter:4:continuity_validate'])
     const key = reviewDispatchKey(state, 'continuity_validate')
-    expect(nextReviewDispatch(state, available, old).kind).toBe('blocked')
-    expect(nextReviewDispatch(state, available, old, new Set([key]))).toMatchObject({ kind: 'tool', key })
-    expect(old.has('compile:chapter:4:continuity_validate')).toBe(true)
-    expect(nextReviewDispatch(state, available, new Set([...old, key]), new Set([key])).kind).toBe('blocked')
+    expect(nextReviewDispatch(state, available, new Set())).toMatchObject({ kind: 'tool', key })
+    expect(nextReviewDispatch(state, available, new Set([key])).kind).toBe('blocked')
+    expect(state.ready).toBe(false)
   })
   it('prompts once for an unspent current-version aesthetic decision, without redispatching a paid check', () => {
     const state = pending({ ready: true, quality: 'complete', qualityCandidateCount: 2, requiredTools: [] })
@@ -167,17 +163,14 @@ describe('server review fallback', () => {
     expect(nextMergedReviewReminder({ ...state, revision: 5 }, writers, new Set([key]), true)).toBe('compile:chapter:5:merged')
     expect(nextReviewDispatch(state, available, new Set()).kind).toBe('ready')
   })
-  it('uses a separate authenticated format-recovery identity without erasing the original attempt', () => {
+  it('binds unresolved requests to the current chapter version without minting a new recovery identity', () => {
     const state = pending({ quality: 'incomplete' })
-    const original = reviewDispatchKey(state, 'quality_analyze')
-    const recovery = 'quality-format-recovery:received-report'
-    const keys = new Map([[original, recovery]])
-    const attempts = new Set([original])
-    expect(nextReviewDispatch(state, available, attempts, new Set(), keys)).toMatchObject({ kind: 'tool', key: recovery })
-    expect(attempts).toEqual(new Set([original]))
-    expect(nextReviewDispatch(state, available, new Set([original, recovery]), new Set(), keys).kind).toBe('blocked')
-    expect(nextReviewDispatch(state, new Set(), attempts, new Set(), keys).kind).toBe('blocked')
-    expect(nextReviewDispatch({ ...state, chapterId: 'other' }, available, attempts, new Set(), keys).kind).toBe('blocked')
+    const key = reviewDispatchKey(state, 'quality_analyze')
+    const unresolved = new Set([key])
+    expect(nextReviewDispatch(state, available, unresolved).kind).toBe('blocked')
+    expect(nextReviewDispatch({ ...state, revision: 5 }, available, unresolved).kind).toBe('tool')
+    expect(nextReviewDispatch(state, new Set(), new Set()).kind).toBe('blocked')
+    expect(unresolved).toEqual(new Set([key]))
   })
   it('never prompts for a closed channel, absent writer, missing checks or original waiver', () => {
     const state = pending({ ready: true, quality: 'complete', qualityCandidateCount: 2, requiredTools: [] })

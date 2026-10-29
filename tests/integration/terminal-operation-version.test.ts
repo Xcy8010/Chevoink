@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
-import { commitChapterBridge, prepareStoryCompilation, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
+import { commitChapterBridge, prepareStoryCompilation, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
+import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
 import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
-import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
+import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { applyContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
@@ -33,15 +34,16 @@ describe.runIf(available)('request-owned evidence at the real commit boundary', 
     const oldEvidence = terminalEvidenceContext(current, source, 2, 1, terminalCoverageInput(f.spec, {}, current, oldCandidate, 1))
     const oldRaw = JSON.stringify({ findings: [], semanticChecks: checks, terminalVerdicts: [{ path: 'exitState.knowledge.0', verdict: 'supported', basis: 'current', sourceEvidence: [{ segmentId: 'c0', quote: initialBody }] }] })
     const oldAudit = inspectContinuityResponse(oldRaw, { previous: null, current: current.content, terminalEvidence: oldEvidence }, true, 8, oldCandidate).audit
-    await validateStoryContinuity({ ...f, compilationId: compilation.id, findings: [], independentCheck: 'complete', terminalCandidate: oldCandidate,
-      coverage: compilerContinuityCoverage({ chapter: current, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source, terminalCandidate: oldCandidate }, 11), continuityCriticResponse: oldAudit })
+    await persistCurrentContinuityReport({ ...f, compilationId: compilation.id, expectedChapterRevision: current.revision })
     const artifact = await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'continuityReview', title: 'Frozen synthetic v1 response', content: 'Test only', metadata: oldAudit } })
     const originalSpec = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).taskSpec
     const quote = 'Sensor remains offline.', content = 'x'.repeat(594) + quote + 'y'.repeat(932 - 594 - quote.length)
     current = await prisma.chapter.update({ where: { id: f.chapterId }, data: { content, revision: 2 } })
-    const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
     const next = terminalCandidateSchema.parse({ exitState: { openLoops: ['Repair the offline sensor.'] } })
-    const input = terminalCoverageInput(f.spec, before.preparedContext, current, next, 2)!
+    // A frozen historical pair, interpreted without saving a new certified
+    // candidate or invoking a retired report-application mutator.
+    const input = { ...terminalCoverageInput(f.spec, {}, current, next, 2)!, obligations: [{
+      id: terminalFactId('knowledge', initialBody), field: 'knowledge' as const, claim: initialBody }] }
     const evidence = terminalEvidenceContext(current, source, 2, 1, input, verdictProtocol)
     const response = JSON.stringify({ findings: [], semanticChecks: Object.fromEntries(checks.map(check => [check.kind, check])),
       terminalVerdicts: [{ path: 'exitState.openLoops.0', verdict: 'supported', ...(verdictProtocol ? {} : { basis: 'current' }), sourceEvidence: [{ segmentId: 'c2', quote }] }],
@@ -56,30 +58,29 @@ describe.runIf(available)('request-owned evidence at the real commit boundary', 
     expect(JSON.stringify(first)).toBe(frozen)
     expect(inspected.audit).toMatchObject({ reassessment: { rawResponse: { content: JSON.stringify(response) },
       mechanicalRecovery: { kind: 'empty_original_dispositions', derived: { decisions: [] } } } })
-    await validateStoryContinuity({ ...f, compilationId: compilation.id, findings: [], independentCheck: 'complete', terminalCandidate: next,
-      coverage: compilerContinuityCoverage({ chapter: current, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source, terminalCandidate: next }, 11), continuityCriticResponse: inspected.audit })
+    const { snapshot } = await persistCurrentContinuityReport({ ...f, compilationId: compilation.id, expectedChapterRevision: current.revision })
+    expect(snapshot.chapter.content.slice(594, 594 + quote.length)).toBe(quote)
     await persistHumanityQualityReport({ ...f, compilationId: compilation.id, chapterId: current.id, chapterRevision: 2, mode: 'balanced',
       criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
-    expect(readiness?.progressEvidence?.phases).toContain('terminal')
-    expect(readiness?.terminalReview?.state).toBe(status === 'supported' ? 'supported' : 'unverified')
-    expect(readiness?.progressEvidence?.phases.includes('terminal_supported')).toBe(status === 'supported')
+    expect(readiness).toMatchObject({ ready: true, continuity: 'complete', quality: 'complete' })
+    expect(readiness).not.toHaveProperty('terminalReview')
+    expect(readiness?.progressEvidence?.phases).not.toContain('terminal')
+    expect(readiness?.progressEvidence?.phases).not.toContain('terminal_supported')
     const original = await prisma.$transaction(tx => readOriginalTaskRequest(tx, f))
     const subject = { ...f, expectedOriginalTaskId: original.taskId, taskSpec: original.spec as typeof f.spec }
     const seen = new Set<string>()
     expect(observeChapterReviewProgress(seen, { ...readiness!.progressEvidence!, phases: ['continuity', 'quality'] }, subject)).toBe(true)
-    expect(observeChapterReviewProgress(seen, readiness?.progressEvidence, subject)).toBe(true)
+    expect(observeChapterReviewProgress(seen, readiness?.progressEvidence, subject)).toBe(false)
     expect(observeChapterReviewProgress(new Set(seen), readiness?.progressEvidence, subject)).toBe(false)
     const terminal = { ...f, compilationId: compilation.id, ...next, chapterSummary: 'Repair still required.', hookDecision: '', delayedHookReason: '', openingStructure: 'Continue', endingStructure: 'Record' }
-    if (status === 'supported') {
-      await commitChapterBridge(terminal)
-      expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).committedAt).not.toBeNull()
-      const prepared = (await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).preparedContext as { terminalFactProofs: Array<{ anchors: Array<{ start: number; end: number; quote: string }> }> }
-      expect(prepared.terminalFactProofs[0].anchors).toMatchObject([{ start: 594, end: 594 + quote.length, quote }])
-    } else {
-      await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'TERMINAL_STATE_REVIEW_REQUIRED' })
-      expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).committedAt).toBeNull()
-    }
+    await commitChapterBridge(terminal)
+    expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).committedAt).not.toBeNull()
+    const committed = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
+    expect(committed?.progressEvidence?.phases).toContain('terminal')
+    expect(observeChapterReviewProgress(seen, committed?.progressEvidence, subject)).toBe(true)
+    expect(observeChapterReviewProgress(seen, committed?.progressEvidence, subject)).toBe(false)
+    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).preparedContext).not.toHaveProperty('terminalFactProofs')
     expect((await prisma.agentArtifact.findUniqueOrThrow({ where: { id: artifact.id } })).metadata).toEqual(artifact.metadata)
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).taskSpec).toEqual(originalSpec)
     expect((originalSpec as { scope: { terminalCoverageProtocol: number } }).scope.terminalCoverageProtocol).toBe(1)

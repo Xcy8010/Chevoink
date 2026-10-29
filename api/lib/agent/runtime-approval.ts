@@ -1,3 +1,4 @@
+import { DataAccessError } from '../prisma.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { databaseNow, lockRunRoot, runtimeError, runtimeId, runtimeJson, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
@@ -70,6 +71,23 @@ export async function pollToolApproval(token: RunLeaseToken, input: { expectedRe
   })
 }
 
+/** Approval is not dependency admission. Missing/denied checks are closed by
+ * the actual compiler adapter before dispatch; they cannot hide another real
+ * ask grant or turn an already complete report into a new paid approval. */
+export async function readCommitReviewApproval(tx: RuntimeTx, token: RunLeaseToken,
+  subject: { userId: string; novelId: string; runId: string }, compilationId?: string) {
+  const services = await import('./runtime-writing-service.js')
+  const manifest = await services.requiredCommitReviewManifest(tx, subject, compilationId)
+  const readiness = await (await import('./chapter-review-guard.js')).readChapterReviewReadiness(tx, subject, compilationId)
+  const actions = readiness?.requiredTools.length ? manifest.steps.flatMap(step => step.actions) : ['chapter_bridge_commit']
+  const confirmations: string[] = []
+  for (const action of actions) {
+    try { confirmations.push(...await services.readWritingServiceConfirmations(tx, token, [action])) }
+    catch (error) { if (!(error instanceof DataAccessError) || error.code !== 'RUNTIME_EFFECT_NOT_AUTHORIZED') throw error }
+  }
+  return { manifest, confirmations }
+}
+
 /** Persists the exact call shown for approval; requesting is not execution. */
 export async function requestToolApproval(token: RunLeaseToken, input: { expectedRevision: number; expectedHash: string; callId: string; timeoutMs: number; normalize: (raw: unknown) => unknown }) {
   token = { ...token }; input = { ...input }
@@ -87,12 +105,8 @@ export async function requestToolApproval(token: RunLeaseToken, input: { expecte
     if (!grant || grant.permission === 'deny'
       || !current.configuration.tools.some(tool => tool.function.name === call.name)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '审批不能扩大冻结工具权限。')
     const args = runtimeJson(input.normalize(coerceToolArgumentEnvelope(call.arguments ? parseToolArgsTolerant(call.arguments, false) : {})))
-    const { taskSpecSchema } = await import('../../../shared/contracts/task-spec-contracts.js')
-    const originalSpec = taskSpecSchema.safeParse(current.originalSpec)
-    const { coordinatedWriterActions, coordinatedWritingManifest } = await import('./coordinated-writing-input.js')
     const key = requestKey(token.taskRootId, frame.snapshotHash, call.id)
     const existing = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: key } })
-    let frozenWritingServices: z.infer<typeof requestSchema>['writingServices']
     if (existing) {
       const parsed = requestSchema.safeParse(existing.payload)
       if (existing.taskRootId !== token.taskRootId || existing.type !== 'approval.requested' || !parsed.success
@@ -100,34 +114,25 @@ export async function requestToolApproval(token: RunLeaseToken, input: { expecte
         || parsed.data.toolName !== call.name || parsed.data.rawArguments !== call.arguments || parsed.data.argsHash !== args.hash
         || runtimeJson(parsed.data.args).hash !== args.hash
 ) runtimeError('RUNTIME_RECEIPT_INVALID', '原审批请求损坏或实际参数已变化。')
-      frozenWritingServices = parsed.data.writingServices
     }
+    // A saved approval remains bound to its original exact payload, including
+    // historical service details. New proposals use only the real tool policy.
+    if (existing) return existing
     let writingServices: z.infer<typeof requestSchema>['writingServices']
     let serviceConfirmation = false
-    if (originalSpec.success && originalSpec.data.scope.writingCoordinationProtocol && coordinatedWriterActions.some(name => name === call.name)) {
-      const spec = originalSpec.data
+    if (call.name === 'chapter_bridge_commit') {
       const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: token.taskRootId } })
-      const original = await (await import('./original-request.js')).readOriginalTaskRequest(tx, { userId: token.userId, novelId: root.novelId, runId: token.runId })
-      const writer = z.object({ chapterId: z.string().min(1), writing: z.unknown() }).parse(args.value)
-      const chapter = frozenWritingServices ? null : await tx.chapter.findFirst({ where: { id: writer.chapterId, authorId: token.userId, novelId: root.novelId }, select: { orderIndex: true } })
-      if (!frozenWritingServices && !chapter) return runtimeError('AUTHOR_CHAPTER_SCOPE', '当前写作章节不属于原作品。')
-      writingServices = requestSchema.shape.writingServices.unwrap().parse(coordinatedWritingManifest({ spec, prompt: original.prompt }, call.name, writer.chapterId, writer.writing,
-        { frozenManifest: frozenWritingServices, targetOrderIndex: chapter?.orderIndex }))
-      serviceConfirmation = (await (await import('./runtime-writing-service.js')).readWritingServiceConfirmations(tx, token,
-        writingServices.steps.flatMap(step => step.actions))).length > 0
+      const parsed = z.object({ compilationId: z.string().optional() }).parse(args.value)
+      const review = await readCommitReviewApproval(tx, token, { userId: token.userId, novelId: root.novelId, runId: token.runId }, parsed.compilationId)
+      writingServices = review.manifest
+      serviceConfirmation = review.confirmations.length > 0
     }
-    if (grant.permission !== 'ask' && !grant.alwaysConfirm && !serviceConfirmation) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原工具和写作步骤不需要本次确认。')
-    if (existing) {
-      if (runtimeJson({ manifest: frozenWritingServices ?? null }).hash !== runtimeJson({ manifest: writingServices ?? null }).hash)
-        return runtimeError('RUNTIME_RECEIPT_INVALID', '原审批请求的写作步骤已变化。')
-      return existing // Original expiry is never extended by polling or resume.
-    }
+    if (grant.permission !== 'ask' && !grant.alwaysConfirm && !serviceConfirmation) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原工具不需要本次确认。')
     if (current.frame.revision !== frame.revision) runtimeError('RUNTIME_STATE_CONFLICT', '不能为已经离开的执行位置新建审批。')
     const now = await databaseNow(tx)
     return tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: token.taskRootId, runId: token.runId,
       eventKey: key, type: 'approval.requested', payload: { version: 1, callId: call.id, toolName: call.name, sourceRevision: frame.revision,
-        sourceHash: frame.snapshotHash, rawArguments: call.arguments, args: args.value, argsHash: args.hash, expiresAt: new Date(now.getTime() + input.timeoutMs).toISOString(),
-        ...(writingServices ? { writingServices } : {}) } } })
+        sourceHash: frame.snapshotHash, rawArguments: call.arguments, args: args.value, argsHash: args.hash, expiresAt: new Date(now.getTime() + input.timeoutMs).toISOString(), ...(writingServices ? { writingServices } : {}) } } })
   })
 }
 

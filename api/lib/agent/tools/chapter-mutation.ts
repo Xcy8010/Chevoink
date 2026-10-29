@@ -1,13 +1,21 @@
 import type { Prisma } from '@prisma/client'
 import { DataAccessError, prisma } from '../../prisma.js'
 import { activeChapterScope } from '../../data/internal.js'
-import { lockNovelActiveScope } from '../../data/novel-write-lock.js'
 import { isAgent2FeatureEnabled } from '../../agent2-feature-flags.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
 import { assertWritingTarget } from '../writing-scope.js'
 import { assertChapterManuscriptRevision, createChapterReviewReadScope, type ChapterReviewReadScope, type ChapterReviewRevisionOptions } from '../chapter-review-guard.js'
 import { recordStoryCompilerWrite } from '../story-compiler.js'
 import type { ToolContext } from './types.js'
+
+/** Optional review repairs keep the current session's manuscript policy. */
+export async function automaticChapterRevisionWritable(tx: Prisma.TransactionClient,
+  subject: Pick<ToolContext, 'sessionId' | 'inlineChild'>) {
+  if (subject.inlineChild) return false
+  const session = await tx.agentSession.findUnique({ where: { id: subject.sessionId }, select: { sandboxMode: true, toolPolicy: true } })
+  const policy = session?.toolPolicy && typeof session.toolPolicy === 'object' && !Array.isArray(session.toolPolicy) ? session.toolPolicy : {}
+  return !!session && session.sandboxMode !== 'read_only' && policy.contentWrite !== 'deny'
+}
 
 /** Shared manuscript CAS. Both runtimes and coordinated writing use the same
  * active scope, author revision and review-consumption boundary. Callers may
@@ -23,11 +31,7 @@ export async function updateOwnedChapterAtRevision(
 ) {
   const apply = async (tx: Prisma.TransactionClient) => {
     ctx.signal.throwIfAborted()
-    if (ctx.continuityRevision || ctx.nativeContinuityRevision) await lockNovelActiveScope(tx, ctx.novelId)
     const readScope = sourceReadScope ?? createChapterReviewReadScope()
-    const consumeContinuityRevision = ctx.continuityRevision ? await (await import('../continuity-coordinator.js'))
-      .assertContinuityRevisionApplication(tx, ctx, chapter, data.content, review, readScope) : ctx.nativeContinuityRevision
-        ? await (await import('../continuity-coordinator.js')).assertNativeContinuityRevisionApplication(tx, ctx, chapter, data.content, review, readScope) : undefined
     await assertAgentManuscriptCurrent(tx, ctx)
     await assertWritingTarget(tx, ctx, { chapterId: chapter.id, effect: mutation ?? 'metadata' })
     if (typeof data.content === 'string' && data.content === chapter.content) {
@@ -42,9 +46,7 @@ export async function updateOwnedChapterAtRevision(
       data: { ...data, revision: { increment: 1 } },
     })
     if (result.count !== 1) return null
-    await consumeContinuityRevision?.()
     await consumeReviewRevision?.()
-    if (ctx.continuityRevision) await (await import('../continuity-coordinator.js')).recordContinuityRevisionApplication(tx, ctx, chapter, data.content)
     const updated = await tx.chapter.findFirst({ where: {
       id: chapter.id, ...activeChapterScope(ctx.novelId), authorId: ctx.userId, revision: chapter.revision + 1,
     } })

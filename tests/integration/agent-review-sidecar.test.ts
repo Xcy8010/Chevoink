@@ -9,7 +9,8 @@ import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
 import { initializeExecutionState, loadExecutionState, saveExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { collectDurableCompletionEvidence } from '../../api/lib/agent/runtime-completion-evidence.js'
 import { advanceDurableCompletionObligations } from '../../api/lib/agent/runtime-continuation.js'
-import { prepareStoryCompilation, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
+import { prepareStoryCompilation, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
+import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
 import { chapterBridgeCommitTool, continuityValidateTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import { available, claim, fixture } from '../support/agent-durable-runtime-fixture.js'
@@ -17,7 +18,6 @@ import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-revi
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
-import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 
 type Fixture = Parameters<Parameters<typeof fixture>[0]>[0]
 const json = (value: unknown) => runtimeJson(JSON.parse(JSON.stringify(value))).value
@@ -75,9 +75,10 @@ async function saveTerminalReview(a: Awaited<ReturnType<typeof admit>>, verdict:
     terminalVerdicts: [{ path: 'exitState.action', verdict, basis: 'current', sourceEvidence: verdict === 'supported' ? [{ segmentId: 'c0', quote: chapter.content }] : [] }],
   }), { current: chapter.content, previous: previous?.content ?? null, terminalEvidence: context }, true, 8, candidate)
   expect(inspected.complete).toBe(true)
-  await validateStoryContinuity({ ...a, compilationId: a.compilationId, findings: [], independentCheck: 'complete', terminalCandidate: candidate,
-    expectedChapterRevision: chapter.revision, continuityCriticResponse: inspected.audit,
-    coverage: compilerContinuityCoverage({ chapter, bridge: compilation.bridge, sceneTasks: compilation.sceneTasks, source: previous, terminalCandidate: candidate }, 8) })
+  // Frozen parser output remains readable history, not a current delivery gate.
+  await prisma.agentArtifact.create({ data: { id: randomUUID(), runId: a.runId, artifactType: 'continuityReview',
+    title: '合成历史终态回执', content: JSON.stringify(inspected.audit), metadata: json({ candidate, audit: inspected.audit }) } })
+  await persistCurrentContinuityReport({ ...a, compilationId: a.compilationId, expectedChapterRevision: chapter.revision })
 }
 
 function v1Message(payload: unknown, blockers: unknown) {
@@ -111,7 +112,7 @@ describe.runIf(available)('current review observations preserve durable continua
     if (marker) {
       const note = state.frame.state.messages.at(-2)
       expect(note).toMatchObject({ role: 'system', content: expect.stringContaining('连续性=missing') })
-      expect(note?.content).toContain('尚不能提交为完成')
+      expect(note?.content).toContain('当前版本尚缺有效检查')
     }
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(beforeChapter)
     expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })).toEqual(beforeCompilation)
@@ -131,14 +132,14 @@ describe.runIf(available)('current review observations preserve durable continua
     expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: a.rootId, type: 'execution.review_observation' } })).toBe(0)
   }))
 
-  it('blocks mixed missing continuity and incomplete quality without buying either check or appending follow-up', async () => fixture(async f => {
+  it('continues mixed missing continuity and incomplete quality through the original tools', async () => fixture(async f => {
     const a = await admit(f)
     await prisma.chapterQualityReport.update({ where: { id: a.reportId }, data: { status: 'failed', deterministicMetrics: { independentCheck: 'unavailable' } } })
-    expect((await collectDurableCompletionEvidence(a.lease, cursor(a.initial))).snapshot).toMatchObject({ reviewObservation: { observations: [{ state: 'blocked',
+    expect((await collectDurableCompletionEvidence(a.lease, cursor(a.initial))).snapshot).toMatchObject({ reviewObservation: { observations: [{ state: 'check_required',
       facts: { continuity: 'missing', quality: 'incomplete', requiredTools: [expect.objectContaining({ name: 'continuity_validate' }), expect.objectContaining({ name: 'quality_analyze' })] } }] } })
-    expect(await advanceDurableCompletionObligations(a.lease, cursor(a.initial))).toMatchObject({ kind: 'reconciliation_required' })
-    expect((await loadExecutionState(a.userId, a.runId)).frame.snapshotHash).toBe(a.initial.snapshotHash)
-    expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: a.rootId, type: { in: ['execution.review_observation', 'execution.continuation'] } } })).toBe(0)
+    expect(await advanceDurableCompletionObligations(a.lease, cursor(a.initial))).toMatchObject({ kind: 'continued' })
+    expect((await loadExecutionState(a.userId, a.runId)).frame.revision).toBe(a.initial.revision + 1)
+    expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: a.rootId, type: { in: ['execution.review_observation', 'execution.continuation'] } } })).toBe(2)
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: a.rootId } } })).toBe(0)
   }))
 
@@ -157,7 +158,7 @@ describe.runIf(available)('current review observations preserve durable continua
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: a.rootId } } })).toBe(0)
   }))
 
-  it('changing report facts cannot reset the original four-reminder stagnation ceiling', async () => fixture(async f => {
+  it('records five changed report observations without a fixed reminder stop', async () => fixture(async f => {
     const a = await admit(f)
     let frame = a.initial
     const fingerprints: string[] = []
@@ -168,16 +169,16 @@ describe.runIf(available)('current review observations preserve durable continua
       const evidence = await collectDurableCompletionEvidence(a.lease, cursor(frame))
       const observation = (evidence.snapshot as { reviewObservation: { fingerprint: string } }).reviewObservation
       fingerprints.push(observation.fingerprint)
-      expect(await advanceDurableCompletionObligations(a.lease, cursor(frame))).toMatchObject({ kind: index === 5 ? 'needs_attention' : 'continued' })
+      expect(await advanceDurableCompletionObligations(a.lease, cursor(frame))).toMatchObject({ kind: 'continued' })
       frame = (await loadExecutionState(a.userId, a.runId)).frame
     }
     expect(new Set(fingerprints).size).toBe(5)
     const events = await prisma.agentExecutionOutbox.findMany({ where: { taskRootId: a.rootId, type: 'execution.continuation' }, orderBy: { sequence: 'asc' } })
-    expect(events.map(event => (event.payload as { reminderIndex: number }).reminderIndex)).toEqual([1, 2, 3, 4])
+    expect(events.map(event => (event.payload as { reminderIndex: number }).reminderIndex)).toEqual([1, 2, 3, 4, 5])
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: a.rootId } } })).toBe(0)
   }))
 
-  it('persists a generated terminal_review_required fingerprint and reads the same sidecar on the next continuation', async () => fixture(async f => {
+  it('persists current commit readiness independently of historical unknown verdicts', async () => fixture(async f => {
     const a = await admit(f, true, false, { terminal: true })
     await saveTerminalReview(a, 'unknown')
     await prisma.qualityFinding.deleteMany({ where: { reportId: a.reportId } })
@@ -187,8 +188,7 @@ describe.runIf(available)('current review observations preserve durable continua
     const evidence = await collectDurableCompletionEvidence(a.lease, cursor(a.initial))
     expect(evidence.snapshot).toMatchObject({ blockers: [{ code: 'uncommitted_compilation', reference: a.compilationId }],
       reviewObservation: { observations: [{ compilationId: a.compilationId, chapterId: f.chapterId, revision: 1,
-        state: 'terminal_review_required', requiredToolNames: [], facts: { continuity: 'complete', quality: 'complete',
-          terminalReview: { state: 'unverified', currentResultVerified: true, deliveryEligible: false } } }] } })
+        state: 'commit_available', requiredToolNames: [], facts: { continuity: 'complete', quality: 'complete' } }] } })
     const observation = (evidence.snapshot as { reviewObservation: { fingerprint: string; observations: unknown[] } }).reviewObservation
     expect(observation.fingerprint).toBe(runtimeJson(observation.observations).hash)
     expect(await advanceDurableCompletionObligations(a.lease, cursor(a.initial))).toMatchObject({ kind: 'continued' })
@@ -201,7 +201,7 @@ describe.runIf(available)('current review observations preserve durable continua
     expect(saved.frame.snapshotHash).toBe(runtimeJson(saved.frame.state).hash)
     expect(saved.frame.state.messages.slice(0, -2)).toEqual(a.initial.state.messages)
     expect(saved.frame.state.messages.at(-2)).toMatchObject({ role: 'system', content: expect.stringContaining(`[只读审查事实 ${observation.fingerprint}]`) })
-    expect(saved.frame.state.messages.at(-2)?.content).toContain('终态候选尚未证实，不能提交')
+    expect(saved.frame.state.messages.at(-2)?.content).toContain('chapter_bridge_commit')
     expect(saved.frame.state.messages.at(-2)?.content).toContain('此观察不是授权、已执行操作或进展')
     expect(saved.frame.state).toMatchObject({ phase: 'idle', turn: 0, nextOperationSequence: 0, pendingOperationId: null })
     const firstContinuation = await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { eventKey: `continuation:${a.rootId}:${a.initial.revision}` } })
@@ -240,17 +240,20 @@ describe.runIf(available)('current review observations preserve durable continua
     // candidate obligation; neither may be lost by classifying the next step.
     await prisma.chapterQualityReport.delete({ where: { id: a.reportId } })
     const chapterBefore = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-    const compilationBefore = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })
     const budgetBefore = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })
+    // Both missing/denied capabilities are still required by this snapshot:
+    // continuity is deliberately made incomplete as well as quality missing.
+    await prisma.storyCompilation.update({ where: { id: a.compilationId }, data: { validation: {} } })
+    const incomplete = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })
     expect((await collectDurableCompletionEvidence(a.lease, cursor(a.initial))).snapshot).toMatchObject({
-      reviewObservation: { observations: [{ state: 'terminal_review_required', requiredToolNames: ['quality_analyze'],
-        facts: { continuity: 'complete', quality: 'missing', terminalReview: { deliveryEligible: false } } }] } })
+      reviewObservation: { observations: [{ state: 'check_required', requiredToolNames: ['continuity_validate', 'quality_analyze'],
+        facts: { continuity: 'missing', quality: 'missing' } }] } })
     expect(await advanceDurableCompletionObligations(a.lease, cursor(a.initial))).toMatchObject({ kind: 'reconciliation_required' })
     expect((await loadExecutionState(a.userId, a.runId)).frame.snapshotHash).toBe(a.initial.snapshotHash)
     expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: a.rootId,
       type: { in: ['execution.review_observation', 'execution.continuation'] } } })).toBe(0)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapterBefore)
-    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })).toEqual(compilationBefore)
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })).toEqual(incomplete)
     expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })).toEqual(budgetBefore)
     expect(await prisma.agentOperation.count({ where: { taskRootId: a.rootId } })).toBe(0)
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: a.rootId } } })).toBe(0)
@@ -267,7 +270,7 @@ describe.runIf(available)('current review observations preserve durable continua
     const budgetBefore = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })
     const evidence = await collectDurableCompletionEvidence(a.lease, cursor(a.initial))
     expect(evidence.snapshot).toMatchObject({ blockers: expect.arrayContaining([{ code: 'unresolved_operation', reference: operation.id }]),
-      reviewObservation: { observations: [{ state: 'terminal_review_required' }] } })
+      reviewObservation: { observations: [{ state: 'commit_available' }] } })
     expect(await advanceDurableCompletionObligations(a.lease, cursor(a.initial))).toMatchObject({ kind: 'reconciliation_required',
       blockers: expect.arrayContaining([{ code: 'unresolved_operation', reference: operation.id }]) })
     expect((await loadExecutionState(a.userId, a.runId)).frame.snapshotHash).toBe(a.initial.snapshotHash)
@@ -289,8 +292,7 @@ describe.runIf(available)('current review observations preserve durable continua
     const budgetBefore = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })
     const evidence = await collectDurableCompletionEvidence(a.lease, cursor(a.initial))
     expect(evidence.snapshot).toMatchObject({ reviewObservation: { observations: [{ state: expectedState, requiredToolNames: [],
-      facts: { continuity: 'complete', quality: 'complete', terminalReview: { currentResultVerified: true,
-        deliveryEligible: expectedState === 'commit_available' } } }] } })
+      facts: { continuity: 'complete', quality: 'complete' } }] } })
     if (expectedState === 'decision_required') expect(evidence.snapshot).toMatchObject({ reviewObservation: { observations: [{
       facts: { pending: Array.from({ length: 10 }, () => expect.objectContaining({ reportId: a.reportId })) } }] } })
     expect(await advanceDurableCompletionObligations(a.lease, cursor(a.initial))).toMatchObject({ kind: 'continued' })

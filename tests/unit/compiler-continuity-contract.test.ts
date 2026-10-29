@@ -1,40 +1,112 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
 import { compilerContinuityCoverage, compilerContinuityCoverageMatches } from '../../api/lib/agent/compiler-continuity-contract.js'
-import { commitChapterBridge, isWritingTaskContinuityCompiler, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
-import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
+import { commitChapterBridge } from '../../api/lib/agent/story-compiler.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import * as manuscript from '../../api/lib/agent/manuscript-scope.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
+import { prisma, DataAccessError } from '../../api/lib/prisma.js'
+import * as original from '../../api/lib/agent/original-request.js'
+import * as humanity from '../../api/lib/agent/humanity-quality.js'
+import * as locks from '../../api/lib/data/novel-write-lock.js'
+import * as goals from '../../api/lib/agent/goal-fence.js'
+import { buildContinuitySnapshot, reviewContinuity, readContinuityReport, type ContinuityOpinion } from '../../api/lib/agent/continuity-review.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { readNewDraftWritingAuthority } from '../../api/lib/agent/writing-scope.js'
+import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
-const revisionChannel = vi.hoisted(() => vi.fn())
+const { revisionChannel, currentReadiness } = vi.hoisted(() => ({ revisionChannel: vi.fn(), currentReadiness: vi.fn() }))
 vi.mock('../../api/lib/agent/chapter-review-guard.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../api/lib/agent/chapter-review-guard.js')>(),
   probeChapterReviewRevision: revisionChannel,
-  // This suite isolates the legacy/manual error gate. Writing requirements are
-  // exercised with real persisted reads in chapter-review-readiness.test.ts.
-  readChapterReviewReadiness: vi.fn().mockResolvedValue(null),
+  // Real readiness projection is covered in chapter-review-guard. This core
+  // fixture derives its decision from the actual shared runner's current report.
+  readChapterReviewReadiness: currentReadiness,
 }))
 
-afterEach(() => { vi.restoreAllMocks(); revisionChannel.mockReset() })
+afterEach(() => { vi.restoreAllMocks(); revisionChannel.mockReset(); currentReadiness.mockReset() })
 const input = () => ({ chapter: { id: 'c', title: '本章', revision: 2, content: '修订后的完整正文', orderIndex: 2 },
   bridge: { fromChapterId: 'source', sourceRevision: 1, location: '城门' }, sceneTasks: [{ ordinal: 1, goal: '寻找钥匙', turn: '发现门已锁' }],
   source: { id: 'source', revision: 1, content: '前章完整正文' } })
+
+function currentFixture() {
+  const value = input()
+  const chapter = { ...value.chapter, authorId: 'u', novelId: 'n', archivedAt: null as Date | null, createdAt: new Date(2) }
+  const previous = { ...value.source, title: '前章', orderIndex: 1 }
+  const compilation = { id: 'comp', userId: 'u', novelId: 'n', runId: 'r', chapterId: 'c', chapter,
+    createdAt: new Date(1),
+    bridge: { id: 'bridge', ...value.bridge, targetRevision: 2, committedAt: null }, sceneTasks: value.sceneTasks,
+    status: 'active', stage: 'write', preparedContext: {}, validation: {} as Record<string, unknown> }
+  const task = buildTaskSpec({ runId: 'r', novelId: 'n', chapterId: 'c', prompt: '修复当前章' })
+  task.scope.writing = { version: 1, kind: 'bounded', targets: [{ chapterId: 'c', orderIndex: 2 }], titleAndBodyOnly: false, repairAuthorized: true }
+  const origin = { taskId: task.id, sourceRunId: 'r', parentRunId: null, prompt: '修复当前章', spec: task as unknown }
+  const run = { id: 'r', userId: 'u', novelId: 'n', status: 'queued', runtimeProtocolVersion: 0, taskRootId: null, sessionId: 's',
+    chapterId: 'c', taskSpec: origin.spec, writingBindings: null as unknown, createdAt: new Date(1) }
+  const artifacts = new Map<string, Record<string, unknown>>()
+  vi.spyOn(original, 'readOriginalTaskRequest').mockImplementation(async () => origin)
+  vi.spyOn(original, 'originalTaskRunIds').mockResolvedValue(['r'])
+  const target = vi.spyOn(humanity, 'resolveQualityChapterTarget').mockResolvedValue('c')
+  const scope = vi.spyOn(humanity, 'qualityCompilationScope').mockResolvedValue({ runId: 'r' })
+  vi.spyOn(locks, 'lockNovelActiveScope').mockResolvedValue(undefined)
+  vi.spyOn(goals, 'assertRunGoalFence').mockResolvedValue(undefined)
+  const owner = vi.spyOn(manuscript, 'assertAgentManuscriptCurrent').mockResolvedValue(undefined)
+  vi.spyOn(prisma, '$queryRaw').mockResolvedValue([{ id: 'n' }])
+  vi.spyOn(prisma.chapter, 'findFirst').mockImplementation(async args => args?.where?.id === 'source' ? { ...previous } as never
+    : args?.where?.id === 'c' && args.where.authorId === 'u' && !chapter.archivedAt ? { ...chapter } as never : null)
+  const chapterWrite = vi.spyOn(prisma.chapter, 'update')
+  vi.spyOn(prisma.chapter, 'findMany').mockImplementation(async args => args?.where?.orderIndex ? [{ ...previous }] as never : [{ id: 'c', orderIndex: 2 }] as never)
+  const owned = (where: Prisma.StoryCompilationWhereInput | undefined) => where?.userId === 'u' && where.novelId === 'n' && compilation.userId === 'u'
+  const findCompilation = vi.spyOn(prisma.storyCompilation, 'findFirst').mockImplementation(async args => {
+    const date = args?.where?.createdAt
+    const after = date && typeof date === 'object' && 'gt' in date ? date.gt : undefined
+    return owned(args?.where) && (!after || compilation.createdAt > new Date(after as string | Date)) ? { ...compilation } as never : null
+  })
+  vi.spyOn(prisma.storyCompilation, 'findMany').mockImplementation(async args => owned(args?.where) ? [{ ...compilation }] as never : [])
+  vi.spyOn(prisma.storyCompilation, 'findUniqueOrThrow').mockImplementation(async () => ({ ...compilation }) as never)
+  const update = vi.spyOn(prisma.storyCompilation, 'update').mockImplementation(async ({ data }) => { Object.assign(compilation, data); return { ...compilation } as never })
+  const bridgeWrite = vi.spyOn(prisma.chapterBridge, 'update').mockResolvedValue({} as never)
+  const scenesWrite = vi.spyOn(prisma.sceneTask, 'updateMany').mockResolvedValue({ count: 1 })
+  vi.spyOn(prisma.agentRun, 'findFirst').mockImplementation(async args => args?.where?.id === 'origin' ? { id: 'origin', taskSpec: { ...task, runId: 'origin', goals: ['另一任务'] } } as never : { ...run } as never)
+  vi.spyOn(prisma.agentRun, 'findFirstOrThrow').mockImplementation(async () => ({ ...run }) as never)
+  vi.spyOn(prisma.agentArtifact, 'findMany').mockResolvedValue([])
+  vi.spyOn(prisma.agentArtifact, 'findUnique').mockImplementation(async ({ where }) => artifacts.get(where.id!) as never ?? null)
+  vi.spyOn(prisma.agentArtifact, 'create').mockImplementation(async ({ data }) => { const row = { ...data, updatedAt: new Date() }; artifacts.set(data.id!, row); return row as never })
+  vi.spyOn(prisma.agentArtifact, 'update').mockImplementation(async ({ where, data }) => { const row = { ...artifacts.get(where.id!), ...data, updatedAt: new Date() }; artifacts.set(where.id!, row); return row as never })
+  vi.spyOn(prisma.aiUsageLog, 'findMany').mockResolvedValue([])
+  vi.spyOn(prisma.aiUsageLog, 'count').mockResolvedValue(0)
+  vi.spyOn(prisma.agentOperation, 'findMany').mockResolvedValue([])
+  vi.spyOn(prisma, '$transaction').mockImplementation(async work => typeof work === 'function' ? work(prisma) : Promise.all(work) as never)
+  const proposal = vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'memory' } as never)
+  const ctx: ToolContext = { userId: 'u', novelId: 'n', runId: 'r', sessionId: 's', chapterId: 'c', callId: 'current-check', mode: 'build',
+    creativeFreedom: 'stable', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }
+  const dispatch = vi.fn(async () => ({ content: '{"findings":[]}', usageIds: [], billingKnown: true }))
+  const review = (opinions: ContinuityOpinion[] = []) => {
+    dispatch.mockResolvedValueOnce({ content: JSON.stringify({ findings: opinions }), usageIds: [], billingKnown: true })
+    return reviewContinuity(ctx, { compilationId: 'comp' }, { allowRepair: false, dispatch })
+  }
+  currentReadiness.mockImplementation(async () => {
+    const report = readContinuityReport(compilation.validation, chapter, (await buildContinuitySnapshot(ctx, { compilationId: 'comp' })).contextHash)
+    const complete = !!report?.complete && report.billingKnown
+    return { ready: complete, chapterId: 'c', revision: chapter.revision, compilationId: 'comp', quality: 'complete', continuity: complete ? 'complete' : 'incomplete',
+      decisionPending: !!report?.findings.length, continuityErrorCount: report?.findings.filter(finding => finding.severity === 'error').length ?? 0, qualityErrorCount: 0, requiredTools: complete ? [] : [{ name: 'continuity_validate', args: { compilationId: 'comp' } }] }
+  })
+  const commit = () => commitChapterBridge({ userId: 'u', novelId: 'n', runId: 'r', compilationId: 'comp', chapterSummary: '章节摘要',
+    exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }, lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '',
+    openingStructure: '动作', endingStructure: '转折', expectedChapterRevision: 2, expectedContentHash: runtimeJson({ content: value.chapter.content }).hash }, prisma)
+  return { ctx, chapter, previous, compilation, origin, run, task, artifacts, dispatch, target, scope, owner, proposal, findCompilation, update, bridgeWrite, scenesWrite, chapterWrite, review, commit }
+}
 
 describe('compiler continuity report dependencies', () => {
   it('completes a frozen protocol6 assessment under its own hash, without upgrading it to current protocol8', async () => {
     const current = input(), coverage = compilerContinuityCoverage(current, 6)
     expect(compilerContinuityCoverageMatches(coverage, compilerContinuityCoverage(current, 6))).toBe(true)
     expect(compilerContinuityCoverageMatches(coverage, compilerContinuityCoverage(current))).toBe(false)
-    const update = vi.fn()
-    const db = { $queryRaw: vi.fn().mockResolvedValue([{ id: 'n' }]), storyCompilation: { findFirst: vi.fn().mockResolvedValue({ id: 'comp', ...current,
-      validation: { checkRounds: 2, autoRepairRounds: 1 } }), update },
-      chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockImplementation(async ({ where }) => where.id === 'source' ? current.source : { id: 'c' }) },
-    } as unknown as Prisma.TransactionClient
-    const result = await validateStoryContinuity({ userId: 'u', novelId: 'n', compilationId: 'comp', expectedChapterRevision: 2,
-      coverage, independentCheck: 'complete', findings: [] }, db)
-    expect(result).toMatchObject({ independentCheck: 'complete', checkRounds: 2, autoRepairRounds: 1 })
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ validation: expect.objectContaining({ coverage }) }) }))
+    const f = currentFixture()
+    f.compilation.validation = { checkRounds: 2, autoRepairRounds: 1, coverage }
+    expect(await f.review()).toMatchObject({ reviewCompleted: true })
+    expect(f.compilation.validation).toMatchObject({ checkRounds: 2, autoRepairRounds: 1, coverage })
+    expect(readContinuityReport(f.compilation.validation, f.chapter)).toMatchObject({ complete: true, revision: 2, rawResponses: ['{"findings":[]}'] })
+    expect(f.chapterWrite).not.toHaveBeenCalled()
   })
   it.each(['text', 'revision', 'title', 'source', 'bridge', 'scenes', 'focus', 'protocol'] as const)('%s invalidates reuse', change => {
     const before = input(), after = structuredClone(before)
@@ -56,136 +128,114 @@ describe('compiler continuity report dependencies', () => {
     expect(compilerContinuityCoverageMatches({ ...coverage, protocolVersion: undefined }, coverage)).toBe(false)
   })
   it.each(['missing', 'old-protocol', 'wrong-hash'] as const)('current terminal commits while %s optional coverage remains unknown', async scenario => {
-    const current = input(), bridge = { ...current.bridge, fromChapterId: null }
-    const coverage = compilerContinuityCoverage({ ...current, bridge, source: null })
-    const terminalWrite = vi.fn()
-    const proposal = vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'memory' } as never)
-    const db = { $queryRaw: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      const sql = strings.join('?')
-      if (sql === 'SELECT id FROM novels WHERE id = ? FOR UPDATE' && values[0] === 'n') return [{ id: 'n' }]
-      if (sql === 'SELECT id FROM story_compilations WHERE id = ? AND user_id = ? AND novel_id = ? FOR UPDATE'
-        && values[0] === 'comp' && values[1] === 'u' && values[2] === 'n') return [{ id: 'comp' }]
-      if (sql === 'SELECT id FROM chapters WHERE id = ? FOR UPDATE' && values[0] === 'c') return [{ id: 'c' }]
-      throw new Error(`Unexpected fixture lock: ${sql}`)
-    }),
-      storyCompilation: { findFirst: vi.fn().mockResolvedValue({ id: 'comp', chapter: current.chapter, bridge, sceneTasks: current.sceneTasks,
-        validation: { independentCheck: 'complete', checkedRevision: 2, errorCount: 0,
-          ...(scenario === 'missing' ? {} : { coverage: { ...coverage, ...(scenario === 'old-protocol' ? { protocolVersion: 1 } : { reviewHash: '0'.repeat(64) }) } }) } }), update: terminalWrite },
-      chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(current.chapter) }, chapterBridge: { update: terminalWrite }, sceneTask: { updateMany: terminalWrite },
-      chapterQualityReport: { findFirst: vi.fn().mockResolvedValue(null) },
-    } as unknown as Prisma.TransactionClient
-    await expect(commitChapterBridge({ userId: 'u', novelId: 'n', compilationId: 'comp', chapterSummary: '章节摘要',
-      exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
-      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '转折' }, db)).resolves.toMatchObject({ compilationId: 'comp', chapterId: 'c', chapterRevision: 2 })
-    expect(terminalWrite).toHaveBeenCalledTimes(3)
-    expect(terminalWrite).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'comp' }, data: expect.objectContaining({ stage: 'commit', status: 'completed' }) }))
-    expect(proposal).toHaveBeenCalledWith(expect.objectContaining({ memoryType: 'chapterSummary', content: '章节摘要' }), db)
-    for (const [call] of terminalWrite.mock.calls) expect(call.data).not.toHaveProperty('validation')
+    const f = currentFixture(), coverage = compilerContinuityCoverage(input())
+    const historical = scenario === 'missing' ? {} : { coverage: { ...coverage, ...(scenario === 'old-protocol' ? { protocolVersion: 1 } : { reviewHash: '0'.repeat(64) }) } }
+    f.compilation.validation = historical
+    await f.review(); f.update.mockClear()
+    await expect(f.commit()).resolves.toMatchObject({ compilationId: 'comp', chapterId: 'c', chapterRevision: 2 })
+    expect(f.update).toHaveBeenCalledOnce(); expect(f.bridgeWrite).toHaveBeenCalledOnce(); expect(f.scenesWrite).toHaveBeenCalledOnce()
+    expect(f.compilation.validation).toMatchObject(historical)
+    expect(f.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ stage: 'commit', status: 'completed' }) }))
+    expect(f.proposal.mock.calls[0]?.[0]).toMatchObject({ memoryType: 'chapterSummary', content: '章节摘要', agentGenerated: true })
+    expect(f.proposal.mock.calls[0]?.[1] === prisma).toBe(true)
+    expect(f.chapterWrite).not.toHaveBeenCalled()
   })
   it.each(['current', 'stale-body', 'stale-scenes', 'cancelled'] as const)('%s persists only a current compiler CHECK without touching manuscript', async scenario => {
-    const frozen = input(), current = structuredClone(frozen)
-    // Freeze the same bounded source envelope that the real current protocol reads.
-    if (scenario === 'stale-body') current.chapter.content += '新文'
-    if (scenario === 'stale-scenes') current.sceneTasks[0].goal = '不同目标'
-    const update = vi.fn(), chapterWrite = vi.fn()
-    const db = { $queryRaw: vi.fn().mockResolvedValue([{ id: 'n' }]),
-      storyCompilation: { findFirst: vi.fn().mockResolvedValue({ id: 'comp', targetOrderIndex: 2, ...current }), update },
-      chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockImplementation(async ({ where, select }) => where.id === 'source' ? select.title ? { revision: current.source.revision, title: '前章' } : current.source : { id: 'c' }), update: chapterWrite },
-    } as unknown as Prisma.TransactionClient
-    const coverage = compilerContinuityCoverage({ ...frozen, source: await readCompilerContinuitySource(db, { userId: 'u', novelId: 'n' }, frozen.chapter, frozen.bridge.fromChapterId) })
-    const work = validateStoryContinuity({ userId: 'u', novelId: 'n', compilationId: 'comp', findings: [], expectedChapterRevision: 2,
-      independentCheck: 'complete', coverage, signal: scenario === 'cancelled' ? AbortSignal.abort() : new AbortController().signal }, db)
-    if (scenario === 'current') {
-      await expect(work).resolves.toMatchObject({ checkedRevision: 2, independentCheck: 'complete', errorCount: 0 })
-      expect(update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'comp' }, data: expect.objectContaining({ stage: 'check', validation: expect.objectContaining({ coverage }) }) }))
+    const f = currentFixture(), frozen = await buildContinuitySnapshot(f.ctx, { compilationId: 'comp' })
+    if (scenario === 'stale-body') f.chapter.content += '新文'
+    if (scenario === 'stale-scenes') f.compilation.sceneTasks[0].goal = '不同目标'
+    if (scenario === 'cancelled') f.ctx.signal = AbortSignal.abort()
+    const work = reviewContinuity(f.ctx, { compilationId: 'comp' }, { snapshot: frozen, allowRepair: false, dispatch: f.dispatch })
+    if (scenario === 'current' || scenario === 'stale-scenes') {
+      await expect(work).resolves.toMatchObject({ reviewCompleted: true })
+      expect(readContinuityReport(f.compilation.validation, f.chapter, frozen.contextHash)).toMatchObject({ complete: true, revision: 2 })
+      expect(f.dispatch).toHaveBeenCalledOnce()
     } else {
       if (scenario === 'cancelled') await expect(work).rejects.toBeDefined()
       else await expect(work).rejects.toMatchObject({ code: 'CONTINUITY_INPUT_STALE' })
-      expect(update).not.toHaveBeenCalled()
+      expect(f.update).not.toHaveBeenCalled(); expect(f.dispatch).not.toHaveBeenCalled()
     }
-    expect(chapterWrite).not.toHaveBeenCalled()
+    expect(f.chapterWrite).not.toHaveBeenCalled()
   })
   it('a fresh complete CHECK preserves the consumed new-draft correction marker and the check/paid repair counters', async () => {
-    const current = input()
-    const marker = { version: 1, taskId: 'task', chapterId: 'c', compilationId: 'comp', checkedRevision: 1 }
-    const update = vi.fn()
-    const db = { $queryRaw: vi.fn().mockResolvedValue([{ id: 'n' }]), storyCompilation: { findFirst: vi.fn().mockResolvedValue({ id: 'comp', ...current,
-      validation: { checkRounds: 2, autoRepairRounds: 1, newDraftRevision: marker } }), update },
-      chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockImplementation(async ({ where }) => where.id === 'source' ? current.source : { id: 'c' }) },
-    } as unknown as Prisma.TransactionClient
-    await validateStoryContinuity({ userId: 'u', novelId: 'n', compilationId: 'comp', expectedChapterRevision: 2, independentCheck: 'complete', findings: [] }, db)
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ validation: expect.objectContaining({ newDraftRevision: marker, checkRounds: 2, autoRepairRounds: 1 }) }) }))
+    const f = currentFixture(), marker = { version: 1, taskId: 'task', chapterId: 'c', compilationId: 'comp', checkedRevision: 1 }
+    const historical = { checkRounds: 2, autoRepairRounds: 1, newDraftRevision: marker }
+    f.compilation.validation = historical
+    await expect(f.review()).resolves.toMatchObject({ reviewCompleted: true })
+    expect(f.compilation.validation).toMatchObject(historical)
+    expect(readContinuityReport(f.compilation.validation, f.chapter)).toMatchObject({ complete: true, revision: 2 })
   })
 })
 
 describe('terminal commit gate is independent of paid revision availability', () => {
-  const fixture = () => {
-    const current = input(), bridge = { ...current.bridge, fromChapterId: null }
-    const coverage = compilerContinuityCoverage({ ...current, bridge, source: null })
-    const terminalWrite = vi.fn()
-    const db = { $queryRaw: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      const sql = strings.join('?')
-      if (sql === 'SELECT id FROM novels WHERE id = ? FOR UPDATE' && values[0] === 'n') return [{ id: 'n' }]
-      if (sql === 'SELECT id FROM story_compilations WHERE id = ? AND user_id = ? AND novel_id = ? FOR UPDATE'
-        && values[0] === 'comp' && values[1] === 'u' && values[2] === 'n') return [{ id: 'comp' }]
-      if (sql === 'SELECT id FROM chapters WHERE id = ? FOR UPDATE' && values[0] === 'c') return [{ id: 'c' }]
-      throw new Error(`Unexpected fixture lock: ${sql}`)
-    }),
-      storyCompilation: { findFirst: vi.fn().mockResolvedValue({ id: 'comp', runId: 'run-1', chapter: current.chapter, bridge,
-        sceneTasks: current.sceneTasks, validation: { independentCheck: 'complete', checkedChapterId: current.chapter.id, checkedRevision: 2,
-          errorCount: 2, warningCount: 0, findings: [
-            { signal: 'object', severity: 'error', evidence: '合成门锁状态冲突', suggestion: '保留原门锁事实' },
-            { signal: 'knowledge', severity: 'error', evidence: '合成人物知情状态冲突', suggestion: '保留原知情范围' },
-          ], coverage } }), update: terminalWrite },
-      chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(current.chapter) }, chapterBridge: { update: terminalWrite }, sceneTask: { updateMany: terminalWrite },
-      chapterQualityReport: { findFirst: vi.fn().mockResolvedValue(null) },
-    } as unknown as Prisma.TransactionClient
-    const commit = () => commitChapterBridge({ userId: 'u', novelId: 'n', compilationId: 'comp', chapterSummary: '章节摘要',
-      exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
-      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '转折' }, db)
-    return { db, terminalWrite, commit }
+  const fixture = async () => {
+    const f = currentFixture(), snapshot = await buildContinuitySnapshot(f.ctx, { compilationId: 'comp' })
+    const sourceId = snapshot.sources[0].table.entries[0].id.slice(0, 13)
+    await f.review((['object', 'knowledge'] as const).map(signal => ({ signal, severity: 'error', explanation: signal === 'object' ? '合成门锁状态冲突' : '合成人物知情状态冲突',
+      suggestion: '保留原事实', evidence: [{ sourceId }] })))
+    f.update.mockClear()
+    return { ...f, terminalWrite: f.update }
   }
   it('holds the commit while one merged correction is still reachable', async () => {
     revisionChannel.mockResolvedValue(true)
-    vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'memory' } as never)
-    const f = fixture()
+    const f = await fixture()
     await expect(f.commit()).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
     expect(revisionChannel).not.toHaveBeenCalled()
     expect(f.terminalWrite).not.toHaveBeenCalled()
   })
   it('keeps unhandled findings pending when automatic revision is unavailable', async () => {
     revisionChannel.mockResolvedValue(false)
-    vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'memory' } as never)
-    const f = fixture()
+    const f = await fixture()
     await expect(f.commit()).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
     expect(revisionChannel).not.toHaveBeenCalled()
     expect(f.terminalWrite).not.toHaveBeenCalled()
-    expect(memory.saveStoryMemory).not.toHaveBeenCalled()
+    expect(f.proposal).not.toHaveBeenCalled()
   })
 })
 
 describe('chapter-only compiler admission from frozen writing authority', () => {
   it.each(['write', 'review', 'proposal', 'selection', 'invalid', 'foreign', 'archived', 'wrong-target', 'changed-origin'] as const)('%s preserves the original task boundary', async scenario => {
-    const task = buildTaskSpec({ runId: 'r', novelId: 'n', chapterId: 'c', prompt: scenario === 'review' ? '检查当前章节' : scenario === 'proposal' ? '写一本小说' : '写下一章' })
+    const f = currentFixture(), prompt = scenario === 'review' ? '检查当前章节' : scenario === 'proposal' ? '写一本小说' : '写下一章'
+    const task = buildTaskSpec({ runId: 'r', novelId: 'n', chapterId: 'c', prompt })
+    task.scope.writing = { version: 1, kind: 'bounded', targets: [{ chapterId: null, orderIndex: scenario === 'wrong-target' ? 3 : 2 }], titleAndBodyOnly: false, repairAuthorized: false }
     if (scenario === 'selection') task.scope.selection = { chapterId: 'c', start: 0, end: 1 }
     if (scenario === 'wrong-target') { task.goals = ['完成当前章节']; task.scope.chapterIds = ['other-chapter'] }
     if (scenario === 'changed-origin') task.runId = 'origin'
-    const run = { runtimeProtocolVersion: 0, taskRootId: null, sessionId: 's', taskSpec: scenario === 'invalid' ? {} : task }
-    const find = vi.fn().mockResolvedValue(scenario === 'foreign' ? null : { id: 'comp' })
-    const db = { agentRun: { findFirst: vi.fn().mockImplementation(async ({ where, select }) => where.id === 'origin' ? { id: 'origin', taskSpec: { ...task, goals: ['另一任务'] } }
-      : select.createdAt ? { createdAt: new Date() } : run) }, storyCompilation: { findFirst: find },
-      chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(scenario === 'archived' ? null : { id: 'c' }) } } as unknown as Prisma.TransactionClient
-    const work = isWritingTaskContinuityCompiler(db, { userId: 'u', novelId: 'n', runId: 'r', compilationId: 'comp', chapterId: 'c' })
+    f.origin.prompt = prompt; f.origin.spec = scenario === 'invalid' ? {} : task; f.origin.taskId = task.id
+    f.run.taskSpec = f.origin.spec
+    f.run.writingBindings = { version: 1, taskId: task.id, targets: [{ orderIndex: scenario === 'wrong-target' ? 3 : 2, chapterId: scenario === 'wrong-target' ? 'other-chapter' : 'c' }] }
+    if (scenario === 'foreign') f.compilation.userId = 'other-author'
+    if (scenario === 'archived') f.chapter.archivedAt = new Date()
+    f.target.mockRestore(); f.scope.mockRestore()
+    const work = buildContinuitySnapshot(f.ctx, { chapterId: 'c', compilationId: 'comp' })
     if (scenario === 'changed-origin') await expect(work).rejects.toMatchObject({ code: 'RUNTIME_SCOPE_MISMATCH' })
-    else await expect(work).resolves.toBe(scenario === 'write')
-    if (scenario === 'write') expect(find).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: 'comp', chapterId: 'c', userId: 'u', novelId: 'n', status: { in: ['active', 'completed'] },
-      run: expect.objectContaining({ taskSpec: { path: ['id'], equals: task.id } }), AND: expect.any(Array) }) }))
+    else if (scenario === 'foreign') await expect(work).rejects.toMatchObject({ code: 'QUALITY_TASK_TARGET_REQUIRED' })
+    else if (scenario === 'archived') await expect(work).rejects.toMatchObject({ code: 'CHAPTER_NOT_FOUND' })
+    else {
+      const snapshot = await work
+      expect(snapshot.chapter).toMatchObject({ id: 'c', revision: 2, content: input().chapter.content })
+      expect(snapshot.original.taskId).toBe(task.id)
+      // Reading this author's source never grants manuscript effects. Only the
+      // original bounded, server-bound new-draft authority authorizes revision.
+      const authority = await readNewDraftWritingAuthority(prisma, f.ctx, f.chapter)
+      expect(authority).toEqual(scenario === 'write' ? { taskId: task.id } : null)
+      expect(f.findCompilation).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: 'comp', userId: 'u', novelId: 'n',
+        run: expect.objectContaining(scenario === 'invalid' ? { id: 'r' } : { taskSpec: { path: ['id'], equals: task.id } }) }) }))
+    }
+    expect(f.chapterWrite).not.toHaveBeenCalled(); expect(f.update).not.toHaveBeenCalled()
+    expect(f.dispatch).not.toHaveBeenCalled()
+
   })
   it('rechecks the current run and manuscript fence before promoting a cached CHECK', async () => {
-    const assert = vi.spyOn(manuscript, 'assertAgentManuscriptCurrent').mockRejectedValue(new Error('stale owner'))
-    const update = vi.fn(), db = { $queryRaw: vi.fn().mockResolvedValue([{ id: 'n' }]), storyCompilation: { update } } as unknown as Prisma.TransactionClient
-    await expect(validateStoryContinuity({ userId: 'u', novelId: 'n', runId: 'r', compilationId: 'comp', findings: [], independentCheck: 'complete' }, db)).rejects.toThrow('stale owner')
-    expect(assert).toHaveBeenCalledWith(db, { userId: 'u', novelId: 'n', runId: 'r' })
-    expect(update).not.toHaveBeenCalled()
+    const f = currentFixture()
+    await f.review(); f.update.mockClear()
+    const originalRaw = JSON.stringify([...f.artifacts.values()])
+    f.owner.mockClear(); f.owner.mockRejectedValue(new DataAccessError(409, 'RUNTIME_PARENT_LEASE_LOST', 'stale owner'))
+    await expect(f.review()).rejects.toThrow('stale owner')
+    expect(f.owner.mock.calls[0]?.[0] === prisma).toBe(true)
+    expect(f.owner.mock.calls[0]?.[1]).toMatchObject({ userId: 'u', novelId: 'n', runId: 'r' })
+    expect(f.dispatch).toHaveBeenCalledOnce(); expect(f.update).not.toHaveBeenCalled()
+    expect(JSON.stringify([...f.artifacts.values()])).toBe(originalRaw)
+    expect(f.chapterWrite).not.toHaveBeenCalled()
   })
 })

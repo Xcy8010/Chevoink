@@ -79,10 +79,8 @@ const known = new Set(['QUALITY_TARGET_AMBIGUOUS', 'QUALITY_TASK_TARGET_REQUIRED
 
 /** 自动修订写的是作者正文：只读沙箱与受限子任务不获授权，只保存检查意见。 */
 async function chapterRevisionWritable(tx: RuntimeTx, lease: RunLeaseToken) {
-  if (lease.parent) return false
   const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId }, select: { sessionId: true } })
-  const session = await tx.agentSession.findUnique({ where: { id: root.sessionId }, select: { sandboxMode: true } })
-  return session?.sandboxMode !== 'read_only'
+  return (await import('./chapter-mutation.js')).automaticChapterRevisionWritable(tx, { sessionId: root.sessionId, inlineChild: !!lease.parent })
 }
 
 /** Freeze all critic inputs before admission. Paid child results are recoverable;

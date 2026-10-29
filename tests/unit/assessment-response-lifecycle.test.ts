@@ -1,6 +1,8 @@
+import { readHistoricalContinuityBilling } from '../../api/lib/agent/continuity-history.js'
+import * as recovery from '../../api/lib/agent/review-request-recovery.js'
 import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
-import { applyContinuityReassessment, bindLegacyContinuityRequest, continuityReassessmentCandidates, continuityReassessmentRequest, readLegacyContinuityAssessment, runContinuityReassessment, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { applyContinuityReassessment, failedContinuityReassessment, legacyContinuityAssessmentKey, continuityReassessmentCandidates, continuityReassessmentRequest, readLegacyContinuityAssessment, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import type { AiUsageLog, Prisma } from '@prisma/client'
@@ -15,6 +17,14 @@ const raw = JSON.stringify({ findings: [finding] })
 const original = (content = raw) => inspectContinuityResponse(content, bodies, true, 6)
 const retract = () => ({ decisions: [{ index: 0, action: 'retract', reason: '原判断忽略前章后续已开门的事件，核对两章原文后撤回。', sourceEvidence: proof }], findings: [] })
 
+const response = (content: string | null) => ({ content: content === null ? null : JSON.stringify(content), finishReason: content === null ? null : 'stop',
+  toolCalls: [], transportComplete: content !== null })
+function reader(rows: Array<Record<string, unknown>>, frames: Array<Record<string, unknown>>) {
+  return { aiUsageLog: { findMany: vi.fn(async ({ where }: { where: { id: { in: string[] } } }) => rows.filter(row => typeof row.id === 'string' && where.id.in.includes(row.id))) },
+    agentArtifact: { findMany: vi.fn(async () => frames.map((metadata, index) => ({ id: `observation-${index}`, metadata }))),
+      findFirst: vi.fn(async () => null) } } as unknown as Prisma.TransactionClient
+}
+
 describe('legacy continuity request attempts retain their semantic stage', () => {
   const ctx = { userId: 'owner', novelId: 'novel', runId: 'run', callId: 'call' } as ToolContext
   const input: LegacyAssessmentInput = { chapterId: 'chapter', revision: 1, bodies, system: 'selected reviewer', content: 'frozen full input', targetType: 'chapter', targetId: 'chapter' }
@@ -22,46 +32,43 @@ describe('legacy continuity request attempts retain their semantic stage', () =>
     requestTokens: null, responseTokens: null, reservedCreditMilli: 0, creditChargeMilli: 0 }
   const settled = { id: 'success', action: 'agent3ContinuityCritic', usageSource: 'reported', billingStatus: 'settled',
     requestTokens: 12, responseTokens: 8, reservedCreditMilli: 0, creditChargeMilli: 1 }
-  it('binds the actual same-action retry to first rather than output recovery', async () => {
-    const create = vi.fn(async ({ data }: { data: { metadata: unknown } }) => ({ id: 'binding', ...data }))
-    const tx = { $queryRaw: vi.fn(async () => [{ id: ctx.novelId }]), aiUsageLog: { findFirst: vi.fn(async () => settled), findMany: vi.fn(async () => [rejected]) },
-      agentArtifact: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => [{ metadata: { stage: 'first', usageIds: [rejected.id] } }]), create } } as unknown as Prisma.TransactionClient
-    await bindLegacyContinuityRequest(tx, ctx, input, settled.id, 'primary', async () => {})
-    expect(create).toHaveBeenCalledOnce()
-    expect(create.mock.calls[0][0].data.metadata).toMatchObject({ stage: 'first', usageIds: [settled.id] })
+  it('reads the actual same-action retry as the original first stage without binding another request', async () => {
+    const frames = [{ stage: 'first', usageIds: [rejected.id], response: response(null) }, { stage: 'first', usageIds: [settled.id], response: response('{"findings":[]}') }]
+    const before = JSON.stringify({ frames, rejected, settled })
+    const result = await readLegacyContinuityAssessment(reader([rejected, settled], frames), ctx, input)
+    expect(result).toMatchObject({ billingKnown: true, slotUsed: false, inspected: { complete: true } })
+    expect(result.usageIds).toEqual([rejected.id, settled.id])
+    expect(JSON.stringify({ frames, rejected, settled })).toBe(before)
   })
-  it.each(['agent3ContinuityCriticOutputRecovery', 'agent3ContinuityCriticEmptyRecovery'])('preserves the real recovery action %s', async action => {
-    const create = vi.fn(async ({ data }: { data: { metadata: unknown } }) => ({ id: 'binding', ...data }))
-    const tx = { $queryRaw: vi.fn(async () => [{ id: ctx.novelId }]), aiUsageLog: { findFirst: vi.fn(async () => ({ ...settled, action })) }, agentArtifact: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []), create } } as unknown as Prisma.TransactionClient
-    await bindLegacyContinuityRequest(tx, ctx, input, settled.id, 'primary', async () => {})
-    expect(create.mock.calls[0][0].data.metadata).toMatchObject({ stage: 'output_recovery' })
+  it.each(['agent3ContinuityCriticOutputRecovery', 'agent3ContinuityCriticEmptyRecovery'])('retains the frozen recovery action %s in read-only replay', async action => {
+    const frame = { stage: 'output_recovery', usageIds: [settled.id], response: response('{"findings":[]}') }
+    expect(await readLegacyContinuityAssessment(reader([{ ...settled, action }], [frame]), ctx, input)).toMatchObject({ billingKnown: true, slotUsed: true, inspected: { complete: true } })
+    expect(frame.stage).toBe('output_recovery')
   })
-  it('rejects reassessment usage bound to a primary stage before saving ownership', async () => {
-    const create = vi.fn()
-    const tx = { $queryRaw: vi.fn(async () => [{ id: ctx.novelId }]), aiUsageLog: { findFirst: vi.fn(async () => ({ ...settled, action: 'agent3ContinuityCriticSecondPass' })) }, agentArtifact: { findFirst: vi.fn(), create } } as unknown as Prisma.TransactionClient
-    await expect(bindLegacyContinuityRequest(tx, ctx, input, settled.id, 'primary', async () => {})).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
-    expect(create).not.toHaveBeenCalled()
+  it('refuses a saved primary stage that actually belongs to reassessment usage', async () => {
+    const frames = [{ stage: 'first', usageIds: [settled.id], response: response('{"findings":[]}') }]
+    await expect(readLegacyContinuityAssessment(reader([{ ...settled, action: 'agent3ContinuityCriticSecondPass' }], frames), ctx, input))
+      .rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
   })
-  it.each(['unknown', 'pending-settlement', 'successful-zero', 'third-attempt'] as const)('does not bind another request after %s', async kind => {
-    const create = vi.fn()
+  it.each(['unknown', 'pending-settlement', 'successful-zero', 'third-attempt'] as const)('preserves the entire %s history without reserving or changing another attempt', async kind => {
     const prior = kind === 'unknown' ? { ...rejected, usageSource: 'unknown', billingStatus: 'pending_usage' }
       : kind === 'pending-settlement' ? { ...settled, id: rejected.id, billingStatus: 'pending_settlement', requestTokens: 0, responseTokens: 0, creditChargeMilli: 0 }
-        : kind === 'successful-zero' ? { ...settled, id: rejected.id, requestTokens: 0, responseTokens: 0, creditChargeMilli: 0 }
-          : rejected
+        : kind === 'successful-zero' ? { ...settled, id: rejected.id, requestTokens: 0, responseTokens: 0, creditChargeMilli: 0 } : rejected
     const priors = kind === 'third-attempt' ? [prior, { ...rejected, id: 'another-rejection' }] : [prior]
-    const tx = { $queryRaw: vi.fn(async () => [{ id: ctx.novelId }]), aiUsageLog: { findFirst: vi.fn(async () => settled), findMany: vi.fn(async () => priors) },
-      agentArtifact: { findMany: vi.fn(async () => priors.map(row => ({ metadata: { usageIds: [row.id] } }))), findFirst: vi.fn(), create } } as unknown as Prisma.TransactionClient
-    await expect(bindLegacyContinuityRequest(tx, ctx, input, settled.id, 'primary', async () => {})).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
-    expect(create).not.toHaveBeenCalled()
+    const frames = [...priors.map(row => ({ stage: 'first', usageIds: [row.id], response: response(null) })),
+      { stage: 'first', usageIds: [settled.id], response: response('{"findings":[]}') }]
+    const frozen = JSON.stringify({ priors, frames })
+    const result = readLegacyContinuityAssessment(reader([...priors, settled], frames), ctx, input)
+    if (kind === 'third-attempt') expect(await result).toMatchObject({ billingKnown: true, inspected: { complete: true } })
+    else await expect(result).rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
+    expect(JSON.stringify({ priors, frames })).toBe(frozen)
   })
-  it.each(['first', 'output_recovery'] as const)('existing usage binding preserves its frozen stage %s', async stage => {
-    const create = vi.fn(), findMany = vi.fn()
-    const tx = { $queryRaw: vi.fn(async () => [{ id: ctx.novelId }]), aiUsageLog: { findFirst: vi.fn(async () => settled) },
-      agentArtifact: { findFirst: vi.fn(async () => ({ metadata: { stage } })), findMany, create } } as unknown as Prisma.TransactionClient
-    const result = bindLegacyContinuityRequest(tx, ctx, input, settled.id, 'primary', async () => {})
-    if (stage === 'first') await expect(result).resolves.toBe('first')
-    else await expect(result).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
-    expect(findMany).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled()
+  it.each(['first', 'output_recovery'] as const)('reads a saved request only under its actual frozen stage %s', async stage => {
+    const frames = [{ stage, usageIds: [settled.id], response: response('{"findings":[]}') }]
+    const before = JSON.stringify(frames), result = readLegacyContinuityAssessment(reader([settled], frames), ctx, input)
+    if (stage === 'first') expect(await result).toMatchObject({ billingKnown: true })
+    else await expect(result).rejects.toMatchObject({ code: 'CONTINUITY_REPORT_INCOMPLETE' })
+    expect(JSON.stringify(frames)).toBe(before)
   })
   it('requires a fresh HTTP rejection witness to classify settled 0/0 as a rejected attempt', () => {
     const zero = { ...settled, requestTokens: 0, responseTokens: 0, creditChargeMilli: 0 }
@@ -73,13 +80,6 @@ describe('legacy continuity request attempts retain their semantic stage', () =>
     expect(isKnownRejectedTextRequestAttempt({ ...zero, billingStatus: 'pending_settlement', billingEvidence: { providerRejection: { status: 429 } } })).toBe(false)
     expect(isKnownRejectedTextRequestAttempt({ ...zero, promptCacheHitTokens: 1, billingEvidence: { providerRejection: { status: 429 } } })).toBe(false)
   })
-  const response = (content: string | null) => ({ content: content === null ? null : JSON.stringify(content), finishReason: content === null ? null : 'stop',
-    toolCalls: [], transportComplete: content !== null })
-  function reader(rows: Array<Record<string, unknown>>, frames: Array<Record<string, unknown>>) {
-    return { aiUsageLog: { findMany: vi.fn(async ({ where }: { where: { id: { in: string[] } } }) => rows.filter(row => typeof row.id === 'string' && where.id.in.includes(row.id))) },
-      agentArtifact: { findMany: vi.fn(async () => frames.map((metadata, index) => ({ id: `observation-${index}`, metadata }))),
-        findFirst: vi.fn(async () => null) } } as unknown as Prisma.TransactionClient
-  }
   it('reads the successful same-action response after a null rejected attempt without consuming the format slot', async () => {
     const frames = [{ stage: 'first', usageIds: [rejected.id], response: response(null) },
       { stage: 'first', usageIds: [settled.id], response: response('{"findings":[]}') }]
@@ -224,35 +224,66 @@ describe('one complete continuity reassessment', () => {
     expect(result.complete).toBe(true)
     expect(result.findings).toMatchObject([{ severity: 'warning', evidence: replacement.evidence }])
   })
-  it.each(['unknown', 'partial', 'slot-used', 'cancelled', 'stale'] as const)('does not send a reassessment for %s', async kind => {
-    const signal = new AbortController()
-    if (kind === 'cancelled') signal.abort()
-    const claim = vi.fn(async () => true), dispatch = vi.fn(async () => ({ content: JSON.stringify(retract()), complete: true }))
-    const result = runContinuityReassessment({ original: original(), bodies, system: 'original selected reviewer', content: 'full immutable input',
-      billingKnown: kind !== 'unknown', providerComplete: kind !== 'partial', slotUsed: kind === 'slot-used', signal: signal.signal,
-      assertCurrent: async () => { if (kind === 'stale') throw new Error('input changed') }, claim, dispatch })
-    if (['cancelled', 'stale'].includes(kind)) await expect(result).rejects.toBeDefined()
-    else expect((await result).complete).toBe(false)
-    expect(dispatch).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled()
+  it.each(['unknown', 'partial', 'slot-used', 'cancelled', 'stale'] as const)('reads actual frozen accounting and transport independently after %s', async kind => {
+    const controller = new AbortController(); if (kind === 'cancelled') controller.abort()
+    const ctx = { userId: 'owner', novelId: 'novel', runId: 'run', callId: 'original', signal: controller.signal } as ToolContext
+    const input: LegacyAssessmentInput = { chapterId: 'chapter', revision: 1, bodies: kind === 'stale' ? { ...bodies, current: bodies.current + ' Changed.' } : bodies,
+      system: 'Frozen reviewer.', content: 'Full old input.', targetType: 'chapter', targetId: 'chapter' }
+    const fees = [{ id: 'first', action: 'agent3ContinuityCritic', usageSource: kind === 'unknown' ? 'unknown' : 'reported',
+      billingStatus: kind === 'unknown' ? 'pending_usage' : 'settled', requestTokens: kind === 'unknown' ? null : 12, responseTokens: kind === 'unknown' ? null : 8,
+      reservedCreditMilli: kind === 'unknown' ? 7 : 0, creditChargeMilli: kind === 'unknown' ? 0 : 1 }]
+    const frames = [{ stage: 'first', usageIds: ['first'], response: { ...response(raw), ...(kind === 'partial' ? { transportComplete: false, finishReason: 'length' } : {}) } }]
+    if (kind === 'slot-used') { fees.push({ ...fees[0], id: 'second', action: 'agent3ContinuityCriticSecondPass' }); frames.push({ stage: 'reassessment', usageIds: ['second'], response: response('{"decisions":[],"findings":[]}') }) }
+    const db = reader(fees, frames)
+    if (kind === 'slot-used') vi.mocked(db.agentArtifact.findFirst).mockResolvedValue({ id: 'old-second-claim' } as never)
+    const before = JSON.stringify({ fees, frames })
+    const result = await readLegacyContinuityAssessment(db, ctx, input)
+    expect(result.inspected.complete).toBe(false)
+    expect(result.billingKnown).toBe(kind !== 'unknown')
+    expect(result.providerComplete).toBe(kind !== 'partial')
+    expect(result.slotUsed).toBe(kind === 'slot-used')
+    expect(JSON.stringify({ fees, frames })).toBe(before)
   })
-  it('a failed second result consumes the single claimed slot across restart', async () => {
-    let claimed = false
-    const claim = vi.fn(async () => { if (claimed) return false; claimed = true; return true })
-    const dispatch = vi.fn(async () => ({ content: '{"decisions":[],"findings":[]}', complete: true }))
-    const input = { original: original(), bodies, system: 'selected reviewer', content: 'full immutable input', billingKnown: true, providerComplete: true,
-      slotUsed: false, signal: new AbortController().signal, assertCurrent: async () => {}, claim, dispatch }
-    expect((await runContinuityReassessment(input)).complete).toBe(false)
-    expect((await runContinuityReassessment(input)).complete).toBe(false)
-    expect(dispatch).toHaveBeenCalledOnce()
+  it('replays a failed second result identically across restart without purchasing or changing either response', () => {
+    const first = original(), raw = '{"decisions":[],"findings":[]}'
+    const observed = failedContinuityReassessment(first, raw, true, bodies)
+    expect(failedContinuityReassessment(first, raw, true, bodies)).toEqual(observed)
+    expect(observed.complete).toBe(false)
+    expect(JSON.parse(observed.audit.reassessment!.rawResponse.content)).toBe(raw)
   })
-  it.each(['abort', 'stale'] as const)('positively observes %s after claim before entering dispatch', async kind => {
-    const controller = new AbortController(), notDispatched = vi.fn(async () => {}), dispatch = vi.fn()
-    let claimed = false
-    const assertCurrent = vi.fn(async () => { if (claimed && kind === 'stale') throw new Error('current input changed') })
-    await expect(runContinuityReassessment({ original: original(), bodies, system: 'selected reviewer', content: 'full input', billingKnown: true,
-      providerComplete: true, slotUsed: false, signal: controller.signal, assertCurrent,
-      claim: async () => { claimed = true; if (kind === 'abort') controller.abort(); return true }, dispatch, notDispatched,
-    })).rejects.toBeDefined()
-    expect(dispatch).not.toHaveBeenCalled(); expect(notDispatched).toHaveBeenCalledOnce()
+  it.each(['abort', 'stale'] as const)('authenticates the actual old %s not-dispatched receipt without granting a request', async kind => {
+    const ctx = { userId: 'owner', novelId: 'novel', runId: 'run', callId: 'original' } as ToolContext
+    const input: LegacyAssessmentInput = { chapterId: 'chapter', revision: 1, bodies, system: 'Frozen', content: 'Full old input.', targetType: 'chapter', targetId: 'chapter' }
+    const key = legacyContinuityAssessmentKey(ctx, input), reservation = { id: 'old-reservation', runId: ctx.runId,
+      metadata: { continuityAssessmentRequestKey: key, assessmentChapterId: input.chapterId, callId: ctx.callId, input } }
+    const witness = { firstAssessmentNotDispatchedKey: key, callId: ctx.callId, usageIds: [], outcome: 'guard_failed_before_dispatch', reason: kind }
+    const db = { agentArtifact: { findMany: vi.fn(async ({ where }) => where.OR.some(item => item.metadata.path.includes('assessmentChapterId'))
+      ? [reservation] : [{ id: 'old-not-sent', metadata: witness }]) }, aiUsageLog: { findMany: vi.fn() } } as unknown as Prisma.TransactionClient
+    const before = JSON.stringify({ reservation, witness })
+    expect(await readHistoricalContinuityBilling(db, ctx, { runIds: [ctx.runId], chapter: { id: input.chapterId } })).toMatchObject({ known: true, hasRequest: true })
+    expect(db.aiUsageLog.findMany).not.toHaveBeenCalled()
+    const journal = vi.spyOn(recovery, 'readReviewRequestRecoveryEvidence').mockResolvedValue([])
+    witness.outcome = 'inferred_from_absence'
+    expect(await readHistoricalContinuityBilling(db, ctx, { runIds: [ctx.runId], chapter: { id: input.chapterId } })).toMatchObject({ known: false })
+    journal.mockRestore(); witness.outcome = 'guard_failed_before_dispatch'
+    expect(JSON.stringify({ reservation, witness })).toBe(before)
+  })
+  it.each([undefined, 7, 8] as const)('reads settled historical parser %s accounting with its original input and key', async parserVersion => {
+    const ctx = { userId: 'owner', novelId: 'novel', runId: 'run', callId: 'original' } as ToolContext
+    const input: LegacyAssessmentInput = { chapterId: 'chapter', revision: 1, bodies, system: 'Frozen', content: 'Full old input.',
+      ...(parserVersion ? { parserVersion, sourceScope: { currentOrderIndex: 1, previous: [] } } : {}), targetType: 'chapter', targetId: 'chapter' }
+    const key = legacyContinuityAssessmentKey(ctx, input)
+    const reservation = { id: 'old-reservation', runId: ctx.runId, metadata: { continuityAssessmentRequestKey: key,
+      assessmentChapterId: input.chapterId, callId: ctx.callId, input } }
+    const frame = { id: 'old-response', metadata: { assessmentKey: key, stage: 'first', usageIds: ['old-fee'], response: response(raw) } }
+    const fee = { id: 'old-fee', usageSource: 'reported', billingStatus: 'settled', requestTokens: 12, responseTokens: 8,
+      reservedCreditMilli: 0, creditChargeMilli: 1 }
+    const db = { agentArtifact: { findMany: vi.fn(async ({ where }) => where.OR.some(item => item.metadata.path.includes('assessmentChapterId'))
+      ? [reservation] : [frame]) }, aiUsageLog: { findMany: vi.fn(async () => [fee]) } } as unknown as Prisma.TransactionClient
+    const before = JSON.stringify({ reservation, frame, fee })
+    expect(await readHistoricalContinuityBilling(db, ctx, { runIds: [ctx.runId], chapter: { id: input.chapterId } }))
+      .toEqual({ known: true, hasRequest: true, usageIds: [fee.id] })
+    expect(JSON.stringify({ reservation, frame, fee })).toBe(before)
+    expect(legacyContinuityAssessmentKey(ctx, input)).toBe(key)
   })
 })

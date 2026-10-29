@@ -315,12 +315,12 @@ function sourceForFinding(content: string, finding: { quote?: string; sourceId?:
   return entry && entry.text.trim() && (finding.quote === undefined || finding.quote === entry.text) ? entry : null
 }
 
-export function locateQualityFindingSpans(content: string, finding: { quote: string; sourceId?: string }, sources?: QualityEvidenceSources): QuoteSpan[] {
+export function locateQualityFindingSpans(content: string, finding: { quote?: string; sourceId?: string }, sources?: QualityEvidenceSources): QuoteSpan[] {
   if (finding.sourceId !== undefined) {
     const source = sourceForFinding(content, finding, sources)
     return source ? [{ start: source.start, end: source.end }] : []
   }
-  return locateQuoteSpans(content, finding.quote)
+  return locateQuoteSpans(content, finding.quote ?? '')
 }
 
 // 逐字绑定的容错归一化：模型复制引文时常产生等价变形（全半角标点、引号样式、省略号/破折号写法、

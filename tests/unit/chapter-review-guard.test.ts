@@ -6,10 +6,12 @@ import type { Prisma } from '@prisma/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as original from '../../api/lib/agent/original-request.js'
 import * as lock from '../../api/lib/data/novel-write-lock.js'
-import { assertChapterManuscriptRevision, assertChapterReviewRevision, probeChapterReviewRevision, continuityDecisionBinding, readChapterReviewReadiness, originalChapterReviewRequirements } from '../../api/lib/agent/chapter-review-guard.js'
+import { assertChapterManuscriptRevision, assertChapterReviewRevision, probeChapterReviewRevision, continuityDecisionBinding, readChapterReviewReadiness, originalChapterReviewRequirements, recordChapterReviewDecisions } from '../../api/lib/agent/chapter-review-guard.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { readNewDraftRevision, readNewDraftWritingAuthority, prohibitsNewDraftRevision } from '../../api/lib/agent/writing-scope.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { buildQualityEvidenceSources } from '../../api/lib/agent/quality-evidence.js'
 
 async function paidChannelOpen(...args: Parameters<typeof probeChapterReviewRevision>) {
   return (await probeChapterReviewRevision(...args)).open
@@ -20,10 +22,11 @@ describe('review driven manuscript mutation admission', () => {
     vi.spyOn(lock, 'lockNovelActiveScope').mockResolvedValue(undefined)
     vi.spyOn(original, 'readOriginalTaskRequest').mockResolvedValue({ prompt, spec: null, taskId: 'task', sourceRunId: 'original-run', parentRunId: null })
     vi.spyOn(original, 'originalTaskRunIds').mockResolvedValue(['original-run', 'resumed-run'])
-    const db = { $queryRaw: vi.fn().mockResolvedValue([]), chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(null) },
+    const chapter = { id: 'c', title: '原章', revision: 4, orderIndex: 1, content: '当前保存的正文。' }
+    const db = { $queryRaw: vi.fn().mockResolvedValue([]), chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(chapter) },
       storyCompilation: { findMany: vi.fn().mockResolvedValue(validation ? [{ validation }] : []) },
       chapterQualityReport: { findMany: vi.fn().mockResolvedValue(reports) } } as unknown as Prisma.TransactionClient
-    return { db, subject: { userId: 'u', novelId: 'n', runId: 'resumed-run' }, chapter: { id: 'c', revision: 4 } }
+    return { db, subject: { userId: 'u', novelId: 'n', runId: 'resumed-run' }, chapter }
   }
   it.each([null, {}])('allows a first draft without an assessment: %s', async validation => {
     const f = fixture('写下一章', validation)
@@ -37,16 +40,20 @@ describe('review driven manuscript mutation admission', () => {
     const f = fixture('写下一章', validation)
     await expect(assertChapterReviewRevision(f.db, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
   })
-  it.each(['写下一章', '检查并修复当前章'])('historical count does not revoke authority but stale evidence still blocks mutation: %s', async prompt => {
+  it.each(['写下一章', '检查并修复当前章'])('historical count and stale advice cannot replace original mutation authority: %s', async prompt => {
     const f = fixture(prompt, { checkRounds: 3, checkedRevision: 3, errorCount: 1 })
-    await expect(assertChapterReviewRevision(f.db, f.subject, f.chapter)).rejects.toMatchObject({ code: prompt === '写下一章' ? 'REPAIR_NOT_AUTHORIZED' : 'REVIEW_REPAIR_RECHECK_REQUIRED' })
+    const before = structuredClone({ checkRounds: 3, checkedRevision: 3, errorCount: 1 })
+    if (prompt === '写下一章') await expect(assertChapterReviewRevision(f.db, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
+    else await expect(assertChapterReviewRevision(f.db, f.subject, f.chapter)).resolves.toBeUndefined()
+    expect((await f.db.storyCompilation.findMany())[0].validation).toEqual(before)
   })
-  it.each(['continuity', 'quality'])('allows one explicitly authorized atomic revision, then blocks reuse of old %s evidence', async kind => {
+  it.each(['continuity', 'quality'])('explicit author permission survives a revision while old %s evidence remains old', async kind => {
     const f = fixture('检查并修复当前章', kind === 'continuity' ? { checkRounds: 1, checkedRevision: 4 } : null,
       kind === 'quality' ? [{ chapterRevision: 4 }] : [])
     await expect(assertChapterReviewRevision(f.db, f.subject, f.chapter)).resolves.toBeUndefined()
     f.chapter.revision++
-    await expect(assertChapterReviewRevision(f.db, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REVIEW_REPAIR_RECHECK_REQUIRED' })
+    await expect(assertChapterReviewRevision(f.db, f.subject, f.chapter)).resolves.toBeUndefined()
+    expect(kind === 'continuity' ? (await f.db.storyCompilation.findMany())[0].validation : (await f.db.chapterQualityReport.findMany())[0]).toMatchObject({ [kind === 'continuity' ? 'checkedRevision' : 'chapterRevision']: 4 })
     expect(f.db.storyCompilation.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ runId: { in: ['original-run', 'resumed-run'] }, chapterId: 'c', userId: 'u', novelId: 'n' }) }))
     expect(f.db.chapterQualityReport.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ runId: { in: ['original-run', 'resumed-run'] } }) }))
   })
@@ -64,18 +71,19 @@ describe('review driven manuscript mutation admission', () => {
       runId: { in: ['original-run', 'child-run'] }, userId: 'u', novelId: 'n', chapterId: 'c',
     }) }))
   })
-  it('repreparing cannot hide the old checked revision that already drove one patch', async () => {
+  it('repreparing preserves old checked revisions without closing explicit author permission', async () => {
     const f = fixture('检查并修复当前章', null)
     f.chapter.revision = 5
     vi.mocked(f.db.storyCompilation.findMany).mockImplementation((async (args: Prisma.StoryCompilationFindManyArgs) => [
       ...(!args?.where?.status ? [{ validation: { checkedRevision: 4, checkRounds: 1 } }] : []),
       { validation: { checkRounds: 1 } },
     ]) as never)
-    await expect(assertChapterReviewRevision(f.db, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REVIEW_REPAIR_RECHECK_REQUIRED' })
+    await expect(assertChapterReviewRevision(f.db, f.subject, f.chapter)).resolves.toBeUndefined()
+    expect((await f.db.storyCompilation.findMany())[0].validation).toMatchObject({ checkedRevision: 4, checkRounds: 1 })
   })
 })
 
-describe('one atomic factual correction in the original new draft', () => {
+describe('current reviews and original new-draft manuscript authority', () => {
   function fixture(prompt = '写下一章') {
     vi.spyOn(lock, 'lockNovelActiveScope').mockResolvedValue(undefined)
     const spec = buildTaskSpec({ runId: 'original-run', novelId: 'n', prompt })
@@ -91,19 +99,35 @@ describe('one atomic factual correction in the original new draft', () => {
     const validation = { checkRounds: 1, autoRepairRounds: 0, checkedChapterId: chapter.id, checkedRevision: chapter.revision,
       independentCheck: 'complete', errorCount: 1, warningCount: 0, findings: [{ signal: 'object', severity: 'error', evidence: '同一扇门锁着却从未锁门', suggestion: '保留门锁事实' }],
       coverage: compilerContinuityCoverage({ chapter, bridge, sceneTasks: scenes, source: null }) }
-    const compilation = { id: 'compiler', chapterId: chapter.id, runId: 'original-run', preparedContext: {} as Record<string, unknown>, status: 'active', stage: 'check', validation, bridge, sceneTasks: scenes }
+    const compilation = { id: 'compiler', chapterId: chapter.id, chapter, runId: 'original-run', preparedContext: {} as Record<string, unknown>, status: 'active', stage: 'check', validation, bridge, sceneTasks: scenes }
     const rows = [compilation]
     const source = { writingBindings: binding }
     const db = { $queryRaw: vi.fn().mockResolvedValue([]), agentRun: { findFirstOrThrow: vi.fn().mockResolvedValue(source),
-      findFirst: vi.fn().mockResolvedValue({ mode: 'act', taskRootId: null, session: { userId: 'u', novelId: 'n', sandboxMode: 'workspace', toolPolicy: null } }) },
-      chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(chapter) }, chapterQualityReport: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn() },
-      storyCompilation: { findMany: vi.fn().mockImplementation(async () => rows), findFirst: vi.fn().mockResolvedValue(compilation),
+      findFirst: vi.fn().mockResolvedValue({ mode: 'act', taskRootId: null, runtimeProtocolVersion: 0, session: { userId: 'u', novelId: 'n', sandboxMode: 'workspace', toolPolicy: null } }) },
+      chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockImplementation(async (args?: Prisma.ChapterFindFirstArgs) =>
+        args?.where?.revision !== undefined && args.where.revision !== chapter.revision ? null : chapter) }, chapterQualityReport: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn() },
+      storyCompilation: { findMany: vi.fn().mockImplementation(async (args?: Prisma.StoryCompilationFindManyArgs) => rows.filter(row => !args?.where?.id || args.where.id === row.id)), findFirst: vi.fn().mockImplementation(async (args?: Prisma.StoryCompilationFindFirstArgs) => rows.find(row => !args?.where?.id || args.where.id === row.id) ?? null),
         findFirstOrThrow: vi.fn().mockResolvedValue(compilation), update: vi.fn().mockImplementation(async ({ data }) => Object.assign(compilation, data)) },
     }
-    db.chapterQualityReport.findFirst.mockImplementation(async () => (await db.chapterQualityReport.findMany())[0] ?? null)
+    db.chapterQualityReport.findFirst.mockImplementation(async (args?: Prisma.ChapterQualityReportFindFirstArgs) =>
+      (await db.chapterQualityReport.findMany()).find((report: { compilationId: string }) => !args?.where?.compilationId || report.compilationId === args.where.compilationId) ?? null)
     const tx = db as unknown as Prisma.TransactionClient
     const subject = { userId: 'u', novelId: 'n', runId: 'child-run' }
-    return { tx, db, subject, chapter, request, spec, binding, source, validation, compilation, rows }
+    const result = { tx, db, subject, chapter, request, spec, binding, source, validation, compilation, rows }
+    completeContinuity(result)
+    return result
+  }
+  function completeContinuity(f: ReturnType<typeof fixture>) {
+    const table = buildQualityEvidenceSources({ userId: f.subject.userId, novelId: f.subject.novelId, chapterId: f.chapter.id, chapterRevision: f.chapter.revision }, f.chapter.content)
+    const contextHash = runtimeJson({ taskId: f.request.taskId, chapterId: f.chapter.id,
+      sources: [{ chapterId: f.chapter.id, revision: f.chapter.revision, orderIndex: f.chapter.orderIndex, contentHash: table.contentHash }],
+      authorRequest: f.request.prompt, focus: null }).hash
+    const report = { version: 1, id: `continuity-${contextHash}`, chapterId: f.chapter.id, taskId: f.request.taskId, revision: f.chapter.revision,
+      contextHash, contentHash: table.contentHash, complete: true, billingKnown: true, opinions: [], unlocatedIndexes: [], usageIds: [], rawResponses: [],
+      findings: f.validation.findings.map((finding, index) => ({ ...finding, id: String(index), explanation: finding.evidence,
+        startOffset: index ? 6 : 0, endOffset: index ? 8 : 2, references: [] })) }
+    Object.assign(f.compilation.validation, { continuityReport: report })
+    return report
   }
   function completeQuality(f: ReturnType<typeof fixture>, candidates = 0) {
     const report = { id: 'q', compilationId: f.compilation.id, chapterRevision: f.chapter.revision, repairRound: 0, status: 'passed',
@@ -114,7 +138,7 @@ describe('one atomic factual correction in the original new draft', () => {
     f.db.chapterQualityReport.findMany.mockResolvedValue([report] as never)
     return report
   }
-  it('shares inheritance authentication only inside each pre-CAS chapter admission while rereading current source', async () => {
+  it('rereads actual source context for each pre-CAS admission without running the historical inheritance court', async () => {
     const f = fixture(), quality = completeQuality(f, 1)
     const baseline = await readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)
     expect(baseline?.ready).toBe(true)
@@ -127,22 +151,17 @@ describe('one atomic factual correction in the original new draft', () => {
     const retainedFindings = [{ source: 'quality' as const, reportId: quality.id, findingId: quality.findings[0].id, reason: 'Keep the original voice.' }]
     const first = await assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'range', after: 'First legitimate change.', retainedFindings })
     expect(first).toBeTypeOf('function')
-    const firstCalls = sourceRead.mock.calls.slice()
-    expect(firstCalls).toHaveLength(4)
-    const firstScope = firstCalls[0][5]
-    expect(firstScope).toMatchObject({ identities: expect.any(Set), authenticated: expect.any(Map), authenticating: expect.any(Set) })
-    for (const call of firstCalls) { expect(call[0]).toBe(f.tx); expect(call[5]).toBe(firstScope) }
+    const firstReads = f.db.chapter.findMany.mock.calls.length
+    expect(f.db.chapter.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ authorId: 'u', orderIndex: { lt: 41 } }) }))
     const second = await assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'range', after: 'Second legitimate change.', retainedFindings })
     expect(second).toBeTypeOf('function')
-    const nextCalls = sourceRead.mock.calls.slice(firstCalls.length)
-    expect(nextCalls).toHaveLength(4)
-    expect(nextCalls[0][5]).not.toBe(firstScope)
-    for (const call of nextCalls) { expect(call[0]).toBe(f.tx); expect(call[5]).toBe(nextCalls[0][5]) }
+    expect(f.db.chapter.findMany.mock.calls.length).toBeGreaterThan(firstReads)
+    expect(sourceRead).not.toHaveBeenCalled()
     // Neither admission consumed a revision or cached the whole readiness.
-    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
     expect(f.chapter.revision).toBe(originalRevision)
+    expect(f.compilation.preparedContext.reviewCycle).toMatchObject({ transitions: [] })
   })
-  it('separates repeated original manuscript authority from the bounded automatic decision and paid counters', async () => {
+  it('records actual repeated manuscript CAS without consuming historical paid counters or closing current authority', async () => {
     const f = fixture(), report = completeQuality(f, 2)
     f.validation.checkRounds = 3
     report.repairRound = 1
@@ -150,24 +169,29 @@ describe('one atomic factual correction in the original new draft', () => {
     const consume = await assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'range', after: '第一处改动，其他意见未处理。' })
     f.chapter.content = '第一处改动，其他意见未处理。'; f.chapter.revision++
     await consume?.()
-    const receipt = readNewDraftRevision(f.compilation.validation)
     for (const mutation of ['range', 'replace', 'append'] as const) {
       const next = await assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation, after: '后续合法修改。' + mutation })
       f.chapter.content = '后续合法修改。' + mutation; f.chapter.revision++
       await next?.()
     }
-    expect(f.compilation.validation).toMatchObject({ checkRounds: 3, autoRepairRounds: 0, newDraftRevision: receipt })
+    expect(f.compilation.validation).toMatchObject({ checkRounds: 3, autoRepairRounds: 0 })
+    expect(f.compilation.validation).not.toHaveProperty('newDraftRevision')
+    expect(f.compilation.preparedContext.reviewCycle).toMatchObject({ transitions: expect.any(Array) })
     expect(report).toEqual(before)
-    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toMatchObject({ open: false, code: 'REVIEW_AUTOMATION_STOPPED' })
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toEqual({ open: true })
+    await expect(readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)).resolves.toMatchObject({ continuity: 'stale', quality: 'stale', terminalCommitted: false })
   })
-  it.each(['malformed', 'foreign-task', 'foreign-chapter'] as const)('ordinary writes fail closed for %s historical receipt', async scenario => {
+  it.each(['malformed', 'foreign-task', 'foreign-chapter'] as const)('preserves the %s historical receipt without making it a new manuscript gate', async scenario => {
     const f = fixture()
     Object.assign(f.compilation.validation, { newDraftRevision: scenario === 'malformed' ? { version: 1 } : {
       version: 1, taskId: scenario === 'foreign-task' ? 'another-task' : f.spec.id,
       chapterId: scenario === 'foreign-chapter' ? 'another-chapter' : f.chapter.id, compilationId: 'old-compiler', checkedRevision: 2,
     } })
-    await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: f.chapter.content }))
-      .rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+    const before = structuredClone(f.compilation.validation)
+    if (scenario === 'malformed') expect(() => readNewDraftRevision(f.compilation.validation)).toThrow(expect.objectContaining({ code: 'RUNTIME_RECEIPT_INVALID' }))
+    else expect(readNewDraftRevision(f.compilation.validation)).toMatchObject({ chapterId: scenario === 'foreign-chapter' ? 'another-chapter' : f.chapter.id })
+    await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: f.chapter.content })).resolves.toBeUndefined()
+    expect(f.compilation.validation).toEqual(before)
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
   it('an ordinary no-op neither mints a correction nor pretends to process current candidates', async () => {
@@ -188,7 +212,7 @@ describe('one atomic factual correction in the original new draft', () => {
     }
     expect(f.compilation.validation).toEqual(before)
     expect(report.repairRound).toBe(1)
-    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toMatchObject({ open: false, code: 'REVIEW_AUTOMATION_STOPPED' })
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toEqual({ open: true })
   })
   it.each(['no-change-request', 'hard-constraint', 'missing-canonical-binding'] as const)('ordinary manuscript admission preserves %s denial', async scenario => {
     const f = fixture(scenario === 'no-change-request' ? '写下一章，不要修改本章正文' : '写下一章')
@@ -204,7 +228,7 @@ describe('one atomic factual correction in the original new draft', () => {
     const retained = { source: 'quality' as const, reportId: scenario === 'old-report' ? 'old-report' : quality.id,
       findingId: scenario === 'forged-id' ? '0' : 'finding-id', reason: scenario === 'blank-reason' ? ' ' : '保留作者声口。' }
     await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'range', after: '只改事实。',
-      retainedFindings: scenario === 'duplicate' ? [retained, retained] : [retained] })).rejects.toMatchObject({ code: 'REVIEW_MERGED_REVISION_REQUIRED' })
+      retainedFindings: scenario === 'duplicate' ? [retained, retained] : [retained] })).rejects.toMatchObject({ code: 'REVIEW_DECISION_REQUIRED' })
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
   it.each(['read_only', 'deny', 'review'] as const)('closes automatic delivery reachability for authenticated %s execution restrictions', async restriction => {
@@ -216,24 +240,26 @@ describe('one atomic factual correction in the original new draft', () => {
     await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toMatchObject({ open: false, code: 'REPAIR_NOT_AUTHORIZED' })
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
-  it.each(['range', 'append'] as const)('denies %s before consumption for two current findings while the shape-free probe stays open', async mutation => {
+  it.each(['range', 'append'] as const)('current findings do not ban an authorized %s or claim their own resolution', async mutation => {
     const f = fixture()
     f.validation.findings.push({ ...f.validation.findings[0], evidence: '第二个合成互斥事实' })
     f.validation.errorCount = 2
     completeQuality(f)
+    completeContinuity(f)
     const before = structuredClone(f.compilation)
-    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation })).rejects.toMatchObject({ code: 'REVIEW_MERGED_REVISION_REQUIRED' })
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation })).resolves.toBeUndefined()
     await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
     expect(f.compilation).toEqual(before)
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
-    const consume = await assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace' })
-    await consume?.()
-    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace' })).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
+    await expect(readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)).resolves.toMatchObject({ continuityErrorCount: 2, decisionPending: true, terminalCommitted: false })
   })
   it('counts safe quality candidates alongside continuity errors, including warnings', async () => {
     const f = fixture()
     completeQuality(f, 1)
-    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'range' })).rejects.toMatchObject({ code: 'REVIEW_MERGED_REVISION_REQUIRED' })
+    const ready = await readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)
+    expect(ready).toMatchObject({ continuityErrorCount: 1, qualityCandidateCount: 1, decisionPending: true })
+    expect(ready!.requiredDecisions).toEqual(expect.arrayContaining([expect.objectContaining({ source: 'quality', reportId: 'q', findingId: 'quality-0' })]))
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'range' })).resolves.toBeUndefined()
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
   function mixedFixture() {
@@ -247,9 +273,10 @@ describe('one atomic factual correction in the original new draft', () => {
     f.validation.coverage = compilerContinuityCoverage({ chapter: f.chapter, bridge: f.compilation.bridge, sceneTasks: f.compilation.sceneTasks, source: null })
     const report = completeQuality(f, 1)
     Object.assign(report.findings[0], { id: 'finding-middle', evidenceExcerpt: '中句。', startOffset: 3, endOffset: 6 })
+    completeContinuity(f)
     return { ...f, report }
   }
-  it.each([false, true])('admits one atomic batch while an incidental full rewrite cannot count untouched middle evidence (terminal candidate=%s)', async withTerminal => {
+  it.each([false, true])('records a real atomic batch without treating untouched middle advice as repaired (historical candidate=%s)', async withTerminal => {
     const f = mixedFixture()
     if (withTerminal) {
       const terminalCandidate = terminalCandidateSchema.parse({ exitState: {} })
@@ -257,15 +284,19 @@ describe('one atomic factual correction in the original new draft', () => {
       f.validation.coverage = compilerContinuityCoverage({ chapter: f.chapter, bridge: f.compilation.bridge, sceneTasks: f.compilation.sceneTasks, source: null, terminalCandidate })
     }
     await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: '丙句。中句。丁句。' }))
-      .rejects.toMatchObject({ code: 'REVIEW_MERGED_REVISION_REQUIRED' })
+      .resolves.toBeTypeOf('function')
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
     const retainedFindings = [{ source: 'quality' as const, reportId: 'q', findingId: 'finding-middle', reason: '保留人物刻意重复的声口，不能安全删去。' }]
     const consume = await assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'range', mergedBatch: true,
       after: '丙句。中句。丁句。', editRanges: [{ start: 0, end: 2, newText: '丙句' }, { start: 6, end: 8, newText: '丁句' }], retainedFindings })
-    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    expect(f.compilation.validation).not.toHaveProperty('newDraftRevision')
+    f.chapter.content = '丙句。中句。丁句。'; f.chapter.revision++
     await consume?.()
-    expect(f.compilation.validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0, newDraftRevision: { retainedFindings } })
-    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toMatchObject({ open: false, code: 'REVIEW_AUTOMATION_STOPPED' })
+    expect(f.compilation.validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0, retainedReviewDecision: { findings: retainedFindings } })
+    expect(f.report.findings[0]).toMatchObject({ evidenceExcerpt: '中句。', disposition: 'pending' })
+    expect(f.compilation.preparedContext.reviewCycle).toMatchObject({ transitions: [{ after: { revision: 4 } }] })
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toEqual({ open: true })
+    await expect(readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)).resolves.toMatchObject({ continuity: 'stale', quality: 'stale', terminalCommitted: false })
   })
   it.each(['old-report', 'unknown-id', 'blank-reason', 'duplicate'] as const)('rejects invalid current-candidate retention: %s', async scenario => {
     const f = mixedFixture()
@@ -274,7 +305,7 @@ describe('one atomic factual correction in the original new draft', () => {
     if (scenario === 'unknown-id') item.findingId = 'foreign'
     if (scenario === 'blank-reason') item.reason = ' '
     await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: '丙句。中句。丁句。',
-      retainedFindings: scenario === 'duplicate' ? [item, item] : [item] })).rejects.toMatchObject({ code: 'REVIEW_MERGED_REVISION_REQUIRED' })
+      retainedFindings: scenario === 'duplicate' ? [item, item] : [item] })).rejects.toMatchObject({ code: 'REVIEW_DECISION_REQUIRED' })
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
   it('accepts a real located quality patch that preserves the quoted phrase while adding the missing detail', async () => {
@@ -295,26 +326,30 @@ describe('one atomic factual correction in the original new draft', () => {
     await assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: f.chapter.content, retainedFindings })
     expect(f.compilation.validation).not.toHaveProperty('newDraftRevision')
     expect(f.compilation.validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0, errorCount: 2 })
-    await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(false)
+    const retainedReadiness = await readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)
+    expect(retainedReadiness).toMatchObject({ decisionPending: false, continuityErrorCount: 2, qualityCandidateCount: 1, terminalCommitted: false })
+    await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
     const writes = f.db.storyCompilation.update.mock.calls.length
     await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: '甲新句。中新句。乙新句。' }))
-      .rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
+      .resolves.toBeTypeOf('function')
     await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'range', mergedBatch: true,
-      after: '甲新句。中新句。乙新句。' })).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
+      after: '甲新句。中新句。乙新句。' })).resolves.toBeTypeOf('function')
     expect(f.db.storyCompilation.update).toHaveBeenCalledTimes(writes)
     Object.assign(f.report.findings[0], { suggestion: '当前新建议' })
     await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
+    await expect(readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)).resolves.toMatchObject({ decisionPending: true })
   })
-  it('allows one range candidate, but an append cannot spend even that correction', async () => {
+  it('an authorized append or range is independent of a historical correction slot and leaves report errors untouched', async () => {
     const f = fixture()
     completeQuality(f)
-    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'append' })).rejects.toMatchObject({ code: 'REVIEW_MERGED_REVISION_REQUIRED' })
-    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'range' })).resolves.toBeTypeOf('function')
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'append' })).resolves.toBeUndefined()
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'range' })).resolves.toBeUndefined()
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    await expect(readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)).resolves.toMatchObject({ continuityErrorCount: 1, decisionPending: true, terminalCommitted: false })
   })
   it.each(['missing-quality', 'failed-quality', 'analyzing-quality', 'stale-quality', 'hash-quality', 'foreign-compilation',
     'repaired-quality', 'incomplete-quality', 'malformed-continuity', 'coverage', 'count', 'source'] as const)(
-    'actual mutation requires complete current persisted checks: %s', async scenario => {
+    'author admission does not promote an invalid or historical %s report into a current check', async scenario => {
       const f = fixture(), report = completeQuality(f)
       if (scenario === 'missing-quality') f.db.chapterQualityReport.findMany.mockResolvedValue([])
       if (scenario === 'failed-quality') report.status = 'failed'
@@ -328,19 +363,25 @@ describe('one atomic factual correction in the original new draft', () => {
       if (scenario === 'coverage') f.validation.coverage.reviewHash = '0'.repeat(64)
       if (scenario === 'count') f.validation.warningCount = 1
       if (scenario === 'source') Object.assign(f.compilation.bridge, { fromChapterId: 'source', sourceRevision: 1 })
-      await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace' })).rejects.toMatchObject({ code: 'REVIEW_REPAIR_RECHECK_REQUIRED' })
+      await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace' })).resolves.toBeUndefined()
+      const readiness = await readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)
+      if (!['malformed-continuity', 'coverage', 'count', 'source'].includes(scenario)) expect(readiness?.quality).not.toBe('complete')
+      if (scenario === 'foreign-compilation') expect(report.compilationId).toBe('other')
+      expect(readiness?.terminalCommitted).toBe(false)
+      expect(f.compilation.validation).not.toHaveProperty('newDraftRevision')
       expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
     })
-  it('pending candidates prove only prepayment reachability, never actual write admission', async () => {
+  it('pending candidates neither grant extra authority nor count as a completed quality report', async () => {
     const f = fixture()
     f.validation.errorCount = 0; f.validation.findings = []
     const pendingQuality = { compilationId: f.compilation.id, candidates: 2 }
     await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, pendingQuality })).resolves.toEqual({ open: true })
     await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', requireQualityChannel: true, pendingQuality }))
-      .rejects.toMatchObject({ code: 'REVIEW_REPAIR_RECHECK_REQUIRED' })
+      .resolves.toBeUndefined()
+    await expect(readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)).resolves.toMatchObject({ quality: 'missing', terminalCommitted: false })
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
-  it.each(['unreviewed', 'failed', 'coverage', 'foreign-compilation'] as const)('pending quality prepayment blocks %s continuity before any report exists', async scenario => {
+  it.each(['unreviewed', 'failed', 'coverage', 'foreign-compilation'] as const)('pending quality never certifies %s continuity or consumes a paid phase', async scenario => {
     const f = fixture()
     f.validation.errorCount = 0; f.validation.findings = []
     if (scenario === 'unreviewed') f.compilation.validation = null as never
@@ -348,9 +389,12 @@ describe('one atomic factual correction in the original new draft', () => {
     if (scenario === 'coverage') f.validation.coverage.reviewHash = '0'.repeat(64)
     const pendingQuality = { compilationId: scenario === 'foreign-compilation' ? 'other' : f.compilation.id, candidates: 1 }
     await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, requireCurrentContinuity: true, pendingQuality }))
-      .resolves.toMatchObject({ open: false, code: 'REVIEW_REPAIR_RECHECK_REQUIRED' })
+      .resolves.toMatchObject({ open: true })
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
-    expect(f.db.chapterQualityReport.findMany).toHaveReturned()
+    const readiness = await readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)
+    expect(readiness?.quality).toBe('missing')
+    if (scenario === 'unreviewed') expect(readiness?.continuity).not.toBe('complete')
+    expect(readiness?.terminalCommitted).toBe(false)
   })
   it.each(['current', 'waived', 'explicit-repair'] as const)('pending quality prepayment preserves %s admission without consuming anything', async scenario => {
     const f = fixture(scenario === 'waived' ? '写下一章，不用连续性检查' : scenario === 'explicit-repair' ? '检查并修复当前章' : '写下一章')
@@ -362,26 +406,31 @@ describe('one atomic factual correction in the original new draft', () => {
   })
   it('honors a quality-only original waiver without inventing a report requirement', async () => {
     const f = fixture('写下一章，不用质量检查')
-    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace' })).resolves.toBeTypeOf('function')
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace' })).resolves.toBeUndefined()
+    const readiness = await readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)
+    expect(readiness?.requiredTools.some(tool => tool.name === 'quality_analyze')).toBe(false)
+    expect(readiness?.continuityErrorCount).toBe(1)
   })
   it('leaves explicit existing repair authority independent of new-draft prechecks and mutation shape', async () => {
     const f = fixture('检查并修复当前章')
     f.spec.scope.writing!.targets[0].chapterId = f.chapter.id
     await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'append' })).resolves.toBeUndefined()
   })
-  it('admits one merged correction without changing original authority or counters, consumes after CAS and blocks a fresh recheck', async () => {
+  it('current checks and repeated admission do not consume a synthetic correction or change original authority', async () => {
     const f = fixture(), frozenSpec = structuredClone(f.spec)
     const consume = await assertChapterReviewRevision(f.tx, f.subject, f.chapter)
-    expect(consume).toBeTypeOf('function')
+    expect(consume).toBeUndefined()
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
     await consume?.()
-    expect(f.compilation.validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0, newDraftRevision: { taskId: f.spec.id, chapterId: 'new41', compilationId: 'compiler', checkedRevision: 3 } })
+    expect(f.compilation.validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0 })
+    expect(f.compilation.validation).not.toHaveProperty('newDraftRevision')
     f.chapter.revision++
     Object.assign(f.compilation.validation, { checkedRevision: 4, checkRounds: 2 })
-    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toBeUndefined()
+    await expect(readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)).resolves.toMatchObject({ continuity: 'stale', terminalCommitted: false })
     expect(f.spec).toEqual(frozenSpec)
   })
-  it.each(['parent', 'child', 'reprepare'] as const)('cannot hide consumption with %s execution', async direction => {
+  it.each(['parent', 'child', 'reprepare'] as const)('keeps original lineage and unchanged fees across %s execution without a paid-slot gate', async direction => {
     const f = fixture()
     await (await assertChapterReviewRevision(f.tx, f.subject, f.chapter))?.()
     if (direction === 'parent') f.subject.runId = 'original-run'
@@ -389,12 +438,14 @@ describe('one atomic factual correction in the original new draft', () => {
       f.compilation.status = 'abandoned'
       f.rows.unshift({ ...f.compilation, id: 'new-compiler', status: 'active', validation: f.validation })
     }
-    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toBeUndefined()
+    expect(f.compilation.validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0 })
+    expect(f.compilation.validation).not.toHaveProperty('newDraftRevision')
     expect(f.db.storyCompilation.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ where: expect.objectContaining({ runId: { in: ['original-run', 'child-run'] }, chapterId: 'new41' }) }))
   })
   it.each(['existing', 'missing-binding', 'foreign-binding', 'wrong-slot', 'wrong-novel', 'wrong-intent', 'proposal', 'selection', 'no-frozen-scope', 'marker-without-frozen-scope',
     'warning', 'stale', 'failed', 'wrong-chapter', 'coverage', 'scenes', 'source', 'committed', 'completed', 'later-failure', 'later-prepare', 'no-body', 'paid-repair-reserved'] as const)(
-    'denies %s evidence without consuming a correction', async scenario => {
+    'keeps original scope decisions separate from historical %s review state', async scenario => {
       const f = fixture()
       if (scenario === 'existing') f.spec.scope.writing!.targets[0].chapterId = f.chapter.id
       if (scenario === 'missing-binding') f.source.writingBindings = null as never
@@ -419,9 +470,15 @@ describe('one atomic factual correction in the original new draft', () => {
       if (scenario === 'later-prepare') f.rows.unshift({ ...f.compilation, id: 'later', validation: { checkRounds: 1 } as never })
       if (scenario === 'no-body') f.chapter.content = ''
       if (scenario === 'paid-repair-reserved') f.validation.autoRepairRounds = 1
-      await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).rejects.toMatchObject({ code: scenario === 'foreign-binding' ? 'RUNTIME_RECEIPT_INVALID'
-        : scenario === 'stale' ? 'REVIEW_REPAIR_RECHECK_REQUIRED' : 'REPAIR_NOT_AUTHORIZED' })
+      const unauthorized = ['existing', 'missing-binding', 'foreign-binding', 'wrong-slot', 'wrong-novel', 'wrong-intent', 'proposal', 'no-frozen-scope', 'marker-without-frozen-scope'].includes(scenario)
+      if (unauthorized) await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).rejects.toMatchObject({ code: scenario === 'foreign-binding' ? 'RUNTIME_RECEIPT_INVALID' : 'REPAIR_NOT_AUTHORIZED' })
+      else if (scenario === 'selection') await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
+      else await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toBeUndefined()
       expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+      expect(f.compilation.validation).not.toHaveProperty('newDraftRevision')
+      if (scenario === 'stale') expect(f.validation.checkedRevision).toBe(2)
+      if (scenario === 'failed') expect(f.validation.independentCheck).toBe('unavailable')
+      if (scenario === 'paid-repair-reserved') expect(f.validation.autoRepairRounds).toBe(1)
     })
   it.each(['写下一章，不要修改正文', 'Write the next chapter. Do not edit the draft.', '写下一章。不要做任何改写',
     '写下一章，不要修改前文和新稿', 'Write the next chapter. Do not edit previous chapters or the draft.', '写下一章，不要修改已有章节及本章正文'])('preserves explicit no-change requests: %s', async prompt => {
@@ -435,11 +492,13 @@ describe('one atomic factual correction in the original new draft', () => {
     await expect(readNewDraftWritingAuthority(f.tx, f.subject, f.chapter)).resolves.toBeNull()
     expect(prohibitsNewDraftRevision('不要修改前文')).toBe(false)
   })
-  it('reports an open channel without consuming the one merged correction', async () => {
+  it('probes original authority without changing reports, counters or the manuscript', async () => {
     const f = fixture()
+    const before = structuredClone(f.compilation)
     await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
     await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    expect(f.compilation).toEqual(before)
   })
   it('a complete quality report cannot close an unspent factual correction by moving the compiler to repair', async () => {
     const f = fixture()
@@ -448,59 +507,64 @@ describe('one atomic factual correction in the original new draft', () => {
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
     const consume = await assertChapterReviewRevision(f.tx, f.subject, f.chapter)
     await consume?.()
-    expect(f.compilation.validation).toMatchObject({ newDraftRevision: { checkedRevision: 3 } })
+    expect(consume).toBeUndefined()
+    expect(f.compilation.validation).toMatchObject({ checkedRevision: 3, checkRounds: 1 })
+    expect(f.compilation.validation).not.toHaveProperty('newDraftRevision')
   })
-  it('reports closed after the merged correction is consumed, without consuming anything itself', async () => {
+  it('a changed revision remains editable while its old report remains stale', async () => {
     const f = fixture()
     await (await assertChapterReviewRevision(f.tx, f.subject, f.chapter))?.()
     f.chapter.revision++
     Object.assign(f.compilation.validation, { checkedRevision: 4, checkRounds: 2 })
-    expect(f.db.storyCompilation.update).toHaveBeenCalledTimes(1)
-    await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(false)
-    expect(f.db.storyCompilation.update).toHaveBeenCalledTimes(1)
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(true)
+    await expect(readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)).resolves.toMatchObject({ continuity: 'stale', terminalCommitted: false })
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
-  it.each(['exhausted', 'unauthorized', 'committed-window', 'later-failure'] as const)('reports a closed channel while edits stay blocked: %s', async scenario => {
+  it.each(['exhausted', 'unauthorized', 'committed-window', 'later-failure'] as const)('only actual author authority closes the current edit probe, not %s platform history', async scenario => {
     const f = fixture()
     if (scenario === 'exhausted') Object.assign(f.validation, { checkRounds: 3, independentCheck: 'unavailable' })
     if (scenario === 'unauthorized') f.spec.intent = 'review'
     if (scenario === 'committed-window') f.compilation.bridge.committedAt = new Date() as never
     if (scenario === 'later-failure') f.rows.unshift({ ...f.compilation, id: 'later', validation: { ...f.validation, independentCheck: 'unavailable' } })
-    await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(false)
+    await expect(paidChannelOpen(f.tx, f.subject, f.chapter)).resolves.toBe(scenario !== 'unauthorized')
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    expect(f.compilation.validation).not.toHaveProperty('newDraftRevision')
   })
-  it('admits the one unspent correction from the final complete check without replenishing checks', async () => {
+  it('historical final-check counters are preserved without limiting repeated authorized admission', async () => {
     const f = fixture()
     Object.assign(f.validation, { checkRounds: 3 })
     const consume = await assertChapterReviewRevision(f.tx, f.subject, f.chapter)
-    expect(consume).toBeTypeOf('function')
+    expect(consume).toBeUndefined()
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
     await consume?.()
-    expect(f.compilation.validation).toMatchObject({ checkRounds: 3, autoRepairRounds: 0, newDraftRevision: { checkedRevision: 3 } })
-    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REVIEW_AUTOMATION_STOPPED' })
+    expect(f.compilation.validation).toMatchObject({ checkRounds: 3, autoRepairRounds: 0 })
+    expect(f.compilation.validation).not.toHaveProperty('newDraftRevision')
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toBeUndefined()
   })
-  it('admits one strict-mode quality correction from a complete report bound to the active compilation', async () => {
+  it('strict-mode quality advice remains current and undecided without a paid correction slot', async () => {
     const f = fixture()
     f.validation.checkRounds = 9
     f.validation.errorCount = 0; f.validation.findings = []
-    const quality = { id: 'q', compilationId: 'compiler', chapterRevision: f.chapter.revision, repairRound: 0, status: 'passed',
-      deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(f.chapter.content).digest('hex') },
-      findings: [{ id: 'q1', severity: 'warning', startOffset: 0, endOffset: 2, disposition: 'pending', authorFeedback: null }] }
-    vi.mocked(f.db.chapterQualityReport.findMany).mockImplementation((async (args: Prisma.ChapterQualityReportFindManyArgs) => (args?.include ? [quality] : []) as never) as never)
+    const quality = completeQuality(f, 1)
+    quality.findings[0].id = 'q1'
     const consume = await assertChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true })
-    expect(consume).toBeTypeOf('function')
+    expect(consume).toBeUndefined()
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
     await consume?.()
-    expect(f.compilation.validation).toMatchObject({ newDraftRevision: { taskId: f.spec.id, chapterId: 'new41', compilationId: 'compiler', checkedRevision: 3 } })
-    expect(f.db.chapterQualityReport.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ include: { findings: true } }))
+    expect(f.compilation.validation).not.toHaveProperty('newDraftRevision')
+    await expect(readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)).resolves.toMatchObject({ quality: 'complete', qualityCandidateCount: 1, decisionPending: true })
+    expect(f.db.chapterQualityReport.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ userId: 'u', novelId: 'n', chapterId: f.chapter.id, runId: { in: ['original-run', 'child-run'] } }), include: { findings: true } }))
   })
-  it('probes a pending strict-mode report on an uncommitted compilation without consuming the correction', async () => {
+  it('a pending strict-mode probe cannot claim a report or commit, even with a historical commit timestamp', async () => {
     const f = fixture()
     f.validation.errorCount = 0; f.validation.findings = []
     const pendingQuality = { compilationId: 'compiler', candidates: 2 }
     await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, pendingQuality })).resolves.toEqual({ open: true })
     await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, pendingQuality })).resolves.toEqual({ open: true })
     f.compilation.bridge.committedAt = new Date() as never
-    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, pendingQuality })).resolves.toMatchObject({ open: false })
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, pendingQuality })).resolves.toEqual({ open: true })
+    await expect(readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)).resolves.toMatchObject({ quality: 'missing', terminalCommitted: false })
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
   it.each([
@@ -514,23 +578,70 @@ describe('one atomic factual correction in the original new draft', () => {
       findings: [{ id: 'advice', severity: 'warning', startOffset: 0, endOffset: 2, disposition: 'pending', authorFeedback: null }] }
     if (reprepare) f.rows.unshift({ ...f.compilation, id: 'later-compiler' })
     const latest = { ...older, id: 'latest', compilationId: reprepare ? 'later-compiler' : older.compilationId, status, findings: [] }
-    vi.mocked(f.db.chapterQualityReport.findMany).mockImplementation((async (args: Prisma.ChapterQualityReportFindManyArgs) =>
-      (args?.include ? [latest, older] : []) as never) as never)
-    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
-    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toMatchObject({ open: false })
+    f.db.chapterQualityReport.findMany.mockResolvedValue([latest, older] as never)
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toBeUndefined()
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toEqual({ open: true })
+    expect((await readChapterReviewReadiness(f.tx, f.subject, reprepare ? 'later-compiler' : f.compilation.id))?.quality).toBe('incomplete')
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
-  it('keeps the strict-mode channel closed without a complete bound report or with zero candidates', async () => {
+  it('zero candidates never certify a missing report or consume original author authority', async () => {
     const f = fixture()
     f.validation.errorCount = 0; f.validation.findings = []
-    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true })).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
-    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, pendingQuality: { compilationId: 'compiler', candidates: 0 } })).resolves.toMatchObject({ open: false })
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true })).resolves.toBeUndefined()
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true, pendingQuality: { compilationId: 'compiler', candidates: 0 } })).resolves.toEqual({ open: true })
+    await expect(readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)).resolves.toMatchObject({ quality: 'missing', terminalCommitted: false })
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
   })
-  it('keeps a pending factual error in its own channel: strict-mode quality repair cannot consume it', async () => {
+  it('a quality preflight cannot consume or erase an existing factual error', async () => {
     const f = fixture()
-    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true })).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
-    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toBeTypeOf('function')
+    const before = structuredClone(f.compilation.validation)
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { requireQualityChannel: true })).resolves.toBeUndefined()
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toBeUndefined()
+    expect(f.compilation.validation).toEqual(before)
+    expect((await readChapterReviewReadiness(f.tx, f.subject, f.compilation.id))?.continuityErrorCount).toBe(1)
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  it.each(['revision', 'content', 'source-context', 'chapter', 'billing', 'incomplete'] as const)('never promotes a %s mismatched current report into a completed check', async scenario => {
+    const f = fixture(), report = completeContinuity(f)
+    completeQuality(f)
+    if (scenario === 'revision') report.revision--
+    if (scenario === 'content') report.contentHash = '0'.repeat(64)
+    if (scenario === 'chapter') report.chapterId = 'foreign-chapter'
+    if (scenario === 'source-context') f.db.chapter.findMany.mockResolvedValue([{ id: 'previous', title: '前章', revision: 2, orderIndex: 40, content: '真实前文已变化。' }] as never)
+    if (scenario === 'billing') report.billingKnown = false
+    if (scenario === 'incomplete') report.complete = false
+    const before = structuredClone(report)
+    const readiness = await readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)
+    expect(readiness?.continuity).not.toBe('complete')
+    expect(readiness?.requiredTools).toContainEqual({ name: 'continuity_validate', args: { compilationId: f.compilation.id } })
+    expect(readiness?.terminalCommitted).toBe(false)
+    await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toEqual({ open: true })
+    expect(report).toEqual(before)
+    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  it.each(['balanced', 'stable', 'bold'] as const)('preserves humanity %s advice-decision semantics independently of continuity', async creativeFreedom => {
+    const f = fixture()
+    f.spec.creativeFreedom = creativeFreedom
+    f.validation.findings = []; f.validation.errorCount = 0
+    completeContinuity(f)
+    const quality = completeQuality(f, 1)
+    quality.status = 'needs_repair'
+    const readiness = await readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)
+    expect(readiness).toMatchObject({ continuity: 'complete', quality: 'complete', qualityCandidateCount: 1, decisionPending: creativeFreedom === 'balanced' })
+    expect(quality.findings[0].disposition).toBe('pending')
+  })
+  it('explicit retention never waives the original hard quality-pass requirement', async () => {
+    const f = fixture('检查并修复当前章，质量检查必须通过')
+    f.validation.findings = []; f.validation.errorCount = 0
+    completeContinuity(f)
+    const quality = completeQuality(f, 1)
+    quality.status = 'needs_repair'
+    const readiness = await readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)
+    expect(readiness).toMatchObject({ quality: 'complete', qualityPassRequired: true, decisionPending: true })
+    await recordChapterReviewDecisions(f.tx, f.subject, readiness!, [{ source: 'quality', reportId: quality.id, findingId: quality.findings[0].id, reason: '保留人物声口，当前意见仍未修复。' }])
+    const after = await readChapterReviewReadiness(f.tx, f.subject, f.compilation.id)
+    expect(after).toMatchObject({ mustPassPending: true, decisionPending: true, terminalCommitted: false })
+    expect(quality.status).toBe('needs_repair')
+    expect(quality.findings[0].disposition).toBe('pending')
   })
 })

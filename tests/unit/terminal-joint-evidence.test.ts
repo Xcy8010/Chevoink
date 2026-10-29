@@ -5,7 +5,7 @@ import { terminalEvidenceContext, type TerminalEvidenceContext } from '../../api
 import { terminalCandidateSchema, inspectTerminalReview, currentTerminalReview, terminalReviewInput } from '../../api/lib/agent/terminal-state-review.js'
 import { terminalCandidateFacts, terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
-import { applyContinuityReassessment, continuityReassessmentRequest, runContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { applyContinuityReassessment, continuityReassessmentRequest } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { buildTerminalFactProofs, readTerminalInheritance } from '../../api/lib/agent/terminal-inheritance-chain.js'
 import { terminalReviewStateHash } from '../../api/lib/agent/chapter-review-guard.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
@@ -67,9 +67,10 @@ describe('request-owned joint terminal evidence v5', () => {
     const evidence = context(), bodies = { previous: previous.content, current: chapter.content, terminalEvidence: evidence }, original = inspect(parts)
     expect(original.complete).toBe(true)
     expect(inspectTerminalReview(candidate, chapter.content, JSON.stringify(parts), true, evidence)?.supported).toBe(false)
-    const dispatch = vi.fn(), claim = vi.fn()
-    expect(await runContinuityReassessment({ original, bodies, system: 'frozen', content: 'frozen', billingKnown: true, providerComplete: true, slotUsed: false, signal: new AbortController().signal, assertCurrent: vi.fn(), claim, dispatch })).toBe(original)
-    expect(dispatch).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled()
+    const replayed = inspectContinuityResponse(JSON.stringify(parts), bodies, true, 8, candidate)
+    expect(replayed).toEqual(original)
+    expect(inspectTerminalReview(candidate, chapter.content, JSON.stringify(parts), true, evidence)?.verdicts[0].verdict).toBe(verdict)
+    expect(JSON.parse(replayed.audit.rawResponse.content)).toBe(JSON.stringify(parts))
   })
 
   it('uses the same contract in a bounded complete reassessment and emits field diagnostics', () => {

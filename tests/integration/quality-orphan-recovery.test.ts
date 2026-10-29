@@ -3,7 +3,8 @@ import { Prisma } from '@prisma/client'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { available, fixture as baseFixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
-import { prepareStoryCompilation, recordStoryCompilerWrite, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
+import { prepareStoryCompilation, recordStoryCompilerWrite, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
+import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
 import { buildHumanityQualityContext, qualityReviewContextHash, HUMANITY_CRITIC_VERSION } from '../../api/lib/agent/humanity-quality.js'
 import { readQualityFormatRecovery, claimQualityFormatRecovery } from '../../api/lib/agent/quality-format-recovery.js'
 import { deleteLoopSessionMessage } from '../../api/lib/agent/session-messages.js'
@@ -35,7 +36,9 @@ async function seed(f: Parameters<Parameters<typeof fixture>[0]>[0], completeSet
     await saveSceneTasks({ ...f, compilationId: compilation.id, tasks: [{ purpose: '推进场景', entryState: state, goal: '找线索', obstacle: '门上锁',
       choice: '绕路', cost: '时间', turn: '发现脚印', exitState: state, styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
     await recordStoryCompilerWrite({ ...f, chapterId: f.chapterId, chapterOrderIndex: 1, chapterRevision: 1 })
-    await validateStoryContinuity({ ...f, compilationId: compilation.id, findings: [], expectedChapterRevision: 1, independentCheck: 'complete' })
+    const continuity = await persistCurrentContinuityReport({ ...f, compilationId: compilation.id, expectedChapterRevision: 1 })
+    expect(continuity.result).toMatchObject({ reviewCompleted: true })
+    expect(continuity.validation).toMatchObject({ continuityReport: { chapterId: f.chapterId, revision: 1, complete: true } })
   }
   const bundle = await buildHumanityQualityContext(f.userId, f.novelId, f.chapterId, f.runId)
   const contextHash = qualityReviewContextHash(bundle), oldRun = randomUUID(), ids = [randomUUID(), randomUUID(), randomUUID()]

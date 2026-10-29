@@ -27,13 +27,18 @@ export async function collectDurableToolEvidence(tx: RuntimeTx, taskRootId: stri
   const observations = new Set<string>()
   const effects: Array<{ operationId: string; action: string; resultHash: string; sequence: string; sourceRevision: number; outcome: 'succeeded' | 'failed'; summary: string }> = []
   for (;;) {
-    const events = await tx.agentExecutionOutbox.findMany({ where: { taskRootId, type: 'effect.committed', ...(cursor === undefined ? {} : { sequence: { gt: cursor } }),
-      operation: { kind: 'tool', status: 'succeeded' } }, orderBy: { sequence: 'asc' }, take: 100, include: { operation: { include: { effectReceipt: true } } } })
+    const events = await tx.agentExecutionOutbox.findMany({ where: { taskRootId, ...(cursor === undefined ? {} : { sequence: { gt: cursor } }), OR: [
+      { type: 'effect.committed', operation: { kind: 'tool', status: 'succeeded' } },
+      { type: 'tool.observation.recorded', operation: { kind: 'tool', action: 'chapter_bridge_commit', status: 'failed',
+        children: { some: { kind: 'internal', action: { in: ['continuity_validate', 'quality_analyze'] }, status: 'succeeded' } } } },
+    ] }, orderBy: { sequence: 'asc' }, take: 100, include: { operation: { include: { effectReceipt: true } } } })
     for (const event of events) {
       const operation = event.operation!, receipt = operation.effectReceipt
       const input = inputSchema.safeParse(operation.inputSnapshot)
+      const observedFailure = event.type === 'tool.observation.recorded'
       if (!input.success || runtimeJsonHash(operation.inputSnapshot) !== operation.inputHash || !receipt || runtimeJsonHash(receipt.result) !== receipt.resultHash
-        || event.eventKey !== `effect:${operation.id}` || runtimeJsonHash(event.payload) !== runtimeJsonHash({ operationId: operation.id, resultHash: receipt.resultHash })) return runtimeError('RUNTIME_RECEIPT_INVALID', '进展或完成审查的工具证据损坏。')
+        || event.eventKey !== `${observedFailure ? 'observation' : 'effect'}:${operation.id}` || runtimeJsonHash(event.payload) !== runtimeJsonHash({ operationId: operation.id,
+          ...(observedFailure ? { outcome: 'failed' } : {}), resultHash: receipt.resultHash })) return runtimeError('RUNTIME_RECEIPT_INVALID', '进展或完成审查的工具证据损坏。')
       const sourceRevision = input.data.input.normalization.sourceRevision
       if (sourceRevision + 2 > revision) continue
       const result = resultSchema.safeParse(receipt.result)
@@ -44,9 +49,30 @@ export async function collectDurableToolEvidence(tx: RuntimeTx, taskRootId: stri
       if (pending.state.pendingOperationId !== operation.id || reduced.state.phase !== 'idle' || message?.role !== 'tool'
         || message.toolCallId !== input.data.input.callId || !matchesToolObservation(operation.action, result.data.toolResult.output, message.content,
           { operationId: operation.id, resultHash: receipt.resultHash })) return runtimeError('RUNTIME_RECEIPT_INVALID', '工具证据未进入原执行上下文。')
-      const failed = result.data.toolResult.outcome === 'failed'
+      const failed = observedFailure || result.data.toolResult.outcome === 'failed'
       effects.push({ operationId: operation.id, action: operation.action, resultHash: receipt.resultHash, sequence: String(event.sequence), sourceRevision,
         outcome: failed ? 'failed' : 'succeeded', summary: result.data.toolResult.summary })
+      if (operation.action === 'chapter_bridge_commit') {
+        const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: taskRootId } })
+        const children = await tx.agentOperation.findMany({ where: { taskRootId, parentOperationId: operation.id, kind: 'internal',
+          action: { in: ['continuity_validate', 'quality_analyze'] }, status: 'succeeded' }, include: { effectReceipt: true, events: true }, orderBy: { createdAt: 'asc' } })
+        for (const child of children) {
+          const effect = child.effectReceipt, saved = resultSchema.safeParse(effect?.result), committed = child.events.find(row => row.eventKey === `effect:${child.id}`)
+          if (!effect || !saved.success || runtimeJsonHash(child.inputSnapshot) !== child.inputHash || runtimeJsonHash(effect.result) !== effect.resultHash
+            || committed?.type !== 'effect.committed' || runtimeJsonHash(committed.payload) !== runtimeJsonHash({ operationId: child.id, resultHash: effect.resultHash }))
+            return runtimeError('RUNTIME_RECEIPT_INVALID', '提交中的检查效果缺少真实原输入、回执或持久事件。')
+          await (await import('./runtime-writing-service.js')).readHistoricalWritingServiceSource(tx,
+            { userId: root.userId, runId: effect.runId, taskRootId }, { operationId: child.id, action: child.action, novelId: root.novelId, callId: input.data.input.callId })
+          const progress = durableProgressSchema.safeParse(saved.data.progress)
+          if (!progress.success || progress.data.kind !== 'content_revision' || progress.data.beforeHash === progress.data.afterHash) continue
+          const display = z.object({ kind: z.literal('chapterDiff'), chapterId: z.string(), before: z.string(), after: z.string() }).safeParse(saved.data.toolResult.display)
+          if (!display.success || display.data.chapterId !== progress.data.targetId || runtimeJsonHash({ content: display.data.before }) !== progress.data.beforeHash
+            || runtimeJsonHash({ content: display.data.after }) !== progress.data.afterHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '检查改稿进度与真实正文效果不一致。')
+          effects.push({ operationId: child.id, action: child.action, resultHash: effect.resultHash, sequence: String(event.sequence), sourceRevision,
+            outcome: 'succeeded', summary: saved.data.toolResult.summary })
+          if (observeSemanticTransition(observations, `content_revision:${progress.data.targetId}`, progress.data.beforeHash, progress.data.afterHash)) progressSequence = String(event.sequence)
+        }
+      }
       if (failed) {
         if (receipt.result && typeof receipt.result === 'object' && !Array.isArray(receipt.result) && receipt.result.writingCompletion !== undefined) {
           const progress = await (await import('./runtime-writing-service.js')).readCommittedWritingBodyProgress(tx, operation, receipt.result)

@@ -1,7 +1,7 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { continuityRecoveryFixture } from '../helpers/continuity-recovery-fixture.js'
 import { applyContinuitySparseRepair, continuityResponseRepairPlan, continuitySparseRepairRequest } from '../../api/lib/agent/continuity-response-repair.js'
-import { applyContinuityReassessment, runContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { applyContinuityReassessment, failedContinuityReassessment } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
 import { terminalReportCorrection, terminalReportRecoveryResult } from '../../api/lib/agent/terminal-report-recovery.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
@@ -88,19 +88,19 @@ describe('production-shaped invalid continuity response recovers without false p
       expect(currentTerminalReview(validation, f.content, f.context)).toBeNull()
     } else expect(correction).toBeNull()
   })
-  it.each(['billing', 'provider', 'slot'] as const)('keeps one existing paid recovery slot and never dispatches for unknown %s', async kind => {
-    const f = continuityRecoveryFixture(), claim = vi.fn(async () => true), dispatch = vi.fn(async () => ({ content: JSON.stringify(f.patch), complete: true }))
-    const result = await runContinuityReassessment({ original: f.original, bodies: f.bodies, system: 'Editor.', content: 'Source.', reassessmentProtocol: 4,
-      billingKnown: kind !== 'billing', providerComplete: kind !== 'provider', slotUsed: kind === 'slot', signal: new AbortController().signal, assertCurrent: async () => {}, claim, dispatch })
-    expect(result).toBe(f.original)
-    expect(claim).not.toHaveBeenCalled(); expect(dispatch).not.toHaveBeenCalled()
+  it.each(['billing', 'provider', 'slot'] as const)('preserves the original invalid audit and historical unresolved %s receipt on read', async kind => {
+    const f = continuityRecoveryFixture(), receipt = { billingKnown: kind !== 'billing', providerComplete: kind !== 'provider', slotUsed: kind === 'slot' }
+    const before = runtimeJson({ receipt, audit: f.original.audit }).hash
+    const result = inspectContinuityResponse(f.raw, f.bodies, true, 8, f.candidate, undefined, { responseContract: 3 })
+    expect(result).toEqual(f.original); expect(result.complete).toBe(false)
+    expect(JSON.parse(result.audit.rawResponse.content)).toBe(f.raw)
+    expect(runtimeJson({ receipt, audit: f.original.audit }).hash).toBe(before)
   })
   it('retains explicit protocol4 diagnostics when the only second reply is still malformed; no third request', async () => {
-    const f = continuityRecoveryFixture(), dispatch = vi.fn(async () => ({ content: f.raw, complete: true }))
-    const result = await runContinuityReassessment({ original: f.original, bodies: f.bodies, system: 'Editor.', content: 'Source.', reassessmentProtocol: 4,
-      billingKnown: true, providerComplete: true, slotUsed: false, signal: new AbortController().signal, assertCurrent: async () => {}, claim: async () => true, dispatch })
+    const f = continuityRecoveryFixture()
+    const result = failedContinuityReassessment(f.original, f.raw, true, f.bodies, 4)
     expect(result).toMatchObject({ complete: false, audit: { reassessment: { kind: 'sparse_table_repair_failed', protocol: 4, classification: 'invalid' } } })
-    expect(dispatch).toHaveBeenCalledOnce()
+    expect(result.audit).toMatchObject({ reassessment: { rawResponse: { content: JSON.stringify(f.raw), complete: true } } })
     expect(runtimeJson(f.original.audit).hash).not.toBe(runtimeJson(result.audit).hash)
     expect(terminalReportCorrection({ ...f.validation, continuityCriticResponse: result.audit }, f.content, f.context, null)).not.toBeNull()
   })

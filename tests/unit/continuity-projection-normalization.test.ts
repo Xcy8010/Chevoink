@@ -1,3 +1,4 @@
+import { historicalEffectiveReportFixture } from '../helpers/historical-effective-report-fixture.js'
 import { describe, expect, it, vi } from 'vitest'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-candidate-contract.js'
@@ -5,7 +6,7 @@ import type { TerminalEvidenceContext } from '../../api/lib/agent/terminal-evide
 import { advanceTerminalCoverage } from '../../api/lib/agent/terminal-fact-coverage.js'
 import { terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
 import { continuitySubjectIdentity } from '../../api/lib/agent/continuity-subject-identity.js'
-import { bindLegacyContinuityAssessment, runContinuityReassessment, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { bindLegacyContinuityAssessment, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { buildContinuityReviewManifest, continuityReviewV4Request, continuityReviewV4ResponseSchema, inspectContinuityV4, normalizeContinuityV4Projection, normalizeContinuityV4ProjectionV2, validateStoredContinuityV4Projection, buildContinuityInvalidRowRepair, failedContinuityV4Repair, applyContinuityV4Repair } from '../../api/lib/agent/continuity-review-v4.js'
 import { readAuthenticatedContinuityAssessment, isContinuityV4Inspection } from '../../api/lib/agent/authenticated-continuity-assessment.js'
 import { terminalDraftFixture } from '../helpers/terminal-draft-fixture.js'
@@ -103,9 +104,7 @@ describe('explicit whole-report projection normalization', () => {
       const validation: Record<string, unknown> = { checkedChapterId: 'chapter', checkedRevision: 4, independentCheck: 'complete',
         coverage: { protocolVersion: 11, contentHash: runtimeJson({ content: f.current }).hash, terminalHash: runtimeJson(f.frozen.candidate).hash },
         terminalCandidate: f.frozen.candidate, continuityCriticResponse: derived.audit }
-      validation.effectiveReport = await coordinator.stageEffectiveContinuityReport({ agentArtifact: { findUnique: async () => null,
-        create: async () => ({}) } } as unknown as Prisma.TransactionClient, ctx,
-      { compilationId: 'compilation', audit: derived.audit, previousValidation: {} })
+      validation.effectiveReport = await historicalEffectiveReportFixture({ runId: (ctx).runId, ...{ compilationId: 'compilation', audit: derived.audit, previousValidation: {} } }).pointer
       if (scenario !== 'unretained-error') {
         const reportId = continuityDecisionBinding('compilation', 4, validation)
         validation.retainedReviewDecision = { version: 1, chapterId: 'chapter', revision: 4, contentHash: runtimeJson({ content: f.current }).hash,
@@ -182,7 +181,8 @@ describe('explicit whole-report projection normalization', () => {
         const compilationRead = vi.fn(async ({ where }: { where: { id?: string; chapterId?: string } }) =>
           where.id === f.rootCompilation.id || where.chapterId === f.rootChapter.id ? f.rootCompilation : committed)
         const chainDb = { ...db, storyCompilation: { ...db.storyCompilation, findFirst: compilationRead, findMany: vi.fn(async () => [{ ...committed, chapter }]) }, chapter: {
-          findFirst: vi.fn(async ({ where }: { where: { id?: string; orderIndex?: unknown } }) => where.id === chapter.id ? chapter : f.rootChapter) } } as unknown as Prisma.TransactionClient
+          findFirst: vi.fn(async ({ where }: { where: { id?: string; orderIndex?: unknown } }) => where.id === chapter.id ? chapter : f.rootChapter),
+          findMany: vi.fn(async () => [f.rootChapter]) } } as unknown as Prisma.TransactionClient
         expect(await readTerminalInheritance(chainDb, ctx, chapter)).toEqual(proofs)
         const modified = structuredClone(preserved), node = modified.nodes[0].preservation!
         node.sourceProofHash = '0'.repeat(64)
@@ -207,7 +207,8 @@ describe('explicit whole-report projection normalization', () => {
             .map(entry => ({ ...entry.compilation, chapter: entry.chapter }))) },
         chapter: { findFirst: vi.fn(async ({ where }: { where: { id?: string; orderIndex?: { lt: number } } }) => where.id
           ? byChapter(where.id)?.chapter ?? null : entries.filter(entry => entry.chapter.orderIndex < where.orderIndex!.lt)
-            .sort((a, b) => b.chapter.orderIndex - a.chapter.orderIndex)[0]?.chapter ?? null) },
+            .sort((a, b) => b.chapter.orderIndex - a.chapter.orderIndex)[0]?.chapter ?? null),
+          findMany: vi.fn(async ({ where }: { where: { orderIndex: { lt: number } } }) => entries.filter(entry => entry.chapter.orderIndex < where.orderIndex.lt).map(entry => entry.chapter).sort((a, b) => b.orderIndex - a.orderIndex)) },
         agentArtifact: { ...chainDb.agentArtifact, findMany: vi.fn(async ({ where }: { where: { metadata: { equals: string } } }) =>
           entries.filter(entry => entry.input && lifecycle.legacyContinuityAssessmentKey({ ...ctx, callId: entry.callId! }, entry.input) === where.metadata.equals)
             .map(entry => ({ runId: 'run', metadata: { input: entry.input, callId: entry.callId } }))) } } as unknown as Prisma.TransactionClient
@@ -243,9 +244,7 @@ describe('explicit whole-report projection normalization', () => {
           expect(normalized.complete).toBe(true)
           const nextValidation = { checkedChapterId: next.id, checkedRevision: 4, independentCheck: 'complete', terminalCandidate: f.frozen.candidate,
             coverage: { protocolVersion: 11, contentHash: evidence.current.contentHash, terminalHash: runtimeJson(f.frozen.candidate).hash },
-            continuityCriticResponse: normalized.audit, effectiveReport: await coordinator.stageEffectiveContinuityReport({ agentArtifact: {
-              findUnique: async () => null, create: async () => ({}) } } as unknown as Prisma.TransactionClient, ctx,
-            { compilationId, audit: normalized.audit, previousValidation: {} }) }
+            continuityCriticResponse: normalized.audit, effectiveReport: await historicalEffectiveReportFixture({ runId: (ctx).runId, ...{ compilationId, audit: normalized.audit, previousValidation: {} } }).pointer }
           const entry: Entry = { chapter: next, compilation: { id: compilationId, chapterId: next.id, runId: 'run', validation: nextValidation,
             preparedContext: {}, bridge: { committedAt: new Date(20 + index), targetRevision: 4 }, sceneTasks: [] }, proofs: [], input, first: inspection, callId }
           entries.push(entry)
@@ -285,21 +284,19 @@ describe('explicit whole-report projection normalization', () => {
     expect(request.system).not.toContain('解释中带引号的文字必须来自')
     expect(f.input).toEqual(before)
   })
-  it('normalizes a returned known whole report before spending its sparse repair slot', async () => {
-    const f = fixture(), claim = vi.fn(async () => false), dispatch = vi.fn(async () => { throw Error('No second provider request is allowed') })
-    const result = await runContinuityReassessment({ original: f.inspect(), bodies: f.input.bodies, system: f.input.system, content: f.input.content,
-      reassessmentProtocol: 7, billingKnown: true, providerComplete: true, slotUsed: false, signal: new AbortController().signal,
-      assertCurrent: async () => {}, claim, dispatch, normalizationInputHash: f.hash })
+  it('normalizes returned known bytes without exposing a paid reassessment producer', () => {
+    const f = fixture(), before = runtimeJson(f.inspect().audit).hash
+    const result = normalizeContinuityV4Projection(f.inspect(), f.hash)
     expect(result.complete).toBe(true)
-    expect(claim).not.toHaveBeenCalled(); expect(dispatch).not.toHaveBeenCalled()
+    expect(lifecycle).not.toHaveProperty('runContinuityReassessment')
+    expect(runtimeJson(f.inspect().audit).hash).toBe(before)
   })
-  it('cannot use a newly interpretable first frame to discard an already-claimed second frame', async () => {
-    const f = fixture(), first = f.inspect(), claim = vi.fn(async () => true), dispatch = vi.fn(async () => { throw Error('No new request is allowed') })
-    const result = await runContinuityReassessment({ original: first, bodies: f.input.bodies, system: f.input.system, content: f.input.content,
-      reassessmentProtocol: 7, billingKnown: true, providerComplete: true, slotUsed: true, signal: new AbortController().signal,
-      assertCurrent: async () => {}, claim, dispatch, normalizationInputHash: f.hash })
-    expect(result).toEqual(first)
-    expect(claim).not.toHaveBeenCalled(); expect(dispatch).not.toHaveBeenCalled()
+  it('cannot use a newly interpretable first frame to discard an existing second frame', () => {
+    const f = repairedBackgroundFixture(), before = structuredClone(f.failed.audit)
+    const result = normalizeContinuityV4ProjectionV2(f.failed, f.hash)
+    expect(result.audit.continuityV4.first).toEqual(before.continuityV4.first)
+    expect(result.audit.continuityV4.failedRepair).toEqual(before.continuityV4.failedRepair)
+    expect(f.failed.audit).toEqual(before)
   })
   it('preserves the strict parser10, every raw row, errors and uncertainty while binding exact source roles', () => {
     const f = fixture(), first = f.inspect(), rawAudit = structuredClone(first.audit), recordHash = runtimeJson(first.parsed!.record).hash
@@ -495,8 +492,7 @@ describe('explicit version2 physical sparse-repair interpretation', () => {
       const validation: Record<string, unknown> = { independentCheck: 'complete', checkedChapterId: 'chapter', checkedRevision: 4,
         coverage: { protocolVersion: 11, contentHash: f.context.current.contentHash, terminalHash: runtimeJson(f.candidate).hash },
         terminalCandidate: f.candidate, continuityCriticResponse: derived.audit }
-      validation.effectiveReport = await coordinator.stageEffectiveContinuityReport({ agentArtifact: { findUnique: async () => null, create: async () => ({}) } } as unknown as Prisma.TransactionClient, ctx,
-        { compilationId: 'compilation', audit: derived.audit, previousValidation: {} })
+      validation.effectiveReport = await historicalEffectiveReportFixture({ runId: (ctx).runId, ...{ compilationId: 'compilation', audit: derived.audit, previousValidation: {} } }).pointer
       const reportId = continuityDecisionBinding('compilation', 4, validation)
       validation.retainedReviewDecision = { version: 1, chapterId: 'chapter', revision: 4, contentHash: f.context.current.contentHash,
         continuityBinding: reportId, qualityReportId: null, qualityReportHash: null,
@@ -685,13 +681,11 @@ it.each(['single', 'repaired'] as const)('version2 preserves background after a 
 })
 
 it('normalizes a strict complete single report before any repair claim or provider request and keeps frozen v1 replay exact', async () => {
-  const f = scopeOnlyBackgroundFixture('single'), claim = vi.fn(async () => true), dispatch = vi.fn(async () => ({ content: '{}', complete: true }))
-  const derived = await runContinuityReassessment({ original: f.first, bodies: f.input.bodies, system: f.input.system, content: f.input.content,
-    reassessmentProtocol: 7, billingKnown: true, providerComplete: true, slotUsed: false, signal: new AbortController().signal,
-    assertCurrent: async () => {}, claim, dispatch, normalizationInputHash: f.hash })
-  if (!isContinuityV4Inspection(derived)) throw Error('Expected the frozen native v4 interpretation')
+  const f = scopeOnlyBackgroundFixture('single'), before = structuredClone(f.first.audit)
+  const derived = normalizeContinuityV4ProjectionV2(f.first, f.hash)
   expect(derived.audit.continuityV4.projectionNormalization).toMatchObject({ version: 2, mode: 'single_report', mappings: [] })
-  expect(claim).not.toHaveBeenCalled(); expect(dispatch).not.toHaveBeenCalled()
+  expect(f.first.audit).toEqual(before)
+  expect(lifecycle).not.toHaveProperty('runContinuityReassessment')
   const old = fixture(), strict = old.inspect(), v1 = normalizeContinuityV4Projection(strict, old.hash), hash = runtimeJson(v1.audit).hash
   expect(v1.audit.continuityV4.projectionNormalization?.version).toBe(1)
   expect(normalizeContinuityV4ProjectionV2(v1, old.hash)).toBe(v1)
@@ -700,65 +694,40 @@ it('normalizes a strict complete single report before any repair claim or provid
 
 
 it.each(['single', 'repaired', 'existing-second', 'unknown-billing', 'cancelled'] as const)(
-  'the actual native producer derives only authenticated physical reports without another fee slot: %s', async mode => {
+  'retired native work cannot dispatch or certify a frozen report: %s', async mode => {
     const f = scopeOnlyBackgroundFixture(mode === 'repaired' ? 'repaired' : 'single')
     const admitted = await import('../../api/lib/agent/runtime-writing-service.js')
     const leases = await import('../../api/lib/agent/runtime-lease.js')
     const operations = await import('../../api/lib/agent/runtime-operations.js')
     const auxiliary = await import('../../api/lib/agent/runtime-auxiliary-call.js')
-    const tools = await import('../../api/lib/agent/tools/story-compiler-tools.js')
+    const current = await import('../../api/lib/agent/continuity-review.js')
     const { executePreparedContinuityWork } = await import('../../api/lib/agent/tools/durable-continuity.js')
-    const controller = new AbortController(), context = { userId: 'user', novelId: 'novel', runId: 'run', callId: 'native', signal: controller.signal } as ToolContext
+    const controller = new AbortController()
+    if (mode === 'cancelled') controller.abort()
+    const context = { userId: 'user', novelId: 'novel', runId: 'run', callId: 'native', signal: controller.signal } as ToolContext
     const lease = { userId: 'user', runId: 'run', taskRootId: 'task', ownerId: 'worker', claimId: 'claim', epoch: 1n }
-    const work = { kind: 'check', version: 23, compiler: null, standaloneContextHash: 'a'.repeat(64),
-      chapter: { id: f.context.current.id, revision: f.context.current.revision, orderIndex: f.context.current.orderIndex, title: 'Synthetic', content: f.current },
-      terminalCandidate: f.candidate, sourceBodies: f.frozen.bodies, sourceScope: f.frozen.sourceScope, continuityManifest: f.frozen.manifest,
-      reassessmentProtocol: 7, sourceId: null, coverage: { version: 1, protocolVersion: 11, contentHash: runtimeJson({ content: f.current }).hash, charCount: f.current.length, sourceHash: null },
-      criticSystem: f.input.system, criticInput: f.input.content, repairSystem: '', repair: false, cached: null,
-      route: { provider: 'fixture', model: 'fixture', baseUrl: 'https://provider.invalid/v1', maxOutputTokens: 16384 },
-      price: { version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000, rateCardId: 'fixture', rates: { inputNano: 1, cacheNano: 1, outputNano: 1 } } }
-    const operation = { id: 'native-operation', inputHash: runtimeJson({ work }).hash }, data = { args: {}, work }
-    let committed: { result: unknown; resultHash: string } | null = null, secondObserved = false
-    const tx = { agentOperation: { findUniqueOrThrow: vi.fn(async () => ({ status: committed ? 'succeeded' : 'prepared', effectReceipt: committed })),
-      findUnique: vi.fn(async ({ where }: { where: { taskRootId_operationKey: { operationKey: string } } }) =>
-        where.taskRootId_operationKey.operationKey.endsWith(':continuity_reassessment') && !secondObserved ? null : { id: 'critic-operation', status: 'succeeded' }) },
-      agentProviderAttempt: { findUnique: vi.fn(async () => ({ status: 'succeeded', usageReceipt: { source: mode === 'unknown-billing' ? 'unknown' : 'reported',
-        settlementStatus: 'settled', promptTokens: 12, completionTokens: 8 } })) },
-      agentArtifact: { findFirst: vi.fn(async () => mode === 'existing-second' ? { metadata: { preserved: true } } : null), create: vi.fn(async () => ({})) } }
-    const spies: Array<{ mockRestore: () => void }> = [vi.spyOn(admitted, 'readAdmittedReviewWork').mockResolvedValue({ operation, input: data } as never),
-      vi.spyOn(leases, 'withRunLease').mockImplementation((async (_lease: unknown, run: (db: unknown) => unknown) => run(tx)) as never),
-      vi.spyOn(operations, 'commitOperationEffect').mockImplementation((async (_lease: unknown, _id: string, _hash: string, run: (db: unknown) => Promise<unknown>) => {
-        const result = await run(tx); return committed = { result, resultHash: runtimeJson(result).hash }
-      }) as never), vi.spyOn(tools, 'buildStandaloneContinuityContext').mockResolvedValue({ contextHash: 'a'.repeat(64) } as never)]
-    const provider = vi.spyOn(auxiliary, 'callDurableAuxiliary').mockImplementation(async input => {
-      input.signal.throwIfAborted()
-      if (input.step === 'continuity_reassessment') secondObserved = true
-      return { content: input.step === 'continuity_critic' ? JSON.parse(f.first.audit.rawResponse.content) : f.second,
-        finishReason: 'stop', toolCalls: [] } as never
-    })
-    const save = vi.spyOn(tools, 'saveStandaloneContinuityReport').mockResolvedValue({ output: 'Actual frozen report saved.', summary: 'Complete' })
-    spies.push(provider, save)
+    const data = { args: {}, work: { kind: 'check', version: 23, chapter: { id: 'chapter' },
+      report: f.failed.audit, secondObserved: mode === 'existing-second' } }, operation = { id: 'native-operation', inputHash: runtimeJson(data).hash }
+    const tx = { agentEffectReceipt: { findUnique: vi.fn(async () => null) } }
+    const spies = [vi.spyOn(admitted, 'readAdmittedReviewWork').mockResolvedValue({ operation, input: data } as never),
+      vi.spyOn(leases, 'withRunLease').mockImplementation((async (_lease: unknown, read: (db: unknown) => unknown) => read(tx)) as never),
+      vi.spyOn(current, 'buildContinuitySnapshot').mockImplementation(async () => { controller.signal.throwIfAborted(); return {} as never }),
+      vi.spyOn(current, 'readContinuityRequestBilling').mockResolvedValue({ known: mode !== 'unknown-billing' } as never)]
+    const failure = vi.spyOn(operations, 'recordToolFailure').mockResolvedValue({ result: { failureCode: 'CONTINUITY_REPORT_INCOMPLETE' } } as never)
+    const provider = vi.spyOn(auxiliary, 'callDurableAuxiliary').mockRejectedValue(new Error('Retired work must not send'))
+    const effect = vi.spyOn(operations, 'commitOperationEffect').mockRejectedValue(new Error('Retired report cannot commit'))
+    const before = runtimeJson({ operation, data }).hash
     try {
-      if (mode === 'cancelled') controller.abort()
-      const before = runtimeJson({ operation, data }).hash
-      if (['existing-second', 'unknown-billing', 'cancelled'].includes(mode)) {
+      if (mode === 'unknown-billing' || mode === 'cancelled') {
         await expect(executePreparedContinuityWork(context, lease, operation.id)).rejects.toBeDefined()
-        expect(save).not.toHaveBeenCalled(); expect(committed).toBeNull()
-        expect(tx.agentArtifact.create).not.toHaveBeenCalled()
+        expect(failure).not.toHaveBeenCalled()
       } else {
-        const receipt = await executePreparedContinuityWork(context, lease, operation.id)
-        expect(save).toHaveBeenCalledOnce()
-        const audit = save.mock.calls[0][7]!
-        expect(audit).toMatchObject({ continuityV4: { projectionNormalization: { version: 2, mode: mode === 'single' ? 'single_report' : 'sparse_repair', mappings: [] } } })
-        expect(validateStoredContinuityV4Projection(audit, f.current, f.context)?.audit).toEqual(audit)
-        expect(audit.rawResponse.content).toBe(f.first.audit.rawResponse.content)
-        expect(provider).toHaveBeenCalledTimes(mode === 'single' ? 1 : 2)
-        expect(tx.agentArtifact.create).toHaveBeenCalledTimes(mode === 'single' ? 0 : 1)
-        expect(await executePreparedContinuityWork(context, lease, operation.id)).toEqual(receipt)
-        expect(save).toHaveBeenCalledOnce(); expect(provider).toHaveBeenCalledTimes(mode === 'single' ? 1 : 2)
+        await executePreparedContinuityWork(context, lease, operation.id)
+        expect(failure).toHaveBeenCalledWith(lease, expect.objectContaining({ code: 'CONTINUITY_REPORT_INCOMPLETE' }))
       }
+      expect(effect).not.toHaveBeenCalled(); expect(provider).not.toHaveBeenCalled()
       expect(runtimeJson({ operation, data }).hash).toBe(before)
-    } finally { spies.reverse().forEach(spy => spy.mockRestore()) }
+    } finally { [...spies, failure, provider, effect].reverse().forEach(spy => spy.mockRestore()) }
   })
 
 
@@ -819,8 +788,7 @@ it.each(['retained', 'unretained', 'changed-previous'] as const)(
     const derived = bindLegacyContinuityAssessment(normalizeContinuityV4ProjectionV2(first, runtimeJson(input).hash), ctx, input)
     const validation: Record<string, unknown> = { independentCheck: 'complete', checkedChapterId: 'chapter', checkedRevision: 4, errorCount: 1,
       coverage: { protocolVersion: 11, contentHash: context.current.contentHash, terminalHash: runtimeJson(candidate).hash }, terminalCandidate: candidate, continuityCriticResponse: derived.audit }
-    validation.effectiveReport = await coordinator.stageEffectiveContinuityReport({ agentArtifact: { findUnique: async () => null, create: async () => ({}) } } as unknown as Prisma.TransactionClient,
-      ctx, { compilationId: 'compilation', audit: derived.audit, previousValidation: {} })
+    validation.effectiveReport = await historicalEffectiveReportFixture({ runId: (ctx).runId, ...{ compilationId: 'compilation', audit: derived.audit, previousValidation: {} } }).pointer
     const reportId = continuityDecisionBinding('compilation', 4, validation)
     if (scenario !== 'unretained') validation.retainedReviewDecision = { version: 1, chapterId: 'chapter', revision: 4, contentHash: context.current.contentHash,
       continuityBinding: reportId, qualityReportId: null, qualityReportHash: null,

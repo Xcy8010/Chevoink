@@ -28,23 +28,10 @@ export type ToolContext = {
   /** Exact native owner captured by the admitted coordinator. Never accepted
    * from tool arguments or inferred from a taskRootId. */
   continuityNativeLease?: RunLeaseToken
-  /** Dedicated frozen original-operation question. Injected only by the
-   * continuity coordinator; never deserialized from model/tool parameters. */
-  continuityQuestion?: { requestId: string }
-  /** Admitted only from a durable exact answer or known phase response. */
-  continuitySupplement?: { requestId: string; dispatchAllowed: boolean }
-  /** Full current-input cached assessment only. Missing/stale cache must stop
-   * before reservation, with no provider fallback. Server populated only. */
-  continuityKnownResultOnly?: { assessmentKey: string; inputHash: string }
-  /** Original-cycle repair response selected by the server coordinator. */
-  continuityRevision?: { responseArtifactId: string; plan: import('../continuity-coordinator.js').ContinuityPhasePlan }
-  nativeContinuityRevision?: { operationId: string; work: unknown }
+  /** Server-only legacy owner/stop fence, never tool/model arguments. */
+  assertCurrentExecution?: (tx: import('@prisma/client').Prisma.TransactionClient) => Promise<void>
   /** Verified original task scope for input guidance only; never model input. */
   writingScope?: import('../../../../shared/contracts/index.js').TaskSpec['scope']
-  /** Server-authenticated per-call offline recovery fence. Never populated
-   * from model/tool arguments, UI input, or inherited by an inline child. */
-  offlineContinuityOnly?: { version: 1; compilationId: string; chapterId: string; revision: number; contentHash: string;
-    receiptContentHash?: string; admissionKey: string; validationHash: string; auditHash: string }
   /** Per-execution server observations; never populated from tool arguments. */
   planContentHashes?: Map<string, string>
   /** 作者明确要求“已有/前文保持不变”时，本轮启动前已存在的章节集合。 */
@@ -84,6 +71,8 @@ export type ToolContext = {
     baseline: { id: string; hash: string } | null }
   durableCreate?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }
   durableStructure?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor; expectedHash: string }
+  /** Executor-owned registered review dispatch; never accepted from model arguments. */
+  registeredReview?: (name: 'continuity_validate' | 'quality_analyze', args: { compilationId: string }, options?: { readOnly?: boolean }) => Promise<ToolResult>
   /** Internal DB-only tool adapter; never accepted from tool arguments. */
   transaction?: import('@prisma/client').Prisma.TransactionClient
   /** 当前工具调用的 callId：供 ask_user 等需要挂起等待前端回应的工具使用 */

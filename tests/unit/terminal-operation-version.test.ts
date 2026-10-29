@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
 import * as lifecycle from '../../api/lib/agent/assessment-response-lifecycle.js'
 import * as completion from '../../api/lib/agent/review-completion.js'
-import { runLegacyContinuityReview } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { legacyContinuityAssessmentKey, readFrozenLegacyContinuityInput, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
@@ -106,19 +105,17 @@ describe('request-owned terminal response versions', () => {
       expect(actual).toEqual(saved)
       return bound
     })
-    const reserve = vi.spyOn(lifecycle, 'reserveLegacyContinuityAssessment')
     const provider = vi.spyOn(completion, 'generateReviewCompletion')
     const fetch = vi.fn().mockRejectedValue(new Error('Unexpected provider dispatch'))
     vi.stubGlobal('fetch', fetch)
     const controller = new AbortController(), recover = vi.fn((requested: lifecycle.FrozenTerminalContract) => ({ ...frozen.bodies, terminalEvidence: { ...context(requested.coverageVersion), ...(requested.verdictProtocol ? { verdictProtocol: requested.verdictProtocol } : {}) } }))
-    const result = await runLegacyContinuityReview({ ...ctx, signal: controller.signal }, {
-      ...frozen, bodies: { ...frozen.bodies, terminalEvidence: context(2, 5) }, system: 'new system', content: 'new compact input',
-      recoverBodies: recover, assertCurrent: async () => {}, options: { targetType: frozen.targetType, targetId: frozen.targetId },
-    })
+    const restored = await lifecycle.readFrozenLegacyContinuityInput(tx, { ...ctx, signal: controller.signal },
+      { ...frozen, bodies: { ...frozen.bodies, terminalEvidence: context(2, 5) } }, recover)
+    expect(restored).toEqual(saved)
+    const result = await lifecycle.readReusableLegacyContinuityAssessment(tx, ctx, restored!)
     expect(result).toEqual(bound)
     expect(restore).toHaveBeenCalledWith(tx, expect.objectContaining({ runId: ctx.runId, callId: ctx.callId }), expect.any(Object), recover)
     expect(reuse).toHaveBeenCalledOnce()
-    expect(reserve).not.toHaveBeenCalled()
     expect(provider).not.toHaveBeenCalled()
     expect(fetch).not.toHaveBeenCalled()
     expect(JSON.parse(result.audit.rawResponse.content)).toBe(response)

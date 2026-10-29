@@ -1,8 +1,10 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { available, fixture as durableFixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
-import { executeAgentRun } from '../../api/lib/agent/loop.js'
-import { prepareStoryCompilation, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
+import { prepareStoryCompilation, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
+import { persistHistoricalContinuityAudit as validateStoryContinuity } from '../support/historical-continuity-audit.js'
+import { continueCurrentTerminalLoop as continueCurrentReviewWorkflow } from '../support/current-terminal-loop-fixture.js'
+import { continueLoopRun } from '../../api/lib/agent/run-service.js'
 import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 import { readOriginalTaskRequest } from '../../api/lib/agent/original-request.js'
 import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
@@ -11,21 +13,15 @@ import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-c
 import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
 import { terminalCandidateSchema, terminalReviewFailure } from '../../api/lib/agent/terminal-state-review.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
-import { observeChapterReviewProgress } from '../../api/lib/agent/semantic-progress.js'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
-import * as ai from '../../api/lib/ai-service.js'
 import * as credits from '../../api/lib/credits.js'
-import * as prices from '../../api/lib/billing/resolve-token-price.js'
-import * as memory from '../../api/lib/agent/story-memory.js'
-import * as titles from '../../api/lib/agent/session-title.js'
-import * as flags from '../../api/lib/agent2-feature-flags.js'
 
 const fixture: typeof durableFixture = (work, ...rest) => durableFixture(async f => {
   try { await work(f) } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
 }, ...rest)
 
-describe.runIf(available)('complete UNKNOWN report does not authorize another judgment', () => {
-  it.each(['continue', 'repeat'] as const)('preserves the original report and exact phase gap: %s', async scenario => fixture(async f => {
+describe.runIf(available)('historical UNKNOWN opinions remain history while current saved prose can complete', () => {
+  it.each(['continue', 'repeat'] as const)('preserves the original UNKNOWN report while current reports, CAS and one commit complete: %s', async scenario => fixture(async f => {
     const prompt = '修改本章', body = 'The sensor remains offline.', started = Date.now() - 5000
     await prisma.agentRun.update({ where: { id: f.runId }, data: { runtimeProtocolVersion: 0, taskRootId: null, startRequest: { prompt } } })
     const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: { revision: 15, content: body, wordCount: body.length } })
@@ -50,9 +46,10 @@ describe.runIf(available)('complete UNKNOWN report does not authorize another ju
     expect(await assess(candidate, 'unknown')).toMatchObject({ reviewCompleted: true })
     await persistHumanityQualityReport({ ...f, compilationId: compilation.id, chapterId: chapter.id, chapterRevision: 15, mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
-    expect(readiness).toMatchObject({ ready: true, terminalReview: { state: 'unverified' } })
+    expect(readiness).toMatchObject({ ready: false, continuity: 'stale' })
     const seen = new Set<string>()
-    expect(observeChapterReviewProgress(seen, { ...readiness!.progressEvidence!, phases: ['continuity', 'quality'] }, { ...f, taskSpec: original.spec as typeof f.spec, expectedOriginalTaskId: original.taskId })).toBe(true)
+    expect(readiness?.progressEvidence?.phases).not.toContain('continuity')
+    expect(readiness?.progressEvidence?.phases).not.toContain('terminal')
     const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', activeExecutionMs: 100, stagnantBatches: 7, runStartedAt: started,
       resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500, writeProgress: 1, writeBaseline: 0, readProgress: 7, readBaseline: 0, progressSignatures: [...seen],
       reviewAttempts: ['old-continuity-attempt', `settled-continuity:${compilation.id}:${chapter.id}:15:continuity_validate:protocol8`], inheritedTokens: 0, inheritedTurns: 0, manualResumeCount: 0 }
@@ -64,48 +61,25 @@ describe.runIf(available)('complete UNKNOWN report does not authorize another ju
     const historical = await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })
     const window = credits.getCreditWindow()
     await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
-    vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', provider: 'fixture', modelName: 'fixture', baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture', multiplierBps: 10000,
-      reasoningEffort: 'low', reasoningEfforts: ['none', 'low'], reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: 128000 })
-    vi.spyOn(prices, 'resolveTokenPrice').mockResolvedValue({ version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 })
-    vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
-    vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
-    vi.spyOn(titles, 'autoNameSession').mockResolvedValue(undefined)
-    const feature = flags.isAgent2FeatureEnabled
-    vi.spyOn(flags, 'isAgent2FeatureEnabled').mockImplementation((key, owner) => key === 'storyCompiler' || key !== 'memory2' && feature(key, owner))
-    const requests: Array<{ url: unknown; body: string }> = []
-    const network = vi.fn(async (url: unknown, init: RequestInit) => {
-      // Contract assertions run outside fetch: an assertion thrown here is
-      // correctly treated as an unknown provider result by real billing.
-      requests.push({ url, body: String(init.body) })
-      const response = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic whole-body judgment.', findingIds: [] })),
-        terminalVerdicts: [{ claimIndex: 0, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] }], terminalProofVerdicts: [], terminalDispositions: [],
-        proposalDispositions: [{ proposalIndex: 0, outcome: 'replaced',
-          reason: 'The saved body establishes that the sensor remains offline rather than repaired.', candidateIndex: 0,
-          sourceEvidence: [{ segmentId: 'c0' }] }] })
-      return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: response }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
-    })
-    vi.stubGlobal('fetch', network)
     const frozen = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
-    const main = vi.spyOn(ai, 'chatWithTools').mockRejectedValue(Error('Continue cannot purchase a candidate-selection main turn'))
-    await executeAgentRun({ ...f, prompt, mode: 'build', resume: true, eventStartSeq: 4, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
+    const completed = await continueCurrentReviewWorkflow(f, { compilationId: compilation.id, prompt, afterSeq: 4 })
     if (scenario === 'repeat') {
-      const latest = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId }, orderBy: { seq: 'desc' } })
-      await executeAgentRun({ ...f, prompt, mode: 'build', resume: true, eventStartSeq: latest.seq, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced', authorContinue: true })
+      const calls = completed.main.mock.calls.length, fees = await prisma.aiUsageLog.count({ where: { userId: f.userId } })
+      await expect(continueLoopRun(f.userId, f.runId)).rejects.toMatchObject({ code: 'RUN_NOT_PAUSED' })
+      expect(completed.main).toHaveBeenCalledTimes(calls)
+      expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(fees)
     }
-    expect(main).not.toHaveBeenCalled()
-    expect(network).not.toHaveBeenCalled()
-    expect(requests).toHaveLength(0)
-    expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
     const savedRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
     const state = (savedRun.usage as { checkpoint: typeof checkpoint }).checkpoint
-    expect(savedRun.status).toBe('paused')
+    expect(savedRun.status).toBe('completed')
     expect(state.reviewAttempts).toContain('old-continuity-attempt')
     expect(state.progressSignatures).toEqual(expect.arrayContaining([...seen]))
-    expect(state.writeProgress).toBe(checkpoint.writeProgress)
+    expect(state.writeProgress).toBeGreaterThan(checkpoint.writeProgress)
     expect(await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { lte: 4 } }, orderBy: { seq: 'asc' } })).toEqual(historical)
-    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).toEqual(frozen)
-    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ revision: 15, content: body })
-    expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).committedAt).toBeNull()
+    expect((completed.compilation.validation as { continuityCriticResponse: unknown }).continuityCriticResponse).toEqual((frozen.validation as { continuityCriticResponse: unknown }).continuityCriticResponse)
+    expect(JSON.stringify((completed.compilation.validation as { continuityCriticResponse: unknown }).continuityCriticResponse)).toContain('unknown')
+    expect(completed.chapter).toMatchObject({ revision: 17 })
+    expect(completed.chapter.content.trim()).toBe(body)
     expect(await prisma.agentRunEvent.count({ where: { runId: f.runId, seq: { gt: 4 }, type: 'tool.result', payload: { path: ['ok'], equals: false } } })).toBe(0)
   }, undefined, '修改本章', { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 1 }), 30000)
 })

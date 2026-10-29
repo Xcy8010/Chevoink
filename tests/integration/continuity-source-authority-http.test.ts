@@ -18,6 +18,7 @@ import { taskSpecSchema } from '../../shared/contracts/index.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { executeAgentRun } from '../../api/lib/agent/loop.js'
 import { readContinuedContinuityRecovery } from '../../api/lib/agent/legacy-continuity-recovery.js'
+import { buildQualityEvidenceSources } from '../../api/lib/agent/quality-evidence.js'
 
 const available = await verifyTestDatabase(isTestDatabaseRequired())
 afterAll(() => prisma.$disconnect())
@@ -25,26 +26,21 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 const runtime: NonNullable<ToolContext['modelRuntime']> = { tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
   baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-only', reasoningEffort: 'high', reasoningEfforts: ['none', 'high'],
   reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null }
-const semanticChecks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'not_applicable', reasonCode: 'consistent',
-  explanation: '本用例仅核对钥匙可用性，未出现方向或到达主张。', findingIds: [] as string[] }))
 const safeBody = '她在库门外等候。库门仍然关闭。'
 const obsolete = '她用旧钥匙开门'
 const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
 
-function sourceReviewResponse(scenario: string, round: number) {
-  const invalid = { findingId: 'f0', signal: 'object', severity: 'error', reasonCode: 'manuscript_conflict',
+function sourceReviewResponse(scenario: string, round: number, ids: { current: string; previous: string }, continued: boolean) {
+  const invalid = { signal: 'object', severity: 'error',
     explanation: `第3章却写“${obsolete}”，与前文熔毁事实矛盾。`, suggestion: '根据实际原文核对钥匙。',
-    manuscriptEvidence: [{ segmentId: 'p0', quote: '钥匙已经熔毁' }, { segmentId: 'c0', quote: obsolete }] }
+    evidence: [{ sourceId: 'missing-historical-prompt' }] }
   const misattributed = { ...invalid, explanation: '第3章仍写“钥匙已经熔毁”，同时写“库门仍然关闭”，同一时刻互斥。',
-    manuscriptEvidence: [{ segmentId: 'p0', quote: '库门只能用这把钥匙开启' }, { segmentId: 'c0', quote: '钥匙已经熔毁' }] }
-  if (round === 1) return { findings: [scenario === 'previous-misattributed' ? misattributed : invalid],
-    semanticChecks: scenario === 'real-conflict' ? semanticChecks.map(row => row.kind === 'state_progression' ? { ...row,
-      result: 'conflict', reasonCode: 'manuscript_conflict', explanation: '钥匙已熔毁且唯一可用，本章却用该钥匙开门。', findingIds: ['f0'] } : row) : semanticChecks,
-    issueDispositions: [] }
-  return { corrections: [{ table: 'findings', index: 0, value: scenario === 'history-confirm-rejected' ? invalid
-    : { findingId: 'f0', action: 'retract', reasonCode: 'historical_reference',
-      explanation: '原引文来自历史问题描述；当前稿明确库门关闭，未发生旧钥匙开门。',
-      manuscriptEvidence: [{ segmentId: 'c0', quote: '库门仍然关闭' }] } }] }
+    evidence: [{ sourceId: 'wrong-current-locator' }] }
+  if (round === 1) return { findings: scenario === 'history-retracted' || scenario === 'changed-during-provider' ? []
+    : scenario === 'real-conflict' ? [{ ...invalid, evidence: [{ sourceId: ids.previous }, { sourceId: ids.current }] }]
+      : [scenario === 'previous-misattributed' ? misattributed : invalid] }
+  return { corrections: scenario === 'history-confirm-rejected' && !continued ? []
+    : [{ index: 0, evidence: [{ sourceId: scenario === 'previous-misattributed' ? ids.previous : ids.current }] }] }
 }
 
 describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source review', () => {
@@ -81,7 +77,7 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
         await prisma.agentRunEvent.create({ data: { runId, seq: ownerSeq, type: 'run.started', payload: { type: 'run.started', seq: ownerSeq } } })
         const ctx: ToolContext = { userId, novelId, sessionId, runId, chapterId: chapters[2].id, callId: 'source-check',
           continuityOwnerSeq: ownerSeq,
-          mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', modelRuntime: runtime,
+          mode: 'build', creativeFreedom: 'stable', qualityMode: 'balanced', modelRuntime: runtime,
           signal: new AbortController().signal, emit: () => {} }
         const { compilation } = await prepareStoryCompilation({ ...ctx, mode: 'balanced', intentSummary: '只检查第三章合成稿' })
         await saveSceneTasks({ ...ctx, compilationId: compilation.id, tasks: [{ purpose: '等候', entryState: state,
@@ -90,19 +86,24 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
         const lastSeq = (await prisma.agentRunEvent.aggregate({ where: { runId }, _max: { seq: true } }))._max.seq ?? 0
         await prisma.agentRunEvent.create({ data: { runId, seq: lastSeq + 1, type: 'tool.call',
           payload: { toolName: 'continuity_validate', callId: ctx.callId, args: { compilationId: compilation.id } } } })
-        let sends = 0
+        const sourceId = (chapter: typeof chapters[number]) => buildQualityEvidenceSources({ userId, novelId,
+          chapterId: chapter.id, chapterRevision: chapter.revision }, chapter.content).entries[0].id.slice(0, 13)
+        const ids = { current: sourceId(chapters[2]), previous: sourceId(chapters[0]) }
+        let sends = 0, continuedRequest = false
         vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init: RequestInit) => {
           sends++
           const wire = JSON.parse(String(init.body))
-          expect(wire.messages[0].content).toContain('contract5')
+          expect(wire.messages[0].content).toContain(sends === 1 ? '连续性编辑' : 'sourceId')
           const input = JSON.parse(wire.messages[1].content)
-          if (sends === 1) expect(input).toMatchObject({ author_request: { manuscriptEvidence: false, text: prompt },
-            manifestSubject: { chapterId: chapters[2].id, revision: 4 }, reviewScope: 'body_only', terminalCertification: 'not_requested' })
-          else expect(input).toMatchObject({ invalid: [{ table: 'findings', index: 0, original: { findingId: 'f0' } }],
-            fixed: { semanticChecks, issueDispositions: [] } })
+          if (sends === 1) {
+            expect(input).toMatchObject({ authorRequest: prompt, currentChapter: chapters[2].id,
+              sources: expect.arrayContaining([expect.objectContaining({ chapterId: chapters[2].id, revision: 4, source: 'current', content: chapters[2].content }),
+                expect.objectContaining({ chapterId: chapters[0].id, revision: 4, source: 'previous', content: chapters[0].content })]) })
+            expect(input.sources[0].evidence).toContain(ids.current)
+          } else expect(input).toMatchObject({ invalid: [{ index: 0, opinion: { severity: 'error' } }] })
           if (scenario === 'changed-during-provider') await prisma.chapter.update({ where: { id: chapters[2].id },
             data: { content: safeBody + '后来收到消息。', revision: { increment: 1 } } })
-          const content = JSON.stringify(sourceReviewResponse(scenario, sends))
+          const content = JSON.stringify(sourceReviewResponse(scenario, sends, ids, continuedRequest))
           return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }],
             usage: { prompt_tokens: 24, completion_tokens: 12 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
         }))
@@ -112,12 +113,12 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
           payload: { toolName: 'continuity_validate', callId: ctx.callId, ok: result.outcome !== 'failed',
             ...('failureCode' in result ? { failureCode: result.failureCode } : {}) } } })
         expect(result.outcome === 'failed').toBe(['history-confirm-rejected', 'changed-during-provider'].includes(scenario))
-        expect(sends).toBe(scenario === 'real-conflict' || scenario === 'changed-during-provider' ? 1 : 2)
+        expect(sends).toBe(['real-conflict', 'changed-during-provider', 'history-retracted'].includes(scenario) ? 1 : 2)
         const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
         if (scenario !== 'changed-during-provider') expect(saved.validation).toMatchObject({
-          checkedRevision: 4, coverage: { protocolVersion: 11 }, continuityCriticResponse: { parserVersion: 10, responseContract: 5 },
+          checkedRevision: 4, continuityReport: { version: 1, revision: 4, rawResponses: expect.any(Array) },
           independentCheck: scenario === 'history-confirm-rejected' ? 'unavailable' : 'complete',
-          ...(scenario === 'real-conflict' ? { errorCount: 1 } : ['history-retracted', 'previous-misattributed'].includes(scenario) ? { errorCount: 0 } : {}),
+          ...(scenario === 'real-conflict' || scenario === 'previous-misattributed' ? { errorCount: 1 } : scenario === 'history-retracted' ? { errorCount: 0 } : {}),
         })
         if (scenario === 'real-conflict') {
           const commit = await chapterBridgeCommitTool.execute({ ...ctx, callId: 'must-pass-denial' }, { compilationId: compilation.id })
@@ -130,9 +131,9 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
         expect(payments).toHaveLength(sends)
         expect(ledger).toHaveLength(sends)
         expect(payments.every(p => p.billingStatus === 'settled' && p.reservedCreditMilli === 0)).toBe(true)
-        if (scenario !== 'changed-during-provider') {
+        if (scenario !== 'changed-during-provider' && scenario !== 'history-confirm-rejected') {
           await continuityValidateTool.execute({ ...ctx, callId: 'repeat-same-state' }, { compilationId: compilation.id }).catch(() => {})
-          expect(sends).toBe(scenario === 'real-conflict' ? 1 : 2)
+          expect(sends).toBe(scenario === 'real-conflict' || scenario === 'history-retracted' ? 1 : 2)
           expect(await prisma.aiUsageLog.findMany({ where: { agentRunId: runId }, orderBy: { id: 'asc' } })).toEqual(payments)
           expect(await prisma.creditLedgerEntry.findMany({ where: { userId }, orderBy: { id: 'asc' } })).toEqual(ledger)
         }
@@ -150,20 +151,23 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
             payload: { authorContinue: admission.authorContinue } } })
           ctx.continuityOwnerSeq = lastSeq + 4
           await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
-          // Continue is a wake-up, not an additional independent whole grant.
-          // This unchanged subject has no original cycle revision receipt.
+          // A known source-address failure can recover on the same body; the
+          // original paid bytes/opinion survive and no new critic is needed.
           expect(await prisma.$transaction(tx => readContinuedContinuityRecovery(tx, ctx))).toHaveLength(0)
+          continuedRequest = true
           await expect(continuityValidateTool.execute({ ...ctx, callId: 'author-continued' }, { compilationId: compilation.id }))
-            .resolves.toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
-          expect(sends).toBe(2)
+            .resolves.toMatchObject({ reviewCompleted: true, display: { errorCount: 1 } })
+          expect(sends).toBe(3)
           const recovered = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
-          expect(recovered.validation).toEqual(saved.validation)
+          expect(recovered.validation).toMatchObject({ independentCheck: 'complete', continuityReport: {
+            opinions: [expect.objectContaining({ explanation: `第3章却写“${obsolete}”，与前文熔毁事实矛盾。` })] } })
           expect(recovered.preparedContext).toEqual(saved.preparedContext)
           await expect(continuityValidateTool.execute({ ...ctx, callId: 'continued-repeat' }, { compilationId: compilation.id }))
-            .resolves.toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
-          expect(sends).toBe(2)
-          expect(await prisma.aiUsageLog.findMany({ where: { agentRunId: runId }, orderBy: { id: 'asc' } })).toEqual(payments)
-          expect(await prisma.creditLedgerEntry.findMany({ where: { userId }, orderBy: { id: 'asc' } })).toEqual(ledger)
+            .resolves.toMatchObject({ reviewCompleted: true })
+          expect(sends).toBe(3)
+          expect(await prisma.aiUsageLog.findMany({ where: { id: { in: payments.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(payments)
+          expect(await prisma.creditLedgerEntry.findMany({ where: { id: { in: ledger.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(ledger)
+          expect(await prisma.aiUsageLog.count({ where: { agentRunId: runId } })).toBe(3)
         }
         for (const chapter of chapters.slice(0, 2)) {
           await expect(chapterWriteTool.execute({ ...ctx, callId: `deny-${chapter.id}` }, { chapterId: chapter.id, content: '未授权替换' }))

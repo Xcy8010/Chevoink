@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
-import { prepareStoryCompilation, saveSceneTasks, validateStoryContinuity, commitChapterBridge } from '../../api/lib/agent/story-compiler.js'
+import { prepareStoryCompilation, saveSceneTasks, commitChapterBridge } from '../../api/lib/agent/story-compiler.js'
+import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
 import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
-import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
-import { resolveTerminalCandidate, terminalCandidateInputSchema, terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
+import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
@@ -13,7 +13,7 @@ import * as memory from '../../api/lib/agent/story-memory.js'
 
 describe.runIf(available)('serial inherited terminal facts with real PostgreSQL receipts', () => {
   it.each(['unchanged', 'root-edited', 'middle-edited', 'middle-verdict', 'inserted', 'same-prose-new-id', 'bookkeeping', 'quote-address'] as const)(
-    'carries two unmentioned chapters and independently invalidates dependencies: %s', scenario => fixture(async f => {
+    'checks actual preceding chapters and invalidates source changes without inherited fact certification: %s', scenario => fixture(async f => {
       vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
       const initial = await prisma.chapter.update({ where: { id: f.chapterId }, data: { orderIndex: 10, orderInVolume: 10,
         content: (scenario === 'quote-address' ? '场景。'.repeat(100) : '') + '过滤泵仍需检修，必须等零件送到。', revision: 3 } })
@@ -34,28 +34,26 @@ describe.runIf(available)('serial inherited terminal facts with real PostgreSQL 
         const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } } })
         const source = await readCompilerContinuitySource(prisma, f, chapter, saved.bridge!.fromChapterId, 11)
         const evidence = terminalEvidenceContext(chapter, source, 2, scenario === 'quote-address' ? 1 : undefined)
-        const selectedProof = evidence.previous?.carried?.[0]?.proofHash
-        if (index > 0) expect(resolveTerminalCandidate(terminalCandidateInputSchema.parse({ exitState: {}, inheritedProofs: [selectedProof] }),
-          evidence.previous?.carried, 2)).toEqual({ ok: true, candidate })
-        if (index > 0) expect(evidence.previous?.carried).toMatchObject([{ field: 'openLoops', claim: '过滤泵检修等零件', depth: index }])
         const raw = JSON.stringify({ findings: [], semanticChecks: ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'not_applicable',
           reason: '本合成例只核对持续未解决事项。', findingIndexes: [] })), terminalVerdicts: [{ path: 'exitState.openLoops.0', verdict: 'supported',
           basis: index === 0 ? 'current' : 'inherited', sourceEvidence: [{ segmentId: index === 0 ? 'c0' : 't0', quote: '过滤泵仍需检修' }],
           ...(index === 0 ? {} : { inheritance: { priorEndState: 'established', currentState: 'unchanged' } }) }] })
         const inspected = inspectContinuityResponse(raw, { previous: source?.content ?? null, current: chapter.content, terminalEvidence: evidence }, true, 8, candidate)
-        expect(inspected.complete).toBe(true)
-        const coverage = compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source, terminalCandidate: candidate }, 11)
-        const report = await validateStoryContinuity({ ...f, compilationId: compilation.id, findings: [], independentCheck: 'complete', coverage, terminalCandidate: candidate })
-        await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: runtimeJson({ ...report, continuityCriticResponse: inspected.audit }).value } })
+        if (index === 0) expect(inspected.complete).toBe(true)
+        const historical = await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'continuityReview', title: '冻结旧继承回复',
+          content: raw, metadata: runtimeJson({ candidate, audit: inspected.audit }).value } })
+        const { snapshot } = await persistCurrentContinuityReport({ ...f, compilationId: compilation.id, expectedChapterRevision: chapter.revision })
+        expect(snapshot.previous.map(row => row.id)).toEqual(chapters.slice(0, index).reverse().slice(0, 3).map(row => row.id))
+        if (scenario === 'quote-address' && index === 0) expect(snapshot.sources[0].table.entries).toContainEqual(expect.objectContaining({ start: 300,
+          text: expect.stringContaining('过滤泵仍需检修') }))
         await persistHumanityQualityReport({ ...f, compilationId: compilation.id, chapterId: chapter.id, chapterRevision: chapter.revision,
           mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
         if (index < 3) {
           await commitChapterBridge(terminal(compilation.id))
           const committed = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
-          expect(committed.preparedContext).toMatchObject({ terminalFactProofs: [{ depth: index + 1 }] })
-          const facts = (committed.preparedContext as { terminalFactProofs: Array<{ nodes: Array<{ chapterId: string }> }> }).terminalFactProofs
-          expect(facts[0].nodes.map(node => node.chapterId)).toEqual(chapters.slice(0, index + 1).reverse().map(item => item.id))
-          if (scenario === 'quote-address') expect(committed.preparedContext).toMatchObject({ terminalFactProofs: [{ anchors: [{ start: 300, end: 307, quote: '过滤泵仍需检修' }] }] })
+          expect(committed.preparedContext).not.toHaveProperty('terminalFactProofs')
+          expect(committed.preparedContext).toMatchObject({ terminalContentHash: runtimeJson({ content: chapter.content }).hash })
+          expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: historical.id } })).toEqual(historical)
           if (scenario === 'bookkeeping' && index === 2) {
             const validation = committed.validation as Record<string, unknown>
             await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: runtimeJson({ ...validation, checkedAt: new Date().toISOString(), checkRounds: 99 }).value } })
@@ -73,14 +71,12 @@ describe.runIf(available)('serial inherited terminal facts with real PostgreSQL 
         if (scenario === 'same-prose-new-id') await prisma.chapter.update({ where: { id: initial.id }, data: { archivedAt: new Date() } })
         if (scenario === 'inserted' || scenario === 'same-prose-new-id') await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId,
           volumeId: initial.volumeId, orderIndex: 15, orderInVolume: 15, title: '改变邻接', content: initial.content, revision: initial.revision } })
-        if (scenario === 'unchanged' || scenario === 'bookkeeping' || scenario === 'quote-address') await commitChapterBridge(terminal(compilation.id))
+        if (scenario === 'unchanged' || scenario === 'bookkeeping' || scenario === 'quote-address' || scenario === 'middle-verdict') await commitChapterBridge(terminal(compilation.id))
         else {
-          const refreshed = await readCompilerContinuitySource(prisma, f, chapter, saved.bridge!.fromChapterId, 11)
-          expect(resolveTerminalCandidate(terminalCandidateInputSchema.parse({ exitState: {}, inheritedProofs: [selectedProof] }),
-            refreshed && 'preceding' in refreshed && 'terminalInheritance' in refreshed ? refreshed.terminalInheritance : [], 2)).toMatchObject({ ok: false })
           await expect(commitChapterBridge(terminal(compilation.id))).rejects.toMatchObject({ code: expect.stringMatching(/CONTINUITY_|TERMINAL_STATE_/) })
           expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toEqual(before)
         }
+        expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: historical.id } })).toEqual(historical)
       }
       expect(await prisma.aiUsageLog.count({ where: { agentRunId: f.runId } })).toBe(0)
     }, undefined, '授权自主创作全书，并修改已有章节及卷章结构。', { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, ...(scenario === 'quote-address' ? { terminalQuoteAddressProtocol: 1 as const } : {}) }))

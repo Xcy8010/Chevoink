@@ -5,7 +5,7 @@ import { recoverExplicitSourceEvidence, validateStoredExplicitSourceProjection }
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { compilerContinuityCoverage, completeCompilerContinuityAssessment, validCompilerContinuitySourceProjection } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { readCurrentCompilerContinuity } from '../../api/lib/agent/chapter-review-guard.js'
-import { readStandaloneContinuityReport, buildStandaloneContinuityContext } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { readHistoricalStandaloneContinuityReport as readStandaloneContinuityReport, readHistoricalStandaloneContinuityContext as buildStandaloneContinuityContext } from '../../api/lib/agent/continuity-history.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 function fixture(version: 7 | 8 = 8) {

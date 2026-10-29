@@ -7,7 +7,7 @@ import { terminalCandidateFacts, terminalFactId } from './terminal-fact-identity
 import type { TerminalCarriedFact } from './terminal-evidence-context.js'
 import type { ToolContext } from './tools/types.js'
 import { readOriginalTaskRequest } from './original-request.js'
-import { terminalProposalTaskId, type TerminalProposalPreparation } from './terminal-proposal-context.js'
+import { terminalProposalTaskId } from './terminal-proposal-context.js'
 import { terminalProposalChangesSchema, terminalProposalStateSchema, readTerminalProposalState } from './terminal-proposal-review.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/u)
@@ -98,8 +98,7 @@ function validateProposalSnapshot(snapshot: z.infer<typeof currentSnapshotSchema
  * is created by this input snapshot; the existing review lifecycle owns that. */
 async function legacyTerminalPatch(tx: Prisma.TransactionClient,ctx: Pick<ToolContext,'userId'|'novelId'|'runId'|'callId'>,
   compilation:{id:string;validation:unknown;chapter:{id:string;revision:number;content:string}},
-  source:unknown,carried:TerminalCarriedFact[]|undefined,protocol:1|2|undefined,patch:TerminalCandidatePatch,inheritedProofs:string[]=[],readOnly=false,
-  prepareProposals?: (candidate: TerminalCandidate) => TerminalProposalPreparation | undefined){
+  source:unknown,carried:TerminalCarriedFact[]|undefined,protocol:1|2|undefined,patch:TerminalCandidatePatch,inheritedProofs:string[]=[]){
   const original=await readOriginalTaskRequest(tx,ctx)
   const identity={userId:ctx.userId,novelId:ctx.novelId,taskId:original.taskId,runId:ctx.runId,callId:ctx.callId,
     compilationId:compilation.id,chapterId:compilation.chapter.id,revision:compilation.chapter.revision,
@@ -120,31 +119,10 @@ async function legacyTerminalPatch(tx: Prisma.TransactionClient,ctx: Pick<ToolCo
     return {candidate:rebuilt.candidate,expectedBaseHash:runtimeJson(current).hash,
       ...(snapshot.data.version === 2 ? { proposalVersion: 2 as const, proposalReview: snapshot.data.proposalReview } : {})}
   }
-  if(readOnly)return null
-  const selected=resolveTerminalCandidate({...applyTerminalCandidatePatch(current,patch),inheritedProofs},carried,protocol)
-  if(!selected.ok)throw stale()
-  const issue=terminalCandidateReplacementIssue(compilation.validation,selected.candidate,compilation.chapter.content)
-  const proposalReview = prepareProposals?.(selected.candidate)
-  if(issue && !proposalReview?.changes)throw new DataAccessError(409,'TERMINAL_STATE_REVIEW_REQUIRED',issue)
-  const snapshot=prepareProposals
-    ? currentSnapshotSchema.parse({version:2,kind:'terminalCandidatePatch',identity,request,base:current,candidate:selected.candidate,
-      ...(proposalReview ? { proposalReview } : {})})
-    : snapshotSchema.parse({version:1,kind:'terminalCandidatePatch',identity,request,base:current,candidate:selected.candidate})
-  if (snapshot.version === 2) validateProposalSnapshot(snapshot, terminalProposalTaskId(original.spec, original.taskId))
-  await tx.agentArtifact.create({data:{id,runId:ctx.runId,artifactType:'continuityReview',title:'章末候选增量输入快照',content:'',metadata:runtimeJson(snapshot).value}})
-  return {candidate:selected.candidate,expectedBaseHash:patch.baseCandidateHash,
-    ...(snapshot.version === 2 ? { proposalVersion: 2 as const, proposalReview: snapshot.proposalReview } : {})}
+  return null
 }
 
 export const readFrozenLegacyTerminalPatch = (tx: Prisma.TransactionClient,ctx: Pick<ToolContext,'userId'|'novelId'|'runId'|'callId'>,
   ...input: [compilation:{id:string;validation:unknown;chapter:{id:string;revision:number;content:string}},source:unknown,
     carried:TerminalCarriedFact[]|undefined,protocol:1|2|undefined,patch:TerminalCandidatePatch,inheritedProofs?:string[]]) =>
-  legacyTerminalPatch(tx,ctx,input[0],input[1],input[2],input[3],input[4],input[5]??[],true)
-
-export async function freezeLegacyTerminalPatch(tx: Prisma.TransactionClient,ctx: Pick<ToolContext,'userId'|'novelId'|'runId'|'callId'|'signal'>,
-  ...input: [compilation:{id:string;validation:unknown;chapter:{id:string;revision:number;content:string}},source:unknown,
-    carried:TerminalCarriedFact[]|undefined,protocol:1|2|undefined,patch:TerminalCandidatePatch,inheritedProofs?:string[],
-    prepareProposals?: (candidate: TerminalCandidate) => TerminalProposalPreparation | undefined]) {
-  ctx.signal.throwIfAborted()
-  return (await legacyTerminalPatch(tx,ctx,input[0],input[1],input[2],input[3],input[4],input[5] ?? [],false,input[6]))!
-}
+  legacyTerminalPatch(tx,ctx,input[0],input[1],input[2],input[3],input[4],input[5]??[])

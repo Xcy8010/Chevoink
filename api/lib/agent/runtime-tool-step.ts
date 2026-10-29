@@ -1,8 +1,9 @@
+import { hasRetiredNativeArguments, verifiedAssistantToolViews, toolWithNativeView, needsNativeToolProjection } from './runtime-tool-view.js'
 import { z } from 'zod'
 import { originalToolParameterSchemas } from './tool-schema.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { env } from '../../config/env.js'
-import { requestToolApproval, pollToolApproval } from './runtime-approval.js'
+import { requestToolApproval, pollToolApproval, readCommitReviewApproval } from './runtime-approval.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { runtimeError, runtimeJson } from './runtime-common.js'
 import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
@@ -15,7 +16,7 @@ import { chapterReadTool, planReadTool, novelGetContextTool, chapterListSummarie
 import { chapterWriteTool, chapterAppendTool, chapterEditRangeTool, chapterCreateTool, chapterRenameTool, preflightChapterReviewWrite } from './tools/chapter-tools.js'
 import { deferReviewWriteInTransaction } from './runtime-review-deferral.js'
 import { executeDurableChapterRename } from './tools/durable-chapter.js'
-import { coordinatedWritingManifest, coordinatedWriterActions, coordinatedWriterParameters } from './coordinated-writing-input.js'
+import { coordinatedWriterParameters } from './coordinated-writing-input.js'
 import { executeDurableCoordinatedWriter } from './tools/durable-coordinated-writer.js'
 import { planSaveTool, planRenameTool, planDeleteTool, memorySaveTool, planExitTool } from './tools/write-tools.js'
 import { researchReportReadTool, researchReportSaveTool, webSearchTool, webReadTool, webReadNavigationTool } from './tools/search-tools.js'
@@ -146,6 +147,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
   const selected = await withRunLease(lease, async tx => {
     const current = await readExecutionStateInTransaction(tx, lease.taskRootId)
     let frame = current.frame
+    let historicalWriter = false
     if (frame.state.phase === 'awaiting_operation') {
       const pending = await tx.agentOperation.findUniqueOrThrow({ where: { id: frame.state.pendingOperationId! } })
       if (pending.kind === 'tool' && ['succeeded', 'failed'].includes(pending.status)) return { recover: { expectedRevision: frame.revision, expectedHash: frame.snapshotHash, operationId: pending.id } }
@@ -160,6 +162,9 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       if (source.state.phase !== 'idle' || pending.operationKey !== `exec:${source.state.nextOperationSequence}`
         || frame.state.nextOperationSequence !== source.state.nextOperationSequence + 1 || frame.state.turn !== source.state.turn
         || runtimeJson(frame.state.messages).hash !== runtimeJson(source.state.messages).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '工具准备状态缺少原准入位置。')
+      historicalWriter = ['chapter_write', 'chapter_append', 'chapter_edit_range'].includes(pending.action)
+        && !!(pending.inputSnapshot && typeof pending.inputSnapshot === 'object' && 'input' in pending.inputSnapshot
+          && pending.inputSnapshot.input && typeof pending.inputSnapshot.input === 'object' && 'writingManifest' in pending.inputSnapshot.input)
       frame = source
     }
     if (frame.state.phase !== 'idle') return { idle: true as const }
@@ -179,21 +184,28 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     const originalSpec = taskSpecSchema.parse(root.specSnapshot)
     const originalScope = originalSpec.scope
-    if (originalScope.writingCoordinationProtocol && coordinatedWriterActions.some(name => name === call.name)) {
-      tool = { ...tool, parameters: coordinatedWriterParameters(tool, originalScope) }
-    }
+    if (historicalWriter) tool = { ...tool, parameters: coordinatedWriterParameters(tool, originalScope) }
     if (call.name === 'web_read' && originalSpec.researchNavigation?.version === 1 && originalSpec.intent === 'research_analysis') {
       tool = checkedAdapter(webReadNavigationTool)
     }
-    const storedSchemaHash = runtimeJson(definition.function.parameters).hash
-    // Old generic snapshots stay immutable. A new narrowed schema is valid
-    // only when recomputed exactly from this root's original frozen contract.
-    if (!originalToolParameterSchemas(tool, originalScope).some(schema => runtimeJson(schema).hash === storedSchemaHash)) runtimeError('RUNTIME_IDENTITY_CONFLICT', '工具 schema 与原任务不一致。')
+    let published = definition
+    if (!historicalWriter && await needsNativeToolProjection(current.configuration.tools, originalScope, call.name)) {
+      const source = (await verifiedAssistantToolViews(tx, lease.taskRootId, frame, current.configuration.tools, originalScope)).find(item => item.function.name === call.name)
+      if (!source) return { reject: { cursor, callId: call.id } }
+      published = source
+    } else if (!originalToolParameterSchemas(tool, originalScope).some(schema => runtimeJson(schema).hash === runtimeJson(definition.function.parameters).hash)) {
+      runtimeError('RUNTIME_IDENTITY_CONFLICT', '工具 schema 与原任务不一致。')
+    }
     let raw: unknown
     try { raw = call.arguments ? parseToolArgsTolerant(call.arguments, false) : {} }
     catch { return { reject: { cursor, callId: call.id } } }
+    if (!historicalWriter && current.frame.state.phase !== 'awaiting_operation' && hasRetiredNativeArguments(call.name, raw)) return { reject: { cursor, callId: call.id, tool } }
     const frozenArgs = await readPreparedLiteraryArguments(tx, lease, { action: call.name, callId: call.id, rawArguments: call.arguments, cursor })
-    const validated = validateToolInput(tool, normalizeToolInput(tool, frozenArgs ?? raw))
+    const normalized = normalizeToolInput(tool, frozenArgs ?? raw)
+    if (!historicalWriter && published !== definition && !validateToolInput(toolWithNativeView(tool, published), normalized).success) {
+      return { reject: { cursor, callId: call.id, tool } }
+    }
+    const validated = validateToolInput(tool, normalized)
     if (!validated.success) {
       if (frozenArgs) return runtimeError('RUNTIME_RECEIPT_INVALID', '原冻结文学参数不符合原工具合同，不能重新补造。')
       return { reject: { cursor, callId: call.id, tool } }
@@ -209,7 +221,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
         customModelId: current.configuration.model.customModelId, reasoningEffort: current.configuration.model.reasoningEffort as ModelReasoningEffort,
         provider: current.configuration.model.provider, modelName: current.configuration.model.modelName, routeRevision: current.configuration.model.routeRevision } }
     ctx.modelAssignments = current.configuration.modelAssignments
-    if (originalScope.writingCoordinationProtocol && coordinatedWriterActions.some(name => name === call.name)) ctx.writingScope = originalScope
+    if (historicalWriter) ctx.writingScope = originalScope
     ctx.inlineChild = Boolean(lease.parent)
     const capability = { lease, cursor, operationKey: `exec:${frame.state.nextOperationSequence}` }
     if (call.name === 'agent_configure' || call.name === 'model_assign') ctx.durableConfiguration = capability
@@ -263,20 +275,15 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       if (admission?.kind === 'decision_required') return { deferred: await deferReviewWriteInTransaction(tx, lease, frame, call, admission.guidance) }
     }
     let serviceConfirmation = false
-    if (ctx.writingScope?.writingCoordinationProtocol && ctx.durableContent) {
-      const original = await (await import('./original-request.js')).readOriginalTaskRequest(tx, ctx)
-      const chapter = await tx.chapter.findFirst({ where: { id: ctx.durableContent.chapterId, authorId: ctx.userId, novelId: ctx.novelId }, select: { orderIndex: true } })
-      if (!chapter) return runtimeError('AUTHOR_CHAPTER_SCOPE', '当前写作章节不属于原作品。')
-      const manifest = z.object({ steps: z.array(z.object({ actions: z.array(z.string()) })) }).parse(
-        coordinatedWritingManifest({ spec: originalSpec, prompt: original.prompt }, call.name, ctx.durableContent.chapterId, args.writing, { targetOrderIndex: chapter.orderIndex }))
-      serviceConfirmation = (await (await import('./runtime-writing-service.js')).readWritingServiceConfirmations(tx, lease,
-        manifest.steps.flatMap(step => step.actions))).length > 0
+    if (call.name === 'chapter_bridge_commit' && current.frame.state.phase === 'idle') {
+      const review = await readCommitReviewApproval(tx, lease, ctx, typeof args.compilationId === 'string' ? args.compilationId : undefined)
+      serviceConfirmation = review.confirmations.length > 0
     }
     // Every validated prepared tool already owns its original idle source.
     // The adapter/effect rechecks that exact approval and current policy; a
     // pending recovery cannot re-enter the idle-only approval polling path.
     const resumeTool = current.frame.state.phase === 'awaiting_operation'
-    return { tool, args, ctx, cursor, needsApproval: !resumeTool && (grant.permission === 'ask' || grant.alwaysConfirm || serviceConfirmation) }
+    return { tool, args, ctx, cursor, historicalWriter, needsApproval: !resumeTool && (grant.permission === 'ask' || grant.alwaysConfirm || serviceConfirmation) }
   })
   if ('deferred' in selected) return { kind: 'context' as const, frame: selected.deferred! }
   if ('recover' in selected) {
@@ -320,8 +327,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
   if (selected.ctx.durableCover) return { kind: 'tool' as const, result: await executeDurableCover(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableDossier) return { kind: 'tool' as const, result: await executeDurableDossier(selected.ctx, selected.tool, selected.args) }
   if (selected.ctx.durableExport) return { kind: 'tool' as const, result: await executeDurableExport(selected.ctx, selected.tool, selected.args) }
-  if (selected.ctx.durableContent && selected.ctx.writingScope?.writingCoordinationProtocol
-    && coordinatedWriterActions.some(name => name === selected.tool.name)) {
+  if (selected.historicalWriter) {
     return { kind: 'tool' as const, result: await executeDurableCoordinatedWriter(selected.ctx, selected.tool, selected.args) }
   }
   if (selected.ctx.durableWeb) return { kind: 'tool' as const, result: await executeDurableWeb(selected.ctx, selected.tool, selected.args) }

@@ -1,3 +1,5 @@
+import { currentNativeToolViews, readFrozenModelToolViews } from './runtime-tool-view.js'
+import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { runtimeError, runtimeJson } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionStateInTransaction } from './runtime-state.js'
@@ -22,7 +24,19 @@ export async function validateModelCursor(token: RunLeaseToken, cursor: ModelExe
     const frame = await readExecutionFrame(tx, token.taskRootId, cursor.expectedRevision)
     if (frame.snapshotHash !== cursor.expectedHash || frame.state.phase !== 'idle' || frame.state.pendingOperationId
       || input.operationKey !== `exec:${frame.state.nextOperationSequence}` || input.parentOperationId) runtimeError('RUNTIME_STATE_CONFLICT', '主模型调用必须来自原空闲执行位置。')
-    if (runtimeJson(input.messages).hash !== runtimeJson(frame.state.messages).hash || runtimeJson(input.tools).hash !== runtimeJson(current.configuration.tools).hash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '模型上下文或工具列表与冻结执行状态不同。')
+    let tools: unknown = await currentNativeToolViews(current.configuration.tools, taskSpecSchema.parse(current.originalSpec).scope)
+    if (current.frame.state.phase === 'awaiting_operation' && current.frame.state.pendingOperationId) {
+      const operation = await tx.agentOperation.findUniqueOrThrow({ where: { id: current.frame.state.pendingOperationId } })
+      if (operation.kind !== 'provider' || operation.status !== 'prepared' || operation.operationKey !== input.operationKey
+        || operation.taskRootId !== token.taskRootId || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash
+        || current.frame.revision !== frame.revision + 1
+        || runtimeJson(current.frame.state.messages).hash !== runtimeJson(frame.state.messages).hash
+        || await tx.agentProviderAttempt.count({ where: { operationId: operation.id, OR: [{ dispatchedAt: { not: null } }, { status: { not: 'prepared' } }] } })) {
+        return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原模型请求不能用新工具视图替换或重派。')
+      }
+      tools = readFrozenModelToolViews(operation.inputSnapshot)
+    }
+    if (runtimeJson(input.messages).hash !== runtimeJson(frame.state.messages).hash || runtimeJson(input.tools).hash !== runtimeJson(tools).hash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '模型上下文或工具列表与冻结执行状态不同。')
     const model = current.configuration.model
     if (model.tier !== input.tier || model.provider !== input.route.provider || model.modelName !== input.route.model
       || model.reasoningEffort !== input.route.reasoningEffort || model.routeRevision !== modelRouteRevision(input.route)) runtimeError('RUNTIME_IDENTITY_CONFLICT', '模型路由与冻结配置不同，不能静默切换供应商或模型。')

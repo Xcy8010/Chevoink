@@ -25,8 +25,8 @@ import { shortSceneRequest, firstChapterAnswer, placementQuestion } from '../sup
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { buildHumanityQualityContext, qualityReviewContextHash, persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import { assertChapterReviewRevision, readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
-import { saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
-import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
+import { saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
+import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
 import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
 import { terminalEvidenceContext, terminalQuoteAddressVersion } from '../../api/lib/agent/terminal-evidence-context.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
@@ -240,7 +240,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       .rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
     expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
   }, false, body, { singleVolume: false, editor: 'none' }))
-  it('retains independently supported facts across candidate omission, failed commit and reprepare without editing prose', () => fixture(
+  it('preserves historical judgments while candidate omission cannot block current reports and delivery', () => fixture(
     '先读取第4章当前已存正文，完成本章检查和提交。请先做连续性与人类感检查；如有必要，只对本章做局部修订并复检。不新建章节，不修改前3章。', async (ctx, before) => {
       const original = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
       expect(original.scope.terminalCoverageProtocol).toBe(2)
@@ -261,15 +261,15 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
             { path: 'exitState.emotion.0', verdict: 'unknown', basis: 'current', sourceEvidence: [] },
           ] : [], ...(unknownDisposition ? { terminalDispositions: obligations!.obligations.map(item => ({ id: item.id, outcome: 'unknown', reason: '尚不能判定解除。', sourceEvidence: [] })) } : {}) })
         const inspected = inspectContinuityResponse(response, { previous: source?.content ?? null, current: chapter.content, terminalEvidence: evidence }, true, 8, candidate)
-        const coverage = compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source, terminalCandidate: candidate }, 11)
-        await validateStoryContinuity({ ...ctx, compilationId: compilation.id, findings: [], independentCheck: inspected.complete ? 'complete' : 'unavailable',
-          coverage, terminalCandidate: candidate, continuityCriticResponse: inspected.audit })
+        await prisma.agentArtifact.create({ data: { id: randomUUID(), runId: ctx.runId, artifactType: 'continuityReview',
+          title: '冻结历史判断', content: response, metadata: runtimeJson({ candidate, audit: inspected.audit }).value } })
+        await persistCurrentContinuityReport({ ...ctx, compilationId: compilation.id, expectedChapterRevision: chapter.revision })
         return inspected
       }
       expect((await assess(complete)).complete).toBe(true)
       compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
-      expect(readTerminalCoverageState(original, compilation.preparedContext, chapter.id)?.facts).toMatchObject([{ field: 'body', claim: '林舟右掌有伤' }])
-      expect((await assess(empty)).audit.classification).toBe('terminal_invalid')
+      expect(readTerminalCoverageState(original, compilation.preparedContext, chapter.id)?.facts ?? []).toEqual([])
+      expect((await assess(empty)).complete).toBe(true)
       expect((await assess(empty, true)).complete).toBe(true)
       const quality = await buildHumanityQualityContext(ctx.userId, ctx.novelId, chapter.id, ctx.runId)
       await prisma.chapterQualityReport.create({ data: { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id,
@@ -277,20 +277,24 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
           contentHash: createHash('sha256').update(chapter.content).digest('hex'), qualityContextHash: qualityReviewContextHash(quality) } } })
       await expect(chapterBridgeCommitTool.execute(ctx, { compilationId: compilation.id, chapterSummary: '原文保留', exitState: empty.exitState,
         lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '等候', endingStructure: '未开门' }))
-        .resolves.toMatchObject({ outcome: 'failed', failureCode: 'TERMINAL_STATE_REVIEW_REQUIRED' })
+        .resolves.toMatchObject({ summary: '章节已提交' })
       const unchanged = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
-      expect(unchanged.bridge?.committedAt).toBeNull()
+      expect(unchanged.bridge?.committedAt).toBeInstanceOf(Date)
+      const history = await prisma.agentArtifact.findMany({ where: { runId: ctx.runId, artifactType: 'continuityReview', title: '冻结历史判断' }, orderBy: { id: 'asc' } })
+      expect(history).toHaveLength(3)
+      expect(history.some(row => row.content.includes('"verdict":"unknown"'))).toBe(true)
       const pending = readTerminalCoverageState(original, unchanged.preparedContext, chapter.id)
       expect((await prepare(ctx)).outcome).not.toBe('failed')
       const next = await prisma.storyCompilation.findFirstOrThrow({ where: { runId: ctx.runId, status: 'active' } })
       expect(next.id).not.toBe(compilation.id)
       expect(readTerminalCoverageState(original, next.preparedContext, chapter.id)).toEqual(pending)
       expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, next.id)))
-        .toMatchObject({ ready: false, terminalReview: { state: 'unverified' } })
+        .toMatchObject({ ready: false })
       await expect(chapterBridgeCommitTool.execute(ctx, { compilationId: next.id, chapterSummary: '不能以重准备清空义务', exitState: empty.exitState,
         lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '等候', endingStructure: '未开门' }))
         .resolves.toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_CHECK_REQUIRED' })
       expect((await prisma.chapterBridge.findFirstOrThrow({ where: { compilationId: next.id } })).committedAt).toBeNull()
+      expect(await prisma.agentArtifact.findMany({ where: { id: { in: history.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(history)
       expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
     }, false, body + '林舟右掌有伤。'))
   const reviewRequests = [
@@ -326,7 +330,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
   it.each([false, true])('completes current checks and real commit with conditional repair=%s, preserving prior chapters', repair => fixture(reviewRequests[0], async (ctx, before) => {
     expect((await prepare(ctx)).outcome).not.toBe('failed')
     const compilation = await prisma.storyCompilation.findFirstOrThrow({ where: { runId: ctx.runId } })
-    expect(await chapterBridgeGetTool.execute(ctx, {})).toMatchObject({ display: { title: '章节桥 · 入章承接' } })
+    expect(await chapterBridgeGetTool.execute(ctx, {})).toMatchObject({ display: { title: '章节桥' } })
     await saveSceneTasks({ ...ctx, compilationId: compilation.id, tasks: [{ purpose: '核对现有场景', entryState: { location: '长廊' },
       goal: '等待门开', obstacle: '门关着', choice: '等候', cost: '时间流逝', turn: '听见指令', exitState: { location: '长廊' },
       styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
@@ -344,13 +348,10 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       terminalVerdicts: [{ path: 'exitState.location', verdict: 'supported', basis: 'current', sourceEvidence: [{ segmentId: 'c0', quote: '两人留在长廊' }] }] })
       const inspected = inspectContinuityResponse(response, { previous: source?.content ?? null, current: chapter.content, terminalEvidence: evidence }, true, 8, candidate)
       expect(inspected.complete).toBe(true)
-      const coverage = compilerContinuityCoverage({ chapter, bridge: saved.bridge, sceneTasks: saved.sceneTasks, source, terminalCandidate: candidate }, 11)
-      const validation = await validateStoryContinuity({ ...ctx, compilationId: compilation.id, findings: [], independentCheck: 'complete', coverage, terminalCandidate: candidate,
-        continuityCriticResponse: inspected.audit })
-      expect(validation.errorCount).toBe(0)
-      await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: runtimeJson({ ...validation, continuityCriticResponse: inspected.audit }).value } })
+      const { validation } = await persistCurrentContinuityReport({ ...ctx, compilationId: compilation.id, expectedChapterRevision: chapter.revision })
+      expect(validation).toMatchObject({ errorCount: 0 })
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).validation)
-        .toMatchObject({ coverage: { protocolVersion: 11 }, continuityCriticResponse: { parserVersion: 8, terminalEvidence: { quoteAddressProtocol: 1 } } })
+        .toMatchObject({ continuityReport: { version: 1, chapterId: chapter.id, revision: chapter.revision, complete: true } })
       if (chapter.content.includes('向左走')) {
         const preflight = await preflightChapterReviewWrite(ctx, 'chapter_edit_range', { chapterId: chapter.id, oldText: '向左走', newText: '向右走' })
         expect(preflight).toMatchObject({ kind: 'decision_required', conditional: { state: 'checks_required',

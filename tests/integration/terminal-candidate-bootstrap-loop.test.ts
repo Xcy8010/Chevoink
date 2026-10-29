@@ -2,34 +2,32 @@ import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { available, fixture as durableFixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
-import { executeAgentRun } from '../../api/lib/agent/loop.js'
 import { continueLoopRun } from '../../api/lib/agent/run-service.js'
-import { readTerminalInheritance } from '../../api/lib/agent/terminal-inheritance-chain.js'
+import { executeAgentRun } from '../../api/lib/agent/loop.js'
+import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import * as agents from '../../api/lib/agent/agents.js'
-import { prepareStoryCompilation, saveSceneTasks, validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
+import { prepareStoryCompilation, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
+import { persistHistoricalContinuityAudit as validateStoryContinuity } from '../support/historical-continuity-audit.js'
+import { continueCurrentTerminalLoop as continueCurrentReviewWorkflow } from '../support/current-terminal-loop-fixture.js'
 import { readOriginalTaskRequest } from '../../api/lib/agent/original-request.js'
 import { originalChapterReviewRequirements } from '../../api/lib/agent/chapter-review-requirements.js'
 import { readCompilerContinuitySource } from '../../api/lib/agent/compiler-continuity-source.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
 import { terminalCoverageInput } from '../../api/lib/agent/terminal-fact-coverage.js'
-import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
+import { terminalCandidateSchema, currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
 import { terminalCandidateFacts } from '../../api/lib/agent/terminal-fact-identity.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { compilerEvidenceScope } from '../../api/lib/agent/continuity-source-authority.js'
 import { bindLegacyContinuityAssessment, legacyContinuityAssessmentKey, readLegacyContinuityAssessment, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
-import { terminalFeedbackSlots } from '../../api/lib/agent/terminal-feedback-handoff.js'
-import { terminalProcessingPlan } from '../../api/lib/agent/terminal-processing.js'
 import { prepareTerminalProposalInput } from '../../api/lib/agent/terminal-proposal-context.js'
 import { observeChapterReviewProgress, observeSemanticReadProgress, observeWritingWorkflowMilestone } from '../../api/lib/agent/semantic-progress.js'
-import { allowsChapterOnlyCompletion, freezeWritingScope, readRecoveredChapterDelivery } from '../../api/lib/agent/writing-scope.js'
+import { allowsChapterOnlyCompletion, freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { recoverRunElapsedMs } from '../../api/lib/agent/checkpoint.js'
-import * as ai from '../../api/lib/ai-service.js'
 import * as credits from '../../api/lib/credits.js'
-import * as prices from '../../api/lib/billing/resolve-token-price.js'
 import * as memory from '../../api/lib/agent/story-memory.js'
 import * as titles from '../../api/lib/agent/session-title.js'
 import * as flags from '../../api/lib/agent2-feature-flags.js'
@@ -40,10 +38,10 @@ const fixture: typeof durableFixture = (work, ...rest) => durableFixture(async f
 const checks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'clear', reason: 'Synthetic whole-body review.', findingIndexes: [] }))
 const recoveryPrompt = '修改第一章'
 
-describe.runIf(available)('authenticated native review hands a rejected current-state candidate back to the original task', () => {
+describe.runIf(available)('historical candidate judgments preserve the original task while current prose reports can complete', () => {
   it.each(['before-turn', 'after-read', 'recover-transient', 'recover-quality-decision', 'recover-unknown-commit', 'recover-missing-commit'] as const)('handles current evidence after exhausted claims and repeated Continue: %s', scenario => fixture(async f => {
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
-    vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
+    vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue({ chapterCount: 0, jobCount: 0, entityCount: 0, relationCount: 0, reused: false })
     vi.spyOn(titles, 'autoNameSession').mockResolvedValue(undefined)
     const startedAt = (await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId }, select: { createdAt: true } })).createdAt
     const chapter = await prisma.chapter.update({ where: { id: f.chapterId }, data: {
@@ -86,15 +84,19 @@ describe.runIf(available)('authenticated native review hands a rejected current-
         explanation: 'The saved beat is quiet.', suggestion: 'Consider the pace without changing the established packet location.', confidence: 0.8 }] : [],
       deterministicFindings: [], deterministicMetrics: {} })
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
-    expect(readiness?.terminalReview).toMatchObject({ state: 'unverified', currentResultVerified: true, deliveryEligible: recovery, unresolved: [{ claim: proposal.claim, reason }] })
+    expect(readiness).toMatchObject({ ready: false, continuity: 'stale' })
+    const historicalReview = currentTerminalReview({ terminalCandidate: candidate, continuityCriticResponse: inspected.audit,
+      independentCheck: 'complete' }, chapter.content, { ...context, proposalChanges: staged.changes })
+    expect(historicalReview).toMatchObject({ supported: false })
+    expect(JSON.stringify(inspected.audit)).toContain(proposal.claim)
+    expect(JSON.stringify(inspected.audit)).toContain(reason)
     if (scenario === 'recover-quality-decision') {
-      expect(readiness).toMatchObject({ ready: true, decisionPending: true, mustPassPending: false })
+      expect(readiness).toMatchObject({ ready: false, decisionPending: true, mustPassPending: false })
       expect(readiness?.requiredDecisions).toHaveLength(1)
     }
     const key = runtimeJson({ kind: 'terminal-processing', version: 1, userId: f.userId, novelId: f.novelId, taskId: spec.id, chapterId: chapter.id,
-      contentHash: readiness!.progressEvidence!.contentHash, sourceHash: readiness!.terminalProcessing!.sourceHash,
-      contractHash: readiness!.terminalProcessing!.contractHash }).hash
-    if (scenario === 'recover-quality-decision') expect(terminalProcessingPlan(readiness, { ...f, taskSpec: spec }, new Set())).toBeNull()
+      contentHash: runtimeJson({ content: chapter.content }).hash, sourceHash: runtimeJson(source).hash,
+      contractHash: runtimeJson(inspected.audit).hash }).hash
     const claims = [0, 1].map(index => `terminal-processing:${key}:${index}`)
     const seen = new Set<string>()
     observeChapterReviewProgress(seen, readiness!.progressEvidence, { ...f, taskSpec: spec, expectedOriginalTaskId: spec.id })
@@ -127,144 +129,60 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     const historicalCharge = await prisma.creditLedgerEntry.create({ data: { userId: f.userId, kind: 'consume', sourceType: 'ai_usage',
       referenceId: historicalUsage.id, idempotencyKey: `synthetic-historical:${historicalUsage.id}`, deltaMilli: -23, dailyDeltaMilli: -23,
       modelTier: 'speed', multiplierBps: 10000, requestTokens: 10, responseTokens: 0 } })
-    const network = vi.fn(() => { throw Error('Exhausted claims must not dispatch a provider request') })
-    vi.stubGlobal('fetch', network)
-    vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', provider: 'fixture', modelName: 'fixture', baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture', multiplierBps: 10000,
-      reasoningEffort: 'low', reasoningEfforts: ['none', 'low'], reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: 128000 })
-    vi.spyOn(prices, 'resolveTokenPrice').mockResolvedValue({ version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 })
     const feature = flags.isAgent2FeatureEnabled
     vi.spyOn(flags, 'isAgent2FeatureEnabled').mockImplementation((key, owner) => key === 'storyCompiler' || key !== 'memory2' && feature(key, owner))
     if (scenario === 'recover-missing-commit') {
       const availableTools = agents.getToolsForAgent
       vi.spyOn(agents, 'getToolsForAgent').mockImplementation((...args) => availableTools(...args).filter(tool => tool.name !== 'chapter_bridge_commit'))
     }
-    let closingCalls = 0
-    const closingSummary = 'The packet remains on the desk; its location stays unchanged.'
-    const main = vi.spyOn(ai, 'chatWithTools').mockImplementation(async request => {
-      const { messages } = request
-      const current = await readChapterReviewReadiness(prisma, f, compilation.id)
-      if (current?.terminalCommitted) {
-        // A default creative wrap-up follows a real commit. It is not another
-        // candidate decision, continuity request or manuscript mutation.
-        expect(['recover-transient', 'recover-quality-decision']).toContain(scenario)
-        expect(current).toMatchObject({ ready: true, decisionPending: false, terminalReview: { deliveryEligible: true } })
-        const capture = await prisma.$transaction(tx => readRecoveredChapterDelivery(tx, f))
-        expect(capture?.chapters).toMatchObject([{ id: chapter.id, revision: chapter.revision, content: chapter.content }])
-        expect(JSON.stringify(messages)).toContain(chapter.content)
-        expect(request).toMatchObject({ model: 'fixture', provider: 'fixture', usageLog: {
-          userId: f.userId, agentRunId: f.runId, modelTier: 'speed', multiplierBps: 10000 } })
-        expect(closingCalls++).toBe(0)
-        expect(main).toHaveBeenCalledTimes(scenario === 'recover-quality-decision' ? 2 : 1)
-        return { content: closingSummary, reasoning: '', finishReason: 'stop', toolCalls: [],
-          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } }
-      }
-      if (scenario === 'recover-quality-decision') {
-        expect(main).toHaveBeenCalledOnce()
-        expect(JSON.stringify(messages)).toContain('The saved beat is quiet.')
-        return { content: '', reasoning: '', finishReason: 'tool_calls', toolCalls: [{ id: 'synthetic-current-decision', name: 'chapter_bridge_commit',
-          arguments: JSON.stringify({ compilationId: compilation.id, retainedFindings: readiness!.requiredDecisions!.map(item => ({ ...item,
-            reason: 'The quiet beat preserves the current packet state; keep the original prose and this warning for the author.' })) }) }],
-          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } }
-      }
-      if (scenario !== 'after-read' || main.mock.calls.length > 1) throw Error('No further primary request is permitted')
-      return { content: '', reasoning: '', finishReason: 'tool_calls', toolCalls: [{ id: 'synthetic-repeat-read', name: 'chapter_read', arguments: JSON.stringify({ chapterId: chapter.id }) }],
-        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } }
-    })
     const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
     const beforeRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
-    const resume = (eventId: string, afterSeq: number) => executeAgentRun({ ...f, prompt: recoveryPrompt, mode: 'build', resume: true,
-      authorContinue: { eventId, afterSeq }, eventStartSeq: afterSeq, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
-    let afterSeq = pauseSeq
-    await resume(pause.id, afterSeq)
-    if (recovery) {
-      const succeeded = scenario === 'recover-transient' || scenario === 'recover-quality-decision'
-      const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
-      if (scenario === 'recover-quality-decision') expect(saved.validation).toMatchObject(before.validation as object)
-      else expect(saved.validation).toEqual(before.validation)
-      expect(saved.preparedContext).toMatchObject(before.preparedContext as object)
-      expect(saved).toMatchObject({ status: succeeded ? 'completed' : before.status, stage: succeeded ? 'commit' : before.stage })
-      expect(saved.bridge!.committedAt !== null).toBe(succeeded)
-      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
-      const finished = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
-      if (succeeded) {
-        const errors = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'error', seq: { gt: pauseSeq } }, select: { payload: true } })
-        expect({ errorMessage: finished.errorMessage, errors }).toEqual({ errorMessage: null, errors: [] })
-        const finals = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'text.final', seq: { gt: pauseSeq } } })
-        expect(finals.filter(event => !(event.payload as { asReasoning?: boolean }).asReasoning)
-          .map(event => (event.payload as { text: string }).text)).toEqual([closingSummary])
-      }
-      expect(finished).toMatchObject({ status: succeeded ? 'completed' : 'paused', taskSpec: spec,
-        modelTier: beforeRun.modelTier, customModelId: beforeRun.customModelId, reasoningEffort: beforeRun.reasoningEffort })
-      const attempts = (finished.usage as { checkpoint: { reviewAttempts: string[] } }).checkpoint.reviewAttempts
-      expect(attempts.filter(item => item.startsWith('terminal-processing:'))).toEqual(claims.filter(item => item.startsWith('terminal-processing:')))
-      if (succeeded) {
-        expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))).toMatchObject({ terminalCommitted: true,
-          terminalReview: { state: 'unverified', deliveryEligible: true, unresolved: [{ claim: proposal.claim, verdict: 'unknown' }] } })
-        expect((await readTerminalInheritance(prisma, f, chapter)).map(item => [item.field, item.claim])).toEqual([['objects', candidate.exitState.objects[0]]])
-        for (let repeated = 0; repeated < 2; repeated++) await expect(continueLoopRun(f.userId, f.runId)).rejects.toMatchObject({ code: 'RUN_NOT_PAUSED' })
-        expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).toEqual(finished)
-      } else {
-        const events = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { gt: pauseSeq } }, orderBy: { seq: 'asc' } })
-        const notices = events.filter(event => event.type === 'error')
-        expect(notices).toHaveLength(1)
-        const stopped = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
-        expect(notices[0].payload).toMatchObject({ code: 'run_paused', recoverable: true, message: stopped.errorMessage })
-        expect((notices[0].payload as { message: string }).message)
-          .toContain(scenario === 'recover-missing-commit' ? '缺少章节终态提交能力' : '已有执行记录但尚未确认完成')
-        expect(events.filter(event => event.type === 'text.final')).toEqual([])
-      }
-      const calls = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'tool.call', seq: { gt: pauseSeq } } })
-      expect(calls.map(event => (event.payload as { toolName: string }).toolName)).toEqual(succeeded ? ['chapter_bridge_commit'] : [])
-      expect(closingCalls).toBe(succeeded ? 1 : 0)
-      expect(main).toHaveBeenCalledTimes(scenario === 'recover-quality-decision' ? 2 : succeeded ? 1 : 0)
-      expect(network).not.toHaveBeenCalled()
-      expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })).toEqual([historicalUsage])
-      expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })).toEqual(account)
-      expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId } })).toEqual([historicalCharge])
-      return
+    const history = await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })
+    const missingCommit = scenario === 'recover-missing-commit'
+    if (scenario === 'recover-unknown-commit') {
+      // An orphan local call is reconciled against its atomic database effect.
+      // The original critic is settled; no provider request is unknown.
+      expect(before).toMatchObject({ id: compilation.id, userId: f.userId, novelId: f.novelId, chapterId: chapter.id,
+        bridge: { toChapterId: chapter.id, committedAt: null } })
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ revision: chapter.revision, content: chapter.content })
+      expect(historicalUsage).toMatchObject({ billingStatus: 'settled', usageSource: 'reported', reservedCreditMilli: 0 })
+      expect(await prisma.aiUsageLog.count({ where: { userId: f.userId, billingStatus: 'pending_usage' } })).toBe(0)
     }
-    for (let continuation = 0; continuation < 3; continuation++) {
-      const events = await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })
-      const currentEvents = events.filter(event => event.seq > afterSeq)
-      const notices = currentEvents.filter(event => event.type === 'error')
-      expect(notices).toHaveLength(1)
-      const stopped = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
-      expect(notices[0].payload).toMatchObject({ code: 'run_paused', recoverable: true, message: stopped.errorMessage })
-      expect(currentEvents.filter(event => event.type === 'text.final')).toEqual([])
-      const { message: text } = notices[0].payload as { message: string }
-      expect(text).toContain(`第${chapter.orderIndex}章（版本${chapter.revision}）：`)
-      expect(text).toContain('当前终态复核结果已收到，仍有1项未获证实')
-      expect(text).toContain(proposal.claim)
-      expect(text).toContain(reason)
-      expect(text).not.toContain('未取得有效独立结果')
-      const stop = currentEvents.filter(event => event.type === 'run.paused').at(-1)!
-      expect(stop?.payload).toMatchObject({ reason: 'needs_input' })
-      expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).toMatchObject({ status: 'paused', errorMessage: expect.stringContaining('当前终态复核结果已收到') })
-      if (continuation < 2) {
-        afterSeq = events.at(-1)!.seq
-        await resume(stop.id, afterSeq)
-      }
+    const completed = await continueCurrentReviewWorkflow(f, { compilationId: compilation.id, prompt: recoveryPrompt, afterSeq: pauseSeq,
+      authorContinue: { eventId: pause.id, afterSeq: pauseSeq }, missingCommit, readFirst: scenario === 'after-read' })
+    expect(await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { lte: pauseSeq } }, orderBy: { seq: 'asc' } })).toEqual(history)
+    expect((completed.compilation.validation as { continuityCriticResponse: unknown }).continuityCriticResponse)
+      .toEqual((before.validation as { continuityCriticResponse: unknown }).continuityCriticResponse)
+    expect(completed.compilation.preparedContext).toMatchObject(before.preparedContext as object)
+    expect(completed.run).toMatchObject({ taskSpec: spec, modelTier: beforeRun.modelTier,
+      customModelId: beforeRun.customModelId, reasoningEffort: beforeRun.reasoningEffort })
+    expect((completed.run.usage as { checkpoint: typeof checkpoint }).checkpoint.reviewAttempts).toEqual(expect.arrayContaining(claims))
+    expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: historicalUsage.id } })).toEqual(historicalUsage)
+    expect(await prisma.creditLedgerEntry.findUniqueOrThrow({ where: { id: historicalCharge.id } })).toEqual(historicalCharge)
+    expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } }))
+      .toMatchObject({ ...account, dailyUsedMilli: account.dailyUsedMilli + completed.actions.length * 7 })
+    if (missingCommit) {
+      expect(completed.chapter).toEqual(chapter)
+      expect(completed.compilation.bridge).toEqual(before.bridge)
+      expect(completed.actions).toEqual([])
+      expect(completed.events.filter(event => event.type === 'tool.call')).toEqual([])
+    } else {
+      expect(completed.chapter).toMatchObject({ revision: chapter.revision + 2 })
+      expect(completed.chapter.content.trim()).toBe(chapter.content)
+      expect(completed.main).toHaveBeenCalled()
+      expect(completed.critic).toHaveBeenCalled()
+      expect(completed.events.filter(event => event.type === 'tool.result' && !(event.payload as { ok: boolean }).ok)).toEqual([])
+      for (let repeated = 0; repeated < 2; repeated++) await expect(continueLoopRun(f.userId, f.runId)).rejects.toMatchObject({ code: 'RUN_NOT_PAUSED' })
+      expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).toEqual(completed.run)
+      if (scenario === 'recover-unknown-commit') expect(completed.events.filter(event =>
+        (event.payload as { callId?: string }).callId === `terminal_commit_${key.slice(0, 40)}`)).toEqual([])
     }
-    expect(main).not.toHaveBeenCalled()
-    expect(network).not.toHaveBeenCalled()
-    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })).toEqual(before)
-    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
-    const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
-    expect(run.status).toBe('paused')
-    expect((run.usage as { checkpoint: { reviewAttempts: string[] } }).checkpoint.reviewAttempts).toEqual(claims)
-    const toolCalls = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'tool.call' }, orderBy: { seq: 'asc' } })
-    expect(toolCalls.map(event => (event.payload as { toolName: string }).toolName)).toEqual([])
-    expect(await prisma.agentRunEvent.count({ where: { runId: f.runId, type: 'tool.call', payload: { path: ['toolName'], equals: 'chapter_bridge_commit' } } })).toBe(0)
-    expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })).toEqual([historicalUsage])
-    expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: account.userId } })).toEqual(account)
-    expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId } })).toEqual([historicalCharge])
   }, undefined, recoveryPrompt, { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
 
   it.each([...(['settled', 'unknown'] as const).flatMap(billing => (['commit', 'repeat', 'restart'] as const).map(scenario => [billing, scenario] as const)), ...(['old-slots', 'local-refusal', 'consumed-local-candidate', 'objects', 'source-address', 'commit-reserved', 'commit-unknown', 'multiple-candidates', 'no-proposal'] as const).map(scenario => ['settled', scenario] as const)])(
-    'preserves failed requests without converting Continue into a paid phase: %s / %s', (billing, scenario) => fixture(async f => {
-    const pendingProvider = billing === 'unknown' && scenario === 'repeat'
+    'preserves settled history and blocks unresolved provider outcomes: %s / %s', (billing, scenario) => fixture(async f => {
     vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
-    vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue(undefined)
+    vi.spyOn(memory, 'syncNovelMemoryProjection').mockResolvedValue({ chapterCount: 0, jobCount: 0, entityCount: 0, relationCount: 0, reused: false })
     vi.spyOn(titles, 'autoNameSession').mockResolvedValue(undefined)
     // Every synthetic historical event precedes the real Continue admission,
     // including on fast CI workers. Keep the saved-version evidence on the
@@ -322,7 +240,8 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       // A previously received, settled UNKNOWN is the initial current report.
       // Its actual frozen frame is authenticated before seeding its genuine
       // milestone. The separate old unknown-fee row below is never settled.
-      const ctx = { ...f, callId: 'initial-known-unknown' } as Parameters<typeof readLegacyContinuityAssessment>[1]
+      const ctx: ToolContext = { ...f, callId: 'initial-known-unknown', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced',
+        signal: new AbortController().signal, emit: () => {} }
       const input: LegacyAssessmentInput = { chapterId: chapter.id, revision: chapter.revision, bodies, terminalCandidate: bad,
         parserVersion: 8, reassessmentProtocol: 2, sourceScope: scope, system: 'Synthetic frozen UNKNOWN reviewer.', content: 'Synthetic full frozen chapter review.',
         bindingHash: runtimeJson(coverage).hash, targetType: 'story_compilation', targetId: compilation.id }
@@ -346,17 +265,14 @@ describe.runIf(available)('authenticated native review hands a rejected current-
       coverage, continuityCriticResponse: audit })
     await persistHumanityQualityReport({ ...f, compilationId: compilation.id, chapterId: chapter.id, chapterRevision: 8, mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
-    if (scenario === 'repeat') expect(readiness?.terminalReview).toMatchObject({ state: 'unverified', currentResultVerified: true })
-    else expect(readiness?.terminalCorrection).toMatchObject({ paths: [rejectedPath] })
+    // Legacy candidate judgments are inspectable history; only a current prose
+    // report satisfies the new required check, even for settled UNKNOWN.
     expect(originalChapterReviewRequirements({ prompt: original.prompt, spec })).toEqual({ continuity: true, quality: true })
-    expect(readiness).toMatchObject({ quality: 'complete', requiredTools: scenario === 'repeat' ? [] : [{ name: 'continuity_validate' }] })
-    if (scenario === 'repeat') expect(readiness).toMatchObject({ continuity: 'complete', ready: true,
-      terminalReview: { state: 'unverified', currentResultVerified: true, deliveryEligible: false } })
-    if (scenario === 'repeat') expect(readiness?.progressEvidence?.phases).toContain('terminal')
-    else expect(readiness?.progressEvidence?.phases).not.toContain('terminal')
-    const slots = terminalFeedbackSlots(readiness, { ...f, taskSpec: spec })!
-    expect(slots).toHaveLength(4)
-    const processingKey = terminalProcessingPlan(readiness, { ...f, taskSpec: spec }, new Set())!.key
+    expect(readiness).toMatchObject({ ready: false, quality: 'complete', continuity: 'stale', requiredTools: [{ name: 'continuity_validate' }] })
+    expect(readiness?.progressEvidence?.phases).not.toContain('continuity')
+    expect(readiness?.progressEvidence?.phases).not.toContain('terminal')
+    const processingKey = runtimeJson({ historicalAudit: audit, compilationId: compilation.id, revision: chapter.revision }).hash
+    const slots = Array.from({ length: 4 }, (_, index) => runtimeJson({ historicalFeedback: processingKey, index }).hash)
     const seen = new Set<string>()
     // Previously persisted quality and workflow receipts cannot reset the
     // exhausted stall counter when this original task is continued again.
@@ -406,60 +322,61 @@ describe.runIf(available)('authenticated native review hands a rejected current-
     await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'paused', currentTurn: 26, startedAt: at(0), usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, checkpoint } } })
     const window = credits.getCreditWindow()
     await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
-    vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', provider: 'fixture', modelName: 'fixture', baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture', multiplierBps: 10000,
-      reasoningEffort: 'low', reasoningEfforts: ['none', 'low'], reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: 128000 })
-    vi.spyOn(prices, 'resolveTokenPrice').mockResolvedValue({ version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 })
-    const feature = flags.isAgent2FeatureEnabled
-    vi.spyOn(flags, 'isAgent2FeatureEnabled').mockImplementation((key, owner) => key === 'storyCompiler' || key !== 'memory2' && feature(key, owner))
-    let calls = 0
-    const network = vi.fn(async () => {
-      calls++
-      if (scenario === 'repeat') throw Error('The authenticated current UNKNOWN must not dispatch another critic')
-      if (calls > 1) throw Error('No extra critic request is permitted')
-      // Historical rejected reports above retain their original v5 identities.
-      // Only this newly frozen provider request uses local addresses.
-      const parts = { findings: [], semanticChecks: checks.map(({ findingIndexes: _indexes, ...check }) => ({ ...check, findingIds: [] })), terminalVerdicts: goodFacts.map((_fact, claimIndex) => ({ claimIndex, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0' }] })), terminalProofVerdicts: [], terminalDispositions: [],
-          proposalDispositions: badFacts.filter(fact => !goodFacts.some(current => current.id === fact.id)).map((fact, proposalIndex) => {
-            const replacement = goodFacts.find(current => current.field === fact.field)
-            return { proposalIndex, outcome: replacement ? 'replaced' : 'retracted',
-              reason: 'The complete saved body supports the doorway state; the old assertion confused intent or location.',
-              sourceEvidence: [{ segmentId: 'c0' }], ...(replacement ? { candidateIndex: goodFacts.indexOf(replacement) } : {}) }
-          }) }
-      return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(parts) }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
-    })
-    vi.stubGlobal('fetch', network)
-    const main = vi.spyOn(ai, 'chatWithTools').mockRejectedValue(Error('Continue cannot create another paid candidate decision'))
     const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
     const originalUsage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
     const originalAccount = await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })
     const originalLedger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
-    await executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true, authorContinue: { eventId: pause.id, afterSeq: pauseSeq }, eventStartSeq: pauseSeq,
-      modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
+    const unknown = billing === 'unknown'
+    if (scenario === 'commit-unknown') {
+      expect(before).toMatchObject({ id: compilation.id, userId: f.userId, novelId: f.novelId, chapterId: chapter.id,
+        bridge: { toChapterId: chapter.id, committedAt: null } })
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ revision: chapter.revision, content: body })
+      expect(originalUsage.every(row => row.billingStatus === 'settled' && row.usageSource === 'reported' && row.reservedCreditMilli === 0)).toBe(true)
+    }
+    const completed = await continueCurrentReviewWorkflow(f, { compilationId: compilation.id, prompt: '修复本章', afterSeq: pauseSeq,
+      authorContinue: { eventId: pause.id, afterSeq: pauseSeq }, unknown, readFirst: scenario === 'restart' })
     if (scenario === 'restart' || scenario === 'repeat') {
       const last = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId }, orderBy: { seq: 'desc' } })
+      const mainCalls = completed.main.mock.calls.length, criticCalls = completed.critic.mock.calls.length
       await executeAgentRun({ ...f, prompt: '修复本章', mode: 'build', resume: true, authorContinue: { eventId: last.id, afterSeq: last.seq }, eventStartSeq: last.seq,
         modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
+      expect(completed.main).toHaveBeenCalledTimes(mainCalls)
+      expect(completed.critic).toHaveBeenCalledTimes(criticCalls)
     }
-    expect(main).not.toHaveBeenCalled()
-    expect(network).not.toHaveBeenCalled()
-    expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(originalUsage)
-    expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })).toEqual(originalAccount)
-    expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(originalLedger)
+    expect(await prisma.aiUsageLog.findMany({ where: { id: { in: originalUsage.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(originalUsage)
+    expect(await prisma.creditLedgerEntry.findMany({ where: { id: { in: originalLedger.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(originalLedger)
+    expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } }))
+      .toMatchObject({ ...originalAccount, dailyUsedMilli: originalAccount.dailyUsedMilli + completed.actions.length * 7 })
     expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: old.id } })).toEqual(old)
     expect(await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { lte: pauseSeq } }, orderBy: { seq: 'asc' } })).toEqual(history)
-    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ content: body, revision: 8 })
     const final = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
     const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
-    expect(final).toEqual(before)
-    expect(final.bridge!.committedAt).toBeNull()
-    expect(run.status).toBe('paused')
+    expect((final.validation as { continuityCriticResponse: unknown }).continuityCriticResponse)
+      .toEqual((before.validation as { continuityCriticResponse: unknown }).continuityCriticResponse)
+    expect(final.preparedContext).toMatchObject(before.preparedContext as object)
+    if (scenario === 'commit-unknown') expect(completed.events.filter(event =>
+      (event.payload as { callId?: string }).callId === `terminal_commit_${processingKey.slice(0, 40)}`)).toEqual([])
     const resumed = run.usage as { checkpoint: typeof checkpoint }
     expect(resumed.checkpoint.reviewAttempts).toEqual(expect.arrayContaining(checkpoint.reviewAttempts))
     expect(resumed.checkpoint.consumedReviewDecisionFeedback ?? []).toEqual(checkpoint.consumedReviewDecisionFeedback ?? [])
-    if (pendingProvider) expect(resumed.checkpoint.pendingReviews).toEqual(checkpoint.pendingReviews)
+    if (unknown) {
+      expect(final).toEqual(before)
+      expect(run.status).toBe('paused')
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
+      expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(originalUsage)
+      expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(originalLedger)
+      expect(await prisma.agentRunEvent.count({ where: { runId: f.runId, seq: { gt: pauseSeq }, type: 'tool.call' } })).toBe(0)
+      if (billing === 'unknown') expect(resumed.checkpoint.pendingReviews).toEqual(checkpoint.pendingReviews)
+    } else {
+      expect(run.status).toBe('completed')
+      expect(completed.chapter.content.trim()).toBe(body)
+      expect(completed.chapter.revision).toBe(chapter.revision + 2)
+      expect(completed.main).toHaveBeenCalled()
+      expect(completed.critic).toHaveBeenCalled()
+      expect(completed.events.filter(event => event.type === 'tool.result' && !(event.payload as { ok: boolean }).ok)).toEqual([])
+    }
     if (knownRepeatUsage) expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: knownRepeatUsage.id } })).toEqual(knownRepeatUsage)
     expect(await prisma.agentArtifact.findMany({ where: { id: { in: knownRepeatArtifacts.map(row => row.id) } }, orderBy: { id: 'asc' } }))
       .toEqual([...knownRepeatArtifacts].sort((left, right) => left.id.localeCompare(right.id)))
-    expect(await prisma.agentRunEvent.count({ where: { runId: f.runId, seq: { gt: pauseSeq }, type: 'tool.call' } })).toBe(0)
   }, undefined, '修复本章', { continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 1 }), 30000)
 })

@@ -1,36 +1,40 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
 import * as originalRequest from '../../api/lib/agent/original-request.js'
 import * as reviewAdmission from '../../api/lib/agent/quality-review-admission.js'
 import { readContinuedReviewRecovery } from '../../api/lib/agent/continued-review-recovery.js'
-import { readOriginalCycleContinuityVerification, claimLegacyContinuityVerification } from '../../api/lib/agent/continuity-coordinator.js'
+import { readOriginalCycleContinuityVerification } from '../../api/lib/agent/continuity-coordinator.js'
 import { beginReviewCycle, advanceReviewCycle } from '../../api/lib/agent/review-cycle.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
-import type { LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { legacyContinuityAssessmentKey, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { readContinuityRequestBilling } from '../../api/lib/agent/continuity-review.js'
+import * as recovery from '../../api/lib/agent/review-request-recovery.js'
+
+afterEach(() => vi.restoreAllMocks())
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
-describe('generic author Continue does not grant a new continuity request', () => {
-  it.each(['first', 'paid-without-stage', 'unknown', 'claimed-correction', 'unsent-without-witness'] as const)('actual reservation preserves %s rather than inferring another phase', async scenario => {
-    const ctx = { userId: 'user', novelId: 'novel', runId: 'run', callId: 'new-call', signal: new AbortController().signal } as ToolContext
+describe('continued tasks retain physical unknowns and original historical CAS evidence', () => {
+  it.each(['first', 'paid-without-stage', 'unknown', 'claimed-correction', 'unsent-without-witness'] as const)('reads only physical accounting for %s without inventing a phase', async scenario => {
+    const ctx = { userId: 'user', novelId: 'novel', runId: 'run', callId: 'original' } as ToolContext
     const input: LegacyAssessmentInput = { chapterId: 'chapter', revision: 4, bodies: { current: 'The packet remains sealed.', previous: null },
       targetType: 'story_compilation', targetId: 'compilation', system: 'Frozen reviewer.', content: 'Frozen original request.' }
-    const fees = scenario === 'first' || scenario === 'claimed-correction' ? [] : [{ id: 'old-fee', billingStatus: scenario === 'unsent-without-witness' ? 'not_dispatched' : scenario === 'unknown' ? 'pending_usage' : 'settled',
-      usageSource: scenario === 'paid-without-stage' ? 'reported' : 'unknown', requestTokens: scenario === 'paid-without-stage' ? 12 : null,
-      responseTokens: scenario === 'paid-without-stage' ? 8 : null, creditChargeMilli: scenario === 'paid-without-stage' ? 23 : 0,
-      reservedCreditMilli: scenario === 'unknown' ? 17 : 0 }]
-    const rows = scenario === 'claimed-correction' ? [{ metadata: { state: 'claimed', usageIds: ['old-fee'] } }] : []
-    const db = { agentOperation: { count: vi.fn(async () => 0) }, agentArtifact: { findMany: vi.fn(async () => rows), create: vi.fn() },
+    const fees = scenario === 'unknown' || scenario === 'paid-without-stage' ? [{ id: 'old-fee', billingStatus: scenario === 'unknown' ? 'pending_usage' : 'settled',
+      usageSource: scenario === 'unknown' ? 'unknown' : 'reported', requestTokens: scenario === 'unknown' ? null : 12, responseTokens: scenario === 'unknown' ? null : 8,
+      creditChargeMilli: scenario === 'unknown' ? 0 : 23, reservedCreditMilli: scenario === 'unknown' ? 17 : 0 }] : []
+    const rows = scenario === 'claimed-correction' ? [{ id: 'old-correction', runId: ctx.runId, metadata: { evidenceCorrectionKey: 'original-correction',
+      state: 'claimed', chapterId: input.chapterId, revision: input.revision, callId: ctx.callId, targetType: input.targetType, targetId: input.targetId, usageIds: ['missing-fee'] } }]
+      : scenario === 'unsent-without-witness' ? [{ id: 'old-reservation', runId: ctx.runId, metadata: { continuityAssessmentRequestKey: legacyContinuityAssessmentKey(ctx, input),
+        assessmentChapterId: input.chapterId, callId: ctx.callId, input } }] : []
+    const recover = vi.spyOn(recovery, 'readReviewRequestRecoveryEvidence').mockResolvedValue([])
+    const db = { agentOperation: { findMany: vi.fn(async () => []) }, agentArtifact: { findMany: vi.fn(async ({ where }) =>
+      where.OR?.some(item => item.metadata?.path?.includes('assessmentChapterId')) ? rows : []), create: vi.fn() },
       aiUsageLog: { findMany: vi.fn(async () => fees) } }
-    const original = vi.spyOn(originalRequest, 'readOriginalTaskRequest').mockResolvedValue({ taskId: 'task', prompt: '修复本章', spec: {}, parentRunId: null } as Awaited<ReturnType<typeof originalRequest.readOriginalTaskRequest>>)
-    const runs = vi.spyOn(originalRequest, 'originalTaskRunIds').mockResolvedValue(['run'])
     const before = JSON.stringify({ rows, fees })
-    try {
-      const result = claimLegacyContinuityVerification(db as unknown as Prisma.TransactionClient, ctx, input, [], 'new-operation')
-      if (scenario === 'first') await expect(result).resolves.toBeUndefined()
-      else await expect(result).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED', message: expect.stringContaining('冻结执行配置') })
-      expect(db.agentArtifact.create).not.toHaveBeenCalled()
-      expect(JSON.stringify({ rows, fees })).toBe(before)
-    } finally { original.mockRestore(); runs.mockRestore() }
+    expect(await readContinuityRequestBilling(db as unknown as Prisma.TransactionClient, ctx, { runIds: ['run'], chapter: { id: input.chapterId } }))
+      .toMatchObject({ known: scenario === 'first' || scenario === 'paid-without-stage' })
+    expect(recover).toHaveBeenCalledTimes(scenario === 'claimed-correction' || scenario === 'unsent-without-witness' ? 1 : 0)
+    expect(db.agentArtifact.create).not.toHaveBeenCalled()
+    expect(JSON.stringify({ rows, fees })).toBe(before)
   })
   it.each(['original-cas', 'same-body', 'external-revision', 'current-already-assessed'] as const)('reads only the actual original verification authority: %s', async scenario => {
     const subject = { userId: 'user', novelId: 'novel', runId: 'run' }, scope = { ...subject, taskId: 'task', chapterId: 'chapter' }

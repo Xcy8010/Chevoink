@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
-import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 const boundary = vi.hoisted(() => ({ db: {} as Record<string, unknown>, original: vi.fn(), runs: vi.fn() }))
 vi.mock('../../api/lib/prisma.js', () => ({
@@ -13,21 +12,15 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { continuitySubjectIdentity } from '../../api/lib/agent/continuity-subject-identity.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-candidate-contract.js'
 import { buildContinuityReviewManifest } from '../../api/lib/agent/continuity-review-v4.js'
-import { answerContinuitySupplementQuestion, assertContinuitySupplementTransport, authenticateContinuityPhasePlan,
-  claimContinuityPhase, readContinuityPhaseClaim, continuityModelPriceHash, continuitySupplementQuestionArgs, executeContinuitySupplementTool,
-  canResumeUnsentContinuitySupplement,
-  createContinuitySupplementUsage,
-  persistContinuitySupplementQuestion, readContinuitySupplementState, reserveContinuitySupplementUsage,
-  waitForContinuitySupplementAnswer } from '../../api/lib/agent/continuity-coordinator.js'
-import type { buildContinuitySupplementQuestion } from '../../api/lib/agent/continuity-coordinator.js'
-import { cancelAllQuestions, resolveQuestionAnswer } from '../../api/lib/agent/permissions.js'
+import { authenticateContinuityPhasePlan, readContinuityPhaseClaim, continuityModelPriceHash,
+  continuitySupplementQuestionArgs, canResumeUnsentContinuitySupplement, readContinuitySupplementState } from '../../api/lib/agent/continuity-coordinator.js'
+import * as coordinator from '../../api/lib/agent/continuity-coordinator.js'
 
-type Question = Awaited<ReturnType<typeof buildContinuitySupplementQuestion>>
+type Question = Omit<NonNullable<Awaited<ReturnType<typeof readContinuitySupplementState>>['question']>, 'answerArtifactId'>
 type Row = { id: string; runId: string; artifactType: string; metadata: Record<string, unknown>; content?: string }
 const original = { taskId: 'original-task', sourceRunId: 'original-run', parentRunId: null, spec: { id: 'original-task' }, prompt: 'Review this chapter.' }
 
-// The unit boundary models owned persisted rows; production question parsing,
-// answer authentication, phase claims, transport guards and mailbox are real.
+// Immutable historical rows are fixtures; only production read-only parsers run.
 function fixture() {
   const subject = { userId: 'synthetic-author', novelId: 'synthetic-novel', runId: 'original-run', continuityOwnerSeq: 7 }
   const rows = new Map<string, Row>(), usage = new Map<string, Record<string, unknown>>()
@@ -106,19 +99,28 @@ function fixture() {
   // ToolContext-only owner fields never appear in the persisted envelope.
   const { continuityOwnerSeq: _owner, ...questionBody } = body
   let question: Question = { ...questionBody, requestHash: runtimeJson(questionBody).hash }
-  const store = async () => persistContinuitySupplementQuestion(tx, subject, question)
-  const answer = (text: string, extra = {}) => answerContinuitySupplementQuestion(tx, subject,
-    { requestId: question.requestId, callId: question.callId, answer: text, ...extra })
+  // Fixed pre-refactor records. These helpers never call a production writer.
+  const store = () => rows.set(question.requestId, { id: question.requestId, runId: subject.runId,
+    artifactType: 'continuityReview', metadata: { version: 1, continuitySupplementQuestion: structuredClone(question) } })
+  const answer = (text = question.accept, extra = {}) => {
+    const id = runtimeJson({ kind: 'continuity_supplement_answer', requestId: question.requestId }).hash
+    rows.set(id, { id, runId: subject.runId, artifactType: 'continuityReview', metadata: { version: 1,
+      continuitySupplementAnswer: { requestId: question.requestId, requestHash: question.requestHash, userId: subject.userId,
+        answer: text, decision: text === question.accept ? 'accept' : 'reject', answeredAt: new Date().toISOString(), ...extra } } })
+  }
   const rewrite = (change: (q: Question) => void) => {
     const next = structuredClone(question); change(next)
     const { requestHash: _hash, ...rest } = next; question = { ...rest, requestHash: runtimeJson(rest).hash }
-    rows.get(question.requestId)!.metadata.continuitySupplementQuestion = question
+    rows.get(question.requestId)!.metadata.continuitySupplementQuestion = structuredClone(question)
   }
-  const claim = (extra = {}, ownerSeq = subject.continuityOwnerSeq) => claimContinuityPhase(tx, { ...subject, continuityOwnerSeq: ownerSeq }, { plan, chapterId: input.chapterId, phase: 'full_reassessment',
-    operationRef: frozen.originalAssessmentKey, inputHash: runtimeJson(input).hash, ownerEpoch: '7', ...extra })
-  const transport = (extra = {}) => assertContinuitySupplementTransport(tx, { ...subject, requestId, chapterId: input.chapterId,
-    targetId: input.targetId, system: input.system, content: input.content, model, price, inputTokenCeiling: frozen.inputTokenCeiling,
-    maximumCreditMilli: frozen.maximumCreditMilli, maxOutputTokens: 16384, ...extra })
+  const claim = (extra = {}) => {
+    const id = runtimeJson({ kind: 'continuity_phase', taskId: plan.originalTaskId, chapterId: input.chapterId,
+      phase: 'full_reassessment', ordinal: 0, originalFailedSubject: plan.supplementalSourceKey }).hash
+    rows.set(id, { id, runId: subject.runId, artifactType: 'continuityReview', metadata: { version: 1, continuityPhaseClaim: {
+      version: 1, planHash: plan.hash, originalTaskId: plan.originalTaskId, phase: 'full_reassessment', ordinal: 0,
+      operationRef: frozen.originalAssessmentKey, exactInputHash: runtimeJson(input).hash, ownerEpoch: '7', ...extra } } })
+    return id
+  }
   const prepare = (id = 'new-usage') => usage.set(id, { id, ...subject, agentRunId: subject.runId, chapterId: input.chapterId,
     action: 'agent3ContinuityCritic', targetType: input.targetType, targetId: input.targetId, providerName: model.provider,
     modelTier: model.tier, modelName: model.modelName, multiplierBps: model.multiplierBps, billingSnapshot: price,
@@ -129,161 +131,127 @@ function fixture() {
       requestId: question.requestId, requestHash: question.requestHash, inputHash: runtimeJson(frozen.input).hash, ownerSeq, callId } } })
     return id
   }
-  const preparedData = (id: string): Prisma.AiUsageLogUncheckedCreateInput => ({ id, userId: subject.userId, novelId: subject.novelId,
-    agentRunId: subject.runId, chapterId: input.chapterId, action: 'agent3ContinuityCritic', targetType: input.targetType,
-    targetId: input.targetId, providerType: 'text', providerMode: 'custom', providerName: model.provider, modelTier: model.tier,
-    modelName: model.modelName, multiplierBps: model.multiplierBps, billingSnapshot: price, usageSource: 'prepared',
-    billingStatus: 'authorized_pending', requestTokens: null, responseTokens: null, durationMs: 0 })
+  const binding = () => {
+    const id = runtimeJson({ kind: 'continuity_supplement_usage', originalFailedSubject: plan.supplementalSourceKey }).hash
+    rows.set(id, { id, runId: subject.runId, artifactType: 'continuityReview', metadata: { version: 1,
+      continuitySupplementUsage: { requestId: question.requestId, requestHash: question.requestHash, usageId: 'new-usage',
+        executionId: execution(7), inputHash: runtimeJson(frozen.input).hash } } })
+  }
   return { subject, tx, rows, run, owner, terminal, usage, artifacts, plan, frozen, providerAttempts: db.agentProviderAttempt,
-    usageCreate: db.aiUsageLog.create, question: () => question, store, rewrite, answer, claim, transport, prepare, execution, preparedData }
+    usageCreate: db.aiUsageLog.create, question: () => question, store, rewrite, answer, claim, prepare, execution, binding }
 }
 
-beforeEach(() => vi.stubGlobal('fetch', vi.fn(() => { throw Error('Synthetic unit has no provider authority') })))
-afterEach(() => { cancelAllQuestions('original-run'); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+beforeEach(() => vi.stubGlobal('fetch', vi.fn(() => { throw Error('Synthetic history has no provider authority') })))
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
-describe('supplemental continuity requires a genuine dedicated human answer', () => {
-  it.each(['继续', 'Continue', 'Yes', 'Approve', 'arbitrary manuscript text'])('does not turn %s or an old Map answer into a grant', async text => {
-    const f = fixture(); await f.store()
-    expect(await answerContinuitySupplementQuestion(f.tx, f.subject, { callId: f.question().callId, answer: text })).toBeNull()
-    await expect(f.answer(text)).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
-    expect((await readContinuitySupplementState(f.tx, f.subject, f.frozen.originalAssessmentKey)).kind).toBe('no_authority')
-    expect(f.rows.size).toBe(1); await expect(f.transport()).rejects.toBeDefined()
+function immutable(f: ReturnType<typeof fixture>) {
+  const before = structuredClone({ rows: [...f.rows.values()], usage: [...f.usage.values()], run: f.run })
+  return () => {
+    expect({ rows: [...f.rows.values()], usage: [...f.usage.values()], run: f.run }).toEqual(before)
+    expect(f.artifacts.create).not.toHaveBeenCalled(); expect(f.usageCreate).not.toHaveBeenCalled()
     expect(fetch).not.toHaveBeenCalled()
+  }
+}
+
+describe('frozen supplemental continuity consent is read-only history', () => {
+  it.each(['继续', 'Continue', 'Yes', 'Approve', 'arbitrary manuscript text'])('does not turn %s into historical consent', async text => {
+    const f = fixture(); f.store(); f.answer(text); const unchanged = immutable(f)
+    expect((await readContinuitySupplementState(f.tx, f.subject, f.frozen.originalAssessmentKey)).kind).toBe('no_authority')
+    expect(await authenticateContinuityPhasePlan(f.tx, f.subject, f.plan)).toBe(false); unchanged()
   })
-  it.each(['expired', 'wrong-call', 'new-owner', 'stopped', 'author-ended', 'cancelled-pause'] as const)('rejects a %s card without creating an answer', async scenario => {
-    const f = fixture(); await f.store()
-    if (scenario === 'expired') f.rewrite(q => { q.expiresAt = new Date(Date.now() - 1).toISOString() })
-    if (scenario === 'new-owner') f.owner.seq++
+  it.each(['expired', 'wrong-call', 'new-owner', 'stopped', 'author-ended', 'cancelled-pause'] as const)('cannot resume a %s historical card', async scenario => {
+    const f = fixture(); f.store(); f.answer(); f.claim(); f.owner.seq = 8
+    if (scenario === 'expired') vi.spyOn(Date, 'now').mockReturnValue(Date.parse(f.question().expiresAt) + 1)
+    if (scenario === 'wrong-call') (f.rows.get(f.question().requestId)!.metadata.continuitySupplementQuestion as Question).callId = 'another-call'
+    if (scenario === 'new-owner') f.owner.seq = 9
     if (scenario === 'stopped') f.run.status = 'cancelled'
     if (scenario === 'author-ended') f.run.usage.authorEnded = true
     if (scenario === 'cancelled-pause') { f.run.status = 'paused'; f.terminal.payload.reason = 'user_stopped' }
-    await expect(f.answer(f.question().accept, scenario === 'wrong-call' ? { callId: 'different-call' } : {})).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
-    expect(f.rows.size).toBe(1)
-    expect((await readContinuitySupplementState(f.tx, f.subject, f.frozen.originalAssessmentKey)).kind).toBe('no_authority')
+    const unchanged = immutable(f)
+    expect(await canResumeUnsentContinuitySupplement(f.tx, { ...f.subject, continuityOwnerSeq: 8 }, f.question())).toBe(false)
+    unchanged()
   })
-  it('keeps rejection immutable and a replay cannot replace it with acceptance', async () => {
-    const f = fixture(); await f.store()
-    expect(await f.answer(f.question().reject)).toMatchObject({ accepted: false, newAnswer: true })
-    const before = structuredClone([...f.rows.values()])
-    expect(await f.answer(f.question().accept)).toMatchObject({ accepted: false, newAnswer: false })
-    expect([...f.rows.values()]).toEqual(before)
-    expect((await readContinuitySupplementState(f.tx, f.subject, f.frozen.originalAssessmentKey)).kind).toBe('no_authority')
+  it('keeps an existing rejected answer immutable across repeated reads', async () => {
+    const f = fixture(); f.store(); f.answer(f.question().reject); const unchanged = immutable(f)
+    for (let attempt = 0; attempt < 2; attempt++)
+      expect((await readContinuitySupplementState(f.tx, f.subject, f.frozen.originalAssessmentKey)).kind).toBe('no_authority')
+    expect(coordinator).not.toHaveProperty('answerContinuitySupplementQuestion'); unchanged()
   })
-  it('binds actor and every frozen field to the question hash', async () => {
-    const f = fixture(); await f.store()
-    expect(await answerContinuitySupplementQuestion(f.tx, { ...f.subject, userId: 'different-author' },
-      { requestId: f.question().requestId, callId: f.question().callId, answer: f.question().accept })).toBeNull()
+  it('binds actor and every frozen field to the original question hash', async () => {
+    const f = fixture(); f.store(); f.answer()
+    expect((await readContinuitySupplementState(f.tx, { ...f.subject, userId: 'different-author' }, f.frozen.originalAssessmentKey)).kind).toBe('no_authority')
     const saved = f.rows.get(f.question().requestId)!.metadata.continuitySupplementQuestion as Question
-    saved.frozen.maximumCreditMilli++
-    expect(await f.answer(f.question().accept)).toBeNull()
-    expect(f.rows.size).toBe(1)
+    saved.frozen.maximumCreditMilli++; const unchanged = immutable(f)
+    expect((await readContinuitySupplementState(f.tx, f.subject, f.frozen.originalAssessmentKey)).kind).toBe('no_authority'); unchanged()
   })
-  it('persists exact approval once through the existing mailbox and does not wake it on replay after cancellation', async () => {
-    const f = fixture(); await f.store()
-    const args = await continuitySupplementQuestionArgs(f.tx, f.subject, f.question().requestId)
-    const ctx = { ...f.subject, callId: f.question().callId, continuityQuestion: { requestId: args.requestId }, signal: new AbortController().signal } as ToolContext
-    const pending = waitForContinuitySupplementAnswer(ctx, args)
-    await vi.waitFor(() => expect(f.run.status).toBe('awaiting_approval'))
-    expect(await f.answer(f.question().accept)).toMatchObject({ accepted: true, newAnswer: true })
-    expect(resolveQuestionAnswer(f.subject.runId, ctx.callId, f.question().accept)).toBe(true)
-    expect(await pending).toMatchObject({ summary: '已确认一次具体独立判断', display: { answer: f.question().accept } })
-    expect(f.run.status).toBe('running')
-    f.run.status = 'paused'; f.run.usage.authorEnded = true
-    const before = structuredClone([...f.rows.values()])
-    expect(await f.answer(f.question().accept)).toMatchObject({ accepted: true, newAnswer: false })
-    expect(resolveQuestionAnswer(f.subject.runId, ctx.callId, f.question().accept)).toBe(false)
-    expect(f.run.status).toBe('paused'); expect([...f.rows.values()]).toEqual(before)
+  it('reads the exact approved answer without waking or rewriting a cancelled run', async () => {
+    const f = fixture(); f.store(); f.answer(); f.claim(); f.run.status = 'paused'; f.run.usage.authorEnded = true
+    const unchanged = immutable(f), args = await continuitySupplementQuestionArgs(f.tx, f.subject, f.question().requestId)
+    expect(args).toMatchObject({ requestId: f.question().requestId, options: [{ label: f.question().accept }, { label: f.question().reject }] })
+    expect(await authenticateContinuityPhasePlan(f.tx, f.subject, f.plan)).toBe(true)
+    expect(await canResumeUnsentContinuitySupplement(f.tx, { ...f.subject, continuityOwnerSeq: 8 }, f.question())).toBe(false)
+    expect(coordinator).not.toHaveProperty('waitForContinuitySupplementAnswer'); unchanged()
   })
-  it.each(['old-mailbox-only', 'unanswered'] as const)('does not infer consent from %s even when the card settles', async scenario => {
-    const f = fixture(); await f.store()
-    const args = await continuitySupplementQuestionArgs(f.tx, f.subject, f.question().requestId)
-    const ctx = { ...f.subject, callId: f.question().callId, continuityQuestion: { requestId: args.requestId }, signal: new AbortController().signal } as ToolContext
-    const pending = waitForContinuitySupplementAnswer(ctx, args)
-    await vi.waitFor(() => expect(f.run.status).toBe('awaiting_approval'))
-    if (scenario === 'old-mailbox-only') expect(resolveQuestionAnswer(f.subject.runId, ctx.callId, f.question().accept)).toBe(true)
-    else cancelAllQuestions(f.subject.runId)
-    expect(await pending).toMatchObject({ summary: '等待明确批准，未增加检查',
-      display: scenario === 'unanswered' ? { unanswered: true } : { answer: f.question().accept } })
+  it.each(['old-mailbox-only', 'unanswered'] as const)('does not infer a persisted answer from %s', async () => {
+    const f = fixture(); f.store(); const unchanged = immutable(f)
     expect((await readContinuitySupplementState(f.tx, f.subject, f.frozen.originalAssessmentKey)).kind).toBe('no_authority')
-    await expect(f.claim()).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
-    expect(f.rows.size).toBe(1)
+    expect(await authenticateContinuityPhasePlan(f.tx, f.subject, f.plan)).toBe(false); unchanged()
   })
 })
 
-describe('one exact original supplemental phase crosses the paid transport boundary', () => {
-  it.each(['model', 'price', 'cap', 'input-limit', 'body', 'target', 'output-limit'] as const)('rejects %s drift after the real grant and claim', async field => {
-    const f = fixture(); await f.store(); await f.answer(f.question().accept); expect(await f.claim()).toBe(true)
-    await expect(f.transport()).resolves.toMatchObject({ requestId: f.question().requestId })
-    const drift = { model: { model: { ...f.frozen.model, modelName: 'replacement' } }, price: { price: { ...f.frozen.price, rateCardId: 'repriced' } },
-      cap: { maximumCreditMilli: f.frozen.maximumCreditMilli + 1 }, 'input-limit': { inputTokenCeiling: f.frozen.inputTokenCeiling + 1 },
-      body: { content: `${f.frozen.input.content} changed` }, target: { targetId: 'other-compilation' }, 'output-limit': { maxOutputTokens: 32768 } }[field]
-    await expect(f.transport(drift)).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+describe('historical supplemental transport identity never becomes a new paid slot', () => {
+  it.each(['model', 'price', 'cap', 'input-limit', 'body', 'target', 'output-limit'] as const)('rejects %s drift in frozen historical consent', async field => {
+    const f = fixture(); f.store(); f.answer()
+    const saved = (f.rows.get(f.question().requestId)!.metadata.continuitySupplementQuestion as Question).frozen
+    if (field === 'model') saved.model.modelName = 'replacement'
+    if (field === 'price') saved.price = { ...saved.price, multiplierBps: saved.price.multiplierBps + 1 }
+    if (field === 'cap') saved.maximumCreditMilli++
+    if (field === 'input-limit') saved.inputTokenCeiling++
+    if (field === 'body') saved.input.content += 'changed'
+    if (field === 'target') saved.input.targetId = 'other-compilation'
+    if (field === 'output-limit') Object.assign(saved, { maxOutputTokens: 32768 })
+    const unchanged = immutable(f)
+    expect(await authenticateContinuityPhasePlan(f.tx, f.subject, f.plan)).toBe(false)
+    expect((await readContinuitySupplementState(f.tx, f.subject, f.frozen.originalAssessmentKey)).kind).toBe('no_authority'); unchanged()
   })
-  it('authorizes only full reassessment; a new owner may reuse the grant but no prose, reverify or second physical usage', async () => {
-    const f = fixture(); await f.store(); await f.answer(f.question().accept)
+  it('reads only the exact claimed phase and never creates another claim, usage or execution', async () => {
+    const f = fixture(); f.store(); f.answer(); f.claim(); const unchanged = immutable(f)
+    expect(await readContinuityPhaseClaim(f.tx, f.subject, { plan: f.plan, chapterId: f.frozen.input.chapterId,
+      phase: 'full_reassessment', operationRef: f.frozen.originalAssessmentKey, inputHash: runtimeJson(f.frozen.input).hash })).toBe(true)
     for (const kind of ['prose_revision', 'reverify', 'sparse_repair'] as const) {
       const { hash: _hash, ...value } = f.plan, body = { ...value, phases: [{ kind, limit: 1, authoritySourceRef: `continuity-question:${f.question().requestId}` }] }
       expect(await authenticateContinuityPhasePlan(f.tx, f.subject, { ...body, hash: runtimeJson(body).hash })).toBe(false)
     }
-    f.owner.seq = 8
-    expect(await claimContinuityPhase(f.tx, { ...f.subject, continuityOwnerSeq: 8 }, { plan: f.plan, chapterId: f.frozen.input.chapterId,
-      phase: 'full_reassessment', operationRef: f.frozen.originalAssessmentKey, inputHash: runtimeJson(f.frozen.input).hash, ownerEpoch: '8' })).toBe(true)
-    expect(await f.claim({ ownerEpoch: '9' }).catch(() => 'old-owner-rejected')).toBe('old-owner-rejected')
-    expect(await f.claim({}, 8)).toBe(false)
-    const executionId = f.execution(8)
-    f.prepare(); await reserveContinuitySupplementUsage(f.tx, f.subject.userId, 'new-usage', f.question().requestId, executionId)
-    const before = structuredClone([...f.rows.values()])
-    await reserveContinuitySupplementUsage(f.tx, f.subject.userId, 'new-usage', f.question().requestId, executionId)
-    expect([...f.rows.values()]).toEqual(before)
-    f.prepare('second-usage')
-    await expect(reserveContinuitySupplementUsage(f.tx, f.subject.userId, 'second-usage', f.question().requestId, executionId)).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
-    await expect(f.claim({ operationRef: 'changed-call-or-operation' }, 8)).rejects.toBeDefined()
+    expect(await readContinuityPhaseClaim(f.tx, f.subject, { plan: f.plan, chapterId: f.frozen.input.chapterId,
+      phase: 'full_reassessment', operationRef: 'changed-operation', inputHash: runtimeJson(f.frozen.input).hash })).toBe(false)
+    expect(coordinator).not.toHaveProperty('claimContinuityPhase'); unchanged()
   })
   it.each(['claim-only', 'dispatch-marker', 'usage-binding', 'orphan-prepared', 'native-unknown', 'expired', 'same-owner', 'current-execution'] as const)(
-    'requires proven absence of every send window before a new owner resumes %s', async kind => {
-    const f = fixture(); await f.store(); await f.answer(f.question().accept); await f.claim()
-    const claims = structuredClone([...f.rows.values()].filter(row => row.metadata.continuityPhaseClaim))
+    'requires absence of every historical send window for %s', async kind => {
+    const f = fixture(); f.store(); f.answer(); f.claim()
     if (kind === 'dispatch-marker') {
       const id = runtimeJson({ kind: 'continuity_supplement_dispatch', originalFailedSubject: f.plan.supplementalSourceKey }).hash
       f.rows.set(id, { id, runId: f.subject.runId, artifactType: 'continuityReview', metadata: { version: 1,
         continuitySupplementDispatch: { requestId: f.question().requestId, requestHash: f.question().requestHash, callId: 'escaped-call',
           usageId: 'unknown-physical-usage', inputHash: runtimeJson(f.frozen.input).hash, at: new Date().toISOString() } } })
     }
-    if (kind === 'usage-binding' || kind === 'orphan-prepared') {
-      f.prepare()
-      if (kind === 'usage-binding') await reserveContinuitySupplementUsage(f.tx, f.subject.userId, 'new-usage', f.question().requestId, f.execution(7))
-    }
+    if (kind === 'usage-binding' || kind === 'orphan-prepared') { f.prepare(); if (kind === 'usage-binding') f.binding() }
     if (kind === 'native-unknown') f.providerAttempts.count.mockResolvedValue(1)
     if (kind === 'expired') vi.spyOn(Date, 'now').mockReturnValue(Date.parse(f.question().expiresAt) + 1)
     f.owner.seq = kind === 'same-owner' ? 7 : 8
     if (kind === 'current-execution') f.execution(8)
-    const resumed = { ...f.subject, continuityOwnerSeq: f.owner.seq }
+    const resumed = { ...f.subject, continuityOwnerSeq: f.owner.seq }, unchanged = immutable(f)
     expect(await canResumeUnsentContinuitySupplement(f.tx, resumed, f.question())).toBe(kind === 'claim-only')
     expect((await readContinuitySupplementState(f.tx, resumed, f.frozen.originalAssessmentKey)).kind).toBe(kind === 'claim-only' ? 'authorized' : 'unknown')
-    const writes = f.artifacts.create.mock.calls.length
-    if (kind !== 'claim-only') for (const callId of ['duplicate-continue', 'worker-restart']) {
-      const ctx = { ...resumed, callId, mode: 'build', signal: new AbortController().signal,
-        continuitySupplement: { requestId: f.question().requestId, dispatchAllowed: true } } as ToolContext
-      await expect(executeContinuitySupplementTool(ctx, { compilationId: f.frozen.input.targetId })).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
-    }
-    expect(f.artifacts.create).toHaveBeenCalledTimes(writes)
-    expect([...f.rows.values()].filter(row => row.metadata.continuityPhaseClaim)).toEqual(claims)
-    expect(f.usage.size).toBe(kind === 'usage-binding' || kind === 'orphan-prepared' ? 1 : 0)
-    expect(fetch).not.toHaveBeenCalled()
+    expect(coordinator).not.toHaveProperty('executeContinuitySupplementTool'); unchanged()
   })
-  it('creates only the current execution usage atomically; late or duplicate preparation creates no orphan', async () => {
-    const f = fixture(); await f.store(); await f.answer(f.question().accept); await f.claim()
-    const oldExecution = f.execution(7, 'old-worker')
-    f.owner.seq = 8
-    const currentExecution = f.execution(8, 'current-worker')
-    const input = { ...f.subject, requestId: f.question().requestId, executionId: oldExecution }
-    await expect(createContinuitySupplementUsage(f.tx, input, f.preparedData('late-old-usage'))).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
-    expect(f.usageCreate).not.toHaveBeenCalled(); expect(f.usage.size).toBe(0)
-    await createContinuitySupplementUsage(f.tx, { ...input, executionId: currentExecution }, f.preparedData('only-usage'))
-    const before = structuredClone([...f.rows.values()])
-    await expect(createContinuitySupplementUsage(f.tx, { ...input, executionId: currentExecution }, f.preparedData('duplicate-usage'))).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
-    expect(f.usageCreate).toHaveBeenCalledOnce(); expect([...f.usage.keys()]).toEqual(['only-usage'])
-    expect([...f.rows.values()]).toEqual(before); expect(fetch).not.toHaveBeenCalled()
+  it('preserves existing usage while retired preparation exports cannot create late or duplicate orphans', async () => {
+    const f = fixture(); f.store(); f.answer(); f.claim(); f.prepare('only-usage'); f.execution(7, 'old-worker'); f.execution(8, 'current-worker'); f.owner.seq = 8
+    const unchanged = immutable(f)
+    for (const name of ['createContinuitySupplementUsage', 'reserveContinuitySupplementUsage', 'assertContinuitySupplementTransport'])
+      expect(coordinator).not.toHaveProperty(name)
+    expect(await canResumeUnsentContinuitySupplement(f.tx, { ...f.subject, continuityOwnerSeq: 8 }, f.question())).toBe(false)
+    expect([...f.usage.keys()]).toEqual(['only-usage']); unchanged()
   })
 })
 
@@ -296,7 +264,7 @@ describe('historical target-specific waiver keeps only existing phase claims', (
     boundary.original.mockResolvedValue(admitted)
     Object.assign(f.tx, { chapter: { findFirst: vi.fn(async ({ where }: { where: { id: string; authorId: string; novelId: string } }) =>
       where.id === chapterId && where.authorId === f.subject.userId && where.novelId === f.subject.novelId ? { id: chapterId, orderIndex: 13 } : null) } })
-    const { hash: _old, supplementalSourceKey: _supplement, revisionAuthority: _revision, ...base } = f.plan
+    const { hash: _old, supplementalSourceKey: _supplement, ...base } = f.plan
     const body = { ...base, authorityHash: runtimeJson({ spec: admitted.spec, prompt: admitted.prompt }).hash,
       phases: [{ kind: 'initial_review' as const, limit: 1, authoritySourceRef: 'original-admission:' + original.sourceRunId },
         { kind: 'sparse_repair' as const, limit: 1, authoritySourceRef: 'original-admission:' + original.sourceRunId }] }
@@ -314,18 +282,17 @@ describe('historical target-specific waiver keeps only existing phase claims', (
     expect(await authenticateContinuityPhasePlan(f.tx, f.subject, f.plan)).toBe(true)
     expect(await readContinuityPhaseClaim(f.tx, f.subject, { plan: f.plan, chapterId: f.chapterId, phase: 'initial_review',
       operationRef: f.claim.operationRef, inputHash: f.claim.exactInputHash })).toBe(true)
-    expect(await claimContinuityPhase(f.tx, f.subject, { plan: f.plan, chapterId: f.chapterId, phase: 'initial_review',
-      operationRef: f.claim.operationRef, inputHash: f.claim.exactInputHash, ownerEpoch: '7' })).toBe(false)
-    await expect(claimContinuityPhase(f.tx, f.subject, { plan: f.plan, chapterId: f.chapterId, phase: 'sparse_repair',
-      operationRef: 'new-request', inputHash: 'b'.repeat(64), ownerEpoch: '7' })).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+    expect(await readContinuityPhaseClaim(f.tx, f.subject, { plan: f.plan, chapterId: f.chapterId, phase: 'sparse_repair',
+      operationRef: 'new-request', inputHash: 'b'.repeat(64) })).toBe(false)
+    expect(coordinator).not.toHaveProperty('claimContinuityPhase')
     expect([...f.rows.values()]).toEqual(before); expect([...f.usage.values()]).toEqual(fees)
     expect(f.usageCreate).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled()
   })
   it('cannot treat an unclaimed old plan as a new paid allowance', async () => {
     const f = oldClaim(false)
     expect(await authenticateContinuityPhasePlan(f.tx, f.subject, f.plan)).toBe(false)
-    await expect(claimContinuityPhase(f.tx, f.subject, { plan: f.plan, chapterId: f.chapterId, phase: 'initial_review',
-      operationRef: 'new', inputHash: 'a'.repeat(64), ownerEpoch: '7' })).rejects.toMatchObject({ code: 'CONTINUITY_PHASE_AUTHORITY_REQUIRED' })
+    expect(await readContinuityPhaseClaim(f.tx, f.subject, { plan: f.plan, chapterId: f.chapterId, phase: 'initial_review',
+      operationRef: 'new', inputHash: 'a'.repeat(64) })).toBe(false)
     expect(f.rows.size).toBe(0); expect(f.usageCreate).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled()
   })
   it.each(['foreign-run', 'planHash', 'phase', 'ordinal'] as const)('rejects an invalid historical %s claim', async kind => {

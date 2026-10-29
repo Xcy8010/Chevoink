@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto'
+import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
+import { createHash, randomUUID } from 'node:crypto'
 import { describe,expect,it,vi } from 'vitest'
 import { z } from 'zod'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
@@ -19,7 +20,7 @@ import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { initializeExecutionState,loadExecutionState,saveExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { loadCurrentTodoSnapshot } from '../../api/lib/agent/session-messages.js'
-import { prepareStoryCompilation,recordStoryCompilerWrite,saveSceneTasks,validateStoryContinuity } from '../../api/lib/agent/story-compiler.js'
+import { prepareStoryCompilation,recordStoryCompilerWrite,saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { freezeWritingScope,readCompletedWritingDelivery } from '../../api/lib/agent/writing-scope.js'
@@ -161,7 +162,7 @@ describe.runIf(available)('first writing workflow milestones are bounded persist
     }
   }), 15000)
 
-  it('reprepare, changed intent, replaced scenes and abandoned attempts never buy another milestone or reset paid counters', async () => writingFixture(async f => {
+  it('reprepare, changed intent, replaced scenes and abandoned attempts preserve historical audit without another milestone or old counter admission', async () => writingFixture(async f => {
     await claim(f)
     const ctx = context(f)
     const first = await storyCompilerPrepareTool.execute(ctx, { chapterId: f.chapterId, intentSummary: '修改本章' })
@@ -170,12 +171,19 @@ describe.runIf(available)('first writing workflow milestones are bounded persist
     await prisma.storyCompilation.update({ where: { id: compilation.id }, data: { validation: { checkRounds: 3, autoRepairRounds: 1 } } })
     expect((await sceneTaskBuildTool.execute(ctx, { compilationId: compilation.id, tasks })).workflowMilestone?.phase).toBe('scenes')
     expect((await sceneTaskBuildTool.execute(ctx, { compilationId: compilation.id, tasks: [{ ...tasks[0], purpose: '同目标不同摘要' }] })).workflowMilestone).toBeUndefined()
+    const archivedValidation = (await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).validation
     expect((await storyCompilerPrepareTool.execute(ctx, { chapterId: f.chapterId, intentSummary: '换摘要仍同一任务' })).workflowMilestone).toBeUndefined()
     const replacement = await prisma.storyCompilation.findFirstOrThrow({ where: { runId: f.runId, status: 'active' } })
     expect(replacement.id).not.toBe(compilation.id)
-    expect(replacement.validation).toMatchObject({ checkRounds: 3, autoRepairRounds: 1 })
+    expect(replacement.validation).not.toHaveProperty('checkRounds')
+    expect(replacement.validation).not.toHaveProperty('autoRepairRounds')
     expect((await sceneTaskBuildTool.execute(ctx, { compilationId: replacement.id, tasks })).workflowMilestone).toBeUndefined()
-    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).status).toBe('abandoned')
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).toMatchObject({ status: 'abandoned', validation: archivedValidation })
+    const reviewed = await persistCurrentContinuityReport({ ...f, compilationId: replacement.id, expectedChapterRevision: 1, opinions: [] })
+    expect(reviewed.result).toMatchObject({ reviewCompleted: true })
+    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: replacement.id } })).validation).toMatchObject({ independentCheck: 'complete', checkedRevision: 1 })
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
   }), 15000)
 
   it('concurrent prepare and scene saves serialize one first observation per phase', async () => writingFixture(async f => {
@@ -322,7 +330,7 @@ describe.runIf(available)('durable compiler dispatch', () => {
       expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: id } })).targetRevision).toBe(2)
       expect(await prisma.sceneTask.count({ where: { compilationId: id, status: 'writing' } })).toBe(1)
       if (scenario.startsWith('commit')) {
-        await validateStoryContinuity({ ...f, compilationId: id, findings: [], expectedChapterRevision: 2, independentCheck: 'complete' })
+        await persistCurrentContinuityReport({ ...f, compilationId: id, opinions: [], expectedChapterRevision: 2, independentCheck: 'complete' })
         if (scenario !== 'commit-no-quality') await persistHumanityQualityReport({ ...f, compilationId: id, chapterRevision: 2,
           mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
         if (scenario === 'commit-retain') {
@@ -330,10 +338,10 @@ describe.runIf(available)('durable compiler dispatch', () => {
           await prisma.chapterQualityReport.update({ where: { id: report.id }, data: { id: retained[0].reportId } })
           await prisma.qualityFinding.create({ data: { id: retained[0].findingId, reportId: retained[0].reportId, userId: f.userId, novelId: f.novelId,
             source: 'critic', signal: 'emotion_grounding', severity: 'advisory', startOffset: 0, endOffset: 2,
-            evidenceExcerpt: '他绕', evidenceHash: 'a'.repeat(64), explanation: '审美建议', suggestion: '增加动作', confidence: 0.9 } })
+            evidenceExcerpt: '他绕', evidenceHash: createHash('sha256').update('他绕').digest('hex'), explanation: '审美建议', suggestion: '增加动作', confidence: 0.9 } })
         }
         await step() // Save the validated compilation observation before COMMIT.
-        if (scenario === 'commit-stale') await prisma.storyCompilation.update({ where: { id }, data: { preparedContext: { changed: true } } })
+        if (scenario === 'commit-stale') await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '作者在检查后保存的新正文。', revision: { increment: 1 } } })
         if (scenario === 'commit-gap') {
           injectRollback()
           await expect(step()).rejects.toThrow('fixture-compiler-rollback')
@@ -351,15 +359,19 @@ describe.runIf(available)('durable compiler dispatch', () => {
             expect(await prisma.chapterQualityReport.count({ where: { compilationId: id } })).toBe(0)
           }
         } else {
-          expect(committed).toMatchObject({ kind: 'tool', result: { summary: '提交章节桥与当前故事终态' } })
+          expect(committed).toMatchObject({ kind: 'tool', result: { summary: '章节已提交' } })
           if (scenario === 'commit-retain') {
             const operation = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'chapter_bridge_commit' }, orderBy: { createdAt: 'desc' } })
             expect(operation.inputSnapshot).toMatchObject({ input: { args: { retainedFindings: retained } } })
             expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id } })).validation).toMatchObject({ retainedReviewDecision: { findings: retained } })
           }
-          const count = await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })
+          const memories = await prisma.projectMemoryEntry.findMany({ where: { novelId: f.novelId }, include: { evidence: true } })
+          expect(memories.map(item => item.memoryType).sort()).toEqual(['chapterSummary', 'sceneState'])
+          for (const memory of memories) expect(memory).toMatchObject({ status: 'inferred', reviewStatus: 'pending', sourceChapterId: f.chapterId,
+            evidence: expect.arrayContaining([expect.objectContaining({ sourceType: 'chapter', sourceId: f.chapterId, revision: 2 })]) })
+          const count = memories.length
           expect(count).toBe(2)
-          expect(await step()).toMatchObject({ kind: 'tool', result: { summary: '提交章节桥与当前故事终态' } })
+          expect(await step()).toMatchObject({ kind: 'tool', result: { summary: '章节已提交' } })
           expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(count)
         }
       }

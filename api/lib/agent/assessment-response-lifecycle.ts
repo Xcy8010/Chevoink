@@ -5,8 +5,6 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { DataAccessError } from '../prisma.js'
-import { lockNovelActiveScope } from '../data/novel-write-lock.js'
-import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { runtimeJson } from './runtime-common.js'
 import { normalizeContinuityV4Projection, normalizeContinuityV4ProjectionV2, bindNormalizedContinuityV4Projection } from './continuity-review-v4.js'
 import { isKnownTextRequestBilling, isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
@@ -15,20 +13,16 @@ import { continuitySourceCatalog, continuitySourceInput, type ContinuityBodies }
 import { parseQualityJsonObject } from './quality-evidence.js'
 import type { ToolContext } from './tools/types.js'
 import { readOriginalTaskRequest, originalTaskRunIds } from './original-request.js'
-import { readQualityReviewAdmission } from './quality-review-admission.js'
-import { readAuthorContinuedReviewUsageIds } from './continued-review-recovery.js'
-import { markLegacyContinuityAssessmentApplied } from './continuity-response-correction.js'
 import { terminalCandidateSchema, terminalResponseFields, type TerminalCandidate } from './terminal-state-review.js'
 import { terminalEvidenceContextSchema, type TerminalEvidenceContext } from './terminal-evidence-context.js'
 import { continuitySourceScopeSchema, type ContinuitySourceScope } from './continuity-source-authority.js'
 import { terminalAddressResponseFields } from './terminal-review-addresses.js'
 import { continuityResponseContract, continuityResponseSystem, continuityResponseInput, fixedContinuityResponseFields, assertFixedContinuityResponseFields, continuityReassessmentDiagnostics, continuityReassessmentEnvelope, decisionSchema, continuityReassessmentCandidates } from './continuity-response-contract.js'
-import { inspectAuthenticatedContinuityAssessment, knownFinalContinuityFailure, isContinuityV4Inspection, assertLegacyContinuityInspection, type AuthenticatedContinuityInspection, type LegacyContinuityInspection } from './authenticated-continuity-assessment.js'
+import { inspectAuthenticatedContinuityAssessment, isContinuityV4Inspection, assertLegacyContinuityInspection, type AuthenticatedContinuityInspection, type LegacyContinuityInspection } from './authenticated-continuity-assessment.js'
 import { continuityReviewManifestSchema, continuityV4RepairRequest, applyContinuityV4Repair, failedContinuityV4Repair,
   type ContinuityReviewManifest } from './continuity-review-v4.js'
-import { nextReviewAction } from '../../../shared/review-lifecycle.js'
 import { sameContinuitySubject } from './continuity-subject-identity.js'
-import { assertContinuityOwner, authenticateContinuityPhasePlan, claimContinuityPhase, readContinuityPhaseClaim, continuityModelPriceHash, assertContinuityAssessmentSubject, continuityAssessmentPhase } from './continuity-coordinator.js'
+import { readContinuityPhaseClaim, assertContinuityAssessmentSubject, continuityAssessmentPhase } from './continuity-coordinator.js'
 
 type Inspection = AuthenticatedContinuityInspection
 const object = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
@@ -152,54 +146,6 @@ export function failedContinuityReassessment(original: Inspection, raw: string, 
     ...((protocol === 3 || protocol === 4 || protocol === 5) && complete ? { diagnostics: sparseDiagnostics ?? continuityReassessmentDiagnostics(original, raw, bodies) } : {}) } } as LegacyContinuityInspection['audit'] }
 }
 
-export async function runContinuityReassessment(input: { original: Inspection; bodies: ContinuityBodies; system: string; content: string; reassessmentProtocol?: 2 | 3 | 4 | 5 | 6 | 7;
-  billingKnown: boolean; providerComplete: boolean; slotUsed: boolean; signal: AbortSignal; assertCurrent: () => Promise<void>;
-  claim: (request: { system: string; content: string }) => Promise<boolean>; dispatch: (request: { system: string; content: string }) => Promise<{ content: string; complete: boolean }>;
-  notDispatched?: () => Promise<void>; normalizationInputHash?: string;
-}): Promise<Inspection> {
-  if (input.reassessmentProtocol === 6 || input.reassessmentProtocol === 7 || isContinuityV4Inspection(input.original)) {
-    if (input.reassessmentProtocol !== (input.original.audit.parserVersion === 10 ? 7 : 6) || !isContinuityV4Inspection(input.original)) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '独立响应版本与冻结修复合同不一致。')
-    if (input.normalizationInputHash && input.billingKnown && input.providerComplete && !input.slotUsed && !input.signal.aborted) {
-      const derived = normalizeContinuityV4ProjectionV2(input.original, input.normalizationInputHash)
-      if (derived.complete) return derived
-    }
-    const request = continuityV4RepairRequest(input.original)
-    const transition = nextReviewAction({ ownerCurrent: true, cancelled: input.signal.aborted, contextCurrent: true, reserved: true,
-      rawPresent: input.original.audit.rawResponse.complete, providerComplete: input.providerComplete, billingKnown: input.billingKnown,
-      providerFailed: false, complete: input.original.complete, sameFailedSubject: false, repairAvailable: !!request,
-      repairConsumed: input.slotUsed, newRequestAllowed: false })
-    if (transition.action !== 'repair' || !request) return input.original
-    input.signal.throwIfAborted(); await input.assertCurrent(); input.signal.throwIfAborted()
-    if (!await input.claim(request)) return input.original
-    try { input.signal.throwIfAborted(); await input.assertCurrent() } catch (error) { await input.notDispatched?.(); throw error }
-    const response = await input.dispatch(request)
-    input.signal.throwIfAborted(); await input.assertCurrent()
-    let repaired: ReturnType<typeof applyContinuityV4Repair>
-    try { repaired = applyContinuityV4Repair(input.original, response.content, response.complete) }
-    catch { repaired = failedContinuityV4Repair(input.original, response.content, response.complete) }
-    return input.normalizationInputHash ? normalizeContinuityV4ProjectionV2(repaired, input.normalizationInputHash) : repaired
-  }
-  assertLegacyContinuityInspection(input.original)
-  if ((input.reassessmentProtocol === 3 || input.reassessmentProtocol === 4 || input.reassessmentProtocol === 5) !== (input.original.audit.responseContract === 3)) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '复核阶段响应版本不一致。')
-  if (input.original.complete || !input.billingKnown || !input.providerComplete || input.slotUsed || !input.original.audit.rawResponse.complete) return input.original
-  input.signal.throwIfAborted(); await input.assertCurrent()
-  input.signal.throwIfAborted()
-  const formatOnly = recoverEmptyOptionalProposalTable(input.original, input.bodies)
-    ?? recoverExplicitSourceEvidence(input.original, input.bodies)
-  if (formatOnly) return formatOnly
-  const request = continuityReassessmentRequest(input.system, input.content, input.original, input.bodies, false, input.reassessmentProtocol)
-  if (!await input.claim(request)) return input.original
-  try { input.signal.throwIfAborted(); await input.assertCurrent() } catch (error) {
-    await input.notDispatched?.()
-    throw error
-  }
-  const response = await input.dispatch(request)
-  input.signal.throwIfAborted(); await input.assertCurrent()
-  let result: Inspection | undefined
-  if (response.complete) try { result = applyContinuityReassessment(input.original, response.content, input.bodies, input.reassessmentProtocol) } catch { /* Explicit invalid second result remains incomplete. */ }
-  return result ?? failedContinuityReassessment(input.original, response.content, response.complete, input.bodies, input.reassessmentProtocol)
-}
-
 export type LegacyAssessmentInput = { chapterId: string; revision: number; bodies: ContinuityBodies; system: string; content: string; terminalCandidate?: TerminalCandidate; reassessmentProtocol?: 2 | 3 | 4 | 5 | 6 | 7;
   parserVersion?: 7 | 8 | 9 | 10; continuityManifest?: ContinuityReviewManifest; sourceScope?: ContinuitySourceScope; bindingHash?: string; targetType: 'chapter' | 'story_compilation'; targetId: string }
 export type FrozenTerminalContract = Pick<TerminalEvidenceContext, 'verdictProtocol' | 'spanAddressProtocol' | 'proposalChanges'> & { coverageVersion: 1 | 2 }
@@ -244,120 +190,6 @@ export async function readFrozenLegacyContinuityInput(tx: Prisma.TransactionClie
     ...(parsed.data.bodies.terminalEvidence?.verdictProtocol ? { verdictProtocol: parsed.data.bodies.terminalEvidence.verdictProtocol } : {}) }) } : proposed
   if (runtimeJson(identity(parsed.data)).hash !== runtimeJson(identity(expected)).hash) throw invalid()
   return parsed.data
-}
-
-/** One actual tool-call reservation. A new selector, body or worker restart
- * cannot retire an unknown request; only existing authenticated retirement can. */
-export async function reserveLegacyContinuityAssessment(tx: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput,
-  assertCurrent: (tx: Prisma.TransactionClient) => Promise<void>) {
-  ctx.signal.throwIfAborted(); await lockNovelActiveScope(tx, ctx.novelId); await assertAgentManuscriptCurrent(tx, ctx); await assertCurrent(tx)
-  const task = await readOriginalTaskRequest(tx, ctx), runIds = await originalTaskRunIds(tx, ctx, task)
-  const run = await tx.agentRun.findFirstOrThrow({ where: { id: ctx.runId, userId: ctx.userId, novelId: ctx.novelId } })
-  const admission = await readQualityReviewAdmission(tx, run), key = assessmentKey(ctx, input)
-  const reservations = await tx.agentArtifact.findMany({ where: { runId: { in: runIds }, artifactType: 'continuityReview',
-    metadata: { path: ['assessmentChapterId'], equals: input.chapterId } } })
-  const exact = reservations.find(row => object(row.metadata)?.continuityAssessmentRequestKey === key)
-  if (exact) return 'replay' as const
-  const retired = reservations.length ? await readAuthorContinuedReviewUsageIds(tx, ctx) : new Set<string>()
-  let sameFailedReviewedInput = false
-  for (const reservation of reservations) {
-    const meta = object(reservation.metadata)
-    if (typeof meta?.continuityAssessmentRequestKey !== 'string') continue
-    if (await tx.agentArtifact.findFirst({ where: { runId: { in: runIds }, artifactType: 'continuityReview',
-      metadata: { path: ['assessmentApplicationKey'], equals: meta.continuityAssessmentRequestKey } } })) continue
-    const observations = await tx.agentArtifact.findMany({ where: { runId: reservation.runId, artifactType: 'continuityReview',
-      metadata: { path: ['assessmentKey'], equals: meta.continuityAssessmentRequestKey } } })
-    const links = await tx.agentArtifact.findMany({ where: { runId: reservation.runId, artifactType: 'continuityReview',
-      metadata: { path: ['assessmentRequestOwnerKey'], equals: meta.continuityAssessmentRequestKey } } })
-    const ids = [...new Set([...observations, ...links].flatMap(row => { const value = object(row.metadata)?.usageIds; return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [] }))]
-    const claim = await tx.agentArtifact.findFirst({ where: { runId: reservation.runId, artifactType: 'continuityReview',
-      metadata: { path: ['fullReassessmentKey'], equals: meta.continuityAssessmentRequestKey } } })
-    const unseenSecond = claim && !observations.some(row => object(row.metadata)?.stage === 'reassessment')
-    const unsent = unseenSecond && await tx.agentArtifact.findFirst({ where: { runId: reservation.runId, artifactType: 'continuityReview',
-      metadata: { path: ['fullReassessmentNotDispatchedKey'], equals: meta.continuityAssessmentRequestKey } } })
-    const usage = ids.length ? await tx.aiUsageLog.findMany({ where: { id: { in: ids }, userId: ctx.userId, novelId: ctx.novelId,
-      chapterId: input.chapterId, action: { startsWith: 'agent3ContinuityCritic' } } }) : []
-    const firstUnsent = await tx.agentArtifact.findFirst({ where: { runId: reservation.runId, artifactType: 'continuityReview',
-      metadata: { path: ['firstAssessmentNotDispatchedKey'], equals: meta.continuityAssessmentRequestKey } } })
-    const known = (!unseenSecond || !!unsent) && (ids.length > 0 || !!firstUnsent) && usage.length === new Set(ids).size
-      && usage.every(row => knownAssessmentBilling(row) || isKnownTextRequestBilling(row) && row.billingStatus === 'not_dispatched')
-    const explicitlyRetired = usage.length > 0 && usage.length === new Set(ids).size && (!unseenSecond || usage.some(row => retired.has(row.id)))
-      && usage.every(row => knownAssessmentBilling(row) || retired.has(row.id))
-    // A completed, paid failure belongs to its exact reviewed input, not every
-    // later revision of the chapter. Changing focus/selectors/callId is not a
-    // new subject. Unknown dispatches and unseen second passes stay fenced.
-    const frozen = object(meta.input), frozenBodies = object(frozen?.bodies)
-    if (known && typeof meta.callId === 'string' && sameContinuitySubject(meta.input, input)) {
-      const prior = await readLegacyContinuityAssessment(tx, { ...ctx, runId: reservation.runId, callId: meta.callId }, frozen as LegacyAssessmentInput)
-      if (!prior.inspected.complete && knownFinalContinuityFailure(prior.inspected.audit)
-        && prior.billingKnown && prior.providerComplete && prior.recoveryReady) {
-        sameFailedReviewedInput = true
-        continue
-      }
-    }
-    const subjectChanged = frozen?.targetType === input.targetType && frozen.targetId === input.targetId
-      && frozen.chapterId === input.chapterId && typeof frozenBodies?.current === 'string'
-      && (frozenBodies.current !== input.bodies.current
-        || runtimeJson({ terminalCandidate: frozen.terminalCandidate ?? null }).hash !== runtimeJson({ terminalCandidate: input.terminalCandidate ?? null }).hash)
-    if (known && admission && meta.admissionId === admission.id && subjectChanged && typeof meta.callId === 'string') {
-      // A primary response may be observed before the old chain claims its
-      // second pass. Only its real terminal tool result closes that window.
-      const events = await tx.agentRunEvent.findMany({ where: { runId: reservation.runId, type: { in: ['tool.call', 'tool.result'] },
-        payload: { path: ['callId'], equals: meta.callId } } })
-      const calls = events.filter(row => row.type === 'tool.call' && object(row.payload)?.toolName === 'continuity_validate')
-      const results = events.filter(row => row.type === 'tool.result' && object(row.payload)?.toolName === 'continuity_validate' && object(row.payload)?.ok === false)
-      const lastObservation = observations.reduce((date, row) => row.createdAt > date ? row.createdAt : date, reservation.createdAt)
-      // Events flush asynchronously. Their database insertion time need not be
-      // the call time; new events carry the server's canonical emission stamp.
-      const emittedAt = (event: typeof events[number]) => {
-        const payload = object(event.payload)
-        if (payload?.seq !== undefined && payload.seq !== event.seq || payload?.type !== undefined && payload.type !== event.type) return null
-        if (payload?.ts === undefined) return event.createdAt
-        if (typeof payload.ts !== 'string') return null
-        const at = new Date(payload.ts)
-        return Number.isFinite(at.getTime()) && at.toISOString() === payload.ts ? at : null
-      }
-      const callAt = calls.length === 1 ? emittedAt(calls[0]) : null, resultAt = results.length === 1 ? emittedAt(results[0]) : null
-      const finished = callAt && resultAt && callAt <= reservation.createdAt
-        && results[0].seq > calls[0].seq && resultAt >= lastObservation
-      const fullyObserved = observations.length > 0 && observations.every(row => {
-        const frame = object(row.metadata), response = object(frame?.response)
-        return response?.transportComplete === true && response.finishReason === 'stop'
-          && Array.isArray(response.toolCalls) && response.toolCalls.length === 0 && typeof response.content === 'string'
-          || response?.content === null && Array.isArray(frame?.usageIds) && frame.usageIds.length > 0
-            && frame.usageIds.every(id => usage.some(row => row.id === id && isKnownRejectedTextRequestAttempt(row)))
-      })
-      if (finished && fullyObserved) {
-        const prior = await readLegacyContinuityAssessment(tx, { ...ctx, runId: reservation.runId, callId: meta.callId }, frozen as LegacyAssessmentInput)
-        if (prior.billingKnown && prior.providerComplete) continue
-      }
-    }
-    const last = observations.reduce((date, row) => row.createdAt > date ? row.createdAt : date, reservation.createdAt)
-    if ((!known && !explicitlyRetired) || !admission || meta.admissionId === admission.id || admission.at <= last) return 'blocked' as const
-  }
-  // A new Continue admission retires no semantic failure. Call IDs, prompt,
-  // focus and table ordering cannot buy the same terminal judgment again.
-  // Unknown requests above retain their original priority and reconciliation.
-  if (sameFailedReviewedInput) {
-    if (input.parserVersion === 10 && continuityAssessmentPhase(input) === null) throw new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED',
-      '当前版本的复核报告未通过，本次未重复检查，正文与报告已保留。')
-    return 'blocked' as const
-  }
-  await (await import('./continuity-coordinator.js')).claimLegacyContinuityVerification(tx, ctx, input, reservations, key)
-  if (input.parserVersion === 10) {
-    await assertContinuityOwner(tx, ctx)
-    const plan = input.continuityManifest?.typedLineage?.phasePlan
-    if (!plan) throw new DataAccessError(409, 'CONTINUITY_PHASE_AUTHORITY_REQUIRED', '新响应合同缺少原任务完整阶段范围。')
-    const phase = await assertContinuityAssessmentSubject(tx, ctx, input)
-    if (phase === 'initial_review') await (await import('./continuity-coordinator.js')).authenticateInitialContinuityHistory(tx, ctx,
-      { compilationId: input.targetId, chapterId: input.chapterId, input })
-    if (phase !== null) await claimContinuityPhase(tx, ctx, { plan, chapterId: input.chapterId, phase, operationRef: key,
-      inputHash: runtimeJson(input).hash, ownerEpoch: `${ctx.runId}:${run.startedAt?.toISOString() ?? ''}` })
-  }
-  await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性检查请求审计', content: '本次原工具检查已预约；未知请求不能重放。',
-    metadata: runtimeJson({ version: 1, continuityAssessmentRequestKey: key, assessmentChapterId: input.chapterId,
-      callId: ctx.callId, input, admissionId: admission?.id ?? null }).value } })
-  return 'new' as const
 }
 
 export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput) {
@@ -531,47 +363,6 @@ export async function readLegacyContinuityAssessment(tx: Prisma.TransactionClien
     && Array.isArray(response.toolCalls) && !response.toolCalls.length, slotUsed: primary.some(row => row.stage === 'output_recovery') || !!claimed }
 }
 
-/** Only the real report application transaction records this receipt. */
-export async function markLegacyContinuityAssessmentApplication(tx: Prisma.TransactionClient, ctx: ToolContext, inspected: Inspection) {
-  const application = object((inspected.audit as unknown as Record<string, unknown>).assessmentRequest)
-  const task = await readOriginalTaskRequest(tx, ctx), runIds = await originalTaskRunIds(tx, ctx, task)
-  const reservations = await tx.agentArtifact.findMany({ where: { runId: { in: runIds }, artifactType: 'continuityReview',
-    metadata: { path: ['continuityAssessmentRequestKey'], equals: String(application?.key) } } })
-  const reservation = reservations.length === 1 ? reservations[0] : null
-  if (!reservation) return
-  const meta = object(reservation.metadata)!, key = String(meta.continuityAssessmentRequestKey)
-  const frozen = object(meta.input)
-  if (!inspected.complete || application?.inputHash !== runtimeJson(frozen).hash
-    || !assessmentContractMatches(frozen, inspected.audit)) return
-  const observations = await tx.agentArtifact.findMany({ where: { runId: reservation.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentKey'], equals: key } } })
-  const ids = observations.flatMap(row => { const value = object(row.metadata)?.usageIds; return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [] })
-  const usage = await tx.aiUsageLog.findMany({ where: { id: { in: ids }, userId: ctx.userId, novelId: ctx.novelId, action: { startsWith: 'agent3ContinuityCritic' } } })
-  if (!ids.length || usage.length !== new Set(ids).size || usage.some(row => !knownAssessmentBilling(row))) return
-  if (typeof meta.callId !== 'string') return
-  const received = await readLegacyContinuityAssessment(tx, { ...ctx, runId: reservation.runId, callId: meta.callId }, frozen as LegacyAssessmentInput)
-  const sourceProjectionHash = object((inspected.audit as Record<string, unknown>).sourceProjection)
-    && validateStoredExplicitSourceProjection(inspected.audit, (frozen as LegacyAssessmentInput).bodies.current, (frozen as LegacyAssessmentInput).bodies.terminalEvidence)
-    ? runtimeJson((inspected.audit as Record<string, unknown>).sourceProjection).hash : undefined
-  const projectionNormalization = isContinuityV4Inspection(inspected) ? inspected.audit.continuityV4.projectionNormalization : undefined
-  const rebound = bindLegacyContinuityAssessment(received.inspected, { ...ctx, runId: reservation.runId, callId: meta.callId },
-    frozen as LegacyAssessmentInput, projectionNormalization?.version === 2 ? 2 : !!projectionNormalization)
-  if (!received.billingKnown || !received.providerComplete || !rebound.complete || runtimeJson(rebound.audit).hash !== runtimeJson(inspected.audit).hash) return
-  if (observations.some(observation => {
-    const meta = object(observation.metadata)
-    return !Array.isArray(meta?.usageIds) || meta.usageIds.some(id => {
-      const row = usage.find(item => item.id === id)
-      return !row || legacyContinuityStageForAction(row.action) !== meta.stage
-        || isKnownRejectedTextRequestAttempt(row) && object(meta.response)?.content !== null
-    })
-  })) return
-  if (!await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentApplicationKey'], equals: key } } })) {
-    await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性报告应用审计', content: '完整检查报告已应用到对应当前输入。',
-      metadata: runtimeJson({ version: 1, assessmentApplicationKey: key, reservationId: reservation.id, usageIds: ids,
-        ...(projectionNormalization ? { projectionNormalization } : {}), ...(sourceProjectionHash ? { sourceProjectionHash } : {}) }).value } })
-  }
-  if (typeof meta.callId === 'string') await markLegacyContinuityAssessmentApplied(tx, { ...ctx, runId: reservation.runId, callId: meta.callId })
-}
-
 export function bindLegacyContinuityAssessment(inspected: Inspection, ctx: ToolContext, input: LegacyAssessmentInput, normalize: boolean | 2 = false): Inspection {
   if (!assessmentContractMatches(input, inspected.audit)) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '响应审计版本与原预约不一致。')
   const assessmentRequest = { version: 1, key: assessmentKey(ctx, input), inputHash: runtimeJson(input).hash }
@@ -622,145 +413,6 @@ export async function readReusableLegacyContinuityAssessment(tx: Prisma.Transact
       || !validEmptyOptionalProposalProjection(result.inspected.audit, input.bodies.current, input.bodies.terminalEvidence))) return null
     return bindLegacyContinuityAssessment(result.inspected, source, frozen)
   } catch { return null }
-}
-
-/** Independent observation transaction: it never checks current text or abort,
- * and never invents accounting. This survives any later application failure. */
-export async function observeLegacyContinuityAssessment(tx: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput,
-  response: { content: string | null; finishReason: string | null; toolCalls: unknown[]; transportComplete?: false }, usageIds: string[], requestedStage: LegacyContinuityStage | 'primary') {
-  const usage = usageIds.length ? await tx.aiUsageLog.findMany({ where: { id: { in: usageIds }, userId: ctx.userId, novelId: ctx.novelId,
-    targetType: input.targetType, targetId: input.targetId, action: { startsWith: 'agent3ContinuityCritic' } } }) : []
-  if (usage.length !== new Set(usageIds).size) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '检查观察缺少真实归属账目。')
-  const stage = requestedStage === 'primary' ? legacyContinuityStageForAction(usage[0]?.action ?? '') : requestedStage
-  if (!stage || usage.some(row => legacyContinuityStageForAction(row.action) !== stage)
-    || response.content !== null && usage.filter(row => !isKnownRejectedTextRequestAttempt(row)).length !== 1) {
-    throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '检查阶段与真实请求或响应归属不一致。')
-  }
-  const key = runtimeJson({ assessmentKey: assessmentKey(ctx, input), stage, usageIds: [...usageIds].sort() }).hash
-  const prior = await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentResponseKey'], equals: key } } })
-  const frozenResponse = { content: response.content === null ? null : JSON.stringify(response.content), encoding: 'json-string',
-    finishReason: response.finishReason, toolCalls: response.toolCalls, transportComplete: response.transportComplete !== false }
-  if (prior) {
-    if (runtimeJson({ input, response: frozenResponse }).hash !== runtimeJson({ input: object(prior.metadata)?.input, response: object(prior.metadata)?.response }).hash) {
-      throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '已保存的真实检查响应不能替换。')
-    }
-    return prior.id
-  }
-  const inspected = response.content === null ? null : inspectAuthenticatedContinuityAssessment(response.content, input, response.transportComplete !== false && response.finishReason === 'stop' && !response.toolCalls.length)
-  const row = await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性检查响应审计', content: '实际检查响应与冻结输入已保存；报告是否可用另行验证。',
-    metadata: runtimeJson({ version: 1, assessmentResponseKey: key, assessmentKey: assessmentKey(ctx, input), callId: ctx.callId, stage,
-      input, usageIds: usage.map(row => row.id), response: frozenResponse, audit: inspected?.audit ?? null }).value } })
-  return row.id
-}
-
-export async function claimLegacyContinuityReassessment(tx: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput,
-  original: Inspection, usageIds: string[], request: { system: string; content: string }, assertCurrent: (tx: Prisma.TransactionClient) => Promise<void>) {
-  ctx.signal.throwIfAborted(); await lockNovelActiveScope(tx, ctx.novelId); await assertAgentManuscriptCurrent(tx, ctx); await assertCurrent(tx)
-  const usage = await tx.aiUsageLog.findMany({ where: { id: { in: usageIds }, userId: ctx.userId, novelId: ctx.novelId,
-    targetType: input.targetType, targetId: input.targetId, action: { startsWith: 'agent3ContinuityCritic' } } })
-  const semantic = usage.filter(row => !isKnownRejectedTextRequestAttempt(row))
-  if (usage.length !== new Set(usageIds).size || semantic.length !== 1 || usage.some(row => !knownAssessmentBilling(row)
-    || row.action !== 'agent3ContinuityCritic')) return false
-  const key = assessmentKey(ctx, input)
-  const first = await tx.agentArtifact.findMany({ where: { runId: ctx.runId, artifactType: 'continuityReview', AND: [
-    { metadata: { path: ['assessmentKey'], equals: key } }, { metadata: { path: ['stage'], equals: 'first' } }] } })
-  const received = first.filter(row => typeof object(object(row.metadata)?.response)?.content === 'string')
-  const observedIds = [...new Set(first.flatMap(row => { const ids = object(row.metadata)?.usageIds; return Array.isArray(ids) ? ids : [] }))]
-  if (received.length !== 1 || object(object(received[0].metadata)?.audit)?.contentHash !== original.audit.contentHash
-    || runtimeJson([...observedIds].sort()).hash !== runtimeJson([...usageIds].sort()).hash) return false
-  if (await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['fullReassessmentKey'], equals: key } } })) return false
-  if (input.parserVersion === 10) {
-    const plan = input.continuityManifest?.typedLineage?.phasePlan
-    if (!plan) return false
-    const phase = continuityAssessmentPhase(input)
-    if (phase === null) await assertContinuityAssessmentSubject(tx, ctx, input)
-    else await claimContinuityPhase(tx, ctx, { plan, chapterId: input.chapterId, phase: 'sparse_repair', operationRef: key,
-      inputHash: runtimeJson(request).hash, ownerEpoch: ctx.runId })
-  }
-  await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性复评请求审计', content: '本次原工具的一次完整复评已预约；不改写正文，不重复派发。',
-    metadata: runtimeJson({ version: 1, fullReassessmentKey: key, callId: ctx.callId, input, original: original.audit, request, usageIds }).value } })
-  return true
-}
-
-/** The caller has positively observed that its dispatch function was never
- * entered. Missing observations, provider throws and process crashes cannot use this path. */
-export async function observeLegacyContinuityReassessmentNotDispatched(tx: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput, usageIds: string[] = []) {
-  await lockNovelActiveScope(tx, ctx.novelId)
-  const key = assessmentKey(ctx, input)
-  const claim = await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, run: { userId: ctx.userId, novelId: ctx.novelId }, artifactType: 'continuityReview',
-    metadata: { path: ['fullReassessmentKey'], equals: key } } })
-  const links = await tx.agentArtifact.findMany({ where: { runId: ctx.runId, artifactType: 'continuityReview', AND: [
-    { metadata: { path: ['assessmentRequestOwnerKey'], equals: key } }, { metadata: { path: ['stage'], equals: 'reassessment' } }] } })
-  const linkedIds = links.flatMap(row => { const ids = object(row.metadata)?.usageIds; return Array.isArray(ids) ? ids as string[] : [] })
-  const usage = usageIds.length ? await tx.aiUsageLog.findMany({ where: { id: { in: usageIds }, userId: ctx.userId, novelId: ctx.novelId, agentRunId: ctx.runId,
-    targetType: input.targetType, targetId: input.targetId, action: 'agent3ContinuityCriticSecondPass' } }) : []
-  if (!claim || linkedIds.some(id => !usageIds.includes(id)) || usage.length !== new Set(usageIds).size
-    || usage.some(row => !isKnownTextRequestBilling(row) || row.billingStatus !== 'not_dispatched')) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '未派发观察与真实请求账目不一致。')
-  // A stale-input guard can roll back its before-send ownership transaction.
-  // The live request trace still proves these exact zero-spend IDs; preserve
-  // their ownership without re-running that now-stale application guard.
-  for (const usageId of usageIds.filter(id => !linkedIds.includes(id))) {
-    await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性未派发请求归属审计', content: '真实请求在发送前结束，保留其确切账目归属。',
-      metadata: runtimeJson({ version: 1, assessmentRequestBindingKey: runtimeJson({ key, usageId }).hash, assessmentRequestOwnerKey: key,
-        stage: 'reassessment', callId: ctx.callId, usageIds: [usageId], notDispatched: true }).value } })
-  }
-  if (!await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['fullReassessmentNotDispatchedKey'], equals: key } } })) {
-    await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性复评未派发审计', content: '本实例在进入供应商请求前观察到取消或输入变化；未再次派发。',
-      metadata: runtimeJson({ version: 1, fullReassessmentNotDispatchedKey: key, claimId: claim.id, callId: ctx.callId, usageIds, outcome: 'guard_failed_before_dispatch' }).value } })
-  }
-}
-
-export async function bindLegacyContinuityRequest(tx: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput,
-  usageId: string, requestedStage: LegacyContinuityStage | 'primary', assertCurrent: (tx: Prisma.TransactionClient) => Promise<void>) {
-  await lockNovelActiveScope(tx, ctx.novelId)
-  await assertCurrent(tx)
-  const usage = await tx.aiUsageLog.findFirst({ where: { id: usageId, userId: ctx.userId, novelId: ctx.novelId, agentRunId: ctx.runId,
-    targetType: input.targetType, targetId: input.targetId, action: { startsWith: 'agent3ContinuityCritic' } } })
-  const stage = usage ? legacyContinuityStageForAction(usage.action) : null
-  if (!usage || !stage || (requestedStage === 'primary' ? stage === 'reassessment' : requestedStage !== stage)) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '检查账目不能绑定此真实请求。')
-  if (input.parserVersion === 10) {
-    const plan = input.continuityManifest?.typedLineage?.phasePlan
-    if (!plan || !await authenticateContinuityPhasePlan(tx, ctx, plan) || plan.modelPriceHash !== continuityModelPriceHash({
-      tier: usage.modelTier ?? '', provider: usage.providerName ?? '', modelName: usage.modelName, multiplierBps: usage.multiplierBps ?? 0 }, usage.billingSnapshot))
-      throw new DataAccessError(409, 'RUNTIME_PRICE_INVALID', '连续性原模型或冻结价目已变化，未派发请求。')
-    await assertContinuityOwner(tx, ctx)
-  }
-  const key = assessmentKey(ctx, input), binding = runtimeJson({ key, usageId }).hash
-  const existing = await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentRequestBindingKey'], equals: binding } } })
-  if (existing) {
-    if (object(existing.metadata)?.stage !== stage) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '已绑定检查阶段不能替换。')
-    return stage
-  }
-  const links = await tx.agentArtifact.findMany({ where: { runId: ctx.runId, artifactType: 'continuityReview', AND: [
-    { metadata: { path: ['assessmentRequestOwnerKey'], equals: key } }, { metadata: { path: ['stage'], equals: stage } }] }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
-  const priorIds = [...new Set(links.flatMap(row => { const ids = object(row.metadata)?.usageIds; return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string' && id !== usageId) : [] }))]
-  if (priorIds.length) {
-    const prior = await tx.aiUsageLog.findMany({ where: { id: { in: priorIds }, userId: ctx.userId, novelId: ctx.novelId,
-      agentRunId: ctx.runId, targetType: input.targetType, targetId: input.targetId, action: usage.action } })
-    if (prior.length !== priorIds.length || priorIds.length > 1 || prior.some(row => !isKnownRejectedTextRequestAttempt(row))) {
-      throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', '同一检查阶段的原请求尚未确认零费用拒绝，未再次派发。')
-    }
-  }
-  if (!await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['assessmentRequestBindingKey'], equals: binding } } })) {
-    await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性请求归属审计', content: '供应商派发前已绑定本工具的真实请求账目。',
-      metadata: runtimeJson({ version: 1, assessmentRequestBindingKey: binding, assessmentRequestOwnerKey: key, stage, usageIds: [usageId], callId: ctx.callId }).value } })
-  }
-  return stage
-}
-
-/** Called only after this live invocation positively observed no entry into
- * provider dispatch. A crash has no such receipt. */
-export async function observeLegacyContinuityFirstNotDispatched(tx: Prisma.TransactionClient, ctx: ToolContext, input: LegacyAssessmentInput, usageIds: string[]) {
-  await lockNovelActiveScope(tx, ctx.novelId)
-  const key = assessmentKey(ctx, input)
-  const usage = usageIds.length ? await tx.aiUsageLog.findMany({ where: { id: { in: usageIds }, userId: ctx.userId, novelId: ctx.novelId, agentRunId: ctx.runId } }) : []
-  if (usage.length !== new Set(usageIds).size || usage.some(row => !isKnownTextRequestBilling(row) || row.billingStatus !== 'not_dispatched')) {
-    throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', '原请求派发状态尚未确认，不能观察为未派发。')
-  }
-  if (!await tx.agentArtifact.findFirst({ where: { runId: ctx.runId, artifactType: 'continuityReview', metadata: { path: ['firstAssessmentNotDispatchedKey'], equals: key } } })) {
-    await tx.agentArtifact.create({ data: { runId: ctx.runId, artifactType: 'continuityReview', title: '连续性检查未派发审计', content: '本实例确认在供应商派发前结束；原预约和真实账目保留。',
-      metadata: runtimeJson({ version: 1, firstAssessmentNotDispatchedKey: key, callId: ctx.callId, usageIds, outcome: 'guard_failed_before_dispatch' }).value } })
-  }
 }
 
 export const legacyAssessmentInputSchema = z.object({ chapterId: z.string(), revision: z.number().int(),

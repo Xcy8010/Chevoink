@@ -8,6 +8,8 @@ import { readExecutionStateInTransaction } from './runtime-state.js'
 import { readObservedBaseline } from './runtime-observed-baseline.js'
 import { compilerObservationSchema } from './runtime-compiler-observation.js'
 import { readOriginalTaskRequest } from './original-request.js'
+import { originalTaskRunIds } from './original-request.js'
+import { originalChapterReviewRequirements } from './chapter-review-requirements.js'
 import { assertWritingTarget, readWritingScope } from './writing-scope.js'
 import { prepareOperationInTransaction } from './runtime-operations.js'
 import { withManuscriptRunLease, withRunLease, type RunLeaseToken } from './runtime-lease.js'
@@ -51,7 +53,28 @@ export function assertWritingReviewWork(value: unknown, expected: { step: 'conti
 const actionFor = (step: z.infer<typeof writingServiceStepSchema>, writer: string) => ({ body: writer,
   continuity: 'continuity_validate', quality: 'quality_analyze', prose_revision: 'chapter_edit_range',
   continuity_verify: 'continuity_validate', quality_verify: 'quality_analyze', commit: 'chapter_bridge_commit' })[step]
-export const writingServiceOperationKey = (parentId: string, step: z.infer<typeof writingServiceStepSchema>) => `writing:${parentId}:${step}`
+export const writingServiceOperationKey = (parentId: string, step: z.infer<typeof writingServiceStepSchema>, contextHash?: string) =>
+  contextHash ? `review:${parentId}:${step}:${contextHash}` : `writing:${parentId}:${step}`
+
+function commitReviewManifest(compilation: { id: string; chapterId: string | null; chapter: { id: string; orderIndex: number } | null },
+  original: { prompt: string | null; spec: unknown }) {
+  if (!compilation.chapter || compilation.chapterId !== compilation.chapter.id) return runtimeError('COMPILATION_NOT_FOUND', '没有当前任务可提交的章节。')
+  const required = originalChapterReviewRequirements(original, compilation.chapter)
+  return manifestSchema.parse({ version: 1, chapterId: compilation.chapter.id,
+    writingHash: runtimeJson({ compilationId: compilation.id, chapterId: compilation.chapter.id, required }).hash,
+    steps: [...(required.quality ? [{ step: 'quality', actions: ['quality_analyze'] }] : []),
+      ...(required.continuity ? [{ step: 'continuity', actions: ['continuity_validate'] }] : []), { step: 'commit', actions: ['chapter_bridge_commit'] }] })
+}
+
+/** Same existing approval payload for the real commit and its required checks.
+ * It is a tool list, never a phase allowance or an assertion that reports pass. */
+export async function requiredCommitReviewManifest(tx: RuntimeTx, subject: { userId: string; novelId: string; runId: string }, compilationId?: string) {
+  const original = await readOriginalTaskRequest(tx, subject), runs = await originalTaskRunIds(tx, subject, original)
+  const compilation = await tx.storyCompilation.findFirst({ where: { userId: subject.userId, novelId: subject.novelId, runId: { in: runs },
+    ...(compilationId ? { id: compilationId } : {}), status: { in: ['active', 'completed'] } }, include: { chapter: true }, orderBy: { createdAt: 'desc' } })
+  if (!compilation) return runtimeError('COMPILATION_NOT_FOUND', '没有当前任务可提交的章节。')
+  return commitReviewManifest(compilation, original)
+}
 
 /** Recover the exact original review role from a no-provider cache. A cache
  * never substitutes today's model/rate or manufactures another paid phase. */
@@ -212,7 +235,7 @@ type ServiceProofSubject = Pick<RunLeaseToken, 'userId' | 'runId' | 'taskRootId'
 async function readServiceParent(tx: RuntimeTx, lease: ServiceProofSubject, saved: z.infer<typeof inputSchema>, verification: { historical: boolean; liveLease?: RunLeaseToken }) {
   const admission = saved.serviceAdmission
   const parent = await tx.agentOperation.findFirst({ where: { id: admission.parentOperationId, taskRootId: lease.taskRootId, kind: 'tool', ...(!verification.historical ? { status: 'prepared' } : {}) } })
-  if (!parent || !coordinatedWriterActions.some(name => name === parent.action)) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '内部写作步骤缺少原待执行写入。')
+  if (!parent || parent.action !== 'chapter_bridge_commit' && !coordinatedWriterActions.some(name => name === parent.action)) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '内部工作缺少真实待执行工具。')
   const genuine = verification.historical ? await readToolOperationSource(tx, parent)
     : verification.liveLease ? await readAdmittedToolOperation(verification.liveLease, { operationId: parent.id, action: parent.action, novelId: saved.novelId, callId: saved.callId }, tx)
       : runtimeError('RUNTIME_RECEIPT_INVALID', '当前内部工作缺少原执行租约。')
@@ -255,6 +278,35 @@ async function verifyServiceInput(tx: RuntimeTx, lease: ServiceProofSubject, sav
     return runtimeError('RUNTIME_RECEIPT_INVALID', '内部前置步骤与同一父写入或调用不一致。')
   }
   verification.parent = common
+  if (parent.action === 'chapter_bridge_commit') {
+    const base = admission.step === 'quality_verify' ? 'quality' : admission.step === 'continuity_verify' ? 'continuity' : admission.step
+    if (base !== 'quality' && base !== 'continuity') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '提交只可补齐当前必要检查。')
+    const compilationId = z.string().parse(saved.args.compilationId), runs = await originalTaskRunIds(tx,
+      { userId: lease.userId, novelId: saved.novelId, runId: lease.runId }, request)
+    const compilation = await tx.storyCompilation.findFirst({ where: { id: compilationId, userId: lease.userId, novelId: saved.novelId,
+      chapterId: admission.chapterId, runId: { in: runs } }, include: { chapter: true } })
+    if (!compilation?.chapter || original.args.compilationId !== undefined && original.args.compilationId !== compilation.id
+      || admission.parentInputHash !== parent.inputHash || admission.sourceRevision !== original.normalization.sourceRevision
+      || admission.sourceSnapshotHash !== original.normalization.sourceSnapshotHash || action !== actionFor(admission.step, parent.action)
+      || runtimeJson(saved.args).hash !== runtimeJson({ compilationId }).hash || saved.baseline?.id !== compilationId)
+      return runtimeError('RUNTIME_RECEIPT_INVALID', '必要检查与真实提交、章节或冻结来源不一致。')
+    const manifest = commitReviewManifest(compilation, request), step = manifest.steps.find(step => step.step === base)
+    if (!step) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原作者任务不要求此检查，提交不能派发额外模型。')
+    if (admission.source) {
+      const previous = await tx.agentOperation.findFirst({ where: { id: admission.source.operationId, taskRootId: lease.taskRootId,
+        parentOperationId: parent.id, kind: 'internal', status: 'succeeded' }, include: { effectReceipt: true } })
+      if (!previous?.effectReceipt || previous.effectReceipt.resultHash !== admission.source.resultHash
+        || !await hasCommittedServiceReceipt(tx, lease, previous.id)) return runtimeError('RUNTIME_RECEIPT_INVALID', '当前复查缺少同一提交的真实前置回执。')
+      await verifyPredecessor(tx, lease, { operationId: previous.id, action: previous.action, novelId: saved.novelId, callId: saved.callId }, verification)
+    }
+    if (!verification.historical) {
+      await assertWritingTarget(tx, { userId: lease.userId, novelId: saved.novelId, runId: lease.runId }, { chapterId: compilation.chapter.id })
+      const { compilerStateHash } = await import('./runtime-compiler-observation.js')
+      if (await compilerStateHash(tx, lease.userId, saved.novelId, lease.taskRootId, compilationId) !== saved.baseline.hash)
+        return runtimeError('TOOL_COMPILER_STALE', '正文或检查状态已变化，未发送旧输入。')
+    }
+    return { parent, original, manifest, step: { ...step, step: admission.step }, input: saved }
+  }
   const chapterId = original.args.chapterId
   const writing = coordinatedWritingInputSchema.parse(original.args.writing)
   if (typeof chapterId !== 'string' || chapterId !== admission.chapterId || root.novelId !== saved.novelId
@@ -372,8 +424,10 @@ async function readVerifiedServiceStep(lease: ServiceProofSubject, input: Servic
   if (!operation || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '内部写作操作缺失或原输入损坏。')
   const envelope = z.object({ kind: z.literal('internal'), action: z.literal(input.action), parentOperationId: z.string(), input: inputSchema }).strict().parse(operation.inputSnapshot)
   const saved = envelope.input
+  const parent = await tx.agentOperation.findUniqueOrThrow({ where: { id: saved.serviceAdmission.parentOperationId } })
+  const contextHash = parent.action === 'chapter_bridge_commit' ? z.object({ contextHash: z.string() }).parse(saved.work).contextHash : undefined
   if (saved.novelId !== input.novelId || saved.callId !== input.callId || operation.parentOperationId !== saved.serviceAdmission.parentOperationId
-    || envelope.parentOperationId !== operation.parentOperationId || operation.operationKey !== writingServiceOperationKey(operation.parentOperationId, saved.serviceAdmission.step)) {
+    || envelope.parentOperationId !== operation.parentOperationId || operation.operationKey !== writingServiceOperationKey(operation.parentOperationId, saved.serviceAdmission.step, contextHash)) {
     return runtimeError('RUNTIME_RECEIPT_INVALID', '内部写作操作的父归属、调用或步骤键不一致。')
   }
   const verified = await verifyServiceInput(tx, lease, saved, operation.action, verification)
@@ -414,10 +468,11 @@ export async function readAdmittedReviewWork(lease: RunLeaseToken, input: { oper
 export async function prepareWritingServiceStep(lease: RunLeaseToken, value: unknown) {
   const saved = inputSchema.parse(value)
   return withManuscriptRunLease(lease, async tx => {
-    const action = actionFor(saved.serviceAdmission.step,
-      (await tx.agentOperation.findUniqueOrThrow({ where: { id: saved.serviceAdmission.parentOperationId } })).action)
-    const existing = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId,
-      operationKey: writingServiceOperationKey(saved.serviceAdmission.parentOperationId, saved.serviceAdmission.step) } } })
+    const parent = await tx.agentOperation.findUniqueOrThrow({ where: { id: saved.serviceAdmission.parentOperationId } })
+    const action = actionFor(saved.serviceAdmission.step, parent.action)
+    const contextHash = parent.action === 'chapter_bridge_commit' ? z.object({ contextHash: z.string() }).parse(saved.work).contextHash : undefined
+    const key = writingServiceOperationKey(saved.serviceAdmission.parentOperationId, saved.serviceAdmission.step, contextHash)
+    const existing = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: key } } })
     if (existing && await hasCommittedServiceReceipt(tx, lease, existing.id)) {
       const expected = runtimeJson({ kind: 'internal', action, parentOperationId: saved.serviceAdmission.parentOperationId, input: saved })
       if (existing.inputHash !== expected.hash || runtimeJson(existing.inputSnapshot).hash !== expected.hash)
@@ -425,9 +480,10 @@ export async function prepareWritingServiceStep(lease: RunLeaseToken, value: unk
       await readHistoricalWritingServiceSource(tx, lease, { operationId: existing.id, action, novelId: saved.novelId, callId: saved.callId })
       return existing
     }
+    if (parent.action !== 'chapter_bridge_commit') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '历史写作协调只可读取已提交回执，不能创建新阶段。')
     const verified = await verifyServiceInput(tx, lease, saved, actionFor(saved.serviceAdmission.step,
       (await tx.agentOperation.findUniqueOrThrow({ where: { id: saved.serviceAdmission.parentOperationId } })).action), serviceVerification(lease))
-    return prepareOperationInTransaction(tx, lease, { key: writingServiceOperationKey(verified.parent.id, saved.serviceAdmission.step),
+    return prepareOperationInTransaction(tx, lease, { key,
       kind: 'internal', action: actionFor(saved.serviceAdmission.step, verified.parent.action), parentOperationId: verified.parent.id,
       input: runtimeJson(saved).value })
   })

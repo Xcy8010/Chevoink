@@ -1,3 +1,6 @@
+import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
+import { hasRetiredNativeArguments, verifiedAssistantToolViews, needsNativeToolProjection } from './runtime-tool-view.js'
+import { parseToolArgsTolerant } from './tool-argument-parser.js'
 import { z } from 'zod'
 import { runtimeError, runtimeJsonHash, type RuntimeTx } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
@@ -87,10 +90,13 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
             || outcome.request.id !== rejection.approval.requestId || outcome.decision.id !== rejection.approval.decisionId
             || runtimeJsonHash(outcome.decision.payload) !== rejection.approval.decisionHash) runtimeError('RUNTIME_RECEIPT_INVALID', '审批拒绝与原决定不一致。')
         }
-        const definition = current.configuration.tools.find(tool => tool.function.name === operation.action)
+        const source = await readExecutionFrame(tx, lease.taskRootId, rejection.sourceRevision)
+        const definition = rejection.validation && await needsNativeToolProjection(current.configuration.tools, taskSpecSchema.parse(current.originalSpec).scope, operation.action)
+          ? (await verifiedAssistantToolViews(tx, lease.taskRootId, source, current.configuration.tools, taskSpecSchema.parse(current.originalSpec).scope)).find(tool => tool.function.name === operation.action)
+          : current.configuration.tools.find(tool => tool.function.name === operation.action)
+        if (rejection.code === 'TOOL_CONTRACT_RETIRED' && !hasRetiredNativeArguments(operation.action, parseToolArgsTolerant(rejection.rawArguments, false))) runtimeError('RUNTIME_RECEIPT_INVALID', '旧协调拒绝与实际原调用不一致。')
         if ((rejection.code === 'TOOL_SCHEMA_INVALID') !== Boolean(rejection.validation)
           || (rejection.validation && (!definition || runtimeJsonHash(definition.function.parameters) !== rejection.validation.schemaHash))) runtimeError('RUNTIME_RECEIPT_INVALID', '字段拒绝回执未绑定原始工具schema。')
-        const source = await readExecutionFrame(tx, lease.taskRootId, rejection.sourceRevision)
         const failure = failedToolResultSchema.safeParse(receipt.result)
         if (!failed || !failure.success || failure.data.code !== rejection.code || normalization
           || rejection.sourceRevision >= frame.revision || source.snapshotHash !== rejection.sourceSnapshotHash

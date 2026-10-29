@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
+import { z } from 'zod'
 import { terminalEvidenceContext, validContinuitySemanticChecks } from '../../api/lib/agent/terminal-evidence-context.js'
-import { terminalCandidateSchema, inspectTerminalReview, terminalResponseFields } from '../../api/lib/agent/terminal-state-review.js'
+import { terminalCandidateInputSchema, terminalCandidateSchema, inspectTerminalReview, terminalResponseFields } from '../../api/lib/agent/terminal-state-review.js'
 import { terminalCandidateFacts, terminalFactId } from '../../api/lib/agent/terminal-fact-identity.js'
-import { applyTerminalCandidatePatch, terminalCandidatePatchSchema, freezeLegacyTerminalPatch, readFrozenLegacyTerminalPatch } from '../../api/lib/agent/terminal-candidate-patch.js'
+import { applyTerminalCandidatePatch, terminalCandidatePatchSchema, readFrozenLegacyTerminalPatch } from '../../api/lib/agent/terminal-candidate-patch.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
-import { applyContinuityReassessment, continuityReassessmentRequest, runContinuityReassessment, freshContinuityResponseContract } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { applyContinuityReassessment, continuityReassessmentRequest, freshContinuityResponseContract } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import * as original from '../../api/lib/agent/original-request.js'
 import type { Prisma } from '@prisma/client'
@@ -20,24 +21,36 @@ const body = () => ({ previous: null, current: chapter.content, terminalEvidence
 const response = (c = candidate) => ({ findings: [], semanticChecks: checks(), terminalProofVerdicts: [], terminalDispositions: [],
   terminalVerdicts: terminalCandidateFacts(c).map(fact => ({ factId: fact.id, verdict: fact.field === 'openLoops' ? 'unknown' : 'supported', sourceEvidence: fact.field === 'openLoops' ? [] : [{ segmentId: 'c0' }] })) })
 
+// Exact public pre-refactor parameter contract, retained only as frozen test data.
+const historicalContinuityTool = { ...continuityValidateTool, parameters: z.object({
+    chapterId: z.string().min(1).optional().describe('既有章节的真实编号，从 chapter_read 或作品目录取得；不能填编译编号'),
+    compilationId: z.string().min(1).optional().describe('仅检查当前写作流水线时传；独立审阅既有章节省略'),
+    focus: z.string().max(500).optional().describe('作者明确要求额外关注的连续性范围；未指定时不传'),
+    terminalState: terminalCandidateInputSchema.optional().describe('写作交付前要提交的真实章末状态 {exitState,lastUnfinishedAction}；须在本次独立检查前给出。不能从场景计划抄事实，缺失信息保持未知。提交必须与此候选一致；单独审阅既有章省略。'),
+    inheritedProofs: z.array(z.string().regex(/^[a-f0-9]{64}$/u)).max(200).optional().describe('显式选择当前已验证的 proofHash；可单独传此项，在同一编译已保存候选上还原原字段、完整事实，仍须独立核对本章是否改变。无需重复整份 terminalState。'),
+    terminalPatch: terminalCandidatePatchSchema.optional().describe('对章节桥返回的当前候选做明确增删：baseCandidateHash校验基线，removeFactIds只删除指定事实，addFacts只增加指定字段/完整事实。其余候选保留，无需重抄；不能与terminalState同时传，删候选不删除未决覆盖义务。'),
+  }) }
+
 describe('frozen addressed continuity contract', () => {
   it('keeps the exact pre-patch top-level, nested and earliest frozen tool schema identities', () => {
-    expect(originalToolParameterSchemas(continuityValidateTool,{novelId:'fixture'}).map(schema=>runtimeJson(schema).hash)).toEqual(expect.arrayContaining([
+    expect(originalToolParameterSchemas(historicalContinuityTool,{novelId:'fixture'}).map(schema=>runtimeJson(schema).hash)).toEqual(expect.arrayContaining([
       '99b22a9d6e34067638a026bfc4447107b45117d2f7e114f75096a3c54a6502a1',
       'd43fa3541cc42c798c28543946c1bccc6a23305cb07fc598c8fe5921216aaa53',
       '05c988421a7275d7ee7340a98e888b964dfd777017c267255aca3acaee705eee',
       '607c2d0780878a871e2a016aa1e0463883613c093fecc7c1bd4ae809d9b1a7a3',
     ]))
+    const current = originalToolParameterSchemas(continuityValidateTool, { novelId: 'fixture' })
+    for (const schema of current) { expect(schema).not.toHaveProperty('properties.terminalState'); expect(schema).not.toHaveProperty('properties.terminalPatch') }
   })
   it('accepts only the new frozen protocol for a map whose exact keys supply missing kinds', async () => {
     const raw = JSON.stringify(response()), bodies = body(), parsed = inspectContinuityResponse(raw, bodies, true, 8, candidate)
     expect(parsed).toMatchObject({ complete: true, audit: { classification: 'complete', terminalEvidence: { verdictProtocol: 4 } } })
     expect(inspectTerminalReview(candidate, chapter.content, raw, true, bodies.terminalEvidence)).toMatchObject({ supported: false, verdicts: [{ verdict: 'supported' }, { verdict: 'unknown' }] })
     // The format change must not erase a genuine unknown or cause another paid pass.
-    const dispatch = vi.fn(), claim = vi.fn()
-    expect(await runContinuityReassessment({ original: parsed, bodies, system: 'frozen', content: 'frozen', billingKnown: true, providerComplete: true,
-      slotUsed: false, signal: new AbortController().signal, assertCurrent: vi.fn(), dispatch, claim })).toBe(parsed)
-    expect(dispatch).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled()
+    const replayed = inspectContinuityResponse(raw, bodies, true, 8, candidate)
+    expect(replayed).toEqual(parsed)
+    expect(JSON.parse(replayed.audit.rawResponse.content)).toBe(raw)
+    expect(inspectTerminalReview(candidate, chapter.content, raw, true, bodies.terminalEvidence)?.supported).toBe(false)
     const pathRaw = JSON.stringify({ ...response(), terminalVerdicts: terminalCandidateFacts(candidate).map((fact, index) => ({ ...response().terminalVerdicts[index], factId: undefined, path: fact.path })) })
     for (const version of [undefined, 2, 3] as const) {
       expect(inspectContinuityResponse(pathRaw, { ...bodies, terminalEvidence: { ...bodies.terminalEvidence, verdictProtocol: version } }, true, 8, candidate))
@@ -88,12 +101,11 @@ describe('frozen addressed continuity contract', () => {
     const original = inspectContinuityResponse(first,bodies,true,8,undefined,{currentOrderIndex:1,previous:[]})
     expect(original.complete).toBe(false)
     const second = {decisions:[{index:0,action:'retract',reason:'旧句未在当前稿中出现。',sourceEvidence:[{source:'current',segmentId:'c0',quote:'原文'}]}],findings:[],semanticChecks}
-    const dispatch = vi.fn().mockResolvedValue({content:JSON.stringify(second),complete:true}), claim = vi.fn().mockResolvedValue(true)
-    const result = await runContinuityReassessment({original,bodies,system:'frozen',content:'frozen body-only input',billingKnown:true,providerComplete:true,slotUsed:false,
-      signal:new AbortController().signal,assertCurrent:vi.fn(),claim,dispatch})
+    const result = applyContinuityReassessment(original,JSON.stringify(second),bodies)
     expect(result).toMatchObject({complete:true,audit:{reassessment:{decisions:second.decisions}}})
     expect(result.audit).not.toHaveProperty('terminalCandidate')
-    expect(dispatch).toHaveBeenCalledOnce(); expect(claim).toHaveBeenCalledOnce()
+    expect(JSON.parse(result.audit.rawResponse.content)).toBe(JSON.stringify(second))
+    expect(result.audit.reassessment?.original).toEqual(original.audit)
     const schema = JSON.parse(continuityReassessmentRequest('frozen','input',original,bodies).system.split('完整响应 JSON Schema（普通事实地址与语义 map 由服务端绑定，不补造任何独立判断）：')[1])
     expect(schema.required).toEqual(expect.arrayContaining(['decisions','findings','semanticChecks']))
     expect(schema.required).not.toContain('terminalVerdicts')
@@ -211,31 +223,42 @@ describe('explicit candidate delta and input recovery', () => {
     try {
       expect(await readFrozenLegacyTerminalPatch(tx,ctx,scope,null,[],2,patch)).toBeNull()
       expect(create).not.toHaveBeenCalled()
-      const frozen = await freezeLegacyTerminalPatch(tx,ctx,scope,null,[],2,patch)
-      expect(create).toHaveBeenCalledTimes(1)
-      const applied = {...scope,validation:{terminalCandidate:frozen.candidate}}
-      expect(await freezeLegacyTerminalPatch(tx,ctx,applied,null,[],2,patch)).toEqual({candidate:frozen.candidate,expectedBaseHash:runtimeJson(frozen.candidate).hash})
-      expect(create).toHaveBeenCalledTimes(1)
-      await expect(freezeLegacyTerminalPatch(tx,{...ctx,callId:'new-call'},applied,null,[],2,patch)).rejects.toMatchObject({code:'CONTINUITY_INPUT_STALE'})
+      const next = applyTerminalCandidatePatch(candidate,patch)
+      const id = runtimeJson({kind:'terminalCandidatePatch',runId:ctx.runId,callId:ctx.callId,compilationId:scope.id}).hash
+      const snapshot = {version:1,kind:'terminalCandidatePatch',identity:{userId:ctx.userId,novelId:ctx.novelId,taskId:'original',runId:ctx.runId,callId:ctx.callId,
+        compilationId:scope.id,chapterId:chapter.id,revision:chapter.revision,bodyHash:runtimeJson({content:chapter.content}).hash,sourceHash:runtimeJson({source:null}).hash},
+        request:{patch,inheritedProofs:[]},base:candidate,candidate:next}
+      expect(id.length).toBe(64)
+      rows.set(id,{id,runId:ctx.runId,metadata:snapshot})
+      const before = runtimeJson(snapshot).hash
+      expect(await readFrozenLegacyTerminalPatch(tx,ctx,scope,null,[],2,patch)).toEqual({candidate:next,expectedBaseHash:runtimeJson(candidate).hash})
+      const applied = {...scope,validation:{terminalCandidate:next}}
+      expect(await readFrozenLegacyTerminalPatch(tx,ctx,applied,null,[],2,patch)).toEqual({candidate:next,expectedBaseHash:runtimeJson(next).hash})
+      expect(await readFrozenLegacyTerminalPatch(tx,{...ctx,callId:'new-call'},applied,null,[],2,patch)).toBeNull()
       const concurrent = {...scope,validation:{terminalCandidate:terminalCandidateSchema.parse({exitState:{emotion:['Uncertain']}})}}
-      await expect(freezeLegacyTerminalPatch(tx,ctx,concurrent,null,[],2,patch)).rejects.toMatchObject({code:'CONTINUITY_INPUT_STALE'})
-      await expect(freezeLegacyTerminalPatch(tx,{...ctx,userId:'other'},applied,null,[],2,patch)).rejects.toMatchObject({code:'CONTINUITY_INPUT_STALE'})
-      expect(create).toHaveBeenCalledTimes(1)
+      await expect(readFrozenLegacyTerminalPatch(tx,ctx,concurrent,null,[],2,patch)).rejects.toMatchObject({code:'CONTINUITY_INPUT_STALE'})
+      await expect(readFrozenLegacyTerminalPatch(tx,{...ctx,userId:'other'},applied,null,[],2,patch)).rejects.toMatchObject({code:'CONTINUITY_INPUT_STALE'})
+      expect(create).not.toHaveBeenCalled(); expect(rows.size).toBe(1)
+      expect(runtimeJson(snapshot).hash).toBe(before)
     } finally { vi.restoreAllMocks() }
   })
 
-  it('freezes a current patch with no removed proposals as valid JSON, without changing the old snapshot contract', async () => {
+  it('reads an existing v2 patch with no removed proposals as valid JSON without creating new input authority', async () => {
     const ctx = { userId: 'u', novelId: 'n', runId: 'r', callId: 'new-current-call', signal: new AbortController().signal }
     const scope = { id: 'compiler', validation: { terminalCandidate: candidate }, chapter }
     const patch = terminalCandidatePatchSchema.parse({ baseCandidateHash: runtimeJson(candidate).hash })
     vi.spyOn(original, 'readOriginalTaskRequest').mockResolvedValue({ taskId: 'original' } as never)
     const create = vi.fn(async ({ data }: { data: { metadata: unknown } }) => data)
-    const tx = { agentArtifact: { findUnique: vi.fn().mockResolvedValue(null), create } } as unknown as Prisma.TransactionClient
+    const snapshot = { version: 2, kind: 'terminalCandidatePatch', identity: { userId: 'u', novelId: 'n', taskId: 'original', runId: 'r', callId: ctx.callId,
+      compilationId: 'compiler', chapterId: chapter.id, revision: chapter.revision, bodyHash: runtimeJson({ content: chapter.content }).hash, sourceHash: runtimeJson({ source: null }).hash },
+      request: { patch, inheritedProofs: [] }, base: candidate, candidate }
+    const before = runtimeJson(snapshot).hash
+    const tx = { agentArtifact: { findUnique: vi.fn().mockResolvedValue({ runId: 'r', metadata: JSON.parse(JSON.stringify(snapshot)) }), create } } as unknown as Prisma.TransactionClient
     try {
-      expect(await freezeLegacyTerminalPatch(tx, ctx, scope, null, [], 2, patch, [], () => undefined)).toMatchObject({ proposalVersion: 2, candidate })
-      expect(create).toHaveBeenCalledOnce()
-      expect(create.mock.calls[0][0].data.metadata).toMatchObject({ version: 2, candidate })
-      expect(create.mock.calls[0][0].data.metadata).not.toHaveProperty('proposalReview')
+      expect(await readFrozenLegacyTerminalPatch(tx, ctx, scope, null, [], 2, patch)).toMatchObject({ proposalVersion: 2, candidate })
+      expect(create).not.toHaveBeenCalled()
+      expect(snapshot).not.toHaveProperty('proposalReview')
+      expect(runtimeJson(snapshot).hash).toBe(before)
     } finally { vi.restoreAllMocks() }
   })
 })

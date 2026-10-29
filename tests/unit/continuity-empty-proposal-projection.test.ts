@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { emptyProposalFixture } from '../helpers/empty-proposal-fixture.js'
@@ -7,13 +7,18 @@ import { recoverEmptyOptionalProposalTable, sameEmptyOptionalProposalInput, vali
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { currentTerminalReview } from '../../api/lib/agent/terminal-state-review.js'
-import { continuityReassessmentRequest, legacyContinuityAssessmentKey, readLegacyContinuityAssessment, readReusableLegacyContinuityAssessment, runContinuityReassessment, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { continuityReassessmentRequest, legacyContinuityAssessmentKey, readLegacyContinuityAssessment, readReusableLegacyContinuityAssessment, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
+import { currentContinuityRunnerFixture } from '../helpers/current-continuity-runner-fixture.js'
+import { buildContinuitySnapshot, reviewContinuity, type ContinuityDispatch } from '../../api/lib/agent/continuity-review.js'
+import { DataAccessError } from '../../api/lib/prisma.js'
 import { buildContinuityReviewManifest } from '../../api/lib/agent/continuity-review-v4.js'
 import { readKnownContinuityReplay } from '../../api/lib/agent/continuity-coordinator.js'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import * as originalRequest from '../../api/lib/agent/original-request.js'
 import * as writingScope from '../../api/lib/agent/writing-scope.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+
+afterEach(() => vi.restoreAllMocks())
 
 function cachedPair(bindingHash = 'b'.repeat(64)) {
   const base = emptyProposalFixture(), scope = { currentOrderIndex: base.chapter.orderIndex, previous: [] }
@@ -235,23 +240,48 @@ describe('versioned empty optional proposal table projection', () => {
     expect((await f.read()).inspected.complete).toBe(false)
   })
 
-  it('recovers a fresh known first result locally before claiming or paying for a second request', async () => {
-    const f = emptyProposalFixture(), claim = vi.fn(), dispatch = vi.fn(), assertCurrent = vi.fn()
-    const result = await runContinuityReassessment({ original: f.original, bodies: f.bodies, system: 'Frozen', content: 'Frozen', reassessmentProtocol: 5,
-      billingKnown: true, providerComplete: true, slotUsed: false, signal: new AbortController().signal, assertCurrent, claim, dispatch })
-    expect(result.complete).toBe(true)
-    expect(assertCurrent).toHaveBeenCalledOnce()
-    expect(claim).not.toHaveBeenCalled(); expect(dispatch).not.toHaveBeenCalled()
+  it('keeps the known historical projection immutable and freely reuses a real current report', async () => {
+    const historical = emptyProposalFixture(), before = JSON.stringify(historical.original)
+    expect(recoverEmptyOptionalProposalTable(historical.original, historical.bodies)?.complete).toBe(true)
+    const f = currentContinuityRunnerFixture(), dispatch = f.dispatch(() => '{"findings":[]}')
+    const first = await reviewContinuity(f.ctx, { compilationId: f.compilation.id }, { dispatch, allowRepair: false })
+    expect(first).toMatchObject({ reviewCompleted: true, display: { errorCount: 0 } })
+    const raw = structuredClone(f.report()), fees = structuredClone(f.fees)
+    expect(await reviewContinuity(f.ctx, { compilationId: f.compilation.id }, { dispatch, allowRepair: false }))
+      .toMatchObject({ reviewCompleted: true, output: expect.stringContaining('复用已保存报告') })
+    expect(f.requests).toHaveLength(1)
+    expect(f.report()).toEqual(raw)
+    expect(f.fees).toEqual(fees)
+    expect(JSON.stringify(historical.original)).toBe(before)
   })
 
-  it.each(['unknown-billing', 'incomplete-provider', 'claimed-second', 'cancelled', 'cancel-during-current-check', 'stale-owner'] as const)('does not recover live after %s', async scenario => {
-    const f = emptyProposalFixture(), controller = new AbortController(), claim = vi.fn(), dispatch = vi.fn()
-    if (scenario === 'cancelled') controller.abort()
-    const result = runContinuityReassessment({ original: f.original, bodies: f.bodies, system: 'Frozen', content: 'Frozen', reassessmentProtocol: 5,
-      billingKnown: scenario !== 'unknown-billing', providerComplete: scenario !== 'incomplete-provider', slotUsed: scenario === 'claimed-second', signal: controller.signal,
-      assertCurrent: async () => { if (scenario === 'stale-owner') throw Error('Stale owner'); if (scenario === 'cancel-during-current-check') controller.abort() }, claim, dispatch })
-    if (scenario === 'cancelled' || scenario === 'cancel-during-current-check' || scenario === 'stale-owner') await expect(result).rejects.toThrow()
-    else expect(await result).toBe(f.original)
-    expect(claim).not.toHaveBeenCalled(); expect(dispatch).not.toHaveBeenCalled()
+  it.each(['unknown-billing', 'incomplete-provider', 'claimed-second', 'cancelled', 'cancel-during-current-check', 'stale-owner'] as const)('preserves actual current closure, cancellation and owner boundaries: %s', async scenario => {
+    const historical = emptyProposalFixture(), before = JSON.stringify(historical.original), f = currentContinuityRunnerFixture()
+    if (scenario === 'unknown-billing') f.fees.push({ id: 'unresolved', usageSource: 'estimated', billingStatus: 'pending_usage', requestTokens: null, responseTokens: null })
+    if (scenario === 'claimed-second') {
+      const snapshot = await buildContinuitySnapshot(f.ctx, { compilationId: f.compilation.id })
+      const id = runtimeJson({ kind: 'continuity-report', taskId: snapshot.original.taskId, chapterId: f.chapter.id, contextHash: snapshot.contextHash }).hash
+      f.artifacts.set(id, { id, runId: f.ctx.runId, updatedAt: new Date(), metadata: { callId: 'original-unclosed-request', requestClosed: false } })
+    }
+    if (scenario === 'cancelled') f.controller.abort()
+    f.ctx.assertCurrentExecution = async () => {
+      if (scenario === 'stale-owner') throw new DataAccessError(409, 'RUNTIME_PARENT_LEASE_LOST', '原执行已失去所有权')
+      if (scenario === 'cancel-during-current-check') f.controller.abort()
+    }
+    const physical = vi.fn(f.dispatch(() => '{"findings":[]}'))
+    const dispatch: ContinuityDispatch = async (request, current) => {
+      await current(); f.ctx.signal.throwIfAborted()
+      return { ...await physical(request), ...(scenario === 'incomplete-provider' ? { providerComplete: false } : {}) }
+    }
+    const result = reviewContinuity(f.ctx, { compilationId: f.compilation.id }, { dispatch, allowRepair: false })
+    if (scenario === 'incomplete-provider') {
+      expect(await result).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE', reviewCompleted: false })
+      expect(physical).toHaveBeenCalledTimes(2)
+      expect(f.report()).toMatchObject({ complete: false, incompleteResponses: [0, 1], rawResponses: ['{"findings":[]}', '{"findings":[]}'] })
+    } else {
+      await expect(result).rejects.toThrow()
+      expect(physical).not.toHaveBeenCalled()
+    }
+    expect(JSON.stringify(historical.original)).toBe(before)
   })
 })

@@ -1,3 +1,4 @@
+import { hasRetiredNativeArguments, verifiedAssistantToolViews, toolWithNativeView, needsNativeToolProjection } from './runtime-tool-view.js'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { runtimeError, runtimeJson, runtimeJsonHash, TASK_ARTIFACT_ACTIONS } from './runtime-common.js'
@@ -101,7 +102,7 @@ export async function readAdmittedToolOperation(token: RunLeaseToken, input: { o
 }
 
 export const toolRejectionSchema = z.object({ version: z.literal(1), rawArguments: z.string(), incomplete: z.boolean(),
-  code: z.enum(['TOOL_NOT_AUTHORIZED', 'TOOL_ARGUMENTS_INCOMPLETE', 'TOOL_ARGUMENTS_INVALID', 'TOOL_SCHEMA_INVALID', 'TOOL_APPROVAL_DENIED', 'TOOL_APPROVAL_EXPIRED', 'TOOL_BASELINE_REQUIRED', 'TOOL_TARGET_REQUIRED']),
+  code: z.enum(['TOOL_NOT_AUTHORIZED', 'TOOL_ARGUMENTS_INCOMPLETE', 'TOOL_ARGUMENTS_INVALID', 'TOOL_SCHEMA_INVALID', 'TOOL_CONTRACT_RETIRED', 'TOOL_APPROVAL_DENIED', 'TOOL_APPROVAL_EXPIRED', 'TOOL_BASELINE_REQUIRED', 'TOOL_TARGET_REQUIRED']),
   target: z.object({ kind: z.literal('plan'), id: z.string().min(1), title: z.string() }).strict().optional(),
   baseline: z.object({ kind: z.enum(['chapter', 'plan', 'structure']), id: z.string().nullable() }).strict().optional(),
   approval: z.object({ requestId: z.string(), decisionId: z.string(), decisionHash: z.string() }).strict().optional(),
@@ -129,7 +130,11 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
       .some(message => message.role === 'tool' && message.toolCallId === item.id)) : undefined
     if (!call || call.id !== callId) return runtimeError('RUNTIME_STATE_CONFLICT', '不能拒绝其他轮次或已回答调用。')
     const grant = current.configuration.toolAuthority.find(item => item.name === call.name)
-    const published = current.configuration.tools.find(tool => tool.function.name === call.name)
+    const scope = taskSpecSchema.parse(current.originalSpec).scope
+    const projected = await needsNativeToolProjection(current.configuration.tools, scope, call.name)
+    const published = projected
+      ? (await verifiedAssistantToolViews(tx, token.taskRootId, frame, current.configuration.tools, scope)).find(tool => tool.function.name === call.name)
+      : current.configuration.tools.find(tool => tool.function.name === call.name)
     let code: z.infer<typeof toolRejectionSchema>['code'] | undefined
     let validation: z.infer<typeof toolRejectionSchema>['validation']
     let validationHint = ''
@@ -142,14 +147,15 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
       let parsed: unknown
       try { parsed = call.arguments ? parseToolArgsTolerant(call.arguments, false) : {} }
       catch { code = 'TOOL_ARGUMENTS_INVALID' }
+      if (!code && hasRetiredNativeArguments(call.name, parsed)) code = 'TOOL_CONTRACT_RETIRED'
       if (!code && validator) {
-        const scope = taskSpecSchema.parse(current.originalSpec).scope
         const schemaHash = runtimeJsonHash(published.function.parameters)
-        if (validator.name !== call.name || !originalToolParameterSchemas(validator, scope).some(schema => runtimeJsonHash(schema) === schemaHash)) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '字段校验器不匹配原工具合同，不能以新schema拒绝旧调用。')
+        if (validator.name !== call.name || !projected && !originalToolParameterSchemas(validator, scope).some(schema => runtimeJsonHash(schema) === schemaHash)) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '字段校验器不匹配原工具合同，不能以新schema拒绝旧调用。')
         // An exception is an implementation fault, not proof of invalid user/model data.
         // Leave it for recovery instead of recording a deterministic schema rejection.
-        const normalized = normalizeToolInput(validator, parsed)
-        const validated = validateToolInput(validator, normalized)
+        const actualValidator = projected ? toolWithNativeView(validator, published) : validator
+        const normalized = normalizeToolInput(actualValidator, parsed)
+        const validated = validateToolInput(actualValidator, normalized)
         if (!validated.success) {
           code = 'TOOL_SCHEMA_INVALID'
           validation = { version: 1, schemaHash }
@@ -206,11 +212,12 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
       input: { callId, args: {}, rejection } })
     const pending = await saveExecutionStateInTransaction(tx, token, { ...cursor, snapshot: { ...frame.state, phase: 'awaiting_operation',
       pendingOperationId: operation.id, nextOperationSequence: frame.state.nextOperationSequence + 1 } })
-    const summary = explicitTarget ? '同名计划已存在，需要明确目标' : baseline ? '需要先读取目标，未执行写入' : code === 'TOOL_APPROVAL_DENIED' ? '用户拒绝本次操作' : code === 'TOOL_APPROVAL_EXPIRED' ? '审批超时，未执行' : code === 'TOOL_NOT_AUTHORIZED' ? '当前任务未授权此工具' : code === 'TOOL_ARGUMENTS_INCOMPLETE' ? '工具参数未生成完整' : code === 'TOOL_SCHEMA_INVALID' ? '参数校验失败' : '参数解析失败'
+    const summary = explicitTarget ? '同名计划已存在，需要明确目标' : baseline ? '需要先读取目标，未执行写入' : code === 'TOOL_APPROVAL_DENIED' ? '用户拒绝本次操作' : code === 'TOOL_APPROVAL_EXPIRED' ? '审批超时，未执行' : code === 'TOOL_NOT_AUTHORIZED' ? '当前任务未授权此工具' : code === 'TOOL_ARGUMENTS_INCOMPLETE' ? '工具参数未生成完整' : code === 'TOOL_CONTRACT_RETIRED' ? '旧协调参数未执行' : code === 'TOOL_SCHEMA_INVALID' ? '参数校验失败' : '参数解析失败'
     const output = explicitTarget ? `本次未执行。同名计划已存在，planId=${explicitTarget.id}。请先用 plan_read 读取核对，再在 plan_save 中明确传入该 planId 修订；不凭标题覆盖，也不要重复创建。`
       : baseline ? `本次未执行，原正文、结构或计划未改动。请先用 ${baseline.kind === 'structure' ? 'volume_list 或 structure_outline' : baseline.kind === 'chapter' ? 'chapter_read' : 'plan_read'} 读取${baseline.id ? `目标 ${baseline.id}` : '当前任务范围内的明确目标'}，再根据保存的读取观察重新发起写入。不能使用其他任务的历史读取代替。`
       : approval ? '本次未执行。审批已拒绝或超时；不得换工具、换窗口或重复发起相同操作绕过用户决定。说明未完成部分，等待明确的新指示。'
       : code === 'TOOL_NOT_AUTHORIZED' ? '本次未执行。只能使用当前任务授权的工具，不得从历史任务或其他窗口恢复权限。'
+      : code === 'TOOL_CONTRACT_RETIRED' ? '本次旧协调调用未执行，原正文和费用证据保留。下一轮按当前工具说明用章节或编译编号继续；正文工具只传实际修改参数，检查不需要阶段、证明或七张表。原作者范围、取消、预算和未知费用仍按实际回执校验。'
       : code === 'TOOL_SCHEMA_INVALID' ? `本次未执行，已有内容未改动。参数字段校验失败：${validationHint}。请按原工具结构修正这些字段后再调用，不重复发送相同参数，也不要删除必要场景来绕过校验。`
       : code === 'TOOL_ARGUMENTS_INCOMPLETE' && call.name === 'plan_save' ? '计划未写入。先plan_read核对已保存部分；长计划按完整小节分次保存，每次建议不超过2000字符且独立调用。首次保存首节，后续mode=append并携带planId及contentHash作为expectedContentHash；完成全部小节才可汇报完成。不能补括号执行残文、重复已保存内容或缩短原目标。'
       : '本次未执行。请按公布的工具参数结构重新生成完整参数，不重复发送相同损坏参数。'
@@ -266,6 +273,13 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     if (!call || call.id !== input.callId || call.name !== input.action || call.incomplete) runtimeError('RUNTIME_STATE_CONFLICT', '工具不是当前下一条完整待执行调用。')
     const frozenArgs = await readPreparedLiteraryArguments(tx, token, { action: input.action, callId: input.callId,
       rawArguments: call!.arguments, cursor })
+    if (await needsNativeToolProjection(current.configuration.tools, taskSpecSchema.parse(current.originalSpec).scope, input.action)) {
+      const views = await verifiedAssistantToolViews(tx, token.taskRootId, frame, current.configuration.tools, taskSpecSchema.parse(current.originalSpec).scope)
+      const definition = views.find(tool => tool.function.name === input.action)
+      const raw = coerceToolArgumentEnvelope(call!.arguments ? parseToolArgsTolerant(call!.arguments, false) : {})
+      if (!definition || !z.fromJSONSchema(definition.function.parameters).safeParse(raw).success
+        || hasRetiredNativeArguments(input.action, raw)) return runtimeError('RUNTIME_INPUT_INVALID', '工具参数不符合产生本轮助手的实际工具视图，未执行。')
+    }
     let normalized: unknown
     try { normalized = input.normalize(frozenArgs ?? coerceToolArgumentEnvelope(call!.arguments ? parseToolArgsTolerant(call!.arguments, false) : {})) }
     catch { return runtimeError('RUNTIME_INPUT_INVALID', '原始工具参数不能安全归一化，未执行。') }

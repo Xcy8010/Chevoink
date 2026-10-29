@@ -21,17 +21,18 @@ vi.mock('zod', async importOriginal => {
 // 回归：novel_import 顶层 discriminatedUnion 转换后没有 type，DeepSeek 按 type null 拒绝，
 // 导致线上继续任务时报 Invalid schema for function 'novel_import'。
 describe('tool schema provider contract', () => {
-  it.each([chapterWriteTool, chapterAppendTool, chapterEditRangeTool])('keeps unmarked $name hashes exact and admits literary data only for the original server marker', tool => {
+  it.each([chapterWriteTool, chapterAppendTool, chapterEditRangeTool])('publishes ordinary $name parameters even with a historical marker while preserving the exact historical parser', tool => {
     const legacyScope: TaskSpec['scope'] = { novelId: 'novel' }, markedScope: TaskSpec['scope'] = { novelId: 'novel', writingCoordinationProtocol: 1 }
     const legacy = toOpenAIParameters(tool.parameters)
     expect(coordinatedWriterParameters(tool, legacyScope)).toBe(tool.parameters)
     expect(toOpenAITools([tool], legacyScope)[0].function.parameters).toEqual(legacy)
     expect(originalToolParameterSchemas(tool, legacyScope).every(schema => runtimeJson(schema).hash === runtimeJson(legacy).hash)).toBe(true)
     const marked = toOpenAITools([tool], markedScope)[0].function.parameters
-    expect(marked).toHaveProperty('properties.writing')
-    expect(marked.required).toContain('writing')
-    expect(originalToolParameterSchemas(tool, markedScope)).toEqual([marked])
-    expect(originalToolParameterSchemas(tool, markedScope)).not.toContainEqual(legacy)
+    expect(marked).toEqual(legacy)
+    expect(marked).not.toHaveProperty('properties.writing')
+    const historical = toOpenAIParameters(coordinatedWriterParameters(tool, markedScope))
+    expect(historical).toHaveProperty('properties.writing')
+    expect(originalToolParameterSchemas(tool, markedScope)).toEqual([legacy, historical])
     const schema = coordinatedWriterParameters(tool, markedScope)
     const body = tool.name === 'chapter_edit_range' ? { oldText: '原文', newText: '新文' } : { content: '新文' }
     expect(schema.safeParse({ chapterId: 'chapter', ...body, writing: { draftComplete: false } }).success).toBe(true)
@@ -59,23 +60,19 @@ describe('tool schema provider contract', () => {
     expect(originalToolParameterSchemas(researchReportSaveTool, { novelId: 'n' })).toContainEqual(previous)
     expect(previous.required).toEqual(['title', 'expectedRevision', 'section'])
   })
-  it('retains the exact nested pre-selection continuity schema while preserving explicit hashes through normalization', () => {
-    const current = toOpenAIParameters(continuityValidateTool.parameters)
-    const properties = current.properties as Record<string, Record<string, unknown>>
-    const original = toOpenAIParameters(z.object({ terminalState: terminalCandidateSchema.optional()
+  it('keeps historical nested proof data parseable while current continuity presentation requires only current source identifiers', () => {
+    const legacyCandidate = terminalCandidateSchema.extend({ inheritedProofs: z.array(z.string().regex(/^[a-f0-9]{64}$/u)).optional() })
+    const original = toOpenAIParameters(z.object({ terminalState: legacyCandidate.optional()
       .describe('写作交付前要提交的真实章末状态 {exitState,lastUnfinishedAction}；须在本次独立检查前给出。不能从场景计划抄事实，缺失信息保持未知。提交必须与此候选一致；单独审阅既有章省略。') }))
-    const previous = { ...current, properties: Object.fromEntries(Object.entries(properties).filter(([key]) => key !== 'inheritedProofs')) }
-    const earlier = { ...previous, properties: { ...previous.properties, terminalState: (original.properties as Record<string, unknown>).terminalState } }
-    const alternatives = originalToolParameterSchemas(continuityValidateTool, { novelId: 'n' })
-    for (const frozen of [previous, earlier]) {
-      expect(alternatives).toContainEqual(frozen)
-      expect(alternatives.map(schema => runtimeJson(schema).hash)).toContain(runtimeJson(frozen).hash)
-      expect(alternatives.map(schema => runtimeJson(schema).hash)).not.toContain(runtimeJson({ ...frozen, additionalProperties: true }).hash)
-    }
-    expect((properties.terminalState.properties as Record<string, unknown>).inheritedProofs).toBeDefined()
-    const parsed = continuityValidateTool.parameters.parse(normalizeToolInput(continuityValidateTool,
-      { compilationId: 'comp', terminalState: { exitState: {}, inheritedProofs: ['a'.repeat(64)] } }))
-    expect(parsed.terminalState?.inheritedProofs).toEqual(['a'.repeat(64)])
+    const hash = runtimeJson(original).hash
+    const current = toOpenAITools([continuityValidateTool], { novelId: 'n' })[0].function.parameters
+    expect(Object.keys(current.properties as object).sort()).toEqual(['chapterId', 'compilationId', 'focus'])
+    expect(current).not.toHaveProperty('properties.terminalState')
+    expect(continuityValidateTool.parameters.safeParse({ chapterId: 'chapter' }).success).toBe(true)
+    expect(continuityValidateTool.parameters.safeParse({ compilationId: 'comp' }).success).toBe(true)
+    const parsed = legacyCandidate.parse({ exitState: {}, inheritedProofs: ['a'.repeat(64)] })
+    expect(parsed.inheritedProofs).toEqual(['a'.repeat(64)])
+    expect(runtimeJson(original).hash).toBe(hash)
   })
   it('publishes a complete compact native scene example accepted without generated state facts', () => {
     const example = sceneTaskBuildTool.description.split('最小原生参数示例：')[1]
@@ -88,15 +85,15 @@ describe('tool schema provider contract', () => {
     expect(parsed.tasks[0].exitState.objects).toEqual([])
     expect(parsed.tasks[0].purpose).toBe(input.tasks[0].purpose)
   })
-  it('preserves exact old frozen commit schema and reveals decision-only only to newly marked tasks', () => {
-    const full = toOpenAIParameters(chapterBridgeCommitTool.parameters)
-    const old = { ...full, properties: Object.fromEntries(Object.entries(full.properties as object).filter(([key]) => key !== 'decisionOnly')) }
-    const scope: TaskSpec['scope'] = { novelId: 'n' }
-    expect(toOpenAITools([chapterBridgeCommitTool], scope)[0].function.parameters).toEqual(old)
-    expect(toOpenAITools([chapterBridgeCommitTool], { ...scope, reviewProtocol: 1 })[0].function.parameters).toEqual(full)
-    expect(originalToolParameterSchemas(chapterBridgeCommitTool, scope)).toContainEqual(old)
-    expect(originalToolParameterSchemas(chapterBridgeCommitTool, { ...scope, reviewProtocol: 1 })).toContainEqual(old)
-    expect((old.required as string[] | undefined) ?? []).not.toContain('decisionOnly')
+  it('publishes one actual commit contract without a decision-only phase for both old and new task metadata', () => {
+    const current = toOpenAIParameters(chapterBridgeCommitTool.parameters)
+    for (const scope of [{ novelId: 'n' }, { novelId: 'n', reviewProtocol: 1 as const }]) {
+      expect(toOpenAITools([chapterBridgeCommitTool], scope)[0].function.parameters).toEqual(current)
+      expect(current).not.toHaveProperty('properties.decisionOnly')
+      expect(current).not.toHaveProperty('properties.terminalState')
+      expect(chapterBridgeCommitTool.parameters.safeParse({ compilationId: 'comp' }).success).toBe(true)
+      expect(originalToolParameterSchemas(chapterBridgeCommitTool, scope)).toContainEqual(current)
+    }
   })
   it('every published tool keeps top-level object parameters', () => {
     process.env.NOVEL_IMPORT_ENABLED = 'true'
