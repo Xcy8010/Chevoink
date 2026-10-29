@@ -223,13 +223,17 @@ describe('严谨创作自动落实质量建议', () => {
     return { ctx, report, critic, reserve, model, write, bundle, audit }
   }
   it.each([true, false])('final verification retains new stylistic advice without another paid patch (cached=%s)', async cached => {
-    const f = fixture(cached)
+    const f = fixture(cached), before = structuredClone(f.report)
     guard.readiness.mockResolvedValue({ chapterId: 'c', ready: true, reviewCycle: { edited: true }, qualityPassRequired: false, mustPassPending: false })
     const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
-    expect(result.output).toContain('当前属于最终核验的质量建议')
+    expect(result.output).toContain('本次最终核验只报告意见')
     expect(result.summary).toBe('质量核验完成 · 0 关注 8 建议')
     expect(result.summary).not.toContain('待决定')
-    expect(result.output).toContain('不要为这些纯建议再调用正文写入工具')
+    expect(result.output).toContain('可在原作者授权范围内据当前证据继续改稿')
+    expect(result.output).toContain('修改后复查连续性与人类感，再提交章节')
+    expect(result.output).not.toContain('不要为这些纯建议再调用正文写入工具')
+    expect(result.output).not.toContain('当前阶段也不因此获得改文权限')
+    expect(result.output).not.toContain('也不因此重开改文')
     expect(result.output).toContain('source、reportId、findingId、reason')
     expect(result.output).toContain('逐项写明保留原因')
     expect(result.output).toContain('事实为何必要、当前表达为何仍合适')
@@ -238,6 +242,7 @@ describe('严谨创作自动落实质量建议', () => {
     expect(f.write).not.toHaveBeenCalled()
     expect(f.report.chapterRevision).toBe(1)
     expect(f.report.findings.every(item => item.disposition === 'pending')).toBe(true)
+    expect(f.report).toEqual(before)
   })
   it.each([true, false])('reports completed cached=%s advice counts without an author-approval summary', async cached => {
     const f = fixture(cached); f.ctx.creativeFreedom = 'stable'

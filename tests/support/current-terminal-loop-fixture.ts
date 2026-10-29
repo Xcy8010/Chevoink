@@ -113,6 +113,7 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
     const last = [...request.messages].reverse().find(message => message.role === 'tool')
     let next: string | undefined
     let nextArgs: Record<string, unknown> | undefined
+    let nextCallId: string | undefined
     let retainedFindings: Array<{ source: 'quality' | 'continuity'; reportId: string; findingId: string; reason: string }> | undefined
     if (input.missingCommit) return { content: summary, reasoning: '', toolCalls: [], finishReason: 'stop',
       usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
@@ -133,7 +134,36 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
     }
     else if (last.toolCallId === 'current-recovery-chapter_bridge_get') next = 'quality_analyze'
     else if (last.toolCallId === 'current-recovery-quality_analyze') {
-      expect(last.content).toContain('修订')
+      if (input.setupAfterRecovery) {
+        expect(last.content).toContain('原作者授权范围内')
+        expect(last.content).not.toContain('不要为这些纯建议再调用正文写入工具')
+        const report = await prisma.chapterQualityReport.findFirstOrThrow({ where: { userId: f.userId, chapterId: f.chapterId,
+          chapterRevision: original.revision + 1 }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], include: { findings: true } })
+        expect(report.repairRound).toBe(0)
+        expect(report.deterministicMetrics).not.toHaveProperty('autoRepairAttempted', true)
+        const finding = report.findings.find(item => item.startOffset === original.content.length + 2
+          && item.endOffset === duplicated.length && item.evidenceExcerpt === duplicated.slice(original.content.length + 2))
+        expect(finding).toBeDefined()
+        expect(last.content).toContain(finding!.id)
+        const oldText = duplicated.slice(finding!.startOffset - 2, finding!.endOffset)
+        expect(duplicated.indexOf(oldText)).toBe(finding!.startOffset - 2)
+        expect(duplicated.lastIndexOf(oldText)).toBe(finding!.startOffset - 2)
+        next = 'chapter_edit_range'; nextCallId = 'current-recovery-report-edit'
+        nextArgs = { chapterId: f.chapterId, oldText, newText: '' }
+      } else {
+        expect(last.content).toContain('修订')
+        next = 'continuity_validate'
+      }
+    } else if (last.toolCallId === 'current-recovery-report-edit' && input.setupAfterRecovery) {
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: original.content, revision: original.revision + 2 })
+      next = 'quality_analyze'; nextCallId = 'current-recovery-final-quality'
+    } else if (last.toolCallId === 'current-recovery-final-quality' && input.setupAfterRecovery) {
+      const checked = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId, type: 'tool.result',
+        payload: { path: ['callId'], equals: last.toolCallId } }, orderBy: { seq: 'desc' } })
+      expect(checked.payload).toMatchObject({ toolName: 'quality_analyze', ok: true, callId: last.toolCallId })
+      const report = await prisma.chapterQualityReport.findFirstOrThrow({ where: { userId: f.userId, chapterId: f.chapterId,
+        chapterRevision: original.revision + 2 }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+      expect(report.deterministicMetrics).toMatchObject({ independentCheck: 'complete' })
       next = 'continuity_validate'
     } else if (last.toolCallId === 'current-recovery-continuity_validate') {
       expect(last.content).toContain('报告')
@@ -154,7 +184,7 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
       }
     }
     if (next) calls.push(next)
-    return { content: next ? '' : summary, reasoning: '', toolCalls: next ? [{ id: retainedFindings ? 'current-recovery-retained-commit' : `current-recovery-${next}`, name: next,
+    return { content: next ? '' : summary, reasoning: '', toolCalls: next ? [{ id: nextCallId ?? (retainedFindings ? 'current-recovery-retained-commit' : `current-recovery-${next}`), name: next,
       arguments: JSON.stringify(nextArgs ?? { compilationId: input.compilationId, ...(retainedFindings ? { retainedFindings } : {}) }) }] : [], finishReason: next ? 'tool_calls' : 'stop',
       usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
     } catch (error) { modelFailures.push(error); throw error }
@@ -186,18 +216,29 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
     expect(chapter.revision).toBe(original.revision + 2)
     expect(chapter.content.trim()).toBe(original.content.trim())
     const repairRequests = critic.mock.calls.filter(([, , options]) => options.action === 'agent3HumanityRevision')
-    expect(repairRequests.length).toBeGreaterThan(0)
+    if (input.setupAfterRecovery) expect(repairRequests).toEqual([])
+    else expect(repairRequests.length).toBeGreaterThan(0)
     for (const [, , options] of repairRequests) expect(options).toMatchObject({ targetType: 'quality_report', targetId: expect.any(String) })
     expect(new Set(repairRequests.map(([, , options]) => options.targetId)).size).toBe(repairRequests.length)
     const repairs = events.flatMap(event => {
       const payload = event.payload as { toolName?: string; display?: { appliedBodyChange?: unknown } }
       return event.type === 'tool.result' && payload.toolName === 'quality_analyze' && payload.display?.appliedBodyChange ? [payload.display.appliedBodyChange] : []
     })
-    expect(repairs).toEqual([expect.objectContaining({ chapterId: chapter.id, sourceRevision: original.revision + 1,
+    if (input.setupAfterRecovery) {
+      expect(repairs).toEqual([])
+      const edits = events.flatMap(event => {
+        const payload = event.payload as { toolName?: string; ok?: boolean; display?: unknown }
+        return event.type === 'tool.result' && payload.toolName === 'chapter_edit_range' && payload.ok ? [payload.display] : []
+      })
+      expect(edits).toEqual([
+        expect.objectContaining({ chapterId: chapter.id, revision: original.revision + 1, before: original.content, after: duplicated }),
+        expect.objectContaining({ chapterId: chapter.id, revision: original.revision + 2, before: duplicated, after: original.content }),
+      ])
+    } else expect(repairs).toEqual([expect.objectContaining({ chapterId: chapter.id, sourceRevision: original.revision + 1,
       targetRevision: chapter.revision, before: duplicated, after: chapter.content })])
     expect(continuityRequests).toHaveLength(1)
     expect(run.status).toBe('completed'); expect(compilation.bridge!.committedAt).not.toBeNull()
-    const prefix = input.setupAfterRecovery ? ['chapter_read', 'chapter_edit_range'] : input.readFirst ? ['chapter_bridge_get'] : []
+    const prefix = input.setupAfterRecovery ? ['chapter_read', 'chapter_edit_range', 'quality_analyze', 'chapter_edit_range'] : input.readFirst ? ['chapter_bridge_get'] : []
     expect(calls.slice(0, prefix.length + 3)).toEqual([...prefix, 'quality_analyze', 'continuity_validate', 'chapter_bridge_commit'])
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, input.compilationId))
     expect(readiness).toMatchObject({ ready: true, revision: chapter.revision, quality: 'complete', continuity: 'complete', terminalCommitted: true, decisionPending: false })

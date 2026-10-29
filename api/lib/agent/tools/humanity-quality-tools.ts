@@ -204,7 +204,7 @@ async function finishQualityReviewResult(ctx: ToolContext, report: QualityReport
     try {
       const review = await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, report.compilationId ?? undefined), { timeout: 20_000 })
       if (review?.chapterId === report.chapterId && verificationQualityAdviceRequiresDecision(review, selected)) return { reviewCompleted: true,
-        output: `质量报告 ${report.id}已保存。当前属于最终核验的质量建议，保留正文并逐项决定，不自动开启新一轮润色。不要为这些纯建议再调用正文写入工具；下一步按当前精确引用填写 retainedFindings 的 source、reportId、findingId、reason，再提交章节终态。涉及解释负担时，保留理由分别说明事实为何必要、当前表达为何仍合适，并考虑保留事实而减少负担的方案；只说信息不能丢不足以论证原说法，当前阶段也不因此获得改文权限。真实错误或尚未尝试原始义务仍按原证据与原权限处理，留置不能替代硬通过要求。${review ? chapterReviewDecisionGuidance(review) : decisionGuidance}${bindingSuffix}\n${renderQualityReportFindings(report)}`,
+        output: `质量报告 ${report.id}已保存。本次最终核验只报告意见，不自动开启新一轮润色。可在原作者授权范围内据当前证据继续改稿，修改后复查连续性与人类感，再提交章节。若保留意见，按当前 source、reportId、findingId、reason 逐项写明具体保留理由。涉及解释负担时，说明事实为何必要、当前表达为何仍合适，并考虑保留事实而减少负担的方案。留置不能替代明确的硬通过要求。${review ? chapterReviewDecisionGuidance(review) : decisionGuidance}${bindingSuffix}\n${renderQualityReportFindings(report)}`,
         summary: `质量核验完成 · ${warningCount} 关注 ${advisoryCount} 建议`, display: reportDisplay(report) }
       // 付费前只读探测：同一次合并修订的准入由守卫统一判定（新稿质量通道或原始修复
       // 授权），被拒时不预约、不调用修订模型，正文与报告保持原样。
