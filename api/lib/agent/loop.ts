@@ -618,7 +618,6 @@ export async function handleToolCall(
     // 错误即观察：不中断 run，把错误回填给模型自行重试或换路
     if (error instanceof DataAccessError && error.code.startsWith('AI_')) {
       const label = error.code === 'AI_PROVIDER_QUOTA_EXCEEDED' ? '供应商模型额度已耗尽'
-        : error.code === 'AI_QUALITY_NON_THINKING_UNSUPPORTED' ? '此模型尚无法关闭检查思考'
         : error.code === 'AI_PROVIDER_TIMEOUT' ? '模型网关超时'
         : error.code === 'AI_PROVIDER_OUTPUT_LIMIT' ? '模型输出达到上限，检查未完成'
         : error.code === 'AI_PROVIDER_INCOMPLETE' ? '模型输出中断，检查未完成'
@@ -629,8 +628,6 @@ export async function handleToolCall(
       const unknownRequest = requestTrace.records.length > 0 && !textRequestsFinished(requestTrace)
       const guidance = unknownRequest ? '原请求的模型结果或用量尚未确认；保留原调用、费用与预算，先核对真实回执，不重发未知付费请求，也不调用模型作收尾。'
         : error.code === 'AI_PROVIDER_QUOTA_EXCEEDED' ? error.message
-        : error.code === 'AI_QUALITY_NON_THINKING_UNSUPPORTED'
-        ? `${error.message} 本次未发送检查模型请求；不要重试同一配置或修改正文来绕过，检查仍未完成。`
         : error.code === 'AI_PROVIDER_OUTPUT_LIMIT'
         ? '输出预算已达上限，不要原样重复付费调用；保留进度并报告检查未完成，不能将截断报告当作通过。'
         : ['AI_PROVIDER_TRANSPORT', 'AI_PROVIDER_INCOMPLETE', 'AI_PROVIDER_TIMEOUT'].includes(error.code)

@@ -592,8 +592,8 @@ export function buildProviderReasoningPayload(input: ProviderReasoningInput): Re
   return { reasoning_effort: input.reasoningEffort }
 }
 
-/** Reviewer chains must be non-thinking after assignment and route resolution.
- * Verified protocols outrank names; an unknown proxy cannot borrow a model's switch. */
+/** Prefer a verified non-thinking protocol for reviews; otherwise use the
+ * selected model's ordinary reasoning mode. A thinking-only model can review. */
 function buildReviewReasoningPayload(input: ProviderReasoningInput & {
   reasoningEfforts?: import('../../shared/contracts/index.js').ModelReasoningEffort[]
 }): Record<string, unknown> {
@@ -613,15 +613,14 @@ function buildReviewReasoningPayload(input: ProviderReasoningInput & {
     || hostname === 'api.deepseek.com' && !/reasoner|(?:^|[/_-])r1(?:$|[^a-z0-9])/i.test(input.model)
     || hostname === 'api.xiaomimimo.com'
     || (hostname === 'bigmodel.cn' || hostname.endsWith('.bigmodel.cn')) && supportsGlmThinking(input.model)
-  // "omit" and thinking=false only prove parameter rejection/plain text
-  // acceptance. They do not prove the gateway's default thinking is off.
+  // Only send an off switch when this route supports it. Other routes retain
+  // their configured reasoning protocol, including the provider default.
   if (input.reasoningParameterMode === 'native' && input.reasoningEfforts?.includes('none')) return {
     reasoning_effort: 'none',
     ...(input.thinkingEnabled === true && switchSupported ? { thinking: { type: 'disabled' } } : {}),
   }
   if (input.thinkingEnabled !== false && switchSupported) return { thinking: { type: 'disabled' } }
-  throw new DataAccessError(409, 'AI_QUALITY_NON_THINKING_UNSUPPORTED',
-    '所选人类感检查模型尚无法确认关闭思考，本次检查未发起，正文保留。请为人类感检查选择已验证可关闭思考或非思考的模型。')
+  return buildProviderReasoningPayload({ ...input, boundedReview: false })
 }
 
 /**
@@ -845,7 +844,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     && ['quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry',
       'continuity_critic', 'continuity_format_recovery', 'continuity_evidence_correction', 'continuity_reassessment', 'continuity_repair', 'continuity_repair_retry', 'continuity_coordinated_revision'].includes(params.usageLog.action)
   const reviewReasoning = isolatedReview ? buildReviewReasoningPayload({ ...params, model,
-    providerBaseUrl: params.providerBaseUrl ?? env.aiTextBaseUrl, reasoningEffort: 'none' }) : undefined
+    providerBaseUrl: params.providerBaseUrl ?? env.aiTextBaseUrl, reasoningEffort }) : undefined
   const body: Record<string, unknown> = frozenRequest ? structuredClone(frozenRequest.body) : {
     model,
     // Sampling is optional and not universally supported with reasoning. A
@@ -1280,7 +1279,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   const reviewTask = resolveTextActionTask(options.action)
   const reviewReasoning = (reviewTask === 'quality' || reviewTask === 'continuity')
     ? buildReviewReasoningPayload({ ...modelRuntime, model: modelRuntime.modelName ?? env.aiTextModel,
-      providerBaseUrl: modelRuntime.baseUrl ?? env.aiTextBaseUrl, reasoningEffort: 'none' }) : undefined
+      providerBaseUrl: modelRuntime.baseUrl ?? env.aiTextBaseUrl, reasoningEffort: completionReasoning }) : undefined
   ensureTextProviderConfigured(modelRuntime.apiKey)
   const authorized = options.authorizedRequest
   if (authorized) {

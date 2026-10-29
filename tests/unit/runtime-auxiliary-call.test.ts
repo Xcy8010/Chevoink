@@ -38,7 +38,7 @@ const runtime = { tier: 'custom' as const, provider: 'Ant Ling', modelName: 'Lin
   multiplierBps: 0, visionEnabled: false, contextWindowTokens: 128000 }
 const selection = { tier: 'custom' as const, customModelId: 'owned-model', reasoningEffort: 'high' as const }
 const price = { version: 'credits-v1-exact' as const, modelTier: 'custom' as const, multiplierBps: 0 }
-const steps = ['quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry', 'continuity_critic', 'continuity_format_recovery', 'continuity_evidence_correction', 'continuity_repair', 'continuity_repair_retry'] as const
+const steps = ['quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry', 'continuity_critic', 'continuity_format_recovery', 'continuity_evidence_correction', 'continuity_reassessment', 'continuity_repair', 'continuity_repair_retry', 'continuity_coordinated_revision'] as const
 const input = (step: typeof steps[number] = 'quality_critic') => ({ lease, parentOperationId: 'parent', step,
   route: auxiliaryRouteForRuntime({ ...runtime, honorAssignedReasoning: true }, selection, 1024), price,
   system: '合成检查规则', content: '合成完整原文', temperature: 0.15, signal: new AbortController().signal, assertCurrent: vi.fn(async () => {}) })
@@ -58,7 +58,7 @@ beforeEach(() => {
 })
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
-describe('durable reviewer non-thinking policy without rewriting old paid requests', () => {
+describe('durable reviewer reasoning compatibility without rewriting old paid requests', () => {
   it.each(steps)('freezes JSON mode for new MiMo %s requests', async step => {
     const mimo = { ...runtime, provider: 'Xiaomi', modelName: 'mimo-v2.6-flash', baseUrl: 'https://api.xiaomimimo.com/v1' }
     mocks.runtime.mockResolvedValue(mimo)
@@ -213,26 +213,55 @@ describe('durable reviewer non-thinking policy without rewriting old paid reques
     expect(mocks.existing).toEqual(original)
   })
 
-  it.each(['quality_critic', 'continuity_critic'] as const)('rejects unverified thinking-only routes before preparing a durable provider operation (%s)', async step => {
+  it.each(steps)('uses selected high for a thinking-only route in %s without an off-mode probe', async step => {
     const request = input(step)
     request.route = { ...request.route, provider: 'fixture', model: 'thinking-only', baseUrl: 'https://unknown.example/v1' }
     mocks.runtime.mockResolvedValue({ ...runtime, provider: request.route.provider, modelName: request.route.model, baseUrl: request.route.baseUrl,
       reasoningEfforts: ['high'], reasoningParameterMode: 'native', thinkingEnabled: false })
-    await expect(callDurableAuxiliary(request)).rejects.toMatchObject({ code: 'AI_QUALITY_NON_THINKING_UNSUPPORTED' })
-    expect(mocks.begin).not.toHaveBeenCalled()
-    expect(fetch).not.toHaveBeenCalled()
+    await expect(callDurableAuxiliary(request)).resolves.toMatchObject({ content: result.content })
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+    expect(body).toMatchObject({ model: request.route.model, reasoning_effort: 'high', max_tokens: 1024 })
+    expect(body).not.toHaveProperty('thinking')
+    expect(body).not.toHaveProperty('temperature')
+    expect(mocks.begin).toHaveBeenCalledOnce()
+    expect(mocks.begin.mock.calls[0][0].request).toMatchObject({ body })
+    expect(mocks.begin.mock.calls[0][0].price).toEqual(price)
+    expect(fetch).toHaveBeenCalledOnce()
   })
 
-  it.each(['quality_critic', 'continuity_critic'] as const)('rejects a hostile omit/false/only-none proxy before preparing durable work or sending HTTP (%s)', async step => {
+  it.each(['quality_critic', 'continuity_critic'] as const)('uses the configured provider default when its reasoning parameters are omitted (%s)', async step => {
     const request = input(step)
     request.route = { ...request.route, provider: 'fixture', model: 'opaque-model', baseUrl: 'https://hostile-default-thinking.example/v1', reasoningEffort: 'none' }
     mocks.runtime.mockResolvedValue({ ...runtime, provider: request.route.provider, modelName: request.route.model, baseUrl: request.route.baseUrl,
       reasoningEffort: 'none', reasoningEfforts: ['none'], reasoningParameterMode: 'omit', thinkingEnabled: false })
-    await expect(callDurableAuxiliary(request)).rejects.toMatchObject({ code: 'AI_QUALITY_NON_THINKING_UNSUPPORTED' })
-    expect(mocks.begin).not.toHaveBeenCalled()
-    expect(mocks.access).not.toHaveBeenCalled()
-    expect(fetch).not.toHaveBeenCalled()
+    await expect(callDurableAuxiliary(request)).resolves.toMatchObject({ content: result.content })
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+    expect(body).not.toHaveProperty('reasoning_effort')
+    expect(body).not.toHaveProperty('thinking')
+    expect(body).not.toHaveProperty('temperature')
+    expect(mocks.begin).toHaveBeenCalledOnce()
+    expect(mocks.begin.mock.calls[0][0].request).toMatchObject({ body })
+    expect(mocks.access).toHaveBeenCalledOnce()
+    expect(fetch).toHaveBeenCalledOnce()
     expect(mocks.existing).toBeNull()
+  })
+
+  it.each(['quality_critic', 'continuity_critic'] as const)('reviews with a built-in thinking-only model without explicit protocol metadata (%s)', async step => {
+    const selected = { ...runtime, tier: 'builtin_0123456789abcdef' as const, provider: 'openai', modelName: 'synthetic-thinking-model',
+      baseUrl: 'https://gateway.example/v1', reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] as const }
+    mocks.runtime.mockResolvedValue(selected)
+    const selectedPrice = { ...price, modelTier: selected.tier }
+    const request = { ...input(step), price: selectedPrice, route: auxiliaryRouteForRuntime({ ...selected, reasoningEfforts: [...selected.reasoningEfforts] },
+      { tier: selected.tier, customModelId: null, reasoningEffort: 'high' }, 1024) }
+    await expect(callDurableAuxiliary(request)).resolves.toMatchObject({ content: result.content })
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+    expect(body).toMatchObject({ model: selected.modelName, reasoning_effort: 'high', max_tokens: 1024 })
+    expect(body).not.toHaveProperty('thinking')
+    expect(body).not.toHaveProperty('temperature')
+    expect(mocks.begin.mock.calls[0][0].request).toMatchObject({ body })
+    expect(mocks.begin.mock.calls[0][0].price).toEqual(selectedPrice)
+    expect(mocks.runtime).toHaveBeenCalledWith(selected.tier, lease.userId, null, 'high')
+    expect(fetch).toHaveBeenCalledOnce()
   })
 
   it('does not apply quality policy to a main tool-bearing request', async () => {

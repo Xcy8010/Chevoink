@@ -153,7 +153,7 @@ describe('actual failed text request terminal trace', () => {
     })
 })
 
-describe('fixed non-thinking humanity quality policy after actual model resolution', () => {
+describe('review reasoning compatibility after actual model resolution', () => {
   it.each(['agent3HumanityCritic', 'agent3ContinuityCritic'])('%s rejects missing current selection even with a frozen assignment before HTTP or billing', async action => {
     const task = TEXT_ACTION_TASKS[action]
     const fetcher = vi.fn()
@@ -192,29 +192,63 @@ describe('fixed non-thinking humanity quality policy after actual model resoluti
   })
 
   it.each([
-    { label: 'unknown native thinking-only', runtime: { reasoningEfforts: ['high'] } },
-    { label: 'unknown omit thinking switch', runtime: { reasoningParameterMode: 'omit', thinkingEnabled: true } },
-    { label: 'omit without non-thinking proof', runtime: { reasoningParameterMode: 'omit', thinkingEnabled: undefined, reasoningEfforts: ['high'] } },
-    { label: 'hostile proxy accepting text but defaulting to thinking', runtime: { reasoningParameterMode: 'omit', thinkingEnabled: false, reasoningEffort: 'none', reasoningEfforts: ['none'] } },
-    { label: 'only-none without disable proof', runtime: { reasoningParameterMode: undefined, reasoningEffort: 'none', reasoningEfforts: ['none'] } },
-    { label: 'official omit rejecting thinking switch', runtime: { provider: 'Ant Ling', modelName: 'Ling-3.0-flash', baseUrl: 'https://api.ant-ling.com/v1', reasoningParameterMode: 'omit', thinkingEnabled: false, reasoningEfforts: ['none'] } },
-    { label: 'unknown proxy bearing Ling name', runtime: { provider: 'Ant Ling', modelName: 'Ling-3.0-flash', reasoningParameterMode: undefined, thinkingEnabled: undefined } },
-    { label: 'unknown DeepSeek proxy', runtime: { provider: 'deepseek', modelName: 'deepseek-v4-flash', reasoningParameterMode: undefined, thinkingEnabled: undefined } },
-    { label: 'TokenHub unsupported model', runtime: { modelName: 'unknown-reasoner', baseUrl: 'https://tokenhub.tencentmaas.com/v1', reasoningEfforts: ['high'] } },
-    { label: 'TokenHub undocumented version', runtime: { modelName: 'deepseek-v4-flash-202606', baseUrl: 'https://tokenhub.tencentmaas.com/v1', reasoningEfforts: ['high'] } },
-    { label: 'TokenHub lookalike host', runtime: { modelName: 'deepseek/deepseek-flash', baseUrl: 'https://tokenhub.tencentmaas.com.example/v1', reasoningEfforts: ['high'] } },
-    { label: 'TokenHub insecure transport', runtime: { modelName: 'deepseek/deepseek-flash', baseUrl: 'http://tokenhub.tencentmaas.com/v1', reasoningEfforts: ['high'] } },
-    { label: 'unknown incomplete capabilities', runtime: { reasoningParameterMode: undefined, thinkingEnabled: undefined, reasoningEfforts: [] } },
-    { label: 'official thinking-only reasoner', runtime: { provider: 'deepseek', modelName: 'deepseek-reasoner', baseUrl: 'https://api.deepseek.com/v1', reasoningParameterMode: undefined, thinkingEnabled: true, reasoningEfforts: ['high'] } },
-    { label: 'verified rejection of thinking switch', runtime: { provider: 'Ant Ling', modelName: 'Ling-3.0-flash', baseUrl: 'https://api.ant-ling.com/v1', reasoningEfforts: ['high'] } },
-  ] satisfies Array<{ label: string; runtime: Partial<TextRuntime> }>)('rejects $label before usage preparation or paid dispatch', async ({ runtime }) => {
-    const fetcher = vi.fn()
+    { label: 'unknown native thinking-only', runtime: { reasoningEfforts: ['high'] }, payload: { reasoning_effort: 'high' } },
+    { label: 'unknown omit thinking switch', runtime: { reasoningParameterMode: 'omit', thinkingEnabled: true }, payload: { thinking: { type: 'enabled' } } },
+    { label: 'omit without non-thinking proof', runtime: { reasoningParameterMode: 'omit', thinkingEnabled: undefined, reasoningEfforts: ['high'] }, payload: {} },
+    { label: 'proxy accepting text but defaulting to thinking', runtime: { reasoningParameterMode: 'omit', thinkingEnabled: false, reasoningEffort: 'none', reasoningEfforts: ['none'] }, payload: {} },
+    { label: 'only-none without separate switch', runtime: { reasoningParameterMode: undefined, reasoningEffort: 'none', reasoningEfforts: ['none'] }, payload: { reasoning_effort: 'none' } },
+    { label: 'official omit rejecting thinking switch', runtime: { provider: 'Ant Ling', modelName: 'Ling-3.0-flash', baseUrl: 'https://api.ant-ling.com/v1', reasoningParameterMode: 'omit', thinkingEnabled: false, reasoningEfforts: ['none'] }, payload: {} },
+    { label: 'unknown proxy bearing Ling name', runtime: { provider: 'Ant Ling', modelName: 'Ling-3.0-flash', reasoningParameterMode: undefined, thinkingEnabled: undefined }, payload: { reasoning_effort: 'high' } },
+    { label: 'unknown DeepSeek proxy', runtime: { provider: 'deepseek', modelName: 'deepseek-v4-flash', reasoningParameterMode: undefined, thinkingEnabled: undefined }, payload: { thinking: { type: 'enabled' }, reasoning_effort: 'high' } },
+    { label: 'TokenHub unsupported model', runtime: { modelName: 'unknown-reasoner', baseUrl: 'https://tokenhub.tencentmaas.com/v1', reasoningEfforts: ['high'] }, payload: { reasoning_effort: 'high' } },
+    { label: 'TokenHub undocumented version', runtime: { modelName: 'deepseek-v4-flash-202606', baseUrl: 'https://tokenhub.tencentmaas.com/v1', reasoningEfforts: ['high'] }, payload: { reasoning_effort: 'high' } },
+    { label: 'TokenHub lookalike host', runtime: { modelName: 'deepseek/deepseek-flash', baseUrl: 'https://tokenhub.tencentmaas.com.example/v1', reasoningEfforts: ['high'] }, payload: { reasoning_effort: 'high' } },
+    { label: 'TokenHub insecure transport', runtime: { modelName: 'deepseek/deepseek-flash', baseUrl: 'http://tokenhub.tencentmaas.com/v1', reasoningEfforts: ['high'] }, payload: { reasoning_effort: 'high' } },
+    { label: 'unknown incomplete capabilities', runtime: { reasoningParameterMode: undefined, thinkingEnabled: undefined, reasoningEfforts: [] }, payload: { reasoning_effort: 'high' } },
+    { label: 'official thinking-only reasoner', runtime: { provider: 'deepseek', modelName: 'deepseek-reasoner', baseUrl: 'https://api.deepseek.com/v1', reasoningParameterMode: undefined, thinkingEnabled: true, reasoningEfforts: ['high'] }, payload: { thinking: { type: 'enabled' }, reasoning_effort: 'high' } },
+    { label: 'verified rejection of thinking switch', runtime: { provider: 'Ant Ling', modelName: 'Ling-3.0-flash', baseUrl: 'https://api.ant-ling.com/v1', reasoningEfforts: ['high'] }, payload: { reasoning_effort: 'high' } },
+  ] satisfies Array<{ label: string; runtime: Partial<TextRuntime>; payload: Record<string, unknown> }>)('uses the configured reasoning protocol for $label', async ({ runtime, payload }) => {
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => qualityResponse())
     vi.stubGlobal('fetch', fetcher)
     await expect(generateTextCompletion('规则', '合成完整正文', { userId: 'test', action: 'agent3HumanityCritic',
-      modelRuntime: qualityRuntime(runtime), reasoningEffort: 'low' })).rejects.toMatchObject({ code: 'AI_QUALITY_NON_THINKING_UNSUPPORTED' })
-    expect(fetcher).not.toHaveBeenCalled()
-    expect(mocks.create).not.toHaveBeenCalled()
-    expect(mocks.access).not.toHaveBeenCalled()
+      modelRuntime: qualityRuntime(runtime), reasoningEffort: 'low' })).resolves.toBe('{"findings":[]}')
+    const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body))
+    expect({ ...(body.thinking ? { thinking: body.thinking } : {}), ...(body.reasoning_effort ? { reasoning_effort: body.reasoning_effort } : {}) }).toEqual(payload)
+    if (payload.reasoning_effort !== 'none') expect(body).not.toHaveProperty('temperature')
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(mocks.create).toHaveBeenCalledOnce()
+    expect(mocks.access).toHaveBeenCalledOnce()
+    expect(mocks.charge).not.toHaveBeenCalled()
+  })
+
+  it.each(['agent3HumanityCritic', 'agent3ContinuityCritic'].flatMap(action =>
+    (['low', 'medium', 'high', 'xhigh', 'max'] as const).map(effort => ({ action, effort }))))('reviews with built-in thinking-only $action at $effort in one HTTP request', async ({ action, effort }) => {
+    const modelRuntime = qualityRuntime({ provider: 'openai', modelName: 'synthetic-thinking-model', tier: 'builtin_0123456789abcdef',
+      baseUrl: 'https://gateway.example/v1', reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], reasoningEffort: effort,
+      thinkingEnabled: undefined, reasoningParameterMode: undefined, outputTokenParameter: 'max_completion_tokens' })
+    const original = structuredClone(modelRuntime)
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => qualityResponse())
+    vi.stubGlobal('fetch', fetcher)
+    await expect(generateTextCompletion('规则', '合成完整正文', { userId: 'test', action, modelRuntime, reasoningEffort: effort,
+      boundedReview: true, maxOutputTokens: 1024 })).resolves.toBe('{"findings":[]}')
+    const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body))
+    expect(body).toMatchObject({ model: modelRuntime.modelName, reasoning_effort: effort, max_completion_tokens: 1024 })
+    expect(body).not.toHaveProperty('thinking')
+    expect(body).not.toHaveProperty('temperature')
+    expect(body).not.toHaveProperty('max_tokens')
+    expect(modelRuntime).toEqual(original)
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(mocks.create).toHaveBeenCalledOnce()
+  })
+
+  it.each(['agent3HumanityCritic', 'agent3ContinuityCritic'])('keeps a real provider rejection failed after selecting thinking for %s', async action => {
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response(JSON.stringify({ error: { message: 'Synthetic provider rejection' } }), { status: 400 }))
+    vi.stubGlobal('fetch', fetcher)
+    await expect(generateTextCompletion('规则', '合成完整正文', { userId: 'test', action,
+      modelRuntime: qualityRuntime({ reasoningEfforts: ['high'] }) })).rejects.toMatchObject({ code: 'AI_PROVIDER_ERROR' })
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ reasoning_effort: 'high' })
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(mocks.create).toHaveBeenCalledOnce()
     expect(mocks.charge).not.toHaveBeenCalled()
   })
 
