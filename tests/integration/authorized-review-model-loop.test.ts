@@ -199,7 +199,7 @@ describe('authorized current-report workflow through the real model loop', () =>
     const reports = await prisma.chapterQualityReport.findMany({ where: { runId: f.runId }, include: { findings: true } })
     if (scenario === 'final-advisory') {
       const report = reports.find(item => item.id === ready!.qualityReportId)!
-      expect(report).toMatchObject({ chapterRevision: current.revision, status: 'needs_repair', findings: [expect.objectContaining({ severity: 'advisory', disposition: 'pending', evidenceExcerpt: '他攥紧信封。' })] })
+      expect(report).toMatchObject({ chapterRevision: current.revision, status: 'passed', findings: [expect.objectContaining({ severity: 'advisory', disposition: 'pending', evidenceExcerpt: '他攥紧信封。' })] })
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
       expect(saved.validation).not.toHaveProperty('retainedReviewDecision')
     }

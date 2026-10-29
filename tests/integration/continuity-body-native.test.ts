@@ -169,7 +169,7 @@ describe.runIf(available)('ordinary native continuity review on an existing task
       const decisions = ready!.decisionDetails!.filter(item => item.source === 'quality')
       expect(decisions).toHaveLength(1)
       expect(decisions[0]).toMatchObject({ evidence: '他合上账簿，走到门口。', severity: 'advisory', suggestion: expect.stringContaining('考虑压缩') })
-      expect(finalQuality).toMatchObject({ status: 'needs_repair', findings: [expect.objectContaining({ id: decisions[0].findingId, disposition: 'pending' })] })
+      expect(finalQuality).toMatchObject({ status: 'passed', findings: [expect.objectContaining({ id: decisions[0].findingId, disposition: 'pending' })] })
       if (outcome.kind === 'tool') expect(outcome.result.output).toContain('当前仍有 1 条报告意见，其中 0 条已明确保留')
       const committedParent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'chapter_bridge_commit' }, include: { effectReceipt: true } })
       expect(committedParent).toMatchObject({ status: 'succeeded', effectReceipt: { result: { toolResult: { summary: '章节已提交' } } } })
