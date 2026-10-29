@@ -24,7 +24,7 @@ type Subject = { userId: string; novelId: string; sessionId: string; runId: stri
  * runtime progress. Provider bytes are synthetic; historical records supplied
  * by the caller remain immutable and grant no execution phase. */
 export async function continueCurrentTerminalLoop(f: Subject, input: {
-  compilationId: string; prompt: string; afterSeq: number; unknown?: boolean; missingCommit?: boolean; readFirst?: boolean;
+  compilationId: string; prompt: string; afterSeq: number; unknown?: boolean; missingCommit?: boolean; readFirst?: boolean; setupAfterRecovery?: boolean;
   authorContinue?: { eventId: string; afterSeq: number };
 }) {
   vi.spyOn(memory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
@@ -43,7 +43,7 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
   // delete that exact second paragraph through the normal quality CAS path.
   const originalSource = buildQualityEvidenceSources({ userId: f.userId, novelId: f.novelId, chapterId: original.id, chapterRevision: original.revision }, original.content)
   const duplicated = original.content + '\n\n' + originalSource.entries.filter(entry => entry.text.trim()).at(-1)!.text
-  if (!input.unknown && !input.missingCommit) {
+  if (!input.unknown && !input.missingCommit && !input.setupAfterRecovery) {
     await prisma.chapter.update({ where: { id: original.id }, data: { content: duplicated, wordCount: duplicated.length, revision: { increment: 1 } } })
     await recordStoryCompilerWrite({ ...f, chapterOrderIndex: original.orderIndex, chapterRevision: original.revision + 1 })
   }
@@ -112,10 +112,25 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
       userId: f.userId, agentRunId: f.runId, modelTier: 'speed', multiplierBps: 10000 } })
     const last = [...request.messages].reverse().find(message => message.role === 'tool')
     let next: string | undefined
+    let nextArgs: Record<string, unknown> | undefined
     let retainedFindings: Array<{ source: 'quality' | 'continuity'; reportId: string; findingId: string; reason: string }> | undefined
     if (input.missingCommit) return { content: summary, reasoning: '', toolCalls: [], finishReason: 'stop',
       usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
-    if (!last || !calls.length) next = input.readFirst ? 'chapter_bridge_get' : 'quality_analyze'
+    if (!last || !calls.length) {
+      if (input.setupAfterRecovery) {
+        const saved = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
+        expect((saved.usage as { checkpoint?: { pendingReviews?: unknown[] } } | null)?.checkpoint?.pendingReviews ?? []).toEqual([])
+        expect(await prisma.agentRunEvent.findFirst({ where: { runId: f.runId, seq: { gt: input.afterSeq }, type: 'review.reconciled' } })).not.toBeNull()
+        next = 'chapter_read'; nextArgs = { chapterId: f.chapterId }
+      } else next = input.readFirst ? 'chapter_bridge_get' : 'quality_analyze'
+    }
+    else if (last.toolCallId === 'current-recovery-chapter_read' && input.setupAfterRecovery) {
+      expect(last.content).toContain(original.content)
+      next = 'chapter_edit_range'; nextArgs = { chapterId: f.chapterId, oldText: original.content, newText: duplicated }
+    } else if (last.toolCallId === 'current-recovery-chapter_edit_range' && input.setupAfterRecovery) {
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: duplicated, revision: original.revision + 1 })
+      next = 'quality_analyze'
+    }
     else if (last.toolCallId === 'current-recovery-chapter_bridge_get') next = 'quality_analyze'
     else if (last.toolCallId === 'current-recovery-quality_analyze') {
       expect(last.content).toContain('修订')
@@ -140,7 +155,7 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
     }
     if (next) calls.push(next)
     return { content: next ? '' : summary, reasoning: '', toolCalls: next ? [{ id: retainedFindings ? 'current-recovery-retained-commit' : `current-recovery-${next}`, name: next,
-      arguments: JSON.stringify({ compilationId: input.compilationId, ...(retainedFindings ? { retainedFindings } : {}) }) }] : [], finishReason: next ? 'tool_calls' : 'stop',
+      arguments: JSON.stringify(nextArgs ?? { compilationId: input.compilationId, ...(retainedFindings ? { retainedFindings } : {}) }) }] : [], finishReason: next ? 'tool_calls' : 'stop',
       usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
     } catch (error) { modelFailures.push(error); throw error }
   })
@@ -182,7 +197,8 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
       targetRevision: chapter.revision, before: duplicated, after: chapter.content })])
     expect(continuityRequests).toHaveLength(1)
     expect(run.status).toBe('completed'); expect(compilation.bridge!.committedAt).not.toBeNull()
-    expect(calls.slice(0, input.readFirst ? 4 : 3)).toEqual([...(input.readFirst ? ['chapter_bridge_get'] : []), 'quality_analyze', 'continuity_validate', 'chapter_bridge_commit'])
+    const prefix = input.setupAfterRecovery ? ['chapter_read', 'chapter_edit_range'] : input.readFirst ? ['chapter_bridge_get'] : []
+    expect(calls.slice(0, prefix.length + 3)).toEqual([...prefix, 'quality_analyze', 'continuity_validate', 'chapter_bridge_commit'])
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, input.compilationId))
     expect(readiness).toMatchObject({ ready: true, revision: chapter.revision, quality: 'complete', continuity: 'complete', terminalCommitted: true, decisionPending: false })
     const finalContinuity = readContinuityReport(compilation.validation, chapter)

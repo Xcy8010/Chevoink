@@ -123,7 +123,8 @@ describe.runIf(available)('known invalid historical input does not revoke curren
     const history = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { lte: 3 } }, orderBy: { seq: 'asc' } })
     const completed = await continueCurrentReviewWorkflow(f, { compilationId: compilation.id, prompt, afterSeq: 3 })
     const finished = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
-    const failedTools = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'tool.result', seq: { gt: 3 } }, select: { payload: true }, orderBy: { seq: 'asc' } })
+    const toolResults = await prisma.agentRunEvent.findMany({ where: { runId: f.runId, type: 'tool.result', seq: { gt: 3 } }, select: { payload: true }, orderBy: { seq: 'asc' } })
+    const failedTools = toolResults.filter(event => (event.payload as { ok?: boolean }).ok !== true)
     const savedCheckpoint = (finished.usage as { checkpoint: typeof checkpoint }).checkpoint
     expect(finished).toMatchObject({ taskSpec: originalRun.taskSpec, modelTier: originalRun.modelTier, customModelId: originalRun.customModelId, reasoningEffort: originalRun.reasoningEffort })
     expect(savedCheckpoint.reviewAttempts).toEqual(expect.arrayContaining(oldClaims))
@@ -133,6 +134,8 @@ describe.runIf(available)('known invalid historical input does not revoke curren
     expect(completed.main).toHaveBeenCalled()
     expect(completed.critic).toHaveBeenCalled()
     expect(failedTools).toEqual([])
+    expect(toolResults).toEqual(expect.arrayContaining(['quality_analyze', 'continuity_validate', 'chapter_bridge_commit'].map(toolName =>
+      expect.objectContaining({ payload: expect.objectContaining({ toolName, ok: true }) }))))
     const completedFees = await prisma.aiUsageLog.count({ where: { userId: f.userId } })
     for (const author of [true, false]) {
       const tail = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId }, orderBy: { seq: 'desc' } })
@@ -151,7 +154,8 @@ describe.runIf(available)('known invalid historical input does not revoke curren
     expect(await prisma.agentArtifact.findMany({ where: { id: { in: artifacts.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(byId(artifacts))
     expect(await prisma.aiUsageLog.findMany({ where: { id: { in: usage.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(byId(usage))
     expect(await prisma.creditLedgerEntry.findMany({ where: { id: { in: ledger.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(byId(ledger))
-    expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })).toMatchObject({ ...account, dailyUsedMilli: account.dailyUsedMilli + completed.actions.length * 7 })
+    expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })).toMatchObject({ ...account,
+      updatedAt: completed.actions.length ? expect.any(Date) : account.updatedAt, dailyUsedMilli: account.dailyUsedMilli + completed.actions.length * 7 })
     expect(await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { lte: 3 } }, orderBy: { seq: 'asc' } })).toEqual(history)
   }, undefined, prompt, { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)
 })

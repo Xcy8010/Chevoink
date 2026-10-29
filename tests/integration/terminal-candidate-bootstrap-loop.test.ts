@@ -160,7 +160,8 @@ describe.runIf(available)('historical candidate judgments preserve the original 
     expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: historicalUsage.id } })).toEqual(historicalUsage)
     expect(await prisma.creditLedgerEntry.findUniqueOrThrow({ where: { id: historicalCharge.id } })).toEqual(historicalCharge)
     expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } }))
-      .toMatchObject({ ...account, dailyUsedMilli: account.dailyUsedMilli + completed.actions.length * 7 })
+      .toMatchObject({ ...account, updatedAt: completed.actions.length ? expect.any(Date) : account.updatedAt,
+        dailyUsedMilli: account.dailyUsedMilli + completed.actions.length * 7 })
     if (missingCommit) {
       expect(completed.chapter).toEqual(chapter)
       expect(completed.compilation.bridge).toEqual(before.bridge)
@@ -346,7 +347,8 @@ describe.runIf(available)('historical candidate judgments preserve the original 
     expect(await prisma.aiUsageLog.findMany({ where: { id: { in: originalUsage.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(originalUsage)
     expect(await prisma.creditLedgerEntry.findMany({ where: { id: { in: originalLedger.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(originalLedger)
     expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } }))
-      .toMatchObject({ ...originalAccount, dailyUsedMilli: originalAccount.dailyUsedMilli + completed.actions.length * 7 })
+      .toMatchObject({ ...originalAccount, updatedAt: completed.actions.length ? expect.any(Date) : originalAccount.updatedAt,
+        dailyUsedMilli: originalAccount.dailyUsedMilli + completed.actions.length * 7 })
     expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: old.id } })).toEqual(old)
     expect(await prisma.agentRunEvent.findMany({ where: { runId: f.runId, seq: { lte: pauseSeq } }, orderBy: { seq: 'asc' } })).toEqual(history)
     const final = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
