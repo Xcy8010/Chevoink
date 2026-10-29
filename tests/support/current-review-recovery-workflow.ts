@@ -131,6 +131,20 @@ export async function continueCurrentReviewWorkflow(f: Subject, input: {
           expect(continuity.findings).toHaveLength(4)
           const expected = [...quality.findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected')
             .map(finding => `quality:${quality.id}:${finding.id}`), ...continuity.findings.map(finding => `continuity:${continuity.id}:${finding.id}`)].sort()
+          const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, input.compilationId))
+          // The failed commit projects mandatory references. This scenario
+          // deliberately makes an explicit decision for every real opinion,
+          // including the twelve nonblocking quality opinions, not just four
+          // continuity errors. Read those from the complete current report.
+          expect(details!.map(item => `${item.source}:${item.reportId}:${item.findingId}`).sort()).toEqual(
+            readiness!.requiredDecisions!.map(item => `${item.source}:${item.reportId}:${item.findingId}`).sort())
+          expect(readiness!.requiredDecisions).toHaveLength(4)
+          expect(readiness!.requiredDecisions!.every(item => item.source === 'continuity')).toBe(true)
+          details = readiness!.decisionDetails
+          for (const finding of quality.findings.filter(item => item.disposition !== 'repaired' && item.authorFeedback !== 'rejected')) {
+            expect(request.messages.some(message => message.role === 'tool' && String(message.content).includes(finding.id)
+              && String(message.content).includes(finding.suggestion))).toBe(true)
+          }
           expect(details!.map(item => `${item.source}:${item.reportId}:${item.findingId}`).sort()).toEqual(expected)
           expect(new Set(expected).size).toBe(expected.length)
         }

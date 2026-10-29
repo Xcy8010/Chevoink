@@ -135,8 +135,9 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
     else if (last.toolCallId === 'current-recovery-chapter_bridge_get') next = 'quality_analyze'
     else if (last.toolCallId === 'current-recovery-quality_analyze') {
       if (input.setupAfterRecovery) {
-        expect(last.content).toContain('原作者授权范围内')
-        expect(last.content).not.toContain('不要为这些纯建议再调用正文写入工具')
+        const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, input.compilationId))
+        expect(readiness).toMatchObject({ ready: false, revision: original.revision + 1, quality: 'complete', continuity: 'stale', terminalCommitted: false })
+        expect(readiness!.requiredTools).toContainEqual({ name: 'continuity_validate', args: { compilationId: input.compilationId } })
         const report = await prisma.chapterQualityReport.findFirstOrThrow({ where: { userId: f.userId, chapterId: f.chapterId,
           chapterRevision: original.revision + 1 }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], include: { findings: true } })
         expect(report.repairRound).toBe(0)

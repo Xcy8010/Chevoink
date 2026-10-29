@@ -49,7 +49,7 @@ describe('authorized current-report workflow through the real model loop', () =>
     await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
     const actions: string[] = []
     const modelFailures: unknown[] = []
-    const summary = scenario === 'final-advisory' ? finalText + '最终报告另有一条节奏建议，已引用实际报告明确保留；该建议没有冒充已修复。' : finalText
+    const summary = scenario === 'final-advisory' ? finalText + '最终报告另有一条节奏建议，供作者参考；该建议没有冒充已修复或已明确留置。' : finalText
     vi.spyOn(ai, 'generateTextCompletion').mockImplementation(async (_system, content, options) => {
       try {
       options.signal?.throwIfAborted()
@@ -151,22 +151,19 @@ describe('authorized current-report workflow through the real model loop', () =>
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ revision: 7,
           content: initial.replace(redundant, '').replace('到了柜台，他说口袋里有487元。', '到了柜台，他说口袋里有390元。') })
         next = { name: 'chapter_bridge_commit', args: { compilationId: compilation.id } }
-      } else if (scenario === 'final-advisory' && last.toolCallId === 'walk-chapter_bridge_commit') {
-        const state = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
-        expect(state).toMatchObject({ ready: true, decisionPending: true, terminalCommitted: false })
-        const raw = String(last.content).split('当前真实意见：')[1]
-        expect(raw, 'failed commit must expose current real finding references').toBeDefined()
-        let details: Array<{ source: 'quality'; reportId: string; findingId: string; evidence: string; suggestion: string }> | undefined
-        for (let end = raw.indexOf(']'); end >= 0; end = raw.indexOf(']', end + 1)) {
-          try { details = JSON.parse(raw.slice(0, end + 1)); break } catch { /* Continue only within this actual observed JSON array. */ }
-        }
-        expect(details).toHaveLength(1)
-        expect(details![0]).toMatchObject({ source: 'quality', evidence: '他攥紧信封。', suggestion: expect.stringContaining('压缩') })
-        next = { name: 'chapter_bridge_commit', args: { compilationId: compilation.id, retainedFindings: details!.map(({ source, reportId, findingId }) => ({
-          source, reportId, findingId, reason: '这处攥紧信封的动作保留紧张的身体反应；已经删去后句解释，当前一句不重复事实，继续压缩会失去人物的动作节奏。' })) } }
       } else {
-        expect(last.toolCallId).toBe(scenario === 'final-advisory' ? 'walk-retained-commit' : 'walk-chapter_bridge_commit')
+        expect(last.toolCallId).toBe('walk-chapter_bridge_commit')
         expect(last.content).toContain('提交')
+        if (scenario === 'final-advisory') {
+          const state = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
+          expect(state).toMatchObject({ ready: true, decisionPending: false, terminalCommitted: true, revision: 7, retainedDecisions: [] })
+          expect(state!.decisionDetails).toHaveLength(1)
+          expect(state!.decisionDetails![0]).toMatchObject({ source: 'quality', evidence: '他攥紧信封。', severity: 'advisory', suggestion: expect.stringContaining('压缩') })
+          expect(last.content).toContain('当前仍有 1 条报告意见，其中 0 条已明确保留')
+          const finding = state!.decisionDetails![0]
+          expect(observations.some(message => String(message.content).includes(finding.findingId)
+            && String(message.content).includes(finding.suggestion))).toBe(true)
+        }
       }
       if (next) calls.push(next)
       return { content: next ? '' : summary, reasoning: '', toolCalls: next ? [{ id: next.args.retainedFindings ? 'walk-retained-commit' : `walk-${next.name}`, name: next.name, arguments: JSON.stringify(next.args) }] : [],
@@ -185,21 +182,27 @@ describe('authorized current-report workflow through the real model loop', () =>
     expect(ready).toMatchObject({ ready: true, revision: current.revision, continuity: 'complete', quality: 'complete', terminalCommitted: true, decisionPending: false })
     const delivery = await prisma.$transaction(tx => readCompletedWritingPresentation(tx, f))
     expect(delivery).toMatchObject({ chapters: [{ id: f.chapterId, revision: current.revision, content: current.content }] })
-    expect(calls.map(item => item.name)).toEqual(['quality_analyze', 'continuity_validate', 'chapter_bridge_commit', ...(scenario === 'final-advisory' ? ['chapter_bridge_commit'] : [])])
+    expect(calls.map(item => item.name)).toEqual(['quality_analyze', 'continuity_validate', 'chapter_bridge_commit'])
     expect(calls.filter(item => !(item.args as { retainedFindings?: unknown }).retainedFindings).every(item => Object.keys(item.args as object).length === 1)).toBe(true)
     expect(actions.filter(action => action === 'agent3HumanityRevision')).toHaveLength(1)
     expect(actions.filter(action => action === 'agent3ContinuityRevision')).toHaveLength(1)
     const history = await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })
-    expect(history.filter(event => event.type === 'tool.call' && (event.payload as { toolName?: string }).toolName === 'chapter_bridge_commit')).toHaveLength(scenario === 'final-advisory' ? 2 : 1)
+    expect(history.filter(event => event.type === 'tool.call' && (event.payload as { toolName?: string }).toolName === 'chapter_bridge_commit')).toHaveLength(1)
     if (scenario === 'final-advisory') {
-      expect(history.filter(event => event.type === 'tool.result' && (event.payload as { toolName?: string }).toolName === 'chapter_bridge_commit').map(event => (event.payload as { ok: boolean }).ok)).toEqual([false, true])
-      expect(ready?.retainedDecisions).toHaveLength(1)
+      expect(history.filter(event => event.type === 'tool.result' && (event.payload as { toolName?: string }).toolName === 'chapter_bridge_commit').map(event => (event.payload as { ok: boolean }).ok)).toEqual([true])
+      expect(ready?.retainedDecisions).toEqual([])
       expect(ready?.decisionDetails?.some(item => item.source === 'quality' && item.evidence === '他攥紧信封。')).toBe(true)
     }
     expect(history.at(-1)?.payload).toMatchObject({ type: 'run.finished', status: 'succeeded' })
-    expect(chat).toHaveBeenCalledTimes(scenario === 'final-advisory' ? 5 : 4)
+    expect(chat).toHaveBeenCalledTimes(4)
     if (scenario === 'legacy-phase-checkpoint') expect(history.filter(event => event.seq <= 4834)).toEqual(originalHistory)
-    const reports = await prisma.chapterQualityReport.findMany({ where: { runId: f.runId } })
+    const reports = await prisma.chapterQualityReport.findMany({ where: { runId: f.runId }, include: { findings: true } })
+    if (scenario === 'final-advisory') {
+      const report = reports.find(item => item.id === ready!.qualityReportId)!
+      expect(report).toMatchObject({ chapterRevision: current.revision, status: 'needs_repair', findings: [expect.objectContaining({ severity: 'advisory', disposition: 'pending', evidenceExcerpt: '他攥紧信封。' })] })
+      const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })
+      expect(saved.validation).not.toHaveProperty('retainedReviewDecision')
+    }
     expect(reports.some(report => report.chapterRevision === current.revision)).toBe(true)
     const usage = await prisma.aiUsageLog.findMany({ where: { agentRunId: f.runId } })
     const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId, kind: 'consume' } })

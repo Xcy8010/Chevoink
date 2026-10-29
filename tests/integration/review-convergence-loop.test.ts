@@ -187,9 +187,10 @@ describe('legacy review convergence through actual loop and terminal delivery', 
       })
       body = after
     }
-    const finalReport = await assess(['灯光6落在桌上', ...initialEvidence.slice(2)])
+    const assessedFinal = await assess(['灯光6落在桌上', ...initialEvidence.slice(2)])
+    const finalReport = await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: assessedFinal.id }, include: { findings: true } })
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f))
-    expect(readiness).toMatchObject({ ready: true, decisionPending: true, mustPassPending: false, continuityErrorCount: 0, qualityErrorCount: 0,
+    expect(readiness).toMatchObject({ ready: true, decisionPending: false, mustPassPending: false, continuityErrorCount: 0, qualityErrorCount: 0,
       reviewCycle: { verificationStarted: true, baselineRevision: 7, transitionCount: 6 } })
     const ctx: ToolContext = { ...f, chapterId: f.chapterId, callId: 'direct', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced',
       signal: new AbortController().signal, emit: () => {} }
@@ -248,31 +249,49 @@ describe('legacy review convergence through actual loop and terminal delivery', 
     const provider = vi.fn(() => { throw new Error('No extra critic or writer request is authorized by this fixture') })
     vi.stubGlobal('fetch', provider)
     let turn = 0
-    const retained = readiness!.requiredDecisions!.map(ref => ({ ...ref, reason: '此处保留灯光与静物停顿，增加动作会改掉作者有意保留的视线与节奏。' }))
-    vi.spyOn(aiService, 'chatWithTools').mockImplementation(async () => {
+    expect(readiness!.requiredDecisions).toEqual([])
+    expect(readiness!.retainedDecisions).toEqual([])
+    expect(readiness!.decisionDetails!.filter(item => item.source === 'quality').map(item => item.findingId).sort()).toEqual(finalReport.findings.map(item => item.id).sort())
+    vi.spyOn(aiService, 'chatWithTools').mockImplementation(async request => {
       turn++
-      const calls = turn === 1 ? [
+      const calls = turn === 1
+        ? [{ id: 'read-final-opinions', name: 'chapter_bridge_get', arguments: JSON.stringify({ compilationId: prepared.compilation.id }) }]
+        : turn === 2 ? [
         ...Array.from({ length: 6 }, (_, index) => ({ id: `polish-${index}`, name: 'chapter_edit_range',
           arguments: JSON.stringify({ chapterId: f.chapterId, oldText: `absent-anchor-${index}`, newText: '未应用' }) })),
-        { id: 'actual-retained-commit', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId: prepared.compilation.id,
-          retainedFindings: retained, chapterSummary: '她在门口等待回应。' }) },
+        { id: 'actual-final-commit', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId: prepared.compilation.id,
+          chapterSummary: '她在门口等待回应。' }) },
       ] : []
+      if (turn === 2) {
+        const observed = request.messages.filter(item => item.role === 'tool').find(item => item.toolCallId === 'read-final-opinions')!
+        for (const finding of finalReport.findings) {
+          expect(observed.content).toContain(finding.id)
+          expect(observed.content).toContain(finding.evidenceExcerpt)
+          expect(observed.content).toContain(finding.suggestion)
+        }
+      }
       return { content: calls.length ? '' : '本章完成。', reasoning: '', finishReason: calls.length ? 'tool_calls' : 'stop', toolCalls: calls,
         usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
     })
     await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'queued' } })
     await executeAgentRun({ ...f, mode: 'build', prompt, modelTier: 'speed', qualityMode: 'balanced', creativeFreedom: 'balanced' })
+    expect(turn).toBe(2)
     const events = await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })
     expect(events.filter(event => event.type === 'tool.result' && String((event.payload as { callId: string }).callId).startsWith('polish-'))).toHaveLength(6)
     expect(events.filter(event => event.type === 'tool.result' && String((event.payload as { callId: string }).callId).startsWith('polish-')).every(event =>
       (event.payload as { ok: boolean }).ok === false)).toBe(true)
-    expect(events.filter(event => event.type === 'tool.result').map(event => event.payload)).toContainEqual(expect.objectContaining({ callId: 'actual-retained-commit', ok: true }))
+    expect(events.filter(event => event.type === 'tool.result').map(event => event.payload)).toContainEqual(expect.objectContaining({ callId: 'actual-final-commit', ok: true }))
     expect(provider).not.toHaveBeenCalled()
     expect(events.filter(event => event.type === 'tool.call' && (event.payload as { toolName: string }).toolName === 'continuity_validate')).toEqual([])
     expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).toMatchObject({ status: 'completed' })
     expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, f))).toMatchObject({ chapters: [{ id: f.chapterId, revision: 13, content: body }] })
     expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: finalReport.id }, include: { findings: true } })).toEqual(finalReport)
     expect(finalReport.status).toBe('needs_repair')
+    const delivered = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, prepared.compilation.id))
+    expect(delivered).toMatchObject({ revision: 13, ready: true, decisionPending: false, terminalCommitted: true, retainedDecisions: [] })
+    expect(delivered!.decisionDetails!.filter(item => item.source === 'quality').map(item => ({ findingId: item.findingId, evidence: item.evidence, suggestion: item.suggestion }))).toEqual(
+      finalReport.findings.map(item => ({ findingId: item.id, evidence: item.evidenceExcerpt, suggestion: item.suggestion })))
+    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id } })).validation).not.toHaveProperty('retainedReviewDecision')
     expect(await prisma.chapterQualityReport.count({ where: { runId: f.runId } })).toBe(2)
     expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })).toEqual(budget)
     expect(await prisma.$transaction(tx => readOriginalTaskRequest(tx, f))).toEqual(original)

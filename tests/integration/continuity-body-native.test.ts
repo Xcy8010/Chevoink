@@ -154,45 +154,65 @@ describe.runIf(available)('ordinary native continuity review on an existing task
       expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toMatchObject({ committedAt: null })
       return
     }
+    expect(outcome).toMatchObject({ result: { summary: '章节已提交' } })
+    const finalQuality = await prisma.chapterQualityReport.findFirstOrThrow({ where: { userId: f.userId, chapterId: chapter.id, chapterRevision: 6 },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], include: { findings: true } })
+    const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'chapter_bridge_commit' }, include: { effectReceipt: true }, orderBy: { createdAt: 'asc' } })
+    const repair = await prisma.agentOperation.findFirstOrThrow({ where: { parentOperationId: parent.id, action: 'continuity_validate', kind: 'internal' }, include: { effectReceipt: true }, orderBy: { createdAt: 'asc' } })
+    const memoryJobId = z.object({ memoryJobId: z.string() }).parse(repair.effectReceipt!.result).memoryJobId
+    const repairJob = await prisma.memoryExtractionJob.findUniqueOrThrow({ where: { id: memoryJobId } })
+    expect(repairJob).toMatchObject({ novelId: f.novelId, chapterId: chapter.id, chapterRevision: 6,
+      idempotencyKey: `${chapter.id}:6`, diff: { durableTaskRootId: f.rootId, durableOperationId: repair.id, after: content.replace(broken, corrected) } })
     if (scenario === 'complete-and-reenter') {
-      expect(outcome).toMatchObject({ result: { outcome: 'failed', failureCode: 'REVIEW_DECISION_REQUIRED' } })
       const ready = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
-      expect(ready).toMatchObject({ ready: true, decisionPending: true, revision: 6, terminalCommitted: false })
+      expect(ready).toMatchObject({ ready: true, decisionPending: false, revision: 6, terminalCommitted: true, retainedDecisions: [] })
       const decisions = ready!.decisionDetails!.filter(item => item.source === 'quality')
       expect(decisions).toHaveLength(1)
-      if (outcome.kind === 'tool') { expect(outcome.result.output).toContain(decisions[0].findingId); expect(outcome.result.output).toContain(decisions[0].evidence) }
-      const failedParent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'chapter_bridge_commit' }, include: { effectReceipt: true } })
-      expect(failedParent).toMatchObject({ status: 'failed', effectReceipt: { result: { effectApplied: false } } })
-      expect(await prisma.memoryExtractionJob.count({ where: { chapterId: chapter.id, chapterRevision: 6 } })).toBe(1)
-      expect(await advanceDurableMemory(lease)).toMatchObject({ kind: 'memory' })
-      expect((await prisma.memoryExtractionJob.findFirstOrThrow({ where: { chapterId: chapter.id, chapterRevision: 6 } })).status).toBe('completed')
-      const priorRequests = fetcher.mock.calls.length
-      await model([{ id: 'retain-and-commit', name: 'chapter_bridge_commit', arguments: JSON.stringify({ ...args,
-        retainedFindings: decisions.map(({ source, reportId, findingId }) => ({ source, reportId, findingId,
-          reason: '保留离桌走向门口的动作节奏；当前没有重复解释算术或情绪，这个动作衔接下一场景，不再自动润色。' })) }) }])
-      expect(await step()).toMatchObject({ result: { summary: '章节已提交' } })
-      expect(fetcher).toHaveBeenCalledTimes(priorRequests)
-    } else expect(outcome).toMatchObject({ result: { summary: '章节已提交' } })
+      expect(decisions[0]).toMatchObject({ evidence: '他合上账簿，走到门口。', severity: 'advisory', suggestion: expect.stringContaining('考虑压缩') })
+      expect(finalQuality).toMatchObject({ status: 'needs_repair', findings: [expect.objectContaining({ id: decisions[0].findingId, disposition: 'pending' })] })
+      if (outcome.kind === 'tool') expect(outcome.result.output).toContain('当前仍有 1 条报告意见，其中 0 条已明确保留')
+      const committedParent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'chapter_bridge_commit' }, include: { effectReceipt: true } })
+      expect(committedParent).toMatchObject({ status: 'succeeded', effectReceipt: { result: { toolResult: { summary: '章节已提交' } } } })
+      const memoryStep = await advanceDurableMemory(lease)
+      expect(memoryStep).toMatchObject({ kind: 'memory', result: { jobId: memoryJobId } })
+      expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: memoryStep!.operationId } })).toMatchObject({
+        taskRootId: f.rootId, parentOperationId: repair.id, action: 'memory_extract',
+        inputSnapshot: { input: { sourceOperationId: repair.id, sourceResultHash: repair.effectReceipt!.resultHash,
+          jobId: memoryJobId, chapterId: chapter.id, chapterRevision: 6 } } })
+      expect((await prisma.memoryExtractionJob.findUniqueOrThrow({ where: { id: memoryJobId } })).status).toBe('completed')
+      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).validation).not.toHaveProperty('retainedReviewDecision')
+    }
     const saved = await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })
     expect(saved).toMatchObject({ revision: 6, content: content.replace(broken, corrected) })
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))).toMatchObject({ ready: true, decisionPending: false, terminalCommitted: true, revision: 6 })
     expect(await prisma.$transaction(tx => readCompletedWritingPresentation(tx, f))).not.toBeNull()
     const committed = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { bridge: true } })
     expect(committed).toMatchObject({ status: 'completed', validation: historical, bridge: { committedAt: expect.any(Date), targetRevision: 6 } })
-    const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'chapter_bridge_commit' }, include: { effectReceipt: true }, orderBy: { createdAt: 'asc' } })
-    const repair = await prisma.agentOperation.findFirstOrThrow({ where: { parentOperationId: parent.id, action: 'continuity_validate', kind: 'internal' }, include: { effectReceipt: true }, orderBy: { createdAt: 'asc' } })
     expect(repair.effectReceipt?.result).toHaveProperty('progress.kind', 'content_revision')
     const evidence = await withRunLease(lease, async tx => collectDurableToolEvidence(tx, f.rootId, (await readExecutionStateInTransaction(tx, f.rootId)).frame.revision))
     expect(evidence.effects.some(effect => effect.operationId === repair.id)).toBe(true)
-    const jobs = await prisma.memoryExtractionJob.findMany({ where: { chapterId: chapter.id, chapterRevision: 6 } })
+    const jobs = await prisma.memoryExtractionJob.findMany({ where: { novelId: f.novelId, chapterId: chapter.id, chapterRevision: 6,
+      diff: { path: ['durableOperationId'], equals: repair.id } } })
     expect(jobs).toHaveLength(1)
+    expect(jobs[0].id).toBe(memoryJobId)
     expect(jobs[0].diff).toMatchObject({ durableTaskRootId: f.rootId, durableOperationId: repair.id })
     const attempts = await prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId } }, include: { usageReceipt: true }, orderBy: { id: 'asc' } })
     const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
     expect(attempts.every(attempt => attempt.usageReceipt?.settlementStatus === 'settled')).toBe(true)
     expect(ledger).toHaveLength(attempts.length)
     const count = fetcher.mock.calls.length
-    await model([{ id: 'reread-current', name: 'continuity_validate', arguments: JSON.stringify(args) }, { id: 'same-commit', name: 'chapter_bridge_commit', arguments: JSON.stringify(args) }])
+    await model([...(scenario === 'complete-and-reenter' ? [{ id: 'read-final-advice', name: 'chapter_bridge_get', arguments: JSON.stringify(args) }] : []), { id: 'reread-current', name: 'continuity_validate', arguments: JSON.stringify(args) }, { id: 'same-commit', name: 'chapter_bridge_commit', arguments: JSON.stringify(args) }])
+    if (scenario === 'complete-and-reenter') {
+      const visible = await step()
+      expect(visible.kind).toBe('tool')
+      if (visible.kind === 'tool') {
+        const finding = finalQuality.findings[0]
+        expect(visible.result.output).toContain(finding.id)
+        expect(visible.result.output).toContain(finding.evidenceExcerpt)
+        expect(visible.result.output).toContain(finding.suggestion)
+      }
+      expect(fetcher).toHaveBeenCalledTimes(count)
+    }
     if (ask) {
       const waiting = await step()
       expect(waiting.kind).toBe('waiting_approval')
@@ -221,6 +241,7 @@ describe.runIf(available)('ordinary native continuity review on an existing task
     expect(refreshedAttempts.filter(row => attempts.some(original => original.id === row.id))).toEqual(attempts)
     expect(refreshedLedger.filter(row => ledger.some(original => original.id === row.id))).toEqual(ledger)
     expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: parent.id }, include: { effectReceipt: true } })).toEqual(parent)
+    expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: finalQuality.id }, include: { findings: true } })).toEqual(finalQuality)
     expect((await loadExecutionState(f.userId, f.runId)).head.configurationHash).toBe(originalConfigHash)
     expect(reentered).toBe(true)
   }, undefined, '检查并修复第一章，再提交，最后简短说明。', { freezeWriting: true, reviewProtocol: 1, continuityReportProtocol: 5 }), 45000)
