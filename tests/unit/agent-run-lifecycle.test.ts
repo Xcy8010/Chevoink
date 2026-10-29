@@ -946,7 +946,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(commitEffect(commit)).toHaveBeenCalledOnce()
     expect(critic.execute).not.toHaveBeenCalled()
     expect(state.terminalReview?.unresolved?.every(item => item.verdict === 'unknown')).toBe(true)
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: '本章延续人物的选择，让后续线索逐步展开。' }))
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'text.final', text: '已完成第1章。\n\n本章延续人物的选择，让后续线索逐步展开。' }))
     expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'ordinary-retained-decision', ok: true }))
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { reviewAttempts: expect.arrayContaining(checkpoint.reviewAttempts),
@@ -1712,7 +1712,8 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { reviewAttempts: expect.arrayContaining(['comp:c:3:quality_analyze', 'comp:c:4:quality_analyze']) } })
     expect((mocks.runs.get('run')?.usage as { checkpoint: unknown }).checkpoint).not.toHaveProperty('pendingReviews')
   })
-  it.each(['persisted', 'unavailable', 'already-persisted'] as const)('retires only the exempt cancelled execution lock without a new continuity grant: %s', async journal => {
+  it.each((['cancelled_review_billing_exempt', 'cancelled_review'] as const).flatMap(status =>
+    (['persisted', 'unavailable', 'already-persisted'] as const).map(journal => ({ status, journal }))))('retires $status with $journal audit without resetting the task budget', async ({ status, journal }) => {
     mocks.reviewReadiness.mockResolvedValue(readiness('missing', 'complete'))
     const critic = tool('continuity_validate', async () => { throw new Error('old aborted check') })
     mocks.tools = [critic]
@@ -1721,7 +1722,7 @@ describe('server assessment fallback in the real execution loop', () => {
     const stopped = structuredClone(mocks.runs.get('run')!)
     const original = (stopped.usage as { checkpoint: { tokenBudget: number; maxTurns: number; writeProgress: number; readProgress: number } }).checkpoint
     mocks.update.mockResolvedValueOnce(stopped as never)
-    const receipt = { status: 'cancelled_review_billing_exempt' as const, sourceRunId: 'run', sourceResultId: 'cancelled-result',
+    const receipt = { status, sourceRunId: 'run', sourceResultId: 'cancelled-result',
       sourceReportId: null, sourceStopEventId: 'user-stop', sourceCallId: 'cancelled-check', usageOutcome: 'unknown_preserved' as const,
       usageIds: ['unknown-exempt-usage'], admissionId: 'author-continue:stop', currentRevision: 3, currentContentHash: 'b'.repeat(64) }
     mocks.cancelledReviews.mockResolvedValue([{ callId: 'cancelled-check', compilationId: 'comp', chapterId: 'c', revision: 3,
@@ -3981,7 +3982,7 @@ describe('recovered committed writing uses the ordinary creative wrap-up', () =>
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     const text = events().filter((event): event is Extract<AgentStreamEventBody, { type: 'text.final' }> => event.type === 'text.final' && !event.asReasoning).at(-1)?.text
     expect(text).toBe(['only-prose', 'batch-only-prose'].includes(scenario) ? `旧碗\n\n${chapterBefore.content}`
-      : ['empty', 'auto-saved-only'].includes(scenario) ? '已完成《旧碗》。' : candidate)
+      : ['empty', 'auto-saved-only'].includes(scenario) ? '已完成第1章《旧碗》。' : `已完成第1章《旧碗》。\n\n${candidate}`)
     expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: {
       reviewAttempts: expect.arrayContaining(claims), consumedReviewDecisionFeedback: ['e'.repeat(64)] } })
     // Unused native requests remain only in the original model response; they
@@ -4082,7 +4083,7 @@ describe('ordinary chapter summary presentation', () => {
       for (const final of finals) expect(final).toMatchObject({ messageId, text: displayed })
       expect(JSON.stringify(finals)).not.toContain('铜钱清脆地落在地上')
       expect(displayed).toContain('结尾让人物的选择自然落地。')
-      if (caseKind !== 'stale-summary') expect(displayed).toBe('已保存《十五块的碗》（3541 字）。本章保留了旧碗与铜钱的细节，结尾让人物的选择自然落地。')
+      if (caseKind !== 'stale-summary') expect(displayed).toBe('已完成第1章《十五块的碗》。\n\n已保存《十五块的碗》（3541 字）。本章保留了旧碗与铜钱的细节，结尾让人物的选择自然落地。')
       expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: displayed })
       expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', outputSummary: displayed })
       const persisted = mocks.persist.mock.calls as unknown as Array<[{ create?: { role?: string; parts?: AgentMessagePart[] }; update?: { parts?: AgentMessagePart[] } }]>

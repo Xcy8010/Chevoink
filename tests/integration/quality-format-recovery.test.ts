@@ -14,6 +14,8 @@ import { persistCurrentContinuityReport } from '../support/current-continuity-re
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { tokenPriceSchema } from '../../api/lib/billing/token-price.js'
 import { priceTokenEvidence } from '../../api/lib/billing/reservation-policy.js'
+import { readCancelledReviewRetirements } from '../../api/lib/agent/cancelled-review-recovery.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 
 // Legacy usage logs have their own user FK; clean only this fixture's real
 // billing rows after assertions, before the shared durable fixture removes user.
@@ -63,6 +65,55 @@ async function prepareRetryQuality(f: Parameters<Parameters<typeof fixture>[0]>[
     signal: new AbortController().signal, emit: () => {} }
   return { ctx, compilationId }
 }
+
+describe.runIf(available)('author Continue after a manually stopped quality format request', () => {
+  it.each(['eligible', 'no-author', 'wrong-report', 'unknown-without-cancel'] as const)(
+    '%s preserves the failed report and paid slots while authenticating a fresh critic', scenario => fixture(async f => {
+      const { compilationId } = await prepareRetryQuality(f)
+      const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+      const start = new Date(Date.now() + 5000), end = new Date(start.getTime() + 1000)
+      const pending = { callId: 'stopped-quality-format', toolName: 'quality_analyze' as const, compilationId,
+        chapterId: f.chapterId, revision: chapter.revision }
+      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call', createdAt: start,
+        payload: { callId: pending.callId, toolName: pending.toolName, args: { chapterId: f.chapterId, compilationId } } } })
+      await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 2, type: 'tool.result', createdAt: end,
+        payload: { callId: pending.callId, toolName: pending.toolName, ok: false,
+          failureCode: scenario === 'unknown-without-cancel' ? 'AI_PROVIDER_TRANSPORT' : 'UNEXPECTED_TOOL_ERROR', summary: '已中断' } } })
+      const stop = await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 3, type: 'run.paused', createdAt: new Date(end.getTime() + 10), payload: { reason: 'user_stop' } } })
+      if (scenario !== 'no-author') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 4, type: 'run.started',
+        createdAt: new Date(end.getTime() + 20), payload: { authorContinue: { eventId: stop.id, afterSeq: 3 } } } })
+      const bundle = await buildHumanityQualityContext(f.userId, f.novelId, f.chapterId, f.runId)
+      const report = await prisma.chapterQualityReport.create({ data: { userId: f.userId, novelId: f.novelId, runId: f.runId,
+        compilationId, chapterId: f.chapterId, chapterRevision: chapter.revision, status: 'failed',
+        createdAt: new Date(start.getTime() - 1000), deterministicMetrics: { independentCheck: 'unavailable',
+          contentHash: createHash('sha256').update(chapter.content).digest('hex'), qualityContextHash: qualityReviewContextHash(bundle),
+          criticResponse: { callId: 'earlier-primary-critic', classification: 'json_invalid' }, autoRepairAttempted: true } } })
+      const claim = { version: 1, state: 'claimed', taskId: f.spec.id, reportId: report.id, chapterId: f.chapterId,
+        chapterRevision: chapter.revision, compilationId, claimRunId: f.runId, claimedAt: new Date(start.getTime() + 100).toISOString(),
+        key: 'original-format-reservation', contextHash: qualityReviewContextHash(bundle), evidenceHash: 'a'.repeat(64) }
+      await prisma.chapterQualityReport.update({ where: { id: report.id }, data: { deterministicMetrics: runtimeJson({
+        ...(report.deterministicMetrics as Record<string, unknown>), formatRecovery: claim }).value } })
+      await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, agentRunId: f.runId, chapterId: f.chapterId,
+        targetType: 'chapter', targetId: f.chapterId, providerType: 'text', providerMode: 'custom', modelName: 'synthetic-no-provider',
+        action: 'agent3HumanityFormatRecovery', usageSource: 'unknown', billingStatus: 'pending_usage', reservedCreditMilli: 18023,
+        requestTokens: null, responseTokens: null, durationMs: 0, createdAt: new Date(start.getTime() + 200) } })
+      const beforeReport = await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: report.id } })
+      const beforeUsage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })
+      const retired = await prisma.$transaction(tx => readCancelledReviewRetirements(tx, f, [pending]))
+      if (scenario === 'eligible' || scenario === 'wrong-report') {
+        expect(retired).toHaveLength(1)
+        expect(retired[0].retirement.sourceReportId).toBe(report.id)
+        await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 5, type: 'review.reconciled', createdAt: new Date(end.getTime() + 30),
+          payload: runtimeJson({ callId: pending.callId, chapterId: f.chapterId, revision: chapter.revision, compilationId,
+            receipt: { ...retired[0].retirement, ...(scenario === 'wrong-report' ? { sourceReportId: 'other-report' } : {}) } }).value } })
+      } else expect(retired).toEqual([])
+      expect(await prisma.$transaction(tx => recoveryClaims.hasReconciledQualityRequest(tx, f, report))).toBe(scenario === 'eligible')
+      expect(await prisma.$transaction(tx => readQualityFormatRecovery(tx, f, { chapterId: f.chapterId }))).toBeNull()
+      expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: report.id } })).toEqual(beforeReport)
+      expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId } })).toEqual(beforeUsage)
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapter)
+    }))
+})
 
 describe.runIf(available)('actual quality tool zero-fee retry and format recovery in PostgreSQL', () => {
   it.each(['primary-absent', 'primary-zero', 'recovery-absent', 'recovery-zero', 'both'] as const)(

@@ -137,7 +137,7 @@ export async function readQualityFormatRecovery(tx: Prisma.TransactionClient, su
 /** The loop has reconciled the complete failed paid chain under this new human
  * admission. Start a fresh assessment; do not reuse or reset its old format claim. */
 export async function hasReconciledQualityRequest(tx: Prisma.TransactionClient, subject: Subject,
-  report: { id: string; chapterId: string; chapterRevision: number }) {
+  report: { id: string; chapterId: string; chapterRevision: number; compilationId: string | null }) {
   const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId } })
   if (!run) return false
   const admission = await readQualityReviewAdmission(tx, run)
@@ -146,12 +146,30 @@ export async function hasReconciledQualityRequest(tx: Prisma.TransactionClient, 
   if (continued.some(item => item.persisted && item.toolName === 'quality_analyze' && item.chapterId === report.chapterId
     && item.receipt.sourceReportId === report.id && item.revision === report.chapterRevision && item.receipt.admissionId === admission.id)) return true
   const events = await tx.agentRunEvent.findMany({ where: { runId: subject.runId, type: 'review.reconciled', createdAt: { gte: admission.at } } })
-  return events.some(event => {
+  if (events.some(event => {
     const payload = object(event.payload), receipt = object(payload.receipt)
     return payload.chapterId === report.chapterId && payload.revision === report.chapterRevision
       && receipt.status === 'terminal_failed_billing_known' && receipt.sourceReportId === report.id
       && receipt.admissionId === admission.id && Array.isArray(receipt.usageIds) && receipt.usageIds.length > 0
+  })) return true
+  if (!admission.id.startsWith('author-continue:')) return false
+  const cancelled = events.filter(event => {
+    const payload = object(event.payload), receipt = object(payload.receipt)
+    return payload.chapterId === report.chapterId && payload.revision === report.chapterRevision
+      && payload.compilationId === report.compilationId && receipt.currentRevision === report.chapterRevision
+      && ['cancelled_review', 'cancelled_review_billing_exempt'].includes(String(receipt.status))
+      && receipt.usageOutcome === 'unknown_preserved' && receipt.sourceReportId === report.id
+      && receipt.admissionId === admission.id && Array.isArray(receipt.usageIds) && receipt.usageIds.length > 0
+      && receipt.usageIds.every(id => typeof id === 'string') && new Set(receipt.usageIds).size === receipt.usageIds.length
   })
+  if (!cancelled.length) return false
+  const original = await readOriginalTaskRequest(tx, subject)
+  const ids = await originalTaskRunIds(tx, subject, original)
+  const { readRetiredReviewUsageIds } = await import('./cancelled-review-recovery.js')
+  const retired = await readRetiredReviewUsageIds(tx, subject, ids)
+  // Retirement authenticates the stopped call/report/usage chain. It permits a
+  // fresh ordinary critic, without reopening the old format reservation.
+  return cancelled.some(event => (object(object(event.payload).receipt).usageIds as string[]).every(id => retired.has(id)))
 }
 
 /** Serialize the once-only claim before any new payment. Lost/unknown attempts

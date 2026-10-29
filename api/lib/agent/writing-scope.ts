@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import type { TaskSpec } from '../../../shared/contracts/task-spec-contracts.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
+import { plainChapterTitle } from '../../../shared/structure/chapter-title.js'
 import { DataAccessError } from '../prisma.js'
 import { activeChapterScope, activeVolumeWhere } from '../data/internal.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
@@ -865,9 +866,14 @@ function withoutWritingReceiptClauses(sentence: string, delivery: PresentationDe
 
 export function completedWritingPresentationText(delivery: PresentationDelivery, candidateText: string): string {
   const receipt = `${delivery.chapters.map(chapter => `已保存《${chapter.title}》（r${chapter.revision}）`).join('；')}，章节终态已提交。`
+  const completion = `已完成${delivery.chapters.map(chapter => {
+    const ordinal = `第${chapter.orderIndex}章`, title = plainChapterTitle(chapter.title)
+    return title === ordinal ? ordinal : `${ordinal}《${title}》`
+  }).join('、')}。`
   const showFullText = delivery.presentation?.mode === 'full_text'
     || !delivery.presentation && delivery.titleAndBodyOnly
-  let summary = withoutModelManuscriptBlocks(candidateText.split(receipt).join('')).trim()
+  const candidate = candidateText.startsWith(completion) ? candidateText.slice(completion.length).trimStart() : candidateText
+  let summary = withoutModelManuscriptBlocks(candidate.split(receipt).join('')).trim()
   for (const chapter of delivery.chapters) {
     summary = summary.split(`${chapter.title}\n\n${chapter.content}`).join('')
     if (summary.trim() === chapter.content.trim()) summary = ''
@@ -881,10 +887,10 @@ export function completedWritingPresentationText(delivery: PresentationDelivery,
   }).map(sentence => withoutWritingReceiptClauses(sentence, delivery)).join('').trim()
   if (showFullText && delivery.titleAndBodyOnly) return delivery.text
   // Completion was verified against current saved text and reports above.
-  // The author receives their text or natural wrap-up, not an internal receipt.
+  // Completion identity comes only from the verified current delivery; the
+  // model's natural wrap-up supplies the content description without a retry.
   // Keep receipt/proof schemas and historical messages unchanged.
-  return [showFullText ? delivery.text : '', summary || (!showFullText
-    ? `已完成${delivery.chapters.map(chapter => `《${chapter.title}》`).join('、')}。` : '')].filter(Boolean).join('\n\n')
+  return [showFullText ? delivery.text : completion, summary].filter(Boolean).join('\n\n')
 }
 
 /** A no-repeat preference withdraws chapter prose, not the author's wrap-up. */

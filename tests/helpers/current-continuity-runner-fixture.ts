@@ -5,12 +5,14 @@ import * as original from '../../api/lib/agent/original-request.js'
 import * as humanity from '../../api/lib/agent/humanity-quality.js'
 import * as locks from '../../api/lib/data/novel-write-lock.js'
 import * as manuscript from '../../api/lib/agent/manuscript-scope.js'
+import * as retirements from '../../api/lib/agent/cancelled-review-recovery.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import type { ContinuityReport, ContinuityOpinion } from '../../api/lib/agent/continuity-review.js'
 
 /** Unit storage fixture for the current shared runner. It has no retired
  * reservation/phase runner, provider, database connection or receipt writer. */
 export function currentContinuityRunnerFixture() {
+  vi.spyOn(retirements, 'readRetiredReviewUsageIds').mockResolvedValue(new Set())
   const chapter = { id: 'chapter', authorId: 'owner', novelId: 'novel', title: '本章', revision: 5, content: '她把账簿放在桌上。账中总额是三十四万元。', orderIndex: 4 }
   const previous = [{ id: 'previous', title: '前章', revision: 2, content: '她带着账簿离开仓库。', orderIndex: 3 }]
   const compilation = { id: 'compilation', userId: 'owner', novelId: 'novel', runId: 'run', chapterId: chapter.id, status: 'active',

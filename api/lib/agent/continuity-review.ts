@@ -198,12 +198,12 @@ ${report.repairFailure ? `报告已取得，自动修订未应用：${report.rep
 }
 
 export type ContinuityDispatch = (request: { system: string; content: string; action: string }, assertCurrent: () => Promise<void>) => Promise<{ content: string; usageIds: string[]; nativeReceiptIds?: string[]; billingKnown: boolean; providerComplete?: boolean }>
-export type ContinuityBilling = { known: boolean; hasRequest: boolean; usageIds: string[]; nativeReceiptIds: string[] }
+export type ContinuityBilling = { known: boolean; hasRequest: boolean; usageIds: string[]; nativeReceiptIds: string[]; retiredUsageIds?: string[] }
 export type ContinuityApplyRepair = (report: ContinuityReport, work: (tx: Prisma.TransactionClient) => Promise<ToolResult>) => Promise<ToolResult>
 
 /** Physical accounting is adapter-specific. Empty legacy usage is never a
  * substitute for a native provider attempt or its settlement receipt. */
-export async function readContinuityRequestBilling(db: Prisma.TransactionClient, ctx: Pick<ToolContext, 'userId' | 'novelId'>,
+export async function readContinuityRequestBilling(db: Prisma.TransactionClient, ctx: Pick<ToolContext, 'userId' | 'novelId' | 'runId'>,
   snapshot: { runIds: string[]; chapter: { id: string } }, nativeActionPrefix: string | null = 'continuity_'): Promise<ContinuityBilling> {
   const [fees, operations, historical] = await Promise.all([
     db.aiUsageLog.findMany({ where: { userId: ctx.userId, novelId: ctx.novelId, agentRunId: { in: snapshot.runIds },
@@ -212,7 +212,12 @@ export async function readContinuityRequestBilling(db: Prisma.TransactionClient,
       taskRoot: { userId: ctx.userId, novelId: ctx.novelId } }, include: { attempts: { include: { usageReceipt: true } }, events: true } }),
     (await import('./continuity-history.js')).readHistoricalContinuityBilling(db, ctx, snapshot),
   ])
-  let known = historical.known && fees.every(isKnownTextRequestBilling)
+  const retired = fees.some(row => !isKnownTextRequestBilling(row))
+    ? await (await import('./cancelled-review-recovery.js')).readRetiredReviewUsageIds(db, ctx, snapshot.runIds) : new Set<string>()
+  // Only requests still owning this execution dependency participate. Retired
+  // requests keep their unknown accounting and are never report evidence.
+  const activeFees = fees.filter(row => !retired.has(row.id))
+  let known = historical.known && activeFees.every(isKnownTextRequestBilling)
   const nativeReceiptIds: string[] = []
   for (const operation of operations) {
     if (!operation.inputSnapshot || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) { known = false; continue }
@@ -256,7 +261,8 @@ export async function readContinuityRequestBilling(db: Prisma.TransactionClient,
     else nativeReceiptIds.push(usage.attemptId)
   }
   return { known, hasRequest: historical.hasRequest || fees.length > 0 || operations.length > 0,
-    usageIds: [...new Set([...fees.map(fee => fee.id), ...historical.usageIds])], nativeReceiptIds }
+    usageIds: [...new Set([...activeFees.map(fee => fee.id), ...historical.usageIds.filter(id => !retired.has(id))])], nativeReceiptIds,
+    ...(retired.size ? { retiredUsageIds: [...retired] } : {}) }
 }
 
 async function legacyDispatch(ctx: ToolContext, snapshot: ContinuitySnapshot, id: string): Promise<ContinuityDispatch> {
@@ -282,10 +288,13 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
   const id = runtimeJson({ kind: 'continuity-report', taskId: snapshot.original.taskId, chapterId: snapshot.chapter.id, contextHash: snapshot.contextHash }).hash
   const saved = await prisma.agentArtifact.findUnique({ where: { id } })
   const metadata = saved?.metadata && typeof saved.metadata === 'object' && !Array.isArray(saved.metadata) ? saved.metadata as Record<string, unknown> : {}
-  const previous = metadata.continuityReport as ContinuityReport | undefined
+  const savedReport = metadata.continuityReport as ContinuityReport | undefined
   const readBilling = options.readBilling ?? (() => readContinuityRequestBilling(prisma, ctx, snapshot))
   const billing = await readBilling()
   if (!billing.known) throw new DataAccessError(409, 'AI_PROVIDER_BILLING_UNCONFIRMED', '原连续性请求的用量或费用尚未确认，未重复请求。')
+  const retired = new Set(billing.retiredUsageIds ?? [])
+  const previous = savedReport && !(savedReport.usageIds.some(id => retired.has(id)) || retired.size > 0 && !savedReport.billingKnown)
+    ? savedReport : undefined
   if (previous?.complete) {
     ctx.signal.throwIfAborted()
     const cached = { ...previous, billingKnown: true }
@@ -313,17 +322,21 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
   await assertCurrent(ctx, args, snapshot)
   const started = { contextHash: snapshot.contextHash, chapterId: snapshot.chapter.id, revision: snapshot.chapter.revision, callId: ctx.callId,
     ...(options.resumeKnownRequest ? { nativeOperationId: options.resumeKnownRequest } : {}),
-    requestClosed: false, ...(previous ? { continuityReport: previous } : {}) }
+    requestClosed: false, ...(savedReport ? { continuityReport: savedReport } : {}) }
   if (saved) await prisma.agentArtifact.update({ where: { id }, data: { metadata: runtimeJson(started).value } })
   else await prisma.agentArtifact.create({ data: { id, runId: ctx.runId, artifactType: 'continuityReview', title: '连续性检查', content: '检查请求已登记。', metadata: runtimeJson(started).value } })
-  const history = previous ? [...(previous.history ?? []), { rawResponses: previous.rawResponses, usageIds: previous.usageIds,
-    incompleteResponses: previous.incompleteResponses ?? [], nativeReceiptIds: previous.nativeReceiptIds ?? [], opinions: previous.opinions, complete: previous.complete, billingKnown: previous.billingKnown }] : []
+  const history: NonNullable<ContinuityReport['history']> = []
+  if (savedReport) {
+    const { history: priorHistory, ...priorReport } = savedReport
+    history.push(...(priorHistory ?? []), priorReport)
+  }
   let report: ContinuityReport = { version: 1, id, taskId: snapshot.original.taskId, chapterId: snapshot.chapter.id, revision: snapshot.chapter.revision,
     ...(options.resumeKnownRequest ? { nativeOperationId: options.resumeKnownRequest } : {}),
     ...(args.focus ? { focus: args.focus } : {}),
     sourceVersions: snapshot.sources.map(source => ({ chapterId: source.chapterId, revision: source.revision, contentHash: source.table.contentHash })),
     contextHash: snapshot.contextHash, contentHash: textHash(snapshot.chapter.content), complete: false,
-    opinions: previous?.opinions ?? [], findings: [], unlocatedIndexes: [], rawResponses: [], usageIds: [], billingKnown: true, history }
+    opinions: previous?.opinions ?? [], findings: [], unlocatedIndexes: [], rawResponses: [], usageIds: [], billingKnown: true, history,
+    ...(savedReport?.repairAttempted ? { repairAttempted: true } : {}) }
   let lastProviderComplete = true
   const call = async (system: string, content: string, action: string) => {
     const response = await dispatch({ system, content, action }, () => assertCurrent(ctx, args, snapshot))
@@ -338,7 +351,7 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
   try {
     const request = continuityReviewRequest(snapshot, args.focus)
     let opinions = [...report.opinions]
-    const completedRaw = previous && [previous, ...(previous.history ?? [])].some(row => row.rawResponses.some((raw, index) =>
+    const completedRaw = previous && [previous, ...(previous.history ?? [])].filter(row => row.billingKnown && !row.usageIds.some(id => retired.has(id))).some(row => row.rawResponses.some((raw, index) =>
       !row.incompleteResponses?.includes(index) && continuityFormatRecoveryPreservesOpinions(inspectContinuityOpinions(JSON.stringify({ findings: opinions })), inspectContinuityOpinions(raw))))
     let parsed = !!previous?.opinions.length && !!completedRaw
     if (!parsed) {

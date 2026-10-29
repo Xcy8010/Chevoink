@@ -6,7 +6,7 @@ import { activeChapterScope } from '../data/internal.js'
 import { originalTaskRunIds, readOriginalTaskRequest } from './original-request.js'
 import { readQualityReviewAdmission } from './quality-review-admission.js'
 import { readAuthorContinuedReviewUsageIds } from './continued-review-recovery.js'
-import { isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
+import { isKnownTextRequestBilling, isKnownRejectedTextRequestAttempt } from './text-request-billing.js'
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const sensitive = ['continuity_validate', 'quality_analyze', 'chapter_write', 'chapter_edit_range', 'chapter_append']
@@ -17,10 +17,15 @@ const exemptUsage = (row: AiUsageLog) => {
     && (row.usageSource === 'unknown' && row.requestTokens === null && row.responseTokens === null
       || row.usageSource === 'reported' && row.requestTokens !== null && row.responseTokens !== null)
 }
+// Cancellation is an execution outcome, independent of whether its bill has
+// arrived. Pending rows and their original reservations are never changed here.
+const cancelledUsage = (row: AiUsageLog) => exemptUsage(row) || row.usageSource === 'reported' && isKnownTextRequestBilling(row)
+  || ['pending_usage', 'pending_settlement', 'pending_authorization'].includes(row.billingStatus ?? '')
+const cancelledStatus = (status: unknown) => status === 'cancelled_review' || status === 'cancelled_review_billing_exempt'
 const reviewActions = (toolName: string) => {
   const family = toolName === 'continuity_validate' ? 'agent3Continuity' : 'agent3Humanity', primary = `${family}Critic`
   return { family, primary, actions: new Set([primary, `${primary}OutputRecovery`, `${primary}EmptyRecovery`,
-    ...(toolName === 'quality_analyze' ? ['agent3HumanityFormatRecovery'] : [])]) }
+    ...(toolName === 'quality_analyze' ? ['agent3HumanityFormatRecovery'] : ['agent3ContinuityFormatRecovery', 'agent3ContinuityEvidenceCorrection'])]) }
 }
 const inScope = (spec: unknown, novelId: string, chapter: { id: string; orderIndex: number }) => {
   const scope = object(object(spec).scope), writing = object(scope.writing)
@@ -28,6 +33,24 @@ const inScope = (spec: unknown, novelId: string, chapter: { id: string; orderInd
     const target = object(value)
     return target.orderIndex === chapter.orderIndex && (target.chapterId == null || target.chapterId === chapter.id)
   }) || writing.kind === undefined && Array.isArray(scope.chapterIds) && scope.chapterIds.includes(chapter.id))
+}
+
+/** Bind a cancelled quality format request to the failed report it actually
+ * used. The original report and its once-only format claim stay unchanged. */
+async function cancelledQualityReportId(tx: Prisma.TransactionClient, subject: { userId: string; novelId: string },
+  item: Pick<PendingReviewCall, 'chapterId' | 'revision' | 'compilationId' | 'callId'>,
+  call: { runId: string; createdAt: Date }, resultAt: Date, runIds: readonly string[]) {
+  const reports = await tx.chapterQualityReport.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
+    runId: { in: [...runIds] }, chapterId: item.chapterId, chapterRevision: item.revision,
+    compilationId: item.compilationId, status: 'failed', createdAt: { lte: resultAt } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+  return reports.find(report => {
+    const metrics = object(report.deterministicMetrics), claim = object(metrics.formatRecovery)
+    const claimedAt = new Date(String(claim.claimedAt))
+    return object(metrics.criticResponse).callId === item.callId
+      || claim.state === 'claimed' && claim.reportId === report.id && claim.chapterId === item.chapterId
+        && claim.chapterRevision === item.revision && claim.compilationId === item.compilationId && claim.claimRunId === call.runId
+        && claimedAt >= call.createdAt && claimedAt <= resultAt
+  })?.id ?? null
 }
 
 /** Consume a durable retirement as an execution receipt, never as known usage.
@@ -44,7 +67,7 @@ export async function readRetiredReviewUsageIds(tx: Prisma.TransactionClient,
     type: { in: ['tool.call', 'tool.result', 'run.paused', 'run.started', 'run.finished', 'review.reconciled'] } }, orderBy: [{ createdAt: 'asc' }, { seq: 'asc' }] })
   for (const audit of history.filter(row => row.type === 'review.reconciled')) {
     const payload = object(audit.payload), receipt = object(payload.receipt)
-    if (receipt.status !== 'cancelled_review_billing_exempt' || receipt.usageOutcome !== 'unknown_preserved'
+    if (!cancelledStatus(receipt.status) || receipt.usageOutcome !== 'unknown_preserved'
       || receipt.sourceCallId !== payload.callId || typeof payload.callId !== 'string' || typeof payload.chapterId !== 'string'
       || !Number.isSafeInteger(receipt.currentRevision) || Number(receipt.currentRevision) < 1
       || typeof receipt.currentContentHash !== 'string' || !/^[a-f0-9]{64}$/.test(receipt.currentContentHash)
@@ -78,19 +101,27 @@ export async function readRetiredReviewUsageIds(tx: Prisma.TransactionClient,
     if (!chapter || !inScope(original.spec, subject.novelId, chapter)) continue
     if (payload.compilationId && (typeof payload.compilationId !== 'string' || !await tx.storyCompilation.findFirst({ where: {
       id: payload.compilationId, userId: subject.userId, novelId: subject.novelId, runId: { in: [...runIds] }, chapterId: chapter.id } }))) continue
+    if (receipt.sourceReportId !== null && (toolName !== 'quality_analyze' || typeof receipt.sourceReportId !== 'string'
+      || !Number.isSafeInteger(payload.revision) || Number(payload.revision) < 1
+      || receipt.sourceReportId !== await cancelledQualityReportId(tx, subject,
+        { chapterId: chapter.id, revision: Number(payload.revision), compilationId: typeof payload.compilationId === 'string' ? payload.compilationId : null,
+          callId: payload.callId }, call, result.createdAt, runIds))) continue
     const { family, primary, actions } = reviewActions(toolName)
     const payments = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
       action: { startsWith: family }, createdAt: { gte: call.createdAt, lte: result.createdAt },
       OR: [{ chapterId: chapter.id }, { targetId: { in: [chapter.id, ...(typeof payload.compilationId === 'string' ? [payload.compilationId] : [])] } }, { agentRunId: call.runId }] } })
-    if (payments.length !== receipt.usageIds.length || payments.filter(row => row.action === primary && !isKnownRejectedTextRequestAttempt(row)).length !== 1
-      || !payments.some(row => row.usageSource === 'unknown') || payments.some(row => !receipt.usageIds || !(receipt.usageIds as string[]).includes(row.id)
-        || !actions.has(row.action) || !exemptUsage(row) && !isKnownRejectedTextRequestAttempt(row) || row.agentRunId !== null && row.agentRunId !== call.runId)) continue
+    const legacyExempt = receipt.status === 'cancelled_review_billing_exempt'
+    if (payments.length !== receipt.usageIds.length || legacyExempt && payments.filter(row => row.action === primary && !isKnownRejectedTextRequestAttempt(row)).length !== 1
+      || !payments.some(row => row.usageSource === 'unknown' || !isKnownTextRequestBilling(row))
+      || payments.some(row => !receipt.usageIds || !(receipt.usageIds as string[]).includes(row.id)
+        || !actions.has(row.action) || !(legacyExempt ? exemptUsage(row) : cancelledUsage(row)) && !isKnownRejectedTextRequestAttempt(row)
+        || row.agentRunId !== null && row.agentRunId !== call.runId)) continue
     for (const payment of payments) ids.add(payment.id)
   }
   return ids
 }
 
-/** Retire a cancelled, author-exempt execution lock, not an unknown request.
+/** Retire a cancelled execution lock after the author's actual Continue.
  * The original usage, response uncertainty and budget remain untouched. */
 export async function readCancelledReviewRetirements(tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string }, pending: readonly PendingReviewCall[]) {
@@ -135,16 +166,21 @@ export async function readCancelledReviewRetirements(tx: Prisma.TransactionClien
     const related = await tx.aiUsageLog.findMany({ where: { userId: subject.userId, novelId: subject.novelId, action: { startsWith: family },
       createdAt: { gte: first.createdAt }, OR: [{ chapterId: item.chapterId }, { targetId: { in: [item.chapterId, ...(item.compilationId ? [item.compilationId] : [])] } }, { agentRunId: { in: ids } }] } })
     const payments = related.filter(row => row.createdAt >= call.createdAt && row.createdAt <= result.createdAt)
-    if (!payments.length || payments.filter(row => row.action === primary && !isKnownRejectedTextRequestAttempt(row)).length !== 1 || payments.some(row => !actions.has(row.action)
-      || !exemptUsage(row) && !isKnownRejectedTextRequestAttempt(row) || row.agentRunId !== null && row.agentRunId !== call.runId) || !payments.some(row => row.usageSource === 'unknown')) continue
+    if (!payments.length || payments.some(row => !actions.has(row.action)
+      || !cancelledUsage(row) && !isKnownRejectedTextRequestAttempt(row) || row.agentRunId !== null && row.agentRunId !== call.runId)
+      || !payments.some(row => row.usageSource === 'unknown' || !isKnownTextRequestBilling(row))) continue
     if (related.some(row => !payments.some(payment => payment.id === row.id) && !retiredUsageIds.has(row.id) && !isKnownRejectedTextRequestAttempt(row) && (row.usageSource !== 'reported'
       || row.billingStatus !== 'settled' || row.requestTokens === null || row.responseTokens === null || row.reservedCreditMilli !== 0))) continue
+    const sourceReportId = item.toolName === 'quality_analyze'
+      ? await cancelledQualityReportId(tx, subject, item, call, result.createdAt, ids) : null
     const previous = history.find(row => payments.every(payment => retiredUsageIds.has(payment.id)) && row.type === 'review.reconciled' && object(row.payload).callId === item.callId
-      && object(object(row.payload).receipt).status === 'cancelled_review_billing_exempt'
+      && cancelledStatus(object(object(row.payload).receipt).status)
       && object(object(row.payload).receipt).sourceResultId === result.id && object(object(row.payload).receipt).sourceStopEventId === stop.id)
     const receipt = object(object(previous?.payload).receipt)
     retired.push({ ...item, persisted: Boolean(previous), retirement: {
-      status: 'cancelled_review_billing_exempt', sourceRunId: call.runId, sourceResultId: result.id, sourceReportId: null,
+      status: payments.filter(row => row.action === primary && !isKnownRejectedTextRequestAttempt(row)).length === 1
+        && payments.every(row => exemptUsage(row) || isKnownRejectedTextRequestAttempt(row)) ? 'cancelled_review_billing_exempt' : 'cancelled_review',
+      sourceRunId: call.runId, sourceResultId: result.id, sourceReportId,
       sourceStopEventId: stop.id, sourceCallId: item.callId, usageOutcome: 'unknown_preserved', usageIds: payments.map(row => row.id),
       admissionId: typeof receipt.admissionId === 'string' ? receipt.admissionId : admission.id,
       currentRevision: chapter.revision, currentContentHash: createHash('sha256').update(chapter.content).digest('hex'),

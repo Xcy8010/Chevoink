@@ -6,7 +6,7 @@ import { prepareStoryCompilation } from '../../api/lib/agent/story-compiler.js'
 import { readCancelledReviewRetirements } from '../../api/lib/agent/cancelled-review-recovery.js'
 
 describe.runIf(available)('author-exempt cancelled reviewer execution lock', () => {
-  it.each(['eligible', 'quality', 'new-body', 'audit-already-persisted', 'no-author', 'not-user-stop', 'wrong-summary', 'missing-result',
+  it.each(['eligible', 'quality', 'paid', 'paid-quality', 'paid-format', 'paid-evidence', 'new-body', 'audit-already-persisted', 'no-author', 'not-user-stop', 'wrong-summary', 'missing-result',
     'duplicate-call', 'wrong-chapter', 'wrong-compilation', 'out-of-scope', 'native', 'charged', 'reserved', 'possible-charge',
     'missing-snapshot', 'frozen-charge', 'wrong-tier', 'pending-billing', 'pending-settlement', 'repair-action', 'other-unknown', 'overlap',
     'previous-retired', 'previous-retired-charged', 'previous-retired-missing-audit',
@@ -19,7 +19,8 @@ describe.runIf(available)('author-exempt cancelled reviewer execution lock', () 
         if (scenario === 'out-of-scope') await prisma.agentRun.update({ where: { id: f.runId }, data: {
           taskSpec: JSON.parse(JSON.stringify({ ...f.spec, scope: { ...f.spec.scope, writing: { version: 1, kind: 'bounded', targets: [{ orderIndex: 99, chapterId: null }] } } })) } })
         const start = new Date(Date.now() + 5000), end = new Date(start.getTime() + 1000)
-        const toolName = scenario === 'quality' ? 'quality_analyze' as const : 'continuity_validate' as const
+        const paid = scenario.startsWith('paid')
+        const toolName = scenario === 'quality' || scenario === 'paid-quality' ? 'quality_analyze' as const : 'continuity_validate' as const
         const family = toolName === 'quality_analyze' ? 'agent3Humanity' : 'agent3Continuity'
         const pending = { callId: 'cancelled-check', compilationId: compilation.id, chapterId: f.chapterId, revision: 1, toolName }
         await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'tool.call', createdAt: start,
@@ -33,11 +34,12 @@ describe.runIf(available)('author-exempt cancelled reviewer execution lock', () 
           payload: { authorContinue: { eventId: stop.id, afterSeq: 3 } } } })
         const usage = await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, chapterId: f.chapterId,
           targetType: 'story_compilation', targetId: compilation.id, providerType: 'text', providerMode: 'custom', modelName: 'isolated-no-provider', modelTier: 'speed',
-          action: scenario === 'repair-action' ? `${family}Repair` : `${family}Critic`, requestTokens: null, responseTokens: null, usageSource: 'unknown',
-          multiplierBps: scenario === 'possible-charge' ? 1 : 0, creditChargeMilli: scenario === 'charged' ? 1 : 0,
-          reservedCreditMilli: scenario === 'reserved' ? 1 : 0,
-          billingStatus: scenario === 'pending-billing' ? 'pending_usage' : scenario === 'pending-settlement' ? 'pending_settlement' : 'settled',
-          ...(scenario === 'missing-snapshot' ? {} : { billingSnapshot: { version: 'credits-v1-exact', multiplierBps: scenario === 'frozen-charge' ? 1 : 0,
+          action: scenario === 'repair-action' ? `${family}Repair` : scenario === 'paid-format' ? `${family}FormatRecovery`
+            : scenario === 'paid-evidence' ? `${family}EvidenceCorrection` : `${family}Critic`, requestTokens: null, responseTokens: null, usageSource: 'unknown',
+          multiplierBps: paid ? 10000 : scenario === 'possible-charge' ? 1 : 0, creditChargeMilli: scenario === 'charged' ? 1 : 0,
+          reservedCreditMilli: paid ? 16384 : scenario === 'reserved' ? 1 : 0,
+          billingStatus: paid || scenario === 'pending-billing' ? 'pending_usage' : scenario === 'pending-settlement' ? 'pending_settlement' : 'settled',
+          ...(scenario === 'missing-snapshot' ? {} : { billingSnapshot: { version: 'credits-v1-exact', multiplierBps: paid ? 10000 : scenario === 'frozen-charge' ? 1 : 0,
             modelTier: scenario === 'wrong-tier' ? 'other' : 'speed' } }),
           durationMs: 0, createdAt: new Date(start.getTime() + 100) } })
         const rejected = scenario.startsWith('rejected-extra') ? await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId,
@@ -83,10 +85,12 @@ describe.runIf(available)('author-exempt cancelled reviewer execution lock', () 
               sourceResultId: result!.id, sourceStopEventId: stop.id, sourceReportId: null, usageIds: currentUsageIds, admissionId: `author-continue:${stop.id}`,
               currentRevision: 1, currentContentHash: createHash('sha256').update('原文').digest('hex') } } } })
         const recovered = await read()
-        expect(recovered).toHaveLength(['eligible', 'quality', 'new-body', 'audit-already-persisted', 'previous-retired', 'rejected-extra', 'rejected-extra-persisted'].includes(scenario) ? 1 : 0)
+        expect(recovered).toHaveLength(['eligible', 'quality', 'paid', 'paid-quality', 'paid-format', 'paid-evidence', 'pending-billing', 'pending-settlement',
+          'new-body', 'audit-already-persisted', 'previous-retired', 'rejected-extra', 'rejected-extra-persisted'].includes(scenario) ? 1 : 0)
         if (recovered.length) {
           expect(recovered[0]).toMatchObject({ ...pending, persisted, retirement: {
-            status: 'cancelled_review_billing_exempt', sourceCallId: pending.callId, sourceStopEventId: stop.id, usageIds: rejected ? expect.arrayContaining(currentUsageIds) : currentUsageIds, usageOutcome: 'unknown_preserved',
+            status: paid || ['pending-billing', 'pending-settlement'].includes(scenario) ? 'cancelled_review' : 'cancelled_review_billing_exempt',
+            sourceCallId: pending.callId, sourceStopEventId: stop.id, usageIds: rejected ? expect.arrayContaining(currentUsageIds) : currentUsageIds, usageOutcome: 'unknown_preserved',
             currentRevision: scenario === 'new-body' ? 2 : 1 } })
           expect(recovered[0].retirement.usageIds).toHaveLength(currentUsageIds.length)
           if (persisted) expect(recovered[0].retirement.admissionId).toBe(`author-continue:${stop.id}`)

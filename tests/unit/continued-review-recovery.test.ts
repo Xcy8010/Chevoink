@@ -64,6 +64,61 @@ function fixture(toolName: 'quality_analyze' | 'continuity_validate' = 'quality_
     snapshot: () => JSON.stringify({ run, events, usage, reports, compilation }) }
 }
 beforeEach(() => { vi.clearAllMocks(); mocks.rules = 'full rules' })
+describe('cancelled quality format recovery admission', () => {
+  function cancelledFixture(legacy = false) {
+    const f = fixture()
+    f.pending.revision = f.chapter.revision
+    Object.assign((f.events[1].payload as Row), { failureCode: 'UNEXPECTED_TOOL_ERROR', summary: '已中断' })
+    Object.assign((f.events[2].payload as Row), { reason: 'user_stop' })
+    if (!legacy) f.usage[0].action = 'agent3HumanityFormatRecovery'
+    else Object.assign(f.usage[0], { modelTier: 'standard', multiplierBps: 0, creditChargeMilli: 0, reservedCreditMilli: 0, billingStatus: 'settled',
+      billingSnapshot: { version: 'credits-v1-exact', modelTier: 'standard', multiplierBps: 0 } })
+    const report = { id: 'failed-format-report', userId: 'owner', novelId: 'novel', runId: 'run', chapterId: 'chapter',
+      compilationId: 'comp', chapterRevision: f.chapter.revision, status: 'failed', createdAt: new Date(legacy ? 2500 : 500), updatedAt: new Date(2500),
+      deterministicMetrics: { independentCheck: 'unavailable', criticResponse: { callId: legacy ? 'oldCall' : 'earlier-critic' },
+        formatRecovery: { version: 1, state: 'claimed', key: 'old-format', taskId: 'task', reportId: 'failed-format-report',
+          chapterId: 'chapter', chapterRevision: f.chapter.revision, compilationId: 'comp', claimRunId: 'run', claimedAt: new Date(1500).toISOString() },
+        autoRepairAttempted: true } }
+    f.reports.push(report)
+    const receipt = { status: legacy ? 'cancelled_review_billing_exempt' : 'cancelled_review', usageOutcome: 'unknown_preserved',
+      sourceRunId: 'run', sourceCallId: 'oldCall', sourceResultId: 'old-result', sourceStopEventId: 'pause', sourceReportId: report.id,
+      usageIds: ['unknown'], admissionId: 'author-continue:pause', currentRevision: f.chapter.revision,
+      currentContentHash: createHash('sha256').update(f.chapter.content).digest('hex') }
+    const payload = { callId: 'oldCall', chapterId: 'chapter', revision: f.chapter.revision, compilationId: 'comp', receipt }
+    f.events.push({ id: 'cancelled-audit', runId: 'run', seq: 5, type: 'review.reconciled', createdAt: new Date(6000), payload })
+    return { ...f, report, receipt, payload }
+  }
+  it.each([false, true])('author Continue permits a fresh critic while preserving the old failed report and recovery claim; legacy=%s', async legacy => {
+    const f = cancelledFixture(legacy), before = f.snapshot()
+    expect(await hasReconciledQualityRequest(f.tx, f.subject, f.report)).toBe(true)
+    expect(f.snapshot()).toBe(before)
+    expect(f.report.status).toBe('failed')
+    expect(f.report.deterministicMetrics.formatRecovery.state).toBe('claimed')
+    expect(f.report.deterministicMetrics.autoRepairAttempted).toBe(true)
+    expect(f.db.aiUsageLog.update).not.toHaveBeenCalled()
+    expect(f.db.chapterQualityReport.update).not.toHaveBeenCalled()
+  })
+  it.each(['no-author', 'no-continue', 'no-user-stop', 'wrong-report', 'wrong-chapter', 'wrong-revision', 'wrong-compilation',
+    'wrong-admission', 'unknown-without-cancel', 'unauthenticated-usage', 'extra-usage', 'claimed-elsewhere'] as const)(
+    '%s does not bypass the failed-report gate', async scenario => {
+      const f = cancelledFixture()
+      if (scenario === 'no-author') mocks.admission = null
+      if (scenario === 'no-continue') f.events.splice(3, 1)
+      if (scenario === 'no-user-stop') (f.events[2].payload as Row).reason = 'budget'
+      if (scenario === 'wrong-report') f.receipt.sourceReportId = 'another-report'
+      if (scenario === 'wrong-chapter') f.payload.chapterId = 'another-chapter'
+      if (scenario === 'wrong-revision') f.receipt.currentRevision++
+      if (scenario === 'wrong-compilation') f.payload.compilationId = 'another-compilation'
+      if (scenario === 'wrong-admission') f.receipt.admissionId = 'author-continue:other'
+      if (scenario === 'unknown-without-cancel') (f.events[1].payload as Row).failureCode = 'AI_PROVIDER_TRANSPORT'
+      if (scenario === 'unauthenticated-usage') f.receipt.usageIds = ['unrelated']
+      if (scenario === 'extra-usage') f.receipt.usageIds.push('unrelated')
+      if (scenario === 'claimed-elsewhere') f.report.deterministicMetrics.formatRecovery.claimRunId = 'other-run'
+      const before = f.snapshot()
+      expect(await hasReconciledQualityRequest(f.tx, f.subject, f.report)).toBe(false)
+      expect(f.snapshot()).toBe(before)
+    })
+})
 describe('ordinary Continue review retirement', () => {
   it('preserves a historic retirement but cannot dispatch from a changed quality prompt context', async () => {
     const f = fixture(), [original] = await f.read()
@@ -162,7 +217,7 @@ describe('ordinary Continue review retirement', () => {
     expect(f.usage.map(row => row.reservedCreditMilli)).toEqual([18023, 18023])
   })
   it('permits a fresh quality tool only for the exact prior failed report; it never resets its format claim', async () => {
-    const f = fixture(), report = { id: 'failed-report', userId: 'owner', novelId: 'novel', runId: 'run', chapterId: 'chapter', chapterRevision: 3,
+    const f = fixture(), report = { id: 'failed-report', userId: 'owner', novelId: 'novel', runId: 'run', chapterId: 'chapter', chapterRevision: 3, compilationId: 'comp',
       status: 'failed', createdAt: new Date(2500), deterministicMetrics: { criticResponse: { callId: 'oldCall' }, formatRecovery: { state: 'claimed', key: 'old-format' } } }
     f.reports.push(report)
     const [first] = await f.read(); f.persist(first)

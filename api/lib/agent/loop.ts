@@ -1277,7 +1277,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const retired = await prisma.$transaction(tx => readCancelledReviewRetirements(tx,
         { userId: params.userId, novelId: params.novelId, runId }, [...pendingReviews.values()]))
       for (const item of retired) {
-        // Only the cancelled author-exempt execution lock is retired. Usage is
+        // Only the cancelled execution lock is retired. Usage is
         // still unknown; no returned response, progress or assessment is signed.
         if (!item.persisted) {
           bus.emit({ type: 'review.reconciled', callId: item.callId, chapterId: item.chapterId,

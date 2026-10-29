@@ -9,18 +9,21 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { legacyContinuityAssessmentKey, type LegacyAssessmentInput } from '../../api/lib/agent/assessment-response-lifecycle.js'
 import { readContinuityRequestBilling } from '../../api/lib/agent/continuity-review.js'
 import * as recovery from '../../api/lib/agent/review-request-recovery.js'
+import * as retirements from '../../api/lib/agent/cancelled-review-recovery.js'
 
 afterEach(() => vi.restoreAllMocks())
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 describe('continued tasks retain physical unknowns and original historical CAS evidence', () => {
-  it.each(['first', 'paid-without-stage', 'unknown', 'claimed-correction', 'unsent-without-witness'] as const)('reads only physical accounting for %s without inventing a phase', async scenario => {
+  it.each(['first', 'paid-without-stage', 'unknown', 'author-cancelled', 'claimed-correction', 'unsent-without-witness'] as const)('keeps current accounting scoped for %s without rewriting unknown rows', async scenario => {
     const ctx = { userId: 'user', novelId: 'novel', runId: 'run', callId: 'original' } as ToolContext
     const input: LegacyAssessmentInput = { chapterId: 'chapter', revision: 4, bodies: { current: 'The packet remains sealed.', previous: null },
       targetType: 'story_compilation', targetId: 'compilation', system: 'Frozen reviewer.', content: 'Frozen original request.' }
-    const fees = scenario === 'unknown' || scenario === 'paid-without-stage' ? [{ id: 'old-fee', billingStatus: scenario === 'unknown' ? 'pending_usage' : 'settled',
-      usageSource: scenario === 'unknown' ? 'unknown' : 'reported', requestTokens: scenario === 'unknown' ? null : 12, responseTokens: scenario === 'unknown' ? null : 8,
-      creditChargeMilli: scenario === 'unknown' ? 0 : 23, reservedCreditMilli: scenario === 'unknown' ? 17 : 0 }] : []
+    const unknown = scenario === 'unknown' || scenario === 'author-cancelled'
+    const fees = unknown || scenario === 'paid-without-stage' ? [{ id: 'old-fee', billingStatus: unknown ? 'pending_usage' : 'settled',
+      usageSource: unknown ? 'unknown' : 'reported', requestTokens: unknown ? null : 12, responseTokens: unknown ? null : 8,
+      creditChargeMilli: unknown ? 0 : 23, reservedCreditMilli: unknown ? 17 : 0 }] : []
+    vi.spyOn(retirements, 'readRetiredReviewUsageIds').mockResolvedValue(new Set(scenario === 'author-cancelled' ? ['old-fee'] : []))
     const rows = scenario === 'claimed-correction' ? [{ id: 'old-correction', runId: ctx.runId, metadata: { evidenceCorrectionKey: 'original-correction',
       state: 'claimed', chapterId: input.chapterId, revision: input.revision, callId: ctx.callId, targetType: input.targetType, targetId: input.targetId, usageIds: ['missing-fee'] } }]
       : scenario === 'unsent-without-witness' ? [{ id: 'old-reservation', runId: ctx.runId, metadata: { continuityAssessmentRequestKey: legacyContinuityAssessmentKey(ctx, input),
@@ -31,7 +34,8 @@ describe('continued tasks retain physical unknowns and original historical CAS e
       aiUsageLog: { findMany: vi.fn(async () => fees) } }
     const before = JSON.stringify({ rows, fees })
     expect(await readContinuityRequestBilling(db as unknown as Prisma.TransactionClient, ctx, { runIds: ['run'], chapter: { id: input.chapterId } }))
-      .toMatchObject({ known: scenario === 'first' || scenario === 'paid-without-stage' })
+      .toMatchObject({ known: scenario === 'first' || scenario === 'paid-without-stage' || scenario === 'author-cancelled',
+        ...(scenario === 'author-cancelled' ? { retiredUsageIds: ['old-fee'], usageIds: [], hasRequest: true } : {}) })
     expect(recover).toHaveBeenCalledTimes(scenario === 'claimed-correction' || scenario === 'unsent-without-witness' ? 1 : 0)
     expect(db.agentArtifact.create).not.toHaveBeenCalled()
     expect(JSON.stringify({ rows, fees })).toBe(before)

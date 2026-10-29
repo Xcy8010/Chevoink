@@ -14,6 +14,7 @@ import * as guard from '../../api/lib/agent/chapter-review-guard.js'
 import * as mutation from '../../api/lib/agent/tools/chapter-mutation.js'
 import * as internal from '../../api/lib/data/internal.js'
 import * as flags from '../../api/lib/agent2-feature-flags.js'
+import * as retirements from '../../api/lib/agent/cancelled-review-recovery.js'
 import * as reviewCompletion from '../../api/lib/agent/review-completion.js'
 import * as auxiliaryRuntime from '../../api/lib/agent/runtime-auxiliary-call.js'
 import * as ai from '../../api/lib/ai-service.js'
@@ -100,11 +101,11 @@ describe('continuity accounting stays native when legacy usage is empty', () => 
       agentArtifact: { findMany: vi.fn().mockResolvedValue([]) }, creditLedgerEntry: { findUnique: vi.fn().mockResolvedValue(charge) } } as unknown as Prisma.TransactionClient
   }
   it.each(['succeeded', 'failed'] as const)('recognizes a fully settled %s receipt without new settlement', async status => {
-    const value = await readContinuityRequestBilling(db(nativeFee(status)), { userId: 'u', novelId: 'n' }, { runIds: ['r'], chapter: { id: 'c' } })
+    const value = await readContinuityRequestBilling(db(nativeFee(status)), { userId: 'u', novelId: 'n', runId: 'r' }, { runIds: ['r'], chapter: { id: 'c' } })
     expect(value).toEqual({ known: true, hasRequest: true, usageIds: [], nativeReceiptIds: ['attempt'] })
   })
   it('does not infer zero charge from no AiUsageLog when native transport remains unknown', async () => {
-    expect(await readContinuityRequestBilling(db(nativeFee('unknown'), null), { userId: 'u', novelId: 'n' }, { runIds: ['r'], chapter: { id: 'c' } })).toMatchObject({ known: false, hasRequest: true })
+    expect(await readContinuityRequestBilling(db(nativeFee('unknown'), null), { userId: 'u', novelId: 'n', runId: 'r' }, { runIds: ['r'], chapter: { id: 'c' } })).toMatchObject({ known: false, hasRequest: true })
   })
   it.each(['operation-only', 'prepared-attempt'] as const)('recognizes actual unsent native %s without inventing settlement', async kind => {
     const op = nativeFee('unknown') as unknown as { status: string; attempts: Array<Record<string, unknown>>; events: unknown[] }
@@ -112,35 +113,36 @@ describe('continuity accounting stays native when legacy usage is empty', () => 
     if (kind === 'operation-only') op.attempts = []
     else Object.assign(op.attempts[0], { status: 'prepared', dispatchedAt: null, result: null, resultHash: null, usageReceipt: null })
     const store = db(op as unknown as ReturnType<typeof nativeFee>, null)
-    expect(await readContinuityRequestBilling(store, { userId: 'u', novelId: 'n' }, { runIds: ['r'], chapter: { id: 'c' } }))
+    expect(await readContinuityRequestBilling(store, { userId: 'u', novelId: 'n', runId: 'r' }, { runIds: ['r'], chapter: { id: 'c' } }))
       .toEqual({ known: true, hasRequest: true, usageIds: [], nativeReceiptIds: [] })
     expect(store.creditLedgerEntry.findUnique).toHaveBeenCalledWith({ where: { idempotencyKey: 'operation:op' } })
     if (kind === 'prepared-attempt') {
       op.attempts[0].dispatchedAt = new Date()
-      expect(await readContinuityRequestBilling(store, { userId: 'u', novelId: 'n' }, { runIds: ['r'], chapter: { id: 'c' } })).toMatchObject({ known: false })
+      expect(await readContinuityRequestBilling(store, { userId: 'u', novelId: 'n', runId: 'r' }, { runIds: ['r'], chapter: { id: 'c' } })).toMatchObject({ known: false })
     }
   })
   it('recognizes the actual not-dispatched receipt while preserving a pending usage contradiction', async () => {
     const op = nativeFee('cancelled')
-    expect(await readContinuityRequestBilling(db(op, null), { userId: 'u', novelId: 'n' }, { runIds: ['r'], chapter: { id: 'c' } })).toMatchObject({ known: true })
+    expect(await readContinuityRequestBilling(db(op, null), { userId: 'u', novelId: 'n', runId: 'r' }, { runIds: ['r'], chapter: { id: 'c' } })).toMatchObject({ known: true })
     op.attempts[0].usageReceipt = nativeFee().attempts[0].usageReceipt
-    expect(await readContinuityRequestBilling(db(op, null), { userId: 'u', novelId: 'n' }, { runIds: ['r'], chapter: { id: 'c' } })).toMatchObject({ known: false })
+    expect(await readContinuityRequestBilling(db(op, null), { userId: 'u', novelId: 'n', runId: 'r' }, { runIds: ['r'], chapter: { id: 'c' } })).toMatchObject({ known: false })
   })
   it('accepts a producer-confirmed HTTP rejection but does not treat quota/partial accounting as zero', async () => {
     const rejected = nativeFee('failed', 401); rejected.attempts[0].usageReceipt = null
-    expect(await readContinuityRequestBilling(db(rejected, null), { userId: 'u', novelId: 'n' }, { runIds: ['r'], chapter: { id: 'c' } })).toMatchObject({ known: true })
+    expect(await readContinuityRequestBilling(db(rejected, null), { userId: 'u', novelId: 'n', runId: 'r' }, { runIds: ['r'], chapter: { id: 'c' } })).toMatchObject({ known: true })
     const quota = nativeFee('failed', 429); quota.attempts[0].usageReceipt!.settlementStatus = 'pending'
-    expect(await readContinuityRequestBilling(db(quota, null), { userId: 'u', novelId: 'n' }, { runIds: ['r'], chapter: { id: 'c' } })).toMatchObject({ known: false })
+    expect(await readContinuityRequestBilling(db(quota, null), { userId: 'u', novelId: 'n', runId: 'r' }, { runIds: ['r'], chapter: { id: 'c' } })).toMatchObject({ known: false })
   })
   it.each(['usage', 'result', 'ledger'] as const)('rejects an unmatched native %s receipt', async changed => {
     const op = nativeFee()
     if (changed === 'usage') op.attempts[0].usageReceipt!.observationHash = '0'.repeat(64)
     if (changed === 'result') op.attempts[0].resultHash = '0'.repeat(64)
-    expect(await readContinuityRequestBilling(db(op, changed === 'ledger' ? null : { id: 'ledger' }), { userId: 'u', novelId: 'n' }, { runIds: ['r'], chapter: { id: 'c' } })).toMatchObject({ known: false })
+    expect(await readContinuityRequestBilling(db(op, changed === 'ledger' ? null : { id: 'ledger' }), { userId: 'u', novelId: 'n', runId: 'r' }, { runIds: ['r'], chapter: { id: 'c' } })).toMatchObject({ known: false })
   })
 })
 
 function runnerFixture() {
+  vi.spyOn(retirements, 'readRetiredReviewUsageIds').mockResolvedValue(new Set())
   const chapter = { id: 'c', authorId: 'u', novelId: 'n', title: '合成章', revision: 4, content: body, orderIndex: 1 }
   const compilation = { id: 'comp', userId: 'u', novelId: 'n', runId: 'r', chapterId: 'c', status: 'active', validation: {} as Record<string, unknown> }
   const artifacts = new Map<string, Record<string, unknown>>()
@@ -181,6 +183,41 @@ function runnerFixture() {
 }
 
 describe('known failure recovery preserves report and paid evidence', () => {
+  it.each([true, false])('runs a fresh check after a cancelled unknown report (old complete=%s), without laundering its raw or repair receipt', async complete => {
+    const f = runnerFixture()
+    await reviewContinuity(f.ctx, { compilationId: 'comp' }, { dispatch: f.dispatch(() => JSON.stringify({ findings: [opinion()] })), allowRepair: false })
+    Object.assign(f.fees[0], { usageSource: 'unknown', billingStatus: 'pending_usage', requestTokens: null, responseTokens: null, reservedCreditMilli: 99 })
+    Object.assign(f.report(), { complete, billingKnown: false, repairAttempted: true, repairResult: { output: '原修订回执，不能作为新检查结果' } })
+    const { history: oldHistory, ...oldReport } = structuredClone(f.report()), oldFee = structuredClone(f.fees[0])
+    vi.spyOn(retirements, 'readRetiredReviewUsageIds').mockResolvedValue(new Set(['fee1']))
+    const raw = JSON.stringify({ findings: [{ ...opinion(), explanation: '新检查保留的实际问题' }] })
+    const dispatch = f.dispatch(() => raw)
+    await expect(reviewContinuity({ ...f.ctx, callId: 'author-resumed-check' }, { compilationId: 'comp' }, { dispatch, allowRepair: true }))
+      .resolves.toMatchObject({ reviewCompleted: true })
+    expect(f.requests).toEqual(['agent3ContinuityCritic', 'agent3ContinuityCritic'])
+    expect(f.report()).toMatchObject({ complete: true, billingKnown: true, usageIds: ['fee2'], rawResponses: [raw], repairAttempted: true })
+    expect(f.report().opinions[0].explanation).toBe('新检查保留的实际问题')
+    expect(f.report().repairResult).toBeUndefined()
+    expect(f.report().history?.at(-1)).toMatchObject(oldReport)
+    expect(f.report().history?.slice(0, -1)).toEqual(oldHistory ?? [])
+    expect(f.fees[0]).toEqual(oldFee)
+    const before = structuredClone(f.report())
+    await reviewContinuity({ ...f.ctx, callId: 'repeat-current-check' }, { compilationId: 'comp' }, { dispatch, allowRepair: true })
+    expect(f.requests).toHaveLength(2)
+    expect(f.report()).toEqual(before)
+  })
+
+  it('does not let a retirement for an earlier call authorize a later unknown request', async () => {
+    const f = runnerFixture()
+    f.fees.push({ id: 'old-cancelled', usageSource: 'unknown', billingStatus: 'pending_usage', requestTokens: null, responseTokens: null, reservedCreditMilli: 10 },
+      { id: 'later-unknown', usageSource: 'unknown', billingStatus: 'pending_usage', requestTokens: null, responseTokens: null, reservedCreditMilli: 20 })
+    vi.spyOn(retirements, 'readRetiredReviewUsageIds').mockResolvedValue(new Set(['old-cancelled']))
+    await expect(reviewContinuity(f.ctx, { compilationId: 'comp' }, { dispatch: f.dispatch(() => '{"findings":[]}'), allowRepair: false }))
+      .rejects.toMatchObject({ code: 'AI_PROVIDER_BILLING_UNCONFIRMED' })
+    expect(f.requests).toHaveLength(0)
+    expect(f.fees.map(row => row.reservedCreditMilli)).toEqual([10, 20])
+  })
+
   it('runs the real legacy adapter with the admitted model and current evidence packet', async () => {
     const f = runnerFixture()
     f.ctx.modelRuntime = { tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',

@@ -6,7 +6,7 @@ afterEach(cleanup)
 it.each(['检查正在等待原请求确认，正文和已完成的检查已保留。', '检查正在等待原请求的结果或用量确认。正文和已完成的检查已保留。'])(
   'makes live and restored receipt waits visible: %s', summary => {
     const view = render(<AgentRunPauseNotice phase="paused" summary={summary} />)
-    expect(screen.getByRole('status').textContent).toContain('继续暂未恢复')
+    expect(screen.getByRole('status').textContent).toBe('上次检查尚未完成，正文和进度已保留。')
     view.rerender(<AgentRunPauseNotice phase="running" summary={summary} />)
     expect(screen.queryByRole('status')).toBeNull()
   })

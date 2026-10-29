@@ -118,6 +118,41 @@ describe('current committed manuscript wrap-up', () => {
     expect(delivery).not.toBeNull()
     return { f, delivery: delivery! }
   }
+  it('adds verified completion identity before a plot-only summary without generating another response', async () => {
+    const { f, delivery } = await current()
+    const chapterBefore = structuredClone(f.chapter)
+    const summary = '阿岚停在半开的闸门前，等待守闸人的回答。'
+    const text = completedWritingPresentationText(delivery, summary)
+    expect(text).toBe(`已完成第3章《河岸》。\n\n${summary}`)
+    expect(completedWritingPresentationText(delivery, text)).toBe(text)
+    expect(text).not.toContain('章节终态')
+    expect(text).not.toContain('检查')
+    expect(f.chapter).toEqual(chapterBefore)
+    expect(mocks.save).not.toHaveBeenCalled()
+  })
+  it('uses current position rather than an obsolete number in the stored title', async () => {
+    const { delivery } = await current()
+    delivery.chapters[0].title = '第十九章 河岸'
+    expect(completedWritingPresentationText(delivery, '')).toBe('已完成第3章《河岸》。')
+  })
+  it('names every verified chapter when several completed chapters share a title', async () => {
+    const { delivery } = await current()
+    delivery.chapters.push({ ...delivery.chapters[0], id: 'other-chapter', orderIndex: 4 })
+    expect(completedWritingPresentationText(delivery, '人物仍在等待。')).toBe('已完成第3章《河岸》、第4章《河岸》。\n\n人物仍在等待。')
+  })
+  it.each(['empty-body', 'missing-commit', 'uncommitted', 'stale-revision', 'other-task'] as const)('cannot present completion for %s evidence', async invalid => {
+    const f = await fixture('完成第一章，简要总结。', false)
+    if (invalid === 'empty-body') f.chapter.content = ' '
+    if (invalid === 'missing-commit') f.terminal.stage = 'quality'
+    if (invalid === 'uncommitted') f.terminal.bridge.committedAt = null as never
+    if (invalid === 'stale-revision') f.terminal.bridge.targetRevision = 2
+    if (invalid === 'other-task') f.mocks.storyCompilation.findFirst.mockImplementation(async (...args: unknown[]) => {
+      expect(args[0]).toMatchObject({ where: { runId: { in: ['run'] }, chapterId: 'chapter' } })
+      return null as never
+    })
+    expect(await readCompletedWritingPresentation(f.db, subject)).toBeNull()
+    expect(mocks.save).not.toHaveBeenCalled()
+  })
   it.each([['「', '」'], ['“', '”'], ['‘', '’'], ['『', '』'], ['`', '`'], ['"', '"'], ["'", "'"]])('omits stale manuscript quotation %s without erasing supported commentary', async (open, close) => {
     const { delivery } = await current()
     const text = completedWritingPresentationText(delivery,
@@ -205,7 +240,7 @@ describe('current committed manuscript wrap-up', () => {
   it('removes correct-version and terminal metadata clauses while preserving literary r6 text and exact saved delivery', async () => {
     const { delivery } = await current()
     const text = completedWritingPresentationText(delivery, '第3章已提交r6。章节终态已提交。当前稿是r6。\n\n人物在r6房间等待回答，停顿更克制。')
-    expect(text).toBe('人物在r6房间等待回答，停顿更克制。')
+    expect(text).toBe('已完成第3章《河岸》。\n\n人物在r6房间等待回答，停顿更克制。')
     delivery.titleAndBodyOnly = true
     delivery.text = `标题r6\n\n${delivery.chapters[0].content}\n章节终态已提交。\n\n\`r6\``
     expect(completedWritingPresentationText(delivery, '章节终态已提交。')).toBe(delivery.text)
@@ -214,7 +249,7 @@ describe('current committed manuscript wrap-up', () => {
     const { delivery } = await current()
     const recap = '阿岚停在半开的闸门前，等待守闸人的回答。'
     const text = completedWritingPresentationText(delivery, `已保存《第三章 河岸》${open}r6${separator}3541 字${close}。${recap}`)
-    expect(text).toBe(`已保存《第三章 河岸》${open}3541 字${close}。${recap}`)
+    expect(text).toBe(`已完成第3章《河岸》。\n\n已保存《第三章 河岸》${open}3541 字${close}。${recap}`)
     expect(completedWritingPresentationText(delivery, text)).toBe(text)
     expect(text).not.toMatch(/^3541/u)
   })
@@ -222,7 +257,7 @@ describe('current committed manuscript wrap-up', () => {
     const { delivery } = await current()
     delivery.chapters[0].title = 'r6 房间'
     const text = completedWritingPresentationText(delivery, '已保存《r6 房间》（r6，3541 字）。人物仍在门外等待。')
-    expect(text).toBe('已保存《r6 房间》（3541 字）。人物仍在门外等待。')
+    expect(text).toBe('已完成第3章《r6 房间》。\n\n已保存《r6 房间》（3541 字）。人物仍在门外等待。')
     expect(completedWritingPresentationText(delivery, text)).toBe(text)
   })
 
@@ -230,23 +265,23 @@ describe('current committed manuscript wrap-up', () => {
     const { delivery } = await current()
     const text = completedWritingPresentationText(delivery,
       '阿岚仍在等待回答，章节终态已提交（r6，3541 字）。守闸人的沉默留下悬念。')
-    expect(text).toBe('阿岚仍在等待回答。守闸人的沉默留下悬念。')
+    expect(text).toBe('已完成第3章《河岸》。\n\n阿岚仍在等待回答。守闸人的沉默留下悬念。')
     expect(completedWritingPresentationText(delivery, text)).toBe(text)
   })
   it('keeps nested parenthetical plot details and literal commas in verified quotations', async () => {
     const { delivery } = await current()
     delivery.chapters[0].content += '屏幕提示：已保存（r6，3541 字）。'
     const text = '人物的停顿（包括等待（半尺，未动）的过程）仍然克制。正文保留“已保存（r6，3541 字）”。'
-    expect(completedWritingPresentationText(delivery, text)).toBe(text)
+    expect(completedWritingPresentationText(delivery, text)).toBe(`已完成第3章《河岸》。\n\n${text}`)
   })
 
   it('preserves verified manuscript block quotes and paragraph boundaries, but removes metadata-only quoted versions', async () => {
     const { delivery } = await current()
     delivery.chapters[0].content += '\n屏幕显示：章节终态已提交。'
     const quote = '> 章节终态已提交。\n\n保留屏幕上的提示。\n\n人物的犹豫仍然清楚。'
-    expect(completedWritingPresentationText(delivery, quote)).toBe(quote)
-    expect(completedWritingPresentationText(delivery, '第3章已提交`r6`。\n\n人物的犹豫仍然清楚。')).toBe('人物的犹豫仍然清楚。')
-    expect(completedWritingPresentationText(delivery, '当前稿是“r6”。\n\n人物的犹豫仍然清楚。')).toBe('人物的犹豫仍然清楚。')
+    expect(completedWritingPresentationText(delivery, quote)).toBe(`已完成第3章《河岸》。\n\n${quote}`)
+    expect(completedWritingPresentationText(delivery, '第3章已提交`r6`。\n\n人物的犹豫仍然清楚。')).toBe('已完成第3章《河岸》。\n\n人物的犹豫仍然清楚。')
+    expect(completedWritingPresentationText(delivery, '当前稿是“r6”。\n\n人物的犹豫仍然清楚。')).toBe('已完成第3章《河岸》。\n\n人物的犹豫仍然清楚。')
   })
   it('respects no-repeat and explicit full-text display without inventing passed checks', async () => {
     const { delivery } = await current()
@@ -273,8 +308,8 @@ describe('saved artifact display withdrawal', () => {
     const f = await fixture('完成第一章，简要说明结果。', false)
     const delivery = await readCompletedWritingPresentation(f.db, subject)
     expect(delivery).not.toBeNull()
-    expect(completedWritingPresentationText(delivery!, '')).toBe('已完成《第一章 旧罗盘》。')
-    expect(completedWritingPresentationText(delivery!, '人物的决定让机会变得具体。')).toBe('人物的决定让机会变得具体。')
+    expect(completedWritingPresentationText(delivery!, '')).toBe('已完成第1章《旧罗盘》。')
+    expect(completedWritingPresentationText(delivery!, '人物的决定让机会变得具体。')).toBe('已完成第1章《旧罗盘》。\n\n人物的决定让机会变得具体。')
     expect(f.chapter.content).toBe('沈桐眼前浮起价值数字。他压住笑意，决定抓住这个独享的机会。')
   })
   it('keeps a natural wrap-up with a title and short excerpt under a no-repeat preference', async () => {

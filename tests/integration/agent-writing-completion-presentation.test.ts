@@ -80,7 +80,7 @@ describe.skipIf(!available)('current committed writing presentation snapshots', 
     const text = completedWritingPresentationText(delivery!, `已保存《${f.chapter.title}》（r6，3541 字）。正文改为「北岸闸门开了整整一尺」。\n\n结尾保留等待回答的停顿，章节终态已提交。守闸人的沉默留下悬念。`)
     expect(text).not.toContain('整整一尺')
     expect(text).toContain('结尾保留等待回答的停顿。')
-    expect(text).toBe(`已保存《${f.chapter.title}》（3541 字）。\n\n结尾保留等待回答的停顿。守闸人的沉默留下悬念。`)
+    expect(text).toBe(`已完成第3章《${f.chapter.title}》。\n\n已保存《${f.chapter.title}》（3541 字）。\n\n结尾保留等待回答的停顿。守闸人的沉默留下悬念。`)
     expect(completedWritingPresentationText(delivery!, text)).toBe(text)
     expect(text).not.toContain('章节终态已提交')
     expect(text).not.toContain('（r6）')

@@ -18,9 +18,9 @@ export type AgentReviewFailureReconciliation = {
   currentContentHash: string
 }
 
-/** A stopped exempt request stays unknown; retirement does not certify any review. */
+/** A stopped request stays unknown; retirement only releases its execution lock. */
 export type AgentCancelledReviewRetirement = Omit<AgentReviewFailureReconciliation, 'status'> & {
-  status: 'cancelled_review_billing_exempt'
+  status: 'cancelled_review' | 'cancelled_review_billing_exempt'
   sourceStopEventId: string
   sourceCallId: string
   usageOutcome: 'unknown_preserved'
