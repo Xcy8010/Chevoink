@@ -73,7 +73,7 @@ function currentFixture() {
   vi.spyOn(prisma.agentArtifact, 'create').mockImplementation(async ({ data }) => { const row = { ...data, updatedAt: new Date() }; artifacts.set(data.id!, row); return row as never })
   vi.spyOn(prisma.agentArtifact, 'update').mockImplementation(async ({ where, data }) => { const row = { ...artifacts.get(where.id!), ...data, updatedAt: new Date() }; artifacts.set(where.id!, row); return row as never })
   vi.spyOn(prisma.aiUsageLog, 'findMany').mockResolvedValue([])
-  vi.spyOn(prisma.aiUsageLog, 'count').mockResolvedValue(0)
+  const usageCount = vi.spyOn(prisma.aiUsageLog, 'count').mockResolvedValue(0)
   vi.spyOn(prisma.agentOperation, 'findMany').mockResolvedValue([])
   vi.spyOn(prisma, '$transaction').mockImplementation(async work => typeof work === 'function' ? work(prisma) : Promise.all(work) as never)
   const proposal = vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'memory' } as never)
@@ -93,7 +93,7 @@ function currentFixture() {
   const commit = () => commitChapterBridge({ userId: 'u', novelId: 'n', runId: 'r', compilationId: 'comp', chapterSummary: '章节摘要',
     exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }, lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '',
     openingStructure: '动作', endingStructure: '转折', expectedChapterRevision: 2, expectedContentHash: runtimeJson({ content: value.chapter.content }).hash }, prisma)
-  return { ctx, chapter, previous, compilation, origin, run, task, artifacts, dispatch, target, scope, owner, proposal, findCompilation, update, bridgeWrite, scenesWrite, chapterWrite, review, commit }
+  return { ctx, chapter, previous, compilation, origin, run, task, artifacts, dispatch, target, scope, owner, proposal, findCompilation, update, bridgeWrite, scenesWrite, chapterWrite, review, commit, usageCount }
 }
 
 describe('compiler continuity report dependencies', () => {
@@ -168,6 +168,19 @@ describe('compiler continuity report dependencies', () => {
 })
 
 describe('terminal commit gate is independent of paid revision availability', () => {
+  it('commits a reviewed saved manuscript without settling or retrying earlier unknown model requests', async () => {
+    const f = currentFixture()
+    await f.review()
+    f.usageCount.mockResolvedValue(2)
+    const settle = vi.spyOn(prisma.aiUsageLog, 'update')
+    await expect(f.commit()).resolves.toMatchObject({ chapterId: 'c', chapterRevision: 2 })
+    expect(f.bridgeWrite).toHaveBeenCalledOnce()
+    expect(f.scenesWrite).toHaveBeenCalledOnce()
+    expect(f.chapterWrite).not.toHaveBeenCalled()
+    expect(f.dispatch).toHaveBeenCalledOnce()
+    expect(settle).not.toHaveBeenCalled()
+  })
+
   const fixture = async () => {
     const f = currentFixture(), snapshot = await buildContinuitySnapshot(f.ctx, { compilationId: 'comp' })
     const sourceId = snapshot.sources[0].table.entries[0].id.slice(0, 13)

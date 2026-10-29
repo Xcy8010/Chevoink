@@ -26,6 +26,13 @@ function registeredCommitReviews(ctx: ToolContext, lease: RunLeaseToken, parent:
     const state = await withRunLease(lease, async tx => {
       const hash = await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, args.compilationId)
       if (!hash) return runtimeError('COMPILATION_NOT_FOUND', '没有当前任务可检查的章节。')
+      const chapterId = (await tx.storyCompilation.findUniqueOrThrow({ where: { id: args.compilationId }, select: { chapterId: true } })).chapterId!
+      const requestSource = await import('../original-request.js'), original = await requestSource.readOriginalTaskRequest(tx, ctx)
+      const runIds = await requestSource.originalTaskRunIds(tx, ctx, original)
+      // Reconcile before a real review dispatch, including when the body became
+      // stale after the commit's first readiness read. Local delivery needs no call.
+      if (!(await (await import('../continuity-review.js')).readContinuityRequestBilling(tx, ctx, { runIds, chapter: { id: chapterId } }, null)).known)
+        return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原请求用量或费用尚未确认，未追加检查。')
       const children = await tx.agentOperation.findMany({ where: { taskRootId: lease.taskRootId, parentOperationId: parent.operation.id, kind: 'internal' },
         include: { effectReceipt: true }, orderBy: { createdAt: 'asc' } })
       for (const child of children) if (runtimeJson(child.inputSnapshot).hash !== child.inputHash
@@ -39,7 +46,7 @@ function registeredCommitReviews(ctx: ToolContext, lease: RunLeaseToken, parent:
         : readOnly ? 'continuity_verify' as const : 'continuity' as const
       const contextHash = name === 'continuity_validate' ? (await (await import('../continuity-review.js')).buildContinuitySnapshot(ctx, args, tx)).contextHash
         : runtimeJson(JSON.parse(JSON.stringify(await (await import('../humanity-quality.js')).buildHumanityQualityContext(ctx.userId, ctx.novelId,
-          (await tx.storyCompilation.findUniqueOrThrow({ where: { id: args.compilationId }, select: { chapterId: true } })).chapterId!, ctx.runId, tx)))).hash
+          chapterId, ctx.runId, tx)))).hash
       const key = services.writingServiceOperationKey(parent.operation.id, step, contextHash)
       const existing = children.find(child => child.operationKey === key)
       const source = [...children].reverse().find(child => child.status === 'succeeded' && child.effectReceipt && object(object(child.effectReceipt.result).toolResult).outcome !== 'failed')
@@ -116,12 +123,8 @@ export async function executePreparedCompilerWork(ctx: ToolContext, lease: impor
   if (tool.name === 'chapter_bridge_commit' && !await withRunLease(lease, tx => tx.agentEffectReceipt.findUnique({ where: { operationId: operation.id } }))) {
     let unavailableCode = 'CONTINUITY_CHECK_REQUIRED'
     try { await withRunLease(lease, async tx => {
-      const services = await import('../runtime-writing-service.js'), manifest = await services.requiredCommitReviewManifest(tx, ctx,
-        typeof args.compilationId === 'string' ? args.compilationId : undefined)
-      const source = await import('../original-request.js'), original = await source.readOriginalTaskRequest(tx, ctx)
-      const runIds = await source.originalTaskRunIds(tx, ctx, original)
-      if (!(await (await import('../continuity-review.js')).readContinuityRequestBilling(tx, ctx, { runIds, chapter: { id: manifest.chapterId } }, null)).known)
-        return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原请求用量或费用尚未确认，未追加检查。')
+      const services = await import('../runtime-writing-service.js')
+      await services.requiredCommitReviewManifest(tx, ctx, typeof args.compilationId === 'string' ? args.compilationId : undefined)
       const readiness = await (await import('../chapter-review-guard.js')).readChapterReviewReadiness(tx, ctx,
         typeof args.compilationId === 'string' ? args.compilationId : undefined)
       if (readiness?.requiredTools.some(tool => tool.name === 'quality_analyze')) unavailableCode = 'QUALITY_CHECK_REQUIRED'

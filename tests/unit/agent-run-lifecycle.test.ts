@@ -2341,6 +2341,20 @@ describe('BYOK paid-tool isolation', () => {
 })
 
 describe('original task context on resume', () => {
+  it('reports unknown model billing accurately instead of a model outage or a blind retry', async () => {
+    const check = tool('continuity_validate', async () => { throw new DataAccessError(409, 'AI_PROVIDER_BILLING_UNCONFIRMED', '原请求用量或费用尚未确认。') })
+    const outcome = await handleToolCall(call('billing-check', check.name), [check], context(), { emit: mocks.emit }, 'message', 'run')
+    expect(outcome.part).toMatchObject({ status: 'failed', summary: '原模型用量尚未确认' })
+    expect(outcome.failureCode).toBe('AI_PROVIDER_BILLING_UNCONFIRMED')
+    expect(outcome.observation).toContain('先核对原请求回执')
+    expect(outcome.observation).toContain('不重复发起未知的模型请求')
+    expect(outcome.observation).not.toMatch(/模型服务异常|模型响应故障|最多重试一次/)
+    expect(check.execute).toHaveBeenCalledOnce()
+    expect(mocks.chat).not.toHaveBeenCalled()
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', ok: false,
+      failureCode: 'AI_PROVIDER_BILLING_UNCONFIRMED', summary: '原模型用量尚未确认' }))
+  })
+
   it.each([
     ['AI_PROVIDER_EMPTY_RESPONSE', '模型未返回有效内容', false],
     ['AI_PROVIDER_TRANSPORT', '模型连接中断，结果未确认', true],

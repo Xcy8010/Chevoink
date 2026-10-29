@@ -618,6 +618,7 @@ export async function handleToolCall(
     // 错误即观察：不中断 run，把错误回填给模型自行重试或换路
     if (error instanceof DataAccessError && error.code.startsWith('AI_')) {
       const label = error.code === 'AI_PROVIDER_QUOTA_EXCEEDED' ? '供应商模型额度已耗尽'
+        : error.code === 'AI_PROVIDER_BILLING_UNCONFIRMED' ? '原模型用量尚未确认'
         : error.code === 'AI_PROVIDER_TIMEOUT' ? '模型网关超时'
         : error.code === 'AI_PROVIDER_OUTPUT_LIMIT' ? '模型输出达到上限，检查未完成'
         : error.code === 'AI_PROVIDER_INCOMPLETE' ? '模型输出中断，检查未完成'
@@ -627,6 +628,7 @@ export async function handleToolCall(
       console.warn('[agent-tool-provider]', { runId, tool: call.name, code: error.code, durationMs: Date.now() - startedAt })
       const unknownRequest = requestTrace.records.length > 0 && !textRequestsFinished(requestTrace)
       const guidance = unknownRequest ? '原请求的模型结果或用量尚未确认；保留原调用、费用与预算，先核对真实回执，不重发未知付费请求，也不调用模型作收尾。'
+        : error.code === 'AI_PROVIDER_BILLING_UNCONFIRMED' ? '保留已保存内容和费用记录，先核对原请求回执，不重复发起未知的模型请求。'
         : error.code === 'AI_PROVIDER_QUOTA_EXCEEDED' ? error.message
         : error.code === 'AI_PROVIDER_OUTPUT_LIMIT'
         ? '输出预算已达上限，不要原样重复付费调用；保留进度并报告检查未完成，不能将截断报告当作通过。'
@@ -639,7 +641,9 @@ export async function handleToolCall(
       const classification = STATE_SENSITIVE_VALIDATORS.has(call.name) ? observedReviewOutcome({ complete: false, rawPresent: false,
         billingKnown: knownBilling, providerComplete: knownBilling && confirmedProviderFailure,
         providerFailed: confirmedProviderFailure }).outcome ?? undefined : undefined
-      return { ...fail(label, `工具 ${call.name} 未完成：${label}（${error.code}）。这是模型响应故障，不是正文质量结论；不要修改正文或重建编译来绕过。${guidance}`, 'failed', undefined, classification), providerFailure: true, providerFailureCode: error.code, unresolvedTextRequest: unknownRequest
+      const detail = error.code === 'AI_PROVIDER_BILLING_UNCONFIRMED' ? `${error.message} ${guidance}`
+        : `工具 ${call.name} 未完成：${label}（${error.code}）。这是模型响应故障，不是正文质量结论；不要修改正文或重建编译来绕过。${guidance}`
+      return { ...fail(label, detail, 'failed', undefined, classification), providerFailure: true, providerFailureCode: error.code, unresolvedTextRequest: unknownRequest
           || !knownBilling && ['AI_PROVIDER_TRANSPORT', 'AI_PROVIDER_INCOMPLETE', 'AI_PROVIDER_TIMEOUT'].includes(error.code) }
     }
     console.warn('[agent-tool-failure]', { runId, tool: call.name, code: error instanceof DataAccessError ? error.code : 'UNEXPECTED_TOOL_ERROR', durationMs: Date.now() - startedAt })

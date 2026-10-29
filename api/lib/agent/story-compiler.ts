@@ -1,6 +1,5 @@
 
 import { assertWritingTarget, readWritingScope, lockWritingRunLineage } from './writing-scope.js'
-import { readOriginalTaskRequest, originalTaskRunIds } from './original-request.js'
 import { createHash } from 'node:crypto'
 
 import { Prisma, type StoryCompilationStage, type StoryCharter, type ReaderPromise, type SceneTask } from '@prisma/client'
@@ -651,9 +650,8 @@ export async function commitChapterBridge(input: {
     : !readiness || readiness.requiredTools.length ? 'CONTINUITY_CHECK_REQUIRED' : readiness.continuityErrorCount ? 'CONTINUITY_ERRORS_REMAIN'
       : readiness.qualityErrorCount || readiness.mustPassPending && readiness.qualityPassRequired ? 'QUALITY_CHECK_REQUIRED' : 'REVIEW_DECISION_REQUIRED',
     '当前正文的检查或真实问题尚未完成，报告和正文已保留，本次未提交。')
-  const original = await readOriginalTaskRequest(db, { ...input, runId }), runIds = await originalTaskRunIds(db, { ...input, runId }, original)
-  if (await db.aiUsageLog.count({ where: { userId: input.userId, novelId: input.novelId, agentRunId: { in: runIds },
-    billingStatus: { in: ['pending_usage','pending_settlement','pending_authorization'] } } })) throw new DataAccessError(409, 'AI_PROVIDER_BILLING_UNCONFIRMED', '原请求用量或费用未确认，正文未提交。')
+  // Current report readiness owns the evidence needed for this manuscript.
+  // Delivery is a local effect; it neither retries nor settles model requests.
   const hash = runtimeJson({ content: chapter.content }).hash
   const prepared = compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext : {}
   if (compilation.bridge.committedAt && compilation.bridge.targetRevision === chapter.revision && prepared.terminalContentHash === hash)
