@@ -27,7 +27,7 @@ const configurationSchema = z.object({ version: z.literal(1), mode: z.enum(['pla
     reasoningEffort: z.string().min(1), routeRevision: z.string().regex(/^[a-f0-9]{64}$/),
     maxOutputTokens: z.number().int().positive().max(4000000).optional(),
     contextWindowTokens: z.number().int().positive().max(4000000).optional() }).strict(),
-  tools: z.array(z.object({ type: z.literal('function'), function: z.object({ name: z.string().min(1), description: z.string(), parameters: z.record(z.string(), z.unknown()) }).strict() }).strict()),
+  tools: z.array(z.object({ type: z.literal('function'), function: z.object({ name: z.string().min(1), strict: z.boolean().optional(), description: z.string(), parameters: z.record(z.string(), z.unknown()) }).strict() }).strict()),
   toolAuthority: z.array(z.object({ name: z.string().min(1), permission: z.enum(['allow', 'ask', 'deny']), alwaysConfirm: z.boolean(), dangerous: z.boolean() }).strict()),
   protectedChapterIds: z.array(id), pinnedSkillVersions: z.array(z.object({ id, version: z.string().min(1) }).strict()),
   // Old configurations may pin selected skills only. Only new admission can

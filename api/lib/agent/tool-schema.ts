@@ -18,8 +18,11 @@ export function toOpenAIParameters(parameters: z.ZodType): Record<string, unknow
 
 /** Only a deterministic server-frozen global slot gets simpler presentation.
  * Execution still parses the original full schema and validates scope. */
-export function toOpenAIToolPresentation(tool: Pick<AgentTool, 'name' | 'description' | 'parameters'>, scope?: TaskSpec['scope']): { description: string; parameters: Record<string, unknown> } {
-  return toolPresentation(tool, toOpenAIParameters(tool.parameters), scope)
+export function toOpenAIToolPresentation(tool: Pick<AgentTool, 'name' | 'description' | 'parameters'>, scope?: TaskSpec['scope']): { strict: false; description: string; parameters: Record<string, unknown> } {
+  // Chat defaults to non-strict; Responses may normalize an omitted strict
+  // flag and make optional fields required. Keep our existing omission-based
+  // input contract explicit across compatible API gateways.
+  return { strict: false, ...toolPresentation(tool, toOpenAIParameters(tool.parameters), scope) }
 }
 
 function toolPresentation(tool: Pick<AgentTool, 'name' | 'description'>, parameters: Record<string, unknown>, scope?: TaskSpec['scope']): { description: string; parameters: Record<string, unknown> } {

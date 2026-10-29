@@ -10,6 +10,8 @@ vi.mock('../../api/lib/billing/resolve-token-price.js', async original => ({ ...
 import { buildProviderToolChoice, chatWithTools, generateTextCompletion } from '../../api/lib/ai-service.js'
 import * as localTransport from '../../api/lib/local-model-transport.js'
 import { buildProviderCompatibilitySnapshot, type ProviderCompatibilityRoute } from '../../api/lib/agent/provider-compatibility.js'
+import { toOpenAIToolPresentation } from '../../api/lib/agent/tool-schema.js'
+import { chapterCreateTool } from '../../api/lib/agent/tools/chapter-tools.js'
 
 afterEach(() => vi.unstubAllGlobals())
 const delta = (args: string, first = false) => ({ choices: [{ delta: { tool_calls: [{ index: 0, ...(first ? { id: 'call', function: { name: 'scene_task_build', arguments: args } } : { function: { arguments: args } }) }] } }] })
@@ -24,6 +26,26 @@ function stream(text: string) {
 }
 const invoke = () => chatWithTools({ messages: [], tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
 describe('lossless tool argument transport', () => {
+  it('sends explicit non-strict optional tools unchanged before one compatible gateway response', async () => {
+    const presentation = toOpenAIToolPresentation(chapterCreateTool, { novelId: 'synthetic', writing: {
+      version: 1, kind: 'bounded', targets: [{ orderIndex: 7, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false,
+      tailVolume: { version: 1, targetOrderIndex: 7, previousChapterId: 'synthetic-previous', previousRevision: 3 } } })
+    const tools = [{ type: 'function' as const, function: { name: chapterCreateTool.name, ...presentation } }]
+    const original = structuredClone(tools)
+    vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+      const body = JSON.parse(String(init?.body))
+      expect(body.tools).toEqual(original)
+      const fn = body.tools[0].function
+      const gatewayRequired = fn.strict === false ? fn.parameters.required : Object.keys(fn.parameters.properties)
+      expect(gatewayRequired).toEqual(['title'])
+      expect(fn.parameters.properties).toHaveProperty('newVolume')
+      return new Response(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'synthetic', function: { name: fn.name, arguments: '{"title":"Synthetic next chapter"}' } }] }, finish_reason: 'tool_calls' }] })}\n\ndata: [DONE]\n\n`)
+    }))
+    const result = await chatWithTools({ messages: [], tools, providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'fixture' } })
+    expect(result.toolCalls).toEqual([{ id: 'synthetic', name: 'chapter_create', arguments: '{"title":"Synthetic next chapter"}' }])
+    expect(tools).toEqual(original)
+    expect(fetch).toHaveBeenCalledOnce()
+  })
   it('routes both Agent and auxiliary text through the owned local transport, retaining real reasoning and usage', async () => {
     const ready = vi.spyOn(localTransport, 'assertLocalModelReady').mockResolvedValue()
     const payload = 'data: {"choices":[{"delta":{"content":"ready","reasoning_content":"actual reasoning"}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3}}\n\ndata: [DONE]\n\n'

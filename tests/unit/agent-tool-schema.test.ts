@@ -100,6 +100,7 @@ describe('tool schema provider contract', () => {
     for (const mode of ['plan', 'build', 'review'] as const) {
       for (const definition of toOpenAITools(getToolsForMode(mode))) {
         expect(definition.function.parameters.type, definition.function.name).toBe('object')
+        expect(definition.function.strict, definition.function.name).toBe(false)
       }
     }
   })
@@ -120,6 +121,30 @@ describe('tool schema provider contract', () => {
 
   const globalScope: TaskSpec['scope'] = { novelId: 'synthetic-novel', writing: { version: 1, kind: 'bounded',
     targets: [{ orderIndex: 7, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false } }
+
+  it('keeps optional object, scalar and array omission through a Responses-compatible gateway', () => {
+    const scope: TaskSpec['scope'] = { ...globalScope, writing: { ...globalScope.writing!, tailVolume: {
+      version: 1, targetOrderIndex: 7, previousChapterId: 'previous', previousRevision: 3 } } }
+    // Synthetic gateway models the documented Responses strict default only;
+    // it is not evidence that a particular live gateway uses this converter.
+    const gateway = (fn: { strict?: boolean; parameters: Record<string, unknown> }) => fn.strict === false
+      ? fn.parameters : { ...fn.parameters, required: Object.keys(fn.parameters.properties as object) }
+    const fn = toOpenAITools([chapterCreateTool], scope)[0].function
+    const before = structuredClone(fn.parameters)
+    expect(gateway({ parameters: fn.parameters }).required).toContain('newVolume')
+    expect(gateway(fn).required).toEqual(['title'])
+    expect(z.fromJSONSchema(gateway(fn)).safeParse({ title: 'Synthetic next chapter' }).success).toBe(true)
+    expect(z.fromJSONSchema(gateway({ parameters: fn.parameters })).safeParse({ title: 'Synthetic next chapter' }).success).toBe(false)
+    expect(chapterCreateTool.parameters.safeParse({ title: 'Synthetic next chapter' }).success).toBe(true)
+    expect(fn.parameters).toEqual(before)
+    // This fix declares the existing protocol; it does not weaken required
+    // title, accept null for omission or discard a real requested new volume.
+    expect(chapterCreateTool.parameters.safeParse({ content: '' }).success).toBe(false)
+    expect(chapterCreateTool.parameters.safeParse({ title: 'Synthetic', newVolume: null }).success).toBe(false)
+    const optional = z.object({ title: z.string(), object: z.object({ value: z.string() }).optional(), scalar: z.number().optional(), array: z.array(z.string()).optional() })
+    const parameters = toOpenAIParameters(optional)
+    expect(z.fromJSONSchema(gateway({ strict: false, parameters })).safeParse({ title: 'fixture' }).success).toBe(true)
+  })
 
   it('shows only title, content and the frozen optional global position for one new chapter', () => {
     const generic = toOpenAITools([chapterCreateTool])

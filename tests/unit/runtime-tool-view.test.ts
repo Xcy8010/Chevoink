@@ -3,7 +3,7 @@ import type { RunLeaseToken } from '../../api/lib/agent/runtime-lease.js'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { retainedFindingSchema } from '../../api/lib/agent/tools/chapter-arguments.js'
-import { projectNativeToolViews, readAssistantToolViews, toolWithNativeView, type NativeToolView } from '../../api/lib/agent/runtime-tool-view.js'
+import { projectNativeToolViews, currentNativeToolViews, verifiedAssistantToolViews, readFrozenModelToolViews, readAssistantToolViews, toolWithNativeView, type NativeToolView } from '../../api/lib/agent/runtime-tool-view.js'
 import { runtimeJson, type RuntimeTx } from '../../api/lib/agent/runtime-common.js'
 import { toOpenAIParameters } from '../../api/lib/agent/tool-schema.js'
 import { readExecutionFrame } from '../../api/lib/agent/runtime-state.js'
@@ -22,7 +22,8 @@ describe('current native built-in presentation', () => {
     const current = projectNativeToolViews(frozen, [chapterWriteTool], { novelId: 'n', writingCoordinationProtocol: 1 })
     expect(runtimeJson(frozen).hash).toBe(original)
     expect(current.map(item => item.function.name)).toEqual(['chapter_write', 'private_custom'])
-    expect(current[1]).toBe(frozen[1])
+    expect(current[1]).toEqual({ ...frozen[1], function: { ...frozen[1].function, strict: false } })
+    expect(current[1].function.parameters).toBe(frozen[1].function.parameters)
     expect(current[0].function.description).not.toContain('actualOutcomes')
     expect(current[0].function.parameters).not.toHaveProperty('properties.writing')
     expect(current[0].function.parameters.required).toEqual(['content', 'reviewer'])
@@ -72,8 +73,8 @@ describe('current native built-in presentation', () => {
   })
 })
 
-function sourceFixture(options: { legacyReasoning?: boolean; siblings?: boolean } = {}) {
-  const tools = [view('chapter_write', { type: 'object', properties: { content: { type: 'string' } } })]
+function sourceFixture(options: { legacyReasoning?: boolean; siblings?: boolean; tools?: NativeToolView[] } = {}) {
+  const tools = options.tools ?? [view('chapter_write', { type: 'object', properties: { content: { type: 'string' } } })]
   const messages = [{ role: 'user', content: '修改本章' }]
   const result = { content: '', reasoning: '', finishReason: 'tool_calls', toolCalls: [{ id: 'call', name: 'chapter_write', arguments: '{"content":"正文"}' }],
     usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14, promptCacheHitTokens: null, promptCacheMissTokens: null } }
@@ -97,6 +98,47 @@ function sourceFixture(options: { legacyReasoning?: boolean; siblings?: boolean 
 }
 
 describe('assistant tool view source', () => {
+  it.each(['previous', 'current', 'frozen', 'strict-changed', 'explicit-true-removed', 'explicit-false-removed', 'constraint', 'description', 'required', 'order'] as const)('authenticates the actual provider journal for %s views without changing old snapshots', async scenario => {
+    const parameters = toOpenAIParameters(chapterWriteTool.parameters)
+    const frozen = [view('chapter_write', { ...parameters, required: ['content', 'writing'],
+      properties: { ...(parameters.properties as object), writing: { type: 'object' } } }),
+      { ...view('private_true', { type: 'object', properties: { optional: { type: 'string' } } }),
+        function: { ...view('private_true', { type: 'object', properties: { optional: { type: 'string' } } }).function, strict: true } },
+      { ...view('private_false', { type: 'object' }), function: { ...view('private_false', { type: 'object' }).function, strict: false } }]
+    const scope = { novelId: 'n' }, original = structuredClone(frozen)
+    const current = await currentNativeToolViews(frozen, scope)
+    const source = structuredClone(scenario === 'frozen' ? frozen : current)
+    if (scenario !== 'current' && scenario !== 'frozen') delete source[0].function.strict
+    if (scenario === 'strict-changed') source[0].function.strict = true
+    if (scenario === 'explicit-true-removed') delete source[1].function.strict
+    if (scenario === 'explicit-false-removed') delete source[2].function.strict
+    if (scenario === 'constraint') source[0].function.parameters.properties = { content: { type: 'string', minLength: 999 } }
+    if (scenario === 'description') source[0].function.description += ' changed'
+    if (scenario === 'required') source[0].function.parameters.required = []
+    if (scenario === 'order') source.reverse()
+    const f = sourceFixture({ tools: source }), journal = structuredClone(f.attempt.requestSnapshot)
+    // sourceFixture authenticates operation/request/result/outbox hashes and
+    // the real assistant boundary, not merely a schema helper return value.
+    const result = verifiedAssistantToolViews(f.tx as unknown as RuntimeTx, 'root', f.frame, frozen, scope)
+    if (['previous', 'current', 'frozen'].includes(scenario)) await expect(result).resolves.toEqual(source)
+    else await expect(result).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+    expect(frozen).toEqual(original)
+    expect(f.attempt.requestSnapshot).toEqual(journal)
+    expect(f.attempt.requestHash).toBe(runtimeJson(journal).hash)
+  })
+  it.each([undefined, false, true])('reads frozen strict=%s exactly and defaults only a new request view', strict => {
+    const original = view('private_custom', { type: 'object', properties: { optional: { type: 'string' } } })
+    if (strict !== undefined) original.function.strict = strict
+    const snapshot = { input: { request: { body: { tools: [original] } } } }
+    const hash = runtimeJson(snapshot).hash
+    const frozen = readFrozenModelToolViews(snapshot)
+    expect(frozen).toEqual([original])
+    const current = projectNativeToolViews(frozen, [], { novelId: 'n' })
+    expect(current[0].function.strict).toBe(strict ?? false)
+    expect(current[0].function.parameters).toEqual(original.function.parameters)
+    expect(runtimeJson(snapshot).hash).toBe(hash)
+    expect(readFrozenModelToolViews(snapshot)).toEqual([original])
+  })
   it.each([{ siblings: false }, { siblings: true }, { legacyReasoning: true }])('reads the exact source request across sibling results and empty-reasoning history %o', async options => {
     const f = sourceFixture(options)
     expect(await readAssistantToolViews(f.tx as unknown as RuntimeTx, 'root', f.frame)).toEqual(f.tools)

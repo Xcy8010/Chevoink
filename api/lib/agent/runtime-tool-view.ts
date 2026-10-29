@@ -6,7 +6,7 @@ import { durableChatResultSchema, runtimeError, runtimeJson, type RuntimeTx } fr
 import { readExecutionFrame } from './runtime-state.js'
 import { toOpenAIToolPresentation } from './tool-schema.js'
 
-export type NativeToolView = { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }
+export type NativeToolView = { type: 'function'; function: { name: string; strict?: boolean; description: string; parameters: Record<string, unknown> } }
 const simplified = new Set(['chapter_write', 'chapter_append', 'chapter_edit_range', 'continuity_validate', 'chapter_bridge_commit'])
 const retiredFields: Record<string, readonly string[]> = {
   chapter_write: ['writing'], chapter_append: ['writing'], chapter_edit_range: ['writing'],
@@ -27,7 +27,12 @@ delete retiredRetentionField.$schema
  * coordination fields are the only fields removed from these built-ins. */
 export function projectNativeToolViews(frozen: readonly NativeToolView[], current: readonly AgentTool[], scope: TaskSpec['scope']): NativeToolView[] {
   const byName = new Map(current.map(tool => [tool.name, tool]))
-  return frozen.map(definition => {
+  return frozen.map(originalDefinition => {
+    // A new model request may clarify the old Chat default, without changing
+    // the frozen configuration or an already prepared request. Explicit
+    // provider/custom strict choices remain authoritative.
+    const definition = originalDefinition.function.strict === undefined
+      ? { ...originalDefinition, function: { ...originalDefinition.function, strict: false } } : originalDefinition
     const tool = byName.get(definition.function.name)
     if (!tool || !simplified.has(tool.name)) return definition
     const next = toOpenAIToolPresentation(tool, scope), original = definition.function.parameters
@@ -76,7 +81,7 @@ export function hasRetiredNativeArguments(action: string, args: unknown): boolea
   return (retiredFields[action] ?? []).some(key => Object.prototype.hasOwnProperty.call(object(args), key))
 }
 
-const toolViews = z.array(z.object({ type: z.literal('function'), function: z.object({ name: z.string(), description: z.string(), parameters: z.record(z.string(), z.unknown()) }).strict() }).strict())
+const toolViews = z.array(z.object({ type: z.literal('function'), function: z.object({ name: z.string(), strict: z.boolean().optional(), description: z.string(), parameters: z.record(z.string(), z.unknown()) }).strict() }).strict())
 const successful = z.object({ outcome: z.literal('succeeded'), result: durableChatResultSchema }).strict()
 
 export function readFrozenModelToolViews(snapshot: unknown): NativeToolView[] {
@@ -129,13 +134,25 @@ export async function readAssistantToolViews(tx: RuntimeTx, taskRootId: string, 
   return runtimeError('RUNTIME_SOURCE_REQUIRED', '没有产生当前助手调用的模型请求。')
 }
 
-/** The source view must be either the immutable historical view or its exact
- * current built-in projection; provider evidence cannot add tool authority. */
+/** The source view must be an exact authenticated historical/current view;
+ * provider evidence cannot add tool authority. */
 export async function verifiedAssistantToolViews(tx: RuntimeTx, taskRootId: string, frame: Awaited<ReturnType<typeof readExecutionFrame>>,
   frozen: readonly NativeToolView[], scope: TaskSpec['scope']): Promise<NativeToolView[]> {
   const source = await readAssistantToolViews(tx, taskRootId, frame)
   const hash = runtimeJson(source).hash
-  if (hash !== runtimeJson(frozen).hash && hash !== runtimeJson(await currentNativeToolViews(frozen, scope)).hash) {
+  if (hash === runtimeJson(frozen).hash) return source
+  const current = await currentNativeToolViews(frozen, scope)
+  if (hash === runtimeJson(current).hash) return source
+  // Previous releases projected the same built-in fields but left Chat's
+  // non-strict default implicit. Authenticate that exact view as well when
+  // consuming an already paid assistant result. Never strip an explicit
+  // original strict choice or normalize any source request in place.
+  const previous = current.map((definition, index) => {
+    if (frozen[index].function.strict !== undefined || definition.function.strict !== false) return definition
+    const { strict: _strict, ...fn } = definition.function
+    return { ...definition, function: fn }
+  })
+  if (hash !== runtimeJson(previous).hash) {
     return runtimeError('RUNTIME_IDENTITY_CONFLICT', '实际模型工具视图不属于原配置或当前投影。')
   }
   return source

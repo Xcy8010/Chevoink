@@ -413,6 +413,7 @@ export type OpenAIToolDefinition = {
   type: 'function'
   function: {
     name: string
+    strict?: boolean
     description: string
     parameters: Record<string, unknown>
   }
