@@ -3,6 +3,7 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { executePreparedContinuityWork, prepareContinuityWork } from '../../api/lib/agent/tools/durable-continuity.js'
 import { executePreparedQualityWork, prepareQualityWork } from '../../api/lib/agent/tools/durable-quality.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
+import { DataAccessError } from '../../api/lib/prisma.js'
 
 const mocks = vi.hoisted(() => ({
   tx: { agentOperation: { findFirst: vi.fn(), findUnique: vi.fn(), findUniqueOrThrow: vi.fn() }, agentEffectReceipt: { findUnique: vi.fn() } },
@@ -98,5 +99,38 @@ describe.each([
     expect(mocks.reduce).not.toHaveBeenCalled()
     expect(mocks.effect).not.toHaveBeenCalled()
     expect(mocks.provider).not.toHaveBeenCalled()
+  })
+})
+
+describe('known quality CAS failure keeps the original admitted work', () => {
+  it.each(['CHAPTER_REVISION_CONFLICT', 'AI_USAGE_UNKNOWN', 'RUNTIME_PARENT_LEASE_LOST', 'cancelled'])('classifies %s without retrying or closing unknown effects', async code => {
+    const { operation } = saved('quality_analyze', 'prepared')
+    const original = operation.inputSnapshot as { input: Record<string, unknown> }
+    const sealed = runtimeJson({ ...original, input: { ...original.input, work: { kind: 'check', version: 1, compiler: null,
+      chapter: { id: 'chapter', title: 'Chapter', revision: 1, content: 'Original body' }, contextHash: 'a'.repeat(64), recentContents: [], feedback: [],
+      mode: 'balanced', repair: true, criticInput: 'Original body', criticSystem: 'Original check', repairSystem: 'Original repair', cached: null,
+      route: { provider: 'fixture', model: 'fixture', baseUrl: 'https://provider.invalid/v1', maxOutputTokens: 1024 },
+      price: { version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 } } } })
+    const admitted = { ...operation, inputSnapshot: sealed.value, inputHash: sealed.hash }
+    mocks.tx.agentOperation.findFirst.mockResolvedValue(admitted)
+    mocks.tx.agentEffectReceipt.findUnique.mockResolvedValue(null)
+    mocks.state.mockResolvedValue({ frame: { revision: 1, state: { phase: 'awaiting_operation', pendingOperationId: admitted.id } } })
+    const error = code === 'cancelled' ? new DOMException('Stopped', 'AbortError') : new DataAccessError(409, code, 'Original known error')
+    mocks.provider.mockRejectedValue(error)
+    const result = runtimeJson({ outcome: 'failed', effectApplied: false, code, toolResult: { output: error.message, summary: 'Original failed review' } })
+    const receipt = { operationId: admitted.id, result: result.value, resultHash: result.hash }
+    mocks.failure.mockResolvedValue(receipt)
+    const running = executePreparedQualityWork(context, lease, admitted.id)
+    if (code === 'CHAPTER_REVISION_CONFLICT') {
+      expect(await running).toEqual(receipt)
+      expect(mocks.failure).toHaveBeenCalledExactlyOnceWith(lease, { operationId: admitted.id, inputHash: sealed.hash, code, output: error.message, summary: '质量检查未执行' })
+    } else {
+      await expect(running).rejects.toBe(error)
+      expect(mocks.failure).not.toHaveBeenCalled()
+    }
+    expect(mocks.provider).toHaveBeenCalledOnce()
+    expect(mocks.effect).not.toHaveBeenCalled()
+    expect(mocks.reduce).not.toHaveBeenCalled()
+    expect(admitted.inputSnapshot).toEqual(sealed.value)
   })
 })

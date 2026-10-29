@@ -219,8 +219,9 @@ describe('chapter-only compiler admission from frozen writing authority', () => 
       // original bounded, server-bound new-draft authority authorizes revision.
       const authority = await readNewDraftWritingAuthority(prisma, f.ctx, f.chapter)
       expect(authority).toEqual(scenario === 'write' ? { taskId: task.id } : null)
+      expect(vi.mocked(original.originalTaskRunIds).mock.calls.some(([db, subject, request]) => db === prisma && subject === f.ctx && request === f.origin)).toBe(true)
       expect(f.findCompilation).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: 'comp', userId: 'u', novelId: 'n',
-        run: expect.objectContaining(scenario === 'invalid' ? { id: 'r' } : { taskSpec: { path: ['id'], equals: task.id } }) }) }))
+        run: { id: { in: ['r'] }, userId: 'u', novelId: 'n' } }) }))
     }
     expect(f.chapterWrite).not.toHaveBeenCalled(); expect(f.update).not.toHaveBeenCalled()
     expect(f.dispatch).not.toHaveBeenCalled()

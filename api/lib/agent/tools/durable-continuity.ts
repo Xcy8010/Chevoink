@@ -22,6 +22,8 @@ const argsSchema = z.object({ chapterId: z.string().optional(), compilationId: z
 export const nativeContinuityWorkSchema = z.object({ kind: z.literal('continuityReview'),
   chapterId: z.string(), revision: z.number().int().positive(), contextHash: z.string(),
   critic: z.object({ system: z.string(), content: z.string() }).strict(), route: auxiliaryRouteSchema, price: tokenPriceSchema }).strict()
+const rejectedContinuityWorkSchema = z.object({ kind: z.literal('rejected'),
+  code: z.enum(['CHAPTER_NOT_FOUND', 'COMPILATION_NOT_FOUND']), message: z.string() }).strict()
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const steps: Record<string, AuxiliaryModelStep> = { agent3ContinuityCritic: 'continuity_critic',
   agent3ContinuityFormatRecovery: 'continuity_format_recovery', agent3ContinuityEvidenceCorrection: 'continuity_evidence_correction', agent3ContinuityRevision: 'continuity_repair' }
@@ -53,7 +55,12 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: RunLeaseTok
     }
     const args = argsSchema.parse(input.args), snapshot = await buildContinuitySnapshot(ctx, args, tx)
     return { snapshot, args }
+  }).catch(error => {
+    if (ctx.signal.aborted || !(error instanceof DataAccessError)
+      || !['CHAPTER_NOT_FOUND', 'COMPILATION_NOT_FOUND'].includes(error.code)) throw error
+    return { rejected: rejectedContinuityWorkSchema.parse({ kind: 'rejected', code: error.code, message: error.message }) }
   })
+  if ('rejected' in frozen) return frozen.rejected
   if ('saved' in frozen) return frozen.saved
   const { snapshot, args } = frozen
   const resolved = input.frozenReview ? null : await resolveDurableAuxiliaryRuntime({ ...ctx, task: 'continuity' })
@@ -68,6 +75,12 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: Run
   const { operation, input } = await readAdmittedReviewWork(lease, { operationId, action: 'continuity_validate', novelId: ctx.novelId, callId: ctx.callId })
   const existing = await withRunLease(lease, tx => tx.agentEffectReceipt.findUnique({ where: { operationId } }))
   if (existing) return commitOperationEffect(lease, operationId, operation.inputHash, async () => runtimeError('RUNTIME_RECEIPT_INVALID', '已提交回执不能重执行。'))
+  const rejected = rejectedContinuityWorkSchema.safeParse(input.work)
+  if (rejected.success) {
+    ctx.signal.throwIfAborted()
+    return recordToolFailure(lease, { operationId, inputHash: operation.inputHash, code: rejected.data.code,
+      output: rejected.data.message, summary: '本次连续性检查未完成' })
+  }
   try {
   const args = argsSchema.parse(input.args), work = nativeContinuityWorkSchema.safeParse(input.work)
   if (!work.success) {

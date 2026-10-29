@@ -842,7 +842,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   }
   const isolatedReview = !frozenRequest && params.tools.length === 0 && params.durableExecution?.auxiliaryStep === params.usageLog.action
     && ['quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry',
-      'continuity_critic', 'continuity_reassessment', 'continuity_repair', 'continuity_repair_retry', 'continuity_coordinated_revision'].includes(params.usageLog.action)
+      'continuity_critic', 'continuity_format_recovery', 'continuity_evidence_correction', 'continuity_reassessment', 'continuity_repair', 'continuity_repair_retry', 'continuity_coordinated_revision'].includes(params.usageLog.action)
   const reviewReasoning = isolatedReview ? buildReviewReasoningPayload({ ...params, model,
     providerBaseUrl: params.providerBaseUrl ?? env.aiTextBaseUrl, reasoningEffort: 'none' }) : undefined
   const body: Record<string, unknown> = frozenRequest ? structuredClone(frozenRequest.body) : {

@@ -46,10 +46,12 @@ describe('authorized current-report workflow through the real model loop', () =>
     vi.spyOn(prices, 'resolveTokenPrice').mockResolvedValue({ provider: 'fixture', modelName: 'fixture-model', inputPerMillion: 1,
       outputPerMillion: 1, cacheReadPerMillion: 1, cacheWritePerMillion: 1, source: 'fixture', revision: 'fixture' } as Awaited<ReturnType<typeof prices.resolveTokenPrice>>)
     const window = credits.getCreditWindow()
-    const account = await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+    await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
     const actions: string[] = []
+    const modelFailures: unknown[] = []
     const summary = scenario === 'final-advisory' ? finalText + '最终报告另有一条节奏建议，已引用实际报告明确保留；该建议没有冒充已修复。' : finalText
     vi.spyOn(ai, 'generateTextCompletion').mockImplementation(async (_system, content, options) => {
+      try {
       options.signal?.throwIfAborted()
       const current = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
       const table = buildQualityEvidenceSources({ userId: f.userId, novelId: f.novelId, chapterId: current.id, chapterRevision: current.revision }, current.content)
@@ -89,6 +91,7 @@ describe('authorized current-report workflow through the real model loop', () =>
         return JSON.stringify({ patches: [{ findingId: input.findings[0].findingId, replacement: input.findings[0].original.replace('487元', '390元') }] })
       }
       throw new Error(`Unexpected auxiliary action ${options.action}`)
+      } catch (error) { modelFailures.push(error); throw error }
     })
     let resume: { resume?: boolean; eventStartSeq?: number; authorContinue?: { eventId: string; afterSeq: number } } = {}
     let originalHistory: unknown[] = []
@@ -115,12 +118,13 @@ describe('authorized current-report workflow through the real model loop', () =>
         reservedCreditMilli: 0, creditChargeMilli: 7, durationMs: 0, createdAt: new Date(Date.now() - 1500) } })
       originalLedger = await prisma.creditLedgerEntry.create({ data: { userId: f.userId, kind: 'consume', sourceType: 'ai_usage', referenceId: (originalUsage as { id: string }).id,
         idempotencyKey: `review-walk:historical:${f.runId}`, deltaMilli: -7, dailyDeltaMilli: -7, modelTier: 'speed', multiplierBps: 10000, requestTokens: 12, responseTokens: 8 } })
-      await prisma.creditAccount.update({ where: { id: account.id }, data: { dailyUsedMilli: { increment: 7 } } })
+      await prisma.creditAccount.update({ where: { userId: f.userId }, data: { dailyUsedMilli: { increment: 7 } } })
       originalHistory = await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })
       resume = { resume: true, eventStartSeq: 4834, authorContinue: { eventId: pause.id, afterSeq: 4834 } }
     }
     const calls: Array<{ name: string; args: unknown }> = []
     const chat = vi.spyOn(ai, 'chatWithTools').mockImplementation(async request => {
+      try {
       const observations = request.messages.filter(item => item.role === 'tool')
       const last = observations.at(-1)
       let next: { name: string; args: { chapterId?: string; compilationId?: string; retainedFindings?: Array<{ source: 'quality'; reportId: string; findingId: string; reason: string }> } } | undefined
@@ -131,14 +135,21 @@ describe('authorized current-report workflow through the real model loop', () =>
       } else if (last.toolCallId === 'walk-quality_analyze') {
         const saved = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
         expect((saved.usage as { checkpoint?: { pendingReviews?: unknown[] } } | null)?.checkpoint?.pendingReviews ?? []).toEqual([])
-        expect(last.content).toContain('需')
-        expect(last.content).toContain('修订')
+        expect(last.content).toContain('正文已变化')
+        expect(last.content).toContain('continuity_validate')
+        expect(last.content).toContain('quality_analyze')
+        expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({
+          revision: 6, content: initial.replace(redundant, '') })
         next = { name: 'continuity_validate', args: { chapterId: f.chapterId } }
       } else if (last.toolCallId === 'walk-continuity_validate') {
         const saved = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
         expect((saved.usage as { checkpoint?: { pendingReviews?: unknown[] } } | null)?.checkpoint?.pendingReviews ?? []).toEqual([])
-        expect(last.content).toContain('正文已变化')
+        expect(last.content).toContain('已局部修订')
         expect(last.content).toContain('复查')
+        expect(last.content).toContain('连续性')
+        expect(last.content).toContain('人类感')
+        expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ revision: 7,
+          content: initial.replace(redundant, '').replace('到了柜台，他说口袋里有487元。', '到了柜台，他说口袋里有390元。') })
         next = { name: 'chapter_bridge_commit', args: { compilationId: compilation.id } }
       } else if (scenario === 'final-advisory' && last.toolCallId === 'walk-chapter_bridge_commit') {
         const state = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
@@ -160,9 +171,11 @@ describe('authorized current-report workflow through the real model loop', () =>
       if (next) calls.push(next)
       return { content: next ? '' : summary, reasoning: '', toolCalls: next ? [{ id: next.args.retainedFindings ? 'walk-retained-commit' : `walk-${next.name}`, name: next.name, arguments: JSON.stringify(next.args) }] : [],
         finishReason: next ? 'tool_calls' : 'stop', usage: { promptTokens: 10, completionTokens: 2, totalTokens: 12, promptCacheHitTokens: null, promptCacheMissTokens: null } }
+      } catch (error) { modelFailures.push(error); throw error }
     })
     if (scenario !== 'legacy-phase-checkpoint') await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'queued' } })
     await executeAgentRun({ ...f, chapterId: f.chapterId, mode: 'build', prompt, modelTier: 'speed', creativeFreedom: 'balanced', qualityMode: 'premium', ...resume })
+    if (modelFailures.length) throw modelFailures[0]
     const current = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     expect(current.revision).toBe(7)
     expect(current.content).toContain('家里抽屉留着97元')

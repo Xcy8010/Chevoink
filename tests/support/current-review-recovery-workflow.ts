@@ -75,11 +75,16 @@ export async function continueCurrentReviewWorkflow(f: Subject, input: {
     }
     if (options.action === 'agent3HumanityRevision') {
       const findings = JSON.parse(content.slice(content.lastIndexOf('\n[') + 1)) as Array<{ findingId: string; evidence: string; explanation: string }>
-      const duplicate = findings.filter(finding => finding.explanation === 'This paragraph repeats the saved action without a new event.')
-      expect(duplicate).toHaveLength(1)
-      expect(duplicate[0].evidence).toBeTruthy()
-      return JSON.stringify({ patches: [{ findingId: duplicate[0].findingId, replacement: '' }],
-        retainedFindings: findings.filter(finding => finding.findingId !== duplicate[0].findingId).map(finding => ({ findingId: finding.findingId,
+      const duplicate = findings.filter(finding => finding.explanation.includes('This paragraph repeats the saved action without a new event.'))
+      if (chapter.content === duplicated) {
+        expect(duplicate).toHaveLength(1)
+        expect(duplicate[0].evidence).toBeTruthy()
+      } else {
+        expect(chapter.content.trim()).toBe(original.content.trim())
+        expect(duplicate).toEqual([])
+      }
+      return JSON.stringify({ patches: duplicate.map(finding => ({ findingId: finding.findingId, replacement: '' })),
+        retainedFindings: findings.filter(finding => !duplicate.some(item => item.findingId === finding.findingId)).map(finding => ({ findingId: finding.findingId,
           reason: 'Retain this additional actual quality opinion for the author; this repair only removes the independently located duplicate action.' })) })
     }
     if (options.action === 'agent3ContinuityCritic') {
@@ -130,7 +135,7 @@ export async function continueCurrentReviewWorkflow(f: Subject, input: {
             chapterId: f.chapterId, chapterRevision: currentChapter.revision }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], include: { findings: true } })
           const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: input.compilationId } })
           const continuity = readContinuityReport(saved.validation, currentChapter)!
-          expect(quality.findings.filter(finding => finding.explanation.startsWith('Current independent advice '))).toHaveLength(11)
+          expect(quality.findings.filter(finding => finding.explanation.includes('Current independent advice '))).toHaveLength(11)
           expect(continuity.findings).toHaveLength(4)
           const expected = [...quality.findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected')
             .map(finding => `quality:${quality.id}:${finding.id}`), ...continuity.findings.map(finding => `continuity:${continuity.id}:${finding.id}`)].sort()
@@ -167,7 +172,16 @@ export async function continueCurrentReviewWorkflow(f: Subject, input: {
   } else {
     expect(chapter.revision).toBe(original.revision + 2)
     expect(chapter.content.trim()).toBe(original.content.trim())
-    expect(actions.filter(action => action === 'agent3HumanityRevision')).toHaveLength(1)
+    const repairRequests = critic.mock.calls.filter(([, , options]) => options.action === 'agent3HumanityRevision')
+    expect(repairRequests.length).toBeGreaterThan(0)
+    for (const [, , options] of repairRequests) expect(options).toMatchObject({ targetType: 'quality_report', targetId: expect.any(String) })
+    expect(new Set(repairRequests.map(([, , options]) => options.targetId)).size).toBe(repairRequests.length)
+    const applied = events.flatMap(event => {
+      const payload = event.payload as { toolName?: string; display?: { appliedBodyChange?: unknown } }
+      return event.type === 'tool.result' && payload.toolName === 'quality_analyze' && payload.display?.appliedBodyChange ? [payload.display.appliedBodyChange] : []
+    })
+    expect(applied).toEqual([expect.objectContaining({ chapterId: chapter.id, sourceRevision: original.revision + 1,
+      targetRevision: chapter.revision, before: duplicated, after: chapter.content })])
     expect(run.status).toBe('completed'); expect(compilation.bridge!.committedAt).not.toBeNull()
     expect(calls.slice(0, input.readFirst ? 4 : 3)).toEqual([...(input.readFirst ? ['chapter_bridge_get'] : []), 'quality_analyze', 'continuity_validate', 'chapter_bridge_commit'])
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, input.compilationId))
@@ -175,7 +189,7 @@ export async function continueCurrentReviewWorkflow(f: Subject, input: {
     if (input.currentDecisions) {
       const quality = await prisma.chapterQualityReport.findFirstOrThrow({ where: { compilationId: compilation.id, chapterRevision: chapter.revision },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], include: { findings: true } })
-      expect(quality.findings.filter(finding => finding.explanation.startsWith('Current independent advice '))).toHaveLength(11)
+      expect(quality.findings.filter(finding => finding.explanation.includes('Current independent advice '))).toHaveLength(11)
       expect(compilation.validation).toMatchObject({ continuityReport: { revision: chapter.revision, complete: true, findings: Array.from({ length: 4 }, () => expect.any(Object)) },
         retainedReviewDecision: { revision: chapter.revision } })
       const currentContinuity = readContinuityReport(compilation.validation, chapter)!

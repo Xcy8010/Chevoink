@@ -167,7 +167,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       }
       if (scenario === 'unknown') {
         await expect(step()).rejects.toThrow('fixture unknown critic')
-        await expect(step()).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
+        await expect(step()).rejects.toMatchObject({ code: 'AI_PROVIDER_BILLING_UNCONFIRMED' })
         expect(fetchMock).toHaveBeenCalledOnce()
         expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toBeNull()
         return
@@ -195,8 +195,12 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       expect(savedChapter).toMatchObject({ revision: scenario === 'stale-chapter' || scenario === 'repair-stale' || applied ? 2 : 1,
         content: scenario === 'stale-chapter' || scenario === 'repair-stale' ? '用户新文' : applied ? '新文，门已经锁好。' : before })
       const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
-      if (scenario === 'stale-chapter' || scenario === 'stale-source') expect(saved.validation).toBeNull()
+      if (scenario === 'stale-chapter' || scenario === 'stale-source' || scenario === 'repair-stale') expect(saved.validation).toBeNull()
       else expect(saved.validation).toMatchObject({ checkedRevision: 1, continuityReport: { complete: !['format', 'truncated', 'single-quotes-stale', 'single-quotes-swapped'].includes(scenario) } })
+      if (scenario === 'repair-stale') {
+        const originalReport = await prisma.agentArtifact.findFirstOrThrow({ where: { runId: f.runId, artifactType: 'continuityReview' } })
+        expect(originalReport.metadata).toMatchObject({ continuityReport: { revision: 1, complete: true, billingKnown: true, rawResponses: expect.any(Array) } })
+      }
       if (scenario === 'full-report') expect(saved.validation).toMatchObject({ warningCount: 31, continuityReport: { opinions: Array.from({ length: 31 }, (_, i) => expect.objectContaining({ explanation: '原文承接意见 ' + i })) } })
       if (scenario === 'wrapped-report') expect(saved.validation).toMatchObject({ continuityReport: { rawResponses: [expect.stringContaining('report'), expect.stringContaining('findings')] } })
       if (scenario === 'history-over-three') expect(saved.validation).toMatchObject({ checkRounds: 9 })
@@ -367,7 +371,7 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
       }
       if (scenario === 'changed-input') {
         const changed = request(); changed.messages[0].content = '改用另一章'
-        await expect(chatWithTools(changed)).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+        await expect(chatWithTools(changed)).rejects.toMatchObject({ code: family === 'continuity' ? 'RUNTIME_RECEIPT_INVALID' : 'RUNTIME_IDENTITY_CONFLICT' })
       }
       if (scenario === 'damaged-prerequisite' || scenario === 'missing-result-event') {
         const attempt = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { parentOperationId: parent.operation.id } } })
@@ -531,15 +535,16 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
       vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
       if (scenario === 'repair-race') await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '原文，门开着，门同时锁着。' } })
       const first = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-      const target = scenario === 'source-commit' ? await prisma.chapter.create({ data: { novelId: f.novelId, authorId: f.userId,
-        volumeId: first.volumeId, orderIndex: 2, orderInVolume: 2, title: '待提交的新章', content: '原文', wordCount: 2 } }) : first
+      const target = scenario === 'source-commit' ? await prisma.chapter.update({ where: { id: first.id }, data: { orderIndex: 2, orderInVolume: 2 } }) : first
+      const changedChapter = scenario === 'source-commit' ? await prisma.chapter.create({ data: { novelId: f.novelId, authorId: f.userId,
+        volumeId: first.volumeId, orderIndex: 1, orderInVolume: 1, title: '只读前章', content: '前章原文', wordCount: 4 } }) : first
       const { compilation } = await prepareStoryCompilation({ ...f, chapterId: target.id, mode: 'balanced', intentSummary: '检查当前章节' })
       const compilationId = compilation.id, state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
       await saveSceneTasks({ ...f, compilationId, tasks: [{ purpose: '推进场景', entryState: state, goal: '寻找线索', obstacle: '门已上锁',
         choice: '绕路', cost: '耗费时间', turn: '发现脚印', exitState: state, styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
       const terminal = { ...f, compilationId, chapterSummary: '章节摘要', exitState: state, lastUnfinishedAction: '', hookDecision: '',
         delayedHookReason: '', openingStructure: '动作', endingStructure: '发现线索' }
-      const changeChapter = () => prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '用户修改', revision: { increment: 1 } } })
+      const changeChapter = () => prisma.chapter.update({ where: { id: changedChapter.id }, data: { content: '用户修改', revision: { increment: 1 } } })
       if (scenario === 'stale-critic') {
         await changeChapter()
         await expect(persistCurrentContinuityReport({ ...f, compilationId, expectedChapterRevision: 1 })).rejects.toMatchObject({ code: 'CONTINUITY_INPUT_STALE' })
@@ -592,7 +597,7 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
       expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId } })).committedAt).toBeNull()
       expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(0)
       expect(await prisma.sceneTask.count({ where: { compilationId, status: 'completed' } })).toBe(0)
-    }, undefined, '修改第一章和第二章，完成连续性和人类感检查后提交。')
+    }, undefined, '修改本章并完成连续性和人类感检查后提交。')
   })
 })
 describe.runIf(available)('native continuity recovery keeps a complete second response with unknown usage fenced', () => {

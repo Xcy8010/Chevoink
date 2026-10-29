@@ -1,3 +1,4 @@
+import { originalChapterReviewRequirements } from '../../api/lib/agent/chapter-review-requirements.js'
 import { describe, expect, it, vi } from 'vitest'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
@@ -27,7 +28,8 @@ describe.runIf(available)('serial inherited terminal facts with real PostgreSQL 
           volumeId: initial.volumeId, orderIndex: (index + 1) * 10, orderInVolume: (index + 1) * 10,
           title: `合成承接${index}`, content: index === 1 ? '她拆开封条，取走清单。' : '她把清单交给门卫，留下收条。', revision: 3 } })
         if (index > 0) chapters.push(chapter)
-        const { compilation } = await prepareStoryCompilation({ ...f, chapterId: chapter.id, mode: 'balanced', intentSummary: '推进本章并保留未解决事项' })
+        expect(originalChapterReviewRequirements({ prompt: '授权自主创作全书。并修改已有章节及卷章结构。各章节检查连续性和人类感后提交。', spec: f.spec }, chapter)).toEqual({ continuity: true, quality: true })
+      const { compilation } = await prepareStoryCompilation({ ...f, chapterId: chapter.id, mode: 'balanced', intentSummary: '推进本章并保留未解决事项' })
         compilations.push(compilation.id)
         await saveSceneTasks({ ...f, compilationId: compilation.id, tasks: [{ purpose: '推进', entryState: empty, goal: '办完本章行动', obstacle: '封条',
           choice: '行动', cost: '时间', turn: '完成', exitState: empty, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
@@ -79,5 +81,5 @@ describe.runIf(available)('serial inherited terminal facts with real PostgreSQL 
         expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: historical.id } })).toEqual(historical)
       }
       expect(await prisma.aiUsageLog.count({ where: { agentRunId: f.runId } })).toBe(0)
-    }, undefined, '授权自主创作全书，并修改已有章节及卷章结构。', { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, ...(scenario === 'quote-address' ? { terminalQuoteAddressProtocol: 1 as const } : {}) }))
+    }, undefined, '授权自主创作全书。并修改已有章节及卷章结构。各章节检查连续性和人类感后提交。', { freezeWriting: true, continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, ...(scenario === 'quote-address' ? { terminalQuoteAddressProtocol: 1 as const } : {}) }))
 })

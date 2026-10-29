@@ -83,11 +83,16 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
     }
     if (options.action === 'agent3HumanityRevision') {
       const findings = JSON.parse(content.slice(content.lastIndexOf('\n[') + 1)) as Array<{ findingId: string; evidence: string; explanation: string }>
-      const duplicate = findings.filter(finding => finding.explanation === 'This paragraph repeats the saved action without a new event.')
-      expect(duplicate).toHaveLength(1)
-      expect(duplicate[0].evidence).toBeTruthy()
-      return JSON.stringify({ patches: [{ findingId: duplicate[0].findingId, replacement: '' }],
-        retainedFindings: findings.filter(finding => finding.findingId !== duplicate[0].findingId).map(finding => ({ findingId: finding.findingId,
+      const duplicate = findings.filter(finding => finding.explanation.includes('This paragraph repeats the saved action without a new event.'))
+      if (chapter.content === duplicated) {
+        expect(duplicate).toHaveLength(1)
+        expect(duplicate[0].evidence).toBeTruthy()
+      } else {
+        expect(chapter.content.trim()).toBe(original.content.trim())
+        expect(duplicate).toEqual([])
+      }
+      return JSON.stringify({ patches: duplicate.map(finding => ({ findingId: finding.findingId, replacement: '' })),
+        retainedFindings: findings.filter(finding => !duplicate.some(item => item.findingId === finding.findingId)).map(finding => ({ findingId: finding.findingId,
           reason: 'Retain this additional actual quality opinion for the author; this repair only removes the independently located duplicate action.' })) })
     }
     if (options.action === 'agent3ContinuityCritic') {
@@ -172,7 +177,10 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
   } else {
     expect(chapter.revision).toBe(original.revision + 2)
     expect(chapter.content.trim()).toBe(original.content.trim())
-    expect(actions.filter(action => action === 'agent3HumanityRevision')).toHaveLength(1)
+    const repairRequests = critic.mock.calls.filter(([, , options]) => options.action === 'agent3HumanityRevision')
+    expect(repairRequests.length).toBeGreaterThan(0)
+    for (const [, , options] of repairRequests) expect(options).toMatchObject({ targetType: 'quality_report', targetId: expect.any(String) })
+    expect(new Set(repairRequests.map(([, , options]) => options.targetId)).size).toBe(repairRequests.length)
     const repairs = events.flatMap(event => {
       const payload = event.payload as { toolName?: string; display?: { appliedBodyChange?: unknown } }
       return event.type === 'tool.result' && payload.toolName === 'quality_analyze' && payload.display?.appliedBodyChange ? [payload.display.appliedBodyChange] : []

@@ -6,6 +6,8 @@ import { pollToolApproval,requestToolApproval,resolveDurableApproval } from '../
 import { loadDurableEvents,publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { modelRouteRevision } from '../../api/lib/agent/runtime-model-cursor.js'
+import { currentNativeToolViews } from '../../api/lib/agent/runtime-tool-view.js'
+import { reduceExecutionReceipt } from '../../api/lib/agent/runtime-reducer.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { initializeExecutionState,loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
@@ -46,7 +48,7 @@ describe.runIf(available)('model tool model durable execution chain', () => {
         return new Response(`data: ${JSON.stringify(response)}\n\ndata: [DONE]\n\n`)
       })
       vi.stubGlobal('fetch', fetchMock)
-      const invokeModel = () => chatWithTools({ messages: frame.state.messages, tools, provider: route.provider, model: route.model, reasoningEffort: 'high',
+      const invokeModel = async () => chatWithTools({ messages: frame.state.messages, tools: await currentNativeToolViews(tools, f.spec.scope), provider: route.provider, model: route.model, reasoningEffort: 'high',
         providerBaseUrl: 'https://provider.invalid/v1', providerApiKey: 'fixture-not-real',
         durableExecution: { lease, operationKey: `exec:${frame.state.nextOperationSequence}`, attemptKey: '1', cursor: { expectedRevision: frame.revision, expectedHash: frame.snapshotHash } },
         usageLog: { userId: f.userId, agentRunId: f.runId, action: 'fixture' } })
@@ -284,6 +286,13 @@ describe.runIf(available)('actual model adapter execution cursor', () => {
           request.durableExecution.lease = lease
           request.usageLog.agentRunId = lease.runId
         }
+        // The executor restores a settled pending result through its original receipt, never a new model dispatch.
+        const pending = await loadExecutionState(f.userId, lease.runId)
+        const original = await prisma.agentOperation.findUniqueOrThrow({ where: { id: pending.frame.state.pendingOperationId! }, include: { attempts: { include: { usageReceipt: true } } } })
+        const originalLedger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+        await reduceExecutionReceipt(lease, { expectedRevision: pending.frame.revision, expectedHash: pending.frame.snapshotHash, operationId: original.id })
+        expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: original.id }, include: { attempts: { include: { usageReceipt: true } } } })).toEqual(original)
+        expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(originalLedger)
       } else expect(await running).toMatchObject({ content: '完整结果', billing: { status: 'settled', chargedMilli: byok ? 0 : 1, exhausted: byok ? false : true } })
       request.messages = [{ role: 'user', content: '修改本章' }]
       expect(await chatWithTools(request)).toMatchObject({ content: '完整结果', billing: { chargedMilli: byok ? 0 : 1 } })

@@ -134,7 +134,9 @@ describe.runIf(available)('authenticated never-verified persistent draft recover
     expect(completed.run).toMatchObject({ status: 'completed', taskSpec: beforeRun.taskSpec, modelTier: beforeRun.modelTier,
       customModelId: beforeRun.customModelId, reasoningEffort: beforeRun.reasoningEffort })
     expect(completed.chapter.content.trim()).toBe(content.trim())
-    expect((await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: quality.id }, include: { findings: true } }))).toEqual(oldQuality)
+    const historicalQuality = await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: quality.id }, include: { findings: true } })
+    expect(historicalQuality).toEqual({ ...oldQuality, status: 'stale', updatedAt: historicalQuality.updatedAt })
+    expect(historicalQuality.updatedAt.getTime()).toBeGreaterThanOrEqual(oldQuality.updatedAt.getTime())
     const byId = <T extends { id: string }>(rows: T[]) => [...rows].sort((a, b) => a.id.localeCompare(b.id))
     expect(await prisma.agentArtifact.findMany({ where: { id: { in: oldRows.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(oldRows)
     expect(await prisma.aiUsageLog.findMany({ where: { id: { in: usage.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(byId(usage))

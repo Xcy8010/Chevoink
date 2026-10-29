@@ -555,7 +555,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
         const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })
         expect(operation.status).toBe('failed')
         const receipt = operation.effectReceipt!
-        const output = (receipt.result as unknown as { toolResult: ToolResult }).toolResult
+        const output = executionReducer.readFailedToolResult(receipt.result)
         expect(output.requiredResult).toBeUndefined()
         expect(await executeDurableToolStep(f.lease, ctx.signal)).toMatchObject({ kind: 'recovered' })
         frame = (await loadExecutionState(ctx.userId, ctx.runId)).frame

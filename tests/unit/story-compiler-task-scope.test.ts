@@ -65,10 +65,11 @@ describe('story compiler task identity', () => {
   })
   function historicalResume(originOverride: Record<string, unknown> = {}) {
     const originalSpec = { ...spec('写下一章'), runId: 'original-run' }
-    const resumed = { id: 'new-run', startRequest: { prompt: '写下一章' }, runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: originalSpec }
-    db.agentRun.findFirst.mockImplementation(async ({ where }) => where.id === 'original-run'
-      ? { id: 'original-run', startRequest: { prompt: '写下一章' }, taskSpec: originalSpec, ...originOverride }
-      : where.id === 'new-run' ? resumed : { createdAt: new Date('2026-09-20T03:22:41Z') })
+    const resumed = { id: 'new-run', userId: 'u', novelId: 'n', startRequest: { prompt: '写下一章' }, runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: originalSpec }
+    const original = { ...resumed, id: 'original-run', status: 'paused', createdAt: new Date('2026-09-20T03:22:41Z'), ...originOverride }
+    db.agentRun.findFirst.mockImplementation(async ({ where }) => where.id === 'original-run' || where.taskSpec ? original
+      : where.id === 'new-run' ? resumed : { createdAt: original.createdAt })
+    db.agentRun.findMany.mockImplementation(async ({ where }) => where.session ? [] : [{ id: original.id }, { id: resumed.id }])
     return originalSpec
   }
   it('recovers the exact interrupted legacy origin without recreating its compiler, scenes, or checks', async () => {
@@ -89,7 +90,9 @@ describe('story compiler task identity', () => {
     expect(digest).toContain('revision=3')
     expect(digest).toContain('缺失或旧版本报告不代表通过')
     expect(db.chapter.findFirst).toHaveBeenCalledWith({ where: { id: actualChapter.id, authorId: 'u', ...activeChapterScope('n') }, select: { id: true, revision: true, content: true } })
-    expect(db.storyCompilation.findFirst.mock.calls.at(-1)![0].where.run.taskSpec).toEqual({ path: ['id'], equals: originalSpec.id })
+    expect(db.storyCompilation.findFirst.mock.calls.at(-1)![0].where.run).toEqual({ id: { in: ['original-run', 'new-run'] }, userId: 'u', novelId: 'n' })
+    expect(db.agentRun.findFirstOrThrow).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: 'u', novelId: 'n', sessionId: 'session',
+      taskSpec: { path: ['id'], equals: originalSpec.id }, incomingChildGrant: null } }))
     expect(db.agentRun.findFirst.mock.calls.some(([query]) => query.where.id === 'original-run'
       && query.where.sessionId === 'session' && query.where.userId === 'u' && query.where.novelId === 'n'
       && query.where.status.in.join(',') === 'paused,failed')).toBe(true)
@@ -198,7 +201,7 @@ describe('story compiler task identity', () => {
     db.agentRun.findFirst.mockImplementation(async ({ where, select }) => select?.manuscriptRevision
       ? { manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 0 } }
       : where.status ? { id: 'new-run' }
-        : { runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: currentTask })
+        : { id: 'new-run', userId: 'u', novelId: 'n', startRequest: { prompt: '修改当前章节' }, runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: currentTask })
     const chapter = { id: 'old31', revision: 3, content: '已保存正文', title: '原章节', orderIndex: 31 }
     const bridge = { id: 'bridge', fromChapterId: null, recentOpenings: [], recentEndings: [] }
     const compilation = { id: 'original-compiler', runId: 'original-run', chapterId: 'old31', status: 'active', chapter, sceneTasks: [], bridge,
@@ -216,7 +219,7 @@ describe('story compiler task identity', () => {
         lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '转折' })
       expect(save).toHaveBeenCalledTimes(2)
       for (const [input] of save.mock.calls) expect(input).toMatchObject({ runId: 'new-run', sourceChapterId: 'old31' })
-      expect(db.storyCompilation.findFirst.mock.calls[0][0].where.run.taskSpec).toEqual({ path: ['id'], equals: currentTask.id })
+      expect(db.storyCompilation.findFirst.mock.calls.at(-1)![0].where.run).toEqual({ id: { in: ['new-run'] }, userId: 'u', novelId: 'n' })
       expect(db.storyCompilation.update.mock.calls[0][0].data).not.toHaveProperty('runId')
     } finally { save.mockRestore() }
   })
