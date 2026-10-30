@@ -13,7 +13,7 @@ import { admissionModelOverride } from './model-assignment-admission.js'
 import { MAIN_RUN_FILTER, prepareChildGrantDeletion } from './runtime-child.js'
 import { dispatchDurableChild } from './runtime-child-tools.js'
 
-import type { AgentRun as AgentRunRecord, Prisma } from '@prisma/client'
+import { Prisma, type AgentRun as AgentRunRecord } from '@prisma/client'
 
 import type {
   AgentActionHandoff,
@@ -1551,6 +1551,8 @@ export function toAgentSession(record: {
   createdAt?: Date | string | null
   updatedAt?: Date | string | null
 }): AgentSession {
+  const policy = record.toolPolicy && typeof record.toolPolicy === 'object' && !Array.isArray(record.toolPolicy)
+    ? Object.fromEntries(Object.entries(record.toolPolicy).filter(([key]) => ['network', 'contentWrite', 'bulkWrite', 'publish', 'destructive'].includes(key))) : null
   return {
     id: record.id,
     userId: record.userId,
@@ -1558,7 +1560,7 @@ export function toAgentSession(record: {
     title: record.title,
     status: record.status,
     pinnedAt: toIso(record.pinnedAt),
-    toolPolicy: record.toolPolicy as AgentSession['toolPolicy'] ?? null,
+    toolPolicy: policy && Object.keys(policy).length ? policy as AgentSession['toolPolicy'] : null,
     sandboxMode: record.sandboxMode === 'read_only' || record.sandboxMode === 'full_access' ? record.sandboxMode : 'workspace',
     novelTitle: record.novel?.displayTitle?.trim() || record.novel?.title,
     lastRunAt: toIso(record.lastRunAt),
@@ -1816,16 +1818,21 @@ export async function updateAgentSessionData(
   const session = await ensureOwnedSession(userId, sessionId)
   const nextTitle = input.title?.trim()
 
-  const updatedSession = await prisma.agentSession.update({
-    where: { id: session.id },
-    data: {
+  const data = {
       title: nextTitle ? nextTitle.slice(0, 160) : undefined,
       status: input.status,
       pinnedAt: input.pinned === undefined ? undefined : input.pinned ? new Date() : null,
-      toolPolicy: input.toolPolicy as Prisma.InputJsonValue | undefined,
       sandboxMode: input.sandboxMode,
-    },
-  })
+  }
+  const updatedSession = input.toolPolicy ? await prisma.$transaction(async tx => {
+    // Permission edits and window preference CAS share this row. Reread after
+    // locking so an in-flight preference save cannot be replaced by old JSON.
+    const rows = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT id FROM agent_sessions WHERE id = ${session.id} AND user_id = ${userId} FOR UPDATE`)
+    if (!rows.length) throw new DataAccessError(404, 'NOT_FOUND', '窗口不存在或无权访问。')
+    const current = await tx.agentSession.findFirstOrThrow({ where: { id: session.id, userId }, select: { toolPolicy: true } })
+    return tx.agentSession.update({ where: { id: session.id }, data: { ...data,
+      toolPolicy: { ...(current.toolPolicy as Prisma.JsonObject | null), ...input.toolPolicy } as Prisma.InputJsonObject } })
+  }) : await prisma.agentSession.update({ where: { id: session.id }, data })
 
   return {
     session: toAgentSession(updatedSession),

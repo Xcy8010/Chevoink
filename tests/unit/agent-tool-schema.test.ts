@@ -14,6 +14,7 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import type { TaskSpec } from '../../shared/contracts/index.js'
 import { configureAgentTool } from '../../api/lib/agent/tools/configuration-tools.js'
 import { agentModelSelectionSchema, modelReasoningEffortSchema } from '../../shared/contracts/agent-model-assignments.js'
+import { toolWithNativeView } from '../../api/lib/agent/runtime-tool-view.js'
 
 vi.mock('zod', async importOriginal => {
   const actual = await importOriginal<typeof import('zod')>()
@@ -30,6 +31,9 @@ it('preserves the exact pre-window agent_configure parameter schema for frozen c
   const historical = z.fromJSONSchema(toOpenAIParameters(previous))
   expect(historical.safeParse({ model: { modelTier: 'speed' } }).success).toBe(true)
   expect(historical.safeParse({ sessionId: 'other', expectedRevision: 0, model: { modelTier: 'speed' } }).success).toBe(false)
+  const actual = toolWithNativeView(configureAgentTool, { type: 'function', function: { name: 'agent_configure', description: '冻结旧窗口合同', parameters: toOpenAIParameters(previous) } }).parameters
+  expect(actual.safeParse({ model: { modelTier: 'speed' } }).success).toBe(true)
+  expect(actual.safeParse({ sessionId: 'other', expectedRevision: 0, model: { modelTier: 'speed' } }).success).toBe(false)
 })
 
 // 回归：novel_import 顶层 discriminatedUnion 转换后没有 type，DeepSeek 按 type null 拒绝，

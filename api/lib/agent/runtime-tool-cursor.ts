@@ -154,7 +154,7 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
         // An exception is an implementation fault, not proof of invalid user/model data.
         // Leave it for recovery instead of recording a deterministic schema rejection.
         const actualValidator = projected || call.name === 'agent_configure' ? toolWithNativeView(validator, published) : validator
-        const normalized = normalizeToolInput(actualValidator, parsed)
+        const normalized = normalizeToolInput(validator, parsed)
         const validated = validateToolInput(actualValidator, normalized)
         if (!validated.success) {
           code = 'TOOL_SCHEMA_INVALID'

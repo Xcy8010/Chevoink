@@ -28,6 +28,8 @@ import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projecti
 import { bindConfigurationConsent, consumeDurableConfigurationConsent } from '../../api/lib/agent/configuration-journal.js'
 import { assertConfigurationAuthority } from '../../api/lib/agent/configuration-authority.js'
 import { getWindowConfiguration, patchWindowConfiguration } from '../../api/lib/agent/window-configuration.js'
+import { updateAgentSessionData, toAgentSession } from '../../api/lib/agent/run-service.js'
+import { Prisma } from '@prisma/client'
 import { prepareToolCursorOperation } from '../../api/lib/agent/runtime-tool-cursor.js'
 import { toOpenAIParameters } from '../../api/lib/agent/tool-schema.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
@@ -92,6 +94,39 @@ function previousConfigurationParameters() {
 }
 
 describe.runIf(available)('model assignments and native configuration real isolated PG', () => {
+  it.each(['sql-null', 'json-null', 'policy'] as const)('stores session-owned preferences with %s CAS while preserving permission edits', async initial => fixture(async f => {
+    const permissions = { network: 'deny', contentWrite: 'ask', bulkWrite: 'deny', publish: 'deny', destructive: 'ask' } as const
+    await prisma.agentSession.update({ where: { id: f.sessionId }, data: { toolPolicy: initial === 'sql-null' ? Prisma.DbNull : initial === 'json-null' ? Prisma.JsonNull : permissions } })
+    const results = await Promise.allSettled(['stable', 'bold'].map(creativeFreedom => patchWindowConfiguration(f.userId, f.sessionId,
+      { expectedRevision: 0, creativeFreedom: creativeFreedom as 'stable' | 'bold' })))
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1)
+    expect(results.filter(result => result.status === 'rejected')).toHaveLength(1)
+    const rejected = results.find(result => result.status === 'rejected')
+    if (rejected?.status === 'rejected') expect(rejected.reason).toMatchObject({ code: 'WINDOW_CONFIGURATION_CONFLICT' })
+    const saved = await getWindowConfiguration(f.userId, f.sessionId)
+    expect(saved.revision).toBe(1)
+    const beforePolicy = (await prisma.agentSession.findUniqueOrThrow({ where: { id: f.sessionId } })).toolPolicy as Prisma.JsonObject
+    if (initial === 'policy') expect(beforePolicy).toMatchObject(permissions)
+    expect(beforePolicy.windowConfiguration).toMatchObject({ revision: 1, configuration: saved.configuration })
+    const response = await updateAgentSessionData(f.userId, f.sessionId, { toolPolicy: permissions })
+    expect(response.session.toolPolicy).toEqual(permissions)
+    expect(response.session.toolPolicy).not.toHaveProperty('windowConfiguration')
+    expect(await getWindowConfiguration(f.userId, f.sessionId)).toMatchObject({ revision: 1, configuration: saved.configuration })
+    const changed = { ...permissions, contentWrite: 'deny' as const }
+    const concurrent = await Promise.allSettled([updateAgentSessionData(f.userId, f.sessionId, { toolPolicy: changed }),
+      patchWindowConfiguration(f.userId, f.sessionId, { expectedRevision: 1, creativeFreedom: 'balanced' })])
+    expect(concurrent[0].status).toBe('fulfilled')
+    const after = await prisma.agentSession.findUniqueOrThrow({ where: { id: f.sessionId } })
+    expect(after.toolPolicy).toMatchObject(changed)
+    expect(toAgentSession(after).toolPolicy).toEqual(changed)
+    const final = await getWindowConfiguration(f.userId, f.sessionId)
+    if (concurrent[1].status === 'fulfilled') expect(final).toMatchObject({ revision: 2, configuration: { creativeFreedom: 'balanced' } })
+    else {
+      expect(concurrent[1].reason).toMatchObject({ code: 'WINDOW_CONFIGURATION_CONFLICT' })
+      expect(final).toMatchObject({ revision: 1, configuration: saved.configuration })
+    }
+    expect(await prisma.agentModelAssignment.count({ where: { userId: f.userId } })).toBe(0)
+  }))
   it.each([true, false])('preserves active explicit selection=%s independently of preferences for future requests', async explicit => fixture(async f => {
     await patchModelAssignments(f.userId, { scope: 'global', expectedRevision: 0, assignments: { main: { modelTier: 'custom', customModelId: f.modelA } } })
     const frozen = await freezeModelAssignments(f.userId, f.novelId)

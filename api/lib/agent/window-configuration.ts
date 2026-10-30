@@ -1,16 +1,12 @@
-import { createHash } from 'node:crypto'
 import { Prisma, type AgentRun } from '@prisma/client'
+import { z } from 'zod'
 import { agentWindowConfigurationSchema, type AgentWindowConfiguration, type AgentWindowConfigurationPayload, type PatchAgentWindowConfiguration } from '../../../shared/contracts/agent-window-configuration.js'
 import { prisma, DataAccessError } from '../prisma.js'
 import { resolveAssignedModel } from './model-assignments.js'
 import { agentModelSelectionSchema } from '../../../shared/contracts/agent-model-assignments.js'
 import { MAIN_RUN_FILTER } from './runtime-child.js'
 
-// The existing sparse preference store also holds window preferences. Its
-// fixed-length key keeps the session namespace separate from novel/global rows.
-export function windowConfigurationKey(sessionId: string) {
-  return createHash('sha256').update(`agent-window:${sessionId}`).digest('hex')
-}
+const storedConfigurationSchema = z.object({ revision: z.number().int().positive(), configuration: agentWindowConfigurationSchema }).strict()
 
 function projectRunWindowConfiguration(startRequest: Prisma.JsonValue | null, taskSpec: Prisma.JsonValue | null,
   history: ReadonlyArray<{ response: Prisma.JsonValue }>): { modelSelectionSource: NonNullable<AgentWindowConfigurationPayload['modelSelectionSource']>; creativeFreedom: AgentWindowConfiguration['creativeFreedom'] } {
@@ -37,9 +33,10 @@ export async function readRunWindowConfiguration(db: Prisma.TransactionClient | 
 }
 
 export async function getWindowConfiguration(userId: string, sessionId: string, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<AgentWindowConfigurationPayload> {
-  const session = await db.agentSession.findFirst({ where: { id: sessionId, userId }, select: { id: true, novelId: true, title: true } })
+  const session = await db.agentSession.findFirst({ where: { id: sessionId, userId }, select: { id: true, novelId: true, title: true, toolPolicy: true } })
   if (!session) throw new DataAccessError(404, 'NOT_FOUND', '窗口不存在或无权访问。')
-  const stored = await db.agentModelAssignment.findUnique({ where: { userId_scopeKey: { userId, scopeKey: windowConfigurationKey(sessionId) } } })
+  const policy = session.toolPolicy as Prisma.JsonObject | null
+  const stored = policy?.windowConfiguration === undefined ? null : storedConfigurationSchema.parse(policy.windowConfiguration)
   if (!stored) {
     const latest = await db.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, sessionId, userId, novelId: session.novelId },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -60,19 +57,23 @@ export async function getWindowConfiguration(userId: string, sessionId: string, 
     }
   }
   return { sessionId, novelId: session.novelId, title: session.title, revision: stored?.revision ?? 0,
-    source: stored ? 'saved' : 'default', configuration: agentWindowConfigurationSchema.parse(stored?.assignments ?? {}) }
+    source: stored ? 'saved' : 'default', configuration: stored?.configuration ?? agentWindowConfigurationSchema.parse({}) }
 }
 
 /** Already validated selections; this DB-only step shares the tool receipt transaction. */
 export async function applyWindowConfiguration(tx: Prisma.TransactionClient, userId: string, sessionId: string, input: PatchAgentWindowConfiguration) {
+  const session = await tx.agentSession.findFirst({ where: { id: sessionId, userId }, select: { id: true, toolPolicy: true } })
+  if (!session) throw new DataAccessError(404, 'NOT_FOUND', '窗口不存在或无权访问。')
   const current = await getWindowConfiguration(userId, sessionId, tx)
   if (current.revision !== input.expectedRevision) throw new DataAccessError(409, 'WINDOW_CONFIGURATION_CONFLICT', '窗口配置已更新，请刷新后重试。')
   const configuration = { ...current.configuration, ...(input.model !== undefined ? { model: input.model } : {}),
     ...(input.creativeFreedom !== undefined ? { creativeFreedom: input.creativeFreedom } : {}) }
-  const scopeKey = windowConfigurationKey(sessionId)
-  if (current.revision === 0) await tx.agentModelAssignment.create({ data: { userId, novelId: current.novelId, scopeKey, assignments: configuration } })
-  else if ((await tx.agentModelAssignment.updateMany({ where: { userId, scopeKey, revision: input.expectedRevision },
-    data: { assignments: configuration, revision: { increment: 1 } } })).count !== 1) {
+  // A session owns its preferences. The policy's five permission fields remain
+  // untouched; compare the complete JSON so concurrent permission edits survive.
+  const policy = session.toolPolicy as Prisma.JsonObject | null
+  if ((await tx.agentSession.updateMany({ where: { id: sessionId, userId,
+    toolPolicy: { equals: session.toolPolicy === null ? Prisma.AnyNull : session.toolPolicy as Prisma.InputJsonValue } },
+    data: { toolPolicy: { ...policy, windowConfiguration: { revision: current.revision + 1, configuration } } } })).count !== 1) {
     throw new DataAccessError(409, 'WINDOW_CONFIGURATION_CONFLICT', '窗口配置已更新，请刷新后重试。')
   }
   return { ...current, source: 'saved' as const, modelSelectionSource: configuration.model ? 'explicit' as const : 'inherited' as const,
@@ -82,10 +83,5 @@ export async function applyWindowConfiguration(tx: Prisma.TransactionClient, use
 export async function patchWindowConfiguration(userId: string, sessionId: string, input: PatchAgentWindowConfiguration) {
   await getWindowConfiguration(userId, sessionId)
   const model = input.model ? (await resolveAssignedModel(userId, input.model)).selection : input.model
-  try {
-    return await prisma.$transaction(tx => applyWindowConfiguration(tx, userId, sessionId, { ...input, ...(model !== undefined ? { model } : {}) }))
-  } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') throw new DataAccessError(409, 'WINDOW_CONFIGURATION_CONFLICT', '窗口配置已更新，请刷新后重试。')
-    throw error
-  }
+  return prisma.$transaction(tx => applyWindowConfiguration(tx, userId, sessionId, { ...input, ...(model !== undefined ? { model } : {}) }))
 }

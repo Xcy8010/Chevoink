@@ -59,7 +59,14 @@ export function usesCurrentNativeView(action: string): boolean { return simplifi
 
 export function toolWithNativeView<T extends Pick<AgentTool, 'name' | 'parameters'>>(tool: T, definition: NativeToolView): T {
   if (tool.name !== definition.function.name) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '工具名称与实际模型视图不同。')
-  return { ...tool, parameters: z.intersection(tool.parameters, z.fromJSONSchema(definition.function.parameters)) }
+  const frozen = z.fromJSONSchema(definition.function.parameters)
+  // Zod intersections intentionally merge object keys, which lets a newly
+  // introduced current key bypass an older strict frozen object. Keep the
+  // original input for the current parser, but enforce frozen ownership first.
+  return { ...tool, parameters: z.unknown().superRefine((input, ctx) => {
+    const result = frozen.safeParse(input)
+    if (!result.success) for (const issue of result.error.issues) ctx.addIssue({ ...issue })
+  }).pipe(tool.parameters) }
 }
 
 export async function currentNativeToolViews(frozen: readonly NativeToolView[], scope: TaskSpec['scope']) {

@@ -973,7 +973,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       }
       if (['synthetic-mechanical', 'synthetic-partial', 'v5-parser-mechanical'].includes(scenario)) {
         const operation = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_analyze', kind: 'tool' } })
-        expect(operation.inputSnapshot).toMatchObject({ input: { work: { version: scenario === 'v5-parser-mechanical' ? 5 : 13, parserVersion: scenario === 'v5-parser-mechanical' ? 1 : 3 } } })
+        expect(operation.inputSnapshot).toMatchObject({ input: { work: { version: scenario === 'v5-parser-mechanical' ? 5 : 14, parserVersion: scenario === 'v5-parser-mechanical' ? 1 : 3 } } })
         expect(reports[0].deterministicMetrics).toMatchObject({ independentCheck: scenario === 'synthetic-mechanical' ? 'complete' : 'unavailable',
           criticResponse: { classification: scenario === 'synthetic-mechanical' ? 'complete' : scenario === 'synthetic-partial' ? 'findings_invalid' : 'incomplete_json' } })
         if (scenario === 'synthetic-partial') expect(reports[0].findings.filter(item => item.source === 'critic')).toHaveLength(1)

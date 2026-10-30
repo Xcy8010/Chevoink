@@ -109,21 +109,34 @@ it.each(['text.delta', 'reasoning.delta'] as const)('hands off immediately to ac
   expect(screen.getByRole('status')).toBeTruthy()
   for (let seq = 2; seq <= 5; seq++) {
     act(() => apply({ ...base, seq, type, delta: `第${seq}处调整让人物的选择更清楚。\n\n` }))
-    // The existing Markdown renderer batches visible updates for 40ms; it
-    // owns a separate timer and is not a second waiting indicator.
-    act(() => vi.advanceTimersByTime(40))
-    expect(view.container.textContent).toContain(`第${seq}处调整让人物的选择更清楚。`)
+    // The received chunk begins appearing on the next reveal frame; its
+    // animation timer is independent of the one silence deadline.
+    act(() => vi.advanceTimersByTime(16))
+    expect(view.container.textContent).toContain(`第${seq}处`)
     expect(view.container.textContent).not.toContain('正在处理...')
+    act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS - 17))
+    expect(view.container.textContent).toContain(`第${seq}处调整让人物的选择更清楚。`)
     expect(vi.getTimerCount()).toBe(1)
-    act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS - 41))
     expect(screen.queryByRole('status')).toBeNull()
   }
   act(() => vi.advanceTimersByTime(1))
   expect(screen.getAllByRole('status')).toHaveLength(1)
-  // A heartbeat, unfinished paragraph or replay is not visible progress.
-  act(() => apply({ ...base, seq: 6, type, delta: '尚未展示' }))
+  // An ordinary tail is real visible output without needing a blank line.
+  act(() => apply({ ...base, seq: 6, type, delta: '新的可见输出' }))
+  expect(screen.queryByRole('status')).toBeNull()
+  act(() => vi.advanceTimersByTime(16))
+  expect(view.container.textContent).toContain('新的')
+  act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS - 17))
+  expect(view.container.textContent).toContain('新的可见输出')
+  expect(screen.queryByRole('status')).toBeNull()
+  expect(vi.getTimerCount()).toBe(1)
+  act(() => vi.advanceTimersByTime(1))
+  expect(screen.getAllByRole('status')).toHaveLength(1)
+  // An ambiguous tool prefix remains hidden and cannot extend that deadline.
+  act(() => apply({ ...base, seq: 7, type, delta: '\n\n调用 chapter_' }))
   expect(screen.getByRole('status')).toBeTruthy()
-  act(() => apply({ ...base, seq: 7, type: 'run.paused', reason: 'needs_input' }))
+  expect(view.container.textContent).not.toContain('chapter_')
+  act(() => apply({ ...base, seq: 8, type: 'run.paused', reason: 'needs_input' }))
   view.unmount()
   expect(vi.getTimerCount()).toBe(0)
 })

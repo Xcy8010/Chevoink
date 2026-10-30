@@ -11,7 +11,7 @@ import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { savedRunUsageSchema, type PendingReviewCall } from './checkpoint.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { readOriginalTaskRequest, originalTaskRunIds } from './original-request.js'
-import { analyzeDeterministicQuality, buildHumanityQualityContext, getLatestQualityReport, HUMANITY_CRITIC_VERSION, FROZEN_V5_HUMANITY_CRITIC_VERSION,
+import { analyzeDeterministicQuality, buildHumanityQualityContext, getLatestQualityReport, HUMANITY_PROMPT_PROTOCOL, HUMANITY_CRITIC_VERSION, FROZEN_V5_HUMANITY_CRITIC_VERSION,
   persistHumanityQualityReport, prepareQualityFindings, qualityReviewContextHash } from './humanity-quality.js'
 import { buildQualityEvidenceSources, inspectCorrectableCriticResponse } from './quality-evidence.js'
 import { buildCriticInput, buildCriticSystem } from './tools/humanity-quality-tools.js'
@@ -57,6 +57,7 @@ const authorizationSchema = z.object({ authorizationId: idSchema, humanAuthoriza
 }).strict()
 type Frozen = AuthorReviewReplacementAuthorization & { version: 1; newCallId: string; sourceCallEventId: string; sourceResultId: string;
   lineageIds: string[]; specHash: string; originalUsageHash: string; sourceEventsHash: string; budget: { currentTurn: number; usage: Prisma.JsonValue };
+  criticPromptProtocol?: 'humanity-context.v5' | 'humanity-context.v6' | typeof HUMANITY_PROMPT_PROTOCOL;
   criticVersion: typeof HUMANITY_CRITIC_VERSION | typeof FROZEN_V5_HUMANITY_CRITIC_VERSION; baselineUsage: Array<{ id: string; hash: string }>; quotedMaximumCreditMilli: number }
 type Completion = { version: 1; authorizationId: string; authorizationEventId: string; claimEventId: string; frozenHash: string;
   observationEventId: string; observationHash: string; newCallId: string; reportId: string; reportHash: string; responseHash: string; finishReason: string | null; toolCalls: number; newUsageIds: string[] }
@@ -72,6 +73,7 @@ const observationSchema = z.object({ version: z.literal(1), authorizationId: idS
 const frozenSchema = authorizationSchema.extend({ version: z.literal(1), newCallId: z.string().min(1), sourceCallEventId: z.string().min(1),
   sourceResultId: z.string().min(1), lineageIds: z.array(z.string().min(1)).min(1), specHash: digest, originalUsageHash: digest, sourceEventsHash: digest,
   budget: z.object({ currentTurn: z.number().int().nonnegative(), usage: z.record(z.string(), z.unknown()) }).strict(),
+  criticPromptProtocol: z.enum(['humanity-context.v5', 'humanity-context.v6', HUMANITY_PROMPT_PROTOCOL]).optional(),
   criticVersion: z.union([z.literal(HUMANITY_CRITIC_VERSION), z.literal(FROZEN_V5_HUMANITY_CRITIC_VERSION)]), baselineUsage: z.array(z.object({ id: z.string().min(1), hash: digest }).strict()).min(1),
   quotedMaximumCreditMilli: z.number().int().nonnegative().max(MAX_CREDIT_STORAGE_INT),
 }).strict()
@@ -135,9 +137,16 @@ function budgetPreserved(current: Prisma.JsonValue | null, frozen: Frozen, readi
     object(old)[key] === undefined || typeof object(now)[key] === 'number' && Number(object(now)[key]) >= Number(object(old)[key]))
 }
 
+/** Old authorizations predate a separate prompt version. Keep their original
+ * v5/v6 inference; only newly admitted work binds the current prompt explicitly. */
+function replacementPromptProtocol(frozen?: Pick<Frozen, 'criticVersion' | 'criticPromptProtocol'>) {
+  return frozen?.criticPromptProtocol ?? (frozen ? frozen.criticVersion === FROZEN_V5_HUMANITY_CRITIC_VERSION
+    ? 'humanity-context.v5' : 'humanity-context.v6' : HUMANITY_PROMPT_PROTOCOL)
+}
+
 async function current(tx: Prisma.TransactionClient, input: AuthorReviewReplacementAuthorization, frozen?: Frozen, reading = false) {
   const { subject, pending } = input
-  const protocol = (frozen?.criticVersion ?? ('criticVersion' in input ? input.criticVersion : undefined)) === FROZEN_V5_HUMANITY_CRITIC_VERSION ? 'humanity-context.v5' : 'humanity-context.v6'
+  const protocol = replacementPromptProtocol(frozen ?? ('criticVersion' in input ? input as Frozen : undefined))
   const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId } })
   if (!run || run.taskRootId || run.runtimeProtocolVersion !== 0 || (!reading && !['failed', 'paused'].includes(run.status))
     || ['completed', 'cancelled'].includes(run.status) || object(run.usage).authorEnded !== undefined
@@ -240,7 +249,7 @@ export async function authorizeAuthorReviewReplacement(tx: Prisma.TransactionCli
     OR: [{ agentRunId: { in: live.ids } }, { targetId: { in: [input.pending.chapterId, input.pending.compilationId!] } }] }, orderBy: { id: 'asc' } })
   const frozen: Frozen = { ...input, version: 1, newCallId: callId(input.authorizationId), sourceCallEventId: live.call.id,
     sourceResultId: live.result.id, lineageIds: [...live.ids].sort(), specHash: hash(live.original.spec), sourceEventsHash: hash(live.events),
-    originalUsageHash: hash(live.oldUsage), budget: { currentTurn: live.run.currentTurn, usage: live.run.usage! }, criticVersion: HUMANITY_CRITIC_VERSION,
+    originalUsageHash: hash(live.oldUsage), budget: { currentTurn: live.run.currentTurn, usage: live.run.usage! }, criticPromptProtocol: HUMANITY_PROMPT_PROTOCOL, criticVersion: HUMANITY_CRITIC_VERSION,
     baselineUsage: baseline.map(row => ({ id: row.id, hash: hash(row) })), quotedMaximumCreditMilli: live.quote }
   const event = await append(tx, input.subject.runId, eventId(input.authorizationId, 'authorization'), eventTypes.authorization, frozen)
   return { status: 'authorized' as const, authorizationEventId: event.id, newCallId: frozen.newCallId }
@@ -379,7 +388,7 @@ export async function completeAuthorReviewReplacement(tx: Prisma.TransactionClie
   const report = await persistHumanityQualityReport({ ...frozen.subject, compilationId: frozen.pending.compilationId!, chapterId: frozen.pending.chapterId,
     chapterRevision: frozen.expected.currentRevision, mode: live.bundle.compilation!.mode, deterministicMetrics: live.deterministic.metrics,
     qualityContextHash: frozen.expected.qualityContextHash, criticVersion: frozen.criticVersion,
-    criticPromptProtocol: frozen.criticVersion === FROZEN_V5_HUMANITY_CRITIC_VERSION ? 'humanity-context.v5' : 'humanity-context.v6', sources: live.sources,
+    criticPromptProtocol: replacementPromptProtocol(frozen), sources: live.sources,
     deterministicFindings: live.deterministic.findings, criticFindings: inspected.findings, criticComplete: complete,
     criticDropped: inspected.diagnostic.droppedFindings, criticResponseDiagnostic: { ...inspected.diagnostic, callId: frozen.newCallId } }, tx)
   const actual = await tx.chapterQualityReport.findFirstOrThrow({ where: { id: report.id }, include: { findings: true } })

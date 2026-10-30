@@ -9,13 +9,13 @@ import { toOpenAIParameters } from '../../api/lib/agent/tool-schema.js'
 import { readExecutionFrame } from '../../api/lib/agent/runtime-state.js'
 import { chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { getToolByName } from '../../api/lib/agent/tools/registry.js'
 
 vi.mock('../../api/lib/agent/runtime-state.js', () => ({ readExecutionFrame: vi.fn() }))
 const view = (name: string, parameters: Record<string, unknown>, description = '旧平台说明'): NativeToolView => ({ type: 'function', function: { name, parameters, description } })
 
 describe('current native built-in presentation', () => {
   it.each(['chapter_write', 'chapter_append', 'chapter_edit_range', 'continuity_validate', 'chapter_bridge_commit'])('does not require a new provider source frame for metadata-only %s clarification', async action => {
-    const { getToolByName } = await import('../../api/lib/agent/tools/registry.js')
     const tool = getToolByName(action)!, scope = { novelId: 'n' }
     const { strict: _strict, ...implicit } = (await currentNativeToolViews([view(action, toOpenAIParameters(tool.parameters))], scope))[0].function
     const frozen: NativeToolView[] = [{ type: 'function', function: implicit }]

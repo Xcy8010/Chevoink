@@ -1,18 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { patchAgentWindowConfigurationSchema } from '../../shared/contracts/agent-window-configuration.js'
 const mocks = vi.hoisted(() => ({ session: vi.fn(), latest: vi.fn(), history: vi.fn(), read: vi.fn(), create: vi.fn(), update: vi.fn(), resolve: vi.fn() }))
+const policies = new Map<string, unknown>()
 vi.mock('../../api/lib/prisma.js', () => {
-  const db = { agentSession: { findFirst: mocks.session }, agentRun: { findFirst: mocks.latest }, agentConfigurationChange: { findMany: mocks.history },
-    agentModelAssignment: { findUnique: mocks.read, create: mocks.create, updateMany: mocks.update } }
+  const db = { agentSession: { findFirst: mocks.session, updateMany: mocks.update }, agentRun: { findFirst: mocks.latest }, agentConfigurationChange: { findMany: mocks.history },
+    agentModelAssignment: { findUnique: mocks.read, create: mocks.create } }
   return { DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } },
     prisma: { ...db, $transaction: (work: (tx: typeof db) => unknown) => work(db) } }
 })
 vi.mock('../../api/lib/agent/model-assignments.js', () => ({ resolveAssignedModel: mocks.resolve }))
-import { getWindowConfiguration, patchWindowConfiguration, windowConfigurationKey, readRunWindowConfiguration } from '../../api/lib/agent/window-configuration.js'
+import { getWindowConfiguration, patchWindowConfiguration, readRunWindowConfiguration } from '../../api/lib/agent/window-configuration.js'
 
 beforeEach(() => {
   vi.clearAllMocks()
-  mocks.session.mockImplementation(async ({ where }) => where.userId === 'owner' && where.id !== 'foreign' ? { id: where.id, novelId: 'novel', title: where.id } : null)
+  policies.clear()
+  mocks.session.mockImplementation(async ({ where }) => where.userId === 'owner' && where.id !== 'foreign'
+    ? { id: where.id, novelId: 'novel', title: where.id, toolPolicy: policies.get(where.id) ?? null } : null)
   mocks.read.mockResolvedValue(null)
   mocks.latest.mockResolvedValue(null)
   mocks.history.mockResolvedValue([])
@@ -59,7 +62,7 @@ describe('owned independent window configuration', () => {
       taskSpec: {}, configurationChanges: [] })
     expect(await getWindowConfiguration('owner', 'window-a')).toMatchObject({ modelSelectionSource: 'inherited', configuration: { model: null } })
     mocks.latest.mockClear()
-    mocks.read.mockResolvedValue({ revision: 3, assignments: { model: null, creativeFreedom: 'bold' } })
+    policies.set('window-a', { windowConfiguration: { revision: 3, configuration: { model: null, creativeFreedom: 'bold' } } })
     expect(await getWindowConfiguration('owner', 'window-a')).toMatchObject({ revision: 3, source: 'saved', configuration: { model: null, creativeFreedom: 'bold' } })
     expect(mocks.latest).not.toHaveBeenCalled()
   })
@@ -68,8 +71,8 @@ describe('owned independent window configuration', () => {
     const b = await getWindowConfiguration('owner', 'window-b')
     expect(a.configuration).toEqual({ model: null, creativeFreedom: 'balanced' })
     expect(b.configuration).toEqual(a.configuration)
-    expect(windowConfigurationKey('window-a')).not.toBe(windowConfigurationKey('window-b'))
-    expect(windowConfigurationKey('a'.repeat(64))).toHaveLength(64)
+    expect(mocks.session.mock.calls.map(([query]) => query.where.id)).toEqual(['window-a', 'window-b'])
+    expect(mocks.read).not.toHaveBeenCalled()
     expect(mocks.resolve).not.toHaveBeenCalled()
   })
   it('checks ownership before reading preferences or resolving a selected model', async () => {
@@ -79,19 +82,22 @@ describe('owned independent window configuration', () => {
     expect(mocks.create).not.toHaveBeenCalled()
   })
   it('stores resolved model effort and mode without global/novel assignments or active-run writes', async () => {
+    policies.set('window-a', { network: 'deny', contentWrite: 'ask', publish: 'deny' })
     const result = await patchWindowConfiguration('owner', 'window-a', { expectedRevision: 0, model: { modelTier: 'speed' }, creativeFreedom: 'bold' })
     expect(result).toMatchObject({ sessionId: 'window-a', revision: 1, configuration: { model: { modelTier: 'speed', reasoningEffort: 'medium' }, creativeFreedom: 'bold' } })
-    expect(mocks.create).toHaveBeenCalledWith({ data: { userId: 'owner', novelId: 'novel', scopeKey: windowConfigurationKey('window-a'), assignments: result.configuration } })
+    expect(mocks.update).toHaveBeenCalledWith({ where: { id: 'window-a', userId: 'owner', toolPolicy: { equals: { network: 'deny', contentWrite: 'ask', publish: 'deny' } } },
+      data: { toolPolicy: { network: 'deny', contentWrite: 'ask', publish: 'deny', windowConfiguration: { revision: 1, configuration: result.configuration } } } })
+    expect(mocks.create).not.toHaveBeenCalled()
   })
   it('preserves model on a partial mode change and supports returning to inherited model', async () => {
-    mocks.read.mockResolvedValue({ revision: 4, assignments: { model: { modelTier: 'ultimate', reasoningEffort: 'max' }, creativeFreedom: 'stable' } })
+    policies.set('window-a', { windowConfiguration: { revision: 4, configuration: { model: { modelTier: 'ultimate', reasoningEffort: 'max' }, creativeFreedom: 'stable' } } })
     expect((await patchWindowConfiguration('owner', 'window-a', { expectedRevision: 4, creativeFreedom: 'bold' })).configuration)
       .toEqual({ model: { modelTier: 'ultimate', reasoningEffort: 'max' }, creativeFreedom: 'bold' })
     expect((await patchWindowConfiguration('owner', 'window-a', { expectedRevision: 4, model: null })).configuration)
       .toEqual({ model: null, creativeFreedom: 'stable' })
   })
   it('rejects stale or concurrently updated preferences without overwriting', async () => {
-    mocks.read.mockResolvedValue({ revision: 2, assignments: {} })
+    policies.set('window-a', { windowConfiguration: { revision: 2, configuration: { model: null, creativeFreedom: 'balanced' } } })
     await expect(patchWindowConfiguration('owner', 'window-a', { expectedRevision: 1, creativeFreedom: 'bold' })).rejects.toMatchObject({ code: 'WINDOW_CONFIGURATION_CONFLICT' })
     expect(mocks.update).not.toHaveBeenCalled()
     mocks.update.mockResolvedValue({ count: 0 })

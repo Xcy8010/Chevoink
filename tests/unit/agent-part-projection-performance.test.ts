@@ -34,10 +34,15 @@ it('projects an unchanged 75-part history once while 40 further deltas arrive', 
 })
 
 it('keeps streaming and finished reasoning projections separate for the same immutable part', () => {
-  const part: AgentMessagePart = Object.freeze({ type: 'reasoning', text: '还在核对人物动机。' })
-  expect(projectAgentAuthorParts([part], true)).toEqual([{ type: 'reasoning', text: '' }])
+  const ordinary: AgentMessagePart = Object.freeze({ type: 'reasoning', text: '还在核对人物动机。' })
+  expect(projectAgentAuthorParts([ordinary], true)[0]).toBe(ordinary)
+  const tail: AgentMessagePart = Object.freeze({ type: 'reasoning', text: '已核对人物动机。\n\n新到达的普通尾句' })
+  expect(projectAgentAuthorParts([tail], true)[0]).toBe(tail)
+  const part: AgentMessagePart = Object.freeze({ type: 'reasoning', text: '还在核对人物动机。\n\n“尚未闭合的引用' })
+  const streaming = [{ type: 'reasoning', text: '还在核对人物动机。\n\n' }]
+  expect(projectAgentAuthorParts([part], true)).toEqual(streaming)
   expect(projectAgentAuthorParts([part], false)).toEqual([part])
-  expect(projectAgentAuthorParts([part], true)).toEqual([{ type: 'reasoning', text: '' }])
+  expect(projectAgentAuthorParts([part], true)).toEqual(streaming)
   expect(projectAgentAuthorParts([part], false)[0]).toBe(part)
 })
 

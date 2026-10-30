@@ -97,23 +97,24 @@ export function projectAgentAuthorText(text: string): string {
 export function createAgentAuthorTextStream() {
   let pending = ''
   let published = 0
+  function ordinaryIncrement(): string {
+    const start = pending.trimStart().replace(/^(?:(?:[-*+] |\d+[.)、] |#{1,6} )\s*)+/, '')
+    const introductions = ['现在', '接下来', '正在', '已经', '然后', '我', '我们', '调用', '工具参数', '调用参数', '参数', '编译', '校验', '重新发起', '落库', '协议', '执行', '提交', '读取', '写入', '进入', '拿到', '正文完成', '正文已完成']
+    const remainder = start.replace(/^(?:(?:现在|接下来|正在|已经|然后|我(?:将|会|先|需要|已)?|我们(?:将|会|先|需要|已)?)\s*)+/, '')
+    if (!remainder || introductions.some(prefix => prefix.startsWith(remainder)) || isOperational(pending)
+      || /^(?:I|We)\b/.test(start) || /[`~<>[\]{}"“”「」『』‘’\n]/.test(pending)) return ''
+    // A trailing ASCII token may still become a tool name or identifier.
+    const stable = pending.replace(/[A-Za-z0-9_]+$/, '').trimEnd()
+    const visible = projectAgentAuthorText(stable)
+    const increment = visible.slice(published)
+    published = visible.length
+    return increment
+  }
   return {
     push(delta: string): string {
       pending += delta
       const boundary = [...pending.matchAll(/\n[\t ]*\n/g)].at(-1)
-      if (!boundary) {
-        const start = pending.trimStart().replace(/^(?:(?:[-*+] |\d+[.)、] |#{1,6} )\s*)+/, '')
-        const introductions = ['现在', '接下来', '正在', '已经', '然后', '我', '我们', '调用', '工具参数', '调用参数', '参数', '编译', '校验', '重新发起', '落库', '协议', '执行', '提交', '读取', '写入', '进入', '拿到', '正文完成', '正文已完成']
-        const remainder = start.replace(/^(?:(?:现在|接下来|正在|已经|然后|我(?:将|会|先|需要|已)?|我们(?:将|会|先|需要|已)?)\s*)+/, '')
-        if (!remainder || introductions.some(prefix => prefix.startsWith(remainder)) || isOperational(pending)
-          || /^(?:I|We)\b/.test(start) || /[`~<>[\]{}"“”「」『』‘’\n]/.test(pending)) return ''
-        // A trailing ASCII token may still become a tool name or identifier.
-        const stable = pending.replace(/[A-Za-z0-9_]+$/, '').trimEnd()
-        const visible = projectAgentAuthorText(stable)
-        const increment = visible.slice(published)
-        published = visible.length
-        return increment
-      }
+      if (!boundary) return ordinaryIncrement()
       const end = boundary.index + boundary[0].length
       const complete = pending.slice(0, end)
       const introduction = complete.trimEnd().split(/\n\s*\n/).at(-1) ?? ''
@@ -132,7 +133,7 @@ export function createAgentAuthorTextStream() {
       pending = pending.slice(end)
       const increment = projectAgentAuthorText(complete).slice(published)
       published = 0
-      return increment
+      return increment + ordinaryIncrement()
     },
     finish(): string {
       const text = projectAgentAuthorText(pending).slice(published)
@@ -154,7 +155,7 @@ function projectAuthorPart(part: AgentMessagePart, streamingReasoning: boolean):
   if (cache.has(part)) return cache.get(part)!
   let projected: AgentMessagePart | null = part
   if (part.type === 'text' || part.type === 'reasoning') {
-    // Classify complete accumulated paragraphs while thinking is streaming.
+    // Re-project accumulated thinking through the same incremental classifier.
     // An incomplete protocol/quote prefix must never escape expanded UI.
     const text = part.type === 'reasoning' && streamingReasoning
       ? createAgentAuthorTextStream().push(part.text) : projectAgentAuthorText(part.text)

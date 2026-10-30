@@ -14,6 +14,7 @@ import { buildCriticInput, buildCriticSystem } from '../../api/lib/agent/tools/h
 import { buildQualityEvidenceSources } from '../../api/lib/agent/quality-evidence.js'
 import { readReviewReceiptWait } from '../../api/lib/agent/review-resume-readiness.js'
 import { generateTextCompletion } from '../../api/lib/ai-service.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { createTextRequestTrace, withTextRequestTrace } from '../../api/lib/text-request-trace.js'
 
 const sha = (text: string) => createHash('sha256').update(text).digest('hex')
@@ -98,6 +99,35 @@ async function prepare(f: F) {
 }
 
 describe.runIf(available)('persisted independent author-review dependency (real PG, no HTTP)', () => {
+  it.each(['humanity-context.v5', 'humanity-context.v6'] as const)('preserves genuinely frozen %s authorizations and old unknown usage without upgrading their hashes', async protocol => fixture(async f => {
+    const h = await prepare(f)
+    const admitted = await h.authorize()
+    const event = await prisma.agentRunEvent.findUniqueOrThrow({ where: { id: admitted.authorizationEventId } })
+    const value = structuredClone((event.payload as Prisma.JsonObject).value) as Prisma.JsonObject
+    // Fixture for an authorization persisted before prompt-protocol binding existed.
+    delete value.criticPromptProtocol
+    value.criticVersion = protocol === 'humanity-context.v5' ? 'humanity-critic.v5' : 'humanity-critic.v6'
+    const bundle = await buildHumanityQualityContext(f.userId, f.novelId, f.chapterId, f.runId)
+    const deterministic = analyzeDeterministicQuality(bundle.chapter.content, bundle.recentChapters.map(row => row.content))
+    const sources = buildQualityEvidenceSources({ userId: f.userId, novelId: f.novelId, chapterId: f.chapterId, chapterRevision: 1 }, bundle.chapter.content)
+    const system = buildCriticSystem('balanced', protocol), content = buildCriticInput(bundle, deterministic.metrics, sources, protocol)
+    const expected = value.expected as Prisma.JsonObject
+    expected.qualityContextHash = qualityReviewContextHash(bundle, protocol)
+    expected.promptHash = sha(JSON.stringify({ system, content }))
+    const historical = await prisma.agentRunEvent.update({ where: { id: event.id }, data: { payload: { value, hash: runtimeJson(value).hash } as Prisma.InputJsonValue } })
+    const plan = await h.claim()
+    expect(plan.system).toBe(system)
+    expect(plan.content).toBe(content)
+    const usageId = await h.actualUsage(plan.newCallId)
+    const completed = await h.complete(plan.newCallId, usageId)
+    expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: completed.reportId } })).toMatchObject({
+      criticVersion: value.criticVersion, deterministicMetrics: { criticPromptProtocol: protocol, qualityContextHash: expected.qualityContextHash },
+    })
+    expect(await h.read()).toHaveLength(1)
+    expect(await prisma.agentRunEvent.findUniqueOrThrow({ where: { id: event.id } })).toEqual(historical)
+    expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: h.oldUsage.id } })).toEqual(h.oldUsage)
+  }))
+
   it('serializes concurrent claims, survives a process-style reread and preserves old unknown accounting', async () => fixture(async f => {
     const h = await prepare(f)
     await h.authorize()
