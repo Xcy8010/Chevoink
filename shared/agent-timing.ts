@@ -60,6 +60,9 @@ export function recoverRunTiming(run: { status: string; startedAt: string | null
 
 /** Durable resume creates a new run; old root events are replay, not its start. */
 export function recoverSingleExecutionTiming(run: { status: string; startedAt: string | null; finishedAt: string | null }, pausedAt: string | null, lastSeq: number): AgentRunTiming {
+  // A queued activation has not executed yet; its empty interval must not
+  // erase known time from earlier activations of the same durable task.
+  if (run.status === 'queued' && run.startedAt === null) return { ...unknownRunTiming(), elapsedMs: 0, lastSeq }
   if (timestamp(run.startedAt) === null) return { ...unknownRunTiming(), lastSeq }
   const timing: AgentRunTiming = { elapsedMs: 0, activeSince: run.startedAt, status: 'running', lastSeq }
   return ['queued', 'running', 'awaiting_approval'].includes(run.status) ? timing

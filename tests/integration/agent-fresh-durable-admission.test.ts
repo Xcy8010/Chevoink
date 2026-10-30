@@ -96,6 +96,25 @@ async function bootstrapDiagnostic(runId: string, failures: ReturnType<typeof ob
 }
 
 describe.runIf(available)('fresh native admission and unstarted bootstrap', () => {
+  it('does not opt a fresh durable HTTP task into legacy terminal response schemas', () => fixture(async f => {
+    const runtime = { tier: 'speed' as const, multiplierBps: 0, provider: 'fixture', modelName: 'fixture-main',
+      baseUrl: 'https://provider.invalid/v1', apiKey: null, reasoningEffort: 'high' as const, reasoningEfforts: ['high' as const],
+      visionEnabled: false, contextWindowTokens: 128000 }
+    vi.spyOn(credits, 'assertCreditAccess').mockResolvedValue(undefined)
+    vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(runtime)
+    env.agentDurableRolloutUserIds = [f.userId]
+    const session = await prisma.agentSession.create({ data: { userId: f.userId, novelId: f.novelId, title: '新持久问答' } })
+    const result = await startLoopRun(f.userId, { novelId: f.novelId, sessionId: session.id, chapterId: f.chapterId,
+      prompt: '你好', mode: 'build' }, { humanOrigin: 'http' })
+    const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })
+    expect(run.runtimeProtocolVersion).toBe(1)
+    const spec = taskSpecSchema.parse(run.taskSpec)
+    expect(spec.responseDeliveryProtocol).toBeUndefined()
+    const { getToolsForMode } = await import('../../api/lib/agent/tools/registry.js')
+    const { restrictToolsToTask } = await import('../../api/lib/agent/tool-authority.js')
+    expect(restrictToolsToTask(getToolsForMode('build'), spec).some(tool => tool.name === 'task_respond')).toBe(false)
+  }))
+
   it('retains original HTTP bootstrap event identity after later goal activation binding', () => fixture(async f => {
     await ready(f)
     env.agentGoalEnabled = true

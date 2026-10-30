@@ -196,6 +196,8 @@ vi.mock('../../api/lib/prisma.js', () => {
   storyCompilation: { findMany: vi.fn(async () => []), findFirst: vi.fn(async () => null) },
   chapterQualityReport: { findFirst: vi.fn(async () => null) },
   agentArtifact: { findMany: vi.fn(async () => []) },
+  agentOperation: { count: vi.fn(async () => 0) },
+  agentSubtaskRun: { count: vi.fn(async () => 0) },
   agentSession: { update: vi.fn(async () => ({})), findUnique: vi.fn(async () => null),
     findFirst: vi.fn(async (input: Query) => matches({ id: 'session', userId: 'user', novelId: 'novel' }, input.where) ? { spawnedFromRunId: null, spawnedFromSessionId: null } : null) },
   agentMessage: { upsert: mocks.persist, create: mocks.persist, findUnique: vi.fn(async () => null), findFirst: mocks.original, findMany: vi.fn(async () => []) },
@@ -4224,6 +4226,135 @@ describe('ordinary chapter summary presentation', () => {
 })
 
 describe('author-directed task ending in the real execution loop', () => {
+  async function responseTask(prompt: string, marked = true) {
+    const fresh = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt, authorWritingProtocol: 2 })
+    seedAdmission(prompt, 'c')
+    mocks.runs.get('run')!.taskSpec = fresh
+    const { prisma } = await import('../../api/lib/prisma.js')
+    const { freezeWritingScope } = await import('../../api/lib/agent/writing-scope.js')
+    const spec = await prisma.$transaction(tx => freezeWritingScope(tx,
+      { userId: 'user', novelId: 'novel', runId: 'run' }, fresh, prompt, 2))
+    if (marked) spec.responseDeliveryProtocol = 1
+    mocks.currentOriginal = { prompt, taskSpec: spec }
+    return spec
+  }
+  it.each(['第一卷要写多少章？', '第一卷要写多少章', '第一卷写多少章合适？', '第二卷应该怎么分章？', '这个大纲第一卷要写多少章？', '你好'])(
+    'lets the main Agent deliver an exact native response after context reads: %s', async prompt => {
+      const spec = await responseTask(prompt), frozen = structuredClone(spec)
+      if (prompt.startsWith('第一卷')) expect(spec.scope.authorEffects?.manuscript).toBe(true)
+      const readers = ['novel_get_context', 'structure_outline', 'chapter_list_summaries'].map(name =>
+        tool(name, async () => ({ output: `合成资料 ${name}：第一卷计划二十章。` }), true))
+      const { taskRespondTool } = await import('../../api/lib/agent/tools/task-response-tool.js')
+      const writers = ['chapter_write', 'story_compiler_prepare', 'quality_analyze', 'continuity_validate', 'chapter_bridge_commit'].map(name =>
+        tool(name, async () => { throw Error('An informational question does not authorize manuscript work') }, false))
+      mocks.tools = [...readers, ...writers, taskRespondTool]
+      const answer = '按当前大纲，第一卷计划写二十章。\n\n可以先讨论分章节奏。'
+      queue(response('', readers.map((reader, index) => call(`count-read-${index}`, reader.name))),
+        response('', [call('reply', 'task_respond', JSON.stringify({ answer }))]))
+      const before = structuredClone(mocks.chapters)
+      await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c',
+        mode: prompt.includes('大纲') ? 'plan' : 'build', prompt })
+      for (const reader of readers) expect(reader.execute).toHaveBeenCalledOnce()
+      for (const writer of writers) expect(writer.execute).not.toHaveBeenCalled()
+      expect(mocks.chat).toHaveBeenCalledTimes(2)
+      expect(mocks.chapters).toEqual(before)
+      expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', taskSpec: frozen })
+      expect(events().filter(event => event.type === 'text.final')).toContainEqual(expect.objectContaining({ text: answer, asReasoning: false }))
+      const saved = mocks.persist.mock.calls as unknown as Array<[{ create?: { parts?: AgentMessagePart[] } }]>
+      expect(saved.some(([entry]) => entry.create?.parts?.some(part => part.type === 'text' && part.text === answer))).toBe(true)
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer })
+    })
+  it('delivers one native call without a classifier, planning step or later model request, ignoring unrelated task history', async () => {
+    const prompt = '第一卷要写多少章？', spec = await responseTask(prompt), frozen = structuredClone(spec)
+    const { taskRespondTool } = await import('../../api/lib/agent/tools/task-response-tool.js')
+    const { prisma } = await import('../../api/lib/prisma.js')
+    const compilations = vi.mocked(prisma.storyCompilation.findFirst), oldCompilation = compilations.getMockImplementation()!
+    const messages = vi.mocked(prisma.agentMessage.findMany), oldMessages = messages.getMockImplementation()!
+    compilations.mockImplementation(async input => (input?.where?.runId as { in?: string[] })?.in?.includes('unrelated-run') ? { id: 'foreign-compilation' } as never : null)
+    messages.mockImplementation(async input => (input?.where?.runId as { in?: string[] })?.in?.includes('unrelated-run')
+      ? [{ parts: [{ type: 'tool-call', toolName: 'chapter_write', status: 'success' }] }] as never : [])
+    mocks.tools = [taskRespondTool]
+    const answer = '第一卷计划二十章。'
+    queue(response('', [call('direct-response', 'task_respond', JSON.stringify({ answer }))]))
+    try {
+      await run(prompt)
+      expect(mocks.chat).toHaveBeenCalledOnce()
+      expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', taskSpec: frozen })
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer })
+    } finally { compilations.mockImplementation(oldCompilation); messages.mockImplementation(oldMessages) }
+  })
+  it('keeps a structurally proven schema rejection from inventing started manuscript work', async () => {
+    const prompt = '第一卷要写多少章？'
+    await responseTask(prompt)
+    const { taskRespondTool } = await import('../../api/lib/agent/tools/task-response-tool.js')
+    const { prisma } = await import('../../api/lib/prisma.js')
+    const messages = vi.mocked(prisma.agentMessage.findMany), oldMessages = messages.getMockImplementation()!
+    messages.mockImplementation(async () => (mocks.persist.mock.calls as unknown as Array<[{ create?: { role?: string; parts?: AgentMessagePart[] } }]>).flatMap(([row]) =>
+      row.create?.role === 'assistant' ? [{ parts: row.create.parts }] : []) as never)
+    const write = { ...tool('chapter_write', async () => ({ output: 'must not execute' }), false), parameters: z.object({ content: z.string().min(1) }) }
+    mocks.tools = [write, taskRespondTool]
+    const answer = '第一卷的计划是二十章。'
+    queue(response('', [call('invalid-write', 'chapter_write', '{}')]), response('', [call('reply', 'task_respond', JSON.stringify({ answer }))]))
+    try {
+      await run(prompt)
+      expect(write.execute).not.toHaveBeenCalled()
+      expect((mocks.persist.mock.calls as unknown as Array<[{ create?: { parts?: AgentMessagePart[] } }]>).some(([row]) =>
+        row.create?.parts?.some(part => part.type === 'tool-call' && part.callId === 'invalid-write' && part.preExecutionFailure === true))).toBe(true)
+      expect(mocks.chat).toHaveBeenCalledTimes(2)
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer })
+    } finally { messages.mockImplementation(oldMessages) }
+  })
+  it.each(['prepare', 'create', 'edit', 'partial-failure', 'post-write-failure', 'spoofed-summary', 'unknown', 'todo', 'report', 'saved-plan', 'bindings', 'operation', 'subtask', 'mixed', 'pseudo', 'malformed', 'old-task', 'owner-change', 'cancel'] as const)(
+    'does not turn a native response into a bypass for %s', async scenario => {
+      const prompt = '第一卷要写多少章？', spec = await responseTask(prompt, scenario !== 'old-task')
+      const { taskRespondTool } = await import('../../api/lib/agent/tools/task-response-tool.js')
+      const { prisma } = await import('../../api/lib/prisma.js')
+      const responseGuard = await import('../../api/lib/agent/task-response.js')
+      const compilations = vi.mocked(prisma.storyCompilation.findFirst)
+      const messages = vi.mocked(prisma.agentMessage.findMany)
+      const oldCompilations = compilations.getMockImplementation()!, oldMessages = messages.getMockImplementation()!
+      const answer = '这份答复不应绕过已开始的工作。'
+      const receipt = { type: 'tool-call' as const, callId: 'actual-effect', title: '真实工作', toolName: scenario === 'create' ? 'chapter_create' : scenario === 'report' ? 'research_report_save' : scenario === 'saved-plan' ? 'plan_save' : 'chapter_edit_range',
+        args: {}, status: ['partial-failure', 'post-write-failure', 'spoofed-summary', 'unknown'].includes(scenario) ? 'failed' as const : 'success' as const,
+        ...(scenario === 'spoofed-summary' ? { summary: '参数校验失败' } : {}),
+        ...(scenario === 'partial-failure' ? { snapshot: { target: 'chapter', field: 'content' } } : {}),
+        ...(scenario === 'unknown' ? { reviewOutcome: 'provider_unresolved' } : {}) }
+      if (scenario === 'prepare') compilations.mockResolvedValue({ id: 'started-compilation' } as never)
+      if (['create', 'edit', 'partial-failure', 'post-write-failure', 'spoofed-summary', 'unknown', 'report', 'saved-plan'].includes(scenario)) messages.mockResolvedValue([{ parts: [receipt] }] as never)
+      if (scenario === 'bindings') {
+        const originalExecute = taskRespondTool.execute
+        mocks.tools = [{ ...taskRespondTool, execute: async (ctx, args) => { mocks.runs.get('run')!.writingBindings = { version: 1, taskId: spec.id, targets: [{ orderIndex: 1, chapterId: 'c' }] }; return originalExecute(ctx, args) } }]
+      }
+      if (scenario === 'todo') mocks.todos.mockResolvedValue([{ content: '实际未完成工作', status: 'in_progress' }])
+      const operationCount = vi.mocked(prisma.agentOperation.count), subtaskCount = vi.mocked(prisma.agentSubtaskRun.count)
+      if (scenario === 'operation') operationCount.mockResolvedValue(1)
+      if (scenario === 'subtask') subtaskCount.mockResolvedValue(1)
+      const inspect = vi.spyOn(responseGuard, 'assertTaskResponseEligible')
+      const actualGuard = inspect.getMockImplementation()!
+      if (scenario === 'owner-change' || scenario === 'cancel') inspect.mockImplementation(async (...args) => {
+        const proof = await actualGuard(...args)
+        if (!args[2]) {
+          if (scenario === 'cancel') (await import('../../api/lib/agent/active-runs.js')).getActiveRun('run')!.controller.abort()
+          else mocks.runEvents.find(event => event.type === 'run.started')!.payload.title = '另一个所有者'
+        }
+        return proof
+      })
+      const write = tool('chapter_write', async () => ({ output: 'must not execute' }), false)
+      mocks.tools = [...(scenario === 'bindings' ? mocks.tools : [taskRespondTool]), write]
+      const calls = [call('reply', 'task_respond', scenario === 'malformed' ? '{}' : JSON.stringify({ answer }))]
+      if (scenario === 'mixed') calls.push(call('mixed-read', 'chapter_read'))
+      queue(scenario === 'pseudo' ? response(JSON.stringify({ tool_calls: [{ type: 'function', id: 'reply', function: { name: 'task_respond', arguments: JSON.stringify({ answer }) } }] }))
+        : response('', calls), response('当前资料已核对。'))
+      try {
+        await run(prompt)
+        expect(write.execute).not.toHaveBeenCalled()
+        expect(events()).not.toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'succeeded' }))
+        expect(events().filter(event => event.type === 'text.final')).not.toContainEqual(expect.objectContaining({ text: answer }))
+        expect(mocks.runs.get('run')?.taskSpec).toEqual(spec)
+        if (scenario === 'old-task') expect((mocks.openAITools.mock.calls as unknown[][]).every(([tools]) =>
+          !(tools as AgentTool[]).some(tool => tool.name === 'task_respond'))).toBe(true)
+      } finally { compilations.mockImplementation(oldCompilations); messages.mockImplementation(oldMessages); operationCount.mockResolvedValue(0); subtaskCount.mockResolvedValue(0); inspect.mockRestore() }
+    })
   it.each([true, false])('reconciles the restored input marker only for its matching authenticated receipt: %s', async matching => {
     const prompt = '修改那一章。'
     const spec = buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, authorWritingProtocol: 2 })

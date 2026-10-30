@@ -1,6 +1,7 @@
 import { beforeEach, expect, it } from 'vitest'
 import { useAgentStore, readSessionMessagesCache } from '../../src/features/studio/agent/agentStore.js'
 import { runElapsedMs } from '../../shared/agent-timing.js'
+import { projectBlockTimings, projectMessages } from '../../src/features/studio/agent/lib/message-projection.js'
 import type { AgentRunTiming, AgentStreamEvent, AgentUIMessage } from '../../shared/contracts/agent-events.js'
 
 const ts = (seconds: number) => new Date(Date.UTC(2026, 9, 18) + seconds * 1000).toISOString()
@@ -68,7 +69,10 @@ it('settles a lost terminal frame from a status read, but never invents a missin
   expect(current().lastSeq).toBe(1)
   useAgentStore.setState({ phase: 'running', messages: [{ ...user, runTiming: { elapsedMs: 0, activeSince: ts(0), status: 'running', lastSeq: 1 } }] })
   useAgentStore.getState().syncRemoteRunStatuses({ s: { runId: 'r', status: 'cancelled' } })
-  expect(current()).toMatchObject({ status: 'finished', elapsedMs: null, activeSince: null })
+  expect(current()).toMatchObject({ status: 'running', elapsedMs: 0, activeSince: ts(0) })
+  const messages = useAgentStore.getState().messages.map(message => ({ ...message, role: 'assistant' as const }))
+  const { blockInfoById } = projectMessages(messages)
+  expect(projectBlockTimings(messages, blockInfoById, null).get('u')).toMatchObject({ elapsedMs: null, activeSince: null, status: 'unknown' })
 })
 it('stops nonrecoverable errors without changing body or billing', () => {
   useAgentStore.getState().applyEvent(start(1, 0))
@@ -98,4 +102,14 @@ it('removes only a deferred running proposal after a real child CHECK result, pr
   expect(useAgentStore.getState().messages[1].parts.filter(part => part.type === 'tool-call').map(part => [part.callId, part.status])).toEqual([
     ['check', 'success'], ['actual-0', 'success'], ['actual-1', 'failed'],
   ])
+})
+it.each(['paused', 'cancelled'] as const)('can settle a late %s frame after a status poll without a stop timestamp', status => {
+  const state = useAgentStore.getState()
+  state.applyEvent(start(1, 0))
+  state.syncRemoteRunStatuses({ s: { runId: 'r', status } })
+  state.applyEvent(status === 'paused'
+    ? { type: 'run.paused', runId: 'r', seq: 2, ts: ts(10), reason: 'user_stop' }
+    : finish('cancelled', 2, 10))
+  expect(runElapsedMs(current(), Date.parse(ts(999)))).toBe(10000)
+  expect(current().status).toBe(status === 'paused' ? 'paused' : 'finished')
 })

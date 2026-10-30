@@ -24,6 +24,7 @@ import { restrictToolsToTask, snapshotToolAuthority, intersectToolAuthority } fr
 import { freezeWritingScope, readWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { chapterRevisionPrompt } from '../support/writing-target-prompt.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { env } from '../../api/config/env.js'
 
 const available = await verifyTestDatabase(isTestDatabaseRequired())
 afterAll(() => prisma.$disconnect())
@@ -49,6 +50,31 @@ async function fixture(work: (subject: { userId: string; novelId: string; sessio
   }
 }
 describe.skipIf(!available)('fresh selected server admission transaction', () => {
+  it('enables Agent reply delivery for a fresh HTTP request in an existing session without upgrading its old task', () => fixture(async f => {
+    const oldSpec = buildTaskSpec({ runId: 'synthetic-old', novelId: f.novelId, chapterId: f.chapterId, prompt: '写下一章' })
+    const old = await prisma.agentRun.create({ data: { userId: f.userId, novelId: f.novelId, sessionId: f.sessionId,
+      engine: 'loop', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'completed',
+      taskSpec: JSON.parse(JSON.stringify(oldSpec)), startRequest: { prompt: '写下一章' } } })
+    const rollout = env.agentDurableRolloutUserIds
+    env.agentDurableRolloutUserIds = []
+    try {
+      const response = await request(app).post('/api/agent/runs')
+        .set('Cookie', `chevoink_session=${buildSessionTokens(f.userId, 0).accessToken}`)
+        .send({ ...f, prompt: '第一卷要写多少章？', mode: 'build' })
+      expect(response.status).toBe(200)
+      const current = await prisma.agentRun.findUniqueOrThrow({ where: { id: response.body.data.runId as string } })
+      const spec = taskSpecSchema.parse(current.taskSpec)
+      expect(current).toMatchObject({ runtimeProtocolVersion: 0, taskRootId: null })
+      expect(spec.responseDeliveryProtocol).toBe(1)
+      expect(spec.scope.authorEffects?.manuscript).toBe(true)
+      expect(spec.scope.writingTargetProtocol).toBe(2)
+      expect(spec.id).not.toBe(oldSpec.id)
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: old.id } })).taskSpec).toEqual(oldSpec)
+      expect(restrictToolsToTask(getToolsForMode('build'), spec).some(tool => tool.name === 'task_respond')).toBe(true)
+      expect(restrictToolsToTask(getToolsForMode('build'), oldSpec).some(tool => tool.name === 'task_respond')).toBe(false)
+    } finally { env.agentDurableRolloutUserIds = rollout }
+  }))
+
   it.each([
     chapterRevisionPrompt,
     '仅修改第3章。请先读取前两章。不修改第1、2章。',

@@ -379,7 +379,9 @@ export function renderTaskSpec(spec: TaskSpec): string {
     ? '[系统] 原始请求只允许搜索或返回链接：不提供或执行web_read，不自动打开网页，不预约或收读取费。\n' : ''
   const navigationRule = spec.researchNavigation ? `[系统] 本任务导航协议：相关官方评论或检索页仅可用web_read purpose="navigation"获取可读书目与实际href，与正文获取共同计入本任务8次Fetch总预算，导航没有另设次数；元数据不可引用为目标正文。首选作品：${spec.researchTarget?.title ?? '按原请求核验'}${spec.researchTarget?.author ? `；作者：${spec.researchTarget.author}` : ''}。${spec.researchNavigation.alternativeSelection === 'denied'
     ? '没有换书授权，不能自行改选。' : '原请求允许首选公开来源不可用后改选；仅服务端确认真实访问/404回执后可用selectAlternative=true导航核验一次替代作品。空搜索、乱码、未知请求不解锁改选。'}没有可读正文时报告实际来源与不足。\n` : ''
-  return networkRule + readRule + navigationRule + renderTaskSpecBody(spec)
+  const responseRule = spec.responseDeliveryProtocol === 1
+    ? '[系统] 本任务的实际交付由你根据完整原始用户请求拆解。下方推测的写作标签与章节范围仅限制实际写入权限，不要求你为普通问题创作正文。判断当前请求只需答复时，完成必要读取后单独原生调用 task_respond，answer 填完整答复；该调用直接交付，无需额外待办或规划轮次。若已经准备或修改章节，须按真实正文、当前检查和提交证据完成原流程，不能改用答复结束。\n' : ''
+  return responseRule + networkRule + readRule + navigationRule + renderTaskSpecBody(spec)
 }
 
 function renderTaskSpecBody(spec: TaskSpec): string {

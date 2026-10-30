@@ -9,6 +9,7 @@ import { readAuthorReviewReplacements } from './author-review-replacement.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { MAIN_RUN_FILTER } from './runtime-child.js'
+import { assertTaskResponseEligible, type TaskResponse } from './task-response.js'
 
 import { containsAgentProtocolInvocation, recoverAgentProtocolToolCalls, stripAgentProtocolArtifacts } from '../../../shared/agent-output.js'
 import type {
@@ -256,6 +257,7 @@ const CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS = 8
  * valid nested report. Provider/user error names cannot impersonate it. */
 
 type ToolCallOutcome = {
+  terminalResponse?: TaskResponse
   reviewOutcome?: ReviewOutcome
   unresolvedTextRequest?: boolean
   reviewCompleted?: boolean
@@ -387,7 +389,7 @@ export async function handleToolCall(
       durationMs: Date.now() - startedAt,
       ...subagentMark,
     })
-    return { observation, argumentFailure: true, part: { ...basePart, args: null, status: 'failed', summary: call.incomplete ? '模型输出达上限，参数未完成' : '参数解析失败' } }
+    return { observation, argumentFailure: true, part: { ...basePart, args: null, status: 'failed', preExecutionFailure: true, summary: call.incomplete ? '模型输出达上限，参数未完成' : '参数解析失败' } }
   }
 
   // 先统一修复兼容网关常见的二次包装、字符串化 JSON、参数列表与顶层 null，
@@ -443,11 +445,18 @@ export async function handleToolCall(
 }
   }
 
+  // Only these parser/schema branches can certify that execute was not entered.
+  // ToolResult/failureCode/summary returned by an executed tool cannot mint it.
+  const rejectBeforeExecution = (summary: string, observation: string): ToolCallOutcome => {
+    const outcome = fail(summary, observation, 'failed')
+    outcome.part.preExecutionFailure = true
+    return outcome
+  }
   const permission = tool.permission[ctx.mode]
 
   if (coercionFailed) {
     failureCode = 'TOOL_NORMALIZATION_FAILED'
-    return fail('参数归一化失败', `工具 ${call.name} 的参数无法安全归一化，本次未执行。历史摘要、_contextCompacted 与嵌套对象占位符不是可执行参数，不要解包或重发摘要；请回读真实目标并按已公布的参数结构重新构建完整参数。`, 'failed')
+    return rejectBeforeExecution('参数归一化失败', `工具 ${call.name} 的参数无法安全归一化，本次未执行。历史摘要、_contextCompacted 与嵌套对象占位符不是可执行参数，不要解包或重发摘要；请回读真实目标并按已公布的参数结构重新构建完整参数。`)
   }
 
   if (permission === 'deny') {
@@ -471,7 +480,7 @@ export async function handleToolCall(
     const retentionHint = invalidFields.some(path => /^retainedFindings\.\d+\.reportId$/u.test(path))
       ? 'retainedFindings 每项都必须包含 source、reportId、findingId、reason；findingId 不能代替 reportId。先用 chapter_bridge_get 核对当前报告的精确引用模板，不猜编号或删除留置项来绕过。' : ''
     const chapterHint = !writingHint && !['chapter_create', 'story_compiler_prepare'].includes(call.name) && ctx.chapterId ? `作者当前正在编辑的章节 chapterId=${ctx.chapterId}。` : ''
-    return fail('参数校验失败', `工具 ${call.name} 参数校验失败：${issues}。${retentionHint}${chapterHint}${writingHint}本次调用完全没有执行。纠正所列字段后再调用，不重复相同无效输入，也不能将回复里的正文当作已经保存。`, 'failed')
+    return rejectBeforeExecution('参数校验失败', `工具 ${call.name} 参数校验失败：${issues}。${retentionHint}${chapterHint}${writingHint}本次调用完全没有执行。纠正所列字段后再调用，不重复相同无效输入，也不能将回复里的正文当作已经保存。`)
   }
 
   // 协作作用域约束：检查派生授权和目标归属，不拦截无关章节写入。
@@ -582,6 +591,7 @@ export async function handleToolCall(
       requiredResult: result.requiredResult,
       semanticTransition: result.semanticTransition,
       observedChapterRange: result.observedChapterRange,
+      terminalResponse: call.name === 'task_respond' && !ctx.inlineChild ? result.terminalResponse : undefined,
       part: {
         ...basePart,
         args: validated.data,
@@ -685,6 +695,8 @@ async function finalizeLegacyRun(
   limitedDelivery?: { subject: { userId: string; novelId: string; runId: string }; expected: LimitedWritingDelivery; signal: AbortSignal; messageId: string },
   pauseReason: 'user_stop' | 'needs_input' | 'review_receipt_pending' = 'user_stop',
   terminalFence?: (tx: Prisma.TransactionClient) => Promise<void>,
+  responseDelivery?: { subject: { userId: string; novelId: string; sessionId: string; runId: string }; expected: TaskResponse;
+    signal: AbortSignal; messageId: string; parts: AgentMessagePart[]; assertObligations: () => void },
 ) {
   // 事件协议用 succeeded，DB 枚举用 completed
   const dbStatus = status === 'succeeded' ? 'completed' : status
@@ -703,6 +715,20 @@ async function finalizeLegacyRun(
   let ownerFenced = false
   const committed = await bus.commitTerminal(terminalBody, async tx => {
     await terminalFence?.(tx)
+    if (responseDelivery) {
+      responseDelivery.signal.throwIfAborted()
+      responseDelivery.assertObligations()
+      await assertTaskResponseEligible(tx, responseDelivery.subject, responseDelivery.expected)
+      responseDelivery.signal.throwIfAborted()
+      const { messageId, subject, expected } = responseDelivery
+      const existing = await tx.agentMessage.findUnique({ where: { id: messageId } })
+      if (existing && (existing.runId !== runId || existing.sessionId !== subject.sessionId || existing.role !== 'assistant')) {
+        throw new DataAccessError(409, 'TASK_RESPONSE_STALE', '答复消息不属于当前任务。')
+      }
+      const parts = [...responseDelivery.parts.filter(part => part.type !== 'text'), { type: 'text', text: expected.answer }]
+      await tx.agentMessage.upsert({ where: { id: messageId }, create: { id: messageId, runId, sessionId: subject.sessionId,
+        role: 'assistant', parts: parts as unknown as Prisma.InputJsonValue }, update: { parts: parts as unknown as Prisma.InputJsonValue } })
+    }
     if (limitedDelivery) {
       await assertLimitedWritingDelivery(tx, limitedDelivery.subject, limitedDelivery.expected)
       limitedDelivery.signal.throwIfAborted()
@@ -735,13 +761,14 @@ async function finalizeLegacyRun(
       },
       select: { userId: true, sessionId: true, novelId: true, taskSpec: true },
     })
-  }, writingDelivery ? [...(writingDelivery.replaceCandidate ? [] : [{ type: 'message.start' as const, messageId: writingDelivery.messageId, role: 'assistant' as const }]),
+  }, responseDelivery ? [{ type: 'text.final', messageId: responseDelivery.messageId, text: responseDelivery.expected.answer, asReasoning: false }] : writingDelivery ? [...(writingDelivery.replaceCandidate ? [] : [{ type: 'message.start' as const, messageId: writingDelivery.messageId, role: 'assistant' as const }]),
     { type: 'text.final', messageId: writingDelivery.messageId, text: writingDisplayText!, asReasoning: false }] : failureStatus ? [failureStatus] : limitedDelivery ? [
     { type: 'message.start', messageId: limitedDelivery.messageId, role: 'assistant' },
     { type: 'text.final', messageId: limitedDelivery.messageId, text: limitedDelivery.expected.text, asReasoning: false },
-  ] : [], writingDelivery || limitedDelivery ? { timeout: 20_000 } : undefined)
+  ] : [], writingDelivery || limitedDelivery || responseDelivery ? { timeout: 20_000 } : undefined)
     .catch((error) => {
-      if ((writingDelivery || limitedDelivery) && (isAbortError(error) || error instanceof DataAccessError && error.code === 'WRITING_DELIVERY_STALE')) throw error
+      if ((writingDelivery || limitedDelivery || responseDelivery) && (isAbortError(error) || error instanceof DataAccessError
+        && ['WRITING_DELIVERY_STALE', 'TASK_RESPONSE_STALE', 'TASK_RESPONSE_WORK_PENDING', 'TASK_RESPONSE_UNAVAILABLE'].includes(error.code))) throw error
       if (error instanceof DataAccessError && error.code === 'GOAL_EXECUTION_FENCED') {
         goalFenced = true
         return null
@@ -1508,7 +1535,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
     const featureFlags = resolveAgent2FeatureFlags(params.userId)
     const sessionPolicy = await prisma.agentSession.findUnique({ where: { id: params.sessionId }, select: { toolPolicy: true, sandboxMode: true, spawnedFromSessionId: true } })
-    const scopedTools = restrictToolsToTask(getToolsForAgent(agent, params.mode, featureFlags, { goalOwned: Boolean(ownedGoalExecution) }), taskSpec)
+    const scopedTools = restrictToolsToTask(getToolsForAgent(agent, params.mode, featureFlags, { goalOwned: Boolean(ownedGoalExecution), taskResponse: taskSpec.responseDeliveryProtocol === 1 }), taskSpec)
     // 派生窗口禁用跨任务编排：否则 b 再派生 e、e 再派生 f 会指数级打爆并发与额度，
     // 而且互相等待还会直接死锁；派生窗口的职责就是干完自己那一份并交回摘要
     const orchestrationScopedTools = sessionPolicy?.spawnedFromSessionId
@@ -2485,10 +2512,40 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             continue
           }
         }
+        const responseNative = call.name === 'task_respond' && effectiveToolCalls.length === 1
+          && result.toolCalls.some(native => native.id === call.id && native.name === call.name)
+        const assertResponseObligations = () => {
+          controller.signal.throwIfAborted()
+          if (pendingReviews.size || incompleteRequestedReviews.size || forceWrapUpReason || authorInputRequired
+            || todoItems.some(item => ['pending', 'in_progress'].includes(item.status))) {
+            throw new DataAccessError(409, 'TASK_RESPONSE_WORK_PENDING', '当前任务仍有未完成实际工作，答复未交付；继续原执行流程。')
+          }
+        }
+        const respondTask = responseNative ? async (answer: string): Promise<TaskResponse> => {
+          assertResponseObligations()
+          const subject = { userId: params.userId, novelId: params.novelId, sessionId: params.sessionId, runId }
+          const proof = await prisma.$transaction(async tx => {
+            await assertLegacyOwnerReceipt(tx)
+            return assertTaskResponseEligible(tx, subject)
+          })
+          return { ...proof, answer }
+        } : undefined
         const executionTools = coordinatedCommit ? tools.map(tool => tool.name === call.name ? coordinatedCommit! : tool) : tools
-        const outcome = await handleToolCall(call, executionTools, { ...toolContext, callId: call.id, messageId }, bus, messageId, runId,
+        const outcome = await handleToolCall(call, executionTools, { ...toolContext, callId: call.id, messageId, respondTask }, bus, messageId, runId,
           undefined, coordinatedCommit || bootstrapCall?.id === call.id ? async () => { await bus.persist() } : undefined)
         if (!outcome) continue
+        if (outcome.terminalResponse && outcome.part.status === 'success' && responseNative) {
+          const responseParts = [...parts.filter(part => part.type !== 'text'), outcome.part]
+          bus.emit({ type: 'step.finish', turn, usage: result.usage })
+          await finalizeRun(runId, bus, 'succeeded', usage, turn, outcome.terminalResponse.answer.slice(0, 300), undefined, false,
+            undefined, undefined, undefined, false, undefined, 'user_stop', undefined, {
+              subject: { userId: params.userId, novelId: params.novelId, sessionId: params.sessionId, runId },
+              expected: outcome.terminalResponse, signal: controller.signal, messageId, parts: responseParts,
+              assertObligations: assertResponseObligations,
+            })
+          liveTurn = null
+          return
+        }
         if (call.name === 'chapter_bridge_commit' && outcome.part.status === 'denied') {
           deniedCommitObservation = `本次提交未获授权，未隐式发起后续付费检查。${outcome.part.summary}。原正文与检查记录保留。`
         } else if (STATE_SENSITIVE_VALIDATORS.has(call.name) && result.toolCalls.some(item => item.id === call.id)

@@ -7,7 +7,7 @@ import { parseAuthorWritingRequest } from './author-writing-request.js'
 const common = new Set(['novel_get_context', 'chapter_read', 'chapter_list_summaries', 'memory_search', 'project_search',
   'plan_read', 'volume_list', 'structure_outline', 'directive_list', 'story_charter_get', 'chapter_bridge_get',
   'session_history_search', 'session_message_read', 'task_context_list', 'task_context_read', 'execution_context_read',
-  'ask_user', 'goal_enable', 'goal_read', 'goal_report', 'agent_configure', 'model_assign', 'model_list'])
+  'task_respond', 'ask_user', 'goal_enable', 'goal_read', 'goal_report', 'agent_configure', 'model_assign', 'model_list'])
 const writing = new Set(['chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'chapter_rename',
   'story_compiler_prepare', 'scene_task_build', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit',
   'quality_report_get', 'quality_finding_feedback', 'character_voice_get', 'experience_anchor_get', 'craft_search',

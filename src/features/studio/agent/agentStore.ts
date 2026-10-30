@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { createAgentAuthorTextStream, projectAgentAuthorParts, projectAgentAuthorText, projectAgentToolSummary } from '../../../../shared/agent-author-view.js'
 import { getAgentToolPresentation } from '../../../../shared/agent-tool-presentation.js'
-import { advanceRunTiming, settleRunTiming } from '../../../../shared/agent-timing.js'
+import { advanceRunTiming, settleRunTiming, timestamp } from '../../../../shared/agent-timing.js'
 import { qualityAppliedBodyChange } from '../../../../shared/agent-applied-body-change.js'
 
 import type {
@@ -928,7 +928,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           messages = settleRunningToolParts(messages, '本轮已结束，未收到工具完成结果').map((message) =>
             (message.runTiming?.sourceRunId ?? message.runId) === entry.runId
               ? { ...message, ...(entry.status === 'completed' && message.role === 'assistant' && entry.finishedAt ? { completedAt: entry.finishedAt } : {}),
-                  runTiming: settleRunTiming(message.runTiming, entry.finishedAt, entry.status === 'paused') }
+                  // A status without a stop time ends the UI activity, but keep
+                  // the start witness so a late real terminal frame can settle it.
+                  runTiming: timestamp(entry.finishedAt) === null ? message.runTiming
+                    : settleRunTiming(message.runTiming, entry.finishedAt, entry.status === 'paused') }
               : message,
           )
           workspaceActivities = settleRunningActivities(workspaceActivities)

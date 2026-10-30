@@ -495,6 +495,8 @@ export type AgentMessagePart =
       args: unknown
       status: 'running' | 'success' | 'failed' | 'denied'
       summary?: string
+      /** Server proof of rejection before the tool execute function was entered. */
+      preExecutionFailure?: true
       reviewOutcome?: ReviewOutcome
       importWaiting?: { url: string; expiresAt: string }
       display?: AgentToolDisplayPayload

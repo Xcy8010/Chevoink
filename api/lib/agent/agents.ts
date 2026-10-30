@@ -68,9 +68,9 @@ export function getToolsForAgent(
   agent: AgentDefinition,
   mode: AgentExecutionMode,
   featureFlags?: Agent2FeatureFlags,
-  options: { goalOwned?: boolean } = {},
+  options: { goalOwned?: boolean; taskResponse?: boolean } = {},
 ): AgentTool[] {
-  let modeTools = getToolsForMode(mode)
+  let modeTools = getToolsForMode(mode).filter(tool => tool.name !== 'task_respond' || options.taskResponse === true)
   modeTools = filterGoalToolsForExecution(modeTools, options.goalOwned === true)
 
   if (featureFlags) {
@@ -106,7 +106,7 @@ export function getToolsForAgent(
     return modeTools
   }
 
-  const allowed = new Set(agent.tools)
+  const allowed = new Set([...agent.tools, 'task_respond'])
   return modeTools.filter((tool) => allowed.has(tool.name))
 }
 

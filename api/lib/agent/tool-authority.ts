@@ -15,6 +15,7 @@ const structureEffects = new Set(['volume_create', 'volume_move', 'volume_delete
 
 /** Narrow both the model's schemas and the executor's admission ceiling. */
 export function restrictToolsToTask(tools: AgentTool[], task: TaskSpec): AgentTool[] {
+  if (task.responseDeliveryProtocol !== 1) tools = tools.filter(tool => tool.name !== 'task_respond')
   if (task.scope.capabilityCatalog) {
     const names = new Set(task.scope.capabilityCatalog.names)
     tools = tools.filter(tool => names.has(tool.name))

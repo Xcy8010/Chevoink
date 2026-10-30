@@ -39,6 +39,7 @@ const groups: Array<[AgentAuthorPhase, string, readonly string[]]> = [
   ['other', '协作创作', ['subagent_delegate', 'subagent_run', 'task_spawn', 'task_send']],
   ['other', '更新任务设置', ['agent_configure', 'model_assign', 'session_rename', 'plan_exit', 'goal_enable', 'goal_report']],
   ['other', '等待作者决定', ['ask_user']],
+  ['other', '答复问题', ['task_respond']],
 ]
 
 const catalog = new Map<string, AgentToolPresentation>()

@@ -135,6 +135,8 @@ export const taskSpecSchema = z.object({
   id: z.string().min(1),
   runId: z.string().min(1).optional(),
   intent: taskIntentSchema,
+  /** Fresh human legacy-loop admission only; never inferred on recovery. */
+  responseDeliveryProtocol: z.literal(1).optional(),
   /** New server policy; absence preserves legacy metadata without a default cap. */
   controlPolicy: z.literal('until_completion').optional(),
   /** Frozen from the original request, never selected by a search tool. */

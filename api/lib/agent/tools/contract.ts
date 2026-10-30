@@ -114,7 +114,7 @@ const account = new Set(['model_list', 'account_credits', 'account_credit_histor
   'novel_create', 'skill_catalog', 'skill_shared_invites', 'skill_install_shared'])
 const session = new Set(['agent_configure', 'model_assign', 'session_rename', 'session_history_search',
   'session_message_read', 'task_context_list', 'task_context_read', 'task_spawn', 'task_send', 'task_wait',
-  'goal_read', 'goal_enable', 'goal_report', 'plan_exit', 'todo_write', 'ask_user'])
+  'goal_read', 'goal_enable', 'goal_report', 'plan_exit', 'todo_write', 'ask_user', 'task_respond'])
 
 export function describeAgentToolContract(tool: Pick<AgentTool, 'name' | 'readOnly' | 'alwaysConfirm' | 'dangerous'>): AgentToolContract {
   const governance = AGENT_TOOL_GOVERNANCE[tool.name as keyof typeof AGENT_TOOL_GOVERNANCE]

@@ -3,7 +3,7 @@ const db = vi.hoisted(() => ({ agentRun: { findMany: vi.fn() }, agentExecutionOu
 vi.mock('../../api/lib/prisma.js', () => ({ prisma: db }))
 vi.mock('../../api/lib/agent/runtime-child.js', () => ({ MAIN_RUN_FILTER: { incomingChildGrant: { is: null } } }))
 import { loadMessageTimings } from '../../api/lib/agent/message-timing.js'
-import { runElapsedMs } from '../../shared/agent-timing.js'
+import { advanceRunTiming, runElapsedMs } from '../../shared/agent-timing.js'
 
 const date = (seconds: number) => new Date(Date.UTC(2026, 9, 18) + seconds * 1000)
 const transition = (type: string, seq: number, seconds: number) => ({ type, seq, payload: { ts: date(seconds).toISOString() } })
@@ -41,4 +41,16 @@ it('does not invent durations for malformed legacy events, missing pauses, or un
 it('does not query when the authorized history window is empty', async () => {
   expect(await loadMessageTimings('owner', 'session', [])).toEqual(new Map())
   expect(db.agentRun.findMany).not.toHaveBeenCalled()
+})
+it.each([true, false])('keeps prior timing evidence while a durable resume is queued (known pause: %s)', async knownPause => {
+  const first = { id: 'old', status: 'paused', startedAt: date(0), finishedAt: null, runtimeProtocolVersion: 1, taskRootId: 'root', events: [transition('run.started', 1, 0)] }
+  const queued = { ...first, id: 'new', status: 'queued', startedAt: null }
+  db.agentRun.findMany.mockResolvedValueOnce([first]).mockResolvedValueOnce([first, queued])
+  db.agentExecutionOutbox.findMany.mockResolvedValue(knownPause ? [{ payload: { runIds: ['old'] }, createdAt: date(10) }] : [])
+  const result = await loadMessageTimings('owner', 'session', ['old'])
+  const timing = result.get('old')!
+  expect(timing).toMatchObject({ scopeId: 'root:root', sourceRunId: 'new', lastSeq: 1, elapsedMs: knownPause ? 10000 : null, activeSince: null })
+  expect(runElapsedMs(timing, date(999).getTime())).toBe(knownPause ? 10000 : null)
+  // The resumed stream replays the original root start, not a new activation.
+  expect(advanceRunTiming(timing, { type: 'run.started', seq: 1, ts: date(0).toISOString() })).toBe(timing)
 })

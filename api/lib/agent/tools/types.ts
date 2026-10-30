@@ -17,6 +17,8 @@ import type { RunLeaseToken } from '../runtime-lease.js'
 
 /** 工具执行上下文：身份与作用域由服务端注入，绝不信任模型给出的 ID */
 export type ToolContext = {
+  /** Main legacy executor only; absent for children, durable and non-native calls. */
+  respondTask?: (answer: string) => Promise<import('../task-response.js').TaskResponse>
   userId: string
   novelId: string
   chapterId: string | null
@@ -97,6 +99,8 @@ export type ToolContext = {
 }
 
 export type ToolResult = {
+  /** Trusted return-only terminal reply; never interpreted from output text. */
+  terminalResponse?: import('../task-response.js').TaskResponse
   observedAttachment?: { url: string; contentHash: string; offset: number; end: number; totalChars: number }
   /** Original-root DB observation allowance; not model input or manuscript progress. */
   platformBudget?: { version: 1; requestHash: string; charged: boolean }

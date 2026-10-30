@@ -562,6 +562,10 @@ export async function startLoopRunLocked(
         initializeFreshDurable = frozen.scope.writing?.kind !== 'needs_input' && frozen.scope.localEditBoundary?.kind !== 'needs_input'
           && !isDeferredWritingRequest(input.prompt)
       }
+      if (!initializeFreshDurable && options.humanOrigin === 'http' && !options.goal
+        && !session.spawnedFromRunId) {
+        frozen = { ...frozen, responseDeliveryProtocol: 1 }
+      }
       created = await tx.agentRun.update({ where: { id: created.id }, data: { taskSpec: JSON.parse(JSON.stringify(frozen)) as Prisma.InputJsonValue } })
     }
     if (steering) await tx.agentMessage.create({ data: { id: steeringMessageId!, runId: created.id, sessionId: session.id, role: 'user', parts: [

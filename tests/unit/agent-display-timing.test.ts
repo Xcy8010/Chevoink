@@ -68,6 +68,10 @@ describe('execution duration', () => {
     expect(runElapsedMs(total, Date.parse(ts(105)))).toBe(15000)
     expect(advanceRunTiming(total, event('run.started', 1, 0))).toBe(total)
     expect(recoverSingleExecutionTiming({ status: 'paused', startedAt: ts(0), finishedAt: null }, null, 1).elapsedMs).toBeNull()
+    expect(recoverSingleExecutionTiming({ status: 'queued', startedAt: null, finishedAt: null }, null, 0)).toMatchObject({ elapsedMs: 0, activeSince: null })
+    for (const status of ['running', 'paused', 'completed']) {
+      expect(recoverSingleExecutionTiming({ status, startedAt: null, finishedAt: ts(10) }, null, 1).elapsedMs).toBeNull()
+    }
   })
   it('deduplicates shared run/root metadata and only ticks the current execution', () => {
     const timing: AgentRunTiming = { scopeId: 'root', sourceRunId: 'r2', elapsedMs: 10000, activeSince: ts(100), status: 'running', lastSeq: 1 }

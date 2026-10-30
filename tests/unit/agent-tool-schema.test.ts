@@ -226,3 +226,41 @@ describe('tool schema provider contract', () => {
     expect(scope).toEqual(original)
   })
 })
+
+
+it('adds the terminal response schema only to fresh marked task catalogs without changing existing schemas', async () => {
+  const { buildTaskSpec, renderTaskSpec } = await import('../../api/lib/agent/task-spec.js')
+  const { restrictToolsToTask } = await import('../../api/lib/agent/tool-authority.js')
+  const { taskRespondTool } = await import('../../api/lib/agent/tools/task-response-tool.js')
+  const legacy = buildTaskSpec({ runId: 'old-run', novelId: 'novel', prompt: '第一卷要写多少章？', authorWritingProtocol: 2 })
+  const fresh = { ...legacy, responseDeliveryProtocol: 1 as const }
+  const available = getToolsForMode('build')
+  const oldTools = toOpenAITools(restrictToolsToTask(available, legacy), legacy.scope)
+  const newTools = toOpenAITools(restrictToolsToTask(available, fresh), fresh.scope)
+  expect(oldTools.some(tool => tool.function.name === 'task_respond')).toBe(false)
+  expect(newTools.filter(tool => tool.function.name !== 'task_respond')).toEqual(oldTools)
+  expect(runtimeJson(newTools).hash).not.toBe(runtimeJson(oldTools).hash)
+  const native = newTools.find(tool => tool.function.name === 'task_respond')!
+  expect(native.function.parameters).toMatchObject({ type: 'object', required: ['answer'], additionalProperties: false })
+  expect(taskRespondTool.parameters.safeParse({ answer: '二十章。', runId: 'foreign' }).success).toBe(false)
+  expect(taskRespondTool.parameters.safeParse({ answer: '   ' }).success).toBe(false)
+  expect(taskRespondTool.parameters.parse({ answer: '二十章。\n保留原样。' })).toEqual({ answer: '二十章。\n保留原样。' })
+  expect(renderTaskSpec(fresh)).toContain('实际交付由你根据完整原始用户请求拆解')
+  expect(renderTaskSpec(legacy)).not.toContain('task_respond')
+  expect(fresh.scope).toEqual(legacy.scope)
+})
+
+
+it('keeps the terminal response schema main-only even under a marked parent authority', async () => {
+  const { getAgentDefinition, getToolsForAgent } = await import('../../api/lib/agent/agents.js')
+  const { snapshotToolAuthority, intersectToolAuthority } = await import('../../api/lib/agent/tool-authority.js')
+  const main = getToolsForAgent(getAgentDefinition('orchestrator'), 'build', undefined, { taskResponse: true })
+  const parent = snapshotToolAuthority(main, 'build')
+  expect(parent.has('task_respond')).toBe(true)
+  for (const profile of ['research', 'continuity', 'quality', 'lore']) {
+    const child = getToolsForAgent(getAgentDefinition(profile), 'review')
+    expect(intersectToolAuthority(child, 'review', parent).some(tool => tool.name === 'task_respond')).toBe(false)
+    expect(getToolsForAgent(getAgentDefinition(profile), 'review', undefined, { taskResponse: true })
+      .some(tool => tool.name === 'task_respond')).toBe(true)
+  }
+})
