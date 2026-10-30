@@ -14,3 +14,18 @@ export const memoryGraphFixture: MemoryGraph = {
     type: i % 3 === 0 ? '同行' : i % 3 === 1 ? '持有' : '位于', state: null, confidence: 0.8, sourceId: `synthetic-${i}`,
   })),
 }
+/** Explicit public hub/community topology, alongside the sparse fixture: still 103 real fixture entities / 145 relations. */
+const hubPairs: [number, number][] = [
+  ...Array.from({ length: 46 }, (_, i): [number, number] => [0, i + 1]),
+  ...Array.from({ length: 27 }, (_, i): [number, number] => [47, i + 48]),
+  ...Array.from({ length: 27 }, (_, i): [number, number] => [75, i + 76]),
+  [0, 47], [47, 75],
+  ...Array.from({ length: 43 }, (_, i): [number, number] => [i + 1, i + 2]),
+]
+export const memoryGraphHubFixture: MemoryGraph = {
+  ...memoryGraphFixture, novelId: 'synthetic-hub-graph', version: 'fixture-hub-1',
+  edges: hubPairs.map(([source, target], i) => ({
+    id: `hub-relation-${i}`, source: memoryGraphFixture.nodes[source].id, target: memoryGraphFixture.nodes[target].id,
+    type: i % 3 === 0 ? '同行' : i % 3 === 1 ? '持有' : '位于', state: null, confidence: 0.8, sourceId: `synthetic-hub-${i}`,
+  })),
+}

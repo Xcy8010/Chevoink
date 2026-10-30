@@ -1,155 +1,137 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { Maximize, Minus, Plus } from 'lucide-react'
 import type { MemoryGraphNode } from '../../../../shared/contracts/index.js'
-import { memoryGraphNeighborhood, memoryNodeColor, projectMemoryPoint, rectanglesOverlap, type GraphPoint, type GraphRect, type ReadableMemoryGraphEdge } from '../lib/memory-graph-layout'
+import type { GraphPoint, MemoryGraphRoutingEdge, ReadableMemoryGraphEdge } from '../lib/memory-graph-layout'
+import { buildGalaxyScene, createGalaxyBackdrop, createGalaxyStarSprite, DEFAULT_GALAXY_VIEW, galaxyClusterExposure, galaxyPaintOrder, pickGalaxyNode, prepareGalaxyGeometry, type GalaxyScreenNode } from '../lib/memory-galaxy-render'
 
-type Props = {
-  nodes: MemoryGraphNode[]
-  edges: ReadableMemoryGraphEdge[]
-  points: Map<string, GraphPoint>
-  selectedId: string | null
-  onSelect: (id: string | null) => void
-  active: boolean
-}
-type ScreenPoint = ReturnType<typeof projectMemoryPoint> & { id: string; radius: number }
+type Props = { nodes: MemoryGraphNode[]; edges: ReadableMemoryGraphEdge[]; points: Map<string, GraphPoint>; selectedId: string | null; onSelect: (id: string | null) => void; active: boolean }
+type GalaxyAssets = { sprites: Map<string, HTMLCanvasElement>; backdrop: HTMLCanvasElement | null; width: number; height: number; dpr: number }
 
 export default function MemoryGraphGalaxy({ nodes, edges, points, selectedId, onSelect, active }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const viewRef = useRef({ yaw: 0.35, pitch: -0.18, zoom: 1 })
+  const viewRef = useRef({ ...DEFAULT_GALAXY_VIEW })
   const redrawRef = useRef<() => void>(() => {})
-  const projectedRef = useRef<ScreenPoint[]>([])
+  const projectedRef = useRef<GalaxyScreenNode[]>([])
+  const assetsRef = useRef<GalaxyAssets | null>(null)
+  const labelOpacityRef = useRef(new Map<string, number>())
 
+  const curveKey = JSON.stringify(edges.map(({ id, source, target, type }) => ({ id, source, target, type })))
+  const geometry = useMemo(() => prepareGalaxyGeometry(points, JSON.parse(curveKey) as MemoryGraphRoutingEdge[]), [points, curveKey])
   useEffect(() => {
     if (!active) return
     const canvas = canvasRef.current
     const context = canvas?.getContext('2d')
     if (!canvas || !context) return
+    if (!assetsRef.current) assetsRef.current = {
+      sprites: new Map([['character', createGalaxyStarSprite('#98c8f2')], ['item', createGalaxyStarSprite('#e5c291')], ['neutral', createGalaxyStarSprite('#cddbe7')]]),
+      backdrop: null, width: 0, height: 0, dpr: 0,
+    }
+    const assets = assetsRef.current
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
     let frame = 0
     let visible: boolean = active
     let width = 1
     let height = 1
-    const radius = Math.max(180, ...[...points.values()].map((p) => Math.hypot(p.x, p.y, p.z)))
-    const neighbors = memoryGraphNeighborhood(selectedId, edges)
-    const selectedEdges = edges.filter((e) => e.source === selectedId || e.target === selectedId)
-    const orderedEdges = [...edges.filter((e) => !selectedEdges.includes(e)), ...selectedEdges]
-    const draw = () => {
+    let transitionStarted = 0
+    let fromOpacity = new Map(labelOpacityRef.current)
+    const draw = (time: number) => {
       frame = 0
       if (!visible || document.hidden || !active || width < 2 || height < 2) return
       const ctx = context
       ctx.clearRect(0, 0, width, height)
-      const backdrop = ctx.createRadialGradient(width * 0.53, height * 0.45, 10, width * 0.5, height * 0.5, Math.max(width, height) * 0.8)
-      backdrop.addColorStop(0, '#162939')
-      backdrop.addColorStop(0.55, '#0b1724')
-      backdrop.addColorStop(1, '#050b13')
-      ctx.fillStyle = backdrop
-      ctx.fillRect(0, 0, width, height)
-      // A fixed star field: no particles, timers, postprocessing or perpetual animation.
-      for (let i = 0; i < 160; i += 1) {
-        const x = ((Math.sin(i * 127.1 + 1) * 43758.5453) % 1 + 1) % 1 * width
-        const y = ((Math.sin(i * 311.7 + 3) * 96321.9123) % 1 + 1) % 1 * height
-        ctx.fillStyle = i % 6 === 0 ? '#c9d8e677' : '#9eb4ca33'
-        ctx.fillRect(x, y, i % 9 === 0 ? 1.5 : 1, i % 9 === 0 ? 1.5 : 1)
+      ctx.globalAlpha = 1
+      ctx.drawImage(assets.backdrop!, 0, 0, width, height)
+      const scene = buildGalaxyScene(nodes, edges, points, viewRef.current, width, height, selectedId, (text, size, weight) => {
+        ctx.font = `${weight} ${size}px system-ui, sans-serif`
+        return ctx.measureText(text).width
+      }, geometry)
+      projectedRef.current = scene.nodes
+      // Optical emission accumulates only around real, spatially dense 3D neighborhoods.
+      // It uses the same cached tinted sprites at a wider scale, without whole-scene bloom or blur.
+      ctx.save(); ctx.globalCompositeOperation = 'screen'
+      for (const node of scene.nodes) {
+        if (node.density <= 0) continue
+        const sprite = assets.sprites.get(node.type === 'character' || node.type === 'item' ? node.type : 'neutral')!
+        ctx.globalAlpha = node.opacity * galaxyClusterExposure(node.density)
+        ctx.drawImage(sprite, node.x - node.emissionRadius, node.y - node.emissionRadius, node.emissionRadius * 2, node.emissionRadius * 2)
       }
-      const view = viewRef.current
-      const projected = new Map(nodes.map((node) => {
-        const p = points.get(node.id)!
-        return [node.id, { ...projectMemoryPoint(p, view.yaw, view.pitch, view.zoom, width, height, radius), id: node.id, radius: Math.max(3.2, 5 * projectMemoryPoint(p, view.yaw, view.pitch, view.zoom, width, height, radius).perspective) }]
-      }))
-      projectedRef.current = [...projected.values()].sort((a, b) => a.depth - b.depth)
-      const labels: GraphRect[] = [...projected.values()].map((p) => ({ x: p.x - p.radius - 3, y: p.y - p.radius - 3, width: p.radius * 2 + 6, height: p.radius * 2 + 6 }))
-      const edgeLabels: { text: string; x: number; y: number; focused: boolean }[] = []
-      orderedEdges.forEach((edge, i) => {
-        const a = projected.get(edge.source)
-        const b = projected.get(edge.target)
-        if (!a || !b) return
-        const focused = edge.source === selectedId || edge.target === selectedId
-        ctx.strokeStyle = focused ? '#a6d5f3dd' : selectedId ? '#7795ac17' : edge.type === '同章出现' ? '#7097ad26' : '#93afc35c'
-        ctx.lineWidth = focused ? 1.5 : 0.7
-        const dx = b.x - a.x
-        const dy = b.y - a.y
-        const distance = Math.max(1, Math.hypot(dx, dy))
-        const bend = (i % 2 ? 1 : -1) * Math.min(35, distance * 0.14)
-        const cx = (a.x + b.x) / 2 - dy / distance * bend
-        const cy = (a.y + b.y) / 2 + dx / distance * bend
-        ctx.beginPath()
-        ctx.moveTo(a.x, a.y)
-        ctx.quadraticCurveTo(cx, cy, b.x, b.y)
-        ctx.stroke()
-        if (edge.type !== '同章出现') {
-          const tangentLength = Math.max(1, Math.hypot(b.x - cx, b.y - cy))
-          const ux = (b.x - cx) / tangentLength
-          const uy = (b.y - cy) / tangentLength
-          const tip = { x: b.x - ux * (b.radius + 3), y: b.y - uy * (b.radius + 3) }
-          ctx.fillStyle = ctx.strokeStyle
+      ctx.restore(); ctx.globalAlpha = 1
+      // Stars and sampled world-space threads share one painter order, so orbit reveals real depth/occlusion.
+      ctx.lineCap = 'round'
+      for (const primitive of galaxyPaintOrder(scene)) {
+        if (primitive.kind === 'threads') {
+          // One stroke per style between actual star planes, rather than one styled stroke per segment.
+          ctx.globalAlpha = primitive.opacity; ctx.strokeStyle = '#bed0dd'; ctx.lineWidth = primitive.width
           ctx.beginPath()
-          ctx.moveTo(tip.x, tip.y)
-          ctx.lineTo(tip.x - ux * 6 - uy * 2.5, tip.y - uy * 6 + ux * 2.5)
-          ctx.lineTo(tip.x - ux * 6 + uy * 2.5, tip.y - uy * 6 - ux * 2.5)
-          ctx.closePath()
-          ctx.fill()
-        }
-        if (edge.type !== '同章出现' && (focused || (!selectedId && view.zoom > 1.65))) edgeLabels.push({ text: edge.type, x: (a.x + b.x + 2 * cx) / 4, y: (a.y + b.y + 2 * cy) / 4, focused })
-      })
-      const drawLabel = (text: string, x: number, y: number, color: string, required: boolean) => {
-        ctx.font = '11px system-ui, sans-serif'
-        const textWidth = ctx.measureText(text).width
-        let box: GraphRect | undefined
-        for (const dy of [0, -18, 18, -36, 36, -54, 54]) {
-          const candidate = { x: x - textWidth / 2 - 4, y: y + dy - 12, width: textWidth + 8, height: 17 }
-          if (candidate.x < 2 || candidate.x + candidate.width > width - 2 || candidate.y < 2 || candidate.y + candidate.height > height - 2) continue
-          if (!labels.some((rect) => rectanglesOverlap(candidate, rect, 2))) { box = candidate; break }
-        }
-        if (!box && !required) return
-        box ??= { x: Math.max(2, Math.min(width - textWidth - 10, x - textWidth / 2 - 4)), y: Math.max(2, Math.min(height - 19, y - 12)), width: textWidth + 8, height: 17 }
-        labels.push(box)
-        ctx.fillStyle = '#0b1724e8'
-        ctx.fillRect(box.x, box.y, box.width, box.height)
-        ctx.fillStyle = color
-        ctx.textAlign = 'left'
-        ctx.fillText(text, box.x + 4, box.y + 12)
-      }
-      // Draw far nodes first; nearby stars correctly occlude distant stars.
-      const orderedNodes = [...nodes].sort((a, b) => projected.get(b.id)!.depth - projected.get(a.id)!.depth)
-      orderedNodes.forEach((node) => {
-        const p = projected.get(node.id)!
-        const focused = neighbors.has(node.id)
-        ctx.globalAlpha = selectedId && !focused ? 0.18 : 1
-        ctx.fillStyle = memoryNodeColor(node.type)
-        if (node.id === selectedId) {
-          ctx.strokeStyle = '#e2f3ff'
-          ctx.lineWidth = 1.5
-          ctx.beginPath()
-          ctx.arc(p.x, p.y, p.radius + 5, 0, Math.PI * 2)
+          for (const { from, to } of primitive.segments) { ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y) }
           ctx.stroke()
+          if (primitive.focused && !primitive.hint) for (const { link, to } of primitive.segments) {
+            if (to !== link.path[link.path.length - 1]) continue
+            const length = Math.max(1, Math.hypot(link.endTangent.x, link.endTangent.y))
+            const ux = link.endTangent.x / length; const uy = link.endTangent.y / length
+            const x = link.b.x - ux * (link.b.coreRadius + 3); const y = link.b.y - uy * (link.b.coreRadius + 3)
+            ctx.globalAlpha = link.opacity * Math.min(1, to.perspective * 0.7); ctx.fillStyle = '#d0e0eb'
+            ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - ux * 4 - uy * 1.8, y - uy * 4 + ux * 1.8); ctx.lineTo(x - ux * 4 + uy * 1.8, y - uy * 4 - ux * 1.8); ctx.closePath(); ctx.fill()
+          }
+          continue
         }
-        ctx.beginPath()
-        ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2)
-        ctx.fill()
-        ctx.globalAlpha = 1
-      })
-      const labelOrder = [...orderedNodes.filter((n) => !neighbors.has(n.id)), ...orderedNodes.filter((n) => neighbors.has(n.id))]
-      // Focus labels get the first claim on space; unrelated labels yield to them.
-      labelOrder.reverse().forEach((node) => {
-        const p = projected.get(node.id)!
-        const focused = neighbors.has(node.id)
-        if (selectedId && !focused) return
-        const label = node.label.length > 24 ? `${node.label.slice(0, 23)}…` : node.label
-        drawLabel(label, p.x, p.y - p.radius - 6, node.id === selectedId ? '#fff' : '#d6e5ef', focused)
-      })
-      edgeLabels.reverse().forEach((label) => drawLabel(label.text, label.x, label.y, '#b6d8ed', label.focused))
+        const node = primitive.node
+        const halo = node.coreRadius * 5.2 + 2
+        const sprite = assets.sprites.get(node.type === 'character' || node.type === 'item' ? node.type : 'neutral')!
+        ctx.globalAlpha = node.opacity
+        ctx.drawImage(sprite, node.x - halo, node.y - halo, halo * 2, halo * 2)
+        ctx.fillStyle = '#f1f6fc'
+        ctx.beginPath(); ctx.arc(node.x, node.y, node.coreRadius, 0, Math.PI * 2); ctx.fill()
+        ctx.globalAlpha = Math.min(1, node.opacity + 0.08); ctx.fillStyle = '#ffffff'
+        ctx.beginPath(); ctx.arc(node.x, node.y, node.coreRadius * 0.38, 0, Math.PI * 2); ctx.fill()
+        if (node.selected) {
+          ctx.globalAlpha = 0.8; ctx.strokeStyle = '#deefff'; ctx.lineWidth = 0.9
+          ctx.beginPath(); ctx.arc(node.x, node.y, node.coreRadius + 4.5, 0, Math.PI * 2); ctx.stroke()
+        }
+      }
+      const progress = reducedMotion ? 1 : Math.min(1, Math.max(0, (time - transitionStarted) / 160))
+      const eased = progress * progress * (3 - 2 * progress)
+      let transitioning = false
+      const currentOpacity = new Map<string, number>()
+      for (const label of scene.labels) {
+        const previous = fromOpacity.get(label.id) ?? 0
+        const opacity = previous + (label.opacity - previous) * eased
+        currentOpacity.set(label.id, opacity)
+        if (Math.abs(label.opacity - previous) > 0.005 && progress < 1) transitioning = true
+        ctx.save(); ctx.globalAlpha = opacity
+        if (label.selected) { ctx.fillStyle = '#050a1066'; ctx.fillRect(label.box.x - 2, label.box.y - 1, label.box.width + 4, label.box.height + 2) }
+        const nearest = { x: Math.max(label.box.x, Math.min(label.box.x + label.box.width, label.anchor.x)), y: Math.max(label.box.y, Math.min(label.box.y + label.box.height, label.anchor.y)) }
+        if (Math.hypot(nearest.x - label.anchor.x, nearest.y - label.anchor.y) > 20) {
+          ctx.strokeStyle = '#a6bed533'; ctx.lineWidth = 0.55; ctx.beginPath(); ctx.moveTo(label.anchor.x, label.anchor.y); ctx.lineTo(nearest.x, nearest.y); ctx.stroke()
+        }
+        ctx.font = `${label.selected ? 600 : 400} ${label.size}px system-ui, sans-serif`
+        ctx.textAlign = 'left'; ctx.lineJoin = 'round'; ctx.lineWidth = 3; ctx.strokeStyle = '#020408c9'; ctx.fillStyle = label.selected ? '#f5faff' : label.kind === 'edge' ? '#aec4d3' : '#cfdae3'
+        label.lines.forEach((line, i) => { ctx.strokeText(line, label.box.x + 3, label.box.y + 12 + i * 15); ctx.fillText(line, label.box.x + 3, label.box.y + 12 + i * 15) })
+        ctx.restore()
+      }
+      labelOpacityRef.current = currentOpacity
+      ctx.globalAlpha = 1
+      // Only opacity changes get a short finite follow-up. Geometry, particles and physics never run while idle.
+      if (transitioning) scheduleFrame()
+    }
+    const scheduleFrame = () => {
+      if (!frame && visible && active && !document.hidden) frame = window.requestAnimationFrame(draw)
     }
     const requestDraw = () => {
-      if (!frame && visible && active && !document.hidden) frame = window.requestAnimationFrame(draw)
+      transitionStarted = performance.now()
+      fromOpacity = new Map(labelOpacityRef.current)
+      scheduleFrame()
     }
     redrawRef.current = requestDraw
     const resize = () => {
-      const rect = canvas.getBoundingClientRect()
-      width = rect.width
-      height = rect.height
+      const rect = canvas.getBoundingClientRect(); width = rect.width; height = rect.height
       const dpr = Math.min(window.devicePixelRatio || 1, 1.5)
-      canvas.width = Math.max(1, Math.round(width * dpr))
-      canvas.height = Math.max(1, Math.round(height * dpr))
+      const pixelWidth = Math.max(1, Math.round(width * dpr)); const pixelHeight = Math.max(1, Math.round(height * dpr))
+      if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) { canvas.width = pixelWidth; canvas.height = pixelHeight }
       context.setTransform(dpr, 0, 0, dpr, 0, 0)
+      if (width > 1 && height > 1 && (!assets.backdrop || assets.width !== width || assets.height !== height || assets.dpr !== dpr)) {
+        assets.backdrop = createGalaxyBackdrop(width, height, dpr); assets.width = width; assets.height = height; assets.dpr = dpr
+      }
       requestDraw()
     }
     const observer = new ResizeObserver(resize)
@@ -179,8 +161,8 @@ export default function MemoryGraphGalaxy({ nodes, edges, points, selectedId, on
       const before = pointers.get(event.pointerId)
       if (!before) {
         const rect = canvas.getBoundingClientRect()
-        const hit = projectedRef.current.find((p) => Math.hypot(p.x - event.clientX + rect.left, p.y - event.clientY + rect.top) < Math.max(14, p.radius + 6))
-        canvas.title = hit ? nodes.find((node) => node.id === hit.id)!.label : ''
+        const hit = pickGalaxyNode(projectedRef.current, event.clientX - rect.left, event.clientY - rect.top)
+        canvas.title = hit?.label ?? ''
         return
       }
       const next = { x: event.clientX, y: event.clientY }
@@ -206,7 +188,7 @@ export default function MemoryGraphGalaxy({ nodes, edges, points, selectedId, on
         const rect = canvas.getBoundingClientRect()
         const x = event.clientX - rect.left
         const y = event.clientY - rect.top
-        const hit = projectedRef.current.find((p) => Math.hypot(p.x - x, p.y - y) < Math.max(14, p.radius + 6))
+        const hit = pickGalaxyNode(projectedRef.current, x, y)
         onSelect(hit?.id ?? null)
       }
       if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId)
@@ -249,7 +231,7 @@ export default function MemoryGraphGalaxy({ nodes, edges, points, selectedId, on
       canvas.removeEventListener('keydown', keyDown)
       redrawRef.current = () => {}
     }
-  }, [nodes, edges, points, selectedId, onSelect, active])
+  }, [nodes, edges, points, selectedId, onSelect, active, geometry])
 
   const zoom = (factor: number) => {
     viewRef.current.zoom = Math.min(4.5, Math.max(0.4, viewRef.current.zoom * factor))
@@ -260,7 +242,7 @@ export default function MemoryGraphGalaxy({ nodes, edges, points, selectedId, on
     <div className="memory-graph-controls memory-galaxy-controls" aria-label="星系视图控制">
       <button type="button" title="放大" aria-label="放大星系" onClick={() => zoom(1.25)}><Plus size={16} /></button>
       <button type="button" title="缩小" aria-label="缩小星系" onClick={() => zoom(0.8)}><Minus size={16} /></button>
-      <button type="button" title="适应视图" aria-label="适应星系视图" onClick={() => { viewRef.current = { yaw: 0.35, pitch: -0.18, zoom: 1 }; redrawRef.current() }}><Maximize size={15} /></button>
+      <button type="button" title="适应视图" aria-label="适应星系视图" onClick={() => { viewRef.current = { ...DEFAULT_GALAXY_VIEW }; redrawRef.current() }}><Maximize size={15} /></button>
     </div>
     <div className="memory-galaxy-accessible" aria-label="星系实体">
       {nodes.map((node) => <button key={node.id} type="button" aria-pressed={selectedId === node.id} onClick={() => onSelect(node.id)}>{node.label}</button>)}

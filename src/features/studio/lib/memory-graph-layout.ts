@@ -1,3 +1,4 @@
+import { solveGalaxyLayout } from './memory-galaxy-layout'
 import type { MemoryGraphEdge } from '../../../../shared/contracts/index.js'
 
 export type ReadableMemoryGraphEdge = MemoryGraphEdge & { occurrences: number }
@@ -44,13 +45,13 @@ export function memoryGraphTopologyKey(ids: string[], edges: Pick<MemoryGraphEdg
 /** Deterministic, finite spring/repulsion solve. No frame loop or ongoing physics after layout. */
 export function solveMemoryGraph(topologyKey: string, dimensions: 2 | 3): Map<string, GraphPoint> {
   const [ids, links] = JSON.parse(topologyKey) as [string[], [string, string][]]
+  if (dimensions === 3) return solveGalaxyLayout(ids, links.map(([source, target]) => ({ source, target })))
   const count = ids.length
-  const radius = Math.max(180, Math.sqrt(count) * (dimensions === 2 ? 120 : 70))
+  const radius = Math.max(180, Math.sqrt(count) * 120)
   const points = ids.map((_, i) => {
     const angle = i * Math.PI * (3 - Math.sqrt(5))
-    const z = dimensions === 3 ? 1 - 2 * (i + 0.5) / count : 0
-    const r = dimensions === 3 ? Math.sqrt(1 - z * z) * radius : Math.sqrt((i + 0.5) / Math.max(count, 1)) * radius
-    return { x: Math.cos(angle) * r, y: Math.sin(angle) * r, z: z * radius }
+    const r = Math.sqrt((i + 0.5) / Math.max(count, 1)) * radius
+    return { x: Math.cos(angle) * r, y: Math.sin(angle) * r, z: 0 }
   })
   const indices = new Map(ids.map((id, i) => [id, i]))
   const springs = links.map(([a, b]) => [indices.get(a), indices.get(b)]).filter((pair): pair is [number, number] => pair[0] !== undefined && pair[1] !== undefined && pair[0] !== pair[1])
@@ -63,7 +64,7 @@ export function solveMemoryGraph(topologyKey: string, dimensions: 2 | 3): Map<st
         const dy = points[a].y - points[b].y || 0.01
         const dz = points[a].z - points[b].z
         const distance = Math.max(20, Math.hypot(dx, dy, dz))
-        const force = Math.min(14, (dimensions === 2 ? 14000 : 8500) / (distance * distance))
+        const force = Math.min(14, 14000 / (distance * distance))
         for (const axis of ['x', 'y', 'z'] as const) {
           const delta = axis === 'x' ? dx : axis === 'y' ? dy : dz
           velocity[a][axis] += delta / distance * force
@@ -76,7 +77,7 @@ export function solveMemoryGraph(topologyKey: string, dimensions: 2 | 3): Map<st
       const dy = points[b].y - points[a].y
       const dz = points[b].z - points[a].z
       const distance = Math.max(1, Math.hypot(dx, dy, dz))
-      const force = (distance - (dimensions === 2 ? 260 : 170)) * 0.018
+      const force = (distance - 260) * 0.018
       for (const axis of ['x', 'y', 'z'] as const) {
         const delta = axis === 'x' ? dx : axis === 'y' ? dy : dz
         velocity[a][axis] += delta / distance * force
