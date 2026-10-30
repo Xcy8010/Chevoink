@@ -66,7 +66,8 @@ function fixture(action: Action, fresh = false) {
   const tx = {
     agentTaskRoot: { findUniqueOrThrow: vi.fn(async () => root) }, agentExecutionState: { findUnique: vi.fn(async () => head), updateMany: vi.fn() },
     agentExecutionFrame: { findFirst: vi.fn(async () => ({ revision: head.revision })), findUnique: vi.fn(async ({ where }) => frames[where.taskRootId_revision.revision]), create: vi.fn() },
-    agentExecutionOutbox: { findUnique: vi.fn(async ({ where }) => events[Number(where.eventKey.split(':').at(-1))]), create: vi.fn() },
+    agentExecutionOutbox: { findUnique: vi.fn(async ({ where }) => events[Number(where.eventKey.split(':').at(-1))]),
+      findFirst: vi.fn(async () => null), create: vi.fn() },
     agentOperation: { findUniqueOrThrow: vi.fn(async () => operation), findUnique: vi.fn(async () => fresh ? null : operation),
       findFirst: vi.fn(async ({ where }) => Object.entries(where).every(([key, value]) => operation[key as keyof typeof operation] === value) ? operation : null), create: vi.fn() },
     agentProviderAttempt: { create: vi.fn() }, creditLedgerEntry: { create: vi.fn() }, aiUsageLog: { create: vi.fn() },

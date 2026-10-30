@@ -52,8 +52,22 @@ async function fixture(work: (fixture: Fixture) => Promise<void>, overrides: Par
     }
     for (const checkpoint of checkpoints) {
       expect(checkpoint.content).toBe('')
-      expect(checkpoint.metadata).toMatchObject({ scopeKey: hash([user.id, session.id, novel.id, spec.id]), taskKey: spec.id })
       const metadata = checkpoint.metadata as { kind: string; status: string }
+      if (metadata.kind === 'researchSelectedIdentity') {
+        const selected = checkpoint.metadata as { taskKey: string; sourceId: string; contentRef: string; revision: string; identityHash: string;
+          target: { title: string; author: string; sourceHosts: string[] } }
+        expect(checkpoint.metadata).toMatchObject({ version: 1, taskKey: spec.id, target: {
+          title: spec.researchTarget!.title, author: spec.researchTarget!.author, sourceHosts: spec.researchTarget!.sourceHosts ?? [],
+        } })
+        expect(selected.identityHash).toBe(hash({ title: selected.target.title.normalize('NFC').trim(),
+          author: selected.target.author.normalize('NFC').trim(), sourceHosts: selected.target.sourceHosts }))
+        expect(await prisma.agentResearchSource.findUniqueOrThrow({ where: { id: selected.sourceId } }))
+          .toMatchObject({ taskKey: spec.id, ownerRunId: scope.runId })
+        expect(await prisma.agentResearchContent.findUniqueOrThrow({ where: { id: selected.contentRef } }))
+          .toMatchObject({ sourceId: selected.sourceId, revision: selected.revision })
+        continue
+      }
+      expect(checkpoint.metadata).toMatchObject({ scopeKey: hash([user.id, session.id, novel.id, spec.id]), taskKey: spec.id })
       expect(checkpoint.metadata).toMatchObject({ version: metadata.kind === 'researchDiscoveryHandoff' ? 2 : 1 })
       expect(['researchReadHandoff', 'researchLimitationDelivery', 'researchDiscoveryHandoff']).toContain(metadata.kind)
       expect(['pending', 'consumed']).toContain(metadata.status)
