@@ -1,6 +1,7 @@
 import { setPublicBetaEnabled } from '../lib/credit-policy.js'
 import { Router, type Request, type Response } from 'express'
 import { modelRoutesInputSchema } from '../../shared/contracts/model-routes.js'
+import { weightedRoutesInputSchema } from '../../shared/contracts/model-weighted-routes.js'
 import { modelPromotionSchema } from '../../shared/model-promotion.js'
 import { createRateCard, transitionRateCard, listRateCards, rateCardEvidenceSchema } from '../lib/billing/rate-cards.js'
 import { itemizedTokenPriceSchema } from '../lib/billing/token-price.js'
@@ -189,6 +190,7 @@ const adminModelUpdateSchema = z.object({
   imageQuality: imageQualityConfigSchema.optional(),
   freePromotion: modelPromotionSchema.nullable().optional(),
   routes: modelRoutesInputSchema.optional(),
+  weightedRoutes: weightedRoutesInputSchema.optional(),
   provider: z.string().trim().min(1).max(40).optional(),
   displayName: z.string().trim().min(1).max(80).optional(),
   modelName: z.string().trim().min(1).max(160).optional(),
@@ -1051,7 +1053,7 @@ router.get('/credits', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
   try {
     await requireAdmin(req)
-    res.status(200).json(buildSuccess(requestId, await getAdminCreditsManagement()))
+    res.status(200).json(buildSuccess(requestId, await getAdminCreditsManagement(typeof req.query.search === 'string' ? req.query.search : undefined)))
   } catch (error) {
     sendRouteError(res, requestId, error)
   }
@@ -1235,7 +1237,7 @@ router.patch('/models/:modelId', async (req: Request, res: Response): Promise<vo
     requireSuperAdmin(admin)
     const body = parseBody(adminModelUpdateSchema, req.body, '模型配置格式不正确。')
     await updateAdminModel(admin.id, req.params.modelId, body)
-    await recordAdminAuditLog({ adminId: admin.id, action: 'models.update', targetType: 'aiModelConfig', targetId: req.params.modelId, detail: { ...body, routes: body.routes?.map(({ apiKey, ...route }) => ({ ...route, ...(apiKey ? { apiKey: '[REPLACED]' } : {}) })), apiKey: body.apiKey ? '[REPLACED]' : undefined }, ip: getRequestIp(req) })
+    await recordAdminAuditLog({ adminId: admin.id, action: 'models.update', targetType: 'aiModelConfig', targetId: req.params.modelId, detail: { ...body, weightedRoutes: body.weightedRoutes ? { ...body.weightedRoutes, candidates: body.weightedRoutes.candidates.map(({ apiKey, ...route }) => ({ ...route, ...(apiKey ? { apiKey: '[REPLACED]' } : {}) })) } : undefined, routes: body.routes?.map(({ apiKey, ...route }) => ({ ...route, ...(apiKey ? { apiKey: '[REPLACED]' } : {}) })), apiKey: body.apiKey ? '[REPLACED]' : undefined }, ip: getRequestIp(req) })
     res.status(200).json(buildSuccess(requestId, { ok: true }))
   } catch (error) {
     sendRouteError(res, requestId, error)

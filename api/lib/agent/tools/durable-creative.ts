@@ -1,3 +1,4 @@
+import { selectWeightedModelRuntime, resolveWeightedModelRuntime } from '../../model-weighted-routing.js'
 import { z } from 'zod'
 import { env } from '../../../config/env.js'
 import { getModelTierRuntime } from '../../credits.js'
@@ -45,10 +46,10 @@ export async function executeDurableCreative(ctx: ToolContext, tool: AgentTool, 
         args as Parameters<typeof prepareCreativeReview>[1], step === 'creative_critique' ? 'critique' : 'revision'))
       const assigned = await assignedTaskModel(ctx.userId, ctx.novelId, step === 'creative_critique' ? 'creative_critique' : 'creative_revision', ctx.modelAssignments, true)
       const selected = ctx.modelSelection
-      const main = ctx.modelRuntime ?? (selected ? await getModelTierRuntime(selected.tier, ctx.userId, selected.customModelId, selected.reasoningEffort) : undefined)
+      const main = ctx.modelRuntime ?? (selected ? resolveWeightedModelRuntime(await getModelTierRuntime(selected.tier, ctx.userId, selected.customModelId, selected.reasoningEffort), selected.weightedRoute) : undefined)
       const inherited = !assigned && auxiliaryTextModel(main)
       const inheritedRuntime = inherited ? await resolveDurableAuxiliaryRuntime({ userId: ctx.userId, modelRuntime: inherited, modelSelection: selected }) : undefined
-      const runtime = assigned?.runtime ?? inheritedRuntime?.runtime ?? await getModelTierRuntime('speed', ctx.userId)
+      const runtime = selectWeightedModelRuntime(assigned?.runtime ?? inheritedRuntime?.runtime ?? await getModelTierRuntime('speed', ctx.userId))
       const selection = { tier: runtime.tier, customModelId: runtime.tier === 'custom' ? assigned?.selection.customModelId ?? selected?.customModelId ?? null : null, reasoningEffort: runtime.reasoningEffort }
       if (selection.tier === 'custom' && !selection.customModelId) return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '创作辅助缺少原自定义模型身份。')
       const route = auxiliaryRouteForRuntime({ ...runtime, honorAssignedReasoning: true }, selection, env.aiTextMaxOutputTokens)

@@ -1,3 +1,4 @@
+import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { Prisma } from '@prisma/client'
@@ -81,11 +82,12 @@ export async function requestImportSuggestion(human: NovelImportHuman, jobId: st
     void prisma.novelImportJob.findUnique({ where: { id: jobId } }).then(job => { if (!job || job.status === 'cancelled' || job.manifestHash !== input.manifestHash) controller.abort() }).catch(() => controller.abort())
   }, 1000)
   try {
-    const response = await chatWithTools({ messages: [{ role: 'system', content: system }, { role: 'user', content: chapter.content }], tools: [], maxOutputTokens: 2000,
-      outputTokenParameter: runtime.outputTokenParameter,
-      thinkingEnabled: runtime.thinkingEnabled,
-      model: runtime.modelName ?? undefined, providerBaseUrl: runtime.baseUrl, providerApiKey: runtime.apiKey, provider: runtime.provider, reasoningEffort: route.reasoningEffort, reasoningParameterMode: runtime.reasoningParameterMode, temperature: 0.1, signal: controller.signal,
-      usageLog: { userId: human.userId, novelId: human.novelId, action: 'novelImportStructure', targetType: 'importSuggestion', targetId: claim.row.id, modelTier: runtime.tier, multiplierBps: runtime.multiplierBps } })
+    const selectedRuntime = selectWeightedModelRuntime(runtime)
+    const response = await chatWithTools({ weightedRoute: selectedRuntime.weightedRoute, messages: [{ role: 'system', content: system }, { role: 'user', content: chapter.content }], tools: [], maxOutputTokens: 2000,
+      outputTokenParameter: selectedRuntime.outputTokenParameter,
+      thinkingEnabled: selectedRuntime.thinkingEnabled,
+      model: selectedRuntime.modelName ?? undefined, providerBaseUrl: selectedRuntime.baseUrl, providerApiKey: selectedRuntime.apiKey, provider: selectedRuntime.provider, reasoningEffort: route.reasoningEffort, reasoningParameterMode: selectedRuntime.reasoningParameterMode, temperature: 0.1, signal: controller.signal,
+      usageLog: { userId: human.userId, novelId: human.novelId, action: 'novelImportStructure', targetType: 'importSuggestion', targetId: claim.row.id, modelTier: selectedRuntime.tier, multiplierBps: selectedRuntime.multiplierBps } })
     if (response.finishReason === 'length') throw new DataAccessError(422, 'IMPORT_AI_OUTPUT_INCOMPLETE', '模型结果不完整，原文未修改。')
     const result = validateImportSuggestion(JSON.parse(response.content), chapter.content)
     // Save paid suggestions, but never apply late results or write manuscript text.

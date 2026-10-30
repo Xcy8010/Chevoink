@@ -1,3 +1,4 @@
+import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { untilCompletionControl } from './execution-control.js'
 import { observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, nextStagnantBatch } from './semantic-progress.js'
 import type { AgentExecutionMode, AgentMessagePart, AgentStreamEventBody, AgentTokenUsage } from '../../../shared/contracts/index.js'
@@ -133,9 +134,12 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
   const toolAuthority = snapshotToolAuthority(tools, params.mode)
   const openAITools = toOpenAITools(tools)
 
+  // Each subtask owns a logical reply; BYOK retains its exact admitted account.
+  const modelRuntime = params.modelRuntime.tier === 'custom' ? params.modelRuntime
+    : selectWeightedModelRuntime(await getModelTierRuntime(params.modelRuntime.tier, params.userId, undefined, params.modelRuntime.reasoningEffort))
   const messages = buildSubagentMessages(params)
   messages.splice(1, 0, ...await (await import('./goal-runtime.js')).buildGoalContextMessages(params.userId, params.parentRunId))
-  const contextBudget = resolveAgentContextBudget(params.modelRuntime.contextWindowTokens ?? env.agentContextWindowTokens, env.aiTextMaxOutputTokens)
+  const contextBudget = resolveAgentContextBudget(modelRuntime.contextWindowTokens ?? env.agentContextWindowTokens, env.aiTextMaxOutputTokens)
   const prepareContextForRequest = (requestTools = openAITools): boolean => {
     const toolTokens = estimateToolDefinitionTokens(requestTools)
     let requestTokens = estimateChatMessagesTokens(messages) + toolTokens
@@ -178,17 +182,17 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
       }
 
       const result = await chatWithTools({
-        freePromotion: params.modelRuntime.freePromotion,
+        weightedRoute: modelRuntime.weightedRoute, freePromotion: modelRuntime.freePromotion,
         messages,
         tools: openAITools,
-        model: params.modelRuntime.modelName ?? definition.model,
-        providerBaseUrl: params.modelRuntime.baseUrl,
-        providerApiKey: params.modelRuntime.apiKey,
-        provider: params.modelRuntime.provider,
-        reasoningEffort: params.modelRuntime.reasoningEffort,
-        reasoningParameterMode: params.modelRuntime.reasoningParameterMode,
-        thinkingEnabled: params.modelRuntime.thinkingEnabled,
-        outputTokenParameter: params.modelRuntime.outputTokenParameter,
+        model: modelRuntime.modelName ?? definition.model,
+        providerBaseUrl: modelRuntime.baseUrl,
+        providerApiKey: modelRuntime.apiKey,
+        provider: modelRuntime.provider,
+        reasoningEffort: modelRuntime.reasoningEffort,
+        reasoningParameterMode: modelRuntime.reasoningParameterMode,
+        thinkingEnabled: modelRuntime.thinkingEnabled,
+        outputTokenParameter: modelRuntime.outputTokenParameter,
         temperature: 0.6,
         signal: params.toolContextBase.signal,
         usageLog: {
@@ -200,8 +204,8 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
           targetId: params.subtaskRunId,
           agentRunId: params.parentRunId,
           turn: turns,
-          modelTier: params.modelRuntime.tier,
-          multiplierBps: params.modelRuntime.multiplierBps,
+          modelTier: modelRuntime.tier,
+          multiplierBps: modelRuntime.multiplierBps,
         },
       })
       addUsage(usage, result.usage)
@@ -234,7 +238,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
         const outcome = await handleToolCall(
           call,
           tools,
-          { ...params.toolContextBase, planContentHashes, mode: params.mode, toolAuthority, callId: call.id },
+          { ...params.toolContextBase, modelRuntime, planContentHashes, mode: params.mode, toolAuthority, callId: call.id },
           params.bus,
           params.messageId,
           params.parentRunId,

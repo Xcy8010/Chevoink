@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ get: vi.fn(), create: vi.fn(), reorder: vi.fn(), update: vi.fn() }))
 vi.mock('../../src/features/admin/api', () => ({ getAdminModelManagement: mocks.get, createAdminModel: mocks.create, reorderAdminModels: mocks.reorder, updateAdminModel: mocks.update }))
 import AdminModelsPage from '../../src/features/admin/pages/AdminModelsPage'
+import { WeightedRoutesEditor } from '../../src/features/admin/components/WeightedRoutesEditor'
 const row = (id: string, tier: 'speed' | 'builtin_0123456789abcdef', displayName: string) => ({ id, tier, displayName, sortOrder: 0, modelKind: 'text', provider: 'openai', modelName: 'fixture', baseUrl: 'https://fixture.invalid/v1', multiplier: 1,
   enabled: true, selectable: true, isDefault: id === 'a', apiKeyConfigured: true, requestCount: 0, requestTokens: 0, responseTokens: 0,
   reasoningEfforts: ['high'], defaultReasoningEffort: 'high', visionEnabled: false, contextWindowTokens: 128000, configurationReady: true, updatedAt: '' })
@@ -114,4 +115,49 @@ it('keeps legacy image quality undeclared when its existing model is saved witho
   fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
   await waitFor(() => expect(mocks.update).toHaveBeenCalledOnce())
   expect(JSON.parse(JSON.stringify(mocks.update.mock.calls[0][1]))).not.toHaveProperty('imageQuality')
+})
+
+it('edits independent weighted candidates and restores server IDs after refresh without changing legacy routes or protocols', async () => {
+  const oldRoute = { id: '11111111-1111-4111-8111-111111111111', label: '原线路', provider: 'old-relay', modelName: 'old-alias', baseUrl: 'https://old.invalid', enabled: true, apiKeyConfigured: true }
+  let model = { ...row('a', 'speed', '权重测试'), routes: [oldRoute], weightedRoutes: { primaryWeight: 100, candidates: [] as Array<Record<string, unknown>> } }
+  mocks.get.mockImplementation(async () => ({ models: [model], trend: [] }))
+  mocks.update.mockImplementation(async (_id: string, payload: Record<string, unknown>) => {
+    const config = payload.weightedRoutes as { primaryWeight: number; candidates: Array<Record<string, unknown>> }
+    model = { ...model, weightedRoutes: { primaryWeight: config.primaryWeight,
+      candidates: config.candidates.map(({ apiKey: _secret, ...route }) => ({ ...route, id: 'server-stable-id', apiKeyConfigured: true })) } }
+    return { ok: true }
+  })
+  mount(); await screen.findByText('权重测试'); fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+  expect(screen.getByRole('spinbutton', { name: '主配置及原线路的入口概率 (%)' }).getAttribute('value')).toBe('100')
+  expect(screen.queryByRole('textbox', { name: '权重线路名称' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '添加权重线路' }))
+  fireEvent.change(screen.getByRole('spinbutton', { name: '主配置及原线路的入口概率 (%)' }), { target: { value: '40' } })
+  fireEvent.change(screen.getByRole('spinbutton', { name: '线路入口概率 (%)' }), { target: { value: '60' } })
+  fireEvent.change(screen.getByRole('textbox', { name: '权重线路供应商' }), { target: { value: 'custom-provider' } })
+  fireEvent.change(screen.getByRole('textbox', { name: '权重线路模型 ID' }), { target: { value: 'free-form/model-alias' } })
+  fireEvent.change(screen.getByRole('textbox', { name: '权重线路 Base URL' }), { target: { value: 'https://free.invalid/custom' } })
+  fireEvent.change(screen.getByLabelText('权重线路 API Key'), { target: { value: 'offline-weighted-secret' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+  await waitFor(() => expect(mocks.update).toHaveBeenCalledWith('a', expect.objectContaining({ weightedRoutes: { primaryWeight: 40, candidates: [expect.objectContaining({
+    weight: 60, provider: 'custom-provider', modelName: 'free-form/model-alias', apiKey: 'offline-weighted-secret', baseUrl: 'https://free.invalid/custom',
+  })] }, routes: [expect.objectContaining({ id: oldRoute.id, enabled: true, provider: oldRoute.provider })] })))
+  await waitFor(() => expect(screen.queryByRole('button', { name: '保存配置' })).toBeNull())
+  fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+  expect(screen.getByRole('spinbutton', { name: '主配置及原线路的入口概率 (%)' }).getAttribute('value')).toBe('40')
+  expect(screen.getByLabelText('权重线路 API Key').getAttribute('value')).toBe('')
+  fireEvent.change(screen.getByRole('textbox', { name: '权重线路名称' }), { target: { value: '编辑后线路' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+  await waitFor(() => expect(mocks.update).toHaveBeenLastCalledWith('a', expect.objectContaining({ weightedRoutes: { primaryWeight: 40, candidates: [expect.objectContaining({ id: 'server-stable-id', label: '编辑后线路' })] } })))
+  await waitFor(() => expect(screen.queryByRole('button', { name: '保存配置' })).toBeNull())
+  fireEvent.click(screen.getByRole('button', { name: '编辑' })); fireEvent.click(screen.getByRole('button', { name: '移除权重线路' }))
+  expect(screen.getByRole('spinbutton', { name: '主配置及原线路的入口概率 (%)' }).getAttribute('value')).toBe('100')
+  fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+  await waitFor(() => expect(mocks.update).toHaveBeenLastCalledWith('a', expect.objectContaining({ weightedRoutes: { primaryWeight: 100, candidates: [] } })))
+})
+
+it('displays the same exact decimal total used by weighted input validation', () => {
+  const defaults = { provider: 'custom', modelName: 'alias', baseUrl: 'https://fixture.invalid' }
+  render(<WeightedRoutesEditor defaults={defaults} onChange={vi.fn()} value={{ primaryWeight: 0.01,
+    candidates: [0.01, 99.98].map(weight => ({ ...defaults, label: '线路', weight })) }} />)
+  expect(screen.getByText('合计 100%')).toBeTruthy()
 })

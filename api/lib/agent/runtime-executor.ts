@@ -1,3 +1,4 @@
+import { selectWeightedModelRuntime, resolveWeightedModelRuntime } from '../model-weighted-routing.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { currentNativeToolViews, readFrozenModelToolViews } from './runtime-tool-view.js'
 import { z } from 'zod'
@@ -193,12 +194,12 @@ async function refreshDurableGoalModel(token: RunLeaseToken) {
   if (!requested) return false
   const effort = reasoning.safeParse(requested.reasoningEffort)
   if (!effort.success) return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '目标续跑的推理配置无效。')
-  const runtime = await getModelTierRuntime(requested.tier as import('../../../shared/contracts/index.js').CreditModelTier, token.userId,
-    requested.tier === 'custom' ? requested.customModelId : null, effort.data)
+  const runtime = selectWeightedModelRuntime(await getModelTierRuntime(requested.tier as import('../../../shared/contracts/index.js').CreditModelTier, token.userId,
+    requested.tier === 'custom' ? requested.customModelId : null, effort.data))
   if (runtime.tier !== requested.tier) return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '目标续跑模型路由未按原档位解析。')
   const modelName = runtime.modelName ?? env.aiTextModel
   const endpoint = `${(runtime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`
-  const routeRevision = modelRouteRevision({ provider: runtime.provider, model: modelName, endpoint, reasoningEffort: runtime.reasoningEffort })
+  const routeRevision = modelRouteRevision({ provider: runtime.provider, model: modelName, endpoint, reasoningEffort: runtime.reasoningEffort, ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}) })
   return withRunLease(token, async tx => {
     const binding = await tx.agentGoalExecution.findUnique({ where: { runId: token.runId }, select: { trigger: true } })
     if (!binding || binding.trigger === 'author') return false
@@ -214,7 +215,8 @@ async function refreshDurableGoalModel(token: RunLeaseToken) {
     if (pendingOperations || pendingAttempts) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '目标仍有未决模型操作，不能切换模型路由。')
     if (state.configuration.model.tier === run.modelTier && state.configuration.model.customModelId === run.customModelId
       && state.configuration.model.reasoningEffort === run.reasoningEffort) return false
-    const nextConfiguration = { ...state.configuration, model: { ...state.configuration.model,
+    const { weightedRoute: _oldWeightedRoute, ...previousModel } = state.configuration.model
+    const nextConfiguration = { ...state.configuration, model: { ...previousModel, ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}),
       tier: runtime.tier, provider: runtime.provider, modelName, customModelId: runtime.tier === 'custom' ? run.customModelId : null,
       maxOutputTokens: env.aiTextMaxOutputTokens, contextWindowTokens: runtime.contextWindowTokens ?? env.agentContextWindowTokens,
       reasoningEffort: runtime.reasoningEffort, routeRevision } }
@@ -302,8 +304,8 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   const tier = durableModelTier.safeParse(configuration.model.tier)
   const effort = reasoning.safeParse(configuration.model.reasoningEffort)
   if (!tier.success || !effort.success || tier.data === 'custom' && !configuration.model.customModelId) return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '原模型配置缺少可核验的自定义模型身份。')
-  const runtime = await getModelTierRuntime(tier.data as import('../../../shared/contracts/index.js').CreditModelTier, lease.userId,
-    tier.data === 'custom' ? configuration.model.customModelId : null, effort.data)
+  const runtime = resolveWeightedModelRuntime(await getModelTierRuntime(tier.data as import('../../../shared/contracts/index.js').CreditModelTier, lease.userId,
+    tier.data === 'custom' ? configuration.model.customModelId : null, effort.data), configuration.model.weightedRoute)
   if (runtime.tier !== tier.data) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原模型档位不可用，不能静默回退。')
   const currentWindow = runtime.contextWindowTokens ?? env.agentContextWindowTokens
   const window = Math.min(configuration.model.contextWindowTokens ?? currentWindow, currentWindow)
@@ -326,7 +328,7 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   if (price.modelTier !== tier.data) return runtimeError('RUNTIME_PRICE_INVALID', '冻结价目与当前模型身份不一致。')
   signal.throwIfAborted()
   const result = await chatWithTools({ messages: frame.state.messages, tools,
-    provider: runtime.provider, model: runtime.modelName ?? env.aiTextModel, providerBaseUrl: runtime.baseUrl,
+    weightedRoute: runtime.weightedRoute, provider: runtime.provider, model: runtime.modelName ?? env.aiTextModel, providerBaseUrl: runtime.baseUrl,
     providerApiKey: runtime.apiKey, reasoningEffort: effort.data, maxOutputTokens, signal,
     durableExecution: { lease, operationKey, attemptKey: '1', price, cursor: { expectedRevision: frame.revision, expectedHash: frame.snapshotHash } },
     usageLog: { userId: lease.userId, agentRunId: lease.runId, action: 'workspaceAgent', modelTier: tier.data, multiplierBps: price.multiplierBps, turn: frame.state.turn + 1 },

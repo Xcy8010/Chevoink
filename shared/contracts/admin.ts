@@ -422,6 +422,7 @@ export type AdminModelManagementPayload = {
     perCallCredits?: number
     freePromotion?: import('../model-promotion.js').ModelPromotion | null
     routes?: import('./model-routes.js').ModelRouteView[]
+    weightedRoutes?: import('./model-weighted-routes.js').WeightedRoutesView
     id: string
     pricing?: import('./credits.js').CreditLedgerItem['pricing']
     tier: string | null

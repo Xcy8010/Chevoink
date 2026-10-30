@@ -1,3 +1,5 @@
+import { getModelTierRuntime } from '../credits.js'
+import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { generateTextCompletion } from '../ai-service.js'
 import { DataAccessError } from '../prisma.js'
 import { env } from '../../config/env.js'
@@ -23,8 +25,10 @@ export async function generateReviewCompletion(
   // 挂死连接由流式静默看门狗（aiTextStreamIdleMs）提前释放，不再叠加更短的硬帽
   const timer = setTimeout(() => deadline.abort(), env.aiTextTimeoutMs)
   const signal = originalSignal ? AbortSignal.any([originalSignal, deadline.signal]) : deadline.signal
-  options = { ...options, signal, responseFormat: 'json_object' }
   try {
+    const runtime = options.modelRuntime ?? (options.modelTier ? await getModelTierRuntime(options.modelTier, options.userId) : undefined)
+    options = { ...options, signal, responseFormat: 'json_object',
+      ...(runtime && !options.authorizedRequest && !options.singlePhysicalRequest ? { modelRuntime: selectWeightedModelRuntime(runtime) } : {}) }
     try {
       const result = await generateTextCompletion(system, content, { ...options, maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true })
       signal.throwIfAborted()

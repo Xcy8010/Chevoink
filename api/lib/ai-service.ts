@@ -25,6 +25,8 @@ import { env } from '../config/env.js'
 import { invokeExactRouteWithRateLimitRetry, ModelRouteRejected, routeRejectionMayRetry, withModelRoutePool } from './model-route-pool.js'
 import { isProviderQuotaError, providerQuotaError } from './provider-quota-error.js'
 import { getToolModelRuntime } from './tool-model-config.js'
+import { selectWeightedModelRuntime, weightedRouteEvidence } from './model-weighted-routing.js'
+import type { WeightedRouteSelection } from '../../shared/contracts/model-weighted-routes.js'
 import { assignedTaskModel, resolveTextActionTask } from './agent/model-assignment-context.js'
 import type {
   ChapterAssistRequest,
@@ -216,9 +218,9 @@ async function prepareTextUsage(input: {
   userId: string; action: string; modelName: string; modelTier: CreditModelTier; multiplierBps: number;
   novelId?: string | null; chapterId?: string | null; targetType?: string; targetId?: string | null;
   agentRunId?: string | null; turn?: number | null; providerName?: string | null;
-  inputEstimate: number; maxOutput: number; frozenPrice?: TokenPrice;
+  inputEstimate: number; maxOutput: number; frozenPrice?: TokenPrice; routeEvidence?: Prisma.InputJsonObject;
 }) {
-  const { inputEstimate, maxOutput, frozenPrice, ...identity } = input
+  const { inputEstimate, maxOutput, frozenPrice, routeEvidence, ...identity } = input
   const price = frozenPrice ? tokenPriceSchema.parse(frozenPrice) : input.modelTier === 'custom' ? { version: 'byok-exempt' }
     : await resolveTokenPrice(input.modelTier, input.multiplierBps)
   if (frozenPrice && !frozenTokenPriceMatchesModel(frozenPrice, input.modelTier, input.multiplierBps)) {
@@ -226,7 +228,7 @@ async function prepareTextUsage(input: {
   }
   const data: import('@prisma/client').Prisma.AiUsageLogUncheckedCreateInput = { ...identity, targetType: input.targetType ?? 'text',
     providerType: 'text', providerMode: env.aiProviderMode, durationMs: 0,
-    billingEvidence: { policy: FALLBACK_USAGE_POLICY, inputEstimate, outputEstimate: 0, responseObserved: false },
+    billingEvidence: { ...routeEvidence, policy: FALLBACK_USAGE_POLICY, inputEstimate, outputEstimate: 0, responseObserved: false },
     billingSnapshot: price, usageSource: 'prepared', billingStatus: frozenPrice ? 'authorized_pending' : 'prepared' }
   const prepared = await prisma.aiUsageLog.create({ data })
   try {
@@ -268,17 +270,17 @@ async function hasKnownZeroProviderRejection(id: string | undefined, userId: str
   return recorded?.count === 1
 }
 
-async function saveOutputEvidence(id: string, inputEstimate: number, output: string) {
+async function saveOutputEvidence(id: string, inputEstimate: number, output: string, routeEvidence?: Prisma.InputJsonObject) {
   if (!output) return
   await prisma.aiUsageLog.updateMany({ where: { id, billingStatus: { in: ['prepared', 'authorized_pending'] } }, data: {
-    billingEvidence: { policy: FALLBACK_USAGE_POLICY, inputEstimate, outputEstimate: estimateTokenCount(output), responseObserved: true },
+    billingEvidence: { ...routeEvidence, policy: FALLBACK_USAGE_POLICY, inputEstimate, outputEstimate: estimateTokenCount(output), responseObserved: true },
   } })
 }
 
 /** Accept SSE when supported and JSON from compatible non-streaming gateways.
  * Persist only counts, never manuscript text or credentials, for interruption billing. */
 async function readAuxiliaryResponse(response: Response, usageId: string, inputEstimate: number, custom: boolean, authorizationHeld = false,
-  onObservedCompletion?: TextCompletionOptions['onObservedCompletion']): Promise<JsonProviderPayload> {
+  onObservedCompletion?: TextCompletionOptions['onObservedCompletion'], routeEvidence?: Prisma.InputJsonObject): Promise<JsonProviderPayload> {
   if (!response.ok || !response.headers.get('content-type')?.includes('text/event-stream') || !response.body) return { ...await parseJsonResponse(response), localOutputEstimate: undefined }
   let content = '', reasoning = '', done = false, truncated = false, lastSaved = 0
   let finishReason: string | null = null
@@ -324,7 +326,7 @@ async function readAuxiliaryResponse(response: Response, usageId: string, inputE
         '模型流式响应长时间无新数据，已中止本次请求；检查未完成，已保存正文保留。'))
       if (chunk.done) break
       frames.push(decoder.decode(chunk.value, { stream: true }))
-      if (Date.now() - lastSaved >= 1000) { await saveOutputEvidence(usageId, inputEstimate, reasoning + content); lastSaved = Date.now() }
+      if (Date.now() - lastSaved >= 1000) { await saveOutputEvidence(usageId, inputEstimate, reasoning + content, routeEvidence); lastSaved = Date.now() }
     }
     frames.push(decoder.decode(), true)
     if (truncated) throw new DataAccessError(502, 'AI_PROVIDER_OUTPUT_LIMIT', '模型输出达到上限，未将部分检查结果当作完成。')
@@ -340,7 +342,7 @@ async function readAuxiliaryResponse(response: Response, usageId: string, inputE
   } finally {
     await reader.cancel().catch(() => {})
     reader.releaseLock()
-    await saveOutputEvidence(usageId, inputEstimate, reasoning + content)
+    await saveOutputEvidence(usageId, inputEstimate, reasoning + content, routeEvidence)
     // A final usage frame received before interruption is stronger than estimates.
     if (usage?.prompt_tokens != null || usage?.completion_tokens != null) {
       const cache = extractCacheTokens(usage!)
@@ -667,6 +669,8 @@ export function buildProviderToolChoice(input: ProviderReasoningInput, requested
 }
 
 export type ChatWithToolsParams = {
+  weightedRoute?: WeightedRouteSelection
+  physicalRouteId?: string
   /** Internal structured auxiliary response contract, frozen with its route. */
   responseFormat?: ReviewResponseFormat
   /** Internal critic/repair calls only; main creative turns retain author effort. */
@@ -879,17 +883,18 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     }, params.toolChoice))
   }
   const encodedBody = JSON.stringify(body)
+  const routeEvidence = weightedRouteEvidence(params.weightedRoute, params.provider ?? env.aiTextProvider, model, params.physicalRouteId)
   const tier = params.usageLog.modelTier ?? 'speed'
   if (params.durableExecution?.cursor) await validateModelCursor(params.durableExecution.lease, params.durableExecution.cursor, {
     operationKey: params.durableExecution.operationKey, parentOperationId: params.durableExecution.parentOperationId,
     messages: params.messages, tools: params.tools, tier,
-    route: { provider: params.provider ?? env.aiTextProvider, model, endpoint, reasoningEffort },
+    route: { provider: params.provider ?? env.aiTextProvider, model, endpoint, reasoningEffort, ...(params.weightedRoute ? { weightedRoute: params.weightedRoute } : {}) },
   })
   if (params.durableExecution?.price && params.durableExecution.price.modelTier !== tier) throw new DataAccessError(409, 'RUNTIME_PRICE_INVALID', '冻结价目与模型档位不一致。')
   const durable = params.durableExecution ? await beginDurableChat({
     execution: params.durableExecution, userId: params.usageLog.userId, agentRunId: params.usageLog.agentRunId,
     action: params.usageLog.action, provider: params.provider ?? env.aiTextProvider, model,
-    request: { endpoint, body: JSON.parse(encodedBody) },
+    request: { endpoint, body: JSON.parse(encodedBody), ...routeEvidence },
     price: params.durableExecution.price ?? await resolveDurableTokenPrice(params.durableExecution.lease, params.durableExecution.operationKey,
       tier, params.usageLog.multiplierBps ?? 10000),
     admit: async () => {
@@ -907,7 +912,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   const prepared = durable ? undefined : await prepareTextUsage({ ...params.usageLog, modelName: model,
     inputEstimate: estimateTokenCount(encodedBody), maxOutput: params.maxOutputTokens ?? env.aiTextMaxOutputTokens,
     modelTier: tier, multiplierBps: params.usageLog.multiplierBps ?? 10000,
-    providerName: params.provider ?? env.aiTextProvider })
+    providerName: params.provider ?? env.aiTextProvider, routeEvidence })
   if (params.signal?.aborted) {
     await markUnobservedUsage(prepared?.id, false)
     params.signal.throwIfAborted()
@@ -1011,7 +1016,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     if (!durable) {
       if (prepared && (force || Date.now() - lastEvidenceSave >= 1000)) {
         const output = content + reasoning + [...toolCallsByIndex.values()].map(call => call.arguments).join('')
-        await saveOutputEvidence(prepared.id, estimateTokenCount(encodedBody), output)
+        await saveOutputEvidence(prepared.id, estimateTokenCount(encodedBody), output, routeEvidence)
         lastEvidenceSave = Date.now()
       }
       return
@@ -1239,7 +1244,8 @@ async function generateGoalTextCompletion(systemPrompt: string, userPrompt: stri
   if (review && !options.modelRuntime && !options.modelTier) throw new DataAccessError(409, 'RUNTIME_MODEL_ADAPTER_REQUIRED', '检查缺少当前选择的模型身份，未派发请求。')
   const assigned = task && !review && !options.explicitModelSelection ? await assignedTaskModel(options.userId, options.novelId, task) : undefined
   if (assigned) options = { ...options, modelRuntime: assigned.runtime, reasoningEffort: assigned.runtime.reasoningEffort, multiplierBps: undefined, boundedReview: false }
-  const sourceRuntime = options.modelRuntime ?? await getModelTierRuntime(options.modelTier ?? 'speed', options.userId)
+  const resolvedRuntime = options.modelRuntime ?? await getModelTierRuntime(options.modelTier ?? 'speed', options.userId)
+  const sourceRuntime = options.authorizedRequest || options.singlePhysicalRequest ? resolvedRuntime : selectWeightedModelRuntime(resolvedRuntime)
   const modelRuntime = sourceRuntime.tier === 'custom' ? sourceRuntime : { ...sourceRuntime, multiplierBps: effectiveModelMultiplier({
     multiplierBps: sourceRuntime.multiplierBps, metadata: { freePromotion: sourceRuntime.freePromotion },
   }) }
@@ -1250,15 +1256,15 @@ async function generateGoalTextCompletion(systemPrompt: string, userPrompt: stri
   })
   if (review) return invokeExactRouteWithRateLimitRetry({ messages: [], tools: [], model: modelRuntime.modelName ?? env.aiTextModel,
     provider: modelRuntime.provider, providerBaseUrl: modelRuntime.baseUrl, providerApiKey: modelRuntime.apiKey,
-    signal: options.signal, usageLog: { userId: options.userId, action: options.action, modelTier: modelRuntime.tier } }, route => {
+    weightedRoute: modelRuntime.weightedRoute, signal: options.signal, usageLog: { userId: options.userId, action: options.action, modelTier: modelRuntime.tier } }, route => {
     return generateTextCompletionImpl(systemPrompt, userPrompt, { ...options, multiplierBps: undefined,
       modelRuntime, signal: route.signal })
   })
   return withModelRoutePool({ messages: [], tools: [], model: modelRuntime.modelName ?? undefined,
     provider: modelRuntime.provider, providerBaseUrl: modelRuntime.baseUrl, providerApiKey: modelRuntime.apiKey,
-    signal: options.signal, usageLog: { userId: options.userId, action: options.action, modelTier: modelRuntime.tier } }, route => {
+    weightedRoute: modelRuntime.weightedRoute, signal: options.signal, usageLog: { userId: options.userId, action: options.action, modelTier: modelRuntime.tier } }, route => {
     return generateTextCompletionImpl(systemPrompt, userPrompt, { ...options, signal: route.signal, modelRuntime: { ...modelRuntime,
-      provider: route.provider ?? modelRuntime.provider, modelName: route.model ?? modelRuntime.modelName,
+      physicalRouteId: route.physicalRouteId, provider: route.provider ?? modelRuntime.provider, modelName: route.model ?? modelRuntime.modelName,
       baseUrl: route.providerBaseUrl ?? modelRuntime.baseUrl, apiKey: route.providerApiKey ?? modelRuntime.apiKey } })
   })
 }
@@ -1273,6 +1279,7 @@ async function finishTextRequest(record: TextRequestRecord, dispatched: boolean)
 
 async function generateTextCompletionImpl(systemPrompt: string, userPrompt: string, options: TextCompletionOptions & { modelRuntime: Awaited<ReturnType<typeof getModelTierRuntime>> }) {
   const modelRuntime = options.modelRuntime
+  const routeEvidence = weightedRouteEvidence(modelRuntime.weightedRoute, modelRuntime.provider, modelRuntime.modelName ?? env.aiTextModel, (modelRuntime as typeof modelRuntime & { physicalRouteId?: string }).physicalRouteId)
   const requestedReasoning = options.reasoningEffort ?? modelRuntime.reasoningEffort
   const completionReasoning = modelRuntime.reasoningEfforts && !modelRuntime.reasoningEfforts.includes(requestedReasoning)
     ? modelRuntime.reasoningEffort : requestedReasoning
@@ -1307,7 +1314,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     modelName: modelRuntime.modelName ?? env.aiTextModel, modelTier: modelRuntime.tier,
     multiplierBps: options.multiplierBps ?? modelRuntime.multiplierBps,
     novelId: options.novelId, chapterId: options.chapterId, agentRunId: options.agentRunId, targetType: options.targetType, targetId: options.targetId,
-    providerName: modelRuntime.provider, frozenPrice: options.authorizedRequest?.price })
+    providerName: modelRuntime.provider, frozenPrice: options.authorizedRequest?.price, routeEvidence })
   let dispatched = false
   const request = beginTextRequest(prepared.id)
   try {
@@ -1351,7 +1358,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   const response = isLocalModelProvider(modelRuntime.provider) ? await localModelFetch({ userId: options.userId,
     provider: modelRuntime.provider, baseUrl: modelRuntime.baseUrl!, apiKey: modelRuntime.apiKey!, body: requestInit.body, signal: options.signal }) : await fetch(endpoint, requestInit)
 
-  const payload = await readAuxiliaryResponse(response, prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), modelRuntime.tier === 'custom', !!authorized, options.onObservedCompletion)
+  const payload = await readAuxiliaryResponse(response, prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), modelRuntime.tier === 'custom', !!authorized, options.onObservedCompletion, routeEvidence)
   if (payload.reasoningTokens != null) console.info('[ai-reasoning-usage]', {
     action: options.action, model: modelRuntime.modelName ?? env.aiTextModel,
     reasoningTokens: payload.reasoningTokens, completionTokens: payload.usage?.completion_tokens ?? null, durationMs: Date.now() - startedAt,
@@ -1363,7 +1370,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   if (validContent) options.onObservedCompletion?.({ usageId: prepared.id, content: content as string,
     finishReason: typeof payload.choices?.[0]?.finish_reason === 'string' ? payload.choices[0].finish_reason : null,
     toolCalls: payload.choices?.[0]?.message?.tool_calls ?? [] })
-  if (validContent && payload.localOutputEstimate === undefined) await saveOutputEvidence(prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), content as string)
+  if (validContent && payload.localOutputEstimate === undefined) await saveOutputEvidence(prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), content as string, routeEvidence)
   const reportedPrompt = payload.usage?.prompt_tokens
   const reportedCompletion = payload.usage?.completion_tokens
   for (const count of [reportedPrompt, reportedCompletion]) {

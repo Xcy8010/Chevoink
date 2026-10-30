@@ -445,3 +445,25 @@ describe('authenticated author review quote and sole sender', () => {
     expect(runtimeJson(payload).hash).toMatch(/^[a-f0-9]{64}$/u)
   })
 })
+it('freezes one weighted builtin candidate in a new author quote and never redraws on submit/claim/dispatch', async () => {
+  const secretBox = await import('../../api/lib/secret-box.js')
+  const decrypt = vi.spyOn(secretBox, 'decryptSecret').mockReturnValue('selected-replacement-key')
+  const draw = vi.spyOn(Math, 'random').mockReturnValue(0.8)
+  try {
+    const base = await mocks.runtime()
+    mocks.runtime.mockResolvedValue({ ...base, weightedRoutes: { primaryWeight: 70, candidates: [{ id: 'replacement-relay', label: 'replacement', weight: 30,
+      provider: 'relay', modelName: 'any-review-alias', baseUrl: 'https://replacement.invalid/v1', apiKeyCiphertext: 'ciphertext' }] } })
+    const quote = await quoteAuthorReviewReplacement('owner', 'run')
+    const authorization = decode(quote.quoteToken).authorization as unknown as AuthorReviewReplacementAuthorization
+    expect(authorization.expected.model).toMatchObject({ tier: 'standard', provider: 'relay', modelName: 'any-review-alias', multiplierBps: 12000,
+      weightedRoute: { source: 'candidate', candidateId: 'replacement-relay' } })
+    expect(JSON.stringify(authorization)).not.toMatch(/selected-replacement-key|ciphertext/)
+    await submitAuthorReviewReplacement('owner', 'run', quote.quoteToken)
+    expect((await settled(quote.authorizationId)).state).toBe('complete')
+    expect(draw).toHaveBeenCalledOnce()
+    expect(mocks.providerRequest).toHaveBeenCalledOnce()
+    expect(mocks.generate.mock.calls[0][2]).toMatchObject({ modelRuntime: { provider: 'relay', modelName: 'any-review-alias', apiKey: 'selected-replacement-key',
+      weightedRoute: { source: 'candidate', candidateId: 'replacement-relay' }, tier: 'standard', multiplierBps: 12000 },
+      authorizedRequest: { price: { modelTier: 'standard', multiplierBps: 12000 } } })
+  } finally { draw.mockRestore(); decrypt.mockRestore() }
+})

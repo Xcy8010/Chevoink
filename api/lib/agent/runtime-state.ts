@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
+import { weightedRouteSelectionSchema } from '../../../shared/contracts/model-weighted-routes.js'
 import { lockRunRoot, runtimeError, runtimeJson, runtimeJsonHash, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readTaskBudgetInTransaction, taskTurnLimit } from './runtime-budget.js'
@@ -23,7 +24,7 @@ const message = z.discriminatedUnion('role', [
 /** Server configuration only; credentials are resolved separately and never serialized here. */
 const configurationSchema = z.object({ version: z.literal(1), mode: z.enum(['plan', 'build', 'review']), agentType: z.string().min(1),
   creativeFreedom: z.enum(['stable', 'balanced', 'bold']), qualityMode: z.enum(['balanced', 'premium']),
-  model: z.object({ tier: z.string().min(1), provider: z.string().min(1), modelName: z.string().nullable(), customModelId: id.nullable(),
+  model: z.object({ weightedRoute: weightedRouteSelectionSchema.optional(), tier: z.string().min(1), provider: z.string().min(1), modelName: z.string().nullable(), customModelId: id.nullable(),
     reasoningEffort: z.string().min(1), routeRevision: z.string().regex(/^[a-f0-9]{64}$/),
     maxOutputTokens: z.number().int().positive().max(4000000).optional(),
     contextWindowTokens: z.number().int().positive().max(4000000).optional() }).strict(),

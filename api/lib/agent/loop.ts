@@ -1,3 +1,4 @@
+import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { observedReviewOutcome, projectedReviewAction, type ReviewOutcome } from '../../../shared/review-lifecycle.js'
 import { readSettledQualityReviews, readQualityReviewAdmission } from './quality-review-admission.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
@@ -1055,7 +1056,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       // Historical runs keep their known consumption, without inventing earned slices.
       checkpointRestored = true
     }
-    let modelRuntime = await getModelTierRuntime(params.modelTier ?? 'speed', params.userId, params.customModelId, params.reasoningEffort)
+    let modelRuntime = selectWeightedModelRuntime(await getModelTierRuntime(params.modelTier ?? 'speed', params.userId, params.customModelId, params.reasoningEffort))
     let runtimeModelName = modelRuntime.modelName ?? agent.model
     assertTaskAuthorizationRuntimeReady(storedRun.taskSpec, { userId: params.userId, sessionId: params.sessionId, novelId: params.novelId })
     await prisma.agentSession.update({
@@ -1844,8 +1845,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         const current = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
         if (!['running', 'awaiting_approval'].includes(current.status)) throw new DOMException('run stopped', 'AbortError')
         if (current.modelTier !== modelRuntime.tier || current.customModelId !== (params.customModelId ?? null) || current.reasoningEffort !== modelRuntime.reasoningEffort) {
-          modelRuntime = await getModelTierRuntime(current.modelTier as CreditModelTier, params.userId, current.customModelId,
-            current.reasoningEffort as import('../../../shared/contracts/index.js').ModelReasoningEffort)
+          modelRuntime = selectWeightedModelRuntime(await getModelTierRuntime(current.modelTier as CreditModelTier, params.userId, current.customModelId,
+            current.reasoningEffort as import('../../../shared/contracts/index.js').ModelReasoningEffort))
           params.customModelId = current.customModelId
           runtimeModelName = modelRuntime.modelName ?? agent.model
           toolContext.modelRuntime = modelRuntime
@@ -1962,7 +1963,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const recoverySystem = JSON.stringify(messages), recoveryContent = JSON.stringify(openAITools)
       const result = bootstrapCall ? { content: '', reasoning: '', toolCalls: [bootstrapCall], finishReason: 'tool_calls' as const,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } } : await chatWithTools({
-        freePromotion: modelRuntime.freePromotion,
+        weightedRoute: modelRuntime.weightedRoute, freePromotion: modelRuntime.freePromotion,
         onUsage: observeTurnUsage,
         messages,
         tools: openAITools,

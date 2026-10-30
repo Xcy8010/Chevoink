@@ -1,3 +1,5 @@
+import { weightedRouteSelectionSchema, type WeightedRouteSelection } from '../../../shared/contracts/model-weighted-routes.js'
+import { selectWeightedModelRuntime, resolveWeightedModelRuntime } from '../model-weighted-routing.js'
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
@@ -41,7 +43,7 @@ const jobs = new Map<string, Promise<void>>()
 const identifier = z.string().min(1).max(64)
 const digest = z.string().regex(/^[a-f0-9]{64}$/u)
 const effort = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
-const modelSchema = z.object({ tier: creditModelTierSchema, customModelId: identifier.nullable(), reasoningEffort: effort,
+const modelSchema = z.object({ weightedRoute: weightedRouteSelectionSchema.optional(), tier: creditModelTierSchema, customModelId: identifier.nullable(), reasoningEffort: effort,
   provider: z.string().min(1).max(256), modelName: z.string().min(1).max(512), multiplierBps: z.number().int().nonnegative().max(MAX_CREDIT_STORAGE_INT) }).strict()
 const authorizationSchema = z.object({
   authorizationId: z.string().min(1).max(160), humanAuthorizationRef: z.string().min(1).max(160),
@@ -60,8 +62,10 @@ type QuotePayload = z.infer<typeof payloadSchema>
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const sha = (value: string) => createHash('sha256').update(value).digest('hex')
 const hash = (value: unknown) => runtimeJson(JSON.parse(JSON.stringify(value))).hash
-const runtimeFingerprint = (runtime: Awaited<ReturnType<typeof getModelTierRuntime>>) => hash({ ...runtime,
-  modelName: runtime.modelName ?? env.aiTextModel, baseUrl: runtime.baseUrl ?? env.aiTextBaseUrl, apiKey: runtime.apiKey ?? env.aiTextApiKey })
+const runtimeFingerprint = (runtime: Awaited<ReturnType<typeof getModelTierRuntime>>) => {
+  const { weightedRoutes: _catalog, ...selected } = runtime
+  return hash({ ...selected, modelName: runtime.modelName ?? env.aiTextModel, baseUrl: runtime.baseUrl ?? env.aiTextBaseUrl, apiKey: runtime.apiKey ?? env.aiTextApiKey })
+}
 const authorizationEventWhere = (runId: string, authorizationId: string): Prisma.AgentRunEventWhereInput => ({ runId,
   OR: [{ id: `ar${sha(`authorization:${authorizationId}`).slice(0, 60)}` },
     { type: 'review.replacement.authorized', payload: { path: ['value', 'authorizationId'], equals: authorizationId } }] })
@@ -130,7 +134,7 @@ function inScope(spec: unknown, novelId: string, chapter: { id: string; orderInd
   }) : writing.kind === 'unbounded' || Array.isArray(scope.chapterIds) && scope.chapterIds.includes(chapter.id))
 }
 
-async function quoteFacts(tx: Prisma.TransactionClient, userId: string, runId: string, selection: Selection, nonce: string, locking: boolean) {
+async function quoteFacts(tx: Prisma.TransactionClient, userId: string, runId: string, selection: Selection, nonce: string, locking: boolean, weightedRoute?: WeightedRouteSelection) {
   const run = await stoppedRun(tx, userId, runId, locking), subject: Subject = { userId, runId, novelId: run.novelId }
   const saved = savedRunUsageSchema.safeParse(run.usage)
   if (!saved.success || saved.data.checkpoint?.version !== 2 || saved.data.checkpoint.controlPolicy !== 'until_completion') refuse('原检查点与预算无法核实。')
@@ -162,9 +166,10 @@ async function quoteFacts(tx: Prisma.TransactionClient, userId: string, runId: s
   const customModelId = tier === 'custom' ? selection.customModelId ?? run.customModelId : null
   if (tier === 'custom' && !customModelId) refuse('当前选择缺少自定义模型身份。')
   const reasoningEffort = effort.parse(selection.reasoningEffort ?? run.reasoningEffort)
-  const runtime = await getModelTierRuntime(tier, userId, customModelId, reasoningEffort)
+  const baseRuntime = await getModelTierRuntime(tier, userId, customModelId, reasoningEffort)
+  const runtime = locking ? resolveWeightedModelRuntime(baseRuntime, weightedRoute) : selectWeightedModelRuntime(baseRuntime)
   if (runtime.tier !== tier || runtime.reasoningEffort !== reasoningEffort) refuse('当前模型身份无法完整核实，未替换模型。')
-  const model = modelSchema.parse({ tier, customModelId, reasoningEffort, provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel, multiplierBps: runtime.multiplierBps })
+  const model = modelSchema.parse({ ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier, customModelId, reasoningEffort, provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel, multiplierBps: runtime.multiplierBps })
   const price = tokenPriceSchema.parse(await resolveTokenPrice(tier, runtime.multiplierBps))
   if (price.modelTier !== tier || price.multiplierBps !== runtime.multiplierBps) refuse('当前模型与实际费率身份不一致，未创建报价。')
   const deterministic = analyzeDeterministicQuality(bundle.chapter.content, bundle.recentChapters.map(item => item.content))
@@ -243,8 +248,8 @@ async function executeClaim(claim: Claim, expectedRuntimeHash: string) {
   let observed: Observed | undefined
   let failureCode = 'AUTHOR_REVIEW_REPLACEMENT_FAILED'
   try {
-    const runtime = await getModelTierRuntime(claim.model.tier, claim.userId, claim.model.customModelId, claim.model.reasoningEffort)
-    if (runtimeFingerprint(runtime) !== expectedRuntimeHash || hash({ tier: runtime.tier, customModelId: claim.model.customModelId, reasoningEffort: runtime.reasoningEffort,
+    const runtime = resolveWeightedModelRuntime(await getModelTierRuntime(claim.model.tier, claim.userId, claim.model.customModelId, claim.model.reasoningEffort), claim.model.weightedRoute)
+    if (runtimeFingerprint(runtime) !== expectedRuntimeHash || hash({ ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier: runtime.tier, customModelId: claim.model.customModelId, reasoningEffort: runtime.reasoningEffort,
       provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel, multiplierBps: runtime.multiplierBps }) !== hash(claim.model)) refuse('派发前当前模型身份已变化，未替换模型。')
     await withTextRequestTrace(trace, () => generateTextCompletion(claim.system, claim.content, {
       userId: claim.userId, novelId: claim.novelId, agentRunId: claim.runId, chapterId: claim.chapterId,
@@ -253,7 +258,7 @@ async function executeClaim(claim: Claim, expectedRuntimeHash: string) {
       authorizedRequest: { price: claim.price, inputTokenCeiling: claim.conservativeInputTokenCeiling, maxCreditMilli: claim.maxCreditMilli,
         beforeDispatch: () => withUserRunLock(claim.userId, () => prisma.$transaction(async tx => {
           await stoppedRun(tx, claim.userId, claim.runId, true)
-          if (runtimeFingerprint(await getModelTierRuntime(claim.model.tier, claim.userId, claim.model.customModelId, claim.model.reasoningEffort)) !== expectedRuntimeHash) refuse('派发前当前模型路由已变化。')
+          if (runtimeFingerprint(resolveWeightedModelRuntime(await getModelTierRuntime(claim.model.tier, claim.userId, claim.model.customModelId, claim.model.reasoningEffort), claim.model.weightedRoute)) !== expectedRuntimeHash) refuse('派发前当前模型路由已变化。')
           await validateClaimAuthorReviewReplacement(tx, claim.authorizationId)
         }, { isolationLevel: 'Serializable' })) },
       onObservedCompletion: value => { observed = { ...value, toolCalls: [...value.toolCalls] } },
@@ -299,7 +304,7 @@ export async function submitAuthorReviewReplacement(userId: string, runId: strin
       if (existing) return { kind: 'status' as const, status: statusDto(input.authorizationId, await readAuthorReviewReplacementStatus(tx, input.subject, input.authorizationId)) }
       const selected = input.expected.model
       const facts = await quoteFacts(tx, userId, runId, continueAgentLoopRunSchema.parse({ modelTier: selected.tier, customModelId: selected.customModelId,
-        reasoningEffort: selected.reasoningEffort }), input.authority.quoteNonce, true)
+        reasoningEffort: selected.reasoningEffort }), input.authority.quoteNonce, true, selected.weightedRoute)
       if (hash(facts) !== hash({ authorization: input, binding: payload.binding })) refuse('正文、完整上下文、当前模型或正常价格已变化，请重新查看报价。')
       if (payload.expiresAt <= Date.now()) refuse('报价在确认前已过期，请重新查看当前报价。')
       if (run.modelTier !== selected.tier || run.customModelId !== selected.customModelId || run.reasoningEffort !== selected.reasoningEffort) {

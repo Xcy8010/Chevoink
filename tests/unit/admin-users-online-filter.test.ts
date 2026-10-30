@@ -81,3 +81,13 @@ describe('listAdminUsersData 状态筛选（在线/封禁）', () => {
     expect(where.lastActiveAt).toBeUndefined()
   })
 })
+
+it('shares ID/nickname/phone/email search while retaining role, status, sorting and pagination', async () => {
+  await listAdminUsersData({ search: '  user_1  ', role: 'user', banned: false, page: 3, pageSize: 10 })
+  expect(mocks.findMany).toHaveBeenCalledWith(expect.objectContaining({
+    where: { OR: [
+      { id: { contains: 'user_1', mode: 'insensitive' } }, { nickname: { contains: 'user_1', mode: 'insensitive' } },
+      { phone: { contains: 'user_1' } }, { email: { contains: 'user_1', mode: 'insensitive' } },
+    ], role: 'user', bannedAt: null }, orderBy: { createdAt: 'desc' }, skip: 20, take: 10,
+  }))
+})

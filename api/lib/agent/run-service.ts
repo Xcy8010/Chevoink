@@ -1,3 +1,4 @@
+import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { freezeWritingScope, readWritingScope, writingClarificationResolvesInput } from './writing-scope.js'
 import { isInternalAgentArtifact } from './artifact-visibility.js'
 import { savedRunUsageSchema } from './checkpoint.js'
@@ -157,8 +158,8 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   if (!original || runtimeJson(original.parts).hash !== runtimeJson(JSON.parse(JSON.stringify(parts))).hash) throw new DataAccessError(409, 'RUN_INPUT_MISMATCH', '初始化必须使用已保存的完整原始请求。')
   if (run.status !== 'queued') throw new DataAccessError(409, 'RUN_IN_PROGRESS', '不能重新初始化已启动任务。')
   await assertManagedAttachmentsAccess(input.attachments, userId)
-  const runtime = await getModelTierRuntime(run.modelTier as import('../../../shared/contracts/index.js').CreditModelTier, userId, run.customModelId,
-    run.reasoningEffort as import('../../../shared/contracts/index.js').ModelReasoningEffort)
+  const runtime = selectWeightedModelRuntime(await getModelTierRuntime(run.modelTier as import('../../../shared/contracts/index.js').CreditModelTier, userId, run.customModelId,
+    run.reasoningEffort as import('../../../shared/contracts/index.js').ModelReasoningEffort))
   if (runtime.tier !== run.modelTier || run.modelTier === 'custom' && !run.customModelId) throw new DataAccessError(409, 'RUNTIME_MODEL_ADAPTER_REQUIRED', '原模型配置缺少可核验的模型身份。')
   const agent = getAgentDefinition(input.agentProfile ?? 'orchestrator')
   if (input.pinnedSubagentId) {
@@ -211,11 +212,11 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
       creativeFreedom: input.creativeFreedom ?? 'balanced', qualityMode: input.qualityMode ?? 'premium',
       ...(input.modelAssignments ? { modelAssignments: input.modelAssignments } : {}),
       ...(input.pinnedSubagentId ? { pinnedSubagentId: input.pinnedSubagentId } : {}),
-      model: { tier: runtime.tier, provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel,
+      model: { ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier: runtime.tier, provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel,
         customModelId: runtime.tier === 'custom' ? run.customModelId : null,
         maxOutputTokens: env.aiTextMaxOutputTokens, contextWindowTokens: runtime.contextWindowTokens ?? env.agentContextWindowTokens,
         reasoningEffort: runtime.reasoningEffort, routeRevision: modelRouteRevision({ provider: runtime.provider, model: runtime.modelName ?? env.aiTextModel,
-          endpoint: `${(runtime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`, reasoningEffort: runtime.reasoningEffort }) },
+          endpoint: `${(runtime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`, reasoningEffort: runtime.reasoningEffort, ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}) }) },
       tools: toOpenAITools(tools, spec.scope), toolAuthority: [...snapshotToolAuthority(tools, input.mode)].map(([name, grant]) => ({ name, ...grant })),
       protectedChapterIds: spec.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED') ? spec.scope.chapterIds ?? [] : [],
       skillRouterVersion: assembled.skillRoute?.routerVersion ?? (await import('./skills/index.js')).SKILL_ROUTER_VERSION,

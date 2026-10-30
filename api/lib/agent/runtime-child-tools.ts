@@ -1,3 +1,4 @@
+import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { env } from '../../config/env.js'
@@ -195,8 +196,8 @@ export async function executeDurableChildTool(parent: RunLeaseToken, cursor: Too
       const selected = entry.model ? await admitAssignedModel(ctx.userId, agentModelSelectionSchema.parse(entry.model))
         : await assignedTaskModel(ctx.userId, ctx.novelId, tool.name.startsWith('subagent_') ? 'subagent' : 'spawned_task', source.configuration.modelAssignments, true)
       const inherited = source.configuration.model
-      const runtime = selected?.runtime ?? await getModelTierRuntime(inherited.tier as import('../../../shared/contracts/index.js').CreditModelTier,
-        ctx.userId, inherited.customModelId, inherited.reasoningEffort as import('../../../shared/contracts/index.js').ModelReasoningEffort)
+      const runtime = selectWeightedModelRuntime(selected?.runtime ?? await getModelTierRuntime(inherited.tier as import('../../../shared/contracts/index.js').CreditModelTier,
+        ctx.userId, inherited.customModelId, inherited.reasoningEffort as import('../../../shared/contracts/index.js').ModelReasoningEffort))
       if (runtime.tier !== (selected?.selection.modelTier ?? inherited.tier)) return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '原子任务模型不可用，不能替换为其他档位。')
       return { entry, runtime, selected, price: await resolveTokenPrice(runtime.tier, runtime.multiplierBps) }
     }))
@@ -227,11 +228,12 @@ export async function executeDurableChildTool(parent: RunLeaseToken, cursor: Too
         const tokenCeiling = COMPATIBILITY_TOKEN_LIMIT
         const modelName = selection.runtime.modelName ?? env.aiTextModel
         const inheritedConfiguration = Object.fromEntries(Object.entries(source.configuration).filter(([key]) => key !== 'pinnedSubagentId')) as ChildConfiguration
+        const { weightedRoute: _parentChoice, ...inheritedModel } = source.configuration.model
         const configuration: ChildConfiguration = { ...inheritedConfiguration, mode, agentType: role,
-          model: selection.selected ? { ...source.configuration.model, tier: selection.runtime.tier, provider: selection.runtime.provider,
-            modelName, customModelId: selection.selected.selection.customModelId ?? null, reasoningEffort: selection.runtime.reasoningEffort,
+          model: selection.selected || selection.runtime.weightedRoute || source.configuration.model.weightedRoute ? { ...inheritedModel, ...(selection.runtime.weightedRoute ? { weightedRoute: selection.runtime.weightedRoute } : {}), tier: selection.runtime.tier, provider: selection.runtime.provider,
+            modelName, customModelId: selection.selected ? selection.selected.selection.customModelId ?? null : inheritedModel.customModelId, reasoningEffort: selection.runtime.reasoningEffort,
             routeRevision: modelRouteRevision({ provider: selection.runtime.provider, model: modelName,
-              endpoint: `${(selection.runtime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`, reasoningEffort: selection.runtime.reasoningEffort }) }
+              endpoint: `${(selection.runtime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`, reasoningEffort: selection.runtime.reasoningEffort, ...(selection.runtime.weightedRoute ? { weightedRoute: selection.runtime.weightedRoute } : {}) }) }
             : source.configuration.model }
         if (parentSpec.scope.selection) {
           const { getToolByName } = await import('./tools/registry.js')

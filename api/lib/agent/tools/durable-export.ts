@@ -1,3 +1,4 @@
+import { selectWeightedModelRuntime } from '../../model-weighted-routing.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { env } from '../../../config/env.js'
@@ -82,12 +83,13 @@ async function freezeExport(ctx: ToolContext, tool: AgentTool, args: Record<stri
         const assigned = await assignedTaskModel(ctx.userId, ctx.novelId, 'publish_advice', ctx.modelAssignments, true)
         const selected = assigned ? { runtime: assigned.runtime, selection: { tier: assigned.runtime.tier, customModelId: assigned.selection.customModelId ?? null,
           reasoningEffort: assigned.runtime.reasoningEffort } } : await resolveAuxiliaryModelSelection(ctx.userId)
-        const effort = assigned ? selected.runtime.reasoningEffort : selected.runtime.reasoningEfforts?.includes('low') ? 'low' : selected.runtime.reasoningEffort
-        const route = auxiliaryRouteForRuntime({ ...selected.runtime, reasoningEffort: effort, honorAssignedReasoning: true }, { ...selected.selection, reasoningEffort: effort }, env.aiTextMaxOutputTokens)
+        const runtime = selectWeightedModelRuntime(selected.runtime)
+        const effort = assigned ? runtime.reasoningEffort : runtime.reasoningEfforts?.includes('low') ? 'low' : runtime.reasoningEffort
+        const route = auxiliaryRouteForRuntime({ ...runtime, reasoningEffort: effort, honorAssignedReasoning: true }, { ...selected.selection, reasoningEffort: effort }, env.aiTextMaxOutputTokens)
         delete route.responseFormat
         const { systemPrompt, userPrompt } = buildPublishAdviceRequest(source.snapshot.advice.input)
         advice = { kind: 'generate', input: source.snapshot.advice.input, system: systemPrompt, content: userPrompt, route,
-          price: await resolveDurableTokenPrice(lease, `${capability.operationKey}:export-price`, selected.runtime.tier, selected.runtime.multiplierBps) }
+          price: await resolveDurableTokenPrice(lease, `${capability.operationKey}:export-price`, runtime.tier, runtime.multiplierBps) }
       } catch (error) {
         // This branch resolves local configuration/price only: no provider child
         // or HTTP has been created, unlike a failed/unknown generation call.

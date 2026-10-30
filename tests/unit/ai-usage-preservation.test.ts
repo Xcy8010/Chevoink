@@ -839,3 +839,53 @@ describe('explicit zero provider usage is not missing usage', () => {
     expect(mocks.create).toHaveBeenCalledOnce()
   })
 })
+it('keeps a fresh builtin weighted review and its paid output recovery on one admitted supplier/tier price', async () => {
+  const draw = vi.spyOn(Math, 'random').mockReturnValue(0.75)
+  try {
+    mocks.findUsage.mockResolvedValue({ usageSource: 'reported', billingStatus: 'settled', requestTokens: 100, responseTokens: 20, reservedCreditMilli: 0 })
+    const selected = qualityRuntime({ tier: 'ultimate', provider: 'primary', modelName: 'main', baseUrl: 'https://primary.invalid/v1', multiplierBps: 25000,
+      weightedRoutes: { primaryWeight: 70, candidates: [{ id: 'weighted-review', label: 'review relay', weight: 30, provider: 'free-relay',
+        modelName: 'unlisted-review-alias', baseUrl: 'https://review.invalid/v1', apiKeyCiphertext: 'synthetic-weighted-key' }] } })
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => qualityResponse()).mockImplementationOnce(async () => qualityResponse('length'))
+    vi.stubGlobal('fetch', fetcher)
+    await expect(generateReviewCompletion('rules', 'complete manuscript', { userId: 'test', action: 'agent3HumanityCritic', modelRuntime: selected }))
+      .resolves.toBe('{"findings":[]}')
+    expect(draw).toHaveBeenCalledOnce()
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    for (const [url, init] of fetcher.mock.calls) {
+      expect(url).toBe('https://review.invalid/v1/chat/completions')
+      expect(JSON.parse(String(init?.body)).model).toBe('unlisted-review-alias')
+      expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer synthetic-weighted-key')
+    }
+    for (const [{ data }] of mocks.create.mock.calls) expect(data).toMatchObject({ modelTier: 'ultimate', multiplierBps: 25000,
+      providerName: 'free-relay', modelName: 'unlisted-review-alias', billingSnapshot: { modelTier: 'ultimate', multiplierBps: 25000 },
+      billingEvidence: { weightedRoute: { source: 'candidate', candidateId: 'weighted-review', provider: 'free-relay', model: 'unlisted-review-alias' } } })
+    for (const [{ data }] of mocks.updateMany.mock.calls.filter(([arg]) => arg.data.billingEvidence)) {
+      expect(data.billingEvidence).toMatchObject({ weightedRoute: { candidateId: 'weighted-review' } })
+      expect(JSON.stringify(data.billingEvidence)).not.toContain('synthetic-weighted-key')
+    }
+    expect(mocks.charge).toHaveBeenCalledTimes(2)
+    for (const [charge] of mocks.charge.mock.calls) expect(charge).toMatchObject({ modelTier: 'ultimate', multiplierBps: 25000, requestTokens: 100, responseTokens: 20 })
+  } finally { draw.mockRestore() }
+})
+it('does not redraw or replay a weighted connection after an unknown network outcome', async () => {
+  const draw = vi.spyOn(Math, 'random').mockReturnValue(0.9)
+  try {
+    const selected = qualityRuntime({ tier: 'speed', multiplierBps: 10000, weightedRoutes: { primaryWeight: 0, candidates: [{ id: 'only', label: 'only', weight: 100,
+      provider: 'relay', modelName: 'free-alias', baseUrl: 'https://single.invalid/v1', apiKeyCiphertext: 'fixture-only-key' }] } })
+    const fetcher = vi.fn(async () => { throw new TypeError('fetch failed') })
+    vi.stubGlobal('fetch', fetcher)
+    await expect(generateTextCompletion('system', 'content', { userId: 'test', action: 'test', modelRuntime: selected })).rejects.toThrow()
+    expect(draw).toHaveBeenCalledOnce(); expect(fetcher).toHaveBeenCalledOnce(); expect(mocks.charge).not.toHaveBeenCalled()
+    expect(mocks.create.mock.calls[0][0].data.billingEvidence.weightedRoute.candidateId).toBe('only')
+  } finally { draw.mockRestore() }
+})
+it('cleans the original review deadline when fresh runtime resolution fails before dispatch', async () => {
+  vi.useFakeTimers()
+  try {
+    mocks.runtime.mockRejectedValue(new Error('synthetic configuration failure'))
+    await expect(generateReviewCompletion('rules', 'content', { userId: 'test', action: 'agent3HumanityCritic', modelTier: 'speed' })).rejects.toThrow('synthetic configuration failure')
+    expect(vi.getTimerCount()).toBe(0)
+    expect(mocks.create).not.toHaveBeenCalled()
+  } finally { vi.useRealTimers() }
+})

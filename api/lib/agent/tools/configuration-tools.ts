@@ -1,3 +1,4 @@
+import { selectWeightedModelRuntime } from '../../model-weighted-routing.js'
 import { selectableModelTierSchema, isBuiltInModelTier } from '../../../../shared/contracts/model-tier.js'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
@@ -98,12 +99,14 @@ export async function configureAgent(ctx: ToolContext, args: ConfigureArgs) {
       const state = await readExecutionStateInTransaction(tx, current.taskRootId)
       if (state.frame.state.phase !== 'awaiting_operation') throw new DataAccessError(409, 'RUNTIME_STATE_CONFLICT', '切换不处于工具边界。')
       if (await tx.agentProviderAttempt.count({ where: { operation: { taskRootId: current.taskRootId }, status: { in: ['prepared', 'dispatched', 'unknown'] } } })) throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', '原模型请求尚待核对，不能切换配置。')
+      const runtime = chosen ? selectWeightedModelRuntime(chosen.runtime) : undefined
+      const { weightedRoute: _oldChoice, ...previousModel } = state.configuration.model
       const configuration = { ...state.configuration, creativeFreedom: response.creativeFreedom,
-        ...(chosen ? { model: { ...state.configuration.model, tier: chosen.runtime.tier, customModelId: chosen.selection.customModelId ?? null,
-          provider: chosen.runtime.provider, modelName: chosen.runtime.modelName ?? env.aiTextModel, reasoningEffort: chosen.runtime.reasoningEffort,
-          contextWindowTokens: chosen.runtime.contextWindowTokens ?? env.agentContextWindowTokens,
-          routeRevision: modelRouteRevision({ provider: chosen.runtime.provider, model: chosen.runtime.modelName ?? env.aiTextModel,
-            endpoint: `${(chosen.runtime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`, reasoningEffort: chosen.runtime.reasoningEffort }) } } : {}) }
+        ...(chosen && runtime ? { model: { ...previousModel, ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier: runtime.tier, customModelId: chosen.selection.customModelId ?? null,
+          provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel, reasoningEffort: runtime.reasoningEffort,
+          contextWindowTokens: runtime.contextWindowTokens ?? env.agentContextWindowTokens,
+          routeRevision: modelRouteRevision({ provider: runtime.provider, model: runtime.modelName ?? env.aiTextModel,
+            endpoint: `${(runtime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`, reasoningEffort: runtime.reasoningEffort, ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}) }) } } : {}) }
       const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: current.taskRootId } })
       await tx.agentExecutionState.update({ where: { taskRootId: current.taskRootId }, data: { configuration: runtimeJson(configuration).value, configurationHash: runtimeJson({ configuration, inputHash: root.inputHash }).hash } })
       await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: current.taskRootId, runId: current.id, operationId: state.frame.state.pendingOperationId,

@@ -1,3 +1,4 @@
+import { selectWeightedModelRuntime } from '../../model-weighted-routing.js'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import { agentModelSelectionSchema, modelAssignmentsSchema, modelAssignmentTaskSchema, type FrozenModelAssignments } from '../../../../shared/contracts/agent-model-assignments.js'
@@ -90,12 +91,13 @@ export const modelAssignmentTool = defineTool({ name: 'model_assign', title: '�
           const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: run.taskRootId } })
           if (state.frame.state.phase !== 'awaiting_operation' || await tx.agentProviderAttempt.count({ where: { operation: { taskRootId: run.taskRootId }, status: { in: ['prepared', 'dispatched', 'unknown'] } } }))
             throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', '原模型请求尚待核对，不能切换配置。')
-          const runtime = selected.runtime
-          const configuration = { ...state.configuration, modelAssignments: frozen, ...(appliesMain ? { model: { ...state.configuration.model,
+          const runtime = appliesMain ? selectWeightedModelRuntime(selected.runtime) : selected.runtime
+          const { weightedRoute: _oldChoice, ...previousModel } = state.configuration.model
+          const configuration = { ...state.configuration, modelAssignments: frozen, ...(appliesMain ? { model: { ...previousModel, ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}),
             tier: runtime.tier, customModelId: selected.selection.customModelId ?? null, provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel,
             reasoningEffort: runtime.reasoningEffort, contextWindowTokens: runtime.contextWindowTokens ?? env.agentContextWindowTokens,
             routeRevision: modelRouteRevision({ provider: runtime.provider, model: runtime.modelName ?? env.aiTextModel,
-              endpoint: `${(runtime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`, reasoningEffort: runtime.reasoningEffort }) } } : {}) }
+              endpoint: `${(runtime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`, reasoningEffort: runtime.reasoningEffort, ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}) }) } } : {}) }
           await tx.agentExecutionState.update({ where: { taskRootId: run.taskRootId }, data: { configuration: runtimeJson(configuration).value,
             configurationHash: runtimeJson({ configuration, inputHash: root.inputHash }).hash } })
           if (response.configuration) await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: run.taskRootId, runId: run.id, operationId: state.frame.state.pendingOperationId,

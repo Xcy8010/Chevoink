@@ -1,3 +1,5 @@
+import { weightedRouteSelectionSchema, type WeightedRouteSelection } from '../../../shared/contracts/model-weighted-routes.js'
+import { resolveWeightedModelRuntime } from '../model-weighted-routing.js'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { AgentRunEvent, AiUsageLog, Prisma } from '@prisma/client'
@@ -22,7 +24,7 @@ import { MAX_CREDIT_STORAGE_INT } from '../billing/pricing.js'
 import { env } from '../../config/env.js'
 
 type Subject = { userId: string; novelId: string; runId: string }
-type Model = { tier: CreditModelTier; customModelId: string | null; reasoningEffort: ModelReasoningEffort;
+type Model = { weightedRoute?: WeightedRouteSelection; tier: CreditModelTier; customModelId: string | null; reasoningEffort: ModelReasoningEffort;
   provider: string; modelName: string; multiplierBps: number }
 export type AuthorReviewReplacementAuthorization = {
   authorizationId: string; humanAuthorizationRef: string; subject: Subject; taskId: string;
@@ -50,7 +52,7 @@ const authorizationSchema = z.object({ authorizationId: idSchema, humanAuthoriza
   subject: z.object({ userId: z.string().min(1), novelId: z.string().min(1), runId: z.string().min(1) }).strict(), taskId: z.string().min(1),
   pending: pendingSchema, originalUsageIds: z.array(z.string().min(1)).length(1),
   expected: z.object({ currentRevision: z.number().int().positive(), currentContentHash: digest, qualityContextHash: digest, promptHash: digest,
-    model: z.object({ tier: creditModelTierSchema, customModelId: z.string().nullable(),
+    model: z.object({ weightedRoute: weightedRouteSelectionSchema.optional(), tier: creditModelTierSchema, customModelId: z.string().nullable(),
       reasoningEffort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']), provider: z.string().min(1), modelName: z.string().min(1), multiplierBps: z.number().int().nonnegative() }).strict(), price: tokenPriceSchema }).strict(),
   conservativeInputTokenCeiling: z.number().int().positive().max(2147483647), maxOutputTokens: z.number().int().positive().max(16384),
   maxModelRequests: z.literal(1), maxCreditMilli: z.number().int().min(0).max(MAX_CREDIT_STORAGE_INT),
@@ -181,8 +183,8 @@ async function current(tx: Prisma.TransactionClient, input: AuthorReviewReplacem
   const model = input.expected.model
   if (!reading) {
     if (run.modelTier !== model.tier || run.customModelId !== model.customModelId || run.reasoningEffort !== model.reasoningEffort) reject('任务的当前模型选择已变化。')
-    const runtime = await getModelTierRuntime(model.tier, subject.userId, model.customModelId, model.reasoningEffort)
-    const liveModel: Model = { tier: runtime.tier, customModelId: model.customModelId, reasoningEffort: runtime.reasoningEffort,
+    const runtime = resolveWeightedModelRuntime(await getModelTierRuntime(model.tier, subject.userId, model.customModelId, model.reasoningEffort), model.weightedRoute)
+    const liveModel: Model = { ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier: runtime.tier, customModelId: model.customModelId, reasoningEffort: runtime.reasoningEffort,
       provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel, multiplierBps: runtime.multiplierBps }
     if (hash(liveModel) !== hash(model) || hash(await resolveTokenPrice(model.tier, model.multiplierBps)) !== hash(input.expected.price)) reject('当前模型选择、配置或冻结费率已变化。')
   }

@@ -1,3 +1,4 @@
+import { selectWeightedModelRuntime, resolveWeightedModelRuntime } from '../../model-weighted-routing.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { env } from '../../../config/env.js'
@@ -46,12 +47,13 @@ async function freezeWork(ctx: ToolContext, args: DossierWork['args']): Promise<
   const search = await resolveDossierSearchRoute()
   const assigned = await assignedTaskModel(ctx.userId, ctx.novelId, 'research_synthesis', ctx.modelAssignments, true)
   const selected = ctx.modelSelection
-  const main = ctx.modelRuntime ?? (selected ? await getModelTierRuntime(selected.tier, ctx.userId, selected.customModelId, selected.reasoningEffort) : undefined)
-  const inherited = assigned ? undefined : auxiliaryTextModel(main)
+  const main = ctx.modelRuntime ?? (selected ? resolveWeightedModelRuntime(await getModelTierRuntime(selected.tier, ctx.userId, selected.customModelId, selected.reasoningEffort), selected.weightedRoute) : undefined)
+  const inheritedBase = assigned ? undefined : auxiliaryTextModel(main)
+  const inherited = inheritedBase ? selectWeightedModelRuntime(inheritedBase) : undefined
   const customModelId = assigned?.selection.customModelId ?? (inherited?.tier === 'custom' ? selected?.customModelId : null) ?? null
   if (inherited?.tier === 'custom' && !customModelId) return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '研究综合缺少原自定义模型身份。')
   const requestedEffort = inherited && !inherited.reasoningEfforts?.includes('high') ? inherited.reasoningEffort : 'high'
-  const runtime = assigned?.runtime ?? await getModelTierRuntime(inherited?.tier ?? 'speed', ctx.userId, customModelId, requestedEffort)
+  const runtime = selectWeightedModelRuntime(assigned?.runtime ?? resolveWeightedModelRuntime(await getModelTierRuntime(inherited?.tier ?? 'speed', ctx.userId, customModelId, requestedEffort), inherited?.weightedRoute))
   if (inherited && (runtime.provider !== inherited.provider || runtime.modelName !== inherited.modelName || runtime.baseUrl !== inherited.baseUrl)) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原免费或自带模型路由已变化。')
   const route = auxiliaryRouteForRuntime({ ...runtime, honorAssignedReasoning: true }, { tier: runtime.tier, customModelId, reasoningEffort: runtime.reasoningEffort }, env.aiTextMaxOutputTokens)
   delete route.responseFormat

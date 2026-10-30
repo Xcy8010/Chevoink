@@ -123,6 +123,7 @@ export async function invokeExactRouteWithRateLimitRetry<T>(params: ChatWithTool
 export async function withModelRoutePool<T>(params: ChatWithToolsParams, invoke: (params: ChatWithToolsParams) => Promise<T>): Promise<T> {
   const tier = params.usageLog.modelTier
   if (!tier || params.durableExecution) return invoke(params)
+  if (params.weightedRoute?.source === 'candidate') return invokeExactRouteWithRateLimitRetry(params, invoke)
   // A confirmed no-charge 429 can retry once on the exact same route, including
   // single-route built-ins and explicitly bound auxiliary models/accounts.
   if (tier === 'custom') return invokeExactRouteWithRateLimitRetry(params, invoke)
@@ -147,7 +148,7 @@ export async function withModelRoutePool<T>(params: ChatWithToolsParams, invoke:
   for (const route of candidates) {
     signal.throwIfAborted()
     try {
-      return await invoke({ ...params, signal, provider: route.provider, model: route.modelName, providerBaseUrl: route.baseUrl, providerApiKey: route.apiKey })
+      return await invoke({ ...params, signal, provider: route.provider, model: route.modelName, providerBaseUrl: route.baseUrl, providerApiKey: route.apiKey, physicalRouteId: route.id })
     } catch (error) {
       if (!(error instanceof ModelRouteRejected) || !routeRetryableStatus(error.upstreamStatus) || signal.aborted) throw error
       failure = error

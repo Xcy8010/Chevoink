@@ -214,3 +214,28 @@ describe('built-in route pools', () => {
     expect(findFirst).not.toHaveBeenCalled()
   })
 })
+it('keeps an admitted weighted candidate through the existing exact 429 retry without consulting or importing the legacy pool', async () => {
+  vi.useFakeTimers()
+  const weighted = { ...params, model: 'relay-alias', provider: 'relay', providerBaseUrl: 'https://relay.invalid/v1', providerApiKey: 'candidate-key',
+    weightedRoute: { source: 'candidate' as const, candidateId: 'A' } }
+  const invoke = vi.fn().mockRejectedValueOnce(new ModelRouteRejected(429)).mockResolvedValueOnce('ready')
+  const pending = withModelRoutePool(weighted, invoke)
+  await vi.advanceTimersByTimeAsync(60000)
+  expect(await pending).toBe('ready')
+  expect(findFirst).not.toHaveBeenCalled()
+  expect(invoke).toHaveBeenCalledTimes(2)
+  for (const [actual] of invoke.mock.calls) {
+    expect(actual).toMatchObject(weighted)
+    expect(actual.usageLog).toBe(weighted.usageLog)
+  }
+})
+it('keeps the original round-robin sequence inside the weighted primary legacy path', async () => {
+  findFirst.mockResolvedValue({ id: 'weighted-primary', provider: 'deepseek', modelName: 'primary', baseUrl: 'https://primary.test/v1', apiKeyCiphertext: 'encrypted:primary-secret', metadata: {
+    routes: [{ ...routes[0], id: 'b2e33d3b-59f7-4e3a-b12b-228ea954e88a' }],
+  } })
+  const invoke = vi.fn().mockResolvedValue('ready')
+  const weighted = { ...params, weightedRoute: { source: 'primary' as const }, usageLog: { ...params.usageLog, modelTier: 'builtin_fedcba9876543210' as const } }
+  for (let request = 0; request < 3; request++) await withModelRoutePool(weighted, invoke)
+  expect(invoke.mock.calls.map(([request]) => request.model)).toEqual(['primary', 'backup', 'primary'])
+  for (const [request] of invoke.mock.calls) expect(request.weightedRoute).toEqual({ source: 'primary' })
+})

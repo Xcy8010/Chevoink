@@ -228,7 +228,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       chapterId: originalChapterId, callId: call.id, mode: current.configuration.mode, creativeFreedom: current.configuration.creativeFreedom,
       qualityMode: current.configuration.qualityMode, protectedChapterIds: new Set(current.configuration.protectedChapterIds),
       toolAuthority: new Map(current.configuration.toolAuthority.map(item => [item.name, item])), signal, emit: () => {},
-      modelSelection: { tier: current.configuration.model.tier as CreditModelTier,
+      modelSelection: { ...(current.configuration.model.weightedRoute ? { weightedRoute: current.configuration.model.weightedRoute } : {}), tier: current.configuration.model.tier as CreditModelTier,
         customModelId: current.configuration.model.customModelId, reasoningEffort: current.configuration.model.reasoningEffort as ModelReasoningEffort,
         provider: current.configuration.model.provider, modelName: current.configuration.model.modelName, routeRevision: current.configuration.model.routeRevision } }
     ctx.modelAssignments = current.configuration.modelAssignments

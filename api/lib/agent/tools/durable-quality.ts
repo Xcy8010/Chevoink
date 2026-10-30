@@ -403,7 +403,7 @@ export async function prepareQualityWork(ctx: ToolContext, lease: import('../run
     if (!(error instanceof DataAccessError) || !known.has(error.code)) throw error
     return { kind: 'rejected' as const, code: error.code, message: error.message }
   })
-  if (!recoveredWork && work.kind === 'check' && (!work.cached || work.repair) && !work.route) {
+  if (!recoveredWork && !input.frozenReview && work.kind === 'check' && (!work.cached || work.repair) && !work.route) {
     const resolved = await resolveDurableAuxiliaryRuntime({ userId: ctx.userId, modelRuntime: ctx.modelRuntime, modelSelection: ctx.modelSelection, modelAssignments: ctx.modelAssignments, task: 'quality' })
     const price = await resolveDurableTokenPrice(lease, `${input.operationKey}:quality-price`, resolved.selection.tier, resolved.runtime.multiplierBps)
     work = { ...work, route: auxiliaryRouteForRuntime(resolved.runtime, resolved.selection, REVIEW_MAX_OUTPUT_TOKENS), price }

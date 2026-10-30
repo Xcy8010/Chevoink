@@ -13,11 +13,14 @@ import { buildNewCreditAccountData, ensureCreditAccount, getCreditWindow, parseM
 import { getActiveRun, stopAgentRun, stopActiveRunsByUser, stopAllActiveRuns } from './agent/active-runs.js'
 import { env } from '../config/env.js'
 import { DataAccessError, prisma } from './prisma.js'
+import { adminUserSearchWhere } from './admin-user-search.js'
 import { encryptSecret } from './secret-box.js'
 import { getActiveTokenPrices } from './billing/rate-cards.js'
 import { presentLedgerPrice } from './billing/ledger-presentation.js'
 import { presentModelRoutes, saveModelRoutes } from './model-route-pool.js'
 import type { ModelRouteInput } from '../../shared/contracts/model-routes.js'
+import type { WeightedRoutesInput } from '../../shared/contracts/model-weighted-routes.js'
+import { presentWeightedRoutes, saveWeightedRoutes } from './model-weighted-config.js'
 import { clearToolModelRuntimeCache } from './tool-model-config.js'
 import { webToolEndpoint } from './web-tool-provider.js'
 import { webToolChargeMilli } from '../../shared/web-tool-pricing.js'
@@ -116,13 +119,17 @@ async function ensureAllPublicBetaAccounts(tx: Prisma.TransactionClient) {
   return setting
 }
 
-export async function getAdminCreditsManagement(): Promise<AdminCreditsManagementPayload> {
+export async function getAdminCreditsManagement(search?: string): Promise<AdminCreditsManagementPayload> {
   return creditTransaction(async tx => {
   const setting = await ensureAllPublicBetaAccounts(tx)
   const accounts = await tx.creditAccount.findMany({
     include: { user: { select: { id: true, nickname: true, avatarUrl: true } } },
     orderBy: [{ dailyUsedMilli: 'desc' }, { updatedAt: 'desc' }],
   })
+  const matchingUsers = search?.trim() ? await tx.user.findMany({
+    where: adminUserSearchWhere(search), select: { id: true },
+  }) : null
+  const matchingIds = matchingUsers ? new Set(matchingUsers.map(user => user.id)) : null
   const users = accounts.map((account) => {
     const dailyRemaining = Math.max(0, account.dailyAllowanceMilli - account.dailyUsedMilli)
     const totalRemaining = dailyRemaining + Math.max(0, account.bonusBalanceMilli)
@@ -150,7 +157,7 @@ export async function getAdminCreditsManagement(): Promise<AdminCreditsManagemen
       bonusBalance: users.reduce((sum, item) => sum + item.bonusBalance, 0),
       exhaustedUsers: users.filter((item) => item.totalRemaining <= 0).length,
     },
-    users,
+    users: matchingIds ? users.filter(item => matchingIds.has(item.user.id)) : users,
   }
   })
 }
@@ -302,6 +309,7 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
       return {
         ...(modelKind === 'image_generation' && metadata.imageQuality ? { imageQuality: metadata.imageQuality as ImageQualityConfig } : {}),
         routes: presentModelRoutes(model.metadata),
+        weightedRoutes: presentWeightedRoutes(model.metadata),
         pricing: price ? presentLedgerPrice({ pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates, v1CeilingBps: price.v1CeilingBps }).pricing : null,
         id: model.id, tier: model.tier, sortOrder: model.sortOrder, modelKind, provider: fallback?.provider ?? model.provider, displayName: model.displayName,
         modelName: fallback?.modelName ?? model.modelName, baseUrl: fallback?.baseUrl ?? model.baseUrl, multiplier: effectiveModelMultiplier(model) / 10_000,
@@ -328,6 +336,7 @@ export type UpdateAdminModelInput = {
   imageQuality?: ImageQualityConfig
   freePromotion?: import('../../shared/model-promotion.js').ModelPromotion | null
   routes?: ModelRouteInput[]
+  weightedRoutes?: WeightedRoutesInput
   provider?: string
   displayName?: string
   modelName?: string
@@ -405,6 +414,7 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
         metadata: {
           ...(model.metadata && typeof model.metadata === 'object' && !Array.isArray(model.metadata) ? model.metadata : {}),
           ...(routes ? { routes } : {}),
+          ...(input.weightedRoutes !== undefined ? { weightedRoutes: saveWeightedRoutes(input.weightedRoutes, model.metadata) } : {}),
           freePromotion,
           ...(input.imageQuality !== undefined ? { imageQuality: input.imageQuality } : {}),
           ...(input.reasoningParameterMode !== undefined ? { reasoningParameterMode: input.reasoningParameterMode } : {}),

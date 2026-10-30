@@ -11,6 +11,8 @@ import { AdminCard, AdminPageHeader, AdminPanelState } from '../AdminLayout'
 import { formatTokens } from '../admin-shared'
 import { createAdminModel, reorderAdminModels, getAdminModelManagement, updateAdminModel } from '../api'
 import { ModelRoutesEditor } from '../components/ModelRoutesEditor'
+import { WeightedRoutesEditor } from '../components/WeightedRoutesEditor'
+import type { WeightedRoutesInput } from '../../../../shared/contracts/model-weighted-routes'
 import type { ModelRouteInput } from '../../../../shared/contracts/model-routes'
 import { webToolChargeMilli } from '../../../../shared/web-tool-pricing'
 
@@ -36,6 +38,7 @@ export default function AdminModelsPage() {
     thinkingEnabled: '' as '' | 'enabled' | 'disabled',
     visionEnabled: false, contextWindowTokens: '128000',
     routes: [] as ModelRouteInput[],
+    weightedRoutes: { primaryWeight: 100, candidates: [] } as WeightedRoutesInput,
     limitedFree: false, freeUntil: '', afterMultiplier: '1.5',
   })
 
@@ -53,6 +56,8 @@ export default function AdminModelsPage() {
       thinkingEnabled: editing.thinkingEnabled === undefined ? '' : editing.thinkingEnabled ? 'enabled' : 'disabled',
       visionEnabled: editing.visionEnabled, contextWindowTokens: String(editing.contextWindowTokens ?? 128000),
       routes: (editing.routes ?? []).map(({ apiKeyConfigured: _configured, ...route }) => route),
+      weightedRoutes: editing.weightedRoutes ? { primaryWeight: editing.weightedRoutes.primaryWeight,
+        candidates: editing.weightedRoutes.candidates.map(({ apiKeyConfigured: _configured, ...route }) => route) } : { primaryWeight: 100, candidates: [] },
       limitedFree: editing.multiplier === 0 && Boolean(editing.freePromotion),
       freeUntil: editing.freePromotion ? new Date(Date.parse(editing.freePromotion.endsAt) - new Date(editing.freePromotion.endsAt).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '',
       afterMultiplier: String(editing.freePromotion?.afterMultiplier ?? 1.5),
@@ -74,7 +79,7 @@ export default function AdminModelsPage() {
       const expires = Date.parse(form.freeUntil)
       if (limitedFree && (!Number.isFinite(expires) || expires <= Date.now())) throw new Error('请选择未来的截止时间')
       const { limitedFree: _limited, freeUntil: _until, afterMultiplier: _after, imageQualityCustomValues: _customQuality, ...fields } = form
-      const payload = { ...fields, imageQuality: editing.modelKind === 'image_generation' ? form.imageQuality : undefined, baseUrl: form.baseUrl || null, apiKey: form.apiKey || undefined, multiplier: Number(form.multiplier), contextWindowTokens: editing.modelKind === 'text' ? Number(form.contextWindowTokens) : undefined,
+      const payload = { ...fields, weightedRoutes: editing.modelKind === 'text' && (editing.weightedRoutes || form.weightedRoutes.candidates.length) ? form.weightedRoutes : undefined, imageQuality: editing.modelKind === 'image_generation' ? form.imageQuality : undefined, baseUrl: form.baseUrl || null, apiKey: form.apiKey || undefined, multiplier: Number(form.multiplier), contextWindowTokens: editing.modelKind === 'text' ? Number(form.contextWindowTokens) : undefined,
         reasoningParameterMode: editing.modelKind === 'text' ? form.reasoningParameterMode || null : undefined,
         outputTokenParameter: editing.modelKind === 'text' ? form.outputTokenParameter || null : undefined,
         thinkingEnabled: editing.modelKind === 'text' ? form.thinkingEnabled === '' ? null : form.thinkingEnabled === 'enabled' : undefined,
@@ -209,6 +214,7 @@ export default function AdminModelsPage() {
       {editingTextModel ? <div className="mt-5 border-y border-[var(--border-subtle)] py-4"><div className="flex items-center gap-2 text-sm font-medium"><BrainCircuit className="h-4 w-4" />推理强度</div><div className="mt-3 flex flex-wrap gap-2">{availableReasoningOptions.map((effort) => <label key={effort} className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] px-2.5 py-1.5 text-xs"><input type="checkbox" checked={form.reasoningEfforts.includes(effort)} onChange={(event) => toggleReasoningEffort(effort, event.target.checked)} />{effort}</label>)}</div><label className="mt-4 block text-xs">默认强度<select value={form.defaultReasoningEffort} onChange={(event) => setForm((value) => ({ ...value, defaultReasoningEffort: event.target.value as ModelReasoningEffort }))} className="mt-1.5 h-10 w-full rounded-full border border-[var(--border-strong)] bg-[var(--surface-default)] px-4 text-sm">{form.reasoningEfforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}</select></label><label className="mt-4 flex items-center gap-2 text-sm"><input type="checkbox" checked={form.visionEnabled} onChange={(event) => setForm((value) => ({ ...value, visionEnabled: event.target.checked }))} /><Eye className="h-4 w-4" />支持 OpenAI 兼容图片输入</label></div> : null}
       <div className="mt-5 flex flex-wrap gap-4 text-sm"><label className="flex items-center gap-2"><input type="checkbox" checked={form.enabled} onChange={(e) => setForm((v) => ({ ...v, enabled: e.target.checked }))} />启用服务</label>{editingTextModel ? <><label className="flex items-center gap-2"><input type="checkbox" checked={form.selectable} onChange={(e) => setForm((v) => ({ ...v, selectable: e.target.checked }))} />允许用户选择</label><label className="flex items-center gap-2"><input type="checkbox" checked={form.isDefault} onChange={(e) => setForm((v) => ({ ...v, isDefault: e.target.checked }))} />设为默认</label></> : null}</div>
       {editingTextModel && <ModelRoutesEditor routes={form.routes} onChange={routes => setForm(value => ({ ...value, routes }))} defaults={form} />}
+      {editingTextModel && <WeightedRoutesEditor value={form.weightedRoutes} onChange={weightedRoutes => setForm(value => ({ ...value, weightedRoutes }))} defaults={form} />}
       {editingTextModel && Number(form.multiplier) === 0 ? <div className="mt-4 space-y-3">
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.limitedFree} onChange={event => setForm(value => ({ ...value, limitedFree: event.target.checked }))} />限时免费</label>
         {form.limitedFree ? <div className="grid gap-3 sm:grid-cols-2">

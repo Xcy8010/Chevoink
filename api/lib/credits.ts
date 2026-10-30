@@ -20,6 +20,8 @@ import type {
 import { lockCreditPolicy, creditTransaction } from './credit-policy.js'
 import { DataAccessError, prisma } from './prisma.js'
 import { decryptSecret } from './secret-box.js'
+import { readWeightedRoutes } from './model-weighted-config.js'
+import type { WeightedRoutesStored, WeightedRouteSelection } from '../../shared/contracts/model-weighted-routes.js'
 import { assertCreditInteger, BillingInputError, calculateV1ChargeMilli, calculateV2UserChargeMilli } from './billing/pricing.js'
 import { equalLegacyMetadata, prepareCreditRequest, readCreditFingerprint } from './billing/credit-request.js'
 import { getActiveTokenPrice, getActiveTokenPrices } from './billing/rate-cards.js'
@@ -663,6 +665,9 @@ export async function resolveAuxiliaryModelSelection(userId: string) {
 }
 
 export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userId?: string, customModelId?: string | null, requestedReasoningEffort?: ModelReasoningEffort): Promise<{
+  weightedRoutes?: WeightedRoutesStored
+  weightedRoute?: WeightedRouteSelection
+  physicalRouteId?: string
   thinkingEnabled?: boolean
   maxOutputTokens?: number
   outputTokenParameter?: 'max_tokens' | 'max_completion_tokens'
@@ -715,6 +720,7 @@ export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userI
     tier,
     multiplierBps: effectiveModelMultiplier(config),
     freePromotion: readModelPromotion(config.metadata),
+    ...(readWeightedRoutes(config.metadata)?.candidates.length ? { weightedRoutes: readWeightedRoutes(config.metadata) } : {}),
     // 0 倍率免费档不绑定费率卡：价格语义恒为免费，展示与指纹不带历史卡价。
     tokenPrice: readModelPromotion(config.metadata)
       ? tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier: tier, multiplierBps: effectiveModelMultiplier(config) })

@@ -18,6 +18,7 @@ import type {
 import { hashPassword, isLegacyPasswordHash, verifyPassword } from '../password.js'
 import { evictUserBanCache } from '../auth-session.js'
 import { prisma } from '../prisma.js'
+import { adminUserSearchWhere } from '../admin-user-search.js'
 import { buildPagination, excerptContent, isUserOnline, onlineWindowStart, toIso } from './internal.js'
 
 type AgentUsageSummary = { promptTokens: number; completionTokens: number; totalTokens: number }
@@ -452,16 +453,7 @@ export async function listAdminUsersData(input: {
   page: number
   pageSize: number
 }): Promise<{ items: AdminUserRow[]; pagination: Pagination }> {
-  const where: Prisma.UserWhereInput = {}
-
-  if (input.search?.trim()) {
-    const keyword = input.search.trim()
-    where.OR = [
-      { nickname: { contains: keyword, mode: 'insensitive' } },
-      { phone: { contains: keyword } },
-      { email: { contains: keyword, mode: 'insensitive' } },
-    ]
-  }
+  const where: Prisma.UserWhereInput = adminUserSearchWhere(input.search)
   if (input.role) {
     where.role = input.role as Prisma.UserWhereInput['role']
   }

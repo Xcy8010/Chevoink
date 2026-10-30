@@ -1,4 +1,6 @@
+import { selectWeightedModelRuntime, resolveWeightedModelRuntime } from '../model-weighted-routing.js'
 import { z } from 'zod'
+import { weightedRouteSelectionSchema, type WeightedRouteSelection } from '../../../shared/contracts/model-weighted-routes.js'
 import { supportsReviewJsonObject } from '../ai-response-format.js'
 import { creditModelTierSchema } from '../../../shared/contracts/credits.js'
 import type { CreditModelTier, ModelReasoningEffort } from '../../../shared/contracts/credits.js'
@@ -17,6 +19,7 @@ const auxiliaryTierSchema = creditModelTierSchema
 const reasoningEffortSchema = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 
 export const auxiliaryRouteSchema = z.object({
+  weightedRoute: weightedRouteSelectionSchema.optional(),
   /** Optional fields keep pre-G22 operation snapshots hash-stable. */
   tier: auxiliaryTierSchema.optional(),
   customModelId: z.string().min(1).nullable().optional(),
@@ -30,6 +33,7 @@ export const auxiliaryRouteSchema = z.object({
 })
 
 export type DurableAuxiliaryModelSelection = {
+  weightedRoute?: WeightedRouteSelection
   tier: CreditModelTier
   customModelId: string | null
   reasoningEffort: ModelReasoningEffort
@@ -53,7 +57,7 @@ async function resolveReviewRuntime(input: ReviewRuntimeInput, nativeIdentity: b
   if (!input.modelRuntime && !selected || selected?.tier === 'custom' && !selected.customModelId) {
     return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '检查缺少原任务已选择的完整模型身份，未派发模型请求。')
   }
-  const runtime = input.modelRuntime ?? await getModelTierRuntime(selected!.tier, input.userId, selected!.customModelId, selected!.reasoningEffort)
+  const runtime = input.modelRuntime ?? resolveWeightedModelRuntime(await getModelTierRuntime(selected!.tier, input.userId, selected!.customModelId, selected!.reasoningEffort), selected?.weightedRoute)
   const selection = selected ?? { tier: runtime.tier, customModelId: null, reasoningEffort: runtime.reasoningEffort }
   if (nativeIdentity && selection.tier === 'custom' && !selection.customModelId) return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '辅助模型未能继承原任务的模型身份。')
   if (selection.tier !== runtime.tier || selection.reasoningEffort !== runtime.reasoningEffort
@@ -65,16 +69,17 @@ async function resolveReviewRuntime(input: ReviewRuntimeInput, nativeIdentity: b
 /** Legacy main/inline calls already carry owned credentials/capabilities; a
  * custom runtime needs no reconstructed model ID for its in-process request. */
 export async function resolveReviewModelRuntime(input: ReviewRuntimeInput) {
-  return (await resolveReviewRuntime(input, false)).runtime
+  return selectWeightedModelRuntime((await resolveReviewRuntime(input, false)).runtime)
 }
 
 export async function resolveDurableAuxiliaryRuntime(input: ReviewRuntimeInput) {
-  return resolveReviewRuntime(input, true)
+  const resolved = await resolveReviewRuntime(input, true)
+  return { ...resolved, runtime: selectWeightedModelRuntime(resolved.runtime) }
 }
 
 export function auxiliaryRouteForRuntime(runtime: NonNullable<ToolContext['modelRuntime']> & { honorAssignedReasoning?: true }, selection: DurableAuxiliaryModelSelection, maxOutputTokens: number) {
   return auxiliaryRouteSchema.parse({
-    tier: selection.tier,
+    ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier: selection.tier,
     customModelId: selection.tier === 'custom' ? selection.customModelId : null,
     reasoningEffort: runtime.reasoningEffort,
     ...(runtime.honorAssignedReasoning ? { honorReasoningEffort: true as const } : {}),
@@ -118,7 +123,7 @@ export async function callDurableAuxiliary(input: {
   const routeTier = (input.route.tier ?? 'speed') as CreditModelTier
   const routeCustomModelId = input.route.customModelId ?? null
   const routeReasoningEffort = (input.route.reasoningEffort ?? 'low') as ModelReasoningEffort
-  const runtime = await getModelTierRuntime(routeTier, lease.userId, routeTier === 'custom' ? routeCustomModelId : null, routeReasoningEffort)
+  const runtime = resolveWeightedModelRuntime(await getModelTierRuntime(routeTier, lease.userId, routeTier === 'custom' ? routeCustomModelId : null, routeReasoningEffort), input.route.weightedRoute)
   if (runtime.tier !== routeTier || runtime.reasoningEffort !== routeReasoningEffort
     || input.price.modelTier !== routeTier
     || runtime.provider !== input.route.provider || (runtime.modelName ?? env.aiTextModel) !== input.route.model
@@ -127,7 +132,7 @@ export async function callDurableAuxiliary(input: {
   if (!inputLimit || estimateChatMessagesTokens([{ role: 'system', content: system }, { role: 'user', content }]) > inputLimit) {
     return runtimeError('RUNTIME_CONTEXT_LIMIT', '独立复核输入超过模型窗口，未派发请求；不能截掉正文后声称完成全文检查。')
   }
-  return chatWithTools({ messages: [{ role: 'system', content: system }, { role: 'user', content }], tools: [], provider: input.route.provider, model: input.route.model,
+  return chatWithTools({ weightedRoute: runtime.weightedRoute, messages: [{ role: 'system', content: system }, { role: 'user', content }], tools: [], provider: input.route.provider, model: input.route.model,
     providerBaseUrl: input.route.baseUrl, providerApiKey: runtime.apiKey, reasoningEffort: runtime.reasoningEffort, temperature, maxOutputTokens: input.route.maxOutputTokens, signal: input.signal,
     boundedReview: !input.route.honorReasoningEffort, thinkingEnabled: runtime.thinkingEnabled, reasoningParameterMode: runtime.reasoningParameterMode,
     reasoningEfforts: [...runtime.reasoningEfforts],

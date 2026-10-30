@@ -5775,3 +5775,21 @@ it.each(['paid', 'cache', 'cache-unknown'] as const)('feeds a real successful ha
     expect(await actualReader.readCompletedReviewRequestRecovery(db as never, context(), [pending])).toEqual(scenario === 'cache-unknown' ? [] : [pending])
   } finally { spies.forEach(spy => spy.mockRestore()) }
 })
+it('holds one weighted supplier across real Agent tool roundtrips until its final reply', async () => {
+  const secret = await import('../../api/lib/secret-box.js')
+  const decrypt = vi.spyOn(secret, 'decryptSecret').mockReturnValue('weighted-loop-key')
+  const draw = vi.spyOn(Math, 'random').mockReturnValue(0.8)
+  try {
+    mocks.modelRuntime.mockResolvedValue({ ...await mocks.modelRuntime(), apiKey: 'primary-key', baseUrl: 'https://primary.invalid/v1', reasoningEffort: 'high',
+      weightedRoutes: { primaryWeight: 0, candidates: [{ id: 'loop-relay', label: 'relay', weight: 100, provider: 'relay-provider', modelName: 'arbitrary-loop-alias',
+        baseUrl: 'https://loop.invalid/v1', apiKeyCiphertext: 'encrypted' }] } } as Awaited<ReturnType<typeof import('../../api/lib/credits.js').getModelTierRuntime>>)
+    queue(response('', [call('weighted-read')]), response('当前章节已读取。'))
+    await run()
+    expect(mocks.tools[0].execute).toHaveBeenCalledOnce()
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    expect(draw).toHaveBeenCalledOnce()
+    for (const [request] of mocks.chat.mock.calls) expect(request).toMatchObject({ provider: 'relay-provider', model: 'arbitrary-loop-alias',
+      providerBaseUrl: 'https://loop.invalid/v1', providerApiKey: 'weighted-loop-key', weightedRoute: { source: 'candidate', candidateId: 'loop-relay' },
+      usageLog: { modelTier: 'speed', multiplierBps: 12000 } })
+  } finally { draw.mockRestore(); decrypt.mockRestore() }
+})

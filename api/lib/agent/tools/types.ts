@@ -91,7 +91,7 @@ export type ToolContext = {
   modelAssignments?: import('../../../../shared/contracts/agent-model-assignments.js').FrozenModelAssignments
   applyModelAssignments?: (value: import('../../../../shared/contracts/agent-model-assignments.js').FrozenModelAssignments) => void
   /** Durable admission's frozen model identity for auxiliary adapters. */
-  modelSelection?: { tier: CreditModelTier; customModelId: string | null; reasoningEffort: ModelReasoningEffort;
+  modelSelection?: { weightedRoute?: import('../../../../shared/contracts/model-weighted-routes.js').WeightedRouteSelection; tier: CreditModelTier; customModelId: string | null; reasoningEffort: ModelReasoningEffort;
     provider: string; modelName: string | null; routeRevision: string }
   /** 工具内部可发进度事件（进入统一事件总线） */
   emit: (event: AgentStreamEventBody) => void

@@ -6,7 +6,7 @@ import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionState
 import { preparePricedProviderOperationInTransaction } from './runtime-settlement.js'
 
 export type ModelExecutionCursor = { expectedRevision: number; expectedHash: string }
-export type FrozenModelRoute = { provider: string; model: string; endpoint: string; reasoningEffort: string }
+export type FrozenModelRoute = { weightedRoute?: import('../../../shared/contracts/model-weighted-routes.js').WeightedRouteSelection; provider: string; model: string; endpoint: string; reasoningEffort: string }
 
 /** No secret in this digest. The bootstrapper must freeze the same resolved route. */
 export function modelRouteRevision(route: FrozenModelRoute): string {

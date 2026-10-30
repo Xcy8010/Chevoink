@@ -113,8 +113,8 @@ export function getAdminTokenManagement(period: 'today' | 'week' | 'month' = 'to
   return requestJson<AdminTokenManagementPayload>(`/api/admin/token-usage?period=${period}`)
 }
 
-export function getAdminCreditsManagement(): Promise<AdminCreditsManagementPayload> {
-  return requestJson<AdminCreditsManagementPayload>('/api/admin/credits')
+export function getAdminCreditsManagement(search?: string): Promise<AdminCreditsManagementPayload> {
+  return requestJson<AdminCreditsManagementPayload>(`/api/admin/credits${buildQueryString({ search })}`)
 }
 
 export function resetAdminUserCredits(userId: string, payload: { captchaId: string; captchaAnswer: string; confirmation: string; requestKey?: string }): Promise<{ stoppedRuns: number }> {
@@ -149,6 +149,7 @@ export function updateAdminModel(modelId: string, payload: {
   imageQuality?: import('../../../shared/contracts/image-model').ImageQualityConfig
   freePromotion?: import('../../../shared/model-promotion').ModelPromotion | null
   routes?: import('../../../shared/contracts/model-routes').ModelRouteInput[]
+  weightedRoutes?: import('../../../shared/contracts/model-weighted-routes').WeightedRoutesInput
   provider?: string; displayName?: string; modelName?: string; baseUrl?: string | null; apiKey?: string
   multiplier?: number; enabled?: boolean; selectable?: boolean; isDefault?: boolean
   reasoningParameterMode?: 'native' | 'omit' | null
