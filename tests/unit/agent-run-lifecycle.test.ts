@@ -4344,7 +4344,7 @@ describe('author-directed task ending in the real execution loop', () => {
       const calls = [call('reply', 'task_respond', scenario === 'malformed' ? '{}' : JSON.stringify({ answer }))]
       if (scenario === 'mixed') calls.push(call('mixed-read', 'chapter_read'))
       queue(scenario === 'pseudo' ? response(JSON.stringify({ tool_calls: [{ type: 'function', id: 'reply', function: { name: 'task_respond', arguments: JSON.stringify({ answer }) } }] }))
-        : response('', calls), response('当前资料已核对。'))
+        : response('', calls), response(''))
       try {
         await run(prompt)
         expect(write.execute).not.toHaveBeenCalled()
@@ -4354,6 +4354,118 @@ describe('author-directed task ending in the real execution loop', () => {
         if (scenario === 'old-task') expect((mocks.openAITools.mock.calls as unknown[][]).every(([tools]) =>
           !(tools as AgentTool[]).some(tool => tool.name === 'task_respond'))).toBe(true)
       } finally { compilations.mockImplementation(oldCompilations); messages.mockImplementation(oldMessages); operationCount.mockResolvedValue(0); subtaskCount.mockResolvedValue(0); inspect.mockRestore() }
+    })
+  it.each(['fresh', 'fresh-plan', 'fresh-json', 'continued-read', 'continued-existing-evidence', 'continued-unresolved-metadata'] as const)(
+    'delivers a normal complete answer after necessary tools without a terminal tool: %s', async scenario => {
+      const fresh = scenario.startsWith('fresh')
+      const prompt = scenario === 'fresh-plan' ? '这个大纲第一卷要写多少章？' : '第一卷要写多少章？'
+      const spec = scenario === 'continued-unresolved-metadata'
+        ? buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt }) : await responseTask(prompt, fresh)
+      if (scenario === 'continued-unresolved-metadata') {
+        spec.scope.writing = { version: 1, kind: 'needs_input', targets: [], titleAndBodyOnly: false, repairAuthorized: false }
+        mocks.currentOriginal = { prompt, taskSpec: spec }
+      }
+      const originalSpec = structuredClone(spec)
+      const previousUsage = { promptTokens: 1000, completionTokens: 50, totalTokens: 1050,
+        checkpoint: { version: 2, controlPolicy: 'until_completion', origin: 'unknown_legacy', runStartedAt: Date.now() - 2000,
+          activeExecutionMs: 100, stagnantBatches: 0, resumeCount: 2, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
+          writeProgress: 0, writeBaseline: 0, readProgress: 3, readBaseline: 0, progressSignatures: [],
+          reviewAttempts: ['original-paid-receipt'], pendingReviews: [] } }
+      if (!fresh) {
+        const at = new Date(previousUsage.checkpoint.runStartedAt + 10)
+        const terminal: AgentStreamEvent = { type: 'run.finished', runId: 'run', seq: 1, ts: at.toISOString(), status: 'failed',
+          usage: { promptTokens: 1000, completionTokens: 50, totalTokens: 1050 }, artifacts: [], outputSummary: '' }
+        mocks.runEvents.push({ id: 'synthetic-original-failure', runId: 'run', seq: 1, type: terminal.type, payload: terminal, createdAt: at })
+        mocks.update.mockResolvedValueOnce({ taskSpec: spec, currentTurn: 4, startedAt: new Date(previousUsage.checkpoint.runStartedAt), usage: previousUsage })
+      }
+      const vision = scenario === 'continued-read'
+      const attachment = { kind: 'image' as const, name: 'synthetic-reference.png', url: '/private/synthetic-reference.png', size: 4 }
+      const imageModule = await import('../../api/lib/agent-attachment-storage.js')
+      const pixels = vision ? vi.spyOn(imageModule, 'readManagedImageDataUrl').mockResolvedValue('data:image/png;base64,c3ludGhldGlj') : null
+      if (vision) {
+        mocks.modelRuntime.mockResolvedValue({ ...await mocks.modelRuntime(), visionEnabled: true } as Awaited<ReturnType<typeof import('../../api/lib/credits.js').getModelTierRuntime>>)
+        vi.mocked(assembleContext).mockResolvedValueOnce({ messages: [{ role: 'user', content: prompt }] } as Awaited<ReturnType<typeof assembleContext>>)
+      }
+      const writingScope = await import('../../api/lib/agent/writing-scope.js')
+      const actualScope = writingScope.effectiveWritingTaskSpec
+      const inferredScope = scenario === 'continued-unresolved-metadata' ? vi.spyOn(writingScope, 'effectiveWritingTaskSpec')
+        .mockImplementation(async (...args) => {
+          // The inferred admission pause must not query scope; later common
+          // persisted-progress recovery still uses the real scope verifier.
+          expect(mocks.savedWorkflow).toHaveBeenCalled()
+          return actualScope(...args)
+        }) : null
+      const readers = ['novel_get_context', 'structure_outline', 'chapter_list_summaries'].map(name =>
+        tool(name, async () => ({ output: `原任务合成证据 ${name}：第一卷计划二十章。` }), true))
+      const write = tool('chapter_write', async () => { throw Error('Normal answer must not write a chapter') }, false)
+      mocks.tools = [...readers, write]
+      const answer = scenario === 'fresh-json' ? JSON.stringify({ tool_calls: 3, chapter_count: 20 }) : '第一卷按现有规划写二十章。'
+      const reread = scenario !== 'continued-existing-evidence'
+      queue(...(reread ? [response('', readers.map((reader, index) => call(`normal-read-${index}`, reader.name)))] : []), response(answer))
+      try {
+        await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: scenario === 'fresh-plan' ? 'plan' : 'build', prompt, ...(vision ? { attachments: [attachment] } : {}),
+          ...(!fresh ? { resume: true, authorContinue: { eventId: 'synthetic-original-failure', afterSeq: 1 } } : {}) })
+        expect(mocks.chat).toHaveBeenCalledTimes(reread ? 2 : 1)
+        if (vision) {
+          const input = mocks.chat.mock.calls[0][0] as Parameters<typeof chatType>[0]
+          const original = input.messages.find(message => message.role === 'user' && Array.isArray(message.content))
+          expect(original?.content).toEqual([{ type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,c3ludGhldGlj', detail: 'auto' } }])
+          expect(input.messages.some(message => message.role === 'user' && typeof message.content === 'string'
+            && message.content.includes('普通答复无需章节提交'))).toBe(true)
+        }
+        for (const reader of readers) expect(reader.execute).toHaveBeenCalledTimes(reread ? 1 : 0)
+        expect(write.execute).not.toHaveBeenCalled()
+        expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', taskSpec: originalSpec, outputSummary: answer })
+        const totals = fresh ? 20 : reread ? 1070 : 1060
+        expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: totals })
+        if (!fresh) expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: {
+          reviewAttempts: previousUsage.checkpoint.reviewAttempts, tokenBudget: 500, maxTurns: 1, resumeCount: 2 } })
+        expect(events().filter(event => event.type === 'text.final')).toContainEqual(expect.objectContaining({ text: answer }))
+        expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer })
+        expect((mocks.openAITools.mock.calls as unknown[][]).every(([tools]) => !(tools as AgentTool[]).some(tool => tool.name === 'task_respond'))).toBe(true)
+        if (inferredScope) expect(inferredScope).toHaveBeenCalled()
+      } finally { pixels?.mockRestore(); inferredScope?.mockRestore() }
+    })
+  it.each(['absent', 'wrong-event', 'wrong-sequence', 'stale', 'started-writing', 'owner-change', 'cancel', 'unknown-work', 'witness-changed-at-commit', 'integrity-error'] as const)(
+    'keeps normal legacy answers behind current human Continue and actual execution evidence: %s', async scenario => {
+      const prompt = '第一卷要写多少章？', spec = await responseTask(prompt, false), before = structuredClone(spec)
+      const at = new Date(Date.now() - 1000), terminal: AgentStreamEvent = { type: 'run.finished', runId: 'run', seq: 1,
+        ts: at.toISOString(), status: 'failed', usage: { promptTokens: 100, completionTokens: 5, totalTokens: 105 }, artifacts: [], outputSummary: '' }
+      mocks.runEvents.push({ id: 'previous-failure', runId: 'run', seq: 1, type: terminal.type, payload: terminal, createdAt: at })
+      if (scenario === 'stale') mocks.runEvents.push({ id: 'newer-pause', runId: 'run', seq: 2, type: 'run.paused',
+        payload: { type: 'run.paused', runId: 'run', seq: 2, ts: new Date(at.getTime() + 1).toISOString(), reason: 'user_stop' }, createdAt: new Date(at.getTime() + 1) })
+      mocks.update.mockResolvedValueOnce({ taskSpec: spec, currentTurn: 4, startedAt: at,
+        usage: { promptTokens: 100, completionTokens: 5, totalTokens: 105 } })
+      const { prisma } = await import('../../api/lib/prisma.js')
+      const compilations = vi.mocked(prisma.storyCompilation.findFirst), oldCompilation = compilations.getMockImplementation()!
+      const operations = vi.mocked(prisma.agentOperation.count)
+      if (scenario === 'started-writing') compilations.mockResolvedValue({ id: 'actual-prepared-chapter' } as never)
+      if (scenario === 'unknown-work') operations.mockResolvedValue(1)
+      mocks.tools = [tool('chapter_read', async () => ({ output: '已有合成上下文' }))]
+      const answer = '本答复尚不能确认交付。'
+      queue(response('', [call('normal-legacy-read', 'chapter_read')]), response(answer))
+      if (scenario === 'owner-change' || scenario === 'cancel') mocks.chat.mockReset().mockImplementation(async () => {
+        if (scenario === 'cancel') (await import('../../api/lib/agent/active-runs.js')).getActiveRun('run')!.controller.abort()
+        else mocks.runEvents.find(event => event.type === 'run.started')!.payload.title = '其他 owner'
+        return response(answer)
+      })
+      const responseGuard = await import('../../api/lib/agent/task-response.js')
+      const inspect = vi.spyOn(responseGuard, 'assertTaskResponseEligible'), actualGuard = inspect.getMockImplementation()!
+      if (scenario === 'witness-changed-at-commit') inspect.mockImplementation(async (...args) => {
+        if (args[2]) mocks.runEvents.find(event => event.id === 'previous-failure')!.id = 'replaced-receipt'
+        return actualGuard(...args)
+      })
+      if (scenario === 'integrity-error') inspect.mockRejectedValue(new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原请求完整性检查失败'))
+      const afterSeq = scenario === 'wrong-sequence' ? 0 : scenario === 'stale' ? 2 : 1
+      try {
+        await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt, resume: true,
+          ...(scenario === 'absent' ? {} : { authorContinue: { eventId: scenario === 'wrong-event' ? 'missing' : 'previous-failure', afterSeq } }) })
+        expect(events()).not.toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'succeeded' }))
+        expect(events().filter(event => event.type === 'text.final')).not.toContainEqual(expect.objectContaining({ text: answer }))
+        expect(mocks.runs.get('run')?.taskSpec).toEqual(before)
+        if (scenario === 'integrity-error') expect(mocks.chat).not.toHaveBeenCalled()
+      } finally { compilations.mockImplementation(oldCompilation); operations.mockResolvedValue(0); inspect.mockRestore() }
     })
   it.each([true, false])('reconciles the restored input marker only for its matching authenticated receipt: %s', async matching => {
     const prompt = '修改那一章。'

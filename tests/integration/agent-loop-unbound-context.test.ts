@@ -15,6 +15,7 @@ import { freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { assertTaskResponseEligible } from '../../api/lib/agent/task-response.js'
 import { taskRespondTool } from '../../api/lib/agent/tools/task-response-tool.js'
+import { continueLoopRun } from '../../api/lib/agent/run-service.js'
 
 describe.runIf(available)('unbound conversation through the real legacy loop and database context', () => {
   beforeEach(() => {
@@ -26,6 +27,70 @@ describe.runIf(available)('unbound conversation through the real legacy loop and
     vi.spyOn(sessionTitle, 'autoNameSession').mockResolvedValue(undefined)
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Live provider/network requests are forbidden in this fixture'))
   })
+
+  it('resumes an actual human markerless Continue, reads necessary context and saves its normal answer without upgrading the task', async () => fixture(async f => {
+    const novel = await prisma.novel.create({ data: { authorId: f.userId, title: '历史问答继续合成作品', slug: randomUUID(), summary: '' } })
+    const volume = await prisma.volume.create({ data: { novelId: novel.id, title: '第一卷', orderIndex: 1 } })
+    const chapter = await prisma.chapter.create({ data: { authorId: f.userId, novelId: novel.id, volumeId: volume.id,
+      title: '第一章', content: '合成正文保持原样。', orderIndex: 1, orderInVolume: 1 } })
+    const session = await prisma.agentSession.create({ data: { userId: f.userId, novelId: novel.id, title: '原问题继续' } })
+    const runId = randomUUID(), prompt = '第一卷要写多少章？', answer = '根据卷纲，第一卷计划二十章。'
+    const startedAt = new Date(Date.now() - 2000), stoppedAt = new Date(startedAt.getTime() + 100)
+    const startRequest = withHumanAdmission({ sessionId: session.id, novelId: novel.id, chapterId: chapter.id, prompt, mode: 'build' })
+    const usage = { promptTokens: 1000, completionTokens: 50, totalTokens: 1050, checkpoint: {
+      version: 2, controlPolicy: 'until_completion', origin: 'unknown_legacy', runStartedAt: startedAt.getTime(), activeExecutionMs: 100,
+      stagnantBatches: 0, resumeCount: 1, compactionCount: 0, maxTurns: 50, tokenBudget: 9000, writeProgress: 0, writeBaseline: 0,
+      readProgress: 3, readBaseline: 0, progressSignatures: [], reviewAttempts: ['original-synthetic-settled-receipt'] } }
+    await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: novel.id, sessionId: session.id, chapterId: chapter.id,
+      status: 'failed', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', runtimeProtocolVersion: 0,
+      manuscriptRevision: novel.manuscriptRevision, modelTier: 'speed', reasoningEffort: 'high', currentTurn: 4, startedAt, finishedAt: stoppedAt,
+      startRequest, usage } })
+    await prisma.agentMessage.create({ data: { runId, sessionId: session.id, role: 'user', parts: [{ type: 'text', text: prompt }] } })
+    await prisma.agentMessage.create({ data: { runId, sessionId: session.id, role: 'assistant', parts: [
+      { type: 'tool-call', callId: 'historical-read', toolName: 'novel_get_context', title: '读取上下文', args: {}, status: 'success', summary: '已读取原问题背景' },
+    ] } })
+    const subject = { userId: f.userId, novelId: novel.id, sessionId: session.id, runId }
+    const frozen = await prisma.$transaction(tx => freezeWritingScope(tx, subject,
+      buildTaskSpec({ runId, novelId: novel.id, chapterId: chapter.id, prompt, authorWritingProtocol: 2 }), prompt, 2))
+    const admitted = runtimeJson(JSON.parse(JSON.stringify(frozen)))
+    await prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: admitted.value } })
+    expect(frozen.responseDeliveryProtocol).toBeUndefined()
+    expect(frozen.scope.authorEffects?.manuscript).toBe(true)
+    await prisma.agentRunEvent.create({ data: { runId, seq: 1, type: 'run.started', createdAt: startedAt, payload: {
+      type: 'run.started', runId, seq: 1, ts: startedAt.toISOString(), agent: { type: 'orchestrator', title: '原任务', model: 'speed' }, mode: 'build', title: prompt,
+    } } })
+    const terminal = await prisma.agentRunEvent.create({ data: { runId, seq: 2, type: 'run.finished', createdAt: stoppedAt, payload: {
+      type: 'run.finished', runId, seq: 2, ts: stoppedAt.toISOString(), status: 'failed', usage: { promptTokens: 1000, completionTokens: 50, totalTokens: 1050 },
+      artifacts: [], outputSummary: '',
+    } } })
+    const priorPayments = await prisma.aiUsageLog.findMany({ where: { agentRunId: runId } })
+    vi.spyOn(credits, 'assertCreditAccess').mockResolvedValue(undefined)
+    vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 0, provider: 'fixture', modelName: 'fixture-main',
+      baseUrl: 'https://provider.invalid/v1', apiKey: null, reasoningEffort: 'high', reasoningEfforts: ['high'], visionEnabled: false, contextWindowTokens: 128000 })
+    const callUsage = { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null }
+    const chat = vi.spyOn(aiService, 'chatWithTools').mockResolvedValueOnce({ content: '', reasoning: '', finishReason: 'tool_calls',
+      toolCalls: ['novel_get_context', 'structure_outline', 'chapter_list_summaries'].map((name, index) => ({ id: `continued-read-${index}`, name, arguments: '{}' })), usage: callUsage })
+      .mockImplementationOnce(async input => {
+        expect(input.tools?.some(tool => tool.function.name === 'task_respond')).toBe(false)
+        for (const index of [0, 1, 2]) expect(input.messages.some(message => message.role === 'tool' && message.toolCallId === `continued-read-${index}`)).toBe(true)
+        return { content: answer, reasoning: '', finishReason: 'stop', toolCalls: [], usage: callUsage }
+      })
+    expect(await continueLoopRun(f.userId, runId)).toMatchObject({ runId, status: 'running' })
+    await vi.waitFor(async () => expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).status).toBe('completed'), { timeout: 10000, interval: 20 })
+    const completed = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
+    expect(chat).toHaveBeenCalledTimes(2)
+    expect(completed).toMatchObject({ currentTurn: 6, outputSummary: answer, runtimeProtocolVersion: 0, taskRootId: null,
+      modelTier: 'speed', customModelId: null, reasoningEffort: 'high', startRequest, usage: { totalTokens: 1070,
+        checkpoint: { tokenBudget: 9000, maxTurns: 50, resumeCount: 1, reviewAttempts: usage.checkpoint.reviewAttempts } } })
+    expect(runtimeJson(completed.taskSpec).hash).toBe(admitted.hash)
+    const starts = await prisma.agentRunEvent.findMany({ where: { runId, type: 'run.started' }, orderBy: { seq: 'desc' } })
+    expect(starts[0].payload).toMatchObject({ authorContinue: { eventId: terminal.id, afterSeq: 2 } })
+    const messages = await prisma.agentMessage.findMany({ where: { runId, role: 'assistant' }, orderBy: { createdAt: 'desc' } })
+    expect(messages[0].parts).toEqual(expect.arrayContaining([{ type: 'text', text: answer }]))
+    expect(await prisma.aiUsageLog.findMany({ where: { agentRunId: runId } })).toEqual(priorPayments)
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
+    expect(await prisma.storyCompilation.count({ where: { runId } })).toBe(0)
+  }))
 
   it('atomically delivers the main Agent native answer despite inferred writing scope and refuses actual prepared work', async () => fixture(async f => {
     const novel = await prisma.novel.create({ data: { authorId: f.userId, title: '答复交付合成作品', slug: randomUUID(), summary: '' } })

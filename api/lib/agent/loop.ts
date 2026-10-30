@@ -9,7 +9,7 @@ import { readAuthorReviewReplacements } from './author-review-replacement.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { MAIN_RUN_FILTER } from './runtime-child.js'
-import { assertTaskResponseEligible, type TaskResponse } from './task-response.js'
+import { assertTaskResponseEligible, isTaskResponseToolEnvelope, type TaskResponse, type TaskResponseContinue } from './task-response.js'
 
 import { containsAgentProtocolInvocation, recoverAgentProtocolToolCalls, stripAgentProtocolArtifacts } from '../../../shared/agent-output.js'
 import type {
@@ -1205,9 +1205,25 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         await persistCheckpoint()
       }
     }
+    const responseContinue: TaskResponseContinue | undefined = params.resume && params.authorContinue && legacyOwnerReceipt
+      ? { ...params.authorContinue, ownerSeq: legacyOwnerReceipt.seq, ownerHash: legacyOwnerReceipt.hash } : undefined
+    const readResponseProof = async () => {
+      try {
+        return await prisma.$transaction(async tx => {
+          await assertLegacyOwnerReceipt(tx)
+          return assertTaskResponseEligible(tx, { userId: params.userId, novelId: params.novelId, sessionId: params.sessionId, runId }, undefined, responseContinue)
+        })
+      } catch (error) {
+        // Only known absence of opt-in or actual work can use the ordinary path.
+        // Ownership, input-integrity and database failures must remain failures.
+        if (error instanceof DataAccessError && ['TASK_RESPONSE_UNAVAILABLE', 'TASK_RESPONSE_WORK_PENDING'].includes(error.code)) return null
+        throw error
+      }
+    }
+    const ordinaryResponseAvailable = taskSpec.responseDeliveryProtocol === 1 || Boolean(responseContinue && await readResponseProof())
     const checkAuthorScope = !taskSpec.scope.authorEffects
       && (continuingTask || taskSpec.scope.writingTargetProtocol === 2 && taskSpec.scope.writingClarificationProtocol === undefined)
-    const needsScopeDecision = checkAuthorScope && (taskSpec.scope.writing?.kind === 'needs_input' || taskSpec.scope.localEditBoundary?.kind === 'needs_input')
+    const needsScopeDecision = !ordinaryResponseAvailable && checkAuthorScope && (taskSpec.scope.writing?.kind === 'needs_input' || taskSpec.scope.localEditBoundary?.kind === 'needs_input')
       ? await prisma.$transaction(async tx => {
         const effective = await effectiveWritingTaskSpec(tx, { userId: params.userId, novelId: params.novelId, runId }, taskSpec)
         return effective.scope.writing?.kind === 'needs_input' || effective.scope.localEditBoundary?.kind === 'needs_input'
@@ -1425,6 +1441,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         break
       }
     }
+    if (ordinaryResponseAvailable && taskSpec.responseDeliveryProtocol !== 1) messages.push({ role: 'user', content: '[系统] 根据本任务完整原始请求决定实际工作。可以按需使用读取工具核对已有信息，再正常输出完整答复；普通答复无需章节提交、终结工具或额外待办。推测的写作标签不构成创作义务；已经实际准备、修改或检查章节及未完成的真实工作仍须按原证据流程交付。' })
     if (params.goalSteering && ownedGoalExecution) {
       messages.push(await (await import('./goal-steering-message.js')).buildGoalSteeringMessage(params.goalSteering, params.userId, Boolean(modelRuntime.visionEnabled)))
     }
@@ -2038,12 +2055,21 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         : []
       const effectiveToolCalls = result.toolCalls.length > 0 ? [...result.toolCalls] : recoveredToolCalls
       if (effectiveToolCalls.length) releaseWritingToolText()
+      let ordinaryResponse: TaskResponse | undefined
+      if (ordinaryResponseAvailable && effectiveToolCalls.length === 0 && result.content.trim()
+        && result.finishReason !== 'length' && result.finishReason !== 'tool_calls' && !containsAgentProtocolInvocation(result.content)
+        && !isTaskResponseToolEnvelope(result.content)
+        && !pendingReviews.size && !incompleteRequestedReviews.size && !forceWrapUpReason && !authorInputRequired
+        && !todoItems.some(item => ['pending', 'in_progress'].includes(item.status))) {
+        const proof = await readResponseProof()
+        if (proof) ordinaryResponse = { ...proof, answer: result.content }
+      }
       let automaticReviewTriggered = false
       let mergedReviewReminder: string | undefined
       // A weak tool caller cannot skip the delivery assessments by returning
       // prose. These calls use the same original tool ceiling and ordinary
       // journal, approvals, billing and compiler counters as model calls.
-      if (!deniedCommitObservation && !completedWritingWrapUp.value && effectiveToolCalls.length === 0 && requiresManuscriptDelivery(taskSpec)
+      if (!ordinaryResponse && !deniedCommitObservation && !completedWritingWrapUp.value && effectiveToolCalls.length === 0 && requiresManuscriptDelivery(taskSpec)
         && params.mode === 'build'
         && result.finishReason !== 'tool_calls' && !containsAgentProtocolInvocation(result.content)) {
         const readiness = await readCurrentReviewReadiness()
@@ -2080,18 +2106,18 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       messages.push(...toolTurnHistory(result, effectiveToolCalls, { bootstrap: Boolean(bootstrapCall),
         recoveredText: recoveredToolCalls.length > 0, withholdText: automaticReviewTriggered }))
 
-      const cleanContent = automaticReviewTriggered ? reviewProgressText
+      const cleanContent = ordinaryResponse ? ordinaryResponse.answer : automaticReviewTriggered ? reviewProgressText
         : explanatoryResponse ? result.content : normalizeExecutionText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
       // This projection affects publication only. Empty-response, promise and
       // saved-delivery decisions below retain baseline execution normalization.
-      const authorContent = automaticReviewTriggered ? ''
+      const authorContent = ordinaryResponse ? ordinaryResponse.answer : automaticReviewTriggered ? ''
         : explanatoryResponse ? result.content : humanizeAgentVisibleText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
 
       // 主流 Agent 标准（Codex 等）：任务过程中的进展正文同样是对话正文信道，作者实时可见、刷新后仍在；
       // 只有模型原生 reasoning 才进思考信道，执行旁白不再改道思考区。
       // text.delta 已实时显示供应商原始流；无论最终是否有干净文本，都要发 text.final 做归一化，
       // 这样 DSML/乱码被清洗成空串时能立即从界面移除，而不是残留到刷新前。
-      const deferWritingCompletionText = !automaticReviewTriggered && (completedWritingWrapUp.value !== null || effectiveToolCalls.length === 0 && requiresCompletedWritingPresentation(taskSpec))
+      const deferWritingCompletionText = Boolean(ordinaryResponse) || !automaticReviewTriggered && (completedWritingWrapUp.value !== null || effectiveToolCalls.length === 0 && requiresCompletedWritingPresentation(taskSpec))
       if ((result.content || automaticReviewTriggered) && !deferWritingCompletionText) bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
 
       const parts: AgentMessagePart[] = []
@@ -2208,6 +2234,23 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       outputRecoveryFrom = undefined
 
       if (effectiveToolCalls.length === 0) {
+        if (ordinaryResponse) {
+          bus.emit({ type: 'step.finish', turn, usage: result.usage })
+          await finalizeRun(runId, bus, 'succeeded', usage, turn, ordinaryResponse.answer.slice(0, 300), undefined, false,
+            undefined, undefined, undefined, false, undefined, 'user_stop', undefined, {
+              subject: { userId: params.userId, novelId: params.novelId, sessionId: params.sessionId, runId },
+              expected: ordinaryResponse, signal: controller.signal, messageId, parts,
+              assertObligations: () => {
+                controller.signal.throwIfAborted()
+                if (pendingReviews.size || incompleteRequestedReviews.size || forceWrapUpReason || authorInputRequired
+                  || todoItems.some(item => ['pending', 'in_progress'].includes(item.status))) {
+                  throw new DataAccessError(409, 'TASK_RESPONSE_WORK_PENDING', '当前任务仍有未完成实际工作，答复未交付。')
+                }
+              },
+            })
+          liveTurn = null
+          return
+        }
         // C3：规划类任务未经 plan_save 落盘就想收尾，回填提醒（最多 2 次）防止全程只聊天不落盘
         if (expectsPlanSave && !planSavePerformed && planSaveReminders < 2) {
           planSaveReminders += 1
