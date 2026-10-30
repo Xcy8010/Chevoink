@@ -83,6 +83,7 @@ import { useAgentGoalStream } from '../useAgentGoalStream'
 import { useGoalBarVisibility } from '../useGoalBarVisibility'
 import { openGoalEntry } from '../goal-entry'
 import { projectBlockTimings, projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
+import { projectResearchGroups } from '../lib/research-groups'
 import { useMessageScroll } from './use-message-scroll'
 import { useComposerInset } from './use-composer-inset'
 import { useRunControls } from './use-run-controls'
@@ -225,6 +226,7 @@ export function AgentPanel({
   const resumeableRunId = useAgentStore((state) => state.resumeableRunId)
   const messages = useAgentStore((state) => state.messages)
   const { recentConversationText, blockInfoById, lastAssistantId } = useMemo(() => projectMessages(messages), [messages])
+  const researchGroups = useMemo(() => projectResearchGroups(messages), [messages])
   // 正文已定稿的消息 id：定稿后不再画流式光标（等答题/审批/工具执行期间光标不应常闪）
   const finalizedTextIds = useAgentStore((state) => state.finalizedTextIds)
   const textRevealTargets = useAgentStore(state => state.textRevealTargets)
@@ -1655,6 +1657,7 @@ export function AgentPanel({
                 >
                   <AgentMessageParts
                     parts={message.parts}
+                    researchGroups={researchGroups.get(message.id)}
                     messageId={message.id}
                     revealText={textRevealTargets[message.id]}
                     onTextRevealed={finishTextReveal}

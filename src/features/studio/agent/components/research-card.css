@@ -1,0 +1,16 @@
+.agent-research-update {
+  animation: agent-research-update 180ms ease-out both;
+}
+
+@keyframes agent-research-update {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-research-update,
+  .agent-research-card .agent-tool-progress {
+    animation: none;
+    transition: none;
+  }
+}

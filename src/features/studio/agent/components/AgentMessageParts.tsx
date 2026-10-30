@@ -24,6 +24,8 @@ import {
 import { buildApiUrl } from '@/app/api-base'
 import { cn } from '@/lib/utils'
 import { ProcessDuration } from './ProcessDuration'
+import { ResearchCard } from './ResearchCard'
+import { projectResearchGroups, type MessageResearchGroups } from '../lib/research-groups'
 import type { AgentRunTiming } from '../../../../../shared/contracts/agent-events.js'
 import ImageLightbox from '../../components/ImageLightbox'
 import { formatTaskRelativeTime } from '../../lib/relative-time'
@@ -1037,11 +1039,20 @@ const EMPTY_SUBAGENT_CHILDREN: Array<Extract<AgentMessagePart, { type: 'tool-cal
 const SubAgentCallCard = memo(function SubAgentCallCard({
   part,
   children,
+  runActive,
+  researchGroups,
+  animateLive = false,
+  liveToolCallIds,
 }: {
+  runActive: boolean
+  researchGroups?: MessageResearchGroups
+  animateLive?: boolean
+  liveToolCallIds?: ReadonlySet<string>
   part: Extract<AgentMessagePart, { type: 'tool-call' }>
   children: Array<Extract<AgentMessagePart, { type: 'tool-call' }>>
 }) {
   const [expanded, setExpanded] = useState(true)
+  const childGroups = useMemo(() => researchGroups ?? projectResearchGroups([{ id: '', role: 'assistant', runId: '', parts: children }]).get(''), [researchGroups, children])
   const report = part.display?.kind === 'subagentReport' ? part.display : null
   const running = part.status === 'running'
   const durationLabel = formatToolDuration(report?.durationMs ?? part.durationMs)
@@ -1078,7 +1089,12 @@ const SubAgentCallCard = memo(function SubAgentCallCard({
         <div className="border-t border-[var(--border-subtle)]">
           {children.length > 0 ? (
             <div className="pl-2">
-              {children.map((child) => <ToolCallCard key={child.callId} part={child} />)}
+              {children.map((child) => {
+                const group = childGroups?.get(child.callId)
+                if (group) return group.firstCallId === child.callId
+                  ? <ResearchCard key={group.id} group={group} runActive={runActive} animate={animateLive && group.calls.some(call => liveToolCallIds?.has(call.callId))} /> : null
+                return <ToolCallCard key={child.callId} part={child} />
+              })}
             </div>
           ) : null}
           {report?.report ? (
@@ -1195,6 +1211,7 @@ const ReasoningPart = memo(function ReasoningPart({
 
 export const AgentMessageParts = memo(function AgentMessageParts({
   parts,
+  researchGroups,
   streaming,
   runActive,
   messageId,
@@ -1211,6 +1228,7 @@ export const AgentMessageParts = memo(function AgentMessageParts({
   textCollapsible = false,
 }: {
   parts: AgentMessagePart[]
+  researchGroups?: MessageResearchGroups
   messageId?: string
   revealText?: string
   onTextRevealed?: (messageId: string, text: string) => void
@@ -1232,6 +1250,7 @@ export const AgentMessageParts = memo(function AgentMessageParts({
   textCollapsible?: boolean
 }) {
   const authorParts = useMemo(() => projectAgentAuthorParts(parts, streaming, { includePreparing: runActive }), [parts, streaming, runActive])
+  const localResearchGroups = useMemo(() => researchGroups ?? projectResearchGroups([{ id: messageId ?? blockId ?? '', role: 'assistant', runId: '', parts }]).get(messageId ?? blockId ?? ''), [researchGroups, messageId, blockId, parts])
   const receivedText = useMemo(() => authorParts.flatMap(part => part.type === 'text' ? [part.text] : []).join(''), [authorParts])
   const revealed = useStreamingTextState(receivedText, revealText !== undefined, messageId ?? blockId ?? '', true)
   useEffect(() => {
@@ -1293,9 +1312,16 @@ export const AgentMessageParts = memo(function AgentMessageParts({
         </AgentProcessRegion>
         if (part.type === 'tool-call') {
           if (part.subagentCallId) return null
+          const researchGroup = localResearchGroups?.get(part.callId)
+          if (researchGroup) {
+            if (researchGroup.firstCallId !== part.callId || researchGroup.messageId !== (messageId ?? blockId ?? '')) return null
+            return <AgentProcessRegion key={researchGroup.id} open={!collapsed}>
+              <ResearchCard group={researchGroup} runActive={runActive} animate={animateLive && researchGroup.calls.some(call => liveToolCallIds?.has(call.callId))} />
+            </AgentProcessRegion>
+          }
           return <AgentProcessRegion key={part.callId} open={!collapsed || failed}>
             {part.toolName === 'subagent_run' || part.toolName === 'subagent_delegate'
-              ? <SubAgentCallCard part={part} children={subagentChildren.get(part.callId) ?? EMPTY_SUBAGENT_CHILDREN} />
+              ? <SubAgentCallCard part={part} children={subagentChildren.get(part.callId) ?? EMPTY_SUBAGENT_CHILDREN} runActive={runActive} researchGroups={localResearchGroups} animateLive={animateLive} liveToolCallIds={liveToolCallIds} />
               : <ToolCallCard part={part} animate={animateLive && Boolean(liveToolCallIds?.has(part.callId))} />}
           </AgentProcessRegion>
         }

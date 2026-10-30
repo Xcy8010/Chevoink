@@ -1,0 +1,57 @@
+.memory-graph { container-type: inline-size; }
+.memory-graph .memory-map-view,
+.memory-graph .memory-galaxy-view,
+.memory-graph .memory-galaxy { position: absolute; inset: 0; }
+.memory-graph [hidden] { display: none !important; }
+.memory-graph .memory-map-node { border: 0; padding: 0; background: transparent; border-radius: 10px; }
+.memory-graph .memory-entity { display: flex; align-items: center; gap: 9px; width: 100%; height: 100%; padding: 0 12px; border: 1px solid color-mix(in srgb, var(--memory-node-color) 65%, transparent); border-radius: 10px; color: var(--text-primary); background: var(--surface-elevated); box-shadow: 0 3px 10px #00000009; text-align: left; font-size: 12px; font-weight: 550; }
+.memory-graph .memory-entity > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memory-graph .memory-entity-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--memory-node-color); }
+.memory-graph .is-focused .memory-entity { border: 2px solid var(--memory-node-color); box-shadow: 0 0 0 4px color-mix(in srgb, var(--memory-node-color) 18%, transparent); }
+.memory-graph .is-dimmed { opacity: 0.18; }
+.memory-graph .react-flow__handle { opacity: 0; pointer-events: none; }
+.memory-graph .memory-entity:focus-visible,
+.memory-graph button:focus-visible,
+.memory-graph canvas:focus-visible { outline: 2px solid #69b5ef; outline-offset: 3px; }
+.memory-graph .memory-relationship-label { pointer-events: none; }
+.memory-graph .react-flow__minimap { width: 160px; height: 112px; margin: 12px; }
+.memory-graph .react-flow__minimap-mask { fill: color-mix(in srgb, var(--surface-default) 65%, transparent); stroke: var(--text-tertiary); stroke-width: 2px; }
+.memory-graph .memory-minimap-dimmed { opacity: 0.25; }
+.memory-graph .react-flow__controls { margin: 12px; }
+.memory-graph .react-flow__controls-button { width: 36px; height: 36px; padding: 10px; }
+.memory-graph-controls { display: flex; z-index: 5; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: 10px; background: var(--surface-elevated); }
+.memory-graph-controls button { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border: 0; color: var(--text-secondary); background: transparent; }
+.memory-graph-controls button:hover { background: var(--surface-muted); }
+.memory-graph-controls button[aria-pressed='true'] { color: var(--text-primary); background: var(--surface-muted); }
+.memory-graph-modes { position: absolute; top: 12px; left: 12px; }
+.memory-graph-modes button + button { border-left: 1px solid var(--border-subtle); }
+.memory-graph-legend { position: absolute; bottom: 12px; right: 12px; z-index: 4; display: flex; gap: 12px; padding: 6px 9px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--surface-elevated); color: var(--text-secondary); font-size: 10px; pointer-events: none; }
+.memory-graph-legend span { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.memory-graph-legend i { width: 6px; height: 6px; border-radius: 50%; }
+.memory-graph-detail { position: absolute; z-index: 6; right: 12px; bottom: 48px; width: min(21rem, calc(100% - 24px)); max-height: calc(100% - 112px); overflow-y: auto; overscroll-behavior: contain; padding: 12px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface-elevated); box-shadow: var(--shadow-elevated); }
+.memory-detail-close { display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; flex: none; color: var(--text-tertiary); border-radius: 6px; }
+.memory-detail-close:hover { color: var(--text-primary); background: var(--surface-muted); }
+.memory-detail-relations { margin: 10px 0 0; padding: 8px 0 0; list-style: none; border-top: 1px solid var(--border-subtle); }
+.memory-detail-relations button { display: flex; width: 100%; gap: 8px; padding: 6px 4px; border-radius: 5px; text-align: left; color: var(--text-secondary); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.memory-detail-relations button:hover { background: var(--surface-muted); }
+.memory-detail-relations button > span:last-child { min-width: 0; }
+.memory-detail-relations strong { display: block; font-weight: 550; color: var(--text-primary); }
+.memory-relation-direction { color: var(--text-tertiary); }
+.memory-galaxy canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+.memory-galaxy canvas:active { cursor: grabbing; }
+.memory-galaxy-controls { position: absolute; top: 12px; right: 12px; flex-direction: column; }
+.memory-galaxy-controls button + button { border-top: 1px solid var(--border-subtle); }
+.memory-galaxy-accessible { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); }
+.memory-galaxy-accessible:focus-within { width: min(260px, calc(100% - 24px)); height: auto; max-height: 60%; top: 60px; left: 12px; margin: 0; padding: 8px; overflow: auto; clip-path: none; background: var(--surface-elevated); border-radius: 8px; }
+.memory-galaxy-accessible button { display: block; padding: 7px; text-align: left; color: var(--text-primary); }
+@container (max-width: 640px) {
+  .memory-graph .react-flow__controls-button,
+  .memory-graph-controls button { width: 40px; height: 40px; }
+  .memory-graph-detail { bottom: 140px; max-height: min(42%, 240px, calc(100% - 204px)); }
+  .memory-graph-legend { gap: 8px; font-size: 9px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .memory-graph *, .memory-graph *::before, .memory-graph *::after { animation: none !important; transition: none !important; }
+}
+
+.memory-graph-loading { position: absolute; z-index: 7; top: 62px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 7px; max-width: calc(100% - 24px); white-space: nowrap; padding: 8px 12px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--surface-elevated); color: var(--text-secondary); font-size: 11px; } .memory-graph-loading button { color: var(--text-primary); text-decoration: underline; }
