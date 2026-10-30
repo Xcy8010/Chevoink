@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { link, mkdir, open, readFile, realpath, unlink, writeFile } from 'node:fs/promises'
+import { chmod, link, mkdir, open, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 import { env } from '../config/env.js'
@@ -29,6 +29,10 @@ function getUploadsRoot() {
 
 function getNovelCoverDirectory() {
   return path.join(getUploadsRoot(), 'novel-covers')
+}
+
+async function allowPublicCoverDirectory(directory: string): Promise<void> {
+  await chmod(directory, (await stat(directory)).mode | 0o755)
 }
 
 function parseNovelCoverDataUrl(dataUrl: string): {
@@ -70,13 +74,14 @@ export async function storeImportedNovelCoverDataUrl(dataUrl: string): Promise<s
   const directory = getNovelCoverDirectory()
   await mkdir(directory, { recursive: true })
   if (await realpath(directory) !== directory) throw new DataAccessError(503, 'IMPORT_COVER_STORAGE_UNSAFE', '封面存储目录不可用。')
+  await allowPublicCoverDirectory(directory)
   const sha256 = createHash('sha256').update(buffer).digest('hex')
   const filename = `${sha256}.png`
   const target = path.join(directory, filename)
   const temporary = path.join(directory, `.${sha256}.${randomUUID()}.tmp`)
   try {
     const handle = await open(temporary, 'wx', 0o644)
-    try { await handle.writeFile(buffer); await handle.sync() } finally { await handle.close() }
+    try { await handle.writeFile(buffer); await handle.chmod(0o644); await handle.sync() } finally { await handle.close() }
     // Atomic publish after fsync: a crash cannot leave a partial public cover.
     await link(temporary, target)
   } catch (error) {
@@ -94,6 +99,7 @@ export async function storeImportedNovelCoverDataUrl(dataUrl: string): Promise<s
         length += read.bytesRead
       }
       if (length !== buffer.length || !existing.subarray(0, length).equals(buffer)) throw new DataAccessError(409, 'IMPORT_COVER_INVALID', '封面持久资源校验失败。')
+      await handle.chmod(stat.mode | 0o044)
     } finally { await handle.close() }
   } finally { await unlink(temporary).catch(error => { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error }) }
   return `${MANAGED_NOVEL_COVER_PREFIX}${filename}`
@@ -139,6 +145,12 @@ export async function storeNovelCoverFromRemoteUrl(remoteUrl: string): Promise<s
   return writeCoverBuffer(mimeType, buffer)
 }
 
+/** Public covers are served by Nginx under a different user; keep the private process umask. */
+async function writePublicCoverFile(filename: string, buffer: Buffer): Promise<void> {
+  await writeFile(filename, buffer)
+  await chmod(filename, 0o644)
+}
+
 async function writeCoverBuffer(
   mimeType: SupportedNovelCoverMimeType,
   buffer: Buffer,
@@ -146,19 +158,20 @@ async function writeCoverBuffer(
   const coverDirectory = getNovelCoverDirectory()
 
   await mkdir(coverDirectory, { recursive: true })
+  await allowPublicCoverDirectory(coverDirectory)
 
   // 优先 sharp 转 WebP + 缩略图；失败时降级原样落盘
   const transcoded = await transcodeCoverImage(buffer)
   if (transcoded) {
     const filename = `${randomUUID()}.webp`
-    await writeFile(path.join(coverDirectory, filename), transcoded.main)
-    await writeFile(path.join(coverDirectory, filename.replace(/\.webp$/, '.thumb.webp')), transcoded.thumb)
+    await writePublicCoverFile(path.join(coverDirectory, filename), transcoded.main)
+    await writePublicCoverFile(path.join(coverDirectory, filename.replace(/\.webp$/, '.thumb.webp')), transcoded.thumb)
     return `${MANAGED_NOVEL_COVER_PREFIX}${filename}`
   }
 
   const extension = MIME_TO_EXTENSION[mimeType]
   const filename = `${randomUUID()}.${extension}`
-  await writeFile(path.join(coverDirectory, filename), buffer)
+  await writePublicCoverFile(path.join(coverDirectory, filename), buffer)
 
   return `${MANAGED_NOVEL_COVER_PREFIX}${filename}`
 }
