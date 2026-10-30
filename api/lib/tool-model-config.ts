@@ -1,8 +1,9 @@
 import { prisma } from './prisma.js'
 import { decryptSecret } from './secret-box.js'
+import type { ImageQualityConfig } from '../../shared/contracts/image-model.js'
 
 export type ToolModelKey = 'tool:image-generation' | 'tool:image-vision' | 'tool:web-search' | 'tool:web-fetch'
-export type ToolModelRuntime = { provider: string; modelName: string; baseUrl: string; apiKey: string }
+export type ToolModelRuntime = { provider: string; modelName: string; baseUrl: string; apiKey: string; imageQuality?: ImageQualityConfig }
 
 const cache = new Map<ToolModelKey, { expiresAt: number; value: ToolModelRuntime | null }>()
 
@@ -24,8 +25,10 @@ export async function getToolModelRuntime(key: ToolModelKey): Promise<ToolModelR
     (record.modelName === 'unconfigured' || !record.baseUrl || !record.apiKeyCiphertext)) {
     throw new ToolModelConfigurationError('TOOL_CONFIG_INCOMPLETE')
   }
+  const metadata = record?.metadata && typeof record.metadata === 'object' && !Array.isArray(record.metadata) ? record.metadata : {}
   const value = record && record.modelName !== 'unconfigured' && record.baseUrl && record.apiKeyCiphertext
-    ? { provider: record.provider, modelName: record.modelName, baseUrl: record.baseUrl, apiKey: decryptSecret(record.apiKeyCiphertext) }
+    ? { provider: record.provider, modelName: record.modelName, baseUrl: record.baseUrl, apiKey: decryptSecret(record.apiKeyCiphertext),
+        ...(key === 'tool:image-generation' && metadata.imageQuality ? { imageQuality: metadata.imageQuality as ImageQualityConfig } : {}) }
     : null
   cache.set(key, { expiresAt: Date.now() + 30_000, value })
   return value

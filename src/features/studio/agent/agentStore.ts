@@ -260,6 +260,11 @@ type AgentStoreState = {
   /** 正文已定稿（text.final 已到达）的消息 id：定稿后正文尾部不再画流式光标，
       避免等作者答题/审批或工具执行期间光标在已完成正文后常闪 */
   finalizedTextIds: string[]
+  /** Cosmetic live reveal only; received text/run status remain authoritative. */
+  textRevealTargets: Record<string, string>
+  motionAfterSeq: number | null
+  liveToolCallIds: ReadonlySet<string>
+  finishTextReveal: (messageId: string, text: string) => void
   /** 自动追踪：Agent 写入章节时编辑器自动跳转到对应正文（默认开启） */
   autoFollow: boolean
   /** 当前任务窗口（会话）累计的工作区写入活动（变更区） */
@@ -280,7 +285,7 @@ type AgentStoreState = {
   applyEvent: (event: AgentStreamEvent) => void
   beginRun: (runId: string, userPrompt: string, sessionId: string | null, attachments?: AgentAttachmentMeta[], runGoalId?: string | null) => void
   /** 续接服务端仍在进行的 run（刷新后恢复）：不追加用户消息，从 seq 0 重放事件重建直播 */
-  resumeRun: (runId: string, sessionId: string | null, runGoalId?: string | null) => void
+  resumeRun: (runId: string, sessionId: string | null, runGoalId?: string | null, motionAfterSeq?: number) => void
   reconcileRunTimings: (messages: AgentUIMessage[], sessionId: string, runId: string) => void
   /** 记录刷新后从服务端派生的可续跑 run（拉历史消息时写入，续跑成功后清空） */
   noteResumeableRun: (runId: string | null) => void
@@ -595,6 +600,14 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   composerSubagent: null,
   skillRoute: null,
   finalizedTextIds: [],
+  textRevealTargets: {},
+  motionAfterSeq: null,
+  liveToolCallIds: new Set<string>(),
+  finishTextReveal: (messageId, text) => set(state => {
+    if (state.textRevealTargets[messageId] !== text) return {}
+    const targets = { ...state.textRevealTargets }; delete targets[messageId]
+    return { textRevealTargets: targets }
+  }),
   autoFollow: readStoredAutoFollow(),
   workspaceActivities: [],
   activitiesVersion: 0,
@@ -627,6 +640,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // 新一轮重新路由技能：上一轮的技能标识不能留到本轮
       skillRoute: null,
       finalizedTextIds: [],
+      textRevealTargets: {},
+      motionAfterSeq: 0,
+      liveToolCallIds: new Set<string>(),
       // 开新 run 后旧的「可续跑」派生状态失效，避免按钮误留
       resumeableRunId: null,
       // 新 run 开跑：登记运行中供侧栏展示；同一会话的旧终态信号视为已消费
@@ -665,8 +681,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       ],
     })),
 
-  resumeRun: (runId, sessionId, runGoalId = null) =>
+  resumeRun: (runId, sessionId, runGoalId = null, motionAfterSeq) =>
     set((state) => ({
+      textRevealTargets: {},
+      motionAfterSeq: motionAfterSeq ?? null,
+      liveToolCallIds: new Set<string>(),
       runId,
       runGoalId,
       resumeableRunId: null,
@@ -706,6 +725,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     const todos = snapshot !== undefined ? snapshot?.items ?? [] : cached?.messages === messages ? cached.todos : derived.todos
     writeSessionMessagesCache(sessionId, restored, todos)
     set((state) => ({
+      textRevealTargets: {},
+      motionAfterSeq: null,
+      liveToolCallIds: new Set<string>(),
       messages: restored,
       lastVisibleOutput: null,
       phase: 'idle',
@@ -810,6 +832,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       toolNavigationRequest: null,
       skillRoute: null,
       finalizedTextIds: [],
+      textRevealTargets: {},
+      motionAfterSeq: null,
+      liveToolCallIds: new Set<string>(),
       // 切换会话视为“离开旧对话”：清空消息，由渲染层按「未水合」展示图标流光；
       // 同会话重挂载/续活走早退路径（loadedSessionId 命中）不会经过这里
       messages: [],
@@ -855,6 +880,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       let pendingApproval = state.pendingApproval
       let pendingQuestion = state.pendingQuestion
       let liveToolDrafts = state.liveToolDrafts
+      let textRevealTargets = state.textRevealTargets
+      let motionAfterSeq = state.motionAfterSeq
       let messages = state.messages
       let workspaceActivities = state.workspaceActivities
       let changed = false
@@ -879,6 +906,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           runId = entry.runId
           runGoalId = entry.runGoalId ?? null
           phase = remoteAuthorEnded.fulfilled ? 'succeeded' : 'cancelled'
+          if (!remoteAuthorEnded.fulfilled) { textRevealTargets = {}; motionAfterSeq = null }
           changed = true
         }
         if (appliesAuthorEnded && signals[sessionId]) {
@@ -925,6 +953,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           pendingApproval = null
           pendingQuestion = null
           liveToolDrafts = {}
+          if (entry.status !== 'completed') { textRevealTargets = {}; motionAfterSeq = null }
           messages = settleRunningToolParts(messages, '本轮已结束，未收到工具完成结果').map((message) =>
             (message.runTiming?.sourceRunId ?? message.runId) === entry.runId
               ? { ...message, ...(entry.status === 'completed' && message.role === 'assistant' && entry.finishedAt ? { completedAt: entry.finishedAt } : {}),
@@ -959,6 +988,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         pendingApproval,
         pendingQuestion,
         liveToolDrafts,
+        textRevealTargets,
+        motionAfterSeq,
         messages,
         workspaceActivities,
         ...(authorEndedTodos ? { todos: authorEndedTodos, todosVersion: state.todosVersion + 1 } : {}),
@@ -1076,7 +1107,12 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       const timingEvent = ['run.started', 'run.paused', 'run.finished'].includes(event.type) || event.type === 'error' && !event.recoverable
       const timedMessages = timingEvent ? state.messages.map(message => (message.runTiming?.sourceRunId ?? message.runId) === event.runId
         ? { ...message, runTiming: advanceRunTiming(message.runTiming, event) } : message) : state.messages
-      const base = { lastSeq: event.seq, ...(timingEvent ? { messages: timedMessages } : {}) }
+      const liveToolEvent = state.motionAfterSeq !== null && event.seq > state.motionAfterSeq
+        && (event.type === 'tool.delta' || event.type === 'tool.call' || event.type === 'tool.result')
+      const base = { lastSeq: event.seq, ...(timingEvent ? { messages: timedMessages } : {}),
+        ...(liveToolEvent && !state.liveToolCallIds.has(event.callId)
+          ? { liveToolCallIds: new Set([...state.liveToolCallIds, event.callId]) } : {}) }
+
 
       switch (event.type) {
         case 'goal.snapshot': {
@@ -1124,10 +1160,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           const stream = authorTextStreams.get(key) ?? createAgentAuthorTextStream()
           authorTextStreams.set(key, stream)
           const delta = stream.push(event.delta)
+          const messages = delta ? updateMessageParts(state.messages, event.messageId, parts => appendDelta(parts, 'text', delta)) : state.messages
+          const text = messages.find(message => message.id === event.messageId)?.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('') ?? ''
           return {
             ...base,
             ...(event.runId === state.runId && delta.trim() ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
-            ...(delta ? { messages: updateMessageParts(state.messages, event.messageId, parts => appendDelta(parts, 'text', delta)) } : {}),
+            ...(delta ? { messages, ...(state.motionAfterSeq !== null && event.seq > state.motionAfterSeq
+              ? { textRevealTargets: { ...state.textRevealTargets, [event.messageId]: text } } : {}) } : {}),
           }
         }
 
@@ -1143,6 +1182,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           return {
             ...base,
             ...(text.trim() && text !== previousText ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
+            ...(state.motionAfterSeq !== null && event.seq > state.motionAfterSeq
+              ? { textRevealTargets: { ...state.textRevealTargets, [event.messageId]: text } } : {}),
             finalizedTextIds: state.finalizedTextIds.includes(event.messageId)
               ? state.finalizedTextIds : [...state.finalizedTextIds, event.messageId],
             messages: updateMessageParts(state.messages, event.messageId, parts => {
@@ -1416,6 +1457,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           return {
             ...base,
             phase: 'paused',
+            textRevealTargets: {},
+            motionAfterSeq: null,
             ...(event.reason === 'model_stalled' ? { outputSummary: '模型暂未完成任务，已保留进度并暂停。请补充指示后继续。' } : {}),
             ...(event.reason === 'review_receipt_pending' ? { errorMessage: null, outputSummary: '检查正在等待原请求确认，正文和已完成的检查已保留。' } : {}),
             pendingApproval: null,
@@ -1433,6 +1476,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           return {
             ...base,
             phase: event.status,
+            ...(event.status !== 'succeeded' ? { textRevealTargets: {}, motionAfterSeq: null } : {}),
             authorEnded: event.authorEnded ?? null,
             outcome: event.outcome ?? null,
             usage: event.usage,
@@ -1457,6 +1501,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
               ? {}
               : {
                   phase: 'failed' as const,
+                  textRevealTargets: {},
+                  motionAfterSeq: null,
                   liveToolDrafts: {},
                   messages: settleRunningToolParts(timedMessages, '已中断'),
                   workspaceActivities: settleRunningActivities(state.workspaceActivities),

@@ -32,6 +32,8 @@ import type {
   AgentToolDisplayPayload,
 } from '../../../../../shared/contracts/index.js'
 import { AgentMarkdownText } from './AgentMarkdownText'
+import { AgentProcessRegion } from './AgentProcessRegion'
+import { useStreamingTextState } from '../../components/use-streaming-text'
 import { useAgentStore } from '../agentStore'
 import { projectAgentAuthorParts, projectAgentAuthorText } from '../../../../../shared/agent-author-view.js'
 import { describeToolArguments, getToolTargetTitle } from '../tool-argument-view'
@@ -889,9 +891,9 @@ function formatToolDuration(durationMs: number | undefined): string | null {
 }
 
 const ToolCallCard = memo(function ToolCallCard({
-  part,
+  part, animate = false,
 }: {
-  part: Extract<AgentMessagePart, { type: 'tool-call' }>
+  part: Extract<AgentMessagePart, { type: 'tool-call' }>; animate?: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
   const requestToolNavigation = useAgentStore((state) => state.requestToolNavigation)
@@ -951,7 +953,7 @@ const ToolCallCard = memo(function ToolCallCard({
       'shrink-0 text-[10px] font-medium',
       part.status === 'success' ? 'text-emerald-600' : part.status === 'denied' ? 'text-amber-500' : 'text-rose-500',
     )}>{part.status === 'success' ? (part.accepted ? '已接受' : '已完成') : part.status === 'denied' ? '已拒绝' : '失败'}</span> : null}
-    <span className="shrink-0">{reviewDecision ? <CircleAlert className="h-3.5 w-3.5 text-amber-600" /> : toolStatusIcon[part.status]}</span>
+    <span key={preparing ? 'preparing' : part.status} className={cn('shrink-0', animate && 'agent-tool-phase')}>{reviewDecision ? <CircleAlert className="h-3.5 w-3.5 text-amber-600" /> : toolStatusIcon[part.status]}</span>
     {spotlightType !== null ? (
       <SquareStack className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)] transition-colors group-hover:text-[var(--text-primary)]" />
     ) : rowExpandable ? <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)] transition-transform', expanded && 'rotate-180')} /> : null}
@@ -960,8 +962,10 @@ const ToolCallCard = memo(function ToolCallCard({
   return (
     <div
       data-agent-call-id={part.callId}
+      data-agent-tool-phase={preparing ? 'preparing' : part.status}
       className={cn(
         'relative overflow-hidden border-b border-[var(--border-subtle)] bg-transparent transition-colors',
+        animate && 'agent-tool-enter',
         (running || preparing) && 'agent-tool-running',
       )}
     >
@@ -986,7 +990,7 @@ const ToolCallCard = memo(function ToolCallCard({
         <a className="underline" href={importWaiting.url}>核对原文并确认导入</a>
         <span className="ml-2 text-[var(--text-secondary)]">尚未导入；已有章节需要两次覆盖确认。</span>
       </p> : null}
-      {part.summary ? (
+      <AgentProcessRegion open={Boolean(part.summary)}>
         <p
           className={cn(
             'pb-2 text-[11px] leading-5',
@@ -998,7 +1002,7 @@ const ToolCallCard = memo(function ToolCallCard({
         >
           {part.summary}
         </p>
-      ) : null}
+      </AgentProcessRegion>
       {expanded && argumentRows.length > 0 ? (
         <dl className="max-h-44 space-y-1.5 overflow-y-auto border-t border-[var(--border-subtle)] py-2 pl-[22px] pr-2 text-[10px] leading-5">
           {argumentRows.map((row, index) => <div key={`${row.label}-${index}`} className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-2"><dt className="text-[var(--text-tertiary)]">{row.label}</dt><dd className="min-w-0 break-words text-[var(--text-secondary)]">{row.value}</dd></div>)}
@@ -1193,6 +1197,12 @@ export const AgentMessageParts = memo(function AgentMessageParts({
   parts,
   streaming,
   runActive,
+  messageId,
+  revealText,
+  onTextRevealed,
+  settling = false,
+  animateLive = false,
+  liveToolCallIds,
   blockId,
   summaryCount,
   summaryTiming,
@@ -1201,6 +1211,12 @@ export const AgentMessageParts = memo(function AgentMessageParts({
   textCollapsible = false,
 }: {
   parts: AgentMessagePart[]
+  messageId?: string
+  revealText?: string
+  onTextRevealed?: (messageId: string, text: string) => void
+  settling?: boolean
+  animateLive?: boolean
+  liveToolCallIds?: ReadonlySet<string>
   streaming: boolean
   /** 所属 run 是否仍活跃：活跃时平铺输出 */
   runActive: boolean
@@ -1216,8 +1232,15 @@ export const AgentMessageParts = memo(function AgentMessageParts({
   textCollapsible?: boolean
 }) {
   const authorParts = useMemo(() => projectAgentAuthorParts(parts, streaming, { includePreparing: runActive }), [parts, streaming, runActive])
+  const receivedText = useMemo(() => authorParts.flatMap(part => part.type === 'text' ? [part.text] : []).join(''), [authorParts])
+  const revealed = useStreamingTextState(receivedText, revealText !== undefined, messageId ?? blockId ?? '', true)
+  useEffect(() => {
+    if (revealText !== undefined && !revealed.pending && messageId) onTextRevealed?.(messageId, receivedText)
+  }, [revealText, revealed.pending, messageId, receivedText, onTextRevealed])
+  let textOffset = 0
+  let textOrdinal = 0
   const showSummary = summaryCount !== undefined && (summaryTiming !== undefined || !runActive && summaryCount > 0)
-  const collapsed = !runActive && !summaryExpanded
+  const collapsed = !runActive && !summaryExpanded && !settling
   // 子 Agent 内部工具卡片归组：嵌套渲染进所属的 subagent_run 容器（codex/Zcode 模式）
   const subagentChildren = useMemo(() => {
     const grouped = new Map<string, Array<Extract<AgentMessagePart, { type: 'tool-call' }>>>()
@@ -1256,39 +1279,26 @@ export const AgentMessageParts = memo(function AgentMessageParts({
       ) : null}
       {authorParts.map((part, index) => {
         const isLast = index === authorParts.length - 1
-
         if (part.type === 'text') {
-          // 折叠态且可收起：过程进展正文折进「已处理 n 个操作」，只留结尾总结的正文可见
-          if (collapsed && textCollapsible) return null
-          // Activity belongs to run status, never an indefinitely blinking prose suffix.
-          return <AgentMarkdownText key={index} text={part.text} streaming={streaming && isLast} identity={`${blockId ?? ''}:${index}`} />
+          const identity = `${messageId ?? blockId ?? ''}:text:${textOrdinal++}`
+          const content = part.text.slice(0, Math.max(0, revealed.text.length - textOffset))
+          textOffset += part.text.length
+          const text = <AgentMarkdownText text={content} identity={identity} />
+          return textCollapsible ? <AgentProcessRegion key={identity} open={!collapsed}>{text}</AgentProcessRegion>
+            : <div key={identity}>{text}</div>
         }
-
-        // 折叠态：隐藏思考/动作，仅保留 text 结论
-        if (collapsed && !(part.type === 'tool-call' && (part.status === 'failed' || part.status === 'denied'))) {
-          return null
-        }
-
-        if (part.type === 'reasoning') {
-          return <ReasoningPart key={index} part={part} streaming={streaming && isLast} />
-        }
-
+        const failed = part.type === 'tool-call' && (part.status === 'failed' || part.status === 'denied')
+        if (part.type === 'reasoning') return <AgentProcessRegion key={`reasoning:${index}`} open={!collapsed}>
+          <ReasoningPart part={part} streaming={streaming && isLast} />
+        </AgentProcessRegion>
         if (part.type === 'tool-call') {
-          // 子 Agent 内部工具卡片已嵌套进容器渲染，平铺处跳过
           if (part.subagentCallId) return null
-          if (part.toolName === 'subagent_run' || part.toolName === 'subagent_delegate') {
-            return (
-              <SubAgentCallCard
-                key={`${part.callId}-${index}`}
-                part={part}
-                children={subagentChildren.get(part.callId) ?? EMPTY_SUBAGENT_CHILDREN}
-              />
-            )
-          }
-          return <ToolCallCard key={`${part.callId}-${index}`} part={part} />
+          return <AgentProcessRegion key={part.callId} open={!collapsed || failed}>
+            {part.toolName === 'subagent_run' || part.toolName === 'subagent_delegate'
+              ? <SubAgentCallCard part={part} children={subagentChildren.get(part.callId) ?? EMPTY_SUBAGENT_CHILDREN} />
+              : <ToolCallCard part={part} animate={animateLive && Boolean(liveToolCallIds?.has(part.callId))} />}
+          </AgentProcessRegion>
         }
-
-        // attachment part 只在用户消息出现，由 AgentPanel 气泡自行渲染，此处防御性跳过
         return null
       })}
     </div>

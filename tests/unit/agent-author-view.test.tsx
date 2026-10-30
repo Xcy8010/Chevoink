@@ -177,3 +177,20 @@ it('restores the original compact thinking row, bounded scroll body and completi
   expect(view.container.textContent).not.toMatch(/chapter_write|chapterId|private-id/)
   expect(view.container.textContent).not.toMatch(/展开思考|收起思考|完整段落到达/)
 })
+
+
+it('hides reply transport cards in live preparation, execution and restored results without changing receipts', () => {
+  for (const status of ['running', 'success', 'failed'] as const) {
+    const receipt: AgentMessagePart = { type: 'tool-call', callId: 'reply-transport', toolName: 'task_respond', title: '答复问题',
+      status, summary: '答复已核对', ...(status === 'running' ? { preparing: true } : {}) }
+    const source = structuredClone(receipt)
+    expect(projectAgentAuthorParts([receipt], true, { includePreparing: true })).toEqual([])
+    expect(projectAgentAuthorParts([receipt])).toEqual([])
+    expect(receipt).toEqual(source)
+  }
+  const answer = '按当前卷纲，第一卷规划二十章。'
+  const view = render(<AgentMessageParts parts={[{ type: 'tool-call', callId: 'reply', toolName: 'task_respond', title: '答复问题', status: 'success', summary: '答复已核对' },
+    { type: 'text', text: answer }]} streaming={false} runActive={false} summaryExpanded />)
+  expect(view.container.textContent).toContain(answer)
+  expect(view.container.textContent).not.toMatch(/答复问题|答复已核对/)
+})

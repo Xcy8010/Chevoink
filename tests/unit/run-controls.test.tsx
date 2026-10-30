@@ -33,7 +33,7 @@ it('deduplicates concurrent resume clicks and connects once', async () => {
   expect(mocks.resume).toHaveBeenCalledTimes(1)
   await act(async () => { finish({ runId: 'resumed', eventStartSeq: 12704 }); await Promise.all([first, second]) })
   expect(connect).toHaveBeenCalledExactlyOnceWith('resumed', 12704)
-  expect(mocks.restore).toHaveBeenCalledExactlyOnceWith('resumed', 'a', undefined)
+  expect(mocks.restore).toHaveBeenCalledExactlyOnceWith('resumed', 'a', undefined, 12704)
   expect(mocks.begin).not.toHaveBeenCalled()
 })
 
@@ -43,7 +43,7 @@ it('one Continue restores the original task and connects directly using the curr
   const { result, connect, setActionError } = fixture(selectedModelRef)
   await act(async () => { await result.current.handleContinue() })
   expect(mocks.resume).toHaveBeenCalledExactlyOnceWith('run', selectedModelRef.current)
-  expect(mocks.restore).toHaveBeenCalledExactlyOnceWith('run', 'a', undefined)
+  expect(mocks.restore).toHaveBeenCalledExactlyOnceWith('run', 'a', undefined, 100)
   expect(connect).toHaveBeenCalledExactlyOnceWith('run', 100)
   expect(setActionError).toHaveBeenCalledExactlyOnceWith(null)
 })

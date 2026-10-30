@@ -1,13 +1,25 @@
 import { useEffect, useRef, useState } from 'react'
 
-/** Smooth only received live text. Completion and scope changes flush immediately. */
-export function useStreamingText(text: string, streaming: boolean, identity: string) {
+/** The viewer keeps its immediate completion flush; live chat may drain received text independently. */
+export function useStreamingTextState(text: string, streaming: boolean, identity: string, animateInitial = false) {
   const [reduced, setReduced] = useState(() => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false)
-  const [visible, setVisible] = useState({ text, identity })
+  const [hidden, setHidden] = useState(() => document.visibilityState === 'hidden')
+  const [visible, setVisible] = useState({ text: streaming && animateInitial && !hidden ? '' : text, identity })
   const current = useRef(visible)
   const pending = useRef({ text, identity })
   const wasStreaming = useRef(streaming)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    const update = () => {
+      if (timer.current !== null) clearTimeout(timer.current)
+      timer.current = null
+      current.current = pending.current
+      setVisible(current.current)
+      setHidden(document.visibilityState === 'hidden')
+    }
+    document.addEventListener('visibilitychange', update)
+    return () => document.removeEventListener('visibilitychange', update)
+  }, [])
   useEffect(() => {
     const media = window.matchMedia?.('(prefers-reduced-motion: reduce)')
     if (!media) return
@@ -19,7 +31,7 @@ export function useStreamingText(text: string, streaming: boolean, identity: str
     pending.current = { text, identity }
     const started = streaming && !wasStreaming.current
     wasStreaming.current = streaming
-    if (started || !streaming || reduced || current.current.identity !== identity || !text.startsWith(current.current.text)) {
+    if (started && !animateInitial || !streaming || reduced || hidden || current.current.identity !== identity || !text.startsWith(current.current.text)) {
       if (timer.current !== null) clearTimeout(timer.current)
       timer.current = null
       current.current = { text, identity }
@@ -38,7 +50,12 @@ export function useStreamingText(text: string, streaming: boolean, identity: str
       if (end < target.text.length) timer.current = setTimeout(tick, 16)
     }
     if (timer.current === null && current.current.text !== text) timer.current = setTimeout(tick, 16)
-  }, [text, identity, streaming, reduced])
+  }, [text, identity, streaming, reduced, hidden, animateInitial])
   useEffect(() => () => { if (timer.current !== null) clearTimeout(timer.current); timer.current = null }, [])
-  return !streaming || reduced || visible.identity !== identity || !text.startsWith(visible.text) ? text : visible.text
+  const shown = !streaming || reduced || hidden || visible.identity !== identity || !text.startsWith(visible.text) ? text : visible.text
+  return { text: shown, pending: shown !== text }
+}
+
+export function useStreamingText(text: string, streaming: boolean, identity: string) {
+  return useStreamingTextState(text, streaming, identity).text
 }

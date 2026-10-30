@@ -7,13 +7,14 @@ const hash = z.string().regex(/^[a-f0-9]{64}$/)
 export const coverWorkSchema = z.object({ version: z.literal(1), novelId: z.string().min(1), title: z.string(), displayTitle: z.string().nullable(),
   prompt: z.string().min(4), count: z.number().int().min(1).max(2), size: z.literal(FIXED_NOVEL_COVER_SIZE),
   assetIds: z.array(z.string().uuid()).min(1).max(2), tariff: z.literal('image_call_6000_v1'), amountMilli: z.literal(6000),
-  route: z.object({ provider: z.string().min(1), modelName: z.string().min(1), baseUrl: z.string().min(1), providerMode: z.string() }).strict(),
+  route: z.object({ provider: z.string().min(1), modelName: z.string().min(1), baseUrl: z.string().min(1), providerMode: z.string(), quality: z.string().optional() }).strict(),
 }).strict().refine(value => value.assetIds.length === value.count && new Set(value.assetIds).size === value.count)
 export type CoverWork = z.infer<typeof coverWorkSchema>
 export const coverChildSchema = z.object({ version: z.literal(1), parentInputHash: hash, workHash: hash,
   chargeKey: z.string(), usageLogId: z.string(), request: z.unknown() }).strict()
 export function coverRequest(work: CoverWork) {
-  return runtimeJson({ endpoint: work.route.baseUrl, body: { model: work.route.modelName, prompt: work.prompt, size: work.size, n: work.count } }).value
+  return runtimeJson({ endpoint: work.route.baseUrl, body: { model: work.route.modelName, prompt: work.prompt, size: work.size, n: work.count,
+    ...(work.route.quality !== undefined ? { quality: work.route.quality } : {}) } }).value
 }
 export const coverUnitSchema = z.object({ operationId: z.string(), parentOperationId: z.string(), attemptId: z.string(),
   parentInputHash: hash, requestHash: hash, resultHash: hash, debitId: z.string(), chargeKey: z.string(),

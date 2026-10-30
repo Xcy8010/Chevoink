@@ -1,5 +1,6 @@
 import type { AgentUIMessage } from '../../../../../shared/contracts/index.js'
 import { getMessageText } from './panel-helpers'
+import { projectAgentAuthorParts } from '../../../../../shared/agent-author-view.js'
 import { combineRunTimings, unknownRunTiming } from '../../../../../shared/agent-timing.js'
 import type { AgentRunTiming } from '../../../../../shared/contracts/agent-events.js'
 
@@ -58,7 +59,7 @@ export function projectMessages(messages: readonly AgentUIMessage[]) {
       runIds.add(message.runId)
       assistantIds.push(message.id)
       lastAssistantId = message.id
-      for (const part of message.parts) if (part.type === 'tool-call') ops++
+      for (const part of projectAgentAuthorParts(message.parts, false, { includePreparing: true })) if (part.type === 'tool-call') ops++
     } else if (message.goalContinuation && message.goalId) {
       if (ids.length > 0 && message.goalId !== goalId) flush()
       goalId = message.goalId

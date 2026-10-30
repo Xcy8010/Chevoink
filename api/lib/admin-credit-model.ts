@@ -5,6 +5,7 @@ import { z } from 'zod'
 import { effectiveModelMultiplier, readModelPromotion, modelPromotionSchema } from '../../shared/model-promotion.js'
 
 import type { AdminCreditsManagementPayload, AdminModelManagementPayload } from '../../shared/contracts/index.js'
+import type { ImageQualityConfig } from '../../shared/contracts/image-model.js'
 import type { ModelReasoningEffort } from '../../shared/contracts/index.js'
 import { isBuiltInModelTier, isServerModelTier } from '../../shared/contracts/index.js'
 import { creditTransaction, lockCreditPolicy } from './credit-policy.js'
@@ -299,6 +300,7 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
       const configurationReady = databaseReady || Boolean(fallback) || (model.tier === 'speed' && model.modelName !== 'unconfigured')
       const price = modelKind === 'text' && model.tier && effectiveModelMultiplier(model) !== 0 && !readModelPromotion(model.metadata) ? prices.get(model.tier) : null
       return {
+        ...(modelKind === 'image_generation' && metadata.imageQuality ? { imageQuality: metadata.imageQuality as ImageQualityConfig } : {}),
         routes: presentModelRoutes(model.metadata),
         pricing: price ? presentLedgerPrice({ pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates, v1CeilingBps: price.v1CeilingBps }).pricing : null,
         id: model.id, tier: model.tier, sortOrder: model.sortOrder, modelKind, provider: fallback?.provider ?? model.provider, displayName: model.displayName,
@@ -323,6 +325,7 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
 }
 
 export type UpdateAdminModelInput = {
+  imageQuality?: ImageQualityConfig
   freePromotion?: import('../../shared/model-promotion.js').ModelPromotion | null
   routes?: ModelRouteInput[]
   provider?: string
@@ -403,6 +406,7 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
           ...(model.metadata && typeof model.metadata === 'object' && !Array.isArray(model.metadata) ? model.metadata : {}),
           ...(routes ? { routes } : {}),
           freePromotion,
+          ...(input.imageQuality !== undefined ? { imageQuality: input.imageQuality } : {}),
           ...(input.reasoningParameterMode !== undefined ? { reasoningParameterMode: input.reasoningParameterMode } : {}),
           ...(input.outputTokenParameter !== undefined ? { outputTokenParameter: input.outputTokenParameter } : {}),
           ...(input.thinkingEnabled !== undefined ? { thinkingEnabled: input.thinkingEnabled } : {}),

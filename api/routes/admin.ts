@@ -5,6 +5,7 @@ import { modelPromotionSchema } from '../../shared/model-promotion.js'
 import { createRateCard, transitionRateCard, listRateCards, rateCardEvidenceSchema } from '../lib/billing/rate-cards.js'
 import { itemizedTokenPriceSchema } from '../lib/billing/token-price.js'
 import { z } from 'zod'
+import { imageQualityConfigSchema } from '../../shared/contracts/image-model.js'
 import { getSupplierBalances } from '../lib/supplier-balances.js'
 
 import { createAuthCaptchaChallenge, verifyAuthCaptchaChallenge } from '../lib/auth-captcha.js'
@@ -185,6 +186,7 @@ const adminBatchCreditsSchema = adminDangerActionSchema.extend({ userIds: z.arra
 const adminBatchPauseCreditsSchema = adminBatchCreditsSchema.extend({ paused: z.boolean() })
 const modelReasoningEffortSchema = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 const adminModelUpdateSchema = z.object({
+  imageQuality: imageQualityConfigSchema.optional(),
   freePromotion: modelPromotionSchema.nullable().optional(),
   routes: modelRoutesInputSchema.optional(),
   provider: z.string().trim().min(1).max(40).optional(),

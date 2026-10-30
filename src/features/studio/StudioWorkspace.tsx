@@ -3763,7 +3763,6 @@ export default function StudioWorkspace() {
     if (sessionResolutionError) return <div role="alert" className="flex h-full flex-col items-center justify-center gap-4 p-6 text-sm text-[var(--text-secondary)]"><p>{sessionResolutionError}</p><button type="button" className="rounded-lg border border-[var(--border-subtle)] px-4 py-2" onClick={() => setSessionResolutionAttempt(value => value + 1)}>重新读取任务</button></div>
     return (
       <AgentPanel
-          composerInsetClassName={activeToolPanel && activeToolPanel !== 'assistant' ? 'md:mr-[26rem] xl:mr-[28rem]' : undefined}
           onImportModelSelection={handleImportModelSelection}
           voiceScopeKey={taskUiScope}
           voiceDisabled={studioSettingsOpen || studioQuery.isPlaceholderData}
@@ -4437,7 +4436,7 @@ export default function StudioWorkspace() {
           />
 
           {activeToolPanel && activeToolPanel !== 'assistant' ? (
-            <div className="fixed inset-0 z-40 hidden bg-[rgba(15,23,42,0.18)] md:block" onClick={() => setActiveToolPanel(null)}>
+            <div className="fixed inset-0 z-[90] hidden bg-[rgba(15,23,42,0.18)] md:block" onClick={() => setActiveToolPanel(null)}>
               <div className="absolute inset-y-4 right-4 w-[24rem] max-w-[calc(100vw-2rem)] xl:w-[26rem]" onClick={(event) => event.stopPropagation()}>
                 {renderToolPanel()}
               </div>

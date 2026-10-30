@@ -963,3 +963,15 @@ html.dark .studio-workspace .agent-composer-goal { background: #333333; }
   .studio-resizable-grid { transition: none; }
   html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='true'] { transition: none; }
 }
+
+/* Received Agent content settles without changing real task/tool status. */
+.agent-process-region { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows 200ms var(--easing-default), opacity 160ms ease; }
+.agent-process-region[data-agent-process-open='false'] { grid-template-rows: 0fr; opacity: 0; pointer-events: none; }
+@keyframes agent-tool-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes agent-tool-phase { from { opacity: 0; transform: translateY(2px) scale(.9); } to { opacity: 1; transform: translateY(0) scale(1); } }
+.agent-tool-enter { animation: agent-tool-enter 180ms ease-out both; }
+.agent-tool-phase { animation: agent-tool-phase 150ms ease-out both; }
+@media (prefers-reduced-motion: reduce) {
+  .agent-process-region { transition: none; }
+  .agent-tool-enter, .agent-tool-phase { animation: none; }
+}

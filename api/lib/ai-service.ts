@@ -1463,8 +1463,10 @@ export async function resolveCoverImageRuntime() {
   const configured = await getToolModelRuntime('tool:image-generation')
   const apiKey = configured?.apiKey ?? env.aiImageApiKey
   ensureImageProviderConfigured(apiKey)
+  const quality = configured?.imageQuality?.defaultValue
   return { apiKey, route: { provider: configured?.provider ?? env.aiProviderMode, modelName: configured?.modelName ?? env.aiImageModel,
-    baseUrl: configured?.baseUrl ?? env.aiImageBaseUrl, providerMode: env.aiProviderMode } }
+    baseUrl: configured?.baseUrl ?? env.aiImageBaseUrl, providerMode: env.aiProviderMode,
+    ...(quality != null ? { quality } : {}) } }
 }
 
 export function parseCoverImageResponse(httpStatus: number, body: string) {
@@ -1485,7 +1487,8 @@ export function parseCoverImageResponse(httpStatus: number, body: string) {
 /** Transport only. The caller must already own the sole committed permit. */
 export function requestCoverImages(runtime: Awaited<ReturnType<typeof resolveCoverImageRuntime>>, input: { prompt: string; size: string; count: number }, signal?: AbortSignal) {
   return undiciFetch(runtime.route.baseUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${runtime.apiKey}` },
-    body: JSON.stringify({ model: runtime.route.modelName, prompt: input.prompt, size: input.size, n: input.count }), dispatcher: imageFetchAgent,
+    body: JSON.stringify({ model: runtime.route.modelName, prompt: input.prompt, size: input.size, n: input.count,
+      ...(runtime.route.quality !== undefined ? { quality: runtime.route.quality } : {}) }), dispatcher: imageFetchAgent,
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(env.aiImageTimeoutMs)]) : AbortSignal.timeout(env.aiImageTimeoutMs) })
 }
 
@@ -1501,21 +1504,7 @@ async function generateImageUrls(
   await options.beforeDispatch?.()
   options.signal?.throwIfAborted()
   // Node 内置 fetch 默认 5 分钟头超时，第三方生图服务经常超过，这里用 undici 显式放宽到 aiImageTimeoutMs
-  const response = await undiciFetch(runtime.route.baseUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${runtime.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: runtime.route.modelName,
-      prompt,
-      size,
-      n: count,
-    }),
-    dispatcher: imageFetchAgent,
-    signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(env.aiImageTimeoutMs)]) : AbortSignal.timeout(env.aiImageTimeoutMs),
-  })
+  const response = await requestCoverImages(runtime, { prompt, size, count }, options.signal)
 
   const payload = await parseJsonResponse(response as unknown as Response)
   if (!response.ok) {

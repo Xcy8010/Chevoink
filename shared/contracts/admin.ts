@@ -418,6 +418,7 @@ export type AdminCreditsManagementPayload = {
 
 export type AdminModelManagementPayload = {
   models: Array<{
+    imageQuality?: import('./image-model.js').ImageQualityConfig
     perCallCredits?: number
     freePromotion?: import('../model-promotion.js').ModelPromotion | null
     routes?: import('./model-routes.js').ModelRouteView[]

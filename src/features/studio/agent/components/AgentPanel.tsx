@@ -94,6 +94,7 @@ import { AgentGoalBar } from './AgentGoalBar'
 import { GoalEditorDialog, type GoalEditBase } from './GoalEditorDialog'
 import { AgentQueueTray } from './AgentQueueTray'
 import { AgentMessageParts } from './AgentMessageParts'
+import { AgentProcessRegion } from './AgentProcessRegion'
 import { AgentPermissionCard } from './AgentPermissionCard'
 import { AgentQuestionCard } from './AgentQuestionCard'
 import { ProcessingHint } from './ProcessingHint'
@@ -141,8 +142,6 @@ type AgentPanelProps = {
   onWorkspaceRollback?: () => void
   onClose?: () => void
   className?: string
-  /** 右侧工具面板（作品设置/封面工坊等）打开时，宿主传入右内缩，避免输入框 z-[80] 压住面板底部。 */
-  composerInsetClassName?: string
   /** Work 宽屏存在独立任务停靠区时，内联待办/变更自动隐藏。 */
   activityPresentation?: 'inline' | 'responsive'
   /** 手机工作台在视图导航下保留紧凑的 Agent 任务控件行。 */
@@ -213,7 +212,6 @@ export function AgentPanel({
   onOpenSkills,
   onImportModelSelection,
   referenceOptions = [],
-  composerInsetClassName,
 }: AgentPanelProps) {
   const queryClient = useQueryClient()
   const workConversation = useWorkConversation()
@@ -229,6 +227,14 @@ export function AgentPanel({
   const { recentConversationText, blockInfoById, lastAssistantId } = useMemo(() => projectMessages(messages), [messages])
   // 正文已定稿的消息 id：定稿后不再画流式光标（等答题/审批/工具执行期间光标不应常闪）
   const finalizedTextIds = useAgentStore((state) => state.finalizedTextIds)
+  const textRevealTargets = useAgentStore(state => state.textRevealTargets)
+  const finishTextReveal = useAgentStore(state => state.finishTextReveal)
+  const motionAfterSeq = useAgentStore(state => state.motionAfterSeq)
+  const liveToolCallIds = useAgentStore(state => state.liveToolCallIds)
+  const settlingBlocks = useMemo(() => new Set(Object.keys(textRevealTargets).flatMap(id => {
+    const block = blockInfoById.get(id)
+    return block ? [block.firstId] : []
+  })), [textRevealTargets, blockInfoById])
   const pendingApproval = useAgentStore((state) => state.pendingApproval)
   const pendingQuestion = useAgentStore((state) => state.pendingQuestion)
   const usage = useAgentStore((state) => state.usage)
@@ -1632,25 +1638,29 @@ export function AgentPanel({
               const blockExpanded = isBlockExpanded(block, message.runId)
               // 仅当前 run 的消息视为活跃：新任务开始时历史块保持折叠，不会被全局 active 连带展开
               const messageRunActive = active && message.runId === runId
-              const blockCollapsed = !messageRunActive && !blockExpanded
+              const settling = Boolean(block && settlingBlocks.has(block.firstId))
+              const blockCollapsed = !messageRunActive && !blockExpanded && !settling
               const hasTextPart = message.parts.some((part) => part.type === 'text')
               // 折叠态下块内非最后一条的过程正文会折进摘要行（与传给 AgentMessageParts 的口径一致）
               const textCollapsible = !isBlockLast && (block?.ops ?? 0) > 0
-              // 折叠态下块内非首条且不再贡献任何内容的消息不渲染空壳（避免 flex gap 在空壳间叠出大段空白）：
-              // 无文本的消息、以及正文被折叠收起后只剩空 div 的消息都属此类
-              if (blockCollapsed && !isBlockFirst && (!hasTextPart || textCollapsible)) {
-                return null
-              }
+              // 保留过程节点完成退出动画，再移除不再贡献内容的消息外壳。
 
               return (
-                <div
+                <AgentProcessRegion
                   key={message.id}
+                  open={!blockCollapsed || Boolean(isBlockFirst) || hasTextPart && !textCollapsible}
                   id={`agent-message-${message.id}`}
                   // 正在流式的消息不加 content-visibility，避免高度估算干扰自动滚底
                   className={cn('group/reply min-w-0', message.id !== lastAssistantId && 'agent-msg-cv')}
                 >
                   <AgentMessageParts
                     parts={message.parts}
+                    messageId={message.id}
+                    revealText={textRevealTargets[message.id]}
+                    onTextRevealed={finishTextReveal}
+                    liveToolCallIds={liveToolCallIds}
+                    settling={settling}
+                    animateLive={message.runId === runId && motionAfterSeq !== null && (messageRunActive || settling)}
                     streaming={isAssistantMessageStreaming(message, runId, lastAssistantId, active, finalizedTextIds)}
                     runActive={messageRunActive}
                     blockId={block?.firstId}
@@ -1693,7 +1703,7 @@ export function AgentPanel({
                       <MessageTime value={message.completedAt} label="完成时间" className="ml-2 opacity-0 transition-opacity group-hover/reply:opacity-100 group-focus-within/reply:opacity-100 mobile:opacity-100" />
                     </div>
                   ) : null}
-                </div>
+                </AgentProcessRegion>
               )
             })}
             {/* 分支副本尚无新对话：底部分隔线提示可从此继续聊，一发新消息就消失 */}
@@ -1810,7 +1820,7 @@ export function AgentPanel({
         onClose={() => setQuotaDialogOpen(false)}
       />
       {workConversation.collapsed ? <WorkConversationRestore onExpand={workConversation.expand} recentMessage={recentConversationText} /> : null}
-      <div data-agent-composer className={`px-4 pb-4 transition-[margin] duration-200${composerInsetClassName ? ` ${composerInsetClassName}` : ''}`}>
+      <div data-agent-composer className="px-4 pb-4">
       {sessionId ? <AgentQueueTray key={sessionId} items={queueQuery.data?.items ?? []} onAction={async (item, action, prompt) => {
         const result = await actOnAgentQueue(sessionId, item.id, action, item.revision, prompt)
         await queueQuery.refetch()

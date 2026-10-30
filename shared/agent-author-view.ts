@@ -151,6 +151,8 @@ const authorPartCache = new WeakMap<AgentMessagePart, AgentMessagePart | null>()
 const streamingReasoningPartCache = new WeakMap<AgentMessagePart, AgentMessagePart | null>()
 
 function projectAuthorPart(part: AgentMessagePart, streamingReasoning: boolean): AgentMessagePart | null {
+  // Terminal reply transport remains an audit receipt, never an author activity card.
+  if (part.type === 'tool-call' && part.toolName === 'task_respond') return null
   const cache = part.type === 'reasoning' && streamingReasoning ? streamingReasoningPartCache : authorPartCache
   if (cache.has(part)) return cache.get(part)!
   let projected: AgentMessagePart | null = part
