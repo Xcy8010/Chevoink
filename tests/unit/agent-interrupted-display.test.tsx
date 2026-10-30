@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, expect, it } from 'vitest'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, expect, it, vi } from 'vitest'
 import { AgentMessageParts } from '../../src/features/studio/agent/components/AgentMessageParts'
 import { selectAgentActivityRunActive, selectAgentGoalView, selectAgentPanelPhase } from '../../src/features/studio/agent/goal-selectors'
 import { useMessageBlockExpansion } from '../../src/features/studio/agent/components/use-message-block-expansion'
@@ -10,8 +10,17 @@ import type { AgentGoalSnapshot, AgentMessagePart, AgentUIMessage } from '../../
 import type { AgentRunPhase } from '../../src/features/studio/agent/agentStore'
 import { useMemo } from 'react'
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.useRealTimers() })
 const row = (id: string) => document.querySelector(`[data-agent-call-id="${id}"]`)
+
+function expectExiting(id: string) {
+  const region = row(id)?.closest('[data-agent-process-open]') as HTMLElement
+  expect(region).toBeTruthy()
+  expect(region.getAttribute('data-agent-process-open')).toBe('false')
+  expect(region.getAttribute('aria-hidden')).toBe('true')
+  expect(region.inert).toBe(true)
+}
+const finishExit = () => act(() => vi.advanceTimersByTime(220))
 
 const parts: AgentMessagePart[] = [
   { type: 'reasoning', text: '执行中的思考' },
@@ -47,7 +56,7 @@ function Fixture({ status, messages = initialMessages, sessionId = 's', goalId =
       const block = blockInfoById.get(item.id)
       const expanded = isExpanded(block, item.runId)
       if (item.role === 'user') return shouldRenderAuthorMessage(item) ? <div key={item.id}>{item.parts.map(part => part.type === 'text' ? part.text : '').join('')}</div> : null
-      return <AgentMessageParts key={item.id} parts={item.parts} streaming={false} runActive={active && item.runId === runId}
+      return <AgentMessageParts key={JSON.stringify([sessionId, item.id])} parts={item.parts} streaming={false} runActive={active && item.runId === runId}
         blockId={block?.firstId} summaryCount={item.id === block?.firstId ? block.ops : undefined}
         summaryExpanded={expanded} onToggleSummary={toggle} textCollapsible={item.id !== block?.lastId && (block?.ops ?? 0) > 0} />
     })}
@@ -56,6 +65,7 @@ function Fixture({ status, messages = initialMessages, sessionId = 's', goalId =
 }
 
 it.each(['paused', 'usage_limited', 'budget_limited', 'blocked', 'cancelled'] as const)('running -> %s keeps operations visible and immediately unmounts stale processing feedback', status => {
+  vi.useFakeTimers()
   const ui = render(<Fixture status="active" />)
   expect(screen.getByText('正在处理...')).toBeTruthy()
   ui.rerender(<Fixture status={status} />)
@@ -63,6 +73,9 @@ it.each(['paused', 'usage_limited', 'budget_limited', 'blocked', 'cancelled'] as
   expect(row('a1')).toBeTruthy()
   expect(screen.getByText('a1执行记录')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: '查看 1 项操作' }))
+  expectExiting('a1')
+  expect(screen.queryByText('正在处理...')).toBeNull()
+  finishExit()
   expect(row('a1')).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: '查看 1 项操作' }))
   expect(row('a1')).toBeTruthy()
@@ -75,6 +88,7 @@ it('continues folding completed work by default', () => {
 })
 
 it('pause -> resume -> completed retains one execution process without presenting internal prompts even during manual expansion', () => {
+  vi.useFakeTimers()
   const ui = render(<Fixture status="paused" />)
   fireEvent.click(screen.getByRole('button', { name: '查看 1 项操作' }))
   fireEvent.click(screen.getByRole('button', { name: '查看 1 项操作' }))
@@ -84,6 +98,11 @@ it('pause -> resume -> completed retains one execution process without presentin
   expect(screen.queryByText('系统续跑记录')).toBeNull()
   ui.rerender(<Fixture status="completed" messages={resumedMessages} runId="r2" />)
   expect(screen.getAllByRole('button', { name: '查看 2 项操作' })).toHaveLength(1)
+  expectExiting('a1')
+  expectExiting('a2')
+  expect(screen.queryByText('正在处理...')).toBeNull()
+  expect(screen.queryByText('系统续跑记录')).toBeNull()
+  finishExit()
   expect(row('a1')).toBeNull()
   expect(row('a2')).toBeNull()
   expect(screen.queryByText('a1执行记录')).toBeNull()
@@ -141,14 +160,22 @@ it.each(['paused', 'usage_limited', 'budget_limited', 'cancelled', 'completed'] 
 })
 
 it('completion and A -> B -> A preserve manually expanded history and isolate duplicate block ids by session', () => {
+  vi.useFakeTimers()
   const messages = [message('old', 'ordinary', null), ...initialMessages]
   const ui = render(<Fixture status="paused" messages={messages} />)
   fireEvent.click(screen.getAllByRole('button', { name: '查看 1 项操作' })[0])
   ui.rerender(<Fixture status="completed" messages={messages} />)
   expect(row('old')).toBeTruthy()
+  expectExiting('a1')
+  finishExit()
   expect(row('a1')).toBeNull()
   fireEvent.click(screen.getAllByRole('button', { name: '查看 1 项操作' })[1])
+  const oldScopeNode = row('old')!
+  const aScopeNode = row('a1')!
   ui.rerender(<Fixture status="completed" sessionId="B" messages={messages} />)
+  // Scope replacement unmounts the old subtree immediately, without an exit wait.
+  expect(oldScopeNode.isConnected).toBe(false)
+  expect(aScopeNode.isConnected).toBe(false)
   expect(row('old')).toBeNull()
   expect(row('a1')).toBeNull()
   ui.rerender(<Fixture status="completed" messages={messages} />)

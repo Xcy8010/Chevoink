@@ -4,7 +4,9 @@ import { observeLegacyContentProgress, observeRequiredResult, observeSemanticTra
 import type { AgentExecutionMode, AgentMessagePart, AgentStreamEventBody, AgentTokenUsage } from '../../../shared/contracts/index.js'
 import { recoverAgentProtocolToolCalls, stripAgentProtocolArtifacts } from '../../../shared/agent-output.js'
 import { chatWithTools, type ChatMessage } from '../ai-service.js'
-import { getModelTierRuntime } from '../credits.js'
+import type { getModelTierRuntime } from '../credits.js'
+import { readWeightedRoutes } from '../model-weighted-config.js'
+import { decryptSecret } from '../secret-box.js'
 import { env } from '../../config/env.js'
 import { prisma } from '../prisma.js'
 import { applySessionToolPolicy, getAgentDefinition, getToolsForAgent } from './agents.js'
@@ -134,9 +136,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
   const toolAuthority = snapshotToolAuthority(tools, params.mode)
   const openAITools = toOpenAITools(tools)
 
-  // Each subtask owns a logical reply; BYOK retains its exact admitted account.
-  const modelRuntime = params.modelRuntime.tier === 'custom' ? params.modelRuntime
-    : selectWeightedModelRuntime(await getModelTierRuntime(params.modelRuntime.tier, params.userId, undefined, params.modelRuntime.reasoningEffort))
+  let modelRuntime = params.modelRuntime
   const messages = buildSubagentMessages(params)
   messages.splice(1, 0, ...await (await import('./goal-runtime.js')).buildGoalContextMessages(params.userId, params.parentRunId))
   const contextBudget = resolveAgentContextBudget(modelRuntime.contextWindowTokens ?? env.agentContextWindowTokens, env.aiTextMaxOutputTokens)
@@ -174,6 +174,18 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
   try {
     while (executionControl.controlPolicy === 'until_completion') {
       params.toolContextBase.signal.throwIfAborted()
+      if (turns === 0 && modelRuntime.tier !== 'custom') {
+        // A new child draws independently of a weighted parent. Re-read only
+        // the connection/pool; the admitted price, protocol and capabilities stay owned here.
+        if (modelRuntime.weightedRoute) {
+          const primary = await prisma.aiModelConfig.findFirstOrThrow({ where: { ownerUserId: null, tier: modelRuntime.tier, enabled: true },
+            select: { provider: true, modelName: true, baseUrl: true, apiKeyCiphertext: true, metadata: true } })
+          const { weightedRoute: _parentChoice, ...admitted } = modelRuntime
+          modelRuntime = { ...admitted, provider: primary.provider, modelName: primary.modelName, baseUrl: primary.baseUrl ?? env.aiTextBaseUrl,
+            apiKey: primary.apiKeyCiphertext ? decryptSecret(primary.apiKeyCiphertext) : env.aiTextApiKey, weightedRoutes: readWeightedRoutes(primary.metadata) }
+        }
+        modelRuntime = selectWeightedModelRuntime(modelRuntime)
+      }
       turns += 1
       emitProgress(turns, `「${params.name}」第 ${turns} 轮：分析任务并选择工具`)
       if (!prepareContextForRequest()) {

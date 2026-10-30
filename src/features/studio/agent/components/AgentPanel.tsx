@@ -1647,7 +1647,7 @@ export function AgentPanel({
 
               return (
                 <AgentProcessRegion
-                  key={message.id}
+                  key={JSON.stringify([novelId, sessionId, voiceScopeKey ?? null, message.id])}
                   open={!blockCollapsed || Boolean(isBlockFirst) || hasTextPart && !textCollapsible}
                   id={`agent-message-${message.id}`}
                   // 正在流式的消息不加 content-visibility，避免高度估算干扰自动滚底
