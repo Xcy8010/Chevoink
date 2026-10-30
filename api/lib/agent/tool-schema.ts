@@ -64,6 +64,8 @@ export function originalToolParameterSchemas(tool: Pick<AgentTool, 'name' | 'des
   const previousPrepare = tool.name === 'story_compiler_prepare' && scope.writing?.tailVolume
     ? { ...current, required: [...new Set([...(current.required as string[] ?? []), 'volumeDecision'])] } : null
   const properties = current.properties as Record<string, Record<string, unknown>> | undefined
+  const previousConfiguration = tool.name === 'agent_configure' && properties?.sessionId && properties?.expectedRevision
+    ? { ...current, properties: Object.fromEntries(Object.entries(properties).filter(([key]) => key !== 'sessionId' && key !== 'expectedRevision')) } : null
   const terminalState = properties?.terminalState
   const previousTerminal = tool.name === 'continuity_validate' && terminalState?.properties
     ? { ...current, properties: { ...properties, terminalState: { ...terminalState,
@@ -79,7 +81,7 @@ export function originalToolParameterSchemas(tool: Pick<AgentTool, 'name' | 'des
     ? { ...current, properties: Object.fromEntries(Object.entries(properties).filter(([key]) => key !== 'terminalPatch')) } : null
   const oldTerminal = previousTerminal && previousPatch ? { ...previousTerminal,
     properties: Object.fromEntries(Object.entries(previousTerminal.properties).filter(([key]) => key !== 'terminalPatch')) } : null
-  return [current, toolPresentation(tool, current, scope).parameters, ...(legacy ? [legacy] : []), ...(previousPrepare ? [previousPrepare] : []),
+  return [current, toolPresentation(tool, current, scope).parameters, ...(previousConfiguration ? [previousConfiguration] : []), ...(legacy ? [legacy] : []), ...(previousPrepare ? [previousPrepare] : []),
     ...(previousPatch ? [previousPatch, withoutTopLevelProofs(previousPatch), ...(oldTerminal ? [oldTerminal, withoutTopLevelProofs(oldTerminal)] : [])] : []),
     ...(previousProofSelection.length ? previousProofSelection : previousTerminal ? [previousTerminal] : []), ...(previousResearch ? [previousResearch] : [])]
 }

@@ -202,7 +202,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     if (!historicalWriter && current.frame.state.phase !== 'awaiting_operation' && hasRetiredNativeArguments(call.name, raw)) return { reject: { cursor, callId: call.id, tool } }
     const frozenArgs = await readPreparedLiteraryArguments(tx, lease, { action: call.name, callId: call.id, rawArguments: call.arguments, cursor })
     const normalized = normalizeToolInput(tool, frozenArgs ?? raw)
-    if (!historicalWriter && published !== definition && !validateToolInput(toolWithNativeView(tool, published), normalized).success) {
+    if (!historicalWriter && (published !== definition || call.name === 'agent_configure') && !validateToolInput(toolWithNativeView(tool, published), normalized).success) {
       return { reject: { cursor, callId: call.id, tool } }
     }
     const validated = validateToolInput(tool, normalized)

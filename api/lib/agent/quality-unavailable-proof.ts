@@ -61,8 +61,8 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
     // A failed source's protocol comes from its authenticated original work,
     // never from today's reviewer or an unverified report marker. This grants
     // recovery eligibility only; passed caches still require the current hash.
-    if (!Number.isInteger(frozen.version) || Number(frozen.version) < 1 || Number(frozen.version) > 13) return null
-    const sourceProtocol = Number(frozen.version) >= 13 ? HUMANITY_PROMPT_PROTOCOL : Number(frozen.version) === 12 ? 'humanity-context.v5' : Number(frozen.version) === 11 ? 'humanity-context.v4' : Number(frozen.version) === 10 ? 'humanity-context.v3' : 'humanity-context.v2'
+    if (!Number.isInteger(frozen.version) || Number(frozen.version) < 1 || Number(frozen.version) > 14) return null
+    const sourceProtocol = Number(frozen.version) >= 14 ? HUMANITY_PROMPT_PROTOCOL : Number(frozen.version) === 13 ? 'humanity-context.v6' : Number(frozen.version) === 12 ? 'humanity-context.v5' : Number(frozen.version) === 11 ? 'humanity-context.v4' : Number(frozen.version) === 10 ? 'humanity-context.v3' : 'humanity-context.v2'
     if (report.criticVersion !== (Number(frozen.version) >= 13 ? HUMANITY_CRITIC_VERSION : FROZEN_V5_HUMANITY_CRITIC_VERSION)
       || metrics.qualityContextHash !== qualityReviewContextHash(context, sourceProtocol)
       || metrics.criticPromptProtocol !== undefined && metrics.criticPromptProtocol !== sourceProtocol) return null

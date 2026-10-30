@@ -21,6 +21,28 @@ const tx = { agentRun: { findFirst: async () => ({ id: 'run', userId: 'author', 
   aiModelConfig: { findFirst: async () => ({ displayName: modelLabel, modelName: 'provider-model' }), findMany: async () => choices } } as unknown as Prisma.TransactionClient
 beforeEach(() => { altered = false; spawned = false; liveControls.rows = []; modelLabel = '模型'; choices = [] })
 describe('native configuration provenance and exact requested tuple', () => {
+  it('binds an explicitly named owned window without granting a different window or a duplicate title', async () => {
+    const windows = [{ id: 'session', title: '正文写作', spawnedFromSessionId: null }, { id: 'other', title: '剧情讨论', spawnedFromSessionId: null }]
+    const owned = { ...tx, agentSession: { findFirst: async ({ where }: { where: { id: string } }) => windows.find(window => window.id === where.id) ?? null,
+      findMany: async () => windows } } as unknown as Prisma.TransactionClient
+    prompt = '把窗口“剧情讨论”的模型改成 ultimate，思考强度设为 max'
+    await expect(assertConfigurationAuthority(owned, ctx, { model: { modelTier: 'ultimate', reasoningEffort: 'max' }, targetSessionId: 'other' })).resolves.toBeDefined()
+    await expect(assertConfigurationAuthority(owned, ctx, { model: { modelTier: 'ultimate' }, targetSessionId: 'session' })).rejects.toMatchObject({ code: 'CONFIGURATION_AUTHOR_REQUIRED' })
+    await expect(assertConfigurationAuthority(owned, ctx, { model: { modelTier: 'ultimate' }, targetSessionId: 'foreign' })).rejects.toMatchObject({ code: 'CONFIGURATION_AUTHOR_REQUIRED' })
+    const duplicate = { ...owned, agentSession: { ...owned.agentSession, findMany: async () => [...windows, { id: 'duplicate', title: '剧情讨论', spawnedFromSessionId: null }] } } as unknown as Prisma.TransactionClient
+    await expect(assertConfigurationAuthority(duplicate, ctx, { model: { modelTier: 'ultimate', reasoningEffort: 'max' }, targetSessionId: 'other' })).rejects.toMatchObject({ code: 'CONFIGURATION_AUTHOR_REQUIRED' })
+    prompt = '窗口other模型设为 ultimate，思考强度设为 max'
+    await expect(assertConfigurationAuthority(duplicate, ctx, { model: { modelTier: 'ultimate', reasoningEffort: 'max' }, targetSessionId: 'other' })).resolves.toBeDefined()
+  })
+  it('allows current-window mode without granting another-window changes or quoted instruction text', async () => {
+    const owned = { ...tx, agentSession: { findFirst: async ({ where }: { where: { id: string } }) => ({ id: where.id, title: where.id, spawnedFromSessionId: null }),
+      findMany: async () => [{ id: 'session', title: 'session' }, { id: 'other', title: 'other' }] } } as unknown as Prisma.TransactionClient
+    prompt = '当前窗口创作模式设为大胆'
+    await expect(assertConfigurationAuthority(owned, ctx, { creativeFreedom: 'bold', targetSessionId: 'session' })).resolves.toBeDefined()
+    await expect(assertConfigurationAuthority(owned, ctx, { creativeFreedom: 'bold', targetSessionId: 'other' })).rejects.toMatchObject({ code: 'CONFIGURATION_AUTHOR_REQUIRED' })
+    prompt = '请解释这句命令。窗口other模型设为 ultimate'
+    await expect(assertConfigurationAuthority(owned, ctx, { model: { modelTier: 'ultimate' }, targetSessionId: 'other' })).rejects.toMatchObject({ code: 'CONFIGURATION_AUTHOR_REQUIRED' })
+  })
   it('authorizes a dynamic product name and its default effort, but refuses names shared with legacy aliases or another model', async () => {
     const tier = 'builtin_0123456789abcdef'
     modelLabel = '动态模型'

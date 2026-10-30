@@ -4,6 +4,7 @@ import type { ChapterDraftState, EditorSelectionState, WorkspaceDocumentView } f
 import LocalFirstTextarea from './LocalFirstTextarea'
 import PlanMarkdownEditor from './PlanMarkdownEditor'
 import { useStreamingAutoFollow } from './useStreamingAutoFollow'
+import { useStreamingText } from './use-streaming-text'
 
 type Props = {
   draft: ChapterDraftState | null
@@ -23,8 +24,10 @@ type Props = {
   writeLocked?: boolean
 }
 
-export default function StudioChapterViewer({ draft, workspaceDocument = null, loading, positionScope, selection, onChange, onWorkspaceDocumentChange, onSelectionChange, onAddSelection, onCreateVolume, onCreateChapter, onClose, onBlur, streamingContent, writeLocked = false }: Props) {
-  const streaming = streamingContent !== undefined
+export default function StudioChapterViewer({ draft, workspaceDocument = null, loading, positionScope, selection, onChange, onWorkspaceDocumentChange, onSelectionChange, onAddSelection, onCreateVolume, onCreateChapter, onClose, onBlur, streamingContent: receivedContent, writeLocked = false }: Props) {
+  const streaming = receivedContent !== undefined
+  const visibleContent = useStreamingText(receivedContent ?? '', streaming, `${positionScope ?? ''}:${workspaceDocument?.id ?? draft?.id ?? ''}`)
+  const streamingContent = streaming ? visibleContent : undefined
   const streamingScroll = useStreamingAutoFollow<HTMLTextAreaElement>(streaming, streamingContent, `${positionScope ?? ''}:${workspaceDocument?.id ?? draft?.id ?? ''}`)
   const hasDocument = Boolean(workspaceDocument)
   return <section className="studio-chapter-viewer flex h-full min-h-0 min-w-0 flex-col bg-[var(--surface-default)]">

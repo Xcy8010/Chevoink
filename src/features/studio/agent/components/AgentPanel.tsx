@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Check,
   CircleAlert,
@@ -215,6 +215,7 @@ export function AgentPanel({
   referenceOptions = [],
   composerInsetClassName,
 }: AgentPanelProps) {
+  const queryClient = useQueryClient()
   const workConversation = useWorkConversation()
   const userId = useShellStore((state) => state.sessionUser?.id)
   const runId = useAgentStore((state) => state.runId)
@@ -274,8 +275,10 @@ export function AgentPanel({
     })
   }, [sessionId])
   const configurationHandler = useRef<(event: Extract<AgentStreamEvent, { type: 'run.configuration' }>) => void>(() => {})
+  const preferenceRefresh = useRef<() => void>(() => {})
   const handleStreamEvent = useCallback((event: AgentStreamEvent) => {
     if (event.type === 'run.configuration') configurationHandler.current(event)
+    if (event.type === 'tool.result' && event.toolName === 'agent_configure') preferenceRefresh.current()
     onStreamEvent?.(event)
   }, [onStreamEvent])
   const { connect, disconnect } = useAgentStream(handleStreamEvent, reconcileActiveStreamError)
@@ -418,17 +421,16 @@ export function AgentPanel({
     document.addEventListener('mousedown', close)
     return () => document.removeEventListener('mousedown', close)
   }, [taskMenuOpen])
-  const [creativeFreedom, setCreativeFreedom] = useState<CreativeFreedom>(() => {
-    if (typeof window === 'undefined') return 'balanced'
-    const saved = window.localStorage.getItem(`chevoink:creative-freedom:${novelId}`)
-    return saved === 'stable' || saved === 'bold' ? saved : 'balanced'
-  })
   const qualityMode: StoryCompilerMode = 'premium'
-  const modelPreference = useAgentModelPreference(novelId, sessionId)
+  const modelPreference = useAgentModelPreference(novelId, sessionId, voiceScopeKey)
+  const windowConfiguration = modelPreference.windowConfiguration
+  const creativeFreedom = windowConfiguration.configuration.creativeFreedom ?? 'balanced'
+  const setCreativeFreedom = (value: CreativeFreedom) => { void windowConfiguration.update({ creativeFreedom: value }).catch(() => {}) }
   const { modelTier, customModelId, reasoningSelections, inheritMain, explicit: modelSelectionExplicit, setFallbackTier } = modelPreference
   configurationHandler.current = event => {
-    if (modelPreference.applyConfiguration(event)) setCreativeFreedom(event.creativeFreedom)
+    modelPreference.applyConfiguration(event)
   }
+  preferenceRefresh.current = () => { void queryClient.invalidateQueries({ queryKey: ['agent', 'window-configuration'] }) }
   /** 用户气泡附件图片的大图预览 */
   const [attachmentPreview, setAttachmentPreview] = useState<{ url: string; name: string } | null>(null)
   const [quotaDialogOpen, setQuotaDialogOpen] = useState(false)
@@ -513,34 +515,6 @@ export function AgentPanel({
   )
   // 参数生成、工具间等待等阶段也需要动态反馈；不能因已经输出过正文而永久隐藏。
   const awaiting = useProcessingHint(messages, runId, panelPhase, Boolean(pendingApproval || pendingQuestion), activityRunActive)
-
-  // AgentPanel stays mounted while authors switch works. Re-hydrate the per-work
-  // freedom setting instead of carrying the previous work's value into the new one.
-  useEffect(() => {
-    const saved = window.localStorage.getItem(`chevoink:creative-freedom:${novelId}`)
-    setCreativeFreedom(saved === 'stable' || saved === 'bold' ? saved : 'balanced')
-  }, [novelId])
-
-  // The full-screen Studio settings page can update the active panel without
-  // reaching into component state or forcing a remount.
-  useEffect(() => {
-    const handleChange = (event: Event) => {
-      const detail = (event as CustomEvent<{ novelId?: string; value?: CreativeFreedom }>).detail
-      if (detail?.novelId !== novelId) return
-      if (detail.value === 'stable' || detail.value === 'balanced' || detail.value === 'bold') {
-        setCreativeFreedom(detail.value)
-      }
-    }
-    window.addEventListener('chevoink:creative-freedom-change', handleChange)
-    return () => window.removeEventListener('chevoink:creative-freedom-change', handleChange)
-  }, [novelId])
-
-  useEffect(() => {
-    window.localStorage.setItem(`chevoink:creative-freedom:${novelId}`, creativeFreedom)
-    // novelId changes are hydrated by the effect above; persisting on that same
-    // render would overwrite the next work with the previous work's preference.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [creativeFreedom])
 
   const selectedModelCapability = modelTier === 'custom'
     ? customModelsQuery.data?.models.find((model) => model.id === customModelId)
@@ -669,6 +643,7 @@ export function AgentPanel({
     setGoalError(undefined)
     setActionError(null)
     try {
+      await windowConfiguration.ready()
       const input = {
         requestId: crypto.randomUUID(),
         objective,
@@ -693,7 +668,12 @@ export function AgentPanel({
       setGoalSnapshot(snapshot, snapshot.sessionId, 0, true)
       setGoalDetail(null)
       setGoalMode(false)
-      if (!sessionId) onGoalSessionCreated?.(snapshot.sessionId, objective)
+      if (!sessionId) {
+        // Creation already succeeded; a preference save failure must not replay it.
+        try { await windowConfiguration.promote(snapshot.sessionId) }
+        catch (error) { setActionError(error instanceof Error ? error.message : '窗口配置保存失败。') }
+        onGoalSessionCreated?.(snapshot.sessionId, objective)
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : '目标创建失败，请稍后重试。'
       setGoalError(message)
@@ -702,7 +682,7 @@ export function AgentPanel({
     } finally {
       setGoalBusy(false)
     }
-  }, [customModelId, goal, inheritMain, modelSelectionExplicit, modelTier, novelId, onGoalSessionCreated, openGoalEditor, selectedReasoningEffort, sessionId, setGoalMode, setGoalSnapshot])
+  }, [customModelId, goal, inheritMain, modelSelectionExplicit, modelTier, novelId, onGoalSessionCreated, openGoalEditor, selectedReasoningEffort, sessionId, setGoalMode, setGoalSnapshot, windowConfiguration])
 
   const handleGoalSave = useCallback(async (objective: string, base?: GoalEditBase) => {
     if (!goal || !sessionId || !base || base.id !== goal.id || base.sessionId !== sessionId) return
@@ -992,9 +972,11 @@ export function AgentPanel({
       // 用户主动发言视为回到对话最新处，重新开启自动跟随
       pinnedToBottomRef.current = true
       try {
+        await windowConfiguration.ready()
         let ensuredSessionId = sessionId
         if (!ensuredSessionId) {
           ensuredSessionId = await ensureSession()
+          await windowConfiguration.promote(ensuredSessionId)
           if (viewScope.current === voiceScopeKey || viewSession.current === ensuredSessionId) lazySessionRef.current = ensuredSessionId
         }
         const startRun = async (targetChapterId: string | null) => {
@@ -1077,12 +1059,12 @@ export function AgentPanel({
         throw error
       }
     },
-    [sessionId, voiceScopeKey, novelId, chapterId, selection, ensureSession, connect, onNewSession, inheritMain, modelSelectionExplicit, modelTier, customModelId, selectedReasoningEffort, refetchCredits, queueQuery, pinnedToBottomRef],
+    [sessionId, voiceScopeKey, novelId, chapterId, selection, ensureSession, connect, onNewSession, inheritMain, modelSelectionExplicit, modelTier, customModelId, selectedReasoningEffort, refetchCredits, queueQuery, pinnedToBottomRef, windowConfiguration],
   )
 
 
   const canContinue = !authorEnded && ((Boolean(runId) && (panelPhase === 'paused' || panelPhase === 'failed')) || (!runId && Boolean(resumeableRunId)))
-  const combinedError = actionError ?? errorMessage
+  const combinedError = actionError ?? windowConfiguration.error ?? errorMessage
 
   const handleCopyText = useCallback(async (id: string, text: string) => {
     if (await copyToClipboard(text)) {

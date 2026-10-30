@@ -76,6 +76,7 @@ import { admitGoalRun, bindGoalRun, type GoalRunAdmission } from './goal-run-adm
 import { assertGoalFence, readGoalExecution } from './goal-fence.js'
 import { withHumanAdmission } from './goal-activation-authority.js'
 import { freezeModelAssignments, resolveAssignedModel } from './model-assignments.js'
+import { getWindowConfiguration } from './window-configuration.js'
 import { frozenModelAssignmentsSchema, agentModelSelectionSchema } from '../../../shared/contracts/agent-model-assignments.js'
 import { buildTaskSpec } from './task-spec.js'
 import { freezeTaskCapabilities } from './task-capabilities.js'
@@ -367,6 +368,13 @@ export async function startLoopRunLocked(
   if (steering) await assertManagedAttachmentsAccess(steering.attachments, userId)
 
   const originalAdmissionInput = input
+  if (options.humanOrigin === 'http' && !options.goal && !session.spawnedFromRunId) {
+    const window = await getWindowConfiguration(userId, session.id)
+    input = { ...input,
+      ...(!input.modelSelectionExplicit && window.configuration.model ? { ...window.configuration.model, modelSelectionExplicit: true as const } : {}),
+      ...(input.creativeFreedom === undefined ? { creativeFreedom: window.configuration.creativeFreedom } : {}),
+    }
+  }
   const modelAssignments = input.modelAssignments ?? await freezeModelAssignments(userId, input.novelId)
   const networkAdmission = options.humanOrigin === 'http' && !options.goal && !session.spawnedFromRunId
     && options.concurrencyScope !== 'orchestration' ? 1 as const : undefined

@@ -475,7 +475,7 @@ describe('严谨创作自动落实质量建议', () => {
     expect(humanityQuality.qualityReviewContextHash(b)).not.toBe(oldHash)
     await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
     expect(f.critic).toHaveBeenCalledOnce()
-    expect(humanityQuality.persistHumanityQualityReport).toHaveBeenCalledWith(expect.objectContaining({ criticPromptProtocol: 'humanity-context.v6' }))
+    expect(humanityQuality.persistHumanityQualityReport).toHaveBeenCalledWith(expect.objectContaining({ criticPromptProtocol: 'humanity-context.v7' }))
     expect(f.model).not.toHaveBeenCalled()
     expect(f.write).not.toHaveBeenCalled()
   })

@@ -1,3 +1,4 @@
+import { advanceReviewCycle, beginReviewCycle, reviewCycleContentHash } from '../../api/lib/agent/review-cycle.js'
 import { randomInt, randomUUID } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 
@@ -84,6 +85,46 @@ describe.skipIf(!dbAvailable)('Agent 3.0 人类感质量门（需 DB）', () => 
       expect(changed.updated.revision).toBe(2)
       expect((await getQualityReport(userId, novelId, report.id)).findings[0].disposition).toBe('repaired')
     } finally { await prisma.chapter.deleteMany({ where: { id: targetId, novelId, authorId: userId } }) }
+  })
+
+  it('复核只读取同任务最近的完整旧版判断，保存当前报告及标旧不会改变输入', async () => {
+    const sourceRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
+    const volumeId = (await prisma.volume.findFirstOrThrow({ where: { novelId }, select: { id: true } })).id
+    const targetId = randomUUID(), before = '门开着。她没有回答。', after = '门合上。她没有回答。'
+    const spec = buildTaskSpec({ runId, novelId, chapterId: targetId, prompt: '局部修改本章，保留事实。' })
+    let compilationId = ''
+    try {
+      await prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: spec } })
+      await prisma.chapter.create({ data: { id: targetId, novelId, authorId: userId, volumeId, orderIndex: 9002, orderInVolume: 9002,
+        title: '合成复核', content: after, wordCount: after.length, revision: 2 } })
+      const comp = await prisma.storyCompilation.create({ data: { userId, novelId, runId, chapterId: targetId, targetOrderIndex: 9002, sourcePromptHash: 'reassessment', preparedContext: {} } })
+      compilationId = comp.id
+      const cycle = advanceReviewCycle(beginReviewCycle({ taskId: spec.id, userId, novelId, chapterId: targetId }, {
+        compilationId, revision: 1, content: before, ready: true, required: { continuity: true, quality: true }, findings: [],
+        binding: { contentHash: reviewCycleContentHash(before), continuityBinding: 'synthetic', qualityReportId: null, qualityReportHash: null },
+      }), { beforeRevision: 1, before, afterRevision: 2, after, ranges: [{ start: 0, end: 3, newText: '门合上' }] })
+      await prisma.storyCompilation.update({ where: { id: compilationId }, data: { preparedContext: { reviewCycle: cycle } as unknown as Prisma.InputJsonValue } })
+      const history = await prisma.chapterQualityReport.create({ data: { userId, novelId, runId, chapterId: targetId, compilationId, chapterRevision: 1,
+        mode: 'balanced', status: 'needs_repair', criticVersion: 'humanity-critic.v6', checkedAt: new Date('2026-01-01'), deterministicMetrics: { independentCheck: 'complete' } } })
+      await prisma.chapterQualityReport.create({ data: { userId, novelId, runId, chapterId: targetId, compilationId, chapterRevision: 1,
+        mode: 'balanced', status: 'failed', criticVersion: 'humanity-critic.v6', checkedAt: new Date('2026-01-02'), deterministicMetrics: { independentCheck: 'unavailable' } } })
+      const initial = await buildHumanityQualityContext(userId, novelId, targetId, runId)
+      expect(initial.priorQualityJudgment).toMatchObject({ reportId: history.id, sourceRevision: 1, independentCheck: 'complete' })
+      await prisma.chapterQualityReport.update({ where: { id: history.id }, data: { status: 'stale' } })
+      await prisma.chapterQualityReport.create({ data: { userId, novelId, runId, chapterId: targetId, compilationId, chapterRevision: 2,
+        mode: 'balanced', status: 'passed', criticVersion: 'humanity-critic.v6', checkedAt: new Date('2026-01-03'), deterministicMetrics: { independentCheck: 'complete' } } })
+      const saved = await buildHumanityQualityContext(userId, novelId, targetId, runId)
+      expect(saved.priorQualityJudgment).toEqual(initial.priorQualityJudgment)
+      expect(qualityReviewContextHash(saved)).toBe(qualityReviewContextHash(initial))
+      const repaired = await prisma.chapterQualityReport.create({ data: { userId, novelId, runId, chapterId: targetId, compilationId, chapterRevision: 2,
+        mode: 'balanced', status: 'repaired', criticVersion: 'humanity-critic.v6', checkedAt: new Date('2026-01-04'), deterministicMetrics: { independentCheck: 'complete', sourceRevision: 1 } } })
+      expect((await buildHumanityQualityContext(userId, novelId, targetId, runId)).priorQualityJudgment).toMatchObject({ reportId: repaired.id, reportRevision: 2, sourceRevision: 1 })
+    } finally {
+      await prisma.chapterQualityReport.deleteMany({ where: { chapterId: targetId, userId } })
+      if (compilationId) await prisma.storyCompilation.delete({ where: { id: compilationId } })
+      await prisma.chapter.deleteMany({ where: { id: targetId, authorId: userId } })
+      await prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: sourceRun.taskSpec ?? Prisma.DbNull } })
+    }
   })
 
   it('原合同续跑可读取编译；同会话的新任务不能继承编译权限', async () => {

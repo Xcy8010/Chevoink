@@ -1788,8 +1788,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           runtimeModelName = modelRuntime.modelName ?? agent.model
           toolContext.modelRuntime = modelRuntime
         }
-        const saved = configurationChanges.map(change => change.response as { creativeFreedom?: CreativeFreedom;
+        const saved = configurationChanges.map(change => change.response as { creativeFreedom?: CreativeFreedom; appliesToRun?: boolean;
           modelAssignments?: import('../../../shared/contracts/agent-model-assignments.js').FrozenModelAssignments; configuration?: { creativeFreedom?: CreativeFreedom } })
+          .filter(change => change.appliesToRun !== false)
         const assignments = saved.find(change => change.modelAssignments)?.modelAssignments
         if (assignments) toolContext.applyModelAssignments?.(assignments)
         const mode = saved.map(change => (change.configuration ?? change).creativeFreedom).find(Boolean)

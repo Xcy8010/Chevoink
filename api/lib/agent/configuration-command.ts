@@ -9,7 +9,7 @@ export function configurationCommandText(prompt: string): string | null {
   let lastCommandIndex = -2
   // A comma-separated effort modifier belongs only to the immediately preceding
   // command. A new task/model directive never inherits another command's tuple.
-  const effortModifier = /^(?:思考强度|推理强度|reasoning(?:\s+effort)?)(?:\s*(?:设为|改为|用|为|to|=))?\s*(?:none|minimal|low|medium|high|xhigh|关闭|最低|低|中|中等|高|极高)$/iu
+  const effortModifier = /^(?:思考强度|推理强度|reasoning(?:\s+effort)?)(?:\s*(?:设为|改为|用|为|to|=))?\s*(?:none|minimal|low|medium|high|xhigh|max|关闭|最低|低|中|中等|高|极高|最高)$/iu
   for (let index = 0; index < clauses.length; index += 2) {
     let clause = clauses[index].trim()
     if (!clause) continue
@@ -37,6 +37,55 @@ export function configurationCommandText(prompt: string): string | null {
 }
 
 export function isConfigurationCommand(prompt: string): boolean { return configurationCommandText(prompt) !== null }
+
+function windowReferencePattern(target: { id: string; title: string }) {
+  const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const names = [target.id, target.title].filter(Boolean).map(escape).join('|')
+  const quotedName = `["“「]?\\s*(?:${names})\\s*["”」]?`
+  return `(?:窗口\\s*${quotedName}|${quotedName}\\s*窗口)`
+}
+export function stripWindowConfigurationReferences(prompt: string, target: { id: string; title: string }) {
+  return prompt.replace(new RegExp(windowReferencePattern(target), 'gu'), '窗口')
+}
+
+/** Resolve a named window before applying the ordinary human-command grammar. */
+export function windowConfigurationDirectives(prompt: string, target: { id: string; title: string }, currentSessionId: string,
+  ownedWindows: ReadonlyArray<{ id: string; title: string }> = [target]) {
+  const named = new RegExp(`^(?:(?:请|麻烦)\\s*)?(?:将|把)?${windowReferencePattern(target)}(?:内|中|的)?\\s*`, 'u')
+  const prose = ownedWindows.reduce((text, window) => stripWindowConfigurationReferences(text, window), prompt)
+  if (/[`"'“”‘’「」『』]/u.test(prose)) return []
+  if (/(?:例如|比如|假如|假设|如果|分析|讨论|比较|解释|翻译|语法|引用|文档|示例|是否|能否|example|hypothetical|\bif\b|analyse|analyze|discuss|compare|explain|translate|quoted?|document)/iu.test(prose)) return []
+  const current = /^(?:(?:请|麻烦)\s*)?(?:将|把)?(?:当前|本|这个)窗口(?:内|中|的)?\s*/u
+  let previousTarget = false
+  const fragments = prompt.split(/([。！？!?\n；;，,])/u)
+  return fragments.reduce<Array<{ command: string; revoked: boolean }>>((result, clause, index) => {
+    if (index % 2) return result
+    let command = clause.trim().replace(/^(?:(?:请|麻烦)\s*)+/u, '')
+    const negative = /^(?:不要(?:再)?|别|禁止)\s*/u.exec(command)?.[0]
+    if (negative) command = command.slice(negative.length)
+    const mentionsTarget = named.test(command)
+    const mentionsCurrent = current.test(command)
+    if (!mentionsTarget && !mentionsCurrent && !previousTarget && /^[，,]$/u.test(fragments[index - 1] ?? '')
+      && /^(?:思考强度|推理强度|reasoning|effort)/iu.test(command)) return result
+    if (mentionsTarget) command = command.replace(named, '')
+    else if (mentionsCurrent && target.id === currentSessionId) command = command.replace(current, '')
+    else if (previousTarget && /^[，,]$/u.test(fragments[index - 1] ?? '') && /^(?:思考强度|推理强度|reasoning|effort)/iu.test(command) && !negative) {
+      const last = result.at(-1)
+      if (last) {
+        const combined = configurationDirectives(`${last.command}，${command}`)
+        if (combined.length === 1) last.command = combined[0].command
+      }
+      return result
+    } else if (target.id !== currentSessionId || /窗口|会话/u.test(command)) {
+      previousTarget = false
+      return result
+    }
+    const directives = configurationDirectives(`${negative ?? ''}${command.replace(/改成/gu, '改为')}`)
+    result.push(...directives)
+    previousTarget = directives.length > 0
+    return result
+  }, [])
+}
 
 /** Negative authentic controls supersede old authority without authorizing a write. */
 export function configurationDirectives(prompt: string): Array<{ command: string; revoked: boolean }> {

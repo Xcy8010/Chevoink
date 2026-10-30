@@ -35,9 +35,9 @@ import { qualityAutoRepairPending, qualityReportMatchesContent, selectAutomaticQ
 
 export const HUMANITY_CRITIC_VERSION = 'humanity-critic.v6'
 export const FROZEN_V5_HUMANITY_CRITIC_VERSION = 'humanity-critic.v5'
-/** v5 is the finding contract; this separately identifies the new prompt rules. */
-export const HUMANITY_PROMPT_PROTOCOL = 'humanity-context.v6'
-export type HumanityPromptProtocol = typeof HUMANITY_PROMPT_PROTOCOL | 'humanity-context.v2' | 'humanity-context.v3' | 'humanity-context.v4' | 'humanity-context.v5'
+/** Finding fields stay v6; prompt protocol separately identifies reassessment rules. */
+export const HUMANITY_PROMPT_PROTOCOL = 'humanity-context.v7'
+export type HumanityPromptProtocol = typeof HUMANITY_PROMPT_PROTOCOL | 'humanity-context.v2' | 'humanity-context.v3' | 'humanity-context.v4' | 'humanity-context.v5' | 'humanity-context.v6'
 export const FROZEN_V4_HUMANITY_CRITIC_VERSION = 'humanity-critic.v4'
 export const PREVIOUS_HUMANITY_CRITIC_VERSION = 'humanity-critic.v3'
 export const LEGACY_HUMANITY_CRITIC_VERSION = 'humanity-critic.v2'
@@ -367,10 +367,27 @@ export async function buildHumanityQualityContext(userId: string, novelId: strin
 
   const priorReviewCycle = original && compilation ? qualityReviewCycleContext(readReviewCycle(compilation.preparedContext,
     { taskId: original.taskId, userId, novelId, chapterId }), chapter) : null
+  // A current-version report is deliberately excluded: saving this assessment
+  // must not alter its own input hash. Stale older reports remain real history.
+  const priorReport = priorReviewCycle && compilation ? await db.chapterQualityReport.findFirst({
+    where: { userId, novelId, chapterId, compilationId: compilation.id, status: { in: ['passed', 'needs_repair', 'repaired', 'stale'] },
+      deterministicMetrics: { path: ['independentCheck'], equals: 'complete' },
+      OR: [{ chapterRevision: { lt: chapter.revision } },
+        { status: 'repaired', chapterRevision: chapter.revision, AND: [{ deterministicMetrics: { path: ['sourceRevision'], lt: chapter.revision } }] }] },
+    orderBy: [{ checkedAt: 'desc' }, { id: 'desc' }],
+    select: { id: true, chapterRevision: true, status: true, deterministicMetrics: true,
+      findings: { orderBy: [{ startOffset: 'asc' }, { id: 'asc' }], select: { id: true, signal: true, severity: true,
+        evidenceExcerpt: true, explanation: true, suggestion: true, disposition: true, authorFeedback: true, feedbackReason: true } } },
+  }) : null
   return { chapter, charter, compilation, profiles: mentionedProfiles, anchors: relevantAnchors, recentChapters, feedback: dataControl?.qualityTelemetryEnabled === false ? [] : feedback,
     originalRequest: original?.prompt ?? null,
     chapterWritingBackground: runId ? await readChapterWritingBackground(db, { userId, novelId, runId }, chapterId) : [],
-    ...(priorReviewCycle ? { priorReviewCycle } : {}) }
+    ...(priorReviewCycle ? { priorReviewCycle } : {}), ...(priorReport ? { priorQualityJudgment: {
+      reportId: priorReport.id, reportRevision: priorReport.chapterRevision,
+      sourceRevision: priorReport.deterministicMetrics && typeof priorReport.deterministicMetrics === 'object' && !Array.isArray(priorReport.deterministicMetrics)
+        && typeof priorReport.deterministicMetrics.sourceRevision === 'number' ? priorReport.deterministicMetrics.sourceRevision : priorReport.chapterRevision,
+      independentCheck: 'complete' as const, findings: priorReport.findings,
+    } } : {}) }
 }
 
 export function qualityReviewContextHash(bundle: Awaited<ReturnType<typeof buildHumanityQualityContext>>, promptProtocol: HumanityPromptProtocol = HUMANITY_PROMPT_PROTOCOL): string {
@@ -380,7 +397,8 @@ export function qualityReviewContextHash(bundle: Awaited<ReturnType<typeof build
     charter: bundle.charter, compiler: bundle.compilation ? { id: bundle.compilation.id, bridge: bundle.compilation.bridge, sceneTasks: bundle.compilation.sceneTasks } : null,
     profiles: bundle.profiles, anchors: bundle.anchors, recentChapters: bundle.recentChapters, feedback: bundle.feedback, originalRequest: bundle.originalRequest ?? null,
     chapterWritingBackground: bundle.chapterWritingBackground,
-    ...((promptProtocol === 'humanity-context.v5' || promptProtocol === HUMANITY_PROMPT_PROTOCOL) ? { priorReviewCycle: bundle.priorReviewCycle ?? null } : {}),
+    ...(promptProtocol === HUMANITY_PROMPT_PROTOCOL ? { priorQualityJudgment: bundle.priorQualityJudgment ?? null } : {}),
+    ...((promptProtocol === 'humanity-context.v5' || promptProtocol === 'humanity-context.v6' || promptProtocol === HUMANITY_PROMPT_PROTOCOL) ? { priorReviewCycle: bundle.priorReviewCycle ?? null } : {}),
   }))
 }
 

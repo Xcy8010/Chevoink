@@ -29,6 +29,7 @@ import {
 import { createPortal } from 'react-dom'
 
 import { ApiClientError, requestJson } from '@/app/api-client'
+import { useAgentWindowConfiguration } from '../agent/useAgentWindowConfiguration'
 import Button from '@/components/ui/Button'
 import { useToast } from '@/components/ui/toast-context'
 import { CustomModelSettingsContent } from '@/features/account/CustomModelSettingsDialog'
@@ -75,6 +76,8 @@ type Props = {
   novelId: string
   novels: Novel[]
   sessionId: string | null
+  taskTitle?: string | null
+  draftScopeKey?: string
   chapterId?: string | null
   runIds?: string[]
   onSelectSession?: (sessionId: string) => void
@@ -642,25 +645,20 @@ function AppearancePanel() {
 }
 
 function WritingPanel(props: Props) {
-  const [creativeFreedom, setCreativeFreedom] = useState<CreativeFreedom>('balanced')
-
-  useEffect(() => {
-    const saved = window.localStorage.getItem(`chevoink:creative-freedom:${props.novelId}`)
-    setCreativeFreedom(saved === 'stable' || saved === 'bold' ? saved : 'balanced')
-  }, [props.novelId])
+  const preferences = useAgentWindowConfiguration(props.novelId, props.sessionId, props.draftScopeKey)
+  const creativeFreedom = preferences.configuration.creativeFreedom
 
   function updateFreedom(value: CreativeFreedom) {
-    setCreativeFreedom(value)
-    window.localStorage.setItem(`chevoink:creative-freedom:${props.novelId}`, value)
-    window.dispatchEvent(new CustomEvent('chevoink:creative-freedom-change', { detail: { novelId: props.novelId, value } }))
+    void preferences.update({ creativeFreedom: value }).catch(() => {})
   }
 
   return (
     <div className="space-y-7">
-      <SettingsGroup title="当前作品的创作自由度" description="该选择会用于之后发起的 Agent 任务，不会重写既有内容。">
+      <SettingsGroup title={`当前窗口的创作模式（${props.taskTitle || preferences.title || '新任务'}）`}>
+        {preferences.error ? <p role="alert" className="py-2 text-xs text-rose-500">{preferences.error}</p> : null}
         <div className="divide-y divide-[var(--border-subtle)] border-y border-[var(--border-subtle)]">
           {FREEDOM_OPTIONS.map((option) => (
-            <button key={option.value} type="button" onClick={() => updateFreedom(option.value)} className="flex w-full items-center gap-4 py-4 text-left">
+            <button key={option.value} type="button" disabled={preferences.loading} onClick={() => updateFreedom(option.value)} className="flex w-full items-center gap-4 py-4 text-left disabled:opacity-50">
               <span className={cn('h-4 w-4 shrink-0 rounded-full border', creativeFreedom === option.value ? 'border-[5px] border-[var(--text-primary)]' : 'border-[var(--border-strong)]')} />
               <span className="min-w-0 flex-1"><span className="block text-sm font-medium">{option.label}</span><span className="mt-1 block text-xs leading-5 text-[var(--text-tertiary)]">{option.description}</span></span>
             </button>

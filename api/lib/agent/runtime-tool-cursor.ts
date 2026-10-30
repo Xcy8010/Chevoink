@@ -153,7 +153,7 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
         if (validator.name !== call.name || !projected && !originalToolParameterSchemas(validator, scope).some(schema => runtimeJsonHash(schema) === schemaHash)) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '字段校验器不匹配原工具合同，不能以新schema拒绝旧调用。')
         // An exception is an implementation fault, not proof of invalid user/model data.
         // Leave it for recovery instead of recording a deterministic schema rejection.
-        const actualValidator = projected ? toolWithNativeView(validator, published) : validator
+        const actualValidator = projected || call.name === 'agent_configure' ? toolWithNativeView(validator, published) : validator
         const normalized = normalizeToolInput(actualValidator, parsed)
         const validated = validateToolInput(actualValidator, normalized)
         if (!validated.success) {

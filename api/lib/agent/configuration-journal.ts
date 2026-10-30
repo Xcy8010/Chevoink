@@ -4,7 +4,7 @@ import type { AgentRun, Prisma } from '@prisma/client'
 import type { StartAgentLoopRunRequest } from '../../../shared/contracts/agent-events.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { DataAccessError } from '../prisma.js'
-import { configurationDirectives } from './configuration-command.js'
+import { configurationDirectives, windowConfigurationDirectives, stripWindowConfigurationReferences } from './configuration-command.js'
 import { readHumanAdmission } from './goal-activation-authority.js'
 import { readGoalConsentSourceRun } from './goal-consent.js'
 import { databaseNow, lockOwnedRun, runtimeJson, runtimeTransaction } from './runtime-common.js'
@@ -16,15 +16,22 @@ export const configurationConsentSchema = z.object({ version: z.literal(1), sour
   executionRunId: z.string().optional(),
   sourceEpoch: z.string().nullable(), sourceRequestHash: z.string().regex(/^[a-f0-9]{64}$/), messageId: z.string(),
   messageHash: z.string().regex(/^[a-f0-9]{64}$/), consumed: z.boolean() }).strict()
-function onlyConfiguration(input: StartAgentLoopRunRequest) {
-  if (input.attachments?.length || !configurationDirectives(input.prompt).length) return false
+async function onlyConfiguration(tx: Prisma.TransactionClient, userId: string, input: StartAgentLoopRunRequest) {
+  if (input.attachments?.length) return false
+  let prompt = input.prompt
+  if (!configurationDirectives(prompt).length || /窗口/u.test(prompt)) {
+    const windows = await tx.agentSession.findMany({ where: { userId }, select: { id: true, title: true } })
+    const targets = windows.filter(window => windowConfigurationDirectives(prompt, window, input.sessionId, windows).length)
+    if (!targets.length) return false
+    for (const window of targets) prompt = stripWindowConfigurationReferences(prompt, window)
+  }
   // A prompt that also asks for manuscript work remains a normal new request.
-  const manuscriptRequest = input.prompt.replace(/创作模式|(?:平衡|严谨|大胆)创作(?=$|[，,。；;！？!?\s])/gu, '')
+  const manuscriptRequest = prompt.replace(/创作模式|(?:平衡|严谨|大胆)创作(?=$|[，,。；;！？!?\s])/gu, '')
   return !/(?:写(?:第|下|一|首|新)|续写|改写|重写|润色|创作|删除|新建|生成(?:正文|章节|大纲)|\bwrite\b|\bdraft\b)/iu.test(manuscriptRequest)
 }
 /** Called only for an authenticated HTTP request under admission/session locks. */
 export async function bindConfigurationConsent(tx: Prisma.TransactionClient, userId: string, input: StartAgentLoopRunRequest) {
-  if (!onlyConfiguration(input)) return null
+  if (!await onlyConfiguration(tx, userId, input)) return null
   const session = await tx.agentSession.findFirst({ where: { id: input.sessionId, novelId: input.novelId, userId } })
   if (!session || session.spawnedFromSessionId) return null
   const run = await tx.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, userId, sessionId: session.id, novelId: input.novelId, engine: 'loop',
@@ -56,7 +63,7 @@ export async function readConfigurationConsents(tx: Prisma.TransactionClient, ru
     const currentEpoch = consent.data.sourceEpoch === (epoch?.toString() ?? null) && (consent.data.executionRunId ?? consent.data.sourceRunId) === run.id
     if (consent.data.sourceRootId !== (run.taskRootId ?? taskSpecSchema.parse(source.taskSpec).id)
       || consent.data.sourceRequestHash !== admitted.grant.requestHash || !includeHistoricalEpochs && !currentEpoch
-      || author.request.novelId !== run.novelId || author.request.sessionId !== run.sessionId || !onlyConfiguration(author.request)) continue
+      || author.request.novelId !== run.novelId || author.request.sessionId !== run.sessionId || !await onlyConfiguration(tx, run.userId, author.request)) continue
     const message = await tx.agentMessage.findFirst({ where: { id: consent.data.messageId, runId: source.id, sessionId: run.sessionId, role: 'user' } })
     if (!message || runtimeJson(message.parts).hash !== consent.data.messageHash
       || runtimeJson(message.parts).hash !== runtimeJson([{ type: 'text', text: author.request.prompt }]).hash)

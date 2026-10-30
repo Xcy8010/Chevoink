@@ -214,7 +214,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     qualityContextCurrent = metrics.qualityContextHash === qualityReviewContextHash(await buildHumanityQualityContext(subject.userId, subject.novelId, chapter.id, subject.runId, tx),
       metrics.criticPromptProtocol === 'humanity-context.v2' || metrics.criticPromptProtocol === 'humanity-context.v3'
         || metrics.criticPromptProtocol === 'humanity-context.v4' || metrics.criticPromptProtocol === 'humanity-context.v5'
-        || metrics.criticPromptProtocol === 'humanity-context.v6' ? metrics.criticPromptProtocol : undefined)
+        || metrics.criticPromptProtocol === 'humanity-context.v6' || metrics.criticPromptProtocol === 'humanity-context.v7' ? metrics.criticPromptProtocol : undefined)
   }
   // Historical delivery compatibility remains bound to the saved body.
   // Context matching is required below before deriving executable edit proof.

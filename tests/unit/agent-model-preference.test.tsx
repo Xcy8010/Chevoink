@@ -4,11 +4,13 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentStreamEvent } from '../../shared/contracts/index.js'
 import type { ModelAssignmentsPayload } from '../../shared/contracts/agent-model-assignments.js'
+import type { AgentWindowConfigurationPayload } from '../../shared/contracts/agent-window-configuration.js'
 import { resolveComposerModelEffort, useAgentModelPreference } from '../../src/features/studio/agent/useAgentModelPreference'
 import { useAgentStream } from '../../src/features/studio/agent/useAgentStream'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
 
-const api = vi.hoisted(() => ({ request: vi.fn() }))
+const api = vi.hoisted(() => ({ request: vi.fn(), assignments: vi.fn() }))
+const windows = new Map<string, AgentWindowConfigurationPayload>()
 vi.mock('../../src/app/api-client', () => ({ requestJson: api.request }))
 function payload(main = true): ModelAssignmentsPayload {
   return { version: 1, global: { revision: 1, assignments: {} }, novel: { revision: 0, assignments: {} },
@@ -22,21 +24,33 @@ function mount(novelId = 'novel-a', sessionId = 'session-a') {
 const configuration = (seq = 2, runId = 'run-a'): AgentStreamEvent & { type: 'run.configuration' } => ({ type: 'run.configuration', runId, seq, ts: new Date().toISOString(), modelTier: 'ultimate', customModelId: null, reasoningEffort: 'high', creativeFreedom: 'bold', modelSelectionExplicit: true })
 beforeEach(() => {
   window.localStorage.clear()
-  api.request.mockReset().mockResolvedValue(payload())
+  windows.clear()
+  api.assignments.mockReset().mockResolvedValue(payload())
+  api.request.mockReset().mockImplementation(async (path: string, options?: RequestInit) => {
+    if (path.includes('model-assignments')) return api.assignments(path)
+    const id = path.split('/').at(-2)!
+    const before = windows.get(id) ?? { sessionId: id, novelId: 'novel-a', title: id, revision: 0, configuration: { model: null, creativeFreedom: 'balanced' } }
+    if (options?.method === 'PATCH') {
+      const { expectedRevision, ...patch } = JSON.parse(options.body as string)
+      expect(expectedRevision).toBe(before.revision)
+      windows.set(id, { ...before, revision: before.revision + 1, configuration: { ...before.configuration, ...patch } })
+    }
+    return windows.get(id) ?? before
+  })
   useAgentStore.setState({ activeSessionId: 'session-a', runId: 'run-a', phase: 'running', lastSeq: 1, messages: [] })
 })
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(async () => { await act(async () => {}); cleanup(); vi.unstubAllGlobals() })
 
 describe('Agent model preference ownership', () => {
   it('inherits global main without converting it to an explicit choice or leaking it into local defaults', async () => {
     const { result } = mount()
     await waitFor(() => expect(result.current.loading).toBe(false))
     expect(result.current).toMatchObject({ modelTier: 'custom', customModelId: 'custom-a', inheritMain: true, explicit: false, preferredEffort: 'medium' })
-    expect(window.localStorage.getItem('chevoink:agent-model-tier')).toBe('speed')
+    expect(window.localStorage.getItem('chevoink:agent-model-tier')).toBeNull()
     expect(window.localStorage.getItem('chevoink:agent-custom-model-id')).toBeNull()
   })
   it('recognizes a manual selection even when the author chooses the same tier as the old default', async () => {
-    api.request.mockResolvedValue(payload(false))
+    api.assignments.mockResolvedValue(payload(false))
     const { result } = mount()
     await waitFor(() => expect(result.current.loading).toBe(false))
     expect(result.current.explicit).toBe(false)
@@ -47,13 +61,13 @@ describe('Agent model preference ownership', () => {
     expect(result.current.preferredEffort).toBe('medium')
   })
   it('does not carry work A overrides into work B and preserves defaults when nothing is assigned', async () => {
-    api.request.mockImplementation((path: string) => Promise.resolve(payload(path.includes('novel-a'))))
+    api.assignments.mockImplementation((path: string) => Promise.resolve(payload(path.includes('novel-a'))))
     const { result, rerender } = mount()
     await waitFor(() => expect(result.current.inheritMain).toBe(true))
     act(() => result.current.selectModelTier('performance'))
     rerender({ novelId: 'novel-b', sessionId: 'session-b' })
     await waitFor(() => expect(result.current.loading).toBe(false))
-    expect(result.current).toMatchObject({ modelTier: 'performance', explicit: false, inheritMain: false })
+    expect(result.current).toMatchObject({ modelTier: 'speed', explicit: false, inheritMain: false })
   })
   it('keeps the newly chosen custom id when the composer batches custom and tier callbacks', async () => {
     const { result } = mount()
@@ -66,13 +80,13 @@ describe('Agent model preference ownership', () => {
   })
   it('uses the selected model configured default when no strength was chosen, while preserving untouched saved settings', async () => {
     window.localStorage.setItem('chevoink:agent-reasoning-efforts', JSON.stringify({ 'tier:speed': 'low' }))
-    api.request.mockResolvedValue(payload(false))
+    api.assignments.mockResolvedValue(payload(false))
     const { result } = mount()
     await waitFor(() => expect(result.current.loading).toBe(false))
     expect(result.current.preferredEffort).toBeUndefined()
-    expect(result.current.reasoningSelections['tier:speed']).toBe('low')
+    expect(result.current.reasoningSelections['tier:speed']).toBeUndefined()
     const highDefault = { reasoningEfforts: ['low', 'high', 'max'] as const, defaultReasoningEffort: 'high' as const }
-    expect(resolveComposerModelEffort(undefined, false, result.current.reasoningSelections['tier:speed'], highDefault)).toBe('low')
+    expect(resolveComposerModelEffort(undefined, false, result.current.reasoningSelections['tier:speed'], highDefault)).toBe('high')
     act(() => result.current.selectModelTier('speed'))
     expect(result.current.preferredEffort).toBeUndefined()
     expect(resolveComposerModelEffort(result.current.preferredEffort, result.current.explicit, result.current.reasoningSelections['tier:speed'], highDefault)).toBe('high')
@@ -82,7 +96,7 @@ describe('Agent model preference ownership', () => {
   })
   it('uses the inherited model configured default instead of stale local effort without creating a composer override', async () => {
     window.localStorage.setItem('chevoink:agent-reasoning-efforts', JSON.stringify({ 'tier:ultimate': 'low' }))
-    api.request.mockResolvedValue({ ...payload(false), effective: { main: { source: 'global', selection: { modelTier: 'ultimate' } } } })
+    api.assignments.mockResolvedValue({ ...payload(false), effective: { main: { source: 'global', selection: { modelTier: 'ultimate' } } } })
     const { result } = mount()
     await waitFor(() => expect(result.current.loading).toBe(false))
     expect(result.current).toMatchObject({ modelTier: 'ultimate', inheritMain: true, explicit: false, preferredEffort: undefined })
@@ -97,12 +111,14 @@ describe('Agent model preference ownership', () => {
     await waitFor(() => expect(result.current.loading).toBe(false))
     const messages = useAgentStore.getState().messages
     const event = configuration()
+    windows.set('session-a', { sessionId: 'session-a', novelId: 'novel-a', title: 'A', revision: 1,
+      configuration: { model: { modelTier: 'ultimate', reasoningEffort: 'high' }, creativeFreedom: 'bold' } })
     act(() => {
       useAgentStore.getState().applyEvent(event)
       expect(result.current.applyConfiguration(event)).toBe(true)
     })
-    expect(result.current.modelTier).toBe('ultimate')
-    expect(window.localStorage.getItem('chevoink:agent-model-tier')).toBe('speed')
+    await waitFor(() => expect(result.current.modelTier).toBe('ultimate'))
+    expect(window.localStorage.getItem('chevoink:agent-model-tier')).toBeNull()
     expect(useAgentStore.getState().messages).toBe(messages)
     act(() => {
       expect(result.current.applyConfiguration(event)).toBe(false)
@@ -114,7 +130,7 @@ describe('Agent model preference ownership', () => {
     await waitFor(() => expect(result.current.modelTier).toBe('custom'))
   })
   it('edits an inactive model strength without changing the active model and honors that explicit choice when selected', async () => {
-    api.request.mockResolvedValue(payload(false))
+    api.assignments.mockResolvedValue(payload(false))
     const { result } = mount()
     await waitFor(() => expect(result.current.loading).toBe(false))
     act(() => result.current.selectReasoningEffort('tier:ultimate', 'max'))

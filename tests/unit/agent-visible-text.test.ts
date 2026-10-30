@@ -8,6 +8,19 @@ import { getToolByName } from '../../api/lib/agent/tools/registry.js'
 const manuscript = 'AnnBlue kept her chapter_read notebook. 12345678901234567890 is engraved on it.\n\n他说：“调用 scene_task_build，chapterId=cmttleebg03h9wqox9lieracs。”\n\n> 用户原话：工具 chapter_write。'
 
 describe('author text classification before publication', () => {
+  it('publishes an ordinary single paragraph before final at every chunk boundary', () => {
+    const raw = '好的，故事从清晨开始。她沿着河岸向前走。'
+    for (let split = 3; split < raw.length; split++) {
+      const stream = createVisibleTextStreamer()
+      const first = stream.push(raw.slice(0, split))
+      expect(first).toBe(raw.slice(0, split))
+      expect(first + stream.push(raw.slice(split)) + stream.finish()).toBe(raw)
+    }
+    const stream = createVisibleTextStreamer()
+    expect(stream.push('普通正文。')).toBe('普通正文。')
+    expect(stream.push('\n\n调用参数：chapterId=hidden')).toBe('\n\n')
+    expect(stream.finish()).not.toContain('hidden')
+  })
   it('preserves manuscript English, numbers, dialogue and author quotes exactly', () => {
     expect(humanizeAgentVisibleText(manuscript)).toBe(manuscript)
     expect(humanizeAgentVisibleText('他在纸上写下 {"chapterId":"secret"}，然后离开。')).toBe('他在纸上写下 {"chapterId":"secret"}，然后离开。')
@@ -106,7 +119,7 @@ describe('author text classification before publication', () => {
       expect(final).not.toMatch(/scene_task|chapter_write|chapterId|compilationId|cmttle|model=|reasoningEffort/)
     }
   })
-  it('streams only complete classified paragraphs and preserves final content', () => {
+  it('streams classified paragraphs and preserves final content', () => {
     const stream = createVisibleTextStreamer()
     const chunks = ['调用 scene', '_task_build。\n', '\nAnnBlue kept 12345678901234567890.', '\n\n最后一段。']
     let shown = ''
@@ -122,17 +135,17 @@ describe('author text classification before publication', () => {
     const shown = chunks.map(chunk => stream.push(chunk)).join('') + stream.finish()
     expect(shown).toBe(chunks.join(''))
   })
-  it('keeps execution detector incremental while author progress is held', () => {
+  it('keeps execution detection independent while ordinary author progress is live', () => {
     const detector = createExecutionTextDetector(), author = createVisibleTextStreamer()
     expect(detector.push('正文正在推进。')).toBe('正文正在推进。')
-    expect(author.push('正文正在推进。')).toBe('')
+    expect(author.push('正文正在推进。')).toBe('正文正在推进。')
     expect(detector.push('调用 scene')).toBe('调用 ')
-    expect(author.push('调用 scene')).toBe('')
+    expect(author.push('\n\n调用 scene')).toBe('\n\n')
     expect(detector.push('_task_build。')).toContain(getToolByName('scene_task_build')!.title)
     const execution = createExecutionTextDetector(), guarded = createRepeatDetector(100, 5, 3), held = createVisibleTextStreamer()
     for (let index = 0; index < 3; index++) {
       const increment = '重复的正文'
-      expect(held.push(increment)).toBe('')
+      expect(held.push(increment)).toBe(increment)
       expect(guarded.push(execution.push(increment))).toBe(index === 2 ? increment : null)
     }
   })

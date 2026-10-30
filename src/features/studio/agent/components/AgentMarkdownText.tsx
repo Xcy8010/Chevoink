@@ -1,4 +1,5 @@
-import { Component, Suspense, lazy, memo, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Component, Suspense, lazy, memo, type ReactNode } from 'react'
+import { useStreamingText } from '../../components/use-streaming-text'
 import type { Components } from 'react-markdown'
 
 // Keep the parser out of the initial workbench chunk. Failure retains the answer.
@@ -78,22 +79,7 @@ class MarkdownBoundary extends Component<{ children: ReactNode; fallback: ReactN
 export const AgentMarkdownText = memo(function AgentMarkdownText({ text, streaming = false, identity = '' }: {
   text: string; streaming?: boolean; identity?: string
 }) {
-  const [visible, setVisible] = useState({ text, identity })
-  const pending = useRef({ text, identity })
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  useEffect(() => {
-    pending.current = { text, identity }
-    if (!streaming || visible.identity !== identity) {
-      if (timer.current) clearTimeout(timer.current)
-      timer.current = null
-      setVisible({ text, identity })
-    } else if (!timer.current) {
-      timer.current = setTimeout(() => { timer.current = null; setVisible(pending.current) }, 40)
-    }
-  }, [text, identity, streaming, visible.identity])
-  useEffect(() => () => { if (timer.current) clearTimeout(timer.current) }, [])
-  // Completion flushes immediately; a task switch never paints another task's queued text.
-  const content = !streaming || visible.identity !== identity ? text : visible.text
+  const content = useStreamingText(text, streaming, identity)
   if (!content.trim()) return null
   const fallback = <p className="whitespace-pre-wrap break-words">{content}</p>
   return <div className="min-w-0 max-w-full break-words text-sm leading-7 text-[var(--text-primary)] [overflow-wrap:anywhere]">

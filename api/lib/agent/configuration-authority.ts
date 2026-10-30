@@ -7,7 +7,7 @@ import { readHumanAdmission } from './goal-activation-authority.js'
 import { readGoalConsentSourceRun } from './goal-consent.js'
 import { runtimeJson } from './runtime-common.js'
 import type { ToolContext } from './tools/types.js'
-import { configurationDirectives } from './configuration-command.js'
+import { configurationDirectives, windowConfigurationDirectives } from './configuration-command.js'
 import { readConfigurationConsents } from './configuration-journal.js'
 export { isConfigurationCommand } from './configuration-command.js'
 
@@ -50,13 +50,18 @@ function selectsModel(command: string, names: string[]): boolean {
 }
 /** Only the saved authentic HTTP author request grants a change. Synthetic child prompts never do. */
 export async function assertConfigurationAuthority(tx: Prisma.TransactionClient, ctx: ToolContext, input: {
-  model?: AgentModelSelection; creativeFreedom?: CreativeFreedom; task?: ModelAssignmentTask; global?: boolean; effortOnly?: string; effectiveReasoningEffort?: string
+  model?: AgentModelSelection; creativeFreedom?: CreativeFreedom; task?: ModelAssignmentTask; global?: boolean; effortOnly?: string; effectiveReasoningEffort?: string; targetSessionId?: string
 }) {
   const deny = () => { throw new DataAccessError(409, 'CONFIGURATION_AUTHOR_REQUIRED', '请先向作者确认要切换的模型、思考强度或写作模式。') }
   if (ctx.inlineChild) return deny()
   const run = await tx.agentRun.findFirst({ where: { id: ctx.runId, userId: ctx.userId, sessionId: ctx.sessionId, novelId: ctx.novelId } })
   const session = await tx.agentSession.findFirst({ where: { id: ctx.sessionId, userId: ctx.userId, novelId: ctx.novelId } })
   if (!run || !session || session.spawnedFromSessionId) return deny()
+  const targetSession = input.targetSessionId && input.targetSessionId !== ctx.sessionId
+    ? await tx.agentSession.findFirst({ where: { id: input.targetSessionId, userId: ctx.userId } }) : session
+  if (!targetSession) return deny()
+  const ownedWindows = input.targetSessionId ? await tx.agentSession.findMany({ where: { userId: ctx.userId }, select: { id: true, title: true } }) : []
+  const uniqueTitle = targetSession.title && ownedWindows.filter(window => window.title === targetSession.title).length === 1
   const source = await readGoalConsentSourceRun(tx, run)
   const admitted = readHumanAdmission(source.startRequest)
   const message = admitted ? await tx.agentMessage.findFirst({ where: { runId: source.id, sessionId: ctx.sessionId, role: 'user' }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }) : null
@@ -82,7 +87,9 @@ export async function assertConfigurationAuthority(tx: Prisma.TransactionClient,
       .filter(choice => input.model?.modelTier === 'custom' ? choice.id !== input.model.customModelId : choice.ownerUserId !== null || choice.tier !== input.model?.modelTier)
       .map(choice => [...(choice.ownerUserId ? ['custom'] : [choice.tier ?? '', ...(tierNames[choice.tier ?? ''] ?? [])]), choice.displayName, choice.modelName])
   }
-  const directives = candidates.flatMap(candidate => configurationDirectives(candidate.prompt).map(directive => ({ ...candidate, ...directive,
+  const directives = candidates.flatMap(candidate => (input.targetSessionId
+    ? windowConfigurationDirectives(candidate.prompt, { id: targetSession.id, title: uniqueTitle ? targetSession.title : '' }, ctx.sessionId, ownedWindows)
+    : configurationDirectives(candidate.prompt)).map(directive => ({ ...candidate, ...directive,
     revoked: directive.revoked || 'pending' in candidate && candidate.pending })))
   const target = input.task ?? 'main'
   const latest = (setting: 'model' | 'mode' | 'effort') => [...directives].reverse().find(directive => directiveTask(directive.command) === target

@@ -164,7 +164,7 @@ it('does not reinterpret narrated text or asReasoning final as actual thinking',
 it('restores the original compact thinking row, bounded scroll body and completion folding', () => {
   const view = render(<AgentMessageParts parts={[{ type: 'reasoning', text: '先核对人' }]} streaming runActive />)
   expect(screen.getByText('思考中')).toBeTruthy()
-  expect(screen.getByText('正在分析…')).toBeTruthy()
+  expect(screen.getByText('先核对人')).toBeTruthy()
   expect(view.container.querySelector('.max-h-44')).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: /^思考中/ }))
   expect(view.container.querySelector('.max-h-44')).toBeTruthy()

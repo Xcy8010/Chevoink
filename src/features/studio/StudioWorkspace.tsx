@@ -989,11 +989,9 @@ export default function StudioWorkspace() {
     if (!useAgentStore.getState().autoFollow) {
       return
     }
-    // Work 追踪不仅切章节：右侧作品树和正文查看器被折叠时也要恢复完整追踪布局。
-    // 即使目标就是当前章，也必须先把被收起的面板重新打开。
+    // 自动追踪更新正文查看器；检查区页签由用户选择，不随正文增量重置。
     if (workspacePerspective === 'work') {
       openWorkDocument(taskUiScope)
-      setWorkInspectorTab('work')
       setWorkRightOpen(true)
       setWorkViewer('chapter')
     } else {
@@ -4426,6 +4424,8 @@ export default function StudioWorkspace() {
             novelId={activeNovelId}
             novels={novelOptions}
             sessionId={agentSessionId}
+            taskTitle={activeAgentTaskWindow?.title ?? null}
+            draftScopeKey={taskUiScope}
             chapterId={selectedChapterId}
             runIds={agentArtifacts.map((artifact) => artifact.runId).filter((runId): runId is string => Boolean(runId))}
             onSelectSession={(sessionId) => {

@@ -842,7 +842,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(2)
         if (noOpRepair) {
           expect(await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_analyze' } }))
-            .toMatchObject({ inputSnapshot: { input: { work: { version: 13 } } } })
+            .toMatchObject({ inputSnapshot: { input: { work: { version: 14 } } } })
           expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'quality_repair' } })).toBe(1)
           expect(await prisma.chapterQualityReport.count({ where: { chapterId: f.chapterId, status: 'passed' } })).toBe(0)
           expect(result.result.snapshot).toBeUndefined()
@@ -892,7 +892,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: { in: ['quality_format_recovery', 'quality_repair', 'quality_repair_retry'] } } })).toBe(0)
         const nextReports = await prisma.chapterQualityReport.findMany({ where: { chapterId: f.chapterId }, orderBy: { createdAt: 'asc' } })
         expect(nextReports).toHaveLength(2)
-        expect(nextReports[1]).toMatchObject({ status: 'passed', criticVersion: 'humanity-critic.v6', deterministicMetrics: { criticPromptProtocol: 'humanity-context.v6', qualityContextHash: qualityReviewContextHash(bundle) } })
+        expect(nextReports[1]).toMatchObject({ status: 'passed', criticVersion: 'humanity-critic.v6', deterministicMetrics: { criticPromptProtocol: 'humanity-context.v7', qualityContextHash: qualityReviewContextHash(bundle) } })
         expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: admittedLegacy!.id }, select: { id: true, inputHash: true, inputSnapshot: true } })).toEqual(admittedLegacy)
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: before, revision: 1 })
         return
@@ -1005,8 +1005,8 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         // A deliberate second blocked call also records rejected work. Bind
         // this assertion to the report's actual checked input, never DB order.
         const savedWork = await prisma.agentOperation.findFirstOrThrow({ where: { id: recoveryBinding.operationId, taskRootId: f.rootId, action: 'quality_analyze', kind: 'tool' } })
-        expect(savedWork.inputSnapshot).toMatchObject({ input: { work: { version: 13, parserVersion: 3, repairContext: expect.any(String), deadlineAt: expect.any(Number) } } })
-        expect(reports[0].deterministicMetrics).toMatchObject({ criticPromptProtocol: 'humanity-context.v6' })
+        expect(savedWork.inputSnapshot).toMatchObject({ input: { work: { version: 14, parserVersion: 3, repairContext: expect.any(String), deadlineAt: expect.any(Number) } } })
+        expect(reports[0].deterministicMetrics).toMatchObject({ criticPromptProtocol: 'humanity-context.v7' })
         const recoveryOp = await prisma.agentOperation.findFirstOrThrow({ where: { parentOperationId: savedWork.id, action: 'quality_format_recovery' }, include: { attempts: { include: { usageReceipt: true } } } })
         expect(recoveryOp.attempts).toHaveLength(1)
         expect(recoveryOp.attempts[0].usageReceipt).toMatchObject({ source: 'reported', settlementStatus: 'settled' })
@@ -1050,8 +1050,8 @@ describe.runIf(available)('frozen cached quality repair authorization', () => {
     expect(await check(work)).toBe(true)
     for (const version of [1, 2, 3]) expect(await check({ ...work, version, sources: undefined })).toBe(true)
     const currentSources = buildQualityEvidenceSources({ userId: f.userId, novelId: f.novelId, chapterId: f.chapterId, chapterRevision: 1 }, '原文')
-    for (const version of [9, 10, 11, 12, 13]) expect(await check({ ...work, version, sources: currentSources })).toBe(true)
-    expect(await check({ ...work, version: 14, sources: currentSources })).toBe(false)
+    for (const version of [9, 10, 11, 12, 13, 14]) expect(await check({ ...work, version, sources: currentSources })).toBe(true)
+    expect(await check({ ...work, version: 15, sources: currentSources })).toBe(false)
     expect(await check({ ...work, sources: { ...sources, identity: { ...sources.identity, userId: randomUUID() } } })).toBe(false)
     expect(await check({ ...work, sources: { ...sources, identity: { ...sources.identity, chapterRevision: 2 } } })).toBe(false)
     expect(await check({ ...work, chapter: { ...work.chapter, content: '另文' } })).toBe(false)

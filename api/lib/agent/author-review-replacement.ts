@@ -179,7 +179,7 @@ async function current(tx: Prisma.TransactionClient, input: AuthorReviewReplacem
   }
   const deterministic = analyzeDeterministicQuality(bundle.chapter.content, bundle.recentChapters.map(item => item.content))
   const sources = buildQualityEvidenceSources({ userId: subject.userId, novelId: subject.novelId, chapterId: pending.chapterId, chapterRevision: input.expected.currentRevision }, bundle.chapter.content)
-  const system = buildCriticSystem('balanced', protocol), content = buildCriticInput(bundle, deterministic.metrics, sources)
+  const system = buildCriticSystem('balanced', protocol), content = buildCriticInput(bundle, deterministic.metrics, sources, protocol)
   if (sha(JSON.stringify({ system, content })) !== input.expected.promptHash || input.conservativeInputTokenCeiling < estimateChatMessagesTokens([
     { role: 'system', content: system }, { role: 'user', content },
   ])) reject('实际提示词或保守输入上限不一致。')

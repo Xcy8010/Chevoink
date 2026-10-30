@@ -3,7 +3,7 @@ import { collectDurableToolEvidence } from '../../api/lib/agent/runtime-evidence
 import { advanceDurableToolStagnation } from '../../api/lib/agent/runtime-continuation.js'
 import { withRunLease } from '../../api/lib/agent/runtime-lease.js'
 import { loadExecutionState, saveExecutionState } from '../../api/lib/agent/runtime-state.js'
-import { MODEL_ASSIGNMENT_TASKS } from '../../shared/contracts/agent-model-assignments.js'
+import { MODEL_ASSIGNMENT_TASKS, agentModelSelectionSchema, modelReasoningEffortSchema } from '../../shared/contracts/agent-model-assignments.js'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
@@ -27,6 +27,9 @@ import { executeDurableStep } from '../../api/lib/agent/runtime-executor.js'
 import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
 import { bindConfigurationConsent, consumeDurableConfigurationConsent } from '../../api/lib/agent/configuration-journal.js'
 import { assertConfigurationAuthority } from '../../api/lib/agent/configuration-authority.js'
+import { getWindowConfiguration, patchWindowConfiguration } from '../../api/lib/agent/window-configuration.js'
+import { prepareToolCursorOperation } from '../../api/lib/agent/runtime-tool-cursor.js'
+import { toOpenAIParameters } from '../../api/lib/agent/tool-schema.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
@@ -57,7 +60,8 @@ async function fixture(work: (f: { userId: string; novelId: string; otherNovelId
   }
 }
 async function execution(f: { userId: string; novelId: string; sessionId: string; modelA: string }, prompt: string,
-  tool: typeof configureAgentTool | typeof modelAssignmentTool, args: Record<string, unknown>, prefs?: Awaited<ReturnType<typeof freezeModelAssignments>>) {
+  tool: typeof configureAgentTool | typeof modelAssignmentTool, args: Record<string, unknown>, prefs?: Awaited<ReturnType<typeof freezeModelAssignments>>,
+  frozenParameters?: Record<string, unknown>) {
   const runId = randomUUID(), messageId = randomUUID(), callId = randomUUID()
   const spec = buildTaskSpec({ runId, novelId: f.novelId, prompt })
   const request = withHumanAdmission({ sessionId: f.sessionId, novelId: f.novelId, prompt, mode: 'build', modelTier: 'custom', customModelId: f.modelA, reasoningEffort: 'low' })
@@ -71,7 +75,7 @@ async function execution(f: { userId: string; novelId: string; sessionId: string
     ...(prefs ? { modelAssignments: prefs } : {}),
     model: { tier: 'custom', customModelId: f.modelA, provider: 'openai', modelName: '模型A', reasoningEffort: 'low',
       routeRevision: modelRouteRevision({ provider: 'openai', model: '模型A', endpoint: 'https://fixture.invalid/v1/chat/completions', reasoningEffort: 'low' }) },
-    tools: [{ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } }],
+    tools: [{ type: 'function', function: { name: tool.name, description: tool.description, parameters: frozenParameters ?? z.toJSONSchema(tool.parameters, { io: 'input' }) } }],
     toolAuthority: [{ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
     snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
       messages: [{ role: 'system', content: '同一任务完整设定' }, { role: 'user', content: prompt },
@@ -79,7 +83,98 @@ async function execution(f: { userId: string; novelId: string; sessionId: string
   return { runId, root, lease, initial, callId }
 }
 
+function previousConfigurationParameters() {
+  return toOpenAIParameters(z.object({ model: agentModelSelectionSchema.optional(), reasoningEffort: modelReasoningEffortSchema.optional(),
+    creativeFreedom: z.enum(['stable', 'balanced', 'bold']).optional() }).strict()
+    .refine(value => !!value.model || !!value.reasoningEffort || !!value.creativeFreedom)
+    .refine(value => !value.model?.reasoningEffort || !value.reasoningEffort || value.model.reasoningEffort === value.reasoningEffort, '不能指定冲突的思考强度。'))
+}
+
 describe.runIf(available)('model assignments and native configuration real isolated PG', () => {
+  it.each(['idle', 'prepared'] as const)('resumes an exact frozen pre-window configuration call from %s without replacing its schema or operation identity', async phase => fixture(async f => {
+    const args = { model: { modelTier: 'custom' as const, customModelId: f.modelB } }
+    const oldParameters = previousConfigurationParameters()
+    const exec = await execution(f, '请切换到 模型B', configureAgentTool, args, undefined, oldParameters)
+    const prepared = phase === 'prepared' ? await prepareToolCursorOperation(exec.lease,
+      { expectedRevision: exec.initial.frame.revision, expectedHash: exec.initial.frame.snapshotHash }, { key: 'exec:0', action: 'agent_configure', callId: exec.callId,
+        effectDomain: 'configuration', targetId: exec.root.id, effectiveArgs: args, normalize: value => configureAgentSchema.parse(value), operationInput: runtimeJson({ callId: exec.callId, args }).value }) : null
+    expect((await executeDurableToolStep(exec.lease, new AbortController().signal)).kind).toBe('tool')
+    const after = await loadExecutionState(f.userId, exec.runId)
+    expect(after.configuration.tools[0].function.parameters).toEqual(oldParameters)
+    expect(after.configuration.model.customModelId).toBe(f.modelB)
+    expect(after.originalRequest).toEqual(exec.root.requestSnapshot)
+    expect(after.originalSpec).toEqual(exec.root.specSnapshot)
+    if (prepared) expect((await prisma.agentOperation.findUniqueOrThrow({ where: { id: prepared.operation.id } })).inputHash).toBe(prepared.operation.inputHash)
+    expect(await prisma.agentConfigurationChange.count({ where: { runId: exec.runId } })).toBe(1)
+  }))
+  it('reduces a deterministic schema rejection when a frozen old tool receives new window-target fields', async () => fixture(async f => {
+    const args = { sessionId: randomUUID(), expectedRevision: 0, model: { modelTier: 'custom' as const, customModelId: f.modelB } }
+    const oldParameters = previousConfigurationParameters()
+    const exec = await execution(f, '请切换到 模型B', configureAgentTool, args, undefined, oldParameters)
+    expect(await executeDurableToolStep(exec.lease, new AbortController().signal))
+      .toMatchObject({ kind: 'tool', result: { outcome: 'failed', failureCode: 'TOOL_SCHEMA_INVALID' } })
+    const state = await loadExecutionState(f.userId, exec.runId)
+    expect(state.configuration.model.customModelId).toBe(f.modelA)
+    expect(state.configuration.tools[0].function.parameters).toEqual(oldParameters)
+    expect(state.frame.state.phase).toBe('idle')
+    expect(state.frame.state.messages.at(-1)?.role).toBe('tool')
+    expect(await prisma.agentConfigurationChange.count({ where: { runId: exec.runId } })).toBe(0)
+    expect((await getWindowConfiguration(f.userId, f.sessionId)).revision).toBe(0)
+  }))
+  it.each(['current', 'other'] as const)('persists %s window config atomically and replays without changing another active snapshot or billing', async target => fixture(async f => {
+    const targetId = target === 'current' ? f.sessionId : randomUUID()
+    if (target === 'other') await prisma.agentSession.create({ data: { id: targetId, userId: f.userId, novelId: f.novelId, title: '审稿窗口' } })
+    const name = target === 'current' ? '当前窗口' : '窗口“审稿窗口”'
+    const args = { ...(target === 'other' ? { sessionId: targetId, expectedRevision: 0 } : {}),
+      model: { modelTier: 'custom' as const, customModelId: f.modelB }, creativeFreedom: 'bold' as const }
+    const exec = await execution(f, `${name}模型设为 模型B；${name}创作模式设为大胆`, configureAgentTool, args)
+    const before = (await loadExecutionState(f.userId, exec.runId)).configuration
+    const first = await executeDurableToolStep(exec.lease, new AbortController().signal)
+    expect(first.kind).toBe('tool')
+    const replay = await configureAgent({ userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, runId: exec.runId, chapterId: null,
+      callId: exec.callId, mode: 'build', creativeFreedom: 'stable', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }, args)
+    if (first.kind === 'tool') expect(replay.output).toBe(first.result.output)
+    expect(await getWindowConfiguration(f.userId, targetId)).toMatchObject({ revision: 1, configuration: {
+      model: { modelTier: 'custom', customModelId: f.modelB, reasoningEffort: 'high' }, creativeFreedom: 'bold' } })
+    const after = (await loadExecutionState(f.userId, exec.runId)).configuration
+    if (target === 'current') expect(after).toMatchObject({ model: { customModelId: f.modelB }, creativeFreedom: 'bold' })
+    else {
+      expect(after).toEqual(before)
+      expect((await getWindowConfiguration(f.userId, f.sessionId)).revision).toBe(0)
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: exec.runId } })).customModelId).toBe(f.modelA)
+    }
+    expect(await prisma.agentConfigurationChange.count({ where: { runId: exec.runId } })).toBe(1)
+    expect((await getModelAssignments(f.userId, f.novelId)).effective).toEqual({})
+    expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
+    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+  }))
+  it('requires the observed other-window revision and does not overwrite a later UI preference', async () => fixture(async f => {
+    const targetId = randomUUID()
+    await prisma.agentSession.create({ data: { id: targetId, userId: f.userId, novelId: f.novelId, title: '审稿窗口' } })
+    await patchWindowConfiguration(f.userId, targetId, { expectedRevision: 0, model: { modelTier: 'custom', customModelId: f.modelA } })
+    const args = { sessionId: targetId, expectedRevision: 0, model: { modelTier: 'custom' as const, customModelId: f.modelB } }
+    const exec = await execution(f, '窗口“审稿窗口”模型设为 模型B', configureAgentTool, args)
+    const result = await executeDurableToolStep(exec.lease, new AbortController().signal)
+    expect(result).toMatchObject({ kind: 'tool', result: { outcome: 'failed', failureCode: 'WINDOW_CONFIGURATION_CONFLICT' } })
+    expect(await getWindowConfiguration(f.userId, targetId)).toMatchObject({ revision: 1, configuration: { model: { customModelId: f.modelA } } })
+    expect(await prisma.agentConfigurationChange.count({ where: { runId: exec.runId } })).toBe(0)
+    const missing = await execution(f, '窗口“审稿窗口”模型设为 模型B', configureAgentTool, { sessionId: targetId, model: args.model })
+    expect(await executeDurableToolStep(missing.lease, new AbortController().signal))
+      .toMatchObject({ kind: 'tool', result: { outcome: 'failed', failureCode: 'WINDOW_CONFIGURATION_REVISION_REQUIRED' } })
+  }))
+  it('journals named-window config and polite revocation but retains mixed manuscript requests and fenced data as new work', async () => fixture(async f => {
+    await execution(f, '讨论现有人物', configureAgentTool, {})
+    await prisma.agentSession.create({ data: { userId: f.userId, novelId: f.novelId, title: '写下一章' } })
+    const input = (prompt: string) => ({ novelId: f.novelId, sessionId: f.sessionId, mode: 'build' as const, prompt })
+    for (const prompt of ['把窗口“写下一章”的模型设为 模型B', '请不要把窗口“写下一章”的模型设为 模型B']) {
+      expect(await prisma.$transaction(tx => bindConfigurationConsent(tx, f.userId, input(prompt)))).not.toBeNull()
+    }
+    const before = await prisma.agentMessage.count({ where: { sessionId: f.sessionId } })
+    for (const prompt of ['把窗口“写下一章”的模型设为 模型B。写下一章', '```text\n把窗口“写下一章”的模型设为 模型B\n```']) {
+      expect(await prisma.$transaction(tx => bindConfigurationConsent(tx, f.userId, input(prompt)))).toBeNull()
+    }
+    expect(await prisma.agentMessage.count({ where: { sessionId: f.sessionId } })).toBe(before)
+  }))
   it.each(['legacy', 'durable'] as const)('%s counts five real role assignments and deduplicates stored noops', async protocol => fixture(async f => {
     const roles = MODEL_ASSIGNMENT_TASKS.filter(task => ['quality', 'continuity', 'research_synthesis', 'style_learning', 'memory_graph'].includes(task.key))
     const prompt = roles.map(task => `${task.label}用 模型B`).join('；')

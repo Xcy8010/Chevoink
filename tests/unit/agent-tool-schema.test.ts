@@ -12,10 +12,24 @@ import { researchReportSaveParameters } from '../../api/lib/agent/research-sourc
 import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import type { TaskSpec } from '../../shared/contracts/index.js'
+import { configureAgentTool } from '../../api/lib/agent/tools/configuration-tools.js'
+import { agentModelSelectionSchema, modelReasoningEffortSchema } from '../../shared/contracts/agent-model-assignments.js'
 
 vi.mock('zod', async importOriginal => {
   const actual = await importOriginal<typeof import('zod')>()
   return { ...actual, z: { ...actual.z, toJSONSchema: vi.fn(actual.z.toJSONSchema) } }
+})
+
+it('preserves the exact pre-window agent_configure parameter schema for frozen calls', () => {
+  const previous = z.object({ model: agentModelSelectionSchema.optional(), reasoningEffort: modelReasoningEffortSchema.optional(),
+    creativeFreedom: z.enum(['stable', 'balanced', 'bold']).optional() }).strict()
+    .refine(value => !!value.model || !!value.reasoningEffort || !!value.creativeFreedom)
+    .refine(value => !value.model?.reasoningEffort || !value.reasoningEffort || value.model.reasoningEffort === value.reasoningEffort, '不能指定冲突的思考强度。')
+  const alternatives = originalToolParameterSchemas(configureAgentTool, { novelId: 'novel' })
+  expect(alternatives).toContainEqual(toOpenAIParameters(previous))
+  const historical = z.fromJSONSchema(toOpenAIParameters(previous))
+  expect(historical.safeParse({ model: { modelTier: 'speed' } }).success).toBe(true)
+  expect(historical.safeParse({ sessionId: 'other', expectedRevision: 0, model: { modelTier: 'speed' } }).success).toBe(false)
 })
 
 // 回归：novel_import 顶层 discriminatedUnion 转换后没有 type，DeepSeek 按 type null 拒绝，

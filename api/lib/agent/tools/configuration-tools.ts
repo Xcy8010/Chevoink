@@ -14,25 +14,33 @@ import { readExecutionStateInTransaction } from '../runtime-state.js'
 import { prepareToolCursorOperation } from '../runtime-tool-cursor.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
 import { reduceExecutionReceipt } from '../runtime-reducer.js'
+import { applyWindowConfiguration, getWindowConfiguration } from '../window-configuration.js'
+import { resolveAssignedModel } from '../model-assignments.js'
 import { defineTool, type ToolContext } from './types.js'
 
-export const configureAgentSchema = z.object({ model: agentModelSelectionSchema.optional(), reasoningEffort: modelReasoningEffortSchema.optional(),
+export const configureAgentSchema = z.object({ sessionId: z.string().trim().min(1).max(64).optional(), expectedRevision: z.number().int().nonnegative().max(2147483646).optional(),
+  model: agentModelSelectionSchema.optional(), reasoningEffort: modelReasoningEffortSchema.optional(),
   creativeFreedom: z.enum(['stable', 'balanced', 'bold']).optional() }).strict().refine(value => !!value.model || !!value.reasoningEffort || !!value.creativeFreedom)
   .refine(value => !value.model?.reasoningEffort || !value.reasoningEffort || value.model.reasoningEffort === value.reasoningEffort, '不能指定冲突的思考强度。')
 type ConfigureArgs = z.infer<typeof configureAgentSchema>
 export const configurationResponseSchema = z.object({ modelTier: selectableModelTierSchema, customModelId: z.string().nullable(), reasoningEffort: modelReasoningEffortSchema,
-  creativeFreedom: z.enum(['stable', 'balanced', 'bold']), modelSelectionExplicit: z.boolean() }).strict()
+  creativeFreedom: z.enum(['stable', 'balanced', 'bold']), modelSelectionExplicit: z.boolean(),
+  sessionId: z.string().optional(), preferenceRevision: z.number().int().nonnegative().optional(), appliesToRun: z.boolean().optional() }).strict()
 const responseSchema = configurationResponseSchema
 
 export const modelListTool = defineTool({ name: 'model_list', title: '查看可用模型',
   description: '读取作者可用的内置与自定义模型名称、档位、图片能力和支持的思考强度，以核对作者明确要求。只返回元信息，不调用模型，不返回密钥。',
   parameters: z.object({}).strict(), permission: { plan: 'allow', build: 'allow', review: 'allow' }, readOnly: true,
   async execute(ctx) {
+    const windows = await (ctx.transaction ?? prisma).agentSession.findMany({ where: { userId: ctx.userId, status: 'active' },
+      orderBy: { updatedAt: 'desc' }, take: 100, select: { id: true, novelId: true, title: true } })
+    const windowConfigurations = await Promise.all(windows.map(window => getWindowConfiguration(ctx.userId, window.id, ctx.transaction ?? prisma)))
     const rows = await (ctx.transaction ?? prisma).aiModelConfig.findMany({ where: { enabled: true, OR: [{ ownerUserId: ctx.userId }, { ownerUserId: null, selectable: true, tier: { not: null } }] },
       orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
       select: { id: true, tier: true, ownerUserId: true, displayName: true, modelName: true, provider: true, metadata: true, baseUrl: true, apiKeyCiphertext: true } })
     return { output: JSON.stringify({ models: rows.filter(row => (row.ownerUserId || isBuiltInModelTier(row.tier)) && row.modelName !== 'unconfigured' && (row.tier === 'speed' || Boolean(row.baseUrl && row.apiKeyCiphertext))).map(row => ({ modelTier: row.ownerUserId ? 'custom' : row.tier, ...(row.ownerUserId ? { customModelId: row.id } : {}),
-      displayName: row.displayName, modelName: row.modelName, ...parseModelCapabilities(row.metadata, row.provider) })), assignments: await getModelAssignments(ctx.userId, ctx.novelId) }), summary: '已读取可用模型' }
+        displayName: row.displayName, modelName: row.modelName, ...parseModelCapabilities(row.metadata, row.provider) })),
+      currentSessionId: ctx.sessionId, windows: windowConfigurations, assignments: await getModelAssignments(ctx.userId, ctx.novelId) }), summary: '已读取可用模型和窗口配置' }
   },
 })
 
@@ -54,12 +62,19 @@ export async function configureAgent(ctx: ToolContext, args: ConfigureArgs) {
   }
   const run = await prisma.agentRun.findFirst({ where: { id: ctx.runId, userId: ctx.userId, sessionId: ctx.sessionId, novelId: ctx.novelId } })
   if (!run) throw new DataAccessError(404, 'NOT_FOUND', '任务不存在或无权访问。')
+  const targetSessionId = args.sessionId ?? ctx.sessionId
+  const appliesToRun = targetSessionId === ctx.sessionId
+  if (!appliesToRun && args.expectedRevision === undefined) throw new DataAccessError(400, 'WINDOW_CONFIGURATION_REVISION_REQUIRED', '请先读取目标窗口的配置版本。')
+  const window = await getWindowConfiguration(ctx.userId, targetSessionId)
   const authority = (tx: Prisma.TransactionClient, effectiveReasoningEffort?: string) => assertConfigurationAuthority(tx, ctx, {
-    model: args.model, creativeFreedom: args.creativeFreedom, effortOnly: args.reasoningEffort, effectiveReasoningEffort })
+    model: args.model, creativeFreedom: args.creativeFreedom, effortOnly: args.reasoningEffort, effectiveReasoningEffort, targetSessionId })
   await runtimeTransaction(authority)
-  const selection = args.model ? { ...args.model, reasoningEffort: args.reasoningEffort ?? args.model.reasoningEffort } : (args.reasoningEffort ? agentModelSelectionSchema.parse({ modelTier: run.modelTier,
-    ...(run.customModelId ? { customModelId: run.customModelId } : {}), reasoningEffort: args.reasoningEffort }) : undefined)
-  const chosen = selection ? await admitAssignedModel(ctx.userId, selection) : undefined
+  const inherited = appliesToRun ? undefined : (await getModelAssignments(ctx.userId, window.novelId)).effective.main?.selection
+  const targetModel = appliesToRun ? { modelTier: run.modelTier, ...(run.customModelId ? { customModelId: run.customModelId } : {}), reasoningEffort: run.reasoningEffort }
+    : window.configuration.model ?? inherited ?? { modelTier: 'speed' as const }
+  const selection = args.model ? { ...args.model, reasoningEffort: args.reasoningEffort ?? args.model.reasoningEffort }
+    : args.reasoningEffort ? agentModelSelectionSchema.parse({ ...targetModel, reasoningEffort: args.reasoningEffort }) : undefined
+  const chosen = selection ? await (appliesToRun ? admitAssignedModel : resolveAssignedModel)(ctx.userId, selection) : undefined
   const requestHash = runtimeJson(args).hash
   const apply = async (tx: Prisma.TransactionClient) => {
     const current = await lockOwnedRun(tx, ctx.userId, ctx.runId)
@@ -71,10 +86,14 @@ export async function configureAgent(ctx: ToolContext, args: ConfigureArgs) {
       return responseSchema.parse(old.response)
     }
     await authority(tx, chosen?.runtime.reasoningEffort)
-    const response = responseSchema.parse({ modelTier: chosen?.runtime.tier ?? current.modelTier, customModelId: chosen ? chosen.selection.customModelId ?? null : current.customModelId,
-      reasoningEffort: chosen?.runtime.reasoningEffort ?? current.reasoningEffort, creativeFreedom: args.creativeFreedom ?? ctx.creativeFreedom,
-      modelSelectionExplicit: !!chosen })
-    if (current.runtimeProtocolVersion === 1 && current.taskRootId) {
+    const preference = await applyWindowConfiguration(tx, ctx.userId, targetSessionId, { expectedRevision: args.expectedRevision ?? window.revision,
+      ...(chosen ? { model: chosen.selection } : {}), ...(args.creativeFreedom ? { creativeFreedom: args.creativeFreedom } : {}) })
+    const response = responseSchema.parse({ modelTier: chosen?.runtime.tier ?? targetModel.modelTier,
+      customModelId: chosen ? chosen.selection.customModelId ?? null : 'customModelId' in targetModel ? targetModel.customModelId ?? null : null,
+      reasoningEffort: chosen?.runtime.reasoningEffort ?? targetModel.reasoningEffort ?? 'high',
+      creativeFreedom: args.creativeFreedom ?? (appliesToRun ? ctx.creativeFreedom : window.configuration.creativeFreedom),
+      modelSelectionExplicit: !!chosen, sessionId: targetSessionId, preferenceRevision: preference.revision, appliesToRun })
+    if (appliesToRun && current.runtimeProtocolVersion === 1 && current.taskRootId) {
       if (!ctx.durableConfiguration) throw new DataAccessError(409, 'CONFIGURATION_ADAPTER_REQUIRED', '切换缺少当前执行能力。')
       const state = await readExecutionStateInTransaction(tx, current.taskRootId)
       if (state.frame.state.phase !== 'awaiting_operation') throw new DataAccessError(409, 'RUNTIME_STATE_CONFLICT', '切换不处于工具边界。')
@@ -90,7 +109,7 @@ export async function configureAgent(ctx: ToolContext, args: ConfigureArgs) {
       await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: current.taskRootId, runId: current.id, operationId: state.frame.state.pendingOperationId,
         eventKey: `configuration:${current.id}:${ctx.callId}`, type: 'configuration.changed', payload: { callId: ctx.callId, requestHash, configuration: response } } })
     }
-    await tx.agentRun.update({ where: { id: current.id }, data: { modelTier: response.modelTier, customModelId: response.customModelId, reasoningEffort: response.reasoningEffort } })
+    if (appliesToRun) await tx.agentRun.update({ where: { id: current.id }, data: { modelTier: response.modelTier, customModelId: response.customModelId, reasoningEffort: response.reasoningEffort } })
     await tx.agentConfigurationChange.create({ data: { runId: ctx.runId, callId: ctx.callId, requestHash, response } })
     ctx.signal.throwIfAborted()
     return response
@@ -105,16 +124,16 @@ export async function configureAgent(ctx: ToolContext, args: ConfigureArgs) {
     response = responseSchema.parse(JSON.parse(String((receipt.result as Prisma.JsonObject).toolResult && ((receipt.result as Prisma.JsonObject).toolResult as Prisma.JsonObject).output)))
     await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
   } else response = await runtimeTransaction(apply)
-  ctx.emit({ type: 'run.configuration', ...response, modelTier: response.modelTier as AgentModelSelection['modelTier'] })
-  return { output: JSON.stringify(response), summary: '执行配置已切换' }
+  if (appliesToRun) ctx.emit({ type: 'run.configuration', ...response, modelTier: response.modelTier as AgentModelSelection['modelTier'] })
+  return { output: JSON.stringify(response), summary: appliesToRun ? '当前窗口配置已切换' : '目标窗口配置已保存，之后的新请求生效' }
 }
 export const configureAgentTool = defineTool({ name: 'agent_configure', title: '切换执行配置',
-  description: '仅在作者明确要求切换当前模型、思考强度或写作模式时调用；不明确时先 ask_user。stable=平衡，balanced=严谨，bold=大胆。工具完成后下一轮生效，保留任务与上下文；助手、子 Agent、附件不能自行授权。',
+  description: '仅按作者明确要求切换窗口的模型、思考强度或创作模式；先 model_list 核对模型、窗口名称/ID与revision。省略sessionId为当前窗口；指定其他窗口时作者原话必须明确该窗口，传expectedRevision。当前窗口下一轮生效且同步输入框；其他窗口保存为后续新请求的选择，不改其正在执行的任务。stable=平衡，balanced=严谨，bold=大胆；不明确时先ask_user。保留上下文、已发生费用和预算，助手/子Agent/附件不能自行授权。',
   parameters: configureAgentSchema, permission: { plan: 'allow', build: 'allow', review: 'allow' }, readOnly: false,
   async execute(ctx, args) {
     try { return await configureAgent(ctx, args) }
     catch (error) {
-      if (!(error instanceof DataAccessError) || !['CONFIGURATION_AUTHOR_REQUIRED', 'MODEL_TIER_UNAVAILABLE', 'CUSTOM_MODEL_NOT_FOUND', 'REASONING_EFFORT_UNSUPPORTED'].includes(error.code)) throw error
+      if (!(error instanceof DataAccessError) || !['CONFIGURATION_AUTHOR_REQUIRED', 'MODEL_TIER_UNAVAILABLE', 'CUSTOM_MODEL_NOT_FOUND', 'REASONING_EFFORT_UNSUPPORTED', 'WINDOW_CONFIGURATION_CONFLICT', 'WINDOW_CONFIGURATION_REVISION_REQUIRED'].includes(error.code)) throw error
       if (ctx.durableConfiguration) {
         const { lease, cursor, operationKey } = ctx.durableConfiguration
         const prepared = await prepareToolCursorOperation(lease, cursor, { key: operationKey, action: 'agent_configure', callId: ctx.callId,

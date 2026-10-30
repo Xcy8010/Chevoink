@@ -3,6 +3,8 @@ import styleLearningRouter from './style-learning.js'
 import agentGoalsRouter from './agent-goals.js'
 import { z } from 'zod'
 import { patchModelAssignmentsSchema } from '../../shared/contracts/agent-model-assignments.js'
+import { patchAgentWindowConfigurationSchema } from '../../shared/contracts/agent-window-configuration.js'
+import { getWindowConfiguration, patchWindowConfiguration } from '../lib/agent/window-configuration.js'
 import { getModelAssignments, patchModelAssignments } from '../lib/agent/model-assignments.js'
 import { readAgentCreationState } from '../lib/agent/creation-state.js'
 
@@ -102,6 +104,22 @@ router.patch('/model-assignments', async (req, res) => {
   } catch (error) { sendRouteError(res, requestId, error) }
 })
 import { actOnQueuedRequest, enqueueRequest, listQueuedRequests } from '../lib/agent/request-queue.js'
+
+router.get('/sessions/:sessionId/configuration', async (req, res) => {
+  const requestId = createRequestId()
+  try {
+    const userId = requireSessionUserId(req)
+    res.status(200).json(buildSuccess(requestId, await getWindowConfiguration(userId, req.params.sessionId)))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
+router.patch('/sessions/:sessionId/configuration', async (req, res) => {
+  const requestId = createRequestId()
+  try {
+    const userId = requireSessionUserId(req)
+    const body = parseBody(patchAgentWindowConfigurationSchema, req.body, '请提供窗口配置。')
+    res.status(200).json(buildSuccess(requestId, await patchWindowConfiguration(userId, req.params.sessionId, body)))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
 
 router.get('/sessions/:sessionId/queue', async (req, res) => {
   const requestId = createRequestId()
