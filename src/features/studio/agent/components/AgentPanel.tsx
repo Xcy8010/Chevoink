@@ -278,7 +278,7 @@ export function AgentPanel({
   const preferenceRefresh = useRef<() => void>(() => {})
   const handleStreamEvent = useCallback((event: AgentStreamEvent) => {
     if (event.type === 'run.configuration') configurationHandler.current(event)
-    if (event.type === 'tool.result' && event.toolName === 'agent_configure') preferenceRefresh.current()
+    if (event.type === 'tool.result' && (event.toolName === 'agent_configure' || event.toolName === 'model_assign')) preferenceRefresh.current()
     onStreamEvent?.(event)
   }, [onStreamEvent])
   const { connect, disconnect } = useAgentStream(handleStreamEvent, reconcileActiveStreamError)
@@ -430,7 +430,10 @@ export function AgentPanel({
   configurationHandler.current = event => {
     modelPreference.applyConfiguration(event)
   }
-  preferenceRefresh.current = () => { void queryClient.invalidateQueries({ queryKey: ['agent', 'window-configuration'] }) }
+  preferenceRefresh.current = () => {
+    void queryClient.invalidateQueries({ queryKey: ['agent', 'window-configuration'] })
+    void queryClient.invalidateQueries({ queryKey: ['agent', 'model-assignments'] })
+  }
   /** 用户气泡附件图片的大图预览 */
   const [attachmentPreview, setAttachmentPreview] = useState<{ url: string; name: string } | null>(null)
   const [quotaDialogOpen, setQuotaDialogOpen] = useState(false)

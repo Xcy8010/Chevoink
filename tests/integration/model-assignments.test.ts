@@ -61,10 +61,11 @@ async function fixture(work: (f: { userId: string; novelId: string; otherNovelId
 }
 async function execution(f: { userId: string; novelId: string; sessionId: string; modelA: string }, prompt: string,
   tool: typeof configureAgentTool | typeof modelAssignmentTool, args: Record<string, unknown>, prefs?: Awaited<ReturnType<typeof freezeModelAssignments>>,
-  frozenParameters?: Record<string, unknown>) {
+  frozenParameters?: Record<string, unknown>, explicitModel = false) {
   const runId = randomUUID(), messageId = randomUUID(), callId = randomUUID()
   const spec = buildTaskSpec({ runId, novelId: f.novelId, prompt })
-  const request = withHumanAdmission({ sessionId: f.sessionId, novelId: f.novelId, prompt, mode: 'build', modelTier: 'custom', customModelId: f.modelA, reasoningEffort: 'low' })
+  const request = withHumanAdmission({ sessionId: f.sessionId, novelId: f.novelId, prompt, mode: 'build', modelTier: 'custom', customModelId: f.modelA, reasoningEffort: 'low',
+    ...(prefs ? { modelAssignments: prefs } : {}), ...(explicitModel ? { modelSelectionExplicit: true } : {}) })
   await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, engine: 'loop', mode: 'act',
     action: 'workspaceAgent', agentType: 'writingOrchestrator', modelTier: 'custom', customModelId: f.modelA, reasoningEffort: 'low', taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value, startRequest: request } })
   await prisma.agentMessage.create({ data: { id: messageId, runId, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
@@ -91,6 +92,19 @@ function previousConfigurationParameters() {
 }
 
 describe.runIf(available)('model assignments and native configuration real isolated PG', () => {
+  it.each([true, false])('preserves active explicit selection=%s independently of preferences for future requests', async explicit => fixture(async f => {
+    await patchModelAssignments(f.userId, { scope: 'global', expectedRevision: 0, assignments: { main: { modelTier: 'custom', customModelId: f.modelA } } })
+    const frozen = await freezeModelAssignments(f.userId, f.novelId)
+    const args = { task: 'main' as const, model: { modelTier: 'custom' as const, customModelId: f.modelB }, scope: 'global' as const, expectedRevision: 1 }
+    const exec = await execution(f, '全局主Agent用 模型B', modelAssignmentTool, args, frozen, undefined, explicit)
+    await patchWindowConfiguration(f.userId, f.sessionId, { expectedRevision: 0,
+      model: explicit ? null : { modelTier: 'custom', customModelId: f.modelA } })
+    expect((await executeDurableToolStep(exec.lease, new AbortController().signal)).kind).toBe('tool')
+    const state = await loadExecutionState(f.userId, exec.runId)
+    expect(state.configuration.model.customModelId).toBe(explicit ? f.modelA : f.modelB)
+    expect((await getModelAssignments(f.userId, f.novelId)).effective.main?.selection.customModelId).toBe(f.modelB)
+    expect((await getWindowConfiguration(f.userId, f.sessionId)).configuration.model?.customModelId ?? null).toBe(explicit ? null : f.modelA)
+  }))
   it.each(['idle', 'prepared'] as const)('resumes an exact frozen pre-window configuration call from %s without replacing its schema or operation identity', async phase => fixture(async f => {
     const args = { model: { modelTier: 'custom' as const, customModelId: f.modelB } }
     const oldParameters = previousConfigurationParameters()

@@ -654,7 +654,7 @@ function WritingPanel(props: Props) {
 
   return (
     <div className="space-y-7">
-      <SettingsGroup title={`当前窗口的创作模式（${props.taskTitle || preferences.title || '新任务'}）`}>
+      <SettingsGroup title={`当前窗口的创作模式（${preferences.title || props.taskTitle || '新任务'}）`}>
         {preferences.error ? <p role="alert" className="py-2 text-xs text-rose-500">{preferences.error}</p> : null}
         <div className="divide-y divide-[var(--border-subtle)] border-y border-[var(--border-subtle)]">
           {FREEDOM_OPTIONS.map((option) => (

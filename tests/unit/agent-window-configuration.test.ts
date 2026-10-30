@@ -8,7 +8,7 @@ vi.mock('../../api/lib/prisma.js', () => {
     prisma: { ...db, $transaction: (work: (tx: typeof db) => unknown) => work(db) } }
 })
 vi.mock('../../api/lib/agent/model-assignments.js', () => ({ resolveAssignedModel: mocks.resolve }))
-import { getWindowConfiguration, patchWindowConfiguration, windowConfigurationKey } from '../../api/lib/agent/window-configuration.js'
+import { getWindowConfiguration, patchWindowConfiguration, windowConfigurationKey, readRunWindowConfiguration } from '../../api/lib/agent/window-configuration.js'
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -20,6 +20,18 @@ beforeEach(() => {
   mocks.resolve.mockImplementation(async (_user, selection) => ({ selection: { ...selection, reasoningEffort: selection.reasoningEffort ?? 'medium' } }))
 })
 describe('owned independent window configuration', () => {
+  it('classifies active selection from immutable admission and same-root controls without consulting future preferences', async () => {
+    const run = { id: 'run-a', userId: 'owner', novelId: 'novel', sessionId: 'window-a', taskRootId: 'root',
+      startRequest: { modelSelectionExplicit: true }, taskSpec: { creativeFreedom: 'stable' } }
+    const db = { agentConfigurationChange: { findMany: mocks.history } } as unknown as Parameters<typeof readRunWindowConfiguration>[0]
+    expect(await readRunWindowConfiguration(db, run)).toMatchObject({ modelSelectionSource: 'explicit', creativeFreedom: 'stable' })
+    mocks.history.mockResolvedValue([{ response: { modelAssignments: {}, configuration: { modelSelectionExplicit: true } } }])
+    expect(await readRunWindowConfiguration(db, run)).toMatchObject({ modelSelectionSource: 'inherited' })
+    mocks.history.mockResolvedValue([{ response: { modelSelectionExplicit: true, creativeFreedom: 'bold' } },
+      { response: { modelAssignments: {}, configuration: { modelSelectionExplicit: true } } }])
+    expect(await readRunWindowConfiguration(db, run)).toMatchObject({ modelSelectionSource: 'explicit', creativeFreedom: 'bold' })
+    expect(mocks.read).not.toHaveBeenCalled()
+  })
   it('restores a resumed task from same-root receipts and preserves the latest model-setting source', async () => {
     mocks.latest.mockResolvedValue({ modelTier: 'custom', customModelId: 'model-b', reasoningEffort: 'high', taskRootId: 'root',
       startRequest: { modelAssignments: { assignments: { main: { modelTier: 'custom', customModelId: 'model-a' } } } }, taskSpec: { creativeFreedom: 'stable' }, configurationChanges: [] })

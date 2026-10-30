@@ -42,6 +42,23 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => {}); cleanup(); vi.unstubAllGlobals() })
 
 describe('Agent model preference ownership', () => {
+  it.each([true, false])('refreshes inherited assignments after server configuration while preserving explicit window choice=%s', async explicit => {
+    if (explicit) windows.set('session-a', { sessionId: 'session-a', novelId: 'novel-a', title: 'A', revision: 1,
+      configuration: { model: { modelTier: 'custom', customModelId: 'custom-a', reasoningEffort: 'medium' }, creativeFreedom: 'balanced' } })
+    const { result } = mount()
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.customModelId).toBe('custom-a')
+    api.assignments.mockResolvedValue({ ...payload(false), effective: { main: { source: 'global', selection: { modelTier: 'ultimate', reasoningEffort: 'high' } } } })
+    const event = configuration()
+    act(() => {
+      useAgentStore.getState().applyEvent(event)
+      expect(result.current.applyConfiguration(event)).toBe(true)
+    })
+    await waitFor(() => expect(api.assignments).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(result.current.modelTier).toBe(explicit ? 'custom' : 'ultimate'))
+    expect(result.current.explicit).toBe(explicit)
+    expect(api.request.mock.calls.filter(([, options]) => options?.method === 'PATCH')).toHaveLength(0)
+  })
   it('inherits global main without converting it to an explicit choice or leaking it into local defaults', async () => {
     const { result } = mount()
     await waitFor(() => expect(result.current.loading).toBe(false))

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { Prisma } from '@prisma/client'
-import { agentWindowConfigurationSchema, type AgentWindowConfigurationPayload, type PatchAgentWindowConfiguration } from '../../../shared/contracts/agent-window-configuration.js'
+import { Prisma, type AgentRun } from '@prisma/client'
+import { agentWindowConfigurationSchema, type AgentWindowConfiguration, type AgentWindowConfigurationPayload, type PatchAgentWindowConfiguration } from '../../../shared/contracts/agent-window-configuration.js'
 import { prisma, DataAccessError } from '../prisma.js'
 import { resolveAssignedModel } from './model-assignments.js'
 import { agentModelSelectionSchema } from '../../../shared/contracts/agent-model-assignments.js'
@@ -10,6 +10,30 @@ import { MAIN_RUN_FILTER } from './runtime-child.js'
 // fixed-length key keeps the session namespace separate from novel/global rows.
 export function windowConfigurationKey(sessionId: string) {
   return createHash('sha256').update(`agent-window:${sessionId}`).digest('hex')
+}
+
+function projectRunWindowConfiguration(startRequest: Prisma.JsonValue | null, taskSpec: Prisma.JsonValue | null,
+  history: ReadonlyArray<{ response: Prisma.JsonValue }>): { modelSelectionSource: NonNullable<AgentWindowConfigurationPayload['modelSelectionSource']>; creativeFreedom: AgentWindowConfiguration['creativeFreedom'] } {
+  const request = startRequest as Prisma.JsonObject | null
+  const spec = taskSpec as Prisma.JsonObject | null
+  const changes = history.map(change => change.response as Prisma.JsonObject).filter(change => change.appliesToRun !== false)
+  const applied = changes.map(change => (change.configuration ?? change) as Prisma.JsonObject)
+  const modelChange = changes.find(change => ((change.configuration ?? change) as Prisma.JsonObject).modelSelectionExplicit === true)
+  const assignments = (request?.modelAssignments as Prisma.JsonObject | undefined)?.assignments as Prisma.JsonObject | undefined
+  const inherited = modelChange ? Boolean(modelChange.modelAssignments)
+    : request?.modelSelectionExplicit !== true && Boolean(assignments?.main || assignments?.chapter_writing)
+  const mode = applied.map(change => change.creativeFreedom).find(value => value === 'stable' || value === 'balanced' || value === 'bold')
+    ?? spec?.creativeFreedom ?? request?.creativeFreedom
+  return { modelSelectionSource: inherited ? 'inherited' : modelChange || request?.modelSelectionExplicit === true ? 'explicit' : 'unknown',
+    creativeFreedom: mode === 'stable' || mode === 'bold' ? mode : 'balanced' }
+}
+
+/** Active-run ownership is independent of preferences for future requests. */
+export async function readRunWindowConfiguration(db: Prisma.TransactionClient | typeof prisma,
+  run: Pick<AgentRun, 'id' | 'userId' | 'sessionId' | 'novelId' | 'taskRootId' | 'startRequest' | 'taskSpec'>) {
+  const history = await db.agentConfigurationChange.findMany({ where: { run: { userId: run.userId, sessionId: run.sessionId, novelId: run.novelId,
+    ...(run.taskRootId ? { taskRootId: run.taskRootId } : { id: run.id }) } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { response: true } })
+  return projectRunWindowConfiguration(run.startRequest, run.taskSpec, history)
 }
 
 export async function getWindowConfiguration(userId: string, sessionId: string, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<AgentWindowConfigurationPayload> {
@@ -22,26 +46,17 @@ export async function getWindowConfiguration(userId: string, sessionId: string, 
       select: { modelTier: true, customModelId: true, reasoningEffort: true, startRequest: true, taskSpec: true, taskRootId: true,
         configurationChanges: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { response: true } } } })
     if (latest) {
-      const request = latest.startRequest as Prisma.JsonObject | null
-      const spec = latest.taskSpec as Prisma.JsonObject | null
       const history = latest.taskRootId ? await db.agentConfigurationChange.findMany({
         where: { run: { taskRootId: latest.taskRootId, userId, sessionId, novelId: session.novelId } },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { response: true },
       }) : latest.configurationChanges
-      const changes = history.map(change => change.response as Prisma.JsonObject).filter(change => change.appliesToRun !== false)
-      const applied = changes.map(change => (change.configuration ?? change) as Prisma.JsonObject)
-      const modelChange = changes.find(change => ((change.configuration ?? change) as Prisma.JsonObject).modelSelectionExplicit === true)
-      const assignments = (request?.modelAssignments as Prisma.JsonObject | undefined)?.assignments as Prisma.JsonObject | undefined
-      const inherited = modelChange ? Boolean(modelChange.modelAssignments)
-        : request?.modelSelectionExplicit !== true && Boolean(assignments?.main || assignments?.chapter_writing)
+      const restored = projectRunWindowConfiguration(latest.startRequest, latest.taskSpec, history)
       const model = agentModelSelectionSchema.safeParse({ modelTier: latest.modelTier,
         ...(latest.customModelId ? { customModelId: latest.customModelId } : {}), reasoningEffort: latest.reasoningEffort })
-      const mode = applied.map(change => change.creativeFreedom).find(value => value === 'stable' || value === 'balanced' || value === 'bold')
-        ?? spec?.creativeFreedom ?? request?.creativeFreedom
       return { sessionId, novelId: session.novelId, title: session.title, revision: 0, source: 'last_run',
-        modelSelectionSource: inherited ? 'inherited' : modelChange || request?.modelSelectionExplicit === true ? 'explicit' : 'unknown',
-        configuration: { model: inherited || !model.success ? null : model.data,
-          creativeFreedom: mode === 'stable' || mode === 'bold' ? mode : 'balanced' } }
+        modelSelectionSource: restored.modelSelectionSource,
+        configuration: { model: restored.modelSelectionSource === 'inherited' || !model.success ? null : model.data,
+          creativeFreedom: restored.creativeFreedom } }
     }
   }
   return { sessionId, novelId: session.novelId, title: session.title, revision: stored?.revision ?? 0,

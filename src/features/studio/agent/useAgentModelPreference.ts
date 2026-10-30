@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { requestJson } from '@/app/api-client'
 import type { AgentStreamEvent, CreditModelTier, ModelReasoningEffort } from '../../../../shared/contracts/index.js'
 import type { ModelAssignmentsPayload } from '../../../../shared/contracts/agent-model-assignments.js'
@@ -17,6 +17,7 @@ export function resolveComposerModelEffort(preferred: ModelReasoningEffort | und
 }
 
 export function useAgentModelPreference(novelId: string, sessionId: string | null, draftScope = '') {
+  const queryClient = useQueryClient()
   const [fallbackTier, setFallbackTier] = useState<CreditModelTier>('speed')
   const windowConfiguration = useAgentWindowConfiguration(novelId, sessionId, draftScope)
   const scope = `${novelId}:${sessionId ?? `draft:${draftScope}`}`
@@ -62,6 +63,7 @@ export function useAgentModelPreference(novelId: string, sessionId: string | nul
     seenConfiguration.current = { runId: event.runId, seq: event.seq }
     // A run snapshot is immutable history; refresh the separately owned window preference.
     void windowConfiguration.refresh()
+    void queryClient.invalidateQueries({ queryKey: ['agent', 'model-assignments'] })
     return true
   }
   return { modelTier: choice.modelTier, customModelId: choice.customModelId ?? null, reasoningSelections: effectiveReasoningSelections,

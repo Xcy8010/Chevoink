@@ -14,6 +14,7 @@ import { taskSpecSchema } from '../../../../shared/contracts/task-spec-contracts
 import { modelRouteRevision } from '../runtime-model-cursor.js'
 import { env } from '../../../config/env.js'
 import { configurationResponseSchema } from './configuration-tools.js'
+import { readRunWindowConfiguration } from '../window-configuration.js'
 
 type AssignmentResponse = { modelAssignments: FrozenModelAssignments; configuration?: import('zod').infer<typeof configurationResponseSchema>;
   semanticTransition?: { targetId: string; beforeHash: string; afterHash: string } }
@@ -26,7 +27,7 @@ const schema = z.object({ task: modelAssignmentTaskSchema, model: agentModelSele
   scope: z.enum(['novel', 'global']).default('novel'), expectedRevision: z.number().int().nonnegative().max(2147483646) }).strict()
 
 export const modelAssignmentTool = defineTool({ name: 'model_assign', title: '分配任务模型',
-  description: '仅按作者明确的“某项任务用某模型”要求保存任务模型和思考强度。默认仅当前作品；只有作者明确全局或所有作品时使用 global。先 model_list 读取配置版本，再传 expectedRevision。不会修改已有付费操作或重置任务预算。',
+  description: '仅按作者明确的“某项任务用某模型”要求保存任务模型和思考强度。默认仅当前作品；只有作者明确全局或所有作品时使用 global。先 model_list 读取配置版本，再传 expectedRevision。窗口已独立指定的主模型保持该选择；要切换窗口模型使用 agent_configure。不会修改已有付费操作或重置任务预算。',
   parameters: schema, permission: { plan: 'allow', build: 'allow', review: 'allow' }, readOnly: false,
   async execute(ctx, args) {
     const capability = ctx.durableConfiguration
@@ -77,7 +78,9 @@ export const modelAssignmentTool = defineTool({ name: 'model_assign', title: '�
         else frozen.novelRevision = args.expectedRevision + 1
         const spec = taskSpecSchema.safeParse(run.taskSpec)
         const writing = spec.success && ['write', 'revise'].includes(spec.data.intent) && !['proposal_only', 'conversation_only'].includes(spec.data.writingPacing ?? '')
-        const appliesMain = !preserveNovel && (args.task === 'chapter_writing' && writing || args.task === 'main' && !(writing && frozen.assignments.chapter_writing))
+        const window = await readRunWindowConfiguration(tx, run)
+        const preserveWindow = window.modelSelectionSource === 'explicit'
+        const appliesMain = !preserveNovel && !preserveWindow && (args.task === 'chapter_writing' && writing || args.task === 'main' && !(writing && frozen.assignments.chapter_writing))
         const semanticTransition = { targetId: `model-assignment:${ctx.userId}:${scopeKey}:${args.task}`,
           beforeHash: runtimeJson({ selection: beforeSelection }).hash, afterHash: runtimeJson({ selection: assigned[args.task] ?? null }).hash }
         const response: AssignmentResponse = { modelAssignments: frozen, semanticTransition, ...(appliesMain ? { configuration: configurationResponseSchema.parse({ modelTier: selected.runtime.tier,
