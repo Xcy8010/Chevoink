@@ -40,11 +40,14 @@ describe.runIf(available)('unbound conversation through the real legacy loop and
       runtimeProtocolVersion: 0, manuscriptRevision: novel.manuscriptRevision, startRequest: { prompt } } })
     const subject = { userId: f.userId, novelId: novel.id, sessionId: session.id, runId }
     const fresh = buildTaskSpec({ runId, novelId: novel.id, chapterId: chapter.id, prompt, authorWritingProtocol: 2 })
-    const spec = { ...await prisma.$transaction(tx => freezeWritingScope(tx, subject, fresh, prompt, 2)), responseDeliveryProtocol: 1 as const }
+    const frozen = { ...await prisma.$transaction(tx => freezeWritingScope(tx, subject, fresh, prompt, 2)), responseDeliveryProtocol: 1 as const }
+    // Mirror HTTP admission's JSON boundary before capturing the persisted contract.
+    const spec = JSON.parse(JSON.stringify(frozen)) as typeof frozen
+    const admitted = runtimeJson(spec)
     expect(spec.scope.authorEffects?.manuscript).toBe(true)
     expect(spec.scope.writing?.kind).toBe('bounded')
-    await prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: runtimeJson(spec).value } })
-    const hash = runtimeJson(spec).hash
+    await prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: admitted.value } })
+    const hash = admitted.hash
     vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 0, provider: 'fixture',
       modelName: 'fixture-main', baseUrl: 'https://provider.invalid/v1', apiKey: null, reasoningEffort: 'high',
       reasoningEfforts: ['high'], visionEnabled: false, contextWindowTokens: 128000 })
