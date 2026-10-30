@@ -30,10 +30,10 @@ describe('fresh external craft research admission', () => {
       expect(spec.researchReadAccess).toBe('denied')
       expect(renderTaskSpec(spec)).toContain('不提供或执行web_read')
     })
-  it('freezes explicit source domains while preserving ordinary read permission and old contracts', () => {
+  it('keeps a platform preference open while preserving ordinary read permission and old contracts', () => {
     const prompt = '联网研究《样本》的写作手法，搜索番茄小说并读取公开正文'
     const spec = buildTaskSpec({ runId: 'r', novelId: 'n', researchAdmission: 1, prompt })
-    expect(spec.researchTarget?.sourceHosts).toEqual(['fanqienovel.com'])
+    expect(spec.researchTarget?.sourceHosts).toBeUndefined()
     expect(spec.researchDiscoveryProtocol).toBe(1)
     expect(spec.researchReadAccess).toBeUndefined()
     expect(buildTaskSpec({ runId: 'old', novelId: 'n', prompt }).researchDiscoveryProtocol).toBeUndefined()
@@ -85,7 +85,9 @@ describe('fresh external craft research admission', () => {
     expect(guidance).toContain('最多5次搜索、8次页面获取')
     expect(guidance).toContain('不把平台首页当作品页')
     expect(guidance).toContain('没有读到章节正文')
-    expect(guidance).toContain('连续两次读取失败后停止')
+    expect(guidance).toContain('搜索总共最多10次')
+    expect(guidance).toContain('不因两次读取失败停止搜索')
+    expect(guidance).toContain('Search与Fetch分别计数')
   })
   it.each(['番茄能力要完整达标', '番茄小说写作手法', '不要联网搜索小说，只谈写作手法',
     '不要联网，搜索小说并总结写作手法', 'Search for a novel, do not analyze its writing techniques'])('does not mint extended access from missing/negated research evidence: %s', text => {

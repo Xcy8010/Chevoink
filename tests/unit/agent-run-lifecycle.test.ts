@@ -22,7 +22,7 @@ import { useAgentStore } from '../../src/features/studio/agent/agentStore'
 
 const mocks = vi.hoisted(() => ({
   chat: vi.fn(), emit: vi.fn(), persist: vi.fn(async () => ({})), journal: vi.fn(async () => {}), dispose: vi.fn(async () => {}),
-  openAITools: vi.fn(() => []),
+  openAITools: vi.fn((): Array<{ type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }> => []),
   update: vi.fn<(input: { data: Record<string, unknown> }) => Promise<{ taskSpec: TaskSpec | null; usage?: unknown; currentTurn?: number; startedAt?: Date; events?: Array<{ type: string; createdAt: Date }> }>>(async () => ({ taskSpec: null })), owner: vi.fn(async () => ({ userId: 'user' })), previous: vi.fn<(input?: { where?: Record<string, unknown> }) => Promise<unknown>>(async () => null),
   committedChapter: vi.fn(async () => false),
   realWritingCompletion: false,
@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   report: vi.fn(async (): Promise<{ chineseCharacters: number; content: string; evidence?: { targetAnalysisSupported?: boolean } }> => ({ chineseCharacters: 0, content: '' })),
   researchClaim: vi.fn(async (): Promise<{ sourceId: string; receiptId: string; purpose?: 'navigation' } | null> => null),
   researchTake: vi.fn(async (): Promise<{ sourceId: string; receiptId: string; purpose?: 'navigation' } | null> => null),
+  researchDiscovery: vi.fn(async (): Promise<Awaited<ReturnType<typeof import('../../api/lib/agent/research-recovery.js').takeResearchDiscoveryHandoff>>> => null),
   researchPartial: vi.fn(async (): Promise<string | null> => '研究尚未完成：未完成有正文依据的写法分析。'),
   original: vi.fn<() => Promise<{ parts: Array<{ type: string; text: string }> } | null>>(async () => ({ parts: [{ type: 'text', text: '核对原任务的剩余工作。' }] })),
   tools: [] as AgentTool[],
@@ -302,9 +303,12 @@ vi.mock('../../api/lib/agent/writing-scope.js', async importOriginal => {
     },
   }
 })
-vi.mock('../../api/lib/agent/research-sources.js', () => ({ readResearchReportForDelivery: mocks.report }))
+vi.mock('../../api/lib/agent/research-sources.js', async original => ({
+  ...await original<typeof import('../../api/lib/agent/research-sources.js')>(),
+  readResearchReportForDelivery: mocks.report,
+}))
 vi.mock('../../api/lib/agent/research-recovery.js', () => ({ claimResearchReadHandoff: mocks.researchClaim,
-  takeResearchReadHandoff: mocks.researchTake, saveResearchLimitationDelivery: mocks.researchPartial }))
+  takeResearchReadHandoff: mocks.researchTake, takeResearchDiscoveryHandoff: mocks.researchDiscovery, saveResearchLimitationDelivery: mocks.researchPartial }))
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({ resolveAgent2FeatureFlags: () => ({}) }))
 vi.mock('../../api/lib/agent/events.js', () => ({ createRunEventBus: (runId: string, initialSeq = 0) => {
   let seq = initialSeq
@@ -352,7 +356,10 @@ vi.mock('../../api/lib/agent/events.js', () => ({ createRunEventBus: (runId: str
   },
 }))
 vi.mock('../../api/lib/agent/permissions.js', () => ({ cancelAllQuestions: vi.fn(), grantAlwaysAllow: vi.fn(), hasAlwaysAllow: () => false, rejectAllApprovals: vi.fn(), waitForApproval: mocks.approval }))
-vi.mock('../../api/lib/agent/tools/todo-tools.js', () => ({ loadSessionTodoItems: mocks.todos, cancelTaskTodoItems: vi.fn(async () => []), renderTodoItems: (items: AgentTodoItem[]) => JSON.stringify(items) }))
+vi.mock('../../api/lib/agent/tools/todo-tools.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../api/lib/agent/tools/todo-tools.js')>(),
+  loadSessionTodoItems: mocks.todos, cancelTaskTodoItems: vi.fn(async () => []), renderTodoItems: (items: AgentTodoItem[]) => JSON.stringify(items),
+}))
 vi.mock('../../api/lib/agent/task-lineage.js', () => ({ getTaskRunIds: async () => ['run'] }))
 vi.mock('../../api/lib/agent/tools/task-orchestration-tools.js', () => ({ ORCHESTRATION_TOOL_NAMES: new Set(), assertOrchestrationResumeGuard: vi.fn(), buildOrchestrationResumeNote: vi.fn() }))
 vi.mock('../../api/lib/agent/session-title.js', () => ({ autoNameSession: vi.fn() }))
@@ -470,6 +477,7 @@ beforeEach(() => {
   mocks.report.mockResolvedValue({ chineseCharacters: 0, content: '' })
   mocks.researchClaim.mockReset().mockResolvedValue(null)
   mocks.researchTake.mockReset().mockResolvedValue(null)
+  mocks.researchDiscovery.mockReset().mockResolvedValue(null)
   mocks.researchPartial.mockReset().mockResolvedValue('研究尚未完成：未完成有正文依据的写法分析。')
   mocks.original.mockReset()
   mocks.original.mockImplementation(async () => ({ parts: [{ type: 'text', text: mocks.sourcePrompt ?? mocks.admissionPrompt }] }))
@@ -3991,6 +3999,123 @@ describe('recovered committed writing uses the ordinary creative wrap-up', () =>
   })
 })
 
+describe('committed chapter todo synchronization', () => {
+  it.each(['same_batch', 'next_turn'] as const)('updates the real existing list and prevents repeated delivery after its final update: %s', async scenario => {
+    const { prepareTodoUpdate, withTodoIds } = await import('../../api/lib/agent/tools/todo-tools.js')
+    const initial = withTodoIds([
+      { content: '读取资料', status: 'in_progress' },
+      { content: '写本章正文', status: 'pending' },
+      { content: '检查并提交', status: 'pending' },
+    ])
+    let saved: AgentTodoItem[] = []
+    const todos = tool('todo_write', async (_ctx, args) => {
+      const update = prepareTodoUpdate(saved, (args as { items: AgentTodoItem[] }).items)
+      expect(update.error).toBeUndefined()
+      saved = update.items
+      return { output: '真实清单已保存', display: { kind: 'todoList', items: saved } }
+    })
+    const commit = tool('chapter_bridge_commit', async () => {
+      mocks.committedChapter.mockResolvedValue(true)
+      return { output: '当前版本已提交' }
+    }, false)
+    const rewrite = tool('chapter_write', async () => { throw new Error('must not rewrite completed chapter') }, false)
+    const check = tool('quality_analyze', async () => { throw new Error('must not repeat completed check') })
+    mocks.tools = [todos, commit, rewrite, check]
+    mocks.openAITools.mockReturnValueOnce(mocks.tools.map(item => ({ type: 'function', function: { name: item.name,
+      description: item.description, parameters: { type: 'object', properties: {} } } })))
+    queue(response('', [call('initial-plan', 'todo_write', JSON.stringify({ items: initial }))]),
+      response('', [call('progress', 'todo_write', JSON.stringify({ items: initial.map((item, index) => ({ ...item,
+        status: index === 0 ? 'completed' : index === 1 ? 'in_progress' : 'pending' })) })),
+      call('commit', 'chapter_bridge_commit'), call('extra-write', 'chapter_write')]))
+    mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
+      expect(saved.map(item => item.status)).toEqual(['completed', 'in_progress', 'pending'])
+      expect(input.messages.some(message => message.content?.includes('既有待办进度同步'))).toBe(true)
+      expect(input.tools?.map(tool => tool.function.name)).toContain('todo_write')
+      return response('', [call('sync-plan', 'todo_write', JSON.stringify({ items: initial.map(item => ({ ...item, status: 'completed' })) })),
+        ...(scenario === 'same_batch' ? [call('after-sync-write', 'chapter_write'), call('after-sync-check', 'quality_analyze')] : [])])
+    })
+    mocks.chat.mockResolvedValueOnce(response('本章已完成。', [call('after-sync-write', 'chapter_write'), call('after-sync-check', 'quality_analyze')]))
+    await run('写下一章。')
+    expect(todos.execute).toHaveBeenCalledTimes(3)
+    expect(commitEffect(commit)).toHaveBeenCalledOnce()
+    expect(rewrite.execute).not.toHaveBeenCalled()
+    expect(check.execute).not.toHaveBeenCalled()
+    expect(saved.map(item => item.status)).toEqual(['completed', 'completed', 'completed'])
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.deferred', callId: 'extra-write', execution: 'not_dispatched' }))
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'sync-plan', ok: true,
+      display: { kind: 'todoList', items: saved } }))
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
+})
+
+describe('source acquisition in the real Agent loop', () => {
+  it.each(['original', 'alternative', 'missing'] as const)('preserves source facts and hands %s evidence to the Agent without the old two-search stop', async branch => {
+    const { planResearchDiscovery, researchDiscoveryStepKey } = await import('../../api/lib/agent/research-discovery.js')
+    type Source = import('../../api/lib/agent/research-discovery.js').DiscoverySource
+    const prompt = '联网研究《河谷纪事》，作者林青，读取公开正文，给简短样本说明并核对书目信息。'
+    const spec = buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, researchAdmission: 1, researchNavigationAdmission: 1 })
+    spec.expectedOutputs = [{ kind: 'text', description: '本例的简短来源与样本说明', required: true }]
+    mocks.update.mockResolvedValueOnce({ taskSpec: spec })
+    const queries: string[] = [], sources: Source[] = [], consumed = new Set<string>()
+    const original: Source = { id: 'original', title: '河谷纪事 第一章', url: 'https://fanqienovel.com/reader/1001', eligible: true,
+      pageType: 'chapter', failed: false, versions: [] }
+    const alternate: Source = { ...original, id: 'alternate', url: 'https://publisher.example/chapter/river-1', versions: [] }
+    const body = '清晨的钟声顺着河谷传来，林青笔下的村民在旧木桩旁停住，先核对水位，再讨论修渠的方向。'
+    let acquired = '', acquiredUrl = '', reportContent = ''
+    mocks.researchDiscovery.mockImplementation(async () => {
+      const step = planResearchDiscovery({ target: { title: '河谷纪事', author: '林青' }, sources, queries, consumed,
+        searchRemaining: 5 - queries.length, readRemaining: 8, navigation: true, allowedTools: ['web_search', 'web_read'] })
+      if (!step) return null
+      consumed.add(researchDiscoveryStepKey(step))
+      return { ...step, receiptId: String(consumed.size).padStart(64, '0') }
+    })
+    const search = tool('web_search', async (_ctx, args) => {
+      const query = (args as { query: string }).query
+      queries.push(query)
+      if (queries.length === 1) sources.push(original)
+      else if (branch === 'alternative' && !query.includes('site:')) sources.push(alternate)
+      return { output: `查询${query}，仅发现真实候选链接，摘要不是已读正文。` }
+    })
+    const read = tool('web_read', async (_ctx, args) => {
+      const source = sources.find(item => item.id === (args as { sourceId: string }).sourceId)!
+      if (source.id === 'original' && branch !== 'original') {
+        source.failed = true
+        throw new DataAccessError(422, 'WEB_READ_BLOCKED', `原站${source.url}要求访问权限；保留已取得资料，可读取其他合法公开来源。`)
+      }
+      acquired = body; acquiredUrl = source.url
+      source.versions.push({ contentKind: 'article', verifiedChapter: true, links: [] })
+      return { output: `实际来源URL：${source.url}\n已核验本章的当前公开正文：\n${body}\n仅本章样本，不代表全书。` }
+    })
+    const save = tool('research_report_save', async (_ctx, args) => {
+      reportContent = (args as { content: string }).content
+      mocks.report.mockResolvedValue({ chineseCharacters: reportContent.length, content: reportContent,
+        evidence: { targetAnalysisSupported: Boolean(acquired) } })
+      return { output: '来源说明与独立书目信息已真实保存。', requiredResult: { targetId: 'saved-report', contentHash: persistedContentHash(reportContent) } }
+    }, false)
+    mocks.tools = [search, read, save]
+    mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
+      if (branch === 'missing') {
+        expect(acquired).toBe('')
+        expect(input.messages.some(message => message.content?.includes('要求访问权限'))).toBe(true)
+        reportContent = '已核对候选书名与作者；未取得可读原作正文，保留书目成果，缺少样本不能作正文分析。'
+      } else {
+        expect(input.messages.some(message => message.content?.includes(body) && message.content.includes(acquiredUrl))).toBe(true)
+        reportContent = `本章样本来自${acquiredUrl}，只对已读部分说明水位核对与动作顺序，不声称读完全书。`
+      }
+      return response('', [call('save-independent-report', save.name, JSON.stringify({ content: reportContent }))])
+    })
+    mocks.chat.mockResolvedValueOnce(response(branch === 'missing' ? '已有书目信息已保存，原作正文仍缺失。' : '已保存基于实际样本的说明。'))
+    await run(prompt)
+    expect(queries).toHaveLength(branch === 'original' ? 1 : branch === 'alternative' ? 3 : 5)
+    expect(read.execute).toHaveBeenCalledTimes(branch === 'alternative' ? 2 : 1)
+    expect(save.execute).toHaveBeenCalledOnce()
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    expect(events().at(-1)).toMatchObject(branch === 'missing'
+      ? { type: 'run.paused', reason: 'needs_input' } : { type: 'run.finished', status: 'succeeded' })
+    if (branch !== 'original') expect(sources.find(item => item.id === 'original')?.failed).toBe(true)
+  })
+})
+
 describe('ordinary chapter summary presentation', () => {
   it.each(['current', 'stale-summary', 'revision-race', 'report-race', 'missing-commit', 'recovered-current', 'recovered-revision-race', 'recovered-report-race'] as const)('binds summary and replay to current committed proof: %s', async scenario => {
     const recovering = scenario.startsWith('recovered-')
@@ -4345,13 +4470,21 @@ describe('author-directed task ending in the real execution loop', () => {
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
     expect(events().at(-1)).not.toHaveProperty('authorEnded')
   })
-  it('does not let obsolete pending bookkeeping overrule a verified single next-chapter deliverable', async () => {
+  it('updates an obsolete existing item through a real cancellation instead of silently ignoring its pending state', async () => {
     mocks.committedChapter.mockResolvedValue(true)
-    mocks.tools.push(tool('todo_write', async () => ({ output: '旧重复清单', display: { kind: 'todoList', items: [{ content: '检查上一章', status: 'pending' }] } })))
-    queue(response('', [call('todo', 'todo_write')]), response('新章正文及终态已提交。'))
+    const pending: AgentTodoItem = { id: 'obsolete', content: '检查上一章', status: 'pending' }
+    const cancelled: AgentTodoItem = { ...pending, status: 'cancelled', reason: '不属于本次下一章交付' }
+    const todo = tool('todo_write', async (_ctx, args) => ({ output: '原清单真实状态已保存',
+      display: { kind: 'todoList', items: (args as { items: AgentTodoItem[] }).items } }))
+    mocks.tools.push(todo)
+    queue(response('', [call('todo', 'todo_write', JSON.stringify({ items: [pending] }))]), response('新章正文及终态已提交。'),
+      response('', [call('cancel-obsolete', 'todo_write', JSON.stringify({ items: [cancelled] }))]), response('新章已完成。'))
     await run('写下一章')
+    expect(todo.execute).toHaveBeenCalledTimes(2)
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'cancel-obsolete', ok: true,
+      display: { kind: 'todoList', items: [cancelled] } }))
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
-    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    expect(mocks.chat).toHaveBeenCalledTimes(4)
   })
 })
 

@@ -11,7 +11,7 @@ import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { assertResearchAlternativeAllowed, assertResearchUrlProvenance, authorizeResearchNavigation, findResearchSource,
   findSavedResearchContent, getResearchReadFailure, getResearchReadTarget, getResearchNavigationPolicy, readResearchContent, readResearchReportForDelivery,
   recordResearchReadFailure, recordResearchReadOutcome, registerResearchSource, reserveResearchRequest,
-  saveResearchContent, saveResearchReportSection, saveResearchSearchOutcome, settleResearchRequest } from '../../api/lib/agent/research-sources.js'
+  saveResearchContent, recordResearchWindow, saveResearchReportSection, saveResearchSearchOutcome, settleResearchRequest } from '../../api/lib/agent/research-sources.js'
 import { claimResearchReadHandoff, saveResearchLimitationDelivery, takeResearchReadHandoff } from '../../api/lib/agent/research-recovery.js'
 import * as researchSources from '../../api/lib/agent/research-sources.js'
 import { assessReaderEvidence, assessReaderText, extractReaderNavigationHtml } from '../../api/lib/web-reader-quality.js'
@@ -77,11 +77,11 @@ function navigation(url: string, links: Array<{ url: string; title: string }> = 
   })}</script>` : ''}</head><body><main>${links.map(link => `<a href="${link.url}">${link.title}</a>`).join('')}</main></body></html>`
   return { ...extractReaderNavigationHtml(source, url, expected ?? undefined), finalUrl: url, provider: 'direct', retryable: false, contentKind: 'metadata', purpose: 'navigation' }
 }
-function body(url = chapterUrl, title = target.title, author = target.author): WebReadResult {
+function body(url = chapterUrl, title = target.title, author = target.author, expected: Parameters<typeof assessReaderEvidence>[2] = target): WebReadResult {
   const source = `<script type="application/ld+json">${JSON.stringify({ '@type': 'Chapter', articleBody: bodyText,
     isPartOf: { '@type': 'Book', name: title, author } })}</script>`
   return { ...assessReaderText(bodyText, `${title}第1章 冰河`), finalUrl: url, provider: 'direct', retryable: false, contentKind: 'article',
-    evidence: assessReaderEvidence(bodyText, `${title}第1章 冰河`, target, source, url) }
+    evidence: assessReaderEvidence(bodyText, `${title}第1章 冰河`, expected, source, url) }
 }
 const citation = (saved: { id: string; revision: string; text: string }) => ({ contentRef: saved.id, revision: saved.revision,
   start: 0, end: Math.min(60, saved.text.length), excerptHash: hashText(saved.text.slice(0, 60)) })
@@ -107,6 +107,13 @@ async function saveBook(scope: Scope) {
 }
 
 describe.skipIf(!available)('fresh research navigation with isolated PostgreSQL and offline responses', () => {
+  it('projects the original requested chapter without modifying its frozen task identity', async () => {
+    await fixture(async ({ scope, spec }) => {
+      expect(await getResearchReadTarget(scope)).toMatchObject({ title: target.title, author: target.author, chapterTitle: '第五章' })
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: scope.runId } })).taskSpec).toEqual(JSON.parse(JSON.stringify(spec)))
+    }, { prompt: prompt.replace('公开章节', '第五章') })
+  })
+
   it('repairs the original search budget projection from a completed raw receipt without another request or fee', async () => {
     await fixture(async ({ scope, scopeKey }) => {
       supplier.search.mockResolvedValue({ provider: 'sogou', results: [comment] })
@@ -249,13 +256,13 @@ describe.skipIf(!available)('fresh research navigation with isolated PostgreSQL 
     })
   })
 
-  it('atomically gives the last navigation slot to one contender without increasing the total limit', async () => {
+  it('serializes navigation while a prior request remains unknown without adding a separate navigation sublimit', async () => {
     await fixture(async ({ scope, scopeKey }) => {
       await consumed(scope, 'navigation')
       const attempts = [call(scope), call(scope)]
       const results = await Promise.allSettled(attempts.map(ctx => reserveResearchRequest(ctx, 'read', digest(ctx.callId), 'navigation')))
       expect(results.filter(result => result.status === 'fulfilled' && result.value === true)).toHaveLength(1)
-      expect(results.filter(result => result.status === 'rejected').map(result => result.reason)).toMatchObject([{ code: 'RESEARCH_NAVIGATION_BUDGET' }])
+      expect(results.filter(result => result.status === 'rejected').map(result => result.reason)).toMatchObject([{ code: 'RESEARCH_REQUEST_UNCERTAIN' }])
       expect(await prisma.agentResearchRequest.count({ where: { scopeKey, kind: 'read', status: { not: 'baseline' } } })).toBe(2)
       expect(await prisma.agentResearchRequest.findFirstOrThrow({ where: { scopeKey, kind: 'read', status: 'baseline' } })).toMatchObject({ requestLimit: 8, units: 0 })
     })
@@ -267,7 +274,7 @@ describe.skipIf(!available)('fresh research navigation with isolated PostgreSQL 
       const pending = call(scope)
       expect(await reserveResearchRequest(pending, 'read', digest(pending.callId), 'navigation')).toBe(true)
       if (state === 'consumed unknown') await settleResearchRequest(pending, 'consumed')
-      await expect(reserveResearchRequest(call(scope), 'read', digest('third nav'), 'navigation')).rejects.toMatchObject({ code: 'RESEARCH_NAVIGATION_BUDGET' })
+      await expect(reserveResearchRequest(call(scope), 'read', digest('third nav'), 'navigation')).rejects.toMatchObject({ code: 'RESEARCH_REQUEST_UNCERTAIN' })
       await expect(reserveResearchRequest(call(scope), 'read', digest('new body'))).rejects.toMatchObject({ code: 'RESEARCH_REQUEST_UNCERTAIN' })
       expect(await prisma.agentResearchRequest.count({ where: { scopeKey, kind: 'read', status: { not: 'baseline' } } })).toBe(2)
       expect(supplier.navigation).not.toHaveBeenCalled(); expect(supplier.body).not.toHaveBeenCalled()
@@ -281,9 +288,9 @@ describe.skipIf(!available)('fresh research navigation with isolated PostgreSQL 
       expect(await reserveResearchRequest(released, 'read', digest(released.callId), 'navigation')).toBe(true)
       await settleResearchRequest(released, 'released')
       await consumed(scope, 'navigation')
-      await expect(reserveResearchRequest(call(scope), 'read', digest('over two'), 'navigation')).rejects.toMatchObject({ code: 'RESEARCH_NAVIGATION_BUDGET' })
+      await consumed(scope, 'navigation')
       expect(await prisma.agentResearchRequest.count({ where: { scopeKey, status: 'released' } })).toBe(1)
-      expect(await prisma.agentResearchRequest.aggregate({ where: { scopeKey, kind: 'read', status: { not: 'released' } }, _sum: { units: true } })).toMatchObject({ _sum: { units: 2 } })
+      expect(await prisma.agentResearchRequest.aggregate({ where: { scopeKey, kind: 'read', status: { not: 'released' } }, _sum: { units: true } })).toMatchObject({ _sum: { units: 3 } })
     })
   })
 
@@ -365,11 +372,49 @@ describe.skipIf(!available)('fresh research navigation with isolated PostgreSQL 
       await saveResearchReportSection(scope, { reportId: 'main', title: '来源与限制', expectedRevision: 0, section: {
         id: 'identity', order: 0, evidenceKind: 'source_identity', content: '已核对作品页声明的作者，正文尚未取得。', citations: [{ ...citation(saved), purpose: 'source_identity' }] } })
       const result = await saveResearchLimitationDelivery(scope, '只有公开目录，尚无可用于分析的章节正文。')
-      expect(result).toContain('研究尚未完成'); expect(result).toContain('正文尚未取得'); expect(result).toContain('已核验章节版本 0')
+      expect(result).toContain('研究尚未完成'); expect(result).toContain('正文尚未取得'); expect(result).toContain('已核验完整章节版本 0')
       const report = await readResearchReportForDelivery(scope)
       expect(report).toMatchObject({ evidence: { targetAnalysisSupported: false, readablePages: 0, metadataPages: 1 } })
       expect(report.sections).toHaveLength(2)
       expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: scope.runId } })).status).toBe('running')
+    })
+  })
+
+  it.each([
+    ['不要访问 https://fanqienovel.com', 'https://fanqienovel.com/reader/1'],
+    ['不要访问 https://fiction.example.com/private', 'https://fiction.example.com/private/chapter'],
+    ['仅在 site:fiction.example.com/public 取材', 'https://fiction.example.com/private/chapter'],
+  ])('applies original %s before any request or ledger debit', async (restriction, url) => {
+    await fixture(async ({ scope, scopeKey }) => {
+      const source = await registerResearchSource(scope, url, target.title)
+      await expect(webReadTool.execute(call(scope), { sourceId: source.id })).rejects.toMatchObject({ code: 'RESEARCH_SOURCE_SCOPE_MISMATCH' })
+      expect(supplier.body).not.toHaveBeenCalled(); expect(supplier.navigation).not.toHaveBeenCalled()
+      expect(await prisma.agentResearchRequest.count({ where: { scopeKey } })).toBe(0)
+      expect(await prisma.webToolCall.count({ where: { runId: scope.runId } })).toBe(0)
+      expect(await prisma.creditLedgerEntry.count({ where: { userId: scope.userId } })).toBe(0)
+    }, { prompt: `联网研究《霜河档案》，作者：周禾。${restriction}。读取公开章节分析写法。` })
+  })
+
+  it('preserves partial text for range-backed local analysis without certifying complete target analysis', async () => {
+    await fixture(async ({ scope }) => {
+      await saveBook(scope)
+      const source = await registerResearchSource(scope, chapterUrl, '第1章 冰河')
+      const partialText = bodyText.slice(0, 220)
+      const original = `<script type="application/ld+json">${JSON.stringify({ '@type': 'Chapter', articleBody: bodyText,
+        isPartOf: { '@type': 'Book', name: target.title, author: target.author } })}</script>`
+      const evidence = assessReaderEvidence(partialText, `${target.title}第1章 冰河`, target, original, chapterUrl)
+      expect(evidence.integrity).toMatchObject({ status: 'unverified', code: 'SOURCE_PREVIEW_ONLY' })
+      const saved = await saveResearchContent(scope, source.id, { ...assessReaderText(partialText, '第1章 冰河'), status: 'ok', code: 'WEB_READ_PARTIAL',
+        finalUrl: chapterUrl, provider: 'direct', retryable: false, contentKind: 'article', evidence })
+      expect(await readResearchContent(scope, { contentRef: saved.id, revision: saved.revision })).toMatchObject({ text: partialText })
+      await recordResearchWindow(scope, { contentRef: saved.id, revision: saved.revision, start: 0, end: 60 })
+      await saveResearchReportSection(scope, { reportId: 'main', title: '实际预览范围', expectedRevision: 0, section: {
+        id: 'partial', order: 0, content: '仅依据已读取的公开预览片段分析本段动作选择，完整章节尚缺。', citations: [citation(saved)] } })
+      expect(await readResearchReportForDelivery(scope)).toMatchObject({ evidence: { targetAnalysisSupported: false } })
+      expect((await prisma.agentResearchContent.findUniqueOrThrow({ where: { id: saved.id } })).text).toBe(partialText)
+      const limitation = await saveResearchLimitationDelivery(scope, '已取得公开片段，完整章节尚缺。')
+      expect(limitation).toContain('仅取得部分正文，可分析实际已读取范围，仍缺完整章节')
+      expect(limitation).not.toContain('尚无可供写法分析的已核验原作正文')
     })
   })
 
@@ -442,6 +487,29 @@ describe.skipIf(!available)('fresh research navigation with isolated PostgreSQL 
       await expect(assertResearchAlternativeAllowed(scope)).rejects.toMatchObject({ code: 'RESEARCH_ALTERNATIVE_DENIED' })
       expect(await prisma.agentArtifact.count({ where: { runId: scope.runId, metadata: { path: ['kind'], equals: 'researchSelectedIdentity' } } })).toBe(2)
     }, { prompt: prompt.replace('不得另选作品。', '如果首选不可读，可以另选作品。') })
+  })
+
+  it('keeps an open-platform selection stable while reading and citing the same book from a real second-site directory', async () => {
+    await fixture(async ({ scope, spec }) => {
+      expect(spec.researchTarget?.sourceHosts).toBeUndefined()
+      const first = await saveBook(scope)
+      const selected = await prisma.agentArtifact.findFirstOrThrow({ where: { runId: scope.runId, metadata: { path: ['kind'], equals: 'researchSelectedIdentity' } } })
+      expect(await getResearchReadTarget(scope)).toMatchObject({ title: target.title, author: target.author, sourceHosts: [] })
+      const otherBook = 'https://other.example.com/books/river', otherChapter = 'https://other.example.com/chapters/ice'
+      await seedSearch(scope, [{ title: `${target.title}作品目录`, url: otherBook, snippet: `作者：${target.author}`, source: 'other.example.com' }])
+      const directory = (await findResearchSource(scope, otherBook))!
+      await authorizeResearchNavigation(scope, directory.id)
+      const openTarget = { ...target, sourceHosts: [] }
+      await saveResearchContent(scope, directory.id, navigation(otherBook, [{ url: otherChapter, title: '第1章 冰河' }], target, openTarget))
+      const chapter = await registerResearchSource(scope, otherChapter, '第1章 冰河')
+      const saved = await saveResearchContent(scope, chapter.id, body(otherChapter, target.title, target.author, openTarget))
+      expect(await readResearchContent(scope, { contentRef: saved.id, revision: saved.revision })).toMatchObject({ text: bodyText })
+      await saveResearchReportSection(scope, { reportId: 'main', title: '同书公开样本', expectedRevision: 0, section: {
+        id: 'sample', order: 0, content: '仅依据实际读取的同书章节分析写法。', citations: [citation(saved)] } })
+      expect(await readResearchReportForDelivery(scope)).toMatchObject({ evidence: { targetAnalysisSupported: true } })
+      expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: selected.id } })).toEqual(selected)
+      expect(await prisma.agentResearchContent.findUniqueOrThrow({ where: { id: first.saved.id } })).toEqual(first.saved)
+    }, { prompt: '只读联网研究《霜河档案》，作者：周禾，优先番茄小说。读取公开章节并分析写法，不得另选作品。' })
   })
 
   it('rejects missing or unrelated directory lineage despite a matching reader identity', async () => {

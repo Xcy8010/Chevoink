@@ -1,5 +1,5 @@
 import dns from 'node:dns'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { env } from '../../api/config/env.js'
 import { webReadTool } from '../../api/lib/agent/tools/search-tools.js'
@@ -26,6 +26,7 @@ vi.mock('../../api/lib/agent/research-sources.js', async original => ({
   recordResearchWindow: vi.fn(async () => {}),
   assertResearchUrlProvenance: vi.fn(async () => {}),
   getResearchReadTarget: vi.fn(async () => undefined),
+  getResearchNavigationPolicy: vi.fn(async () => undefined),
   findSavedResearchContent: vi.fn(async () => null),
   registerResearchSources: async (_scope: unknown, links: Array<{ url: string; title: string }>) => links.map((link, index) => ({ id: `link-${index}`, canonicalUrl: link.url })),
   registerResearchSource: async (_scope: unknown, url: string) => ({ id: 'fixture-source', canonicalUrl: url }),
@@ -71,6 +72,32 @@ beforeEach(() => {
 afterEach(() => { env.webReaderFallback = originalFallback; env.webReaderFirecrawlApiKey = originalFirecrawlKey; vi.restoreAllMocks(); vi.unstubAllGlobals(); transport.mockReset() })
 
 describe('web_read trustworthy outcomes', () => {
+  it.each([
+    ['-site:example.com', 'https://example.com/chapter'],
+    ['-site:example.com/private', 'https://example.com/private/chapter'],
+    ['site:example.com/public', 'https://example.com/private/chapter'],
+  ])('rejects original domain/path denial %s before dispatch or billing', async (site, url) => {
+    const { getResearchNavigationPolicy, reserveResearchRequest } = await import('../../api/lib/agent/research-sources.js')
+    const { executeWebToolCall } = await import('../../api/lib/billing/web-tool-calls.js')
+    vi.mocked(getResearchNavigationPolicy).mockResolvedValueOnce({ version: 1, requestHash: 'a'.repeat(64), alternativeSelection: 'denied', sourceSites: [site], alternativeAvailable: false })
+    vi.mocked(reserveResearchRequest).mockClear(); vi.mocked(executeWebToolCall).mockClear()
+    await expect(webReadTool.execute(ctx(), { url })).rejects.toMatchObject({ code: 'RESEARCH_SOURCE_SCOPE_MISMATCH' })
+    expect(transport).not.toHaveBeenCalled(); expect(reserveResearchRequest).not.toHaveBeenCalled(); expect(executeWebToolCall).not.toHaveBeenCalled()
+  })
+  it('presents a saved proven preview with its actual source/range and never calls it a full chapter', async () => {
+    const text = article.repeat(4), contentHash = createHash('sha256').update(text).digest('hex')
+    stored.page = { status: 'ok', code: 'WEB_READ_PARTIAL', text, title: '第一章', finalUrl: 'https://example.com/chapter', provider: 'direct', retryable: false,
+      contentKind: 'article', quality: { readable: true, chars: text.length, chineseChars: text.length, replacementChars: 0, privateUseChars: 0, controlChars: 0, linkDensity: 0 },
+      evidence: { version: 1, identity: { status: 'verified', title: '样本', author: '作者', pageType: 'chapter', basis: 'structured_metadata' },
+        integrity: { status: 'unverified', code: 'SOURCE_PREVIEW_ONLY', extractedHash: contentHash, referenceHash: 'b'.repeat(64) } } } as import('../../api/lib/web-reader-service.js').WebReadResult
+    const result = await webReadTool.execute(ctx(), { contentRef: 'fixture-content', revision: 'a'.repeat(64) })
+    expect(result.output).toContain('公开预览/部分正文（不是完整章节）')
+    expect(result.output).toContain('https://example.com/chapter')
+    expect(result.output).toContain(`0-${text.length}字符`)
+    expect(result.output).toContain('可依据实际已读取范围作局部分析')
+    expect(result.summary).toContain('部分正文')
+    expect(transport).not.toHaveBeenCalled()
+  })
   it('refunds a cancellation arriving after fetch completes while saved content is being persisted', async () => {
     const { refundCancelledWebToolCall } = await import('../../api/lib/billing/web-tool-calls.js')
     const controller = new AbortController()

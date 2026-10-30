@@ -133,27 +133,30 @@ describe('independent DeepSeek Fetch contract', () => {
     expect(transport.mock.calls[0][1].headers).not.toHaveProperty('Authorization')
   })
   it('sends only the target URL, extracts real links and preserves metadata classification', async () => {
-    transport.mockResolvedValue(Response.json({ title: 'Book details', content: `# Book details\n\n${article}\n[Chapter 1](/reader/987)\n[Private](http://127.0.0.1/private)\n[Other](https://other.example/chapter)` }))
+    transport.mockResolvedValueOnce(new Response('<script src="app.js"></script>', { headers: { 'content-type': 'text/html' } }))
+      .mockResolvedValueOnce(Response.json({ title: 'Book details', content: `# Book details\n\n${article}\n[Chapter 1](/reader/987)\n[Private](http://127.0.0.1/private)\n[Other](https://other.example/chapter)` }))
     const result = await readPublicWebPage('https://fanqienovel.com/page/123', new AbortController().signal, { ...config, modelName: 'deepseek-fetch' })
     expect(result).toMatchObject({ status: 'ok', provider: 'deepseek', title: 'Book details', contentKind: 'metadata', links: [{ url: 'https://fanqienovel.com/reader/987', title: 'Chapter 1' }] })
-    const [endpoint, options] = transport.mock.calls[0]
+    const [endpoint, options] = transport.mock.calls[1]
     expect(endpoint).toBe('https://api.deepseek.com/v1/tools/fetch')
     expect(JSON.parse(options.body)).toEqual({ url: 'https://fanqienovel.com/page/123' })
     expect(options.redirect).toBe('error')
     expect(options.dispatcher.destroyed).toBe(true)
   })
   it.each([{ markdown: article }, { title: 'Bad', content: {} }, { title: 'Bad' }])('rejects malformed successful responses %j', async payload => {
-    transport.mockResolvedValue(Response.json(payload))
+    transport.mockResolvedValueOnce(new Response('<script src="app.js"></script>', { headers: { 'content-type': 'text/html' } }))
+      .mockResolvedValueOnce(Response.json(payload))
     expect(await readPublicWebPage(item.url, new AbortController().signal, config)).toMatchObject({ code: 'WEB_READ_PROVIDER_PROTOCOL_ERROR', status: 'unreadable', text: '', retryable: false })
-    expect(transport).toHaveBeenCalledOnce()
+    expect(transport).toHaveBeenCalledTimes(2)
   })
   it.each([[401, 'WEB_READ_PROVIDER_401', false], [402, 'WEB_READ_PROVIDER_402', false], [403, 'WEB_READ_BLOCKED', false],
     [404, 'WEB_READ_HOSTED_NO_CONTENT', false], [429, 'WEB_READ_RATE_LIMITED', true], [503, 'WEB_READ_HOSTED_UNAVAILABLE', true]] as const)('reports HTTP %i explicitly without a silent reader retry', async (status, code, retryable) => {
-    transport.mockResolvedValue(new Response('private-secret-provider-prose', { status, headers: { 'retry-after': '30' } }))
+    transport.mockResolvedValueOnce(new Response('<script src="app.js"></script>', { headers: { 'content-type': 'text/html' } }))
+      .mockResolvedValueOnce(new Response('private-secret-provider-prose', { status, headers: { 'retry-after': '30' } }))
     const result = await readPublicWebPage(item.url, new AbortController().signal, config)
     expect(result).toMatchObject({ code, provider: 'deepseek', text: '', retryable })
     expect(JSON.stringify(result)).not.toContain('private-secret-provider-prose')
-    expect(transport).toHaveBeenCalledOnce()
+    expect(transport).toHaveBeenCalledTimes(2)
   })
   it.each(['http://127.0.0.1/private', 'https://example.com/chapter?signature=private', 'https://sec.douban.com/c?r=article'])('rejects restricted target %s before provider dispatch', async url => {
     expect((await readPublicWebPage(url, new AbortController().signal, config)).status).not.toBe('ok')
@@ -165,9 +168,10 @@ describe('independent DeepSeek Fetch contract', () => {
     expect(transport).not.toHaveBeenCalled()
   })
   it('bounds a successful provider body and does not fall back on oversize', async () => {
-    transport.mockResolvedValue(new Response('x'.repeat(WEB_READER_MAX_BYTES + 1)))
+    transport.mockResolvedValueOnce(new Response('<script src="app.js"></script>', { headers: { 'content-type': 'text/html' } }))
+      .mockResolvedValueOnce(new Response('x'.repeat(WEB_READER_MAX_BYTES + 1)))
     expect(await readPublicWebPage(item.url, new AbortController().signal, config)).toMatchObject({ code: 'WEB_READ_TOO_LARGE', text: '' })
-    expect(transport).toHaveBeenCalledOnce()
+    expect(transport).toHaveBeenCalledTimes(2)
   })
   it('propagates cancellation and never retries', async () => {
     const controller = new AbortController()
@@ -178,13 +182,14 @@ describe('independent DeepSeek Fetch contract', () => {
   it('times out a stalled Fetch request without starting another reader or leaving a timer', async () => {
     vi.useFakeTimers()
     try {
-      transport.mockImplementation(async (_url: string, options: RequestInit) => new Promise((_resolve, reject) => {
+      transport.mockResolvedValueOnce(new Response('<script src="app.js"></script>', { headers: { 'content-type': 'text/html' } }))
+        .mockImplementation(async (_url: string, options: RequestInit) => new Promise((_resolve, reject) => {
         options.signal!.addEventListener('abort', () => reject(options.signal!.reason), { once: true })
       }))
       const pending = readPublicWebPage(item.url, new AbortController().signal, config)
       await vi.advanceTimersByTimeAsync(12000)
       expect(await pending).toMatchObject({ code: 'WEB_READ_HOSTED_UNAVAILABLE', status: 'transient_error', retryable: true })
-      expect(transport).toHaveBeenCalledOnce()
+      expect(transport).toHaveBeenCalledTimes(2)
       expect(vi.getTimerCount()).toBe(0)
     } finally { vi.useRealTimers() }
   })

@@ -72,7 +72,7 @@ function explicitlyDeniesResearchRead(prompt: string): boolean {
   return actionClauses(prompt).some(clause => /(?:不要|不需要|无需|不用|不必|禁止|不得|不能|不许|别|不)(?:再|自动)?(?:读|读取|获取|抓取|访问|打开|浏览)(?:取)?(?:任何)?(?:正文|原文|章节|网页|页面|链接)(?!后|之后|以后|时|就|便)|(?:只|仅)(?:做|进行)?(?:搜索|检索|查找)[^。\n]{0,32}(?:链接|网址)|(?:只|仅)(?:返回|列出|提供)(?:搜索)?(?:链接|网址)|\b(?:do not|don't|must not|never)\s+(?:read|fetch|open|browse)\b|\b(?:search only|only search|links only)\b/iu.test(clause))
 }
 
-function namedResearchTarget(prompt: string): TaskSpec['researchTarget'] {
+function namedResearchTarget(prompt: string, sourceHosts: string[]): TaskSpec['researchTarget'] {
   const titles = [...new Set([...prompt.matchAll(/《([^》\n]{1,120})》/gu)].map(match => match[1].trim()))]
   if (titles.length !== 1 || !titles[0]) return undefined
   const author = prompt.match(/作者(?:是|为|[:：])\s*([^\s，,。；;、()（）《》：:]{1,120})/u)?.[1]
@@ -82,13 +82,8 @@ function namedResearchTarget(prompt: string): TaskSpec['researchTarget'] {
   const bibliographyOnly = /作者|书目|出版信息|出版时间|出版情况|ISBN|\b(?:author|bibliograph|publication)\b/iu.test(positive)
     && !/分析|解读|拆解|比较|总结|手法|正文|原文|修辞|主题|段落|情节|人物|叙事|章节|样本|写作|\b(?:analy[sz]|craft|chapter|text|narrative)/iu.test(positive)
   const textAnalysisRequired = !bibliographyOnly && !explicitlyDeniesResearchRead(prompt)
-  const sourceHosts = new Set<string>()
-  if (/番茄小说|fanqienovel\.com/iu.test(positive)) sourceHosts.add('fanqienovel.com')
-  for (const match of positive.matchAll(/(?:\bsite:|https?:\/\/)((?:[a-z0-9-]+\.)+[a-z]{2,63})(?:[\s/:]|$)/giu)) {
-    if (sourceHosts.size < 8 && match[1].length <= 253 && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/iu.test(match[1])) sourceHosts.add(match[1].toLowerCase())
-  }
   return { title: titles[0], ...(author ? { author } : {}), textAnalysisRequired,
-    ...(sourceHosts.size ? { sourceHosts: [...sourceHosts] } : {}) }
+    ...(sourceHosts.length ? { sourceHosts } : {}) }
 }
 
 /** A requested short scene is prose, even when a separate clause forbids an outline. */
@@ -306,6 +301,8 @@ export function buildTaskSpec(input: {
         ? 'artifact'
         : 'text'
 
+  const sourceHosts = researchSourceHosts(input.prompt)
+  const researchTarget = freshResearch && !networkDenied ? namedResearchTarget(input.prompt, sourceHosts) : undefined
   return {
     id: randomUUID(),
     runId: input.runId,
@@ -320,11 +317,11 @@ export function buildTaskSpec(input: {
       version: 1 as const, requestHash: createHash('sha256').update(input.prompt).digest('hex'),
       alternativeSelection: researchAlternativeSelection(input.prompt),
       ...(researchSourceSites(input.prompt).length ? { sourceSites: researchSourceSites(input.prompt) } : {}),
-      ...(researchSourceHosts(input.prompt).length ? { sourceHosts: researchSourceHosts(input.prompt) } : {}),
+      ...(sourceHosts.length ? { sourceHosts } : {}),
     } } : {}),
-    ...(freshResearch && namedResearchTarget(input.prompt) ? { researchTarget: {
-      ...namedResearchTarget(input.prompt)!, ...(input.researchNavigationAdmission === 1
-        ? { author: researchAuthor(input.prompt), sourceHosts: researchSourceHosts(input.prompt).length ? researchSourceHosts(input.prompt) : undefined } : {}),
+    ...(researchTarget ? { researchTarget: {
+      ...researchTarget, ...(input.researchNavigationAdmission === 1
+        ? { author: researchAuthor(input.prompt) } : {}),
     } } : {}),
     researchBudget: !networkDenied && (freshResearch
       || /完整拆书|全书拆解|逐章分析|逐章拆解|深度研究|全面研究|深入研究|深入分析|深度分析|拆解这本小说|拆解整本|full.book|deep research/i.test(input.prompt)) ? 'extended' : 'standard',
@@ -380,7 +377,7 @@ export function renderTaskSpec(spec: TaskSpec): string {
     ? '[系统] 原始请求明确禁止联网：本任务不提供或执行搜索、网页获取，不预约、不请求供应商、不收工具费。只使用已有获准材料并说明证据限制。\n' : ''
   const readRule = spec.researchReadAccess === 'denied'
     ? '[系统] 原始请求只允许搜索或返回链接：不提供或执行web_read，不自动打开网页，不预约或收读取费。\n' : ''
-  const navigationRule = spec.researchNavigation ? `[系统] 本任务导航协议：相关官方评论或检索页仅可用web_read purpose="navigation"获取可读书目与实际href，最多两次且计入原Fetch预算；元数据不可引用为目标正文。首选作品：${spec.researchTarget?.title ?? '按原请求核验'}${spec.researchTarget?.author ? `；作者：${spec.researchTarget.author}` : ''}。${spec.researchNavigation.alternativeSelection === 'denied'
+  const navigationRule = spec.researchNavigation ? `[系统] 本任务导航协议：相关官方评论或检索页仅可用web_read purpose="navigation"获取可读书目与实际href，与正文获取共同计入本任务8次Fetch总预算，导航没有另设次数；元数据不可引用为目标正文。首选作品：${spec.researchTarget?.title ?? '按原请求核验'}${spec.researchTarget?.author ? `；作者：${spec.researchTarget.author}` : ''}。${spec.researchNavigation.alternativeSelection === 'denied'
     ? '没有换书授权，不能自行改选。' : '原请求允许首选公开来源不可用后改选；仅服务端确认真实访问/404回执后可用selectAlternative=true导航核验一次替代作品。空搜索、乱码、未知请求不解锁改选。'}没有可读正文时报告实际来源与不足。\n` : ''
   return networkRule + readRule + navigationRule + renderTaskSpecBody(spec)
 }
@@ -388,8 +385,8 @@ export function renderTaskSpec(spec: TaskSpec): string {
 function renderTaskSpecBody(spec: TaskSpec): string {
   if (spec.intent === 'research_analysis') {
     const budget = spec.networkAccess === 'denied' ? '禁止新增联网' : spec.researchReadAccess === 'denied'
-      ? `最多${spec.researchBudget === 'extended' ? 5 : 2}次搜索、禁止页面获取` : spec.researchBudget === 'extended' ? '最多5次搜索、8次页面获取' : '最多2次搜索、2次页面获取'
-    return `[系统] 本轮只读研究契约（taskSpecId=${spec.id}）：\n目标：${spec.goals.join('；')}\n只读取资料并交付分析；不得创建或改写章节、卷、作品、记忆、封面或派生写作窗口，历史写作指令不构成本轮授权。正文不可读或覆盖不足必须说明缺失，不能虚称全书读完。按照用户要求完整输出报告，不套用写作任务的简短收尾规则。复杂任务可维护本轮真实待办，无待办不补建已完成清单。\n联网预算：${budget}，缓存续读不消耗获取额度；连续两次读取失败后停止新增联网，保留已有证据并说明限制。普通分析不自行扩展到影视化、销量或结局争议。用户指定外部平台作品时直接搜索官方来源，不先搜索本平台作品库。\n取证顺序：1）用作品名/作者及官方域名定向搜索；未指定书时先选定一本有公开章节的作品，核实官方作品页的书名和作者，不把平台首页当作品页。2）沿搜索或已读目录实际返回的章节链接获取公开正文，不猜链接。3）按返回的contentRef/revision和范围续读样本，记录章节、来源URL、实际覆盖与短引文。4）仅依据读到的正文分析写作手法、叙事选择与效果，明确样本局限。书评、新闻、简介、视频和搜索摘要只能作为各自类型资料，不能替代原著正文；没有读到章节正文时交付缺失说明，不能编造作品手法。8页额度、目录或链接清单都不等于全书阅读完成。\n预期交付：${spec.expectedOutputs.map(item => item.description).join('；')}。`
+      ? '常规最多5次搜索，有真实关键资料缺口且有新检索方向时总共最多10次；禁止页面获取' : '最多5次搜索、8次页面获取；有真实关键资料缺口且有新来源或章节检索方向时，搜索总共最多10次'
+    return `[系统] 本轮只读研究契约（taskSpecId=${spec.id}）：\n目标：${spec.goals.join('；')}\n只读取资料并交付分析；不得创建或改写章节、卷、作品、记忆、封面或派生写作窗口，历史写作指令不构成本轮授权。正文不可读或覆盖不足必须说明缺失，不能虚称全书读完。按照用户要求完整输出报告，不套用写作任务的简短收尾规则。复杂任务可维护本轮真实待办，无待办不补建已完成清单。\n联网预算：${budget}，Search与Fetch分别计数，所有分岔与续跑共享本任务总额；复用已保存结果和正文，不重复未变化的检索词或失败URL。资料已充分就停止，不必用满次数；单个页面失败改用其他来源，不因两次读取失败停止搜索。保留已有证据并说明实际缺口。普通分析不自行扩展到影视化、销量或结局争议。用户指定外部平台作品时优先搜索该平台官方来源；除非原请求明确限定站点，也可核验其他合法公开来源，不先搜索本平台作品库。\n取证顺序：1）用作品名/作者及官方域名定向搜索；未指定书时先选定一本有公开章节的作品，核实官方作品页的书名和作者，不把平台首页当作品页。2）沿搜索或已读目录实际返回的章节链接获取公开正文，不猜链接。3）按返回的contentRef/revision和范围续读样本，记录章节、来源URL、实际覆盖与短引文。4）仅依据读到的正文分析写作手法、叙事选择与效果，明确样本局限。书评、新闻、简介、视频和搜索摘要只能作为各自类型资料，不能替代原著正文；没有读到章节正文时交付缺失说明，不能编造作品手法。8页额度、目录或链接清单都不等于全书阅读完成。\n预期交付：${spec.expectedOutputs.map(item => item.description).join('；')}。`
   }
   if (spec.scope.authorEffects?.manuscript === false && !spec.scope.authorEffects.structure && spec.writingPacing !== 'proposal_only') {
     return `[系统] 本轮任务契约（taskSpecId=${spec.id}）：\n目标：${spec.goals.join('；')}\n直接完成当前请求，按需使用获准工具；本轮没有章节正文写入义务，无需先确定章节。作品设置、文件等操作仍遵守各工具原有权限与确认要求，不继承历史任务的写作、待办或计划。`

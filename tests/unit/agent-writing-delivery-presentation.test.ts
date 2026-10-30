@@ -7,7 +7,13 @@ import { createHash } from 'node:crypto'
 import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continuity-contract.js'
 import { probeChapterReviewRevision, readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 
-const mocks = vi.hoisted(() => ({ original: vi.fn(), preference: vi.fn(), lease: vi.fn(), state: vi.fn(), save: vi.fn() }))
+const mocks = vi.hoisted(() => ({ original: vi.fn(), preference: vi.fn(), committed: vi.fn(), lease: vi.fn(), state: vi.fn(), save: vi.fn(), todos: vi.fn(async () => [] as import('../../shared/contracts').AgentTodoItem[]) }))
+vi.mock('../../api/lib/agent/humanity-quality.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../api/lib/agent/humanity-quality.js')>(), hasCommittedTaskChapter: mocks.committed,
+}))
+vi.mock('../../api/lib/agent/tools/durable-todo.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../api/lib/agent/tools/durable-todo.js')>(), readDurableTodoItems: mocks.todos,
+}))
 vi.mock('../../api/lib/agent/original-request.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../api/lib/agent/original-request.js')>(), readOriginalTaskRequest: mocks.original,
   originalTaskRunIds: async () => ['run'],
@@ -51,14 +57,52 @@ async function fixture(prompt = '完成第一章，只输出标题与正文。',
     agentOperation: { count: vi.fn(async () => 0) }, agentProviderAttempt: { count: vi.fn(async () => 0) },
     agentExecutionOutbox: { create: vi.fn(async () => ({})) } }
   mocks.lease.mockImplementation(async (_token, work) => work(db))
-  const state = { frame: { revision: 7, snapshotHash: 'a'.repeat(64), state: { phase: 'idle', messages: [{ role: 'user', content: prompt }] } } }
+  const state = { originalSpec: spec, frame: { revision: 7, snapshotHash: 'a'.repeat(64), state: { phase: 'idle', messages: [{ role: 'user', content: prompt }] } } }
   mocks.state.mockResolvedValue(state)
   mocks.save.mockImplementation(async (_db, _token, input) => { state.frame = { revision: 8, snapshotHash: 'b'.repeat(64), state: input.snapshot }; return state.frame })
   const refreshContinuity = () => currentReviewReadinessFixture(db as unknown as Prisma.TransactionClient, subject, terminal)
   await refreshContinuity()
   return { db: db as unknown as Prisma.TransactionClient, mocks: db, chapter, terminal, quality, spec, state, refreshContinuity }
 }
-beforeEach(() => { vi.clearAllMocks(); mocks.preference.mockResolvedValue(null) })
+beforeEach(() => { vi.clearAllMocks(); mocks.preference.mockResolvedValue(null); mocks.todos.mockResolvedValue([]); mocks.committed.mockResolvedValue(true) })
+
+it('requires a real existing todo update before projecting an already committed chapter, without changing the manuscript', async () => {
+  const f = await fixture(), before = structuredClone(f.chapter)
+  const items = [{ id: 'write', content: '写本章', status: 'completed' as const }, { id: 'commit', content: '检查与提交', status: 'in_progress' as const }]
+  mocks.todos.mockResolvedValue(items)
+  expect(await advanceDurableWritingDelivery(token as never)).toMatchObject({ revision: 8 })
+  expect(f.state.frame.state.messages.at(-1)).toMatchObject({ role: 'system', content: expect.stringContaining('既有待办进度同步') })
+  expect(f.state.frame.state.messages.at(-1)?.content).toContain('[id=commit]')
+  expect(f.mocks.agentExecutionOutbox.create).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ type: 'writing.todo_sync' }) }))
+  expect(items[1].status).toBe('in_progress')
+  expect(await advanceDurableWritingDelivery(token as never)).toBeNull()
+  mocks.todos.mockResolvedValue(items.map(item => ({ ...item, status: 'completed' })))
+  expect(await advanceDurableWritingDelivery(token as never)).not.toBeNull()
+  expect(f.state.frame.state.messages.at(-1)).toMatchObject({ role: 'assistant', content: expect.stringContaining(f.chapter.content) })
+  expect(f.chapter).toEqual(before)
+})
+
+it.each(['valid', 'uncommitted', 'extra-goal', 'stale-review'] as const)('ordinary next-chapter plan sync requires both current proofs: %s', async scenario => {
+  const f = await fixture('写下一章。', false)
+  f.spec.goals = scenario === 'extra-goal' ? ['写下一章', '另外提供分析报告'] : ['写下一章']
+  if (scenario === 'uncommitted') mocks.committed.mockResolvedValue(false)
+  if (scenario === 'stale-review') f.terminal.bridge.targetRevision = 2
+  const items = [{ id: 'write', content: '写本章', status: 'completed' as const }, { id: 'commit', content: '检查与提交', status: 'in_progress' as const }]
+  mocks.todos.mockResolvedValue(items)
+  expect(await readCompletedWritingDelivery(f.db, subject)).toBeNull()
+  const result = await advanceDurableWritingDelivery(token as never)
+  if (scenario !== 'valid') {
+    expect(result).toBeNull()
+    expect(mocks.save).not.toHaveBeenCalled()
+    return
+  }
+  expect(result).toMatchObject({ revision: 8 })
+  expect(f.state.frame.state.messages.at(-1)).toMatchObject({ role: 'system', content: expect.stringContaining('[id=commit]') })
+  expect(items[1].status).toBe('in_progress')
+  mocks.todos.mockResolvedValue(items.map(item => ({ ...item, status: 'completed' })))
+  expect(await advanceDurableWritingDelivery(token as never)).toBeNull()
+  expect(f.mocks.agentExecutionOutbox.create).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ type: 'writing.delivery.projected' }) }))
+})
 
 it('delivers the authenticated frozen current chapter without requiring a second numbered legacy range', async () => {
   const prompt = '完整重写当前章节，只输出标题和正文。', f = await fixture(prompt)

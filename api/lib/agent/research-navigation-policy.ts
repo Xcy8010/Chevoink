@@ -1,3 +1,5 @@
+import { chapterTitleOrdinal } from '../../../shared/structure/chapter-title.js'
+
 /** Only the original human request supplies policy. Source prose never does. */
 function directiveText(prompt: string, authorLabels: boolean): string {
   const pairs: Record<string, string> = { '“': '”', '「': '」', '"': '"', "'": "'", '`': '`', '```': '```' }
@@ -49,6 +51,19 @@ export function researchAuthor(prompt: string): string | undefined {
   return names.size === 1 ? [...names][0] : undefined
 }
 
+/** A named chapter refines the requested work without rewriting its frozen identity. */
+export function researchChapterTitle(prompt: string): string | undefined {
+  const chapters = new Map<number, string>()
+  for (const clause of sourceClauses(prompt)) {
+    if (/(?:不要|不得|禁止|不许|不能|不允许|无需|不用|不必|不是|并非|do not|don't|don’t|cannot|can't|can’t|must not|never)/iu.test(clause)) continue
+    for (const match of clause.matchAll(/第\s*[^\s，,。；;《》]+?\s*[章回节集]/gu)) {
+      const ordinal = chapterTitleOrdinal(match[0])
+      if (ordinal !== null) chapters.set(ordinal, match[0].trim())
+    }
+  }
+  return chapters.size === 1 ? [...chapters.values()][0] : undefined
+}
+
 export function researchAlternativeSelection(prompt: string): 'denied' | 'after_preferred_unavailable' {
   // Quoted material has no directive role. Keep sentence boundaries outside
   // quotes so a quoted full stop cannot expose the rest as a new permission.
@@ -85,10 +100,11 @@ const sourceClauses = (prompt: string) => directives(prompt).flatMap(clause => c
 
 export function researchSourceHosts(prompt: string): string[] {
   const hosts = new Set<string>()
-  const text = sourceClauses(prompt).filter(clause => !/(?:不要|不得|禁止|不许|不能|不允许|无需|不用|不必|do not|don't|don’t|cannot|can't|can’t|must not|mustn't|mustn’t|never)/iu.test(clause)).join('\n')
+  const text = sourceClauses(prompt).filter(clause => !/(?:不要|不得|禁止|不许|不能|不允许|无需|不用|不必|不仅|不只|do not|don't|don’t|cannot|can't|can’t|must not|mustn't|mustn’t|never)/iu.test(clause)
+    && /(?:(?:只|仅)(?:允许|能|限)?(?:限于|限|在|从|用|研究|搜索|检索|读取|获取|使用)?\s*(?:番茄小说|fanqienovel\.com|site:|https?:\/\/)|限定|限制|来源范围|搜索范围|\bonly\s+(?:(?:on|from|within|at|use)\s+)?(?:site:|https?:\/\/|fanqienovel)|\bwithin\s+(?:site:|https?:\/\/)|restricted)|^\s*site:/iu.test(clause)).join('\n')
   if (/番茄小说|fanqienovel\.com/iu.test(text)) hosts.add('fanqienovel.com')
   for (const match of text.matchAll(/(?:(?<![-\w])site:|https?:\/\/)((?:[a-z0-9-]+\.)+[a-z]{2,63})(?:[\s/:]|$)/giu)) {
-    if (hosts.size < 8 && match[1].length <= 253) hosts.add(match[1].toLowerCase())
+    if (hosts.size < 8 && match[1].length <= 253 && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/iu.test(match[1])) hosts.add(match[1].toLowerCase())
   }
   return [...hosts]
 }

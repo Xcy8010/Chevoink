@@ -66,7 +66,7 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
       ...memoryWork.filter(item => !item.completed).map(item => ({ code: 'unresolved_memory_job', reference: item.job.id })),
       ...deliverables.filter(item => item.status === 'missing' || item.status === 'changed').map(item => ({ code: `deliverable_${item.status}`, reference: item.id })),
       ...postconditionChecks.filter(item => item.severity === 'error' && item.status !== 'passed').map(item => ({ code: `postcondition_${item.status}`, reference: item.code })),
-      ...todos.filter(item => !writingDelivery && !(limitedWritingDelivery && limitedReviewDependency(item.content))
+      ...todos.filter(item => !(limitedWritingDelivery && limitedReviewDependency(item.content))
         && (item.status === 'pending' || item.status === 'in_progress')).map(item => ({ code: 'unfinished_todo', reference: runtimeJsonHash({ content: item.content }) })),
       ...compilations.filter(item => !writingDelivery && !limitedWritingDelivery?.chapters.some(chapter => chapter.compilationId === item.id)
         && (item.status === 'active' || item.status === 'completed' && (!item.bridge?.committedAt || item.chapter?.revision !== item.bridge.targetRevision))).map(item => ({ code: 'uncommitted_compilation', reference: item.id })),

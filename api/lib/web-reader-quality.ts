@@ -3,6 +3,8 @@ import { Readability } from '@mozilla/readability'
 import { parseHTML } from 'linkedom'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { parsePublicHttpUrl } from './public-http.js'
+import { extractFanqieChapter, fanqieChapterText } from './fanqie-reader.js'
+import { chapterTitleOrdinal, plainChapterTitle } from '../../shared/structure/chapter-title.js'
 
 /** Follow only actual same-site anchors. Never synthesize reader/chapter IDs. */
 export function extractReaderLinks(html: string, finalUrl: string): Array<{ url: string; title: string }> {
@@ -30,10 +32,10 @@ export type ReaderQualityResult = {
   quality: ReaderQuality
 }
 
-export type ReaderTarget = { title: string; author?: string; sourceHosts?: readonly string[] }
+export type ReaderTarget = { title: string; author?: string; sourceHosts?: readonly string[]; chapterTitle?: string; chapterId?: string }
 export type ReaderEvidence = {
   version: 1
-  identity: { status: 'verified' | 'mismatch' | 'unknown'; title?: string; author?: string; pageType: 'chapter' | 'book' | 'unknown'; basis: 'structured_metadata' | 'page_title' | 'none' }
+  identity: { status: 'verified' | 'mismatch' | 'unknown'; title?: string; author?: string; chapterTitle?: string; chapterId?: string; pageType: 'chapter' | 'book' | 'unknown'; basis: 'structured_metadata' | 'page_title' | 'none' }
   integrity: { status: 'source_compared' | 'unverified' | 'damaged'; code: string; extractedHash: string; referenceHash?: string }
 }
 
@@ -45,6 +47,18 @@ const compact = (value: string) => {
 }
 const identityValue = (value: string) => value.normalize('NFC').trim().replace(/^《|》$/gu, '').trim()
 
+export function matchesReaderChapter(target: Pick<ReaderTarget, 'chapterTitle' | 'chapterId'>, actual: Pick<ReaderEvidence['identity'], 'chapterTitle' | 'chapterId'>): boolean {
+  if (target.chapterId && target.chapterId !== actual.chapterId) return false
+  if (!target.chapterTitle) return true
+  if (!actual.chapterTitle) return false
+  const expected = identityValue(target.chapterTitle), found = identityValue(actual.chapterTitle)
+  const ordinal = chapterTitleOrdinal(expected)
+  const expectedName = plainChapterTitle(expected)
+  return ordinal !== null
+    ? chapterTitleOrdinal(found) === ordinal && (expectedName === expected || plainChapterTitle(found) === expectedName)
+    : plainChapterTitle(found) === expected
+}
+
 /** Metadata is source evidence, not authority. Never equate a title prefix,
  * common hostname or a search snippet with the requested original work. */
 export function assessReaderEvidence(text: string, pageTitle: string, target?: ReaderTarget, sourceHtml?: string, sourceUrl?: string, purpose?: 'navigation'): ReaderEvidence {
@@ -52,18 +66,31 @@ export function assessReaderEvidence(text: string, pageTitle: string, target?: R
   let basis: ReaderEvidence['identity']['basis'] = 'none'
   let pageType: ReaderEvidence['identity']['pageType'] = 'unknown'
   let reference: string | undefined
+  let referenceHeading = ''
   let structuredReference = false
+  const chapter = sourceHtml ? extractFanqieChapter(sourceHtml, sourceUrl) : null
+  let chapterTitle = chapter?.chapterTitle, chapterId = chapter?.chapterId
+  const chapterText = chapter ? fanqieChapterText(chapter) : null
+  if (chapter) {
+    title = chapter.bookTitle || undefined
+    author = chapter.author || undefined
+    basis = title ? 'structured_metadata' : 'none'
+    pageType = 'chapter'
+    reference = chapterText?.text
+    structuredReference = true
+  }
   if (sourceHtml) {
     const { document } = parseHTML(sourceHtml)
+    if (!chapter) referenceHeading = document.querySelector('article h1,[role="main"] h1,main h1')?.textContent ?? ''
     const meta = (names: string[]) => {
       for (const node of document.querySelectorAll('meta[content]')) {
         if (names.includes((node.getAttribute('property') ?? node.getAttribute('name') ?? '').toLowerCase())) return node.getAttribute('content')?.trim()
       }
       return undefined
     }
-    title = meta(['og:novel:book_name', 'og:book_name', 'book:name'])
+    title ??= meta(['og:novel:book_name', 'og:book_name', 'book:name'])
     if (!title && purpose === 'navigation' && /^(?:book|novel)$/iu.test(meta(['og:type']) ?? '')) title = meta(['og:title'])
-    author = meta(['og:novel:author', 'book:author', 'author'])
+    author ??= meta(['og:novel:author', 'book:author', 'author'])
     const authorName = (value: unknown): string | undefined => typeof value === 'string' ? value : value && typeof value === 'object' && 'name' in value && typeof value.name === 'string' ? value.name : undefined
     const inspect = (value: unknown, depth = 0): void => {
       if (!value || typeof value !== 'object' || depth > 5) return
@@ -73,11 +100,15 @@ export function assessReaderEvidence(text: string, pageTitle: string, target?: R
       if (types.some(type => type === 'Book' || type === 'Novel')) {
         if (typeof entry.name === 'string') title ??= entry.name
         author ??= authorName(Array.isArray(entry.author) ? entry.author[0] : entry.author)
-        if (depth === 0) pageType = 'book'
+        if (depth === 0 && !chapter) pageType = 'book'
       }
       if (types.some(type => type === 'Chapter' || type === 'Article' || type === 'NewsArticle' || type === 'BlogPosting')) {
         if (typeof entry.articleBody === 'string' && !reference) { reference = entry.articleBody; structuredReference = true }
-        if (types.includes('Chapter')) pageType = 'chapter'
+        if (types.includes('Chapter')) {
+          pageType = 'chapter'
+          if (typeof entry.name === 'string') chapterTitle ??= entry.name
+          if (typeof entry.identifier === 'string') chapterId ??= entry.identifier
+        }
         inspect(entry.isPartOf, depth + 1)
       }
       inspect(entry['@graph'], depth + 1)
@@ -103,19 +134,28 @@ export function assessReaderEvidence(text: string, pageTitle: string, target?: R
     const chapter = pageTitle.match(/^(.{1,160}?)(?:第[零〇一二三四五六七八九十百千万\d]+章|\s*[-|–]\s*Chapter\s+\d)/iu)
     if (chapter) { pageType = 'chapter'; if (!title) { title = chapter[1]; basis = 'page_title' } }
   }
+  if (!chapterTitle && chapterTitleOrdinal(referenceHeading) !== null) chapterTitle = referenceHeading.trim()
   if (title) title = identityValue(title).slice(0, 300)
   if (author) author = identityValue(author).slice(0, 300)
   const sourceMismatch = Boolean(target?.sourceHosts?.length && !target.sourceHosts.some(host => {
     try { const actual = new URL(sourceUrl ?? '').hostname.toLowerCase()
       return actual === host || actual.endsWith(`.${host}`) } catch { return false }
   }))
-  const mismatch = sourceMismatch || Boolean(target && ((title && title !== identityValue(target.title)) || (target.author && author && author !== identityValue(target.author))))
-  const verified = Boolean(target && title === identityValue(target.title) && author && (!target.author || author === identityValue(target.author)) && basis === 'structured_metadata')
+  const actualChapter = { chapterTitle, chapterId }
+  const requestedChapterMatches = pageType === 'book' || !target || matchesReaderChapter(target, actualChapter)
+  const chapterMismatch = Boolean(chapter?.chapterId && sourceUrl && new URL(sourceUrl).pathname.split('/')[2] !== chapter.chapterId)
+    || Boolean(target && !requestedChapterMatches && (chapterTitle || chapterId))
+  const mismatch = chapterMismatch || sourceMismatch || Boolean(target && ((title && title !== identityValue(target.title)) || (target.author && author && author !== identityValue(target.author))))
+  const verified = Boolean(target && title === identityValue(target.title) && author && (!target.author || author === identityValue(target.author))
+    && requestedChapterMatches && basis === 'structured_metadata')
   const integrity: ReaderEvidence['integrity'] = { status: 'unverified', code: 'SOURCE_COMPLETENESS_UNVERIFIED', extractedHash: textHash(text) }
   if (reference) {
-    const extracted = compact(text), original = compact(reference)
+    let extracted = compact(text)
+    const original = compact(reference), heading = compact(referenceHeading)
+    if (heading && extracted.startsWith(heading) && !original.startsWith(heading)) extracted = extracted.slice(heading.length)
     integrity.referenceHash = textHash(reference)
-    if (original.includes(extracted) || extracted.includes(original)) { integrity.status = 'source_compared'; integrity.code = 'SOURCE_TEXT_MATCH' }
+    if (original === extracted) { integrity.status = 'source_compared'; integrity.code = 'SOURCE_TEXT_MATCH' }
+    else if (original.includes(extracted)) integrity.code = 'SOURCE_PREVIEW_ONLY'
     else if (extracted.length >= 150) {
       const deletionOnly = (span: string, sample: string) => {
         const chars = Array.from(sample)
@@ -138,7 +178,16 @@ export function assessReaderEvidence(text: string, pageTitle: string, target?: R
       }
     }
   }
-  return { version: 1, identity: { status: mismatch ? 'mismatch' : verified ? 'verified' : 'unknown', ...(title ? { title } : {}), ...(author ? { author } : {}), pageType, basis }, integrity }
+  if (chapter && (chapter.locked || chapter.declaredCharacters !== chapterText!.characters)) {
+    integrity.status = 'unverified'
+    integrity.code = chapter.locked || chapter.declaredCharacters && chapterText!.characters < chapter.declaredCharacters
+      ? 'SOURCE_PREVIEW_ONLY' : 'SOURCE_COMPLETENESS_UNVERIFIED'
+  }
+  if (chapterMismatch) {
+    integrity.status = 'damaged'; integrity.code = 'SOURCE_CHAPTER_MISMATCH'
+  }
+  return { version: 1, identity: { status: mismatch ? 'mismatch' : verified ? 'verified' : 'unknown', ...(title ? { title } : {}), ...(author ? { author } : {}),
+    ...(chapterTitle ? { chapterTitle } : {}), ...(chapterId ? { chapterId } : {}), pageType, basis }, integrity }
 }
 
 const normalize = (text: string) => text.replace(/\r\n?/g, '\n').replace(/[\t \u00a0]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim()
@@ -166,7 +215,24 @@ export function assessReaderText(text: string, title = ''): ReaderQualityResult 
   return result('ok', 'WEB_READ_OK')
 }
 
-export function extractReaderHtml(html: string, useReadability = true): ReaderQualityResult {
+export function extractReaderHtml(html: string, useReadability = true, sourceUrl?: string): ReaderQualityResult {
+  const chapter = extractFanqieChapter(html, sourceUrl)
+  if (chapter) {
+    if (chapter.locked) return { ...assessReaderText('', chapter.chapterTitle), status: 'blocked', code: 'WEB_READ_BLOCKED' }
+    const body = fanqieChapterText(chapter)
+    const assessed = assessReaderText(body.text, chapter.chapterTitle)
+    // Structured chapter content has already separated the body from page
+    // chrome. A genuinely short chapter is not an empty navigation page.
+    const result = assessed.code === 'WEB_READ_INSUFFICIENT' && body.text.trim()
+      ? { ...assessed, status: 'ok' as const, code: 'WEB_READ_OK', text: body.text, quality: { ...assessed.quality, readable: true } } : assessed
+    if (body.unmapped) {
+      return { ...result, status: 'unreadable', code: 'WEB_READ_GARBLED', text: '', quality: { ...result.quality, readable: false } }
+    }
+    if (result.status === 'ok' && chapter.declaredCharacters && body.characters < chapter.declaredCharacters) {
+      return { ...result, code: 'WEB_READ_PARTIAL' }
+    }
+    return result
+  }
   const { document } = parseHTML(html)
   // Empty/script-only/error fragments can have no root. linkedom's body getter
   // throws in that case; such a response is unreadable, not a parser crash.

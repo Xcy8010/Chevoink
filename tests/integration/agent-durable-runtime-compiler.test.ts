@@ -18,6 +18,9 @@ import * as runtimeOperations from '../../api/lib/agent/runtime-operations.js'
 import * as runtimeReducer from '../../api/lib/agent/runtime-reducer.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { initializeExecutionState,loadExecutionState,saveExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { advanceDurableWritingDelivery } from '../../api/lib/agent/runtime-writing-delivery.js'
+import { readWritingTodoSyncDelivery } from '../../api/lib/agent/runtime-writing-todo.js'
+import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { loadCurrentTodoSnapshot } from '../../api/lib/agent/session-messages.js'
 import { prepareStoryCompilation,recordStoryCompilerWrite,saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
@@ -27,7 +30,7 @@ import { freezeWritingScope,readCompletedWritingDelivery } from '../../api/lib/a
 import { chapterCreateTool,chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { executeDurableCompiler } from '../../api/lib/agent/tools/durable-compiler.js'
 import { executeDurableRead } from '../../api/lib/agent/tools/durable-read.js'
-import { executeDurableTodo } from '../../api/lib/agent/tools/durable-todo.js'
+import { executeDurableTodo, readDurableTodoItems } from '../../api/lib/agent/tools/durable-todo.js'
 import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import { sessionHistorySearchTool,sessionMessageReadTool } from '../../api/lib/agent/tools/session-history-tools.js'
 import { chapterBridgeCommitTool,chapterBridgeGetTool,sceneTaskBuildTool,storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
@@ -465,6 +468,101 @@ describe.runIf(available)('传统任务待办快照', () => {
       expect(await loadCurrentTodoSnapshot('another-user', f.sessionId)).toBeNull()
     })
   })
+})
+
+describe.runIf(available)('completed next-chapter existing plan reconciliation', () => {
+  it.each(['ordinary', 'exact'] as const)('%s advances commit / extra check / original todo ids without another paid review', async presentation => fixture(async f => {
+    let lease = await claim(f)
+    const ctx: ToolContext = { ...f, chapterId: undefined, callId: randomUUID(), mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced',
+      signal: new AbortController().signal, emit: () => {} }
+    const creation = [{ content: '写完下一章', status: 'in_progress' as const }, { content: '检查并提交本章', status: 'pending' as const }]
+    const tools: AgentTool[] = [todoWriteTool, chapterBridgeGetTool, chapterBridgeCommitTool, qualityAnalyzeTool, chapterReadTool, chapterWriteTool]
+    await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'balanced',
+      model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+      tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } })),
+      toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
+      snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null, successfulToolSignatures: [],
+        messages: [{ role: 'user', content: '写下一章。' }, { role: 'assistant', content: null, toolCalls: [
+          { id: 'plan', name: 'todo_write', arguments: JSON.stringify({ items: creation }) },
+        ] }] } })
+    const step = () => executeDurableToolStep(lease, new AbortController().signal)
+    const created = await step()
+    expect(created).toMatchObject({ kind: 'tool', result: { display: { kind: 'todoList', items: creation.map(item => ({ ...item, id: expect.any(String) })) } } })
+    if (created.kind !== 'tool' || created.result.display?.kind !== 'todoList') throw Error('Expected a real initial todo receipt')
+    const initial = created.result.display.items.map((item, index) => ({ ...item, status: index === 0 ? 'completed' as const : 'in_progress' as const }))
+    const prepared = await prepareStoryCompilation({ ...f, chapterId: undefined, mode: 'balanced', intentSummary: '写下一章',
+      volumeDecision: { kind: 'continue', reason: '当前卷故事尚未收束' } })
+    const compilationId = prepared.compilation.id
+    await sceneTaskBuildTool.execute(ctx, { compilationId, tasks: [{ purpose: '寻找线索', entryState: {}, goal: '看清脚印', obstacle: '门锁',
+      choice: '绕路', cost: '时间', turn: '发现脚印', exitState: {}, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
+    await chapterCreateTool.execute(ctx, { title: '第二章 足迹', position: 2 })
+    const chapter = await prisma.chapter.findFirstOrThrow({ where: { novelId: f.novelId, orderIndex: 2 } })
+    await chapterWriteTool.execute({ ...ctx, callId: randomUUID() }, { chapterId: chapter.id, content: '林舟绕到门后，墙根的脚印一直通向旧井。他蹲下检查绳结，决定先绕开井口。' })
+    const savedChapter = await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })
+    await persistCurrentContinuityReport({ ...f, compilationId, opinions: [], expectedChapterRevision: savedChapter.revision, independentCheck: 'complete' })
+    await persistHumanityQualityReport({ ...f, chapterId: chapter.id, compilationId, chapterRevision: savedChapter.revision,
+      mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
+    const baseline = await loadExecutionState(f.userId, lease.runId)
+    await saveExecutionState(lease, { expectedRevision: baseline.frame.revision, expectedHash: baseline.frame.snapshotHash,
+      snapshot: { ...baseline.frame.state, messages: [...baseline.frame.state.messages, { role: 'assistant', content: null, toolCalls: [
+        { id: 'progress', name: 'todo_write', arguments: JSON.stringify({ items: initial }) },
+        { id: 'observe', name: 'chapter_bridge_get', arguments: JSON.stringify({ compilationId }) },
+        { id: 'commit', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId }) },
+        { id: 'extra-check', name: 'quality_analyze', arguments: JSON.stringify({ compilationId }) },
+        { id: 'read-facts', name: 'chapter_read', arguments: JSON.stringify({ chapterId: chapter.id }) },
+        { id: 'sync', name: 'todo_write', arguments: JSON.stringify({ items: initial.map(item => ({ ...item, status: 'completed' })) }) },
+        { id: 'after-sync-check', name: 'quality_analyze', arguments: JSON.stringify({ compilationId }) },
+        { id: 'after-sync-write', name: 'chapter_write', arguments: JSON.stringify({ chapterId: chapter.id, content: 'This repeated rewrite must not be applied.' }) },
+        { id: 'after-sync-read', name: 'chapter_read', arguments: JSON.stringify({ chapterId: chapter.id }) },
+      ] }] } })
+    const fetcher = vi.fn(() => { throw Error('A current report must be reused; reconciliation must not pay for another check') })
+    vi.stubGlobal('fetch', fetcher)
+    expect(await step()).toMatchObject({ kind: 'tool', result: { display: { kind: 'todoList', items: initial } } })
+    expect(await step()).toMatchObject({ kind: 'tool' })
+    expect(await step()).toMatchObject({ kind: 'tool', result: { summary: '章节已提交' } })
+    const completed = await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })
+    const proof = await prisma.$transaction(tx => readWritingTodoSyncDelivery(tx, { ...f, runId: lease.runId }, f.spec))
+    expect(proof?.chapters.map(item => item.id)).toEqual([chapter.id])
+    const reports = await prisma.chapterQualityReport.findMany({ where: { compilationId }, orderBy: { id: 'asc' } })
+    const before = await loadExecutionState(f.userId, lease.runId)
+    expect(await step()).toMatchObject({ kind: 'context' })
+    const deferred = await loadExecutionState(f.userId, lease.runId)
+    expect(deferred.frame.state.nextOperationSequence).toBe(before.frame.state.nextOperationSequence)
+    expect(deferred.frame.state.messages.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'extra-check', content: expect.stringContaining('not dispatched') })
+    expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'quality_analyze' } })).toBe(0)
+    // A restart retains the next call and original plan; readonly facts remain usable.
+    await pauseDurableTask(f.userId, lease.runId)
+    const paused = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'run.paused' }, orderBy: { sequence: 'desc' } })
+    const resumed = await resumeDurableTask({ userId: f.userId, runId: lease.runId, pauseEventId: paused.id })
+    lease = await claim({ userId: f.userId, runId: resumed.run.id }, 'todo-reconcile-restart')
+    expect(await step()).toMatchObject({ kind: 'tool', result: { observedState: { kind: 'chapter', id: chapter.id } } })
+    const pending = await loadExecutionState(f.userId, lease.runId)
+    expect(await withRunLease(lease, tx => readDurableTodoItems(tx, f.rootId, pending.frame.revision))).toEqual(initial)
+    expect(await step()).toMatchObject({ kind: 'tool', result: { display: { kind: 'todoList', items: initial.map(item => ({ ...item, status: 'completed' })) } } })
+    const synced = await loadExecutionState(f.userId, lease.runId)
+    expect(await withRunLease(lease, tx => readDurableTodoItems(tx, f.rootId, synced.frame.revision))).toEqual(initial.map(item => ({ ...item, status: 'completed' })))
+    expect(await step()).toMatchObject({ kind: 'context' })
+    expect(await step()).toMatchObject({ kind: 'context' })
+    const afterRepeats = await loadExecutionState(f.userId, lease.runId)
+    expect(afterRepeats.frame.state.nextOperationSequence).toBe(synced.frame.state.nextOperationSequence)
+    expect(await step()).toMatchObject({ kind: 'tool', result: { observedState: { kind: 'chapter', id: chapter.id } } })
+    expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: { in: ['quality_analyze', 'chapter_write'] } } })).toBe(0)
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(completed)
+    expect(await prisma.chapterQualityReport.findMany({ where: { compilationId }, orderBy: { id: 'asc' } })).toEqual(reports)
+    expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'chapter_bridge_commit' } })).toBe(1)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+    const events = await publishDurableEvents(f.userId, lease.runId, 200)
+    expect(events.filter(event => event.type === 'tool.deferred')).toMatchObject([
+      { callId: 'extra-check', toolName: 'quality_analyze', execution: 'not_dispatched' },
+      { callId: 'after-sync-check', toolName: 'quality_analyze', execution: 'not_dispatched' },
+      { callId: 'after-sync-write', toolName: 'chapter_write', execution: 'not_dispatched' },
+    ])
+    expect(events.filter(event => event.type === 'tool.result' && event.toolName === 'quality_analyze')).toEqual([])
+    expect(await advanceDurableWritingDelivery(lease)).toEqual(presentation === 'ordinary' ? null : expect.objectContaining({ state: expect.objectContaining({ phase: 'idle' }) }))
+    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: lease.runId } })).status).not.toBe('completed')
+    expect(fetcher).not.toHaveBeenCalled()
+  }, undefined, presentation === 'ordinary' ? '写下一章。' : '写下一章。只输出标题和正文。', { freezeWriting: true }), 30000)
 })
 
 describe.runIf(available)('durable task todos', () => {

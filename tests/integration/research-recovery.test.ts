@@ -4,9 +4,10 @@ import type { TaskSpec } from '../../shared/contracts/index.js'
 import type { WebSearchResult } from '../../api/lib/web-search-service.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
-import { claimResearchReadHandoff, takeResearchReadHandoff, saveResearchLimitationDelivery } from '../../api/lib/agent/research-recovery.js'
-import { registerResearchSource, reserveResearchRequest, settleResearchRequest, saveResearchSearchOutcome,
-  recordResearchReadOutcome, saveResearchContent, saveResearchReportSection, readResearchReportForDelivery } from '../../api/lib/agent/research-sources.js'
+import { claimResearchReadHandoff, takeResearchReadHandoff, saveResearchLimitationDelivery, takeResearchDiscoveryHandoff } from '../../api/lib/agent/research-recovery.js'
+import { registerResearchSource, reserveResearchRequest, settleResearchRequest, saveResearchSearchOutcome, recordResearchSearchFailure,
+  recordResearchReadOutcome, recordResearchReadFailure, saveResearchContent, readResearchContent, recordResearchWindow,
+  saveResearchReportSection, readResearchReportForDelivery } from '../../api/lib/agent/research-sources.js'
 import { assessReaderText, assessReaderEvidence } from '../../api/lib/web-reader-quality.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
 
@@ -51,9 +52,10 @@ async function fixture(work: (fixture: Fixture) => Promise<void>, overrides: Par
     }
     for (const checkpoint of checkpoints) {
       expect(checkpoint.content).toBe('')
-      expect(checkpoint.metadata).toMatchObject({ version: 1, scopeKey: hash([user.id, session.id, novel.id, spec.id]), taskKey: spec.id })
+      expect(checkpoint.metadata).toMatchObject({ scopeKey: hash([user.id, session.id, novel.id, spec.id]), taskKey: spec.id })
       const metadata = checkpoint.metadata as { kind: string; status: string }
-      expect(['researchReadHandoff', 'researchLimitationDelivery']).toContain(metadata.kind)
+      expect(checkpoint.metadata).toMatchObject({ version: metadata.kind === 'researchDiscoveryHandoff' ? 2 : 1 })
+      expect(['researchReadHandoff', 'researchLimitationDelivery', 'researchDiscoveryHandoff']).toContain(metadata.kind)
       expect(['pending', 'consumed']).toContain(metadata.status)
     }
     expect(await prisma.creditLedgerEntry.count({ where: { userId: user.id } })).toBe(0)
@@ -163,7 +165,6 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
     { label: 'explicit no-network contract', overrides: { networkAccess: 'denied' as const } },
     { label: 'explicit search-only contract', overrides: { researchReadAccess: 'denied' as const } },
     { label: 'identity-only task', overrides: { researchTarget: { ...target, textAnalysisRequired: false } } },
-    { label: 'unknown official scope', overrides: { researchTarget: { title: target.title, author: target.author } } },
   ])('does not grant recovery authority to $label', async ({ overrides }) => {
     await fixture(async ({ scope, scopeKey, spec }) => {
       // Persist a historical successful search explicitly. The no-network task
@@ -212,7 +213,7 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
     })
   })
 
-  it('requires remaining frozen read quota and preserves the two-failure stop', async () => {
+  it('shares the finite Fetch quota and continues another source after two known read failures', async () => {
     await fixture(async ({ scope, scopeKey }) => {
       const fourth = await fourthSearch(scope)
       for (let index = 0; index < 8; index++) await consumeRead(scope, `used-${index}`)
@@ -223,8 +224,8 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
       const fourth = await fourthSearch(scope)
       await consumeRead(scope, 'failure-1', false)
       await consumeRead(scope, 'failure-2', false)
-      expect(await claimResearchReadHandoff(scope, [fourth.callId])).toBeNull()
-      expect(await handoffCount(scopeKey)).toBe(0)
+      expect(await claimResearchReadHandoff(scope, [fourth.callId])).not.toBeNull()
+      expect(await handoffCount(scopeKey)).toBe(1)
     })
   })
 
@@ -256,15 +257,35 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
     })
   })
 
-  it.each(['quota', 'read-breaker'] as const)('does not consume a pending marker after %s becomes unavailable', async reason => {
+  it('continues a new query after an original confirmed non-billable HTTP search failure, retaining the same failure receipt', async () => {
+    await fixture(async ({ scope, scopeKey }) => {
+      const call = { ...scope, callId: randomUUID() }, request = { query: '河谷纪事 林青 site:fanqienovel.com', count: 8 }
+      expect(await reserveResearchRequest(call, 'search', hash(request))).toBe(true)
+      await settleResearchRequest(call, 'consumed')
+      const receipt = await prisma.webToolCall.create({ data: { id: hash([scope.userId, scope.runId, call.callId, 'search']), runId: scope.runId,
+        kind: 'search', requestHash: hash(request), amountMilli: 0, multiplierBps: 0, status: 'failed' } })
+      expect(await recordResearchSearchFailure(call, request, [{ provider: 'sogou', httpStatus: 503 }])).toBe(true)
+      const observed = await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id: hash([scopeKey, scope.runId, call.callId]) } })
+      expect(observed.savedOutcome).toMatchObject({ kind: 'known_http_failure', failures: [{ provider: 'sogou', httpStatus: 503 }] })
+      const handoff = await takeResearchDiscoveryHandoff(scope, ['web_search', 'web_read'])
+      expect(handoff?.name).toBe('web_search')
+      expect(handoff?.args.query).not.toBe(request.query)
+      expect(await prisma.webToolCall.findUniqueOrThrow({ where: { id: receipt.id } })).toEqual(receipt)
+      expect(await prisma.agentResearchRequest.findUniqueOrThrow({ where: { id: observed.id } })).toEqual(observed)
+    }, { researchNavigation: { version: 1, requestHash: createHash('sha256').update('只读联网研究《河谷纪事》，读取公开章节分析写法').digest('hex'), alternativeSelection: 'denied' } })
+  })
+
+  it.each(['quota', 'read-breaker'] as const)('keeps quota binding while preserving two known read failures: %s', async reason => {
     await fixture(async ({ scope }) => {
       const fourth = await fourthSearch(scope)
       const pending = await claimResearchReadHandoff(scope, [fourth.callId])
       expect(pending).not.toBeNull()
       if (reason === 'quota') for (let index = 0; index < 8; index++) await consumeRead(scope, `used-${index}`)
       else { await consumeRead(scope, 'first-failure', false); await consumeRead(scope, 'second-failure', false) }
-      expect(await takeResearchReadHandoff(scope)).toBeNull()
-      expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: pending!.receiptId } })).toMatchObject({ metadata: { status: 'pending' } })
+      const failures = await prisma.agentResearchRequest.findMany({ where: { ownerRunId: scope.runId, kind: 'read', savedOutcome: { path: ['ok'], equals: false } } })
+      expect(await takeResearchReadHandoff(scope)).toEqual(reason === 'quota' ? null : pending)
+      expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: pending!.receiptId } })).toMatchObject({ metadata: { status: reason === 'quota' ? 'pending' : 'consumed' } })
+      expect(await prisma.agentResearchRequest.findMany({ where: { ownerRunId: scope.runId, kind: 'read', savedOutcome: { path: ['ok'], equals: false } } })).toEqual(failures)
     })
   })
 
@@ -320,7 +341,7 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
       const partial = await saveResearchLimitationDelivery(scope, '未取得分析所需的原作正文。')
       expect(partial).toContain(authorSection.content)
       expect(partial).toContain('元数据版本 1')
-      expect(partial).toContain('已核验章节版本 0')
+      expect(partial).toContain('已核验完整章节版本 0')
       expect(partial).toContain('尚无可供写法分析的已核验原作正文')
       const first = await readResearchReportForDelivery(scope)
       expect(first).toMatchObject({ title: '原作者保存的研究报告', evidence: { targetAnalysisSupported: false } })
@@ -345,7 +366,7 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
           start: 0, end: 50, excerptHash: createHash('sha256').update(text.slice(0, 50)).digest('hex') }] } })
       const withChapter = await saveResearchLimitationDelivery(scope, '仍有目标样本与全文覆盖尚未完成。')
       expect(withChapter).toContain('元数据版本 1')
-      expect(withChapter).toContain('已核验章节版本 1')
+      expect(withChapter).toContain('已核验完整章节版本 1')
       expect(withChapter).toContain(authorSection.content)
       expect(withChapter).toContain('仅就这份已核验章节证据作局部分析。')
       expect(withChapter).toContain('未标记完成')
@@ -384,5 +405,71 @@ describe.skipIf(!available)('bounded research recovery with isolated PostgreSQL 
       expect(await prisma.agentArtifact.count({ where: { runId: scope.runId, artifactType: 'contextCheckpoint' } })).toBe(1)
       expect(await prisma.agentArtifact.count({ where: { runId: scope.runId } })).toBe(2)
     })
+  })
+})
+
+describe.runIf(available)('unified research source discovery', () => {
+  it.each(['original', 'alternative'] as const)('acquires %s body through shared search/read accounting and preserves provenance', async branch => {
+    await fixture(async ({ scope, scopeKey }) => {
+      const tools = ['web_search', 'web_read']
+      const original = { title: '河谷纪事 第一章_林青', url: 'https://fanqienovel.com/reader/1001', snippet: '河谷纪事，作者林青，第一章公开正文。', source: 'fanqienovel.com' }
+      const alternate = { ...original, url: 'https://publisher.example.com/chapter/river-1', source: 'publisher.example.com' }
+      const executeSearch = async (results: WebSearchResult[]) => {
+        const step = await takeResearchDiscoveryHandoff(scope, tools)
+        expect(step?.name).toBe('web_search')
+        if (step?.name !== 'web_search') throw new Error('expected a search handoff')
+        const call = { ...scope, callId: `discovery-${step.receiptId}` }
+        expect(await reserveResearchRequest(call, 'search', hash(step.args), undefined, undefined, { query: step.args.query })).toBe(true)
+        await settleResearchRequest(call, 'consumed')
+        await saveResearchSearchOutcome(call, { provider: 'deepseek', results }, step.args.query)
+        await Promise.all(results.map(result => registerResearchSource(scope, result.url, result.title)))
+        return step
+      }
+      await executeSearch([original])
+      const originalRead = await takeResearchDiscoveryHandoff(scope, tools)
+      expect(originalRead?.name).toBe('web_read')
+      if (originalRead?.name !== 'web_read') throw new Error('expected original read')
+      const originalCall = { ...scope, callId: `discovery-${originalRead.receiptId}` }
+      expect(await reserveResearchRequest(originalCall, 'read', hash(originalRead.args))).toBe(true)
+      await settleResearchRequest(originalCall, 'consumed')
+      let chosen = originalRead
+      if (branch === 'alternative') {
+        const blocked = { ...assessReaderText('', target.title), status: 'blocked' as const, code: 'WEB_READ_BLOCKED',
+          finalUrl: original.url, provider: 'direct' as const, retryable: false, httpStatus: 403, contentKind: 'article' as const }
+        await recordResearchReadOutcome(originalCall, false)
+        await recordResearchReadFailure(originalCall, originalRead.args.sourceId, blocked)
+        const second = await executeSearch([])
+        expect(second.args.query).toContain('site:fanqienovel.com')
+        const third = await executeSearch([alternate])
+        expect(third.args.query).not.toContain('site:fanqienovel.com')
+        const next = await takeResearchDiscoveryHandoff(scope, tools)
+        expect(next?.name).toBe('web_read')
+        if (next?.name !== 'web_read') throw new Error('expected alternate read')
+        expect(next.args.sourceId).not.toBe(originalRead.args.sourceId)
+        chosen = next
+        const nextCall = { ...scope, callId: `discovery-${next.receiptId}` }
+        expect(await reserveResearchRequest(nextCall, 'read', hash(next.args))).toBe(true)
+        await settleResearchRequest(nextCall, 'consumed')
+        await recordResearchReadOutcome(nextCall, true)
+        expect((await prisma.agentResearchSource.findUniqueOrThrow({ where: { id: originalRead.args.sourceId } })).readFailure).not.toBeNull()
+      } else await recordResearchReadOutcome(originalCall, true)
+      const chosenUrl = branch === 'original' ? original.url : alternate.url
+      const text = '村民沿着河岸核对木桩留下的水痕，带着记录回村讨论下一次修渠的方向。'.repeat(12)
+      const html = `<script type="application/ld+json">${JSON.stringify({ '@type': 'Chapter', articleBody: text,
+        isPartOf: { '@type': 'Book', name: target.title, author: { '@type': 'Person', name: target.author } } })}</script><article>${text}</article>`
+      const readingTarget = { title: target.title, author: target.author }
+      const evidence = assessReaderEvidence(text, target.title, readingTarget, html, chosenUrl)
+      expect(evidence).toMatchObject({ identity: { status: 'verified', pageType: 'chapter' }, integrity: { status: 'source_compared' } })
+      const saved = await saveResearchContent(scope, chosen.args.sourceId, { ...assessReaderText(text, target.title),
+        provider: 'direct', finalUrl: chosenUrl, retryable: false, contentKind: 'article', evidence })
+      const window = await readResearchContent(scope, { contentRef: saved.id, revision: saved.revision, limit: 6000 })
+      await recordResearchWindow(scope, { contentRef: saved.id, revision: saved.revision, start: 0, end: text.length })
+      expect(window).toMatchObject({ finalUrl: chosenUrl, text, truncated: false, returnedRange: { start: 0, end: text.length, total: text.length } })
+      expect(await takeResearchDiscoveryHandoff(scope, tools)).toBeNull()
+      const requests = await prisma.agentResearchRequest.findMany({ where: { scopeKey, status: 'consumed' } })
+      expect(requests.filter(request => request.kind === 'search')).toHaveLength(branch === 'original' ? 1 : 3)
+      expect(requests.filter(request => request.kind === 'read')).toHaveLength(branch === 'original' ? 1 : 2)
+    }, { researchTarget: { title: target.title, author: target.author, textAnalysisRequired: true },
+      researchNavigation: { version: 1, requestHash: 'a'.repeat(64), alternativeSelection: 'denied' } })
   })
 })

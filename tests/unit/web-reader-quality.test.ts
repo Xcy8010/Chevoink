@@ -83,6 +83,16 @@ describe('source-grounded work identity and extraction integrity', () => {
   it('matches exact structured book and author, independently from readable body quality', () => {
     expect(assessReaderEvidence(original, '河谷纪事第1章 清晨', target, html())).toMatchObject({ identity: { status: 'verified', title: target.title, author: target.author, pageType: 'chapter' }, integrity: { status: 'source_compared', code: 'SOURCE_TEXT_MATCH' } })
   })
+  it('uses actual article headings to distinguish the requested chapter and equivalent ordinals', () => {
+    const requested = { ...target, chapterTitle: '第五章' }
+    const source = html().replace('<article>', '<article><h1>第5章 清晨</h1>')
+    expect(assessReaderEvidence(original, '河谷纪事第5章', requested, source)).toMatchObject({
+      identity: { status: 'verified', chapterTitle: '第5章 清晨' }, integrity: { status: 'source_compared' },
+    })
+    expect(assessReaderEvidence(original, '河谷纪事第1章', requested, source.replace('第5章', '第1章'))).toMatchObject({
+      identity: { status: 'mismatch' }, integrity: { status: 'damaged', code: 'SOURCE_CHAPTER_MISMATCH' },
+    })
+  })
   it('uses the final source host, including redirects, before certifying a frozen official source', () => {
     const scoped = { ...target, sourceHosts: ['publisher.example'] }
     for (const url of [undefined, 'https://other.example/chapter/1', 'https://publisher.example.evil.example/chapter/1']) {
@@ -114,10 +124,12 @@ describe('source-grounded work identity and extraction integrity', () => {
     expect(assessReaderText(damaged)).toMatchObject({ status: 'ok', quality: { privateUseRatio: 0, replacementRatio: 0 } })
     expect(assessReaderEvidence(damaged, '河谷纪事第1章', target, html()).integrity).toMatchObject({ status: 'damaged', code: 'SOURCE_TEXT_DELETION' })
   })
-  it('permits normal spaces, paragraph formatting, Markdown and source-bounded excerpts', () => {
-    for (const text of [original.replaceAll('，', '，  '), original.split('\n\n').map(paragraph => `**${paragraph}**`).join('\n\n'), original.slice(50, -50)]) {
+  it('permits normal spaces, paragraph formatting and Markdown without accepting a preview as complete', () => {
+    for (const text of [original.replaceAll('，', '，  '), original.split('\n\n').map(paragraph => `**${paragraph}**`).join('\n\n')]) {
       expect(assessReaderEvidence(text, '河谷纪事第1章', target, html()).integrity.status).toBe('source_compared')
     }
+    expect(assessReaderEvidence(original.slice(50, -50), '河谷纪事第1章', target, html()).integrity)
+      .toMatchObject({ status: 'unverified', code: 'SOURCE_PREVIEW_ONLY' })
     const english = 'The village recorded the water level each morning and carefully compared the resulting evidence. '.repeat(5)
     expect(assessReaderEvidence(english, 'Chapter 1', undefined, html(target.title, target.author, english)).integrity.status).toBe('source_compared')
   })

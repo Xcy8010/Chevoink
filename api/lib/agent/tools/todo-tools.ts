@@ -185,11 +185,16 @@ export function renderTodoItems(items: AgentTodoItem[]): string {
     .join('\n')
 }
 
+/** A real delivery stays authoritative while its existing plan catches up. */
+export function completedWritingTodoGuidance(items: AgentTodoItem[]): string {
+  return `[系统/既有待办进度同步] 原任务授权章节的正文、当前版本检查与提交已核验完成。现在仅核对本任务既有清单，沿用原 id 用 todo_write 立即更新已经真实完成的项；不得新建、追加或改写清单扩大范围，不得重复章节写作、检查或提交。无法确认完成的项保持原状态并说明阻塞，不得因任务完成而全部勾选。清单不代替成果证据。\n${renderTodoItems(items)}`
+}
+
 export const todoWriteTool = defineTool({
   name: 'todo_write',
   title: '更新待办清单',
   description:
-    '按原 id 更新状态或修改说明，禁止改描述新增重复项。开工前一次列出已知步骤并按序执行，每项开工先设 in_progress，真实完成后立即设 completed；确有范围变化才带 changeReason 新增。重复项或不再执行项沿用原 id 设 cancelled 并填 reason，不得假标 completed。仅用于长任务、复杂任务（如连写多章、跨章批量整改、多项独立交付步骤）：开工前建立至少两项真实待办，再逐项推进。简单问答、单处修改、简单单步操作不需要清单。首次创建不能包含 completed；禁止在收尾时补写完成清单或用一条总结覆盖旧清单。已真实交付的既有项可批量标记 completed，已完成项不回退、原项不遗漏。有未完成项就继续执行，无法完成时说明阻塞，不得假勾选。空数组不会清空旧清单；进度未变化不要重复调用。',
+    '按原 id 更新状态或修改说明，禁止改描述新增重复项。开工前一次列出已知步骤并按序执行，每项开工先设 in_progress，真实完成后立即设 completed；确有范围变化才带 changeReason 新增。重复项或不再执行项沿用原 id 设 cancelled 并填 reason，不得假标 completed。仅用于长任务、复杂任务（如连写多章、跨章批量整改、多项独立交付步骤）：开工前建立至少两项真实待办，再逐项推进。普通写下一章的读取、编译、写作、检查及提交属于一个交付单元，不因内部工具步骤多机械建三项待办；由 Agent 判断是否确属长任务或复杂任务。简单问答、单处修改、简单单步操作不需要清单。首次创建不能包含 completed；禁止在收尾时补写完成清单或用一条总结覆盖旧清单。已真实交付的既有项可批量标记 completed，已完成项不回退、原项不遗漏。有未完成项就继续执行，无法完成时说明阻塞，不得假勾选。空数组不会清空旧清单；进度未变化不要重复调用。',
   parameters: todoWriteParameters,
   coerceArgs(raw) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw

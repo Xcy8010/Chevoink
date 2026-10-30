@@ -50,6 +50,22 @@ describe('current model request tools and exact prepared-request recovery', () =
       expect(cursor).toEqual(cursorBefore)
     } finally { mocks.projected = originalProjected }
   })
+  it.each(['idle', 'prepared'] as const)('keeps the complete request identity while synchronizing an existing plan: %s', async phase => {
+    const todo = { type: 'function', function: { name: 'todo_write', description: 'sync original ids', parameters: { type: 'object' } } }
+    const full = [...mocks.projected, todo]
+    const originalProjected = mocks.projected
+    mocks.projected = full
+    ;(mocks.current.configuration as { tools: unknown }).tools = full
+    const snapshot = { kind: 'provider', action: 'workspaceAgent', parentOperationId: null, input: { request: { body: { tools: full } } } }
+    mocks.operation.inputSnapshot = snapshot; mocks.operation.inputHash = runtimeJson(snapshot).hash
+    if (phase === 'prepared') mocks.current.frame = { revision: 1, state: { phase: 'awaiting_operation', pendingOperationId: 'op', messages } }
+    const before = runtimeJson(mocks.operation).hash
+    try {
+      await expect(validateModelCursor(token, cursor, { ...input(), tools: full })).resolves.toEqual(mocks.frame)
+      await expect(validateModelCursor(token, cursor, { ...input(), tools: [todo] })).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+      expect(runtimeJson(mocks.operation).hash).toBe(before)
+    } finally { mocks.projected = originalProjected }
+  })
   it('does not add the implicit compatibility candidate to an already prepared explicit-false request', async () => {
     const preparedTools = mocks.projected.map(definition => ({ ...definition, function: { ...definition.function, strict: false } }))
     const snapshot = { kind: 'provider', action: 'workspaceAgent', parentOperationId: null, input: { request: { body: { tools: preparedTools } } } }

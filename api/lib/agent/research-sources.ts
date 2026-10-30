@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import { z } from 'zod'
-import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
+import { taskSpecSchema, type TaskSpec } from '../../../shared/contracts/task-spec-contracts.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { parsePublicHttpUrl } from '../public-http.js'
-import { assessReaderText } from '../web-reader-quality.js'
+import { assessReaderText, type ReaderTarget } from '../web-reader-quality.js'
 import type { WebReadResult } from '../web-reader-service.js'
 import { countReportChineseCharacters } from '../../../shared/agent-output.js'
+import { researchChapterTitle, researchSourceHosts } from './research-navigation-policy.js'
 import { mergeResearchRanges } from './research-ranges.js'
 import { evaluateResearchNavigationCandidates, evaluateResearchSearchCandidates } from '../research-search-quality.js'
 import { runtimeJson } from './runtime-common.js'
@@ -36,11 +37,16 @@ const reportCitationSchema = z.object({ contentRef: z.string().min(1).max(64), r
   start: z.number().int().nonnegative(), end: z.number().int().positive(), excerptHash: z.string().regex(/^[a-f0-9]{64}$/),
   purpose: z.enum(['target_text', 'source_identity', 'limitation']).optional() }).strict()
 const readerEvidenceSchema = z.object({ version: z.literal(1),
-  identity: z.object({ status: z.enum(['verified', 'mismatch', 'unknown']), title: z.string().max(300).optional(), author: z.string().max(300).optional(),
+  identity: z.object({ status: z.enum(['verified', 'mismatch', 'unknown']), title: z.string().max(300).optional(), author: z.string().max(300).optional(), chapterTitle: z.string().max(300).optional(), chapterId: z.string().max(300).optional(),
     pageType: z.enum(['chapter', 'book', 'unknown']), basis: z.enum(['structured_metadata', 'page_title', 'none']) }).strict(),
   integrity: z.object({ status: z.enum(['source_compared', 'unverified', 'damaged']), code: z.string().max(64),
     extractedHash: z.string().regex(/^[a-f0-9]{64}$/), referenceHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict(),
 }).strict()
+/** A readable, source-proven subset remains partial; it is not chapter completeness. */
+export function isResearchPreviewEvidence(evidence: Pick<z.infer<typeof readerEvidenceSchema>, 'integrity'> | undefined) {
+  return evidence?.integrity.status === 'unverified' && evidence.integrity.code === 'SOURCE_PREVIEW_ONLY' && Boolean(evidence.integrity.referenceHash)
+}
+
 const reportSectionSchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), order: z.number().int().min(0).max(100),
   content: z.string().min(1).max(60_000), evidenceKind: z.enum(['analysis', 'source_identity', 'limitation']).optional(),
   citations: z.array(reportCitationSchema).max(100) }).strict()
@@ -116,8 +122,12 @@ export async function saveResearchReportSection(scope: Scope, input: {
         const metadata = content.quality && typeof content.quality === 'object' && !Array.isArray(content.quality) ? content.quality : null
         const evidence = readerEvidenceSchema.safeParse(metadata?.evidence)
         if (content.contentKind !== 'article' || !evidence.success || evidence.data.identity.status !== 'verified' || evidence.data.identity.pageType !== 'chapter'
-          || evidence.data.integrity.status !== 'source_compared') {
+          || evidence.data.integrity.status !== 'source_compared' && !isResearchPreviewEvidence(evidence.data)) {
           throw new DataAccessError(422, 'RESEARCH_TARGET_EVIDENCE_REQUIRED', '目标正文引用尚未核对原作书名、作者及同源正文完整性；不得把错书、简介或未核验提取当作原作证据。仅用于身份核验或说明缺失的引用须明确purpose。')
+        }
+        if (isResearchPreviewEvidence(evidence.data) && !mergeResearchRanges(content.providedRanges, content.text.length)
+          .some(range => range.start <= citation.start && range.end >= citation.end)) {
+          throw new DataAccessError(409, 'RESEARCH_CITATION_INVALID', '部分正文引用必须位于本任务实际已读取的保存范围内，不能把预览当作完整章节。')
         }
         if (spec.researchNavigation) {
           const sealed = checkedResearchMetadata(content)
@@ -227,7 +237,7 @@ async function ownedTask(tx: Prisma.TransactionClient, scope: Scope) {
   if (!run) return denied()
   const spec = run.taskSpec == null ? null : taskSpecSchema.safeParse(run.taskSpec)
   if (spec && (!spec.success || spec.data.scope.novelId !== scope.novelId)) return denied()
-  return { taskKey: run.taskRootId ?? (spec?.success ? spec.data.id : run.id), run }
+  return { taskKey: run.taskRootId ?? (spec?.success ? spec.data.id : run.id), run, spec: spec?.success ? spec.data : null }
 }
 
 async function ownedSource(tx: Prisma.TransactionClient, scope: Scope, sourceId: string) {
@@ -238,66 +248,126 @@ async function ownedSource(tx: Prisma.TransactionClient, scope: Scope, sourceId:
   return source
 }
 
+export type ResearchSearchBudgetContext = { query: string; extension?: {
+  gap: 'missing_target_text' | 'source_unavailable'; direction: 'open_web' | 'site' | 'chapter' | 'catalogue'; host?: string
+} }
+
+/** Cache identity ignores presentation and word order, never task ownership. */
+export function normalizeResearchSearchQuery(query: string): string {
+  return [...new Set(query.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}:./_-]+/gu, ' ').trim().split(/\s+/u))].sort().join(' ')
+}
+
+function searchDirection(query: string) {
+  query = query.normalize('NFKC').replace(/[^\p{L}\p{N}:./_-]+/gu, ' ')
+  const hosts = [...new Set([...query.matchAll(/(?<![-\w])site:((?:[a-z0-9-]+\.)+[a-z]{2,63})(?=[/\s]|$)/giu)].map(match => match[1].toLowerCase()))].sort()
+  const purpose = /目录|章节列表|目次|catalog(?:ue)?|table of contents|site:[^\s]+\/page(?:[\s/]|$)/iu.test(query) ? 'catalogue'
+    : /正文|原文|章节|全文|阅读|chapter|full text|site:[^\s]+\/reader(?:[\s/]|$)/iu.test(query) ? 'chapter' : 'general'
+  return { hosts, purpose }
+}
+
+function newSearchDirection(query: string, previous: readonly string[]) {
+  const current = searchDirection(query), prior = previous.map(searchDirection)
+  if (!normalizeResearchSearchQuery(query) || previous.some(old => normalizeResearchSearchQuery(old) === normalizeResearchSearchQuery(query))
+    || prior.some(old => old.hosts.join(' ') === current.hosts.join(' ') && old.purpose === current.purpose)) return false
+  return current.hosts.some(host => !prior.some(old => old.hosts.includes(host)))
+    || !current.hosts.length && prior.some(old => old.hosts.length)
+    || current.purpose !== 'general'
+}
+
+async function legacyResearchRequestUnits(tx: Prisma.TransactionClient, scope: Scope, taskKey: string, kind: 'search' | 'read', callId = '') {
+  const counts = await tx.$queryRaw<Array<{ units: bigint }>>`
+    SELECT count(*) AS units FROM agent_run_events e JOIN agent_runs r ON r.id=e.run_id
+    WHERE r.user_id=${scope.userId} AND r.session_id=${scope.sessionId} AND r.novel_id=${scope.novelId}
+      AND (r.id=${scope.runId} OR r.task_root_id=${taskKey} OR (r.task_root_id IS NULL AND r.task_spec->>'id'=${taskKey}))
+      AND e.type='tool.call' AND e.payload->>'toolName'=${kind === 'search' ? 'web_search' : 'web_read'}
+      AND e.payload->'args' IS NOT NULL AND e.payload->'args'<>'null'::jsonb
+      AND (${kind}='search' OR e.payload->'args'->>'contentRef' IS NULL)
+      AND (${callId}='' OR NOT (e.run_id=${scope.runId} AND e.payload->>'callId'=${callId}))`
+  return Number(counts[0].units)
+}
+
+async function researchRequestBudget(tx: Prisma.TransactionClient, scope: Scope, task: Awaited<ReturnType<typeof ownedTask>>,
+  kind: 'search' | 'read', search?: ResearchSearchBudgetContext, requestKey?: string) {
+  const scopeKey = hash(JSON.stringify([scope.userId, scope.sessionId, scope.novelId, task.taskKey]))
+  const requests = await tx.agentResearchRequest.findMany({ where: { scopeKey, status: { not: 'released' } } })
+  const matching = requests.filter(item => item.kind === kind)
+  const used = matching.reduce((sum, item) => sum + item.units, 0)
+    + (matching.some(item => item.status === 'baseline') ? 0 : await legacyResearchRequestUnits(tx, scope, task.taskKey, kind))
+  const searches = requests.filter(item => item.kind === 'search' && item.status === 'consumed').flatMap(item => {
+    const parsed = searchOutcomeSchema.safeParse(item.savedOutcome)
+    const failed = parsed.success ? null : searchFailureSchema.safeParse(item.savedOutcome)
+    return parsed.success && parsed.data.query ? [parsed.data.query] : failed?.success ? [failed.data.query] : []
+  })
+  const repeated = kind === 'search' && (matching.some(item => item.status !== 'baseline' && item.requestKey === requestKey)
+    || !!search?.query && searches.some(query => normalizeResearchSearchQuery(query) === normalizeResearchSearchQuery(search.query)))
+  let limit = kind === 'read' ? 8 : 5
+  if (kind === 'search' && used >= 5 && used < 10 && search?.query && !repeated && newSearchDirection(search.query, searches)) {
+    const spec = task.spec
+    const qualified = await tx.agentResearchContent.findFirst({ where: { source: { taskKey: task.taskKey, ownerRun: sourceOwner(scope) }, contentKind: 'article',
+      ...(spec && (spec.researchTarget || spec.researchNavigation) ? { AND: [
+        { quality: { path: ['evidence', 'identity', 'status'], equals: 'verified' } },
+        { quality: { path: ['evidence', 'identity', 'pageType'], equals: 'chapter' } },
+        { quality: { path: ['evidence', 'integrity', 'status'], equals: 'source_compared' } },
+      ] } : {}) }, select: { id: true } })
+    const failedRead = requests.some(item => item.kind === 'read' && item.status === 'consumed' && item.savedOutcome
+      && typeof item.savedOutcome === 'object' && !Array.isArray(item.savedOutcome) && item.savedOutcome.ok === false)
+    // Actual missing text or a failed source supplies the gap; model callers
+    // need no extra wire parameter to pursue a demonstrably new direction.
+    if (!qualified && searches.length > 0 || failedRead) limit = 10
+  }
+  return { used, limit, remaining: repeated ? 0 : Math.max(0, limit - used) }
+}
+
+/** Read-only availability for the same task ledger used by every tool path.
+ * Historical baseline rows are evidence, not mutable current policy settings. */
+export async function readResearchRequestBudget(scope: Scope, kind: 'search' | 'read', transaction?: Prisma.TransactionClient,
+  search?: ResearchSearchBudgetContext) {
+  const read = async (tx: Prisma.TransactionClient) => researchRequestBudget(tx, scope, await ownedTask(tx, scope), kind, search)
+  return transaction ? read(transaction) : researchTransaction(scope, read)
+}
+
 /** Durable task-scoped safety attempts. Saved content/cache hits never call this.
  * Historical calls seed a conservative baseline; a restart cannot reset it. */
-export async function reserveResearchRequest(scope: Scope & Pick<ToolContext, 'callId' | 'webAdmission'>, kind: 'search' | 'read', requestKey: string, purpose?: 'navigation', transaction?: Prisma.TransactionClient) {
+export async function reserveResearchRequest(scope: Scope & Pick<ToolContext, 'callId' | 'webAdmission'>, kind: 'search' | 'read', requestKey: string, purpose?: 'navigation', transaction?: Prisma.TransactionClient, search?: ResearchSearchBudgetContext) {
   const reserve = async (tx: Prisma.TransactionClient) => {
-    const { taskKey, run } = await ownedTask(tx, scope)
+    const task = await ownedTask(tx, scope)
+    const { taskKey, run, spec: frozen } = task
     if (run.status !== 'running' && !scope.webAdmission) throw new DataAccessError(409, 'RESEARCH_RUN_NOT_ACTIVE', '任务已停止，未发起联网请求。')
-    const frozen = taskSpecSchema.safeParse(run.taskSpec)
-    if (frozen.success && frozen.data.networkAccess === 'denied') {
+    if (frozen?.networkAccess === 'denied') {
       throw new DataAccessError(403, 'RESEARCH_NETWORK_DENIED', '原始请求明确禁止联网，本次未预约、未请求供应商、未收工具费。')
     }
     const scopeKey = hash(JSON.stringify([scope.userId, scope.sessionId, scope.novelId, taskKey]))
-    if (kind === 'read' && frozen.success && frozen.data.researchReadAccess === 'denied') {
+    if (kind === 'read' && frozen?.researchReadAccess === 'denied') {
       throw new DataAccessError(403, 'RESEARCH_READ_DENIED', '原始请求只允许搜索，未预约、未读取网页、未收读取费。')
     }
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${scopeKey}, 0))::text`
     if (purpose) {
-      if (kind !== 'read' || !frozen.success || frozen.data.researchNavigation?.version !== 1) {
+      if (kind !== 'read' || !frozen || frozen.researchNavigation?.version !== 1) {
         throw new DataAccessError(403, 'RESEARCH_NAVIGATION_DENIED', '本任务未冻结目录导航权限，未预约或发起请求。')
       }
-      const navigation = await tx.agentResearchRequest.count({ where: { scopeKey, kind: 'read', status: { not: 'released' },
-        savedOutcome: { path: ['purpose'], equals: 'navigation' } } })
-      if (navigation >= 2) throw new DataAccessError(429, 'RESEARCH_NAVIGATION_BUDGET', '本任务两次目录导航额度已用尽，不能把导航次数当作新的正文预算。')
+
     }
-    if (frozen.success && frozen.data.researchNavigation?.version === 1 && await tx.agentResearchRequest.findFirst({
+    if (frozen?.researchNavigation?.version === 1 && await tx.agentResearchRequest.findFirst({
       where: { scopeKey, kind: 'read', OR: [{ status: 'reserved' }, { status: 'consumed', savedOutcome: { equals: Prisma.DbNull } },
         { status: 'consumed', savedOutcome: { path: ['state'], equals: 'reserved' } }] },
     })) throw new DataAccessError(409, 'RESEARCH_REQUEST_UNCERTAIN', '已有页面请求结果待核对，未派发新的联网请求。')
-    if (frozen.success && frozen.data.researchNavigation?.version === 1 && await tx.webToolCall.findFirst({ where: { status: 'dispatched', run: {
+    if (frozen?.researchNavigation?.version === 1 && await tx.webToolCall.findFirst({ where: { status: 'dispatched', run: {
       ...sourceOwner(scope), OR: [{ id: scope.runId }, { taskRootId: taskKey }, { taskSpec: { path: ['id'], equals: taskKey } }],
     } } })) throw new DataAccessError(409, 'RESEARCH_REQUEST_UNCERTAIN', '已有供应商请求结果未知，未派发新联网请求。')
     const id = hash(JSON.stringify([scopeKey, scope.runId, scope.callId]))
     const previous = await tx.agentResearchRequest.findUnique({ where: { id } })
     if (previous) throw new DataAccessError(409, 'RESEARCH_REQUEST_ALREADY_RESERVED',
       '此联网调用已有执行记录，未重复请求。请使用已保存的来源或核对原调用结果。')
-    const recentReads = await tx.agentResearchRequest.findMany({ where: { scopeKey, kind: 'read', status: 'consumed' },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 2, select: { savedOutcome: true } })
-    if (recentReads.length === 2 && recentReads.every(item => item.savedOutcome !== null
-      && typeof item.savedOutcome === 'object' && !Array.isArray(item.savedOutcome) && item.savedOutcome.ok === false)) {
-      throw new DataAccessError(429, 'RESEARCH_NO_PROGRESS', '连续两次页面读取失败，已停止本任务新增联网请求，不再收费重试。请使用已有证据说明限制；如需进一步研究，请用户提供可读取的官方链接或有权使用的文件。')
-    }
     const baselineId = hash(JSON.stringify([scopeKey, kind, 'baseline']))
     let baseline = await tx.agentResearchRequest.findUnique({ where: { id: baselineId } })
     if (!baseline) {
-      const counts = await tx.$queryRaw<Array<{ units: bigint }>>`
-        SELECT count(*) AS units FROM agent_run_events e JOIN agent_runs r ON r.id=e.run_id
-        WHERE r.user_id=${scope.userId} AND r.session_id=${scope.sessionId} AND r.novel_id=${scope.novelId}
-          AND (r.id=${scope.runId} OR r.task_root_id=${taskKey} OR (r.task_root_id IS NULL AND r.task_spec->>'id'=${taskKey}))
-          AND e.type='tool.call' AND e.payload->>'toolName'=${kind === 'search' ? 'web_search' : 'web_read'}
-          AND e.payload->'args' IS NOT NULL AND e.payload->'args'<>'null'::jsonb
-          AND (${kind}='search' OR e.payload->'args'->>'contentRef' IS NULL)
-          AND NOT (e.run_id=${scope.runId} AND e.payload->>'callId'=${scope.callId})`
-      const units = Number(counts[0].units)
-      const spec = taskSpecSchema.safeParse(run.taskSpec)
-      const extended = spec.success && spec.data.researchBudget === 'extended'
+      const units = await legacyResearchRequestUnits(tx, scope, taskKey, kind, scope.callId)
       baseline = await tx.agentResearchRequest.create({ data: { id: baselineId, ownerRunId: scope.runId, scopeKey, kind,
-        units, requestKey: hash('legacy-baseline'), requestLimit: extended ? (kind === 'search' ? 5 : 8) : 2, status: 'baseline' } })
+        units, requestKey: hash('legacy-baseline'), requestLimit: kind === 'search' ? 5 : 8, status: 'baseline' } })
     }
-    const used = await tx.agentResearchRequest.aggregate({ where: { scopeKey, kind, status: { not: 'released' } }, _sum: { units: true } })
-    if ((used._sum.units ?? 0) >= baseline.requestLimit) return false
-    await tx.agentResearchRequest.create({ data: { id, ownerRunId: scope.runId, scopeKey, kind, requestKey, requestLimit: baseline.requestLimit,
+    const budget = await researchRequestBudget(tx, scope, task, kind, search, requestKey)
+    if (!budget.remaining) return false
+    await tx.agentResearchRequest.create({ data: { id, ownerRunId: scope.runId, scopeKey, kind, requestKey, requestLimit: budget.limit,
       ...(purpose ? { savedOutcome: { purpose, state: 'reserved' } } : {}) } })
     return true
   }
@@ -315,7 +385,7 @@ export async function settleResearchRequest(scope: Scope & { callId: string }, s
   return transaction ? settle(transaction) : prisma.$transaction(settle)
 }
 
-/** Persist the transport outcome for the task-scoped no-progress breaker. */
+/** Persist each real transport outcome; failed URLs do not stop other sources. */
 export async function recordResearchReadOutcome(scope: Scope & { callId: string }, ok: boolean) {
   return researchTransaction(scope, async tx => {
     const { taskKey } = await ownedTask(tx, scope)
@@ -336,6 +406,34 @@ const searchOutcomeSchema = z.object({ provider: z.enum(['bocha', 'deepseek', 's
   navigation: z.object({ provider: z.enum(['bocha', 'deepseek', 'sogou', 'bing']),
     results: z.array(z.object({ title: z.string(), url: z.string().max(8192), snippet: z.string(), source: z.string() })).max(2) }).optional() })
 
+const searchFailureSchema = z.object({ kind: z.literal('known_http_failure'), query: z.string().max(120),
+  failures: z.array(z.object({ provider: z.string(), httpStatus: z.number().int().min(400).max(599) })) })
+
+/** Only a confirmed original non-billable failure can resolve this same request.
+ * A refund alone never upgrades an unknown supplier response to a known one. */
+export async function recordResearchSearchFailure(scope: Scope & { callId: string }, request: { query: string; count: number },
+  failures: Array<{ provider: string; httpStatus: number }>) {
+  return researchTransaction(scope, async tx => {
+    const { taskKey } = await ownedTask(tx, scope)
+    const receiptId = hash(JSON.stringify([scope.userId, scope.runId, scope.callId, 'search']))
+    const receipt = await tx.webToolCall.findUnique({ where: { id: receiptId } })
+    if (!receipt || receipt.runId !== scope.runId || receipt.kind !== 'search' || receipt.status !== 'failed'
+      || receipt.requestHash !== hash(JSON.stringify(request))) return false
+    if (receipt.amountMilli > 0 && !await tx.creditRefundIntent.findFirst({ where: {
+      originalEntry: { userId: scope.userId, idempotencyKey: `web-search:${scope.runId}:${scope.callId}` },
+      reason: 'web_tool_no_billable_result', AND: [
+        { evidence: { path: ['callId'], equals: receipt.id } }, { evidence: { path: ['outcome'], equals: 'failed' } },
+      ],
+    } })) return false
+    const scopeKey = hash(JSON.stringify([scope.userId, scope.sessionId, scope.novelId, taskKey]))
+    const id = hash(JSON.stringify([scopeKey, scope.runId, scope.callId]))
+    const savedOutcome = { kind: 'known_http_failure', query: request.query, failures }
+    await tx.agentResearchRequest.updateMany({ where: { id, ownerRunId: scope.runId, scopeKey, kind: 'search', status: 'consumed', savedOutcome: { equals: Prisma.DbNull } },
+      data: { savedOutcome } })
+    return true
+  })
+}
+
 /** Persist only bounded public results, not provider credentials or trace IDs. */
 export async function saveResearchSearchOutcome(scope: Scope & { callId: string }, outcome: unknown, query?: string) {
   const parsed = searchOutcomeSchema.parse(outcome)
@@ -353,14 +451,25 @@ export async function saveResearchSearchOutcome(scope: Scope & { callId: string 
   })
 }
 
-export async function findResearchSearchOutcome(scope: Scope, requestKey: string) {
+export async function findResearchSearchOutcome(scope: Scope, requestKey: string, query?: string) {
   return researchTransaction(scope, async tx => {
     const { taskKey } = await ownedTask(tx, scope)
     const scopeKey = hash(JSON.stringify([scope.userId, scope.sessionId, scope.novelId, taskKey]))
     const saved = await tx.agentResearchRequest.findFirst({ where: { scopeKey, kind: 'search', requestKey,
-      status: 'consumed', savedOutcome: { not: Prisma.DbNull }, createdAt: { gte: new Date(Date.now() - 15 * 60_000) } },
+      status: 'consumed', savedOutcome: { not: Prisma.DbNull } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { savedOutcome: true } })
-    return saved ? searchOutcomeSchema.parse(saved.savedOutcome) : null
+    if (saved) {
+      if (searchFailureSchema.safeParse(saved.savedOutcome).success) return null
+      return searchOutcomeSchema.parse(saved.savedOutcome)
+    }
+    if (!query) return null
+    const previous = await tx.agentResearchRequest.findMany({ where: { scopeKey, kind: 'search', status: 'consumed', savedOutcome: { not: Prisma.DbNull } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { savedOutcome: true } })
+    for (const entry of previous) {
+      const parsed = searchOutcomeSchema.safeParse(entry.savedOutcome)
+      if (parsed.success && parsed.data.query && normalizeResearchSearchQuery(parsed.data.query) === normalizeResearchSearchQuery(query)) return parsed.data
+    }
+    return null
   })
 }
 
@@ -416,32 +525,77 @@ export async function resolveResearchSource(scope: Scope, sourceId: string) {
 }
 
 /** The model cannot replace the original task's named work or author. */
-export async function getResearchReadTarget(scope: Scope) {
+export async function getResearchReadTarget(scope: Scope): Promise<(ReaderTarget & { textAnalysisRequired?: boolean }) | undefined> {
   return researchTransaction(scope, async tx => {
-    const { run, taskKey } = await ownedTask(tx, scope)
-    const spec = taskSpecSchema.safeParse(run.taskSpec)
-    if (spec.success && spec.data.researchNavigation) {
+    const { spec, taskKey } = await ownedTask(tx, scope)
+    if (spec?.researchNavigation) {
+      const sourceHosts = await originalResearchSourceHosts(tx, scope, spec)
+      const chapterTitle = researchChapterTitle(await originalResearchPrompt(tx, scope, spec) ?? '')
       const selected = await readResearchSelection(tx, scope, taskKey)
-      if (selected) return selected.target
+      const target = selected?.target ?? spec.researchTarget ?? { title: '' }
+      return { ...target, sourceHosts, ...(chapterTitle ? { chapterTitle } : {}) }
     }
-    return spec.success ? spec.data.researchTarget ?? (spec.data.researchNavigation?.sourceHosts
-      ? { title: '', sourceHosts: spec.data.researchNavigation.sourceHosts } : undefined) : undefined
+    return spec?.researchTarget
   })
+}
+
+/** Shared original source host/path policy, independent from query hints. */
+export function researchSourceWithinScope(url: string, target?: { sourceHosts?: readonly string[] }, sourceSites: readonly string[] = []) {
+  return evaluateResearchSearchCandidates(sourceSites.join(' '), [{ url, title: '', snippet: '', source: '' }], { title: '', sourceHosts: target?.sourceHosts }).eligibleCount > 0
 }
 
 export async function getResearchNavigationPolicy(scope: Scope) {
   return researchTransaction(scope, async tx => {
-    const { run, taskKey } = await ownedTask(tx, scope)
-    const parsed = taskSpecSchema.safeParse(run.taskSpec)
-    if (!parsed.success) return undefined
-    const spec = parsed.data
+    const { spec, taskKey } = await ownedTask(tx, scope)
+    if (!spec) return undefined
     const alternativeChosen = spec.researchNavigation ? await tx.agentArtifact.findUnique({ where: {
       id: hash(JSON.stringify(['research-alternative-identity-v1', scope.userId, scope.sessionId, taskKey])),
     }, select: { id: true } }) : null
     return spec.intent === 'research_analysis' && spec.researchNavigation ? { ...spec.researchNavigation,
+      sourceHosts: await originalResearchSourceHosts(tx, scope, spec),
       alternativeAvailable: !alternativeChosen && spec.researchNavigation.alternativeSelection === 'after_preferred_unavailable'
         && await preferredResearchUnavailable(tx, scope, taskKey) } : undefined
   })
+}
+
+/** Old selections may include an inferred first-site host. Only the actual
+ * original author's source restriction controls future reads; saved hashes stay. */
+async function originalResearchPrompt(tx: Prisma.TransactionClient, scope: Scope, spec: TaskSpec) {
+  const requestHash = spec.researchNavigation?.requestHash
+  if (!requestHash) return null
+  const goal = spec.goals.find(text => hash(text) === requestHash)
+  if (goal) return goal
+  const messages = await tx.agentMessage.findMany({ where: { sessionId: scope.sessionId, role: 'user',
+    run: { ...sourceOwner(scope), taskSpec: { path: ['id'], equals: spec.id } } }, take: 32, select: { parts: true } })
+  for (const message of messages) for (const part of Array.isArray(message.parts) ? message.parts : []) {
+    if (part && typeof part === 'object' && !Array.isArray(part) && part.type === 'text' && typeof part.text === 'string'
+      && hash(part.text) === requestHash) return part.text
+  }
+  return null
+}
+async function originalResearchSourceHosts(tx: Prisma.TransactionClient, scope: Scope, spec: TaskSpec) {
+  const frozen = spec.researchTarget?.sourceHosts ?? spec.researchNavigation?.sourceHosts ?? []
+  if (!frozen.length) return frozen
+  const prompt = await originalResearchPrompt(tx, scope, spec)
+  return prompt === null ? frozen : researchSourceHosts(prompt)
+}
+
+async function researchSearchDiscoveries(tx: Prisma.TransactionClient, scope: Scope, taskKey: string) {
+  const searches = await tx.agentResearchRequest.findMany({ where: { ownerRun: { ...sourceOwner(scope),
+    OR: [{ id: scope.runId }, { taskRootId: taskKey }, { taskSpec: { path: ['id'], equals: taskKey } }] },
+    kind: 'search', status: 'consumed', savedOutcome: { not: Prisma.DbNull } }, orderBy: { createdAt: 'desc' } })
+  return searches.flatMap(search => { const saved = searchOutcomeSchema.safeParse(search.savedOutcome); return saved.success ? [saved.data] : [] })
+}
+
+async function directlyDiscoveredResearchUrl(tx: Prisma.TransactionClient, scope: Scope, taskKey: string, spec: TaskSpec, url: string) {
+  for (const saved of await researchSearchDiscoveries(tx, scope, taskKey)) {
+    if ([...saved.results, ...(saved.navigation?.results ?? [])].some(result => result.url === url)) return true
+  }
+  const prompt = await originalResearchPrompt(tx, scope, spec)
+  for (const match of (prompt ?? '').matchAll(/https?:\/\/[^\s<>"'）】。，；！]+/gu)) {
+    try { if (canonicalResearchUrl(match[0].replace(/[)\],.!?]+$/u, '')) === url) return true } catch { /* Not an original public URL. */ }
+  }
+  return false
 }
 
 const selectionSchema = z.object({ version: z.literal(1), kind: z.literal('researchSelectedIdentity'), taskKey: z.string(),
@@ -531,36 +685,24 @@ export async function assertResearchAlternativeAllowed(scope: Scope) {
 export async function authorizeResearchNavigation(scope: Scope, sourceId: string, alternative = false) {
   if (alternative) await assertResearchAlternativeAllowed(scope)
   return researchTransaction(scope, async tx => {
-    const { run, taskKey } = await ownedTask(tx, scope)
-    const spec = taskSpecSchema.parse(run.taskSpec)
+    const { spec, taskKey } = await ownedTask(tx, scope)
     const source = await ownedSource(tx, scope, sourceId)
-    if (!spec.researchNavigation || spec.intent !== 'research_analysis' || spec.networkAccess === 'denied' || spec.researchReadAccess === 'denied') {
+    if (!spec?.researchNavigation || spec.intent !== 'research_analysis' || spec.networkAccess === 'denied' || spec.researchReadAccess === 'denied') {
       throw new DataAccessError(403, 'RESEARCH_NAVIGATION_DENIED', '本任务没有获准的导航用途，未发起请求。')
     }
-    const target = (await readResearchSelection(tx, scope, taskKey))?.target ?? spec.researchTarget
-      ?? { title: '', sourceHosts: spec.researchNavigation.sourceHosts }
-    if (!target?.sourceHosts?.length || !evaluateResearchSearchCandidates((spec.researchNavigation.sourceSites ?? []).join(' '),
-      [{ url: source.canonicalUrl, title: '', snippet: '', source: '' }], { ...target, title: '' }).eligibleCount) {
+    const sourceHosts = await originalResearchSourceHosts(tx, scope, spec)
+    const target = { ...((await readResearchSelection(tx, scope, taskKey))?.target ?? spec.researchTarget ?? { title: '' }), sourceHosts }
+    if (!researchSourceWithinScope(source.canonicalUrl, target, spec.researchNavigation.sourceSites)) {
       throw new DataAccessError(403, 'RESEARCH_NAVIGATION_DENIED', '导航地址超出原始来源范围，未发起请求。')
     }
     if (await findNavigationParent(tx, scope, taskKey, source.canonicalUrl)) return
-    const searches = await tx.agentResearchRequest.findMany({ where: { ownerRun: { ...sourceOwner(scope),
-      OR: [{ id: scope.runId }, { taskRootId: taskKey }, { taskSpec: { path: ['id'], equals: taskKey } }] },
-      kind: 'search', status: 'consumed', savedOutcome: { not: Prisma.DbNull } }, take: 5, orderBy: { createdAt: 'desc' } })
-    for (const search of searches) {
-      const saved = searchOutcomeSchema.safeParse(search.savedOutcome)
-      if (!saved.success) continue
-      const results = [...saved.data.results, ...(saved.data.navigation?.results ?? [])]
+    for (const saved of await researchSearchDiscoveries(tx, scope, taskKey)) {
+      const results = [...saved.results, ...(saved.navigation?.results ?? [])]
       if (evaluateResearchNavigationCandidates(results, target, spec.researchNavigation.sourceSites, alternative).some(item => canonicalResearchUrl(item.url) === source.canonicalUrl)) return
     }
-    const messages = await tx.agentMessage.findMany({ where: { sessionId: scope.sessionId, role: 'user',
-      run: { ...sourceOwner(scope), taskSpec: { path: ['id'], equals: spec.id } } }, take: 32, select: { parts: true } })
-    for (const message of messages) for (const part of Array.isArray(message.parts) ? message.parts : []) {
-      if (!part || typeof part !== 'object' || Array.isArray(part) || part.type !== 'text' || typeof part.text !== 'string'
-        || hash(part.text) !== spec.researchNavigation.requestHash) continue
-      for (const match of part.text.matchAll(/https?:\/\/[^\s<>"'）】。，；！]+/gu)) {
-        try { if (canonicalResearchUrl(match[0].replace(/[)\],.!?]+$/u, '')) === source.canonicalUrl) return } catch { /* Not a public source URL. */ }
-      }
+    const prompt = await originalResearchPrompt(tx, scope, spec)
+    for (const match of (prompt ?? '').matchAll(/https?:\/\/[^\s<>"'）】。，；！]+/gu)) {
+      try { if (canonicalResearchUrl(match[0].replace(/[)\],.!?]+$/u, '')) === source.canonicalUrl) return } catch { /* Not an original public URL. */ }
     }
     throw new DataAccessError(403, 'RESEARCH_NAVIGATION_UNRELATED', '未发现与目标有关的真实导航线索，未发起请求。')
   })
@@ -580,6 +722,7 @@ async function assertChosenResearchLineage(tx: Prisma.TransactionClient, scope: 
   parent?: { contentRef: string; revision: string }) {
   if (sourceId === selected.sourceId) return
   let source = await ownedSource(tx, scope, sourceId)
+  const { spec } = await ownedTask(tx, scope)
   let link = parent
   for (let hop = 0; link && hop < 3; hop++) {
     const page = await tx.agentResearchContent.findUnique({ where: { id: link.contentRef } })
@@ -588,20 +731,16 @@ async function assertChosenResearchLineage(tx: Prisma.TransactionClient, scope: 
     if (!metadata.links.some(item => item.url === source.canonicalUrl)) break
     source = await ownedSource(tx, scope, page.sourceId)
     if (page.id === selected.contentRef && page.revision === selected.revision) return
+    const actual = metadata.evidence?.identity
+    if (spec && actual?.status === 'verified' && actual.pageType === 'book' && actual.title === selected.target.title
+      && actual.author === selected.target.author && await directlyDiscoveredResearchUrl(tx, scope, selected.taskKey, spec, source.canonicalUrl)) return
     link = metadata.binding?.parent
   }
-  const { run } = await ownedTask(tx, scope), spec = taskSpecSchema.parse(run.taskSpec)
+  // Callers already checked actual chapter title/author and source-compared
+  // text. A real search URL supplies provenance only, never that identity proof.
   const original = await ownedSource(tx, scope, sourceId)
-  const messages = await tx.agentMessage.findMany({ where: { sessionId: scope.sessionId, role: 'user', run: {
-    ...sourceOwner(scope), taskSpec: { path: ['id'], equals: spec.id } } }, take: 32, select: { parts: true } })
-  for (const message of messages) for (const part of Array.isArray(message.parts) ? message.parts : []) {
-    if (!part || typeof part !== 'object' || Array.isArray(part) || part.type !== 'text' || typeof part.text !== 'string'
-      || hash(part.text) !== spec.researchNavigation?.requestHash) continue
-    for (const match of part.text.matchAll(/https?:\/\/[^\s<>"'）】。，；！]+/gu)) {
-      try { if (canonicalResearchUrl(match[0].replace(/[)\],.!?]+$/u, '')) === original.canonicalUrl) return } catch { /* Not an author-supplied public URL. */ }
-    }
-  }
-  throw new DataAccessError(422, 'RESEARCH_SOURCE_LINEAGE_REQUIRED', '章节没有连接到已核验作品的真实目录版本，也非原作者直接提供的地址；不能用任意页面链接冒充同书正文。')
+  if (spec && await directlyDiscoveredResearchUrl(tx, scope, selected.taskKey, spec, original.canonicalUrl)) return
+  throw new DataAccessError(422, 'RESEARCH_SOURCE_LINEAGE_REQUIRED', '章节没有连接到已核验同书的真实目录、搜索发现或原作者提供的地址；不能用任意页面链接冒充同书正文。')
 }
 
 async function currentResearchTargetAnalysis(tx: Prisma.TransactionClient, scope: Scope, taskKey: string, sections: z.infer<typeof reportSectionSchema>[]) {
@@ -720,33 +859,33 @@ export async function recordResearchReadFailure(scope: Scope & { callId?: string
 
 /** Immutable successful extraction, not an analysis/coverage receipt. Failed,
  * restricted or garbled pages cannot enter the readable content store. */
-export async function saveResearchContent(scope: Scope, sourceId: string, result: WebReadResult, alternative = false) {
+export async function saveResearchContent(scope: Scope, sourceId: string, result: WebReadResult, alternative = false, sourceScopeAdmitted = false) {
   const checked = assessReaderText(result.text, result.title)
   const navigation = result.purpose === 'navigation'
+  const evidence = result.evidence ? readerEvidenceSchema.parse(result.evidence) : undefined
+  const provenShortPreview = isResearchPreviewEvidence(evidence) && evidence?.identity.status === 'verified' && evidence.identity.pageType === 'chapter'
+    && checked.code === 'WEB_READ_INSUFFICIENT' && Boolean(result.text.trim())
   if (result.status !== 'ok' || !result.quality.readable || (checked.status !== 'ok' && !(navigation && result.text.trim()
-    && !/[\p{Co}\uFFFD]/u.test(result.text)))
+    && !/[\p{Co}\uFFFD]/u.test(result.text)) && !provenShortPreview)
     || !['article', 'metadata'].includes(result.contentKind)) {
     throw new DataAccessError(422, 'RESEARCH_CONTENT_UNREADABLE', '未取得合格正文，不能保存为已获取内容。')
   }
   if (Buffer.byteLength(result.text, 'utf8') > 2 * 1024 * 1024) throw new DataAccessError(413, 'RESEARCH_CONTENT_TOO_LARGE', '提取内容超过保存上限。')
   const finalUrl = canonicalResearchUrl(result.finalUrl)
   const links = checkedSavedLinks(result.links, finalUrl)
-  const evidence = result.evidence ? readerEvidenceSchema.parse(result.evidence) : undefined
   if (evidence && (evidence.integrity.status === 'damaged' || evidence.integrity.extractedHash !== hash(result.text))) {
     throw new DataAccessError(422, 'RESEARCH_CONTENT_UNREADABLE', '正文完整性证据与提取内容不一致，未保存为已获取内容。')
   }
   const contentHash = hash(result.text)
   return researchTransaction(scope, async tx => {
     const source = await ownedSource(tx, scope, sourceId)
-    const { run, taskKey } = await ownedTask(tx, scope)
-    const parsedSpec = taskSpecSchema.safeParse(run.taskSpec)
-    const spec = parsedSpec.success ? parsedSpec.data : { researchNavigation: undefined, researchTarget: undefined }
+    const { spec: originalSpec, taskKey } = await ownedTask(tx, scope)
+    const spec = originalSpec ?? { researchNavigation: undefined, researchTarget: undefined }
     const fresh = Boolean(spec.researchNavigation)
     const scopeKey = hash(JSON.stringify([scope.userId, scope.sessionId, scope.novelId, taskKey]))
     if (fresh) await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${scopeKey}, 0))::text`
-    const frozenHosts = spec.researchTarget?.sourceHosts ?? spec.researchNavigation?.sourceHosts
-    if (fresh && frozenHosts?.length && !evaluateResearchSearchCandidates((spec.researchNavigation?.sourceSites ?? []).join(' '),
-      [{ url: finalUrl, title: '', snippet: '', source: '' }], { title: '', sourceHosts: frozenHosts }).eligibleCount) {
+    const frozenHosts = originalSpec?.researchNavigation ? await originalResearchSourceHosts(tx, scope, originalSpec) : spec.researchTarget?.sourceHosts
+    if (fresh && (!sourceScopeAdmitted || finalUrl !== source.canonicalUrl) && !researchSourceWithinScope(finalUrl, { sourceHosts: frozenHosts }, spec.researchNavigation?.sourceSites)) {
       throw new DataAccessError(403, 'RESEARCH_SOURCE_SCOPE_MISMATCH', '页面最终地址超出原始来源范围，未保存为目标证据。')
     }
     if (navigation && (!fresh || result.contentKind !== 'metadata' || !evidence || evidence.integrity.status !== 'unverified'
@@ -759,15 +898,14 @@ export async function saveResearchContent(scope: Scope, sourceId: string, result
     const verified = Boolean(actual && actual.status !== 'mismatch' && actual.title && actual.author && (target
       ? actual.status === 'verified' && actual.title === target.title && (!target.author || actual.author === target.author)
       : fresh && actual.pageType === 'book' && actual.basis === 'structured_metadata'))
-    const actualTarget = verified ? { title: actual!.title!, author: actual!.author!, sourceHosts: (target ?? spec.researchTarget)?.sourceHosts
-      ?? spec.researchNavigation?.sourceHosts ?? [new URL(finalUrl).hostname] } : undefined
+    const actualTarget = verified ? { title: actual!.title!, author: actual!.author!, sourceHosts: frozenHosts ?? [] } : undefined
     const parent = fresh ? await findNavigationParent(tx, scope, taskKey, source.canonicalUrl) : null
     const binding = fresh ? { purpose: navigation ? 'navigation' as const : 'body' as const,
-      ...(actualTarget ? { identityHash: identityHash(actualTarget) } : {}), ...(parent ? { parent } : {}) } : undefined
+      ...(actualTarget ? { identityHash: selected && !alternative ? selected.identityHash : identityHash(actualTarget) } : {}), ...(parent ? { parent } : {}) } : undefined
     if (fresh && selected && actualTarget && !navigation && result.contentKind === 'article') {
       await assertChosenResearchLineage(tx, scope, selected, sourceId, parent ?? undefined)
     }
-    if (selected && actualTarget && !alternative && identityHash(actualTarget) !== selected.identityHash) {
+    if (selected && actualTarget && !alternative && identityHash({ ...actualTarget, sourceHosts: selected.target.sourceHosts }) !== selected.identityHash) {
       throw new DataAccessError(422, 'RESEARCH_IDENTITY_CONFLICT', '页面身份与本任务已经核验的作品不一致，未替换目标。')
     }
     const revision = hash(JSON.stringify(binding ? [contentHash, finalUrl, result.contentKind, links, evidence ?? null, binding]
@@ -777,10 +915,10 @@ export async function saveResearchContent(scope: Scope, sourceId: string, result
     if (!navigation) await tx.agentResearchSource.update({ where: { id: sourceId }, data: { readFailure: Prisma.DbNull } })
     const saved = await tx.agentResearchContent.upsert({ where: { sourceId_revision: { sourceId, revision } }, update: {}, create: {
       id: randomUUID(), sourceId, revision, contentHash, finalUrl, provider: result.provider,
-      contentKind: result.contentKind, text: result.text, quality: { ...(navigation ? result.quality : checked.quality), links, ...(evidence ? { evidence } : {}),
+      contentKind: result.contentKind, text: result.text, quality: { ...(navigation || provenShortPreview ? result.quality : checked.quality), links, ...(evidence ? { evidence } : {}),
         ...(binding ? { binding } : {}), revisionVersion: binding ? 4 : evidence ? 3 : 2 },
     } })
-    if (fresh && (!selected || alternative) && actualTarget && (actual!.pageType === 'book' || actual!.pageType === 'chapter' && evidence!.integrity.status === 'source_compared')) {
+    if (fresh && (!selected || alternative) && actualTarget && (actual!.pageType === 'book' || actual!.pageType === 'chapter' && (evidence!.integrity.status === 'source_compared' || isResearchPreviewEvidence(evidence)))) {
       const id = hash(JSON.stringify([alternative ? 'research-alternative-identity-v1' : 'research-selected-identity-v1', scope.userId, scope.sessionId, taskKey]))
       const previous = await tx.agentArtifact.findUnique({ where: { id } })
       if (previous) {

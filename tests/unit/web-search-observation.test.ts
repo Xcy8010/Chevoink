@@ -26,6 +26,7 @@ vi.mock('../../api/lib/agent/research-sources.js', async original => ({
   getResearchReadTarget: vi.fn(async () => undefined),
   getResearchNavigationPolicy: vi.fn(async () => undefined),
   saveResearchSearchOutcome: vi.fn(async () => {}),
+  recordResearchSearchFailure: vi.fn(async () => false),
   registerResearchSources: async (_scope: unknown, entries: Array<{ url: string }>) => entries.map((entry, index) => ({ id: `source-${index}`, canonicalUrl: entry.url })),
 }))
 
@@ -91,6 +92,8 @@ describe('search URL handoff to the model', () => {
     expect(result.output).toContain('搜索接口 HTTP 404')
     expect(result.output).toContain('不是小说正文地址的404')
     expect(result.output).not.toContain('private')
+    const { recordResearchSearchFailure } = await import('../../api/lib/agent/research-sources.js')
+    expect(recordResearchSearchFailure).toHaveBeenCalledWith(expect.any(Object), { query: '番茄小说', count: 2 }, [{ provider: 'bocha', httpStatus: 404 }])
   })
   it.each(['CREDIT_IDEMPOTENCY_CONFLICT', 'CREDITS_EXHAUSTED'])('does not disguise %s as a provider failure or dispatch another paid request', async code => {
     const { DataAccessError } = await import('../../api/lib/prisma.js')

@@ -122,7 +122,7 @@ export function evaluateResearchSearchCandidates(query: string, results: readonl
  * path operators guide recall; only original author site boundaries authorize
  * a navigation hop. No URL is generated from an ID or a title. */
 export function evaluateResearchNavigationCandidates(results: readonly WebSearchResult[], target?: ResearchSearchTarget, sourceSites: readonly string[] = [], allowAlternative = false) {
-  if (!target?.sourceHosts?.length) return []
+  if (!target) return []
   const checked = evaluateResearchSearchCandidates(sourceSites.join(' '), results, target)
   return checked.candidates.filter(candidate => candidate.hostMatch && candidate.siteMatch
     && ((allowAlternative || !target.title) && candidate.pageType === 'book' || target.title && candidate.authorMatch !== 'conflicting' && candidate.titleMatch !== 'absent')

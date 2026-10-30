@@ -166,7 +166,7 @@ describe.skipIf(!available)('J4 private versioned research sources', () => {
       await prisma.user.delete({ where: { id: user.id } })
     }
   })
-  it('freezes small research budgets, stops consecutive failures across resume, and isolates the next task', async () => {
+  it('shares current five/eight research budgets across resume without letting two page failures disable other sources', async () => {
     const user = await prisma.user.create({ data: { nickname: 'budget-fixture', passwordHash: 'test-only' } })
     try {
       const novel = await prisma.novel.create({ data: { authorId: user.id, title: '预算', slug: randomUUID(), summary: '' } })
@@ -183,7 +183,7 @@ describe.skipIf(!available)('J4 private versioned research sources', () => {
         expect(await reserveResearchRequest(call, 'search', `query-${i}`)).toBe(true)
         await settleResearchRequest(call, 'consumed')
       }
-      expect(await reserveResearchRequest({ ...scope, callId: randomUUID() }, 'search', 'third')).toBe(false)
+      expect(await reserveResearchRequest({ ...scope, callId: randomUUID() }, 'search', 'third')).toBe(true)
       for (let i = 0; i < 2; i++) {
         const call = { ...scope, callId: randomUUID() }
         expect(await reserveResearchRequest(call, 'read', `page-${i}`)).toBe(true)
@@ -193,8 +193,8 @@ describe.skipIf(!available)('J4 private versioned research sources', () => {
       }
       const resumedId = randomUUID()
       await prisma.agentRun.create({ data: { ...base, id: resumedId, taskSpec: JSON.parse(JSON.stringify({ ...spec, runId: resumedId })) } })
-      await expect(reserveResearchRequest({ ...scope, runId: resumedId, callId: randomUUID() }, 'search', 'new-query'))
-        .rejects.toMatchObject({ code: 'RESEARCH_NO_PROGRESS' })
+      expect(await reserveResearchRequest({ ...scope, runId: resumedId, callId: randomUUID() }, 'search', 'new-query')).toBe(true)
+      expect(await reserveResearchRequest({ ...scope, runId: resumedId, callId: randomUUID() }, 'read', 'another-source')).toBe(true)
       const nextId = randomUUID()
       await prisma.agentRun.create({ data: { ...base, id: nextId, taskSpec: JSON.parse(JSON.stringify(buildTaskSpec({ runId: nextId, novelId: novel.id, prompt: '深度研究下一本书' }))) } })
       expect(await reserveResearchRequest({ ...scope, runId: nextId, callId: randomUUID() }, 'search', 'new-task')).toBe(true)
@@ -217,7 +217,7 @@ describe.skipIf(!available)('J4 private versioned research sources', () => {
       await prisma.agentRun.create({ data: { ...base, id: runId, taskSpec: JSON.parse(JSON.stringify(spec)) } })
       const scope = { userId: user.id, novelId: novel.id, sessionId: session.id, runId }
       const requests = Array.from({ length: 8 }, () => ({ ...scope, callId: randomUUID() }))
-      const admitted = await Promise.all(requests.map(request => reserveResearchRequest(request, 'search', 'a'.repeat(64))))
+      const admitted = await Promise.all(requests.map((request, index) => reserveResearchRequest(request, 'search', createHash('sha256').update(`parallel-${index}`).digest('hex'))))
       expect(admitted.filter(Boolean)).toHaveLength(5)
       const accepted = requests[admitted.indexOf(true)]
       await settleResearchRequest(accepted, 'released')

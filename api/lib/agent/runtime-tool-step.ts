@@ -14,7 +14,7 @@ import { readFailedToolResult, reduceExecutionReceipt } from './runtime-reducer.
 import { readObservedBaseline } from './runtime-observed-baseline.js'
 import { chapterReadTool, planReadTool, novelGetContextTool, chapterListSummariesTool, memorySearchTool } from './tools/read-tools.js'
 import { chapterWriteTool, chapterAppendTool, chapterEditRangeTool, chapterCreateTool, chapterRenameTool, preflightChapterReviewWrite } from './tools/chapter-tools.js'
-import { deferReviewWriteInTransaction } from './runtime-review-deferral.js'
+import { deferReviewWriteInTransaction, deferWritingTodoProposalInTransaction } from './runtime-review-deferral.js'
 import { executeDurableChapterRename } from './tools/durable-chapter.js'
 import { coordinatedWriterParameters } from './coordinated-writing-input.js'
 import { executeDurableCoordinatedWriter } from './tools/durable-coordinated-writer.js'
@@ -44,7 +44,8 @@ import { taskContextListTool, taskContextReadTool, executionContextReadTool } fr
 import { sessionHistorySearchTool, sessionMessageReadTool } from './tools/session-history-tools.js'
 import { executeDurableRead } from './tools/durable-read.js'
 import { todoWriteTool } from './tools/todo-tools.js'
-import { executeDurableTodo, executeDurableTaskArtifact } from './tools/durable-todo.js'
+import { executeDurableTodo, executeDurableTaskArtifact, readDurableTodoItems } from './tools/durable-todo.js'
+import { readWritingTodoSyncDelivery, isCompletedWritingRepeatProposal } from './runtime-writing-todo.js'
 import { storyCompilerPrepareTool, sceneTaskBuildTool, chapterBridgeGetTool, continuityValidateTool, chapterBridgeCommitTool } from './tools/story-compiler-tools.js'
 import { executeDurableCompiler } from './tools/durable-compiler.js'
 import { executeDurableContinuity } from './tools/durable-continuity.js'
@@ -183,6 +184,16 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     if (!tool) return runtimeError('RUNTIME_TOOL_ADAPTER_REQUIRED', '此工具的持久适配尚未接入，不能执行旧效果路径。')
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     const originalSpec = taskSpecSchema.parse(root.specSnapshot)
+    // Unprepared proposals may be observed as not dispatched. Keep every
+    // prepared request on its original receipt path, even after delivery.
+    // The original plan still exists after its last update clears unfinished
+    // items; later calls in that same batch must not redo the delivered work.
+    if (current.frame.state.phase === 'idle' && isCompletedWritingRepeatProposal(call.name)
+      && (await readDurableTodoItems(tx, root.id, frame.revision)).length > 0
+      && await readWritingTodoSyncDelivery(tx, { userId: lease.userId, novelId: root.novelId, runId: lease.runId }, originalSpec)) {
+      return { deferred: await deferWritingTodoProposalInTransaction(tx, lease, frame, call,
+        '授权章节已实际完成；先沿用原 id 同步既有待办，不能重做正文、检查或提交。') }
+    }
     const originalScope = originalSpec.scope
     if (historicalWriter) tool = { ...tool, parameters: coordinatedWriterParameters(tool, originalScope) }
     if (call.name === 'web_read' && originalSpec.researchNavigation?.version === 1 && originalSpec.intent === 'research_analysis') {
