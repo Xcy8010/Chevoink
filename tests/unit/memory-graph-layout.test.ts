@@ -45,6 +45,11 @@ describe('记忆图谱可读性投影', () => {
     for (let i = 0; i < rects.length; i += 1) for (let j = i + 1; j < rects.length; j += 1) expect(rectanglesOverlap(rects[i], rects[j], 12)).toBe(false)
     expect(new Set(rects.map((r) => Math.round(r.x))).size).toBeGreaterThan(60)
     expect(new Set(rects.map((r) => Math.round(r.y))).size).toBeGreaterThan(60)
+    const width = Math.max(...rects.map((r) => r.x + r.width)) - Math.min(...rects.map((r) => r.x))
+    const height = Math.max(...rects.map((r) => r.y + r.height)) - Math.min(...rects.map((r) => r.y))
+    // A wide card's short height must not bias every collision into a tall column.
+    expect(width / height).toBeGreaterThan(1.25)
+    expect(width / height).toBeLessThan(2.2)
   })
   it('所有关系均有曲线路由，语义标签避开节点与其他标签', () => {
     const routes = routeMemoryGraph(edges, positions)

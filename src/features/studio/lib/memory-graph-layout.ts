@@ -94,19 +94,24 @@ export function solveMemoryGraph(topologyKey: string, dimensions: 2 | 3): Map<st
     })
     if (tick > 50 && movement < count * 0.025) break
   }
-  // Rectangle collision, rather than circular forces alone, keeps long entity cards apart.
+  // Solve card spacing in an aspect-normalized metric: equal force distances represent equal card clearance.
+  // Raw pixel penetration favors the short Y dimension and packs a wide-card graph into a tall column.
   if (dimensions === 2) {
+    const clearanceX = MEMORY_NODE_WIDTH + 48
+    const clearanceY = MEMORY_NODE_HEIGHT + 65
+    const aspectScale = Math.sqrt(clearanceX / clearanceY)
+    points.forEach((point) => { point.x *= aspectScale; point.y /= aspectScale })
     for (let tick = 0; tick < 120; tick += 1) {
       let overlaps = 0
       for (let a = 0; a < count; a += 1) {
         for (let b = a + 1; b < count; b += 1) {
           const dx = points[b].x - points[a].x
           const dy = points[b].y - points[a].y
-          const ox = MEMORY_NODE_WIDTH + 48 - Math.abs(dx)
-          const oy = MEMORY_NODE_HEIGHT + 65 - Math.abs(dy)
+          const ox = clearanceX - Math.abs(dx)
+          const oy = clearanceY - Math.abs(dy)
           if (ox <= 0 || oy <= 0) continue
           overlaps += 1
-          const axis = ox < oy ? 'x' : 'y'
+          const axis = ox / clearanceX < oy / clearanceY ? 'x' : 'y'
           const push = ((axis === 'x' ? ox : oy) / 2 + 0.5) * (axis === 'x' ? Math.sign(dx) || 1 : Math.sign(dy) || 1)
           points[a][axis] -= push
           points[b][axis] += push

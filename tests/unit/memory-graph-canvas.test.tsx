@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import React from 'react'
+import type { Node, NodeMouseHandler, NodeTypes } from '@xyflow/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import MemoryGraphCanvas from '../../src/features/studio/components/MemoryGraphCanvas'
@@ -43,7 +44,7 @@ class LayoutWorker {
 const latestWorker = () => LayoutWorker.instances[LayoutWorker.instances.length - 1]
 const finish = (worker = latestWorker()) => act(() => worker.complete())
 beforeEach(() => { LayoutWorker.instances = []; state.nodes = []; state.edges = []; vi.stubGlobal('Worker', LayoutWorker) })
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('关系网视图交互', () => {
   it('异步布局完整图谱，缩略图几何一致且不按端点边界裁剪自定义标签', () => {
@@ -62,6 +63,28 @@ describe('关系网视图交互', () => {
     expect(state.flow.onlyRenderVisibleElements).not.toBe(true)
     const color = state.minimap.nodeColor as (node: Record<string, unknown>) => string
     expect(color(state.nodes[0])).not.toBe(color(state.nodes[1]))
+  })
+  it('真实 ReactFlow 节点包装器允许指针事件并将点击传回实体选择', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockImplementation(function (this: HTMLElement) { return Number.parseFloat(this.style.width) || 800 })
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) { return Number.parseFloat(this.style.height) || 600 })
+    render(<MemoryGraphCanvas graph={memoryGraphFixture} />)
+    finish()
+    const { ReactFlow: RealReactFlow } = await vi.importActual<typeof import('@xyflow/react')>('@xyflow/react')
+    render(<div style={{ width: 800, height: 600 }}><RealReactFlow
+      nodes={[state.nodes[0] as Node]} nodeTypes={state.flow.nodeTypes as NodeTypes}
+      nodesDraggable={false} elementsSelectable={false} nodesConnectable={false}
+      onNodeClick={state.flow.onNodeClick as NodeMouseHandler}
+    /></div>)
+    const wrapper = screen.getByTestId('rf__node-node-000')
+    // The actual library chooses pointer-events:none without its own onNodeClick handler,
+    // even when a custom node renders an inner button. A mocked Flow alone misses this.
+    expect(wrapper.style.pointerEvents).toBe('all')
+    fireEvent.click(wrapper)
+    expect(screen.getByLabelText('实体详情').textContent).toContain('测试实体 1')
+    const button = wrapper.querySelector('button')!
+    expect(button.tabIndex).toBe(0)
+    expect(button.getAttribute('aria-label')).toBe('测试实体 1')
   })
   it('选择同时突出邻居和直接连线，详情可查看完整关系', () => {
     render(<MemoryGraphCanvas graph={memoryGraphFixture} />)

@@ -95,7 +95,7 @@ export default function MemoryGraphCanvas({ graph }: { graph: MemoryGraph }) {
         fitView fitViewOptions={{ padding: 0.18, maxZoom: 1.15 }}
         minZoom={0.08} maxZoom={2.2} nodesDraggable={false} nodesConnectable={false}
         elementsSelectable={false} panOnDrag zoomOnScroll zoomOnPinch preventScrolling
-        onPaneClick={() => setSelectedId(null)} proOptions={{ hideAttribution: true }}
+        onNodeClick={(_, node) => setSelectedId(node.id)} onPaneClick={() => setSelectedId(null)} proOptions={{ hideAttribution: true }}
       >
         <Background variant={BackgroundVariant.Dots} gap={24} size={1} />
         <Controls showInteractive={false} position="top-right" />

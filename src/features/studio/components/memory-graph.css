@@ -48,6 +48,7 @@
   .memory-graph .react-flow__controls-button,
   .memory-graph-controls button { width: 40px; height: 40px; }
   .memory-graph-detail { bottom: 140px; max-height: min(42%, 240px, calc(100% - 204px)); }
+  .memory-graph.is-galaxy .memory-graph-detail { bottom: 48px; }
   .memory-graph-legend { gap: 8px; font-size: 9px; }
 }
 @media (prefers-reduced-motion: reduce) {
