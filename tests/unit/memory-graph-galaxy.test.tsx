@@ -76,29 +76,58 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('真实星系 Canvas 绘制契约', () => {
-  it('默认远景实际绘制103个双层星核、145条线，绝不调用文字绘制', () => {
+  it('默认远景实际绘制103个细小双层星核，关系线/名称/关系文字均不绘制', () => {
     render(<MemoryGraphGalaxy nodes={nodes} edges={edges} points={points} selectedId={null} onSelect={onSelect} active />)
     const canvas = screen.getByRole('img') as HTMLCanvasElement
     expect(flush()).toBe(1)
     const ctx = contexts.get(canvas)!
     expect(ctx.arc).toHaveBeenCalledTimes(206)
-    expect(ctx.quadraticCurveTo).not.toHaveBeenCalled()
-    expect(ctx.lineTo).toHaveBeenCalledTimes(145 * GALAXY_CURVE_STEPS)
-    expect(ctx.moveTo).toHaveBeenCalledTimes(145 * GALAXY_CURVE_STEPS)
+    expect(ctx.moveTo).not.toHaveBeenCalled()
+    expect(ctx.lineTo).not.toHaveBeenCalled()
+    expect(ctx.stroke).not.toHaveBeenCalled()
     expect(ctx.fillText).not.toHaveBeenCalled()
     expect(ctx.fillRect).not.toHaveBeenCalled()
     expect(ctx.drawImage).toHaveBeenCalledTimes(207)
     const output = buildGalaxyScene(nodes, edges, points, DEFAULT_GALAXY_VIEW, width, 640, null, (text) => [...text].length * 7)
+    const wings = [...contexts].filter(([asset]) => asset.width === 64 && asset.height === 64)
+    expect(wings).toHaveLength(3)
+    for (const [, asset] of wings) {
+      const gradient = asset.createRadialGradient.mock.results[0].value
+      const colors = gradient.addColorStop.mock.calls.map((call: [number, string]) => call[1])
+      expect(colors.every((color: string) => color.length === 9 && Number.parseInt(color.slice(-2), 16) < 255)).toBe(true)
+      const opacity = colors.map((color: string) => Number.parseInt(color.slice(-2), 16))
+      expect(opacity[0]).toBeGreaterThan(0)
+      expect(opacity.at(-1)).toBe(0)
+      expect(opacity.every((alpha: number, i: number) => i === 0 || alpha < opacity[i - 1])).toBe(true)
+      expect(colors.some((color: string) => color.slice(0, 7) === '#ffffff')).toBe(false)
+    }
+    output.nodes.forEach((node, i) => {
+      const emission = ctx.drawImage.mock.calls[i + 1]
+      expect(wings.some(([asset]) => asset === emission[0])).toBe(true)
+      expect(emission[3]).toBeCloseTo(node.emissionRadius * 2)
+      expect(Number(emission[3])).toBeLessThanOrEqual(node.coreRadius * 15)
+    })
+  })
+  it('缩放后实际绘制完整145条曲线，深度分批保持星核遮挡且不恢复关系文字', () => {
+    render(<MemoryGraphGalaxy nodes={nodes} edges={edges} points={points} selectedId={null} onSelect={onSelect} active />)
+    const canvas = screen.getByRole('img') as HTMLCanvasElement
+    flush()
+    const ctx = contexts.get(canvas)!
+    ctx.arc.mockClear()
+    fireEvent.wheel(canvas, { deltaY: -Math.log(1.3) / 0.001 }); flush()
+    const output = buildGalaxyScene(nodes, edges, points, { ...DEFAULT_GALAXY_VIEW, zoom: 1.3 }, width, 640, null, (text) => [...text].length * 7)
     const primitives = galaxyDrawOrder(output)
     const nativeBatches = galaxyPaintOrder(output).filter((primitive) => primitive.kind === 'threads')
-    expect(ctx.stroke).toHaveBeenCalledTimes(nativeBatches.length)
+    const segmentCount = edges.length * GALAXY_CURVE_STEPS
+    expect(ctx.moveTo.mock.calls.slice(0, segmentCount)).toEqual(nativeBatches.flatMap((batch) => batch.segments).map((segment) => [segment.from.x, segment.from.y]))
+    expect(ctx.lineTo.mock.calls.slice(0, segmentCount)).toEqual(nativeBatches.flatMap((batch) => batch.segments).map((segment) => [segment.to.x, segment.to.y]))
     const styles = new Set(output.links.map((link) => [link.focused, link.internal, link.type === '同章出现'].join(':'))).size
     expect(nativeBatches.length).toBeLessThanOrEqual((nodes.length + 1) * styles)
     const threads = primitives.filter((p) => p.kind === 'thread')
     expect(new Set(threads.map((p) => p.link.id))).toEqual(new Set(edges.map((e) => e.id)))
-    expect(ctx.moveTo.mock.calls).toEqual(nativeBatches.flatMap((batch) => batch.segments).map((segment) => [segment.from.x, segment.from.y]))
-    const actualOrder = [...ctx.moveTo.mock.invocationCallOrder.map((order) => ({ kind: 'thread', order })), ...ctx.arc.mock.invocationCallOrder.filter((_, i) => i % 2 === 0).map((order) => ({ kind: 'star', order }))].sort((a, b) => a.order - b.order)
+    const actualOrder = [...ctx.moveTo.mock.invocationCallOrder.slice(0, segmentCount).map((order) => ({ kind: 'thread', order })), ...ctx.arc.mock.invocationCallOrder.filter((_, i) => i % 2 === 0).map((order) => ({ kind: 'star', order }))].sort((a, b) => a.order - b.order)
     expect(actualOrder.map((p) => p.kind)).toEqual(primitives.map((p) => p.kind))
+    expect(latestText(canvas).some((text) => relationTexts.has(text))).toBe(false)
   })
   it('靠近后只绘制适合空间的名称；即使最大缩放也不绘制未选中的关系文字或黑色标签墙', () => {
     render(<MemoryGraphGalaxy nodes={nodes} edges={edges} points={points} selectedId={null} onSelect={onSelect} active />)

@@ -168,9 +168,13 @@ export function buildGalaxyScene(nodes: GalaxyEntity[], edges: MemoryGraphRoutin
     const density = geometry.density.get(node.id) ?? 0
     const selected = node.id === selectedId
     const neighbor = neighbors.has(node.id)
-    const coreRadius = (0.62 + 0.67 * Math.pow(p.perspective, 1.7) + connectivity * 0.11) * Math.pow(view.zoom, 0.28)
-    const brightness = clamp(0.18 + 0.46 * Math.pow(p.perspective, 0.9) + connectivity * 0.035, 0.28, 1)
-    return { ...node, ...p, coreRadius, opacity: selected ? 1 : brightness * (selectedId && !neighbor ? 0.14 : 1), selected, neighbor, separation: Infinity, nameOpacity: 0, density, emissionRadius: geometry.bandwidth * frame.scale * view.zoom * p.perspective * 0.85 }
+    // Intrinsic variation is stable per real entity; depth and connectivity still shape its apparent light.
+    let hash = 2166136261
+    for (const character of node.id) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619)
+    const luminosity = (hash >>> 0) / 4294967296
+    const coreRadius = (0.34 + 0.48 * Math.pow(p.perspective, 1.5) + connectivity * 0.045) * (0.7 + luminosity * 0.6) * Math.pow(view.zoom, 0.2)
+    const brightness = clamp((0.38 + 0.42 * Math.pow(p.perspective, 0.8) + connectivity * 0.018) * (0.72 + luminosity * 0.28), 0.28, 1)
+    return { ...node, ...p, coreRadius, opacity: selected ? 1 : brightness * (selectedId && !neighbor ? 0.14 : 1), selected, neighbor, separation: Infinity, nameOpacity: 0, density, emissionRadius: coreRadius * (4 + density * 3.5) }
   })
   projected.forEach((node, i) => {
     projected.forEach((other, j) => { if (i !== j) node.separation = Math.min(node.separation, Math.hypot(node.x - other.x, node.y - other.y) - node.coreRadius - other.coreRadius) })
@@ -189,7 +193,7 @@ export function buildGalaxyScene(nodes: GalaxyEntity[], edges: MemoryGraphRoutin
     const internal = geometry.communities.get(edge.source) === geometry.communities.get(edge.target)
     const focused = edge.source === selectedId || edge.target === selectedId
     const depthAlpha = clamp((a.perspective + b.perspective) / 2, 0.5, 1.8)
-    return { ...edge, a, b, curve, path, anchors, endTangent, focused, internal, opacity: focused ? Math.min(0.8, 0.48 * depthAlpha) : selectedId ? 0.018 : (edge.type === '同章出现' ? 0.035 : internal ? 0.045 : 0.2) * depthAlpha }
+    return { ...edge, a, b, curve, path, anchors, endTangent, focused, internal, opacity: focused ? Math.min(0.8, 0.48 * depthAlpha) : (selectedId ? 0.018 : (edge.type === '同章出现' ? 0.035 : internal ? 0.045 : 0.2) * depthAlpha) * smooth(1.08, 1.8, view.zoom) }
   })
   const occupied: GraphRect[] = projected.map((n) => ({ x: n.x - n.coreRadius - 3, y: n.y - n.coreRadius - 3, width: (n.coreRadius + 3) * 2, height: (n.coreRadius + 3) * 2 }))
   const labels: GalaxyLabel[] = []
@@ -260,11 +264,11 @@ export function buildGalaxyScene(nodes: GalaxyEntity[], edges: MemoryGraphRoutin
 }
 
 /** These canvas assets are created once per renderer (stars) or actual backing-size change (deep field). */
-export function createGalaxyStarSprite(tint: string): HTMLCanvasElement {
+export function createGalaxyWingSprite(tint: string): HTMLCanvasElement {
   const canvas = document.createElement('canvas'); canvas.width = 64; canvas.height = 64
   const ctx = canvas.getContext('2d')!
   const glow = ctx.createRadialGradient(32, 32, 0, 32, 32, 32)
-  glow.addColorStop(0, '#ffffffff'); glow.addColorStop(0.08, `${tint}dd`); glow.addColorStop(0.22, `${tint}80`); glow.addColorStop(0.45, `${tint}2e`); glow.addColorStop(0.72, `${tint}0b`); glow.addColorStop(1, `${tint}00`)
+  glow.addColorStop(0, `${tint}70`); glow.addColorStop(0.12, `${tint}46`); glow.addColorStop(0.3, `${tint}18`); glow.addColorStop(0.58, `${tint}03`); glow.addColorStop(1, `${tint}00`)
   ctx.fillStyle = glow; ctx.fillRect(0, 0, 64, 64)
   return canvas
 }

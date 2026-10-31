@@ -2,10 +2,10 @@ import { useEffect, useMemo, useRef } from 'react'
 import { Maximize, Minus, Plus } from 'lucide-react'
 import type { MemoryGraphNode } from '../../../../shared/contracts/index.js'
 import type { GraphPoint, MemoryGraphRoutingEdge, ReadableMemoryGraphEdge } from '../lib/memory-graph-layout'
-import { buildGalaxyScene, createGalaxyBackdrop, createGalaxyStarSprite, DEFAULT_GALAXY_VIEW, galaxyClusterExposure, galaxyPaintOrder, pickGalaxyNode, prepareGalaxyGeometry, type GalaxyScreenNode } from '../lib/memory-galaxy-render'
+import { buildGalaxyScene, createGalaxyBackdrop, createGalaxyWingSprite, DEFAULT_GALAXY_VIEW, galaxyClusterExposure, galaxyPaintOrder, pickGalaxyNode, prepareGalaxyGeometry, type GalaxyScreenNode } from '../lib/memory-galaxy-render'
 
 type Props = { nodes: MemoryGraphNode[]; edges: ReadableMemoryGraphEdge[]; points: Map<string, GraphPoint>; selectedId: string | null; onSelect: (id: string | null) => void; active: boolean }
-type GalaxyAssets = { sprites: Map<string, HTMLCanvasElement>; backdrop: HTMLCanvasElement | null; width: number; height: number; dpr: number }
+type GalaxyAssets = { wings: Map<string, HTMLCanvasElement>; backdrop: HTMLCanvasElement | null; width: number; height: number; dpr: number }
 
 export default function MemoryGraphGalaxy({ nodes, edges, points, selectedId, onSelect, active }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -23,7 +23,7 @@ export default function MemoryGraphGalaxy({ nodes, edges, points, selectedId, on
     const context = canvas?.getContext('2d')
     if (!canvas || !context) return
     if (!assetsRef.current) assetsRef.current = {
-      sprites: new Map([['character', createGalaxyStarSprite('#98c8f2')], ['item', createGalaxyStarSprite('#e5c291')], ['neutral', createGalaxyStarSprite('#cddbe7')]]),
+      wings: new Map([['character', createGalaxyWingSprite('#98c8f2')], ['item', createGalaxyWingSprite('#e5c291')], ['neutral', createGalaxyWingSprite('#cddbe7')]]),
       backdrop: null, width: 0, height: 0, dpr: 0,
     }
     const assets = assetsRef.current
@@ -47,12 +47,12 @@ export default function MemoryGraphGalaxy({ nodes, edges, points, selectedId, on
       }, geometry)
       projectedRef.current = scene.nodes
       // Optical emission accumulates only around real, spatially dense 3D neighborhoods.
-      // It uses the same cached tinted sprites at a wider scale, without whole-scene bloom or blur.
+      // Faint tinted wings contain no white core. Their footprint follows the tiny apparent star, not world-space spacing.
       ctx.save(); ctx.globalCompositeOperation = 'screen'
       for (const node of scene.nodes) {
         if (node.density <= 0) continue
-        const sprite = assets.sprites.get(node.type === 'character' || node.type === 'item' ? node.type : 'neutral')!
-        ctx.globalAlpha = node.opacity * galaxyClusterExposure(node.density)
+        const sprite = assets.wings.get(node.type === 'character' || node.type === 'item' ? node.type : 'neutral')!
+        ctx.globalAlpha = node.opacity * galaxyClusterExposure(node.density) * 0.55
         ctx.drawImage(sprite, node.x - node.emissionRadius, node.y - node.emissionRadius, node.emissionRadius * 2, node.emissionRadius * 2)
       }
       ctx.restore(); ctx.globalAlpha = 1
@@ -60,6 +60,7 @@ export default function MemoryGraphGalaxy({ nodes, edges, points, selectedId, on
       ctx.lineCap = 'round'
       for (const primitive of galaxyPaintOrder(scene)) {
         if (primitive.kind === 'threads') {
+          if (primitive.opacity === 0) continue
           // One stroke per style between actual star planes, rather than one styled stroke per segment.
           ctx.globalAlpha = primitive.opacity; ctx.strokeStyle = '#bed0dd'; ctx.lineWidth = primitive.width
           ctx.beginPath()
@@ -76,8 +77,8 @@ export default function MemoryGraphGalaxy({ nodes, edges, points, selectedId, on
           continue
         }
         const node = primitive.node
-        const halo = node.coreRadius * 5.2 + 2
-        const sprite = assets.sprites.get(node.type === 'character' || node.type === 'item' ? node.type : 'neutral')!
+        const halo = node.coreRadius * 2.7 + 1
+        const sprite = assets.wings.get(node.type === 'character' || node.type === 'item' ? node.type : 'neutral')!
         ctx.globalAlpha = node.opacity
         ctx.drawImage(sprite, node.x - halo, node.y - halo, halo * 2, halo * 2)
         ctx.fillStyle = '#f1f6fc'

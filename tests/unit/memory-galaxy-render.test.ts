@@ -16,9 +16,41 @@ describe('星系真实体积与屏幕文字层级', () => {
     expect(far.links).toHaveLength(145)
     expect(far.labels).toHaveLength(0)
     expect(far.nodes.every((n) => n.nameOpacity === 0)).toBe(true)
+    expect(far.links.every((link) => link.opacity === 0)).toBe(true)
     const probe = buildGalaxyScene(nodes.slice(0, 2), [], new Map([[nodes[0].id, { x: 0, y: 0, z: -100 }], [nodes[1].id, { x: 0, y: 0, z: 100 }]]), { yaw: 0, pitch: 0, zoom: 1 }, 1200, 800, null, measure)
-    expect(probe.nodes[0].coreRadius).toBeGreaterThan(probe.nodes[1].coreRadius)
-    expect(probe.nodes[0].opacity).toBeGreaterThan(probe.nodes[1].opacity)
+    const reversed = buildGalaxyScene(nodes.slice(0, 2), [], new Map([[nodes[0].id, { x: 0, y: 0, z: 100 }], [nodes[1].id, { x: 0, y: 0, z: -100 }]]), { yaw: 0, pitch: 0, zoom: 1 }, 1200, 800, null, measure)
+    expect(probe.nodes[0].coreRadius).toBeGreaterThan(reversed.nodes[0].coreRadius)
+    expect(probe.nodes[0].opacity).toBeGreaterThan(reversed.nodes[0].opacity)
+  })
+  it('细小星核有稳定个体差异，辉光尺度随星核而不是世界空间间距扩大', () => {
+    const entities = nodes.slice(0, 20)
+    const positions = new Map(entities.map((node, i) => [node.id, { x: i * 20, y: 0, z: 0 }]))
+    const view = { yaw: 0, pitch: 0, zoom: 1 }
+    const output = buildGalaxyScene(entities, [], positions, view, 1200, 800, null, measure)
+    const repeated = buildGalaxyScene([...entities].reverse(), [], positions, view, 1200, 800, null, measure)
+    expect(new Set(output.nodes.map((node) => node.coreRadius)).size).toBeGreaterThan(5)
+    expect(new Set(output.nodes.map((node) => node.opacity)).size).toBeGreaterThan(5)
+    for (const node of output.nodes) {
+      expect(node.coreRadius).toBeGreaterThan(0)
+      expect(node.coreRadius).toBeLessThan(1.1)
+      expect(node.emissionRadius).toBeLessThanOrEqual(node.coreRadius * 7.5)
+      const other = repeated.nodes.find((candidate) => candidate.id === node.id)!
+      expect(other.coreRadius).toBe(node.coreRadius)
+      expect(other.opacity).toBe(node.opacity)
+    }
+  })
+  it('关系线从远景零透明度连续显现，选择始终显示真实直接关系', () => {
+    const outputs = [1, 1.3, 1.6, 1.8].map((zoom) => scene(zoom))
+    expect(outputs.every((output) => output.links.length === 145)).toBe(true)
+    for (let i = 0; i < edges.length; i += 1) {
+      expect(outputs[0].links[i].opacity).toBe(0)
+      expect(outputs[1].links[i].opacity).toBeGreaterThan(0)
+      expect(outputs[2].links[i].opacity).toBeGreaterThan(outputs[1].links[i].opacity)
+      expect(outputs[3].links[i].opacity).toBeGreaterThan(outputs[2].links[i].opacity)
+    }
+    const focused = scene(1, nodes[0].id)
+    expect(focused.links.some((link) => link.focused)).toBe(true)
+    expect(focused.links.every((link) => link.focused ? link.opacity > 0 : link.opacity === 0)).toBe(true)
   })
   it('靠近按深度、局部空间渐进显示名称，任何未选中缩放均无关系文字', () => {
     const near = scene(2.4)
@@ -132,7 +164,7 @@ describe('星系真实体积与屏幕文字层级', () => {
         if (primitive.kind === 'star') { previousDepth = primitive.depth; continue }
         const nextStar = paint.slice(i + 1).find((candidate) => candidate.kind === 'star')
         const nextDepth = nextStar?.kind === 'star' ? nextStar.depth : -Infinity
-        expect(primitive.opacity).toBeGreaterThan(0); expect(primitive.opacity).toBeLessThanOrEqual(1)
+        expect(primitive.opacity).toBeGreaterThanOrEqual(0); expect(primitive.opacity).toBeLessThanOrEqual(1); expect(primitive.opacity > 0).toBe(primitive.focused)
         for (const segment of primitive.segments) {
           expect(segment.depth).toBeLessThanOrEqual(previousDepth)
           expect(segment.depth).toBeGreaterThanOrEqual(nextDepth)
