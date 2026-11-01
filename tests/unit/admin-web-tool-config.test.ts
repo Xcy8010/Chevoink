@@ -12,6 +12,7 @@ vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<object
     findFirst: vi.fn(async () => mocks.row), findFirstOrThrow: vi.fn(async () => mocks.row), update: mocks.update,
   },
   aiUsageLog: { groupBy: vi.fn(async () => []), findMany: vi.fn(async () => []) },
+  adminAuditLog: { create: vi.fn(async () => ({})) },
   user: { findUnique: vi.fn(async () => ({ role: 'admin', isSuperAdmin: true, bannedAt: null })) },
   $queryRaw: vi.fn(async () => []),
 } }))
@@ -21,13 +22,13 @@ vi.mock('../../api/lib/credit-policy.js', async original => ({ ...await original
 vi.mock('../../api/lib/billing/rate-cards.js', async original => ({ ...await original<object>(), getActiveTokenPrices: vi.fn(async () => new Map()) }))
 
 beforeEach(() => {
-  mocks.row = { id: 'tool-web-fetch', key: 'tool:web-fetch', ownerUserId: null, provider: 'unconfigured', displayName: 'Fetch tool',
+  mocks.row = { revision: 1, archivedAt: null, id: 'tool-web-fetch', key: 'tool:web-fetch', ownerUserId: null, provider: 'unconfigured', displayName: 'Fetch tool',
     modelName: 'unconfigured', baseUrl: null, apiKeyCiphertext: null, tier: 'tool_fetch', multiplierBps: 10000,
     enabled: false, selectable: false, isDefault: false, sortOrder: 0,
     metadata: { modelKind: 'web_fetch', reasoningEfforts: ['high'], defaultReasoningEffort: 'high', visionEnabled: false },
     updatedAt: new Date('2026-10-19T00:00:00Z') }
   mocks.update.mockReset().mockImplementation(async ({ data }: { data: Record<string, unknown> }) => {
-    mocks.row = { ...mocks.row, ...Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined)) }
+    mocks.row = { ...mocks.row, ...Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined).map(([key, value]) => [key, key === 'revision' && value && typeof value === 'object' && 'increment' in value ? Number(mocks.row.revision) + Number(value.increment) : value])) }
     return mocks.row
   })
   mocks.encrypt.mockClear()
@@ -77,6 +78,7 @@ it.each([
 it('rejects Bocha Fetch even when disabled and does not write web protocol onto ordinary models', async () => {
   await expect(updateAdminModel('fixture-admin', 'tool-web-fetch', { webToolProtocol: 'bocha' })).rejects.toMatchObject({ code: 'WEB_TOOL_CONFIG_INVALID' })
   mocks.row.key = 'builtin-fixture'
+  mocks.row.metadata = { modelKind: 'text' }
   await expect(updateAdminModel('fixture-admin', 'tool-web-fetch', { webToolProtocol: 'deepseek' })).rejects.toMatchObject({ code: 'WEB_TOOL_CONFIG_INVALID' })
   expect(mocks.update).not.toHaveBeenCalled()
 })
@@ -93,3 +95,5 @@ it('limits the shared admin request protocol contract to the two supported adapt
   expect(webToolProtocolSchema.safeParse('bocha').success).toBe(true)
   for (const value of ['openai', 'DeepSeek', '', null]) expect(webToolProtocolSchema.safeParse(value).success).toBe(false)
 })
+
+vi.mock('../../api/lib/model-lifecycle.js', async original => ({ ...await original<object>(), captureAdminModelVersion: vi.fn(async () => {}) }))

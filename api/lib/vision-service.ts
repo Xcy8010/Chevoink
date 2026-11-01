@@ -74,7 +74,7 @@ function isRetryable(error: unknown): boolean {
  * compare the public route before dispatch and replay before resolving it. */
 export async function resolveVisionRuntime(scope: VisionScope) {
   const assigned = await assignedTaskModel(scope.userId, scope.novelId, 'vision', scope.modelAssignments, Boolean(scope.runId))
-  const configured = assigned ? { provider: assigned.runtime.provider, modelName: assigned.runtime.modelName!, baseUrl: assigned.runtime.baseUrl ?? env.aiVisionBaseUrl,
+  const configured = assigned ? { ...(assigned.runtime.modelConfigId ? { modelConfigId: assigned.runtime.modelConfigId, modelConfigRevision: assigned.runtime.modelConfigRevision } : {}), provider: assigned.runtime.provider, modelName: assigned.runtime.modelName!, baseUrl: assigned.runtime.baseUrl ?? env.aiVisionBaseUrl,
     apiKey: assigned.runtime.apiKey ?? env.aiVisionApiKey } : await getToolModelRuntime('tool:image-vision')
   if (!configured && !env.aiVisionApiKeyConfigured) throw new DataAccessError(503, 'VISION_NOT_CONFIGURED', '视觉服务未配置（缺少 AI_VISION_API_KEY）。')
   const baseUrl = configured?.baseUrl ?? env.aiVisionBaseUrl, modelName = configured?.modelName ?? env.aiVisionModel
@@ -82,7 +82,7 @@ export async function resolveVisionRuntime(scope: VisionScope) {
     { provider: assigned.runtime.provider, model: modelName, providerBaseUrl: baseUrl }, true)]: 4096,
     ...buildProviderReasoningPayload({ provider: assigned.runtime.provider, model: modelName, providerBaseUrl: baseUrl,
       reasoningEffort: assigned.runtime.reasoningEffort, reasoningParameterMode: assigned.runtime.reasoningParameterMode, thinkingEnabled: assigned.runtime.thinkingEnabled }) } : {}
-  return { configured, selected: assigned?.runtime, route: { provider: configured?.provider ?? 'vision', modelName, baseUrl,
+  return { configured, selected: assigned?.runtime, route: { ...(configured?.modelConfigId ? { modelConfigId: configured.modelConfigId, modelConfigRevision: configured.modelConfigRevision } : {}), provider: configured?.provider ?? 'vision', modelName, baseUrl,
     providerMode: env.aiProviderMode, options }, apiKey: configured?.apiKey ?? env.aiVisionApiKey }
 }
 

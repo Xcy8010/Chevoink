@@ -13,6 +13,7 @@ vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<object
   },
   aiUsageLog: { groupBy: vi.fn(async () => []), findMany: vi.fn(async () => []), findUnique: vi.fn(async () => null),
     create: vi.fn(async () => ({ id: 'usage' })), update: vi.fn(async () => ({ id: 'usage' })), updateMany: vi.fn(async () => ({ count: 1 })) },
+  adminAuditLog: { create: vi.fn(async () => ({})) },
   user: { findUnique: vi.fn(async () => ({ role: 'admin', isSuperAdmin: true, bannedAt: null })) },
   $queryRaw: vi.fn(async () => []),
 } }))
@@ -30,12 +31,12 @@ vi.mock('../../api/lib/billing/resolve-token-price.js', async original => ({ ...
 }))
 
 beforeEach(() => {
-  mocks.row = { id: 'builtin', key: 'builtin-fixture', ownerUserId: null, provider: 'opaque', displayName: '内置模型',
+  mocks.row = { revision: 1, archivedAt: null, id: 'builtin', key: 'builtin-fixture', ownerUserId: null, provider: 'opaque', displayName: '内置模型',
     modelName: 'fixture-model', baseUrl: 'https://fixture.invalid/v1', apiKeyCiphertext: 'encrypted', tier: 'speed', multiplierBps: 10000,
     enabled: true, selectable: true, isDefault: false, sortOrder: 0,
     metadata: { reasoningEfforts: ['high'], defaultReasoningEffort: 'high', customMarker: 'preserved' }, updatedAt: new Date() }
   mocks.update.mockReset().mockImplementation(async ({ data }: { data: Record<string, unknown> }) => {
-    mocks.row = { ...mocks.row, ...Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined)) }
+    mocks.row = { ...mocks.row, ...Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined).map(([key, value]) => [key, key === 'revision' && value && typeof value === 'object' && 'increment' in value ? Number(mocks.row.revision) + Number(value.increment) : value])) }
     return mocks.row
   })
   vi.stubGlobal('fetch', vi.fn(async () => new Response('data: {"choices":[{"delta":{"content":"ready"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } })))
@@ -102,3 +103,5 @@ it.each(['opaque', 'openai', 'deepseek'].flatMap(provider => efforts.map(reasoni
     else expect(body).not.toHaveProperty('thinking')
   }
 })
+
+vi.mock('../../api/lib/model-lifecycle.js', async original => ({ ...await original<object>(), captureAdminModelVersion: vi.fn(async () => {}) }))

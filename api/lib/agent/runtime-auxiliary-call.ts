@@ -19,6 +19,7 @@ const auxiliaryTierSchema = creditModelTierSchema
 const reasoningEffortSchema = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 
 export const auxiliaryRouteSchema = z.object({
+  modelConfigId: z.string().min(1).max(64).optional(), modelConfigRevision: z.number().int().positive().optional(),
   weightedRoute: weightedRouteSelectionSchema.optional(),
   /** Optional fields keep pre-G22 operation snapshots hash-stable. */
   tier: auxiliaryTierSchema.optional(),
@@ -33,6 +34,9 @@ export const auxiliaryRouteSchema = z.object({
 })
 
 export type DurableAuxiliaryModelSelection = {
+  tokenPrice?: import('../billing/token-price.js').TokenPrice
+  modelConfigId?: string
+  modelConfigRevision?: number
   weightedRoute?: WeightedRouteSelection
   tier: CreditModelTier
   customModelId: string | null
@@ -42,6 +46,7 @@ export type DurableAuxiliaryModelSelection = {
 type ReviewRuntimeInput = {
   userId: string
   novelId?: string | null
+  runId?: string
   modelRuntime?: ToolContext['modelRuntime']
   modelSelection?: DurableAuxiliaryModelSelection & Partial<Pick<NonNullable<ToolContext['modelSelection']>, 'provider' | 'modelName'>>
   modelAssignments?: import('../../../shared/contracts/agent-model-assignments.js').FrozenModelAssignments
@@ -57,7 +62,7 @@ async function resolveReviewRuntime(input: ReviewRuntimeInput, nativeIdentity: b
   if (!input.modelRuntime && !selected || selected?.tier === 'custom' && !selected.customModelId) {
     return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '检查缺少原任务已选择的完整模型身份，未派发模型请求。')
   }
-  const runtime = input.modelRuntime ?? resolveWeightedModelRuntime(await getModelTierRuntime(selected!.tier, input.userId, selected!.customModelId, selected!.reasoningEffort), selected?.weightedRoute)
+  const runtime = input.modelRuntime ?? resolveWeightedModelRuntime(await getModelTierRuntime(selected!.tier, input.userId, selected!.customModelId, selected!.reasoningEffort, input.runId ? { userId: input.userId, runId: input.runId, modelConfigId: selected?.modelConfigId, modelConfigRevision: selected?.modelConfigRevision, provider: selected?.provider, modelName: selected?.modelName } : undefined), selected?.weightedRoute)
   const selection = selected ?? { tier: runtime.tier, customModelId: null, reasoningEffort: runtime.reasoningEffort }
   if (nativeIdentity && selection.tier === 'custom' && !selection.customModelId) return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '辅助模型未能继承原任务的模型身份。')
   if (selection.tier !== runtime.tier || selection.reasoningEffort !== runtime.reasoningEffort
@@ -79,6 +84,7 @@ export async function resolveDurableAuxiliaryRuntime(input: ReviewRuntimeInput) 
 
 export function auxiliaryRouteForRuntime(runtime: NonNullable<ToolContext['modelRuntime']> & { honorAssignedReasoning?: true }, selection: DurableAuxiliaryModelSelection, maxOutputTokens: number) {
   return auxiliaryRouteSchema.parse({
+    ...(runtime.modelConfigId ? { modelConfigId: runtime.modelConfigId, modelConfigRevision: runtime.modelConfigRevision } : {}),
     ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier: selection.tier,
     customModelId: selection.tier === 'custom' ? selection.customModelId : null,
     reasoningEffort: runtime.reasoningEffort,
@@ -123,7 +129,7 @@ export async function callDurableAuxiliary(input: {
   const routeTier = (input.route.tier ?? 'speed') as CreditModelTier
   const routeCustomModelId = input.route.customModelId ?? null
   const routeReasoningEffort = (input.route.reasoningEffort ?? 'low') as ModelReasoningEffort
-  const runtime = resolveWeightedModelRuntime(await getModelTierRuntime(routeTier, lease.userId, routeTier === 'custom' ? routeCustomModelId : null, routeReasoningEffort), input.route.weightedRoute)
+  const runtime = resolveWeightedModelRuntime(await getModelTierRuntime(routeTier, lease.userId, routeTier === 'custom' ? routeCustomModelId : null, routeReasoningEffort, { userId: lease.userId, runId: lease.runId, modelConfigId: input.route.modelConfigId, modelConfigRevision: input.route.modelConfigRevision, provider: input.route.provider, modelName: input.route.model }), input.route.weightedRoute)
   if (runtime.tier !== routeTier || runtime.reasoningEffort !== routeReasoningEffort
     || input.price.modelTier !== routeTier
     || runtime.provider !== input.route.provider || (runtime.modelName ?? env.aiTextModel) !== input.route.model

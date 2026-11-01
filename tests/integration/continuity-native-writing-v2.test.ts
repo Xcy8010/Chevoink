@@ -105,7 +105,7 @@ describe.runIf(available)('current native writing and historical configuration a
       requests++
       // The selected main runtime stays high; both auxiliary reviewers use the established non-thinking encoding.
       expect(body.reasoning_effort).toBe('none')
-      expect(credits.getModelTierRuntime).toHaveBeenCalledWith('speed', f.userId, null, 'high')
+      expect(credits.getModelTierRuntime).toHaveBeenCalledWith('speed', f.userId, null, 'high', expect.objectContaining({ userId: f.userId, runId: f.runId, provider: 'fixture', modelName: 'fixture' }))
       const system = String(body.messages[0].content), material = String(body.messages[1].content)
       let report: unknown = { findings: [] }
       if (system.includes('你是中文小说连续性编辑')) {

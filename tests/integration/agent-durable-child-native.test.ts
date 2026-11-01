@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
+import { getCreditWindow } from '../../api/lib/credits.js'
 import { encryptSecret } from '../../api/lib/secret-box.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
@@ -78,7 +79,7 @@ async function fixture(work: (f: { userId: string; novelId: string; sessionId: s
   }
 }
 
-async function execution(f: Parameters<Parameters<typeof fixture>[0]>[0], tool: AgentTool, args: Record<string, unknown>, assigned = false, pin = false, goalBound = false, tokenBudget = 64000) {
+async function execution(f: Parameters<Parameters<typeof fixture>[0]>[0], tool: AgentTool, args: Record<string, unknown>, assigned = false, pin = false, goalBound = false, tokenBudget = 64000, parentModel?: Awaited<ReturnType<typeof initializeExecutionState>>['configuration']['model']) {
   if (assigned) await patchModelAssignments(f.userId, { scope: 'global', expectedRevision: 0, assignments: { subagent: { modelTier: 'custom', customModelId: f.modelB }, spawned_task: { modelTier: 'custom', customModelId: f.modelB } } })
   const prefs = await freezeModelAssignments(f.userId, f.novelId)
   const runId = randomUUID(), callId = randomUUID(), prompt = '只读审阅并提交报告'
@@ -90,7 +91,8 @@ async function execution(f: Parameters<Parameters<typeof fixture>[0]>[0], tool: 
   const spec = { ...buildTaskSpec({ runId, novelId: f.novelId, prompt }), intent: 'review' as const, postconditions: [],
     expectedOutputs: [{ kind: 'validation_report' as const, required: true, description: '报告' }] }
   await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, engine: 'loop', mode: 'review', status: 'queued',
-    action: 'workspaceAgent', agentType: 'writingOrchestrator', modelTier: 'custom', customModelId: f.modelA, reasoningEffort: 'low', taskSpec: JSON.parse(JSON.stringify(spec)) } })
+    action: 'workspaceAgent', agentType: 'writingOrchestrator', modelTier: parentModel?.tier ?? 'custom', customModelId: parentModel ? parentModel.customModelId : f.modelA, reasoningEffort: parentModel?.reasoningEffort ?? 'low',
+    modelConfigId: parentModel?.modelConfigId, modelConfigRevision: parentModel?.modelConfigRevision, modelPriceSnapshot: parentModel?.tokenPrice, taskSpec: JSON.parse(JSON.stringify(spec)) } })
   const message = await prisma.agentMessage.create({ data: { runId, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
   if (goal) {
     await prisma.agentGoalExecution.create({ data: { goalId: goal.id, goalRevision: 1, epoch: 1n, continuationIndex: 1, runId, trigger: 'author', sourceEventId: `fixture:${runId}` } })
@@ -103,7 +105,7 @@ async function execution(f: Parameters<Parameters<typeof fixture>[0]>[0], tool: 
   const initial = await initializeExecutionState(lease, { configuration: { version: 1, mode: 'review', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
     ...(prefs ? { modelAssignments: prefs } : {}), ...(pin ? { pinnedSubagentId: f.definitionId } : {}),
     model: { tier: 'custom', customModelId: f.modelA, provider: 'openai', modelName: '模型A', reasoningEffort: 'low', maxOutputTokens: 100,
-      routeRevision: modelRouteRevision({ provider: 'openai', model: '模型A', endpoint: 'https://fixture.invalid/v1/chat/completions', reasoningEffort: 'low' }) },
+      routeRevision: modelRouteRevision({ provider: 'openai', model: '模型A', endpoint: 'https://fixture.invalid/v1/chat/completions', reasoningEffort: 'low' }), ...parentModel },
     tools: tools.map(item => ({ type: 'function', function: { name: item.name, description: item.description, parameters: toOpenAIParameters(item.parameters) } })),
     toolAuthority: tools.map(item => ({ name: item.name, permission: 'allow', alwaysConfirm: false, dangerous: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
     snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
@@ -316,6 +318,42 @@ describe.runIf(available)('durable native child HTTP path in isolated PG', () =>
     expect(await prisma.agentChildExecutionGrant.findUnique({ where: { id: grant.id } })).not.toBeNull()
     expect(await prisma.agentProviderAttempt.findUniqueOrThrow({ where: { id: attempt.id } })).toMatchObject({ requestHash: attempt.requestHash, status: 'unknown', dispatchedAt: attempt.dispatchedAt })
     await expect(claimLease({ userId: f.userId, runId: grant.childRunId, ownerId: 'late-delete-child', claimId: randomUUID() })).rejects.toBeDefined()
+  }), 30000)
+
+  it('admits platform child B with its own version and price when parent A has another frozen config and tariff', async () => fixture(async f => {
+    const ids = [randomUUID(), randomUUID()], tiers = ids.map(id => `builtin_${id.replaceAll('-', '').slice(0, 16)}`)
+    try {
+      await prisma.aiModelConfig.createMany({ data: ids.map((id, index) => ({ id, ownerUserId: null, key: `platform-child-fixture:${id}`, tier: tiers[index],
+        provider: 'fixture', displayName: `平台模型${index ? 'B' : 'A'}`, modelName: `platform-${index ? 'B' : 'A'}`, baseUrl: 'https://fixture.invalid/v1',
+        apiKeyCiphertext: encryptSecret('isolated-never-used'), enabled: true, selectable: true, multiplierBps: index ? 20000 : 10000,
+        metadata: { reasoningEfforts: ['low', 'high'], defaultReasoningEffort: index ? 'high' : 'low', contextWindowTokens: 128000 } })) })
+      const window = getCreditWindow()
+      await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 1000000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+      const parentPrice = { version: 'credits-v1-exact' as const, modelTier: tiers[0] as `builtin_${string}`, multiplierBps: 10000 }
+      const childPrice = { version: 'credits-v1-exact', modelTier: tiers[1], multiplierBps: 20000 }
+      const exec = await execution(f, subAgentRunTool, { subagentId: f.definitionId, task: '只读审阅原始设定并提交完整报告',
+        model: { modelTier: tiers[1], reasoningEffort: 'high' } }, false, true, false, 64000,
+      { tier: tiers[0], provider: 'fixture', modelName: 'platform-A', customModelId: null, modelConfigId: ids[0], modelConfigRevision: 1,
+        tokenPrice: parentPrice, reasoningEffort: 'low', maxOutputTokens: 100, routeRevision: modelRouteRevision({ provider: 'fixture', model: 'platform-A',
+          endpoint: 'https://fixture.invalid/v1/chat/completions', reasoningEffort: 'low' }) })
+      const fetcher = mockProvider()
+      expect((await executeDurableToolStep(exec.lease, new AbortController().signal)).kind).toBe('tool')
+      const grant = await prisma.agentChildExecutionGrant.findFirstOrThrow({ where: { parentRootId: exec.root.id }, include: { childRun: true } })
+      expect(grant.status).toBe('completed')
+      const frozen = verifyChildGrant(grant)
+      expect(frozen.configuration).toMatchObject({ model: { tier: tiers[1], modelConfigId: ids[1], modelConfigRevision: 1, tokenPrice: childPrice } })
+      expect(frozen.price).toEqual(childPrice)
+      expect(grant.childRun).toMatchObject({ modelTier: tiers[1], customModelId: null, modelConfigId: ids[1], modelConfigRevision: 1, modelPriceSnapshot: childPrice })
+      expect(await prisma.aiModelConfigVersion.count({ where: { modelConfigId: ids[1], revision: 1 } })).toBe(1)
+      expect((await loadExecutionState(f.userId, exec.runId)).configuration.model).toEqual(exec.initial.configuration.model)
+      expect(fetcher).toHaveBeenCalledOnce()
+      expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body)).model).toBe('platform-B')
+      const modelOp = await prisma.agentOperation.findFirstOrThrow({ where: { originRunId: grant.childRunId, kind: 'provider' } })
+      expect(modelOp.inputSnapshot).toMatchObject({ input: { billing: childPrice } })
+    } finally {
+      await prisma.aiModelConfigVersion.deleteMany({ where: { modelConfigId: { in: ids } } })
+      await prisma.aiModelConfig.deleteMany({ where: { id: { in: ids } } })
+    }
   }), 30000)
 
   it.each(['inherit', 'assigned', 'explicit', 'explicit-effort'] as const)('runs inline child through saved durable cursor (%s)', async selection => fixture(async f => {

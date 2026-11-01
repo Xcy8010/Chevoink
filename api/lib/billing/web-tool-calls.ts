@@ -76,7 +76,7 @@ export async function refundCancelledWebToolCall(ctx: ToolContext, kind: Kind, r
 /** One durable dispatch permit and one frozen debit. Unknown dispatches are never resent. */
 export async function executeWebToolCall<T>(ctx: ToolContext, kind: Kind, request: unknown, paidProvider: boolean,
   dispatch: () => Promise<T>, classify: (result: T) => 'billable' | 'empty' | 'fallback' | 'failed' | 'unknown',
-  reserve?: (tx: Prisma.TransactionClient) => Promise<void>, knownRejection?: (error: unknown) => boolean): Promise<T> {
+  reserve?: (tx: Prisma.TransactionClient) => Promise<void>, knownRejection?: (error: unknown) => boolean, modelIdentity?: { id: string; revision: number }): Promise<T> {
   ctx.signal.throwIfAborted()
   const id = identity(ctx, kind)
   await creditTransaction(tx => admitted(ctx, tx, async () => {
@@ -87,8 +87,10 @@ export async function executeWebToolCall<T>(ctx: ToolContext, kind: Kind, reques
     const included = ctx.includedDossierSearch
       ? await (await import('../agent/runtime-dossier-contract.js')).readIncludedDossierSearch(tx, ctx, request) : null
     if (included && (kind !== 'search' || !ctx.webAdmission || reserve)) throw new DataAccessError(409, 'CREDIT_WEB_TOOL_SCOPE', '研究搜索不能借用其他联网预算或派发权限。')
-    const config = included ? null : await tx.aiModelConfig.findFirst({ where: { key: `tool:web-${kind === 'search' ? 'search' : 'fetch'}`, ownerUserId: null },
-      select: { multiplierBps: true } })
+    if (modelIdentity) await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock_shared(hashtext('platform-model-catalog'))`
+    const config = included ? null : await tx.aiModelConfig.findFirst({ where: { ...(modelIdentity ? { id: modelIdentity.id } : { key: `tool:web-${kind === 'search' ? 'search' : 'fetch'}` }), ownerUserId: null },
+      select: { multiplierBps: true, revision: true, archivedAt: true } })
+    if (modelIdentity && !included && (!config || config.archivedAt || config.revision !== modelIdentity.revision)) throw new DataAccessError(409, 'MODEL_SELECTION_REQUIRED', '网页工具配置已变化，本次未请求或收费。')
     const multiplierBps = included ? 0 : config?.multiplierBps ?? 10000
     let amountMilli: number
     try { amountMilli = included ? 0 : paidProvider ? webToolChargeMilli(multiplierBps) : 0 }
@@ -97,7 +99,8 @@ export async function executeWebToolCall<T>(ctx: ToolContext, kind: Kind, reques
       idempotencyKey: key(ctx, kind), referenceId: ctx.runId, multiplierBps,
       metadata: { webToolCallId: id, requestHash: digest(request), baseMilli: included ? 0 : 2000,
         ...(included ? { tariff: included.work.searchTariff, parentOperationId: included.parent.id, parentInputHash: included.parent.inputHash, ordinal: ctx.includedDossierSearch!.ordinal } : {}) } })
-    await tx.webToolCall.create({ data: { id, runId: ctx.runId, requestHash: digest(request), kind, amountMilli, multiplierBps } })
+    await tx.webToolCall.create({ data: { id, runId: ctx.runId, requestHash: digest(request), kind, amountMilli, multiplierBps,
+      ...(modelIdentity ? { modelConfigId: modelIdentity.id, modelConfigRevision: modelIdentity.revision } : {}) } })
   })).catch(error => {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') throw pending()
     throw error

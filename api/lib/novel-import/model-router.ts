@@ -1,12 +1,30 @@
+import { z } from 'zod'
+import { novelImportModelSchema } from '../../../shared/contracts/novel-import.js'
+import { serverModelTierSchema } from '../../../shared/contracts/model-tier.js'
 import { createHash } from 'node:crypto'
 import { getModelTierRuntime } from '../credits.js'
-import { DataAccessError } from '../prisma.js'
+import { DataAccessError, prisma } from '../prisma.js'
 import type { ModelReasoningEffort } from '../../../shared/contracts/index.js'
 import type { NovelImportModelSelection } from '../../../shared/contracts/novel-import.js'
 
 /** The selection is supplied by the current composer, never inferred from the
  * most recently edited BYOK configuration. Provider secrets remain server-only. */
-export type ImportModelSelection = NovelImportModelSelection
+export const storedImportModelSchema = z.union([novelImportModelSchema, z.object({ kind: z.literal('basic'),
+  modelConfigId: z.string().min(1).max(64), modelConfigRevision: z.number().int().positive(), resolvedTier: serverModelTierSchema }).strict()])
+export type ImportModelSelection = z.infer<typeof storedImportModelSchema>
+export async function freezeBasicImportSelection(selection: NovelImportModelSelection): Promise<ImportModelSelection> {
+  if (selection.kind !== 'basic') return selection
+  try {
+    const runtime = await getModelTierRuntime('basic', undefined, undefined, 'low')
+    return runtime.modelConfigId && runtime.modelConfigRevision && runtime.tier !== 'custom'
+      ? { kind: 'basic', modelConfigId: runtime.modelConfigId, modelConfigRevision: runtime.modelConfigRevision, resolvedTier: runtime.tier } : selection
+  } catch (error) {
+    // Local parsing remains available without an LLM. Its later optional request
+    // still rejects an unavailable or archived selection before dispatch.
+    if (error instanceof DataAccessError && error.code === 'MODEL_TIER_UNAVAILABLE') return selection
+    throw error
+  }
+}
 
 export type ImportModelRoute = {
   kind: 'basic' | 'builtin' | 'custom'
@@ -26,10 +44,15 @@ export async function resolveImportModelRoute(userId: string, selection: ImportM
   if (selection.kind === 'custom' && !selection.customModelId.trim()) {
     throw new DataAccessError(400, 'CUSTOM_MODEL_REQUIRED', '请选择本次导入使用的自定义模型。')
   }
+  if (selection.kind === 'basic') {
+    const frozen = 'modelConfigId' in selection ? selection : null
+    const original = await prisma.aiModelConfig.findFirst({ where: { ownerUserId: null, ...(frozen ? { id: frozen.modelConfigId } : { tier: 'basic' }) } })
+    if (original?.archivedAt || frozen && (!original || original.revision !== frozen.modelConfigRevision)) throw new DataAccessError(409, 'IMPORT_MODEL_CHANGED', '原导入模型已归档或配置已变化，请重新选择并确认；未请求其他模型。')
+  }
   const requestedEffort = selection.kind === 'basic' ? 'low' : selection.reasoningEffort ?? (selection.kind === 'custom' ? 'low' : 'medium')
   // getModelTierRuntime enforces ownership, enabled state and supported efforts.
   // Do not catch its failure and retry against another paid provider.
-  const runtime = await getModelTierRuntime(selection.kind === 'custom' ? 'custom' : selection.kind === 'builtin' ? selection.modelTier : 'basic',
+  const runtime = await getModelTierRuntime(selection.kind === 'custom' ? 'custom' : selection.kind === 'builtin' ? selection.modelTier : 'resolvedTier' in selection ? selection.resolvedTier : 'basic',
     userId, selection.kind === 'custom' ? selection.customModelId : undefined, requestedEffort)
   const effort = runtime.reasoningEffort
   if ((selection.kind === 'basic' && effort !== requestedEffort) || !runtime.reasoningEfforts.includes(effort)) {

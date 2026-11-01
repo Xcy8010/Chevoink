@@ -65,7 +65,9 @@ describe.skipIf(!available)('B0 durable runtime foundation (real isolated PG)', 
         expect(await resolveDurableTokenPrice(lease, 'v2:model', tier, 99999)).toEqual(price)
         await expect(credits.getModelTierRuntime(tier, f.userId)).rejects.toMatchObject({ code: 'MODEL_TIER_UNAVAILABLE' })
         await expect(credits.assertCreditAccess(f.userId, tier)).rejects.toMatchObject({ code: 'MODEL_TIER_UNAVAILABLE' })
-      } finally { await prisma.aiModelConfig.delete({ where: { id: model.id } }) }
+      } finally { await prisma.aiModelConfigVersion.deleteMany({ where: { modelConfigId: model.id } })
+      await prisma.aiModelSystemBinding.deleteMany({ where: { modelConfigId: model.id } })
+      await prisma.aiModelConfig.delete({ where: { id: model.id } }) }
     })
   })
   it.each(['known-cache', 'unknown-discount', 'unknown-equal'] as const)('V2 settlement %s', async scenario => {

@@ -39,7 +39,11 @@ describe.runIf(available)('versioned V2 rate-card lifecycle', () => {
     } finally {
       await prisma.creditRateCardEvent.deleteMany({ where: { rateCardId: { in: ids } } })
       await prisma.creditRateCard.deleteMany({ where: { id: { in: ids } } })
-      if (!existing) await prisma.aiModelConfig.delete({ where: { id: config.id } })
+      if (!existing) {
+        await prisma.aiModelConfigVersion.deleteMany({ where: { modelConfigId: config.id } })
+        await prisma.aiModelSystemBinding.deleteMany({ where: { modelConfigId: config.id } })
+        await prisma.aiModelConfig.delete({ where: { id: config.id } })
+      }
       await prisma.user.delete({ where: { id: admin.id } })
     }
   })
@@ -88,6 +92,8 @@ describe.runIf(available)('versioned V2 rate-card lifecycle', () => {
     } finally {
       await prisma.creditRateCardEvent.deleteMany({ where: { rateCardId: { in: ids } } })
       await prisma.creditRateCard.deleteMany({ where: { id: { in: ids }, createdBy: admin.id } })
+      await prisma.aiModelConfigVersion.deleteMany({ where: { modelConfigId: model.id } })
+      await prisma.aiModelSystemBinding.deleteMany({ where: { modelConfigId: model.id } })
       await prisma.aiModelConfig.delete({ where: { id: model.id } })
       await prisma.user.delete({ where: { id: admin.id } })
     }

@@ -321,6 +321,8 @@ describe.runIf(available)('model assignments and native configuration real isola
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, modelTier: tier, deltaMilli: { lt: 0 } } })).toBe(1)
       expect(JSON.stringify(state.configuration)).not.toContain('isolated-never-used')
     } finally {
+      await prisma.aiModelConfigVersion.deleteMany({ where: { modelConfigId: id } })
+      await prisma.aiModelSystemBinding.deleteMany({ where: { modelConfigId: id } })
       await prisma.aiModelConfig.delete({ where: { id } })
       await prisma.adminAuditLog.deleteMany({ where: { adminId } })
       await prisma.user.delete({ where: { id: adminId } })
@@ -351,7 +353,13 @@ describe.runIf(available)('model assignments and native configuration real isola
       const otherScope = { userId: f.userId, novelId: f.otherNovelId }
       const otherIntent = await preflightNovelImport(otherScope)
       await prepareNovelImport(otherScope, otherIntent.intentId)
-      expect((await prisma.novelImportJob.findUniqueOrThrow({ where: { intentId: otherIntent.intentId } })).modelSelection).toEqual({ kind: 'basic' })
+      // The test has no configured basic service: preserve its existing speed fallback,
+      // while keeping the original basic selection and freezing the actual runtime.
+      expect(await prisma.aiModelConfig.findFirstOrThrow({ where: { ownerUserId: null, tier: 'basic' } }))
+        .toMatchObject({ modelName: 'unconfigured' })
+      const fallback = await prisma.aiModelConfig.findFirstOrThrow({ where: { ownerUserId: null, tier: 'speed' } })
+      expect((await prisma.novelImportJob.findUniqueOrThrow({ where: { intentId: otherIntent.intentId } })).modelSelection)
+        .toEqual({ kind: 'basic', modelConfigId: fallback.id, modelConfigRevision: fallback.revision, resolvedTier: 'speed' })
       expect(http).not.toHaveBeenCalled()
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
       expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)

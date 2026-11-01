@@ -27,7 +27,8 @@ function fixture() {
 describe('exact reviewed production migration', () => {
   const billingFixture = () => {
     const f = fixture()
-    const schema = readFileSync('prisma/schema.prisma', 'utf8').replaceAll('\r\n', '\n')
+    // This approval is historical and must not follow newer application schema.
+    const schema = readFileSync(new URL('../fixtures/release-web-tool-billing.schema.prisma', import.meta.url), 'utf8').replaceAll('\r\n', '\n')
     const begin = schema.indexOf('/// Frozen fixed-price dispatch receipt.')
     const end = schema.indexOf('model ReferralCode {', begin)
     expect(begin).toBeGreaterThan(0)
@@ -47,6 +48,11 @@ describe('exact reviewed production migration', () => {
     expect(() => assertMigrationState([old], sums, 'before', undefined, webToolBillingMigrationName)).not.toThrow()
     expect(() => assertMigrationState([old, completed], sums, 'after', [old], webToolBillingMigrationName)).not.toThrow()
     expect(() => assertMigrationState([old, { ...completed, checksum: 'c'.repeat(64) }], sums, 'after', [old], webToolBillingMigrationName)).toThrow()
+  })
+  it('does not reuse historical billing approval for the current model-lifecycle schema', () => {
+    const f = billingFixture()
+    writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), readFileSync('prisma/schema.prisma'))
+    expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow('Unapproved schema change')
   })
   it.each(['schema', 'baseline', 'history', 'sql', 'extra'])('rejects unrelated %s in billing release', kind => {
     const f = billingFixture()

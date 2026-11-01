@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 const execution = vi.hoisted(() => vi.fn(async () => {}))
 vi.mock('../../api/lib/agent/loop.js', () => ({ executeAgentRun: execution }))
-vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: vi.fn(async () => {}), getModelTierRuntime: vi.fn(async () => ({ reasoningEffort: 'high' })) }))
+vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: vi.fn(async () => {}), getModelTierRuntime: vi.fn(async () => ({ reasoningEffort: 'high', multiplierBps: 10000 })) }))
 vi.mock('../../api/lib/agent/writing-experiments.js', () => ({ recordSevenDayContinuation: vi.fn(async () => {}) }))
 import { prisma } from '../../api/lib/prisma.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
@@ -86,7 +86,8 @@ describe.skipIf(!dbAvailable)('queue database transactions (isolated test DB)', 
       qualityMode: 'balanced' as const, pinnedSkillIds: ['skill-a'], agentProfile: 'continuity' as const, tokenBudget: 1200 }
     const result = await startLoopRun(userId, input)
     const stored = await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })
-    expect(stored.startRequest).toEqual(input)
+    expect(stored.modelTier).toBe('speed')
+    expect(stored.startRequest).toEqual({ ...input, modelTier: 'speed' })
     expect(stored.taskSpec).toMatchObject({ scope: { writing: { kind: 'bounded', targets: [{ orderIndex: 1, chapterId: chapter.id }] },
       selectionBoundary: { chapterId: chapter.id, start: input.selection.start, end: input.selection.end } } })
     expect(await prisma.agentQueuedRequest.count({ where: { runId: result.runId } })).toBe(0)

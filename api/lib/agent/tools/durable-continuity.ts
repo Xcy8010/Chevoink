@@ -65,7 +65,7 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: RunLeaseTok
   const { snapshot, args } = frozen
   const resolved = input.frozenReview ? null : await resolveDurableAuxiliaryRuntime({ ...ctx, task: 'continuity' })
   const route = input.frozenReview?.route ?? auxiliaryRouteForRuntime(resolved!.runtime, resolved!.selection, REVIEW_MAX_OUTPUT_TOKENS)
-  const price = input.frozenReview?.price ?? await resolveDurableTokenPrice(lease, `${input.operationKey}:critic-price`, resolved!.selection.tier, resolved!.runtime.multiplierBps)
+  const price = input.frozenReview?.price ?? await resolveDurableTokenPrice(lease, `${input.operationKey}:critic-price`, resolved!.selection.tier, resolved!.runtime.multiplierBps, resolved!.selection.tokenPrice)
   return nativeContinuityWorkSchema.parse({ kind: 'continuityReview', chapterId: snapshot.chapter.id, revision: snapshot.chapter.revision,
     contextHash: snapshot.contextHash, critic: continuityReviewRequest(snapshot, args.focus), route, price })
 }

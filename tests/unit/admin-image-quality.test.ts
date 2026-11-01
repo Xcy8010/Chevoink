@@ -12,8 +12,9 @@ vi.mock('undici', async original => ({ ...await original<typeof import('undici')
 vi.mock('../../api/lib/secret-box.js', async original => ({ ...await original<object>(), decryptSecret: () => 'offline-image-key' }))
 vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<object>(), prisma: {
   aiModelConfig: { findMany: vi.fn(async (args: { select?: unknown }) => args.select ? [] : [mocks.row]),
-    findFirst: vi.fn(async () => mocks.row), findFirstOrThrow: vi.fn(async () => mocks.row), update: mocks.update },
+    findUnique: vi.fn(async () => mocks.row), findFirst: vi.fn(async () => mocks.row), findFirstOrThrow: vi.fn(async () => mocks.row), update: mocks.update },
   aiUsageLog: { groupBy: vi.fn(async () => []), findMany: vi.fn(async () => []), create: mocks.usage, findUnique: vi.fn(async () => null) },
+  adminAuditLog: { create: vi.fn(async () => ({})) },
   user: { findUnique: vi.fn(async () => ({ role: 'admin', isSuperAdmin: true, bannedAt: null })) }, $queryRaw: vi.fn(async () => []),
 } }))
 vi.mock('../../api/lib/credit-policy.js', async original => ({ ...await original<object>(),
@@ -26,12 +27,12 @@ vi.mock('../../api/lib/data-access.js', () => ({ createCoverAssetsData: mocks.as
 beforeEach(() => {
   vi.clearAllMocks()
   clearToolModelRuntimeCache()
-  mocks.row = { id: 'image', key: 'tool:image-generation', ownerUserId: null, tier: 'tool_image', provider: 'free-form-proxy',
+  mocks.row = { revision: 1, archivedAt: null, id: 'image', key: 'tool:image-generation', ownerUserId: null, tier: 'tool_image', provider: 'free-form-proxy',
     displayName: '图片生成', modelName: 'relay/arbitrary-image-alias', baseUrl: 'https://images.invalid/custom/generate', apiKeyCiphertext: 'encrypted',
     multiplierBps: 10000, enabled: true, selectable: false, isDefault: false, sortOrder: 0,
     metadata: { modelKind: 'image_generation', customMarker: { preserve: true } }, updatedAt: new Date('2026-10-30T00:00:00Z') }
   mocks.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => {
-    mocks.row = { ...mocks.row, ...Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined)) }
+    mocks.row = { ...mocks.row, ...Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined).map(([key, value]) => [key, key === 'revision' && value && typeof value === 'object' && 'increment' in value ? Number(mocks.row.revision) + Number(value.increment) : value])) }
     return mocks.row
   })
   mocks.fetch.mockImplementation(async () => new Response(JSON.stringify({ data: [{ url: 'https://images.invalid/result.png' }],
@@ -85,12 +86,16 @@ it.each(['legacy', 'omit'] as const)('keeps %s requests and original route/reque
   const { runtime, work, body } = await captureBothPaths()
   const originalRoute = { provider: 'free-form-proxy', modelName: 'relay/arbitrary-image-alias', baseUrl: 'https://images.invalid/custom/generate', providerMode: runtime.route.providerMode }
   const originalRequest = { endpoint: originalRoute.baseUrl, body: { model: originalRoute.modelName, prompt: input.prompt, size: input.size, n: 1 } }
-  expect(runtime.route).toEqual(originalRoute)
+  const { modelConfigId, modelConfigRevision, ...publicRoute } = runtime.route
+  expect({ modelConfigId, modelConfigRevision }).toEqual({ modelConfigId: 'image', modelConfigRevision: mocks.row.revision })
+  expect(publicRoute).toEqual(originalRoute)
   expect(body).not.toHaveProperty('quality')
   expect(body).not.toHaveProperty('reasoning_effort')
-  expect(runtimeJson(work.route).hash).toBe(runtimeJson(originalRoute).hash)
+  const legacyWork = coverWorkSchema.parse({ ...work, route: originalRoute })
+  expect(runtimeJson(legacyWork.route).hash).toBe(runtimeJson(originalRoute).hash)
   expect(runtimeJson(coverRequest(work)).hash).toBe(runtimeJson(originalRequest).hash)
-  expect(coverWorkSchema.parse({ ...work, route: originalRoute })).toEqual(work)
+  expect(legacyWork).toEqual({ ...work, route: originalRoute })
+  expect(coverRequest(legacyWork)).toEqual(coverRequest(work))
   const refreshed = (await getAdminModelManagement()).models[0]
   if (mode === 'legacy') expect(refreshed).not.toHaveProperty('imageQuality')
   else expect(refreshed.imageQuality).toEqual({ supportedValues: ['auto', 'max', 'relay-quality'], defaultValue: null })
@@ -106,3 +111,5 @@ it('invalidates the cached image quality when the admin changes the default, pre
   expect(mocks.row.metadata).toMatchObject({ customMarker: { preserve: true } })
   expect(mocks.fetch).not.toHaveBeenCalled()
 })
+
+vi.mock('../../api/lib/model-lifecycle.js', async original => ({ ...await original<object>(), captureAdminModelVersion: vi.fn(async () => {}) }))

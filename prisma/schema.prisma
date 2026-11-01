@@ -1266,6 +1266,9 @@ model WebToolCall {
 
   @@index([runId])
   @@map("web_tool_calls")
+  modelConfigId String? @map("model_config_id") @db.VarChar(64)
+  modelConfigRevision Int? @map("model_config_revision")
+
 }
 
 /// Only original public multipliers, no credentials or configuration snapshots.
@@ -1372,6 +1375,13 @@ model AiModelConfig {
   @@index([ownerUserId, enabled])
   @@index([tier, enabled, selectable])
   @@map("ai_model_configs")
+  revision         Int       @default(1)
+  archivedAt       DateTime? @map("archived_at")
+  archivedById     String?   @map("archived_by_id") @db.VarChar(64)
+  archiveReason    String?   @map("archive_reason") @db.VarChar(1000)
+  systemBindings   AiModelSystemBinding[]
+  versions         AiModelConfigVersion[]
+
 }
 
 model AgentSession {
@@ -1679,6 +1689,8 @@ model AgentSchedule {
   @@index([status, nextRunAt])
   @@index([userId, novelId, updatedAt])
   @@map("agent_schedules")
+  modelConfigId String? @map("model_config_id") @db.VarChar(64)
+
 }
 
 model AgentEvalComparison {
@@ -1760,6 +1772,10 @@ model AgentRun {
   @@index([novelId, createdAt])
   @@index([taskRootId, createdAt])
   @@map("agent_runs")
+  modelConfigId       String? @map("model_config_id") @db.VarChar(64)
+  modelConfigRevision Int? @map("model_config_revision")
+  modelPriceSnapshot Json? @map("model_price_snapshot")
+
 }
 
 /// B0 expansion: original scope is immutable; session/novel IDs survive history pruning.
@@ -3323,4 +3339,54 @@ model NovelImportSuggestion {
   @@unique([jobId, manifestRevision, volumeIndex, chapterIndex])
   @@index([jobId, createdAt])
   @@map("novel_import_suggestions")
+}
+
+
+/// Roles reference configuration identities; archiving never changes an old row's tier or price.
+model AiModelSystemBinding {
+  roleKey       String @id @map("role_key") @db.VarChar(96)
+  modelConfigId String @map("model_config_id") @db.VarChar(64)
+  revision      Int @default(1)
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  model         AiModelConfig @relation(fields: [modelConfigId], references: [id], onDelete: NoAction)
+  @@index([modelConfigId])
+  @@map("ai_model_system_bindings")
+}
+
+model AdminModelDiagnostic {
+  id String @id @default(cuid()) @db.VarChar(64)
+  adminId String @map("admin_id") @db.VarChar(64)
+  modelConfigId String @map("model_config_id") @db.VarChar(64)
+  configRevision String @map("config_revision") @db.VarChar(96)
+  requestKey String @map("request_key") @db.VarChar(100)
+  mode String @db.VarChar(24)
+  status String @db.VarChar(24)
+  feeIdentity String @unique @map("fee_identity") @db.VarChar(128)
+  feeOwner String @default("platform") @map("fee_owner") @db.VarChar(24)
+  feeStatus String @default("not_requested") @map("fee_status") @db.VarChar(24)
+  result Json
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@unique([adminId, requestKey])
+  @@index([modelConfigId, createdAt])
+  @@index([adminId, createdAt])
+  @@map("admin_model_diagnostics")
+}
+
+
+/// Immutable server-only versions retain encrypted credentials for admitted active work.
+model AiModelConfigVersion {
+  modelConfigId String @map("model_config_id") @db.VarChar(64)
+  revision Int
+  tier String? @db.VarChar(24)
+  provider String @db.VarChar(40)
+  modelName String @map("model_name") @db.VarChar(160)
+  baseUrl String? @map("base_url") @db.VarChar(512)
+  apiKeyCiphertext String? @map("api_key_ciphertext")
+  multiplierBps Int @map("multiplier_bps")
+  metadata Json?
+  createdAt DateTime @default(now()) @map("created_at")
+  model AiModelConfig @relation(fields: [modelConfigId], references: [id], onDelete: NoAction)
+  @@id([modelConfigId, revision])
+  @@map("ai_model_config_versions")
 }

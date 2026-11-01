@@ -16,7 +16,7 @@ import AdminLogsPage from '../../src/features/admin/pages/AdminLogsPage'
 beforeEach(() => {
   vi.clearAllMocks()
   mocks.tokens.mockResolvedValue({ summary: { totalTokens: 0, requestTokens: 0, responseTokens: 0, cacheHitTokens: null, cacheMissTokens: null, cacheObservedTokens: 0, users: 0, webSearchCalls: 0, imageCalls: 0 }, models: [], runs: [], runTurns: [], users: [], actions: [], trend: [] })
-  mocks.request.mockImplementation(async (url: string) => url.includes('supplier-balances') ? [] : { labels: [], metrics: [{ key: 'failed', label: '失败执行', total: 2, values: [] }], tools: [], cost: { knownCalls: 0, unknownCalls: 4, models: [] }, to: '2026-11-01T10:00:00Z' })
+  mocks.request.mockImplementation(async (url: string) => url.includes('/integrations/status') ? {resources:[]} : url.includes('/operations/health') ? { source:'provider_attempts',coverage:[],snapshotAt:'2026-11-01T10:00:00Z',window:{from:'2026-11-01T00:00:00Z',to:'2026-11-02T00:00:00Z',timeZone:'UTC+8',boundary:'created_at'},observation:'no_samples',counts:{total:0,success:0,failure:0,pending:0,cancelled:0,unknown:0},lastSampleAt:null } : url.includes('supplier-balances') ? [] : { labels: [], metrics: [{ key: 'failed', label: '失败执行', total: 2, values: [] }], tools: [], cost: { knownCalls: 0, unknownCalls: 4, models: [] }, to: '2026-11-01T10:00:00Z' })
   mocks.feedback.mockResolvedValue({ counts: { pending: 3 }, items: [] })
 })
 afterEach(cleanup)
@@ -41,7 +41,8 @@ it('keeps one period across usage tabs and fetches balances only after opening c
   await waitFor(() => expect(mocks.tokens).toHaveBeenCalledWith('month'))
   expect(mocks.request).not.toHaveBeenCalled()
   fireEvent.click(screen.getByRole('button', { name: '健康', exact: true }))
-  expect(screen.getByText(/模型连接检测与近期失败分布未接入/)).toBeTruthy()
+  expect(await screen.findByText('该范围无样本')).toBeTruthy()
+  expect(mocks.request).toHaveBeenCalledWith(expect.stringContaining('/api/admin/operations/health?period=month'))
   fireEvent.click(screen.getByRole('button', { name: '成本与余额' }))
   await waitFor(() => expect(mocks.request).toHaveBeenCalledWith('/api/admin/analytics?period=month&scope=cost'))
   expect(screen.getAllByRole('button', { name: '本月', exact: true })).toHaveLength(1)
@@ -49,7 +50,7 @@ it('keeps one period across usage tabs and fetches balances only after opening c
   expect(screen.queryByRole('heading', { name: '用量排行' })).toBeNull()
 })
 
-it('shows structured audit metadata, hides sensitive fields and scopes frontend filters honestly', async () => {
+it('shows structured audit metadata, hides sensitive fields and sends complete filters to the server', async () => {
   mocks.logs.mockResolvedValue({ items: [{ id: 'log-synthetic', adminId: 'admin-a', adminNickname: '测试管理甲', action: 'model.update', targetType: 'model', targetId: 'model-a', createdAt: '2026-11-01T10:00:00Z', ip: null, detail: { revision: 2, nested: { enabled: true }, password: 'sensitive-synthetic-value' } }], pagination: { total: 1, page: 1, pageSize: 10, totalPages: 1 } })
   mount(<AdminLogsPage />, '/admin/logs?targetType=model&action=model.update')
   expect(await screen.findByText('测试管理甲')).toBeTruthy()
@@ -59,8 +60,7 @@ it('shows structured audit metadata, hides sensitive fields and scopes frontend 
   expect(screen.queryByText('sensitive-synthetic-value')).toBeNull()
   expect(screen.queryByText('[object Object]')).toBeNull()
   fireEvent.click(screen.getByText('更多筛选'))
-  expect(screen.getByText(/仅筛选当前已加载页/)).toBeTruthy()
+  expect(screen.getByText(/全部筛选由服务端执行/)).toBeTruthy()
   fireEvent.change(screen.getByPlaceholderText('管理员昵称 / ID'), { target: { value: '另一位管理员' } })
-  expect(screen.queryByText('测试管理甲')).toBeNull()
-  expect(mocks.logs).toHaveBeenLastCalledWith({ targetType: 'model', action: 'model.update', page: 1, pageSize: 10 })
+  await waitFor(() => expect(mocks.logs).toHaveBeenLastCalledWith(expect.objectContaining({ targetType: 'model', action: 'model.update',operator:'另一位管理员',page:1,pageSize:10 })))
 })

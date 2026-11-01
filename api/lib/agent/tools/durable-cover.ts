@@ -74,7 +74,9 @@ async function generate(ctx: ToolContext, lease: RunLeaseToken, parentId: string
   } else {
     if (prepared.attempt.status !== 'prepared') return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原封面调用已终止，未重新生成。')
     const runtime = await resolveCoverImageRuntime()
-    if (runtimeJson(runtime.route).hash !== runtimeJson(work.route).hash) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '图片服务路由已变化，尚未派发。')
+    const { modelConfigId: _currentId, modelConfigRevision: _currentRevision, ...legacyRoute } = runtime.route
+    const comparableRoute = work.route.modelConfigId ? runtime.route : legacyRoute
+    if (runtimeJson(comparableRoute).hash !== runtimeJson(work.route).hash) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '图片服务路由已变化，尚未派发。')
     ctx.signal.throwIfAborted()
     await prepareImageResponseStorage(identity)
     const permit = await withManuscriptRunLease(lease, async tx => {

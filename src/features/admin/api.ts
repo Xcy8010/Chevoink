@@ -113,8 +113,8 @@ export function getAdminTokenManagement(period: 'today' | 'week' | 'month' = 'to
   return requestJson<AdminTokenManagementPayload>(`/api/admin/token-usage?period=${period}`)
 }
 
-export function getAdminCreditsManagement(search?: string): Promise<AdminCreditsManagementPayload> {
-  return requestJson<AdminCreditsManagementPayload>(`/api/admin/credits${buildQueryString({ search })}`)
+export function getAdminCreditsManagement(search?: string, paging: { page?: number; pageSize?: number } = {}): Promise<AdminCreditsManagementPayload> {
+  return requestJson<AdminCreditsManagementPayload>(`/api/admin/credits${buildQueryString({ search, page: paging.page, pageSize: paging.pageSize })}`)
 }
 
 export function resetAdminUserCredits(userId: string, payload: { captchaId: string; captchaAnswer: string; confirmation: string; requestKey?: string }): Promise<{ stoppedRuns: number }> {
@@ -141,11 +141,12 @@ export function setAdminCreditsPaused(payload: { paused: boolean; captchaId: str
   return requestJson('/api/admin/credits/pause', { method: 'POST', body: JSON.stringify(payload) })
 }
 
-export function getAdminModelManagement(): Promise<AdminModelManagementPayload> {
-  return requestJson<AdminModelManagementPayload>('/api/admin/models')
+export function getAdminModelManagement(view: 'active' | 'archived' | 'all' = 'active'): Promise<AdminModelManagementPayload> {
+  return requestJson<AdminModelManagementPayload>(view === 'active' ? '/api/admin/models' : `/api/admin/models?view=${view}`)
 }
 
 export function updateAdminModel(modelId: string, payload: {
+  expectedRevision?: number
   webToolProtocol?: import('../../../shared/contracts/web-tool').WebToolProtocol
   imageQuality?: import('../../../shared/contracts/image-model').ImageQualityConfig
   freePromotion?: import('../../../shared/model-promotion').ModelPromotion | null
@@ -415,6 +416,10 @@ export function listAdminAuditLogs(input: {
   targetType?: string
   page: number
   pageSize: number
+  operator?: string
+  objectId?: string
+  from?: string
+  to?: string
 }): Promise<AdminListPayload<AdminAuditLogRow>> {
   return requestJson(`/api/admin/logs${buildQueryString(input)}`)
 }
@@ -433,7 +438,7 @@ export function getAdminConversationMessages(conversationId: string): Promise<{ 
   return requestJson(`/api/admin/conversations/${conversationId}/messages`)
 }
 
-export function createAdminModel(payload: Parameters<typeof updateAdminModel>[1] & { expectedOrder: string[] }): Promise<{ id: string; tier: string }> {
+export function createAdminModel(payload: Parameters<typeof updateAdminModel>[1] & { expectedOrder: string[]; modelKind?: import('../../../shared/contracts/admin-model-lifecycle').AdminModelKind }): Promise<{ id: string; tier: string | null }> {
   return requestJson('/api/admin/models', { method: 'POST', body: JSON.stringify(payload) })
 }
 export function reorderAdminModels(order: string[], expectedOrder: string[]): Promise<{ ok: true }> {
@@ -441,4 +446,23 @@ export function reorderAdminModels(order: string[], expectedOrder: string[]): Pr
 }
 export function setAdminPublicBeta(payload: { enabled: boolean; expectedRevision: number; captchaId: string; captchaAnswer: string; confirmation: string }): Promise<{ publicBetaEnabled: boolean; publicBetaRevision: number }> {
   return requestJson('/api/admin/credits/public-beta', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function getAdminModelLifecyclePreview(modelId: string): Promise<import('../../../shared/contracts/admin-model-lifecycle').AdminModelLifecyclePreview> {
+  return requestJson(`/api/admin/models/${encodeURIComponent(modelId)}/lifecycle`)
+}
+export function archiveAdminModel(modelId: string, input: import('../../../shared/contracts/admin-model-lifecycle').ArchiveAdminModelInput): Promise<import('../../../shared/contracts/admin-model-lifecycle').AdminModelLifecycleResult> {
+  return requestJson(`/api/admin/models/${encodeURIComponent(modelId)}/archive`, {method:'POST',body:JSON.stringify(input)})
+}
+export function restoreAdminModel(modelId: string, input: import('../../../shared/contracts/admin-model-lifecycle').RestoreAdminModelInput): Promise<import('../../../shared/contracts/admin-model-lifecycle').AdminModelLifecycleResult> {
+  return requestJson(`/api/admin/models/${encodeURIComponent(modelId)}/restore`, {method:'POST',body:JSON.stringify(input)})
+}
+export function startAdminModelDiagnostic(modelId: string, input: import('../../../shared/contracts/admin-model-diagnostics').AdminModelDiagnosticRequest): Promise<import('../../../shared/contracts/admin-model-diagnostics').AdminModelDiagnosticResult> {
+  return requestJson(`/api/admin/models/${encodeURIComponent(modelId)}/diagnostics`,{method:'POST',body:JSON.stringify(input)})
+}
+export function getAdminModelDiagnostic(modelId: string, requestKey: string): Promise<import('../../../shared/contracts/admin-model-diagnostics').AdminModelDiagnosticResult> {
+  return requestJson(`/api/admin/models/${encodeURIComponent(modelId)}/diagnostics/${encodeURIComponent(requestKey)}`)
+}
+export function cancelAdminModelDiagnostic(modelId: string, requestKey: string): Promise<import('../../../shared/contracts/admin-model-diagnostics').AdminModelDiagnosticResult> {
+  return requestJson(`/api/admin/models/${encodeURIComponent(modelId)}/diagnostics/${encodeURIComponent(requestKey)}/cancel`,{method:'POST',body:'{}'})
 }

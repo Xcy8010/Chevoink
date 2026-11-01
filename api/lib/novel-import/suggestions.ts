@@ -5,8 +5,7 @@ import { Prisma } from '@prisma/client'
 import { prisma, DataAccessError } from '../prisma.js'
 import { chatWithTools } from '../ai-service.js'
 import { assertNovelImportHuman, getNovelImportPreview, novelImportCapabilities, novelImportTransaction, type NovelImportHuman } from '../novel-import-service.js'
-import { novelImportModelSchema } from '../../../shared/contracts/novel-import.js'
-import { assertImportStructureBudget, resolveImportModelRoute } from './model-router.js'
+import { assertImportStructureBudget, resolveImportModelRoute, storedImportModelSchema } from './model-router.js'
 
 export const importSuggestionQuoteSchema = z.object({
   manifestRevision: z.number().int().positive(), manifestHash: z.string().regex(/^[a-f0-9]{64}$/),
@@ -33,7 +32,7 @@ async function context(human: NovelImportHuman, jobId: string, input: Selection)
   if (!['ready', 'needs_review', 'awaiting_confirmation'].includes(job.status) || job.expiresAt <= new Date() || preview.manifestHash !== input.manifestHash || preview.manifestRevision !== input.manifestRevision) throw new DataAccessError(409, 'IMPORT_PREVIEW_CHANGED', '请保存并刷新预览，再请求结构建议。')
   const chapter = preview.volumes[input.volumeIndex]?.chapters[input.chapterIndex]
   if (!chapter?.content.trim() || chapter.content.length > 7000) throw new DataAccessError(413, 'IMPORT_AI_SCOPE_LIMIT', '每次仅分析一个不超过7000字符的章节；长章请先手动拆分。')
-  const { runtime, route } = await resolveImportModelRoute(human.userId, novelImportModelSchema.parse(job.modelSelection))
+  const { runtime, route } = await resolveImportModelRoute(human.userId, storedImportModelSchema.parse(job.modelSelection))
   // Conservative UTF-16 count plus envelope allowance; never truncate the manuscript.
   assertImportStructureBudget({ estimatedInput: system.length + chapter.content.length + 512, maxOutput: 2000, consumedInput: 0, consumedOutput: 0, reservedInput: 0, reservedOutput: 0, contextWindowTokens: runtime.contextWindowTokens })
   return { chapter, runtime, route }

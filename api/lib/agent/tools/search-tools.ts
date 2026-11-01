@@ -145,7 +145,7 @@ export const webSearchTool = defineTool({
           if (!knownSearchHttpRejection(error)) return false
           knownFailure = error
           return true
-        })
+        }, configured?.modelConfigId && configured.modelConfigRevision ? { id: configured.modelConfigId, revision: configured.modelConfigRevision } : undefined)
       const project = async (ctx: ToolContext): Promise<ToolResult> => {
         // A completed WebToolCall can outlive a crash before its research
         // projection. This helper fills only the same consumed request once;
@@ -369,7 +369,7 @@ export const webReadTool = defineTool({
           ctx.webAdmission ? async tx => {
             if (!await reserveResearchRequest(ctx, 'read', researchKey, navigation ? 'navigation' : undefined, tx)) throw new DataAccessError(429, 'WEB_READ_BUDGET', '网页读取预算已用尽，本次未读取、未收费。')
             await settleResearchRequest(ctx, 'consumed', tx)
-          } : undefined)
+          } : undefined, undefined, configuredFetch?.modelConfigId && configuredFetch.modelConfigRevision ? { id: configuredFetch.modelConfigId, revision: configuredFetch.modelConfigRevision } : undefined)
       } catch (error) {
         if (ctx.signal.aborted || (error instanceof DataAccessError && /^CREDITS?_/.test(error.code))) await releaseUndispatchedResearchRequest(ctx, 'fetch', request)
         throw error

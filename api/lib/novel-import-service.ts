@@ -1,3 +1,4 @@
+import { freezeBasicImportSelection } from './novel-import/model-router.js'
 import { randomUUID } from 'node:crypto'
 import type { Request } from 'express'
 import { Prisma, type NovelImportJob, type NovelImportIntent } from '@prisma/client'
@@ -254,10 +255,11 @@ export async function prepareNovelImport(scope: NovelImportScope, intentId: stri
     const selected = explicitSelection?.kind === 'custom' ? await resolveAssignedModel(scope.userId, { modelTier: 'custom', customModelId: explicitSelection.customModelId, reasoningEffort: explicitSelection.reasoningEffort })
       : explicitSelection?.kind === 'builtin' ? await resolveAssignedModel(scope.userId, { modelTier: explicitSelection.modelTier, reasoningEffort: explicitSelection.reasoningEffort })
       : explicitSelection ? undefined : await assignedTaskModel(scope.userId, scope.novelId, 'import_analysis')
-    const modelSelection: NovelImportModelSelection = selected ? selected.selection.modelTier === 'custom'
+    const requestedModelSelection: NovelImportModelSelection = selected ? selected.selection.modelTier === 'custom'
       ? { kind: 'custom', customModelId: selected.selection.customModelId!, reasoningEffort: selected.selection.reasoningEffort }
       : { kind: 'builtin', modelTier: selected.selection.modelTier, reasoningEffort: selected.selection.reasoningEffort }
       : explicitSelection ?? { kind: 'basic' }
+    const modelSelection = await freezeBasicImportSelection(requestedModelSelection)
     if (await tx.novelImportJob.count({ where: { userId: scope.userId, createdAt: { gte: new Date(Date.now() - 86400_000) } } }) >= NOVEL_IMPORT_DAILY_LIMITS.jobs) fail('IMPORT_DAILY_JOB_LIMIT', '24小时内最多创建10个导入任务，取消不会重置配额；请使用已有任务或24小时后重试。', 429)
     // Replacing previews is authorized only by a new human file selection. The
     // novel lock serializes this with commits; retries reuse the intent above.

@@ -5,7 +5,7 @@ import { runtimeJson } from './runtime-common.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
 const count = z.number().int().nonnegative().max(2147483647).nullable()
-const routeSchema = z.object({ provider: z.string().min(1), modelName: z.string().min(1), baseUrl: z.string().min(1),
+const routeSchema = z.object({ modelConfigId: z.string().min(1).max(64).optional(), modelConfigRevision: z.number().int().positive().optional(), provider: z.string().min(1), modelName: z.string().min(1), baseUrl: z.string().min(1),
   providerMode: z.string(), options: z.record(z.string(), z.unknown()) }).strict()
 export const visionWorkSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('unavailable'), result: z.object({ output: z.string() }).passthrough() }).strict(),

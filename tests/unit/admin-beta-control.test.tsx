@@ -10,10 +10,10 @@ vi.mock('../../src/features/admin/api', () => ({ getAdminCreditsManagement: mock
 vi.mock('../../src/features/admin/components/AdminAnalytics', () => ({ default: () => null }))
 vi.mock('../../src/components/ui/toast-context', () => ({ useToast: () => ({ success: vi.fn(), error: vi.fn() }) }))
 import AdminCreditsManagementPage from '../../src/features/admin/pages/AdminCreditsManagementPage'
-beforeEach(() => { vi.clearAllMocks(); mocks.credits.mockResolvedValue({ summary: { publicBetaEnabled: true, publicBetaRevision: 4, globallyPaused: false, users: 0, dailyAllowance: 0, dailyUsed: 0, bonusBalance: 0, exhaustedUsers: 0 }, users: [] }); mocks.captcha.mockResolvedValue({ captchaId: 'fixture-captcha', imageBase64: 'data:image/png;base64,AA==', expiresInSeconds: 120 }); mocks.beta.mockResolvedValue({ publicBetaEnabled: false, publicBetaRevision: 5 }) })
+beforeEach(() => { vi.clearAllMocks(); mocks.credits.mockResolvedValue({ pagination: { page:1,pageSize:20,total:0,hasMore:false }, summary: { publicBetaEnabled: true, publicBetaRevision: 4, globallyPaused: false, users: 0, dailyAllowance: 0, dailyUsed: 0, bonusBalance: 0, exhaustedUsers: 0 }, users: [] }); mocks.captcha.mockResolvedValue({ captchaId: 'fixture-captcha', imageBase64: 'data:image/png;base64,AA==', expiresInSeconds: 120 }); mocks.beta.mockResolvedValue({ publicBetaEnabled: false, publicBetaRevision: 5 }) })
 afterEach(cleanup)
 it('labels a stopped aggregate allowance as base quota rather than current availability', async () => {
-  mocks.credits.mockResolvedValue({ summary: { publicBetaEnabled: false, publicBetaRevision: 5, globallyPaused: false, users: 1, dailyAllowance: 450, dailyUsed: 450, bonusBalance: 0, exhaustedUsers: 1 }, users: [] })
+  mocks.credits.mockResolvedValue({ pagination: { page:1,pageSize:20,total:0,hasMore:false }, summary: { publicBetaEnabled: false, publicBetaRevision: 5, globallyPaused: false, users: 1, dailyAllowance: 450, dailyUsed: 450, bonusBalance: 0, exhaustedUsers: 1 }, users: [] })
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
   render(<QueryClientProvider client={client}><MemoryRouter><AdminCreditsManagementPage /></MemoryRouter></QueryClientProvider>)
   expect(await screen.findByText('基础总额度')).toBeTruthy()

@@ -58,7 +58,7 @@ type DurableSteeringCandidate = {
   partsHash: string
   sourceRevision: number
   sourceHash: string
-  model: { tier: string; customModelId: string | null; reasoningEffort: string }
+  model: { tier: string; customModelId: string | null; reasoningEffort: string; modelConfigId?: string; modelConfigRevision?: number; provider?: string; modelName?: string | null }
 }
 type SteeringImagePart = { type: 'attachment'; kind: 'image'; name: string; url: string; size?: number }
 
@@ -68,7 +68,7 @@ type DurableSteeringContent = Exclude<ChatMessage, { role: 'system' | 'assistant
  * Vision routes must receive the authorized bytes; a missing source is an error rather
  * than a silent URL-only downgrade. Non-vision routes retain the managed source in the
  * textual attachment marker so the existing view_image flow can inspect it. */
-async function materializeDurableSteering(candidate: DurableSteeringCandidate, userId: string) {
+async function materializeDurableSteering(candidate: DurableSteeringCandidate, userId: string, runId: string) {
   const imageParts = candidate.parts.filter((part): part is SteeringImagePart => part.type === 'attachment' && part.kind === 'image')
   let nativeImages: string[] = []
   if (imageParts.length) {
@@ -78,7 +78,7 @@ async function materializeDurableSteering(candidate: DurableSteeringCandidate, u
       return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '原模型附件能力尚未接入持久执行，不能降级或替换。')
     }
     const runtime = await getModelTierRuntime(tier.data as import('../../../shared/contracts/index.js').CreditModelTier, userId,
-      tier.data === 'custom' ? candidate.model.customModelId : null, effort.data)
+      tier.data === 'custom' ? candidate.model.customModelId : null, effort.data, { userId, runId, modelConfigId: candidate.model.modelConfigId, modelConfigRevision: candidate.model.modelConfigRevision, provider: candidate.model.provider, modelName: candidate.model.modelName })
     if (runtime.tier !== tier.data) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原模型档位不可用，不能静默回退。')
     if (runtime.visionEnabled) {
       const resolved = await Promise.all(imageParts.map(async part => readManagedImageDataUrl(part.url, userId)))
@@ -142,10 +142,10 @@ async function consumeDurableSteering(token: RunLeaseToken) {
     // retained in AgentMessage and will be consumed on the next idle boundary.
     if (current.frame.state.phase !== 'idle') return false
     return { messageId: message.id, parts: rendered.parts, partsHash, sourceRevision: current.frame.revision,
-      sourceHash: current.frame.snapshotHash, model: { tier: run.modelTier, customModelId: run.customModelId, reasoningEffort: run.reasoningEffort } } satisfies DurableSteeringCandidate
+      sourceHash: current.frame.snapshotHash, model: { ...current.configuration.model, tier: run.modelTier, customModelId: run.customModelId, reasoningEffort: run.reasoningEffort } } satisfies DurableSteeringCandidate
   })
   if (!candidate) return false
-  const content = await materializeDurableSteering(candidate, token.userId)
+  const content = await materializeDurableSteering(candidate, token.userId, token.runId)
   return withRunLease(token, async tx => {
     const binding = await tx.agentGoalExecution.findUnique({ where: { runId: token.runId }, select: { trigger: true } })
     if (binding?.trigger !== 'steering') return false
@@ -215,8 +215,8 @@ async function refreshDurableGoalModel(token: RunLeaseToken) {
     if (pendingOperations || pendingAttempts) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '目标仍有未决模型操作，不能切换模型路由。')
     if (state.configuration.model.tier === run.modelTier && state.configuration.model.customModelId === run.customModelId
       && state.configuration.model.reasoningEffort === run.reasoningEffort) return false
-    const { weightedRoute: _oldWeightedRoute, ...previousModel } = state.configuration.model
-    const nextConfiguration = { ...state.configuration, model: { ...previousModel, ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}),
+    const { weightedRoute: _oldWeightedRoute, modelConfigId: _oldConfigId, modelConfigRevision: _oldRevision, tokenPrice: _oldPrice, ...previousModel } = state.configuration.model
+    const nextConfiguration = { ...state.configuration, model: { ...previousModel, ...(runtime.modelConfigId ? { modelConfigId: runtime.modelConfigId, modelConfigRevision: runtime.modelConfigRevision } : {}), ...(runtime.tokenPrice ? { tokenPrice: runtime.tokenPrice } : {}), ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}),
       tier: runtime.tier, provider: runtime.provider, modelName, customModelId: runtime.tier === 'custom' ? run.customModelId : null,
       maxOutputTokens: env.aiTextMaxOutputTokens, contextWindowTokens: runtime.contextWindowTokens ?? env.agentContextWindowTokens,
       reasoningEffort: runtime.reasoningEffort, routeRevision } }
@@ -305,7 +305,8 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   const effort = reasoning.safeParse(configuration.model.reasoningEffort)
   if (!tier.success || !effort.success || tier.data === 'custom' && !configuration.model.customModelId) return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '原模型配置缺少可核验的自定义模型身份。')
   const runtime = resolveWeightedModelRuntime(await getModelTierRuntime(tier.data as import('../../../shared/contracts/index.js').CreditModelTier, lease.userId,
-    tier.data === 'custom' ? configuration.model.customModelId : null, effort.data), configuration.model.weightedRoute)
+    tier.data === 'custom' ? configuration.model.customModelId : null, effort.data,
+    { userId: lease.userId, runId: lease.runId, modelConfigId: configuration.model.modelConfigId, modelConfigRevision: configuration.model.modelConfigRevision, provider: configuration.model.provider, modelName: configuration.model.modelName }), configuration.model.weightedRoute)
   if (runtime.tier !== tier.data) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原模型档位不可用，不能静默回退。')
   const currentWindow = runtime.contextWindowTokens ?? env.agentContextWindowTokens
   const window = Math.min(configuration.model.contextWindowTokens ?? currentWindow, currentWindow)
@@ -324,7 +325,7 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   }
   const operationKey = `exec:${frame.state.nextOperationSequence}`
   const child = await withRunLease(lease, tx => tx.agentChildExecutionGrant.findUnique({ where: { childRunId: lease.runId } }))
-  const price = child ? verifyChildGrant(child).price : await resolveDurableTokenPrice(lease, operationKey, tier.data, runtime.multiplierBps)
+  const price = child ? verifyChildGrant(child).price : await resolveDurableTokenPrice(lease, operationKey, tier.data, runtime.multiplierBps, configuration.model.tokenPrice)
   if (price.modelTier !== tier.data) return runtimeError('RUNTIME_PRICE_INVALID', '冻结价目与当前模型身份不一致。')
   signal.throwIfAborted()
   const result = await chatWithTools({ messages: frame.state.messages, tools,

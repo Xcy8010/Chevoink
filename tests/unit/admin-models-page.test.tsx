@@ -3,12 +3,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { Link, MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-const mocks = vi.hoisted(() => ({ get: vi.fn(), create: vi.fn(), reorder: vi.fn(), update: vi.fn() }))
-vi.mock('../../src/features/admin/api', () => ({ getAdminModelManagement: mocks.get, createAdminModel: mocks.create, reorderAdminModels: mocks.reorder, updateAdminModel: mocks.update }))
+const mocks = vi.hoisted(() => ({ get: vi.fn(), create: vi.fn(), reorder: vi.fn(), update: vi.fn(), lifecycle: vi.fn(), archive: vi.fn(), restore: vi.fn(), diagnostic: vi.fn() }))
+vi.mock('../../src/features/admin/api', () => ({ getAdminModelManagement: mocks.get, createAdminModel: mocks.create, reorderAdminModels: mocks.reorder, updateAdminModel: mocks.update, getAdminModelLifecyclePreview: mocks.lifecycle, archiveAdminModel: mocks.archive, restoreAdminModel: mocks.restore, startAdminModelDiagnostic: mocks.diagnostic, getAdminModelDiagnostic: mocks.diagnostic, cancelAdminModelDiagnostic: mocks.diagnostic }))
 import { clearAdminModelHistoryDrafts } from '../../src/features/admin/components/AdminModelDraftRecovery'
 import AdminModelsPage from '../../src/features/admin/pages/AdminModelsPage'
 import { WeightedRoutesEditor } from '../../src/features/admin/components/WeightedRoutesEditor'
-const row = (id: string, tier: 'speed' | 'builtin_0123456789abcdef', displayName: string) => ({ id, tier, displayName, sortOrder: 0, modelKind: 'text', provider: 'openai', modelName: 'fixture', baseUrl: 'https://fixture.invalid/v1', multiplier: 1,
+const row = (id: string, tier: 'speed' | 'builtin_0123456789abcdef', displayName: string) => ({ id, tier, displayName, revision: 1, archivedAt: null as string | null, archiveReason: null as string | null, sortOrder: 0, modelKind: 'text', provider: 'openai', modelName: 'fixture', baseUrl: 'https://fixture.invalid/v1', multiplier: 1,
   enabled: true, selectable: true, isDefault: id === 'a', apiKeyConfigured: true, requestCount: 0, requestTokens: 0, responseTokens: 0,
   reasoningEfforts: ['high'], defaultReasoningEffort: 'high', visionEnabled: false, contextWindowTokens: 128000, configurationReady: true, updatedAt: '' })
 function LocationProbe() { const location = useLocation(); return <><span data-testid="location">{location.pathname}{location.search}</span><Link to="/admin/users">前往用户列表</Link></> }
@@ -379,4 +379,34 @@ it.each(['changed-version', 'different-admin', 'logout'] as const)('handles reje
   }
   expect(mocks.update).not.toHaveBeenCalled()
   window.history.replaceState(null, '', '/')
+})
+
+
+it('archives through explicit impact preview with same-fee replacement and preserves the required audit reason', async () => {
+  mocks.lifecycle.mockResolvedValue({ id: 'a', revision: 1, displayName: '极速', archivedAt: null, modelKind: 'text', isDefault: true, systemRoles: ['speed'], previewHash: 'a'.repeat(64), historyAttribution: 'tier', impact: { queued: 2, running: 1, paused: 1, historicalCalls: 12, assignments: 1, queuedRequests: 1, goals: 1, schedules: 1, imports: 0 }, candidates: [{ id: 'b', revision: 1, displayName: '动态模型', modelKind: 'text', eligible: true, reasons: [] }, { id: 'expensive', revision: 1, displayName: '不同费率', modelKind: 'text', eligible: false, reasons: ['生效费率不同'] }] })
+  mocks.archive.mockResolvedValue({ id: 'a', revision: 2, archived: true })
+  mount('/admin/models?model=a&section=changes')
+  await screen.findByRole('button', { name: '预览归档影响' })
+  expect(mocks.archive).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: '预览归档影响' }))
+  await screen.findByRole('combobox', { name: '必要用途的替代配置' })
+  expect(screen.getByRole('option', { name: /不同费率/ }).hasAttribute('disabled')).toBe(true)
+  expect(screen.getByRole('button', { name: '确认归档' }).hasAttribute('disabled')).toBe(true)
+  fireEvent.change(screen.getByRole('combobox', { name: '必要用途的替代配置' }), { target: { value: 'b' } })
+  fireEvent.change(screen.getByRole('textbox', { name: '操作原因' }), { target: { value: '移除重复配置' } })
+  fireEvent.click(screen.getByRole('button', { name: '确认归档' }))
+  await waitFor(() => expect(mocks.archive).toHaveBeenCalledWith('a', { expectedRevision: 1, previewHash: 'a'.repeat(64), reason: '移除重复配置', replacementId: 'b', replacementRevision: 1 }))
+  expect(mocks.update).not.toHaveBeenCalled()
+})
+
+it('keeps archived rows out of the active list and opens their read-only detail without enabling save', async () => {
+  mocks.get.mockResolvedValue({ models: [{ ...row('a', 'speed', '已归档模型'), archivedAt: '2026-11-01T12:00:00Z' }], trend: [] })
+  mount()
+  await screen.findByText('0 项匹配')
+  expect(screen.queryByRole('button', { name: '编辑 已归档模型' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '已归档' }))
+  await screen.findByRole('button', { name: '编辑 已归档模型' })
+  fireEvent.click(screen.getByRole('button', { name: '编辑 已归档模型' }))
+  expect(screen.getByRole('button', { name: '保存配置' }).hasAttribute('disabled')).toBe(true)
+  expect(screen.getByRole('textbox', { name: '显示名称' }).closest('fieldset')?.disabled).toBe(true)
 })

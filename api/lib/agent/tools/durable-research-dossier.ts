@@ -47,18 +47,18 @@ async function freezeWork(ctx: ToolContext, args: DossierWork['args']): Promise<
   const search = await resolveDossierSearchRoute()
   const assigned = await assignedTaskModel(ctx.userId, ctx.novelId, 'research_synthesis', ctx.modelAssignments, true)
   const selected = ctx.modelSelection
-  const main = ctx.modelRuntime ?? (selected ? resolveWeightedModelRuntime(await getModelTierRuntime(selected.tier, ctx.userId, selected.customModelId, selected.reasoningEffort), selected.weightedRoute) : undefined)
+  const main = ctx.modelRuntime ?? (selected ? resolveWeightedModelRuntime(await getModelTierRuntime(selected.tier, ctx.userId, selected.customModelId, selected.reasoningEffort, { userId: ctx.userId, runId: ctx.runId, modelConfigId: selected.modelConfigId, modelConfigRevision: selected.modelConfigRevision, provider: selected.provider, modelName: selected.modelName }), selected.weightedRoute) : undefined)
   const inheritedBase = assigned ? undefined : auxiliaryTextModel(main)
   const inherited = inheritedBase ? selectWeightedModelRuntime(inheritedBase) : undefined
   const customModelId = assigned?.selection.customModelId ?? (inherited?.tier === 'custom' ? selected?.customModelId : null) ?? null
   if (inherited?.tier === 'custom' && !customModelId) return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '研究综合缺少原自定义模型身份。')
   const requestedEffort = inherited && !inherited.reasoningEfforts?.includes('high') ? inherited.reasoningEffort : 'high'
-  const runtime = selectWeightedModelRuntime(assigned?.runtime ?? resolveWeightedModelRuntime(await getModelTierRuntime(inherited?.tier ?? 'speed', ctx.userId, customModelId, requestedEffort), inherited?.weightedRoute))
+  const runtime = selectWeightedModelRuntime(assigned?.runtime ?? resolveWeightedModelRuntime(await getModelTierRuntime(inherited?.tier ?? 'speed', ctx.userId, customModelId, requestedEffort, { userId: ctx.userId, runId: ctx.runId, modelConfigId: inherited?.modelConfigId, modelConfigRevision: inherited?.modelConfigRevision, provider: inherited?.provider, modelName: inherited?.modelName }), inherited?.weightedRoute))
   if (inherited && (runtime.provider !== inherited.provider || runtime.modelName !== inherited.modelName || runtime.baseUrl !== inherited.baseUrl)) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原免费或自带模型路由已变化。')
   const route = auxiliaryRouteForRuntime({ ...runtime, honorAssignedReasoning: true }, { tier: runtime.tier, customModelId, reasoningEffort: runtime.reasoningEffort }, env.aiTextMaxOutputTokens)
   delete route.responseFormat
   return dossierWorkSchema.parse({ ...initial.build, searchRoute: search.route, route,
-    price: await resolveDurableTokenPrice(lease, `${ctx.durableDossier!.operationKey}:dossier-price`, runtime.tier, runtime.multiplierBps) })
+    price: await resolveDurableTokenPrice(lease, `${ctx.durableDossier!.operationKey}:dossier-price`, runtime.tier, runtime.multiplierBps, !assigned && ctx.modelSelection?.tier === runtime.tier ? ctx.modelSelection.tokenPrice : undefined) })
 }
 
 export async function executeDurableDossier(ctx: ToolContext, tool: AgentTool, raw: unknown): Promise<ToolResult> {
@@ -121,7 +121,10 @@ export async function executeDurableDossier(ctx: ToolContext, tool: AgentTool, r
             if (await findWebToolCallOutcome(web, 'search', request)) continue
             await assertCreditAccess(ctx.userId, 'speed', false)
             const search = await resolveDossierSearchRoute()
-            if (runtimeJson(search.route).hash !== runtimeJson(frozen.searchRoute).hash) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原搜索路由已变化，未派发查询。')
+            const configured = search.route.configured
+            const { modelConfigId: _currentId, modelConfigRevision: _currentRevision, ...legacyConfigured } = configured ?? {}
+            const comparableRoute = !frozen.searchRoute.configured?.modelConfigId && configured ? { ...search.route, configured: legacyConfigured } : search.route
+            if (runtimeJson(comparableRoute).hash !== runtimeJson(frozen.searchRoute).hash) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原搜索路由已变化，未派发查询。')
             await executeWebToolCall(web, 'search', request, true,
               () => searchWeb(frozen.args.queries[ordinal], 5, ctx.signal, search.runtime, undefined, undefined, { stopOnUnknown: true }),
               outcome => outcome.results.length ? 'billable' : 'empty', undefined,

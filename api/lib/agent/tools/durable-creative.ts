@@ -46,16 +46,16 @@ export async function executeDurableCreative(ctx: ToolContext, tool: AgentTool, 
         args as Parameters<typeof prepareCreativeReview>[1], step === 'creative_critique' ? 'critique' : 'revision'))
       const assigned = await assignedTaskModel(ctx.userId, ctx.novelId, step === 'creative_critique' ? 'creative_critique' : 'creative_revision', ctx.modelAssignments, true)
       const selected = ctx.modelSelection
-      const main = ctx.modelRuntime ?? (selected ? resolveWeightedModelRuntime(await getModelTierRuntime(selected.tier, ctx.userId, selected.customModelId, selected.reasoningEffort), selected.weightedRoute) : undefined)
+      const main = ctx.modelRuntime ?? (selected ? resolveWeightedModelRuntime(await getModelTierRuntime(selected.tier, ctx.userId, selected.customModelId, selected.reasoningEffort, { userId: ctx.userId, runId: ctx.runId, modelConfigId: selected.modelConfigId, modelConfigRevision: selected.modelConfigRevision, provider: selected.provider, modelName: selected.modelName }), selected.weightedRoute) : undefined)
       const inherited = !assigned && auxiliaryTextModel(main)
-      const inheritedRuntime = inherited ? await resolveDurableAuxiliaryRuntime({ userId: ctx.userId, modelRuntime: inherited, modelSelection: selected }) : undefined
+      const inheritedRuntime = inherited ? await resolveDurableAuxiliaryRuntime({ userId: ctx.userId, runId: ctx.runId, modelRuntime: inherited, modelSelection: selected }) : undefined
       const runtime = selectWeightedModelRuntime(assigned?.runtime ?? inheritedRuntime?.runtime ?? await getModelTierRuntime('speed', ctx.userId))
       const selection = { tier: runtime.tier, customModelId: runtime.tier === 'custom' ? assigned?.selection.customModelId ?? selected?.customModelId ?? null : null, reasoningEffort: runtime.reasoningEffort }
       if (selection.tier === 'custom' && !selection.customModelId) return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '创作辅助缺少原自定义模型身份。')
       const route = auxiliaryRouteForRuntime({ ...runtime, honorAssignedReasoning: true }, selection, env.aiTextMaxOutputTokens)
       // These tools produce prose; the critic JSON response format is inapplicable.
       delete route.responseFormat
-      work = { kind: 'creative', version: 1, review, route, price: await resolveDurableTokenPrice(lease, `${capability.operationKey}:creative-price`, runtime.tier, runtime.multiplierBps) }
+      work = { kind: 'creative', version: 1, review, route, price: await resolveDurableTokenPrice(lease, `${capability.operationKey}:creative-price`, runtime.tier, runtime.multiplierBps, !assigned && ctx.modelSelection?.tier === runtime.tier ? ctx.modelSelection.tokenPrice : undefined) }
     } catch (error) {
       if (!(error instanceof DataAccessError) || !error.code.startsWith('CREATIVE_')) throw error
       work = { kind: 'rejected', code: error.code, message: error.message }

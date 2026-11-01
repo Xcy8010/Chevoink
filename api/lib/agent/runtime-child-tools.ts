@@ -1,3 +1,4 @@
+import { modelRouteRevision } from './runtime-model-cursor.js'
 import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
@@ -165,6 +166,20 @@ export function childContext(messages: ChildMessages, prompt: string, rolePrompt
   return [...history, { role: 'system', content: rolePrompt }, { role: 'user', content: prompt }]
 }
 
+/** New grants bind their actual selected runtime and price. Parent capabilities
+ * remain the ceiling; parent model identity and tariff never leak into a child. */
+export function childModelForRuntime(inherited: ChildConfiguration['model'], runtime: NonNullable<ToolContext['modelRuntime']>, customModelId: string | null,
+  price: import('../billing/token-price.js').TokenPrice): ChildConfiguration['model'] {
+  const { weightedRoute: _choice, modelConfigId: _id, modelConfigRevision: _revision, tokenPrice: _price, ...capabilities } = inherited
+  const modelName = runtime.modelName ?? env.aiTextModel
+  return { ...capabilities, ...(runtime.modelConfigId ? { modelConfigId: runtime.modelConfigId, modelConfigRevision: runtime.modelConfigRevision } : {}),
+    tokenPrice: price, ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier: runtime.tier, provider: runtime.provider,
+    modelName, customModelId: runtime.tier === 'custom' ? customModelId : null, reasoningEffort: runtime.reasoningEffort,
+    routeRevision: modelRouteRevision({ provider: runtime.provider, model: modelName,
+      endpoint: `${(runtime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`, reasoningEffort: runtime.reasoningEffort,
+      ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}) }) }
+}
+
 /** Native child tools enter this adapter directly; the legacy inline runner is
  * never called for a durable root. */
 export async function executeDurableChildTool(parent: RunLeaseToken, cursor: ToolExecutionCursor, ctx: ToolContext, tool: AgentTool, args: Record<string, unknown>) {
@@ -190,14 +205,13 @@ export async function executeDurableChildTool(parent: RunLeaseToken, cursor: Too
     const { assignedTaskModel } = await import('./model-assignment-context.js')
     const { agentModelSelectionSchema } = await import('../../../shared/contracts/agent-model-assignments.js')
     const { resolveTokenPrice } = await import('../billing/resolve-token-price.js')
-    const { modelRouteRevision } = await import('./runtime-model-cursor.js')
     const { getAgentDefinition } = await import('./agents.js')
     const selections = await Promise.all(entries.map(async entry => {
       const selected = entry.model ? await admitAssignedModel(ctx.userId, agentModelSelectionSchema.parse(entry.model))
         : await assignedTaskModel(ctx.userId, ctx.novelId, tool.name.startsWith('subagent_') ? 'subagent' : 'spawned_task', source.configuration.modelAssignments, true)
       const inherited = source.configuration.model
       const runtime = selectWeightedModelRuntime(selected?.runtime ?? await getModelTierRuntime(inherited.tier as import('../../../shared/contracts/index.js').CreditModelTier,
-        ctx.userId, inherited.customModelId, inherited.reasoningEffort as import('../../../shared/contracts/index.js').ModelReasoningEffort))
+        ctx.userId, inherited.customModelId, inherited.reasoningEffort as import('../../../shared/contracts/index.js').ModelReasoningEffort, { userId: ctx.userId, runId: ctx.runId, modelConfigId: inherited.modelConfigId, modelConfigRevision: inherited.modelConfigRevision, provider: inherited.provider, modelName: inherited.modelName }))
       if (runtime.tier !== (selected?.selection.modelTier ?? inherited.tier)) return runtimeError('RUNTIME_MODEL_ADAPTER_REQUIRED', '原子任务模型不可用，不能替换为其他档位。')
       return { entry, runtime, selected, price: await resolveTokenPrice(runtime.tier, runtime.multiplierBps) }
     }))
@@ -226,15 +240,10 @@ export async function executeDurableChildTool(parent: RunLeaseToken, cursor: Too
         const budget = await readTaskBudgetInTransaction(tx, parent.taskRootId)
         if (budget.unresolvedAttempts > 0n) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原任务存在未知支出，不能分配新子任务。')
         const tokenCeiling = COMPATIBILITY_TOKEN_LIMIT
-        const modelName = selection.runtime.modelName ?? env.aiTextModel
         const inheritedConfiguration = Object.fromEntries(Object.entries(source.configuration).filter(([key]) => key !== 'pinnedSubagentId')) as ChildConfiguration
-        const { weightedRoute: _parentChoice, ...inheritedModel } = source.configuration.model
         const configuration: ChildConfiguration = { ...inheritedConfiguration, mode, agentType: role,
-          model: selection.selected || selection.runtime.weightedRoute || source.configuration.model.weightedRoute ? { ...inheritedModel, ...(selection.runtime.weightedRoute ? { weightedRoute: selection.runtime.weightedRoute } : {}), tier: selection.runtime.tier, provider: selection.runtime.provider,
-            modelName, customModelId: selection.selected ? selection.selected.selection.customModelId ?? null : inheritedModel.customModelId, reasoningEffort: selection.runtime.reasoningEffort,
-            routeRevision: modelRouteRevision({ provider: selection.runtime.provider, model: modelName,
-              endpoint: `${(selection.runtime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`, reasoningEffort: selection.runtime.reasoningEffort, ...(selection.runtime.weightedRoute ? { weightedRoute: selection.runtime.weightedRoute } : {}) }) }
-            : source.configuration.model }
+          model: childModelForRuntime(source.configuration.model, selection.runtime,
+            selection.selected ? selection.selected.selection.customModelId ?? null : source.configuration.model.customModelId, selection.price) }
         if (parentSpec.scope.selection) {
           const { getToolByName } = await import('./tools/registry.js')
           const readNames = new Set(configuration.tools.filter(item => getToolByName(item.function.name)?.readOnly).map(item => item.function.name))

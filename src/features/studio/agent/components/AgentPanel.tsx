@@ -771,8 +771,8 @@ export function AgentPanel({
 
   useEffect(() => {
     const options = creditSummaryQuery.data?.models
-    if (!inheritMain && !modelSelectionExplicit && modelTier !== 'custom' && options && !options.some((item) => item.tier === modelTier && item.available)) setFallbackTier('speed')
-  }, [creditSummaryQuery.data?.models, inheritMain, modelSelectionExplicit, modelTier, setFallbackTier])
+    if (!inheritMain && !modelSelectionExplicit && modelTier !== 'custom' && options && !creditSummaryQuery.data?.archivedModelTiers?.includes(modelTier) && !options.some((item) => item.tier === modelTier && item.available)) setFallbackTier('speed')
+  }, [creditSummaryQuery.data?.models, creditSummaryQuery.data?.archivedModelTiers, inheritMain, modelSelectionExplicit, modelTier, setFallbackTier])
 
   useEffect(() => {
     if (modelTier !== 'custom') return
@@ -983,6 +983,7 @@ export function AgentPanel({
       // 用户主动发言视为回到对话最新处，重新开启自动跟随
       pinnedToBottomRef.current = true
       try {
+        if (!inheritMain && creditSummaryQuery.data?.archivedModelTiers?.includes(modelTier)) throw new Error('原模型已归档，请明确重新选择后发送；输入草稿已保留。')
         await windowConfiguration.ready()
         let ensuredSessionId = sessionId
         if (!ensuredSessionId) {
@@ -1070,7 +1071,7 @@ export function AgentPanel({
         throw error
       }
     },
-    [sessionId, voiceScopeKey, novelId, chapterId, selection, ensureSession, connect, onNewSession, inheritMain, modelSelectionExplicit, modelTier, customModelId, selectedReasoningEffort, refetchCredits, queueQuery, pinnedToBottomRef, windowConfiguration],
+    [sessionId, voiceScopeKey, novelId, chapterId, selection, ensureSession, connect, onNewSession, inheritMain, modelSelectionExplicit, modelTier, customModelId, selectedReasoningEffort, refetchCredits, queueQuery, pinnedToBottomRef, windowConfiguration, creditSummaryQuery.data?.archivedModelTiers],
   )
 
 

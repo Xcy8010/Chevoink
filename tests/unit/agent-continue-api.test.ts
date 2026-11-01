@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ find: vi.fn(), count: vi.fn(), message: vi.fn(), execute: vi.fn(), active: vi.fn(() => false), prepare: vi.fn(),
-  activeRun: vi.fn(),
+  activeRun: vi.fn(), catalog: vi.fn(),
   terminal: vi.fn(), runUpdate: vi.fn(), creditAccess: vi.fn(), tierRuntime: vi.fn(), goal: vi.fn(), binding: vi.fn(), receiptWait: vi.fn(),
   lockGoal: vi.fn(), activationSource: vi.fn(), reconcile: vi.fn(), resumeDurable: vi.fn(), pause: vi.fn(),
   transaction: vi.fn(), tx: { $queryRaw: vi.fn(), agentRun: { findFirst: vi.fn() }, agentGoalExecution: { findUnique: vi.fn(async () => null) } },
@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({ find: vi.fn(), count: vi.fn(), message: vi.fn(
 vi.mock('../../api/lib/agent/events.js', () => ({ prepareRunEventResume: mocks.prepare }))
 vi.mock('../../api/lib/prisma.js', () => ({
   DataAccessError: class extends Error { constructor(public status: number, public code: string, message: string) { super(message) } },
-  prisma: { agentRunEvent: { findFirst: mocks.terminal }, $transaction: mocks.transaction, agentRun: { findFirst: mocks.find, count: mocks.count, update: mocks.runUpdate }, agentGoal: { findFirst: mocks.goal }, agentGoalExecution: { findUnique: mocks.binding }, agentMessage: { findFirst: mocks.message }, agentQueuedRequest: { findFirst: vi.fn(async () => null) }, agentExecutionOutbox: { findFirst: mocks.pause } },
+  prisma: { aiModelConfig: { findFirst: mocks.catalog }, agentRunEvent: { findFirst: mocks.terminal }, $transaction: mocks.transaction, agentRun: { findFirst: mocks.find, count: mocks.count, update: mocks.runUpdate }, agentGoal: { findFirst: mocks.goal }, agentGoalExecution: { findUnique: mocks.binding }, agentMessage: { findFirst: mocks.message }, agentQueuedRequest: { findFirst: vi.fn(async () => null) }, agentExecutionOutbox: { findFirst: mocks.pause } },
 }))
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: mocks.creditAccess, getModelTierRuntime: mocks.tierRuntime }))
 vi.mock('../../api/lib/agent/loop.js', () => ({ executeAgentRun: mocks.execute }))
@@ -30,6 +30,7 @@ beforeEach(() => {
   mocks.tx.$queryRaw.mockResolvedValue([{ id: 'n' }])
   mocks.tx.agentRun.findFirst.mockResolvedValue({ manuscriptRevision: 0, novel: { authorId: 'u', manuscriptRevision: 0 } })
   mocks.tx.agentGoalExecution.findUnique.mockResolvedValue(null)
+  mocks.catalog.mockResolvedValue({ id: 'original-model', archivedAt: null })
   mocks.goal.mockResolvedValue(null)
   mocks.binding.mockResolvedValue(null)
   mocks.receiptWait.mockResolvedValue(null)
@@ -189,8 +190,18 @@ describe('continue API exact target', () => {
     expect(await continueActivatedGoalRun('u', run.id, goal.id, goal.epoch)).toMatchObject({ runId: 'resumed', runGoalId: goal.id })
     expect(mocks.reconcile).toHaveBeenCalledWith(mocks.tx, goal, expect.any(Date))
     expect(mocks.tx.agentRun.findFirst).not.toHaveBeenCalled()
+    expect(mocks.catalog).toHaveBeenCalledWith({ where: { ownerUserId: null, tier: 'speed' } })
     expect(mocks.resumeDurable).toHaveBeenCalledWith({ userId: 'u', runId: run.id, pauseEventId: 'pause', activation: { goalId: goal.id, epoch: goal.epoch } })
     expect(mocks.execute).not.toHaveBeenCalled()
+  })
+  it('blocks a verified durable activation when its original model is archived without resuming or dispatching', async () => {
+    const goal = activatedFixture(true)
+    mocks.catalog.mockResolvedValue({ id: 'original-model', archivedAt: new Date() })
+    await expect(continueActivatedGoalRun('u', run.id, goal.id, goal.epoch)).rejects.toMatchObject({ code: 'MODEL_SELECTION_REQUIRED' })
+    expect(mocks.resumeDurable).not.toHaveBeenCalled()
+    expect(mocks.execute).not.toHaveBeenCalled()
+    expect(mocks.creditAccess).not.toHaveBeenCalled()
+    expect(mocks.runUpdate).not.toHaveBeenCalled()
   })
   it.each(['stale-epoch', 'cancelled', 'pending-revision', 'unsettled', 'missing-baseline', 'imported-manuscript'])('rejects activation %s before dispatch or spending', async kind => {
     const goal = activatedFixture()

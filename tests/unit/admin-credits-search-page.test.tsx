@@ -18,7 +18,7 @@ const first = row('first-page-user', '首页作者'), target = row('outside-user
 const summary = { publicBetaEnabled: true, publicBetaRevision: 1, globallyPaused: false, users: 35, dailyAllowance: 15750, dailyUsed: 350, bonusBalance: 35, exhaustedUsers: 0 }
 beforeEach(() => {
   vi.clearAllMocks()
-  mocks.credits.mockImplementation(async (search?: string) => ({ summary, users: search === 'missing' ? [] : search ? [target] : [first, target] }))
+  mocks.credits.mockImplementation(async (search?: string) => ({ summary, pagination:{page:1,pageSize:20,total:search==='missing'?0:search?1:2,hasMore:false},users: search === 'missing' ? [] : search ? [target] : [first, target] }))
   mocks.captcha.mockResolvedValue({ captchaId: 'synthetic-captcha', imageBase64: 'data:image/png;base64,AA==', expiresInSeconds: 120 })
   mocks.reset.mockResolvedValue({ stoppedRuns: 0 }); mocks.pause.mockResolvedValue({ users: 1, stoppedRuns: 0 }); mocks.batch.mockResolvedValue({ users: 1, stoppedRuns: 0 })
 })
@@ -43,7 +43,7 @@ it.each(['outside-user-id', '目标作者', 'MAIL+tag@example.invalid'])('reques
   fireEvent.click(screen.getByRole('checkbox', { name: '选择 首页作者' }))
   expect(screen.getByText('已选 1 位（当前页）')).toBeTruthy()
   search('  ' + keyword + '  ')
-  await waitFor(() => expect(mocks.credits).toHaveBeenLastCalledWith(keyword))
+  await waitFor(() => expect(mocks.credits).toHaveBeenLastCalledWith(keyword, { page:1,pageSize:20 }))
   const match = await screen.findByRole('link', { name: '目标作者' })
   expect(match.getAttribute('href')).toBe('/admin/users/outside-user-id')
   expect(screen.queryByRole('link', { name: '首页作者' })).toBeNull()
@@ -62,9 +62,9 @@ it('shows a no-result state while preserving global totals and clears back to al
   await screen.findByRole('link', { name: '首页作者' })
 })
 it.each([{ label: '重置', word: 'RESET_USER', suspended: false }, { label: '暂停', word: 'PAUSE_USER', suspended: false }, { label: '恢复', word: 'RESUME_USER', suspended: true }])('keeps the searched userId bound to $label through the existing confirmation flow', async ({ label, word, suspended }) => {
-  mocks.credits.mockResolvedValue({ summary, users: [row(target.user.id, target.user.nickname, suspended)] })
+  mocks.credits.mockResolvedValue({ summary, pagination:{page:1,pageSize:20,total:1,hasMore:false},users: [row(target.user.id, target.user.nickname, suspended)] })
   mount(); await screen.findByRole('link', { name: '目标作者' }); search('outside-user-id')
-  await waitFor(() => expect(mocks.credits).toHaveBeenLastCalledWith('outside-user-id'))
+  await waitFor(() => expect(mocks.credits).toHaveBeenLastCalledWith('outside-user-id', { page:1,pageSize:20 }))
   const link = await screen.findByRole('link', { name: '目标作者' })
   fireEvent.click(within(link.closest('tr')!).getByText('更多操作'))
   fireEvent.click(within(link.closest('tr')!).getByRole('button', { name: label, exact: true }))
@@ -85,7 +85,8 @@ it('selects only the visible search result for the existing batch pause operatio
 })
 
 it('bounds account rendering to the current page and clears selection when changing pages', async () => {
-  mocks.credits.mockResolvedValue({ summary, users: Array.from({ length: 41 }, (_, index) => row(`account-${index}`, `分页作者${index}`)) })
+  const accounts = Array.from({ length: 41 }, (_, index) => row(`account-${index}`, `分页作者${index}`))
+  mocks.credits.mockImplementation(async (_search: string | undefined, {page,pageSize}: {page:number;pageSize:number}) => ({summary,pagination:{page,pageSize,total:accounts.length,hasMore:page*pageSize<accounts.length},users:accounts.slice((page-1)*pageSize,page*pageSize)}))
   mount()
   await screen.findByRole('link', { name: '分页作者0', exact: true })
   expect(screen.getAllByRole('link', { name: /^分页作者/ })).toHaveLength(20)
@@ -93,9 +94,10 @@ it('bounds account rendering to the current page and clears selection when chang
   expect(screen.getByText('已选 20 位（当前页）')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: '下一页' }))
   expect(await screen.findByRole('link', { name: '分页作者20', exact: true })).toBeTruthy()
+  expect(mocks.credits).toHaveBeenLastCalledWith(undefined, {page:2,pageSize:20})
   expect(screen.queryByRole('link', { name: '分页作者0', exact: true })).toBeNull()
   expect(screen.queryByRole('button', { name: '批量暂停' })).toBeNull()
   expect(screen.getByText(/全选只选择当前页/)).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: '下一页' }))
-  expect(screen.getAllByRole('link', { name: /^分页作者/ })).toHaveLength(1)
+  await waitFor(() => expect(screen.getAllByRole('link', { name: /^分页作者/ })).toHaveLength(1))
 })

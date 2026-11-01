@@ -52,6 +52,8 @@ import { activeChapterScope } from '../data/internal.js'
 import { assertAgentManuscriptCurrent, assertAgentManuscriptRevisionCurrent } from './manuscript-scope.js'
 import { recoverRunElapsedMs } from './checkpoint.js'
 import { DataAccessError, prisma } from '../prisma.js'
+import { assertAdmittedModelVersion, assertQueuedModelVersion, assertRunModelNotArchived, freshSystemModelTier } from '../model-lifecycle.js'
+import { tokenPriceSchema } from '../billing/token-price.js'
 import { assertCreditAccess, getModelTierRuntime } from '../credits.js'
 import { getRunEventBus, loadPersistedEvents, prepareRunEventResume, loadServerRunNotices, publicRunEvent } from './events.js'
 import {
@@ -158,9 +160,14 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   if (!original || runtimeJson(original.parts).hash !== runtimeJson(JSON.parse(JSON.stringify(parts))).hash) throw new DataAccessError(409, 'RUN_INPUT_MISMATCH', '初始化必须使用已保存的完整原始请求。')
   if (run.status !== 'queued') throw new DataAccessError(409, 'RUN_IN_PROGRESS', '不能重新初始化已启动任务。')
   await assertManagedAttachmentsAccess(input.attachments, userId)
+  await assertRunModelNotArchived(run)
+  await assertQueuedModelVersion(run)
   const runtime = selectWeightedModelRuntime(await getModelTierRuntime(run.modelTier as import('../../../shared/contracts/index.js').CreditModelTier, userId, run.customModelId,
     run.reasoningEffort as import('../../../shared/contracts/index.js').ModelReasoningEffort))
   if (runtime.tier !== run.modelTier || run.modelTier === 'custom' && !run.customModelId) throw new DataAccessError(409, 'RUNTIME_MODEL_ADAPTER_REQUIRED', '原模型配置缺少可核验的模型身份。')
+  if (run.modelConfigId && (runtime.modelConfigId !== run.modelConfigId || runtime.modelConfigRevision !== run.modelConfigRevision)) {
+    throw new DataAccessError(409, 'MODEL_SELECTION_REQUIRED', '排队任务的模型身份已变化，请明确重新选择；未初始化或派发请求。')
+  }
   const agent = getAgentDefinition(input.agentProfile ?? 'orchestrator')
   if (input.pinnedSubagentId) {
     await (await import('./subagent-selection.js')).requireSelectedSubagent(userId, run.novelId, input.pinnedSubagentId)
@@ -208,11 +215,12 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   await initializeDurableTask({ userId, runId, sourceMessageId: original.id, tokenBudget: input.tokenBudget })
   const lease = await acquireRunLease({ userId, runId, ownerId: durableProcessOwner, claimId: randomUUID() })
   try {
-    return await initializeExecutionState(lease, { configuration: { version: 1, mode: input.mode, agentType: agent.type,
+    return await initializeExecutionState(lease, { ...(run.modelConfigId && run.modelConfigRevision ? { admittedModel: { modelConfigId: run.modelConfigId, modelConfigRevision: run.modelConfigRevision } } : {}), configuration: { version: 1, mode: input.mode, agentType: agent.type,
       creativeFreedom: input.creativeFreedom ?? 'balanced', qualityMode: input.qualityMode ?? 'premium',
       ...(input.modelAssignments ? { modelAssignments: input.modelAssignments } : {}),
       ...(input.pinnedSubagentId ? { pinnedSubagentId: input.pinnedSubagentId } : {}),
-      model: { ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier: runtime.tier, provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel,
+      model: { ...(runtime.modelConfigId ? { modelConfigId: runtime.modelConfigId, modelConfigRevision: runtime.modelConfigRevision } : {}),
+        ...(run.modelPriceSnapshot ? { tokenPrice: tokenPriceSchema.parse(run.modelPriceSnapshot) } : {}), ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier: runtime.tier, provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel,
         customModelId: runtime.tier === 'custom' ? run.customModelId : null,
         maxOutputTokens: env.aiTextMaxOutputTokens, contextWindowTokens: runtime.contextWindowTokens ?? env.agentContextWindowTokens,
         reasoningEffort: runtime.reasoningEffort, routeRevision: modelRouteRevision({ provider: runtime.provider, model: runtime.modelName ?? env.aiTextModel,
@@ -255,6 +263,9 @@ async function executeOwnedPersistedLoopRun(run: AgentRunRecord) {
   let result: Awaited<ReturnType<typeof import('./runtime-executor.js').runReviewedDurableExecution>>
   let cleanupFailure: { error: unknown } | undefined
   try {
+    // Reserve locally before this asynchronous admission check; duplicate
+    // Continue/recovery must observe the pending executor immediately.
+    await assertRunModelNotArchived(run)
     lease = await acquireRunLease({ userId, runId: run.id, ownerId: durableProcessOwner, claimId: randomUUID() })
     controller.signal.throwIfAborted()
     await withRunLease(lease, async tx => {
@@ -388,6 +399,9 @@ export async function startLoopRunLocked(
     input = { ...input, ...selected.selection }
   }
   input = { ...input, ...(modelAssignments ? { modelAssignments } : {}) }
+  if (!input.modelSelectionExplicit && (!input.modelTier || input.modelTier === 'speed') && !options.queuedRequest && !options.goal) {
+    input = { ...input, modelTier: await freshSystemModelTier('speed') as CreditModelTier }
+  }
   const modelTier = input.modelTier ?? 'speed'
   if (input.pinnedSubagentId) {
     if (input.agentProfile && input.agentProfile !== 'orchestrator') throw new DataAccessError(400, 'SUBAGENT_NESTING_DENIED', '只有主 Agent 可以调用子 Agent。')
@@ -453,6 +467,8 @@ export async function startLoopRunLocked(
       startRequest: JSON.parse(JSON.stringify({ ...(options.humanOrigin === 'http' && !options.goal && options.concurrencyScope !== 'orchestration'
         ? withHumanAdmission(input) : input), ...(authorSteering ? { authorSteering } : {}) })) as Prisma.InputJsonValue,
       modelTier,
+      modelConfigId: modelRuntime.modelConfigId, modelConfigRevision: modelRuntime.modelConfigRevision,
+      modelPriceSnapshot: modelRuntime.tokenPrice ?? tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier, multiplierBps: modelRuntime.multiplierBps }),
       customModelId: modelTier === 'custom' ? input.customModelId : null,
       reasoningEffort: modelRuntime.reasoningEffort,
     },
@@ -467,6 +483,7 @@ export async function startLoopRunLocked(
     type: 'attachment', kind: attachment.kind, name: attachment.name, url: attachment.url, size: attachment.size,
   }))]
   const run = await prisma.$transaction(async tx => {
+    await assertAdmittedModelVersion(tx, modelRuntime)
     // Queued/recovering runs may not yet have a local controller. Share the
     // durable resume admission lock and count saved work before creating more.
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-admission:${userId}`}, 0))::text`
@@ -1061,6 +1078,7 @@ async function continueLoopRunLocked(
 
   assertTaskAuthorizationRuntimeReady(run.taskSpec, { userId, sessionId: run.sessionId, novelId: run.novelId })
   if (run.runtimeProtocolVersion === 1 && run.taskRootId) {
+    await assertRunModelNotArchived(run)
     const admitted = readAdmittedStart(run)
     await assertManagedAttachmentsAccess(admitted?.attachments, userId)
     const currentSpec = taskSpecSchema.safeParse(run.taskSpec)

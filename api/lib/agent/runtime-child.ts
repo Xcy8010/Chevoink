@@ -6,6 +6,7 @@ import { withRunLease, withRunLeaseInTransaction, type RunLeaseToken } from './r
 import { readExecutionStateInTransaction, executionSnapshotSchema } from './runtime-state.js'
 import { createTaskBudgetPolicy, readTaskBudgetInTransaction } from './runtime-budget.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
+import { assertAdmittedModelVersion } from '../model-lifecycle.js'
 import { tokenPriceSchema } from '../billing/token-price.js'
 import { env } from '../../config/env.js'
 import { COMPATIBILITY_TOKEN_LIMIT } from './execution-control.js'
@@ -358,6 +359,11 @@ export async function admitChildExecutionInTransaction(tx: RuntimeTx, parent: Ru
     await withRunLeaseInTransaction(tx, parent, async () => undefined)
     return existing
   }
+  // Existing grants return above with their original immutable configuration/hash.
+  const admittedPrice = tokenPriceSchema.parse(input.price)
+  if (admittedPrice.modelTier !== configuration.model.tier || configuration.model.tokenPrice
+    && runtimeJson(configuration.model.tokenPrice).hash !== runtimeJson(admittedPrice).hash) return runtimeError('RUNTIME_PRICE_INVALID', '子任务模型与冻结价目不一致，未派发请求。')
+  await assertAdmittedModelVersion(tx, configuration.model)
   const budget = await readTaskBudgetInTransaction(tx, root.id)
   if (budget.unresolvedAttempts > 0n) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原任务仍有未知支出，不能派生新任务。')
   // A per-user admission lock also prevents unrelated parent roots from racing
@@ -403,6 +409,7 @@ export async function admitChildExecutionInTransaction(tx: RuntimeTx, parent: Ru
     mode: configuration.mode === 'build' ? 'act' : configuration.mode, agentType: run.agentType, action: run.action,
     engine: 'loop', runtimeProtocolVersion: 1, taskRootId: childRootId, taskSpec: specSnapshot.value,
     manuscriptRevision: run.manuscriptRevision, inputSummary: input.prompt.slice(0, 500), modelTier: configuration.model.tier,
+    modelConfigId: configuration.model.modelConfigId, modelConfigRevision: configuration.model.modelConfigRevision, modelPriceSnapshot: admittedPrice,
     customModelId: configuration.model.customModelId, reasoningEffort: configuration.model.reasoningEffort, executionLease: { create: {} } } })
   const snapshot = runtimeJson(executionSnapshotSchema.parse({ version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0,
     phase: 'idle', pendingOperationId: null, messages: initialMessages, successfulToolSignatures: [] }))

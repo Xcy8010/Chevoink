@@ -1,7 +1,7 @@
 import { useAdminNumberQuery } from './admin-page-query'
 import { useAdminQueryState } from '../admin-query-state'
 import { AdminRowActions } from './AdminPageControls'
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Pause, Play, RefreshCcw, ShieldAlert } from 'lucide-react'
 import { Link } from 'react-router-dom'
@@ -47,7 +47,7 @@ export default function AdminCreditsManagementPage() {
   const [tab, setTab] = useAdminQueryState('tab', 'accounts')
   const [page, setPage] = useAdminNumberQuery('page', 1)
   const pageSize = 20
-  const query = useQuery({ queryKey: ['admin', 'credits', search], queryFn: () => getAdminCreditsManagement(search || undefined) })
+  const query = useQuery({ queryKey: ['admin', 'credits', search, page, pageSize], queryFn: () => getAdminCreditsManagement(search || undefined, { page, pageSize }) })
   const [pending, setPending] = useState<PendingAction>(null)
   const resetRequest = useRef<{ action: PendingAction; key: string } | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -91,9 +91,10 @@ export default function AdminCreditsManagementPage() {
       : { title: '恢复全部模型调用', description: '公测用户将重新获得模型调用权限。', confirmation: 'RESUME_ALL' }
   }, [pending])
   const data = query.data
-    const pageCount = Math.max(1, Math.ceil((data?.users.length ?? 0) / pageSize))
-  const currentPage = Math.min(page, pageCount)
-  const visibleUsers = data?.users.slice((currentPage - 1) * pageSize, currentPage * pageSize) ?? []
+  const pageCount = Math.max(1, Math.ceil((data?.pagination.total ?? 0) / pageSize))
+  const currentPage = data?.pagination.page ?? page
+  const visibleUsers = data?.users ?? []
+  useEffect(() => { setSelected(new Set()); setKeyword(search) }, [search, page])
   const allSelected = visibleUsers.length > 0 && visibleUsers.every((item) => selected.has(item.user.id))
   const selectedIds = visibleUsers.filter(item => selected.has(item.user.id)).map(item => item.user.id)
 
@@ -117,8 +118,8 @@ export default function AdminCreditsManagementPage() {
         {tab !== 'policy' ? <AdminCard>
           <div className="mb-3 flex flex-wrap items-center gap-2"><h2 className="mr-auto text-sm font-semibold">用户额度</h2><label className="flex min-h-11 items-center gap-2 text-sm"><input type="checkbox" checked={allSelected} onChange={(event) => setSelected(event.target.checked ? new Set(visibleUsers.map((item) => item.user.id)) : new Set())} aria-label="选择当前页用户" />当前页</label>{selectedIds.length > 0 ? <><span className="text-xs text-[var(--text-secondary)]">已选 {selectedIds.length} 位（当前页）</span><Button size="sm" onClick={() => setPending({ kind: 'reset-selected', userIds: selectedIds })}><RefreshCcw className="h-3.5 w-3.5" />批量重置</Button><Button size="sm" onClick={() => setPending({ kind: 'pause-selected', userIds: selectedIds, paused: true })}><Pause className="h-3.5 w-3.5" />批量暂停</Button><Button size="sm" onClick={() => setPending({ kind: 'pause-selected', userIds: selectedIds, paused: false })}><Play className="h-3.5 w-3.5" />批量恢复</Button></> : null}</div>
           {data.users.length === 0 ? <p className="py-6 text-center text-sm text-[var(--text-secondary)]">{search ? '未找到匹配的用户' : '暂无用户'}</p> : <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="hidden text-xs text-[var(--text-secondary)] md:table-header-group"><tr><th className="pb-2">选择</th><th>用户</th><th>套餐</th><th>状态</th><th>使用率</th><th>{data.summary.publicBetaEnabled ? '今日已用' : '已用额度'}</th><th>奖励余额</th><th>当前可用</th><th /></tr></thead><tbody className="divide-y divide-[var(--border-default)]">{visibleUsers.map((item) => <tr key={item.user.id} className="mb-3 grid grid-cols-2 gap-3 rounded-xl border border-[var(--border-default)] p-3 md:mb-0 md:table-row md:rounded-none md:border-0 md:p-0"><td className="py-2.5"><input type="checkbox" checked={selected.has(item.user.id)} onChange={(event) => setSelected((value) => { const next = new Set(value); if (event.target.checked) next.add(item.user.id); else next.delete(item.user.id); return next })} aria-label={`选择 ${item.user.nickname}`} /></td><td><Link className="font-medium hover:underline" to={`/admin/users/${item.user.id}`}>{item.user.nickname}</Link></td><td><span className="rounded-full border border-[var(--border-subtle)] px-2 py-0.5 text-xs">{item.planLabel}</span></td><td><span className={item.suspended ? 'text-rose-600' : 'text-emerald-600'}>{item.suspended ? '已暂停' : '正常'}</span></td><td>{data.summary.publicBetaEnabled ? <Ring value={item.usedPercent} /> : '—'}</td><td className="tabular-nums"><span className="block text-xs text-[var(--text-secondary)] md:hidden">已用 / 额度</span>{formatCreditAmount(item.dailyUsed)} / {formatCreditAmount(item.dailyAllowance)}</td><td className="tabular-nums"><span className="block text-xs text-[var(--text-secondary)] md:hidden">奖励余额</span>{formatCreditAmount(item.bonusBalance)}</td><td className="tabular-nums"><span className="block text-xs text-[var(--text-secondary)] md:hidden">当前可用</span>{formatCreditAmount(item.totalRemaining)}</td><td className="col-span-2 text-right"><AdminRowActions><Button size="sm" onClick={() => setPending({ kind: 'reset-user', userId: item.user.id, name: item.user.nickname })}>重置</Button><Button size="sm" onClick={() => setPending({ kind: 'pause-user', userId: item.user.id, name: item.user.nickname, paused: !item.suspended })}>{item.suspended ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}{item.suspended ? '恢复' : '暂停'}</Button></AdminRowActions></td></tr>)}</tbody></table></div>}
-          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm"><p>筛选结果 {data.users.length} 位 · 每页 {pageSize} 位 · 第 {currentPage} / {pageCount} 页</p><div className="flex gap-2"><Button disabled={currentPage <= 1} onClick={() => { setPage(currentPage - 1); setSelected(new Set()) }}>上一页</Button><Button disabled={currentPage >= pageCount} onClick={() => { setPage(currentPage + 1); setSelected(new Set()) }}>下一页</Button></div></div>
-          <p className="mt-2 text-xs text-[var(--text-secondary)]">当前为本地分页，服务端分页待接入；全选只选择当前页，不包含全部筛选结果。</p>
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm"><p>筛选结果 {data.pagination.total} 位 · 每页 {pageSize} 位 · 第 {currentPage} / {pageCount} 页</p><div className="flex gap-2"><Button disabled={currentPage <= 1} onClick={() => { setPage(currentPage - 1); setSelected(new Set()) }}>上一页</Button><Button disabled={currentPage >= pageCount} onClick={() => { setPage(currentPage + 1); setSelected(new Set()) }}>下一页</Button></div></div>
+          <p className="mt-2 text-xs text-[var(--text-secondary)]">服务端分页 · 全选只选择当前页，不包含全部筛选结果。全局摘要不随搜索改变。</p>
         </AdminCard> : null}
       </div> : null}
     </AdminPanelState>

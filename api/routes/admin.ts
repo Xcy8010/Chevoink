@@ -7,6 +7,12 @@ import { createRateCard, transitionRateCard, listRateCards, rateCardEvidenceSche
 import { itemizedTokenPriceSchema } from '../lib/billing/token-price.js'
 import { z } from 'zod'
 import { webToolProtocolSchema } from '../../shared/contracts/web-tool.js'
+import { adminModelKindSchema } from '../../shared/contracts/admin-model-lifecycle.js'
+import { getAdminModelLifecyclePreview, archiveAdminModel, restoreAdminModel } from '../lib/admin-model-lifecycle.js'
+import { adminModelDiagnosticRequestSchema } from '../../shared/contracts/admin-model-diagnostics.js'
+import { startAdminModelDiagnostic, getAdminModelDiagnostic, cancelAdminModelDiagnostic } from '../lib/admin-model-diagnostics.js'
+import { adminOperationCallsQuerySchema, adminOperationRunsQuerySchema, adminOperationsHealthQuerySchema } from '../../shared/contracts/admin-operations.js'
+import { listAdminOperationCalls, listAdminOperationRuns, getAdminOperationsHealth } from '../lib/admin-operations.js'
 import { imageQualityConfigSchema } from '../../shared/contracts/image-model.js'
 import { getSupplierBalances } from '../lib/supplier-balances.js'
 
@@ -188,6 +194,8 @@ const adminBatchCreditsSchema = adminDangerActionSchema.extend({ userIds: z.arra
 const adminBatchPauseCreditsSchema = adminBatchCreditsSchema.extend({ paused: z.boolean() })
 const modelReasoningEffortSchema = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 const adminModelUpdateSchema = z.object({
+  expectedRevision: z.number().int().positive().optional(),
+  modelKind: adminModelKindSchema.optional(),
   imageQuality: imageQualityConfigSchema.optional(),
   webToolProtocol: webToolProtocolSchema.optional(),
   freePromotion: modelPromotionSchema.nullable().optional(),
@@ -1055,7 +1063,8 @@ router.get('/credits', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
   try {
     await requireAdmin(req)
-    res.status(200).json(buildSuccess(requestId, await getAdminCreditsManagement(typeof req.query.search === 'string' ? req.query.search : undefined)))
+    const query = parseBody(z.object({ search: z.string().trim().max(160).optional(), page: z.coerce.number().int().min(1).max(1000000).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(20) }), req.query, '分页或搜索条件不正确。')
+    res.status(200).json(buildSuccess(requestId, await getAdminCreditsManagement(query.search, { page: query.page, pageSize: query.pageSize })))
   } catch (error) {
     sendRouteError(res, requestId, error)
   }
@@ -1192,7 +1201,7 @@ router.get('/models', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
   try {
     await requireAdmin(req)
-    res.status(200).json(buildSuccess(requestId, await getAdminModelManagement()))
+    res.status(200).json(buildSuccess(requestId, await getAdminModelManagement(parseBody(z.object({view:z.enum(['active','archived','all']).default('active')}),req.query,'目录视图不正确。').view)))
   } catch (error) {
     sendRouteError(res, requestId, error)
   }
@@ -1238,8 +1247,7 @@ router.patch('/models/:modelId', async (req: Request, res: Response): Promise<vo
     const admin = await requireAdmin(req)
     requireSuperAdmin(admin)
     const body = parseBody(adminModelUpdateSchema, req.body, '模型配置格式不正确。')
-    await updateAdminModel(admin.id, req.params.modelId, body)
-    await recordAdminAuditLog({ adminId: admin.id, action: 'models.update', targetType: 'aiModelConfig', targetId: req.params.modelId, detail: { ...body, weightedRoutes: body.weightedRoutes ? { ...body.weightedRoutes, candidates: body.weightedRoutes.candidates.map(({ apiKey, ...route }) => ({ ...route, ...(apiKey ? { apiKey: '[REPLACED]' } : {}) })) } : undefined, routes: body.routes?.map(({ apiKey, ...route }) => ({ ...route, ...(apiKey ? { apiKey: '[REPLACED]' } : {}) })), apiKey: body.apiKey ? '[REPLACED]' : undefined }, ip: getRequestIp(req) })
+    await updateAdminModel(admin.id, req.params.modelId, body, getRequestIp(req))
     res.status(200).json(buildSuccess(requestId, { ok: true }))
   } catch (error) {
     sendRouteError(res, requestId, error)
@@ -1522,17 +1530,66 @@ router.post('/feedback/:feedbackId/status', async (req: Request, res: Response):
   }
 })
 
+// Lifecycle and diagnostics remain independently authenticated; no raw upstream credentials cross these DTOs.
+router.get('/models/:modelId/lifecycle', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try { const actor = await requireAdmin(req); requireSuperAdmin(actor); res.json(buildSuccess(requestId, await getAdminModelLifecyclePreview(actor.id, String(req.params.modelId)))) }
+  catch (error) { sendRouteError(res, requestId, error) }
+})
+router.post('/models/:modelId/archive', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try { const actor = await requireAdmin(req); requireSuperAdmin(actor); res.json(buildSuccess(requestId, await archiveAdminModel(actor.id, String(req.params.modelId), req.body))) }
+  catch (error) { sendRouteError(res, requestId, error) }
+})
+router.post('/models/:modelId/restore', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try { const actor = await requireAdmin(req); requireSuperAdmin(actor); res.json(buildSuccess(requestId, await restoreAdminModel(actor.id, String(req.params.modelId), req.body))) }
+  catch (error) { sendRouteError(res, requestId, error) }
+})
+router.post('/models/:modelId/diagnostics', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try { const actor = await requireAdmin(req); const body = parseBody(adminModelDiagnosticRequestSchema,req.body,'诊断参数格式不正确。'); res.json(buildSuccess(requestId, await startAdminModelDiagnostic(actor.id, String(req.params.modelId), body))) }
+  catch (error) { sendRouteError(res, requestId, error) }
+})
+router.get('/models/:modelId/diagnostics/:requestKey', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try { const actor = await requireAdmin(req); const key = parseBody(z.object({requestKey:adminModelDiagnosticRequestSchema.shape.requestKey}),req.params,'诊断请求标识格式不正确。').requestKey; res.json(buildSuccess(requestId, await getAdminModelDiagnostic(actor.id, String(req.params.modelId), key))) }
+  catch (error) { sendRouteError(res, requestId, error) }
+})
+router.post('/models/:modelId/diagnostics/:requestKey/cancel', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try { const actor = await requireAdmin(req); const key = parseBody(z.object({requestKey:adminModelDiagnosticRequestSchema.shape.requestKey}),req.params,'诊断请求标识格式不正确。').requestKey; res.json(buildSuccess(requestId, await cancelAdminModelDiagnostic(actor.id, String(req.params.modelId), key))) }
+  catch (error) { sendRouteError(res, requestId, error) }
+})
+
+router.get('/operations/calls', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try { await requireAdmin(req); const query = parseBody(adminOperationCallsQuerySchema, req.query, '调用筛选条件不正确。'); res.json(buildSuccess(requestId, await listAdminOperationCalls(query))) }
+  catch (error) { sendRouteError(res, requestId, error) }
+})
+
+router.get('/operations/runs', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try { await requireAdmin(req); const query = parseBody(adminOperationRunsQuerySchema, req.query, '执行筛选条件不正确。'); res.json(buildSuccess(requestId, await listAdminOperationRuns(query))) }
+  catch (error) { sendRouteError(res, requestId, error) }
+})
+router.get('/operations/health', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try { await requireAdmin(req); const query = parseBody(adminOperationsHealthQuerySchema, req.query, '观测筛选条件不正确。'); res.json(buildSuccess(requestId, await getAdminOperationsHealth(query))) }
+  catch (error) { sendRouteError(res, requestId, error) }
+})
+
 router.get('/logs', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
 
   try {
     await requireAdmin(req)
-    const payload = await listAdminAuditLogsData({
-      action: typeof req.query.action === 'string' ? req.query.action : undefined,
-      targetType: typeof req.query.targetType === 'string' ? req.query.targetType : undefined,
-      page: parsePositiveInt(req.query.page, 1),
-      pageSize: parsePositiveInt(req.query.pageSize, 20),
-    })
+    const query = parseBody(z.object({action:z.string().trim().max(64).optional(),targetType:z.string().trim().max(64).optional(),operator:z.string().trim().max(100).optional(),objectId:z.string().trim().max(128).optional(),
+      from:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value=>{const date=new Date(`${value}T00:00:00Z`);return Number.isFinite(date.getTime())&&date.toISOString().slice(0,10)===value},'日期无效。').optional(),to:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value=>{const date=new Date(`${value}T00:00:00Z`);return Number.isFinite(date.getTime())&&date.toISOString().slice(0,10)===value},'日期无效。').optional(),page:z.coerce.number().int().min(1).max(1000000).default(1),pageSize:z.coerce.number().int().min(1).max(100).default(20)}).refine(value=>!value.from||!value.to||value.from<=value.to,'开始日期不能晚于结束日期。'),req.query,'审计筛选条件不正确。')
+    const from=query.from?new Date(`${query.from}T00:00:00+08:00`):undefined
+    const to=query.to?new Date(`${query.to}T23:59:59.999+08:00`):undefined
+    if((from&&!Number.isFinite(from.getTime()))||(to&&!Number.isFinite(to.getTime()))) throw new DataAccessError(400,'VALIDATION_ERROR','日期格式不正确。')
+    const payload = await listAdminAuditLogsData({...query,from,to})
     res.status(200).json(buildSuccess(requestId, payload))
   } catch (error) {
     sendRouteError(res, requestId, error)

@@ -9,7 +9,7 @@ import { readModelPromotion } from '../../../shared/model-promotion.js'
 
 /** Recover an operation's exact price before consulting today's active rate card.
  * No fee changes on replay, even after the old card is retired. */
-export async function resolveDurableTokenPrice(lease: RunLeaseToken, key: string, modelTier: CreditModelTier, multiplierBps: number): Promise<TokenPrice> {
+export async function resolveDurableTokenPrice(lease: RunLeaseToken, key: string, modelTier: CreditModelTier, multiplierBps: number, admittedPrice?: TokenPrice): Promise<TokenPrice> {
   const saved = await withRunLease(lease, async tx => {
     const operation = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: key } } })
     if (!operation) return null
@@ -20,6 +20,10 @@ export async function resolveDurableTokenPrice(lease: RunLeaseToken, key: string
     return price.data
   })
   if (saved) return saved
+  if (admittedPrice) {
+    if (admittedPrice.modelTier !== modelTier) return runtimeError('RUNTIME_PRICE_INVALID', '原任务价目身份不匹配。')
+    return admittedPrice
+  }
   return resolveTokenPrice(modelTier, multiplierBps)
 }
 

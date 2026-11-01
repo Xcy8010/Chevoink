@@ -15,7 +15,7 @@ describe('independent admin tool runtime configuration', () => {
     expect(await getToolModelRuntime('tool:web-fetch')).toMatchObject({ apiKey: 'clear-tool:web-fetch' })
     await getToolModelRuntime('tool:web-fetch')
     expect(mocks.find).toHaveBeenCalledTimes(2)
-    expect(mocks.find).toHaveBeenCalledWith({ where: { key: 'tool:web-fetch', ownerUserId: null, enabled: true } })
+    expect(mocks.find).toHaveBeenCalledWith({ where: { key: 'tool:web-fetch', ownerUserId: null, archivedAt: null, enabled: true } })
   })
   it('reloads after admin cache invalidation including key rotation', async () => {
     mocks.find.mockResolvedValueOnce(record('old')).mockResolvedValueOnce(record('new'))

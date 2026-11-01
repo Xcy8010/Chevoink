@@ -4,7 +4,7 @@
  * 本文件为 api/lib/data-access.ts 桶文件的重导出源，禁止绕过桶文件新增消费者。
  */
 import { randomBytes, randomUUID } from 'node:crypto'
-import type { Prisma } from '@prisma/client'
+import { Prisma } from '@prisma/client'
 import type {
   AdminAgentSessionMessagesPayload,
   AdminBriefUser,
@@ -18,6 +18,7 @@ import type {
 import { hashPassword, isLegacyPasswordHash, verifyPassword } from '../password.js'
 import { evictUserBanCache } from '../auth-session.js'
 import { prisma } from '../prisma.js'
+import { presentAdminAuditDetail } from '../admin-audit-detail.js'
 import { adminUserSearchWhere } from '../admin-user-search.js'
 import { buildPagination, excerptContent, isUserOnline, onlineWindowStart, toIso } from './internal.js'
 
@@ -1520,47 +1521,22 @@ export async function getAdminConversationMessagesData(conversationId: string): 
 
 
 export async function listAdminAuditLogsData(input: {
-  action?: string
-  targetType?: string
-  page: number
-  pageSize: number
+  action?: string; targetType?: string; operator?: string; objectId?: string; from?: Date; to?: Date; page: number; pageSize: number
 }): Promise<{ items: AdminAuditLogRow[]; pagination: Pagination }> {
-  const where: Prisma.AdminAuditLogWhereInput = {}
-
-  if (input.action?.trim()) {
-    where.action = input.action.trim()
-  }
-  if (input.targetType?.trim()) {
-    where.targetType = input.targetType.trim()
-  }
-
-  const [total, records] = await Promise.all([
-    prisma.adminAuditLog.count({ where }),
-    prisma.adminAuditLog.findMany({
-      where,
-      orderBy: { createdAt: 'desc' },
-      skip: (input.page - 1) * input.pageSize,
-      take: input.pageSize,
-    }),
-  ])
-
-  const adminIds = [...new Set(records.map((record) => record.adminId))]
-  const admins = adminIds.length
-    ? await prisma.user.findMany({ where: { id: { in: adminIds } }, select: { id: true, nickname: true } })
-    : []
-  const adminNames = new Map(admins.map((admin) => [admin.id, admin.nickname]))
-
-  const items: AdminAuditLogRow[] = records.map((record) => ({
-    id: record.id,
-    adminId: record.adminId,
-    adminNickname: adminNames.get(record.adminId) ?? null,
-    action: record.action,
-    targetType: record.targetType,
-    targetId: record.targetId,
-    detail: (record.detail ?? {}) as Record<string, unknown>,
-    ip: record.ip,
-    createdAt: record.createdAt.toISOString(),
-  }))
-
-  return { items, pagination: buildPagination(input.page, input.pageSize, total) }
+  const conditions: Prisma.Sql[] = []
+  if(input.action?.trim()) conditions.push(Prisma.sql`l.action=${input.action.trim()}`)
+  if(input.targetType?.trim()) conditions.push(Prisma.sql`l.target_type=${input.targetType.trim()}`)
+  if(input.operator?.trim()) { const pattern=`%${input.operator.trim()}%`;conditions.push(Prisma.sql`(l.admin_id ILIKE ${pattern} OR u.nickname ILIKE ${pattern})`) }
+  if(input.objectId?.trim()) conditions.push(Prisma.sql`l.target_id ILIKE ${`%${input.objectId.trim()}%`}`)
+  if(input.from) conditions.push(Prisma.sql`l.created_at>=${input.from.toISOString()}::timestamp`)
+  if(input.to) conditions.push(Prisma.sql`l.created_at<=${input.to.toISOString()}::timestamp`)
+  const where=conditions.length?Prisma.sql`WHERE ${Prisma.join(conditions,' AND ')}`:Prisma.empty
+  return prisma.$transaction(async tx=>{
+    const [total]=await tx.$queryRaw<Array<{count:bigint}>>(Prisma.sql`SELECT count(*)::bigint AS count FROM admin_audit_logs l LEFT JOIN users u ON u.id=l.admin_id ${where}`)
+    const rows=await tx.$queryRaw<Array<{id:string;adminId:string;adminNickname:string|null;action:string;targetType:string|null;targetId:string|null;detail:unknown;ip:string|null;createdAt:Date}>>(Prisma.sql`
+      SELECT l.id,l.admin_id AS "adminId",u.nickname AS "adminNickname",l.action,l.target_type AS "targetType",l.target_id AS "targetId",l.detail,l.ip,l.created_at AS "createdAt"
+      FROM admin_audit_logs l LEFT JOIN users u ON u.id=l.admin_id ${where}
+      ORDER BY l.created_at DESC,l.id DESC OFFSET ${(input.page-1)*input.pageSize} LIMIT ${input.pageSize}`)
+    return {items:rows.map(row=>({...row,detail:presentAdminAuditDetail(row.detail),createdAt:row.createdAt.toISOString()})),pagination:buildPagination(input.page,input.pageSize,Number(total.count))}
+  },{isolationLevel:Prisma.TransactionIsolationLevel.RepeatableRead})
 }

@@ -8,6 +8,7 @@ import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, FileText, History, L
 import { getAdminAgentSessionMessages, getAdminCreationRecords, getAdminCreationRecordsIndex } from '../api'
 import Button from '@/components/ui/Button'
 import AdminAnalytics from '../components/AdminAnalytics'
+import { AdminRunRecords } from '../components/AdminOperationsLists'
 import TextInput from '../components/AdminTextInput'
 import { AdminCard, AdminPageHeader, AdminPanelState, AdminSectionTabs, StatusPill } from '../AdminLayout'
 import { formatTokens } from '../admin-shared'
@@ -283,7 +284,7 @@ export default function AdminCreationRecordsPage() {
   const searchQuery = useQuery({
     queryKey: ['admin', 'creation-records', 'index', search, page],
     queryFn: () => getAdminCreationRecordsIndex(search || undefined, page),
-    enabled: !userId,
+    enabled: !userId && tab === 'creators',
     placeholderData: (previous) => previous,
   })
 
@@ -347,10 +348,11 @@ export default function AdminCreationRecordsPage() {
           title="创作运行"
           description={indexTotal > 0 ? `共 ${indexTotal} 位创作者有 Agent 记录` : '按创作者定位执行记录；会话正文仅在主动展开后显示。'}
         />
-        <AdminSectionTabs tabs={[{id:'tasks',label:'任务记录'},{id:'tools',label:'工具与导入'},{id:'stats',label:'统计'}]} value={tab} onChange={setTab} label="创作运行分区" />
-        {tab !== 'tasks' ? <AdminAnalytics scope="creation" view={tab === 'tools' ? 'tools' : 'stats'} /> : null}
-        {tab === 'tasks' ? <>
-        <p className="mb-4 text-sm text-[var(--text-secondary)]">当前索引按创作者汇总，进入后可查看任务执行状态、轮次、错误与用量；跨用户任务级筛选待接入。</p>
+        <AdminSectionTabs tabs={[{id:'tasks',label:'任务记录'},{id:'creators',label:'创作者'},{id:'tools',label:'工具与导入'},{id:'stats',label:'统计'}]} value={tab} onChange={setTab} label="创作运行分区" />
+        {tab === 'tools' || tab === 'stats' ? <AdminAnalytics scope="creation" view={tab === 'tools' ? 'tools' : 'stats'} /> : null}
+        {tab === 'tasks' ? <AdminRunRecords /> : null}
+        {tab === 'creators' ? <>
+        <p className="mb-4 text-sm text-[var(--text-secondary)]">按创作者进入会话详情，正文仅在主动展开后显示。</p>
         <form
           className="mb-4 flex max-w-md gap-2"
           onSubmit={(event) => {

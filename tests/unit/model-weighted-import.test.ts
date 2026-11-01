@@ -3,7 +3,7 @@ import { quoteImportSuggestion, requestImportSuggestion } from '../../api/lib/no
 const mocks = vi.hoisted(() => ({ find: vi.fn(), create: vi.fn(), update: vi.fn(), chat: vi.fn(), runtime: {} as Record<string, unknown> }))
 vi.mock('../../api/lib/secret-box.js', () => ({ decryptSecret: (value: string) => 'key-' + value, encryptSecret: (value: string) => value }))
 vi.mock('../../api/lib/ai-service.js', () => ({ chatWithTools: mocks.chat }))
-vi.mock('../../api/lib/novel-import/model-router.js', () => ({ assertImportStructureBudget: vi.fn(), resolveImportModelRoute: async () => ({ runtime: mocks.runtime,
+vi.mock('../../api/lib/novel-import/model-router.js', async () => ({ storedImportModelSchema: (await import('../../shared/contracts/novel-import.js')).novelImportModelSchema, assertImportStructureBudget: vi.fn(), resolveImportModelRoute: async () => ({ runtime: mocks.runtime,
   route: { kind: 'basic', fingerprint: 'a'.repeat(64), reasoningEffort: 'low', modelName: 'primary-model' } }) }))
 vi.mock('../../api/lib/novel-import-service.js', () => ({ assertNovelImportHuman: vi.fn(), novelImportCapabilities: () => ({ enabled: true }),
   getNovelImportPreview: async () => ({ manifestHash: 'b'.repeat(64), manifestRevision: 1, volumes: [{ chapters: [{ content: '合成原文\n下一段' }] }] }),

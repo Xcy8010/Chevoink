@@ -24,6 +24,7 @@ vi.mock('../../api/lib/agent/runtime-lease.js', () => ({
 
 import { chatWithTools } from '../../api/lib/ai-service.js'
 import { auxiliaryRouteForRuntime, callDurableAuxiliary, resolveDurableAuxiliaryRuntime, resolveReviewModelRuntime } from '../../api/lib/agent/runtime-auxiliary-call.js'
+import { childModelForRuntime } from '../../api/lib/agent/runtime-child-tools.js'
 import * as assignments from '../../api/lib/agent/model-assignment-context.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { DataAccessError } from '../../api/lib/prisma.js'
@@ -149,7 +150,7 @@ describe('durable reviewer reasoning compatibility without rewriting old paid re
     expect(body).not.toHaveProperty('tools')
     expect(mocks.begin.mock.calls[0][0].request).toMatchObject({ body })
     expect(mocks.begin.mock.calls[0][0].action).toBe(step)
-    expect(mocks.runtime).toHaveBeenCalledWith('custom', 'owner', 'owned-model', 'high')
+    expect(mocks.runtime).toHaveBeenCalledWith('custom', 'owner', 'owned-model', 'high', expect.objectContaining({ userId: lease.userId, runId: lease.runId, provider: runtime.provider, modelName: runtime.modelName }))
     expect(fetch).toHaveBeenCalledOnce()
     expect(request.route.reasoningEffort).toBe('high')
   })
@@ -260,7 +261,7 @@ describe('durable reviewer reasoning compatibility without rewriting old paid re
     expect(body).not.toHaveProperty('temperature')
     expect(mocks.begin.mock.calls[0][0].request).toMatchObject({ body })
     expect(mocks.begin.mock.calls[0][0].price).toEqual(selectedPrice)
-    expect(mocks.runtime).toHaveBeenCalledWith(selected.tier, lease.userId, null, 'high')
+    expect(mocks.runtime).toHaveBeenCalledWith(selected.tier, lease.userId, null, 'high', expect.objectContaining({ userId: lease.userId, runId: lease.runId, provider: selected.provider, modelName: selected.modelName }))
     expect(fetch).toHaveBeenCalledOnce()
   })
 
@@ -289,7 +290,7 @@ describe('selected paid review model through resolution, frozen route and actual
     expect(route.model).toBe(env.aiTextModel)
     const selectedPrice = { version: 'credits-v1-exact' as const, modelTier: 'speed' as const, multiplierBps: 10000 }
     await callDurableAuxiliary({ ...input('quality_critic'), route, price: selectedPrice })
-    expect(mocks.runtime).toHaveBeenLastCalledWith('speed', 'owner', null, 'high')
+    expect(mocks.runtime).toHaveBeenLastCalledWith('speed', 'owner', null, 'high', expect.objectContaining({ userId: lease.userId, runId: lease.runId, provider: admittedRuntime.provider, modelName: env.aiTextModel }))
     expect(mocks.begin).toHaveBeenCalledOnce()
     const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
     expect(body).toMatchObject({ model: env.aiTextModel, thinking: { type: 'disabled' } })
@@ -329,7 +330,7 @@ describe('selected paid review model through resolution, frozen route and actual
       expect(body.reasoning_effort ?? 'none').toBe('none')
       expect(body[chosen.outputTokenParameter]).toBe(1024)
       expect(vi.mocked(fetch).mock.calls[0][0]).toBe(chosen.baseUrl + '/chat/completions')
-      expect(mocks.runtime).toHaveBeenLastCalledWith(chosen.tier, 'owner', null, 'high')
+      expect(mocks.runtime).toHaveBeenLastCalledWith(chosen.tier, 'owner', null, 'high', expect.objectContaining({ userId: lease.userId, runId: lease.runId, provider: chosen.provider, modelName: chosen.modelName }))
       expect(mocks.begin.mock.calls[0][0]).toMatchObject({ provider: chosen.provider, model: chosen.modelName,
         price: selectedPrice, request: { body: { model: chosen.modelName } } })
       expect(fetch).toHaveBeenCalledOnce()
@@ -375,5 +376,37 @@ describe('selected paid review model through resolution, frozen route and actual
     expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body)).model).toBe(chosen.modelName)
     expect(mocks.begin.mock.calls[0][0]).toMatchObject({ provider: chosen.provider, model: chosen.modelName,
       price: { version: 'credits-v1-exact', modelTier: chosen.tier, multiplierBps: 17500 } })
+  })
+})
+
+describe('new child model identity and auxiliary tariff ownership', () => {
+  const parentPrice = { version: 'credits-v1-exact' as const, modelTier: 'speed' as const, multiplierBps: 10000 }
+  const parent = { modelConfigId: 'parent-model-A', modelConfigRevision: 7, tokenPrice: parentPrice,
+    tier: 'speed', provider: 'parent-provider', modelName: 'parent-model', customModelId: null, reasoningEffort: 'low', routeRevision: 'a'.repeat(64), maxOutputTokens: 1024 }
+  it.each(['quality', 'continuity'] as const)('binds child B and its frozen fee through a %s tool check instead of parent A', async task => {
+    const childRuntime = { ...runtime, tier: 'builtin_1234567890abcdef' as const, modelConfigId: 'child-model-B', modelConfigRevision: 3,
+      provider: 'child-provider', modelName: 'child-model', multiplierBps: 17500 }
+    const childPrice = { version: 'credits-v2-itemized' as const, modelTier: childRuntime.tier, multiplierBps: 17500,
+      rateCardId: 'child-rate-card', rates: { inputNano: 100, cacheNano: 25, outputNano: 1000 } }
+    const child = childModelForRuntime(parent, childRuntime, null, childPrice)
+    expect(child).toMatchObject({ modelConfigId: 'child-model-B', modelConfigRevision: 3, tokenPrice: childPrice, tier: childRuntime.tier, provider: childRuntime.provider })
+    expect(parent.tokenPrice).toEqual(parentPrice)
+    mocks.runtime.mockResolvedValue(childRuntime)
+    const resolved = await resolveDurableAuxiliaryRuntime({ userId: lease.userId, runId: lease.runId, task,
+      modelSelection: { ...child, tier: childRuntime.tier, reasoningEffort: childRuntime.reasoningEffort } })
+    expect(resolved.selection.tokenPrice).toEqual(childPrice)
+    await callDurableAuxiliary({ ...input(task === 'quality' ? 'quality_critic' : 'continuity_critic'),
+      route: auxiliaryRouteForRuntime(resolved.runtime, resolved.selection, 1024), price: resolved.selection.tokenPrice! })
+    expect(mocks.runtime).toHaveBeenLastCalledWith(childRuntime.tier, lease.userId, null, 'high', expect.objectContaining({
+      userId: lease.userId, runId: lease.runId, modelConfigId: 'child-model-B', modelConfigRevision: 3, provider: childRuntime.provider, modelName: childRuntime.modelName }))
+    expect(mocks.begin.mock.calls[0][0]).toMatchObject({ provider: childRuntime.provider, model: childRuntime.modelName, price: childPrice })
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+  it('removes platform A identity when new child B uses an owned custom model', () => {
+    const child = childModelForRuntime(parent, runtime, 'owned-model-B', price)
+    expect(child).not.toHaveProperty('modelConfigId')
+    expect(child).not.toHaveProperty('modelConfigRevision')
+    expect(child).toMatchObject({ tier: 'custom', customModelId: 'owned-model-B', tokenPrice: price })
+    expect(parent.modelConfigId).toBe('parent-model-A')
   })
 })

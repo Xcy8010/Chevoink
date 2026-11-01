@@ -106,7 +106,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         expect(body.max_tokens).toBe(16_384)
         expect(body.tools).toBeUndefined()
         expect(body.reasoning_effort).toBe('none')
-        expect(credits.getModelTierRuntime).toHaveBeenCalledWith('speed', f.userId, null, 'high')
+        expect(credits.getModelTierRuntime).toHaveBeenCalledWith('speed', f.userId, null, 'high', expect.objectContaining({ userId: f.userId, runId: f.runId, provider: 'fixture', modelName: 'fixture' }))
         expect(body.messages.map((item: { role: string }) => item.role)).toEqual(['system', 'user'])
         const repair = system.includes('只替换列出的本章原文片段'), correction = system.startsWith('只为原意见'), format = system.includes('只纠正这份原回复')
         if (!repair && !correction && !format) {
@@ -440,7 +440,9 @@ describe.runIf(available)('auxiliary model route inheritance (isolated PG)', () 
       const result = await callDurableAuxiliary({ lease, parentOperationId: parent.operation.id, step: 'continuity_critic', route, price,
         system: critic.system, content: critic.content, temperature: 0.15, signal: new AbortController().signal, assertCurrent: async () => {} })
       expect(result).toMatchObject({ content: '{"findings":[]}', billing: { status: 'settled', chargedMilli: 0 } })
-      expect(runtimeSpy).toHaveBeenCalledWith(runtime.tier, f.userId, selection.customModelId, 'low')
+      expect(runtimeSpy).toHaveBeenCalledWith(runtime.tier, f.userId, selection.customModelId, 'low', expect.objectContaining({
+        userId: f.userId, runId: f.runId, provider: runtime.provider, modelName: runtime.modelName,
+      }))
       expect(fetchMock).toHaveBeenCalledOnce()
       const requestBody = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
       expect(requestBody).toMatchObject({ reasoning_effort: 'none', max_completion_tokens: 1024 })

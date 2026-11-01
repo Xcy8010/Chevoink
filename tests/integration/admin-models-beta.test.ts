@@ -26,6 +26,8 @@ async function fixture(work: (f: { adminId: string; userId: string; created: str
   try { await work({ adminId, userId, created }) }
   finally {
     await prisma.aiUsageLog.deleteMany({ where: { userId: { in: [userId, adminId] } } })
+    await prisma.aiModelConfigVersion.deleteMany({ where: { modelConfigId: { in: created } } })
+    await prisma.aiModelSystemBinding.deleteMany({ where: { modelConfigId: { in: created } } })
     await prisma.aiModelConfig.deleteMany({ where: { id: { in: created } } })
     for (const row of oldOrder) await prisma.aiModelConfig.update({ where: { id: row.id }, data: { sortOrder: row.sortOrder, isDefault: row.isDefault } })
     await prisma.adminAuditLog.deleteMany({ where: { adminId } })
@@ -75,7 +77,8 @@ describe.runIf(available)('admin dynamic catalog and independent public beta on 
     expect(await order()).toEqual([added.id, ...expected])
     for (const previous of original) {
       const after = await prisma.aiModelConfig.findUniqueOrThrow({ where: { id: previous.id } })
-      expect({ ...after, sortOrder: previous.sortOrder, updatedAt: previous.updatedAt }).toEqual(previous)
+      expect(after.revision).toBe(previous.revision + Number(after.sortOrder !== previous.sortOrder))
+      expect({ ...after, sortOrder: previous.sortOrder, updatedAt: previous.updatedAt, revision: previous.revision }).toEqual(previous)
     }
     const audits = await prisma.adminAuditLog.findMany({ where: { adminId: f.adminId } })
     expect(audits.map(row => row.action)).toEqual(['models.create', 'models.reorder'])

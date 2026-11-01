@@ -19,6 +19,7 @@ import type {
 } from '../../shared/contracts/index.js'
 import { lockCreditPolicy, creditTransaction } from './credit-policy.js'
 import { DataAccessError, prisma } from './prisma.js'
+import { resolveRetainedModelConfig, resolveSystemModelConfig, type RetainedModelContext } from './model-lifecycle.js'
 import { decryptSecret } from './secret-box.js'
 import { readWeightedRoutes } from './model-weighted-config.js'
 import type { WeightedRoutesStored, WeightedRouteSelection } from '../../shared/contracts/model-weighted-routes.js'
@@ -202,7 +203,7 @@ async function listPublicModelOptions(): Promise<CreditModelOption[]> {
   const configs = await prisma.aiModelConfig.findMany({
     where: { ownerUserId: null, tier: { not: null } },
     orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
-    select: { tier: true, provider: true, displayName: true, modelName: true, baseUrl: true, apiKeyCiphertext: true, multiplierBps: true, enabled: true, selectable: true, isDefault: true, metadata: true },
+    select: { archivedAt: true, tier: true, provider: true, displayName: true, modelName: true, baseUrl: true, apiKeyCiphertext: true, multiplierBps: true, enabled: true, selectable: true, isDefault: true, metadata: true },
   })
   const activePrices = await getActiveTokenPrices(configs.flatMap(item => isBuiltInModelTier(item.tier) ? [item.tier] : []))
   if (configs.length === 0) return MODEL_FALLBACKS.map(item => {
@@ -210,7 +211,7 @@ async function listPublicModelOptions(): Promise<CreditModelOption[]> {
     return { ...item, pricing: price ? presentLedgerPrice({ pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates, v1CeilingBps: price.v1CeilingBps }).pricing : null }
   })
   return configs.flatMap((item) => {
-    if (!item.tier || !isBuiltInModelTier(item.tier)) return []
+    if (item.archivedAt || !item.tier || !isBuiltInModelTier(item.tier)) return []
     const capabilities = parseModelCapabilities(item.metadata, item.provider)
     // 0 倍率档对用户公示为免费：不列分项费率，历史费率卡不参与免费档结算。
     const multiplierBps = effectiveModelMultiplier(item)
@@ -297,6 +298,7 @@ async function toCreditSummary(
     globallyPaused: setting.globallyPaused,
     suspended: Boolean(account.suspendedAt),
     models: await listPublicModelOptions(),
+    archivedModelTiers: (await prisma.aiModelConfig.findMany({ where: { ownerUserId: null, archivedAt: { not: null } }, select: { tier: true, archivedAt: true } })).flatMap(row => row.archivedAt && row.tier ? [row.tier] : []),
   }
 }
 
@@ -627,7 +629,7 @@ export async function assertCreditAccess(userId: string, tier: CreditModelTier =
     throw new DataAccessError(423, setting.globallyPaused ? 'CREDITS_GLOBALLY_PAUSED' : 'CREDITS_ACCOUNT_SUSPENDED', setting.globallyPaused ? '公测模型服务已由管理员暂停，请稍后再试。' : '当前账户的模型使用权限已暂停。')
   }
   const model = await prisma.aiModelConfig.findFirst({
-    where: { ownerUserId: null, tier, enabled: true, ...(requireSelectable ? { selectable: true } : {}) },
+    where: { ownerUserId: null, tier, archivedAt: null, enabled: true, ...(requireSelectable ? { selectable: true } : {}) },
     select: { tier: true, modelName: true, baseUrl: true, apiKeyCiphertext: true, multiplierBps: true, metadata: true },
   })
   if (!model || !isConfiguredBuiltIn(model)) {
@@ -664,7 +666,9 @@ export async function resolveAuxiliaryModelSelection(userId: string) {
   return { runtime, selection: { tier: runtime.tier, customModelId: custom?.id ?? null, reasoningEffort: runtime.reasoningEffort } }
 }
 
-export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userId?: string, customModelId?: string | null, requestedReasoningEffort?: ModelReasoningEffort): Promise<{
+export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userId?: string, customModelId?: string | null, requestedReasoningEffort?: ModelReasoningEffort, retained?: RetainedModelContext): Promise<{
+  modelConfigId?: string
+  modelConfigRevision?: number
   weightedRoutes?: WeightedRoutesStored
   weightedRoute?: WeightedRouteSelection
   physicalRouteId?: string
@@ -697,10 +701,27 @@ export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userI
     return { tier, multiplierBps: 0, provider: custom.provider, modelName: custom.modelName, baseUrl: custom.baseUrl, apiKey: decryptSecret(custom.apiKeyCiphertext), reasoningEffort, ...capabilities }
   }
   if (!isServerModelTier(tier)) throw new DataAccessError(409, 'MODEL_TIER_UNAVAILABLE', '该模型档位尚未开放。')
-  const config = await prisma.aiModelConfig.findFirst({
-    where: { ownerUserId: null, tier, enabled: true, ...(tier.startsWith('builtin_') ? { selectable: true } : {}) },
-    select: { tier: true, provider: true, modelName: true, multiplierBps: true, baseUrl: true, apiKeyCiphertext: true, metadata: true },
+  let config = await prisma.aiModelConfig.findFirst({
+    where: { ownerUserId: null, tier, archivedAt: null, enabled: true, ...(tier.startsWith('builtin_') ? { selectable: true } : {}) },
   })
+  if (retained && (!config || config.archivedAt || retained.modelConfigId && retained.modelConfigId !== config.id || retained.modelConfigRevision && retained.modelConfigRevision !== config.revision)) config = await resolveRetainedModelConfig(tier, retained)
+  if (tier === 'basic' && !retained) {
+    const originalRole = config ?? await prisma.aiModelConfig.findFirst({ where: { ownerUserId: null, tier } })
+    if (originalRole?.archivedAt || originalRole?.archivedById) {
+      const target = await resolveSystemModelConfig('basic')
+      if (target?.id !== originalRole.id && target?.tier && isServerModelTier(target.tier)) return getModelTierRuntime(target.tier, userId, undefined, requestedReasoningEffort)
+    }
+  }
+  if (!config) {
+    const archived = await prisma.aiModelConfig.findFirst({ where: { ownerUserId: null, tier, archivedAt: { not: null } } })
+    if (archived?.archivedAt) {
+      if (tier === 'basic' && !retained) {
+        const replacement = await resolveSystemModelConfig('basic')
+        if (replacement?.id !== archived.id && replacement?.tier && isServerModelTier(replacement.tier)) return getModelTierRuntime(replacement.tier, userId, undefined, requestedReasoningEffort)
+      }
+      throw new DataAccessError(409, 'MODEL_ARCHIVED', '原模型已归档，请明确重新选择；未回退或更换模型。')
+    }
+  }
   if (!config) {
     const configuredModels = await prisma.aiModelConfig.count({ where: { ownerUserId: null } })
     if (tier === 'speed' && configuredModels === 0) return { tier, multiplierBps: 10000, provider: 'deepseek', modelName: null, baseUrl: null, apiKey: null, reasoningEffort: requestedReasoningEffort ?? 'high', reasoningEfforts: ['low', 'high', 'max'], visionEnabled: false, contextWindowTokens: null }
@@ -718,6 +739,7 @@ export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userI
   if (!capabilities.reasoningEfforts.includes(reasoningEffort)) throw new DataAccessError(400, 'REASONING_EFFORT_UNSUPPORTED', '该模型不支持所选推理强度。')
   return {
     tier,
+    ...(config.id ? { modelConfigId: config.id, modelConfigRevision: config.revision } : {}),
     multiplierBps: effectiveModelMultiplier(config),
     freePromotion: readModelPromotion(config.metadata),
     ...(readWeightedRoutes(config.metadata)?.candidates.length ? { weightedRoutes: readWeightedRoutes(config.metadata) } : {}),

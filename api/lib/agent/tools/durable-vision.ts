@@ -100,7 +100,9 @@ async function callVision(ctx: ToolContext, lease: RunLeaseToken, parentOperatio
         (await readAdmittedToolOperation(lease, { operationId: parentOperationId, action: 'view_image', novelId: ctx.novelId, callId: ctx.callId })).operation.inputSnapshot).input.args))
       if ('output' in pixels || pixelHash(pixels.image) !== work.pixelHash || pixels.image.mime !== work.mime) return runtimeError('VISION_INPUT_CHANGED', '原图片已变化或不可访问，未替换像素重新请求。')
       const runtime = await resolveVisionRuntime({ userId: ctx.userId, runId: ctx.runId, novelId: ctx.novelId, signal: ctx.signal, modelAssignments: ctx.modelAssignments })
-      if (runtimeJson(runtime.route).hash !== runtimeJson(work.route).hash) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '视觉路由已变化，未替换原模型请求。')
+      const { modelConfigId: _currentId, modelConfigRevision: _currentRevision, ...legacyRoute } = runtime.route
+    const comparableRoute = work.route.modelConfigId ? runtime.route : legacyRoute
+    if (runtimeJson(comparableRoute).hash !== runtimeJson(work.route).hash) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '视觉路由已变化，未替换原模型请求。')
       const release = await acquireVisionSlot(ctx.signal), started = Date.now()
       try {
         ctx.signal.throwIfAborted()

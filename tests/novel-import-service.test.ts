@@ -273,13 +273,26 @@ describe('staged import authorization and durability (DB mocked; not concurrency
     await prepareNovelImport(scope, intent.intentId, { kind: 'custom', customModelId: 'chosen' })
     expect(fixture.state.novelImportJob[0].modelSelection).toEqual({ kind: 'custom', customModelId: 'chosen', reasoningEffort: 'max' })
   })
-  it('keeps unassigned imports on their legacy basic selection', async () => {
-    const intent = await preflightNovelImport(scope)
-    await prepareNovelImport(scope, intent.intentId)
-    expect(fixture.db.agentModelAssignment.findMany).toHaveBeenCalledWith({ where: { userId: scope.userId, scopeKey: { in: ['', scope.novelId] } } })
-    expect(fixture.state.novelImportJob[0].modelSelection).toEqual({ kind: 'basic' })
-    expect(fixture.db.aiModelConfig.findFirst).not.toHaveBeenCalled()
+  it('checks only platform roles when freezing an unassigned import and keeps local parsing basic without paid dispatch', async () => {
+    const charge = vi.spyOn(await import('../api/lib/credits.js'), 'consumeCredits')
+    const chat = vi.spyOn(await import('../api/lib/ai-service.js'), 'chatWithTools')
+    const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('This local import fixture must never request a provider'))
+    try {
+      const intent = await preflightNovelImport(scope)
+      await prepareNovelImport(scope, intent.intentId)
+      expect(fixture.db.agentModelAssignment.findMany).toHaveBeenCalledWith({ where: { userId: scope.userId, scopeKey: { in: ['', scope.novelId] } } })
+      expect(fixture.state.novelImportJob[0].modelSelection).toEqual({ kind: 'basic' })
+      expect(fixture.db.aiModelConfig.findFirst).toHaveBeenCalled()
+      for (const [query] of fixture.db.aiModelConfig.findFirst.mock.calls) {
+        expect(query.where.ownerUserId).toBeNull()
+        expect(['basic', 'speed']).toContain(query.where.tier)
+      }
+      expect(charge).not.toHaveBeenCalled()
+      expect(chat).not.toHaveBeenCalled()
+      expect(fetch).not.toHaveBeenCalled()
+    } finally { charge.mockRestore(); chat.mockRestore(); fetch.mockRestore() }
   })
+
   it('cancelled jobs still exhaust the finite rolling 24h creation budget', async () => {
     for (let n = 0; n < 10; n++) fixture.state.novelImportJob.push({ id: randomUUID(), ...scope, status: 'cancelled', createdAt: new Date() })
     const intent = await preflightNovelImport(scope)

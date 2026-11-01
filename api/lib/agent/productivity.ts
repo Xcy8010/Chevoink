@@ -11,6 +11,8 @@ import type {
   StoryBranchDiffView,
   StoryBranchView,
 } from '../../../shared/contracts/index.js'
+import { resolveSystemModelConfig, freshSystemModelTier } from '../model-lifecycle.js'
+import { isServerModelTier } from '../../../shared/contracts/model-tier.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { activeChapterScope } from '../data/internal.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
@@ -340,14 +342,19 @@ export async function listAgentSchedules(userId: string, novelId: string) {
 export async function createAgentSchedule(userId: string, input: { novelId: string; sessionId: string; name: string; prompt: string; cadenceMinutes: number; nextRunAt?: string }) {
   const session = await requireSession(userId, input.sessionId)
   if (session.novelId !== input.novelId) throw new DataAccessError(400, 'SESSION_NOVEL_MISMATCH', '任务与作品不匹配。')
-  const item = await prisma.agentSchedule.create({ data: { userId, novelId: input.novelId, sessionId: session.id, name: input.name.trim().slice(0, 160), prompt: input.prompt.trim(), cadenceMinutes: input.cadenceMinutes, nextRunAt: input.nextRunAt ? new Date(input.nextRunAt) : new Date(Date.now() + input.cadenceMinutes * 60_000) } })
+  const selected = await resolveSystemModelConfig('speed')
+  const item = await prisma.agentSchedule.create({ data: { modelConfigId: selected?.id, userId, novelId: input.novelId, sessionId: session.id, name: input.name.trim().slice(0, 160), prompt: input.prompt.trim(), cadenceMinutes: input.cadenceMinutes, nextRunAt: input.nextRunAt ? new Date(input.nextRunAt) : new Date(Date.now() + input.cadenceMinutes * 60_000) } })
   return { item: scheduleView(item) }
 }
 
-export async function updateAgentSchedule(userId: string, scheduleId: string, input: { status?: 'active' | 'paused'; nextRunAt?: string }) {
+export async function updateAgentSchedule(userId: string, scheduleId: string, input: { status?: 'active' | 'paused'; nextRunAt?: string; modelConfigId?: string }) {
   const schedule = await prisma.agentSchedule.findFirst({ where: { id: scheduleId, userId } })
   if (!schedule) throw new DataAccessError(404, 'SCHEDULE_NOT_FOUND', '定时任务不存在。')
-  const item = await prisma.agentSchedule.update({ where: { id: schedule.id }, data: { status: input.status, nextRunAt: input.nextRunAt ? new Date(input.nextRunAt) : undefined, lockedAt: null } })
+  if (input.modelConfigId) {
+    const selected = await prisma.aiModelConfig.findFirst({ where: { id: input.modelConfigId, ownerUserId: null, archivedAt: null, enabled: true, selectable: true } })
+    if (!selected || !isServerModelTier(selected.tier)) throw new DataAccessError(409, 'MODEL_SELECTION_REQUIRED', '请选择有效的平台文本模型。')
+  }
+  const item = await prisma.agentSchedule.update({ where: { id: schedule.id }, data: { modelConfigId: input.modelConfigId, status: input.status, nextRunAt: input.nextRunAt ? new Date(input.nextRunAt) : undefined, lockedAt: null } })
   return { item: scheduleView(item) }
 }
 
@@ -357,9 +364,17 @@ export async function runDueAgentSchedules(now = new Date()) {
     const locked = await prisma.agentSchedule.updateMany({ where: { id: schedule.id, status: 'active', nextRunAt: { lte: now }, OR: [{ lockedAt: null }, { lockedAt: { lt: new Date(now.getTime() - 10 * 60_000) } }] }, data: { lockedAt: now } })
     if (!locked.count) continue
     try {
-      const run = await startLoopRun(schedule.userId, { sessionId: schedule.sessionId, novelId: schedule.novelId, mode: 'build', prompt: schedule.prompt, creativeFreedom: 'balanced', qualityMode: 'premium', modelTier: 'speed', reasoningEffort: 'high' })
+      const tier = schedule.modelConfigId
+        ? (await prisma.aiModelConfig.findFirst({ where: { id: schedule.modelConfigId, ownerUserId: null, archivedAt: null, enabled: true } }))?.tier
+        : await freshSystemModelTier('speed')
+      if (!tier || !isServerModelTier(tier) || !schedule.modelConfigId && tier !== 'speed') throw new DataAccessError(409, 'MODEL_SELECTION_REQUIRED', '原定时模型已归档，请明确重新选择。')
+      const run = await startLoopRun(schedule.userId, { sessionId: schedule.sessionId, novelId: schedule.novelId, mode: 'build', prompt: schedule.prompt, creativeFreedom: 'balanced', qualityMode: 'premium', modelTier: tier, modelSelectionExplicit: true, reasoningEffort: 'high' })
       await prisma.agentSchedule.update({ where: { id: schedule.id }, data: { lastRunId: run.runId, nextRunAt: new Date(now.getTime() + schedule.cadenceMinutes * 60_000), lockedAt: null } })
-    } catch {
+    } catch (error) {
+      if (error instanceof DataAccessError && ['MODEL_SELECTION_REQUIRED', 'MODEL_ARCHIVED'].includes(error.code)) {
+        await prisma.agentSchedule.update({ where: { id: schedule.id }, data: { status: 'model_selection_required', lockedAt: null } })
+        continue
+      }
       await prisma.agentSchedule.update({ where: { id: schedule.id }, data: { nextRunAt: new Date(now.getTime() + 5 * 60_000), lockedAt: null } }).catch(() => {})
     }
   }

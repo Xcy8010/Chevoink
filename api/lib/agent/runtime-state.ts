@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
+import { tokenPriceSchema } from '../billing/token-price.js'
 import { weightedRouteSelectionSchema } from '../../../shared/contracts/model-weighted-routes.js'
 import { lockRunRoot, runtimeError, runtimeJson, runtimeJsonHash, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
@@ -24,7 +25,7 @@ const message = z.discriminatedUnion('role', [
 /** Server configuration only; credentials are resolved separately and never serialized here. */
 const configurationSchema = z.object({ version: z.literal(1), mode: z.enum(['plan', 'build', 'review']), agentType: z.string().min(1),
   creativeFreedom: z.enum(['stable', 'balanced', 'bold']), qualityMode: z.enum(['balanced', 'premium']),
-  model: z.object({ weightedRoute: weightedRouteSelectionSchema.optional(), tier: z.string().min(1), provider: z.string().min(1), modelName: z.string().nullable(), customModelId: id.nullable(),
+  model: z.object({ modelConfigId: id.optional(), modelConfigRevision: z.number().int().positive().optional(), tokenPrice: tokenPriceSchema.optional(), weightedRoute: weightedRouteSelectionSchema.optional(), tier: z.string().min(1), provider: z.string().min(1), modelName: z.string().nullable(), customModelId: id.nullable(),
     reasoningEffort: z.string().min(1), routeRevision: z.string().regex(/^[a-f0-9]{64}$/),
     maxOutputTokens: z.number().int().positive().max(4000000).optional(),
     contextWindowTokens: z.number().int().positive().max(4000000).optional() }).strict(),
@@ -116,7 +117,7 @@ async function insertFrame(tx: RuntimeTx, token: RunLeaseToken, revision: number
 }
 
 /** One-time initialization; an existing root never gets fresh messages/config on resume. */
-export async function initializeExecutionState(token: RunLeaseToken, input: { configuration: unknown; snapshot: unknown }) {
+export async function initializeExecutionState(token: RunLeaseToken, input: { configuration: unknown; snapshot: unknown; admittedModel?: { modelConfigId: string; modelConfigRevision: number } }) {
   const lease = { ...token }, parsed = configurationSchema.safeParse(input.configuration), snapshot = parseSnapshot(input.snapshot)
   if (!parsed.success) return runtimeError('RUNTIME_STATE_INVALID', '执行配置无效或含未允许字段。')
   const configuration = runtimeJson(parsed.data)
@@ -131,6 +132,7 @@ export async function initializeExecutionState(token: RunLeaseToken, input: { co
       if (existing.configurationHash !== configurationHash || initial.snapshotHash !== snapshot.hash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '恢复不能替换原始模型配置或初始上下文。')
       return current
     }
+    if (input.admittedModel) await (await import('../model-lifecycle.js')).assertAdmittedModelVersion(tx, input.admittedModel)
     const spec = (await import('../../../shared/contracts/task-spec-contracts.js')).taskSpecSchema.safeParse(root.specSnapshot)
     if (spec.success && spec.data.scope.capabilityCatalog) {
       // Same lease transaction as the first configuration/frame insertion.

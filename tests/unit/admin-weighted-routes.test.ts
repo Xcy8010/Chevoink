@@ -15,6 +15,7 @@ vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<object
   aiModelConfig: { findMany: vi.fn(async (args: { select?: unknown }) => args.select ? [] : [mocks.row]),
     findFirstOrThrow: vi.fn(async () => mocks.row), update: mocks.update },
   creditRateCard: { findMany: vi.fn(async () => []) },
+  adminAuditLog: { create: mocks.audit },
   user: { findUnique: mocks.actor }, $queryRaw: vi.fn(async () => []),
   aiUsageLog: { groupBy: vi.fn(async () => []), findMany: vi.fn(async () => []) },
 } }))
@@ -26,13 +27,13 @@ beforeEach(() => {
   vi.clearAllMocks()
   mocks.actor.mockResolvedValue({ role: 'admin', isSuperAdmin: true, bannedAt: null })
   mocks.auth.mockResolvedValue({ id: 'admin', role: 'admin', isSuperAdmin: true })
-  mocks.row = { id: 'model', key: 'text:speed', tier: 'speed', provider: 'openai', modelName: 'parent-alias', baseUrl: 'https://parent.invalid',
+  mocks.row = { revision: 1, archivedAt: null, id: 'model', key: 'text:speed', tier: 'speed', provider: 'openai', modelName: 'parent-alias', baseUrl: 'https://parent.invalid',
     apiKeyCiphertext: encryptSecret('offline-parent-key'), multiplierBps: 15000, enabled: true, selectable: true, isDefault: false, sortOrder: 0,
     updatedAt: new Date('2026-10-31T00:00:00Z'), metadata: { modelKind: 'text', customMarker: { preserve: true },
       imageQuality: { supportedValues: ['proxy-high'], defaultValue: 'proxy-high' },
       reasoningEfforts: ['high'], defaultReasoningEffort: 'high', reasoningParameterMode: 'omit',
       routes: [{ id: '11111111-1111-4111-8111-111111111111', label: '原线路', provider: 'original', modelName: 'old', baseUrl: 'https://old.invalid', enabled: false, apiKeyCiphertext: encryptSecret('old-route-key') }] } }
-  mocks.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => { mocks.row = { ...mocks.row, ...Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined)) }; return mocks.row })
+  mocks.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => { mocks.row = { ...mocks.row, ...Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined).map(([key, value]) => [key, key === 'revision' && value && typeof value === 'object' && 'increment' in value ? Number(mocks.row.revision) + Number(value.increment) : value])) }; return mocks.row })
 })
 it('validates proportions once at the input boundary without limiting free-form candidates or importing old routes', () => {
   expect(weightedRoutesInputSchema.safeParse({ primaryWeight: 60, candidates: [candidate] }).success).toBe(false)
@@ -74,7 +75,7 @@ it('rejects invalid proportions through HTTP, redacts audit credentials, and ret
   expect(mocks.update).not.toHaveBeenCalled()
   expect((await request(app).patch('/api/admin/models/model').send({ weightedRoutes: { primaryWeight: 65, candidates: [candidate] } })).status).toBe(200)
   expect(JSON.stringify(mocks.audit.mock.calls)).not.toContain(candidate.apiKey)
-  expect(JSON.stringify(mocks.audit.mock.calls)).toContain('[REPLACED]')
+  expect(mocks.audit).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'models.update', detail: expect.objectContaining({ routeKeysReplaced: [candidate.label], keyReplaced: false }) }) }))
   mocks.update.mockClear(); mocks.auth.mockResolvedValue({ id: 'normal-admin', role: 'admin', isSuperAdmin: false })
   expect((await request(app).patch('/api/admin/models/model').send({ weightedRoutes: { primaryWeight: 65, candidates: [candidate] } })).status).toBe(403)
   expect(mocks.update).not.toHaveBeenCalled()
@@ -89,4 +90,19 @@ it('rejects a truly insufficient decimal total without an epsilon or precision c
   expect(sumWeightedRouteWeights([0.01, ...candidates.map(route => route.weight)])).toBe('99.99999999999999')
   expect(weightedRoutesInputSchema.safeParse({ primaryWeight: 0.01, candidates }).success).toBe(false)
   expect(sumWeightedRouteWeights([1e-7, 2e-7])).toBe('0.0000003')
+})
+
+vi.mock('../../api/lib/model-lifecycle.js', async original => ({ ...await original<object>(), captureAdminModelVersion: vi.fn(async () => {}) }))
+
+
+it('returns HTTP400 for malformed archive/restore input after authorization instead of leaking a ZodError as500', async () => {
+  const app = express().use(express.json()).use('/api/admin', adminRouter)
+  for (const action of ['archive', 'restore']) {
+    const response = await request(app).post(`/api/admin/models/model/${action}`).send({ expectedRevision: -1, reason: '' })
+    expect(response.status).toBe(400)
+    expect(response.body.error.code).toBe('VALIDATION_ERROR')
+  }
+  expect(mocks.update).not.toHaveBeenCalled()
+  mocks.auth.mockResolvedValue({ id: 'normal-admin', role: 'admin', isSuperAdmin: false })
+  expect((await request(app).post('/api/admin/models/model/archive').send({})).status).toBe(403)
 })

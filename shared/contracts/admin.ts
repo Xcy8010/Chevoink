@@ -392,6 +392,10 @@ export type AdminTokenManagementPayload = {
 }
 
 export type AdminCreditsManagementPayload = {
+  pagination: Pagination
+  snapshotAt: string
+  summaryScope: 'global'
+
   summary: {
     globallyPaused: boolean
     publicBetaEnabled: boolean
@@ -418,6 +422,9 @@ export type AdminCreditsManagementPayload = {
 
 export type AdminModelManagementPayload = {
   models: Array<{
+    revision: number
+    archivedAt: string | null
+    archiveReason: string | null
     webToolProtocol?: import('./web-tool.js').WebToolProtocol
     imageQuality?: import('./image-model.js').ImageQualityConfig
     perCallCredits?: number

@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 
-import { Prisma } from '@prisma/client'
+import { Prisma, type AiModelConfig } from '@prisma/client'
 import { z } from 'zod'
 import { effectiveModelMultiplier, readModelPromotion, modelPromotionSchema } from '../../shared/model-promotion.js'
 
@@ -13,7 +13,10 @@ import { buildNewCreditAccountData, ensureCreditAccount, getCreditWindow, parseM
 import { getActiveRun, stopAgentRun, stopActiveRunsByUser, stopAllActiveRuns } from './agent/active-runs.js'
 import { env } from '../config/env.js'
 import { DataAccessError, prisma } from './prisma.js'
-import { adminUserSearchWhere } from './admin-user-search.js'
+import { getPagedAdminCreditAccounts } from './admin-credit-accounts.js'
+import { adminModelKind, captureAdminModelVersion } from './model-lifecycle.js'
+import { adminModelChangeDetail } from './admin-model-audit.js'
+import type { AdminModelKind } from '../../shared/contracts/admin-model-lifecycle.js'
 import { encryptSecret } from './secret-box.js'
 import { getActiveTokenPrices } from './billing/rate-cards.js'
 import { presentLedgerPrice } from './billing/ledger-presentation.js'
@@ -119,47 +122,8 @@ async function ensureAllPublicBetaAccounts(tx: Prisma.TransactionClient) {
   return setting
 }
 
-export async function getAdminCreditsManagement(search?: string): Promise<AdminCreditsManagementPayload> {
-  return creditTransaction(async tx => {
-  const setting = await ensureAllPublicBetaAccounts(tx)
-  const accounts = await tx.creditAccount.findMany({
-    include: { user: { select: { id: true, nickname: true, avatarUrl: true } } },
-    orderBy: [{ dailyUsedMilli: 'desc' }, { updatedAt: 'desc' }],
-  })
-  const matchingUsers = search?.trim() ? await tx.user.findMany({
-    where: adminUserSearchWhere(search), select: { id: true },
-  }) : null
-  const matchingIds = matchingUsers ? new Set(matchingUsers.map(user => user.id)) : null
-  const users = accounts.map((account) => {
-    const dailyRemaining = Math.max(0, account.dailyAllowanceMilli - account.dailyUsedMilli)
-    const totalRemaining = dailyRemaining + Math.max(0, account.bonusBalanceMilli)
-    return {
-      user: account.user,
-      planLabel: setting.publicBetaEnabled ? '公测版' as const : '免费版' as const,
-      dailyAllowance: account.dailyAllowanceMilli / MILLI,
-      dailyUsed: account.dailyUsedMilli / MILLI,
-      dailyRemaining: dailyRemaining / MILLI,
-      bonusBalance: account.bonusBalanceMilli / MILLI,
-      totalRemaining: totalRemaining / MILLI,
-      usedPercent: account.dailyAllowanceMilli > 0 ? Math.min(100, Math.round(account.dailyUsedMilli / account.dailyAllowanceMilli * 1000) / 10) : 100,
-      resetsAt: account.periodEndsAt.toISOString(),
-      suspended: Boolean(account.suspendedAt),
-    }
-  })
-  return {
-    summary: {
-      globallyPaused: setting.globallyPaused,
-      publicBetaEnabled: setting.publicBetaEnabled,
-      publicBetaRevision: setting.publicBetaRevision,
-      users: users.length,
-      dailyAllowance: users.reduce((sum, item) => sum + item.dailyAllowance, 0),
-      dailyUsed: users.reduce((sum, item) => sum + item.dailyUsed, 0),
-      bonusBalance: users.reduce((sum, item) => sum + item.bonusBalance, 0),
-      exhaustedUsers: users.filter((item) => item.totalRemaining <= 0).length,
-    },
-    users: matchingIds ? users.filter(item => matchingIds.has(item.user.id)) : users,
-  }
-  })
+export async function getAdminCreditsManagement(search?: string, paging: { page?: number; pageSize?: number } = {}): Promise<AdminCreditsManagementPayload> {
+  return getPagedAdminCreditAccounts(search, paging.page ?? 1, paging.pageSize ?? 20)
 }
 
 export async function resetAdminUserCredits(userId: string, adminId: string, requestKey: string = randomUUID()): Promise<{ stoppedRuns: number }> {
@@ -277,12 +241,12 @@ export function toolEnvironmentFallback(modelKind: 'text' | 'image_generation' |
   return null
 }
 
-export async function getAdminModelManagement(): Promise<AdminModelManagementPayload> {
+export async function getAdminModelManagement(view: 'active' | 'archived' | 'all' = 'active'): Promise<AdminModelManagementPayload> {
   const usageWhere: Prisma.AiUsageLogWhereInput = {
     OR: [{ billingStatus: null }, { billingStatus: { notIn: ['prepared', 'not_dispatched'] } }],
   }
   const [models, usage, recent, prices] = await Promise.all([
-    prisma.aiModelConfig.findMany({ where: { ownerUserId: null } }),
+    prisma.aiModelConfig.findMany({ where: { ownerUserId: null, ...(view === 'active' ? { archivedAt: null } : view === 'archived' ? { archivedAt: { not: null } } : {}) } }),
     prisma.aiUsageLog.groupBy({ by: ['modelTier'], where: { ...usageWhere, modelTier: { not: null } }, _sum: { requestTokens: true, responseTokens: true }, _count: { _all: true } }),
     prisma.aiUsageLog.findMany({ where: { ...usageWhere, createdAt: { gte: new Date(Date.now() - 13 * 86_400_000) } }, select: { createdAt: true, requestTokens: true, responseTokens: true } }),
     prisma.aiModelConfig.findMany({ where: { ownerUserId: null, tier: { not: null } }, select: { tier: true } }).then(rows => getActiveTokenPrices(rows.flatMap(row => isBuiltInModelTier(row.tier) ? [row.tier] : []))),
@@ -303,7 +267,7 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
       const metadata = model.metadata && typeof model.metadata === 'object' && !Array.isArray(model.metadata) ? model.metadata as Record<string, unknown> : {}
       const modelKind = metadata.modelKind === 'image_generation' || metadata.modelKind === 'vision' || metadata.modelKind === 'web_search' || metadata.modelKind === 'web_fetch' ? metadata.modelKind : 'text'
       const databaseReady = model.modelName !== 'unconfigured' && Boolean(model.baseUrl && model.apiKeyCiphertext)
-      const fallback = databaseReady ? null : toolEnvironmentFallback(modelKind)
+      const fallback = model.archivedAt || databaseReady ? null : toolEnvironmentFallback(modelKind)
       const configurationReady = databaseReady || Boolean(fallback) || (model.tier === 'speed' && model.modelName !== 'unconfigured')
       const price = modelKind === 'text' && model.tier && effectiveModelMultiplier(model) !== 0 && !readModelPromotion(model.metadata) ? prices.get(model.tier) : null
       return {
@@ -312,7 +276,7 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
         routes: presentModelRoutes(model.metadata),
         weightedRoutes: presentWeightedRoutes(model.metadata),
         pricing: price ? presentLedgerPrice({ pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates, v1CeilingBps: price.v1CeilingBps }).pricing : null,
-        id: model.id, tier: model.tier, sortOrder: model.sortOrder, modelKind, provider: fallback?.provider ?? model.provider, displayName: model.displayName,
+        id: model.id, revision: model.revision, archivedAt: model.archivedAt?.toISOString() ?? null, archiveReason: model.archiveReason, tier: model.tier, sortOrder: model.sortOrder, modelKind, provider: fallback?.provider ?? model.provider, displayName: model.displayName,
         modelName: fallback?.modelName ?? model.modelName, baseUrl: fallback?.baseUrl ?? model.baseUrl, multiplier: effectiveModelMultiplier(model) / 10_000,
         freePromotion: readModelPromotion(model.metadata),
         ...(modelKind === 'web_search' || modelKind === 'web_fetch' ? { perCallCredits: webToolChargeMilli(model.multiplierBps) / MILLI } : {}),
@@ -334,6 +298,8 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
 }
 
 export type UpdateAdminModelInput = {
+  expectedRevision?: number
+  modelKind?: AdminModelKind
   webToolProtocol?: import('../../shared/contracts/web-tool.js').WebToolProtocol
   imageQuality?: ImageQualityConfig
   freePromotion?: import('../../shared/model-promotion.js').ModelPromotion | null
@@ -366,8 +332,12 @@ function assertProviderReasoningEfforts(provider: string, reasoningEfforts: Mode
   }
 }
 
-async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: string, input: UpdateAdminModelInput): Promise<void> {
+async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: string, input: UpdateAdminModelInput): Promise<{ before: AiModelConfig; after: AiModelConfig }> {
     const model = await tx.aiModelConfig.findFirstOrThrow({ where: { id: modelId, ownerUserId: null } })
+    if (input.modelKind !== undefined && input.modelKind !== adminModelKind(model.metadata)) throw new DataAccessError(400, 'MODEL_KIND_IMMUTABLE', '已有配置的能力类型不能直接更改，请新建对应类型。')
+    if (model.archivedAt) throw new DataAccessError(409, 'MODEL_ARCHIVED', '该模型已归档，请先恢复并重新确认配置。')
+    if (input.expectedRevision !== undefined && input.expectedRevision !== model.revision) throw new DataAccessError(409, 'MODEL_CONFIG_CONFLICT', '配置已被修改，草稿已保留；请核对最新版本。')
+    await captureAdminModelVersion(tx, model)
     const freePromotion = input.freePromotion === undefined ? (input.multiplier === undefined ? readModelPromotion(model.metadata) : null) : input.freePromotion
     if (freePromotion) {
       const parsed = modelPromotionSchema.safeParse(freePromotion)
@@ -390,15 +360,15 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
     const nextHasApiKey = Boolean(input.apiKey?.trim() || model.apiKeyCiphertext)
     const nextEnabled = input.enabled ?? model.enabled
     const nextSelectable = input.selectable ?? model.selectable
-    const isWebTool = model.key === 'tool:web-search' || model.key === 'tool:web-fetch'
     const metadata = model.metadata && typeof model.metadata === 'object' && !Array.isArray(model.metadata) ? model.metadata : {}
+    const isWebTool = metadata.modelKind === 'web_search' || metadata.modelKind === 'web_fetch' || model.key === 'tool:web-search' || model.key === 'tool:web-fetch'
     const webToolProtocol = (input.webToolProtocol !== undefined ? input.webToolProtocol : metadata.webToolProtocol) as UpdateAdminModelInput['webToolProtocol']
     if (!isWebTool && input.webToolProtocol !== undefined) throw new DataAccessError(400, 'WEB_TOOL_CONFIG_INVALID', '网页工具协议仅适用于 Search 与 Fetch。')
     if (isWebTool && (nextEnabled || input.webToolProtocol !== undefined)) {
       try {
         const config = { provider: input.provider ?? model.provider, modelName: nextModelName,
           baseUrl: nextBaseUrl ?? '', apiKey: nextHasApiKey ? 'configured' : '', webToolProtocol }
-        const operation = model.key === 'tool:web-search' ? 'search' : 'fetch'
+        const operation = model.key === 'tool:web-search' || metadata.modelKind === 'web_search' ? 'search' : 'fetch'
         if (nextEnabled) webToolEndpoint(config, operation)
         else resolveWebToolProtocol(config, operation)
       }
@@ -410,10 +380,15 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
     if (model.tier !== 'speed' && (nextEnabled || nextSelectable) && (nextModelName === 'unconfigured' || !nextBaseUrl || !nextHasApiKey)) {
       throw new DataAccessError(409, 'MODEL_CONFIG_INCOMPLETE', '该服务必须先完整配置模型 ID、Base URL 与 API Key，才能启用。')
     }
-    if (input.isDefault) await tx.aiModelConfig.updateMany({ where: { ownerUserId: null, id: { not: model.id } }, data: { isDefault: false } })
-    await tx.aiModelConfig.update({
+    if (input.isDefault) {
+      const defaults = await tx.aiModelConfig.findMany({ where: { ownerUserId: null, id: { not: model.id }, isDefault: true, archivedAt: null } })
+      for (const previous of defaults) await captureAdminModelVersion(tx, previous)
+      await tx.aiModelConfig.updateMany({ where: { ownerUserId: null, id: { not: model.id }, isDefault: true, archivedAt: null }, data: { isDefault: false, revision: { increment: 1 } } })
+    }
+    const after = await tx.aiModelConfig.update({
       where: { id: model.id },
       data: {
+        revision: { increment: 1 },
         provider: input.provider?.trim() || undefined,
         displayName: input.displayName?.trim() || undefined,
         modelName: input.modelName?.trim() || undefined,
@@ -442,12 +417,16 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
         },
       },
     })
+    return { before: model, after }
 }
 
-export async function updateAdminModel(adminId: string, modelId: string, input: UpdateAdminModelInput): Promise<void> {
+export async function updateAdminModel(adminId: string, modelId: string, input: UpdateAdminModelInput, ip?: string | null): Promise<void> {
   await creditTransaction(async tx => {
     await lockCatalog(tx, adminId)
-    await updateAdminModelWithTx(tx, modelId, input)
+    const changed = await updateAdminModelWithTx(tx, modelId, input)
+    const routeKeysReplaced = [...(input.routes ?? []), ...(input.weightedRoutes?.candidates ?? [])].filter(route=>Boolean(route.apiKey)).map(route=>route.id ?? route.label)
+    await tx.adminAuditLog.create({data:{adminId,action:'models.update',targetType:'aiModelConfig',targetId:modelId,ip,
+      detail:adminModelChangeDetail(changed.before,changed.after,Boolean(input.apiKey?.trim()),routeKeysReplaced)}})
   })
   clearToolModelRuntimeCache()
 }
@@ -456,7 +435,7 @@ async function lockCatalog(tx: Prisma.TransactionClient, adminId: string) {
   const actor = await tx.user.findUnique({ where: { id: adminId }, select: { role: true, isSuperAdmin: true, bannedAt: true } })
   if (!actor || actor.role !== 'admin' || !actor.isSuperAdmin || actor.bannedAt) throw new DataAccessError(403, 'SUPER_ADMIN_REQUIRED', '该操作仅限超级管理员。')
   await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext('platform-model-catalog'))`
-  return (await tx.aiModelConfig.findMany({ where: { ownerUserId: null, tier: { not: null } }, orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] }))
+  return (await tx.aiModelConfig.findMany({ where: { ownerUserId: null, archivedAt: null, tier: { not: null } }, orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] }))
     .filter(row => isBuiltInModelTier(row.tier))
 }
 function assertCatalogOrder(actual: string[], expected: string[]) {
@@ -466,10 +445,12 @@ export async function createAdminModel(adminId: string, input: UpdateAdminModelI
   return creditTransaction(async tx => {
     const rows = await lockCatalog(tx, adminId)
     assertCatalogOrder(rows.map(row => row.id), expectedOrder)
-    const tier = `builtin_${randomBytes(8).toString('hex')}`
-    const model = await tx.aiModelConfig.create({ data: { key: tier, tier, provider: input.provider ?? 'openai', displayName: input.displayName ?? '新模型',
+    const modelKind = input.modelKind ?? 'text'
+    if (modelKind !== 'text' && (input.selectable || input.isDefault)) throw new DataAccessError(400, 'MODEL_KIND_INVALID', '工具与图片服务仅供内部使用，不能设为文本默认模型。')
+    const tier = modelKind === 'text' ? `builtin_${randomBytes(8).toString('hex')}` : null
+    const model = await tx.aiModelConfig.create({ data: { key: tier ?? `tool:variant:${randomUUID()}`, tier, metadata: { modelKind }, provider: input.provider ?? 'openai', displayName: input.displayName ?? '新模型',
       modelName: 'unconfigured', enabled: false, selectable: false, isDefault: false, sortOrder: Math.max(-1, ...rows.map(row => row.sortOrder)) + 1 } })
-    await updateAdminModelWithTx(tx, model.id, input)
+    await updateAdminModelWithTx(tx, model.id, { ...input, expectedRevision: undefined })
     await tx.adminAuditLog.create({ data: { adminId, action: 'models.create', targetType: 'aiModelConfig', targetId: model.id, detail: { tier, displayName: input.displayName ?? model.displayName } } })
     return { id: model.id, tier }
   })
@@ -480,7 +461,10 @@ export async function reorderAdminModels(adminId: string, order: string[], expec
     const actual = rows.map(row => row.id)
     assertCatalogOrder(actual, expectedOrder)
     if (order.length !== actual.length || new Set(order).size !== actual.length || order.some(id => !actual.includes(id))) throw new DataAccessError(400, 'MODEL_ORDER_INVALID', '请提交完整且无重复的模型顺序。')
-    for (const [sortOrder, id] of order.entries()) await tx.aiModelConfig.update({ where: { id }, data: { sortOrder } })
+    for (const [sortOrder, id] of order.entries()) {
+      const model = rows.find(row => row.id === id)!
+      if (model.sortOrder !== sortOrder) { await captureAdminModelVersion(tx, model); await tx.aiModelConfig.update({ where: { id }, data: { sortOrder, revision: { increment: 1 } } }) }
+    }
     await tx.adminAuditLog.create({ data: { adminId, action: 'models.reorder', targetType: 'aiModelConfig', detail: { previousOrder: actual, order } } })
     return { ok: true as const }
   })

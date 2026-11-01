@@ -1471,7 +1471,7 @@ export async function resolveCoverImageRuntime() {
   const apiKey = configured?.apiKey ?? env.aiImageApiKey
   ensureImageProviderConfigured(apiKey)
   const quality = configured?.imageQuality?.defaultValue
-  return { apiKey, route: { provider: configured?.provider ?? env.aiProviderMode, modelName: configured?.modelName ?? env.aiImageModel,
+  return { apiKey, route: { ...(configured?.modelConfigId ? { modelConfigId: configured.modelConfigId, modelConfigRevision: configured.modelConfigRevision } : {}), provider: configured?.provider ?? env.aiProviderMode, modelName: configured?.modelName ?? env.aiImageModel,
     baseUrl: configured?.baseUrl ?? env.aiImageBaseUrl, providerMode: env.aiProviderMode,
     ...(quality != null ? { quality } : {}) } }
 }
