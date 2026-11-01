@@ -31,7 +31,8 @@ describe('exact reviewed production migration', () => {
     writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), readFileSync(new URL('../fixtures/release-web-tool-billing.schema.prisma', import.meta.url)))
     writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), readFileSync(new URL('../fixtures/release-admin-model-lifecycle.schema.prisma', import.meta.url)))
     mkdirSync(path.join(f.candidate, `prisma/migrations/${adminModelLifecycleMigrationName}`))
-    writeFileSync(path.join(f.candidate, `prisma/migrations/${adminModelLifecycleMigrationName}/migration.sql`), readFileSync(`prisma/migrations/${adminModelLifecycleMigrationName}/migration.sql`))
+    // Production uses Git archive bytes, independent of Windows checkout line endings.
+    writeFileSync(path.join(f.candidate, `prisma/migrations/${adminModelLifecycleMigrationName}/migration.sql`), readFileSync(`prisma/migrations/${adminModelLifecycleMigrationName}/migration.sql`, 'utf8').replaceAll('\r\n', '\n'))
     return f
   }
   it('permits only the frozen lifecycle schema pair and exact SQL', () => {
@@ -44,12 +45,16 @@ describe('exact reviewed production migration', () => {
     expect(() => assertMigrationState([old, complete], checksums, 'after', [old], adminModelLifecycleMigrationName)).not.toThrow()
     expect(() => assertMigrationState([old, { ...complete, checksum: 'c'.repeat(64) }], checksums, 'after', [old], adminModelLifecycleMigrationName)).toThrow()
   })
-  it.each(['schema', 'baseline', 'history', 'sql', 'extra', 'already-present'])('rejects lifecycle %s outside the frozen approval', kind => {
+  it.each(['schema', 'baseline', 'history', 'sql', 'crlf-sql', 'extra', 'already-present'])('rejects lifecycle %s outside the frozen approval', kind => {
     const f = lifecycleFixture()
     if (kind === 'schema') writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), '// unrelated')
     if (kind === 'baseline') writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), '// unrelated')
     if (kind === 'history') writeFileSync(path.join(f.candidate, 'prisma/migrations/old/migration.sql'), 'SELECT 2;')
     if (kind === 'sql') writeFileSync(path.join(f.candidate, `prisma/migrations/${adminModelLifecycleMigrationName}/migration.sql`), 'SELECT 2;')
+    if (kind === 'crlf-sql') {
+      const sqlPath = path.join(f.candidate, `prisma/migrations/${adminModelLifecycleMigrationName}/migration.sql`)
+      writeFileSync(sqlPath, readFileSync(sqlPath, 'utf8').replaceAll('\n', '\r\n'))
+    }
     if (kind === 'extra') writeFileSync(path.join(f.candidate, `prisma/migrations/${adminModelLifecycleMigrationName}/extra.sql`), 'SELECT 2;')
     if (kind === 'already-present') {
       mkdirSync(path.join(f.baseline, `prisma/migrations/${adminModelLifecycleMigrationName}`))

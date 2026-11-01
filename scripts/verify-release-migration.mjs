@@ -10,7 +10,7 @@ export const fetchMigrationChecksum = '2e318f4b0a2004efdccfad7ad7a3962c4e8346a3d
 export const webToolBillingMigrationName = '20261020120000_web_tool_billing'
 export const webToolBillingMigrationChecksum = 'f7797fe83d78f72a07c9c6e4b8a6cc17ff758db54b1709776f9b1dd35b7933f0'
 export const adminModelLifecycleMigrationName = '20261101120000_admin_model_lifecycle'
-export const adminModelLifecycleMigrationChecksum = '7c24bac35ffde32ce2279dad0a1f41ebd2674affc6084a42ba6a0cdf0648398b'
+export const adminModelLifecycleMigrationChecksum = 'ced5cef83baa1d9bfe9ebe54e5c39388e85f7e6ea0ee9aa7c2257958e9181baf'
 // Frozen ae6cd5f7d43e77e1a75ce9c4d2dfe3ce60ee568e -> 8ba827a5029010f4ad87e3c6e59a513edb90ce53 schema pair.
 const lifecycleCandidateSchema = 'da62c9651530ce93646848e7be0f0634787ef397317a1e4d321e3242ffca265f'
 const billingBaselineSchema = 'e7752d3afe61d9e6172404cf5ea93cec78087dab274743804f3a90fd2b01d774'
