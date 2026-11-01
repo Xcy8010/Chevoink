@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const f = vi.hoisted(() => ({ model: vi.fn(), route: vi.fn(), preview: vi.fn(), find: vi.fn(), create: vi.fn(), update: vi.fn(), count: vi.fn(), job: vi.fn(), human: vi.fn() }))
 vi.mock('../api/lib/ai-service.js', () => ({ chatWithTools: f.model }))
-vi.mock('../api/lib/novel-import/model-router.js', () => ({ resolveImportModelRoute: f.route, assertImportStructureBudget: vi.fn() }))
+vi.mock('../api/lib/novel-import/model-router.js', async original => ({ ...await original<typeof import('../api/lib/novel-import/model-router.js')>(), resolveImportModelRoute: f.route, assertImportStructureBudget: vi.fn() }))
 vi.mock('../api/lib/novel-import-service.js', () => ({ assertNovelImportHuman: f.human, getNovelImportPreview: f.preview, novelImportCapabilities: () => ({ enabled: true }), novelImportTransaction: async (fn: (tx: unknown) => Promise<unknown>) => fn({ novelImportJob: { findFirst: f.job }, novelImportSuggestion: { findFirst: f.find, count: f.count, create: f.create } }) }))
 vi.mock('../api/lib/prisma.js', async original => ({ ...await original<typeof import('../api/lib/prisma.js')>(), prisma: { novelImportJob: { findFirstOrThrow: f.job }, novelImportSuggestion: { findFirst: f.find, update: f.update } } }))
 import { requestImportSuggestion, validateImportSuggestion } from '../api/lib/novel-import/suggestions.js'

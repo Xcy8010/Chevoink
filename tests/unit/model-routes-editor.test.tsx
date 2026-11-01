@@ -14,6 +14,8 @@ it('keeps existing route identity and changes only the selected setting', () => 
   const onChange = vi.fn()
   const route = { ...defaults, id: '6a18e83b-4c75-422d-8173-3e524fb64892', label: '备用账号', enabled: true }
   render(<ModelRoutesEditor routes={[route]} onChange={onChange} defaults={defaults} />)
+  expect(screen.queryByLabelText('API Key')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '编辑线路 1' }))
   expect(screen.getByLabelText('API Key')).toHaveProperty('value', '')
   fireEvent.click(screen.getByRole('checkbox', { name: '启用' }))
   expect(onChange).toHaveBeenCalledWith([{ ...route, enabled: false }])

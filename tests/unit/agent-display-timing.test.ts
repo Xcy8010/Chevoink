@@ -14,11 +14,20 @@ describe('local message time', () => {
     expect(formatMessageTime(new Date(2025, 11, 31, 23, 59).toISOString(), now)).toBe('2025/12/31/23:59')
     expect(formatMessageTime(new Date(2026, 9, 17, 15, 24).toISOString(), now)).toBe('10/17/15:24')
   })
-  it('uses the local calendar on UTC midnight and year boundaries', () => {
-    const value = '2026-01-01T01:05:00Z', now = new Date('2026-01-01T16:00:00Z')
-    const expected = process.env.TZ === 'America/New_York' ? '2025/12/31/20:05'
-      : process.env.TZ === 'Asia/Shanghai' ? '01/01/09:05' : '01:05'
-    expect(formatMessageTime(value, now)).toBe(expected)
+  it.each([
+    ['UTC', '01:05'],
+    ['Asia/Shanghai', '01/01/09:05'],
+    ['America/New_York', '2025/12/31/20:05'],
+  ])('uses the local calendar on UTC midnight and year boundaries in %s', (zone, expected) => {
+    const previousZone = process.env.TZ
+    try {
+      process.env.TZ = zone
+      const value = '2026-01-01T01:05:00Z', now = new Date('2026-01-01T16:00:00Z')
+      expect(formatMessageTime(value, now)).toBe(expected)
+    } finally {
+      if (previousZone === undefined) delete process.env.TZ
+      else process.env.TZ = previousZone
+    }
   })
   it('does not invent absent or invalid times', () => {
     for (const value of [undefined, null, '', 'invalid']) expect(formatMessageTime(value)).toBeNull()
