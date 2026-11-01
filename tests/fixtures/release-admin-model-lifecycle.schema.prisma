@@ -1,0 +1,3392 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  user
+  author
+  admin
+}
+
+enum NovelStatus {
+  draft
+  published
+  completed
+  archived
+}
+
+enum ChapterStatus {
+  draft
+  published
+  scheduled
+  archived
+}
+
+enum Visibility {
+  public
+  followers
+  private
+}
+
+enum CommentTargetType {
+  novel
+  chapter
+  post
+}
+
+enum MessageType {
+  text
+  image
+  novelCard
+  postCard
+  authorCard
+  commentCard
+  system
+}
+
+enum ConversationType {
+  direct
+  system
+}
+
+enum CoverSourceType {
+  upload
+  ai_generated
+}
+
+enum ContentAuditStatus {
+  pending
+  approved
+  rejected
+}
+
+enum AiProviderType {
+  text
+  image
+}
+
+enum AgentSessionStatus {
+  active
+  archived
+}
+
+enum AgentRunMode {
+  plan
+  act
+  review
+}
+
+enum AgentRunStatus {
+  queued
+  running
+  awaiting_approval
+  paused
+  completed
+  failed
+  cancelled
+}
+
+enum AgentType {
+  writingOrchestrator
+  storyPlanner
+  draftWriter
+  continuityEditor
+  styleEditor
+  loreLibrarian
+  coverPromptAgent
+}
+
+enum AgentActionKind {
+  planChapter
+  draftChapter
+  continueChapter
+  rewriteSelection
+  polishSelection
+  reviewContinuity
+  generateCoverPrompt
+  workspaceAgent
+}
+
+enum AgentArtifactType {
+  researchReport
+  chapterPlan
+  chapterDraft
+  chapterContinuation
+  rewriteSelection
+  polishSelection
+  continuityReview
+  coverPrompt
+  searchResult
+  contextCheckpoint
+}
+
+enum ProjectMemoryType {
+  novelSummary
+  worldbuilding
+  characterCard
+  chapterSummary
+  timelineEvent
+  foreshadowing
+  stylePreference
+  continuityRule
+  volumeSummary
+  storyArc
+  sceneState
+  relationshipState
+  storyBible
+  authorProfile
+}
+
+enum StoryMemoryLayer {
+  L0
+  L1
+  L2
+  L3
+}
+
+enum StoryMemoryStatus {
+  confirmed
+  inferred
+  conflicted
+  superseded
+  invalid
+}
+
+enum MemoryReviewStatus {
+  none
+  pending
+  accepted
+  rejected
+}
+
+enum MemorySourceType {
+  chapter
+  volume
+  message
+  author_input
+  artifact
+}
+
+enum MemoryJobStatus {
+  pending
+  processing
+  completed
+  failed
+}
+
+enum ChangeSetStatus {
+  draft
+  approved
+  applying
+  applied
+  conflicted
+  failed
+  rolled_back
+}
+
+enum UserDirectiveScope {
+  global
+  volume
+  chapter
+  task
+}
+
+enum UserDirectiveKind {
+  goal
+  must
+  must_not
+  preference
+  decision
+}
+
+enum UserDirectiveStatus {
+  active
+  fulfilled
+  superseded
+  cancelled
+}
+
+enum StoryCompilerMode {
+  balanced
+  premium
+}
+
+enum StoryCompilationStage {
+  prepare
+  beat
+  write
+  check
+  repair
+  commit
+}
+
+enum StoryCompilationStatus {
+  active
+  completed
+  abandoned
+  failed
+}
+
+enum SceneTaskStatus {
+  ready
+  writing
+  completed
+  abandoned
+}
+
+enum ReaderPromiseStatus {
+  open
+  paid
+  deferred
+  abandoned
+}
+
+enum ChapterQualityStatus {
+  analyzing
+  needs_repair
+  passed
+  repaired
+  stale
+  failed
+}
+
+enum QualityFindingSource {
+  deterministic
+  critic
+}
+
+enum QualityFindingSeverity {
+  advisory
+  warning
+  error
+}
+
+enum QualityFindingDisposition {
+  pending
+  selected
+  repaired
+}
+
+enum QualityFindingFeedback {
+  accepted
+  rejected
+}
+
+enum CreativeProfileStatus {
+  draft
+  confirmed
+  archived
+}
+
+enum CorpusSourceClass {
+  internal
+  public_domain
+  permissive
+  licensed
+  author_private
+  platform_opt_in
+}
+
+enum CorpusRightsStatus {
+  pending
+  approved
+  rejected
+  expired
+  revoked
+}
+
+enum CorpusScope {
+  platform
+  user
+  novel
+}
+
+enum CorpusDocumentStatus {
+  pending
+  indexed
+  blocked
+  revoked
+}
+
+enum StyleProfileKind {
+  author
+  corpus
+}
+
+enum LeakageDecision {
+  passed
+  blocked
+}
+
+enum SmsVerificationPurpose {
+  login
+  register
+  reset_password
+  admin_login
+  admin_bind
+}
+
+/// 隐私可见级别：公开 / 仅自己 / 仅互关可见
+enum PrivacyLevel {
+  public
+  private
+  mutual
+}
+
+model User {
+  modelAssignments AgentModelAssignment[]
+  novelImportJobs NovelImportJob[]
+  novelImportIntents NovelImportIntent[]
+  id                         String                  @id @default(cuid()) @db.VarChar(64)
+  email                      String?                 @unique @db.VarChar(255)
+  phone                      String?                 @unique @db.VarChar(32)
+  passwordHash               String                  @map("password_hash") @db.VarChar(255)
+  nickname                   String                  @db.VarChar(64)
+  avatarUrl                  String?                 @map("avatar_url")
+  profileCoverUrl            String?                 @map("profile_cover_url")
+  bio                        String?
+  role                       UserRole                @default(user)
+  /**
+   * 超级管理（唯一）：仅该账号可在后台设置用户身份（用户↔管理）
+   */
+  isSuperAdmin               Boolean                 @default(false) @map("is_super_admin")
+  isAuthor                   Boolean                 @default(false) @map("is_author")
+  followerCount              Int                     @default(0) @map("follower_count")
+  followingCount             Int                     @default(0) @map("following_count")
+  novelCount                 Int                     @default(0) @map("novel_count")
+  postCount                  Int                     @default(0) @map("post_count")
+  unreadMessageCount         Int                     @default(0) @map("unread_message_count")
+  unreadNotificationCount    Int                     @default(0) @map("unread_notification_count")
+  /**
+   * 会话令牌版本：改密/登出/封禁时 +1，即刻吊销该用户全部 v2 会话令牌
+   */
+  tokenVersion               Int                     @default(0) @map("token_version")
+  interactionsSeenAt         DateTime?               @map("interactions_seen_at")
+  followersSeenAt            DateTime?               @map("followers_seen_at")
+  lastActiveAt               DateTime?               @map("last_active_at")
+  /**
+   * 封禁时间（NULL = 正常）：后台管理封禁后全站登录态失效
+   */
+  bannedAt                   DateTime?               @map("banned_at")
+  privacyFollowers           PrivacyLevel            @default(public) @map("privacy_followers")
+  privacyFollowing           PrivacyLevel            @default(public) @map("privacy_following")
+  privacyLikes               PrivacyLevel            @default(public) @map("privacy_likes")
+  privacyFavorites           PrivacyLevel            @default(public) @map("privacy_favorites")
+  privacyReplies             PrivacyLevel            @default(public) @map("privacy_replies")
+  createdAt                  DateTime                @default(now()) @map("created_at")
+  updatedAt                  DateTime                @updatedAt @map("updated_at")
+  novels                     Novel[]
+  chapters                   Chapter[]
+  comments                   Comment[]
+  posts                      Post[]
+  sharedInPosts              Post[]                  @relation("PostSharedUser")
+  coverAssets                CoverAsset[]
+  conversationMembers        ConversationMember[]
+  messages                   Message[]
+  aiUsageLogs                AiUsageLog[]
+  creditAccount              CreditAccount?
+  creditLedgerEntries        CreditLedgerEntry[]
+  referralCode               ReferralCode?
+  sentReferralRedemptions    ReferralRedemption[]    @relation("ReferralInviter")
+  receivedReferralRedemption ReferralRedemption?     @relation("ReferralInvitee")
+  aiModelConfigs             AiModelConfig[]
+  agentSessions              AgentSession[]
+  agentRuns                  AgentRun[]
+  durableTaskRoots           AgentTaskRoot[]
+  legacyAgentAttachmentGrants LegacyAgentAttachmentGrant[]
+  smsVerificationCodes       SmsVerificationCode[]
+  postLikes                  PostLike[]
+  postBookmarks              PostBookmark[]
+  commentLikes               CommentLike[]
+  novelFavorites             NovelFavorite[]
+  readingProgress            ReadingProgress[]
+  novelReads                 NovelRead[]
+  paragraphUnderlines        ParagraphUnderline[]
+  changeSets                 ChangeSet[]
+  userDirectives             UserDirective[]
+  storyCharters              StoryCharter[]
+  readerPromises             ReaderPromise[]
+  storyCompilations          StoryCompilation[]
+  sceneTasks                 SceneTask[]
+  chapterBridges             ChapterBridge[]
+  characterVoiceProfiles     CharacterVoiceProfile[]
+  experienceAnchors          ExperienceAnchor[]
+  chapterQualityReports      ChapterQualityReport[]
+  qualityFindings            QualityFinding[]
+  ownedCorpusSources         CorpusSource[]          @relation("CorpusSourceOwner")
+  auditedCorpusSources       CorpusSource[]          @relation("CorpusSourceAuditor")
+  corpusDocuments            CorpusDocument[]
+  corpusPassages             CorpusPassage[]
+  techniqueCards             TechniqueCard[]
+  styleProfiles              StyleProfile[]
+  retrievalTraces            RetrievalTrace[]
+  leakageChecks              LeakageCheck[]
+  corpusDeletionReceipts     CorpusDeletionReceipt[]
+  researchDossiers           ResearchDossier[]
+  firstThreePrototypes       FirstThreePrototype[]
+  writingExperiments         WritingExperiment[]
+  agentDataControls          AgentDataControl[]
+  sentSkillShareInvites      SkillShareInvite[]      @relation("SkillShareInviteSender")
+  receivedSkillShareInvites  SkillShareInvite[]      @relation("SkillShareInviteRecipient")
+  storyBranches              StoryBranch[]
+  agentSubtasks              AgentSubtask[]
+  agentSubtaskRuns           AgentSubtaskRun[]
+  agentSchedules             AgentSchedule[]
+  agentEvalComparisons       AgentEvalComparison[]
+  following                  UserFollow[]            @relation("UserFollowFollower")
+  followers                  UserFollow[]            @relation("UserFollowFollowing")
+  feedbacks                  Feedback[]
+
+  @@map("users")
+}
+
+model SmsVerificationCode {
+  id         String                 @id @default(cuid()) @db.VarChar(64)
+  userId     String?                @map("user_id") @db.VarChar(64)
+  phone      String                 @db.VarChar(32)
+  purpose    SmsVerificationPurpose
+  codeHash   String                 @map("code_hash") @db.VarChar(128)
+  expiresAt  DateTime               @map("expires_at")
+  consumedAt DateTime?              @map("consumed_at")
+  attempts   Int                    @default(0)
+  provider   String                 @default("tencentcloud") @db.VarChar(32)
+  meta       Json?
+  createdAt  DateTime               @default(now()) @map("created_at")
+  updatedAt  DateTime               @updatedAt @map("updated_at")
+  user       User?                  @relation(fields: [userId], references: [id])
+
+  @@index([phone, purpose, createdAt])
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sms_verification_codes")
+}
+
+model Novel {
+  modelAssignments AgentModelAssignment[]
+  manuscriptRevision Int @default(0) @map("manuscript_revision")
+  importJobs NovelImportJob[]
+  importIntents NovelImportIntent[]
+  id                     String                  @id @default(cuid()) @db.VarChar(64)
+  authorId               String                  @map("author_id") @db.VarChar(64)
+  title                  String                  @db.VarChar(128)
+  displayTitle           String?                 @map("display_title") @db.VarChar(128)
+  slug                   String                  @unique @db.VarChar(160)
+  summary                String
+  categoryId             String?                 @map("category_id") @db.VarChar(64)
+  categoryName           String?                 @map("category_name") @db.VarChar(64)
+  tagNames               String[]                @default([]) @map("tag_names")
+  status                 NovelStatus             @default(draft)
+  visibility             Visibility              @default(public)
+  coverAssetId           String?                 @unique @map("cover_asset_id") @db.VarChar(64)
+  coverPrompt            String?                 @map("cover_prompt")
+  wordCount              Int                     @default(0) @map("word_count")
+  chapterCount           Int                     @default(0) @map("chapter_count")
+  commentCount           Int                     @default(0) @map("comment_count")
+  favoriteCount          Int                     @default(0) @map("favorite_count")
+  likeCount              Int                     @default(0) @map("like_count")
+  viewCount              Int                     @default(0) @map("view_count")
+  lastChapterTitle       String?                 @map("last_chapter_title") @db.VarChar(128)
+  lastPublishedAt        DateTime?               @map("last_published_at")
+  publishedAt            DateTime?               @map("published_at")
+  pinnedAt               DateTime?               @map("pinned_at")
+  createdAt              DateTime                @default(now()) @map("created_at")
+  updatedAt              DateTime                @updatedAt @map("updated_at")
+  author                 User                    @relation(fields: [authorId], references: [id])
+  coverAsset             CoverAsset?             @relation("NovelCover", fields: [coverAssetId], references: [id])
+  coverAssets            CoverAsset[]            @relation("CoverAssetCandidates")
+  chapters               Chapter[]
+  volumes                Volume[]
+  comments               Comment[]
+  favorites              NovelFavorite[]
+  posts                  Post[]
+  aiUsageLogs            AiUsageLog[]
+  agentSessions          AgentSession[]
+  agentRuns              AgentRun[]
+  projectMemoryEntries   ProjectMemoryEntry[]
+  readingProgress        ReadingProgress[]
+  novelReads             NovelRead[]
+  recommendationEvents   RecommendationEvent[]
+  changeSets             ChangeSet[]
+  userDirectives         UserDirective[]
+  storyEntities          StoryEntity[]
+  storyEvents            StoryEvent[]
+  memoryExtractionJobs   MemoryExtractionJob[]
+  foreshadowThreads      ForeshadowThread[]
+  storyCharter           StoryCharter?
+  readerPromises         ReaderPromise[]
+  storyCompilations      StoryCompilation[]
+  sceneTasks             SceneTask[]
+  chapterBridges         ChapterBridge[]
+  characterVoiceProfiles CharacterVoiceProfile[]
+  experienceAnchors      ExperienceAnchor[]
+  chapterQualityReports  ChapterQualityReport[]
+  qualityFindings        QualityFinding[]
+  corpusSources          CorpusSource[]
+  corpusDocuments        CorpusDocument[]
+  corpusPassages         CorpusPassage[]
+  techniqueCards         TechniqueCard[]
+  styleProfiles          StyleProfile[]
+  retrievalTraces        RetrievalTrace[]
+  leakageChecks          LeakageCheck[]
+  corpusDeletionReceipts CorpusDeletionReceipt[]
+  researchDossiers       ResearchDossier[]
+  firstThreePrototypes   FirstThreePrototype[]
+  writingExperiments     WritingExperiment[]
+  agentDataControls      AgentDataControl[]
+  skillShareInvites      SkillShareInvite[]
+  storyBranches          StoryBranch[]
+  agentSubtasks          AgentSubtask[]
+  agentSubtaskRuns       AgentSubtaskRun[]
+  agentSchedules         AgentSchedule[]
+  agentEvalComparisons   AgentEvalComparison[]
+
+  @@index([authorId])
+  @@index([status, visibility])
+  @@index([categoryId])
+  @@index([status, visibility, lastPublishedAt])
+  @@index([authorId, updatedAt])
+  @@index([authorId, pinnedAt])
+  @@map("novels")
+}
+
+model Chapter {
+  archivedAt           DateTime?              @map("archived_at")
+  archivedByImportId   String?                @map("archived_by_import_id") @db.VarChar(64)
+  id                   String                 @id @default(cuid()) @db.VarChar(64)
+  novelId              String                 @map("novel_id") @db.VarChar(64)
+  authorId             String                 @map("author_id") @db.VarChar(64)
+  title                String                 @db.VarChar(128)
+  summary              String?
+  content              String
+  orderIndex           Int                    @map("order_index")
+  volumeId             String                 @map("volume_id") @db.VarChar(64)
+  orderInVolume        Int                    @map("order_in_volume")
+  wordCount            Int                    @default(0) @map("word_count")
+  status               ChapterStatus          @default(draft)
+  visibility           Visibility             @default(public)
+  commentCount         Int                    @default(0) @map("comment_count")
+  revision             Int                    @default(1)
+  publishedTitle       String?                @map("published_title") @db.VarChar(128)
+  publishedSummary     String?                @map("published_summary")
+  publishedContent     String?                @map("published_content")
+  publishedWordCount   Int?                   @map("published_word_count")
+  publishedRevision    Int?                   @map("published_revision")
+  publishedAt          DateTime?              @map("published_at")
+  createdAt            DateTime               @default(now()) @map("created_at")
+  updatedAt            DateTime               @updatedAt @map("updated_at")
+  novel                Novel                  @relation(fields: [novelId], references: [id])
+  volume               Volume                 @relation(fields: [volumeId], references: [id], onDelete: Restrict)
+  author               User                   @relation(fields: [authorId], references: [id])
+  comments             Comment[]
+  aiUsageLogs          AiUsageLog[]
+  agentRuns            AgentRun[]
+  projectMemoryEntries ProjectMemoryEntry[]
+  paragraphUnderlines  ParagraphUnderline[]
+  storyCompilations    StoryCompilation[]
+  sceneTasks           SceneTask[]
+  bridgesFrom          ChapterBridge[]        @relation("ChapterBridgeFrom")
+  bridgesTo            ChapterBridge[]        @relation("ChapterBridgeTo")
+  qualityReports       ChapterQualityReport[]
+  storyBranches        StoryBranch[]
+
+  // Active-only uniqueness is maintained by SQL partial indexes (Prisma 6).
+  @@index([novelId, archivedAt])
+  @@index([novelId, status])
+  @@index([volumeId, orderInVolume])
+  @@map("chapters")
+}
+
+model Volume {
+  archivedAt DateTime? @map("archived_at")
+  archivedByImportId String? @map("archived_by_import_id") @db.VarChar(64)
+  id         String    @id @default(cuid()) @db.VarChar(64)
+  novelId    String    @map("novel_id") @db.VarChar(64)
+  title      String    @db.VarChar(128)
+  summary    String?
+  orderIndex Int       @map("order_index")
+  revision   Int       @default(1)
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+  novel      Novel     @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  chapters   Chapter[]
+
+  // Active-only uniqueness is maintained by SQL partial indexes (Prisma 6).
+  @@index([novelId, archivedAt])
+  @@index([novelId])
+  @@map("volumes")
+}
+
+model NovelImportIntent {
+  id String @id @db.VarChar(64)
+  userId String @db.VarChar(64)
+  novelId String @db.VarChar(64)
+  agentRunId String? @db.VarChar(64)
+  agentToolCallId String? @db.VarChar(255)
+  targetHash String @db.VarChar(64)
+  overwriteRequired Boolean
+  confirmationStep Int @default(0)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel Novel @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  jobs NovelImportJob[]
+  @@index([userId, novelId, expiresAt])
+  @@unique([agentRunId, agentToolCallId])
+  @@map("novel_import_intents")
+}
+
+model NovelImportJob {
+  id String @id @db.VarChar(64)
+  userId String @db.VarChar(64)
+  novelId String @db.VarChar(64)
+  agentRunId String? @db.VarChar(64)
+  agentToolCallId String? @db.VarChar(255)
+  intentId String @unique @db.VarChar(64)
+  status String @default("uploading") @db.VarChar(32)
+  jobVersion Int @default(1)
+  manifestRevision Int @default(0)
+  manifestHash String? @db.VarChar(64)
+  targetHash String @db.VarChar(64)
+  modelSelection Json
+  parseEncoding String? @db.VarChar(32)
+  parseDeadlineAt DateTime?
+  leaseOwner String? @db.VarChar(64)
+  leaseEpoch Int @default(0)
+  leaseUntil DateTime?
+  errorCode String? @db.VarChar(64)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel Novel @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  intent NovelImportIntent @relation(fields: [intentId], references: [id], onDelete: Cascade)
+  source NovelImportSource?
+  manifests NovelImportManifest[]
+  approvals NovelImportApproval[]
+  commit NovelImportCommit?
+  backup NovelImportBackup?
+  artifacts NovelImportArtifact[]
+  events NovelImportEvent[]
+  @@index([userId, novelId, createdAt])
+  @@unique([agentRunId, agentToolCallId])
+  @@index([status, leaseUntil])
+  @@map("novel_import_jobs")
+}
+
+model NovelImportSource {
+  id String @id @db.VarChar(64)
+  jobId String @unique @db.VarChar(64)
+  filename String @db.VarChar(255)
+  storageKey String @db.VarChar(128)
+  sha256 String @db.VarChar(64)
+  bytes Int
+  createdAt DateTime @default(now())
+  job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  @@map("novel_import_sources")
+}
+
+model NovelImportArtifact {
+  id String @id @db.Uuid
+  jobId String @db.VarChar(64)
+  kind String @db.VarChar(24)
+  logicalId String @db.VarChar(255)
+  storageKey String @db.VarChar(128)
+  sha256 String @db.VarChar(64)
+  bytes Int
+  mediaType String @db.VarChar(128)
+  createdAt DateTime @default(now())
+  job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  @@index([jobId])
+  @@unique([jobId, kind, sha256])
+  @@map("novel_import_artifacts")
+}
+
+model NovelImportManifest {
+  id String @id @db.VarChar(64)
+  jobId String @db.VarChar(64)
+  revision Int
+  hash String @db.VarChar(64)
+  storageKey String @db.VarChar(128)
+  createdAt DateTime @default(now())
+  job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  @@unique([jobId, revision])
+  @@map("novel_import_manifests")
+}
+
+model NovelImportApproval {
+  id String @id @db.VarChar(64)
+  jobId String @db.VarChar(64)
+  userId String @db.VarChar(64)
+  kind String @db.VarChar(16)
+  sourceHash String @db.VarChar(64)
+  manifestHash String @db.VarChar(64)
+  manifestRevision Int
+  targetHash String @db.VarChar(64)
+  expiresAt DateTime
+  consumedAt DateTime?
+  createdAt DateTime @default(now())
+  job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  @@index([jobId, kind])
+  @@map("novel_import_approvals")
+}
+
+model NovelImportBackup {
+  id String @id @db.VarChar(64)
+  jobId String @unique @db.VarChar(64)
+  // Retained row IDs + metadata; full bodies remain in their original rows.
+  snapshot Json
+  beforeHash String @db.VarChar(64)
+  afterHash String @db.VarChar(64)
+  expiresAt DateTime
+  restoredAt DateTime?
+  restoredApprovalId String? @unique @db.VarChar(64)
+  restoreIdempotencyKey String? @db.VarChar(128)
+  restoreReceipt Json?
+  restoreErrorCode String? @db.VarChar(64)
+  createdAt DateTime @default(now())
+  job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  @@map("novel_import_backups")
+}
+
+model NovelImportCommit {
+  jobId String @id @db.VarChar(64)
+  approvalId String @unique @db.VarChar(64)
+  idempotencyKey String @db.VarChar(128)
+  receipt Json
+  // Durable outbox marker: parent integration drains it without paid AI effects.
+  effectsPublishedAt DateTime?
+  createdAt DateTime @default(now())
+  job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  @@index([effectsPublishedAt, createdAt])
+  @@map("novel_import_commits")
+}
+
+// DB delete triggers retain exact private keys for later bounded orphan cleanup.
+model NovelImportGarbage {
+  storageKey String @id @db.VarChar(128)
+  createdAt DateTime @default(now())
+  @@map("novel_import_garbage")
+}
+
+model NovelImportEvent {
+  id String @id @db.Uuid
+  jobId String @db.VarChar(64)
+  kind String @db.VarChar(16)
+  payload Json
+  createdAt DateTime @default(now())
+  job NovelImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  @@unique([jobId, kind])
+  @@map("novel_import_events")
+}
+
+model ChangeSet {
+  id           String           @id @default(cuid()) @db.VarChar(64)
+  novelId      String           @map("novel_id") @db.VarChar(64)
+  userId       String           @map("user_id") @db.VarChar(64)
+  taskSpecId   String           @map("task_spec_id") @db.VarChar(64)
+  status       ChangeSetStatus  @default(draft)
+  baseRevision Int              @default(0) @map("base_revision")
+  validations  Json
+  snapshotId   String?          @map("snapshot_id") @db.VarChar(64)
+  createdAt    DateTime         @default(now()) @map("created_at")
+  updatedAt    DateTime         @updatedAt @map("updated_at")
+  novel        Novel            @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  patches      ChangeSetPatch[]
+
+  @@index([novelId, createdAt])
+  @@index([userId, status])
+  @@map("change_sets")
+}
+
+model ChangeSetPatch {
+  id               String    @id @default(cuid()) @db.VarChar(64)
+  changeSetId      String    @map("change_set_id") @db.VarChar(64)
+  targetType       String    @map("target_type") @db.VarChar(24)
+  targetId         String    @map("target_id") @db.VarChar(64)
+  field            String    @db.VarChar(32)
+  beforeHash       String    @map("before_hash") @db.VarChar(64)
+  expectedRevision Int       @map("expected_revision")
+  appliedRevision  Int?      @map("applied_revision")
+  anchor           String?
+  before           String?
+  after            String?
+  reason           String
+  selected         Boolean   @default(true)
+  createdAt        DateTime  @default(now()) @map("created_at")
+  changeSet        ChangeSet @relation(fields: [changeSetId], references: [id], onDelete: Cascade)
+
+  @@index([changeSetId, selected])
+  @@index([targetType, targetId])
+  @@map("change_set_patches")
+}
+
+model Comment {
+  id             String             @id @default(cuid()) @db.VarChar(64)
+  userId         String             @map("user_id") @db.VarChar(64)
+  targetType     CommentTargetType  @map("target_type")
+  targetId       String             @map("target_id") @db.VarChar(64)
+  novelId        String?            @map("novel_id") @db.VarChar(64)
+  chapterId      String?            @map("chapter_id") @db.VarChar(64)
+  postId         String?            @map("post_id") @db.VarChar(64)
+  parentId       String?            @map("parent_id") @db.VarChar(64)
+  rootId         String?            @map("root_id") @db.VarChar(64)
+  content        String
+  /**
+   * 作品评论的评星（1-5）；仅 targetType=novel 的根评论使用
+   */
+  rating         Int?
+  /**
+   * 段评：评论所属正文段落序号（0 起）；仅 targetType=chapter 的根评论使用
+   */
+  paragraphIndex Int?               @map("paragraph_index")
+  likeCount      Int                @default(0) @map("like_count")
+  replyCount     Int                @default(0) @map("reply_count")
+  auditStatus    ContentAuditStatus @default(pending) @map("audit_status")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+  author         User               @relation(fields: [userId], references: [id])
+  novel          Novel?             @relation(fields: [novelId], references: [id])
+  chapter        Chapter?           @relation(fields: [chapterId], references: [id])
+  post           Post?              @relation(fields: [postId], references: [id])
+  parent         Comment?           @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies        Comment[]          @relation("CommentReplies")
+  likes          CommentLike[]
+
+  @@index([targetType, targetId])
+  @@index([targetType, targetId, createdAt])
+  @@index([parentId])
+  @@index([novelId])
+  @@index([chapterId])
+  @@index([postId])
+  @@map("comments")
+}
+
+model Topic {
+  id        String      @id @default(cuid()) @db.VarChar(64)
+  name      String      @unique @db.VarChar(64)
+  slug      String      @unique @db.VarChar(80)
+  postCount Int         @default(0) @map("post_count")
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
+  posts     Post[]
+  postLinks PostTopic[]
+
+  @@map("topics")
+}
+
+/**
+ * 帖子-话题多对多关联（方案 18 §3）：# 解析出的话题全部落这里，Post.topicId 保留主话题兼容旧链路
+ */
+model PostTopic {
+  id        String   @id @default(cuid()) @db.VarChar(64)
+  postId    String   @map("post_id") @db.VarChar(64)
+  topicId   String   @map("topic_id") @db.VarChar(64)
+  createdAt DateTime @default(now()) @map("created_at")
+  post      Post     @relation(fields: [postId], references: [id])
+  topic     Topic    @relation(fields: [topicId], references: [id])
+
+  @@unique([postId, topicId])
+  @@index([topicId])
+  @@map("post_topics")
+}
+
+model Post {
+  id             String             @id @default(cuid()) @db.VarChar(64)
+  userId         String             @map("user_id") @db.VarChar(64)
+  topicId        String?            @map("topic_id") @db.VarChar(64)
+  relatedNovelId String?            @map("related_novel_id") @db.VarChar(64)
+  /**
+   * 分享的作者（分享作者主页到社区时写入）
+   */
+  sharedUserId   String?            @map("shared_user_id") @db.VarChar(64)
+  content        String
+  excerpt        String             @db.VarChar(240)
+  imageUrls      String[]           @default([]) @map("image_urls")
+  likeCount      Int                @default(0) @map("like_count")
+  commentCount   Int                @default(0) @map("comment_count")
+  favoriteCount  Int                @default(0) @map("favorite_count")
+  auditStatus    ContentAuditStatus @default(pending) @map("audit_status")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+  author         User               @relation(fields: [userId], references: [id])
+  topic          Topic?             @relation(fields: [topicId], references: [id])
+  relatedNovel   Novel?             @relation(fields: [relatedNovelId], references: [id])
+  sharedUser     User?              @relation("PostSharedUser", fields: [sharedUserId], references: [id])
+  comments       Comment[]
+  likes          PostLike[]
+  bookmarks      PostBookmark[]
+  topicLinks     PostTopic[]
+
+  @@index([userId])
+  @@index([topicId])
+  @@index([relatedNovelId])
+  @@index([sharedUserId])
+  @@index([createdAt])
+  @@index([topicId, createdAt])
+  @@index([userId, createdAt])
+  @@map("posts")
+}
+
+model PostLike {
+  id        String   @id @default(cuid()) @db.VarChar(64)
+  postId    String   @map("post_id") @db.VarChar(64)
+  userId    String   @map("user_id") @db.VarChar(64)
+  createdAt DateTime @default(now()) @map("created_at")
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@unique([postId, userId])
+  @@index([userId])
+  @@map("post_likes")
+}
+
+model PostBookmark {
+  id        String   @id @default(cuid()) @db.VarChar(64)
+  postId    String   @map("post_id") @db.VarChar(64)
+  userId    String   @map("user_id") @db.VarChar(64)
+  createdAt DateTime @default(now()) @map("created_at")
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@unique([postId, userId])
+  @@index([userId])
+  @@map("post_bookmarks")
+}
+
+model UserFollow {
+  id          String   @id @default(cuid()) @db.VarChar(64)
+  followerId  String   @map("follower_id") @db.VarChar(64)
+  followingId String   @map("following_id") @db.VarChar(64)
+  createdAt   DateTime @default(now()) @map("created_at")
+  follower    User     @relation("UserFollowFollower", fields: [followerId], references: [id], onDelete: Cascade)
+  following   User     @relation("UserFollowFollowing", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@unique([followerId, followingId])
+  @@index([followingId])
+  @@map("user_follows")
+}
+
+model NovelFavorite {
+  id        String   @id @default(cuid()) @db.VarChar(64)
+  novelId   String   @map("novel_id") @db.VarChar(64)
+  userId    String   @map("user_id") @db.VarChar(64)
+  createdAt DateTime @default(now()) @map("created_at")
+  novel     Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@unique([novelId, userId])
+  @@index([userId])
+  @@map("novel_favorites")
+}
+
+// 云端书架 + 阅读进度（每个用户对每本书一行）：
+// 有记录即在书架中；chapterId 非空表示已开始阅读，scrollPercent 记录章内位置。
+// 取代原来仅存 localStorage 的本地书架/进度，实现多设备同步。
+model ReadingProgress {
+  id            String   @id @default(cuid()) @db.VarChar(64)
+  userId        String   @map("user_id") @db.VarChar(64)
+  novelId       String   @map("novel_id") @db.VarChar(64)
+  novelTitle    String   @map("novel_title") @db.VarChar(128)
+  coverUrl      String?  @map("cover_url")
+  chapterId     String?  @map("chapter_id") @db.VarChar(64)
+  chapterTitle  String?  @map("chapter_title") @db.VarChar(128)
+  chapterOrder  Int      @default(0) @map("chapter_order")
+  totalChapters Int      @default(0) @map("total_chapters")
+  scrollPercent Float    @default(0) @map("scroll_percent")
+  addedAt       DateTime @default(now()) @map("added_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel         Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, novelId])
+  @@index([userId])
+  @@map("reading_progress")
+}
+
+// 读者去重表（阅读数 UV 化）：一人一作品仅一条，首次阅读写入后重读不累加；
+// viewCount 对外语义为「读者数」，与微信读书/Wattpad 的 UV 口径一致。
+model NovelRead {
+  id        String   @id @default(cuid()) @db.VarChar(64)
+  userId    String   @map("user_id") @db.VarChar(64)
+  novelId   String   @map("novel_id") @db.VarChar(64)
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel     Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, novelId])
+  @@index([novelId])
+  @@map("novel_reads")
+}
+
+// 阅读器段落划线（方案 20 §2.7）：段级划线，userId+chapterId+paragraphIndex 幂等唯一
+model ParagraphUnderline {
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  userId         String   @map("user_id") @db.VarChar(64)
+  novelId        String   @map("novel_id") @db.VarChar(64)
+  chapterId      String   @map("chapter_id") @db.VarChar(64)
+  paragraphIndex Int      @map("paragraph_index")
+  createdAt      DateTime @default(now()) @map("created_at")
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chapter        Chapter  @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, chapterId, paragraphIndex])
+  @@index([userId, chapterId])
+  @@map("paragraph_underlines")
+}
+
+// 推荐行为事件（推荐算法优化方案 Phase 1）：
+// 统一记录曝光/点击/开始阅读/进度/收藏/完读/弃读/不感兴趣等事件；
+// 客户端生成 eventId 幂等去重，服务端入库唯一跳过；
+// 只保留作品/用户/行为元数据，不保留正文内容（隐私优先）。
+model RecommendationEvent {
+  id               String   @id @default(cuid()) @db.VarChar(64)
+  eventId          String   @unique @map("event_id") @db.VarChar(64)
+  userId           String?  @map("user_id") @db.VarChar(64)
+  novelId          String   @map("novel_id") @db.VarChar(64)
+  surface          String   @db.VarChar(32)
+  position         Int?
+  eventType        String   @map("event_type") @db.VarChar(32)
+  dwellMs          Int?     @map("dwell_ms")
+  progressPercent  Float?   @map("progress_percent")
+  sessionId        String?  @map("session_id") @db.VarChar(64)
+  algorithmVersion String?  @map("algorithm_version") @db.VarChar(32)
+  createdAt        DateTime @default(now()) @map("created_at")
+  novel            Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([novelId, eventType])
+  @@map("recommendation_events")
+}
+
+model CommentLike {
+  id        String   @id @default(cuid()) @db.VarChar(64)
+  commentId String   @map("comment_id") @db.VarChar(64)
+  userId    String   @map("user_id") @db.VarChar(64)
+  createdAt DateTime @default(now()) @map("created_at")
+  comment   Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@unique([commentId, userId])
+  @@index([userId])
+  @@map("comment_likes")
+}
+
+model Conversation {
+  id                 String               @id @default(cuid()) @db.VarChar(64)
+  type               ConversationType     @default(direct)
+  title              String?              @db.VarChar(128)
+  avatarUrl          String?              @map("avatar_url")
+  unreadCount        Int                  @default(0) @map("unread_count")
+  lastMessagePreview String?              @map("last_message_preview") @db.VarChar(240)
+  lastMessageAt      DateTime?            @map("last_message_at")
+  createdAt          DateTime             @default(now()) @map("created_at")
+  updatedAt          DateTime             @updatedAt @map("updated_at")
+  members            ConversationMember[]
+  messages           Message[]
+
+  @@map("conversations")
+}
+
+model ConversationMember {
+  id             String       @id @default(cuid()) @db.VarChar(64)
+  conversationId String       @map("conversation_id") @db.VarChar(64)
+  userId         String       @map("user_id") @db.VarChar(64)
+  joinedAt       DateTime     @default(now()) @map("joined_at")
+  lastReadAt     DateTime?    @map("last_read_at")
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  user           User         @relation(fields: [userId], references: [id])
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+  @@map("conversation_members")
+}
+
+model Message {
+  id             String       @id @default(cuid()) @db.VarChar(64)
+  conversationId String       @map("conversation_id") @db.VarChar(64)
+  senderId       String       @map("sender_id") @db.VarChar(64)
+  type           MessageType
+  content        String
+  relatedId      String?      @map("related_id") @db.VarChar(64)
+  createdAt      DateTime     @default(now()) @map("created_at")
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  sender         User         @relation(fields: [senderId], references: [id])
+
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+model CoverAsset {
+  id             String          @id @default(cuid()) @db.VarChar(64)
+  novelId        String?         @map("novel_id") @db.VarChar(64)
+  ownerUserId    String          @map("owner_user_id") @db.VarChar(64)
+  sourceType     CoverSourceType @map("source_type")
+  imageUrl       String          @map("image_url")
+  prompt         String?
+  negativePrompt String?         @map("negative_prompt")
+  modelName      String?         @map("model_name") @db.VarChar(128)
+  width          Int?
+  height         Int?
+  createdAt      DateTime        @default(now()) @map("created_at")
+  owner          User            @relation(fields: [ownerUserId], references: [id])
+  novel          Novel?          @relation("CoverAssetCandidates", fields: [novelId], references: [id])
+  novelAsCover   Novel?          @relation("NovelCover")
+
+  @@index([ownerUserId])
+  @@index([novelId])
+  @@map("cover_assets")
+}
+
+model AiUsageLog {
+  id                String         @id @default(cuid()) @db.VarChar(64)
+  userId            String         @map("user_id") @db.VarChar(64)
+  novelId           String?        @map("novel_id") @db.VarChar(64)
+  chapterId         String?        @map("chapter_id") @db.VarChar(64)
+  coverAssetId      String?        @map("cover_asset_id") @db.VarChar(64)
+  targetType        String         @map("target_type") @db.VarChar(32)
+  targetId          String?        @map("target_id") @db.VarChar(64)
+  providerType      AiProviderType @map("provider_type")
+  providerMode      String         @map("provider_mode") @db.VarChar(16)
+  providerName      String?        @map("provider_name") @db.VarChar(40)
+  modelName         String         @map("model_name") @db.VarChar(128)
+  action            String         @db.VarChar(64)
+  requestTokens     Int?           @map("request_tokens")
+  responseTokens    Int?           @map("response_tokens")
+  /** Agent 轮号（targetType=agentRun 时有效；wrapUp 兑底调用为 null） */
+  turn              Int?           @map("turn")
+  /** 供应商返回的缓存命中/未命中输入 token（DeepSeek 顶层字段或 OpenAI prompt_tokens_details） */
+  promptCacheHitTokens  Int?       @map("prompt_cache_hit_tokens")
+  promptCacheMissTokens Int?       @map("prompt_cache_miss_tokens")
+  /** 主 Agent Run 归属；主循环等于 targetId，子 Agent 指向 parentRunId。 */
+  agentRunId        String?        @map("agent_run_id") @db.VarChar(64)
+  modelTier         String?        @map("model_tier") @db.VarChar(24)
+  multiplierBps     Int            @default(10000) @map("multiplier_bps")
+  creditChargeMilli Int            @default(0) @map("credit_charge_milli")
+  /// Frozen before a legacy/default text dispatch; null retains historical V1 replay.
+  billingSnapshot  Json?          @map("billing_snapshot")
+  usageSource      String?        @map("usage_source") @db.VarChar(24)
+  billingStatus    String?        @map("billing_status") @db.VarChar(24)
+  billingRetryAt   DateTime?      @map("billing_retry_at")
+  reservedCreditMilli Int         @default(0) @map("reserved_credit_milli")
+  reservationExpiresAt DateTime?  @map("reservation_expires_at")
+  billingEvidence Json?          @map("billing_evidence")
+  durationMs        Int            @map("duration_ms")
+  createdAt         DateTime       @default(now()) @map("created_at")
+  user              User           @relation(fields: [userId], references: [id])
+  novel             Novel?         @relation(fields: [novelId], references: [id])
+  chapter           Chapter?       @relation(fields: [chapterId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
+  @@index([targetType, targetId])
+  @@index([agentRunId, createdAt])
+  @@index([providerName, modelName, createdAt])
+  @@index([billingStatus, billingRetryAt])
+  @@index([userId, reservationExpiresAt])
+  @@map("ai_usage_logs")
+}
+
+/// 用户额度账户。金额统一使用 milli-credit（1000 milli = 1 Credit），避免浮点误差。
+model CreditAccount {
+  userId              String    @id @map("user_id") @db.VarChar(64)
+  dailyAllowanceMilli Int       @default(450000) @map("daily_allowance_milli")
+  dailyUsedMilli      Int       @default(0) @map("daily_used_milli")
+  bonusBalanceMilli   Int       @default(0) @map("bonus_balance_milli")
+  periodStartedAt     DateTime  @map("period_started_at")
+  periodEndsAt        DateTime  @map("period_ends_at")
+  suspendedAt         DateTime? @map("suspended_at")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([periodEndsAt])
+  @@index([suspendedAt])
+  @@map("credit_accounts")
+}
+
+/// 额度不可变账本：消费为负，邀请/管理员补发为正；idempotencyKey 防止网络重试重复扣款。
+model CreditLedgerEntry {
+  id              String   @id @default(cuid()) @db.VarChar(64)
+  userId          String   @map("user_id") @db.VarChar(64)
+  deltaMilli      Int      @map("delta_milli")
+  dailyDeltaMilli Int      @default(0) @map("daily_delta_milli")
+  bonusDeltaMilli Int      @default(0) @map("bonus_delta_milli")
+  kind            String   @db.VarChar(32)
+  sourceType      String   @map("source_type") @db.VarChar(40)
+  referenceId     String?  @map("reference_id") @db.VarChar(96)
+  idempotencyKey  String   @unique @map("idempotency_key") @db.VarChar(160)
+  modelTier       String?  @map("model_tier") @db.VarChar(24)
+  multiplierBps   Int      @default(10000) @map("multiplier_bps")
+  requestTokens   Int?     @map("request_tokens")
+  responseTokens  Int?     @map("response_tokens")
+  metadata        Json?
+  createdAt       DateTime @default(now()) @map("created_at")
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refundIntent    CreditRefundIntent?
+
+  @@index([userId, createdAt])
+  @@index([sourceType, createdAt])
+  @@map("credit_ledger_entries")
+}
+
+/// Durable obligation, separate from provider cost and from the credited ledger.
+model CreditRefundIntent {
+  originalEntryId String @id @map("original_entry_id") @db.VarChar(64)
+  reason          String @db.VarChar(64)
+  evidence        Json
+  attempts        Int @default(0)
+  nextAttemptAt   DateTime @default(now()) @map("next_attempt_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  settledAt       DateTime? @map("settled_at")
+  originalEntry   CreditLedgerEntry @relation(fields: [originalEntryId], references: [id], onDelete: Cascade)
+
+  @@index([settledAt, nextAttemptAt])
+  @@map("credit_refund_intents")
+}
+
+/// Frozen fixed-price dispatch receipt. Unresolved requests must never be redispatched.
+model WebToolCall {
+  id            String @id @db.VarChar(64)
+  runId         String @map("run_id") @db.VarChar(64)
+  requestHash   String @map("request_hash") @db.VarChar(64)
+  kind          String @db.VarChar(16)
+  amountMilli   Int @map("amount_milli")
+  multiplierBps Int @map("multiplier_bps")
+  status        String @default("dispatched") @db.VarChar(24)
+  outcome       Json?
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  run           AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
+  @@map("web_tool_calls")
+  modelConfigId String? @map("model_config_id") @db.VarChar(64)
+  modelConfigRevision Int? @map("model_config_revision")
+
+}
+
+/// Only original public multipliers, no credentials or configuration snapshots.
+model WebToolPriceMigration {
+  key                 String @id @db.VarChar(64)
+  previousMultiplier  Int @map("previous_multiplier")
+  previousUpdatedAt   DateTime @map("previous_updated_at")
+  appliedAt           DateTime @map("applied_at")
+
+  @@map("web_tool_price_migration_20261020")
+}
+
+model ReferralCode {
+  userId      String               @id @map("user_id") @db.VarChar(64)
+  code        String               @unique @db.VarChar(24)
+  createdAt   DateTime             @default(now()) @map("created_at")
+  user        User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  redemptions ReferralRedemption[]
+
+  @@map("referral_codes")
+}
+
+model ReferralRedemption {
+  id                 String       @id @default(cuid()) @db.VarChar(64)
+  code               String       @db.VarChar(24)
+  inviterUserId      String       @map("inviter_user_id") @db.VarChar(64)
+  inviteeUserId      String       @unique @map("invitee_user_id") @db.VarChar(64)
+  inviterRewardMilli Int          @default(300000) @map("inviter_reward_milli")
+  inviteeRewardMilli Int          @default(120000) @map("invitee_reward_milli")
+  createdAt          DateTime     @default(now()) @map("created_at")
+  referralCode       ReferralCode @relation(fields: [code], references: [code], onDelete: Restrict)
+  inviter            User         @relation("ReferralInviter", fields: [inviterUserId], references: [id], onDelete: Cascade)
+  invitee            User         @relation("ReferralInvitee", fields: [inviteeUserId], references: [id], onDelete: Cascade)
+
+  @@index([inviterUserId, createdAt])
+  @@index([code])
+  @@map("referral_redemptions")
+}
+
+/// 额度系统全局开关与公测默认值。固定使用 id=global 的单例记录。
+model CreditSystemSetting {
+  id                  String   @id @db.VarChar(32)
+  globallyPaused      Boolean  @default(false) @map("globally_paused")
+  publicBetaEnabled   Boolean  @default(true) @map("public_beta_enabled")
+  publicBetaRevision  Int      @default(0) @map("public_beta_revision")
+  dailyAllowanceMilli Int      @default(450000) @map("daily_allowance_milli")
+  resetHourUtc8       Int      @default(15) @map("reset_hour_utc8")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  @@map("credit_system_settings")
+}
+
+/// 不可变产品费率快照；状态变化另记审计事件。
+model CreditRateCard {
+  id          String @id @db.VarChar(64)
+  modelTier   String @map("model_tier") @db.VarChar(24)
+  status      String @default("draft") @db.VarChar(24)
+  price       Json
+  priceHash   String @map("price_hash") @db.VarChar(64)
+  createdBy   String @map("created_by") @db.VarChar(64)
+  createdAt   DateTime @default(now()) @map("created_at")
+  revision    Int @default(0)
+  events      CreditRateCardEvent[]
+
+  @@index([modelTier, status])
+  @@map("credit_rate_cards")
+}
+
+model CreditRateCardEvent {
+  id          String @id @db.VarChar(64)
+  rateCardId  String @map("rate_card_id") @db.VarChar(64)
+  revision    Int
+  status      String @db.VarChar(24)
+  actorId     String @map("actor_id") @db.VarChar(64)
+  evidence    Json
+  createdAt   DateTime @default(now()) @map("created_at")
+  card        CreditRateCard @relation(fields: [rateCardId], references: [id], onDelete: Restrict)
+
+  @@unique([rateCardId, revision])
+  @@map("credit_rate_card_events")
+}
+
+/// 平台内置模型与用户 BYOK 模型共用配置表。真实 modelName/API Key 永不进入用户侧契约。
+model AiModelConfig {
+  id               String   @id @default(cuid()) @db.VarChar(64)
+  ownerUserId      String?  @map("owner_user_id") @db.VarChar(64)
+  key              String   @unique @db.VarChar(96)
+  provider         String   @db.VarChar(40)
+  displayName      String   @map("display_name") @db.VarChar(80)
+  modelName        String   @map("model_name") @db.VarChar(160)
+  baseUrl          String?  @map("base_url") @db.VarChar(512)
+  apiKeyCiphertext String?  @map("api_key_ciphertext")
+  tier             String?  @db.VarChar(24)
+  multiplierBps    Int      @default(10000) @map("multiplier_bps")
+  enabled          Boolean  @default(true)
+  selectable       Boolean  @default(true)
+  isDefault        Boolean  @default(false) @map("is_default")
+  sortOrder        Int      @default(1000) @map("sort_order")
+  metadata         Json?
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+  owner            User?    @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+
+  @@index([ownerUserId, enabled])
+  @@index([tier, enabled, selectable])
+  @@map("ai_model_configs")
+  revision         Int       @default(1)
+  archivedAt       DateTime? @map("archived_at")
+  archivedById     String?   @map("archived_by_id") @db.VarChar(64)
+  archiveReason    String?   @map("archive_reason") @db.VarChar(1000)
+  systemBindings   AiModelSystemBinding[]
+  versions         AiModelConfigVersion[]
+
+}
+
+model AgentSession {
+  id                 String              @id @default(cuid()) @db.VarChar(64)
+  userId             String              @map("user_id") @db.VarChar(64)
+  novelId            String              @map("novel_id") @db.VarChar(64)
+  title              String              @db.VarChar(160)
+  status             AgentSessionStatus  @default(active)
+  pinnedAt           DateTime?           @map("pinned_at")
+  toolPolicy         Json?               @map("tool_policy")
+  sandboxMode        String              @default("workspace") @map("sandbox_mode") @db.VarChar(24)
+  lastRunAt          DateTime?           @map("last_run_at")
+  // 任务分支溯源：只存 id 不建外键，源任务被删后分支仍独立可用（分支即完整副本）
+  forkedFromSessionId String?            @map("forked_from_session_id") @db.VarChar(64)
+  /** 从哪条对话切出的分支；整任务复制时为空 */
+  forkedFromMessageId String?            @map("forked_from_message_id") @db.VarChar(64)
+  /** 切分支的时刻：晚于它的消息即分支内新增对话，用于收起「从聊天中继续」提示 */
+  forkedAt           DateTime?           @map("forked_at")
+  // 跨任务编排派生溯源：非空即该任务窗口由另一任务的 task_spawn 创建，
+  // loop 组装工具时据此剥除编排工具，防止派生窗口再派生形成并发爆炸
+  spawnedFromSessionId String?           @map("spawned_from_session_id") @db.VarChar(64)
+  /** 派生它的那个 run：供作者回溯是哪轮编排拉起的分支 */
+  spawnedFromRunId   String?             @map("spawned_from_run_id") @db.VarChar(64)
+  createdAt          DateTime            @default(now()) @map("created_at")
+  updatedAt          DateTime            @updatedAt @map("updated_at")
+  user               User                @relation(fields: [userId], references: [id])
+  novel              Novel               @relation(fields: [novelId], references: [id])
+  runs               AgentRun[]
+  directives         UserDirective[]
+  contextCheckpoints ContextCheckpoint[]
+  parentSubtasks     AgentSubtask[]       @relation("ParentAgentSubtask")
+  childSubtasks      AgentSubtask[]       @relation("ChildAgentSubtask")
+  schedules          AgentSchedule[]
+  queuedRequests     AgentQueuedRequest[]
+  goals              AgentGoal[]
+
+  @@index([userId, novelId])
+  @@index([novelId, updatedAt])
+  @@index([forkedFromSessionId])
+  @@index([spawnedFromSessionId])
+  @@unique([id, userId, novelId])
+  @@map("agent_sessions")
+}
+
+// Persistent goals are additive: existing task roots and authorizations stay immutable.
+model AgentGoal {
+  id                String @id @default(cuid()) @db.VarChar(64)
+  userId            String @map("user_id") @db.VarChar(64)
+  novelId           String @map("novel_id") @db.VarChar(64)
+  sessionId         String @map("session_id") @db.VarChar(64)
+  currentRevision   Int @default(1) @map("current_revision")
+  pendingRevision   Int? @map("pending_revision")
+  resumeStatus      String? @map("resume_status") @db.VarChar(24)
+  status            String @default("active") @db.VarChar(24)
+  phase             String @default("queued") @db.VarChar(24)
+  stateVersion      Int @default(1) @map("state_version")
+  epoch             BigInt @default(1)
+  currentRunId      String? @map("current_run_id") @db.VarChar(64)
+  executionOptions  Json @map("execution_options")
+  continuationIndex Int @default(0) @map("continuation_index")
+  reasonCode        String? @map("reason_code") @db.VarChar(96)
+  nextEligibleAt    DateTime? @map("next_eligible_at")
+  blockFingerprint  String? @map("block_fingerprint") @db.VarChar(64)
+  blockCount        Int @default(0) @map("block_count")
+  progressHash      String? @map("progress_hash") @db.VarChar(64)
+  activeSince       DateTime? @map("active_since")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  finishedAt        DateTime? @map("finished_at")
+  session           AgentSession @relation(fields: [sessionId, userId, novelId], references: [id, userId, novelId], onDelete: Cascade)
+  revisions         AgentGoalRevision[]
+  executions        AgentGoalExecution[]
+  budget            AgentGoalBudget?
+  events            AgentGoalEvent[]
+  evidence          AgentGoalEvidence[]
+  usage             AgentGoalUsage[]
+  // A partial unique session index for non-terminal goals is installed by migration.
+  @@index([status, nextEligibleAt])
+  @@index([userId, sessionId, createdAt])
+  @@map("agent_goals")
+}
+
+model AgentGoalRevision {
+  goalId        String @map("goal_id") @db.VarChar(64)
+  revision      Int
+  objective     String
+  request       Json
+  authorityHash String @map("authority_hash") @db.VarChar(64)
+  sourceActionId String @map("source_action_id") @db.VarChar(64)
+  createdAt     DateTime @default(now()) @map("created_at")
+  goal          AgentGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  @@id([goalId, revision])
+  @@map("agent_goal_revisions")
+}
+
+model AgentGoalExecution {
+  id                String @id @default(cuid()) @db.VarChar(64)
+  goalId            String @map("goal_id") @db.VarChar(64)
+  goalRevision      Int @map("goal_revision")
+  epoch             BigInt
+  taskRootId        String? @map("task_root_id") @db.VarChar(64)
+  runId             String @unique @map("run_id") @db.VarChar(64)
+  continuationIndex Int @map("continuation_index")
+  trigger           String @db.VarChar(32)
+  sourceEventId     String @unique @map("source_event_id") @db.VarChar(160)
+  createdAt         DateTime @default(now()) @map("created_at")
+  goal              AgentGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  run               AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  @@unique([goalId, continuationIndex])
+  @@index([goalId, goalRevision])
+  @@map("agent_goal_executions")
+}
+
+model AgentGoalBudget {
+  goalId            String @id @map("goal_id") @db.VarChar(64)
+  tokenLimit        BigInt @map("token_limit")
+  platformTokenCap  BigInt @map("platform_token_cap")
+  tokensUsed        BigInt @default(0) @map("tokens_used")
+  tokensReserved    BigInt @default(0) @map("tokens_reserved")
+  creditsUsedMicros BigInt @default(0) @map("credits_used_micros")
+  activeTimeMs      BigInt @default(0) @map("active_time_ms")
+  activeTimeLimitMs BigInt @map("active_time_limit_ms")
+  platformTimeCapMs BigInt @map("platform_time_cap_ms")
+  goal              AgentGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  @@map("agent_goal_budgets")
+}
+
+model AgentGoalEvent {
+  id             String @id @default(cuid()) @db.VarChar(64)
+  sequence       Int @unique @default(autoincrement())
+  goalId         String @map("goal_id") @db.VarChar(64)
+  sessionId      String @map("session_id") @db.VarChar(64)
+  stateVersion   Int @map("state_version")
+  goalRevision   Int @map("goal_revision")
+  type           String @db.VarChar(48)
+  payload        Json
+  createdAt      DateTime @default(now()) @map("created_at")
+  goal           AgentGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  @@unique([goalId, stateVersion])
+  @@index([sessionId, sequence])
+  @@map("agent_goal_events")
+}
+
+model AgentGoalCommand {
+  userId      String @map("user_id") @db.VarChar(64)
+  requestId   String @map("request_id") @db.VarChar(64)
+  requestHash String @map("request_hash") @db.VarChar(64)
+  response    Json
+  createdAt   DateTime @default(now()) @map("created_at")
+  @@id([userId, requestId])
+  @@map("agent_goal_commands")
+}
+
+model AgentGoalEvidence {
+  id          String @id @default(cuid()) @db.VarChar(64)
+  goalId      String @map("goal_id") @db.VarChar(64)
+  revision    Int
+  criterionId String @map("criterion_id") @db.VarChar(64)
+  description String
+  kind        String @db.VarChar(32)
+  targetId    String? @map("target_id") @db.VarChar(64)
+  status      String @default("pending") @db.VarChar(24)
+  receipt     Json
+  verifiedAt  DateTime? @map("verified_at")
+  goal        AgentGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  @@unique([goalId, revision, criterionId])
+  @@map("agent_goal_evidence")
+}
+
+model AgentGoalUsage {
+  sourceKey       String @id @map("source_key") @db.VarChar(192)
+  goalId          String @map("goal_id") @db.VarChar(64)
+  runId           String @map("run_id") @db.VarChar(64)
+  reservedTokens  BigInt @default(0) @map("reserved_tokens")
+  inputTokens     BigInt @default(0) @map("input_tokens")
+  outputTokens    BigInt @default(0) @map("output_tokens")
+  creditsMicros   BigInt @default(0) @map("credits_micros")
+  status          String @default("reserved") @db.VarChar(24)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  goal            AgentGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  @@index([goalId, status])
+  @@map("agent_goal_usage")
+}
+
+model AgentQueuedRequest {
+  id          String @id @db.VarChar(64)
+  sequence    Int @unique @default(autoincrement())
+  sessionId   String @map("session_id") @db.VarChar(64)
+  userId      String @map("user_id") @db.VarChar(64)
+  payload     Json
+  status      String @default("pending") @db.VarChar(24)
+  priority    Int @default(0)
+  revision    Int @default(0)
+  runId       String? @unique @map("run_id") @db.VarChar(64)
+  error       String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  session     AgentSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([sessionId, status, priority, sequence])
+  @@map("agent_queued_requests")
+}
+
+model StoryBranch {
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  userId         String   @map("user_id") @db.VarChar(64)
+  novelId        String   @map("novel_id") @db.VarChar(64)
+  chapterId      String   @map("chapter_id") @db.VarChar(64)
+  sourceRunId    String?  @map("source_run_id") @db.VarChar(64)
+  name           String   @db.VarChar(160)
+  baseRevision   Int      @map("base_revision")
+  baseContent    String   @map("base_content")
+  headContent    String   @map("head_content")
+  status         String   @default("active") @db.VarChar(24)
+  mergedAt       DateTime? @map("merged_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel          Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  chapter        Chapter  @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  sourceRun      AgentRun? @relation(fields: [sourceRunId], references: [id], onDelete: SetNull)
+
+  @@index([userId, novelId, updatedAt])
+  @@index([chapterId, status])
+  @@map("story_branches")
+}
+
+model AgentSubtask {
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  userId         String   @map("user_id") @db.VarChar(64)
+  novelId        String   @map("novel_id") @db.VarChar(64)
+  parentSessionId String? @map("parent_session_id") @db.VarChar(64)
+  childSessionId String?  @map("child_session_id") @db.VarChar(64)
+  childRunId     String?  @map("child_run_id") @db.VarChar(64)
+  name           String   @default("未命名子 Agent") @db.VarChar(160)
+  role           String   @db.VarChar(32)
+  triggerCondition String @default("由主 Agent 或其他子 Agent 在任务匹配时调用") @map("trigger_condition")
+  callableBy     String   @default("main_and_subagents") @map("callable_by") @db.VarChar(32)
+  prompt         String
+  tokenBudget    Int      @default(4000) @map("token_budget")
+  status         String   @default("ready") @db.VarChar(24)
+  enabled        Boolean  @default(true) @map("enabled")
+  cancelledAt    DateTime? @map("cancelled_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel          Novel        @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  parentSession  AgentSession? @relation("ParentAgentSubtask", fields: [parentSessionId], references: [id], onDelete: SetNull)
+  childSession   AgentSession? @relation("ChildAgentSubtask", fields: [childSessionId], references: [id], onDelete: SetNull)
+  childRun       AgentRun?    @relation(fields: [childRunId], references: [id], onDelete: SetNull)
+  runs           AgentSubtaskRun[]
+
+  @@index([userId, novelId, createdAt])
+  @@index([parentSessionId, createdAt])
+  @@map("agent_subtasks")
+}
+
+/// 子 Agent 内嵌调用记录：主 run 像调工具一样同步执行子 Agent 时落一条，不再新开任务窗口
+model AgentSubtaskRun {
+  id            String   @id @default(cuid()) @db.VarChar(64)
+  subtaskId     String   @map("subtask_id") @db.VarChar(64)
+  parentRunId   String?  @map("parent_run_id") @db.VarChar(64)
+  userId        String   @map("user_id") @db.VarChar(64)
+  novelId       String   @map("novel_id") @db.VarChar(64)
+  chapterId     String?  @map("chapter_id") @db.VarChar(64)
+  task          String
+  status        String   @default("running") @db.VarChar(24)
+  resultSummary String?  @map("result_summary")
+  steps         Json?
+  usage         Json?
+  startedAt     DateTime? @map("started_at")
+  finishedAt    DateTime? @map("finished_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+  subtask    AgentSubtask @relation(fields: [subtaskId], references: [id], onDelete: Cascade)
+  parentRun  AgentRun?    @relation(fields: [parentRunId], references: [id], onDelete: SetNull)
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel      Novel        @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@index([subtaskId, createdAt])
+  @@index([userId, status])
+  @@map("agent_subtask_runs")
+}
+
+model AgentSchedule {
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  userId         String   @map("user_id") @db.VarChar(64)
+  novelId        String   @map("novel_id") @db.VarChar(64)
+  sessionId      String   @map("session_id") @db.VarChar(64)
+  name           String   @db.VarChar(160)
+  prompt         String
+  cadenceMinutes Int      @map("cadence_minutes")
+  nextRunAt      DateTime @map("next_run_at")
+  lastRunId      String?  @map("last_run_id") @db.VarChar(64)
+  status         String   @default("active") @db.VarChar(24)
+  lockedAt       DateTime? @map("locked_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel          Novel        @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  session        AgentSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  lastRun        AgentRun?    @relation(fields: [lastRunId], references: [id], onDelete: SetNull)
+
+  @@index([status, nextRunAt])
+  @@index([userId, novelId, updatedAt])
+  @@map("agent_schedules")
+  modelConfigId String? @map("model_config_id") @db.VarChar(64)
+
+}
+
+model AgentEvalComparison {
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  userId         String   @map("user_id") @db.VarChar(64)
+  novelId        String   @map("novel_id") @db.VarChar(64)
+  name           String   @db.VarChar(160)
+  runIds         Json     @map("run_ids")
+  metrics        Json
+  createdAt      DateTime @default(now()) @map("created_at")
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel          Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@index([userId, novelId, createdAt])
+  @@map("agent_eval_comparisons")
+}
+
+model AgentRun {
+  incomingChildGrant AgentChildExecutionGrant? @relation("ChildExecutionRun")
+  admittedChildGrants AgentChildExecutionGrant[] @relation("ChildAdmissionRun")
+  currentChildGrants AgentChildExecutionGrant[] @relation("ChildCurrentParent")
+  configurationChanges AgentConfigurationChange[]
+  goalExecution     AgentGoalExecution?
+  manuscriptRevision Int @default(0) @map("manuscript_revision")
+  id                 String                 @id @default(cuid()) @db.VarChar(64)
+  sessionId          String                 @map("session_id") @db.VarChar(64)
+  userId             String                 @map("user_id") @db.VarChar(64)
+  novelId            String                 @map("novel_id") @db.VarChar(64)
+  chapterId          String?                @map("chapter_id") @db.VarChar(64)
+  mode               AgentRunMode
+  action             AgentActionKind
+  agentType          AgentType              @map("agent_type")
+  status             AgentRunStatus         @default(queued)
+  inputSummary       String?                @map("input_summary")
+  startRequest       Json?                  @map("start_request")
+  outputSummary      String?                @map("output_summary")
+  errorMessage       String?                @map("error_message")
+  engine             String                 @default("legacy") @db.VarChar(16)
+  currentTurn        Int                    @default(0) @map("current_turn")
+  usage              Json?
+  taskSpec           Json?                  @map("task_spec")
+  writingBindings    Json?                  @map("writing_bindings")
+  taskRootId         String?                @map("task_root_id") @db.VarChar(64)
+  runtimeProtocolVersion Int                @default(0) @map("runtime_protocol_version")
+  modelTier          String                 @default("speed") @map("model_tier") @db.VarChar(24)
+  customModelId      String?                @map("custom_model_id") @db.VarChar(64)
+  reasoningEffort    String                 @default("high") @map("reasoning_effort") @db.VarChar(16)
+  startedAt          DateTime?              @map("started_at")
+  finishedAt         DateTime?              @map("finished_at")
+  createdAt          DateTime               @default(now()) @map("created_at")
+  updatedAt          DateTime               @updatedAt @map("updated_at")
+  session            AgentSession           @relation(fields: [sessionId], references: [id])
+  user               User                   @relation(fields: [userId], references: [id])
+  novel              Novel                  @relation(fields: [novelId], references: [id])
+  chapter            Chapter?               @relation(fields: [chapterId], references: [id])
+  artifacts          AgentArtifact[]
+  researchSources    AgentResearchSource[]
+  researchRequests   AgentResearchRequest[]
+  webToolCalls       WebToolCall[]
+  memoryEntries      ProjectMemoryEntry[]
+  messages           AgentMessage[]
+  events             AgentRunEvent[]
+  skillRun           AgentSkillRun?
+  contextCheckpoints ContextCheckpoint[]
+  storyCompilations  StoryCompilation[]
+  qualityReports     ChapterQualityReport[]
+  retrievalTraces    RetrievalTrace[]
+  leakageChecks      LeakageCheck[]
+  sourceBranches     StoryBranch[]
+  childSubtasks      AgentSubtask[]
+  subtaskRuns        AgentSubtaskRun[]
+  scheduleRuns       AgentSchedule[]
+  taskRoot           AgentTaskRoot?         @relation(fields: [taskRootId], references: [id], onDelete: NoAction)
+  executionLease     AgentRunLease?
+  eventProjections   AgentEventProjection[]
+
+  @@index([sessionId, createdAt])
+  @@index([userId, createdAt])
+  @@index([novelId, createdAt])
+  @@index([taskRootId, createdAt])
+  @@map("agent_runs")
+  modelConfigId       String? @map("model_config_id") @db.VarChar(64)
+  modelConfigRevision Int? @map("model_config_revision")
+  modelPriceSnapshot Json? @map("model_price_snapshot")
+
+}
+
+/// B0 expansion: original scope is immutable; session/novel IDs survive history pruning.
+model AgentTaskRoot {
+  childExecutionGrants AgentChildExecutionGrant[]
+  id                 String   @id @db.VarChar(64)
+  userId             String   @map("user_id") @db.VarChar(64)
+  sessionId          String   @map("session_id") @db.VarChar(64)
+  novelId            String   @map("novel_id") @db.VarChar(64)
+  protocolVersion    Int      @default(1) @map("protocol_version")
+  authorizationMode  String   @default("legacy") @map("authorization_mode") @db.VarChar(24)
+  sourceMessageId    String   @map("source_message_id") @db.VarChar(64)
+  inputHash          String   @map("input_hash") @db.VarChar(64)
+  specSnapshot       Json     @map("spec_snapshot")
+  requestSnapshot    Json     @map("request_snapshot")
+  status             String   @default("active") @db.VarChar(24)
+  createdAt          DateTime @default(now()) @map("created_at")
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  runs               AgentRun[]
+  operations         AgentOperation[]
+  events             AgentExecutionOutbox[]
+  budget             AgentTaskBudget?
+  checkpoints        AgentRuntimeCheckpoint[]
+  executionState     AgentExecutionState?
+  executionFrames    AgentExecutionFrame[]
+
+  @@index([userId, sessionId, createdAt])
+  @@map("agent_task_roots")
+}
+
+model AgentTaskBudget {
+  taskRootId         String   @id @map("task_root_id") @db.VarChar(64)
+  policy             Json
+  policyHash         String   @map("policy_hash") @db.VarChar(64)
+  tokenLimit         Int      @map("token_limit")
+  checkpointCount    Int      @default(0) @map("checkpoint_count")
+  compactionCount    Int      @default(0) @map("compaction_count")
+  createdAt          DateTime @default(now()) @map("created_at")
+  taskRoot           AgentTaskRoot @relation(fields: [taskRootId], references: [id], onDelete: Cascade)
+
+  @@map("agent_task_budgets")
+}
+
+model AgentExecutionState {
+  taskRootId String @id @map("task_root_id") @db.VarChar(64)
+  configuration Json
+  configurationHash String @map("configuration_hash") @db.VarChar(64)
+  revision Int @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+  taskRoot AgentTaskRoot @relation(fields: [taskRootId], references: [id], onDelete: Cascade, map: "agent_execution_states_root_fkey")
+
+  @@map("agent_execution_states")
+}
+
+/// Sparse user preferences. Empty scopeKey is global; otherwise it equals the owned novel id.
+model AgentModelAssignment {
+  id String @id @default(cuid()) @db.VarChar(64)
+  userId String @map("user_id") @db.VarChar(64)
+  scopeKey String @map("scope_key") @db.VarChar(64)
+  novelId String? @map("novel_id") @db.VarChar(64)
+  revision Int @default(1)
+  assignments Json
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel Novel? @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, scopeKey])
+  @@index([novelId])
+  @@map("agent_model_assignments")
+}
+
+model AgentConfigurationChange {
+  id String @id @default(cuid()) @db.VarChar(64)
+  runId String @map("run_id") @db.VarChar(64)
+  callId String @map("call_id") @db.VarChar(160)
+  requestHash String @map("request_hash") @db.VarChar(64)
+  response Json
+  createdAt DateTime @default(now()) @map("created_at")
+  run AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  @@unique([runId, callId])
+  @@map("agent_configuration_changes")
+}
+
+model AgentExecutionFrame {
+  taskRootId String @map("task_root_id") @db.VarChar(64)
+  revision Int
+  originRunId String @map("origin_run_id") @db.VarChar(64)
+  previousHash String? @map("previous_hash") @db.VarChar(64)
+  snapshot Json
+  snapshotHash String @map("snapshot_hash") @db.VarChar(64)
+  createdAt DateTime @default(now()) @map("created_at")
+  taskRoot AgentTaskRoot @relation(fields: [taskRootId], references: [id], onDelete: Cascade, map: "agent_execution_frames_root_fkey")
+
+  @@id([taskRootId, revision])
+  @@map("agent_execution_frames")
+}
+
+model AgentRuntimeCheckpoint {
+  taskRootId         String @map("task_root_id") @db.VarChar(64)
+  checkpointIndex    Int @map("checkpoint_index")
+  originRunId        String @map("origin_run_id") @db.VarChar(64)
+  progressOperationId String @unique @map("progress_operation_id") @db.VarChar(64)
+  requestHash        String @map("request_hash") @db.VarChar(64)
+  snapshot           Json
+  snapshotHash       String @map("snapshot_hash") @db.VarChar(64)
+  createdAt          DateTime @default(now()) @map("created_at")
+  taskRoot           AgentTaskRoot @relation(fields: [taskRootId], references: [id], onDelete: Cascade)
+  progressOperation  AgentOperation @relation(fields: [progressOperationId, taskRootId], references: [id, taskRootId], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([taskRootId, checkpointIndex])
+  @@map("agent_runtime_checkpoints")
+}
+
+model AgentRunLease {
+  runId              String   @id @map("run_id") @db.VarChar(64)
+  ownerId            String?  @map("owner_id") @db.VarChar(96)
+  claimId            String?  @map("claim_id") @db.VarChar(64)
+  epoch              BigInt   @default(0)
+  expiresAt          DateTime? @map("expires_at")
+  enabled            Boolean  @default(true)
+  updatedAt          DateTime @updatedAt @map("updated_at")
+  run                AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([enabled, expiresAt])
+  @@map("agent_run_leases")
+}
+
+model AgentOperation {
+  childExecutionGrants AgentChildExecutionGrant[]
+  id                 String   @id @db.VarChar(64)
+  taskRootId         String   @map("task_root_id") @db.VarChar(64)
+  operationKey       String   @map("operation_key") @db.VarChar(160)
+  parentOperationId  String?  @map("parent_operation_id") @db.VarChar(64)
+  originRunId        String   @map("origin_run_id") @db.VarChar(64)
+  kind               String   @db.VarChar(24)
+  action             String   @db.VarChar(96)
+  inputHash          String   @map("input_hash") @db.VarChar(64)
+  inputSnapshot      Json?    @map("input_snapshot")
+  checkpoints        AgentRuntimeCheckpoint[]
+  status             String   @default("prepared") @db.VarChar(24)
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+  taskRoot           AgentTaskRoot @relation(fields: [taskRootId], references: [id], onDelete: Cascade)
+  parent             AgentOperation? @relation("OperationParent", fields: [parentOperationId, taskRootId], references: [id, taskRootId], onDelete: NoAction, onUpdate: NoAction)
+  children           AgentOperation[] @relation("OperationParent")
+  attempts           AgentProviderAttempt[]
+  effectReceipt      AgentEffectReceipt?
+  events             AgentExecutionOutbox[]
+
+  @@unique([taskRootId, operationKey])
+  @@unique([id, taskRootId])
+  @@index([taskRootId, status, createdAt])
+  @@map("agent_operations")
+}
+
+/// A server-issued delegation. ChildRunId is the sole canonical execution identity.
+model AgentChildExecutionGrant {
+  id String @id @db.VarChar(64)
+  parentRootId String @map("parent_root_id") @db.VarChar(64)
+  parentOperationId String @map("parent_operation_id") @db.VarChar(64)
+  childIndex Int @map("child_index")
+  admissionRunId String @map("admission_run_id") @db.VarChar(64)
+  admissionEpoch BigInt @map("admission_epoch")
+  currentParentRunId String @map("current_parent_run_id") @db.VarChar(64)
+  generation BigInt
+  childRunId String @unique @map("child_run_id") @db.VarChar(64)
+  kind String @db.VarChar(16)
+  tokenCeiling Int @map("token_ceiling")
+  snapshot Json
+  snapshotHash String @map("snapshot_hash") @db.VarChar(64)
+  status String @default("admitted") @db.VarChar(24)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  parentRoot AgentTaskRoot @relation(fields: [parentRootId], references: [id], onDelete: Cascade)
+  parentOperation AgentOperation @relation(fields: [parentOperationId, parentRootId], references: [id, taskRootId], onDelete: NoAction, onUpdate: NoAction)
+  admissionRun AgentRun @relation("ChildAdmissionRun", fields: [admissionRunId], references: [id], onDelete: NoAction)
+  currentParentRun AgentRun @relation("ChildCurrentParent", fields: [currentParentRunId], references: [id], onDelete: NoAction)
+  childRun AgentRun @relation("ChildExecutionRun", fields: [childRunId], references: [id], onDelete: NoAction)
+  @@unique([parentOperationId, childIndex])
+  @@index([parentRootId, status])
+  @@index([currentParentRunId, generation])
+  @@map("agent_child_execution_grants")
+}
+
+model AgentProviderAttempt {
+  id                 String   @id @db.VarChar(64)
+  operationId        String   @map("operation_id") @db.VarChar(64)
+  attemptKey         String   @map("attempt_key") @db.VarChar(64)
+  runId              String   @map("run_id") @db.VarChar(64)
+  ownerEpoch         BigInt   @map("owner_epoch")
+  provider           String   @db.VarChar(96)
+  model              String   @db.VarChar(160)
+  requestHash        String   @map("request_hash") @db.VarChar(64)
+  requestSnapshot    Json?    @map("request_snapshot")
+  status             String   @default("prepared") @db.VarChar(24)
+  dispatchedAt       DateTime? @map("dispatched_at")
+  completedAt        DateTime? @map("completed_at")
+  result             Json?
+  resultHash         String?  @map("result_hash") @db.VarChar(64)
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+  operation          AgentOperation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  usageReceipt       AgentProviderUsageReceipt?
+
+  @@unique([operationId, attemptKey])
+  @@index([status, updatedAt])
+  @@map("agent_provider_attempts")
+}
+
+/// Latest cumulative observation, not an additive charge per SSE frame.
+model AgentProviderUsageReceipt {
+  attemptId          String   @id @map("attempt_id") @db.VarChar(64)
+  revision           Int      @default(1)
+  source             String   @db.VarChar(24)
+  promptTokens       Int?     @map("prompt_tokens")
+  completionTokens   Int?     @map("completion_tokens")
+  cacheHitTokens     Int?     @map("cache_hit_tokens")
+  cacheMissTokens    Int?     @map("cache_miss_tokens")
+  observationHash    String   @map("observation_hash") @db.VarChar(64)
+  settlementStatus   String   @default("pending") @map("settlement_status") @db.VarChar(24)
+  observedAt         DateTime @default(now()) @map("observed_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+  attempt            AgentProviderAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+
+  @@index([settlementStatus, updatedAt])
+  @@map("agent_provider_usage_receipts")
+}
+
+model AgentEffectReceipt {
+  operationId        String   @id @map("operation_id") @db.VarChar(64)
+  runId              String   @map("run_id") @db.VarChar(64)
+  ownerEpoch         BigInt   @map("owner_epoch")
+  result             Json
+  resultHash         String   @map("result_hash") @db.VarChar(64)
+  createdAt          DateTime @default(now()) @map("created_at")
+  operation          AgentOperation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+
+  @@map("agent_effect_receipts")
+}
+
+model AgentExecutionOutbox {
+  id                 String   @id @db.VarChar(64)
+  sequence           BigInt   @unique @default(autoincrement())
+  taskRootId         String   @map("task_root_id") @db.VarChar(64)
+  operationId        String?  @map("operation_id") @db.VarChar(64)
+  runId              String   @map("run_id") @db.VarChar(64)
+  eventKey           String   @unique @map("event_key") @db.VarChar(160)
+  type               String   @db.VarChar(48)
+  payload            Json
+  createdAt          DateTime @default(now()) @map("created_at")
+  publishedAt        DateTime? @map("published_at")
+  taskRoot           AgentTaskRoot @relation(fields: [taskRootId], references: [id], onDelete: Cascade)
+  operation          AgentOperation? @relation(fields: [operationId, taskRootId], references: [id, taskRootId], onDelete: NoAction, onUpdate: NoAction)
+  projections        AgentEventProjection[]
+
+  @@index([publishedAt, sequence])
+  @@index([runId, sequence])
+  @@map("agent_execution_outbox")
+}
+
+model AgentSkillRun {
+  id              String   @id @default(cuid()) @db.VarChar(64)
+  runId           String   @unique @map("run_id") @db.VarChar(64)
+  userId          String   @map("user_id") @db.VarChar(64)
+  novelId         String   @map("novel_id") @db.VarChar(64)
+  phase           String   @db.VarChar(24)
+  routerVersion   String   @map("router_version") @db.VarChar(32)
+  candidates      Json
+  selected        Json
+  loaded          Json
+  reasonCodes     Json     @map("reason_codes")
+  confidence      Float
+  estimatedTokens Int      @default(0) @map("estimated_tokens")
+  qualitySignals  Json?    @map("quality_signals")
+  accepted        Boolean?
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  run             AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([novelId, createdAt])
+  @@map("agent_skill_runs")
+}
+
+model AgentSkillDefinition {
+  id             String                   @id @db.VarChar(160)
+  ownerUserId    String?                  @map("owner_user_id") @db.VarChar(64)
+  name           String                   @db.VarChar(120)
+  description    String
+  source         String                   @db.VarChar(24)
+  visibility     String                   @db.VarChar(24)
+  license        String                   @db.VarChar(64)
+  status         String                   @db.VarChar(24)
+  defaultVersion String                   @map("default_version") @db.VarChar(32)
+  createdAt      DateTime                 @default(now()) @map("created_at")
+  updatedAt      DateTime                 @updatedAt @map("updated_at")
+  versions       AgentSkillVersion[]
+  installations  AgentSkillInstallation[]
+  audits         AgentSkillAudit[]
+  evals          AgentSkillEval[]
+  shareInvites   SkillShareInvite[]
+
+  @@index([ownerUserId, status])
+  @@index([source, status])
+  @@map("agent_skill_definitions")
+}
+
+model AgentSkillVersion {
+  id           String               @id @default(cuid()) @db.VarChar(64)
+  skillId      String               @map("skill_id") @db.VarChar(160)
+  version      String               @db.VarChar(32)
+  instructions Json
+  manifest     Json
+  contentHash  String               @map("content_hash") @db.VarChar(64)
+  status       String               @db.VarChar(24)
+  createdAt    DateTime             @default(now()) @map("created_at")
+  skill        AgentSkillDefinition @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@unique([skillId, version])
+  @@index([skillId, createdAt])
+  @@map("agent_skill_versions")
+}
+
+model AgentSkillInstallation {
+  id            String               @id @default(cuid()) @db.VarChar(64)
+  skillId       String               @map("skill_id") @db.VarChar(160)
+  userId        String               @map("user_id") @db.VarChar(64)
+  scope         String               @db.VarChar(24)
+  scopeId       String               @map("scope_id") @db.VarChar(64)
+  enabled       Boolean              @default(true)
+  lockedVersion String?              @map("locked_version") @db.VarChar(32)
+  priority      Int                  @default(0)
+  createdAt     DateTime             @default(now()) @map("created_at")
+  updatedAt     DateTime             @updatedAt @map("updated_at")
+  skill         AgentSkillDefinition @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@unique([skillId, userId, scope, scopeId])
+  @@index([userId, scope, scopeId, enabled])
+  @@map("agent_skill_installations")
+}
+
+model AgentSkillAudit {
+  id              String               @id @default(cuid()) @db.VarChar(64)
+  skillId         String               @map("skill_id") @db.VarChar(160)
+  version         String               @db.VarChar(32)
+  status          String               @db.VarChar(24)
+  findings        Json                 @default("[]")
+  manifestHash    String               @map("manifest_hash") @db.VarChar(64)
+  createdByUserId String               @map("created_by_user_id") @db.VarChar(64)
+  createdAt       DateTime             @default(now()) @map("created_at")
+  skill           AgentSkillDefinition @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@index([skillId, version, createdAt])
+  @@map("agent_skill_audits")
+}
+
+model AgentSkillEval {
+  id         String               @id @default(cuid()) @db.VarChar(64)
+  skillId    String               @map("skill_id") @db.VarChar(160)
+  version    String               @db.VarChar(32)
+  userId     String               @map("user_id") @db.VarChar(64)
+  novelId    String               @map("novel_id") @db.VarChar(64)
+  promptHash String               @map("prompt_hash") @db.VarChar(64)
+  input      Json
+  result     Json
+  passed     Boolean
+  createdAt  DateTime             @default(now()) @map("created_at")
+  skill      AgentSkillDefinition @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@index([skillId, version, createdAt])
+  @@index([userId, novelId, createdAt])
+  @@map("agent_skill_evals")
+}
+
+// Private task evidence, never indexed as shared craft material or shown as a chapter.
+model AgentResearchSource {
+  id           String @id @db.VarChar(64)
+  ownerRunId   String @map("owner_run_id") @db.VarChar(64)
+  taskKey      String @map("task_key") @db.VarChar(200)
+  urlHash      String @map("url_hash") @db.VarChar(64)
+  canonicalUrl String @map("canonical_url") @db.VarChar(8192)
+  title        String @db.VarChar(300)
+  readFailure  Json? @map("read_failure")
+  createdAt    DateTime @default(now()) @map("created_at")
+  ownerRun     AgentRun @relation(fields: [ownerRunId], references: [id], onDelete: Cascade)
+  versions     AgentResearchContent[]
+
+  @@unique([ownerRunId, taskKey, urlHash])
+  @@index([taskKey, createdAt])
+  @@map("agent_research_sources")
+}
+
+model AgentResearchRequest {
+  id          String @id @db.VarChar(64)
+  ownerRunId  String @map("owner_run_id") @db.VarChar(64)
+  scopeKey    String @map("scope_key") @db.VarChar(64)
+  kind        String @db.VarChar(16)
+  units       Int @default(1)
+  requestKey  String @map("request_key") @db.VarChar(64)
+  requestLimit Int @map("request_limit")
+  status      String @default("reserved") @db.VarChar(24)
+  savedOutcome Json? @map("saved_outcome")
+  createdAt   DateTime @default(now()) @map("created_at")
+  ownerRun    AgentRun @relation(fields: [ownerRunId], references: [id], onDelete: Cascade)
+
+  @@index([scopeKey, kind])
+  @@map("agent_research_requests")
+}
+
+model AgentResearchContent {
+  id          String @id @db.VarChar(64)
+  sourceId    String @map("source_id") @db.VarChar(64)
+  revision    String @db.VarChar(64)
+  contentHash String @map("content_hash") @db.VarChar(64)
+  finalUrl    String @map("final_url") @db.VarChar(8192)
+  provider    String @db.VarChar(32)
+  contentKind String @map("content_kind") @db.VarChar(24)
+  text        String
+  quality     Json
+  providedRanges Json @default("[]") @map("provided_ranges")
+  createdAt   DateTime @default(now()) @map("created_at")
+  source      AgentResearchSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceId, revision])
+  @@index([sourceId, createdAt])
+  @@map("agent_research_contents")
+}
+
+model AgentArtifact {
+  id           String            @id @default(cuid()) @db.VarChar(64)
+  runId        String            @map("run_id") @db.VarChar(64)
+  artifactType AgentArtifactType @map("artifact_type")
+  title        String            @db.VarChar(160)
+  summary      String?
+  content      String
+  metadata     Json?
+  createdAt    DateTime          @default(now()) @map("created_at")
+  updatedAt    DateTime          @updatedAt @map("updated_at")
+  run          AgentRun          @relation(fields: [runId], references: [id])
+
+  @@index([runId, createdAt])
+  @@map("agent_artifacts")
+}
+
+// Explicitly reviewed historical ownership; message references alone cannot grant access.
+model LegacyAgentAttachmentGrant {
+  url           String    @id @db.VarChar(512)
+  ownerUserId   String    @map("owner_user_id") @db.VarChar(64)
+  contentSha256 String    @map("content_sha256") @db.VarChar(64)
+  evidenceRef   String    @map("evidence_ref") @db.VarChar(512)
+  approvedBy    String    @map("approved_by") @db.VarChar(128)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  revokedAt     DateTime? @map("revoked_at")
+  owner         User      @relation(fields: [ownerUserId], references: [id], onDelete: Cascade, map: "legacy_agent_attachment_grants_owner_fkey")
+
+  @@index([ownerUserId])
+  @@map("legacy_agent_attachment_grants")
+}
+
+model AgentMessage {
+  id        String   @id @default(cuid()) @db.VarChar(64)
+  runId     String   @map("run_id") @db.VarChar(64)
+  sessionId String   @map("session_id") @db.VarChar(64)
+  role      String   @db.VarChar(16)
+  parts     Json
+  createdAt DateTime @default(now()) @map("created_at")
+  run       AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@index([runId, createdAt])
+  @@map("agent_messages")
+}
+
+model UserDirective {
+  id              String              @id @default(cuid()) @db.VarChar(64)
+  userId          String              @map("user_id") @db.VarChar(64)
+  novelId         String              @map("novel_id") @db.VarChar(64)
+  sessionId       String?             @map("session_id") @db.VarChar(64)
+  volumeId        String?             @map("volume_id") @db.VarChar(64)
+  chapterId       String?             @map("chapter_id") @db.VarChar(64)
+  taskSpecId      String?             @map("task_spec_id") @db.VarChar(64)
+  scope           UserDirectiveScope
+  kind            UserDirectiveKind
+  text            String
+  status          UserDirectiveStatus @default(active)
+  sourceMessageId String              @map("source_message_id") @db.VarChar(64)
+  supersededBy    String?             @map("superseded_by") @db.VarChar(64)
+  createdAt       DateTime            @default(now()) @map("created_at")
+  updatedAt       DateTime            @updatedAt @map("updated_at")
+  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel           Novel               @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  session         AgentSession?       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([novelId, status, createdAt])
+  @@index([sessionId, status])
+  @@index([sourceMessageId])
+  @@map("user_directives")
+}
+
+model ContextCheckpoint {
+  id                 String       @id @default(cuid()) @db.VarChar(64)
+  sessionId          String       @map("session_id") @db.VarChar(64)
+  runId              String?      @map("run_id") @db.VarChar(64)
+  sourceMessageCount Int          @map("source_message_count")
+  sourceMessageIds   Json         @map("source_message_ids")
+  sourceStartedAt    DateTime     @map("source_started_at")
+  sourceEndedAt      DateTime     @map("source_ended_at")
+  sourceTokens       Int          @map("source_tokens")
+  summaryTokens      Int          @map("summary_tokens")
+  model              String       @db.VarChar(128)
+  version            Int          @default(1)
+  sourceHash         String       @map("source_hash") @db.VarChar(64)
+  summary            Json
+  validation         Json
+  createdAt          DateTime     @default(now()) @map("created_at")
+  session            AgentSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  run                AgentRun?    @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([sessionId, createdAt])
+  @@unique([sessionId, sourceHash])
+  @@map("context_checkpoints")
+}
+
+model AgentRunEvent {
+  id        String   @id @default(cuid()) @db.VarChar(64)
+  runId     String   @map("run_id") @db.VarChar(64)
+  seq       Int
+  type      String   @db.VarChar(48)
+  payload   Json
+  createdAt DateTime @default(now()) @map("created_at")
+  run       AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  projection AgentEventProjection?
+
+  @@unique([runId, seq])
+  @@index([type, createdAt])
+  @@map("agent_run_events")
+}
+
+/// One durable source may project into multiple UI events, once per destination run.
+model AgentEventProjection {
+  runId       String @map("run_id") @db.VarChar(64)
+  sourceId    String @map("source_id") @db.VarChar(64)
+  partIndex   Int @default(0) @map("part_index")
+  eventId     String @unique @map("event_id") @db.VarChar(64)
+  sourceHash  String @map("source_hash") @db.VarChar(64)
+  eventHash   String @map("event_hash") @db.VarChar(64)
+  version     Int @default(1)
+  run         AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  source      AgentExecutionOutbox @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  event       AgentRunEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@id([runId, sourceId, partIndex])
+  @@map("agent_event_projections")
+}
+
+model ProjectMemoryEntry {
+  id              String             @id @default(cuid()) @db.VarChar(64)
+  runId           String?            @map("run_id") @db.VarChar(64)
+  novelId         String             @map("novel_id") @db.VarChar(64)
+  sourceChapterId String?            @map("source_chapter_id") @db.VarChar(64)
+  memoryType      ProjectMemoryType  @map("memory_type")
+  title           String             @db.VarChar(160)
+  content         String
+  importance      Int                @default(50)
+  embeddingRef    String?            @map("embedding_ref") @db.VarChar(255)
+  graphProposal   Json?              @map("graph_proposal")
+  layer           StoryMemoryLayer   @default(L1)
+  status          StoryMemoryStatus  @default(confirmed)
+  reviewStatus    MemoryReviewStatus @default(none) @map("review_status")
+  confidence      Float              @default(1)
+  version         Int                @default(1)
+  embedding       Json?
+  createdAt       DateTime           @default(now()) @map("created_at")
+  updatedAt       DateTime           @updatedAt @map("updated_at")
+  run             AgentRun?          @relation(fields: [runId], references: [id])
+  novel           Novel              @relation(fields: [novelId], references: [id])
+  sourceChapter   Chapter?           @relation(fields: [sourceChapterId], references: [id])
+  evidence        MemoryEvidence[]
+  revisions       MemoryRevision[]
+
+  @@index([runId])
+  @@index([novelId, memoryType])
+  @@index([sourceChapterId])
+  @@map("project_memory_entries")
+}
+
+model MemoryEvidence {
+  id         String             @id @default(cuid()) @db.VarChar(64)
+  memoryId   String             @map("memory_id") @db.VarChar(64)
+  sourceType MemorySourceType   @map("source_type")
+  sourceId   String             @map("source_id") @db.VarChar(64)
+  revision   Int?
+  spanStart  Int?               @map("span_start")
+  spanEnd    Int?               @map("span_end")
+  quoteHash  String?            @map("quote_hash") @db.VarChar(64)
+  confidence Float              @default(1)
+  createdAt  DateTime           @default(now()) @map("created_at")
+  memory     ProjectMemoryEntry @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([memoryId])
+  @@index([sourceType, sourceId])
+  @@map("memory_evidence")
+}
+
+model MemoryRevision {
+  id           String             @id @default(cuid()) @db.VarChar(64)
+  memoryId     String             @map("memory_id") @db.VarChar(64)
+  before       String
+  after        String
+  reason       String             @db.VarChar(255)
+  supersededBy String?            @map("superseded_by") @db.VarChar(64)
+  createdAt    DateTime           @default(now()) @map("created_at")
+  memory       ProjectMemoryEntry @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([memoryId, createdAt])
+  @@map("memory_revisions")
+}
+
+model StoryEntity {
+  id            String            @id @default(cuid()) @db.VarChar(64)
+  novelId       String            @map("novel_id") @db.VarChar(64)
+  entityType    String            @map("entity_type") @db.VarChar(32)
+  canonicalName String            @map("canonical_name") @db.VarChar(128)
+  description   String?
+  status        StoryMemoryStatus @default(confirmed)
+  createdAt     DateTime          @default(now()) @map("created_at")
+  updatedAt     DateTime          @updatedAt @map("updated_at")
+  novel         Novel             @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  aliases       EntityAlias[]
+  relationsFrom EntityRelation[]  @relation("RelationFrom")
+  relationsTo   EntityRelation[]  @relation("RelationTo")
+
+  @@unique([novelId, entityType, canonicalName])
+  @@index([novelId, canonicalName])
+  @@map("story_entities")
+}
+
+model EntityAlias {
+  id        String      @id @default(cuid()) @db.VarChar(64)
+  entityId  String      @map("entity_id") @db.VarChar(64)
+  alias     String      @db.VarChar(128)
+  validFrom Int?        @map("valid_from")
+  validTo   Int?        @map("valid_to")
+  sourceId  String?     @map("source_id") @db.VarChar(64)
+  entity    StoryEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@unique([entityId, alias])
+  @@index([alias])
+  @@map("entity_aliases")
+}
+
+model EntityRelation {
+  id           String      @id @default(cuid()) @db.VarChar(64)
+  fromEntityId String      @map("from_entity_id") @db.VarChar(64)
+  toEntityId   String      @map("to_entity_id") @db.VarChar(64)
+  relationType String      @map("relation_type") @db.VarChar(64)
+  state        String?
+  validFrom    Int?        @map("valid_from")
+  validTo      Int?        @map("valid_to")
+  confidence   Float       @default(1)
+  sourceId     String      @map("source_id") @db.VarChar(64)
+  revision     Int?
+  fromEntity   StoryEntity @relation("RelationFrom", fields: [fromEntityId], references: [id], onDelete: Cascade)
+  toEntity     StoryEntity @relation("RelationTo", fields: [toEntityId], references: [id], onDelete: Cascade)
+
+  @@unique([fromEntityId, toEntityId, relationType, validFrom])
+  @@index([fromEntityId])
+  @@index([toEntityId])
+  @@map("entity_relations")
+}
+
+model ForeshadowThread {
+  id         String   @id @default(cuid()) @db.VarChar(64)
+  novelId    String   @map("novel_id") @db.VarChar(64)
+  title      String   @db.VarChar(160)
+  content    String
+  plantedAt  String   @map("planted_at") @db.VarChar(64)
+  status     String   @default("open") @db.VarChar(24)
+  resolvedAt String?  @map("resolved_at") @db.VarChar(64)
+  sourceId   String   @map("source_id") @db.VarChar(64)
+  revision   Int?
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  novel      Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@index([novelId, status])
+  @@map("foreshadow_threads")
+}
+
+model StoryEvent {
+  id           String            @id @default(cuid()) @db.VarChar(64)
+  novelId      String            @map("novel_id") @db.VarChar(64)
+  title        String            @db.VarChar(160)
+  description  String
+  storyTime    String?           @map("story_time") @db.VarChar(160)
+  location     String?           @db.VarChar(160)
+  participants Json
+  causes       Json
+  effects      Json
+  sourceId     String            @map("source_id") @db.VarChar(64)
+  revision     Int?
+  status       StoryMemoryStatus @default(inferred)
+  createdAt    DateTime          @default(now()) @map("created_at")
+  novel        Novel             @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@index([novelId, createdAt])
+  @@map("story_events")
+}
+
+model MemoryExtractionJob {
+  id              String          @id @default(cuid()) @db.VarChar(64)
+  novelId         String          @map("novel_id") @db.VarChar(64)
+  chapterId       String          @map("chapter_id") @db.VarChar(64)
+  chapterRevision Int             @map("chapter_revision")
+  idempotencyKey  String          @unique @map("idempotency_key") @db.VarChar(160)
+  diff            Json
+  status          MemoryJobStatus @default(pending)
+  attempts        Int             @default(0)
+  leaseUntil      DateTime?       @map("lease_until")
+  errorMessage    String?         @map("error_message")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+  novel           Novel           @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([chapterId, chapterRevision])
+  @@map("memory_extraction_jobs")
+}
+
+model StoryCharter {
+  id                       String   @id @default(cuid()) @db.VarChar(64)
+  userId                   String   @map("user_id") @db.VarChar(64)
+  novelId                  String   @unique @map("novel_id") @db.VarChar(64)
+  oneLinePromise           String   @map("one_line_promise")
+  targetAudience           String   @map("target_audience")
+  targetPlatform           String   @default("") @map("target_platform") @db.VarChar(160)
+  protagonistDesire        String   @map("protagonist_desire")
+  protagonistFear          String   @map("protagonist_fear")
+  protagonistMisbelief     String   @map("protagonist_misbelief")
+  protagonistNonNegotiable String   @map("protagonist_non_negotiable")
+  conflictEngine           String   @map("conflict_engine")
+  relationshipEngine       String   @map("relationship_engine")
+  genreRules               Json     @map("genre_rules")
+  abilityCosts             Json     @map("ability_costs")
+  realityBoundaries        Json     @map("reality_boundaries")
+  emotionalBaseline        String   @map("emotional_baseline")
+  emotionalRange           String   @map("emotional_range")
+  styleDna                 Json     @map("style_dna")
+  forbiddenZones           Json     @map("forbidden_zones")
+  antiExamples             Json     @map("anti_examples")
+  revision                 Int      @default(1)
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @updatedAt @map("updated_at")
+  user                     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel                    Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@index([userId, updatedAt])
+  @@map("story_charters")
+}
+
+enum ResearchDossierStatus {
+  draft
+  ready
+  stale
+  failed
+}
+
+enum ResearchTriggerReason {
+  new_book
+  new_genre
+  new_arc
+  factual_risk
+  author_request
+  quality_stagnation
+}
+
+enum FirstThreePrototypeStatus {
+  planning
+  ready
+  writing
+  quality_review
+  completed
+  abandoned
+}
+
+model ResearchDossier {
+  id                   String                @id @default(cuid()) @db.VarChar(64)
+  userId               String                @map("user_id") @db.VarChar(64)
+  novelId              String                @map("novel_id") @db.VarChar(64)
+  runId                String?               @map("run_id") @db.VarChar(64)
+  version              Int
+  status               ResearchDossierStatus @default(draft)
+  triggerReason        ResearchTriggerReason @map("trigger_reason")
+  triggerSignals       Json                  @map("trigger_signals")
+  topic                String                @db.VarChar(240)
+  genre                String                @db.VarChar(96)
+  targetAudience       String                @map("target_audience") @db.VarChar(500)
+  targetPlatform       String                @default("") @map("target_platform") @db.VarChar(160)
+  readerPromise        String                @map("reader_promise")
+  abandonmentRisks     Json                  @map("abandonment_risks")
+  marketPatterns       Json                  @map("market_patterns")
+  differentiation      Json
+  factCards            Json                  @map("fact_cards")
+  languageRisks        Json                  @map("language_risks")
+  recommendations      Json
+  rejectedIdeas        Json                  @map("rejected_ideas")
+  queryPlan            Json                  @map("query_plan")
+  sources              Json
+  sourceHash           String                @map("source_hash") @db.VarChar(64)
+  cacheKey             String                @map("cache_key") @db.VarChar(64)
+  searchCount          Int                   @default(0) @map("search_count")
+  estimatedInputTokens Int                   @default(0) @map("estimated_input_tokens")
+  buildDurationMs      Int                   @default(0) @map("build_duration_ms")
+  reusedCount          Int                   @default(0) @map("reused_count")
+  expiresAt            DateTime              @map("expires_at")
+  confirmedAt          DateTime?             @map("confirmed_at")
+  createdAt            DateTime              @default(now()) @map("created_at")
+  updatedAt            DateTime              @updatedAt @map("updated_at")
+  user                 User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel                Novel                 @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  prototypes           FirstThreePrototype[]
+
+  @@unique([novelId, version])
+  @@index([userId, status, updatedAt])
+  @@index([novelId, expiresAt, status])
+  @@index([cacheKey])
+  @@map("research_dossiers")
+}
+
+model FirstThreePrototype {
+  id                String                    @id @default(cuid()) @db.VarChar(64)
+  userId            String                    @map("user_id") @db.VarChar(64)
+  novelId           String                    @map("novel_id") @db.VarChar(64)
+  dossierId         String?                   @map("dossier_id") @db.VarChar(64)
+  version           Int
+  status            FirstThreePrototypeStatus @default(planning)
+  genreRisks        Json                      @map("genre_risks")
+  directions        Json
+  selectedDirection Json?                     @map("selected_direction")
+  volumeSpine       Json                      @map("volume_spine")
+  chapterBlueprints Json                      @map("chapter_blueprints")
+  completedChapters Int                       @default(0) @map("completed_chapters")
+  passedChapters    Int                       @default(0) @map("passed_chapters")
+  createdAt         DateTime                  @default(now()) @map("created_at")
+  updatedAt         DateTime                  @updatedAt @map("updated_at")
+  user              User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel             Novel                     @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  dossier           ResearchDossier?          @relation(fields: [dossierId], references: [id], onDelete: SetNull)
+
+  @@unique([novelId, version])
+  @@index([userId, status, updatedAt])
+  @@index([novelId, status])
+  @@map("first_three_prototypes")
+}
+
+enum WritingExperimentKind {
+  first_three_direction
+  quality_revision
+  craft_retrieval
+}
+
+enum WritingExperimentStatus {
+  active
+  completed
+  withdrawn
+}
+
+model WritingExperiment {
+  id              String                  @id @default(cuid()) @db.VarChar(64)
+  userId          String                  @map("user_id") @db.VarChar(64)
+  novelId         String                  @map("novel_id") @db.VarChar(64)
+  kind            WritingExperimentKind
+  status          WritingExperimentStatus @default(active)
+  subjectHash     String                  @map("subject_hash") @db.VarChar(64)
+  arm             String                  @db.VarChar(64)
+  featureVersions Json                    @map("feature_versions")
+  exposure        Json
+  outcomes        Json
+  consentSnapshot Json                    @map("consent_snapshot")
+  startedAt       DateTime                @default(now()) @map("started_at")
+  completedAt     DateTime?               @map("completed_at")
+  createdAt       DateTime                @default(now()) @map("created_at")
+  updatedAt       DateTime                @updatedAt @map("updated_at")
+  user            User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel           Novel                   @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status, updatedAt])
+  @@index([novelId, kind, status])
+  @@index([subjectHash])
+  @@map("writing_experiments")
+}
+
+model AgentDataControl {
+  id                      String   @id @default(cuid()) @db.VarChar(64)
+  userId                  String   @map("user_id") @db.VarChar(64)
+  novelId                 String   @map("novel_id") @db.VarChar(64)
+  qualityTelemetryEnabled Boolean  @default(true) @map("quality_telemetry_enabled")
+  productAnalyticsEnabled Boolean  @default(true) @map("product_analytics_enabled")
+  privateStyleEnabled     Boolean  @default(true) @map("private_style_enabled")
+  publicCorpusOptIn       Boolean  @default(false) @map("public_corpus_opt_in")
+  createdAt               DateTime @default(now()) @map("created_at")
+  updatedAt               DateTime @updatedAt @map("updated_at")
+  user                    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel                   Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, novelId])
+  @@index([novelId, updatedAt])
+  @@map("agent_data_controls")
+}
+
+enum SkillShareInviteStatus {
+  pending
+  accepted
+  declined
+  expired
+  revoked
+}
+
+model SkillShareInvite {
+  id              String                 @id @default(cuid()) @db.VarChar(64)
+  userId          String                 @map("user_id") @db.VarChar(64)
+  novelId         String                 @map("novel_id") @db.VarChar(64)
+  recipientUserId String                 @map("recipient_user_id") @db.VarChar(64)
+  skillId         String                 @map("skill_id") @db.VarChar(160)
+  version         String                 @db.VarChar(32)
+  status          SkillShareInviteStatus @default(pending)
+  tokenHash       String                 @unique @map("token_hash") @db.VarChar(64)
+  message         String                 @default("") @db.VarChar(500)
+  expiresAt       DateTime               @map("expires_at")
+  acceptedAt      DateTime?              @map("accepted_at")
+  createdAt       DateTime               @default(now()) @map("created_at")
+  updatedAt       DateTime               @updatedAt @map("updated_at")
+  user            User                   @relation("SkillShareInviteSender", fields: [userId], references: [id], onDelete: Cascade)
+  recipient       User                   @relation("SkillShareInviteRecipient", fields: [recipientUserId], references: [id], onDelete: Cascade)
+  novel           Novel                  @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  skill           AgentSkillDefinition   @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@index([userId, novelId, status])
+  @@index([recipientUserId, status, expiresAt])
+  @@index([skillId, version])
+  @@map("skill_share_invites")
+}
+
+model ReaderPromise {
+  id            String              @id @default(cuid()) @db.VarChar(64)
+  userId        String              @map("user_id") @db.VarChar(64)
+  novelId       String              @map("novel_id") @db.VarChar(64)
+  title         String              @db.VarChar(160)
+  promise       String
+  payoffHorizon String              @map("payoff_horizon") @db.VarChar(160)
+  priority      Int                 @default(50)
+  status        ReaderPromiseStatus @default(open)
+  paidAtChapter Int?                @map("paid_at_chapter")
+  createdAt     DateTime            @default(now()) @map("created_at")
+  updatedAt     DateTime            @updatedAt @map("updated_at")
+  user          User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel         Novel               @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([novelId, status, priority])
+  @@map("reader_promises")
+}
+
+model StoryCompilation {
+  id               String                 @id @default(cuid()) @db.VarChar(64)
+  userId           String                 @map("user_id") @db.VarChar(64)
+  novelId          String                 @map("novel_id") @db.VarChar(64)
+  runId            String?                @map("run_id") @db.VarChar(64)
+  chapterId        String?                @map("chapter_id") @db.VarChar(64)
+  targetOrderIndex Int                    @map("target_order_index")
+  mode             StoryCompilerMode      @default(premium)
+  stage            StoryCompilationStage  @default(prepare)
+  status           StoryCompilationStatus @default(active)
+  sourcePromptHash String                 @map("source_prompt_hash") @db.VarChar(64)
+  preparedContext  Json                   @map("prepared_context")
+  validation       Json?
+  completedAt      DateTime?              @map("completed_at")
+  createdAt        DateTime               @default(now()) @map("created_at")
+  updatedAt        DateTime               @updatedAt @map("updated_at")
+  user             User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel            Novel                  @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  run              AgentRun?              @relation(fields: [runId], references: [id], onDelete: SetNull)
+  chapter          Chapter?               @relation(fields: [chapterId], references: [id], onDelete: SetNull)
+  sceneTasks       SceneTask[]
+  bridge           ChapterBridge?
+  qualityReports   ChapterQualityReport[]
+
+  @@index([userId, status, updatedAt])
+  @@index([novelId, targetOrderIndex, status])
+  @@index([runId])
+  @@map("story_compilations")
+}
+
+model SceneTask {
+  id            String           @id @default(cuid()) @db.VarChar(64)
+  userId        String           @map("user_id") @db.VarChar(64)
+  novelId       String           @map("novel_id") @db.VarChar(64)
+  compilationId String           @map("compilation_id") @db.VarChar(64)
+  chapterId     String?          @map("chapter_id") @db.VarChar(64)
+  ordinal       Int
+  status        SceneTaskStatus  @default(ready)
+  purpose       String
+  entryState    Json             @map("entry_state")
+  goal          String
+  obstacle      String
+  choice        String
+  cost          String
+  turn          String
+  exitState     Json             @map("exit_state")
+  styleBudget   Json             @map("style_budget")
+  createdAt     DateTime         @default(now()) @map("created_at")
+  updatedAt     DateTime         @updatedAt @map("updated_at")
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel         Novel            @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  compilation   StoryCompilation @relation(fields: [compilationId], references: [id], onDelete: Cascade)
+  chapter       Chapter?         @relation(fields: [chapterId], references: [id], onDelete: SetNull)
+
+  @@unique([compilationId, ordinal])
+  @@index([novelId, chapterId, status])
+  @@index([userId, updatedAt])
+  @@map("scene_tasks")
+}
+
+model ChapterBridge {
+  id                   String           @id @default(cuid()) @db.VarChar(64)
+  userId               String           @map("user_id") @db.VarChar(64)
+  novelId              String           @map("novel_id") @db.VarChar(64)
+  compilationId        String           @unique @map("compilation_id") @db.VarChar(64)
+  fromChapterId        String?          @map("from_chapter_id") @db.VarChar(64)
+  toChapterId          String?          @map("to_chapter_id") @db.VarChar(64)
+  targetOrderIndex     Int              @map("target_order_index")
+  sourceRevision       Int?             @map("source_revision")
+  targetRevision       Int?             @map("target_revision")
+  lastUnfinishedAction String           @default("") @map("last_unfinished_action")
+  location             String           @default("") @db.VarChar(160)
+  storyTime            String           @default("") @map("story_time") @db.VarChar(160)
+  knowledgeState       Json             @map("knowledge_state")
+  bodyState            Json             @map("body_state")
+  objectState          Json             @map("object_state")
+  relationshipState    Json             @map("relationship_state")
+  emotionAftermath     Json             @map("emotion_aftermath")
+  hookDecision         String           @default("") @map("hook_decision")
+  delayedHookReason    String           @default("") @map("delayed_hook_reason")
+  recentOpenings       Json             @map("recent_openings")
+  recentEndings        Json             @map("recent_endings")
+  openLoops            Json             @map("open_loops")
+  committedAt          DateTime?        @map("committed_at")
+  createdAt            DateTime         @default(now()) @map("created_at")
+  updatedAt            DateTime         @updatedAt @map("updated_at")
+  user                 User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel                Novel            @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  compilation          StoryCompilation @relation(fields: [compilationId], references: [id], onDelete: Cascade)
+  fromChapter          Chapter?         @relation("ChapterBridgeFrom", fields: [fromChapterId], references: [id], onDelete: SetNull)
+  toChapter            Chapter?         @relation("ChapterBridgeTo", fields: [toChapterId], references: [id], onDelete: SetNull)
+
+  @@index([novelId, targetOrderIndex, updatedAt])
+  @@index([userId, updatedAt])
+  @@map("chapter_bridges")
+}
+
+model CharacterVoiceProfile {
+  id                 String                @id @default(cuid()) @db.VarChar(64)
+  userId             String                @map("user_id") @db.VarChar(64)
+  novelId            String                @map("novel_id") @db.VarChar(64)
+  characterName      String                @map("character_name") @db.VarChar(128)
+  status             CreativeProfileStatus @default(draft)
+  vocabularyLevel    String                @map("vocabulary_level") @db.VarChar(240)
+  sentenceLength     Json                  @map("sentence_length")
+  addressSystem      Json                  @map("address_system")
+  pressureResponse   String                @map("pressure_response")
+  avoidedTopics      Json                  @map("avoided_topics")
+  attentionBias      Json                  @map("attention_bias")
+  voiceSamples       Json                  @map("voice_samples")
+  forbiddenKnowledge Json                  @map("forbidden_knowledge")
+  evolutionNotes     String                @default("") @map("evolution_notes")
+  revision           Int                   @default(1)
+  createdAt          DateTime              @default(now()) @map("created_at")
+  updatedAt          DateTime              @updatedAt @map("updated_at")
+  user               User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel              Novel                 @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@unique([novelId, characterName])
+  @@index([userId, status, updatedAt])
+  @@map("character_voice_profiles")
+}
+
+model ExperienceAnchor {
+  id               String            @id @default(cuid()) @db.VarChar(64)
+  userId           String            @map("user_id") @db.VarChar(64)
+  novelId          String            @map("novel_id") @db.VarChar(64)
+  characterName    String            @map("character_name") @db.VarChar(128)
+  title            String            @db.VarChar(160)
+  triggerEvent     String            @map("trigger_event")
+  concreteDetail   String            @map("concrete_detail")
+  sensoryCue       String            @default("") @map("sensory_cue")
+  habitualResponse String            @map("habitual_response")
+  emotionalMeaning String            @map("emotional_meaning")
+  sourceType       MemorySourceType  @map("source_type")
+  sourceId         String            @map("source_id") @db.VarChar(64)
+  sourceRevision   Int?              @map("source_revision")
+  status           StoryMemoryStatus @default(confirmed)
+  createdAt        DateTime          @default(now()) @map("created_at")
+  updatedAt        DateTime          @updatedAt @map("updated_at")
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel            Novel             @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@unique([novelId, characterName, title, sourceId])
+  @@index([userId, characterName, status])
+  @@index([novelId, characterName, updatedAt])
+  @@map("experience_anchors")
+}
+
+model ChapterQualityReport {
+  id                   String               @id @default(cuid()) @db.VarChar(64)
+  userId               String               @map("user_id") @db.VarChar(64)
+  novelId              String               @map("novel_id") @db.VarChar(64)
+  runId                String?              @map("run_id") @db.VarChar(64)
+  compilationId        String?              @map("compilation_id") @db.VarChar(64)
+  chapterId            String               @map("chapter_id") @db.VarChar(64)
+  chapterRevision      Int                  @map("chapter_revision")
+  mode                 StoryCompilerMode    @default(premium)
+  status               ChapterQualityStatus @default(analyzing)
+  repairRound          Int                  @default(0) @map("repair_round")
+  deterministicMetrics Json                 @map("deterministic_metrics")
+  criticVersion        String               @default("humanity-critic.v1") @map("critic_version") @db.VarChar(64)
+  checkedAt            DateTime?            @map("checked_at")
+  createdAt            DateTime             @default(now()) @map("created_at")
+  updatedAt            DateTime             @updatedAt @map("updated_at")
+  user                 User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel                Novel                @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  run                  AgentRun?            @relation(fields: [runId], references: [id], onDelete: SetNull)
+  compilation          StoryCompilation?    @relation(fields: [compilationId], references: [id], onDelete: SetNull)
+  chapter              Chapter              @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  findings             QualityFinding[]
+
+  @@index([userId, createdAt])
+  @@index([novelId, chapterId, chapterRevision])
+  @@index([compilationId, repairRound])
+  @@map("chapter_quality_reports")
+}
+
+model QualityFinding {
+  id              String                    @id @default(cuid()) @db.VarChar(64)
+  userId          String                    @map("user_id") @db.VarChar(64)
+  novelId         String                    @map("novel_id") @db.VarChar(64)
+  reportId        String                    @map("report_id") @db.VarChar(64)
+  signal          String                    @db.VarChar(48)
+  source          QualityFindingSource
+  severity        QualityFindingSeverity
+  startOffset     Int                       @map("start_offset")
+  endOffset       Int                       @map("end_offset")
+  evidenceExcerpt String                    @map("evidence_excerpt") @db.VarChar(360)
+  evidenceHash    String                    @map("evidence_hash") @db.VarChar(64)
+  explanation     String
+  suggestion      String
+  confidence      Float                     @default(0.7)
+  disposition     QualityFindingDisposition @default(pending)
+  authorFeedback  QualityFindingFeedback?   @map("author_feedback")
+  feedbackReason  String?                   @map("feedback_reason") @db.VarChar(500)
+  createdAt       DateTime                  @default(now()) @map("created_at")
+  updatedAt       DateTime                  @updatedAt @map("updated_at")
+  user            User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel           Novel                     @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  report          ChapterQualityReport      @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@unique([reportId, source, signal, startOffset, endOffset, evidenceHash], map: "quality_findings_report_source_signal_span_key")
+  @@index([userId, disposition, updatedAt])
+  @@index([novelId, signal, disposition])
+  @@index([novelId, signal, authorFeedback])
+  @@map("quality_findings")
+}
+
+model CorpusSource {
+  id                String                  @id @default(cuid()) @db.VarChar(64)
+  userId            String?                 @map("user_id") @db.VarChar(64)
+  novelId           String?                 @map("novel_id") @db.VarChar(64)
+  scope             CorpusScope             @default(platform)
+  name              String                  @db.VarChar(160)
+  sourceClass       CorpusSourceClass       @map("source_class")
+  rightsHolder      String                  @map("rights_holder") @db.VarChar(240)
+  sourceUrl         String?                 @map("source_url") @db.VarChar(1000)
+  license           String                  @db.VarChar(120)
+  commercialUse     Boolean                 @default(false) @map("commercial_use")
+  redistribution    Boolean                 @default(false)
+  modification      Boolean                 @default(false)
+  rawStorageAllowed Boolean                 @default(false) @map("raw_storage_allowed")
+  indexAllowed      Boolean                 @default(false) @map("index_allowed")
+  rightsStatus      CorpusRightsStatus      @default(pending) @map("rights_status")
+  rightsEvidence    String                  @map("rights_evidence")
+  auditNote         String?                 @map("audit_note")
+  auditedByUserId   String?                 @map("audited_by_user_id") @db.VarChar(64)
+  auditedAt         DateTime?               @map("audited_at")
+  expiresAt         DateTime?               @map("expires_at")
+  revokedAt         DateTime?               @map("revoked_at")
+  createdAt         DateTime                @default(now()) @map("created_at")
+  updatedAt         DateTime                @updatedAt @map("updated_at")
+  user              User?                   @relation("CorpusSourceOwner", fields: [userId], references: [id], onDelete: Cascade)
+  novel             Novel?                  @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  auditedBy         User?                   @relation("CorpusSourceAuditor", fields: [auditedByUserId], references: [id], onDelete: SetNull)
+  documents         CorpusDocument[]
+  techniqueCards    TechniqueCard[]
+  styleProfiles     StyleProfile[]
+  deletionReceipts  CorpusDeletionReceipt[]
+
+  @@index([rightsStatus, sourceClass, updatedAt])
+  @@index([userId, novelId, rightsStatus])
+  @@index([expiresAt])
+  @@map("corpus_sources")
+}
+
+model CorpusDocument {
+  id                String               @id @default(cuid()) @db.VarChar(64)
+  userId            String?              @map("user_id") @db.VarChar(64)
+  novelId           String?              @map("novel_id") @db.VarChar(64)
+  sourceId          String               @map("source_id") @db.VarChar(64)
+  title             String               @db.VarChar(240)
+  authorName        String?              @map("author_name") @db.VarChar(160)
+  contentHash       String               @map("content_hash") @db.VarChar(64)
+  rawStorageAllowed Boolean              @default(false) @map("raw_storage_allowed")
+  indexAllowed      Boolean              @default(false) @map("index_allowed")
+  status            CorpusDocumentStatus @default(pending)
+  metadata          Json                 @default("{}")
+  revokedAt         DateTime?            @map("revoked_at")
+  createdAt         DateTime             @default(now()) @map("created_at")
+  updatedAt         DateTime             @updatedAt @map("updated_at")
+  user              User?                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel             Novel?               @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  source            CorpusSource         @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  passages          CorpusPassage[]
+  techniqueCards    TechniqueCard[]
+  styleProfiles     StyleProfile[]
+
+  @@unique([sourceId, contentHash])
+  @@index([userId, novelId, status])
+  @@index([sourceId, status])
+  @@map("corpus_documents")
+}
+
+model CorpusPassage {
+  id          String         @id @default(cuid()) @db.VarChar(64)
+  userId      String?        @map("user_id") @db.VarChar(64)
+  novelId     String?        @map("novel_id") @db.VarChar(64)
+  documentId  String         @map("document_id") @db.VarChar(64)
+  ordinal     Int
+  content     String
+  contentHash String         @map("content_hash") @db.VarChar(64)
+  charCount   Int            @map("char_count")
+  createdAt   DateTime       @default(now()) @map("created_at")
+  user        User?          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel       Novel?         @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  document    CorpusDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  leakageHits LeakageCheck[]
+
+  @@unique([documentId, ordinal])
+  @@index([userId, novelId, createdAt])
+  @@index([contentHash])
+  @@map("corpus_passages")
+}
+
+model TechniqueCard {
+  id                String          @id @default(cuid()) @db.VarChar(64)
+  userId            String?         @map("user_id") @db.VarChar(64)
+  novelId           String?         @map("novel_id") @db.VarChar(64)
+  sourceId          String          @map("source_id") @db.VarChar(64)
+  documentId        String?         @map("document_id") @db.VarChar(64)
+  cardKey           String          @unique @map("card_key") @db.VarChar(160)
+  title             String          @db.VarChar(160)
+  genre             String          @db.VarChar(64)
+  subgenre          String          @default("") @db.VarChar(64)
+  sceneType         String          @map("scene_type") @db.VarChar(96)
+  readerEffect      String          @map("reader_effect") @db.VarChar(240)
+  relationshipStage String          @default("") @map("relationship_stage") @db.VarChar(96)
+  pointOfView       String          @default("") @map("point_of_view") @db.VarChar(48)
+  narrativeDistance String          @default("") @map("narrative_distance") @db.VarChar(48)
+  pace              String          @default("") @db.VarChar(48)
+  defectTargets     String[]        @default([]) @map("defect_targets")
+  techniques        Json
+  styleStats        Json            @map("style_stats")
+  avoid             Json
+  searchableText    String          @map("searchable_text")
+  abstractionHash   String          @map("abstraction_hash") @db.VarChar(64)
+  active            Boolean         @default(false)
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+  user              User?           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel             Novel?          @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  source            CorpusSource    @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  document          CorpusDocument? @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([active, genre, sceneType])
+  @@index([userId, novelId, active])
+  @@index([sourceId, active])
+  @@map("technique_cards")
+}
+
+model StyleProfile {
+  learningJobs StyleLearningJob[]
+  id          String           @id @default(cuid()) @db.VarChar(64)
+  userId      String?          @map("user_id") @db.VarChar(64)
+  novelId     String?          @map("novel_id") @db.VarChar(64)
+  sourceId    String?          @map("source_id") @db.VarChar(64)
+  documentId  String?          @map("document_id") @db.VarChar(64)
+  kind        StyleProfileKind
+  name        String           @db.VarChar(160)
+  stats       Json
+  sampleCount Int              @map("sample_count")
+  sampleChars Int              @map("sample_chars")
+  contentHash String           @map("content_hash") @db.VarChar(64)
+  confirmed   Boolean          @default(false)
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+  user        User?            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel       Novel?           @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  source      CorpusSource?    @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  document    CorpusDocument?  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([userId, novelId, confirmed, updatedAt])
+  @@index([sourceId, kind])
+  @@map("style_profiles")
+}
+
+model StyleLearningJob {
+  id             String       @id @default(cuid()) @db.VarChar(64)
+  requestId      String       @unique @map("request_id") @db.VarChar(64)
+  profileId      String       @map("profile_id") @db.VarChar(64)
+  status         String       @default("queued") @db.VarChar(32)
+  revision       Int          @default(0)
+  enabled        Boolean      @default(false)
+  pauseRequested Boolean      @default(false) @map("pause_requested")
+  selection      Json
+  modelIdentity  Json         @map("model_identity")
+  chunks         Json
+  reports        Json         @default("[]")
+  rules          Json         @default("[]")
+  processed      Int          @default(0)
+  response       String?
+  error          String?
+  leaseUntil     DateTime?    @map("lease_until")
+  claimToken     String?      @map("claim_token") @db.VarChar(64)
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+  profile        StyleProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([status, leaseUntil])
+  @@index([profileId, createdAt])
+  @@map("style_learning_jobs")
+}
+
+model RetrievalTrace {
+  id           String   @id @default(cuid()) @db.VarChar(64)
+  userId       String   @map("user_id") @db.VarChar(64)
+  novelId      String   @map("novel_id") @db.VarChar(64)
+  runId        String   @map("run_id") @db.VarChar(64)
+  query        Json
+  candidateIds Json     @map("candidate_ids")
+  selected     Json
+  profileId    String?  @map("profile_id") @db.VarChar(64)
+  createdAt    DateTime @default(now()) @map("created_at")
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel        Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  run          AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([userId, novelId, createdAt])
+  @@index([runId, createdAt])
+  @@map("retrieval_traces")
+}
+
+model LeakageCheck {
+  id                     String          @id @default(cuid()) @db.VarChar(64)
+  userId                 String          @map("user_id") @db.VarChar(64)
+  novelId                String          @map("novel_id") @db.VarChar(64)
+  runId                  String?         @map("run_id") @db.VarChar(64)
+  chapterId              String?         @map("chapter_id") @db.VarChar(64)
+  outputHash             String          @map("output_hash") @db.VarChar(64)
+  matchedPassageId       String?         @map("matched_passage_id") @db.VarChar(64)
+  ngramOverlap           Float           @map("ngram_overlap")
+  longestCommonSubstring Int             @map("longest_common_substring")
+  semanticSimilarity     Float           @map("semantic_similarity")
+  decision               LeakageDecision
+  action                 String          @db.VarChar(120)
+  evidenceHash           String?         @map("evidence_hash") @db.VarChar(64)
+  createdAt              DateTime        @default(now()) @map("created_at")
+  user                   User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel                  Novel           @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  run                    AgentRun?       @relation(fields: [runId], references: [id], onDelete: SetNull)
+  matchedPassage         CorpusPassage?  @relation(fields: [matchedPassageId], references: [id], onDelete: SetNull)
+
+  @@index([userId, novelId, createdAt])
+  @@index([runId, decision])
+  @@index([matchedPassageId])
+  @@map("leakage_checks")
+}
+
+model CorpusDeletionReceipt {
+  id            String       @id @default(cuid()) @db.VarChar(64)
+  userId        String?      @map("user_id") @db.VarChar(64)
+  novelId       String?      @map("novel_id") @db.VarChar(64)
+  sourceId      String       @map("source_id") @db.VarChar(64)
+  deletedCounts Json         @map("deleted_counts")
+  reason        String       @db.VarChar(500)
+  receiptHash   String       @unique @map("receipt_hash") @db.VarChar(64)
+  createdAt     DateTime     @default(now()) @map("created_at")
+  user          User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  novel         Novel?       @relation(fields: [novelId], references: [id], onDelete: SetNull)
+  source        CorpusSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([userId, novelId, createdAt])
+  @@index([sourceId, createdAt])
+  @@map("corpus_deletion_receipts")
+}
+
+/**
+ * 后台管理操作审计日志：只增不删，admin_id 不做外键（避免用户删除产生悬挂）
+ */
+model AdminAuditLog {
+  id         String   @id @default(cuid()) @db.VarChar(64)
+  adminId    String   @map("admin_id") @db.VarChar(64)
+  action     String   @db.VarChar(64)
+  targetType String?  @map("target_type") @db.VarChar(32)
+  targetId   String?  @map("target_id") @db.VarChar(64)
+  detail     Json     @default("{}")
+  ip         String?  @db.VarChar(64)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([targetType, targetId])
+  @@map("admin_audit_logs")
+}
+
+model AgentEvalSuite {
+  id               String            @id @default(cuid()) @db.VarChar(64)
+  name             String            @db.VarChar(160)
+  datasetVersion   String            @map("dataset_version") @db.VarChar(64)
+  rubricVersion    String            @map("rubric_version") @db.VarChar(64)
+  status           String            @default("draft") @db.VarChar(24)
+  createdByAdminId String            @map("created_by_admin_id") @db.VarChar(64)
+  createdAt        DateTime          @default(now()) @map("created_at")
+  updatedAt        DateTime          @updatedAt @map("updated_at")
+  samples          AgentEvalSample[]
+
+  @@index([status, createdAt])
+  @@map("agent_eval_suites")
+}
+
+model AgentEvalSample {
+  id                  String               @id @default(cuid()) @db.VarChar(64)
+  suiteId             String               @map("suite_id") @db.VarChar(64)
+  code                String               @db.VarChar(64)
+  title               String               @db.VarChar(160)
+  genre               String               @db.VarChar(48)
+  task                String               @db.VarChar(48)
+  style               String               @db.VarChar(48)
+  evaluationBrief     String               @map("evaluation_brief")
+  sourceClass         String               @map("source_class") @db.VarChar(32)
+  sourceReferenceHash String               @map("source_reference_hash") @db.VarChar(64)
+  consentReceiptId    String?              @map("consent_receipt_id") @db.VarChar(160)
+  createdAt           DateTime             @default(now()) @map("created_at")
+  suite               AgentEvalSuite       @relation(fields: [suiteId], references: [id], onDelete: Cascade)
+  candidates          AgentEvalCandidate[]
+  reviews             AgentBlindReview[]
+
+  @@unique([suiteId, code])
+  @@index([suiteId, createdAt])
+  @@map("agent_eval_samples")
+}
+
+model AgentEvalCandidate {
+  id          String          @id @default(cuid()) @db.VarChar(64)
+  sampleId    String          @map("sample_id") @db.VarChar(64)
+  blindLabel  String          @map("blind_label") @db.VarChar(8)
+  origin      String          @db.VarChar(24)
+  content     String
+  contentHash String          @map("content_hash") @db.VarChar(64)
+  metadata    Json            @default("{}")
+  createdAt   DateTime        @default(now()) @map("created_at")
+  sample      AgentEvalSample @relation(fields: [sampleId], references: [id], onDelete: Cascade)
+
+  @@unique([sampleId, blindLabel])
+  @@index([sampleId, origin])
+  @@map("agent_eval_candidates")
+}
+
+model AgentBlindReview {
+  id                String          @id @default(cuid()) @db.VarChar(64)
+  sampleId          String          @map("sample_id") @db.VarChar(64)
+  reviewerHash      String          @map("reviewer_hash") @db.VarChar(64)
+  candidateRatings  Json            @map("candidate_ratings")
+  guessedOrigins    Json            @map("guessed_origins")
+  mechanicalReasons Json            @map("mechanical_reasons")
+  preferredLabel    String          @map("preferred_label") @db.VarChar(8)
+  notes             String?
+  submittedAt       DateTime        @default(now()) @map("submitted_at")
+  sample            AgentEvalSample @relation(fields: [sampleId], references: [id], onDelete: Cascade)
+
+  @@unique([sampleId, reviewerHash])
+  @@index([reviewerHash, submittedAt])
+  @@map("agent_blind_reviews")
+}
+
+/// 用户反馈类别：问题反馈 / 功能建议
+enum FeedbackKind {
+  bug
+  suggestion
+}
+
+/// 用户反馈处理状态：待处理 / 已采纳 / 已忽略（后两者可撤销回 pending）
+enum FeedbackStatus {
+  pending
+  accepted
+  ignored
+}
+
+model Feedback {
+  id               String         @id @default(cuid()) @db.VarChar(64)
+  userId           String         @map("user_id") @db.VarChar(64)
+  kind             FeedbackKind
+  status           FeedbackStatus @default(pending)
+  content          String
+  /**
+   * 联系方式（邮箱/手机号/微信/QQ 等，用户自填，可空）
+   */
+  contact          String?        @db.VarChar(160)
+  imageUrls        String[]       @default([]) @map("image_urls")
+  /**
+   * 提交来源标记（如 studio-work / studio-ide / studio-mobile），用于定位问题场景
+   */
+  source           String?        @db.VarChar(64)
+  pageUrl          String?        @map("page_url") @db.VarChar(500)
+  /**
+   * 客户端环境快照（UA、视口、主题等），便于复现问题
+   */
+  clientInfo       Json           @default("{}") @map("client_info")
+  handledByAdminId String?        @map("handled_by_admin_id") @db.VarChar(64)
+  handledAt        DateTime?      @map("handled_at")
+  createdAt        DateTime       @default(now()) @map("created_at")
+  updatedAt        DateTime       @updatedAt @map("updated_at")
+  user             User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([kind, status, createdAt])
+  @@index([userId, createdAt])
+  @@map("feedbacks")
+}
+
+// Import-local paid suggestions are single-dispatch and never rewrite source text.
+model NovelImportSuggestion {
+  id String @id @db.VarChar(64)
+  jobId String @db.VarChar(64)
+  userId String @db.VarChar(64)
+  manifestRevision Int
+  manifestHash String @db.VarChar(64)
+  fingerprint String @db.VarChar(64)
+  volumeIndex Int
+  chapterIndex Int
+  status String @default("pending") @db.VarChar(24)
+  result Json?
+  errorCode String? @db.VarChar(128)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([jobId, manifestRevision, volumeIndex, chapterIndex])
+  @@index([jobId, createdAt])
+  @@map("novel_import_suggestions")
+}
+
+
+/// Roles reference configuration identities; archiving never changes an old row's tier or price.
+model AiModelSystemBinding {
+  roleKey       String @id @map("role_key") @db.VarChar(96)
+  modelConfigId String @map("model_config_id") @db.VarChar(64)
+  revision      Int @default(1)
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  model         AiModelConfig @relation(fields: [modelConfigId], references: [id], onDelete: NoAction)
+  @@index([modelConfigId])
+  @@map("ai_model_system_bindings")
+}
+
+model AdminModelDiagnostic {
+  id String @id @default(cuid()) @db.VarChar(64)
+  adminId String @map("admin_id") @db.VarChar(64)
+  modelConfigId String @map("model_config_id") @db.VarChar(64)
+  configRevision String @map("config_revision") @db.VarChar(96)
+  requestKey String @map("request_key") @db.VarChar(100)
+  mode String @db.VarChar(24)
+  status String @db.VarChar(24)
+  feeIdentity String @unique @map("fee_identity") @db.VarChar(128)
+  feeOwner String @default("platform") @map("fee_owner") @db.VarChar(24)
+  feeStatus String @default("not_requested") @map("fee_status") @db.VarChar(24)
+  result Json
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@unique([adminId, requestKey])
+  @@index([modelConfigId, createdAt])
+  @@index([adminId, createdAt])
+  @@map("admin_model_diagnostics")
+}
+
+
+/// Immutable server-only versions retain encrypted credentials for admitted active work.
+model AiModelConfigVersion {
+  modelConfigId String @map("model_config_id") @db.VarChar(64)
+  revision Int
+  tier String? @db.VarChar(24)
+  provider String @db.VarChar(40)
+  modelName String @map("model_name") @db.VarChar(160)
+  baseUrl String? @map("base_url") @db.VarChar(512)
+  apiKeyCiphertext String? @map("api_key_ciphertext")
+  multiplierBps Int @map("multiplier_bps")
+  metadata Json?
+  createdAt DateTime @default(now()) @map("created_at")
+  model AiModelConfig @relation(fields: [modelConfigId], references: [id], onDelete: NoAction)
+  @@id([modelConfigId, revision])
+  @@map("ai_model_config_versions")
+}

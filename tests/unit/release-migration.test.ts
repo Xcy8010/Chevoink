@@ -4,7 +4,8 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { assertMigrationEnvironment, assertDatabaseIdentity, assertFindingIndex, assertMigrationState, migrationChecksum, migrationName, releaseMigrationPlan,
   fetchMigrationName, fetchMigrationChecksum, fetchSeedEvidence, assertFetchSeed,
-  webToolBillingMigrationName, webToolBillingMigrationChecksum, assertWebToolBillingState } from '../../scripts/verify-release-migration.mjs'
+  webToolBillingMigrationName, webToolBillingMigrationChecksum, assertWebToolBillingState,
+  adminModelLifecycleMigrationName, adminModelLifecycleMigrationChecksum, lifecycleColumns, lifecycleIndexes, assertAdminModelLifecycleState } from '../../scripts/verify-release-migration.mjs'
 
 function fixture() {
   const root = mkdtempSync(path.join(tmpdir(), 'chevoink-release-migration-'))
@@ -25,6 +26,57 @@ function fixture() {
 }
 
 describe('exact reviewed production migration', () => {
+  const lifecycleFixture = () => {
+    const f = fixture()
+    writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), readFileSync(new URL('../fixtures/release-web-tool-billing.schema.prisma', import.meta.url)))
+    writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), readFileSync(new URL('../fixtures/release-admin-model-lifecycle.schema.prisma', import.meta.url)))
+    mkdirSync(path.join(f.candidate, `prisma/migrations/${adminModelLifecycleMigrationName}`))
+    writeFileSync(path.join(f.candidate, `prisma/migrations/${adminModelLifecycleMigrationName}/migration.sql`), readFileSync(`prisma/migrations/${adminModelLifecycleMigrationName}/migration.sql`))
+    return f
+  }
+  it('permits only the frozen lifecycle schema pair and exact SQL', () => {
+    const f = lifecycleFixture()
+    expect(releaseMigrationPlan(f.candidate, f.baseline)).toBe(adminModelLifecycleMigrationName)
+    const old = { migration_name: 'old', checksum: 'a'.repeat(64), finished_at: new Date(), rolled_back_at: null, applied_steps_count: 1 }
+    const complete = { ...old, migration_name: adminModelLifecycleMigrationName, checksum: adminModelLifecycleMigrationChecksum }
+    const checksums = [['old', 'b'.repeat(64)], [adminModelLifecycleMigrationName, adminModelLifecycleMigrationChecksum]]
+    expect(() => assertMigrationState([old], checksums, 'before', undefined, adminModelLifecycleMigrationName)).not.toThrow()
+    expect(() => assertMigrationState([old, complete], checksums, 'after', [old], adminModelLifecycleMigrationName)).not.toThrow()
+    expect(() => assertMigrationState([old, { ...complete, checksum: 'c'.repeat(64) }], checksums, 'after', [old], adminModelLifecycleMigrationName)).toThrow()
+  })
+  it.each(['schema', 'baseline', 'history', 'sql', 'extra', 'already-present'])('rejects lifecycle %s outside the frozen approval', kind => {
+    const f = lifecycleFixture()
+    if (kind === 'schema') writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), '// unrelated')
+    if (kind === 'baseline') writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), '// unrelated')
+    if (kind === 'history') writeFileSync(path.join(f.candidate, 'prisma/migrations/old/migration.sql'), 'SELECT 2;')
+    if (kind === 'sql') writeFileSync(path.join(f.candidate, `prisma/migrations/${adminModelLifecycleMigrationName}/migration.sql`), 'SELECT 2;')
+    if (kind === 'extra') writeFileSync(path.join(f.candidate, `prisma/migrations/${adminModelLifecycleMigrationName}/extra.sql`), 'SELECT 2;')
+    if (kind === 'already-present') {
+      mkdirSync(path.join(f.baseline, `prisma/migrations/${adminModelLifecycleMigrationName}`))
+      writeFileSync(path.join(f.baseline, `prisma/migrations/${adminModelLifecycleMigrationName}/migration.sql`), 'SELECT 1;')
+    }
+    expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
+  })
+  it('verifies lifecycle schema defaults, initial nulls, six ID bindings and protected catalog preservation', () => {
+    const roles = ['basic', 'speed', 'tool:image-generation', 'tool:image-vision', 'tool:web-fetch', 'tool:web-search'].map((role, i) => ({ role, id: `config-${i}` }))
+    const before = { tables: [], columns: [], roles, catalog: { count: 8, hash: 'a'.repeat(32) } }
+    const after = { ...before, tables: ['admin_model_diagnostics', 'ai_model_config_versions', 'ai_model_system_bindings'], columns: lifecycleColumns, indexes: lifecycleIndexes,
+      foreignKeys: ['ai_model_config_versions', 'ai_model_system_bindings'].map(table => ({ table, columns: ['model_config_id'], target: 'ai_model_configs', targetColumns: ['id'], onDelete: 'a', onUpdate: 'a', valid: true })),
+      bindings: roles.map(row => ({ ...row, revision: 1, hasUpdatedAt: true })), invalid: { configs: 0, runs: 0, schedules: 0, calls: 0, diagnostics: 0, versions: 0 } }
+    expect(() => assertAdminModelLifecycleState(before, 'before')).not.toThrow()
+    expect(() => assertAdminModelLifecycleState(after, 'after', JSON.parse(JSON.stringify(before)))).not.toThrow()
+    expect(() => assertAdminModelLifecycleState({ ...before, roles: roles.slice(1) }, 'before')).toThrow()
+    expect(() => assertAdminModelLifecycleState({ ...before, tables: after.tables }, 'before')).toThrow()
+    for (const changed of [
+      { ...after, tables: after.tables.slice(1) }, { ...after, catalog: { ...after.catalog, hash: 'b'.repeat(32) } },
+      { ...after, columns: after.columns.map(row => row.name === 'revision' ? { ...row, defaultValue: '2' } : row) },
+      { ...after, columns: after.columns.map(row => row.name === 'model_config_id' ? { ...row, required: !row.required } : row) },
+      { ...after, indexes: after.indexes.map(row => ({ ...row, valid: false })) },
+      { ...after, foreignKeys: after.foreignKeys.map(row => ({ ...row, onDelete: 'c' })) },
+      { ...after, bindings: after.bindings.map((row, i) => i === 0 ? { ...row, id: 'wrong-config' } : row) },
+      { ...after, invalid: { ...after.invalid, runs: 1 } }, { ...after, invalid: { ...after.invalid, versions: 1 } },
+    ]) expect(() => assertAdminModelLifecycleState(changed, 'after', before)).toThrow()
+  })
   const billingFixture = () => {
     const f = fixture()
     // This approval is historical and must not follow newer application schema.

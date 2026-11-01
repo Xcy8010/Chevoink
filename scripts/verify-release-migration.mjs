@@ -9,10 +9,14 @@ export const fetchMigrationName = '20261019120000_web_fetch_tool_config'
 export const fetchMigrationChecksum = '2e318f4b0a2004efdccfad7ad7a3962c4e8346a3da1e58c144aa1646dd034191'
 export const webToolBillingMigrationName = '20261020120000_web_tool_billing'
 export const webToolBillingMigrationChecksum = 'f7797fe83d78f72a07c9c6e4b8a6cc17ff758db54b1709776f9b1dd35b7933f0'
+export const adminModelLifecycleMigrationName = '20261101120000_admin_model_lifecycle'
+export const adminModelLifecycleMigrationChecksum = '7c24bac35ffde32ce2279dad0a1f41ebd2674affc6084a42ba6a0cdf0648398b'
+// Frozen ae6cd5f7d43e77e1a75ce9c4d2dfe3ce60ee568e -> 8ba827a5029010f4ad87e3c6e59a513edb90ce53 schema pair.
+const lifecycleCandidateSchema = 'da62c9651530ce93646848e7be0f0634787ef397317a1e4d321e3242ffca265f'
 const billingBaselineSchema = 'e7752d3afe61d9e6172404cf5ea93cec78087dab274743804f3a90fd2b01d774'
 const billingCandidateSchema = 'f981e01401a19d5a18e0c28556a12cb2fb0b35eefe6a9be2975980da2ddf5afa'
 const reviewed = new Map([[migrationName, migrationChecksum], [fetchMigrationName, fetchMigrationChecksum],
-  [webToolBillingMigrationName, webToolBillingMigrationChecksum]])
+  [webToolBillingMigrationName, webToolBillingMigrationChecksum], [adminModelLifecycleMigrationName, adminModelLifecycleMigrationChecksum]])
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
@@ -36,6 +40,12 @@ export function releaseMigrationPlan(candidate, baseline) {
   const currentFiles = files(path.join(candidate, 'prisma/migrations'))
   const oldFiles = files(path.join(baseline, 'prisma/migrations'))
   if (next === previous && JSON.stringify(currentFiles) === JSON.stringify(oldFiles)) return 'routine'
+  const lifecycleTarget = `${adminModelLifecycleMigrationName}/migration.sql`
+  if (digest(previous.replaceAll('\r\n', '\n')) === billingCandidateSchema
+    && digest(next.replaceAll('\r\n', '\n')) === lifecycleCandidateSchema
+    && !oldFiles.some(([name]) => name === lifecycleTarget)
+    && JSON.stringify(currentFiles.filter(([name]) => name !== lifecycleTarget)) === JSON.stringify(oldFiles)
+    && currentFiles.find(([name]) => name === lifecycleTarget)?.[1] === adminModelLifecycleMigrationChecksum) return adminModelLifecycleMigrationName
   const billingTarget = `${webToolBillingMigrationName}/migration.sql`
   if (digest(previous.replaceAll('\r\n', '\n')) === billingBaselineSchema
     && digest(next.replaceAll('\r\n', '\n')) === billingCandidateSchema
@@ -108,6 +118,96 @@ export function assertWebToolBillingState(after, before) {
   }
 }
 
+const lifecycleTables = ['admin_model_diagnostics', 'ai_model_config_versions', 'ai_model_system_bindings']
+const lifecycleRoles = ['basic', 'speed', 'tool:image-generation', 'tool:image-vision', 'tool:web-fetch', 'tool:web-search']
+// pg_catalog format_type/default expressions for exactly the reviewed SQL, including nullable additions.
+export const lifecycleColumns = [
+  ['ai_model_configs', [['revision', 'integer', true, '1'], ['archived_at', 'timestamp(3) without time zone'], ['archived_by_id', 'character varying(64)'], ['archive_reason', 'character varying(1000)']]],
+  ['agent_runs', [['model_config_id', 'character varying(64)'], ['model_config_revision', 'integer'], ['model_price_snapshot', 'jsonb']]],
+  ['agent_schedules', [['model_config_id', 'character varying(64)']]],
+  ['web_tool_calls', [['model_config_id', 'character varying(64)'], ['model_config_revision', 'integer']]],
+  ['ai_model_system_bindings', [['role_key', 'character varying(96)', true], ['model_config_id', 'character varying(64)', true], ['revision', 'integer', true, '1'], ['updated_at', 'timestamp(3) without time zone', true, 'CURRENT_TIMESTAMP']]],
+  ['admin_model_diagnostics', [['id', 'character varying(64)', true], ['admin_id', 'character varying(64)', true], ['model_config_id', 'character varying(64)', true], ['config_revision', 'character varying(96)', true], ['request_key', 'character varying(100)', true], ['mode', 'character varying(24)', true], ['status', 'character varying(24)', true], ['fee_identity', 'character varying(128)', true], ['fee_owner', 'character varying(24)', true, "'platform'::character varying"], ['fee_status', 'character varying(24)', true, "'not_requested'::character varying"], ['result', 'jsonb', true], ['created_at', 'timestamp(3) without time zone', true, 'CURRENT_TIMESTAMP'], ['updated_at', 'timestamp(3) without time zone', true, 'CURRENT_TIMESTAMP']]],
+  ['ai_model_config_versions', [['model_config_id', 'character varying(64)', true], ['revision', 'integer', true], ['tier', 'character varying(24)'], ['provider', 'character varying(40)', true], ['model_name', 'character varying(160)', true], ['base_url', 'character varying(512)'], ['api_key_ciphertext', 'text'], ['multiplier_bps', 'integer', true], ['metadata', 'jsonb'], ['created_at', 'timestamp(3) without time zone', true, 'CURRENT_TIMESTAMP']]],
+].flatMap(([table, columns]) => columns.map(([name, type, required = false, defaultValue = null]) => ({ table, name, type, required, defaultValue })))
+export const lifecycleIndexes = [
+  ['ai_model_system_bindings_pkey', 'ai_model_system_bindings', true, ['role_key']],
+  ['ai_model_system_bindings_model_config_id_idx', 'ai_model_system_bindings', false, ['model_config_id']],
+  ['admin_model_diagnostics_pkey', 'admin_model_diagnostics', true, ['id']],
+  ['admin_model_diagnostics_fee_identity_key', 'admin_model_diagnostics', true, ['fee_identity']],
+  ['admin_model_diagnostics_admin_id_request_key_key', 'admin_model_diagnostics', true, ['admin_id', 'request_key']],
+  ['admin_model_diagnostics_model_config_id_created_at_idx', 'admin_model_diagnostics', false, ['model_config_id', 'created_at']],
+  ['admin_model_diagnostics_admin_id_created_at_idx', 'admin_model_diagnostics', false, ['admin_id', 'created_at']],
+  ['ai_model_config_versions_pkey', 'ai_model_config_versions', true, ['model_config_id', 'revision']],
+].map(([name, table, unique, columns]) => ({ name, table, unique, columns, valid: true, ready: true, partial: false, expression: false }))
+const ordered = rows => [...rows].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+function sameRows(actual, expected) { return JSON.stringify(ordered(actual)) === JSON.stringify(ordered(expected)) }
+export function assertAdminModelLifecycleState(state, phase, before) {
+  if (!['before', 'after'].includes(phase)) throw Error('Invalid lifecycle phase')
+  if (!/^[a-f0-9]{32}$/.test(state.catalog.hash) || !Number.isInteger(state.catalog.count)
+    || !sameRows(state.roles.map(row => row.role), lifecycleRoles)
+    || new Set(state.roles.map(row => row.id)).size !== 6 || state.roles.some(row => typeof row.id !== 'string' || !row.id)) throw Error('Lifecycle role baseline mismatch')
+  if (phase === 'before') {
+    if (state.tables.length || state.columns.length) throw Error('Lifecycle objects already exist')
+    return
+  }
+  assertAdminModelLifecycleState(before, 'before')
+  if (!sameRows(state.tables, lifecycleTables) || !sameRows(state.columns, lifecycleColumns)
+    || !sameRows(state.indexes, lifecycleIndexes)
+    || !sameRows(state.foreignKeys, ['ai_model_config_versions', 'ai_model_system_bindings'].map(table => ({ table,
+      columns: ['model_config_id'], target: 'ai_model_configs', targetColumns: ['id'], onDelete: 'a', onUpdate: 'a', valid: true })))
+    || !sameRows(state.roles, before.roles) || JSON.stringify(state.catalog) !== JSON.stringify(before.catalog)
+    || !sameRows(state.bindings.map(({ role, id, revision, hasUpdatedAt }) => ({ role, id, revision, hasUpdatedAt })),
+      before.roles.map(row => ({ ...row, revision: 1, hasUpdatedAt: true })))
+    || Object.values(state.invalid).some(value => value !== 0)) throw Error('Lifecycle migration objects, bindings or protected configuration mismatch')
+}
+
+/** Read-only catalog inspection; credentials are hashed in PostgreSQL and never selected. */
+export async function readAdminModelLifecycleState(tx, phase) {
+  const tableList = lifecycleTables.map(name => `'${name}'`).join(',')
+  const pairs = lifecycleColumns.map(({ table, name }) => `('${table}','${name}')`).join(',')
+  const tableRows = await tx.$queryRawUnsafe(`SELECT c.relname AS name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname=current_schema() AND c.relname IN (${tableList}) AND c.relkind='r' ORDER BY c.relname`)
+  const columns = await tx.$queryRawUnsafe(`SELECT c.relname AS table, a.attname AS name, format_type(a.atttypid,a.atttypmod) AS type,
+    a.attnotnull AS required, pg_get_expr(d.adbin,d.adrelid) AS "defaultValue"
+    FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+    LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+    WHERE n.nspname=current_schema() AND a.attnum>0 AND NOT a.attisdropped
+      AND (c.relname IN (${tableList}) OR (c.relname,a.attname) IN (${pairs})) ORDER BY c.relname,a.attnum`)
+  const roles = await tx.$queryRawUnsafe(`SELECT CASE WHEN tier IN ('speed','basic') THEN tier ELSE key END AS role, id
+    FROM ai_model_configs WHERE owner_user_id IS NULL
+      AND key IN ('builtin:speed','builtin:basic','tool:image-generation','tool:image-vision','tool:web-search','tool:web-fetch') ORDER BY role`)
+  const [catalog] = await tx.$queryRawUnsafe(`SELECT count(*)::int AS count,
+    md5(coalesce(string_agg(md5((to_jsonb(c) - 'revision' - 'archived_at' - 'archived_by_id' - 'archive_reason')::text), '' ORDER BY c.id), '')) AS hash
+    FROM ai_model_configs c`)
+  const state = { tables: tableRows.map(row => row.name), columns, roles, catalog }
+  if (phase === 'before') return state
+  const indexes = await tx.$queryRawUnsafe(`SELECT c.relname AS name, t.relname AS table, i.indisunique AS unique,
+    ARRAY(SELECT a.attname::text FROM unnest(i.indkey) WITH ORDINALITY k(num,ord)
+      JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.num ORDER BY k.ord) AS columns,
+    i.indisvalid AS valid, i.indisready AS ready, i.indpred IS NOT NULL AS partial, i.indexprs IS NOT NULL AS expression
+    FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+    WHERE n.nspname=current_schema() AND t.relname IN (${tableList}) ORDER BY c.relname`)
+  const foreignKeys = await tx.$queryRawUnsafe(`SELECT t.relname AS table,
+    ARRAY(SELECT a.attname::text FROM unnest(k.conkey) WITH ORDINALITY x(num,ord)
+      JOIN pg_attribute a ON a.attrelid=k.conrelid AND a.attnum=x.num ORDER BY x.ord) AS columns,
+    r.relname AS target, ARRAY(SELECT a.attname::text FROM unnest(k.confkey) WITH ORDINALITY x(num,ord)
+      JOIN pg_attribute a ON a.attrelid=k.confrelid AND a.attnum=x.num ORDER BY x.ord) AS "targetColumns",
+    k.confdeltype::text AS "onDelete", k.confupdtype::text AS "onUpdate", k.convalidated AS valid
+    FROM pg_constraint k JOIN pg_class t ON t.oid=k.conrelid JOIN pg_class r ON r.oid=k.confrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+    WHERE n.nspname=current_schema() AND k.contype='f' AND t.relname IN (${tableList}) ORDER BY t.relname`)
+  const bindings = await tx.$queryRawUnsafe('SELECT role_key AS role, model_config_id AS id, revision, updated_at IS NOT NULL AS "hasUpdatedAt" FROM ai_model_system_bindings ORDER BY role_key')
+  // Only the new fields are inspected. No author, ledger or running-task snapshot is taken.
+  const [invalid] = await tx.$queryRawUnsafe(`SELECT
+    (SELECT count(*)::int FROM ai_model_configs WHERE revision<>1 OR archived_at IS NOT NULL OR archived_by_id IS NOT NULL OR archive_reason IS NOT NULL) AS configs,
+    (SELECT count(*)::int FROM agent_runs WHERE model_config_id IS NOT NULL OR model_config_revision IS NOT NULL OR model_price_snapshot IS NOT NULL) AS runs,
+    (SELECT count(*)::int FROM agent_schedules WHERE model_config_id IS NOT NULL) AS schedules,
+    (SELECT count(*)::int FROM web_tool_calls WHERE model_config_id IS NOT NULL OR model_config_revision IS NOT NULL) AS calls,
+    (SELECT count(*)::int FROM admin_model_diagnostics) AS diagnostics,
+    (SELECT count(*)::int FROM ai_model_config_versions) AS versions`)
+  return { ...state, indexes, foreignKeys, bindings, invalid }
+}
+
 export function assertMigrationEnvironment(environment, shared) {
   if (environment.APP_ENV !== 'production' || shared.APP_ENV !== 'production'
     || !shared.DATABASE_URL || environment.DATABASE_URL !== shared.DATABASE_URL) throw Error('Production migration environment mismatch')
@@ -151,6 +251,11 @@ async function main() {
       if (before && (before.migration !== plan || before.checksum !== reviewed.get(plan) || before.phase !== 'before')) throw Error('Migration preflight receipt mismatch')
       if (before) assertDatabaseIdentity(database, before.database)
       assertMigrationState(rows, checksums, phase, before?.migrations, plan)
+      if (plan === adminModelLifecycleMigrationName) {
+        const lifecycle = await readAdminModelLifecycleState(tx, phase)
+        assertAdminModelLifecycleState(lifecycle, phase, before?.lifecycle)
+        return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, lifecycle }
+      }
       if (plan === fetchMigrationName) {
         const seed = fetchSeedEvidence(await tx.aiModelConfig.findUnique({ where: { key: 'tool:web-fetch' } }))
         if (phase === 'after') assertFetchSeed(seed, before.seed)
