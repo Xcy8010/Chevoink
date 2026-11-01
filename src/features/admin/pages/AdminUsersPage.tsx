@@ -1,9 +1,12 @@
+import { useAdminNumberQuery } from './admin-page-query'
+import { useAdminQueryState } from '../admin-query-state'
+import { AdminRowActions } from './AdminPageControls'
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import Button from '@/components/ui/Button'
-import TextInput from '@/components/ui/TextInput'
+import TextInput from '../components/AdminTextInput'
 import { useToast } from '@/components/ui/toast-context'
 import { ApiClientError } from '@/app/api-client'
 import type { AdminUserRow } from '../../../../shared/contracts/index.js'
@@ -18,16 +21,17 @@ import { AdminCard, AdminConfirmDialog, AdminPageHeader, AdminPager, AdminPanelS
 import { formatDateTime, useAdminSession } from '../admin-shared'
 
 export default function AdminUsersPage() {
+  const location = useLocation()
   const toast = useToast()
   const queryClient = useQueryClient()
   const { admin } = useAdminSession()
   const isSuperAdmin = Boolean(admin?.isSuperAdmin)
-  const [keyword, setKeyword] = useState('')
-  const [search, setSearch] = useState('')
-  const [role, setRole] = useState('')
-  const [status, setStatus] = useState('')
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(10)
+  const [search, setSearch] = useAdminQueryState('search', '')
+  const [keyword, setKeyword] = useState(search)
+  const [role, setRole] = useAdminQueryState('role', '')
+  const [status, setStatus] = useAdminQueryState('status', '')
+  const [page, setPage] = useAdminNumberQuery('page', 1)
+  const [pageSize, setPageSize] = useAdminNumberQuery('pageSize', 10)
   const [pendingBan, setPendingBan] = useState<AdminUserRow | null>(null)
   const [pendingReset, setPendingReset] = useState<AdminUserRow | null>(null)
   const [tempPassword, setTempPassword] = useState<string | null>(null)
@@ -134,7 +138,7 @@ export default function AdminUsersPage() {
               setRole(event.target.value)
               setPage(1)
             }}
-            className="h-10 rounded-[var(--radius-pill)] border border-[var(--border-strong)] bg-[var(--surface-default)] px-3 text-sm text-[var(--text-primary)] outline-none"
+            aria-label="角色筛选" className="h-11 rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] px-3 text-sm text-[var(--text-primary)] outline-none"
           >
             <option value="">全部角色</option>
             <option value="user">用户</option>
@@ -147,7 +151,7 @@ export default function AdminUsersPage() {
               setStatus(event.target.value)
               setPage(1)
             }}
-            className="h-10 rounded-[var(--radius-pill)] border border-[var(--border-strong)] bg-[var(--surface-default)] px-3 text-sm text-[var(--text-primary)] outline-none"
+            aria-label="状态筛选" className="h-11 rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] px-3 text-sm text-[var(--text-primary)] outline-none"
           >
             <option value="">全部状态</option>
             <option value="false">正常</option>
@@ -172,7 +176,7 @@ export default function AdminUsersPage() {
                 {data.items.map((user) => (
                   <li key={user.id} className="rounded-lg border border-[var(--border-default)] p-3">
                     <div className="flex items-center justify-between gap-2">
-                      <Link to={`/admin/users/${user.id}`} className="min-w-0 truncate text-sm font-medium hover:underline">
+                      <Link to={`/admin/users/${user.id}`} state={{ adminReturnTo: location.pathname + location.search }} className="min-w-0 truncate text-sm font-medium hover:underline">
                         {user.nickname}
                       </Link>
                       {user.bannedAt ? (
@@ -184,14 +188,15 @@ export default function AdminUsersPage() {
                       )}
                     </div>
                     <p className="mt-1 truncate text-xs text-[var(--text-secondary)]">
-                      {user.phone ?? '无手机号'}
-                      {user.email ? <span> · {user.email}</span> : null}
+                      最近活跃 {formatDateTime(user.lastActiveAt)}
                     </p>
                     <p className="mt-0.5 text-xs text-[var(--text-tertiary)]">
                       作品 / 帖子 {user.novelCount} / {user.postCount} · 注册 {formatDateTime(user.createdAt)}
                     </p>
                     <div className="mt-2.5 flex flex-wrap items-center gap-2">
-                      <select
+                      <span className="text-sm text-[var(--text-secondary)]">{user.role === 'admin' ? '管理' : '用户'}</span>
+                      <AdminRowActions label="更多操作">
+<label className="text-sm">身份<select aria-label={`调整 ${user.nickname} 的身份`} title={!isSuperAdmin ? '仅超级管理员可调整身份' : user.id === admin?.id ? '不能修改自己的身份' : undefined}
                         value={user.role === 'admin' ? 'admin' : 'user'}
                         disabled={!isSuperAdmin || user.id === admin?.id}
                         onChange={(event) => handleRoleChange(user, event.target.value)}
@@ -199,8 +204,7 @@ export default function AdminUsersPage() {
                       >
                         <option value="user">用户</option>
                         <option value="admin">管理</option>
-                      </select>
-                      <div className="ml-auto flex gap-1.5">
+                      </select></label>
                         {user.bannedAt ? (
                           <Button size="sm" onClick={() => unbanMutation.mutate(user.id)} disabled={unbanMutation.isPending}>
                             解封
@@ -215,7 +219,7 @@ export default function AdminUsersPage() {
                             </Button>
                           </>
                         ) : null}
-                      </div>
+                      </AdminRowActions>
                     </div>
                   </li>
                 ))}
@@ -226,7 +230,7 @@ export default function AdminUsersPage() {
                   <thead>
                     <tr className="text-left text-xs text-[var(--text-secondary)]">
                       <th className="pb-2 font-normal">用户</th>
-                      <th className="pb-2 font-normal">手机号</th>
+
                       <th className="pb-2 font-normal">角色</th>
                       <th className="pb-2 font-normal">状态</th>
                       <th className="pb-2 font-normal">作品 / 帖子</th>
@@ -239,22 +243,14 @@ export default function AdminUsersPage() {
                     {data.items.map((user) => (
                       <tr key={user.id} className="border-t border-[var(--border-default)]">
                         <td className="py-2.5">
-                          <Link to={`/admin/users/${user.id}`} className="font-medium hover:underline">
+                          <Link to={`/admin/users/${user.id}`} state={{ adminReturnTo: location.pathname + location.search }} className="font-medium hover:underline">
                             {user.nickname}
                           </Link>
-                          {user.email ? <p className="text-xs text-[var(--text-secondary)]">{user.email}</p> : null}
+
                         </td>
-                        <td className="py-2.5 text-[var(--text-secondary)]">{user.phone ?? '—'}</td>
+
                         <td className="py-2.5">
-                          <select
-                            value={user.role === 'admin' ? 'admin' : 'user'}
-                            disabled={!isSuperAdmin || user.id === admin?.id}
-                            onChange={(event) => handleRoleChange(user, event.target.value)}
-                            className="rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] px-2 py-1 text-xs text-[var(--text-primary)] outline-none disabled:opacity-60"
-                          >
-                            <option value="user">用户</option>
-                            <option value="admin">管理</option>
-                          </select>
+                          <span className="text-sm text-[var(--text-secondary)]">{user.role === 'admin' ? '管理' : '用户'}</span>
                         </td>
                         <td className="py-2.5">
                           {user.bannedAt ? (
@@ -271,7 +267,16 @@ export default function AdminUsersPage() {
                         <td className="py-2.5 text-[var(--text-secondary)]">{formatDateTime(user.createdAt)}</td>
                         <td className="py-2.5 text-[var(--text-secondary)]">{formatDateTime(user.lastActiveAt)}</td>
                         <td className="py-2.5">
-                          <div className="flex gap-1.5">
+                          <AdminRowActions label="更多操作">
+<label className="text-sm">身份<select aria-label={`调整 ${user.nickname} 的身份`} title={!isSuperAdmin ? '仅超级管理员可调整身份' : user.id === admin?.id ? '不能修改自己的身份' : undefined}
+                            value={user.role === 'admin' ? 'admin' : 'user'}
+                            disabled={!isSuperAdmin || user.id === admin?.id}
+                            onChange={(event) => handleRoleChange(user, event.target.value)}
+                            className="rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] px-2 py-1 text-xs text-[var(--text-primary)] outline-none disabled:opacity-60"
+                          >
+                            <option value="user">用户</option>
+                            <option value="admin">管理</option>
+                          </select></label>
                             {user.bannedAt ? (
                               <Button size="sm" onClick={() => unbanMutation.mutate(user.id)} disabled={unbanMutation.isPending}>
                                 解封
@@ -286,7 +291,7 @@ export default function AdminUsersPage() {
                                 </Button>
                               </>
                             ) : null}
-                          </div>
+                          </AdminRowActions>
                         </td>
                       </tr>
                     ))}

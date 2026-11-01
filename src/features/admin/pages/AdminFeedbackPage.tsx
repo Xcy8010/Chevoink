@@ -1,8 +1,11 @@
+import { useAdminDialog } from '../admin-dialog'
+import { useAdminQueryState } from '../admin-query-state'
+import { useAdminNumberQuery } from './admin-page-query'
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import Button from '@/components/ui/Button'
-import TextInput from '@/components/ui/TextInput'
+import TextInput from '../components/AdminTextInput'
 import { useToast } from '@/components/ui/toast-context'
 import { ApiClientError } from '@/app/api-client'
 import { cn } from '@/lib/utils'
@@ -32,13 +35,15 @@ function sourceLabel(source: string | null): string {
 export default function AdminFeedbackPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
-  const [status, setStatus] = useState<FeedbackStatus>('pending')
+  const [statusValue, setStatus] = useAdminQueryState('status', 'pending')
+  const status: FeedbackStatus = statusValue === 'accepted' || statusValue === 'ignored' ? statusValue : 'pending'
   const [kind, setKind] = useState<'' | FeedbackKind>('')
-  const [keyword, setKeyword] = useState('')
-  const [search, setSearch] = useState('')
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(10)
+  const [search, setSearch] = useAdminQueryState('search', '')
+  const [keyword, setKeyword] = useState(search)
+  const [page, setPage] = useAdminNumberQuery('page', 1)
+  const [pageSize, setPageSize] = useAdminNumberQuery('pageSize', 10)
   const [detailId, setDetailId] = useState<string | null>(null)
+  const dialogRef = useAdminDialog(detailId !== null, () => setDetailId(null))
 
   const query = useQuery({
     queryKey: ['admin', 'feedback', status, kind, search, page, pageSize],
@@ -134,7 +139,7 @@ export default function AdminFeedbackPage() {
               setKind(event.target.value as '' | FeedbackKind)
               setPage(1)
             }}
-            className="h-10 rounded-[var(--radius-pill)] border border-[var(--border-strong)] bg-[var(--surface-default)] px-3 text-sm text-[var(--text-primary)] outline-none"
+            aria-label="筛选条件" className="h-11 rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] px-3 text-sm text-[var(--text-primary)] outline-none"
           >
             <option value="">全部类别</option>
             <option value="bug">问题反馈</option>
@@ -195,8 +200,9 @@ export default function AdminFeedbackPage() {
       </AdminCard>
 
       {detailId !== null ? (
-        <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+        <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-labelledby="admin-feedback-detail-title" ref={dialogRef} tabIndex={-1}>
           <div className="max-h-[88vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-5">
+            <div className="mb-3 flex items-center justify-between gap-3"><h2 id="admin-feedback-detail-title" className="font-semibold">反馈详情</h2><Button variant="ghost" onClick={() => setDetailId(null)}>关闭</Button></div>
             <AdminPanelState state={detailQuery.isLoading ? 'loading' : detailQuery.isError ? 'error' : 'ready'}>
               {detail ? (
                 <>
@@ -214,9 +220,7 @@ export default function AdminFeedbackPage() {
                         <span>{sourceLabel(detail.source)}</span>
                       </div>
                     </div>
-                    <Button size="sm" variant="ghost" onClick={() => setDetailId(null)}>
-                      关闭
-                    </Button>
+
                   </div>
 
                   <p className="mt-4 whitespace-pre-wrap break-words text-sm leading-relaxed">{detail.content}</p>

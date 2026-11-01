@@ -1,0 +1,55 @@
+import { createRoot } from 'react-dom/client'
+import { MemoryRouter, Routes, Route } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { ToastProvider } from '../../src/components/ui/Toast'
+import AdminLayout from '../../src/features/admin/AdminLayout'
+import AdminDashboardPage from '../../src/features/admin/pages/AdminDashboardPage'
+import AdminModelsPage from '../../src/features/admin/pages/AdminModelsPage'
+import AdminUsersPage from '../../src/features/admin/pages/AdminUsersPage'
+import AdminNovelsPage from '../../src/features/admin/pages/AdminNovelsPage'
+import AdminPostsPage from '../../src/features/admin/pages/AdminPostsPage'
+import AdminCommentsPage from '../../src/features/admin/pages/AdminCommentsPage'
+import AdminMessagesPage from '../../src/features/admin/pages/AdminMessagesPage'
+import AdminFeedbackPage from '../../src/features/admin/pages/AdminFeedbackPage'
+import AdminCreditsManagementPage from '../../src/features/admin/pages/AdminCreditsManagementPage'
+import AdminTokenManagementPage from '../../src/features/admin/pages/AdminTokenManagementPage'
+import AdminCreationRecordsPage from '../../src/features/admin/pages/AdminCreationRecordsPage'
+import AdminCraftLibraryPage from '../../src/features/admin/pages/AdminCraftLibraryPage'
+import AdminAgentEvalsPage from '../../src/features/admin/pages/AdminAgentEvalsPage'
+import AdminLogsPage from '../../src/features/admin/pages/AdminLogsPage'
+import AdminSettingsPage from '../../src/features/admin/pages/AdminSettingsPage'
+import '../../src/index.css'
+const now = '2026-11-01T12:00:00.000Z'
+const user = { id: 'public-fixture-user', nickname: '示例创作者', avatarUrl: null, phone: null, email: null, role: 'author', bannedAt: null, createdAt: now, lastActiveAt: now, isOnline: false, novelCount: 2, postCount: 1, followerCount: 0 }
+const models = [
+ ['speed','轻量','text','relay-text'],['builtin_0123456789abcdef','标准','text','relay-standard'],['builtin_1111111111111111','性能','text','relay-performance'],['tool_search','联网搜索 Search','web_search','deepseek-search'],['tool_fetch','网页抓取 Fetch','web_fetch','deepseek-fetch'],['tool_image','图片生成','image_generation','image-relay'],['tool_vision','图片理解','vision','vision-relay'],
+].map(([tier,displayName,modelKind,modelName],i)=>({ id:`model-${i}`,tier,displayName,modelKind,modelName,sortOrder:i,provider:'演示中转',baseUrl:modelKind==='web_search'?'https://relay.example.com/v1/tools/search':modelKind==='web_fetch'?'https://relay.example.com/v1/tools/fetch':'https://relay.example.com/v1',webToolProtocol:modelKind.startsWith('web_')?'deepseek':undefined,multiplier:1,enabled:i!==2,selectable:modelKind==='text',isDefault:i===0,apiKeyConfigured:i!==2,configurationReady:i!==2,requestCount:12,requestTokens:12000,responseTokens:4000,reasoningEfforts:['high'],defaultReasoningEffort:'high',visionEnabled:modelKind==='vision',contextWindowTokens:128000,updatedAt:now,routes:[],weightedRoutes:{primaryWeight:100,candidates:[]} }))
+const params = new URLSearchParams(location.search)
+if(params.get('theme')==='dark') document.documentElement.classList.add('dark')
+const pagination = { page:1,pageSize:10,total:1,totalPages:1 }
+const empty = { items:[],pagination:{...pagination,total:0} }
+window.fetch = async (input, init) => {
+ const url=new URL(typeof input==='string'?input:input instanceof Request?input.url:input.href,location.origin)
+ if (!url.pathname.startsWith('/api/admin')) throw Error('Preview blocks all non-admin requests')
+ if (init?.method && init.method!=='GET') return Response.json({success:false,error:{code:'PREVIEW_READ_ONLY',message:'合成预览仅用于只读审阅。'}},{status:409})
+ let data: unknown = empty
+ if(url.pathname==='/api/admin/me') data={...user,id:'public-fixture-admin',nickname:'演示管理员',role:'admin',isSuperAdmin:true}
+ else if(url.pathname==='/api/admin/models') data={models,trend:[]}
+ else if(url.pathname==='/api/admin/users') data={items:[user],pagination}
+ else if(url.pathname==='/api/admin/novels') data={items:[{id:'public-fixture-novel',title:'山海之间：公开合成作品',displayTitle:null,status:'published',visibility:'public',categoryName:'幻想',wordCount:12400,chapterCount:8,commentCount:2,favoriteCount:0,publishedAt:now,updatedAt:now,author:user}],pagination}
+ else if(url.pathname==='/api/admin/posts') data={items:[{id:'fixture-post',excerpt:'公开合成讨论：如何建立清晰的人物关系？',author:user,createdAt:now,updatedAt:now,commentCount:3,likeCount:0}],pagination}
+ else if(url.pathname==='/api/admin/feedback') data={...empty,counts:{pending:0,accepted:0,ignored:0}}
+ else if(url.pathname==='/api/admin/credits') data={summary:{globallyPaused:false,publicBetaEnabled:true,publicBetaRevision:1,users:1,dailyAllowance:0,dailyUsed:0,bonusBalance:0,exhaustedUsers:0},users:[{user,planLabel:'公测版',dailyAllowance:0,dailyUsed:0,dailyRemaining:0,bonusBalance:0,totalRemaining:0,usedPercent:0,resetsAt:now,suspended:false}]}
+ else if(url.pathname==='/api/admin/analytics') data={period:url.searchParams.get('period')??'day',from:now,to:now,labels:['2026-11-01 12:00'],metrics:[['users','新增用户',3],['completed','执行完成',8],['failed','执行异常',1],['tools','工具返回',12],['toolSuccess','工具成功',11],['toolFailed','工具未成功',1]].map(([key,label,total])=>({key,label,total,values:[total]})),tools:[],imports:null,cost:{knownCalls:0,unknownCalls:0,estimated:0,models:[]}}
+ else if(url.pathname==='/api/admin/token-usage') data={period:'today',periodStartedAt:now,summary:{totalTokens:0,requestTokens:0,responseTokens:0,cacheHitTokens:0,cacheMissTokens:0,cacheObservedTokens:0,users:0,webSearchCalls:0,imageCalls:0},users:[],actions:[],models:[],runs:[],runTurns:[],trend:[]}
+ else if(url.pathname==='/api/admin/creation-records') data={items:[],total:0,page:1,pageSize:20,hasMore:false}
+ else if(url.pathname==='/api/admin/craft/sources') data={sources:[]}
+ else if(url.pathname==='/api/admin/evals/suites') data={suites:[]}
+ else if(url.pathname==='/api/admin/agent3/operations') data={research:{queryBudgetViolations:0,builds:0,reuses:0,reuseRate:0,averageSearchesPerBuild:0,averageInputTokensPerBuild:0},prototypes:{completed:0,total:0,completionRate:0},privacy:{analyticsOptOut:0},sharing:{accepted:0}}
+ else if(url.pathname==='/api/admin/supplier-balances') data=[]
+ return Response.json({success:true,data})
+}
+const pages: Record<string,React.ReactNode> = {'':<AdminDashboardPage/>,models:<AdminModelsPage/>,users:<AdminUsersPage/>,novels:<AdminNovelsPage/>,posts:<AdminPostsPage/>,comments:<AdminCommentsPage/>,messages:<AdminMessagesPage/>,feedback:<AdminFeedbackPage/>,credits:<AdminCreditsManagementPage/>,tokens:<AdminTokenManagementPage/>, 'creation-records':<AdminCreationRecordsPage/>,craft:<AdminCraftLibraryPage/>,evals:<AdminAgentEvalsPage/>,logs:<AdminLogsPage/>,settings:<AdminSettingsPage/>}
+const page=params.get('page')??''; const route='/admin'+(page?'/'+page:'')+(params.get('model')?'?model='+params.get('model'):'')
+const client=new QueryClient({defaultOptions:{queries:{retry:false,staleTime:Infinity},mutations:{retry:false}}})
+createRoot(document.getElementById('root')!).render(<QueryClientProvider client={client}><ToastProvider><MemoryRouter initialEntries={[route]}><Routes>{Object.entries(pages).map(([path,element])=><Route key={path} path={'/admin'+(path?'/'+path:'')} element={<AdminLayout>{element}</AdminLayout>}/>)}</Routes></MemoryRouter></ToastProvider></QueryClientProvider>)

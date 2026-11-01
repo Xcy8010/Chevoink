@@ -1,9 +1,10 @@
+import { useAdminQueryState } from '../admin-query-state'
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { ApiClientError } from '@/app/api-client'
 import Button from '@/components/ui/Button'
-import TextInput from '@/components/ui/TextInput'
+import TextInput from '../components/AdminTextInput'
 import { useToast } from '@/components/ui/toast-context'
 import type {
   AdminAgentEvalSuiteRow,
@@ -29,7 +30,7 @@ import {
   submitAdminBlindReview,
   updateAdminAgentEvalSuiteStatus,
 } from '../api'
-import { AdminCard, AdminPageHeader, AdminPanelState, StatusPill } from '../AdminLayout'
+import { AdminCard, AdminPageHeader, AdminPanelState, AdminSectionTabs, StatusPill } from '../AdminLayout'
 import { useAdminSession } from '../admin-shared'
 
 const DIMENSION_LABELS: Record<AgentEvalDimension, string> = {
@@ -84,25 +85,22 @@ function blankCandidateRatings(labels: string[]): AgentBlindReviewSubmission['ca
 }
 
 export default function AdminAgentEvalsPage() {
+  const [tab, setTab] = useAdminQueryState('tab', 'suites')
   const toast = useToast()
   const queryClient = useQueryClient()
   const { admin } = useAdminSession()
-  const [selectedSuiteId, setSelectedSuiteId] = useState('')
+  const [selectedSuiteId, setSelectedSuiteId] = useAdminQueryState('suite', '')
   const [reviewNonce, setReviewNonce] = useState(0)
 
   const suitesQuery = useQuery({ queryKey: ['admin', 'evals', 'suites'], queryFn: listAdminAgentEvalSuites })
-  const operationsQuery = useQuery({ queryKey: ['admin', 'agent3', 'operations'], queryFn: getAdminAgent3OperationsMetrics, enabled: Boolean(admin?.isSuperAdmin) })
+  const operationsQuery = useQuery({ queryKey: ['admin', 'agent3', 'operations'], queryFn: getAdminAgent3OperationsMetrics, enabled: Boolean(tab === 'results' && admin?.isSuperAdmin) })
   const suites = suitesQuery.data?.suites ?? EMPTY_SUITES
   const selectedSuite = suites.find((suite) => suite.id === selectedSuiteId) ?? suites[0]
-
-  useEffect(() => {
-    if (!selectedSuiteId && suites[0]) setSelectedSuiteId(suites[0].id)
-  }, [selectedSuiteId, suites])
 
   const assignmentQuery = useQuery({
     queryKey: ['admin', 'evals', 'assignment', selectedSuite?.id, reviewNonce],
     queryFn: () => getNextAdminBlindReview(selectedSuite?.id),
-    enabled: selectedSuite?.status === 'active',
+    enabled: tab === 'review' && selectedSuite?.status === 'active',
     retry: false,
   })
   const assignment = assignmentQuery.data?.assignment ?? null
@@ -124,7 +122,7 @@ export default function AdminAgentEvalsPage() {
   const resultsQuery = useQuery({
     queryKey: ['admin', 'evals', 'results', selectedSuite?.id],
     queryFn: () => getAdminAgentEvalResults(selectedSuite!.id),
-    enabled: Boolean(admin?.isSuperAdmin && selectedSuite?.id),
+    enabled: Boolean(tab === 'results' && admin?.isSuperAdmin && selectedSuite?.id),
   })
 
   const submitMutation = useMutation({
@@ -149,14 +147,15 @@ export default function AdminAgentEvalsPage() {
   return (
     <div className="space-y-5">
       <AdminPageHeader
-        title="Agent 3.5 创作盲评"
+        title="创作盲评"
         description="固定量表、匿名候选、可追溯授权；评审过程中不展示候选真实来源。"
       />
 
-      {admin?.isSuperAdmin ? <SuiteCreator /> : null}
+      <AdminSectionTabs tabs={[{id:'suites',label:'评测套件'},{id:'create',label:'创建与样本'},{id:'review',label:'盲评'},{id:'results',label:'结果与门禁'}].filter(item => admin?.isSuperAdmin || !['create','results'].includes(item.id))} value={tab} onChange={setTab} label="创作盲评分区" />
+      {admin?.isSuperAdmin ? <div hidden={tab !== 'create'}><SuiteCreator /></div> : null}
 
-      {admin?.isSuperAdmin && operationsQuery.data ? <AdminCard>
-        <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-sm font-semibold">Agent 3.5 近 30 天运行门禁</h2><p className="mt-1 text-xs text-[var(--text-secondary)]">只汇总匿名计数、耗时和预算，不读取小说正文。</p></div><StatusPill tone={operationsQuery.data.research.queryBudgetViolations === 0 ? 'success' : 'danger'}>{operationsQuery.data.research.queryBudgetViolations === 0 ? '研究预算正常' : '存在预算越界'}</StatusPill></div>
+      {tab === 'results' && admin?.isSuperAdmin && operationsQuery.data ? <AdminCard>
+        <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-sm font-semibold">Agent 3.5 近 30 天运行门禁</h2><p className="mt-1 text-xs text-[var(--text-secondary)]">只汇总匿名计数、耗时和预算，不读取小说正文。</p></div><StatusPill tone={operationsQuery.data.research.queryBudgetViolations > 0 ? 'danger' : 'neutral'}>{operationsQuery.data.research.queryBudgetViolations === 0 ? '已记录 0 次预算越界' : '存在预算越界'}</StatusPill></div>
         <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Metric label="研究构建 / 复用" value={`${operationsQuery.data.research.builds} / ${operationsQuery.data.research.reuses}`} detail={`复用率 ${Math.round(operationsQuery.data.research.reuseRate * 100)}%`} />
           <Metric label="单档案搜索" value={operationsQuery.data.research.averageSearchesPerBuild.toFixed(1)} detail={`平均 ${Math.round(operationsQuery.data.research.averageInputTokensPerBuild)} input tokens`} />
@@ -165,6 +164,7 @@ export default function AdminAgentEvalsPage() {
         </div>
       </AdminCard> : null}
 
+      {tab === 'suites' ? <AdminCard><h2 className="mb-3 text-sm font-semibold">套件列表</h2><AdminPanelState state={suitesQuery.isPending ? 'loading' : suitesQuery.isError ? 'error' : !suites.length ? 'empty' : 'ready'}><ul className="divide-y divide-[var(--border-default)]">{suites.map(suite => <li key={suite.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><p className="font-semibold">{suite.name}</p><p className="mt-1 text-sm text-[var(--text-secondary)]">{STATUS_LABELS[suite.status]} · {suite.sampleCount} 个样本 · {suite.reviewCount} 份评审</p><p className="mt-1 text-xs text-[var(--text-secondary)]">数据集 {suite.datasetVersion} · 量表 {suite.rubricVersion}</p></div><Button onClick={() => { setSelectedSuiteId(suite.id); setTab(suite.status === 'active' ? 'review' : suite.status === 'draft' && admin?.isSuperAdmin ? 'create' : admin?.isSuperAdmin ? 'results' : 'review') }}>查看套件</Button></li>)}</ul></AdminPanelState></AdminCard> : null}
       <AdminCard>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
@@ -200,9 +200,10 @@ export default function AdminAgentEvalsPage() {
         </AdminPanelState>
       </AdminCard>
 
-      {admin?.isSuperAdmin && selectedSuite?.status === 'draft' ? <SampleCreator suiteId={selectedSuite.id} /> : null}
+      {admin?.isSuperAdmin && selectedSuite?.status === 'draft' ? <div hidden={tab !== 'create'}><SampleCreator key={selectedSuite.id} suiteId={selectedSuite.id} /></div> : null}
 
-      {selectedSuite?.status === 'active' ? (
+      {tab === 'review' && selectedSuite && selectedSuite.status !== 'active' ? <AdminCard><p className="text-sm text-[var(--text-secondary)]">当前套件{selectedSuite.status === 'draft' ? '尚未开始' : '已结束'}，暂不开放盲评。汇总仅超级管理员可查看。</p></AdminCard> : null}
+      {tab === 'review' && selectedSuite?.status === 'active' ? (
         <AdminCard>
           <AdminPanelState state={assignmentQuery.isLoading ? 'loading' : assignmentQuery.isError ? 'error' : !assignment ? 'empty' : 'ready'}>
             {assignment ? (
@@ -300,7 +301,7 @@ export default function AdminAgentEvalsPage() {
         </AdminCard>
       ) : null}
 
-      {admin?.isSuperAdmin && selectedSuite ? <ResultsPanel query={resultsQuery} /> : null}
+      {tab === 'results' && admin?.isSuperAdmin && selectedSuite ? <ResultsPanel query={resultsQuery} /> : null}
     </div>
   )
 }

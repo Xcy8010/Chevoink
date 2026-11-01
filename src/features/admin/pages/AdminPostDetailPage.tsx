@@ -1,4 +1,4 @@
-import { Link, useParams } from 'react-router-dom'
+import { Link, useLocation, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft } from 'lucide-react'
 
@@ -7,6 +7,8 @@ import { AdminCard, AdminPanelState, StatusPill } from '../AdminLayout'
 import { formatDateTime } from '../admin-shared'
 
 export default function AdminPostDetailPage() {
+  const location = useLocation()
+  const returnTo = (location.state as { adminReturnTo?: string } | null)?.adminReturnTo
   const { postId = '' } = useParams()
 
   const query = useQuery({
@@ -20,7 +22,7 @@ export default function AdminPostDetailPage() {
   return (
     <div>
       <Link
-        to="/admin/posts"
+        to={returnTo?.startsWith('/admin/posts') ? returnTo : '/admin/posts'}
         className="mb-4 inline-flex items-center gap-1 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
       >
         <ArrowLeft size={15} />

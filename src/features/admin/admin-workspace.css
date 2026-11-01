@@ -1,0 +1,85 @@
+/* Match Studio's neutral workspace in both themes; all overrides stay admin-only. */
+.admin-workspace, body:has(.admin-workspace) {
+  --app-bg: #f3f4f6;
+  --surface-default: #ffffff;
+  --surface-solid: #ffffff;
+  --surface-muted: #e9ebef;
+  --surface-elevated: #ffffff;
+  --surface-contrast: #1a1d23;
+  --surface-contrast-hover: #101216;
+  --text-primary: #171a20;
+  --text-secondary: #596171;
+  --text-tertiary: #596171;
+  --text-contrast: #f7f8fa;
+  --border-default: #e2e5e9;
+  --border-subtle: rgba(23,26,32,.1);
+  --border-strong: rgba(23,26,32,.18);
+  --color-brand: #343a43;
+  --color-brand-hover: #20252c;
+  --color-brand-soft: #e9ebef;
+  --accent-strong: #1a1d23;
+  --accent-soft: #eceef1;
+  --accent-border: #9ba3ad;
+  --focus-ring: rgba(90,100,115,.12);
+  --color-success: #397056;
+  --color-warning: #89642f;
+  --color-error: #aa4747;
+  --color-info: #526980;
+  --shadow-soft: none;
+  --shadow-card: none;
+}
+html.dark .admin-workspace, html.dark body:has(.admin-workspace) {
+  color-scheme: dark;
+  --app-bg: #2b2b2b;
+  --surface-default: #161616;
+  --surface-solid: #161616;
+  --surface-muted: #2b2b2b;
+  --surface-elevated: #303030;
+  --surface-contrast: #eef1f5;
+  --surface-contrast-hover: #ffffff;
+  --text-primary: #edf0f4;
+  --text-secondary: #abb3bf;
+  --text-tertiary: #969eaa;
+  --text-contrast: #111318;
+  --border-default: #333333;
+  --border-subtle: #383838;
+  --border-strong: #505050;
+  --color-brand: #d8dde5;
+  --color-brand-hover: #f1f3f6;
+  --color-brand-soft: #303236;
+  --accent-strong: #eef1f5;
+  --accent-soft: #303236;
+  --accent-border: #737b87;
+  --focus-ring: rgba(200,208,220,.14);
+  --color-success: #9cbaa8;
+  --color-warning: #c8b188;
+  --color-error: #d59b9b;
+  --color-info: #a3b3c6;
+}
+.admin-workspace main { background: var(--surface-default); }
+.admin-workspace .admin-sidebar { background: var(--app-bg); }
+.admin-workspace .admin-section { border-top: 1px solid var(--border-default); }
+/* A section is a flat region; contained rows use dividers rather than another card. */
+.admin-workspace .admin-section :where(article,section,div).rounded-xl { border-radius: 0; border-width: 0 0 1px; box-shadow: none; background-color: transparent; }
+.admin-workspace main :where(button,select,textarea) { border-radius: 6px; box-shadow: none; }
+.admin-workspace .admin-section :where(h2,h3) { letter-spacing: -.01em; }
+.admin-workspace .admin-toolbar { background: transparent; }
+.admin-workspace .admin-nav-link { border-radius: 6px; }
+
+.admin-workspace { font-size: 14px; line-height: 1.6; }
+.admin-workspace .admin-nav-link { display: flex; align-items: center; min-height: 44px; padding: 8px 12px; border-radius: 8px; color: var(--text-secondary); font-size: 14px; }
+.admin-workspace .admin-nav-link:hover { background: var(--surface-muted); color: var(--text-primary); }
+.admin-workspace .admin-nav-link.active { background: var(--color-brand-soft); color: var(--color-brand); font-weight: 600; }
+.admin-workspace .admin-nav-group { display: flex; width: 100%; min-height: 44px; align-items: center; justify-content: space-between; padding: 6px 12px; font-size: 12px; color: var(--text-tertiary); }
+.admin-workspace .admin-menu-item { display: flex; width: 100%; min-height: 44px; align-items: center; padding: 8px 12px; border-radius: 6px; text-align: left; }
+.admin-workspace .admin-menu-item:hover { background: var(--surface-muted); }
+.admin-workspace :is(button, a, input, select, textarea):focus-visible { outline: 2px solid var(--color-brand); outline-offset: 3px; }
+.admin-workspace :is(button, select, input):not([type=checkbox]):not([type=radio]) { min-height: 44px; }
+.admin-workspace .admin-skip-link { position: fixed; top: -100px; left: 16px; z-index: 200; padding: 12px 20px; background: var(--surface-default); }
+.admin-workspace .admin-skip-link:focus { top: 8px; }
+.admin-workspace :is(td,th) { padding-top: 12px; padding-bottom: 12px; }
+.admin-workspace :is(p,td,dd,span) { overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { .admin-workspace * { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+
+.admin-portal { font-size: 14px; line-height: 1.6; }
+.admin-portal :is(button,select,input):not([type=checkbox]) { min-height:44px; }

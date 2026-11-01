@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, ExternalLink, Eye, History } from 'lucide-react'
 
@@ -17,6 +17,8 @@ import { AdminCard, AdminConfirmDialog, AdminPanelState, StatusPill } from '../A
 import { formatDateTime, formatTokens, isNovelTakenDown, NOVEL_STATUS_LABELS } from '../admin-shared'
 
 export default function AdminNovelDetailPage() {
+  const location = useLocation()
+  const returnTo = (location.state as { adminReturnTo?: string } | null)?.adminReturnTo
   const { novelId = '' } = useParams()
   const navigate = useNavigate()
   const toast = useToast()
@@ -80,7 +82,7 @@ export default function AdminNovelDetailPage() {
 
   return (
     <div>
-      <Link to="/admin/novels" className="mb-4 inline-flex items-center gap-1 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
+      <Link to={returnTo?.startsWith('/admin/novels') ? returnTo : '/admin/novels'} className="mb-4 inline-flex items-center gap-1 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
         <ArrowLeft size={15} />
         返回作品列表
       </Link>

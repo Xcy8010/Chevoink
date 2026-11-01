@@ -1,138 +1,39 @@
-import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-
+import TextInput from '../components/AdminTextInput'
 import { listAdminAuditLogs } from '../api'
 import { AdminCard, AdminPageHeader, AdminPager, AdminPanelState } from '../AdminLayout'
 import { describeAdminAction, formatDateTime } from '../admin-shared'
+import { useAdminQueryState } from '../admin-query-state'
+import { useAdminNumberQuery } from './admin-page-query'
 
-const TARGET_TYPE_LABELS: Record<string, string> = {
-  user: '用户',
-  novel: '作品',
-  chapter: '章节',
-  post: '帖子',
-  comment: '评论',
+const TARGET_TYPE_LABELS: Record<string, string> = { user: '用户', novel: '作品', chapter: '章节', post: '帖子', comment: '评论', model: '模型', credits: 'Credits', corpusSource: '语料来源' }
+const DETAIL_LABELS: Record<string, string> = { reason: '原因', status: '状态', modelId: '模型 ID', modelTier: '档位', enabled: '启用', userIds: '用户 ID', count: '数量', stoppedRuns: '停止任务数', revision: '版本', provider: '渠道', previousRole: '原角色', role: '角色' }
+function Detail({ value }: { value: unknown }) {
+  if (value === null || value === undefined) return <span>—</span>
+  if (typeof value === 'object') return <dl className="space-y-2">{Object.entries(value).filter(([key]) => key !== 'previousVisibility' && !/password|secret|token|credential|apiKey|content|body|prompt|message/i.test(key)).map(([key, item]) => <div key={key} className="grid min-w-0 grid-cols-[minmax(5rem,1fr)_minmax(0,2fr)] gap-3"><dt className="break-words text-[var(--text-secondary)]">{DETAIL_LABELS[key] ?? key}</dt><dd className="min-w-0 break-all"><Detail value={item} /></dd></div>)}</dl>
+  return <span>{typeof value === 'boolean' ? value ? '是' : '否' : String(value)}</span>
 }
-
 export default function AdminLogsPage() {
-  const [targetType, setTargetType] = useState('')
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(10)
-
-  const query = useQuery({
-    queryKey: ['admin', 'logs', targetType, page, pageSize],
-    queryFn: () =>
-      listAdminAuditLogs({
-        targetType: targetType || undefined,
-        page,
-        pageSize,
-      }),
-  })
-
-  const handlePageSizeChange = (size: number) => {
-    setPageSize(size)
-    setPage(1)
-  }
-
+  const [targetType, setTargetType] = useAdminQueryState('targetType', '')
+  const [action, setAction] = useAdminQueryState('action', '')
+  const [operator, setOperator] = useAdminQueryState('operator', '')
+  const [object, setObject] = useAdminQueryState('object', '')
+  const [from, setFrom] = useAdminQueryState('from', '')
+  const [to, setTo] = useAdminQueryState('to', '')
+  const [page, setPage] = useAdminNumberQuery('page', 1)
+  const [pageSize, setPageSize] = useAdminNumberQuery('pageSize', 10)
+  const query = useQuery({ queryKey: ['admin', 'logs', targetType, action, page, pageSize], queryFn: () => listAdminAuditLogs({ targetType: targetType || undefined, action: action || undefined, page, pageSize }) })
   const data = query.data
-
-  return (
-    <div>
-      <AdminPageHeader title="操作日志" description="所有管理操作留痕，只增不删" />
-
-      <AdminCard>
-        <div className="mb-4">
-          <select
-            value={targetType}
-            onChange={(event) => {
-              setTargetType(event.target.value)
-              setPage(1)
-            }}
-            className="h-10 rounded-[var(--radius-pill)] border border-[var(--border-strong)] bg-[var(--surface-default)] px-3 text-sm text-[var(--text-primary)] outline-none"
-          >
-            <option value="">全部对象</option>
-            <option value="user">用户</option>
-            <option value="novel">作品</option>
-            <option value="chapter">章节</option>
-            <option value="post">帖子</option>
-            <option value="comment">评论</option>
-          </select>
-        </div>
-
-        <AdminPanelState
-          state={query.isLoading ? 'loading' : query.isError ? 'error' : data && data.items.length === 0 ? 'empty' : 'ready'}
-        >
-          {data ? (
-            <>
-              {/* 手机端：卡片式列表，避免宽表格横向裁切 */}
-              <ul className="space-y-3 md:hidden">
-                {data.items.map((log) => {
-                  const detailEntries = Object.entries(log.detail).filter(([key]) => key !== 'previousVisibility')
-                  return (
-                    <li key={log.id} className="rounded-lg border border-[var(--border-default)] p-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="text-sm font-medium">{describeAdminAction(log.action)}</p>
-                        <span className="shrink-0 text-xs text-[var(--text-secondary)]">{formatDateTime(log.createdAt)}</span>
-                      </div>
-                      <p className="mt-1 text-xs text-[var(--text-secondary)]">
-                        管理员 {log.adminNickname ?? log.adminId} · 对象{' '}
-                        {log.targetType ? TARGET_TYPE_LABELS[log.targetType] ?? log.targetType : '—'} · IP {log.ip ?? '—'}
-                      </p>
-                      {detailEntries.length > 0 ? (
-                        <p className="mt-1 break-words text-xs text-[var(--text-tertiary)]">
-                          {detailEntries.map(([key, value]) => `${key}: ${String(value)}`).join('；')}
-                        </p>
-                      ) : null}
-                    </li>
-                  )
-                })}
-              </ul>
-
-              <div className="hidden overflow-x-auto md:block">
-                <table className="w-full min-w-[720px] text-sm">
-                  <thead>
-                    <tr className="text-left text-xs text-[var(--text-secondary)]">
-                      <th className="pb-2 font-normal">时间</th>
-                      <th className="pb-2 font-normal">管理员</th>
-                      <th className="pb-2 font-normal">操作</th>
-                      <th className="pb-2 font-normal">对象</th>
-                      <th className="pb-2 font-normal">详情</th>
-                      <th className="pb-2 font-normal">IP</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.items.map((log) => {
-                      const detailEntries = Object.entries(log.detail).filter(([key]) => key !== 'previousVisibility')
-                      return (
-                        <tr key={log.id} className="border-t border-[var(--border-default)]">
-                          <td className="py-2.5 text-[var(--text-secondary)]">{formatDateTime(log.createdAt)}</td>
-                          <td className="py-2.5">{log.adminNickname ?? log.adminId}</td>
-                          <td className="py-2.5 font-medium">{describeAdminAction(log.action)}</td>
-                          <td className="py-2.5 text-[var(--text-secondary)]">
-                            {log.targetType ? TARGET_TYPE_LABELS[log.targetType] ?? log.targetType : '—'}
-                          </td>
-                          <td className="max-w-[260px] py-2.5 text-xs text-[var(--text-secondary)]">
-                            {detailEntries.length > 0
-                              ? detailEntries.map(([key, value]) => `${key}: ${String(value)}`).join('；')
-                              : '—'}
-                          </td>
-                          <td className="py-2.5 text-xs text-[var(--text-secondary)]">{log.ip ?? '—'}</td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              <AdminPager
-                pagination={data.pagination}
-                page={page}
-                pageSize={pageSize}
-                onPageChange={setPage}
-                onPageSizeChange={handlePageSizeChange}
-              />
-            </>
-          ) : null}
-        </AdminPanelState>
-      </AdminCard>
-    </div>
-  )
+  const rows = data?.items.filter(log => (!operator || `${log.adminId} ${log.adminNickname ?? ''}`.toLowerCase().includes(operator.toLowerCase())) && (!object || `${log.targetId ?? ''} ${log.targetType ?? ''}`.toLowerCase().includes(object.toLowerCase())) && (!from || new Date(log.createdAt).getTime() >= new Date(`${from}T00:00:00+08:00`).getTime()) && (!to || new Date(log.createdAt).getTime() <= new Date(`${to}T23:59:59.999+08:00`).getTime())) ?? []
+  return <div>
+    <AdminPageHeader title="操作审计" description="管理操作只增不删；详情按字段展示，敏感内容保持隐藏。" />
+    <AdminCard className="mb-4"><div className="flex flex-wrap items-end gap-3">
+      <label className="text-sm">对象类型<select aria-label="对象类型" value={targetType} onChange={event => { setTargetType(event.target.value); setPage(1) }} className="mt-1 block min-h-11 rounded-lg border border-[var(--border-default)] bg-[var(--surface-default)] px-3"><option value="">全部对象</option>{Object.entries(TARGET_TYPE_LABELS).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+      <label className="text-sm">动作代码<TextInput aria-label="动作代码" value={action} onChange={event => { setAction(event.target.value); setPage(1) }} placeholder="完整动作代码" /></label>
+      <details className="w-full"><summary className="min-h-11 cursor-pointer py-3 text-sm">更多筛选</summary><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><label className="text-sm">操作者<TextInput value={operator} onChange={event => setOperator(event.target.value)} placeholder="管理员昵称 / ID" /></label><label className="text-sm">对象 ID<TextInput value={object} onChange={event => setObject(event.target.value)} placeholder="对象 ID" /></label><label className="text-sm">开始日期<TextInput type="date" value={from} onChange={event => setFrom(event.target.value)} /></label><label className="text-sm">结束日期<TextInput type="date" value={to} onChange={event => setTo(event.target.value)} /></label></div><p className="mt-3 text-xs text-[var(--text-secondary)]">对象类型与动作由服务端筛选；操作者、对象 ID 与时间仅筛选当前已加载页（UTC+8），不代表全量检索。</p></details>
+    </div></AdminCard>
+    <AdminCard><AdminPanelState state={query.isPending ? 'loading' : query.isError ? 'error' : rows.length === 0 ? 'empty' : 'ready'}>
+      <div className="space-y-3">{rows.map(log => <article key={log.id} className="rounded-xl border border-[var(--border-default)] p-4"><div className="flex flex-wrap items-start justify-between gap-2"><h2 className="text-sm font-semibold">{describeAdminAction(log.action)}</h2><time className="text-sm text-[var(--text-secondary)]" dateTime={log.createdAt}>{formatDateTime(log.createdAt)}</time></div><dl className="mt-3 grid gap-3 text-sm sm:grid-cols-3"><div><dt className="text-xs text-[var(--text-secondary)]">操作者</dt><dd className="break-all">{log.adminNickname ?? log.adminId}</dd></div><div><dt className="text-xs text-[var(--text-secondary)]">对象</dt><dd className="break-all">{TARGET_TYPE_LABELS[log.targetType ?? ''] ?? log.targetType ?? '—'} · {log.targetId ?? '—'}</dd></div><div><dt className="text-xs text-[var(--text-secondary)]">动作代码</dt><dd className="break-all">{log.action}</dd></div></dl><details className="mt-3"><summary className="min-h-11 cursor-pointer py-3 text-sm">查看审计详情</summary><div className="space-y-3 text-sm"><p>来源 IP：{log.ip ?? '—'}</p><Detail value={log.detail} /></div></details></article>)}</div>
+    </AdminPanelState>{data ? <AdminPager pagination={data.pagination} page={page} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={size => { setPageSize(size); setPage(1) }} /> : null}</AdminCard>
+  </div>
 }

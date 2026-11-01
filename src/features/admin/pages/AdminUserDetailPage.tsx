@@ -1,4 +1,5 @@
-import { Link, useParams } from 'react-router-dom'
+import { AdminRowActions } from './AdminPageControls'
+import { Link, useLocation, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft } from 'lucide-react'
 
@@ -17,6 +18,8 @@ const ROLE_LABELS: Record<string, string> = {
 }
 
 export default function AdminUserDetailPage() {
+  const location = useLocation()
+  const returnTo = (location.state as { adminReturnTo?: string } | null)?.adminReturnTo
   const { userId = '' } = useParams()
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -78,7 +81,7 @@ export default function AdminUserDetailPage() {
 
   return (
     <div>
-      <Link to="/admin/users" className="mb-4 inline-flex items-center gap-1 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
+      <Link to={returnTo?.startsWith('/admin/users') ? returnTo : '/admin/users'} className="mb-4 inline-flex items-center gap-1 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
         <ArrowLeft size={15} />
         返回用户列表
       </Link>
@@ -120,7 +123,7 @@ export default function AdminUserDetailPage() {
                   >
                     创作记录
                   </Link>
-                  {isSuperAdmin && user.id !== admin?.id ? (
+                  <AdminRowActions label="账户管理">{isSuperAdmin && user.id !== admin?.id ? (
                     <label className="flex items-center gap-1.5 text-xs text-[var(--text-secondary)]">
                       身份
                       <select
@@ -149,11 +152,11 @@ export default function AdminUserDetailPage() {
                     </>
                   ) : (
                     <StatusPill tone="warning">管理员账号</StatusPill>
-                  )}
+                  )}</AdminRowActions>
                 </div>
               </div>
 
-              <dl className="mt-5 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+              <details className="mt-4"><summary className="min-h-11 cursor-pointer py-3 text-sm">基本资料与联系方式</summary><dl className="mt-3 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
                 {[
                   ['手机号', user.phone ?? '未绑定'],
                   ['邮箱', user.email ?? '未绑定'],
@@ -175,7 +178,8 @@ export default function AdminUserDetailPage() {
                     )}
                   </div>
                 ))}
-              </dl>
+              </dl></details>
+              <nav aria-label="用户关联管理" className="mt-3 flex flex-wrap gap-3 text-sm"><Link className="inline-flex min-h-11 items-center underline" to={`/admin/credits?search=${encodeURIComponent(userId)}`}>Credits 账户</Link><Link className="inline-flex min-h-11 items-center underline" to={`/admin/logs?targetType=user&object=${encodeURIComponent(userId)}`}>相关操作审计</Link></nav>
             </AdminCard>
 
             <AdminCard>

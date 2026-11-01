@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 
 import Button from '@/components/ui/Button'
-import TextInput from '@/components/ui/TextInput'
+import TextInput from '../components/AdminTextInput'
 import { useToast } from '@/components/ui/toast-context'
 import { ApiClientError } from '@/app/api-client'
 import type { AdminCaptchaPayload } from '../../../../shared/contracts/index.js'
@@ -126,10 +126,10 @@ export default function AdminSettingsPage() {
 
   return (
     <div>
-      <AdminPageHeader title="安全设置" description="管理你的登录凭证" />
+      <AdminPageHeader title="管理员安全" description="管理你的登录凭证" />
 
-      <div className="grid items-start gap-5 md:grid-cols-2">
-      <AdminCard>
+      <div className="grid min-w-0 grid-cols-1 items-start gap-5 md:grid-cols-2">
+      <AdminCard className="min-w-0">
         <h2 className="mb-1 text-sm font-semibold">修改登录密码</h2>
         <p className="mb-4 text-xs text-[var(--text-secondary)]">
           修改成功后当前会话将退出，需使用新密码重新登录。
@@ -140,6 +140,7 @@ export default function AdminSettingsPage() {
             <p className="mb-1.5 text-sm text-[var(--text-secondary)]">当前密码</p>
             <TextInput
               type="password"
+              aria-label="当前密码"
               autoComplete="current-password"
               value={oldPassword}
               onChange={(event) => setOldPassword(event.target.value)}
@@ -150,6 +151,7 @@ export default function AdminSettingsPage() {
             <p className="mb-1.5 text-sm text-[var(--text-secondary)]">新密码</p>
             <TextInput
               type="password"
+              aria-label="新密码"
               autoComplete="new-password"
               placeholder="至少 12 位，含大小写、数字与符号"
               value={newPassword}
@@ -160,7 +162,7 @@ export default function AdminSettingsPage() {
           <div>
             <p className="mb-1.5 text-sm text-[var(--text-secondary)]">确认新密码</p>
             <TextInput
-              type="password"
+              type="password" aria-label="确认新密码"
               autoComplete="new-password"
               value={confirmPassword}
               onChange={(event) => setConfirmPassword(event.target.value)}
@@ -173,7 +175,7 @@ export default function AdminSettingsPage() {
         </form>
       </AdminCard>
 
-      <AdminCard>
+      <AdminCard className="min-w-0">
         <h2 className="mb-1 text-sm font-semibold">绑定手机号</h2>
         <p className="mb-4 text-xs text-[var(--text-secondary)]">
           当前绑定：{admin?.phone ?? '未绑定'}。绑定后可在登录页使用手机号 + 密码或短信验证码登录。
@@ -193,7 +195,7 @@ export default function AdminSettingsPage() {
 
           <div>
             <p className="mb-1.5 text-sm text-[var(--text-secondary)]">人机验证</p>
-            <div className="flex items-center gap-3">
+            <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-3">
               {captcha ? (
                 <button type="button" title="点击刷新" onClick={() => void refreshCaptcha()} className="shrink-0">
                   <img
@@ -212,6 +214,7 @@ export default function AdminSettingsPage() {
                 </button>
               )}
               <TextInput
+                className="min-w-0"
                 placeholder="图中字符"
                 value={captchaAnswer}
                 onChange={(event) => setCaptchaAnswer(event.target.value)}
@@ -221,8 +224,9 @@ export default function AdminSettingsPage() {
 
           <div>
             <p className="mb-1.5 text-sm text-[var(--text-secondary)]">短信验证码</p>
-            <div className="flex gap-2">
+            <div className="flex min-w-0 flex-wrap gap-2">
               <TextInput
+                className="min-w-0 flex-[1_1_10rem]"
                 inputMode="numeric"
                 autoComplete="one-time-code"
                 placeholder="请输入短信验证码"

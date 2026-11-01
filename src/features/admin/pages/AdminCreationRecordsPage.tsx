@@ -1,3 +1,5 @@
+import { useAdminQueryState } from '../admin-query-state'
+import { useAdminNumberQuery } from './admin-page-query'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
@@ -6,8 +8,8 @@ import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, FileText, History, L
 import { getAdminAgentSessionMessages, getAdminCreationRecords, getAdminCreationRecordsIndex } from '../api'
 import Button from '@/components/ui/Button'
 import AdminAnalytics from '../components/AdminAnalytics'
-import TextInput from '@/components/ui/TextInput'
-import { AdminCard, AdminPageHeader, AdminPanelState, StatusPill } from '../AdminLayout'
+import TextInput from '../components/AdminTextInput'
+import { AdminCard, AdminPageHeader, AdminPanelState, AdminSectionTabs, StatusPill } from '../AdminLayout'
 import { formatTokens } from '../admin-shared'
 // 创作区消息渲染组件只读复用：思考折叠、工具卡片、待办清单等与作者侧看到的内容完全一致
 import { AgentMessageParts } from '@/features/studio/agent/components/AgentMessageParts'
@@ -148,7 +150,7 @@ function SessionTranscript({
           </div>
           {run.errorMessage ? <p className="mt-1 text-sm text-[var(--color-error)]">错误：{run.errorMessage}</p> : null}
 
-          <div className="mt-3 space-y-3">
+          <details className="mt-3"><summary className="min-h-11 cursor-pointer py-3 text-sm">查看本轮消息与工具详情</summary><div className="space-y-3">
             {run.messages.map((message) => {
               if (message.role === 'user') {
                 const attachments = message.parts.filter((part) => (part as AgentMessagePart).type === 'attachment')
@@ -236,7 +238,7 @@ function SessionTranscript({
                 </div>
               )
             })}
-          </div>
+          </div></details>
         </div>
       ))}
 
@@ -259,9 +261,10 @@ export default function AdminCreationRecordsPage() {
   const { userId = '' } = useParams()
   const navigate = useNavigate()
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null)
-  const [keyword, setKeyword] = useState('')
-  const [search, setSearch] = useState('')
-  const [page, setPage] = useState(1)
+  const [search, setSearch] = useAdminQueryState('search', '')
+  const [keyword, setKeyword] = useState(search)
+  const [page, setPage] = useAdminNumberQuery('page', 1)
+  const [tab, setTab] = useAdminQueryState('tab', 'tasks')
   const [indexItems, setIndexItems] = useState<AdminCreationRecordsIndexRow[]>([])
   const [indexHasMore, setIndexHasMore] = useState(false)
   const [indexTotal, setIndexTotal] = useState(0)
@@ -341,10 +344,13 @@ export default function AdminCreationRecordsPage() {
     return (
       <div>
         <AdminPageHeader
-          title="创作记录"
-          description={indexTotal > 0 ? `共 ${indexTotal} 位创作者有 Agent 创作记录，点击进入查看完整对话` : '无需搜索即可查看已有创作记录的创作者，点击进入其创作记录'}
+          title="创作运行"
+          description={indexTotal > 0 ? `共 ${indexTotal} 位创作者有 Agent 记录` : '按创作者定位执行记录；会话正文仅在主动展开后显示。'}
         />
-        <AdminAnalytics scope="creation" />
+        <AdminSectionTabs tabs={[{id:'tasks',label:'任务记录'},{id:'tools',label:'工具与导入'},{id:'stats',label:'统计'}]} value={tab} onChange={setTab} label="创作运行分区" />
+        {tab !== 'tasks' ? <AdminAnalytics scope="creation" view={tab === 'tools' ? 'tools' : 'stats'} /> : null}
+        {tab === 'tasks' ? <>
+        <p className="mb-4 text-sm text-[var(--text-secondary)]">当前索引按创作者汇总，进入后可查看任务执行状态、轮次、错误与用量；跨用户任务级筛选待接入。</p>
         <form
           className="mb-4 flex max-w-md gap-2"
           onSubmit={(event) => {
@@ -397,6 +403,7 @@ export default function AdminCreationRecordsPage() {
             ) : null}
           </AdminCard>
         </AdminPanelState>
+        </> : null}
       </div>
     )
   }

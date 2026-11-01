@@ -1,8 +1,11 @@
+import { useAdminNumberQuery } from './admin-page-query'
+import { useAdminQueryState } from '../admin-query-state'
+import { AdminCommunityTabs, AdminRowActions } from './AdminPageControls'
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import Button from '@/components/ui/Button'
-import TextInput from '@/components/ui/TextInput'
+import TextInput from '../components/AdminTextInput'
 import { useToast } from '@/components/ui/toast-context'
 import { ApiClientError } from '@/app/api-client'
 import type { AdminCommentRow } from '../../../../shared/contracts/index.js'
@@ -27,11 +30,11 @@ function commentTypeLabel(comment: AdminCommentRow): string {
 export default function AdminCommentsPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
-  const [keyword, setKeyword] = useState('')
-  const [search, setSearch] = useState('')
-  const [category, setCategory] = useState('')
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(10)
+  const [search, setSearch] = useAdminQueryState('search', '')
+  const [keyword, setKeyword] = useState(search)
+  const [category, setCategory] = useAdminQueryState('category', '')
+  const [page, setPage] = useAdminNumberQuery('page', 1)
+  const [pageSize, setPageSize] = useAdminNumberQuery('pageSize', 10)
   const [pendingDelete, setPendingDelete] = useState<AdminCommentRow | null>(null)
 
   const query = useQuery({
@@ -64,7 +67,9 @@ export default function AdminCommentsPage() {
 
   return (
     <div>
-      <AdminPageHeader title="评论管理" description="检索全站评论（作品评、章节评、帖子评论），对违规内容执行删除" />
+      <AdminPageHeader title="社区管理" description="检索全站评论（作品评、章节评、帖子评论），对违规内容执行删除" />
+
+      <AdminCommunityTabs />
 
       <AdminCard className="mb-4">
         <div className="flex flex-wrap items-center gap-3">
@@ -88,7 +93,7 @@ export default function AdminCommentsPage() {
               setCategory(event.target.value)
               setPage(1)
             }}
-            className="h-10 rounded-[var(--radius-pill)] border border-[var(--border-strong)] bg-[var(--surface-default)] px-3 text-sm text-[var(--text-primary)] outline-none"
+            aria-label="筛选条件" className="h-11 rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] px-3 text-sm text-[var(--text-primary)] outline-none"
           >
             <option value="">全部类型</option>
             <option value="novel">作品评论（含章节/段落评论）</option>
@@ -103,7 +108,7 @@ export default function AdminCommentsPage() {
         >
           {data ? (
             <>
-              <ul className="divide-y divide-[var(--border-default)] md:max-h-[60vh] md:overflow-y-auto md:pr-1">
+              <ul className="divide-y divide-[var(--border-default)]">
                 {data.items.map((comment) => (
                   <li key={comment.id} className="flex items-start justify-between gap-3 py-3">
                     <div className="min-w-0 flex-1">
@@ -133,9 +138,9 @@ export default function AdminCommentsPage() {
                           查看
                         </a>
                       ) : null}
-                      <Button size="sm" variant="ghost" onClick={() => setPendingDelete(comment)}>
+                      <AdminRowActions><Button size="sm" variant="ghost" onClick={() => setPendingDelete(comment)}>
                         删除
-                      </Button>
+                      </Button></AdminRowActions>
                     </div>
                   </li>
                 ))}

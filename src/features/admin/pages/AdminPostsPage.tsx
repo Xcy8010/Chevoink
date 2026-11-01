@@ -1,9 +1,12 @@
+import { useAdminNumberQuery } from './admin-page-query'
+import { useAdminQueryState } from '../admin-query-state'
+import { AdminCommunityTabs, AdminRowActions } from './AdminPageControls'
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import Button from '@/components/ui/Button'
-import TextInput from '@/components/ui/TextInput'
+import TextInput from '../components/AdminTextInput'
 import { useToast } from '@/components/ui/toast-context'
 import { ApiClientError } from '@/app/api-client'
 import type { AdminPostRow } from '../../../../shared/contracts/index.js'
@@ -12,12 +15,13 @@ import { AdminCard, AdminConfirmDialog, AdminPageHeader, AdminPager, AdminPanelS
 import { formatDateTime } from '../admin-shared'
 
 export default function AdminPostsPage() {
+  const location = useLocation()
   const toast = useToast()
   const queryClient = useQueryClient()
-  const [keyword, setKeyword] = useState('')
-  const [search, setSearch] = useState('')
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(10)
+  const [search, setSearch] = useAdminQueryState('search', '')
+  const [keyword, setKeyword] = useState(search)
+  const [page, setPage] = useAdminNumberQuery('page', 1)
+  const [pageSize, setPageSize] = useAdminNumberQuery('pageSize', 10)
   const [pendingDelete, setPendingDelete] = useState<AdminPostRow | null>(null)
 
   const query = useQuery({
@@ -44,7 +48,9 @@ export default function AdminPostsPage() {
 
   return (
     <div>
-      <AdminPageHeader title="帖子管理" description="检索社区帖子，对违规内容执行删除" />
+      <AdminPageHeader title="社区管理" description="检索社区帖子，对违规内容执行删除" />
+
+      <AdminCommunityTabs />
 
       <AdminCard className="mb-4">
         <form
@@ -68,10 +74,10 @@ export default function AdminPostsPage() {
         >
           {data ? (
             <>
-              <ul className="divide-y divide-[var(--border-default)] md:max-h-[60vh] md:overflow-y-auto md:pr-1">
+              <ul className="divide-y divide-[var(--border-default)]">
                 {data.items.map((post) => (
                   <li key={post.id} className="flex items-start justify-between gap-3 py-3">
-                    <Link to={`/admin/posts/${post.id}`} className="min-w-0 flex-1 transition-opacity hover:opacity-75">
+                    <Link to={`/admin/posts/${post.id}`} state={{ adminReturnTo: location.pathname + location.search }} className="min-w-0 flex-1 transition-opacity hover:opacity-75">
                       <p className="break-words text-sm leading-relaxed">{post.excerpt}</p>
                       <p className="mt-1.5 text-xs text-[var(--text-secondary)]">
                         {post.author.nickname}
@@ -84,9 +90,9 @@ export default function AdminPostsPage() {
                         {formatDateTime(post.createdAt)}
                       </p>
                     </Link>
-                    <Button size="sm" variant="ghost" className="shrink-0" onClick={() => setPendingDelete(post)}>
+                    <AdminRowActions><Button size="sm" variant="ghost" className="shrink-0" onClick={() => setPendingDelete(post)}>
                       删除
-                    </Button>
+                    </Button></AdminRowActions>
                   </li>
                 ))}
               </ul>

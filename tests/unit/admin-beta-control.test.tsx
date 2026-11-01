@@ -22,6 +22,7 @@ it('labels a stopped aggregate allowance as base quota rather than current avail
 it('requires separate STOP_BETA captcha/confirmation and sends the displayed CAS revision without pausing calls or resetting accounts', async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } })
   render(<QueryClientProvider client={client}><MemoryRouter><AdminCreditsManagementPage /></MemoryRouter></QueryClientProvider>)
+  fireEvent.click(screen.getByRole('button', { name: '全局政策' }))
   const stop = await screen.findByRole('button', { name: '停止公测' })
   expect(stop.className).toContain('bg-rose-700')
   fireEvent.click(stop)
@@ -37,4 +38,19 @@ it('requires separate STOP_BETA captcha/confirmation and sends the displayed CAS
   fireEvent.click(confirm)
   await waitFor(() => expect(mocks.beta).toHaveBeenCalledWith({ enabled: false, expectedRevision: 4, captchaId: 'fixture-captcha', captchaAnswer: 'abcd', confirmation: 'STOP_BETA' }))
   expect(mocks.pause).not.toHaveBeenCalled(); expect(mocks.reset).not.toHaveBeenCalled()
+})
+
+it('names the global danger dialog, contains keyboard focus and returns focus on Escape without mutating', async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+  render(<QueryClientProvider client={client}><MemoryRouter><AdminCreditsManagementPage /></MemoryRouter></QueryClientProvider>)
+  fireEvent.click(screen.getByRole('button', { name: '全局政策' }))
+  const stop = await screen.findByRole('button', { name: '停止公测' })
+  stop.focus(); fireEvent.click(stop)
+  const dialog = await screen.findByRole('dialog', { name: /停止公测/ })
+  expect(dialog.contains(document.activeElement)).toBe(true)
+  expect(screen.getByRole('textbox', { name: '人机验证码' })).toBeTruthy()
+  fireEvent.keyDown(document, { key: 'Escape' })
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(document.activeElement).toBe(stop)
+  expect(mocks.beta).not.toHaveBeenCalled(); expect(mocks.reset).not.toHaveBeenCalled()
 })

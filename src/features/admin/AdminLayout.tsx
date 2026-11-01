@@ -1,25 +1,8 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import {
-  BookOpen,
-  ChevronLeft,
-  ChevronRight,
-  ChevronsLeft,
-  ChevronsRight,
-  Home,
-  LayoutDashboard,
-  LogOut,
-  MessagesSquare,
-  MoonStar,
-  MoreHorizontal,
-  ShieldCheck,
-  SunMedium,
-  Users,
-} from 'lucide-react'
-
-import BottomSheet from '@/components/layout/BottomSheet'
+import { BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, LayoutDashboard, Menu, Search, Users, Workflow, Pin, X } from 'lucide-react'
 import Button from '@/components/ui/Button'
-import TextInput from '@/components/ui/TextInput'
+import TextInput from './components/AdminTextInput'
 import { useToast } from '@/components/ui/toast-context'
 import { useAutoHideScrollbars } from '@/hooks/useAutoHideScrollbars'
 import { cn } from '@/lib/utils'
@@ -27,49 +10,19 @@ import { useShellStore } from '@/store/useShellStore'
 import type { Pagination } from '../../../shared/contracts/index.js'
 import { adminLogout } from './api'
 import { useAdminSession } from './admin-shared'
+import { adminNavigation, adminCurrentPage, searchAdminPages } from './admin-navigation'
+import './admin-workspace.css'
+import { useAdminDialog } from './admin-dialog'
+import { clearAdminModelHistoryDrafts } from './components/AdminModelDraftRecovery'
 
-/* ---------------- 布局 ---------------- */
-
-const navItems = [
-  { to: '/admin', label: '仪表盘', end: true },
-  { to: '/admin/users', label: '用户管理' },
-  { to: '/admin/novels', label: '作品管理' },
-  { to: '/admin/posts', label: '帖子管理' },
-  { to: '/admin/comments', label: '评论管理' },
-  { to: '/admin/messages', label: '消息管理' },
-  { to: '/admin/evals', label: '创作盲评' },
-  { to: '/admin/creation-records', label: '创作记录' },
-  { to: '/admin/tokens', label: 'Token 管理' },
-  { to: '/admin/credits', label: 'Credits 管理' },
-  { to: '/admin/models', label: '模型管理' },
-  { to: '/admin/craft', label: '合法文笔库' },
-  { to: '/admin/feedback', label: '用户反馈 / 建议' },
-  { to: '/admin/logs', label: '操作日志' },
-  { to: '/admin/settings', label: '安全设置' },
-]
-
-/** 手机端底部导航：四个主入口 + 「更多」抽屉（与主站移动端同模式） */
-const mobilePrimaryNav = [
-  { to: '/admin', label: '仪表盘', end: true, icon: LayoutDashboard },
+let draftSessionOwner: string | null = null
+const scrollPositions = new Map<string, number>()
+const mobileItems = [
+  { to: '/admin', label: '总览', icon: LayoutDashboard },
   { to: '/admin/users', label: '用户', icon: Users },
-  { to: '/admin/novels', label: '作品', icon: BookOpen },
-  { to: '/admin/posts', label: '帖子', icon: MessagesSquare },
+  { to: '/admin/novels', label: '内容', icon: BookOpen },
+  { to: '/admin/models', label: '模型', icon: Workflow },
 ]
-
-const mobileMoreNav = [
-  { to: '/admin/comments', label: '评论管理' },
-  { to: '/admin/messages', label: '消息管理' },
-  { to: '/admin/evals', label: '创作盲评' },
-  { to: '/admin/creation-records', label: '创作记录' },
-  { to: '/admin/tokens', label: 'Token 管理' },
-  { to: '/admin/credits', label: 'Credits 管理' },
-  { to: '/admin/models', label: '模型管理' },
-  { to: '/admin/craft', label: '合法文笔库' },
-  { to: '/admin/feedback', label: '用户反馈 / 建议' },
-  { to: '/admin/logs', label: '操作日志' },
-  { to: '/admin/settings', label: '安全设置' },
-]
-
 export default function AdminLayout({ children }: { children?: ReactNode }) {
   const toast = useToast()
   const { admin, isLoading, denied } = useAdminSession()
@@ -77,204 +30,116 @@ export default function AdminLayout({ children }: { children?: ReactNode }) {
   const location = useLocation()
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false)
-  const theme = useShellStore((state) => state.theme)
-  const toggleTheme = useShellStore((state) => state.toggleTheme)
-
-  // 与主站一致：细滚动条 + 不滚动时自动隐藏
+  const [search, setSearch] = useState('')
+  const [pinned, setPinned] = useState(() => localStorage.getItem('chevoink-admin-model-pin') !== 'false')
+  const mobileDialogRef = useAdminDialog(moreOpen, () => setMoreOpen(false))
+  const mainRef = useRef<HTMLElement>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
+  const theme = useShellStore(state => state.theme)
+  const toggleTheme = useShellStore(state => state.toggleTheme)
+  useEffect(() => {
+    if (denied || (!isLoading && !admin)) {
+      clearAdminModelHistoryDrafts(); draftSessionOwner = null
+    } else if (admin) {
+      if (draftSessionOwner && draftSessionOwner !== admin.id) clearAdminModelHistoryDrafts()
+      draftSessionOwner = admin.id
+    }
+  }, [admin, denied, isLoading])
+  const currentPage = adminCurrentPage(location.pathname)
+  const currentGroup = adminNavigation.find(group => group.items.some(item => item.to === currentPage.to))?.label
+  const [expanded, setExpanded] = useState<string[]>(currentGroup ? [currentGroup] : [])
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const desktop = window.matchMedia('(min-width: 768px)')
+    const closeMobileNavigation = () => { if (desktop.matches) setMoreOpen(false) }
+    closeMobileNavigation()
+    desktop.addEventListener('change', closeMobileNavigation)
+    return () => desktop.removeEventListener('change', closeMobileNavigation)
+  }, [])
   useAutoHideScrollbars()
-
-  if (denied) {
-    return <Navigate to="/admin/login" replace />
-  }
-
-  if (isLoading) {
-    return (
-      <div className="flex h-[100dvh] items-center justify-center bg-[var(--surface-muted)] text-sm text-[var(--text-secondary)]">
-        正在校验管理员身份…
-      </div>
-    )
-  }
-
-  const handleLogout = async () => {
+  useEffect(() => {
+    // Admin accessibility must not alter author-side viewport behavior.
+    const viewport = document.querySelector('meta[name="viewport"]')
+    const original = viewport?.getAttribute('content')
+    viewport?.setAttribute('content', 'width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content')
+    return () => { if (original) viewport?.setAttribute('content', original) }
+  }, [])
+  useLayoutEffect(() => {
+    const main = mainRef.current
+    const content = contentRef.current
+    if (!main || !content) return
+    const key = location.pathname + location.search
+    const target = scrollPositions.get(key) ?? 0
+    let restoring = true
+    const restore = () => { if (!restoring) return; main.scrollTop = target; if (main.scrollTop >= target - 1) restoring = false }
+    const cancel = () => { restoring = false }
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(restore)
+    observer?.observe(content)
+    restore()
+    main.addEventListener('wheel', cancel, { passive: true })
+    main.addEventListener('touchstart', cancel, { passive: true })
+    main.addEventListener('keydown', cancel)
+    return () => {
+      scrollPositions.set(key, main.scrollTop)
+      if (scrollPositions.size > 100) scrollPositions.delete(scrollPositions.keys().next().value!)
+      observer?.disconnect()
+      main.removeEventListener('wheel', cancel)
+      main.removeEventListener('touchstart', cancel)
+      main.removeEventListener('keydown', cancel)
+    }
+  }, [location.pathname, location.search, isLoading])
+  useEffect(() => { if (currentGroup) setExpanded(value => value.includes(currentGroup) ? value : [currentGroup]) }, [currentGroup])
+  if (denied) return <Navigate to="/admin/login" replace />
+  if (isLoading) return <div role="status" className="flex h-[100dvh] items-center justify-center text-sm">正在校验管理员身份…</div>
+  if (!admin) return <div role="alert" className="p-8">暂时无法校验管理员身份，请刷新重试。</div>
+  const logout = async () => {
     if (isLoggingOut) return
     setIsLoggingOut(true)
-    try {
-      await adminLogout()
-    } catch {
-      toast.error('暂时无法确认退出登录，请稍后重试。')
-      return
-    } finally { setIsLoggingOut(false) }
-    navigate('/admin/login', { replace: true })
+    try { await adminLogout(); clearAdminModelHistoryDrafts(); draftSessionOwner = null; navigate('/admin/login', { replace: true }) }
+    catch { toast.error('暂时无法确认退出登录，请稍后重试。') }
+    finally { setIsLoggingOut(false) }
   }
-
-  return (
-    <div className="flex h-[100dvh] overflow-hidden bg-[var(--surface-muted)] text-[var(--text-primary)]">
-      <aside className="hidden h-full w-56 shrink-0 flex-col border-r border-[var(--border-default)] bg-[var(--surface-default)] md:flex">
-        <Link to="/admin" className="flex items-center gap-2 px-5 py-5">
-          <ShieldCheck size={20} className="text-[var(--text-primary)]" />
-          <div>
-            <p className="text-sm font-semibold tracking-[-0.01em]">启创墨域</p>
-            <p className="text-xs text-[var(--text-secondary)]">管理后台</p>
+  const navigation = (mobile = false) => <>
+    <NavLink to="/admin" end className="admin-nav-link" onClick={() => setMoreOpen(false)}>总览</NavLink>
+    {pinned ? <NavLink to="/admin/models" className="admin-nav-link" onClick={() => setMoreOpen(false)}>模型中心 <span className="ml-auto text-xs text-[var(--text-secondary)]">常用</span></NavLink> : null}
+    <button type="button" className="flex min-h-11 w-full items-center gap-2 px-3 text-xs text-[var(--text-tertiary)]" onClick={() => { setPinned(!pinned); localStorage.setItem('chevoink-admin-model-pin', String(!pinned)) }}><Pin size={13} />{pinned ? '取消固定模型中心' : '固定模型中心'}</button>
+    {adminNavigation.map(group => <section key={group.label} className="mt-3">
+      <button type="button" className="admin-nav-group" aria-expanded={mobile || expanded.includes(group.label)} onClick={() => setExpanded(value => value.includes(group.label) ? value.filter(label => label !== group.label) : [...value, group.label])}>
+        {group.label}<ChevronDown size={14} className={expanded.includes(group.label) || mobile ? '' : '-rotate-90'} />
+      </button>
+      {mobile || expanded.includes(group.label) ? <div className="space-y-1">{group.items.map(item => <NavLink key={item.to} to={item.to} className="admin-nav-link" onClick={() => setMoreOpen(false)}>{item.label}</NavLink>)}</div> : null}
+    </section>)}
+  </>
+  return <div className="admin-workspace flex h-[100dvh] overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)]">
+    <a href="#admin-main" className="admin-skip-link">跳到主要内容</a>
+    <aside className="admin-sidebar hidden h-full w-[248px] shrink-0 flex-col border-r border-[var(--border-default)] bg-[var(--surface-default)] md:flex">
+      <Link to="/admin" className="flex min-h-[80px] items-center gap-3 px-6"><img src="/favicon.png" alt="启创墨域 Logo" width={44} height={44} className="h-11 w-11 shrink-0 rounded-md object-contain" /><span><strong className="block text-base">启创墨域</strong><span className="text-xs text-[var(--text-tertiary)]">管理工作台</span></span></Link>
+      <nav aria-label="后台业务导航" className="min-h-0 flex-1 overflow-y-auto px-4 pb-5">{navigation()}</nav>
+      <div className="border-t border-[var(--border-default)] px-6 py-4 text-xs text-[var(--text-tertiary)]">{admin.isSuperAdmin ? '超级管理员' : '管理员'} · 受控管理会话</div>
+    </aside>
+    <div className="flex min-w-0 flex-1 flex-col">
+      <header className="relative z-40 flex min-h-[72px] shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[var(--border-default)] bg-[var(--surface-default)] px-4 py-2 md:px-8">
+        <div className="flex items-center gap-2 text-sm"><span className="hidden text-[var(--text-tertiary)] lg:inline">{currentGroup ?? '工作台'} /</span><span className="font-medium">{currentPage.label}</span></div>
+        <div className="flex items-center gap-2">
+          <div className="relative"><label className="flex items-center gap-2 rounded-lg border border-[var(--border-default)] bg-[var(--surface-muted)] px-3"><Search size={16} /><input aria-label="搜索后台页面及操作" value={search} onChange={event => setSearch(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setSearch('') }} placeholder="搜索页面与操作" className="h-11 w-28 bg-transparent text-sm outline-none sm:w-48" /></label>
+            {search ? <div role="region" aria-label="页面搜索结果" className="absolute right-0 top-full z-50 mt-2 max-h-[65dvh] w-[min(320px,90vw)] overflow-y-auto rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-2 shadow-lg">{searchAdminPages(search).length ? searchAdminPages(search).map(item => <Link key={item.to} to={item.to} onClick={() => setSearch('')} className="flex min-h-11 items-center rounded-lg px-3 text-sm hover:bg-[var(--surface-muted)]">{item.label}</Link>) : <p role="status" className="p-3 text-sm">没有匹配页面</p>}</div> : null}
           </div>
-        </Link>
-        <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto px-3">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.end}
-              className={({ isActive }) =>
-                cn(
-                  'block rounded-lg px-3 py-2 text-sm transition-colors',
-                  isActive
-                    ? 'bg-[var(--surface-contrast)] text-[var(--text-contrast)]'
-                    : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]',
-                )
-              }
-            >
-              {item.label}
-            </NavLink>
-          ))}
-        </nav>
-        <div className="border-t border-[var(--border-default)] px-5 py-4">
-          <p className="truncate text-sm">
-            {admin?.nickname}
-            {admin?.isSuperAdmin ? <span className="ml-1.5 text-xs text-[var(--color-warning)]">超级管理</span> : null}
-          </p>
-          <div className="mt-2 flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void handleLogout()}
-              aria-label="退出登录"
-              title="退出登录"
-              className="flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-            >
-              <LogOut size={14} />
-            </button>
-            <Link
-              to="/"
-              aria-label="返回主站"
-              title="返回主站"
-              className="flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-            >
-              <Home size={14} />
-            </Link>
-            <button
-              type="button"
-              onClick={toggleTheme}
-              aria-label="切换主题"
-              title="切换深色/浅色模式"
-              className="ml-auto flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-            >
-              {theme === 'light' ? <MoonStar size={14} /> : <SunMedium size={14} />}
-            </button>
-          </div>
+          <Link to="/admin#attention" className="hidden min-h-11 shrink-0 items-center whitespace-nowrap px-3 text-sm sm:flex">待办</Link>
+          <details className="relative shrink-0"><summary aria-label="管理员账号菜单" className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-lg border border-[var(--border-default)] px-3 text-sm"><span className="max-w-24 truncate">{admin.nickname || '管理员'}</span><ChevronDown size={14} /></summary><div className="absolute right-0 z-50 mt-2 w-44 rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-2 shadow-lg"><button type="button" className="admin-menu-item" onClick={toggleTheme}>{theme === 'light' ? '切换深色主题' : '切换浅色主题'}</button><Link to="/" className="admin-menu-item">返回主站</Link><button type="button" className="admin-menu-item" disabled={isLoggingOut} onClick={() => void logout()}>{isLoggingOut ? '正在退出…' : '退出登录'}</button></div></details>
         </div>
-      </aside>
-
-      <div className="flex h-full min-w-0 flex-1 flex-col">
-        {/* 手机端顶栏：品牌 + 图标操作区（导航移至底部） */}
-        <header className="shrink-0 border-b border-[var(--border-default)] bg-[var(--surface-default)] md:hidden">
-          <div className="flex items-center justify-between px-4 py-3">
-            <p className="text-sm font-semibold">启创墨域 · 管理后台</p>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={toggleTheme}
-                aria-label="切换主题"
-                title="切换深色/浅色模式"
-                className="flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)]"
-              >
-                {theme === 'light' ? <MoonStar size={14} /> : <SunMedium size={14} />}
-              </button>
-              <Link
-                to="/"
-                aria-label="返回主站"
-                title="返回主站"
-                className="flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)]"
-              >
-                <Home size={14} />
-              </Link>
-              <button
-                type="button"
-                onClick={() => void handleLogout()}
-                aria-label="退出登录"
-                title="退出登录"
-                className="flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--border-strong)] text-[var(--text-secondary)]"
-              >
-                <LogOut size={14} />
-              </button>
-            </div>
-          </div>
-        </header>
-        
-        {/* 整体滚动容器：body 全局 overflow hidden，管理端自管滚动；
-            滚动条走全局 6px 细条 + autohide 机制（静止隐藏、滚动时显示） */}
-        <main className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-          <div className="mx-auto w-full max-w-6xl px-4 pt-6 pb-[calc(88px+var(--safe-bottom))] md:px-8 md:pb-8">
-            {children ?? <Outlet />}
-          </div>
-        </main>
-        
-        {/* 手机端底部导航：与主站移动端同模式 */}
-        <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--border-default)] bg-[var(--surface-default)]/95 pb-[var(--safe-bottom)] backdrop-blur md:hidden">
-          <div className="grid grid-cols-5">
-            {mobilePrimaryNav.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                className={({ isActive }) =>
-                  cn(
-                    'flex flex-col items-center gap-1 py-2 text-[11px]',
-                    isActive ? 'font-medium text-[var(--text-primary)]' : 'text-[var(--text-tertiary)]',
-                  )
-                }
-              >
-                <item.icon size={18} />
-                {item.label}
-              </NavLink>
-            ))}
-            <button
-              type="button"
-              onClick={() => setMoreOpen(true)}
-              className={cn(
-                'flex flex-col items-center gap-1 py-2 text-[11px]',
-                mobileMoreNav.some((item) => location.pathname.startsWith(item.to))
-                  ? 'font-medium text-[var(--text-primary)]'
-                  : 'text-[var(--text-tertiary)]',
-              )}
-            >
-              <MoreHorizontal size={18} />
-              更多
-            </button>
-          </div>
-        </nav>
-        
-        <BottomSheet open={moreOpen} onClose={() => setMoreOpen(false)} title="更多管理">
-          <div className="space-y-1 p-2 pb-[calc(8px+var(--safe-bottom))]">
-            {mobileMoreNav.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                onClick={() => setMoreOpen(false)}
-                className={({ isActive }) =>
-                  cn(
-                    'block rounded-lg px-4 py-3 text-sm',
-                    isActive
-                      ? 'bg-[var(--surface-muted)] font-medium text-[var(--text-primary)]'
-                      : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]',
-                  )
-                }
-              >
-                {item.label}
-              </NavLink>
-            ))}
-          </div>
-        </BottomSheet>
-      </div>
+      </header>
+      <main id="admin-main" ref={mainRef} tabIndex={-1} className="min-h-0 flex-1 overflow-y-auto overscroll-contain"><div ref={contentRef} className="mx-auto w-full max-w-[1440px] px-4 pb-[calc(96px+var(--safe-bottom))] pt-6 md:px-8 md:pb-10 md:pt-8">{children ?? <Outlet />}</div></main>
+      <nav aria-label="手机后台导航" className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-5 border-t border-[var(--border-default)] bg-[var(--surface-default)] pb-[var(--safe-bottom)] md:hidden">{mobileItems.map(item => <NavLink key={item.to} to={item.to} end={item.to === '/admin'} className={({ isActive }) => cn('flex min-h-16 flex-col items-center justify-center gap-1 text-xs', isActive ? 'font-semibold text-[var(--color-brand)]' : 'text-[var(--text-secondary)]')}><item.icon size={20} />{item.label}</NavLink>)}<button type="button" aria-expanded={moreOpen} onClick={() => setMoreOpen(true)} className="flex min-h-16 flex-col items-center justify-center gap-1 text-xs"><Menu size={20} />全部</button></nav>
+      {moreOpen ? <div ref={mobileDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="全部管理页面" className="fixed inset-0 z-[100] flex flex-col bg-[var(--surface-default)] md:hidden"><div className="flex min-h-16 items-center justify-between border-b border-[var(--border-default)] px-5"><h2 className="text-lg font-semibold">全部管理页面</h2><button type="button" aria-label="关闭全部管理页面" onClick={() => setMoreOpen(false)} className="flex h-11 w-11 items-center justify-center"><X size={20} /></button></div><nav aria-label="全部业务导航" className="overflow-y-auto p-5 pb-[calc(24px+var(--safe-bottom))]">{navigation(true)}</nav></div> : null}
     </div>
-  )
+  </div>
+}
+
+export function AdminToolbar({ children }: { children: ReactNode }) {
+  return <div className="admin-toolbar mb-5 flex flex-wrap items-center gap-3 border-b border-[var(--border-default)] pb-4" aria-label="列表搜索与筛选">{children}</div>
+}
+export function AdminSectionTabs<T extends string>({ tabs, value, onChange, label = '页面分区' }: { tabs: readonly { id: T; label: string }[]; value: T; onChange: (value: T) => void; label?: string }) {
+  return <nav aria-label={label} className="mb-5 flex max-w-full gap-1 overflow-x-auto border-b border-[var(--border-default)]">{tabs.map(tab => <button key={tab.id} type="button" aria-current={value === tab.id ? 'page' : undefined} onClick={() => onChange(tab.id)} className={cn('min-h-11 shrink-0 border-b-2 px-4 text-sm', value === tab.id ? 'border-[var(--color-brand)] font-semibold text-[var(--color-brand)]' : 'border-transparent text-[var(--text-secondary)]')}>{tab.label}</button>)}</nav>
 }
 
 /* ---------------- 页头 ---------------- */
@@ -295,7 +160,7 @@ export function AdminPageHeader({ title, description, extra }: { title: string; 
 
 export function AdminCard({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <section className={cn('rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-4 md:p-5', className)}>
+    <section className={cn('admin-section min-w-0 py-4', className)}>
       {children}
     </section>
   )
@@ -450,7 +315,7 @@ export function AdminSearchBar({
 
   return (
     <form onSubmit={handleSubmit} className="flex w-full max-w-md gap-2">
-      <TextInput value={draft} placeholder={placeholder} onChange={(event) => setDraft(event.target.value)} />
+      <TextInput aria-label={placeholder} value={draft} placeholder={placeholder} onChange={(event) => setDraft(event.target.value)} />
       <Button type="submit" variant="primary">
         搜索
       </Button>
@@ -484,6 +349,8 @@ export function AdminConfirmDialog({
   onConfirm: () => void
 }) {
   const [typed, setTyped] = useState('')
+  const titleId = useId()
+  const dialogRef = useAdminDialog(open, () => { if (!loading) onCancel() })
 
   useEffect(() => {
     if (open) {
@@ -498,9 +365,9 @@ export function AdminConfirmDialog({
   const blocked = confirmText !== undefined && typed.trim() !== confirmText
 
   return (
-    <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+    <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-labelledby={titleId} ref={dialogRef} tabIndex={-1}>
       <div className="w-full max-w-md rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-5">
-        <h3 className="text-base font-semibold">{title}</h3>
+        <h3 id={titleId} className="text-base font-semibold">{title}</h3>
         <div className="mt-2 text-sm text-[var(--text-secondary)]">{description}</div>
 
         {confirmText !== undefined ? (
@@ -508,12 +375,12 @@ export function AdminConfirmDialog({
             <p className="mb-2 text-xs text-[var(--text-secondary)]">
               请输入 <span className="font-semibold text-[var(--text-primary)]">{confirmText}</span> 以确认操作
             </p>
-            <TextInput value={typed} placeholder={confirmText} onChange={(event) => setTyped(event.target.value)} />
+            <TextInput aria-label="输入确认文本" value={typed} placeholder={confirmText} onChange={(event) => setTyped(event.target.value)} />
           </div>
         ) : null}
 
         <div className="mt-5 flex justify-end gap-2">
-          <Button onClick={onCancel}>取消</Button>
+          <Button disabled={loading} onClick={onCancel}>取消</Button>
           <Button
             variant="primary"
             disabled={blocked || loading}
@@ -532,10 +399,10 @@ export function AdminConfirmDialog({
 
 export function AdminPanelState({ state, children }: { state: 'loading' | 'error' | 'empty' | 'ready'; children?: ReactNode }) {
   if (state === 'loading') {
-    return <div className="py-16 text-center text-sm text-[var(--text-secondary)]">加载中…</div>
+    return <div role="status" aria-live="polite" className="py-16 text-center text-sm text-[var(--text-secondary)]">加载中…</div>
   }
   if (state === 'error') {
-    return <div className="py-16 text-center text-sm text-[var(--color-error)]">加载失败，请刷新重试。</div>
+    return <div role="alert" className="py-16 text-center text-sm text-[var(--color-error)]">加载失败，请刷新重试。</div>
   }
   if (state === 'empty') {
     return <div className="py-16 text-center text-sm text-[var(--text-secondary)]">暂无数据</div>

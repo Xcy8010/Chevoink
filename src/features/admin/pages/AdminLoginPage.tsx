@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { ShieldCheck } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
-import TextInput from '@/components/ui/TextInput'
+import TextInput from '../components/AdminTextInput'
 import { useToast } from '@/components/ui/toast-context'
 import { ApiClientError } from '@/app/api-client'
 import { cn } from '@/lib/utils'
@@ -135,12 +134,10 @@ export default function AdminLoginPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[var(--surface-muted)] px-4 py-10">
+    <div className="admin-workspace flex min-h-screen items-center justify-center bg-[var(--app-bg)] px-4 py-10">
       <div className="w-full max-w-sm">
         <div className="mb-6 flex items-center gap-3">
-          <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--surface-contrast)] text-[var(--text-contrast)]">
-            <ShieldCheck size={20} />
-          </span>
+          <img src="/favicon.png" alt="启创墨域 Logo" width={44} height={44} className="h-11 w-11 rounded-md object-contain" />
           <div>
             <h1 className="text-lg font-semibold tracking-[-0.01em] text-[var(--text-primary)]">启创墨域 · 管理后台</h1>
             <p className="text-sm text-[var(--text-secondary)]">仅限管理员访问，操作全程留痕</p>

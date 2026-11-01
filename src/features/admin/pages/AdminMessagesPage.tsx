@@ -1,9 +1,11 @@
+import { useAdminQueryState } from '../admin-query-state'
+import { useAdminNumberQuery } from './admin-page-query'
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
-import TextInput from '@/components/ui/TextInput'
+import TextInput from '../components/AdminTextInput'
 import { cn } from '@/lib/utils'
 import type { AdminConversationRow } from '../../../../shared/contracts/index.js'
 import { getAdminConversationMessages, listAdminConversations } from '../api'
@@ -44,10 +46,10 @@ function Avatar({ nickname, avatarUrl }: { nickname: string; avatarUrl: string |
 }
 
 export default function AdminMessagesPage() {
-  const [keyword, setKeyword] = useState('')
-  const [search, setSearch] = useState('')
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(10)
+  const [search, setSearch] = useAdminQueryState('search', '')
+  const [keyword, setKeyword] = useState(search)
+  const [page, setPage] = useAdminNumberQuery('page', 1)
+  const [pageSize, setPageSize] = useAdminNumberQuery('pageSize', 10)
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
   const listQuery = useQuery({
@@ -72,7 +74,7 @@ export default function AdminMessagesPage() {
 
   return (
     <div>
-      <AdminPageHeader title="消息管理" description="查看全站用户的私聊会话与完整聊天记录" />
+      <AdminPageHeader title="消息稽核" description="仅用于授权的违规调查；按成员检索后查看会话，继续遵守管理员权限和访问留痕。" />
 
       <div className="grid items-start gap-4 lg:grid-cols-[minmax(300px,380px)_minmax(0,1fr)]">
         {/* 会话列表 */}

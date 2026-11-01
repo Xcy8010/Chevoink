@@ -1,3 +1,5 @@
+import { useAdminQueryState } from '../admin-query-state'
+import { AdminRowActions } from './AdminPageControls'
 import { useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BookOpenCheck, FileInput, ShieldCheck, Trash2 } from 'lucide-react'
@@ -16,7 +18,7 @@ import {
   revokeAdminCorpusSource,
   verifyAdminCorpusSource,
 } from '../api'
-import { AdminCard, AdminPageHeader, AdminPanelState, StatusPill } from '../AdminLayout'
+import { AdminCard, AdminPageHeader, AdminPanelState, AdminSectionTabs, StatusPill } from '../AdminLayout'
 import { formatDateTime, useAdminSession } from '../admin-shared'
 
 const inputClass = 'h-10 w-full rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] px-3 text-sm outline-none focus:border-[var(--text-primary)]'
@@ -55,6 +57,7 @@ function statusTone(status: AdminCorpusSourceRow['rightsStatus']): 'neutral' | '
 }
 
 export default function AdminCraftLibraryPage() {
+  const [status, setStatus] = useAdminQueryState('status', 'pending')
   const { admin } = useAdminSession()
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -119,7 +122,8 @@ export default function AdminCraftLibraryPage() {
     onError: (error) => toast.error(errorMessage(error, '撤权失败。')),
   })
 
-  const sources = query.data?.sources ?? []
+  const allSources = query.data?.sources ?? []
+  const sources = allSources.filter(source => status === 'all' || source.rightsStatus === status)
   const state = query.isLoading ? 'loading' : query.isError ? 'error' : sources.length === 0 ? 'empty' : 'ready'
 
   function submitSource(event: FormEvent) {
@@ -138,13 +142,14 @@ export default function AdminCraftLibraryPage() {
       }
     />
 
-    <AdminCard className="mb-4">
+    <AdminSectionTabs tabs={[{id:'pending',label:'待审批'},{id:'approved',label:'已批准'},{id:'rejected',label:'已拒绝'},{id:'revoked',label:'已撤权'},{id:'expired',label:'已过期'},{id:'all',label:'全部'}]} value={status} onChange={setStatus} label="来源审核状态" />
+    <details className="mb-4"><summary className="min-h-11 cursor-pointer py-3 text-sm">授权、导入与撤权规则</summary><AdminCard>
       <div className="grid gap-3 text-sm md:grid-cols-3">
         <div className="flex gap-3"><ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-emerald-500" /><div><p className="font-medium">权利先行</p><p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">商业使用、原文存储、索引许可分别记录；缺少任一必要授权即硬阻断。</p></div></div>
         <div className="flex gap-3"><BookOpenCheck className="mt-0.5 h-5 w-5 shrink-0 text-sky-500" /><div><p className="font-medium">只学技法</p><p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">运行时只提供结构化技法和统计特征，不提供可逆引用，也不克隆在世作者。</p></div></div>
         <div className="flex gap-3"><Trash2 className="mt-0.5 h-5 w-5 shrink-0 text-rose-500" /><div><p className="font-medium">可撤回删除</p><p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">撤权会停用来源、清理原文和派生数据，并保留不可逆哈希回执。</p></div></div>
       </div>
-    </AdminCard>
+    </AdminCard></details>
 
     {createOpen && admin?.isSuperAdmin ? <AdminCard className="mb-4">
       <form onSubmit={submitSource} className="space-y-4">
@@ -177,17 +182,19 @@ export default function AdminCraftLibraryPage() {
               <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h2 className="font-medium">{source.name}</h2><StatusPill tone={statusTone(source.rightsStatus)}>{STATUS_LABELS[source.rightsStatus]}</StatusPill><StatusPill>{SOURCE_CLASS_LABELS[source.sourceClass]}</StatusPill></div><p className="mt-1 text-xs text-[var(--text-secondary)]">{source.rightsHolder} · {source.license}</p></div>
               <div className="text-right text-xs text-[var(--text-secondary)]"><p>{source._count.documents} 文档 · {source._count.techniqueCards} 技法卡 · {source._count.styleProfiles} 画像</p><p className="mt-1">审批：{formatDateTime(source.auditedAt)}</p></div>
             </div>
+            <details className="mt-3"><summary className="min-h-11 cursor-pointer py-3 text-sm">授权链与审核详情</summary>
             <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--text-secondary)]">
               <span>商业使用 {source.commercialUse ? '✓' : '×'}</span><span>原文存储 {source.rawStorageAllowed ? '✓' : '×'}</span><span>生产索引 {source.indexAllowed ? '✓' : '×'}</span><span>再分发 {source.redistribution ? '✓' : '×'}</span><span>改编 {source.modification ? '✓' : '×'}</span>
             </div>
             <p className="mt-3 rounded-lg border border-[var(--border-subtle)] px-3 py-2 text-xs leading-5 text-[var(--text-secondary)]">权利证据：{source.rightsEvidence}</p>
             {source.auditNote ? <p className="mt-3 rounded-lg bg-[var(--surface-muted)] px-3 py-2 text-xs leading-5 text-[var(--text-secondary)]">审计说明：{source.auditNote}</p> : null}
             {source.sourceUrl ? <a href={source.sourceUrl} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs underline underline-offset-4">查看权利证据</a> : null}
-            {admin?.isSuperAdmin && source.id !== 'builtin.agent3.craft.v1' ? <div className="mt-4 flex flex-wrap gap-2 border-t border-[var(--border-subtle)] pt-3">
+            </details>
+            {admin?.isSuperAdmin && source.id !== 'builtin.agent3.craft.v1' ? <AdminRowActions label="来源操作"><div className="mt-4 flex flex-wrap gap-2 border-t border-[var(--border-subtle)] pt-3">
               {source.rightsStatus !== 'revoked' ? <><Button size="sm" onClick={() => { setReview({ sourceId: source.id, decision: 'approved' }); setAuditNote('') }}>批准</Button><Button size="sm" onClick={() => { setReview({ sourceId: source.id, decision: 'rejected' }); setAuditNote('') }}>拒绝</Button></> : null}
               {canImport ? <Button size="sm" onClick={() => setImportSourceId(source.id)}><FileInput className="h-4 w-4" />受控导入文档</Button> : null}
               {source.rightsStatus !== 'revoked' ? <Button size="sm" className="text-[var(--color-error)]" onClick={() => { setRevokeSourceId(source.id); setRevokeReason('') }}>撤权并清理</Button> : null}
-            </div> : null}
+            </div></AdminRowActions> : null}
             {review?.sourceId === source.id ? <div className="mt-3 rounded-lg border border-[var(--border-default)] p-3"><p className="text-sm font-medium">{review.decision === 'approved' ? '批准来源' : '拒绝来源'}</p><textarea autoFocus rows={3} className={`${textareaClass} mt-2`} placeholder="填写可审计的审批依据" value={auditNote} onChange={(event) => setAuditNote(event.target.value)} /><div className="mt-2 flex gap-2"><Button size="sm" variant="primary" disabled={!auditNote.trim() || reviewMutation.isPending} onClick={() => reviewMutation.mutate()}>确认</Button><Button size="sm" onClick={() => setReview(null)}>取消</Button></div></div> : null}
             {importSourceId === source.id ? <div className="mt-3 rounded-lg border border-[var(--border-default)] p-3"><p className="text-sm font-medium">受控导入合法原文</p><p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">仅在来源已批准且明确允许商业使用、原文存储和索引时可执行。正文不会直接提供给 Agent。</p><div className="mt-3 grid gap-3 sm:grid-cols-2"><input className={inputClass} placeholder="文档标题" value={documentForm.title} onChange={(event) => setDocumentForm((form) => ({ ...form, title: event.target.value }))} /><input className={inputClass} placeholder="作者/权利人署名（可选）" value={documentForm.authorName} onChange={(event) => setDocumentForm((form) => ({ ...form, authorName: event.target.value }))} /></div><textarea rows={8} className={`${textareaClass} mt-3`} placeholder="粘贴已确认有权存储和索引的正文，至少 200 字" value={documentForm.content} onChange={(event) => setDocumentForm((form) => ({ ...form, content: event.target.value }))} /><div className="mt-2 flex gap-2"><Button size="sm" variant="primary" disabled={!documentForm.title.trim() || documentForm.content.trim().length < 200 || importMutation.isPending} onClick={() => importMutation.mutate()}>确认导入</Button><Button size="sm" onClick={() => setImportSourceId(null)}>取消</Button></div></div> : null}
             {revokeSourceId === source.id ? <div className="mt-3 rounded-lg border border-[var(--color-error)]/40 p-3"><p className="text-sm font-medium text-[var(--color-error)]">撤权将删除原文、画像和派生索引</p><textarea autoFocus rows={3} className={`${textareaClass} mt-2`} placeholder="填写撤权原因" value={revokeReason} onChange={(event) => setRevokeReason(event.target.value)} /><div className="mt-2 flex gap-2"><Button size="sm" variant="primary" className="bg-[var(--color-error)] text-white hover:bg-[var(--color-error)]" disabled={!revokeReason.trim() || revokeMutation.isPending} onClick={() => revokeMutation.mutate()}>确认撤权</Button><Button size="sm" onClick={() => setRevokeSourceId(null)}>取消</Button></div></div> : null}
