@@ -6,6 +6,7 @@ import { ArrowDown, ArrowUp, Plus, BrainCircuit, Eye, Globe2, ImagePlus, KeyRoun
 import Button from '@/components/ui/Button'
 import TextInput from '@/components/ui/TextInput'
 import type { ModelReasoningEffort } from '../../../../shared/contracts'
+import type { WebToolProtocol } from '../../../../shared/contracts/web-tool'
 import { IMAGE_QUALITY_OPTIONS, type ImageQualityConfig } from '../../../../shared/contracts/image-model'
 import { AdminCard, AdminPageHeader, AdminPanelState } from '../AdminLayout'
 import { formatTokens } from '../admin-shared'
@@ -29,6 +30,7 @@ export default function AdminModelsPage() {
   const query = useQuery({ queryKey: ['admin', 'models'], queryFn: getAdminModelManagement })
   const [editing, setEditing] = useState<ModelRow | null>(null)
   const [form, setForm] = useState({
+    webToolProtocol: '' as '' | WebToolProtocol,
     provider: '', displayName: '', modelName: '', baseUrl: '', apiKey: '', multiplier: '1',
     imageQuality: undefined as ImageQualityConfig | undefined, imageQualityCustomValues: '',
     enabled: true, selectable: true, isDefault: false,
@@ -45,6 +47,7 @@ export default function AdminModelsPage() {
   useEffect(() => {
     if (!editing) return
     setForm({
+      webToolProtocol: editing.webToolProtocol ?? (editing.provider.trim().toLowerCase() === 'deepseek' ? 'deepseek' : editing.provider.trim().toLowerCase() === 'bocha' ? 'bocha' : ''),
       provider: editing.provider, displayName: editing.displayName, modelName: editing.modelName,
       imageQuality: editing.imageQuality,
       imageQualityCustomValues: editing.imageQuality?.supportedValues.filter(value => !IMAGE_QUALITY_OPTIONS.some(option => option.value === value)).join(', ') ?? '',
@@ -79,7 +82,7 @@ export default function AdminModelsPage() {
       const expires = Date.parse(form.freeUntil)
       if (limitedFree && (!Number.isFinite(expires) || expires <= Date.now())) throw new Error('请选择未来的截止时间')
       const { limitedFree: _limited, freeUntil: _until, afterMultiplier: _after, imageQualityCustomValues: _customQuality, ...fields } = form
-      const payload = { ...fields, weightedRoutes: editing.modelKind === 'text' && (editing.weightedRoutes || form.weightedRoutes.candidates.length) ? form.weightedRoutes : undefined, imageQuality: editing.modelKind === 'image_generation' ? form.imageQuality : undefined, baseUrl: form.baseUrl || null, apiKey: form.apiKey || undefined, multiplier: Number(form.multiplier), contextWindowTokens: editing.modelKind === 'text' ? Number(form.contextWindowTokens) : undefined,
+      const payload = { ...fields, webToolProtocol: (editing.modelKind === 'web_search' || editing.modelKind === 'web_fetch') && form.webToolProtocol ? form.webToolProtocol : undefined, weightedRoutes: editing.modelKind === 'text' && (editing.weightedRoutes || form.weightedRoutes.candidates.length) ? form.weightedRoutes : undefined, imageQuality: editing.modelKind === 'image_generation' ? form.imageQuality : undefined, baseUrl: form.baseUrl || null, apiKey: form.apiKey || undefined, multiplier: Number(form.multiplier), contextWindowTokens: editing.modelKind === 'text' ? Number(form.contextWindowTokens) : undefined,
         reasoningParameterMode: editing.modelKind === 'text' ? form.reasoningParameterMode || null : undefined,
         outputTokenParameter: editing.modelKind === 'text' ? form.outputTokenParameter || null : undefined,
         thinkingEnabled: editing.modelKind === 'text' ? form.thinkingEnabled === '' ? null : form.thinkingEnabled === 'enabled' : undefined,
@@ -185,8 +188,9 @@ export default function AdminModelsPage() {
 
     {editing ? <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/35 px-4 backdrop-blur-[2px]"><section className="max-h-[90dvh] w-full max-w-xl overflow-y-auto rounded-[18px] border border-[var(--border-strong)] bg-[var(--surface-default)] p-5 shadow-[0_24px_70px_rgba(15,23,42,0.2)]">
       <div className="flex items-center justify-between"><div><h2 className="font-semibold">{editing.id ? `编辑 ${editing.displayName}` : '添加内置模型'}</h2><p className="mt-1 text-xs text-[var(--text-secondary)]">真实模型 ID 仅在管理端显示；未完成服务配置的高阶档位无法开放。</p></div><button type="button" disabled={mutation.isPending} onClick={() => setEditing(null)} className="inline-flex h-8 w-8 items-center justify-center rounded-full hover:bg-[var(--surface-muted)]"><X className="h-4 w-4" /></button></div>
-      {editing.modelKind === 'web_search' || editing.modelKind === 'web_fetch' ? <><p className="mt-3 text-xs text-[var(--text-secondary)]">{editing.modelKind === 'web_search' ? '供应商支持 bocha、deepseek。' : '供应商支持 deepseek；停用后保留网页直读。'} Search 与 Fetch 独立配置。DeepSeek Base URL 填写 https://api.deepseek.com 或对应的 /v1/tools/search、/v1/tools/fetch 地址。</p><p className="mt-2 text-xs" aria-live="polite">保存后费用：{toolPrice(Number(form.multiplier))}（基础 2 Credits × 倍率）</p></> : null}
+      {editing.modelKind === 'web_search' || editing.modelKind === 'web_fetch' ? <><p className="mt-3 text-xs text-[var(--text-secondary)]">{editing.modelKind === 'web_search' ? 'Search 支持 deepseek、bocha 协议。' : 'Fetch 支持 deepseek 协议；停用后保留网页直读。'} Search 与 Fetch 独立配置。DeepSeek Base URL 填写 https://api.deepseek.com 或对应的 /v1/tools/search、/v1/tools/fetch 地址。</p><p className="mt-2 text-xs" aria-live="polite">保存后费用：{toolPrice(Number(form.multiplier))}（基础 2 Credits × 倍率）</p></> : null}
       <div className="mt-5 grid gap-4 sm:grid-cols-2"><label className="text-xs">显示名称<TextInput className="mt-1.5" name={`model-display-${editing.id}`} autoComplete="off" value={form.displayName} onChange={(e) => setForm((v) => ({ ...v, displayName: e.target.value }))} /></label><label className="text-xs">供应商<TextInput className="mt-1.5" name={`model-provider-${editing.id}`} autoComplete="off" value={form.provider} onChange={(e) => setForm((v) => ({ ...v, provider: e.target.value }))} /></label><label className="text-xs">模型 ID<TextInput className="mt-1.5" name={`model-id-${editing.id}`} autoComplete="off" value={form.modelName} onChange={(e) => setForm((v) => ({ ...v, modelName: e.target.value }))} /></label><label className="text-xs">Credits 倍率<TextInput className="mt-1.5" name={`model-multiplier-${editing.id}`} autoComplete="off" type="number" min="0" step="0.1" value={form.multiplier} onChange={(e) => setForm((v) => ({ ...v, multiplier: e.target.value }))} /></label>{editingTextModel ? <label className="text-xs sm:col-span-2">上下文窗口（Tokens）<TextInput className="mt-1.5" name={`model-context-window-${editing.id}`} autoComplete="off" type="number" min="16000" max="4000000" step="1000" value={form.contextWindowTokens} onChange={(e) => setForm((v) => ({ ...v, contextWindowTokens: e.target.value }))} /><span className="mt-1.5 block text-[11px] leading-5 text-[var(--text-secondary)]">按供应商文档填写；Agent 自动压缩与输出预留将采用此值。</span></label> : null}<label className="text-xs sm:col-span-2">Base URL<TextInput className="mt-1.5" name={`model-endpoint-${editing.id}`} autoComplete="off" inputMode="url" data-lpignore="true" data-1p-ignore="true" value={form.baseUrl} onChange={(e) => setForm((v) => ({ ...v, baseUrl: e.target.value }))} placeholder="https://api.example.com/v1" /></label><label className="text-xs sm:col-span-2">替换 API Key<TextInput className="mt-1.5" name={`model-secret-${editing.id}`} type="password" autoComplete="new-password" data-lpignore="true" data-1p-ignore="true" value={form.apiKey} onChange={(e) => setForm((v) => ({ ...v, apiKey: e.target.value }))} placeholder={editing.apiKeyConfigured ? '已配置；留空保持不变，输入新值即替换' : '必须填写后才能开放该档位'} /></label></div>
+      {editing.modelKind === 'web_search' || editing.modelKind === 'web_fetch' ? <label className="mt-4 block text-xs">网页工具协议<select aria-label="网页工具协议" value={form.webToolProtocol} onChange={event => setForm(value => ({ ...value, webToolProtocol: event.target.value as '' | WebToolProtocol }))} className="mt-1.5 h-10 w-full rounded-full border border-[var(--border-strong)] bg-[var(--surface-default)] px-4"><option value="">请选择协议</option><option value="deepseek">deepseek</option>{editing.modelKind === 'web_search' ? <option value="bocha">bocha</option> : null}</select></label> : null}
       {editing.modelKind === 'image_generation' ? <fieldset className="mt-5 border-y border-[var(--border-subtle)] py-4">
         <legend className="text-sm font-medium">图片生成质量</legend>
         <div className="mt-2 flex flex-wrap gap-2">{IMAGE_QUALITY_OPTIONS.map(option => <label key={option.value} className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] px-2.5 py-1.5 text-xs">

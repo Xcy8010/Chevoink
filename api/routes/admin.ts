@@ -6,6 +6,7 @@ import { modelPromotionSchema } from '../../shared/model-promotion.js'
 import { createRateCard, transitionRateCard, listRateCards, rateCardEvidenceSchema } from '../lib/billing/rate-cards.js'
 import { itemizedTokenPriceSchema } from '../lib/billing/token-price.js'
 import { z } from 'zod'
+import { webToolProtocolSchema } from '../../shared/contracts/web-tool.js'
 import { imageQualityConfigSchema } from '../../shared/contracts/image-model.js'
 import { getSupplierBalances } from '../lib/supplier-balances.js'
 
@@ -188,6 +189,7 @@ const adminBatchPauseCreditsSchema = adminBatchCreditsSchema.extend({ paused: z.
 const modelReasoningEffortSchema = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 const adminModelUpdateSchema = z.object({
   imageQuality: imageQualityConfigSchema.optional(),
+  webToolProtocol: webToolProtocolSchema.optional(),
   freePromotion: modelPromotionSchema.nullable().optional(),
   routes: modelRoutesInputSchema.optional(),
   weightedRoutes: weightedRoutesInputSchema.optional(),

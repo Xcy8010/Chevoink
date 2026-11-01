@@ -1,9 +1,10 @@
 import { prisma } from './prisma.js'
 import { decryptSecret } from './secret-box.js'
+import type { WebToolProtocol } from '../../shared/contracts/web-tool.js'
 import type { ImageQualityConfig } from '../../shared/contracts/image-model.js'
 
 export type ToolModelKey = 'tool:image-generation' | 'tool:image-vision' | 'tool:web-search' | 'tool:web-fetch'
-export type ToolModelRuntime = { provider: string; modelName: string; baseUrl: string; apiKey: string; imageQuality?: ImageQualityConfig }
+export type ToolModelRuntime = { provider: string; modelName: string; baseUrl: string; apiKey: string; imageQuality?: ImageQualityConfig; webToolProtocol?: WebToolProtocol }
 
 const cache = new Map<ToolModelKey, { expiresAt: number; value: ToolModelRuntime | null }>()
 
@@ -28,6 +29,7 @@ export async function getToolModelRuntime(key: ToolModelKey): Promise<ToolModelR
   const metadata = record?.metadata && typeof record.metadata === 'object' && !Array.isArray(record.metadata) ? record.metadata : {}
   const value = record && record.modelName !== 'unconfigured' && record.baseUrl && record.apiKeyCiphertext
     ? { provider: record.provider, modelName: record.modelName, baseUrl: record.baseUrl, apiKey: decryptSecret(record.apiKeyCiphertext),
+        ...((key === 'tool:web-search' || key === 'tool:web-fetch') && metadata.webToolProtocol !== undefined ? { webToolProtocol: metadata.webToolProtocol as WebToolProtocol } : {}),
         ...(key === 'tool:image-generation' && metadata.imageQuality ? { imageQuality: metadata.imageQuality as ImageQualityConfig } : {}) }
     : null
   cache.set(key, { expiresAt: Date.now() + 30_000, value })

@@ -22,7 +22,7 @@ import type { ModelRouteInput } from '../../shared/contracts/model-routes.js'
 import type { WeightedRoutesInput } from '../../shared/contracts/model-weighted-routes.js'
 import { presentWeightedRoutes, saveWeightedRoutes } from './model-weighted-config.js'
 import { ToolModelConfigurationError, clearToolModelRuntimeCache } from './tool-model-config.js'
-import { webToolEndpoint } from './web-tool-provider.js'
+import { webToolEndpoint, resolveWebToolProtocol } from './web-tool-provider.js'
 import { webToolChargeMilli } from '../../shared/web-tool-pricing.js'
 
 const MILLI = 1000
@@ -307,6 +307,7 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
       const configurationReady = databaseReady || Boolean(fallback) || (model.tier === 'speed' && model.modelName !== 'unconfigured')
       const price = modelKind === 'text' && model.tier && effectiveModelMultiplier(model) !== 0 && !readModelPromotion(model.metadata) ? prices.get(model.tier) : null
       return {
+        ...((modelKind === 'web_search' || modelKind === 'web_fetch') && (metadata.webToolProtocol === 'deepseek' || metadata.webToolProtocol === 'bocha') ? { webToolProtocol: metadata.webToolProtocol } : {}),
         ...(modelKind === 'image_generation' && metadata.imageQuality ? { imageQuality: metadata.imageQuality as ImageQualityConfig } : {}),
         routes: presentModelRoutes(model.metadata),
         weightedRoutes: presentWeightedRoutes(model.metadata),
@@ -333,6 +334,7 @@ export async function getAdminModelManagement(): Promise<AdminModelManagementPay
 }
 
 export type UpdateAdminModelInput = {
+  webToolProtocol?: import('../../shared/contracts/web-tool.js').WebToolProtocol
   imageQuality?: ImageQualityConfig
   freePromotion?: import('../../shared/model-promotion.js').ModelPromotion | null
   routes?: ModelRouteInput[]
@@ -388,9 +390,18 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
     const nextHasApiKey = Boolean(input.apiKey?.trim() || model.apiKeyCiphertext)
     const nextEnabled = input.enabled ?? model.enabled
     const nextSelectable = input.selectable ?? model.selectable
-    if ((model.key === 'tool:web-search' || model.key === 'tool:web-fetch') && nextEnabled) {
-      try { webToolEndpoint({ provider: input.provider ?? model.provider, modelName: nextModelName,
-        baseUrl: nextBaseUrl ?? '', apiKey: nextHasApiKey ? 'configured' : '' }, model.key === 'tool:web-search' ? 'search' : 'fetch') }
+    const isWebTool = model.key === 'tool:web-search' || model.key === 'tool:web-fetch'
+    const metadata = model.metadata && typeof model.metadata === 'object' && !Array.isArray(model.metadata) ? model.metadata : {}
+    const webToolProtocol = (input.webToolProtocol !== undefined ? input.webToolProtocol : metadata.webToolProtocol) as UpdateAdminModelInput['webToolProtocol']
+    if (!isWebTool && input.webToolProtocol !== undefined) throw new DataAccessError(400, 'WEB_TOOL_CONFIG_INVALID', '网页工具协议仅适用于 Search 与 Fetch。')
+    if (isWebTool && (nextEnabled || input.webToolProtocol !== undefined)) {
+      try {
+        const config = { provider: input.provider ?? model.provider, modelName: nextModelName,
+          baseUrl: nextBaseUrl ?? '', apiKey: nextHasApiKey ? 'configured' : '', webToolProtocol }
+        const operation = model.key === 'tool:web-search' ? 'search' : 'fetch'
+        if (nextEnabled) webToolEndpoint(config, operation)
+        else resolveWebToolProtocol(config, operation)
+      }
       catch (error) {
         if (!(error instanceof ToolModelConfigurationError)) throw error
         throw new DataAccessError(400, 'WEB_TOOL_CONFIG_INVALID', error.configurationMessage ?? '网页工具配置不完整。')
@@ -419,6 +430,7 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
           ...(routes ? { routes } : {}),
           ...(input.weightedRoutes !== undefined ? { weightedRoutes: saveWeightedRoutes(input.weightedRoutes, model.metadata) } : {}),
           freePromotion,
+          ...(isWebTool && input.webToolProtocol !== undefined ? { webToolProtocol: input.webToolProtocol } : {}),
           ...(input.imageQuality !== undefined ? { imageQuality: input.imageQuality } : {}),
           ...(input.reasoningParameterMode !== undefined ? { reasoningParameterMode: input.reasoningParameterMode } : {}),
           ...(input.outputTokenParameter !== undefined ? { outputTokenParameter: input.outputTokenParameter } : {}),

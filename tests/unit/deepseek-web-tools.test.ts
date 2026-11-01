@@ -25,10 +25,10 @@ afterEach(() => { env.webSearchProvider = originalProvider; vi.restoreAllMocks()
 
 describe('explicit web tool endpoints', () => {
   it.each(['https://api.deepseek.com', 'https://api.deepseek.com/v1/', 'https://api.deepseek.com/v1/tools/search'])('resolves search endpoint %s without chat-path inference', baseUrl => {
-    expect(webToolEndpoint({ ...config, baseUrl }, 'search')).toBe('https://api.deepseek.com/v1/tools/search')
+    expect(webToolEndpoint({ ...config, provider: 'deepseek_YunShu', webToolProtocol: 'deepseek', baseUrl }, 'search')).toBe('https://api.deepseek.com/v1/tools/search')
   })
   it.each(['https://api.deepseek.com/chat/completions', 'https://api.deepseek.com/v1/tools/fetch', 'http://api.deepseek.com', 'https://127.0.0.1/v1', 'https://user:password@api.deepseek.com', 'https://api.deepseek.com?api_key=private', 'https://api.deepseek.com#private', 'https://api.deepseek.com:8443'])('rejects unsafe or cross-operation endpoint %s', baseUrl => {
-    expect(() => webToolEndpoint({ ...config, baseUrl }, 'search')).toThrow('WEB_TOOL_ENDPOINT_INVALID')
+    expect(() => webToolEndpoint({ ...config, provider: 'deepseek_YunShu', webToolProtocol: 'deepseek', baseUrl }, 'search')).toThrow('WEB_TOOL_ENDPOINT_INVALID')
   })
   it('rejects an unknown provider instead of treating its schema as Bocha', async () => {
     await expect(searchWeb('query', 2, undefined, { ...config, provider: 'openai' })).rejects.toThrow('WEB_TOOL_PROVIDER_UNSUPPORTED')
@@ -62,7 +62,7 @@ describe('DeepSeek Search JSON contract', () => {
   })
   it.each(['https://api.deepseek.com', 'https://yunshu.chevolink.com/v1/tools/search'])('sends Search contract through %s', async baseUrl => {
     transport.mockResolvedValue(Response.json({ results: [item, item, { ...item, url: 'http://127.0.0.1/private' }] }, { headers: { 'x-request-id': 'request-19' } }))
-    const outcome = await searchWeb('public query', 2, undefined, { ...config, baseUrl })
+    const outcome = await searchWeb('public query', 2, undefined, { ...config, provider: 'deepseek_YunShu', webToolProtocol: 'deepseek', baseUrl })
     expect(outcome).toMatchObject({ provider: 'deepseek', results: [{ title: item.title, url: item.url, snippet: item.summary, source: 'Example' }],
       attempts: [expect.objectContaining({ provider: 'deepseek', outcome: 'results', httpStatus: 200, providerRequestId: 'request-19' })] })
     expect(transport).toHaveBeenCalledOnce()
@@ -87,7 +87,7 @@ describe('DeepSeek Search JSON contract', () => {
     expect(await searchWeb('query', 2, undefined, config)).toMatchObject({ provider: 'deepseek', results: [], attempts: [expect.objectContaining({ outcome: 'empty' }), expect.anything(), expect.anything()] })
   })
   it.each([' ', '界'.repeat(129)])('rejects invalid query before dispatch', async query => {
-    await expect(searchWeb(query, 2, undefined, config)).rejects.toThrow('WEB_SEARCH_QUERY_INVALID')
+    await expect(searchWeb(query, 2, undefined, { ...config, provider: 'deepseek_YunShu', webToolProtocol: 'deepseek' })).rejects.toThrow('WEB_SEARCH_QUERY_INVALID')
     expect(transport).not.toHaveBeenCalled()
   })
   it('counts the documented limit as Unicode characters', async () => {
@@ -136,7 +136,7 @@ describe('independent DeepSeek Fetch contract', () => {
   it.each(['https://api.deepseek.com', 'https://yunshu.chevolink.com/v1/tools/fetch'])('sends Fetch contract through %s', async baseUrl => {
     transport.mockResolvedValueOnce(new Response('<script src="app.js"></script>', { headers: { 'content-type': 'text/html' } }))
       .mockResolvedValueOnce(Response.json({ title: 'Book details', content: `# Book details\n\n${article}\n[Chapter 1](/reader/987)\n[Private](http://127.0.0.1/private)\n[Other](https://other.example/chapter)` }))
-    const result = await readPublicWebPage('https://fanqienovel.com/page/123', new AbortController().signal, { ...config, baseUrl, modelName: 'deepseek-fetch' })
+    const result = await readPublicWebPage('https://fanqienovel.com/page/123', new AbortController().signal, { ...config, provider: 'deepseek_YunShu', webToolProtocol: 'deepseek', baseUrl, modelName: 'deepseek-fetch' })
     expect(result).toMatchObject({ status: 'ok', provider: 'deepseek', title: 'Book details', contentKind: 'metadata', links: [{ url: 'https://fanqienovel.com/reader/987', title: 'Chapter 1' }] })
     const [endpoint, options] = transport.mock.calls[1]
     expect(endpoint).toBe(baseUrl.includes('/tools/') ? baseUrl : `${baseUrl}/v1/tools/fetch`)
@@ -227,4 +227,26 @@ describe('observed directory links and search HTML', () => {
     expect(value.results).toEqual([{ title: '河谷纪事完整版在线免费阅读', url: 'https://books.example/page/9?a=1&b=2', snippet: '目录简介', source: 'books.example' }])
     expect(transport).toHaveBeenCalledOnce()
   })
+})
+
+it('routes an arbitrary Bocha supplier through the Bocha request and parser', async () => {
+  transport.mockResolvedValue(Response.json({ code: 200, data: { webPages: { value: [{ name: 'Bocha source', url: item.url, summary: 'Bocha summary', siteName: 'Bocha site' }] } } }))
+  const query = '界'.repeat(129)
+  expect(await searchWeb(query, 2, undefined, { ...config, provider: '自定义搜索供应商', webToolProtocol: 'bocha', baseUrl: 'https://search.example.com/v1' })).toMatchObject({ provider: 'bocha', results: [{ title: 'Bocha source', snippet: 'Bocha summary', source: 'Bocha site' }] })
+  const [endpoint, options] = transport.mock.calls[0]
+  expect(endpoint).toBe('https://search.example.com/v1/web-search')
+  expect(options.method).toBe('POST')
+  expect(options.headers.Authorization).toBe('Bearer offline-fixture-secret')
+  expect(JSON.parse(options.body)).toEqual({ query, count: 2, summary: true })
+})
+
+it.each(['unknown', null])('rejects malformed stored protocol %j before dispatch', async webToolProtocol => {
+  const malformed = { ...config, webToolProtocol } as unknown as ToolModelRuntime
+  await expect(searchWeb('query', 2, undefined, malformed)).rejects.toThrow('WEB_TOOL_PROVIDER_UNSUPPORTED')
+  expect(transport).not.toHaveBeenCalled()
+})
+
+it('rejects Bocha Fetch before any target or supplier request', async () => {
+  expect(await readPublicWebPage(item.url, new AbortController().signal, { ...config, provider: 'custom', webToolProtocol: 'bocha' })).toMatchObject({ code: 'WEB_TOOL_PROVIDER_UNSUPPORTED', status: 'unreadable' })
+  expect(transport).not.toHaveBeenCalled()
 })

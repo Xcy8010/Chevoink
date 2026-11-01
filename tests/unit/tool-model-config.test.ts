@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { webToolEndpoint } from '../../api/lib/web-tool-provider.js'
 import { clearToolModelRuntimeCache, getToolModelRuntime } from '../../api/lib/tool-model-config.js'
 
 const mocks = vi.hoisted(() => ({ find: vi.fn(), decrypt: vi.fn() }))
@@ -36,4 +37,22 @@ describe('independent admin tool runtime configuration', () => {
     await expect(getToolModelRuntime('tool:web-fetch')).rejects.toMatchObject({ code: 'TOOL_CONFIG_INCOMPLETE' })
     expect(mocks.decrypt).not.toHaveBeenCalled()
   })
+})
+
+it.each(['deepseek', 'bocha'] as const)('loads the explicit %s protocol alongside the unchanged custom supplier', async webToolProtocol => {
+  mocks.find.mockResolvedValue({ ...record('search'), provider: 'custom_supplier', metadata: { webToolProtocol } })
+  const runtime = await getToolModelRuntime('tool:web-search')
+  expect(runtime).toMatchObject({ provider: 'custom_supplier', webToolProtocol })
+  expect(webToolEndpoint(runtime!, 'search')).toBe(webToolProtocol === 'deepseek' ? 'https://api.deepseek.com/v1/tools/search' : 'https://api.deepseek.com/v1/web-search')
+})
+
+it.each(['unsupported', null])('rejects malformed stored protocol %j at the web boundary rather than silently using the supplier name', async webToolProtocol => {
+  mocks.find.mockResolvedValue({ ...record('search'), metadata: { webToolProtocol } })
+  const runtime = await getToolModelRuntime('tool:web-search')
+  expect(() => webToolEndpoint(runtime!, 'search')).toThrow('WEB_TOOL_PROVIDER_UNSUPPORTED')
+})
+
+it('ignores web protocol metadata for ordinary image tools', async () => {
+  mocks.find.mockResolvedValue({ ...record('image'), metadata: { webToolProtocol: 'unsupported' } })
+  expect(await getToolModelRuntime('tool:image-generation')).not.toHaveProperty('webToolProtocol')
 })

@@ -146,6 +146,7 @@ export function getAdminModelManagement(): Promise<AdminModelManagementPayload> 
 }
 
 export function updateAdminModel(modelId: string, payload: {
+  webToolProtocol?: import('../../../shared/contracts/web-tool').WebToolProtocol
   imageQuality?: import('../../../shared/contracts/image-model').ImageQualityConfig
   freePromotion?: import('../../../shared/model-promotion').ModelPromotion | null
   routes?: import('../../../shared/contracts/model-routes').ModelRouteInput[]

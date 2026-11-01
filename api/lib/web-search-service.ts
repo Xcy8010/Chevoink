@@ -2,7 +2,7 @@ import { env } from '../config/env.js'
 import { z } from 'zod'
 import { parsePublicHttpUrl, readBoundedPublicBody } from './public-http.js'
 import { getToolModelRuntime, ToolModelConfigurationError, type ToolModelRuntime } from './tool-model-config.js'
-import { requestWebTool, webToolEndpoint } from './web-tool-provider.js'
+import { requestWebTool, webToolEndpoint, resolveWebToolProtocol } from './web-tool-provider.js'
 import { parseHTML } from 'linkedom'
 import { evaluateResearchSearchCandidates, evaluateResearchNavigationCandidates, searchQueryHash, type ResearchSearchEvaluation, type ResearchSearchTarget } from './research-search-quality.js'
 
@@ -106,7 +106,7 @@ export class WebSearchUnknownError extends WebSearchError {
 export function assertWebSearchConfiguration(configured: ToolModelRuntime | null, query?: string): void {
   if (configured) webToolEndpoint(configured, 'search')
   if (!['auto', 'bocha', 'sogou', 'bing', 'disabled'].includes(env.webSearchProvider)) throw new ToolModelConfigurationError('WEB_SEARCH_PROVIDER_UNSUPPORTED')
-  if (configured?.provider.trim().toLowerCase() === 'deepseek' && query !== undefined &&
+  if (configured && resolveWebToolProtocol(configured) === 'deepseek' && query !== undefined &&
     (!query.trim() || [...query].length > 128)) throw new WebSearchError('WEB_SEARCH_QUERY_INVALID')
 }
 
@@ -382,7 +382,7 @@ export async function searchWeb(
   try {
     const configured = configuredInput === undefined ? await getToolModelRuntime('tool:web-search') : configuredInput
     assertWebSearchConfiguration(configured, query)
-    const primary = configured ? configured.provider.trim().toLowerCase() as 'bocha' | 'deepseek'
+    const primary = configured ? resolveWebToolProtocol(configured)
       : env.webSearchProvider === 'bocha' || (env.webSearchProvider === 'auto' && env.webSearchBochaApiKeyConfigured) ? 'bocha' : null
 
     if (env.webSearchProvider === 'disabled') {

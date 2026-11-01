@@ -418,6 +418,7 @@ export type AdminCreditsManagementPayload = {
 
 export type AdminModelManagementPayload = {
   models: Array<{
+    webToolProtocol?: import('./web-tool.js').WebToolProtocol
     imageQuality?: import('./image-model.js').ImageQualityConfig
     perCallCredits?: number
     freePromotion?: import('../model-promotion.js').ModelPromotion | null

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { ResearchDossier } from '@prisma/client'
 import { researchDossierBuildSchema } from '../../../shared/contracts/index.js'
+import { webToolProtocolSchema } from '../../../shared/contracts/web-tool.js'
 import { env } from '../../config/env.js'
 import { tokenPriceSchema } from '../billing/token-price.js'
 import { getToolModelRuntime } from '../tool-model-config.js'
@@ -15,7 +16,7 @@ import { dossierCacheKey, researchDossierPrompts, researchDossierSources } from 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const hex = z.string().regex(/^[a-f0-9]{64}$/)
 export const dossierForceSchema = z.object({ requestHash: hex, start: z.number().int().nonnegative(), end: z.number().int().positive(), clauseHash: hex }).strict()
-const searchRouteSchema = z.object({ configured: z.object({ provider: z.string(), modelName: z.string(), baseUrl: z.string() }).strict().nullable(),
+const searchRouteSchema = z.object({ configured: z.object({ provider: z.string(), modelName: z.string(), baseUrl: z.string(), webToolProtocol: webToolProtocolSchema.optional() }).strict().nullable(),
   envProvider: z.string(), envBochaConfigured: z.boolean() }).strict()
 const base = { version: z.literal(1), novelId: z.string(), args: researchDossierBuildSchema,
   admittedAt: z.string().datetime(), cacheKey: hex, predecessor: z.object({ id: z.string(), version: z.number().int().positive(), hash: hex }).strict().nullable() }
@@ -86,7 +87,7 @@ export async function resolveDossierSearchRoute() {
     const url = new URL(runtime.baseUrl)
     if (url.username || url.password || url.search || url.hash) return runtimeError('RUNTIME_INPUT_INVALID', '搜索路由含不能持久化的认证参数。')
   }
-  return { runtime, route: searchRouteSchema.parse({ configured: runtime ? { provider: runtime.provider, modelName: runtime.modelName, baseUrl: runtime.baseUrl } : null,
+  return { runtime, route: searchRouteSchema.parse({ configured: runtime ? { provider: runtime.provider, modelName: runtime.modelName, baseUrl: runtime.baseUrl, ...(runtime.webToolProtocol ? { webToolProtocol: runtime.webToolProtocol } : {}) } : null,
     envProvider: env.webSearchProvider, envBochaConfigured: env.webSearchBochaApiKeyConfigured }) }
 }
 
