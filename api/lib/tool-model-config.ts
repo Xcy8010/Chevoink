@@ -8,7 +8,7 @@ export type ToolModelRuntime = { provider: string; modelName: string; baseUrl: s
 const cache = new Map<ToolModelKey, { expiresAt: number; value: ToolModelRuntime | null }>()
 
 export class ToolModelConfigurationError extends Error {
-  constructor(readonly code: string) { super(code); this.name = 'ToolModelConfigurationError' }
+  constructor(readonly code: string, readonly configurationMessage?: string) { super(code); this.name = 'ToolModelConfigurationError' }
 }
 
 export function clearToolModelRuntimeCache(): void { cache.clear() }

@@ -50,3 +50,22 @@ it.each([{ provider: 'direct', baseUrl: 'https://api.deepseek.com' }, { provider
   expect(mocks.update).not.toHaveBeenCalled()
   expect(mocks.encrypt).not.toHaveBeenCalled()
 })
+
+it.each(['search', 'fetch'] as const)('roundtrips YunShu %s and rejects the screenshot provider alias', async operation => {
+  mocks.row = { ...mocks.row, key: `tool:web-${operation}`, tier: `tool_${operation}`, metadata: { modelKind: `web_${operation}` } }
+  const input = { provider: 'deepseek', modelName: `deepseek-${operation}`, baseUrl: `https://yunshu.chevolink.com/v1/tools/${operation}`, apiKey: 'offline-fixture-secret', enabled: true }
+  await expect(updateAdminModel('fixture-admin', 'tool-web-fetch', { ...input, provider: 'deepseek_YunShu' })).rejects.toMatchObject({ message: expect.stringContaining('供应商：') })
+  expect(mocks.update).not.toHaveBeenCalled()
+  await updateAdminModel('fixture-admin', 'tool-web-fetch', input)
+  const saved = (await getAdminModelManagement()).models[0]
+  expect(saved).toMatchObject({ provider: input.provider, modelName: input.modelName, baseUrl: input.baseUrl, apiKeyConfigured: true })
+  expect(JSON.stringify(saved)).not.toContain(input.apiKey)
+})
+it.each([
+  [{ baseUrl: 'not-a-url' }, 'Base URL：请填写安全'],
+  [{ baseUrl: 'https://yunshu.chevolink.com/v1/tools/search' }, '端点类型错误'],
+  [{ apiKey: '' }, 'API Key：'],
+])('reports the failing field without saving %j', async (patch, message) => {
+  await expect(updateAdminModel('fixture-admin', 'tool-web-fetch', { provider: 'deepseek', modelName: 'deepseek-fetch', baseUrl: 'https://yunshu.chevolink.com/v1/tools/fetch', apiKey: 'offline-fixture-secret', enabled: true, ...patch })).rejects.toMatchObject({ code: 'WEB_TOOL_CONFIG_INVALID', message: expect.stringContaining(message) })
+  expect(mocks.update).not.toHaveBeenCalled()
+})

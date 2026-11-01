@@ -21,7 +21,7 @@ import { presentModelRoutes, saveModelRoutes } from './model-route-pool.js'
 import type { ModelRouteInput } from '../../shared/contracts/model-routes.js'
 import type { WeightedRoutesInput } from '../../shared/contracts/model-weighted-routes.js'
 import { presentWeightedRoutes, saveWeightedRoutes } from './model-weighted-config.js'
-import { clearToolModelRuntimeCache } from './tool-model-config.js'
+import { ToolModelConfigurationError, clearToolModelRuntimeCache } from './tool-model-config.js'
 import { webToolEndpoint } from './web-tool-provider.js'
 import { webToolChargeMilli } from '../../shared/web-tool-pricing.js'
 
@@ -391,7 +391,10 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
     if ((model.key === 'tool:web-search' || model.key === 'tool:web-fetch') && nextEnabled) {
       try { webToolEndpoint({ provider: input.provider ?? model.provider, modelName: nextModelName,
         baseUrl: nextBaseUrl ?? '', apiKey: nextHasApiKey ? 'configured' : '' }, model.key === 'tool:web-search' ? 'search' : 'fetch') }
-      catch { throw new DataAccessError(400, 'WEB_TOOL_CONFIG_INVALID', '网页工具需要受支持的供应商、独立工具端点与密钥；不能使用聊天接口地址。') }
+      catch (error) {
+        if (!(error instanceof ToolModelConfigurationError)) throw error
+        throw new DataAccessError(400, 'WEB_TOOL_CONFIG_INVALID', error.configurationMessage ?? '网页工具配置不完整。')
+      }
     }
     if (model.tier !== 'speed' && (nextEnabled || nextSelectable) && (nextModelName === 'unconfigured' || !nextBaseUrl || !nextHasApiKey)) {
       throw new DataAccessError(409, 'MODEL_CONFIG_INCOMPLETE', '该服务必须先完整配置模型 ID、Base URL 与 API Key，才能启用。')

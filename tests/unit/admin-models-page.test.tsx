@@ -161,3 +161,19 @@ it('displays the same exact decimal total used by weighted input validation', ()
     candidates: [0.01, 99.98].map(weight => ({ ...defaults, label: '线路', weight })) }} />)
   expect(screen.getByText('合计 100%')).toBeTruthy()
 })
+
+it.each(['search', 'fetch'] as const)('saves and reopens the complete YunShu %s endpoint without returning the key', async operation => {
+  const baseUrl = `https://yunshu.chevolink.com/v1/tools/${operation}`
+  let model = { ...row('tool', 'speed', '云枢工具'), tier: `tool_${operation}`, modelKind: `web_${operation}`, provider: 'deepseek', modelName: `deepseek-${operation}`, baseUrl, selectable: false, isDefault: false }
+  mocks.get.mockImplementation(async () => ({ models: [model], trend: [] }))
+  mocks.update.mockImplementation(async (_id: string, payload: Record<string, unknown>) => { model = { ...model, ...payload }; return { ok: true } })
+  mount(); await screen.findByText('云枢工具')
+  fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+  expect((screen.getByRole('textbox', { name: 'Base URL' }) as HTMLInputElement).value).toBe(baseUrl)
+  fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+  await waitFor(() => expect(mocks.update).toHaveBeenCalledWith('tool', expect.objectContaining({ provider: 'deepseek', baseUrl, apiKey: undefined })))
+  await waitFor(() => expect(screen.queryByRole('button', { name: '保存配置' })).toBeNull())
+  fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+  expect((screen.getByRole('textbox', { name: 'Base URL' }) as HTMLInputElement).value).toBe(baseUrl)
+  expect((screen.getByRole('textbox', { name: '供应商' }) as HTMLInputElement).value).toBe('deepseek')
+})

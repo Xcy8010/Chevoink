@@ -7,17 +7,18 @@ export type WebToolOperation = 'search' | 'fetch'
 /** Tools accept their own root or exact endpoint; chat paths are never inferred. */
 export function webToolEndpoint(config: ToolModelRuntime, operation: WebToolOperation): string {
   const provider = config.provider.trim().toLowerCase()
-  if (!config.apiKey.trim() || !config.modelName.trim() || config.modelName === 'unconfigured') throw new ToolModelConfigurationError('TOOL_CONFIG_INCOMPLETE')
-  if (provider !== 'deepseek' && !(operation === 'search' && provider === 'bocha')) throw new ToolModelConfigurationError('WEB_TOOL_PROVIDER_UNSUPPORTED')
+  if (!config.apiKey.trim()) throw new ToolModelConfigurationError('TOOL_CONFIG_INCOMPLETE', 'API Key：请填写网页工具密钥。')
+  if (!config.modelName.trim() || config.modelName === 'unconfigured') throw new ToolModelConfigurationError('TOOL_CONFIG_INCOMPLETE', '模型 ID：请填写网页工具配置标识。')
+  if (provider !== 'deepseek' && !(operation === 'search' && provider === 'bocha')) throw new ToolModelConfigurationError('WEB_TOOL_PROVIDER_UNSUPPORTED', operation === 'search' ? '供应商：仅支持 bocha、deepseek；渠道名称请填入显示名称。' : '供应商：Fetch 仅支持 deepseek；渠道名称请填入显示名称。')
   let url: URL
-  try { url = parsePublicHttpUrl(config.baseUrl) } catch { throw new ToolModelConfigurationError('WEB_TOOL_ENDPOINT_INVALID') }
-  if (url.search || new URL(config.baseUrl).hash) throw new ToolModelConfigurationError('WEB_TOOL_ENDPOINT_INVALID')
+  try { url = parsePublicHttpUrl(config.baseUrl) } catch { throw new ToolModelConfigurationError('WEB_TOOL_ENDPOINT_INVALID', 'Base URL：请填写安全的公共 HTTPS 地址，不得包含凭据、查询参数、片段或自定义端口。') }
+  if (url.search || new URL(config.baseUrl).hash) throw new ToolModelConfigurationError('WEB_TOOL_ENDPOINT_INVALID', 'Base URL：请填写安全的公共 HTTPS 地址，不得包含凭据、查询参数、片段或自定义端口。')
   const path = url.pathname.replace(/\/+$/, '')
   if (provider === 'deepseek') {
-    if (!['', '/v1', `/v1/tools/${operation}`].includes(path)) throw new ToolModelConfigurationError('WEB_TOOL_ENDPOINT_INVALID')
+    if (!['', '/v1', `/v1/tools/${operation}`].includes(path)) throw new ToolModelConfigurationError('WEB_TOOL_ENDPOINT_INVALID', `Base URL：端点类型错误，请使用根地址、/v1 或 /v1/tools/${operation}，不能使用聊天或另一网页工具端点。`)
     url.pathname = `/v1/tools/${operation}`
   } else {
-    if (!['', '/v1', '/v1/web-search'].includes(path)) throw new ToolModelConfigurationError('WEB_TOOL_ENDPOINT_INVALID')
+    if (!['', '/v1', '/v1/web-search'].includes(path)) throw new ToolModelConfigurationError('WEB_TOOL_ENDPOINT_INVALID', 'Base URL：Bocha Search 请使用根地址、/v1 或 /v1/web-search。')
     url.pathname = '/v1/web-search'
   }
   return url.href

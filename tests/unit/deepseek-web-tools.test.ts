@@ -60,14 +60,15 @@ describe('DeepSeek Search JSON contract', () => {
     expect((await searchWeb(query, 2, undefined, { ...config, provider: 'bocha', baseUrl: 'https://api.bochaai.com/v1/web-search' })).provider).toBe('bocha')
     expect(JSON.parse(transport.mock.calls[0][1].body).query).toBe(query)
   })
-  it('sends the documented request and maps results[] with summary, public filtering and deduplication', async () => {
+  it.each(['https://api.deepseek.com', 'https://yunshu.chevolink.com/v1/tools/search'])('sends Search contract through %s', async baseUrl => {
     transport.mockResolvedValue(Response.json({ results: [item, item, { ...item, url: 'http://127.0.0.1/private' }] }, { headers: { 'x-request-id': 'request-19' } }))
-    const outcome = await searchWeb('public query', 2, undefined, config)
+    const outcome = await searchWeb('public query', 2, undefined, { ...config, baseUrl })
     expect(outcome).toMatchObject({ provider: 'deepseek', results: [{ title: item.title, url: item.url, snippet: item.summary, source: 'Example' }],
       attempts: [expect.objectContaining({ provider: 'deepseek', outcome: 'results', httpStatus: 200, providerRequestId: 'request-19' })] })
     expect(transport).toHaveBeenCalledOnce()
     const [endpoint, options] = transport.mock.calls[0]
-    expect(endpoint).toBe('https://api.deepseek.com/v1/tools/search')
+    expect(endpoint).toBe(baseUrl.includes('/tools/') ? baseUrl : `${baseUrl}/v1/tools/search`)
+    expect(options.method).toBe('POST')
     expect(JSON.parse(options.body)).toEqual({ query: 'public query', count: 2, need_content: false })
     expect(options.headers.Authorization).toBe('Bearer offline-fixture-secret')
     expect(options.redirect).toBe('error')
@@ -132,13 +133,15 @@ describe('independent DeepSeek Fetch contract', () => {
     expect(transport).toHaveBeenCalledOnce()
     expect(transport.mock.calls[0][1].headers).not.toHaveProperty('Authorization')
   })
-  it('sends only the target URL, extracts real links and preserves metadata classification', async () => {
+  it.each(['https://api.deepseek.com', 'https://yunshu.chevolink.com/v1/tools/fetch'])('sends Fetch contract through %s', async baseUrl => {
     transport.mockResolvedValueOnce(new Response('<script src="app.js"></script>', { headers: { 'content-type': 'text/html' } }))
       .mockResolvedValueOnce(Response.json({ title: 'Book details', content: `# Book details\n\n${article}\n[Chapter 1](/reader/987)\n[Private](http://127.0.0.1/private)\n[Other](https://other.example/chapter)` }))
-    const result = await readPublicWebPage('https://fanqienovel.com/page/123', new AbortController().signal, { ...config, modelName: 'deepseek-fetch' })
+    const result = await readPublicWebPage('https://fanqienovel.com/page/123', new AbortController().signal, { ...config, baseUrl, modelName: 'deepseek-fetch' })
     expect(result).toMatchObject({ status: 'ok', provider: 'deepseek', title: 'Book details', contentKind: 'metadata', links: [{ url: 'https://fanqienovel.com/reader/987', title: 'Chapter 1' }] })
     const [endpoint, options] = transport.mock.calls[1]
-    expect(endpoint).toBe('https://api.deepseek.com/v1/tools/fetch')
+    expect(endpoint).toBe(baseUrl.includes('/tools/') ? baseUrl : `${baseUrl}/v1/tools/fetch`)
+    expect(options.method).toBe('POST')
+    expect(options.headers.Authorization).toBe('Bearer offline-fixture-secret')
     expect(JSON.parse(options.body)).toEqual({ url: 'https://fanqienovel.com/page/123' })
     expect(options.redirect).toBe('error')
     expect(options.dispatcher.destroyed).toBe(true)
