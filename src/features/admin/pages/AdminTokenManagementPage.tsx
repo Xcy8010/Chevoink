@@ -9,6 +9,7 @@ import { formatTokens } from '../admin-shared'
 import { getAdminTokenManagement } from '../api'
 import SupplierBalances from '../components/SupplierBalances'
 import { AdminCallRecords, AdminLocalHealth } from '../components/AdminOperationsLists'
+import AdminIntegrationStatus from '../components/AdminIntegrationStatus'
 import AdminAnalytics from '../components/AdminAnalytics'
 
 function formatCacheRate(hit: number | null, miss: number | null) {
@@ -37,7 +38,7 @@ export default function AdminTokenManagementPage() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><AdminPageHeader title="用量与运行" description="按 UTC+8 统计模型输入/输出 Token、联网搜索和生图调用，并下钻到用户创作记录。" /><div className="flex shrink-0 rounded-lg border border-[var(--border-strong)] p-1">{([['today','本日'],['week','本周'],['month','本月']] as const).map(([value,label]) => <button key={value} type="button" onClick={() => setPeriod(value)} className={`rounded-md px-3 py-1.5 text-xs ${period === value ? 'bg-[var(--surface-contrast)] text-[var(--text-contrast)]' : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]'}`}>{label}</button>)}</div></div>
       <AdminSectionTabs tabs={[{id:'usage',label:'用量'},{id:'calls',label:'调用记录'},{id:'health',label:'健康'},{id:'cost',label:'成本与余额'}]} value={tab} onChange={setTab} label="用量与运行分区" />
       <p className="mb-4 text-sm text-[var(--text-secondary)]">数据来源：墨域本地用量记录 · UTC+8 · 缺失数据保持未知，云枢扣款尚未对账。</p>
-      {tab === 'cost' ? <><AdminCard className="mb-4"><h2 className="font-semibold">云枢扣款</h2><p className="mt-2 text-sm text-[var(--text-secondary)]">未接入对账。以下供应商余额与公开价估算均不代表云枢实际扣款。</p></AdminCard><SupplierBalances /><AdminAnalytics scope="cost" period={period === 'today' ? 'day' : period} /></> : null}
+      {tab === 'cost' ? <><AdminIntegrationStatus /><AdminCard className="mb-4"><h2 className="font-semibold">云枢扣款</h2><p className="mt-2 text-sm text-[var(--text-secondary)]">未接入对账。以下供应商余额与公开价估算均不代表云枢实际扣款。</p></AdminCard><SupplierBalances /><AdminAnalytics scope="cost" period={period === 'today' ? 'day' : period} /></> : null}
       {tab === 'health' ? <AdminLocalHealth /> : null}
       {tab === 'calls' ? <AdminCallRecords /> : null}
       {tab === 'usage' ? <AdminPanelState state={query.isLoading ? 'loading' : query.isError ? 'error' : 'ready'}>

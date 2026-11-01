@@ -16,9 +16,17 @@ it('authenticates every operations and audit query before validation or data acc
   mocks.auth.mockRejectedValue(new DataAccessError(403,'ADMIN_REQUIRED','无管理权限'))
   for(const path of ['calls','runs','health'])expect((await request(app).get('/api/admin/operations/'+path).query({page:'bad'})).status).toBe(403)
   expect((await request(app).get('/api/admin/logs').query({from:'bad'})).status).toBe(403)
+  expect((await request(app).get('/api/admin/integrations/status')).status).toBe(403)
   for(const fn of [mocks.calls,mocks.runs,mocks.health,mocks.logs])expect(fn).not.toHaveBeenCalled()
 })
-
+it('exposes only local blocked integration status with no fabricated production version or external snapshot', async()=>{
+  const response = await request(app).get('/api/admin/integrations/status')
+  expect(response.status).toBe(200)
+  expect(response.body.data.system.releaseVersion).toBeNull()
+  expect(response.body.data.resources).toHaveLength(4)
+  for(const resource of response.body.data.resources)expect(resource).toMatchObject({state:'blocked',canRead:false,snapshot:null,lastSuccessAt:null})
+  expect(JSON.stringify(response.body)).not.toMatch(/DATABASE_URL|apiKeyCiphertext|apiKey|password/)
+})
 it('validates bounded queries and paired dates once before forwarding typed filters',async()=>{
   expect((await request(app).get('/api/admin/operations/calls').query({source:'usage',page:2,pageSize:20,model:'synthetic-model'})).status).toBe(200)
   expect(mocks.calls).toHaveBeenCalledWith({source:'usage',period:'today',page:2,pageSize:20,model:'synthetic-model'})

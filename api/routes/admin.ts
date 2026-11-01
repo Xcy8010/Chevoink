@@ -13,6 +13,7 @@ import { adminModelDiagnosticRequestSchema } from '../../shared/contracts/admin-
 import { startAdminModelDiagnostic, getAdminModelDiagnostic, cancelAdminModelDiagnostic } from '../lib/admin-model-diagnostics.js'
 import { adminOperationCallsQuerySchema, adminOperationRunsQuerySchema, adminOperationsHealthQuerySchema } from '../../shared/contracts/admin-operations.js'
 import { listAdminOperationCalls, listAdminOperationRuns, getAdminOperationsHealth } from '../lib/admin-operations.js'
+import { getAdminIntegrationStatus } from '../lib/admin-integrations.js'
 import { imageQualityConfigSchema } from '../../shared/contracts/image-model.js'
 import { getSupplierBalances } from '../lib/supplier-balances.js'
 
@@ -1567,7 +1568,11 @@ router.get('/operations/calls', async (req: Request, res: Response): Promise<voi
   try { await requireAdmin(req); const query = parseBody(adminOperationCallsQuerySchema, req.query, '调用筛选条件不正确。'); res.json(buildSuccess(requestId, await listAdminOperationCalls(query))) }
   catch (error) { sendRouteError(res, requestId, error) }
 })
-
+router.get('/integrations/status', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try { await requireAdmin(req); res.json(buildSuccess(requestId, getAdminIntegrationStatus())) }
+  catch (error) { sendRouteError(res, requestId, error) }
+})
 router.get('/operations/runs', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
   try { await requireAdmin(req); const query = parseBody(adminOperationRunsQuerySchema, req.query, '执行筛选条件不正确。'); res.json(buildSuccess(requestId, await listAdminOperationRuns(query))) }
