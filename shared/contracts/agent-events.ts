@@ -345,10 +345,23 @@ export interface AgentArtifactRef {
  * 结构化 SSE 事件协议（前后端唯一契约）。
  * live 与 replay 同源：全部事件按 seq 持久化，重连用 Last-Event-ID 续传。
  */
+export interface LegacyContinuationRetirement {
+  status: 'legacy_continuation_retired'
+  usageOutcome: 'preserved'
+  sourceRunId: string
+  sourceTaskId: string
+  wrapperRunId: string
+  wrapperTaskId: string
+  manuscriptRevision: number
+  terminalEventId: string
+  calls: { callId: string; toolName: string; resultEventId: string; pendingReview: unknown }[]
+  usageIds: string[]
+}
+
 export type AgentStreamEventBody =
   | { type: 'goal.snapshot'; snapshot: import('./agent-goal.js').AgentGoalSnapshot }
   | { type: 'run.started'; agent: AgentRunAgentSummary; mode: AgentExecutionMode; title: string;
-      authorContinue?: { eventId: string; afterSeq: number } }
+      authorContinue?: { eventId: string; afterSeq: number; legacyContinuationRetirements?: LegacyContinuationRetirement[] } }
   | {
       type: 'skill.route'
       phase: string

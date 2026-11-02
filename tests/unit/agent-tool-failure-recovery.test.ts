@@ -117,3 +117,11 @@ describe('chapter authority failure feedback', () => {
       expect(toolFailureRecovery(code)).toBeUndefined()
     })
 })
+
+it('guides pending work through its original workflow and asks for an unresolved target once', () => {
+  expect(toolFailureRecovery('TASK_RESPONSE_WORK_PENDING')!.guidance).toContain('不要重复task_respond')
+  expect(toolFailureRecovery('TASK_RESPONSE_WORK_PENDING')!.guidance).toContain('未知请求先核对')
+  expect(toolFailureRecovery('SCOPE_NEEDS_INPUT')!.guidance).toContain('ask_user只问一次')
+  expect(toolFailureRecovery('SCOPE_NEEDS_INPUT')!.guidance).not.toContain('按新任务受理')
+  expect(toolFailureRecovery('QUALITY_TARGET_AMBIGUOUS')!.guidance).toContain('不能自动改检查另一章')
+})

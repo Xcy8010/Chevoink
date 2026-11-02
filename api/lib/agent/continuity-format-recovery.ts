@@ -31,6 +31,19 @@ function normalize(value: unknown, bodies: ContinuityBodies | undefined, parserV
   return quotes.length ? { ...item, sourceEvidence: quotes } : item
 }
 
+/** The shared parser has already checked complete syntax and duplicate keys
+ * before an envelope-only failure. A sole wrapper changes no report values. */
+export function parseContinuityReportEnvelope(raw: string) {
+  try { return { record: object(parseQualityJsonObject(raw, 'continuity', 3)), unwrapped: false } }
+  catch (error) {
+    if (!(error instanceof Error) || !('classification' in error) || error.classification !== 'envelope_invalid') throw error
+    const outer = object(JSON.parse(raw)), keys = outer ? Object.keys(outer) : []
+    const inner = keys.length === 1 ? object(outer![keys[0]]) : null
+    if (inner && Object.keys(inner).length === 1 && Array.isArray(inner.findings)) return { record: inner, unwrapped: true }
+    throw error
+  }
+}
+
 /** Mechanical envelope compatibility; no new model call or missing-content reconstruction. */
 export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies, responseComplete = true, parserVersion: 3 | 4 | 5 | 6 | 7 | 8 = 3, terminalCandidate?: TerminalCandidate, sourceScope?: ContinuitySourceScope, options: { frozenCurrentMetadata?: true; responseContract?: 3; sourceCheckPolicy?: ContinuitySourceCheckPolicy } = {}) {
   const sourceRelocations: ContinuitySourceRelocation[] = []
@@ -38,16 +51,9 @@ export function inspectContinuityResponse(raw: string, bodies?: ContinuityBodies
   let record: Record<string, unknown> | null = null
   let unwrapped = false
   if (responseComplete && raw.length <= MAX_AUDIT_CHARS) {
-    try { record = object(parseQualityJsonObject(raw, 'continuity', 3)) }
+    try { const envelope = parseContinuityReportEnvelope(raw); record = envelope.record; unwrapped = envelope.unwrapped }
     catch (error) {
       classification = error instanceof Error && 'classification' in error && typeof error.classification === 'string' ? error.classification : 'json_invalid'
-      // Duplicate keys, multiple envelopes and damaged syntax remain failures.
-      if (classification === 'envelope_invalid') try {
-        const outer = object(JSON.parse(raw))
-        const keys = outer ? Object.keys(outer) : []
-        const inner = keys.length === 1 ? object(outer![keys[0]]) : null
-        if (inner && Object.keys(inner).length === 1 && Array.isArray(inner.findings) && inner.findings.length) { record = inner; unwrapped = true }
-      } catch { /* Retain original response without inventing findings. */ }
     }
   }
   let findings: ContinuityFindingInput[] = []

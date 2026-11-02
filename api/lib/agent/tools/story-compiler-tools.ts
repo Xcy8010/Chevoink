@@ -200,7 +200,7 @@ export const storyCompilerPrepareTool = defineTool({
   name: 'story_compiler_prepare',
   title: '准备章节写作',
   description:
-    '章节写作及需要最终检查、提交章节桥的既有章修订所需 PREPARE 步骤：召回 Story Charter、待兑现承诺、前章终态、故事记忆和近期首尾结构，并建立可追踪 Chapter Bridge。条件局部修订先按已保存正文建立本次检查所需场景，不创造新情节或扩大写入范围。无需章节桥的独立选区润色、改标题、调整元数据时禁止调用。新章节尚未创建时传目标全书序号，已有章节传 chapterId。',
+    '章节写作及需要最终检查、提交章节桥的既有章修订所需 PREPARE 步骤：召回 Story Charter、待兑现承诺、前章终态、故事记忆和近期首尾结构，并建立可追踪 Chapter Bridge。条件局部修订先按已保存正文建立本次检查所需场景，不创造新情节或扩大写入范围。无需章节桥的独立选区润色、改标题、调整元数据时禁止调用。intentSummary只写一句短意图，不复制正文、长纲或历史。新章尚未创建时传目标全书序号，已有章传chapterId；原任务目标不明时先用ask_user一次问清，不猜章节、不生成长参数。',
   parameters: z.object({
     chapterId: z.string().min(1).optional(),
     targetOrderIndex: z.number().int().min(1).optional(),
@@ -210,9 +210,11 @@ export const storyCompilerPrepareTool = defineTool({
   permission: BUILD_WRITE,
   readOnly: false,
   async execute(ctx, args) {
+    const db = ctx.transaction ?? prisma
+    const scope = await readWritingScope(db, ctx)
+    if (scope.writing?.kind === 'needs_input') return { outcome: 'failed' as const, failureCode: 'SCOPE_NEEDS_INPUT',
+      summary: '准备前需要明确目标章节', output: '原任务尚未确认目标章节，本次未建立编译、未写正文。用ask_user只问一次要处理的具体章节，等待作者明确回答后沿原任务受理；不要猜targetOrderIndex、重发准备参数或重新创建任务。' }
     if (args.chapterId && args.targetOrderIndex !== undefined) {
-      const db = ctx.transaction ?? prisma
-      const scope = await readWritingScope(db, ctx)
       const frozen = scope.writing?.kind === 'bounded' && scope.writing.targets.find(target => target.orderIndex === args.targetOrderIndex)
       const chapter = frozen ? await db.chapter.findFirst({ where: { id: args.chapterId, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) },
         select: { orderIndex: true } }) : null

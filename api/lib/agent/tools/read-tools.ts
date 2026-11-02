@@ -339,23 +339,28 @@ export const planReadTool = defineTool({
         tx => planReadTool.execute({ ...captured, durableRead: undefined, transaction: tx }, effective))
     }
     const db = ctx.transaction ?? prisma
+    const planId = args.planId?.trim() ? args.planId : undefined
     const plan = await db.agentArtifact.findFirst({
       where: {
         artifactType: 'chapterPlan',
         metadata: { path: ['savedAsPlan'], equals: true },
         run: { userId: ctx.userId, novelId: ctx.novelId },
-        ...(args.planId ? { id: args.planId } : {}),
+        ...(planId ? { id: planId } : {}),
       },
       orderBy: { updatedAt: 'desc' },
       select: { id: true, title: true, content: true, updatedAt: true, metadata: true },
     })
 
     if (!plan) {
+      const candidates = planId ? await db.agentArtifact.findMany({
+        where: { artifactType: 'chapterPlan', metadata: { path: ['savedAsPlan'], equals: true }, run: { userId: ctx.userId, novelId: ctx.novelId } },
+        orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }], take: 5, select: { id: true, title: true },
+      }) : []
       return {
-        ...(args.planId ? { outcome: 'failed' as const } : {}),
-        summary: args.planId ? '指定计划不存在' : '计划文件夹为空',
-        output: args.planId
-          ? `未找到 planId=${args.planId} 对应的计划，请核对上下文里的计划清单。`
+        ...(planId ? { outcome: 'failed' as const } : {}),
+        summary: planId ? '指定计划不存在' : '计划文件夹为空',
+        output: planId
+          ? `未找到 planId=${planId} 对应的计划，本次没有改读另一份计划。${candidates.length ? `当前作品最近的真实计划候选（仅编号与标题）：${JSON.stringify(candidates)}。按原目标选择准确planId后调用plan_read；若原意只是查看最近计划，可明确省略planId。` : '当前作品没有可用的已保存计划；不要猜测编号或新建计划来代替读取。'}`
           : '计划文件夹目前是空的，还没有任何计划。',
       }
     }

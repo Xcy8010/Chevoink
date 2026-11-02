@@ -25,12 +25,19 @@ describe('mechanical continuity envelope compatibility', () => {
     expect(inspected.audit.rawResponse.complete).toBe(true)
     expect(parseIndependentContinuityResult(raw, 2, bodies).structured).toBe(false)
   })
-  it.each(['unknown', 'truncated', 'empty', 'invalid-enum', 'ambiguous', 'duplicate', 'unfinished'] as const)('%s cannot become a rescued empty success', scenario => {
+  it.each(['unknown', 'truncated', 'invalid-enum', 'ambiguous', 'duplicate', 'unfinished'] as const)('%s cannot become a rescued empty success', scenario => {
     const raw = scenario === 'unknown' ? '检查结果不明' : scenario === 'truncated' ? '{"report":{"findings":['
-      : scenario === 'empty' ? wrapper([]) : scenario === 'invalid-enum' ? wrapper([{ ...finding, severity: 'error/warning' }])
+      : scenario === 'invalid-enum' ? wrapper([{ ...finding, severity: 'error/warning' }])
         : scenario === 'ambiguous' ? JSON.stringify({ report: { findings: [finding] }, extra: { findings: [finding] } })
           : scenario === 'duplicate' ? '{"report":{"findings":[],"findings":[]}}' : wrapper()
     expect(inspectContinuityResponse(raw, bodies, scenario !== 'unfinished').structured).toBe(false)
+  })
+  it('recognizes an exact wrapped empty report without inventing findings or accepting incomplete transport', () => {
+    const raw = wrapper([]), inspected = inspectContinuityResponse(raw, bodies)
+    expect(inspected).toMatchObject({ structured: true, complete: true, findings: [], audit: { classification: 'complete', unwrapped: true } })
+    expect(JSON.parse(inspected.audit.rawResponse.content)).toBe(raw)
+    expect(inspectContinuityResponse(raw, bodies, false)).toMatchObject({ complete: false, structured: false })
+    expect(parseIndependentContinuityResult(raw, 2, bodies).structured).toBe(false)
   })
   it('retains source-invalid judgments for the existing reference validator without marking them complete', () => {
     const raw = wrapper([{ ...finding, sourceEvidence: [{ source: 'previous', quote: '门锁着' }] }])

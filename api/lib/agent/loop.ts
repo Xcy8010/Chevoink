@@ -140,7 +140,7 @@ export type ExecuteAgentRunParams = {
   /** Server-owned journal high water mark, never accepted from model/user input. */
   eventStartSeq?: number
   /** Verified HTTP continue admission; never supplied by a model or worker. */
-  authorContinue?: { eventId: string; afterSeq: number }
+  authorContinue?: Extract<AgentStreamEvent, { type: 'run.started' }>['authorContinue']
   modelTier?: CreditModelTier
   customModelId?: string | null
   reasoningEffort?: import('../../../shared/contracts/index.js').ModelReasoningEffort

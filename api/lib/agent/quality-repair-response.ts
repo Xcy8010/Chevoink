@@ -34,6 +34,8 @@ export function partitionQualityRepairResponse(response: ReturnType<typeof parse
   for (const item of entries) frequencies.set(item.id, (frequencies.get(item.id) ?? 0) + 1)
   const valid = (item: { id: string }) => requested.has(item.id) && frequencies.get(item.id) === 1
   return { patches: response.patches.filter(valid), retainedFindings: response.retainedFindings.filter(valid),
+    conflicts: requestedIds.filter(id => (frequencies.get(id) ?? 0) > 1).map(id => ({ id,
+      patches: response.patches.filter(item => item.id === id), retainedFindings: response.retainedFindings.filter(item => item.id === id) })),
     counts: { returned: entries.length, missing: requestedIds.filter(id => !frequencies.has(id)).length,
       unknown: entries.filter(item => !requested.has(item.id)).length,
       duplicate: entries.filter(item => requested.has(item.id) && frequencies.get(item.id)! > 1).length } }

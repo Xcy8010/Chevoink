@@ -16,6 +16,7 @@ import { readNewDraftWritingAuthority } from './writing-scope.js'
 import { selectAutomaticQualityFindings } from './quality-report-contract.js'
 import { parseQualityRepairResponse, partitionQualityRepairResponse, QUALITY_REPAIR_RETAIN_RULE } from './quality-repair-response.js'
 import { runtimeJson } from './runtime-common.js'
+import { parseContinuityReportEnvelope } from './continuity-format-recovery.js'
 import { isKnownTextRequestBilling } from './text-request-billing.js'
 import type { ToolContext, ToolResult } from './tools/types.js'
 
@@ -35,14 +36,32 @@ export type ContinuityReport = { version: 1; id: string; taskId: string; chapter
   rawResponses: string[]; usageIds: string[]; nativeReceiptIds?: string[]; billingKnown: boolean; repairAttempted?: boolean; repairResponseIndex?: number; repairResult?: ToolResult; repairFailure?: string;
   incompleteResponses?: number[];
   retainedProposals?: Array<{ findingId: string; reason: string }>;
-  history?: Array<{ rawResponses: string[]; incompleteResponses?: number[]; usageIds: string[]; nativeReceiptIds?: string[]; opinions: ContinuityOpinion[]; complete: boolean; billingKnown: boolean; error?: string }> }
+  repairUnresolved?: Array<{ findingId: string; reason: string; retainedReasons?: string[] }>;
+  history?: Array<{ rawResponses: string[]; incompleteResponses?: number[]; usageIds: string[]; nativeReceiptIds?: string[]; opinions: ContinuityOpinion[]; complete: boolean; billingKnown: boolean; error?: string; repairResult?: ToolResult; repairFailure?: string }> }
 export type ContinuityReviewArgs = { chapterId?: string; compilationId?: string; focus?: string }
 export type ContinuitySnapshot = Awaited<ReturnType<typeof buildContinuitySnapshot>>
 
 /** A source-address error must not erase a recognizable editorial opinion. */
 export function inspectContinuityOpinions(raw: string) {
   let rows: unknown[] | null = null
-  try { const parsed = z.object({ findings: z.array(z.unknown()) }).safeParse(parseQualityJsonObject(raw, 'findings', 3)); if (parsed.success) rows = parsed.data.findings } catch { /* Keep the original response. */ }
+  try { const parsed = z.object({ findings: z.array(z.unknown()) }).safeParse(parseContinuityReportEnvelope(raw).record); if (parsed.success) rows = parsed.data.findings }
+  catch {
+    // Some complete responses contain comma-separated finding objects without
+    // their outer array/envelope. The entire collection must parse and every
+    // original object must match; never split quoted text or close a finding.
+    try { const collection = continuityReportResponseSchema.safeParse(parseQualityJsonObject(`{"findings":[${raw}]}`, 'findings', 3))
+      if (collection.success && collection.data.findings.length) rows = collection.data.findings
+    } catch { /* Keep the original response without guessing missing content. */ }
+    if (rows === null) try {
+      // The observed gateway echo is a complete copy of our schema followed by
+      // ,"findings":[...]}. Reintroduce only its missing metadata envelope;
+      // its existing final brace must close it. Never read schema examples or
+      // append closing delimiters/business fields to an incomplete response.
+      const echoed = z.object({ schema: z.unknown(), findings: continuityReportResponseSchema.shape.findings }).strict()
+        .parse(parseQualityJsonObject(`{"schema":${raw}`, 'findings', 3))
+      if (runtimeJson(echoed.schema).hash === runtimeJson(z.toJSONSchema(continuityReportResponseSchema, { io: 'input' })).hash) rows = echoed.findings
+    } catch { /* A changed schema or malformed actual findings remains a failure. */ }
+  }
   const recognized = (rows ?? []).flatMap((row, index) => {
     if (!row || typeof row !== 'object' || Array.isArray(row)) return []
     const value = row as Record<string, unknown>, semantic = findingSchema.omit({ evidence: true }).safeParse({ signal: value.signal,
@@ -190,6 +209,7 @@ function reportResult(snapshot: ContinuitySnapshot, report: ContinuityReport, ca
 ${report.findings.map(finding => `[${finding.id}/${finding.severity}/${finding.signal}] ${finding.startOffset >= 0 ? `本章范围[${finding.startOffset},${finding.endOffset})` : '前文意见'}；原文：${JSON.stringify(finding.evidence)}\n证据：${JSON.stringify(finding.references)}\n解释：${finding.explanation}\n建议：${finding.suggestion}`).join('\n')}
 ${report.unlocatedIndexes.map(index => `未定位意见[${index}]：${JSON.stringify(report.opinions[index])}`).join('\n')}
 ${report.retainedProposals?.length ? `修订保留建议：${JSON.stringify(report.retainedProposals.map(item => ({ source: 'continuity', reportId: report.id, ...item })))}` : ''}
+${report.repairUnresolved?.length ? `自动修订仍待核对（未当作已处理或已修复）：${JSON.stringify(report.repairUnresolved)}` : ''}
 ${report.repairFailure ? `报告已取得，自动修订未应用：${report.repairFailure}` : ''}`,
     display: { kind: 'storyCompiler', compilationId: snapshot.compilation?.id ?? '', phase: errors ? 'repair' : 'check', title: '连续性检查',
       detail: `${errors} 错误 · ${warnings} 警告`, errorCount: errors, warningCount: warnings,
@@ -304,7 +324,7 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
       await assertCurrent(ctx, args, snapshot, tx)
       await bindContinuityReport(tx, snapshot, cached)
     }, { timeout: 20000 })
-    if (cached.repairResult) return cached.repairResult
+    if (cached.repairResult && (cached.repairResult.outcome !== 'failed' || cached.repairResult.failureCode !== 'CONTINUITY_REPAIR_FAILED')) return cached.repairResult
     return finishContinuityReview(ctx, args, snapshot, cached, { ...options, nativeOperationId: options.resumeKnownRequest,
       resumeRepair: !!options.resumeKnownRequest && !!ctx.continuityNativeLease && metadata.callId === ctx.callId
         && (metadata.nativeOperationId ?? cached.nativeOperationId) === options.resumeKnownRequest }, true)
@@ -352,11 +372,17 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
     let opinions = [...report.opinions]
     const completedRaw = previous && [previous, ...(previous.history ?? [])].filter(row => row.billingKnown && !row.usageIds.some(id => retired.has(id))).some(row => row.rawResponses.some((raw, index) =>
       !row.incompleteResponses?.includes(index) && continuityFormatRecoveryPreservesOpinions(inspectContinuityOpinions(JSON.stringify({ findings: opinions })), inspectContinuityOpinions(raw))))
-    let parsed = !!previous?.opinions.length && !!completedRaw
+    let parsed = !!previous && !!completedRaw
+    if (parsed && previous) report = { ...report, rawResponses: [...previous.rawResponses], usageIds: [...previous.usageIds],
+      nativeReceiptIds: [...(previous.nativeReceiptIds ?? [])], incompleteResponses: [...(previous.incompleteResponses ?? [])] }
     if (!parsed) {
       const priorRaw = previous?.rawResponses.at(-1)
       let raw = priorRaw ?? await call(request.system, request.content, 'agent3ContinuityCritic')
-      if (priorRaw !== undefined) lastProviderComplete = !previous!.incompleteResponses?.includes(previous!.rawResponses.length - 1)
+      if (priorRaw !== undefined) {
+        lastProviderComplete = !previous!.incompleteResponses?.includes(previous!.rawResponses.length - 1)
+        report = { ...report, rawResponses: [...previous!.rawResponses], usageIds: [...previous!.usageIds],
+          nativeReceiptIds: [...(previous!.nativeReceiptIds ?? [])], incompleteResponses: [...(previous!.incompleteResponses ?? [])] }
+      }
       const first = inspectContinuityOpinions(raw)
       opinions = first.opinions; parsed = first.structured && lastProviderComplete
       if (!parsed) {
@@ -401,8 +427,9 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
 async function finishContinuityReview(ctx: ToolContext, args: ContinuityReviewArgs, snapshot: ContinuitySnapshot, report: ContinuityReport,
   options: { dispatch?: ContinuityDispatch; applyRepair?: ContinuityApplyRepair; allowRepair?: boolean; resumeRepair?: boolean; nativeOperationId?: string }, cached = false): Promise<ToolResult> {
   ctx.signal.throwIfAborted()
-  if (report.repairResult?.outcome === 'failed') return report.repairResult
-  const savedRepair = report.repairResponseIndex === undefined ? undefined : report.rawResponses[report.repairResponseIndex]
+  const savedRepair = report.repairResponseIndex === undefined || report.incompleteResponses?.includes(report.repairResponseIndex) ? undefined : report.rawResponses[report.repairResponseIndex]
+  const priorFailure = report.repairResult?.outcome === 'failed' ? report.repairResult : undefined
+  if (priorFailure && (priorFailure.failureCode !== 'CONTINUITY_REPAIR_FAILED' || savedRepair === undefined)) return priorFailure
   if (!report.complete || report.repairAttempted && !savedRepair && !options.resumeRepair || options.allowRepair === false || ctx.mode !== 'build' || ctx.creativeFreedom !== 'balanced'
     || ctx.inlineChild || ctx.sandboxMode === 'read_only' || ctx.protectedChapterIds?.has(report.chapterId)) return reportResult(snapshot, report, cached)
   const { automaticChapterRevisionWritable } = await import('./tools/chapter-mutation.js')
@@ -438,19 +465,36 @@ async function finishContinuityReview(ctx: ToolContext, args: ContinuityReviewAr
   if (!response.billingKnown) throw new DataAccessError(409, 'AI_PROVIDER_BILLING_UNCONFIRMED', '修订响应的费用未确认，正文未应用。')
   if (response.providerComplete === false) throw new DataAccessError(409, 'CONTINUITY_REPORT_INCOMPLETE', '修订回复未完整返回，正文未应用。')
   }
-  let patches: Array<{ findingId: string; replacement: string }> = []
-  try { const partitioned = partitionQualityRepairResponse(parseQualityRepairResponse(parseQualityJsonObject(savedRepair ?? report.rawResponses[report.repairResponseIndex!], 'patches', 3)), selected.map(finding => finding.id))
-    patches = partitioned.patches.map(patch => ({ findingId: patch.id, replacement: patch.replacement }))
-    report = { ...report, retainedProposals: partitioned.retainedFindings.map(item => ({ findingId: item.id, reason: item.reason })) }
-  } catch {
+  let partitioned: ReturnType<typeof partitionQualityRepairResponse>
+  try { partitioned = partitionQualityRepairResponse(parseQualityRepairResponse(parseQualityJsonObject(savedRepair ?? report.rawResponses[report.repairResponseIndex!], 'patches', 3)), selected.map(finding => finding.id)) }
+  catch {
+    if (priorFailure) return priorFailure
     throw new DataAccessError(409, 'CONTINUITY_REPAIR_FAILED', '修订回复未形成可验证的局部补丁；正文未改动，原意见及回复已保留。')
   }
+  const patches = partitioned.patches.filter(patch => patch.replacement !== snapshot.chapter.content.slice(
+    selected.find(finding => finding.id === patch.id)!.startOffset, selected.find(finding => finding.id === patch.id)!.endOffset))
+    .map(patch => ({ findingId: patch.id, replacement: patch.replacement }))
+  const unresolved = selected.filter(finding => !patches.some(patch => patch.findingId === finding.id)
+    && !partitioned.retainedFindings.some(item => item.id === finding.id)).map(finding => {
+      const conflict = partitioned.conflicts.find(item => item.id === finding.id)
+      return { findingId: finding.id, reason: conflict ? '同一编号返回了重复或互相冲突的修订/保留提议，未自动选择或应用。'
+        : partitioned.patches.some(item => item.id === finding.id) ? '替换文本与原文相同，未当作实际修订。' : '没有取得该意见的可验证补丁或保留理由。',
+        ...(conflict?.retainedFindings.length ? { retainedReasons: conflict.retainedFindings.map(item => item.reason) } : {}) }
+    })
+  if (!patches.length && !partitioned.retainedFindings.length && !partitioned.conflicts.length) {
+    if (priorFailure) return priorFailure
+    throw new DataAccessError(409, 'CONTINUITY_REPAIR_FAILED', '修订回复没有可安全应用的实际正文变化，原意见及回复已保留。')
+  }
+  const { repairResult: _priorResult, repairFailure: _priorFailure, ...currentReport } = report
+  report = { ...currentReport, retainedProposals: partitioned.retainedFindings.map(item => ({ findingId: item.id, reason: item.reason })),
+    repairUnresolved: unresolved, ...(priorFailure ? { history: [...(report.history ?? []), { rawResponses: report.rawResponses,
+      usageIds: report.usageIds, nativeReceiptIds: report.nativeReceiptIds ?? [], opinions: report.opinions, complete: report.complete,
+      billingKnown: report.billingKnown, error: priorFailure.failureCode, repairResult: priorFailure, repairFailure: report.repairFailure }] } : {}) }
   await saveReport(ctx, args, snapshot, report)
   if (!patches.length) {
-    report = { ...report, repairFailure: '修订器没有提出安全且必要的局部替换，原意见保留待审。' }
+    report = { ...report, repairFailure: unresolved.length ? '本次修订提议存在冲突或缺项，原意见全部保留待审；正文未修改。' : '修订器没有提出安全且必要的局部替换，原意见保留待审。' }
     await saveReport(ctx, args, snapshot, report)
-    if (report.retainedProposals?.length === selected.length) return reportResult(snapshot, report)
-    throw new DataAccessError(409, 'CONTINUITY_REPAIR_FAILED', '修订回复未完整处理当前意见，正文未改动。')
+    return { ...reportResult(snapshot, report), ...(unresolved.length ? { summary: '连续性报告已保存 · 自动修订待核对' } : {}) }
   }
   const apply = async (tx: Prisma.TransactionClient) => {
     await lockNovelActiveScope(tx, ctx.novelId); await assertCurrent(ctx, args, snapshot, tx)

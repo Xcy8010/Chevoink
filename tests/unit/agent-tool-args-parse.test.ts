@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { parseToolArgsTolerant } from '../../api/lib/agent/loop.js'
+import { parseToolArgsTolerant } from '../../api/lib/agent/tool-argument-parser.js'
 
 /**
  * 截断残尾深度修复：模型输出被 length 截断时，除未闭括号外还会留下
@@ -44,5 +44,37 @@ describe('parseToolArgsTolerant 深度截断修复', () => {
     expect(parsed.mode).toBe('build')
     expect(parsed.tasks).toHaveLength(1)
     expect(parsed.tasks[0].title).toBe('第 3 章')
+  })
+})
+
+
+describe('complete execution argument recovery', () => {
+  const content = ('## 计划\n- 人物保留原有欲望\n- [ ] 不猜目标 {实际范围}\n').repeat(60)
+  it.each([
+    ["Here's the JSON:\n", '\n'],
+    ['\x60\x60\x60json\n', '\n\x60\x60\x60'],
+    ["Author's complete arguments:\n\x60\x60\x60json\n", '\n\x60\x60\x60'],
+  ])('ignores wrapper prose/fences but preserves every long Markdown character', (prefix, suffix) => {
+    const input = { title: '完整长计划', content }
+    expect(parseToolArgsTolerant(prefix + JSON.stringify(input) + suffix, false)).toEqual(input)
+  })
+  it('preserves raw control characters and escaped single-quoted content', () => {
+    const value = '第一段\n第二段\t正文\r\u0000\b\f'
+    const raw = '{"title":"计划","content":"' + value + '"}'
+    expect(parseToolArgsTolerant(raw, false)).toEqual({ title: '计划', content: value })
+    expect(parseToolArgsTolerant("{'title':'计划','content':'人物说\\'保留事实\\'。'}", false))
+      .toEqual({ title: '计划', content: "人物说'保留事实'。" })
+  })
+  it('repairs complete comma syntax without replacing values', () => {
+    expect(parseToolArgsTolerant('{"content":"完整正文" "tasks":[{"goal":"事实",},],}', false))
+      .toEqual({ content: '完整正文', tasks: [{ goal: '事实' }] })
+  })
+  it.each([
+    '{"title":"计划","content":}', '{"title":"计划","content"}',
+    '{"content":"真实残文', '{"tasks":[{"goal":"完整一项"}',
+    '{"content":"甲"}{"content":"乙"}', '{"tasks":["甲"}}',
+    '{"content":"完整正文"},"planId":"残文', '{"tasks":["甲",,"乙"]}',
+  ])('rejects incomplete or ambiguous payloads instead of supplying business tokens: %s', raw => {
+    expect(() => parseToolArgsTolerant(raw, false)).toThrow()
   })
 })

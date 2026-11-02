@@ -5,7 +5,7 @@ import { planSaveTool } from '../../api/lib/agent/tools/write-tools.js'
 import { planReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
-vi.mock('../../api/lib/prisma.js', () => ({ prisma: { agentArtifact: { findFirst: vi.fn(), updateMany: vi.fn(), update: vi.fn(), create: vi.fn() } },
+vi.mock('../../api/lib/prisma.js', () => ({ prisma: { agentArtifact: { findFirst: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), update: vi.fn(), create: vi.fn() } },
   DataAccessError: class extends Error { constructor(public statusCode: number, public code: string, message: string) { super(message) } } }))
 const hash = (text: string) => createHash('sha256').update(text).digest('hex')
 const ctx = { userId: 'u', novelId: 'n', runId: 'r', signal: new AbortController().signal } as ToolContext
@@ -13,6 +13,7 @@ const original = { id: 'p', title: '原计划', content: '前文'.repeat(200), m
 beforeEach(() => {
   ctx.planContentHashes = undefined
   vi.clearAllMocks()
+  vi.mocked(prisma.agentArtifact.findMany).mockResolvedValue([])
   vi.mocked(prisma.agentArtifact.findFirst).mockResolvedValue(original as never)
   vi.mocked(prisma.agentArtifact.updateMany).mockResolvedValue({ count: 1 })
 })
@@ -109,4 +110,24 @@ it('allows reading the saved tail of a long plan before retrying an append', asy
   expect(durable.observedState).toMatchObject({ kind: 'plan', id: 'p' })
   const partialDurable = await planReadTool.execute({ ...ctx, transaction: prisma }, { planId: 'p', limit: 100 })
   expect(partialDurable.observedState).toBeUndefined()
+})
+
+it('returns only real same-work plan candidates for an invalid explicit ID without reading a different body', async () => {
+  vi.mocked(prisma.agentArtifact.findFirst).mockResolvedValue(null)
+  vi.mocked(prisma.agentArtifact.findMany).mockResolvedValue([{ id: 'actual-plan', title: '实际计划' }] as never)
+  const result = await planReadTool.execute(ctx, { planId: ': ' })
+  expect(result).toMatchObject({ outcome: 'failed', summary: '指定计划不存在' })
+  expect(result.output).toContain('actual-plan')
+  expect(result.output).toContain('没有改读另一份计划')
+  expect(result.observedState).toBeUndefined()
+  expect(prisma.agentArtifact.findFirst).toHaveBeenCalledTimes(1)
+  expect(prisma.agentArtifact.findMany).toHaveBeenCalledWith({
+    where: { artifactType: 'chapterPlan', metadata: { path: ['savedAsPlan'], equals: true }, run: { userId: 'u', novelId: 'n' } },
+    orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }], take: 5, select: { id: true, title: true },
+  })
+})
+it('omits only whitespace optional plan IDs and never treats punctuation as empty', async () => {
+  expect((await planReadTool.execute(ctx, { planId: '   ' })).outcome).not.toBe('failed')
+  expect(prisma.agentArtifact.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.not.objectContaining({ id: expect.anything() }) }))
+  expect(prisma.agentArtifact.findMany).not.toHaveBeenCalled()
 })

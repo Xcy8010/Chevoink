@@ -31,12 +31,16 @@ describe('R01 event journal persistence', () => {
     const pending = deferred(), paidWork = vi.fn()
     db.createMany.mockImplementationOnce(() => pending.promise)
     const bus = new RunEventBus('author-admission', 72)
+    const retirements = [{ status: 'legacy_continuation_retired' as const, usageOutcome: 'preserved' as const,
+      sourceRunId: 'author-admission', sourceTaskId: 'original-task', wrapperRunId: 'later-continue', wrapperTaskId: 'separate-task',
+      manuscriptRevision: 0, terminalEventId: 'wrapper-pause', calls: [{ callId: 'old-call', toolName: 'quality_analyze', resultEventId: 'old-result', pendingReview: null }], usageIds: ['unknown-usage'] }]
     bus.emit({ type: 'run.started', agent: { type: 'writingOrchestrator', title: '创作', model: 'speed' },
-      mode: 'build', title: '继续', authorContinue: { eventId: 'pause-72', afterSeq: 72 } })
+      mode: 'build', title: '继续', authorContinue: { eventId: 'pause-72', afterSeq: 72, legacyContinuationRetirements: retirements } })
     const admission = bus.persist().then(paidWork)
     const result = admission.then(() => 'saved', () => 'failed')
     await settleMicrotasks()
     expect(paidWork).not.toHaveBeenCalled()
+    expect(db.createMany.mock.calls[0][0].data[0].payload.authorContinue.legacyContinuationRetirements).toEqual(retirements)
     if (saved) pending.resolve()
     else pending.reject(new Error('journal unavailable'))
     expect(await result).toBe(saved ? 'saved' : 'failed')

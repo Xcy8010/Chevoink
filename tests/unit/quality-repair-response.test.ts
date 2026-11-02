@@ -7,7 +7,7 @@ describe('explicit bounded quality retain proposals', () => {
       retainedFindings: [{ [identity]: 'b', reason: 'The original negation already supports the fact.' }] }, identity)
     expect(partitionQualityRepairResponse(response, ['a', 'b'])).toEqual({ patches: [{ id: 'a', replacement: '' }],
       retainedFindings: [{ id: 'b', reason: 'The original negation already supports the fact.' }],
-      counts: { returned: 2, missing: 0, unknown: 0, duplicate: 0 } })
+      conflicts: [], counts: { returned: 2, missing: 0, unknown: 0, duplicate: 0 } })
   })
   it.each(['findingId', 'key'] as const)('accepts all-retain without synthesizing a replacement for %s', identity => {
     const parsed = parseQualityRepairResponse({ patches: [], retainedFindings: [{ [identity]: 'a', reason: 'Keep the supported fact.' }] }, identity)
@@ -18,6 +18,8 @@ describe('explicit bounded quality retain proposals', () => {
     const parsed = parseQualityRepairResponse({ patches: [{ findingId: 'a', replacement: 'changed' }, { findingId: 'c', replacement: 'one' }, { findingId: 'c', replacement: 'two' }],
       retainedFindings: [{ findingId: 'a', reason: 'conflict' }, { findingId: 'foreign', reason: 'foreign' }] })
     expect(partitionQualityRepairResponse(parsed, ['a', 'b', 'c'])).toEqual({ patches: [], retainedFindings: [],
+      conflicts: [{ id: 'a', patches: [{ id: 'a', replacement: 'changed' }], retainedFindings: [{ id: 'a', reason: 'conflict' }] },
+        { id: 'c', patches: [{ id: 'c', replacement: 'one' }, { id: 'c', replacement: 'two' }], retainedFindings: [] }],
       counts: { returned: 5, missing: 1, unknown: 1, duplicate: 4 } })
   })
   it.each([

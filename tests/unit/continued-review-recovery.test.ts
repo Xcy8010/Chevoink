@@ -5,7 +5,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readContinuedReviewRecovery, readAuthorContinuedReviewUsageIds, readContinuedReviewDispatchWitness, readContinuedReviewRepairHandoff,
   continuedReviewAttemptKey, continuedReviewCallId } from '../../api/lib/agent/continued-review-recovery.js'
 import { hasReconciledQualityRequest } from '../../api/lib/agent/quality-format-recovery.js'
-const mocks = vi.hoisted(() => ({ rules: 'full rules', original: {} as Record<string, unknown>, bundle: {} as Record<string, unknown>, admission: null as null | { id: string; at: Date } }))
+const mocks = vi.hoisted(() => ({ rules: 'full rules', continuation: vi.fn(), original: {} as Record<string, unknown>, bundle: {} as Record<string, unknown>, admission: null as null | { id: string; at: Date } }))
+vi.mock('../../api/lib/agent/legacy-continuation-target.js', () => ({ readLegacyContinuationResolution: mocks.continuation }))
 vi.mock('../../api/lib/agent/original-request.js', () => ({ readOriginalTaskRequest: async () => mocks.original, originalTaskRunIds: async () => ['run'] }))
 vi.mock('../../api/lib/agent/quality-review-admission.js', () => ({ readQualityReviewAdmission: async () => mocks.admission }))
 vi.mock('../../api/lib/agent/humanity-quality.js', () => ({ HUMANITY_CRITIC_VERSION: 'current-test', buildHumanityQualityContext: async () => mocks.bundle,
@@ -63,7 +64,7 @@ function fixture(toolName: 'quality_analyze' | 'continuity_validate' = 'quality_
   return { tx, db, run, events, usage, reports, artifacts, findings, chapter, compilation, pending, subject, read, persist,
     snapshot: () => JSON.stringify({ run, events, usage, reports, compilation }) }
 }
-beforeEach(() => { vi.clearAllMocks(); mocks.rules = 'full rules' })
+beforeEach(() => { vi.clearAllMocks(); mocks.rules = 'full rules'; mocks.continuation.mockResolvedValue(null) })
 describe('cancelled quality format recovery admission', () => {
   function cancelledFixture(legacy = false) {
     const f = fixture()
@@ -120,6 +121,21 @@ describe('cancelled quality format recovery admission', () => {
     })
 })
 describe('ordinary Continue review retirement', () => {
+  it.each(['matching', 'missing', 'changed', 'old-admission'] as const)('legacy wrapper source retirement requires the current persisted admission: %s', async kind => {
+    const f = fixture()
+    const originalFind = f.db.agentRun.findFirst.getMockImplementation()!
+    f.db.agentRun.findFirst.mockImplementation(async input => 'sessionId' in (input.where ?? {}) ? { id: 'later-wrapper' } : originalFind(input))
+    const retirements = [{ sourceRunId: f.run.id, sourceTaskId: 'task', wrapperRunId: 'later-wrapper', wrapperTaskId: 'separate-task',
+      terminalEventId: 'later-terminal', manuscriptRevision: 0, calls: [{ callId: 'later-check', resultEventId: 'later-result' }], usageIds: ['later-unknown'] }]
+    mocks.continuation.mockResolvedValue({ source: f.run, retirements })
+    const authorContinue = (f.events[3].payload as Row).authorContinue as Row
+    if (kind !== 'missing') authorContinue.legacyContinuationRetirements = JSON.parse(JSON.stringify(retirements))
+    if (kind === 'changed') (authorContinue.legacyContinuationRetirements as Row[])[0].usageIds = ['unrelated']
+    if (kind === 'old-admission') authorContinue.eventId = 'older-pause'
+    const before = f.snapshot()
+    expect(await f.read()).toHaveLength(kind === 'matching' ? 1 : 0)
+    expect(f.snapshot()).toBe(before)
+  })
   it('preserves a historic retirement but cannot dispatch from a changed quality prompt context', async () => {
     const f = fixture(), [original] = await f.read()
     f.persist(original)

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ find: vi.fn(), count: vi.fn(), message: vi.fn(), execute: vi.fn(), active: vi.fn(() => false), prepare: vi.fn(),
+  resolveContinuation: vi.fn(), session: vi.fn(),
   activeRun: vi.fn(), catalog: vi.fn(),
   terminal: vi.fn(), runUpdate: vi.fn(), creditAccess: vi.fn(), tierRuntime: vi.fn(), goal: vi.fn(), binding: vi.fn(), receiptWait: vi.fn(),
   lockGoal: vi.fn(), activationSource: vi.fn(), reconcile: vi.fn(), resumeDurable: vi.fn(), pause: vi.fn(),
@@ -8,8 +9,13 @@ const mocks = vi.hoisted(() => ({ find: vi.fn(), count: vi.fn(), message: vi.fn(
 vi.mock('../../api/lib/agent/events.js', () => ({ prepareRunEventResume: mocks.prepare }))
 vi.mock('../../api/lib/prisma.js', () => ({
   DataAccessError: class extends Error { constructor(public status: number, public code: string, message: string) { super(message) } },
-  prisma: { aiModelConfig: { findFirst: mocks.catalog }, agentRunEvent: { findFirst: mocks.terminal }, $transaction: mocks.transaction, agentRun: { findFirst: mocks.find, count: mocks.count, update: mocks.runUpdate }, agentGoal: { findFirst: mocks.goal }, agentGoalExecution: { findUnique: mocks.binding }, agentMessage: { findFirst: mocks.message }, agentQueuedRequest: { findFirst: vi.fn(async () => null) }, agentExecutionOutbox: { findFirst: mocks.pause } },
+  prisma: { agentSession: { findFirst: mocks.session }, aiModelConfig: { findFirst: mocks.catalog }, agentRunEvent: { findFirst: mocks.terminal }, $transaction: mocks.transaction, agentRun: { findFirst: mocks.find, count: mocks.count, update: mocks.runUpdate }, agentGoal: { findFirst: mocks.goal }, agentGoalExecution: { findUnique: mocks.binding }, agentMessage: { findFirst: mocks.message }, agentQueuedRequest: { findFirst: vi.fn(async () => null) }, agentExecutionOutbox: { findFirst: mocks.pause } },
 }))
+vi.mock('../../api/lib/agent/legacy-continuation-target.js', () => ({
+  isLegacyContinuationRun: (run: { startRequest?: { prompt?: string } }) => run.startRequest?.prompt === '继续',
+  readLegacyContinuationResolution: mocks.resolveContinuation,
+}))
+vi.mock('../../api/lib/agent/goal-author-admission.js', () => ({ resolveGoalAuthorAdmission: async (_user: string, input: unknown) => ({ input }) }))
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: mocks.creditAccess, getModelTierRuntime: mocks.tierRuntime }))
 vi.mock('../../api/lib/agent/loop.js', () => ({ executeAgentRun: mocks.execute }))
 vi.mock('../../api/lib/agent/active-runs.js', () => ({ getActiveRun: mocks.activeRun, hasActiveRunInSession: mocks.active, countActiveRunsByUser: () => 0 }))
@@ -18,7 +24,7 @@ vi.mock('../../api/lib/agent/goal-activation.js', async importOriginal => ({ ...
 vi.mock('../../api/lib/agent/goal-activation-supervisor.js', () => ({ reconcileGoalActivation: mocks.reconcile }))
 vi.mock('../../api/lib/agent/runtime-resume.js', () => ({ resumeDurableTask: mocks.resumeDurable }))
 vi.mock('../../api/lib/agent/review-resume-readiness.js', () => ({ readReviewReceiptWait: mocks.receiptWait }))
-import { continueActivatedGoalRun, continueLoopRun } from '../../api/lib/agent/run-service.js'
+import { continueActivatedGoalRun, continueLoopRun, startLoopRun } from '../../api/lib/agent/run-service.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import * as writingScope from '../../api/lib/agent/writing-scope.js'
 const run = { id: 'run19', sessionId: 's', userId: 'u', novelId: 'n', chapterId: 'c19', status: 'paused', engine: 'loop', mode: 'build', inputSummary: 'truncated', modelTier: 'speed', reasoningEffort: 'high', customModelId: null }
@@ -34,6 +40,8 @@ beforeEach(() => {
   mocks.goal.mockResolvedValue(null)
   mocks.binding.mockResolvedValue(null)
   mocks.receiptWait.mockResolvedValue(null)
+  mocks.resolveContinuation.mockResolvedValue(null)
+  mocks.session.mockResolvedValue({ id: 's', userId: 'u', novelId: 'n', spawnedFromRunId: null })
   mocks.active.mockReturnValue(false)
   mocks.activeRun.mockReturnValue(undefined)
   mocks.count.mockResolvedValue(0)
@@ -60,6 +68,36 @@ function activatedFixture(durable = false) {
   return goal
 }
 describe('continue API exact target', () => {
+  it('a new bare Continue resumes the saved task instead of creating a new task or paid model configuration', async () => {
+    mocks.find.mockReset().mockResolvedValue(run)
+    expect(await startLoopRun('u', { sessionId: 's', novelId: 'n', mode: 'build', prompt: '继续' }, { humanOrigin: 'http' }))
+      .toMatchObject({ runId: run.id, status: 'running' })
+    expect(mocks.execute).toHaveBeenCalledOnce()
+    expect(mocks.execute.mock.calls[0][0]).toMatchObject({ runId: run.id, resume: true, authorContinue: { eventId: 'pause-72', afterSeq: 72 } })
+    expect(mocks.execute.mock.calls[0][0].prompt).toContain('写第19章')
+    expect(mocks.runUpdate).not.toHaveBeenCalled()
+  })
+  it('an authenticated read-only legacy Continue wrapper returns to the original run and keeps its saved state', async () => {
+    const source = { ...run, runtimeProtocolVersion: 0, taskRootId: null, currentTurn: 18, usage: { totalTokens: 5000 } }
+    const wrapper = { ...source, id: 'later-continue', currentTurn: 1, startRequest: { prompt: '继续' } }
+    const before = JSON.stringify([source, wrapper])
+    mocks.find.mockReset().mockImplementation(async args => args.where.id ? wrapper : { id: wrapper.id })
+    const retirements = [{ status: 'legacy_continuation_retired', wrapperRunId: wrapper.id, usageIds: ['old-unknown-usage'] }]
+    mocks.resolveContinuation.mockResolvedValue({ source, retirements })
+    expect(await continueLoopRun('u', wrapper.id)).toMatchObject({ runId: source.id, eventStartSeq: 72 })
+    expect(mocks.execute).toHaveBeenCalledOnce()
+    expect(mocks.execute.mock.calls[0][0]).toMatchObject({ runId: source.id, resume: true,
+      authorContinue: { legacyContinuationRetirements: retirements } })
+    expect(JSON.stringify([source, wrapper])).toBe(before)
+    expect(mocks.runUpdate).not.toHaveBeenCalled()
+  })
+  it('does not launch another paid checker when a legacy Continue cannot prove its original task', async () => {
+    mocks.find.mockReset().mockResolvedValue({ ...run, runtimeProtocolVersion: 0, taskRootId: null, startRequest: { prompt: '继续' } })
+    await expect(continueLoopRun('u', run.id)).rejects.toMatchObject({ code: 'CONTINUATION_SOURCE_UNCONFIRMED' })
+    expect(mocks.execute).not.toHaveBeenCalled()
+    expect(mocks.creditAccess).not.toHaveBeenCalled()
+    expect(mocks.tierRuntime).not.toHaveBeenCalled()
+  })
   it.each(['answered', 'different-call', 'unresolved-local'] as const)('uses only a matching fully resolved authenticated clarification before resume: %s', async kind => {
     const prompt = '只修改第5章这句话。'
     const taskSpec = buildTaskSpec({ runId: run.id, novelId: 'n', prompt, authorWritingProtocol: 2, localEditProtocol: 1 })

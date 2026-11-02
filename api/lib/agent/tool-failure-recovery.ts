@@ -14,6 +14,9 @@ export function toolRecoveryKey(action: string, code: string, args: unknown, fal
 export function toolFailureRecovery(code: string): { label: string; guidance: string } | undefined {
   const entries: Record<string, { label: string; guidance: string }> = {
     INVALID_ARGUMENTS: { label: '工具参数需要纠正', guidance: '本次输入未执行。按具体字段含义纠正参数；同一调用中的章节编号、全书位置和卷内位置必须一致，不能只修改说明文字或重复发送同一冲突输入。原授权、已保存结果和预算保留。' },
+    TASK_RESPONSE_WORK_PENDING: { label: '实际工作尚需原流程交付', guidance: '按本次回执列出的原待办、编译和已保存产物完成缺失步骤；计划落盘用plan_save，章节用chapter_bridge_get核对当前正文、必要检查与提交。保留已完成结果，未知请求先核对；不要重复task_respond、重新建任务或仅把待办标完来冒充完成。' },
+    QUALITY_TASK_TARGET_REQUIRED: { label: '质量检查尚未定位本任务新章', guidance: '按回执中的本任务真实编译和章节绑定核对目标；已有新章不重建，尚未保存正文时继续原写作步骤。不能回到历史旧章、自动改检查另一章或借其他任务的编译。' },
+    QUALITY_TARGET_AMBIGUOUS: { label: '质量检查的章节与编译不对应', guidance: '本次未调用检查模型。按回执中的同任务真实编译绑定核对chapterId；仅在原授权目标一致后重发正确配对，不能自动改检查另一章或借其他任务的编译。' },
     TASK_WAIT_TARGET_NOT_FOUND: { label: '等待窗口不存在或不属于当前作者', guidance: '本次未获得该窗口交付。任务身份和章节编译编号不是派生窗口编号；仅使用本任务实际派生工具返回的窗口编号。没有派生窗口就直接执行当前原任务，不能等待虚构窗口或把失败当作完成。' },
     TASK_WAIT_TARGET_INVALID: { label: '等待窗口身份无效', guidance: '不能等待当前窗口自身或把任务身份当作窗口身份。仅等待本任务实际派生且获授权的窗口；没有窗口时继续当前原任务的必要步骤。' },
     COMPILATION_NOT_FOUND: { label: '未找到本任务章节编译', guidance: '章节编号不是编译编号。使用本任务真实编译编号；本任务尚未准备时按冻结目标准备，再构建场景并保存正文。不要恢复历史旧章、猜编号或重复创建已存在编译。' },
@@ -30,7 +33,7 @@ export function toolFailureRecovery(code: string): { label: string; guidance: st
     CONTINUITY_REPORT_INCOMPLETE: { label: '连续性报告未完成', guidance: '报告尚未完整取得，正文与真实费用保留。已知格式失败可按当前授权继续检查；供应商结果或费用未知时先核对原请求。' },
     QUALITY_CHECK_REQUIRED: { label: '当前版本尚未完成人类感检查', guidance: '先完成当前正文的 quality_analyze，不能省略检查、引用旧版报告或宣称修订本身就是检查通过。' },
     AUTHOR_CHAPTER_SCOPE: { label: '章节目标或位置与原请求不符', guidance: '本次未执行，目标不符不表示任务已结束。核对原始请求和当前作品目录，仅在现有授权范围内纠正参数；全书位置与卷内位置不得混用。任务已暂停、结束或授权不匹配时不得继续。' },
-    SCOPE_NEEDS_INPUT: { label: '原任务缺少可证明的章节目标', guidance: '原请求的目标章节无法证明，本次未写入任何章节。用 ask_user 如实说明并请作者明确要处理的章节；在作者给出明确指令前不要按当前界面位置、历史记录或猜测的章节自行写入。作者在输入框新发写明章节的指令后，系统按新任务受理。' },
+    SCOPE_NEEDS_INPUT: { label: '原任务缺少可证明的章节目标', guidance: '原请求的目标章节无法证明，本次未写入任何章节。用ask_user只问一次要处理的具体章节并等待作者明确答复；原任务的缺失目标经受理后继续。不能按当前界面位置、历史记录或模型猜测写入，不能反复提问、重发准备参数或另建任务绕过。' },
     MEMORY_SOURCE_REQUIRED: { label: '记忆来源需要重新核对', guidance: '先用 chapter_read 读取来源章节，使用返回的真实 chapterId 和 revision，再提交逐字原文。不得猜测版本、删除来源字段或改成无来源候选来绕过校验。' },
     MEMORY_EVIDENCE_MISMATCH: { label: '记忆引用与原文不符', guidance: '重新读取来源正文，只引用实际存在的连续原文；摘要、改写和省略号拼接不是原文。找不到依据就保留未完成并向作者说明，不要修改正文来迁就记忆。' },
     MEMORY_DELETED: { label: '作者已删除此记忆', guidance: '不要重试、改名重建或恢复被删除卡片。保留删除状态，其他已授权工作可以继续；确需此记忆时请作者决定。' },

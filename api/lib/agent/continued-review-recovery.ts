@@ -164,7 +164,9 @@ async function readRecovery(tx: Prisma.TransactionClient, subject: Subject, pend
   if (!admission?.id.startsWith('author-continue:')) return recovered
   const novel = await tx.novel.findFirst({ where: { id: subject.novelId, authorId: subject.userId }, select: { manuscriptRevision: true } })
   const latest = await tx.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, sessionId: run.sessionId }, orderBy: { createdAt: 'desc' }, select: { id: true } })
-  if (!novel || !Number.isSafeInteger(run.manuscriptRevision) || run.manuscriptRevision !== novel.manuscriptRevision || latest?.id !== run.id
+  const continuation = latest?.id !== run.id ? await (await import('./legacy-continuation-target.js')).readLegacyContinuationResolution(tx, run) : null
+  const currentTask = latest?.id === run.id || continuation?.source.id === run.id
+  if (!novel || !Number.isSafeInteger(run.manuscriptRevision) || run.manuscriptRevision !== novel.manuscriptRevision || !currentTask
     || await tx.agentGoalExecution.findUnique({ where: { runId: run.id } })) return recovered
   const original = await readOriginalTaskRequest(tx, subject), ids = await originalTaskRunIds(tx, subject, original)
   if (!ids.includes(subject.runId) || !original.prompt?.trim() || original.parentRunId !== null) return recovered
@@ -176,6 +178,8 @@ async function readRecovery(tx: Prisma.TransactionClient, subject: Subject, pend
     && event.seq === Number(object(object(event.payload).authorContinue).afterSeq) + 1)
   const start = starts[0]
   if (!start || start.createdAt.getTime() !== admission.at.getTime()) return recovered
+  const savedRetirements = object(object(start.payload).authorContinue).legacyContinuationRetirements
+  if (continuation && (!Array.isArray(savedRetirements) || hash(savedRetirements) !== hash(continuation.retirements))) return recovered
   const terminalId = object(object(start.payload).authorContinue).eventId
   const terminal = history.find(event => event.id === terminalId && event.runId === subject.runId && ['run.paused', 'run.finished'].includes(event.type)
     && event.seq <= Number(object(object(start.payload).authorContinue).afterSeq))

@@ -1,5 +1,69 @@
 import { jsonrepair } from 'jsonrepair'
 
+/** Execution repair may change JSON syntax, never supply a missing value or
+ * close a partial business payload. Compare all non-comma tokens after repair. */
+function parseCompleteToolArgs(raw: string): unknown {
+  const firstObject = raw.indexOf('{'), firstArray = raw.indexOf('[')
+  const first = firstObject < 0 ? firstArray : firstArray < 0 ? firstObject : Math.min(firstObject, firstArray)
+  if (first < 0) throw new Error('工具参数结构不完整')
+  const last = raw.lastIndexOf(raw[first] === '{' ? '}' : ']')
+  if (last < first) throw new Error('工具参数结构不完整')
+  // Ignore prose/fence wrappers, not strings inside the actual argument object.
+  const suffix = raw.slice(last + 1)
+  if (/[{}[\]"':,]/.test(suffix)) throw new Error('工具参数尾部存在未完成业务字段')
+  const input = raw.slice(first, last + 1)
+  let normalized = ''
+  for (let index = 0; index < input.length; index++) {
+    const quote = input[index]
+    if (quote !== '"' && quote !== "'") { normalized += quote; continue }
+    let value = '', closed = false
+    for (index++; index < input.length; index++) {
+      const char = input[index]
+      if (char === quote) { closed = true; break }
+      if (char !== '\\') { value += char; continue }
+      const escaped = input[++index]
+      if (quote === "'" && escaped === "'") { value += "'"; continue }
+      const length = escaped === 'u' ? 5 : 1
+      if (!escaped || !'"\\/bfnrtu'.includes(escaped)
+        || escaped === 'u' && !/^[a-f0-9]{4}$/i.test(input.slice(index + 1, index + 5))) throw new Error('参数无法解析为 JSON')
+      value += JSON.parse('"\\' + input.slice(index, index + length) + '"') as string
+      index += length - 1
+    }
+    if (!closed) throw new Error('工具参数结构不完整')
+    normalized += JSON.stringify(value)
+  }
+  const tokens = (source: string): string[] => {
+    const result: string[] = [], stack: string[] = []
+    const pattern = /\s+|"(?:\\.|[^"\\])*"|true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|[{}[\]:,]|\S/g
+    let closed = false, previous = ''
+    for (const match of source.matchAll(pattern)) {
+      const token = match[0]
+      if (!token.trim()) continue
+      if (closed) throw new Error('参数包含多个或不完整的 JSON 对象')
+      if (token === '{' || token === '[') stack.push(token === '{' ? '}' : ']')
+      else if (token === '}' || token === ']') {
+        if (stack.pop() !== token) throw new Error('工具参数结构不完整')
+        closed = stack.length === 0
+      } else if (!stack.length) throw new Error('工具参数结构不完整')
+      if (token === ',') {
+        if (['{', '[', ':', ','].includes(previous)) throw new Error('工具参数存在缺失字段或数组项')
+        previous = token
+        continue
+      }
+      previous = token
+      if (token.startsWith('"')) result.push(JSON.stringify(['string', JSON.parse(token)]))
+      else if (/^(?:[{}[\]:]|true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)$/.test(token)) result.push(token)
+      else throw new Error('参数无法解析为 JSON')
+    }
+    if (!closed || stack.length) throw new Error('工具参数结构不完整')
+    return result
+  }
+  const before = tokens(normalized)
+  const repaired = jsonrepair(normalized)
+  if (JSON.stringify(before) !== JSON.stringify(tokens(repaired))) throw new Error('参数修复不能补造或改写业务内容')
+  return JSON.parse(repaired)
+}
+
 /** 容错 JSON 解析：模型生成长正文参数时最常见的三类毛病可自动修复，
  * 避免一整章内容因一个未转义换行符就全部作废重写：
  * 1. 字符串内部出现未转义的控制字符（真换行/制表符）
@@ -8,23 +72,7 @@ import { jsonrepair } from 'jsonrepair'
 export function parseToolArgsTolerant(raw: string, allowTruncation = true): unknown {
   // Normal calls stay linear and byte-for-byte intact. Repair full syntax before any legacy truncation fallback.
   try { return JSON.parse(raw) } catch { /* syntax repair below */ }
-  if (!allowTruncation) {
-    // Syntax repair may add commas/escapes, but cannot invent the end of an execution payload.
-    const stack: string[] = []
-    let quote = ''
-    for (let index = 0; index < raw.length; index++) {
-      const char = raw[index]
-      if (quote) {
-        if (char === '\\') index++
-        else if (char === quote) quote = ''
-      } else if (char === '"' || char === "'") quote = char
-      else if (char === '{' || char === '[') stack.push(char === '{' ? '}' : ']')
-      else if (char === '}' || char === ']') {
-        if (stack.pop() !== char) throw new Error('工具参数结构不完整')
-      }
-    }
-    if (quote || stack.length) throw new Error('工具参数结构不完整')
-  }
+  if (!allowTruncation) return parseCompleteToolArgs(raw)
   if (/[}\]]\s*$/.test(raw)) {
     try { return JSON.parse(jsonrepair(raw)) } catch { /* legacy compatibility below */ }
   }

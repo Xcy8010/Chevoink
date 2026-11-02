@@ -91,7 +91,15 @@ export async function assertTaskResponseEligible(tx: Prisma.TransactionClient,
   if (compilation || actualWork || unresolvedOperations || unfinishedSubtasks || runs.some(item => item.writingBindings !== null && item.writingBindings !== undefined
     || item.id !== subject.runId && ['queued', 'running', 'awaiting_approval'].includes(item.status))
     || todos.some(item => ['pending', 'in_progress'].includes(item.status))) {
-    throw new DataAccessError(409, 'TASK_RESPONSE_WORK_PENDING', '本任务已开始章节工作或仍有实际待办，不能改为仅答复；继续核对原正文、当前检查和提交结果。')
+    const pending = todos.filter(item => ['pending', 'in_progress'].includes(item.status))
+    const next = [
+      pending.length ? `尚未完成的原待办：${pending.slice(0, 5).map(item => item.content).join('；')}。` : '',
+      compilation ? `本任务已有章节编译${compilation.id}，用chapter_bridge_get读取当前目标及缺失的正文、必要检查或提交步骤；复用有效结果，不重建编译。` : '',
+      actualWork && !compilation ? '本任务已经执行计划或正文等实际工作，先核对工具回执并完成原目标；计划未保存用plan_save，已有计划用plan_read核对后只补缺失内容。' : '',
+      unfinishedSubtasks ? '仍有未终态的本任务子工作，读取其真实状态后继续或等待，不创建替代任务。' : '',
+      unresolvedOperations ? '已有执行操作或待核回执须按原主流程交付；未知结果先核对，不重复请求。' : '',
+    ].filter(Boolean).join('')
+    throw new DataAccessError(409, 'TASK_RESPONSE_WORK_PENDING', `当前不能用task_respond提前收尾。${next}继续原主流程；完成原目标后正常交付，不反复调用task_respond，也不把待办标记完成来绕过实际工作。`)
   }
   return proof
 }

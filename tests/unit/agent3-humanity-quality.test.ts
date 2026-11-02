@@ -158,7 +158,7 @@ describe('质量检查工具与编号配对失败回执', () => {
     const conflict = new DataAccessError(409, 'QUALITY_TARGET_AMBIGUOUS', 'chapterId 与 compilationId 不对应')
     const resolve = vi.spyOn(humanityQuality, 'resolveQualityChapterTarget').mockRejectedValue(conflict)
     expect(await qualityAnalyzeTool.execute(ctx, { chapterId: 'target', compilationId: 'compiler' })).toEqual({
-      outcome: 'failed', summary: '质量检查目标不匹配', output: conflict.message,
+      outcome: 'failed', failureCode: 'QUALITY_TARGET_AMBIGUOUS', summary: '质量检查目标不匹配', output: conflict.message,
     })
     expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ userId: 'u', novelId: 'n', runId: 'r',
       chapterId: 'target', compilationId: 'compiler', fallbackChapterId: 'editor-chapter' }))

@@ -7,9 +7,11 @@ import { continuityReassessmentRequest, legacyContinuityAssessmentKey } from '..
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { createHash } from 'node:crypto'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { readLegacyContinuationResolution } from '../../api/lib/agent/legacy-continuation-target.js'
 
 describe.runIf(available)('ordinary Continue separates historical unknown billing journals from new paid plans', () => {
-  it.each(['quality', 'continuity', 'no-author', 'post-admission', 'correction', 'correction-no-claim', 'correction-unknown-source', 'correction-late-claim',
+  it.each(['quality', 'quality-wrapper', 'quality-wrapper-missing', 'quality-wrapper-changed', 'continuity', 'no-author', 'post-admission', 'correction', 'correction-no-claim', 'correction-unknown-source', 'correction-late-claim',
     'correction-rejected-source', 'correction-charged-rejection-source', 'correction-reserved-rejection-source',
     'reassessment', 'reassessment-no-claim', 'reassessment-no-first-response', 'reassessment-unknown-first', 'reassessment-late-claim', 'reassessment-extra-attempt'] as const)('%s uses authenticated PostgreSQL call/admission/input evidence', scenario => fixture(async f => {
     try {
@@ -81,11 +83,32 @@ describe.runIf(available)('ordinary Continue separates historical unknown billin
           targetType: 'story_compilation', targetId: compilation.id, providerType: 'text', providerMode: 'custom', modelName: 'isolated-no-provider', action: 'agent3ContinuityCriticOutputRecovery',
           requestTokens: 100, responseTokens: 30, usageSource: 'reported', billingStatus: 'settled', durationMs: 10, createdAt: new Date(startAt.getTime() + 20) } })
       }
+      if (scenario.startsWith('quality-wrapper')) {
+        const spec = buildTaskSpec({ runId: 'wrapper', novelId: f.novelId, chapterId: f.chapterId, prompt: '继续', authorWritingProtocol: 2 })
+        const wrapper = await prisma.agentRun.create({ data: { userId: f.userId, novelId: f.novelId, sessionId: f.sessionId,
+          chapterId: f.chapterId, status: 'paused', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop',
+          manuscriptRevision: 0, taskRootId: null, runtimeProtocolVersion: 0, startRequest: { prompt: '继续' }, taskSpec: runtimeJson(spec).value,
+          usage: { checkpoint: { pendingReviews: [{ chapterId: f.chapterId, revision: 1, toolName: 'quality_analyze', callId: 'wrapper-check', compilationId: null }] } } } })
+        await prisma.agentMessage.create({ data: { runId: wrapper.id, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: '继续' }] } })
+        await prisma.agentRunEvent.createMany({ data: [
+          { runId: wrapper.id, seq: 1, type: 'tool.call', payload: { callId: 'wrapper-check', toolName: 'quality_analyze', args: { chapterId: f.chapterId } } },
+          { runId: wrapper.id, seq: 2, type: 'tool.result', payload: { callId: 'wrapper-check', toolName: 'quality_analyze', ok: false, failureCode: 'AI_PROVIDER_TIMEOUT' } },
+          { runId: wrapper.id, seq: 3, type: 'run.paused', payload: {} },
+        ] })
+        const source = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
+        const resolution = await prisma.$transaction(tx => readLegacyContinuationResolution(tx, source))
+        expect(resolution?.source.id).toBe(f.runId)
+        const start = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId, seq: 4 } })
+        const retirements = JSON.parse(JSON.stringify(resolution!.retirements))
+        if (scenario === 'quality-wrapper-changed') retirements[0].wrapperTaskId = 'unrelated-task'
+        await prisma.agentRunEvent.update({ where: { id: start.id }, data: { payload: { authorContinue: { eventId: pause.id, afterSeq: 3,
+          ...(scenario === 'quality-wrapper-missing' ? {} : { legacyContinuationRetirements: retirements }) } } } })
+      }
       const beforeUsage = await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: usage.id } })
       const beforeAllUsage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
       const beforeRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
       const recovered = await prisma.$transaction(tx => readContinuedReviewRecovery(tx, f, [pending]))
-      expect(recovered).toHaveLength(scenario === 'quality' ? 1 : 0)
+      expect(recovered).toHaveLength(scenario === 'quality' || scenario === 'quality-wrapper' ? 1 : 0)
       if (recovered.length) {
         const first = recovered[0]
         const allUsageIds = knownFirstId ? expect.arrayContaining([usage.id, knownFirstId]) : [usage.id]

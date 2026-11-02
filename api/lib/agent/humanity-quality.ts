@@ -304,14 +304,20 @@ export async function resolveQualityChapterTarget(
         select: { chapterId: true }, take: 2,
       })
       if (targets.length === 1 && targets[0].chapterId) return targets[0].chapterId
-      throw new DataAccessError(409, 'QUALITY_TASK_TARGET_REQUIRED', '当前任务要求写下一章，请先准备并写入本任务的新章，再检查质量；不能回到历史旧章重复修订。')
+      const bound = input.compilationId ? await db.storyCompilation.findFirst({
+        where: { userId: input.userId, novelId: input.novelId, status: { in: ['active', 'completed'] }, ...scope, id: input.compilationId },
+        select: { chapterId: true },
+      }) : null
+      throw new DataAccessError(409, 'QUALITY_TASK_TARGET_REQUIRED',
+        `当前任务要求检查本任务新章，传入目标未匹配，本次未调用模型。${bound?.chapterId ? `该同任务编译compilationId=${input.compilationId}实际绑定chapterId=${bound.chapterId}；用chapter_read核对原授权新章，再提交准确配对，不自动改检查另一章。` : '先用chapter_bridge_get核对本任务编译；尚无正文时按原冻结目标准备并保存，不回到历史旧章重复修订。'}`)
     }
   }
   if (input.chapterId) {
     if (input.compilationId) {
       const compilation = await db.storyCompilation.findFirst({ where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, status: { in: ['active', 'completed'] },
         ...(compilationScope ?? await qualityCompilationScope(db, input.userId, input.novelId, input.runId)) }, select: { chapterId: true } })
-      if (!compilation || compilation.chapterId !== input.chapterId) throw new DataAccessError(409, 'QUALITY_TARGET_AMBIGUOUS', 'chapterId 与 compilationId 不对应或编译不属于本任务；章节编号与编译编号不可混用。独立检查既有章只传 chapter_read 返回的 chapterId，无需准备编译。')
+      if (!compilation || compilation.chapterId !== input.chapterId) throw new DataAccessError(409, 'QUALITY_TARGET_AMBIGUOUS',
+        `chapterId 与 compilationId 不对应或编译不属于本任务，本次未调用模型。${compilation?.chapterId ? `该同任务编译compilationId=${input.compilationId}实际绑定chapterId=${compilation.chapterId}；先用chapter_read核对该目标与原请求，只在目标一致时提交准确配对，不自动改检查另一章。` : '用chapter_bridge_get读取本任务真实编译；不要借其他任务或猜测目标。'}独立检查既有章只传chapter_read返回的chapterId，无需准备编译。`)
     }
     return input.chapterId
   }

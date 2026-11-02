@@ -20,6 +20,7 @@ import { compilerContinuityCoverage } from '../../api/lib/agent/compiler-continu
 import { hasCommittedTaskChapter } from '../../api/lib/agent/humanity-quality.js'
 import { chapterBridgeCommitTool, chapterBridgeGetTool, continuityValidateTool, storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { activeChapterScope } from '../../api/lib/data/internal.js'
+import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 
 const ctx = { userId: 'u', novelId: 'n', runId: 'new-run', sessionId: 'session', chapterId: 'old31', callId: 'call', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced', signal: new AbortController().signal, emit: vi.fn() } as ToolContext
 const spec = (prompt: string) => {
@@ -330,4 +331,41 @@ describe('story compiler task identity', () => {
     expect(db.storyCompilation.create).not.toHaveBeenCalled()
     expect(await buildStoryCompilerDigest('u', 'n', null)).toBeNull()
   })
+})
+
+
+describe('tool target recovery stays within the original grant', () => {
+  it('rejects an unresolved prepare before target queries or compilation effects', async () => {
+    const current = await db.agentRun.findFirst({ where: { id: ctx.runId } })
+    const unresolved = spec('单独写这章内容')
+    unresolved.scope.writing = { ...unresolved.scope.writing, kind: 'needs_input', targets: [] } as never
+    db.agentRun.findFirst.mockResolvedValue({ ...current, chapterId: null, startRequest: { prompt: '单独写这章内容' }, taskSpec: unresolved })
+    const result = await storyCompilerPrepareTool.execute(ctx, { targetOrderIndex: 1, intentSummary: '写本章' })
+    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'SCOPE_NEEDS_INPUT' })
+    expect(result.output).toContain('ask_user只问一次')
+    expect(db.chapter.findFirst).not.toHaveBeenCalled()
+    expect(db.storyCompilation.create).not.toHaveBeenCalled()
+  })
+  it.each([true, false])('returns the verified compiler binding only when it belongs to this task: owned=%s', async owned => {
+    const current = await db.agentRun.findFirst({ where: { id: ctx.runId } })
+    db.agentRun.findFirst.mockResolvedValue({ ...current, startRequest: { prompt: '修改本章' }, taskSpec: spec('修改本章') })
+    db.storyCompilation.findFirst.mockResolvedValue(owned ? { chapterId: 'actual-target' } : null)
+    const result = await qualityAnalyzeTool.execute(ctx, { chapterId: 'wrong-target', compilationId: 'own-compiler' })
+    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'QUALITY_TARGET_AMBIGUOUS' })
+    expect(result.output.includes('chapterId=actual-target')).toBe(owned)
+    expect(db.storyCompilation.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ userId: 'u', novelId: 'n', id: 'own-compiler' }) }))
+    expect(db.storyCompilation.create).not.toHaveBeenCalled()
+    expect(db.aiUsageLog.count).not.toHaveBeenCalled()
+  })
+})
+
+it('locates an owned next-chapter compiler in a rejected quality pairing without checking a substitute chapter', async () => {
+  db.storyCompilation.findMany.mockResolvedValue([])
+  db.storyCompilation.findFirst.mockResolvedValue({ chapterId: 'own32' })
+  const result = await qualityAnalyzeTool.execute(ctx, { chapterId: 'old31', compilationId: 'own-compiler' })
+  expect(result).toMatchObject({ outcome: 'failed', failureCode: 'QUALITY_TASK_TARGET_REQUIRED' })
+  expect(result.output).toContain('compilationId=own-compiler实际绑定chapterId=own32')
+  expect(result.output).toContain('不自动改检查另一章')
+  expect(db.storyCompilation.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ userId: 'u', novelId: 'n', id: 'own-compiler' }) }))
+  expect(db.aiUsageLog.count).not.toHaveBeenCalled()
 })

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { prisma, DataAccessError } from '../../api/lib/prisma.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
@@ -70,6 +71,39 @@ describe('one ordinary continuity report', () => {
     expect(correctContinuitySourceIds(opinions, [0], '{"corrections":[]}')).toEqual(opinions)
     expect(correctContinuitySourceIds(opinions, [0], JSON.stringify({ corrections: [{ index: 0, evidence: opinion().evidence }, { index: 0, evidence: opinion('other').evidence }] }))).toEqual(opinions)
   })
+  it('mechanically reads an entire comma-separated finding collection without splitting quoted commas or braces', () => {
+    const opinions = [opinion(), { ...opinion(), explanation: '原意见含有逗号, 与大括号 }{ 以及 "引号"，仍是数据。' }]
+    const raw = opinions.map(item => JSON.stringify(item)).join(',\n')
+    expect(() => JSON.parse(raw)).toThrow()
+    expect(inspectContinuityOpinions(raw)).toMatchObject({ structured: true, opinions })
+  })
+  it.each(['truncated', 'duplicate-key', 'incomplete-row', 'multiple-reports', 'empty'] as const)('does not reconstruct a %s finding collection', kind => {
+    const valid = JSON.stringify(opinion())
+    const raw = kind === 'truncated' ? valid + ',' + valid.slice(0, -1)
+      : kind === 'duplicate-key' ? valid.replace('{', '{"signal":"object",') + ',' + valid
+        : kind === 'incomplete-row' ? valid + ',{"signal":"object"}'
+          : kind === 'multiple-reports' ? '{"findings":[]},{"findings":[]}' : ''
+    expect(inspectContinuityOpinions(raw).structured).toBe(false)
+    expect(inspectContinuityOpinions(raw).opinions).toEqual([])
+  })
+  it('mechanically separates the exact echoed response schema from all four actual findings using the existing final brace', () => {
+    const schema = z.toJSONSchema(continuityReportResponseSchema, { io: 'input' })
+    const opinions = Array.from({ length: 4 }, (_, index) => ({ ...opinion(), explanation: '实际合成意见' + index }))
+    const raw = JSON.stringify(schema) + ',"findings":' + JSON.stringify(opinions) + '}'
+    expect(() => JSON.parse(raw)).toThrow()
+    expect(() => JSON.parse('[' + raw + ']')).toThrow()
+    expect(inspectContinuityOpinions(raw)).toMatchObject({ structured: true, opinions })
+  })
+  it.each(['schema-only', 'examples-only', 'foreign-schema', 'extra-field', 'duplicate-key', 'truncated', 'missing-field'] as const)(
+    'does not manufacture schema-echo findings from %s', kind => {
+      const schema = z.toJSONSchema(continuityReportResponseSchema, { io: 'input' })
+      const metadata = kind === 'foreign-schema' ? { ...schema, additionalProperties: true }
+        : kind === 'examples-only' ? { ...schema, examples: [{ findings: [opinion()] }] } : schema
+      const findings = kind === 'missing-field' ? [{ signal: 'object' }] : [opinion()]
+      const raw = JSON.stringify(metadata) + (kind === 'schema-only' || kind === 'examples-only' ? '}'
+        : ',"findings":' + JSON.stringify(findings) + (kind === 'duplicate-key' ? ',"findings":[]}' : kind === 'extra-field' ? ',"extra":true}' : kind === 'truncated' ? '' : '}'))
+      expect(inspectContinuityOpinions(raw)).toMatchObject({ structured: false, opinions: [] })
+    })
   it('retains a recognizable opinion with missing source data and rejects a format recovery that deletes or downgrades it', () => {
     const original = { ...opinion(), evidence: undefined }
     expect(inspectContinuityOpinions(JSON.stringify({ findings: [original] })).opinions).toEqual([{ ...original, evidence: [] }])
@@ -183,6 +217,18 @@ function runnerFixture() {
   return { chapter, compilation, artifacts, fees, operations, ctx, controller, requests, dispatch, report, sessionRead }
 }
 
+function repairFixture() {
+  const f = runnerFixture()
+  f.ctx.creativeFreedom = 'balanced'
+  vi.spyOn(guard, 'readChapterReviewReadiness').mockResolvedValue(null)
+  vi.spyOn(guard, 'probeChapterReviewRevision').mockResolvedValue({ open: true })
+  vi.spyOn(humanity, 'buildHumanityQualityContext').mockImplementation(async () => ({ chapter: { ...f.chapter, novel: {} }, profiles: [], anchors: [], recentChapters: [], chapterWritingBackground: [], originalRequest: '检查并修复本章' } as never))
+  f.chapter.content = '合成甲句。合成乙句。合成丙句。合成丁句。'
+  const sources = buildQualityEvidenceSources(identity, f.chapter.content)
+  const opinions = sources.entries.map((entry, index) => ({ ...opinion(entry.id.slice(0, 13)), explanation: '合成意见' + index }))
+  return { ...f, sources, opinions }
+}
+
 describe('known failure recovery preserves report and paid evidence', () => {
   it.each([true, false])('runs a fresh check after a cancelled unknown report (old complete=%s), without laundering its raw or repair receipt', async complete => {
     const f = runnerFixture()
@@ -241,6 +287,126 @@ describe('known failure recovery preserves report and paid evidence', () => {
     expect(generate).toHaveBeenCalledOnce()
     expect(f.report()).toMatchObject({ complete: true, billingKnown: true, rawResponses: ['{"findings":[]}'], usageIds: ['legacy-fee'] })
     expect(f.chapter.revision).toBe(4); expect(f.chapter.content).toBe(body)
+  })
+  it.each([false, true])('uses a complete known empty raw report despite a later non-report response (wrapped=%s)', async wrapped => {
+    const f = runnerFixture(), raw = JSON.stringify(wrapped ? { report: { findings: [] } } : { findings: [] })
+    await reviewContinuity(f.ctx, { compilationId: 'comp' }, { allowRepair: false, dispatch: f.dispatch(() => raw) })
+    const saved = f.report()
+    saved.complete = false; saved.rawResponses.push('{"corrections":[]}')
+    const rawBefore = [...saved.rawResponses], feesBefore = structuredClone(f.fees)
+    const dispatch = vi.fn(async () => { throw Error('The complete original report must be reused without another model request') })
+    const result = await reviewContinuity({ ...f.ctx, callId: 'local-report-recovery' }, { compilationId: 'comp' }, { allowRepair: false, dispatch })
+    expect(result).toMatchObject({ reviewCompleted: true, reviewOutcome: 'complete' })
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(f.report()).toMatchObject({ complete: true, billingKnown: true, opinions: [], findings: [], rawResponses: rawBefore, usageIds: ['fee1'] })
+    expect(f.fees).toEqual(feesBefore)
+  })
+  it('recovers every finding from two stored complete comma-separated raw collections with no new request', async () => {
+    const f = repairFixture(); f.ctx.creativeFreedom = 'stable'
+    const raw = f.opinions.map(item => JSON.stringify(item)).join(',')
+    await reviewContinuity(f.ctx, { compilationId: 'comp' }, { allowRepair: false, dispatch: f.dispatch(() => raw) })
+    const saved = f.report()
+    Object.assign(saved, { complete: false, opinions: [], findings: [], rawResponses: [raw, raw], usageIds: ['fee1', 'fee2'] })
+    f.fees.push({ ...f.fees[0], id: 'fee2' })
+    const feesBefore = structuredClone(f.fees)
+    const dispatch = vi.fn(async () => { throw Error('Already obtained complete findings must be decoded locally') })
+    const result = await reviewContinuity({ ...f.ctx, callId: 'recover-complete-finding-collection' }, { compilationId: 'comp' }, { allowRepair: false, dispatch })
+    expect(result).toMatchObject({ reviewCompleted: true, reviewOutcome: 'decision_required' })
+    expect(f.report()).toMatchObject({ complete: true, opinions: f.opinions, findings: { length: 4 }, rawResponses: [raw, raw], usageIds: ['fee1', 'fee2'] })
+    expect(f.report().history?.at(-1)).toMatchObject({ complete: false, opinions: [], rawResponses: [raw, raw] })
+    expect(f.fees).toEqual(feesBefore); expect(dispatch).not.toHaveBeenCalled()
+    expect(f.chapter.revision).toBe(4)
+  })
+  it('recovers four actual findings from the stored schema-echo envelope failure without buying another response', async () => {
+    const f = repairFixture(); f.ctx.creativeFreedom = 'stable'
+    const schema = z.toJSONSchema(continuityReportResponseSchema, { io: 'input' })
+    const raw = JSON.stringify(schema) + ',"findings":' + JSON.stringify(f.opinions) + '}'
+    await reviewContinuity(f.ctx, { compilationId: 'comp' }, { allowRepair: false, dispatch: f.dispatch(() => raw) })
+    const saved = f.report()
+    Object.assign(saved, { complete: false, opinions: [], findings: [], rawResponses: [raw, raw], usageIds: ['fee1', 'fee2'] })
+    f.fees.push({ ...f.fees[0], id: 'fee2' })
+    const feesBefore = structuredClone(f.fees)
+    const dispatch = vi.fn(async () => { throw Error('The already complete actual findings must be decoded locally') })
+    const result = await reviewContinuity({ ...f.ctx, callId: 'recover-schema-echo-report' }, { compilationId: 'comp' }, { allowRepair: false, dispatch })
+    expect(result).toMatchObject({ reviewCompleted: true, reviewOutcome: 'decision_required' })
+    expect(f.report()).toMatchObject({ complete: true, opinions: f.opinions, findings: { length: 4 }, rawResponses: [raw, raw], usageIds: ['fee1', 'fee2'] })
+    expect(f.report().history?.at(-1)).toMatchObject({ complete: false, opinions: [], rawResponses: [raw, raw] })
+    expect(f.fees).toEqual(feesBefore); expect(dispatch).not.toHaveBeenCalled()
+    expect(f.chapter.revision).toBe(4)
+  })
+  it('keeps every conflicting patch/retain proposal from the four-opinion response without writing or buying another repair', async () => {
+    const f = repairFixture(), write = vi.spyOn(mutation, 'updateOwnedChapterAtRevision')
+    const repair = JSON.stringify({ patches: f.opinions.map((_, index) => ({ findingId: String(index), replacement: '替换' + index })),
+      retainedFindings: f.opinions.map((_, index) => ({ findingId: String(index), reason: '原保留理由' + index })) })
+    const result = await reviewContinuity(f.ctx, { compilationId: 'comp' }, { dispatch: f.dispatch(action => action === 'agent3ContinuityRevision' ? repair : JSON.stringify({ findings: f.opinions })) })
+    expect(result).toMatchObject({ reviewCompleted: true, reviewOutcome: 'decision_required', summary: '连续性报告已保存 · 自动修订待核对' })
+    expect(result.outcome).not.toBe('failed')
+    expect(f.report().opinions).toEqual(f.opinions)
+    expect(f.report().findings).toHaveLength(4)
+    expect(f.report().retainedProposals).toEqual([])
+    expect(f.report().repairUnresolved).toEqual(f.opinions.map((_, index) => ({ findingId: String(index),
+      reason: '同一编号返回了重复或互相冲突的修订/保留提议，未自动选择或应用。', retainedReasons: ['原保留理由' + index] })))
+    for (const index of [0, 1, 2, 3]) expect(result.output).toContain('原保留理由' + index)
+    expect(write).not.toHaveBeenCalled(); expect(f.chapter.revision).toBe(4)
+    const rawBefore = [...f.report().rawResponses], feesBefore = structuredClone(f.fees)
+    const oldFailure = { outcome: 'failed' as const, failureCode: 'CONTINUITY_REPAIR_FAILED', output: '原自动修订失败回执', summary: '连续性报告已保存 · 自动修订未应用' }
+    f.report().repairResult = oldFailure; f.report().repairFailure = '修订回复未完整处理当前意见，正文未改动。'
+    delete f.report().repairUnresolved
+    const dispatch = vi.fn(async () => { throw Error('The existing complete repair raw must not be repurchased') })
+    const recovered = await reviewContinuity({ ...f.ctx, callId: 'recover-known-raw' }, { compilationId: 'comp' }, { dispatch })
+    expect(recovered).toMatchObject({ reviewCompleted: true, reviewOutcome: 'decision_required' })
+    expect(recovered.outcome).not.toBe('failed')
+    expect(f.report().history?.at(-1)?.repairResult).toEqual(oldFailure)
+    expect(f.report().repairUnresolved).toHaveLength(4)
+    expect(f.report().rawResponses).toEqual(rawBefore); expect(f.fees).toEqual(feesBefore)
+    expect(dispatch).not.toHaveBeenCalled(); expect(write).not.toHaveBeenCalled()
+    expect(f.requests).toEqual(['agent3ContinuityCritic', 'agent3ContinuityRevision'])
+  })
+  it.each(['unknown-billing', 'incomplete-response'] as const)('does not use cached conflict recovery to bypass %s', async state => {
+    const f = repairFixture(), write = vi.spyOn(mutation, 'updateOwnedChapterAtRevision')
+    const repair = JSON.stringify({ patches: [{ findingId: '0', replacement: '合成替换。' }], retainedFindings: [{ findingId: '0', reason: '保留意见。' }] })
+    await reviewContinuity(f.ctx, { compilationId: 'comp' }, { dispatch: f.dispatch(action => action === 'agent3ContinuityRevision' ? repair : JSON.stringify({ findings: f.opinions })) })
+    const oldFailure = { outcome: 'failed' as const, failureCode: 'CONTINUITY_REPAIR_FAILED', output: '原失败真实回执' }
+    f.report().repairResult = oldFailure
+    if (state === 'unknown-billing') {
+      f.report().billingKnown = false
+      Object.assign(f.fees[1], { usageSource: 'unknown', billingStatus: 'pending_usage', requestTokens: null, responseTokens: null, reservedCreditMilli: 10 })
+    } else f.report().incompleteResponses = [1]
+    const rawBefore = [...f.report().rawResponses], feesBefore = structuredClone(f.fees)
+    const dispatch = vi.fn(async () => { throw Error('Unknown or incomplete responses cannot authorize another request') })
+    const result = reviewContinuity({ ...f.ctx, callId: 'guarded-cached-recovery' }, { compilationId: 'comp' }, { dispatch })
+    if (state === 'unknown-billing') await expect(result).rejects.toMatchObject({ code: 'AI_PROVIDER_BILLING_UNCONFIRMED' })
+    else await expect(result).resolves.toEqual(oldFailure)
+    expect(f.report().rawResponses).toEqual(rawBefore); expect(f.fees).toEqual(feesBefore)
+    expect(dispatch).not.toHaveBeenCalled(); expect(write).not.toHaveBeenCalled()
+    expect(f.chapter.revision).toBe(4)
+  })
+  it('returns partial retain proposals and keeps every omitted original opinion pending without claiming a repair', async () => {
+    const f = repairFixture(), write = vi.spyOn(mutation, 'updateOwnedChapterAtRevision')
+    const repair = JSON.stringify({ patches: [], retainedFindings: [{ findingId: '0', reason: '第一条暂保留待核对。' }] })
+    const result = await reviewContinuity(f.ctx, { compilationId: 'comp' }, { dispatch: f.dispatch(action => action === 'agent3ContinuityRevision' ? repair : JSON.stringify({ findings: f.opinions })) })
+    expect(result).toMatchObject({ reviewCompleted: true, reviewOutcome: 'decision_required', summary: '连续性报告已保存 · 自动修订待核对' })
+    expect(f.report().retainedProposals).toEqual([{ findingId: '0', reason: '第一条暂保留待核对。' }])
+    expect(f.report().repairUnresolved?.map(item => item.findingId)).toEqual(['1', '2', '3'])
+    expect(f.report().opinions).toEqual(f.opinions); expect(f.report().findings).toHaveLength(4)
+    expect(result.output).toContain('未当作已处理或已修复')
+    expect(write).not.toHaveBeenCalled(); expect(f.chapter.revision).toBe(4)
+    expect(f.requests).toEqual(['agent3ContinuityCritic', 'agent3ContinuityRevision'])
+  })
+  it('applies only an unambiguous actual patch while conflicting and missing findings remain unresolved', async () => {
+    const f = repairFixture(), before = f.chapter.content
+    const repair = JSON.stringify({ patches: [{ findingId: '0', replacement: '合成甲句已修订。' }, { findingId: '1', replacement: '不应应用的冲突修改。' }],
+      retainedFindings: [{ findingId: '1', reason: '第二条保留理由与补丁冲突。' }] })
+    const write = vi.spyOn(mutation, 'updateOwnedChapterAtRevision').mockImplementation(async (_ctx, _expected, data) => { Object.assign(f.chapter, data, { revision: 5 }); return { ...f.chapter } as never })
+    vi.spyOn(internal, 'recalculateNovelStats').mockResolvedValue(undefined)
+    vi.spyOn(flags, 'isAgent2FeatureEnabled').mockReturnValue(false)
+    const result = await reviewContinuity(f.ctx, { compilationId: 'comp' }, { dispatch: f.dispatch(action => action === 'agent3ContinuityRevision' ? repair : JSON.stringify({ findings: f.opinions })) })
+    expect(result).toMatchObject({ reviewCompleted: false, reviewOutcome: 'stale', display: { kind: 'chapterDiff', revision: 5 } })
+    expect(write).toHaveBeenCalledOnce()
+    expect(f.chapter.content).toBe('合成甲句已修订。' + before.slice(f.sources.entries[0].end))
+    expect(f.report().repairUnresolved?.map(item => item.findingId)).toEqual(['1', '2', '3'])
+    expect(f.report().opinions).toEqual(f.opinions)
+    expect(result.output).toContain('需复查最终版')
   })
   it('resumes the same admitted native call interrupted before its first provider registration', async () => {
     const f = runnerFixture(), snapshot = await buildContinuitySnapshot(f.ctx, { compilationId: 'comp' })

@@ -5,7 +5,8 @@ import { savedRunUsageSchema } from './checkpoint.js'
 import { syncBuiltinSkillCatalog } from './skills/service.js'
 import { readAuthorEnded } from './author-ended.js'
 import { readRunOutcome } from './run-outcome.js'
-import { hasAuthorEnded } from './completion-guard.js'
+import { hasAuthorEnded, isContinuationRequest } from './completion-guard.js'
+import { isLegacyContinuationRun, readLegacyContinuationResolution, type LegacyContinuationRetirement } from './legacy-continuation-target.js'
 import type { Response } from 'express'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
@@ -376,6 +377,16 @@ export async function startLoopRunLocked(
   }
 
   await assertManagedAttachmentsAccess(input.attachments, userId)
+
+  // A plain human Continue reuses the saved contract, progress and budget.
+  if (options.humanOrigin === 'http' && !options.goal && !options.queuedRequest && !session.spawnedFromRunId
+    && !input.selection && !input.attachments?.length && isContinuationRequest(input.prompt)) {
+    const previous = await prisma.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, sessionId: session.id }, orderBy: { createdAt: 'desc' } })
+    if (previous && ['paused', 'failed', 'running', 'awaiting_approval'].includes(previous.status)) {
+      return continueLoopRunLocked(userId, previous.id, input.modelSelectionExplicit
+        ? { modelTier: input.modelTier, customModelId: input.customModelId, reasoningEffort: input.reasoningEffort } : undefined)
+    }
+  }
 
   if (steering) await assertManagedAttachmentsAccess(steering.attachments, userId)
 
@@ -1044,7 +1055,14 @@ async function continueLoopRunLocked(
   model?: ContinueLoopRunModelSelection,
   activation?: { goalId: string; epoch: bigint },
 ): Promise<StartAgentLoopRunResponse> {
-  const run = await findOwnedLoopRun(userId, runId)
+  let run = await findOwnedLoopRun(userId, runId)
+  let continuationRetirements: LegacyContinuationRetirement[] = []
+  if (!activation && !run.taskRootId && run.runtimeProtocolVersion === 0 && isLegacyContinuationRun(run)) {
+    const resolution = await prisma.$transaction(tx => readLegacyContinuationResolution(tx, run))
+    if (!resolution) throw new DataAccessError(409, 'CONTINUATION_SOURCE_UNCONFIRMED', '这条“继续”的原任务关联尚未核实，未启动新检查或写入。请保留现有任务和正文，核对要接续的原任务。')
+    continuationRetirements = resolution.retirements
+    run = resolution.source; runId = run.id
+  }
   // The author's explicit end is final, before any goal/control lookup or
   // admission transaction can reinterpret this as a resumable execution.
   if (hasAuthorEnded(run.usage)) throw new DataAccessError(409, 'RUN_AUTHOR_ENDED', '原任务已按作者要求结束，请发送明确的新任务；已有成果保留。')
@@ -1058,7 +1076,8 @@ async function continueLoopRunLocked(
   if (!activation && !goalExecution && run.engine === 'loop' && !run.taskRootId && run.runtimeProtocolVersion !== 1
     && active?.userId === userId && active.sessionId === run.sessionId && !active.controller.signal.aborted) {
     const latest = await prisma.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, sessionId: run.sessionId }, orderBy: { createdAt: 'desc' }, select: { id: true } })
-    if (latest?.id !== run.id) throw new DataAccessError(409, 'STALE_RESUME_TARGET', '当前会话已开始新任务，不能从旧入口续跑。')
+    if (latest?.id !== run.id && (await prisma.$transaction(tx => readLegacyContinuationResolution(tx, run)))?.source.id !== run.id)
+      throw new DataAccessError(409, 'STALE_RESUME_TARGET', '当前会话已开始新任务，不能从旧入口续跑。')
     return { runId: run.id, sessionId: run.sessionId, runGoalId: null, status: 'running', streamUrl: `/api/agent/runs/${run.id}/stream`, eventStartSeq: active.eventStartSeq ?? 0 }
   }
   const activationReceipt = activation ? await runtimeTransaction(async tx => {
@@ -1131,7 +1150,9 @@ async function continueLoopRunLocked(
   // A stale tab must not revive an old task after the author has started a new one.
   const latest = await prisma.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, sessionId: run.sessionId }, orderBy: { createdAt: 'desc' }, select: { id: true } })
   if (latest?.id !== run.id) {
-    throw new DataAccessError(409, 'STALE_RESUME_TARGET', '当前会话已开始新任务，不能从旧入口续跑。请刷新后继续最新任务。')
+    const resolution = await prisma.$transaction(tx => readLegacyContinuationResolution(tx, run))
+    if (resolution?.source.id !== run.id) throw new DataAccessError(409, 'STALE_RESUME_TARGET', '当前会话已开始新任务，不能从旧入口续跑。请刷新后继续最新任务。')
+    continuationRetirements = resolution.retirements
   }
   const originalMessage = await prisma.agentMessage.findFirst({ where: { runId: run.id, sessionId: run.sessionId, role: 'user' }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { parts: true } })
   const queued = await prisma.agentQueuedRequest.findFirst({ where: { runId: run.id, userId }, select: { payload: true } })
@@ -1230,7 +1251,8 @@ async function continueLoopRunLocked(
     tokenBudget: queuedInput?.tokenBudget,
     resume: true,
     eventStartSeq,
-    ...(continueFrom ? { authorContinue: { eventId: continueFrom.id, afterSeq: eventStartSeq } } : {}),
+    ...(continueFrom ? { authorContinue: { eventId: continueFrom.id, afterSeq: eventStartSeq,
+      ...(continuationRetirements.length ? { legacyContinuationRetirements: continuationRetirements } : {}) } } : {}),
     modelTier: nextTier,
     customModelId: nextCustomModelId,
     reasoningEffort: nextReasoningEffort,

@@ -407,8 +407,8 @@ export const qualityAnalyzeTool = defineTool({
       })
     } catch (error) {
       // 配对校验前移后仍保留工具失败回执；供应商和其他运行错误不在此吞掉。
-      if (error instanceof DataAccessError && error.code === 'QUALITY_TARGET_AMBIGUOUS') return {
-        outcome: 'failed' as const, summary: '质量检查目标不匹配', output: error.message,
+      if (error instanceof DataAccessError && ['QUALITY_TARGET_AMBIGUOUS', 'QUALITY_TASK_TARGET_REQUIRED'].includes(error.code)) return {
+        outcome: 'failed' as const, failureCode: error.code, summary: '质量检查目标不匹配', output: error.message,
       }
       throw error
     }

@@ -224,16 +224,15 @@ describe('严谨创作落实连续性警告', () => {
     expect(f.critic).not.toHaveBeenCalled()
     expect(f.repair).not.toHaveBeenCalled()
   })
-  it('wrapped findings use the humanity-style format correction while preserving the original opinion and both raw responses', async () => {
+  it('mechanically unwraps the complete findings report without purchasing a format correction', async () => {
     const f = fixture(false)
     const findings = [{ signal: 'object', severity: 'warning', explanation: '原文承接需留意', suggestion: '交作者审阅', evidence: [{ sourceId: f.sourceTable().entries[0].id.slice(0, 13) }] }]
     f.critic.mockImplementationOnce(async () => { f.observe(); return JSON.stringify({ report: { findings } }) })
-      .mockImplementationOnce(async () => { f.observe(); return JSON.stringify({ findings }) })
     await continuityValidateTool.execute(f.ctx, { compilationId: 'comp' })
-    expect(f.critic).toHaveBeenCalledTimes(2)
+    expect(f.critic).toHaveBeenCalledOnce()
     expect(f.repair).not.toHaveBeenCalled()
     expect(f.write).not.toHaveBeenCalled()
-    expect(f.compilation.validation).toMatchObject({ continuityReport: { complete: true, rawResponses: [JSON.stringify({ report: { findings } }), JSON.stringify({ findings })], findings: [{ evidence: '原文', explanation: '原文承接需留意' }] } })
+    expect(f.compilation.validation).toMatchObject({ continuityReport: { complete: true, rawResponses: [JSON.stringify({ report: { findings } })], findings: [{ evidence: '原文', explanation: '原文承接需留意' }] } })
   })
   it('sends the selected paid complete runtime to continuity instead of the generic cheap auxiliary policy', async () => {
     const f = fixture(false)
