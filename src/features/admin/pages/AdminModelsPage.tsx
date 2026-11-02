@@ -1,5 +1,5 @@
 import { isBuiltInModelTier } from '../../../../shared/contracts/model-tier'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowDown, ArrowUp, Plus, ChevronLeft } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
@@ -65,7 +65,7 @@ export default function AdminModelsPage() {
   const liveDraft = useRef({ form, baseline: savedForm.current, editing, actorId })
   liveDraft.current = { form, baseline: savedForm.current, editing, actorId }
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!editing) return
     const initial = {
       webToolProtocol: editing.webToolProtocol ?? (editing.provider.trim().toLowerCase() === 'deepseek' ? 'deepseek' : editing.provider.trim().toLowerCase() === 'bocha' ? 'bocha' : ''),
