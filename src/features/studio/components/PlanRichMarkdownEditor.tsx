@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react'
 import { CrepeBuilder } from '@milkdown/crepe/builder'
 import { placeholder } from '@milkdown/crepe/feature/placeholder'
-import { replaceAll } from '@milkdown/kit/utils'
-import { editorViewCtx, parserCtx } from '@milkdown/kit/core'
+import { editorViewCtx, parserCtx, serializerCtx } from '@milkdown/kit/core'
+import type { Node as ProseNode } from '@milkdown/kit/prose/model'
 
 import '@milkdown/crepe/theme/common/prosemirror.css'
 import '@milkdown/crepe/theme/common/reset.css'
@@ -29,9 +29,9 @@ export default function PlanRichMarkdownEditor({ markdown, editable, mobile, onC
   const editorRef = useRef<CrepeBuilder | null>(null)
   const currentMarkdownRef = useRef(markdown)
   const desiredMarkdownRef = useRef(markdown)
+  const synchronizedDocRef = useRef<ProseNode | null>(null)
   const editableRef = useRef(editable)
   editableRef.current = editable
-  const suppressedMarkdownRef = useRef<string | null>(null)
   const onChangeRef = useRef(onChange)
   const onBlurRef = useRef(onBlur)
   const onSelectionChangeRef = useRef(onSelectionChange)
@@ -57,15 +57,17 @@ export default function PlanRichMarkdownEditor({ markdown, editable, mobile, onC
     currentMarkdownRef.current = markdown
     editor.setReadonly(!editable)
     editor.on((listener) => {
-      listener.markdownUpdated((_ctx, nextMarkdown, previousMarkdown) => {
-        if (disposed) return
+      listener.updated((ctx, doc) => {
+        if (disposed || !acceptingUpdates || !editableRef.current) return
+        // The listener is debounced. Compare actual documents: parsing its
+        // serialized Markdown would drop the trailing paragraph of a list.
+        if (!doc.eq(ctx.get(editorViewCtx).state.doc) || synchronizedDocRef.current?.eq(doc)) return
+        // A later undo to the server document is a real edit after this save.
+        synchronizedDocRef.current = null
+        const nextMarkdown = ctx.get(serializerCtx)(doc)
+        if (nextMarkdown === currentMarkdownRef.current) return
         currentMarkdownRef.current = nextMarkdown
-        if (!acceptingUpdates) return
-        if (suppressedMarkdownRef.current === nextMarkdown) {
-          suppressedMarkdownRef.current = null
-          return
-        }
-        if (nextMarkdown !== previousMarkdown) onChangeRef.current?.(nextMarkdown)
+        onChangeRef.current?.(nextMarkdown)
       })
       listener.blur(() => { if (!disposed) onBlurRef.current?.() })
     })
@@ -78,12 +80,12 @@ export default function PlanRichMarkdownEditor({ markdown, editable, mobile, onC
       }
       editorRef.current = editor
       editor.setReadonly(!editableRef.current)
+      synchronizedDocRef.current = editor.editor.action(ctx => ctx.get(editorViewCtx).state.doc)
       acceptingUpdates = true
       const desiredMarkdown = desiredMarkdownRef.current
       if (desiredMarkdown !== currentMarkdownRef.current) {
-        suppressedMarkdownRef.current = desiredMarkdown
         currentMarkdownRef.current = desiredMarkdown
-        synchronizeMarkdown(editor, desiredMarkdown)
+        synchronizedDocRef.current = synchronizeMarkdown(editor, desiredMarkdown)
       }
       // Restore only once, after the async editor has laid out its real document.
       root.scrollTop = readPlanPosition(positionKey)
@@ -94,16 +96,15 @@ export default function PlanRichMarkdownEditor({ markdown, editable, mobile, onC
       if (editorRef.current === editor) editorRef.current = null
       if (created) void editor.destroy()
     }
-    // 每份计划以独立组件实例挂载；外部内容变化由下方 replaceAll 增量同步。
+    // 每份计划以独立组件实例挂载；外部内容变化由下方无历史事务同步。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
     const editor = editorRef.current
     if (!editor || markdown === currentMarkdownRef.current) return
-    suppressedMarkdownRef.current = markdown
     currentMarkdownRef.current = markdown
-    synchronizeMarkdown(editor, markdown)
+    synchronizedDocRef.current = synchronizeMarkdown(editor, markdown)
   }, [markdown])
 
   useEffect(() => {
@@ -142,10 +143,17 @@ export default function PlanRichMarkdownEditor({ markdown, editable, mobile, onC
 }
 
 /** Equivalent serialized markdown must not replace the document and map the cursor. */
-function synchronizeMarkdown(editor: CrepeBuilder, markdown: string) {
-  editor.editor.action(ctx => {
+function synchronizeMarkdown(editor: CrepeBuilder, markdown: string): ProseNode | null {
+  return editor.editor.action(ctx => {
+    const view = ctx.get(editorViewCtx)
     const next = ctx.get(parserCtx)(markdown)
-    if (!next || ctx.get(editorViewCtx).state.doc.eq(next)) return
-    replaceAll(markdown)(ctx)
+    if (!next) return null
+    if (view.state.doc.eq(next)) return view.state.doc
+    // A server update is not a user edit. In particular, serializing Markdown
+    // can normalize lists; publishing that serialization would race the next
+    // Agent append and could restore an older, shorter document.
+    view.dispatch(view.state.tr.replaceWith(0, view.state.doc.content.size, next.content).setMeta('addToHistory', false))
+    // ProseMirror has now applied trailing-plugin transactions too.
+    return view.state.doc
   })
 }

@@ -6,9 +6,8 @@ import { assertOriginalRepairAuthority } from '../original-request.js'
 import { assertSelectionBodyEffect } from '../writing-scope.js'
 import { z } from 'zod'
 
-import { env } from '../../../config/env.js'
 import { generateTextCompletion } from '../../ai-service.js'
-import { generateReviewCompletion, runReviewStep, REVIEW_MAX_OUTPUT_TOKENS } from '../review-completion.js'
+import { generateReviewCompletion, REVIEW_MAX_OUTPUT_TOKENS } from '../review-completion.js'
 import { DataAccessError, prisma } from '../../prisma.js'
 import {
   characterVoiceProfileInputSchema,
@@ -285,7 +284,7 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
           evidence: finding.evidenceExcerpt, explanation: finding.explanation, suggestion: finding.suggestion,
           ...qualityRepairSurroundings(report.chapter.content, finding.startOffset, finding.endOffset) })))}`,
         { modelRuntime: repairRuntime, explicitModelSelection: true, responseFormat: 'json_object',
-          signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)]), userId: ctx.userId, agentRunId: ctx.runId, action, novelId: ctx.novelId, chapterId: report.chapterId, targetType: 'quality_report', targetId: report.id, temperature: 0.3, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true },
+          signal: ctx.signal, userId: ctx.userId, agentRunId: ctx.runId, action, novelId: ctx.novelId, chapterId: report.chapterId, targetType: 'quality_report', targetId: report.id, temperature: 0.3, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true },
       ))
     } catch (error) {
       const code = error instanceof DataAccessError ? error.code : 'UNCONFIRMED'
@@ -450,10 +449,10 @@ export const qualityAnalyzeTool = defineTool({
     // Provider, credit and configuration failures retain their real error code.
     // Evidence-correction failures are first persisted as incomplete, then rethrown;
     // they must never turn located findings into a passing report.
-    // 审核使用独立有界输出预算；只对供应商明确截断做一次扩大预算恢复，总超时与取消信号不重置。
+    // 审核使用独立有界输出预算；只对供应商明确截断做一次扩大预算恢复，作者取消贯穿所有步骤。
     // 真实用户取消照常上抛；初始 critic 的格式异常保留为不完整报告。
     const startedAt = new Date()
-    const reviewSignal = AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)])
+    const reviewSignal = ctx.signal
     const resolved = { runtime: await resolveReviewModelRuntime({ ...ctx, task: 'quality' }) }
     const responseOptions = { modelRuntime: resolved.runtime, explicitModelSelection: true, signal: reviewSignal, userId: ctx.userId, agentRunId: ctx.runId,
       action: formatRecovery ? 'agent3HumanityFormatRecovery' : 'agent3HumanityCritic', novelId: ctx.novelId, chapterId,
@@ -463,7 +462,7 @@ export const qualityAnalyzeTool = defineTool({
       if (qualityReviewContextHash(current) !== contextHash) throw new DataAccessError(409, 'QUALITY_INPUT_STALE', '正文或当前任务已变化，未重发旧版本质量检查，请读取当前版本。')
     }
     const reviewTrace = createTextRequestTrace()
-    const callReview = (...input: Parameters<typeof generateReviewCompletion>) => withTextRequestTrace(reviewTrace, () => runReviewStep(ctx.signal, reviewSignal, () => generateReviewCompletion(...input)))
+    const callReview = (...input: Parameters<typeof generateReviewCompletion>) => withTextRequestTrace(reviewTrace, () => generateReviewCompletion(...input))
     let response: string | null = null
     try {
       await assertCurrent()
@@ -487,7 +486,6 @@ export const qualityAnalyzeTool = defineTool({
       )
     } catch (error) {
       ctx.signal.throwIfAborted()
-      if (reviewSignal.aborted) throw new DataAccessError(504, 'AI_PROVIDER_TIMEOUT', '检查响应未在等待时间内完成，正文和已收到的报告保留。')
       if (error instanceof DataAccessError) throw error
       criticFallback = true
     }

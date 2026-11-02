@@ -7,6 +7,7 @@ import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
 import { consumeTextRequestRecovery, createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
 import { readReviewRequestRecovery, readCompletedReviewRequestRecovery } from './review-request-recovery.js'
 import { readAuthorReviewReplacements } from './author-review-replacement.js'
+import { readContinuedReviewRecovery } from './continued-review-recovery.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { MAIN_RUN_FILTER } from './runtime-child.js'
@@ -1343,6 +1344,25 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
       if (reconciled) await persistCheckpoint()
     }
+    if ((params.resume || previousTask) && pendingReviews.size) {
+      const continued = await prisma.$transaction(tx => readContinuedReviewRecovery(tx,
+        { userId: params.userId, novelId: params.novelId, runId }, [...pendingReviews.values()]), { timeout: 20_000 })
+      let retired = false
+      for (const item of continued) {
+        const key = `${item.compilationId ?? item.chapterId}:${item.toolName}`
+        if (pendingReviews.get(key)?.callId !== item.callId) continue
+        // A real author Continue retires only this exact old execution lock.
+        // Its unknown usage remains an audit, never a report or a free retry.
+        if (!item.persisted) {
+          bus.emit({ type: 'review.reconciled', callId: item.callId, chapterId: item.chapterId,
+            revision: item.revision, compilationId: item.compilationId, receipt: item.receipt })
+          await bus.persist()
+        }
+        pendingReviews.delete(key)
+        retired = true
+      }
+      if (retired) await persistCheckpoint()
+    }
     if (pendingReviews.size) {
       // A prior batch may already have saved an independent current report
       // before stopping. Record its semantic receipt without buying another
@@ -1746,15 +1766,16 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         ? await (await import('./research-recovery.js')).saveResearchLimitationDelivery({ userId: params.userId,
           novelId: params.novelId, sessionId: params.sessionId, runId }, reasonText) : null
       controller.signal.throwIfAborted()
-      const text = researchPartial ?? `${reasonText}已保存的内容保留，本次工作尚未完成。`
+      const pendingReceipt = forceWrapUpLocal && pendingReviews.size > 0
+      const text = researchPartial ?? (pendingReceipt ? reasonText : `${reasonText}已保存的内容保留，本次工作尚未完成。`)
       if (researchPartial) {
         const messageId = randomUUID()
         bus.emit({ type: 'message.start', messageId, role: 'assistant' })
         bus.emit({ type: 'text.final', messageId, text, asReasoning: false })
         await persistMessage(messageId, runId, params.sessionId, 'assistant', [{ type: 'text', text }])
-      } else await announceStopReason(reasonText, forceWrapUpLocal ? 'paused' : 'failed')
-      await finalizeRun(runId, bus, forceWrapUpLocal || researchPartial ? 'paused' : 'failed', usage, turn, text.slice(0, 300), reasonText, false,
-        undefined, undefined, undefined, false, undefined, forceWrapUpLocal || researchPartial ? 'needs_input' : 'user_stop')
+      } else if (!pendingReceipt) await announceStopReason(reasonText, forceWrapUpLocal ? 'paused' : 'failed')
+      await finalizeRun(runId, bus, forceWrapUpLocal || researchPartial ? 'paused' : 'failed', usage, turn, text.slice(0, 300), pendingReceipt ? undefined : reasonText, false,
+        undefined, undefined, undefined, false, undefined, pendingReceipt ? 'review_receipt_pending' : forceWrapUpLocal || researchPartial ? 'needs_input' : 'user_stop')
     }
 
     const finishPersistedWritingIfComplete = async (beforeFinish?: () => Promise<void>, candidate?: { messageId: string; text: string; parts: AgentMessagePart[]; expected?: NonNullable<Awaited<ReturnType<typeof readCompletedWritingDelivery>>> }) => {

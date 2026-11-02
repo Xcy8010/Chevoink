@@ -32,6 +32,7 @@ import * as humanityQuality from '../../api/lib/agent/humanity-quality.js'
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import { buildQualityEvidenceSources, coerceCriticFindings } from '../../api/lib/agent/quality-evidence.js'
 import { DataAccessError, prisma } from '../../api/lib/prisma.js'
+import { env } from '../../api/config/env.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 describe('frozen source IDs through quality report preparation', () => {
@@ -359,6 +360,30 @@ describe('严谨创作自动落实质量建议', () => {
     expect(JSON.stringify(audits)).not.toContain(f.bundle.originalRequest!)
     expect(JSON.stringify(audits)).not.toContain('已补动作')
     expect(JSON.stringify(audits)).not.toContain('fixture-only')
+  })
+  it.each(['critic', 'repair'] as const)('keeps author cancellation active without cutting off an active %s at the former aggregate deadline', async phase => {
+    vi.useFakeTimers()
+    try {
+      const f = fixture(phase === 'repair')
+      if (phase === 'critic') f.ctx.creativeFreedom = 'stable'
+      const response = phase === 'critic' ? '{"findings":[]}'
+        : JSON.stringify({ patches: f.report.findings.map(finding => ({ findingId: finding.id, replacement: '具体动作。' })) })
+      const wait = async (_system: string, _content: string, input: Parameters<typeof aiService.generateTextCompletion>[2]) =>
+        new Promise<string>((resolve, reject) => {
+          const timer = setTimeout(() => resolve(response), env.aiTextTimeoutMs + 1000)
+          input.signal?.addEventListener('abort', () => { clearTimeout(timer); reject(input.signal!.reason) }, { once: true })
+        })
+      if (phase === 'critic') f.critic.mockImplementation(wait)
+      else f.model.mockImplementation(wait)
+      const result = qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
+      const assertion = expect(result).resolves.toMatchObject({ display: { kind: 'qualityReport', chapterRevision: phase === 'repair' ? 2 : 1 } })
+      await vi.advanceTimersByTimeAsync(env.aiTextTimeoutMs + 1000)
+      await assertion
+      expect(f.ctx.signal.aborted).toBe(false)
+      expect(phase === 'critic' ? f.critic : f.model).toHaveBeenCalledOnce()
+      expect(f.write).toHaveBeenCalledTimes(phase === 'repair' ? 1 : 0)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { vi.useRealTimers() }
   })
   it('records unknown transport with its original billing reference and rethrows the identical error without retry', async () => {
     const f = fixture(true), error = new DataAccessError(504, 'AI_PROVIDER_TIMEOUT', 'private provider payload must not be stored')

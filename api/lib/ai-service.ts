@@ -281,7 +281,7 @@ async function saveOutputEvidence(id: string, inputEstimate: number, output: str
  * Persist only counts, never manuscript text or credentials, for interruption billing. */
 async function readAuxiliaryResponse(response: Response, usageId: string, inputEstimate: number, custom: boolean, authorizationHeld = false,
   onObservedCompletion?: TextCompletionOptions['onObservedCompletion'], routeEvidence?: Prisma.InputJsonObject): Promise<JsonProviderPayload> {
-  if (!response.ok || !response.headers.get('content-type')?.includes('text/event-stream') || !response.body) return { ...await parseJsonResponse(response), localOutputEstimate: undefined }
+  if (!response.ok || !response.headers.get('content-type')?.includes('text/event-stream') || !response.body) return { ...await parseJsonResponse(response, env.aiTextStreamIdleMs), localOutputEstimate: undefined }
   let content = '', reasoning = '', done = false, truncated = false, lastSaved = 0
   let finishReason: string | null = null
   const toolCalls: unknown[] = []
@@ -373,8 +373,24 @@ type JsonProviderPayload = {
   }
 }
 
-async function parseJsonResponse(response: Response): Promise<JsonProviderPayload> {
-  const text = await response.text()
+async function parseJsonResponse(response: Response, idleMs?: number): Promise<JsonProviderPayload> {
+  let text = ''
+  if (!idleMs || !response.body) text = await response.text()
+  else {
+    const reader = response.body.getReader(), decoder = new TextDecoder()
+    try {
+      for (;;) {
+        const chunk = await readWithIdleTimeout(reader, idleMs, () => new DataAccessError(504, 'AI_PROVIDER_TIMEOUT',
+          '模型响应长时间无新数据，已中止本次请求；检查未完成，已保存正文保留。'))
+        if (chunk.done) break
+        text += decoder.decode(chunk.value, { stream: true })
+      }
+      text += decoder.decode()
+    } finally {
+      await reader.cancel().catch(() => {})
+      reader.releaseLock()
+    }
+  }
 
   if (!text) {
     return {}
@@ -1324,8 +1340,14 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
   options.signal?.throwIfAborted()
   await assertGoalProviderAdmission()
   dispatched = true
+  // Bound the wait for HTTP headers, then let body activity drive the idle
+  // watchdog. An active review stream must not be cut off by total elapsed time.
+  const firstResponse = new AbortController()
+  const requestSignal = options.signal ? AbortSignal.any([options.signal, firstResponse.signal]) : firstResponse.signal
+  const firstResponseTimer = setTimeout(() => firstResponse.abort(new DataAccessError(504, 'AI_PROVIDER_TIMEOUT',
+    '模型未在等待时间内开始响应，已中止本次请求；检查未完成。')), env.aiTextTimeoutMs)
   const requestInit = {
-    signal: options.signal,
+    signal: requestSignal,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -1355,8 +1377,15 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
       ],
     }),
   }
-  const response = isLocalModelProvider(modelRuntime.provider) ? await localModelFetch({ userId: options.userId,
-    provider: modelRuntime.provider, baseUrl: modelRuntime.baseUrl!, apiKey: modelRuntime.apiKey!, body: requestInit.body, signal: options.signal }) : await fetch(endpoint, requestInit)
+  let response: Response
+  try {
+    response = isLocalModelProvider(modelRuntime.provider) ? await localModelFetch({ userId: options.userId,
+      provider: modelRuntime.provider, baseUrl: modelRuntime.baseUrl!, apiKey: modelRuntime.apiKey!, body: requestInit.body, signal: requestSignal }) : await fetch(endpoint, requestInit)
+  } catch (error) {
+    options.signal?.throwIfAborted()
+    if (firstResponse.signal.aborted) throw firstResponse.signal.reason
+    throw error
+  } finally { clearTimeout(firstResponseTimer) }
 
   const payload = await readAuxiliaryResponse(response, prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), modelRuntime.tier === 'custom', !!authorized, options.onObservedCompletion, routeEvidence)
   if (payload.reasoningTokens != null) console.info('[ai-reasoning-usage]', {

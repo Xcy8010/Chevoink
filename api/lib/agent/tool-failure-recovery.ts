@@ -26,6 +26,7 @@ export function toolFailureRecovery(code: string): { label: string; guidance: st
     TODO_CHANGE_REASON_REQUIRED: { label: '待办需要保留原项目身份', guidance: '读取当前清单，更新时保留原 id。确有新增的原授权工作请给出 changeReason，不重建整张清单或扩大章节范围。' },
     CONTINUITY_CHECK_REQUIRED: { label: '当前版本尚未完成连续性检查', guidance: '先完成当前正文的 continuity_validate，保留现有编译及真实用量，不能把缺报告视为通过。' },
     CONTINUITY_EVIDENCE_UNLOCATED: { label: '检查引用需要核对', guidance: '报告引用无法定位，尚不能作为改稿或通过依据。核对当前原文与报告，原授权内处理有依据的问题，再复核最终版；未知费用先对账。' },
+    CONTINUITY_REPAIR_FAILED: { label: '连续性报告已保存，自动修订未应用', guidance: '当前报告与意见仍真实有效；本报告的自动修订不会重复请求。按报告中的真实 findingId、原文和建议，在原作者授权范围内用 chapter_edit_range 处理可定位的问题；决定保留时提交具体理由。普通改稿权限未因本次失败撤销，实际修改后复核最终版本，不能把自动修订失败当作检查通过或重建编译。' },
     CONTINUITY_REPORT_INCOMPLETE: { label: '连续性报告未完成', guidance: '报告尚未完整取得，正文与真实费用保留。已知格式失败可按当前授权继续检查；供应商结果或费用未知时先核对原请求。' },
     QUALITY_CHECK_REQUIRED: { label: '当前版本尚未完成人类感检查', guidance: '先完成当前正文的 quality_analyze，不能省略检查、引用旧版报告或宣称修订本身就是检查通过。' },
     AUTHOR_CHAPTER_SCOPE: { label: '章节目标或位置与原请求不符', guidance: '本次未执行，目标不符不表示任务已结束。核对原始请求和当前作品目录，仅在现有授权范围内纠正参数；全书位置与卷内位置不得混用。任务已暂停、结束或授权不匹配时不得继续。' },

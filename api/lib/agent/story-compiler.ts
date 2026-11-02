@@ -4,11 +4,11 @@ import { createHash } from 'node:crypto'
 
 import { Prisma, type StoryCompilationStage, type StoryCharter, type ReaderPromise, type SceneTask } from '@prisma/client'
 
-import type { ReaderPromiseInput, SceneTaskInput, StoryCharterInput, StoryCompilerMode, StoryState } from '../../../shared/contracts/index.js'
+import type { ReaderPromiseInput, SceneTaskInput, StoryCharterSaveInput, StoryCompilerMode, StoryState } from '../../../shared/contracts/index.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { activeChapterScope } from '../data/internal.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
-import { taskSpecSchema, sceneTaskInputSchema } from '../../../shared/contracts/index.js'
+import { taskSpecSchema, sceneTaskInputSchema, storyCharterInputSchema } from '../../../shared/contracts/index.js'
 import { requiresNextChapterDelivery } from './completion-guard.js'
 import { runtimeJson } from './runtime-common.js'
 import type { WritingWorkflowMilestone } from './semantic-progress.js'
@@ -100,25 +100,23 @@ export async function getStoryCharterBundle(userId: string, novelId: string, db:
   return { charter, promises }
 }
 
-export async function upsertStoryCharter(userId: string, novelId: string, input: StoryCharterInput, db: Prisma.TransactionClient = prisma) {
+export async function upsertStoryCharter(userId: string, novelId: string, input: StoryCharterSaveInput, db: Prisma.TransactionClient = prisma) {
   await assertOwnedNovel(userId, novelId, db)
-  const data = {
-    ...input,
-    genreRules: input.genreRules as Prisma.InputJsonValue,
-    abilityCosts: input.abilityCosts as Prisma.InputJsonValue,
-    realityBoundaries: input.realityBoundaries as Prisma.InputJsonValue,
-    styleDna: input.styleDna as Prisma.InputJsonValue,
-    forbiddenZones: input.forbiddenZones as Prisma.InputJsonValue,
-    antiExamples: input.antiExamples as Prisma.InputJsonValue,
-  }
   const existing = await db.storyCharter.findUnique({ where: { novelId } })
-  // A repeated identical save is not a new revision or new writing progress.
-  if (existing && Object.entries(data).every(([key, value]) =>
-    JSON.stringify(existing[key as keyof typeof existing]) === JSON.stringify(value))) return existing
+  const patch = Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined))
+  if (existing) {
+    // Omitted fields and creation defaults never replace existing author data.
+    if (Object.entries(patch).every(([key, value]) =>
+      JSON.stringify(existing[key as keyof typeof existing]) === JSON.stringify(value))) return existing
+    return db.storyCharter.update({ where: { novelId }, data: { ...patch, revision: { increment: 1 } } })
+  }
+  const complete = storyCharterInputSchema.safeParse(input)
+  if (!complete.success) throw new DataAccessError(400, 'INVALID_ARGUMENTS',
+    `首次创建创作宪章需要完整字段：${complete.error.issues.map(issue => issue.path.join('.')).join('、')}；未创建宪章。`)
   return db.storyCharter.upsert({
     where: { novelId },
-    create: { userId, novelId, ...data },
-    update: { ...data, revision: { increment: 1 } },
+    create: { userId, novelId, ...complete.data },
+    update: { ...complete.data, revision: { increment: 1 } },
   })
 }
 

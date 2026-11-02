@@ -19,6 +19,7 @@ import * as reviewCompletion from '../../api/lib/agent/review-completion.js'
 import * as auxiliaryRuntime from '../../api/lib/agent/runtime-auxiliary-call.js'
 import * as ai from '../../api/lib/ai-service.js'
 import { beginTextRequest } from '../../api/lib/text-request-trace.js'
+import { env } from '../../api/config/env.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
 const body = '账本写着三十四万元的一成是三千四百元。她把账本放回桌上。'
@@ -449,6 +450,34 @@ describe('known failure recovery preserves report and paid evidence', () => {
     expect(f.chapter.revision).toBe(4); expect(f.chapter.content).toBe(body)
     expect(write).toHaveBeenCalledTimes(kind === 'cas-conflict' ? 1 : 0)
     expect(result.output).toContain('自动修订未应用')
+  })
+  it('finishes the critic and one format recovery without a shared elapsed-time cutoff', async () => {
+    vi.useFakeTimers()
+    try {
+      const f = runnerFixture()
+      vi.spyOn(auxiliaryRuntime, 'resolveReviewModelRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
+        baseUrl: 'https://fixture.invalid', apiKey: 'fixture-only', reasoningEffort: 'high', reasoningEfforts: ['none', 'high'],
+        reasoningParameterMode: 'native', thinkingEnabled: true, visionEnabled: false, contextWindowTokens: 128000 })
+      let requests = 0
+      const generate = vi.spyOn(reviewCompletion, 'generateReviewCompletion').mockImplementation(async (_system, _content, input) => {
+        const index = requests++, fee = { id: `fee-phase-${index}`, usageSource: 'reported', billingStatus: 'settled', requestTokens: 12, responseTokens: 8, reservedCreditMilli: 0 }
+        const record = beginTextRequest(fee.id).record
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, env.aiTextTimeoutMs * 0.6)
+          input.signal?.addEventListener('abort', () => { clearTimeout(timer); reject(input.signal!.reason) }, { once: true })
+        })
+        f.fees.push(fee); record.status = 'terminal'; record.billingKnown = true
+        return index === 0 ? '{broken' : '{"findings":[]}'
+      })
+      const result = reviewContinuity(f.ctx, { compilationId: 'comp' }, { allowRepair: false })
+      const assertion = expect(result).resolves.toMatchObject({ reviewCompleted: true, reviewOutcome: 'complete' })
+      await vi.advanceTimersByTimeAsync(env.aiTextTimeoutMs * 1.2)
+      await assertion
+      expect(generate).toHaveBeenCalledTimes(2)
+      expect(f.report()).toMatchObject({ complete: true, billingKnown: true, usageIds: ['fee-phase-0', 'fee-phase-1'] })
+      expect(f.chapter.revision).toBe(4)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { vi.useRealTimers() }
   })
   it.each(['critic', 'format'] as const)('fences the current legacy owner immediately before the actual %s dispatch', async kind => {
     const f = runnerFixture(); let checks = 0, current = true

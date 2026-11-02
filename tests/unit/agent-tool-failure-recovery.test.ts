@@ -68,6 +68,14 @@ describe('chapter authority failure feedback', () => {
     expect(toolRecoveryKey('chapter_edit_range', 'CHAPTER_ANCHOR_CONFLICT', { chapterId: 'c' }))
       .toBe(toolRecoveryKey('chapter_write', 'CHAPTER_ANCHOR_CONFLICT', { chapterId: 'c' }))
   })
+  it('continues a saved report through ordinary authorized local edits after automatic repair fails', () => {
+    const recovery = toolFailureRecovery('CONTINUITY_REPAIR_FAILED')!
+    expect(recovery.guidance).toContain('自动修订不会重复请求')
+    expect(recovery.guidance).toContain('chapter_edit_range')
+    expect(recovery.guidance).toContain('原作者授权范围')
+    expect(recovery.guidance).toContain('实际修改后复核最终版本')
+    expect(recovery.guidance).toContain('不能把自动修订失败当作检查通过')
+  })
   it('routes a completed-check decision to commit with exact references instead of another critic', () => {
     const recovery = toolFailureRecovery('REVIEW_DECISION_REQUIRED')!
     expect(recovery.guidance).toContain('chapter_bridge_commit')

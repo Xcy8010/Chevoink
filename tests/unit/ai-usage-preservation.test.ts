@@ -585,6 +585,86 @@ describe('explicit zero provider usage is not missing usage', () => {
       expect(fetcher).toHaveBeenCalledOnce()
     } finally { vi.useRealTimers() }
   })
+  it('keeps an active review stream beyond the former total deadline and saves its actual final usage', async () => {
+    vi.useFakeTimers()
+    try {
+      const encoder = new TextEncoder(), cadence = env.aiTextStreamIdleMs / 2
+      let interval: ReturnType<typeof setInterval>, completion: ReturnType<typeof setTimeout>
+      const fetcher = vi.fn(async () => new Response(new ReadableStream({ start(controller) {
+        const push = (frame: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}
+
+`))
+        interval = setInterval(() => push({ choices: [{ delta: { reasoning_content: '核对' } }] }), cadence)
+        completion = setTimeout(() => {
+          clearInterval(interval)
+          push({ choices: [{ delta: { content: '{"findings":[]}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 100, completion_tokens: 9000 } })
+          controller.close()
+        }, env.aiTextTimeoutMs + cadence)
+      }, cancel() { clearInterval(interval); clearTimeout(completion) } }), { headers: { 'content-type': 'text/event-stream' } }))
+      vi.stubGlobal('fetch', fetcher)
+      const author = new AbortController()
+      const result = generateReviewCompletion('system', '完整正文', { userId: 'test', action: 'agent3HumanityCritic', signal: author.signal, modelRuntime: qualityRuntime({ tier: 'speed', multiplierBps: 10000 }) })
+      await vi.advanceTimersByTimeAsync(env.aiTextTimeoutMs + cadence)
+      await expect(result).resolves.toBe('{"findings":[]}')
+      expect(fetcher).toHaveBeenCalledOnce()
+      expect(author.signal.aborted).toBe(false)
+      expect(mocks.charge).toHaveBeenCalledWith(expect.objectContaining({ requestTokens: 100, responseTokens: 9000 }))
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { vi.useRealTimers() }
+  })
+  it('bounds the first HTTP response and preserves an unknown request without retrying', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetcher = vi.fn((_url: unknown, input?: RequestInit) => new Promise<Response>((_resolve, reject) =>
+        input!.signal!.addEventListener('abort', () => reject(input!.signal!.reason), { once: true })))
+      vi.stubGlobal('fetch', fetcher)
+      const result = generateReviewCompletion('system', 'chapter', { userId: 'test', action: 'agent3HumanityCritic', modelRuntime: qualityRuntime() })
+      const assertion = expect(result).rejects.toMatchObject({ code: 'AI_PROVIDER_TIMEOUT' })
+      await vi.advanceTimersByTimeAsync(env.aiTextTimeoutMs)
+      await assertion
+      expect(fetcher).toHaveBeenCalledOnce()
+      expect(mocks.charge).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { vi.useRealTimers() }
+  })
+  it.each(['headers', 'sse', 'json'] as const)('honors author cancellation during %s without relabeling it or retrying', async phase => {
+    vi.useFakeTimers()
+    try {
+      const author = new AbortController(), cancellation = new Error('author stopped review')
+      const fetcher = vi.fn((_url: unknown, input?: RequestInit) => {
+        if (phase === 'headers') return new Promise<Response>((_resolve, reject) => input!.signal!.addEventListener('abort', () => reject(input!.signal!.reason), { once: true }))
+        return Promise.resolve(new Response(new ReadableStream({ start(controller) {
+          input!.signal!.addEventListener('abort', () => controller.error(input!.signal!.reason), { once: true })
+          controller.enqueue(new TextEncoder().encode(phase === 'sse' ? 'data: {"choices":[]}\n\n' : '{"choices":['))
+        } }), { headers: { 'content-type': phase === 'sse' ? 'text/event-stream' : 'application/json' } }))
+      })
+      vi.stubGlobal('fetch', fetcher)
+      const result = generateReviewCompletion('system', 'chapter', { userId: 'test', action: 'agent3HumanityCritic', signal: author.signal, modelRuntime: qualityRuntime() })
+      const assertion = expect(result).rejects.toBe(cancellation)
+      await vi.advanceTimersByTimeAsync(0)
+      author.abort(cancellation)
+      await assertion
+      expect(fetcher).toHaveBeenCalledOnce()
+      expect(mocks.charge).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { vi.useRealTimers() }
+  })
+  it('applies the idle watchdog to a stalled JSON gateway body', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetcher = vi.fn(async () => new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"choices":['))
+      } }), { headers: { 'content-type': 'application/json' } }))
+      vi.stubGlobal('fetch', fetcher)
+      const result = generateReviewCompletion('system', 'chapter', { userId: 'test', action: 'agent3HumanityCritic', modelRuntime: qualityRuntime() })
+      const assertion = expect(result).rejects.toMatchObject({ code: 'AI_PROVIDER_TIMEOUT' })
+      await vi.advanceTimersByTimeAsync(env.aiTextStreamIdleMs)
+      await assertion
+      expect(fetcher).toHaveBeenCalledOnce()
+      expect(mocks.charge).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { vi.useRealTimers() }
+  })
   it('classifies gateway HTML timeouts without reporting a malformed quality report or redispatching', async () => {
     const fetcher = vi.fn(async () => new Response('<html>Gateway Timeout</html>', { status: 504 }))
     vi.stubGlobal('fetch', fetcher)

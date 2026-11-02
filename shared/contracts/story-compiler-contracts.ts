@@ -38,6 +38,17 @@ export const storyCharterInputSchema = z.object({
   antiExamples: z.array(z.string().min(1).max(1000)).max(20).default([]),
 })
 
+// Saves are patches on an existing charter. Defaults belong to creation only.
+export const storyCharterSaveInputSchema = storyCharterInputSchema.partial().extend({
+  targetPlatform: storyCharterInputSchema.shape.targetPlatform.removeDefault().optional(),
+  genreRules: storyCharterInputSchema.shape.genreRules.removeDefault().optional(),
+  abilityCosts: storyCharterInputSchema.shape.abilityCosts.removeDefault().optional(),
+  realityBoundaries: storyCharterInputSchema.shape.realityBoundaries.removeDefault().optional(),
+  styleDna: storyCharterInputSchema.shape.styleDna.removeDefault().optional(),
+  forbiddenZones: storyCharterInputSchema.shape.forbiddenZones.removeDefault().optional(),
+  antiExamples: storyCharterInputSchema.shape.antiExamples.removeDefault().optional(),
+})
+
 export const readerPromiseInputSchema = z.object({
   title: z.string().min(1).max(160),
   promise: z.string().min(1).max(2000),
@@ -74,6 +85,7 @@ export type StoryCompilationStage = z.infer<typeof storyCompilationStageSchema>
 export type StoryCompilationStatus = z.infer<typeof storyCompilationStatusSchema>
 export type StoryState = z.infer<typeof storyStateSchema>
 export type StoryCharterInput = z.infer<typeof storyCharterInputSchema>
+export type StoryCharterSaveInput = z.infer<typeof storyCharterSaveInputSchema>
 export type ReaderPromiseInput = z.infer<typeof readerPromiseInputSchema>
 export type SceneTaskInput = z.infer<typeof sceneTaskInputSchema>
 export type ContinuityFindingInput = z.infer<typeof continuityFindingInputSchema>

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { storyCharterInputSchema } from '../../../shared/contracts/story-compiler-contracts.js'
 import type { TaskSpec } from '../../../shared/contracts/index.js'
 import type { AgentTool } from './tools/types.js'
 import { coordinatedWriterActions, coordinatedWriterParameters } from './coordinated-writing-input.js'
@@ -58,6 +59,7 @@ export function originalToolParameterSchemas(tool: Pick<AgentTool, 'name' | 'des
     return [toOpenAIParameters(tool.parameters), toOpenAIParameters(coordinatedWriterParameters(tool, scope))]
   }
   const current = toOpenAIParameters(tool.parameters)
+  if (tool.name === 'story_charter_save') return [current, toOpenAIParameters(storyCharterInputSchema)]
   const additive = tool.name === 'chapter_create' ? 'newVolume' : tool.name === 'story_compiler_prepare' ? 'volumeDecision' : tool.name === 'chapter_bridge_commit' ? 'decisionOnly' : null
   const legacy = additive && current.properties && typeof current.properties === 'object'
     ? { ...current, properties: Object.fromEntries(Object.entries(current.properties).filter(([key]) => key !== additive)) } : null

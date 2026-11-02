@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client'
 import { randomUUID } from 'node:crypto'
 import { describe,expect,it,vi } from 'vitest'
 import { z } from 'zod'
+import { storyCharterInputSchema } from '../../shared/contracts/story-compiler-contracts.js'
 import { setAdminUsersSuspended } from '../../api/lib/admin-credit-model.js'
 import { getActiveRun } from '../../api/lib/agent/active-runs.js'
 import { captureUserDirectives,listActiveDirectives } from '../../api/lib/agent/context-engine.js'
@@ -407,3 +408,47 @@ describe.runIf(available)('durable charter save', () => {
 })
 
 
+
+
+describe.runIf(available)('durable charter partial updates', () => {
+  it.each(['partial', 'stale', 'incomplete-create', 'legacy-schema'] as const)('%s keeps field and version ownership', async scenario => {
+    await fixture(async f => {
+      const complete = storyCharterInputSchema.parse({ oneLinePromise: '寻找失落证据', targetAudience: '悬疑读者', targetPlatform: '原平台',
+        protagonistDesire: '寻找真相', protagonistFear: '失去亲人', protagonistMisbelief: '证据不会骗人', protagonistNonNegotiable: '不伤害无辜者',
+        conflictEngine: '证据互相矛盾', relationshipEngine: '互不信任的同伴', emotionalBaseline: '克制', emotionalRange: '从怀疑到信任',
+        genreRules: ['线索可追溯'], abilityCosts: ['暴露身份'], realityBoundaries: ['现实事实须核验'], styleDna: ['短句'], forbiddenZones: ['不滥杀'], antiExamples: ['不堆砌设定'] })
+      const patch = { oneLinePromise: '失落证据揭开家族秘密', targetAudience: '喜欢人物关系的悬疑读者', relationshipEngine: '同伴重建信任', protagonistMisbelief: '亲人不会说谎' }
+      const before = scenario === 'incomplete-create' ? null : await upsertStoryCharter(f.userId, f.novelId, complete)
+      const lease = await claim(f), tools = [storyCharterGetTool, storyCharterSaveTool]
+      await initializeExecutionState(lease, { configuration: { version: 1, mode: 'plan', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+        model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+        tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description,
+          parameters: z.toJSONSchema(scenario === 'legacy-schema' && tool.name === 'story_charter_save' ? storyCharterInputSchema : tool.parameters, { io: 'input' }) } })),
+        toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
+        snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+          messages: [{ role: 'user', content: '更新创作宪章的读者承诺和人物关系' }, { role: 'assistant', content: null, toolCalls: [
+            { id: 'read', name: 'story_charter_get', arguments: '{}' },
+            { id: 'save', name: 'story_charter_save', arguments: JSON.stringify(patch) },
+            { id: 'same-patch', name: 'story_charter_save', arguments: JSON.stringify(patch) },
+          ] }], successfulToolSignatures: [] } })
+      await executeDurableToolStep(lease, new AbortController().signal)
+      const concurrent = scenario === 'stale' ? await upsertStoryCharter(f.userId, f.novelId, { protagonistDesire: '作者刚刚修改的欲望' }) : null
+      const result = await executeDurableToolStep(lease, new AbortController().signal)
+      const saved = await prisma.storyCharter.findUnique({ where: { novelId: f.novelId } })
+      if (scenario === 'incomplete-create') {
+        expect(result).toMatchObject({ kind: 'tool', result: { outcome: 'failed' } })
+        expect(saved).toBeNull()
+        expect(await prisma.agentOperation.findFirst({ where: { taskRootId: f.rootId, action: 'story_charter_save' }, include: { effectReceipt: true } }))
+          .toMatchObject({ status: 'failed', effectReceipt: { result: { code: 'INVALID_ARGUMENTS' } } })
+      } else if (scenario === 'stale') {
+        expect(result).toMatchObject({ kind: 'tool', result: { outcome: 'failed' } })
+        expect(saved).toEqual(concurrent)
+      } else {
+        expect(result).toMatchObject({ kind: 'tool', result: { observedState: { kind: 'charter', id: f.novelId } } })
+        expect(saved).toEqual({ ...before, ...patch, revision: before!.revision + 1, updatedAt: expect.any(Date) })
+        await executeDurableToolStep(lease, new AbortController().signal)
+        expect(await prisma.storyCharter.findUnique({ where: { novelId: f.novelId } })).toEqual(saved)
+      }
+    })
+  })
+})

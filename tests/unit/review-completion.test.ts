@@ -46,18 +46,18 @@ describe('bounded review completion recovery', () => {
     await expect(generateReviewCompletion('s', 'c', options)).rejects.toMatchObject({ code: 'AI_PROVIDER_OUTPUT_LIMIT' })
     expect(complete).toHaveBeenCalledTimes(2)
   })
-  it('aborts a hanging provider without resetting the shared deadline for recovery', async () => {
+  it('allows recovery after the former aggregate deadline while preserving author cancellation', async () => {
     vi.useFakeTimers()
-    complete.mockImplementationOnce(() => new Promise((_resolve, reject) => setTimeout(() => reject(knownFailure()), 120_000)))
-      .mockImplementationOnce((_system, _content, input) => new Promise((_resolve, reject) => input.signal.addEventListener('abort', () => reject(input.signal.reason), { once: true })))
-    const result = generateReviewCompletion('s', 'c', options)
-    const assertion = expect(result).rejects.toMatchObject({ code: 'AI_PROVIDER_TIMEOUT' })
-    // 等待上限跟随 env（默认 4 分钟）：不再叠加旧的 180s 硬帽
-    await vi.advanceTimersByTimeAsync(env.aiTextTimeoutMs)
-    await assertion
+    const author = new AbortController()
+    complete.mockImplementationOnce(() => new Promise((_resolve, reject) => setTimeout(() => reject(knownFailure()), env.aiTextTimeoutMs / 2)))
+      .mockImplementationOnce(() => new Promise(resolve => setTimeout(() => resolve('{"findings":[]}'), env.aiTextTimeoutMs)))
+    const result = generateReviewCompletion('s', 'c', { ...options, signal: author.signal })
+    await vi.advanceTimersByTimeAsync(env.aiTextTimeoutMs * 1.5)
+    await expect(result).resolves.toBe('{"findings":[]}')
     expect(complete).toHaveBeenCalledTimes(2)
-    expect(complete.mock.calls[0][2].signal).toBe(complete.mock.calls[1][2].signal)
-    expect(complete.mock.calls[1][2].signal.aborted).toBe(true)
+    expect(complete.mock.calls[0][2].signal).toBe(author.signal)
+    expect(complete.mock.calls[1][2].signal).toBe(author.signal)
+    expect(author.signal.aborted).toBe(false)
     expect(vi.getTimerCount()).toBe(0)
   })
   it.each(['AI_PROVIDER_TRANSPORT', 'AI_PROVIDER_TIMEOUT', 'AI_PROVIDER_INCOMPLETE', 'CREDITS_EXHAUSTED'])('does not redispatch uncertain/credit failure %s', async code => {
@@ -91,15 +91,12 @@ describe('bounded review completion recovery', () => {
   })
 })
 
-describe('shared review deadline classification', () => {
-  it('preserves author cancellation and classifies only the actual review deadline', async () => {
-    const { runReviewStep } = await import('../../api/lib/agent/review-completion.js')
-    const author = new AbortController(), deadline = new AbortController()
-    const failure = new Error('unrelated')
-    await expect(runReviewStep(author.signal, deadline.signal, async () => { throw failure })).rejects.toBe(failure)
-    deadline.abort(new DOMException('expired', 'TimeoutError'))
-    await expect(runReviewStep(author.signal, deadline.signal, async () => { throw deadline.signal.reason })).rejects.toMatchObject({ code: 'AI_PROVIDER_TIMEOUT' })
-    author.abort(new Error('author cancelled'))
-    await expect(runReviewStep(author.signal, deadline.signal, async () => { throw deadline.signal.reason })).rejects.toBe(author.signal.reason)
+describe('review cancellation after returned output', () => {
+  it('preserves the actual author stop instead of accepting a late result', async () => {
+    const author = new AbortController()
+    const cancellation = new Error('author cancelled')
+    complete.mockImplementationOnce(async () => { author.abort(cancellation); return '{"findings":[]}' })
+    await expect(generateReviewCompletion('s', 'c', { ...options, signal: author.signal })).rejects.toBe(cancellation)
+    expect(complete).toHaveBeenCalledOnce()
   })
 })

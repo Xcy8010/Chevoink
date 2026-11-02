@@ -1,14 +1,13 @@
 import { Prisma } from '@prisma/client'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
-import { env } from '../../config/env.js'
 import { prisma, DataAccessError } from '../prisma.js'
 import { activeChapterScope } from '../data/internal.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { continuityFindingInputSchema, type ContinuityFindingInput } from '../../../shared/contracts/story-compiler-contracts.js'
 import { buildQualityEvidenceSources, locateQualityFindingSpans, parseQualityJsonObject, renderQualityEvidenceSources, type QualityEvidenceSources } from './quality-evidence.js'
 import { createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
-import { generateReviewCompletion, runReviewStep } from './review-completion.js'
+import { generateReviewCompletion } from './review-completion.js'
 import { resolveReviewModelRuntime } from './runtime-auxiliary-call.js'
 import { readOriginalTaskRequest, originalTaskRunIds, originalRepairAuthority } from './original-request.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
@@ -267,14 +266,14 @@ export async function readContinuityRequestBilling(db: Prisma.TransactionClient,
 
 async function legacyDispatch(ctx: ToolContext, snapshot: ContinuitySnapshot, id: string): Promise<ContinuityDispatch> {
   const runtime = await resolveReviewModelRuntime({ ...ctx, task: 'continuity' })
-  const signal = AbortSignal.any([ctx.signal, AbortSignal.timeout(env.aiTextTimeoutMs)])
+  const signal = ctx.signal
   return async (request, current) => {
     await current()
     const trace = createTextRequestTrace()
-    const content = await withTextRequestTrace(trace, () => runReviewStep(ctx.signal, signal, () => generateReviewCompletion(request.system, request.content,
+    const content = await withTextRequestTrace(trace, () => generateReviewCompletion(request.system, request.content,
       { modelRuntime: runtime, explicitModelSelection: true, signal, userId: ctx.userId, agentRunId: ctx.runId, action: request.action,
         novelId: ctx.novelId, chapterId: snapshot.chapter.id, targetType: 'continuity_report', targetId: id, temperature: 0.15,
-        reasoningEffort: runtime.reasoningEffort, beforeProviderDispatch: async () => { await current() } }, current)))
+        reasoningEffort: runtime.reasoningEffort, beforeProviderDispatch: async () => { await current() } }, current))
     return { content, usageIds: trace.records.map(record => record.usageId), billingKnown: textRequestsFinished(trace) }
   }
 }

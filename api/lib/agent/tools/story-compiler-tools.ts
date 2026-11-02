@@ -9,7 +9,7 @@ import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { writingVolumeDecisionSchema } from '../../../../shared/contracts/writing-volume-contracts.js'
 
-import { readerPromiseInputSchema, sceneTaskInputSchema, storyCharterInputSchema, storyStateSchema } from '../../../../shared/contracts/index.js'
+import { readerPromiseInputSchema, sceneTaskInputSchema, storyCharterSaveInputSchema, storyStateSchema } from '../../../../shared/contracts/index.js'
 import { REVIEW_MAX_OUTPUT_TOKENS } from '../review-completion.js'
 import { DataAccessError, prisma } from '../../prisma.js'
 import { activeChapterScope } from '../../data/internal.js'
@@ -95,8 +95,8 @@ export const storyCharterSaveTool = defineTool({
   name: 'story_charter_save',
   title: '保存创作宪章',
   description:
-    '创建或修订作品级 Story Charter。作者从一句题材描述开始规划新书、生成长纲或试制前三章时，应先收敛读者承诺、主角驱动力、持续冲突与题材边界后调用；不得把套路模板或未确认的真实事实写入。旧作局部编辑不要求补建。',
-  parameters: storyCharterInputSchema,
+    '创建或修订作品级 Story Charter。作者从一句题材描述开始规划新书、生成长纲或试制前三章时，应先收敛读者承诺、主角驱动力、持续冲突与题材边界后调用；不得把套路模板或未确认的真实事实写入。旧作局部编辑不要求补建。已有宪章只传需要修改的字段，未传字段保留；首次创建须提交完整必填字段。',
+  parameters: storyCharterSaveInputSchema,
   coerceArgs(raw) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw
     const asRecord = (value: unknown): Record<string, unknown> | null => {
