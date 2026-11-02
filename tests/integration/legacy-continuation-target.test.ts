@@ -55,9 +55,10 @@ describe.runIf(available)('legacy Continue identity on isolated PostgreSQL', () 
         payload: { toolName: scenario === 'body-write' ? 'chapter_write' : 'quality_analyze', callId: 'later-review', ok: false, failureCode: 'AI_PROVIDER_TIMEOUT' } } })
       for (const run of [source, wrapper]) await prisma.aiUsageLog.create({ data: {
         userId: f.userId, novelId: f.novelId, agentRunId: run.id, chapterId: f.chapterId,
+        targetType: 'chapter', targetId: f.chapterId,
         providerType: 'text', providerMode: 'custom', modelName: 'isolated-no-provider', action: 'agent3HumanityCritic',
         requestTokens: null, responseTokens: null, usageSource: 'unknown', billingStatus: 'settled',
-        creditChargeMilli: 1234, reservedCreditMilli: 0, durationMs: 10,
+        creditChargeMilli: 1234, reservedCreditMilli: 0, durationMs: 0,
       } })
       await prisma.agentRunEvent.create({ data: { runId: wrapper.id, seq: 3, type: 'run.paused', payload: {} } })
       const snapshot = async () => ({

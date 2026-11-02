@@ -212,8 +212,8 @@ export const storyCompilerPrepareTool = defineTool({
   async execute(ctx, args) {
     const db = ctx.transaction ?? prisma
     const scope = await readWritingScope(db, ctx)
-    if (scope.writing?.kind === 'needs_input') return { outcome: 'failed' as const, failureCode: 'SCOPE_NEEDS_INPUT',
-      summary: '准备前需要明确目标章节', output: '原任务尚未确认目标章节，本次未建立编译、未写正文。用ask_user只问一次要处理的具体章节，等待作者明确回答后沿原任务受理；不要猜targetOrderIndex、重发准备参数或重新创建任务。' }
+    if (scope.writing?.kind === 'needs_input') throw new DataAccessError(409, 'SCOPE_NEEDS_INPUT',
+      '原任务尚未确认目标章节，本次未建立编译、未写正文。用ask_user只问一次要处理的具体章节，等待作者明确回答后沿原任务受理；不要猜targetOrderIndex、重发准备参数或重新创建任务。')
     if (args.chapterId && args.targetOrderIndex !== undefined) {
       const frozen = scope.writing?.kind === 'bounded' && scope.writing.targets.find(target => target.orderIndex === args.targetOrderIndex)
       const chapter = frozen ? await db.chapter.findFirst({ where: { id: args.chapterId, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) },

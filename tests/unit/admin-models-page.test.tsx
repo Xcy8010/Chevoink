@@ -260,10 +260,13 @@ it('shows only one existing route editor and keeps hidden route drafts in the sa
 
 it('locates required field errors and retains the draft after a server rejection', async () => {
   mount('/admin/models?model=a&section=basic')
-  await screen.findByRole('textbox', { name: '显示名称' })
+  await waitFor(() => expect((screen.getByRole('textbox', { name: '显示名称' }) as HTMLInputElement).value).toBe('极速'))
   fireEvent.change(screen.getByRole('textbox', { name: '显示名称' }), { target: { value: '' } })
+  expect((screen.getByRole('textbox', { name: '显示名称' }) as HTMLInputElement).value).toBe('')
   fireEvent.click(screen.getByRole('button', { name: '计费' }))
-  fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: '计费' }).getAttribute('aria-current')).toBe('page'))
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '保存配置' })) })
+  expect(mocks.update).not.toHaveBeenCalled()
   await screen.findByRole('alert')
   const requiredField = await screen.findByRole('textbox', { name: '显示名称' })
   expect(requiredField.getAttribute('aria-invalid')).toBe('true')

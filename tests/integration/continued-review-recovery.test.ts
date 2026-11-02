@@ -87,7 +87,7 @@ describe.runIf(available)('ordinary Continue separates historical unknown billin
         const spec = buildTaskSpec({ runId: 'wrapper', novelId: f.novelId, chapterId: f.chapterId, prompt: '继续', authorWritingProtocol: 2 })
         const wrapper = await prisma.agentRun.create({ data: { userId: f.userId, novelId: f.novelId, sessionId: f.sessionId,
           chapterId: f.chapterId, status: 'paused', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop',
-          manuscriptRevision: 0, taskRootId: null, runtimeProtocolVersion: 0, startRequest: { prompt: '继续' }, taskSpec: runtimeJson(spec).value,
+          manuscriptRevision: 0, taskRootId: null, runtimeProtocolVersion: 0, startRequest: { prompt: '继续' }, taskSpec: JSON.parse(JSON.stringify(spec)),
           usage: { checkpoint: { pendingReviews: [{ chapterId: f.chapterId, revision: 1, toolName: 'quality_analyze', callId: 'wrapper-check', compilationId: null }] } } } })
         await prisma.agentMessage.create({ data: { runId: wrapper.id, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: '继续' }] } })
         await prisma.agentRunEvent.createMany({ data: [

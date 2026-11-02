@@ -187,7 +187,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       const result = await step(), failed = ['format', 'truncated', 'format-retry', 'stale-chapter', 'repair-stale', 'stale-source', 'single-quotes-stale', 'single-quotes-swapped'].includes(scenario)
       expect(result).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { summary: expect.stringContaining('连续性') } })
       if (cachedCalls) expect(await step()).toMatchObject({ kind: 'tool', result: { reviewCompleted: true, output: expect.stringContaining('复用已保存报告') } })
-      const expectedRequests = repairing && scenario !== 'repair-stale' || ['repair-stale', 'wrapped-report', 'format', 'truncated', 'single-quotes-stale', 'single-quotes-swapped'].includes(scenario) || correcting ? 2 : 1
+      const expectedRequests = repairing && scenario !== 'repair-stale' || ['repair-stale', 'format', 'truncated', 'single-quotes-stale', 'single-quotes-swapped'].includes(scenario) || correcting ? 2 : 1
       expect(fetchMock).toHaveBeenCalledTimes(expectedRequests)
       expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(expectedRequests)
       expect(corrections).toBe(correcting || scenario === 'single-quotes-stale' || scenario === 'single-quotes-swapped' ? 1 : 0)
@@ -202,7 +202,20 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         expect(originalReport.metadata).toMatchObject({ continuityReport: { revision: 1, complete: true, billingKnown: true, rawResponses: expect.any(Array) } })
       }
       if (scenario === 'full-report') expect(saved.validation).toMatchObject({ warningCount: 31, continuityReport: { opinions: Array.from({ length: 31 }, (_, i) => expect.objectContaining({ explanation: '原文承接意见 ' + i })) } })
-      if (scenario === 'wrapped-report') expect(saved.validation).toMatchObject({ continuityReport: { rawResponses: [expect.stringContaining('report'), expect.stringContaining('findings')] } })
+      if (scenario === 'wrapped-report') {
+        const raw = JSON.stringify({ report: { findings: [opinion()] } })
+        expect(saved.validation).toMatchObject({ continuityReport: { complete: true, billingKnown: true, rawResponses: [raw],
+          opinions: [opinion()], findings: [expect.objectContaining({ explanation: opinion().explanation, severity: opinion().severity })] } })
+        // A complete sole wrapper is decoded locally. Its one physical critic
+        // request/usage and one atomic report effect remain the real receipts.
+        const attempts = await prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId } }, include: { usageReceipt: true } })
+        expect(attempts).toHaveLength(1)
+        expect(attempts).toMatchObject([{ status: 'succeeded', usageReceipt: { source: 'reported', promptTokens: 10,
+          completionTokens: 0, settlementStatus: 'settled' } }])
+        expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'continuity_format_recovery' } })).toBe(0)
+        expect(await prisma.agentEffectReceipt.count({ where: { operation: { taskRootId: f.rootId, action: 'continuity_validate' } } })).toBe(1)
+        expect(await readTaskBudget(lease)).toMatchObject({ usedTokens: 10n, attempts: 1n, unresolvedAttempts: 0n })
+      }
       if (scenario === 'history-over-three') expect(saved.validation).toMatchObject({ checkRounds: 9 })
       if (correcting) expect(saved.validation).toMatchObject({ continuityReport: { opinions: [expect.objectContaining({ explanation: '原文承接意见 0' })], rawResponses: expect.any(Array) } })
       if (history) expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: history.id } })).toEqual(history)

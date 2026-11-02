@@ -340,9 +340,8 @@ describe('tool target recovery stays within the original grant', () => {
     const unresolved = spec('单独写这章内容')
     unresolved.scope.writing = { ...unresolved.scope.writing, kind: 'needs_input', targets: [] } as never
     db.agentRun.findFirst.mockResolvedValue({ ...current, chapterId: null, startRequest: { prompt: '单独写这章内容' }, taskSpec: unresolved })
-    const result = await storyCompilerPrepareTool.execute(ctx, { targetOrderIndex: 1, intentSummary: '写本章' })
-    expect(result).toMatchObject({ outcome: 'failed', failureCode: 'SCOPE_NEEDS_INPUT' })
-    expect(result.output).toContain('ask_user只问一次')
+    await expect(storyCompilerPrepareTool.execute(ctx, { targetOrderIndex: 1, intentSummary: '写本章' }))
+      .rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT', message: expect.stringContaining('ask_user只问一次') })
     expect(db.chapter.findFirst).not.toHaveBeenCalled()
     expect(db.storyCompilation.create).not.toHaveBeenCalled()
   })
