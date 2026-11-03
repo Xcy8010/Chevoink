@@ -4,6 +4,27 @@ import { chapterRevisionPrompt, nextChapterContinuationPrompt } from '../support
 import { shortSceneRequest } from '../support/writing-clarification-fixture.js'
 
 describe('fresh structured author-writing interpretation, protocol 2', () => {
+  it.each(['我授权你可以修改我正文1 2 3章的权利 你按照想法修改', '修改1 2 3章', '修订第1 2 3章',
+    '1章 2章 3章正文修改', '修改第一 二 三章', '修改第二卷第1 2 3章', '修改1\t2\t3章'])(
+    'keeps a whitespace-separated chapter list as exact ordinals: %s', prompt => {
+      expect(parseAuthorWritingRequest(prompt)).toMatchObject({ range: { kind: 'list', positions: [1, 2, 3],
+        ...(prompt.includes('卷') ? { volume: 2 } : {}) }, ambiguous: false, intent: 'revise' })
+    })
+  it.each(['写三章', '写3章', '写 3 章'])(
+    'retains a single spoken quantity: %s', prompt => {
+      expect(parseAuthorWritingRequest(prompt)).toMatchObject({ range: { kind: 'count', count: 3 }, intent: 'write' })
+    })
+  it.each(['不要修改1 2 3章', '读取1 2 3章', '给出修改1 2 3章的建议', '引用：“修改1 2 3章”。'])(
+    'does not promote a spaced list from denied, read-only, advisory or quoted text: %s', prompt => {
+      expect(parseAuthorWritingRequest(prompt)).toMatchObject({ range: null, hasAction: false, intent: null })
+    })
+  it('keeps every spaced exclusion and does not concatenate separate chapter numbers', () => {
+    expect(parseAuthorWritingRequest('修改第4章。不要修改1 2 3章。')).toMatchObject({
+      range: { kind: 'range', start: 4, count: 1 }, exclusions: ['不要修改1 2 3章'] })
+    expect(parseAuthorWritingExclusion('不要修改1 2 3章')).toEqual({ kind: 'list', positions: [1, 2, 3] })
+    expect(parseAuthorWritingRequest('修改1 2 3章').range).not.toMatchObject({ start: 123 })
+  })
+
   it.each([
     '仅修改第3章。请先读取前两章。不修改第1、2章。', '仅修改第3章。请先读取前两章。',
     '请先读取第1章。仅修改第3章。', '仅修改第3章。请先读取第1章。', '仅修改第3章，第1章提到一扇窗。',

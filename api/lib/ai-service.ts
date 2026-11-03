@@ -543,6 +543,12 @@ function supportsGlmThinking(model: string): boolean {
   return Boolean(version && (version.major > 4 || (version.major === 4 && version.minor >= 5)))
 }
 
+/** This model always reasons; version >= 4.5 is not proof of an off switch.
+ * https://docs.nvidia.com/nim/vision-language-models/latest/get-started/advanced/get-started-glm-5-3-flash.html */
+function isGlmThinkingOnly(model: string): boolean {
+  return model.trim().toLowerCase() === 'glm-5.3-flash'
+}
+
 function supportsGlmReasoningEffort(model: string): boolean {
   const version = parseGlmVersion(model)
   return Boolean(version && (version.major > 5 || (version.major === 5 && version.minor >= 2)))
@@ -575,10 +581,11 @@ function isAntLingFlashProvider(input: { provider?: string | null; providerBaseU
  * GLM 缓存无需请求参数；这里只避免旧版 GLM 收到仅 5.2+ 支持的 reasoning_effort。
  */
 export function buildProviderReasoningPayload(input: ProviderReasoningInput): Record<string, unknown> {
+  if (isGlmThinkingOnly(input.model) && input.reasoningEffort === 'none') return {}
   // Validated BYOK thinking=true describes capability, not a mandate for every
   // request. Critics must override it before the generic native branch.
   if (input.boundedReview && input.thinkingEnabled !== false
-    && (isDeepSeekProvider(input) || isMimoProvider(input) || isGlmProvider(input) && supportsGlmThinking(input.model))) {
+    && (isDeepSeekProvider(input) || isMimoProvider(input) || isGlmProvider(input) && supportsGlmThinking(input.model) && !isGlmThinkingOnly(input.model))) {
     return { thinking: { type: 'disabled' } }
   }
   if (input.reasoningParameterMode) return {
@@ -615,8 +622,19 @@ export function buildProviderReasoningPayload(input: ProviderReasoningInput): Re
 function buildReviewReasoningPayload(input: ProviderReasoningInput & {
   reasoningEfforts?: import('../../shared/contracts/index.js').ModelReasoningEffort[]
 }): Record<string, unknown> {
-  let hostname = ''
-  try { hostname = new URL(input.providerBaseUrl ?? '').hostname.toLowerCase() } catch { /* no protocol proof */ }
+  if (isGlmThinkingOnly(input.model)) return buildProviderReasoningPayload({ ...input, boundedReview: false })
+  let endpoint: URL | undefined
+  try { endpoint = new URL(input.providerBaseUrl ?? '') } catch { /* no protocol proof */ }
+  const hostname = endpoint?.hostname.toLowerCase() ?? ''
+  // YunShu's public status identifies New API rc.47; its OpenAI adaptor
+  // preserves these configured upstreams' thinking field. Protocol, not latency.
+  // https://github.com/QuantumNous/new-api/blob/v1.0.0-rc.47/relay/channel/openai/adaptor.go
+  // https://mimo.mi.com/docs/en-US/quick-start/usage-guide/other/deep-thinking
+  // https://api-docs.deepseek.com/api/create-chat-completion/
+  const yunshuSwitch = endpoint?.origin === 'https://yunshu.chevolink.com'
+    && !endpoint.username && !endpoint.password && !endpoint.search && !endpoint.hash
+    && endpoint.pathname.replace(/\/$/, '') === '/v1' && ['mimo-v2.6-flash', 'deepseek-flash'].includes(input.model)
+  if (yunshuSwitch && input.thinkingEnabled !== false) return { thinking: { type: 'disabled' } }
   // Verified endpoint/model pairs; a proxy or a matching name is not proof.
   // https://cloud.tencent.com/document/product/1823/132248
   const tokenHubModels = new Set(['deepseek/deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-pro',
@@ -665,7 +683,7 @@ export function resolveBoundedReviewReasoningEffort(
   effort: import('../../shared/contracts/index.js').ModelReasoningEffort,
   input: { provider?: string | null; providerBaseUrl?: string | null; model: string },
 ): import('../../shared/contracts/index.js').ModelReasoningEffort {
-  if (!boundedReview || effort === 'none') return effort
+  if (!boundedReview || effort === 'none' || isGlmThinkingOnly(input.model)) return effort
   // 判定集与 buildProviderReasoningPayload 的显式分支保持一致，避免“判定 none 但走通用分支”的错配
   return isMimoProvider(input) || isDeepSeekProvider(input) || isGlmProvider(input) ? 'none' : effort
 }
@@ -860,9 +878,11 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     || frozenRequest.body.stream !== true || !Array.isArray(frozenRequest.body.messages) || frozenRequest.body.tools !== undefined)) {
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原辅助请求与冻结路由不匹配。')
   }
-  const isolatedReview = !frozenRequest && params.tools.length === 0 && params.durableExecution?.auxiliaryStep === params.usageLog.action
+  const auxiliaryReview = params.tools.length === 0 && params.durableExecution?.auxiliaryStep === params.usageLog.action
     && ['quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry',
       'continuity_critic', 'continuity_format_recovery', 'continuity_evidence_correction', 'continuity_reassessment', 'continuity_repair', 'continuity_repair_retry', 'continuity_coordinated_revision'].includes(params.usageLog.action)
+  const isolatedReview = !frozenRequest && auxiliaryReview
+  const reviewTransport = auxiliaryReview || params.tools.length === 0 && params.boundedReview === true
   const reviewReasoning = isolatedReview ? buildReviewReasoningPayload({ ...params, model,
     providerBaseUrl: params.providerBaseUrl ?? env.aiTextBaseUrl, reasoningEffort }) : undefined
   const body: Record<string, unknown> = frozenRequest ? structuredClone(frozenRequest.body) : {
@@ -935,6 +955,10 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   }
   let response: Response
   let providerDispatched = false
+  const firstResponse = reviewTransport ? new AbortController() : undefined
+  const requestSignal = firstResponse
+    ? params.signal ? AbortSignal.any([params.signal, firstResponse.signal]) : firstResponse.signal
+    : params.signal
   try {
     await assertGoalProviderAdmission()
     params.signal?.throwIfAborted()
@@ -946,10 +970,16 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
         Authorization: `Bearer ${params.providerApiKey ?? env.aiTextApiKey}`,
       },
       body: encodedBody,
-      signal: params.signal,
+      signal: requestSignal,
     }
-    response = isLocalModelProvider(params.provider ?? '') ? await localModelFetch({ userId: params.usageLog.userId,
-      provider: params.provider!, baseUrl: params.providerBaseUrl!, apiKey: params.providerApiKey!, body: encodedBody, signal: params.signal }) : await fetch(endpoint, requestInit)
+    // Reviews can stream for longer than a single wait window. Bound only the
+    // first response here; each body read has its own idle watchdog below.
+    const firstResponseTimer = firstResponse ? setTimeout(() => firstResponse.abort(new DataAccessError(504, 'AI_PROVIDER_TIMEOUT',
+      '模型未在等待时间内开始响应，已中止本次请求；检查未完成。')), env.aiTextTimeoutMs) : undefined
+    try {
+      response = isLocalModelProvider(params.provider ?? '') ? await localModelFetch({ userId: params.usageLog.userId,
+        provider: params.provider!, baseUrl: params.providerBaseUrl!, apiKey: params.providerApiKey!, body: encodedBody, signal: requestSignal }) : await fetch(endpoint, requestInit)
+    } finally { clearTimeout(firstResponseTimer) }
   } catch (error) {
     if (error instanceof LocalModelTransportError && !error.dispatched) providerDispatched = false
     await durable?.interrupted(params.signal?.aborted ? 'aborted' : 'transport_error')
@@ -967,7 +997,15 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   }
 
   if (!response.ok || !response.body) {
-    const payload = await parseJsonResponse(response)
+    let payload: JsonProviderPayload
+    try { payload = await parseJsonResponse(response, reviewTransport ? env.aiTextStreamIdleMs : undefined) }
+    catch (error) {
+      if (reviewTransport) {
+        await durable?.interrupted(params.signal?.aborted ? 'aborted' : 'stream_error')
+        await markUnobservedUsage(prepared?.id)
+      }
+      throw error
+    }
     const quotaRejected = isProviderQuotaError(payload.error ?? (!response.ok ? payload : undefined))
     const reportedPrompt = payload.usage?.prompt_tokens
     const reportedCompletion = payload.usage?.completion_tokens
@@ -1173,7 +1211,10 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   })
   try {
     for (;;) {
-      const { done, value } = await reader.read()
+      const { done, value } = await (reviewTransport
+        ? readWithIdleTimeout(reader, env.aiTextStreamIdleMs, () => new DataAccessError(504, 'AI_PROVIDER_TIMEOUT',
+          '模型响应长时间没有新内容，已中止本次请求；检查未完成。'))
+        : reader.read())
       if (done) {
         break
       }
@@ -1270,7 +1311,7 @@ async function generateGoalTextCompletion(systemPrompt: string, userPrompt: stri
   if (options.authorizedRequest || options.singlePhysicalRequest) return generateTextCompletionImpl(systemPrompt, userPrompt, {
     ...options, ...(review ? { multiplierBps: undefined } : {}), modelRuntime,
   })
-  if (review) return invokeExactRouteWithRateLimitRetry({ messages: [], tools: [], model: modelRuntime.modelName ?? env.aiTextModel,
+  if (review) return invokeExactRouteWithRateLimitRetry({ messages: [], tools: [], boundedReview: true, model: modelRuntime.modelName ?? env.aiTextModel,
     provider: modelRuntime.provider, providerBaseUrl: modelRuntime.baseUrl, providerApiKey: modelRuntime.apiKey,
     weightedRoute: modelRuntime.weightedRoute, signal: options.signal, usageLog: { userId: options.userId, action: options.action, modelTier: modelRuntime.tier } }, route => {
     return generateTextCompletionImpl(systemPrompt, userPrompt, { ...options, multiplierBps: undefined,

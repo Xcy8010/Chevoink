@@ -104,6 +104,15 @@ describe('供应商推理参数适配', () => {
     })
   })
 
+  it.each([undefined, 'native', 'omit'] as const)('never sends an off request to GLM-5.3-Flash with %s protocol', reasoningParameterMode => {
+    const route = { provider: 'zhipu', model: 'glm-5.3-flash', reasoningParameterMode }
+    expect(buildProviderReasoningPayload({ ...route, reasoningEffort: 'none', boundedReview: true, thinkingEnabled: true })).toEqual({})
+    expect(buildProviderReasoningPayload({ ...route, reasoningEffort: 'none' })).toEqual({})
+    expect(buildProviderReasoningPayload({ ...route, reasoningEffort: 'high', boundedReview: true, thinkingEnabled: true }))
+      .toEqual(buildProviderReasoningPayload({ ...route, reasoningEffort: 'high', thinkingEnabled: true }))
+    expect(resolveBoundedReviewReasoningEffort(true, 'high', route)).toBe('high')
+  })
+
   it('DeepSeek 保持既有参数语义', () => {
     expect(buildProviderReasoningPayload({ provider: 'deepseek', model: 'deepseek-v4-flash', reasoningEffort: 'high' })).toEqual({
       thinking: { type: 'enabled' },

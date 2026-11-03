@@ -68,9 +68,9 @@ function activatedFixture(durable = false) {
   return goal
 }
 describe('continue API exact target', () => {
-  it('a new bare Continue resumes the saved task instead of creating a new task or paid model configuration', async () => {
+  it.each(['继续', '继续任务', '请继续执行当前任务。'])('a new bare Continue %s resumes the saved task instead of creating a new task or paid model configuration', async prompt => {
     mocks.find.mockReset().mockResolvedValue(run)
-    expect(await startLoopRun('u', { sessionId: 's', novelId: 'n', mode: 'build', prompt: '继续' }, { humanOrigin: 'http' }))
+    expect(await startLoopRun('u', { sessionId: 's', novelId: 'n', mode: 'build', prompt }, { humanOrigin: 'http' }))
       .toMatchObject({ runId: run.id, status: 'running' })
     expect(mocks.execute).toHaveBeenCalledOnce()
     expect(mocks.execute.mock.calls[0][0]).toMatchObject({ runId: run.id, resume: true, authorContinue: { eventId: 'pause-72', afterSeq: 72 } })

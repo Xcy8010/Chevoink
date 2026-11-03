@@ -242,8 +242,8 @@ describe('same-state admission and continuation', () => {
     expect(guard.previous(guard.key('write', false))).toBe('r2')
   })
   it('recognizes a pure continue instruction, not a fresh request or a question about continuing', () => {
-    for (const text of ['继续', '请继续完成之前的任务。', '继续执行', '接着完成剩余工作']) expect(isContinuationRequest(text)).toBe(true)
-    for (const text of ['继续写一个新故事', '为什么不能继续？', '不要继续', '解释继续按钮']) expect(isContinuationRequest(text)).toBe(false)
+    for (const text of ['继续', '继续任务', '继续执行当前任务', '请接着处理这个工作。', '请继续完成之前的任务。', '继续执行', '接着完成剩余工作']) expect(isContinuationRequest(text), text).toBe(true)
+    for (const text of ['继续写一个新故事', '继续任务并修改第四章', '继续其他任务', '为什么不能继续？', '不要继续', '解释继续按钮']) expect(isContinuationRequest(text), text).toBe(false)
     expect(promisesFurtherAction('第七章仍为空，先写入正文。')).toBe(true)
     expect(promisesFurtherAction('第七章已完成落库与校验。')).toBe(false)
   })

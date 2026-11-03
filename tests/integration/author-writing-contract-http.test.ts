@@ -176,6 +176,30 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
 })
 
 describe.skipIf(!available)('unified fresh HTTP author contract with actual PostgreSQL writes', () => {
+  it('prepares and edits only the explicitly spaced first-three-chapter list', () => fixture(
+    '我授权你可以修改我正文1 2 3章的权利 你按照想法修改', async (ctx, before) => {
+      const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
+      const frozen = taskSpecSchema.parse(run.taskSpec)
+      expect(frozen).toMatchObject({ intent: 'revise', scope: { writing: { kind: 'bounded', repairAuthorized: true,
+        targets: before.slice(0, 3).map(chapter => ({ orderIndex: chapter.orderIndex, chapterId: chapter.id })) } } })
+      expect(frozen.scope.writing?.targets).toHaveLength(3)
+      for (const chapter of before.slice(0, 3)) {
+        expect((await storyCompilerPrepareTool.execute({ ...ctx, callId: 'prepare-spaced-' + chapter.orderIndex },
+          { chapterId: chapter.id, intentSummary: '修订授权合成章' })).outcome).not.toBe('failed')
+        expect((await chapterEditRangeTool.execute({ ...ctx, callId: 'edit-spaced-' + chapter.orderIndex },
+          { chapterId: chapter.id, oldText: '合成正文', newText: '修订正文' })).outcome).not.toBe('failed')
+        expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({
+          content: chapter.content.replace('合成正文', '修订正文'), revision: chapter.revision + 1 })
+      }
+      await expect(storyCompilerPrepareTool.execute({ ...ctx, callId: 'deny-spaced-prepare-four' },
+        { chapterId: before[3].id, intentSummary: '未授权合成章' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+      await expect(chapterEditRangeTool.execute({ ...ctx, callId: 'deny-spaced-edit-four' },
+        { chapterId: before[3].id, oldText: '钟声传来', newText: '未授权改稿' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+      expect(await prisma.chapter.findUniqueOrThrow({ where: { id: before[3].id } })).toEqual(before[3])
+      expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(4)
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec).toEqual(run.taskSpec)
+    }))
+
   it('atomically rejects a seven-patch punctuation conflict and applies only the corrected current draft batch', () => fixture(directoryContinuationPrompt, async (ctx, before) => {
     await storyCompilerPrepareTool.execute(ctx, { targetOrderIndex: 5, intentSummary: '新章的合成编辑定位回归', volumeDecision: { kind: 'continue', reason: '原卷续写' } })
     const compilation = await prisma.storyCompilation.findFirstOrThrow({ where: { runId: ctx.runId, status: 'active' } })

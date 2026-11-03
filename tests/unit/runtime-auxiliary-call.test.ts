@@ -74,6 +74,129 @@ describe('durable reviewer reasoning compatibility without rewriting old paid re
     expect(fetch).toHaveBeenCalledOnce()
   })
 
+  it.each(steps.flatMap(step => (['standard', 'performance'] as const).map(tier => ({ step, tier }))))('disables thinking for the verified YunShu $tier $step route without replacing it', async ({ step, tier }) => {
+    const selected = { ...runtime, tier, provider: 'Xiaomi_YunShu', modelName: 'mimo-v2.6-flash', baseUrl: 'https://yunshu.chevolink.com/v1',
+      reasoningEffort: 'medium' as const, reasoningEfforts: ['low', 'medium', 'high'] as Array<'low' | 'medium' | 'high'>, multiplierBps: 15000 }
+    mocks.runtime.mockResolvedValue(selected)
+    const saved = structuredClone(selected)
+    const route = auxiliaryRouteForRuntime({ ...selected, honorAssignedReasoning: true }, { tier, customModelId: null, reasoningEffort: 'medium' }, 1024)
+    const selectedPrice = { ...price, modelTier: tier, multiplierBps: 15000 }
+    await callDurableAuxiliary({ ...input(step), route, price: selectedPrice })
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+    expect(body).toMatchObject({ model: selected.modelName, thinking: { type: 'disabled' }, max_completion_tokens: 1024 })
+    expect(body).not.toHaveProperty('reasoning_effort')
+    expect(body).not.toHaveProperty('tools')
+    expect(vi.mocked(fetch).mock.calls[0][0]).toBe(selected.baseUrl + '/chat/completions')
+    expect(mocks.begin.mock.calls[0][0]).toMatchObject({ provider: selected.provider, model: selected.modelName,
+      action: step, price: selectedPrice, request: { body } })
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(selected).toEqual(saved)
+    expect(route.reasoningEffort).toBe('medium')
+  })
+
+  it.each(['new', 'prepared'].flatMap(state => (['headers', 'sse', 'json-error'] as const).map(phase => ({ state, phase }))))('bounds a silent $state durable review $phase without replaying its provider request', async ({ state, phase }) => {
+    vi.useFakeTimers()
+    try {
+      const interrupted = vi.fn(async () => {})
+      mocks.begin.mockImplementation(async request => {
+        await request.admit()
+        return { replay: undefined, observe: vi.fn(async () => {}), finish: async response => response,
+          interrupted, rejected: vi.fn(async () => {}) }
+      })
+      const fetcher = vi.fn((_url: unknown, init?: RequestInit) => {
+        if (phase === 'headers') return new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason), { once: true }))
+        return Promise.resolve(new Response(new ReadableStream({ start(controller) {
+          init!.signal!.addEventListener('abort', () => controller.error(init!.signal!.reason), { once: true })
+          controller.enqueue(new TextEncoder().encode(phase === 'sse' ? 'data: {"choices":[]}\n\n' : '{"error":'))
+        } }), { status: phase === 'json-error' ? 502 : 200, headers: { 'content-type': phase === 'sse' ? 'text/event-stream' : 'application/json' } }))
+      })
+      vi.stubGlobal('fetch', fetcher)
+      const request = input()
+      const saved = { endpoint: request.route.baseUrl + '/chat/completions', body: { model: request.route.model,
+        stream: true, thinking: { type: 'enabled' }, messages: [{ role: 'user', content: 'Original prepared review' }] } }
+      if (state === 'prepared') {
+        const snapshot = { input: { request: saved } }
+        mocks.existing = { status: 'prepared', inputSnapshot: snapshot, inputHash: runtimeJson(snapshot).hash }
+      }
+      const original = structuredClone(mocks.existing)
+      const assertion = expect(callDurableAuxiliary(request)).rejects.toMatchObject({ code: 'AI_PROVIDER_TIMEOUT' })
+      await vi.advanceTimersByTimeAsync(phase === 'headers' ? env.aiTextTimeoutMs : env.aiTextStreamIdleMs)
+      await assertion
+      expect(interrupted).toHaveBeenCalledOnce()
+      expect(mocks.begin).toHaveBeenCalledOnce()
+      expect(fetcher).toHaveBeenCalledOnce()
+      expect(request.route.honorReasoningEffort).toBe(true)
+      expect(mocks.existing).toEqual(original)
+      if (state === 'prepared') expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toEqual(saved.body)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { vi.useRealTimers() }
+  })
+
+  it.each(['new', 'prepared'].flatMap(state => (['headers', 'sse', 'json-error'] as const).map(phase => ({ state, phase }))))('preserves author cancellation during $state durable review $phase', async ({ state, phase }) => {
+    vi.useFakeTimers()
+    try {
+      const author = new AbortController(), reason = new Error('author cancelled review')
+      const interrupted = vi.fn(async () => {})
+      mocks.begin.mockImplementation(async request => {
+        await request.admit()
+        return { replay: undefined, observe: vi.fn(async () => {}), finish: async response => response,
+          interrupted, rejected: vi.fn(async () => {}) }
+      })
+      const fetcher = vi.fn((_url: unknown, init?: RequestInit) => {
+        if (phase === 'headers') return new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason), { once: true }))
+        return Promise.resolve(new Response(new ReadableStream({ start(controller) {
+          init!.signal!.addEventListener('abort', () => controller.error(init!.signal!.reason), { once: true })
+          controller.enqueue(new TextEncoder().encode(phase === 'sse' ? 'data: {"choices":[]}\n\n' : '{"error":'))
+        } }), { status: phase === 'json-error' ? 502 : 200, headers: { 'content-type': phase === 'sse' ? 'text/event-stream' : 'application/json' } }))
+      })
+      vi.stubGlobal('fetch', fetcher)
+      const request = { ...input(), signal: author.signal }
+      const saved = { endpoint: request.route.baseUrl + '/chat/completions', body: { model: request.route.model,
+        stream: true, thinking: { type: 'enabled' }, messages: [{ role: 'user', content: 'Original prepared review' }] } }
+      if (state === 'prepared') {
+        const snapshot = { input: { request: saved } }
+        mocks.existing = { status: 'prepared', inputSnapshot: snapshot, inputHash: runtimeJson(snapshot).hash }
+      }
+      const original = structuredClone(mocks.existing)
+      const assertion = expect(callDurableAuxiliary(request)).rejects.toBe(reason)
+      await vi.advanceTimersByTimeAsync(0)
+      author.abort(reason)
+      await assertion
+      expect(interrupted).toHaveBeenCalledWith('aborted', ...(phase === 'sse' ? [expect.any(Object)] : []))
+      expect(mocks.begin).toHaveBeenCalledOnce()
+      expect(fetcher).toHaveBeenCalledOnce()
+      expect(request.route.honorReasoningEffort).toBe(true)
+      expect(mocks.existing).toEqual(original)
+      if (state === 'prepared') expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toEqual(saved.body)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('lets active durable reviews finish after both former aggregate deadlines', async () => {
+    vi.useFakeTimers()
+    try {
+      const duration = Math.max(360_000, env.aiTextTimeoutMs) + env.aiTextStreamIdleMs / 2
+      let interval: ReturnType<typeof setInterval>, completion: ReturnType<typeof setTimeout>
+      vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init?: RequestInit) => new Response(new ReadableStream({ start(controller) {
+        const push = (frame: unknown) => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(frame)}\n\n`))
+        init!.signal!.addEventListener('abort', () => controller.error(init!.signal!.reason), { once: true })
+        interval = setInterval(() => push({ choices: [{ delta: { reasoning_content: 'Synthetic review in progress.' } }] }), env.aiTextStreamIdleMs / 2)
+        completion = setTimeout(() => {
+          clearInterval(interval)
+          push({ choices: [{ delta: { content: result.content }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 1 } })
+          controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'))
+          controller.close()
+        }, duration)
+      }, cancel() { clearInterval(interval); clearTimeout(completion) } }), { headers: { 'content-type': 'text/event-stream' } })))
+      const response = callDurableAuxiliary(input())
+      await vi.advanceTimersByTimeAsync(duration)
+      await expect(response).resolves.toMatchObject({ content: result.content, usage: { promptTokens: 10, completionTokens: 1 } })
+      expect(fetch).toHaveBeenCalledOnce()
+      expect(mocks.begin).toHaveBeenCalledOnce()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { vi.useRealTimers() }
+  })
+
   it.each(['publish_advice', 'research_dossier_synthesis', 'creative_critique', 'creative_revision'] as const)('keeps unrelated %s admission on the ordinary DB budget', async step => {
     await callDurableAuxiliary({ ...input(), step })
     expect(mocks.manuscriptBudget).toHaveBeenCalledExactlyOnceWith(undefined)
@@ -214,9 +337,9 @@ describe('durable reviewer reasoning compatibility without rewriting old paid re
     expect(mocks.existing).toEqual(original)
   })
 
-  it.each(steps)('uses selected high for a thinking-only route in %s without an off-mode probe', async step => {
+  it.each(steps.flatMap(step => ['unknown', 'yunshu-glm'].map(kind => ({ step, kind }))))('uses selected high for a $kind thinking-only route in $step without an off-mode probe', async ({ step, kind }) => {
     const request = input(step)
-    request.route = { ...request.route, provider: 'fixture', model: 'thinking-only', baseUrl: 'https://unknown.example/v1' }
+    request.route = { ...request.route, provider: kind === 'yunshu-glm' ? 'zhipu_YunShu' : 'fixture', model: kind === 'yunshu-glm' ? 'glm-5.3-flash' : 'thinking-only', baseUrl: kind === 'yunshu-glm' ? 'https://yunshu.chevolink.com/v1' : 'https://unknown.example/v1' }
     mocks.runtime.mockResolvedValue({ ...runtime, provider: request.route.provider, modelName: request.route.model, baseUrl: request.route.baseUrl,
       reasoningEfforts: ['high'], reasoningParameterMode: 'native', thinkingEnabled: false })
     await expect(callDurableAuxiliary(request)).resolves.toMatchObject({ content: result.content })
@@ -308,6 +431,7 @@ describe('selected paid review model through resolution, frozen route and actual
   })
   const chosenModels = [
     { tier: 'builtin_1234567890abcdef' as const, provider: 'Xiaomi', modelName: 'mimo-v2.6-flash', baseUrl: 'https://api.xiaomimimo.com/v1', outputTokenParameter: 'max_completion_tokens' as const },
+    { tier: 'speed' as const, provider: 'deepseek_YunShu', modelName: 'deepseek-flash', baseUrl: 'https://yunshu.chevolink.com/v1', outputTokenParameter: 'max_tokens' as const },
     { tier: 'builtin_abcdef1234567890' as const, provider: 'Zhipu', modelName: 'glm-5', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', outputTokenParameter: 'max_tokens' as const },
   ]
   it.each(chosenModels.flatMap(chosen => steps.flatMap(step => ['runtime', 'selection'].map(entry => ({ chosen, step, entry })))))(

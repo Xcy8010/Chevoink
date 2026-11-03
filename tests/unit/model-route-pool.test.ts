@@ -175,6 +175,40 @@ describe('built-in route pools', () => {
     expect(invoke.mock.calls[0][0].signal).toBe(invoke.mock.calls[1][0].signal)
   })
 
+  it.each([false, true])('lets an active review finish after six minutes on a %s pooled route', async pooled => {
+    vi.useFakeTimers()
+    if (!pooled) findFirst.mockResolvedValue(null)
+    const controller = new AbortController()
+    const timeout = vi.spyOn(AbortSignal, 'timeout')
+    const invoke = vi.fn(async ({ signal }: ChatWithToolsParams) => {
+      await new Promise(resolve => setTimeout(resolve, 420_000))
+      signal!.throwIfAborted()
+      return 'complete review'
+    })
+    const pending = withModelRoutePool({ ...params, boundedReview: true, signal: controller.signal,
+      usageLog: { ...params.usageLog, userId: `active-review-${pooled}` } }, invoke)
+    await vi.advanceTimersByTimeAsync(420_000)
+    expect(await pending).toBe('complete review')
+    expect(timeout).not.toHaveBeenCalled()
+    expect(invoke).toHaveBeenCalledOnce()
+    expect(invoke.mock.calls[0][0].signal).toBe(controller.signal)
+  })
+
+  it('preserves author cancellation during a review cooldown without dispatching a retry', async () => {
+    vi.useFakeTimers()
+    findFirst.mockResolvedValue(null)
+    const controller = new AbortController()
+    const invoke = vi.fn().mockRejectedValue(new ModelRouteRejected(429))
+    const pending = withModelRoutePool({ ...params, boundedReview: true, signal: controller.signal,
+      usageLog: { ...params.usageLog, userId: 'review-stop' } }, invoke)
+    const assertion = expect(pending).rejects.toThrow('author stopped')
+    await vi.advanceTimersByTimeAsync(30_000)
+    controller.abort(new Error('author stopped'))
+    await assertion
+    await vi.advanceTimersByTimeAsync(90_000)
+    expect(invoke).toHaveBeenCalledOnce()
+  })
+
   it('stops after the builtin retry is rejected and applies its cooldown only to the exact route', async () => {
     vi.useFakeTimers()
     findFirst.mockResolvedValue(null)

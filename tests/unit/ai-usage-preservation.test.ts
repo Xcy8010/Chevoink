@@ -173,6 +173,9 @@ describe('review reasoning compatibility after actual model resolution', () => {
     { label: 'official DeepSeek', runtime: { provider: 'deepseek', modelName: 'deepseek-v4-flash', baseUrl: 'https://api.deepseek.com/v1', reasoningEfforts: ['low', 'high'], reasoningParameterMode: undefined, thinkingEnabled: undefined }, payload: { thinking: { type: 'disabled' } } },
     { label: 'verified Tencent TokenHub DeepSeek', runtime: { provider: 'custom', modelName: 'deepseek/deepseek-flash', baseUrl: 'https://tokenhub.tencentmaas.com/v1', reasoningEfforts: ['low', 'high', 'max'], reasoningParameterMode: 'native', thinkingEnabled: false }, payload: { thinking: { type: 'disabled' } } },
     { label: 'documented TokenHub Flash version', runtime: { modelName: 'deepseek-v4-flash-202605', baseUrl: 'https://tokenhub.tencentmaas.com/v1', reasoningEfforts: ['high'] }, payload: { thinking: { type: 'disabled' } } },
+    { label: 'verified YunShu DeepSeek Flash', runtime: { provider: 'deepseek_YunShu', modelName: 'deepseek-flash', baseUrl: 'https://yunshu.chevolink.com/v1', reasoningParameterMode: undefined, thinkingEnabled: undefined, reasoningEfforts: ['low', 'high'] }, payload: { thinking: { type: 'disabled' } } },
+    { label: 'verified YunShu MiMo', runtime: { provider: 'Xiaomi_YunShu', modelName: 'mimo-v2.6-flash', baseUrl: 'https://yunshu.chevolink.com/v1', reasoningParameterMode: undefined, thinkingEnabled: undefined, reasoningEfforts: ['low', 'medium', 'high'] }, payload: { thinking: { type: 'disabled' } } },
+    { label: 'verified YunShu MiMo trailing slash', runtime: { modelName: 'mimo-v2.6-flash', baseUrl: 'https://yunshu.chevolink.com/v1/', thinkingEnabled: true }, payload: { thinking: { type: 'disabled' } } },
     { label: 'official MiMo', runtime: { provider: 'xiaomi', modelName: 'mimo-v2.6-flash', baseUrl: 'https://api.xiaomimimo.com/v1', reasoningParameterMode: undefined, thinkingEnabled: undefined }, payload: { thinking: { type: 'disabled' } } },
     { label: 'official GLM', runtime: { provider: 'zhipu', modelName: 'glm-4.6', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', reasoningParameterMode: undefined, thinkingEnabled: undefined }, payload: { thinking: { type: 'disabled' } } },
     { label: 'validated native none', runtime: { thinkingEnabled: true }, payload: { reasoning_effort: 'none' } },
@@ -204,6 +207,21 @@ describe('review reasoning compatibility after actual model resolution', () => {
     { label: 'TokenHub undocumented version', runtime: { modelName: 'deepseek-v4-flash-202606', baseUrl: 'https://tokenhub.tencentmaas.com/v1', reasoningEfforts: ['high'] }, payload: { reasoning_effort: 'high' } },
     { label: 'TokenHub lookalike host', runtime: { modelName: 'deepseek/deepseek-flash', baseUrl: 'https://tokenhub.tencentmaas.com.example/v1', reasoningEfforts: ['high'] }, payload: { reasoning_effort: 'high' } },
     { label: 'TokenHub insecure transport', runtime: { modelName: 'deepseek/deepseek-flash', baseUrl: 'http://tokenhub.tencentmaas.com/v1', reasoningEfforts: ['high'] }, payload: { reasoning_effort: 'high' } },
+    ...[
+      'https://proxy.example/v1', 'http://yunshu.chevolink.com/v1', 'https://yunshu.chevolink.com.example/v1',
+      'https://yunshu.chevolink.com:8443/v1', 'https://yunshu.chevolink.com/other',
+      'https://yunshu.chevolink.com/v1?route=other', 'https://yunshu.chevolink.com/v1#other',
+      'https://fixture@yunshu.chevolink.com/v1',
+    ].map(baseUrl => ({ label: `unverified MiMo route ${baseUrl}`, runtime: { provider: 'Xiaomi_YunShu', modelName: 'mimo-v2.6-flash', baseUrl,
+      reasoningParameterMode: undefined, thinkingEnabled: undefined, reasoningEfforts: ['high'] as Array<'high'> }, payload: { thinking: { type: 'enabled' } } })),
+    { label: 'YunShu GLM thinking-only', runtime: { provider: 'zhipu_YunShu', modelName: 'glm-5.3-flash', baseUrl: 'https://yunshu.chevolink.com/v1', reasoningParameterMode: undefined, thinkingEnabled: undefined, reasoningEfforts: ['low', 'high'] }, payload: { thinking: { type: 'enabled' }, reasoning_effort: 'low' } },
+    { label: 'official GLM thinking-only', runtime: { provider: 'zhipu', modelName: 'glm-5.3-flash', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', reasoningParameterMode: undefined, thinkingEnabled: undefined, reasoningEfforts: ['low', 'high'] }, payload: { thinking: { type: 'enabled' }, reasoning_effort: 'low' } },
+    { label: 'GLM thinking-only native none metadata', runtime: { provider: 'zhipu', modelName: 'glm-5.3-flash', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', reasoningEffort: 'none', reasoningEfforts: ['none'] }, payload: {} },
+    { label: 'YunShu visual thinking-only', runtime: { provider: 'zhipu_YunShu', modelName: 'glm-4.1v-thinking', baseUrl: 'https://yunshu.chevolink.com/v1', reasoningParameterMode: undefined, thinkingEnabled: undefined, reasoningEfforts: ['high'] }, payload: {} },
+    { label: 'YunShu R1 thinking-only', runtime: { provider: 'deepseek_YunShu', modelName: 'deepseek-r1', baseUrl: 'https://yunshu.chevolink.com/v1', reasoningParameterMode: undefined, thinkingEnabled: true, reasoningEfforts: ['high'] }, payload: { thinking: { type: 'enabled' }, reasoning_effort: 'high' } },
+    { label: 'YunShu reasoner thinking-only', runtime: { provider: 'deepseek', modelName: 'deepseek-reasoner', baseUrl: 'https://yunshu.chevolink.com/v1', reasoningParameterMode: undefined, thinkingEnabled: true, reasoningEfforts: ['high'] }, payload: { thinking: { type: 'enabled' }, reasoning_effort: 'high' } },
+    { label: 'YunShu unsupported model', runtime: { modelName: 'synthetic-thinking-only', baseUrl: 'https://yunshu.chevolink.com/v1', reasoningEfforts: ['high'] }, payload: { reasoning_effort: 'high' } },
+    { label: 'YunShu explicit switch rejection', runtime: { modelName: 'mimo-v2.6-flash', baseUrl: 'https://yunshu.chevolink.com/v1', reasoningParameterMode: 'omit', thinkingEnabled: false, reasoningEfforts: ['high'] }, payload: {} },
     { label: 'unknown incomplete capabilities', runtime: { reasoningParameterMode: undefined, thinkingEnabled: undefined, reasoningEfforts: [] }, payload: { reasoning_effort: 'high' } },
     { label: 'official thinking-only reasoner', runtime: { provider: 'deepseek', modelName: 'deepseek-reasoner', baseUrl: 'https://api.deepseek.com/v1', reasoningParameterMode: undefined, thinkingEnabled: true, reasoningEfforts: ['high'] }, payload: { thinking: { type: 'enabled' }, reasoning_effort: 'high' } },
     { label: 'verified rejection of thinking switch', runtime: { provider: 'Ant Ling', modelName: 'Ling-3.0-flash', baseUrl: 'https://api.ant-ling.com/v1', reasoningEfforts: ['high'] }, payload: { reasoning_effort: 'high' } },
@@ -346,6 +364,30 @@ describe('review reasoning compatibility after actual model resolution', () => {
     expect(mocks.runtime).not.toHaveBeenCalled()
     expect(selected.reasoningEffort).toBe('high')
     expect(frozen).toEqual(original)
+  })
+
+  it.each(['standard', 'performance'] as const)('keeps the YunShu %s main default and actual review usage across all review phases', async tier => {
+    const modelRuntime = qualityRuntime({ tier, provider: 'Xiaomi_YunShu', modelName: 'mimo-v2.6-flash', baseUrl: 'https://yunshu.chevolink.com/v1',
+      reasoningEffort: 'medium', reasoningEfforts: ['low', 'medium', 'high'], reasoningParameterMode: undefined, thinkingEnabled: undefined, multiplierBps: 15000 })
+    const original = structuredClone(modelRuntime)
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => qualityResponse())
+    vi.stubGlobal('fetch', fetcher)
+    const actions = ['agent3HumanityCritic', 'agent3HumanityFormatRecovery', 'agent3HumanityEvidenceCorrection', 'agent3HumanityRevision', 'agent3HumanityRevisionRetry',
+      'agent3ContinuityCritic', 'agent3ContinuityCriticSecondPass', 'agent3ContinuityRepair', 'agent3ContinuityRepairRetry']
+      .flatMap(action => [action, `${action}OutputRecovery`, `${action}EmptyRecovery`])
+    for (const action of ['mainWriting', ...actions, 'mainWriting']) await generateTextCompletion('Synthetic rules', 'Synthetic full chapter', { userId: 'test', action, modelRuntime })
+    const bodies = fetcher.mock.calls.map(call => JSON.parse(String(call[1]?.body)))
+    expect(bodies[0]).toEqual(bodies.at(-1))
+    expect(bodies[0]).toMatchObject({ thinking: { type: 'enabled' }, model: modelRuntime.modelName })
+    for (const body of bodies.slice(1, -1)) {
+      expect(body).toMatchObject({ thinking: { type: 'disabled' }, model: modelRuntime.modelName })
+      expect(body).not.toHaveProperty('reasoning_effort')
+    }
+    for (const call of fetcher.mock.calls) expect(call[0]).toBe(modelRuntime.baseUrl + '/chat/completions')
+    for (const [arg] of mocks.charge.mock.calls) expect(arg).toMatchObject({ modelTier: tier, multiplierBps: 15000, requestTokens: 100, responseTokens: 20 })
+    expect(mocks.charge).toHaveBeenCalledTimes(actions.length + 2)
+    expect(fetcher).toHaveBeenCalledTimes(actions.length + 2)
+    expect(modelRuntime).toEqual(original)
   })
 
   it('preserves the configured main-writing high payload before and after a quality check', async () => {
@@ -589,8 +631,10 @@ describe('explicit zero provider usage is not missing usage', () => {
     vi.useFakeTimers()
     try {
       const encoder = new TextEncoder(), cadence = env.aiTextStreamIdleMs / 2
+      const duration = Math.max(360_000, env.aiTextTimeoutMs) + cadence
       let interval: ReturnType<typeof setInterval>, completion: ReturnType<typeof setTimeout>
-      const fetcher = vi.fn(async () => new Response(new ReadableStream({ start(controller) {
+      const fetcher = vi.fn(async (_url: unknown, input?: RequestInit) => new Response(new ReadableStream({ start(controller) {
+        input!.signal!.addEventListener('abort', () => controller.error(input!.signal!.reason), { once: true })
         const push = (frame: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}
 
 `))
@@ -599,12 +643,12 @@ describe('explicit zero provider usage is not missing usage', () => {
           clearInterval(interval)
           push({ choices: [{ delta: { content: '{"findings":[]}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 100, completion_tokens: 9000 } })
           controller.close()
-        }, env.aiTextTimeoutMs + cadence)
+        }, duration)
       }, cancel() { clearInterval(interval); clearTimeout(completion) } }), { headers: { 'content-type': 'text/event-stream' } }))
       vi.stubGlobal('fetch', fetcher)
       const author = new AbortController()
       const result = generateReviewCompletion('system', '完整正文', { userId: 'test', action: 'agent3HumanityCritic', signal: author.signal, modelRuntime: qualityRuntime({ tier: 'speed', multiplierBps: 10000 }) })
-      await vi.advanceTimersByTimeAsync(env.aiTextTimeoutMs + cadence)
+      await vi.advanceTimersByTimeAsync(duration)
       await expect(result).resolves.toBe('{"findings":[]}')
       expect(fetcher).toHaveBeenCalledOnce()
       expect(author.signal.aborted).toBe(false)

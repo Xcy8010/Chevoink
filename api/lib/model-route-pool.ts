@@ -90,7 +90,10 @@ function exactRouteCooldownKey(params: ChatWithToolsParams): string {
  * must establish zero-charge billing before issuing ModelRouteRejected. */
 export async function invokeExactRouteWithRateLimitRetry<T>(params: ChatWithToolsParams, invoke: (params: ChatWithToolsParams) => Promise<T>): Promise<T> {
   if (params.durableExecution) return invoke(params)
-  const signal = AbortSignal.any([...(params.signal ? [params.signal] : []), AbortSignal.timeout(360_000)])
+  // Review producers enforce header/idle timeouts for each physical request.
+  // A healthy stream must not be cut off by route/cooldown wall-clock time.
+  const signal = params.boundedReview ? params.signal ?? new AbortController().signal
+    : AbortSignal.any([...(params.signal ? [params.signal] : []), AbortSignal.timeout(360_000)])
   const key = exactRouteCooldownKey(params)
   if (exactRouteCooldowns.size > 512) exactRouteCooldowns.clear()
   const existingCooldown = exactRouteCooldowns.get(key)
@@ -143,7 +146,8 @@ export async function withModelRoutePool<T>(params: ChatWithToolsParams, invoke:
   const ordered = routes.map((_, index) => routes[(index + cursor) % routes.length])
   const ready = ordered.filter(route => !cooldowns.has(route.id))
   const candidates = (ready.length ? ready : ordered.slice(0, 1)).slice(0, 3)
-  const signal = AbortSignal.any([...(params.signal ? [params.signal] : []), AbortSignal.timeout(360_000)])
+  const signal = params.boundedReview ? params.signal ?? new AbortController().signal
+    : AbortSignal.any([...(params.signal ? [params.signal] : []), AbortSignal.timeout(360_000)])
   let failure: unknown
   for (const route of candidates) {
     signal.throwIfAborted()

@@ -28,7 +28,9 @@ const spanOf = (clause: AuthorClause): AuthorSpan => ({ start: clause.start, end
 const ordinalNumber = (text: string) => { const value = chapterNumber(text); return value && Number.isSafeInteger(value) ? value : null }
 const quantityNumber = (text: string) => { const value = ordinalNumber(text); return value && value <= 1000 ? value : null }
 const numberPattern = `(?:${numeric})`
-const join = '(?:、|及|与|和|至|到|[-–—−~～〜－])'
+// Spaces between complete numbers also enumerate chapters ("1 2 3章").
+// A single number keeps its existing ordinal/count meaning.
+const join = '(?:、|及|与|和|至|到|[-–—−~～〜－]|\\s+)'
 const chapterPattern = `(?:第\\s*)?${numberPattern}\\s*(?:章)?(?:\\s*${join}\\s*(?:第\\s*)?${numberPattern}\\s*(?:章)?)*\\s*章`
 const numbered = new RegExp(`^(?:第\\s*)?(${numberPattern})\\s*章$`, 'u')
 const revisionWords = '修订|修正|修改|改写|重写|扩写|缩写|修复|纠正|纠错|润色|优化|调整|替换|改名|重命名|改为|改成|插入|删除|删掉|删去|精简|补充|增加|整改|补足|解决|不动|改(?!价|变|卷)'
