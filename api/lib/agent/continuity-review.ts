@@ -147,7 +147,8 @@ export function readContinuityReport(validation: unknown, chapter: { id: string;
 const criticSystem = `你是中文小说连续性编辑。完整阅读本章和实际前文，核查人物知识、时空、身体、物品、关系、动作归属与因果。
 只报告有证据的具体矛盾，不把疑问、未解谜、风格偏好或作者计划当既定事实。每条意见选择本次表里的sourceId，不抄引文、不编编号；编号只证明位置，不证明意见正确。
 一个真实原文片段即可支持一条具体矛盾意见；不要为凑引用数量选择无关段落。保留所有真实意见及严重度，不为通过删意见。解释与建议是意见，不是事实认证。
-严格输出 ${JSON.stringify(z.toJSONSchema(continuityReportResponseSchema, { io: 'input' }))}`
+只输出一个完整 findings JSON 数据对象，无问题时输出 {"findings":[]}。不输出审查过程、输入正文、证据表或下面的 JSON Schema；Schema 仅约束报告格式，不是待填写或回显的报告内容。
+报告须满足以下全部约束：${JSON.stringify(z.toJSONSchema(continuityReportResponseSchema, { io: 'input' }))}`
 
 export function continuityReviewRequest(snapshot: Pick<ContinuitySnapshot, 'chapter' | 'sources' | 'original'>, focus?: string) {
   return { system: criticSystem, content: JSON.stringify({ authorRequest: snapshot.original.prompt, focus: focus ?? null,
@@ -301,7 +302,8 @@ async function legacyDispatch(ctx: ToolContext, snapshot: ContinuitySnapshot, id
 /** One service for legacy tools and native adapters. Reports are cached by the
  * actual task/body/source context, never by a paid phase or a revision quota. */
 export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewArgs,
-  options: { snapshot?: ContinuitySnapshot; dispatch?: ContinuityDispatch; readBilling?: () => Promise<ContinuityBilling>; applyRepair?: ContinuityApplyRepair; allowRepair?: boolean; resumeKnownRequest?: string } = {}): Promise<ToolResult> {
+  options: { snapshot?: ContinuitySnapshot; dispatch?: ContinuityDispatch; readBilling?: () => Promise<ContinuityBilling>; applyRepair?: ContinuityApplyRepair; allowRepair?: boolean; resumeKnownRequest?: string;
+    criticRequest?: ReturnType<typeof continuityReviewRequest>; compactRepair?: boolean } = {}): Promise<ToolResult> {
   ctx.signal.throwIfAborted()
   const snapshot = options.snapshot ?? await buildContinuitySnapshot(ctx, args)
   const id = runtimeJson({ kind: 'continuity-report', taskId: snapshot.original.taskId, chapterId: snapshot.chapter.id, contextHash: snapshot.contextHash }).hash
@@ -368,7 +370,7 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
     return response.content
   }
   try {
-    const request = continuityReviewRequest(snapshot, args.focus)
+    const request = options.criticRequest ?? continuityReviewRequest(snapshot, args.focus)
     let opinions = [...report.opinions]
     const completedRaw = previous && [previous, ...(previous.history ?? [])].filter(row => row.billingKnown && !row.usageIds.some(id => retired.has(id))).some(row => row.rawResponses.some((raw, index) =>
       !row.incompleteResponses?.includes(index) && continuityFormatRecoveryPreservesOpinions(inspectContinuityOpinions(JSON.stringify({ findings: opinions })), inspectContinuityOpinions(raw))))
@@ -425,7 +427,7 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
 }
 
 async function finishContinuityReview(ctx: ToolContext, args: ContinuityReviewArgs, snapshot: ContinuitySnapshot, report: ContinuityReport,
-  options: { dispatch?: ContinuityDispatch; applyRepair?: ContinuityApplyRepair; allowRepair?: boolean; resumeRepair?: boolean; nativeOperationId?: string }, cached = false): Promise<ToolResult> {
+  options: { dispatch?: ContinuityDispatch; applyRepair?: ContinuityApplyRepair; allowRepair?: boolean; resumeRepair?: boolean; nativeOperationId?: string; compactRepair?: boolean }, cached = false): Promise<ToolResult> {
   ctx.signal.throwIfAborted()
   const savedRepair = report.repairResponseIndex === undefined || report.incompleteResponses?.includes(report.repairResponseIndex) ? undefined : report.rawResponses[report.repairResponseIndex]
   const priorFailure = report.repairResult?.outcome === 'failed' ? report.repairResult : undefined
@@ -453,8 +455,14 @@ async function finishContinuityReview(ctx: ToolContext, args: ContinuityReviewAr
   try {
   if (!savedRepair) {
   const response = await dispatch!({ action: 'agent3ContinuityRevision', system: `${QUALITY_REPAIR_RETAIN_RULE}\n输出 {"patches":[{"findingId":"0","replacement":"替换文本"}],"retainedFindings":[{"findingId":"1","reason":"保留理由"}]}。只替换列出的本章原文片段，不更改其他段落。`,
-    content: JSON.stringify({ authorRequest: snapshot.original.prompt, writingContext, current: snapshot.chapter.content, findings: selected.map(finding => ({ findingId: finding.id, explanation: finding.explanation,
-      suggestion: finding.suggestion, original: snapshot.chapter.content.slice(finding.startOffset, finding.endOffset) })) }) }, async () => {
+    // writingContext already contains the complete current manuscript. Retain
+    // only one copy, without removing any author constraint or finding text.
+    content: JSON.stringify({ authorRequest: snapshot.original.prompt, writingContext,
+      ...(options.compactRepair === false ? { current: snapshot.chapter.content } : {}),
+      findings: selected.map(finding => ({ findingId: finding.id, explanation: finding.explanation,
+        suggestion: options.compactRepair !== false && finding.suggestion.startsWith(`${finding.explanation}\n`)
+          ? finding.suggestion.slice(finding.explanation.length + 1) : finding.suggestion,
+        original: snapshot.chapter.content.slice(finding.startOffset, finding.endOffset) })) }) }, async () => {
     await assertCurrent(ctx, args, snapshot)
     if (!await automaticChapterRevisionWritable(prisma, ctx)) throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '当前会话不允许改稿，正文未修改。')
   })

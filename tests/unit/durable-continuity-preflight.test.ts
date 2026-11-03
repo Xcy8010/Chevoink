@@ -58,6 +58,26 @@ async function fixture(args: Record<string, string> = { chapterId: 'missing' }) 
 beforeEach(() => vi.resetAllMocks())
 afterEach(() => vi.restoreAllMocks())
 describe('continuity preflight rejection through actual tool admission and failure receipts', () => {
+  it.each([undefined, true])('passes frozen critic bytes and the admitted repair encoding without rewriting old work (%s)', async compactRepair => {
+    const f = await fixture({ chapterId: 'chapter' })
+    const work = { kind: 'continuityReview', chapterId: 'chapter', revision: 4, contextHash: 'b'.repeat(64),
+      critic: { system: '历史已冻结的完整检查规则', content: '历史已冻结的完整正文与证据' },
+      route: { provider: 'fixture', model: 'fixture', baseUrl: 'https://fixture.invalid/v1', maxOutputTokens: 16384 },
+      price: { version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 },
+      ...(compactRepair ? { compactRepair } : {}) }
+    const admitted = await f.admit(work), original = structuredClone(f.operation().inputSnapshot)
+    vi.spyOn(continuity, 'buildContinuitySnapshot').mockResolvedValue({ chapter: { id: 'chapter', revision: 4 }, contextHash: work.contextHash } as never)
+    const stop = new Error('review boundary reached without buying a request')
+    const review = vi.spyOn(continuity, 'reviewContinuity').mockRejectedValue(stop)
+    await expect(executePreparedContinuityWork(context as never, lease, admitted.operation.id)).rejects.toBe(stop)
+    expect(review).toHaveBeenCalledExactlyOnceWith(expect.anything(), f.args,
+      expect.objectContaining({ criticRequest: work.critic, compactRepair: compactRepair === true }))
+    expect(f.operation().inputSnapshot).toEqual(original)
+    expect(f.operation().status).toBe('prepared')
+    expect(f.receipt()).toBeNull()
+    expect(mocks.provider).not.toHaveBeenCalled()
+  })
+
   it.each(['CHAPTER_NOT_FOUND', 'COMPILATION_NOT_FOUND'] as const)('records %s once, with authentic frozen input and no provider dispatch', async code => {
     const f = await fixture(code === 'CHAPTER_NOT_FOUND' ? { chapterId: 'missing' } : { compilationId: 'missing' })
     vi.spyOn(continuity, 'buildContinuitySnapshot').mockRejectedValue(new DataAccessError(404, code, 'Original locator was not found'))

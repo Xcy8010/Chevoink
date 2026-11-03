@@ -6,7 +6,7 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { buildQualityEvidenceSources, locateQualityFindingSpans } from '../../api/lib/agent/quality-evidence.js'
 import { bindContinuityOpinions, inspectContinuityOpinions, correctContinuitySourceIds, continuityFormatRecoveryPreservesOpinions,
   buildContinuitySnapshot, continuityReviewRequest, continuityReportResponseSchema, readContinuityRequestBilling, reviewContinuity,
-  type ContinuityOpinion, type ContinuityReport } from '../../api/lib/agent/continuity-review.js'
+  type ContinuityOpinion, type ContinuityReport, type ContinuityDispatch } from '../../api/lib/agent/continuity-review.js'
 import * as original from '../../api/lib/agent/original-request.js'
 import * as humanity from '../../api/lib/agent/humanity-quality.js'
 import * as locks from '../../api/lib/data/novel-write-lock.js'
@@ -230,6 +230,48 @@ function repairFixture() {
 }
 
 describe('known failure recovery preserves report and paid evidence', () => {
+  it('uses the exact critic request frozen before a prompt update without rewriting its hash', async () => {
+    const f = runnerFixture()
+    const critic = { system: '原冻结连续性规则', content: JSON.stringify({ current: f.chapter.content, source: '原冻结证据' }) }
+    const before = runtimeJson(critic).hash
+    const base = f.dispatch(() => '{"findings":[]}')
+    const dispatch = vi.fn(async (request: Parameters<ContinuityDispatch>[0]) => base(request))
+    await expect(reviewContinuity(f.ctx, { compilationId: 'comp' }, { criticRequest: critic, dispatch, allowRepair: false }))
+      .resolves.toMatchObject({ reviewCompleted: true })
+    expect(dispatch).toHaveBeenCalledExactlyOnceWith({ ...critic, action: 'agent3ContinuityCritic' }, expect.any(Function))
+    expect(runtimeJson(critic).hash).toBe(before)
+  })
+
+  it.each([undefined, false])('retains all repair facts while removing only duplicate input for new encoding=%s', async compactRepair => {
+    const f = repairFixture()
+    const base = f.dispatch(action => action === 'agent3ContinuityRevision'
+      ? JSON.stringify({ patches: [], retainedFindings: f.opinions.map((_, index) => ({ findingId: String(index), reason: '保留原文待作者决定' })) })
+      : JSON.stringify({ findings: f.opinions }))
+    let sent = ''
+    const dispatch = async (request: Parameters<ContinuityDispatch>[0]) => {
+      if (request.action === 'agent3ContinuityRevision') sent = request.content
+      return base(request)
+    }
+    await reviewContinuity(f.ctx, { compilationId: 'comp' }, { dispatch, compactRepair })
+    const payload = JSON.parse(sent)
+    expect(payload.authorRequest).toBe('检查并修复本章')
+    expect(payload.writingContext.split(JSON.stringify(f.chapter.content))).toHaveLength(2)
+    expect(payload.findings).toEqual(f.report().findings.map(finding => ({ findingId: finding.id,
+      explanation: finding.explanation, original: f.chapter.content.slice(finding.startOffset, finding.endOffset),
+      suggestion: compactRepair === false ? finding.suggestion : finding.suggestion.slice(finding.explanation.length + 1) })))
+    expect(f.report().opinions).toEqual(f.opinions)
+    expect(f.requests).toEqual(['agent3ContinuityCritic', 'agent3ContinuityRevision'])
+    expect(f.chapter.revision).toBe(4)
+    const previousPayload = { ...payload, current: f.chapter.content, findings: f.report().findings.map(finding => ({
+      findingId: finding.id, explanation: finding.explanation, suggestion: finding.suggestion,
+      original: f.chapter.content.slice(finding.startOffset, finding.endOffset) })) }
+    if (compactRepair === false) expect(sent).toBe(JSON.stringify(previousPayload))
+    else {
+      expect(payload).not.toHaveProperty('current')
+      expect(Buffer.byteLength(sent)).toBeLessThan(Buffer.byteLength(JSON.stringify(previousPayload)))
+    }
+  })
+
   it.each([true, false])('runs a fresh check after a cancelled unknown report (old complete=%s), without laundering its raw or repair receipt', async complete => {
     const f = runnerFixture()
     await reviewContinuity(f.ctx, { compilationId: 'comp' }, { dispatch: f.dispatch(() => JSON.stringify({ findings: [opinion()] })), allowRepair: false })

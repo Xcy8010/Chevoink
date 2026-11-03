@@ -21,6 +21,7 @@ import type { AgentTool, ToolContext, ToolResult } from './types.js'
 const argsSchema = z.object({ chapterId: z.string().optional(), compilationId: z.string().optional(), focus: z.string().optional() })
 export const nativeContinuityWorkSchema = z.object({ kind: z.literal('continuityReview'),
   chapterId: z.string(), revision: z.number().int().positive(), contextHash: z.string(),
+  compactRepair: z.literal(true).optional(),
   critic: z.object({ system: z.string(), content: z.string() }).strict(), route: auxiliaryRouteSchema, price: tokenPriceSchema }).strict()
 const rejectedContinuityWorkSchema = z.object({ kind: z.literal('rejected'),
   code: z.enum(['CHAPTER_NOT_FOUND', 'COMPILATION_NOT_FOUND']), message: z.string() }).strict()
@@ -67,7 +68,7 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: RunLeaseTok
   const route = input.frozenReview?.route ?? auxiliaryRouteForRuntime(resolved!.runtime, resolved!.selection, REVIEW_MAX_OUTPUT_TOKENS)
   const price = input.frozenReview?.price ?? await resolveDurableTokenPrice(lease, `${input.operationKey}:critic-price`, resolved!.selection.tier, resolved!.runtime.multiplierBps, resolved!.selection.tokenPrice)
   return nativeContinuityWorkSchema.parse({ kind: 'continuityReview', chapterId: snapshot.chapter.id, revision: snapshot.chapter.revision,
-    contextHash: snapshot.contextHash, critic: continuityReviewRequest(snapshot, args.focus), route, price })
+    contextHash: snapshot.contextHash, critic: continuityReviewRequest(snapshot, args.focus), compactRepair: true, route, price })
 }
 
 export async function executePreparedContinuityWork(ctx: ToolContext, lease: RunLeaseToken, operationId: string) {
@@ -128,6 +129,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: Run
   }
   let applied: Awaited<ReturnType<typeof commitOperationEffect>> | undefined
   const result = await reviewContinuity(ctx, args, { snapshot, dispatch, resumeKnownRequest: operation.id,
+    criticRequest: frozen.critic, compactRepair: frozen.compactRepair === true,
     applyRepair: async (report, apply) => {
       let result: ToolResult | undefined
       applied = await commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {

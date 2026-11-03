@@ -576,6 +576,15 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(body.max_tokens).toBe(16_384)
         expect(body.tools).toBeUndefined()
         expect(body.messages.map((item: { role: string }) => item.role)).toEqual(['system', 'user'])
+        if (scenario === 'repair' && requests === 2) {
+          const material = body.messages[1].content as string, marker = '待修订证据（只有 evidence 可替换，before/after 不可改写）：\n'
+          expect(material.split(`当前完整正文（只读语境；只有请求的 evidence 可改）：${JSON.stringify(before)}`)).toHaveLength(2)
+          const candidates = z.array(z.object({ key: z.string(), evidence: z.string(), explanation: z.string(), suggestion: z.string(),
+            start: z.number().int(), end: z.number().int() }).strict()).parse(JSON.parse(material.slice(material.indexOf(marker) + marker.length)))
+          expect(candidates).toHaveLength(1)
+          expect(candidates[0]).toMatchObject({ evidence: before, start: 0, end: before.length })
+          expect(before.slice(candidates[0].start, candidates[0].end)).toBe(candidates[0].evidence)
+        }
         if (checkingOriginal) {
           expect(body.messages[1].content).toContain(JSON.stringify(authorRequest))
           expect(body.messages[1].content).toContain('首章收益与情绪强度')
@@ -776,6 +785,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
           if (oldWorkVersion! >= 4) freezeLegacySources(snapshot.work, oldWorkVersion! >= 7 ? 6 : 5)
           snapshot.work = { ...snapshot.work, version: oldWorkVersion, contextHash: runtimeJson(JSON.parse(JSON.stringify(legacy))).hash,
             criticInput: '合成升级前冻结的完整正文与点评输入', criticSystem: '合成升级前的只读点评规则；只输出 findings JSON。' }
+          delete snapshot.work.repairContextComplete
           if (oldWorkVersion! < 9) {
             delete snapshot.work.parserVersion
             delete snapshot.work.repairSourceReferences
@@ -1005,7 +1015,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         // A deliberate second blocked call also records rejected work. Bind
         // this assertion to the report's actual checked input, never DB order.
         const savedWork = await prisma.agentOperation.findFirstOrThrow({ where: { id: recoveryBinding.operationId, taskRootId: f.rootId, action: 'quality_analyze', kind: 'tool' } })
-        expect(savedWork.inputSnapshot).toMatchObject({ input: { work: { version: 14, parserVersion: 3, repairContext: expect.any(String), deadlineAt: expect.any(Number) } } })
+        expect(savedWork.inputSnapshot).toMatchObject({ input: { work: { version: 14, parserVersion: 3, repairContext: expect.any(String), repairContextComplete: true, deadlineAt: expect.any(Number) } } })
         expect(reports[0].deterministicMetrics).toMatchObject({ criticPromptProtocol: 'humanity-context.v7' })
         const recoveryOp = await prisma.agentOperation.findFirstOrThrow({ where: { parentOperationId: savedWork.id, action: 'quality_format_recovery' }, include: { attempts: { include: { usageReceipt: true } } } })
         expect(recoveryOp.attempts).toHaveLength(1)
@@ -1286,6 +1296,7 @@ describe.runIf(available)('既有章节独立检查', () => {
 // Reconstruct the historical table and prompt at admission; changing only the
 // work version would manufacture an impossible old work with new references.
 function freezeLegacySources(work: Record<string, unknown>, protocol: 5 | 6 = 5) {
+  delete work.repairContextComplete
   const sources = work.sources as QualityEvidenceSources
   const old = buildQualityEvidenceSources(sources.identity, sources.entries.map(entry => entry.text).join(''), protocol)
   work.criticInput = String(work.criticInput).replace(renderQualityEvidenceSources(sources), renderQualityEvidenceSources(old))

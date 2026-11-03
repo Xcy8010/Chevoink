@@ -29,7 +29,15 @@ import { allTools } from '../../api/lib/agent/tools/registry.js'
 import { AGENT_TOOL_GOVERNANCE } from '../../api/lib/agent/tools/governance.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import * as humanityQuality from '../../api/lib/agent/humanity-quality.js'
-import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
+import { qualityAnalyzeTool, buildQualityRepairContext } from '../../api/lib/agent/tools/humanity-quality-tools.js'
+import { prepareQualityWork, executePreparedQualityWork } from '../../api/lib/agent/tools/durable-quality.js'
+import * as runtimeLease from '../../api/lib/agent/runtime-lease.js'
+import * as writingService from '../../api/lib/agent/runtime-writing-service.js'
+import * as observedBaseline from '../../api/lib/agent/runtime-observed-baseline.js'
+import * as executionState from '../../api/lib/agent/runtime-state.js'
+import * as chapterMutation from '../../api/lib/agent/tools/chapter-mutation.js'
+import { runtimeJson, type RuntimeTx } from '../../api/lib/agent/runtime-common.js'
+import { qualityRepairSurroundings } from '../../api/lib/agent/quality-neighbor-context.js'
 import { buildQualityEvidenceSources, coerceCriticFindings } from '../../api/lib/agent/quality-evidence.js'
 import { DataAccessError, prisma } from '../../api/lib/prisma.js'
 import { env } from '../../api/config/env.js'
@@ -312,10 +320,81 @@ describe('严谨创作自动落实质量建议', () => {
     expect(result.semanticTransition).toMatchObject({ targetId: 'chapter:c', beforeHash: expect.stringMatching(/^[a-f0-9]{64}$/u), afterHash: expect.stringMatching(/^[a-f0-9]{64}$/u) })
     expect(result.semanticTransition?.beforeHash).not.toBe(result.semanticTransition?.afterHash)
     expect(f.model.mock.calls[0][1]).toContain(f.bundle.originalRequest!)
-    expect(f.model.mock.calls[0][1]).toContain('"before"')
+    const material = f.model.mock.calls[0][1], marker = '待修订证据（只有 evidence 可替换，before/after 不可改写）：\n'
+    expect(material.slice(0, material.indexOf(marker))).toBe(buildQualityRepairContext(f.bundle) + '\n')
+    expect(material.split(JSON.stringify(f.bundle.chapter.content))).toHaveLength(2)
+    const candidates = JSON.parse(material.slice(material.indexOf(marker) + marker.length))
+    expect(candidates).toEqual(f.report.findings.map(finding => ({ findingId: finding.id, signal: finding.signal,
+      evidence: finding.evidenceExcerpt, explanation: finding.explanation, suggestion: finding.suggestion,
+      start: finding.startOffset, end: finding.endOffset })))
+    for (const candidate of candidates) {
+      expect(candidate).not.toHaveProperty('before')
+      expect(candidate).not.toHaveProperty('after')
+      expect(f.bundle.chapter.content.slice(candidate.start, candidate.end)).toBe(candidate.evidence)
+    }
+    const former = f.report.findings.map(finding => ({ findingId: finding.id, signal: finding.signal, evidence: finding.evidenceExcerpt,
+      explanation: finding.explanation, suggestion: finding.suggestion, ...qualityRepairSurroundings(f.bundle.chapter.content, finding.startOffset, finding.endOffset) }))
+    const previousMaterial = `${buildQualityRepairContext(f.bundle)}\n${marker}${JSON.stringify(former)}`
+    // Same conservative input estimator as transport admission; no provider
+    // usage or real Credits saving is inferred from this synthetic comparison.
+    const estimate = (value: string) => {
+      let ascii = 0, nonAscii = 0
+      for (const character of value) { if (character.codePointAt(0)! <= 0x7f) ascii++; else nonAscii++ }
+      return Math.max(1, Math.ceil(ascii / 4 + nonAscii))
+    }
+    expect(estimate(material)).toBeLessThan(estimate(previousMaterial))
     expect(f.write).toHaveBeenCalledWith(expect.objectContaining({ expectedContextHash: humanityQuality.qualityReviewContextHash(f.bundle) }))
     expect(f.model.mock.calls[0][2]).toMatchObject({ userId: 'u', novelId: 'n', agentRunId: 'r', action: 'agent3HumanityRevision', targetId: 'q' })
   })
+  it.each([false, true])('freezes complete repair context only for new work and preserves old dispatch bytes (new=%s)', async optimized => {
+    const f = fixture(true)
+    const lease = { userId: 'u', runId: 'r', taskRootId: 'root', ownerId: 'worker', claimId: 'claim', epoch: 1n }
+    const lookup = vi.fn().mockResolvedValue(null)
+    const tx = { agentOperation: { findUnique: lookup }, agentEffectReceipt: { findUnique: async () => null },
+      agentTaskRoot: { findUniqueOrThrow: async () => ({ sessionId: 's' }) } } as unknown as RuntimeTx
+    vi.spyOn(runtimeLease, 'withRunLease').mockImplementation(async (_lease, work) => work(tx))
+    vi.spyOn(chapterMutation, 'automaticChapterRevisionWritable').mockResolvedValue(true)
+    vi.spyOn(observedBaseline, 'readObservedBaseline').mockResolvedValue({ kind: 'chapter', id: 'c', revision: 1 })
+    vi.spyOn(executionState, 'readExecutionStateInTransaction').mockResolvedValue({ configuration: { mode: 'build', creativeFreedom: 'balanced',
+      qualityMode: 'premium', protectedChapterIds: [] } } as unknown as Awaited<ReturnType<typeof executionState.readExecutionStateInTransaction>>)
+    const admission = { operationKey: 'quality', observedRevision: 0, baseline: null, args: { chapterId: 'c' }, frozenReview: {
+      route: { tier: 'speed' as const, customModelId: null, reasoningEffort: 'low' as const, provider: 'fixture', model: 'fixture',
+        baseUrl: 'https://provider.invalid/v1', maxOutputTokens: 16384 },
+      price: { version: 'credits-v1-exact' as const, modelTier: 'speed' as const, multiplierBps: 10000 } } }
+    const prepared = await prepareQualityWork(f.ctx, lease, admission)
+    if (prepared.kind !== 'check') throw new Error('Fixture must prepare a complete quality check')
+    expect(prepared.repairContextComplete).toBe(true)
+    expect(prepared.repairContext).toBe(buildQualityRepairContext(f.bundle))
+    const { repairContextComplete: _newFlag, ...oldWork } = prepared
+    const work = optimized ? prepared : oldWork
+    const snapshot = { input: { work } }, original = structuredClone(snapshot), inputHash = runtimeJson(snapshot).hash
+    lookup.mockResolvedValue({ id: 'quality-parent', inputSnapshot: snapshot, inputHash })
+    expect(await prepareQualityWork(f.ctx, lease, admission)).toEqual(work)
+    expect(snapshot).toEqual(original)
+    expect(runtimeJson(snapshot).hash).toBe(inputHash)
+    vi.spyOn(writingService, 'readAdmittedReviewWork').mockResolvedValue({ operation: { id: 'quality-parent', inputHash }, input: { work } } as unknown as Awaited<ReturnType<typeof writingService.readAdmittedReviewWork>>)
+    const captured = new Error('Stop at the physical child dispatch boundary')
+    const dispatch = vi.spyOn(auxiliaryRuntime, 'callDurableAuxiliary').mockRejectedValue(captured)
+    await expect(executePreparedQualityWork(f.ctx, lease, 'quality-parent')).rejects.toBe(captured)
+    expect(dispatch).toHaveBeenCalledOnce()
+    const request = dispatch.mock.calls[0][0], marker = '待修订证据（只有 evidence 可替换，before/after 不可改写）：\n'
+    const candidates = f.report.findings.map(finding => ({ key: `${finding.signal}:${finding.startOffset}:${finding.endOffset}`,
+      evidence: f.bundle.chapter.content.slice(finding.startOffset, finding.endOffset), explanation: finding.explanation, suggestion: finding.suggestion,
+      ...(optimized ? { start: finding.startOffset, end: finding.endOffset } : qualityRepairSurroundings(f.bundle.chapter.content, finding.startOffset, finding.endOffset)) }))
+    expect(request).toMatchObject({ step: 'quality_repair', system: work.repairSystem, route: work.route, price: work.price,
+      content: `${work.repairContext}\n${marker}${JSON.stringify(candidates)}` })
+    expect(request.content.split(JSON.stringify(f.bundle.chapter.content))).toHaveLength(2)
+    expect(candidates).toHaveLength(8)
+    if (optimized) for (const candidate of candidates) {
+      expect(candidate).not.toHaveProperty('before')
+      expect(candidate).not.toHaveProperty('after')
+      expect(f.bundle.chapter.content.slice(candidate.start, candidate.end)).toBe(candidate.evidence)
+    }
+    expect(snapshot).toEqual(original)
+    expect(runtimeJson(snapshot).hash).toBe(inputHash)
+    expect(f.write).not.toHaveBeenCalled()
+  })
+
   it('retains a patch that copies read-only neighbor prose without another paid repair attempt', async () => {
     const f = fixture(true)
     const before = '控制阀位于平台的西北角。', evidence = '她转身看了一眼。'

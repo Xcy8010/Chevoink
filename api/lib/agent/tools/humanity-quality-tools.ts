@@ -282,7 +282,7 @@ async function applySelectedQualityRepairs(ctx: ToolContext, report: QualityRepo
         QUALITY_REPAIR_RETAIN_RULE + '\n' + `你是与 Writer/Critic 上下文隔离的局部修订编辑。只替换每条 evidence 本身，不扩写相邻内容，不改变事实、情节结果、人物知识或作者刻意的口语与断句。删除优先于同义词替换；补写只补建议中缺失的具体动作、选择或后果。解释负担与事实必要性分开：保留危机条件、期限、后果及读者未知规则，可在 evidence 内用视角内感知、短念头或有交际必要的台词承载，不强制转对白，不改机器人程序声口、人物辨析或有意对比。建议若指向 evidence 外，只保留原证据，不借 before/after 修改邻文。punctuation_misuse 只移除误用符号，保留人物直接话语和逐字引文。replacement 可以为空。严格只输出 JSON，以下两种条目按实际需要放入对应数组，数组可以为空：{"patches":[{"findingId":"需要修改的原 id","replacement":"只替换证据范围的文本"}],"retainedFindings":[{"findingId":"需要保留的原 id","reason":"具体理由"}]}。必须为每个输入 id 返回且只返回一次。`,
         `${buildQualityRepairContext(bundle)}\n待修订证据（只有 evidence 可替换，before/after 不可改写）：\n${JSON.stringify(remaining.map(finding => ({ findingId: finding.id, signal: finding.signal,
           evidence: finding.evidenceExcerpt, explanation: finding.explanation, suggestion: finding.suggestion,
-          ...qualityRepairSurroundings(report.chapter.content, finding.startOffset, finding.endOffset) })))}`,
+          start: finding.startOffset, end: finding.endOffset })))}`,
         { modelRuntime: repairRuntime, explicitModelSelection: true, responseFormat: 'json_object',
           signal: ctx.signal, userId: ctx.userId, agentRunId: ctx.runId, action, novelId: ctx.novelId, chapterId: report.chapterId, targetType: 'quality_report', targetId: report.id, temperature: 0.3, reasoningEffort: 'low', maxOutputTokens: REVIEW_MAX_OUTPUT_TOKENS, boundedReview: true },
       ))

@@ -708,8 +708,12 @@ async function nativeContinuityRecoveryFixture(f: NativeContinuityFixture) {
     expect(body.model).toBe('fixture')
     expect(body.messages.map(message => message.role)).toEqual(['system', 'user'])
     const repair = body.messages[0].content.includes('只替换列出的本章原文片段')
-    if (repair) expect(JSON.parse(body.messages[1].content)).toMatchObject({ current: before,
-      findings: [{ findingId: '0', original: before }] })
+    if (repair) {
+      const payload = JSON.parse(body.messages[1].content)
+      expect(payload).not.toHaveProperty('current')
+      expect(payload.writingContext.split(JSON.stringify(before))).toHaveLength(2)
+      expect(payload).toMatchObject({ findings: [{ findingId: '0', original: before }] })
+    }
     else expect(JSON.parse(body.messages[1].content)).toMatchObject({ currentChapter: chapter.id,
       sources: [expect.objectContaining({ chapterId: chapter.id, revision: chapter.revision, content: before })] })
     await duringHttp?.(repair)
