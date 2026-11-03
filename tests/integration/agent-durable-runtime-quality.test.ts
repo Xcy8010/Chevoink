@@ -1116,7 +1116,8 @@ describe.runIf(available).each(['continuity', 'quality'] as const)('真实报告
           const material = JSON.parse(body.messages[1].content)
           const repairing = Array.isArray(material.findings)
           if (repairing) {
-            expect(material.current).toBe('原文')
+            expect(material).not.toHaveProperty('current')
+            expect(material.writingContext.split('当前完整正文（只读语境；只有请求的 evidence 可改）："原文"')).toHaveLength(2)
             expect(material.findings[0].original).toBe('原文')
           } else expect(body.messages[1].content).toContain(scenario === 'stale' ? '作者新文' : repaired ? '新文' : '原文')
           const content = repairing ? JSON.stringify({ patches: repaired ? [{ findingId: material.findings[0].findingId, replacement: '新文' }] : [] }) : '{"findings":[]}'
