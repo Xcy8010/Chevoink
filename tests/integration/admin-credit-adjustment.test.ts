@@ -44,7 +44,7 @@ describe.runIf(available)('admin reward adjustment on real isolated PostgreSQL',
       expect(await prisma.creditAccount.findUnique({ where: { userId } })).toBeNull()
       const now = new Date(), future = new Date(now.getTime() + 86400000)
       await prisma.creditAccount.create({ data: { userId, bonusBalanceMilli: 1000, dailyAllowanceMilli: 450000, dailyUsedMilli: 450000, periodStartedAt: now, periodEndsAt: future } })
-      await prisma.aiUsageLog.create({ data: { userId, providerType: 'text', providerMode: 'fixture', modelName: 'fixture', action: 'fixture', targetType: 'text', modelTier: 'speed', durationMs: 0, requestTokens: 0, responseTokens: 0, totalTokens: 0, reservedCreditMilli: 900, reservationExpiresAt: future, billingStatus: 'prepared' } })
+      await prisma.aiUsageLog.create({ data: { userId, providerType: 'text', providerMode: 'fixture', modelName: 'fixture', action: 'fixture', targetType: 'text', modelTier: 'speed', durationMs: 0, requestTokens: 0, responseTokens: 0, reservedCreditMilli: 900, reservationExpiresAt: future, billingStatus: 'prepared' } })
       await expect(adjustAdminBonusCredits(adminId, userId, payload)).rejects.toMatchObject({ code: 'CREDIT_BALANCE_RESERVED' })
       expect(await prisma.creditLedgerEntry.count({ where: { userId } })).toBe(0)
       expect((await prisma.creditAccount.findUniqueOrThrow({ where: { userId } })).bonusBalanceMilli).toBe(1000)
