@@ -15,7 +15,7 @@ import { freezeLocalEditBoundary, originalLocalEditBoundary, requestedLocalEdit 
 import { eligibleEmptyWritingClarification, eligibleWritingClarification, readWritingClarification } from './writing-clarification.js'
 import { parseAuthorWritingRequest, parseAuthorWritingExclusion, resolveAuthorWritingRequest } from './author-writing-request.js'
 import { currentIssueQuoteRegions } from './local-edit-citations.js'
-import { assertFrozenWritingContract, frozenWritingScopeHash } from './writing-contract.js'
+import { assertFrozenWritingContract, frozenWritingScopeHash, writingActionTargets } from './writing-contract.js'
 import { actionTargetMatches, freezeWritingActions } from './writing-action-admission.js'
 
 import { chapterNumber, numeric, rangeDash, negativeScopeClause, writingScopeClauses, legacyWritingRange } from './writing-target-range.js'
@@ -127,7 +127,7 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
   } else writing = { ...base, kind: 'needs_input', targets: [] }
   const writingActions = interpretation ? await freezeWritingActions(tx, subject, interpretation, admissionPrompt, chapters, run.chapterId) : undefined
   if (writingActions) {
-    const targets = [...new Map(writingActions.operations.flatMap(operation => operation.targets).map(target => [target.orderIndex, target])).values()]
+    const targets = writingActionTargets(writingActions.operations)
     writing = { ...base, kind: writingActions.operations.every(operation => operation.resolution === 'bound') ? 'bounded' : 'needs_input', targets }
     // This legacy scalar cannot confer a revise grant on a different action's
     // target. Per-chapter consumers use writingActions instead.
@@ -137,6 +137,7 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
   if (parsed?.confirmedNextOrderIndex !== undefined && (writing.kind !== 'bounded' || writing.targets.length !== 1
     || writing.targets[0].orderIndex !== parsed.confirmedNextOrderIndex)) {
     writing = { ...base, kind: 'needs_input', targets: [] }
+    if (writingActions) for (const operation of writingActions.operations) { operation.targets = []; operation.resolution = 'needs_input' }
   }
   if (writingActions) {
     for (const operation of writingActions.operations) {
@@ -145,7 +146,7 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
       if (!allowed.length && operation.targets.length) operation.resolution = 'denied'
       operation.targets = allowed
     }
-    writing.targets = [...new Map(writingActions.operations.flatMap(operation => operation.targets).map(target => [target.orderIndex, target])).values()]
+    writing.targets = writingActionTargets(writingActions.operations)
     if (writingActions.operations.some(operation => operation.resolution !== 'bound')) writing.kind = 'needs_input'
   } else if (creationDenied && writing.kind === 'bounded' && writing.targets.some(target => target.chapterId === null)
     || revisionDenied && spec.intent === 'revise') writing = { ...base, kind: 'needs_input', targets: [] }
@@ -198,11 +199,14 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
     && !/(?:只读|不(?:要|得|能|许|必)?(?:新建|建|改|调整|分)卷|(?:不要|不得|禁止|不能).{0,12}(?:结构|分卷)|read.only|do not.{0,20}(?:volume|structure))/iu.test(admissionPrompt + spec.hardConstraints.map(item => item.text).join('；'))) {
     writing.tailVolume = { version: 1, targetOrderIndex: writing.targets[0].orderIndex, previousChapterId: last.id, previousRevision: last.revision }
   }
-  const hasSeparateActions = writingActions?.operations.some(operation => operation.kind === 'write')
+  const hasSeparateActions = writingActions?.operations.some(operation => operation.kind === 'write'
+    && operation.targets.some(target => !writingActions.operations.some(revision => revision.kind === 'revise'
+      && revision.targets.some(item => item.orderIndex === target.orderIndex && item.chapterId === target.chapterId))))
     && writingActions.operations.some(operation => operation.kind === 'revise')
   const localInterpretation = interpretation && hasSeparateActions ? { ...interpretation,
     ambiguous: interpretation.reasons.some(reason => reason !== 'conflicting_targets'),
-    evidence: { ...interpretation.evidence, operations: interpretation.evidence.operations.filter(operation => operation.kind !== 'write'),
+    evidence: { ...interpretation.evidence, operations: interpretation.evidence.operations.map(operation => operation.kind === 'write'
+      ? { ...operation, accepted: false } : operation),
       clauses: interpretation.evidence.clauses.filter(clause => interpretation.evidence.operations.some(operation => operation.kind !== 'write'
         && operation.clauseSpan.start === clause.start)) } } : interpretation
   const localWriting = hasSeparateActions ? { ...writing, targets: writing.targets.filter(target => writingActions!.operations.some(operation =>

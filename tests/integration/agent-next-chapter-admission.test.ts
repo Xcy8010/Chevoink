@@ -114,6 +114,9 @@ describe.skipIf(!available)('fresh HTTP same next-chapter identity and actual PG
 
   it.each([true, false])('never reparses a frozen needs-input run on continuation, new marker=%s', marker => fixture(nextChapterContinuationPrompt, async (ctx, before) => {
     const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
+    // These simulate frozen contracts admitted before per-action projections.
+    // A new bound writingActions plus an empty scalar is invalid hybrid data.
+    delete spec.scope.writingActions
     spec.scope.writing = { version: 1, kind: 'needs_input', targets: [], repairAuthorized: true, titleAndBodyOnly: false }
     if (spec.scope.writingInterpretation) spec.scope.writingInterpretation.scopeHash = frozenWritingScopeHash(spec.scope)
     if (!marker) delete spec.scope.writingTargetProtocol

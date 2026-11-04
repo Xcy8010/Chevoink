@@ -1,4 +1,5 @@
 import { chapterNumber, numeric, type RequestedWritingRange } from './writing-target-range.js'
+import { isContinuationRequest } from './completion-guard.js'
 
 export type AuthorSpan = { start: number; end: number }
 export type AuthorWritingDirectory = {
@@ -296,6 +297,11 @@ function bindSameTargetObjects(masked: string, operations: AuthorWritingOperatio
       || !operation.targetIndices.some(index => targets[index].kind === 'same_target') || ranged(operation).length) continue
     const prior = operations.slice(0, operationIndex)
     const mutations = prior.filter(item => item.accepted && ['write', 'revise'].includes(item.kind) && ranged(item).length)
+    // A separately requested current/editor chapter after a mutation is its
+    // own address. Read/review governors may still establish the subject of a
+    // first conditional repair before any manuscript action has occurred.
+    if (mutations.length && operation.targetIndices.some(index => targets[index].kind === 'same_target'
+      && /当前|正在编辑|\bcurrent\b/iu.test(masked.slice(targets[index].span.start, targets[index].span.end)))) continue
     const primary = mutations.length ? mutations : prior.filter(item => item.accepted && item.kind === 'review' && ranged(item).length)
     const latestPrimary = primary.at(-1)
     const primaryTargets = primary.flatMap(ranged)
@@ -540,6 +546,8 @@ function interpretAuthorWritingRequest(prompt: string, directory?: AuthorWriting
       else if (protecting) reason = 'protected'
       else if (polarity === 'negative') reason = 'negated'
       else if (sourceQuotes.some(quote => !quote.closed)) reason = 'unclosed_source_quote'
+      else if (/^(?:继续|continue)$/iu.test(match[0]) && (isContinuationRequest(prompt)
+        || nextMatch && !after.trim())) reason = 'task_continuation'
       else if (kind === 'write' && /完成|finish|complete/iu.test(match[0]) && matches.slice(index + 1).some(next => reviewPattern.test(next[0]))
         && !/并|然后|后|再/u.test(after)) reason = 'review_wrapper'
       else if (kind === 'write' && /^(?:完成|finish|complete)$/iu.test(match[0]) && previous?.kind === 'review'
@@ -662,6 +670,13 @@ export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest 
 /** Preserve each predicate's argument before forming the compatibility union. */
 export function authorOperationRange(request: AuthorWritingRequest, operation: AuthorWritingOperation, directory?: AuthorWritingDirectory) {
   return mergeRanges(operation.targetIndices.flatMap(index => request.evidence.targets[index].range ? [request.evidence.targets[index].range!] : []), directory)
+}
+
+/** Repeated addresses for one effect remain constraints on that effect. */
+export function authorEffectRange(request: AuthorWritingRequest, kind: AuthorWritingOperation['kind'], directory?: AuthorWritingDirectory) {
+  const ranges = request.evidence.operations.filter(operation => operation.accepted && operation.kind === kind)
+    .flatMap(operation => operation.targetIndices.flatMap(index => request.evidence.targets[index].range ? [request.evidence.targets[index].range!] : []))
+  return { hasRanges: ranges.length > 0, range: mergeRanges(ranges, directory) }
 }
 
 /** Only fresh admission supplies its locked, complete directory snapshot. */

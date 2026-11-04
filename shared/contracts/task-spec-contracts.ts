@@ -208,7 +208,8 @@ export const taskSpecSchema = z.object({
       || !spec.scope.writingInterpretation?.operations.some(operation => operation.start === action.start && operation.end === action.end
         && operation.kind === action.kind && operation.polarity === 'affirmative')
       || (action.resolution === 'bound') !== (action.targets.length > 0)
-      || action.kind === 'revise' && action.targets.some(target => target.chapterId === null)
+      || action.kind === 'revise' && action.targets.some(target => target.chapterId === null && !actions.operations.some(write => write.kind === 'write'
+        && write.resolution === 'bound' && write.targets.some(item => item.chapterId === null && item.orderIndex === target.orderIndex)))
       || action.targets.some(target => !spec.scope.writing?.targets.some(item => item.orderIndex === target.orderIndex && item.chapterId === target.chapterId))))) {
     ctx.addIssue({ code: 'custom', path: ['scope', 'writingActions'], message: 'Each action must bind the current author predicate and its own frozen target' })
   }

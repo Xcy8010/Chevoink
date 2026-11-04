@@ -9,6 +9,7 @@ import { frozenWritingScopeHash } from '../../api/lib/agent/writing-contract.js'
 import { isWritingContinuationRequest } from '../../api/lib/agent/completion-guard.js'
 import { restrictToolsToTask } from '../../api/lib/agent/tool-authority.js'
 import { getToolsForMode } from '../../api/lib/agent/tools/registry.js'
+import { chapterRevisionPrompt, directoryContinuationPrompt, nextChapterContinuationPrompt } from '../support/writing-target-prompt.js'
 import { taskSpecSchema, type TaskSpec } from '../../shared/contracts/task-spec-contracts.js'
 
 afterEach(() => vi.restoreAllMocks())
@@ -22,7 +23,7 @@ function makeRun(id: string, prompt: string, time: number, chapterId: string | n
     session: { spawnedFromRunId: null, spawnedFromSessionId: null, sandboxMode: 'workspace' },
     startRequest: withHumanAdmission({ novelId: 'novel', sessionId: 'session', mode: 'build', prompt }) }
 }
-async function fixture(prompt: string, previousPrompt = '写第1、2章', editorId: string | null = 'chapter-1') {
+async function fixture(prompt: string, previousPrompt = '写第1、2章', editorId: string | null = 'chapter-1', directory = chapters) {
   const previous = makeRun('previous', previousPrompt, 10), current = makeRun('current', prompt, 20, editorId), runs = [previous, current]
   const messages = runs.map(run => ({ id: `${run.id}-message`, runId: run.id, sessionId: run.sessionId, role: 'user',
     parts: [{ type: 'text', text: run.startRequest.prompt }] }))
@@ -32,14 +33,21 @@ async function fixture(prompt: string, previousPrompt = '写第1、2章', editor
     agentGoalExecution: { findUnique: vi.fn(async () => null) },
     agentRun: {
       findFirst: vi.fn(async (input: { where: { id: string } }) => runs.find(run => run.id === input.where.id) ?? null),
-      findFirstOrThrow: vi.fn(async (input: { where: { id: string } }) => runs.find(run => run.id === input.where.id)!),
+      findFirstOrThrow: vi.fn(async (input: { where: { id?: string; taskSpec?: { equals: string } } }) => input.where.id
+        ? runs.find(run => run.id === input.where.id)! : runs.find(run => run.taskSpec?.id === input.where.taskSpec?.equals)!),
       findMany: vi.fn(async (input: { where: { id: { not: string }; createdAt: { lte: Date } } }) => runs
         .filter(run => run.id !== input.where.id.not && run.createdAt <= input.where.createdAt.lte)
         .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).map(run => ({ id: run.id }))),
     },
     agentMessage: { findMany: vi.fn(async (input: { where: { runId: string } }) => messages.filter(message => message.runId === input.where.runId)) },
-    chapter: { findMany: vi.fn(async (input: { where: { id?: { in: string[] } } }) => chapters.filter(chapter => !input.where.id || input.where.id.in.includes(chapter.id))) },
-    volume: { findFirst: vi.fn(async () => ({ id: 'volume', orderIndex: 1 })) },
+    agentChildExecutionGrant: { findUnique: vi.fn(async () => null) },
+    agentSession: { findFirst: vi.fn(async () => ({ spawnedFromRunId: null, spawnedFromSessionId: null })) },
+    chapter: { findMany: vi.fn(async (input: { where: { id?: { in: string[] } } }) => directory.filter(chapter => !input.where.id || input.where.id.in.includes(chapter.id))),
+      findFirst: vi.fn(async (input: { where: { id: string } }) => directory.find(chapter => chapter.id === input.where.id) ?? null) },
+    volume: { findFirst: vi.fn(async (input: { where: { orderIndex: number } }) => {
+      const chapter = directory.find(chapter => chapter.volume.orderIndex === input.where.orderIndex)
+      return chapter ? { id: chapter.volumeId, orderIndex: input.where.orderIndex } : null
+    }) },
     storyCompilation: { findFirst: vi.fn(async (input: { where: { chapterId: string; runId: { in: string[] } } }) =>
       terminals.has(input.where.chapterId) || input.where.runId.in.includes(terminalAttempts.get(input.where.chapterId) ?? '') ? { id: 'terminal' } : null) },
     chapterQualityReport: { findMany: vi.fn(async () => reports) },
@@ -244,5 +252,98 @@ describe('fresh human actions and their own chapter objects', () => {
     expect(JSON.stringify(await freezeWritingScope(f.tx, subject, old, '写下一章', 2))).toBe(bytes)
     expect(taskSpecSchema.parse(old).scope.writingActions).toBeUndefined()
     expect(() => projectWritingClarification(spec, { version: 2, projection: { writing: spec.scope.writing } } as never)).toThrow()
+  })
+  it('keeps a bare Continue as control input without a fresh manuscript grant', async () => {
+    const f = await fixture('继续', '写第2章')
+    const spec = await f.freeze()
+    expect(spec.scope.authorEffects?.manuscript).toBe(false)
+    expect(spec.scope.writingActions).toBeUndefined()
+  })
+  it('freezes the complete current-chapter request including persistence of its own result', async () => {
+    const directory = [1, 2, 3].map(orderIndex => ({ ...chapters[0], id: `chapter-${orderIndex}`, orderIndex, orderInVolume: orderIndex }))
+    const f = await fixture(chapterRevisionPrompt, '你好', 'chapter-3', directory)
+    const spec = await f.freeze()
+    expect(spec).toMatchObject({ intent: 'revise', scope: { writing: { kind: 'bounded', repairAuthorized: true,
+      targets: [{ orderIndex: 3, chapterId: 'chapter-3' }] } } })
+  })
+  it.each([nextChapterContinuationPrompt, '只续写下一章，不修改已经保存的第1章，完成质量与连续性检查并按必要性修订复检。'])(
+    'binds an explicit necessary repair to the new draft from the same current request: %s', async prompt => {
+      const directory = [1, 2, 3].map(orderIndex => ({ ...chapters[0], id: `chapter-${orderIndex}`, orderIndex, orderInVolume: orderIndex }))
+      const f = await fixture(prompt, '你好', null, directory)
+      const spec = await f.freeze()
+      expect(spec.scope.writing).toMatchObject({ kind: 'bounded', repairAuthorized: true, targets: [{ orderIndex: 4, chapterId: null }] })
+      expect(spec.scope.localEditBoundary).toBeUndefined()
+    })
+  it('resolves the complete volume/book continuation against the locked physical directory', async () => {
+    const directory = [1, 2, 3, 4].map(orderIndex => ({ ...chapters[0], id: `chapter-${orderIndex}`, orderIndex, orderInVolume: orderIndex }))
+    const f = await fixture(directoryContinuationPrompt, '你好', null, directory)
+    expect((await f.freeze()).scope.writing).toMatchObject({ kind: 'bounded', targets: [{ orderIndex: 5, chapterId: null,
+      volumeId: 'volume', positionInVolume: 5 }] })
+  })
+  it.each(['续写下一章，作为第5章正式写入。只写这一章。', '在当前章之后写下一章，作为第4章正式写入。只写这一章。'])(
+    'keeps a placement contradiction empty after every action projection: %s', async prompt => {
+      const directory = [1, 2, 3].map(orderIndex => ({ ...chapters[0], id: `chapter-${orderIndex}`, orderIndex, orderInVolume: orderIndex }))
+      const f = await fixture(prompt, '你好', 'chapter-1', directory)
+      const spec = await f.freeze()
+      expect(spec.scope.writing).toMatchObject({ kind: 'needs_input', targets: [] })
+      expect(spec.scope.writingActions?.operations.every(operation => !operation.targets.length)).toBe(true)
+    })
+  it('does not union conflicting volume/book selectors for the same write effect', async () => {
+    const directory = [1, 2, 3, 4].map(orderIndex => ({ ...chapters[0], id: `chapter-${orderIndex}`, orderIndex,
+      orderInVolume: orderIndex <= 2 ? orderIndex : orderIndex - 2, volumeId: orderIndex <= 2 ? 'volume-1' : 'volume-2',
+      volume: { orderIndex: orderIndex <= 2 ? 1 : 2 } }))
+    const f = await fixture('续写第二卷第3章。仅写第3章。不修改第1至4章。', '你好', null, directory)
+    expect((await f.freeze()).scope.writing).toMatchObject({ kind: 'needs_input', targets: [] })
+  })
+  it.each(['检查并修复第二段', '将“窗边还留着灯。”改为“灯已经熄灭。”'])(
+    'keeps a concrete local object on the verified editor body: %s', async prompt => {
+      const f = await fixture(prompt, '你好', 'chapter-1')
+      const spec = await f.freeze()
+      expect(spec.scope.writing).toMatchObject({ kind: 'bounded', targets: [{ chapterId: 'chapter-1' }] })
+      expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'bounded', regions: [{ chapterId: 'chapter-1' }] })
+    })
+  it('keeps conditional review-before-repair on the one referenced saved chapter', async () => {
+    const prompt = '请读取《合成契约作品》第二卷第2章《合成章4》当前已保存正文并完成本章检查和提交，不续写、不新建章节、不修改第1至3章。当前指令已为“向左走”，无需还原旧句。请基于当前版本做完整连续性与人类感检查；如有确证问题，只对本章必要位置做局部修订并复检，保持其他情节。终态应对应两人留在长廊、门尚未打开；其余设定保持。最终以当前正文真实提交章节桥与故事终态，确认保存后自然结束。'
+    const directory = [1, 2, 3, 4].map(orderIndex => ({ ...chapters[0], id: `chapter-${orderIndex}`, orderIndex,
+      orderInVolume: orderIndex <= 2 ? orderIndex : orderIndex - 2, volumeId: orderIndex <= 2 ? 'volume-1' : 'volume-2',
+      volume: { orderIndex: orderIndex <= 2 ? 1 : 2 } }))
+    const f = await fixture(prompt, '你好', 'chapter-1', directory)
+    const spec = await f.freeze()
+    expect(spec.scope.writing).toMatchObject({ kind: 'bounded', repairAuthorized: false, targets: [{ chapterId: 'chapter-4' }] })
+    expect(spec.scope.localEditBoundary).toMatchObject({ version: 3, kind: 'review_bound', regions: [{ chapterId: 'chapter-4' }] })
+    expect(original.originalRepairAuthority({ prompt, spec }, 'chapter-4')).toBe(false)
+  })
+  it.each(['修改第1章。修改当前章。', '写第1章。修改当前章。'])(
+    'keeps an explicit current-editor target separate from an earlier same-request chapter: %s', async prompt => {
+    const f = await fixture(prompt, '你好', 'chapter-2')
+    const spec = await f.freeze()
+    expect(spec.scope.writingActions?.operations.map(operation => operation.targets.map(target => target.chapterId)))
+      .toEqual([['chapter-1'], ['chapter-2']])
+  })
+  it.each(['修改这段', '检查并修复结尾'])(
+    'keeps an unresolved local locator fenced before any body effect: %s', async prompt => {
+      const f = await fixture(prompt, '你好', 'chapter-1')
+      const spec = await f.freeze()
+      expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'needs_input', regions: [] })
+      expect(frozenWritingRevisionAuthority(spec, 'chapter-1')).toBe(false)
+    })
+  it('authenticates an explicit new-draft repair through the original canonical create binding', async () => {
+    const directory = chapters.map(chapter => ({ ...chapter }))
+    const f = await fixture('写下一章，按必要性修订复检', '你好', null, directory)
+    const spec = await f.freeze()
+    const created = { ...chapters[0], id: 'new-chapter', orderIndex: 3, orderInVolume: 3 }
+    directory.push(created)
+    f.current.writingBindings = { version: 1, taskId: spec.id, targets: [{ chapterId: created.id, orderIndex: 3 }] }
+    await expect(original.assertOriginalRepairAuthority(f.tx, subject, created.id)).resolves.toBeUndefined()
+    await expect(original.assertOriginalRepairAuthority(f.tx, subject, 'chapter-1')).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
+    f.current.writingBindings = null
+    await expect(original.assertOriginalRepairAuthority(f.tx, subject, created.id)).rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
+  })
+  it('rejects a fresh per-action projection whose scalar was replaced with an unrelated old needs-input shape', async () => {
+    const f = await fixture('修改第2章')
+    const spec = await f.freeze()
+    spec.scope.writing = { version: 1, kind: 'needs_input', targets: [], repairAuthorized: true, titleAndBodyOnly: false }
+    spec.scope.writingInterpretation!.scopeHash = frozenWritingScopeHash(spec.scope)
+    expect(taskSpecSchema.safeParse(spec).success).toBe(false)
   })
 })

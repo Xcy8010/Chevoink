@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { taskSpecSchema, type TaskSpec } from '../../../shared/contracts/task-spec-contracts.js'
-import { authorOperationRange, parseAuthorWritingRequest, type AuthorWritingRequest } from './author-writing-request.js'
+import { authorEffectRange, authorOperationRange, parseAuthorWritingRequest, type AuthorWritingRequest } from './author-writing-request.js'
 import type { RequestedWritingRange } from './writing-target-range.js'
 import { ownedAuthorAdmission } from './writing-request-context.js'
 import { assertFrozenWritingContract } from './writing-contract.js'
@@ -118,25 +118,44 @@ export async function freezeWritingActions(tx: Prisma.TransactionClient, subject
   if (!operations.length || request.range?.kind === 'unbounded') return undefined
   const volumeOrders = [...new Set(request.evidence.targets.flatMap(target => target.range?.volume ? [target.range.volume] : []))]
   const volumes = (await Promise.all(volumeOrders.map(orderIndex => tx.volume.findFirst({ where: { novelId: subject.novelId, archivedAt: null, orderIndex }, select: { id: true, orderIndex: true } })))).filter(item => item !== null)
+  const directory = { chapters, volumes }
+  const conflictingEffect = (['write', 'revise'] as const).some(kind => {
+    const effect = authorEffectRange(request, kind, directory)
+    return effect.hasRanges && !effect.range
+  })
   const result: NonNullable<TaskSpec['scope']['writingActions']>['operations'] = []
   for (const operation of operations) {
     const kind = operation.kind as 'write' | 'revise'
     const ranges = operation.targetIndices.filter(index => request.evidence.targets[index].range)
-    const range = authorOperationRange(request, operation)
+    const range = authorOperationRange(request, operation, directory)
     let targets = resolveActionTargets(range, chapters, editorId, volumes), source: Source | undefined, boundary: Boundary | undefined
-    if (request.reasons.some(reason => !['conflicting_targets'].includes(reason))) targets = []
-    else if (!ranges.length && editorId && operation.targetIndices.some(index => request.evidence.targets[index].kind === 'same_target'
-      && /当前|正在编辑|\bcurrent\b/iu.test(prompt.slice(request.evidence.targets[index].span.start, request.evidence.targets[index].span.end)))) {
+    const invalid = conflictingEffect || request.reasons.some(reason => !['conflicting_targets'].includes(reason))
+    const predicate = prompt.slice(operation.span.start, operation.span.end)
+    const persistence = /^(?:保存|存入|导出|发布|save|export|publish)$/iu.test(predicate)
+    const explicitEditor = operation.targetIndices.some(index => request.evidence.targets[index].kind === 'same_target'
+      && /当前|正在编辑|\bcurrent\b/iu.test(prompt.slice(request.evidence.targets[index].span.start, request.evidence.targets[index].span.end)))
+    const clause = request.evidence.clauses.find(clause => clause.start === operation.clauseSpan.start)
+    const necessaryRepair = kind === 'revise' && /(?:必要时|如有必要|如需|按(?:照)?(?:需要|必要性|需)|视需要|if\s+(?:needed|necessary)|as\s+needed)\s*$/iu
+      .test(clause?.masked.slice(0, operation.span.start - clause.start) ?? '')
+    if (invalid) targets = []
+    else if (!ranges.length && !explicitEditor && (persistence || necessaryRepair || operation.targetIndices.some(index =>
+      ['prose', 'local', 'same_target'].includes(request.evidence.targets[index].kind)))) {
+      const prior = result.filter(action => action.resolution === 'bound')
+      const domains = [...new Map(prior.map(action => [JSON.stringify(action.targets), action.targets])).values()]
+      if (domains.length === 1) targets = domains[0].map(target => ({ ...target }))
+    }
+    if (!invalid && !ranges.length && !targets.length && editorId && operation.targetIndices.some(index => request.evidence.targets[index].kind === 'local'
+      || request.evidence.targets[index].kind === 'same_target' && explicitEditor)) {
       const chapter = chapters.find(item => item.id === editorId)
       if (chapter) targets = [{ orderIndex: chapter.orderIndex, chapterId: chapter.id }]
     }
-    if (chapters.length && !ranges.length && !targets.length && !request.reasons.length) {
-      const clause = request.evidence.clauses.find(clause => clause.start === operation.clauseSpan.start)
+    if (!invalid && chapters.length && !ranges.length && !targets.length && !request.reasons.length) {
       const collective = /全部|所有|\ball\b/iu.test(clause?.masked ?? '')
       const historical = await recentHumanObject(tx, subject, chapters, kind, prompt, volumes, collective)
       if (historical) { targets = historical.targets; source = historical.source; boundary = historical.boundary }
     }
-    if (kind === 'revise' && targets.some(target => target.chapterId === null)) targets = []
+    if (kind === 'revise' && targets.some(target => target.chapterId === null && !result.some(action => action.kind === 'write'
+      && action.resolution === 'bound' && action.targets.some(item => item.chapterId === null && item.orderIndex === target.orderIndex)))) targets = []
     result.push({ start: operation.span.start, end: operation.span.end, kind, resolution: targets.length ? 'bound' : 'needs_input', targets,
       ...(source ? { source } : {}), ...(boundary ? { boundary } : {}) })
   }

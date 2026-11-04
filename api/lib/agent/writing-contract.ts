@@ -2,6 +2,16 @@ import type { TaskSpec } from '../../../shared/contracts/task-spec-contracts.js'
 import { DataAccessError } from '../prisma.js'
 import { runtimeJson } from './runtime-common.js'
 
+/** The compatibility union retains any proven volume fence for the same slot. */
+export function writingActionTargets(operations: NonNullable<TaskSpec['scope']['writingActions']>['operations']) {
+  const targets = new Map<number, NonNullable<TaskSpec['scope']['writing']>['targets'][number]>()
+  for (const target of operations.flatMap(operation => operation.targets)) {
+    const previous = targets.get(target.orderIndex)
+    if (!previous?.volumeId || target.volumeId) targets.set(target.orderIndex, target)
+  }
+  return [...targets.values()]
+}
+
 /** Detect incomplete or inconsistent projections without parsing author prose
  * again. Frozen root/input ownership remains the authority for this receipt. */
 export function frozenWritingScopeHash(scope: TaskSpec['scope']): string {

@@ -126,9 +126,10 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
 
   it('retains old needs-input contracts without promoting them to fresh admission', () => fixture(async f => {
     const result = await startLoopRun(f.userId, { ...f, prompt: '修改第一章', mode: 'build' })
-    const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).taskSpec)
-    delete spec.scope.writingTargetProtocol
-    delete spec.scope.continuityEvidenceProtocol
+    // Reconstruct the historical contract, without today's additive action
+    // projection. Editing only its scalar would be a corrupt fresh receipt.
+    const spec = buildTaskSpec({ runId: result.runId, novelId: f.novelId, chapterId: f.chapterId,
+      prompt: '修改第一章', reviewProtocol: 1 })
     spec.scope.writing = { version: 1, kind: 'needs_input', targets: [], repairAuthorized: true, titleAndBodyOnly: false }
     await prisma.agentRun.update({ where: { id: result.runId }, data: { status: 'running', taskSpec: spec } })
     expect(await prisma.$transaction(tx => freezeWritingScope(tx, { ...f, runId: result.runId }, spec, '修改第一章', 1))).toEqual(spec)
@@ -137,6 +138,7 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
     { chapterId: f.chapterId, oldText: '选区原文。', newText: '不能扩大旧授权。' })).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
     expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('前😀段。选区原文。后段。')
     expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).taskSpec).toEqual(spec)
   }))
 
   it.each(['不修订第2章', '不动第2章', '不改第2章'])('honors an explicit exclusion inside a broader fresh HTTP range: %s', exclusion => fixture(async f => {

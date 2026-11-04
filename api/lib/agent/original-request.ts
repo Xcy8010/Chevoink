@@ -4,6 +4,7 @@ import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js
 import { assertFrozenWritingContract } from './writing-contract.js'
 import { DataAccessError } from '../prisma.js'
 import { runtimeJson } from './runtime-common.js'
+import { activeChapterScope } from '../data/internal.js'
 
 type Subject = { userId: string; novelId: string; runId: string }
 type OriginalRequest = { prompt: string | null; spec: unknown; taskId: string; sourceRunId: string; parentRunId: string | null }
@@ -113,7 +114,19 @@ export function hasOriginalRepairAuthority(prompt: string | null): boolean {
 }
 
 export async function assertOriginalRepairAuthority(tx: Prisma.TransactionClient, subject: Subject, chapterId?: string) {
-  if (!originalRepairAuthority(await readOriginalTaskRequest(tx, subject), chapterId)) {
+  const original = await readOriginalTaskRequest(tx, subject)
+  if (!originalRepairAuthority(original, chapterId)) {
+    // An explicit repair of the current request's new draft is frozen before
+    // its chapter ID exists. Only the canonical create binding may fill it.
+    const spec = taskSpecSchema.safeParse(original.spec).data
+    if (chapterId && spec?.scope.writingActions && spec.scope.localEditBoundary?.version !== 3
+      && !spec.scope.writingInterpretation?.revisionDenied) {
+      const chapter = await tx.chapter.findFirst({ where: { id: chapterId, authorId: subject.userId, ...activeChapterScope(subject.novelId) },
+        select: { id: true, orderIndex: true } })
+      if (chapter && spec.scope.writingActions.operations.some(operation => operation.kind === 'revise' && operation.resolution === 'bound'
+        && operation.targets.some(target => target.chapterId === null && target.orderIndex === chapter.orderIndex))
+        && await (await import('./writing-scope.js')).readNewDraftWritingAuthority(tx, subject, chapter)) return
+    }
     throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '原始请求未授权检查后改写正文；保留报告与当前正文。')
   }
 }

@@ -9,7 +9,7 @@ import { readOriginalTaskRequest } from './original-request.js'
 import { lexAuthorWritingRequest, parseAuthorWritingRequest, parseAuthorWritingExclusion } from './author-writing-request.js'
 import { freezeLocalEditBoundary, requestedLocalEdit } from './local-edit-scope.js'
 import { localEditProtectionRanges } from './local-edit-citations.js'
-import { frozenWritingScopeHash } from './writing-contract.js'
+import { frozenWritingScopeHash, writingActionTargets } from './writing-contract.js'
 
 type Subject = { userId: string; novelId: string; runId: string }
 type Original = Awaited<ReturnType<typeof readOriginalTaskRequest>>
@@ -67,7 +67,7 @@ export function clarifyWritingProjection(spec: TaskSpec, prompt: string, answer:
     if (!answerProjection) return null
     const operations = spec.scope.writingActions.operations.map(operation => pending.includes(operation)
       ? { ...operation, resolution: 'bound' as const, targets: answerProjection.writing.targets } : operation)
-    const targets = [...new Map(operations.flatMap(operation => operation.targets).map(target => [target.orderIndex, target])).values()]
+    const targets = writingActionTargets(operations)
     const repairAuthorized = targets.length > 0 && targets.every(target => operations.some(operation => operation.kind === 'revise'
       && operation.targets.some(item => item.chapterId === target.chapterId && item.orderIndex === target.orderIndex)))
     return { writing: { ...spec.scope.writing!, kind: 'bounded' as const, targets, repairAuthorized },
