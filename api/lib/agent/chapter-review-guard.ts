@@ -1,3 +1,4 @@
+import { assertWritingPlanContextCurrent, writingPlanContextHash } from './writing-plan-context.js'
 import { createHash } from 'node:crypto'
 
 import { Prisma } from '@prisma/client'
@@ -88,6 +89,7 @@ export type ChapterReviewRevisionOptions = {
   pendingQuality?: { compilationId: string; candidates: number }
 }
 export type ChapterReviewReadiness = {
+  planAlignment?: 'reviewed' | 'unknown'
   terminalCommitted?: boolean
   terminalProcessing?: TerminalProcessingInput
   terminalCorrection?: TerminalCandidateCorrection
@@ -198,6 +200,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     ...(compilationId ? { id: compilationId } : {}), status: { in: ['active','completed'] } }, include: { bridge: true, chapter: true }, orderBy: { createdAt: 'desc' } })
   if (!compilation?.chapter || !compilation.bridge || !compilation.chapter.content.trim()) return null
   const chapter = compilation.chapter
+  const planContext = await assertWritingPlanContextCurrent(tx, { userId: subject.userId, novelId: subject.novelId }, compilation.preparedContext)
   const { buildContinuitySnapshot, readContinuityReport } = await import('./continuity-review.js')
   const raw = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : {}
   const snapshot = await buildContinuitySnapshot({ ...subject, chapterId: chapter.id }, { compilationId: compilation.id, chapterId: chapter.id,
@@ -219,12 +222,19 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   // Historical delivery compatibility remains bound to the saved body.
   // Context matching is required below before deriving executable edit proof.
   const qualityComplete = qualityBodyCurrent
-  const continuity: ReviewStatus = report ? report.complete && report.billingKnown ? 'complete' : 'incomplete' : raw.checkedRevision !== undefined ? 'stale' : 'missing'
+  const planReviewed = !planContext || report?.planAlignment?.status === 'reviewed' && report.planAlignment.planContextHash === writingPlanContextHash(planContext)
+  const continuity: ReviewStatus = report ? report.complete && report.billingKnown && planReviewed ? 'complete' : 'incomplete' : raw.checkedRevision !== undefined ? 'stale' : 'missing'
   const quality: ReviewStatus = qualityComplete ? 'complete' : !qualityReport ? 'missing' : qualityReport.chapterRevision !== chapter.revision ? 'stale' : 'incomplete'
+  const planFindings = report?.planAlignment?.status === 'reviewed' ? report.planAlignment.findings : []
+  const planEntries = planFindings.map(finding => ({ source: 'continuity' as const, reportId: report!.id,
+    findingId: `plan-${runtimeJson(finding).hash}`, evidence: finding.planEvidence.map(reference => reference.quote).join('\n'),
+    explanation: finding.explanation, suggestion: finding.explanation, severity: finding.severity, disposition: 'pending', startOffset: -1, endOffset: -1 }))
+  const planFindingIds = new Set(planEntries.map(entry => entry.findingId))
   const entries: ChapterReviewDecisionDetail[] = [
     ...(report?.complete ? report.findings.map(finding => ({ source: 'continuity' as const, reportId: report.id, findingId: finding.id,
       evidence: finding.evidence, explanation: finding.explanation, suggestion: finding.suggestion, severity: finding.severity, disposition: 'pending',
       startOffset: finding.startOffset, endOffset: finding.endOffset })) : []),
+    ...planEntries,
     ...(qualityComplete ? qualityReport!.findings.filter(finding => finding.disposition !== 'repaired').map(finding => ({
       source: 'quality' as const, reportId: qualityReport!.id, findingId: finding.id, evidence: finding.evidenceExcerpt, explanation: finding.explanation,
       suggestion: finding.suggestion, severity: finding.severity, disposition: finding.disposition, startOffset: finding.startOffset, endOffset: finding.endOffset })) : []),
@@ -258,7 +268,8 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   const qualityTerms = /质量|人类感|AI味|quality/iu, continuityTerms = /连续性|连贯性|一致性|continuity/iu
   const mustPassQuality = constraints.some(text => qualityTerms.test(text) || !continuityTerms.test(text))
   const mustPassContinuity = constraints.some(text => continuityTerms.test(text) || !qualityTerms.test(text))
-  const mandatoryReviewPending = mustPassContinuity && !!report?.findings.some(finding => finding.severity === 'error')
+  const mandatoryReviewPending = mustPassContinuity && (!!report?.findings.some(finding => finding.severity === 'error')
+    || !!report?.planAlignment?.findings.some(finding => finding.severity === 'error'))
     || mustPassQuality && qualityComplete && qualityReport!.status !== 'passed'
   const decisionPending = mandatoryReviewPending || requiredDecisions.some(entry => !retained.some(item =>
     item.source === entry.source && item.reportId === entry.reportId && item.findingId === entry.findingId))
@@ -267,6 +278,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   if (requirements.quality && quality !== 'complete') requiredTools.push({ name: 'quality_analyze', args: { compilationId: compilation.id } })
   const ready = !requiredTools.length
   const semanticFindings = [
+    ...planFindings.map(finding => ({ source: 'plan', ...finding })),
     ...(report?.complete ? report.findings.map(finding => ({ source: 'continuity', signal: finding.signal, severity: finding.severity,
       evidence: finding.evidence, suggestion: finding.suggestion })) : []),
     ...(qualityComplete ? qualityReport!.findings.map(finding => ({ source: 'quality', signal: finding.signal, severity: finding.severity,
@@ -278,11 +290,14 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
       taskId: original.taskId, userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, orderIndex: chapter.orderIndex,
       compilationId: compilation.id, revision: chapter.revision, contentHash } : undefined
   const cycleFindings = entries.map(entry => {
+    const isPlanFinding = entry.source === 'continuity' && planFindingIds.has(entry.findingId)
     const finding = reviewCycleFinding({ source: entry.source, reportId: entry.reportId, findingId: entry.findingId,
       signal: entry.source === 'quality' ? qualityReport!.findings.find(row => row.id === entry.findingId)!.signal
-        : report!.findings.find(row => row.id === entry.findingId)!.signal,
+        : isPlanFinding ? 'structure' : report!.findings.find(row => row.id === entry.findingId)!.signal,
       severity: entry.severity, evidence: entry.evidence, explanation: entry.explanation, suggestion: entry.suggestion,
       startOffset: entry.startOffset, endOffset: entry.endOffset }, chapter.content)
+    // A planned event is not a located manuscript edit, even if its quote also occurs in the prose.
+    if (isPlanFinding) finding.anchor = null
     const qualityFinding = entry.source === 'quality' ? qualityReport!.findings.find(row => row.id === entry.findingId) : null
     if (qualityFinding && Number.isInteger(entry.startOffset) && Number.isInteger(entry.endOffset)
       && entry.startOffset !== undefined && entry.endOffset !== undefined && entry.startOffset >= 0 && entry.endOffset > entry.startOffset
@@ -313,7 +328,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
   if (ready && !decisionPending && requiredDecisions.length && (!requirements.quality || qualityContextCurrent)) phases.push('decision')
   if (terminalCommitted) phases.push('terminal')
   const readiness: ChapterReviewReadiness = { ready, checksRequired: requirements.continuity || requirements.quality, compilationId: compilation.id, chapterId: chapter.id, revision: chapter.revision,
-    continuity, quality, continuityErrorCount: report?.complete ? report.findings.filter(finding => finding.severity === 'error').length : 0,
+    continuity, quality, continuityErrorCount: report?.complete ? report.findings.filter(finding => finding.severity === 'error').length + (report.planAlignment?.status === 'reviewed' ? report.planAlignment.findings.filter(finding => finding.severity === 'error').length : 0) : 0,
     qualityErrorCount: qualityComplete ? qualityReport!.findings.filter(finding => finding.severity === 'error' && finding.disposition !== 'repaired').length : 0,
     qualityCandidateCount: automaticQuality.length, qualityReportId: qualityComplete ? qualityReport!.id : null,
     requiredTools, decisionPending, requiredDecisions, retainedDecisions: retained, decisionDetails: entries, decisionEntries: entries,
@@ -322,6 +337,7 @@ export async function readChapterReviewReadiness(tx: Prisma.TransactionClient,
     decisionBinding, reviewCycle, reviewCycleFindings: cycleFindings, mustPassPending: mandatoryReviewPending, qualityPassRequired: mustPassQuality,
     ...(scope.reviewProtocol === 1 ? { reviewProtocol: 1 as const, completeStrictReview } : {}),
     ...(options?.reviewBoundEvidence ? { reviewBoundEvidence: { contentHash, anchors, cycle } } : {}),
+    ...(planContext ? { planAlignment: report?.planAlignment?.status ?? 'unknown' } : {}),
     terminalCommitted, selectionOnly: !!boundary || !!originalSelectionBoundary(original.spec),
     progressEvidence: { taskId: original.taskId, userId: subject.userId, novelId: subject.novelId, chapterId: chapter.id, orderIndex: chapter.orderIndex,
       contentHash, phases } }
@@ -445,6 +461,8 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
   const compilations = await tx.storyCompilation.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
     chapterId: chapter.id, runId: { in: runIds } }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+  const boundCompilation = compilations.find(item => item.status === 'active' || item.status === 'completed')
+  if (boundCompilation) await assertWritingPlanContextCurrent(tx, { userId: subject.userId, novelId: subject.novelId }, boundCompilation.preparedContext)
   const { readNewDraftWritingAuthority, prohibitsNewDraftRevision, chapterRevisionAuthorityText, frozenWritingRevisionAuthority } = await import('./writing-scope.js')
   const current = await tx.chapter.findFirst({ where: { id: chapter.id, revision: chapter.revision, authorId: subject.userId,
     ...activeChapterScope(subject.novelId) }, select: { id: true, title: true, revision: true, content: true, orderIndex: true } })

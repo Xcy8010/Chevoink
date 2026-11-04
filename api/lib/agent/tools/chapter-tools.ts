@@ -1,3 +1,4 @@
+import { bindCreatedChapterWritingPlan } from '../writing-plan-context.js'
 import { readSemanticStructureHash } from '../semantic-progress.js'
 import { bindWritingChapter, readWritingScope, resolveWritingCreateTarget, originalSelectionBoundary } from '../writing-scope.js'
 import { assertLocalEditArguments, originalLocalEditBoundary } from '../local-edit-scope.js'
@@ -344,11 +345,13 @@ export const chapterCreateTool = defineTool({
         throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '创建后的章节位置与冻结目标不一致，本次事务需要回滚。')
       }
       if (slot) await bindWritingChapter(tx, ctx, slot.orderIndex, result.id)
+      await bindCreatedChapterWritingPlan(tx, ctx, result)
       semanticTransition = { targetId: ctx.novelId, beforeHash, afterHash: await readSemanticStructureHash(tx, ctx.novelId) }
       if (content && isAgent2FeatureEnabled('storyCompiler', ctx.userId)) {
         await recordStoryCompilerWrite({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
           chapterId: result.id, chapterOrderIndex: result.orderIndex, chapterRevision: result.revision }, tx)
       }
+      ctx.signal.throwIfAborted()
       return { ...result, scopeReused: false }
     }
     const chapter = ctx.transaction ? await create(ctx.transaction) : await prisma.$transaction(create)

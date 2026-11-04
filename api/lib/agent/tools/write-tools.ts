@@ -1,3 +1,6 @@
+import { lockNovelActiveScope } from '../../data/novel-write-lock.js'
+import { planMetadataPatchSchema } from '../../../../shared/contracts/novel-plans.js'
+import { applyPlanMetadataPatch, findPlanByIdentity, planKind, novelPlanHash } from '../novel-plan-contract.js'
 import { z } from 'zod'
 import { createHash } from 'node:crypto'
 
@@ -121,8 +124,9 @@ export const planSaveTool = defineTool({
   name: 'plan_save',
   title: '写入计划',
   description:
-    '把创作计划写入作品树「计划」文件夹。规划诉求必须落盘完整目标。长计划按完整小节分次写入，每次建议不超过2000字符且独立调用；首次保存首节，后续mode=append带planId和expectedContentHash追加，直到全部完成。修订已有计划必须传planId就地更新，不另建同名副本；默认replace替换全文，不传planId时同名自动更新。查看先plan_read，不重写代替读取。不要把计划全文粘贴在回复里。',
+    '把创作计划写入作品树「计划」文件夹。规划诉求必须落盘完整目标。长计划按完整小节分次写入，每次建议不超过2000字符且独立调用；首次保存首节，后续mode=append带planId和expectedContentHash追加，直到全部完成。修订已有计划必须传planId就地更新，不另建同名副本；新建时planKind必须明确outline大纲或detail细纲；大纲管主线、阶段、转折、结局，细纲管单章行动、冲突、结果、人物场景、伏笔衔接。细纲用parentPlanId和expectedParentPlanHash绑定已读取大纲，用target绑定真实chapterId或future全书序号；未关联草稿不能用于章节执行。修订typed计划带planHash作为expectedPlanHash；父大纲变化后明确核对并提交expectedParentPlanHash。默认replace替换全文，无planId只在相同类型、父大纲和目标内匹配。查看先plan_read，不重写代替读取。不要把计划全文粘贴在回复里。',
   parameters: z.object({
+    ...planMetadataPatchSchema.shape,
     title: z.string().min(2).max(60).describe('计划标题，如"第六章规划"'),
     content: z.string().min(1).describe('Markdown正文。长计划分完整小节写入，每次建议不超过2000字符且只调用一次plan_save；首次保存首节，后续mode=append追加，不能缩短原目标或把首节说成全文完成。禁止占位文本'),
     mode: z.enum(['replace', 'append']).optional().describe('默认replace替换全文；长计划用append逐节追加，每次等待回执再写下一节'),
@@ -164,7 +168,7 @@ export const planSaveTool = defineTool({
       const wrapped = obj[wrapKey]
       const direct = unwrapWrapped(wrapped)
       if (direct) {
-        obj = { ...direct, planId: obj.planId ?? direct.planId, mode: obj.mode ?? direct.mode, expectedContentHash: obj.expectedContentHash ?? direct.expectedContentHash }
+        obj = { ...direct, planId: obj.planId ?? direct.planId, mode: obj.mode ?? direct.mode, expectedContentHash: obj.expectedContentHash ?? direct.expectedContentHash, ...Object.fromEntries(Object.keys(planMetadataPatchSchema.shape).map(key => [key, obj[key] !== undefined ? obj[key] : direct[key]])) }
         break
       }
     }
@@ -187,7 +191,7 @@ export const planSaveTool = defineTool({
         (value) => value !== null && typeof value === 'object' && !Array.isArray(value),
       ) as Record<string, unknown> | undefined
       if (nested && (nested.title !== undefined || nested.content !== undefined)) {
-        obj = { ...nested, planId: obj.planId ?? nested.planId, mode: obj.mode ?? nested.mode, expectedContentHash: obj.expectedContentHash ?? nested.expectedContentHash }
+        obj = { ...nested, planId: obj.planId ?? nested.planId, mode: obj.mode ?? nested.mode, expectedContentHash: obj.expectedContentHash ?? nested.expectedContentHash, ...Object.fromEntries(Object.keys(planMetadataPatchSchema.shape).map(key => [key, obj[key] !== undefined ? obj[key] : nested[key]])) }
       }
     }
 
@@ -209,7 +213,7 @@ export const planSaveTool = defineTool({
     // 最后一层保守恢复：根对象里若只有一段明显的长文本，把它视为计划正文；ID、标题与说明不参与。
     if (result.content === undefined) {
       const candidates = Object.entries(result)
-        .filter(([key, value]) => !['title', 'name', 'planTitle', 'planId', 'id', 'reason', 'summary', 'mode', 'expectedContentHash'].includes(key) && typeof value === 'string')
+        .filter(([key, value]) => !['title', 'name', 'planTitle', 'planId', 'id', 'reason', 'summary', 'mode', 'expectedContentHash', ...Object.keys(planMetadataPatchSchema.shape)].includes(key) && typeof value === 'string')
         .map(([, value]) => value as string)
         .filter((value) => value.trim().length >= 20)
         .sort((left, right) => right.length - left.length)
@@ -255,10 +259,14 @@ export const planSaveTool = defineTool({
       const capturedArgs = { ...args }
       return executeDurablePlanSave(capturedCtx, capturedArgs,
         raw => Object.fromEntries(Object.entries(planSaveTool.parameters.parse(planSaveTool.coerceArgs!(raw))).filter(([, value]) => value !== undefined)),
-        (tx, verifiedContentHash) => planSaveTool.execute({ ...capturedCtx, durablePlan: undefined, transaction: tx,
+        (tx, verifiedContentHash, legacyCreationReplay) => planSaveTool.execute({ ...capturedCtx, durablePlan: undefined, transaction: tx, legacyPlanCreationReplay: legacyCreationReplay,
           planContentHashes: capturedArgs.planId && verifiedContentHash ? new Map([[capturedArgs.planId, verifiedContentHash]]) : undefined }, capturedArgs))
     }
+    if (!args.planId && !args.planKind && !ctx.legacyPlanCreationReplay) return { outcome: 'failed', failureCode: 'PLAN_KIND_REQUIRED',
+      summary: '新建计划需要明确类型', output: '新建计划必须明确传入 planKind=outline（大纲）或 detail（细纲）。未创建或改写任何计划；修订旧计划请先 plan_read，再明确传入 planId，不按标题猜测类型。' }
     const db = ctx.transaction ?? prisma
+    if (args.planKind && !ctx.transaction) return prisma.$transaction(async tx => planSaveTool.execute({ ...ctx, transaction: tx }, args))
+    if (ctx.transaction) await lockNovelActiveScope(db, ctx.novelId)
     const title = args.title.trim()
     ctx.signal.throwIfAborted()
     const expectedContentHash = args.expectedContentHash ?? (args.planId ? ctx.planContentHashes?.get(args.planId) : undefined)
@@ -276,16 +284,9 @@ export const planSaveTool = defineTool({
             run: { userId: ctx.userId, novelId: ctx.novelId },
           },
         })
-      : await db.agentArtifact.findFirst({
-          where: {
-            artifactType: 'chapterPlan',
-            title,
-            metadata: { path: ['savedAsPlan'], equals: true },
-            run: { userId: ctx.userId, novelId: ctx.novelId },
-          },
-          orderBy: { updatedAt: 'desc' },
-        })
+      : await findPlanByIdentity(db, ctx.userId, ctx.novelId, args)
 
+    if (existing && planKind(existing.metadata) !== 'legacy' && !ctx.transaction) return prisma.$transaction(async tx => planSaveTool.execute({ ...ctx, transaction: tx }, args))
     if (args.planId && !existing) {
       return {
         output: `未找到 planId=${args.planId} 对应的计划，本次未执行任何写入。请核对 planId，或不传 planId 重试（同名计划会自动就地更新）。`,
@@ -321,15 +322,15 @@ export const planSaveTool = defineTool({
       }
     }
 
+    const metadata = await applyPlanMetadataPatch(db, ctx.userId, ctx.novelId, existing, args, content)
+    metadata.savedAsPlan = true
+
+    const planHash = novelPlanHash({ content, metadata })
     if (existing) {
       const beforeTitle = existing.title
       const before = existing.content
-      const metadata = {
-        ...((existing.metadata as Record<string, unknown> | null) ?? {}),
-        savedAsPlan: true,
-      }
       ctx.signal.throwIfAborted()
-      if (appending || expectedContentHash) {
+      if (appending || expectedContentHash || args.expectedPlanHash) {
         const saved = await db.agentArtifact.updateMany({
           where: { id: existing.id, content: existing.content, title: existing.title, updatedAt: existing.updatedAt },
           data: { title: appending ? existing.title : title, content, metadata: metadata as Prisma.InputJsonValue },
@@ -337,7 +338,7 @@ export const planSaveTool = defineTool({
         if (saved.count !== 1) return { outcome: 'failed', summary: '计划版本已变化，未追加', output: '并发修改已发生，未写入。请plan_read核对正文和contentHash后再继续，不能重复追加已保存小节。' }
         recordPlanContentHash(ctx, existing.id, contentHash)
         return { summary: `${appending ? '追加' : '更新'}计划《${appending ? existing.title : title}》 · ${args.content.length} 字`,
-          output: `${appending ? '已追加一个完整小节' : '已按核对版本更新计划'}，planId=${existing.id}，contentHash=${contentHash}，累计${content.length}字。继续追加剩余小节直到原计划完整，不重复已保存内容。`,
+          output: `${appending ? '已追加一个完整小节' : '已按核对版本更新计划'}，planId=${existing.id}，contentHash=${contentHash}，planHash=${planHash}，累计${content.length}字。继续追加剩余小节直到原计划完整，不重复已保存内容。`,
           display: { kind: 'planDiff', artifactId: existing.id, title: appending ? existing.title : title, beforeTitle: existing.title, before: existing.content, after: content } }
       }
       const updated = await db.agentArtifact.update({
@@ -347,7 +348,7 @@ export const planSaveTool = defineTool({
       recordPlanContentHash(ctx, updated.id, contentHash)
 
       return {
-        output: `已就地更新既有计划《${beforeTitle}》（planId=${updated.id}，contentHash=${contentHash}，${args.content.length} 字），没有新建副本。如长计划尚未完整，继续mode=append追加剩余小节；只有完成原目标后才向作者汇报完成。`,
+        output: `已就地更新既有计划《${beforeTitle}》（planId=${updated.id}，contentHash=${contentHash}，planHash=${planHash}，${args.content.length} 字），没有新建副本。如长计划尚未完整，继续mode=append追加剩余小节；只有完成原目标后才向作者汇报完成。`,
         summary: `更新计划《${title}》 · ${args.content.length} 字`,
         display: {
           kind: 'planDiff',
@@ -366,13 +367,13 @@ export const planSaveTool = defineTool({
         artifactType: 'chapterPlan',
         title,
         content: args.content,
-        metadata: { savedAsPlan: true },
+        metadata: metadata as Prisma.InputJsonValue,
       },
     })
     recordPlanContentHash(ctx, artifact.id, contentHash)
 
     return {
-      output: `已把《${title}》写入计划文件夹（planId=${artifact.id}，contentHash=${contentHash}，${args.content.length} 字）。如长计划尚未完整，继续mode=append追加剩余小节；只有完成原目标后才向作者汇报完成。后续修订带planId就地更新，不新建副本。`,
+      output: `已把《${title}》写入计划文件夹（planId=${artifact.id}，contentHash=${contentHash}，planHash=${planHash}，${args.content.length} 字）。如长计划尚未完整，继续mode=append追加剩余小节；只有完成原目标后才向作者汇报完成。后续修订带planId就地更新，不新建副本。`,
       summary: `写入计划《${title}》 · ${args.content.length} 字`,
       display: { kind: 'planFile', artifactId: artifact.id, title, content: args.content },
     }
@@ -433,8 +434,9 @@ export const planDeleteTool = defineTool({
   }),
   permission: { plan: 'allow', build: 'ask', review: 'deny' },
   readOnly: false,
-  async execute(ctx, args) {
+  async execute(ctx, args): Promise<ToolResult> {
     const db = ctx.transaction ?? prisma
+    if (ctx.transaction) await lockNovelActiveScope(db, ctx.novelId)
     const existing = await db.agentArtifact.findFirst({
       where: {
         id: args.planId,
@@ -451,6 +453,11 @@ export const planDeleteTool = defineTool({
       }
     }
 
+    if (planKind(existing.metadata) !== 'legacy' && !ctx.transaction) return prisma.$transaction(async tx => {
+      await lockNovelActiveScope(tx, ctx.novelId)
+      return planDeleteTool.execute({ ...ctx, transaction: tx }, args)
+    })
+    ctx.signal.throwIfAborted()
     const metadata = {
       ...((existing.metadata as Record<string, unknown> | null) ?? {}),
       savedAsPlan: false,

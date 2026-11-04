@@ -1,9 +1,15 @@
+import type { PlanMetadataPatch } from '../../../../shared/contracts/novel-plans'
 import type { Dispatch, SetStateAction } from 'react'
 import { createNovelPlanFile, updateNovelPlanFile } from '../api'
-import { buildServerPlanFile } from '../lib/plan-review'
+import { buildServerPlanFile, getSavedPlanSnapshot } from '../lib/plan-review'
 import type { AgentArtifact, AgentRunState, MobileView, SaveState, WorkspacePlanFile } from '../types'
 
 type PlanDocumentActions = {
+  onPlansChanged?: () => void
+  syncScope?: string
+  isCurrentNovel?: () => boolean
+  onRequestCreate?: () => void
+  savePlanMetadata?: (artifactId: string, patch: PlanMetadataPatch & { title?: string }, novelId?: string) => Promise<unknown>
   activeNovelId: string
   savedPlanFiles: WorkspacePlanFile[]
   agentArtifacts: AgentArtifact[]
@@ -21,12 +27,12 @@ type PlanDocumentActions = {
   setWorkspaceDialog: (dialog: { title: string; description: string; confirmLabel?: string; cancelLabel?: string; tone?: 'default' | 'danger'; onConfirm: () => void | Promise<void> }) => void
   setCatalogDocument: Dispatch<SetStateAction<{ title: string; content: string; manualTitle: boolean; manualContent: boolean } | null>>
   updateAgentArtifact: (id: string, updater: (current: AgentArtifact) => AgentArtifact) => void
-  schedulePlanServerSync: (artifactId: string, title: string, content: string) => void
+  schedulePlanServerSync: (artifactId: string, title: string, content?: string, expectedPlanHash?: string, novelId?: string) => void
 }
 
 /** Plan/catalog editing and confirmations. Does not own the editor's current chapter. */
 export function createPlanDocumentActions({
-  activeNovelId, savedPlanFiles, agentArtifacts, selectedTreeItemId, catalogPreview, setSelectedTreeItemId, setWorkViewer, setMobileView, setActiveAgentArtifactId, setAgentArtifacts, setServerPlanFiles, setChapterSaveState, setChapterSaveMessage, setAgentRunState, setWorkspaceDialog, setCatalogDocument, updateAgentArtifact, schedulePlanServerSync,
+  onPlansChanged, syncScope, isCurrentNovel = () => true, onRequestCreate, savePlanMetadata, activeNovelId, savedPlanFiles, agentArtifacts, selectedTreeItemId, catalogPreview, setSelectedTreeItemId, setWorkViewer, setMobileView, setActiveAgentArtifactId, setAgentArtifacts, setServerPlanFiles, setChapterSaveState, setChapterSaveMessage, setAgentRunState, setWorkspaceDialog, setCatalogDocument, updateAgentArtifact, schedulePlanServerSync,
 }: PlanDocumentActions) {
   function handleSelectPlanFromTree(planId: string) {
     const artifactId = savedPlanFiles.find(plan => plan.id === planId)?.artifactId ?? planId
@@ -59,33 +65,20 @@ export function createPlanDocumentActions({
       cancelLabel: '取消',
       tone: 'danger',
       onConfirm: async () => {
-        if (targetArtifact) {
-          setAgentArtifacts((current) =>
-            current.map((artifact) =>
-              artifact.id === targetArtifact.id
-                ? {
-                    ...artifact,
-                    savedAsPlan: false,
-                  }
-                : artifact,
-            ),
-          )
-        }
-        setServerPlanFiles((current) =>
-          current.filter((plan) =>
-            targetPlan.backendArtifactId
-              ? plan.backendArtifactId !== targetPlan.backendArtifactId
-              : plan.id !== planId,
-          ),
-        )
-        // 同步云端标记，刷新后不再出现在计划文件夹
+        if (!isCurrentNovel()) return
         if (targetPlan.backendArtifactId) {
-          try {
-            await updateNovelPlanFile(targetPlan.backendArtifactId, { saved: false })
-          } catch {
-            /* 云端同步失败时本地已移除，刷新后可重新删除 */
+          try { await updateNovelPlanFile(targetPlan.backendArtifactId, { saved: false }) }
+          catch (error) {
+            if (!isCurrentNovel()) return
+            setChapterSaveState('error')
+            setChapterSaveMessage(error instanceof Error ? error.message : '删除失败，请重试。')
+            throw error
           }
         }
+        if (!isCurrentNovel()) return
+        if (targetArtifact) setAgentArtifacts(current => current.map(artifact => artifact.id === targetArtifact.id ? { ...artifact, savedAsPlan: false } : artifact))
+        setServerPlanFiles(current => current.filter(plan => targetPlan.backendArtifactId ? plan.backendArtifactId !== targetPlan.backendArtifactId : plan.id !== planId))
+        onPlansChanged?.()
         setChapterSaveState('saved')
         setChapterSaveMessage('这份计划已从计划文件夹移除。')
         setAgentRunState((current) => ({
@@ -97,25 +90,31 @@ export function createPlanDocumentActions({
   }
 
   /** 手工新建空白计划：落到云端后直接选中，作者可在编辑区改名/补充内容 */
-  async function handleCreatePlanFile() {
+  async function handleCreatePlanFile(planKind: 'outline' | 'detail' = 'outline') {
     setChapterSaveState('saving')
     setChapterSaveMessage('正在新建计划...')
 
     try {
-      const item = await createNovelPlanFile(activeNovelId)
+      const item = await createNovelPlanFile(activeNovelId, undefined, { planKind })
+      if (!isCurrentNovel()) return
       const nextPlan = buildServerPlanFile(item)
       setServerPlanFiles((current) => [...current, nextPlan])
+      onPlansChanged?.()
       setSelectedTreeItemId(`plan:${nextPlan.id}`)
       setMobileView('editor')
+      setWorkViewer('document')
       setChapterSaveState('saved')
       setChapterSaveMessage('已新建一份空白计划，可直接改名或补充内容。')
     } catch (error) {
+      if (!isCurrentNovel()) return
       setChapterSaveState('error')
       setChapterSaveMessage(error instanceof Error ? error.message : '新建计划失败，请稍后重试。')
+      throw error
     }
   }
 
   function handleRequestCreatePlan() {
+    if (onRequestCreate) { onRequestCreate(); return }
     setWorkspaceDialog({
       title: '确认新建计划',
       description: '将会在计划文件夹新建一份空白计划，Agent 后续可直接读取它。确定现在新建吗？',
@@ -152,7 +151,9 @@ export function createPlanDocumentActions({
       schedulePlanServerSync(
         targetPlan.backendArtifactId,
         nextTitle.trim() || targetPlan.title,
-        targetPlan.content,
+        undefined,
+        undefined,
+        syncScope ?? activeNovelId,
       )
     }
     setChapterSaveState('saved')
@@ -186,12 +187,17 @@ export function createPlanDocumentActions({
         title: next.title.trim() || current.title,
         content: next.content,
         rawContent: next.content,
+        planLocalDraft: current.planLocalDraft ?? { basePlanHash: targetPlan?.planHash },
       }))
       setServerPlanFiles((current) =>
         current.map((plan) =>
           plan.id === artifactId ||
           Boolean(targetPlan?.backendArtifactId && plan.backendArtifactId === targetPlan.backendArtifactId)
-            ? { ...plan, title: next.title.trim() || plan.title, content: next.content }
+            ? { ...plan, title: next.title.trim() || plan.title, content: next.content,
+                planHash: plan.localDraft?.basePlanHash ?? targetPlan?.planHash,
+                localDraft: plan.localDraft ?? { basePlanHash: targetPlan?.planHash },
+                savedSnapshot: getSavedPlanSnapshot(plan) ?? (targetPlan ? getSavedPlanSnapshot(targetPlan) ?? undefined : undefined),
+                hasRemoteConflict: Boolean(getSavedPlanSnapshot(plan)?.planHash && getSavedPlanSnapshot(plan)?.planHash !== (plan.localDraft?.basePlanHash ?? targetPlan?.planHash)) }
             : plan,
         ),
       )
@@ -200,11 +206,21 @@ export function createPlanDocumentActions({
           targetPlan.backendArtifactId,
           next.title.trim() || targetPlan.title,
           next.content,
+          targetPlan.planHash,
+          syncScope ?? activeNovelId,
         )
       }
       setChapterSaveState('saved')
       setChapterSaveMessage('创作计划已更新。')
     }
   }
-  return { handleSelectPlanFromTree, handleRequestDeletePlan, handleRequestCreatePlan, handleRenamePlan, handleWorkspaceDocumentChange }
+  async function handleSavePlanSettings(planId: string, patch: PlanMetadataPatch & { title?: string }) {
+    const plan = savedPlanFiles.find(item => item.id === planId)
+    if (!plan?.backendArtifactId || !savePlanMetadata) throw new Error('计划尚未保存，请稍后重试。')
+    await savePlanMetadata(plan.backendArtifactId, { ...patch, expectedPlanHash: plan.planHash }, syncScope ?? activeNovelId)
+    if (!isCurrentNovel()) return
+    if (patch.title !== undefined) setServerPlanFiles(current => current.map(item => item.backendArtifactId === plan.backendArtifactId ? { ...item, title: patch.title!.trim() || item.title } : item))
+    if (patch.title !== undefined) updateAgentArtifact(plan.artifactId, current => ({ ...current, title: patch.title!.trim() || current.title }))
+  }
+  return { handleCreatePlanFile, handleSavePlanSettings, handleSelectPlanFromTree, handleRequestDeletePlan, handleRequestCreatePlan, handleRenamePlan, handleWorkspaceDocumentChange }
 }

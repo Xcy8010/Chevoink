@@ -30,3 +30,5 @@ export * from './feedback.js'
 export * from './novel-import.js'
 export * from './agent-goal.js'
 export * from './agent-review-replacement.js'
+
+export * from './novel-plans.js'

@@ -26,6 +26,7 @@ import ChapterSidebar from './components/ChapterSidebar'
 import VolumeSettingsDialog from './components/VolumeSettingsDialog'
 import ChangeSetDrawer from './components/ChangeSetDrawer'
 import PlanSettingsPanel from './components/PlanSettingsPanel'
+import CreatePlanDialog from './components/CreatePlanDialog'
 import { StudioSkeleton } from '@/components/ui/Skeleton'
 import ConfirmDialog from './components/ConfirmDialog'
 import CoverPanel from './components/CoverPanel'
@@ -71,12 +72,12 @@ import type { AgentArtifact, AgentLocalRollbackSnapshot, AgentRunState, ChapterD
 import { buildArtifactsFromHistory, mergeRestoredArtifactsWithSnapshot, readStoredAgentWorkspace } from './lib/agent-persistence.js'
 import { BOOTSTRAP_NOVEL_SUMMARY, BOOTSTRAP_NOVEL_TITLE, DEFAULT_NOVEL_ID, STUDIO_LAST_NOVEL_STORAGE_KEY, buildAgentTaskWindowFromSession, createLocalAgentTaskWindow, dedupeAgentTaskWindows, formatDateTime, formatWordCount, getAgentWorkspaceStorageKey, isBootstrapNovel, pickFallbackAgentTaskWindow, resolveNovelTitleState, shouldDisplayListedAgentSession, shouldShowWorkspaceNovel } from './lib/agent-session.js'
 import { buildChapterDraft, buildLocalChapterCreateInput, buildCoverForm, buildNovelFormState, buildNovelUpdatePayload, buildProjectNotes, createIdleAgentRunState, isNovelFormDirty } from './lib/form-state.js'
-import { buildCatalogPreview, buildChapterReviewDescription, buildPendingChapterReview, buildServerPlanFile, buildWorkspacePlanFiles, mergeCatalogContentWithChapters, removeChapterAndCompact, replaceChapterItem, toChapterListItem, upsertChapterItem } from './lib/plan-review.js'
+import { buildCatalogPreview, buildChapterReviewDescription, buildPendingChapterReview, buildServerPlanFile, mergeServerPlanFile, buildWorkspacePlanFiles, mergeWorkspacePlanFiles, mergeCatalogContentWithChapters, removeChapterAndCompact, replaceChapterItem, toChapterListItem, upsertChapterItem } from './lib/plan-review.js'
 import { usePendingReviewStorage } from './components/use-pending-review-storage'
 import type { AgentTaskWindowState, StoredAgentWorkspaceSnapshot } from './lib/workspace-types.js'
 import { getPlatformCapabilities, subscribePlatformLifecycle } from './platform-capabilities.js'
 import { useWorkPanelState, writeWorkPanelUi } from './components/use-work-panel-state'
-import { reconcilePlanSelection, stablePlanId } from './components/work-plan-selection'
+import { reconcilePlanSelection } from './components/work-plan-selection'
 import { consumeSessionDeepLink, initialTaskWindows, selectInitialTask, selectTaskFallback } from './lib/initial-task-selection'
 import { createCatalogActions } from './components/catalog-actions'
 import { useChapterPersistence } from './components/use-chapter-persistence'
@@ -289,7 +290,37 @@ export default function StudioWorkspace() {
   // 计划文件夹云端副本：覆盖非活跃任务窗口/历史会话的计划，刷新后不丢失
   const [serverPlanFiles, setServerPlanFiles] = useState<WorkspacePlanFile[]>([])
   const [plansLoadedNovelId, setPlansLoadedNovelId] = useState<string | null>(null)
-  const { flushPlanServerSync, schedulePlanServerSync, awaitPlanServerSync } = usePlanSync()
+  const [planSaveFailure, setPlanSaveFailure] = useState<{ scope: string; message: string } | null>(null)
+  const planRefreshEpoch = useRef(0)
+  const refreshPlanLinks = useCallback(() => {
+    const owner = workspaceOwnerRef.current
+    const epoch = ++planRefreshEpoch.current
+    void listNovelPlanFiles(owner.novelId).then(items => {
+      if (workspaceOwnerRef.current !== owner || planRefreshEpoch.current !== epoch) return
+      setServerPlanFiles(current => items.map(item => {
+        const previous = current.find(plan => plan.backendArtifactId === item.id)
+        return mergeServerPlanFile(item, previous)
+      }))
+      setPlansLoadedNovelId(owner.novelId)
+    }).catch(() => { /* Keep the saved response and retry links on the next refresh. */ })
+  }, [])
+  const { flushPlanServerSync, schedulePlanServerSync, awaitPlanServerSync, savePlanMetadata } = usePlanSync((item, novelId, savedContent) => {
+    if (novelId !== `${workspaceOwnerRef.current.novelId}:${workspaceOwnerRef.current.epoch}`) return
+    setServerPlanFiles(current => current.map(plan => plan.backendArtifactId === item.id
+      ? { ...mergeServerPlanFile(item, plan, savedContent), id: plan.id, artifactId: plan.artifactId } : plan))
+    if (savedContent !== undefined) setAgentArtifacts(current => current.map(artifact => {
+      if (artifact.backendArtifactId !== item.id || !artifact.planLocalDraft) return artifact
+      const saved = (artifact.rawContent ?? artifact.content) === item.content && artifact.title === item.title
+      return { ...artifact, planLocalDraft: saved ? undefined : { basePlanHash: item.planHash } }
+    }))
+    refreshPlanLinks()
+  }, (state, message, novelScope) => {
+    if (novelScope !== `${workspaceOwnerRef.current.novelId}:${workspaceOwnerRef.current.epoch}`) return
+    if (state === 'error') setPlanSaveFailure({ scope: novelScope, message })
+    if (state === 'saved') setPlanSaveFailure(null)
+    setChapterSaveState(state)
+    setChapterSaveMessage(message)
+  })
   const agentRunAbortControllerRef = useRef<AbortController | null>(null)
   const coverGenerationWasActiveRef = useRef(false)
   const [editorSelection, setEditorSelection] = useState<EditorSelectionState>({
@@ -303,6 +334,7 @@ export default function StudioWorkspace() {
   const [editorChapterSettingsOpen, setEditorChapterSettingsOpen] = useState(false)
   // 计划设置抽屉：值为计划文件 id（本地产物 id 或 server- 前缀 id）
   const [planSettingsPlanId, setPlanSettingsPlanId] = useState<string | null>(null)
+  const [planCreateOwner, setPlanCreateOwner] = useState<typeof workspaceOwnerRef.current | null>(null)
   // 章节审查改为数组：Agent 连续写多章时各章审查态并存，互不覆盖（fix：新章写入导致旧审查被自动采纳）
   const [pendingChapterReviews, setPendingChapterReviews] = useState<ChapterPendingReview[]>([])
   const [pendingChapterReviewBusy, setPendingChapterReviewBusy] = useState(false)
@@ -834,10 +866,11 @@ export default function StudioWorkspace() {
     flushPlanServerSync()
     setServerPlanFiles([])
     setPlansLoadedNovelId(null)
+    const epoch = ++planRefreshEpoch.current
 
     void listNovelPlanFiles(activeNovelId)
       .then((items) => {
-        if (!cancelled) {
+        if (!cancelled && planRefreshEpoch.current === epoch) {
           setServerPlanFiles(items.map(buildServerPlanFile))
           setPlansLoadedNovelId(activeNovelId)
         }
@@ -1270,6 +1303,7 @@ export default function StudioWorkspace() {
 
       // plan_save：把规划文档直接写进左侧「计划」文件夹并选中，无需用户手动存入
       if (event.type === 'tool.result' && event.ok && event.display?.kind === 'planFile') {
+        refreshPlanLinks()
         const display = event.display
         const existing = pendingPlanReviewRef.current?.backendArtifactId === display.artifactId ? pendingPlanReviewRef.current : null
         if (isReviewStreamReplay(existing?.lastAppliedEvent, event)
@@ -1289,24 +1323,30 @@ export default function StudioWorkspace() {
           savedAsPlan: true,
         }
 
-        setAgentArtifacts((current) => [
-          planArtifact,
-          ...current.filter((artifact) => artifact.backendArtifactId !== display.artifactId),
-        ])
+        setAgentArtifacts((current) => {
+          const draft = current.find(artifact => artifact.backendArtifactId === display.artifactId && artifact.planLocalDraft)
+          return [draft ?? planArtifact, ...current.filter(artifact => artifact.backendArtifactId !== display.artifactId)]
+        })
         setActiveAgentArtifactId(planArtifact.id)
-        setSelectedTreeItemId(`plan:${planArtifact.id}`)
+        setSelectedTreeItemId(`plan:server-${display.artifactId}`)
         // 同步写入云端副本，切换任务窗口/刷新后仍可见
-        setServerPlanFiles((current) => [
-          {
+        setServerPlanFiles((current) => {
+          const previous = current.find(plan => plan.backendArtifactId === display.artifactId)
+          if (previous?.localDraft) return current
+          return [{
+            ...previous,
             id: `server-${display.artifactId}`,
+            planHash: undefined,
+            savedSnapshot: undefined,
+            hasRemoteConflict: false,
             title: display.title,
-            content: display.content.trim(),
+            content: display.content,
             createdAt: event.ts,
             artifactId: `server-${display.artifactId}`,
             backendArtifactId: display.artifactId,
           },
           ...current.filter((plan) => plan.backendArtifactId !== display.artifactId),
-        ])
+        ]})
         // 新建计划也挂审查条：空基线→全绿新增，撤销即从计划夹移除
         const review: PlanPendingReview = existing ? {
           ...existing, title: display.title, after: display.content, runId: event.runId,
@@ -1331,6 +1371,7 @@ export default function StudioWorkspace() {
 
       // plan_save 更新既有计划（planDiff）：先落库后审——同步新内容到计划夹，再挂出审查条供保留/撤销
       if (event.type === 'tool.result' && event.ok && event.display?.kind === 'planDiff') {
+        refreshPlanLinks()
         const display = event.display
         const existing = pendingPlanReviewRef.current?.backendArtifactId === display.artifactId ? pendingPlanReviewRef.current : null
         if (isReviewStreamReplay(existing?.lastAppliedEvent, event)
@@ -1350,23 +1391,29 @@ export default function StudioWorkspace() {
           savedAsPlan: true,
         }
 
-        setAgentArtifacts((current) => [
-          planArtifact,
-          ...current.filter((artifact) => artifact.backendArtifactId !== display.artifactId),
-        ])
+        setAgentArtifacts((current) => {
+          const draft = current.find(artifact => artifact.backendArtifactId === display.artifactId && artifact.planLocalDraft)
+          return [draft ?? planArtifact, ...current.filter(artifact => artifact.backendArtifactId !== display.artifactId)]
+        })
         setActiveAgentArtifactId(planArtifact.id)
-        setSelectedTreeItemId(`plan:${planArtifact.id}`)
-        setServerPlanFiles((current) => [
-          {
+        setSelectedTreeItemId(`plan:server-${display.artifactId}`)
+        setServerPlanFiles((current) => {
+          const previous = current.find(plan => plan.backendArtifactId === display.artifactId)
+          if (previous?.localDraft) return current
+          return [{
+            ...previous,
             id: `server-${display.artifactId}`,
+            planHash: undefined,
+            savedSnapshot: undefined,
+            hasRemoteConflict: false,
             title: display.title,
-            content: display.after.trim(),
+            content: display.after,
             createdAt: event.ts,
             artifactId: `server-${display.artifactId}`,
             backendArtifactId: display.artifactId,
           },
           ...current.filter((plan) => plan.backendArtifactId !== display.artifactId),
-        ])
+        ]})
         // 同一份计划连续修订：保留最早的 before，仅推进 after
         const review: PlanPendingReview = existing
             ? {
@@ -1465,7 +1512,7 @@ export default function StudioWorkspace() {
         void refreshWorkspaceAfterAgentWrite()
       }
     },
-    [activeNovelId, chapterStreamOwner, captureAgentChapterReview, queryClient, refreshWorkspaceAfterAgentWrite],
+    [activeNovelId, chapterStreamOwner, captureAgentChapterReview, queryClient, refreshWorkspaceAfterAgentWrite, refreshPlanLinks],
   )
 
   useEffect(
@@ -1501,35 +1548,7 @@ export default function StudioWorkspace() {
     () => volumes.find((volume) => volume.id === activeChapterListItem?.volumeId)?.title ?? null,
     [activeChapterListItem?.volumeId, volumes],
   )
-  const savedPlanFiles = useMemo(() => {
-    const localPlans = buildWorkspacePlanFiles(agentArtifacts)
-    const serverByBackendId = new Map(
-      serverPlanFiles
-        .filter((plan): plan is WorkspacePlanFile & { backendArtifactId: string } => Boolean(plan.backendArtifactId))
-        .map((plan) => [plan.backendArtifactId, plan]),
-    )
-    const orderedLocalPlans = localPlans.map((plan) => ({
-      ...plan,
-      // The same persisted plan must keep its identity when session history arrives.
-      id: stablePlanId(plan),
-      orderIndex: plan.backendArtifactId ? serverByBackendId.get(plan.backendArtifactId)?.orderIndex ?? null : null,
-    }))
-    const localBackendIds = new Set(
-      orderedLocalPlans.map((plan) => plan.backendArtifactId).filter((id): id is string => Boolean(id)),
-    )
-
-    // 本地（活跃任务窗口）优先，云端补齐其他窗口/历史会话的计划
-    return [
-      ...orderedLocalPlans,
-      ...serverPlanFiles.filter(
-        (plan) => !plan.backendArtifactId || !localBackendIds.has(plan.backendArtifactId),
-      ),
-    ].sort((left, right) => {
-      const leftOrder = left.orderIndex ?? Number.MAX_SAFE_INTEGER
-      const rightOrder = right.orderIndex ?? Number.MAX_SAFE_INTEGER
-      return leftOrder - rightOrder || new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime()
-    })
-  }, [agentArtifacts, serverPlanFiles])
+  const savedPlanFiles = useMemo(() => mergeWorkspacePlanFiles(buildWorkspacePlanFiles(agentArtifacts), serverPlanFiles), [agentArtifacts, serverPlanFiles])
   // 计划设置抽屉指向的计划：计划被删除/切换作品后自动收起
   const planSettingsPlan = planSettingsPlanId
     ? savedPlanFiles.find((plan) => plan.id === planSettingsPlanId) ?? null
@@ -1652,7 +1671,9 @@ export default function StudioWorkspace() {
     ? activeLiveToolDraft?.content
     : undefined
   const selectChapterFromToolRef = useRef(handleSelectChapter)
-  const { handleSelectPlanFromTree: selectPlanFromTree, handleRequestDeletePlan, handleRequestCreatePlan, handleRenamePlan, handleWorkspaceDocumentChange } = createPlanDocumentActions({
+  const { handleSelectPlanFromTree: selectPlanFromTree, handleRequestDeletePlan, handleRequestCreatePlan, handleCreatePlanFile, handleSavePlanSettings, handleRenamePlan, handleWorkspaceDocumentChange } = createPlanDocumentActions({
+    isCurrentNovel: (() => { const owner = workspaceOwnerRef.current; return () => workspaceOwnerRef.current === owner })(),
+    onRequestCreate: () => setPlanCreateOwner(workspaceOwnerRef.current), onPlansChanged: refreshPlanLinks, savePlanMetadata, syncScope: `${activeNovelId}:${workspaceOwnerRef.current.epoch}`,
     activeNovelId, savedPlanFiles, agentArtifacts, selectedTreeItemId, catalogPreview, setSelectedTreeItemId, setWorkViewer, setMobileView, setActiveAgentArtifactId, setAgentArtifacts, setServerPlanFiles, setChapterSaveState, setChapterSaveMessage, setAgentRunState, setWorkspaceDialog, setCatalogDocument, updateAgentArtifact, schedulePlanServerSync,
   })
   const handleSelectPlanFromTree = (planId: string) => { openWorkDocument(taskUiScope); selectPlanFromTree(planId) }
@@ -3177,6 +3198,8 @@ export default function StudioWorkspace() {
 
   // 计划审查条（plan/14 方案F）：✓保留仅清审查态；✕撤销把云端计划回写到本次修订前
   const { handleKeepPendingPlanReview, handleRevertPendingPlanReview, handleRequestRejectPendingPlanReview, handleAcceptPlanReviewHunk, handleRequestRejectPlanReviewHunk } = createPlanReviewActions({
+    savedPlanFiles, isCurrentNovel: (() => { const owner = workspaceOwnerRef.current; return () => workspaceOwnerRef.current === owner })(),
+    onSaved: refreshPlanLinks,
     pendingPlanReview, pendingPlanReviewBusy, setPendingPlanReview, setPendingPlanReviewBusy, setServerPlanFiles, setAgentArtifacts, setSelectedTreeItemId, setChapterSaveState, setChapterSaveMessage, setWorkspaceDialog,
   })
 
@@ -3633,10 +3656,12 @@ export default function StudioWorkspace() {
     novelSaveState === 'saved' && novelLastSavedAt
       ? `已自动保存于 ${formatDateTime(novelLastSavedAt)}`
       : novelMessage
-  const saveDisplayMessage =
+  const planRemoteConflict = plansLoadedNovelId === activeNovelId && savedPlanFiles.some(plan => plan.hasRemoteConflict)
+  const planSaveErrorMessage = planRemoteConflict ? '计划已在其他任务更新，当前草稿尚未保存。' : planSaveFailure?.scope === `${activeNovelId}:${workspaceOwnerRef.current.epoch}` ? planSaveFailure.message : null
+  const saveDisplayMessage = planSaveErrorMessage ?? (
     chapterSaveState === 'saved' && chapterLastSavedAt
       ? `已自动保存于 ${formatDateTime(chapterLastSavedAt)}`
-      : chapterSaveMessage
+      : chapterSaveMessage)
   const previewTargetChapterId = selectedChapterId && !selectedChapterId.startsWith('local-')
     ? selectedChapterId
     : chapters[0]?.id
@@ -3908,7 +3933,7 @@ export default function StudioWorkspace() {
       workspaceDocument={activeWorkspaceDocument}
       chapterLoading={chapterQuery.isLoading}
       chapterErrorMessage={chapterQuery.isError ? chapterSaveMessage : null}
-      chapterSaveState={chapterSaveState}
+      chapterSaveState={planSaveErrorMessage ? 'error' : chapterSaveState}
       chapterSaveMessage={saveDisplayMessage}
       latestWordCountLabel={latestWordCountLabel}
       selectedCommentCount={activeChapterListItem?.commentCount ?? 0}
@@ -4456,9 +4481,14 @@ export default function StudioWorkspace() {
           onClose={() => setEditorChapterSettingsOpen(false)}
         />
       ) : null}
+      {planCreateOwner === workspaceOwnerRef.current ? <CreatePlanDialog onClose={() => setPlanCreateOwner(current => current === planCreateOwner ? null : current)} onCreate={handleCreatePlanFile} /> : null}
       {planSettingsPlan ? (
         <PlanSettingsPanel
+          key={`${activeNovelId}:${planSettingsPlan.id}`}
           plan={planSettingsPlan}
+          plans={savedPlanFiles}
+          chapters={chapters}
+          onSave={(patch) => handleSavePlanSettings(planSettingsPlan.id, patch)}
           onRename={(title) => handleRenamePlan(planSettingsPlan.id, title)}
           onRequestDelete={() => {
             setPlanSettingsPlanId(null)

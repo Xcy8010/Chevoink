@@ -4,7 +4,7 @@
  */
 import type { Chapter, StudioPayload } from '../../../../shared/contracts/index.js'
 import type { NovelPlanFileItem } from '../api'
-import type { AgentArtifact, AgentLocalRollbackSnapshot, ChapterDraftState, ChapterPendingReview, WorkspacePlanFile } from '../types'
+import type { AgentArtifact, AgentLocalRollbackSnapshot, ChapterDraftState, ChapterPendingReview, PlanSavedSnapshot, WorkspacePlanFile } from '../types'
 
 
 
@@ -78,6 +78,7 @@ export function buildWorkspacePlanFiles(artifacts: AgentArtifact[]): WorkspacePl
       createdAt: artifact.createdAt,
       artifactId: artifact.id,
       backendArtifactId: artifact.backendArtifactId ?? null,
+      ...(artifact.planLocalDraft ? { localDraft: artifact.planLocalDraft, planHash: artifact.planLocalDraft.basePlanHash } : {}),
     }))
     .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
 }
@@ -94,6 +95,12 @@ export function buildServerPlanFile(item: NovelPlanFileItem): WorkspacePlanFile 
     artifactId: `server-${item.id}`,
     backendArtifactId: item.id,
     orderIndex: item.orderIndex,
+    planKind: item.planKind,
+    planHash: item.planHash,
+    parentPlanId: item.parentPlanId,
+    parentPlanHash: item.parentPlanHash,
+    target: item.target,
+    reviewState: item.reviewState,
   }
 }
 
@@ -305,4 +312,54 @@ export function removeChapterAndCompact(
         ? { ...chapter, orderIndex: chapter.orderIndex - 1, revision: chapter.revision + 1 }
         : chapter,
     )
+}
+
+/** The text shown for a parent confirmation must belong to the submitted saved hash. */
+export function getSavedPlanSnapshot(plan: WorkspacePlanFile): PlanSavedSnapshot | null {
+  if (plan.savedSnapshot) return plan.savedSnapshot
+  return !plan.localDraft && plan.planHash ? { title: plan.title, content: plan.content, planHash: plan.planHash } : null
+}
+
+/** List refreshes never grant a remote version to an unsaved local body. */
+export function mergeServerPlanFile(item: NovelPlanFileItem, previous?: WorkspacePlanFile, savedContent?: string): WorkspacePlanFile {
+  const server = buildServerPlanFile(item)
+  if (!previous?.localDraft) return server
+  if (savedContent !== undefined && !previous.hasRemoteConflict && previous.content === item.content && previous.title === item.title) return server
+  const basePlanHash = savedContent !== undefined ? item.planHash : previous.localDraft.basePlanHash
+  const savedSnapshot = previous.hasRemoteConflict && savedContent !== undefined
+    ? previous.savedSnapshot
+    : getSavedPlanSnapshot(server) ?? undefined
+  return {
+    ...(previous.hasRemoteConflict && savedContent !== undefined ? previous : server),
+    title: previous.title,
+    content: previous.content,
+    planHash: basePlanHash,
+    localDraft: { basePlanHash },
+    savedSnapshot,
+    hasRemoteConflict: Boolean(savedSnapshot && savedSnapshot.planHash !== basePlanHash),
+  }
+}
+
+/** Saved server text replaces historical caches; only explicit author drafts keep their body and baseline. */
+export function mergeWorkspacePlanFiles(localPlans: WorkspacePlanFile[], serverPlanFiles: WorkspacePlanFile[]): WorkspacePlanFile[] {
+  const serverByBackendId = new Map(serverPlanFiles.filter(plan => plan.backendArtifactId).map(plan => [plan.backendArtifactId, plan]))
+  const orderedLocalPlans = localPlans.map(plan => {
+    const server = plan.backendArtifactId ? serverByBackendId.get(plan.backendArtifactId) : undefined
+    const id = plan.backendArtifactId ? `server-${plan.backendArtifactId}` : plan.id
+    if (!server) return { ...plan, id }
+    if (!plan.localDraft) return { ...server, id, artifactId: plan.artifactId }
+    const savedSnapshot = getSavedPlanSnapshot(server) ?? undefined
+    return {
+      ...server, id, artifactId: plan.artifactId,
+      title: plan.title, content: plan.content,
+      planHash: plan.localDraft.basePlanHash,
+      localDraft: plan.localDraft,
+      savedSnapshot,
+      hasRemoteConflict: Boolean(savedSnapshot && savedSnapshot.planHash !== plan.localDraft.basePlanHash),
+    }
+  })
+  const localBackendIds = new Set(orderedLocalPlans.map(plan => plan.backendArtifactId).filter(Boolean))
+  return [...orderedLocalPlans, ...serverPlanFiles.filter(plan => !plan.backendArtifactId || !localBackendIds.has(plan.backendArtifactId))]
+    .sort((left, right) => (left.orderIndex ?? Number.MAX_SAFE_INTEGER) - (right.orderIndex ?? Number.MAX_SAFE_INTEGER)
+      || new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime())
 }

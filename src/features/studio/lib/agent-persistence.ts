@@ -502,6 +502,7 @@ export function mergeRestoredArtifactsWithSnapshot(
       renamedNovel: snapshotArtifact.renamedNovel ?? artifact.renamedNovel,
       renamedChapter: snapshotArtifact.renamedChapter ?? artifact.renamedChapter,
       savedAsPlan: snapshotArtifact.savedAsPlan ?? artifact.savedAsPlan,
+      planLocalDraft: snapshotArtifact.planLocalDraft,
       catalogUpdated: snapshotArtifact.catalogUpdated ?? artifact.catalogUpdated,
       appliedToCover: snapshotArtifact.appliedToCover ?? artifact.appliedToCover,
       coverPreviewAssetIds: snapshotArtifact.coverPreviewAssetIds ?? artifact.coverPreviewAssetIds,

@@ -1,3 +1,4 @@
+import { planKindSchema, planMetadataPatchSchema, planTargetSchema } from '../../shared/contracts/novel-plans.js'
 import { Router, type Request, type Response } from 'express'
 import styleLearningRouter from './style-learning.js'
 import agentGoalsRouter from './agent-goals.js'
@@ -170,6 +171,10 @@ const updateAgentSessionSchema = z.object({
 const createAgentPlanSchema = z.object({
   novelId: z.string().refine((value) => value.trim().length > 0),
   title: z.string().optional(),
+  planKind: planKindSchema,
+  parentPlanId: planMetadataPatchSchema.shape.parentPlanId,
+  expectedParentPlanHash: planMetadataPatchSchema.shape.expectedParentPlanHash,
+  target: planTargetSchema.nullable().optional(),
 })
 
 /** 计划改名/改正文：至少携带一个可更新字段（strip 后空对象拒绝） */
@@ -179,8 +184,9 @@ const updateAgentPlanSchema = z
     content: z.string().optional(),
     saved: z.boolean().optional(),
     position: z.number().int().positive().optional(),
+    ...planMetadataPatchSchema.shape,
   })
-  .refine((patch) => patch.title !== undefined || patch.content !== undefined || patch.saved !== undefined || patch.position !== undefined)
+  .refine((patch) => patch.planKind !== undefined || patch.parentPlanId !== undefined || patch.target !== undefined || patch.expectedParentPlanHash !== undefined || patch.title !== undefined || patch.content !== undefined || patch.saved !== undefined || patch.position !== undefined)
 
 const resolveMemoryReviewSchema = z.object({ accepted: z.boolean() })
 const updateNovelSkillSchema = z
@@ -1032,7 +1038,7 @@ router.post('/plans', async (req: Request, res: Response): Promise<void> => {
     const userId = requireSessionUserId(req)
     const body = parseBody(createAgentPlanSchema, req.body, '请提供作品 ID。')
 
-    const payload = await createNovelPlanArtifact(userId, body.novelId, body.title)
+    const payload = await createNovelPlanArtifact(userId, body.novelId, body.title, body)
     res.status(201).json(buildSuccess(requestId, payload))
   } catch (error) {
     sendRouteError(res, requestId, error)

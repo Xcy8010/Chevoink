@@ -5,6 +5,9 @@ import { buildReviewDiff, resolveReviewHunk } from './diff'
 import type { AgentArtifact, PlanPendingReview, SaveState, WorkspaceConfirmation, WorkspacePlanFile } from '../types'
 
 type PlanReviewActions = {
+  savedPlanFiles?: WorkspacePlanFile[]
+  isCurrentNovel?: () => boolean
+  onSaved?: () => void
   pendingPlanReview: PlanPendingReview | null
   pendingPlanReviewBusy: boolean
   setPendingPlanReview: Dispatch<SetStateAction<PlanPendingReview | null>>
@@ -19,7 +22,7 @@ type PlanReviewActions = {
 
 /** Plan review decisions, preserving confirmation and server-write ordering. */
 export function createPlanReviewActions({
-  pendingPlanReview, pendingPlanReviewBusy, setPendingPlanReview, setPendingPlanReviewBusy, setServerPlanFiles, setAgentArtifacts, setSelectedTreeItemId, setChapterSaveState, setChapterSaveMessage, setWorkspaceDialog,
+  savedPlanFiles = [], isCurrentNovel = () => true, onSaved, pendingPlanReview, pendingPlanReviewBusy, setPendingPlanReview, setPendingPlanReviewBusy, setServerPlanFiles, setAgentArtifacts, setSelectedTreeItemId, setChapterSaveState, setChapterSaveMessage, setWorkspaceDialog,
 }: PlanReviewActions) {
   function handleKeepPendingPlanReview() {
     if (!pendingPlanReview || pendingPlanReviewBusy) {
@@ -43,6 +46,8 @@ export function createPlanReviewActions({
       if (review.isCreate) {
         await updateNovelPlanFile(review.backendArtifactId, { saved: false })
 
+        if (!isCurrentNovel()) return
+        onSaved?.()
         setServerPlanFiles((current) =>
           current.filter((plan) => plan.backendArtifactId !== review.backendArtifactId),
         )
@@ -63,16 +68,22 @@ export function createPlanReviewActions({
         return
       }
 
-      await updateNovelPlanFile(review.backendArtifactId, {
+      const planHash = savedPlanFiles.find(plan => plan.backendArtifactId === review.backendArtifactId)?.planHash
+      const item = await updateNovelPlanFile(review.backendArtifactId, {
         title: review.beforeTitle,
         content: review.before,
+        ...(planHash ? { expectedPlanHash: planHash } : {}),
       })
+      if (!isCurrentNovel()) return
+      onSaved?.()
 
       // 本地计划夹/产物列表同步回修订前的内容
       setServerPlanFiles((current) =>
         current.map((plan) =>
           plan.backendArtifactId === review.backendArtifactId
-            ? { ...plan, title: review.beforeTitle, content: review.before.trim() }
+            ? { ...plan, planHash: item?.planHash ?? plan.planHash, localDraft: undefined, hasRemoteConflict: false,
+                savedSnapshot: item?.planHash ? { title: review.beforeTitle, content: review.before, planHash: item.planHash } : undefined,
+                title: review.beforeTitle, content: review.before }
             : plan,
         ),
       )
@@ -84,6 +95,7 @@ export function createPlanReviewActions({
                 title: review.beforeTitle,
                 content: review.before,
                 rawContent: review.before,
+                planLocalDraft: undefined,
               }
             : artifact,
         ),
@@ -93,12 +105,13 @@ export function createPlanReviewActions({
       setChapterSaveState('saved')
       setChapterSaveMessage(`计划《${review.beforeTitle}》已恢复到本次修订前。`)
     } catch (error) {
+      if (!isCurrentNovel()) return
       setChapterSaveState('error')
       setChapterSaveMessage(
         error instanceof Error ? error.message : '撤销计划修订失败，请稍后重试。',
       )
     } finally {
-      setPendingPlanReviewBusy(false)
+      if (isCurrentNovel()) setPendingPlanReviewBusy(false)
     }
   }
 
@@ -152,20 +165,25 @@ export function createPlanReviewActions({
     const resolved = resolveReviewHunk(review.before, review.after, hunkIndex, 'reject')
     setPendingPlanReviewBusy(true)
     try {
-      await updateNovelPlanFile(review.backendArtifactId, { content: resolved.after })
+      const planHash = savedPlanFiles.find(plan => plan.backendArtifactId === review.backendArtifactId)?.planHash
+      const item = await updateNovelPlanFile(review.backendArtifactId, { content: resolved.after, ...(planHash ? { expectedPlanHash: planHash } : {}) })
+      if (!isCurrentNovel()) return
+      onSaved?.()
 
       // 本地计划夹/产物列表同步到撤回后的内容
       setServerPlanFiles((current) =>
         current.map((plan) =>
           plan.backendArtifactId === review.backendArtifactId
-            ? { ...plan, content: resolved.after.trim() }
+            ? { ...plan, planHash: item?.planHash ?? plan.planHash, localDraft: undefined, hasRemoteConflict: false,
+                savedSnapshot: item?.planHash ? { title: plan.title, content: resolved.after, planHash: item.planHash } : undefined,
+                content: resolved.after }
             : plan,
         ),
       )
       setAgentArtifacts((current) =>
         current.map((artifact) =>
           artifact.backendArtifactId === review.backendArtifactId
-            ? { ...artifact, content: resolved.after, rawContent: resolved.after }
+            ? { ...artifact, content: resolved.after, rawContent: resolved.after, planLocalDraft: undefined }
             : artifact,
         ),
       )
@@ -180,10 +198,11 @@ export function createPlanReviewActions({
         setChapterSaveMessage('已撤回该处计划变更。')
       }
     } catch (error) {
+      if (!isCurrentNovel()) return
       setChapterSaveState('error')
       setChapterSaveMessage(error instanceof Error ? error.message : '撤回该处计划变更失败，请稍后重试。')
     } finally {
-      setPendingPlanReviewBusy(false)
+      if (isCurrentNovel()) setPendingPlanReviewBusy(false)
     }
   }
 

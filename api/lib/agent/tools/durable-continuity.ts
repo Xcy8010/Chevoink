@@ -1,3 +1,4 @@
+import { PLAN_FAILURE_CODES } from '../novel-plan-contract.js'
 import { z } from 'zod'
 import { prisma, DataAccessError } from '../../prisma.js'
 import { tokenPriceSchema } from '../../billing/token-price.js'
@@ -24,7 +25,7 @@ export const nativeContinuityWorkSchema = z.object({ kind: z.literal('continuity
   compactRepair: z.literal(true).optional(),
   critic: z.object({ system: z.string(), content: z.string() }).strict(), route: auxiliaryRouteSchema, price: tokenPriceSchema }).strict()
 const rejectedContinuityWorkSchema = z.object({ kind: z.literal('rejected'),
-  code: z.enum(['CHAPTER_NOT_FOUND', 'COMPILATION_NOT_FOUND']), message: z.string() }).strict()
+  code: z.enum(['CHAPTER_NOT_FOUND', 'COMPILATION_NOT_FOUND', 'PLAN_CONTEXT_STALE', 'PLAN_CONTEXT_INVALID']), message: z.string() }).strict()
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const steps: Record<string, AuxiliaryModelStep> = { agent3ContinuityCritic: 'continuity_critic',
   agent3ContinuityFormatRecovery: 'continuity_format_recovery', agent3ContinuityEvidenceCorrection: 'continuity_evidence_correction', agent3ContinuityRevision: 'continuity_repair' }
@@ -58,7 +59,7 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: RunLeaseTok
     return { snapshot, args }
   }).catch(error => {
     if (ctx.signal.aborted || !(error instanceof DataAccessError)
-      || !['CHAPTER_NOT_FOUND', 'COMPILATION_NOT_FOUND'].includes(error.code)) throw error
+      || !['CHAPTER_NOT_FOUND', 'COMPILATION_NOT_FOUND', 'PLAN_CONTEXT_STALE', 'PLAN_CONTEXT_INVALID'].includes(error.code)) throw error
     return { rejected: rejectedContinuityWorkSchema.parse({ kind: 'rejected', code: error.code, message: error.message }) }
   })
   if ('rejected' in frozen) return frozen.rejected
@@ -150,7 +151,7 @@ export async function executePreparedContinuityWork(ctx: ToolContext, lease: Run
     return envelope(tx, result)
   })
   } catch (error) {
-    const business = new Set(['CONTINUITY_INPUT_STALE', 'CHAPTER_REVISION_CONFLICT', 'COMPILATION_NOT_FOUND', 'CHAPTER_NOT_FOUND',
+    const business = new Set<string>([...PLAN_FAILURE_CODES, 'CONTINUITY_INPUT_STALE', 'CHAPTER_REVISION_CONFLICT', 'COMPILATION_NOT_FOUND', 'CHAPTER_NOT_FOUND',
       'AUTHOR_CHAPTER_SCOPE', 'AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE',
       'REPAIR_NOT_AUTHORIZED', 'CONTINUITY_REPAIR_FAILED', 'CREDITS_EXHAUSTED', 'CREDITS_RESERVED', 'CREDITS_PROVIDER_UNSTABLE'])
     if (ctx.signal.aborted || !(error instanceof DataAccessError) || error.code === 'AI_PROVIDER_BILLING_UNCONFIRMED'

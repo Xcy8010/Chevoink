@@ -1,3 +1,4 @@
+import { PLAN_FAILURE_CODES } from '../novel-plan-contract.js'
 import { z } from 'zod'
 import { DataAccessError } from '../../prisma.js'
 import { runtimeError, runtimeJson } from '../runtime-common.js'
@@ -11,7 +12,7 @@ import { normalizeToolInput } from './input-validation.js'
 import type { AgentTool, ToolContext, ToolResult } from './types.js'
 
 const actions = new Set(['story_compiler_prepare', 'scene_task_build', 'chapter_bridge_get', 'chapter_bridge_commit'])
-const failures = new Set(['TOOL_COMPILER_REQUIRED', 'TOOL_COMPILER_STALE', 'COMPILATION_NOT_FOUND', 'COMPILATION_STAGE_CONFLICT',
+const failures = new Set<string>([...PLAN_FAILURE_CODES, 'TOOL_COMPILER_REQUIRED', 'TOOL_COMPILER_STALE', 'COMPILATION_NOT_FOUND', 'COMPILATION_STAGE_CONFLICT',
   'TERMINAL_STATE_REVIEW_REQUIRED',
   'AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE',
   'COMPILATION_IDENTITY_MISMATCH', 'COMPILATION_NOT_WRITTEN', 'INVALID_ARGUMENTS',

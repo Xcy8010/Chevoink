@@ -71,8 +71,8 @@ export default function EditorCanvas({
   workspaceDocument: sourceWorkspaceDocument = null,
   chapterLoading,
   chapterErrorMessage,
-  chapterSaveState: _chapterSaveState,
-  chapterSaveMessage: _chapterSaveMessage,
+  chapterSaveState,
+  chapterSaveMessage,
   latestWordCountLabel,
   onSelectionChange,
   selection,
@@ -171,6 +171,7 @@ export default function EditorCanvas({
               </div>
             )}
           </div>
+          {workspaceDocument.kind === 'plan' && chapterSaveState === 'error' ? <p role="alert" className="mb-3 text-sm text-[rgb(153,27,27)]">{chapterSaveMessage}</p> : null}
           {workspaceDocument.kind === 'plan' && pendingPlanReview ? (
             <PlanChangeReview
               review={pendingPlanReview}
@@ -260,6 +261,7 @@ export default function EditorCanvas({
         </div>
 
         <div className="mt-4 flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain pr-1 pb-2">
+          {workspaceDocument.kind === 'plan' && chapterSaveState === 'error' ? <p role="alert" className="mb-3 text-sm text-[rgb(153,27,27)]">{chapterSaveMessage}</p> : null}
           {workspaceDocument.kind === 'plan' && pendingPlanReview ? (
             <PlanChangeReview
               review={pendingPlanReview}

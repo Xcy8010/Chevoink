@@ -10,7 +10,8 @@ import { reduceExecutionReceipt } from '../../api/lib/agent/runtime-reducer.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { preparePricedProviderOperation } from '../../api/lib/agent/runtime-settlement.js'
 import { initializeExecutionState,loadExecutionState,saveExecutionState } from '../../api/lib/agent/runtime-state.js'
-import { rejectToolCursorCall } from '../../api/lib/agent/runtime-tool-cursor.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { prepareToolCursorOperation, rejectToolCursorCall } from '../../api/lib/agent/runtime-tool-cursor.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
 import { chapterCreateTool,chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
@@ -265,11 +266,11 @@ describe.runIf(available)('durable chapter creation', () => {
 })
 
 describe.runIf(available)('durable actual plan writes', () => {
-  it.each(['create', 'update', 'conflict', 'missing', 'placeholder', 'review', 'append', 'append-stale'] as const)('%s', async scenario => {
+  it.each(['create', 'missing-kind', 'legacy-prepared-create', 'update', 'conflict', 'missing', 'placeholder', 'review', 'append', 'append-stale'] as const)('%s', async scenario => {
     await fixture(async f => {
       const lease = await claim(f)
       const existing = ['update', 'conflict', 'append', 'append-stale'].includes(scenario) ? await prisma.agentArtifact.create({ data: { runId: f.runId, artifactType: 'chapterPlan', title: '原计划', content: '原始完整计划', metadata: { savedAsPlan: true } } }) : null
-      const args = { title: '章节规划', content: scenario === 'placeholder' ? 'placeholder' : '第一场景审俘，第二场景核对口供，第三场景整理证据。',
+      const args = { ...(existing || scenario === 'missing-kind' || scenario === 'legacy-prepared-create' ? {} : { planKind: 'outline' as const }), title: '章节规划', content: scenario === 'placeholder' ? 'placeholder' : '第一场景审俘，第二场景核对口供，第三场景整理证据。',
         ...(existing ? { planId: existing.id } : scenario === 'missing' ? { planId: 'missing-plan' } : {}),
         ...(scenario.startsWith('append') ? { mode: 'append' as const, expectedContentHash: createHash('sha256').update(scenario === 'append-stale' ? '过期正文' : existing!.content).digest('hex') } : {}) }
       const mode = scenario === 'review' ? 'review' as const : 'plan' as const
@@ -288,14 +289,20 @@ describe.runIf(available)('durable actual plan writes', () => {
         expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId } })).toBe(0)
         return
       }
+      if (scenario === 'legacy-prepared-create') await prepareToolCursorOperation(lease, ctx.durablePlan!.cursor, {
+        key: 'exec:0', action: 'plan_save', callId: 'plan-call', targetId: f.novelId, effectDomain: 'plan', effectiveArgs: args,
+        normalize: raw => Object.fromEntries(Object.entries(planSaveTool.parameters.parse(planSaveTool.coerceArgs!(raw))).filter(([, value]) => value !== undefined)),
+        operationInput: runtimeJson({ callId: 'plan-call', novelId: f.novelId, args, expected: { id: null, hash: null } }).value,
+      })
       const result = await planSaveTool.execute(ctx, args)
       expect(await planSaveTool.execute(ctx, args)).toEqual(result)
-      const failed = ['conflict', 'missing', 'placeholder', 'append-stale'].includes(scenario)
+      const failed = ['missing-kind', 'conflict', 'missing', 'placeholder', 'append-stale'].includes(scenario)
       expect(result.outcome === 'failed').toBe(failed)
       expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(2)
       const artifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId } })
       expect(artifacts).toHaveLength(existing || !failed ? 1 : 0)
       if (!failed) {
+        if (scenario === 'legacy-prepared-create') expect(artifacts[0].metadata).toEqual({ savedAsPlan: true })
         expect(artifacts[0].content).toBe(scenario === 'append' ? `${existing!.content}\n\n${args.content}` : args.content)
         const receipt = await prisma.agentEffectReceipt.findFirst({ where: { operation: { taskRootId: f.rootId } } })
         expect(receipt?.result).toMatchObject({ progress: { kind: 'content_revision', targetId: artifacts[0].id } })

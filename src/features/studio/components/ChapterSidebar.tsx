@@ -107,7 +107,8 @@ export default function ChapterSidebar({
   embedded = false,
 }: ChapterSidebarProps) {
   const [novelExpanded, setNovelExpanded] = useState(true)
-  const [planFolderExpanded, setPlanFolderExpanded] = useState(true)
+  const [planFolderExpanded, setPlanFolderExpanded] = useState(false)
+  const [expandedPlanKinds, setExpandedPlanKinds] = useState<Record<string, boolean>>({ outline: true, detail: true, legacy: true })
   const [chapterFolderExpanded, setChapterFolderExpanded] = useState(true)
   const [draggedItem, setDraggedItem] = useState<{ kind: 'chapter' | 'plan'; id: string } | null>(null)
   const [dropTarget, setDropTarget] = useState<string | null>(null)
@@ -194,6 +195,7 @@ export default function ChapterSidebar({
               <button
                 type="button"
                 onClick={() => setPlanFolderExpanded((current) => !current)}
+                aria-expanded={planFolderExpanded}
                 className="flex w-full items-center gap-1.5 rounded-[10px] px-2 py-1.5 text-left text-[13px] text-[var(--text-primary)] transition hover:bg-[var(--surface-muted)]"
               >
                 {planFolderExpanded ? (
@@ -208,8 +210,17 @@ export default function ChapterSidebar({
 
               {planFolderExpanded ? (
                 <div className="ml-3 border-l border-[var(--border-subtle)] pl-1.5 md:border-transparent md:transition-colors md:group-hover/tree:border-[var(--border-subtle)]">
-                  {savedPlans.length > 0 ? (
-                    savedPlans.map((plan, index) => (
+                  {(['outline', 'detail', 'legacy'] as const).map(kind => {
+                    const plans = savedPlans.filter(plan => (plan.planKind ?? 'legacy') === kind)
+                    if (kind === 'legacy' && plans.length === 0) return null
+                    return <div key={kind}>
+                      <button type="button" aria-expanded={expandedPlanKinds[kind]} onClick={() => setExpandedPlanKinds(current => ({ ...current, [kind]: !current[kind] }))} className="flex w-full items-center gap-1.5 rounded-[10px] px-2 py-1.5 text-left text-[13px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]">
+                        {expandedPlanKinds[kind] ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                        <span>{kind === 'outline' ? '大纲' : kind === 'detail' ? '细纲' : '历史未分类'}</span><span className="ml-auto text-[10px]">共{plans.length}个</span>
+                      </button>
+                    {expandedPlanKinds[kind] ? plans.map((plan) => {
+                      const index = savedPlans.findIndex(item => item.id === plan.id)
+                      return (
                       <div
                         key={plan.id}
                         draggable={Boolean(onMovePlan)}
@@ -262,6 +273,7 @@ export default function ChapterSidebar({
                           <span className="truncate">
                             {plan.title.trim() || `计划 ${savedPlans.length - index}`}
                           </span>
+                          {plan.planKind === 'detail' ? <span className="ml-auto shrink-0 text-[10px] text-[var(--text-tertiary)]">{plan.reviewState === 'stale' ? '待复核' : plan.reviewState === 'missing_parent' ? '父大纲已移除' : plan.reviewState === 'current' ? '已关联' : '未关联'}</span> : null}
                         </button>
                         <button
                           type="button"
@@ -279,12 +291,9 @@ export default function ChapterSidebar({
                           <Settings2 className="h-3.5 w-3.5" />
                         </button>
                       </div>
-                    ))
-                  ) : (
-                    <div className="px-2 py-2 text-xs leading-6 text-[var(--text-tertiary)]">
-                      当前作品还没存入计划，点上方「新建计划」自己写，或用规划模式让 Agent 制定。
+                    )}) : null}
                     </div>
-                  )}
+                  })}
                 </div>
               ) : null}
 

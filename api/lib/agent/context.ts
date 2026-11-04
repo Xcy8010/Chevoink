@@ -1,3 +1,4 @@
+import { planLinkFields } from './novel-plan-contract.js'
 import type { AgentExecutionMode, CreditModelTier } from '../../../shared/contracts/index.js'
 import type { AgentAttachmentMeta, AgentMessagePart, TaskSpec } from '../../../shared/contracts/index.js'
 import { stripAgentHistoryEchoes } from '../../../shared/agent-output.js'
@@ -100,7 +101,7 @@ const DECISION_STRATEGIES = `决策策略（每条都是原则，不是流程规
 
 const MODE_CONTRACTS: Record<AgentExecutionMode, string> = {
   plan: `当前模式：Plan（规划）。
-按当前模式的实际工具权限分析与规划；作品正文只读，原请求要求的计划产物用获准的计划工具保存。回顾既有计划用只读的 plan_read，禁止用 plan_save 重写一遍来代替读取。新书研究只在原任务需要且明示触发条件实际影响任务时按需进行；已有有效档案必须复用。方向比较、Story Charter、Reader Promise 和前三章蓝图只处理原请求需要的部分，不因缺少某份资料强制启动后续流程，不把选题推荐扩成全书大纲。规划前若存在影响方向的关键不确定点，先用 ask_user 工具向作者提问（给出 2-4 个候选方向），拿到回答再规划；禁止在回复正文里罗列问题和选项让作者「回复数字选择」。原请求要求保存规划文档时用 plan_save 把完整计划写入「计划」文件夹，纯讨论建议不因此落盘；计划完整落盘后按作者的交付要求回应；默认简述形成的故事方向，作者要求查看或解释时完整给出，不播报写入过程。作者回答提问后是修订既有计划（plan_save 带 planId），不是重新生成一份。只改计划名字用 plan_rename，作者要求删除某份计划用 plan_delete，两者都禁止用 plan_save 另存新副本。如果后续还需要切换到 Build 执行写作，再调用 plan_exit 提交执行步骤等待用户确认。不要输出“我现在开始写”之类的执行承诺，也不要在正文里复述或讨论本模式的规则。`,
+按当前模式的实际工具权限分析与规划；作品正文只读，原请求要求的计划产物用获准的计划工具保存。回顾既有计划用只读的 plan_read，禁止用 plan_save 重写一遍来代替读取。新书研究只在原任务需要且明示触发条件实际影响任务时按需进行；已有有效档案必须复用。方向比较、Story Charter、Reader Promise 和前三章蓝图只处理原请求需要的部分，不因缺少某份资料强制启动后续流程，不把选题推荐扩成全书大纲。规划前若存在影响方向的关键不确定点，先用 ask_user 工具向作者提问（给出 2-4 个候选方向），拿到回答再规划；禁止在回复正文里罗列问题和选项让作者「回复数字选择」。原请求要求保存规划文档时用 plan_save 把完整计划写入「计划」文件夹，新建计划必须区分planKind=outline大纲与detail细纲：大纲管主线、阶段、转折和结局，细纲绑定已读取的父大纲版本并落实单章行动、冲突、结果、人物场景、伏笔与衔接；不得凭细纲覆盖大纲，父大纲有变须复核。纯讨论建议不因此落盘；计划完整落盘后按作者的交付要求回应；默认简述形成的故事方向，作者要求查看或解释时完整给出，不播报写入过程。作者回答提问后是修订既有计划（plan_save 带 planId），不是重新生成一份。只改计划名字用 plan_rename，作者要求删除某份计划用 plan_delete，两者都禁止用 plan_save 另存新副本。如果后续还需要切换到 Build 执行写作，再调用 plan_exit 提交执行步骤等待用户确认。不要输出“我现在开始写”之类的执行承诺，也不要在正文里复述或讨论本模式的规则。`,
   build: `当前模式：Build（执行）。
 你可以调用全部授权工具完成任务。写入类操作会直接落库并生成 diff 供用户审阅；高危操作在确认作者意图明确后直接执行（意图不明先 ask_user）。执行与交付遵守上述行为核心；作者要求的分析、检查或详细解释须完整回答，不能用默认简短结尾截断。`,
   review: `当前模式：Review（审阅）。
@@ -205,14 +206,16 @@ async function buildPlanFolderDigest(userId: string, novelId: string): Promise<s
     },
     orderBy: { updatedAt: 'desc' },
     take: 10,
-    select: { id: true, title: true, updatedAt: true },
+    select: { id: true, title: true, content: true, metadata: true, updatedAt: true },
   })
 
   if (plans.length === 0) {
     return null
   }
 
-  const lines = plans.map((plan) => `《${plan.title}》 planId=${plan.id}`)
+  const parentIds = plans.map(plan => (plan.metadata as Record<string, unknown> | null)?.parentPlanId).filter((id): id is string => typeof id === 'string')
+  const parents = parentIds.length ? await prisma.agentArtifact.findMany({ where: { id: { in: parentIds }, artifactType: 'chapterPlan', run: { userId, novelId } } }) : []
+  const lines = plans.map((plan) => `《${plan.title}》 planId=${plan.id} ${JSON.stringify(planLinkFields(plan, parents))}`)
   return `计划文件夹里的既有计划（查看内容用 plan_read，修订用 plan_save 带 planId，改名用 plan_rename，删除用 plan_delete）：
 ${lines.join('\n')}`
 }

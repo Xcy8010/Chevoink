@@ -5,7 +5,7 @@ import { planSaveTool } from '../../api/lib/agent/tools/write-tools.js'
 import { planReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
-vi.mock('../../api/lib/prisma.js', () => ({ prisma: { agentArtifact: { findFirst: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), update: vi.fn(), create: vi.fn() } },
+vi.mock('../../api/lib/prisma.js', () => ({ prisma: { $transaction: vi.fn(), $queryRaw: vi.fn(), agentArtifact: { findFirst: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), update: vi.fn(), create: vi.fn() } },
   DataAccessError: class extends Error { constructor(public statusCode: number, public code: string, message: string) { super(message) } } }))
 const hash = (text: string) => createHash('sha256').update(text).digest('hex')
 const ctx = { userId: 'u', novelId: 'n', runId: 'r', signal: new AbortController().signal } as ToolContext
@@ -13,6 +13,10 @@ const original = { id: 'p', title: '原计划', content: '前文'.repeat(200), m
 beforeEach(() => {
   ctx.planContentHashes = undefined
   vi.clearAllMocks()
+  vi.mocked(prisma.$transaction).mockImplementation((work: never) => (work as (tx: unknown) => Promise<unknown>)(prisma) as never)
+  vi.mocked(prisma.$queryRaw).mockResolvedValue([{ id: 'n' }])
+  vi.mocked(prisma.agentArtifact.create).mockResolvedValue({ id: 'new-plan' } as never)
+  vi.mocked(prisma.agentArtifact.update).mockResolvedValue(original as never)
   vi.mocked(prisma.agentArtifact.findMany).mockResolvedValue([])
   vi.mocked(prisma.agentArtifact.findFirst).mockResolvedValue(original as never)
   vi.mocked(prisma.agentArtifact.updateMany).mockResolvedValue({ count: 1 })
@@ -130,4 +134,25 @@ it('omits only whitespace optional plan IDs and never treats punctuation as empt
   expect((await planReadTool.execute(ctx, { planId: '   ' })).outcome).not.toBe('failed')
   expect(prisma.agentArtifact.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.not.objectContaining({ id: expect.anything() }) }))
   expect(prisma.agentArtifact.findMany).not.toHaveBeenCalled()
+})
+
+it('rejects a fresh missing planKind without reading or writing a guessed legacy identity', async () => {
+  const result = await planSaveTool.execute(ctx, { title: '新计划', content: '本章人物取得钥匙。' })
+  expect(result).toMatchObject({ outcome: 'failed', failureCode: 'PLAN_KIND_REQUIRED' })
+  expect(prisma.agentArtifact.findFirst).not.toHaveBeenCalled()
+  expect(prisma.agentArtifact.findMany).not.toHaveBeenCalled()
+  expect(prisma.agentArtifact.create).not.toHaveBeenCalled()
+  expect(prisma.agentArtifact.update).not.toHaveBeenCalled()
+  expect(prisma.agentArtifact.updateMany).not.toHaveBeenCalled()
+})
+it.each(['outline', 'detail'] as const)('creates an explicitly typed %s without guessing from its title', async planKind => {
+  const result = await planSaveTool.execute(ctx, { title: '同名计划', content: '本章人物取得钥匙。', planKind })
+  expect(result.outcome).not.toBe('failed')
+  expect(prisma.agentArtifact.create).toHaveBeenCalledWith({ data: expect.objectContaining({ metadata: expect.objectContaining({ planKind }) }) })
+})
+it('preserves an existing legacy plan when updating its explicit ID without a type', async () => {
+  const result = await planSaveTool.execute(ctx, { title: original.title, content: original.content + '新增小节', planId: original.id })
+  expect(result.outcome).not.toBe('failed')
+  expect(prisma.agentArtifact.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ metadata: original.metadata }) }))
+  expect(prisma.agentArtifact.create).not.toHaveBeenCalled()
 })

@@ -30,7 +30,7 @@ it('requires confirmation before creating a server-backed plan', async () => {
   actions.handleRequestCreatePlan()
   expect(api.create).not.toHaveBeenCalled()
   await vi.mocked(options.setWorkspaceDialog).mock.calls[0][0].onConfirm()
-  expect(api.create).toHaveBeenCalledExactlyOnceWith('novel')
+  expect(api.create).toHaveBeenCalledExactlyOnceWith('novel', undefined, { planKind: 'outline' })
   expect(options.setSelectedTreeItemId).toHaveBeenCalledWith('plan:server-new')
 })
 
@@ -49,7 +49,7 @@ it('requires confirmation before removing a saved plan', async () => {
 it('renames using the backend artifact id while retaining body content', () => {
   const { options, actions } = fixture()
   actions.handleRenamePlan('plan', ' Renamed ')
-  expect(options.schedulePlanServerSync).toHaveBeenCalledWith('server', 'Renamed', 'Body')
+  expect(options.schedulePlanServerSync).toHaveBeenCalledWith('server', 'Renamed', undefined, undefined, 'novel')
   expect(options.updateAgentArtifact).toHaveBeenCalledWith('plan', expect.any(Function))
 })
 
@@ -64,7 +64,7 @@ it('keeps manual catalog edits separate from plan server mutations', () => {
 it('queues the full current plan text without changing chapter state', () => {
   const { options, actions } = fixture()
   actions.handleWorkspaceDocumentChange({ title: 'Title', content: 'New body' })
-  expect(options.schedulePlanServerSync).toHaveBeenCalledWith('server', 'Title', 'New body')
+  expect(options.schedulePlanServerSync).toHaveBeenCalledWith('server', 'Title', 'New body', undefined, 'novel')
   expect(options.setCatalogDocument).not.toHaveBeenCalled()
 })
 
@@ -77,5 +77,64 @@ it('writes and renames a canonical plan through its original local artifact id',
   actions.handleRenamePlan('server-backend', 'Renamed')
   expect(options.updateAgentArtifact).toHaveBeenCalledWith('history-local', expect.any(Function))
   expect(options.updateAgentArtifact).not.toHaveBeenCalledWith('server-backend', expect.any(Function))
-  expect(options.schedulePlanServerSync).toHaveBeenCalledWith('backend', 'Title', 'Edited')
+  expect(options.schedulePlanServerSync).toHaveBeenCalledWith('backend', 'Title', 'Edited', undefined, 'novel')
+})
+
+
+it('creates an empty detail draft only after the type selector requests it', async () => {
+  api.create.mockResolvedValue({ id: 'detail', title: '细纲', content: '', createdAt: '', planKind: 'detail', reviewState: 'unlinked' })
+  const onRequestCreate = vi.fn()
+  const { options, actions } = fixture({ onRequestCreate })
+  actions.handleRequestCreatePlan()
+  expect(onRequestCreate).toHaveBeenCalledOnce()
+  expect(api.create).not.toHaveBeenCalled()
+  await actions.handleCreatePlanFile('detail')
+  expect(api.create).toHaveBeenCalledWith('novel', undefined, { planKind: 'detail' })
+  expect(options.setWorkViewer).toHaveBeenCalledWith('document')
+})
+
+it('does not apply a late create result after leaving its novel scope', async () => {
+  let resolve!: (value: object) => void
+  api.create.mockImplementationOnce(() => new Promise(done => { resolve = done }))
+  let current = true
+  const { options, actions } = fixture({ isCurrentNovel: () => current })
+  const saving = actions.handleCreatePlanFile('detail')
+  current = false
+  resolve({ id: 'old', title: 'Old novel', content: '', createdAt: '' })
+  await saving
+  expect(options.setServerPlanFiles).not.toHaveBeenCalled()
+  expect(options.setSelectedTreeItemId).not.toHaveBeenCalled()
+})
+
+it('retains the create and deletion failure for their dialogs without removing the plan', async () => {
+  api.create.mockRejectedValueOnce(new Error('create failed'))
+  api.update.mockRejectedValueOnce(new Error('delete failed'))
+  const { options, actions } = fixture()
+  await expect(actions.handleCreatePlanFile('detail')).rejects.toThrow('create failed')
+  actions.handleRequestDeletePlan('plan')
+  await expect(vi.mocked(options.setWorkspaceDialog).mock.calls[0][0].onConfirm()).rejects.toThrow('delete failed')
+  expect(options.setServerPlanFiles).not.toHaveBeenCalled()
+})
+
+it('carries the observed semantic version with body edits and explicit settings saves', async () => {
+  const savePlanMetadata = vi.fn().mockResolvedValue({})
+  const base = fixture().options.savedPlanFiles[0]
+  const { options, actions } = fixture({ savedPlanFiles: [{ ...base, planKind: 'detail', planHash: 'observed' }], savePlanMetadata, syncScope: 'novel:3' })
+  actions.handleWorkspaceDocumentChange({ title: 'Title', content: '\nBody\n' })
+  expect(options.schedulePlanServerSync).toHaveBeenCalledWith('server', 'Title', '\nBody\n', 'observed', 'novel:3')
+  await actions.handleSavePlanSettings('plan', { parentPlanId: 'parent', expectedParentPlanHash: 'parent-version' })
+  expect(savePlanMetadata).toHaveBeenCalledWith('server', { parentPlanId: 'parent', expectedParentPlanHash: 'parent-version', expectedPlanHash: 'observed' }, 'novel:3')
+})
+
+
+it('marks a body draft with the observed baseline instead of a newer response already in server state', () => {
+  const setup = fixture()
+  const observed = { ...setup.options.savedPlanFiles[0], planHash: 'v1' }
+  const remote = { ...observed, content: 'remote v2', planHash: 'v2' }
+  const { options, actions } = fixture({ savedPlanFiles: [observed] })
+  actions.handleWorkspaceDocumentChange({ title: 'Title', content: '\nlocal draft\n' })
+  const update = vi.mocked(options.setServerPlanFiles).mock.calls[0][0]
+  const next = typeof update === 'function' ? update([remote]) : update
+  expect(next[0]).toMatchObject({ content: '\nlocal draft\n', planHash: 'v1', localDraft: { basePlanHash: 'v1' }, hasRemoteConflict: true, savedSnapshot: { content: 'remote v2', planHash: 'v2' } })
+  expect(options.schedulePlanServerSync).toHaveBeenCalledWith('server', 'Title', '\nlocal draft\n', 'v1', 'novel')
 })

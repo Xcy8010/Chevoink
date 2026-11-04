@@ -21,6 +21,8 @@ import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format
 import { prepareTerminalProposalInput } from '../../api/lib/agent/terminal-proposal-context.js'
 import { terminalProcessingExhaustedMessage, terminalProcessingPlan } from '../../api/lib/agent/terminal-processing.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
+import { novelPlanHash } from '../../api/lib/agent/novel-plan-contract.js'
+import { writingPlanContextHash, type WritingPlanContext } from '../../api/lib/agent/writing-plan-context.js'
 
 afterEach(() => vi.restoreAllMocks())
 const sha = (text: string) => createHash('sha256').update(text).digest('hex')
@@ -63,6 +65,31 @@ async function fixture(prompt = '写下一章') {
 }
 
 describe('persisted current review readiness', () => {
+  it.each(['outline_to_detail', 'detail_to_chapter'] as const)('projects nonempty %s plan advice into review decisions without treating plan quotes as manuscript anchors', async stage => {
+    const f = await fixture()
+    const outline = { id: 'outline', title: '全书大纲', content: '门已经锁好。', metadata: { savedAsPlan: true, planKind: 'outline' } }
+    const detail = { id: 'detail', title: '本章细纲', content: '门已经锁好。', metadata: { savedAsPlan: true, planKind: 'detail',
+      parentPlanId: outline.id, parentPlanHash: novelPlanHash(outline), target: { kind: 'chapter' as const, chapterId: f.chapter.id } } }
+    const freeze = (plan: typeof outline) => ({ id: plan.id, title: plan.title, content: plan.content, planHash: novelPlanHash(plan) })
+    const planContext: WritingPlanContext = { version: 1, outline: freeze(outline), detail: freeze(detail), parentPlanHash: novelPlanHash(outline), target: detail.metadata.target }
+    f.compilation.preparedContext = { planContext }
+    Object.assign(f.db, { agentArtifact: { findMany: vi.fn().mockResolvedValue([outline, detail]) } })
+    const report = await currentReviewReadinessFixture(f.tx, f.subject, f.compilation)
+    report.planAlignment = { version: 1, planContextHash: writingPlanContextHash(planContext), status: 'reviewed', findings: [{
+      stage, kind: 'omission', severity: 'error', explanation: '当前阶段约定的门锁结果需要核对。',
+      planEvidence: [{ planId: stage === 'outline_to_detail' ? outline.id : detail.id,
+        planHash: stage === 'outline_to_detail' ? novelPlanHash(outline) : novelPlanHash(detail), quote: '门已经锁好。' }], chapterEvidence: [],
+    }] }
+    const ready = await readChapterReviewReadiness(f.tx, f.subject)
+    expect(ready).toMatchObject({ continuity: 'complete', planAlignment: 'reviewed', continuityErrorCount: 1, decisionPending: true })
+    expect(ready!.reviewCycleFindings).toEqual([expect.objectContaining({ signal: 'structure', anchor: null, findingId: expect.stringMatching(/^plan-/) })])
+    expect(ready!.requiredDecisions).toContainEqual(expect.objectContaining({ findingId: ready!.reviewCycleFindings![0].findingId }))
+    const firstId = ready!.reviewCycleFindings![0].findingId
+    report.planAlignment.findings[0].explanation = '同一上下文的新意见不得继承旧索引的留置决定。'
+    const changed = await readChapterReviewReadiness(f.tx, f.subject)
+    expect(changed!.reviewCycleFindings![0].findingId).not.toBe(firstId)
+    expect(f.db.chapter.update).not.toHaveBeenCalled()
+  })
   it.each(['advice', 'continuity-error', 'quality-error', 'hard-quality', 'missing-quality', 'incomplete-continuity', 'untracked-revision'] as const)(
     'finishes revised drafts with advice while preserving the %s delivery condition', async scenario => {
       const f = await fixture(scenario === 'hard-quality' ? '写下一章，质量检查必须通过。' : '写下一章')

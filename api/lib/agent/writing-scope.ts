@@ -1023,7 +1023,12 @@ async function readChapterDelivery(tx: Prisma.TransactionClient, subject: Subjec
       if (source?.revision !== terminal.bridge.sourceRevision) return null
     }
     const { readChapterReviewReadiness, hasPendingChapterReviewDecision } = await import('./chapter-review-guard.js')
-    const readiness = await readChapterReviewReadiness(tx, subject, terminal.id)
+    let readiness: Awaited<ReturnType<typeof readChapterReviewReadiness>>
+    try { readiness = await readChapterReviewReadiness(tx, subject, terminal.id) }
+    catch (error) {
+      if (error instanceof DataAccessError && error.code === 'PLAN_CONTEXT_STALE') return null
+      throw error
+    }
     if (!readiness?.ready) return null
     if (hasPendingChapterReviewDecision(readiness)) return null
     if (length && (chapter.content.trim().length < Number(length[1]) || chapter.content.trim().length > Number(length[2]))) return null

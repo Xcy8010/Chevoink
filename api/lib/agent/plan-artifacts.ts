@@ -1,13 +1,16 @@
+import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import type { Prisma } from '@prisma/client'
 
 import { DataAccessError, prisma } from '../prisma.js'
+import type { PlanLinkFields, PlanMetadataPatch } from '../../../shared/contracts/novel-plans.js'
+import { applyPlanMetadataPatch, planKind, planLinkFields, type PlanRow } from './novel-plan-contract.js'
 
 /**
  * 作品维度的「计划文件夹」产物服务（自 run-service.ts 模块级拆分而来，行为原样保留）。
  * 聚合 savedAsPlan 的 chapterPlan 产物，供任务窗口体系的计划树消费。
  */
 
-export type NovelPlanArtifact = {
+export type NovelPlanArtifact = PlanLinkFields & {
   id: string
   runId: string
   title: string
@@ -25,11 +28,12 @@ function toNovelPlanArtifact(artifact: {
   createdAt: Date
   updatedAt: Date
   metadata?: Prisma.JsonValue | null
-}): NovelPlanArtifact {
+}, plans: PlanRow[] = []): NovelPlanArtifact {
   const metadata = artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata)
     ? artifact.metadata as Record<string, unknown>
     : {}
   return {
+    ...planLinkFields({ ...artifact, metadata: artifact.metadata }, plans),
     id: artifact.id,
     runId: artifact.runId,
     title: artifact.title,
@@ -70,20 +74,21 @@ export async function listNovelPlanArtifacts(
   // 同名去重（plan/14 §四 B3）：历史重复落盘的同名计划只保留最后更新的一份，无需数据迁移
   const latestByTitle = new Map<string, (typeof artifacts)[number]>()
   for (const artifact of artifacts) {
+    if (planKind(artifact.metadata) !== 'legacy') continue
     const kept = latestByTitle.get(artifact.title)
     if (!kept || artifact.updatedAt >= kept.updatedAt) {
       latestByTitle.set(artifact.title, artifact)
     }
   }
   const deduped = artifacts
-    .filter((artifact) => latestByTitle.get(artifact.title)?.id === artifact.id)
+    .filter((artifact) => planKind(artifact.metadata) !== 'legacy' || latestByTitle.get(artifact.title)?.id === artifact.id)
     .sort((left, right) => {
       const leftOrder = toNovelPlanArtifact(left).orderIndex ?? Number.MAX_SAFE_INTEGER
       const rightOrder = toNovelPlanArtifact(right).orderIndex ?? Number.MAX_SAFE_INTEGER
       return leftOrder - rightOrder || left.createdAt.getTime() - right.createdAt.getTime()
     })
 
-  return { items: deduped.map(toNovelPlanArtifact) }
+  return { items: deduped.map(item => toNovelPlanArtifact(item, artifacts)) }
 }
 
 /** 手工新建计划：作者在作品树点「新建计划」时落一份空白计划，挂到该作品最近的 Agent 任务上 */
@@ -91,8 +96,13 @@ export async function createNovelPlanArtifact(
   userId: string,
   novelId: string,
   title?: string,
+  options: PlanMetadataPatch = {},
+  transaction?: Prisma.TransactionClient,
 ): Promise<{ item: NovelPlanArtifact }> {
-  const novel = await prisma.novel.findFirst({
+  if (!transaction) return prisma.$transaction(tx => createNovelPlanArtifact(userId, novelId, title, options, tx))
+  const db = transaction
+  await lockNovelActiveScope(db, novelId)
+  const novel = await db.novel.findFirst({
     where: { id: novelId, authorId: userId },
     select: { id: true, title: true },
   })
@@ -101,15 +111,17 @@ export async function createNovelPlanArtifact(
     throw new DataAccessError(404, 'NOT_FOUND', '作品不存在或无权访问。')
   }
 
+  const linkMetadata = await applyPlanMetadataPatch(db, userId, novelId, null, options, '')
+
   // 计划产物必须挂在 AgentRun 上：优先复用该作品最近一次任务，还没跑过任务时补一条载体
-  let run = await prisma.agentRun.findFirst({
+  let run = await db.agentRun.findFirst({
     where: { userId, novelId },
     orderBy: { createdAt: 'desc' },
     select: { id: true },
   })
 
   if (!run) {
-    const session = await prisma.agentSession.create({
+    const session = await db.agentSession.create({
       data: {
         userId,
         novelId,
@@ -120,7 +132,7 @@ export async function createNovelPlanArtifact(
       select: { id: true },
     })
 
-    run = await prisma.agentRun.create({
+    run = await db.agentRun.create({
       data: {
         sessionId: session.id,
         userId,
@@ -137,7 +149,7 @@ export async function createNovelPlanArtifact(
   }
 
   // listNovelPlanArtifacts 会按标题折叠同名计划，这里自动排号，避免新建的空白计划与旧计划互相吞掉
-  const existing = await prisma.agentArtifact.findMany({
+  const existing = await db.agentArtifact.findMany({
     where: {
       artifactType: 'chapterPlan',
       metadata: { path: ['savedAsPlan'], equals: true },
@@ -145,9 +157,9 @@ export async function createNovelPlanArtifact(
     },
     select: { title: true, metadata: true },
   })
-  const usedTitles = new Set(existing.map((artifact) => artifact.title.trim()))
+  const usedTitles = new Set(existing.filter(artifact => planKind(artifact.metadata) === (options.planKind ?? 'legacy')).map((artifact) => artifact.title.trim()))
 
-  const baseTitle = title?.trim().slice(0, 60) || '未命名计划'
+  const baseTitle = title?.trim().slice(0, 60) || (options.planKind === 'outline' ? '未命名大纲' : options.planKind === 'detail' ? '未命名细纲' : '未命名计划')
   let nextTitle = baseTitle
   let suffix = 2
   while (usedTitles.has(nextTitle)) {
@@ -155,14 +167,14 @@ export async function createNovelPlanArtifact(
     suffix += 1
   }
 
-  const artifact = await prisma.agentArtifact.create({
+  const artifact = await db.agentArtifact.create({
     data: {
       runId: run.id,
       artifactType: 'chapterPlan',
       title: nextTitle,
       content: '',
       metadata: {
-        savedAsPlan: true,
+        ...linkMetadata,
         manualCreated: true,
         planOrder: existing.reduce((maximum, item, index) => {
           const metadata = item.metadata && typeof item.metadata === 'object' && !Array.isArray(item.metadata)
@@ -170,21 +182,27 @@ export async function createNovelPlanArtifact(
             : {}
           return Math.max(maximum, typeof metadata.planOrder === 'number' ? metadata.planOrder : index + 1)
         }, 0) + 1,
-      },
+      } as Prisma.InputJsonValue,
     },
     select: { id: true, runId: true, title: true, content: true, metadata: true, createdAt: true, updatedAt: true },
   })
 
-  return { item: toNovelPlanArtifact(artifact) }
+  return { item: (await listNovelPlanArtifacts(userId, novelId, db)).items.find(item => item.id === artifact.id)! }
 }
 
 /** 更新计划：改名/改正文，或 saved=false 从计划文件夹移除（保留产物本体与任务历史） */
 export async function updateNovelPlanArtifact(
   userId: string,
   artifactId: string,
-  patch: { title?: string; content?: string; saved?: boolean; position?: number },
+  patch: { title?: string; content?: string; saved?: boolean; position?: number } & PlanMetadataPatch,
+  transaction?: Prisma.TransactionClient,
 ): Promise<{ item: NovelPlanArtifact }> {
-  const artifact = await prisma.agentArtifact.findFirst({
+  if (!transaction) return prisma.$transaction(tx => updateNovelPlanArtifact(userId, artifactId, patch, tx))
+  const db = transaction
+  const owner = await db.agentArtifact.findFirst({ where: { id: artifactId, artifactType: 'chapterPlan', run: { userId } }, select: { run: { select: { novelId: true } } } })
+  if (!owner?.run.novelId) throw new DataAccessError(404, 'NOT_FOUND', '计划不存在或无权访问。')
+  await lockNovelActiveScope(db, owner.run.novelId)
+  const artifact = await db.agentArtifact.findFirst({
     where: { id: artifactId, artifactType: 'chapterPlan', run: { userId } },
     include: { run: { select: { novelId: true } } },
   })
@@ -193,17 +211,14 @@ export async function updateNovelPlanArtifact(
     throw new DataAccessError(404, 'NOT_FOUND', '计划不存在或无权访问。')
   }
 
-  const metadata =
-    artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata)
-      ? { ...(artifact.metadata as Record<string, unknown>) }
-      : {}
+  const metadata = await applyPlanMetadataPatch(db, userId, artifact.run.novelId!, artifact, patch, patch.content ?? artifact.content)
 
   if (typeof patch.saved === 'boolean') {
     metadata.savedAsPlan = patch.saved
   }
 
   if (typeof patch.position === 'number') {
-    const siblings = await prisma.agentArtifact.findMany({
+    const siblings = await db.agentArtifact.findMany({
       where: {
         artifactType: 'chapterPlan',
         metadata: { path: ['savedAsPlan'], equals: true },
@@ -222,11 +237,12 @@ export async function updateNovelPlanArtifact(
     if (currentIndex >= 0) {
       const [moved] = siblings.splice(currentIndex, 1)
       siblings.splice(Math.max(0, Math.min(patch.position - 1, siblings.length)), 0, moved)
-      await prisma.$transaction(siblings.map((item, index) => {
+      await Promise.all(siblings.filter(item => item.id !== artifact.id).map((item) => {
+        const index = siblings.findIndex(sibling => sibling.id === item.id)
         const itemMetadata = item.metadata && typeof item.metadata === 'object' && !Array.isArray(item.metadata)
           ? { ...(item.metadata as Record<string, unknown>) }
           : {}
-        return prisma.agentArtifact.update({
+        return db.agentArtifact.update({
           where: { id: item.id },
           data: { metadata: { ...itemMetadata, planOrder: index + 1 } as Prisma.InputJsonValue },
         })
@@ -235,15 +251,15 @@ export async function updateNovelPlanArtifact(
     }
   }
 
-  const updated = await prisma.agentArtifact.update({
-    where: { id: artifact.id },
+  const updated = await db.agentArtifact.updateMany({
+    where: { id: artifact.id, updatedAt: artifact.updatedAt },
     data: {
       ...(typeof patch.title === 'string' ? { title: patch.title.slice(0, 160) || '未命名计划' } : {}),
       ...(typeof patch.content === 'string' ? { content: patch.content } : {}),
       metadata: metadata as Prisma.InputJsonValue,
     },
-    select: { id: true, runId: true, title: true, content: true, metadata: true, createdAt: true, updatedAt: true },
   })
-
-  return { item: toNovelPlanArtifact(updated) }
+  if (updated.count !== 1) throw new DataAccessError(409, 'PLAN_REVISION_CONFLICT', '计划已被并发修改，未覆盖作者内容。')
+  return { item: (await listNovelPlanArtifacts(userId, artifact.run.novelId!, db)).items.find(item => item.id === artifact.id)
+    ?? toNovelPlanArtifact({ ...artifact, title: patch.title ?? artifact.title, content: patch.content ?? artifact.content, metadata: metadata as Prisma.JsonValue }) }
 }

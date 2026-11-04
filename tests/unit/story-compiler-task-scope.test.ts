@@ -406,3 +406,22 @@ it('locates an owned next-chapter compiler in a rejected quality pairing without
   expect(db.storyCompilation.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ userId: 'u', novelId: 'n', id: 'own-compiler' }) }))
   expect(db.aiUsageLog.count).not.toHaveBeenCalled()
 })
+
+it.each([false, true])('digest preserves recovery tools after a plan change, with body=%s', async hasBody => {
+  const frozen = { id: 'outline', title: '大纲', content: '旧提纲', planHash: 'a'.repeat(64) }
+  const planContext = { version: 1, outline: frozen, detail: { ...frozen, id: 'detail' }, parentPlanHash: frozen.planHash, target: { kind: 'chapter', chapterId: 'own32' } }
+  const chapter = hasBody ? { id: 'own32', revision: 3, content: '已保存正文', orderIndex: 32 } : null
+  db.chapter.findFirst.mockResolvedValue(chapter)
+  db.storyCompilation.findFirst.mockResolvedValue({ id: 'compiler', chapterId: chapter?.id ?? null, targetOrderIndex: 32,
+    stage: hasBody ? 'commit' : 'prepare', status: hasBody ? 'completed' : 'active', chapter, sceneTasks: [], qualityReports: [],
+    bridge: { toChapterId: chapter?.id ?? null, targetRevision: 3, committedAt: new Date(1) },
+    preparedContext: { planContext, terminalContentHash: runtimeJson({ content: '已保存正文' }).hash } })
+  db.agentArtifact.findMany.mockResolvedValue([])
+  const digest = await buildStoryCompilerDigest('u', 'n', null, 'new-run')
+  expect(digest).toContain('needs-review')
+  expect(digest).toContain('plan_read')
+  expect(digest).toContain('story_compiler_prepare')
+  expect(digest).not.toContain('终态已提交且匹配当前正文 revision/hash')
+  expect(db.storyCompilation.update).not.toHaveBeenCalled()
+  expect(db.storyCompilation.create).not.toHaveBeenCalled()
+})

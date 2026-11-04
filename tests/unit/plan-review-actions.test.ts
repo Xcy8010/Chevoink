@@ -76,3 +76,27 @@ it('confirms before rejecting a single hunk', async () => {
   expect(mocks.update).toHaveBeenCalledExactlyOnceWith('server', { content: 'before' })
   expect(options.setPendingPlanReview).toHaveBeenCalledWith(null)
 })
+
+
+it('rolls back only against the observed plan hash and preserves exact whitespace', async () => {
+  mocks.update.mockResolvedValue({ planHash: 'restored-hash' })
+  const setup = fixture()
+  const { options, actions } = fixture({ savedPlanFiles: [{ id: 'server-server', backendArtifactId: 'server', artifactId: 'local', title: 'New', content: 'after', createdAt: '', planHash: 'observed-hash' }], pendingPlanReview: { ...setup.options.pendingPlanReview!, before: '\nbefore\n' } })
+  await actions.handleRevertPendingPlanReview()
+  expect(mocks.update).toHaveBeenCalledWith('server', { title: 'Old', content: '\nbefore\n', expectedPlanHash: 'observed-hash' })
+  const update = vi.mocked(options.setServerPlanFiles).mock.calls[0][0]
+  expect(typeof update === 'function' ? update(options.savedPlanFiles!) : update).toEqual([expect.objectContaining({ content: '\nbefore\n', planHash: 'restored-hash' })])
+})
+
+it('ignores a late rollback response after switching novel scopes', async () => {
+  let resolve!: () => void
+  mocks.update.mockImplementationOnce(() => new Promise<void>(done => { resolve = done }))
+  let current = true
+  const { options, actions } = fixture({ isCurrentNovel: () => current })
+  const saving = actions.handleRevertPendingPlanReview()
+  current = false; resolve()
+  await saving
+  expect(options.setPendingPlanReview).not.toHaveBeenCalled()
+  expect(options.setServerPlanFiles).not.toHaveBeenCalled()
+  expect(options.setPendingPlanReviewBusy).toHaveBeenCalledExactlyOnceWith(true)
+})

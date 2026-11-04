@@ -1,3 +1,5 @@
+import { DataAccessError } from '../prisma.js'
+import { findPlanByIdentity } from './novel-plan-contract.js'
 import { hasRetiredNativeArguments, verifiedAssistantToolViews, toolWithNativeView, needsNativeToolProjection } from './runtime-tool-view.js'
 import { z } from 'zod'
 import { originalToolParameterSchemas } from './tool-schema.js'
@@ -270,7 +272,10 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       const baseline = target ? await readObservedBaseline(tx, root.id, frame.revision, { kind: 'plan', id: target }) : null
       if (target && baseline?.kind !== 'plan') return { reject: { cursor, callId: call.id, tool } }
       // An existing same-title plan must first be explicitly read, never silently overwritten.
-      if (!target && await tx.agentArtifact.findFirst({ where: { title: String(args.title).trim(), artifactType: 'chapterPlan', metadata: { path: ['savedAsPlan'], equals: true }, run: { userId: lease.userId, novelId: root.novelId } } })) return { reject: { cursor, callId: call.id, tool } }
+      if (!target) {
+        try { if (await findPlanByIdentity(tx, lease.userId, root.novelId, args)) return { reject: { cursor, callId: call.id, tool } } }
+        catch (error) { if (error instanceof DataAccessError && error.code === 'PLAN_TARGET_AMBIGUOUS') return { reject: { cursor, callId: call.id, tool } }; throw error }
+      }
       ctx.durablePlan = { ...capability, expected: baseline?.kind === 'plan' ? { id: baseline.id, hash: baseline.hash } : { id: null, hash: null } }
     } else {
       const target = typeof args.chapterId === 'string' && args.chapterId.trim() ? args.chapterId.trim() : originalChapterId

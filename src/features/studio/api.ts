@@ -1,3 +1,4 @@
+import type { PlanLinkFields, PlanMetadataPatch } from '../../../shared/contracts/novel-plans'
 import { buildApiUrl } from '@/app/api-base'
 import { buildAuthHeader } from '@/lib/auth-token'
 import type {
@@ -198,7 +199,7 @@ export async function getWritingAgentSessionHistory(
   return data.items
 }
 
-export type NovelPlanFileItem = {
+export type NovelPlanFileItem = PlanLinkFields & {
   id: string
   runId: string
   title: string
@@ -220,10 +221,11 @@ export async function listNovelPlanFiles(novelId: string): Promise<NovelPlanFile
 export async function createNovelPlanFile(
   novelId: string,
   title?: string,
+  metadata: Pick<PlanMetadataPatch, 'planKind' | 'parentPlanId' | 'expectedParentPlanHash' | 'target'> = { planKind: 'outline' },
 ): Promise<NovelPlanFileItem> {
   const data = await requestData<{ item: NovelPlanFileItem }>('/api/agent/plans', {
     method: 'POST',
-    body: JSON.stringify({ novelId, ...(title ? { title } : {}) }),
+    body: JSON.stringify({ novelId, ...(title ? { title } : {}), ...metadata }),
   })
   return data.item
 }
@@ -231,7 +233,7 @@ export async function createNovelPlanFile(
 /** 计划文件夹：同步改名/改正文，saved=false 从云端文件夹移除 */
 export async function updateNovelPlanFile(
   artifactId: string,
-  patch: { title?: string; content?: string; saved?: boolean; position?: number },
+  patch: PlanMetadataPatch & { title?: string; content?: string; saved?: boolean; position?: number },
 ): Promise<NovelPlanFileItem> {
   const data = await requestData<{ item: NovelPlanFileItem }>(`/api/agent/plans/${artifactId}`, {
     method: 'PATCH',

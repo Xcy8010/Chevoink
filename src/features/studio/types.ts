@@ -1,3 +1,4 @@
+import type { PlanLinkFields } from '../../../shared/contracts/novel-plans'
 import type {
   AiImageSize,
   AgentActionHandoff,
@@ -90,6 +91,7 @@ export type AgentArtifact = {
   backendArtifactId?: string | null
   availableApplyStrategies?: AgentArtifactApplyStrategy[]
   savedAsPlan?: boolean
+  planLocalDraft?: { basePlanHash?: string }
   catalogUpdated?: boolean
   appliedToCover?: boolean
   replacedChapterContent?: boolean
@@ -211,7 +213,13 @@ export type CoverFormState = {
   count: number
 }
 
-export type WorkspacePlanFile = {
+export type PlanSavedSnapshot = { title: string; content: string; planHash: string }
+
+export type WorkspacePlanFile = Partial<PlanLinkFields> & {
+  /** Author edits keep the version observed before typing, independently of remote refreshes. */
+  localDraft?: { basePlanHash?: string }
+  savedSnapshot?: PlanSavedSnapshot
+  hasRemoteConflict?: boolean
   id: string
   title: string
   content: string

@@ -20,3 +20,16 @@ it('flushes a switched document buffer to its own callback, never the newly sele
   await act(async () => {vi.advanceTimersByTime(500)})
   expect(second).toHaveBeenCalledExactlyOnceWith('B edited')
 })
+
+
+it('keeps a buffered same-document edit bound to the version callback observed before a remote refresh', async () => {
+  const v1 = vi.fn(), v2 = vi.fn()
+  const view = render(<PlanMarkdownEditor documentId="same-plan" markdown="v1" onChange={v1} />)
+  await screen.findByText('编辑计划')
+  vi.useFakeTimers()
+  fireEvent.click(screen.getByText('编辑计划'))
+  view.rerender(<PlanMarkdownEditor documentId="same-plan" markdown="v2 remote" onChange={v2} />)
+  await act(async () => { vi.advanceTimersByTime(500) })
+  expect(v1).toHaveBeenCalledExactlyOnceWith('v1 edited')
+  expect(v2).not.toHaveBeenCalled()
+})

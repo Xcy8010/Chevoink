@@ -76,7 +76,7 @@ function PlanMarkdownEditorDocument({
 
   // Milkdown 富文本每次击键都会同步上报 markdown，直接透传会让 StudioWorkspace 整树
   // 每字重渲染一遍（与章节正文同样的“打字断一下”问题）；这里先缓冲，停顿后一次性上报。
-  const pendingMarkdownRef = useRef<string | null>(null)
+  const pendingMarkdownRef = useRef<{ content: string; commit?: (markdown: string) => void } | null>(null)
   const markdownCommitTimerRef = useRef<number | null>(null)
   const onChangeRef = useRef(onChange)
   const onBlurRef = useRef(onBlur)
@@ -91,13 +91,13 @@ function PlanMarkdownEditorDocument({
     if (pendingMarkdownRef.current !== null) {
       const next = pendingMarkdownRef.current
       pendingMarkdownRef.current = null
-      onChangeRef.current?.(next)
+      next.commit?.(next.content)
     }
   }, [])
 
   const handleRichMarkdownChange = useCallback(
     (next: string) => {
-      pendingMarkdownRef.current = next
+      pendingMarkdownRef.current = { content: next, commit: pendingMarkdownRef.current?.commit ?? onChangeRef.current }
       if (markdownCommitTimerRef.current !== null) window.clearTimeout(markdownCommitTimerRef.current)
       markdownCommitTimerRef.current = window.setTimeout(() => {
         markdownCommitTimerRef.current = null
@@ -117,7 +117,7 @@ function PlanMarkdownEditorDocument({
   useEffect(
     () => () => {
       if (markdownCommitTimerRef.current !== null) window.clearTimeout(markdownCommitTimerRef.current)
-      if (pendingMarkdownRef.current !== null) onChangeRef.current?.(pendingMarkdownRef.current)
+      if (pendingMarkdownRef.current !== null) pendingMarkdownRef.current.commit?.(pendingMarkdownRef.current.content)
     },
     [],
   )

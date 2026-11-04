@@ -11,9 +11,11 @@ const m = vi.hoisted(() => ({
     // ordinary no-goal branch while preserving all manuscript assertions.
     agentGoalExecution: { findUnique: vi.fn() },
     chapter: { findFirst: vi.fn(), findFirstOrThrow: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), create: vi.fn(), count: vi.fn() },
+    storyCompilation: { findFirst: vi.fn(), update: vi.fn() },
+    agentArtifact: { findMany: vi.fn(), findFirstOrThrow: vi.fn(), update: vi.fn() },
     volume: { findFirst: vi.fn(), findMany: vi.fn() }, agentTaskRoot: { findUniqueOrThrow: vi.fn() },
   },
-  reviewGuard: vi.fn(), stats: vi.fn(), memory: vi.fn(), compiler: vi.fn(), flags: vi.fn(), craft: vi.fn(), placement: vi.fn(), place: vi.fn(),
+  reviewGuard: vi.fn(), stats: vi.fn(), memory: vi.fn(), compiler: vi.fn(), compilerScope: vi.fn(), flags: vi.fn(), craft: vi.fn(), placement: vi.fn(), place: vi.fn(),
   prepare: vi.fn(), prepareCursor: vi.fn(), rejectCursor: vi.fn(), commit: vi.fn(), failure: vi.fn(), reduce: vi.fn(),
 }))
 vi.mock('../../api/lib/prisma.js', () => ({
@@ -25,7 +27,7 @@ vi.mock('../../api/lib/data/internal.js', async original => ({
 }))
 vi.mock('../../api/lib/data/volume.js', () => ({ resolveChapterPlacement: m.placement, placeCreatedChapter: m.place }))
 vi.mock('../../api/lib/agent/story-memory.js', () => ({ enqueueChapterMemoryExtraction: m.memory }))
-vi.mock('../../api/lib/agent/story-compiler.js', () => ({ recordStoryCompilerWrite: m.compiler }))
+vi.mock('../../api/lib/agent/story-compiler.js', () => ({ recordStoryCompilerWrite: m.compiler, compilationRunScope: m.compilerScope }))
 vi.mock('../../api/lib/agent/chapter-review-guard.js', () => ({
   createChapterReviewReadScope: () => ({ inheritanceScope: { identities: new Set(), authenticating: new Set(), authenticated: new Map() }, terminalDraftScope: new WeakMap() }), assertChapterManuscriptRevision: m.reviewGuard }))
 vi.mock('../../api/lib/agent/craft-library.js', () => ({ assertCraftOutputSafe: m.craft }))
@@ -44,6 +46,7 @@ import { chapterAppendTool, chapterCreateTool, chapterEditRangeTool, chapterRena
 import { executeDurableChapter, executeDurableChapterRename } from '../../api/lib/agent/tools/durable-chapter.js'
 import type { AgentTool, ToolContext, ToolResult } from '../../api/lib/agent/tools/types.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { novelPlanHash } from '../../api/lib/agent/novel-plan-contract.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 
 const tx = m.tx as unknown as Prisma.TransactionClient
@@ -91,6 +94,8 @@ beforeEach(() => {
     throw new Error(`Unexpected fixture lock: ${sql}`)
   })
   authorScope()
+  m.compilerScope.mockResolvedValue({ runId: 'r' })
+  m.tx.storyCompilation.findFirst.mockResolvedValue(null)
   m.tx.agentSession.findFirst.mockResolvedValue({ id: 's', userId: 'u', novelId: 'n', spawnedFromRunId: null, spawnedFromSessionId: null })
   m.tx.agentChildExecutionGrant.findUnique.mockResolvedValue(null)
   m.tx.chapter.findMany.mockResolvedValue([row])
@@ -483,6 +488,25 @@ describe('legacy Agent chapter archive guards', () => {
     await expect(chapterCreateTool.execute(ctx(), { title: 'New', volumeOrder: 1 })).rejects.toMatchObject({ code: 'VOLUME_NOT_FOUND' })
     expect(m.tx.volume.findFirst).toHaveBeenCalledWith({ where: { novelId: 'n', archivedAt: null, orderIndex: 1 } })
     expect(m.tx.chapter.create).not.toHaveBeenCalled()
+  })
+
+  it('binds an explicitly frozen future detail even when the legacy compiler feature flag is disabled', async () => {
+    authorScope(1)
+    m.flags.mockReturnValue(false)
+    m.placement.mockResolvedValue({ volume: { id: 'v' }, count: 1, position: 0 })
+    m.tx.chapter.create.mockResolvedValue(row)
+    m.tx.chapter.findFirstOrThrow.mockResolvedValue(row)
+    const outline = { id: 'outline', title: '大纲', content: '本章取得钥匙', metadata: { savedAsPlan: true, planKind: 'outline' } }
+    const detail = { id: 'detail', title: '细纲', content: '绕过锁门，取得钥匙', metadata: { savedAsPlan: true, planKind: 'detail', parentPlanId: outline.id, parentPlanHash: novelPlanHash(outline), target: { kind: 'future', targetOrderIndex: 1 } } }
+    const planContext = { version: 1, outline: { ...outline, planHash: novelPlanHash(outline) }, detail: { ...detail, planHash: novelPlanHash(detail) }, parentPlanHash: novelPlanHash(outline), target: detail.metadata.target }
+    m.tx.storyCompilation.findFirst.mockResolvedValue({ id: 'comp', targetOrderIndex: 1, preparedContext: { planContext } })
+    m.tx.agentArtifact.findMany.mockResolvedValue([outline, detail])
+    m.tx.agentArtifact.findFirstOrThrow.mockResolvedValue(detail)
+    await chapterCreateTool.execute(ctx(), { title: 'New', position: 1 })
+    expect(m.tx.storyCompilation.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ userId: 'u', novelId: 'n', runId: 'r' }) }))
+    expect(m.tx.agentArtifact.update).toHaveBeenCalledWith({ where: { id: 'detail' }, data: { metadata: expect.objectContaining({ target: { kind: 'chapter', chapterId: 'c' } }) } })
+    expect(m.tx.storyCompilation.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'comp' }, data: expect.objectContaining({ chapterId: 'c' }) }))
+    expect(m.compiler).not.toHaveBeenCalled()
   })
 
   it('scopes global placement, last chapter, count and created-row hydration', async () => {

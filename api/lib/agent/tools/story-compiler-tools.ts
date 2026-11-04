@@ -1,3 +1,4 @@
+import { assertWritingPlanContextCurrent, renderWritingPlanContext } from '../writing-plan-context.js'
 import { reviewContinuity } from '../continuity-review.js'
 import { readWritingContinuityReference, renderWritingContinuityReference } from '../writing-continuity-reference.js'
 import type { ToolResult } from './types.js'
@@ -205,6 +206,7 @@ export const storyCompilerPrepareTool = defineTool({
   parameters: z.object({
     chapterId: z.string().min(1).optional(),
     targetOrderIndex: z.number().int().min(1).optional(),
+    detailPlanId: z.string().min(1).optional().describe('该章存在多份细纲时明确选择已读取核对的细纲ID'),
     intentSummary: z.string().min(1).max(1000).describe('本轮写作意图的事实化摘要；服务端只保存其 SHA-256，不保存原提示词'),
     volumeDecision: writingVolumeDecisionSchema.optional().describe('每次续写都审视当前卷目标：continue说明未收束原因；new_volume须真实前章收束引用+下一主困局，不能按章数分卷。旧已绑定目标不迁移'),
   }),
@@ -229,12 +231,14 @@ export const storyCompilerPrepareTool = defineTool({
       targetOrderIndex: args.targetOrderIndex,
       mode: ctx.qualityMode,
       intentSummary: args.intentSummary,
+      detailPlanId: args.detailPlanId,
       volumeDecision: args.volumeDecision,
     }, ctx.transaction)
     const bridge = prepared.bridge
     const workflowMilestone = prepared.preparedFirstForTarget ? { version: 1 as const, userId: ctx.userId, novelId: ctx.novelId,
       runId: ctx.runId, targetOrderIndex: prepared.compilation.targetOrderIndex, phase: 'prepare' as const } : undefined
     const items = [
+      renderWritingPlanContext(prepared.compilation.preparedContext),
       `本章卷处理决定：${JSON.stringify((prepared.compilation.preparedContext as Record<string, unknown>).volumeDecision)}；当前卷与计划：${JSON.stringify((prepared.compilation.preparedContext as Record<string, unknown>).volumeContext)}。仅章数增加不能作为收束。若真实卷目标已完成，先重新PREPARE提交证据，再chapter_create传同一newVolume；没有权限或证据则延续当前卷。`,
       bridge.lastUnfinishedAction ? `未完成动作：${bridge.lastUnfinishedAction}` : '前章无明确未完成动作',
       bridge.location || bridge.storyTime ? `连续时空：${bridge.storyTime || '未标注'} · ${bridge.location || '未标注'}` : '时空状态待 Scene Task 明确',
@@ -428,15 +432,17 @@ export const chapterBridgeGetTool = defineTool({
       include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: true } })
     if (!compilation && !args.compilationId) return { output: `当前任务尚未建立章节桥。${await missingCompilationGuidance(db, ctx, scope)}`, summary: '本任务尚未建立章节桥' }
     if (!compilation?.bridge) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND', output: '没有当前作者任务可读取的章节桥。', summary: '未找到章节编译状态' }
+    await assertWritingPlanContextCurrent(db, { userId: ctx.userId, novelId: ctx.novelId }, compilation.preparedContext)
     const continuityReference = await readWritingContinuityReference(db, ctx, compilation.targetOrderIndex)
     const review = await readChapterReviewReadiness(db, ctx, compilation.id)
     const retained = review?.retainedDecisions ?? []
     const items = [`第 ${compilation.targetOrderIndex} 章；${review?.terminalCommitted ? '当前正文已提交' : '当前正文尚未提交'}`,
-      `连续性报告：${review?.continuity ?? 'missing'}；人类感质量报告：${review?.quality ?? 'missing'}`,
+      `连续性报告：${review?.continuity ?? 'missing'}；人类感质量报告：${review?.quality ?? 'missing'}；提纲一致性：${review?.planAlignment ?? '未绑定提纲'}`,
       `剩余意见 ${review?.decisionEntries?.length ?? 0} 条，已明确保留 ${retained.length} 条。保留意见不等于已修复。`]
     return { summary: `读取第 ${compilation.targetOrderIndex} 章章节桥`,
       ...(review?.decisionFeedback ? { reviewDecisionFeedback: review.decisionFeedback } : {}),
       output: `compilationId=${compilation.id}；chapterId=${compilation.chapterId ?? '尚未创建'}；revision=${compilation.chapter?.revision ?? '无正文'}\n${items.join('\n')}
+${renderWritingPlanContext(compilation.preparedContext)}
 原章节桥保存的前章来源：${JSON.stringify({ chapterId: compilation.bridge.fromChapterId, revision: compilation.bridge.sourceRevision })}
 ${renderWritingContinuityReference(continuityReference) ?? ''}
 场景任务：${JSON.stringify(compilation.sceneTasks.map(task => ({ ordinal: task.ordinal, purpose: task.purpose, goal: task.goal, obstacle: task.obstacle, cost: task.cost, turn: task.turn })))}

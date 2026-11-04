@@ -46,6 +46,8 @@ export type ToolContext = {
   /** Internal, frozen at admission. Never populated from model arguments. */
   durableContent?: { lease: RunLeaseToken; operationKey: string; chapterId: string; expectedRevision: number;
     cursor?: import('../runtime-tool-cursor.js').ToolExecutionCursor }
+  /** Only the verified pre-existing durable plan operation may preserve legacy creation. Never model input. */
+  legacyPlanCreationReplay?: true
   durablePlan?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor;
     expected: { id: string | null; hash: string | null } }
   durableRead?: { lease: RunLeaseToken; operationKey: string; cursor: import('../runtime-tool-cursor.js').ToolExecutionCursor }

@@ -1,19 +1,22 @@
+import { withRunLease } from '../runtime-lease.js'
+import { lockNovelActiveScope } from '../../data/novel-write-lock.js'
+import { findPlanByIdentity } from '../novel-plan-contract.js'
 import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import type { ToolContext, ToolResult } from './types.js'
 import { runtimeError, runtimeJson } from '../runtime-common.js'
-import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
+import { prepareToolCursorOperation, rejectToolCursorCall, readAdmittedToolOperation } from '../runtime-tool-cursor.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
 import { failedToolResultSchema, readFailedToolResult, reduceExecutionReceipt } from '../runtime-reducer.js'
 import { DataAccessError } from '../../prisma.js'
 
-type PlanArgs = { title?: string; content?: string; planId?: string; mode?: 'replace' | 'append'; expectedContentHash?: string }
+type PlanArgs = import('../../../../shared/contracts/novel-plans.js').PlanMetadataPatch & { title?: string; content?: string; planId?: string; mode?: 'replace' | 'append'; expectedContentHash?: string }
 export const planTargetHash = (plan: { id: string; title: string; content: string; metadata: Prisma.JsonValue }) => runtimeJson({ id: plan.id, title: plan.title, content: plan.content, metadata: plan.metadata }).hash
 
 /** Real plan_save implementation executes through the same tx as receipt/outbox. */
 export async function executeDurablePlanSave(ctx: ToolContext, args: PlanArgs, normalize: (raw: unknown) => unknown,
-  write: (tx: Prisma.TransactionClient, verifiedContentHash?: string) => Promise<ToolResult>, action: 'plan_save' | 'plan_rename' | 'plan_delete' = 'plan_save'): Promise<ToolResult> {
+  write: (tx: Prisma.TransactionClient, verifiedContentHash?: string, legacyCreationReplay?: true) => Promise<ToolResult>, action: 'plan_save' | 'plan_rename' | 'plan_delete' = 'plan_save'): Promise<ToolResult> {
   const capability = ctx.durablePlan && { ...ctx.durablePlan, lease: { ...ctx.durablePlan.lease }, cursor: { ...ctx.durablePlan.cursor }, expected: { ...ctx.durablePlan.expected } }
   if (!capability || capability.lease.userId !== ctx.userId || capability.lease.runId !== ctx.runId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '计划写入能力与原任务不一致。')
   const grant = ctx.toolAuthority?.get(action)
@@ -23,9 +26,19 @@ export async function executeDurablePlanSave(ctx: ToolContext, args: PlanArgs, n
   const effectiveArgs = Object.fromEntries(Object.entries(args).filter(([, value]) => value !== undefined))
   const { lease, cursor } = capability
   ctx.signal.throwIfAborted()
+  const legacyCreationReplay = action === 'plan_save' && !args.planKind && !args.planId ? await withRunLease(lease, async tx => {
+    const original = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: lease.taskRootId, operationKey: capability.operationKey } } })
+    if (!original) return false
+    const saved = await readAdmittedToolOperation(lease, { operationId: original.id, action, novelId: ctx.novelId, callId: ctx.callId }, tx)
+    return saved.input.planProtocol === undefined && saved.input.args.planKind === undefined && saved.input.args.planId === undefined
+  }) : false
   const prepared = await prepareToolCursorOperation(lease, cursor, { key: capability.operationKey, action, callId: ctx.callId,
     targetId: expected.id ?? ctx.novelId, effectDomain: 'plan', requireApproval: grant.permission === 'ask' || grant.alwaysConfirm,
-    effectiveArgs, normalize, operationInput: runtimeJson({ callId: ctx.callId, novelId: ctx.novelId, args: effectiveArgs, expected }).value }).catch(async error => {
+    effectiveArgs, normalize, operationInput: runtimeJson({
+      // A new missing-kind proposal must remain new after an interruption at PREPARED.
+      // Only historical operations lacking this frozen protocol retain the legacy path.
+      ...(action === 'plan_save' && !args.planKind && !args.planId && !legacyCreationReplay ? { planProtocol: 1 } : {}),
+      callId: ctx.callId, novelId: ctx.novelId, args: effectiveArgs, expected }).value }).catch(async error => {
       if (!(error instanceof DataAccessError) || !['RUNTIME_APPROVAL_DENIED', 'RUNTIME_APPROVAL_EXPIRED'].includes(error.code)) throw error
       const rejected = await rejectToolCursorCall(lease, cursor, ctx.callId)
       await reduceExecutionReceipt(lease, { expectedRevision: rejected.pending.revision, expectedHash: rejected.pending.snapshotHash, operationId: rejected.operation.id })
@@ -36,10 +49,11 @@ export async function executeDurablePlanSave(ctx: ToolContext, args: PlanArgs, n
     ctx.signal.throwIfAborted()
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) runtimeError('RUNTIME_SCOPE_MISMATCH', '计划写入不属于原任务范围。')
-    const target = await tx.agentArtifact.findFirst({ where: { artifactType: 'chapterPlan', run: { userId: ctx.userId, novelId: ctx.novelId },
-      ...(args.planId ? { id: args.planId } : { title: args.title?.trim() ?? '', metadata: { path: ['savedAsPlan'], equals: true } }) }, orderBy: { updatedAt: 'desc' } })
+    await lockNovelActiveScope(tx, ctx.novelId)
+    const target = args.planId ? await tx.agentArtifact.findFirst({ where: { id: args.planId, artifactType: 'chapterPlan', run: { userId: ctx.userId, novelId: ctx.novelId } } })
+      : await findPlanByIdentity(tx, ctx.userId, ctx.novelId, args)
     if ((target?.id ?? null) !== expected.id || (target ? planTargetHash(target) : null) !== expected.hash) runtimeError('PLAN_REVISION_CONFLICT', '计划已被修改，请重新读取后建立新操作，未覆盖作者修改。')
-    const result = await write(tx, target ? createHash('sha256').update(target.content).digest('hex') : undefined)
+    const result = await write(tx, target ? createHash('sha256').update(target.content).digest('hex') : undefined, legacyCreationReplay ? true : undefined)
     if (result.outcome === 'failed') throw new DataAccessError(409, 'PLAN_WRITE_REJECTED', result.output)
     const artifactId = result.display && 'artifactId' in result.display ? result.display.artifactId : undefined
     const saved = artifactId ? await tx.agentArtifact.findFirst({ where: { id: artifactId, run: { userId: ctx.userId, novelId: ctx.novelId } } }) : null
@@ -49,7 +63,7 @@ export async function executeDurablePlanSave(ctx: ToolContext, args: PlanArgs, n
       planAfter: { id: saved.id, title: saved.title, content: saved.content, removed: action === 'plan_delete' }, progress: { kind: 'content_revision', targetId: saved.id,
       beforeHash: runtimeJson({ content: target?.content ?? '' }).hash, afterHash: runtimeJson({ content: saved.content }).hash } }).value
   }).catch(async error => {
-    if (!(error instanceof DataAccessError) || !['PLAN_REVISION_CONFLICT', 'PLAN_WRITE_REJECTED'].includes(error.code)) throw error
+    if (!(error instanceof DataAccessError) || !error.code.startsWith('PLAN_')) throw error
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code, output: error.message, summary: '计划写入未执行' })
   })
   const failed = failedToolResultSchema.safeParse(receipt.result)

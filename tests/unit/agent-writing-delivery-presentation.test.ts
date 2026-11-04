@@ -50,6 +50,7 @@ async function fixture(prompt = '完成第一章，只输出标题与正文。',
     findings: [] as Array<{ id: string; signal: string; severity: string; disposition: string; authorFeedback: null;
       evidenceExcerpt: string; startOffset: number; endOffset: number; explanation: string; suggestion: string }> }
   const db = { $queryRaw: vi.fn(async () => [{ id: 'novel' }]),
+    agentArtifact: { findMany: vi.fn().mockResolvedValue([]) },
     agentRun: { findFirst: vi.fn(async () => ({ id: subject.runId })), findFirstOrThrow: vi.fn(async () => ({ writingBindings: null })) },
     chapter: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn(async () => chapter) }, storyCompilation: { findFirst: vi.fn(async () => terminal), findMany: vi.fn(async () => [terminal]) },
     chapterQualityReport: { findFirst: vi.fn(async () => quality), findMany: vi.fn(async () => [quality]) },
@@ -480,4 +481,15 @@ describe('saved artifact display withdrawal', () => {
     expect(f.chapter).toEqual(chapter)
     expect(mocks.save).not.toHaveBeenCalled()
   })
+})
+
+it('treats a committed chapter with changed plan dependencies as unavailable for recovery, while readiness stays fenced', async () => {
+  const f = await fixture()
+  const frozen = { id: 'outline', title: '大纲', content: '旧提纲', planHash: 'a'.repeat(64) }
+  Object.assign(f.terminal.preparedContext, { planContext: { version: 1, outline: frozen, detail: { ...frozen, id: 'detail' },
+    parentPlanHash: frozen.planHash, target: { kind: 'chapter', chapterId: f.chapter.id } } })
+  await expect(readCompletedWritingDelivery(f.db, subject)).resolves.toBeNull()
+  await expect(readRecoveredChapterDelivery(f.db, subject)).resolves.toBeNull()
+  await expect(readChapterReviewReadiness(f.db, subject, f.terminal.id)).rejects.toMatchObject({ code: 'PLAN_CONTEXT_STALE' })
+  expect(mocks.save).not.toHaveBeenCalled()
 })

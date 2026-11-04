@@ -1,3 +1,5 @@
+import { DataAccessError } from '../prisma.js'
+import { findPlanByIdentity } from './novel-plan-contract.js'
 import { hasRetiredNativeArguments, verifiedAssistantToolViews, toolWithNativeView, needsNativeToolProjection } from './runtime-tool-view.js'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
@@ -102,7 +104,7 @@ export async function readAdmittedToolOperation(token: RunLeaseToken, input: { o
 }
 
 export const toolRejectionSchema = z.object({ version: z.literal(1), rawArguments: z.string(), incomplete: z.boolean(),
-  code: z.enum(['TOOL_NOT_AUTHORIZED', 'TOOL_ARGUMENTS_INCOMPLETE', 'TOOL_ARGUMENTS_INVALID', 'TOOL_SCHEMA_INVALID', 'TOOL_CONTRACT_RETIRED', 'TOOL_APPROVAL_DENIED', 'TOOL_APPROVAL_EXPIRED', 'TOOL_BASELINE_REQUIRED', 'TOOL_TARGET_REQUIRED']),
+  code: z.enum(['TOOL_NOT_AUTHORIZED', 'TOOL_ARGUMENTS_INCOMPLETE', 'TOOL_ARGUMENTS_INVALID', 'TOOL_SCHEMA_INVALID', 'TOOL_CONTRACT_RETIRED', 'TOOL_APPROVAL_DENIED', 'TOOL_APPROVAL_EXPIRED', 'TOOL_BASELINE_REQUIRED', 'TOOL_TARGET_REQUIRED', 'TOOL_TARGET_AMBIGUOUS']),
   target: z.object({ kind: z.literal('plan'), id: z.string().min(1), title: z.string() }).strict().optional(),
   baseline: z.object({ kind: z.enum(['chapter', 'plan', 'structure']), id: z.string().nullable() }).strict().optional(),
   approval: z.object({ requestId: z.string(), decisionId: z.string(), decisionHash: z.string() }).strict().optional(),
@@ -176,9 +178,10 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
             baseline = target
           }
           if (!code && call.name === 'plan_save' && !args.planId) {
-            const existing = await tx.agentArtifact.findFirst({ where: { title: String(args.title).trim(), artifactType: 'chapterPlan', metadata: { path: ['savedAsPlan'], equals: true },
-              run: { userId: token.userId, novelId: scope.novelId } }, orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }] })
-            if (existing) { code = 'TOOL_TARGET_REQUIRED'; explicitTarget = { kind: 'plan', id: existing.id, title: existing.title } }
+            try {
+              const existing = await findPlanByIdentity(tx, token.userId, scope.novelId, args)
+              if (existing) { code = 'TOOL_TARGET_REQUIRED'; explicitTarget = { kind: 'plan', id: existing.id, title: existing.title } }
+            } catch (error) { if (error instanceof DataAccessError && error.code === 'PLAN_TARGET_AMBIGUOUS') code = 'TOOL_TARGET_AMBIGUOUS'; else throw error }
           }
           if (!code && STRUCTURE_MUTATIONS.some(name => name === call.name)) {
             if (!await readObservedBaseline(tx, token.taskRootId, frame.revision, { kind: 'structure', id: scope.novelId })) {
@@ -212,8 +215,8 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
       input: { callId, args: {}, rejection } })
     const pending = await saveExecutionStateInTransaction(tx, token, { ...cursor, snapshot: { ...frame.state, phase: 'awaiting_operation',
       pendingOperationId: operation.id, nextOperationSequence: frame.state.nextOperationSequence + 1 } })
-    const summary = explicitTarget ? '同名计划已存在，需要明确目标' : baseline ? '需要先读取目标，未执行写入' : code === 'TOOL_APPROVAL_DENIED' ? '用户拒绝本次操作' : code === 'TOOL_APPROVAL_EXPIRED' ? '审批超时，未执行' : code === 'TOOL_NOT_AUTHORIZED' ? '当前任务未授权此工具' : code === 'TOOL_ARGUMENTS_INCOMPLETE' ? '工具参数未生成完整' : code === 'TOOL_CONTRACT_RETIRED' ? '旧协调参数未执行' : code === 'TOOL_SCHEMA_INVALID' ? '参数校验失败' : '参数解析失败'
-    const output = explicitTarget ? `本次未执行。同名计划已存在，planId=${explicitTarget.id}。请先用 plan_read 读取核对，再在 plan_save 中明确传入该 planId 修订；不凭标题覆盖，也不要重复创建。`
+    const summary = code === 'TOOL_TARGET_AMBIGUOUS' ? '同名计划身份不唯一，需要明确目标' : explicitTarget ? '同名计划已存在，需要明确目标' : baseline ? '需要先读取目标，未执行写入' : code === 'TOOL_APPROVAL_DENIED' ? '用户拒绝本次操作' : code === 'TOOL_APPROVAL_EXPIRED' ? '审批超时，未执行' : code === 'TOOL_NOT_AUTHORIZED' ? '当前任务未授权此工具' : code === 'TOOL_ARGUMENTS_INCOMPLETE' ? '工具参数未生成完整' : code === 'TOOL_CONTRACT_RETIRED' ? '旧协调参数未执行' : code === 'TOOL_SCHEMA_INVALID' ? '参数校验失败' : '参数解析失败'
+    const output = code === 'TOOL_TARGET_AMBIGUOUS' ? '本次未执行。相同类型、父大纲和章节目标存在多份同名计划；请从计划清单选择真实planId，读取核对后明确传入planId，未猜选或覆盖。' : explicitTarget ? `本次未执行。同名计划已存在，planId=${explicitTarget.id}。请先用 plan_read 读取核对，再在 plan_save 中明确传入该 planId 修订；不凭标题覆盖，也不要重复创建。`
       : baseline ? `本次未执行，原正文、结构或计划未改动。请先用 ${baseline.kind === 'structure' ? 'volume_list 或 structure_outline' : baseline.kind === 'chapter' ? 'chapter_read' : 'plan_read'} 读取${baseline.id ? `目标 ${baseline.id}` : '当前任务范围内的明确目标'}，再根据保存的读取观察重新发起写入。不能使用其他任务的历史读取代替。`
       : approval ? '本次未执行。审批已拒绝或超时；不得换工具、换窗口或重复发起相同操作绕过用户决定。说明未完成部分，等待明确的新指示。'
       : code === 'TOOL_NOT_AUTHORIZED' ? '本次未执行。只能使用当前任务授权的工具，不得从历史任务或其他窗口恢复权限。'

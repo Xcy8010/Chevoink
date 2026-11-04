@@ -367,7 +367,7 @@ describe.runIf(available)('durable deliverable facts', () => {
       const tools = [chapterReadTool, chapterWriteTool, chapterCreateTool, planSaveTool]
       const calls: { id: string; name: string; arguments: string }[] = []
       const add = (name: string, args: object) => calls.push({ id: `call-${calls.length}`, name, arguments: JSON.stringify(args) })
-      if (scenario.startsWith('plan')) add('plan_save', { title: '交付计划', content: '计划正文' })
+      if (scenario.startsWith('plan')) add('plan_save', { title: '交付计划', content: '计划正文', planKind: 'outline' })
       else if (scenario === 'empty-create') add('chapter_create', { title: '新空章' })
       else if (scenario === 'create-write-retry') {
         add('chapter_create', { title: '新章', content: '新正文' })

@@ -1,3 +1,5 @@
+import { planAlignmentSchema, readPlanAlignment, renderPlanAlignmentInstructions, type PlanAlignment } from './plan-alignment.js'
+import { assertWritingPlanContextCurrent, writingPlanContextHash } from './writing-plan-context.js'
 import { Prisma } from '@prisma/client'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
@@ -24,12 +26,13 @@ const textHash = (text: string) => createHash('sha256').update(text).digest('hex
 const findingSchema = z.object({ signal: continuityFindingInputSchema.shape.signal, severity: continuityFindingInputSchema.shape.severity,
   explanation: z.string().min(1).max(1000), suggestion: z.string().min(1).max(1000),
   evidence: z.array(z.object({ sourceId: z.string().min(1).max(96) }).strict()).min(1).max(8) }).strict()
-export const continuityReportResponseSchema = z.object({ findings: z.array(findingSchema) }).strict()
+export const continuityReportResponseSchema = z.object({ findings: z.array(findingSchema), planAlignment: planAlignmentSchema.optional() }).strict()
 export type ContinuityOpinion = z.infer<typeof findingSchema>
 type LocatedFinding = ContinuityFindingInput & { id: string; explanation: string; startOffset: number; endOffset: number;
   references: Array<{ sourceId: string; chapterId: string; revision: number; source: 'current' | 'previous'; start: number; end: number; quote: string }> }
 export type ContinuityReport = { version: 1; id: string; taskId: string; chapterId: string; revision: number; contextHash: string;
   nativeOperationId?: string;
+  planAlignment?: PlanAlignment;
   focus?: string;
   sourceVersions?: Array<{ chapterId: string; revision: number; contentHash: string }>;
   contentHash: string; complete: boolean; findings: LocatedFinding[]; opinions: ContinuityOpinion[]; unlocatedIndexes: number[];
@@ -106,12 +109,13 @@ export async function buildContinuitySnapshot(ctx: Pick<ToolContext, 'userId' | 
       ...(args.compilationId ? { id: args.compilationId } : {}), status: { in: ['active', 'completed'] } }, orderBy: { createdAt: 'desc' } }),
   ])
   if (args.compilationId && !compilation) throw new DataAccessError(409, 'COMPILATION_NOT_FOUND', '编译任务不属于当前章节与作者任务。')
+  const planContext = compilation ? await assertWritingPlanContextCurrent(db, { userId: ctx.userId, novelId: ctx.novelId }, compilation.preparedContext) : null
   const sources = [chapter, ...previous].map(source => ({ chapterId: source.id, revision: source.revision, orderIndex: source.orderIndex,
     title: source.title, source: source.id === chapter.id ? 'current' as const : 'previous' as const, content: source.content,
     table: buildQualityEvidenceSources({ userId: ctx.userId, novelId: ctx.novelId, chapterId: source.id, chapterRevision: source.revision }, source.content) }))
   const contextHash = runtimeJson({ taskId: original.taskId, chapterId, sources: sources.map(source => ({ chapterId: source.chapterId,
-    revision: source.revision, orderIndex: source.orderIndex, contentHash: source.table.contentHash })), authorRequest: original.prompt, focus: args.focus ?? null }).hash
-  return { chapter, previous, compilation, original, runIds, sources, contextHash }
+    revision: source.revision, orderIndex: source.orderIndex, contentHash: source.table.contentHash })), authorRequest: original.prompt, focus: args.focus ?? null, ...(planContext ? { planContextHash: writingPlanContextHash(planContext) } : {}) }).hash
+  return { chapter, previous, compilation, original, runIds, sources, contextHash, planContext }
 }
 
 /** Only an actual table entry can supply evidence; explanations are opinions. */
@@ -150,8 +154,8 @@ const criticSystem = `你是中文小说连续性编辑。完整阅读本章和�
 只输出一个完整 findings JSON 数据对象，无问题时输出 {"findings":[]}。不输出审查过程、输入正文、证据表或下面的 JSON Schema；Schema 仅约束报告格式，不是待填写或回显的报告内容。
 报告须满足以下全部约束：${JSON.stringify(z.toJSONSchema(continuityReportResponseSchema, { io: 'input' }))}`
 
-export function continuityReviewRequest(snapshot: Pick<ContinuitySnapshot, 'chapter' | 'sources' | 'original'>, focus?: string) {
-  return { system: criticSystem, content: JSON.stringify({ authorRequest: snapshot.original.prompt, focus: focus ?? null,
+export function continuityReviewRequest(snapshot: Pick<ContinuitySnapshot, 'chapter' | 'sources' | 'original'> & Partial<Pick<ContinuitySnapshot, 'planContext'>>, focus?: string) {
+  return { system: criticSystem + (snapshot.planContext ? `\n${renderPlanAlignmentInstructions(snapshot.planContext)}` : ''), content: JSON.stringify({ ...(snapshot.planContext ? { planContext: snapshot.planContext } : {}), authorRequest: snapshot.original.prompt, focus: focus ?? null,
     currentChapter: snapshot.chapter.id, sources: snapshot.sources.map(source => ({ chapterId: source.chapterId, revision: source.revision,
       orderIndex: source.orderIndex, source: source.source, content: source.content, evidence: renderQualityEvidenceSources(source.table) })) }) }
 }
@@ -199,8 +203,10 @@ export async function bindContinuityReport(tx: Prisma.TransactionClient, snapsho
 }
 
 function reportResult(snapshot: ContinuitySnapshot, report: ContinuityReport, cached = false): ToolResult {
-  const errors = report.findings.filter(finding => finding.severity === 'error').length, warnings = report.findings.length - errors
-  return { ...(report.complete && report.billingKnown ? {} : { outcome: 'failed' as const, failureCode: report.billingKnown ? 'CONTINUITY_REPORT_INCOMPLETE' : 'AI_PROVIDER_BILLING_UNCONFIRMED' }),
+  const alignmentFindings = report.planAlignment?.findings ?? []
+  const errors = report.findings.filter(finding => finding.severity === 'error').length + (report.planAlignment?.status === 'reviewed' ? alignmentFindings.filter(finding => finding.severity === 'error').length : 0), warnings = report.findings.filter(finding => finding.severity === 'warning').length + (report.planAlignment?.status === 'reviewed' ? alignmentFindings.filter(finding => finding.severity === 'warning').length : 0)
+  const alignmentUnknown = !!snapshot.planContext && report.planAlignment?.status !== 'reviewed'
+  return { ...(report.complete && report.billingKnown && !alignmentUnknown ? {} : { outcome: 'failed' as const, failureCode: !report.billingKnown ? 'AI_PROVIDER_BILLING_UNCONFIRMED' : alignmentUnknown ? 'PLAN_ALIGNMENT_UNVERIFIED' : 'CONTINUITY_REPORT_INCOMPLETE' }),
     reviewCompleted: report.complete, reviewOutcome: !report.billingKnown ? 'provider_unresolved' : !report.complete ? 'evidence_repair_required' : report.findings.length ? 'decision_required' : 'complete',
     reviewRequestFinished: report.billingKnown ? { version: 1, chapterId: report.chapterId, revision: report.revision, contentHash: report.contentHash } : undefined,
     summary: report.complete ? `连续性检查完成 · ${errors} 错误 ${warnings} 警告` : '连续性报告未完成',
@@ -209,7 +215,7 @@ function reportResult(snapshot: ContinuitySnapshot, report: ContinuityReport, ca
       : `有 ${report.unlocatedIndexes.length} 条意见未定位，报告未完成。`}
 ${report.findings.map(finding => `[${finding.id}/${finding.severity}/${finding.signal}] ${finding.startOffset >= 0 ? `本章范围[${finding.startOffset},${finding.endOffset})` : '前文意见'}；原文：${JSON.stringify(finding.evidence)}\n证据：${JSON.stringify(finding.references)}\n解释：${finding.explanation}\n建议：${finding.suggestion}`).join('\n')}
 ${report.unlocatedIndexes.map(index => `未定位意见[${index}]：${JSON.stringify(report.opinions[index])}`).join('\n')}
-${report.retainedProposals?.length ? `修订保留建议：${JSON.stringify(report.retainedProposals.map(item => ({ source: 'continuity', reportId: report.id, ...item })))}` : ''}
+提纲一致性：${snapshot.planContext ? report.planAlignment?.status ?? 'unknown' : '未绑定提纲'}；${JSON.stringify(alignmentFindings)}${alignmentUnknown ? '；提纲语义复核尚未取得可核对的完整结果，未当作通过；不要原样重复收费请求，先核对保存的报告与原作者检查授权。' : ''}\n${report.retainedProposals?.length ? `修订保留建议：${JSON.stringify(report.retainedProposals.map(item => ({ source: 'continuity', reportId: report.id, ...item })))}` : ''}
 ${report.repairUnresolved?.length ? `自动修订仍待核对（未当作已处理或已修复）：${JSON.stringify(report.repairUnresolved)}` : ''}
 ${report.repairFailure ? `报告已取得，自动修订未应用：${report.repairFailure}` : ''}`,
     display: { kind: 'storyCompiler', compilationId: snapshot.compilation?.id ?? '', phase: errors ? 'repair' : 'check', title: '连续性检查',
@@ -409,7 +415,9 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
       if (lastProviderComplete) opinions = correctContinuitySourceIds(opinions, bound.unlocatedIndexes, corrected)
       bound = bindContinuityOpinions(opinions, snapshot.sources)
     }
-    report = { ...report, opinions, ...bound, complete: parsed && !bound.unlocatedIndexes.length && report.billingKnown }
+    const alignmentRaw = report.rawResponses.map((raw, index) => ({ raw, index })).reverse().find(({ raw, index }) => !report.incompleteResponses?.includes(index) && (() => { try { return !!parseContinuityReportEnvelope(raw).record?.planAlignment } catch { return false } })())?.raw
+    const planAlignment = snapshot.planContext ? readPlanAlignment(alignmentRaw ?? '', snapshot.planContext, snapshot.sources) : undefined
+    report = { ...report, ...(planAlignment ? { planAlignment } : {}), opinions, ...bound, complete: parsed && !bound.unlocatedIndexes.length && report.billingKnown }
     await saveReport(ctx, args, snapshot, report)
     return finishContinuityReview(ctx, args, snapshot, report, { ...options, dispatch, nativeOperationId: options.resumeKnownRequest })
   } catch (error) {

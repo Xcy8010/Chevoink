@@ -1,3 +1,4 @@
+import type { PlanMetadataPatch } from '../../../../shared/contracts/novel-plans'
 import { useEffect, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
@@ -84,6 +85,7 @@ type ImmersiveComposerProps = {
   onOpenVolumeSettings?: (volumeId: string) => void
   /** 计划改名（计划设置面板内） */
   onRenamePlan: (planId: string, title: string) => void
+  onSavePlanSettings?: (planId: string, patch: PlanMetadataPatch & { title?: string }) => Promise<void>
   onSelectCatalog: () => void
   onCreateChapter: () => void
   onCreatePlan: () => void
@@ -157,6 +159,7 @@ export default function ImmersiveComposer({
   onOpenChapterSettings,
   onOpenVolumeSettings,
   onRenamePlan,
+  onSavePlanSettings,
   onSelectCatalog,
   onCreateChapter,
   onCreatePlan,
@@ -1164,7 +1167,11 @@ export default function ImmersiveComposer({
       ) : null}
       {planSettingsPlan ? (
         <PlanSettingsPanel
+          key={`${currentNovelId}:${planSettingsPlan.id}`}
           plan={planSettingsPlan}
+          plans={savedPlans}
+          chapters={chapters}
+          onSave={onSavePlanSettings ? patch => onSavePlanSettings(planSettingsPlan.id, patch) : undefined}
           onRename={(title) => onRenamePlan(planSettingsPlan.id, title)}
           onRequestDelete={() => {
             setPlanSettingsPlanId(null)
