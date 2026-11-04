@@ -5,6 +5,11 @@ import { ledgerLabel } from '../../src/features/account/ledger-label.js'
 import type { CreditLedgerItem } from '../../shared/contracts/credits.js'
 
 describe('user-visible Credits formatting', () => {
+  it('labels administrator reward increases and decreases without exposing the internal source code', () => {
+    const entry = { kind: 'admin_adjustment', sourceType: 'admin_bonus_adjustment', delta: 10 } as CreditLedgerItem
+    expect(ledgerLabel(entry)).toBe('管理员奖励调整')
+    expect(ledgerLabel({ ...entry, delta: -10 })).toBe('管理员奖励调整')
+  })
   it('shows a dynamic product name with a compatible fallback for historical missing configuration', () => {
     const entry = { kind: 'usage', sourceType: 'model_tokens', modelTier: 'builtin_0123456789abcdef', modelLabel: '动态名称' } as CreditLedgerItem
     expect(ledgerLabel(entry)).toBe('动态名称')

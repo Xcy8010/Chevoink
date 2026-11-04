@@ -11,8 +11,11 @@ export default function AdminAnalytics({ scope, period: controlledPeriod, view =
   const [localPeriod, setPeriod] = useState<AdminAnalyticsPeriod>('day')
   const period = controlledPeriod ?? localPeriod
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [selected, setSelected] = useState<string | null>(null)
   const query = useQuery({ queryKey: ['admin', 'analytics', scope, period], queryFn: () => requestJson<AdminAnalyticsPayload>(`/api/admin/analytics?period=${period}&scope=${scope}`), staleTime: 60000 })
   const data = query.data
+  const metrics = data?.metrics.filter(metric => view !== 'tools' || ['tools', 'toolSuccess', 'toolFailed'].includes(metric.key)) ?? []
+  const activeMetric = metrics.find(metric => metric.key === selected) ?? metrics[0]
   const total = (key: string) => data?.metrics.find(metric => metric.key === key)?.total ?? 0
   return (
     <section className="mb-6 space-y-4" aria-label={scope === 'dashboard' ? '平台统计' : '创作统计'}>
@@ -22,22 +25,23 @@ export default function AdminAnalytics({ scope, period: controlledPeriod, view =
         </div> : null}
         <button type="button" disabled={query.isFetching} onClick={() => void query.refetch()} className="min-h-11 rounded-lg px-3 text-sm disabled:opacity-50">刷新统计</button>
       </div>
-      <p className="text-xs leading-6 text-[var(--text-secondary)]">{period === 'day' ? '本日 · 按小时' : period === 'week' ? '本周 · 按天（周一起）' : '本月 · 按天'} · UTC+8 · 数值为范围合计，当前周期尚未结束。点击卡片展开，仅统计本期起点至当前时间，不填充未来时段。</p>
+
       {query.isPending ? <p role="status">正在加载统计…</p> : query.isError ? <p role="alert">统计加载失败，请点击刷新重试。</p> : data ? <>
         {scope === 'creation' ? <div className="grid gap-3 sm:grid-cols-2">
           <div className="rounded-xl border border-[var(--border-default)] p-4">执行成功率 <strong>{rate(total('completed'), total('failed'))}</strong><p className="mt-2 text-xs text-[var(--text-secondary)]">范围内发起执行的当前状态：完成 ÷（完成 + 失败）。暂停、待审批及进行中不计入分母；不是会话完成率。</p></div>
           <div className="rounded-xl border border-[var(--border-default)] p-4">工具成功率 <strong>{rate(total('toolSuccess'), total('toolFailed'))}</strong><p className="mt-2 text-xs text-[var(--text-secondary)]">成功 ÷ 已知结果。未成功含拒绝、保护性拦截，不等同系统故障。未知结果 {format(total('tools') - total('toolSuccess') - total('toolFailed'))} 次。</p></div>
-        </div> : <p className="text-xs leading-6 text-[var(--text-secondary)]">作品按保留记录统计，发布按发布时间；邀请为已兑换的唯一受邀用户。Token 为已记录用量（不含未知部分），Credits 为调用计费毛额，未扣后续退款。</p>}
-        <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          {data.metrics.filter(metric => view !== 'tools' || ['tools', 'toolSuccess', 'toolFailed'].includes(metric.key)).map(metric => <div key={metric.key} className={`min-w-0 rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] ${expanded === metric.key ? 'sm:col-span-2 xl:col-span-4' : ''}`}>
-            <button type="button" className="w-full rounded-xl p-4 text-left focus-visible:outline focus-visible:outline-2" aria-expanded={expanded === metric.key} onClick={() => setExpanded(expanded === metric.key ? null : metric.key)}>
-              <span className="flex justify-between gap-2 text-sm">{metric.label}<span>{expanded === metric.key ? '收起' : '展开'}</span></span>
-              <strong className="mt-2 block break-all text-2xl tabular-nums">{metric.unavailable ? '未核定' : format(metric.total)}</strong>
-              {!metric.unavailable && <TrendLineChart labels={data.labels.map(label => period === 'day' ? label.slice(11) : label.slice(5))} values={metric.values} />}
-            </button>
-            {expanded === metric.key ? <div className="max-h-72 overflow-auto border-t border-[var(--border-default)] p-4"><table className="w-full text-sm"><caption className="sr-only">{metric.label}分期数据</caption><thead><tr><th className="text-left">时间（UTC+8）</th><th className="text-right">数量</th></tr></thead><tbody>{data.labels.map((label, i) => <tr key={label} className="border-t border-[var(--border-default)]"><td className="py-3">{label}</td><td className="text-right tabular-nums">{metric.unavailable ? '未核定' : format(metric.values[i])}</td></tr>)}</tbody></table></div> : null}
-          </div>)}
+        </div> : null}
+        <div className="grid min-w-0 grid-cols-2 gap-3 xl:grid-cols-4">
+          {metrics.map((metric, index) => <button key={metric.key} type="button" className="admin-metric-card min-w-0 rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-4 text-left" aria-pressed={activeMetric?.key === metric.key} aria-expanded={expanded === metric.key} onClick={() => { setSelected(metric.key); setExpanded(expanded === metric.key ? null : metric.key) }}>
+            <span className="flex items-center gap-2 text-xs text-[var(--text-secondary)]"><i className="h-2 w-2 shrink-0 rounded-full" style={{ background: `var(--chart-${index % 4 + 1})` }} />{metric.label}</span>
+            <strong className="mt-3 block break-all text-2xl font-semibold tabular-nums">{metric.unavailable ? '未核定' : format(metric.total)}</strong>
+          </button>)}
         </div>
+        {activeMetric ? <div className="rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-4 sm:p-6">
+          <div className="mb-5 flex items-center justify-between gap-3"><h3 className="font-semibold">{activeMetric.label}趋势</h3><span className="text-xs text-[var(--text-tertiary)]">{period === 'day' ? '按小时' : '按天'} · UTC+8</span></div>
+          {activeMetric.unavailable ? <div className="admin-chart-empty">该指标尚未核定</div> : <TrendLineChart labels={data.labels.map(label => period === 'day' ? label.slice(11) : label.slice(5))} values={activeMetric.values} label={activeMetric.label} />}
+          {expanded === activeMetric.key ? <div className="mt-4 max-h-72 overflow-auto border-t border-[var(--border-default)] pt-4"><table className="w-full text-sm"><caption className="sr-only">{activeMetric.label}分期数据</caption><thead><tr><th className="text-left">时间（UTC+8）</th><th className="text-right">数量</th></tr></thead><tbody>{data.labels.map((label, i) => <tr key={label} className="border-t border-[var(--border-default)]"><td className="py-3">{label}</td><td className="text-right tabular-nums">{activeMetric.unavailable ? '未核定' : format(activeMetric.values[i])}</td></tr>)}</tbody></table></div> : null}
+        </div> : <div className="admin-chart-empty rounded-xl border border-dashed border-[var(--border-default)]">该时段暂无统计指标</div>}
         {data.imports && view !== 'stats' ? <div className="rounded-xl border border-[var(--border-default)] p-4 text-sm">
           <h2 className="font-semibold">作品导入</h2>
           <p className="my-3 text-xs leading-6 text-[var(--text-secondary)]">本期创建任务的当前状态。预览产出率 = 已生成预览 ÷（已生成预览 + 预览前失败）；不代表文字完整或识别准确率。取消不计为解析失败。提交数按任务去重，不把尚待确认算失败。</p>
@@ -56,6 +60,9 @@ export default function AdminAnalytics({ scope, period: controlledPeriod, view =
           <p className="my-3 text-xs text-[var(--text-secondary)]">按未成功次数排序，最多 30 项。每行保留样本量；返回数不含尚未返回的调用。</p>
           {!data.tools.length ? <p className="py-6 text-center">该时段暂无工具返回</p> : <ol className="divide-y divide-[var(--border-default)]">{data.tools.map((tool, i) => <li key={tool.name} className="py-3"><div className="flex flex-wrap justify-between gap-2"><span className="break-all font-medium">{i + 1}. {tool.name}</span><span className="text-sm">成功率 {rate(tool.succeeded, tool.failed)}</span></div><div className="my-2 h-1.5 overflow-hidden rounded-full bg-[var(--surface-muted)]"><div className="h-full bg-[var(--color-error)]" style={{ width: `${tool.failed / (tool.calls || 1) * 100}%` }} /></div><p className="text-xs text-[var(--text-secondary)]">返回 {tool.calls} · 成功 {tool.succeeded} · 未成功 {tool.failed} · 未知 {tool.unknown}</p></li>)}</ol>}
         </div> : null}
+        <details className="rounded-lg border border-[var(--border-default)] bg-[var(--surface-default)] px-4 text-xs text-[var(--text-secondary)]"><summary className="flex min-h-11 cursor-pointer items-center">统计口径</summary><div className="space-y-2 pb-4"><p className="text-xs leading-6 text-[var(--text-secondary)]">{period === 'day' ? '本日 · 按小时' : period === 'week' ? '本周 · 按天（周一起）' : '本月 · 按天'} · UTC+8 · 数值为范围合计，当前周期尚未结束。点击卡片展开，仅统计本期起点至当前时间，不填充未来时段。</p>
+          <p className="leading-6">{scope === 'dashboard' ? '作品按保留记录统计，发布按发布时间；邀请为已兑换的唯一受邀用户。Token 为已记录用量（不含未知部分），Credits 为调用计费毛额，未扣后续退款。' : scope === 'credits' ? 'Credits 为调用计费毛额，未扣后续退款；用量缺失部分保持未知。' : scope === 'cost' ? 'Token 为已记录用量（不含未知部分）。成本为公开价估算，非供应商账单；缺价格或用量的部分保持未知。' : '按范围内发起执行的当前状态统计，工具未知结果不计为成功。'}</p>
+        </div></details>
         <p className="text-xs text-[var(--text-tertiary)]">快照时间：{new Date(data.to).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}</p>
       </> : null}
     </section>

@@ -6,6 +6,8 @@ import { modelPromotionSchema } from '../../shared/model-promotion.js'
 import { createRateCard, transitionRateCard, listRateCards, rateCardEvidenceSchema } from '../lib/billing/rate-cards.js'
 import { itemizedTokenPriceSchema } from '../lib/billing/token-price.js'
 import { z } from 'zod'
+import { adminCreditAdjustmentSchema } from '../../shared/contracts/admin-credit-adjustment.js'
+import { adjustAdminBonusCredits } from '../lib/admin-credit-adjustment.js'
 import { webToolProtocolSchema } from '../../shared/contracts/web-tool.js'
 import { adminModelKindSchema } from '../../shared/contracts/admin-model-lifecycle.js'
 import { getAdminModelLifecyclePreview, archiveAdminModel, restoreAdminModel } from '../lib/admin-model-lifecycle.js'
@@ -1066,6 +1068,20 @@ router.get('/credits', async (req: Request, res: Response): Promise<void> => {
     await requireAdmin(req)
     const query = parseBody(z.object({ search: z.string().trim().max(160).optional(), page: z.coerce.number().int().min(1).max(1000000).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(20) }), req.query, '分页或搜索条件不正确。')
     res.status(200).json(buildSuccess(requestId, await getAdminCreditsManagement(query.search, { page: query.page, pageSize: query.pageSize })))
+  } catch (error) {
+    sendRouteError(res, requestId, error)
+  }
+})
+
+router.post('/credits/users/:userId/adjust-bonus', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try {
+    const admin = await requireAdmin(req)
+    requireSuperAdmin(admin)
+    const body = parseBody(adminCreditAdjustmentSchema.safeExtend({ captchaId: z.string().trim().min(1), captchaAnswer: z.string().trim().min(1), confirmation: z.literal('ADJUST_CREDITS') }).strict(), req.body, '请输入有效的奖励金额、调整原因并完成确认。')
+    const userId = parseBody(z.string().trim().min(1).max(64), req.params.userId, '用户编号无效。')
+    verifyAuthCaptchaChallenge(body.captchaId, body.captchaAnswer)
+    res.status(200).json(buildSuccess(requestId, await adjustAdminBonusCredits(admin.id, userId, body, getRequestIp(req))))
   } catch (error) {
     sendRouteError(res, requestId, error)
   }

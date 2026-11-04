@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, LayoutDashboard, Menu, Search, Users, Workflow, Pin, X } from 'lucide-react'
+import { BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, LayoutDashboard, Menu, Search, Users, Workflow, Pin, X, FileText, MessageSquare, CreditCard, Activity, Settings, Shield, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import Button from '@/components/ui/Button'
 import TextInput from './components/AdminTextInput'
 import { useToast } from '@/components/ui/toast-context'
@@ -17,6 +17,7 @@ import { clearAdminModelHistoryDrafts } from './components/AdminModelDraftRecove
 
 let draftSessionOwner: string | null = null
 const scrollPositions = new Map<string, number>()
+const pageIcons: Record<string, typeof Users> = { '/admin/users': Users, '/admin/credits': CreditCard, '/admin/novels': BookOpen, '/admin/posts': MessageSquare, '/admin/comments': MessageSquare, '/admin/feedback': MessageSquare, '/admin/messages': MessageSquare, '/admin/creation-records': Activity, '/admin/evals': Activity, '/admin/craft': FileText, '/admin/models': Workflow, '/admin/tokens': Activity, '/admin/settings': Settings, '/admin/logs': Shield }
 const mobileItems = [
   { to: '/admin', label: '总览', icon: LayoutDashboard },
   { to: '/admin/users', label: '用户', icon: Users },
@@ -30,6 +31,7 @@ export default function AdminLayout({ children }: { children?: ReactNode }) {
   const location = useLocation()
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('chevoink-admin-sidebar-collapsed') === 'true')
   const [search, setSearch] = useState('')
   const [pinned, setPinned] = useState(() => localStorage.getItem('chevoink-admin-model-pin') !== 'false')
   const mobileDialogRef = useAdminDialog(moreOpen, () => setMoreOpen(false))
@@ -100,26 +102,26 @@ export default function AdminLayout({ children }: { children?: ReactNode }) {
     finally { setIsLoggingOut(false) }
   }
   const navigation = (mobile = false) => <>
-    <NavLink to="/admin" end className="admin-nav-link" onClick={() => setMoreOpen(false)}>总览</NavLink>
-    {pinned ? <NavLink to="/admin/models" className="admin-nav-link" onClick={() => setMoreOpen(false)}>模型中心 <span className="ml-auto text-xs text-[var(--text-secondary)]">常用</span></NavLink> : null}
+    <NavLink to="/admin" end className="admin-nav-link" onClick={() => setMoreOpen(false)}><LayoutDashboard size={17} /><span>总览</span></NavLink>
+    {pinned ? <NavLink to="/admin/models" className="admin-nav-link" onClick={() => setMoreOpen(false)}><Workflow size={17} />模型中心 <span className="ml-auto text-xs text-[var(--text-secondary)]">常用</span></NavLink> : null}
     <button type="button" className="flex min-h-11 w-full items-center gap-2 px-3 text-xs text-[var(--text-tertiary)]" onClick={() => { setPinned(!pinned); localStorage.setItem('chevoink-admin-model-pin', String(!pinned)) }}><Pin size={13} />{pinned ? '取消固定模型中心' : '固定模型中心'}</button>
     {adminNavigation.map(group => <section key={group.label} className="mt-3">
       <button type="button" className="admin-nav-group" aria-expanded={mobile || expanded.includes(group.label)} onClick={() => setExpanded(value => value.includes(group.label) ? value.filter(label => label !== group.label) : [...value, group.label])}>
         {group.label}<ChevronDown size={14} className={expanded.includes(group.label) || mobile ? '' : '-rotate-90'} />
       </button>
-      {mobile || expanded.includes(group.label) ? <div className="space-y-1">{group.items.map(item => <NavLink key={item.to} to={item.to} className="admin-nav-link" onClick={() => setMoreOpen(false)}>{item.label}</NavLink>)}</div> : null}
+      {mobile || expanded.includes(group.label) ? <div className="space-y-1">{group.items.map(item => { const Icon = pageIcons[item.to]; return <NavLink key={item.to} to={item.to} className="admin-nav-link" onClick={() => setMoreOpen(false)}><Icon size={17} />{item.label}</NavLink> })}</div> : null}
     </section>)}
   </>
   return <div className="admin-workspace flex h-[100dvh] overflow-hidden bg-[var(--app-bg)] text-[var(--text-primary)]">
     <a href="#admin-main" className="admin-skip-link">跳到主要内容</a>
-    <aside className="admin-sidebar hidden h-full w-[248px] shrink-0 flex-col border-r border-[var(--border-default)] bg-[var(--surface-default)] md:flex">
-      <Link to="/admin" className="flex min-h-[80px] items-center gap-3 px-6"><img src="/favicon.png" alt="启创墨域 Logo" width={44} height={44} className="h-11 w-11 shrink-0 rounded-md object-contain" /><span><strong className="block text-base">启创墨域</strong><span className="text-xs text-[var(--text-tertiary)]">管理工作台</span></span></Link>
+    <aside style={{ visibility: sidebarCollapsed ? 'hidden' : undefined }} className={cn(sidebarCollapsed ? 'w-0 overflow-hidden border-r-0' : 'w-[248px]', "admin-sidebar hidden h-full shrink-0 flex-col border-r border-[var(--border-default)] bg-[var(--surface-default)] md:flex")}>
+      <Link to="/admin" className="flex min-h-[72px] items-center gap-3 px-6"><img src="/favicon.png" alt="启创墨域 Logo" width={44} height={44} className="h-11 w-11 shrink-0 rounded-md object-contain" /><span><strong className="block text-base">启创墨域</strong><span className="text-xs text-[var(--text-tertiary)]">管理工作台</span></span></Link>
       <nav aria-label="后台业务导航" className="min-h-0 flex-1 overflow-y-auto px-4 pb-5">{navigation()}</nav>
-      <div className="border-t border-[var(--border-default)] px-6 py-4 text-xs text-[var(--text-tertiary)]">{admin.isSuperAdmin ? '超级管理员' : '管理员'} · 受控管理会话</div>
+      <div className="border-t border-[var(--border-default)] px-6 py-4 text-xs text-[var(--text-tertiary)]">{admin.isSuperAdmin ? '超级管理员' : '管理员'} · 管理控制台</div>
     </aside>
     <div className="flex min-w-0 flex-1 flex-col">
-      <header className="relative z-40 flex min-h-[72px] shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[var(--border-default)] bg-[var(--surface-default)] px-4 py-2 md:px-8">
-        <div className="flex items-center gap-2 text-sm"><span className="hidden text-[var(--text-tertiary)] lg:inline">{currentGroup ?? '工作台'} /</span><span className="font-medium">{currentPage.label}</span></div>
+      <header className="relative z-40 flex min-h-[64px] shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[var(--border-default)] bg-[var(--surface-default)] px-4 py-2 md:px-8">
+        <div className="flex items-center gap-2 text-sm"><button type="button" aria-label={sidebarCollapsed ? '展开侧栏' : '收起侧栏'} aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed(value => { localStorage.setItem('chevoink-admin-sidebar-collapsed', String(!value)); return !value })} className="hidden h-11 w-11 items-center justify-center rounded-lg hover:bg-[var(--surface-muted)] md:inline-flex">{sidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}</button><span className="hidden text-[var(--text-tertiary)] lg:inline">{currentGroup ?? '工作台'} /</span><span className="font-medium">{currentPage.label}</span></div>
         <div className="flex items-center gap-2">
           <div className="relative"><TextInput aria-label="搜索后台页面及操作" value={search} onChange={event => setSearch(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setSearch('') }} placeholder="搜索页面与操作" leading={<Search size={16} />} className="w-40 bg-[var(--surface-muted)] sm:w-60" />
             {search ? <div role="region" aria-label="页面搜索结果" className="absolute right-0 top-full z-50 mt-2 max-h-[65dvh] w-[min(320px,90vw)] overflow-y-auto rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-2 shadow-lg">{searchAdminPages(search).length ? searchAdminPages(search).map(item => <Link key={item.to} to={item.to} onClick={() => setSearch('')} className="flex min-h-11 items-center rounded-lg px-3 text-sm hover:bg-[var(--surface-muted)]">{item.label}</Link>) : <p role="status" className="p-3 text-sm">没有匹配页面</p>}</div> : null}
@@ -128,7 +130,7 @@ export default function AdminLayout({ children }: { children?: ReactNode }) {
           <details className="relative shrink-0"><summary aria-label="管理员账号菜单" className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-lg border border-[var(--border-default)] px-3 text-sm"><span className="max-w-24 truncate">{admin.nickname || '管理员'}</span><ChevronDown size={14} /></summary><div className="absolute right-0 z-50 mt-2 w-44 rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-2 shadow-lg"><button type="button" className="admin-menu-item" onClick={toggleTheme}>{theme === 'light' ? '切换深色主题' : '切换浅色主题'}</button><Link to="/" className="admin-menu-item">返回主站</Link><button type="button" className="admin-menu-item" disabled={isLoggingOut} onClick={() => void logout()}>{isLoggingOut ? '正在退出…' : '退出登录'}</button></div></details>
         </div>
       </header>
-      <main id="admin-main" ref={mainRef} tabIndex={-1} className="min-h-0 flex-1 overflow-y-auto overscroll-contain"><div ref={contentRef} className="mx-auto w-full max-w-[1440px] px-4 pb-[calc(96px+var(--safe-bottom))] pt-6 md:px-8 md:pb-10 md:pt-8">{children ?? <Outlet />}</div></main>
+      <main id="admin-main" ref={mainRef} tabIndex={-1} className="min-h-0 flex-1 overflow-y-auto overscroll-contain"><div ref={contentRef} className="mx-auto w-full max-w-[1680px] px-4 pb-[calc(96px+var(--safe-bottom))] pt-6 md:px-8 md:pb-10 md:pt-8">{children ?? <Outlet />}</div></main>
       <nav aria-label="手机后台导航" className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-5 border-t border-[var(--border-default)] bg-[var(--surface-default)] pb-[var(--safe-bottom)] md:hidden">{mobileItems.map(item => <NavLink key={item.to} to={item.to} end={item.to === '/admin'} className={({ isActive }) => cn('flex min-h-16 flex-col items-center justify-center gap-1 text-xs', isActive ? 'font-semibold text-[var(--color-brand)]' : 'text-[var(--text-secondary)]')}><item.icon size={20} />{item.label}</NavLink>)}<button type="button" aria-expanded={moreOpen} onClick={() => setMoreOpen(true)} className="flex min-h-16 flex-col items-center justify-center gap-1 text-xs"><Menu size={20} />全部</button></nav>
       {moreOpen ? <div ref={mobileDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="全部管理页面" className="fixed inset-0 z-[100] flex flex-col bg-[var(--surface-default)] md:hidden"><div className="flex min-h-16 items-center justify-between border-b border-[var(--border-default)] px-5"><h2 className="text-lg font-semibold">全部管理页面</h2><button type="button" aria-label="关闭全部管理页面" onClick={() => setMoreOpen(false)} className="flex h-11 w-11 items-center justify-center"><X size={20} /></button></div><nav aria-label="全部业务导航" className="overflow-y-auto p-5 pb-[calc(24px+var(--safe-bottom))]">{navigation(true)}</nav></div> : null}
     </div>
@@ -139,14 +141,14 @@ export function AdminToolbar({ children }: { children: ReactNode }) {
   return <div className="admin-toolbar mb-5 flex flex-wrap items-center gap-3 border-b border-[var(--border-default)] pb-4" aria-label="列表搜索与筛选">{children}</div>
 }
 export function AdminSectionTabs<T extends string>({ tabs, value, onChange, label = '页面分区' }: { tabs: readonly { id: T; label: string }[]; value: T; onChange: (value: T) => void; label?: string }) {
-  return <nav aria-label={label} className="mb-5 flex max-w-full gap-1 overflow-x-auto border-b border-[var(--border-default)]">{tabs.map(tab => <button key={tab.id} type="button" aria-current={value === tab.id ? 'page' : undefined} onClick={() => onChange(tab.id)} className={cn('min-h-11 shrink-0 border-b-2 px-4 text-sm', value === tab.id ? 'border-[var(--color-brand)] font-semibold text-[var(--color-brand)]' : 'border-transparent text-[var(--text-secondary)]')}>{tab.label}</button>)}</nav>
+  return <nav aria-label={label} className="admin-section-tabs mb-5 flex max-w-full gap-1 overflow-x-auto border-b border-[var(--border-default)]">{tabs.map(tab => <button key={tab.id} type="button" aria-current={value === tab.id ? 'page' : undefined} onClick={() => onChange(tab.id)} className={cn('min-h-11 shrink-0 border-b-2 px-4 text-sm', value === tab.id ? 'border-[var(--color-brand)] font-semibold text-[var(--color-brand)]' : 'border-transparent text-[var(--text-secondary)]')}>{tab.label}</button>)}</nav>
 }
 
 /* ---------------- 页头 ---------------- */
 
 export function AdminPageHeader({ title, description, extra }: { title: string; description?: string; extra?: ReactNode }) {
   return (
-    <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+    <div className="admin-page-header mb-5 flex flex-wrap items-center justify-between gap-3">
       <div>
         <h1 className="text-lg font-semibold tracking-[-0.01em]">{title}</h1>
         {description ? <p className="mt-1 text-sm text-[var(--text-secondary)]">{description}</p> : null}
@@ -399,7 +401,7 @@ export function AdminConfirmDialog({
 
 export function AdminPanelState({ state, children }: { state: 'loading' | 'error' | 'empty' | 'ready'; children?: ReactNode }) {
   if (state === 'loading') {
-    return <div role="status" aria-live="polite" className="py-16 text-center text-sm text-[var(--text-secondary)]">加载中…</div>
+    return <div role="status" aria-live="polite" className="admin-panel-state py-16 text-center text-sm text-[var(--text-secondary)]">加载中…</div>
   }
   if (state === 'error') {
     return <div role="alert" className="py-16 text-center text-sm text-[var(--color-error)]">加载失败，请刷新重试。</div>

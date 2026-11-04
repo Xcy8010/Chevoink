@@ -73,3 +73,15 @@ it('closes the mobile navigation and releases its focus trap at the desktop brea
   expect(screen.queryByRole('dialog')).toBeNull()
   vi.unstubAllGlobals()
 })
+
+it('collapses desktop sidebar without leaving invisible navigation focus targets and persists preference', () => {
+  localStorage.removeItem('chevoink-admin-sidebar-collapsed')
+  render(<MemoryRouter><AdminLayout><h1>示例</h1></AdminLayout></MemoryRouter>)
+  fireEvent.click(screen.getByRole('button', { name: '收起侧栏' }))
+  expect(screen.getByRole('button', { name: '展开侧栏' }).getAttribute('aria-expanded')).toBe('false')
+  expect(screen.queryByRole('navigation', { name: '后台业务导航' })).toBeNull()
+  expect(localStorage.getItem('chevoink-admin-sidebar-collapsed')).toBe('true')
+  fireEvent.click(screen.getByRole('button', { name: '展开侧栏' }))
+  expect(screen.getByRole('navigation', { name: '后台业务导航' })).toBeTruthy()
+  localStorage.removeItem('chevoink-admin-sidebar-collapsed')
+})

@@ -1,6 +1,6 @@
 import { useAdminQueryState } from '../admin-query-state'
 import { useQuery } from '@tanstack/react-query'
-import { useMemo } from 'react'
+
 import { Link } from 'react-router-dom'
 
 import { formatCreditAmount } from '@/features/account/credit-format'
@@ -11,6 +11,7 @@ import SupplierBalances from '../components/SupplierBalances'
 import { AdminCallRecords, AdminLocalHealth } from '../components/AdminOperationsLists'
 import AdminIntegrationStatus from '../components/AdminIntegrationStatus'
 import AdminAnalytics from '../components/AdminAnalytics'
+import TrendLineChart from '../components/TrendLineChart'
 
 function formatCacheRate(hit: number | null, miss: number | null) {
   if (hit === null || miss === null) return '—'
@@ -32,7 +33,6 @@ export default function AdminTokenManagementPage() {
   const [tab, setTab] = useAdminQueryState('tab', 'usage')
   const query = useQuery({ queryKey: ['admin', 'token-usage', period], queryFn: () => getAdminTokenManagement(period), enabled: tab === 'usage' })
   const data = query.data
-  const maxTrend = useMemo(() => Math.max(1, ...(data?.trend?.map((item) => item.requestTokens + item.responseTokens) ?? [1])), [data?.trend])
   return (
     <div>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><AdminPageHeader title="用量与运行" description="按 UTC+8 统计模型输入/输出 Token、联网搜索和生图调用，并下钻到用户创作记录。" /><div className="flex shrink-0 rounded-lg border border-[var(--border-strong)] p-1">{([['today','本日'],['week','本周'],['month','本月']] as const).map(([value,label]) => <button key={value} type="button" onClick={() => setPeriod(value)} className={`rounded-md px-3 py-1.5 text-xs ${period === value ? 'bg-[var(--surface-contrast)] text-[var(--text-contrast)]' : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]'}`}>{label}</button>)}</div></div>
@@ -61,7 +61,7 @@ export default function AdminTokenManagementPage() {
               ))}
             </div> : null}
 
-            {tab === 'usage' && data.trend && data.trend.length > 0 ? <AdminCard><h2 className="text-sm font-semibold">输入 / 输出趋势</h2><div className="mt-5 flex h-36 items-end gap-2">{data.trend.map((item) => <div key={item.date} className="flex h-full min-w-0 flex-1 items-end gap-[2px]" title={`${item.date} · 输入 ${formatTokens(item.requestTokens)} · 输出 ${formatTokens(item.responseTokens)}`}><div className="flex-1 bg-slate-500" style={{ height: `${Math.max(2, item.requestTokens / maxTrend * 100)}%` }} /><div className="flex-1 bg-emerald-500" style={{ height: `${Math.max(2, item.responseTokens / maxTrend * 100)}%` }} /></div>)}</div><div className="mt-3 flex gap-4 text-xs text-[var(--text-secondary)]"><span><i className="mr-1 inline-block h-2 w-2 bg-slate-500" />输入</span><span><i className="mr-1 inline-block h-2 w-2 bg-emerald-500" />输出</span></div></AdminCard> : null}
+            {tab === 'usage' && data.trend ? <AdminCard><h2 className="mb-5 text-sm font-semibold">输入 / 输出趋势</h2><TrendLineChart label="Token 输入输出趋势" labels={data.trend.map(item => item.date.slice(5))} series={[{label:'输入 Token',values:data.trend.map(item=>item.requestTokens)},{label:'输出 Token',values:data.trend.map(item=>item.responseTokens)}]} /></AdminCard> : null}
 
             {tab === 'usage' && data.models && data.models.length > 0 ? <AdminCard><h2 className="mb-3 text-sm font-semibold">模型用量</h2><ul className="space-y-3 md:hidden">{data.models.map(item => <li key={`${item.providerName}:${item.modelName}:${item.modelTier}`} className="rounded-xl border border-[var(--border-default)] p-3"><h3 className="break-all font-semibold">{item.modelName}</h3><p className="mt-1 text-sm text-[var(--text-secondary)]">{item.providerName ?? '未知供应商'} · {item.modelLabel}</p><dl className="mt-3 grid grid-cols-2 gap-3 text-sm"><div><dt className="text-xs text-[var(--text-secondary)]">输入 / 输出</dt><dd>{formatTokens(item.requestTokens)} / {formatTokens(item.responseTokens)}</dd></div><div><dt className="text-xs text-[var(--text-secondary)]">请求 / 总 Token</dt><dd>{item.requestCount} / {formatTokens(item.totalTokens)}</dd></div><div><dt className="text-xs text-[var(--text-secondary)]">缓存命中率</dt><dd>{formatCacheRate(item.cacheHitTokens, item.cacheMissTokens)}</dd></div><div><dt className="text-xs text-[var(--text-secondary)]">观测覆盖</dt><dd>{formatCoverage(item.cacheObservedTokens, item.requestTokens)}</dd></div></dl></li>)}</ul><div className="hidden overflow-x-auto md:block"><table className="w-full min-w-[920px] text-left text-sm"><thead className="text-xs text-[var(--text-secondary)]"><tr><th className="pb-2">供应商 / 模型</th><th>档位</th><th>输入</th><th>输出</th><th>总量</th><th>缓存命中率</th><th>观测覆盖</th><th>请求</th></tr></thead><tbody className="divide-y divide-[var(--border-default)]">{data.models.map((item) => <tr key={`${item.providerName ?? 'unknown'}:${item.modelName}:${item.modelTier}`}><td className="py-2.5"><p className="font-medium">{item.modelName}</p><p className="text-xs text-[var(--text-tertiary)]">{item.providerName ?? '未知供应商'}</p></td><td>{item.modelLabel}</td><td>{formatTokens(item.requestTokens)}</td><td>{formatTokens(item.responseTokens)}</td><td>{formatTokens(item.totalTokens)}</td><td>{formatCacheRate(item.cacheHitTokens, item.cacheMissTokens)}</td><td>{formatCoverage(item.cacheObservedTokens, item.requestTokens)}</td><td>{item.requestCount.toLocaleString('zh-CN')}</td></tr>)}</tbody></table></div></AdminCard> : null}
 

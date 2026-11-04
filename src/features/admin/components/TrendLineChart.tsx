@@ -1,180 +1,56 @@
-import { useMemo, useState, type PointerEvent } from 'react'
+import { useId, useState, type PointerEvent } from 'react'
 
-type SparklinePoint = { x: number; y: number; value: number }
+export type TrendSeries = { label: string; values: number[]; color?: string }
+const W = 800, H = 240, L = 56, R = 18, T = 18, B = 28
+const format = (value: number) => value.toLocaleString('zh-CN', { maximumFractionDigits: 3 })
 
-type HoverState = { index: number; xPercent: number; yPercent: number }
-
-const WIDTH = 300
-const HEIGHT = 156
-const PADDING_LEFT = 34
-const PADDING_RIGHT = 8
-const PADDING_TOP = 14
-const PADDING_BOTTOM = 26
-
-function getAxisUpperBound(value: number): number {
-  if (value <= 0) {
-    return 1
-  }
-  const exponent = 10 ** Math.floor(Math.log10(value))
-  const normalized = value / exponent
-  if (normalized <= 1) return exponent
-  if (normalized <= 2) return 2 * exponent
-  if (normalized <= 5) return 5 * exponent
-  return 10 * exponent
-}
-
-function formatAxisLabel(value: number): string {
-  return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(value)
-}
-
-function buildSparkline(values: number[], labels: string[]) {
-  const series = values.length ? values : [0]
-  const availableWidth = WIDTH - PADDING_LEFT - PADDING_RIGHT
-  const availableHeight = HEIGHT - PADDING_TOP - PADDING_BOTTOM
-  const max = Math.max(...series, 0)
-  const upperBound = getAxisUpperBound(max)
-  const yStep = upperBound / 4
-
-  const points = series.map<SparklinePoint>((value, index) => {
-    const ratio = series.length === 1 ? 0.5 : index / (series.length - 1)
-    const x = PADDING_LEFT + availableWidth * ratio
-    const normalizedY = (1 - value / upperBound) * availableHeight
-    return { x: Number(x.toFixed(2)), y: Number((PADDING_TOP + normalizedY).toFixed(2)), value }
-  })
-
-  const linePoints = points.map((point) => `${point.x},${point.y}`).join(' ')
-
-  const yTicks = Array.from({ length: 5 }, (_, index) => {
-    const value = upperBound - yStep * index
-    const ratio = value / Math.max(upperBound, 1)
-    return { label: formatAxisLabel(value), y: PADDING_TOP + availableHeight * (1 - ratio) }
-  })
-
-  const xTicks = points
-    .map((point, index) => ({
-      label: index % Math.max(1, Math.ceil((series.length - 1) / 3)) !== 0 && index !== series.length - 1 ? '' : labels[index] ?? '',
-      x: point.x,
-    }))
-    .filter((item) => item.label)
-
-  return { points, linePoints, yTicks, xTicks }
-}
-
-/** 近 7 日单指标折线统计图：横向网格 + Y 轴刻度 + 悬停十字线与数值气泡 */
-export default function TrendLineChart({ labels, values }: { labels: string[]; values: number[] }) {
-  const [hover, setHover] = useState<HoverState | null>(null)
-  const chart = useMemo(() => buildSparkline(values, labels), [values, labels])
-
-  const handleMouseMove = (event: PointerEvent<HTMLDivElement>) => {
-    const bounds = event.currentTarget.getBoundingClientRect()
-    if (!chart.points.length || bounds.width <= 0) {
-      setHover(null)
-      return
-    }
-    const relativeX = ((event.clientX - bounds.left) / bounds.width) * WIDTH
-    let closestIndex = 0
-    let closestDistance = Number.POSITIVE_INFINITY
-    chart.points.forEach((point, index) => {
-      const distance = Math.abs(point.x - relativeX)
-      if (distance < closestDistance) {
-        closestDistance = distance
-        closestIndex = index
-      }
-    })
-    const point = chart.points[closestIndex]
-    setHover({
-      index: closestIndex,
-      xPercent: (point.x / WIDTH) * 100,
-      yPercent: (point.y / HEIGHT) * 100,
-    })
-  }
-
-  const hovered = hover ? chart.points[hover.index] : null
-
-  return (
-    <div className="flex flex-col gap-1.5">
-      <div className="relative" onPointerMove={handleMouseMove} onPointerLeave={() => setHover(null)}>
-        <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} preserveAspectRatio="none" className="h-[132px] w-full overflow-visible">
-          {chart.yTicks.map((tick) => (
-            <g key={`y-${tick.label}`}>
-              <line
-                x1={PADDING_LEFT}
-                y1={tick.y}
-                x2={WIDTH - PADDING_RIGHT}
-                y2={tick.y}
-                stroke="var(--border-default)"
-                strokeWidth={1}
-                shapeRendering="crispEdges"
-              />
-            </g>
-          ))}
-          {chart.xTicks.map((tick) => (
-            <line
-              key={`x-${tick.label}`}
-              x1={tick.x}
-              y1={PADDING_TOP}
-              x2={tick.x}
-              y2={HEIGHT - PADDING_BOTTOM}
-              stroke="var(--border-default)"
-              strokeOpacity={0.55}
-              strokeWidth={1}
-              shapeRendering="crispEdges"
-            />
-          ))}
-          <polyline
-            points={chart.linePoints}
-            fill="none"
-            stroke="var(--color-info)"
-            strokeWidth={1.4}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            vectorEffect="non-scaling-stroke"
-          />
-          {hovered ? (
-            <>
-              <line
-                x1={hovered.x}
-                y1={PADDING_TOP}
-                x2={hovered.x}
-                y2={HEIGHT - PADDING_BOTTOM}
-                stroke="var(--text-tertiary)"
-                strokeOpacity={0.45}
-                strokeWidth={1}
-              />
-              <circle cx={hovered.x} cy={hovered.y} r={4} fill="var(--surface-default)" stroke="var(--color-info)" strokeWidth={1.5} />
-            </>
-          ) : null}
-        </svg>
-
-        {/* Keep type outside the non-uniformly stretched SVG, including expanded cards. */}
-        <div className="pointer-events-none absolute inset-0 text-[11px] font-medium leading-none text-[var(--text-tertiary)]" aria-hidden="true">
-          {chart.yTicks.map((tick, index) => <span key={index} className="absolute left-0 -translate-y-1/2" style={{ top: `${tick.y / HEIGHT * 100}%` }}>{tick.label}</span>)}
-        </div>
-
-        {hovered && hover ? (
-          <div
-            className="pointer-events-none absolute z-10 min-w-[72px] -translate-x-1/2 -translate-y-full rounded-xl border border-[var(--border-default)] bg-[var(--surface-solid)] px-3 py-2 shadow-lg"
-            style={{
-              left: `${Math.min(Math.max(hover.xPercent, 20), 80)}%`,
-              top: `${Math.max(hover.yPercent - 8, 6)}%`,
-            }}
-          >
-            <p className="text-[11px] font-semibold text-[var(--text-primary)]">{labels[hover.index] ?? ''}</p>
-            <p className="mt-0.5 flex items-center gap-1.5 text-xs font-semibold text-[var(--text-primary)]">
-              <span className="inline-block h-2 w-2 rounded-full bg-[var(--color-info)]" />
-              {hovered.value}
-            </p>
-          </div>
-        ) : null}
-      </div>
-
-      <div className="relative h-5 text-[9px] text-[var(--text-tertiary)]">
-        {chart.xTicks.map((tick) => (
-          <span key={`axis-${tick.label}`} className="absolute bottom-0 -translate-x-1/2 whitespace-nowrap" style={{ left: `${(tick.x / WIDTH) * 100}%` }}>
-            {tick.label}
-          </span>
-        ))}
-      </div>
+/** Shared scale and HTML axes with a keyboard/touch equivalent of the pointer tooltip. */
+export default function TrendLineChart({ labels, values = [], series, label = '趋势统计' }: { labels: string[]; values?: number[]; series?: TrendSeries[]; label?: string }) {
+  const id = useId().replace(/:/g, '')
+  const [active, setActive] = useState<number | null>(null)
+  const lines = series ?? [{ label, values, color: 'var(--chart-1)' }]
+  const count = Math.max(0, ...lines.map(line => line.values.length))
+  const max = Math.max(0, ...lines.flatMap(line => line.values))
+  const power = 10 ** Math.floor(Math.log10(max || 1))
+  const upper = max ? Math.ceil(max / power / 2) * power * 2 : 1
+  const x = (index: number) => L + (count === 1 ? .5 : index / (count - 1)) * (W - L - R)
+  const y = (value: number) => T + (1 - value / upper) * (H - T - B)
+  const selected = active === null ? null : Math.min(active, count - 1)
+  const ticks = Array.from({ length: 5 }, (_, index) => upper * index / 4)
+  const xTicks = Array.from({ length: count }, (_, index) => index).filter(index => index === count - 1 || index % Math.max(1, Math.ceil((count - 1) / 5)) === 0)
+  const pointFromPointer = (event: PointerEvent<HTMLDivElement>) => { const bounds = event.currentTarget.getBoundingClientRect(); if (bounds.width) setActive(Math.max(0, Math.min(count - 1, Math.round((((event.clientX - bounds.left) / bounds.width * W) - L) / (W - L - R) * (count - 1))))) }
+  if (!count) return <div role="status" className="admin-chart-empty">暂无趋势数据</div>
+  return <div className="admin-chart">
+    {lines.length > 1 ? <div className="mb-4 flex flex-wrap gap-5 text-xs text-[var(--text-secondary)]">{lines.map((line, index) => <span key={line.label} className="inline-flex items-center gap-2"><i className="h-2 w-2 rounded-full" style={{ background: line.color ?? `var(--chart-${index + 1})` }} />{line.label}</span>)}</div> : null}
+    <div className="relative" role="group" aria-label={label} tabIndex={0}
+      onFocus={() => setActive(0)} onBlur={() => setActive(null)}
+      onKeyDown={event => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End', 'Escape'].includes(event.key)) return
+        event.preventDefault()
+        if (event.key === 'Escape') setActive(null)
+        else setActive(current => event.key === 'Home' ? 0 : event.key === 'End' ? count - 1 : Math.max(0, Math.min(count - 1, (current ?? 0) + (event.key === 'ArrowRight' ? 1 : -1))))
+      }}
+      onPointerMove={pointFromPointer} onPointerDown={pointFromPointer}
+      onPointerLeave={event => { if (document.activeElement !== event.currentTarget) setActive(null) }}>
+      <svg aria-hidden="true" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="h-[240px] w-full overflow-visible">
+        <defs>{lines.map((line, index) => <linearGradient key={line.label} id={`${id}-${index}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={line.color ?? `var(--chart-${index + 1})`} stopOpacity=".18" /><stop offset="100%" stopColor={line.color ?? `var(--chart-${index + 1})`} stopOpacity=".01" /></linearGradient>)}</defs>
+        {ticks.map(tick => <line key={tick} x1={L} x2={W - R} y1={y(tick)} y2={y(tick)} stroke="var(--border-default)" strokeDasharray="3 5" vectorEffect="non-scaling-stroke" />)}
+        {lines.map((line, index) => {
+          const points = line.values.map((value, i) => `${x(i)},${y(value)}`).join(' ')
+          const color = line.color ?? `var(--chart-${index + 1})`
+          return <g key={line.label}>
+            {line.values.length > 1 ? <polygon points={`${x(0)},${H - B} ${points} ${x(line.values.length - 1)},${H - B}`} fill={`url(#${id}-${index})`} /> : null}
+            <polyline points={points} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+            {line.values.length === 1 ? <circle cx={x(0)} cy={y(line.values[0])} r="4" fill={color} /> : null}
+            {selected !== null && line.values[selected] !== undefined ? <circle cx={x(selected)} cy={y(line.values[selected])} r="4" fill="var(--surface-default)" stroke={color} strokeWidth="2" /> : null}
+          </g>
+        })}
+        {selected !== null ? <line x1={x(selected)} x2={x(selected)} y1={T} y2={H - B} stroke="var(--text-tertiary)" strokeDasharray="4 4" /> : null}
+      </svg>
+      <div aria-hidden="true" className="pointer-events-none absolute inset-0 text-[11px] leading-none text-[var(--text-tertiary)]">{ticks.map(tick => <span key={tick} className="absolute left-0 -translate-y-1/2" style={{ top: `${y(tick) / H * 100}%` }}>{new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(tick)}</span>)}</div>
+      {selected !== null ? <div role="status" aria-live="polite" className="admin-chart-tooltip" style={{ left: `${Math.max(20, Math.min(75, x(selected) / W * 100))}%` }}><p className="mb-1 font-medium">{labels[selected] ?? `第 ${selected + 1} 项`}</p>{lines.map((line, index) => <p key={line.label} className="flex items-center gap-2"><i className="h-2 w-2 rounded-full" style={{ background: line.color ?? `var(--chart-${index + 1})` }} />{line.label}<strong className="ml-auto pl-4 tabular-nums">{line.values[selected] === undefined ? '未采集' : format(line.values[selected])}</strong></p>)}</div> : null}
     </div>
-  )
+    <div aria-hidden="true" className="relative h-6 text-[11px] text-[var(--text-tertiary)]">{xTicks.map(index => <span key={index} className="absolute -translate-x-1/2 whitespace-nowrap" style={{ left: `${x(index) / W * 100}%` }}>{labels[index] ?? ''}</span>)}</div>
+    <span className="sr-only">使用左右方向键查看数据，Home 与 End 跳至首尾。</span>
+  </div>
 }

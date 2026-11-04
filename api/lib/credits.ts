@@ -484,7 +484,7 @@ export async function getCreditActivity(userId: string, now = new Date()): Promi
         SUM(-"delta_milli")::bigint AS "spentMilli",
         COUNT(*)::bigint AS "eventCount"
       FROM "credit_ledger_entries"
-      WHERE "user_id" = ${userId} AND "delta_milli" < 0
+      WHERE "user_id" = ${userId} AND "kind" = 'usage' AND "delta_milli" < 0
       GROUP BY ("created_at" + INTERVAL '8 hours')::date
       ORDER BY ("created_at" + INTERVAL '8 hours')::date ASC
     `,

@@ -117,6 +117,10 @@ export function getAdminCreditsManagement(search?: string, paging: { page?: numb
   return requestJson<AdminCreditsManagementPayload>(`/api/admin/credits${buildQueryString({ search, page: paging.page, pageSize: paging.pageSize })}`)
 }
 
+export function adjustAdminUserBonusCredits(userId: string, payload: import('../../../shared/contracts/admin-credit-adjustment.js').AdminCreditAdjustmentInput & { captchaId: string; captchaAnswer: string; confirmation: string }): Promise<import('../../../shared/contracts/admin-credit-adjustment.js').AdminCreditAdjustmentResult> {
+  return requestJson(`/api/admin/credits/users/${encodeURIComponent(userId)}/adjust-bonus`, { method: 'POST', body: JSON.stringify(payload) })
+}
+
 export function resetAdminUserCredits(userId: string, payload: { captchaId: string; captchaAnswer: string; confirmation: string; requestKey?: string }): Promise<{ stoppedRuns: number }> {
   return requestJson(`/api/admin/credits/users/${userId}/reset`, { method: 'POST', body: JSON.stringify(payload) })
 }

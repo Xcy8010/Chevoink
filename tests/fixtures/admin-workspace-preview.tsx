@@ -19,7 +19,7 @@ import AdminAgentEvalsPage from '../../src/features/admin/pages/AdminAgentEvalsP
 import AdminLogsPage from '../../src/features/admin/pages/AdminLogsPage'
 import AdminSettingsPage from '../../src/features/admin/pages/AdminSettingsPage'
 import '../../src/index.css'
-const now = '2026-11-01T12:00:00.000Z'
+const now = '2026-11-04T10:00:00.000Z'
 const user = { id: 'public-fixture-user', nickname: '示例创作者', avatarUrl: null, phone: null, email: null, role: 'author', bannedAt: null, createdAt: now, lastActiveAt: now, isOnline: false, novelCount: 2, postCount: 1, followerCount: 0 }
 const models = [
  ['speed','轻量','text','relay-text'],['builtin_0123456789abcdef','标准','text','relay-standard'],['builtin_1111111111111111','性能','text','relay-performance'],['tool_search','联网搜索 Search','web_search','deepseek-search'],['tool_fetch','网页抓取 Fetch','web_fetch','deepseek-fetch'],['tool_image','图片生成','image_generation','image-relay'],['tool_vision','图片理解','vision','vision-relay'],
@@ -50,9 +50,16 @@ window.fetch = async (input, init) => {
  else if(url.pathname==='/api/admin/novels') data={items:[{id:'public-fixture-novel',title:'山海之间：公开合成作品',displayTitle:null,status:'published',visibility:'public',categoryName:'幻想',wordCount:12400,chapterCount:8,commentCount:2,favoriteCount:0,publishedAt:now,updatedAt:now,author:user}],pagination}
  else if(url.pathname==='/api/admin/posts') data={items:[{id:'fixture-post',excerpt:'公开合成讨论：如何建立清晰的人物关系？',author:user,createdAt:now,updatedAt:now,commentCount:3,likeCount:0}],pagination}
  else if(url.pathname==='/api/admin/feedback') data={...empty,counts:{pending:0,accepted:0,ignored:0}}
- else if(url.pathname==='/api/admin/credits') data={pagination:{page:1,pageSize:20,total:1,hasMore:false},snapshotAt:now,summaryScope:'global',summary:{globallyPaused:false,publicBetaEnabled:true,publicBetaRevision:1,users:1,dailyAllowance:0,dailyUsed:0,bonusBalance:0,exhaustedUsers:0},users:[{user,planLabel:'公测版',dailyAllowance:0,dailyUsed:0,dailyRemaining:0,bonusBalance:0,totalRemaining:0,usedPercent:0,resetsAt:now,suspended:false}]}
- else if(url.pathname==='/api/admin/analytics') data={period:url.searchParams.get('period')??'day',from:now,to:now,labels:['2026-11-01 12:00'],metrics:[['users','新增用户',3],['completed','执行完成',8],['failed','执行异常',1],['tools','工具返回',12],['toolSuccess','工具成功',11],['toolFailed','工具未成功',1]].map(([key,label,total])=>({key,label,total,values:[total]})),tools:[],imports:null,cost:{knownCalls:0,unknownCalls:0,estimated:0,models:[]}}
- else if(url.pathname==='/api/admin/token-usage') data={period:'today',periodStartedAt:now,summary:{totalTokens:0,requestTokens:0,responseTokens:0,cacheHitTokens:0,cacheMissTokens:0,cacheObservedTokens:0,users:0,webSearchCalls:0,imageCalls:0},users:[],actions:[],models:[],runs:[],runTurns:[],trend:[]}
+ else if(url.pathname==='/api/admin/captcha') data={captchaId:'synthetic-preview',imageBase64:'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNDAiIGhlaWdodD0iNTAiPjx0ZXh0IHg9IjMwIiB5PSIzNSIgZm9udC1zaXplPSIyOCI+YWJjZDwvdGV4dD48L3N2Zz4=',expiresInSeconds:120}
+ else if(url.pathname==='/api/admin/credits') data={pagination:{page:1,pageSize:20,total:3,hasMore:false},snapshotAt:now,summaryScope:'global',summary:{globallyPaused:false,publicBetaEnabled:true,publicBetaRevision:1,users:3,dailyAllowance:1350,dailyUsed:584.5,bonusBalance:325.75,exhaustedUsers:0},users:[{user,planLabel:'公测版',dailyAllowance:450,dailyUsed:132.5,dailyRemaining:317.5,bonusBalance:125.75,totalRemaining:443.25,usedPercent:29.4,resetsAt:now,suspended:false},{user:{...user,id:'public-fixture-user-2',nickname:'示例写作者'},planLabel:'公测版',dailyAllowance:450,dailyUsed:450,dailyRemaining:0,bonusBalance:200,totalRemaining:200,usedPercent:100,resetsAt:now,suspended:false},{user:{...user,id:'public-fixture-user-3',nickname:'示例读者'},planLabel:'公测版',dailyAllowance:450,dailyUsed:2,dailyRemaining:448,bonusBalance:0,totalRemaining:448,usedPercent:0.4,resetsAt:now,suspended:true}]}
+ else if(url.pathname==='/api/admin/analytics') {
+  const period=url.searchParams.get('period')??'day', scope=url.searchParams.get('scope')??'dashboard'
+  const labels=period==='day'?Array.from({length:19},(_,i)=>`2026-11-04 ${String(i).padStart(2,'0')}:00`):['2026-11-02','2026-11-03','2026-11-04']
+  const base=labels.map((_,i)=>[2,1,0,0,1,3,5,8,13,9,17,14,10,12,18,14,9,7,5][i])
+  const definitions=scope==='dashboard'?[['users','新增用户',1],['novels','新建作品',2],['published','作品发布',1],['invites','邀请兑换',1]]:[['completed','执行完成',3],['failed','执行异常',0.2],['tools','工具返回',7],['toolSuccess','工具成功',6.8],['toolFailed','工具未成功',0.2]]
+  data={period,from:labels[0],to:now,labels,metrics:definitions.map(([key,label,multiplier])=>{const values=base.map(value=>Math.round(value*Number(multiplier)));return {key,label,total:values.reduce((sum,value)=>sum+value,0),values}}),tools:[],imports:null,cost:scope==='cost'?{knownCalls:88,unknownCalls:2,estimated:12.5,models:[]}:null}
+ }
+ else if(url.pathname==='/api/admin/token-usage') data={period:'today',periodStartedAt:now,summary:{totalTokens:1840000,requestTokens:1420000,responseTokens:420000,cacheHitTokens:800000,cacheMissTokens:620000,cacheObservedTokens:1420000,users:28,webSearchCalls:124,imageCalls:16},users:[],actions:[],models:[],runs:[],runTurns:[],trend:Array.from({length:7},(_,i)=>({date:`2026-10-${25+i}`,requestTokens:[12000,28000,16000,38000,32000,55000,48000][i],responseTokens:[4000,8000,6000,10000,9000,18000,15000][i]}))}
  else if(url.pathname==='/api/admin/creation-records') data={items:[],total:0,page:1,pageSize:20,hasMore:false}
  else if(url.pathname==='/api/admin/craft/sources') data={sources:[]}
  else if(url.pathname==='/api/admin/evals/suites') data={suites:[]}

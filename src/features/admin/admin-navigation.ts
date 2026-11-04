@@ -8,7 +8,7 @@ export const adminNavigation = [
   ] },
   { label: '用户与权益', items: [
     { to: '/admin/users', label: '用户管理', keywords: '角色 封禁' },
-    { to: '/admin/credits', label: 'Credits 权益', keywords: '账户 额度 全局政策 暂停 重置' },
+    { to: '/admin/credits', label: 'Credits 权益', keywords: '账户 额度 全局政策 暂停 重置 奖励 赠送 扣减 覆盖' },
   ] },
   { label: '创作运营', items: [
     { to: '/admin/creation-records', label: '创作运行', keywords: '任务 运行 工具 导入 统计' },
