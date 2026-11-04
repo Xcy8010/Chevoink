@@ -14,6 +14,7 @@ describe.runIf(available)('admin reward adjustment on real isolated PostgreSQL',
     try { await work(adminId, userId) }
     finally {
       await prisma.adminAuditLog.deleteMany({ where: { adminId } })
+      await prisma.aiUsageLog.deleteMany({ where: { userId } })
       await prisma.user.deleteMany({ where: { id: { in: [adminId, userId] } } })
     }
   }
