@@ -42,6 +42,8 @@ function parseReasoningEffort(value: string | undefined): 'low' | 'high' | 'max'
 }
 
 export const env = {
+  yunshuAdminAccessTokenFile: process.env.YUNSHU_ADMIN_ACCESS_TOKEN_FILE ?? '',
+  yunshuAdminAccessToken: process.env.YUNSHU_ADMIN_ACCESS_TOKEN ?? '',
   agentGoalEnabled: parseBoolean(process.env.AGENT_GOAL_ENABLED, false),
   appName: process.env.APP_NAME ?? '启创墨域',
   appEnv: process.env.APP_ENV ?? 'development',
