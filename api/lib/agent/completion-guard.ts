@@ -39,8 +39,15 @@ export function isWritingContinuationRequest(prompt: string): boolean {
 
 export function promisesFurtherAction(text: string): boolean {
   const lastSentence = text.trim().split(/[。！!\n]/u).filter(Boolean).at(-1) ?? ''
-  if (/(?:无需|不需要|不必|如需|如果|你可以|您可以|可以继续|是否|已经|已完成)/u.test(lastSentence)) return false
-  return /(?:接下来|下一步|现在|马上|先|继续|直接)(?:我会|我将|会|将|去)?[^。\n]{0,24}(?:写入|写正文|修订|修复|检查|校验|整改|重建|补齐|读取|读回)/u.test(lastSentence)
+  if (/(?:如需|如果)/u.test(lastSentence)) return false
+  // Optional next steps are advice to the author, not another execution turn.
+  // Check each clause so an advisory prefix cannot hide a later actual promise.
+  return lastSentence.split(/[，,；;]/u).some(clause => {
+    if (/(?:无需|不需要|不必|如需|如果|你可以|您可以|可以继续|是否|已经|已完成)/u.test(clause)) return false
+    if (/(?:建议|可以|可考虑|不妨)/u.test(clause)
+      && !/(?:我(?:会|将|来|先|现在|马上|接下来)|接下来我|下一步我)/u.test(clause)) return false
+    return /(?:接下来|下一步|现在|马上|先|继续|直接)(?:我会|我将|会|将|去)?[^。\n]{0,24}(?:写入|写正文|修订|修复|检查|校验|整改|重建|补齐|读取|读回)/u.test(clause)
+  })
 }
 
 /** Narrow to an explicit next-chapter instruction, not the legacy "write"

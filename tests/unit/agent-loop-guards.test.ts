@@ -247,6 +247,14 @@ describe('same-state admission and continuation', () => {
     expect(promisesFurtherAction('第七章仍为空，先写入正文。')).toBe(true)
     expect(promisesFurtherAction('第七章已完成落库与校验。')).toBe(false)
   })
+  it('ends on optional advice but retains actual execution promises in mixed replies', () => {
+    for (const text of ['下一步建议补齐大纲。', '下一步可以考虑修订人物档案。', '建议先检查人物关系，再补齐大纲。', '如果继续创作，可以先写正文。', '第一章已完成。下一步建议完善封面和标签。']) {
+      expect(promisesFurtherAction(text), text).toBe(false)
+    }
+    for (const text of ['下一步建议完善封面，我现在先修订正文。', '第一章已完成，接下来我会检查第二章。', '建议稍后再看，我马上写入正文。']) {
+      expect(promisesFurtherAction(text), text).toBe(true)
+    }
+  })
 })
 
 describe('internal token budget compatibility is storage-only', () => {

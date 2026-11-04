@@ -60,3 +60,11 @@ it.each(['plan', 'review'] as const)('respects %s mode before selecting a manusc
   expect(text).not.toContain('本次是写作或修订')
   if (mode === 'review') expect(text).toContain('交付有位置与证据的问题及建议')
 })
+
+it.each(['创建新作品并保存简介标签。', '写下一章。', '只输出标题正文，不要建议。'])('keeps optional stage suggestions separate from completion, questions and execution: %s', prompt => {
+  const spec = task(prompt), before = structuredClone(spec), text = taskOperatingGuidance(spec, 'build')!
+  for (const required of ['真实完成后', '1–2 条与最新作品阶段相符', '本轮最新成功回执', '不重复完成事项', '不把未知状态说成缺失',
+    '建议不调用 ask_user、不要求回答、不建立待办或执行新任务', '简短认可不自动选择多个建议之一', '仅要标题正文、仅要结果或明确不要建议时不附加',
+    '任务未完成、失败或结果未知时先如实说明']) expect(text).toContain(required)
+  expect(spec).toEqual(before)
+})

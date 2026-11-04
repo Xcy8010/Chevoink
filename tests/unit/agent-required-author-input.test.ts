@@ -39,7 +39,7 @@ describe('required legacy author decisions', () => {
     const { pending } = await start()
     await vi.advanceTimersByTimeAsync(env.agentApprovalTimeoutMs + 1)
     const result = await pending
-    expect(result).toMatchObject({ failureCode: 'AUTHOR_INPUT_REQUIRED', display: { kind: 'question', unanswered: true } })
+    expect(result).toMatchObject({ failureCode: 'AUTHOR_INPUT_REQUIRED', display: { kind: 'question', unanswered: true, scopeResolution: 'needs_input' } })
     expect(result.outcome).toBeUndefined()
     expect(mocks.update).toHaveBeenCalledOnce()
     expect(mocks.update.mock.calls[0][0].data.status).toBe('awaiting_approval')
@@ -56,6 +56,7 @@ describe('required legacy author decisions', () => {
     expect(result.output).toContain('未回答不等于同意')
     expect(result.output).toContain('不依赖此决定且已获授权的工作')
     expect(result.output).not.toContain('默认方案继续')
+    expect(result.display).not.toHaveProperty('scopeResolution')
     expect(mocks.update).toHaveBeenCalledTimes(2)
   })
   it('cannot replace a required decision when the bounded question budget is exhausted', async () => {
@@ -68,7 +69,7 @@ describe('required legacy author decisions', () => {
     const { pending } = await start()
     expect(resolveQuestionAnswer('run', 'original-question', '第一章写入')).toBe(true)
     const result = await pending
-    expect(result).toMatchObject({ failureCode: 'AUTHOR_INPUT_REQUIRED', display: { answer: '第一章写入' } })
+    expect(result).toMatchObject({ failureCode: 'AUTHOR_INPUT_REQUIRED', display: { answer: '第一章写入', scopeResolution: 'needs_input' } })
     expect(result.semanticTransition).toBeUndefined()
     expect(original).toEqual(before)
     expect(mocks.clarification).toHaveBeenCalledOnce()
@@ -77,9 +78,18 @@ describe('required legacy author decisions', () => {
     mocks.clarification.mockResolvedValue({ targetId: 'writing-scope:original', beforeHash: 'old', afterHash: 'new' })
     const { pending } = await start()
     expect(resolveQuestionAnswer('run', 'original-question', '第一章写入')).toBe(true)
-    expect(await pending).toMatchObject({ semanticTransition: { targetId: 'writing-scope:original' } })
+    expect(await pending).toMatchObject({ semanticTransition: { targetId: 'writing-scope:original' }, display: { scopeResolution: 'accepted' } })
     expect(mocks.clarification).toHaveBeenCalledWith(expect.anything(), ctx, expect.objectContaining({ source: 'legacy_question', callId: ctx.callId }))
     expect(vi.getTimerCount()).toBe(0)
+  })
+  it('does not label an ordinary answered preference as a writing-scope grant', async () => {
+    scope('bounded')
+    const { pending } = await start()
+    expect(resolveQuestionAnswer('run', 'original-question', '使用近距离视角')).toBe(true)
+    const result = await pending
+    expect(result.display).toMatchObject({ answer: '使用近距离视角' })
+    expect(result.display).not.toHaveProperty('scopeResolution')
+    expect(result.semanticTransition).toBeUndefined()
   })
   it('propagates cancellation without disguising it as a missing author decision', async () => {
     const controller = new AbortController(), { pending } = await start({ ...ctx, signal: controller.signal })

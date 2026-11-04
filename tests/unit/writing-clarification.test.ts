@@ -49,11 +49,18 @@ describe('authenticated first-chapter scope clarification', () => {
     expect(renderTaskSpec(frozen)).toContain('先用 ask_user 一次询问该落点')
     expect(f.create).not.toHaveBeenCalled()
   })
-  it.each([firstChapterAnswer, '第一章', '写入第一章'])('keeps fresh protocol2 scene creation eligible for the actual first-chapter answer: %s', async answer => {
+  it.each([firstChapterAnswer, '第一章', '写入第一章',
+    '第一章：启程（约4000字）（主角进入车站，发现异常，章末留悬念）',
+    '第一章：车站来信（约3500字）（主角阅读来信，得知有人改写了记录）',
+    '第一章：启程（主角说“不要写第二章”，随后离开车站）',
+    '第一章：写给故乡的信（约4000字）', '第一章：不要回头（主角进入车站）',
+  ])('keeps fresh protocol2 scene creation eligible for the actual first-chapter answer: %s', async answer => {
     const f = fixture()
-    const fresh = buildTaskSpec({ ...f.subject, prompt: shortSceneRequest, authorWritingProtocol: 2,
+    const prompt = shortSceneRequest.replace('约500字', '约4000字').replace('最多800字', '最多5000字')
+    f.admission.prompt = prompt
+    const fresh = buildTaskSpec({ ...f.subject, prompt, authorWritingProtocol: 2,
       reviewProtocol: 1, localEditProtocol: 1 })
-    const frozen = await scope.freezeWritingScope(f.tx, f.subject, fresh, shortSceneRequest, 2)
+    const frozen = await scope.freezeWritingScope(f.tx, f.subject, fresh, prompt, 2)
     expect(frozen).toMatchObject({ intent: 'write', scope: { writingTargetProtocol: 2, writingClarificationProtocol: 2,
       writing: { kind: 'needs_input', targets: [] }, writingInterpretation: { intent: 'write' } } })
     expect(frozen.scope.localEditBoundary).toBeUndefined()
@@ -62,8 +69,26 @@ describe('authenticated first-chapter scope clarification', () => {
     f.admission.spec = JSON.parse(JSON.stringify(frozen)) as typeof frozen
     f.admission.taskId = frozen.id
     expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer })).toBeTruthy()
+    expect(f.artifacts[0].metadata).toMatchObject({ callId: f.answer.callId, answer })
     expect((await scope.readWritingScope(f.tx, f.subject)).writing).toMatchObject({ kind: 'bounded', targets: [{ orderIndex: 1, chapterId: null }] })
     expect(f.admission.spec).toEqual(frozen)
+  })
+  it.each(['第一章：启程（再写第二章）', '第一章：启程（生成封面）', '第一章：启程（导出小说）',
+    '第一章：启程（主角入站）；写第二章', '第一章：启程（先研究公开资料）', '第一章：启程（再写第一章）',
+    '第一章：启程（约4000字', '第一章：启程（约4000字）再发布作品', '第一章：也许先不确定（约4000字）',
+    '第一章：启程（不要保存）', '第一章：启程（约4000字）？', '好的', '按照要求来就可以了',
+    '第一章：请删除作品', '第一章：顺便改第二章', '第一章：不要写',
+    '第一章：启程（请你生成封面）', '第一章：启程（你可以导出小说）',
+  ])('does not accept added actions, scope, retractions or ambiguous replies as chapter annotations: %s', async answer => {
+    const f = fixture()
+    const fresh = buildTaskSpec({ ...f.subject, prompt: shortSceneRequest, authorWritingProtocol: 2,
+      reviewProtocol: 1, localEditProtocol: 1 })
+    const frozen = await scope.freezeWritingScope(f.tx, f.subject, fresh, shortSceneRequest, 2)
+    f.admission.spec = JSON.parse(JSON.stringify(frozen)) as typeof frozen
+    f.admission.taskId = frozen.id
+    expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer })).toBeNull()
+    expect(f.create).not.toHaveBeenCalled()
+    expect((await scope.readWritingScope(f.tx, f.subject)).writing?.kind).toBe('needs_input')
   })
   it('keeps an explicit first-chapter grant when a separate clause forbids continuation', async () => {
     const f = fixture(), prompt = '写第一章，不继续下一章。'

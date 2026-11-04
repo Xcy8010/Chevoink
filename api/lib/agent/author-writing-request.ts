@@ -62,6 +62,21 @@ const editorAfterRelation = /(?:当前(?:这)?(?:章|章节)|正在编辑(?:的)
 // Arbitrary prose before a terminal verb is not a command with a missing noun.
 const elidedCommandHead = /^(?:(?:请(?:你)?|帮我|替我|为我|给我|麻烦(?:你)?|现在|直接|先|再|就|只|然后|接着|继续|全部|所有|可以|允许你|(?:我)?(?:现|现在)?(?:明确)?授权(?:你)?(?:可以)?|please|then|continue|all)\s*)*$/iu
 
+/** A recommendation evaluates a proposed action. A sequenced new directive
+ * closes that governor, so recommending a topic cannot veto a later write. */
+function nonExecutionSubject(text: string, start: number, end: number): boolean {
+  const boundary = /并(?:且)?|然后|随后|接着|再|就|则|才|\b(?:and|then)\b/iu
+  for (const governor of text.matchAll(/推荐|\brecommend(?:ation|ing)?\b|\bsuggest(?:ion|ing)?\b/giu)) {
+    const at = governor.index!, before = text.slice(0, at)
+    if (/^\s*的/u.test(text.slice(at + governor[0].length))
+      || /(?:按(?:照)?|根据|基于|采用|使用)[^，,。；;]{0,24}$/u.test(before)) continue
+    const between = at < start ? text.slice(at + governor[0].length, start) : text.slice(end, at)
+    if (!boundary.test(between)) return true
+  }
+  const hypothetical = /(?:假设|假如|如果|要是|倘若|\b(?:suppose|assuming|if)\b)([^，,。；;]*)$/iu.exec(text.slice(0, start))
+  return !!hypothetical && !boundary.test(hypothetical[1])
+}
+
 /** UTF-16 coordinates stay identical to the author's input. A quotation never
  * becomes a whitespace join that can synthesize a new number or operation. */
 export function lexAuthorWritingRequest(prompt: string): { masked: string; clauses: AuthorClause[]; quoted: AuthorQuotedSpan[] } {
@@ -535,8 +550,10 @@ function interpretAuthorWritingRequest(prompt: string, directory?: AuthorWriting
       let reason = polarity === 'negative' ? 'negated' : 'author_operation'
       if (kind === 'read') reason = 'reference'
       else if (factBefore.test(before) || /(?:已经|早已|曾经|已)\s*$/u.test(before) || /^\s*过/u.test(after)) reason = 'factual_statement'
-      else if (advice.test(before) || /的(?:建议|方案|思路|方法|报告|情况)\s*$/u.test(after)
+      else if (advice.test(before) && !/^(?:按(?:照)?|根据|基于|采用|使用)[^，,。；;]*(?:方案|建议|思路|方法|题材)\s*$/u.test(before.trim()) || /的(?:建议|方案|思路|方法|报告|情况)\s*$/u.test(after)
         || /^(?:的)?(?:手法|技巧|方法|建议|教程|风格)/u.test(after)) reason = 'advice'
+      else if ((kind === 'write' || kind === 'revise') && !conditionalRevision && !assessed.has(index)
+        && nonExecutionSubject(text, match.index!, match.index! + match[0].length)) reason = 'advice'
       else if (/只读|仅供阅读|read.only/iu.test(before)) reason = 'read_only'
       else if (/[:：]/u.test(before) && operations.some(operation => operation.clauseSpan.start === clause.start
         && (operation.kind === 'read' || operation.kind === 'review'

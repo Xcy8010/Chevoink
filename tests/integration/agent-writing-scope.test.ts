@@ -41,6 +41,8 @@ import { askUserTool } from '../../api/lib/agent/tools/interact-tools.js'
 import * as questionPermissions from '../../api/lib/agent/permissions.js'
 import { resolveLoopRunQuestion } from '../../api/lib/agent/run-service.js'
 import { resolveDurableQuestion } from '../../api/lib/agent/runtime-question.js'
+import { runDurableExecution } from '../../api/lib/agent/runtime-executor.js'
+import * as aiService from '../../api/lib/ai-service.js'
 import { readOriginalTaskRequest } from '../../api/lib/agent/original-request.js'
 import { shortSceneRequest, firstChapterAnswer, placementQuestion } from '../support/writing-clarification-fixture.js'
 
@@ -72,6 +74,52 @@ async function fixture(prompt: string, work: (ctx: ToolContext) => Promise<void>
   }
 }
 describe.skipIf(!available)('authenticated empty-book clarification', () => {
+  it.each((['none', 'before-reduction', 'after-reduction'] as const).flatMap(crash => [false, true].map(wrapped => ({ crash, wrapped }))))(
+    'pauses the original durable task after an unaccepted scope answer, crash=$crash wrapped=$wrapped', ({ crash, wrapped }) => fixture(shortSceneRequest, async ctx => {
+      const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx,
+        buildTaskSpec({ ...ctx, prompt: shortSceneRequest, authorWritingProtocol: 2, reviewProtocol: 1, localEditProtocol: 1 }), shortSceneRequest, 2))
+      await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(spec).value, status: 'queued' } })
+      const sourceMessageId = randomUUID()
+      await prisma.agentMessage.create({ data: { id: sourceMessageId, sessionId: ctx.sessionId, runId: ctx.runId, role: 'user', parts: [{ type: 'text', text: shortSceneRequest }] } })
+      const root = await initializeDurableTask({ userId: ctx.userId, runId: ctx.runId, sourceMessageId })
+      const budget = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: root.id } })
+      const lease = await acquireRunLease({ userId: ctx.userId, runId: ctx.runId, ownerId: 'scope-boundary-fixture', claimId: randomUUID() })
+      await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+        model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+        tools: [{ type: 'function', function: { name: askUserTool.name, description: askUserTool.description, parameters: z.toJSONSchema(askUserTool.parameters, { io: 'input' }) } }],
+        toolAuthority: [{ name: askUserTool.name, permission: 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
+        snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+          messages: [{ role: 'user', content: shortSceneRequest }, { role: 'assistant', content: null,
+            toolCalls: [{ id: ctx.callId, name: 'ask_user', arguments: wrapped
+              ? '```json\n' + JSON.stringify({ input: { question: ` ${placementQuestion.question} `, options: placementQuestion.options.map(option => option.label) } }) + '\n```'
+              : JSON.stringify(placementQuestion) }] }], successfulToolSignatures: [] } })
+      const waiting = await executeDurableToolStep(lease, ctx.signal)
+      if (waiting.kind !== 'waiting_question' || !waiting.requestId) throw Error('Expected persisted question')
+      await resolveDurableQuestion({ userId: ctx.userId, runId: ctx.runId, callId: ctx.callId, requestId: waiting.requestId, answer: '按照要求来就可以了' })
+      const model = vi.spyOn(aiService, 'chatWithTools').mockRejectedValue(Error('Scope boundary must stop before provider dispatch'))
+      try {
+        if (crash !== 'none') {
+          const reduce = executionReducer.reduceExecutionReceipt
+          const fault = vi.spyOn(executionReducer, 'reduceExecutionReceipt').mockImplementationOnce(async (...args) => {
+            if (crash === 'after-reduction') await reduce(...args)
+            throw Error('synthetic question reduction crash')
+          })
+          try { await expect(executeDurableToolStep(lease, ctx.signal)).rejects.toThrow('synthetic question reduction crash') } finally { fault.mockRestore() }
+        }
+        const result = await runDurableExecution(lease, ctx.signal)
+        expect(result).toMatchObject({ kind: 'needs_attention', authorInputRequired: true, frame: { state: { phase: 'idle' } } })
+        expect(model).not.toHaveBeenCalled()
+        expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).toMatchObject({ status: 'paused', taskRootId: root.id })
+        const after = await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: root.id } })
+        expect(after.inputHash).toBe(root.inputHash)
+        expect(after.specSnapshot).toEqual(root.specSnapshot)
+        expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: root.id } })).toEqual(budget)
+        expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: root.id } } })).toBe(0)
+        expect(await prisma.agentOperation.count({ where: { taskRootId: root.id, action: 'ask_user', status: 'succeeded' } })).toBe(1)
+        expect(await prisma.agentArtifact.count({ where: { runId: ctx.runId, metadata: { path: ['writingScopeClarification'], equals: true } } })).toBe(0)
+        expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(0)
+      } finally { model.mockRestore() }
+    }))
   async function admit(ctx: ToolContext) {
     const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx,
       buildTaskSpec({ ...ctx, prompt: shortSceneRequest, reviewProtocol: 1, localEditProtocol: 1 }), shortSceneRequest))

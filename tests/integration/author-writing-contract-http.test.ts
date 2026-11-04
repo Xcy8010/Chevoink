@@ -33,7 +33,8 @@ import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import { chapterSplitTool, volumeUpdateTool } from '../../api/lib/agent/tools/structure-tools.js'
-import { novelUpdateMetaTool } from '../../api/lib/agent/tools/novel-tools.js'
+import { novelCreateTool, novelUpdateMetaTool } from '../../api/lib/agent/tools/novel-tools.js'
+import { ALL_NOVEL_TAGS } from '../../shared/contracts/novel-tags.js'
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import { inspectCriticResponse } from '../../api/lib/agent/quality-evidence.js'
 import { terminalCoverageInput, readTerminalCoverageState } from '../../api/lib/agent/terminal-fact-coverage.js'
@@ -679,13 +680,14 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
       expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
     }))
-  it('honors a genuine empty-book first-chapter answer without widening the frozen root', async () => {
+  it.each([firstChapterAnswer, '第一章：启程（约600字）（主角进入车站，发现异常，章末留悬念）'])(
+    'initializes an empty work then prepares and writes the genuinely confirmed first chapter: %s', async answer => {
     const userId = randomUUID(), novelId = randomUUID(), sessionId = randomUUID()
     let restoreWait = () => {}
     try {
       vi.stubGlobal('fetch', vi.fn(() => { throw Error('No Provider allowed') }))
       await prisma.user.create({ data: { id: userId, nickname: 'synthetic-first-answer', passwordHash: 'test-only' } })
-      await prisma.novel.create({ data: { id: novelId, authorId: userId, title: '合成空书', slug: randomUUID(), summary: '' } })
+      await prisma.novel.create({ data: { id: novelId, authorId: userId, title: '未命名作品', slug: randomUUID(), summary: '先创建一部作品，再继续完善简介、章节和封面。' } })
       await prisma.volume.create({ data: { novelId, title: '第一卷', orderIndex: 1 } })
       await prisma.agentSession.create({ data: { id: sessionId, userId, novelId, title: '合成澄清' } })
       const admitted = await request(app).post('/api/agent/runs')
@@ -698,13 +700,22 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
       const ctx: ToolContext = { userId, novelId, sessionId, runId, chapterId: null, callId: 'true-author-answer', mode: 'build',
         qualityMode: 'premium', creativeFreedom: 'balanced', signal: new AbortController().signal, emit: () => {} }
+      expect((await novelCreateTool.execute(ctx, { title: '合成首章作品', summary: '用于校验首章确认与实际正文写入。', tags: [ALL_NOVEL_TAGS[0]] })).outcome).not.toBe('failed')
+      await expect(storyCompilerPrepareTool.execute({ ...ctx, callId: 'before-answer-prepare' }, { targetOrderIndex: 1,
+        intentSummary: '作者尚未确认章节落点', volumeDecision: { kind: 'continue', reason: '第一卷首章' } })).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+      expect(await prisma.storyCompilation.count({ where: { runId } })).toBe(0)
       const wait = questionPermissions.waitForQuestionAnswer
       const waitingSpy = vi.spyOn(questionPermissions, 'waitForQuestionAnswer').mockImplementation((id, callId, timeout, signal) => {
         const pending = wait(id, callId, timeout, signal)
-        return Promise.all([pending, resolveLoopRunQuestion(userId, id, callId, firstChapterAnswer)]).then(([answer]) => answer)
+        return Promise.all([pending, resolveLoopRunQuestion(userId, id, callId, answer)]).then(([resolved]) => resolved)
       })
       restoreWait = () => { waitingSpy.mockRestore() }
-      expect((await askUserTool.execute(ctx, placementQuestion)).semanticTransition).toBeDefined()
+      expect(await askUserTool.execute(ctx, placementQuestion)).toMatchObject({ semanticTransition: expect.anything(), display: { scopeResolution: 'accepted', answer } })
+      expect((await storyCompilerPrepareTool.execute({ ...ctx, callId: 'after-answer-prepare' }, { targetOrderIndex: 1,
+        intentSummary: '承接作者确认的第一章与附属要求', volumeDecision: { kind: 'continue', reason: '第一卷首章' } })).outcome).not.toBe('failed')
+      const compilation = await prisma.storyCompilation.findFirstOrThrow({ where: { runId, status: 'active' } })
+      await saveSceneTasks({ ...ctx, compilationId: compilation.id, tasks: [{ purpose: '首章冲突', entryState: {}, goal: '入站', obstacle: '异常通知',
+        choice: '继续等待', cost: '时间', turn: '发现异常', exitState: {}, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] })
       expect((await chapterCreateTool.execute({ ...ctx, callId: 'create-answered-first' }, { title: '合成第一章', volumeOrder: 1, positionInVolume: 1 })).outcome).not.toBe('failed')
       const chapter = await prisma.chapter.findFirstOrThrow({ where: { novelId, orderIndex: 1 } })
       expect((await chapterWriteTool.execute({ ...ctx, callId: 'write-answered-first' }, { chapterId: chapter.id, content: '她在门口等候。窗外天亮了。' })).outcome).not.toBe('failed')
@@ -713,6 +724,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).taskSpec).toEqual(frozen)
       expect(await prisma.chapter.count({ where: { novelId } })).toBe(1)
       expect(await prisma.aiUsageLog.count({ where: { userId } })).toBe(0)
+      expect(await prisma.creditLedgerEntry.count({ where: { userId } })).toBe(0)
       expect(fetch).not.toHaveBeenCalled()
     } finally {
       restoreWait()

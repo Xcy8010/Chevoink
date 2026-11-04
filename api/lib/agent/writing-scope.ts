@@ -821,8 +821,8 @@ function writingStyleLabel(sentence: string, quote: WritingQuotation): boolean {
   return quote.value.split(/\s*(?:与|和|、|\/|\+)\s*/u).every(label => labels.has(label))
 }
 
-/** All substantive quotations need a current source. Only an explicitly named
- * style-label grammar is commentary; short words are never a citation waiver. */
+/** All manuscript quotations need a current source. Explicit style labels and
+ * proposed future book titles are commentary, not claims about saved prose. */
 function currentWritingSummarySentence(sentence: string, delivery: PresentationDelivery, inherited: PresentationChapter[]): boolean {
   const quotes = writingQuotations(sentence), mentions = writingChapterMentions(sentence, quotes, delivery.chapters)
   const scope = (position: number) => writingSentenceScope(sentence, position, mentions, inherited)
@@ -845,7 +845,11 @@ function currentWritingSummarySentence(sentence: string, delivery: PresentationD
     const references = new Set(chapters.flatMap(chapter => [chapter.title, chapter.id, `r${chapter.revision}`, chapter.completion.compilationId,
       ...(chapter.completion.qualityReportId ? [chapter.completion.qualityReportId] : [])]))
     if (references.has(quote.value) || chapters.some(chapter => chapter.content.normalize('NFC').includes(quote.value.normalize('NFC')))) continue
-    if (!writingStyleLabel(sentence, quote)) return false
+    const before = sentence.slice(0, quote.start).replace(/[*_]/gu, '')
+    const proposedTitle = /(?:建议|可以考虑|可考虑|不妨)[^。！？\n]*?(?:书名|作品名)(?:可)?(?:用|叫|取为|改为|定为|考虑)\s*$/u.test(before)
+      && !/(?:已|已经|保存|写入|正文|原文|本章|写道)/u.test(sentence)
+      && sentence[quote.start] === '《'
+    if (!writingStyleLabel(sentence, quote) && !proposedTitle) return false
   }
   return true
 }

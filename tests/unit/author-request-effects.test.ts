@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { parseAuthorWritingRequest } from '../../api/lib/agent/author-writing-request.js'
-import { buildTaskSpec, renderTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { buildTaskSpec, renderTaskSpec, requiresManuscriptDelivery } from '../../api/lib/agent/task-spec.js'
 import { restrictToolsToTask, snapshotToolAuthority, intersectToolAuthority } from '../../api/lib/agent/tool-authority.js'
 import { getToolsForMode } from '../../api/lib/agent/tools/registry.js'
 import { originalRepairAuthority } from '../../api/lib/agent/original-request.js'
@@ -12,6 +12,21 @@ const bodyTools = ['chapter_create', 'chapter_write', 'chapter_edit_range', 'cha
   'story_compiler_prepare', 'chapter_bridge_commit', 'changeset_apply', 'changeset_rollback', 'quality_revision_apply']
 
 describe('fresh request effects without a global chapter prerequisite', () => {
+  it.each(['里面其中一个题材写小说推荐哪个？', '推荐适合写小说的题材', '请推荐一个能写长篇小说的题材',
+    '假设写一本小说，你会如何选择题材？', '如果写小说，应该选哪个题材？', '修改第一章推荐什么方法？'])(
+    'keeps a proposed writing action under its recommendation or hypothetical governor: %s', prompt => {
+      const spec = fresh(prompt)
+      expect(spec.scope.authorEffects?.manuscript).toBe(false)
+      expect(spec.writingPacing).not.toBe('proposal_only')
+      expect(spec.intent).not.toBe('plan')
+      expect(requiresManuscriptDelivery(spec)).toBe(false)
+      expect(spec.expectedOutputs.some(output => output.kind === 'artifact' || /全书大纲|前三章|人物.*大纲/u.test(output.description))).toBe(false)
+      expect(renderTaskSpec(spec)).not.toContain('本轮仅规划')
+    })
+  it.each(['推荐一个题材并写第一章', '请先推荐题材，然后写第一章', '按照你推荐的题材写第一章', '如果方向确定就写第一章', '按推荐方案修改第一章'])(
+    'retains a separately governed explicit writing directive: %s', prompt => {
+      expect(fresh(prompt).scope.authorEffects?.manuscript).toBe(true)
+    })
   it.each([
     '为什么天空是蓝色的？',
     '列出三个提升注意力的方法。',

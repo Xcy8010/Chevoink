@@ -81,8 +81,8 @@ export const researchDossierBuildTool = defineTool({
     ]
     return {
       output: dossier.reused
-        ? `命中 Research Dossier v${dossier.version} 缓存，dossierId=${dossier.id}，无需重新联网。下一步新书规划应建立 Story Charter，再生成前三章试制。`
-        : `Research Dossier v${dossier.version} 已建立，dossierId=${dossier.id}，共执行 ${dossier.searchCount} 个查询、保存 ${dossier.sources.length} 个摘要来源，有效期至 ${dossier.expiresAt}。只可使用高层特征和事实卡，不得复写来源文本。下一步新书规划应建立 Story Charter，再调用 first_three_prototype_build。\n${items.join('\n')}`,
+        ? `命中 Research Dossier v${dossier.version} 缓存，dossierId=${dossier.id}，无需重新联网。按原始请求使用已有研究资料；档案就绪不要求新增宪章、前三章规划或正文任务。`
+        : `Research Dossier v${dossier.version} 已建立，dossierId=${dossier.id}，共执行 ${dossier.searchCount} 个查询、保存 ${dossier.sources.length} 个摘要来源，有效期至 ${dossier.expiresAt}。只可使用高层特征和事实卡，不得复写来源文本。按原始请求使用本次资料；研究完成不自动启动其他规划或创作。\n${items.join('\n')}`,
       summary: dossier.reused ? `复用研究档案 v${dossier.version}` : `建立研究档案 v${dossier.version}`,
       display: { kind: 'researchDossier', dossierId: dossier.id, title: '创作研究档案', detail: `v${dossier.version} · ${dossier.reused ? '复用' : `${dossier.sources.length} 个来源`}`, reused: Boolean(dossier.reused), sourceCount: dossier.sources.length, items },
     }
@@ -98,7 +98,7 @@ export const firstThreePrototypeGetTool = defineTool({
   readOnly: true,
   async execute(ctx) {
     const prototype = await getLatestFirstThreePrototype(ctx.userId, ctx.novelId, ctx.transaction)
-    if (!prototype) return { output: '当前作品尚无前三章试制。新书需先完成有效 Research Dossier 和 Story Charter，再调用 first_three_prototype_build。' }
+    if (!prototype) return { output: '当前作品尚无前三章试制。缺少这份规划不产生创建义务；仅原始请求需要建立前三章蓝图时，才按该工具的资料要求处理，否则继续当前任务。' }
     if (ctx.transaction) return { output: JSON.stringify(prototype), summary: `读取前三章试制 v${prototype.version}` }
     const items = prototype.chapterBlueprints.map((chapter) => `第 ${chapter.orderIndex} 章「${chapter.title}」：${chapter.chapterJob}；退出钩子：${chapter.exitHook}`)
     return {
@@ -166,7 +166,7 @@ export const firstThreePrototypeBuildTool = defineTool({
     const prototype = await buildFirstThreePrototype(ctx.userId, ctx.novelId, args, ctx.transaction)
     const items = prototype.chapterBlueprints.map((chapter) => `第 ${chapter.orderIndex} 章「${chapter.title}」：${chapter.concreteEvent}｜选择：${chapter.protagonistChoice}｜代价：${chapter.cost}`)
     return {
-      output: `前三章试制 v${prototype.version} 已建立，prototypeId=${prototype.id}。先让作者选择方向（若尚未选择），再逐章执行 Story Compiler 和质量门；通过前三章样本后才扩完整长纲。\n题材风险：${prototype.genreRisks.join('；')}\n${items.join('\n')}`,
+      output: `前三章试制 v${prototype.version} 已建立，prototypeId=${prototype.id}。本次保存的是规划蓝图，不是章节正文；按原始请求交付所需规划，未选择的方向保持候选。仅原作者明确授权对应章节写作时再处理正文，蓝图就绪不自动开启写作或完整长纲任务。\n题材风险：${prototype.genreRisks.join('；')}\n${items.join('\n')}`,
       summary: `建立前三章试制 v${prototype.version}`,
       display: { kind: 'firstThreePrototype', prototypeId: prototype.id, title: '前三章试制', detail: `v${prototype.version} · ${prototype.directions.length} 个方向`, items },
     }

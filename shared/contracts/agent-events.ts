@@ -139,6 +139,8 @@ export type AgentToolDisplayPayload =
       answer?: string
       /** 超时或任务停止导致未获回答 */
       unanswered?: boolean
+      /** Answer transport and acceptance of a missing writing target are separate. */
+      scopeResolution?: 'accepted' | 'needs_input'
     }
   | { kind: 'uiIntent'; intent: 'open_meta' | 'open_cover' }
   | {

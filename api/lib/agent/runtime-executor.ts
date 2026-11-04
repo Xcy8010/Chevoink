@@ -15,6 +15,7 @@ import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { withLeaseHeartbeat } from './runtime-heartbeat.js'
 import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionStateInTransaction } from './runtime-state.js'
 import { executeDurableToolStep } from './runtime-tool-step.js'
+import { readDurableAuthorInputBoundary } from './runtime-question.js'
 import { assertProviderBudget } from './runtime-budget.js'
 import { advanceDurableCheckpoint, advanceDurableContext } from './runtime-checkpoint-step.js'
 import { advanceDurableContinuation, advanceDurableCompletionObligations, advanceDurableToolStagnation } from './runtime-continuation.js'
@@ -245,6 +246,8 @@ async function refreshDurableGoalModel(token: RunLeaseToken) {
 export async function executeDurableStep(token: RunLeaseToken, signal: AbortSignal) {
   const lease = { ...token }
   signal.throwIfAborted()
+  const authorInput = await readDurableAuthorInputBoundary(lease)
+  if (authorInput) return authorInput
   const importBoundary = await readDurableImportBoundary(lease)
   if (importBoundary) return importBoundary
   // Goal continuations carry the author's real steering message in AgentMessage;
@@ -350,7 +353,7 @@ export async function runDurableExecution(token: RunLeaseToken, signal: AbortSig
   })
   if (result.kind === 'needs_attention') {
     signal.throwIfAborted()
-    await pauseDurableTaskForAttention(lease, { expectedRevision: result.frame.revision, expectedHash: result.frame.snapshotHash }, 'importBoundary' in result ? 'needs_input' : 'model_stalled')
+    await pauseDurableTaskForAttention(lease, { expectedRevision: result.frame.revision, expectedHash: result.frame.snapshotHash }, 'importBoundary' in result || 'authorInputRequired' in result ? 'needs_input' : 'model_stalled')
   }
   return result
 }

@@ -4,13 +4,14 @@ import { env } from '../../config/env.js'
 import { databaseNow, lockRunRoot, runtimeError, runtimeJson, runtimeTransaction } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
-import { prepareToolCursorOperation, type ToolExecutionCursor } from './runtime-tool-cursor.js'
+import { argumentNormalizationSchema, prepareToolCursorOperation, type ToolExecutionCursor } from './runtime-tool-cursor.js'
 import { commitOperationEffectInTransaction } from './runtime-operations.js'
 import { reduceExecutionReceipt } from './runtime-reducer.js'
 import { normalizeToolInput } from './tools/input-validation.js'
 import type { AgentTool, ToolContext, ToolResult } from './tools/types.js'
 import { assertGoalRevisionFence, readGoalExecution } from './goal-fence.js'
-import { assertQuestionWritingScope } from './writing-scope.js'
+import { assertQuestionWritingScope, readWritingScope } from './writing-scope.js'
+import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { recordWritingClarification } from './writing-clarification.js'
 import { DataAccessError } from '../prisma.js'
 import { recordToolFailure } from './runtime-operations.js'
@@ -42,12 +43,16 @@ export async function executeDurableQuestion(lease: RunLeaseToken, cursor: ToolE
     const finish = async (output: string, answer: string | null) => ({ receipt:
       await commitOperationEffectInTransaction(tx, lease, prepared.operation.id, prepared.operation.inputHash, async () => {
         ctx.signal.throwIfAborted()
+        const scope = await readWritingScope(tx, ctx), spec = taskSpecSchema.safeParse(scope.spec)
+        const authorRequired = scope.writing?.kind === 'needs_input' || spec.success && spec.data.scope.localEditBoundary?.kind === 'needs_input'
         const clarification = answer === null ? null : await recordWritingClarification(tx, ctx,
           { callId: ctx.callId, ...effective, answer, source: 'durable_question', requestId: request!.id })
         return runtimeJson({ toolResult: {
         ...(clarification ? { semanticTransition: clarification } : {}),
+        ...(authorRequired && !clarification ? { failureCode: 'AUTHOR_INPUT_REQUIRED' } : {}),
         output, summary: answer === null ? '提问未获回答' : '作者已回答',
-        display: { kind: 'question', ...effective, ...(answer === null ? { unanswered: true } : { answer }) },
+        display: { kind: 'question', ...effective, ...(answer === null ? { unanswered: true } : { answer }),
+          ...(clarification ? { scopeResolution: 'accepted' } : authorRequired ? { scopeResolution: 'needs_input' } : {}) },
       } }).value
       }) })
     const key = `question:${prepared.operation.id}`
@@ -74,8 +79,55 @@ export async function executeDurableQuestion(lease: RunLeaseToken, cursor: ToolE
   })
   if ('requestId' in waiting) return { kind: 'waiting_question' as const, requestId: waiting.requestId }
   const { receipt } = waiting
-  await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
-  return { kind: 'tool' as const, result: z.object({ toolResult: z.object({ output: z.string() }).passthrough() }).parse(receipt.result).toolResult as ToolResult }
+  const frame = await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
+  const result = z.object({ toolResult: z.object({ output: z.string() }).passthrough() }).parse(receipt.result).toolResult as ToolResult
+  if (result.failureCode === 'AUTHOR_INPUT_REQUIRED') return { kind: 'needs_attention' as const, frame,
+    authorInputRequired: true as const, reason: '章节范围尚未受理；已保留原任务，请明确需要写入或修改的对象。' }
+  return { kind: 'tool' as const, result }
+}
+
+/** Recover the same decision boundary after an effect/reducer crash. Only a
+ * verified receipt for the current assistant's consumed call can stop work. */
+export async function readDurableAuthorInputBoundary(lease: RunLeaseToken) {
+  return withRunLease(lease, async tx => {
+    const { frame } = await readExecutionStateInTransaction(tx, lease.taskRootId)
+    if (frame.state.phase !== 'idle') return null
+    const messages = frame.state.messages
+    let at = messages.length - 1
+    while (at >= 0 && messages[at].role === 'tool') at--
+    const assistant = messages[at]
+    if (assistant?.role !== 'assistant') return null
+    for (const call of assistant.toolCalls ?? []) {
+      if (call.name !== 'ask_user' || !messages.slice(at + 1).some(message => message.role === 'tool' && message.toolCallId === call.id)) continue
+      const operations = await tx.agentOperation.findMany({ where: { taskRootId: lease.taskRootId, kind: 'tool', action: 'ask_user', status: 'succeeded',
+        inputSnapshot: { path: ['input', 'callId'], equals: call.id },
+        effectReceipt: { is: { result: { path: ['toolResult', 'failureCode'], equals: 'AUTHOR_INPUT_REQUIRED' } } } }, include: { effectReceipt: true }, take: 2 })
+      if (!operations.length) continue // Imported/failed ordinary questions carry no new boundary.
+      if (operations.length !== 1) return runtimeError('RUNTIME_RECEIPT_INVALID', '已消费提问的原操作不唯一。')
+      const operation = operations[0], receipt = operation.effectReceipt
+      const result = z.object({ toolResult: z.object({ failureCode: z.string().optional() }) }).safeParse(receipt?.result)
+      if (!result.success || result.data.toolResult.failureCode !== 'AUTHOR_INPUT_REQUIRED') continue
+      if (!receipt || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash || runtimeJson(receipt.result).hash !== receipt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '已消费提问的原回执损坏。')
+      const input = z.object({ input: z.object({ callId: z.string(), args: z.unknown(), normalization: argumentNormalizationSchema.optional() }) }).parse(operation.inputSnapshot)
+      const normalization = input.input.normalization
+      if (normalization) {
+        const source = await readExecutionFrame(tx, lease.taskRootId, normalization.sourceRevision)
+        if (normalization.sourceRevision >= frame.revision || source.snapshotHash !== normalization.sourceSnapshotHash
+          || normalization.rawArguments !== call.arguments || normalization.normalizedArgsHash !== runtimeJson(input.input.args).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '已消费提问的参数归一化来源不一致。')
+      } else {
+        let args: unknown
+        try { args = JSON.parse(call.arguments) } catch { return runtimeError('RUNTIME_RECEIPT_INVALID', '已消费提问的原调用参数损坏。') }
+        if (runtimeJson(input.input.args).hash !== runtimeJson(args).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '已消费提问与当前调用不一致。')
+      }
+      if (input.input.callId !== call.id) return runtimeError('RUNTIME_RECEIPT_INVALID', '已消费提问调用身份不一致。')
+      const event = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `effect:${operation.id}` } })
+      if (!event || event.taskRootId !== lease.taskRootId || event.operationId !== operation.id || event.type !== 'effect.committed'
+        || runtimeJson(event.payload).hash !== runtimeJson({ operationId: operation.id, resultHash: receipt.resultHash }).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原提问回执与效果事件不一致。')
+      return { kind: 'needs_attention' as const, frame, authorInputRequired: true as const,
+        reason: '章节范围尚未受理；已保留原任务，请明确需要写入或修改的对象。' }
+    }
+    return null
+  })
 }
 
 export async function resolveDurableQuestion(input: { userId: string; runId: string; callId: string; requestId: string; answer: string }) {

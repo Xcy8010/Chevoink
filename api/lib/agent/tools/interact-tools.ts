@@ -85,7 +85,7 @@ export const askUserTool = defineTool({
       failureCode: 'AUTHOR_INPUT_REQUIRED',
       output: '本任务缺少必须由作者明确的目标或范围，已保存提问并等待输入。未选择默认方案，也不会继续调用模型。此提问已结束等待；请在输入框发送写明目标章节与范围的新指令，原合同、用量与已保存正文保持原值。',
       summary: '等待作者明确目标与范围',
-      display: { kind: 'question' as const, question: args.question, options: args.options, unanswered: true },
+      display: { kind: 'question' as const, question: args.question, options: args.options, unanswered: true, scopeResolution: 'needs_input' as const },
     })
     // 提问预算：超出额度直接回填，不再挂起，防止反复追问
     if (!consumeQuestionBudget(ctx.runId)) {
@@ -141,7 +141,7 @@ export const askUserTool = defineTool({
       { callId: ctx.callId, ...args, answer: result.answer!, source: 'legacy_question' }))
     if (authorRequired && !clarification) return { ...waitingForAuthor(),
       output: '作者回答已收到，但原冻结合同仍缺少可证明的目标或范围，未静默扩大权限。请在输入框发送写明目标章节与范围的新指令；原合同、用量与已保存正文保持原值。',
-      display: { kind: 'question' as const, question: args.question, options: args.options, answer: result.answer },
+      display: { kind: 'question' as const, question: args.question, options: args.options, answer: result.answer, scopeResolution: 'needs_input' as const },
     }
     return {
       ...(clarification ? { semanticTransition: clarification } : {}),
@@ -152,6 +152,7 @@ export const askUserTool = defineTool({
         question: args.question,
         options: args.options,
         answer: result.answer,
+        ...(clarification ? { scopeResolution: 'accepted' as const } : {}),
       },
     }
   },

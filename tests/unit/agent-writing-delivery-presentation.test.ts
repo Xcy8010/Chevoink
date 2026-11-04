@@ -214,6 +214,17 @@ describe('current committed manuscript wrap-up', () => {
     expect(text).toContain('正文保留「北岸闸门只开了半尺」。')
     expect(text).toContain('风格标签为“收束与留白”。')
   })
+  it('keeps an optional proposed book title without accepting invented saved text or metadata', async () => {
+    const { f, delivery } = await current()
+    const before = structuredClone(f.chapter)
+    const advice = '下一步建议书名用《渡口来信》。'
+    const text = completedWritingPresentationText(delivery, `${advice}\n建议书名改为《雾港》，已经保存。\n建议保留正文写道：“旧钥匙打开了门”。`)
+    expect(text).toContain(advice)
+    expect(text).not.toContain('雾港')
+    expect(text).not.toContain('旧钥匙')
+    expect(f.chapter).toEqual(before)
+    expect(mocks.save).not.toHaveBeenCalled()
+  })
   it.each(['「旧钥匙打开了门」', '“旧钥匙\n打开了门”', "'旧钥匙\n打开了门'", '本章写道：“旧钥匙打开了门”。', '原文是：“旧钥匙\n打开了门”。', '第3章却写“旧钥匙打开了门”。', '「灯」', '“留白”'])('rejects unsupported literal text without an attribution-prefix loophole: %s', async candidate => {
     const { delivery } = await current()
     const text = completedWritingPresentationText(delivery, `${candidate}\n\n等待回答的处理仍然克制。`)

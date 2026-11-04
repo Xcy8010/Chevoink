@@ -61,6 +61,18 @@ describe('versioned built-in writing resources', () => {
     expect(routeSkills({ mode: 'build', intent: 'write', freedom: 'balanced', prompt: '写下一章', ...runtime }).reasonCodes).not.toContain('DRAFT_FOUNDATION')
   })
 
+  it('marks a saved current 4.1 selection as frozen without changing its versions or stored records', async () => {
+    const saved = { routerVersion: '4.1.0', selected: [{ id: skillCatalog[3].id, version: skillCatalog[3].version }], loaded: [] }
+    const before = structuredClone(saved)
+    vi.spyOn(prisma.agentSkillRun, 'findFirst').mockResolvedValue(saved as never)
+    vi.spyOn(prisma.agentRun, 'findFirst').mockResolvedValue(null)
+    vi.spyOn(prisma.agentSkillInstallation, 'findMany').mockResolvedValue([])
+    const result = await resolveRuntimeSkillContext('u', 'n', 'old-41')
+    expect(result).toMatchObject({ routerVersion: '4.1.0' })
+    expect(result.catalog).toEqual(skillCatalog)
+    expect(saved).toEqual(before)
+  })
+
   it('a saved 3.7 router retains every 3.6 resource while new tasks use 4.0', async () => {
     vi.spyOn(prisma.agentSkillRun, 'findFirst').mockResolvedValue({ routerVersion: '3.7.0', selected: [], loaded: [] } as never)
     vi.spyOn(prisma.agentRun, 'findFirst').mockResolvedValue(null)

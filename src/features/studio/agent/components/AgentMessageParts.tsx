@@ -819,8 +819,13 @@ function ToolDisplayRenderer({
         <div className="border-t border-[var(--border-subtle)] py-2 pl-5">
           <p className="break-words text-xs leading-6 text-[var(--text-primary)]">{display.question}</p>
           <p className="mt-1 break-words text-[11px] leading-5 text-[var(--text-secondary)]">
-            {display.unanswered ? '未回答，Agent 已按默认方案继续' : `你的回答：${display.answer ?? ''}`}
+            {display.unanswered ? '尚未收到回答' : `你的回答：${display.answer ?? ''}`}
           </p>
+          {display.scopeResolution && (
+            <p className="mt-1 text-[11px] leading-5 text-[var(--text-secondary)]">
+              {display.scopeResolution === 'accepted' ? '章节目标已确认' : '章节目标仍待确认，尚未开始写入'}
+            </p>
+          )}
         </div>
       )
     case 'todoList': {

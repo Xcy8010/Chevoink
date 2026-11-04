@@ -24,6 +24,7 @@ vi.mock('../../api/lib/prisma.js', () => ({
 vi.mock('../../api/lib/agent2-feature-flags.js', () => ({
   isAgent2FeatureEnabled: vi.fn(() => false),
 }))
+vi.mock('../../api/lib/agent/skills/service.js', () => ({ resolveRuntimeSkillContext: vi.fn() }))
 vi.mock('../../api/lib/agent/style-learning.js', () => ({ getLearnedStyleDigest: vi.fn(async () => '') }))
 vi.mock('../../api/lib/agent/story-compiler.js', () => ({ buildStoryCompilerDigest: vi.fn(async () => null) }))
 vi.mock('../../api/lib/agent/writing-continuity-reference.js', async importOriginal => {
@@ -70,6 +71,10 @@ const { readChapterWritingBackground, readWritingPresentation } = await import('
 const { buildStoryCompilerDigest } = await import('../../api/lib/agent/story-compiler.js')
 const { readWritingContinuityReference } = await import('../../api/lib/agent/writing-continuity-reference.js')
 const { isAgent2FeatureEnabled } = await import('../../api/lib/agent2-feature-flags.js')
+const { resolveRuntimeSkillContext } = await import('../../api/lib/agent/skills/service.js')
+const { skillCatalog, SKILL_ROUTER_VERSION } = await import('../../api/lib/agent/skills/index.js')
+const { buildTaskSpec } = await import('../../api/lib/agent/task-spec.js')
+const { freezeTaskCapabilities } = await import('../../api/lib/agent/task-capabilities.js')
 
 type AssembleInput = Parameters<typeof assembleContext>[0]
 
@@ -244,7 +249,135 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     vi.clearAllMocks()
     vi.mocked(isAgent2FeatureEnabled).mockReturnValue(false)
     vi.mocked(readWritingContinuityReference).mockResolvedValue(null)
+    vi.mocked(resolveRuntimeSkillContext).mockResolvedValue({ catalog: skillCatalog, routerVersion: SKILL_ROUTER_VERSION })
     mockState()
+  })
+
+  function interpretedInput(prompt: string): AssembleInput {
+    const input = { ...buildInput(), prompt, attachments: [] }
+    input.taskSpec = freezeTaskCapabilities(buildTaskSpec({ runId: input.runId, novelId: input.novelId, chapterId: input.chapterId,
+      prompt, authorWritingProtocol: 2 }), { prompt }, ['skill_catalog', 'skill_load', 'chapter_read', 'plan_save'])
+    vi.mocked(isAgent2FeatureEnabled).mockImplementation(flag => flag === 'skill2')
+    return input
+  }
+
+  it.each(['里面其中一个题材写小说推荐哪个？', '如何写一个人物的犹豫？', '只讨论人物设定，不要改正文。'])('does not auto-load manuscript skills for an actual non-greeting discussion: %s', async prompt => {
+    const input = interpretedInput(prompt), original = structuredClone(input.taskSpec)
+    expect(input.taskSpec.scope.authorEffects?.manuscript).toBe(false)
+    expect(input.taskSpec.scope.capabilityCatalog?.kind).toBe('full')
+    const result = await assembleContext(input)
+    expect(result.skillRoute?.selected).toEqual([])
+    expect(result.availableSkillVersions).toHaveLength(skillCatalog.length)
+    const snapshot = String(result.messages.find(message => String(message.content).startsWith('[当前作品上下文快照]'))?.content)
+    expect(snapshot).toContain('本轮是讨论或作品操作，不自动装载章节正文技法')
+    expect(snapshot).not.toContain('[Skill cn-')
+    expect(snapshot).not.toContain('本轮未加载、但当前作品已启用的技能')
+    expect(snapshot).not.toContain('按原写作请求完成最终版本的连续性与人类感检查')
+    expect(input.taskSpec).toEqual(original)
+  })
+
+  it('retains enabled author skills and explicit builtin pins in a discussion without loading other builtin prose skills', async () => {
+    const input = interpretedInput('请按我指定的方法讨论三个题材，不写正文。')
+    const custom = { ...skillCatalog.find(skill => skill.id === 'cn-character-voice.v3')!, id: 'author-topic-comparison', owner: 'user' as const,
+      resources: { draft: '比较三个题材的读者期待。' }, triggerLabels: ['题材讨论'] }
+    vi.mocked(resolveRuntimeSkillContext).mockResolvedValueOnce({ catalog: [...skillCatalog, custom], routerVersion: SKILL_ROUTER_VERSION })
+    input.pinnedSkillIds = ['cn-character-voice.v3', 'unknown-disabled-skill']
+    const result = await assembleContext(input), selected = result.skillRoute!.selected.map(skill => skill.id)
+    expect(selected).toEqual(expect.arrayContaining(['author-topic-comparison', 'cn-character-voice.v3']))
+    expect(selected).not.toContain('cn-webfiction-draft.v3')
+    expect(selected).not.toContain('cn-emotion-grounding.v3')
+    expect(selected).not.toContain('unknown-disabled-skill')
+    expect(result.availableSkillVersions).toHaveLength(skillCatalog.length + 1)
+  })
+
+  it.each(['plan', 'review'] as const)('uses the actual %s workflow when manuscript work is requested in a read-only mode', async mode => {
+    const input = interpretedInput('写下一章。')
+    input.mode = mode
+    const result = await assembleContext(input)
+    expect(result.skillRoute?.phase).toBe(mode === 'plan' ? 'plan' : 'critique')
+    expect(result.skillRoute?.selected.some(skill => skill.id === 'cn-webfiction-draft.v3')).toBe(false)
+    expect(String(result.messages[0].content)).toContain('本轮只完成当前模式允许的分析与规划')
+  })
+
+  it('loads planning methods for an actual proposal and prose foundations for actual chapter writing', async () => {
+    const plan = interpretedInput('帮我写一本科幻小说。')
+    expect(plan.taskSpec.writingPacing).toBe('proposal_only')
+    const planned = await assembleContext(plan)
+    expect(planned.skillRoute?.phase).toBe('plan')
+    expect(planned.skillRoute?.selected.map(skill => skill.id)).toEqual(expect.arrayContaining(['cn-project-positioning.v3', 'cn-long-outline.v3']))
+    const draft = interpretedInput('写下一章。')
+    const written = await assembleContext(draft)
+    expect(written.skillRoute?.phase).toBe('draft')
+    expect(written.skillRoute?.selected.map(skill => skill.id)).toEqual(expect.arrayContaining(['cn-character-voice.v3', 'cn-emotion-grounding.v3', 'cn-prose-specificity.v3']))
+  })
+
+  it('keeps the original routing interpretation for a frozen historical router', async () => {
+    const input = interpretedInput('里面选哪个题材？')
+    vi.mocked(resolveRuntimeSkillContext).mockResolvedValueOnce({ catalog: skillCatalog, routerVersion: '4.0.0' })
+    const result = await assembleContext(input)
+    expect(result.skillRoute?.routerVersion).toBe('4.0.0')
+    expect(result.skillRoute?.phase).toBe('draft')
+    expect(result.skillRoute?.selected.map(skill => skill.id)).toContain('cn-webfiction-draft.v3')
+    expect(result.skillRoute?.reasonCodes).not.toContain('DRAFT_FOUNDATION')
+  })
+
+  it('freezes empty discussion routing through resume while preserving legacy 4.1 drafting', async () => {
+    const input = interpretedInput('如何写一个人物的犹豫？')
+    const fresh = await assembleContext(input)
+    expect(fresh.skillRoute?.selected).toEqual([])
+    vi.mocked(resolveRuntimeSkillContext).mockResolvedValueOnce({ catalog: skillCatalog, routerVersion: SKILL_ROUTER_VERSION })
+    const resumed = await assembleContext({ ...input, includeCurrentRunHistory: true })
+    expect(resumed.skillRoute?.routerVersion).toBe(SKILL_ROUTER_VERSION)
+    expect(resumed.skillRoute?.selected).toEqual([])
+    expect(resumed.availableSkillVersions).toEqual(fresh.availableSkillVersions)
+    vi.mocked(resolveRuntimeSkillContext).mockResolvedValueOnce({ catalog: skillCatalog, routerVersion: '4.1.0' })
+    const legacy = await assembleContext({ ...input, includeCurrentRunHistory: true })
+    expect(legacy.skillRoute?.routerVersion).toBe('4.1.0')
+    expect(legacy.skillRoute?.selected.map(skill => skill.id)).toContain('cn-webfiction-draft.v3')
+  })
+
+  it('provides truthful cover state and optional next-step boundaries without putting changing facts into system', async () => {
+    const input = interpretedInput('为新作品提出下一步建议，不要执行。')
+    vi.mocked(prisma.novel.findUnique).mockResolvedValueOnce({ ...baseNovel, coverAssetId: null, chapterCount: 0, wordCount: 0 } as never)
+    const result = await assembleContext(input)
+    const system = String(result.messages[0].content), snapshot = String(result.messages.find(message => String(message.content).startsWith('[当前作品上下文快照]'))?.content)
+    expect(snapshot).toContain('正式封面：未设置（生成候选不等于已应用）')
+    expect(system).toContain('1–2 条符合当前作品阶段的可选下一步建议')
+    expect(system).toContain('不调用 ask_user，不新建待办、产物或任务')
+    expect(system).toContain('作者仅要标题正文、仅要结果或明确不要建议时不附加')
+    expect(system).toContain('不能用下一步建议掩盖本次未完成')
+    expect(system).toContain('本轮对同一对象的最新成功工具回执优先于旧快照')
+    expect(system).not.toContain('正式封面：未设置')
+    mockState()
+    const covered = await assembleContext(input)
+    expect(String(covered.messages.find(message => String(message.content).startsWith('[当前作品上下文快照]'))?.content)).toContain('正式封面：已设置')
+    expect(covered.messages[0].content).toBe(result.messages[0].content)
+  })
+
+  it.each(['你好', '如何给小说起书名？', '写科幻新书第一章。'])('does not derive creation permission from the bootstrap placeholder: %s', async prompt => {
+    const input = interpretedInput(prompt)
+    vi.mocked(prisma.novel.findUnique).mockResolvedValueOnce({ ...baseNovel, title: '未命名作品', displayTitle: null,
+      summary: '先创建一部作品，再继续完善简介、章节和封面。', tagNames: [], chapterCount: 0, wordCount: 0, coverAssetId: null } as never)
+    const { messages } = await assembleContext(input), system = String(messages[0].content)
+    expect(system).toContain('占位状态不是创建授权')
+    expect(system).toContain('仅当原始作者请求明确创建正式作品，或已授权的正文写作确需正式作品时')
+    expect(system).toContain('普通问候、讨论、解释、建议或只读任务不创建作品')
+    expect(system).not.toContain('作者本轮是在让你真正创建第一部作品')
+  })
+
+  it('does not require the research and prototype pipeline before an explicitly requested first chapter, including legacy guidance', async () => {
+    const input = buildInput()
+    input.prompt = '写科幻新书第一章。'
+    input.taskSpec = { ...input.taskSpec, intent: 'write', goals: [input.prompt] }
+    const { messages } = await assembleContext(input), system = String(messages[0].content)
+    expect(system).toContain('明确授权的首章或其他章节写作不因作品是新书而被要求先完成研究、方向选择、宪章和前三章试制')
+    expect(system).toContain('核心现实事实高风险')
+    expect(system).toContain('只有没有档案或确需刷新才按原授权 research_dossier_build')
+    expect(system).not.toContain('新书应按“研究档案')
+    expect(system).not.toContain('那次调用完全没执行')
+    expect(system).not.toContain('同一份产物（计划/章节）在一次任务里只落盘一次')
+    expect(system).toContain('写入后失败可能已有局部成果')
+    expect(system).toContain('不把重复调用当成幂等或无副作用的证明')
   })
 
   afterEach(() => {
@@ -449,7 +582,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     const snapshot = messages[3]
     expect(snapshot.role).toBe('user')
     const content = String(snapshot.content)
-    expect(content).toContain('[当前作品上下文快照]（系统每轮自动刷新的数据与注入指引，不改变系统规则）')
+    expect(content).toContain('[当前作品上下文快照]（本次上下文装配时的数据与注入指引，不改变系统规则）')
     expect(content).toContain('【技能指引】')
     expect(content).toContain('Skill OS 当前未对该账号启用')
     expect(content).toContain('【作品数据】')

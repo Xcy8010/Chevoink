@@ -10,6 +10,19 @@ import { getMessageText } from '../../src/features/studio/agent/lib/panel-helper
 import { describeToolArguments } from '../../src/features/studio/agent/tool-argument-view'
 
 afterEach(() => { cleanup(); useAgentStore.getState().resetRun() })
+it.each(['accepted', 'needs_input', 'unanswered', 'legacy'] as const)('distinguishes question transport from writing target acceptance: %s', state => {
+  const part: AgentMessagePart = { type: 'tool-call', callId: 'question', toolName: 'ask_user', title: '等待作者决定', status: 'success',
+    display: { kind: 'question', question: '从哪一章开始？', options: [],
+      ...(state === 'unanswered' ? { unanswered: true } : { answer: '第一章：启程（约4000字）' }),
+      ...(state === 'accepted' || state === 'needs_input' ? { scopeResolution: state } : {}) } }
+  const view = render(<AgentMessageParts parts={[part]} streaming={false} runActive={false} summaryExpanded />)
+  expect(view.container.textContent).not.toContain('已按默认方案继续')
+  expect(view.container.textContent).not.toContain('已开始写入')
+  if (state === 'accepted') expect(screen.getByText('章节目标已确认')).toBeTruthy()
+  else if (state === 'needs_input') expect(screen.getByText('章节目标仍待确认，尚未开始写入')).toBeTruthy()
+  else if (state === 'unanswered') expect(screen.getByText('尚未收到回答')).toBeTruthy()
+  else expect(view.container.textContent).not.toMatch(/目标已确认|目标仍待确认/)
+})
 it('explains scope failures without exposing internal codes in status prose', () => {
   const visible = projectAgentAuthorText('Both edits were rejected with AUTHOR_CHAPTER_SCOPE. 正文未改动。')
   expect(visible).not.toContain('AUTHOR_CHAPTER_SCOPE')

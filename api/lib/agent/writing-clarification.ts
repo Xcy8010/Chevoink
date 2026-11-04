@@ -48,6 +48,60 @@ export function eligibleWritingClarification(spec: TaskSpec) {
 
 type ClarificationChapter = { id: string; revision: number; orderIndex: number; orderInVolume: number; volumeId: string; content: string; volume: { orderIndex: number } }
 type WritingProjection = Pick<TaskSpec['scope'], 'localEditBoundary' | 'writingActions'> & { writing: Writing }
+
+/** A chapter noun can carry a title and parenthesized specifications. Those
+ * are arguments to the admitted action, not a second request or a new verb. */
+function chapterAnswerArgument(answer: string, raw: ReturnType<typeof parseAuthorWritingRequest>, masked: string): { selector: string; consent: string } | null | false {
+  const addressed = raw.evidence.targets.filter(target => target.range)
+  const target = addressed[0]
+  if (!target) return null
+  const range = target.range!
+  if (!['first', 'range'].includes(range.kind) || (range.count ?? 1) !== 1
+    || !/^(?:(?:就是|就选|选择|确认|是|就|选)|\s)*$/u.test(masked.slice(0, target.span.start))) return null
+  const tail = masked.slice(target.span.end), first = tail.search(/\S/u)
+  if (first < 0) return null // The ordinary noun-only path already handles it.
+  const at = target.span.end + first
+  if (!/[:：（(]/u.test(masked[at]) && !raw.evidence.quoted.some(quote => quote.start === at)) return null
+  if (addressed.length !== 1 || raw.evidence.quoted.some(quote => !quote.closed)) return false
+  const titleStart = /[:：]/u.test(masked[at]) ? at + 1 : -1
+  const group = titleStart < 0 ? -1 : masked.slice(titleStart).search(/[（(]/u)
+  const titleEnd = titleStart < 0 ? -1 : group < 0 ? masked.length : titleStart + group
+  if (titleStart >= 0) {
+    const title = masked.slice(titleStart, titleEnd).trim(), titleRequest = parseAuthorWritingRequest(title)
+    if (titleRequest.evidence.operations.some(operation => operation.polarity === 'negative'
+      || operation.targetIndices.length || operation.kind !== 'write' || !title.slice(operation.span.end).trim())
+      || /^(?:请|帮我|替我|为我|顺便|然后|再|please)\s*/iu.test(title)) return false
+  }
+  const stack: string[] = [], pairs: Record<string, string> = { '（': '）', '(': ')' }
+  let hadGroup = false
+  for (let index = target.span.end; index < masked.length; index++) {
+    const char = masked[index]
+    if (pairs[char]) { stack.push(pairs[char]); hadGroup = true; continue }
+    if (char === '）' || char === ')') {
+      if (stack.pop() !== char) return false
+      continue
+    }
+    if (!stack.length && (/[。！？!?；;\r\n]/u.test(char) || hadGroup && !/[\s，,、]/u.test(char))) return false
+  }
+  if (stack.length) return false
+  for (const operation of raw.evidence.operations) {
+    if (operation.span.start < target.span.end) return false
+    if (titleStart >= 0 && operation.span.start >= titleStart && operation.span.end <= titleEnd) {
+      // A framed title may contain a non-executable verb (e.g. a verb with a
+      // literary complement). A real target, negation or imperative stays out.
+      continue
+    }
+    const before = masked.slice(target.span.end, operation.span.start)
+    const start = [...before.matchAll(/[，,。！？!?；;\r\n（(:：]/gu)].at(-1)?.index
+    const head = before.slice(start === undefined ? 0 : start + 1).trim()
+    // A new imperative inside an annotation is still a new action. Narrative
+    // subjects in plot specifications remain data, including quoted dialogue.
+    if (!/^(?:主角|角色|人物|他(?:们)?|她(?:们)?|有人|得知有人)[^。！？!?；;]*$/u.test(head)) return false
+  }
+  const consent = titleStart < 0 ? masked : masked.slice(0, titleStart) + ' '.repeat(titleEnd - titleStart) + masked.slice(titleEnd)
+  return { selector: answer.slice(target.span.start, target.span.end), consent }
+}
+
 export function clarifyWritingProjection(spec: TaskSpec, prompt: string, answer: string, chapters: ClarificationChapter[]): WritingProjection | null {
   if (!eligibleWritingClarification(spec) || /[?？]/u.test(lexAuthorWritingRequest(answer).masked)) return null
   if (spec.scope.writingActions?.operations.some(operation => operation.resolution === 'denied')) return null
@@ -76,11 +130,14 @@ export function clarifyWritingProjection(spec: TaskSpec, prompt: string, answer:
   }
   if (!chapters.length && !spec.scope.localEditBoundary && eligibleEmptyWritingClarification(spec, prompt)
     && explicitFirstChapterAnswer(answer)) return { writing: effectiveWriting(spec.scope.writing!) }
-  const original = parseAuthorWritingRequest(prompt), raw = parseAuthorWritingRequest(answer)
+  const original = parseAuthorWritingRequest(prompt), answerRequest = parseAuthorWritingRequest(answer)
   const masked = lexAuthorWritingRequest(answer).masked
-  if (/(?:不要|不是|并非|别(?:选|改|写)|do not|don't|not\s+(?:chapter|the))/iu.test(masked)) return null
+  const argument = spec.intent === 'write' && !spec.scope.localEditBoundary ? chapterAnswerArgument(answer, answerRequest, masked) : null
+  if (argument === false) return null
+  if (/(?:不要|不是|并非|别(?:选|改|写)|do not|don't|not\s+(?:chapter|the))/iu.test(argument?.consent ?? masked)) return null
   if (/(?:暂不|尚未|还没|不太|未能).{0,8}(?:确定|确认|决定)|也许|可能|大概|应该.{0,6}(?:吧|可以)|是否|会不会|能否|可否|好不好|合不合适|取消|撤回/u.test(masked)) return null
-  if (!raw.hasAction) {
+  const raw = argument ? parseAuthorWritingRequest(argument.selector) : answerRequest
+  if (!raw.hasAction && !argument) {
     // A noun-only answer supplies the missing argument, not an invented verb
     // over a rejected target. Unknown prose cannot become affirmative authority.
     const spans = [...raw.evidence.targets.map(item => item.span), ...raw.evidence.quoted]
@@ -91,7 +148,7 @@ export function clarifyWritingProjection(spec: TaskSpec, prompt: string, answer:
   // Resolve only an actual human's missing argument with the original action.
   // The question/options are presentation, never input to this resolver.
   const verb = spec.intent === 'write' ? '写入' : '修改'
-  let parsed = raw.hasAction ? raw : parseAuthorWritingRequest(`${verb}${answer}`)
+  let parsed = raw.hasAction ? raw : parseAuthorWritingRequest(`${verb}${argument?.selector ?? answer}`)
   const sourceQuotes = raw.evidence.quoted.filter(item => item.kind === 'quotation' && item.closed)
   if (!parsed.hasAction && !raw.evidence.operations.length && sourceQuotes.length === 1) {
     const quote = sourceQuotes[0]

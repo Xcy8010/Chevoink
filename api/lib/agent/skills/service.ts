@@ -648,7 +648,7 @@ export async function resolveRuntimeSkillContext(userId: string, novelId: string
   const routerVersion = durable ? durable.configuration.skillRouterVersion ?? '3.1.0' : saved?.routerVersion ?? SKILL_ROUTER_VERSION
   const builtinCatalog = routerVersion === '3.6.0' ? frozenV350BuiltinCatalog
     : routerVersion === '3.7.0' ? frozenV360BuiltinCatalog
-      : routerVersion === '4.0.0' || routerVersion === SKILL_ROUTER_VERSION ? skillCatalog : historicalBuiltinCatalog
+      : ['4.0.0', '4.1.0', SKILL_ROUTER_VERSION].includes(routerVersion) ? skillCatalog : historicalBuiltinCatalog
   const pinned = new Map([...readSelected(saved?.loaded ?? []), ...readSelected(saved?.selected ?? [])].map(item => [item.id, item.version]))
   const frozenInventory = durable?.configuration.skillInventoryVersion === 1
     ? new Map(durable.configuration.pinnedSkillVersions.map(item => [item.id, item.version])) : null

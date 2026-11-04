@@ -3,6 +3,7 @@ import type { Prisma } from '@prisma/client'
 import { skillCatalog, SKILL_ROUTER_VERSION } from '../../api/lib/agent/skills/index.js'
 import { buildCustomSkillArtifacts } from '../../api/lib/agent/skills/custom.js'
 import { resolveRuntimeSkillContext } from '../../api/lib/agent/skills/service.js'
+import { readOriginalTaskRequest } from '../../api/lib/agent/original-request.js'
 
 const mocks = vi.hoisted(() => ({ db: {
   agentSkillRun: { findFirst: vi.fn() }, agentRun: { findFirst: vi.fn() }, agentExecutionState: { findUnique: vi.fn() },
@@ -70,6 +71,20 @@ describe('durable frozen skill inventory compatibility', () => {
     mocks.db.agentRun.findFirst.mockResolvedValueOnce({ runtimeProtocolVersion: 0, taskRootId: null, status: 'running' })
     const result = await resolveRuntimeSkillContext('user', 'novel', 'run')
     expect(result.catalog.map(skill => skill.id)).toEqual([...skillCatalog.map(skill => skill.id), installation.skillId])
+    expect(mocks.saved).not.toHaveBeenCalled()
+  })
+
+  it('retains the original current router and empty selection for typed Continue under a new run identity', async () => {
+    const selected = { routerVersion: SKILL_ROUTER_VERSION, selected: [], loaded: [] }
+    const before = structuredClone(selected)
+    mocks.db.agentSkillRun.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce(selected)
+    mocks.db.agentRun.findFirst.mockResolvedValueOnce({ runtimeProtocolVersion: 0, taskRootId: null, status: 'running' })
+    mocks.db.agentSkillInstallation.findMany.mockResolvedValueOnce([])
+    vi.mocked(readOriginalTaskRequest).mockResolvedValueOnce({ sourceRunId: 'origin' } as never)
+    const result = await resolveRuntimeSkillContext('user', 'novel', 'run')
+    expect(result).toMatchObject({ routerVersion: SKILL_ROUTER_VERSION })
+    expect(mocks.db.agentSkillRun.findFirst).toHaveBeenCalledWith({ where: { runId: 'origin', userId: 'user', novelId: 'novel' } })
+    expect(selected).toEqual(before)
     expect(mocks.saved).not.toHaveBeenCalled()
   })
 })
