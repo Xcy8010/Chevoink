@@ -78,7 +78,7 @@ describe.skipIf(!available)('authenticated empty-book clarification', () => {
     'pauses the original durable task after an unaccepted scope answer, crash=$crash wrapped=$wrapped', ({ crash, wrapped }) => fixture(shortSceneRequest, async ctx => {
       const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx,
         buildTaskSpec({ ...ctx, prompt: shortSceneRequest, authorWritingProtocol: 2, reviewProtocol: 1, localEditProtocol: 1 }), shortSceneRequest, 2))
-      await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(spec).value, status: 'queued' } })
+      await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value, status: 'queued' } })
       const sourceMessageId = randomUUID()
       await prisma.agentMessage.create({ data: { id: sourceMessageId, sessionId: ctx.sessionId, runId: ctx.runId, role: 'user', parts: [{ type: 'text', text: shortSceneRequest }] } })
       const root = await initializeDurableTask({ userId: ctx.userId, runId: ctx.runId, sourceMessageId })
