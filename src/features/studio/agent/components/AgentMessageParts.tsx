@@ -1,4 +1,4 @@
-import { memo, useEffect, useId, useMemo, useState } from 'react'
+import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   BookOpenText,
   Bot,
@@ -1123,21 +1123,45 @@ const SubAgentCallCard = memo(function SubAgentCallCard({
 const ReasoningPart = memo(function ReasoningPart({ text, streaming, count, actions }: { text: string; streaming: boolean; count: number; actions: string[] }) {
   const [expanded, setExpanded] = useState(false)
   const contentId = useId()
+  const contentRef = useRef<HTMLDivElement>(null)
+  const pinnedToBottom = useRef(true)
+  const lastScrollTop = useRef(0)
+  useLayoutEffect(() => {
+    const node = contentRef.current
+    if (!expanded || !node || !pinnedToBottom.current) return
+    node.scrollTop = node.scrollHeight
+    lastScrollTop.current = node.scrollTop
+  }, [expanded, text])
   const sentences = text.split(/(?<=[。！？.!?])\s*|\n+/).map(line => line.trim()).filter(line => /[\p{L}\p{N}]/u.test(line))
   // Extract a real later judgment, without rewriting an intention as success.
   const conclusion = [...sentences].reverse().find(sentence => !/^(?:先|首先|接下来|下一步|然后|再|需要|准备|计划|打算|调用|工具参数|调用参数|我(?:们)?(?:会|将|先|需要|准备|打算|要)|(?:I|We) (?:will|need|should|plan|want)\b|(?:call|invoke|arguments)\b)/i.test(sentence) && !/[？?]$/.test(sentence))
   const preview = (streaming ? sentences.at(-1) : conclusion)?.replace(/\s+/g, ' ').slice(0, 42)
   const title = streaming ? `正在分析…${preview ? ` · ${preview}` : ''}`
-    : preview ? `分析：${preview}` : actions.length ? `分析记录 · ${actions.at(-1)}` : '分析记录'
+    : preview ? preview : actions.length ? `分析记录 · ${actions.at(-1)}` : '分析记录'
   return <div className="text-[11px] text-[var(--text-secondary)]" data-agent-analysis="true" data-reasoning-running={streaming || undefined}>
     <button type="button" aria-label="思考过程" aria-expanded={expanded} aria-controls={contentId} disabled={!text}
-      onClick={() => setExpanded(value => !value)} className="flex min-h-8 max-w-full items-center gap-2 text-left">
+      onClick={() => {
+        if (!expanded) { pinnedToBottom.current = true; lastScrollTop.current = 0 }
+        setExpanded(value => !value)
+      }} className="flex min-h-8 w-full min-w-0 items-center gap-2 text-left">
       <Brain className={cn('h-3.5 w-3.5 shrink-0', streaming && 'motion-safe:animate-pulse')} />
-      <span className="min-w-0 truncate">{title}</span>
-      {count > 1 ? <span className="shrink-0 text-[var(--text-tertiary)]">{count} 段</span> : null}
-      {text ? expanded ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" /> : null}
+      <span className="min-w-0 flex-1 truncate">{title}</span>
+      <span className="ml-auto flex shrink-0 items-center gap-2" data-analysis-controls>
+        {count > 1 ? <span className="shrink-0 tabular-nums text-[var(--text-tertiary)]">{count} 段</span> : null}
+        <span className="inline-flex h-3 w-3 shrink-0">{text ? expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" /> : null}</span>
+      </span>
     </button>
-    {expanded && text ? <div id={contentId} className="max-h-44 overflow-y-auto whitespace-pre-wrap break-words border-l border-[var(--border-subtle)] py-1 pl-5 leading-6">{text}</div> : null}
+    {expanded && text ? <div id={contentId} ref={contentRef} onScroll={() => {
+      const node = contentRef.current
+      if (!node || node.clientHeight === 0) return
+      const previousTop = lastScrollTop.current
+      lastScrollTop.current = node.scrollTop
+      const distance = node.scrollHeight - node.scrollTop - node.clientHeight
+      // Match the chat viewport: any deliberate upward movement detaches;
+      // browser clamping at the actual bottom does not. Reaching bottom resumes.
+      if (node.scrollTop < previousTop - 2 && distance > 1) pinnedToBottom.current = false
+      else if (distance <= 1) pinnedToBottom.current = true
+    }} className="max-h-44 overflow-y-auto whitespace-pre-wrap break-words border-l border-[var(--border-subtle)] py-1 pl-5 leading-6">{text}</div> : null}
   </div>
 })
 

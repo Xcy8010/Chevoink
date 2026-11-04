@@ -27,6 +27,10 @@ import type {
  */
 
 // Private, run-scoped pending prose never enters author messages or caches.
+// A hydrated message remains visible while its stream replays. Only a real
+// replayed start switches subsequent deltas from append to cumulative replacement.
+type MessageReplay = { started: boolean; text: string; reasoning: string; afterCallId: string | null; reasoningSlot: number; lastPart: 'text' | 'reasoning' | 'tool' | null; seenCalls: Set<string> }
+const restoredMessageReplay = new Map<string, MessageReplay>()
 const authorTextStreams = new Map<string, ReturnType<typeof createAgentAuthorTextStream>>()
 const reasoningTextStreams = new Map<string, { part: AgentMessagePart; stream: ReturnType<typeof createAgentAuthorTextStream> }>()
 
@@ -442,7 +446,7 @@ function deriveSessionStateFromMessages(messages: AgentUIMessage[]): {
 
   for (const message of messages) {
     for (const part of message.parts) {
-      if (part.type !== 'tool-call' || part.preparing) {
+      if (part.type !== 'tool-call' || part.preparing || part.subagentCallId) {
         continue
       }
       if (part.status === 'success' && part.display?.kind === 'todoList' && message.runId === messages.at(-1)?.runId) {
@@ -483,10 +487,14 @@ function projectStoredMessage(message: AgentUIMessage): AgentUIMessage {
   return message.role === 'assistant' ? { ...message, parts: projectStoredParts(message.parts) } : message
 }
 
+function messageBelongsToRun(message: AgentUIMessage, runId: string): boolean {
+  return message.runId === runId || Boolean(message.runTiming?.scopeId?.startsWith('root:') && message.runTiming.sourceRunId === runId)
+}
+
 /** Reconnection may start at a tool frame. Restore only its exact owned message. */
 function ensureToolMessage(messages: AgentUIMessage[], event: { messageId: string; runId: string; ts: string }, goalId: string | null): AgentUIMessage[] | null {
   const existing = messages.find(message => message.id === event.messageId)
-  if (existing) return existing.runId === event.runId && existing.role === 'assistant' ? messages : null
+  if (existing) return messageBelongsToRun(existing, event.runId) && existing.role === 'assistant' ? messages : null
   return [...messages, { id: event.messageId, runId: event.runId, role: 'assistant', goalId, parts: [], createdAt: event.ts,
     runTiming: messages.find(message => (message.runTiming?.sourceRunId ?? message.runId) === event.runId)?.runTiming }]
 }
@@ -514,6 +522,42 @@ function appendDelta(
   }
 
   return [...parts, { type, text: delta }]
+}
+
+/** A partial replay never shrinks saved text; only new suffixes or text.final replace it. */
+function reconcileReplayedText(parts: AgentMessagePart[], text: string): AgentMessagePart[] {
+  const saved = parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('')
+  if (saved.startsWith(text) || !text.startsWith(saved)) return parts
+  const suffix = text.slice(saved.length)
+  let last = -1
+  for (let index = parts.length - 1; index >= 0; index--) if (parts[index].type === 'text') { last = index; break }
+  return last < 0 ? [...parts, { type: 'text', text: suffix }] : parts.map((part, index) => index === last && part.type === 'text' ? { ...part, text: part.text + suffix } : part)
+}
+
+function reconcileReplayedReasoning(parts: AgentMessagePart[], replay: MessageReplay, final = false): AgentMessagePart[] {
+  const start = replay.afterCallId ? parts.findIndex(part => part.type === 'tool-call' && part.callId === replay.afterCallId) + 1 : 0
+  const next = parts.findIndex((part, index) => index >= start && part.type === 'tool-call' && !part.preparing)
+  const end = next < 0 ? parts.length : next
+  const slots = parts.flatMap((part, index) => index >= start && index < end && part.type === 'reasoning' ? [index] : [])
+  const target = slots[replay.reasoningSlot]
+  if (target === undefined) return [...parts.slice(0, end), { type: 'reasoning', text: replay.reasoning }, ...parts.slice(end)]
+  return parts.map((part, index) => index === target && part.type === 'reasoning'
+    && (final || !part.text.startsWith(replay.reasoning)) ? { ...part, text: replay.reasoning } : part)
+}
+
+function finalizeReplayedReasoning(messages: AgentUIMessage[], event: { runId: string; messageId: string; callId: string }): AgentUIMessage[] {
+  const replay = restoredMessageReplay.get(`${event.runId}:${event.messageId}`)
+  return replay?.started && replay.lastPart === 'reasoning' && !replay.seenCalls.has(event.callId)
+    ? updateMessageParts(messages, event.messageId, parts => reconcileReplayedReasoning(parts, replay, true)) : messages
+}
+
+function noteReplayedTool(event: { runId: string; messageId: string; callId: string }) {
+  const replay = restoredMessageReplay.get(`${event.runId}:${event.messageId}`)
+  if (!replay?.started || replay.seenCalls.has(event.callId)) return
+  replay.seenCalls.add(event.callId)
+  replay.afterCallId = event.callId
+  replay.reasoningSlot = -1
+  replay.lastPart = 'tool'
 }
 
 /** 任务停止/结束后把仍处于「执行中」的工具卡片就地收尾：
@@ -699,7 +743,12 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     }) }),
 
   resumeRun: (runId, sessionId, runGoalId = null, motionAfterSeq) =>
-    set((state) => ({
+    set((state) => {
+      restoredMessageReplay.clear()
+      for (const message of state.messages) if (messageBelongsToRun(message, runId) && message.role === 'assistant') {
+        restoredMessageReplay.set(`${runId}:${message.id}`, { started: false, text: '', reasoning: '', afterCallId: null, reasoningSlot: -1, lastPart: null, seenCalls: new Set() })
+      }
+      return ({
       textRevealTargets: {},
       motionAfterSeq: motionAfterSeq ?? null,
       liveToolCallIds: new Set<string>(),
@@ -730,12 +779,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             ...(state.sessionSignals[sessionId] ? (() => { const next = { ...state.sessionSignals }; delete next[sessionId]; return { sessionSignals: next } })() : {}),
           }
         : {}),
-      // 不清空变更/待办：历史部分由 restoreMessages 推导，活跃 run 部分由事件重放按 callId 去重补齐
-    })),
+      // Persisted tool history is authoritative; replay only reconciles later witnesses.
+    }) }),
 
   restoreMessages: (messages, sessionId = null, snapshot) => {
     authorTextStreams.clear()
     reasoningTextStreams.clear()
+    restoredMessageReplay.clear()
     const restored = decorateAcceptedMessages(messages.map(projectStoredMessage))
     const derived = deriveSessionStateFromMessages(restored)
     const cached = sessionId ? sessionMessagesCache.get(sessionId) : undefined
@@ -819,6 +869,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   resetRun: () => {
     authorTextStreams.clear()
     reasoningTextStreams.clear()
+    restoredMessageReplay.clear()
     // 离开旧会话前把最新消息（含刚直播完的内容）快照进缓存：切回来可零延迟复原
     const { loadedSessionId: leavingSessionId, messages: leavingMessages, todos } = get()
     writeSessionMessagesCache(leavingSessionId, leavingMessages, todos)
@@ -1161,8 +1212,17 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             },
           }
 
-        case 'message.start':
-          if (state.messages.some(message => message.id === event.messageId)) return base
+        case 'message.start': {
+          const existing = state.messages.find(message => message.id === event.messageId)
+          if (existing) {
+            const key = `${event.runId}:${event.messageId}`, replay = restoredMessageReplay.get(key)
+            if (messageBelongsToRun(existing, event.runId) && existing.role === 'assistant' && replay && !replay.started) {
+              replay.started = true
+              authorTextStreams.delete(key)
+              reasoningTextStreams.delete(key)
+            }
+            return base
+          }
           return {
             ...base,
             messages: [
@@ -1179,12 +1239,17 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             ],
           }
 
+        }
+
         case 'text.delta': {
           const key = `${event.runId}:${event.messageId}`
           const stream = authorTextStreams.get(key) ?? createAgentAuthorTextStream()
           authorTextStreams.set(key, stream)
           const delta = stream.push(event.delta)
-          const messages = delta ? updateMessageParts(state.messages, event.messageId, parts => appendDelta(parts, 'text', delta)) : state.messages
+          const replay = restoredMessageReplay.get(key)
+          if (replay?.started) { replay.text += delta; if (delta) replay.lastPart = 'text' }
+          const messages = delta ? updateMessageParts(state.messages, event.messageId, parts => replay?.started
+            ? reconcileReplayedText(parts, replay.text) : appendDelta(parts, 'text', delta)) : state.messages
           const text = messages.find(message => message.id === event.messageId)?.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('') ?? ''
           return {
             ...base,
@@ -1201,6 +1266,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           authorTextStreams.delete(`${event.runId}:${event.messageId}`)
           reasoningTextStreams.delete(`${event.runId}:${event.messageId}`)
           const text = event.asReasoning ? '' : projectAgentAuthorText(event.text)
+          const replay = restoredMessageReplay.get(`${event.runId}:${event.messageId}`)
+          if (replay?.started) { replay.text = text; replay.lastPart = 'text' }
           const previousText = state.messages.find(message => message.id === event.messageId)?.parts
             .filter(part => part.type === 'text').map(part => part.text).join('') ?? ''
           return {
@@ -1224,11 +1291,20 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           if (!isRunActive(state.phase)) return base
           const previous = state.messages.find(message => message.id === event.messageId)?.parts.at(-1)
           const key = `${event.runId}:${event.messageId}`
+          const replay = restoredMessageReplay.get(key)
+          if (replay?.started && replay.lastPart !== 'reasoning') {
+            replay.reasoning = ''
+            replay.reasoningSlot++
+            replay.lastPart = 'reasoning'
+            reasoningTextStreams.delete(key)
+          }
           const cached = reasoningTextStreams.get(key)
           const stream = cached && cached.part === previous ? cached.stream : createAgentAuthorTextStream()
-          if (cached?.part !== previous && previous?.type === 'reasoning') stream.push(previous.text)
+          if (!replay?.started && cached?.part !== previous && previous?.type === 'reasoning') stream.push(previous.text)
           const visibleDelta = stream.push(event.delta)
-          const messages = updateMessageParts(state.messages, event.messageId, parts => appendDelta(parts, 'reasoning', event.delta))
+          if (replay?.started) replay.reasoning += event.delta
+          const messages = updateMessageParts(state.messages, event.messageId, parts => replay?.started
+            ? reconcileReplayedReasoning(parts, replay) : appendDelta(parts, 'reasoning', event.delta))
           const current = messages.find(message => message.id === event.messageId)?.parts.at(-1)
           // Use the same published prefix as the message renderer. Raw model
           // tokens, hidden protocol and unfinished paragraphs are not visible
@@ -1239,8 +1315,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         }
 
         case 'tool.call': {
-          const messages = ensureToolMessage(state.messages, event, event.runId === state.runId ? state.runGoalId : null)
-          if (!messages) return {}
+          const owned = ensureToolMessage(state.messages, event, event.runId === state.runId ? state.runGoalId : null)
+          if (!owned) return {}
+          const messages = finalizeReplayedReasoning(owned, event)
+          noteReplayedTool(event)
           const isWrite = WORKSPACE_WRITE_TOOLS.has(event.toolName)
           // 子 Agent 内嵌执行内部的写工具不进主活动区（卡片已嵌套在子 Agent 容器内展示）
           const isSubagentInternal = Boolean(event.subagentCallId)
@@ -1381,8 +1459,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         case 'tool.result': {
           // A reconnect can deliver the terminal witness without its call/start.
           // Restore only this exact message/call, never another tool with the same name.
-          const messages = ensureToolMessage(state.messages, event, event.runId === state.runId ? state.runGoalId : null)
-          if (!messages) return {}
+          const owned = ensureToolMessage(state.messages, event, event.runId === state.runId ? state.runGoalId : null)
+          if (!owned) return {}
+          const messages = finalizeReplayedReasoning(owned, event)
+          noteReplayedTool(event)
           const extracted = activityFromDisplay(event.display)
           const previousCall = state.messages.find(message => message.id === event.messageId)?.parts
             .find(part => part.type === 'tool-call' && part.callId === event.callId)
@@ -1406,8 +1486,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             ...(clearImport ? { phase: 'running' as const, ...withoutActiveSessionSignal(state) } : {}),
             ...todoUpdate,
             liveToolDrafts: Object.fromEntries(Object.entries(state.liveToolDrafts).filter(([callId]) => callId !== event.callId)),
-            workspaceActivities: [...state.workspaceActivities, ...(event.ok && (event.display?.kind === 'chapterDiff' || event.display?.kind === 'planDiff' || qualityAppliedBodyChange(event.display)) && !state.workspaceActivities.some(activity => activity.callId === event.callId)
-              ? [{ callId: event.callId, toolName: qualityAppliedBodyChange(event.display) ? event.toolName : 'body_edit', label: extracted.label ?? '正文变更', chapterId: extracted.chapterId, deltaChars: extracted.deltaChars, status: 'done' as const }] : [])].map((activity) =>
+            workspaceActivities: [...state.workspaceActivities, ...(!event.subagentCallId
+              && (WORKSPACE_WRITE_TOOLS.has(event.toolName) || event.ok && (event.display?.kind === 'chapterDiff' || event.display?.kind === 'planDiff' || qualityAppliedBodyChange(event.display)))
+              && !state.workspaceActivities.some(activity => activity.callId === event.callId)
+              ? [{ callId: event.callId, toolName: WORKSPACE_WRITE_TOOLS.has(event.toolName) || qualityAppliedBodyChange(event.display) ? event.toolName : 'body_edit',
+                  label: extracted.label ?? WRITE_TOOL_LABELS[event.toolName] ?? '正文变更', chapterId: extracted.chapterId, deltaChars: extracted.deltaChars, status: event.ok ? 'done' as const : 'failed' as const }] : [])].map((activity) =>
               activity.callId === event.callId
                 ? {
                     ...activity,
@@ -1543,4 +1626,22 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
 export function isRunActive(phase: AgentRunPhase): boolean {
   return phase === 'starting' || phase === 'running' || phase === 'awaiting_approval' || phase === 'awaiting_input'
+}
+
+/** API history is a saved journal, never disposable scaffolding for SSE replay. */
+export function restoreActiveRunHistory(messages: AgentUIMessage[], runId: string, sessionId: string, todoSnapshot?: AgentTodoSnapshot | null, runGoalId?: string | null) {
+  const store = useAgentStore.getState()
+  store.restoreMessages(messages, sessionId, todoSnapshot)
+  store.resumeRun(runId, sessionId, runGoalId)
+}
+
+/** A failed older HTTP read cannot discard a newer run or a same-session journal. */
+export function failSessionHistoryHydration(sessionId: string, expectedRunId: string | null): boolean {
+  const store = useAgentStore.getState()
+  if (store.loadedSessionId && store.loadedSessionId !== sessionId || store.activeSessionId && store.activeSessionId !== sessionId
+    || store.runId !== expectedRunId || isRunActive(store.phase) && store.activeSessionId === sessionId) return false
+  if (store.loadedSessionId === sessionId) return true
+  if (store.hydratingSessionId !== sessionId) return false
+  store.restoreMessages([], null)
+  return true
 }

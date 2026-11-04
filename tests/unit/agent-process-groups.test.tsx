@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { AgentMessageParts } from '../../src/features/studio/agent/components/AgentMessageParts'
 import { projectAnalysisGroups } from '../../src/features/studio/agent/lib/process-groups'
 import { projectResearchGroups } from '../../src/features/studio/agent/lib/research-groups'
 import type { AgentUIMessage, AgentMessagePart } from '../../shared/contracts/index'
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.restoreAllMocks() })
 const reason = (): AgentMessagePart => ({ type: 'reasoning', text: '核对人物动机。\n\n调用 chapter_write，chapterId=secret。\n\n保留伏笔与因果。' })
 const tool = (id: string, toolName = 'web_search'): AgentMessagePart => ({ type: 'tool-call', callId: id, title: toolName, toolName, status: 'failed', summary: '查询服务暂不可用' })
 const message = (id: string, parts: AgentMessagePart[]): AgentUIMessage => ({ id, runId: 'r', role: 'assistant', createdAt: '', parts })
@@ -19,7 +19,8 @@ it('merges sanitized expandable thinking across research without hiding real fai
   const { container } = render(<Transcript messages={messages} />)
   expect(container.querySelectorAll('[data-agent-analysis]')).toHaveLength(1)
   expect(container.textContent).toContain('3 段')
-  expect(container.textContent).toContain('分析：保留伏笔与因果。')
+  expect(screen.getByRole('button', { name: '思考过程' }).textContent).toContain('保留伏笔与因果。')
+  expect(container.textContent).not.toContain('分析：')
   const toggle = screen.getByRole('button', { name: '思考过程' })
   expect(toggle.getAttribute('aria-expanded')).toBe('false')
   fireEvent.click(toggle)
@@ -39,7 +40,7 @@ it('updates the safe live preview and retains expansion through streamed updates
   expect(view.container.textContent).toContain('正在分析… · 保持因果一致。')
   expect(view.container.textContent).not.toMatch(/chapterId|private-id/)
   view.rerender(<AgentMessageParts parts={[{ type: 'reasoning', text: '先核对人物动机。\n\n保持因果一致。' }]} streaming={false} runActive summaryExpanded />)
-  expect(view.container.textContent).toContain('分析：保持因果一致。')
+  expect(screen.getByRole('button', { name: '思考过程' }).textContent).toBe('保持因果一致。')
   expect(view.container.textContent).not.toContain('正在分析')
   expect(view.container.querySelector('.max-h-44')?.textContent).toContain('保持因果一致。')
 })
@@ -47,9 +48,69 @@ it('summarizes the latest safe judgment instead of the opening plan without chan
   const text = '先核对上一章结尾的人物位置，再确认本章冲突怎样承接。\n\n人物尚未拿到关键线索，这一章应先让调查碰到阻力。保留伏笔，把真相放到后续章节揭示。'
   const { container } = render(<AgentMessageParts parts={[{ type: 'reasoning', text }]} streaming={false} runActive summaryExpanded />)
   const toggle = screen.getByRole('button', { name: '思考过程' })
-  expect(toggle.textContent).toBe('分析：保留伏笔，把真相放到后续章节揭示。')
+  expect(toggle.textContent).toBe('保留伏笔，把真相放到后续章节揭示。')
   fireEvent.click(toggle)
   expect(container.querySelector('.max-h-44')?.textContent).toBe(text)
+})
+it('keeps the count and chevron in a fixed right rail while only the preview flexes', () => {
+  const parts = (text: string): AgentMessagePart[] => [{ type: 'reasoning', text: '保留人物动机。' }, { type: 'reasoning', text }]
+  const { rerender } = render(<AgentMessageParts parts={parts('保留伏笔。')} streaming runActive />)
+  const button = screen.getByRole('button', { name: '思考过程' })
+  const controls = button.querySelector('[data-analysis-controls]')!
+  const chevron = controls.querySelector('svg')
+  expect(button.className).toContain('w-full')
+  expect(button.children[1].className).toContain('flex-1')
+  expect(button.children[1].className).toContain('truncate')
+  expect(controls.className).toContain('ml-auto')
+  expect(controls.className).toContain('shrink-0')
+  expect(controls.textContent).toBe('2 段')
+  rerender(<AgentMessageParts parts={parts('保留伏笔，让尚未公开的线索在后续章节自然衔接，并把人物选择与实际后果联系起来。')} streaming runActive />)
+  expect(button.querySelector('[data-analysis-controls]')).toBe(controls)
+  expect(controls.querySelector('svg')).toBe(chevron)
+  expect(controls.textContent).toBe('2 段')
+  expect(button.children[1].textContent).toContain('正在分析… · 保留伏笔，让尚未公开的线索')
+})
+
+it('follows expanded thinking until an upward scroll, resumes only at bottom, and resets the scroll owner on reopen', () => {
+  let height = 500
+  const positions = new WeakMap<Element, number>()
+  vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockImplementation(function (this: Element) { return this.classList.contains('max-h-44') ? height : 0 })
+  vi.spyOn(Element.prototype, 'clientHeight', 'get').mockImplementation(function (this: Element) { return this.classList.contains('max-h-44') ? 100 : 0 })
+  vi.spyOn(Element.prototype, 'scrollTop', 'get').mockImplementation(function (this: Element) { return positions.get(this) ?? 0 })
+  vi.spyOn(Element.prototype, 'scrollTop', 'set').mockImplementation(function (this: Element, top: number) { positions.set(this, Math.max(0, Math.min(top, this.scrollHeight - this.clientHeight))) })
+  let text = '保留人物动机。'
+  const { container, rerender, unmount } = render(<AgentMessageParts parts={[{ type: 'reasoning', text }]} streaming runActive />)
+  const toggle = screen.getByRole('button', { name: '思考过程' })
+  const append = (nextHeight: number) => {
+    height = nextHeight; text += '\n\n保留新的因果线索。'
+    rerender(<AgentMessageParts parts={[{ type: 'reasoning', text }]} streaming runActive />)
+  }
+  fireEvent.click(toggle)
+  const content = container.querySelector<HTMLDivElement>('.max-h-44')!
+  expect(content.scrollTop).toBe(400)
+  append(700); expect(content.scrollTop).toBe(600)
+  content.scrollTop = 590; fireEvent.scroll(content)
+  append(900); expect(content.scrollTop).toBe(590)
+  // Moving down near the bottom does not erase the author's deliberate detach.
+  content.scrollTop = 790; fireEvent.scroll(content)
+  append(1000); expect(content.scrollTop).toBe(790)
+  content.scrollTop = 900; fireEvent.scroll(content)
+  append(1200); expect(content.scrollTop).toBe(1100)
+  // Browser clamping after a height reduction at bottom is not an upward gesture.
+  height = 800; content.scrollTop = 700; fireEvent.scroll(content)
+  append(1000); expect(content.scrollTop).toBe(900)
+  height = 1200; text += '\n\n伏笔应在后续章节揭示。'
+  rerender(<AgentMessageParts parts={[{ type: 'reasoning', text }]} streaming={false} runActive summaryExpanded />)
+  expect(content.scrollTop).toBe(1100)
+  expect(toggle.textContent).toBe('伏笔应在后续章节揭示。')
+  fireEvent.click(toggle)
+  expect(container.querySelector('.max-h-44')).toBeNull()
+  fireEvent.click(toggle)
+  const reopened = container.querySelector<HTMLDivElement>('.max-h-44')!
+  expect(reopened).not.toBe(content)
+  expect(reopened.scrollTop).toBe(1100)
+  unmount()
+  expect(container.querySelector('.max-h-44')).toBeNull()
 })
 
 it.each([

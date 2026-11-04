@@ -73,7 +73,7 @@ import {
 } from '../agentApi'
 import { projectOutgoingMessages, useOutgoingMessages } from '../outgoing-messages'
 import { ProcessDuration } from './ProcessDuration'
-import { isRunActive, readSessionMessagesCache, useAgentStore, type ComposerReference } from '../agentStore'
+import { isRunActive, readSessionMessagesCache, restoreActiveRunHistory, failSessionHistoryHydration, useAgentStore, type ComposerReference } from '../agentStore'
 import { selectAgentActivityRunActive, selectAgentGoalView, selectAgentPanelPhase } from '../goal-selectors'
 import { useMessageBlockExpansion } from './use-message-block-expansion'
 import { buildGoalResumeModel } from '../goal-command'
@@ -364,10 +364,9 @@ export function AgentPanel({
     void fetchAgentSessionMessages(sessionId, { runLimit: 50 }).then(payload => {
       if (cancelled || viewSession.current !== sessionId) return
       const now = useAgentStore.getState()
-      if (now.runId === latestId) return
+      if (now.runId === latestId || shouldKeepLiveSessionMessages(now.runId, now.phase, now.activeSessionId, sessionId)) return
       if (payload.activeRunId) {
-        now.restoreMessages(payload.messages.filter(message => !(message.runId === payload.activeRunId && message.role === 'assistant')), sessionId, payload.todoSnapshot)
-        now.resumeRun(payload.activeRunId, sessionId, payload.runGoalId)
+        restoreActiveRunHistory(payload.messages, payload.activeRunId, sessionId, payload.todoSnapshot, payload.runGoalId)
         connect(payload.activeRunId, 0)
       } else {
         now.restoreMessages(payload.messages, sessionId, payload.todoSnapshot)
@@ -953,6 +952,7 @@ export function AgentPanel({
       holdTimer = window.setTimeout(() => setShimmerHolding(false), MIN_SHIMMER_HOLD_MS)
     }
 
+    const historyRunId = useAgentStore.getState().runId
     fetchAgentSessionMessages(sessionId, { runLimit: 50 })
       .then((payload) => {
         if (cancelled) {
@@ -968,16 +968,8 @@ export function AgentPanel({
           return
         }
         if (activeRunId) {
-          // 服务端仍有本会话进行中的 run（如刷新页面后回来）：
-          // 历史里剔除该 run 的助手消息，改由事件重放（seq 0）重建直播与提问/审批卡片
-          useAgentStore
-            .getState()
-            .restoreMessages(
-              history.filter((message) => !(message.runId === activeRunId && message.role === 'assistant')),
-              sessionId,
-              payload.todoSnapshot,
-            )
-          useAgentStore.getState().resumeRun(activeRunId, sessionId, payload.runGoalId)
+          // Keep saved tools and changes; a legacy live bus may replay only this attempt.
+          restoreActiveRunHistory(history, activeRunId, sessionId, payload.todoSnapshot, payload.runGoalId)
           connect(activeRunId, 0)
         } else {
           useAgentStore.getState().restoreMessages(history, sessionId, payload.todoSnapshot)
@@ -988,9 +980,11 @@ export function AgentPanel({
         }
       })
       .catch(() => {
-        if (!cancelled) {
-          // 网络失败不能把该会话标记成“已恢复”，否则 Work/IDE 切换后也不会重试。
-          useAgentStore.getState().restoreMessages([], null)
+        if (!cancelled && viewSession.current === sessionId) {
+          const live = useAgentStore.getState()
+          if (shouldKeepLiveSessionMessages(live.runId, live.phase, live.activeSessionId, sessionId)
+            || !failSessionHistoryHydration(sessionId, historyRunId)) return
+          // Keep this session's saved journal; only an empty failed hydration resets ownership.
           setHistoryErrorSessionId(sessionId)
           setOlderPagination(null)
         }
