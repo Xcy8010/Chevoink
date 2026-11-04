@@ -75,9 +75,16 @@ export async function bindFutureWritingPlan(db: Prisma.TransactionClient, subjec
 }
 
 export async function bindCreatedChapterWritingPlan(db: Prisma.TransactionClient, subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; orderIndex: number }) {
+  const target = { userId: subject.userId, novelId: subject.novelId, status: 'active' as const,
+    OR: [{ chapterId: chapter.id }, { chapterId: null, targetOrderIndex: chapter.orderIndex }] }
+  // This optional hook adds no compiler identity requirement to a create with no
+  // frozen plan. Inspect every matching candidate so an untyped newer compiler
+  // cannot hide a typed one; this presence check grants no binding authority.
+  const candidates = await db.storyCompilation.findMany({ where: target, select: { id: true, preparedContext: true } })
+  const plannedIds = candidates.filter(item => Object.prototype.hasOwnProperty.call(planMetadata(item.preparedContext), 'planContext')).map(item => item.id)
+  if (!plannedIds.length) return
   const { compilationRunScope } = await import('./story-compiler.js')
   const scope = await compilationRunScope(db, subject)
-  const compilation = await db.storyCompilation.findFirst({ where: { userId: subject.userId, novelId: subject.novelId, ...scope,
-    status: 'active', OR: [{ chapterId: chapter.id }, { chapterId: null, targetOrderIndex: chapter.orderIndex }] }, orderBy: { createdAt: 'desc' } })
+  const compilation = await db.storyCompilation.findFirst({ where: { ...target, ...scope, id: { in: plannedIds } }, orderBy: { createdAt: 'desc' } })
   if (compilation) await bindFutureWritingPlan(db, { userId: subject.userId, novelId: subject.novelId }, compilation, chapter)
 }

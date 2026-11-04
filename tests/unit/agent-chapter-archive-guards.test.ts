@@ -11,7 +11,7 @@ const m = vi.hoisted(() => ({
     // ordinary no-goal branch while preserving all manuscript assertions.
     agentGoalExecution: { findUnique: vi.fn() },
     chapter: { findFirst: vi.fn(), findFirstOrThrow: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), create: vi.fn(), count: vi.fn() },
-    storyCompilation: { findFirst: vi.fn(), update: vi.fn() },
+    storyCompilation: { findFirst: vi.fn(), findMany: vi.fn(), update: vi.fn() },
     agentArtifact: { findMany: vi.fn(), findFirstOrThrow: vi.fn(), update: vi.fn() },
     volume: { findFirst: vi.fn(), findMany: vi.fn() }, agentTaskRoot: { findUniqueOrThrow: vi.fn() },
   },
@@ -96,6 +96,7 @@ beforeEach(() => {
   authorScope()
   m.compilerScope.mockResolvedValue({ runId: 'r' })
   m.tx.storyCompilation.findFirst.mockResolvedValue(null)
+  m.tx.storyCompilation.findMany.mockResolvedValue([])
   m.tx.agentSession.findFirst.mockResolvedValue({ id: 's', userId: 'u', novelId: 'n', spawnedFromRunId: null, spawnedFromSessionId: null })
   m.tx.agentChildExecutionGrant.findUnique.mockResolvedValue(null)
   m.tx.chapter.findMany.mockResolvedValue([row])
@@ -500,6 +501,7 @@ describe('legacy Agent chapter archive guards', () => {
     const detail = { id: 'detail', title: '细纲', content: '绕过锁门，取得钥匙', metadata: { savedAsPlan: true, planKind: 'detail', parentPlanId: outline.id, parentPlanHash: novelPlanHash(outline), target: { kind: 'future', targetOrderIndex: 1 } } }
     const planContext = { version: 1, outline: { ...outline, planHash: novelPlanHash(outline) }, detail: { ...detail, planHash: novelPlanHash(detail) }, parentPlanHash: novelPlanHash(outline), target: detail.metadata.target }
     m.tx.storyCompilation.findFirst.mockResolvedValue({ id: 'comp', targetOrderIndex: 1, preparedContext: { planContext } })
+    m.tx.storyCompilation.findMany.mockResolvedValue([{ id: 'comp', preparedContext: { planContext } }])
     m.tx.agentArtifact.findMany.mockResolvedValue([outline, detail])
     m.tx.agentArtifact.findFirstOrThrow.mockResolvedValue(detail)
     await chapterCreateTool.execute(ctx(), { title: 'New', position: 1 })
