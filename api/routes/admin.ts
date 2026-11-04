@@ -1,5 +1,5 @@
 import { setPublicBetaEnabled } from '../lib/credit-policy.js'
-import { getAdminYunshuModelUsage } from '../lib/admin-yunshu-usage.js'
+import { getAdminYunshuModelUsage, getAdminYunshuOperations } from '../lib/admin-yunshu-usage.js'
 import { Router, type Request, type Response } from 'express'
 import { modelRoutesInputSchema } from '../../shared/contracts/model-routes.js'
 import { weightedRoutesInputSchema } from '../../shared/contracts/model-weighted-routes.js'
@@ -1049,6 +1049,21 @@ router.get('/conversations/:conversationId/messages', async (req: Request, res: 
   } catch (error) {
     sendRouteError(res, requestId, error)
   }
+})
+
+router.get('/yunshu-operations', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  const controller = new AbortController()
+  const close = () => { if (!res.writableEnded) controller.abort() }
+  res.once('close', close)
+  try {
+    await requireAdmin(req)
+    const query = parseBody(z.object({ period: z.enum(['today', 'week', 'month']).default('today'), page: z.coerce.number().int().min(1).max(1_000_000).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(20), kind: z.enum(['all', 'consume', 'error', 'refund']).default('all'), view: z.enum(['records', 'health', 'cost']).default('records') }).strict(), req.query, '云枢记录查询条件无效。')
+    const result = await getAdminYunshuOperations(query, controller.signal)
+    if (!controller.signal.aborted) res.status(200).json(buildSuccess(requestId, result))
+  } catch (error) {
+    if (!controller.signal.aborted) sendRouteError(res, requestId, error)
+  } finally { res.removeListener('close', close) }
 })
 
 router.get('/yunshu-model-usage', async (req: Request, res: Response): Promise<void> => {

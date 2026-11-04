@@ -109,6 +109,10 @@ export function getAdminDashboard(): Promise<AdminDashboardPayload> {
   return requestJson<AdminDashboardPayload>('/api/admin/dashboard')
 }
 
+export function getAdminYunshuOperations(query: import('../../../shared/contracts/admin-yunshu-usage.js').AdminYunshuOperationsQuery, signal?: AbortSignal): Promise<import('../../../shared/contracts/admin-yunshu-usage.js').AdminYunshuOperations> {
+  return requestJson(`/api/admin/yunshu-operations${buildQueryString(query)}`, { signal })
+}
+
 export function getAdminYunshuModelUsage(period: 'today' | 'week' | 'month' = 'today', signal?: AbortSignal): Promise<import('../../../shared/contracts/admin-yunshu-usage.js').AdminYunshuModelUsage> {
   return requestJson(`/api/admin/yunshu-model-usage?period=${period}`, { signal })
 }

@@ -1,5 +1,6 @@
 import { useAdminQueryState } from '../admin-query-state'
 import { useQuery } from '@tanstack/react-query'
+import { useState, type ReactNode } from 'react'
 
 import { Link } from 'react-router-dom'
 
@@ -9,10 +10,15 @@ import { formatTokens } from '../admin-shared'
 import { getAdminTokenManagement } from '../api'
 import SupplierBalances from '../components/SupplierBalances'
 import { AdminCallRecords, AdminLocalHealth } from '../components/AdminOperationsLists'
-import AdminIntegrationStatus from '../components/AdminIntegrationStatus'
+import AdminYunshuOperations from '../components/AdminYunshuOperations'
 import AdminAnalytics from '../components/AdminAnalytics'
 import TrendLineChart from '../components/TrendLineChart'
 import AdminYunshuModelUsage from '../components/AdminYunshuModelUsage'
+
+function LocalRecords({ children }: { children: ReactNode }) {
+  const [open,setOpen] = useState(false)
+  return <details className="mt-6" open={open} onToggle={event=>setOpen(event.currentTarget.open)}><summary className="min-h-11 cursor-pointer py-3 text-sm text-[var(--text-secondary)]">墨域本地记录与估算</summary>{open ? children : null}</details>
+}
 
 function formatCacheRate(hit: number | null, miss: number | null) {
   if (hit === null || miss === null) return '—'
@@ -38,10 +44,11 @@ export default function AdminTokenManagementPage() {
     <div>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><AdminPageHeader title="用量与运行" description="按 UTC+8 统计模型输入/输出 Token、联网搜索和生图调用，并下钻到用户创作记录。" /><div className="flex shrink-0 rounded-lg border border-[var(--border-strong)] p-1">{([['today','本日'],['week','本周'],['month','本月']] as const).map(([value,label]) => <button key={value} type="button" onClick={() => setPeriod(value)} className={`rounded-md px-3 py-1.5 text-xs ${period === value ? 'bg-[var(--surface-contrast)] text-[var(--text-contrast)]' : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]'}`}>{label}</button>)}</div></div>
       <AdminSectionTabs tabs={[{id:'usage',label:'用量'},{id:'calls',label:'调用记录'},{id:'health',label:'健康'},{id:'cost',label:'成本与余额'}]} value={tab} onChange={setTab} label="用量与运行分区" />
-      <p className="mb-4 text-sm text-[var(--text-secondary)]">模型用量来自云枢管理日志；总览、趋势及用户记录来自墨域本地用量 · UTC+8。</p>
-      {tab === 'cost' ? <><AdminIntegrationStatus /><AdminCard className="mb-4"><h2 className="font-semibold">云枢扣款</h2><p className="mt-2 text-sm text-[var(--text-secondary)]">未接入对账。以下供应商余额与公开价估算均不代表云枢实际扣款。</p></AdminCard><SupplierBalances /><AdminAnalytics scope="cost" period={period === 'today' ? 'day' : period} /></> : null}
-      {tab === 'health' ? <AdminLocalHealth /> : null}
-      {tab === 'calls' ? <AdminCallRecords /> : null}
+      <p className="mb-4 text-sm text-[var(--text-secondary)]">模型用量、调用与健康观测来自云枢；成本为云枢实际扣费，余额为管理账号范围。用量总览、趋势及用户记录来自墨域本地 · UTC+8。</p>
+      {tab === 'calls' || tab === 'health' || tab === 'cost' ? <>
+        <AdminYunshuOperations key={`${tab}:${period}`} period={period} view={tab === 'calls' ? 'records' : tab} />
+        <LocalRecords key={tab}>{tab === 'calls' ? <AdminCallRecords /> : tab === 'health' ? <AdminLocalHealth /> : <><SupplierBalances /><AdminAnalytics scope="cost" period={period === 'today' ? 'day' : period} /></>}</LocalRecords>
+      </> : null}
       {tab === 'usage' ? <AdminYunshuModelUsage period={period} /> : null}
       {tab === 'usage' ? <AdminPanelState state={query.isLoading ? 'loading' : query.isError ? 'error' : 'ready'}>
         {data ? (

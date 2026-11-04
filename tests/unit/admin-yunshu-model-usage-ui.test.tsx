@@ -7,6 +7,7 @@ import type { AdminYunshuModelUsage } from '../../shared/contracts/admin-yunshu-
 const mocks = vi.hoisted(() => ({ yunshu: vi.fn(), local: vi.fn() }))
 vi.mock('../../src/features/admin/api', () => ({ getAdminYunshuModelUsage: mocks.yunshu, getAdminTokenManagement: mocks.local }))
 vi.mock('../../src/features/admin/admin-shared', () => ({ formatTokens: (value: number) => String(value) }))
+vi.mock('../../src/features/admin/components/AdminYunshuOperations',()=>({default:()=>null}))
 import AdminYunshuModelUsage from '../../src/features/admin/components/AdminYunshuModelUsage'
 import AdminTokenManagementPage from '../../src/features/admin/pages/AdminTokenManagementPage'
 

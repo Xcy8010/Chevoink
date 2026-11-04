@@ -4,17 +4,19 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ request: vi.fn(), tokens: vi.fn(), yunshu: vi.fn(), feedback: vi.fn(), logs: vi.fn() }))
+const mocks = vi.hoisted(() => ({ request: vi.fn(), tokens: vi.fn(), yunshu: vi.fn(), operations: vi.fn(), feedback: vi.fn(), logs: vi.fn() }))
 vi.mock('../../src/app/api-client', () => ({ requestJson: mocks.request }))
-vi.mock('../../src/features/admin/api', () => ({ getAdminTokenManagement: mocks.tokens, getAdminYunshuModelUsage: mocks.yunshu, listAdminFeedbacks: mocks.feedback, listAdminAuditLogs: mocks.logs, adminLogout: vi.fn() }))
+vi.mock('../../src/features/admin/api', () => ({ getAdminTokenManagement: mocks.tokens, getAdminYunshuModelUsage: mocks.yunshu, getAdminYunshuOperations: mocks.operations, listAdminFeedbacks: mocks.feedback, listAdminAuditLogs: mocks.logs, adminLogout: vi.fn() }))
 vi.mock('../../src/features/admin/admin-shared', () => ({ formatTokens: (value: number) => String(value), formatDateTime: (value: string) => value, describeAdminAction: (value: string) => value, useAdminSession: () => ({ admin: { id: 'admin-synthetic', nickname: '测试管理员' } }) }))
 vi.mock('../../src/components/ui/toast-context', () => ({ useToast: () => ({ success: vi.fn(), error: vi.fn() }) }))
+import { adminYunshuOperationsFixture } from '../fixtures/admin-yunshu-operations'
 import AdminDashboardPage from '../../src/features/admin/pages/AdminDashboardPage'
 import AdminTokenManagementPage from '../../src/features/admin/pages/AdminTokenManagementPage'
 import AdminLogsPage from '../../src/features/admin/pages/AdminLogsPage'
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mocks.operations.mockImplementation(async query => adminYunshuOperationsFixture(query))
   mocks.yunshu.mockResolvedValue({source:'yunshu_admin_logs',scope:'configured_platform_tokens',period:'month',window:{from:'2026-11-01T00:00:00Z',to:'2026-11-04T00:00:00Z'},observedAt:null,state:'unconfigured',coverage:'partial',paginationComplete:false,message:'',lastAttemptAt:null,sources:{configured:0,verified:0,unresolved:0},models:[]})
   mocks.tokens.mockResolvedValue({ summary: { totalTokens: 0, requestTokens: 0, responseTokens: 0, cacheHitTokens: null, cacheMissTokens: null, cacheObservedTokens: 0, users: 0, webSearchCalls: 0, imageCalls: 0 }, models: [], runs: [], runTurns: [], users: [], actions: [], trend: [] })
   mocks.request.mockImplementation(async (url: string) => url.includes('/integrations/status') ? {resources:[]} : url.includes('/operations/health') ? { source:'provider_attempts',coverage:[],snapshotAt:'2026-11-01T10:00:00Z',window:{from:'2026-11-01T00:00:00Z',to:'2026-11-02T00:00:00Z',timeZone:'UTC+8',boundary:'created_at'},observation:'no_samples',counts:{total:0,success:0,failure:0,pending:0,cancelled:0,unknown:0},lastSampleAt:null } : url.includes('supplier-balances') ? [] : { labels: [], metrics: [{ key: 'failed', label: '失败执行', total: 2, values: [] }], tools: [], cost: { knownCalls: 0, unknownCalls: 4, models: [] }, to: '2026-11-01T10:00:00Z' })
@@ -43,12 +45,17 @@ it('keeps one period across usage tabs and fetches balances only after opening c
   await waitFor(() => expect(mocks.yunshu).toHaveBeenCalledWith('month', expect.any(AbortSignal)))
   expect(mocks.request).not.toHaveBeenCalled()
   fireEvent.click(screen.getByRole('button', { name: '健康', exact: true }))
-  expect(await screen.findByText('该范围无样本')).toBeTruthy()
-  expect(mocks.request).toHaveBeenCalledWith(expect.stringContaining('/api/admin/operations/health?period=month'))
+  expect(await screen.findByRole('heading', {name:'云枢健康观测'})).toBeTruthy()
+  await waitFor(()=>expect(mocks.operations).toHaveBeenCalledWith(expect.objectContaining({period:'month',view:'health'}),expect.any(AbortSignal)))
+  expect(mocks.request).not.toHaveBeenCalled()
   fireEvent.click(screen.getByRole('button', { name: '成本与余额' }))
+  await waitFor(()=>expect(mocks.operations).toHaveBeenCalledWith(expect.objectContaining({period:'month',view:'cost'}),expect.any(AbortSignal)))
+  expect(mocks.request).not.toHaveBeenCalled()
+  expect(await screen.findByRole('heading',{name:'云枢管理账号余额'})).toBeTruthy()
+  fireEvent.click(screen.getByText('墨域本地记录与估算'))
   await waitFor(() => expect(mocks.request).toHaveBeenCalledWith('/api/admin/analytics?period=month&scope=cost'))
   expect(screen.getAllByRole('button', { name: '本月', exact: true })).toHaveLength(1)
-  expect(screen.getByText(/未接入对账/)).toBeTruthy()
+  expect(screen.queryByText(/未接入对账/)).toBeNull()
   expect(screen.queryByRole('heading', { name: '用量排行' })).toBeNull()
 })
 
