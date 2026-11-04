@@ -16,7 +16,8 @@ describe('task-scoped creative pacing', () => {
     const task = taskSpecSchema.parse(spec(prompt))
     expect(task.writingPacing).toBe('proposal_only')
     expect(task.intent).toBe('plan')
-    expect(task.expectedOutputs[0].description).toContain('本轮不写章节正文')
+    expect(task.expectedOutputs[0].description).toContain('完成后询问是否修改或开始细纲')
+    expect(task.expectedOutputs[0].description).toContain('未获后续明确授权前不写细纲或章节正文')
     expect(renderTaskSpec(task)).toContain('作者下一条明确写作指令')
   })
 

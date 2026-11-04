@@ -10,10 +10,20 @@ import { useAgentStore } from '../../src/features/studio/agent/agentStore'
 import { OUTPUT_SILENCE_MS, useProcessingHint } from '../../src/features/studio/agent/useProcessingHint'
 afterEach(() => { cleanup(); useAgentStore.getState().resetRun(); vi.useRealTimers() })
 
+function expectActiveAnalysis(container: HTMLElement) {
+  const rows = container.querySelectorAll('[data-agent-analysis]')
+  expect(rows).toHaveLength(1)
+  expect(rows[0].getAttribute('data-reasoning-running')).toBe('true')
+  expect(rows[0].querySelector('[class~="motion-safe:animate-pulse"]')).toBeTruthy()
+  expect(rows[0].textContent).toBe('正在分析')
+}
+
 function LiveParts() {
   const messages=useAgentStore(state=>state.messages)
+  const textRevealTargets=useAgentStore(state=>state.textRevealTargets)
+  const finishTextReveal=useAgentStore(state=>state.finishTextReveal)
   const visible=useProcessingHint(messages,'r','running',false)
-  return <><ProcessingHint visible={visible}/>{messages.map(message=><AgentMessageParts key={message.id} parts={message.parts} streaming runActive/>)}</>
+  return <><ProcessingHint visible={visible}/>{messages.filter(message=>message.role==='assistant').map(message=><AgentMessageParts key={message.id} messageId={message.id} parts={message.parts} streaming runActive revealText={textRevealTargets[message.id]} onTextRevealed={finishTextReveal}/>)}</>
 }
 
 it('keeps local reasoning active after finalized prose, then hands off to one animated tool card', () => {
@@ -21,8 +31,8 @@ it('keeps local reasoning active after finalized prose, then hands off to one an
     parts: [{ type: 'text', text: '我先核对人物动机。' }, { type: 'reasoning', text: '接着核对时间与地点。\n\n' }] }
   const streaming = () => isAssistantMessageStreaming(message, 'r', 'm', true, ['m'])
   const view = render(<AgentMessageParts parts={message.parts} streaming={streaming()} runActive />)
-  expect(view.container.querySelector('[data-reasoning-running]')).toBeTruthy()
-  expect(view.container.querySelector('[class*="reasoning-sweep"]')).toBeTruthy()
+  expectActiveAnalysis(view.container)
+  expect(view.container.textContent).not.toContain('接着核对时间与地点。')
   message.parts.push({ type: 'tool-call', callId: 'write', toolName: 'chapter_write', title: '撰写本章', status: 'running', preparing: true, args: null })
   view.rerender(<AgentMessageParts parts={message.parts.slice()} streaming={streaming()} runActive />)
   expect(view.container.querySelector('[data-reasoning-running]')).toBeNull()
@@ -99,23 +109,40 @@ it('hides on published paragraph output and returns only after silence without a
   expect(vi.getTimerCount()).toBe(0)
 })
 
-it.each(['text.delta', 'reasoning.delta'] as const)('hands off immediately to actually rendered %s, and restores one timer after silence', type => {
+it.each(['text.delta', 'reasoning.delta'] as const)('hands off immediately to real %s activity, and restores one timer after silence', type => {
   vi.useFakeTimers()
   useAgentStore.getState().resetRun()
-  useAgentStore.getState().resumeRun('r', 'session')
+  useAgentStore.getState().beginRun('r', '合成活动请求', 'session')
   const view = render(<LiveParts />), apply = useAgentStore.getState().applyEvent
   const base = { runId: 'r', messageId: 'm', ts: new Date().toISOString() }
   act(() => apply({ ...base, seq: 1, type: 'message.start', role: 'assistant' }))
   expect(screen.getByRole('status')).toBeTruthy()
   for (let seq = 2; seq <= 5; seq++) {
+    const previousText = view.container.textContent?.replace('正在处理...', '').replace(/\s/g, '') ?? ''
     act(() => apply({ ...base, seq, type, delta: `第${seq}处调整让人物的选择更清楚。\n\n` }))
     // The received chunk begins appearing on the next reveal frame; its
     // animation timer is independent of the one silence deadline.
     act(() => vi.advanceTimersByTime(16))
-    expect(view.container.textContent).toContain(`第${seq}处`)
+    if (type === 'text.delta') {
+      const shownText = view.container.textContent?.replace(/\s/g, '') ?? ''
+      const receivedText = Array.from({ length: seq - 1 }, (_, index) => `第${index + 2}处调整让人物的选择更清楚。`).join('')
+      expect(shownText.startsWith(previousText)).toBe(true)
+      expect(shownText.length).toBeGreaterThan(previousText.length)
+      expect(receivedText.startsWith(shownText)).toBe(true)
+      expect(view.container.textContent).not.toContain(`第${seq}处调整让人物的选择更清楚。`)
+    } else {
+      expectActiveAnalysis(view.container)
+      expect(view.container.textContent).not.toContain(`第${seq}处`)
+      expect(vi.getTimerCount()).toBe(1)
+    }
     expect(view.container.textContent).not.toContain('正在处理...')
     act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS - 17))
-    expect(view.container.textContent).toContain(`第${seq}处调整让人物的选择更清楚。`)
+    if (type === 'text.delta') expect(view.container.textContent).toContain(`第${seq}处调整让人物的选择更清楚。`)
+    else {
+      expectActiveAnalysis(view.container)
+      expect(view.container.textContent).not.toMatch(/第[2-5]处调整/)
+    }
+    expect(useAgentStore.getState().textRevealTargets).toEqual({})
     expect(vi.getTimerCount()).toBe(1)
     expect(screen.queryByRole('status')).toBeNull()
   }
@@ -125,17 +152,34 @@ it.each(['text.delta', 'reasoning.delta'] as const)('hands off immediately to ac
   act(() => apply({ ...base, seq: 6, type, delta: '新的可见输出' }))
   expect(screen.queryByRole('status')).toBeNull()
   act(() => vi.advanceTimersByTime(16))
-  expect(view.container.textContent).toContain('新的')
+  if (type === 'text.delta') {
+    expect(view.container.textContent).toContain('新')
+    expect(view.container.textContent).not.toContain('新的可见输出')
+  } else {
+    expectActiveAnalysis(view.container)
+    expect(view.container.textContent).not.toContain('新的可见输出')
+  }
   act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS - 17))
-  expect(view.container.textContent).toContain('新的可见输出')
+  if (type === 'text.delta') expect(view.container.textContent).toContain('新的可见输出')
+  else {
+    expectActiveAnalysis(view.container)
+    expect(view.container.textContent).not.toContain('新的可见输出')
+  }
   expect(screen.queryByRole('status')).toBeNull()
   expect(vi.getTimerCount()).toBe(1)
   act(() => vi.advanceTimersByTime(1))
   expect(screen.getAllByRole('status')).toHaveLength(1)
   // An ambiguous tool prefix remains hidden and cannot extend that deadline.
+  const lastVisibleOutput = useAgentStore.getState().lastVisibleOutput
   act(() => apply({ ...base, seq: 7, type, delta: '\n\n调用 chapter_' }))
   expect(screen.getByRole('status')).toBeTruthy()
   expect(view.container.textContent).not.toContain('chapter_')
+  expect(useAgentStore.getState().lastVisibleOutput).toEqual(lastVisibleOutput)
+  // Drain the whitespace-only reveal frames; they must not create a silence deadline.
+  act(() => vi.advanceTimersByTime(64))
+  expect(useAgentStore.getState().textRevealTargets).toEqual({})
+  expect(screen.getAllByRole('status')).toHaveLength(1)
+  expect(vi.getTimerCount()).toBe(0)
   act(() => apply({ ...base, seq: 8, type: 'run.paused', reason: 'needs_input' }))
   view.unmount()
   expect(vi.getTimerCount()).toBe(0)

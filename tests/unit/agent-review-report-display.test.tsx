@@ -102,14 +102,16 @@ it('does not auto-open a report when its running tool receives an error-filled r
   expect(screen.getByRole('button', { name: '展开检查详情' }).getAttribute('aria-expanded')).toBe('false')
 })
 
-it('keeps failures and prose visible with the original compact reasoning summary and folded report details', async () => {
+it('keeps failures and prose visible with a factual analysis summary and folded report details', async () => {
   const view = render(<AgentMessageParts parts={[
     { type: 'reasoning', text: '先核对章节状态。' },
     { ...tool(quality), status: 'failed', summary: '质量检查失败，请稍后重试' },
     { type: 'text', text: '已保存本章正文。' },
   ]} streaming={false} runActive />)
   expect(screen.getByText('质量检查失败，请稍后重试')).toBeTruthy()
-  expect(screen.getByText('先核对章节状态。')).toBeTruthy()
+  expect(screen.getByText('复查章节相关分析')).toBeTruthy()
+  expect(view.container.querySelectorAll('[data-agent-analysis]')).toHaveLength(1)
+  expect(view.container.textContent).not.toContain('先核对章节状态。')
   expect(view.container.querySelector('.max-h-44')).toBeNull()
   expect(await screen.findByText('已保存本章正文。')).toBeTruthy()
   expect(screen.queryByText(quality.findings[0].evidence)).toBeNull()

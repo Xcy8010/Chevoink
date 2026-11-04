@@ -103,7 +103,12 @@ export async function assertNovelMetadataIntent(db: Prisma.TransactionClient, ct
   novel: { chapterCount: number; wordCount: number; summary: string; tagNames: string[] }) {
   const original = await readOriginalTaskRequest(db, ctx)
   assertFreshPlanSetup(ctx, original.spec)
-  const complete = taskSpecSchema.safeParse(original.spec).data?.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED') === true
+  const parsed = taskSpecSchema.safeParse(original.spec)
+  // Historical build tasks keep their frozen tool grant and observed metadata
+  // CAS. Fresh initialization semantics never retrofit those contracts.
+  // The plan-mode guard above still denies their newly introduced write entry.
+  if (parsed.success && parsed.data.scope.novelInitializationProtocol !== 1) return false
+  const complete = parsed.data?.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED') === true
   if (original.prompt && isExplicitNovelMetadataRequest(original.prompt)) {
     const choice = await readDirectionChoice(db, ctx, original)
     if (choice && declined(choice.answer)) throw new DataAccessError(409, 'NOVEL_DIRECTION_REQUIRED', '作者已选择暂不初始化，未覆盖作品信息。')

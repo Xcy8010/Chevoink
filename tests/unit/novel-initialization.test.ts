@@ -27,7 +27,7 @@ const context = (answer?: string, identity = who): ToolContext => ({ ...who, mod
 const fresh = (prompt: string) => buildTaskSpec({ runId: 'r', novelId: 'n', prompt, mode: 'build', authorWritingProtocol: 2, novelInitializationProtocol: 1 })
 beforeEach(() => {
   vi.resetAllMocks()
-  mocks.original.mockResolvedValue({ prompt: directionPrompt, sourceRunId: 'r', taskId: 'task' })
+  mocks.original.mockResolvedValue({ prompt: directionPrompt, spec: fresh(directionPrompt), sourceRunId: 'r', taskId: 'task' })
   mocks.runIds.mockResolvedValue(['r'])
   mocks.db.novel.findFirst.mockResolvedValue(empty)
   mocks.db.chapter.count.mockResolvedValue(0)
@@ -173,7 +173,8 @@ it('rejects partial initialization without effects, then the real metadata tool 
   expect((await novelUpdateMetaTool.execute(ctx, fields)).outcome).not.toBe('failed')
   expect(mocks.db.novel.update).toHaveBeenCalledExactlyOnceWith({ where: { id: 'n' }, data: { title: fields.title, displayTitle: fields.title, summary: fields.summary, tagNames: fields.tags } })
 })
-it('retains a real partial metadata update for an author request to edit synopsis only', async () => {
+it('retains a real partial metadata update for an author request to edit synopsis only on an existing edited work', async () => {
+  mocks.db.novel.findFirst.mockResolvedValue({ ...empty, title: '作者原题', summary: '作者原简介', tagNames: ['玄幻'], chapterCount: 2, wordCount: 1200 })
   const prompt = '只更新当前作品简介。'
   mocks.original.mockResolvedValue({ prompt, spec: fresh(prompt) })
   expect((await novelUpdateMetaTool.execute(context(), { summary: fields.summary })).outcome).not.toBe('failed')
@@ -210,4 +211,19 @@ it.each([
   expect(restrictToolsToTask([novelUpdateMetaTool], spec, 'plan').map(tool => tool.name)).toContain('novel_update_meta')
   mocks.original.mockResolvedValue({ prompt, spec })
   await expect(assertNovelMetadataIntent(mocks.db as unknown as Prisma.TransactionClient, context(), { ...empty, summary: '作者已有简介' })).resolves.toBe(true)
+})
+
+it('keeps the frozen legacy build metadata grant without retrofitting fresh initialization semantics', async () => {
+  const prompt = '修改本章', spec = buildTaskSpec({ runId: 'r', novelId: 'n', chapterId: 'c', prompt })
+  mocks.original.mockResolvedValue({ prompt, spec })
+  mocks.db.novel.findFirst.mockResolvedValue({ ...empty, summary: '原简介', chapterCount: 1, wordCount: 1200 })
+  expect((await novelUpdateMetaTool.execute(context(), { summary: fields.summary })).outcome).not.toBe('failed')
+  expect(mocks.db.novel.update).toHaveBeenCalledExactlyOnceWith({ where: { id: 'n' }, data: { summary: fields.summary, tagNames: undefined } })
+})
+it('fresh chapter work cannot use its grant to overwrite existing metadata without author intent', async () => {
+  const prompt = '修改本章', spec = fresh(prompt)
+  mocks.original.mockResolvedValue({ prompt, spec })
+  mocks.db.novel.findFirst.mockResolvedValue({ ...empty, summary: '原简介', tagNames: ['玄幻'], chapterCount: 1, wordCount: 1200 })
+  await expect(novelUpdateMetaTool.execute(context(), { summary: fields.summary })).rejects.toMatchObject({ code: 'NOVEL_SETUP_AUTHORITY_REQUIRED' })
+  expect(mocks.db.novel.update).not.toHaveBeenCalled()
 })
