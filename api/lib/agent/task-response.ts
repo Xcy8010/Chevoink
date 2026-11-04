@@ -1,3 +1,4 @@
+import { readNovelInitializationCompletion } from './novel-initialization.js'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
@@ -62,6 +63,8 @@ export async function assertTaskResponseEligible(tx: Prisma.TransactionClient,
     || parsed.data.responseDeliveryProtocol !== 1 && !(authorContinue && await currentResponseContinue(tx, subject.runId, authorContinue))) {
     throw new DataAccessError(409, 'TASK_RESPONSE_UNAVAILABLE', '原任务未启用直接答复交付，保留原执行流程。')
   }
+  if (parsed.data.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED')
+    && (await readNovelInitializationCompletion(tx, subject)).status === 'incomplete') throw new DataAccessError(409, 'TASK_RESPONSE_WORK_PENDING', '作品初始化尚未实际保存，不能仅用文字结束；继续已授权的书名、简介与标签保存。')
   const proof = { taskId: original.taskId, requestHash: createHash('sha256').update(original.prompt).digest('hex'),
     ...(parsed.data.responseDeliveryProtocol !== 1 && authorContinue ? { authorContinue: { ...authorContinue } } : {}) }
   if (expected && (expected.taskId !== proof.taskId || expected.requestHash !== proof.requestHash)) {

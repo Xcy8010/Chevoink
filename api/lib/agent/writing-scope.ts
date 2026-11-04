@@ -197,7 +197,7 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
     && writing.targets[0].orderIndex === last.orderIndex + 1 && !writing.targets[0].volumeId
     && writing.targets[0].positionInVolume === undefined && !range?.volume
     && !/(?:只读|不(?:要|得|能|许|必)?(?:新建|建|改|调整|分)卷|(?:不要|不得|禁止|不能).{0,12}(?:结构|分卷)|read.only|do not.{0,20}(?:volume|structure))/iu.test(admissionPrompt + spec.hardConstraints.map(item => item.text).join('；'))) {
-    writing.tailVolume = { version: 1, targetOrderIndex: writing.targets[0].orderIndex, previousChapterId: last.id, previousRevision: last.revision }
+    writing.tailVolume = { version: 1, ...(spec.scope.volumeCreationProtocol === 1 ? { creationProtocol: 2 as const } : {}), targetOrderIndex: writing.targets[0].orderIndex, previousChapterId: last.id, previousRevision: last.revision }
   }
   const hasSeparateActions = writingActions?.operations.some(operation => operation.kind === 'write'
     && operation.targets.some(target => !writingActions.operations.some(revision => revision.kind === 'revise'

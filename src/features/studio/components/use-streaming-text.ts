@@ -8,10 +8,10 @@ export function useStreamingTextState(text: string, streaming: boolean, identity
   const current = useRef(visible)
   const pending = useRef({ text, identity })
   const wasStreaming = useRef(streaming)
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const timer = useRef<number | null>(null)
   useEffect(() => {
     const update = () => {
-      if (timer.current !== null) clearTimeout(timer.current)
+      if (timer.current !== null) cancelAnimationFrame(timer.current)
       timer.current = null
       current.current = pending.current
       setVisible(current.current)
@@ -32,26 +32,29 @@ export function useStreamingTextState(text: string, streaming: boolean, identity
     const started = streaming && !wasStreaming.current
     wasStreaming.current = streaming
     if (started && !animateInitial || !streaming || reduced || hidden || current.current.identity !== identity || !text.startsWith(current.current.text)) {
-      if (timer.current !== null) clearTimeout(timer.current)
+      if (timer.current !== null) cancelAnimationFrame(timer.current)
       timer.current = null
       current.current = { text, identity }
       setVisible(current.current)
       return
     }
-    const tick = () => {
+    let lastFrame = performance.now()
+    const tick = (now: number) => {
       timer.current = null
       const target = pending.current
       const length = current.current.text.length
-      let end = Math.min(target.text.length, length + Math.max(2, Math.ceil((target.text.length - length) / 3)))
+      const frameMs = Math.max(8, Math.min(32, now - lastFrame))
+      lastFrame = now
+      let end = Math.min(target.text.length, length + Math.max(1, Math.ceil((target.text.length - length) * frameMs / 180)))
       // Do not split an astral Unicode character between animation frames.
       if (end < target.text.length && /[\uD800-\uDBFF]/.test(target.text[end - 1])) end++
       current.current = { text: target.text.slice(0, end), identity: target.identity }
       setVisible(current.current)
-      if (end < target.text.length) timer.current = setTimeout(tick, 16)
+      if (end < target.text.length) timer.current = requestAnimationFrame(tick)
     }
-    if (timer.current === null && current.current.text !== text) timer.current = setTimeout(tick, 16)
+    if (timer.current === null && current.current.text !== text) timer.current = requestAnimationFrame(tick)
   }, [text, identity, streaming, reduced, hidden, animateInitial])
-  useEffect(() => () => { if (timer.current !== null) clearTimeout(timer.current); timer.current = null }, [])
+  useEffect(() => () => { if (timer.current !== null) cancelAnimationFrame(timer.current); timer.current = null }, [])
   const shown = !streaming || reduced || hidden || visible.identity !== identity || !text.startsWith(visible.text) ? text : visible.text
   return { text: shown, pending: shown !== text }
 }

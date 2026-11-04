@@ -219,3 +219,27 @@ describe('Agent voice draft integration', () => {
     expect(useAgentStore.getState().composerDraft).toBe('已有草稿')
   })
 })
+
+
+it('keeps send locks, drafts and focus owned by the task when an older send settles', async () => {
+  let finishA!: () => void, finishB!: () => void
+  const onSend = vi.fn().mockImplementationOnce(() => new Promise<void>(done => { finishA = done })).mockImplementationOnce(() => new Promise<void>(done => { finishB = done }))
+  const input = { ...props(), onSend }
+  const view = render(<AgentComposer {...input} />)
+  fireEvent.click(screen.getByRole('button', { name: '发送' }))
+  expect(onSend).toHaveBeenCalledTimes(1)
+  view.rerender(<AgentComposer {...input} voiceScopeKey="u:n1:task-b-pending" />)
+  const editor = screen.getByRole('textbox', { name: 'Agent 提示词' })
+  editor.textContent = 'B的新草稿'; fireEvent.input(editor)
+  expect((screen.getByRole('button', { name: '发送' }) as HTMLButtonElement).disabled).toBe(false)
+  fireEvent.click(screen.getByRole('button', { name: '发送' }))
+  expect(onSend).toHaveBeenCalledTimes(2)
+  const focusTarget = document.createElement('button'); document.body.append(focusTarget); focusTarget.focus()
+  await act(async () => { finishA(); await Promise.resolve() })
+  expect(useAgentStore.getState().composerDraft).toBe('B的新草稿')
+  expect((screen.getByRole('button', { name: '发送' }) as HTMLButtonElement).disabled).toBe(true)
+  expect(document.activeElement).toBe(focusTarget)
+  await act(async () => { finishB(); await Promise.resolve() })
+  expect(useAgentStore.getState().composerDraft).toBe('')
+  focusTarget.remove()
+})

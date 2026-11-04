@@ -1,12 +1,14 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { planSaveTool } from '../../api/lib/agent/tools/write-tools.js'
-import { executeDurablePlanSave } from '../../api/lib/agent/tools/durable-plan.js'
+import { novelPlanHash } from '../../api/lib/agent/novel-plan-contract.js'
+import { createHash } from 'node:crypto'
+import { executeDurablePlanSave, planTargetHash } from '../../api/lib/agent/tools/durable-plan.js'
 import { DataAccessError } from '../../api/lib/prisma.js'
 
 const mocks = vi.hoisted(() => ({
   tx: { $queryRaw: vi.fn(), agentOperation: { findUnique: vi.fn() }, agentTaskRoot: { findUniqueOrThrow: vi.fn() },
-    agentArtifact: { findMany: vi.fn(), findFirst: vi.fn() } },
+    agentArtifact: { findMany: vi.fn(), findFirst: vi.fn(), updateMany: vi.fn() } },
   admitted: vi.fn(), prepare: vi.fn(), commit: vi.fn(), reduce: vi.fn(), failure: vi.fn(),
 }))
 vi.mock('../../api/lib/agent/runtime-lease.js', async original => ({ ...await original<object>(),
@@ -40,7 +42,7 @@ it.each([false, true])('grants legacy creation only after authenticating an oper
   mocks.admitted.mockResolvedValue({ input: { args } })
   const write = vi.fn(async () => ({ output: '已保存', summary: '已保存', display: { kind: 'planFile' as const, artifactId: 'saved', title: args.title, content: args.content } }))
   await executeDurablePlanSave(ctx, args, raw => raw, write)
-  expect(write).toHaveBeenCalledWith(mocks.tx, undefined, existing ? true : undefined)
+  expect(write).toHaveBeenCalledWith(mocks.tx, undefined, existing ? true : undefined, undefined)
   expect(mocks.admitted).toHaveBeenCalledTimes(existing ? 1 : 0)
   if (existing) {
     expect(mocks.admitted).toHaveBeenCalledWith(lease, { operationId: 'old-op', action: 'plan_save', novelId: 'n', callId: 'call' }, mocks.tx)
@@ -78,7 +80,25 @@ it('never upgrades a new missing-kind call to legacy when interrupted after PREP
   const result = await executeDurablePlanSave(ctx, args, raw => raw, write)
   expect(result.outcome).toBe('failed')
   expect(result.output).toContain('planKind=outline')
-  expect(write).toHaveBeenCalledExactlyOnceWith(mocks.tx, undefined, undefined)
+  expect(write).toHaveBeenCalledExactlyOnceWith(mocks.tx, undefined, undefined, undefined)
   expect(mocks.tx.agentArtifact.findFirst).not.toHaveBeenCalled()
   expect(mocks.failure).toHaveBeenCalledWith(lease, expect.objectContaining({ code: 'PLAN_WRITE_REJECTED' }))
+})
+
+it('passes the full verified durable plan version to typed append without changing the admitted model arguments', async () => {
+  const plan = { id: 'typed', title: '大纲', content: '原大纲正文', metadata: { savedAsPlan: true, planKind: 'outline' } }
+  const input = { title: plan.title, planId: plan.id, content: '追加完整小节', mode: 'append' as const,
+    expectedContentHash: createHash('sha256').update(plan.content).digest('hex') }
+  const fullBaseline = planTargetHash(plan), semanticBaseline = novelPlanHash(plan)
+  mocks.tx.agentArtifact.findFirst.mockImplementation(async () => plan)
+  mocks.tx.agentArtifact.updateMany.mockImplementation(async ({ data }) => { Object.assign(plan, data); return { count: 1 } })
+  const context = { ...ctx, durablePlan: { ...ctx.durablePlan!, expected: { id: plan.id, hash: fullBaseline } } }
+  const write = vi.fn(async (tx, contentHash, _legacyCreationReplay, semanticHash) => planSaveTool.execute({ ...context,
+    durablePlan: undefined, transaction: tx, planContentHashes: new Map([[plan.id, contentHash]]), planSemanticHashes: new Map([[plan.id, semanticHash]]) }, input))
+  const result = await executeDurablePlanSave(context, input, raw => raw, write)
+  expect(result.outcome).not.toBe('failed')
+  expect(write).toHaveBeenCalledWith(mocks.tx, input.expectedContentHash, undefined, semanticBaseline)
+  expect(mocks.prepare.mock.calls[0][2].effectiveArgs).toEqual(input)
+  expect(mocks.prepare.mock.calls[0][2].effectiveArgs).not.toHaveProperty('expectedPlanHash')
+  expect(plan.content).toBe('原大纲正文\n\n追加完整小节')
 })

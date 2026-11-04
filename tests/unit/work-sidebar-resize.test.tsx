@@ -66,3 +66,16 @@ it('prioritizes the clicked session over the remembered active task, including m
   expect(selectInitialTask(tasks,'old',null)).toBe(tasks[0])
   expect(selectInitialTask(tasks,'old','new')).toBeNull()
 })
+
+
+it('keeps a newly created local task and its novel visible after switching before navigation refetch sees it', () => {
+  const novels = [{id:'a',title:'新作品A',status:'draft',updatedAt:'2026-09-10'}, {id:'b',title:'作品B',status:'draft',updatedAt:'2026-09-09'}] as ComponentProps<typeof StudioWorkspaceSidebar>['novels']
+  const aTasks = [{id:'local-a',title:'新任务A',updatedAt:'2026-09-10',temporary:true,prompt:'合成请求',artifactsCount:0}]
+  const onSelectTask = vi.fn()
+  const view = render(<Fixture novels={novels} currentNovelId="a" currentTasksNovelId="a" currentTasks={aTasks} activeTaskId="local-a" onSelectTask={onSelectTask} />)
+  expect(screen.getByRole('button', { name: '新任务A' })).toBeTruthy()
+  view.rerender(<Fixture novels={[novels[1]]} currentNovelId="b" currentTasksNovelId="b" currentTasks={[]} activeTaskId={null} onSelectTask={onSelectTask} />)
+  expect(screen.getByRole('button', { name: /^新作品A/ })).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '新任务A' }))
+  expect(onSelectTask).toHaveBeenCalledWith('local-a', 'a')
+})

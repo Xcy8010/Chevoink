@@ -27,10 +27,20 @@ export function toOpenAIToolPresentation(tool: Pick<AgentTool, 'name' | 'descrip
 }
 
 function toolPresentation(tool: Pick<AgentTool, 'name' | 'description'>, parameters: Record<string, unknown>, scope?: TaskSpec['scope']): { description: string; parameters: Record<string, unknown> } {
+  if (tool.name === 'novel_update_meta' && scope?.novelInitializationProtocol === 1 && scope.novelInitializationTarget === 'empty') {
+    return { description: `${tool.description} 完整初始化时一次提供title、summary与tags；缺字段不会保存任何内容。单项修改任务仍可只传所需字段。`, parameters }
+  }
   const writing = scope?.writing
   const target = writing?.kind === 'bounded' && writing.targets.length === 1 ? writing.targets[0] : undefined
   const globalNewChapter = target?.chapterId === null && Number.isSafeInteger(target.orderIndex) && target.orderIndex > 0
     && target.volumeId === undefined && target.positionInVolume === undefined ? target.orderIndex : undefined
+  if (tool.name === 'volume_create' && writing?.tailVolume?.creationProtocol === 2) {
+    const properties = parameters.properties as Record<string, unknown>
+    return { description: '为本任务已准备的新阶段显式创建尾卷。只使用原目标和同一收束证据，创建成功后用返回的真实卷编号创建本章；不移动旧章。',
+      parameters: { type: 'object', properties: { title: properties.title, summary: properties.summary, boundary: properties.boundary,
+        targetOrderIndex: { ...(properties.targetOrderIndex as Record<string, unknown>), enum: [writing.tailVolume.targetOrderIndex] } },
+        required: ['title', 'summary', 'boundary', 'targetOrderIndex'], additionalProperties: false } }
+  }
   if (tool.name === 'story_compiler_prepare') {
     const properties = parameters.properties as Record<string, unknown>
     const required = [...new Set([...(parameters.required as string[] ?? []), ...(writing?.tailVolume ? ['volumeDecision'] : [])])]
@@ -45,9 +55,9 @@ function toolPresentation(tool: Pick<AgentTool, 'name' | 'description'>, paramet
   if (tool.name !== 'chapter_create' || globalNewChapter === undefined) return { description: tool.description, parameters }
   const properties = parameters.properties as Record<string, unknown>
   return {
-    description: `在当前作品创建本任务冻结的全书第 ${globalNewChapter} 章。服务器按原任务合同定位，只填 title 标题即可，content 正文可选。默认title只写实际章名，不重复章号或书名号；作者明确命名照其要求。若传 position，只能为 ${globalNewChapter}；不要猜测卷 ID、卷序号或卷内位置。${writing?.tailVolume ? '每次续写先在PREPARE审视卷目标；continue决定创建时省略newVolume和所有卷坐标，服务端沿用当前卷。真实收束且已保存new_volume决定时，只传同一newVolume创建尾卷与此章；不得把现有卷填写为newVolume。缺证据留当前卷，不能按章数切卷。' : ''}创建成功后复用返回的 chapterId 写正文，不要重复建章。`,
+    description: `在当前作品创建本任务冻结的全书第 ${globalNewChapter} 章。服务器按原任务合同定位，只填 title 标题即可，content 正文可选。默认title只写实际章名，不重复章号或书名号；作者明确命名照其要求。若传 position，只能为 ${globalNewChapter}；不要猜测卷 ID、卷序号或卷内位置。${writing?.tailVolume?.creationProtocol === 2 ? '每次续写先审视本卷目标；决定新阶段后先调用volume_create，再传返回的volumeId创建本章；延续本卷时省略卷编号。不能在建章时隐式建卷，也不按章数切卷。' : writing?.tailVolume ? '每次续写先在PREPARE审视卷目标；continue决定创建时省略newVolume和所有卷坐标，服务端沿用当前卷。真实收束且已保存new_volume决定时，只传同一newVolume创建尾卷与此章；不得把现有卷填写为newVolume。缺证据留当前卷，不能按章数切卷。' : ''}创建成功后复用返回的 chapterId 写正文，不要重复建章。`,
     parameters: { type: 'object', properties: { title: properties.title, content: properties.content,
-      ...(writing?.tailVolume ? { newVolume: properties.newVolume } : {}),
+      ...(writing?.tailVolume?.creationProtocol === 2 ? { volumeId: properties.volumeId } : writing?.tailVolume ? { newVolume: properties.newVolume } : {}),
       position: { ...(properties.position as Record<string, unknown>), enum: [globalNewChapter] } }, required: ['title'], additionalProperties: false },
   }
 }
@@ -83,7 +93,9 @@ export function originalToolParameterSchemas(tool: Pick<AgentTool, 'name' | 'des
     ? { ...current, properties: Object.fromEntries(Object.entries(properties).filter(([key]) => key !== 'terminalPatch')) } : null
   const oldTerminal = previousTerminal && previousPatch ? { ...previousTerminal,
     properties: Object.fromEntries(Object.entries(previousTerminal.properties).filter(([key]) => key !== 'terminalPatch')) } : null
-  return [current, toolPresentation(tool, current, scope).parameters, ...(previousConfiguration ? [previousConfiguration] : []), ...(legacy ? [legacy] : []), ...(previousPrepare ? [previousPrepare] : []),
+  const previousVolumeCreate = tool.name === 'volume_create' ? { ...current, properties: Object.fromEntries(Object.entries(current.properties as Record<string, unknown>).filter(([key]) => key !== 'boundary' && key !== 'targetOrderIndex')) } : null
+  const previousNovelMetadata = tool.name === 'novel_update_meta' ? { ...current, properties: Object.fromEntries(Object.entries(current.properties as Record<string, unknown>).filter(([key]) => key !== 'title')) } : null
+  return [current, toolPresentation(tool, current, scope).parameters, ...(previousNovelMetadata ? [previousNovelMetadata] : []), ...(previousVolumeCreate ? [previousVolumeCreate] : []), ...(previousConfiguration ? [previousConfiguration] : []), ...(legacy ? [legacy] : []), ...(previousPrepare ? [previousPrepare] : []),
     ...(previousPatch ? [previousPatch, withoutTopLevelProofs(previousPatch), ...(oldTerminal ? [oldTerminal, withoutTopLevelProofs(oldTerminal)] : [])] : []),
     ...(previousProofSelection.length ? previousProofSelection : previousTerminal ? [previousTerminal] : []), ...(previousResearch ? [previousResearch] : [])]
 }

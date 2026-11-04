@@ -191,10 +191,13 @@ export default function StudioWorkspaceSidebar(props: Props) {
     }
   }, [])
 
-  const novels = useMemo(
-    () => sortWorkspaceItemsByLatest(props.novels.filter((item) => item.status !== 'archived')),
-    [props.novels],
-  )
+  const [taskSnapshots, setTaskSnapshots] = useState<Record<string, SidebarTask[]>>({})
+  const [novelSnapshots, setNovelSnapshots] = useState<Record<string, Novel>>({})
+  const novels = useMemo(() => {
+    const currentIds = new Set(props.novels.map(novel => novel.id))
+    const retained = Object.values(novelSnapshots).filter(novel => !currentIds.has(novel.id) && (taskSnapshots[novel.id]?.length ?? 0) > 0)
+    return sortWorkspaceItemsByLatest([...props.novels, ...retained].filter(novel => novel.status !== 'archived'))
+  }, [props.novels, novelSnapshots, taskSnapshots])
   const sessionsQuery = useQuery({
     queryKey: ['agent', 'sessions', 'workspace-sidebar'],
     queryFn: () => fetchAgentSessions(),
@@ -220,6 +223,14 @@ export default function StudioWorkspaceSidebar(props: Props) {
     id: task.id, novelId: props.currentTasksNovelId, title: task.title, updatedAt: task.updatedAt,
     pinnedAt: null, temporary: task.temporary, isBranch: false, lastActiveAt: task.updatedAt, createdAt: null,
   })), [props.currentTasksNovelId, props.currentTasks])
+  useLayoutEffect(() => {
+    setTaskSnapshots(current => ({ ...current, [props.currentTasksNovelId]: localTasks }))
+    setNovelSnapshots(current => ({ ...current, ...Object.fromEntries(props.novels.map(novel => [novel.id, novel])) }))
+  }, [localTasks, props.currentTasksNovelId, props.novels])
+  function forgetTask(taskId: string) {
+    setTaskSnapshots(current => Object.fromEntries(Object.entries(current).map(([owner, tasks]) => [owner, tasks.filter(task => task.id !== taskId)])))
+    props.onTaskDeleted(taskId)
+  }
   // 任务状态信号：本地 SSE 实时层（agentStore）+ 服务端 run-status 轮询兑底，
   // 覆盖切走窗口/跨作品/折叠期间的任务完成、待确认、异常中止与运行中提示
   const sessionSignals = useAgentStore((state) => state.sessionSignals)
@@ -352,13 +363,15 @@ export default function StudioWorkspaceSidebar(props: Props) {
     try {
       if (danger.kind === 'deleteNovel') {
         await deleteNovelWorkspace(danger.id)
+        setNovelSnapshots(current => { const next = { ...current }; delete next[danger.id]; return next })
+        setTaskSnapshots(current => { const next = { ...current }; delete next[danger.id]; return next })
         props.onNovelDeleted(danger.id)
         await refreshNavigation()
         toast.success('作品已删除。')
       } else if (danger.kind === 'deleteTask') {
         // 临时窗口还没落库，直接让宿主移除即可，不要拿本地 id 调删除接口 404
         if (!danger.temporary) await deleteAgentSession(danger.id)
-        props.onTaskDeleted(danger.id)
+        forgetTask(danger.id)
         await refreshNavigation()
       } else {
         const { session } = await forkAgentSession(danger.id)
@@ -414,6 +427,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
     try {
       if (target.kind === 'novel') {
         await updateNovelMeta(target.id, { status: 'archived' })
+        setNovelSnapshots(current => current[target.id] ? { ...current, [target.id]: { ...current[target.id], status: 'archived' } } : current)
         if (target.id === props.currentNovelId) {
           const next = novels.find((item) => item.id !== target.id)
           if (next) props.onSelectNovel(next.id); else props.onCreateNovel()
@@ -423,7 +437,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
         await updateAgentSessionSettings(target.id, { status: 'archived' })
         // 归档与删除同为窗口回收：不能新建任务窗口（否则作者会看到「归档了却又冒出一个新任务」），
         // 且必须移除本地窗口，被归档的任务才不会继续留在列表里
-        props.onTaskDeleted(target.id)
+        forgetTask(target.id)
         toast.success('任务已归档，可在左侧栏「更多 → 归档内容」中找回并恢复。')
       }
       await refreshNavigation()
@@ -494,11 +508,10 @@ export default function StudioWorkspaceSidebar(props: Props) {
 
   const projectTasks = (novelId: string): SidebarTask[] => {
     const remote = (sessionsByNovel.get(novelId) ?? []).map(toSidebarTask)
-    if (novelId !== props.currentTasksNovelId) return sortWorkspaceItemsByLatest(remote)
     // 同 id 任务以服务端为准（快照只补服务端尚没有的本地临时任务）：
     // 快照→服务端合并时 updatedAt 不再漂移，切换作品后任务列表不重排跳动
     const remoteIds = new Set(remote.map((task) => task.id))
-    return sortWorkspaceItemsByLatest([...remote, ...localTasks.filter((task) => !remoteIds.has(task.id))])
+    return sortWorkspaceItemsByLatest([...remote, ...(novelId === props.currentTasksNovelId ? localTasks : taskSnapshots[novelId] ?? []).filter((task) => !remoteIds.has(task.id))])
   }
   const pinnedNovels = sortWorkspaceItemsByLatest(novels.filter((item) => item.pinnedAt))
   const pinnedSessions = sortWorkspaceItemsByLatest(sessions.filter((item) => item.pinnedAt))

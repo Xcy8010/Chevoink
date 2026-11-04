@@ -21,7 +21,8 @@ function Harness() {
 }
 let seq = 0
 function event(body: AgentStreamEventBody) { useAgentStore.getState().applyEvent({ ...body, runId: 'run', seq: ++seq, ts: '2026-10-31T00:00:00Z' }) }
-function start() { seq = 0; useAgentStore.getState().beginRun('run', '合成问题', 'session'); event({ type: 'message.start', messageId: 'answer' }) }
+// Each call starts a separate synthetic execution; reusing a run id is an idempotent receipt.
+function start() { useAgentStore.getState().resetRun(); seq = 0; useAgentStore.getState().beginRun('run', '合成问题', 'session'); event({ type: 'message.start', messageId: 'answer' }) }
 const answer = '按照已经核对的卷纲，第一卷计划写二十章，人物冲突与阶段目标会分批推进。'
 it('reveals an atomic final answer after real finish, then folds process rows with an exit transition', async () => {
   vi.useFakeTimers(); start()

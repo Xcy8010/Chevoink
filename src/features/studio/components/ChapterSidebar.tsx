@@ -1,4 +1,4 @@
-import { useEffect, useState, type DragEvent, type MouseEvent, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useState, type DragEvent, type MouseEvent, type ReactNode } from 'react'
 import { ChevronDown, ChevronRight, FilePlus2, FileText, FolderPlus, FolderTree, GripVertical, NotebookPen, NotebookText, PencilLine, ScrollText, Settings2, Trash2 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -42,7 +42,14 @@ function TreeHeaderButton({ label, onClick, children }: { label: string; onClick
   )
 }
 
+function readCollapsedVolumes(scope?: string): Set<string> {
+  if (!scope) return new Set()
+  try { const value: unknown = JSON.parse(localStorage.getItem(`chevoink:volume-collapse:${scope}`) ?? '[]'); return new Set(Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : []) }
+  catch { return new Set() }
+}
+
 type ChapterSidebarProps = {
+  taskScope?: string
   chapters: StudioPayload['chapters']
   volumes: StudioPayload['volumes']
   savedPlans: WorkspacePlanFile[]
@@ -83,6 +90,7 @@ type ChapterSidebarProps = {
 }
 
 export default function ChapterSidebar({
+  taskScope,
   chapters,
   volumes,
   savedPlans,
@@ -106,6 +114,15 @@ export default function ChapterSidebar({
   onSelectChapter,
   embedded = false,
 }: ChapterSidebarProps) {
+  const [volumeState, setVolumeState] = useState(() => ({ scope: taskScope, collapsed: readCollapsedVolumes(taskScope) }))
+  const collapsedVolumes = volumeState.scope === taskScope ? volumeState.collapsed : readCollapsedVolumes(taskScope)
+  useLayoutEffect(() => { setVolumeState({ scope: taskScope, collapsed: readCollapsedVolumes(taskScope) }) }, [taskScope])
+  function toggleVolume(volumeId: string) {
+    const next = new Set(collapsedVolumes)
+    if (next.has(volumeId)) next.delete(volumeId); else next.add(volumeId)
+    setVolumeState({ scope: taskScope, collapsed: next })
+    if (taskScope) try { localStorage.setItem(`chevoink:volume-collapse:${taskScope}`, JSON.stringify([...next])) } catch { /* Memory state remains available. */ }
+  }
   const [novelExpanded, setNovelExpanded] = useState(true)
   const [planFolderExpanded, setPlanFolderExpanded] = useState(false)
   const [expandedPlanKinds, setExpandedPlanKinds] = useState<Record<string, boolean>>({ outline: true, detail: true, legacy: true })
@@ -334,8 +351,11 @@ export default function ChapterSidebar({
                           dropTarget === `volume:${volume.id}` && 'border-[var(--border-strong)] bg-[var(--surface-muted)]',
                         )}
                       >
-                        <NotebookText className="h-3.5 w-3.5 shrink-0 text-[var(--text-tertiary)]" />
-                        <span className="truncate">第 {volume.orderIndex} 卷 · {volume.title}</span>
+                        <button type="button" onClick={() => toggleVolume(volume.id)} aria-expanded={!collapsedVolumes.has(volume.id)} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+                          {collapsedVolumes.has(volume.id) ? <ChevronRight className="h-3.5 w-3.5 shrink-0" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+                          <NotebookText className="h-3.5 w-3.5 shrink-0 text-[var(--text-tertiary)]" />
+                          <span className="truncate">第 {volume.orderIndex} 卷 · {volume.title}</span>
+                        </button>
                         {onOpenVolumeSettings ? (
                           <button
                             type="button"
@@ -356,7 +376,7 @@ export default function ChapterSidebar({
                           <span className="ml-auto shrink-0 text-[10px] text-[var(--text-tertiary)]">共{volumeChapters.length}章</span>
                         )}
                       </div>
-                      <div className="ml-2.5 border-l border-[var(--border-subtle)] pl-1 md:border-transparent md:transition-colors md:group-hover/tree:border-[var(--border-subtle)]">
+                      {!collapsedVolumes.has(volume.id) ? <div className="ml-2.5 border-l border-[var(--border-subtle)] pl-1 md:border-transparent md:transition-colors md:group-hover/tree:border-[var(--border-subtle)]">
                   {volumeChapters.map((chapter) => {
                     const chapterActive =
                       selectedTreeItemId === `chapter:${chapter.id}` ||
@@ -439,7 +459,7 @@ export default function ChapterSidebar({
                         {volumeChapters.length === 0 ? (
                           <p className="px-2 py-1.5 text-xs text-[var(--text-tertiary)]">空卷</p>
                         ) : null}
-                      </div>
+                      </div> : null}
                     </div>
                   ))}
                   {volumeGroups.length === 0 ? (

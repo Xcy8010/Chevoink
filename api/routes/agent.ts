@@ -898,6 +898,7 @@ router.post('/runs', async (req: Request, res: Response): Promise<void> => {
     const body = parseBody(startAgentLoopRunSchema, req.body, '请完整填写运行参数。')
 
     const payload = await startLoopRun(userId, {
+      clientRequestId: body.clientRequestId,
       sessionId: body.sessionId,
       novelId: body.novelId,
       chapterId: body.chapterId ?? null,

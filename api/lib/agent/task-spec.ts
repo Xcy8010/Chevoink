@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { DataAccessError } from '../prisma.js'
 import { localEditGuidance } from './local-edit-scope.js'
-import { parseAuthorWritingRequest } from './author-writing-request.js'
+import { lexAuthorWritingRequest, parseAuthorWritingRequest } from './author-writing-request.js'
 import { requiresWritingConfirmation } from './writing-pacing-policy.js'
 import { researchAuthor, researchAlternativeSelection, researchSourceSites, researchSourceHosts } from './research-navigation-policy.js'
 
@@ -99,7 +99,7 @@ export function classifyWritingPacing(prompt: string): TaskSpec['writingPacing']
   const positive = affirmativeClauses(prompt).join('\n')
   const greeting = /^(?:你好|您好|嗨|哈喽|hello|hi|hey|在吗|谢谢|早上好|晚上好|你是谁|你能做什么)[\s，,。.!！?？～~]*$/iu.test(prompt.trim())
   const question = /^(?:请问|告诉我|解释|介绍|什么是|为什么|如何|怎么|怎样|能否解释|你觉得|你认为|(?:我)?(?:想|想要|希望)(?:了解|知道|学习)|what\b|why\b|how\b|explain\b)/iu.test(prompt.trim())
-  const explicitEffect = /(?:帮我|替我|为我|请你|然后|再)(?:直接)?(?:写|修改|改写|续写|创建|删除|保存|更新|润色|重写|生成)/u.test(positive)
+  const explicitEffect = /(?:帮我|替我|为我|请你|然后|再)(?:直接)?(?:写|修改|改写|续写|创建|删除|保存|更新|润色|重写|生成|初始化)/u.test(positive)
   // Resolve informational questions before matching a book-sized object:
   // "如何写一本小说" asks for advice, not even a saved planning artifact.
   const advisory = /^(?:(?:那|那么|你觉得|你看|请问)[，,\s]*)?(?:下一步|接下来)(?:我|我们)?(?:应该|该|可以|要)?(?:做什么|怎么做|怎么办|如何推进|干什么)[呢吗吧？?。.!！\s]*$/u.test(prompt.trim())
@@ -119,6 +119,35 @@ export function classifyWritingPacing(prompt: string): TaskSpec['writingPacing']
   const autonomous = /(?:自动|自主|自行|直接).{0,16}(?:写完|完成全书|创作全书|连续写|逐章写)|(?:全权|授权).{0,16}(?:写作|创作)|(?:write|finish).{0,24}(?:autonomously|automatically)/iu.test(positive)
   const confirmationFirst = requiresWritingConfirmation(prompt)
   return !confirmationFirst && (bounded || autonomous) ? 'explicit_writing' : 'proposal_only'
+}
+
+export function isExplicitNovelMetadataRequest(prompt: string): boolean {
+  const request = lexAuthorWritingRequest(prompt).masked
+  if (classifyWritingPacing(request.replace(/^(?:能否|可以)?(?:帮我|请你)/u, '')) === 'conversation_only') return false
+  // Initialization needs a positive command, not merely the noun/verb appearing
+  // in an explanation or a conditional. A polite action question is a command.
+  const prefix = '(?:(?:请问|可以|能否|能不能|可不可以|请你|请|帮我|替我|为我|麻烦你|麻烦|劳烦你|劳烦|现在|直接|立即|开始|先|你来|由你)\\s*)*'
+  const target = '(?:(?:当前(?:的)?|这个|这部|这本|本部|我的|新建的|新|当前空)?(?:作品|小说)|书名|作品名|简介|标签|元信息)'
+  const fields = '(?:的?(?:书名|作品名|简介|标签|元信息|信息|设置|和|与|及|并|\\s))*'
+  const ending = '(?:一下|好)?(?:吗|好吗|可以吗|行吗|吧)?\\s*$'
+  const initialize = new RegExp(`^\\s*${prefix}初始化(?:一下)?${target}${fields}${ending}`, 'u')
+  const initializeObject = new RegExp(`^\\s*${prefix}(?:把|将)${target}${fields}(?:进行)?初始化${ending}`, 'u')
+  const delegated = new RegExp(`^\\s*${prefix}(?:从[^，,。；;]{0,24})?(?:代选|选(?:择)?)[^，,。；;]{0,30}(?:并|并且)(?:直接)?初始化(?:一下)?${target}${fields}${ending}`, 'u')
+  return affirmativeClauses(request).some(clause => {
+    if (initialize.test(clause) || initializeObject.test(clause) || delegated.test(clause)) return true
+    // Other metadata edits retain their existing contract; initialization prose
+    // cannot acquire that authority through an incidental field name.
+    return !clause.includes('初始化') && /(?:设置|修改|更新|完善|补充|补写|补|写|调整|保存|采用|确定|更换|重命名|改名).{0,20}(?:书名|作品名|简介|标签)|(?:书名|作品名|简介|标签).{0,12}(?:设为|改为|修改|更新|采用|保存)/u.test(clause)
+  })
+}
+
+export function requiresNovelInitialization(prompt: string): boolean {
+  const request = lexAuthorWritingRequest(prompt).masked
+  return isNovelDirectionSetup(request) || isExplicitNovelMetadataRequest(request) && /初始化|书名.{0,40}简介.{0,40}标签/u.test(request)
+}
+
+export function isNovelDirectionSetup(prompt: string): boolean {
+  return !isExplicitNovelMetadataRequest(prompt) && classifyWritingPacing(prompt) === 'proposal_only' && !/(?:大纲|细纲|规划|计划|梗概|outline|plan)/iu.test(prompt)
 }
 
 /** Repair greeting/question legacy contracts only from the recovered original
@@ -252,6 +281,9 @@ export function buildTaskSpec(input: {
   networkAdmission?: 1
   /** Genuine fresh HTTP authority; legacy build/recovery retains its classifier. */
   authorWritingProtocol?: 2
+  novelInitializationProtocol?: 1
+  novelInitializationTarget?: 'empty' | 'existing'
+  volumeCreationProtocol?: 1
   creativeFreedom?: CreativeFreedom
   qualityMode?: StoryCompilerMode
 }): TaskSpec {
@@ -293,7 +325,10 @@ export function buildTaskSpec(input: {
   const selection = input.chapterId && input.selection?.start !== undefined && input.selection.end !== undefined
     ? { chapterId: input.chapterId, start: input.selection.start, end: input.selection.end }
     : undefined
-  const outputKind = intent === 'global_transform'
+  const directionSetup = input.novelInitializationProtocol === 1 && isNovelDirectionSetup(input.prompt)
+  const existingDirection = directionSetup && input.novelInitializationTarget === 'existing'
+  const metadataSetup = input.novelInitializationProtocol === 1 && isExplicitNovelMetadataRequest(input.prompt) && !/(?:大纲|细纲|正文|章节|outline|chapter)/iu.test(input.prompt)
+  const outputKind = directionSetup || metadataSetup ? 'text' : intent === 'global_transform'
     ? 'changeset'
     : intent === 'review' || intent === 'research_analysis' || intent === 'structure'
       ? 'validation_report'
@@ -325,7 +360,10 @@ export function buildTaskSpec(input: {
     } } : {}),
     researchBudget: !networkDenied && (freshResearch
       || /完整拆书|全书拆解|逐章分析|逐章拆解|深度研究|全面研究|深入研究|深入分析|深度分析|拆解这本小说|拆解整本|full.book|deep research/i.test(input.prompt)) ? 'extended' : 'standard',
-    scope: { novelId: input.novelId, chapterIds, selection, ...(writingRequest ? { authorEffects: { version: 1 as const,
+    scope: {
+      ...(input.novelInitializationProtocol ? { novelInitializationProtocol: input.novelInitializationProtocol } : {}), novelId: input.novelId, chapterIds, selection,
+      ...(input.novelInitializationTarget ? { novelInitializationTarget: input.novelInitializationTarget } : {}),
+      ...(input.volumeCreationProtocol ? { volumeCreationProtocol: input.volumeCreationProtocol } : {}), ...(writingRequest ? { authorEffects: { version: 1 as const,
       requestHash: createHash('sha256').update(input.prompt).digest('hex'), manuscript: manuscriptRequested && !bookProposal, structure: structureRequested, artifact: artifactRequested } } : {}),
       ...(input.manuscriptProtocol ? { manuscriptProtocol: input.manuscriptProtocol } : {}),
       ...(input.reviewProtocol ? { reviewProtocol: input.reviewProtocol } : {}),
@@ -342,13 +380,14 @@ export function buildTaskSpec(input: {
     softPreferences: directives
       .filter((item) => item.kind === 'preference')
       .map((item) => ({ id: randomUUID(), text: item.text, weight: 0.8 })),
-    expectedOutputs: [{ kind: outputKind, description: writingPacing === 'conversation_only'
+    expectedOutputs: [{ kind: outputKind, description: metadataSetup ? '按作者明确意图更新当前作品书名、简介与标签；已授权代选时自行选择并实际保存，不重复询问方向；如实说明封面等缺项，结束时简短询问下一阶段，不自动执行' : writingPacing === 'conversation_only'
       ? '回应本任务原始用户问题或问候，不执行作品创作，不恢复其他任务的待办'
       : writingPacing === 'proposal_only'
-      ? '交付题材定位、核心冲突、人物与全书大纲、首批章节范围建议，等待作者确认后再另起正文写作；本轮不写章节正文'
+      ? existingDirection ? '先向作者提问对齐故事方向；保留当前作品已有元信息与正文，说明本轮未改写作品并简短询问下一步，结束本轮' : directionSetup ? '先通过向作者提问对齐故事方向与当前空作品初始化语境，收到实际回答后完成已授权的书名、简介、标签初始化；结束时询问是否开始大纲，不自动写大纲或章节正文' : '交付作者明确要求的题材定位或大纲，完成后询问是否修改或开始细纲；未获后续明确授权前不写细纲或章节正文'
       : `完成${intent}任务并给出可核验结果${minimumChineseCharacters ? `；报告至少${minimumChineseCharacters}个汉字（不计代码、URL、标点与重复段落）` : ''}`, required: true,
       ...(minimumChineseCharacters ? { minimumChineseCharacters } : {}) }],
     postconditions: [
+      ...(input.novelInitializationProtocol === 1 && requiresNovelInitialization(input.prompt) && !existingDirection ? [{ code: 'NOVEL_METADATA_INITIALIZED', description: '本任务实际保存的书名、简介与标签与当前作品一致；作者明确选择只讨论或暂不初始化时如实结束，不当作已保存', severity: 'error' as const }] : []),
       ...(intent === 'global_transform'
         ? [{ code: 'CHANGESET_VERIFIED', description: '全书变更通过预览、版本校验与原子应用', severity: 'error' as const }]
         : []),
@@ -396,7 +435,7 @@ function renderTaskSpecBody(spec: TaskSpec): string {
   const pacing = spec.writingPacing === 'conversation_only'
     ? '\n本轮是普通对话：直接回应当前任务的原始问候或问题；作品上下文只作背景，不代表写作授权，不继续其他窗口的创作、待办或历史计划。任务中止后仍回应该原始问题，不能将“继续”解释为继续写作品。'
     : spec.writingPacing === 'proposal_only'
-    ? '\n创作阶段：本轮仅规划。宽泛整书目标不等于授权连续写正文。先利用已给条件形成可审阅的大纲（人物目标、核心冲突、主要转折、结局方向、卷章节奏），可用 plan_save 保存；说明假设和建议的首批章节范围，交付后收尾等待作者下一条明确写作指令。不要把调研完成、旧作品大纲、历史写作授权、普通继续或你自己的待办当作本轮正文授权；不能通过子任务或其它工具绕过。关键方向缺失可集中提问，但不必为每个细节重复确认。'
+    ? spec.scope.novelInitializationProtocol === 1 && isExplicitNovelMetadataRequest(spec.goals.join('\n')) ? '\n创作阶段：作者已明确要求初始化或修改当前作品信息；按已授权的选择完成书名、简介与标签保存，不因宽泛题材重复询问。封面缺项如实说明并问是否补做，再简短问是否开始大纲，结束本轮，不自动写大纲或正文。' : spec.scope.novelInitializationProtocol === 1 && isNovelDirectionSetup(spec.goals.join('\n')) && spec.scope.novelInitializationTarget === 'existing' ? '\n创作阶段：当前作品已有元信息或正文。先向作者提问对齐故事方向，保留已有内容与作品设置；说明本轮未初始化或覆盖作品，简短询问下一步并结束，不以缺少保存记录反复尝试初始化。' : spec.scope.novelInitializationProtocol === 1 && isNovelDirectionSetup(spec.goals.join('\n')) ? '\n创作阶段：作者仅表达了想写某类小说。先通过向作者提问工具给出2–4个方向，并说明回答后将完善当前空作品的书名、简介和标签；收到真实回答后执行已授权初始化。既有非空作品的元信息修改仍需明确意图。初始化后简述故事方向，如实说明未完成封面等项目并问是否补做，再问是否开始大纲，结束本轮，不自动写大纲或正文。' : '\n创作阶段：本轮仅规划。宽泛整书目标不等于授权连续写正文。先利用已给条件形成可审阅的大纲（人物目标、核心冲突、主要转折、结局方向、卷章节奏），可用 plan_save 保存；说明假设和建议的首批章节范围，交付后收尾等待作者下一条明确写作指令。不要把调研完成、旧作品大纲、历史写作授权、普通继续或你自己的待办当作本轮正文授权；不能通过子任务或其它工具绕过。关键方向缺失可集中提问，但不必为每个细节重复确认。'
     : '\n创作节奏：写作严格限于本任务原始请求。面对宽泛整书目标先交可审阅的大纲并确认首批范围，再进入正文；用户明确授权自主整书创作时先保存大纲、按计划分批推进，每批回报真实进度与重大偏差。用户明确指定章节/续写范围时直接执行该范围，不反复确认，不擅自向后无限续章。调研结果和历史任务不是新的写作授权。'
   const clarificationRule = spec.scope.writingClarificationProtocol === 2 && (spec.scope.writing?.kind === 'needs_input' || spec.scope.localEditBoundary?.kind === 'needs_input')
     ? '\n原请求已有写作授权，目标章节或局部引文尚未明确。通过 ask_user 接收作者实际回答后在同一任务内补全该范围；提问选项不授予权限，原请求的动作、禁止事项和用量保持有效。目标或引文未定位前先完成可独立执行的读取，不反复尝试写入。'

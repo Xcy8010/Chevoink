@@ -1,0 +1,13 @@
+# Writing assistant stage boundaries
+
+Fresh broad book requests first use an author question to align direction. Empty new works, including the hidden first-work placeholder and ordinary new empty works, save title, synopsis and tags only after explaining initialization and receiving a real answer from the same task. Explicit delegated initialization proceeds directly. Works with existing metadata or prose align direction while preserving their content and have no initialization-save obligation, unless the author explicitly requests reinitialization. Requests to discuss only, defer initialization or reject all directions end honestly.
+
+Complete initialization submits title, synopsis and tags together. Calls with missing fields save nothing and may be corrected. Explanations, quoted initialization text and explicit refusals create no save obligation. Repreparing the same task target inherits an already-created tail volume only when the decision, predecessor revision and active volume identity match; mismatches reject replacement creation.
+
+Complete initialization verifies both current saved values and successful writes from that task. Response text is not save evidence. Editing tags or synopsis alone does not require all three fields to be rewritten. Missing covers are disclosed with an optional follow-up question and never silently trigger paid generation. Initialization and outline delivery end with a brief natural-language next-stage question; suggestions do not authorize further work. Author-facing progress omits tool arguments, internal identifiers and raw reasoning.
+
+Fresh volume creation uses `volume_create`, then its real volume ID for chapter creation or an originally authorized move. A next-chapter tail-volume capability still requires the same task's prepared decision, actual predecessor revision and exact closure evidence. The created volume identity is bound persistently to that target and reused for the same decision; it grants no arbitrary directory moves. Historical frozen contracts retain `chapter_create.newVolume` compatibility. New planning-mode writes require fresh server admission and never upgrade old tasks automatically.
+
+Plan reads and save receipts carry both body and content/link semantic versions. The server may reuse this execution's actual observed semantic version or a durable frozen baseline verified against the complete target version. Explicit stale versions remain rejected and parent-outline versions never advance automatically.
+
+Targeted local unit tests are not PostgreSQL integration or release acceptance. Original complete same-commit CI retains all four gates, zero-skip database checks, Agent eval and dependency audits.

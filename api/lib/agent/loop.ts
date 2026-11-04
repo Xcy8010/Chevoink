@@ -1,3 +1,4 @@
+import { readNovelInitializationCompletion } from './novel-initialization.js'
 import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { observedReviewOutcome, projectedReviewAction, type ReviewOutcome } from '../../../shared/review-lifecycle.js'
 import { readSettledQualityReviews, readQualityReviewAdmission } from './quality-review-admission.js'
@@ -973,10 +974,18 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         data: { currentTurn: turn, usage: { ...usage, checkpoint: checkpointSnapshot() } } })
     })
   }
+  let initializationCompletionRequired = false
   const finalizeRun = (...args: Parameters<typeof finalizeLegacyRun>) => {
     args[8] = checkpointSnapshot()
     const explicitFence = args[14]
-    args[14] = async tx => { await assertLegacyOwnerReceipt(tx, true); await explicitFence?.(tx) }
+    args[14] = async tx => {
+      await assertLegacyOwnerReceipt(tx, true)
+      if (args[2] === 'succeeded' && initializationCompletionRequired
+        && (await readNovelInitializationCompletion(tx, { userId: params.userId, novelId: params.novelId, runId })).status === 'incomplete') {
+        throw new DataAccessError(409, 'NOVEL_SETUP_INCOMPLETE', '本任务的书名、简介与标签尚未实际保存，初始化未完成。')
+      }
+      await explicitFence?.(tx)
+    }
     return finalizeLegacyRun(...args)
   }
   const finalizeFailedWithNotice = (reason: string) => finalizeRun(
@@ -1173,6 +1182,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           creativeFreedom: params.creativeFreedom,
           qualityMode: params.qualityMode,
         })
+    initializationCompletionRequired = taskSpec.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED')
     let taskSpecChanged = !parsedTaskSpec.success || Boolean(previousTask) || parsedTaskSpec.data.runId !== runId
     if ((params.resume || previousTask) && !params.activationResume) {
       const narrowed = narrowLegacyConversationTask(narrowLegacyResearchTask(taskSpec, contextPrompt), contextPrompt)
@@ -1573,7 +1583,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
     const featureFlags = resolveAgent2FeatureFlags(params.userId)
     const sessionPolicy = await prisma.agentSession.findUnique({ where: { id: params.sessionId }, select: { toolPolicy: true, sandboxMode: true, spawnedFromSessionId: true } })
-    const scopedTools = restrictToolsToTask(getToolsForAgent(agent, params.mode, featureFlags, { goalOwned: Boolean(ownedGoalExecution), taskResponse: taskSpec.responseDeliveryProtocol === 1 }), taskSpec)
+    const scopedTools = restrictToolsToTask(getToolsForAgent(agent, params.mode, featureFlags, { goalOwned: Boolean(ownedGoalExecution), taskResponse: taskSpec.responseDeliveryProtocol === 1 }), taskSpec, params.mode)
     // 派生窗口禁用跨任务编排：否则 b 再派生 e、e 再派生 f 会指数级打爆并发与额度，
     // 而且互相等待还会直接死锁；派生窗口的职责就是干完自己那一份并交回摘要
     const orchestrationScopedTools = sessionPolicy?.spawnedFromSessionId
@@ -1677,6 +1687,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     }
     const toolContext: ToolContext = {
       planContentHashes: new Map(),
+      planSemanticHashes: new Map(),
+      authorQuestionAnswers: new Map(),
       userId: params.userId,
       novelId: params.novelId,
       chapterId: params.chapterId,
@@ -2139,7 +2151,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       // 只有模型原生 reasoning 才进思考信道，执行旁白不再改道思考区。
       // text.delta 已实时显示供应商原始流；无论最终是否有干净文本，都要发 text.final 做归一化，
       // 这样 DSML/乱码被清洗成空串时能立即从界面移除，而不是残留到刷新前。
-      const deferWritingCompletionText = Boolean(ordinaryResponse) || !automaticReviewTriggered && (completedWritingWrapUp.value !== null || effectiveToolCalls.length === 0 && requiresCompletedWritingPresentation(taskSpec))
+      const deferWritingCompletionText = taskSpec.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED') || Boolean(ordinaryResponse) || !automaticReviewTriggered && (completedWritingWrapUp.value !== null || effectiveToolCalls.length === 0 && requiresCompletedWritingPresentation(taskSpec))
       if ((result.content || automaticReviewTriggered) && !deferWritingCompletionText) bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
 
       const parts: AgentMessagePart[] = []
@@ -2284,6 +2296,15 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               '[系统] 规划模式的产出必须通过 plan_save 工具写入「计划」文件夹，目前尚未落盘。请立即调用 plan_save 保存完整计划（修订既有计划请带 planId），不要在正文里输出计划内容。',
           })
           continue
+        }
+
+        if (taskSpec.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED')) {
+          const initialized = await readNovelInitializationCompletion(prisma, { userId: params.userId, novelId: params.novelId, runId })
+          if (initialized.status === 'incomplete') {
+            await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
+            messages.push({ role: 'user', content: `当前${initialized.missing.join('、')}尚未在本任务中真实保存，不能只用文字说初始化完成；继续已授权的元信息保存。作者若已明确只讨论或暂不初始化，按真实回答如实结束，不生成封面或后续大纲。` })
+            continue
+          }
         }
 
         // A missing real deliverable remains unfinished. Current writing can keep

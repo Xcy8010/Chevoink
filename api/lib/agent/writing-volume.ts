@@ -1,3 +1,4 @@
+import { createVolumeData } from '../data/volume.js'
 import type { Prisma } from '@prisma/client'
 import { DataAccessError } from '../prisma.js'
 import { activeChapterScope, activeVolumeWhere } from '../data/internal.js'
@@ -73,11 +74,43 @@ export async function assertPreparedWritingVolumeDecision(tx: Prisma.Transaction
       throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '卷处理决定的冻结前章或当前版本不匹配，未创建或移动任何章节。')
     }
   }
+  return { compilation: compilation!, prepared: prepared!, scope }
 }
 
 export async function createWritingTailVolume(tx: Prisma.TransactionClient, subject: Subject, targetOrderIndex: number, input: WritingNewVolume) {
   const proposed = await assertWritingVolumeBoundary(tx, subject, targetOrderIndex, input)
-  await assertPreparedWritingVolumeDecision(tx, subject, targetOrderIndex, proposed)
-  const last = await tx.volume.findFirst({ where: { novelId: subject.novelId, ...activeVolumeWhere }, orderBy: { orderIndex: 'desc' } })
-  return tx.volume.create({ data: { novelId: subject.novelId, title: proposed.title, summary: proposed.summary, orderIndex: (last?.orderIndex ?? 0) + 1 } })
+  const validated = await assertPreparedWritingVolumeDecision(tx, subject, targetOrderIndex, proposed)
+  const created = validated?.prepared.createdTailVolume as { id?: string; proposalHash?: string; targetOrderIndex?: number } | undefined
+  const proposalHash = runtimeJson(proposed).hash
+  if (created) {
+    if (created.proposalHash !== proposalHash || created.targetOrderIndex !== targetOrderIndex || !created.id) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '本任务已有不同的新卷创建决定，未再创建卷。')
+    const volume = await tx.volume.findFirst({ where: { id: created.id, novelId: subject.novelId, ...activeVolumeWhere } })
+    if (!volume) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原新卷已归档或不存在，未创建替代卷。')
+    return volume
+  }
+  const volume = await createVolumeData(subject.userId, subject.novelId, { title: proposed.title, summary: proposed.summary }, tx)
+  if (validated?.scope.writing?.tailVolume?.creationProtocol === 2) await tx.storyCompilation.update({ where: { id: validated.compilation.id }, data: {
+    preparedContext: runtimeJson({ ...validated.prepared, createdTailVolume: { id: volume.id, proposalHash, targetOrderIndex } }).value } })
+  return volume
+}
+
+/** Explicit new-task placement keeps the old chapter target and predecessor fence. */
+export async function assertExplicitWritingVolumePlacement(tx: Prisma.TransactionClient, subject: Subject, targetOrderIndex: number, volumeId?: string) {
+  const scope = await readWritingScope(tx, subject)
+  const compilation = await tx.storyCompilation.findFirst({ where: { userId: subject.userId, novelId: subject.novelId,
+    runId: { in: [...new Set([scope.sourceRunId, subject.runId])] }, status: 'active', targetOrderIndex }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+  const prepared = compilation?.preparedContext as Record<string, unknown> | null
+  const decision = prepared?.volumeDecision as { kind?: string; newVolume?: WritingNewVolume } | undefined
+  await assertPreparedWritingVolumeDecision(tx, subject, targetOrderIndex, decision?.kind === 'new_volume' ? decision.newVolume : undefined)
+  if (decision?.kind === 'new_volume') {
+    const created = prepared?.createdTailVolume as { id?: string; targetOrderIndex?: number; proposalHash?: string } | undefined
+    if (!volumeId || created?.id !== volumeId || created.targetOrderIndex !== targetOrderIndex
+      || created.proposalHash !== runtimeJson(decision.newVolume).hash
+      || !await tx.volume.findFirst({ where: { id: volumeId, novelId: subject.novelId, ...activeVolumeWhere } })) {
+      throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '请先明确创建本任务已决定的新卷，再使用返回的真实卷编号创建目标章。')
+    }
+  } else if (volumeId) {
+    const previous = await tx.chapter.findFirst({ where: { authorId: subject.userId, ...activeChapterScope(subject.novelId) }, orderBy: { orderIndex: 'desc' } })
+    if (previous?.volumeId !== volumeId) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '本任务决定延续当前卷，不能改到另一卷。')
+  }
 }

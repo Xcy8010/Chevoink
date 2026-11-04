@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 const db = vi.hoisted(() => ({
+  volume: { findFirst: vi.fn() },
   novel: { findFirst: vi.fn() }, agentArtifact: { findMany: vi.fn() }, agentRun: { findFirst: vi.fn(), findMany: vi.fn(), findFirstOrThrow: vi.fn(), findUniqueOrThrow: vi.fn() }, chapter: { findFirst: vi.fn(), findMany: vi.fn(), count: vi.fn() },
   agentSession: { findFirst: vi.fn() }, agentChildExecutionGrant: { findUnique: vi.fn() }, agentMessage: { findFirst: vi.fn() }, chapterQualityReport: { findFirst: vi.fn(), findUnique: vi.fn() },
   storyCompilation: { findFirst: vi.fn(), findUniqueOrThrow: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), update: vi.fn(), create: vi.fn() },
@@ -15,6 +16,8 @@ vi.mock('../../api/lib/agent/writing-volume.js', async original => ({ ...await o
 vi.mock('../../api/lib/agent/writing-continuity-reference.js', async original => ({
   ...await original<typeof import('../../api/lib/agent/writing-continuity-reference.js')>(), readWritingContinuityReference: vi.fn(async () => null),
 }))
+import * as volumeData from '../../api/lib/data/volume.js'
+import { createWritingTailVolume, assertExplicitWritingVolumePlacement } from '../../api/lib/agent/writing-volume.js'
 import { readWritingContinuityReference } from '../../api/lib/agent/writing-continuity-reference.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
@@ -424,4 +427,52 @@ it.each([false, true])('digest preserves recovery tools after a plan change, wit
   expect(digest).not.toContain('终态已提交且匹配当前正文 revision/hash')
   expect(db.storyCompilation.update).not.toHaveBeenCalled()
   expect(db.storyCompilation.create).not.toHaveBeenCalled()
+})
+
+describe('same-task explicit tail-volume reprepare', () => {
+  async function preparedVolume() {
+    const proposal = { title: '远行', summary: '进入下一困局', boundary: { previousChapterId: 'old31', previousRevision: 3,
+      quote: '守门人终于放下武器，交出了旧城的钥匙。', completedObjective: '取得钥匙', nextConflict: '穿过旧城寻人' } }
+    const task = spec('写下一章')
+    Object.assign(task.scope.writing, { tailVolume: { version: 1, creationProtocol: 2, targetOrderIndex: 32, previousChapterId: 'old31', previousRevision: 3 } })
+    const readRun = db.agentRun.findFirst.getMockImplementation()!
+    db.agentRun.findFirst.mockImplementation(async query => ({ ...await readRun(query), taskSpec: task }))
+    const previous = { id: 'old31', title: '旧城', orderIndex: 31, revision: 3, content: proposal.boundary.quote, volumeId: 'old-volume', volume: { id: 'old-volume', title: '旧卷', summary: '旧困局' } }
+    db.chapter.findFirst.mockImplementation(async ({ where }) => where.orderIndex === 32 ? null : previous)
+    const compilations: Array<Record<string, unknown>> = []
+    db.storyCompilation.findMany.mockImplementation(async () => [...compilations].reverse())
+    db.storyCompilation.findFirst.mockImplementation(async () => [...compilations].reverse().find(item => item.status === 'active') ?? null)
+    db.storyCompilation.create.mockImplementation(async ({ data }) => { const value = { status: 'active', ...data, id: `comp-${compilations.length}`, bridge: data.bridge.create }; compilations.push(value); return value })
+    db.storyCompilation.update.mockImplementation(async ({ where, data }) => { const value = compilations.find(item => item.id === where.id)!; Object.assign(value, data); return value })
+    db.storyCompilation.updateMany.mockImplementation(async () => { for (const item of compilations) item.status = 'abandoned'; return { count: compilations.length } })
+    db.volume.findFirst.mockResolvedValue({ id: 'created-volume' })
+    const create = vi.spyOn(volumeData, 'createVolumeData').mockResolvedValue({ id: 'created-volume' } as never)
+    const input = { ...ctx, chapterId: undefined, targetOrderIndex: 32, mode: 'balanced' as const, intentSummary: '进入新阶段',
+      volumeDecision: { kind: 'new_volume' as const, reason: '旧困局已收束', newVolume: proposal } }
+    const first = await prepareStoryCompilation(input)
+    await createWritingTailVolume(db as unknown as Prisma.TransactionClient, ctx, 32, proposal)
+    return { input, proposal, first, compilations, create, previous }
+  }
+  it('actually prepares, creates, reprepares and reuses the original real volume for chapter placement', async () => {
+    const f = await preparedVolume()
+    const second = await prepareStoryCompilation(f.input)
+    expect(second.compilation.id).not.toBe(f.first.compilation.id)
+    expect(second.compilation.preparedContext).toMatchObject({ createdTailVolume: { id: 'created-volume', targetOrderIndex: 32 } })
+    await expect(assertExplicitWritingVolumePlacement(db as unknown as Prisma.TransactionClient, ctx, 32, 'created-volume')).resolves.toBeUndefined()
+    await expect(createWritingTailVolume(db as unknown as Prisma.TransactionClient, ctx, 32, f.proposal)).resolves.toMatchObject({ id: 'created-volume' })
+    expect(f.create).toHaveBeenCalledOnce()
+    expect(db.storyCompilation.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ userId: 'u', novelId: 'n', runId: { in: ['new-run'] }, targetOrderIndex: 32 }) }))
+  })
+  it.each(['proposal', 'continue', 'predecessor', 'archived-volume'] as const)('blocks changed %s before abandoning the binding or creating a replacement', async scenario => {
+    const f = await preparedVolume()
+    if (scenario === 'archived-volume') db.volume.findFirst.mockResolvedValue(null)
+    if (scenario === 'predecessor') f.previous.revision++
+    const input = scenario === 'proposal' ? { ...f.input, volumeDecision: { ...f.input.volumeDecision, newVolume: { ...f.proposal, title: '不同提议' } } }
+      : scenario === 'continue' ? { ...f.input, volumeDecision: { kind: 'continue' as const, reason: '改为延续' } } : f.input
+    const effects = db.storyCompilation.updateMany.mock.calls.length
+    await expect(prepareStoryCompilation(input)).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    expect(db.storyCompilation.updateMany).toHaveBeenCalledTimes(effects)
+    expect(db.storyCompilation.create).toHaveBeenCalledOnce()
+    expect(f.create).toHaveBeenCalledOnce()
+  })
 })

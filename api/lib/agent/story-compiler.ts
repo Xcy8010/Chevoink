@@ -7,7 +7,7 @@ import { Prisma, type StoryCompilationStage, type StoryCharter, type ReaderPromi
 
 import type { ReaderPromiseInput, SceneTaskInput, StoryCharterSaveInput, StoryCompilerMode, StoryState } from '../../../shared/contracts/index.js'
 import { DataAccessError, prisma } from '../prisma.js'
-import { activeChapterScope } from '../data/internal.js'
+import { activeChapterScope, activeVolumeWhere } from '../data/internal.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { taskSpecSchema, sceneTaskInputSchema, storyCharterInputSchema } from '../../../shared/contracts/index.js'
 import { requiresNextChapterDelivery } from './completion-guard.js'
@@ -275,6 +275,27 @@ export async function prepareStoryCompilation(input: {
     where: { userId: input.userId, novelId: input.novelId, runId: { in: originalRunIds }, targetOrderIndex: target.targetOrderIndex },
     select: { validation: true, preparedContext: true, chapterId: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
   })
+  // A repeated PREPARE must retain the volume already created for this same
+  // original task/target. A changed proposal cannot mint a replacement volume.
+  const priorVolumes = !target.chapter ? priorRepairStates.flatMap(item => {
+    const prepared = item.preparedContext as Record<string, unknown> | null
+    return prepared?.createdTailVolume ? [{ prepared, binding: prepared.createdTailVolume as { id?: string; proposalHash?: string; targetOrderIndex?: number } }] : []
+  }) : []
+  const createdTailVolume = priorVolumes[0]?.binding
+  for (const { prepared, binding } of priorVolumes) {
+    const priorPrevious = prepared.previousChapter as { id?: string; revision?: number } | null
+    const capability = writing.writing?.tailVolume
+    const priorDecision = prepared.volumeDecision as { kind?: string; newVolume?: unknown } | undefined
+    if (volumeDecision.kind !== 'new_volume' || capability?.creationProtocol !== 2 || !binding.id
+      || binding.id !== createdTailVolume?.id || binding.targetOrderIndex !== target.targetOrderIndex
+      || binding.proposalHash !== runtimeJson(volumeDecision.newVolume).hash
+      || priorDecision?.kind !== 'new_volume' || !priorDecision.newVolume || runtimeJson(priorDecision.newVolume).hash !== binding.proposalHash
+      || previousChapter?.id !== capability.previousChapterId || previousChapter.revision !== capability.previousRevision
+      || priorPrevious?.id !== previousChapter.id || priorPrevious.revision !== previousChapter.revision
+      || !await db.volume.findFirst({ where: { id: binding.id, novelId: input.novelId, ...activeVolumeWhere }, select: { id: true } })) {
+      throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '本任务已创建尾卷，但原目标、收束决定、前章版本或真实卷身份已变化；未重新准备或创建替代卷。')
+    }
+  }
   const priorCycle = target.chapter ? priorRepairStates.map(item => readReviewCycle(item.preparedContext, {
     taskId: writing.taskId, userId: input.userId, novelId: input.novelId, chapterId: target.chapter!.id,
   })).find(Boolean) : null
@@ -283,6 +304,7 @@ export async function prepareStoryCompilation(input: {
     data: { status: 'abandoned' },
   })
   const preparedContext = {
+    ...(createdTailVolume ? { createdTailVolume } : {}),
     ...(planContext ? { planContext } : {}),
     ...(continuityReference ? { writingContinuityReference: continuityReference } : {}),
     ...(priorCycle ? { reviewCycle: priorCycle } : {}),
@@ -758,7 +780,7 @@ export async function buildStoryCompilerDigest(userId: string, novelId: string, 
   const lines = [
     'Story Compiler 3.0 状态：',
     active ? renderWritingPlanContext(active.preparedContext) : '',
-    volumeContext ? `本章必须审视卷目标：当前《${volumeContext.volumeTitle}》，已写 ${volumeContext.chapterCount} 章（仅提醒，绝非切卷阈值）；卷目标：${volumeContext.summary || '未保存，须结合真实正文判断'}；${volumeContext.planStatus}。最新章 ${volumeContext.previousChapter.id} r${volumeContext.previousChapter.revision}，末尾：${volumeContext.previousChapter.ending}。已保存计划：${JSON.stringify(volumeContext.plans)}。PREPARE明确 volumeDecision：continue并解释未收束原因，或new_volume列已完成卷目标、前章精确收束引用和下一主困局。原目标已创建、旧任务无冻结新尾卷能力或缺真实收束证据时保留原卷；独立volume_create不能绕过此限制。` : '',
+    volumeContext ? `本章必须审视卷目标：当前《${volumeContext.volumeTitle}》，已写 ${volumeContext.chapterCount} 章（仅提醒，绝非切卷阈值）；卷目标：${volumeContext.summary || '未保存，须结合真实正文判断'}；${volumeContext.planStatus}。最新章 ${volumeContext.previousChapter.id} r${volumeContext.previousChapter.revision}，末尾：${volumeContext.previousChapter.ending}。已保存计划：${JSON.stringify(volumeContext.plans)}。PREPARE明确 volumeDecision：continue并解释未收束原因，或new_volume列已完成卷目标、前章精确收束引用和下一主困局。原目标已创建、旧任务无冻结新尾卷能力或缺真实收束证据时保留原卷；显式建卷也须核对原冻结尾卷授权与同一收束证据，不能绕过此限制。` : '',
     bundle.charter ? `创作宪章 r${bundle.charter.revision}：${clip(bundle.charter.oneLinePromise, 240)}` : '创作宪章：尚未建立（新书长纲前应先建立）',
     bundle.promises.length ? `待兑现读者承诺：${bundle.promises.slice(0, 5).map((item) => `${item.title}（${item.payoffHorizon}）`).join('；')}` : '待兑现读者承诺：无',
     active ? `本任务编译：${active.id}，chapterId=${active.chapterId ?? '尚未创建'}，目标第 ${active.targetOrderIndex} 章，阶段 ${active.stage}，状态 ${active.status}，Scene Task ${active.sceneTasks.length} 个。${resume}` : '本任务尚未建立编译；历史检查失败不构成恢复旧任务的授权。写下一章时以前文为参考，为新章建立本任务编译。',

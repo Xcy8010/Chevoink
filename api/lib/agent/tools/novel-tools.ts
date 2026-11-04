@@ -1,8 +1,9 @@
+import { assertNovelInitializationDirection, assertNovelMetadataIntent } from '../novel-initialization.js'
 import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 
-import { prisma } from '../../prisma.js'
+import { DataAccessError, prisma } from '../../prisma.js'
 import { recalculateNovelStats } from '../../data/internal.js'
 import { ALL_NOVEL_TAGS, MAX_NOVEL_TAGS } from '../../../../shared/contracts/novel-tags.js'
 import { enforceCoverTitleInPrompt } from './cover-prompt.js'
@@ -31,7 +32,7 @@ export const novelCreateTool = defineTool({
     summary: z.string().min(1).max(1000).describe('作品简介'),
     tags: z.array(z.string().min(1).max(24)).min(1).max(MAX_NOVEL_TAGS).describe(`站内标签，最多 ${MAX_NOVEL_TAGS} 个`),
   }),
-  permission: WRITE_PERMISSION,
+  permission: { ...WRITE_PERMISSION, plan: 'allow' },
   readOnly: false,
   async execute(ctx, args) {
     ctx.signal.throwIfAborted()
@@ -53,6 +54,7 @@ export const novelCreateTool = defineTool({
       return { outcome: 'failed', output: '当前占位作品已有章节记录，不能覆盖为新作品。请先读取当前作品。' }
     }
 
+    await assertNovelInitializationDirection(db, ctx)
     const dedupedTags = [...new Set(args.tags.map((tag) => tag.trim()).filter(Boolean))]
     const rejectedTags = dedupedTags.filter((tag) => !ALL_NOVEL_TAGS.includes(tag))
     if (rejectedTags.length > 0) {
@@ -108,25 +110,31 @@ export const novelRenameTool = defineTool({
 export const novelUpdateMetaTool = defineTool({
   name: 'novel_update_meta',
   title: '更新作品设置',
-  description: `更新作品的简介和标签。仅传入需要修改的字段。标签必须从站内统一标签库中选择（上下文里已给出完整标签库），最多 ${MAX_NOVEL_TAGS} 个；请结合作品简介与正文内容挑选最贴切的分类、题材与风格标签。`,
+  description: `更新当前作品的书名、简介和标签。作者明确要求初始化当前正式作品时，可将三项一次保存，不重复创建作品。完整初始化必须一次提供非空书名、简介与至少一个有效标签；单独修改某项时仅传入需要修改的字段。标签必须从站内统一标签库中选择（上下文里已给出完整标签库），最多 ${MAX_NOVEL_TAGS} 个；请结合作品简介与正文内容挑选最贴切的分类、题材与风格标签。`,
   parameters: z.object({
+    title: z.string().trim().min(1).max(120).optional().describe('作者明确授权采用或修改的当前作品书名'),
     summary: z.string().min(1).max(1000).optional().describe('新的作品简介'),
     tags: z.array(z.string().min(1).max(24)).max(10).optional().describe(`新的标签列表（整体替换，必须来自站内标签库，最多 ${MAX_NOVEL_TAGS} 个）`),
   }),
-  permission: WRITE_PERMISSION,
+  permission: { ...WRITE_PERMISSION, plan: 'allow' },
   readOnly: false,
   async execute(ctx, args) {
+    ctx.signal.throwIfAborted()
     const novel = await (ctx.transaction ?? prisma).novel.findFirst({
       where: { id: ctx.novelId, authorId: ctx.userId },
-      select: { summary: true, tagNames: true },
+      select: { title: true, summary: true, tagNames: true, chapterCount: true, wordCount: true },
     })
 
     if (!novel) {
       return { outcome: 'failed' as const, output: '未找到当前作品。' }
     }
 
-    if (args.summary === undefined && args.tags === undefined) {
-      return { outcome: 'failed' as const, output: '没有提供任何要修改的字段（summary / tags）。' }
+    const completeInitialization = await assertNovelMetadataIntent(ctx.transaction ?? prisma, ctx, novel)
+    if (completeInitialization && (!args.title?.trim() || !args.summary?.trim() || !args.tags?.length)) {
+      throw new DataAccessError(400, 'INVALID_ARGUMENTS', '完整初始化需要一次提供书名、简介与标签；尚未保存任何字段，请补齐三项后重试。')
+    }
+    if (args.title === undefined && args.summary === undefined && args.tags === undefined) {
+      return { outcome: 'failed' as const, output: '没有提供需要修改的书名、简介或标签。' }
     }
 
     // 标签合法性校验：只接受站内标签库里的标签，越界的挑出来提示模型改用库内标签
@@ -137,7 +145,7 @@ export const novelUpdateMetaTool = defineTool({
       nextTags = deduped.filter((tag) => ALL_NOVEL_TAGS.includes(tag)).slice(0, MAX_NOVEL_TAGS)
       rejectedTags = deduped.filter((tag) => !ALL_NOVEL_TAGS.includes(tag))
 
-      if (nextTags.length === 0 && rejectedTags.length > 0) {
+      if (completeInitialization && (nextTags.length === 0 || rejectedTags.length > 0) || nextTags.length === 0 && rejectedTags.length > 0) {
         return {
           outcome: 'failed' as const,
           output: `标签未保存：「${rejectedTags.join('、')}」不在站内标签库中。请从上下文给出的标签库里重新选择（如：玄幻、都市、系统、重生、爽文……）。`,
@@ -145,15 +153,17 @@ export const novelUpdateMetaTool = defineTool({
       }
     }
 
+    ctx.signal.throwIfAborted()
     await (ctx.transaction ?? prisma).novel.update({
       where: { id: ctx.novelId },
       data: {
+        ...(args.title !== undefined ? { title: args.title, displayTitle: args.title } : {}),
         summary: args.summary?.trim() || undefined,
         tagNames: nextTags ?? undefined,
       },
     })
 
-    const changed = [args.summary !== undefined ? '简介' : '', nextTags !== undefined ? `标签（${nextTags.join('、')}）` : '']
+    const changed = [args.title !== undefined ? '书名' : '', args.summary !== undefined ? '简介' : '', nextTags !== undefined ? `标签（${nextTags.join('、')}）` : '']
       .filter(Boolean)
       .join('、')
     const rejectedNote = rejectedTags.length > 0 ? `已忽略库外标签：${rejectedTags.join('、')}。` : ''
@@ -161,7 +171,7 @@ export const novelUpdateMetaTool = defineTool({
     return {
       output: `已更新作品${changed}。${rejectedNote}`,
       summary: `更新作品${args.summary !== undefined ? '简介' : ''}${args.summary !== undefined && nextTags !== undefined ? '与' : ''}${nextTags !== undefined ? '标签' : ''}`,
-      snapshot: { target: 'novel', targetId: ctx.novelId, field: 'summary', previousValue: novel.summary },
+      snapshot: { target: 'novel', targetId: ctx.novelId, field: args.title !== undefined ? 'title' : 'summary', previousValue: args.title !== undefined ? novel.title : novel.summary },
     }
   },
 })

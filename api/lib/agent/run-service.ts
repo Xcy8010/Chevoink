@@ -202,7 +202,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   })
   // Freeze the same task ceiling as the ordinary loop before applying the
   // session/goal ceilings. Existing saved configurations return above intact.
-  const currentTools = applySessionToolPolicy(restrictToolsToTask([...scoped, contextRead], spec), input.mode, session.toolPolicy,
+  const currentTools = applySessionToolPolicy(restrictToolsToTask([...scoped, contextRead], spec, input.mode), input.mode, session.toolPolicy,
     session.sandboxMode === 'read_only' || session.sandboxMode === 'full_access' ? session.sandboxMode : 'workspace')
   const tools = activationCeiling ? intersectToolAuthority(currentTools, input.mode, new Map(activationCeiling)) : currentTools
   const assembled = await assembleContext({ agent, mode: input.mode, userId, sessionId: run.sessionId, runId, novelId: run.novelId, chapterId: run.chapterId,
@@ -509,7 +509,7 @@ export async function startLoopRunLocked(
       throw new DataAccessError(409, 'GOAL_VERSION_CONFLICT', '窗口已有新目标，请重新发送补充。')
     }
     const goalAdmission = options.goal ? await admitGoalRun(tx, userId, session.id, session.novelId, options.goal, input.prompt) : null
-    const manuscript = await tx.novel.findFirst({ where: { id: session.novelId, authorId: userId }, select: { manuscriptRevision: true } })
+    const manuscript = await tx.novel.findFirst({ where: { id: session.novelId, authorId: userId }, select: { manuscriptRevision: true, chapterCount: true, wordCount: true, summary: true, tagNames: true, displayTitle: true } })
     if (!manuscript) throw new DataAccessError(404, 'NOVEL_NOT_FOUND', '作品不存在或无权访问。')
     if (chapterId && !await tx.chapter.findFirst({ where: { id: chapterId, authorId: userId, ...activeChapterScope(session.novelId) }, select: { id: true } })) {
       throw new DataAccessError(404, 'CHAPTER_NOT_FOUND', '章节已归档或不属于当前稿件。')
@@ -568,7 +568,9 @@ export async function startLoopRunLocked(
         // historical v1 HTTP envelope cannot acquire today's paid phases.
         ...(!options.goal || freshGoal?.continuityReportProtocol === 5 ? { continuityReportProtocol: 5 as const } : {}),
         terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2,
-        researchAdmission, researchNavigationAdmission: researchAdmission, networkAdmission, authorWritingProtocol: 2, creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
+        researchAdmission, researchNavigationAdmission: researchAdmission, networkAdmission, authorWritingProtocol: 2, novelInitializationProtocol: 1, novelInitializationTarget: manuscript.chapterCount === 0 && manuscript.wordCount === 0
+          && (!manuscript.summary.trim() || !manuscript.displayTitle?.trim() && manuscript.summary === '先创建一部作品，再继续完善简介、章节和封面。')
+          && manuscript.tagNames.length === 0 ? 'empty' : 'existing', volumeCreationProtocol: 1, creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
       let frozen = fresh
       if (input.selection || fresh.scope.authorEffects?.manuscript) {
         // Preserve the original protected-body snapshot normally captured by
@@ -589,7 +591,7 @@ export async function startLoopRunLocked(
         const { restrictToolsToTask } = await import('./tool-authority.js')
         const { issueWritingCoordination, isDeferredWritingRequest } = await import('./coordinated-writing-input.js')
         const available = applySessionToolPolicy(restrictToolsToTask(getToolsForAgent(getAgentDefinition(input.agentProfile ?? 'orchestrator'), input.mode,
-          resolveAgent2FeatureFlags(userId)), frozen), input.mode, session.toolPolicy,
+          resolveAgent2FeatureFlags(userId)), frozen, input.mode), input.mode, session.toolPolicy,
         session.sandboxMode === 'read_only' || session.sandboxMode === 'full_access' ? session.sandboxMode : 'workspace')
         frozen = taskSpecSchema.parse(issueWritingCoordination(frozen, input.mode, new Set(available.map(tool => tool.name)), input.prompt))
         // Scope questions retain their current admission/answer contract until

@@ -18,10 +18,11 @@ import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { getActiveRunIdBySession, hasActiveRunInSession } from './active-runs.js'
 import { publishDurableEvents } from './runtime-event-projection.js'
 import { MAIN_RUN_FILTER, prepareChildGrantDeletion } from './runtime-child.js'
+import { historyClientRequest } from './message-client-request.js'
 import { loadMessageTimings } from './message-timing.js'
 import { projectLegacyQualityBodyChanges } from './quality-body-change-history.js'
 
-const historyRunState = { select: { runtimeProtocolVersion: true, status: true, finishedAt: true, taskRoot: { select: { status: true } },
+const historyRunState = { select: { userId: true, startRequest: true, runtimeProtocolVersion: true, status: true, finishedAt: true, taskRoot: { select: { status: true } },
   goalExecution: { select: { goalId: true, trigger: true } },
   messages: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: 1, select: { id: true } } } } satisfies Prisma.AgentRunDefaultArgs
 
@@ -226,6 +227,7 @@ export async function listLoopSessionMessages(
         runId: record.runId,
         runTiming: timings.get(record.runId),
         ...historyGoalMetadata(record),
+        ...historyClientRequest(record, userId),
         role: record.role === 'assistant' ? 'assistant' : 'user',
         parts: await normalizeLegacyViewedImageUrls(userId, stripped),
         createdAt: record.createdAt.toISOString(),
@@ -293,6 +295,7 @@ export async function listLoopSessionMessages(
       runId: record.runId,
       runTiming: timings.get(record.runId),
       ...historyGoalMetadata(record),
+      ...historyClientRequest(record, userId),
       role: record.role === 'assistant' ? 'assistant' : 'user',
       parts: await normalizeLegacyViewedImageUrls(userId, stripped),
       createdAt: record.createdAt.toISOString(),

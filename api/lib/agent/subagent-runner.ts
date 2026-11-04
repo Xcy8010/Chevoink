@@ -115,6 +115,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
   }
   const parentAuthority = params.toolContextBase.toolAuthority
   const planContentHashes = new Map<string, string>()
+  const planSemanticHashes = new Map<string, string>()
   if (!parentAuthority) {
     return {
       ok: false, denied: true, report: '父任务授权快照缺失，子 Agent 未启动；请由主任务重新核验授权。',
@@ -250,7 +251,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
         const outcome = await handleToolCall(
           call,
           tools,
-          { ...params.toolContextBase, modelRuntime, planContentHashes, mode: params.mode, toolAuthority, callId: call.id },
+          { ...params.toolContextBase, modelRuntime, planContentHashes, planSemanticHashes, mode: params.mode, toolAuthority, callId: call.id },
           params.bus,
           params.messageId,
           params.parentRunId,

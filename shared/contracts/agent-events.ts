@@ -552,6 +552,8 @@ export type AgentRunTiming = {
 }
 
 export interface AgentUIMessage {
+  /** Optional client display correlation; never an operation or authorization identity. */
+  clientRequestId?: string
   id: string
   runId: EntityId
   role: 'user' | 'assistant'
@@ -568,6 +570,8 @@ export interface AgentUIMessage {
 
 /** POST /api/agent/runs 新链路入参（模型自主决策，不再需要 task 类型） */
 export interface StartAgentLoopRunRequest {
+  /** UUID for matching this author message to local delivery UI, without idempotency semantics. */
+  clientRequestId?: string
   sessionId: EntityId
   novelId: EntityId
   chapterId?: EntityId | null

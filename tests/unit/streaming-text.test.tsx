@@ -38,3 +38,19 @@ it('shows received text immediately with reduced motion', () => {
   expect(hook.result.current).toBe('即时显示完整文本')
   expect(vi.getTimerCount()).toBe(0)
 })
+
+
+it('uses one frame loop for successive received chunks and preserves complete Unicode on final flush', () => {
+  vi.useFakeTimers()
+  const raf = vi.spyOn(window, 'requestAnimationFrame')
+  const hook = renderHook(({ text }) => useStreamingText(text, true, 'one'), { initialProps: { text: '' } })
+  hook.rerender({ text: '合成文字🙂'.repeat(30) })
+  hook.rerender({ text: '合成文字🙂'.repeat(40) })
+  expect(raf).toHaveBeenCalledOnce()
+  act(() => vi.advanceTimersByTime(16))
+  expect(hook.result.current.length).toBeGreaterThan(0)
+  expect(hook.result.current).not.toMatch(/[\uD800-\uDBFF]$/)
+  hook.unmount()
+  expect(vi.getTimerCount()).toBe(0)
+  raf.mockRestore()
+})

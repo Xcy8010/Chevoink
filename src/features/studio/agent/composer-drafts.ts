@@ -10,6 +10,7 @@ let active: string | undefined
 const empty = (): Draft => ({ composerDraft: '', composerAttachments: [], composerReferences: [], composerSkillIds: [], composerSubagent: null, composerUploading: 0, goalMode: false })
 const pick = (state: State): Draft => ({ composerDraft: state.composerDraft, composerAttachments: state.composerAttachments, composerReferences: state.composerReferences, composerSkillIds: state.composerSkillIds, composerSubagent: state.composerSubagent, composerUploading: state.composerUploading, goalMode: state.goalMode })
 const resolve = (scope: string): string => aliases.get(scope) ?? scope
+export const sameComposerDraftScope = (left: string, right: string): boolean => resolve(left) === resolve(right)
 
 registerDesktopSave(() => {
   if (!active) return true

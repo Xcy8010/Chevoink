@@ -52,8 +52,11 @@ export const taskScopeSchema = z.object({
   writingTargetProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
   /** Server-only fresh admission. Never added by a tool, resume or migration. */
   writingCoordinationProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
-  /** Server-frozen relevance projection. It only narrows existing authority;
-   * absent historical tasks keep their original catalog. */
+  /** Fresh server-only initialization and volume protocol; absent old tasks retain their authority. */
+  novelInitializationProtocol: z.literal(1).optional(),
+  novelInitializationTarget: z.enum(['empty', 'existing']).optional(),
+  volumeCreationProtocol: z.literal(1).optional(),
+  /** Server-frozen tool relevance; absent historical tasks retain their catalog. */
   capabilityCatalog: z.object({ version: z.literal(1), requestHash: z.string().regex(/^[a-f0-9]{64}$/),
     kind: z.enum(['full', 'writing', 'research', 'conversation']),
     names: z.array(z.string().min(1)).min(1).max(256),

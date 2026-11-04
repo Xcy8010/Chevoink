@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import type { AgentUIMessage } from '../../../../../shared/contracts/index.js'
 import { useKeyboardPushScroll } from '@/hooks/useKeyboardPushScroll'
 
 /** Owns only viewport following/navigation; history and request ownership stay outside. */
 export function useMessageScroll({
-  messages, pendingApproval, pendingQuestion, conversationLoading, collapsed,
+  messages, pendingApproval, pendingQuestion, conversationLoading, collapsed, scopeKey,
 }: {
+  scopeKey?: string
   messages: readonly AgentUIMessage[]
   pendingApproval: unknown
   pendingQuestion: unknown
@@ -16,6 +17,9 @@ export function useMessageScroll({
   // 自动跟随开关：用户上滑离开底部后暂停自动滚底（避免运行中回看历史被强制弹回），滚回底部附近自动恢复
   const pinnedToBottomRef = useRef(true)
   const lastScrollTopRef = useRef(0)
+  const scopeOwner = useRef({ key: scopeKey })
+  if (scopeOwner.current.key !== scopeKey) scopeOwner.current = { key: scopeKey }
+  useLayoutEffect(() => { pinnedToBottomRef.current = true; lastScrollTopRef.current = 0 }, [scopeKey])
 
   // 消息更新自动滚动到底部（仅当用户本就贴底时）。
   // 消息流用 content-visibility 虚拟化，scrollHeight 起初只是估算值：面板新挂载（如进入沉浸层）时
@@ -32,11 +36,12 @@ export function useMessageScroll({
     if (!pinnedToBottomRef.current) {
       return
     }
+    const owner = scopeOwner.current
     let attempts = 0
     let stableTicks = 0
     let frame = requestAnimationFrame(function step() {
       // 用户中途上滑脱离贴底：立刻停止追底，不和手势抢滚动
-      if (!pinnedToBottomRef.current) {
+      if (scopeOwner.current !== owner || scrollRef.current !== node || !pinnedToBottomRef.current) {
         return
       }
       if (node.scrollHeight - node.scrollTop - node.clientHeight > 1) {
@@ -53,7 +58,7 @@ export function useMessageScroll({
       }
     })
     return () => cancelAnimationFrame(frame)
-  }, [messages, pendingApproval, pendingQuestion, conversationLoading, collapsed])
+  }, [messages, pendingApproval, pendingQuestion, conversationLoading, collapsed, scopeKey])
 
   // 跟踪用户是否贴底。只要出现一次「向上滚动」就立刻脱离贴底：
   // 流式输出时每个增量都会触发自动滚底，若只用「距底 80px」判定，用户手指刚上滑十几像素

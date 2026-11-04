@@ -13,14 +13,14 @@ afterEach(() => { cleanup(); vi.useRealTimers() })
 
 it('ticks from the real start, then freezes and releases the clock on termination', () => {
   const { rerender } = render(<ProcessDuration timing={timing} />)
-  expect(screen.getByText('已处理 5秒')).toBeTruthy()
+  expect(document.querySelector('[data-process-duration]')?.textContent).toBe('已处理 5 秒')
   act(() => vi.advanceTimersByTime(60000))
-  expect(screen.getByText('已处理 1分钟5秒')).toBeTruthy()
+  expect(document.querySelector('[data-process-duration]')?.textContent).toBe('已处理 65 秒')
   rerender(<ProcessDuration timing={{ ...timing, activeSince: null, elapsedMs: 65000, status: 'finished' }} />)
-  expect(screen.getByText('用时 1分钟5秒')).toBeTruthy()
+  expect(document.querySelector('[data-process-duration]')?.textContent).toBe('用时 65 秒')
   expect(vi.getTimerCount()).toBe(0)
   act(() => vi.advanceTimersByTime(10000))
-  expect(screen.getByText('用时 1分钟5秒')).toBeTruthy()
+  expect(document.querySelector('[data-process-duration]')?.textContent).toBe('用时 65 秒')
 })
 
 it('shares a single clock among current summaries and gives historical messages none', () => {
@@ -39,15 +39,15 @@ it('restores the same elapsed time after leaving and reentering a session', () =
   expect(vi.getTimerCount()).toBe(0)
   act(() => vi.advanceTimersByTime(120000))
   const second = render(<ProcessDuration timing={{ ...timing, activeSince: null, elapsedMs: 10000, status: 'paused' }} />)
-  expect(screen.getByText('已暂停 · 用时 10秒')).toBeTruthy()
+  expect(document.querySelector('[data-process-duration]')?.textContent).toBe('已暂停 · 用时 10 秒')
   second.unmount()
   render(<ProcessDuration timing={timing} />)
-  expect(screen.getByText('已处理 2分钟5秒')).toBeTruthy()
+  expect(document.querySelector('[data-process-duration]')?.textContent).toBe('已处理 125 秒')
 })
 
 it('shows unknown without ticking for incomplete historical evidence', () => {
   render(<ProcessDuration timing={{ elapsedMs: null, activeSince: null, status: 'unknown', lastSeq: 0 }} />)
-  expect(screen.getByText('用时 未知')).toBeTruthy()
+  expect(document.querySelector('[data-process-duration]')?.textContent).toBe('用时 未知')
   expect(vi.getTimerCount()).toBe(0)
 })
 
@@ -63,7 +63,7 @@ it('retains the summary toggle, arrow and collapsed process content', () => {
   }
   const { container } = render(<Fixture />)
   const summary = screen.getByRole('button', { name: '查看 1 项操作' })
-  expect(summary.textContent).toBe('用时 2分钟32秒')
+  expect(summary.textContent).toBe('用时 152 秒')
   expect(summary.getAttribute('aria-expanded')).toBe('false')
   expect(summary.querySelector('svg')).toBeTruthy()
   expect(container.querySelector('[data-agent-call-id="read"]')).toBeNull()
@@ -97,4 +97,21 @@ it('updates today to month/day after an idle midnight and cleans up on unmount',
   expect(screen.getByText('10/18/15:24')).toBeTruthy()
   unmount()
   expect(vi.getTimerCount()).toBe(0)
+})
+
+
+it('uses a zero initial UI slot only for an active unknown interval and preserves unknown history', () => {
+  const unknown: AgentRunTiming = { elapsedMs: null, activeSince: null, status: 'unknown', lastSeq: 0 }
+  const { container, rerender } = render(<ProcessDuration timing={unknown} active />)
+  expect(screen.getByLabelText('0 秒')).toBeTruthy()
+  expect(unknown.elapsedMs).toBeNull()
+  const widthClass = container.querySelector('[data-process-duration]')!.className
+  rerender(<ProcessDuration timing={{ ...timing, elapsedMs: 56000 }} />)
+  expect(screen.getByLabelText('59 秒')).toBeTruthy()
+  act(() => vi.advanceTimersByTime(1000))
+  expect(screen.getByLabelText('60 秒')).toBeTruthy()
+  expect(container.querySelector('[data-process-duration]')!.className).toBe(widthClass)
+  expect(container.querySelectorAll('.tabular-nums').length).toBeGreaterThan(1)
+  rerender(<ProcessDuration timing={unknown} />)
+  expect(screen.getByText('未知')).toBeTruthy()
 })

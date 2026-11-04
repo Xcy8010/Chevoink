@@ -38,7 +38,7 @@ import { prepareAgentImage, readFileAsDataUrl, validateAgentFile } from '../agen
 import { uploadAgentAttachment } from '../agentApi'
 import { getChapterContent } from '../../api'
 import { useAgentStore, type ComposerReference } from '../agentStore'
-import { activateComposerDraft, updateComposerDraft } from '../composer-drafts'
+import { activateComposerDraft, sameComposerDraftScope, updateComposerDraft } from '../composer-drafts'
 import { useVoiceInput } from '../hooks/useVoiceInput'
 import { AgentVoiceInputBar } from './AgentVoiceInputBar'
 import { insertVoiceTranscript } from '../voice-insertion'
@@ -434,9 +434,10 @@ export function AgentComposer({
   const showContinue = Boolean(onContinue) && isComposerBlank(prompt) && references.length === 0 && attachments.length === 0
   const canContinue = showContinue && !running && !disabled && !sending && !voiceActive && !pendingVoice && uploading === 0
   const continueLock = useRef(false)
-  const sendLock = useRef(false)
+  const sendLock = useRef(new Set<string>())
   const currentScope = useRef(scope)
   currentScope.current = scope
+  useLayoutEffect(() => { setSending([...sendLock.current].some(owner => sameComposerDraftScope(owner, scope))) }, [scope])
   async function handleContinue() {
     if (!canContinue || !onContinue || continueLock.current) return
     continueLock.current = true
@@ -663,7 +664,7 @@ export function AgentComposer({
 
   const handleSend = async () => {
     const current = syncComposerFromDom()
-    if ((isComposerBlank(current.draft) && current.references.length === 0) || disabled || sending || sendLock.current || voiceActive || pendingVoice || uploading > 0) {
+    if ((isComposerBlank(current.draft) && current.references.length === 0) || disabled || sending || [...sendLock.current].some(owner => sameComposerDraftScope(owner, scope)) || voiceActive || pendingVoice || uploading > 0) {
       return
     }
     const effectivePrompt = buildComposerPrompt(current.draft, current.references)
@@ -674,7 +675,7 @@ export function AgentComposer({
     const pending = attachments
     const pinned = pinnedSkills.map((skill) => skill.id)
     const sendingScope = scope
-    sendLock.current = true
+    sendLock.current.add(sendingScope)
     setSending(true)
     try {
       const parsedCommand = parseGoalCommand(current.draft)
@@ -713,9 +714,11 @@ export function AgentComposer({
     } catch {
       // 面板已展示错误提示；保留草稿与附件供用户重试
     } finally {
-      sendLock.current = false
-      setSending(false)
-      editorRef.current?.focus()
+      sendLock.current.delete(sendingScope)
+      if (sameComposerDraftScope(currentScope.current, sendingScope)) {
+        setSending(false)
+        editorRef.current?.focus({ preventScroll: true })
+      }
     }
   }
 

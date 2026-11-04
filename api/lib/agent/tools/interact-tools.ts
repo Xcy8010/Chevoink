@@ -143,6 +143,7 @@ export const askUserTool = defineTool({
       output: '作者回答已收到，但原冻结合同仍缺少可证明的目标或范围，未静默扩大权限。请在输入框发送写明目标章节与范围的新指令；原合同、用量与已保存正文保持原值。',
       display: { kind: 'question' as const, question: args.question, options: args.options, answer: result.answer, scopeResolution: 'needs_input' as const },
     }
+    ctx.authorQuestionAnswers?.set(ctx.callId, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, question: args.question + '\n' + args.options.map(option => option.label + ' ' + (option.detail ?? '')).join('\n'), answer: result.answer })
     return {
       ...(clarification ? { semanticTransition: clarification } : {}),
       output: `作者的回答：${result.answer}${clarification ? '\n已补全原请求缺失的目标或原文范围；继续原任务，保留原有检查、权限与预算。' : ''}`,

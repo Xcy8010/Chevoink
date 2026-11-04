@@ -12,7 +12,7 @@ export const writingVolumeDecisionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('continue'), reason: z.string().trim().min(2).max(1000) }).strict(),
   z.object({ kind: z.literal('new_volume'), reason: z.string().trim().min(2).max(1000), newVolume: writingNewVolumeSchema }).strict(),
 ])
-export const writingTailVolumeCapabilitySchema = z.object({ version: z.literal(1), targetOrderIndex: z.number().int().positive(),
+export const writingTailVolumeCapabilitySchema = z.object({ version: z.literal(1), creationProtocol: z.literal(2).optional(), targetOrderIndex: z.number().int().positive(),
   previousChapterId: z.string().min(1), previousRevision: z.number().int().positive() }).strict()
 export type WritingVolumeDecision = z.infer<typeof writingVolumeDecisionSchema>
 export type WritingNewVolume = z.infer<typeof writingNewVolumeSchema>

@@ -26,7 +26,7 @@ import { composeChapterEdit } from './chapter-patches.js'
 import { composeChapterBody } from './chapter-body.js'
 import { plainChapterTitle } from '../../../../shared/structure/chapter-title.js'
 import { writingNewVolumeSchema } from '../../../../shared/contracts/writing-volume-contracts.js'
-import { assertPreparedWritingVolumeDecision, createWritingTailVolume } from '../writing-volume.js'
+import { assertPreparedWritingVolumeDecision, assertExplicitWritingVolumePlacement, createWritingTailVolume } from '../writing-volume.js'
 import { projectChapterBodyResult, projectConfirmedToolFailure } from './contract.js'
 import { readReviewBoundEditPlan } from '../review-bound-edit.js'
 
@@ -216,7 +216,7 @@ export const chapterCreateTool = defineTool({
   name: 'chapter_create',
   title: '新建章节',
   description:
-    '在当前作品原子创建一个新章节。默认title只写实际章名，不重复章号或书名号；作者明确命名照其要求。作者说“全书第 N 章”时只传 position=N；作者说“第 M 卷第 N 章/卷内第 N 章”时必须传 volumeOrder=M（或 volumeId）与 positionInVolume=N，位置必须是数字，严禁改用全书 position，严禁先建到错误卷再移动。沿用现有卷时不要传newVolume；newVolume仅用于已通过PREPARE新卷决定的真实新尾卷，不得与固定卷或卷内位置混用。未指定位置时紧接全书最后一个已有章节。仅用于新增章节；重写已有章节必须用 chapter_write。创建成功后必须复用返回的 chapterId 写正文，绝不要重复创建同名章。',
+    '在当前作品原子创建一个新章节。默认title只写实际章名，不重复章号或书名号；作者明确命名照其要求。作者说“全书第 N 章”时只传 position=N；作者说“第 M 卷第 N 章/卷内第 N 章”时必须传 volumeOrder=M（或 volumeId）与 positionInVolume=N，位置必须是数字，严禁改用全书 position，严禁先建到错误卷再移动。沿用现有卷时不要传newVolume；新任务先调用volume_create取得真实volumeId再创建本章；newVolume仅保留旧冻结任务已通过PREPARE新卷决定的历史兼容，不得与固定卷或卷内位置混用。未指定位置时紧接全书最后一个已有章节。仅用于新增章节；重写已有章节必须用 chapter_write。创建成功后必须复用返回的 chapterId 写正文，绝不要重复创建同名章。',
   coerceArgs(raw) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw
     const args = { ...raw } as Record<string, unknown>
@@ -288,7 +288,10 @@ export const chapterCreateTool = defineTool({
         }
       }
       const beforeHash = await readSemanticStructureHash(tx, ctx.novelId)
-      if (!args.newVolume && frozen.writing?.tailVolume) await assertPreparedWritingVolumeDecision(tx, ctx, slot?.orderIndex ?? args.position ?? 0)
+      if (frozen.writing?.tailVolume?.creationProtocol === 2) {
+        if (args.newVolume) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '本任务先使用新建卷，再用真实卷编号创建目标章，不在创建章节时隐式建卷。')
+        await assertExplicitWritingVolumePlacement(tx, ctx, slot?.orderIndex ?? args.position ?? 0, requestedVolumeId)
+      } else if (!args.newVolume && frozen.writing?.tailVolume) await assertPreparedWritingVolumeDecision(tx, ctx, slot?.orderIndex ?? args.position ?? 0)
       if (args.newVolume && (ctx.inlineChild || ctx.sandboxMode === 'read_only' || ctx.protectedChapterIds?.size)) {
         throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '子执行、只读或受保护任务不能为章节新建尾卷。')
       }

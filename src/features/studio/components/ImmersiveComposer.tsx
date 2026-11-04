@@ -50,6 +50,7 @@ import { useStudioPanelWidths } from '../panel-widths'
 type MobileSheetPanel = 'agent' | 'chapters' | 'cover' | 'meta'
 
 type ImmersiveComposerProps = {
+  taskScope?: string
   currentNovelId: string
   novelTitle: string
   novelTitleMissing?: boolean
@@ -130,6 +131,7 @@ type ImmersiveComposerProps = {
 }
 
 export default function ImmersiveComposer({
+  taskScope,
   currentNovelId,
   novelTitle,
   novelTitleMissing = false,
@@ -520,6 +522,7 @@ export default function ImmersiveComposer({
           {isDesktop ? (
             <div className={cn('flex h-full min-h-0 flex-col', isDesktop && 'relative border-r border-[var(--border-subtle)] bg-[var(--surface-default)] p-4')}>
               <ChapterSidebar
+                taskScope={taskScope}
                 embedded
                 chapters={chapters}
                 volumes={volumes}
@@ -1096,6 +1099,7 @@ export default function ImmersiveComposer({
                 ) : null}
                 <div className="min-h-0 flex-1 overflow-hidden">
                   <ChapterSidebar
+                taskScope={taskScope}
                     embedded
                     chapters={chapters}
                     volumes={volumes}

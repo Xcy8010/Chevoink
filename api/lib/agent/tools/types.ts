@@ -36,6 +36,10 @@ export type ToolContext = {
   writingScope?: import('../../../../shared/contracts/index.js').TaskSpec['scope']
   /** Per-execution server observations; never populated from tool arguments. */
   planContentHashes?: Map<string, string>
+  /** Same execution’s observed content+link version; never populated from tool arguments. */
+  planSemanticHashes?: Map<string, string>
+  /** Actual answers from this execution’s question mailbox, never model arguments. */
+  authorQuestionAnswers?: Map<string, { userId: string; novelId: string; runId: string; question: string; answer: string }>
   /** 作者明确要求“已有/前文保持不变”时，本轮启动前已存在的章节集合。 */
   protectedChapterIds?: ReadonlySet<string>
   /** Current server admission ceiling; inline children must inherit and intersect it. */

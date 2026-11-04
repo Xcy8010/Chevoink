@@ -1,3 +1,4 @@
+import { isExplicitNovelMetadataRequest, isNovelDirectionSetup } from './task-spec.js'
 import { DataAccessError } from '../prisma.js'
 import { findPlanByIdentity } from './novel-plan-contract.js'
 import { hasRetiredNativeArguments, verifiedAssistantToolViews, toolWithNativeView, needsNativeToolProjection } from './runtime-tool-view.js'
@@ -250,6 +251,10 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     if (input.effectDomain === 'deletion' && (input.action !== 'novel_delete' || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '删除能力仅属于原作者任务。')
     if (input.action === 'novel_import' && input.effectDomain !== 'import') runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '导入不能通过只读或旧写入适配器执行。')
     if (input.effectDomain === 'import' && (input.action !== 'novel_import' || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '导入能力仅允许原任务的专用导入流程。')
+    const originalTask = taskSpecSchema.parse(current.originalSpec)
+    const setup = originalTask.scope.novelInitializationProtocol === 1 && input.effectDomain === 'metadata' && ['novel_create', 'novel_update_meta'].includes(input.action)
+      && (isExplicitNovelMetadataRequest(originalTask.goals.join('\n')) || isNovelDirectionSetup(originalTask.goals.join('\n')))
+    const explicitPlanVolume = originalTask.scope.volumeCreationProtocol === 1 && input.effectDomain === 'structure' && input.action === 'volume_create' && originalTask.scope.authorEffects?.structure === true
     const plan = input.effectDomain === 'plan'
     const configuration = input.effectDomain === 'configuration'
     if (configuration && (!['agent_configure', 'model_assign'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '配置能力只能更新当前任务的执行选项。')
@@ -266,7 +271,7 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
       || input.targetId !== taskSpecSchema.parse(current.originalSpec).scope.novelId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '变更集能力仅允许当前作品的已确认操作。')
     const compiler = input.effectDomain === 'compiler'
     if (compiler && (!['story_compiler_prepare', 'scene_task_build', 'continuity_validate', 'chapter_bridge_commit', 'quality_analyze'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '编译能力只允许本任务的准备、场景构建、连续性/质量检查与终态提交。')
-    if ((!read && !task && !memory && input.action !== 'session_rename' && (plan || (metadata && ['research_dossier_build', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action)) ? !['plan', 'build'].includes(current.configuration.mode) : current.configuration.mode !== 'build')) || !grant || grant.permission === 'deny'
+    if ((!read && !task && !memory && input.action !== 'session_rename' && (plan || setup || explicitPlanVolume || (metadata && ['research_dossier_build', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action)) ? !['plan', 'build'].includes(current.configuration.mode) : current.configuration.mode !== 'build')) || !grant || grant.permission === 'deny'
       || (!plan && !read && !structure && !task && !compiler && !memory && !metadata && !changeset && current.configuration.protectedChapterIds.includes(input.targetId))) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原冻结授权不允许此次工具效果。')
     let index = frame.state.messages.length - 1
     while (index >= 0 && frame.state.messages[index].role === 'tool') index--

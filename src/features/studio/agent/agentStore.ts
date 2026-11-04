@@ -283,7 +283,7 @@ type AgentStoreState = {
   memorySpotlight: MemorySpotlightRequest | null
   /** 事件 reducer：live 与 replay 共用同一构建逻辑 */
   applyEvent: (event: AgentStreamEvent) => void
-  beginRun: (runId: string, userPrompt: string, sessionId: string | null, attachments?: AgentAttachmentMeta[], runGoalId?: string | null) => void
+  beginRun: (runId: string, userPrompt: string, sessionId: string | null, attachments?: AgentAttachmentMeta[], runGoalId?: string | null, optimisticMessageId?: string, expectedPreviousRunId?: string | null) => void
   /** 续接服务端仍在进行的 run（刷新后恢复）：不追加用户消息，从 seq 0 重放事件重建直播 */
   resumeRun: (runId: string, sessionId: string | null, runGoalId?: string | null, motionAfterSeq?: number) => void
   reconcileRunTimings: (messages: AgentUIMessage[], sessionId: string, runId: string) => void
@@ -517,9 +517,9 @@ function appendDelta(
 
 /** 任务停止/结束后把仍处于「执行中」的工具卡片就地收尾：
  * 被中止的工具永远收不到 tool.result 事件，不收尾会导致卡片无限转圈 */
-function settleRunningToolParts(messages: AgentUIMessage[], summary: string): AgentUIMessage[] {
+function settleRunningToolParts(messages: AgentUIMessage[], summary: string, preserveRunId?: string): AgentUIMessage[] {
   return messages.map((message) => {
-    if (!message.parts.some((part) => part.type === 'tool-call' && part.status === 'running')) {
+    if (message.runId === preserveRunId || !message.parts.some((part) => part.type === 'tool-call' && part.status === 'running')) {
       return message
     }
     return {
@@ -617,8 +617,41 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   toolNavigationRequest: null,
   memorySpotlight: null,
 
-  beginRun: (runId, userPrompt, sessionId, attachments, runGoalId = null) =>
-    set((state) => ({
+  beginRun: (runId, userPrompt, sessionId, attachments, runGoalId = null, optimisticMessageId, expectedPreviousRunId) =>
+    set((state) => {
+      const existingUser = state.messages.some(message => message.role === 'user' && message.runId === runId)
+      const userMessage: AgentUIMessage = {
+          id: optimisticMessageId ?? `local-${Date.now()}`,
+          runId,
+          role: 'user' as const,
+          goalId: runGoalId,
+          // 附件随提示词一起发送：本地用户消息即时回显附件 part
+          parts: [
+            { type: 'text', text: userPrompt },
+            ...(attachments ?? []).map((attachment) => ({
+              type: 'attachment' as const,
+              kind: attachment.kind,
+              name: attachment.name,
+              url: attachment.url,
+              size: attachment.size,
+            })),
+          ],
+          createdAt: new Date().toISOString(),
+        }
+      const runMessages = state.messages.filter(message => message.runId === runId || message.runTiming?.sourceRunId === runId)
+      const observedStopped = runMessages.some(message => message.runId === runId && Boolean(message.completedAt)
+        || (message.runTiming?.sourceRunId ?? message.runId) === runId && (message.runTiming?.status === 'finished' || message.runTiming?.status === 'paused'))
+      const lastRunIndex = state.messages.map(message => message.runId).lastIndexOf(runId)
+      const observedNewerRun = lastRunIndex >= 0 && state.messages.slice(lastRunIndex + 1).some(message => message.runId !== runId)
+      const supersededReceipt = expectedPreviousRunId !== undefined && state.runId !== null && state.runId !== runId
+        && (state.runId !== expectedPreviousRunId || isRunActive(state.phase))
+      if (state.runId === runId || observedStopped || observedNewerRun || supersededReceipt) {
+        if (existingUser || supersededReceipt && runMessages.length === 0) return {}
+        const firstRunMessage = state.messages.findIndex(message => message.runId === runId)
+        const index = firstRunMessage < 0 ? state.messages.length : firstRunMessage
+        return { messages: [...state.messages.slice(0, index), userMessage, ...state.messages.slice(index)] }
+      }
+      return ({
       runId,
       runGoalId,
       phase: 'starting',
@@ -659,27 +692,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // 上一个任务若被停止后遗留了「执行中」的工具卡片（终态事件丢失时），开新任务前一并收尾
       workspaceActivities: settleRunningActivities(state.workspaceActivities),
       messages: [
-        ...settleRunningToolParts(state.messages, '已停止'),
-        {
-          id: `local-${Date.now()}`,
-          runId,
-          role: 'user',
-          goalId: runGoalId,
-          // 附件随提示词一起发送：本地用户消息即时回显附件 part
-          parts: [
-            { type: 'text', text: userPrompt },
-            ...(attachments ?? []).map((attachment) => ({
-              type: 'attachment' as const,
-              kind: attachment.kind,
-              name: attachment.name,
-              url: attachment.url,
-              size: attachment.size,
-            })),
-          ],
-          createdAt: new Date().toISOString(),
-        },
+        ...settleRunningToolParts(state.messages, '已停止', runId),
+        ...(existingUser ? [] : [userMessage]),
       ],
-    })),
+    }) }),
 
   resumeRun: (runId, sessionId, runGoalId = null, motionAfterSeq) =>
     set((state) => ({

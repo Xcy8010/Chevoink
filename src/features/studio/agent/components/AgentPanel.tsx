@@ -71,6 +71,7 @@ import {
   updateAgentGoal,
   type ContinueAgentLoopRunModel,
 } from '../agentApi'
+import { projectOutgoingMessages, useOutgoingMessages } from '../outgoing-messages'
 import { isRunActive, readSessionMessagesCache, useAgentStore, type ComposerReference } from '../agentStore'
 import { selectAgentActivityRunActive, selectAgentGoalView, selectAgentPanelPhase } from '../goal-selectors'
 import { useMessageBlockExpansion } from './use-message-block-expansion'
@@ -83,6 +84,7 @@ import { useAgentGoalStream } from '../useAgentGoalStream'
 import { useGoalBarVisibility } from '../useGoalBarVisibility'
 import { openGoalEntry } from '../goal-entry'
 import { projectBlockTimings, projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
+import { projectAnalysisGroups } from '../lib/process-groups'
 import { projectResearchGroups } from '../lib/research-groups'
 import { useMessageScroll } from './use-message-scroll'
 import { useComposerInset } from './use-composer-inset'
@@ -224,8 +226,15 @@ export function AgentPanel({
   const authorEnded = useAgentStore((state) => state.authorEnded)
   const outcome = useAgentStore((state) => state.outcome)
   const resumeableRunId = useAgentStore((state) => state.resumeableRunId)
-  const messages = useAgentStore((state) => state.messages)
+  const canonicalMessages = useAgentStore((state) => state.messages)
+  const storeLoadedSessionId = useAgentStore((state) => state.loadedSessionId)
+  const outgoing = useOutgoingMessages(state => state.items)
+  const sendScope = voiceScopeKey ?? `${novelId}:${sessionId ?? 'new'}`
+  const messages = useMemo(() => projectOutgoingMessages(storeLoadedSessionId === sessionId ? canonicalMessages : [], outgoing, sendScope, novelId, sessionId), [canonicalMessages, outgoing, sendScope, novelId, sessionId, storeLoadedSessionId])
+  const hasOutgoing = messages.some(message => message.delivery)
+  const deliveryErrorRef = useRef<{ clientRequestId: string; scope: string; sessionId: string | null; message: string } | null>(null)
   const { recentConversationText, blockInfoById, lastAssistantId } = useMemo(() => projectMessages(messages), [messages])
+  const analysisGroups = useMemo(() => projectAnalysisGroups(messages), [messages])
   const researchGroups = useMemo(() => projectResearchGroups(messages), [messages])
   // 正文已定稿的消息 id：定稿后不再画流式光标（等答题/审批/工具执行期间光标不应常闪）
   const finalizedTextIds = useAgentStore((state) => state.finalizedTextIds)
@@ -256,6 +265,13 @@ export function AgentPanel({
 
   const viewSession = useRef(sessionId)
   viewSession.current = sessionId
+  const paginationOwner = useRef({ scope: sendScope, sessionId })
+  if (paginationOwner.current.scope !== sendScope || paginationOwner.current.sessionId !== sessionId) paginationOwner.current = { scope: sendScope, sessionId }
+  const paginationEffects = useRef<{ frame?: number; timer?: number }>({})
+  useEffect(() => () => {
+    if (paginationEffects.current.frame !== undefined) cancelAnimationFrame(paginationEffects.current.frame)
+    if (paginationEffects.current.timer !== undefined) clearTimeout(paginationEffects.current.timer)
+  }, [sendScope])
   const viewScope = useRef(voiceScopeKey)
   viewScope.current = voiceScopeKey
   const terminalProbe = useRef<{ runId: string | null; at: number }>({ runId: null, at: 0 })
@@ -376,11 +392,11 @@ export function AgentPanel({
   // 更早对话分页：每页最多 50 轮 run，用户手动点击顶部按钮加载更早内容
   const [olderPagination, setOlderPagination] = useState<{ hasMore: boolean; before: string | null } | null>(null)
   const [loadingOlder, setLoadingOlder] = useState(false)
+  useLayoutEffect(() => { setLoadingOlder(false); setOlderPagination(null) }, [sendScope])
   // 无缓存首次加载的流光保底窗口（快请求下也走完一个扫光周期）
   const [shimmerHolding, setShimmerHolding] = useState(false)
   // 历史拉取失败的会话：不能标记成“已恢复”（否则不再重试），但需让渲染层退出加载态，避免流光永久转圈
   const [historyErrorSessionId, setHistoryErrorSessionId] = useState<string | null>(null)
-  const storeLoadedSessionId = useAgentStore((state) => state.loadedSessionId)
   const hydratingSessionId = useAgentStore((state) => state.hydratingSessionId)
   // 加载态完全由全局 store 状态派生，不再依赖任何局部标记：
   // 只有 store 明确宣告「本会话已水合」（loadedSessionId 命中）或「本就没有会话」时才允许欢迎页，
@@ -390,9 +406,9 @@ export function AgentPanel({
     sessionId === null || storeLoadedSessionId === sessionId || historyErrorSessionId === sessionId
   const conversationLoading =
     // 保底窗口优先：无缓存首载即便请求 200ms 就回来，也走完一个完整扫光周期再显示，避免流光一闪而过
-    shimmerHolding ||
+    !hasOutgoing && (shimmerHolding ||
     (!conversationReady &&
-      (sessionResolving || (sessionId !== null && hydratingSessionId === sessionId) || !conversationSettled))
+      (sessionResolving || (sessionId !== null && hydratingSessionId === sessionId) || !conversationSettled)))
   const [actionError, setActionError] = useState<string | null>(null)
   const [goalBusy, setGoalBusy] = useState(false)
   const [goalEditorOpen, setGoalEditorOpen] = useState(false)
@@ -471,6 +487,20 @@ export function AgentPanel({
   const [rollbackPreview, setRollbackPreview] = useState<RollbackPreviewState | null>(null)
   // 操作成功提示（如回退后保留已发布章节）：下次操作或发送时清除
   const [actionNotice, setActionNotice] = useState<string | null>(null)
+  const reconcileOutgoingDelivery = useCallback(() => {
+    if (storeLoadedSessionId !== sessionId) return
+    const failure = deliveryErrorRef.current
+    if (failure && (failure.scope === sendScope || Boolean(sessionId && failure.sessionId === sessionId))
+      && canonicalMessages.some(message => message.role === 'user' && message.clientRequestId === failure.clientRequestId)) {
+      deliveryErrorRef.current = null
+      if (actionError === failure.message) {
+        setActionError(null)
+        setActionNotice('请求已由服务端接纳。')
+      }
+    }
+    useOutgoingMessages.getState().reconcile(canonicalMessages, sendScope, novelId, sessionId)
+  }, [storeLoadedSessionId, sessionId, sendScope, canonicalMessages, actionError, novelId])
+  useEffect(reconcileOutgoingDelivery, [reconcileOutgoingDelivery, outgoing])
   // 分支溯源：本会话是副本时后端随消息一起返回，用于底部「从聊天中继续」提示
   const [forkInfo, setForkInfo] = useState<{ sessionId: string; forkedAt: string | null } | null>(null)
   // 待确认的分支创建：messageId 为空表示从整段对话切分支
@@ -482,13 +512,16 @@ export function AgentPanel({
   const lazySessionRef = useRef<string | null>(null)
 
   const { scrollRef, pinnedToBottomRef, lastScrollTopRef, handleMessagesScroll } = useMessageScroll({
-    messages, pendingApproval, pendingQuestion, conversationLoading, collapsed: workConversation.collapsed,
+    scopeKey: sendScope, messages, pendingApproval, pendingQuestion, conversationLoading, collapsed: workConversation.collapsed,
   })
   const goalView = selectAgentGoalView({ goal, goalSessionId, sessionId, runId, resumeableRunId, phase, runGoalId })
   const goalBar = useGoalBarVisibility(userId, sessionId, goalView.goal)
   const panelPhase = selectAgentPanelPhase(goalView, phase)
   const active = isRunActive(panelPhase)
   const blockTimings = useMemo(() => projectBlockTimings(messages, blockInfoById, active ? runId : null), [messages, blockInfoById, active, runId])
+  const lastAnalysisMessage = messages.at(-1)
+  const activeAnalysisGroupId = active && lastAnalysisMessage?.role === 'assistant' && lastAnalysisMessage.parts.at(-1)?.type === 'reasoning'
+    ? analysisGroups.get(lastAnalysisMessage.id)?.get(lastAnalysisMessage.parts.length - 1)?.id : undefined
   const activityRunActive = selectAgentActivityRunActive(goalView, phase)
   const creditSummaryQuery = useQuery({
     queryKey: ['credits', 'summary'],
@@ -980,20 +1013,29 @@ export function AgentPanel({
     async (prompt: string, attachments: AgentAttachmentMeta[], freedom: CreativeFreedom, selectedQualityMode: StoryCompilerMode, pinnedSkillIds: string[], pinnedSubagentId?: string) => {
       setActionError(null)
       setActionNotice(null)
+      deliveryErrorRef.current = null
       // 用户主动发言视为回到对话最新处，重新开启自动跟随
       pinnedToBottomRef.current = true
+      const sendingState = useAgentStore.getState()
+      const previousRunId = sendingState.runId
+      const lastCanonicalMessage = sendingState.loadedSessionId === sessionId ? sendingState.messages.at(-1) : undefined
+      const clientRequestId = crypto.randomUUID()
+      const outgoingId = useOutgoingMessages.getState().add(sendScope, novelId, sessionId, prompt, attachments, { messageId: lastCanonicalMessage?.id ?? null, runId: lastCanonicalMessage?.runId ?? null }, clientRequestId)
+      let ensuredSessionId = sessionId
       try {
         if (!inheritMain && creditSummaryQuery.data?.archivedModelTiers?.includes(modelTier)) throw new Error('原模型已归档，请明确重新选择后发送；输入草稿已保留。')
         await windowConfiguration.ready()
-        let ensuredSessionId = sessionId
         if (!ensuredSessionId) {
           ensuredSessionId = await ensureSession()
+          useOutgoingMessages.getState().update(outgoingId, { sessionId: ensuredSessionId })
           await windowConfiguration.promote(ensuredSessionId)
           if (viewScope.current === voiceScopeKey || viewSession.current === ensuredSessionId) lazySessionRef.current = ensuredSessionId
         }
+        const resolvedSessionId = ensuredSessionId
         const startRun = async (targetChapterId: string | null) => {
           const input = {
-            sessionId: ensuredSessionId,
+            clientRequestId,
+            sessionId: resolvedSessionId,
             novelId,
             chapterId: targetChapterId,
             // Agent 默认最大权限：恒以 build 模式运行（后端路由也有强制兜底）
@@ -1047,11 +1089,25 @@ export function AgentPanel({
             throw error
           }
         }
-        if (!result || (viewSession.current !== sessionId && viewSession.current !== ensuredSessionId)) return
+        if (!result) { useOutgoingMessages.getState().remove(outgoingId); return }
+        useOutgoingMessages.getState().update(outgoingId, { sessionId: ensuredSessionId, runId: result.runId, status: 'sent' })
+        if (viewSession.current !== sessionId && viewSession.current !== ensuredSessionId) return
         if (viewScope.current !== voiceScopeKey && viewSession.current !== ensuredSessionId) return
-        useAgentStore.getState().beginRun(result.runId, prompt, ensuredSessionId, attachments, result.runGoalId)
-        connect(result.runId)
+        useAgentStore.getState().beginRun(result.runId, prompt, ensuredSessionId, attachments, result.runGoalId, outgoingId, previousRunId)
+        const admittedState = useAgentStore.getState()
+        if (admittedState.runId === result.runId && isRunActive(admittedState.phase)) connect(result.runId)
       } catch (error) {
+        const observedState = useAgentStore.getState()
+        const observedHistory = ensuredSessionId
+          ? observedState.loadedSessionId === ensuredSessionId ? observedState.messages : readSessionMessagesCache(ensuredSessionId) ?? [] : []
+        if (observedHistory.some(message => message.role === 'user' && message.clientRequestId === clientRequestId)) {
+          useOutgoingMessages.getState().remove(outgoingId)
+          if (viewScope.current === voiceScopeKey && viewSession.current === sessionId || viewSession.current === ensuredSessionId) {
+            setActionNotice('请求已由服务端接纳。')
+          }
+          return
+        }
+        useOutgoingMessages.getState().update(outgoingId, { status: 'failed', error: error instanceof Error ? error.message : '发送失败，草稿已保留。' })
         if (viewScope.current !== voiceScopeKey) throw error
         // 会话已在服务端被删除（如用户删了历史任务后本地快照残留僵尸 sessionId）：
         // 重置为新对话而不是让用户死循环卡在「会话不存在或无权访问」里
@@ -1060,7 +1116,9 @@ export function AgentPanel({
           setActionError('上个会话已被删除，已为你新建对话，请重新发送。')
           throw error
         }
-        setActionError(error instanceof Error ? error.message : '启动失败，请稍后再试。')
+        const deliveryError = error instanceof Error ? error.message : '启动失败，请稍后再试。'
+        deliveryErrorRef.current = { clientRequestId, scope: sendScope, sessionId: ensuredSessionId, message: deliveryError }
+        setActionError(deliveryError)
         if (error instanceof AgentApiError && ['CREDITS_EXHAUSTED', 'CREDITS_GLOBALLY_PAUSED', 'CREDITS_ACCOUNT_SUSPENDED'].includes(error.code ?? '')) {
           setQuotaDialogOpen(true)
           void refetchCredits()
@@ -1071,7 +1129,7 @@ export function AgentPanel({
         throw error
       }
     },
-    [sessionId, voiceScopeKey, novelId, chapterId, selection, ensureSession, connect, onNewSession, inheritMain, modelSelectionExplicit, modelTier, customModelId, selectedReasoningEffort, refetchCredits, queueQuery, pinnedToBottomRef, windowConfiguration, creditSummaryQuery.data?.archivedModelTiers],
+    [sessionId, voiceScopeKey, sendScope, novelId, chapterId, selection, ensureSession, connect, onNewSession, inheritMain, modelSelectionExplicit, modelTier, customModelId, selectedReasoningEffort, refetchCredits, queueQuery, pinnedToBottomRef, windowConfiguration, creditSummaryQuery.data?.archivedModelTiers],
   )
 
 
@@ -1207,28 +1265,35 @@ export function AgentPanel({
       setOlderPagination(null)
       return
     }
+    const owner = paginationOwner.current
     const anchorId = useAgentStore.getState().messages[0]?.id ?? null
+    pinnedToBottomRef.current = false
     setLoadingOlder(true)
     try {
       const payload = await fetchAgentSessionMessages(sessionId, { runLimit: 50, beforeRunStartedAt: before })
-      if (viewSession.current !== sessionId || useAgentStore.getState().loadedSessionId !== sessionId) return
+      if (paginationOwner.current !== owner || viewSession.current !== sessionId || useAgentStore.getState().loadedSessionId !== sessionId) return
       setOlderPagination(payload.pagination ? { hasMore: payload.pagination.hasMore, before: payload.pagination.earliestRunStartedAt } : null)
       useAgentStore.getState().prependMessages(payload.messages)
       if (anchorId) {
         // content-visibility 虚拟化下前插内容高度初始为估算值：多帧对齐锚点直到布局稳定
         const alignAnchor = () => {
-          document.getElementById(`agent-message-${anchorId}`)?.scrollIntoView({ block: 'start' })
+          if (paginationOwner.current !== owner) return
+          const container = scrollRef.current
+          const target = container?.querySelector<HTMLElement>(`[id="agent-message-${anchorId}"]`)
+          if (!container || !target || container.clientHeight === 0) return
+          container.scrollTop += target.getBoundingClientRect().top - container.getBoundingClientRect().top
+          lastScrollTopRef.current = container.scrollTop
         }
         alignAnchor()
-        requestAnimationFrame(alignAnchor)
-        window.setTimeout(alignAnchor, 80)
+        paginationEffects.current.frame = requestAnimationFrame(alignAnchor)
+        paginationEffects.current.timer = window.setTimeout(alignAnchor, 80)
       }
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : '加载更早对话失败，请稍后再试。')
+      if (paginationOwner.current === owner) setActionError(error instanceof Error ? error.message : '加载更早对话失败，请稍后再试。')
     } finally {
-      setLoadingOlder(false)
+      if (paginationOwner.current === owner) setLoadingOlder(false)
     }
-  }, [sessionId, olderPagination, loadingOlder])
+  }, [sessionId, olderPagination, loadingOlder, pinnedToBottomRef, scrollRef, lastScrollTopRef])
 
   // 刚发出的用户消息在本地是临时 id（local-*），服务端落库用的是另一个 uuid：
   // 直接拿临时 id 调删除/回退/预览会 404「消息不存在或已被删除」，先按 runId 对齐到真实 id
@@ -1552,7 +1617,7 @@ export function AgentPanel({
         ) : conversationReady ? (
           /* 已有内容直接呈现：切回已加载会话 / 同会话重用 / 直播收尾时不插任何加载态，做到「有缓存直接显示」。
              按会话取 key：跨会话切换重放淡入，同会话流式追加不重挂载 */
-          <div key={storeLoadedSessionId ?? 'pending'} className="flex flex-col gap-4 pb-2 motion-safe:animate-fade-in">
+          <div className="flex flex-col gap-4 pb-2">
             {olderPagination?.hasMore ? (
               <div className="flex justify-center pb-1">
                 <button
@@ -1575,7 +1640,7 @@ export function AgentPanel({
                 <div
                   key={message.id}
                   id={`agent-message-${message.id}`}
-                  className="agent-msg-cv group/message flex flex-col items-end gap-1.5"
+                  className={cn('group/message flex flex-col items-end gap-1.5', !message.delivery && message.id !== messages.filter(item => item.role === 'user').at(-1)?.id && 'agent-msg-cv')}
                   onTouchStart={() => startLongPress(message.id)}
                   onTouchEnd={cancelLongPress}
                   onTouchMove={cancelLongPress}
@@ -1627,10 +1692,13 @@ export function AgentPanel({
                         .join('')}
                     </div>
                   </div>
-                  <UserMessageActions createdAt={message.createdAt} visible={touchActionsId === message.id} copied={copiedId === message.id} disabled={active}
+                  {message.delivery ? <div className="flex max-w-full items-center gap-2 text-xs text-[var(--text-secondary)]">
+                    <span role={message.delivery.status === 'failed' ? 'alert' : 'status'}>{message.delivery.status === 'sending' ? '正在发送…' : message.delivery.status === 'failed' ? `发送未确认：${message.delivery.error}` : '已发送，正在同步…'}</span>
+                    {message.delivery.status === 'failed' ? <button type="button" onClick={() => useOutgoingMessages.getState().remove(message.id)} className="shrink-0 underline">移除这条本地消息</button> : null}
+                  </div> : <UserMessageActions createdAt={message.createdAt} visible={touchActionsId === message.id} copied={copiedId === message.id} disabled={active}
                     onCopy={() => void handleCopyText(message.id, getMessageText(message.parts, message.role))}
                     onRollback={() => setConfirmAction({ kind: 'rollbackMessage', messageId: message.id })}
-                    onDelete={() => setConfirmAction({ kind: 'deleteMessage', messageId: message.id })} />
+                    onDelete={() => setConfirmAction({ kind: 'deleteMessage', messageId: message.id })} />}
                 </div>
                 )
               }
@@ -1659,6 +1727,8 @@ export function AgentPanel({
                   <AgentMessageParts
                     parts={message.parts}
                     researchGroups={researchGroups.get(message.id)}
+                    analysisGroups={analysisGroups.get(message.id)}
+                    activeAnalysisGroupId={activeAnalysisGroupId}
                     messageId={message.id}
                     revealText={textRevealTargets[message.id]}
                     onTextRevealed={finishTextReveal}

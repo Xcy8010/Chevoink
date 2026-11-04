@@ -60,7 +60,7 @@ export function freezeTaskCapabilities(spec: TaskSpec, input: Pick<StartAgentLoo
     const group = taskToolRelevance(name)
     // Preserve newly introduced/unmapped capabilities conservatively. Existing
     // extension intents above select full, so mapped irrelevant tools can go.
-    return group === 'common' || group === kind || group === 'extension' && !extensions.has(name)
+    return name === 'volume_create' && spec.scope.writing?.tailVolume?.creationProtocol === 2 || group === 'common' || group === kind || group === 'extension' && !extensions.has(name)
   })
   return { ...spec, scope: { ...spec.scope, capabilityCatalog: { version: 1, requestHash, kind, names } } }
 }

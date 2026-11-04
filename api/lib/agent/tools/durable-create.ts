@@ -63,6 +63,10 @@ export async function executeDurableCreate(ctx: ToolContext, args: { title: stri
           chapterCreateReuse: { version: 1, userId: ctx.userId, novelId: ctx.novelId, chapterId: active.id, revision: active.revision },
           display: { kind: 'chapterRef', chapterId: active.id, title: active.title, wordCount: 'wordCount' in active ? active.wordCount : 0 } } }).value
       }
+      if (action === 'volume_create' && effectiveArgs && typeof effectiveArgs === 'object' && !Array.isArray(effectiveArgs) && 'boundary' in effectiveArgs) {
+        const oldArgs = z.object({ input: z.object({ args: z.record(z.string(), z.unknown()) }) }).parse(previous.inputSnapshot).input.args
+        if (runtimeJson(oldArgs).hash !== runtimeJson(effectiveArgs).hash) return runtimeError('AUTHOR_CHAPTER_SCOPE', '同名卷的原创建参数与本次尾卷目标或证据不同，未复用或新建。')
+      }
       return runtimeJson({ toolResult: { ...result.toolResult, summary: `复用本任务已创建卷《${args.title.trim()}》` } }).value
     }
     const protectedIds = (await readExecutionStateInTransaction(tx, lease.taskRootId)).configuration.protectedChapterIds
@@ -89,7 +93,7 @@ export async function executeDurableCreate(ctx: ToolContext, args: { title: stri
     return runtimeJson({ toolResult: result, memoryJobId: memoryJob?.id ?? null, ...(createdBody ? { progress: { kind: 'content_revision', targetId: target.id,
       beforeHash: runtimeJson({ content: '' }).hash, afterHash: runtimeJson({ content: target.content }).hash } } : {}) }).value
   }).catch(async error => {
-    if (!(error instanceof DataAccessError) || ![...PLAN_FAILURE_CODES, 'AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'VOLUME_NOT_FOUND', 'NOVEL_NOT_FOUND', 'AUTHOR_SCOPE_PROTECTED', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH'].includes(error.code)) throw error
+    if (!(error instanceof DataAccessError) || ![...PLAN_FAILURE_CODES, 'AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'VOLUME_NOT_FOUND', 'NOVEL_NOT_FOUND', 'AUTHOR_SCOPE_PROTECTED', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'INVALID_ARGUMENTS', 'RUNTIME_SCOPE_MISMATCH'].includes(error.code)) throw error
     const recovery = error.code === 'AUTHOR_CHAPTER_SCOPE' ? toolFailureRecovery(error.code) : undefined
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code,
       output: recovery ? `${error.message} ${recovery.guidance}` : error.message,

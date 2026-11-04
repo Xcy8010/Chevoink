@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useId, useMemo, useState } from 'react'
 import {
   BookOpenText,
   Bot,
@@ -6,7 +6,6 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  ChevronUp,
   CircleAlert,
   Download,
   Eye,
@@ -25,6 +24,7 @@ import { buildApiUrl } from '@/app/api-base'
 import { cn } from '@/lib/utils'
 import { ProcessDuration } from './ProcessDuration'
 import { ResearchCard } from './ResearchCard'
+import { projectAnalysisGroups, type MessageAnalysisGroups } from '../lib/process-groups'
 import { projectResearchGroups, type MessageResearchGroups } from '../lib/research-groups'
 import type { AgentRunTiming } from '../../../../../shared/contracts/agent-events.js'
 import ImageLightbox from '../../components/ImageLightbox'
@@ -39,6 +39,7 @@ import { useStreamingTextState } from '../../components/use-streaming-text'
 import { useAgentStore } from '../agentStore'
 import { projectAgentAuthorParts, projectAgentAuthorText } from '../../../../../shared/agent-author-view.js'
 import { describeToolArguments, getToolTargetTitle } from '../tool-argument-view'
+import { getAgentToolPresentation } from '../../../../../shared/agent-tool-presentation'
 import { projectedReviewAction, type ReviewOutcome } from '../../../../../shared/review-lifecycle.js'
 
 /**
@@ -951,7 +952,7 @@ const ToolCallCard = memo(function ToolCallCard({
             : ''
   const headerContent = <>
     {writeTool ? <FileText className="h-3.5 w-3.5 shrink-0 text-sky-500" /> : <Wrench className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />}
-    <span className="min-w-0 flex-1 truncate text-xs font-medium text-[var(--text-primary)]">{part.title}</span>
+    <span className="min-w-0 flex-1 truncate text-xs font-medium text-[var(--text-primary)]">{getAgentToolPresentation(part.toolName).label}</span>
     {preparing ? <span className="agent-tool-running-label shrink-0 text-[10px] text-[var(--text-secondary)]">准备中…</span> : null}
     {running ? <span className="agent-tool-running-label shrink-0 text-[10px] font-medium text-[var(--text-secondary)]">{runningLabel}</span> : null}
     {reviewLabel ? <span className={cn('shrink-0 text-[10px] font-medium', reviewDecision ? 'text-amber-600' : 'text-rose-500')}>{reviewLabel}</span> : null}
@@ -1051,6 +1052,8 @@ const SubAgentCallCard = memo(function SubAgentCallCard({
 }: {
   runActive: boolean
   researchGroups?: MessageResearchGroups
+  analysisGroups?: MessageAnalysisGroups
+  activeAnalysisGroupId?: string
   animateLive?: boolean
   liveToolCallIds?: ReadonlySet<string>
   part: Extract<AgentMessagePart, { type: 'tool-call' }>
@@ -1117,106 +1120,19 @@ const SubAgentCallCard = memo(function SubAgentCallCard({
   )
 })
 
-const ReasoningPart = memo(function ReasoningPart({
-  part,
-  streaming,
-}: {
-  part: Extract<AgentMessagePart, { type: 'reasoning' }>
-  streaming: boolean
-}) {
-  // null = 默认收起；true/false = 用户本轮手动指定。
-  const [manualOpen, setManualOpen] = useState<boolean | null>(null)
-  const showBody = manualOpen ?? false
-  const bodyRef = useRef<HTMLDivElement | null>(null)
-  // 是否跟随最新思考文本：默认跟随，用户在思考区内往上翻即暂停，重新滑回底部即恢复
-  const followRef = useRef(true)
-
-  // 思考结束时清掉手动状态，维持紧凑收起态。
-  useEffect(() => {
-    if (!streaming) {
-      setManualOpen(null)
-    }
-  }, [streaming])
-
-  useEffect(() => {
-    // 只在思考中跟随；思考结束后用户手动展开回看时，从头开始读而不是跳到末尾
-    if (!streaming || !showBody) {
-      return
-    }
-    const node = bodyRef.current
-    if (!node || !followRef.current) {
-      return
-    }
-    node.scrollTop = node.scrollHeight
-  }, [part.text, streaming, showBody])
-
-  const handleBodyScroll = useCallback(() => {
-    const node = bodyRef.current
-    if (!node) {
-      return
-    }
-    // 程序自动滚底后本就贴底，不会被误判成用户干预；内容没溢出时差值为 0，同样保持跟随
-    followRef.current = node.scrollHeight - node.scrollTop - node.clientHeight <= 12
-  }, [])
-
-  const handleToggle = useCallback(() => {
-    setManualOpen((current) => {
-      const nextOpen = !(current ?? false)
-      // 收起时重置跟随，再次展开直接看最新思考
-      if (!nextOpen) {
-        followRef.current = true
-      }
-      return nextOpen
-    })
-  }, [])
-
-  const visibleText = part.text.trim()
-  const meaningfulLines = visibleText.split('\n').map((line) => line.trim()).filter(Boolean)
-  const summary = (streaming ? meaningfulLines.at(-1) : meaningfulLines[0]) ?? (streaming ? '正在分析…' : '已完成分析')
-
-  return (
-    <div className="relative overflow-hidden" data-reasoning-running={streaming || undefined}>
-      {streaming ? <span aria-hidden className="pointer-events-none absolute inset-y-0 -left-72 z-0 w-72 animate-[reasoning-sweep_2.6s_ease-out_infinite] bg-gradient-to-r from-transparent via-[color:var(--surface-muted)]/70 to-transparent motion-reduce:hidden" /> : null}
-      <button
-        type="button"
-        onClick={handleToggle}
-        className="relative z-10 flex h-8 w-full items-center gap-2 overflow-hidden text-left"
-      >
-        <Brain
-          className={cn(
-            'h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]',
-            streaming && 'animate-pulse',
-          )}
-        />
-        <span className="shrink-0 text-[11px] font-medium text-[var(--text-secondary)]">
-          {streaming ? '思考中' : '思考'}
-        </span>
-        <span className="h-0.5 w-0.5 shrink-0 rounded-full bg-[var(--text-tertiary)]" />
-        <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-tertiary)]">{summary}</span>
-        {showBody ? (
-          <ChevronUp className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
-        ) : (
-          <ChevronDown className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
-        )}
-      </button>
-      {showBody ? (
-        /* 这里刻意不加 overscroll-contain：思考区滚到边界后手势要能继续传给外层对话列表，
-           否则手指落在思考区上时整个对话就滑不动了 */
-        <div
-          ref={bodyRef}
-          onScroll={handleBodyScroll}
-          className="max-h-44 overflow-y-auto whitespace-pre-wrap border-l border-[var(--border-subtle)] py-1 pl-[22px] text-xs leading-6 text-[var(--text-tertiary)] [-webkit-overflow-scrolling:auto]"
-        >
-          {part.text}
-        </div>
-      ) : null}
-    </div>
-  )
+const ReasoningPart = memo(function ReasoningPart({ streaming, count, labels }: { streaming: boolean; count: number; labels: string[] }) {
+  return <div className="flex h-8 items-center gap-2 text-[11px] text-[var(--text-secondary)]" data-agent-analysis="true" data-reasoning-running={streaming || undefined}>
+    <Brain className={cn('h-3.5 w-3.5 shrink-0', streaming && 'motion-safe:animate-pulse')} />
+    <span>{streaming ? labels.length ? `正在分析 · ${labels.slice(0, 2).join('、')}` : '正在分析' : labels.length ? `${labels.slice(0, 2).join('、')}相关分析` : '本轮请求分析'}</span>
+    {count > 1 ? <span className="text-[var(--text-tertiary)]">{count} 段</span> : null}
+  </div>
 })
 
 export const AgentMessageParts = memo(function AgentMessageParts({
   parts,
   researchGroups,
+  analysisGroups,
+  activeAnalysisGroupId,
   streaming,
   runActive,
   messageId,
@@ -1234,6 +1150,8 @@ export const AgentMessageParts = memo(function AgentMessageParts({
 }: {
   parts: AgentMessagePart[]
   researchGroups?: MessageResearchGroups
+  analysisGroups?: MessageAnalysisGroups
+  activeAnalysisGroupId?: string
   messageId?: string
   revealText?: string
   onTextRevealed?: (messageId: string, text: string) => void
@@ -1254,7 +1172,8 @@ export const AgentMessageParts = memo(function AgentMessageParts({
   /** 折叠态下本消息正文是否可收起（块内非最后一条）：run 结束后过程进展正文折进摘要行 */
   textCollapsible?: boolean
 }) {
-  const authorParts = useMemo(() => projectAgentAuthorParts(parts, streaming, { includePreparing: runActive }), [parts, streaming, runActive])
+  const authorParts = useMemo(() => parts.flatMap(part => part.type === 'reasoning' ? [part] : projectAgentAuthorParts([part], streaming, { includePreparing: runActive })), [parts, streaming, runActive])
+  const localAnalysisGroups = useMemo(() => analysisGroups ?? projectAnalysisGroups([{ id: messageId ?? blockId ?? '', role: 'assistant', runId: '', parts }]).get(messageId ?? blockId ?? ''), [analysisGroups, messageId, blockId, parts])
   const localResearchGroups = useMemo(() => researchGroups ?? projectResearchGroups([{ id: messageId ?? blockId ?? '', role: 'assistant', runId: '', parts }]).get(messageId ?? blockId ?? ''), [researchGroups, messageId, blockId, parts])
   const receivedText = useMemo(() => authorParts.flatMap(part => part.type === 'text' ? [part.text] : []).join(''), [authorParts])
   const revealed = useStreamingTextState(receivedText, revealText !== undefined, messageId ?? blockId ?? '', true)
@@ -1292,7 +1211,7 @@ export const AgentMessageParts = memo(function AgentMessageParts({
           }}
           className="flex w-full animate-fade-in items-center gap-1 text-left"
         >
-          {summaryTiming ? <ProcessDuration timing={summaryTiming} /> : <span className="text-[11px] text-[var(--text-secondary)]">查看 {summaryCount} 项操作</span>}
+          {summaryTiming ? <ProcessDuration timing={summaryTiming} active={runActive} /> : <span className="text-[11px] text-[var(--text-secondary)]">查看 {summaryCount} 项操作</span>}
           {collapsed ? (
             <ChevronRight className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
           ) : (
@@ -1302,7 +1221,6 @@ export const AgentMessageParts = memo(function AgentMessageParts({
         </button>
       ) : null}
       {authorParts.map((part, index) => {
-        const isLast = index === authorParts.length - 1
         if (part.type === 'text') {
           const identity = `${messageId ?? blockId ?? ''}:text:${textOrdinal++}`
           const content = part.text.slice(0, Math.max(0, revealed.text.length - textOffset))
@@ -1312,9 +1230,14 @@ export const AgentMessageParts = memo(function AgentMessageParts({
             : <div key={identity}>{text}</div>
         }
         const failed = part.type === 'tool-call' && (part.status === 'failed' || part.status === 'denied')
-        if (part.type === 'reasoning') return <AgentProcessRegion key={`reasoning:${index}`} open={!collapsed}>
-          <ReasoningPart part={part} streaming={streaming && isLast} />
-        </AgentProcessRegion>
+        if (part.type === 'reasoning') {
+          const originalIndex = parts.indexOf(part)
+          const group = localAnalysisGroups?.get(originalIndex)
+          if (group && (group.messageId !== (messageId ?? blockId ?? '') || group.firstIndex !== originalIndex)) return null
+          return <AgentProcessRegion key={group?.id ?? `analysis:${index}`} open={!collapsed}>
+            <ReasoningPart count={group?.count ?? 1} labels={group?.labels ?? []} streaming={group && activeAnalysisGroupId ? group.id === activeAnalysisGroupId : streaming && (group ? group.lastMessageId === (messageId ?? blockId ?? '') && group.lastIndex === parts.length - 1 : index === authorParts.length - 1)} />
+          </AgentProcessRegion>
+        }
         if (part.type === 'tool-call') {
           if (part.subagentCallId) return null
           const researchGroup = localResearchGroups?.get(part.callId)

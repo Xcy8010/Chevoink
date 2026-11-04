@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { expect, it } from 'vitest'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
-import { activateComposerDraft, promoteComposerDraft, updateComposerDraft } from '../../src/features/studio/agent/composer-drafts'
+import { activateComposerDraft, promoteComposerDraft, sameComposerDraftScope, updateComposerDraft } from '../../src/features/studio/agent/composer-drafts'
 import type { AgentAttachmentMeta } from '../../shared/contracts/agent-attachments'
 it('isolates same-novel windows and synchronously persists even the last keystroke', () => {
   activateComposerDraft('draft-test:u:n:a')
@@ -51,4 +51,11 @@ it('promotes goal drafts with uploaded attachment metadata into the created sess
   expect(useAgentStore.getState().composerDraft).toBe('写三章')
   expect(useAgentStore.getState().composerAttachments).toEqual([attachment])
   expect(useAgentStore.getState().goalMode).toBe(true)
+})
+
+it('treats lazy-session promotion as one send owner while keeping another window independent', () => {
+  activateComposerDraft('pending-local-identity')
+  promoteComposerDraft('pending-local-identity', 'pending-session-identity')
+  expect(sameComposerDraftScope('pending-local-identity', 'pending-session-identity')).toBe(true)
+  expect(sameComposerDraftScope('pending-local-identity', 'different-task')).toBe(false)
 })

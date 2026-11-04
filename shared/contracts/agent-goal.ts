@@ -17,7 +17,7 @@ export const agentGoalLimitsSchema = z.object({
   tokenLimit: positiveLimit.optional(),
   activeTimeLimitMs: positiveLimit.optional(),
 }).strict()
-export const agentGoalExecutionOptionsSchema = startAgentLoopRunSchema.omit({ sessionId: true, novelId: true, prompt: true })
+export const agentGoalExecutionOptionsSchema = startAgentLoopRunSchema.omit({ sessionId: true, novelId: true, prompt: true, clientRequestId: true })
 export const createAgentGoalSchema = z.object({
   requestId, objective: agentGoalObjectiveSchema, options: agentGoalExecutionOptionsSchema,
   limits: agentGoalLimitsSchema.optional(),

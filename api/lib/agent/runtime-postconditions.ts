@@ -1,3 +1,4 @@
+import { readNovelInitializationCompletion } from './novel-initialization.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
@@ -32,7 +33,10 @@ export async function evaluateTaskPostconditions(tx: RuntimeTx, root: { id: stri
   const spec = taskSpecSchema.parse(root.specSnapshot)
   const results: { code: string; severity: string; status: 'passed' | 'failed' | 'unverified'; evidence: unknown }[] = []
   for (const condition of spec.postconditions) {
-    if (condition.code === 'EARLIER_CONTENT_UNCHANGED') {
+    if (condition.code === 'NOVEL_METADATA_INITIALIZED') {
+      const result = await readNovelInitializationCompletion(tx, { userId: root.userId, novelId: root.novelId, runId: spec.runId! })
+      results.push({ ...condition, status: result.status === 'incomplete' ? 'failed' : 'passed', evidence: result })
+    } else if (condition.code === 'EARLIER_CONTENT_UNCHANGED') {
       const event = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `baseline:${root.id}` } })
       if (!event) {
         results.push({ ...condition, status: 'unverified', evidence: { reason: 'original_baseline_missing' } })

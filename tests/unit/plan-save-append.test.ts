@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { beforeEach, expect, it, vi } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
+import { novelPlanHash } from '../../api/lib/agent/novel-plan-contract.js'
 import { planSaveTool } from '../../api/lib/agent/tools/write-tools.js'
 import { planReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
@@ -12,6 +13,7 @@ const ctx = { userId: 'u', novelId: 'n', runId: 'r', signal: new AbortController
 const original = { id: 'p', title: '原计划', content: '前文'.repeat(200), metadata: { savedAsPlan: true }, updatedAt: new Date(0) }
 beforeEach(() => {
   ctx.planContentHashes = undefined
+  ctx.planSemanticHashes = undefined
   vi.clearAllMocks()
   vi.mocked(prisma.$transaction).mockImplementation((work: never) => (work as (tx: unknown) => Promise<unknown>)(prisma) as never)
   vi.mocked(prisma.$queryRaw).mockResolvedValue([{ id: 'n' }])
@@ -155,4 +157,30 @@ it('preserves an existing legacy plan when updating its explicit ID without a ty
   expect(result.outcome).not.toBe('failed')
   expect(prisma.agentArtifact.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ metadata: original.metadata }) }))
   expect(prisma.agentArtifact.create).not.toHaveBeenCalled()
+})
+
+it('appends consecutive typed sections using the server-observed semantic version without asking the model for a second hash', async () => {
+  ctx.planContentHashes = new Map(); ctx.planSemanticHashes = new Map()
+  const typed = { ...original, metadata: { savedAsPlan: true, planKind: 'outline' } }
+  vi.mocked(prisma.agentArtifact.findFirst).mockImplementation(async () => typed as never)
+  vi.mocked(prisma.agentArtifact.updateMany).mockImplementation(async ({ data }) => { Object.assign(typed, data); return { count: 1 } })
+  await planReadTool.execute(ctx, { planId: 'p' })
+  const first = await planSaveTool.execute(ctx, { title: typed.title, content: '第一份新增小节', planId: 'p', mode: 'append' })
+  expect(first.outcome).not.toBe('failed')
+  expect(ctx.planSemanticHashes.get('p')).toBe(novelPlanHash(typed))
+  const second = await planSaveTool.execute(ctx, { title: typed.title, content: '第二份新增小节', planId: 'p', mode: 'append' })
+  expect(second.outcome).not.toBe('failed')
+  expect(typed.content).toContain('第一份新增小节\n\n第二份新增小节')
+  expect(prisma.agentArtifact.updateMany).toHaveBeenCalledTimes(2)
+})
+it.each(['explicit-stale', 'metadata-only-concurrent'] as const)('never replaces an explicit stale semantic hash or ignores changed links: %s', async scenario => {
+  ctx.planContentHashes = new Map(); ctx.planSemanticHashes = new Map()
+  const typed = { ...original, metadata: { savedAsPlan: true, planKind: 'outline' } }
+  vi.mocked(prisma.agentArtifact.findFirst).mockResolvedValue(typed as never)
+  await planReadTool.execute(ctx, { planId: 'p' })
+  if (scenario === 'metadata-only-concurrent') vi.mocked(prisma.agentArtifact.findFirst).mockResolvedValue({ ...typed, metadata: { savedAsPlan: true, planKind: 'detail', target: { kind: 'future', targetOrderIndex: 1 } } } as never)
+  const operation = planSaveTool.execute(ctx, { title: typed.title, content: '新增小节', planId: 'p', mode: 'append',
+    ...(scenario === 'explicit-stale' ? { expectedPlanHash: 'a'.repeat(64) } : {}) })
+  await expect(operation).rejects.toMatchObject({ code: 'PLAN_REVISION_CONFLICT' })
+  expect(prisma.agentArtifact.updateMany).not.toHaveBeenCalled()
 })

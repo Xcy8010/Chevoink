@@ -1,3 +1,9 @@
+import { readOriginalTaskRequest } from '../original-request.js'
+import { taskSpecSchema } from '../../../../shared/contracts/task-spec-contracts.js'
+import { writingVolumeBoundarySchema } from '../../../../shared/contracts/writing-volume-contracts.js'
+import { createWritingTailVolume } from '../writing-volume.js'
+import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
+import { prisma } from '../../prisma.js'
 import type { Prisma } from '@prisma/client'
 import { readSemanticStructureHash } from '../semantic-progress.js'
 import type { ToolContext } from './types.js'
@@ -71,15 +77,24 @@ export const volumeListTool = defineTool({
 export const volumeCreateTool = defineTool({
   name: 'volume_create',
   title: '新建卷',
-  description: '为当前作品新建一卷，可指定插入位置。标题与显示序号分离，移动卷不会改写标题。',
+  description: '为当前作品显式新建一卷，取得真实卷编号后再创建章节或按原授权迁入章节。普通结构任务可指定插入位置；仅写下一章的尾卷任务必须提供已准备的同一收束证据，只能创建原目标的新尾卷，不能顺带移动旧章。',
   parameters: z.object({
     title: z.string().min(1).max(128),
     summary: z.string().optional(),
     position: z.number().int().positive().optional(),
+    targetOrderIndex: z.number().int().positive().optional(),
+    boundary: writingVolumeBoundarySchema.optional(),
   }),
-  permission: STRUCTURE_PERMISSION,
+  permission: { ...STRUCTURE_PERMISSION, plan: 'allow' },
   readOnly: false,
   async execute(ctx, args): Promise<ToolResult> {
+    if (ctx.mode === 'plan') {
+      const original = await readOriginalTaskRequest(ctx.transaction ?? prisma, ctx)
+      const spec = taskSpecSchema.safeParse(original.spec).data
+      if (spec?.scope.volumeCreationProtocol !== 1 || spec.scope.authorEffects?.structure !== true) {
+        throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原规划任务未授权创建卷，目录未改变。')
+      }
+    }
     if (ctx.durableCreate) {
       const captured = { ...ctx, toolAuthority: new Map(ctx.toolAuthority), durableCreate: { ...ctx.durableCreate, lease: { ...ctx.durableCreate.lease }, cursor: { ...ctx.durableCreate.cursor } } }
       const normalize = (raw: unknown) => {
@@ -89,7 +104,16 @@ export const volumeCreateTool = defineTool({
       const effective = volumeCreateTool.parameters.parse(normalize(args))
       return executeDurableCreate(captured, effective, normalize, tx => volumeCreateTool.execute({ ...captured, durableCreate: undefined, transaction: tx }, effective), 'volume_create')
     }
-    const { value: volume, semanticTransition } = await withStructureProgress(ctx, tx => createVolumeData(ctx.userId, ctx.novelId, args, tx))
+    const tailCreate = async (tx: Prisma.TransactionClient) => {
+      await assertAgentManuscriptCurrent(tx, ctx)
+      const beforeHash = await readSemanticStructureHash(tx, ctx.novelId)
+      if (args.position !== undefined || !args.summary?.trim() || !args.boundary || args.targetOrderIndex === undefined) throw new DataAccessError(400, 'INVALID_ARGUMENTS', '新尾卷需要原目标章节序号、简介及已准备的收束证据，不能指定其他插入位置。')
+      const value = await createWritingTailVolume(tx, ctx, args.targetOrderIndex, { title: args.title, summary: args.summary, boundary: args.boundary })
+      return { value, semanticTransition: { targetId: ctx.novelId, beforeHash, afterHash: await readSemanticStructureHash(tx, ctx.novelId) } }
+    }
+    const { value: volume, semanticTransition } = args.boundary || args.targetOrderIndex !== undefined
+      ? ctx.transaction ? await tailCreate(ctx.transaction) : await prisma.$transaction(tailCreate)
+      : await withStructureProgress(ctx, tx => createVolumeData(ctx.userId, ctx.novelId, args, tx))
     return {
       output: `已创建第 ${volume.orderIndex} 卷《${volume.title}》，volumeId=${volume.id}。`,
       summary: `新建卷《${volume.title}》`,

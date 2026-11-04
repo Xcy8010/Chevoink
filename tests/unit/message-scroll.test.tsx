@@ -60,3 +60,20 @@ it('ignores hidden panels and removes navigation listeners on unmount', () => {
   window.dispatchEvent(new CustomEvent('chevoink:agent-conversation-navigate', { detail: { messageId: 'one' } }))
   expect(query).not.toHaveBeenCalled()
 })
+
+
+it('fences an already queued scroll frame after a task scope changes', () => {
+  const frames: FrameRequestCallback[] = []
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation(next => { frames.push(next); return frames.length })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {})
+  const { result, rerender } = renderHook(({ scope }) => useMessageScroll({ scopeKey: scope, messages: [], pendingApproval: null, pendingQuestion: null, conversationLoading: false, collapsed: false }), { initialProps: { scope: 'a' } })
+  const node = document.createElement('div')
+  Object.defineProperties(node, { clientHeight: { value: 200 }, scrollHeight: { value: 1000 } })
+  result.current.scrollRef.current = node
+  rerender({ scope: 'a' })
+  const oldFrame = frames.at(-1)!
+  rerender({ scope: 'b' })
+  node.scrollTop = 123
+  act(() => oldFrame(0))
+  expect(node.scrollTop).toBe(123)
+})

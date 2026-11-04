@@ -3743,6 +3743,7 @@ export default function StudioWorkspace() {
       activeNovelId,
       currentTaskWindow?.customNamed ? currentTaskWindow.title : undefined,
     )
+    for (const key of ['workspace-navigation', 'workspace-sidebar']) queryClient.setQueryData<{ items: AgentSession[] }>(['agent', 'sessions', key], current => ({ items: [createdSession, ...(current?.items ?? []).filter(session => session.id !== createdSession.id)] }))
     // 未命名空白作品一旦产生会话就属于用户真实内容；立即刷新全局导航会话，
     // 避免紧接着切换/新建作品时仍按“无会话引导作品”将它过滤掉。
     void queryClient.invalidateQueries({ queryKey: ['agent', 'sessions'] })
@@ -4034,6 +4035,7 @@ export default function StudioWorkspace() {
             {mobileView === 'chapters' ? (
               <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-2">
                 <ChapterSidebar
+                  taskScope={taskUiScope}
                   embedded
                   chapters={chapters}
                   volumes={volumes}
@@ -4256,6 +4258,7 @@ export default function StudioWorkspace() {
                   tab={workInspectorTab}
                   onTabChange={setWorkInspectorTab}
                   workTree={<ChapterSidebar
+                  taskScope={taskUiScope}
                     embedded chapters={chapters} volumes={volumes} savedPlans={savedPlanFiles}
                     selectedChapterId={selectedChapterId} selectedTreeItemId={selectedTreeItemId}
                     catalogPreview={catalogPreview} novelWordCountLabel={wordCountLabel}
@@ -4339,6 +4342,7 @@ export default function StudioWorkspace() {
                     setIdeTreeOpen(true)
                   }}
                   panel={ideSidebarTab === 'work' ? <ChapterSidebar
+                  taskScope={taskUiScope}
                     embedded
                     chapters={chapters}
                     volumes={volumes}

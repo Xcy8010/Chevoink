@@ -57,7 +57,7 @@ export async function executeDurableMetadata(ctx: ToolContext, tool: AgentTool, 
       observedState: { kind, id: target.id, hash: savedHash } } }).value
     })
   })().catch(async error => {
-    if (!(error instanceof DataAccessError) || !['COVER_ASSET_NOT_FOUND', 'COVER_ATTACHMENT_SCOPE', 'COVER_ATTACHMENT_SIZE', 'COVER_ATTACHMENT_INVALID', 'NOVEL_NOT_FOUND', 'INVALID_ARGUMENTS', 'METADATA_BASELINE_REQUIRED', 'METADATA_WRITE_REJECTED', 'READER_PROMISE_NOT_FOUND', 'PAYOFF_CHAPTER_REQUIRED'].includes(error.code)) throw error
+    if (!(error instanceof DataAccessError) || !['NOVEL_DIRECTION_REQUIRED', 'NOVEL_SETUP_AUTHORITY_REQUIRED', 'COVER_ASSET_NOT_FOUND', 'COVER_ATTACHMENT_SCOPE', 'COVER_ATTACHMENT_SIZE', 'COVER_ATTACHMENT_INVALID', 'NOVEL_NOT_FOUND', 'INVALID_ARGUMENTS', 'METADATA_BASELINE_REQUIRED', 'METADATA_WRITE_REJECTED', 'READER_PROMISE_NOT_FOUND', 'PAYOFF_CHAPTER_REQUIRED'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code, output: error.message, summary: '作品设置未修改' })
   })
   await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
