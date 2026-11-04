@@ -3,6 +3,7 @@ import { createAgentAuthorTextStream, projectAgentAuthorParts, projectAgentAutho
 import { getAgentToolPresentation } from '../../../../shared/agent-tool-presentation.js'
 import { advanceRunTiming, settleRunTiming, timestamp } from '../../../../shared/agent-timing.js'
 import { qualityAppliedBodyChange } from '../../../../shared/agent-applied-body-change.js'
+import { useOutgoingMessages } from './outgoing-messages'
 
 import type {
   AgentAttachmentMeta,
@@ -1119,6 +1120,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // A late stream from another run cannot change the current message,
       // cursor or draft lifecycle, including preparation-end cleanup.
       if (event.runId !== state.runId && ['run.started', 'message.start', 'text.delta', 'text.final', 'reasoning.delta', 'tool.call', 'tool.result', 'tool.delta', 'tool.deferred', 'tool.preparation.end', 'step.finish', 'run.paused', 'run.finished', 'error'].includes(event.type)) return {}
+
+      // A fresh local admission may observe its actual first start at any seq.
+      // Resume/history snapshots cannot establish the original submit interval.
+      if (event.type === 'run.started' && !event.authorContinue && state.motionAfterSeq === 0
+        && !state.messages.some(message => (message.runTiming?.sourceRunId ?? message.runId) === event.runId && message.runTiming)) {
+        useOutgoingMessages.getState().observeOriginalStart(event.runId, event.ts)
+      }
 
       const timingEvent = ['run.started', 'run.paused', 'run.finished'].includes(event.type) || event.type === 'error' && !event.recoverable
       const timedMessages = timingEvent ? state.messages.map(message => (message.runTiming?.sourceRunId ?? message.runId) === event.runId

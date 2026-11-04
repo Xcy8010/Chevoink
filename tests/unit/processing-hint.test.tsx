@@ -15,7 +15,7 @@ function expectActiveAnalysis(container: HTMLElement) {
   expect(rows).toHaveLength(1)
   expect(rows[0].getAttribute('data-reasoning-running')).toBe('true')
   expect(rows[0].querySelector('[class~="motion-safe:animate-pulse"]')).toBeTruthy()
-  expect(rows[0].textContent).toBe('正在分析')
+  expect(rows[0].querySelector('button')?.textContent).toMatch(/^正在分析…/)
 }
 
 function LiveParts() {
@@ -32,7 +32,7 @@ it('keeps local reasoning active after finalized prose, then hands off to one an
   const streaming = () => isAssistantMessageStreaming(message, 'r', 'm', true, ['m'])
   const view = render(<AgentMessageParts parts={message.parts} streaming={streaming()} runActive />)
   expectActiveAnalysis(view.container)
-  expect(view.container.textContent).not.toContain('接着核对时间与地点。')
+  expect(view.container.textContent).toContain('正在分析… · 接着核对时间与地点。')
   message.parts.push({ type: 'tool-call', callId: 'write', toolName: 'chapter_write', title: '撰写本章', status: 'running', preparing: true, args: null })
   view.rerender(<AgentMessageParts parts={message.parts.slice()} streaming={streaming()} runActive />)
   expect(view.container.querySelector('[data-reasoning-running]')).toBeNull()
@@ -132,7 +132,7 @@ it.each(['text.delta', 'reasoning.delta'] as const)('hands off immediately to re
       expect(view.container.textContent).not.toContain(`第${seq}处调整让人物的选择更清楚。`)
     } else {
       expectActiveAnalysis(view.container)
-      expect(view.container.textContent).not.toContain(`第${seq}处`)
+      expect(view.container.textContent).toContain(`正在分析… · 第${seq}处`)
       expect(vi.getTimerCount()).toBe(1)
     }
     expect(view.container.textContent).not.toContain('正在处理...')
@@ -140,7 +140,7 @@ it.each(['text.delta', 'reasoning.delta'] as const)('hands off immediately to re
     if (type === 'text.delta') expect(view.container.textContent).toContain(`第${seq}处调整让人物的选择更清楚。`)
     else {
       expectActiveAnalysis(view.container)
-      expect(view.container.textContent).not.toMatch(/第[2-5]处调整/)
+      expect(view.container.textContent).toContain(`第${seq}处调整让人物的选择更清楚。`)
     }
     expect(useAgentStore.getState().textRevealTargets).toEqual({})
     expect(vi.getTimerCount()).toBe(1)
@@ -157,13 +157,13 @@ it.each(['text.delta', 'reasoning.delta'] as const)('hands off immediately to re
     expect(view.container.textContent).not.toContain('新的可见输出')
   } else {
     expectActiveAnalysis(view.container)
-    expect(view.container.textContent).not.toContain('新的可见输出')
+    expect(view.container.textContent).toContain('正在分析… · 新的可见输出')
   }
   act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS - 17))
   if (type === 'text.delta') expect(view.container.textContent).toContain('新的可见输出')
   else {
     expectActiveAnalysis(view.container)
-    expect(view.container.textContent).not.toContain('新的可见输出')
+    expect(view.container.textContent).toContain('正在分析… · 新的可见输出')
   }
   expect(screen.queryByRole('status')).toBeNull()
   expect(vi.getTimerCount()).toBe(1)

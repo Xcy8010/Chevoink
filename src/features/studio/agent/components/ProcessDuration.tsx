@@ -23,8 +23,14 @@ export function ProcessDuration({ timing, active = false }: { timing: AgentRunTi
   const elapsed = runElapsedMs(timing, Date.now())
   const live = active || timing.status === 'running'
   const seconds = elapsed === null ? live ? 0 : null : Math.floor(Math.max(0, elapsed) / 1000)
+  const units = seconds === null ? [] : [
+    ...(seconds >= 3600 ? [{ value: Math.floor(seconds / 3600), label: '小时' }] : []),
+    ...(seconds >= 60 ? [{ value: Math.floor(seconds / 60) % 60, label: '分钟' }] : []),
+    { value: seconds % 60, label: '秒' },
+  ]
+  const durationLabel = units.map(unit => `${unit.value} ${unit.label}`).join(' ')
   return <span className="inline-flex shrink-0 items-baseline whitespace-nowrap text-[11px] tabular-nums text-[var(--text-secondary)]" data-process-duration>
     <span>{timing.status === 'paused' ? '已暂停 · ' : ''}{live ? '已处理 ' : '用时 '}</span>
-    {seconds === null ? <span>未知</span> : <span aria-label={`${seconds} 秒`}><span className="inline-block w-[6ch] text-right tabular-nums">{seconds}</span>{' '}秒</span>}
+    {seconds === null ? <span>未知</span> : <span aria-label={durationLabel} className="inline-flex items-baseline">{units.map((unit, index) => <span key={unit.label}>{index > 0 ? ' ' : null}<span className="inline-block min-w-[2ch] text-right tabular-nums">{unit.value}</span>{' '}{unit.label}</span>)}</span>}
   </span>
 }

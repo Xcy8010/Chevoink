@@ -56,6 +56,11 @@ export const taskScopeSchema = z.object({
   novelInitializationProtocol: z.literal(1).optional(),
   novelInitializationTarget: z.enum(['empty', 'existing']).optional(),
   volumeCreationProtocol: z.literal(1).optional(),
+  /** A fresh author confirms only these named empty volumes from this exact conversation. */
+  volumeCreateIntent: z.object({ version: z.literal(1), requestHash: z.string().regex(/^[a-f0-9]{64}$/),
+    sourceMessageId: z.string().min(1), sourceHash: z.string().regex(/^[a-f0-9]{64}$/),
+    targets: z.array(z.object({ orderIndex: z.number().int().positive(), title: z.string().trim().min(1).max(128) }).strict()).min(1).max(20),
+  }).strict().optional(),
   /** Server-frozen tool relevance; absent historical tasks retain their catalog. */
   capabilityCatalog: z.object({ version: z.literal(1), requestHash: z.string().regex(/^[a-f0-9]{64}$/),
     kind: z.enum(['full', 'writing', 'research', 'conversation']),

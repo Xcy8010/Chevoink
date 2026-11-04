@@ -47,3 +47,21 @@ it('only fresh explicit directory creation receives planning authority, without 
   expect(restrictToolsToTask([chapterCreateTool], fresh)).toEqual([])
   expect(volumeMoveTool.permission.plan).toBe('deny')
 })
+
+it.each(['新建一个空卷', '给当前作品新增一卷', '帮我加一个新卷', '增加第二卷', '添加第二卷', '帮我加上第二卷'])('exposes actual volume creation for a standalone empty-volume request: %s', prompt => {
+  const task = buildTaskSpec({ runId: 'r', novelId: 'n', prompt, mode: 'build', authorWritingProtocol: 2, volumeCreationProtocol: 1 })
+  expect(task.intent).toBe('structure')
+  expect(task.scope.authorEffects).toMatchObject({ manuscript: false, structure: true })
+  const catalog = freezeTaskCapabilities(task, { prompt }, ['volume_create', 'chapter_create'])
+  expect(restrictToolsToTask([volumeCreateTool, chapterCreateTool], catalog, 'build').map(tool => tool.name)).toEqual(['volume_create'])
+})
+it.each(['不要帮我加一个新卷', '解释为什么没有第二卷', '只读检查卷目录，不要增加第二卷', '解释“帮我加一个新卷”的含义'])('does not turn refusal or discussion into empty-volume creation: %s', prompt => {
+  const task = buildTaskSpec({ runId: 'r', novelId: 'n', prompt, mode: 'build', authorWritingProtocol: 2, volumeCreationProtocol: 1 })
+  expect(restrictToolsToTask([volumeCreateTool, chapterCreateTool], task, 'build')).toEqual([])
+})
+
+it.each(['给第二卷增加摘要', '帮我添加第二卷的摘要'])('does not mistake an existing volume metadata edit for empty-volume creation: %s', prompt => {
+  const task = buildTaskSpec({ runId: 'r', novelId: 'n', prompt, authorWritingProtocol: 2, volumeCreationProtocol: 1 })
+  expect(task.scope.authorEffects?.manuscript).toBe(false)
+  expect(restrictToolsToTask([volumeCreateTool], task, 'build')).toEqual([])
+})

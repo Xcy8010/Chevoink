@@ -1,3 +1,5 @@
+import { createConfirmedVolume } from '../volume-create-intent.js'
+import { assertWritingStructureAuthority } from '../writing-scope.js'
 import { readOriginalTaskRequest } from '../original-request.js'
 import { taskSpecSchema } from '../../../../shared/contracts/task-spec-contracts.js'
 import { writingVolumeBoundarySchema } from '../../../../shared/contracts/writing-volume-contracts.js'
@@ -91,7 +93,7 @@ export const volumeCreateTool = defineTool({
     if (ctx.mode === 'plan') {
       const original = await readOriginalTaskRequest(ctx.transaction ?? prisma, ctx)
       const spec = taskSpecSchema.safeParse(original.spec).data
-      if (spec?.scope.volumeCreationProtocol !== 1 || spec.scope.authorEffects?.structure !== true) {
+      if (spec?.scope.volumeCreationProtocol !== 1 || spec.scope.authorEffects?.structure !== true && !spec.scope.volumeCreateIntent) {
         throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原规划任务未授权创建卷，目录未改变。')
       }
     }
@@ -111,12 +113,22 @@ export const volumeCreateTool = defineTool({
       const value = await createWritingTailVolume(tx, ctx, args.targetOrderIndex, { title: args.title, summary: args.summary, boundary: args.boundary })
       return { value, semanticTransition: { targetId: ctx.novelId, beforeHash, afterHash: await readSemanticStructureHash(tx, ctx.novelId) } }
     }
+    const ordinaryCreate = async (tx: Prisma.TransactionClient) => {
+      ctx.signal.throwIfAborted()
+      await assertAgentManuscriptCurrent(tx, ctx)
+      const beforeHash = await readSemanticStructureHash(tx, ctx.novelId)
+      const confirmed = await createConfirmedVolume(tx, ctx, args)
+      if (!confirmed) await assertWritingStructureAuthority(tx, ctx)
+      const value = confirmed ?? await createVolumeData(ctx.userId, ctx.novelId, args, tx)
+      ctx.signal.throwIfAborted()
+      return { value, semanticTransition: { targetId: ctx.novelId, beforeHash, afterHash: await readSemanticStructureHash(tx, ctx.novelId) } }
+    }
     const { value: volume, semanticTransition } = args.boundary || args.targetOrderIndex !== undefined
       ? ctx.transaction ? await tailCreate(ctx.transaction) : await prisma.$transaction(tailCreate)
-      : await withStructureProgress(ctx, tx => createVolumeData(ctx.userId, ctx.novelId, args, tx))
+      : ctx.transaction ? await ordinaryCreate(ctx.transaction) : await prisma.$transaction(ordinaryCreate)
     return {
-      output: `已创建第 ${volume.orderIndex} 卷《${volume.title}》，volumeId=${volume.id}。`,
-      summary: `新建卷《${volume.title}》`,
+      output: `${semanticTransition.beforeHash === semanticTransition.afterHash ? '已存在，复用' : '已创建'}第 ${volume.orderIndex} 卷《${volume.title}》，volumeId=${volume.id}。`,
+      summary: `${semanticTransition.beforeHash === semanticTransition.afterHash ? '复用' : '新建'}卷《${volume.title}》`,
       semanticTransition,
       observedState: { kind: 'volume', id: volume.id, revision: volume.revision },
     }

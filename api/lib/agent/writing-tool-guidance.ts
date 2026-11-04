@@ -1,5 +1,26 @@
 import type { TaskSpec } from '../../../shared/contracts/index.js'
 
+/** A task-owned observation is a cue to prepare, not a claim that all research
+ * is complete. Never change tools, budgets or the permission to verify a gap. */
+export function writingPreparationGuidance(spec: TaskSpec, observations: ReadonlySet<string>): string {
+  const writing = spec.scope.writing
+  if (spec.intent !== 'write' || ['conversation_only', 'proposal_only'].includes(spec.writingPacing ?? '')
+    || writing?.kind !== 'bounded' || writing.targets.length !== 1 || !writing.tailVolume
+    || writing.targets[0].chapterId !== null) return ''
+  const target = writing.targets[0]
+  const predecessor = `read-range:[${JSON.stringify(writing.tailVolume.previousChapterId)},`
+  if (![...observations].some(key => key.startsWith(predecessor))) return ''
+  for (const key of observations) {
+    if (!key.startsWith('workflow:')) continue
+    try {
+      const value: unknown = JSON.parse(key.slice('workflow:'.length))
+      if (Array.isArray(value) && value[1] === spec.scope.novelId && value[2] === spec.id && value[3] === target.orderIndex
+        && ['prepare', 'scenes'].includes(value[4])) return ''
+    } catch { /* Historical unrecognized evidence does not certify preparation. */ }
+  }
+  return `当前任务已取得绑定前章的正文片段，目标是交付第${target.orderIndex}章，不是整理全书。先核对尚缺的前章结尾、当前卷目标及对应提纲；事实足以决定承接与分卷后立即进入 story_compiler_prepare。该步骤会集中召回前章终态、故事记忆、近期首尾与已绑定提纲，不必提前逐章重建这些资料。之后依据返回的本章上下文进入场景与正文。只有影响当前章的具体事实缺口才继续定向读取，已取得的相同版本资料直接复用；遇到真正冲突仍核实，不能为赶进度跳过提纲、必要前文或质量检查。若本任务已有编译则复用，不重复准备。`
+}
+
 /** Guidance uses the server-frozen task, never the editor anchor or tool input.
  * It does not change admission, saved decisions, bindings or permissions. */
 export function frozenWritingToolGuidance(action: string, scope?: TaskSpec['scope']): string {

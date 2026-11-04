@@ -1,3 +1,4 @@
+import { isElidedVolumeAddition } from './volume-create-intent.js'
 import { isNovelDirectionSetup, isExplicitNovelMetadataRequest } from './task-spec.js'
 import type { AgentExecutionMode, AgentWorkspaceToolPermission, TaskSpec } from '../../../shared/contracts/index.js'
 import type { AgentTool } from './tools/types.js'
@@ -20,7 +21,7 @@ export function restrictToolsToTask(tools: AgentTool[], task: TaskSpec, mode?: A
     const setup = task.scope.novelInitializationProtocol === 1 && (isExplicitNovelMetadataRequest(task.goals.join('\n'))
       || isNovelDirectionSetup(task.goals.join('\n')) && task.scope.novelInitializationTarget !== 'existing')
     const allowed = ['novel_create', 'novel_update_meta'].includes(tool.name) ? setup
-      : tool.name === 'volume_create' ? task.scope.volumeCreationProtocol === 1 && task.scope.authorEffects?.structure === true : true
+      : tool.name === 'volume_create' ? task.scope.volumeCreationProtocol === 1 && (task.scope.authorEffects?.structure === true || Boolean(task.scope.volumeCreateIntent)) : true
     return allowed ? tool : { ...tool, permission: { ...tool.permission, plan: 'deny' as const } }
   })
   if (mode) tools = tools.filter(tool => tool.permission[mode] !== 'deny')
@@ -34,9 +35,13 @@ export function restrictToolsToTask(tools: AgentTool[], task: TaskSpec, mode?: A
     const names = new Set(task.scope.capabilityCatalog.names)
     tools = tools.filter(tool => names.has(tool.name))
   }
+  if (task.scope.volumeCreateIntent || task.scope.volumeCreationProtocol === 1 && isElidedVolumeAddition(task.goals.join('\n'))) {
+    tools = tools.filter(tool => tool.readOnly || ['ask_user', 'todo_write', 'agent_configure', 'model_assign', 'task_respond'].includes(tool.name)
+      || tool.name === 'volume_create' && Boolean(task.scope.volumeCreateIntent))
+  }
   if (task.scope.authorEffects) tools = tools.filter(tool =>
     (task.scope.authorEffects!.manuscript || !manuscriptEffects.has(tool.name))
-    && (task.scope.authorEffects!.structure || tool.name === 'volume_create' && task.scope.writing?.tailVolume?.creationProtocol === 2 || !structureEffects.has(tool.name)))
+    && (task.scope.authorEffects!.structure || tool.name === 'volume_create' && (task.scope.writing?.tailVolume?.creationProtocol === 2 || Boolean(task.scope.volumeCreateIntent)) || !structureEffects.has(tool.name)))
   if (task.researchNavigation?.version === 1 && task.intent === 'research_analysis') tools = tools.map(tool => tool.researchNavigation
     ? { ...tool, ...tool.researchNavigation } : tool)
   if (task.networkAccess === 'denied') tools = tools.filter(tool => tool.name !== 'web_search' && tool.name !== 'web_read')

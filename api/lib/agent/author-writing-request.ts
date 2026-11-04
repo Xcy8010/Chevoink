@@ -36,7 +36,8 @@ const chapterPattern = `(?:第\\s*)?${numberPattern}\\s*(?:章)?(?:\\s*${join}\\
 const numbered = new RegExp(`^(?:第\\s*)?(${numberPattern})\\s*章$`, 'u')
 const revisionWords = '修订|修正|修改|改写|重新写|重写|扩写|缩写|修复|纠正|纠错|润色|优化|调整|替换|改名|重命名|改为|改成|插入|删除|删掉|删去|精简|补充|增加|整改|补足|解决|不动|改(?!价|变|卷)'
 const preservationWords = '保持不变|保持原样|保留原样|保留|保持|不变'
-const writeWords = '继续\\s*(?:写|创作|起草)|续写|继续(?!\\s*(?:写|创作|起草))|创作|起草|补写|补完|补齐|写完|完成|写入|落稿|新建|创建|新增|建章|保存|存入|导出|生成|发布|制定|拟定|编写|撰写|设计|构思|策划|整理|写(?!作)'
+const volumeAddWords = `(?:添加|加上|加)(?=\\s*(?:第\\s*)?(?:${numberPattern})?\\s*(?:个|部)?\\s*(?:新|空)?卷)`
+const writeWords = `${volumeAddWords}|继续\\s*(?:写|创作|起草)|续写|继续(?!\\s*(?:写|创作|起草))|创作|起草|补写|补完|补齐|写完|完成|写入|落稿|新建|创建|新增|建章|保存|存入|导出|生成|发布|制定|拟定|编写|撰写|设计|构思|策划|整理|写(?!作)`
 const structureWords = '移动|重排|排序|拆分|合并'
 const reviewWords = '检查|审查|审阅|核对|核实|评估|分析|判断|检视|看看|复检|复核|校验'
 const readWords = '读取|阅读|读完|参考|参照|根据|对照|呼应|回顾|借鉴|比照|通读|引用|搜索|检索|查找|查阅|研究|读'
@@ -538,7 +539,7 @@ function interpretAuthorWritingRequest(prompt: string, directory?: AuthorWriting
           || /^(?:保存|存入|导出|save|export)$/iu.test(match[0]) && /到|为|成|\b(?:to|as)\b/iu.test(after))) kind = 'artifact'
       if (['write', 'revise'].includes(kind) && objectKinds.includes('structure')
         && !objectKinds.some(object => ['ordinal', 'relative', 'same_target', 'local', 'prose', 'book'].includes(object))) kind = 'structure'
-      if (/^(?:新增|新建|创建|删除)$/u.test(match[0]) && bound.some(targetIndex => {
+      if ((/^(?:新增|新建|创建|删除)$/u.test(match[0]) || kind !== 'artifact' && /^(?:增加|添加|加上|加)$/u.test(match[0])) && bound.some(targetIndex => {
         const target = targets[targetIndex]
         return target.range?.volume !== undefined && /卷\s*$/u.test(prompt.slice(target.span.start, target.span.end))
       })) kind = 'structure'

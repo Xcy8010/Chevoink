@@ -4,9 +4,16 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { projectOutgoingMessages, useOutgoingMessages } from '../../src/features/studio/agent/outgoing-messages'
 import { useAgentStore, readSessionMessagesCache } from '../../src/features/studio/agent/agentStore'
 import type { AgentUIMessage } from '../../shared/contracts/index'
+import { runElapsedMs } from '../../shared/agent-timing'
+import { projectBlockTimings, projectMessages } from '../../src/features/studio/agent/lib/message-projection'
 
-afterEach(() => { useOutgoingMessages.setState({ items: [] }); useAgentStore.getState().resetRun() })
+afterEach(() => { useOutgoingMessages.setState({ items: [], requestClocks: [] }); useAgentStore.getState().resetRun(); vi.useRealTimers() })
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (reason: Error) => void; const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail }); return { promise, resolve, reject } }
+function observeInitialStart(runId: string, id: string) {
+  useAgentStore.getState().beginRun(runId, '合成请求', 's', [], null, id)
+  // A real original start need not have sequence one.
+  useAgentStore.getState().applyEvent({ type: 'run.started', runId, seq: 7, ts: '2026-11-05T00:00:05Z', mode: 'build', title: '合成任务', agent: { type: 'novelist', title: '合成助手', model: 'speed' } })
+}
 function loadCallback(name: string, context: Record<string, unknown>) {
   const source = ts.createSourceFile('AgentPanel.tsx', readFileSync('src/features/studio/agent/components/AgentPanel.tsx', 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
   let callback = ''
@@ -30,6 +37,143 @@ function sending(overrides: Record<string, unknown> = {}) {
   const send = loadCallback('handleSend', context) as (prompt: string, attachments: [], freedom: string, quality: string, skills: []) => Promise<void>
   return { context, send: () => send('合成请求', [], 'balanced', 'premium', []) }
 }
+it('starts the local clock on send before configuration, ensureSession and HTTP, retaining its original task ownership', async () => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:00Z'))
+  const ready = deferred<void>(), ensured = deferred<string>(), admitted = deferred<{ runId: string; runGoalId: null }>()
+  const { context, send } = sending({ windowConfiguration: { ready: () => ready.promise, promote: vi.fn() }, ensureSession: () => ensured.promise, startAgentLoopRun: () => admitted.promise })
+  const request = send()
+  const elapsed = (sessionId: string | null = null) => {
+    const state = useOutgoingMessages.getState()
+    const row = projectOutgoingMessages([], state.items, 'u:a:local-task', 'a', sessionId, state.requestClocks)[0]
+    return runElapsedMs(row.requestTiming!, Date.now())
+  }
+  expect(elapsed()).toBe(0)
+  vi.advanceTimersByTime(2000); expect(elapsed()).toBe(2000)
+  ready.resolve(); await Promise.resolve(); await Promise.resolve()
+  vi.advanceTimersByTime(3000); expect(elapsed()).toBe(5000)
+  ensured.resolve('session-a'); await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+  vi.advanceTimersByTime(4000); expect(elapsed('session-a')).toBe(9000)
+  context.viewScope.current = 'u:b:other'; context.viewSession.current = 'session-b'
+  admitted.resolve({ runId: 'run-a', runGoalId: null }); await request
+  expect(context.connect).not.toHaveBeenCalled()
+  expect(projectOutgoingMessages([], useOutgoingMessages.getState().items, 'u:b:other', 'b', 'session-b', useOutgoingMessages.getState().requestClocks)).toEqual([])
+  expect(elapsed('session-a')).toBe(9000)
+})
+
+it('adds only the locally observed submit wait to server time, excludes paused gaps, freezes completion and leaves unknown history intact', () => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:00Z'))
+  const id = useOutgoingMessages.getState().add('scope', 'a', 's', '合成请求', [])
+  const clientRequestId = useOutgoingMessages.getState().items[0].clientRequestId
+  useOutgoingMessages.getState().update(id, { runId: 'A', status: 'sent' })
+  observeInitialStart('A', id)
+  const user = { ...row('user', 'A', 'user'), clientRequestId }
+  let assistant: AgentUIMessage = { ...row('assistant', 'A'), runTiming: { elapsedMs: 0, activeSince: '2026-11-05T00:00:05Z', status: 'running', lastSeq: 1 } }
+  const observe = () => {
+    useOutgoingMessages.getState().reconcile([user, assistant], 'scope', 'a', 's')
+    const state = useOutgoingMessages.getState()
+    return projectOutgoingMessages([user, assistant], state.items, 'scope', 'a', 's', state.requestClocks)[1].runTiming!
+  }
+  vi.setSystemTime(new Date('2026-11-05T00:00:10Z'))
+  expect(runElapsedMs(observe(), Date.now())).toBe(10000)
+  expect(useOutgoingMessages.getState().items).toEqual([])
+  assistant = { ...assistant, runTiming: { elapsedMs: 4000, activeSince: null, status: 'paused', lastSeq: 2 } }
+  expect(runElapsedMs(observe(), Date.now())).toBe(9000)
+  vi.advanceTimersByTime(20000)
+  expect(runElapsedMs(observe(), Date.now())).toBe(9000)
+  assistant = { ...assistant, runTiming: { elapsedMs: 4000, activeSince: new Date().toISOString(), status: 'running', lastSeq: 3 } }
+  vi.advanceTimersByTime(2000)
+  expect(runElapsedMs(observe(), Date.now())).toBe(11000)
+  assistant = { ...assistant, runTiming: { elapsedMs: 6000, activeSince: null, status: 'finished', lastSeq: 4 } }
+  const finished = observe()
+  vi.advanceTimersByTime(30000)
+  expect(runElapsedMs(finished, Date.now())).toBe(11000)
+  expect(runElapsedMs(observe(), Date.now())).toBe(11000)
+  expect(assistant.runTiming?.elapsedMs).toBe(6000)
+  const unknown: AgentUIMessage = { ...row('old', 'old-run'), runTiming: { elapsedMs: null, activeSince: null, status: 'unknown', lastSeq: 0 } }
+  expect(projectOutgoingMessages([unknown], [], 'scope', 'a', 's', useOutgoingMessages.getState().requestClocks)[0]).toBe(unknown)
+})
+
+it('keeps server activity time without guessing submit overhead when full history beats an unknown HTTP failure', async () => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:00Z'))
+  const failed = deferred<{ runId: string; runGoalId: null }>()
+  const { send } = sending({ sessionId: 'session-a', viewSession: { current: 'session-a' }, startAgentLoopRun: () => failed.promise })
+  const request = send(); await Promise.resolve(); await Promise.resolve()
+  const item = useOutgoingMessages.getState().items[0]
+  const history: AgentUIMessage[] = [{ ...row('user', 'A', 'user'), clientRequestId: item.clientRequestId }, {
+    ...row('answer', 'A'), completedAt: '2026-11-05T00:00:05Z', runTiming: { elapsedMs: 4000, activeSince: null, status: 'finished', lastSeq: 3 },
+  }]
+  useAgentStore.getState().restoreMessages(history, 'session-a')
+  vi.advanceTimersByTime(20000)
+  failed.reject(new Error('HTTP未知')); await expect(request).resolves.toBeUndefined()
+  const state = useOutgoingMessages.getState()
+  const projected = projectOutgoingMessages(history, state.items, 'u:a:local-task', 'a', 'session-a', state.requestClocks)
+  expect(projected).toHaveLength(2)
+  expect(state.items).toEqual([])
+  expect(runElapsedMs(projected[1].runTiming!, Date.now())).toBe(4000)
+})
+it('retains the submit interval once across an explicitly shared durable timing scope and its new execution run', () => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:00Z'))
+  const id = useOutgoingMessages.getState().add('scope', 'a', 's', '合成请求', [])
+  const clientRequestId = useOutgoingMessages.getState().items[0].clientRequestId
+  const user = { ...row('user', 'A', 'user'), clientRequestId }
+  const original: AgentUIMessage = { ...row('first', 'A'), runTiming: { scopeId: 'task', sourceRunId: 'A', elapsedMs: 0, activeSince: '2026-11-05T00:00:05Z', status: 'running', lastSeq: 1 } }
+  useOutgoingMessages.getState().update(id, { runId: 'A', status: 'sent' })
+  observeInitialStart('A', id)
+  useOutgoingMessages.getState().reconcile([user, original], 'scope', 'a', 's')
+  const paused: AgentUIMessage = { ...original, runTiming: { ...original.runTiming!, elapsedMs: 4000, activeSince: null, status: 'paused', lastSeq: 2 } }
+  const resumed: AgentUIMessage = { ...row('continued', 'B'), runTiming: { scopeId: 'task', sourceRunId: 'B', elapsedMs: 4000, activeSince: '2026-11-05T00:00:30Z', status: 'running', lastSeq: 3 } }
+  vi.setSystemTime(new Date('2026-11-05T00:00:32Z'))
+  useOutgoingMessages.getState().reconcile([user, paused, resumed], 'scope', 'a', 's')
+  const state = useOutgoingMessages.getState()
+  const projected = projectOutgoingMessages([user, paused, resumed], state.items, 'scope', 'a', 's', state.requestClocks)
+  const { blockInfoById } = projectMessages(projected)
+  const timing = projectBlockTimings(projected, blockInfoById, 'B').get('first')!
+  expect(runElapsedMs(timing, Date.now())).toBe(11000)
+  expect(projected[1].runTiming?.sourceRunId).toBe('B')
+  expect(projected[2].runTiming).toEqual(projected[1].runTiming)
+})
+it.each([
+  ['paused', 4000, null, 4000],
+  ['finished', 6000, null, 6000],
+  ['running', 4000, '2026-11-05T00:00:30Z', 6000],
+  ['running', 0, '2026-11-05T00:00:30Z', 2000],
+  ['finished', null, null, null],
+] as const)('does not infer original submit latency from a first-seen %s snapshot with %s prior activity', (status, elapsedMs, activeSince, expected) => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:00Z'))
+  const id = useOutgoingMessages.getState().add('scope', 'a', 's', '合成请求', [])
+  const clientRequestId = useOutgoingMessages.getState().items[0].clientRequestId
+  useOutgoingMessages.getState().update(id, { runId: 'A', status: 'sent' })
+  const history: AgentUIMessage[] = [{ ...row('user', 'A', 'user'), clientRequestId }, {
+    ...row('answer', 'A'), runTiming: { scopeId: 'task', sourceRunId: 'A', status, elapsedMs, activeSince, lastSeq: 12 },
+    ...(status === 'finished' ? { completedAt: '2026-11-05T00:00:32Z' } : {}),
+  }]
+  vi.setSystemTime(new Date('2026-11-05T00:00:32Z'))
+  useOutgoingMessages.getState().reconcile(history, 'scope', 'a', 's')
+  const state = useOutgoingMessages.getState()
+  expect(state.requestClocks[0].overheadMs).toBeNull()
+  const projected = projectOutgoingMessages(history, state.items, 'scope', 'a', 's', state.requestClocks)
+  expect(runElapsedMs(projected[1].runTiming!, Date.now())).toBe(expected)
+  expect(projected[1].runTiming?.status).toBe(status)
+})
+
+it('uses an observed original start for a late finished snapshot, but never treats a continued start as original', () => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:00Z'))
+  const id = useOutgoingMessages.getState().add('scope', 'a', 's', '合成请求', [])
+  const clientRequestId = useOutgoingMessages.getState().items[0].clientRequestId
+  useOutgoingMessages.getState().update(id, { runId: 'A', status: 'sent' })
+  observeInitialStart('A', id)
+  const history: AgentUIMessage[] = [{ ...row('user', 'A', 'user'), clientRequestId }, {
+    ...row('answer', 'A'), runTiming: { elapsedMs: 6000, activeSince: null, status: 'finished', lastSeq: 12 }, completedAt: '2026-11-05T00:00:32Z',
+  }]
+  useOutgoingMessages.getState().reconcile(history, 'scope', 'a', 's')
+  let state = useOutgoingMessages.getState()
+  expect(runElapsedMs(projectOutgoingMessages(history, state.items, 'scope', 'a', 's', state.requestClocks)[1].runTiming!, Date.parse('2026-11-05T00:00:32Z'))).toBe(11000)
+  useOutgoingMessages.setState({ requestClocks: state.requestClocks.map(clock => ({ ...clock, overheadMs: null })) })
+  useAgentStore.getState().resumeRun('A', 's', null, 10)
+  useAgentStore.getState().applyEvent({ type: 'run.started', runId: 'A', seq: 11, ts: '2026-11-05T00:00:30Z', mode: 'build', title: '继续合成任务', agent: { type: 'novelist', title: '合成助手', model: 'speed' } })
+  state = useOutgoingMessages.getState()
+  expect(state.requestClocks[0].overheadMs).toBeNull()
+})
 it('shows the outgoing request before configuration/session admission resolves and replaces it once on success', async () => {
   const ready = deferred<void>()
   const { context, send } = sending({ windowConfiguration: { ready: () => ready.promise, promote: vi.fn() } })

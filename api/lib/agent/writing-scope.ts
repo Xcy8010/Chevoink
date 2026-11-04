@@ -649,6 +649,9 @@ export async function bindWritingChapter(tx: Prisma.TransactionClient, subject: 
 
 export async function assertWritingStructureAuthority(tx: Prisma.TransactionClient, subject: Subject, effect: 'structure' | 'metadata' = 'structure') {
   const scope = await readWritingScope(tx, subject)
+  if (taskSpecSchema.safeParse(scope.spec).data?.scope.volumeCreateIntent) {
+    throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '本次只授权添加指定空卷，不能改已有卷、迁移章节或改变其他结构。')
+  }
   if (effect !== 'metadata' && taskSpecSchema.safeParse(scope.spec).data?.scope.authorEffects?.structure === false) {
     throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原请求仅授权指定章节正文，未授权拆分、合并或重排作品结构。')
   }

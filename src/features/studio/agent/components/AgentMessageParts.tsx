@@ -1120,11 +1120,24 @@ const SubAgentCallCard = memo(function SubAgentCallCard({
   )
 })
 
-const ReasoningPart = memo(function ReasoningPart({ streaming, count, labels }: { streaming: boolean; count: number; labels: string[] }) {
-  return <div className="flex h-8 items-center gap-2 text-[11px] text-[var(--text-secondary)]" data-agent-analysis="true" data-reasoning-running={streaming || undefined}>
-    <Brain className={cn('h-3.5 w-3.5 shrink-0', streaming && 'motion-safe:animate-pulse')} />
-    <span>{streaming ? labels.length ? `正在分析 · ${labels.slice(0, 2).join('、')}` : '正在分析' : labels.length ? `${labels.slice(0, 2).join('、')}相关分析` : '本轮请求分析'}</span>
-    {count > 1 ? <span className="text-[var(--text-tertiary)]">{count} 段</span> : null}
+const ReasoningPart = memo(function ReasoningPart({ text, streaming, count, actions }: { text: string; streaming: boolean; count: number; actions: string[] }) {
+  const [expanded, setExpanded] = useState(false)
+  const contentId = useId()
+  const sentences = text.split(/(?<=[。！？.!?])\s*|\n+/).map(line => line.trim()).filter(line => /[\p{L}\p{N}]/u.test(line))
+  // Extract a real later judgment, without rewriting an intention as success.
+  const conclusion = [...sentences].reverse().find(sentence => !/^(?:先|首先|接下来|下一步|然后|再|需要|准备|计划|打算|调用|工具参数|调用参数|我(?:们)?(?:会|将|先|需要|准备|打算|要)|(?:I|We) (?:will|need|should|plan|want)\b|(?:call|invoke|arguments)\b)/i.test(sentence) && !/[？?]$/.test(sentence))
+  const preview = (streaming ? sentences.at(-1) : conclusion)?.replace(/\s+/g, ' ').slice(0, 42)
+  const title = streaming ? `正在分析…${preview ? ` · ${preview}` : ''}`
+    : preview ? `分析：${preview}` : actions.length ? `分析记录 · ${actions.at(-1)}` : '分析记录'
+  return <div className="text-[11px] text-[var(--text-secondary)]" data-agent-analysis="true" data-reasoning-running={streaming || undefined}>
+    <button type="button" aria-label="思考过程" aria-expanded={expanded} aria-controls={contentId} disabled={!text}
+      onClick={() => setExpanded(value => !value)} className="flex min-h-8 max-w-full items-center gap-2 text-left">
+      <Brain className={cn('h-3.5 w-3.5 shrink-0', streaming && 'motion-safe:animate-pulse')} />
+      <span className="min-w-0 truncate">{title}</span>
+      {count > 1 ? <span className="shrink-0 text-[var(--text-tertiary)]">{count} 段</span> : null}
+      {text ? expanded ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" /> : null}
+    </button>
+    {expanded && text ? <div id={contentId} className="max-h-44 overflow-y-auto whitespace-pre-wrap break-words border-l border-[var(--border-subtle)] py-1 pl-5 leading-6">{text}</div> : null}
   </div>
 })
 
@@ -1173,7 +1186,7 @@ export const AgentMessageParts = memo(function AgentMessageParts({
   textCollapsible?: boolean
 }) {
   const authorParts = useMemo(() => parts.flatMap(part => part.type === 'reasoning' ? [part] : projectAgentAuthorParts([part], streaming, { includePreparing: runActive })), [parts, streaming, runActive])
-  const localAnalysisGroups = useMemo(() => analysisGroups ?? projectAnalysisGroups([{ id: messageId ?? blockId ?? '', role: 'assistant', runId: '', parts }]).get(messageId ?? blockId ?? ''), [analysisGroups, messageId, blockId, parts])
+  const localAnalysisGroups = useMemo(() => analysisGroups ?? projectAnalysisGroups([{ id: messageId ?? blockId ?? '', role: 'assistant', runId: '', parts }], streaming ? messageId ?? blockId ?? '' : undefined).get(messageId ?? blockId ?? ''), [analysisGroups, messageId, blockId, parts, streaming])
   const localResearchGroups = useMemo(() => researchGroups ?? projectResearchGroups([{ id: messageId ?? blockId ?? '', role: 'assistant', runId: '', parts }]).get(messageId ?? blockId ?? ''), [researchGroups, messageId, blockId, parts])
   const receivedText = useMemo(() => authorParts.flatMap(part => part.type === 'text' ? [part.text] : []).join(''), [authorParts])
   const revealed = useStreamingTextState(receivedText, revealText !== undefined, messageId ?? blockId ?? '', true)
@@ -1235,7 +1248,7 @@ export const AgentMessageParts = memo(function AgentMessageParts({
           const group = localAnalysisGroups?.get(originalIndex)
           if (group && (group.messageId !== (messageId ?? blockId ?? '') || group.firstIndex !== originalIndex)) return null
           return <AgentProcessRegion key={group?.id ?? `analysis:${index}`} open={!collapsed}>
-            <ReasoningPart count={group?.count ?? 1} labels={group?.labels ?? []} streaming={group && activeAnalysisGroupId ? group.id === activeAnalysisGroupId : streaming && (group ? group.lastMessageId === (messageId ?? blockId ?? '') && group.lastIndex === parts.length - 1 : index === authorParts.length - 1)} />
+            <ReasoningPart text={group?.text ?? ''} count={group?.count ?? 1} actions={group?.actions ?? []} streaming={group && activeAnalysisGroupId ? group.id === activeAnalysisGroupId : streaming && (group ? group.lastMessageId === (messageId ?? blockId ?? '') && group.lastIndex === parts.length - 1 : index === authorParts.length - 1)} />
           </AgentProcessRegion>
         }
         if (part.type === 'tool-call') {

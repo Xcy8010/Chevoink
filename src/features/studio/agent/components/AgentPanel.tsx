@@ -72,6 +72,7 @@ import {
   type ContinueAgentLoopRunModel,
 } from '../agentApi'
 import { projectOutgoingMessages, useOutgoingMessages } from '../outgoing-messages'
+import { ProcessDuration } from './ProcessDuration'
 import { isRunActive, readSessionMessagesCache, useAgentStore, type ComposerReference } from '../agentStore'
 import { selectAgentActivityRunActive, selectAgentGoalView, selectAgentPanelPhase } from '../goal-selectors'
 import { useMessageBlockExpansion } from './use-message-block-expansion'
@@ -229,12 +230,15 @@ export function AgentPanel({
   const canonicalMessages = useAgentStore((state) => state.messages)
   const storeLoadedSessionId = useAgentStore((state) => state.loadedSessionId)
   const outgoing = useOutgoingMessages(state => state.items)
+  const requestClocks = useOutgoingMessages(state => state.requestClocks)
   const sendScope = voiceScopeKey ?? `${novelId}:${sessionId ?? 'new'}`
-  const messages = useMemo(() => projectOutgoingMessages(storeLoadedSessionId === sessionId ? canonicalMessages : [], outgoing, sendScope, novelId, sessionId), [canonicalMessages, outgoing, sendScope, novelId, sessionId, storeLoadedSessionId])
+  const messages = useMemo(() => projectOutgoingMessages(storeLoadedSessionId === sessionId ? canonicalMessages : [], outgoing, sendScope, novelId, sessionId, requestClocks), [canonicalMessages, outgoing, sendScope, novelId, sessionId, storeLoadedSessionId, requestClocks])
+  const lastUserRequest = [...messages].reverse().find(message => message.role === 'user')
+  const waitingRequest = lastUserRequest?.requestTiming && !messages.some(item => item.role === 'assistant' && item.runId === lastUserRequest.runId) ? lastUserRequest : undefined
   const hasOutgoing = messages.some(message => message.delivery)
   const deliveryErrorRef = useRef<{ clientRequestId: string; scope: string; sessionId: string | null; message: string } | null>(null)
   const { recentConversationText, blockInfoById, lastAssistantId } = useMemo(() => projectMessages(messages), [messages])
-  const analysisGroups = useMemo(() => projectAnalysisGroups(messages), [messages])
+  const analysisGroups = useMemo(() => projectAnalysisGroups(messages, isRunActive(phase) ? messages.at(-1)?.id : undefined), [messages, phase])
   const researchGroups = useMemo(() => projectResearchGroups(messages), [messages])
   // 正文已定稿的消息 id：定稿后不再画流式光标（等答题/审批/工具执行期间光标不应常闪）
   const finalizedTextIds = useAgentStore((state) => state.finalizedTextIds)
@@ -1101,7 +1105,7 @@ export function AgentPanel({
         const observedHistory = ensuredSessionId
           ? observedState.loadedSessionId === ensuredSessionId ? observedState.messages : readSessionMessagesCache(ensuredSessionId) ?? [] : []
         if (observedHistory.some(message => message.role === 'user' && message.clientRequestId === clientRequestId)) {
-          useOutgoingMessages.getState().remove(outgoingId)
+          useOutgoingMessages.getState().reconcile(observedHistory, sendScope, novelId, ensuredSessionId)
           if (viewScope.current === voiceScopeKey && viewSession.current === sessionId || viewSession.current === ensuredSessionId) {
             setActionNotice('请求已由服务端接纳。')
           }
@@ -1692,13 +1696,13 @@ export function AgentPanel({
                         .join('')}
                     </div>
                   </div>
-                  {message.delivery ? <div className="flex max-w-full items-center gap-2 text-xs text-[var(--text-secondary)]">
-                    <span role={message.delivery.status === 'failed' ? 'alert' : 'status'}>{message.delivery.status === 'sending' ? '正在发送…' : message.delivery.status === 'failed' ? `发送未确认：${message.delivery.error}` : '已发送，正在同步…'}</span>
-                    {message.delivery.status === 'failed' ? <button type="button" onClick={() => useOutgoingMessages.getState().remove(message.id)} className="shrink-0 underline">移除这条本地消息</button> : null}
-                  </div> : <UserMessageActions createdAt={message.createdAt} visible={touchActionsId === message.id} copied={copiedId === message.id} disabled={active}
+                  {message.delivery?.status === 'failed' ? <div className="flex max-w-full items-center gap-2 text-xs text-[var(--text-secondary)]">
+                    <span role="alert">发送未确认：{message.delivery.error}</span>
+                    <button type="button" onClick={() => useOutgoingMessages.getState().remove(message.id)} className="shrink-0 underline">移除这条本地消息</button>
+                  </div> : !message.delivery ? <UserMessageActions createdAt={message.createdAt} visible={touchActionsId === message.id} copied={copiedId === message.id} disabled={active}
                     onCopy={() => void handleCopyText(message.id, getMessageText(message.parts, message.role))}
                     onRollback={() => setConfirmAction({ kind: 'rollbackMessage', messageId: message.id })}
-                    onDelete={() => setConfirmAction({ kind: 'deleteMessage', messageId: message.id })} />}
+                    onDelete={() => setConfirmAction({ kind: 'deleteMessage', messageId: message.id })} /> : null}
                 </div>
                 )
               }
@@ -1791,6 +1795,7 @@ export function AgentPanel({
                 <span className="h-px flex-1 bg-[var(--border-subtle)]" />
               </div>
             ) : null}
+            {waitingRequest?.requestTiming ? <ProcessDuration timing={waitingRequest.requestTiming} /> : null}
             {activityRunActive ? <ProcessingHint visible={awaiting} /> : null}
             {pendingApproval ? (
               <AgentPermissionCard approval={pendingApproval} onResolve={handleResolveApproval} />

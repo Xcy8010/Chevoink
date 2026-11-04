@@ -115,6 +115,36 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     expect(restrictToolsToTask(getToolsForMode('build'), spec).some(tool => tool.name === 'task_respond')).toBe(false)
   }))
 
+  it('a fresh add-volumes confirmation in an old session freezes only named creates and executes the real durable create path', () => fixture(async f => {
+    await ready(f)
+    vi.mocked(flags.resolveAgent2FeatureFlags).mockReturnValue({ ...flags.resolveAgent2FeatureFlags(f.userId), volume: true })
+    const before = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
+    await prisma.agentMessage.create({ data: { runId: f.runId, sessionId: f.sessionId, role: 'assistant', parts: [{ type: 'text',
+      text: '请在目录里新增三个空卷，卷名是《第二卷 渡桥》《第三卷 灯塔》《第四卷 归港》。之后还可以挂细纲和核对卷序。' }] } })
+    const admitted = await startLoopRun(f.userId, { novelId: f.novelId, sessionId: f.sessionId, prompt: '你帮我加', mode: 'build' }, { humanOrigin: 'http' })
+    const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: admitted.runId } })
+    const spec = taskSpecSchema.parse(run.taskSpec)
+    expect(run.id).not.toBe(f.runId)
+    expect(spec.scope.authorEffects).toMatchObject({ manuscript: false, structure: false, artifact: false })
+    expect(spec.scope.volumeCreateIntent?.targets.map(target => target.title)).toEqual(['渡桥', '灯塔', '归港'])
+    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).taskSpec).toEqual(before.taskSpec)
+    const state = await initializePersistedLoopRun(f.userId, run.id)
+    expect(state.configuration.toolAuthority.find(tool => tool.name === 'volume_create')?.permission).toBe('allow')
+    expect(state.configuration.toolAuthority.some(tool => ['volume_update', 'volume_move', 'chapter_create', 'chapter_move', 'plan_save'].includes(tool.name))).toBe(false)
+    const { acquireRunLease } = await import('../../api/lib/agent/runtime-lease.js')
+    const { saveExecutionState } = await import('../../api/lib/agent/runtime-state.js')
+    const { executeDurableToolStep } = await import('../../api/lib/agent/runtime-tool-step.js')
+    const lease = await acquireRunLease({ userId: f.userId, runId: run.id, ownerId: 'named-volume-fixture', claimId: randomUUID() })
+    const current = await loadExecutionState(f.userId, run.id)
+    await saveExecutionState(lease, { expectedRevision: current.frame.revision, expectedHash: current.frame.snapshotHash,
+      snapshot: { ...current.frame.state, messages: [...current.frame.state.messages, { role: 'assistant', content: null, toolCalls: ['渡桥', '灯塔', '归港', '渡桥'].map((title, index) => ({ id: `create-${index}`, name: 'volume_create', arguments: JSON.stringify({ title }) })) }] } })
+    for (let index = 0; index < 4; index++) expect(await executeDurableToolStep(lease, new AbortController().signal)).toMatchObject({ kind: 'tool', result: { observedState: { kind: 'volume' } } })
+    expect(await prisma.volume.count({ where: { novelId: f.novelId } })).toBe(4)
+    expect((await prisma.volume.findMany({ where: { novelId: f.novelId }, orderBy: { orderIndex: 'asc' } })).slice(1).map(volume => volume.title)).toEqual(['渡桥', '灯塔', '归港'])
+    expect(await prisma.chapter.count({ where: { novelId: f.novelId } })).toBe(1)
+    expect(fetch).not.toHaveBeenCalled()
+  }))
+
   it('retains original HTTP bootstrap event identity after later goal activation binding', () => fixture(async f => {
     await ready(f)
     env.agentGoalEnabled = true

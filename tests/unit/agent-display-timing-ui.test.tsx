@@ -15,12 +15,12 @@ it('ticks from the real start, then freezes and releases the clock on terminatio
   const { rerender } = render(<ProcessDuration timing={timing} />)
   expect(document.querySelector('[data-process-duration]')?.textContent).toBe('已处理 5 秒')
   act(() => vi.advanceTimersByTime(60000))
-  expect(document.querySelector('[data-process-duration]')?.textContent).toBe('已处理 65 秒')
+  expect(document.querySelector('[data-process-duration]')?.textContent).toBe('已处理 1 分钟 5 秒')
   rerender(<ProcessDuration timing={{ ...timing, activeSince: null, elapsedMs: 65000, status: 'finished' }} />)
-  expect(document.querySelector('[data-process-duration]')?.textContent).toBe('用时 65 秒')
+  expect(document.querySelector('[data-process-duration]')?.textContent).toBe('用时 1 分钟 5 秒')
   expect(vi.getTimerCount()).toBe(0)
   act(() => vi.advanceTimersByTime(10000))
-  expect(document.querySelector('[data-process-duration]')?.textContent).toBe('用时 65 秒')
+  expect(document.querySelector('[data-process-duration]')?.textContent).toBe('用时 1 分钟 5 秒')
 })
 
 it('shares a single clock among current summaries and gives historical messages none', () => {
@@ -42,7 +42,7 @@ it('restores the same elapsed time after leaving and reentering a session', () =
   expect(document.querySelector('[data-process-duration]')?.textContent).toBe('已暂停 · 用时 10 秒')
   second.unmount()
   render(<ProcessDuration timing={timing} />)
-  expect(document.querySelector('[data-process-duration]')?.textContent).toBe('已处理 125 秒')
+  expect(document.querySelector('[data-process-duration]')?.textContent).toBe('已处理 2 分钟 5 秒')
 })
 
 it('shows unknown without ticking for incomplete historical evidence', () => {
@@ -63,7 +63,7 @@ it('retains the summary toggle, arrow and collapsed process content', () => {
   }
   const { container } = render(<Fixture />)
   const summary = screen.getByRole('button', { name: '查看 1 项操作' })
-  expect(summary.textContent).toBe('用时 152 秒')
+  expect(summary.textContent).toBe('用时 2 分钟 32 秒')
   expect(summary.getAttribute('aria-expanded')).toBe('false')
   expect(summary.querySelector('svg')).toBeTruthy()
   expect(container.querySelector('[data-agent-call-id="read"]')).toBeNull()
@@ -109,9 +109,35 @@ it('uses a zero initial UI slot only for an active unknown interval and preserve
   rerender(<ProcessDuration timing={{ ...timing, elapsedMs: 56000 }} />)
   expect(screen.getByLabelText('59 秒')).toBeTruthy()
   act(() => vi.advanceTimersByTime(1000))
-  expect(screen.getByLabelText('60 秒')).toBeTruthy()
+  expect(screen.getByLabelText('1 分钟 0 秒')).toBeTruthy()
   expect(container.querySelector('[data-process-duration]')!.className).toBe(widthClass)
   expect(container.querySelectorAll('.tabular-nums').length).toBeGreaterThan(1)
   rerender(<ProcessDuration timing={unknown} />)
   expect(screen.getByText('未知')).toBeTruthy()
+})
+
+it.each([
+  [8, '8 秒'], [59, '59 秒'], [60, '1 分钟 0 秒'], [66, '1 分钟 6 秒'],
+  [3599, '59 分钟 59 秒'], [3600, '1 小时 0 分钟 0 秒'], [3726, '1 小时 2 分钟 6 秒'],
+])('uses the same compact unit layout for running and finished %s seconds', (seconds, label) => {
+  const { container, rerender } = render(<ProcessDuration timing={{ elapsedMs: Number(seconds) * 1000, activeSince: new Date().toISOString(), status: 'running', lastSeq: 1 }} />)
+  expect(screen.getByLabelText(String(label))).toBeTruthy()
+  expect(container.textContent).toBe(`已处理 ${label}`)
+  expect(container.querySelector('[class*="6ch"]')).toBeNull()
+  const digits = container.querySelectorAll('[class*="2ch"]')
+  expect(digits.length).toBe(String(label).split(' ').length / 2)
+  for (const digit of digits) expect(digit.className).toContain('tabular-nums')
+  rerender(<ProcessDuration timing={{ elapsedMs: Number(seconds) * 1000, activeSince: null, status: 'finished', lastSeq: 2 }} />)
+  expect(screen.getByLabelText(String(label))).toBeTruthy()
+  expect(container.textContent).toBe(`用时 ${label}`)
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+it.each([[59000, '59 秒', '1 分钟 0 秒'], [3599000, '59 分钟 59 秒', '1 小时 0 分钟 0 秒']])('carries %s across unit boundaries without changing existing digit slots', (elapsedMs, before, after) => {
+  const { container } = render(<ProcessDuration timing={{ elapsedMs: Number(elapsedMs), activeSince: new Date().toISOString(), status: 'running', lastSeq: 1 }} />)
+  const secondsSlot = Array.from(container.querySelectorAll('[class*="2ch"]')).at(-1)!
+  expect(screen.getByLabelText(String(before))).toBeTruthy()
+  act(() => vi.advanceTimersByTime(1000))
+  expect(screen.getByLabelText(String(after))).toBeTruthy()
+  expect(container.querySelectorAll('[class*="2ch"]')[Number(elapsedMs) < 60000 ? 1 : 2]).toBe(secondsSlot)
 })

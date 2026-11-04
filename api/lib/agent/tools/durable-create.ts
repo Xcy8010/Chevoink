@@ -1,3 +1,4 @@
+import { readConfirmedVolumeTarget } from '../volume-create-intent.js'
 import { PLAN_FAILURE_CODES } from '../novel-plan-contract.js'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
@@ -36,6 +37,7 @@ export async function executeDurableCreate(ctx: ToolContext, args: { title: stri
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '创建目标不属于原任务。')
     if (!await tx.novel.findFirst({ where: { id: ctx.novelId, authorId: ctx.userId } })) return runtimeError('NOVEL_NOT_FOUND', '作品不存在或无权修改其卷章结构。')
+    if (action === 'volume_create' && ctx.writingScope?.volumeCreateIntent) await readConfirmedVolumeTarget(tx, ctx, args)
     const previous = await tx.agentOperation.findFirst({ where: { taskRootId: lease.taskRootId, action, status: 'succeeded',
       inputSnapshot: { path: ['input', 'args', 'title'], equals: args.title.trim() } }, include: { effectReceipt: true } })
     if (previous) {

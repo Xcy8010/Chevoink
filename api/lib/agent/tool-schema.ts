@@ -30,6 +30,11 @@ function toolPresentation(tool: Pick<AgentTool, 'name' | 'description'>, paramet
   if (tool.name === 'novel_update_meta' && scope?.novelInitializationProtocol === 1 && scope.novelInitializationTarget === 'empty') {
     return { description: `${tool.description} 完整初始化时一次提供title、summary与tags；缺字段不会保存任何内容。单项修改任务仍可只传所需字段。`, parameters }
   }
+  if (tool.name === 'volume_create' && scope?.volumeCreateIntent) {
+    const properties = parameters.properties as Record<string, unknown>
+    return { description: `只添加当前作者已承接的这些空卷：${scope.volumeCreateIntent.targets.map(target => `第${target.orderIndex}卷《${target.title}》`).join('、')}。保持原卷序，不修改已有卷、不写正文、不迁移章节。`,
+      parameters: { type: 'object', properties: { title: { ...(properties.title as object), enum: scope.volumeCreateIntent.targets.map(target => target.title) }, summary: properties.summary }, required: ['title'], additionalProperties: false } }
+  }
   const writing = scope?.writing
   const target = writing?.kind === 'bounded' && writing.targets.length === 1 ? writing.targets[0] : undefined
   const globalNewChapter = target?.chapterId === null && Number.isSafeInteger(target.orderIndex) && target.orderIndex > 0

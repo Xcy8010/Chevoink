@@ -562,6 +562,8 @@ export async function startLoopRunLocked(
       // assemble/pin a new configuration. Failure rolls back admission; old
       // contracts and durable continuation never refresh frozen resources.
       await syncBuiltinSkillCatalog(tx)
+      const volumeCreateIntent = options.humanOrigin === 'http' && !options.goal
+        ? await (await import('./volume-create-intent.js')).readVolumeCreateIntent(tx, { userId, novelId: session.novelId, sessionId: session.id, runId: created.id, prompt: input.prompt }) : undefined
       const fresh = buildTaskSpec({ runId: created.id, novelId: session.novelId, chapterId,
         prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1, localEditProtocol: 1, continuityEvidenceProtocol: 1,
         // A delayed first goal start retains its creation-time contract. The
@@ -570,7 +572,7 @@ export async function startLoopRunLocked(
         terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2,
         researchAdmission, researchNavigationAdmission: researchAdmission, networkAdmission, authorWritingProtocol: 2, novelInitializationProtocol: 1, novelInitializationTarget: manuscript.chapterCount === 0 && manuscript.wordCount === 0
           && (!manuscript.summary.trim() || !manuscript.displayTitle?.trim() && manuscript.summary === '先创建一部作品，再继续完善简介、章节和封面。')
-          && manuscript.tagNames.length === 0 ? 'empty' : 'existing', volumeCreationProtocol: 1, creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
+          && manuscript.tagNames.length === 0 ? 'empty' : 'existing', volumeCreationProtocol: 1, volumeCreateIntent, creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
       let frozen = fresh
       if (input.selection || fresh.scope.authorEffects?.manuscript) {
         // Preserve the original protected-body snapshot normally captured by

@@ -80,7 +80,7 @@ it('holds every streamed split before first render, then uses the same final/his
   }
 })
 
-it('shows analysis activity without private reasoning and preserves visible real failure and intent', () => {
+it('shows sanitized expandable thinking and preserves visible real failure and intent', () => {
   const tool: AgentMessagePart = { type: 'tool-call', callId: 'failure', toolName: 'future_unknown_tool', title: 'future_unknown_tool',
     status: 'failed', summary: 'HTTP Error P2002 at hidden/stack.ts:3', args: {
       chapterId: 'cmttleebg03h9wqox9lieracs', secretField: 'hidden-param', nested: { key: 'hidden-json' }, reason: '避免人物前后矛盾', content: manuscript,
@@ -88,7 +88,9 @@ it('shows analysis activity without private reasoning and preserves visible real
   const view = render(<AgentMessageParts parts={[...history.parts, tool]} streaming={false} runActive summaryExpanded />)
   expect(view.container.textContent).not.toContain('hidden English')
   expect(view.container.querySelector('.max-h-44')).toBeNull()
-  expect(view.container.textContent).not.toContain('先核对人物动机。')
+  expect(screen.getByRole('button', { name: '思考过程' }).textContent).toBe('分析记录')
+  fireEvent.click(screen.getByRole('button', { name: '思考过程' }))
+  expect(view.container.querySelector('.max-h-44')?.textContent).toContain('先核对人物动机。')
   expect(screen.getByText('推进创作')).toBeTruthy()
   expect(screen.getByText('本次操作未完成。请核对当前成果后重试，或调整要求。')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: '展开工具详情' }))
@@ -162,8 +164,8 @@ it('retains every real thinking split through final, reconnect and cache without
     expect(useAgentStore.getState().messages[0].parts[0]).toEqual({ type: 'reasoning', text: thinking })
     expect(getMessageText(useAgentStore.getState().messages[0].parts)).toBe('最终回复')
     const view = render(<AgentMessageParts parts={useAgentStore.getState().messages[0].parts} streaming={false} runActive={false} summaryExpanded />)
-    expect(screen.queryByText('再检查情节承接。')).toBeNull()
-    expect(view.container.textContent).not.toContain('再检查情节承接。')
+    fireEvent.click(screen.getByRole('button', { name: '思考过程' }))
+    expect(view.container.querySelector('.max-h-44')?.textContent).toContain('再检查情节承接。')
     expect(view.container.textContent).not.toMatch(/scene_task_build|compilationId|cmttle/)
     cleanup()
     useAgentStore.getState().resetRun()
@@ -183,14 +185,16 @@ it('does not reinterpret narrated text or asReasoning final as actual thinking',
   expect(getMessageText(useAgentStore.getState().messages[0].parts)).toBe('')
 })
 
-it('renders compact factual analysis activity for live and historical messages without raw reasoning', () => {
+it('renders actual thinking previews and expandable sanitized historical thought', () => {
   const view = render(<AgentMessageParts parts={[{ type: 'reasoning', text: '先核对人' }]} streaming runActive />)
-  expect(screen.getByText('正在分析')).toBeTruthy()
-  expect(view.container.textContent).not.toContain('先核对人')
+  expect(screen.getByText('正在分析… · 先核对人')).toBeTruthy()
+  expect(screen.getByRole('button', { name: '思考过程' }).getAttribute('aria-expanded')).toBe('false')
   expect(view.container.querySelector('.max-h-44')).toBeNull()
   view.rerender(<AgentMessageParts parts={[{ type: 'reasoning', text: '先核对人物动机。\n\n调用 chapter_write，chapterId=private-id。' }]} streaming={false} runActive={false} summaryExpanded />)
-  expect(screen.getByText('本轮请求分析')).toBeTruthy()
-  expect(view.container.textContent).not.toMatch(/人物动机|chapter_write|chapterId|private-id/)
+  expect(screen.getByText('分析记录')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '思考过程' }))
+  expect(view.container.querySelector('.max-h-44')?.textContent).toContain('先核对人物动机。')
+  expect(view.container.textContent).not.toMatch(/chapter_write|chapterId|private-id/)
 })
 
 

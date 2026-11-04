@@ -254,7 +254,7 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     const originalTask = taskSpecSchema.parse(current.originalSpec)
     const setup = originalTask.scope.novelInitializationProtocol === 1 && input.effectDomain === 'metadata' && ['novel_create', 'novel_update_meta'].includes(input.action)
       && (isExplicitNovelMetadataRequest(originalTask.goals.join('\n')) || isNovelDirectionSetup(originalTask.goals.join('\n')))
-    const explicitPlanVolume = originalTask.scope.volumeCreationProtocol === 1 && input.effectDomain === 'structure' && input.action === 'volume_create' && originalTask.scope.authorEffects?.structure === true
+    const explicitPlanVolume = originalTask.scope.volumeCreationProtocol === 1 && input.effectDomain === 'structure' && input.action === 'volume_create' && (originalTask.scope.authorEffects?.structure === true || Boolean(originalTask.scope.volumeCreateIntent))
     const plan = input.effectDomain === 'plan'
     const configuration = input.effectDomain === 'configuration'
     if (configuration && (!['agent_configure', 'model_assign'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '配置能力只能更新当前任务的执行选项。')

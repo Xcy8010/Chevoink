@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { DataAccessError } from '../prisma.js'
+import { isElidedVolumeAddition } from './volume-create-intent.js'
 import { localEditGuidance } from './local-edit-scope.js'
 import { lexAuthorWritingRequest, parseAuthorWritingRequest } from './author-writing-request.js'
 import { requiresWritingConfirmation } from './writing-pacing-policy.js'
@@ -284,6 +285,7 @@ export function buildTaskSpec(input: {
   novelInitializationProtocol?: 1
   novelInitializationTarget?: 'empty' | 'existing'
   volumeCreationProtocol?: 1
+  volumeCreateIntent?: TaskSpec['scope']['volumeCreateIntent']
   creativeFreedom?: CreativeFreedom
   qualityMode?: StoryCompilerMode
 }): TaskSpec {
@@ -313,7 +315,7 @@ export function buildTaskSpec(input: {
       : structureRequested || artifactRequested ? undefined : legacyPacing === 'conversation_only' ? legacyPacing : undefined
   const inferredIntent = freshResearch ? 'research_analysis' : writingPacing === 'proposal_only' ? 'plan'
     : writingPacing === 'explicit_writing' && boundedSceneRequest(input.prompt) ? 'write' : classifyIntent(input.prompt, input.researchAdmission === 1)
-  const intent = !writingRequest ? inferredIntent : freshResearch ? 'research_analysis'
+  const intent = !writingRequest ? inferredIntent : input.volumeCreateIntent ? 'structure' : freshResearch ? 'research_analysis'
     : bookProposal ? 'plan' : manuscriptRequested ? globalTransform ? 'global_transform' : writingRequest.intent ?? 'write'
       : structureRequested ? 'structure' : artifactRequested ? inferredIntent
         : writingRequest.intent === 'review' ? 'review' : 'write'
@@ -363,7 +365,8 @@ export function buildTaskSpec(input: {
     scope: {
       ...(input.novelInitializationProtocol ? { novelInitializationProtocol: input.novelInitializationProtocol } : {}), novelId: input.novelId, chapterIds, selection,
       ...(input.novelInitializationTarget ? { novelInitializationTarget: input.novelInitializationTarget } : {}),
-      ...(input.volumeCreationProtocol ? { volumeCreationProtocol: input.volumeCreationProtocol } : {}), ...(writingRequest ? { authorEffects: { version: 1 as const,
+      ...(input.volumeCreationProtocol ? { volumeCreationProtocol: input.volumeCreationProtocol } : {}),
+      ...(input.volumeCreateIntent ? { volumeCreateIntent: input.volumeCreateIntent } : {}), ...(writingRequest ? { authorEffects: { version: 1 as const,
       requestHash: createHash('sha256').update(input.prompt).digest('hex'), manuscript: manuscriptRequested && !bookProposal, structure: structureRequested, artifact: artifactRequested } } : {}),
       ...(input.manuscriptProtocol ? { manuscriptProtocol: input.manuscriptProtocol } : {}),
       ...(input.reviewProtocol ? { reviewProtocol: input.reviewProtocol } : {}),
@@ -380,7 +383,7 @@ export function buildTaskSpec(input: {
     softPreferences: directives
       .filter((item) => item.kind === 'preference')
       .map((item) => ({ id: randomUUID(), text: item.text, weight: 0.8 })),
-    expectedOutputs: [{ kind: outputKind, description: metadataSetup ? '按作者明确意图更新当前作品书名、简介与标签；已授权代选时自行选择并实际保存，不重复询问方向；如实说明封面等缺项，结束时简短询问下一阶段，不自动执行' : writingPacing === 'conversation_only'
+    expectedOutputs: [{ kind: outputKind, description: input.volumeCreateIntent ? '仅添加本次明确承接的指定空卷，保留已有卷章、细纲及正文，不执行建议中的其他事项' : input.volumeCreationProtocol && isElidedVolumeAddition(input.prompt) ? '通过向作者提问明确要添加的对象；当前缺少唯一目录目标，未创建或修改内容，不能把工具未获本轮授权说成系统没有工具' : metadataSetup ? '按作者明确意图更新当前作品书名、简介与标签；已授权代选时自行选择并实际保存，不重复询问方向；如实说明封面等缺项，结束时简短询问下一阶段，不自动执行' : writingPacing === 'conversation_only'
       ? '回应本任务原始用户问题或问候，不执行作品创作，不恢复其他任务的待办'
       : writingPacing === 'proposal_only'
       ? existingDirection ? '先向作者提问对齐故事方向；保留当前作品已有元信息与正文，说明本轮未改写作品并简短询问下一步，结束本轮' : directionSetup ? '先通过向作者提问对齐故事方向与当前空作品初始化语境，收到实际回答后完成已授权的书名、简介、标签初始化；结束时询问是否开始大纲，不自动写大纲或章节正文' : '交付作者明确要求的题材定位或大纲，完成后询问是否修改或开始细纲；未获后续明确授权前不写细纲或章节正文'
@@ -424,13 +427,14 @@ export function renderTaskSpec(spec: TaskSpec): string {
 }
 
 function renderTaskSpecBody(spec: TaskSpec): string {
+  const volumeRule = spec.scope.volumeCreateIntent ? `\n本次只承接新建空卷：${spec.scope.volumeCreateIntent.targets.map(target => `第${target.orderIndex}卷《${target.title}》`).join('、')}。先读取卷目录，再逐个新建；复用返回的真实卷编号。禁止修改既有卷、挂细纲、写章、迁移或推进其他建议；当前请求不授予通用结构权限。` : spec.scope.volumeCreationProtocol && isElidedVolumeAddition(spec.goals.join('\n')) ? '\n本次添加请求缺少可核实的唯一宾语。使用向作者提问工具澄清具体对象，不猜测或写入；若涉及新的创建目标，请作者发送写明卷名和范围的新请求后执行。' : ''
   if (spec.intent === 'research_analysis') {
     const budget = spec.networkAccess === 'denied' ? '禁止新增联网' : spec.researchReadAccess === 'denied'
       ? '常规最多5次搜索，有真实关键资料缺口且有新检索方向时总共最多10次；禁止页面获取' : '最多5次搜索、8次页面获取；有真实关键资料缺口且有新来源或章节检索方向时，搜索总共最多10次'
     return `[系统] 本轮只读研究契约（taskSpecId=${spec.id}）：\n目标：${spec.goals.join('；')}\n只读取资料并交付分析；不得创建或改写章节、卷、作品、记忆、封面或派生写作窗口，历史写作指令不构成本轮授权。正文不可读或覆盖不足必须说明缺失，不能虚称全书读完。按照用户要求完整输出报告，不套用写作任务的简短收尾规则。复杂任务可维护本轮真实待办，无待办不补建已完成清单。\n联网预算：${budget}，Search与Fetch分别计数，所有分岔与续跑共享本任务总额；复用已保存结果和正文，不重复未变化的检索词或失败URL。资料已充分就停止，不必用满次数；单个页面失败改用其他来源，不因两次读取失败停止搜索。保留已有证据并说明实际缺口。普通分析不自行扩展到影视化、销量或结局争议。用户指定外部平台作品时优先搜索该平台官方来源；除非原请求明确限定站点，也可核验其他合法公开来源，不先搜索本平台作品库。\n取证顺序：1）用作品名/作者及官方域名定向搜索；未指定书时先选定一本有公开章节的作品，核实官方作品页的书名和作者，不把平台首页当作品页。2）沿搜索或已读目录实际返回的章节链接获取公开正文，不猜链接。3）按返回的contentRef/revision和范围续读样本，记录章节、来源URL、实际覆盖与短引文。4）仅依据读到的正文分析写作手法、叙事选择与效果，明确样本局限。书评、新闻、简介、视频和搜索摘要只能作为各自类型资料，不能替代原著正文；没有读到章节正文时交付缺失说明，不能编造作品手法。8页额度、目录或链接清单都不等于全书阅读完成。\n预期交付：${spec.expectedOutputs.map(item => item.description).join('；')}。`
   }
   if (spec.scope.authorEffects?.manuscript === false && !spec.scope.authorEffects.structure && spec.writingPacing !== 'proposal_only') {
-    return `[系统] 本轮任务契约（taskSpecId=${spec.id}）：\n目标：${spec.goals.join('；')}\n直接完成当前请求，按需使用获准工具；本轮没有章节正文写入义务，无需先确定章节。作品设置、文件等操作仍遵守各工具原有权限与确认要求，不继承历史任务的写作、待办或计划。`
+    return `[系统] 本轮任务契约（taskSpecId=${spec.id}）：\n目标：${spec.goals.join('；')}\n直接完成当前请求，按需使用获准工具；本轮没有章节正文写入义务，无需先确定章节。作品设置、文件等操作仍遵守各工具原有权限与确认要求，不继承历史任务的写作、待办或计划。${volumeRule}`
   }
   const pacing = spec.writingPacing === 'conversation_only'
     ? '\n本轮是普通对话：直接回应当前任务的原始问候或问题；作品上下文只作背景，不代表写作授权，不继续其他窗口的创作、待办或历史计划。任务中止后仍回应该原始问题，不能将“继续”解释为继续写作品。'
@@ -463,5 +467,5 @@ function renderTaskSpecBody(spec: TaskSpec): string {
       : '只在原始请求获准范围内创作。写作交付先完成当前版本连续性与质量检查，仅原始作者请求可明确跳过；检查本身不扩大写入授权。质量警告与审美建议，应与事实修法优先合并处理；可连续调用章节修改工具，每次使用当前正文，不能硬性限定只调用一次，也不要求一次处理全部候选。本任务冻结的新建目标章可在原写作权限内持续修订，多项相关修法优先用 chapter_edit_range 的 patches（每次最多8处、同一原稿、唯一不重叠），也可单片段替换或 chapter_write。保留真实剩余意见；不能安全处理的项可用 retainedFindings 引用当前报告并说明具体原因，留置与正文未变不表示修复。付费自动检查与自动修订次数保持原限制，不重置预算或重放未知调用。全部修订后只读复核当前版本两类检查，最后提交终态；写入不能代替最终版本检查。已有稿仍需原请求明确修复授权，明确禁止修改优先；报告不能扩大章节范围。完成真实章节终态后按请求格式交付；可按作品当前阶段在普通回复给出1–2条可选下一步建议，不转成提问、待办或执行；排他输出或作者不要建议时不附加。')
   const reviewRule = spec.scope.reviewProtocol === 1 && !['stable', 'bold'].includes(spec.creativeFreedom)
     ? '\n严格意见协议v1：原要求的最终版本完整检查报告中，每项未修复意见都须按原授权具体处理或用真实ref与具体原因合理保留，包括自动8处窗口外、重叠、未定位及已标拒绝但尚无当前保留决定的项。自动安全窗口不代表完整意见义务，不给额外定位或写入权限。原作者要求检查通过时，保留不能替代硬通过；合法跳过检查的原要求保持。' : ''
-  return `[系统] 本轮任务契约（taskSpecId=${spec.id}）：\n意图：${spec.intent}\n目标：${spec.goals.join('；')}\n创作模式：${freedomLabel}（${freedomRule}）；质量模式：${spec.qualityMode}${reviewRule}\n硬约束：\n${hard}\n预期交付：${spec.expectedOutputs.map((item) => item.description).join('；')}\n完成前必须验证：${spec.postconditions.map((item) => item.description).join('；') || '按用户目标核验结果'}。`
+  return `[系统] 本轮任务契约（taskSpecId=${spec.id}）：\n意图：${spec.intent}\n目标：${spec.goals.join('；')}\n创作模式：${freedomLabel}（${freedomRule}）；质量模式：${spec.qualityMode}${reviewRule}${volumeRule}\n硬约束：\n${hard}\n预期交付：${spec.expectedOutputs.map((item) => item.description).join('；')}\n完成前必须验证：${spec.postconditions.map((item) => item.description).join('；') || '按用户目标核验结果'}。`
 }

@@ -234,7 +234,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
         customModelId: current.configuration.model.customModelId, reasoningEffort: current.configuration.model.reasoningEffort as ModelReasoningEffort,
         provider: current.configuration.model.provider, modelName: current.configuration.model.modelName, routeRevision: current.configuration.model.routeRevision } }
     ctx.modelAssignments = current.configuration.modelAssignments
-    if (historicalWriter) ctx.writingScope = originalScope
+    if (historicalWriter || originalScope.volumeCreateIntent) ctx.writingScope = originalScope
     ctx.inlineChild = Boolean(lease.parent)
     const capability = { lease, cursor, operationKey: `exec:${frame.state.nextOperationSequence}` }
     if (call.name === 'agent_configure' || call.name === 'model_assign') ctx.durableConfiguration = capability
