@@ -75,6 +75,11 @@ export function createAdminYunshuUsageService(overrides: Partial<Dependencies> =
   const fingerprint = (value: unknown) => createHmac('sha256', salt).update(JSON.stringify(value)).digest('hex')
   const cache = new Map<AdminYunshuUsagePeriod, { identity: string; at: number; value: AdminYunshuModelUsage }>()
   const active = new Map<AdminYunshuUsagePeriod, { identity: string; windowFrom: string; promise: Promise<AdminYunshuModelUsage> }>()
+  type Mapping = { allowed: Set<number>; status: AdminYunshuModelUsage['sources'] }
+  let mappingCache: { identity: string; expiresAt: number; value: Mapping } | undefined
+  let mappingActive: { identity: string; promise: Promise<Mapping> } | undefined
+  let retryAt = 0
+  const rateLimitMessage = () => `云枢查询触发频率限制，请在 ${new Date(retryAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}（UTC+8）后刷新；等待期间不再请求云枢。`
   let scopeIdentity = ''
   const read = async (period: AdminYunshuUsagePeriod, callerSignal?: AbortSignal): Promise<AdminYunshuModelUsage> => {
     callerSignal?.throwIfAborted()
@@ -87,16 +92,20 @@ export function createAdminYunshuUsageService(overrides: Partial<Dependencies> =
     let sources: Source[]
     try {
       token = await deps.loadToken()
-      if (!token) { scopeIdentity = ''; cache.clear(); return empty }
+      if (!token) { scopeIdentity = ''; cache.clear(); mappingCache = undefined; mappingActive = undefined; return empty }
       sources = await deps.loadSources()
     } catch {
-      scopeIdentity = ''; cache.clear()
+      scopeIdentity = ''; cache.clear(); mappingCache = undefined; mappingActive = undefined
       return { ...empty, state: 'error', lastAttemptAt: new Date(attemptedAt).toISOString(), message: '管理员只读凭据或平台来源配置不可用，未显示旧范围数据。' }
     }
     const identity = fingerprint([token, sources])
     callerSignal?.throwIfAborted()
-    if (identity !== scopeIdentity) { cache.clear(); scopeIdentity = identity }
+    if (identity !== scopeIdentity) { cache.clear(); mappingCache = undefined; mappingActive = undefined; scopeIdentity = identity }
     const previous = cache.get(period)
+    if (retryAt > deps.now()) {
+      if (previous?.identity === identity && previous.value.window.from === empty.window.from) return { ...structuredClone(previous.value), state: 'stale', lastAttemptAt: new Date(attemptedAt).toISOString(), message: rateLimitMessage() }
+      return { ...empty, state: 'error', lastAttemptAt: new Date(attemptedAt).toISOString(), message: rateLimitMessage() }
+    }
     if (previous?.identity === identity && attemptedAt - previous.at < 60000 && previous.value.window.from === empty.window.from) return structuredClone(previous.value)
     const inFlight = active.get(period)
     let operation = inFlight?.identity === identity && inFlight.windowFrom === empty.window.from ? inFlight.promise : undefined
@@ -106,7 +115,14 @@ export function createAdminYunshuUsageService(overrides: Partial<Dependencies> =
         let totalBytes = 0
         async function get(path: '/api/log/' | '/api/log/token', credential: string, query?: URLSearchParams): Promise<unknown> {
           signal.throwIfAborted()
+          if (retryAt > deps.now()) throw new Error('YUNSHU_RATE_LIMITED')
           const response = await deps.fetch(`${ORIGIN}${path}${query ? `?${query}` : ''}`, { method: 'GET', headers: { Authorization: `Bearer ${credential}` }, redirect: 'error', signal })
+          if (response.status === 429) {
+            const header = response.headers.get('Retry-After') ?? ''
+            const seconds = /^\d+$/.test(header) ? Number(header) : NaN
+            const wait = Number.isSafeInteger(seconds) && seconds >= 0 && Number.isSafeInteger(deps.now() + seconds * 1000) && Number.isFinite(new Date(deps.now() + seconds * 1000).getTime()) ? seconds : 1200
+            retryAt = Math.max(retryAt, deps.now() + wait * 1000)
+          }
           if (!response.ok || !response.body) {
             await response.body?.cancel().catch(() => {})
             throw new Error('YUNSHU_READ_FAILED')
@@ -129,15 +145,33 @@ export function createAdminYunshuUsageService(overrides: Partial<Dependencies> =
         const unique = new Map<string, Source>()
         for (const source of sources) unique.set(source.key ? fingerprint(source.key) : source.identity, source)
         const status = { configured: unique.size, verified: 0, unresolved: 0 }
-        const allowed = new Set<number>()
         try {
-          for (const source of unique.values()) {
-            if (!source.key?.trim()) { status.unresolved++; continue }
-            const response = z.object({ success: z.literal(true), data: z.array(z.object({ token_id: count.positive() })).max(1000) }).parse(await get('/api/log/token', source.key))
-            const ids = new Set(response.data.map(row => row.token_id))
-            if (ids.size !== 1) { status.unresolved++; continue }
-            allowed.add(response.data[0].token_id); status.verified++
+          let mapping = mappingCache?.identity === identity && mappingCache.expiresAt > deps.now() ? mappingCache.value : undefined
+          if (!mapping) {
+            let pending = mappingActive?.identity === identity ? mappingActive.promise : undefined
+            if (!pending) {
+              pending = (async () => {
+                const result: Mapping = { allowed: new Set(), status: { configured: unique.size, verified: 0, unresolved: 0 } }
+                for (const source of unique.values()) {
+                  if (!source.key?.trim()) { result.status.unresolved++; continue }
+                  const response = z.object({ success: z.literal(true), data: z.array(z.object({ token_id: count.positive() })).max(1000) }).parse(await get('/api/log/token', source.key))
+                  const ids = new Set(response.data.map(row => row.token_id))
+                  if (ids.size !== 1) { result.status.unresolved++; continue }
+                  result.allowed.add(response.data[0].token_id); result.status.verified++
+                }
+                const currentIdentity = fingerprint([await deps.loadToken(), await deps.loadSources()])
+                if (scopeIdentity !== identity || currentIdentity !== identity) throw new Error('YUNSHU_SCOPE_CHANGED')
+                mappingCache = { identity, expiresAt: deps.now() + 30 * 60000, value: result }
+                return result
+              })()
+              const entry = { identity, promise: pending }
+              mappingActive = entry
+              void pending.finally(() => { if (mappingActive === entry) mappingActive = undefined }).catch(() => {})
+            }
+            mapping = await pending
           }
+          const allowed = mapping.allowed
+          Object.assign(status, mapping.status)
           empty.sources = status
           if (!allowed.size) return { ...empty, state: 'partial' as const, lastAttemptAt: new Date(attemptedAt).toISOString(), message: status.configured ? '平台令牌暂无可验证记录，来源未知；未查询全部网关数据。' : '没有可查询的云枢平台模型配置。' }
           const models = new Map<string, AdminYunshuModelUsage['models'][number]>()
@@ -198,10 +232,12 @@ export function createAdminYunshuUsageService(overrides: Partial<Dependencies> =
           if (currentIdentity !== identity || scopeIdentity !== identity) {
             for (const [cachedPeriod, snapshot] of cache) if (snapshot.identity === identity) cache.delete(cachedPeriod)
             if (scopeIdentity === identity) scopeIdentity = ''
+            if (mappingCache?.identity === identity) mappingCache = undefined
+            if (mappingActive?.identity === identity) mappingActive = undefined
             return { ...empty, state: 'error' as const, lastAttemptAt: new Date(attemptedAt).toISOString(), message: '管理员凭据或平台来源配置已变化或不可用，未显示旧范围数据。' }
           }
-          if (scopeIdentity === identity && previous?.identity === identity && previous.value.window.from === empty.window.from) return { ...structuredClone(previous.value), state: 'stale' as const, lastAttemptAt: new Date(attemptedAt).toISOString(), message: '云枢只读查询失败或超时；保留上次成功快照，未重试。' }
-          return { ...empty, sources: status, state: 'error' as const, lastAttemptAt: new Date(attemptedAt).toISOString(), message: '云枢只读查询失败、权限不足或返回无效；未显示估算值，未重试。' }
+          if (scopeIdentity === identity && previous?.identity === identity && previous.value.window.from === empty.window.from) return { ...structuredClone(previous.value), state: 'stale' as const, lastAttemptAt: new Date(attemptedAt).toISOString(), message: retryAt > deps.now() ? rateLimitMessage() : '云枢只读查询失败或超时；保留上次成功快照，未重试。' }
+          return { ...empty, sources: status, state: 'error' as const, lastAttemptAt: new Date(attemptedAt).toISOString(), message: retryAt > deps.now() ? rateLimitMessage() : '云枢只读查询失败、权限不足或返回无效；未显示估算值，未重试。' }
         }
       })()
       const entry = { identity, windowFrom: empty.window.from, promise: operation }

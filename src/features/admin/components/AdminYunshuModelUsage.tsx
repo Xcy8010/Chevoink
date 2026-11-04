@@ -33,13 +33,14 @@ export default function AdminYunshuModelUsage({ period }: { period: 'today' | 'w
   })
   const data = query.data
   const state = query.isError ? data?.observedAt ? 'stale' : 'error' : data?.state
+  const failureMessage = !query.isError && (state === 'error' || state === 'stale') ? data?.message.trim() : ''
   const models = data?.models ?? []
   return <AdminCard className="mb-4"><section aria-label="云枢模型用量">
     <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">模型用量</h2><p className="mt-1 text-xs text-[var(--text-secondary)]">云枢管理日志 · 已配置的平台令牌 · 部分覆盖</p></div><Button size="sm" disabled={query.isFetching} onClick={() => void query.refetch()}><RefreshCw size={15} className={query.isFetching ? 'animate-spin' : ''} />{query.isFetching ? '更新中…' : '刷新模型用量'}</Button></div>
     {query.isPending ? <p role="status" className="py-8 text-center text-sm text-[var(--text-secondary)]">正在读取云枢模型用量…</p> : <>
       <div className="mb-4 flex flex-wrap items-center gap-3 text-xs text-[var(--text-secondary)]"><StatusPill tone={state === 'error' ? 'danger' : state === 'stale' ? 'warning' : 'neutral'}>{state ? states[state] : '读取失败'}</StatusPill><span>更新时间：{data?.observedAt ? observedTime(data.observedAt) : '尚未取得'}</span>{data && <span>来源 {data.sources.verified} / {data.sources.configured}{data.sources.unresolved > 0 ? ` · ${data.sources.unresolved} 项未核实` : ''}</span>}{data && !data.paginationComplete && state !== 'unconfigured' && <span>分页未完成</span>}</div>
       {state === 'unconfigured' ? <p role="status" className="py-6 text-center text-sm text-[var(--text-secondary)]">尚未配置云枢管理读取凭据。</p> : null}
-      {state === 'error' || state === 'stale' ? <p role="alert" className="mb-4 text-sm text-[var(--color-error)]">{state === 'stale' ? '更新失败，以下保留上次成功快照。' : '云枢模型用量读取失败，请刷新重试。'}</p> : null}
+      {state === 'error' || state === 'stale' ? <p role="alert" className="mb-4 text-sm text-[var(--color-error)]">{failureMessage ? <>{failureMessage}{state === 'stale' ? ' 以下保留上次成功快照。' : ''}</> : state === 'stale' ? '更新失败，以下保留上次成功快照。' : query.isError ? '云枢模型用量读取失败，请刷新重试。' : '云枢模型用量暂不可用。'}</p> : null}
       {state === 'partial' && data?.message ? <p className="mb-4 text-xs text-[var(--text-secondary)]">{data.message}</p> : null}
       {!models.length && (state === 'ready' || state === 'partial') ? <p role="status" className="py-8 text-center text-sm text-[var(--text-secondary)]">该范围暂无云枢模型用量记录。</p> : null}
       {models.length > 0 ? <>

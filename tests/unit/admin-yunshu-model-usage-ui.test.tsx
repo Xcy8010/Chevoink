@@ -43,10 +43,30 @@ it('isolates rapid period switches and ignores a late prior-period result', asyn
 })
 
 it.each(['unconfigured','error','stale'] as const)('renders %s without converting missing or old data to fresh zeros', async state => {
-  mocks.yunshu.mockResolvedValue({...fixture(),state,observedAt:state==='stale'?fixture().observedAt:null,models:state==='stale'?fixture().models:[]})
+  mocks.yunshu.mockResolvedValue({...fixture(),state,message:'',observedAt:state==='stale'?fixture().observedAt:null,models:state==='stale'?fixture().models:[]})
   mount()
-  expect(await screen.findByText({unconfigured:'尚未配置云枢管理读取凭据。',error:'云枢模型用量读取失败，请刷新重试。',stale:'更新失败，以下保留上次成功快照。'}[state])).toBeTruthy()
+  expect(await screen.findByText({unconfigured:'尚未配置云枢管理读取凭据。',error:'云枢模型用量暂不可用。',stale:'更新失败，以下保留上次成功快照。'}[state])).toBeTruthy()
   if(state!=='stale') expect(screen.queryByRole('table')).toBeNull()
+})
+
+it.each(['error','stale'] as const)('shows the server cooldown message for %s while identifying an old snapshot', async state => {
+  const message='云枢读取已限流，预计 20 分钟后恢复，请等待后自动更新。'
+  mocks.yunshu.mockResolvedValue({...fixture(),state,message,observedAt:state==='stale'?fixture().observedAt:null,models:state==='stale'?fixture().models:[]})
+  mount()
+  const alert=await screen.findByRole('alert')
+  expect(alert.textContent).toContain(message)
+  expect(alert.textContent).not.toContain('请刷新重试')
+  if(state==='stale') {
+    expect(alert.textContent).toContain('以下保留上次成功快照。')
+    expect(screen.getByRole('table')).toBeTruthy()
+  }
+})
+
+it('uses the network fallback when no business response is received', async () => {
+  mocks.yunshu.mockRejectedValue(new Error('synthetic-secret-error'))
+  mount()
+  expect(await screen.findByText('云枢模型用量读取失败，请刷新重试。')).toBeTruthy()
+  expect(screen.queryByText('synthetic-secret-error')).toBeNull()
 })
 
 it('keeps a successful snapshot visible after a refresh transport error with no automatic retry', async () => {

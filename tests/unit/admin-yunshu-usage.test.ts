@@ -14,7 +14,7 @@ function fixture(rows = [log()]) {
   const loadToken = vi.fn(async () => 'nap_fake_protected_admin')
   const loadSources = vi.fn(async () => [{ identity: 'model:revision:1', key: 'sk-synthetic-private' }])
   const service = createAdminYunshuUsageService({ fetch: fetcher, now: () => time, loadToken, loadSources })
-  return { service, fetcher, loadToken, loadSources, advance: () => { time += 61000 } }
+  return { service, fetcher, loadToken, loadSources, advance: (milliseconds = 61000) => { time += milliseconds } }
 }
 beforeEach(() => { vi.clearAllMocks(); clearToolModelRuntimeCache(); mocks.models.mockResolvedValue([]); mocks.count.mockResolvedValue(1); mocks.modelFirst.mockResolvedValue(null); mocks.binding.mockResolvedValue(null) })
 it('does not access sources or network without a protected administrator token', async () => {
@@ -45,6 +45,100 @@ it('deduplicates configured keys and concurrent reads, caches only within the sa
   await f.service.read('week'); expect(f.fetcher).toHaveBeenCalledTimes(2)
   f.loadSources.mockResolvedValue([{ identity: 'changed-config', key: 'new-key' }]); f.fetcher.mockRejectedValue(new Error('SECRET-URL'))
   const failed = await f.service.read('week'); expect(failed.state).toBe('error'); expect(failed.models).toEqual([]); expect(JSON.stringify(failed)).not.toContain('SECRET')
+})
+it('reuses eight verified source mappings across periods and refreshes usage independently after sixty seconds', async () => {
+  const f = fixture()
+  f.loadSources.mockResolvedValue(Array.from({ length: 8 }, (_, index) => ({ identity: `config-${index}`, key: `platform-key-${index}` })))
+  let usage = 100
+  f.fetcher.mockImplementation(async (input, init) => {
+    if (String(input).includes('/token')) {
+      const authorization = (init?.headers as Record<string, string>).Authorization
+      return json({ success: true, data: [{ token_id: Number(authorization.split('-').at(-1)) + 1 }] })
+    }
+    return json({ success: true, data: { page: 1, page_size: 100, total: 1, items: [log({ prompt_tokens: usage })] } })
+  })
+  expect((await f.service.read('today')).sources.verified).toBe(8)
+  await Promise.all([f.service.read('week'), f.service.read('month')])
+  expect(f.fetcher.mock.calls.filter(([url]) => String(url).includes('/token'))).toHaveLength(8)
+  expect(f.fetcher.mock.calls.filter(([url]) => !String(url).includes('/token'))).toHaveLength(3)
+  f.advance(); usage = 300
+  expect((await f.service.read('today')).models[0].requestTokens).toBe(300)
+  expect(f.fetcher.mock.calls.filter(([url]) => String(url).includes('/token'))).toHaveLength(8)
+  expect(f.fetcher.mock.calls.filter(([url]) => !String(url).includes('/token'))).toHaveLength(4)
+})
+it('shares mapping work already in flight between today, week and month', async () => {
+  const f = fixture()
+  let started: () => void = () => {}, release: () => void = () => {}
+  const waiting = new Promise<void>(resolve => { started = resolve })
+  const paused = new Promise<void>(resolve => { release = resolve })
+  f.fetcher.mockImplementation(async input => {
+    if (String(input).includes('/token')) { started(); await paused; return json({ success: true, data: [{ token_id: 7 }] }) }
+    return json({ success: true, data: { page: 1, page_size: 100, total: 1, items: [log()] } })
+  })
+  const today = f.service.read('today')
+  await waiting
+  const week = f.service.read('week'), month = f.service.read('month')
+  release()
+  const results = await Promise.all([today, week, month])
+  expect(results.every(result => result.sources.verified === 1)).toBe(true)
+  expect(f.fetcher.mock.calls.filter(([url]) => String(url).includes('/token'))).toHaveLength(1)
+  expect(f.fetcher).toHaveBeenCalledTimes(4)
+})
+it('expires source mappings after thirty minutes and invalidates them immediately on configuration or credential changes', async () => {
+  const f = fixture()
+  await f.service.read('today')
+  f.advance(29 * 60000); await f.service.read('week')
+  expect(f.fetcher.mock.calls.filter(([url]) => String(url).includes('/token'))).toHaveLength(1)
+  f.advance(60000); await f.service.read('month')
+  expect(f.fetcher.mock.calls.filter(([url]) => String(url).includes('/token'))).toHaveLength(2)
+  f.loadSources.mockResolvedValue([{ identity: 'new-revision', key: 'new-key' }])
+  await f.service.read('today')
+  expect(f.fetcher.mock.calls.filter(([url]) => String(url).includes('/token'))).toHaveLength(3)
+  f.loadToken.mockResolvedValue('nap_replacement_admin')
+  await f.service.read('week')
+  expect(f.fetcher.mock.calls.filter(([url]) => String(url).includes('/token'))).toHaveLength(4)
+})
+it('honors actual 429 Retry-After across periods without any further network calls until recovery', async () => {
+  const f = fixture()
+  f.fetcher.mockResolvedValueOnce(new Response('private upstream limit', { status: 429, headers: { 'Retry-After': '1200' } }))
+  const first = await f.service.read('today')
+  expect(first.state).toBe('error'); expect(first.message).toMatch(/频率限制.*UTC\+8/)
+  expect(first.message).not.toContain('private')
+  f.advance(61000)
+  const waiting = await f.service.read('week')
+  expect(waiting.state).toBe('error'); expect(waiting.message).toBe(first.message)
+  f.loadToken.mockResolvedValue('nap_changed_during_ip_limit')
+  expect((await f.service.read('month')).state).toBe('error')
+  expect(f.fetcher).toHaveBeenCalledTimes(1)
+  f.advance(1139000)
+  expect((await f.service.read('week')).sources.verified).toBe(1)
+  expect(f.fetcher).toHaveBeenCalledTimes(3)
+})
+it('shows the same-scope old snapshot as stale during 429 cooldown but never reuses it after a source change', async () => {
+  const f = fixture()
+  const first = await f.service.read('today')
+  f.advance()
+  f.fetcher.mockResolvedValueOnce(new Response('', { status: 429, headers: { 'Retry-After': '1200' } }))
+  const limited = await f.service.read('today')
+  expect(limited).toMatchObject({ state: 'stale', observedAt: first.observedAt, models: first.models })
+  expect(limited.message).toMatch(/频率限制.*UTC\+8/)
+  expect((await f.service.read('today')).state).toBe('stale')
+  expect((await f.service.read('week')).state).toBe('error')
+  const calls = f.fetcher.mock.calls.length
+  f.loadSources.mockResolvedValue([{ identity: 'different-source', key: 'different-private-key' }])
+  const changed = await f.service.read('today')
+  expect(changed).toMatchObject({ state: 'error', models: [], observedAt: null })
+  expect(f.fetcher).toHaveBeenCalledTimes(calls)
+})
+it('keeps cached empty or mixed source identities unresolved across periods', async () => {
+  for (const data of [[], [{ token_id: 7 }, { token_id: 8 }]]) {
+    const f = fixture()
+    f.fetcher.mockImplementation(async () => json({ success: true, data }))
+    const today = await f.service.read('today'), week = await f.service.read('week')
+    expect(today.sources).toEqual({ configured: 1, verified: 0, unresolved: 1 })
+    expect(week.sources).toEqual(today.sources); expect(week.models).toEqual([])
+    expect(f.fetcher).toHaveBeenCalledTimes(1)
+  }
 })
 it('leaves missing tokens/cache unknown and preserves stale same-scope success after failure', async () => {
   const f = fixture([log({ prompt_tokens: undefined, other: '{}' })])

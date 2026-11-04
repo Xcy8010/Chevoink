@@ -14,4 +14,6 @@ Periods use UTC+8 calendar boundaries, Monday-start weeks, and a fixed request-t
 
 Only type 2 consumes contribute request/token totals; type 5 errors and type 6 refunds are separate counts. Missing token or cache evidence remains null. Cache reads/writes are separate from input tokens; cache creation totals are not added again to duration-specific breakdowns. Gateway quota is never converted to cash or Chevoink Credits. This endpoint does not write the local ledger or change existing integration reconciliation gates.
 
+Source-token identity observations are shared across periods for 30 minutes in process memory, with concurrent discovery coalesced; unresolved identities remain unresolved. Credential or platform-source changes invalidate this identity cache. Usage snapshots still expire after 60 seconds. An upstream HTTP 429 pauses all gateway reads until its seconds-based `Retry-After` deadline and returns a safe UTC+8 recovery time; old same-scope data is marked stale, otherwise the result is an error. There is no automatic retry. 来源令牌识别快照在进程内跨期间共用30分钟，并合并并发识别；未知来源仍保持未知。凭据或平台来源变更立即使映射失效，用量快照仍为60秒。云枢返回429时按秒制 `Retry-After` 暂停所有外部读取并显示 UTC+8 恢复时间；同范围旧数据标过期，无旧数据则返回错误，不自动重试。
+
 仅类型2消费计入请求和 Token，类型5错误、类型6退款分别计数。缺失用量/缓存证据为 null；缓存读写与输入分列，不把缓存写入总项和分时明细重复相加。不把网关 quota 转成现金或墨域 Credits，不写本地账本，不改变原有集成对账门禁。
