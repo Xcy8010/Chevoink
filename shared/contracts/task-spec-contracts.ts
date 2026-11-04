@@ -61,7 +61,7 @@ export const taskScopeSchema = z.object({
   /** Fresh server interpretation of requested effects. Missing keeps legacy
    * contracts unchanged; chapter scope is checked only when applying writes. */
   authorEffects: z.object({ version: z.literal(1), requestHash: z.string().regex(/^[a-f0-9]{64}$/),
-    manuscript: z.boolean(), structure: z.boolean() }).strict().optional(),
+    manuscript: z.boolean(), structure: z.boolean(), artifact: z.boolean().optional() }).strict().optional(),
   /** Fresh parser result, bound once to original human input; never re-derived on recovery. */
   writingInterpretation: z.object({ version: z.literal(2), requestHash: z.string().regex(/^[a-f0-9]{64}$/), scopeHash: z.string().regex(/^[a-f0-9]{64}$/),
     intent: z.enum(['write', 'revise', 'review']).nullable(), reasons: z.array(z.string().min(1)).max(32),
@@ -69,6 +69,17 @@ export const taskScopeSchema = z.object({
     operations: z.array(z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive(),
       kind: z.enum(['write', 'revise', 'review']), polarity: z.enum(['affirmative', 'negative']) }).strict()).max(1000),
     excludedChapterIds: z.array(z.string().min(1)).max(1000),
+  }).strict().optional(),
+  /** Fresh admission keeps each current human action's own target grant. */
+  writingActions: z.object({ version: z.literal(1), requestHash: z.string().regex(/^[a-f0-9]{64}$/),
+    operations: z.array(z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive(),
+      kind: z.enum(['write', 'revise']), resolution: z.enum(['bound', 'needs_input', 'denied']),
+      boundary: localEditBoundarySchema.optional(),
+      targets: z.array(z.object({ orderIndex: z.number().int().positive(), chapterId: z.string().min(1).nullable(),
+        volumeId: z.string().min(1).optional(), positionInVolume: z.number().int().positive().optional() }).strict()).max(1000),
+      source: z.object({ runId: z.string().min(1), messageId: z.string().min(1), requestHash: z.string().regex(/^[a-f0-9]{64}$/),
+        scopeHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), resultIds: z.array(z.string().min(1)).min(1).max(1000).optional() }).strict().optional(),
+    }).strict()).min(1).max(1000),
   }).strict().optional(),
   /** New human admission requires factual claims anchored in the current manuscript. */
   continuityEvidenceProtocol: z.literal(1).optional(),
@@ -189,6 +200,18 @@ export const taskSpecSchema = z.object({
   if (spec.scope.writingTargetProtocol === 2 && (!spec.scope.writingInterpretation || !spec.scope.writing)) {
     ctx.addIssue({ code: 'custom', path: ['scope', 'writingInterpretation'], message: 'Fresh author scope requires its complete frozen projection' })
   }
+  const actions = spec.scope.writingActions
+  if (actions && (spec.scope.writingTargetProtocol !== 2 || actions.requestHash !== spec.scope.writingInterpretation?.requestHash
+    || actions.requestHash !== spec.scope.authorEffects?.requestHash || !spec.scope.authorEffects.manuscript
+    || actions.operations.some(action => action.resolution !== 'bound') && spec.scope.writing?.kind !== 'needs_input'
+    || actions.operations.some(action => action.end <= action.start
+      || !spec.scope.writingInterpretation?.operations.some(operation => operation.start === action.start && operation.end === action.end
+        && operation.kind === action.kind && operation.polarity === 'affirmative')
+      || (action.resolution === 'bound') !== (action.targets.length > 0)
+      || action.kind === 'revise' && action.targets.some(target => target.chapterId === null)
+      || action.targets.some(target => !spec.scope.writing?.targets.some(item => item.orderIndex === target.orderIndex && item.chapterId === target.chapterId))))) {
+    ctx.addIssue({ code: 'custom', path: ['scope', 'writingActions'], message: 'Each action must bind the current author predicate and its own frozen target' })
+  }
   if (spec.scope.localEditBoundary?.version === 2 && (spec.scope.writingTargetProtocol !== 2
     || spec.scope.localEditProtocol !== 1 || !spec.scope.writingInterpretation
     || spec.scope.localEditBoundary.regions.some(region => region.source.requestHash !== spec.scope.writingInterpretation!.requestHash))) {
@@ -198,7 +221,8 @@ export const taskSpecSchema = z.object({
   if (conditional?.version === 3 && (spec.scope.writingTargetProtocol !== 2 || spec.scope.localEditProtocol !== 1
     || !spec.scope.writingInterpretation || conditional.source.requestHash !== spec.scope.writingInterpretation.requestHash
     || spec.scope.writing?.kind !== 'bounded' || spec.scope.writing.repairAuthorized
-    || conditional.regions.length !== spec.scope.writing.targets.length
+    || conditional.regions.length !== (actions ? new Set(actions.operations.filter(operation => operation.kind === 'revise')
+      .flatMap(operation => operation.targets.map(target => target.chapterId))).size : spec.scope.writing.targets.length)
     || conditional.regions.some(region => !spec.scope.writing!.targets.some(target => target.chapterId === region.chapterId)
       || region.start !== 0 || region.end <= 0 || region.prefix !== '' || region.suffix !== '' || region.maxBodyLength < region.end)
     || new Set(conditional.regions.map(region => region.chapterId)).size !== conditional.regions.length

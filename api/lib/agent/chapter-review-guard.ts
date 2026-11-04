@@ -470,7 +470,7 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
   const freshAssessment = frozenAuthority === undefined && !!spec?.scope && typeof spec.scope === 'object' && !Array.isArray(spec.scope)
     && (spec.scope as Record<string, unknown>).localEditProtocol === 1 && hasReadOnlyRevisionAssessment(original.prompt)
   if (prohibited || freshAssessment || (!authority && !localAuthority && (reviewed || newReview && spec?.intent === 'review')
-    && frozenAuthority !== true && !originalRepairAuthority(original))) {
+    && frozenAuthority !== true && !originalRepairAuthority(original, current.id))) {
     throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '原始作者请求未授权改写该正文；检查报告不能扩大写入权限。')
   }
 
@@ -506,7 +506,7 @@ export async function probeChapterReviewRevision(tx: Prisma.TransactionClient,
   try {
     await assertChapterReviewRevision(tx, subject, chapter, { ...options, readScope })
     const original = await readOriginalTaskRequest(tx, subject)
-    if (!originalRepairAuthority(original)) {
+    if (!originalRepairAuthority(original, chapter.id)) {
       // Closure evidence narrows automatic reachability only. It never adds
       // mutation authority, nor rejects a child merely for having a parent.
       const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId },

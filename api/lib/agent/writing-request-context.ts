@@ -61,7 +61,7 @@ async function consumedSteering(db: Prisma.TransactionClient, run: { id: string;
  * A saved HTTP admission must have its exact owned user message. Older legacy
  * admissions are accepted only with the same persisted prompt and user message,
  * without modern metadata, child provenance or automatic goal execution. */
-async function ownedAuthorAdmission(db: Prisma.TransactionClient, subject: Subject, runId: string, sessionId: string) {
+export async function ownedAuthorAdmission(db: Prisma.TransactionClient, subject: Subject, runId: string, sessionId: string) {
   const run = await db.agentRun.findFirst({ where: { id: runId, userId: subject.userId, novelId: subject.novelId, sessionId },
     include: { incomingChildGrant: true, goalExecution: true, session: true } })
   if (!run || run.userId !== subject.userId || run.novelId !== subject.novelId || run.sessionId !== sessionId

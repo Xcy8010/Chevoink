@@ -10,6 +10,7 @@ import { compilerContinuityCoverage, compilerContinuityCoverageMatches } from '.
 import { terminalReviewStateHash } from '../../api/lib/agent/chapter-review-guard.js'
 import { stageTerminalProposals } from '../../api/lib/agent/terminal-proposal-review.js'
 import { DataAccessError } from '../../api/lib/prisma.js'
+import { readWritingContinuityReference, renderWritingContinuityReference } from '../../api/lib/agent/writing-continuity-reference.js'
 
 const checks = ['action_direction', 'state_progression'].map(kind => ({ kind, result: 'not_applicable', reason: '合成事实继承。', findingIndexes: [] }))
 const initial = terminalCandidateSchema.parse({ exitState: { openLoops: ['过滤泵检修等零件'] } })
@@ -25,16 +26,17 @@ function assessment(chapter: { id: string; orderIndex: number; revision: number;
   return { validation, review: currentTerminalReview(validation, chapter.content, evidence) }
 }
 
-function sharedFactFixture() {
-  const candidate = terminalCandidateSchema.parse({ exitState: { objects: Array.from({ length: 20 }, (_, i) => `物件${i}仍在柜内`) } })
-  const chapter = { id: 'shared-chapter', orderIndex: 1, revision: 1, content: candidate.exitState.objects.join('。') + '。' }
+function sharedFactFixture(field: 'objects' | 'body' = 'objects') {
+  const claims = field === 'body' ? ['林岑左腿伤残尚未愈合，仍须拄拐'] : Array.from({ length: 20 }, (_, i) => `物件${i}仍在柜内`)
+  const candidate = terminalCandidateSchema.parse({ exitState: { [field]: claims } })
+  const chapter = { id: 'shared-chapter', orderIndex: 1, revision: 1, content: claims.join('。') + '。' }
   const context = terminalEvidenceContext(chapter, null, 2, 1, { version: 2, taskId: 'shared-task', chapterId: chapter.id, obligations: [] }, 5, 2)
   const proposals = stageTerminalProposals({ preparedContext: {}, identity: { taskId: 'shared-task', chapterId: chapter.id,
     bodyHash: context.current.contentHash, sourceHash: runtimeJson({ previous: null }).hash }, auditHash: 'a'.repeat(64),
     base: terminalCandidateSchema.parse({ exitState: { ...candidate.exitState, emotion: ['一个尚未证实的旧情绪提议'] } }), candidate, verifiedFactIds: [] })!
   const evidence = { ...context, proposalChanges: proposals.changes }
   const raw = JSON.stringify({ findings: [], semanticChecks: checks, terminalDispositions: [], terminalProofVerdicts: [],
-    terminalVerdicts: candidate.exitState.objects.map((claim, i) => ({ path: `exitState.objects.${i}`, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: claim }] })),
+    terminalVerdicts: claims.map((claim, i) => ({ path: `exitState.${field}.${i}`, verdict: 'supported', sourceEvidence: [{ segmentId: 'c0', quote: claim }] })),
     proposalDispositions: proposals.changes!.proposals.map(proposal => ({ id: proposal.id, outcome: 'unknown', reason: '原提议没有获得证实。', sourceEvidence: [] })) })
   const inspected = inspectContinuityResponse(raw, { previous: null, current: chapter.content, terminalEvidence: evidence }, true, 8, candidate)
   expect(inspected.complete).toBe(true)
@@ -47,7 +49,7 @@ function sharedFactFixture() {
   const review = currentTerminalReview(validation, chapter.content, evidence, { taskId: 'shared-task', preparedContext })!
   expect(review).toMatchObject({ supported: false, deliveryEligibility: { eligible: true, basis: 'current_supported_with_preserved_drafts' } })
   const proofs = buildTerminalFactProofs({ compilationId: 'shared-compilation', chapter, validation, stateHash, evidence, review })
-  expect(proofs).toHaveLength(20)
+  expect(proofs).toHaveLength(claims.length)
   const compilation = { id: 'shared-compilation', runId: 'shared-run', chapterId: chapter.id, bridge, sceneTasks, validation,
     preparedContext: { ...preparedContext, terminalFactProofs: proofs } }
   const run = { id: 'shared-run', sessionId: 'shared-session', taskRootId: null, startRequest: { prompt: '写第一章' }, taskSpec: { id: 'shared-task' } }
@@ -59,6 +61,21 @@ function sharedFactFixture() {
     { userId: 'author', novelId: 'novel' }, chapter) }
 }
 describe('bounded flat terminal fact chains', () => {
+  it('provides source-bound injury reference to the writer and drops it after an actual predecessor revision change', async () => {
+    const f = sharedFactFixture('body'), before = JSON.stringify(f.compilation)
+    const subject = { userId: 'author', novelId: 'novel' }, db = f.tx as unknown as Prisma.TransactionClient
+    const reference = await readWritingContinuityReference(db, subject, 2, f.chapter)
+    expect(reference?.facts).toMatchObject([{ field: 'body', claim: '林岑左腿伤残尚未愈合，仍须拄拐', proofHash: f.proofs[0].proofHash }])
+    expect(renderWritingContinuityReference(reference)).toContain('shared-chapter@r1:0-')
+    expect(renderWritingContinuityReference(reference)).toContain('不是新授权或本章检查通过证明')
+    expect(JSON.stringify(f.compilation)).toBe(before)
+    f.chapter.revision++
+    const stale = await readWritingContinuityReference(db, subject, 2, f.chapter)
+    expect(stale?.facts).toEqual([])
+    expect(renderWritingContinuityReference(stale)).toContain('人物身体、知识、持有物与关系状态仍未知')
+    expect(renderWritingContinuityReference(stale)).not.toContain('左腿伤残')
+  })
+
   it('authenticates each shared compilation once and preserves the full raw report and exact proof output', async () => {
     const f = sharedFactFixture(), before = JSON.stringify(f.compilation)
     expect(await f.read()).toEqual(f.proofs)

@@ -12,6 +12,10 @@ const db = vi.hoisted(() => ({
 }))
 vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<typeof import('../../api/lib/prisma.js')>(), prisma: db }))
 vi.mock('../../api/lib/agent/writing-volume.js', async original => ({ ...await original<typeof import('../../api/lib/agent/writing-volume.js')>(), readWritingVolumeContext: vi.fn(async () => null) }))
+vi.mock('../../api/lib/agent/writing-continuity-reference.js', async original => ({
+  ...await original<typeof import('../../api/lib/agent/writing-continuity-reference.js')>(), readWritingContinuityReference: vi.fn(async () => null),
+}))
+import { readWritingContinuityReference } from '../../api/lib/agent/writing-continuity-reference.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { buildStoryCompilerDigest, commitChapterBridge, compilationRunScope, prepareStoryCompilation, readPersistedWritingWorkflowMilestones } from '../../api/lib/agent/story-compiler.js'
@@ -30,6 +34,7 @@ const spec = (prompt: string) => {
 }
 beforeEach(() => {
   vi.resetAllMocks()
+  vi.mocked(readWritingContinuityReference).mockResolvedValue(null)
   db.$transaction.mockImplementation(fn => fn(db)); db.$queryRaw.mockResolvedValue([{ id: 'n' }]); db.aiUsageLog.count.mockResolvedValue(0)
   db.novel.findFirst.mockResolvedValue({ id: 'n', chapterCount: 31 })
   db.agentGoalExecution.findUnique.mockResolvedValue(null)
@@ -54,6 +59,23 @@ beforeEach(() => {
 })
 
 describe('story compiler task identity', () => {
+  it('exposes the freshly read predecessor evidence in PREPARE without filling target bridge state or certifying delivery', async () => {
+    const reference = { version: 1 as const, targetOrderIndex: 32,
+      predecessor: { chapterId: 'old31', revision: 3, orderIndex: 31, contentHash: 'a'.repeat(64) },
+      facts: [{ field: 'body', claim: '林岑左腿伤残未愈', proofHash: 'b'.repeat(64), preserved: false,
+        sources: [{ chapterId: 'old29', revision: 1, contentHash: 'c'.repeat(64), start: 3, end: 12 }] }] }
+    vi.mocked(readWritingContinuityReference).mockResolvedValueOnce(reference)
+    const result = await storyCompilerPrepareTool.execute(ctx, { intentSummary: '写下一章' })
+    expect(result.output).toContain('[body] 林岑左腿伤残未愈')
+    expect(result.output).toContain('old29@r1:3-12')
+    expect(result.output).toContain('不是新授权或本章检查通过证明')
+    const data = db.storyCompilation.create.mock.calls[0][0].data
+    expect(data.preparedContext.writingContinuityReference).toEqual(reference)
+    expect(data.bridge.create.bodyState).toEqual([])
+    expect(data.bridge.create.knowledgeState).toEqual([])
+    expect(data.bridge.create.committedAt).toBeUndefined()
+    expect(readWritingContinuityReference).toHaveBeenCalledTimes(1)
+  })
   it.each(['malformed', 'review', 'unbounded', 'selection', 'proposal', 'wrong-run'] as const)('saved workflow recovery rejects %s input before querying progress', async scenario => {
     const original = spec('写下一章')
     const taskSpec = scenario === 'malformed' ? {} : scenario === 'review' ? { ...original, intent: 'review' }
@@ -313,6 +335,22 @@ describe('story compiler task identity', () => {
     expect(db.storyCompilation.create).not.toHaveBeenCalled()
     db.storyCompilation.findFirst.mockResolvedValue({ id: 'broken', bridge: null })
     expect(await chapterBridgeGetTool.execute(ctx, {})).toMatchObject({ outcome: 'failed', failureCode: 'COMPILATION_NOT_FOUND' })
+  })
+  it('re-reads predecessor evidence for bridge_get and never returns a stale saved injury reference', async () => {
+    const stored = { version: 1, targetOrderIndex: 32, predecessor: { chapterId: 'old31', revision: 3 },
+      facts: [{ field: 'body', claim: '旧版伤势已失效，不能复用此句' }] }
+    db.storyCompilation.findFirst.mockResolvedValue({ id: 'own-compiler', chapterId: null, chapter: null,
+      targetOrderIndex: 32, stage: 'prepare', sceneTasks: [],
+      bridge: { fromChapterId: 'old31', sourceRevision: 3 }, preparedContext: { writingContinuityReference: stored } })
+    vi.mocked(readWritingContinuityReference).mockResolvedValueOnce({ version: 1, targetOrderIndex: 32,
+      predecessor: { chapterId: 'old31', revision: 4, orderIndex: 31, contentHash: 'd'.repeat(64) }, facts: [] })
+    const result = await chapterBridgeGetTool.execute(ctx, { compilationId: 'own-compiler' })
+    expect(readWritingContinuityReference).toHaveBeenCalledExactlyOnceWith(db, ctx, 32)
+    expect(result.output).toContain('chapterId=old31@r4')
+    expect(result.output).toContain('人物身体、知识、持有物与关系状态仍未知')
+    expect(result.output).not.toContain('旧版伤势已失效')
+    expect(db.storyCompilation.update).not.toHaveBeenCalled()
+    expect(db.chapterBridge.update).not.toHaveBeenCalled()
   })
   it('marks a missing cross-task continuity compilation as failed instead of showing tool success', async () => {
     await expect(continuityValidateTool.execute(ctx, { compilationId: 'foreign' })).rejects.toMatchObject({ code: 'QUALITY_TASK_TARGET_REQUIRED' })

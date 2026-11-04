@@ -17,6 +17,7 @@ import { readWritingVolumeContext, assertWritingVolumeBoundary, isWritingVolumeT
 import { writingVolumeDecisionSchema, type WritingVolumeDecision } from '../../../shared/contracts/writing-volume-contracts.js'
 import { readReviewCycle } from './review-cycle.js'
 import { saveStoryMemory } from './story-memory.js'
+import { readWritingContinuityReference, type WritingContinuityReference } from './writing-continuity-reference.js'
 
 type PreparedBridge = {
   lastUnfinishedAction: string
@@ -194,7 +195,7 @@ export async function prepareStoryCompilation(input: {
   mode: StoryCompilerMode
   intentSummary: string
   volumeDecision?: WritingVolumeDecision
-}, transaction?: Prisma.TransactionClient): Promise<{ compilation: Prisma.StoryCompilationGetPayload<{ include: { bridge: true } }>; charter: StoryCharter | null; promises: ReaderPromise[]; bridge: PreparedBridge; preparedFirstForTarget: boolean }> {
+}, transaction?: Prisma.TransactionClient): Promise<{ compilation: Prisma.StoryCompilationGetPayload<{ include: { bridge: true } }>; charter: StoryCharter | null; promises: ReaderPromise[]; bridge: PreparedBridge; preparedFirstForTarget: boolean; continuityReference: WritingContinuityReference | null }> {
   if (!transaction) return prisma.$transaction(tx => prepareStoryCompilation(input, tx))
   const db = transaction
   await lockNovelActiveScope(db, input.novelId)
@@ -228,6 +229,7 @@ export async function prepareStoryCompilation(input: {
       select: { title: true, content: true },
     }),
   ])
+  const continuityReference = await readWritingContinuityReference(db, input, target.targetOrderIndex, previousChapter)
   const volumeContext = previousChapter ? await readWritingVolumeContext(db, input, target.targetOrderIndex) : null
   if (writing.writing?.tailVolume && !input.volumeDecision) {
     throw new DataAccessError(400, 'INVALID_ARGUMENTS', `请在PREPARE显式提交volumeDecision及理由，审视本卷目标是否收束；章数不能代替故事边界。当前卷上下文：${JSON.stringify(volumeContext)}`)
@@ -278,6 +280,7 @@ export async function prepareStoryCompilation(input: {
     data: { status: 'abandoned' },
   })
   const preparedContext = {
+    ...(continuityReference ? { writingContinuityReference: continuityReference } : {}),
     ...(priorCycle ? { reviewCycle: priorCycle } : {}),
     volumeContext, volumeDecision,
     charterRevision: bundle.charter?.revision ?? null,
@@ -324,7 +327,7 @@ export async function prepareStoryCompilation(input: {
     },
     include: { bridge: true },
   })
-  return { compilation, charter: bundle.charter, promises: bundle.promises, bridge, preparedFirstForTarget: priorRepairStates.length === 0 }
+  return { compilation, charter: bundle.charter, promises: bundle.promises, bridge, preparedFirstForTarget: priorRepairStates.length === 0, continuityReference }
 }
 
 export async function saveSceneTasks(input: {

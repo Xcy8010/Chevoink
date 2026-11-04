@@ -163,7 +163,7 @@ export async function authenticateContinuityPhasePlan(db: Prisma.TransactionClie
   if (!chapter) return false
   let revisionAuthority = false
   if (plan.revisionAuthority) {
-    const authority = plan.revisionAuthority.source === 'original_repair' ? originalRepairAuthority(original) ? { taskId: original.taskId } : null
+    const authority = plan.revisionAuthority.source === 'original_repair' ? originalRepairAuthority(original, chapter.id) ? { taskId: original.taskId } : null
       : chapter ? await (await import('./writing-scope.js')).readNewDraftWritingAuthority(db, subject, chapter) : null
     revisionAuthority = !!authority && plan.revisionAuthority.sourceHash === runtimeJson({ source: plan.revisionAuthority.source,
       taskId: original.taskId, sourceRunId: original.sourceRunId, chapterId: plan.chapterId, authority }).hash
@@ -285,7 +285,7 @@ export async function readOriginalCycleContinuityVerification(db: Prisma.Transac
     chapterId: input.chapterId, runId: { in: runIds } }, include: { chapter: true } })
   const cycle = saved ? (await import('./review-cycle.js')).readReviewCycle(saved.preparedContext,
     { taskId: original.taskId, userId: ctx.userId, novelId: ctx.novelId, chapterId: input.chapterId }) : null
-  const source = originalRepairAuthority(original) ? { taskId: original.taskId }
+  const source = originalRepairAuthority(original, input.chapterId) ? { taskId: original.taskId }
     : saved?.chapter ? await (await import('./writing-scope.js')).readNewDraftWritingAuthority(db, ctx, saved.chapter) : null
   const revision = saved && !cycle ? (await import('./writing-scope.js')).readNewDraftRevision(saved.validation) : null
   // An incomplete required report cannot create a ready reviewCycle. The

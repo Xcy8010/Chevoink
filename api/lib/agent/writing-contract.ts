@@ -10,7 +10,8 @@ export function frozenWritingScopeHash(scope: TaskSpec['scope']): string {
     localEditProtocol: scope.localEditProtocol ?? null, selection: scope.selection ?? null, selectionBoundary: scope.selectionBoundary ?? null,
     requestHash: interpretation?.requestHash ?? null, intent: interpretation?.intent ?? null,
     revisionDenied: interpretation?.revisionDenied ?? null, creationDenied: interpretation?.creationDenied ?? null,
-    operations: interpretation?.operations ?? null, excludedChapterIds: interpretation?.excludedChapterIds ?? null }).hash
+    operations: interpretation?.operations ?? null, excludedChapterIds: interpretation?.excludedChapterIds ?? null,
+    ...(scope.writingActions ? { writingActions: scope.writingActions } : {}) }).hash
 }
 
 export function assertFrozenWritingContract(spec: TaskSpec): void {

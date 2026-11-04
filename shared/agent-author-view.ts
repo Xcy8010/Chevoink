@@ -12,6 +12,11 @@ const operationalCue = /^\s*(?:(?:现在|接下来|正在|已经|然后|我(?:�
 const protocolAssignment = /^\s*(?:[a-z][\w]*Id|arguments|toolName|function_call|tool_call)\s*[=:：]/
 const protocolJson = /[[{]\s*"(?:tool|name|arguments|chapterId|compilationId|model|reasoningEffort|thinkingEnabled|provider|apiKey)"\s*:/
 const opaqueId = /\b(?:c[a-z0-9]{20,}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\b/gi
+const scopeFailureLabels: Record<string, string> = {
+  AUTHOR_CHAPTER_SCOPE: '章节修改范围不匹配',
+  AUTHOR_SELECTION_STALE: '所选正文已经变化',
+  STORY_TASK_TARGET_MISMATCH: '章节目标不匹配',
+}
 
 function isOperational(text: string): boolean {
   // Markdown list/heading syntax is structure, not part of the statement.
@@ -19,6 +24,12 @@ function isOperational(text: string): boolean {
   text = text.trimStart().replace(/^(?:(?:[-*+] |\d+[.)、] |#{1,6} )\s*)+/, '')
   if (text.startsWith('>')) return false
   if (operationalCue.test(text) || protocolAssignment.test(text)) return true
+  // Status explanations can start with the result ("Both edits were rejected")
+  // rather than "I will call". Recognize actual registered protocol names,
+  // never arbitrary identifier-shaped words in a manuscript.
+  if (/失败|拒绝|权限|授权|工具|无法|未能|rejected|denied|permission|failed|unavailable/iu.test(text)
+    && (Object.keys(scopeFailureLabels).some(code => text.includes(code))
+      || [...text.matchAll(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g)].some(match => hasAgentToolPresentation(match[0])))) return true
   const first = /^\s*([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b/.exec(text)?.[1]
   return Boolean(first && hasAgentToolPresentation(first))
 }
@@ -29,7 +40,7 @@ function removeOperationalCode(text: string): string {
   if (!/[`~]/.test(text) && !/^(?: {4}|\t)/m.test(text)) return text
   type Node = { type: string; value?: string; position?: { start: { offset?: number }; end: { offset?: number } }; children?: Node[] }
   const stack: Node[] = [fromMarkdown(text)]
-  const ranges: Array<{ start: number; end: number }> = []
+  const ranges: Array<{ start: number; end: number; replacement?: string }> = []
   while (stack.length) {
     const node = stack.pop()!
     if (node.type === 'code' || node.type === 'inlineCode') {
@@ -37,13 +48,19 @@ function removeOperationalCode(text: string): string {
       if (start === undefined || end === undefined) continue
       const introduction = text.slice(0, start).split(/\n\s*\n/).map(part => part.trim()).filter(Boolean).at(-1) ?? ''
       const payload = node.value ?? ''
+      if (node.type === 'inlineCode' && hasAgentToolPresentation(payload.trim())
+        && /工具|权限|授权|失败|拒绝|未能|没能|cannot|failed|denied|rejected/iu.test(introduction)
+        && !/示例|例子|引用|原文|作者|小说|对话|example|quote/i.test(introduction)) {
+        ranges.push({ start, end, replacement: getAgentToolPresentation(payload.trim()).label })
+        continue
+      }
       if (isOperational(introduction) && !/示例|例子|引用|原文|作者|小说|对话|example|quote/i.test(introduction)
         && (/^\s*[[{]/.test(payload) || /\b(?:\w+Id|arguments|toolName|reasoningEffort|thinkingEnabled)\b/.test(payload)
           || hasAgentToolPresentation(payload.trim()))) ranges.push({ start, end })
     } else if (node.children) stack.push(...node.children)
   }
   ranges.sort((a, b) => b.start - a.start)
-  for (const range of ranges) text = text.slice(0, range.start) + text.slice(range.end)
+  for (const range of ranges) text = text.slice(0, range.start) + (range.replacement ?? '') + text.slice(range.end)
   return text
 }
 
@@ -82,6 +99,7 @@ export function projectAgentAuthorText(text: string): string {
       if (/\b[A-Za-z]\w*\s*[=:：]|(?:编译任务|编译编号|目标章节|章节编号|场景任务|任务窗口|任务编号)\s*[=＝:：]/.test(paragraph)
         || protocolJson.test(paragraph)) return ''
       let visible = paragraph.replace(opaqueId, '')
+        .replace(/\b(?:AUTHOR_CHAPTER_SCOPE|AUTHOR_SELECTION_STALE|STORY_TASK_TARGET_MISMATCH)\b/g, name => scopeFailureLabels[name])
         .replace(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g, name =>
           hasAgentToolPresentation(name) ? getAgentToolPresentation(name).label
             : /调用|工具|协议|\bcall\b/i.test(paragraph) ? '推进创作' : name)

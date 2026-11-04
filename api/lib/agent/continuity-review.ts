@@ -436,7 +436,7 @@ async function finishContinuityReview(ctx: ToolContext, args: ContinuityReviewAr
     || ctx.inlineChild || ctx.sandboxMode === 'read_only' || ctx.protectedChapterIds?.has(report.chapterId)) return reportResult(snapshot, report, cached)
   const { automaticChapterRevisionWritable } = await import('./tools/chapter-mutation.js')
   if (!await automaticChapterRevisionWritable(prisma, ctx)) return reportResult(snapshot, report, cached)
-  const allowed = originalRepairAuthority(snapshot.original) || !!await readNewDraftWritingAuthority(prisma, ctx, snapshot.chapter)
+  const allowed = originalRepairAuthority(snapshot.original, snapshot.chapter.id) || !!await readNewDraftWritingAuthority(prisma, ctx, snapshot.chapter)
   const selected = allowed ? selectAutomaticQualityFindings(report.findings.filter(finding => finding.startOffset >= 0 && finding.endOffset > finding.startOffset)) : []
   if (!selected.length) return reportResult(snapshot, report, cached)
   const { probeChapterReviewRevision, readChapterReviewReadiness } = await import('./chapter-review-guard.js')

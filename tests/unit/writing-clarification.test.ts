@@ -25,7 +25,7 @@ function fixture() {
   const create = vi.fn(async ({ data }: { data: { metadata: unknown } }) => { artifacts.push(data); return data })
   const count = vi.fn(async () => 0)
   const tx = { $queryRaw: vi.fn(async () => [{ id: 'n' }]), agentGoalExecution: { findUnique: vi.fn(async () => null) },
-    agentRun: { findFirst: vi.fn(async () => run), findFirstOrThrow: vi.fn(async () => run) },
+    agentRun: { findFirst: vi.fn(async () => run), findFirstOrThrow: vi.fn(async () => run), findMany: vi.fn(async () => []) },
     chapter: { count, findMany: vi.fn(async () => []) },
     agentArtifact: { findMany: vi.fn(async () => artifacts), create } } as unknown as Prisma.TransactionClient
   return { subject, spec, admission, artifacts, create, tx, run, count,

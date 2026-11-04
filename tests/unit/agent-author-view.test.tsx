@@ -10,6 +10,17 @@ import { getMessageText } from '../../src/features/studio/agent/lib/panel-helper
 import { describeToolArguments } from '../../src/features/studio/agent/tool-argument-view'
 
 afterEach(() => { cleanup(); useAgentStore.getState().resetRun() })
+it('explains scope failures without exposing internal codes in status prose', () => {
+  const visible = projectAgentAuthorText('Both edits were rejected with AUTHOR_CHAPTER_SCOPE. 正文未改动。')
+  expect(visible).not.toContain('AUTHOR_CHAPTER_SCOPE')
+  expect(visible).toContain('章节修改范围不匹配')
+  expect(visible).toContain('正文未改动')
+  const inline = projectAgentAuthorText('第1章的修改本轮没能执行：`chapter_edit_range` 不在授权工具集中，正文未动。')
+  expect(inline).not.toContain('chapter_edit_range')
+  expect(inline).toContain('正文未动')
+  const quoted = '作者引用：“Both edits were rejected with AUTHOR_CHAPTER_SCOPE.”'
+  expect(projectAgentAuthorText(quoted)).toBe(quoted)
+})
 const raw = '调用 scene_task_build，compilationId=cmttleebg03h9wqox9lieracs。'
 const manuscript = 'AnnBlue says hello_world, 12345678901234567890。她说：“调用 chapter_write。”'
 const history: AgentUIMessage = { id: 'a', runId: 'r', role: 'assistant', createdAt: '2026-10-11T00:00:00Z', parts: [

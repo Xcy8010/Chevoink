@@ -33,9 +33,9 @@ const numberPattern = `(?:${numeric})`
 const join = '(?:、|及|与|和|至|到|[-–—−~～〜－]|\\s+)'
 const chapterPattern = `(?:第\\s*)?${numberPattern}\\s*(?:章)?(?:\\s*${join}\\s*(?:第\\s*)?${numberPattern}\\s*(?:章)?)*\\s*章`
 const numbered = new RegExp(`^(?:第\\s*)?(${numberPattern})\\s*章$`, 'u')
-const revisionWords = '修订|修正|修改|改写|重写|扩写|缩写|修复|纠正|纠错|润色|优化|调整|替换|改名|重命名|改为|改成|插入|删除|删掉|删去|精简|补充|增加|整改|补足|解决|不动|改(?!价|变|卷)'
+const revisionWords = '修订|修正|修改|改写|重新写|重写|扩写|缩写|修复|纠正|纠错|润色|优化|调整|替换|改名|重命名|改为|改成|插入|删除|删掉|删去|精简|补充|增加|整改|补足|解决|不动|改(?!价|变|卷)'
 const preservationWords = '保持不变|保持原样|保留原样|保留|保持|不变'
-const writeWords = '续写|继续(?!\\s*(?:写|创作|起草))|创作|起草|补写|补完|补齐|写完|完成|写入|落稿|新建|创建|新增|建章|保存|存入|导出|生成|发布|制定|拟定|编写|撰写|设计|构思|策划|整理|写(?!作)'
+const writeWords = '继续\\s*(?:写|创作|起草)|续写|继续(?!\\s*(?:写|创作|起草))|创作|起草|补写|补完|补齐|写完|完成|写入|落稿|新建|创建|新增|建章|保存|存入|导出|生成|发布|制定|拟定|编写|撰写|设计|构思|策划|整理|写(?!作)'
 const structureWords = '移动|重排|排序|拆分|合并'
 const reviewWords = '检查|审查|审阅|核对|核实|评估|分析|判断|检视|看看|复检|复核|校验'
 const readWords = '读取|阅读|读完|参考|参照|根据|对照|呼应|回顾|借鉴|比照|通读|引用|搜索|检索|查找|查阅|研究|读'
@@ -57,6 +57,9 @@ const advice = /如何|怎样|怎么|建议|方案|思路|方法|说明|讲解|\
 const connective = /并且|然后|接着|同时|但是|不过|而且|并|但|且|再|\b(?:and|then|but)\b/iu
 const conditionalRevisionModifier = /(?:按(?:照)?(?:需要|必要性|需)|视(?:需要|情况)|必要时|如有必要|如需|if\s+(?:needed|necessary)|as\s+needed)\s*$/iu
 const editorAfterRelation = /(?:当前(?:这)?(?:章|章节)|正在编辑(?:的)?(?:这章|章节|章))(?:之|以)?后|\bafter\s+(?:the\s+)?(?:current|currently edited)\s+chapter\b/giu
+// An elided object is recoverable only for an imperative/permission speech act.
+// Arbitrary prose before a terminal verb is not a command with a missing noun.
+const elidedCommandHead = /^(?:(?:请(?:你)?|帮我|替我|为我|给我|麻烦(?:你)?|现在|直接|先|再|就|只|然后|接着|继续|全部|所有|可以|允许你|(?:我)?(?:现|现在)?(?:明确)?授权(?:你)?(?:可以)?|please|then|continue|all)\s*)*$/iu
 
 /** UTF-16 coordinates stay identical to the author's input. A quotation never
  * becomes a whitespace join that can synthesize a new number or operation. */
@@ -539,9 +542,13 @@ function interpretAuthorWritingRequest(prompt: string, directory?: AuthorWriting
       else if (sourceQuotes.some(quote => !quote.closed)) reason = 'unclosed_source_quote'
       else if (kind === 'write' && /完成|finish|complete/iu.test(match[0]) && matches.slice(index + 1).some(next => reviewPattern.test(next[0]))
         && !/并|然后|后|再/u.test(after)) reason = 'review_wrapper'
+      else if (kind === 'write' && /^(?:完成|finish|complete)$/iu.test(match[0]) && previous?.kind === 'review'
+        && !after.trim() && !connective.test(between)) reason = 'review_wrapper'
       else if ((kind === 'write' || kind === 'revise') && nextMatch && reviewPattern.test(nextMatch[0])
         && !conditionalRevision && !/并|与|和|然后|后|再|\b(?:and|then)\b/iu.test(after)) reason = 'review_subject'
-      else if ((kind === 'write' || kind === 'revise') && !bound.length && !quoteEdit && !explicitLocal && !conditionalRevision && !implicitWriting) reason = 'no_manuscript_object'
+      else if ((kind === 'write' || kind === 'revise') && !bound.length && !quoteEdit && !explicitLocal && !conditionalRevision && !implicitWriting) reason = after.trim()
+        || !elidedCommandHead.test(before.trim()) || /[?？]/u.test(prompt.slice(clause.end, clause.end + 1))
+        || lexical.quoted.some(quote => quote.start >= end && quote.end <= right) ? 'no_manuscript_object' : 'mutation_unresolved'
       else if (kind === 'structure' && !bound.length) reason = 'no_manuscript_object'
       else if (kind === 'revise' && !quoteEdit && bound.length && bound.every(targetIndex => targets[targetIndex].span.end <= start)
         && !/^(?:改名|重命名|rename)$/iu.test(match[0])
@@ -550,7 +557,7 @@ function interpretAuthorWritingRequest(prompt: string, directory?: AuthorWriting
         && !/[:：]|正文|草稿|稿件|问题/u.test(before + after)) reason = 'unbound_postposed_operation'
       if (reason === 'negated' && ['write', 'revise'].includes(kind)) exclusions.push(clause.text.trim())
       if (reason === 'unclosed_source_quote') reasons.add(reason)
-      const accepted = polarity === 'affirmative' && ['author_operation'].includes(reason)
+      const accepted = polarity === 'affirmative' && ['author_operation', 'mutation_unresolved'].includes(reason)
       const operation: AuthorWritingOperation = { span: { start, end }, clauseSpan: spanOf(clause), kind, polarity, accepted, reason, targetIndices: bound }
       const governorIndex = assessed.get(index)
       if (reason === 'assessment_predicate' && governorIndex !== undefined && governorIndex !== null) {
@@ -650,6 +657,11 @@ function interpretAuthorWritingRequest(prompt: string, directory?: AuthorWriting
 
 export function parseAuthorWritingRequest(prompt: string): AuthorWritingRequest {
   return interpretAuthorWritingRequest(prompt)
+}
+
+/** Preserve each predicate's argument before forming the compatibility union. */
+export function authorOperationRange(request: AuthorWritingRequest, operation: AuthorWritingOperation, directory?: AuthorWritingDirectory) {
+  return mergeRanges(operation.targetIndices.flatMap(index => request.evidence.targets[index].range ? [request.evidence.targets[index].range!] : []), directory)
 }
 
 /** Only fresh admission supplies its locked, complete directory snapshot. */

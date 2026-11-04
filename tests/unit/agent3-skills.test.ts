@@ -31,7 +31,10 @@ describe('Agent 3.0 Skill OS deterministic router', () => {
       'cn-webfiction-draft.v3',
       'cn-scene-task.v3',
     ]))
-    expect(decision.selected.length).toBeLessThanOrEqual(3)
+    expect(decision.selected.length).toBeLessThanOrEqual(6)
+    expect(decision.selected.map(skill => skill.id)).toEqual(expect.arrayContaining([
+      'cn-character-voice.v3', 'cn-emotion-grounding.v3', 'cn-prose-specificity.v3',
+    ]))
     expect(decision.reasonCodes).toContain('WRITE_CHAPTER')
     expect(decision.estimatedTokens).toBeGreaterThan(0)
 

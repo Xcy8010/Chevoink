@@ -5,6 +5,19 @@ import { nextSkillPhase } from '../../api/lib/agent/skills/lifecycle'
 const ids = (prompt: string, intent: 'write' | 'plan' | 'revise' = 'write', catalog = skillCatalog) => routeSkills({ mode: 'build', intent, prompt, freedom: 'balanced', catalog }).selected.map(s => s.id)
 
 describe('Work skill routing regressions', () => {
+  it('loads ordinary prose responsibilities without asking the author for skill keywords', () => {
+    for (const prompt of ['写下一章', '接着刚才的情节写', '完成这场戏']) {
+      expect(ids(prompt)).toEqual(expect.arrayContaining([
+        'cn-character-voice.v3', 'cn-emotion-grounding.v3', 'cn-prose-specificity.v3',
+      ]))
+    }
+    const frozen = routeSkills({ mode: 'build', intent: 'write', freedom: 'balanced', prompt: '写下一章', routerVersion: '4.0.0' })
+    expect(frozen.reasonCodes).not.toContain('DRAFT_FOUNDATION')
+    const disabled = skillCatalog.filter(skill => skill.id !== 'cn-character-voice.v3')
+    expect(ids('写下一章', 'write', disabled)).not.toContain('cn-character-voice.v3')
+    const nonDraft = routeSkills({ mode: 'build', intent: 'write', phase: 'scene', freedom: 'balanced', prompt: '写下一章' })
+    expect(nonDraft.reasonCodes).not.toContain('DRAFT_FOUNDATION')
+  })
   it('loads both planning skills in Work build mode without altering immutable resources', () => {
     expect(ids('为新书设计定位和长篇分卷大纲', 'plan')).toEqual(expect.arrayContaining(['cn-project-positioning.v3', 'cn-long-outline.v3']))
     expect(skillCatalog[0].modes).toEqual(['plan'])

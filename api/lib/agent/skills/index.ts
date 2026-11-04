@@ -16,6 +16,7 @@ export type SkillReasonCode =
   | 'REPETITION_RISK'
   | 'CUSTOM_TRIGGER'
   | 'MANUAL_PIN'
+  | 'DRAFT_FOUNDATION'
 
 type SkillTrigger = {
   pattern: RegExp
@@ -281,7 +282,7 @@ export const historicalBuiltinCatalog: AgentSkill[] = [
 
 export const BUILTIN_SKILL_PACK_VERSION = '4.0.0'
 // 4.0 publishes the current pack; historical router identities keep their own catalogs.
-export const SKILL_ROUTER_VERSION = '4.0.0'
+export const SKILL_ROUTER_VERSION = '4.1.0'
 const RELEASE_GUIDANCE = '本任务的完整原始作者要求与服务端冻结边界优先。局部修改先读取当前正文，再用唯一原文片段精确修订，不借整章覆盖扩大范围；定位不足先补充证据。正文改变后完成本任务要求的当前版本检查。严格审查逐项实际应用或记录有依据的保留理由；保存、检查完成和任务交付分别按真实结果汇报。'
 
 /** Frozen 3.5 pack, including resources not yet loaded by an existing run. */
@@ -384,7 +385,7 @@ export function routeSkills(input: {
   const normalizedPrompt = input.prompt.trim()
   // Only current built-in routing normalizes equivalent author language. Saved
   // runs and user-authored trigger expressions keep their original semantics.
-  const builtinPrompt = ['3.6.0', '3.7.0', SKILL_ROUTER_VERSION].includes(routerVersion) ? normalizedPrompt.replace(/(?:A\s*I\s*(?:味|痕迹|感)|人工智能\s*(?:味|痕迹)|机器味)/giu, 'AI味') : normalizedPrompt
+  const builtinPrompt = ['3.6.0', '3.7.0', '4.0.0', SKILL_ROUTER_VERSION].includes(routerVersion) ? normalizedPrompt.replace(/(?:A\s*I\s*(?:味|痕迹|感)|人工智能\s*(?:味|痕迹)|机器味)/giu, 'AI味') : normalizedPrompt
   const isEnabled = (skill: AgentSkill): boolean => input.enabledSkillIds?.has(skill.id) ?? true
 
   const pinnedCandidates: SkillRouteCandidate[] = input.pinnedSkillIds?.size
@@ -410,8 +411,15 @@ export function routeSkills(input: {
       skill.phases.includes(phase) && !blockedByNegative(skill, skill.owner === 'chevoink' ? builtinPrompt : normalizedPrompt))
     .map((skill) => {
       const matchedTriggers = skill.triggers.filter((trigger) => trigger.pattern.test(skill.owner === 'chevoink' ? builtinPrompt : normalizedPrompt))
-      const reasonCodes = [...new Set(matchedTriggers.map((trigger) => trigger.reasonCode))]
-      const score = baseIntentScore(skill, input.intent) + matchedTriggers.reduce((total, trigger) => total + trigger.weight, 0) + skill.priority / 100
+      // These are ordinary prose-writing responsibilities, not features an
+      // author must name in every continuation. Keep specialist/custom trigger
+      // semantics and frozen routers intact; only enabled eligible resources
+      // participate, and their own instructions remain conditional on scene.
+      const foundation = routerVersion === '4.1.0' && input.intent === 'write' && phase === 'draft'
+        && skill.owner === 'chevoink' && ['cn-prose-specificity.v3', 'cn-character-voice.v3', 'cn-emotion-grounding.v3'].includes(skill.id)
+      const reasonCodes: SkillReasonCode[] = [...new Set([...matchedTriggers.map((trigger) => trigger.reasonCode),
+        ...(foundation ? ['DRAFT_FOUNDATION' as const] : [])])]
+      const score = Math.max(baseIntentScore(skill, input.intent), foundation ? 35 : 0) + matchedTriggers.reduce((total, trigger) => total + trigger.weight, 0) + skill.priority / 100
       return { skill, score, reasonCodes }
     })
     .sort((left, right) => right.score - left.score || right.skill.priority - left.skill.priority)
@@ -458,7 +466,8 @@ export function routeSkills(input: {
     ...primaryCandidates.filter((candidate) => !authorReserved.includes(candidate) && !explicitlyMatchedSpecialists.includes(candidate)),
     ...authorFallbackCandidates.filter((candidate) => !authorReserved.includes(candidate)),
   ]
-  const hardCap = Math.min(6, maxLoaded + pinnedCandidates.length + authorReserved.length)
+  const draftFoundation = routerVersion === '4.1.0' && input.intent === 'write' && phase === 'draft'
+  const hardCap = Math.min(6, (draftFoundation ? 6 : maxLoaded) + pinnedCandidates.length + authorReserved.length)
   for (const candidate of orderedCandidates) {
     if (selectedCandidates.length >= hardCap) break
     // 手动指定不参与冲突让位：作者已经表态要用它。

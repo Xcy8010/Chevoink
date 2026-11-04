@@ -112,15 +112,15 @@ export function hasOriginalRepairAuthority(prompt: string | null): boolean {
       .replace(/(?:修复|修正|修订|纠正|纠错|改写|修改|润色|重写|整改|优化)(?:的)?(?:建议|方案|思路|方法|情况)/gu, '')))
 }
 
-export async function assertOriginalRepairAuthority(tx: Prisma.TransactionClient, subject: Subject) {
-  if (!originalRepairAuthority(await readOriginalTaskRequest(tx, subject))) {
+export async function assertOriginalRepairAuthority(tx: Prisma.TransactionClient, subject: Subject, chapterId?: string) {
+  if (!originalRepairAuthority(await readOriginalTaskRequest(tx, subject), chapterId)) {
     throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '原始请求未授权检查后改写正文；保留报告与当前正文。')
   }
 }
 
 /** Fresh author interpretation is the authority; recovery never substitutes a
  * truncated goal or a second lexical classifier for its frozen decision. */
-export function originalRepairAuthority(original: { prompt: string | null; spec: unknown }): boolean {
+export function originalRepairAuthority(original: { prompt: string | null; spec: unknown }, chapterId?: string): boolean {
   const raw = record(original.spec), scope = record(raw?.scope)
   if (scope && 'authorEffects' in scope) {
     const parsed = taskSpecSchema.safeParse(original.spec)
@@ -137,6 +137,14 @@ export function originalRepairAuthority(original: { prompt: string | null; spec:
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原作者操作解释与请求不匹配，不能重新猜测修订授权。')
   }
   assertFrozenWritingContract(parsed.data)
+  if (parsed.data.scope.writingActions) {
+    if (parsed.data.scope.localEditBoundary?.version === 3 || parsed.data.scope.writing?.kind !== 'bounded'
+      || parsed.data.scope.writingInterpretation.revisionDenied) return false
+    const revised = parsed.data.scope.writingActions.operations.filter(operation => operation.kind === 'revise' && operation.resolution === 'bound')
+    return chapterId ? revised.some(operation => operation.targets.some(target => target.chapterId === chapterId))
+      : parsed.data.scope.writing.targets.length > 0 && parsed.data.scope.writing.targets.every(target => revised.some(operation =>
+        operation.targets.some(item => item.chapterId === target.chapterId && item.orderIndex === target.orderIndex)))
+  }
   return parsed.data.scope.localEditBoundary?.version !== 3 && parsed.data.scope.writing?.kind !== 'needs_input' && !!parsed.data.scope.writing?.repairAuthorized
     && parsed.data.scope.writingInterpretation.operations.some(operation => operation.kind === 'revise' && operation.polarity === 'affirmative')
 }

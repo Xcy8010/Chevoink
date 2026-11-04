@@ -1,4 +1,5 @@
 import { reviewContinuity } from '../continuity-review.js'
+import { readWritingContinuityReference, renderWritingContinuityReference } from '../writing-continuity-reference.js'
 import type { ToolResult } from './types.js'
 export { parseIndependentContinuityResult, continuityCriticSystem, continuityReviewTail, parseContinuityPatches, standaloneContinuityBindingHash } from '../continuity-history.js'
 import { retainedFindings } from './chapter-arguments.js'
@@ -242,7 +243,7 @@ export const storyCompilerPrepareTool = defineTool({
       bridge.openLoops.length ? `开放钩子：${bridge.openLoops.slice(0, 4).join('；')}` : '无已记录开放钩子',
     ]
     return {
-      output: `PREPARE 完成，compilationId=${prepared.compilation.id}，chapterId=${prepared.compilation.chapterId ?? '尚未创建（写入后取真实编号）'}，目标全书第 ${prepared.compilation.targetOrderIndex} 章。章节编号与编译编号不可混用。${prepared.charter ? `已加载 Story Charter r${prepared.charter.revision}` : '当前无 Story Charter，旧作可继续，但新书长纲应先建立。'}下一步只调用一次 scene_task_build 生成 1–4 个 Scene Task，禁止直接跳到正文；精品候选取舍由服务端记录，不需要手工补 alternatives。\n${items.join('\n')}`,
+      output: `PREPARE 完成，compilationId=${prepared.compilation.id}，chapterId=${prepared.compilation.chapterId ?? '尚未创建（写入后取真实编号）'}，目标全书第 ${prepared.compilation.targetOrderIndex} 章。章节编号与编译编号不可混用。${prepared.charter ? `已加载 Story Charter r${prepared.charter.revision}` : '当前无 Story Charter，旧作可继续，但新书长纲应先建立。'}下一步只调用一次 scene_task_build 生成 1–4 个 Scene Task，禁止直接跳到正文；精品候选取舍由服务端记录，不需要手工补 alternatives。\n${items.join('\n')}\n${renderWritingContinuityReference(prepared.continuityReference) ?? ''}`,
       summary: `准备第 ${prepared.compilation.targetOrderIndex} 章写作`,
       ...(workflowMilestone ? { workflowMilestone } : {}),
       display: {
@@ -427,6 +428,7 @@ export const chapterBridgeGetTool = defineTool({
       include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: true } })
     if (!compilation && !args.compilationId) return { output: `当前任务尚未建立章节桥。${await missingCompilationGuidance(db, ctx, scope)}`, summary: '本任务尚未建立章节桥' }
     if (!compilation?.bridge) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND', output: '没有当前作者任务可读取的章节桥。', summary: '未找到章节编译状态' }
+    const continuityReference = await readWritingContinuityReference(db, ctx, compilation.targetOrderIndex)
     const review = await readChapterReviewReadiness(db, ctx, compilation.id)
     const retained = review?.retainedDecisions ?? []
     const items = [`第 ${compilation.targetOrderIndex} 章；${review?.terminalCommitted ? '当前正文已提交' : '当前正文尚未提交'}`,
@@ -435,7 +437,8 @@ export const chapterBridgeGetTool = defineTool({
     return { summary: `读取第 ${compilation.targetOrderIndex} 章章节桥`,
       ...(review?.decisionFeedback ? { reviewDecisionFeedback: review.decisionFeedback } : {}),
       output: `compilationId=${compilation.id}；chapterId=${compilation.chapterId ?? '尚未创建'}；revision=${compilation.chapter?.revision ?? '无正文'}\n${items.join('\n')}
-前章来源：${JSON.stringify({ chapterId: compilation.bridge.fromChapterId, revision: compilation.bridge.sourceRevision })}
+原章节桥保存的前章来源：${JSON.stringify({ chapterId: compilation.bridge.fromChapterId, revision: compilation.bridge.sourceRevision })}
+${renderWritingContinuityReference(continuityReference) ?? ''}
 场景任务：${JSON.stringify(compilation.sceneTasks.map(task => ({ ordinal: task.ordinal, purpose: task.purpose, goal: task.goal, obstacle: task.obstacle, cost: task.cost, turn: task.turn })))}
 当前报告意见：${JSON.stringify(review?.decisionDetails ?? [])}
 明确保留意见：${JSON.stringify(retained)}\n${review ? chapterReviewDecisionGuidance(review) : ''}`,

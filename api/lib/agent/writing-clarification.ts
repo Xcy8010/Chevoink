@@ -22,7 +22,7 @@ const clarificationBase = z.object({ writingScopeClarification: z.literal(true),
   contentHash: digest }).strict()
 const clarificationSchema = z.discriminatedUnion('version', [
   clarificationBase.extend({ version: z.literal(1), targetOrderIndex: z.literal(1) }),
-  clarificationBase.extend({ version: z.literal(2), projection: taskScopeSchema.pick({ writing: true, localEditBoundary: true }) }),
+  clarificationBase.extend({ version: z.literal(2), projection: taskScopeSchema.pick({ writing: true, localEditBoundary: true, writingActions: true }) }),
 ])
 export type WritingClarification = z.infer<typeof clarificationSchema>
 
@@ -47,8 +47,33 @@ export function eligibleWritingClarification(spec: TaskSpec) {
 }
 
 type ClarificationChapter = { id: string; revision: number; orderIndex: number; orderInVolume: number; volumeId: string; content: string; volume: { orderIndex: number } }
-export function clarifyWritingProjection(spec: TaskSpec, prompt: string, answer: string, chapters: ClarificationChapter[]) {
+type WritingProjection = Pick<TaskSpec['scope'], 'localEditBoundary' | 'writingActions'> & { writing: Writing }
+export function clarifyWritingProjection(spec: TaskSpec, prompt: string, answer: string, chapters: ClarificationChapter[]): WritingProjection | null {
   if (!eligibleWritingClarification(spec) || /[?？]/u.test(lexAuthorWritingRequest(answer).masked)) return null
+  if (spec.scope.writingActions?.operations.some(operation => operation.resolution === 'denied')) return null
+  if (spec.scope.writingActions?.operations.some(operation => operation.resolution === 'needs_input')) {
+    const pending = spec.scope.writingActions.operations.filter(operation => operation.resolution === 'needs_input')
+    // A single answer cannot disambiguate two different missing arguments.
+    const emptyPlacement = !chapters.length && pending.every(operation => operation.kind === 'write')
+      && eligibleEmptyWritingClarification(spec, prompt)
+    if (pending.length !== 1 && !emptyPlacement) return null
+    const missing = pending[0], parsed = parseAuthorWritingRequest(prompt)
+    if (parsed.reasons.some(reason => reason !== 'conflicting_targets')) return null
+    const clause = parsed.evidence.clauses.find(clause => clause.start <= missing.start && missing.end <= clause.end)
+    if (!clause) return null
+    const narrowed: TaskSpec = { ...spec, intent: missing.kind, scope: { ...spec.scope, writingActions: undefined,
+      writing: { ...spec.scope.writing!, kind: 'needs_input', targets: [] } } }
+    const answerProjection = clarifyWritingProjection(narrowed, [clause.text, ...parsed.exclusions].join('。'), answer, chapters)
+    if (!answerProjection) return null
+    const operations = spec.scope.writingActions.operations.map(operation => pending.includes(operation)
+      ? { ...operation, resolution: 'bound' as const, targets: answerProjection.writing.targets } : operation)
+    const targets = [...new Map(operations.flatMap(operation => operation.targets).map(target => [target.orderIndex, target])).values()]
+    const repairAuthorized = targets.length > 0 && targets.every(target => operations.some(operation => operation.kind === 'revise'
+      && operation.targets.some(item => item.chapterId === target.chapterId && item.orderIndex === target.orderIndex)))
+    return { writing: { ...spec.scope.writing!, kind: 'bounded' as const, targets, repairAuthorized },
+      writingActions: { ...spec.scope.writingActions, operations },
+      ...(answerProjection.localEditBoundary ? { localEditBoundary: answerProjection.localEditBoundary } : {}) }
+  }
   if (!chapters.length && !spec.scope.localEditBoundary && eligibleEmptyWritingClarification(spec, prompt)
     && explicitFirstChapterAnswer(answer)) return { writing: effectiveWriting(spec.scope.writing!) }
   const original = parseAuthorWritingRequest(prompt), raw = parseAuthorWritingRequest(answer)
@@ -115,11 +140,20 @@ export function clarifyWritingProjection(spec: TaskSpec, prompt: string, answer:
     if (!localEditBoundary || localEditBoundary.kind !== 'bounded' || !protections || localEditBoundary.regions.some(region =>
       protections.some(protectedRegion => region.start < protectedRegion.end && protectedRegion.start < region.end))) return null
   }
-  return { writing, ...(localEditBoundary ? { localEditBoundary } : {}) }
+  return { writing, ...(spec.scope.writingActions ? { writingActions: spec.scope.writingActions } : {}), ...(localEditBoundary ? { localEditBoundary } : {}) }
 }
 
 export function projectWritingClarification(spec: TaskSpec, evidence: WritingClarification): TaskSpec {
   if (evidence.version === 1) return { ...spec, scope: { ...spec.scope, writing: effectiveWriting(spec.scope.writing!) } }
+  const projectedActions = evidence.projection.writingActions
+  if (spec.scope.writingActions && (!projectedActions
+    || spec.scope.writingActions.operations.length !== projectedActions.operations.length
+    || spec.scope.writingActions.operations.some((operation, index) => operation.resolution === 'bound'
+      ? runtimeJson(operation).hash !== runtimeJson(projectedActions.operations[index]).hash
+      : operation.start !== projectedActions.operations[index].start || operation.end !== projectedActions.operations[index].end
+        || operation.kind !== projectedActions.operations[index].kind))) {
+    throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '章节澄清不能替换原合同已知动作或目标。')
+  }
   const projection = { ...spec, scope: { ...spec.scope, ...evidence.projection,
     ...(spec.scope.writingInterpretation ? { writingInterpretation: { ...spec.scope.writingInterpretation } } : {}) } }
   if (projection.scope.writingInterpretation) projection.scope.writingInterpretation.scopeHash = frozenWritingScopeHash(projection.scope)

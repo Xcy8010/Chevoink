@@ -48,6 +48,19 @@ describe('versioned built-in writing resources', () => {
     expect(runtime.find(skill => skill.id === 'custom.fixture')).toMatchObject({ version: '0.1.0', resources: instructions })
   })
 
+  it('a saved 4.0 router keeps unloaded 4.0 resources and disabled installations', async () => {
+    vi.spyOn(prisma.agentSkillRun, 'findFirst').mockResolvedValue({ routerVersion: '4.0.0', selected: [], loaded: [] } as never)
+    vi.spyOn(prisma.agentRun, 'findFirst').mockResolvedValue(null)
+    vi.spyOn(prisma.agentSkillInstallation, 'findMany').mockResolvedValue([{ skillId: 'cn-character-voice.v3', enabled: false }] as never)
+    const readVersion = vi.spyOn(prisma.agentSkillVersion, 'findUnique')
+    const runtime = await resolveRuntimeSkillContext('u', 'n', 'old-40')
+    expect(runtime.routerVersion).toBe('4.0.0')
+    expect(runtime.catalog).toEqual(skillCatalog.filter(skill => skill.id !== 'cn-character-voice.v3'))
+    expect(runtime.catalog.every(skill => skill.version === '4.0.0')).toBe(true)
+    expect(readVersion).not.toHaveBeenCalled()
+    expect(routeSkills({ mode: 'build', intent: 'write', freedom: 'balanced', prompt: '写下一章', ...runtime }).reasonCodes).not.toContain('DRAFT_FOUNDATION')
+  })
+
   it('a saved 3.7 router retains every 3.6 resource while new tasks use 4.0', async () => {
     vi.spyOn(prisma.agentSkillRun, 'findFirst').mockResolvedValue({ routerVersion: '3.7.0', selected: [], loaded: [] } as never)
     vi.spyOn(prisma.agentRun, 'findFirst').mockResolvedValue(null)
@@ -77,14 +90,17 @@ describe('versioned built-in writing resources', () => {
     expect(createHash('sha256').update(JSON.stringify(frozenV350BuiltinCatalog)).digest('hex')).toBe(before)
   })
 
-  it('new ordinary draft gets contextual guidance without forcing a new specialist slot or changing ranking', () => {
+  it('new drafts load prose foundations while frozen routers retain their original ranking', () => {
     const input = { mode: 'build' as const, intent: 'write' as const, freedom: 'balanced' as const, prompt: '续写下一章，少解释，完成连续性与人类感检查。' }
     const current = routeSkills(input)
     const old = routeSkills({ ...input, routerVersion: '3.6.0', catalog: frozenV350BuiltinCatalog })
-    expect(current.selected.map(skill => skill.id)).toEqual(old.selected.map(skill => skill.id))
-    expect(current.reasonCodes).toEqual(old.reasonCodes)
+    const frozen = routeSkills({ ...input, routerVersion: '4.0.0' })
+    expect(frozen.selected.map(skill => skill.id)).toEqual(old.selected.map(skill => skill.id))
+    expect(frozen.reasonCodes).toEqual(old.reasonCodes)
+    expect(current.reasonCodes).toContain('DRAFT_FOUNDATION')
     expect(current.selected.map(skill => skill.id)).toContain('cn-webfiction-draft.v3')
-    expect(current.selected.map(skill => skill.id)).not.toContain('cn-prose-specificity.v3')
+    expect(current.selected.map(skill => skill.id)).toContain('cn-prose-specificity.v3')
+    expect(frozen.selected.map(skill => skill.id)).not.toContain('cn-prose-specificity.v3')
     expect(loadSkill('cn-webfiction-draft.v3', 'draft', 'balanced')).toContain('同句或跨句释因前')
     expect(loadSkill('cn-prose-specificity.v3', 'critique', 'balanced')).toContain('证据必须包含拟修改对象')
   })

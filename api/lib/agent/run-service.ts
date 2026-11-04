@@ -5,7 +5,7 @@ import { savedRunUsageSchema } from './checkpoint.js'
 import { syncBuiltinSkillCatalog } from './skills/service.js'
 import { readAuthorEnded } from './author-ended.js'
 import { readRunOutcome } from './run-outcome.js'
-import { hasAuthorEnded, isContinuationRequest } from './completion-guard.js'
+import { hasAuthorEnded, isContinuationRequest, isWritingContinuationRequest } from './completion-guard.js'
 import { isLegacyContinuationRun, readLegacyContinuationResolution, type LegacyContinuationRetirement } from './legacy-continuation-target.js'
 import type { Response } from 'express'
 import { randomUUID } from 'node:crypto'
@@ -380,11 +380,17 @@ export async function startLoopRunLocked(
 
   // A plain human Continue reuses the saved contract, progress and budget.
   if (options.humanOrigin === 'http' && !options.goal && !options.queuedRequest && !session.spawnedFromRunId
-    && !input.selection && !input.attachments?.length && isContinuationRequest(input.prompt)) {
+    && !input.selection && !input.attachments?.length && (isContinuationRequest(input.prompt) || isWritingContinuationRequest(input.prompt))) {
     const previous = await prisma.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, sessionId: session.id }, orderBy: { createdAt: 'desc' } })
     if (previous && ['paused', 'failed', 'running', 'awaiting_approval'].includes(previous.status)) {
-      return continueLoopRunLocked(userId, previous.id, input.modelSelectionExplicit
-        ? { modelTier: input.modelTier, customModelId: input.customModelId, reasoningEffort: input.reasoningEffort } : undefined)
+      const writingResume = isWritingContinuationRequest(input.prompt)
+      const prior = writingResume ? await prisma.$transaction(tx => readWritingScope(tx, { userId, novelId: session.novelId, runId: previous.id })) : null
+      const contract = writingResume ? taskSpecSchema.safeParse(prior?.spec).data : null
+      if (!writingResume || contract && ['write', 'revise'].includes(contract.intent) && contract.scope.authorEffects?.manuscript !== false
+        && prior?.writing?.kind === 'bounded' && contract.scope.localEditBoundary?.kind !== 'needs_input') {
+        return continueLoopRunLocked(userId, previous.id, input.modelSelectionExplicit
+          ? { modelTier: input.modelTier, customModelId: input.customModelId, reasoningEffort: input.reasoningEffort } : undefined)
+      }
     }
   }
 

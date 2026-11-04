@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
 
-import type { AgentMessagePart, AgentTodoItem } from '../../../../shared/contracts/index.js'
+import type { AgentMessagePart, AgentTodoItem, TaskSpec } from '../../../../shared/contracts/index.js'
 import { prisma } from '../../prisma.js'
 import { defineTool } from './types.js'
 import { getTaskRunIds } from '../task-lineage.js'
@@ -15,6 +15,17 @@ import { getTaskRunIds } from '../task-lineage.js'
  */
 
 const todoStatusSchema = z.enum(['pending', 'in_progress', 'completed', 'cancelled'])
+
+/** A single frozen chapter/local edit is one author deliverable. Internal
+ * read/compile/write/check steps do not turn it into a project. Existing plans
+ * remain updateable, including plans created before this policy. */
+export function singleDeliverableTodoGuidance(previous: AgentTodoItem[], scope?: TaskSpec['scope']): string | null {
+  return !previous.length && scope?.authorEffects?.manuscript === true
+    && scope.authorEffects.artifact === false && scope.authorEffects.structure === false
+    && scope.writing?.kind === 'bounded' && scope.writing.targets.length === 1
+    ? '本次只有一个章节交付目标，直接完成即可；读取资料、写作和检查属于内部步骤，无需创建待办。没有创建清单，也不代表正文已经完成。'
+    : null
+}
 
 const todoWriteParameters = z.object({
   changeReason: z.string().min(1).max(200).optional().describe('已有清单确需追加新工作时必填范围变化原因；改写旧项不得新增'),
@@ -252,6 +263,8 @@ export const todoWriteTool = defineTool({
     // 的 todo_write 清单），跨 run / 续跑也能拿到真实前态；避免 artifact 副本停在旧任务导致
     // previous 退化为空，从而把本应已完成的旧项误判为本轮“一次完成多项”而被拒。
     const previous = await loadSessionTodoItems(ctx.sessionId, runIds)
+    const simpleTask = singleDeliverableTodoGuidance(previous, ctx.writingScope)
+    if (simpleTask) return { output: simpleTask, summary: '直接完成当前章节，无需待办' }
     const { items, changed, error, failureCode } = prepareTodoUpdate(previous, args.items, args.changeReason)
     if (error) return { outcome: 'failed', failureCode, summary: '待办更新未接受', output: `${error}\n本任务实际清单：\n${renderTodoItems(previous)}`, display: { kind: 'todoList', items: previous } }
     if (!changed) return {

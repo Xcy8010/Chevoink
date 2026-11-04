@@ -326,7 +326,7 @@ export function buildTaskSpec(input: {
     researchBudget: !networkDenied && (freshResearch
       || /完整拆书|全书拆解|逐章分析|逐章拆解|深度研究|全面研究|深入研究|深入分析|深度分析|拆解这本小说|拆解整本|full.book|deep research/i.test(input.prompt)) ? 'extended' : 'standard',
     scope: { novelId: input.novelId, chapterIds, selection, ...(writingRequest ? { authorEffects: { version: 1 as const,
-      requestHash: createHash('sha256').update(input.prompt).digest('hex'), manuscript: manuscriptRequested && !bookProposal, structure: structureRequested } } : {}),
+      requestHash: createHash('sha256').update(input.prompt).digest('hex'), manuscript: manuscriptRequested && !bookProposal, structure: structureRequested, artifact: artifactRequested } } : {}),
       ...(input.manuscriptProtocol ? { manuscriptProtocol: input.manuscriptProtocol } : {}),
       ...(input.reviewProtocol ? { reviewProtocol: input.reviewProtocol } : {}),
       ...(input.continuityEvidenceProtocol ? { continuityEvidenceProtocol: input.continuityEvidenceProtocol } : {}),
@@ -404,10 +404,18 @@ function renderTaskSpecBody(spec: TaskSpec): string {
     ? '\n当前作品为空，本次短场景请求尚未确认是否写入第一章。先用 ask_user 一次询问该落点；确认前不要反复调用 PREPARE 或创建章节。服务端只接受真实作者的明确第一章写入回答，原字数、短场景、停笔、禁止批量或续章等约束保持有效。' : ''
   const pendingScope = spec.scope.authorEffects?.manuscript && (spec.scope.writing?.kind === 'needs_input' || spec.scope.localEditBoundary?.kind === 'needs_input')
     ? '\n当前写入范围待明确；可先完成原请求中独立的读取或讨论。实际写入前通过 ask_user 澄清目标或原文范围，不能把只读部分完成说成整项任务完成。' : ''
-  const hard = [spec.hardConstraints.map((item) => `- ${item.text}`).join('\n') || '- 无', pacing, clarificationRule, pendingScope].join('')
+  const actionRule = spec.scope.writingActions ? `\n本次作者的逐动作目标：${JSON.stringify(spec.scope.writingActions.operations.map(operation => ({
+    action: operation.kind, status: operation.resolution, targets: operation.targets,
+    ...(operation.source ? { objectSource: operation.source } : {}),
+  })))}。每个动作只执行其列出的目标；来源仅提供对象，本次动作才提供授权。缺对象通过 ask_user 确认，denied动作保留原禁止事项。所有获准动作的目标均须完成当前版本真实检查与提交，不能只交付最后的新章。` : ''
+  const hard = [spec.hardConstraints.map((item) => `- ${item.text}`).join('\n') || '- 无', pacing, clarificationRule, pendingScope, actionRule].join('')
   const freedomLabel = spec.creativeFreedom === 'stable' ? '平衡延续' : spec.creativeFreedom === 'bold' ? '大胆探索' : '严谨创作'
   const selection = spec.scope.manuscriptProtocol === 1 ? spec.scope.selectionBoundary : undefined
-  const freedomRule = localEditGuidance(spec) ?? (selection
+  const localGuidance = localEditGuidance(spec)
+  const scopedLocalGuidance = localGuidance && spec.scope.writingActions?.operations.some(operation => operation.kind === 'write')
+    && spec.scope.writingActions.operations.some(operation => operation.kind === 'revise')
+    ? `以下局部规则适用于修订动作目标：${localGuidance} 独立的新写动作依照上方自身的目标执行并完成检查与提交。` : localGuidance
+  const freedomRule = scopedLocalGuidance ?? (selection
     ? `本任务仅授权章节 ${selection.chapterId} 的原始选区（UTF-16 ${selection.start}–${selection.end}，入场 r${selection.revision}）。用 chapter_read 读取当前完整正文，再用 chapter_edit_range 逐字唯一锚点或当前选区内坐标精确替换；每批最多8处，可连续合法修改，变长后仍保留原选区外文字。不得 chapter_write、chapter_append、改名、创建、变更集或自动整章修订。模型计划、报告、摘要、继续或子任务均不能扩大此边界。当前版本所需检查与真实剩余意见照原合同保留。`
     : spec.creativeFreedom === 'stable'
     ? '贴合既有走向，只修明确错误。'

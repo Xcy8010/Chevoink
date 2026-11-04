@@ -632,8 +632,8 @@ export const qualityRevisionApplyTool = defineTool({
   description: '仅原始请求明确授权修订时，对已选意见应用一次有证据的局部修订；检查本身不授予改文权限。',
   parameters: z.object({ reportId: z.string().min(1) }), permission: CONTENT_WRITE, readOnly: false,
   async execute(ctx, args) {
-    await prisma.$transaction(tx => assertOriginalRepairAuthority(tx, ctx))
     const report = await getQualityReport(ctx.userId, ctx.novelId, args.reportId)
+    await prisma.$transaction(tx => assertOriginalRepairAuthority(tx, ctx, report.chapterId))
     if (ctx.protectedChapterIds?.has(report.chapterId)) return { output: '作者要求保持前文不变，该章节被保护，禁止质量修订。' }
     const selected = report.findings.filter((finding) => finding.disposition === 'selected')
     if (selected.length === 0) return { output: '报告中没有已选择的 finding，请先调用 quality_findings_select。' }

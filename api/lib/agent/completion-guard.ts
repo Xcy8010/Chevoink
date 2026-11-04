@@ -31,6 +31,12 @@ export function isContinuationRequest(prompt: string): boolean {
   return /^(?:请|请你|帮我)?\s*(?:继续|接着)(?:(?:执行|完成|处理)?(?:之前|此前|刚才|上次|上一轮|剩余|未完成)的?(?:任务|工作|整改|内容)?|(?:执行|完成|处理)?(?:当前|这个)?(?:任务|工作)|执行|完成)?[。！!\s]*$/u.test(prompt.trim())
 }
 
+/** Writing-specific resume is admitted only against a verified unfinished
+ * manuscript contract at HTTP entry; it is not a generic legacy Continue. */
+export function isWritingContinuationRequest(prompt: string): boolean {
+  return /^(?:请(?:你)?|帮我)?\s*(?:(?:我)?(?:明确)?授权(?:你)?[，,\s]*)?(?:继续|接着)(?:写|写作|创作|修改|修订)(?:下去)?[。！!\s]*$/u.test(prompt.trim())
+}
+
 export function promisesFurtherAction(text: string): boolean {
   const lastSentence = text.trim().split(/[。！!\n]/u).filter(Boolean).at(-1) ?? ''
   if (/(?:无需|不需要|不必|如需|如果|你可以|您可以|可以继续|是否|已经|已完成)/u.test(lastSentence)) return false

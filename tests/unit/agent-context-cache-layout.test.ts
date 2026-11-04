@@ -26,6 +26,10 @@ vi.mock('../../api/lib/agent2-feature-flags.js', () => ({
 }))
 vi.mock('../../api/lib/agent/style-learning.js', () => ({ getLearnedStyleDigest: vi.fn(async () => '') }))
 vi.mock('../../api/lib/agent/story-compiler.js', () => ({ buildStoryCompilerDigest: vi.fn(async () => null) }))
+vi.mock('../../api/lib/agent/writing-continuity-reference.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../api/lib/agent/writing-continuity-reference.js')>()
+  return { ...actual, readWritingContinuityReference: vi.fn(async () => null) }
+})
 vi.mock('../../api/lib/agent/writing-request-context.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../../api/lib/agent/writing-request-context.js')>()
   return { ...actual, readChapterWritingBackground: vi.fn(async () => []), readWritingPresentation: vi.fn(async () => null) }
@@ -64,6 +68,7 @@ const { estimateChatMessagesTokens } = await import('../../api/lib/agent/context
 const { getLearnedStyleDigest } = await import('../../api/lib/agent/style-learning.js')
 const { readChapterWritingBackground, readWritingPresentation } = await import('../../api/lib/agent/writing-request-context.js')
 const { buildStoryCompilerDigest } = await import('../../api/lib/agent/story-compiler.js')
+const { readWritingContinuityReference } = await import('../../api/lib/agent/writing-continuity-reference.js')
 const { isAgent2FeatureEnabled } = await import('../../api/lib/agent2-feature-flags.js')
 
 type AssembleInput = Parameters<typeof assembleContext>[0]
@@ -234,13 +239,95 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(JSON.stringify(result.messages)).not.toContain('inputEstimates')
   })
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-03T04:00:00.000Z'))
     vi.clearAllMocks()
     vi.mocked(isAgent2FeatureEnabled).mockReturnValue(false)
+    vi.mocked(readWritingContinuityReference).mockResolvedValue(null)
     mockState()
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.restoreAllMocks()
+  })
+
+  it('always adds trusted time to the dynamic snapshot and refreshes it only for a new assembly', async () => {
+    const input = { ...buildInput(), prompt: '你好' }
+    const first = await assembleContext(input)
+    const frozen = structuredClone(first.messages)
+    const firstSnapshot = first.messages.find(message => String(message.content).startsWith('[当前作品上下文快照]'))
+    expect(String(firstSnapshot?.content)).toContain('2026-11-03T04:00:00.000Z')
+    expect(String(firstSnapshot?.content)).toContain('2026-11-03T12:00:00.000+08:00')
+    expect(String(first.messages[0].content)).not.toContain('2026-11-03')
+    vi.setSystemTime(new Date('2026-11-04T04:00:00.000Z'))
+    mockState()
+    const second = await assembleContext({ ...input, runId: 'run-2' })
+    expect(second.messages[0]).toEqual(first.messages[0])
+    expect(JSON.stringify(second.messages)).toContain('2026-11-04T04:00:00.000Z')
+    expect(first.messages).toEqual(frozen)
+  })
+
+  it('exposes authenticated predecessor body facts before writing, scoped to the first frozen target', async () => {
+    const input = buildInput()
+    input.taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [
+      { chapterId: null, orderIndex: 48 }, { chapterId: null, orderIndex: 49 },
+    ], titleAndBodyOnly: false, repairAuthorized: false }
+    vi.mocked(readWritingContinuityReference).mockResolvedValueOnce({ version: 1, targetOrderIndex: 48,
+      predecessor: { chapterId: 'chapter-47', revision: 3, orderIndex: 47, contentHash: 'a'.repeat(64) },
+      facts: [{ field: 'body', claim: '林岑左腿旧伤未愈，仍须拄拐。', proofHash: 'b'.repeat(64), preserved: false,
+        sources: [{ chapterId: 'chapter-45', revision: 2, contentHash: 'c'.repeat(64), start: 20, end: 35 }] }] })
+    const { messages } = await assembleContext(input)
+    expect(readWritingContinuityReference).toHaveBeenCalledTimes(1)
+    expect(readWritingContinuityReference).toHaveBeenCalledWith(prisma, { userId: input.userId, novelId: input.novelId, runId: input.runId }, 48)
+    expect(String(messages.at(-1)?.content)).toContain('[body] 林岑左腿旧伤未愈，仍须拄拐。')
+    expect(String(messages.at(-1)?.content)).toContain('chapter-45@r2:20-35')
+    expect(String(messages.at(-1)?.content)).toContain('只对应全书第 48 章，其他目标须各自读取')
+    expect(String(messages[0].content)).not.toContain('林岑左腿')
+  })
+
+  it('dates the recent exchange and keeps a news follow-up focused despite unrelated novel tags', async () => {
+    vi.mocked(prisma.novel.findUnique).mockResolvedValue({ ...baseNovel, tagNames: ['都市', '异能'] } as never)
+    const question = '今天有什么值得关注的新闻？'
+    const answer = '可考虑航天新突破、城市记忆与机器人陪伴三个方向。'
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([
+      { id: 'news-answer', role: 'assistant', createdAt: new Date('2026-11-01T02:01:00Z'), parts: [{ type: 'text', text: answer }] },
+      { id: 'news-question', role: 'user', createdAt: new Date('2026-11-01T02:00:00Z'), parts: [{ type: 'text', text: question }] },
+    ] as never)
+    const input = buildInput()
+    input.prompt = '里面其中一个题材写小说推荐哪个？'
+    input.attachments = []
+    input.taskSpec.writingPacing = 'conversation_only'
+    input.taskSpec.scope.authorEffects = { version: 1, requestHash: 'a'.repeat(64), manuscript: false, structure: false }
+    const { messages } = await assembleContext(input)
+    expect(messages[1]).toEqual({ role: 'user', content: `[服务端历史发言时间：2026-11-01T02:00:00.000Z（UTC）]\n${question}` })
+    expect(messages[2]).toEqual({ role: 'assistant', content: `[服务端历史发言时间：2026-11-01T02:01:00.000Z（UTC）]\n${answer}` })
+    expect(String(messages[0].content)).toContain('指代先对应最近相关会话中的候选')
+    expect(messages.at(-1)?.content).toBe(input.prompt)
+    expect(readWritingContinuityReference).not.toHaveBeenCalled()
+    expect(String(messages.at(-1)?.content)).not.toContain('题材写作要点')
+    expect(String(messages.at(-1)?.content)).not.toContain('首章收益与情绪强度')
+  })
+
+  it('reserves the exact recent exchange before an oversized historical tool receipt', async () => {
+    const question = '列出三个新闻题材供我选择。'
+    const answer = '一是机器人陪伴，二是航天突破，三是城市记忆。'
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([
+      { id: 'latest', role: 'assistant', createdAt: new Date('2026-11-01T02:01:00Z'), parts: [
+        { type: 'text', text: answer },
+        { type: 'tool-call', toolName: 'web_search', status: 'success', summary: '历史检索记录'.repeat(4000) },
+      ] },
+      { id: 'question', role: 'user', createdAt: new Date('2026-11-01T02:00:00Z'), parts: [{ type: 'text', text: question }] },
+    ] as never)
+    const result = await assembleContext({ ...buildInput(), contextWindowTokens: 8192 })
+    const history = result.messages.slice(1, result.messages.findIndex(message => String(message.content).startsWith('[当前作品上下文快照]')))
+    expect(history.some(message => message.role === 'user' && String(message.content).endsWith(question))).toBe(true)
+    expect(history.some(message => message.role === 'assistant' && String(message.content).endsWith(answer))).toBe(true)
+    expect(JSON.stringify(history)).not.toContain('历史检索记录')
+    expect(JSON.stringify(history)).toContain('消息或回执未完整进入当前窗口')
+    expect(JSON.stringify(history)).toContain('共 1 组消息或回执')
+    expect(JSON.stringify(history)).toContain('session_message_read')
+    expect(result.inputEstimates!.history.tokens).toBeLessThan(2000)
   })
 
   it('separates an old chapter repair and false saved claims from the frozen next-chapter task on resume', async () => {

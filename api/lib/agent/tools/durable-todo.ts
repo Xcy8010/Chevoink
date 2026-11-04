@@ -8,7 +8,8 @@ import { readExecutionFrame } from '../runtime-state.js'
 import { formatDurableToolObservation } from '../runtime-common.js'
 import { DataAccessError } from '../../prisma.js'
 import { normalizeToolInput } from './input-validation.js'
-import { todoWriteTool, prepareTodoUpdate, renderTodoItems } from './todo-tools.js'
+import { todoWriteTool, prepareTodoUpdate, renderTodoItems, singleDeliverableTodoGuidance } from './todo-tools.js'
+import { taskSpecSchema } from '../../../../shared/contracts/index.js'
 
 const itemsSchema = z.array(z.object({ id: z.string().max(64).optional(), reason: z.string().max(200).optional(), content: z.string().min(1).max(100), status: z.enum(['pending', 'in_progress', 'completed', 'cancelled']) }).strict()).max(20)
 const resultSchema = z.object({ todoItems: itemsSchema, toolResult: z.object({ output: z.string(), summary: z.string() }).passthrough() })
@@ -94,6 +95,9 @@ export async function executeDurableTodo(ctx: ToolContext, raw: unknown): Promis
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
     if (root.novelId !== ctx.novelId || root.sessionId !== ctx.sessionId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '待办不属于原任务范围。')
     const previous = await readDurableTodoItems(tx, root.id, cursor.expectedRevision)
+    const spec = taskSpecSchema.safeParse(root.specSnapshot)
+    const simpleTask = singleDeliverableTodoGuidance(previous, spec.success ? spec.data.scope : undefined)
+    if (simpleTask) return runtimeJson({ todoItems: previous, toolResult: { output: simpleTask, summary: '直接完成当前章节，无需待办' } }).value
     const { items, changed, error, failureCode } = prepareTodoUpdate(previous, args.items, args.changeReason)
     if (error) return runtimeJson({ todoItems: previous, toolResult: { outcome: 'failed', failureCode: failureCode ?? 'TODO_UPDATE_REJECTED', summary: '待办更新未接受', output: `${error}\n本任务实际清单：\n${renderTodoItems(previous)}`, display: { kind: 'todoList', items: previous } } }).value
     const completed = items.filter(item => item.status === 'completed').length

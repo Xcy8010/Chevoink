@@ -37,6 +37,7 @@ import { novelUpdateMetaTool } from '../../api/lib/agent/tools/novel-tools.js'
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import { inspectCriticResponse } from '../../api/lib/agent/quality-evidence.js'
 import { terminalCoverageInput, readTerminalCoverageState } from '../../api/lib/agent/terminal-fact-coverage.js'
+import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 
 const available = await verifyTestDatabase(isTestDatabaseRequired())
 afterAll(() => prisma.$disconnect())
@@ -94,6 +95,83 @@ const prepare = (ctx: ToolContext) => storyCompilerPrepareTool.execute(ctx, { ta
   intentSummary: '只对第四个已存合成章作作者指出的局部修订', volumeDecision: { kind: 'continue', reason: '原卷原章' } })
 
 describe.skipIf(!available)('fresh independent reads and effect-scoped writes over HTTP and PostgreSQL', () => {
+  it('executes a local old-chapter revision and the separate new slot through the actual edit/create tools', () => fixture(
+    '修改第4章首段，然后写下一章', async (ctx, before) => {
+      const target = before[3]
+      expect((await chapterEditRangeTool.execute({ ...ctx, callId: 'compound-local' },
+        { chapterId: target.id, oldText: '窗边还留着灯。', newText: '窗边的灯熄灭了。' })).outcome).not.toBe('failed')
+      await expect(chapterEditRangeTool.execute({ ...ctx, callId: 'compound-outside' },
+        { chapterId: target.id, oldText: '走廊无人。', newText: '越过首段改稿。' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      expect((await storyCompilerPrepareTool.execute(ctx, { targetOrderIndex: 5, intentSummary: '独立的新章动作',
+        volumeDecision: { kind: 'continue', reason: '当前卷承接' } })).outcome).not.toBe('failed')
+      expect((await chapterCreateTool.execute({ ...ctx, callId: 'compound-create' },
+        { title: '新章', content: '新章的合成正文。', position: 5 })).outcome).not.toBe('failed')
+      expect((await prisma.chapter.findUniqueOrThrow({ where: { id: target.id } })).content)
+        .toBe(target.content.replace('窗边还留着灯。', '窗边的灯熄灭了。'))
+      expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(5)
+      await expect(chapterCreateTool.execute({ ...ctx, callId: 'compound-deny-six' }, { title: '不扩章', position: 6 }))
+        .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+      expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(0, 3).map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } }))
+        .toEqual(before.slice(0, 3))
+    }, false, '窗边还留着灯。\n门开了。\n走廊无人。'))
+  it.each(['不要写下一章', '不要新建'])('does not revive a known next slot excluded by %s when a different action is clarified', denial => fixture(
+    `修改。写下一章。${denial}`, async (ctx, before) => {
+      const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
+      expect(taskSpecSchema.parse(run.taskSpec).scope.writingActions?.operations.find(operation => operation.kind === 'write')?.resolution).toBe('denied')
+      await expect(chapterCreateTool.execute(ctx, { title: '被原请求禁止的新章', position: 5 })).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+      expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+    }))
+  it('keeps a verified prior local object local when the next human simply authorizes another modification', () => fixture(
+    '只修改第4章首段', async (ctx, before) => {
+      const source = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
+      await prisma.agentRun.update({ where: { id: source.id }, data: { status: 'completed' } })
+      const response = await request(app).post('/api/agent/runs')
+        .set('Cookie', `chevoink_session=${buildSessionTokens(ctx.userId, 0).accessToken}`)
+        .send({ novelId: ctx.novelId, sessionId: ctx.sessionId, chapterId: before[0].id, prompt: '再修改', mode: 'build' })
+      expect(response.status).toBe(200)
+      const runId = response.body.data.runId as string, next = { ...ctx, runId }
+      await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
+      const frozen = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).taskSpec)
+      expect(frozen.scope.localEditBoundary).toEqual(taskSpecSchema.parse(source.taskSpec).scope.localEditBoundary)
+      expect((await chapterEditRangeTool.execute(next, { chapterId: before[3].id, oldText: '窗边还留着灯。', newText: '窗边灯已熄灭。' })).outcome)
+        .not.toBe('failed')
+      await expect(chapterEditRangeTool.execute({ ...next, callId: 'continued-outside' },
+        { chapterId: before[3].id, oldText: '走廊无人。', newText: '不得越出前轮对象。' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      await expect(chapterWriteTool.execute({ ...next, callId: 'continued-whole' }, { chapterId: before[3].id, content: '不得整章覆盖。' }))
+        .rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    }, false, '窗边还留着灯。\n门开了。\n走廊无人。'))
+  it('routes pure continue-writing to the same unfinished task without a new root, input or usage identity', () => fixture(
+    '修改第4章正文', async ctx => {
+      const source = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
+      if (source.runtimeProtocolVersion === 1 && source.taskRootId) await pauseDurableTask(ctx.userId, source.id)
+      else {
+        await prisma.agentRun.update({ where: { id: source.id }, data: { status: 'paused', usage: { totalTokens: 1234 } } })
+        const last = await prisma.agentRunEvent.findFirst({ where: { runId: source.id }, orderBy: { seq: 'desc' }, select: { seq: true } })
+        await prisma.agentRunEvent.create({ data: { runId: source.id, seq: (last?.seq ?? 0) + 1, type: 'run.paused', payload: {} } })
+      }
+      const before = await prisma.agentRun.findUniqueOrThrow({ where: { id: source.id } })
+      const identity = source.taskRootId ? await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: source.taskRootId },
+        select: { inputHash: true, specSnapshot: true, requestSnapshot: true, sourceMessageId: true, budget: true, operations: true } }) : null
+      const messages = await prisma.agentMessage.findMany({ where: { runId: source.id }, orderBy: { id: 'asc' } })
+      const response = await request(app).post('/api/agent/runs')
+        .set('Cookie', `chevoink_session=${buildSessionTokens(ctx.userId, 0).accessToken}`)
+        .send({ novelId: ctx.novelId, sessionId: ctx.sessionId, prompt: '继续写', mode: 'build' })
+      expect(response.status).toBe(200)
+      const resumedId = response.body.data.runId as string
+      if (!source.taskRootId) expect(resumedId).toBe(source.id)
+      const after = await prisma.agentRun.findUniqueOrThrow({ where: { id: resumedId } })
+      expect(after.taskRootId).toBe(before.taskRootId)
+      expect(after.taskSpec).toEqual({ ...taskSpecSchema.parse(before.taskSpec), runId: resumedId })
+      expect(after.startRequest).toEqual(before.startRequest)
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: source.id } })).usage).toEqual(before.usage)
+      if (source.taskRootId) {
+        expect(await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: source.taskRootId },
+          select: { inputHash: true, specSnapshot: true, requestSnapshot: true, sourceMessageId: true, budget: true, operations: true } })).toEqual(identity)
+        expect(await prisma.agentTaskRoot.count({ where: { sessionId: ctx.sessionId } })).toBe(1)
+      } else expect(await prisma.agentRun.count({ where: { sessionId: ctx.sessionId } })).toBe(1)
+      expect(await prisma.agentMessage.findMany({ where: { runId: source.id }, orderBy: { id: 'asc' } })).toEqual(messages)
+      if (resumedId !== source.id) expect(await prisma.agentMessage.count({ where: { runId: resumedId, role: 'user' } })).toBe(0)
+    }))
   it('preserves explicit novel and volume metadata operations with their original version checks', () => fixture(
     '请修改作品简介并更新第1卷标题。', async (ctx, before) => {
       expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec).toMatchObject({ scope: { authorEffects: { manuscript: false } } })

@@ -16,6 +16,7 @@ import { eligibleEmptyWritingClarification, eligibleWritingClarification, readWr
 import { parseAuthorWritingRequest, parseAuthorWritingExclusion, resolveAuthorWritingRequest } from './author-writing-request.js'
 import { currentIssueQuoteRegions } from './local-edit-citations.js'
 import { assertFrozenWritingContract, frozenWritingScopeHash } from './writing-contract.js'
+import { actionTargetMatches, freezeWritingActions } from './writing-action-admission.js'
 
 import { chapterNumber, numeric, rangeDash, negativeScopeClause, writingScopeClauses, legacyWritingRange } from './writing-target-range.js'
 import { parseWritingTargets, writingExclusionRange } from './writing-target-admission.js'
@@ -124,15 +125,33 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
     const target = chapters.find(item => item.id === run.chapterId)
     writing = { ...base, kind: target ? 'bounded' : 'needs_input', targets: target ? [{ orderIndex: target.orderIndex, chapterId: target.id }] : [] }
   } else writing = { ...base, kind: 'needs_input', targets: [] }
+  const writingActions = interpretation ? await freezeWritingActions(tx, subject, interpretation, admissionPrompt, chapters, run.chapterId) : undefined
+  if (writingActions) {
+    const targets = [...new Map(writingActions.operations.flatMap(operation => operation.targets).map(target => [target.orderIndex, target])).values()]
+    writing = { ...base, kind: writingActions.operations.every(operation => operation.resolution === 'bound') ? 'bounded' : 'needs_input', targets }
+    // This legacy scalar cannot confer a revise grant on a different action's
+    // target. Per-chapter consumers use writingActions instead.
+    writing.repairAuthorized = targets.length > 0 && targets.every(target => writingActions.operations.some(operation => operation.kind === 'revise'
+      && operation.targets.some(item => item.orderIndex === target.orderIndex && item.chapterId === target.chapterId)))
+  }
   if (parsed?.confirmedNextOrderIndex !== undefined && (writing.kind !== 'bounded' || writing.targets.length !== 1
     || writing.targets[0].orderIndex !== parsed.confirmedNextOrderIndex)) {
     writing = { ...base, kind: 'needs_input', targets: [] }
   }
-  if (creationDenied && writing.kind === 'bounded' && writing.targets.some(target => target.chapterId === null)
+  if (writingActions) {
+    for (const operation of writingActions.operations) {
+      const allowed = operation.targets.filter(target => !(creationDenied && target.chapterId === null)
+        && !(revisionDenied && operation.kind === 'revise'))
+      if (!allowed.length && operation.targets.length) operation.resolution = 'denied'
+      operation.targets = allowed
+    }
+    writing.targets = [...new Map(writingActions.operations.flatMap(operation => operation.targets).map(target => [target.orderIndex, target])).values()]
+    if (writingActions.operations.some(operation => operation.resolution !== 'bound')) writing.kind = 'needs_input'
+  } else if (creationDenied && writing.kind === 'bounded' && writing.targets.some(target => target.chapterId === null)
     || revisionDenied && spec.intent === 'revise') writing = { ...base, kind: 'needs_input', targets: [] }
   if (revisionDenied) writing.repairAuthorized = false
   const excludedChapterIds = new Set<string>()
-  if (writing.kind === 'bounded') {
+  if (writing.targets.length) {
     // A broad positive interval cannot erase the author's explicit exceptions.
     // Resolve them against this same admission snapshot, never later rows.
     for (const clause of parsed?.exclusions ?? writingScopeClauses(admissionPrompt).filter(clause => negativeScopeClause.test(clause))) {
@@ -179,17 +198,38 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
     && !/(?:只读|不(?:要|得|能|许|必)?(?:新建|建|改|调整|分)卷|(?:不要|不得|禁止|不能).{0,12}(?:结构|分卷)|read.only|do not.{0,20}(?:volume|structure))/iu.test(admissionPrompt + spec.hardConstraints.map(item => item.text).join('；'))) {
     writing.tailVolume = { version: 1, targetOrderIndex: writing.targets[0].orderIndex, previousChapterId: last.id, previousRevision: last.revision }
   }
-  const localEditBoundary = localRequest
-    ? freezeLocalEditBoundary(admissionPrompt, writing, await tx.chapter.findMany({ where: { authorId: subject.userId,
+  const hasSeparateActions = writingActions?.operations.some(operation => operation.kind === 'write')
+    && writingActions.operations.some(operation => operation.kind === 'revise')
+  const localInterpretation = interpretation && hasSeparateActions ? { ...interpretation,
+    ambiguous: interpretation.reasons.some(reason => reason !== 'conflicting_targets'),
+    evidence: { ...interpretation.evidence, operations: interpretation.evidence.operations.filter(operation => operation.kind !== 'write'),
+      clauses: interpretation.evidence.clauses.filter(clause => interpretation.evidence.operations.some(operation => operation.kind !== 'write'
+        && operation.clauseSpan.start === clause.start)) } } : interpretation
+  const localWriting = hasSeparateActions ? { ...writing, targets: writing.targets.filter(target => writingActions!.operations.some(operation =>
+    operation.kind === 'revise' && operation.targets.some(item => item.orderIndex === target.orderIndex && item.chapterId === target.chapterId))) } : writing
+  let localEditBoundary = localRequest
+    ? freezeLocalEditBoundary(admissionPrompt, localWriting, await tx.chapter.findMany({ where: { authorId: subject.userId,
       ...activeChapterScope(subject.novelId), id: { in: writing.targets.flatMap(target => target.chapterId ? [target.chapterId] : []) } },
-      select: { id: true, revision: true, content: true } }), targetProtocol === 2 ? 2 : 1, interpretation ?? undefined) : undefined
+      select: { id: true, revision: true, content: true } }), targetProtocol === 2 ? 2 : 1, localInterpretation ?? undefined) : undefined
+  const inheritedBoundaries = writingActions?.operations.flatMap(operation => operation.boundary ? [operation.boundary] : []) ?? []
+  if (!localEditBoundary && inheritedBoundaries.length) {
+    localEditBoundary = inheritedBoundaries.every(boundary => boundary.version === 1 && boundary.kind === 'bounded')
+      ? { version: 1, kind: 'bounded', regions: [...new Map(inheritedBoundaries.flatMap(boundary => boundary.regions)
+        .map(region => [region.chapterId, region])).values()] }
+      : { version: 1, kind: 'needs_input', regions: [] }
+  }
   // Finding-conditioned repair is a distinct phase, not a broad repair grant.
   if (localEditBoundary?.version === 3) writing.repairAuthorized = false
+  if (writingActions) for (const operation of writingActions.operations) {
+    operation.targets = operation.targets.filter(target => writing.targets.some(item => item.orderIndex === target.orderIndex && item.chapterId === target.chapterId))
+    if (!operation.targets.length && operation.resolution !== 'denied') operation.resolution = operation.resolution === 'bound' && negativeOperations.length ? 'denied' : 'needs_input'
+  }
+  if (writingActions?.operations.some(operation => operation.resolution !== 'bound')) writing.kind = 'needs_input'
   const clarification = !chapters.length && !range && !ambiguousRange && !localRequest
     && run.session.sandboxMode !== 'read_only' && !run.session.spawnedFromRunId
     && eligibleEmptyWritingClarification({ ...spec, scope: { ...spec.scope, writing } }, admissionPrompt)
   const frozen: TaskSpec = { ...spec, ambiguity: interpretation && (writing.kind === 'needs_input' || localEditBoundary?.kind === 'needs_input') ? 'must_ask' : spec.ambiguity,
-    scope: { ...spec.scope, writing, ...(targetProtocol ? { writingTargetProtocol: targetProtocol } : {}),
+    scope: { ...spec.scope, writing, ...(writingActions ? { writingActions } : {}), ...(targetProtocol ? { writingTargetProtocol: targetProtocol } : {}),
       ...(interpretation ? { writingInterpretation: { version: 2 as const, requestHash: createHash('sha256').update(admissionPrompt).digest('hex'), scopeHash: '0'.repeat(64),
         intent: interpretation.intent, revisionDenied, creationDenied, reasons: [...new Set([...interpretation.reasons,
           ...(revisionDenied ? ['BODY_REVISION_DENIED'] : []), ...(creationDenied ? ['CHAPTER_CREATION_DENIED'] : []),
@@ -291,6 +331,10 @@ export async function readWritingScope(tx: Prisma.TransactionClient, subject: Su
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原作者请求的章节解释凭证缺失或不匹配，不能重新解析补授权。')
   }
   if (spec.success) assertFrozenWritingContract(spec.data)
+  if (spec.success && spec.data.scope.writingActions && (!original.prompt
+    || spec.data.scope.writingActions.operations.some(operation => operation.end > original.prompt!.length))) {
+    throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原作者动作与章节目标凭证不匹配。')
+  }
   if (spec.success && spec.data.scope.authorEffects?.manuscript === false) {
     return { ...original, writing: undefined, bindings: null, clarification: null }
   }
@@ -426,6 +470,12 @@ async function assertLocalBodyEffect(tx: Prisma.TransactionClient, subject: Subj
   automatic: boolean, spec: unknown) {
   const local = originalLocalEditBoundary(spec)
   if (!local) return
+  const actionSpec = taskSpecSchema.safeParse(spec).data
+  if (actionSpec?.scope.writingActions && !local.regions.some(region => region.chapterId === chapter.id)) {
+    const scope = await readWritingScope(tx, subject)
+    const actions = actionSpec.scope.writingActions.operations.filter(operation => operation.targets.some(target => actionTargetMatches(target, chapter.id, scope.bindings)))
+    if (actions.some(operation => operation.kind === 'write') && !actions.some(operation => operation.kind === 'revise')) return
+  }
   if (local.version === 3) {
     // Automatic whole-body repair is withheld before dispatch/reservation. The
     // ordinary exact-range tool will obtain current persisted finding proof.
@@ -510,7 +560,12 @@ export async function assertWritingTarget(tx: Prisma.TransactionClient, subject:
   if (boundary && (target.chapterId !== boundary.chapterId || target.effect && target.effect !== 'range')) {
     throw new DataAccessError(409, 'AUTHOR_SELECTION_SCOPE', '原任务只授权选区内片段替换，不能整体覆盖、追加、改名、创建或通过其他工具改动正文。')
   }
-  const local = originalLocalEditBoundary(scope.spec)
+  let local = originalLocalEditBoundary(scope.spec)
+  if (local && frozen?.scope.writingActions && !local.regions.some(region => region.chapterId === target.chapterId)) {
+    const actions = frozen.scope.writingActions.operations.filter(operation => operation.targets.some(item => target.chapterId
+      ? actionTargetMatches(item, target.chapterId, scope.bindings) : item.orderIndex === target.orderIndex))
+    if (actions.some(operation => operation.kind === 'write') && !actions.some(operation => operation.kind === 'revise')) local = null
+  }
   if (taskSpecSchema.safeParse(scope.spec).data?.scope.writingTargetProtocol === 2 && local?.kind === 'needs_input') {
     throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', '目标章节已确认，但局部原文范围尚未唯一定位；本次未执行写作准备或正文变更。')
   }
@@ -526,6 +581,13 @@ export async function assertWritingTarget(tx: Prisma.TransactionClient, subject:
     ? (item.chapterId ?? scope.bindings?.targets.find(binding => binding.orderIndex === item.orderIndex)?.chapterId) === target.chapterId
     : item.orderIndex === target.orderIndex)
   if (!allowed) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原始请求未授权该章节，不能通过工具、待办或子任务扩大范围。')
+  if (frozen?.scope.writingActions) {
+    const actions = frozen.scope.writingActions.operations.filter(operation => operation.resolution === 'bound'
+      && operation.targets.some(item => target.chapterId ? actionTargetMatches(item, target.chapterId, scope.bindings) : item.orderIndex === target.orderIndex))
+    if (!actions.length || target.effect === 'create' && !actions.some(operation => operation.kind === 'write')) {
+      throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '本次作者动作未授权该目标的写入效果。')
+    }
+  }
   return scope
 }
 
@@ -669,10 +731,14 @@ export function frozenWritingRevisionAuthority(value: unknown, chapterId: string
   if (!parsed.success || parsed.data.scope.writingTargetProtocol !== 2) return undefined
   const spec = parsed.data, interpretation = spec.scope.writingInterpretation, writing = spec.scope.writing
   assertFrozenWritingContract(spec)
-  if (!interpretation || !writing || interpretation.revisionDenied || spec.scope.localEditBoundary?.kind === 'needs_input'
-    || spec.scope.localEditBoundary?.version === 3
+  const local = spec.scope.localEditBoundary
+  const localApplies = local && (!spec.scope.writingActions || local.regions.some(region => region.chapterId === chapterId)
+    || spec.scope.writingActions.operations.some(operation => operation.kind === 'revise' && operation.targets.some(target => target.chapterId === chapterId)))
+  if (!interpretation || !writing || interpretation.revisionDenied || localApplies && (local.kind === 'needs_input' || local.version === 3)
     || interpretation.excludedChapterIds.includes(chapterId)) return false
-  if (writing.kind === 'needs_input') return provenNewDraft && spec.scope.writingClarificationProtocol !== undefined && spec.intent === 'write'
+  if (writing.kind === 'needs_input') return !spec.scope.writingActions && provenNewDraft && spec.scope.writingClarificationProtocol !== undefined && spec.intent === 'write'
+  if (spec.scope.writingActions) return spec.scope.writingActions.operations.some(operation => operation.resolution === 'bound'
+    && operation.targets.some(target => target.chapterId === chapterId || provenNewDraft && operation.kind === 'write' && target.chapterId === null))
   const action = interpretation.operations.some(operation => operation.polarity === 'affirmative'
     && (operation.kind === 'revise' || spec.intent === 'write' && operation.kind === 'write'))
   return action && (writing.kind === 'unbounded' || writing.targets.some(target => target.chapterId === chapterId)
