@@ -5,7 +5,7 @@ import { prisma, DataAccessError } from '../../api/lib/prisma.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { buildQualityEvidenceSources, locateQualityFindingSpans } from '../../api/lib/agent/quality-evidence.js'
 import { bindContinuityOpinions, inspectContinuityOpinions, correctContinuitySourceIds, continuityFormatRecoveryPreservesOpinions,
-  buildContinuitySnapshot, continuityReviewRequest, continuityReportResponseSchema, readContinuityRequestBilling, reviewContinuity,
+  buildContinuitySnapshot, enrichContinuitySnapshot, continuityReviewRequest, continuityReportResponseSchema, readContinuityRequestBilling, reviewContinuity,
   type ContinuityOpinion, type ContinuityReport, type ContinuityDispatch } from '../../api/lib/agent/continuity-review.js'
 import * as original from '../../api/lib/agent/original-request.js'
 import * as humanity from '../../api/lib/agent/humanity-quality.js'
@@ -194,7 +194,7 @@ function runnerFixture() {
   vi.spyOn(prisma.storyCompilation, 'findUniqueOrThrow').mockImplementation(async () => ({ ...compilation } as never))
   vi.spyOn(prisma.storyCompilation, 'update').mockImplementation(async ({ data }) => { Object.assign(compilation, data); return { ...compilation } as never })
   vi.spyOn(prisma.agentArtifact, 'findUnique').mockImplementation(async ({ where }) => artifacts.get(where.id!) as never ?? null)
-  vi.spyOn(prisma.agentArtifact, 'findMany').mockImplementation(async args => {
+  const historyRead = vi.spyOn(prisma.agentArtifact, 'findMany').mockImplementation(async args => {
     if (args?.where?.artifactType !== 'continuityReview') return []
     const where = args.where as { AND?: Array<{ metadata?: { path: string[]; equals?: unknown; lte?: number } }>; NOT?: { metadata: { path: string[]; equals: unknown } } }
     return [...artifacts.values()].reverse().filter(row => {
@@ -207,6 +207,7 @@ function runnerFixture() {
         && (!where.NOT || value[where.NOT.metadata.path[1]] !== where.NOT.metadata.equals)
     }).slice(0, 1) as never
   })
+  const artifactRead = vi.spyOn(prisma.agentArtifact, 'findFirst').mockImplementation(async args => artifacts.get(String(args?.where?.id)) as never ?? null)
   vi.spyOn(prisma.agentArtifact, 'create').mockImplementation(async ({ data }) => { const row = { ...data, updatedAt: new Date() }; artifacts.set(data.id!, row); return row as never })
   vi.spyOn(prisma.agentArtifact, 'update').mockImplementation(async ({ where, data }) => { const row = { ...artifacts.get(where.id!), ...data, updatedAt: new Date() }; artifacts.set(where.id!, row); return row as never })
   vi.spyOn(prisma.aiUsageLog, 'findMany').mockImplementation(async () => fees as never)
@@ -226,7 +227,7 @@ function runnerFixture() {
     return { content: await answer(action), usageIds: [fee.id], billingKnown: true }
   }
   const report = () => (Array.from(artifacts.values()).at(-1)!.metadata as { continuityReport: ContinuityReport }).continuityReport
-  return { chapter, compilation, artifacts, fees, operations, ctx, controller, requests, dispatch, report, sessionRead, previousRead, compilationRead }
+  return { chapter, compilation, artifacts, fees, operations, ctx, controller, requests, dispatch, report, sessionRead, previousRead, compilationRead, historyRead, artifactRead }
 }
 
 function repairFixture() {
@@ -242,6 +243,46 @@ function repairFixture() {
 }
 
 describe('known failure recovery preserves report and paid evidence', () => {
+  it('keeps current-source snapshots independent of report history and accounting reads', async () => {
+    const f = runnerFixture()
+    f.historyRead.mockImplementation(async () => { throw Error('A current-source snapshot must not load historical reports') })
+    const base = await buildContinuitySnapshot(f.ctx, { compilationId: 'comp' })
+    expect(base).toMatchObject({ chapter: { id: 'c', revision: 4 }, fullReviewKey: expect.any(String) })
+    expect(base).not.toHaveProperty('priorReport')
+    expect(base).not.toHaveProperty('compatibleReport')
+    expect(f.historyRead).not.toHaveBeenCalled()
+    await expect(enrichContinuitySnapshot(f.ctx, base)).rejects.toThrow('must not load historical reports')
+  })
+  it('retains same-focus cached results without adding an own-receipt-ID admission gate', async () => {
+    const f = runnerFixture()
+    await reviewContinuity(f.ctx, { compilationId: 'comp' }, { allowRepair: false, dispatch: f.dispatch(() => '{"findings":[]}') })
+    f.report().usageIds = []
+    const before = structuredClone(f.report())
+    const dispatch = vi.fn(async () => { throw Error('A same-context complete report must not be repurchased') })
+    f.historyRead.mockClear()
+    expect(await reviewContinuity(f.ctx, { compilationId: 'comp' }, { allowRepair: false, dispatch }))
+      .toMatchObject({ reviewCompleted: true, output: expect.stringContaining('复用已保存报告') })
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(f.report()).toEqual(before)
+    expect(f.historyRead.mock.calls.filter(([args]) => args?.where?.AND)).toHaveLength(0)
+  })
+  it('uses only the reuse identity frozen during native preparation without a history rescan', async () => {
+    const f = runnerFixture()
+    await reviewContinuity(f.ctx, { compilationId: 'comp', focus: '人物' }, { allowRepair: false, dispatch: f.dispatch(() => '{"findings":[]}') })
+    const original = structuredClone(f.report())
+    const snapshot = await buildContinuitySnapshot(f.ctx, { compilationId: 'comp', focus: '物品' })
+    const criticRequest = continuityReviewRequest(await enrichContinuitySnapshot(f.ctx, snapshot), '物品')
+    expect(JSON.parse(criticRequest.content).reusableReportId).toBe(original.id)
+    const requestHash = runtimeJson(criticRequest).hash
+    f.historyRead.mockClear(); f.artifactRead.mockClear()
+    const dispatch = vi.fn(async () => { throw Error('Prepared focus-only reuse needs no provider request') })
+    expect(await reviewContinuity(f.ctx, { compilationId: 'comp', focus: '物品' }, { snapshot, criticRequest, allowRepair: false, dispatch }))
+      .toMatchObject({ reviewCompleted: true, output: expect.stringContaining('复用已保存报告') })
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(f.historyRead.mock.calls.filter(([args]) => args?.where?.AND)).toHaveLength(0)
+    expect(f.artifactRead).toHaveBeenCalledWith({ where: { id: original.id, artifactType: 'continuityReview', runId: { in: ['r'] }, run: { userId: 'u', novelId: 'n' } } })
+    expect(runtimeJson(criticRequest).hash).toBe(requestHash)
+  })
   it('reuses a new full review across changed focus without dispatch or rewriting the original report', async () => {
     const f = runnerFixture()
     await reviewContinuity(f.ctx, { compilationId: 'comp', focus: '人物知识' }, { allowRepair: false, dispatch: f.dispatch(() => '{"findings":[]}') })

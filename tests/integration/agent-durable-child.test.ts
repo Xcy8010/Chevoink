@@ -466,7 +466,8 @@ describe.runIf(available)('canonical durable child grants', () => {
     expect(await readTaskBudget(f.lease)).toMatchObject({ reservedChildTokens: 500n })
   }, false, 5000, undefined, 5000))
 
-  it.each(['finite', 'selection'] as const)('enforces child target ceilings even after an owned chapter read (%s)', async target => fixture(async f => {
+  it.each((['finite', 'selection'] as const).flatMap(target => (['write_denials', 'readonly_critics'] as const).map(check => ({ target, check }))))(
+    'enforces child target ceilings after an owned read ($target, $check)', async ({ target, check }) => fixture(async f => {
     const grant = await admitChildExecution(f.lease, { ...f.input, roleTools: '*' })
     const child = await acquireRunLease({ userId: f.userId, runId: grant.childRunId, ownerId: 'child', claimId: randomUUID() })
     const chapterId = target === 'finite' ? f.chapters[1].id : f.chapters[0].id
@@ -482,7 +483,7 @@ describe.runIf(available)('canonical durable child grants', () => {
         { name: 'chapter_edit_range', args: { chapterId, start: 4, end: 6, newText: '修改后缀' } }]
     const indirect = [qualityAnalyzeTool, continuityValidateTool].flatMap(tool => [
       { name: tool.name, args: { chapterId }, tool }, { name: tool.name, args: { compilationId: 'saved-compilation' }, tool }])
-    for (const [index, call] of calls.entries()) {
+    if (check === 'write_denials') for (const [index, call] of calls.entries()) {
       state = await loadExecutionState(f.userId, child.runId)
       const frame = await saveExecutionState(child, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash, snapshot: { ...state.frame.state,
         messages: [...state.frame.state.messages.slice(0, index > 0 ? -1 : undefined), { role: 'assistant', content: null,
@@ -493,9 +494,10 @@ describe.runIf(available)('canonical durable child grants', () => {
     }
     // Critics are now body-read-only by default. Their admission is allowed;
     // none can turn a read baseline into author permission to edit this target.
+    if (check === 'readonly_critics') {
     state = await loadExecutionState(f.userId, child.runId)
     await saveExecutionState(child, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash,
-      snapshot: { ...state.frame.state, messages: [...state.frame.state.messages.slice(0, -1), { role: 'assistant', content: null,
+      snapshot: { ...state.frame.state, messages: [...state.frame.state.messages, { role: 'assistant', content: null,
         toolCalls: indirect.map((call, index) => ({ id: `readonly-${index}`, name: call.name, arguments: JSON.stringify(call.args) })) }] } })
     for (const [index, call] of indirect.entries()) {
       const { frame } = await loadExecutionState(f.userId, child.runId)
@@ -508,6 +510,7 @@ describe.runIf(available)('canonical durable child grants', () => {
       await recordToolFailure(child, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash,
         code: 'FIXTURE_READONLY_ADMISSION', output: '只读准入已核对，未运行检查。', summary: '未运行检查' })
       await reduceExecutionReceipt(child, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
+    }
     }
     expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })).content).toBe('前缀选区后缀')
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' } }, runId: child.runId } })).toBe(0)

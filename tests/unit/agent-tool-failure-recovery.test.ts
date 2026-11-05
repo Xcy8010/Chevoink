@@ -20,9 +20,10 @@ describe('frozen new-chapter input recovery', () => {
     expect(prepare).not.toContain('尚未绑定章节')
     const create = frozenWritingToolGuidance('chapter_create', nextScope)
     expect(create).toContain('{"title":"章节名称"}')
-    expect(create).toContain('先完成本任务 PREPARE')
+    expect(create).toContain('不传正文，取得真实 chapterId 后用 chapter_write 写入')
+    expect(create).toContain('准备、检查不构成普通写入的阶段许可')
     expect(create).toContain('不能填写已有卷')
-    expect(create).toContain('不因章号或书名号拒绝创建')
+    expect(create).toContain('作者明确指定的非空命名均可使用')
   })
   it('does not infer a new slot from a missing, multiple, existing or volume-relative grant', () => {
     const writing = nextScope.writing!

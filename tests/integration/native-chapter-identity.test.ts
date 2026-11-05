@@ -16,6 +16,7 @@ import { COLLABORATION_MARKER, readWritingCollaborationDigest } from '../../api/
 
 it('recovers a paid historical combined create once, then creates a real empty identity before a separate body write', async () => {
   await fixture(async f => {
+    expect(f.spec.scope.writing).toMatchObject({ kind: 'bounded', targets: [{ orderIndex: 2, chapterId: null }, { orderIndex: 3, chapterId: null }] })
     const fetch = vi.fn(() => { throw new Error('no provider permitted in this regression') }); vi.stubGlobal('fetch', fetch)
     const lease = await claim(f), signal = new AbortController().signal
     const frozen: NativeToolView[] = [chapterCreateTool, chapterWriteTool].map(tool => ({ type: 'function', function: { name: tool.name, description: '冻结旧工具说明', parameters: toOpenAIParameters(tool.parameters) } }))
@@ -40,14 +41,14 @@ it('recovers a paid historical combined create once, then creates a real empty i
       expect(await settleProviderOperation({ ...identity, lease })).toMatchObject({ status: 'settled' })
       await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
     }
-    await model(frozen, 'chapter_create', { title: '历史新章', content: '已取得的旧正文，继续时不丢弃。' }, 'old-create')
+    await model(frozen, 'chapter_create', { title: '历史新章', position: 2, content: '已取得的旧正文，继续时不丢弃。' }, 'old-create')
     expect(await advanceDurableContext(lease)).toBeNull()
     expect(await executeDurableToolStep(lease, signal)).toMatchObject({ kind: 'tool', result: { display: { kind: 'chapterDiff', after: '已取得的旧正文，继续时不丢弃。' } } })
     expect(await executeDurableToolStep(lease, signal)).toMatchObject({ kind: 'idle' })
     expect(await prisma.chapter.count({ where: { novelId: f.novelId, title: '历史新章' } })).toBe(1)
     const views = await currentNativeToolViews(frozen, f.spec.scope)
     expect(views[0].function.parameters).not.toHaveProperty('properties.content')
-    await model(views, 'chapter_create', { title: '空章身份' }, 'new-create')
+    await model(views, 'chapter_create', { title: '空章身份', position: 3 }, 'new-create')
     const created = await executeDurableToolStep(lease, signal)
     expect(created).toMatchObject({ kind: 'tool', result: { display: { kind: 'chapterRef', wordCount: 0 } } })
     const chapter = await prisma.chapter.findFirstOrThrow({ where: { novelId: f.novelId, title: '空章身份' } })
@@ -62,5 +63,5 @@ it('recovers a paid historical combined create once, then creates a real empty i
     expect(await executeDurableToolStep(lease, signal)).toMatchObject({ kind: 'tool', result: { display: { chapterId: chapter.id, after: '通过真实身份另行保存的新正文。' } } })
     expect(await prisma.chapter.count({ where: { novelId: f.novelId, title: '空章身份' } })).toBe(1)
     expect(fetch).not.toHaveBeenCalled()
-  }, undefined, '写后续章节正文')
+  }, undefined, '写第2至3章正文', { freezeWriting: true })
 })

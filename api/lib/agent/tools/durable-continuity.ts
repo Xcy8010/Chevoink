@@ -14,7 +14,7 @@ import { failedToolResultSchema, readFailedToolResult, reduceExecutionReceipt } 
 import { auxiliaryRouteSchema, auxiliaryRouteForRuntime, resolveDurableAuxiliaryRuntime, callDurableAuxiliary } from '../runtime-auxiliary-call.js'
 import type { AuxiliaryModelStep } from '../runtime-auxiliary-model.js'
 import { REVIEW_MAX_OUTPUT_TOKENS } from '../review-completion.js'
-import { buildContinuitySnapshot, continuityReviewRequest, reviewContinuity, bindContinuityReport, readContinuityRequestBilling,
+import { buildContinuitySnapshot, enrichContinuitySnapshot, continuityReviewRequest, reviewContinuity, bindContinuityReport, readContinuityRequestBilling,
   type ContinuityDispatch, type ContinuityReport, type ContinuitySnapshot } from '../continuity-review.js'
 import { normalizeToolInput } from './input-validation.js'
 import type { AgentTool, ToolContext, ToolResult } from './types.js'
@@ -55,7 +55,7 @@ export async function prepareContinuityWork(ctx: ToolContext, lease: RunLeaseTok
       if (runtimeJson(existing.inputSnapshot).hash !== existing.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原检查输入损坏。')
       return { saved: object(object(existing.inputSnapshot).input).work }
     }
-    const args = argsSchema.parse(input.args), snapshot = await buildContinuitySnapshot(ctx, args, tx)
+    const args = argsSchema.parse(input.args), snapshot = await enrichContinuitySnapshot(ctx, await buildContinuitySnapshot(ctx, args, tx), tx)
     return { snapshot, args }
   }).catch(error => {
     if (ctx.signal.aborted || !(error instanceof DataAccessError)

@@ -51,7 +51,8 @@ export type ContinuityReport = { version: 1; id: string; taskId: string; chapter
   repairUnresolved?: Array<{ findingId: string; reason: string; retainedReasons?: string[] }>;
   history?: Array<{ rawResponses: string[]; incompleteResponses?: number[]; usageIds: string[]; nativeReceiptIds?: string[]; opinions: ContinuityOpinion[]; complete: boolean; billingKnown: boolean; error?: string; repairResult?: ToolResult; repairFailure?: string }> }
 export type ContinuityReviewArgs = { chapterId?: string; compilationId?: string; focus?: string }
-export type ContinuitySnapshot = Awaited<ReturnType<typeof buildContinuitySnapshot>>
+export type ContinuitySnapshot = Awaited<ReturnType<typeof buildContinuitySnapshot>> & {
+  compatibleReport?: ContinuityReport; priorReport?: ContinuityReport }
 
 /** A source-address error must not erase a recognizable editorial opinion. */
 export function inspectContinuityOpinions(raw: string) {
@@ -125,6 +126,14 @@ export async function buildContinuitySnapshot(ctx: Pick<ToolContext, 'userId' | 
   const contextHash = runtimeJson({ taskId: original.taskId, chapterId, sources: sources.map(source => ({ chapterId: source.chapterId,
     revision: source.revision, orderIndex: source.orderIndex, contentHash: source.table.contentHash })), authorRequest: original.prompt, focus: args.focus ?? null, ...(planContext ? { planContextHash: writingPlanContextHash(planContext) } : {}) }).hash
   const fullReviewKey = continuityFullReviewKey({ chapter, original, sources }, planContext ? writingPlanContextHash(planContext) : null)
+  return { chapter, previous, compilation, original, runIds, sources, contextHash, planContext, fullReviewKey }
+}
+
+/** Fresh critic preparation only. Current-source/readiness checks deliberately
+ * read no report history and cannot acquire new accounting dependencies. */
+export async function enrichContinuitySnapshot(ctx: Pick<ToolContext, 'userId' | 'novelId' | 'runId'>,
+  snapshot: ContinuitySnapshot, db: Prisma.TransactionClient = prisma): Promise<ContinuitySnapshot> {
+  const { chapter, original, runIds, contextHash, fullReviewKey, planContext } = snapshot, chapterId = chapter.id
   const scope = { artifactType: 'continuityReview' as const, runId: { in: runIds }, run: { userId: ctx.userId, novelId: ctx.novelId },
     AND: [{ metadata: { path: ['continuityReport', 'taskId'], equals: original.taskId } },
       { metadata: { path: ['continuityReport', 'chapterId'], equals: chapterId } },
@@ -148,7 +157,7 @@ export async function buildContinuitySnapshot(ctx: Pick<ToolContext, 'userId' | 
   const compatibleReport = known.find(report => report.reviewProtocol === CONTINUITY_FULL_REVIEW_PROTOCOL && report.fullReviewKey === fullReviewKey
     && report.revision === chapter.revision && report.contentHash === textHash(chapter.content) && (!planContext || report.planAlignment?.status === 'reviewed'))
   const priorReport = known.find(report => report.revision <= chapter.revision && report.contextHash !== contextHash)
-  return { chapter, previous, compilation, original, runIds, sources, contextHash, planContext, fullReviewKey, compatibleReport, priorReport }
+  return { ...snapshot, compatibleReport, priorReport }
 }
 
 /** Only an actual table entry can supply evidence; explanations are opinions. */
@@ -187,10 +196,11 @@ const criticSystem = `你是中文小说连续性编辑。完整阅读本章和�
 只输出一个完整 findings JSON 数据对象，无问题时输出 {"findings":[]}。不输出审查过程、输入正文、证据表或下面的 JSON Schema；Schema 仅约束报告格式，不是待填写或回显的报告内容。
 报告须满足以下全部约束：${JSON.stringify(z.toJSONSchema(continuityReportResponseSchema, { io: 'input' }))}`
 
-export function continuityReviewRequest(snapshot: Pick<ContinuitySnapshot, 'chapter' | 'sources' | 'original'> & Partial<Pick<ContinuitySnapshot, 'planContext' | 'fullReviewKey' | 'priorReport'>>, focus?: string) {
+export function continuityReviewRequest(snapshot: Pick<ContinuitySnapshot, 'chapter' | 'sources' | 'original'> & Partial<Pick<ContinuitySnapshot, 'planContext' | 'fullReviewKey' | 'priorReport' | 'compatibleReport'>>, focus?: string) {
   const prior = snapshot.priorReport
   return { system: criticSystem + `\n${REVIEW_REASSESSMENT_RULE}\n有历史报告时可附加reassessment逐项说明分类、理由及baselineFindingId或当前findingIndex；缺少分类不能删除findings。` + (snapshot.planContext ? `\n${renderPlanAlignmentInstructions(snapshot.planContext)}` : ''), content: JSON.stringify({ reviewProtocol: CONTINUITY_FULL_REVIEW_PROTOCOL,
     fullReviewKey: snapshot.fullReviewKey ?? continuityFullReviewKey(snapshot, snapshot.planContext ? writingPlanContextHash(snapshot.planContext) : null),
+    ...(snapshot.compatibleReport ? { reusableReportId: snapshot.compatibleReport.id } : {}),
     ...(prior ? { priorReview: { reportId: prior.id, revision: prior.revision, contentHash: prior.contentHash, sourceVersions: prior.sourceVersions ?? null,
       sourceSnapshots: prior.sourceSnapshots ?? null, findings: prior.findings, retainedProposals: prior.retainedProposals ?? [], sourceContentStatus: prior.sourceSnapshots ? 'recorded' : 'not_recorded' } } : {}),
     ...(snapshot.planContext ? { planContext: snapshot.planContext } : {}), authorRequest: snapshot.original.prompt, focus: focus ?? null,
@@ -350,20 +360,23 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
   options: { snapshot?: ContinuitySnapshot; dispatch?: ContinuityDispatch; readBilling?: () => Promise<ContinuityBilling>; applyRepair?: ContinuityApplyRepair; allowRepair?: boolean; resumeKnownRequest?: string;
     criticRequest?: ReturnType<typeof continuityReviewRequest>; compactRepair?: boolean } = {}): Promise<ToolResult> {
   ctx.signal.throwIfAborted()
-  const snapshot = options.snapshot ?? await buildContinuitySnapshot(ctx, args)
+  const current: ContinuitySnapshot = options.snapshot ?? await buildContinuitySnapshot(ctx, args)
+  const id = runtimeJson({ kind: 'continuity-report', taskId: current.original.taskId, chapterId: current.chapter.id, contextHash: current.contextHash }).hash
+  const saved = await prisma.agentArtifact.findUnique({ where: { id } })
+  const snapshot = options.criticRequest || saved ? current : await enrichContinuitySnapshot(ctx, current)
   const criticRequest = options.criticRequest ?? continuityReviewRequest(snapshot, args.focus)
   // The explicit marker lives inside the frozen request, so an old admitted
   // native request remains byte-for-byte old and is never relabeled v1.
   let fullReview = false
   let requestBaseline: ContinuityReport['baseline']
+  let reusableReportId: string | undefined
   try { const input = JSON.parse(criticRequest.content); fullReview = input.reviewProtocol === CONTINUITY_FULL_REVIEW_PROTOCOL && input.fullReviewKey === snapshot.fullReviewKey
     // This is the exact admitted request's historical input, not a newer report
     // discovered while resuming the same frozen native work.
     if (fullReview && input.priorReview) requestBaseline = input.priorReview as ContinuityReport['baseline']
+    if (fullReview && typeof input.reusableReportId === 'string') reusableReportId = input.reusableReportId
   }
   catch { /* Historical requests may contain plain text. */ }
-  const id = runtimeJson({ kind: 'continuity-report', taskId: snapshot.original.taskId, chapterId: snapshot.chapter.id, contextHash: snapshot.contextHash }).hash
-  const saved = await prisma.agentArtifact.findUnique({ where: { id } })
   const metadata = saved?.metadata && typeof saved.metadata === 'object' && !Array.isArray(saved.metadata) ? saved.metadata as Record<string, unknown> : {}
   const savedReport = metadata.continuityReport as ContinuityReport | undefined
   const readBilling = options.readBilling ?? (() => readContinuityRequestBilling(prisma, ctx, snapshot))
@@ -372,10 +385,17 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
   const retired = new Set(billing.retiredUsageIds ?? [])
   const previous = savedReport && !(savedReport.usageIds.some(id => retired.has(id)) || retired.size > 0 && !savedReport.billingKnown)
     ? savedReport : undefined
-  if (previous?.reviewProtocol === CONTINUITY_FULL_REVIEW_PROTOCOL && previous.complete && !reviewReceiptsKnown(previous, billing))
-    throw new DataAccessError(409, 'AI_PROVIDER_BILLING_UNCONFIRMED', '原完整报告缺少可核对的实际请求回执，未作为复用依据或重复请求。')
-  if (!saved && fullReview && snapshot.compatibleReport && reviewReceiptsKnown(snapshot.compatibleReport, billing)) {
-    const original = snapshot.compatibleReport
+  // A fresh native admission can freeze one reusable report identity. Resume
+  // reads that exact owned artifact, never rescans/rebuilds historical input.
+  const reusableArtifact = !saved && fullReview && reusableReportId && !snapshot.compatibleReport ? await prisma.agentArtifact.findFirst({
+    where: { id: reusableReportId, artifactType: 'continuityReview', runId: { in: snapshot.runIds }, run: { userId: ctx.userId, novelId: ctx.novelId } } }) : null
+  const reusableMetadata = reusableArtifact?.metadata && typeof reusableArtifact.metadata === 'object' && !Array.isArray(reusableArtifact.metadata) ? reusableArtifact.metadata : {}
+  const reusable = snapshot.compatibleReport ?? reusableMetadata.continuityReport as ContinuityReport | undefined
+  if (!saved && fullReview && reusable?.complete && reusable.taskId === snapshot.original.taskId && reusable.chapterId === snapshot.chapter.id
+    && reusable.reviewProtocol === CONTINUITY_FULL_REVIEW_PROTOCOL && reusable.fullReviewKey === snapshot.fullReviewKey
+    && reusable.revision === snapshot.chapter.revision && reusable.contentHash === textHash(snapshot.chapter.content)
+    && (!snapshot.planContext || reusable.planAlignment?.status === 'reviewed') && reviewReceiptsKnown(reusable, billing)) {
+    const original = reusable
     const { focus: _originalFocus, ...originalReport } = original
     const reused: ContinuityReport = { ...originalReport, ...(args.focus ? { focus: args.focus } : {}), id,
       contextHash: snapshot.contextHash, reusedReportId: original.reusedReportId ?? original.id }

@@ -96,9 +96,19 @@ describe.runIf(available)('durable worker orchestration', () => {
         : { version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000, rateCardId: 'worker-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
       let requests = 0
       let verifyHistoricalContinuation = false
+      let continuationCollisionKey: string | undefined
       const fetch = vi.fn(async (_url: unknown, init: RequestInit) => {
         requests++
         if (scenario === 'unknown') throw new Error('fixture disconnected')
+        if (scenario === 'continuation-gap' && requests === 2) {
+          // Inject the same post-response/pre-reduction fault by its actual
+          // model boundary. Advisory context frames do not define this fault.
+          const pending = (await loadExecutionState(f.userId, f.runId)).frame
+          expect(pending.state.phase).toBe('awaiting_operation')
+          continuationCollisionKey = `state:${f.rootId}:${pending.revision + 1}`
+          await prisma.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: f.rootId, runId: f.runId,
+            eventKey: continuationCollisionKey, type: 'fixture.collision', payload: {} } })
+        }
         const body = JSON.parse(String(init.body))
         expect(body.messages).toContainEqual(expect.objectContaining({ role: 'user', content: '检查本章' }))
         expect(body.messages).toContainEqual(expect.objectContaining({ role: 'system', content: expect.stringContaining('[当前工具执行规则]') }))
@@ -117,13 +127,13 @@ describe.runIf(available)('durable worker orchestration', () => {
       if (scenario === 'prepare-gap') vi.spyOn(runtimeOperations, 'prepareProviderAttempt').mockRejectedValueOnce(new Error('fixture before attempt'))
       if (scenario === 'attempt-gap') vi.spyOn(runtimeOperations, 'markProviderDispatched').mockRejectedValueOnce(new Error('fixture before dispatch'))
       if (scenario === 'checkpoint-gap') await prisma.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: f.rootId, runId: f.runId, eventKey: `state:${f.rootId}:8`, type: 'fixture.collision', payload: {} } })
-      if (scenario === 'continuation-gap') await prisma.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: f.rootId, runId: f.runId, eventKey: `state:${f.rootId}:8`, type: 'fixture.collision', payload: {} } })
       let run = runDurableExecution(lease, new AbortController().signal)
       if (scenario === 'continuation-gap') {
         await expect(run).rejects.toMatchObject({ code: 'P2002' })
         expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'execution.continuation' } })).toBe(0)
         expect(fetch).toHaveBeenCalledTimes(2)
-        await prisma.agentExecutionOutbox.delete({ where: { eventKey: `state:${f.rootId}:8` } })
+        expect(continuationCollisionKey).toBeDefined()
+        await prisma.agentExecutionOutbox.delete({ where: { eventKey: continuationCollisionKey! } })
         await pauseDurableTask(f.userId, lease.runId)
         const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { runId: lease.runId, type: 'run.paused' } })
         const resumed = await resumeDurableTask({ userId: f.userId, runId: lease.runId, pauseEventId: pause.id })
