@@ -3,7 +3,7 @@ import { resolveSystemModelConfig } from './model-lifecycle.js'
 import { decryptSecret } from './secret-box.js'
 import type { WebToolProtocol } from '../../shared/contracts/web-tool.js'
 import type { ImageQualityConfig } from '../../shared/contracts/image-model.js'
-import { readModelRoutes } from './model-route-pool.js'
+import { readModelRoutes } from './model-route-config.js'
 
 export type ToolModelKey = 'tool:image-generation' | 'tool:image-vision' | 'tool:web-search' | 'tool:web-fetch'
 export type ToolModelRuntime = { provider: string; modelName: string; baseUrl: string; apiKey: string; routes?: Array<{ id: string; provider: string; modelName: string; baseUrl: string; apiKey: string }>; imageQuality?: ImageQualityConfig; webToolProtocol?: WebToolProtocol; modelConfigId?: string; modelConfigRevision?: number }

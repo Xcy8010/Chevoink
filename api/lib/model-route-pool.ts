@@ -1,18 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { z } from 'zod'
 import { modelRoutesInputSchema, type ModelRouteInput } from '../../shared/contracts/model-routes.js'
 import { encryptSecret, decryptSecret } from './secret-box.js'
 import { DataAccessError, prisma } from './prisma.js'
 import type { ChatWithToolsParams } from './ai-service.js'
 import { env } from '../config/env.js'
+import { readModelRoutes } from './model-route-config.js'
 
-const storedSchema = z.array(z.object({ id: z.string().uuid(), label: z.string(), provider: z.string(), modelName: z.string(), baseUrl: z.string(), apiKeyCiphertext: z.string(), enabled: z.boolean(), reasoningEfforts: z.array(z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])).optional(), contextWindowTokens: z.number().optional(), visionEnabled: z.boolean().optional() })).max(7)
-export function readModelRoutes(metadata: unknown) {
-  const value = metadata && typeof metadata === 'object' && 'routes' in metadata ? metadata.routes : []
-  const parsed = storedSchema.safeParse(value)
-  if (!parsed.success) throw new DataAccessError(409, 'MODEL_ROUTES_INVALID', '模型线路配置无效，请管理员检查。')
-  return parsed.data
-}
+export { readModelRoutes } from './model-route-config.js'
 export function presentModelRoutes(metadata: unknown) {
   return readModelRoutes(metadata).map(({ apiKeyCiphertext, ...route }) => ({ ...route, apiKeyConfigured: Boolean(apiKeyCiphertext) }))
 }

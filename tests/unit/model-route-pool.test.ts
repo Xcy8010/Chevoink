@@ -3,7 +3,8 @@ const { findFirst } = vi.hoisted(() => ({ findFirst: vi.fn() }))
 vi.mock('../../api/lib/prisma.js', () => ({ prisma: { aiModelConfig: { findFirst } }, DataAccessError: class extends Error { constructor(public status: number, public code: string, message: string) { super(message) } } }))
 vi.mock('../../api/lib/secret-box.js', () => ({ encryptSecret: (value: string) => `encrypted:${value}`, decryptSecret: (value: string) => value.replace('encrypted:', '') }))
 vi.mock('../../api/config/env.js', () => ({ env: { aiTextProvider: 'deepseek', aiTextModel: 'primary', aiTextBaseUrl: 'https://primary.test/v1', aiTextApiKey: 'primary-secret' } }))
-import { ModelRouteRejected, presentModelRoutes, routeRejectionMayRetry, saveModelRoutes, withModelRoutePool } from '../../api/lib/model-route-pool.js'
+import { ModelRouteRejected, presentModelRoutes, readModelRoutes, routeRejectionMayRetry, saveModelRoutes, withModelRoutePool } from '../../api/lib/model-route-pool.js'
+import { readModelRoutes as readRouteConfig } from '../../api/lib/model-route-config.js'
 import type { ChatWithToolsParams } from '../../api/lib/ai-service.js'
 
 const id = '6a18e83b-4c75-422d-8173-3e524fb64892'
@@ -12,6 +13,12 @@ const params: ChatWithToolsParams = { messages: [{ role: 'user', content: '你�
 beforeEach(() => { vi.clearAllMocks(); findFirst.mockResolvedValue({ id: 'main', tier: 'speed', enabled: true, provider: 'deepseek', modelName: 'primary', baseUrl: 'https://primary.test/v1', apiKeyCiphertext: 'encrypted:primary-secret', metadata: { routes } }) })
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers() })
 describe('built-in route pools', () => {
+  it('retains one stored-route reader for the pool export and lightweight configuration consumers', () => {
+    expect(readModelRoutes).toBe(readRouteConfig)
+    expect(readRouteConfig({ routes })).toEqual(routes)
+    expect(readRouteConfig(null)).toEqual([])
+    expect(() => readRouteConfig({ routes: [{ ...routes[0], id: 'invalid' }] })).toThrow(expect.objectContaining({ code: 'MODEL_ROUTES_INVALID', status: 409 }))
+  })
   it('encrypts new credentials and never returns them to admin reads', () => {
     const stored = saveModelRoutes([{ label: '第二账号', provider: 'deepseek', modelName: 'deepseek-chat', baseUrl: 'https://example.test/v1', apiKey: 'secret-123', enabled: true }], {}, ['low'])
     expect(stored[0].apiKeyCiphertext).toBe('encrypted:secret-123')
