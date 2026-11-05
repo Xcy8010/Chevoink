@@ -169,7 +169,7 @@ describe.runIf(available)('real durable default execution control', () => {
       const token = await claim(f)
       const raw = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })
       const op = await prepareOperation(token, { key: 'first', kind: 'provider', action: 'chat', input: {} })
-      const attempt = await prepareProviderAttempt(token, { operationId: op.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request })
+      const attempt = await prepareProviderAttempt(token, { operationId: op.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request: { body: { max_tokens: 100 } } })
       expect((await markProviderDispatched(token, attempt.id)).dispatchGranted).toBe(true)
       const identity = { userId: f.userId, attemptId: attempt.id, requestHash: attempt.requestHash }
       await recordProviderUsage({ ...identity, revision: 1, usage: { source: 'reported', promptTokens: 10000000, completionTokens: 123, cacheHitTokens: null, cacheMissTokens: null } })
@@ -377,7 +377,7 @@ describe.runIf(available)('actual saved-frame consumers beyond historical defaul
         const op = await prepareOperation(token, { key: `exec:${frame.state.nextOperationSequence}`, kind: 'provider', action: 'chat', input: { request } })
         const pending = await saveExecutionState(token, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
           snapshot: { ...frame.state, phase: 'awaiting_operation', pendingOperationId: op.id, turn: frame.state.turn + 1, nextOperationSequence: frame.state.nextOperationSequence + 1 } })
-        const attempt = await prepareProviderAttempt(token, { operationId: op.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request: { body: { max_tokens: 100 } } })
+        const attempt = await prepareProviderAttempt(token, { operationId: op.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request })
         expect((await markProviderDispatched(token, attempt.id)).dispatchGranted).toBe(true)
         const identity = { userId: f.userId, attemptId: attempt.id, requestHash: attempt.requestHash }
         await recordProviderUsage({ ...identity, revision: 1, usage: { source: 'reported', promptTokens: 100000, completionTokens: 100, cacheHitTokens: null, cacheMissTokens: null } })

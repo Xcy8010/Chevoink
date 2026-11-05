@@ -487,6 +487,9 @@ export const chapterBridgeCommitTool = defineTool({
         output: '该章已有本任务后续准备的编译，请读取当前章节桥；本次未覆盖新编译或重复提交。' }
     compilation = await db.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { chapter: true, bridge: true } })
     const chapter = compilation.chapter!
+    const contentHash = persistedContentHash(chapter.content)
+    const prepared = compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext : {}
+    const wasCommitted = Boolean(compilation.bridge?.committedAt && compilation.bridge.targetRevision === chapter.revision && prepared.terminalContentHash === contentHash)
     let result: Awaited<ReturnType<typeof commitChapterBridge>>
     try { result = await commitChapterBridge({ ...ctx, compilationId: compilation.id, chapterSummary: args.chapterSummary ?? chapter.content.slice(0, 600),
       exitState: storyStateSchema.parse({}), lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '',
@@ -499,7 +502,9 @@ export const chapterBridgeCommitTool = defineTool({
     const final = await readAdvisoryChapterReviewReadiness(db, ctx, result.compilationId)
     const remaining = final?.decisionEntries?.length ?? 0, retainedCount = final?.retainedDecisions?.length ?? 0
     return { output: `当前正文已保存，章节已提交。连续性报告：${final?.continuity ?? '未核验'}；人类感质量报告：${final?.quality ?? '未核验'}。${remaining ? `当前仍有 ${remaining} 条报告意见，其中 ${retainedCount} 条已明确保留；保留不代表已修复。` : '提交不表示检查已完成或通过；检查结论以实际报告为准。'}`, summary: '章节已提交',
-      semanticTransition: { targetId: result.compilationId, beforeHash: runtimeJson({ committed: false }).hash, afterHash: runtimeJson(result).hash },
+      semanticTransition: { targetId: result.compilationId,
+        beforeHash: runtimeJson({ committed: wasCommitted, chapterId: chapter.id, chapterRevision: chapter.revision, contentHash }).hash,
+        afterHash: runtimeJson({ committed: true, chapterId: chapter.id, chapterRevision: chapter.revision, contentHash }).hash },
       display: { kind: 'storyCompiler', compilationId: result.compilationId, phase: 'commit', title: '章节已提交', detail: 'r' + result.chapterRevision, items: [`保留意见 ${retainedCount} 条`] } }
   },
 })

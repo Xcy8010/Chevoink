@@ -242,7 +242,7 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
       expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: root.id } } })).toBe(0)
       return
     }
-    expect(action).toBe(true)
+    expect(action).toMatchObject({ kind: 'activation_continue', runId: f.runId })
     const ready = await prisma.agentGoal.findUniqueOrThrow({ where: { id: initial.id } })
     expect(await prisma.agentGoalExecution.findUniqueOrThrow({ where: { runId: f.runId } })).toMatchObject({
       goalId: initial.id, goalRevision: 1, epoch: ready.epoch, taskRootId: root.id,

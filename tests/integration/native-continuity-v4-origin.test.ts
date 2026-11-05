@@ -79,7 +79,9 @@ describe.runIf(available)('native continuity origin remains a real operation and
     const reusedOrigin = await step()
     expect(reusedOrigin, JSON.stringify(reusedOrigin)).toMatchObject({ result: { reviewCompleted: true, reviewOutcome: 'complete' } })
     expect(network).toHaveBeenCalledOnce()
-    const originCache = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate', operationKey: `exec:2` }, include: { effectReceipt: true, children: true } })
+    const originCache = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate',
+      inputSnapshot: { path: ['input', 'callId'], equals: 'origin-cache' } }, include: { effectReceipt: true, children: true } })
+    expect(originCache.id).not.toBe(origin.id)
     expect(originCache.inputSnapshot).toMatchObject({ input: { work: { kind: 'continuityReview', chapterId: chapter.id, revision: chapter.revision } } })
     expect(originCache.effectReceipt).not.toBeNull()
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { parentOperationId: originCache.id } } })).toBe(0)

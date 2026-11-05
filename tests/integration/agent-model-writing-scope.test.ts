@@ -33,7 +33,7 @@ describe.runIf(available)('main Agent scope through the durable saved cursor', (
     expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('原文')
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
   }, undefined, '把对白处理自然并保存。', { agentWritingProtocol: 1 }))
-  it('recovers confirmed binding errors, reuses the binding and edits only the locked current chapter', () => fixture(async f => {
+  it.each(['scope-recovery', 'terminal-delivery'] as const)('%s keeps the original binding and edits only the locked current chapter', scenario => fixture(async f => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     const fetch = vi.fn(() => { throw Error('No paid provider in scope regression') }); vi.stubGlobal('fetch', fetch)
     const other = await prisma.chapter.create({ data: { authorId: f.userId, novelId: f.novelId,
@@ -43,7 +43,7 @@ describe.runIf(available)('main Agent scope through the durable saved cursor', (
     const budget = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })
     const lease = await claim(f), tools = [taskScopeBindTool, chapterReadTool, storyCompilerPrepareTool, sceneTaskBuildTool, chapterEditRangeTool, chapterBridgeGetTool, chapterBridgeCommitTool]
     const binding = { intent: 'revise', targets: [{ chapterId: f.chapterId }], requiredChecks: [] }
-    const calls = [
+    const allCalls = [
       { id: 'unbound-prepare', name: storyCompilerPrepareTool.name, arguments: JSON.stringify({ chapterId: f.chapterId, intentSummary: '模型可根据工具反馈先确定正文任务' }) },
       { id: 'invalid-target', name: taskScopeBindTool.name, arguments: JSON.stringify({ ...binding, targets: [{ chapterId: randomUUID() }] }) },
       { id: 'bind', name: taskScopeBindTool.name, arguments: JSON.stringify(binding) },
@@ -55,6 +55,10 @@ describe.runIf(available)('main Agent scope through the durable saved cursor', (
       { id: 'read-other', name: chapterReadTool.name, arguments: JSON.stringify({ chapterId: other.id }) },
       { id: 'edit-other', name: chapterEditRangeTool.name, arguments: JSON.stringify({ chapterId: other.id, oldText: '保持不变', newText: '不该修改' }) },
     ]
+    // Keep recovery/negative scope checks and the complete delivery chain in
+    // independent real fixtures; neither needs the other's extra tool rounds.
+    const calls = allCalls.filter(call => scenario === 'scope-recovery' ? !['prepare', 'scenes'].includes(call.id)
+      : ['bind', 'read', 'prepare', 'scenes', 'edit'].includes(call.id))
     await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
       model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
       tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } })),
@@ -84,6 +88,12 @@ describe.runIf(available)('main Agent scope through the durable saved cursor', (
       snapshot: { ...current.frame.state, messages: [...current.frame.state.messages, { role: 'assistant', content: '已完成' }] } })
     const evidence = await collectDurableCompletionEvidence(lease, { expectedRevision: candidate.revision, expectedHash: candidate.snapshotHash })
     expect((evidence.snapshot as { blockers: Array<{ code: string }> }).blockers.some(item => item.code === 'writing_delivery_missing' || item.code === 'uncommitted_compilation')).toBe(false)
+    if (scenario === 'scope-recovery') {
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
+      expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
+      expect(fetch).not.toHaveBeenCalled()
+      return
+    }
     await saveExecutionState(lease, { expectedRevision: candidate.revision, expectedHash: candidate.snapshotHash,
       snapshot: { ...candidate.state, messages: [...candidate.state.messages, { role: 'assistant', content: null, toolCalls: [
         { id: 'bridge', name: chapterBridgeGetTool.name, arguments: '{}' },

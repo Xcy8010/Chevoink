@@ -314,14 +314,14 @@ describe.runIf(available)('durable actual plan writes', () => {
 })
 
 describe.runIf(available)('durable pre-execution rejection', () => {
-  it.each(['incomplete', 'invalid', 'denied', 'unpublished', 'valid', 'approval', 'wrong-call', 'atomic-gap', 'schema-invalid', 'schema-changed', 'schema-coerced', 'coercion-fault', 'scene-overflow', 'scene-invalid'] as const)('%s', async scenario => {
+  it.each(['incomplete', 'invalid', 'denied', 'unpublished', 'valid', 'approval', 'wrong-call', 'atomic-gap', 'schema-invalid', 'current-schema-invalid', 'schema-coerced', 'coercion-fault', 'scene-five-valid', 'scene-invalid'] as const)('%s', async scenario => {
     await fixture(async f => {
       const lease = await claim(f)
       const scene = scenario.startsWith('scene-')
       const name = scene ? 'scene_task_build' : 'chapter_read'
       const syntheticScene = (goal: string) => ({ purpose: '让守军从城门撤往水渠', goal, obstacle: '城门被封锁',
         choice: '改走水渠', cost: '放弃补给车，人员无新增伤亡', turn: '撤离队抵达水渠入口' })
-      const raw = scene ? JSON.stringify({ arguments: { tasks: scenario === 'scene-overflow'
+      const raw = scene ? JSON.stringify({ arguments: { tasks: scenario === 'scene-five-valid'
         ? Array.from({ length: 5 }, (_, index) => syntheticScene(`场景${index + 1}`)) : [syntheticScene('守城'), null] } }) : scenario === 'invalid' ? '{' : '{}'
       const parameters = scene ? sceneTaskBuildTool.parameters : z.object({ chapterId: z.string().min(1) })
       const candidate: AgentTool = { name, title: '读取', description: '', parameters, readOnly: !scene,
@@ -329,17 +329,17 @@ describe.runIf(available)('durable pre-execution rejection', () => {
         ...(scene ? { coerceArgs: sceneTaskBuildTool.coerceArgs } : {}),
         ...(scenario === 'schema-coerced' ? { coerceArgs: () => ({ chapterId: f.chapterId }) } : {}),
         ...(scenario === 'coercion-fault' ? { coerceArgs: () => { throw new Error('fixture normalizer failed') } } : {}) }
-      const hasValidator = scene || scenario.startsWith('schema-') || scenario === 'coercion-fault'
+      const hasValidator = scene || scenario.startsWith('schema-') || scenario === 'current-schema-invalid' || scenario === 'coercion-fault'
       const initial = await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
         model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: modelRouteRevision({ provider: 'fixture', model: 'fixture', endpoint: 'https://provider.invalid/v1/chat/completions', reasoningEffort: 'high' }) },
-        tools: scenario === 'unpublished' ? [] : [{ type: 'function', function: { name, description: '', parameters: hasValidator && scenario !== 'schema-changed' ? z.toJSONSchema(parameters, { io: 'input' }) : { type: 'object' } } }],
+        tools: scenario === 'unpublished' ? [] : [{ type: 'function', function: { name, description: '', parameters: hasValidator && scenario !== 'current-schema-invalid' ? z.toJSONSchema(parameters, { io: 'input' }) : { type: 'object' } } }],
         toolAuthority: [{ name, permission: scenario === 'denied' || scenario === 'atomic-gap' ? 'deny' : scenario === 'approval' ? 'ask' : 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
         snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
           messages: [{ role: 'user', content: '读取' }, { role: 'assistant', content: null, toolCalls: [{ id: 'call', name, arguments: raw, ...(scenario === 'incomplete' ? { incomplete: true } : {}) }] }], successfulToolSignatures: [] } })
       const cursor = { expectedRevision: initial.frame.revision, expectedHash: initial.frame.snapshotHash }
       if (scenario === 'atomic-gap') await prisma.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: f.rootId, runId: f.runId, eventKey: `state:${f.rootId}:${cursor.expectedRevision + 1}`, type: 'fixture-conflict', payload: {} } })
       const invoke = () => rejectToolCursorCall(lease, cursor, scenario === 'wrong-call' ? 'other' : 'call', hasValidator ? candidate : undefined)
-      if (['valid', 'approval', 'wrong-call', 'atomic-gap', 'schema-changed', 'schema-coerced', 'coercion-fault'].includes(scenario)) {
+      if (['valid', 'approval', 'wrong-call', 'atomic-gap', 'schema-coerced', 'coercion-fault', 'scene-five-valid'].includes(scenario)) {
         await expect(invoke()).rejects.toThrow()
         expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } })).toBe(0)
         expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(initial.frame.revision)
@@ -350,18 +350,18 @@ describe.runIf(available)('durable pre-execution rejection', () => {
       expect(rejected.receipt.result).toMatchObject({ outcome: 'failed', effectApplied: false })
       const reduced = await reduceExecutionReceipt(lease, { expectedRevision: rejected.pending.revision, expectedHash: rejected.pending.snapshotHash, operationId: rejected.operation.id })
       expect(reduced.state.messages.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'call' })
-      if (scenario === 'schema-invalid') {
+      if (scenario === 'schema-invalid' || scenario === 'current-schema-invalid') {
         expect(reduced.state.messages.at(-1)?.content).toContain('chapterId:')
         expect(reduced.state.messages.at(-1)?.content).toContain('参数字段校验失败')
       }
       if (scene) {
-        expect(reduced.state.messages.at(-1)?.content).toContain(scenario === 'scene-overflow' ? 'tasks:' : 'tasks.1:')
+        expect(reduced.state.messages.at(-1)?.content).toContain('tasks.1:')
         expect(reduced.state.messages.at(-1)?.content).toContain('参数字段校验失败')
       }
-      expect(reduced.state).toMatchObject({ phase: 'idle', turn: 0, nextOperationSequence: 1 })
+      expect(reduced.state).toMatchObject({ phase: 'idle', turn: initial.frame.state.turn, nextOperationSequence: initial.frame.state.nextOperationSequence + 1 })
       const replay = await invoke()
       await reduceExecutionReceipt(lease, { expectedRevision: replay.pending.revision, expectedHash: replay.pending.snapshotHash, operationId: replay.operation.id })
-      expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(4)
+      expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(initial.frame.revision + 2)
       expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } })).toBe(1)
       expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'effect.committed' } })).toBe(0)
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('原文')

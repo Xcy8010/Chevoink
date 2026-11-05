@@ -7,7 +7,7 @@ import { modelRouteRevision, prepareModelCursorOperation, validateModelCursor } 
 import { currentNativeToolViews } from '../../api/lib/agent/runtime-tool-view.js'
 import { toOpenAIToolPresentation } from '../../api/lib/agent/tool-schema.js'
 import * as operations from '../../api/lib/agent/runtime-operations.js'
-import { preparePricedProviderOperation, settleProviderOperation, type DurableTokenPrice } from '../../api/lib/agent/runtime-settlement.js'
+import { settleProviderOperation, type DurableTokenPrice } from '../../api/lib/agent/runtime-settlement.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { resolveDurableApproval } from '../../api/lib/agent/runtime-approval.js'
@@ -172,13 +172,14 @@ describe.runIf(available)('ordinary writer actual PG body and original task curs
       expect(await prisma.agentProviderAttempt.findMany({ where: { id: { in: originalAttempts.map(row => row.id) } }, include: { usageReceipt: true }, orderBy: { id: 'asc' } })).toEqual(originalAttempts)
       expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(originalLedger)
       if (fullChain) {
-        await model([{ id: 'explicit-quality', name: 'quality_analyze', arguments: JSON.stringify({ compilationId: compilationBefore.id }) },
-          { id: 'explicit-continuity', name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilationBefore.id }) },
-          { id: 'commit-current', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId: compilationBefore.id }) }])
         if (scenario === 'unknown-paid') {
-          const request = { endpoint: 'https://provider.invalid/v1', body: { model: 'fixture', max_tokens: 100 } }
-          const unknownOperation = await preparePricedProviderOperation(lease, { key: 'fixture-unknown-payment', action: 'chat', request, price })
-          const attempt = await operations.prepareProviderAttempt(lease, { operationId: unknownOperation.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request })
+          const current = await loadExecutionState(f.userId, lease.runId), frame = current.frame
+          const views = await currentNativeToolViews(current.configuration.tools, f.spec.scope)
+          const cursor = { expectedRevision: frame.revision, expectedHash: frame.snapshotHash }, key = `exec:${frame.state.nextOperationSequence}`
+          await validateModelCursor(lease, cursor, { operationKey: key, messages: frame.state.messages, tools: views, tier: 'speed', route })
+          const request = { endpoint: route.endpoint, body: { model: 'fixture', messages: frame.state.messages, tools: views, max_tokens: 100 } }
+          const unknown = await prepareModelCursorOperation(lease, cursor, { key, action: 'workspaceAgent', request, price })
+          const attempt = await operations.prepareProviderAttempt(lease, { operationId: unknown.operation.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request })
           await operations.markProviderDispatched(lease, attempt.id, 0)
           await operations.recordProviderResult({ userId: f.userId, attemptId: attempt.id, requestHash: attempt.requestHash,
             outcome: 'unknown', result: { reason: 'synthetic interrupted response' } })
@@ -187,10 +188,14 @@ describe.runIf(available)('ordinary writer actual PG body and original task curs
           await expect(step()).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
           expect(fetcher).not.toHaveBeenCalled()
           expect(await prisma.agentProviderAttempt.findUniqueOrThrow({ where: { id: attempt.id } })).toEqual(original)
+          expect((await loadExecutionState(f.userId, lease.runId)).frame.snapshotHash).toBe(unknown.pending.snapshotHash)
           expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(ledger)
           expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilationBefore.id } })).toMatchObject({ committedAt: null })
           return
         }
+        await model([{ id: 'explicit-quality', name: 'quality_analyze', arguments: JSON.stringify({ compilationId: compilationBefore.id }) },
+          { id: 'explicit-continuity', name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilationBefore.id }) },
+          { id: 'commit-current', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId: compilationBefore.id }) }])
         for (let index = 0; index < 2; index++) {
           const checked = await step()
           expect(checked.kind, JSON.stringify(checked)).toBe('tool')

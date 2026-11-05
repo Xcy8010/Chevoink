@@ -467,10 +467,19 @@ describe('same-task explicit tail-volume reprepare', () => {
     expect(f.create).toHaveBeenCalledOnce()
     expect(db.storyCompilation.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ userId: 'u', novelId: 'n', runId: { in: ['new-run'] }, targetOrderIndex: 32 }) }))
   })
-  it.each(['proposal', 'continue', 'predecessor', 'archived-volume'] as const)('blocks changed %s before abandoning the binding or creating a replacement', async scenario => {
+  it('reuses the bound volume after its predecessor changes without rewriting the original creation proof', async () => {
+    const f = await preparedVolume()
+    const originalBindings = structuredClone((await db.agentRun.findFirst({})).writingBindings)
+    f.previous.revision++
+    const second = await prepareStoryCompilation(f.input)
+    expect(second.compilation.preparedContext).toMatchObject({ createdTailVolume: { id: 'created-volume', targetOrderIndex: 32 } })
+    expect((await db.agentRun.findFirst({})).writingBindings).toEqual(originalBindings)
+    await expect(assertExplicitWritingVolumePlacement(db as unknown as Prisma.TransactionClient, ctx, 32, 'created-volume')).resolves.toBeUndefined()
+    expect(f.create).toHaveBeenCalledOnce()
+  })
+  it.each(['proposal', 'continue', 'archived-volume'] as const)('blocks changed %s before abandoning the binding or creating a replacement', async scenario => {
     const f = await preparedVolume()
     if (scenario === 'archived-volume') db.volume.findFirst.mockResolvedValue(null)
-    if (scenario === 'predecessor') f.previous.revision++
     const input = scenario === 'proposal' ? { ...f.input, volumeDecision: { ...f.input.volumeDecision, newVolume: { ...f.proposal, title: '不同提议' } } }
       : scenario === 'continue' ? { ...f.input, volumeDecision: { kind: 'continue' as const, reason: '改为延续' } } : f.input
     const effects = db.storyCompilation.updateMany.mock.calls.length
