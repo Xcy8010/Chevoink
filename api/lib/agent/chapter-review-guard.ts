@@ -454,7 +454,9 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
   const parsedSpec = taskSpecSchema.safeParse(original.spec)
   // Consume the authenticated answer/target-correction projection for body authority. The
   // immutable original still supplies lineage, review requirements and budgets.
-  const authoritySpec = parsedSpec.success
+  const authoritySpec = parsedSpec.success && (parsedSpec.data.scope.agentWritingProtocol === 1
+    || parsedSpec.data.scope.writingClarificationProtocol === 2
+    || parsedSpec.data.scope.writingTargetProtocol === 2 && parsedSpec.data.scope.writing?.kind === 'needs_input')
     ? await effectiveWritingTaskSpec(tx, subject, parsedSpec.data) : original.spec
   const runIds = await originalTaskRunIds(tx, subject, original)
   await tx.$queryRaw(Prisma.sql`SELECT id FROM story_compilations WHERE user_id = ${subject.userId}
