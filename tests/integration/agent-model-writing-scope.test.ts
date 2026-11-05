@@ -14,6 +14,7 @@ import { chapterEditRangeTool } from '../../api/lib/agent/tools/chapter-tools.js
 import { storyCompilerPrepareTool, sceneTaskBuildTool, chapterBridgeGetTool, chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
+import { advanceDurableMemory } from '../../api/lib/agent/runtime-memory.js'
 
 describe.runIf(available)('main Agent scope through the durable saved cursor', () => {
   it('rejects a cancelled owner before the model binding can be committed', () => fixture(async f => {
@@ -89,6 +90,11 @@ describe.runIf(available)('main Agent scope through the durable saved cursor', (
       ] }] } })
     expect(await executeDurableToolStep(lease, signal)).toMatchObject({ kind: 'tool' })
     expect(await executeDurableToolStep(lease, signal)).toMatchObject({ kind: 'tool', result: { summary: '章节已提交' } })
+    // The real scheduler settles DB-only derived memory before completion.
+    // Tool-step fixtures must run that step too; never mark the job complete
+    // without its actual source-bound operation and effect receipt.
+    expect(await advanceDurableMemory(lease)).toMatchObject({ kind: 'memory' })
+    expect(await advanceDurableMemory(lease)).toBeNull()
     const committed = await loadExecutionState(f.userId, f.runId)
     const final = await saveExecutionState(lease, { expectedRevision: committed.frame.revision, expectedHash: committed.frame.snapshotHash,
       snapshot: { ...committed.frame.state, messages: [...committed.frame.state.messages, { role: 'assistant', content: '已修改并保存当前章节。' }] } })

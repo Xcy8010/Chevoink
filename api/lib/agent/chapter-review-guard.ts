@@ -452,9 +452,9 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
   const conditionalAuthority = await assertSelectionBodyEffect(tx, subject, chapter, options)
   const original = await readOriginalTaskRequest(tx, subject)
   const parsedSpec = taskSpecSchema.safeParse(original.spec)
-  // Consume only the authenticated answer projection for body authority. The
+  // Consume the authenticated answer/target-correction projection for body authority. The
   // immutable original still supplies lineage, review requirements and budgets.
-  const authoritySpec = parsedSpec.success && (parsedSpec.data.scope.writingClarificationProtocol === 2 || parsedSpec.data.scope.agentWritingProtocol === 1)
+  const authoritySpec = parsedSpec.success
     ? await effectiveWritingTaskSpec(tx, subject, parsedSpec.data) : original.spec
   const runIds = await originalTaskRunIds(tx, subject, original)
   await tx.$queryRaw(Prisma.sql`SELECT id FROM story_compilations WHERE user_id = ${subject.userId}
@@ -489,7 +489,7 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
   const freshAssessment = frozenAuthority === undefined && !!spec?.scope && typeof spec.scope === 'object' && !Array.isArray(spec.scope)
     && (spec.scope as Record<string, unknown>).localEditProtocol === 1 && hasReadOnlyRevisionAssessment(original.prompt)
   if (prohibited || freshAssessment || (!authority && !localAuthority && (reviewed || newReview && spec?.intent === 'review')
-    && frozenAuthority !== true && !originalRepairAuthority(original, current.id))) {
+    && frozenAuthority !== true && !originalRepairAuthority({ ...original, spec: authoritySpec }, current.id))) {
     throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '原始作者请求未授权改写该正文；检查报告不能扩大写入权限。')
   }
 
