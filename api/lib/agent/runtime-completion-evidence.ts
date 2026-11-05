@@ -11,7 +11,7 @@ import { readDurableTodoItems } from './tools/durable-todo.js'
 import { evaluateTaskPostconditions } from './runtime-postconditions.js'
 import { collectDurableDeliverables } from './runtime-deliverables.js'
 import { collectDurableMemoryWork } from './runtime-memory.js'
-import { readCompletedWritingDelivery } from './writing-scope.js'
+import { readCompletedWritingDelivery, readCompletedWritingPresentation, effectiveWritingTaskSpec } from './writing-scope.js'
 import { readOriginalTaskRequest } from './original-request.js'
 import { readLimitedWritingDelivery, limitedReviewDependency, verifyRunLimitedWritingOutcome, permitsLimitedWritingContract } from './writing-delivery-limitations.js'
 
@@ -31,14 +31,17 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
     const frame = state.frame, last = frame.state.messages.at(-1)
     if (frame.revision !== expected.expectedRevision || frame.snapshotHash !== expected.expectedHash || frame.state.phase !== 'idle'
       || last?.role !== 'assistant' || last.toolCalls?.length) return runtimeError('RUNTIME_STATE_CONFLICT', '完成审查必须绑定当前已保存的候选答复。')
-    const spec = taskSpecSchema.parse(state.originalSpec)
+    const frozenSpec = taskSpecSchema.parse(state.originalSpec)
     const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
+    const spec = frozenSpec.scope.agentWritingProtocol === 1 && !lease.parent ? await effectiveWritingTaskSpec(tx,
+      { userId: lease.userId, novelId: root.novelId, runId: lease.runId }, frozenSpec) : frozenSpec
     const evidence = await collectDurableToolEvidence(tx, root.id, frame.revision)
     const deliverables = await collectDurableDeliverables(tx, root, evidence.effects)
     const memoryWork = await collectDurableMemoryWork(tx, root, evidence.effects)
     const postconditionChecks = await evaluateTaskPostconditions(tx, root)
     const todos = await readDurableTodoItems(tx, root.id, frame.revision)
-    const writingDelivery = await readCompletedWritingDelivery(tx, { userId: lease.userId, novelId: root.novelId, runId: lease.runId })
+    const writingDelivery = await (spec.scope.agentWritingBinding ? readCompletedWritingPresentation : readCompletedWritingDelivery)(tx,
+      { userId: lease.userId, novelId: root.novelId, runId: lease.runId })
     const limitedWritingDelivery = writingDelivery ? null : await readLimitedWritingDelivery(tx, { userId: lease.userId, novelId: root.novelId, runId: lease.runId })
     const budget = await readTaskBudgetInTransaction(tx, root.id)
     const compilations = await tx.storyCompilation.findMany({ where: { userId: lease.userId, novelId: root.novelId, run: { taskRootId: root.id } },
@@ -61,6 +64,8 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
       .map(output => ({ description: output.description, required: output.minimumChineseCharacters!,
         actual: output.kind === 'text' || output.kind === 'validation_report' ? countReportChineseCharacters(last.content ?? '') : null }))
     const blockers = [
+      ...(!lease.parent && spec.scope.agentWritingBinding && spec.intent !== 'review' && !writingDelivery && !limitedWritingDelivery
+        ? [{ code: 'writing_delivery_missing', reference: root.id }] : []),
       ...reportLengthChecks.filter(check => check.actual === null || check.actual < check.required)
         .map(check => ({ code: 'report_length_unmet', reference: check.description })),
       ...memoryWork.filter(item => !item.completed).map(item => ({ code: 'unresolved_memory_job', reference: item.job.id })),

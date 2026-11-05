@@ -410,11 +410,13 @@ export function buildTaskSpec(input: {
 
 /** A legacy write label alone creates no chapter-delivery obligation. */
 export function requiresManuscriptDelivery(spec: Pick<TaskSpec, 'intent' | 'scope' | 'writingPacing'>): boolean {
+  if (spec.scope.agentWritingProtocol === 1 && !spec.scope.agentWritingBinding) return false
   return spec.scope.authorEffects?.manuscript !== false && ['write', 'revise'].includes(spec.intent)
     && !['conversation_only', 'proposal_only'].includes(spec.writingPacing ?? '')
 }
 
 export function renderTaskSpec(spec: TaskSpec): string {
+  if (spec.scope.agentWritingProtocol === 1 && !spec.scope.agentWritingBinding) return `[系统] 本任务由主Agent理解完整作者需求，词表推测不决定正文权限。原始请求：${spec.goals.join('\n')}\n当前章节上下文：${JSON.stringify(spec.scope.chapterIds ?? [])}。需要作用于正文时，先按需读取目录、正文及同聊天已有真实作者要求，自主确定写作/修改/检查和目标，用task_scope_bind提交真实章节ID或全书序号，再执行实际工作。普通讨论直接回答，无需正文目标或绑定。不要因自然用语没有命中固定关键词要求作者重说；只有阅读后仍有影响操作的具体冲突才询问。真实选区、保护章、只读模式、权限、取消、版本和费用规则继续由系统强制校验。`
   const networkRule = spec.networkAccess === 'denied'
     ? '[系统] 原始请求明确禁止联网：本任务不提供或执行搜索、网页获取，不预约、不请求供应商、不收工具费。只使用已有获准材料并说明证据限制。\n' : ''
   const readRule = spec.researchReadAccess === 'denied'

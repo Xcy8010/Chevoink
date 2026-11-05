@@ -7,9 +7,9 @@ import { freezeIssueQuoteBoundary, localEditProtectionRanges, validIssueQuoteBou
 import { assertFrozenWritingContract } from './writing-contract.js'
 
 type Locator = { kind: 'quote'; text: string } | { kind: 'paragraph'; position: number | 'last' } | { kind: 'unknown' }
-const edit = /(?:修改|改写|重写|润色|优化|调整|修复|修正|替换|改成|改为|扩写|缩写|精简|删掉|删去|删除|补充|补|增加|插入|改(?!名|价|变|卷)|revise|rewrite|edit|modify|polish|replace|fix|change|expand|shorten|delete|remove|insert|add)/iu
+const edit = /(?:修改|改写|重写|润色|优化|调整|修复|修正|替换|换成|换为|改成|改为|扩写|缩写|精简|删掉|删去|删除|补充|补|增加|插入|改(?!名|价|变|卷)|revise|rewrite|edit|modify|polish|replace|fix|change|expand|shorten|delete|remove|insert|add)/iu
 const negative = /(?:不要|无需|不用|不必|禁止|不得|不能|(?<!分)别|不改|do not|don't|must not|never)/iu
-const local = /(?:局部|片段|句子|这句话|这句|一句|几句|这段|这一段|那段|该段|某段|段落|对白|对话|开头|结尾|首段|末段|最后一段|第\s*[一二两三四五六七八九十百0-9]+\s*段|first paragraph|last paragraph|paragraph\s*\d+|passage|sentence)/iu
+const local = /(?:局部|片段|句子|这句话|这句|一句|几句|这段|这一段|那段|该段|某段|段落|整段(?!正文)|对白|对话|开头|结尾|首段|末段|最后一段|第\s*[一二两三四五六七八九十百0-9]+\s*段|first paragraph|last paragraph|paragraph\s*\d+|passage|sentence)/iu
 const whole = /(?:整章|整段正文|整篇|全文|全章|whole chapter|entire chapter)/iu
 const quotePattern = /“([^”]+)”|「([^」]+)」|『([^』]+)』|"([^"\n]+)"/gu
 const quoteEditPrefix = '(?:修改|改写|润色|替换|优化|调整|修复|修正|扩写|缩写|精简|删掉|删去|删除|改)(?:第\\s*[一二两三四五六七八九十百0-9]+\\s*章(?:的)?)?(?:这句|句子|片段)?\\s*'
@@ -116,7 +116,31 @@ export function freezeLocalEditBoundary(prompt: string, writing: TaskSpec['scope
   const locator = requestedLocalEdit(prompt, protocol, parsed ?? undefined)
   if (!locator) return undefined
   const denied = { version: 1 as const, kind: 'needs_input' as const, regions: [] }
-  if (locator.kind === 'unknown') return protocol === 2 ? freezeIssueQuoteBoundary(prompt, writing, chapters) ?? denied : denied
+  if (locator.kind === 'unknown') {
+    if (protocol !== 2) return denied
+    const citation = freezeIssueQuoteBoundary(prompt, writing, chapters)
+    if (citation?.kind === 'bounded') return citation
+    const mutations = parsed?.evidence.operations.filter(operation => operation.accepted && operation.polarity === 'affirmative'
+      && operation.kind === 'revise') ?? []
+    const preciseSource = mutations.some(operation => operation.targetIndices.some(index => parsed!.evidence.targets[index].kind === 'local'
+      && parsed!.evidence.quoted.some(quote => quote.start === parsed!.evidence.targets[index].span.start)))
+    const actionText = mutations.map(operation => prompt.slice(operation.clauseSpan.start, operation.clauseSpan.end)).join('。')
+    const unprovenQuote = parsed?.evidence.quoted.some(quote => quote.kind === 'quotation' && !parsed.evidence.operations.some(operation =>
+      operation.polarity === 'negative' && operation.targetIndices.some(index => parsed.evidence.targets[index].span.start === quote.start)
+      || mutations.includes(operation) && /^(?:换为|换成|替换成|替换为|改为|改成)$/u.test(prompt.slice(operation.span.start, operation.span.end))
+        && quote.start >= operation.span.end && quote.end <= operation.clauseSpan.end))
+    if (!mutations.length || !local.test(actionText) || parsed?.ambiguous || preciseSource || unprovenQuote || /首段|末段|最后一段|第\s*[一二两三四五六七八九十百0-9]+\s*段|first paragraph|last paragraph|paragraph\s*\d+|以外|之外|除了|上下文|except|outside/iu.test(actionText)
+      || !writing || writing.kind !== 'bounded' || writing.targets.some(target => !target.chapterId)) return citation ?? denied
+    const regions = []
+    for (const target of writing.targets) {
+      const chapter = chapters.find(item => item.id === target.chapterId)
+      const protections = chapter && localEditProtectionRanges(prompt, chapter.content, parsed ?? undefined)
+      if (!chapter?.content.trim() || !protections) return citation ?? denied
+      regions.push({ chapterId: chapter.id, revision: chapter.revision, contentHash: runtimeJson({ content: chapter.content }).hash,
+        start: 0, end: chapter.content.length, prefix: '', suffix: '', protectedText: protections.map(span => chapter.content.slice(span.start, span.end)) })
+    }
+    return regions.length ? { version: 4, kind: 'semantic', regions } : denied
+  }
   if (writing?.kind !== 'bounded' || !writing.targets.length) return denied
   const regions: Extract<NonNullable<TaskSpec['scope']['localEditBoundary']>, { version: 1 }>['regions'] = []
   for (const target of writing.targets) {
@@ -156,7 +180,7 @@ export function originalLocalEditBoundary(value: unknown) {
   // field must never degrade to a whole-chapter grant.
   if (!parsed.success || scope.localEditBoundary !== undefined && !boundary
     || boundary && (boundary.kind !== 'needs_input' ? !boundary.regions.length : boundary.regions.length > 0)
-    || boundary && boundary.version !== 3 && (boundary.version === 2 ? !validIssueQuoteBoundary(boundary)
+    || boundary && boundary.version !== 3 && boundary.version !== 4 && (boundary.version === 2 ? !validIssueQuoteBoundary(boundary)
       : new Set(boundary.regions.map(region => region.chapterId)).size !== boundary.regions.length
       || boundary.regions.some(region => region.end <= region.start || region.prefix.length !== region.start
         || !region.prefix.length && !region.suffix.length))) {
@@ -180,6 +204,7 @@ export function localEditGuidance(spec: unknown): string | null {
   const intersection = taskSpecSchema.parse(spec).scope.selectionBoundary ? '同时保留编辑器冻结选区约束，仅可修改两个范围的交集。' : ''
   return (boundary.kind === 'needs_input'
     ? '原局部请求尚无可证明的精确范围，正文未获写入授权。请通过既有反馈入口请作者补充准确原文片段或编辑器选区，并重新发起任务；模型摘要、继续或子任务不能补授权。'
+    : boundary.version === 4 ? '目标章节已明确，本次授权按作者要求作章内局部修改。先 chapter_read 读取当前正文，自行定位需要调整的位置，再用 chapter_edit_range 的逐字唯一 oldText 修改；保留其他正文和明确保护句。无需作者再次复制原文；只有读后仍有多个真实目标或冲突时才问清。不得整体覆盖正文、追加、改名、新建或自动 critic 改文；多处补丁也不能合并覆盖整章。'
     : boundary.version === 3 ? '目标章节已经确认。先准备并读取本章，完成当前正文的必要连续性与人类感检查；没有确证问题时无需改文，直接按真实报告提交。只有当前任务、当前版本完整检查中逐字定位的真实问题才允许 chapter_edit_range 局部修订，每批最多8处；使用逐字唯一 oldText，保留其他正文。整章覆盖、追加、改名、新建和自动 critic 改文不获授权。修改后重新检查并提交，报告、重新准备和子任务不能扩大范围或重置原长度上限。'
     : '原任务只授权冻结的局部正文范围。读取当前正文，用 chapter_edit_range 的逐字唯一 oldText 连续修改，每批最多8处，保留冻结范围外原文。不得整章覆盖、坐标猜定位、追加、改名、创建、变更集或自动 critic 修订。最后修改后完成当前版本必要报告；报告与子任务不能扩大范围。') + intersection
 }

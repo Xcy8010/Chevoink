@@ -115,7 +115,7 @@ export function hasOriginalRepairAuthority(prompt: string | null): boolean {
 
 export async function assertOriginalRepairAuthority(tx: Prisma.TransactionClient, subject: Subject, chapterId?: string) {
   const original = await readOriginalTaskRequest(tx, subject)
-  if (!originalRepairAuthority(original, chapterId)) {
+  if (!await effectiveOriginalRepairAuthority(tx, subject, original, chapterId)) {
     // An explicit repair of the current request's new draft is frozen before
     // its chapter ID exists. Only the canonical create binding may fill it.
     const spec = taskSpecSchema.safeParse(original.spec).data
@@ -131,10 +131,29 @@ export async function assertOriginalRepairAuthority(tx: Prisma.TransactionClient
   }
 }
 
+/** Reuse the authenticated effective target for old binder corrections and
+ * real clarification receipts. The saved author request is never rewritten. */
+export async function effectiveOriginalRepairAuthority(tx: Prisma.TransactionClient, subject: Subject,
+  original: { prompt: string | null; spec: unknown }, chapterId?: string): Promise<boolean> {
+  if (originalRepairAuthority(original, chapterId)) return true
+  const parsed = taskSpecSchema.safeParse(original.spec)
+  if (!parsed.success || !parsed.data.scope.agentWritingProtocol
+    && (parsed.data.scope.writing?.kind !== 'needs_input' || !parsed.data.scope.authorEffects?.manuscript)) return false
+  const effective = await (await import('./writing-scope.js')).effectiveWritingTaskSpec(tx, subject, parsed.data)
+  return originalRepairAuthority({ ...original, spec: effective }, chapterId)
+}
+
 /** Fresh author interpretation is the authority; recovery never substitutes a
  * truncated goal or a second lexical classifier for its frozen decision. */
 export function originalRepairAuthority(original: { prompt: string | null; spec: unknown }, chapterId?: string): boolean {
   const raw = record(original.spec), scope = record(raw?.scope)
+  if (scope?.agentWritingProtocol === 1) {
+    const parsed = taskSpecSchema.safeParse(original.spec)
+    const writing = parsed.success ? parsed.data.scope.writing : undefined
+    return !!(parsed.success && parsed.data.scope.agentWritingBinding && parsed.data.intent === 'revise'
+      && writing?.kind === 'bounded' && writing.repairAuthorized
+      && (chapterId ? writing.targets.some(target => target.chapterId === chapterId) : writing.targets.length))
+  }
   if (scope && 'authorEffects' in scope) {
     const parsed = taskSpecSchema.safeParse(original.spec)
     if (!parsed.success || !original.prompt || !parsed.data.scope.authorEffects

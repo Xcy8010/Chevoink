@@ -95,7 +95,7 @@ export async function executeDurableCreate(ctx: ToolContext, args: { title: stri
     return runtimeJson({ toolResult: result, memoryJobId: memoryJob?.id ?? null, ...(createdBody ? { progress: { kind: 'content_revision', targetId: target.id,
       beforeHash: runtimeJson({ content: '' }).hash, afterHash: runtimeJson({ content: target.content }).hash } } : {}) }).value
   }).catch(async error => {
-    if (!(error instanceof DataAccessError) || ![...PLAN_FAILURE_CODES, 'AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'VOLUME_NOT_FOUND', 'NOVEL_NOT_FOUND', 'AUTHOR_SCOPE_PROTECTED', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'INVALID_ARGUMENTS', 'RUNTIME_SCOPE_MISMATCH'].includes(error.code)) throw error
+    if (!(error instanceof DataAccessError) || ![...PLAN_FAILURE_CODES, 'TASK_SCOPE_REQUIRED', 'AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'VOLUME_NOT_FOUND', 'NOVEL_NOT_FOUND', 'AUTHOR_SCOPE_PROTECTED', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'INVALID_ARGUMENTS', 'RUNTIME_SCOPE_MISMATCH'].includes(error.code)) throw error
     const recovery = error.code === 'AUTHOR_CHAPTER_SCOPE' ? toolFailureRecovery(error.code) : undefined
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code,
       output: recovery ? `${error.message} ${recovery.guidance}` : error.message,

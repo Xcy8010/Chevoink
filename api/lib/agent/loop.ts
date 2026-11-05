@@ -3,7 +3,7 @@ import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { observedReviewOutcome, projectedReviewAction, type ReviewOutcome } from '../../../shared/review-lifecycle.js'
 import { readSettledQualityReviews, readQualityReviewAdmission } from './quality-review-admission.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
-import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, writingClarificationResolvesInput, readCompletedWritingDelivery, readRecoveredChapterDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
+import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, writingScopeResolvesInput, readCompletedWritingDelivery, readRecoveredChapterDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
 import { consumeTextRequestRecovery, createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
 import { readReviewRequestRecovery, readCompletedReviewRequestRecovery } from './review-request-recovery.js'
@@ -1210,10 +1210,27 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         taskSpec: taskSpec as unknown as object, usage: { ...usage, checkpoint: checkpointSnapshot() },
       } })
     } else await persistCheckpoint()
-    if (authorInputRequired && taskSpec.scope.writingClarificationProtocol !== undefined) {
-      const clarified = await prisma.$transaction(tx => readWritingScope(tx, { userId: params.userId, novelId: params.novelId, runId }))
-      if (writingClarificationResolvesInput(clarified, authorInputRequired)) {
+    if (taskSpec.scope.agentWritingProtocol === 1) taskSpec = await prisma.$transaction(tx => effectiveWritingTaskSpec(tx,
+      { userId: params.userId, novelId: params.novelId, runId }, taskSpec))
+    if ((authorInputRequired || taskSpec.scope.writing?.kind === 'needs_input')
+      && (taskSpec.scope.writingClarificationProtocol !== undefined || taskSpec.scope.writingTargetProtocol === 2)) {
+      const marker = authorInputRequired
+      const resolved = await prisma.$transaction(async tx => {
+        const subject = { userId: params.userId, novelId: params.novelId, runId }
+        const scope = await readWritingScope(tx, subject)
+        return { scope, answered: !!marker && await writingScopeResolvesInput(tx, subject, scope, marker) }
+      })
+      if (resolved.scope.targetCorrection || resolved.scope.clarification) {
+        // Effective view only: the immutable root and original taskSpec remain intact.
+        taskSpec = { ...taskSpec, scope: taskSpecSchema.parse(resolved.scope.spec).scope }
+      }
+      if (resolved.answered) {
         authorInputRequired = undefined
+        if (resolved.scope.targetCorrection) for (let index = toolRestrictions.length - 1; index >= 0; index--) {
+          const item = toolRestrictions[index]
+          if (item.code === 'SCOPE_NEEDS_INPUT' && item.action === 'story_compiler_prepare'
+            && (!item.target || item.target === resolved.scope.targetCorrection.chapterId)) toolRestrictions.splice(index, 1)
+        }
         await persistCheckpoint()
       }
     }
@@ -2673,6 +2690,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         lastActivityAt = Date.now()
         // 滑窗更新：只记成功执行；失败不碰窗口（同签名重试不会被误杀）
         if (outcome.part.status === 'success') {
+          if (call.name === 'task_scope_bind') taskSpec = await prisma.$transaction(tx => effectiveWritingTaskSpec(tx,
+            { userId: params.userId, novelId: params.novelId, runId }, taskSpec))
           if (['quality_report_get', 'chapter_bridge_get'].includes(call.name) && outcome.reviewDecisionFeedback) {
             decisionFeedback.push(outcome.reviewDecisionFeedback)
           }

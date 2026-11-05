@@ -4,6 +4,25 @@ import { chapterRevisionPrompt, nextChapterContinuationPrompt } from '../support
 import { shortSceneRequest } from '../support/writing-clarification-fixture.js'
 
 describe('fresh structured author-writing interpretation, protocol 2', () => {
+  it('does not treat a complaint about character expression as a character-sheet object for rewriting', () => {
+    const parsed = parseAuthorWritingRequest('人物表达太僵硬，全部重新写。')
+    expect(parsed).toMatchObject({ intent: 'revise', hasAction: true })
+    expect(parsed.evidence.targets.some(target => target.kind === 'artifact')).toBe(false)
+    expect(parseAuthorWritingRequest('人物表，重新写。').evidence.operations.some(operation => operation.accepted && operation.kind === 'artifact')).toBe(true)
+  })
+  it.each(['整段换为“新的合成段落。”', '整段替换成“新的合成段落。”'])(
+    'recognizes an explicit replacement predicate as body revision: %s', prompt => {
+      const parsed = parseAuthorWritingRequest(prompt)
+      expect(parsed.intent).toBe('revise')
+      expect(parsed.evidence.operations.some(operation => operation.accepted && operation.kind === 'revise')).toBe(true)
+      expect(parsed.evidence.operations.some(operation => operation.accepted && operation.kind === 'write')).toBe(false)
+    })
+  it.each(['按此修改', '照此修改', '照建议修'])(
+    'retains a real elided revision predicate pending a proven object: %s', prompt => {
+      expect(parseAuthorWritingRequest(prompt)).toMatchObject({ intent: 'revise', hasAction: true, range: null })
+      expect(parseAuthorWritingRequest(`如何${prompt}？`).hasAction).toBe(false)
+      expect(parseAuthorWritingRequest(`引用：“${prompt}”`).hasAction).toBe(false)
+    })
   it.each(['我授权你可以修改我正文1 2 3章的权利 你按照想法修改', '修改1 2 3章', '修订第1 2 3章',
     '1章 2章 3章正文修改', '修改第一 二 三章', '修改第二卷第1 2 3章', '修改1\t2\t3章'])(
     'keeps a whitespace-separated chapter list as exact ordinals: %s', prompt => {

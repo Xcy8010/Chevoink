@@ -12,7 +12,11 @@ import { buildSessionTokens } from '../../api/lib/auth-session.js'
 import { lockNovelActiveScope } from '../../api/lib/data/novel-write-lock.js'
 import { chapterEditRangeTool, chapterWriteTool, chapterAppendTool, chapterCreateTool, chapterRenameTool, preflightChapterReviewWrite } from '../../api/lib/agent/tools/chapter-tools.js'
 import { chapterBridgeGetTool, chapterBridgeCommitTool, storyCompilerPrepareTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
-import { freezeWritingScope, readWritingScope, assertWritingTarget } from '../../api/lib/agent/writing-scope.js'
+import { freezeWritingScope, readWritingScope, assertWritingTarget, writingScopeResolvesInput } from '../../api/lib/agent/writing-scope.js'
+import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { frozenWritingScopeHash } from '../../api/lib/agent/writing-contract.js'
+import { withHumanAdmission } from '../../api/lib/agent/goal-activation-authority.js'
+import { runCheckpointSchema } from '../../api/lib/agent/checkpoint.js'
 import { directoryContinuationPrompt } from '../support/writing-target-prompt.js'
 import { taskSpecSchema } from '../../shared/contracts/index.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
@@ -20,7 +24,7 @@ import { verifyTestDatabase } from '../support/database-preflight.js'
 import { isTestDatabaseRequired } from '../support/database-availability.js'
 import { askUserTool } from '../../api/lib/agent/tools/interact-tools.js'
 import * as questionPermissions from '../../api/lib/agent/permissions.js'
-import { resolveLoopRunQuestion } from '../../api/lib/agent/run-service.js'
+import { continueLoopRun, resolveLoopRunQuestion } from '../../api/lib/agent/run-service.js'
 import { shortSceneRequest, firstChapterAnswer, placementQuestion } from '../support/writing-clarification-fixture.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { buildHumanityQualityContext, qualityReviewContextHash, persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
@@ -39,6 +43,8 @@ import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-t
 import { inspectCriticResponse } from '../../api/lib/agent/quality-evidence.js'
 import { terminalCoverageInput, readTerminalCoverageState } from '../../api/lib/agent/terminal-fact-coverage.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
+import { taskScopeBindTool } from '../../api/lib/agent/tools/task-scope-tools.js'
+import { readOriginalTaskRequest } from '../../api/lib/agent/original-request.js'
 
 const available = await verifyTestDatabase(isTestDatabaseRequired())
 afterAll(() => prisma.$disconnect())
@@ -52,7 +58,7 @@ const requests = [
 ]
 
 async function fixture(prompt: string, work: (ctx: ToolContext, before: Awaited<ReturnType<typeof prisma.chapter.findMany>>) => Promise<void>, duplicate = false, targetBody = body,
-  directory?: { singleVolume: boolean; editor: 'none' }) {
+  directory?: { singleVolume: boolean; editor: 'none' | 'first'; agentWriting?: true }) {
   const userId = randomUUID(), novelId = randomUUID(), sessionId = randomUUID()
   try {
     vi.stubGlobal('fetch', vi.fn(() => { throw Error('No Provider allowed in synthetic admission test') }))
@@ -69,7 +75,7 @@ async function fixture(prompt: string, work: (ctx: ToolContext, before: Awaited<
     await prisma.agentSession.create({ data: { id: sessionId, novelId, userId, title: '合成局部任务' } })
     const response = await request(app).post('/api/agent/runs')
       .set('Cookie', `chevoink_session=${buildSessionTokens(userId, 0).accessToken}`)
-      .send({ novelId, sessionId, chapterId: editor, prompt, mode: 'build' })
+      .send({ novelId, sessionId, chapterId: editor, prompt, mode: 'build', ...(directory?.agentWriting ? { agentWritingProtocol: 1 } : {}) })
     expect(response.status).toBe(200)
     const runId = response.body.data.runId as string
     await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
@@ -96,6 +102,131 @@ const prepare = (ctx: ToolContext) => storyCompilerPrepareTool.execute(ctx, { ta
   intentSummary: '只对第四个已存合成章作作者指出的局部修订', volumeDecision: { kind: 'continue', reason: '原卷原章' } })
 
 describe.skipIf(!available)('fresh independent reads and effect-scoped writes over HTTP and PostgreSQL', () => {
+  it('uses the main Agent interpretation for an ordinary editor request through prepare and actual body edit', () => fixture('这一页读着像播报，把说话的劲儿调自然一点，落到稿子里。', async (ctx, before) => {
+    const chapterId = before[0].id
+    const original = await prisma.$transaction(tx => readOriginalTaskRequest(tx, ctx)), originalHash = runtimeJson(original).hash
+    expect(taskSpecSchema.parse(original.spec).scope).toMatchObject({ agentWritingProtocol: 1 })
+    await expect(storyCompilerPrepareTool.execute(ctx, { chapterId, intentSummary: '准备原章节' })).rejects.toMatchObject({ code: 'TASK_SCOPE_REQUIRED' })
+    const args = taskScopeBindTool.parameters.parse({ intent: 'revise', targets: [{ chapterId }], requiredChecks: [] })
+    await taskScopeBindTool.execute(ctx, args)
+    await taskScopeBindTool.execute({ ...ctx, callId: 'same-binding' }, args)
+    expect(await prisma.agentArtifact.count({ where: { runId: original.sourceRunId, metadata: { path: ['agentWritingScopeBinding'], equals: true } } })).toBe(1)
+    expect((await storyCompilerPrepareTool.execute({ ...ctx, callId: 'prepare-bound' }, { chapterId, intentSummary: '按作者要求调整已有稿的人物表达' })).outcome).not.toBe('failed')
+    await chapterReadTool.execute({ ...ctx, callId: 'read-current' }, { chapterId })
+    expect((await chapterEditRangeTool.execute({ ...ctx, callId: 'edit-current' }, { chapterId, oldText: '合成正文', newText: '合成对话' })).outcome).not.toBe('failed')
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })).toMatchObject({ content: before[0].content.replace('合成正文', '合成对话'), revision: 5 })
+    await expect(storyCompilerPrepareTool.execute({ ...ctx, callId: 'other-chapter' }, { chapterId: before[1].id, intentSummary: '不能扩展到别章' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expect(taskScopeBindTool.execute(ctx, { ...args, targets: [{ chapterId: before[1].id, preserveText: [] }] })).rejects.toMatchObject({ code: 'TASK_SCOPE_BIND_CONFLICT' })
+    expect(runtimeJson(await prisma.$transaction(tx => readOriginalTaskRequest(tx, ctx))).hash).toBe(originalHash)
+    expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(1).map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(1))
+  }, false, body, { singleVolume: true, editor: 'first', agentWriting: true }))
+
+  it('lets the main Agent locate a semantic local revision and enforces its actual patch and preserved text', () => fixture('收尾这一小段处理得自然些，钟声那句留着。', async (ctx, before) => {
+    const chapterId = before[3].id
+    await taskScopeBindTool.execute(ctx, taskScopeBindTool.parameters.parse({ intent: 'revise', targets: [{ chapterId, preserveText: ['钟声传来'] }], locality: 'local', requiredChecks: [] }))
+    await chapterReadTool.execute({ ...ctx, callId: 'read-semantic' }, { chapterId })
+    expect((await storyCompilerPrepareTool.execute(ctx, { chapterId, intentSummary: '读取后定位并精确修改末段' })).outcome).not.toBe('failed')
+    await chapterEditRangeTool.execute({ ...ctx, callId: 'edit-semantic' }, { chapterId, oldText: '向右转', newText: '向左转' })
+    await expect(chapterWriteTool.execute(ctx, { chapterId, content: '不能借局部要求重写整章' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    await expect(chapterEditRangeTool.execute(ctx, { chapterId, oldText: '钟声传来', newText: '雨声传来' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })).toMatchObject({ content: before[3].content.replace('向右转', '向左转'), revision: 5 })
+  }, false, body, { singleVolume: true, editor: 'none', agentWriting: true }))
+
+  it('recovers an admitted old binder target through a read projection and genuine author continuation, preserving its frozen evidence', () => fixture('修改正文', async (ctx, before) => {
+    await prisma.agentRun.update({ where: { id: ctx.runId }, data: { status: 'completed' } })
+    const runId = randomUUID(), prompt = '修改正文', chapterId = before[0].id
+    const startRequest = withHumanAdmission({ novelId: ctx.novelId, sessionId: ctx.sessionId, chapterId, prompt, mode: 'build' })
+    const fresh = buildTaskSpec({ runId, novelId: ctx.novelId, chapterId, prompt, authorWritingProtocol: 2, localEditProtocol: 1, reviewProtocol: 1 })
+    await prisma.agentRun.create({ data: { id: runId, userId: ctx.userId, novelId: ctx.novelId, sessionId: ctx.sessionId, chapterId,
+      mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', runtimeProtocolVersion: 0,
+      status: 'paused', taskSpec: runtimeJson(fresh).value, startRequest: runtimeJson(startRequest).value } })
+    await prisma.agentMessage.create({ data: { runId, sessionId: ctx.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
+    const subject = { ...ctx, runId, chapterId }
+    const spec = await prisma.$transaction(tx => freezeWritingScope(tx, subject, fresh, prompt, 2))
+    spec.scope.writing = { ...spec.scope.writing!, kind: 'needs_input', targets: [], repairAuthorized: false }
+    for (const operation of spec.scope.writingActions!.operations) { operation.targets = []; operation.resolution = 'needs_input' }
+    spec.scope.writingInterpretation!.reasons = ['TARGET_UNRESOLVED']
+    spec.scope.writingInterpretation!.scopeHash = frozenWritingScopeHash(spec.scope)
+    const frozen = runtimeJson(taskSpecSchema.parse(spec)), marker = { version: 1 as const, kind: 'writing_scope' as const, callId: 'old-scope-question' }
+    const checkpoint = runCheckpointSchema.parse({ version: 2, controlPolicy: 'until_completion', origin: 'system_default', activeExecutionMs: 0,
+      runStartedAt: Date.now(), resumeCount: 0, compactionCount: 0, maxTurns: 100, tokenBudget: 100000,
+      writeProgress: 0, writeBaseline: 0, readProgress: 0, readBaseline: 0, progressSignatures: [], authorInputRequired: marker })
+    const usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0, checkpoint }
+    await prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: frozen.value, usage: runtimeJson(usage).value } })
+    await prisma.agentRunEvent.createMany({ data: [
+      { runId, seq: 1, type: 'tool.result', payload: { callId: 'failed-prepare', toolName: 'story_compiler_prepare', failureCode: 'SCOPE_NEEDS_INPUT' } },
+      { runId, seq: 2, type: 'tool.call', payload: { callId: marker.callId, toolName: 'ask_user', args: { question: '这次是指修改当前章节吗？', options: [{ label: '当前章节' }, { label: '我补充' }] } } },
+      { runId, seq: 3, type: 'run.paused', payload: {} },
+    ] })
+    const effective = await prisma.$transaction(tx => readWritingScope(tx, subject))
+    expect(effective.targetCorrection).toMatchObject({ taskId: spec.id, chapterId })
+    expect(await prisma.$transaction(tx => writingScopeResolvesInput(tx, subject, effective, marker))).toBe(true)
+    expect(await prisma.$transaction(tx => writingScopeResolvesInput(tx, subject, effective, { ...marker, kind: 'local_edit_scope' }))).toBe(false)
+    expect(await prisma.$transaction(tx => writingScopeResolvesInput(tx, subject, effective, { ...marker, callId: 'unrecorded-question' }))).toBe(false)
+    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).status).toBe('paused')
+    expect(await prisma.agentArtifact.count({ where: { runId } })).toBe(0)
+    expect(runtimeJson((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).taskSpec).hash).toBe(frozen.hash)
+    await prisma.agentRun.update({ where: { id: runId }, data: { usage: runtimeJson({ ...usage, checkpoint: { ...checkpoint, authorInputRequired: { ...marker, kind: 'local_edit_scope' } } }).value } })
+    await expect(continueLoopRun(ctx.userId, runId)).rejects.toMatchObject({ code: 'AUTHOR_INPUT_REQUIRED' })
+    await prisma.agentRun.update({ where: { id: runId }, data: { usage: runtimeJson(usage).value } })
+    expect((await continueLoopRun(ctx.userId, runId)).runId).toBe(runId)
+    await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
+    expect((await storyCompilerPrepareTool.execute(subject, { chapterId, intentSummary: '按真实原请求准备已绑定合成章' })).outcome).not.toBe('failed')
+    expect((await chapterEditRangeTool.execute(subject, { chapterId, oldText: '合成正文', newText: '修订正文' })).outcome).not.toBe('failed')
+    await expect(storyCompilerPrepareTool.execute({ ...subject, callId: 'deny-old-outside' },
+      { chapterId: before[1].id, intentSummary: '不得更换原请求对象' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(1).map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(1))
+    expect(runtimeJson((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).taskSpec).hash).toBe(frozen.hash)
+    expect(await prisma.agentArtifact.count({ where: { runId, metadata: { path: ['writingScopeClarification'], equals: true } } })).toBe(0)
+  }))
+  it('reads an admitted semantic local target and edits a unique patch without accepting whole-body shortcuts', () => fixture('只修改第4章结尾。“钟声传来”保持不变。', async (ctx, before) => {
+    const chapter = before[3], midpoint = Math.floor(chapter.content.length / 2)
+    const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
+    expect(spec.scope.localEditBoundary).toMatchObject({ version: 4, kind: 'semantic' })
+    await chapterReadTool.execute(ctx, { chapterId: chapter.id })
+    await expect(chapterWriteTool.execute(ctx, { chapterId: chapter.id, content: '整章覆盖。' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    await expect(chapterEditRangeTool.execute(ctx, { chapterId: chapter.id, patches: [
+      { oldText: chapter.content.slice(0, midpoint), newText: '前半。' }, { oldText: chapter.content.slice(midpoint), newText: '后半。' },
+    ] })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    await expect(chapterEditRangeTool.execute(ctx, { chapterId: chapter.id, oldText: '钟声传来', newText: '夜幕降临' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    expect((await chapterEditRangeTool.execute(ctx, { chapterId: chapter.id, oldText: '门还没开', newText: '门依然紧闭' })).outcome).not.toBe('failed')
+    expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).content).toBe(chapter.content.replace('门还没开', '门依然紧闭'))
+    expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(0, 3).map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(0, 3))
+  }))
+  it.each(['修改正文', '整章重写', '修改并写入正文'])(
+    'prepares and changes only the admitted editor chapter for %s', prompt => fixture(prompt, async (ctx, before) => {
+      const admitted = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
+      expect(taskSpecSchema.parse(admitted.taskSpec).scope.writing).toMatchObject({ kind: 'bounded', targets: [{ chapterId: before[0].id }] })
+      expect((await storyCompilerPrepareTool.execute(ctx, { chapterId: before[0].id, intentSummary: '修改编辑器已绑定的合成章' })).outcome).not.toBe('failed')
+      expect((await chapterEditRangeTool.execute({ ...ctx, callId: 'editor-body-change' },
+        { chapterId: before[0].id, oldText: before[0].content, newText: '修改后的合成正文。' })).outcome).not.toBe('failed')
+      await expect(storyCompilerPrepareTool.execute({ ...ctx, callId: 'editor-outside' },
+        { chapterId: before[1].id, intentSummary: '不得越到另一章' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+      expect((await prisma.chapter.findUniqueOrThrow({ where: { id: before[0].id } })).content).toBe('修改后的合成正文。')
+      expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(1).map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(1))
+      expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(before.length)
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec).toEqual(admitted.taskSpec)
+    }))
+  it('keeps a proven same-chat chapter across ordinary discussion for the next affirmative revision', () => fixture('修改第4章正文', async (ctx, before) => {
+    const source = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
+    await prisma.agentRun.update({ where: { id: source.id }, data: { status: 'completed' } })
+    const send = (prompt: string) => request(app).post('/api/agent/runs')
+      .set('Cookie', `chevoink_session=${buildSessionTokens(ctx.userId, 0).accessToken}`)
+      .send({ novelId: ctx.novelId, sessionId: ctx.sessionId, chapterId: null, prompt, mode: 'build' })
+    const discussion = await send('气氛不错')
+    expect(discussion.status).toBe(200)
+    await prisma.agentRun.update({ where: { id: discussion.body.data.runId as string }, data: { status: 'completed' } })
+    const followup = await send('按此修改')
+    expect(followup.status).toBe(200)
+    const next = { ...ctx, chapterId: null, runId: followup.body.data.runId as string }
+    await prisma.agentRun.update({ where: { id: next.runId }, data: { status: 'running' } })
+    expect(taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: next.runId } })).taskSpec).scope.writing)
+      .toMatchObject({ kind: 'bounded', targets: [{ chapterId: before[3].id }] })
+    expect((await storyCompilerPrepareTool.execute(next, { chapterId: before[3].id, intentSummary: '承接同聊真实对象' })).outcome).not.toBe('failed')
+    await expect(storyCompilerPrepareTool.execute({ ...next, callId: 'historical-outside' },
+      { chapterId: before[0].id, intentSummary: '不得改成前章' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: source.id } })).taskSpec).toEqual(source.taskSpec)
+  }))
   it('executes a local old-chapter revision and the separate new slot through the actual edit/create tools', () => fixture(
     '修改第4章首段，然后写下一章', async (ctx, before) => {
       const target = before[3]

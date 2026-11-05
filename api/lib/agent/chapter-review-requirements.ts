@@ -8,6 +8,12 @@ const object = (value: unknown): Record<string, unknown> => value && typeof valu
  * its delivery checks. Quoted data and another chapter never grant a waiver. */
 export function originalChapterReviewRequirements(original: { prompt: string | null; spec: unknown }, target?: ReviewTarget): { continuity: boolean; quality: boolean } {
   const spec = object(original.spec), scope = object(spec.scope), writingScope = object(scope.writing)
+  if (scope.agentWritingProtocol === 1) {
+    const binding = object(scope.agentWritingBinding), checks = binding.requiredChecks
+    const writing = !!binding.receiptHash && ['write', 'revise'].includes(String(spec.intent))
+    return { continuity: writing && Array.isArray(checks) && checks.includes('continuity'),
+      quality: writing && Array.isArray(checks) && checks.includes('humanity') }
+  }
   const writing = ['write', 'revise'].includes(String(spec.intent)) && !['conversation_only', 'proposal_only'].includes(String(spec.writingPacing))
     && object(scope.authorEffects).manuscript !== false
     && ['balanced', 'premium'].includes(String(spec.qualityMode))

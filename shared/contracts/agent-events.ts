@@ -570,6 +570,8 @@ export interface AgentUIMessage {
 
 /** POST /api/agent/runs 新链路入参（模型自主决策，不再需要 task 类型） */
 export interface StartAgentLoopRunRequest {
+  /** Fresh main-Agent interpretation; historical tasks retain their contract. */
+  agentWritingProtocol?: 1
   /** UUID for matching this author message to local delivery UI, without idempotency semantics. */
   clientRequestId?: string
   sessionId: EntityId

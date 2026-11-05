@@ -1,6 +1,11 @@
 import { expect, it } from 'vitest'
 import { isInternalAgentArtifact } from '../../api/lib/agent/artifact-visibility.js'
 
+it('keeps the exact main Agent scope receipt internal', () => {
+  expect(isInternalAgentArtifact({ artifactType: 'continuityReview', metadata: { version: 1, agentWritingScopeBinding: true } })).toBe(true)
+  expect(isInternalAgentArtifact({ artifactType: 'continuityReview', metadata: { version: 1, agentWritingScopeBinding: false } })).toBe(false)
+})
+
 it('keeps private request/recovery journals out of deliverables without changing their records', () => {
   for (const metadata of [{ version: 1, kind: 'terminalCandidatePatch' }, ...[
     'continuityAssessmentRequestKey', 'assessmentRequestOwnerKey', 'assessmentResponseKey', 'assessmentApplicationKey',

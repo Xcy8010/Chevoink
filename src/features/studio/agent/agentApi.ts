@@ -92,7 +92,7 @@ async function requestData<T>(path: string, options?: RequestInit): Promise<T> {
 export function startAgentLoopRun(input: StartAgentLoopRunRequest): Promise<StartAgentLoopRunResponse> {
   return requestData<StartAgentLoopRunResponse>('/api/agent/runs', {
     method: 'POST',
-    body: JSON.stringify(input),
+    body: JSON.stringify({ ...input, ...(input.mode === 'build' ? { agentWritingProtocol: 1 } : {}) }),
   })
 }
 

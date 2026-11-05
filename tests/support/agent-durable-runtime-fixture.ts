@@ -3,6 +3,8 @@ import { afterAll, afterEach, vi } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
 import { lockNovelActiveScope } from '../../api/lib/data/novel-write-lock.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { enableAgentWritingScope } from '../../api/lib/agent/agent-writing-scope.js'
+import { withHumanAdmission } from '../../api/lib/agent/goal-activation-authority.js'
 import { freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
 import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
 import { acquireRunLease } from '../../api/lib/agent/runtime-lease.js'
@@ -21,7 +23,7 @@ afterEach(async () => {
 export function fixture(work: (f: {
   userId: string; novelId: string; sessionId: string; chapterId: string; runId: string; sourceMessageId: string;
   spec: ReturnType<typeof buildTaskSpec>; rootId: string;
-}) => Promise<void>, tokenBudget?: number, prompt = '修改本章', options?: { freezeWriting?: boolean; reviewProtocol?: 1; writingCoordinationProtocol?: 1 | 2; researchNavigationAdmission?: 1; continuityEvidenceProtocol?: 1; continuityReportProtocol?: 5; terminalEvidenceProtocol?: 1 | 2; terminalQuoteAddressProtocol?: 1; terminalCoverageProtocol?: 1 | 2; lifecycle?: DurableTestLifecycle }) {
+}) => Promise<void>, tokenBudget?: number, prompt = '修改本章', options?: { agentWritingProtocol?: 1; freezeWriting?: boolean; reviewProtocol?: 1; writingCoordinationProtocol?: 1 | 2; researchNavigationAdmission?: 1; continuityEvidenceProtocol?: 1; continuityReportProtocol?: 5; terminalEvidenceProtocol?: 1 | 2; terminalQuoteAddressProtocol?: 1; terminalCoverageProtocol?: 1 | 2; lifecycle?: DurableTestLifecycle }) {
   const lifecycle = options?.lifecycle
   let cleanupFailed = false
   const active = <T>(work: () => PromiseLike<T>) => lifecycle ? lifecycle.active(work) : Promise.resolve(work())
@@ -46,9 +48,11 @@ export function fixture(work: (f: {
         const chapter = await active(() => prisma.chapter.create({ data: { authorId: userId, novelId: novel.id, volumeId: volume.id, title: '原章', content: '原文', orderIndex: 1, orderInVolume: 1, wordCount: 2 } }))
         const runId = randomUUID(), sourceMessageId = randomUUID()
         let spec = buildTaskSpec({ runId, novelId: novel.id, chapterId: chapter.id, prompt, reviewProtocol: options?.reviewProtocol, researchAdmission: options?.researchNavigationAdmission, researchNavigationAdmission: options?.researchNavigationAdmission, continuityEvidenceProtocol: options?.continuityEvidenceProtocol, continuityReportProtocol: options?.continuityReportProtocol, terminalEvidenceProtocol: options?.terminalEvidenceProtocol, terminalQuoteAddressProtocol: options?.terminalQuoteAddressProtocol, terminalCoverageProtocol: options?.terminalCoverageProtocol })
+        if (options?.agentWritingProtocol) spec = enableAgentWritingScope(spec)
         await active(() => prisma.agentRun.create({ data: {
           id: runId, userId, novelId: novel.id, sessionId: session.id, chapterId: chapter.id, status: 'queued',
           mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', taskSpec: JSON.parse(JSON.stringify(spec)),
+          ...(options?.agentWritingProtocol ? { startRequest: withHumanAdmission({ novelId: novel.id, sessionId: session.id, chapterId: chapter.id, prompt, mode: 'build' }) } : {}),
         } }))
         await active(() => prisma.agentMessage.create({ data: { id: sourceMessageId, runId, sessionId: session.id, role: 'user', parts: [{ type: 'text', text: prompt }] } }))
         if (options?.freezeWriting) {

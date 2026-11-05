@@ -141,7 +141,7 @@ describe.skipIf(!available)('authenticated empty-book clarification', () => {
     try { return await askUserTool.execute(ctx, question) } finally { spy.mockRestore() }
   }
   it.each([false, true, 'narrow'] as const)('uses the authenticated same-task answer through actual chapter mutation, local=%s', local => {
-    const prompt = local === true ? '只修改第5章这句话。' : '修改那一章。'
+    const prompt = local === true ? '只修改第5章第9段。' : '修改那一章。'
     return fixture(prompt, async ctx => {
       const volume = await prisma.volume.findFirstOrThrow({ where: { novelId: ctx.novelId } })
       const body = '窗边还留着一盏灯。门开了。走廊无人。'

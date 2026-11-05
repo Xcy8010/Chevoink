@@ -17,6 +17,7 @@ const structureEffects = new Set(['volume_create', 'volume_move', 'volume_delete
 
 /** Narrow both the model's schemas and the executor's admission ceiling. */
 export function restrictToolsToTask(tools: AgentTool[], task: TaskSpec, mode?: AgentExecutionMode): AgentTool[] {
+  if (task.scope.agentWritingProtocol !== 1) tools = tools.filter(tool => tool.name !== 'task_scope_bind')
   tools = tools.map(tool => {
     const setup = task.scope.novelInitializationProtocol === 1 && (isExplicitNovelMetadataRequest(task.goals.join('\n'))
       || isNovelDirectionSetup(task.goals.join('\n')) && task.scope.novelInitializationTarget !== 'existing')
@@ -35,17 +36,19 @@ export function restrictToolsToTask(tools: AgentTool[], task: TaskSpec, mode?: A
     const names = new Set(task.scope.capabilityCatalog.names)
     tools = tools.filter(tool => names.has(tool.name))
   }
-  if (task.scope.volumeCreateIntent || task.scope.volumeCreationProtocol === 1 && isElidedVolumeAddition(task.goals.join('\n'))) {
+  if (!task.scope.agentWritingProtocol && (task.scope.volumeCreateIntent || task.scope.volumeCreationProtocol === 1 && isElidedVolumeAddition(task.goals.join('\n')))) {
     tools = tools.filter(tool => tool.readOnly || ['ask_user', 'todo_write', 'agent_configure', 'model_assign', 'task_respond'].includes(tool.name)
       || tool.name === 'volume_create' && Boolean(task.scope.volumeCreateIntent))
   }
   if (task.scope.authorEffects) tools = tools.filter(tool =>
-    (task.scope.authorEffects!.manuscript || !manuscriptEffects.has(tool.name))
+    (task.scope.agentWritingProtocol === 1 || task.scope.authorEffects!.manuscript || !manuscriptEffects.has(tool.name))
     && (task.scope.authorEffects!.structure || tool.name === 'volume_create' && (task.scope.writing?.tailVolume?.creationProtocol === 2 || Boolean(task.scope.volumeCreateIntent)) || !structureEffects.has(tool.name)))
   if (task.researchNavigation?.version === 1 && task.intent === 'research_analysis') tools = tools.map(tool => tool.researchNavigation
     ? { ...tool, ...tool.researchNavigation } : tool)
   if (task.networkAccess === 'denied') tools = tools.filter(tool => tool.name !== 'web_search' && tool.name !== 'web_read')
   if (task.researchReadAccess === 'denied') tools = tools.filter(tool => tool.name !== 'web_read')
+  if (task.scope.agentWritingProtocol === 1) return tools.filter(tool => task.intent === 'research_analysis'
+    || !['research_report_save', 'research_report_read'].includes(tool.name))
   if (task.writingPacing === 'conversation_only') return tools.filter(tool => tool.readOnly || ['ask_user', 'goal_report', 'goal_enable', 'agent_configure', 'model_assign'].includes(tool.name))
   if (task.writingPacing === 'proposal_only') {
     // This ceiling is snapshotted and inherited by children and resume. A model

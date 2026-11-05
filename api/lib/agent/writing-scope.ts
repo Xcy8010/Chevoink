@@ -17,6 +17,8 @@ import { parseAuthorWritingRequest, parseAuthorWritingExclusion, resolveAuthorWr
 import { currentIssueQuoteRegions } from './local-edit-citations.js'
 import { assertFrozenWritingContract, frozenWritingScopeHash, writingActionTargets } from './writing-contract.js'
 import { actionTargetMatches, freezeWritingActions } from './writing-action-admission.js'
+import { readAgentWritingScope } from './agent-writing-scope.js'
+import { boundRevisionCorrectionResolvesInput, projectBoundRevisionTarget } from './writing-target-correction.js'
 
 import { chapterNumber, numeric, rangeDash, negativeScopeClause, writingScopeClauses, legacyWritingRange } from './writing-target-range.js'
 import { parseWritingTargets, writingExclusionRange } from './writing-target-admission.js'
@@ -55,6 +57,7 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
       revision: chapter.revision, contentHash: runtimeJson({ content: chapter.content }).hash, start: selection.start, end: selection.end,
       prefix: chapter.content.slice(0, selection.start), suffix: chapter.content.slice(selection.end) } } }
   }
+  if (spec.scope.agentWritingProtocol === 1) return spec
   if (spec.scope.authorEffects?.manuscript === false || !['write', 'revise', 'review', 'global_transform'].includes(spec.intent)
     || spec.writingPacing === 'proposal_only' || spec.writingPacing === 'conversation_only') return spec
   const admissionPrompt = original.prompt ?? prompt
@@ -215,9 +218,13 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
     ? freezeLocalEditBoundary(admissionPrompt, localWriting, await tx.chapter.findMany({ where: { authorId: subject.userId,
       ...activeChapterScope(subject.novelId), id: { in: writing.targets.flatMap(target => target.chapterId ? [target.chapterId] : []) } },
       select: { id: true, revision: true, content: true } }), targetProtocol === 2 ? 2 : 1, localInterpretation ?? undefined) : undefined
+  if (localEditBoundary?.version === 4 && (spec.scope.selection || spec.scope.selectionBoundary)) localEditBoundary = undefined
   const inheritedBoundaries = writingActions?.operations.flatMap(operation => operation.boundary ? [operation.boundary] : []) ?? []
   if (!localEditBoundary && inheritedBoundaries.length) {
-    localEditBoundary = inheritedBoundaries.every(boundary => boundary.version === 1 && boundary.kind === 'bounded')
+    localEditBoundary = inheritedBoundaries.every(boundary => boundary.version === 4)
+      ? { version: 4, kind: 'semantic', regions: [...new Map(inheritedBoundaries.flatMap(boundary => boundary.version === 4 ? boundary.regions : [])
+        .map(region => [region.chapterId, region])).values()] }
+      : inheritedBoundaries.every(boundary => boundary.version === 1 && boundary.kind === 'bounded')
       ? { version: 1, kind: 'bounded', regions: [...new Map(inheritedBoundaries.flatMap(boundary => boundary.regions)
         .map(region => [region.chapterId, region])).values()] }
       : { version: 1, kind: 'needs_input', regions: [] }
@@ -301,11 +308,11 @@ export function chapterRevisionAuthorityText(text: string | null, value: unknown
  * targets, timestamps, child briefs and current directory positions cannot mint
  * this allowance: require the original frozen null slot and its exact binding. */
 export async function readNewDraftWritingAuthority(tx: Prisma.TransactionClient, subject: Subject, chapter: { id: string; orderIndex: number }) {
-  const original = await readOriginalTaskRequest(tx, subject)
+  const original = await readEffectiveWritingRequest(tx, subject)
   const parsed = taskSpecSchema.safeParse(original.spec)
   if (!parsed.success || parsed.data.intent !== 'write' || parsed.data.scope.novelId !== subject.novelId
     || parsed.data.scope.selection || ['proposal_only', 'conversation_only'].includes(parsed.data.writingPacing ?? '')
-    || parsed.data.scope.writingTargetProtocol !== 2 && (prohibitsNewDraftRevision(original.prompt)
+    || !parsed.data.scope.agentWritingProtocol && parsed.data.scope.writingTargetProtocol !== 2 && (prohibitsNewDraftRevision(original.prompt)
       || parsed.data.hardConstraints.some(item => prohibitsNewDraftRevision(item.text)))) return null
   const frozen = parsed.data.scope.writing
   if (frozen?.kind !== 'bounded' && !(frozen?.kind === 'needs_input' && parsed.data.scope.writingClarificationProtocol !== undefined)) return null
@@ -339,8 +346,19 @@ export async function readWritingScope(tx: Prisma.TransactionClient, subject: Su
     || spec.data.scope.writingActions.operations.some(operation => operation.end > original.prompt!.length))) {
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原作者动作与章节目标凭证不匹配。')
   }
+  if (spec.success && spec.data.scope.agentWritingProtocol === 1) {
+    const binding = await readAgentWritingScope(tx, subject, original, spec.data)
+    const source = await tx.agentRun.findFirstOrThrow({ where: { id: original.sourceRunId, userId: subject.userId, novelId: subject.novelId }, select: { writingBindings: true } })
+    const writing = binding?.spec.scope.writing
+    const bindings = source.writingBindings == null ? null : bindingSchema.parse(source.writingBindings)
+    if (bindings && (bindings.taskId !== original.taskId || bindings.targets.some(item => !writing?.targets.some(target =>
+      target.orderIndex === item.orderIndex && (!target.chapterId || target.chapterId === item.chapterId))))) {
+      throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '正文解释与章节创建绑定不一致。')
+    }
+    return { ...original, spec: binding?.spec ?? original.spec, writing, bindings, clarification: null, targetCorrection: null }
+  }
   if (spec.success && spec.data.scope.authorEffects?.manuscript === false) {
-    return { ...original, writing: undefined, bindings: null, clarification: null }
+    return { ...original, writing: undefined, bindings: null, clarification: null, targetCorrection: null }
   }
   if (spec.success && spec.data.scope.authorEffects?.manuscript && !spec.data.scope.writing) {
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原作者请求的章节解释凭证缺失或不匹配，不能重新解析补授权。')
@@ -350,6 +368,8 @@ export async function readWritingScope(tx: Prisma.TransactionClient, subject: Su
     select: { id: true, chapterId: true, taskRootId: true, sessionId: true, manuscriptRevision: true, writingBindings: true } })
   const clarification = spec.success ? await readWritingClarification(tx, subject, original, source, spec.data) : null
   if (clarification) writing = clarification.writing
+  const correction = !clarification && spec.success ? await projectBoundRevisionTarget(tx, subject, original, spec.data, source) : null
+  if (correction) writing = correction.writing
   if (!writing && original.prompt) {
     const range = legacyWritingRange(original.prompt)
     // No historical directory snapshot proves a list or an existing-book
@@ -389,7 +409,8 @@ export async function readWritingScope(tx: Prisma.TransactionClient, subject: Su
     || bindings.targets.some(item => !writing?.targets.some(target => target.orderIndex === item.orderIndex && (!target.chapterId || target.chapterId === item.chapterId))))) {
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '章节写入绑定损坏，不能扩大授权范围。')
   }
-  return { ...original, ...(clarification?.evidence.version === 2 ? { spec: clarification.spec } : {}), writing, bindings, clarification: clarification?.evidence ?? null }
+  return { ...original, ...(clarification?.evidence.version === 2 ? { spec: clarification.spec } : correction ? { spec: correction.spec } : {}),
+    writing, bindings, clarification: clarification?.evidence ?? null, targetCorrection: correction?.correction ?? null }
 }
 
 /** A read projection for workflow observers; the frozen spec/hash is untouched. */
@@ -399,15 +420,34 @@ export function writingClarificationResolvesInput(scope: Awaited<ReturnType<type
     && scope.writing?.kind === 'bounded' && spec.success && spec.data.scope.localEditBoundary?.kind !== 'needs_input'
 }
 
+export async function writingScopeResolvesInput(tx: Prisma.TransactionClient, subject: Subject, scope: Awaited<ReturnType<typeof readWritingScope>>,
+  marker: { kind?: string; callId: string }) {
+  return writingClarificationResolvesInput(scope, marker) || await boundRevisionCorrectionResolvesInput(tx, subject, scope, marker)
+}
+
 export async function effectiveWritingTaskSpec(tx: Prisma.TransactionClient, subject: Subject, spec: TaskSpec): Promise<TaskSpec> {
-  if (spec.scope.writingClarificationProtocol === undefined) return spec
+  if (spec.scope.agentWritingProtocol === 1) {
+    const scope = await readWritingScope(tx, subject)
+    const effective = taskSpecSchema.parse(scope.spec)
+    const childGoal = scope.parentRunId && spec.id !== scope.taskId
+    return { ...spec, ...(!childGoal ? { intent: effective.intent, writingPacing: effective.writingPacing } : {}), scope: effective.scope }
+  }
+  if (spec.scope.writingClarificationProtocol === undefined && !(spec.scope.writingTargetProtocol === 2 && spec.scope.writing?.kind === 'needs_input')) return spec
   const scope = await readWritingScope(tx, subject)
-  if (!scope.clarification || scope.taskId !== spec.id) return spec
+  if (!scope.clarification && !scope.targetCorrection || scope.taskId !== spec.id) return spec
   const projection = { ...spec, scope: { ...spec.scope, ...taskSpecSchema.parse(scope.spec).scope, writing: scope.writing,
     ...(spec.scope.writingInterpretation ? { writingInterpretation: { ...spec.scope.writingInterpretation } } : {}) } }
   // This authenticated observer projection is never persisted as the root.
   if (projection.scope.writingInterpretation) projection.scope.writingInterpretation.scopeHash = frozenWritingScopeHash(projection.scope)
   return projection
+}
+
+/** Business observers use the same authenticated view as tools; root remains raw. */
+export async function readEffectiveWritingRequest(tx: Prisma.TransactionClient, subject: Subject) {
+  const original = await readOriginalTaskRequest(tx, subject)
+  const parsed = taskSpecSchema.safeParse(original.spec)
+  return parsed.success && parsed.data.scope.agentWritingProtocol === 1
+    ? { ...original, spec: await effectiveWritingTaskSpec(tx, subject, parsed.data) } : original
 }
 
 /** Read only the authenticated original contract. Never mint on an old run. */
@@ -436,7 +476,7 @@ export async function assertSelectionBodyEffect(tx: Prisma.TransactionClient, su
     editRanges?: Array<{ start: number; end: number; newText: string }> }, automatic = false) {
   const original = await readOriginalTaskRequest(tx, subject)
   const parsed = taskSpecSchema.safeParse(original.spec)
-  const spec = parsed.success && parsed.data.scope.writingClarificationProtocol === 2
+  const spec = parsed.success && (parsed.data.scope.writingClarificationProtocol === 2 || parsed.data.scope.agentWritingProtocol === 1)
     ? await effectiveWritingTaskSpec(tx, subject, parsed.data) : original.spec
   const conditional = await assertLocalBodyEffect(tx, subject, chapter, options, automatic, spec)
   const boundary = originalSelectionBoundary(spec)
@@ -497,6 +537,28 @@ async function assertLocalBodyEffect(tx: Prisma.TransactionClient, subject: Subj
   const current = await tx.chapter.findFirst({ where: { id: chapter.id, revision: chapter.revision, authorId: subject.userId,
     ...activeChapterScope(subject.novelId) }, select: { content: true } })
   if (!current) throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '当前正文版本已变化，局部替换未执行。')
+  if (local.version === 4) {
+    const region = local.regions.find(item => item.chapterId === chapter.id)!, before = current.content
+    if (chapter.revision < region.revision || chapter.revision === region.revision && runtimeJson({ content: before }).hash !== region.contentHash) {
+      throw new DataAccessError(409, 'AUTHOR_LOCAL_STALE', '原章节版本已变化，未执行局部替换。')
+    }
+    const ranges = options.editRanges, ordered = [...ranges ?? []].sort((a, b) => a.start - b.start)
+    const protectedRegions = region.protectedText.map(text => ({ text, start: before.indexOf(text), end: before.indexOf(text) + text.length }))
+    if (!ranges?.length || ranges.length > 8 || options.after === undefined || ordered.some((range, index) =>
+      !Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end) || range.start < 0 || range.end <= range.start || range.end > before.length
+      || index > 0 && range.start < ordered[index - 1].end
+      || protectedRegions.some(protectedRegion => range.start < protectedRegion.end && protectedRegion.start < range.end))
+      || ordered.reduce((length, range) => length + range.end - range.start, 0) >= before.length
+      || protectedRegions.some(region => region.start < 0 || before.indexOf(region.text, region.start + 1) >= 0)) {
+      throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', '局部补丁不能整体覆盖正文、重叠或修改明确保护句，全部变更未执行。')
+    }
+    let after = before
+    for (const range of [...ordered].reverse()) after = after.slice(0, range.start) + range.newText + after.slice(range.end)
+    if (after !== options.after || protectedRegions.some(region => after.indexOf(region.text) < 0 || after.indexOf(region.text, after.indexOf(region.text) + 1) >= 0)) {
+      throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', '局部补丁与实际正文或明确保护句不一致，全部变更未执行。')
+    }
+    return
+  }
   if (local.version === 2) {
     const spans = currentIssueQuoteRegions(local, chapter.id, chapter.revision, current.content)
     const ranges = options.editRanges
@@ -554,7 +616,9 @@ export async function assertWritingTarget(tx: Prisma.TransactionClient, subject:
   }
   const scope = await readWritingScope(tx, subject)
   const frozen = taskSpecSchema.safeParse(scope.spec).data
-  if (frozen?.scope.authorEffects?.manuscript === false) {
+  if (frozen?.scope.agentWritingProtocol === 1 && !frozen.scope.agentWritingBinding)
+    throw new DataAccessError(409, 'TASK_SCOPE_REQUIRED', '先由主Agent调用task_scope_bind确定本次正文意图和真实目标；无需让作者重复原请求。')
+  if (frozen?.scope.authorEffects?.manuscript === false && !(frozen.scope.agentWritingBinding && frozen.intent === 'review' && !target.effect)) {
     if (frozen.intent === 'review' && target.effect && ['range', 'replace', 'append', 'changeset'].includes(target.effect)) {
       throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '原始作者请求未授权改写该正文；检查报告不能扩大写入权限。')
     }
@@ -716,6 +780,7 @@ export async function readRecoveredChapterDelivery(tx: Prisma.TransactionClient,
 }
 
 export function requiresCompletedWritingPresentation(spec: TaskSpec): boolean {
+  if (spec.scope.agentWritingProtocol === 1) return !!spec.scope.agentWritingBinding && ['write', 'revise'].includes(spec.intent)
   return spec.scope.authorEffects?.manuscript !== false && ['write', 'revise'].includes(spec.intent) && spec.scope.writing?.kind === 'bounded'
     && !['proposal_only', 'conversation_only'].includes(spec.writingPacing ?? '')
     // Legacy intent defaults may say write for a plain summary or observation.
@@ -735,6 +800,9 @@ export function frozenWritingRevisionAuthority(value: unknown, chapterId: string
   if (!parsed.success && scope?.writingTargetProtocol === 2) {
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原作者章节操作解释损坏，不能回退文本猜测权限。')
   }
+  if (parsed.success && parsed.data.scope.agentWritingProtocol === 1) return Boolean(parsed.data.scope.agentWritingBinding
+    && parsed.data.intent !== 'review' && parsed.data.scope.writing?.kind === 'bounded'
+    && parsed.data.scope.writing.targets.some(target => target.chapterId === chapterId || provenNewDraft && !target.chapterId))
   if (!parsed.success || parsed.data.scope.writingTargetProtocol !== 2) return undefined
   const spec = parsed.data, interpretation = spec.scope.writingInterpretation, writing = spec.scope.writing
   assertFrozenWritingContract(spec)

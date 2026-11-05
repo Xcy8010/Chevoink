@@ -61,7 +61,7 @@ export async function executeDurableChapterRename(ctx: ToolContext, tool: AgentT
         observedState: { kind: 'chapter', id: chapter.id, revision },
         snapshot: { target: 'chapter', targetId: chapter.id, field: 'title', previousValue: chapter.title } } }).value
   }).catch(async error => {
-    if (!(error instanceof DataAccessError) || ![...PLAN_FAILURE_CODES, 'AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'CHAPTER_REVISION_CONFLICT', 'CHAPTER_RENAME_INVALID', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST'].includes(error.code)) throw error
+    if (!(error instanceof DataAccessError) || ![...PLAN_FAILURE_CODES, 'TASK_SCOPE_REQUIRED', 'AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'CHAPTER_REVISION_CONFLICT', 'CHAPTER_RENAME_INVALID', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code, output: error.message, summary: '章节未改名' })
   })
   await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
@@ -141,7 +141,7 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
   const operation = prepared?.operation ?? await prepareOperation(lease, { key: capability.operationKey, kind: 'tool', action, input: operationInput })
   const receipt = await commitOperationEffect(lease, operation.id, operation.inputHash,
     tx => applyDurableChapterBody(ctx, tx, { taskRootId: lease.taskRootId, action, args, expectedRevision, anchorProtocol })).catch(async error => {
-    if (!prepared || !(error instanceof DataAccessError) || ![...PLAN_FAILURE_CODES, 'AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'CHAPTER_REVISION_CONFLICT', 'CHAPTER_ANCHOR_CONFLICT', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED', 'REVIEW_CYCLE_DECISION_REQUIRED'].includes(error.code)) throw error
+    if (!prepared || !(error instanceof DataAccessError) || ![...PLAN_FAILURE_CODES, 'TASK_SCOPE_REQUIRED', 'AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'CHAPTER_REVISION_CONFLICT', 'CHAPTER_ANCHOR_CONFLICT', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED', 'REVIEW_CYCLE_DECISION_REQUIRED'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code: error.code,
       summary: '正文变更未执行', output: error.message })
   })

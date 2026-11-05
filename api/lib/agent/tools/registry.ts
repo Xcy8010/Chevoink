@@ -20,6 +20,7 @@ import { novelExportTool } from './export-tools.js'
 import { novelImportTool } from './import-tools.js'
 import { askUserTool } from './interact-tools.js'
 import { taskRespondTool } from './task-response-tool.js'
+import { taskScopeBindTool } from './task-scope-tools.js'
 import {
   coverPromptSetTool,
   novelArchiveTool,
@@ -237,7 +238,7 @@ export const allTools: AgentTool<any>[] = [
   subAgentRunTool,
   subAgentDelegateTool,
   // 交互
-  askUserTool, taskRespondTool,
+  askUserTool, taskRespondTool, taskScopeBindTool,
 ].map(tool => {
   if (!hasAgentToolPresentation(tool.name)) throw new Error(`Author presentation missing: ${tool.name}`)
   return { ...tool, contract: describeAgentToolContract(tool) }

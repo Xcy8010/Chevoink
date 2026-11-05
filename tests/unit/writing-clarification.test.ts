@@ -192,8 +192,20 @@ describe('authenticated same-task chapter and quote clarification', () => {
     expect(f.create).toHaveBeenCalledOnce()
     await expect(scope.assertWritingTarget(f.tx, f.subject, { chapterId: 'other', effect: 'replace' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
   })
+  it('resolves modification and saving the same body with one real chapter answer', async () => {
+    const f = await generalFixture('修改并写入正文。'), before = runtimeJson(f.admission).hash
+    expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer: '第5章' })).toBeTruthy()
+    const effective = await scope.readWritingScope(f.tx, f.subject)
+    expect(effective.writing).toMatchObject({ kind: 'bounded', targets: [{ chapterId: chapter.id, orderIndex: 5 }] })
+    expect(effective.spec).toMatchObject({ scope: { writingActions: { operations: [
+      { kind: 'revise', resolution: 'bound', targets: [{ chapterId: chapter.id }] },
+      { kind: 'write', resolution: 'bound', targets: [{ chapterId: chapter.id }] },
+    ] } } })
+    expect(runtimeJson(f.admission).hash).toBe(before)
+    expect(f.create).toHaveBeenCalledOnce()
+  })
   it('fills an exact unique quote on the already known chapter in the same task', async () => {
-    const f = await generalFixture('只修改第5章这句话。'), before = runtimeJson(f.admission).hash
+    const f = await generalFixture('只修改第5章第9段。'), before = runtimeJson(f.admission).hash
     expect(f.frozen.scope.localEditBoundary?.kind).toBe('needs_input')
     expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer: '原文是“门开了。”' })).toBeTruthy()
     const effective = await scope.effectiveWritingTaskSpec(f.tx, f.subject, f.frozen)
@@ -211,12 +223,12 @@ describe('authenticated same-task chapter and quote clarification', () => {
     expect(f.create).not.toHaveBeenCalled()
   })
   it('never changes the known chapter to another target when only a quote was missing', async () => {
-    const f = await generalFixture('只修改第5章这句话。')
+    const f = await generalFixture('只修改第5章第9段。')
     expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer: '第6章的“门开了。”' })).toBeNull()
     expect(f.create).not.toHaveBeenCalled()
   })
   it('clears only the matching answered question after both chapter and local boundaries are resolved', async () => {
-    const f = await generalFixture('只修改第5章这句话。')
+    const f = await generalFixture('只修改第5章第9段。')
     const marker = { callId: f.answer.callId }
     expect(scope.writingClarificationResolvesInput(await scope.readWritingScope(f.tx, f.subject), marker)).toBe(false)
     await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer: '原文是“门开了。”' })
@@ -237,7 +249,7 @@ describe('authenticated same-task chapter and quote clarification', () => {
     await expect(scope.assertWritingTarget(f.tx, f.subject, { chapterId: chapter.id, effect: 'replace' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
   })
   it('requires a real answer, an unambiguous quote and the original manuscript epoch', async () => {
-    const f = await generalFixture('只修改第5章这句话。')
+    const f = await generalFixture('只修改第5章第9段。')
     expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer: '按选项一' })).toBeNull()
     expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer: '原文是“尚未出现的句子”' })).toBeNull()
     expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer: '原文是“门开了。”' })).toBeTruthy()

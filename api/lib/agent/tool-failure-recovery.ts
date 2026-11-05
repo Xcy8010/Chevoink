@@ -13,6 +13,8 @@ export function toolRecoveryKey(action: string, code: string, args: unknown, fal
  * source revisions, author deletion, or quality gates. */
 export function toolFailureRecovery(code: string): { label: string; guidance: string } | undefined {
   const entries: Record<string, { label: string; guidance: string }> = {
+    TASK_SCOPE_REQUIRED: { label: '先确定正文任务', guidance: '根据完整作者请求与现有上下文自行理解本轮写作、修改或检查目标，核对目录后调用task_scope_bind；不要求作者重复同一目标，不重建任务。绑定后实际工具仍校验归属、选区、保护章与当前版本。' },
+    TASK_SCOPE_BIND_CONFLICT: { label: '复用已确定目标', guidance: '该任务已有不可变的正文解释记录，请读取原绑定并完成其中目标；不能通过更换绑定重写已完成章节或扩大本轮范围。' },
     INVALID_ARGUMENTS: { label: '工具参数需要纠正', guidance: '本次输入未执行。按具体字段含义纠正参数；同一调用中的章节编号、全书位置和卷内位置必须一致，不能只修改说明文字或重复发送同一冲突输入。原授权、已保存结果和预算保留。' },
     TASK_RESPONSE_WORK_PENDING: { label: '实际工作尚需原流程交付', guidance: '按本次回执列出的原待办、编译和已保存产物完成缺失步骤；计划落盘用plan_save，章节用chapter_bridge_get核对当前正文、必要检查与提交。保留已完成结果，未知请求先核对；不要重复task_respond、重新建任务或仅把待办标完来冒充完成。' },
     QUALITY_TASK_TARGET_REQUIRED: { label: '质量检查尚未定位本任务新章', guidance: '按回执中的本任务真实编译和章节绑定核对目标；已有新章不重建，尚未保存正文时继续原写作步骤。不能回到历史旧章、自动改检查另一章或借其他任务的编译。' },

@@ -11,6 +11,7 @@ import { restrictToolsToTask } from '../../api/lib/agent/tool-authority.js'
 import { getToolsForMode } from '../../api/lib/agent/tools/registry.js'
 import { chapterRevisionPrompt, directoryContinuationPrompt, nextChapterContinuationPrompt } from '../support/writing-target-prompt.js'
 import { taskSpecSchema, type TaskSpec } from '../../shared/contracts/task-spec-contracts.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 
 afterEach(() => vi.restoreAllMocks())
 const subject = { userId: 'author', novelId: 'novel', runId: 'current' }
@@ -18,7 +19,7 @@ const chapters = [1, 2].map(orderIndex => ({ id: `chapter-${orderIndex}`, orderI
   volumeId: 'volume', revision: 1, volume: { orderIndex: 1 }, content: '窗边还留着灯。\n门开了。\n走廊无人。' }))
 function makeRun(id: string, prompt: string, time: number, chapterId: string | null = null) {
   return { id, userId: 'author', novelId: 'novel', sessionId: 'session', chapterId, createdAt: new Date(time),
-    engine: 'loop', runtimeProtocolVersion: 0, taskRootId: null as string | null, taskSpec: null as TaskSpec | null,
+    engine: 'loop', runtimeProtocolVersion: 0, manuscriptRevision: 0, taskRootId: null as string | null, taskSpec: null as TaskSpec | null,
     incomingChildGrant: null as unknown, goalExecution: null, writingBindings: null as unknown,
     session: { spawnedFromRunId: null, spawnedFromSessionId: null, sandboxMode: 'workspace' },
     startRequest: withHumanAdmission({ novelId: 'novel', sessionId: 'session', mode: 'build', prompt }) }
@@ -37,10 +38,11 @@ async function fixture(prompt: string, previousPrompt = '写第1、2章', editor
         ? runs.find(run => run.id === input.where.id)! : runs.find(run => run.taskSpec?.id === input.where.taskSpec?.equals)!),
       findMany: vi.fn(async (input: { where: { id: { not: string }; createdAt: { lte: Date } } }) => runs
         .filter(run => run.id !== input.where.id.not && run.createdAt <= input.where.createdAt.lte)
-        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).map(run => ({ id: run.id }))),
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).map(run => ({ id: run.id, incomingChildGrant: run.incomingChildGrant ? { id: 'child-source' } : null }))),
     },
     agentMessage: { findMany: vi.fn(async (input: { where: { runId: string } }) => messages.filter(message => message.runId === input.where.runId)) },
     agentChildExecutionGrant: { findUnique: vi.fn(async () => null) },
+    agentArtifact: { findMany: vi.fn(async (): Promise<Array<{ metadata: unknown }>> => []) },
     agentSession: { findFirst: vi.fn(async () => ({ spawnedFromRunId: null, spawnedFromSessionId: null })) },
     chapter: { findMany: vi.fn(async (input: { where: { id?: { in: string[] } } }) => directory.filter(chapter => !input.where.id || input.where.id.in.includes(chapter.id))),
       findFirst: vi.fn(async (input: { where: { id: string } }) => directory.find(chapter => chapter.id === input.where.id) ?? null) },
@@ -73,6 +75,71 @@ async function fixture(prompt: string, previousPrompt = '写第1、2章', editor
 }
 
 describe('fresh human actions and their own chapter objects', () => {
+  it('carries forward a target resolved by an authentic human clarification without rewriting the old contract', async () => {
+    const f = await fixture('全部重写', '修改正文', null)
+    const spec = f.previous.taskSpec!, originalBytes = JSON.stringify(spec)
+    const projection = clarifyWritingProjection(spec, f.previous.startRequest.prompt, '第2章', chapters)
+    expect(projection?.writing.targets).toEqual([{ orderIndex: 2, chapterId: 'chapter-2' }])
+    const payload = { version: 2, writingScopeClarification: true, taskId: spec.id, userId: subject.userId, novelId: subject.novelId,
+      sourceRunId: f.previous.id, questionRunId: f.previous.id, originHash: runtimeJson({ prompt: f.previous.startRequest.prompt, spec }).hash,
+      manuscriptRevision: 0, callId: 'clarification', question: '请选择章节', options: [], answer: '第2章', source: 'legacy_question', projection }
+    f.mocks.agentArtifact.findMany.mockResolvedValue([{ metadata: { ...payload, contentHash: runtimeJson(payload).hash } }])
+    const current = await f.freeze()
+    expect(current.scope.writing?.targets).toEqual([{ orderIndex: 2, chapterId: 'chapter-2' }])
+    expect(current.scope.writingActions?.operations[0].source).toMatchObject({ runId: 'previous', scopeHash: expect.any(String) })
+    expect(JSON.stringify(f.previous.taskSpec)).toBe(originalBytes)
+  })
+  it.each(['按此修改', '照此修改', '照建议修'])(
+    'keeps an unbound follow-up behind the scope question without manufacturing a chapter: %s', async prompt => {
+      const f = await fixture(prompt, '你好', null)
+      expect((await f.freeze()).scope.writing).toMatchObject({ kind: 'needs_input', targets: [] })
+    })
+  it.each(['child', 'invalid-hash', 'stale-report'])(
+    'does not replace a failed provenance check with the editor merely because the follow-up says all: %s', async failure => {
+      const f = await fixture('全部重写', failure === 'stale-report' ? '检查一下' : '写第2章', 'chapter-1')
+      if (failure === 'child') f.previous.incomingChildGrant = { id: 'child' }
+      if (failure === 'invalid-hash') f.previous.taskSpec!.scope.authorEffects!.requestHash = 'f'.repeat(64)
+      if (failure === 'stale-report') f.reports.push({ id: 'old-report', chapterId: 'chapter-2', chapterRevision: 0 })
+      expect((await f.freeze()).scope.writing).toMatchObject({ kind: 'needs_input', targets: [] })
+    })
+  it.each(['修改正文', '整章重写', '全部重写', '写入正文', '按此修改', '照建议修'])(
+    'binds the admitted editor object for a concrete body command without a historical object: %s', async prompt => {
+      const f = await fixture(prompt, '你好', 'chapter-1')
+      const spec = await f.freeze()
+      expect(spec.scope.authorEffects?.manuscript).toBe(true)
+      expect(spec.scope.writing).toMatchObject({ kind: 'bounded', targets: [{ chapterId: 'chapter-1' }] })
+      expect(spec.scope.writingActions?.operations.every(operation => operation.resolution === 'bound')).toBe(true)
+    })
+  it.each(['全部重写', '按此修改', '照建议修'])(
+    'uses the authenticated same-chat chapter rather than an unrelated editor: %s', async prompt => {
+      const f = await fixture(prompt, '写第2章', 'chapter-1')
+      expect((await f.freeze()).scope.writing?.targets).toEqual([{ orderIndex: 2, chapterId: 'chapter-2' }])
+    })
+  it.each(['修改并写入正文', '修改正文，再写入正文'])(
+    'keeps revision and persistence on the same saved body: %s', async prompt => {
+      const f = await fixture(prompt, '你好', 'chapter-1')
+      const spec = await f.freeze()
+      expect(spec.scope.writing?.targets).toEqual([{ orderIndex: 1, chapterId: 'chapter-1' }])
+      expect(spec.scope.writingActions?.operations.every(operation => operation.targets.every(target => target.chapterId === 'chapter-1'))).toBe(true)
+    })
+  it('passes ordinary discussion while retaining the nearest authenticated chapter object', async () => {
+    const f = await fixture('全部重写', '写第2章', null)
+    const discussion = makeRun('discussion', '气氛很有趣', 15)
+    discussion.taskSpec = buildTaskSpec({ novelId: 'novel', prompt: discussion.startRequest.prompt, authorWritingProtocol: 2 })
+    f.runs.push(discussion)
+    f.messages.push({ id: 'discussion-message', runId: discussion.id, sessionId: 'session', role: 'user', parts: [{ type: 'text', text: discussion.startRequest.prompt }] })
+    expect((await f.freeze()).scope.writing?.targets).toEqual([{ orderIndex: 2, chapterId: 'chapter-2' }])
+  })
+  it.each(['只读，不修改', '不要修改第1章', '第1章', '只检查第1章'])(
+    'does not jump over a newer denied or different object to restore an older chapter: %s', async prompt => {
+      const f = await fixture('全部重写', '写第2章', null)
+      const newer = makeRun('newer', prompt, 15)
+      f.runs.push(newer)
+      f.messages.push({ id: 'newer-message', runId: newer.id, sessionId: 'session', role: 'user', parts: [{ type: 'text', text: prompt }] })
+      await f.freeze(newer)
+      const spec = await f.freeze()
+      expect(spec.scope.writing?.targets).not.toContainEqual(expect.objectContaining({ chapterId: 'chapter-2' }))
+    })
   it.each(['修改', '重新写', '重写', '授权，继续写'])('retains a current mutation and resolves only its recent owned object: %s', async prompt => {
     const f = await fixture(prompt, '写第2章')
     const spec = await f.freeze()
@@ -321,11 +388,11 @@ describe('fresh human actions and their own chapter objects', () => {
       .toEqual([['chapter-1'], ['chapter-2']])
   })
   it.each(['修改这段', '检查并修复结尾'])(
-    'keeps an unresolved local locator fenced before any body effect: %s', async prompt => {
+    'lets an admitted semantic local request locate exact patches inside its chapter: %s', async prompt => {
       const f = await fixture(prompt, '你好', 'chapter-1')
       const spec = await f.freeze()
-      expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'needs_input', regions: [] })
-      expect(frozenWritingRevisionAuthority(spec, 'chapter-1')).toBe(false)
+      expect(spec.scope.localEditBoundary).toMatchObject({ version: 4, kind: 'semantic', regions: [{ chapterId: 'chapter-1' }] })
+      expect(frozenWritingRevisionAuthority(spec, 'chapter-1')).toBe(true)
     })
   it('authenticates an explicit new-draft repair through the original canonical create binding', async () => {
     const directory = chapters.map(chapter => ({ ...chapter }))

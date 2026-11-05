@@ -8,6 +8,9 @@ const localEditRegionSchema = z.object({ chapterId: z.string().min(1), revision:
   prefix: z.string(), suffix: z.string() }).strict()
 const localEditBoundarySchema = z.discriminatedUnion('version', [
   z.object({ version: z.literal(1), kind: z.enum(['bounded', 'needs_input']), regions: z.array(localEditRegionSchema) }).strict(),
+  z.object({ version: z.literal(4), kind: z.literal('semantic'),
+    regions: z.array(localEditRegionSchema.extend({ protectedText: z.array(z.string().min(1)) }).strict()).min(1).max(1000),
+  }).strict(),
   z.object({ version: z.literal(2), kind: z.enum(['bounded', 'needs_input']), regions: z.array(localEditRegionSchema.extend({
     text: z.string().min(1).max(512), maxNewChars: z.number().int().positive().max(1024),
     source: z.object({ kind: z.literal('author_issue_quote'), requestHash: z.string().regex(/^[a-f0-9]{64}$/),
@@ -39,6 +42,10 @@ export const taskIntentSchema = z.enum([
 ])
 
 export const taskScopeSchema = z.object({
+  /** Fresh main-Agent interpretation. Absence of a binding is not a denied user request. */
+  agentWritingProtocol: z.literal(1).optional(),
+  agentWritingBinding: z.object({ sourceRunId: z.string().min(1), receiptHash: z.string().regex(/^[a-f0-9]{64}$/),
+    requiredChecks: z.array(z.enum(['continuity', 'humanity'])) }).strict().optional(),
   novelId: z.string().min(1),
   volumeIds: z.array(z.string().min(1)).optional(),
   chapterIds: z.array(z.string().min(1)).optional(),
@@ -227,6 +234,16 @@ export const taskSpecSchema = z.object({
     ctx.addIssue({ code: 'custom', path: ['scope', 'localEditBoundary'], message: 'Issue quotations require the same frozen author interpretation' })
   }
   const conditional = spec.scope.localEditBoundary
+  if (conditional?.version === 4 && (spec.scope.localEditProtocol !== 1
+    || !spec.scope.authorEffects?.manuscript || spec.scope.writing?.kind !== 'bounded'
+    || spec.scope.selection || spec.scope.selectionBoundary
+    || (spec.scope.agentWritingProtocol === 1 ? spec.intent !== 'revise' : spec.scope.writingTargetProtocol !== 2
+      || !spec.scope.writingInterpretation?.operations.some(operation => operation.kind === 'revise' && operation.polarity === 'affirmative'))
+    || new Set(conditional.regions.map(region => region.chapterId)).size !== conditional.regions.length
+    || conditional.regions.some(region => !spec.scope.writing!.targets.some(target => target.chapterId === region.chapterId)
+      || region.start !== 0 || region.end <= 0 || region.prefix !== '' || region.suffix !== ''))) {
+    ctx.addIssue({ code: 'custom', path: ['scope', 'localEditBoundary'], message: 'Semantic local edits require an admitted saved chapter and revision command' })
+  }
   if (conditional?.version === 3 && (spec.scope.writingTargetProtocol !== 2 || spec.scope.localEditProtocol !== 1
     || !spec.scope.writingInterpretation || conditional.source.requestHash !== spec.scope.writingInterpretation.requestHash
     || spec.scope.writing?.kind !== 'bounded' || spec.scope.writing.repairAuthorized

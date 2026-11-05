@@ -59,6 +59,11 @@ export async function assertTaskResponseEligible(tx: Prisma.TransactionClient,
     sessionId: subject.sessionId, runtimeProtocolVersion: 0, taskRootId: null, status: 'running' } })
   const original = await readOriginalTaskRequest(tx, subject)
   const parsed = taskSpecSchema.safeParse(original.spec)
+  if (parsed.success && parsed.data.scope.agentWritingProtocol === 1) {
+    const effective = await (await import('./writing-scope.js')).effectiveWritingTaskSpec(tx, subject, parsed.data)
+    if (effective.scope.agentWritingBinding && ['write', 'revise'].includes(effective.intent))
+      throw new DataAccessError(409, 'TASK_RESPONSE_WORK_PENDING', '已经绑定本次正文目标，请完成实际写入和必要检查，不能改用普通答复结束。')
+  }
   if (!run || original.parentRunId || !original.prompt || !parsed.success
     || parsed.data.responseDeliveryProtocol !== 1 && !(authorContinue && await currentResponseContinue(tx, subject.runId, authorContinue))) {
     throw new DataAccessError(409, 'TASK_RESPONSE_UNAVAILABLE', '原任务未启用直接答复交付，保留原执行流程。')

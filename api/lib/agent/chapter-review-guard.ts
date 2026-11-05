@@ -6,7 +6,8 @@ import { currentReviewNextStepGuidance, projectCurrentReviewNextStep } from './r
 import { DataAccessError } from '../prisma.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { continuityCheckRounds } from './story-compiler.js'
-import { readOriginalTaskRequest, originalTaskRunIds, originalRepairAuthority } from './original-request.js'
+import { originalTaskRunIds, originalRepairAuthority, effectiveOriginalRepairAuthority } from './original-request.js'
+import { readEffectiveWritingRequest as readOriginalTaskRequest } from './writing-scope.js'
 import { activeChapterScope } from '../data/internal.js'
 import { compilerContinuityCoverage, currentCompilerContinuityAssessment, continuityStoryInput, storedContinuityProtocol } from './compiler-continuity-contract.js'
 import { qualityReportCheckedCurrentContent, selectAutomaticQualityFindings } from './quality-report-contract.js'
@@ -453,7 +454,7 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
   const parsedSpec = taskSpecSchema.safeParse(original.spec)
   // Consume only the authenticated answer projection for body authority. The
   // immutable original still supplies lineage, review requirements and budgets.
-  const authoritySpec = parsedSpec.success && parsedSpec.data.scope.writingClarificationProtocol === 2
+  const authoritySpec = parsedSpec.success && (parsedSpec.data.scope.writingClarificationProtocol === 2 || parsedSpec.data.scope.agentWritingProtocol === 1)
     ? await effectiveWritingTaskSpec(tx, subject, parsedSpec.data) : original.spec
   const runIds = await originalTaskRunIds(tx, subject, original)
   await tx.$queryRaw(Prisma.sql`SELECT id FROM story_compilations WHERE user_id = ${subject.userId}
@@ -524,7 +525,7 @@ export async function probeChapterReviewRevision(tx: Prisma.TransactionClient,
   try {
     await assertChapterReviewRevision(tx, subject, chapter, { ...options, readScope })
     const original = await readOriginalTaskRequest(tx, subject)
-    if (!originalRepairAuthority(original, chapter.id)) {
+    if (!await effectiveOriginalRepairAuthority(tx, subject, original, chapter.id)) {
       // Closure evidence narrows automatic reachability only. It never adds
       // mutation authority, nor rejects a child merely for having a parent.
       const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId },

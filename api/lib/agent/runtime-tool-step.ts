@@ -37,6 +37,7 @@ import { executeDurableMemorySave } from './runtime-memory.js'
 import { novelCreateTool, novelPublishTool, novelArchiveTool, novelDeleteTool, novelRenameTool, novelUpdateMetaTool, coverPromptSetTool } from './tools/novel-tools.js'
 import { prepareNovelDeletion } from './runtime-novel-delete.js'
 import { METADATA_ACTIONS, executeDurableMetadata } from './tools/durable-metadata.js'
+import { taskScopeBindTool } from './tools/task-scope-tools.js'
 import { settleProviderOperation } from './runtime-settlement.js'
 import { volumeListTool, volumeCreateTool, structureOutlineTool, volumeUpdateTool, volumeMoveTool, volumeDeleteTool, chapterMoveTool, chapterMoveToVolumeTool, chapterSplitTool, chapterMergeTool } from './tools/structure-tools.js'
 import { STRUCTURE_MUTATIONS, structureContentTargets, TASK_ARTIFACT_ACTIONS } from './runtime-common.js'
@@ -90,6 +91,7 @@ function checkedAdapter<T>(tool: AgentTool<T>): AgentTool {
   return { ...tool, execute: (ctx, args) => tool.execute(ctx, tool.parameters.parse(args)) }
 }
 const adapters: ReadonlyMap<string, AgentTool> = new Map<string, AgentTool>([
+  checkedAdapter(taskScopeBindTool),
   checkedAdapter(webSearchTool), checkedAdapter(webReadTool),
   checkedAdapter(readFileTool), checkedAdapter(viewImageTool),
   checkedAdapter(creativeCritiqueTool), checkedAdapter(creativeRevisionDraftTool),

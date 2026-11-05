@@ -107,11 +107,17 @@ export function clarifyWritingProjection(spec: TaskSpec, prompt: string, answer:
   if (spec.scope.writingActions?.operations.some(operation => operation.resolution === 'denied')) return null
   if (spec.scope.writingActions?.operations.some(operation => operation.resolution === 'needs_input')) {
     const pending = spec.scope.writingActions.operations.filter(operation => operation.resolution === 'needs_input')
-    // A single answer cannot disambiguate two different missing arguments.
+    const parsed = parseAuthorWritingRequest(prompt)
+    // Revising and saving the same body share one missing chapter argument.
+    // A separate write/new chapter still needs its own explicit target.
+    const sameBodySave = pending.filter(operation => operation.kind === 'revise').length === 1
+      && pending.some(operation => operation.kind === 'write') && !parsed.range && !parsed.ambiguous
+      && !parsed.evidence.targets.some(target => target.range)
+      && pending.every(operation => operation.kind === 'revise' || /^(?:写入|保存|落盘)$/u.test(prompt.slice(operation.start, operation.end)))
     const emptyPlacement = !chapters.length && pending.every(operation => operation.kind === 'write')
       && eligibleEmptyWritingClarification(spec, prompt)
-    if (pending.length !== 1 && !emptyPlacement) return null
-    const missing = pending[0], parsed = parseAuthorWritingRequest(prompt)
+    if (pending.length !== 1 && !emptyPlacement && !sameBodySave) return null
+    const missing = sameBodySave ? pending.find(operation => operation.kind === 'revise')! : pending[0]
     if (parsed.reasons.some(reason => reason !== 'conflicting_targets')) return null
     const clause = parsed.evidence.clauses.find(clause => clause.start <= missing.start && missing.end <= clause.end)
     if (!clause) return null

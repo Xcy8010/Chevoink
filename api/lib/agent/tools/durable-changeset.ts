@@ -54,7 +54,7 @@ export async function executeDurableChangeSet(ctx: ToolContext, tool: AgentTool,
     ctx.signal.throwIfAborted()
     return runtimeJson({ toolResult: result }).value
   }).catch(async error => {
-    if (!(error instanceof DataAccessError) || !/^(CHANGESET_|EMPTY_CHANGESET|UNSUPPORTED_CHANGESET_|INVALID_TITLE_REPLACEMENT|AUTHOR_|SCOPE_NEEDS_INPUT|IMPORT_SCOPE_CHANGED)/.test(error.code)) throw error
+    if (!(error instanceof DataAccessError) || !/^(CHANGESET_|EMPTY_CHANGESET|UNSUPPORTED_CHANGESET_|INVALID_TITLE_REPLACEMENT|AUTHOR_|TASK_SCOPE_REQUIRED|SCOPE_NEEDS_INPUT|IMPORT_SCOPE_CHANGED)/.test(error.code)) throw error
     return recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: error.code, output: error.message, summary: '变更集未应用新改动' })
   })
   await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })

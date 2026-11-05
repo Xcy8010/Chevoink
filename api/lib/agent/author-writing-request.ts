@@ -34,7 +34,7 @@ const numberPattern = `(?:${numeric})`
 const join = '(?:、|及|与|和|至|到|[-–—−~～〜－]|\\s+)'
 const chapterPattern = `(?:第\\s*)?${numberPattern}\\s*(?:章)?(?:\\s*${join}\\s*(?:第\\s*)?${numberPattern}\\s*(?:章)?)*\\s*章`
 const numbered = new RegExp(`^(?:第\\s*)?(${numberPattern})\\s*章$`, 'u')
-const revisionWords = '修订|修正|修改|改写|重新写|重写|扩写|缩写|修复|纠正|纠错|润色|优化|调整|替换|改名|重命名|改为|改成|插入|删除|删掉|删去|精简|补充|增加|整改|补足|解决|不动|改(?!价|变|卷)'
+const revisionWords = '修订|修正|修改|改写|重新写|重写|扩写|缩写|修复|纠正|纠错|润色|优化|调整|替换(?:成|为)?|换为|换成|改名|重命名|改为|改成|插入|删除|删掉|删去|精简|补充|增加|整改|补足|解决|不动|改(?!价|变|卷)|修(?=\\s*$)'
 const preservationWords = '保持不变|保持原样|保留原样|保留|保持|不变'
 const volumeAddWords = `(?:添加|加上|加)(?=\\s*(?:第\\s*)?(?:${numberPattern})?\\s*(?:个|部)?\\s*(?:新|空)?卷)`
 const writeWords = `${volumeAddWords}|继续\\s*(?:写|创作|起草)|续写|继续(?!\\s*(?:写|创作|起草))|创作|起草|补写|补完|补齐|写完|完成|写入|落稿|新建|创建|新增|建章|保存|存入|导出|生成|发布|制定|拟定|编写|撰写|设计|构思|策划|整理|写(?!作)`
@@ -61,7 +61,7 @@ const conditionalRevisionModifier = /(?:按(?:照)?(?:需要|必要性|需)|视(
 const editorAfterRelation = /(?:当前(?:这)?(?:章|章节)|正在编辑(?:的)?(?:这章|章节|章))(?:之|以)?后|\bafter\s+(?:the\s+)?(?:current|currently edited)\s+chapter\b/giu
 // An elided object is recoverable only for an imperative/permission speech act.
 // Arbitrary prose before a terminal verb is not a command with a missing noun.
-const elidedCommandHead = /^(?:(?:请(?:你)?|帮我|替我|为我|给我|麻烦(?:你)?|现在|直接|先|再|就|只|然后|接着|继续|全部|所有|可以|允许你|(?:我)?(?:现|现在)?(?:明确)?授权(?:你)?(?:可以)?|please|then|continue|all)\s*)*$/iu
+const elidedCommandHead = /^(?:(?:请(?:你)?|帮我|替我|为我|给我|麻烦(?:你)?|现在|直接|先|再|就|只|然后|接着|继续|全部|所有|整章|(?:按(?:照)?|照)(?:此|建议|方案)|可以|允许你|(?:我)?(?:现|现在)?(?:明确)?授权(?:你)?(?:可以)?|please|then|continue|all)\s*)*$/iu
 
 /** A recommendation evaluates a proposed action. A sequenced new directive
  * closes that governor, so recommending a topic cannot veto a later write. */
@@ -181,14 +181,14 @@ function extractTargets(clause: AuthorClause): AuthorWritingTarget[] {
   add(/当前(?:这)?(?:一)?(?:章|章节)|(?:这|那|该|本)(?:一)?章|正在编辑(?:的)?章节|current chapter/giu, 'same_target', () => null)
   add(/全书|整本(?:书|小说)|所有(?:已有|现有)?章节|全部(?:已有|现有)?章节|whole book|all chapters/giu,
     'global', () => ({ kind: 'existing', start: 1 }))
-  add(new RegExp(`(?:第\\s*${numberPattern}\\s*段|首段|末段|最后一段|开头|结尾|段落|句子|对白|对话|那句话|这句话|这句|一句|几句|这段|这一段|那段|某段|该段|片段|局部|选区|paragraph\\s*\\d+|sentence|passage|opening|beginning|ending|dialogue)`, 'giu'), 'local', () => null)
+  add(new RegExp(`(?:第\\s*${numberPattern}\\s*段|首段|末段|最后一段|开头|结尾|段落|整段|句子|对白|对话|那句话|这句话|这句|一句|几句|这段|这一段|那段|某段|该段|片段|局部|选区|paragraph\\s*\\d+|sentence|passage|opening|beginning|ending|dialogue)`, 'giu'), 'local', () => null)
   add(/正文|草稿|稿件|prose|chapter\s*\d+/giu, 'prose', text => {
     const value = text.match(/chapter\s*(\d+)/iu)
     return value ? chapterRange(`第${value[1]}章`) : null
   })
   add(/小说|故事|novel|book/giu, 'book', () => null)
   add(/(?:作品|小说)?(?:简介|标签|书名|章名|卷名|标题|摘要)|(?:book|chapter|volume)\s+(?:title|summary)|tags/giu, 'metadata', () => null)
-  add(/(?:(?:章节|正文|连续性|质量|分析|研究|拆书)(?:检查|分析|评估)?)?报告|计划(?:文件)?|大纲|规划|封面|设定集|人物表|文件|report|plan|outline|cover|file/giu, 'artifact', () => null)
+  add(/(?:(?:章节|正文|连续性|质量|分析|研究|拆书)(?:检查|分析|评估)?)?报告|计划(?:文件)?|大纲|规划|封面|设定集|人物表(?!达)|文件|report|plan|outline|cover|file/giu, 'artifact', () => null)
   add(/章节顺序|卷章顺序|章节结构|卷章结构|顺序|结构|卷(?!内)|chapter order|structure|volume/giu, 'structure', () => null)
   // Longest object wins before operation binding; a title placeholder cannot
   // manufacture a volume/ordinal adjacency because its UTF-16 space remains.
@@ -514,7 +514,7 @@ function interpretAuthorWritingRequest(prompt: string, directory?: AuthorWriting
           targets[targetIndex].range = { ...targets[targetIndex].range!, anchor: 'editor' }
         }
       }
-      const replacesSource = /^(?:替换|改为|改成|replace)$/iu.test(match[0]) || /^\s*(?:为|成)/u.test(after)
+      const replacesSource = /^(?:替换(?:成|为)?|换为|换成|改为|改成|replace)$/iu.test(match[0]) || /^\s*(?:为|成)/u.test(after)
       const sourceQuotes = kind !== 'revise' ? [] : lexical.quoted.filter(quote => (quote.kind === 'quotation' || !quote.closed)
         && (protecting && precedingClause?.sentence === clause.sentence && !precedingClause.masked.trim()
           && quote.start >= precedingClause.start && quote.end <= precedingClause.end
@@ -551,7 +551,7 @@ function interpretAuthorWritingRequest(prompt: string, directory?: AuthorWriting
       let reason = polarity === 'negative' ? 'negated' : 'author_operation'
       if (kind === 'read') reason = 'reference'
       else if (factBefore.test(before) || /(?:已经|早已|曾经|已)\s*$/u.test(before) || /^\s*过/u.test(after)) reason = 'factual_statement'
-      else if (advice.test(before) && !/^(?:按(?:照)?|根据|基于|采用|使用)[^，,。；;]*(?:方案|建议|思路|方法|题材)\s*$/u.test(before.trim()) || /的(?:建议|方案|思路|方法|报告|情况)\s*$/u.test(after)
+      else if (advice.test(before) && !/^(?:按(?:照)?|照|根据|基于|采用|使用)[^，,。；;]*(?:方案|建议|思路|方法|题材)\s*$/u.test(before.trim()) || /的(?:建议|方案|思路|方法|报告|情况)\s*$/u.test(after)
         || /^(?:的)?(?:手法|技巧|方法|建议|教程|风格)/u.test(after)) reason = 'advice'
       else if ((kind === 'write' || kind === 'revise') && !conditionalRevision && !assessed.has(index)
         && nonExecutionSubject(text, match.index!, match.index! + match[0].length)) reason = 'advice'
@@ -638,7 +638,7 @@ function interpretAuthorWritingRequest(prompt: string, directory?: AuthorWriting
       targets[index].span.start === quote.start && targets[index].span.end === quote.end))) continue
     const owner = mutations.at(-1)!
     const operator = prompt.slice(owner.span.start, owner.span.end)
-    const replacement = quote.start >= owner.span.end && (/^(?:改为|改成)$/iu.test(operator)
+    const replacement = quote.start >= owner.span.end && (/^(?:改为|改成|换为|换成|替换成|替换为)$/iu.test(operator)
       || /^(?:修改|修订|改|替换|edit|revise|replace)$/iu.test(operator) && /^\s*(?:为|成|with)\s*$/iu.test(prompt.slice(owner.span.end, quote.start)))
     if (!replacement) reasons.add('unresolved_source_quote')
   }

@@ -1,5 +1,6 @@
 import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
-import { freezeWritingScope, readWritingScope, writingClarificationResolvesInput } from './writing-scope.js'
+import { freezeWritingScope, readWritingScope, writingScopeResolvesInput } from './writing-scope.js'
+import { enableAgentWritingScope } from './agent-writing-scope.js'
 import { isInternalAgentArtifact } from './artifact-visibility.js'
 import { savedRunUsageSchema } from './checkpoint.js'
 import { syncBuiltinSkillCatalog } from './skills/service.js'
@@ -564,7 +565,7 @@ export async function startLoopRunLocked(
       await syncBuiltinSkillCatalog(tx)
       const volumeCreateIntent = options.humanOrigin === 'http' && !options.goal
         ? await (await import('./volume-create-intent.js')).readVolumeCreateIntent(tx, { userId, novelId: session.novelId, sessionId: session.id, runId: created.id, prompt: input.prompt }) : undefined
-      const fresh = buildTaskSpec({ runId: created.id, novelId: session.novelId, chapterId,
+      let fresh = buildTaskSpec({ runId: created.id, novelId: session.novelId, chapterId,
         prompt: input.prompt, selection: input.selection, ...(input.selection ? { manuscriptProtocol: 1 } : {}), reviewProtocol: 1, localEditProtocol: 1, continuityEvidenceProtocol: 1,
         // A delayed first goal start retains its creation-time contract. The
         // historical v1 HTTP envelope cannot acquire today's paid phases.
@@ -573,8 +574,13 @@ export async function startLoopRunLocked(
         researchAdmission, researchNavigationAdmission: researchAdmission, networkAdmission, authorWritingProtocol: 2, novelInitializationProtocol: 1, novelInitializationTarget: manuscript.chapterCount === 0 && manuscript.wordCount === 0
           && (!manuscript.summary.trim() || !manuscript.displayTitle?.trim() && manuscript.summary === '先创建一部作品，再继续完善简介、章节和封面。')
           && manuscript.tagNames.length === 0 ? 'empty' : 'existing', volumeCreationProtocol: 1, volumeCreateIntent, creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
+      if (input.agentWritingProtocol === 1 && options.humanOrigin === 'http' && !options.goal && !session.spawnedFromRunId
+        && (input.agentProfile ?? 'orchestrator') === 'orchestrator') {
+        if (input.mode !== 'build') throw new DataAccessError(400, 'INVALID_ARGUMENTS', '正文任务解释只适用于创作模式。')
+        fresh = enableAgentWritingScope(fresh)
+      }
       let frozen = fresh
-      if (input.selection || fresh.scope.authorEffects?.manuscript) {
+      if (input.selection || fresh.scope.authorEffects?.manuscript && !fresh.scope.agentWritingProtocol) {
         // Preserve the original protected-body snapshot normally captured by
         // async initialization when freezing this fresh contract at admission.
         if (fresh.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED')) {
@@ -598,7 +604,7 @@ export async function startLoopRunLocked(
         frozen = taskSpecSchema.parse(issueWritingCoordination(frozen, input.mode, new Set(available.map(tool => tool.name)), input.prompt))
         // Scope questions retain their current admission/answer contract until
         // the target is actually bound; never mint a marked whole-chapter task.
-        initializeFreshDurable = frozen.scope.writing?.kind !== 'needs_input' && frozen.scope.localEditBoundary?.kind !== 'needs_input'
+        initializeFreshDurable = frozen.scope.agentWritingProtocol === 1 || frozen.scope.writing?.kind !== 'needs_input' && frozen.scope.localEditBoundary?.kind !== 'needs_input'
           && !isDeferredWritingRequest(input.prompt)
       }
       if (!initializeFreshDurable && options.humanOrigin === 'http' && !options.goal
@@ -1191,9 +1197,10 @@ async function continueLoopRunLocked(
   const inputMarker = savedUsage.success ? savedUsage.data.checkpoint?.authorInputRequired : undefined
   let authorInputRequired = Boolean(inputMarker)
   if (frozen.success && (inputMarker || frozen.data.scope.writing?.kind === 'needs_input' || frozen.data.scope.localEditBoundary?.kind === 'needs_input')) {
-    const effective = frozen.data.scope.writingClarificationProtocol !== undefined
+    const effective = frozen.data.scope.writingClarificationProtocol !== undefined || frozen.data.scope.writingTargetProtocol === 2
       ? await prisma.$transaction(tx => readWritingScope(tx, { userId, novelId: run.novelId, runId })) : null
-    if (inputMarker && effective && writingClarificationResolvesInput(effective, inputMarker)) authorInputRequired = false
+    if (inputMarker && effective && await prisma.$transaction(tx => writingScopeResolvesInput(tx,
+      { userId, novelId: run.novelId, runId }, effective, inputMarker))) authorInputRequired = false
     const effectiveSpec = effective ? taskSpecSchema.parse(effective.spec) : frozen.data
     if (!frozen.data.scope.authorEffects) authorInputRequired ||= effectiveSpec.scope.localEditBoundary?.kind === 'needs_input'
       || (effective?.writing ?? effectiveSpec.scope.writing)?.kind === 'needs_input'

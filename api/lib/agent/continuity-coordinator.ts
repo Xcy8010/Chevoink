@@ -3,7 +3,8 @@ import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { DataAccessError } from '../prisma.js'
 import { runtimeJson, durableChatResultSchema } from './runtime-common.js'
-import { readOriginalTaskRequest, originalTaskRunIds, originalRepairAuthority } from './original-request.js'
+import { originalTaskRunIds, effectiveOriginalRepairAuthority } from './original-request.js'
+import { readEffectiveWritingRequest as readOriginalTaskRequest } from './writing-scope.js'
 import { originalChapterReviewRequirements } from './chapter-review-requirements.js'
 import { tokenPriceSchema, type TokenPrice } from '../billing/token-price.js'
 import type { LegacyAssessmentInput } from './assessment-response-lifecycle.js'
@@ -163,7 +164,7 @@ export async function authenticateContinuityPhasePlan(db: Prisma.TransactionClie
   if (!chapter) return false
   let revisionAuthority = false
   if (plan.revisionAuthority) {
-    const authority = plan.revisionAuthority.source === 'original_repair' ? originalRepairAuthority(original, chapter.id) ? { taskId: original.taskId } : null
+    const authority = plan.revisionAuthority.source === 'original_repair' ? await effectiveOriginalRepairAuthority(db, subject, original, chapter.id) ? { taskId: original.taskId } : null
       : chapter ? await (await import('./writing-scope.js')).readNewDraftWritingAuthority(db, subject, chapter) : null
     revisionAuthority = !!authority && plan.revisionAuthority.sourceHash === runtimeJson({ source: plan.revisionAuthority.source,
       taskId: original.taskId, sourceRunId: original.sourceRunId, chapterId: plan.chapterId, authority }).hash
@@ -285,7 +286,7 @@ export async function readOriginalCycleContinuityVerification(db: Prisma.Transac
     chapterId: input.chapterId, runId: { in: runIds } }, include: { chapter: true } })
   const cycle = saved ? (await import('./review-cycle.js')).readReviewCycle(saved.preparedContext,
     { taskId: original.taskId, userId: ctx.userId, novelId: ctx.novelId, chapterId: input.chapterId }) : null
-  const source = originalRepairAuthority(original, input.chapterId) ? { taskId: original.taskId }
+  const source = await effectiveOriginalRepairAuthority(db, ctx, original, input.chapterId) ? { taskId: original.taskId }
     : saved?.chapter ? await (await import('./writing-scope.js')).readNewDraftWritingAuthority(db, ctx, saved.chapter) : null
   const revision = saved && !cycle ? (await import('./writing-scope.js')).readNewDraftRevision(saved.validation) : null
   // An incomplete required report cannot create a ready reviewCycle. The

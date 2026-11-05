@@ -3,6 +3,20 @@ import { freezeLocalEditBoundary, requestedLocalEdit, originalLocalEditBoundary 
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 
 describe('complete original local edit wording', () => {
+  it.each(['只修改第1章结尾', '优化第1章对白', '整段换为“新的合成段落。”'])(
+    'freezes a semantic chapter fence for a fresh local revision without asking the author to copy source: %s', prompt => {
+      const chapter = { id: 'c', revision: 3, content: '前段。\n中段。\n末段。' }
+      const writing = { version: 1 as const, kind: 'bounded' as const, targets: [{ chapterId: 'c', orderIndex: 1 }], titleAndBodyOnly: false, repairAuthorized: true }
+      expect(freezeLocalEditBoundary(prompt, writing, [chapter], 2)).toMatchObject({ version: 4, kind: 'semantic',
+        regions: [{ chapterId: 'c', revision: 3, start: 0, end: chapter.content.length, prefix: '', suffix: '' }] })
+      expect(freezeLocalEditBoundary(prompt, writing, [chapter], 1)?.kind).not.toBe('semantic')
+    })
+  it.each(['只修改第1章第二十段', '只修改第1章“找不到的原句”', '只修改第1章“重复句。”', '修改第1章“未闭合原句'])(
+    'does not upgrade a failed precise locator into a semantic grant: %s', prompt => {
+      const chapter = { id: 'c', revision: 3, content: '重复句。\n其他正文。\n重复句。' }
+      const writing = { version: 1 as const, kind: 'bounded' as const, targets: [{ chapterId: 'c', orderIndex: 1 }], titleAndBodyOnly: false, repairAuthorized: true }
+      expect(freezeLocalEditBoundary(prompt, writing, [chapter], 2)?.kind).toBe('needs_input')
+    })
   it.each(['检查是否需要修改第二段', '看看需不需要润色第二段', '判断修改第二段有没有必要',
     '评估是否需要重写第二段', '评估第二段有没有必要润色', 'Check whether to edit paragraph 2',
     'Assess if paragraph 2 needs polishing', 'Evaluate if we should rewrite paragraph 2'])(

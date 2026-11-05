@@ -30,6 +30,12 @@ import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js
 import { chapterWriteTool, chapterEditRangeTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import { continuityValidateTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { enableAgentWritingScope, bindAgentWritingScope } from '../../api/lib/agent/agent-writing-scope.js'
+import { withHumanAdmission } from '../../api/lib/agent/goal-activation-authority.js'
+import { agentWritingScopeInputSchema } from '../../shared/contracts/agent-writing-scope.js'
+import { collectDurableCompletionEvidence } from '../../api/lib/agent/runtime-completion-evidence.js'
+import { effectiveWritingTaskSpec, readCompletedWritingPresentation } from '../../api/lib/agent/writing-scope.js'
+import { requiresManuscriptDelivery } from '../../api/lib/agent/task-spec.js'
 
 vi.mock('node:timers/promises', async importOriginal => {
   const timers = await importOriginal<typeof import('node:timers/promises')>()
@@ -46,7 +52,7 @@ afterEach(async () => {
 const route = { provider: 'fixture', model: 'fixture', endpoint: 'https://provider.invalid/v1/chat/completions', reasoningEffort: 'high' }
 const price = { version: 'credits-v1-exact' as const, modelTier: 'speed' as const, multiplierBps: 10000 }
 
-async function fixture(work: (f: Awaited<ReturnType<typeof prepareFixture>>) => Promise<void>, spawned = false, budget = 5000, target?: 'finite' | 'selection', outputLimit = 100) {
+async function fixture(work: (f: Awaited<ReturnType<typeof prepareFixture>>) => Promise<void>, spawned = false, budget = 5000, target?: 'finite' | 'selection' | 'model', outputLimit = 100) {
   const user = await prisma.user.create({ data: { nickname: 'durable-child-fixture', passwordHash: 'test-only-unusable' } })
   try { await work(await prepareFixture(user.id, spawned, budget, target, outputLimit)) }
   finally {
@@ -61,7 +67,7 @@ async function fixture(work: (f: Awaited<ReturnType<typeof prepareFixture>>) => 
   }
 }
 
-async function prepareFixture(userId: string, spawned: boolean, tokenBudget: number, target?: 'finite' | 'selection', outputLimit = 100) {
+async function prepareFixture(userId: string, spawned: boolean, tokenBudget: number, target?: 'finite' | 'selection' | 'model', outputLimit = 100) {
   const novel = await prisma.novel.create({ data: { authorId: userId, title: '子任务测试', slug: randomUUID(), summary: '' } })
   const session = await prisma.agentSession.create({ data: { userId, novelId: novel.id, title: '父任务', toolPolicy: { network: 'allow', contentWrite: 'allow' } } })
   const runId = randomUUID()
@@ -72,15 +78,20 @@ async function prepareFixture(userId: string, spawned: boolean, tokenBudget: num
     return Promise.all([1, 2].map(order => prisma.chapter.create({ data: { authorId: userId, novelId: novel.id, volumeId: volume.id,
       title: `第${order}章`, content: '前缀选区后缀', orderIndex: order, orderInVolume: order, wordCount: 6 } })))
   })() : []
-  const prompt = target === 'finite' ? '修改本章并汇报' : '只读审阅并汇报'
-  const spec = { ...buildTaskSpec({ runId, novelId: novel.id, ...(target ? { chapterId: chapters[0].id } : {}), prompt }), intent: target === 'finite' ? 'revise' as const : 'review' as const, postconditions: [],
+  const prompt = target === 'model' ? '去处理第二章的对白并保存。' : target === 'finite' ? '修改本章并汇报' : '只读审阅并汇报'
+  let spec = { ...buildTaskSpec({ runId, novelId: novel.id, ...(target ? { chapterId: chapters[0].id } : {}), prompt }), intent: target === 'finite' ? 'revise' as const : 'review' as const, postconditions: [],
     ...(target ? { scope: { novelId: novel.id, chapterIds: [chapters[0].id], ...(target === 'selection' ? { selection: { chapterId: chapters[0].id, text: '选区', start: 2, end: 4 } } : {}) } } : {}),
     expectedOutputs: [{ kind: 'validation_report' as const, required: true, description: '报告' }] }
+  if (target === 'model') spec = enableAgentWritingScope(spec) as typeof spec
   await prisma.agentRun.create({ data: { id: runId, userId, novelId: novel.id, sessionId: session.id, mode: 'review', status: 'queued',
+    ...(target === 'model' ? { chapterId: chapters[0].id, startRequest: withHumanAdmission({ novelId: novel.id, sessionId: session.id, chapterId: chapters[0].id, prompt, mode: 'build' }) } : {}),
     engine: 'loop', action: 'workspaceAgent', agentType: 'writingOrchestrator', taskSpec: JSON.parse(JSON.stringify(spec)) } })
   const message = await prisma.agentMessage.create({ data: { runId, sessionId: session.id, role: 'user', parts: [{ type: 'text', text: prompt }] } })
   const root = await initializeDurableTask({ userId, runId, sourceMessageId: message.id, tokenBudget })
   const lease = await acquireRunLease({ userId, runId, ownerId: 'parent-worker', claimId: randomUUID() })
+  if (target === 'model') await prisma.$transaction(tx => bindAgentWritingScope(tx, { userId, novelId: novel.id, sessionId: session.id, runId, chapterId: chapters[0].id,
+    mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', callId: 'bind-parent', emit: () => {}, signal: new AbortController().signal },
+  agentWritingScopeInputSchema.parse({ intent: 'revise', targets: [{ chapterId: chapters[1].id }], requiredChecks: [] })))
   const tool = spawned ? taskSpawnTool : subAgentRunTool
   const args = spawned ? { tasks: [{ title: '窗口一', brief: '读取作品的现有设定并给出完整的只读审阅报告。' }, { title: '窗口二', brief: '读取作品的现有设定并给出第二份只读审阅报告。' }], mode: 'review', inherit: 'brief' }
     : { subagentId: definition.id, task: '报告' }
@@ -123,6 +134,46 @@ async function knownProvider(f: Awaited<ReturnType<typeof prepareFixture>>, leas
 }
 
 describe.runIf(available)('canonical durable child grants', () => {
+  it('lets an inline review report finish while the bound parent still owes its manuscript delivery', () => fixture(async f => {
+    const grant = await admitChildExecution(f.lease, { ...f.input, spec: { ...f.input.spec, intent: 'review', goals: ['报告'],
+      expectedOutputs: [{ kind: 'validation_report', required: true, description: '报告' }], postconditions: [] } })
+    const child = await acquireRunLease({ userId: f.userId, runId: grant.childRunId, ownerId: 'review-child', claimId: randomUUID() })
+    const state = await loadExecutionState(f.userId, child.runId)
+    const effective = await prisma.$transaction(tx => effectiveWritingTaskSpec(tx, { userId: f.userId, novelId: f.novelId, runId: child.runId },
+      verifyChildGrant(grant).taskSpec))
+    expect(effective.intent).toBe('review')
+    expect(requiresManuscriptDelivery(effective)).toBe(false)
+    const frame = await saveExecutionState(child, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash,
+      snapshot: { ...state.frame.state, messages: [...state.frame.state.messages, { role: 'assistant', content: '已读取原请求，审阅意见作为报告交给主Agent。' }] } })
+    const evidence = await collectDurableCompletionEvidence(child, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash })
+    expect(evidence.snapshot).toMatchObject({ blockers: [], obligations: { expectedOutputs: [{ kind: 'validation_report' }] } })
+    expect(await prisma.$transaction(tx => readCompletedWritingPresentation(tx, { userId: f.userId, novelId: f.novelId, runId: f.runId }))).toBeNull()
+    expect(await prisma.agentProviderAttempt.count({ where: { runId: child.runId } })).toBe(0)
+  }, false, 5000, 'model'))
+  it.each([false, true])('uses the main Agent parent binding instead of its editor chapter context, targetAllowed=%s', allowed => fixture(async f => {
+    const grant = await admitChildExecution(f.lease, { ...f.input, roleTools: '*' })
+    const before = grant.snapshotHash
+    const child = await acquireRunLease({ userId: f.userId, runId: grant.childRunId, ownerId: 'bound-child', claimId: randomUUID() })
+    const chapterId = f.chapters[allowed ? 1 : 0].id
+    let state = await loadExecutionState(f.userId, child.runId)
+    await saveExecutionState(child, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash,
+      snapshot: { ...state.frame.state, messages: [...state.frame.state.messages, { role: 'assistant', content: null,
+        toolCalls: [{ id: 'read-bound', name: 'chapter_read', arguments: JSON.stringify({ chapterId }) }] }] } })
+    await executeDurableToolStep(child, new AbortController().signal)
+    state = await loadExecutionState(f.userId, child.runId)
+    const args = chapterWriteTool.parameters.parse({ chapterId, content: '只核验准入，不执行正文写入' })
+    const frame = await saveExecutionState(child, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash,
+      snapshot: { ...state.frame.state, messages: [...state.frame.state.messages, { role: 'assistant', content: null,
+        toolCalls: [{ id: 'write-bound', name: 'chapter_write', arguments: JSON.stringify(args) }] }] } })
+    const preparing = prepareToolCursorOperation(child, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash }, {
+      key: `exec:${frame.state.nextOperationSequence}`, action: 'chapter_write', callId: 'write-bound', targetId: chapterId,
+      effectDomain: 'chapter', effectiveArgs: args, normalize: raw => chapterWriteTool.parameters.parse(raw), operationInput: { callId: 'write-bound', args } })
+    if (allowed) expect((await preparing).operation.status).toBe('prepared')
+    else await expect(preparing).rejects.toMatchObject({ code: 'RUNTIME_CHILD_TARGET_NOT_AUTHORIZED' })
+    expect((await prisma.agentChildExecutionGrant.findUniqueOrThrow({ where: { id: grant.id } })).snapshotHash).toBe(before)
+    expect(await prisma.chapter.findMany({ where: { novelId: f.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(f.chapters)
+    expect(await prisma.agentProviderAttempt.count({ where: { runId: child.runId } })).toBe(0)
+  }, false, 5000, 'model'))
   it.each(['current', 'legacy-empty', 'legacy-other'] as const)('atomically reduces and replays %s frames without HTTP or debit', async projection => fixture(async f => {
     const fetcher = vi.fn(() => { throw new Error('receipt reduction cannot dispatch HTTP') })
     vi.stubGlobal('fetch', fetcher)

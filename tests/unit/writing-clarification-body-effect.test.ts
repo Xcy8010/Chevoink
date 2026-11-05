@@ -41,7 +41,7 @@ describe('authenticated clarification at ordinary body-effect admission', () => 
   }
 
   it.each(['chapter', 'quote'] as const)('consumes a valid %s answer only for the body effect while preserving the frozen request', async scenario => {
-    const f = await fixture(scenario === 'chapter' ? '修改那一章。' : '只修改第5章这句话。')
+    const f = await fixture(scenario === 'chapter' ? '修改那一章。' : '只修改第5章第9段。')
     const originalHash = runtimeJson(f.admission).hash
     const start = f.chapter.content.indexOf('门开了。'), end = start + '门开了。'.length
     const editRanges = [{ start, end, newText: '门悄然开了。' }]
@@ -62,5 +62,22 @@ describe('authenticated clarification at ordinary body-effect admission', () => 
     }
     f.run.manuscriptRevision++
     await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, options)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+  })
+  it('permits self-located exact semantic patches while rejecting whole-body, split-body and protected-text edits', async () => {
+    const f = await fixture('只修改第5章结尾。“窗边还留着一盏灯。”保持不变。')
+    expect(f.frozen.scope.localEditBoundary).toMatchObject({ version: 4, kind: 'semantic' })
+    const before = f.chapter.content, start = before.indexOf('走廊无人。')
+    const options = { mutation: 'range' as const, after: before.slice(0, start) + '走廊灯亮了。', editRanges: [{ start, end: before.length, newText: '走廊灯亮了。' }] }
+    await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, options)).resolves.toBeUndefined()
+    for (const mutation of ['replace', 'append'] as const) {
+      await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { ...options, mutation })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    }
+    await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'range', after: '全改。',
+      editRanges: [{ start: 0, end: before.length, newText: '全改。' }] })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    const middle = Math.floor(before.length / 2)
+    await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'range', after: '全改。',
+      editRanges: [{ start: 0, end: middle, newText: '全' }, { start: middle, end: before.length, newText: '改。' }] })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'range', after: '床' + before.slice(1),
+      editRanges: [{ start: 0, end: 1, newText: '床' }] })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
   })
 })

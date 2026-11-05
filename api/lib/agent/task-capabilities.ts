@@ -34,6 +34,8 @@ export function taskToolRelevance(name: string): 'common' | 'writing' | 'researc
  * Unknown, mixed and extension requests retain the full effective catalog. */
 export function freezeTaskCapabilities(spec: TaskSpec, input: Pick<StartAgentLoopRunRequest,
   'prompt' | 'attachments' | 'pinnedSkillIds' | 'pinnedSubagentId' | 'selection'>, registeredNames: readonly string[]): TaskSpec {
+  if (spec.scope.agentWritingProtocol === 1) return { ...spec, scope: { ...spec.scope, capabilityCatalog: { version: 1,
+    requestHash: createHash('sha256').update(input.prompt).digest('hex'), kind: 'full', names: [...new Set([...registeredNames, 'execution_context_read'])] } } }
   if (spec.scope.capabilityCatalog || !spec.scope.authorEffects) return spec
   const requestHash = createHash('sha256').update(input.prompt).digest('hex')
   if (requestHash !== spec.scope.authorEffects.requestHash) throw new Error('Original request does not match the task catalog')

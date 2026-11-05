@@ -13,7 +13,7 @@ const groups: Array<[AgentAuthorPhase, string, readonly string[]]> = [
   ['read', '查看我的作品', ['account_novels']],
   ['read', '查看额度', ['account_credits', 'account_credit_history']],
   ['read', '查看可用模型', ['model_list']],
-  ['plan', '准备章节', ['story_compiler_prepare', 'scene_task_build']],
+  ['plan', '准备章节', ['story_compiler_prepare', 'scene_task_build', 'task_scope_bind']],
   ['plan', '规划创作', ['todo_write', 'first_three_prototype_build']],
   ['plan', '整理创作资料', ['research_dossier_build', 'research_report_save']],
   ['write', '新建章节', ['chapter_create']],

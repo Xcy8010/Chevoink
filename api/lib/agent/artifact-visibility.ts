@@ -5,6 +5,7 @@ export function isInternalAgentArtifact(record: { artifactType: string; metadata
     || Array.isArray(record.metadata)) return false
   const meta = record.metadata as Record<string, unknown>
   if (meta.version !== 1) return false
+  if (meta.agentWritingScopeBinding === true) return true
   return meta.kind === 'terminalCandidatePatch' || [
     'effectiveContinuityReport', 'continuityPhaseClaim', 'continuitySourceRecovery', 'continuitySupplementQuestion',
     'continuitySupplementAnswer', 'continuitySupplementUsage', 'continuitySupplementDispatch', 'continuitySupplementResponse',

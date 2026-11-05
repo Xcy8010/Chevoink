@@ -7,6 +7,7 @@ import { ownedAuthorAdmission } from './writing-request-context.js'
 import { assertFrozenWritingContract } from './writing-contract.js'
 import { readHumanAdmission } from './goal-activation-authority.js'
 import { originalTaskRunIds, readOriginalTaskRequest } from './original-request.js'
+import { readWritingClarification } from './writing-clarification.js'
 
 type Target = NonNullable<TaskSpec['scope']['writing']>['targets'][number]
 type Chapter = { id: string; revision: number; orderIndex: number; orderInVolume: number; volumeId: string; volume: { orderIndex: number } }
@@ -33,24 +34,28 @@ export function resolveActionTargets(range: RequestedWritingRange | null, chapte
 }
 
 async function recentHumanObject(tx: Prisma.TransactionClient, subject: { userId: string; novelId: string; runId: string },
-  chapters: Chapter[], kind: 'write' | 'revise', prompt: string, volumes: Array<{ id: string; orderIndex: number }>, collective: boolean): Promise<{ targets: Target[]; source: Source; boundary?: Boundary } | null> {
+  chapters: Chapter[], kind: 'write' | 'revise', prompt: string, volumes: Array<{ id: string; orderIndex: number }>, collective: boolean): Promise<{ targets: Target[]; source: Source; boundary?: Boundary } | null | undefined> {
   const current = await tx.agentRun.findFirstOrThrow({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId } })
   if (!readHumanAdmission(current.startRequest)) return null
   const currentHuman = await ownedAuthorAdmission(tx, subject, current.id, current.sessionId)
   if (!currentHuman || currentHuman.creativePrompt !== prompt) return null
   const candidates = await tx.agentRun.findMany({ where: { userId: subject.userId, novelId: subject.novelId, sessionId: current.sessionId,
-    id: { not: current.id }, createdAt: { lte: current.createdAt }, incomingChildGrant: null },
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 16, select: { id: true } })
+    id: { not: current.id }, createdAt: { lte: current.createdAt } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 16, select: { id: true, incomingChildGrant: { select: { id: true } } } })
   for (const candidate of candidates) {
+    if (candidate.incomingChildGrant) return null
     const human = await ownedAuthorAdmission(tx, subject, candidate.id, current.sessionId)
     if (!human || human.run.createdAt > current.createdAt) continue
     const parsed = taskSpecSchema.safeParse(human.run.taskSpec), requestHash = createHash('sha256').update(human.creativePrompt).digest('hex')
     if (!parsed.success || parsed.data.scope.novelId !== subject.novelId || parsed.data.scope.authorEffects?.requestHash !== requestHash) return null
     // Invalid historical evidence is not an invitation to search further back.
     try { assertFrozenWritingContract(parsed.data) } catch { return null }
-    const spec = parsed.data, writing = spec.scope.writing
+    let spec = parsed.data
     const original = await readOriginalTaskRequest(tx, { ...subject, runId: human.run.id })
     if (original.parentRunId || original.sourceRunId !== human.run.id || original.taskId !== spec.id || original.prompt !== human.creativePrompt) return null
+    const clarification = await readWritingClarification(tx, { ...subject, runId: human.run.id }, original, human.run, spec)
+    if (clarification) spec = clarification.spec
+    const writing = spec.scope.writing
     const runIds = await originalTaskRunIds(tx, { ...subject, runId: human.run.id }, original)
     const source: Source = { runId: human.run.id, messageId: human.message.id, requestHash,
       ...(spec.scope.writingInterpretation ? { scopeHash: spec.scope.writingInterpretation.scopeHash } : {}) }
@@ -59,7 +64,7 @@ async function recentHumanObject(tx: Prisma.TransactionClient, subject: { userId
     // to the current request. Quoted/reference/negative predicates stay inert.
     if (!targets.length) {
       const named = parseAuthorWritingRequest(human.creativePrompt)
-      if (named.ambiguous || named.evidence.quoted.length || named.evidence.operations.some(operation =>
+      if (named.ambiguous || named.evidence.quoted.length || /换个话题|聊聊别的|只读|不要.{0,8}(?:改|写)|不修改/u.test(human.creativePrompt) || named.evidence.operations.some(operation =>
         !['read', 'review'].includes(operation.kind) || operation.polarity !== 'affirmative'
         || !['reference', 'author_operation'].includes(operation.reason))) return null
       const ranges = named.evidence.targets.filter(target => target.range && !target.contextual)
@@ -73,7 +78,8 @@ async function recentHumanObject(tx: Prisma.TransactionClient, subject: { userId
         if (reports.length > 1000 || !ids.size || ids.size > 1 && !collective) return null
         targets = chapters.filter(chapter => ids.has(chapter.id)).map(chapter => ({ chapterId: chapter.id, orderIndex: chapter.orderIndex }))
         source.resultIds = currentReports.map(report => report.id)
-      } else return null
+      } else if (!named.evidence.targets.length && !named.hasAction && !spec.scope.authorEffects?.structure && !spec.scope.authorEffects?.artifact) continue
+      else return null
     }
     if (!targets.length) return null
     const bindings = object(human.run.writingBindings)
@@ -105,10 +111,10 @@ async function recentHumanObject(tx: Prisma.TransactionClient, subject: { userId
     // source-specific quote/review policies require a new precise human answer.
     const boundary: Boundary | undefined = selection ? { version: 1, kind: 'bounded', regions: [{ chapterId: selection.chapterId,
       revision: selection.revision, contentHash: selection.contentHash, start: selection.start, end: selection.end, prefix: selection.prefix, suffix: selection.suffix }] }
-      : local?.version === 1 ? local : local ? { version: 1, kind: 'needs_input', regions: [] } : undefined
+      : local?.version === 1 || local?.version === 4 ? local : local ? { version: 1, kind: 'needs_input', regions: [] } : undefined
     return { targets, source, ...(boundary ? { boundary } : {}) }
   }
-  return null
+  return undefined
 }
 
 export async function freezeWritingActions(tx: Prisma.TransactionClient, subject: { userId: string; novelId: string; runId: string },
@@ -145,14 +151,22 @@ export async function freezeWritingActions(tx: Prisma.TransactionClient, subject
       if (domains.length === 1) targets = domains[0].map(target => ({ ...target }))
     }
     if (!invalid && !ranges.length && !targets.length && editorId && operation.targetIndices.some(index => request.evidence.targets[index].kind === 'local'
+      || request.evidence.targets[index].kind === 'prose'
       || request.evidence.targets[index].kind === 'same_target' && explicitEditor)) {
       const chapter = chapters.find(item => item.id === editorId)
       if (chapter) targets = [{ orderIndex: chapter.orderIndex, chapterId: chapter.id }]
     }
+    let historicalBlocked = false
     if (!invalid && chapters.length && !ranges.length && !targets.length && !request.reasons.length) {
       const collective = /全部|所有|\ball\b/iu.test(clause?.masked ?? '')
       const historical = await recentHumanObject(tx, subject, chapters, kind, prompt, volumes, collective)
       if (historical) { targets = historical.targets; source = historical.source; boundary = historical.boundary }
+      else historicalBlocked = historical === null
+    }
+    if (!invalid && !historicalBlocked && !ranges.length && !targets.length && editorId && !request.reasons.length
+      && /整章|全部|(?:按(?:照)?|照)(?:此|建议|方案)/u.test(clause?.masked ?? '')) {
+      const chapter = chapters.find(item => item.id === editorId)
+      if (chapter) targets = [{ orderIndex: chapter.orderIndex, chapterId: chapter.id }]
     }
     if (kind === 'revise' && targets.some(target => target.chapterId === null && !result.some(action => action.kind === 'write'
       && action.resolution === 'bound' && action.targets.some(item => item.chapterId === null && item.orderIndex === target.orderIndex)))) targets = []

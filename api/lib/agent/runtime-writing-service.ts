@@ -7,7 +7,7 @@ import { argumentNormalizationSchema, readAdmittedToolOperation, readToolOperati
 import { readExecutionStateInTransaction } from './runtime-state.js'
 import { readObservedBaseline } from './runtime-observed-baseline.js'
 import { compilerObservationSchema } from './runtime-compiler-observation.js'
-import { readOriginalTaskRequest } from './original-request.js'
+import { readEffectiveWritingRequest as readOriginalTaskRequest } from './writing-scope.js'
 import { originalTaskRunIds } from './original-request.js'
 import { originalChapterReviewRequirements } from './chapter-review-requirements.js'
 import { assertWritingTarget, readWritingScope } from './writing-scope.js'

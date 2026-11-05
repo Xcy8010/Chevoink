@@ -260,7 +260,7 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     if (configuration && (!['agent_configure', 'model_assign'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '配置能力只能更新当前任务的执行选项。')
     const read = input.effectDomain === 'read' || configuration
     const metadata = input.effectDomain === 'metadata'
-    if (metadata && (!['novel_create', 'novel_publish', 'novel_archive', 'cover_generate', 'cover_apply', 'research_dossier_build', 'session_rename', 'novel_rename', 'novel_update_meta', 'cover_prompt_set', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '作品设置能力不能用于其他动作。')
+    if (metadata && (!['task_scope_bind', 'novel_create', 'novel_publish', 'novel_archive', 'cover_generate', 'cover_apply', 'research_dossier_build', 'session_rename', 'novel_rename', 'novel_update_meta', 'cover_prompt_set', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '作品设置能力不能用于其他动作。')
     const memory = input.effectDomain === 'memory'
     if (memory && (!['memory_save', 'memory_event_save', 'memory_relation_save'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '记忆能力仅允许原任务保存记忆。')
     const task = input.effectDomain === 'task' && ['todo_write', ...TASK_ARTIFACT_ACTIONS].includes(input.action) && input.targetId === token.taskRootId
@@ -302,7 +302,19 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
       // ranges, replace a chapter, rename it or indirectly auto-repair outside
       // the selection. Preserve context and return a report for the parent.
       if (parentSpec.scope.selection && tool && !tool.readOnly) return runtimeError('RUNTIME_CHILD_SELECTION_READ_ONLY', '选区子任务只能读取并报告，不能扩大到整章或猜测新的选区范围。')
-      const finite = parentSpec.scope.chapterIds?.length && !parentSpec.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED')
+      // New protocol chapterIds are editor context, not the model's locked
+      // target. Domain writes still read the authenticated parent binding.
+      if (parentSpec.scope.agentWritingProtocol === 1 && tool && !tool.readOnly
+        && (input.effectDomain === 'chapter' || input.effectDomain === 'compiler')) {
+        const scope = await (await import('./writing-scope.js')).readWritingScope(tx,
+          { userId: token.userId, novelId: parentRoot.novelId, runId: token.runId })
+        if (!taskSpecSchema.parse(scope.spec).scope.agentWritingBinding) return runtimeError('TASK_SCOPE_REQUIRED', '父任务须先由主Agent确定正文目标；子任务不能自行分配权限。')
+        const args = normalized as Record<string, unknown>
+        const id = typeof args.chapterId === 'string' ? args.chapterId : input.effectDomain === 'chapter' ? input.targetId : null
+        if (id && !scope.writing?.targets.some(target => (target.chapterId ?? scope.bindings?.targets.find(binding => binding.orderIndex === target.orderIndex)?.chapterId) === id))
+          return runtimeError('RUNTIME_CHILD_TARGET_NOT_AUTHORIZED', '子任务目标不在主Agent已锁定的正文范围内。')
+      }
+      const finite = !parentSpec.scope.agentWritingProtocol && parentSpec.scope.chapterIds?.length && !parentSpec.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED')
       if (finite && tool && !tool.readOnly) {
         const effective = normalized as Record<string, unknown>
         const ids = [typeof effective.chapterId === 'string' ? effective.chapterId : null,
