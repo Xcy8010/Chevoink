@@ -42,7 +42,7 @@ export function restrictToolsToTask(tools: AgentTool[], task: TaskSpec, mode?: A
   }
   if (task.scope.authorEffects) tools = tools.filter(tool =>
     (task.scope.agentWritingProtocol === 1 || task.scope.authorEffects!.manuscript || !manuscriptEffects.has(tool.name))
-    && (task.scope.authorEffects!.structure || tool.name === 'volume_create' && (task.scope.writing?.tailVolume?.creationProtocol === 2 || Boolean(task.scope.volumeCreateIntent)) || !structureEffects.has(tool.name)))
+    && (task.scope.authorEffects!.structure || tool.name === 'volume_create' && (task.scope.agentWritingProtocol === 1 || task.scope.writing?.tailVolume?.creationProtocol === 2 || Boolean(task.scope.volumeCreateIntent)) || !structureEffects.has(tool.name)))
   if (task.researchNavigation?.version === 1 && task.intent === 'research_analysis') tools = tools.map(tool => tool.researchNavigation
     ? { ...tool, ...tool.researchNavigation } : tool)
   if (task.networkAccess === 'denied') tools = tools.filter(tool => tool.name !== 'web_search' && tool.name !== 'web_read')

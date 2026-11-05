@@ -85,8 +85,7 @@ describe.runIf(available)('main Agent scope through the durable saved cursor', (
     await saveExecutionState(lease, { expectedRevision: candidate.revision, expectedHash: candidate.snapshotHash,
       snapshot: { ...candidate.state, messages: [...candidate.state.messages, { role: 'assistant', content: null, toolCalls: [
         { id: 'bridge', name: chapterBridgeGetTool.name, arguments: '{}' },
-        { id: 'commit', name: chapterBridgeCommitTool.name, arguments: JSON.stringify({ chapterSummary: '已保存自然对白', exitState: {},
-          lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '对话', endingStructure: '说清请求' }) },
+        { id: 'commit', name: chapterBridgeCommitTool.name, arguments: JSON.stringify({ chapterSummary: '已保存自然对白' }) },
       ] }] } })
     expect(await executeDurableToolStep(lease, signal)).toMatchObject({ kind: 'tool' })
     expect(await executeDurableToolStep(lease, signal)).toMatchObject({ kind: 'tool', result: { summary: '章节已提交' } })

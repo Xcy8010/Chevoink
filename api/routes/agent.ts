@@ -906,6 +906,7 @@ router.post('/runs', async (req: Request, res: Response): Promise<void> => {
       mode: 'build',
       prompt: body.prompt.trim(),
       selection: body.selection ?? null,
+      ...(body.agentWritingProtocol ? { agentWritingProtocol: body.agentWritingProtocol } : {}),
       attachments: body.attachments ?? [],
       creativeFreedom: body.creativeFreedom ?? 'balanced',
       qualityMode: body.qualityMode ?? 'premium',

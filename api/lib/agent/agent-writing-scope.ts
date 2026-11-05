@@ -94,10 +94,17 @@ export async function bindAgentWritingScope(tx: Prisma.TransactionClient, ctx: T
     }
   }
   const requestHash = createHash('sha256').update(original.prompt!).digest('hex')
+  const last = chapters.at(-1)
+  const tailVolume = input.intent === 'write' && input.allowNewTailVolume && targets.length === 1 && targets[0].chapterId === null
+    && last && targets[0].orderIndex === last.orderIndex + 1 && !spec.scope.selection && !spec.scope.volumeIds?.length
+    && !spec.authorization && !ctx.protectedChapterIds?.size
+    ? { version: 1 as const, ...(spec.scope.volumeCreationProtocol === 1 ? { creationProtocol: 2 as const } : {}),
+      targetOrderIndex: targets[0].orderIndex, previousChapterId: last.id, previousRevision: last.revision } : undefined
   const projection = JSON.parse(JSON.stringify(taskSpecSchema.parse({ ...spec, intent: input.intent, writingPacing: input.intent === 'review' ? undefined : 'explicit_writing',
     scope: { ...spec.scope, authorEffects: { version: 1, requestHash, manuscript: input.intent !== 'review',
       structure: spec.scope.authorEffects?.structure ?? false, artifact: spec.scope.authorEffects?.artifact ?? false },
-      writing: { version: 1, kind: 'bounded', targets, repairAuthorized: input.intent === 'revise', titleAndBodyOnly: false },
+      writing: { version: 1, kind: 'bounded', targets, repairAuthorized: input.intent === 'revise', titleAndBodyOnly: false,
+        ...(tailVolume ? { tailVolume } : {}) },
       ...(regions.length ? { localEditBoundary: { version: 4, kind: 'semantic', regions } } : {}),
     } }))) as TaskSpec
   const payload = { version: 1 as const, agentWritingScopeBinding: true as const, taskId: original.taskId, userId: ctx.userId, novelId: ctx.novelId,

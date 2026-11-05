@@ -86,3 +86,11 @@ it('keeps old protocols and tampered receipts outside model binding', async () =
   Object.assign(f.artifacts[0].metadata as object, { taskId: 'different-task' })
   await expect(readAgentWritingScope(f.tx, f.ctx, f.original, f.spec)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
 })
+
+it.each([true, false])('preserves next-chapter volume handling only when the main Agent admits it, allow=%s', async allowNewTailVolume => {
+  const f = fixture('接上后面的剧情，写好下一章。')
+  await bindAgentWritingScope(f.tx, f.ctx, agentWritingScopeInputSchema.parse({ intent: 'write', targets: [{ orderIndex: 2 }], allowNewTailVolume }))
+  const bound = await readAgentWritingScope(f.tx, f.ctx, f.original, f.spec)
+  expect(Boolean(bound?.spec.scope.writing?.tailVolume)).toBe(allowNewTailVolume)
+  if (allowNewTailVolume) expect(bound?.spec.scope.writing?.tailVolume).toMatchObject({ targetOrderIndex: 2, previousChapterId: 'chapter', previousRevision: 4 })
+})

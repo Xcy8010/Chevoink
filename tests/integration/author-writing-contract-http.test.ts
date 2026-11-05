@@ -36,7 +36,7 @@ import { terminalEvidenceContext, terminalQuoteAddressVersion } from '../../api/
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
-import { chapterSplitTool, volumeUpdateTool } from '../../api/lib/agent/tools/structure-tools.js'
+import { chapterSplitTool, volumeUpdateTool, volumeCreateTool } from '../../api/lib/agent/tools/structure-tools.js'
 import { novelCreateTool, novelUpdateMetaTool } from '../../api/lib/agent/tools/novel-tools.js'
 import { ALL_NOVEL_TAGS } from '../../shared/contracts/novel-tags.js'
 import { qualityAnalyzeTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
@@ -102,6 +102,28 @@ const prepare = (ctx: ToolContext) => storyCompilerPrepareTool.execute(ctx, { ta
   intentSummary: '只对第四个已存合成章作作者指出的局部修订', volumeDecision: { kind: 'continue', reason: '原卷原章' } })
 
 describe.skipIf(!available)('fresh independent reads and effect-scoped writes over HTTP and PostgreSQL', () => {
+  it.each([false, true])('keeps new draft and volume handling after model interpretation, newVolume=%s', newVolume => fixture('接上后面的剧情，写好下一章。', async (ctx, before) => {
+    await taskScopeBindTool.execute(ctx, taskScopeBindTool.parameters.parse({ intent: 'write', targets: [{ orderIndex: 5 }],
+      allowNewTailVolume: newVolume, requiredChecks: [] }))
+    const boundary = { previousChapterId: before[3].id, previousRevision: before[3].revision, quote: before[3].content,
+      completedObjective: '当前长廊情节收束', nextConflict: '进入新的场所' }
+    const proposal = { title: '后续卷', summary: '承接已保存的前章，推进新困局。', boundary }
+    expect((await storyCompilerPrepareTool.execute({ ...ctx, callId: 'prepare-next' }, { targetOrderIndex: 5,
+      intentSummary: '只写下一章，保留全部已有正文', volumeDecision: newVolume ? { kind: 'new_volume', reason: '前章已收束原目标', newVolume: proposal }
+        : { kind: 'continue', reason: '本章继续当前卷' } })).outcome).not.toBe('failed')
+    let volumeId = before[3].volumeId
+    if (newVolume) {
+      expect((await volumeCreateTool.execute({ ...ctx, callId: 'new-tail-volume' }, { ...proposal, targetOrderIndex: 5 })).outcome).not.toBe('failed')
+      volumeId = (await prisma.volume.findFirstOrThrow({ where: { novelId: ctx.novelId, title: proposal.title } })).id
+    }
+    expect((await chapterCreateTool.execute({ ...ctx, callId: 'create-next' }, { title: '后续章', volumeId,
+      positionInVolume: newVolume ? 1 : 5 })).outcome).not.toBe('failed')
+    const chapter = await prisma.chapter.findFirstOrThrow({ where: { novelId: ctx.novelId, orderIndex: 5 } })
+    expect((await chapterWriteTool.execute({ ...ctx, callId: 'write-next' }, { chapterId: chapter.id, content: '她走出长廊，来到下一处门口。' })).outcome).not.toBe('failed')
+    expect(await prisma.chapter.findMany({ where: { id: { in: before.map(item => item.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+    await expect(chapterCreateTool.execute({ ...ctx, callId: 'deny-sixth' }, { title: '不获授权的再下一章', position: 6 })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+  }, false, body, { singleVolume: true, editor: 'first', agentWriting: true }))
+
   it('uses the main Agent interpretation for an ordinary editor request through prepare and actual body edit', () => fixture('这一页读着像播报，把说话的劲儿调自然一点，落到稿子里。', async (ctx, before) => {
     const chapterId = before[0].id
     const original = await prisma.$transaction(tx => readOriginalTaskRequest(tx, ctx)), originalHash = runtimeJson(original).hash
@@ -139,7 +161,7 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
     const fresh = buildTaskSpec({ runId, novelId: ctx.novelId, chapterId, prompt, authorWritingProtocol: 2, localEditProtocol: 1, reviewProtocol: 1 })
     await prisma.agentRun.create({ data: { id: runId, userId: ctx.userId, novelId: ctx.novelId, sessionId: ctx.sessionId, chapterId,
       mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', runtimeProtocolVersion: 0,
-      status: 'paused', taskSpec: runtimeJson(fresh).value, startRequest: runtimeJson(startRequest).value } })
+      status: 'paused', taskSpec: runtimeJson(JSON.parse(JSON.stringify(fresh))).value, startRequest: runtimeJson(startRequest).value } })
     await prisma.agentMessage.create({ data: { runId, sessionId: ctx.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
     const subject = { ...ctx, runId, chapterId }
     const spec = await prisma.$transaction(tx => freezeWritingScope(tx, subject, fresh, prompt, 2))
@@ -147,7 +169,7 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
     for (const operation of spec.scope.writingActions!.operations) { operation.targets = []; operation.resolution = 'needs_input' }
     spec.scope.writingInterpretation!.reasons = ['TARGET_UNRESOLVED']
     spec.scope.writingInterpretation!.scopeHash = frozenWritingScopeHash(spec.scope)
-    const frozen = runtimeJson(taskSpecSchema.parse(spec)), marker = { version: 1 as const, kind: 'writing_scope' as const, callId: 'old-scope-question' }
+    const frozen = runtimeJson(JSON.parse(JSON.stringify(taskSpecSchema.parse(spec)))), marker = { version: 1 as const, kind: 'writing_scope' as const, callId: 'old-scope-question' }
     const checkpoint = runCheckpointSchema.parse({ version: 2, controlPolicy: 'until_completion', origin: 'system_default', activeExecutionMs: 0,
       runStartedAt: Date.now(), resumeCount: 0, compactionCount: 0, maxTurns: 100, tokenBudget: 100000,
       writeProgress: 0, writeBaseline: 0, readProgress: 0, readBaseline: 0, progressSignatures: [], authorInputRequired: marker })

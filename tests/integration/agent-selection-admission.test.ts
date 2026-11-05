@@ -365,7 +365,8 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
       expect(spec.scope.localEditProtocol).toBe(1)
       expect(spec.scope.selection).toBeUndefined()
       expect(spec.scope.localEditBoundary).toMatchObject(prompt.startsWith('将') ? { kind: 'bounded', regions: [{ chapterId: f.chapterId,
-        revision: 3, start: 5, end: 10, prefix: '前😀段。', suffix: '后段。' }] } : { kind: 'needs_input', regions: [] })
+        revision: 3, start: 5, end: 10, prefix: '前😀段。', suffix: '后段。' }] } : prompt === '缩写第二段' ? { kind: 'needs_input', regions: [] }
+        : { version: 4, kind: 'semantic', regions: [{ chapterId: f.chapterId, revision: 3 }] })
     }))
   it('a fresh readonly review does not authorize editing even before its first report', () => fixture(async f => {
     const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt: '只检查当前章节，不给修改建议' })
