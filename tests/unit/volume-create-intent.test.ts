@@ -49,10 +49,10 @@ it('admits a new run in an old session as create-only, while the original reques
   expect(mocks.db.agentRun.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ userId: 'u', novelId: 'n', sessionId: 'session', id: { not: 'new-run' } }) }))
   const tools = [volumeCreateTool, volumeListTool, volumeUpdateTool, volumeMoveTool, chapterCreateTool, askUserTool]
   const catalog = freezeTaskCapabilities(task, { prompt: subject.prompt }, tools.map(tool => tool.name))
-  expect(restrictToolsToTask(tools, catalog, 'build').map(tool => tool.name)).toEqual(['volume_create', 'volume_list', 'ask_user'])
+  expect(restrictToolsToTask(tools, catalog, 'build').map(tool => tool.name)).toEqual(tools.map(tool => tool.name))
   expect(restrictToolsToTask(tools, catalog, 'plan').map(tool => tool.name)).toContain('volume_create')
-  expect(toOpenAIToolPresentation(volumeCreateTool, catalog.scope).parameters.properties).toMatchObject({ title: { enum: ['渡桥', '灯塔', '归港'] } })
-  expect(toOpenAIToolPresentation(volumeCreateTool, catalog.scope).parameters.properties).not.toHaveProperty('position')
+  expect(toOpenAIToolPresentation(volumeCreateTool, catalog.scope).parameters.properties).not.toMatchObject({ title: { enum: expect.any(Array) } })
+  expect(toOpenAIToolPresentation(volumeCreateTool, catalog.scope).parameters.properties).toHaveProperty('position')
   expect(renderTaskSpec(task)).toContain('不授予通用结构权限')
 })
 it('the real tool adds the three named empty volumes in order and repeated requests reuse the same objects', async () => {
@@ -80,7 +80,7 @@ it.each(['只讨论', '你觉得能加吗？', '可以加吗？', '不要帮我�
   expect(await readVolumeCreateIntent(mocks.db as unknown as Prisma.TransactionClient, { ...subject, prompt })).toBeUndefined()
   expect(mocks.db.agentRun.findFirst).not.toHaveBeenCalled()
 })
-it.each(['no-prior-run', 'no-concrete-names', 'two-add-objects', 'quoted-story', 'unrelated-latest-message', 'changed-directory'] as const)('keeps ambiguous %s read-only with an actual question tool available', async scenario => {
+it.each(['no-prior-run', 'no-concrete-names', 'two-add-objects', 'quoted-story', 'unrelated-latest-message', 'changed-directory'] as const)('leaves %s interpretation to the main Agent without revoking real tools', async scenario => {
   if (scenario === 'no-prior-run') mocks.db.agentRun.findFirst.mockResolvedValue(null)
   if (scenario === 'no-concrete-names') mocks.db.agentMessage.findMany.mockResolvedValue([{ id: 'm', parts: [{ type: 'text', text: '可以在目录里新增几个空卷，之后再起名。' }] }])
   if (scenario === 'two-add-objects') mocks.db.agentMessage.findMany.mockResolvedValue([{ ...source, parts: [{ type: 'text', text: proposal + '也可以添加一个人物。' }] }])
@@ -89,9 +89,9 @@ it.each(['no-prior-run', 'no-concrete-names', 'two-add-objects', 'quoted-story',
   if (scenario === 'changed-directory') volumes.push({ id: 'other', title: '另一卷', orderIndex: 2, revision: 1 })
   const task = await admitted()
   expect(task.scope.volumeCreateIntent).toBeUndefined()
-  expect(restrictToolsToTask([volumeCreateTool, volumeUpdateTool, chapterCreateTool, askUserTool], task, 'build')).toEqual([askUserTool])
+  expect(restrictToolsToTask([volumeCreateTool, volumeUpdateTool, chapterCreateTool, askUserTool], task, 'build')).toEqual([volumeCreateTool, volumeUpdateTool, chapterCreateTool, askUserTool])
   expect(askUserTool.permission.build).toBe('allow')
-  expect(renderTaskSpec(task)).toContain('向作者提问工具澄清')
+  expect(renderTaskSpec(task)).toContain('只有仍有影响执行的具体缺口才提问')
   expect(mocks.create).not.toHaveBeenCalled()
 })
 it('does not treat a suggestion as action without the new human confirmation', () => {
@@ -108,10 +108,10 @@ it('read-only session policy and explicit cancellation cannot create even a conf
   expect(mocks.create).not.toHaveBeenCalled()
 })
 
-it.each(['structure', 'metadata'] as const)('the actual general %s mutation guard rejects the create-only scope', async effect => {
+it.each(['structure', 'metadata'] as const)('the actual general %s mutation guard does not turn inferred create-only metadata into a permission denial', async effect => {
   await admitted()
   const { assertWritingStructureAuthority } = await vi.importActual<typeof import('../../api/lib/agent/writing-scope.js')>('../../api/lib/agent/writing-scope.js')
-  await expect(assertWritingStructureAuthority(mocks.db as unknown as Prisma.TransactionClient, ctx, effect)).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+  await expect(assertWritingStructureAuthority(mocks.db as unknown as Prisma.TransactionClient, ctx, effect)).resolves.toBeUndefined()
   expect(mocks.create).not.toHaveBeenCalled()
 })
 

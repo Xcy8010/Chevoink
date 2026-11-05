@@ -1,4 +1,4 @@
-import { prepareWritingPlanContext, assertWritingPlanContextCurrent, bindFutureWritingPlan, renderWritingPlanContext } from './writing-plan-context.js'
+import { prepareWritingPlanContext, assertWritingPlanContextCurrent, tryBindFutureWritingPlan, renderWritingPlanContext } from './writing-plan-context.js'
 
 import { assertWritingTarget, readWritingScope, lockWritingRunLineage } from './writing-scope.js'
 import { createHash } from 'node:crypto'
@@ -9,8 +9,8 @@ import type { ReaderPromiseInput, SceneTaskInput, StoryCharterSaveInput, StoryCo
 import { DataAccessError, prisma } from '../prisma.js'
 import { activeChapterScope, activeVolumeWhere } from '../data/internal.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
-import { taskSpecSchema, sceneTaskInputSchema, storyCharterInputSchema } from '../../../shared/contracts/index.js'
 import { requiresNextChapterDelivery } from './completion-guard.js'
+import { taskSpecSchema, sceneTaskInputSchema, storyCharterInputSchema } from '../../../shared/contracts/index.js'
 import { runtimeJson } from './runtime-common.js'
 import type { WritingWorkflowMilestone } from './semantic-progress.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
@@ -203,20 +203,15 @@ export async function prepareStoryCompilation(input: {
   await lockNovelActiveScope(db, input.novelId)
   const scope = await compilationRunScope(db, input)
   await assertOwnedNovel(input.userId, input.novelId, db)
-  const { task } = await readCompilerTaskIdentity(db, input)
-  const nextChapter = !!task && requiresNextChapterDelivery(task.goals)
-  const continuing = nextChapter && !input.chapterId && input.targetOrderIndex === undefined
+  const continuing = !input.chapterId && input.targetOrderIndex === undefined && !input.fallbackChapterId
     ? await db.storyCompilation.findFirst({ where: { userId: input.userId, novelId: input.novelId, ...scope, status: 'active' }, orderBy: { updatedAt: 'desc' }, select: { chapterId: true, targetOrderIndex: true } }) : null
   const writing = await readWritingScope(db, input)
   const slot = writing.writing?.kind === 'bounded' ? writing.writing.targets.find(item => input.chapterId ? item.chapterId === input.chapterId
     || writing.bindings?.targets.some(binding => binding.orderIndex === item.orderIndex && binding.chapterId === input.chapterId)
     : input.targetOrderIndex === undefined || item.orderIndex === input.targetOrderIndex) : null
   const boundId = slot?.chapterId ?? writing.bindings?.targets.find(item => item.orderIndex === slot?.orderIndex)?.chapterId
-  const target = await resolveTarget(input.userId, input.novelId, input.chapterId ?? boundId ?? continuing?.chapterId ?? (!nextChapter && !slot ? input.fallbackChapterId : undefined), input.targetOrderIndex ?? slot?.orderIndex ?? continuing?.targetOrderIndex, db)
+  const target = await resolveTarget(input.userId, input.novelId, input.chapterId ?? boundId ?? continuing?.chapterId ?? (!slot ? input.fallbackChapterId : undefined), input.targetOrderIndex ?? slot?.orderIndex ?? continuing?.targetOrderIndex, db)
   await assertWritingTarget(db, input, target.chapter ? { chapterId: target.chapter.id } : { orderIndex: target.targetOrderIndex })
-  if (nextChapter && !writing.writing && target.chapter && !await db.storyCompilation.findFirst({ where: { userId: input.userId, novelId: input.novelId, ...scope, chapterId: target.chapter.id }, select: { id: true } })) {
-    throw new DataAccessError(409, 'STORY_TASK_TARGET_MISMATCH', '当前任务要求写下一章，不能接管历史任务的旧章检查或重写。请省略已有chapterId，以新的目标序号准备下一章；历史正文仅作承接参考。')
-  }
   const planContext = await prepareWritingPlanContext(db, { userId: input.userId, novelId: input.novelId }, target, input.detailPlanId)
   const [bundle, previousChapter, recentChapters] = await Promise.all([
     getStoryCharterBundle(input.userId, input.novelId, db),
@@ -234,9 +229,6 @@ export async function prepareStoryCompilation(input: {
   ])
   const continuityReference = await readWritingContinuityReference(db, input, target.targetOrderIndex, previousChapter)
   const volumeContext = previousChapter ? await readWritingVolumeContext(db, input, target.targetOrderIndex) : null
-  if (writing.writing?.tailVolume && !input.volumeDecision) {
-    throw new DataAccessError(400, 'INVALID_ARGUMENTS', `请在PREPARE显式提交volumeDecision及理由，审视本卷目标是否收束；章数不能代替故事边界。当前卷上下文：${JSON.stringify(volumeContext)}`)
-  }
   const volumeDecision = input.volumeDecision ? writingVolumeDecisionSchema.parse(input.volumeDecision)
     : { kind: 'continue' as const, reason: target.chapter ? '原目标章已创建，保持其所在卷；本次审视不迁移既有章。' : '尚无本卷主困局已收束的真实原文依据，先延续当前卷；本章必须推进原目标，章数不能代替边界判断。' }
   if (volumeDecision.kind === 'new_volume') await assertWritingVolumeBoundary(db, input, target.targetOrderIndex, volumeDecision.newVolume)
@@ -366,18 +358,14 @@ export async function saveSceneTasks(input: {
   if (!transaction) return prisma.$transaction(tx => saveSceneTasks(input, tx))
   const tx = transaction
   await lockNovelActiveScope(tx, input.novelId)
-  if (input.tasks.length < 1 || input.tasks.length > 4) {
-    throw new DataAccessError(400, 'SCENE_TASK_COUNT_INVALID', '每章必须建立 1–4 个 Scene Task。')
+  if (input.tasks.length < 1) {
+    throw new DataAccessError(400, 'SCENE_TASK_COUNT_INVALID', '场景列表不能为空。')
   }
   await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${input.compilationId} AND user_id = ${input.userId} AND novel_id = ${input.novelId} FOR UPDATE`
   const compilation = await tx.storyCompilation.findFirst({
     where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, status: 'active' },
   })
   if (!compilation) throw new DataAccessError(404, 'COMPILATION_NOT_FOUND', '写作编译任务不存在、已结束或不属于当前作品。')
-  await assertWritingPlanContextCurrent(tx, { userId: input.userId, novelId: input.novelId }, compilation.preparedContext)
-  if (!['prepare', 'beat'].includes(compilation.stage)) {
-    throw new DataAccessError(409, 'COMPILATION_STAGE_CONFLICT', `当前已进入 ${compilation.stage} 阶段，不能覆盖场景任务。`)
-  }
   const beatCandidates = normalizeBeatCandidates(input.tasks, input.alternatives)
   await tx.sceneTask.deleteMany({ where: { compilationId: compilation.id } })
   await tx.sceneTask.createMany({
@@ -404,7 +392,7 @@ export async function saveSceneTasks(input: {
   await tx.storyCompilation.update({
     where: { id: compilation.id },
     data: {
-      stage: 'beat',
+      stage: ['prepare', 'beat'].includes(compilation.stage) ? 'beat' : compilation.stage,
       preparedContext: { ...context, beatCandidates } as Prisma.InputJsonValue,
     },
   })
@@ -607,7 +595,7 @@ export async function recordStoryCompilerWrite(input: {
     orderBy: { createdAt: 'desc' },
   })
   if (!compilation) return null
-  await bindFutureWritingPlan(transaction, { userId: input.userId, novelId: input.novelId }, compilation, { id: input.chapterId, orderIndex: input.chapterOrderIndex })
+  if (!await tryBindFutureWritingPlan(transaction, { userId: input.userId, novelId: input.novelId }, compilation, { id: input.chapterId, orderIndex: input.chapterOrderIndex })) return null
   const stage: StoryCompilationStage = ['check', 'repair', 'commit'].includes(compilation.stage) ? 'repair' : 'write'
   await transaction.storyCompilation.update({
       where: { id: compilation.id },
@@ -655,7 +643,6 @@ export async function commitChapterBridge(input: {
   const compilation = await db.storyCompilation.findFirst({ where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, ...scope },
     include: { bridge: true, chapter: true } })
   if (!compilation?.chapter || !compilation.bridge) throw new DataAccessError(404, 'COMPILATION_NOT_FOUND', '没有当前任务可提交的正文。')
-  await assertWritingPlanContextCurrent(db, { userId: input.userId, novelId: input.novelId }, compilation.preparedContext)
   const runId = input.runId ?? compilation.runId
   if (!runId) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '提交缺少原任务归属。')
   const run = await db.agentRun.findFirst({ where: { id: runId, userId: input.userId, novelId: input.novelId, status: { in: ['queued','running','awaiting_approval'] } } })
@@ -670,22 +657,19 @@ export async function commitChapterBridge(input: {
   if (!chapter?.content.trim() || input.expectedChapterRevision !== undefined && chapter.revision !== input.expectedChapterRevision
     || input.expectedContentHash !== undefined && runtimeJson({ content: chapter.content }).hash !== input.expectedContentHash)
     throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文已变化，未提交旧版本。')
-  const { readChapterReviewReadiness, recordChapterReviewDecisions } = await import('./chapter-review-guard.js')
-  let readiness = await readChapterReviewReadiness(db, { ...input, runId }, compilation.id)
+  const { readChapterReviewReadiness, readAdvisoryChapterReviewReadiness, recordChapterReviewDecisions } = await import('./chapter-review-guard.js')
+  let readiness = await (input.retainedFindings?.length ? readChapterReviewReadiness : readAdvisoryChapterReviewReadiness)(db, { ...input, runId }, compilation.id)
   if (input.retainedFindings?.length && readiness) {
     await recordChapterReviewDecisions(db, { ...input, runId }, readiness, input.retainedFindings)
     readiness = await readChapterReviewReadiness(db, { ...input, runId }, compilation.id)
   }
-  if (!readiness?.ready || readiness.decisionPending) throw new DataAccessError(409, readiness?.requiredTools[0]?.name === 'quality_analyze' ? 'QUALITY_CHECK_REQUIRED'
-    : !readiness || readiness.requiredTools.length ? 'CONTINUITY_CHECK_REQUIRED' : readiness.continuityErrorCount ? 'CONTINUITY_ERRORS_REMAIN'
-      : readiness.qualityErrorCount || readiness.mustPassPending && readiness.qualityPassRequired ? 'QUALITY_CHECK_REQUIRED' : 'REVIEW_DECISION_REQUIRED',
-    '当前正文的检查或真实问题尚未完成，报告和正文已保留，本次未提交。')
-  // Current report readiness owns the evidence needed for this manuscript.
-  // Delivery is a local effect; it neither retries nor settles model requests.
+  // Saving the current chapter is independent of advisory report readiness.
+  // Keep each report's real state; commit neither certifies it nor retries a
+  // model request. Current manuscript identity/revision is checked above.
   const hash = runtimeJson({ content: chapter.content }).hash
   const prepared = compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext : {}
   if (compilation.bridge.committedAt && compilation.bridge.targetRevision === chapter.revision && prepared.terminalContentHash === hash)
-    return { compilationId: compilation.id, chapterId: chapter.id, chapterRevision: chapter.revision, skippedMemoryCount: 0, retainedIssueCount: readiness.retainedDecisions?.length ?? 0 }
+    return { compilationId: compilation.id, chapterId: chapter.id, chapterRevision: chapter.revision, skippedMemoryCount: 0, retainedIssueCount: readiness?.retainedDecisions?.length ?? 0 }
   const now = new Date()
   const source = compilation.bridge.fromChapterId ? await db.chapter.findFirst({ where: { id: compilation.bridge.fromChapterId,
     authorId: input.userId, ...activeChapterScope(input.novelId) }, select: { revision: true } }) : null
@@ -720,7 +704,7 @@ export async function commitChapterBridge(input: {
       ...input.exitState.knowledge, ...input.exitState.emotion, ...input.exitState.body, ...input.exitState.objects,
       ...input.exitState.relationships, ...input.exitState.openLoops, input.hookDecision, input.delayedHookReason].filter(Boolean).join('；') || lastParagraph(chapter.content),
     importance: 80, confidence: 1, status: 'inferred', evidence })
-  return { compilationId: compilation.id, chapterId: chapter.id, chapterRevision: chapter.revision, skippedMemoryCount, retainedIssueCount: readiness.retainedDecisions?.length ?? 0 }
+  return { compilationId: compilation.id, chapterId: chapter.id, chapterRevision: chapter.revision, skippedMemoryCount, retainedIssueCount: readiness?.retainedDecisions?.length ?? 0 }
 }
 
 export async function buildStoryCompilerDigest(userId: string, novelId: string, _chapterId: string | null, runId?: string) {
@@ -763,28 +747,20 @@ export async function buildStoryCompilerDigest(userId: string, novelId: string, 
     && !!active.bridge && active.bridge.toChapterId === chapter?.id && !!active.bridge.committedAt && active.bridge.targetRevision === chapter?.revision
     && terminalContext?.terminalContentHash === runtimeJson({ content: chapter?.content }).hash
   const resume = !active ? '' : planNeedsReview
-    ? 'needs-review：冻结的大纲或细纲已变化或移除，旧编译和终态不可复用。先用 plan_read 核对当前大纲与细纲，必要时重新关联，再在原授权目标内调用 story_compiler_prepare；核对前不能写入或提交。'
-    : committed
-    ? '本任务该章终态已提交且匹配当前正文 revision/hash；复用结果，不重复写入或提交。'
-    : active.sceneTasks.length === 0
-      ? ['prepare', 'beat'].includes(active.stage)
-        ? `保留此编译，不重复 PREPARE；尚无场景，下一步调用 scene_task_build，compilationId=${active.id}。尚不能宣称该章已写完或完成。`
-        : '本编译缺少场景记录，先核对已保存状态；不得宣称已写完或完成，也不得重建编译或重复正文写入。'
-      : !hasBody
-        ? `保留此编译和场景，不重复 PREPARE/BEAT；尚无合法非空正文，下一步${chapter ? '' : '按冻结目标 chapter_create 后'}调用 chapter_write 保存正文，不能宣称已写完或完成。`
-        : active.bridge?.targetRevision !== chapter?.revision
-          ? `保留此编译和场景，不重复 PREPARE/BEAT；当前正文与本编译绑定写入版本（${active.bridge?.targetRevision ?? '未记录'}）不一致。先核对正文和原请求，再补缺失步骤；终态未核验，不能宣称完成。`
-          : `保留此编译、场景和已保存正文，不重复 PREPARE/BEAT 或整章写入；终态尚未提交。使用当前连续性与人类感报告处理具体意见；调用 chapter_bridge_commit；工具会补齐必要检查、复查修改后的正文并实际提交。取得报告不表示问题都已解决，取得实际提交回执前不能宣称完成。`
+    ? '冻结的大纲或细纲已变化，旧编译不能认证新版。可读取当前计划；普通正文工具仍可按原请求使用。'
+    : committed ? '本章已有与当前正文 revision/hash 匹配的提交；复用已完成结果，避免重复写入。'
+      : !hasBody ? '目标尚无非空正文。根据原请求选择创建或写入；场景与编译为可选协作记录。'
+        : '已有非空正文。根据原请求选择继续修改、检查或提交；没有固定步骤顺序，保存不等于报告通过。'
   const historicalValidation = active?.validation && typeof active.validation === 'object' && !Array.isArray(active.validation) ? active.validation : {}
   const latestQuality = active?.qualityReports[0]
   const lines = [
     'Story Compiler 3.0 状态：',
     active ? renderWritingPlanContext(active.preparedContext) : '',
-    volumeContext ? `本章必须审视卷目标：当前《${volumeContext.volumeTitle}》，已写 ${volumeContext.chapterCount} 章（仅提醒，绝非切卷阈值）；卷目标：${volumeContext.summary || '未保存，须结合真实正文判断'}；${volumeContext.planStatus}。最新章 ${volumeContext.previousChapter.id} r${volumeContext.previousChapter.revision}，末尾：${volumeContext.previousChapter.ending}。已保存计划：${JSON.stringify(volumeContext.plans)}。PREPARE明确 volumeDecision：continue并解释未收束原因，或new_volume列已完成卷目标、前章精确收束引用和下一主困局。原目标已创建、旧任务无冻结新尾卷能力或缺真实收束证据时保留原卷；显式建卷也须核对原冻结尾卷授权与同一收束证据，不能绕过此限制。` : '',
-    bundle.charter ? `创作宪章 r${bundle.charter.revision}：${clip(bundle.charter.oneLinePromise, 240)}` : '创作宪章：尚未建立（新书长纲前应先建立）',
+    volumeContext ? `当前卷《${volumeContext.volumeTitle}》共 ${volumeContext.chapterCount} 章；卷目标：${volumeContext.summary || '未保存'}；${volumeContext.planStatus}。前章 ${volumeContext.previousChapter.id} r${volumeContext.previousChapter.revision}，末尾：${volumeContext.previousChapter.ending}。计划：${JSON.stringify(volumeContext.plans)}。按作者请求和真实剧情决定卷安排，章数不是自动切卷阈值。` : '',
+    bundle.charter ? `创作宪章 r${bundle.charter.revision}：${clip(bundle.charter.oneLinePromise, 240)}` : '创作宪章：尚未建立',
     bundle.promises.length ? `待兑现读者承诺：${bundle.promises.slice(0, 5).map((item) => `${item.title}（${item.payoffHorizon}）`).join('；')}` : '待兑现读者承诺：无',
-    active ? `本任务编译：${active.id}，chapterId=${active.chapterId ?? '尚未创建'}，目标第 ${active.targetOrderIndex} 章，阶段 ${active.stage}，状态 ${active.status}，Scene Task ${active.sceneTasks.length} 个。${resume}` : '本任务尚未建立编译；历史检查失败不构成恢复旧任务的授权。写下一章时以前文为参考，为新章建立本任务编译。',
-    chapter ? `当前正文 r${chapter.revision}，${hasBody ? `非空 ${chapter.content.trim().length} 字` : '正文为空，未写完'}；提纲一致性=${planNeedsReview ? 'needs-review' : review?.planAlignment ?? '未绑定提纲'}；当前连续性报告=${review?.continuity ?? 'missing'}，人类感质量报告=${review?.quality ?? 'missing'}；报告剩余意见=${review?.decisionEntries?.length ?? 0}，已明确保留=${review?.retainedDecisions?.length ?? 0}。报告完成、意见已修复、明确保留和章节已提交分别说明。${review?.requiredTools.length ? `当前需补齐：${review.requiredTools.map(tool => tool.name).join('、')}。` : ''}` : '',
+    active ? `本任务编译：${active.id}，chapterId=${active.chapterId ?? '尚未创建'}，目标第 ${active.targetOrderIndex} 章，阶段 ${active.stage}，状态 ${active.status}，Scene Task ${active.sceneTasks.length} 个。${resume}` : '本任务没有编译记录。可直接使用普通正文工具，按需要准备上下文或记录场景。',
+    chapter ? `当前正文 r${chapter.revision}，${hasBody ? `非空 ${chapter.content.trim().length} 字` : '正文为空，未写完'}；提纲一致性=${planNeedsReview ? 'needs-review' : review?.planAlignment ?? '未绑定提纲'}；当前连续性报告=${review?.continuity ?? 'missing'}，人类感质量报告=${review?.quality ?? 'missing'}；报告剩余意见=${review?.decisionEntries?.length ?? 0}，已明确保留=${review?.retainedDecisions?.length ?? 0}。报告完成、意见已修复、明确保留和章节已提交分别说明。${review?.requiredTools.length ? `当前尚无有效报告的检查：${review.requiredTools.map(tool => tool.name).join('、')}。` : ''}` : '',
     active && chapter ? `当前有效质量报告编号=${review?.qualityReportId ?? '无'}；最近已存质量报告=${latestQuality ? `${latestQuality.id}（revision=${latestQuality.chapterRevision}，${latestQuality.status}）` : '无'}；历史连续性记录 revision=${historicalValidation.checkedRevision ?? '未知'}。历史或独立报告不能代替当前编译与最终正文绑定的必要检查；缺失或旧版本报告不代表通过。` : '',
     active ? '初稿流程：本任务冻结的新建目标章可在原写作权限内持续修订。先核对对象身份与原文证据，仅将同一对象同一维度的互斥事实视为冲突，不照 suggestion 机械改剧情。相关修法优先合并为 chapter_edit_range patches（每次最多8处），也可连续单片段替换或 chapter_write；不硬性限定一次调用。每次使用当前正文与版本，不要求每次覆盖全部意见；全部修改后复核最终版本。已有章节与明确禁止修改的请求仍按原权限处理。自动局部修订后复查最终版本，原用量或费用未知时先核对，不为清零警告循环改写，剩余意见保留真实状态。' : '',
     latestBridge?.toChapter ? `最近已提交桥（仅作背景，不证明本任务完成）：第 ${latestBridge.toChapter.orderIndex} 章《${latestBridge.toChapter.title}》，提交 r${latestBridge.targetRevision ?? '未知'}，当前 r${latestBridge.toChapter.revision}；未完成动作：${latestBridge.lastUnfinishedAction || '无'}；开放钩子：${asStringArray(latestBridge.openLoops).slice(0, 4).join('、') || '无'}` : '',

@@ -228,3 +228,22 @@ export async function bindQualityFormatRecovery(tx: Prisma.TransactionClient, re
   await tx.chapterQualityReport.update({ where: { id: reportId }, data: { deterministicMetrics: runtimeJson({ ...object(report.deterministicMetrics),
     formatRecovery: { ...recovery, state: report.status === 'failed' ? 'failed' : 'completed' } }).value } })
 }
+
+/** A new ordinary call may retry a genuinely ended, settled failure. This does
+ * not reopen its old format claim, mutate its work or certify its report. */
+export async function canStartFreshQualityCheck(tx: Prisma.TransactionClient, subject: Subject,
+  reportId: string, chapter: { id: string; revision: number; content: string }) {
+  const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId }, select: { taskRootId: true } })
+  if (!run) return false
+  const original = await readOriginalTaskRequest(tx, subject), ids = await originalTaskRunIds(tx, subject, original)
+  const report = await tx.chapterQualityReport.findFirst({ where: { id: reportId, userId: subject.userId, novelId: subject.novelId,
+    chapterId: chapter.id, chapterRevision: chapter.revision }, include: { findings: true } })
+  if (!report) return false
+  const first = await tx.agentRun.findFirstOrThrow({ where: { id: { in: ids } }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } })
+  if (await tx.aiUsageLog.count({ where: { userId: subject.userId, novelId: subject.novelId,
+    OR: [{ agentRunId: { in: ids }, billingStatus: 'pending_usage' }, { targetType: 'chapter', targetId: chapter.id,
+      action: { startsWith: 'agent3Humanity' }, createdAt: { gte: first.createdAt },
+      OR: [{ billingStatus: 'pending_usage' }, { usageSource: 'unknown' }] }] } })
+    || await tx.agentProviderAttempt.count({ where: { runId: { in: ids }, status: { in: ['dispatching', 'unknown'] } } })) return false
+  return !!await readQualityUnavailableProof(tx, subject, ids, report, chapter, run.taskRootId, { allowFormatRecovery: true })
+}

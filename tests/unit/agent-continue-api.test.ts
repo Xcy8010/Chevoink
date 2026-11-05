@@ -98,7 +98,7 @@ describe('continue API exact target', () => {
     expect(mocks.creditAccess).not.toHaveBeenCalled()
     expect(mocks.tierRuntime).not.toHaveBeenCalled()
   })
-  it.each(['answered', 'different-call', 'unresolved-local'] as const)('uses only a matching fully resolved authenticated clarification before resume: %s', async kind => {
+  it.each(['answered', 'different-call', 'unresolved-local'] as const)('does not turn an old unanswered creative question into a Continue permission: %s', async kind => {
     const prompt = '只修改第5章这句话。'
     const taskSpec = buildTaskSpec({ runId: run.id, novelId: 'n', prompt, authorWritingProtocol: 2, localEditProtocol: 1 })
     taskSpec.scope.writingClarificationProtocol = 2
@@ -117,14 +117,8 @@ describe('continue API exact target', () => {
     mocks.find.mockReset().mockImplementation(async args => args.where.id ? original : { id: run.id })
     mocks.message.mockResolvedValue({ parts: [{ type: 'text', text: prompt }] })
     try {
-      if (kind === 'answered') {
-        expect(await continueLoopRun('u', run.id)).toMatchObject({ runId: run.id, status: 'running' })
-        expect(mocks.execute).toHaveBeenCalledOnce()
-      } else {
-        await expect(continueLoopRun('u', run.id)).rejects.toMatchObject({ code: 'AUTHOR_INPUT_REQUIRED' })
-        expect(mocks.execute).not.toHaveBeenCalled()
-        expect(mocks.creditAccess).not.toHaveBeenCalled()
-      }
+      expect(await continueLoopRun('u', run.id)).toMatchObject({ runId: run.id, status: 'running' })
+      expect(mocks.execute).toHaveBeenCalledOnce()
       expect(original).toEqual(before)
     } finally { read.mockRestore() }
   })
@@ -141,7 +135,7 @@ describe('continue API exact target', () => {
     expect(mocks.execute).not.toHaveBeenCalled(); expect(mocks.prepare).not.toHaveBeenCalled(); expect(mocks.runUpdate).not.toHaveBeenCalled()
     expect(original).toEqual(before)
   })
-  it.each(['frozen-scope', 'checkpoint'] as const)('keeps required author input waiting before credits, model, cursor and executor admission: %s', async source => {
+  it.each(['frozen-scope', 'checkpoint'] as const)('restores original work and normal credit admission despite an old parser input marker: %s', async source => {
     const taskSpec = buildTaskSpec({ runId: run.id, novelId: 'n', chapterId: null, prompt: '写一个短场景' })
     taskSpec.scope.writing = { version: 1, kind: source === 'frozen-scope' ? 'needs_input' : 'bounded',
       targets: source === 'frozen-scope' ? [] : [{ orderIndex: 1, chapterId: 'c19' }], repairAuthorized: false, titleAndBodyOnly: false }
@@ -151,9 +145,9 @@ describe('continue API exact target', () => {
       progressSignatures: [], authorInputRequired: { version: 1, callId: 'original-question', kind: 'writing_scope' } } }
     const original = { ...run, taskSpec, ...(source === 'checkpoint' ? { usage } : {}) }, before = structuredClone(original)
     mocks.find.mockReset().mockImplementation(async args => args.where.id ? original : { id: run.id })
-    await expect(continueLoopRun('u', run.id)).rejects.toMatchObject({ code: 'AUTHOR_INPUT_REQUIRED', status: 409 })
-    expect(mocks.creditAccess).not.toHaveBeenCalled(); expect(mocks.tierRuntime).not.toHaveBeenCalled()
-    expect(mocks.execute).not.toHaveBeenCalled(); expect(mocks.prepare).not.toHaveBeenCalled(); expect(mocks.runUpdate).not.toHaveBeenCalled()
+    expect(await continueLoopRun('u', run.id)).toMatchObject({ runId: run.id, status: 'running' })
+    expect(mocks.creditAccess).toHaveBeenCalledOnce(); expect(mocks.tierRuntime).toHaveBeenCalledOnce()
+    expect(mocks.execute).toHaveBeenCalledOnce(); expect(mocks.prepare).toHaveBeenCalledOnce(); expect(mocks.runUpdate).not.toHaveBeenCalled()
     expect(original).toEqual(before)
   })
   it('keeps an activated goal continuation behind its original goal, manuscript and normal credit admission', async () => {

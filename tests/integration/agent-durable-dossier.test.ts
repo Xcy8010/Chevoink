@@ -1,3 +1,4 @@
+import { initializeExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { prisma } from '../../api/lib/prisma.js'
@@ -9,7 +10,7 @@ import * as contract from '../../api/lib/agent/runtime-dossier-contract.js'
 import * as dossier from '../../api/lib/agent/research-dossier.js'
 import * as reducer from '../../api/lib/agent/runtime-reducer.js'
 import * as operations from '../../api/lib/agent/runtime-operations.js'
-import { initializeExecutionState, loadExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
@@ -44,7 +45,7 @@ describe.runIf(available)('research dossier owns its original queries, synthesis
         messages: [{ role: 'user', content: '建立创作研究档案' }, { role: 'assistant', content: null, toolCalls: [{ id: 'dossier-call', name: tool.name, arguments: JSON.stringify(args) }] }] } })
     await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running' } })
     const period = credits.getCreditWindow()
-    await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: period.startedAt, periodEndsAt: period.endsAt } })
+    await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: period.startedAt, periodEndsAt: period.endsAt } })
     vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(runtime)
     vi.spyOn(credits, 'assertCreditAccess').mockResolvedValue()
     vi.spyOn(prices, 'resolveDurableTokenPrice').mockResolvedValue(price)

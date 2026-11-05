@@ -1,11 +1,9 @@
 import { z } from 'zod'
-import { taskSpecSchema } from '../../../../shared/contracts/index.js'
 
 import { env } from '../../../config/env.js'
 import { DataAccessError, prisma } from '../../prisma.js'
-import { assertQuestionWritingScope, readWritingScope } from '../writing-scope.js'
 import { recordWritingClarification } from '../writing-clarification.js'
-import { consumeQuestionBudget, waitForQuestionAnswer } from '../permissions.js'
+import { waitForQuestionAnswer } from '../permissions.js'
 import { defineTool } from './types.js'
 
 /**
@@ -71,32 +69,12 @@ export const askUserTool = defineTool({
   name: 'ask_user',
   title: '向作者提问',
   description:
-    '仅当现有请求与上下文仍有影响执行的具体冲突、确实缺少目标，或作者明确要求亲自决定时，用本工具提问并等待回答。已绑定章节的明确修改、整章重写或保存请求直接执行，不重复确认相同目标；普通人物表达、文风、段落组织等创作细节按已知意图自行处理。先核对本轮章节绑定、同聊天真实作者已明确的目标与已有回答。提供 2-4 个候选选项，作者也可以自行输入答案。一次任务最多提问 3 次，尽量合并相关问题；拿到回答后修订既有产物（如 plan_save 带 planId）。禁止把问题和选项写在回复正文里让作者"回复数字选择"——那样任务已经结束，作者的回答无法接上。',
+    '仅当现有请求与上下文仍有影响执行的具体冲突、确实缺少目标，或作者明确要求亲自决定时，用本工具提问并等待回答。已绑定章节的明确修改、整章重写或保存请求直接执行，不重复确认相同目标；普通人物表达、文风、段落组织等创作细节按已知意图自行处理。先核对本轮章节绑定、同聊天真实作者已明确的目标与已有回答。提供 2-4 个候选选项，作者也可以自行输入答案。尽量合并相关问题，避免重复追问；拿到回答后修订既有产物（如 plan_save 带 planId）。禁止把问题和选项写在回复正文里让作者"回复数字选择"——那样任务已经结束，作者的回答无法接上。',
   parameters: askUserParameters,
   coerceArgs: coerceAskUserArgs,
   permission: { plan: 'allow', build: 'allow', review: 'allow' },
   readOnly: true,
   async execute(ctx, args) {
-    await prisma.$transaction(tx => assertQuestionWritingScope(tx, ctx, args.question, args.options))
-    const scope = await prisma.$transaction(tx => readWritingScope(tx, ctx))
-    const spec = taskSpecSchema.safeParse(scope.spec)
-    const authorRequired = scope.writing?.kind === 'needs_input' || spec.success && spec.data.scope.localEditBoundary?.kind === 'needs_input'
-    const waitingForAuthor = () => ({
-      failureCode: 'AUTHOR_INPUT_REQUIRED',
-      output: '本任务缺少必须由作者明确的目标或范围，已保存提问并等待输入。未选择默认方案，也不会继续调用模型。此提问已结束等待；请在输入框发送写明目标章节与范围的新指令，原合同、用量与已保存正文保持原值。',
-      summary: '等待作者明确目标与范围',
-      display: { kind: 'question' as const, question: args.question, options: args.options, unanswered: true, scopeResolution: 'needs_input' as const },
-    })
-    // 提问预算：超出额度直接回填，不再挂起，防止反复追问
-    if (!consumeQuestionBudget(ctx.runId)) {
-      if (authorRequired) return waitingForAuthor()
-      return {
-        output:
-          '本次任务的提问次数已用完（每次任务最多 3 次）。请基于已有回答与上下文选择最合理的方案直接完成任务，不要再提问；已有产物走修订而不是重新生成。',
-        summary: '提问预算已用尽',
-      }
-    }
-
     // 挂起等待作者回答（复用审批超时时长）；期间 run 标记为 awaiting_approval 供前端展示等待态
     const waiting = await prisma.agentRun.updateMany({ where: { id: ctx.runId, userId: ctx.userId, novelId: ctx.novelId,
       status: { in: ['queued', 'running'] } }, data: { status: 'awaiting_approval' } })
@@ -111,12 +89,7 @@ export const askUserTool = defineTool({
       ctx.signal,
     )
 
-    const goalContext = (await import('../goal-context.js')).currentGoalExecution()
-    if (result.answer === null && goalContext) {
-      return (await import('../goal-store.js')).goalError('GOAL_AUTHOR_INPUT_REQUIRED', '目标等待作者回答，未选择默认方向继续。')
-    }
     ctx.signal.throwIfAborted()
-    if (result.answer === null && authorRequired) return waitingForAuthor()
     const resumed = await prisma.agentRun.updateMany({ where: { id: ctx.runId, userId: ctx.userId, novelId: ctx.novelId,
       status: 'awaiting_approval' }, data: { status: 'running' } })
     if (resumed.count !== 1) throw new DataAccessError(409, 'RUNTIME_SCOPE_MISMATCH', '提问后执行已停止，回答没有恢复旧任务。')
@@ -139,10 +112,6 @@ export const askUserTool = defineTool({
     ctx.signal.throwIfAborted()
     const clarification = await prisma.$transaction(tx => recordWritingClarification(tx, ctx,
       { callId: ctx.callId, ...args, answer: result.answer!, source: 'legacy_question' }))
-    if (authorRequired && !clarification) return { ...waitingForAuthor(),
-      output: '作者回答已收到，但原冻结合同仍缺少可证明的目标或范围，未静默扩大权限。请在输入框发送写明目标章节与范围的新指令；原合同、用量与已保存正文保持原值。',
-      display: { kind: 'question' as const, question: args.question, options: args.options, answer: result.answer, scopeResolution: 'needs_input' as const },
-    }
     ctx.authorQuestionAnswers?.set(ctx.callId, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, question: args.question + '\n' + args.options.map(option => option.label + ' ' + (option.detail ?? '')).join('\n'), answer: result.answer })
     return {
       ...(clarification ? { semanticTransition: clarification } : {}),

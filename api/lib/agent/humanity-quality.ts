@@ -257,6 +257,13 @@ export async function qualityCompilationScope(db: Prisma.TransactionClient, user
 
 /** Server-side next-chapter delivery evidence, including resumed task lineage. */
 export async function hasCommittedTaskChapter(db: Prisma.TransactionClient, userId: string, novelId: string, runId: string): Promise<boolean> {
+  const saved = await (await import('./saved-chapter-work.js')).readCurrentSavedTaskChapters(db, { userId, novelId, runId })
+  if (saved.length) {
+    const { readWritingScope } = await import('./writing-scope.js')
+    const scope = await readWritingScope(db, { userId, novelId, runId })
+    return scope.writing?.kind !== 'bounded' || !scope.writing.targets.length || scope.writing.targets.every(target =>
+      saved.some(chapter => chapter.id === (target.chapterId ?? scope.bindings?.targets.find(item => item.orderIndex === target.orderIndex)?.chapterId)))
+  }
   const scope = await qualityCompilationScope(db, userId, novelId, runId)
   const rows = await db.storyCompilation.findMany({
     where: { userId, novelId, ...scope, status: { not: 'abandoned' } },

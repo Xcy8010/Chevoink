@@ -1,9 +1,10 @@
+import { initializeExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { prisma } from '../../api/lib/prisma.js'
 import * as credits from '../../api/lib/credits.js'
 import * as prices from '../../api/lib/billing/resolve-token-price.js'
-import { initializeExecutionState, loadExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import * as reducer from '../../api/lib/agent/runtime-reducer.js'
 import * as creative from '../../api/lib/agent/tools/creative-review.js'
@@ -40,7 +41,7 @@ describe.runIf(available)('durable independent creative artifacts', () => {
       messages: [{ role: 'user', content: '独立批评并只生成选中意见的修订草稿' }, { role: 'assistant', content: null, toolCalls: [{ id: 'creative-call', name: tool.name, arguments: JSON.stringify(args) }] }], successfulToolSignatures: [] } })
     await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running' } })
     const period = credits.getCreditWindow()
-    await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: period.startedAt, periodEndsAt: period.endsAt } })
+    await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: period.startedAt, periodEndsAt: period.endsAt } })
     vi.spyOn(credits, 'getModelTierRuntime').mockImplementation(async () => {
       if (scenario === 'archived-before-dispatch') await prisma.chapter.update({ where: { id: f.chapterId }, data: { archivedAt: new Date() } })
       return scenario === 'changed-free-route' ? { ...runtime, multiplierBps: 0, provider: 'changed-provider' } : runtime

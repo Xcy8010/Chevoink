@@ -30,15 +30,15 @@ export async function prepareWritingPlanContext(db: Prisma.TransactionClient,
     return planKind(plan.metadata) === 'detail' && (target.chapter ? binding?.kind === 'chapter' && binding.chapterId === target.chapter.id
       : binding?.kind === 'future' && binding.targetOrderIndex === target.targetOrderIndex)
   })
-  if (!detailPlanId && matching.length > 1) throw new DataAccessError(409, 'PLAN_TARGET_AMBIGUOUS', '该章有多份细纲，请读取后明确 detailPlanId；未猜选。')
+  if (!detailPlanId && matching.length > 1) return null // The Agent can read/select a plan; preparation itself remains usable.
   const detail = detailPlanId ? matching.find(plan => plan.id === detailPlanId) : matching[0]
   if (!detail) {
-    if (detailPlanId || plans.some(plan => planKind(plan.metadata) === 'outline')) throw new DataAccessError(409, 'DETAIL_PLAN_REQUIRED', '当前作品已有大纲，请先保存、关联并核对本章细纲后再执行。既有章节必须绑定真实 chapterId，不按序号猜选。')
+    if (detailPlanId) throw new DataAccessError(409, 'PLAN_TARGET_INVALID', '指定细纲不属于当前作者作品及章节目标，未绑定其他计划。')
     return null
   }
   const links = planLinkFields(detail, plans), outline = plans.find(plan => plan.id === links.parentPlanId)
   if (links.reviewState !== 'current' || !outline || !links.target || !detail.content.trim() || !outline.content.trim()) {
-    throw new DataAccessError(409, 'PLAN_REVIEW_REQUIRED', '本章细纲未关联有效大纲、父版本已变化或内容为空，请先核对大纲和细纲再执行。')
+    return null // An incomplete/stale planning aid cannot deny ordinary preparation.
   }
   const freeze = (plan: typeof detail) => ({ id: plan.id, title: plan.title, content: plan.content, planHash: novelPlanHash(plan) })
   return { version: 1, outline: freeze(outline), detail: freeze(detail), parentPlanHash: links.parentPlanHash!, target: links.target }
@@ -74,6 +74,18 @@ export async function bindFutureWritingPlan(db: Prisma.TransactionClient, subjec
     preparedContext: runtimeJson({ ...planMetadata(compilation.preparedContext), planContext }).value } })
 }
 
+/** Optional ordinary-tool bookkeeping never binds a stale or different plan. */
+export async function tryBindFutureWritingPlan(db: Prisma.TransactionClient, subject: { userId: string; novelId: string },
+  compilation: { id: string; preparedContext: unknown; targetOrderIndex: number }, chapter: { id: string; orderIndex: number }) {
+  try {
+    await bindFutureWritingPlan(db, subject, compilation, chapter)
+    return true
+  } catch (error) {
+    if (!(error instanceof DataAccessError) || !['PLAN_CONTEXT_STALE', 'PLAN_TARGET_INVALID'].includes(error.code)) throw error
+    return false
+  }
+}
+
 export async function bindCreatedChapterWritingPlan(db: Prisma.TransactionClient, subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; orderIndex: number }) {
   const target = { userId: subject.userId, novelId: subject.novelId, status: 'active' as const,
     OR: [{ chapterId: chapter.id }, { chapterId: null, targetOrderIndex: chapter.orderIndex }] }
@@ -86,5 +98,5 @@ export async function bindCreatedChapterWritingPlan(db: Prisma.TransactionClient
   const { compilationRunScope } = await import('./story-compiler.js')
   const scope = await compilationRunScope(db, subject)
   const compilation = await db.storyCompilation.findFirst({ where: { ...target, ...scope, id: { in: plannedIds } }, orderBy: { createdAt: 'desc' } })
-  if (compilation) await bindFutureWritingPlan(db, { userId: subject.userId, novelId: subject.novelId }, compilation, chapter)
+  if (compilation) await tryBindFutureWritingPlan(db, { userId: subject.userId, novelId: subject.novelId }, compilation, chapter)
 }

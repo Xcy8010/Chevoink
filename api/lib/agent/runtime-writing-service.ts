@@ -57,13 +57,18 @@ export const writingServiceOperationKey = (parentId: string, step: z.infer<typeo
   contextHash ? `review:${parentId}:${step}:${contextHash}` : `writing:${parentId}:${step}`
 
 function commitReviewManifest(compilation: { id: string; chapterId: string | null; chapter: { id: string; orderIndex: number } | null },
-  original: { prompt: string | null; spec: unknown }) {
+  original: { prompt: string | null; spec: unknown }, historical = false) {
   if (!compilation.chapter || compilation.chapterId !== compilation.chapter.id) return runtimeError('COMPILATION_NOT_FOUND', '没有当前任务可提交的章节。')
-  const required = originalChapterReviewRequirements(original, compilation.chapter)
+  if (historical) {
+    const required = originalChapterReviewRequirements(original, compilation.chapter)
+    return manifestSchema.parse({ version: 1, chapterId: compilation.chapter.id,
+      writingHash: runtimeJson({ compilationId: compilation.id, chapterId: compilation.chapter.id, required }).hash,
+      steps: [...(required.quality ? [{ step: 'quality', actions: ['quality_analyze'] }] : []),
+        ...(required.continuity ? [{ step: 'continuity', actions: ['continuity_validate'] }] : []), { step: 'commit', actions: ['chapter_bridge_commit'] }] })
+  }
   return manifestSchema.parse({ version: 1, chapterId: compilation.chapter.id,
-    writingHash: runtimeJson({ compilationId: compilation.id, chapterId: compilation.chapter.id, required }).hash,
-    steps: [...(required.quality ? [{ step: 'quality', actions: ['quality_analyze'] }] : []),
-      ...(required.continuity ? [{ step: 'continuity', actions: ['continuity_validate'] }] : []), { step: 'commit', actions: ['chapter_bridge_commit'] }] })
+    writingHash: runtimeJson({ compilationId: compilation.id, chapterId: compilation.chapter.id }).hash,
+    steps: [{ step: 'commit', actions: ['chapter_bridge_commit'] }] })
 }
 
 /** Same existing approval payload for the real commit and its required checks.
@@ -290,7 +295,9 @@ async function verifyServiceInput(tx: RuntimeTx, lease: ServiceProofSubject, sav
       || admission.sourceSnapshotHash !== original.normalization.sourceSnapshotHash || action !== actionFor(admission.step, parent.action)
       || runtimeJson(saved.args).hash !== runtimeJson({ compilationId }).hash || saved.baseline?.id !== compilationId)
       return runtimeError('RUNTIME_RECEIPT_INVALID', '必要检查与真实提交、章节或冻结来源不一致。')
-    const manifest = commitReviewManifest(compilation, request), step = manifest.steps.find(step => step.step === base)
+    // Existing internal checks keep their original admission proof, including
+    // dispatched/unknown recovery. New commits no longer schedule these steps.
+    const manifest = commitReviewManifest(compilation, request, true), step = manifest.steps.find(step => step.step === base)
     if (!step) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原作者任务不要求此检查，提交不能派发额外模型。')
     if (admission.source) {
       const previous = await tx.agentOperation.findFirst({ where: { id: admission.source.operationId, taskRootId: lease.taskRootId,

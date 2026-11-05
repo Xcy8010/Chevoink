@@ -53,13 +53,15 @@ describe('explicit composite approval using the existing author decision', () =>
     const record = await request()
     expect(mocks.tx.storyCompilation.findFirst).toHaveBeenCalledWith({ where: { userId: 'user', novelId: 'novel', runId: { in: ['run'] }, id: 'compilation', status: { in: ['active', 'completed'] } },
       include: { chapter: true }, orderBy: { createdAt: 'desc' } })
-    expect(record.payload).toMatchObject({ args, argsHash: runtimeJson(args).hash, writingServices: assertion().manifest })
+    const manifest = { version: 1, chapterId: 'chapter', writingHash: runtimeJson({ compilationId: 'compilation', chapterId: 'chapter' }).hash,
+      steps: [{ step: 'commit', actions: ['chapter_bridge_commit'] }] }
+    expect(record.payload).toMatchObject({ args, argsHash: runtimeJson(args).hash, writingServices: manifest })
     const projected = await projectApprovalEvent(mocks.tx as never, record, 'user')
     expect(projected).toMatchObject({ type: 'permission.ask', toolName: 'chapter_bridge_commit', args: { 写入参数: args,
-      后续操作: ['独立质量复核', '独立连续性复核', '提交本章承接状态'] } })
+      后续操作: ['提交本章承接状态'] } })
     expect((await pollToolApproval(lease, { expectedRevision: 0, expectedHash: frame.snapshotHash, callId: 'writer' })).event).toEqual(projected)
     approve(record)
-    await expect(assertWritingServiceApproval(mocks.tx as never, lease, assertion())).resolves.toBeUndefined()
+    await expect(assertWritingServiceApproval(mocks.tx as never, lease, { ...assertion(), manifest })).resolves.toBeUndefined()
   })
   it('reuses the exact displayed manifest without extending its expiry', async () => {
     const record = await request(), originalPayload = structuredClone(record.payload)
@@ -153,3 +155,4 @@ describe('explicit composite approval using the existing author decision', () =>
     expect(events.size).toBe(0)
   })
 })
+vi.mock('../../api/lib/agent/native-tool-policy.js', async importOriginal => ({ ...await importOriginal<typeof import('../../api/lib/agent/native-tool-policy.js')>(), readEffectiveNativeTooling: async (_tx: unknown, _lease: unknown, configuration: { tools: unknown[]; toolAuthority: unknown[] }) => configuration }))

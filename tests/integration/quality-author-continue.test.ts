@@ -1,3 +1,4 @@
+import { initializeExecutionState, saveExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
 import type { Prisma } from '@prisma/client'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
@@ -18,7 +19,7 @@ import { readQualityUnavailableProof } from '../../api/lib/agent/quality-unavail
 import { readOriginalTaskRequest, originalTaskRunIds } from '../../api/lib/agent/original-request.js'
 import { buildHumanityQualityContext, persistHumanityQualityReport, qualityReviewContextHash } from '../../api/lib/agent/humanity-quality.js'
 import { inspectCriticResponse, buildQualityEvidenceSources } from '../../api/lib/agent/quality-evidence.js'
-import { initializeExecutionState, saveExecutionState } from '../../api/lib/agent/runtime-state.js'
+
 import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
@@ -65,7 +66,7 @@ async function prepare(f: F, legacy: boolean) {
     choice: '绕路', cost: '耗费时间', turn: '发现脚印', exitState: state, styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
   if (legacy) await recordStoryCompilerWrite({ ...f, chapterId: f.chapterId, chapterOrderIndex: 1, chapterRevision: 1 })
   const window = credits.getCreditWindow()
-  await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+  await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
   installRuntime()
   return compilation.id
 }

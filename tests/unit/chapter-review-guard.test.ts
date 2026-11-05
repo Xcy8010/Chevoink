@@ -1,3 +1,4 @@
+import * as cycleStore from '../../api/lib/agent/review-cycle-store.js'
 import { beginReviewCycle } from '../../api/lib/agent/review-cycle.js'
 import * as sourceReads from '../../api/lib/agent/compiler-continuity-source.js'
 import { createHash } from 'node:crypto'
@@ -214,13 +215,28 @@ describe('current reviews and original new-draft manuscript authority', () => {
     expect(report.repairRound).toBe(1)
     await expect(probeChapterReviewRevision(f.tx, f.subject, f.chapter)).resolves.toEqual({ open: true })
   })
-  it.each(['no-change-request', 'hard-constraint', 'missing-canonical-binding'] as const)('ordinary manuscript admission preserves %s denial', async scenario => {
+  it.each(['no-change-request', 'hard-constraint', 'missing-canonical-binding'] as const)('automatic repair preserves its %s author constraint while ordinary tools use their actual grant', async scenario => {
     const f = fixture(scenario === 'no-change-request' ? '写下一章，不要修改本章正文' : '写下一章')
     if (scenario === 'hard-constraint') f.spec.hardConstraints.push({ id: 'preserve', kind: 'author_directive', text: '不要修改本章正文' })
     if (scenario === 'missing-canonical-binding') f.source.writingBindings = null as never
-    await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: '不应写入。' }))
+    await expect(assertChapterReviewRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: '不应自动修订。' }))
       .rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
+    expect(await assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: f.chapter.content })).toBeUndefined()
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+  })
+  it.each(['PLAN_CONTEXT_STALE', 'REVIEW_CYCLE_CONFLICT'])('ordinary saving does not depend on optional %s bookkeeping', async code => {
+    const f = fixture(), before = structuredClone(f.compilation)
+    vi.spyOn(cycleStore, 'prepareReviewCycleTransition').mockRejectedValue(new (await import('../../api/lib/prisma.js')).DataAccessError(409, code, 'old optional context'))
+    await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: '新的正文。' })).resolves.toBeUndefined()
+    expect(f.compilation).toEqual(before)
+  })
+  it.each(['REVIEW_CYCLE_CONFLICT', 'CHAPTER_REVISION_CONFLICT', 'RUNTIME_RECEIPT_INVALID'])('after-CAS bookkeeping preserves real %s semantics', async code => {
+    const f = fixture(), error = new (await import('../../api/lib/prisma.js')).DataAccessError(409, code, 'callback')
+    vi.spyOn(cycleStore, 'prepareReviewCycleTransition').mockResolvedValue(async () => { throw error })
+    const transition = await assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, { mutation: 'replace', after: '新的正文。' })
+    expect(transition).toBeTypeOf('function')
+    if (code === 'REVIEW_CYCLE_CONFLICT') await expect(transition!()).resolves.toBeUndefined()
+    else await expect(transition!()).rejects.toBe(error)
   })
   it.each(['forged-id', 'old-report', 'duplicate', 'blank-reason'] as const)('ordinary write validates supplied retained bindings: %s', async scenario => {
     const f = fixture(), quality = completeQuality(f, 1)

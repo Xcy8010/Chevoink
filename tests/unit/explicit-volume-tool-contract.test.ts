@@ -11,7 +11,7 @@ it('exposes the existing create tool for explicit volume creation and keeps a di
   const created = fresh('创建第二卷并命名为远行。'), explained = fresh('解释当前卷目录的布局。')
   expect(created.scope.authorEffects?.structure).toBe(true)
   expect(restrictToolsToTask([volumeListTool, volumeCreateTool], created).map(tool => tool.name)).toContain('volume_create')
-  expect(restrictToolsToTask([volumeListTool, volumeCreateTool], explained).map(tool => tool.name)).not.toContain('volume_create')
+  expect(restrictToolsToTask([volumeListTool, volumeCreateTool], explained).map(tool => tool.name)).toContain('volume_create')
 })
 it('retains only the explicit tail-volume capability for a bounded chapter, without granting volume move', () => {
   const spec = fresh('写下一章。')
@@ -20,13 +20,13 @@ it('retains only the explicit tail-volume capability for a bounded chapter, with
   const input = { prompt: '写下一章。' }
   const catalog = freezeTaskCapabilities(spec, input, ['volume_create', 'volume_move', 'chapter_create'])
   expect(catalog.scope.capabilityCatalog?.names).toContain('volume_create')
-  expect(restrictToolsToTask([volumeCreateTool, volumeMoveTool, chapterCreateTool], catalog).map(tool => tool.name)).toEqual(['volume_create', 'chapter_create'])
+  expect(restrictToolsToTask([volumeCreateTool, volumeMoveTool, chapterCreateTool], catalog).map(tool => tool.name)).toEqual(['volume_create', 'volume_move', 'chapter_create'])
   const chapter = toOpenAIToolPresentation(chapterCreateTool, catalog.scope)
   expect(chapter.parameters.properties).toHaveProperty('volumeId')
-  expect(chapter.parameters.properties).not.toHaveProperty('newVolume')
+  expect(chapter.parameters.properties).toHaveProperty('newVolume')
   const volume = toOpenAIToolPresentation(volumeCreateTool, catalog.scope)
-  expect(volume.parameters.required).toEqual(['title', 'summary', 'boundary', 'targetOrderIndex'])
-  expect(volume.parameters.properties).not.toHaveProperty('position')
+  expect(volume.parameters.required).toEqual(['title'])
+  expect(volume.parameters.properties).toHaveProperty('position')
 })
 it('preserves old frozen implicit-newVolume presentation and the original volume-create parameter shape', () => {
   const spec = fresh('写下一章。')
@@ -36,15 +36,15 @@ it('preserves old frozen implicit-newVolume presentation and the original volume
   expect(originalToolParameterSchemas(volumeCreateTool, spec.scope)).toContainEqual(expect.objectContaining({ properties: {
     title: expect.any(Object), summary: expect.any(Object), position: expect.any(Object),
   } }))
-  expect(restrictToolsToTask([volumeCreateTool], spec)).toEqual([])
+  expect(restrictToolsToTask([volumeCreateTool], spec)).toEqual([volumeCreateTool])
 })
 
 it('only fresh explicit directory creation receives planning authority, without chapter or move grants', () => {
   const old = buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '创建第二卷。', mode: 'plan', authorWritingProtocol: 2 })
   const fresh = buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '创建第二卷。', mode: 'plan', authorWritingProtocol: 2, volumeCreationProtocol: 1 })
-  expect(restrictToolsToTask([volumeCreateTool], old)[0].permission.plan).toBe('deny')
-  expect(restrictToolsToTask([volumeCreateTool], fresh)[0].permission.plan).toBe('allow')
-  expect(restrictToolsToTask([chapterCreateTool], fresh)).toEqual([])
+  expect(restrictToolsToTask([volumeCreateTool], old, 'plan')).toEqual([volumeCreateTool])
+  expect(restrictToolsToTask([volumeCreateTool], fresh, 'plan')).toEqual([volumeCreateTool])
+  expect(restrictToolsToTask([chapterCreateTool], fresh)).toEqual([chapterCreateTool])
   expect(volumeMoveTool.permission.plan).toBe('deny')
 })
 
@@ -53,15 +53,15 @@ it.each(['新建一个空卷', '给当前作品新增一卷', '帮我加一个�
   expect(task.intent).toBe('structure')
   expect(task.scope.authorEffects).toMatchObject({ manuscript: false, structure: true })
   const catalog = freezeTaskCapabilities(task, { prompt }, ['volume_create', 'chapter_create'])
-  expect(restrictToolsToTask([volumeCreateTool, chapterCreateTool], catalog, 'build').map(tool => tool.name)).toEqual(['volume_create'])
+  expect(restrictToolsToTask([volumeCreateTool, chapterCreateTool], catalog, 'build').map(tool => tool.name)).toEqual(['volume_create', 'chapter_create'])
 })
 it.each(['不要帮我加一个新卷', '解释为什么没有第二卷', '只读检查卷目录，不要增加第二卷', '解释“帮我加一个新卷”的含义'])('does not turn refusal or discussion into empty-volume creation: %s', prompt => {
   const task = buildTaskSpec({ runId: 'r', novelId: 'n', prompt, mode: 'build', authorWritingProtocol: 2, volumeCreationProtocol: 1 })
-  expect(restrictToolsToTask([volumeCreateTool, chapterCreateTool], task, 'build')).toEqual([])
+  expect(restrictToolsToTask([volumeCreateTool, chapterCreateTool], task, 'build')).toEqual([volumeCreateTool, chapterCreateTool])
 })
 
 it.each(['给第二卷增加摘要', '帮我添加第二卷的摘要'])('does not mistake an existing volume metadata edit for empty-volume creation: %s', prompt => {
   const task = buildTaskSpec({ runId: 'r', novelId: 'n', prompt, authorWritingProtocol: 2, volumeCreationProtocol: 1 })
   expect(task.scope.authorEffects?.manuscript).toBe(false)
-  expect(restrictToolsToTask([volumeCreateTool], task, 'build')).toEqual([])
+  expect(restrictToolsToTask([volumeCreateTool], task, 'build')).toEqual([volumeCreateTool])
 })

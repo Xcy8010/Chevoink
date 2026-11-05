@@ -256,7 +256,11 @@ export async function freezeWritingScope(tx: Prisma.TransactionClient, subject: 
   return frozen
 }
 
-const bindingSchema = z.object({ version: z.literal(1), taskId: z.string(), targets: z.array(z.object({ orderIndex: z.number().int().positive(), chapterId: z.string() }).strict()) }).strict()
+const bindingSchema = z.object({ version: z.literal(1), taskId: z.string(),
+  targets: z.array(z.object({ orderIndex: z.number().int().positive(), chapterId: z.string() }).strict()),
+  tailVolumes: z.array(z.object({ targetOrderIndex: z.number().int().positive(), proposalHash: z.string().regex(/^[a-f0-9]{64}$/u), volumeId: z.string().min(1) }).strict()).optional(),
+}).strict().refine(value => new Set(value.targets.map(item => item.orderIndex)).size === value.targets.length
+  && new Set(value.tailVolumes?.map(item => item.targetOrderIndex)).size === (value.tailVolumes?.length ?? 0), '章节或尾卷绑定重复')
 const newDraftRevisionSchema = z.object({ version: z.literal(1), taskId: z.string().min(1), chapterId: z.string().min(1),
   compilationId: z.string().min(1), checkedRevision: z.number().int().positive(),
   beforeHash: z.string().regex(/^[a-f0-9]{64}$/u).optional(), afterHash: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
@@ -513,7 +517,7 @@ async function assertLocalBodyEffect(tx: Prisma.TransactionClient, subject: Subj
   options: { mutation?: 'range' | 'replace' | 'append'; after?: string; editRanges?: Array<{ start: number; end: number; newText: string }> },
   automatic: boolean, spec: unknown) {
   const local = originalLocalEditBoundary(spec)
-  if (!local) return
+  if (!local || local.kind === 'needs_input' && !local.regions.length) return
   const actionSpec = taskSpecSchema.safeParse(spec).data
   if (actionSpec?.scope.writingActions && !local.regions.some(region => region.chapterId === chapter.id)) {
     const scope = await readWritingScope(tx, subject)
@@ -616,14 +620,6 @@ export async function assertWritingTarget(tx: Prisma.TransactionClient, subject:
   }
   const scope = await readWritingScope(tx, subject)
   const frozen = taskSpecSchema.safeParse(scope.spec).data
-  if (frozen?.scope.agentWritingProtocol === 1 && !frozen.scope.agentWritingBinding)
-    throw new DataAccessError(409, 'TASK_SCOPE_REQUIRED', '先由主Agent调用task_scope_bind确定本次正文意图和真实目标；无需让作者重复原请求。')
-  if (frozen?.scope.authorEffects?.manuscript === false && !(frozen.scope.agentWritingBinding && frozen.intent === 'review' && !target.effect)) {
-    if (frozen.intent === 'review' && target.effect && ['range', 'replace', 'append', 'changeset'].includes(target.effect)) {
-      throw new DataAccessError(409, 'REPAIR_NOT_AUTHORIZED', '原始作者请求未授权改写该正文；检查报告不能扩大写入权限。')
-    }
-    throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原始请求未授权该章节，不能通过工具、待办或子任务扩大范围。')
-  }
   const boundary = originalSelectionBoundary(scope.spec)
   if (boundary && (target.chapterId !== boundary.chapterId || target.effect && target.effect !== 'range')) {
     throw new DataAccessError(409, 'AUTHOR_SELECTION_SCOPE', '原任务只授权选区内片段替换，不能整体覆盖、追加、改名、创建或通过其他工具改动正文。')
@@ -634,17 +630,17 @@ export async function assertWritingTarget(tx: Prisma.TransactionClient, subject:
       ? actionTargetMatches(item, target.chapterId, scope.bindings) : item.orderIndex === target.orderIndex))
     if (actions.some(operation => operation.kind === 'write') && !actions.some(operation => operation.kind === 'revise')) local = null
   }
-  if (taskSpecSchema.safeParse(scope.spec).data?.scope.writingTargetProtocol === 2 && local?.kind === 'needs_input') {
-    throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', '目标章节已确认，但局部原文范围尚未唯一定位；本次未执行写作准备或正文变更。')
-  }
+  if (local?.kind === 'needs_input' && !local.regions.length) local = null
   if (local && target.effect && (local.kind === 'needs_input' || !local.regions.some(region => region.chapterId === target.chapterId)
     || target.effect !== 'range')) {
     throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', '原局部请求不能整体覆盖、追加、改名、创建或借其他工具改动正文；定位不明须补准确原文或选区后重新发起任务。')
   }
   if (scope.parentRunId && !await tx.agentRun.findFirst({ where: { id: scope.parentRunId, userId: subject.userId, novelId: subject.novelId,
     status: { in: ['queued', 'running', 'awaiting_approval'] } }, select: { id: true } })) throw new DataAccessError(409, 'RUNTIME_PARENT_LEASE_LOST', '父任务已暂停或结束，子任务不能写入。')
+  // Inferred missing intent is not a root permission gate. Already-bound
+  // chapter identities remain real target boundaries for all executions.
   if (!scope.writing || scope.writing.kind === 'unbounded') return scope
-  if (scope.writing.kind === 'needs_input') throw new DataAccessError(409, 'SCOPE_NEEDS_INPUT', '原任务缺少可证明的章节目标，请明确目标章节；保留已保存正文。')
+  if (scope.writing.kind === 'needs_input') return scope
   const allowed = scope.writing.targets.some(item => target.chapterId
     ? (item.chapterId ?? scope.bindings?.targets.find(binding => binding.orderIndex === item.orderIndex)?.chapterId) === target.chapterId
     : item.orderIndex === target.orderIndex)
@@ -695,7 +691,8 @@ export async function resolveWritingCreateTarget(tx: Prisma.TransactionClient, s
       && target.orderIndex === chapters.filter(item => item.volume.orderIndex < volume.orderIndex).length + position
   })
   if (bounded && !slot) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '显式创建目标不匹配原始请求的冻结章节范围，本次未创建或复用其他章节。')
-  await assertWritingTarget(tx, subject, existing ? { chapterId: existing.id, effect: 'create' } : { orderIndex: slot?.orderIndex ?? args.position, effect: 'create' })
+  await assertWritingTarget(tx, subject, existing ? { chapterId: existing.id, effect: 'create' }
+    : { orderIndex: slot?.orderIndex ?? args.position, effect: 'create' })
   return { slot, volumeId: volume?.id, chapters }
 }
 
@@ -705,23 +702,18 @@ export async function bindWritingChapter(tx: Prisma.TransactionClient, subject: 
   const scope = await assertWritingTarget(tx, subject, { orderIndex })
   if (!scope.writing || scope.writing.kind !== 'bounded') return
   const old = scope.bindings?.targets.find(item => item.orderIndex === orderIndex)
-  const admission = scope.writing.targets.find(item => item.orderIndex === orderIndex)!
+  const admission = scope.writing.targets.find(item => item.orderIndex === orderIndex)
+  if (!admission) {
+    throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '创建目标不在已绑定的章节范围内。')
+  }
   if ((old && old.chapterId !== chapterId) || (admission.chapterId && admission.chapterId !== chapterId)) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '本任务目标已绑定原章节，不能重复创建。')
-  await tx.agentRun.update({ where: { id: scope.sourceRunId }, data: { writingBindings: runtimeJson({ version: 1, taskId: scope.taskId,
+  await tx.agentRun.update({ where: { id: scope.sourceRunId }, data: { writingBindings: runtimeJson({ ...scope.bindings, version: 1, taskId: scope.taskId,
     targets: [...(scope.bindings?.targets.filter(item => item.orderIndex !== orderIndex) ?? []), { orderIndex, chapterId }].sort((a, b) => a.orderIndex - b.orderIndex) }).value } })
 }
 
 export async function assertWritingStructureAuthority(tx: Prisma.TransactionClient, subject: Subject, effect: 'structure' | 'metadata' = 'structure') {
   const scope = await readWritingScope(tx, subject)
-  if (taskSpecSchema.safeParse(scope.spec).data?.scope.volumeCreateIntent) {
-    throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '本次只授权添加指定空卷，不能改已有卷、迁移章节或改变其他结构。')
-  }
-  if (effect !== 'metadata' && taskSpecSchema.safeParse(scope.spec).data?.scope.authorEffects?.structure === false) {
-    throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原请求仅授权指定章节正文，未授权拆分、合并或重排作品结构。')
-  }
-  if (originalSelectionBoundary(scope.spec)) throw new DataAccessError(409, 'AUTHOR_SELECTION_SCOPE', '选区授权不允许改变章节结构。')
-  if (originalLocalEditBoundary(scope.spec)) throw new DataAccessError(409, 'AUTHOR_LOCAL_SCOPE', '局部正文授权不允许改变章节结构。')
-  if (scope.writing && scope.writing.kind !== 'unbounded') throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原请求仅授权指定章节正文，未授权拆分、合并或重排作品结构。')
+  if (effect === 'structure' && originalSelectionBoundary(scope.spec)) throw new DataAccessError(409, 'AUTHOR_SELECTION_SCOPE', '选区授权不允许改变章节结构。')
 }
 
 export function questionExpandsWritingScope(question: string, options: Array<{ label: string; detail?: string }>, writing: Writing | undefined, original: string | null): boolean {
@@ -1060,64 +1052,69 @@ async function readChapterDelivery(tx: Prisma.TransactionClient, subject: Subjec
   const scope = await readWritingScope(tx, subject)
   const originalSpec = taskSpecSchema.safeParse(scope.spec)
   const originalWriting = originalSpec.success ? originalSpec.data.scope.writing : undefined
+  const saved = await (await import('./saved-chapter-work.js')).readCurrentSavedTaskChapters(tx, subject)
+  const writing = scope.writing?.kind === 'bounded' && scope.writing.targets.length ? scope.writing
+    : saved.length && presentationKind === 'completed_wrap_up' ? { kind: 'bounded' as const, titleAndBodyOnly: false,
+      targets: saved.map(chapter => ({ orderIndex: chapter.orderIndex, chapterId: chapter.id })) } : null
   // readWritingScope authenticated these original targets and their bindings.
   // A current-chapter admission has no numbered legacy range to rediscover.
   // Historical inferred targets cannot create this presentation eligibility.
   const frozenTargets = originalWriting?.kind === 'bounded' && originalWriting.targets.length > 0 && scope.writing?.kind === 'bounded'
     && runtimeJson(originalWriting).hash === runtimeJson(scope.writing).hash
-  if (scope.writing?.kind !== 'bounded' || !scope.writing.targets.length
-    || (presentationKind === 'auto' && !scope.writing.titleAndBodyOnly)
+  if (!writing
+    || (presentationKind === 'auto' && !writing.titleAndBodyOnly)
     || (presentationKind !== 'completed_wrap_up' && !(frozenTargets
       ? allowsChapterArtifactPresentation(scope.prompt, presentationKind === 'auto')
       : allowsChapterOnlyCompletion(scope.prompt, presentationKind === 'auto')))) return null
-  const targets = scope.writing.targets.map(target => ({ ...target, chapterId: target.chapterId ?? scope.bindings?.targets.find(item => item.orderIndex === target.orderIndex)?.chapterId }))
+  const targets = writing.targets.map(target => ({ ...target, chapterId: target.chapterId ?? scope.bindings?.targets.find(item => item.orderIndex === target.orderIndex)?.chapterId }))
   const presentation = await readWritingPresentation(tx, subject, targets)
   if (presentationKind === 'completed_saved_only' && presentation?.mode !== 'saved_only') return null
   const runIds = await originalTaskRunIds(tx, subject, scope)
   const chapters = []
   const length = scope.prompt?.match(new RegExp(`(\\d{2,6})\\s*(?:${rangeDash}|至|到)\\s*(\\d{2,6})\\s*字`, 'u'))
-  for (const target of scope.writing.targets) {
+  for (const target of writing.targets) {
     const id = target.chapterId ?? scope.bindings?.targets.find(item => item.orderIndex === target.orderIndex)?.chapterId
     if (!id) return null
     await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${id} FOR SHARE`
     const chapter = await tx.chapter.findFirst({ where: { id, authorId: subject.userId, ...activeChapterScope(subject.novelId) }, select: { id: true, title: true, content: true, revision: true, orderIndex: true } })
     const terminal = await tx.storyCompilation.findFirst({ where: { userId: subject.userId, novelId: subject.novelId, runId: { in: runIds }, chapterId: id,
       status: { not: 'abandoned' } }, include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
-    if (!chapter?.content.trim() || terminal?.status !== 'completed' || terminal.stage !== 'commit'
-      || terminal.bridge?.toChapterId !== id || !terminal.bridge.committedAt || terminal.bridge.targetRevision !== chapter.revision) return null
-    const context = terminal.preparedContext && typeof terminal.preparedContext === 'object' && !Array.isArray(terminal.preparedContext) ? terminal.preparedContext : null
-    if (context?.terminalContentHash !== runtimeJson({ content: chapter.content }).hash) return null
+    if (!chapter?.content.trim()) return null
+    const savedProof = saved.find(item => item.id === id && item.revision === chapter.revision && item.content === chapter.content)
+    const committed = terminal?.status === 'completed' && terminal.stage === 'commit'
+      && terminal.bridge?.toChapterId === id && terminal.bridge.committedAt && terminal.bridge.targetRevision === chapter.revision
+    if (!savedProof && !committed) return null
+    const context = terminal?.preparedContext && typeof terminal.preparedContext === 'object' && !Array.isArray(terminal.preparedContext) ? terminal.preparedContext : null
+    if (!savedProof && context?.terminalContentHash !== runtimeJson({ content: chapter.content }).hash) return null
     let source: { id: string; revision: number; content: string } | null = null
-    if (terminal.bridge.fromChapterId) {
+    if (!savedProof && terminal?.bridge?.fromChapterId) {
       await tx.$queryRaw`SELECT id FROM chapters WHERE id = ${terminal.bridge.fromChapterId} FOR SHARE`
       source = await tx.chapter.findFirst({ where: { id: terminal.bridge.fromChapterId, ...activeChapterScope(subject.novelId) }, select: { id: true, revision: true, content: true } })
       if (source?.revision !== terminal.bridge.sourceRevision) return null
     }
-    const { readChapterReviewReadiness, hasPendingChapterReviewDecision } = await import('./chapter-review-guard.js')
-    let readiness: Awaited<ReturnType<typeof readChapterReviewReadiness>>
-    try { readiness = await readChapterReviewReadiness(tx, subject, terminal.id) }
+    const { readChapterReviewReadiness } = await import('./chapter-review-guard.js')
+    let readiness: Awaited<ReturnType<typeof readChapterReviewReadiness>> = null
+    try { if (terminal) readiness = await readChapterReviewReadiness(tx, subject, terminal.id) }
     catch (error) {
-      if (error instanceof DataAccessError && error.code === 'PLAN_CONTEXT_STALE') return null
-      throw error
+      if (!(error instanceof DataAccessError && error.code === 'PLAN_CONTEXT_STALE')) throw error
     }
-    if (!readiness?.ready) return null
-    if (hasPendingChapterReviewDecision(readiness)) return null
     if (length && (chapter.content.trim().length < Number(length[1]) || chapter.content.trim().length > Number(length[2]))) return null
     // Database finding order has no editorial meaning. Keep every reviewed
     // value while making this completion capture stable across row ordering.
     const reviewSets = new Set(['decisionDetails', 'decisionEntries', 'requiredDecisions', 'retainedDecisions', 'reviewCycleFindings'])
     const orderedReviewRows = (rows: unknown[]) => [...rows].sort((a, b) => runtimeJson(a).hash.localeCompare(runtimeJson(b).hash))
-    const reviewSnapshot = { ...Object.fromEntries(Object.entries(readiness).map(([key, value]) => [key,
+    const reviewSnapshot = readiness && { ...Object.fromEntries(Object.entries(readiness).map(([key, value]) => [key,
       reviewSets.has(key) && Array.isArray(value) ? orderedReviewRows(value) : value])),
       ...(readiness.reviewCycle ? { reviewCycle: { ...readiness.reviewCycle, findings: orderedReviewRows(readiness.reviewCycle.findings) } } : {}) }
     chapters.push({ ...chapter, contentHash: runtimeJson({ content: chapter.content }).hash,
-      completion: { compilationId: terminal.id, qualityReportId: readiness.qualityReportId,
-        commitHash: runtimeJson(JSON.parse(JSON.stringify(terminal))).hash, reviewHash: runtimeJson(reviewSnapshot).hash,
-        continuity: readiness.continuity, quality: readiness.quality, continuityErrors: readiness.continuityErrorCount,
-        qualityErrors: readiness.qualityErrorCount, openFindings: readiness.reviewCycleFindings?.length ?? null } })
+      completion: { compilationId: terminal?.id ?? null, qualityReportId: readiness?.qualityReportId ?? null,
+        commitHash: terminal ? runtimeJson(JSON.parse(JSON.stringify(terminal))).hash : savedProof!.sourceHash,
+        reviewHash: reviewSnapshot ? runtimeJson(reviewSnapshot).hash : null,
+        continuity: readiness?.continuity ?? 'missing', quality: readiness?.quality ?? 'missing', continuityErrors: readiness?.continuityErrorCount ?? 0,
+        qualityErrors: readiness?.qualityErrorCount ?? 0, openFindings: readiness?.reviewCycleFindings?.length ?? null } })
   }
-  const showFullText = presentation ? presentation.mode === 'full_text' : scope.writing.titleAndBodyOnly
-  return { chapters, titleAndBodyOnly: scope.writing.titleAndBodyOnly, presentation, presentationKind,
+  const showFullText = presentation ? presentation.mode === 'full_text' : writing.titleAndBodyOnly
+  return { chapters, titleAndBodyOnly: writing.titleAndBodyOnly, presentation, presentationKind,
     text: showFullText ? chapters.map(chapter => `${chapter.title}\n\n${chapter.content}`).join('\n\n')
       : `已保存${chapters.map(chapter => `《${chapter.title}》`).join('、')}。` }
 }

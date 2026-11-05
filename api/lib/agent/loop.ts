@@ -1,9 +1,10 @@
+import { AGENT_TOOL_EXECUTION_POLICY } from './tool-execution-guidance.js'
 import { readNovelInitializationCompletion } from './novel-initialization.js'
 import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { observedReviewOutcome, projectedReviewAction, type ReviewOutcome } from '../../../shared/review-lifecycle.js'
 import { readSettledQualityReviews, readQualityReviewAdmission } from './quality-review-admission.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
-import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, writingScopeResolvesInput, readCompletedWritingDelivery, readRecoveredChapterDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
+import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, readCompletedWritingDelivery, readRecoveredChapterDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
 import { consumeTextRequestRecovery, createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
 import { readReviewRequestRecovery, readCompletedReviewRequestRecovery } from './review-request-recovery.js'
@@ -71,8 +72,8 @@ import { toolFailureRecovery } from './tool-failure-recovery.js'
 import { frozenWritingToolGuidance, writingPreparationGuidance } from './writing-tool-guidance.js'
 import { findToolRestriction, isHistoricalReviewRestriction, isInputScopedFailure, restoreToolRestriction, toolFailureInputHash, toolRestrictionTarget, type ToolRestriction } from './tool-local-failure.js'
 import { assertLimitedWritingDelivery, type LimitedWritingDelivery } from './writing-delivery-limitations.js'
-import { readChapterReviewReadiness, hasPendingChapterReviewDecision, chapterReviewDecisionGuidance, type ChapterReviewReadiness } from './chapter-review-guard.js'
-import { nextMergedReviewReminder, nextReviewDispatch, reviewDispatchKey } from './review-dispatch.js'
+import { readAdvisoryChapterReviewReadiness, hasPendingChapterReviewDecision, chapterReviewDecisionGuidance, type ChapterReviewReadiness } from './chapter-review-guard.js'
+import { reviewDispatchKey } from './review-dispatch.js'
 import { deferToolProposal } from './deferred-tool.js'
 import { runtimeJson } from './runtime-common.js'
 import { readCancelledReviewRetirements } from './cancelled-review-recovery.js'
@@ -372,7 +373,7 @@ export async function handleToolCall(
     parsedArgs = call.arguments ? parseToolArgsTolerant(call.arguments, false) : {}
   } catch {
     const correction = call.name === 'scene_task_build'
-      ? '使用原生 scene_task_build：顶层 tasks 数组包含本章完整的 1–4 个场景；每项 purpose/goal/obstacle/choice/cost/turn 各一句短句，entryState/exitState 只填变化字段，可省略 compilationId/styleBudget/alternatives。不要写正文或重复整章设定。'
+      ? '使用原生 scene_task_build：顶层 tasks 数组包含本章完整场景；每项 purpose/goal/obstacle/choice/cost/turn 各一句短句，entryState/exitState 只填变化字段，可省略 compilationId/styleBudget/alternatives。不要写正文或重复整章设定。'
       : call.incomplete && ['chapter_write', 'chapter_append'].includes(call.name)
         ? '本次正文没有写入。先核对目标章节已保存内容；可将完整写作目标拆为完整段落逐次写入/追加，每次参数必须完整闭合，累计内容仍须满足原目标。不得重复覆盖已保存正文、补括号执行残文或缩短目标冒充完成。'
       : call.incomplete && call.name === 'plan_save'
@@ -884,14 +885,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   let researchReadBootstrap: { sourceId: string; receiptId: string } | null = null
   let researchHandoffChecked = false
   const networkArgumentFailures = new Map<string, number>()
-  const reviewReminders = new Set<string>()
   const historicalReviewAttempts = new Set<string>()
   const pendingReviews = new Map<string, PendingReviewCall>()
-  const incompleteRequestedReviews = new Map<string, string>()
   let deniedCommitObservation: string | undefined
   const toolRestrictions: ToolRestriction[] = []
   let inputProtocolRecovery: RunCheckpointState['inputProtocolRecovery']
-  let authorInputRequired: RunCheckpointState['authorInputRequired']
   const restrictTool = (action: string, args: unknown, code: string, reason: string, reviewInput?: ToolRestriction['reviewInput']) => {
     const target = toolRestrictionTarget(args, getLastTouchedChapter(runId) ?? params.chapterId)
     const inputHash = isInputScopedFailure(code) ? toolFailureInputHash(action, args) : undefined
@@ -961,7 +959,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     ...(pendingReviews.size ? { pendingReviews: [...pendingReviews.values()] } : {}),
     ...(toolRestrictions.length ? { toolRestrictions } : {}),
     ...(inputProtocolRecovery ? { inputProtocolRecovery } : {}),
-    ...(authorInputRequired ? { authorInputRequired } : {}),
     inheritedTokens, inheritedTurns, inheritedExecutionMs, manualResumeCount,
     ...(historicalReviewHandoffCount > 0 ? { reviewHandoffCount: historicalReviewHandoffCount } : {}),
   })
@@ -993,7 +990,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
   )
   const restoreCheckpointLimits = (checkpoint: RunCheckpointState) => {
     restoreReviewEvidence(checkpoint)
-    authorInputRequired = checkpoint.authorInputRequired
     runStartedAt = Math.min(runStartedAt, checkpoint.runStartedAt)
     resumeCount = checkpoint.resumeCount
     compactionCount = checkpoint.compactionCount
@@ -1213,28 +1209,17 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     if (taskSpec.scope.agentWritingProtocol === 1) taskSpec = await prisma.$transaction(tx => effectiveWritingTaskSpec(tx,
       { userId: params.userId, novelId: params.novelId, runId }, taskSpec))
     let resumedWritingTarget: { chapterId: string; orderIndex: number } | undefined
-    if ((authorInputRequired || taskSpec.scope.writing?.kind === 'needs_input')
-      && (taskSpec.scope.writingClarificationProtocol !== undefined || taskSpec.scope.writingTargetProtocol === 2)) {
-      const marker = authorInputRequired
-      const resolved = await prisma.$transaction(async tx => {
-        const subject = { userId: params.userId, novelId: params.novelId, runId }
-        const scope = await readWritingScope(tx, subject)
-        return { scope, answered: !!marker && await writingScopeResolvesInput(tx, subject, scope, marker) }
-      })
-      if (resolved.scope.targetCorrection || resolved.scope.clarification) {
-        // Effective view only: the immutable root and original taskSpec remain intact.
-        taskSpec = { ...taskSpec, scope: taskSpecSchema.parse(resolved.scope.spec).scope }
-      }
-      if (resolved.answered) {
-        authorInputRequired = undefined
-        if (resolved.scope.targetCorrection) for (let index = toolRestrictions.length - 1; index >= 0; index--) {
+    if (taskSpec.scope.writingClarificationProtocol !== undefined || taskSpec.scope.writingTargetProtocol === 2) {
+      const scope = await prisma.$transaction(tx => readWritingScope(tx, { userId: params.userId, novelId: params.novelId, runId }))
+      if (scope.targetCorrection || scope.clarification) taskSpec = { ...taskSpec, scope: taskSpecSchema.parse(scope.spec).scope }
+      if (scope.targetCorrection) {
+        resumedWritingTarget = scope.targetCorrection
+        for (let index = toolRestrictions.length - 1; index >= 0; index--) {
           const item = toolRestrictions[index]
           if (item.code === 'SCOPE_NEEDS_INPUT' && item.action === 'story_compiler_prepare'
-            && (!item.target || item.target === resolved.scope.targetCorrection.chapterId)) toolRestrictions.splice(index, 1)
+            && (!item.target || item.target === scope.targetCorrection.chapterId)) toolRestrictions.splice(index, 1)
         }
-        await persistCheckpoint()
       }
-      if (resolved.scope.targetCorrection && !authorInputRequired) resumedWritingTarget = resolved.scope.targetCorrection
     }
     const responseContinue: TaskResponseContinue | undefined = params.resume && params.authorContinue && legacyOwnerReceipt
       ? { ...params.authorContinue, ownerSeq: legacyOwnerReceipt.seq, ownerHash: legacyOwnerReceipt.hash } : undefined
@@ -1252,25 +1237,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
     }
     const ordinaryResponseAvailable = taskSpec.responseDeliveryProtocol === 1 || Boolean(responseContinue && await readResponseProof())
-    const checkAuthorScope = !taskSpec.scope.authorEffects
-      && (continuingTask || taskSpec.scope.writingTargetProtocol === 2 && taskSpec.scope.writingClarificationProtocol === undefined)
-    const needsScopeDecision = !ordinaryResponseAvailable && checkAuthorScope && (taskSpec.scope.writing?.kind === 'needs_input' || taskSpec.scope.localEditBoundary?.kind === 'needs_input')
-      ? await prisma.$transaction(async tx => {
-        const effective = await effectiveWritingTaskSpec(tx, { userId: params.userId, novelId: params.novelId, runId }, taskSpec)
-        return effective.scope.writing?.kind === 'needs_input' || effective.scope.localEditBoundary?.kind === 'needs_input'
-      }) : false
-    if (authorInputRequired || needsScopeDecision) {
-      const notice = taskSpec.scope.writingTargetProtocol === 2 && !continuingTask
-        ? taskSpec.scope.writing?.kind === 'bounded' && taskSpec.scope.localEditBoundary?.kind === 'needs_input'
-          ? '目标章节已确认，但局部改动范围尚不能从已保存正文唯一定位。请补充准确原文片段或编辑器选区后重新发起任务；本次未改正文，也未调用模型。'
-          : '本次请求的章节目标存在缺失或冲突，请明确要处理的章节后重新发起任务；本次未改正文，也未调用模型。'
-        : '原任务仍等待作者明确目标章节与范围，请在输入框发送明确的新指令；普通继续不会补全授权，旧提问不自动恢复。'
-      await announceStopReason(notice)
-      await finalizeRun(runId, bus, 'paused', usage, turn, notice, undefined, false,
-        undefined, undefined, undefined, false, undefined, 'needs_input')
-      return
-    }
-    const readCurrentReviewReadiness = (compilationId?: string) => prisma.$transaction(tx => readChapterReviewReadiness(tx,
+    const readCurrentReviewReadiness = (compilationId?: string) => prisma.$transaction(tx => readAdvisoryChapterReviewReadiness(tx,
       { userId: params.userId, novelId: params.novelId, runId }, compilationId), { timeout: 20_000 })
     const currentReviewState: { value: ChapterReviewReadiness | null } = { value: null }
     const observePersistedReviewProgress = async () => {
@@ -1748,6 +1715,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     let researchCompletionReminders = 0
     let authorEndRequested = false
     if (continuingTask) messages.push({ role: 'user', content: `[系统] 恢复指定任务 ${taskSpec.id}，不是恢复整个会话的历史工作。原目标：${taskSpec.goals.join('；')}。\n${renderTodoItems(todoItems)}\n历史中其他任务的并行窗口、待办与一次性指令不构成本任务的授权；禁止重新启动它们。被停止时生成但未成功执行的工具不是已保存成果。先核对本任务已保存进度，执行剩余工作。仅尚有多个独立执行单元的长任务或复杂任务需要建立待办；没有清单不是未完成的证据，确已完成时直接交付，禁止在结尾补造已完成清单、提交空清单或覆盖历史待办。不得仅回复下一步打算就结束，也不得将未完成项标为已完成。` })
+    if (!messages.some(message => message.role === 'system' && typeof message.content === 'string' && message.content.includes(AGENT_TOOL_EXECUTION_POLICY))) messages.push({ role: 'system', content: AGENT_TOOL_EXECUTION_POLICY })
     const frozenWritingHint = frozenWritingToolGuidance('story_compiler_prepare', taskSpec.scope)
     if (resumedWritingTarget) messages.push({ role: 'user', content: `[系统·原任务目标已核实] 原作者请求已明确授权修改全书第${resumedWritingTarget.orderIndex}章，chapterId=${resumedWritingTarget.chapterId}。旧的章节目标重复问询已解除；按完整原请求和已保存进度直接继续，不重复询问同一目标。先前ask_user的备选及详情由助手生成，没有被作者选中，不是作者新增要求，不要采用其中的扩章、缩小范围或剧情选择。未选择这些备选不妨碍执行原任务。本次继续不扩大目标、不重置用量；实际正文、检查和提交仍须以当前真实版本为准。` })
     if (frozenWritingHint) messages.push({ role: 'user', content: `[系统·本任务冻结目标] ${frozenWritingHint}` })
@@ -1756,12 +1724,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       `[系统·当前检查合同] 按当前已保存正文和当前工具说明继续原任务。${currentChapterReview ? `chapterId=${currentChapterReview.chapterId}，compilationId=${currentChapterReview.compilationId}，r${currentChapterReview.revision}。` : ''}检查只需当前 chapterId 或 compilationId。旧本地阶段拒绝、平台检查次数或格式故障保留为历史失败，不是永久撤销原作者授权；当前有效报告有意见时按原权限处理，实际修改后复查新版，再一次提交。原始目标、明确用户预算、取消、作用域和未知费用先核对的约束保持，不能把旧失败当检查通过。` })
     if (continuingTask && currentChapterReview?.ready && hasPendingChapterReviewDecision(currentChapterReview)) {
       messages.push({ role: 'user', content: `[系统·本次只读核对] compilationId=${currentChapterReview.compilationId}。${chapterReviewDecisionGuidance(currentChapterReview)} 此状态提示不新增权限、不重置预算，也不代表意见已处理或任务完成。` })
-    }
-    const currentDispatch = (readiness: ChapterReviewReadiness | null) => {
-      const allowed = toolContext.toolAuthority ? intersectToolAuthority(tools, params.mode, toolContext.toolAuthority)
-        : tools.filter(tool => tool.permission[params.mode] !== 'deny')
-      return nextReviewDispatch(readiness, new Set(allowed.map(tool => tool.name)),
-        new Set([...pendingReviews.values()].map(call => reviewDispatchKey(call, call.toolName))))
     }
     // A4：长上下文提醒消息（单实例，每轮移除后重新追加到队尾，保证只存在一条且最靠近当前轮）
     const contextReminder: ChatMessage = {
@@ -2121,44 +2083,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (ordinaryResponseAvailable && effectiveToolCalls.length === 0 && result.content.trim()
         && result.finishReason !== 'length' && result.finishReason !== 'tool_calls' && !containsAgentProtocolInvocation(result.content)
         && !isTaskResponseToolEnvelope(result.content)
-        && !pendingReviews.size && !incompleteRequestedReviews.size && !forceWrapUpReason && !authorInputRequired
+        && !pendingReviews.size && !forceWrapUpReason
         && !todoItems.some(item => ['pending', 'in_progress'].includes(item.status))) {
         const proof = await readResponseProof()
         if (proof) ordinaryResponse = { ...proof, answer: result.content }
       }
-      let automaticReviewTriggered = false
-      let mergedReviewReminder: string | undefined
-      // A weak tool caller cannot skip the delivery assessments by returning
-      // prose. These calls use the same original tool ceiling and ordinary
-      // journal, approvals, billing and compiler counters as model calls.
-      if (!ordinaryResponse && !deniedCommitObservation && !completedWritingWrapUp.value && effectiveToolCalls.length === 0 && requiresManuscriptDelivery(taskSpec)
-        && params.mode === 'build'
-        && result.finishReason !== 'tool_calls' && !containsAgentProtocolInvocation(result.content)) {
-        const readiness = await readCurrentReviewReadiness()
-        const next = await currentDispatch(readiness)
-        if (next.kind === 'tool' && (next.tool.name === 'continuity_validate' ? readiness?.continuity : readiness?.quality) !== 'incomplete') {
-          automaticReviewTriggered = true
-          effectiveToolCalls.push({ id: `review_${messageId}`, name: next.tool.name, arguments: JSON.stringify(next.tool.args) })
-        }
-        else if (next.kind === 'blocked' || next.kind === 'tool') {
-          forceWrapUpReason = next.kind === 'blocked' ? next.reason : '当前检查报告无效，正文及实际费用保留；根据已知失败反馈继续纠正检查，不能把无效报告当作通过。'
-          forceWrapUpLocal = Boolean(readiness?.requiredTools.some(item => findToolRestriction(toolRestrictions, item.name, item.args, readiness.chapterId, readiness)
-            || [...pendingReviews.values()].some(pending => pending.chapterId === readiness.chapterId && pending.toolName === item.name)))
-        }
-        else if (readiness?.ready && toolContext.sandboxMode !== 'read_only'
-          && !toolContext.inlineChild && !toolContext.protectedChapterIds?.has(readiness.chapterId)
-          && (readiness.reviewProtocol === 1 ? hasPendingChapterReviewDecision(readiness) : readiness.continuityErrorCount > 0 || (readiness.qualityCandidateCount ?? 0) > 0)) {
-          const key = nextMergedReviewReminder(readiness, new Set(tools.map(tool => tool.name)), reviewReminders, hasPendingChapterReviewDecision(readiness))
-          if (key) {
-            reviewReminders.add(key)
-            await persistCheckpoint()
-            automaticReviewTriggered = true
-            mergedReviewReminder = `[系统/只读状态] ${chapterReviewDecisionGuidance(readiness)}`
-          }
-        }
-      }
-
-      const reviewProgressText = mergedReviewReminder ? '正在核对检查意见的处理结果。' : '正文已保存，正在完成当前版本的必要检查。'
 
       const toolHistoryStart = messages.length
       if (deniedCommitObservation && effectiveToolCalls.length === 0) {
@@ -2166,21 +2095,19 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         forceWrapUpLocal = false
       }
       messages.push(...toolTurnHistory(result, effectiveToolCalls, { bootstrap: Boolean(bootstrapCall),
-        recoveredText: recoveredToolCalls.length > 0, withholdText: automaticReviewTriggered }))
+        recoveredText: recoveredToolCalls.length > 0 }))
 
-      const cleanContent = ordinaryResponse ? ordinaryResponse.answer : automaticReviewTriggered ? reviewProgressText
-        : explanatoryResponse ? result.content : normalizeExecutionText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
+      const cleanContent = ordinaryResponse ? ordinaryResponse.answer : explanatoryResponse ? result.content : normalizeExecutionText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
       // This projection affects publication only. Empty-response, promise and
       // saved-delivery decisions below retain baseline execution normalization.
-      const authorContent = ordinaryResponse ? ordinaryResponse.answer : automaticReviewTriggered ? ''
-        : explanatoryResponse ? result.content : humanizeAgentVisibleText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
+      const authorContent = ordinaryResponse ? ordinaryResponse.answer : explanatoryResponse ? result.content : humanizeAgentVisibleText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
 
       // 主流 Agent 标准（Codex 等）：任务过程中的进展正文同样是对话正文信道，作者实时可见、刷新后仍在；
       // 只有模型原生 reasoning 才进思考信道，执行旁白不再改道思考区。
       // text.delta 已实时显示供应商原始流；无论最终是否有干净文本，都要发 text.final 做归一化，
       // 这样 DSML/乱码被清洗成空串时能立即从界面移除，而不是残留到刷新前。
-      const deferWritingCompletionText = taskSpec.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED') || Boolean(ordinaryResponse) || !automaticReviewTriggered && (completedWritingWrapUp.value !== null || effectiveToolCalls.length === 0 && requiresCompletedWritingPresentation(taskSpec))
-      if ((result.content || automaticReviewTriggered) && !deferWritingCompletionText) bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
+      const deferWritingCompletionText = taskSpec.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED') || Boolean(ordinaryResponse) || (completedWritingWrapUp.value !== null || effectiveToolCalls.length === 0 && requiresCompletedWritingPresentation(taskSpec))
+      if (result.content && !deferWritingCompletionText) bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
 
       const parts: AgentMessagePart[] = []
       if (liveTurn) liveTurn.parts = parts
@@ -2213,13 +2140,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         return
       }
 
-      if (mergedReviewReminder) {
-        requireNativeToolCall = true
-        await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
-        bus.emit({ type: 'step.finish', turn, usage: result.usage })
-        messages.push({ role: 'user', content: mergedReviewReminder })
-        continue
-      }
 
       const invalidToolProtocol =
         !explanatoryResponse && effectiveToolCalls.length === 0 &&
@@ -2254,13 +2174,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
 
       if (cleanContent) lastAssistantText = authorContent
-      if (effectiveToolCalls.length === 0 && taskSpec.intent === 'review' && incompleteRequestedReviews.size) {
-        await persistMessage(messageId, runId, params.sessionId, 'assistant', parts.filter(part => part.type !== 'text'))
-        bus.emit({ type: 'text.final', messageId, text: '', asReasoning: false })
-        bus.emit({ type: 'step.finish', turn, usage: result.usage })
-        await finalizeFailedWithNotice('请求的检查尚未取得有效报告：' + [...incompleteRequestedReviews.values()].join('；'))
-        return
-      }
 
       if (!cleanContent.trim() && effectiveToolCalls.length === 0) {
         // Preserve diagnosis, but do not replay unproductive reasoning into a
@@ -2304,7 +2217,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               expected: ordinaryResponse, signal: controller.signal, messageId, parts,
               assertObligations: () => {
                 controller.signal.throwIfAborted()
-                if (pendingReviews.size || incompleteRequestedReviews.size || forceWrapUpReason || authorInputRequired
+                if (pendingReviews.size || forceWrapUpReason
                   || todoItems.some(item => ['pending', 'in_progress'].includes(item.status))) {
                   throw new DataAccessError(409, 'TASK_RESPONSE_WORK_PENDING', '当前任务仍有未完成实际工作，答复未交付。')
                 }
@@ -2368,13 +2281,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           return
         }
         const todoIncomplete = unfinishedTodos.length > 0
-        const unresolvedWritingScope = taskSpec.scope.authorEffects?.manuscript
-          && (taskSpec.scope.writing?.kind === 'needs_input' || taskSpec.scope.localEditBoundary?.kind === 'needs_input')
-          && await prisma.$transaction(async tx => {
-            const effective = await effectiveWritingTaskSpec(tx, { userId: params.userId, novelId: params.novelId, runId }, taskSpec)
-            return effective.scope.writing?.kind === 'needs_input' || effective.scope.localEditBoundary?.kind === 'needs_input'
-          })
-        const prematureFinish = unresolvedWritingScope || chapterIncomplete || reportIncomplete || todoIncomplete || result.finishReason === 'length' || promisesFurtherAction(cleanContent) || (expectsPlanSave && !planSavePerformed)
+        const prematureFinish = chapterIncomplete || reportIncomplete || todoIncomplete || result.finishReason === 'length' || promisesFurtherAction(cleanContent) || (expectsPlanSave && !planSavePerformed)
         if (prematureFinish && deferWritingCompletionText) bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
         if (prematureFinish && (taskSpec.intent !== 'research_analysis' || researchCompletionReminders < 4)) {
           requireNativeToolCall = true
@@ -2383,7 +2290,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           bus.emit({ type: 'step.finish', turn, usage: result.usage })
           messages.push({
             role: 'user',
-            content: completedWritingWrapUp.value ? completedWritingTodoGuidance(todoItems) : `[系统] 当前回复尚不足以交付：仍有未完成待办、未落盘产出，或回复只说明了下一步动作/被截断。${chapterIncomplete ? '\n本任务要求写下一章，但本任务作用域内尚无完整正文及对应当前版本的章节终态。先用真实工具核对已有编译与正文：尚未建立则准备本章，已有则完成缺失步骤；不要重写已完成章节，不要引用历史工具记录冒充本次执行。' : ''}\n${renderTodoItems(unfinishedTodos)}${reportReminder}\n只在原授权范围内继续下一步，不重新规划已完成工作。有本任务既有清单时才更新真实完成进度；无清单且工作已完成时直接交付，不为结束任务补建空清单或已完成清单。无法完成的项保持未完成并说明阻塞，严禁假标 completed。需要作者决策时使用 ask_user。`,
+            content: completedWritingWrapUp.value ? completedWritingTodoGuidance(todoItems) : `[系统] 当前回复尚不足以交付：仍有未完成待办、未落盘产出，或回复只说明了下一步动作/被截断。${chapterIncomplete ? '\n本任务要求写下一章，但当前任务尚无匹配最新正文的保存证据。用真实工具核对目标正文与剩余工作；不要重写已完成章节，也不要用其他任务记录冒充本次保存。' : ''}\n${renderTodoItems(unfinishedTodos)}${reportReminder}\n只在原授权范围内继续下一步，不重新规划已完成工作。有本任务既有清单时才更新真实完成进度；无清单且工作已完成时直接交付，不为结束任务补建空清单或已完成清单。无法完成的项保持未完成并说明阻塞，严禁假标 completed。需要作者决策时使用 ask_user。`,
           })
           continue
         }
@@ -2393,7 +2300,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         if (!prematureFinish && !report?.content && requiresCompletedWritingPresentation(taskSpec) && !savedCandidate) {
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts.filter(part => part.type !== 'text'))
           bus.emit({ type: 'step.finish', turn, usage: result.usage })
-          await finalizeFailedWithNotice('当前授权章节尚无与最新正文和检查报告一致的提交回执，不能确认完成；已保存内容保留。')
+          await finalizeFailedWithNotice('当前目标章节尚无与最新正文一致的保存证据，不能确认完成；已保存内容保留。')
           return
         }
         if (!prematureFinish && targetEvidenceMissing && taskSpec.researchDiscoveryProtocol === 1) {
@@ -2630,7 +2537,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           && result.toolCalls.some(native => native.id === call.id && native.name === call.name)
         const assertResponseObligations = () => {
           controller.signal.throwIfAborted()
-          if (pendingReviews.size || incompleteRequestedReviews.size || forceWrapUpReason || authorInputRequired
+          if (pendingReviews.size || forceWrapUpReason
             || todoItems.some(item => ['pending', 'in_progress'].includes(item.status))) {
             throw new DataAccessError(409, 'TASK_RESPONSE_WORK_PENDING', '当前任务仍有未完成实际工作，答复未交付；继续原执行流程。')
           }
@@ -2674,11 +2581,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         if (STATE_SENSITIVE_VALIDATORS.has(call.name)) admission.invalidateStateReads()
         if (reviewBatchKey && outcome.part.status !== 'success' && !outcome.unresolvedTextRequest) knownBatchReviewResults.set(reviewBatchKey, outcome.observation)
         await settleRegisteredReview(reviewDispatch, outcome)
-        if (taskSpec.intent === 'review' && STATE_SENSITIVE_VALIDATORS.has(call.name)) {
-          const key = `${call.name}:${reviewDispatch?.chapterId ?? toolRestrictionTarget(preflightArgs, params.chapterId)}`
-          if (outcome.part.status === 'success' && outcome.reviewCompleted !== false && outcome.reviewOutcome !== 'evidence_repair_required') incompleteRequestedReviews.delete(key)
-          else if (!outcome.unresolvedTextRequest) incompleteRequestedReviews.set(key, outcome.observation)
-        }
+
         if (outcome.unresolvedTextRequest && !reviewDispatch) {
           forceWrapUpReason = '原工具请求的供应商结果或费用尚未确认，保留原回执，先核对实际结果，未重派请求。'
         }
@@ -2729,15 +2632,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           && !outcome.part.display.unanswered && outcome.part.display.answer && isExplicitAuthorEnd(outcome.part.display.answer, outcome.part.display.options)) {
           authorEndRequested = true
         }
-        if (call.name === 'ask_user' && outcome.failureCode === 'AUTHOR_INPUT_REQUIRED') {
-          authorInputRequired = { version: 1, callId: call.id,
-            kind: taskSpec.scope.localEditBoundary?.kind === 'needs_input' ? 'local_edit_scope' : 'writing_scope' }
-        }
         parts.push(outcome.part)
         // 子 Agent 内嵌执行产生的内部工具卡片随父消息一并直播与落库，刷新后仍可展开查看
         if (outcome.extraParts?.length) parts.push(...outcome.extraParts)
         messages.push({ role: 'tool', toolCallId: call.id, content: outcome.observation })
-        if (forceWrapUpReason || authorEndRequested || authorInputRequired) {
+        if (forceWrapUpReason || authorEndRequested) {
           break
         }
       }
@@ -2752,7 +2651,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
       // Persist the ordinary batch counter before its completion receipt, so a
       // restarted owner cannot replay a finished batch with a stale checkpoint.
-      if (!authorInputRequired && !pendingReviews.size && !authorEndRequested) {
+      if (!pendingReviews.size && !authorEndRequested) {
         const waitingForChild = effectiveToolCalls.some(call => ['task_wait', 'task_get', 'task_list'].includes(call.name))
           && await prisma.agentRun.count({ where: { userId: params.userId, novelId: params.novelId, OR: [{ session: { spawnedFromRunId: runId } }, { incomingChildGrant: { currentParentRunId: runId } }],
             status: { in: ['queued', 'running', 'awaiting_approval'] } } }) > 0
@@ -2772,12 +2671,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       }
       await persistCheckpoint()
       bus.emit({ type: 'step.finish', turn, usage: result.usage })
-
-      if (authorInputRequired) {
-        forceWrapUpLocal = true
-        await wrapUpAndFinish('等待作者明确目标章节与范围；提问已保存，未选择默认方案。请在输入框发送明确的新指令，普通继续不能补全原任务授权。')
-        return
-      }
 
       if (pendingReviews.size) {
         // Finish the batch's already admitted safe independent observations,

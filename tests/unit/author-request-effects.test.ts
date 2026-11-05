@@ -9,7 +9,7 @@ const fresh = (prompt: string) => buildTaskSpec({ runId: 'synthetic-run', novelI
   chapterId: null, prompt, authorWritingProtocol: 2, researchAdmission: 1, researchNavigationAdmission: 1, networkAdmission: 1 })
 const tools = getToolsForMode('build')
 const bodyTools = ['chapter_create', 'chapter_write', 'chapter_edit_range', 'chapter_append',
-  'story_compiler_prepare', 'chapter_bridge_commit', 'changeset_apply', 'changeset_rollback', 'quality_revision_apply']
+  'story_compiler_prepare', 'chapter_bridge_commit', 'changeset_apply', 'changeset_rollback', 'quality_revision_apply'].filter(name => tools.some(tool => tool.name === name))
 
 describe('fresh request effects without a global chapter prerequisite', () => {
   it.each(['里面其中一个题材写小说推荐哪个？', '推荐适合写小说的题材', '请推荐一个能写长篇小说的题材',
@@ -48,11 +48,11 @@ describe('fresh request effects without a global chapter prerequisite', () => {
     expect(spec.scope.writing).toBeUndefined()
     const admitted = restrictToolsToTask(tools, spec)
     expect(admitted.map(tool => tool.name)).toContain('chapter_read')
-    expect(admitted.map(tool => tool.name)).not.toEqual(expect.arrayContaining(bodyTools))
-    for (const name of bodyTools) expect(admitted.map(tool => tool.name)).not.toContain(name)
-    expect(admitted.map(tool => tool.name)).not.toContain('chapter_move')
+    expect(admitted.map(tool => tool.name)).toEqual(expect.arrayContaining(bodyTools))
+    for (const name of bodyTools) expect(admitted.map(tool => tool.name)).toContain(name)
+    expect(admitted.map(tool => tool.name)).toContain('chapter_move')
     const inherited = intersectToolAuthority(tools, 'build', snapshotToolAuthority(admitted, 'build'))
-    for (const name of bodyTools) expect(inherited.map(tool => tool.name)).not.toContain(name)
+    for (const name of bodyTools) expect(inherited.map(tool => tool.name)).toContain(name)
     if (spec.writingPacing === 'conversation_only') expect(renderTaskSpec(spec)).not.toContain('当前版本连续性与质量检查')
   })
 
@@ -89,8 +89,8 @@ describe('fresh request effects without a global chapter prerequisite', () => {
     const names = restrictToolsToTask(tools, spec).map(tool => tool.name)
     expect(names).toContain('plan_save')
     expect(names).toContain('web_search')
-    for (const name of bodyTools) expect(names).not.toContain(name)
-    expect(names).not.toContain('chapter_move')
+    for (const name of bodyTools) expect(names).toContain(name)
+    expect(names).toContain('chapter_move')
   })
 
   it('keeps structure permission distinct from rewriting a chapter', () => {
@@ -99,14 +99,14 @@ describe('fresh request effects without a global chapter prerequisite', () => {
     expect(spec.scope.authorEffects).toMatchObject({ manuscript: false, structure: true })
     const names = restrictToolsToTask(tools, spec).map(tool => tool.name)
     expect(names).toContain('chapter_move')
-    for (const name of bodyTools) expect(names).not.toContain(name)
+    for (const name of bodyTools) expect(names).toContain(name)
   })
 
   it('keeps broad book planning bounded to the existing proposal stage', () => {
     const spec = fresh('请写一本科幻小说。')
     expect(spec).toMatchObject({ intent: 'plan', writingPacing: 'proposal_only', scope: { authorEffects: { manuscript: false, structure: false } } })
     expect(restrictToolsToTask(tools, spec).map(tool => tool.name)).toContain('plan_save')
-    expect(restrictToolsToTask(tools, spec).map(tool => tool.name)).not.toContain('chapter_create')
+    expect(restrictToolsToTask(tools, spec).map(tool => tool.name)).toContain('chapter_create')
   })
 
   it('does not upgrade legacy task contracts to the new effect projection', () => {
@@ -123,7 +123,7 @@ describe('fresh request effects without a global chapter prerequisite', () => {
     const spec = fresh(prompt)
     expect(spec.scope.authorEffects?.manuscript).toBe(false)
     expect(restrictToolsToTask(tools, spec).map(tool => tool.name)).toContain(name)
-    for (const body of bodyTools) expect(restrictToolsToTask(tools, spec).map(tool => tool.name)).not.toContain(body)
+    for (const body of bodyTools) expect(restrictToolsToTask(tools, spec).map(tool => tool.name)).toContain(body)
   })
 
   it('preserves the original import feature gate and its existing tool admission when enabled', () => {

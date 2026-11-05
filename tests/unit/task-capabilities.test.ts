@@ -17,15 +17,15 @@ function task(prompt: string) {
 const freeze = (prompt: string) => freezeTaskCapabilities(task(prompt), { prompt }, names)
 
 describe('fresh task relevance catalog', () => {
-  it('narrows one ordinary chapter task while preserving the complete internal writing closure', () => {
+  it('keeps the actual role catalog available without inferring permissions from the current chapter task', () => {
     const spec = freeze('修改第四章正文，核对连续性和质量。')
-    expect(spec.scope.capabilityCatalog?.kind).toBe('writing')
+    expect(spec.scope.capabilityCatalog?.kind).toBe('full')
     const selected = spec.scope.capabilityCatalog!.names
-    expect(selected.length).toBeLessThan(names.length)
+    expect(selected).toEqual([...names, 'execution_context_read'])
     for (const name of ['chapter_read', 'chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'story_compiler_prepare',
       'scene_task_build', 'continuity_validate', 'quality_analyze', 'quality_finding_feedback', 'chapter_bridge_commit', 'execution_context_read']) expect(selected).toContain(name)
-    expect(selected).not.toContain('cover_generate')
-    expect(selected).not.toContain('skill_publish')
+    expect(selected).toContain('cover_generate')
+    expect(selected).toContain('skill_publish')
     expect(taskSpecSchema.safeParse(spec).success).toBe(true)
   })
   it.each(['修改第四章正文，然后导出', '修改第四章正文并生成封面', '修改第四章正文，然后创建一个技能',
@@ -44,7 +44,7 @@ describe('fresh task relevance catalog', () => {
     expect(original.scope.capabilityCatalog).toBeUndefined()
   })
   it.each([{ prompt: '研究《合成作品》，不要联网', kind: 'full' },
-    { prompt: '上网搜索《合成作品》，研究叙事技巧，只搜索不要读取正文', kind: 'research' }])(
+    { prompt: '上网搜索《合成作品》，研究叙事技巧，只搜索不要读取正文', kind: 'full' }])(
     'preserves research network/read denials after relevance selection: $prompt', ({ prompt, kind }) => {
       const spec = freeze(prompt), available = getToolsForAgent(getAgentDefinition('orchestrator'), 'build')
       const selected = restrictToolsToTask(available, spec)

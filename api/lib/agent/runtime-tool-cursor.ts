@@ -1,7 +1,7 @@
-import { isExplicitNovelMetadataRequest, isNovelDirectionSetup } from './task-spec.js'
+import { readEffectiveNativeTooling, readNativeToolAdmission } from './native-tool-policy.js'
 import { DataAccessError } from '../prisma.js'
 import { findPlanByIdentity } from './novel-plan-contract.js'
-import { hasRetiredNativeArguments, verifiedAssistantToolViews, toolWithNativeView, needsNativeToolProjection } from './runtime-tool-view.js'
+import { hasRetiredNativeArguments, verifiedAssistantToolViews, toolWithNativeView } from './runtime-tool-view.js'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { runtimeError, runtimeJson, runtimeJsonHash, TASK_ARTIFACT_ACTIONS } from './runtime-common.js'
@@ -12,7 +12,6 @@ import { parseToolArgsTolerant } from './tool-argument-parser.js'
 import { coerceToolArgumentEnvelope } from './tools/argument-coercion.js'
 import { normalizeToolInput, validateToolInput } from './tools/input-validation.js'
 import type { AgentTool } from './tools/types.js'
-import { originalToolParameterSchemas } from './tool-schema.js'
 import { assertToolApproval, readToolApprovalOutcome } from './runtime-approval.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { readObservedBaseline } from './runtime-observed-baseline.js'
@@ -132,12 +131,10 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
     const call = assistant?.role === 'assistant' ? assistant.toolCalls?.find(item => !frame.state.messages.slice(index + 1)
       .some(message => message.role === 'tool' && message.toolCallId === item.id)) : undefined
     if (!call || call.id !== callId) return runtimeError('RUNTIME_STATE_CONFLICT', '不能拒绝其他轮次或已回答调用。')
-    const grant = current.configuration.toolAuthority.find(item => item.name === call.name)
-    const scope = taskSpecSchema.parse(current.originalSpec).scope
-    const projected = await needsNativeToolProjection(current.configuration.tools, scope, call.name)
-    const published = projected
-      ? (await verifiedAssistantToolViews(tx, token.taskRootId, frame, current.configuration.tools, scope)).find(tool => tool.function.name === call.name)
-      : current.configuration.tools.find(tool => tool.function.name === call.name)
+    const spec = taskSpecSchema.parse(current.originalSpec), scope = spec.scope
+    const effective = await readEffectiveNativeTooling(tx, token, current.configuration, spec)
+    const grant = effective.toolAuthority.find(item => item.name === call.name)
+    const published = (await verifiedAssistantToolViews(tx, token.taskRootId, frame, current.configuration.tools, scope)).find(tool => tool.function.name === call.name)
     let code: z.infer<typeof toolRejectionSchema>['code'] | undefined
     let validation: z.infer<typeof toolRejectionSchema>['validation']
     let validationHint = ''
@@ -152,11 +149,11 @@ export async function rejectToolCursorCall(token: RunLeaseToken, cursor: ToolExe
       catch { code = 'TOOL_ARGUMENTS_INVALID' }
       if (!code && hasRetiredNativeArguments(call.name, parsed)) code = 'TOOL_CONTRACT_RETIRED'
       if (!code && validator) {
+        if (validator.name !== call.name) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '字段校验器不匹配实际工具合同。')
         const schemaHash = runtimeJsonHash(published.function.parameters)
-        if (validator.name !== call.name || !projected && !originalToolParameterSchemas(validator, scope).some(schema => runtimeJsonHash(schema) === schemaHash)) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '字段校验器不匹配原工具合同，不能以新schema拒绝旧调用。')
         // An exception is an implementation fault, not proof of invalid user/model data.
         // Leave it for recovery instead of recording a deterministic schema rejection.
-        const actualValidator = projected || call.name === 'agent_configure' ? toolWithNativeView(validator, published) : validator
+        const actualValidator = toolWithNativeView(validator, published)
         const normalized = normalizeToolInput(validator, parsed)
         const validated = validateToolInput(actualValidator, normalized)
         if (!validated.success) {
@@ -246,15 +243,21 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     const frame = current.frame.revision === cursor.expectedRevision ? current.frame
       : await readExecutionFrame(tx, token.taskRootId, cursor.expectedRevision)
     if (frame.snapshotHash !== cursor.expectedHash || frame.state.phase !== 'idle' || input.key !== `exec:${frame.state.nextOperationSequence}`) runtimeError('RUNTIME_STATE_CONFLICT', '工具必须从原执行位置准入。')
-    const grant = current.configuration.toolAuthority.find(item => item.name === input.action)
+    const originalTask = taskSpecSchema.parse(current.originalSpec)
+    const originalOperation = current.frame.state.phase === 'awaiting_operation' && current.frame.state.pendingOperationId
+      ? await tx.agentOperation.findUniqueOrThrow({ where: { id: current.frame.state.pendingOperationId } }) : null
+    const admitted = originalOperation ? readNativeToolAdmission(originalOperation) : null
+    const effective = current.frame.state.phase === 'idle' || admitted
+      ? await readEffectiveNativeTooling(tx, token, current.configuration, originalTask) : current.configuration
+    let grant = effective.toolAuthority.find(item => item.name === input.action)
+    if (admitted && grant) grant = { ...grant, alwaysConfirm: grant.alwaysConfirm || admitted.grant.alwaysConfirm,
+      dangerous: grant.dangerous || admitted.grant.dangerous,
+      permission: grant.permission === 'deny' || admitted.grant.permission === 'deny' ? 'deny'
+        : grant.permission === 'ask' || admitted.grant.permission === 'ask' ? 'ask' : 'allow' }
     if (input.action === 'novel_delete' && (input.effectDomain !== 'deletion' || !input.requireApproval)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '删除只能通过独立终态提交，且必须明确确认。')
     if (input.effectDomain === 'deletion' && (input.action !== 'novel_delete' || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '删除能力仅属于原作者任务。')
     if (input.action === 'novel_import' && input.effectDomain !== 'import') runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '导入不能通过只读或旧写入适配器执行。')
     if (input.effectDomain === 'import' && (input.action !== 'novel_import' || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '导入能力仅允许原任务的专用导入流程。')
-    const originalTask = taskSpecSchema.parse(current.originalSpec)
-    const setup = originalTask.scope.novelInitializationProtocol === 1 && input.effectDomain === 'metadata' && ['novel_create', 'novel_update_meta'].includes(input.action)
-      && (isExplicitNovelMetadataRequest(originalTask.goals.join('\n')) || isNovelDirectionSetup(originalTask.goals.join('\n')))
-    const explicitPlanVolume = originalTask.scope.volumeCreationProtocol === 1 && input.effectDomain === 'structure' && input.action === 'volume_create' && (originalTask.scope.authorEffects?.structure === true || Boolean(originalTask.scope.volumeCreateIntent))
     const plan = input.effectDomain === 'plan'
     const configuration = input.effectDomain === 'configuration'
     if (configuration && (!['agent_configure', 'model_assign'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '配置能力只能更新当前任务的执行选项。')
@@ -271,7 +274,7 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
       || input.targetId !== taskSpecSchema.parse(current.originalSpec).scope.novelId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '变更集能力仅允许当前作品的已确认操作。')
     const compiler = input.effectDomain === 'compiler'
     if (compiler && (!['story_compiler_prepare', 'scene_task_build', 'continuity_validate', 'chapter_bridge_commit', 'quality_analyze'].includes(input.action) || input.targetId !== token.taskRootId)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '编译能力只允许本任务的准备、场景构建、连续性/质量检查与终态提交。')
-    if ((!read && !task && !memory && input.action !== 'session_rename' && (plan || setup || explicitPlanVolume || (metadata && ['research_dossier_build', 'story_charter_save', 'reader_promise_save', 'reader_promise_update'].includes(input.action)) ? !['plan', 'build'].includes(current.configuration.mode) : current.configuration.mode !== 'build')) || !grant || grant.permission === 'deny'
+    if (!grant || grant.permission === 'deny'
       || (!plan && !read && !structure && !task && !compiler && !memory && !metadata && !changeset && current.configuration.protectedChapterIds.includes(input.targetId))) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原冻结授权不允许此次工具效果。')
     let index = frame.state.messages.length - 1
     while (index >= 0 && frame.state.messages[index].role === 'tool') index--
@@ -281,12 +284,15 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     if (!call || call.id !== input.callId || call.name !== input.action || call.incomplete) runtimeError('RUNTIME_STATE_CONFLICT', '工具不是当前下一条完整待执行调用。')
     const frozenArgs = await readPreparedLiteraryArguments(tx, token, { action: input.action, callId: input.callId,
       rawArguments: call!.arguments, cursor })
-    if (await needsNativeToolProjection(current.configuration.tools, taskSpecSchema.parse(current.originalSpec).scope, input.action)) {
-      const views = await verifiedAssistantToolViews(tx, token.taskRootId, frame, current.configuration.tools, taskSpecSchema.parse(current.originalSpec).scope)
+    const oldDefinition = current.configuration.tools.find(tool => tool.function.name === input.action)
+    let published = admitted?.definition ?? effective.tools.find(tool => tool.function.name === input.action)
+    if (!originalOperation) {
+      const views = await verifiedAssistantToolViews(tx, token.taskRootId, frame, current.configuration.tools, originalTask.scope)
       const definition = views.find(tool => tool.function.name === input.action)
       const raw = coerceToolArgumentEnvelope(call!.arguments ? parseToolArgsTolerant(call!.arguments, false) : {})
       if (!definition || !z.fromJSONSchema(definition.function.parameters).safeParse(raw).success
         || hasRetiredNativeArguments(input.action, raw)) return runtimeError('RUNTIME_INPUT_INVALID', '工具参数不符合产生本轮助手的实际工具视图，未执行。')
+      published = definition
     }
     let normalized: unknown
     try { normalized = input.normalize(frozenArgs ?? coerceToolArgumentEnvelope(call!.arguments ? parseToolArgsTolerant(call!.arguments, false) : {})) }
@@ -308,10 +314,9 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
         && (input.effectDomain === 'chapter' || input.effectDomain === 'compiler')) {
         const scope = await (await import('./writing-scope.js')).readWritingScope(tx,
           { userId: token.userId, novelId: parentRoot.novelId, runId: token.runId })
-        if (!taskSpecSchema.parse(scope.spec).scope.agentWritingBinding) return runtimeError('TASK_SCOPE_REQUIRED', '父任务须先由主Agent确定正文目标；子任务不能自行分配权限。')
         const args = normalized as Record<string, unknown>
         const id = typeof args.chapterId === 'string' ? args.chapterId : input.effectDomain === 'chapter' ? input.targetId : null
-        if (id && !scope.writing?.targets.some(target => (target.chapterId ?? scope.bindings?.targets.find(binding => binding.orderIndex === target.orderIndex)?.chapterId) === id))
+        if (id && scope.writing?.kind === 'bounded' && !scope.writing.targets.some(target => (target.chapterId ?? scope.bindings?.targets.find(binding => binding.orderIndex === target.orderIndex)?.chapterId) === id))
           return runtimeError('RUNTIME_CHILD_TARGET_NOT_AUTHORIZED', '子任务目标不在主Agent已锁定的正文范围内。')
       }
       const finite = !parentSpec.scope.agentWritingProtocol && parentSpec.scope.chapterIds?.length && !parentSpec.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED')
@@ -329,7 +334,12 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     if (envelope.callId !== input.callId || runtimeJsonHash(envelope.args) !== normalizedArgsHash) runtimeError('RUNTIME_IDENTITY_CONFLICT', '操作信封与归一化参数不同。')
     const normalization = { version: 1 as const, rawArguments: call!.arguments, normalizedArgsHash,
       sourceRevision: frame.revision, sourceSnapshotHash: frame.snapshotHash }
-    const operation = await prepareOperationInTransaction(tx, token, { key: input.key, kind: 'tool', action: input.action, input: { ...base, normalization } })
+    const oldGrant = current.configuration.toolAuthority.find(item => item.name === input.action)
+    const toolAdmission = admitted ?? (published && (runtimeJsonHash(oldGrant ?? null) !== runtimeJsonHash(grant)
+      || runtimeJsonHash(oldDefinition?.function.parameters ?? null) !== runtimeJsonHash(published.function.parameters))
+      ? { version: 1 as const, grant: grant!, definition: published } : null)
+    const operation = await prepareOperationInTransaction(tx, token, { key: input.key, kind: 'tool', action: input.action,
+      input: runtimeJson({ ...base, normalization, ...(toolAdmission ? { toolAdmission } : {}) }).value })
     const pending = await saveExecutionStateInTransaction(tx, token, { ...cursor, snapshot: { ...frame.state, phase: 'awaiting_operation',
       pendingOperationId: operation.id, nextOperationSequence: frame.state.nextOperationSequence + 1 } })
     return { operation, pending }

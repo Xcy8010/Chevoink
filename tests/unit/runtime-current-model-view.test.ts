@@ -44,7 +44,7 @@ describe('current model request tools and exact prepared-request recovery', () =
     const before = runtimeJson(JSON.parse(JSON.stringify(mocks.current))).hash, cursorBefore = structuredClone(cursor)
     try {
       const result = validateModelCursor(token, cursor, { ...input(), tools: supplied })
-      if (scenario === 'implicit' || scenario === 'current') await expect(result).resolves.toEqual(mocks.frame)
+      if (scenario === 'implicit' || scenario === 'current' || scenario === 'order') await expect(result).resolves.toEqual(mocks.frame)
       else await expect(result).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
       expect(runtimeJson(JSON.parse(JSON.stringify(mocks.current))).hash).toBe(before)
       expect(cursor).toEqual(cursorBefore)
@@ -62,7 +62,9 @@ describe('current model request tools and exact prepared-request recovery', () =
     const before = runtimeJson(mocks.operation).hash
     try {
       await expect(validateModelCursor(token, cursor, { ...input(), tools: full })).resolves.toEqual(mocks.frame)
-      await expect(validateModelCursor(token, cursor, { ...input(), tools: [todo] })).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+      const subset = validateModelCursor(token, cursor, { ...input(), tools: [todo] })
+      if (phase === 'prepared') await expect(subset).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+      else await expect(subset).resolves.toEqual(mocks.frame)
       expect(runtimeJson(mocks.operation).hash).toBe(before)
     } finally { mocks.projected = originalProjected }
   })
@@ -99,3 +101,4 @@ describe('current model request tools and exact prepared-request recovery', () =
     expect(runtimeJson(mocks.operation).hash).toBe(saved)
   })
 })
+vi.mock('../../api/lib/agent/native-tool-policy.js', async importOriginal => ({ ...await importOriginal<typeof import('../../api/lib/agent/native-tool-policy.js')>(), readEffectiveNativeTooling: async (_tx: unknown, _lease: unknown, configuration: { tools: unknown[]; toolAuthority: unknown[] }) => configuration }))

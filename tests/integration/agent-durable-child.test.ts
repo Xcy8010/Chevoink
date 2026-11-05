@@ -1,3 +1,4 @@
+import { initializeExecutionState, saveExecutionState } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { setTimeout as contentionTimer } from 'node:timers/promises'
 import { Prisma } from '@prisma/client'
@@ -8,7 +9,7 @@ import { handleTestDatabaseUnavailable } from '../support/database-availability.
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { initializeDurableTask, attachRunToDurableTask } from '../../api/lib/agent/runtime-identity.js'
 import { acquireRunLease, withRunLease, releaseRunLease, type RunLeaseToken } from '../../api/lib/agent/runtime-lease.js'
-import { initializeExecutionState, loadExecutionState, saveExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { prepareToolCursorOperation } from '../../api/lib/agent/runtime-tool-cursor.js'
 import { subAgentRunTool } from '../../api/lib/agent/tools/subagent-tools.js'
 import { taskSpawnTool } from '../../api/lib/agent/tools/task-orchestration-tools.js'

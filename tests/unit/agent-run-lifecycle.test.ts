@@ -83,7 +83,7 @@ vi.mock('../../api/lib/ai-service.js', () => ({ chatWithTools: mocks.chat }))
 // read-only observation is controlled to exercise real loop dispatch/order.
 vi.mock('../../api/lib/agent/chapter-review-guard.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../api/lib/agent/chapter-review-guard.js')>(),
-  readChapterReviewReadiness: mocks.reviewReadiness, probeChapterReviewRevision: mocks.reviewProbe,
+  readChapterReviewReadiness: mocks.reviewReadiness, readAdvisoryChapterReviewReadiness: mocks.reviewReadiness, probeChapterReviewRevision: mocks.reviewProbe,
 }))
 // Actual candidate construction and transactional admission have PostgreSQL
 // coverage. These tests exercise how the real loop handles that decision.
@@ -280,6 +280,7 @@ vi.mock('../../api/lib/agent/legacy-continuity-recovery.js', () => ({ readLegacy
 vi.mock('../../api/lib/agent/legacy-input-recovery.js', () => ({ readLegacyAnchorInputRecovery: mocks.legacyAnchorRecovery }))
 vi.mock('../../api/lib/agent/continuity-offline-recovery.js', () => ({ readOfflineContinuityRecovery: mocks.offlineContinuity }))
 vi.mock('../../api/lib/agent/humanity-quality.js', () => ({ hasCommittedTaskChapter: mocks.committedChapter, qualityCompilationScope: vi.fn(async () => ({ runId: 'run' })) }))
+vi.mock('../../api/lib/agent/saved-chapter-work.js', () => ({ readCurrentSavedTaskChapters: vi.fn(async () => []) }))
 // Most cases isolate dispatch/recovery and already model a successful compiler
 // commit with committedChapter. Give that explicit fixture its corresponding
 // read-only delivery receipt. The presentation/CAS cases below use the actual
@@ -396,34 +397,21 @@ function admitCurrentOriginal(prompt: string) {
 type Response = Awaited<ReturnType<typeof chatType>>
 const response = (content = '已完成。', toolCalls: Response['toolCalls'] = [], tokens = 10): Response => ({ content, toolCalls, reasoning: '', finishReason: toolCalls.length ? 'tool_calls' : 'stop', usage: { promptTokens: tokens, completionTokens: 0, totalTokens: tokens, promptCacheHitTokens: null, promptCacheMissTokens: null } })
 const call = (id: string, name = 'chapter_read', args = '{}') => ({ id, name, arguments: args })
+const withExplicitChecks = (commit: ReturnType<typeof call>, ...checks: string[]) => [
+  ...checks.map((name, index) => call(`explicit_review_${commit.id}_${index}`, name,
+    JSON.stringify({ compilationId: JSON.parse(commit.arguments).compilationId }))), commit,
+]
 const events = () => mocks.emit.mock.calls.map(([event]) => event as AgentStreamEventBody)
 const commitEffects = new Map<AgentTool['execute'], ReturnType<typeof vi.fn>>()
 const commitEffect = (item: AgentTool) => commitEffects.get(item.execute) ?? item.execute
 function tool(name: string, execute: (ctx?: ToolContext, args?: unknown) => Promise<ToolResult>, readOnly = true): AgentTool {
   const effect = vi.fn(execute)
   let committed: { chapterId: string; revision: number; result: ToolResult } | undefined
-  // The domain mock implements the new registered-review callback contract.
-  // Count the handler and the actual commit effect separately: an entered
-  // handler can legitimately fail before committing or return new findings.
+  // A local commit records saved text; it does not automatically dispatch a
+  // paid check or certify the separate report state.
   const handler: AgentTool['execute'] = name !== 'chapter_bridge_commit' ? effect : vi.fn(async (ctx, args) => {
-    const attempted = new Set<string>()
-    for (;;) {
-      const state = await mocks.reviewReadiness()
-      if (!state) break
-      if (committed?.chapterId === state.chapterId && committed.revision === state.revision) return committed.result
-      const next = state.requiredTools[0]
-      if (!next) {
-        const refs = (args as { retainedFindings?: Array<{ source: string; reportId: string; findingId: string }> }).retainedFindings ?? []
-        if (state.mustPassPending || state.decisionPending && (state.requiredDecisions ?? []).some(ref => !refs.some(item => item.source === ref.source
-          && item.reportId === ref.reportId && item.findingId === ref.findingId))) return { outcome: 'failed', failureCode: 'REVIEW_DECISION_REQUIRED', output: '当前报告仍有意见须处理，未提交。' }
-        break
-      }
-      const key = `${state.revision}:${next.name}`
-      if (!ctx.registeredReview || attempted.has(key)) return { outcome: 'failed', failureCode: 'REVIEW_DEPENDENCY_UNAVAILABLE', output: '当前必要报告未完成，未提交。' }
-      attempted.add(key)
-      const report = await ctx.registeredReview(next.name, { compilationId: state.compilationId! })
-      if (report.outcome === 'failed') return report
-    }
+    const state = await mocks.reviewReadiness()
+    if (state && committed?.chapterId === state.chapterId && committed.revision === state.revision) return committed.result
     const result = await effect(ctx, args)
     const current = await mocks.reviewReadiness()
     if (result.outcome !== 'failed' && current) committed = { chapterId: current.chapterId, revision: current.revision, result }
@@ -746,7 +734,7 @@ describe('server assessment fallback in the real execution loop', () => {
     const commit = tool('chapter_bridge_commit', async () => { expect(state.ready).toBe(true); mocks.committedChapter.mockResolvedValue(true); return { output: '已提交' } }, false)
     mocks.tools = [check, edit, commit]
     queue(...[1, 2, 3].flatMap(n => [response('', [call(`check${n}`, check.name, '{"compilationId":"comp"}'), call(`repeat${n}`, check.name, '{"compilationId":"comp"}')]),
-      response('', [call(`edit${n}`, edit.name, JSON.stringify({ chapterId: 'c', patches: [{ oldText: `正文${n}`, newText: `正文${n + 1}` }] }))])]), response('', [call('commit', commit.name, '{"compilationId":"comp"}')]), response('', [call('fresh-commit', commit.name, '{"compilationId":"comp"}')]), response('已完成。'))
+      response('', [call(`edit${n}`, edit.name, JSON.stringify({ chapterId: 'c', patches: [{ oldText: `正文${n}`, newText: `正文${n + 1}` }] }))])]), response('', [...withExplicitChecks(call('commit', commit.name, '{"compilationId":"comp"}'), 'continuity_validate')]), response('', [call('fresh-commit', commit.name, '{"compilationId":"comp"}')]), response('已完成。'))
     await run('写下一章')
     expect(checks).toBe(4)
     expect(edit.execute).toHaveBeenCalledTimes(3)
@@ -776,28 +764,28 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(checkpoint.pendingReviews ?? []).toEqual([])
     expect(checkpoint).toMatchObject({ resumeCount: 0, compactionCount: 0, writeProgress: 0 })
   })
-  it.each(['CONTINUITY_EVIDENCE_UNLOCATED', 'CONTINUITY_REPORT_INCOMPLETE'])('%s clears the received pending call and returns a truthful failed commit without a second request and keeps the remaining batch', async failureCode => {
+  it.each(['CONTINUITY_EVIDENCE_UNLOCATED', 'CONTINUITY_REPORT_INCOMPLETE'])('%s clears the received pending call and allows an ordinary save without a second request and keeps the remaining batch', async failureCode => {
     let state = readiness('missing', 'complete')
     mocks.reviewReadiness.mockImplementation(async () => state)
     const check = tool('continuity_validate', async () => { state = readiness('incomplete', 'complete'); return { outcome: 'failed', failureCode, output: '已收到报告，证据尚未定位' } })
-    const commit = tool('chapter_bridge_commit', async () => ({ output: '不应执行' }), false)
+    const commit = tool('chapter_bridge_commit', async () => { mocks.committedChapter.mockResolvedValue(true); return { output: '正文已保存，报告仍未完成' } }, false)
     const read = tool('chapter_read', async () => ({ output: '当前正文仍保留' }))
     mocks.tools = [check, commit, read]
     queue(response('', [call('check', check.name, '{"compilationId":"comp"}'), call('commit', commit.name, '{"compilationId":"comp"}'), call('read', read.name)]), response('报告尚未确认，正文保留。'))
     await run('写下一章')
     expect(check.execute).toHaveBeenCalledOnce()
-    expect(commitEffect(commit)).not.toHaveBeenCalled()
+    expect(commitEffect(commit)).toHaveBeenCalledOnce()
     expect(read.execute).toHaveBeenCalledOnce()
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'commit', ok: false, failureCode: 'REVIEW_DEPENDENCY_UNAVAILABLE' }))
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'commit', ok: true }))
     expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'check', ok: false, failureCode }))
     const checkpoint = (mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews?: unknown[]; toolRestrictions?: unknown[] } }).checkpoint
     expect(checkpoint.pendingReviews ?? []).toEqual([])
     expect(checkpoint.toolRestrictions ?? []).toEqual([])
   })
   it.each(['CONTINUITY_EVIDENCE_UNLOCATED', 'CONTINUITY_REPORT_INCOMPLETE'])('%s retains its current cause at legacy stagnant nine without resetting the checkpoint', async failureCode => {
-    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '检查当前章节并说明报告结果' })
     taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 20, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
-    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    mocks.currentOriginal = { prompt: '检查当前章节并说明报告结果', taskSpec }
     const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
       activeExecutionMs: 172197, stagnantBatches: 8, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
       writeProgress: 3, writeBaseline: 0, readProgress: 3, readBaseline: 0, progressSignatures: ['read-range:' + JSON.stringify(['c', 'b'.repeat(64)]) + ':0-2502'],
@@ -808,19 +796,19 @@ describe('server assessment fallback in the real execution loop', () => {
     mocks.reviewReadiness.mockImplementation(async () => state)
     const check = tool('continuity_validate', async () => { state = readiness('incomplete', 'stale', 4); return { outcome: 'failed', failureCode, output: '原始报告已保存，引用尚未确认' } })
     const read = tool('chapter_read', async () => ({ output: '保存的 r4 正文', observedChapterRange: { targetId: 'c', contentHash: 'b'.repeat(64), start: 0, end: 2502 } }))
-    const commit = tool('chapter_bridge_commit', async () => ({ output: '不可提交' }), false)
+    const commit = tool('chapter_bridge_commit', async () => ({ output: '当前正文保存状态已记录，报告仍未完成' }), false)
     mocks.tools = [check, read, commit]
     queue(response('', [call('check', check.name, '{"compilationId":"comp"}'), call('read', read.name), call('commit', commit.name, '{"compilationId":"comp"}')]),
       response('当前报告引用仍未确认；正文和真实失败报告保留，章节未提交。'))
-    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '检查当前章节并说明报告结果', resume: true })
     expect(check.execute).toHaveBeenCalledOnce()
     expect(read.execute).toHaveBeenCalledOnce()
-    expect(commitEffect(commit)).not.toHaveBeenCalled()
+    expect(commitEffect(commit)).toHaveBeenCalledOnce()
     expect(mocks.chat).toHaveBeenCalledTimes(2)
     expect(mocks.fixtureBudgetExhaustions).toBe(0)
-    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(events().at(-1), JSON.stringify(events().slice(-8))).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'check', ok: false, failureCode }))
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'error', code: 'run_failed' }))
+    expect(events()).not.toContainEqual(expect.objectContaining({ type: 'error', code: 'run_failed' }))
     expect(events().some(event => event.type === 'text.final' && event.text.includes('连续多轮没有推进'))).toBe(false)
     expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 1070, checkpoint: {
       stagnantBatches: 9, writeProgress: 3, readProgress: 3, maxTurns: 1, tokenBudget: 500,
@@ -829,9 +817,9 @@ describe('server assessment fallback in the real execution loop', () => {
   })
   it('keeps a malformed terminal report pending without granting a new judgment at the stagnation boundary', async () => {
     const { runtimeJson } = await import('../../api/lib/agent/runtime-common.js')
-    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '检查当前章节并说明报告结果' })
     taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 20, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
-    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    mocks.currentOriginal = { prompt: '检查当前章节并说明报告结果', taskSpec }
     const body = mocks.chapters[0].content, proofHash = 'd'.repeat(64)
     mocks.chapters[0].orderIndex = 20
     mocks.chapters[0].orderInVolume = 20
@@ -869,13 +857,13 @@ describe('server assessment fallback in the real execution loop', () => {
     mocks.tools = [check, commit]
     queue(response('', [call('received-report', check.name, '{"compilationId":"comp"}')]),
       response('当前报告仍未取得完整处置，保留原始未知意见，章节尚未提交。'))
-    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '检查当前章节并说明报告结果', resume: true })
     // A known completed request is not unknown billing. The malformed
     // report remains incomplete and cannot be certified by a prose summary.
     expect(check.execute).toHaveBeenCalledOnce(); expect(commitEffect(commit)).not.toHaveBeenCalled()
     expect(mocks.chat).toHaveBeenCalledTimes(2)
     expect(mocks.fixtureBudgetExhaustions).toBe(0)
-    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     expect(mocks.runs.get('run')?.usage.checkpoint.pendingReviews ?? []).toEqual([])
     expect(state.terminalReview?.unresolved).toEqual([{ path: 'factCoverage.old', verdict: 'unknown' }])
   })
@@ -930,7 +918,7 @@ describe('server assessment fallback in the real execution loop', () => {
         ({ ...ref, reason: 'The full current evidence does not justify changing the manuscript; preserve this independent opinion for the author.' })) }))])
     })
     mocks.chat.mockImplementationOnce(async request => {
-      if (!['hard-pass', 'missing-tool'].includes(scenario)) expect(request.messages.some(message => message.content?.includes('[当前已核验交付') && message.content.includes(body))).toBe(true)
+      if (scenario !== 'missing-tool') expect(request.messages.some(message => message.content?.includes('[当前已核验交付') && message.content.includes(body))).toBe(true)
       return response('本章延续人物的选择，让后续线索逐步展开。')
     })
     // The loop-only suite supplies its existing explicit committed-delivery
@@ -940,7 +928,7 @@ describe('server assessment fallback in the real execution loop', () => {
     try {
       await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '修改本章', resume: true })
     } finally { delivery.mockRestore() }
-    if (scenario === 'hard-pass' || scenario === 'missing-tool') {
+    if (scenario === 'missing-tool') {
       expect(commitEffect(commit)).not.toHaveBeenCalled()
       expect(critic.execute).not.toHaveBeenCalled()
       expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'ordinary-retained-decision', ok: false }))
@@ -980,9 +968,9 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(mocks.runs.get('run')?.usage.checkpoint.pendingReviews ?? []).toEqual([])
   })
   it('settles only a confirmed offline no-request stale receipt without progress or a new retry allowance', async () => {
-    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '检查当前章节并说明报告结果' })
     taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 20, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
-    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    mocks.currentOriginal = { prompt: '检查当前章节并说明报告结果', taskSpec }
     const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
       activeExecutionMs: 172197, stagnantBatches: 8, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
       writeProgress: 3, writeBaseline: 0, readProgress: 3, readBaseline: 0,
@@ -997,16 +985,16 @@ describe('server assessment fallback in the real execution loop', () => {
     const read = tool('chapter_read', async () => ({ output: '已核对的旧正文仍保留', observedChapterRange: { targetId: 'c', contentHash: 'b'.repeat(64), start: 0, end: 2502 } }))
     const commit = tool('chapter_bridge_commit', async () => ({ output: '不能提交' }), false)
     mocks.tools = [check, read, commit]
-    queue(response('', [call('offline-check', check.name, '{"compilationId":"comp"}'), call('read', read.name), call('commit', commit.name, '{"compilationId":"comp"}')]),
+    queue(response('', [call('offline-check', check.name, '{"compilationId":"comp"}'), call('read', read.name)]),
       response('当前正文在恢复期间发生变化，报告未完成，章节未提交。'))
-    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
-    expect(check.execute).toHaveBeenCalledTimes(2)
-    expect(events().filter(event => event.type === 'tool.result' && event.toolName === check.name).map(event => event.reviewRequestFinished?.revision)).toEqual([4, 5])
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '检查当前章节并说明报告结果', resume: true })
+    expect(check.execute).toHaveBeenCalledOnce()
+    expect(events().filter(event => event.type === 'tool.result' && event.toolName === check.name).map(event => event.reviewRequestFinished?.revision)).toEqual([4])
     expect(read.execute).toHaveBeenCalledOnce()
     expect(commitEffect(commit)).not.toHaveBeenCalled()
     expect(mocks.chat).toHaveBeenCalledTimes(2)
     expect(mocks.fixtureBudgetExhaustions).toBe(0)
-    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(events().at(-1), JSON.stringify(events().slice(-8))).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     const saved = (mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews?: unknown[]; reviewAttempts: string[] } }).checkpoint
     expect(saved.pendingReviews ?? []).toEqual([])
     expect(saved.reviewAttempts).toContain('comp:c:4:continuity_validate:protocol8')
@@ -1014,9 +1002,9 @@ describe('server assessment fallback in the real execution loop', () => {
       stagnantBatches: 9, readProgress: 3, writeProgress: 3, tokenBudget: 500, maxTurns: 1, inputProtocolRecovery: checkpoint.inputProtocolRecovery } })
   })
   it.each(['restored', 'proof-lost', 'no-author', 'no-proof'] as const)('lets an actual current-ID call interpret a returned report while old author/proof aliases do not grant a phase: %s', async scenario => {
-    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '写下一章' })
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt: '检查当前章节并说明报告结果' })
     taskSpec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 20, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
-    mocks.currentOriginal = { prompt: '写下一章', taskSpec }
+    mocks.currentOriginal = { prompt: '检查当前章节并说明报告结果', taskSpec }
     const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', runStartedAt: Date.now() - 1000,
       activeExecutionMs: 172197, stagnantBatches: 9, resumeCount: 0, compactionCount: 0, maxTurns: 1, tokenBudget: 500,
       writeProgress: 3, writeBaseline: 0, readProgress: 3, readBaseline: 0,
@@ -1041,7 +1029,7 @@ describe('server assessment fallback in the real execution loop', () => {
     mocks.tools = [check, read]
     queue(response('', [call('current-report', check.name, '{"compilationId":"comp"}'), call('repeat-read', read.name, '{"chapterId":"c"}')]))
     if (scenario !== 'proof-lost') queue(response('4条意见仍待处理，质量检查仍缺失。'))
-    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '检查当前章节并说明报告结果', resume: true })
     expect(check.execute).toHaveBeenCalledWith(expect.objectContaining({ callId: 'current-report' }), { compilationId: 'comp' })
     expect(check.execute).toHaveBeenCalledOnce()
     expect(read.execute).toHaveBeenCalledOnce()
@@ -1056,7 +1044,7 @@ describe('server assessment fallback in the real execution loop', () => {
       tokenBudget: 500, maxTurns: 1, writeProgress: 3, inputProtocolRecovery: checkpoint.inputProtocolRecovery } })
     expect(mocks.fixtureBudgetExhaustions).toBe(scenario === 'proof-lost' ? 1 : 0)
     expect((mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews?: unknown[] } }).checkpoint.pendingReviews ?? []).toEqual([])
-    expect(events().some(event => event.type === 'run.finished' && event.status === 'succeeded')).toBe(false)
+    expect(events().some(event => event.type === 'run.finished' && event.status === 'succeeded')).toBe(scenario !== 'proof-lost')
   })
   it('keeps a bad wait as a failed observation while the next authorized call in the batch executes', async () => {
     const wait = tool('task_wait', async () => ({ outcome: 'failed', failureCode: 'TASK_WAIT_TARGET_NOT_FOUND', output: '任务身份不是窗口编号；当前任务没有派生窗口' }))
@@ -1207,19 +1195,21 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
     expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 110, checkpoint: { writeProgress: 0, stagnantBatches: 5 } })
   })
-  it('withholds a false aesthetic completion claim and asks for one authorized merged decision without another critic', async () => {
+  it('lets the model read existing opinions and decide an edit without an implicit critic', async () => {
     let state = { ...readiness('complete', 'complete'), qualityCandidateCount: 2 }
     mocks.reviewReadiness.mockImplementation(async () => state)
     mocks.reviewProbe.mockResolvedValue({ open: true })
     const edit = tool('chapter_edit_range', async () => { state = { ...state, qualityCandidateCount: 0 }; return { output: '候选已处理或明确留置' } }, false)
     const critic = tool('quality_analyze', async () => ({ output: '不应再次检查' }))
+    const read = tool('chapter_bridge_get', async () => ({ output: '当前报告仍有意见。可用retainedFindings记录真实保留理由，保存不表示意见已解决。' }))
     const commit = tool('chapter_bridge_commit', async () => { expect(state.qualityCandidateCount).toBe(0); mocks.committedChapter.mockResolvedValue(true); return { output: '终态已提交' } }, false)
-    mocks.tools = [edit, critic, commit]
-    const proposed = { ...response('全部审美建议已经应用。'), reasoning: '必须原样保留的原生思考；不是意见已处理证明' }
+    mocks.tools = [read, edit, critic, commit]
+    const proposed = { ...response('', [call('read-opinions', read.name, '{"compilationId":"comp"}')]), reasoning: '必须原样保留的原生思考；不是意见已处理证明' }
     queue(proposed, response('', [call('merged', edit.name, '{"chapterId":"c"}')]),
       response('', [call('commit', commit.name, '{"compilationId":"comp"}')]), response('已保存。'))
     await run('写下一章')
     expect(edit.execute).toHaveBeenCalledOnce()
+    expect(read.execute).toHaveBeenCalledOnce()
     expect(critic.execute).not.toHaveBeenCalled()
     expect(commitEffect(commit)).toHaveBeenCalledOnce()
     expect(events()).not.toContainEqual(expect.objectContaining({ type: 'text.final', text: '正在核对检查意见的处理结果。' }))
@@ -1229,7 +1219,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(history.some((message: { content?: string }) => message.content?.includes('retainedFindings'))).toBe(true)
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
-  it('returns a truthful failed early commit and lets the model read actual report references before one real effect', async () => {
+  it('lets the model read actual report references and save its explicit retained reasons in one effect', async () => {
     const ref = { source: 'quality' as const, reportId: 'current-report', findingId: 'current-advice' }
     const retained = [{ ...ref, reason: '保留此处人物动作的节奏；当前一句没有重复解释，不以留置冒充修复。' }]
     let state = { ...readiness('complete', 'complete'), qualityCandidateCount: 1, decisionPending: true, requiredDecisions: [ref] }
@@ -1243,14 +1233,12 @@ describe('server assessment fallback in the real execution loop', () => {
     }, false)
     mocks.tools = [reader, edit, commit]
     const before = structuredClone(mocks.chapters)
-    queue(response('', [call('early-commit', commit.name, '{"compilationId":"comp"}')]),
-      response('', [call('read-current-report', reader.name, '{"compilationId":"comp"}')]),
+    queue(response('', [call('read-current-report', reader.name, '{"compilationId":"comp"}')]),
       response('', [call('retained-commit', commit.name, JSON.stringify({ compilationId: 'comp', retainedFindings: retained }))]), response('已保存，建议明确保留。'))
     await run('写下一章')
     expect(reader.execute).toHaveBeenCalledOnce(); expect(edit.execute).not.toHaveBeenCalled(); expect(commitEffect(commit)).toHaveBeenCalledOnce()
     expect(mocks.chapters).toEqual(before)
-    expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['chapter_bridge_commit', 'chapter_bridge_get', 'chapter_bridge_commit'])
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'early-commit', ok: false, failureCode: 'REVIEW_DECISION_REQUIRED' }))
+    expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['chapter_bridge_get', 'chapter_bridge_commit'])
     expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'retained-commit', ok: true }))
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
@@ -1306,38 +1294,39 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { tokenBudget: 500, maxTurns: 1, writeProgress: 2, resumeCount: 0 } })
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
-  it('completes missing current checks and the actual effect within one registered commit', async () => {
+  it('completes missing current checks and the actual effect from explicit model calls before commit', async () => {
     let state = readiness('complete', 'missing')
     mocks.reviewReadiness.mockImplementation(async () => state)
     const critic = tool('quality_analyze', async () => { state = readiness('complete', 'complete'); return { output: '当前版本检查完成' } })
     const commit = tool('chapter_bridge_commit', async () => { expect(state.ready).toBe(true); mocks.committedChapter.mockResolvedValue(true); return { output: '提交完成' } }, false)
     mocks.tools = [critic, commit]
-    queue(response('', [call('commit', commit.name, '{"compilationId":"comp"}')]), response('正文已保存，检查完成。'))
+    queue(response('', [...withExplicitChecks(call('commit', commit.name, '{"compilationId":"comp"}'), 'quality_analyze')]), response('正文已保存，检查完成。'))
     await run('写下一章')
     expect(critic.execute).toHaveBeenCalledOnce()
     expect(commitEffect(commit)).toHaveBeenCalledOnce()
-    expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['chapter_bridge_commit', 'quality_analyze'])
+    expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['quality_analyze', 'chapter_bridge_commit'])
     const history = mocks.chat.mock.calls[1][0].messages
     const review = events().find(event => event.type === 'tool.call' && event.toolName === 'quality_analyze')
     expect(review).toMatchObject({ args: { compilationId: 'comp' } })
-    expect(critic.execute).toHaveBeenCalledWith(expect.objectContaining({ callId: expect.stringMatching(/^commit_review_/u) }), { compilationId: 'comp' })
+    expect(critic.execute).toHaveBeenCalledWith(expect.objectContaining({ callId: expect.stringMatching(/^explicit_review_/u) }), { compilationId: 'comp' })
     expect(history.filter((message: { role: string; toolCalls?: unknown[] }) => message.role === 'assistant' && message.toolCalls?.length).flatMap((message: { toolCalls: Array<{ id: string }> }) => message.toolCalls.map(item => item.id)))
-      .toEqual(['commit'])
+      .toEqual(['explicit_review_commit_0', 'commit'])
     expect(history.filter((message: { role: string }) => message.role === 'tool').map((item: { toolCallId: string }) => item.toolCallId)).toEqual([review!.callId, 'commit'])
     expect(history.find((message: { role: string; toolCallId?: string }) => message.role === 'tool' && message.toolCallId === 'commit')?.content).toContain('提交完成')
     expect(events().filter(event => event.type === 'tool.result').map(event => [event.toolName, event.ok])).toEqual([['quality_analyze', true], ['chapter_bridge_commit', true]])
     expect(mocks.runs.get('run')?.usage.checkpoint.pendingReviews).toBeUndefined()
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
-  it('replaces an unverified completion claim with progress and completes the missing check', async () => {
+  it('does not dispatch a missing check merely to save the current manuscript', async () => {
     let state = readiness('complete', 'missing')
     mocks.reviewReadiness.mockImplementation(async () => state)
     const critic = tool('quality_analyze', async () => { state = readiness('complete', 'complete'); return { output: '检查完成' } })
     const commit = tool('chapter_bridge_commit', async () => { mocks.committedChapter.mockResolvedValue(true); return { output: '提交完成' } }, false)
     mocks.tools = [critic, commit]
-    queue(response('已完成全部质量检查。'), response('', [call('commit', commit.name, '{"compilationId":"comp"}')]), response('已保存。'))
+    queue(response('', [call('commit', commit.name, '{"compilationId":"comp"}')]), response('正文已保存，检查尚未请求。'))
     await run('写下一章')
-    expect(critic.execute).toHaveBeenCalledOnce()
+    expect(critic.execute).not.toHaveBeenCalled()
+    expect(state.quality).toBe('missing')
     const parts = mocks.persist.mock.calls.flatMap(([input]) => (input as { create?: { parts?: Array<{ type: string; text?: string }> }; data?: { parts?: Array<{ type: string; text?: string }> } }).create?.parts ?? [])
     expect(parts.some(part => part.text === '已完成全部质量检查。')).toBe(false)
     expect(parts.some(part => part.text === '正文已保存，正在完成当前版本的必要检查。')).toBe(false)
@@ -1355,13 +1344,13 @@ describe('server assessment fallback in the real execution loop', () => {
     const commit = tool('chapter_bridge_commit', async () => { expect(state.ready).toBe(true); expect(state.revision).toBe(5); mocks.committedChapter.mockResolvedValue(true); return { output: '提交完成' } }, false)
     mocks.tools = [rename, check, quality, edit, commit]
     queue(response('', [call('rename', rename.name), call('old-edit', edit.name, '{"chapterId":"c"}')]),
-      response('', [call('commit', commit.name, '{"compilationId":"comp"}')]), response('已保存。'))
+      response('', [...withExplicitChecks(call('commit', commit.name, '{"compilationId":"comp"}'), 'continuity_validate', 'quality_analyze')]), response('已保存。'))
     await run('写下一章')
     expect(check.execute).toHaveBeenCalledOnce()
     expect(edit.execute).toHaveBeenCalledOnce()
     expect(quality.execute).toHaveBeenCalledOnce()
     expect(events().some(event => event.type === 'tool.call' && event.callId === 'old-edit')).toBe(true)
-    expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['chapter_rename', 'chapter_edit_range', 'chapter_bridge_commit', 'continuity_validate', 'quality_analyze'])
+    expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['chapter_rename', 'chapter_edit_range', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit'])
   })
   it('permits successive partial and full edits without interposed paid checks, then checks the final revision', async () => {
     let state = readiness('complete', 'missing')
@@ -1376,7 +1365,7 @@ describe('server assessment fallback in the real execution loop', () => {
     queue(response('开始修改第一条。', [call('old-part', edit.name, '{"chapterId":"c"}')]),
       response('', [call('next-part', edit.name, '{"chapterId":"c","oldText":"第二处","newText":"已修改"}')]),
       response('', [call('merged', write.name, '{"chapterId":"c"}')]),
-      response('检查已通过，提交终态。', [call('commit', commit.name, '{"compilationId":"comp"}')]), response('已保存。'))
+      response('检查已通过，提交终态。', [...withExplicitChecks(call('commit', commit.name, '{"compilationId":"comp"}'), 'continuity_validate', 'quality_analyze')]), response('已保存。'))
     await run('写下一章')
     expect(edit.execute).toHaveBeenCalledTimes(2)
     expect(write.execute).toHaveBeenCalledOnce()
@@ -1384,7 +1373,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(check.execute).toHaveBeenCalledOnce()
     expect(quality.execute).toHaveBeenCalledOnce()
     expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual([
-      'chapter_edit_range', 'chapter_edit_range', 'chapter_write', 'chapter_bridge_commit', 'continuity_validate', 'quality_analyze',
+      'chapter_edit_range', 'chapter_edit_range', 'chapter_write', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit',
     ])
     const saved = mocks.persist.mock.calls.flatMap(([input]) => (input as { create?: { parts?: AgentMessagePart[] } }).create?.parts ?? [])
     expect(saved.filter(part => part.type === 'tool-call').map(part => part.type === 'tool-call' && part.toolName)).toEqual([
@@ -1400,7 +1389,7 @@ describe('server assessment fallback in the real execution loop', () => {
     const commit = tool('chapter_bridge_commit', async () => { mocks.committedChapter.mockResolvedValue(true); return { output: '当前版本终态提交' } }, false)
     const reader = tool('chapter_read', async () => ({ output: '同批独立读取完成' }))
     mocks.tools = [check, critic, commit, reader]
-    queue(response('', [call('commit', commit.name, '{"compilationId":"comp"}'), call('remaining-read', reader.name)]), response('正文已保存。'))
+    queue(response('', [...withExplicitChecks(call('commit', commit.name, '{"compilationId":"comp"}'), 'continuity_validate', 'quality_analyze'), call('remaining-read', reader.name)]), response('正文已保存。'))
     await run('写下一章')
     expect(check.execute).toHaveBeenCalledOnce()
     expect(critic.execute).toHaveBeenCalledOnce()
@@ -1414,38 +1403,38 @@ describe('server assessment fallback in the real execution loop', () => {
     let state = readiness('complete', 'missing')
     mocks.reviewReadiness.mockImplementation(async () => state)
     const critic = tool('quality_analyze', async () => { state = readiness('complete', 'incomplete'); return { outcome: 'failed', failureCode, output: '该报告已确认无效' } })
-    const commit = tool('chapter_bridge_commit', async () => ({ output: '不能提交' }), false)
+    const commit = tool('chapter_bridge_commit', async () => { mocks.committedChapter.mockResolvedValue(true); return { output: '正文已保存，检查不完整' } }, false)
     const reader = tool('chapter_read', async () => ({ output: '独立读取已完成' }))
     mocks.tools = [critic, commit, reader]
     queue(response('', [call('quality', critic.name, '{"chapterId":"c"}')]),
       response('', [call('commit', commit.name, '{"compilationId":"comp"}'), call('read', reader.name)]), response('正文保留，质量检查受限。'))
     await run('写下一章')
-    expect(critic.execute).toHaveBeenCalledTimes(2)
-    expect(commitEffect(commit)).not.toHaveBeenCalled()
+    expect(critic.execute).toHaveBeenCalledOnce()
+    expect(commitEffect(commit)).toHaveBeenCalledOnce()
     expect(reader.execute).toHaveBeenCalledOnce()
-    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     expect(events().filter(event => event.type === 'tool.result' && event.toolName === 'quality_analyze')).toEqual([
-      expect.objectContaining({ ok: false, failureCode }), expect.objectContaining({ ok: false, failureCode }),
+      expect.objectContaining({ ok: false, failureCode }),
     ])
     expect(mocks.runs.get('run')?.usage.checkpoint.pendingReviews).toBeUndefined()
     expect(mocks.runs.get('run')?.usage.checkpoint.toolRestrictions ?? []).toEqual([])
-    expect(events().some(event => event.type === 'run.finished' && event.status === 'succeeded')).toBe(false)
+    expect(state.quality).toBe('incomplete')
   })
-  it('keeps an independent batch read after a substituted assessment fails, without executing the old commit', async () => {
+  it('keeps an independent batch read after an explicitly requested assessment fails', async () => {
     let state = readiness('complete', 'missing')
     mocks.reviewReadiness.mockImplementation(async () => state)
     const critic = tool('quality_analyze', async () => { state = readiness('complete', 'incomplete'); return { outcome: 'failed', failureCode: 'QUALITY_EVIDENCE_UNLOCATED', output: '一条证据未定位' } })
     const commit = tool('chapter_bridge_commit', async () => ({ output: '不得提交' }), false)
     const reader = tool('chapter_read', async () => ({ output: '独立读取' }))
     mocks.tools = [critic, commit, reader]
-    queue(response('', [call('early', commit.name, '{"compilationId":"comp"}'), call('independent', reader.name)]), response('正文保留，检查尚未完成。'))
-    await run('写下一章')
+    queue(response('', [call('explicit-check', critic.name, '{"compilationId":"comp"}'), call('independent', reader.name)]), response('正文保留，检查尚未完成。'))
+    await run('检查当前章节并说明报告结果')
     expect(critic.execute).toHaveBeenCalledOnce()
     expect(reader.execute).toHaveBeenCalledOnce()
     expect(commitEffect(commit)).not.toHaveBeenCalled()
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', toolName: 'chapter_bridge_commit', callId: 'early', ok: false, failureCode: 'QUALITY_EVIDENCE_UNLOCATED' }))
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', toolName: 'quality_analyze', callId: 'explicit-check', ok: false, failureCode: 'QUALITY_EVIDENCE_UNLOCATED' }))
     expect(mocks.runs.get('run')?.usage.checkpoint.pendingReviews).toBeUndefined()
-    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
   it('recovers a received old format failure, handles its finding, checks the edited revision and actually commits', async () => {
     let state = readiness('complete', 'incomplete')
@@ -1476,10 +1465,10 @@ describe('server assessment fallback in the real execution loop', () => {
     const continuity = tool('continuity_validate', async () => { order.push(`continuity:r${state.revision}`); state = readiness('complete', 'missing', state.revision); return { output: '新版本连续性复核完成。' } })
     const commit = tool('chapter_bridge_commit', async () => { expect(state.ready).toBe(true); expect(state.qualityCandidateCount ?? 0).toBe(0); order.push('commit'); mocks.committedChapter.mockResolvedValue(true); return { output: '当前版本终态已实际提交。' } }, false)
     mocks.tools = [critic, bridge, edit, continuity, commit]
-    queue(response('', [call('premature', commit.name, '{"compilationId":"comp"}')]),
+    queue(response('', [call('explicit-initial-quality', 'quality_analyze', '{"compilationId":"comp"}')]),
       response('', [call('findings', bridge.name, '{"compilationId":"comp"}')]),
       response('', [call('edit', edit.name, '{"chapterId":"c"}')]),
-      response('', [call('commit', commit.name, '{"compilationId":"comp"}')]), response('正文已保存，检查和终态提交完成。'))
+      response('', [...withExplicitChecks(call('commit', commit.name, '{"compilationId":"comp"}'), 'continuity_validate', 'quality_analyze')]), response('正文已保存，检查和终态提交完成。'))
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
     expect(order).toEqual(['quality:r3', 'finding', 'edit', 'continuity:r4', 'quality:r4', 'commit'])
     expect(critic.execute).toHaveBeenCalledTimes(2)
@@ -1490,7 +1479,7 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     expect(mocks.limitedDelivery).not.toHaveBeenCalled()
   })
-  it.each([false, true])('does not complete or emit a limited delivery after an exhausted format recovery; resumed=%s', async resume => {
+  it.each([false, true])('reports known incomplete checks without extra paid calls or a fabricated manuscript delivery; resumed=%s', async resume => {
     let state = readiness('complete', resume ? 'incomplete' : 'missing')
     mocks.reviewReadiness.mockImplementation(async () => state)
     const critic = tool('quality_analyze', async () => {
@@ -1508,15 +1497,15 @@ describe('server assessment fallback in the real execution loop', () => {
       mocks.update.mockResolvedValueOnce({ taskSpec: null, currentTurn: 2, startedAt: new Date(checkpoint.runStartedAt),
         usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120, checkpoint } })
       queue(response('质量检查仍未完成。'))
-      await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+      await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '检查当前章节并说明报告结果', resume: true })
       expect(critic.execute).not.toHaveBeenCalled()
       expect(reader.execute).not.toHaveBeenCalled()
       expect(mocks.chat).toHaveBeenCalledOnce()
       expect(Number((mocks.runs.get('run')?.usage as { totalTokens: number }).totalTokens)).toBeGreaterThanOrEqual(120)
     } else {
       queue(response('', [call('quality', critic.name, '{"compilationId":"comp"}'),
-        call('commit', commit.name, '{"compilationId":"comp"}'), call('read', reader.name)]), response('质量检查仍未完成。'))
-      await run('写下一章')
+        call('read', reader.name)]), response('质量检查仍未完成。'))
+      await run('检查当前章节并说明报告结果')
       expect(critic.execute).toHaveBeenCalledOnce()
       expect(reader.execute).toHaveBeenCalledOnce()
       expect(mocks.chat).toHaveBeenCalledTimes(2)
@@ -1524,9 +1513,9 @@ describe('server assessment fallback in the real execution loop', () => {
     expect(commitEffect(commit)).not.toHaveBeenCalled()
     expect(mocks.limitedDelivery).not.toHaveBeenCalled()
     expect(mocks.assertLimitedDelivery).not.toHaveBeenCalled()
-    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
-    expect(events().some(event => event.type === 'run.finished' && event.status === 'succeeded')).toBe(false)
-    expect(mocks.runs.get('run')).toMatchObject({ status: 'failed' })
+    expect(events().at(-1), JSON.stringify(events().slice(-8))).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    expect(events().some(event => event.type === 'run.finished' && event.status === 'succeeded')).toBe(true)
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'completed' })
     expect(mocks.runs.get('run')?.usage).not.toHaveProperty('deliveryProof')
     expect(mocks.runs.get('run')?.usage.checkpoint.pendingReviews ?? []).toEqual([])
     expect(state.quality).toBe('incomplete')
@@ -1537,7 +1526,7 @@ describe('server assessment fallback in the real execution loop', () => {
     const critic = tool('quality_analyze', async () => { state = readiness('complete', 'complete'); return { output: '当前版本已取得完整报告。', reviewCompleted: true } })
     const commit = tool('chapter_bridge_commit', async () => { expect(state.ready).toBe(true); mocks.committedChapter.mockResolvedValue(true); return { output: '完整报告已核对，当前版本已提交。' } }, false)
     mocks.tools = [critic, commit]
-    queue(response('', [call('commit', commit.name, '{"compilationId":"comp"}')]), response('当前版本已核验并提交。'))
+    queue(response('', [...withExplicitChecks(call('commit', commit.name, '{"compilationId":"comp"}'), 'quality_analyze')]), response('当前版本已核验并提交。'))
     await run('写下一章')
     expect(critic.execute).toHaveBeenCalledWith(expect.anything(), { compilationId: 'comp' })
     expect(critic.execute).toHaveBeenCalledOnce()
@@ -1550,33 +1539,33 @@ describe('server assessment fallback in the real execution loop', () => {
     mocks.chat.mockImplementation(async () => response('检查尚未完成，原文保留。'))
     mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'missing'))
     const hidden = tool('quality_analyze', async () => ({ output: '不能越权调用' }))
-    const commit = tool('chapter_bridge_commit', async () => ({ output: '不能提交' }), false)
+    const commit = tool('chapter_bridge_commit', async () => { mocks.committedChapter.mockResolvedValue(true); return { output: '正文已保存，检查仍缺少权限' } }, false)
     mocks.tools = [commit]; mocks.hiddenTools = [hidden]
     queue(response('', [call('commit', commit.name, '{"compilationId":"comp"}')]),
       response('当前任务没有必要检查工具的权限，正文保留，章节尚未提交。'))
     await run('写下一章')
     expect(hidden.execute).not.toHaveBeenCalled()
-    expect(commitEffect(commit)).not.toHaveBeenCalled()
+    expect(commitEffect(commit)).toHaveBeenCalledOnce()
     expect(mocks.fixtureBudgetExhaustions).toBe(0)
-    expect(mocks.runs.get('run')?.errorMessage).toContain('缺少必要检查')
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
-  it('stops one failed automatic critic without a new request or a commit', async () => {
+  it('stops one explicit critic with an unknown provider outcome without a new request or a commit', async () => {
     mocks.chat.mockImplementation(async () => response('检查尚未完成，原文保留。'))
     mocks.reviewReadiness.mockResolvedValue(readiness('complete', 'missing'))
     const critic = tool('quality_analyze', async () => { throw new DataAccessError(502, 'AI_PROVIDER_TIMEOUT', 'unknown outcome') })
     const commit = tool('chapter_bridge_commit', async () => ({ output: '不能提交' }), false)
     mocks.tools = [critic, commit]
-    queue(response('', [call('commit', commit.name, '{"compilationId":"comp"}')]))
+    queue(response('', [...withExplicitChecks(call('commit', commit.name, '{"compilationId":"comp"}'), 'quality_analyze')]))
     await run('写下一章')
     expect(critic.execute).toHaveBeenCalledOnce()
     expect(commitEffect(commit)).not.toHaveBeenCalled()
+    expect(events().some(event => event.type === 'tool.result' && event.callId === 'commit')).toBe(false)
     expect(mocks.chat).toHaveBeenCalledOnce()
     expect(events().filter(event => event.type === 'tool.result')).toEqual([
       expect.objectContaining({ toolName: 'quality_analyze', ok: false, failureCode: 'AI_PROVIDER_TIMEOUT' }),
-      expect.objectContaining({ toolName: 'chapter_bridge_commit', callId: 'commit', ok: false, failureCode: 'REVIEW_PROVIDER_OUTCOME_UNCONFIRMED' }),
     ])
     expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { pendingReviews: [expect.objectContaining({
-      compilationId: 'comp', chapterId: 'c', revision: 3, toolName: 'quality_analyze', callId: expect.stringMatching(/^commit_review_/u),
+      compilationId: 'comp', chapterId: 'c', revision: 3, toolName: 'quality_analyze', callId: expect.stringMatching(/^explicit_review_/u),
     })] } })
     expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'review_receipt_pending' })
     expect(mocks.runs.get('run')?.errorMessage).toBeNull()
@@ -1648,16 +1637,16 @@ describe('server assessment fallback in the real execution loop', () => {
       failureCode: 'QUALITY_REPORT_SAVE_FAILED', reviewRequestFinished: proof }))
     mocks.tools = [critic]
     queue(response('', [call('save-failure', critic.name, '{"compilationId":"comp"}')]), response('检查尚未完成。'))
-    await run('写下一章')
+    await run('检查当前章节并说明报告结果')
     const usage = mocks.runs.get('run')?.usage as { checkpoint: { reviewAttempts: string[]; pendingReviews?: unknown[] } }
     expect(usage.checkpoint.reviewAttempts).toContain('comp:c:3:quality_analyze')
     if (scenario === 'matching') {
       expect(usage.checkpoint.pendingReviews).toBeUndefined()
-      expect(critic.execute).toHaveBeenCalledTimes(2)
-      expect(mocks.chat).toHaveBeenCalledTimes(3)
-      expect(mocks.fixtureBudgetExhaustions).toBe(1)
+      expect(critic.execute).toHaveBeenCalledOnce()
+      expect(mocks.chat).toHaveBeenCalledTimes(2)
+      expect(mocks.fixtureBudgetExhaustions).toBe(0)
       expect(mocks.runs.get('run')?.usage.totalTokens).toBe(20)
-      expect(events()).toContainEqual(expect.objectContaining({ type: 'error', code: 'credits_exhausted' }))
+      expect(events().some(event => event.type === 'error' && event.code === 'credits_exhausted')).toBe(false)
     } else {
       expect(usage.checkpoint.pendingReviews).toEqual([{ compilationId: 'comp', chapterId: 'c', revision: 3,
         toolName: 'quality_analyze', callId: 'save-failure' }])
@@ -1729,7 +1718,7 @@ describe('server assessment fallback in the real execution loop', () => {
     const critic = tool('continuity_validate', async () => { throw new Error('old aborted check') })
     mocks.tools = [critic]
     queue(response('', [call('cancelled-check', critic.name, '{"compilationId":"comp"}')]), response('原检查未确认。'))
-    await run('写下一章')
+    await run('检查当前章节并说明报告结果')
     const stopped = structuredClone(mocks.runs.get('run')!)
     const original = (stopped.usage as { checkpoint: { tokenBudget: number; maxTurns: number; writeProgress: number; readProgress: number } }).checkpoint
     mocks.update.mockResolvedValueOnce(stopped as never)
@@ -1756,7 +1745,7 @@ describe('server assessment fallback in the real execution loop', () => {
       return { output: '本次真实检查仍需复核', outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE' }
     })
     queue(response('', [call('fresh-check', critic.name, '{"compilationId":"comp"}')]), response('检查尚未完成。'))
-    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '检查当前章节并说明报告结果', resume: true })
     const audits = events().filter(event => event.type === 'review.reconciled')
     expect(audits).toEqual(journal === 'already-persisted' ? [] : [expect.objectContaining({ callId: 'cancelled-check', receipt })])
     if (journal === 'unavailable') {
@@ -1767,7 +1756,7 @@ describe('server assessment fallback in the real execution loop', () => {
       expect(critic.execute).toHaveBeenCalledOnce()
       expect(events().filter(event => event.type === 'tool.call' && event.toolName === 'continuity_validate')).toEqual([expect.objectContaining({ callId: 'fresh-check', args: { compilationId: 'comp' } })])
       expect(mocks.chat).toHaveBeenCalledTimes(2)
-      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
       expect((mocks.runs.get('run')?.usage as { checkpoint: unknown }).checkpoint).not.toHaveProperty('pendingReviews')
       expect((mocks.runs.get('run')?.usage as { checkpoint: { reviewAttempts: string[] } }).checkpoint.reviewAttempts)
         .not.toContain('review-retired:author-continue:stop:cancelled-check')
@@ -2551,7 +2540,7 @@ describe('original task context on resume', () => {
     expect(events().filter(event => event.type === 'tool.result').map(event => event.callId)).toEqual(['first', 'slow'])
   })
 
-  it('restores the complete research request on typed continue and does not revive legacy writing authority', async () => {
+  it('restores the complete research request on typed continue while preserving a declared tool denial', async () => {
     const originalPrompt = '搜索并拆解这本小说，不要写章节。' + '核对人物与情节证据。'.repeat(130)
     const taskSpec = { ...buildTaskSpec({ runId: 'original', novelId: 'novel', prompt: originalPrompt }), intent: 'write' as const }
     const prior = { id: 'original', taskSpec, usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10 },
@@ -2560,6 +2549,8 @@ describe('original task context on resume', () => {
     mocks.priorRuns.mockResolvedValue([prior])
     mocks.original.mockResolvedValue({ parts: [{ type: 'text', text: originalPrompt }] })
     const write = tool('chapter_write', async () => ({ output: 'must not write' }), false)
+    // This is a declared tool permission denial, independent of prose intent.
+    write.permission.build = 'deny'
     mocks.tools.push(write)
     queue(response('', [call('forbidden', 'chapter_write')]), response('资料不足，未改动作品。'))
     await run('继续')
@@ -2700,12 +2691,13 @@ describe('original task context on resume', () => {
     await run(prompt)
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   })
-  it('narrows a legacy misclassified research run on explicit resume and persists the same task identity', async () => {
+  it('preserves declared deny and full request identity while refreshing legacy research context', async () => {
     const prompt = '搜索并拆解这本小说，不要写章节。'
     const legacy = { ...buildTaskSpec({ runId: 'run', novelId: 'novel', prompt }), intent: 'write' as const }
     mocks.update.mockResolvedValueOnce({ ...{ taskSpec: legacy }, usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10 },
       currentTurn: 1, startedAt: new Date() })
     const write = tool('chapter_write', async () => ({ output: 'must not write' }), false)
+    write.permission.build = 'deny'
     mocks.tools.push(write)
     queue(response('', [call('blocked-resume', 'chapter_write')]), response('资料不足，未改动作品。'))
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: null,
@@ -2716,15 +2708,17 @@ describe('original task context on resume', () => {
     }) }))
     expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'blocked-resume', ok: false }))
   })
-  it.each(['chapter_write', 'plan_save', 'memory_save', 'task_send', 'subagent_delegate'])('rejects model-requested %s during book research even with an allowed registry tool', async toolName => {
+  it.each(['chapter_write', 'plan_save', 'memory_save', 'task_send', 'subagent_delegate'])('enforces a declared body-tool denial while leaving other build tool %s permissions intact', async toolName => {
     const write = tool(toolName, async () => ({ output: 'must not write' }), false)
+    if (toolName === 'chapter_write') write.permission.build = 'deny'
     mocks.tools.push(write)
     queue(response('', [call('forbidden-write', toolName)]), response('资料不足，未改动作品。'))
     await run('搜索并拆解这本小说，不要写章节。')
-    expect(write.execute).not.toHaveBeenCalled()
+    if (toolName === 'chapter_write') expect(write.execute).not.toHaveBeenCalled()
+    else expect(write.execute).toHaveBeenCalledOnce()
     const { captureUserDirectives } = await import('../../api/lib/agent/context-engine.js')
     expect(captureUserDirectives).not.toHaveBeenCalled()
-    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'forbidden-write', ok: false }))
+    expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'forbidden-write', ok: toolName !== 'chapter_write' }))
   })
   it.each([false, true])('preserves the exact request and run identity when resume=%s', async resume => {
     const prompt = '只完成第19章，不能重开旧章节的任务窗口。' + '原始详细要求。'.repeat(100)
@@ -3107,7 +3101,7 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     }, false)
     mocks.tools = [read, edit, continuity, quality, commit]
     queue(response('', [call('read-current', read.name, '{"chapterId":"c"}')]), response('', [call('current-cas', edit.name,
-      JSON.stringify({ chapterId: 'c', oldText: mocks.chapters[0].content, newText: '修订句。\n\n下一段。' })), call('commit-current', commit.name, '{"compilationId":"comp"}')]), response('当前修订版本与最终两报告已保存并提交。'))
+      JSON.stringify({ chapterId: 'c', oldText: mocks.chapters[0].content, newText: '修订句。\n\n下一段。' })), ...withExplicitChecks(call('commit-current', commit.name, '{"compilationId":"comp"}'), 'continuity_validate', 'quality_analyze')]), response('当前修订版本与最终两报告已保存并提交。'))
     await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
     expect(read.execute).toHaveBeenCalledOnce(); expect(edit.execute).toHaveBeenCalledOnce(); expect(commitEffect(commit)).toHaveBeenCalledOnce()
     expect(continuity.execute).toHaveBeenCalledOnce(); expect(quality.execute).toHaveBeenCalledOnce()
@@ -3213,11 +3207,11 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     expect(checking.execute).toHaveBeenCalledOnce()
     expect(reading.execute).toHaveBeenCalledOnce()
     expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', ok: false, failureCode }))
-    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     expect(mocks.runs.get('run')?.usage.checkpoint.pendingReviews).toBeUndefined()
     expect(mocks.runs.get('run')?.usage.checkpoint.toolRestrictions ?? []).toEqual([])
-    expect(mocks.runs.get('run')?.errorMessage).toContain('检查未完成')
-    expect(mocks.runs.get('run')?.status).toBe('failed')
+    expect(mocks.runs.get('run')?.errorMessage).toBeNull()
+    expect(mocks.runs.get('run')?.status).toBe('completed')
   })
   it('isolates exhausted checks and unauthorized writes while independent reads still execute', async () => {
     mocks.reviewReadiness.mockResolvedValue(readiness('incomplete', 'complete'))
@@ -3234,7 +3228,7 @@ describe('Agent run admission and completion lifecycle (real loop, mocked provid
     expect(mocks.chapters[0].content).toBe('当前章节正文')
     expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'same-target-write', ok: false, failureCode: 'AUTHOR_LOCAL_SCOPE' }))
     expect(reading.execute).toHaveBeenCalledOnce()
-    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'edit', ok: false, failureCode: 'REPAIR_NOT_AUTHORIZED' }))
     expect(mocks.runs.get('run')?.usage.checkpoint.pendingReviews ?? []).toEqual([])
   })
@@ -4557,13 +4551,8 @@ describe('author-directed task ending in the real execution loop', () => {
     queue(response('已读取当前任务资料。'))
     try {
       await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
-      if (matching) {
-        expect(mocks.chat).toHaveBeenCalled()
-        expect((mocks.runs.get('run')?.usage as { checkpoint?: { authorInputRequired?: unknown } }).checkpoint?.authorInputRequired).toBeUndefined()
-      } else {
-        expect(mocks.chat).not.toHaveBeenCalled()
-        expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
-      }
+      expect(mocks.chat).toHaveBeenCalled()
+      expect((mocks.runs.get('run')?.usage as { checkpoint?: { authorInputRequired?: unknown } }).checkpoint?.authorInputRequired).toBeUndefined()
       expect(mocks.runs.get('run')?.taskSpec).toEqual(spec)
     } finally { read.mockRestore() }
   })
@@ -4620,18 +4609,18 @@ describe('author-directed task ending in the real execution loop', () => {
     spec.scope.writing = { version: 1, kind: 'needs_input', targets: [], repairAuthorized: true, titleAndBodyOnly: false }
     mocks.currentOriginal = { prompt, taskSpec: spec }
     const read = tool('chapter_read', async () => ({ output: '已读取原请求所需的合成资料。' }), true)
-    const write = tool('chapter_write', async () => ({ output: 'must not execute' }), false)
+    const write = tool('chapter_write', async () => { const before = mocks.chapters[0].content; mocks.chapters[0].content = '根据原请求修改的正文'; mocks.chapters[0].revision++; mocks.committedChapter.mockResolvedValue(true); return { output: '正文已保存', display: { kind: 'chapterDiff', chapterId: 'c', chapterTitle: '当前章', before, after: mocks.chapters[0].content, revision: mocks.chapters[0].revision, appliedDirectly: true } } }, false)
     const ask = tool('ask_user', async () => ({ failureCode: 'AUTHOR_INPUT_REQUIRED', output: '等待真实作者明确范围', summary: '等待作者输入',
       display: { kind: 'question', question: '要修改哪一章？', options: [{ label: '第1章' }, { label: '稍后再定' }], unanswered: true } }))
     mocks.tools = [read, ask, write]
-    queue(response('', [call('mixed-read', 'chapter_read')]), response('', [call('mixed-question', 'ask_user')]))
+    queue(response('', [call('mixed-read', 'chapter_read')]), response('', [call('mixed-question', 'ask_user')]), response('', [call('mixed-write', 'chapter_write')]), response('资料已核对，正文修改已保存；提问未获得回答。'))
     await run(prompt)
     expect(read.execute).toHaveBeenCalledOnce()
     expect(ask.execute).toHaveBeenCalledOnce()
-    expect(write.execute).not.toHaveBeenCalled()
-    expect(mocks.chat).toHaveBeenCalledTimes(2)
-    expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
-    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { authorInputRequired: { callId: 'mixed-question' } } })
+    expect(write.execute).toHaveBeenCalledOnce()
+    expect(mocks.chat).toHaveBeenCalledTimes(4)
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    expect(mocks.runs.get('run')?.usage.checkpoint).not.toHaveProperty('authorInputRequired')
   })
   it.each(['解释一下限知视角，然后继续下一章。', 'explain limited viewpoint, then write chapter 3.', '请问如何开场？请写第3章。'])(
     'preserves the frozen writing phase when a mixed request resumes: %s', async prompt => {
@@ -4645,19 +4634,19 @@ describe('author-directed task ending in the real execution loop', () => {
       const frozen = structuredClone(spec)
       mocks.currentOriginal = { prompt, taskSpec: spec }
       mocks.update.mockResolvedValueOnce({ taskSpec: spec, currentTurn: 1, startedAt: new Date(), usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10 } })
-      const write = tool('chapter_write', async () => ({ output: 'must not execute before author answer' }), false)
+      const write = tool('chapter_write', async () => { const before = mocks.chapters[0].content; mocks.chapters[0].content = '按原请求完成的修订正文'; mocks.chapters[0].revision++; mocks.committedChapter.mockResolvedValue(true); return { output: '当前正文已保存', display: { kind: 'chapterDiff', chapterId: 'c', chapterTitle: '当前章', before, after: mocks.chapters[0].content, revision: mocks.chapters[0].revision, appliedDirectly: true } } }, false)
       const ask = tool('ask_user', async () => ({ failureCode: 'AUTHOR_INPUT_REQUIRED', output: '等待真实作者明确落点',
         display: { kind: 'question', question: '确认写入落点？', options: [{ label: '确认' }, { label: '稍后' }], unanswered: true } }))
       mocks.tools = [write, ask]
-      queue(response('', [call('resume-placement', 'ask_user')]))
+      queue(response('', [call('resume-placement', 'ask_user')]), response('', [call('actual-write', 'chapter_write')]), response('正文已保存。'))
       await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
       expect((mocks.openAITools.mock.calls as unknown[][]).some(([admitted]) => (admitted as AgentTool[]).some(item => item.name === 'chapter_write'))).toBe(true)
       expect(ask.execute, JSON.stringify({ events: events().slice(-6), chatCalls: mocks.chat.mock.calls.length })).toHaveBeenCalledOnce()
-      expect(write.execute).not.toHaveBeenCalled()
+      expect(write.execute).toHaveBeenCalledOnce()
       expect(mocks.runs.get('run')?.taskSpec).toEqual(frozen)
-      expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     })
-  it.each([false, true])('keeps legacy unresolved protocol2 contracts local before chat, naming or tool execution, local=%s', async local => {
+  it.each([false, true])('lets the Agent use current tools without a parser needs_input barrier, local=%s', async local => {
     const prompt = local ? '局部修订第1章的某句话。' : '修订一章，目标尚未明确。'
     const spec = buildTaskSpec({ runId: 'run', novelId: 'novel', prompt, authorWritingProtocol: 2, localEditProtocol: 1 })
     delete spec.scope.authorEffects
@@ -4672,16 +4661,16 @@ describe('author-directed task ending in the real execution loop', () => {
     spec.scope.writingInterpretation.requestHash = (await import('node:crypto')).createHash('sha256').update(prompt).digest('hex')
     spec.scope.writingInterpretation.scopeHash = (await import('../../api/lib/agent/writing-contract.js')).frozenWritingScopeHash(spec.scope)
     mocks.currentOriginal = { prompt, taskSpec: spec }
-    const write = tool('chapter_write', async () => ({ output: 'must not execute' }), false)
+    const write = tool('chapter_write', async () => { const before = mocks.chapters[0].content; mocks.chapters[0].content = '按原请求完成的修订正文'; mocks.chapters[0].revision++; mocks.committedChapter.mockResolvedValue(true); return { output: '当前正文已保存', display: { kind: 'chapterDiff', chapterId: 'c', chapterTitle: '当前章', before, after: mocks.chapters[0].content, revision: mocks.chapters[0].revision, appliedDirectly: true } } }, false)
     mocks.tools = [write]
+    queue(response('', [call('actual-write', 'chapter_write')]), response('正文已保存。'))
     await run(prompt)
-    expect(mocks.chat).not.toHaveBeenCalled()
-    expect(write.execute).not.toHaveBeenCalled()
-    expect((await import('../../api/lib/agent/session-title.js')).autoNameSession).not.toHaveBeenCalled()
-    expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
-    expect(mocks.runs.get('run')).toMatchObject({ status: 'paused', currentTurn: 0, usage: { totalTokens: 0 } })
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    expect(write.execute).toHaveBeenCalledOnce()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', usage: { totalTokens: 20 } })
   })
-  it.each([false, true])('keeps typed Continue local for a frozen unresolved target, including old checkpoints without a marker (marker=%s)', async marker => {
+  it.each([false, true])('lets typed Continue recover a parser-unresolved target, including old checkpoints without a marker (marker=%s)', async marker => {
     const spec = buildTaskSpec({ runId: 'original', novelId: 'novel', chapterId: null, prompt: '写一个短场景' })
     spec.scope.writing = { version: 1, kind: 'needs_input', targets: [], repairAuthorized: false, titleAndBodyOnly: false }
     const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'unknown_legacy', runStartedAt: 1000,
@@ -4694,23 +4683,26 @@ describe('author-directed task ending in the real execution loop', () => {
     mocks.previous.mockResolvedValueOnce(previous)
     mocks.priorRuns.mockResolvedValue([previous])
     mocks.original.mockResolvedValue({ parts: [{ type: 'text', text: '写一个短场景' }] })
+    const write = tool('chapter_write', async () => { const before = mocks.chapters[0].content; mocks.chapters[0].content = '按原请求完成的修订正文'; mocks.chapters[0].revision++; mocks.committedChapter.mockResolvedValue(true); return { output: '当前正文已保存', display: { kind: 'chapterDiff', chapterId: 'c', chapterTitle: '当前章', before, after: mocks.chapters[0].content, revision: mocks.chapters[0].revision, appliedDirectly: true } } }, false)
+    mocks.tools = [write]
+    queue(response('', [call('continued-write', 'chapter_write')]), response('原任务正文已保存。'))
     await run('继续')
-    expect(mocks.chat).not.toHaveBeenCalled()
-    expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
+    expect(write.execute).toHaveBeenCalledOnce()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { inheritedTokens: 25, inheritedTurns: 2 } })
-    if (marker) expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { authorInputRequired: { callId: 'original-question' } } })
+    expect(mocks.runs.get('run')?.usage.checkpoint).not.toHaveProperty('authorInputRequired')
   })
-  it('persists an unanswered scope question and pauses locally before any same-batch action or paid follow-up', async () => {
-    const write = tool('chapter_write', async () => ({ output: 'must not execute' }), false)
+  it('preserves an old unanswered question as information without inventing an answer or blocking actual tools', async () => {
+    const write = tool('chapter_write', async () => { const before = mocks.chapters[0].content; mocks.chapters[0].content = '按原请求完成的修订正文'; mocks.chapters[0].revision++; mocks.committedChapter.mockResolvedValue(true); return { output: '当前正文已保存', display: { kind: 'chapterDiff', chapterId: 'c', chapterTitle: '当前章', before, after: mocks.chapters[0].content, revision: mocks.chapters[0].revision, appliedDirectly: true } } }, false)
     mocks.tools = [tool('ask_user', async () => ({ failureCode: 'AUTHOR_INPUT_REQUIRED', output: '等待作者明确范围', summary: '等待作者输入',
       display: { kind: 'question', question: '目标章节？', options: [{ label: '第一章' }, { label: '稍后' }], unanswered: true } })), write]
-    queue(response('', [call('original-question', 'ask_user'), call('late-write', 'chapter_write')]))
+    queue(response('', [call('original-question', 'ask_user'), call('late-write', 'chapter_write')]), response('正文已保存，提问没有获得回答。'))
     await run('写一小段')
-    expect(mocks.chat).toHaveBeenCalledOnce(); expect(write.execute).not.toHaveBeenCalled()
-    expect(events().at(-1)).toMatchObject({ type: 'run.paused', reason: 'needs_input' })
+    expect(mocks.chat).toHaveBeenCalledTimes(2); expect(write.execute).toHaveBeenCalledOnce()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     expect(events().find(event => event.type === 'tool.result' && event.callId === 'original-question')).toMatchObject({ ok: true, display: { unanswered: true } })
-    expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { authorInputRequired: { version: 1, kind: 'writing_scope', callId: 'original-question' } } })
-    expect(mocks.runs.get('run')?.status).toBe('paused')
+    expect(mocks.runs.get('run')?.usage.checkpoint).not.toHaveProperty('authorInputRequired')
+    expect(mocks.runs.get('run')?.status).toBe('completed')
     const persisted = (mocks.persist.mock.calls as unknown as Array<[{ create?: { parts?: AgentMessagePart[] } }]>).flatMap(([input]) => input.create?.parts ?? [])
     expect(persisted.find(part => part.type === 'tool-call' && part.callId === 'original-question')).toMatchObject({
       status: 'success', display: { kind: 'question', unanswered: true },
@@ -4912,10 +4904,10 @@ describe('confirmed review request failures', () => {
     const independent = tool('chapter_read', async () => ({ output: '独立读取完成' }))
     mocks.tools = [critic, independent]
     queue(response('', [call('failed-review', critic.name, '{"chapterId":"c","compilationId":"comp"}'), call('independent-read', independent.name)]), response('正文保留，检查尚未完成。'))
-    await run('写下一章')
+    await run('检查当前章节并说明报告结果')
     expect(independent.execute).toHaveBeenCalledOnce()
     expect(critic.execute).toHaveBeenCalledOnce()
-    expect(events().at(-1)).toMatchObject(status === 'unknown' ? { type: 'run.paused' } : { type: 'run.finished', status: 'failed' })
+    expect(events().at(-1)).toMatchObject(status === 'unknown' ? { type: 'run.paused' } : { type: 'run.finished', status: 'succeeded' })
     const result = events().find(event => event.type === 'tool.result' && event.callId === 'failed-review')
     const checkpoint = (mocks.runs.get('run')?.usage as { checkpoint: { pendingReviews?: unknown[] } }).checkpoint
     if (status === 'terminal') {
@@ -4942,7 +4934,7 @@ it('retains a failed admission-bound report and its actual ended request without
   mocks.tools = [critic]
   // A genuine resume uses the same task spec; its old request reconciliation is
   // independently authenticated by the PG reader suite.
-  seedAdmission('写下一章', 'c')
+  seedAdmission('检查当前章节并说明报告结果', 'c')
   const stored = structuredClone(mocks.runs.get('run')!)
   mocks.update.mockResolvedValueOnce(stored as never)
   mocks.requestRecovery.mockResolvedValue([{ compilationId: 'comp', chapterId: 'c', revision: 3,
@@ -4950,10 +4942,10 @@ it('retains a failed admission-bound report and its actual ended request without
       sourceRunId: 'run', sourceResultId: 'old-result', sourceReportId: null, usageIds: ['old-usage'],
       admissionId: 'author-continue:new', currentRevision: 3, currentContentHash: 'a'.repeat(64) } }])
   queue(response('', [call('new-review', critic.name, '{"chapterId":"c","compilationId":"comp"}')]), response('检查未完成，保留正文。'))
-  await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '写下一章', resume: true })
+  await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '检查当前章节并说明报告结果', resume: true })
   expect(critic.execute).toHaveBeenCalledOnce()
   expect(mocks.chat).toHaveBeenCalledTimes(2)
-  expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+  expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
   expect(mocks.runs.get('run')?.usage).toMatchObject({ checkpoint: { reviewAttempts: expect.arrayContaining(['comp:c:3:quality_analyze']) } })
 })
 
@@ -5644,18 +5636,22 @@ async function lateCandidateCommitFixture() {
   })
   const original = { compilationId: 'comp', chapterSummary: 'The clerk waits beside the sealed desk.',
     retainedFindings: [{ source: 'quality', reportId: 'report', findingId: 'advice', reason: 'The current phrasing is intentional.' }] }
-  const committed = tool('chapter_bridge_commit', async () => {
-    expect(state.ready).toBe(true)
-    expect(state.revision).toBe(chapter.revision)
-    expect(mocks.runEvents.some(event => event.type === 'tool.call' && (event.payload as { args?: unknown }).args
-      && runtimeJson((event.payload as { args: unknown }).args).hash === runtimeJson(original).hash)).toBe(true)
-    state = { ...state, decisionPending: false, mustPassPending: false }
+  const savedCommit = vi.fn()
+  const committed = tool('chapter_bridge_commit', async (ctx, args) => {
+    expect(ctx).toMatchObject({ userId: 'user', novelId: 'novel' })
+    expect(args).toMatchObject({ compilationId: 'comp', chapterSummary: original.chapterSummary })
+    const current = mocks.chapters.find(item => item.id === chapter.id)
+    if (!current || current.revision !== chapter.revision || current.content !== chapter.content)
+      throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '正文版本已变化，未提交旧版本。')
+    const journal = mocks.runEvents.find(event => event.type === 'tool.call' && (event.payload as { callId?: string }).callId === ctx.callId)
+    expect((journal?.payload as { args?: unknown })?.args).toEqual(args)
+    savedCommit(args, { id: current.id, revision: current.revision })
     mocks.committedChapter.mockResolvedValue(true)
     return { output: 'The unchanged proposal has been committed.' }
   }, false)
   committed.parameters = chapterBridgeCommitTool.parameters
   mocks.tools = [checked, committed]
-  return { candidate, original, checked, committed, chapter, state: () => state, reviewed: () => { validation = { ...validation, terminalCandidate: candidate }; update(true) },
+  return { candidate, original, checked, committed, savedCommit, chapter, state: () => state, reviewed: () => { validation = { ...validation, terminalCandidate: candidate }; update(true) },
     setState: (patch: Partial<ChapterReviewReadiness>) => { state = { ...state, ...patch }; update() },
     restore: () => compilation.mockReset().mockResolvedValue(null) }
 }
@@ -5664,13 +5660,13 @@ describe('late COMMIT candidate uses the registered review executor before its o
   it('checks a body-only report candidate once and commits the exact original reasons in the same main batch', async () => {
     const f = await lateCandidateCommitFixture()
     try {
-      queue(response('', [call('original-commit', 'chapter_bridge_commit', JSON.stringify(f.original))]), response('The saved chapter is complete.'))
+      queue(response('', withExplicitChecks(call('original-commit', 'chapter_bridge_commit', JSON.stringify(f.original)), 'continuity_validate')), response('The saved chapter is complete.'))
       await run('写下一章')
       expect(f.checked.execute, JSON.stringify(events().filter(event => ['tool.call', 'tool.result', 'tool.deferred', 'error'].includes(event.type)))).toHaveBeenCalledOnce(); expect(f.committed.execute).toHaveBeenCalledOnce()
-      expect(f.checked.execute).toHaveBeenCalledWith(expect.objectContaining({ callId: expect.stringMatching(/^commit_review_/u) }), { compilationId: 'comp' })
+      expect(f.checked.execute).toHaveBeenCalledWith(expect.objectContaining({ callId: expect.stringMatching(/^explicit_review_/u) }), { compilationId: 'comp' })
       expect(vi.mocked(f.checked.execute).mock.calls[0][0].transaction).toBeUndefined()
       expect(f.committed.execute).toHaveBeenCalledWith(expect.anything(), f.original)
-      expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['chapter_bridge_commit', 'continuity_validate'])
+      expect(events().filter(event => event.type === 'tool.call').map(event => event.toolName)).toEqual(['continuity_validate', 'chapter_bridge_commit'])
       expect(events().filter(event => event.type === 'tool.result').map(event => [event.toolName, event.ok])).toEqual([['continuity_validate', true], ['chapter_bridge_commit', true]])
       expect(mocks.chat).toHaveBeenCalledTimes(2)
       expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
@@ -5725,16 +5721,25 @@ describe('late COMMIT candidate uses the registered review executor before its o
       if (scenario === 'approval-denied') { f.committed.permission.build = 'ask'; f.committed.alwaysConfirm = true }
       if (scenario === 'denied-check') f.checked.permission.build = 'deny'
       if (scenario === 'failed-check') vi.mocked(f.checked.execute).mockImplementation(async () => { f.setState({ continuity: 'incomplete' }); return { outcome: 'failed', failureCode: 'CONTINUITY_REPORT_INCOMPLETE', output: 'Physical reply invalid; retained.' } })
-      if (scenario === 'body-changed') vi.mocked(f.checked.execute).mockImplementation(async () => { f.chapter.revision++; f.setState({ continuity: 'incomplete' }); return { outcome: 'failed', failureCode: 'CONTINUITY_INPUT_STALE', output: 'Body changed outside the review; original report was not applied.', reviewCompleted: false, reviewOutcome: 'stale' } })
+      if (scenario === 'body-changed') vi.mocked(f.checked.execute).mockImplementation(async () => { mocks.chapters[0].revision++; mocks.chapters[0].content += ' External edit.'; return { outcome: 'failed', failureCode: 'CONTINUITY_INPUT_STALE', output: 'Body changed outside the review; original report was not applied.', reviewCompleted: false, reviewOutcome: 'stale' } })
       if (scenario === 'still-unverified') vi.mocked(f.checked.execute).mockImplementation(async () => { f.setState({ continuity: 'incomplete' }); return { output: 'Current report remains invalid.', reviewCompleted: false, reviewOutcome: 'evidence_repair_required' } })
       try {
         mocks.chat.mockImplementation(async () => response('Current chapter remains saved; no further action.'))
-        queue(response('', [call('original-commit', 'chapter_bridge_commit', JSON.stringify(f.original))]), response('Stopped with the saved proposal.'))
+        const commit = call('original-commit', 'chapter_bridge_commit', JSON.stringify(f.original))
+        queue(response('', ['denied-commit', 'approval-denied'].includes(scenario) ? [commit] : withExplicitChecks(commit, 'continuity_validate')), response('Stopped with the saved proposal.'))
         await run('写下一章')
-        expect(commitEffect(f.committed)).not.toHaveBeenCalled()
+        const saved = ['denied-check', 'failed-check', 'still-unverified'].includes(scenario)
+        if (saved) expect(f.savedCommit).toHaveBeenCalledOnce()
+        else expect(f.savedCommit).not.toHaveBeenCalled()
         expect(f.checked.execute).toHaveBeenCalledTimes(['denied-commit', 'approval-denied', 'denied-check'].includes(scenario) ? 0 : 1)
         const commitResult = events().find(event => event.type === 'tool.result' && event.toolName === 'chapter_bridge_commit')
-        expect(commitResult).toMatchObject({ ok: false })
+        expect(commitResult).toMatchObject({ ok: saved })
+        if (scenario === 'body-changed') {
+          expect(commitResult).toMatchObject({ failureCode: 'CONTINUITY_INPUT_STALE' })
+          expect(mocks.chapters[0].revision).toBe(4)
+          expect(f.chapter.revision).toBe(3)
+        }
+        if (scenario === 'failed-check' || scenario === 'still-unverified') expect(f.state().continuity).toBe('incomplete')
       } finally { f.restore() }
     })
   it('returns newly reported prose opinions to the Writer and commits only after real current reasons are supplied', async () => {
@@ -5745,24 +5750,24 @@ describe('late COMMIT candidate uses the registered review executor before its o
     const resolved = { ...f.original, retainedFindings: [...f.original.retainedFindings, { ...fresh, reason: 'The original author scope retains this verified issue explicitly.' }] }
     const logger = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
-      queue(response('', [call('original-commit', 'chapter_bridge_commit', JSON.stringify(f.original))]),
+      queue(response('', [call('explicit-review', 'continuity_validate', '{"compilationId":"comp"}')]),
         response('', [call('resolved-commit', 'chapter_bridge_commit', JSON.stringify(resolved))]), response('The saved chapter is complete.'))
       await run('写下一章', undefined, true)
       expect(logger.mock.calls.map(args => String(args.at(-1))), JSON.stringify(logger.mock.calls.map(args => String(args.at(-1))))).toEqual([])
-      expect(f.checked.execute).toHaveBeenCalledOnce(); expect(f.committed.execute).toHaveBeenCalledTimes(2)
-      expect(commitEffect(f.committed)).toHaveBeenCalledOnce()
-      expect(commitEffect(f.committed)).toHaveBeenCalledWith(expect.anything(), resolved)
-      expect(events()).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'original-commit', ok: false, failureCode: 'REVIEW_DECISION_REQUIRED' }))
-      expect(events().filter(event => event.type === 'tool.result' && event.toolName === 'chapter_bridge_commit')).toEqual([expect.objectContaining({ callId: 'original-commit', ok: false }), expect.objectContaining({ callId: 'resolved-commit', ok: true })])
-      const messages = mocks.chat.mock.calls[1][0].messages as Parameters<typeof chatType>[0]['messages']
-      const nativeIndex = messages.findIndex(message => message.role === 'assistant' && message.toolCalls?.some(item => item.id === 'original-commit'))
+      expect(f.checked.execute).toHaveBeenCalledOnce(); expect(f.committed.execute).toHaveBeenCalledOnce()
+      expect(f.savedCommit).toHaveBeenCalledWith(resolved, { id: 'c', revision: 3 })
+      expect(resolved.chapterSummary).toBe(f.original.chapterSummary)
+      expect(resolved.retainedFindings).toEqual(expect.arrayContaining(f.original.retainedFindings))
+      expect(events().filter(event => event.type === 'tool.result' && event.toolName === 'chapter_bridge_commit')).toEqual([expect.objectContaining({ callId: 'resolved-commit', ok: true })])
+      const messages = mocks.chat.mock.calls.at(-1)![0].messages as Parameters<typeof chatType>[0]['messages']
+      const nativeIndex = messages.findIndex(message => message.role === 'assistant' && message.toolCalls?.some(item => item.id === 'resolved-commit'))
       const following = messages.slice(nativeIndex + 1)
       const boundary = following.findIndex(message => message.role !== 'tool')
       const receipts = following.slice(0, boundary < 0 ? following.length : boundary).filter(message => message.role === 'tool')
-      expect(receipts.map(message => message.toolCallId)).toEqual([expect.stringMatching(/^commit_review_/u), 'original-commit'])
+      expect(receipts.map(message => message.toolCallId)).toEqual(['resolved-commit'])
       expect(messages.some(message => message.role === 'tool' && typeof message.content === 'string' && message.content.includes('A current prose error remains'))).toBe(true)
-      expect(messages[nativeIndex]).toMatchObject({ role: 'assistant', toolCalls: [{ id: 'original-commit', name: 'chapter_bridge_commit', arguments: JSON.stringify(f.original) }] })
-      expect(messages.filter(message => message.role === 'assistant').flatMap(message => message.toolCalls ?? []).map(item => item.id)).toEqual(['original-commit', 'resolved-commit'])
+      expect(messages[nativeIndex]).toMatchObject({ role: 'assistant', toolCalls: [{ id: 'resolved-commit', name: 'chapter_bridge_commit', arguments: JSON.stringify(resolved) }] })
+      expect(messages.filter(message => message.role === 'assistant').flatMap(message => message.toolCalls ?? []).map(item => item.id)).toEqual(['explicit-review', 'resolved-commit'])
       expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     } finally { logger.mockRestore(); f.restore() }
   })
@@ -5781,7 +5786,7 @@ describe('late COMMIT candidate uses the registered review executor before its o
     })
     mocks.tools.push(quality)
     try {
-      queue(response('', [call('original-commit', 'chapter_bridge_commit', JSON.stringify(f.original))]), response('The chapter is complete.'))
+      queue(response('', [...withExplicitChecks(call('original-commit', 'chapter_bridge_commit', JSON.stringify(f.original)), 'continuity_validate', 'quality_analyze', 'continuity_validate')]), response('The chapter is complete.'))
       await run('写下一章')
       expect(f.checked.execute).toHaveBeenCalledTimes(2); expect(quality.execute).toHaveBeenCalledOnce(); expect(f.committed.execute).toHaveBeenCalledOnce()
       expect(f.chapter.revision).toBe(4)

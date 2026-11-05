@@ -760,3 +760,4 @@ describe('parser v3 lossless persisted judgment projection', () => {
     expect(prepareQualityFindings(content, [], opinions, true, undefined, 2)).toMatchObject({ complete: true, omittedFindings: 4 })
   })
 })
+vi.mock('../../api/lib/agent/saved-chapter-work.js', () => ({ readCurrentSavedTaskChapters: vi.fn(async () => []) }))

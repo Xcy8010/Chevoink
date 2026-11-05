@@ -1,6 +1,7 @@
 import { selectWeightedModelRuntime, resolveWeightedModelRuntime } from '../model-weighted-routing.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { currentNativeToolViews, readFrozenModelToolViews } from './runtime-tool-view.js'
+import { readEffectiveNativeTooling } from './native-tool-policy.js'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -15,7 +16,7 @@ import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { withLeaseHeartbeat } from './runtime-heartbeat.js'
 import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionStateInTransaction } from './runtime-state.js'
 import { executeDurableToolStep } from './runtime-tool-step.js'
-import { readDurableAuthorInputBoundary } from './runtime-question.js'
+import { validateHistoricalQuestionReceipt } from './runtime-question.js'
 import { assertProviderBudget } from './runtime-budget.js'
 import { advanceDurableCheckpoint, advanceDurableContext } from './runtime-checkpoint-step.js'
 import { advanceDurableContinuation, advanceDurableCompletionObligations, advanceDurableToolStagnation } from './runtime-continuation.js'
@@ -246,8 +247,7 @@ async function refreshDurableGoalModel(token: RunLeaseToken) {
 export async function executeDurableStep(token: RunLeaseToken, signal: AbortSignal) {
   const lease = { ...token }
   signal.throwIfAborted()
-  const authorInput = await readDurableAuthorInputBoundary(lease)
-  if (authorInput) return authorInput
+  await validateHistoricalQuestionReceipt(lease)
   const importBoundary = await readDurableImportBoundary(lease)
   if (importBoundary) return importBoundary
   // Goal continuations carry the author's real steering message in AgentMessage;
@@ -322,7 +322,9 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
     const compacted = await advanceDurableContext(lease, inputLimit)
     if (compacted) return { kind: 'context' as const, frame: compacted }
   }
-  const tools = prepared?.preparedTools ?? await currentNativeToolViews(configuration.tools, taskSpecSchema.parse(current.state.originalSpec).scope)
+  const originalSpec = taskSpecSchema.parse(current.state.originalSpec)
+  const effectiveTools = prepared ? configuration : await withRunLease(lease, tx => readEffectiveNativeTooling(tx, lease, configuration, originalSpec))
+  const tools = prepared?.preparedTools ?? await currentNativeToolViews(effectiveTools.tools, originalSpec.scope)
   if (estimateChatMessagesTokens(frame.state.messages) + estimateToolDefinitionTokens(tools) > inputLimit) {
     return runtimeError('RUNTIME_CONTEXT_LIMIT', '原请求、工具定义或不可再归档内容超过模型输入预算；已保留完整原文，不截掉要求或盲目重试模型。')
   }

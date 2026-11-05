@@ -1,3 +1,4 @@
+import { initializeExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
@@ -16,7 +17,7 @@ import { prisma } from '../../api/lib/prisma.js'
 import { getCreditWindow, getTaskCreditUsage } from '../../api/lib/credits.js'
 import { adoptCoverGoalAccounting, readCoverAdmission, readCoverUnit } from '../../api/lib/agent/runtime-cover-accounting.js'
 import { coverGenerateTool } from '../../api/lib/agent/tools/cover-tools.js'
-import { initializeExecutionState, loadExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep, getDurableToolAdapterNames } from '../../api/lib/agent/runtime-tool-step.js'
 import { readTaskBudget, readTaskBudgetInTransaction } from '../../api/lib/agent/runtime-budget.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
@@ -47,7 +48,7 @@ describe.runIf(available)('fixed-price cover generation genuine PG admission and
         let lease = await claim(f)
         const signal = controller(), tool = coverGenerateTool, args = { prompt: '雨夜车站，清晰书名', count: 1 }
         const window = getCreditWindow()
-        await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 20000,
+        await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 20000,
           dailyUsedMilli: 0, bonusBalanceMilli: 0, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
         await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'balanced',
           model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
@@ -140,7 +141,7 @@ describe.runIf(available)('fixed-price cover generation genuine PG admission and
       let lease = await claim(f)
       const signal = controller(), tool = coverGenerateTool, args = { prompt: '冷色调，主角站在车站门口', count: 2 }
       const window = getCreditWindow()
-      await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: scenario === 'exhausted' ? 5000 : 20000,
+      await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: scenario === 'exhausted' ? 5000 : 20000,
         dailyUsedMilli: 0, bonusBalanceMilli: 0, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
       await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'balanced',
         model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },

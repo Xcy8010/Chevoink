@@ -13,7 +13,8 @@ vi.mock('../../api/lib/agent/runtime-lease.js', async original => ({ ...await or
 vi.mock('../../api/lib/agent/goal-fence.js', async original => ({ ...await original<object>(), readGoalExecution: vi.fn(async () => null) }))
 vi.mock('../../api/lib/agent/tools/durable-todo.js', async original => ({ ...await original<object>(), readDurableTodoItems: mocks.todos }))
 vi.mock('../../api/lib/agent/writing-scope.js', async original => ({ ...await original<object>(), readCompletedWritingDelivery: mocks.delivery }))
-vi.mock('../../api/lib/agent/runtime-tool-view.js', async original => ({ ...await original<object>(), needsNativeToolProjection: mocks.nativeAdmission }))
+vi.mock('../../api/lib/agent/runtime-tool-view.js', async original => ({ ...await original<object>(), needsNativeToolProjection: mocks.nativeAdmission,
+  verifiedAssistantToolViews: async (_tx: unknown, _root: unknown, _frame: unknown, tools: unknown[]) => tools }))
 
 beforeEach(() => vi.clearAllMocks())
 
@@ -35,7 +36,7 @@ it.each([
     messages: [{ role: 'assistant', content: null, toolCalls: [{ id: 'sync', name: 'todo_write', arguments: JSON.stringify({ items: completed.items }) }, call] },
       { role: 'tool', toolCallId: 'sync', content: 'Actual existing todo ids are now completed.' }] }
   const frame = { revision: 12, snapshotHash: runtimeJson(snapshot).hash, state: snapshot }
-  mocks.state.mockResolvedValue({ frame, configuration: { tools: [{ type: 'function', function: { name: action } }],
+  mocks.state.mockResolvedValue({ frame, configuration: { tools: [{ type: 'function', function: { name: action, parameters: {} } }],
     toolAuthority: [{ name: action, permission: 'allow' }] } })
   const outbox = { create: vi.fn(async () => ({})) }
   const tx = { agentTaskRoot: { findUniqueOrThrow: vi.fn(async () => ({ id: 'root', novelId: 'novel', specSnapshot: spec })) }, agentExecutionOutbox: outbox }
@@ -57,3 +58,4 @@ it.each([
   }
   expect(frame.state).toEqual(snapshot)
 })
+vi.mock('../../api/lib/agent/native-tool-policy.js', async importOriginal => ({ ...await importOriginal<typeof import('../../api/lib/agent/native-tool-policy.js')>(), readEffectiveNativeTooling: async (_tx: unknown, _lease: unknown, configuration: { tools: unknown[]; toolAuthority: unknown[] }) => configuration }))

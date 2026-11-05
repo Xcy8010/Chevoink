@@ -1,3 +1,4 @@
+import { initializeExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
 import { mkdtemp, rm, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
@@ -10,7 +11,7 @@ import * as assignments from '../../api/lib/agent/model-assignment-context.js'
 import * as storage from '../../api/lib/export-private-storage.js'
 import * as operations from '../../api/lib/agent/runtime-operations.js'
 import * as reducer from '../../api/lib/agent/runtime-reducer.js'
-import { initializeExecutionState, loadExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep, getDurableToolAdapterNames } from '../../api/lib/agent/runtime-tool-step.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
@@ -54,7 +55,7 @@ describe.runIf(available)('durable export preserves original manuscript, optiona
           messages: [{ role: 'user', content: '一键导出当前作品。' }, { role: 'assistant', content: null, toolCalls: [{ id: 'original-export', name: tool.name, arguments: JSON.stringify(args) }] }] } })
       await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running' } })
       const period = credits.getCreditWindow()
-      await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: period.startedAt, periodEndsAt: period.endsAt } })
+      await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: period.startedAt, periodEndsAt: period.endsAt } })
       const runtime = { ...baseRuntime, tier: scenario === 'byok' ? 'custom' as const : scenario === 'assigned' ? 'standard' as const : 'lite' as const,
         multiplierBps: scenario === 'byok' ? 0 : 10000 }
       vi.spyOn(credits, 'getModelTierRuntime').mockImplementation(async (_tier, _user, _custom, effort) => ({ ...runtime, reasoningEffort: effort ?? runtime.reasoningEffort }))

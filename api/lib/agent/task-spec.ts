@@ -416,7 +416,7 @@ export function requiresManuscriptDelivery(spec: Pick<TaskSpec, 'intent' | 'scop
 }
 
 export function renderTaskSpec(spec: TaskSpec): string {
-  if (spec.scope.agentWritingProtocol === 1 && !spec.scope.agentWritingBinding) return `[系统] 本任务由主Agent理解完整作者需求，词表推测不决定正文权限。原始请求：${spec.goals.join('\n')}\n当前章节上下文：${JSON.stringify(spec.scope.chapterIds ?? [])}。需要作用于正文时，先按需读取目录、正文及同聊天已有真实作者要求，自主确定写作/修改/检查和目标，用task_scope_bind提交真实章节ID或全书序号，再执行实际工作。普通讨论直接回答，无需正文目标或绑定。不要因自然用语没有命中固定关键词要求作者重说；只有阅读后仍有影响操作的具体冲突才询问。真实选区、保护章、只读模式、权限、取消、版本和费用规则继续由系统强制校验。`
+  if (spec.scope.agentWritingProtocol === 1 && !spec.scope.agentWritingBinding) return `[系统] 本任务由主Agent理解完整作者需求，词表推测不决定正文权限。原始请求：${spec.goals.join('\n')}\n当前章节上下文：${JSON.stringify(spec.scope.chapterIds ?? [])}。需要作用于正文时，先按需读取目录、正文及同聊天已有真实作者要求，自主确定写作/修改/检查和目标，可直接用真实章节ID或全书序号调用对应普通工具；task_scope_bind仅用于可选计划记录，不是前置权限。普通讨论直接回答，无需正文目标或绑定。不要因自然用语没有命中固定关键词要求作者重说；只有阅读后仍有影响操作的具体冲突才询问。真实选区、保护章、只读模式、权限、取消、版本和费用规则继续由系统校验；任务分类、计划步骤及检查报告状态不用于封锁普通工具。`
   const networkRule = spec.networkAccess === 'denied'
     ? '[系统] 原始请求明确禁止联网：本任务不提供或执行搜索、网页获取，不预约、不请求供应商、不收工具费。只使用已有获准材料并说明证据限制。\n' : ''
   const readRule = spec.researchReadAccess === 'denied'
@@ -429,7 +429,7 @@ export function renderTaskSpec(spec: TaskSpec): string {
 }
 
 function renderTaskSpecBody(spec: TaskSpec): string {
-  const volumeRule = spec.scope.volumeCreateIntent ? `\n本次只承接新建空卷：${spec.scope.volumeCreateIntent.targets.map(target => `第${target.orderIndex}卷《${target.title}》`).join('、')}。先读取卷目录，再逐个新建；复用返回的真实卷编号。禁止修改既有卷、挂细纲、写章、迁移或推进其他建议；当前请求不授予通用结构权限。` : spec.scope.volumeCreationProtocol && isElidedVolumeAddition(spec.goals.join('\n')) ? '\n本次添加请求缺少可核实的唯一宾语。使用向作者提问工具澄清具体对象，不猜测或写入；若涉及新的创建目标，请作者发送写明卷名和范围的新请求后执行。' : ''
+  const volumeRule = spec.scope.volumeCreateIntent ? `\n本次只承接新建空卷：${spec.scope.volumeCreateIntent.targets.map(target => `第${target.orderIndex}卷《${target.title}》`).join('、')}。先读取卷目录，再逐个新建；复用返回的真实卷编号。禁止修改既有卷、挂细纲、写章、迁移或推进其他建议；当前请求不授予通用结构权限。` : spec.scope.volumeCreationProtocol && isElidedVolumeAddition(spec.goals.join('\n')) ? '\n本次添加对象需要结合完整对话和当前目录理解；主Agent先读取必要上下文，自主确定对象与步骤。只有仍有影响执行的具体缺口才提问，不因短句未命中关键词要求作者重发请求。' : ''
   if (spec.intent === 'research_analysis') {
     const budget = spec.networkAccess === 'denied' ? '禁止新增联网' : spec.researchReadAccess === 'denied'
       ? '常规最多5次搜索，有真实关键资料缺口且有新检索方向时总共最多10次；禁止页面获取' : '最多5次搜索、8次页面获取；有真实关键资料缺口且有新来源或章节检索方向时，搜索总共最多10次'
@@ -466,7 +466,7 @@ function renderTaskSpecBody(spec: TaskSpec): string {
     ? '贴合既有走向，只修明确错误。'
     : spec.creativeFreedom === 'bold'
       ? '优先探索新可能；检查建议仅提示，不自动改写。'
-      : '只在原始请求获准范围内创作。写作交付先完成当前版本连续性与质量检查，仅原始作者请求可明确跳过；检查本身不扩大写入授权。质量警告与审美建议，应与事实修法优先合并处理；可连续调用章节修改工具，每次使用当前正文，不能硬性限定只调用一次，也不要求一次处理全部候选。本任务冻结的新建目标章可在原写作权限内持续修订，多项相关修法优先用 chapter_edit_range 的 patches（每次最多8处、同一原稿、唯一不重叠），也可单片段替换或 chapter_write。保留真实剩余意见；不能安全处理的项可用 retainedFindings 引用当前报告并说明具体原因，留置与正文未变不表示修复。付费自动检查与自动修订次数保持原限制，不重置预算或重放未知调用。全部修订后只读复核当前版本两类检查，最后提交终态；写入不能代替最终版本检查。已有稿仍需原请求明确修复授权，明确禁止修改优先；报告不能扩大章节范围。完成真实章节终态后按请求格式交付；可按作品当前阶段在普通回复给出1–2条可选下一步建议，不转成提问、待办或执行；排他输出或作者不要建议时不附加。')
+      : '只在原始请求获准范围内创作。按实际创作需要调用连续性与质量检查，检查建议和未完成报告不阻止保存或提交；报告不扩大写入授权，也不能把提交称为检查通过。质量警告与审美建议，应与事实修法优先合并处理；可连续调用章节修改工具，每次使用当前正文，不能硬性限定只调用一次，也不要求一次处理全部候选。本任务冻结的新建目标章可在原写作权限内持续修订，多项相关修法优先用 chapter_edit_range 的 patches（每次最多8处、同一原稿、唯一不重叠），也可单片段替换或 chapter_write。保留真实剩余意见；不能安全处理的项可用 retainedFindings 引用当前报告并说明具体原因，留置与正文未变不表示修复。付费自动检查与自动修订次数保持原限制，不重置预算或重放未知调用。修订后按实际需要复核，保存或提交不认证检查通过；原作者明确要求的检查目标须如实完成或说明尚未完成。已有稿仍需原请求明确修复授权，明确禁止修改优先；报告不能扩大章节范围。完成真实章节终态后按请求格式交付；可按作品当前阶段在普通回复给出1–2条可选下一步建议，不转成提问、待办或执行；排他输出或作者不要建议时不附加。')
   const reviewRule = spec.scope.reviewProtocol === 1 && !['stable', 'bold'].includes(spec.creativeFreedom)
     ? '\n严格意见协议v1：原要求的最终版本完整检查报告中，每项未修复意见都须按原授权具体处理或用真实ref与具体原因合理保留，包括自动8处窗口外、重叠、未定位及已标拒绝但尚无当前保留决定的项。自动安全窗口不代表完整意见义务，不给额外定位或写入权限。原作者要求检查通过时，保留不能替代硬通过；合法跳过检查的原要求保持。' : ''
   return `[系统] 本轮任务契约（taskSpecId=${spec.id}）：\n意图：${spec.intent}\n目标：${spec.goals.join('；')}\n创作模式：${freedomLabel}（${freedomRule}）；质量模式：${spec.qualityMode}${reviewRule}${volumeRule}\n硬约束：\n${hard}\n预期交付：${spec.expectedOutputs.map((item) => item.description).join('；')}\n完成前必须验证：${spec.postconditions.map((item) => item.description).join('；') || '按用户目标核验结果'}。`

@@ -26,7 +26,7 @@ import { composeChapterEdit } from './chapter-patches.js'
 import { composeChapterBody } from './chapter-body.js'
 import { plainChapterTitle } from '../../../../shared/structure/chapter-title.js'
 import { writingNewVolumeSchema } from '../../../../shared/contracts/writing-volume-contracts.js'
-import { assertPreparedWritingVolumeDecision, assertExplicitWritingVolumePlacement, createWritingTailVolume } from '../writing-volume.js'
+import { createWritingTailVolume } from '../writing-volume.js'
 import { projectChapterBodyResult, projectConfirmedToolFailure } from './contract.js'
 import { readReviewBoundEditPlan } from '../review-bound-edit.js'
 
@@ -288,10 +288,6 @@ export const chapterCreateTool = defineTool({
         }
       }
       const beforeHash = await readSemanticStructureHash(tx, ctx.novelId)
-      if (frozen.writing?.tailVolume?.creationProtocol === 2) {
-        if (args.newVolume) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '本任务先使用新建卷，再用真实卷编号创建目标章，不在创建章节时隐式建卷。')
-        await assertExplicitWritingVolumePlacement(tx, ctx, slot?.orderIndex ?? args.position ?? 0, requestedVolumeId)
-      } else if (!args.newVolume && frozen.writing?.tailVolume) await assertPreparedWritingVolumeDecision(tx, ctx, slot?.orderIndex ?? args.position ?? 0)
       if (args.newVolume && (ctx.inlineChild || ctx.sandboxMode === 'read_only' || ctx.protectedChapterIds?.size)) {
         throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '子执行、只读或受保护任务不能为章节新建尾卷。')
       }

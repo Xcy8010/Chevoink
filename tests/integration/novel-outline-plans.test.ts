@@ -62,7 +62,8 @@ describe.skipIf(!available)('outline/detail metadata persistence and compiler de
     expect(readWritingPlanContext(old.compilation.preparedContext)).toBeNull()
     const outline = (await createNovelPlanArtifact(f.userId, f.novelId, '大纲', { planKind: 'outline' })).item
     const parent = (await updateNovelPlanArtifact(f.userId, outline.id, { content: '本章取得钥匙。终局返回故乡。', expectedPlanHash: outline.planHash })).item
-    await expect(prepareStoryCompilation({ ...f, mode: 'balanced', intentSummary: '改写本章' })).rejects.toMatchObject({ code: 'DETAIL_PLAN_REQUIRED' })
+    const withoutDetail = await prepareStoryCompilation({ ...f, mode: 'balanced', intentSummary: '改写本章' })
+    expect(readWritingPlanContext(withoutDetail.compilation.preparedContext)).toBeNull()
     const detail = (await createNovelPlanArtifact(f.userId, f.novelId, '细纲', { planKind: 'detail', parentPlanId: parent.id,
       expectedParentPlanHash: parent.planHash, target: { kind: 'chapter', chapterId: f.chapterId } })).item
     const saved = (await updateNovelPlanArtifact(f.userId, detail.id, { content: '本章人物取得钥匙，留下一封信。', expectedPlanHash: detail.planHash })).item
@@ -71,8 +72,8 @@ describe.skipIf(!available)('outline/detail metadata persistence and compiler de
     await updateNovelPlanArtifact(f.userId, saved.id, { content: '作者新的细纲内容。', expectedPlanHash: saved.planHash })
     await expect(prisma.$transaction(tx => assertWritingPlanContextCurrent(tx, { userId: f.userId, novelId: f.novelId }, prepared.compilation.preparedContext))).rejects.toMatchObject({ code: 'PLAN_CONTEXT_STALE' })
     await expect(saveSceneTasks({ userId: f.userId, novelId: f.novelId, compilationId: prepared.compilation.id,
-      tasks: [{ purpose: '取得钥匙', goal: '拿到钥匙', obstacle: '门锁', choice: '绕行', cost: '留下痕迹', turn: '找到钥匙', entryState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }, exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }, styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })).rejects.toMatchObject({ code: 'PLAN_CONTEXT_STALE' })
-    expect(await prisma.sceneTask.count({ where: { compilationId: prepared.compilation.id } })).toBe(0)
+      tasks: [{ purpose: '取得钥匙', goal: '拿到钥匙', obstacle: '门锁', choice: '绕行', cost: '留下痕迹', turn: '找到钥匙', entryState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }, exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }, styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })).resolves.toHaveLength(1)
+    expect(await prisma.sceneTask.count({ where: { compilationId: prepared.compilation.id } })).toBe(1)
   }))
 
   it('binds a future plan to one real chapter atomically and keeps that identity after reordering', async () => fixture(async f => {

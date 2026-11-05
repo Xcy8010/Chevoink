@@ -1,3 +1,4 @@
+import { initializeExecutionState, saveExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
@@ -7,7 +8,7 @@ import { encryptSecret } from '../../api/lib/secret-box.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
 import { acquireRunLease } from '../../api/lib/agent/runtime-lease.js'
-import { initializeExecutionState, loadExecutionState, saveExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { runReviewedDurableExecution } from '../../api/lib/agent/runtime-executor.js'
 import { dispatchDurableChild, awaitDurableChildren } from '../../api/lib/agent/runtime-child-tools.js'
@@ -328,7 +329,7 @@ describe.runIf(available)('durable native child HTTP path in isolated PG', () =>
         apiKeyCiphertext: encryptSecret('isolated-never-used'), enabled: true, selectable: true, multiplierBps: index ? 20000 : 10000,
         metadata: { reasoningEfforts: ['low', 'high'], defaultReasoningEffort: index ? 'high' : 'low', contextWindowTokens: 128000 } })) })
       const window = getCreditWindow()
-      await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 1000000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+      await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 1000000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
       const parentPrice = { version: 'credits-v1-exact' as const, modelTier: tiers[0] as `builtin_${string}`, multiplierBps: 10000 }
       const childPrice = { version: 'credits-v1-exact', modelTier: tiers[1], multiplierBps: 20000 }
       const exec = await execution(f, subAgentRunTool, { subagentId: f.definitionId, task: '只读审阅原始设定并提交完整报告',

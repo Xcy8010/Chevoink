@@ -2,7 +2,7 @@ import { observedReviewOutcome } from '../../../../shared/review-lifecycle.js'
 import { z } from 'zod'
 import { REVIEW_MAX_OUTPUT_TOKENS } from '../review-completion.js'
 import { env } from '../../../config/env.js'
-import { readQualityFormatRecovery, claimDurableQualityFormatRecovery, qualityFormatRecoverySchema } from '../quality-format-recovery.js'
+import { canStartFreshQualityCheck, readQualityFormatRecovery, claimDurableQualityFormatRecovery, qualityFormatRecoverySchema } from '../quality-format-recovery.js'
 import { DataAccessError } from '../../prisma.js'
 import { resolveDurableTokenPrice } from '../../billing/resolve-token-price.js'
 import { tokenPriceSchema } from '../../billing/token-price.js'
@@ -324,7 +324,7 @@ export async function executePreparedQualityWork(ctx: ToolContext, lease: RunLea
       const note = writerGuidance + (bindingNote ? `（${bindingNote}；已纳入意见均逐字绑定。）` : '')
         + (remaining ? `仍有 ${remaining} 项未应用（无安全补丁、范围重叠、数量上限或本次未获修订授权），保留待审，不冒充已修复，不为清零建议循环改写。` : '')
       const toolResult: ToolResult = { reviewOutcome: repaired ? 'stale' : report.status !== 'failed' && remaining ? 'decision_required' : observedReviewOutcome({ complete: report.status !== 'failed', rawPresent, providerComplete: transportComplete, billingKnown: true, providerFailed }).outcome ?? undefined, ...(report.status === 'failed' ? { outcome: 'failed' as const, failureCode: complete ? 'QUALITY_EVIDENCE_UNLOCATED' : 'QUALITY_REPORT_INCOMPLETE' } : {}), summary: repaired ? `质量检查 · r${frozen.chapter.revision} 已检查，自动修订 ${repaired.repairedFindingIds.length} 处至 r${report.chapterRevision}，需复检` : frozen.cached ? '复用当前质量报告' : '人类感质量检查',
-        output: `质量报告 ${report.id} · ${report.status} · r${report.chapterRevision}。${report.status === 'failed' ? `独立检查未完整完成（格式不完整或部分证据尚未定位），不能提交章节桥；${formatRecoveryAttempted ? '本次工具执行内的独立计费格式恢复已完成，报告仍不可验证；后续检查须遵守真实作者继续授权、预算与未知结果保护。' : '原报告与正文保留。'}禁止改写正文来凑通过。` : `${repaired ? `安全修订已原子写入；${frozen.compiler ? `调用 continuity_validate 和 quality_analyze，传 compilationId=${frozen.compiler.id}，只读复核当前版本；旧报告不证明修订后正文已检查，不要为消除警告继续改写。` : '需对新版本只读重新检查连续性，不能沿用旧版验证。'}` : selected.length ? (repairNote || '已尝试集中处理警告与建议，但未得到可安全应用的实际改动；同一报告不循环重试。') : frozen.cached ? '复用原报告，不重复请求模型或修订。' : '报告已保存；没有可验证补丁的意见保留待审，不冒充已修复。'}${note}`}` + (frozen.version >= 12 ? renderQualityRetainProposals(report, retainedFindings, frozen.chapter.revision) + '\n' + renderQualityReportFindings(report) : ''),
+        output: `质量报告 ${report.id} · ${report.status} · r${report.chapterRevision}。${report.status === 'failed' ? `独立检查未完整完成（格式不完整或部分证据尚未定位），不能作为检查通过的依据；${formatRecoveryAttempted ? '本次工具执行内的独立计费格式恢复已完成，报告仍不可验证；后续检查须遵守真实作者继续授权、预算与未知结果保护。' : '原报告与正文保留。'}禁止改写正文来凑通过。` : `${repaired ? `安全修订已原子写入；${frozen.compiler ? `调用 continuity_validate 和 quality_analyze，传 compilationId=${frozen.compiler.id}，只读复核当前版本；旧报告不证明修订后正文已检查，不要为消除警告继续改写。` : '需对新版本只读重新检查连续性，不能沿用旧版验证。'}` : selected.length ? (repairNote || '已尝试集中处理警告与建议，但未得到可安全应用的实际改动；同一报告不循环重试。') : frozen.cached ? '复用原报告，不重复请求模型或修订。' : '报告已保存；没有可验证补丁的意见保留待审，不冒充已修复。'}${note}`}` + (frozen.version >= 12 ? renderQualityRetainProposals(report, retainedFindings, frozen.chapter.revision) + '\n' + renderQualityReportFindings(report) : ''),
         observedState: { kind: 'chapter', id: frozen.chapter.id, revision: report.chapterRevision },
         display: repaired ? { kind: 'chapterDiff', chapterId: frozen.chapter.id, chapterTitle: frozen.chapter.title, before: repaired.before, after: repaired.after, appliedDirectly: true, revision: report.chapterRevision } : reportDisplay(report),
         ...(repaired ? { snapshot: { target: 'chapter' as const, targetId: frozen.chapter.id, field: 'content', previousValue: repaired.before } } : {}) }
@@ -384,10 +384,12 @@ export async function prepareQualityWork(ctx: ToolContext, lease: import('../run
     const matchingContext = !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics) && cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle)
     const sameFailedContext = existingReport?.status === 'failed' && !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics)
       && (matchingContext || ['humanity-context.v2', 'humanity-context.v3', 'humanity-context.v4', 'humanity-context.v5', 'humanity-context.v6'].some(protocol => cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle, protocol as 'humanity-context.v2' | 'humanity-context.v3' | 'humanity-context.v4' | 'humanity-context.v5' | 'humanity-context.v6')))
-    const formatRecovery = sameFailedContext && existingReport.chapterRevision === bundle.chapter.revision
+    const freshCheck = sameFailedContext && existingReport.chapterRevision === bundle.chapter.revision
+      && await canStartFreshQualityCheck(tx, ctx, existingReport.id, bundle.chapter)
+    const formatRecovery = !freshCheck && sameFailedContext && existingReport.chapterRevision === bundle.chapter.revision
       ? await readQualityFormatRecovery(tx, ctx, { chapterId }) : null
-    if (sameFailedContext && existingReport.chapterRevision === bundle.chapter.revision && !formatRecovery) {
-      return reject('QUALITY_REPORT_INCOMPLETE', '本输入的一次格式恢复不可用或已经使用，未重复检查。原报告与正文保留，检查未完成，请暂停并展示原因。')
+    if (sameFailedContext && existingReport.chapterRevision === bundle.chapter.revision && !formatRecovery && !freshCheck) {
+      return reject('QUALITY_REPORT_INCOMPLETE', '本输入的一次格式恢复不可用或已经使用，未重复检查。原报告与正文保留，检查未完成，需如实说明；普通正文工具仍可执行。')
     }
     const cached = existingReport && existingReport.compilationId === (bundle.compilation?.id ?? null) && existingReport.criticVersion === HUMANITY_CRITIC_VERSION
       && matchingContext && !qualityReportHasDroppedFindings(cacheMetrics) && qualityReportCheckedCurrentContent(existingReport, bundle.chapter.revision, bundle.chapter.content)

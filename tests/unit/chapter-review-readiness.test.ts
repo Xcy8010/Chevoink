@@ -23,8 +23,11 @@ import { terminalProcessingExhaustedMessage, terminalProcessingPlan } from '../.
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { novelPlanHash } from '../../api/lib/agent/novel-plan-contract.js'
 import { writingPlanContextHash, type WritingPlanContext } from '../../api/lib/agent/writing-plan-context.js'
+import { applySessionToolPolicy } from '../../api/lib/agent/agents.js'
+import { chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 
 afterEach(() => vi.restoreAllMocks())
+vi.mock('../../api/lib/agent/saved-chapter-work.js', () => ({ readCurrentSavedTaskChapters: vi.fn(async () => []) }))
 const sha = (text: string) => createHash('sha256').update(text).digest('hex')
 async function fixture(prompt = '写下一章') {
   const subject = { userId: 'u', novelId: 'n', runId: 'resumed' }
@@ -54,6 +57,7 @@ async function fixture(prompt = '写下一章') {
     chapterBridge: { update: vi.fn(async ({ data }) => Object.assign(bridge, data)) },
     sceneTask: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
   }
+  vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'candidate' } as never)
   const tx = db as unknown as Prisma.TransactionClient
   const terminal = { userId: 'u', novelId: 'n', compilationId: compilation.id, chapterSummary: '寻找门外线索',
     exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
@@ -62,6 +66,15 @@ async function fixture(prompt = '写下一章') {
     coverage: compilerContinuityCoverage({ chapter, bridge, sceneTasks, source: null }) }); await currentReviewReadinessFixture(tx, subject, compilation) }
   const currentReport = await currentReviewReadinessFixture(tx, subject, compilation)
   return { currentReport, subject, chapter, bridge, sceneTasks, compilation, task, report, db, tx, terminal, refreshContinuity }
+}
+
+async function saveWithoutCertifyingReports(f: Awaited<ReturnType<typeof fixture>>, input = f.terminal) {
+  const report = structuredClone(f.report), continuity = structuredClone(f.compilation.validation)
+  await expect(commitChapterBridge(input, f.tx)).resolves.toMatchObject({ chapterId: f.chapter.id, chapterRevision: f.chapter.revision })
+  expect(f.bridge).toMatchObject({ targetRevision: f.chapter.revision, committedAt: expect.any(Date) })
+  expect(f.report).toEqual(report)
+  expect(f.compilation.validation).toMatchObject(continuity)
+  expect(f.db.chapterQualityReport.update).not.toHaveBeenCalled()
 }
 
 describe('persisted current review readiness', () => {
@@ -127,8 +140,7 @@ describe('persisted current review readiness', () => {
       } else {
         expect(step.state).toBe(scenario === 'missing-quality' || scenario === 'incomplete-continuity' ? 'check_required'
           : scenario === 'hard-quality' ? 'must_pass_required' : 'decision_required')
-        await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toBeInstanceOf(Error)
-        expect(f.bridge.committedAt).toBeNull()
+        await saveWithoutCertifyingReports(f)
       }
       expect(f.report).toEqual(originalQuality)
       expect(continuity).toEqual(originalContinuity)
@@ -317,11 +329,11 @@ describe('persisted current review readiness', () => {
       requiredTools: [{ name: 'quality_analyze', args: { compilationId: 'compiler' } }] })
     if (scenario === 'analyzing' || scenario === 'failed') await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ quality: 'incomplete' })
     const proposal = vi.spyOn(memory, 'saveStoryMemory')
-    await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
-    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
-    expect(f.db.chapterBridge.update).not.toHaveBeenCalled()
-    expect(f.db.sceneTask.updateMany).not.toHaveBeenCalled()
-    expect(proposal).not.toHaveBeenCalled()
+    await saveWithoutCertifyingReports(f)
+    expect(f.db.storyCompilation.update).toHaveBeenCalled()
+    expect(f.db.chapterBridge.update).toHaveBeenCalled()
+    expect(f.db.sceneTask.updateMany).toHaveBeenCalled()
+    expect(proposal).toHaveBeenCalled()
   })
   it.each(['missing', 'failed', 'body', 'title', 'scenes', 'malformed-findings', 'count-mismatch'] as const)('requires a complete current continuity check after %s', async scenario => {
     const f = await fixture()
@@ -339,8 +351,8 @@ describe('persisted current review readiness', () => {
     }
     await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ ready: false,
       requiredTools: expect.arrayContaining([{ name: 'continuity_validate', args: { compilationId: 'compiler' } }]) })
-    await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
-    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    await saveWithoutCertifyingReports(f)
+    expect(f.db.storyCompilation.update).toHaveBeenCalled()
   })
   it('a latest failed assessment cannot revive an earlier passing report by filtering on revision', async () => {
     const f = await fixture()
@@ -367,9 +379,9 @@ describe('persisted current review readiness', () => {
     expect(nextReviewDispatch(next, available, new Set([reviewDispatchKey(next!, 'quality_analyze')])).kind).toBe('blocked')
     expect(nextReviewDispatch(next, new Set(), new Set()).kind).toBe('blocked')
     expect(f.report).toEqual(before)
-    await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+    await saveWithoutCertifyingReports(f)
     expect(f.db.chapterQualityReport.update).not.toHaveBeenCalled()
-    expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
+    expect(f.db.storyCompilation.update).toHaveBeenCalled()
   })
   it('keeps current unavailable continuity incomplete but makes it stale after a legitimate new revision', async () => {
     const f = await fixture()
@@ -391,9 +403,9 @@ describe('persisted current review readiness', () => {
     const run = await f.db.agentRun.findFirst()
     run.session.sandboxMode = 'read_only'
     expect(await probeChapterReviewRevision(f.tx, f.subject, f.chapter)).toMatchObject({ open: false, code: 'REPAIR_NOT_AUTHORIZED' })
-    await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+    expect(applySessionToolPolicy([chapterBridgeCommitTool], 'build', run.session.toolPolicy, 'read_only')).toEqual([])
     Object.assign(f.compilation.validation, { errorCount: 0, findings: [] }); await f.refreshContinuity()
-    await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+    expect(applySessionToolPolicy([chapterBridgeCommitTool], 'build', run.session.toolPolicy, 'read_only')).toEqual([])
     expect(f.db.storyCompilation.update).not.toHaveBeenCalled()
     expect(f.compilation.validation).not.toHaveProperty('newDraftRevision')
     expect(f.compilation.validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0 })
@@ -407,7 +419,8 @@ describe('persisted current review readiness', () => {
     expect(qualityReportCheckedCurrentContent(f.report, f.chapter.revision, f.chapter.content)).toBe(false)
     expect(f.report.deterministicMetrics.contentHash).toBe(sha(before))
     await f.refreshContinuity()
-    await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+    await saveWithoutCertifyingReports(f)
+    expect(qualityReportCheckedCurrentContent(f.report, f.chapter.revision, f.chapter.content)).toBe(false)
     const checkedReport = { ...f.report, id: 'q4', status: 'passed', repairRound: 0,
       deterministicMetrics: { independentCheck: 'complete', contentHash: sha(f.chapter.content) } }
     f.db.chapterQualityReport.findFirst.mockResolvedValue(checkedReport)
@@ -442,9 +455,9 @@ describe('persisted current review readiness', () => {
       newDraftRevision: { version: 1, taskId: f.task.id, chapterId: f.chapter.id, compilationId: f.compilation.id, checkedRevision: 2 } })
     await currentReviewReadinessFixture(f.tx, f.subject, f.compilation, snapshot => [{ signal: 'object', severity: 'error', explanation: '同一物件状态仍冲突', suggestion: '交作者确认', evidence: [{ sourceId: snapshot.sources[0].table.entries[0].id }] }])
     vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'candidate' } as never)
-    await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
-    expect(memory.saveStoryMemory).not.toHaveBeenCalled()
-    expect(f.bridge.committedAt).toBeNull()
+    await saveWithoutCertifyingReports(f)
+    expect(memory.saveStoryMemory).toHaveBeenCalled()
+    expect(f.bridge.committedAt).toBeInstanceOf(Date)
     expect(f.compilation.validation).toMatchObject({ independentCheck: 'complete', errorCount: 1, checkRounds: 1,
       newDraftRevision: { checkedRevision: 2 } })
     await expect(readChapterReviewReadiness(f.tx, f.subject)).resolves.toMatchObject({ ready: true, continuityErrorCount: 1, quality: 'complete' })
@@ -452,7 +465,8 @@ describe('persisted current review readiness', () => {
   it.each(['balanced', 'premium'] as const)('mode %s cannot be waived by compiler/model arguments', async mode => {
     const f = await fixture(); f.task.qualityMode = mode
     f.db.chapterQualityReport.findFirst.mockResolvedValue(null as never)
-    await expect(commitChapterBridge({ ...f.terminal, requireQuality: false }, f.tx)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+    await saveWithoutCertifyingReports(f, { ...f.terminal, requireQuality: false } as typeof f.terminal)
+    expect((await readChapterReviewReadiness(f.tx, f.subject))?.quality).toBe('missing')
   })
   it.each(['检查当前章节', '写下一章，不用检查', '写下一章，跳过质量检查和连续性检查'])('preserves original non-writing or explicit skip: %s', async prompt => {
     const f = await fixture(prompt)
@@ -470,8 +484,9 @@ describe('persisted current review readiness', () => {
     const f = await fixture(prompt)
     f.db.chapterQualityReport.findFirst.mockResolvedValue(null as never)
     expect(originalChapterReviewRequirements({ prompt, spec: { intent: 'write', qualityMode: 'premium' } })).toEqual({ continuity: true, quality: true })
-    await expect(commitChapterBridge(f.terminal, f.tx)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
-    expect(f.db.chapterBridge.update).not.toHaveBeenCalled()
+    await saveWithoutCertifyingReports(f)
+    expect((await readChapterReviewReadiness(f.tx, f.subject))?.quality).toBe('missing')
+    expect(f.db.chapterBridge.update).toHaveBeenCalled()
   })
   it.each(['写下一章，不要检查标题', '写下一章，不用检查错别字', '不要检查第1章，写下一章', '写下一章，不用检查标题质量'])('a local check waiver does not waive chapter delivery: %s', prompt => {
     expect(originalChapterReviewRequirements({ prompt, spec: { intent: 'write', qualityMode: 'premium' } }))
@@ -549,7 +564,7 @@ describe('retained quality report order is not decision identity', () => {
       const row = f.findings[0] as Record<string, unknown>, value = row[field]
       row[field] = value instanceof Date ? new Date(value.getTime() + 1) : typeof value === 'number' ? value + 1 : String(value) + '-changed'
       const writes = f.db.storyCompilation.update.mock.calls.length
-      expect(await readRecoveredChapterDelivery(f.tx, f.subject)).toBeNull()
+      expect(await readRecoveredChapterDelivery(f.tx, f.subject)).not.toBeNull()
       await expect(assertCompletedWritingDelivery(f.tx, f.subject, capture!)).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
       expect(f.db.storyCompilation.update).toHaveBeenCalledTimes(writes)
       expect(f.chapter.revision).toBe(3)
@@ -558,6 +573,7 @@ describe('retained quality report order is not decision identity', () => {
   it.each(['body', 'revision', 'report', 'added-row', 'removed-row', 'duplicate-row', 'obligation'] as const)(
     'does not let stable row ordering mask changed %s', async change => {
       const f = await retainedFixture(); await f.retain(); await commitChapterBridge(f.terminal, f.tx)
+      const capture = await readRecoveredChapterDelivery(f.tx, f.subject)
       if (change === 'body') f.chapter.content += 'Changed actual body.'
       if (change === 'revision') f.chapter.revision++
       if (change === 'report') f.report.id += '-other'
@@ -565,7 +581,10 @@ describe('retained quality report order is not decision identity', () => {
       if (change === 'removed-row') Object.assign(f.report, { findings: f.findings.slice(1) })
       if (change === 'duplicate-row') Object.assign(f.report, { findings: [...f.findings, f.findings[0]] })
       if (change === 'obligation') mocksOriginalRequirement(f)
-      expect(await readRecoveredChapterDelivery(f.tx, f.subject)).toBeNull()
+      const current = await readRecoveredChapterDelivery(f.tx, f.subject)
+      if (change === 'body' || change === 'revision') expect(current).toBeNull()
+      else expect(current).not.toBeNull()
+      await expect(assertCompletedWritingDelivery(f.tx, f.subject, capture!)).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
     })
 
   function mocksOriginalRequirement(f: Awaited<ReturnType<typeof retainedFixture>>) {
@@ -583,8 +602,7 @@ describe('retained quality report order is not decision identity', () => {
     }
     const before = JSON.stringify(f.compilation.validation)
     const result = await readRecoveredChapterDelivery(f.tx, f.subject)
-    if (kind === 'reordered-unproven') expect(result).toBeNull()
-    else expect(result).not.toBeNull()
+    expect(result).not.toBeNull()
     expect(JSON.stringify(f.compilation.validation)).toBe(before)
     expect((f.compilation.validation as unknown as { retainedReviewDecision: Record<string, unknown> }).retainedReviewDecision).not.toHaveProperty('qualityReportHashVersion')
   })

@@ -7,6 +7,8 @@ import { reduceExecutionReceipt } from '../../api/lib/agent/runtime-reducer.js'
 
 const lease = vi.hoisted(() => ({ withRunLease: vi.fn() }))
 vi.mock('../../api/lib/agent/runtime-lease.js', () => ({ withRunLease: lease.withRunLease }))
+vi.mock('../../api/lib/agent/native-tool-policy.js', async original => ({ ...await original<object>(),
+  readEffectiveNativeTooling: async (_tx: unknown, _lease: unknown, configuration: unknown) => configuration }))
 
 const reachedOperation = new Error('synthetic operation boundary reached')
 function fixture(action: 'prepare' | 'reject' | 'reduce') {
@@ -73,3 +75,4 @@ describe('verified frame reuse within one cursor transaction', () => {
     expect(f.queries.agentOperation.findFirst).not.toHaveBeenCalled()
   })
 })
+vi.mock('../../api/lib/agent/runtime-tool-view.js', async original => ({ ...await original<object>(), verifiedAssistantToolViews: async (_tx: unknown, _root: unknown, _frame: unknown, tools: unknown[]) => tools }))

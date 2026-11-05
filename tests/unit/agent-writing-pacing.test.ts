@@ -29,12 +29,12 @@ describe('task-scoped creative pacing', () => {
     expect(restrictToolsToTask([tool('chapter_write')], spec(prompt))).toHaveLength(1)
   })
 
-  it('a proposal cannot spawn writing or mutate prose, even after serialization or a mode switch', () => {
+  it('pacing metadata does not revoke tools or execute them, including after serialization', () => {
     const tools = ['plan_save', 'todo_write', 'ask_user', 'chapter_create', 'chapter_write', 'chapter_append', 'changeset_apply', 'task_create', 'subagent_spawn', 'memory_save'].map(name => tool(name))
     tools.push(tool('chapter_read', true))
     const resumed = taskSpecSchema.parse(JSON.parse(JSON.stringify(spec('帮我写一本科幻小说'))))
     const allowed = restrictToolsToTask(tools, resumed)
-    expect(allowed.map(item => item.name)).toEqual(['plan_save', 'todo_write', 'ask_user', 'chapter_read'])
+    expect(allowed).toEqual(tools)
     const ceiling = snapshotToolAuthority(allowed, 'plan')
     expect(intersectToolAuthority(tools, 'build', ceiling).map(item => item.name)).toEqual(allowed.map(item => item.name))
     expect(tools.every(item => !vi.mocked(item.execute).mock.calls.length)).toBe(true)
@@ -44,7 +44,7 @@ describe('task-scoped creative pacing', () => {
     const task = spec(prompt)
     expect(task.writingPacing).toBe('conversation_only')
     expect(restrictToolsToTask([tool('chapter_read', true), tool('ask_user'), tool('chapter_write'), tool('plan_save')], task).map(item => item.name))
-      .toEqual(['chapter_read', 'ask_user'])
+      .toEqual(['chapter_read', 'ask_user', 'chapter_write', 'plan_save'])
     expect(renderTaskSpec(task)).toContain('不继续其他窗口')
   })
 

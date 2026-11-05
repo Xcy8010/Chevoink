@@ -1,3 +1,4 @@
+import { initializeExecutionState, saveExecutionState } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as featureFlags from '../../api/lib/agent2-feature-flags.js'
@@ -19,7 +20,7 @@ import { splitChapterData } from '../../api/lib/data/volume.js'
 import { previewBulkReplaceData, applyChangeSetData, rollbackChangeSetData } from '../../api/lib/data/changeset.js'
 import { bulkReplacePreviewRequestSchema } from '../../shared/contracts/index.js'
 import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
-import { initializeExecutionState, loadExecutionState, saveExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { toOpenAITools } from '../../api/lib/agent/tools/registry.js'
 

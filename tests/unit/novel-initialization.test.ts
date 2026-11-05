@@ -39,14 +39,14 @@ it('fresh vague book intent asks direction first and exposes only the protected 
   expect(spec.expectedOutputs[0].kind).toBe('text')
   expect(spec.postconditions).toContainEqual(expect.objectContaining({ code: 'NOVEL_METADATA_INITIALIZED' }))
   expect(renderTaskSpec(spec)).toContain('先通过向作者提问工具')
-  expect(restrictToolsToTask([novelCreateTool, novelUpdateMetaTool, chapterWriteTool, planSaveTool], spec).map(tool => tool.name)).toEqual(['novel_create', 'novel_update_meta'])
+  expect(restrictToolsToTask([novelCreateTool, novelUpdateMetaTool, chapterWriteTool, planSaveTool], spec).map(tool => tool.name)).toEqual(['novel_create', 'novel_update_meta', 'chapter_write', 'plan_save'])
 })
 it('explicit delegated initialization takes precedence over vague book pacing and never demands another direction question or an outline', () => {
   const prompt = '请从备选中代选一个方向并初始化当前作品的书名、简介和标签。'
   const spec = fresh(prompt)
   expect(isNovelDirectionSetup(prompt)).toBe(false)
   expect(spec.expectedOutputs[0]).toMatchObject({ kind: 'text', description: expect.stringContaining('不重复询问') })
-  expect(restrictToolsToTask([novelCreateTool, novelUpdateMetaTool, chapterWriteTool, planSaveTool], spec).map(tool => tool.name)).toEqual(['novel_create', 'novel_update_meta'])
+  expect(restrictToolsToTask([novelCreateTool, novelUpdateMetaTool, chapterWriteTool, planSaveTool], spec).map(tool => tool.name)).toEqual(['novel_create', 'novel_update_meta', 'chapter_write', 'plan_save'])
 })
 it.each(['首部占位', '普通新空作品'])('saves the actual approved title, summary and tags for %s', async kind => {
   if (kind === '首部占位') mocks.db.novel.findFirst.mockResolvedValue({ ...empty, title: '未命名作品', summary: '先创建一部作品，再继续完善简介、章节和封面。' })
@@ -95,7 +95,7 @@ it('freezes vague existing-work discussion without initialization writes or a sa
   expect(spec.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED')).toBe(false)
   expect(spec.expectedOutputs[0].description).toContain('保留当前作品')
   expect(renderTaskSpec(spec)).toContain('不以缺少保存记录反复尝试')
-  expect(restrictToolsToTask([novelCreateTool, novelUpdateMetaTool], spec)).toEqual([])
+  expect(restrictToolsToTask([novelCreateTool, novelUpdateMetaTool], spec)).toEqual([novelCreateTool, novelUpdateMetaTool])
   const explicit = buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '初始化当前作品的书名、简介、标签。',
     novelInitializationProtocol: 1, novelInitializationTarget: 'existing' })
   expect(explicit.postconditions).toContainEqual(expect.objectContaining({ code: 'NOVEL_METADATA_INITIALIZED' }))
@@ -105,8 +105,12 @@ it.each(['novel_create', 'novel_update_meta', 'volume_create'])('old planning co
   mocks.original.mockResolvedValue({ prompt: old.goals[0], spec: old })
   mocks.db.novel.findFirst.mockResolvedValue({ ...empty, title: '未命名作品', summary: '先创建一部作品，再继续完善简介、章节和封面。' })
   const tool = name === 'novel_create' ? novelCreateTool : name === 'novel_update_meta' ? novelUpdateMetaTool : volumeCreateTool
-  expect(restrictToolsToTask([tool], old)[0].permission.plan).toBe('deny')
-  expect(restrictToolsToTask([tool], old, 'plan')).toEqual([])
+  expect(restrictToolsToTask([tool], old)).toEqual([tool])
+  expect(restrictToolsToTask([tool], old, 'plan')).toEqual(tool.permission.plan === 'deny' ? [] : [tool])
+  if (name === 'volume_create') {
+    expect(tool.permission.plan).toBe('allow')
+    return // Ordinary volume creation has its own transactional fixture.
+  }
   await expect(tool.execute({ ...context(), mode: 'plan' }, fields)).rejects.toMatchObject({ code: name === 'volume_create' ? 'AUTHOR_CHAPTER_SCOPE' : 'NOVEL_SETUP_AUTHORITY_REQUIRED' })
   expect(mocks.db.novel.update).not.toHaveBeenCalled()
 })
@@ -153,7 +157,7 @@ it.each(['什么是作品初始化？', '帮我解释作品初始化的含义。
   const task = fresh(prompt)
   expect(task.postconditions.some(item => item.code === 'NOVEL_METADATA_INITIALIZED')).toBe(false)
   expect(task.expectedOutputs[0].description).not.toContain('更新当前作品')
-  expect(restrictToolsToTask([novelUpdateMetaTool], task, 'plan')).toEqual([])
+  expect(restrictToolsToTask([novelUpdateMetaTool], task, 'plan')).toEqual([novelUpdateMetaTool])
 })
 it.each(['可以帮我初始化当前作品吗？', '请问可以帮我初始化当前作品吗？'])('keeps polite interrogative action requests authorized: %s', prompt => {
   expect(fresh(prompt).postconditions).toContainEqual(expect.objectContaining({ code: 'NOVEL_METADATA_INITIALIZED' }))
@@ -195,7 +199,7 @@ it.each([
 ])('requires positive initialization action grammar for spec and actual metadata authority: %s', async prompt => {
   const spec = fresh(prompt)
   expect(spec.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED')).toBe(false)
-  expect(restrictToolsToTask([novelUpdateMetaTool], spec, 'plan')).toEqual([])
+  expect(restrictToolsToTask([novelUpdateMetaTool], spec, 'plan')).toEqual([novelUpdateMetaTool])
   mocks.original.mockResolvedValue({ prompt, spec })
   await expect(assertNovelMetadataIntent(mocks.db as unknown as Prisma.TransactionClient, context(), { ...empty, summary: '作者已有简介' })).rejects.toMatchObject({ code: 'NOVEL_SETUP_AUTHORITY_REQUIRED' })
   expect(mocks.db.novel.update).not.toHaveBeenCalled()

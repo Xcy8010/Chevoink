@@ -1,3 +1,4 @@
+import { initializeExecutionState, saveExecutionState } from '../support/native-tool-test-state.js'
 import { Prisma } from '@prisma/client'
 import { randomUUID } from 'node:crypto'
 import { describe,expect,it,vi } from 'vitest'
@@ -9,6 +10,7 @@ import * as contextAssembler from '../../api/lib/agent/context.js'
 import { executePersistedLoopRun,initializePersistedLoopRun,recoverDurableLoopRuns,stopLoopRun } from '../../api/lib/agent/run-service.js'
 import { readTaskBudget } from '../../api/lib/agent/runtime-budget.js'
 import { advanceDurableContext } from '../../api/lib/agent/runtime-checkpoint-step.js'
+import { AGENT_TOOL_EXECUTION_POLICY } from '../../api/lib/agent/tool-execution-guidance.js'
 import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
 import { collectDurableToolEvidence } from '../../api/lib/agent/runtime-evidence.js'
 import { prepareStoryCompilation } from '../../api/lib/agent/story-compiler.js'
@@ -21,7 +23,7 @@ import { readObservedBaseline } from '../../api/lib/agent/runtime-observed-basel
 import * as runtimeOperations from '../../api/lib/agent/runtime-operations.js'
 import { resolveDurableQuestion } from '../../api/lib/agent/runtime-question.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
-import { initializeExecutionState,loadExecutionState,saveExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { entityResolveTool,impactAnalyzeTool,projectSearchTool,structureValidateTool } from '../../api/lib/agent/tools/changeset-tools.js'
 import { chapterCreateTool,chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
@@ -397,7 +399,7 @@ describe.runIf(available)('durable context archive', () => {
   it.each(['read', 'wrong-hash', 'future', 'no-reader', 'stopped', 'model-window'] as const)('%s preserves source frames and task budget', async scenario => {
     await fixture(async f => {
       const lease = await claim(f), tool = executionContextReadTool
-      const messages = [{ role: 'user', content: '只写第19章，不能继续旧任务。' }, ...Array.from({ length: 12 }, (_, index) => [
+      const messages = [{ role: 'system', content: AGENT_TOOL_EXECUTION_POLICY }, { role: 'user', content: '只写第19章，不能继续旧任务。' }, ...Array.from({ length: 12 }, (_, index) => [
         { role: 'assistant', content: `第${index}次说明必须保留`, toolCalls: [{ id: `archive-${index}`, name: 'chapter_read', arguments: '{}' }] },
         { role: 'tool', toolCallId: `archive-${index}`, content: '历史原文，必须可以完整回读。'.repeat(scenario === 'model-window' ? 100 : 1600) },
       ]).flat()]

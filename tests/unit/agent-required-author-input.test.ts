@@ -33,16 +33,17 @@ async function start(context = ctx) {
 beforeEach(() => { vi.clearAllMocks(); vi.useFakeTimers(); mocks.update.mockResolvedValue({ count: 1 }); mocks.clarification.mockResolvedValue(null); scope() })
 afterEach(() => { cancelAllQuestions('run'); vi.useRealTimers() })
 
-describe('required legacy author decisions', () => {
-  it.each([false, true])('parks frozen scope on timeout without restarting the run or recording default authority (local=%s)', async local => {
+describe('legacy author questions are information, not permissions', () => {
+  it.each([false, true])('returns unanswered information to the Agent without recording default authority (local=%s)', async local => {
     scope(local ? 'bounded' : 'needs_input', local)
     const { pending } = await start()
     await vi.advanceTimersByTimeAsync(env.agentApprovalTimeoutMs + 1)
     const result = await pending
-    expect(result).toMatchObject({ failureCode: 'AUTHOR_INPUT_REQUIRED', display: { kind: 'question', unanswered: true, scopeResolution: 'needs_input' } })
+    expect(result).toMatchObject({ display: { kind: 'question', unanswered: true } })
     expect(result.outcome).toBeUndefined()
-    expect(mocks.update).toHaveBeenCalledOnce()
-    expect(mocks.update.mock.calls[0][0].data.status).toBe('awaiting_approval')
+    expect(result.failureCode).toBeUndefined()
+    expect(mocks.update).toHaveBeenCalledTimes(2)
+    expect(mocks.update.mock.lastCall![0].data.status).toBe('running')
     expect(mocks.clarification).not.toHaveBeenCalled()
     expect(resolveQuestionAnswer('run', 'original-question', '第一章')).toBe(false)
     expect(vi.getTimerCount()).toBe(0)
@@ -59,17 +60,19 @@ describe('required legacy author decisions', () => {
     expect(result.display).not.toHaveProperty('scopeResolution')
     expect(mocks.update).toHaveBeenCalledTimes(2)
   })
-  it('cannot replace a required decision when the bounded question budget is exhausted', async () => {
+  it('does not make an old question counter a permission barrier', async () => {
     for (let index = 0; index < 3; index++) consumeQuestionBudget('run')
-    expect(await askUserTool.execute(ctx, args)).toMatchObject({ failureCode: 'AUTHOR_INPUT_REQUIRED', display: { unanswered: true } })
-    expect(mocks.update).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0)
+    const { pending } = await start()
+    expect(resolveQuestionAnswer('run', 'original-question', '继续讨论')).toBe(true)
+    expect(await pending).toMatchObject({ display: { answer: '继续讨论' } })
+    expect(mocks.update).toHaveBeenCalledTimes(2); expect(vi.getTimerCount()).toBe(0)
   })
   it('retains a real answer without upgrading an old frozen contract', async () => {
     const original = scope(), before = structuredClone(original)
     const { pending } = await start()
     expect(resolveQuestionAnswer('run', 'original-question', '第一章写入')).toBe(true)
     const result = await pending
-    expect(result).toMatchObject({ failureCode: 'AUTHOR_INPUT_REQUIRED', display: { answer: '第一章写入', scopeResolution: 'needs_input' } })
+    expect(result).toMatchObject({ display: { answer: '第一章写入' } })
     expect(result.semanticTransition).toBeUndefined()
     expect(original).toEqual(before)
     expect(mocks.clarification).toHaveBeenCalledOnce()

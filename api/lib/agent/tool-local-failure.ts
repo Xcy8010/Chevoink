@@ -16,6 +16,8 @@ const localCodes = new Set(['TASK_SCOPE_REQUIRED', 'TASK_SCOPE_BIND_CONFLICT', '
  * capability revocations. Unknown provider effects are fenced separately. */
 export function isHistoricalReviewRestriction(item: ToolRestriction): boolean {
   if (item.code === 'STRUCTURE_RETRY_LIMIT' || item.reason === '结构操作连续失败，已隔离该目标的操作以免重复创建或错位；其他原授权工作可继续。') return true
+  if (['SCOPE_NEEDS_INPUT', 'AUTHOR_INPUT_REQUIRED', 'TASK_SCOPE_REQUIRED', 'TASK_SCOPE_BIND_CONFLICT', 'TASK_SCOPE_BIND_UNAVAILABLE',
+    'COMPILATION_STAGE_CONFLICT', 'PLAN_CONTEXT_STALE', 'DETAIL_PLAN_REQUIRED', 'PLAN_REVIEW_REQUIRED'].includes(item.code)) return true
   const manuscript = ['chapter_write', 'chapter_append', 'chapter_edit_range', 'chapter_bridge_commit', 'continuity_validate', 'quality_analyze'].includes(item.action)
   if (manuscript && (item.code === 'REPAIR_NOT_AUTHORIZED' || isInputScopedFailure(item.code))) return true
   // Keep the saved failure, while actual tools validate every current call.

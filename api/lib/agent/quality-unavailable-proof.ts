@@ -26,10 +26,10 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
   chapter: { id: string; revision: number; content: string }, taskRootId: string | null, options: { allowFormatRecovery?: boolean } = {}) {
   const metrics = object(report.deterministicMetrics)
   if (report.status !== 'failed' || (report.criticVersion !== HUMANITY_CRITIC_VERSION && report.criticVersion !== FROZEN_V5_HUMANITY_CRITIC_VERSION) || !report.runId || !runIds.includes(report.runId)
-    || report.chapterId !== chapter.id || report.chapterRevision !== chapter.revision || !report.compilationId
+    || report.chapterId !== chapter.id || report.chapterRevision !== chapter.revision || !report.compilationId && !options.allowFormatRecovery
     || metrics.independentCheck !== 'unavailable' || metrics.contentHash !== createHash('sha256').update(chapter.content).digest('hex')) return null
   const context = await buildHumanityQualityContext(subject.userId, subject.novelId, chapter.id, report.runId, tx)
-  if (context.compilation?.id !== report.compilationId) return null
+  if ((context.compilation?.id ?? null) !== report.compilationId) return null
   const audit = metrics.criticResponse === undefined ? null : object(metrics.criticResponse)
   const validFailure = (code: unknown) => code === 'QUALITY_REPORT_INCOMPLETE'
     || options.allowFormatRecovery && audit?.classification === 'source_invalid' && code === 'QUALITY_EVIDENCE_UNLOCATED'
@@ -57,7 +57,7 @@ export async function readQualityUnavailableProof(tx: Prisma.TransactionClient,
     const frozen = object(work), frozenChapter = object(frozen.chapter), compiler = object(frozen.compiler)
     if (jsonHash(operation.inputSnapshot) !== operation.inputHash || jsonHash(receipt.result) !== receipt.resultHash || receipt.runId !== report.runId
       || frozen.kind !== 'check' || frozenChapter.id !== chapter.id || frozenChapter.revision !== chapter.revision
-      || frozenChapter.content !== chapter.content || compiler.id !== report.compilationId) return null
+      || frozenChapter.content !== chapter.content || (frozen.compiler === null ? null : compiler.id) !== report.compilationId) return null
     // A failed source's protocol comes from its authenticated original work,
     // never from today's reviewer or an unverified report marker. This grants
     // recovery eligibility only; passed caches still require the current hash.

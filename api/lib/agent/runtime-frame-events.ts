@@ -79,7 +79,8 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
       const input = operationInput.safeParse(operation.inputSnapshot)
       if (!input.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '工具事件缺少原调用身份。')
       const { humanizeAgentVisibleText } = await import('./visible-text.js')
-      const grant = current.configuration.toolAuthority.find(item => item.name === operation.action)
+      const grant = (await import('./native-tool-policy.js')).readNativeToolAdmission(operation)?.grant
+        ?? current.configuration.toolAuthority.find(item => item.name === operation.action)
       return [{ type: 'tool.call', messageId, callId: input.data.input.callId, toolName: operation.action,
         title: humanizeAgentVisibleText(operation.action), args: input.data.input.args, autoApproved: grant?.permission === 'allow' && !grant.alwaysConfirm }]
     }

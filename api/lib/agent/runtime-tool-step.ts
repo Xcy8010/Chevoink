@@ -1,6 +1,7 @@
 import { DataAccessError } from '../prisma.js'
 import { findPlanByIdentity } from './novel-plan-contract.js'
 import { hasRetiredNativeArguments, verifiedAssistantToolViews, toolWithNativeView, needsNativeToolProjection } from './runtime-tool-view.js'
+import { readEffectiveNativeTooling, readNativeToolAdmission, type NativeToolAdmission } from './native-tool-policy.js'
 import { z } from 'zod'
 import { originalToolParameterSchemas } from './tool-schema.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
@@ -153,6 +154,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     const current = await readExecutionStateInTransaction(tx, lease.taskRootId)
     let frame = current.frame
     let historicalWriter = false
+    let admittedTool: NativeToolAdmission | null = null
     if (frame.state.phase === 'awaiting_operation') {
       const pending = await tx.agentOperation.findUniqueOrThrow({ where: { id: frame.state.pendingOperationId! } })
       if (pending.kind === 'tool' && ['succeeded', 'failed'].includes(pending.status)) return { recover: { expectedRevision: frame.revision, expectedHash: frame.snapshotHash, operationId: pending.id } }
@@ -163,6 +165,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
           settlement: { userId: lease.userId, attemptId: attempts[0].id, requestHash: attempts[0].requestHash } }
       }
       if (pending.kind !== 'tool' || pending.status !== 'prepared') return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原操作尚待恢复或核对，不能选择下一工具。')
+      admittedTool = readNativeToolAdmission(pending)
       const source = await readExecutionFrame(tx, lease.taskRootId, frame.revision - 1)
       if (source.state.phase !== 'idle' || pending.operationKey !== `exec:${source.state.nextOperationSequence}`
         || frame.state.nextOperationSequence !== source.state.nextOperationSequence + 1 || frame.state.turn !== source.state.turn
@@ -179,15 +182,26 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     const call = assistant?.role === 'assistant' ? assistant.toolCalls?.find(item => !frame.state.messages.slice(index + 1).some(message => message.role === 'tool' && message.toolCallId === item.id)) : undefined
     if (!call) return { idle: true as const }
     const cursor = { expectedRevision: frame.revision, expectedHash: frame.snapshotHash }
-    const grant = current.configuration.toolAuthority.find(item => item.name === call.name)
-    const definition = current.configuration.tools.find(item => item.function.name === call.name)
+    const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
+    const originalSpec = taskSpecSchema.parse(root.specSnapshot)
+    const effective = current.frame.state.phase === 'idle' || admittedTool
+      ? await readEffectiveNativeTooling(tx, lease, current.configuration, originalSpec) : current.configuration
+    let grant = effective.toolAuthority.find(item => item.name === call.name)
+    if (admittedTool && grant) grant = { ...grant, alwaysConfirm: grant.alwaysConfirm || admittedTool.grant.alwaysConfirm,
+      dangerous: grant.dangerous || admittedTool.grant.dangerous,
+      permission: grant.permission === 'deny' || admittedTool.grant.permission === 'deny' ? 'deny'
+        : grant.permission === 'ask' || admittedTool.grant.permission === 'ask' ? 'ask' : 'allow' }
+    const originalDefinition = current.configuration.tools.find(item => item.function.name === call.name)
+    let definition = admittedTool?.definition ?? effective.tools.find(item => item.function.name === call.name)
+    const sourceContract = current.frame.state.phase === 'idle' || Boolean(admittedTool) || !originalDefinition
+      || runtimeJson(originalDefinition.function.parameters).hash !== runtimeJson(definition?.function.parameters ?? null).hash
+    if (current.frame.state.phase === 'idle')
+      definition = (await verifiedAssistantToolViews(tx, lease.taskRootId, frame, current.configuration.tools, originalSpec.scope)).find(item => item.function.name === call.name)
     let tool = adapters.get(call.name)
     const goalTool = call.name === 'goal_read' || call.name === 'goal_report'
     if (goalTool && !await readGoalExecution(lease.userId, lease.runId, tx)) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '目标工具仅允许目标归属执行使用。')
     if (!grant || grant.permission === 'deny' || !definition || call.incomplete) return { reject: { cursor, callId: call.id } }
     if (!tool) return runtimeError('RUNTIME_TOOL_ADAPTER_REQUIRED', '此工具的持久适配尚未接入，不能执行旧效果路径。')
-    const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
-    const originalSpec = taskSpecSchema.parse(root.specSnapshot)
     // Unprepared proposals may be observed as not dispatched. Keep every
     // prepared request on its original receipt path, even after delivery.
     // The original plan still exists after its last update clears unfinished
@@ -208,7 +222,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       const source = (await verifiedAssistantToolViews(tx, lease.taskRootId, frame, current.configuration.tools, originalScope)).find(item => item.function.name === call.name)
       if (!source) return { reject: { cursor, callId: call.id } }
       published = source
-    } else if (!originalToolParameterSchemas(tool, originalScope).some(schema => runtimeJson(schema).hash === runtimeJson(definition.function.parameters).hash)) {
+    } else if (!sourceContract && !originalToolParameterSchemas(tool, originalScope).some(schema => runtimeJson(schema).hash === runtimeJson(definition.function.parameters).hash)) {
       runtimeError('RUNTIME_IDENTITY_CONFLICT', '工具 schema 与原任务不一致。')
     }
     let raw: unknown
@@ -217,7 +231,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     if (!historicalWriter && current.frame.state.phase !== 'awaiting_operation' && hasRetiredNativeArguments(call.name, raw)) return { reject: { cursor, callId: call.id, tool } }
     const frozenArgs = await readPreparedLiteraryArguments(tx, lease, { action: call.name, callId: call.id, rawArguments: call.arguments, cursor })
     const normalized = normalizeToolInput(tool, frozenArgs ?? raw)
-    if (!historicalWriter && (published !== definition || call.name === 'agent_configure') && !validateToolInput(toolWithNativeView(tool, published), normalized).success) {
+    if (!historicalWriter && (sourceContract || published !== definition || call.name === 'agent_configure') && !validateToolInput(toolWithNativeView(tool, published), normalized).success) {
       return { reject: { cursor, callId: call.id, tool } }
     }
     const validated = validateToolInput(tool, normalized)
@@ -231,7 +245,7 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
     const ctx: ToolContext = { userId: lease.userId, runId: lease.runId, novelId: root.novelId, sessionId: root.sessionId,
       chapterId: originalChapterId, callId: call.id, mode: current.configuration.mode, creativeFreedom: current.configuration.creativeFreedom,
       qualityMode: current.configuration.qualityMode, protectedChapterIds: new Set(current.configuration.protectedChapterIds),
-      toolAuthority: new Map(current.configuration.toolAuthority.map(item => [item.name, item])), signal, emit: () => {},
+      toolAuthority: new Map(effective.toolAuthority.map(item => [item.name, item])), signal, emit: () => {},
       modelSelection: { ...(current.configuration.model.tokenPrice ? { tokenPrice: current.configuration.model.tokenPrice } : {}), ...(current.configuration.model.modelConfigId ? { modelConfigId: current.configuration.model.modelConfigId, modelConfigRevision: current.configuration.model.modelConfigRevision } : {}), ...(current.configuration.model.weightedRoute ? { weightedRoute: current.configuration.model.weightedRoute } : {}), tier: current.configuration.model.tier as CreditModelTier,
         customModelId: current.configuration.model.customModelId, reasoningEffort: current.configuration.model.reasoningEffort as ModelReasoningEffort,
         provider: current.configuration.model.provider, modelName: current.configuration.model.modelName, routeRevision: current.configuration.model.routeRevision } }

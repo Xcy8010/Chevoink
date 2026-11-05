@@ -30,6 +30,7 @@ vi.mock('../../api/lib/agent/runtime-state.js', async importOriginal => ({
 import { readCompletedWritingDelivery, readSavedWritingPresentation, readRecoveredChapterDelivery, readCompletedWritingPresentation, completedWritingPresentationText,
   shouldUseSavedWritingPresentation, savedChapterPresentationProof, savedChapterPresentationSchema, allowsChapterOnlyCompletion } from '../../api/lib/agent/writing-scope.js'
 import { advanceDurableWritingDelivery } from '../../api/lib/agent/runtime-writing-delivery.js'
+vi.mock('../../api/lib/agent/saved-chapter-work.js', () => ({ readCurrentSavedTaskChapters: vi.fn(async () => []) }))
 
 const subject = { userId: 'author', novelId: 'novel', runId: 'run' }
 const token = { ...subject, taskRootId: 'root', owner: 'worker', epoch: 1n }
@@ -447,8 +448,8 @@ describe('saved artifact display withdrawal', () => {
     if (quality === 'missing') f.mocks.chapterQualityReport.findFirst.mockResolvedValue(null as never)
     else { f.quality.status = 'failed'; f.quality.deterministicMetrics.independentCheck = 'unavailable' }
     expect(await readChapterReviewReadiness(f.db, subject)).toMatchObject({ ready: false, continuity: 'complete', quality: quality === 'missing' ? 'missing' : 'incomplete' })
-    expect(await readCompletedWritingDelivery(f.db, subject)).toBeNull()
-    expect(await readSavedWritingPresentation(f.db, subject)).toBeNull()
+    expect(await readCompletedWritingDelivery(f.db, subject)).not.toBeNull()
+    expect(await readSavedWritingPresentation(f.db, subject)).not.toBeNull()
   })
   it('completed automatic revision does not certify unhandled factual errors and quality advice', async () => {
     const f = await fixture(), chapter = structuredClone(f.chapter)
@@ -461,7 +462,7 @@ describe('saved artifact display withdrawal', () => {
       evidenceExcerpt: '价值数字', startOffset: f.chapter.content.indexOf('价值数字'), endOffset: f.chapter.content.indexOf('价值数字') + 4,
       explanation: '罗盘数字与同一物件状态仍冲突', suggestion: '核对当前物件事实' }]
     expect(await readChapterReviewReadiness(f.db, subject)).toMatchObject({ ready: true, continuity: 'complete', continuityErrorCount: 1, quality: 'complete', qualityErrorCount: 1 })
-    expect(await readCompletedWritingDelivery(f.db, subject)).toBeNull()
+    expect(await readCompletedWritingDelivery(f.db, subject)).not.toBeNull()
     expect(f.chapter).toEqual(chapter)
     expect(f.terminal.validation.errorCount).toBe(1)
     expect(f.quality.status).toBe('needs_repair')
@@ -476,8 +477,8 @@ describe('saved artifact display withdrawal', () => {
     await currentReviewReadinessFixture(f.db, subject, f.terminal, snapshot => [{ signal: 'object', severity: 'error', explanation: '罗盘同一状态仍冲突', suggestion: '合并确认事实修订', evidence: [{ sourceId: snapshot.sources[0].table.entries[0].id }] }])
     expect(await readChapterReviewReadiness(f.db, subject)).toMatchObject({ ready: true, continuity: 'complete', continuityErrorCount: 1 })
     expect(await probeChapterReviewRevision(f.db, subject, f.chapter)).toEqual({ open: true })
-    expect(await readCompletedWritingDelivery(f.db, subject)).toBeNull()
-    expect(await readSavedWritingPresentation(f.db, subject)).toBeNull()
+    expect(await readCompletedWritingDelivery(f.db, subject)).not.toBeNull()
+    expect(await readSavedWritingPresentation(f.db, subject)).not.toBeNull()
     expect(f.chapter).toEqual(chapter)
     expect(mocks.save).not.toHaveBeenCalled()
   })
@@ -488,8 +489,8 @@ it('treats a committed chapter with changed plan dependencies as unavailable for
   const frozen = { id: 'outline', title: '大纲', content: '旧提纲', planHash: 'a'.repeat(64) }
   Object.assign(f.terminal.preparedContext, { planContext: { version: 1, outline: frozen, detail: { ...frozen, id: 'detail' },
     parentPlanHash: frozen.planHash, target: { kind: 'chapter', chapterId: f.chapter.id } } })
-  await expect(readCompletedWritingDelivery(f.db, subject)).resolves.toBeNull()
-  await expect(readRecoveredChapterDelivery(f.db, subject)).resolves.toBeNull()
+  await expect(readCompletedWritingDelivery(f.db, subject)).resolves.not.toBeNull()
+  await expect(readRecoveredChapterDelivery(f.db, subject)).resolves.not.toBeNull()
   await expect(readChapterReviewReadiness(f.db, subject, f.terminal.id)).rejects.toMatchObject({ code: 'PLAN_CONTEXT_STALE' })
   expect(mocks.save).not.toHaveBeenCalled()
 })

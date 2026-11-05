@@ -131,7 +131,10 @@ describe('authenticated first-chapter scope clarification', () => {
       expect(explicitFirstChapterAnswer(answer)).toBe(false)
       expect(await recordWritingClarification(f.tx, f.subject, { ...f.answer, answer })).toBeNull()
       expect(f.create).not.toHaveBeenCalled()
-      await expect(scope.assertWritingTarget(f.tx, f.subject, { orderIndex: 1 })).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+      // An unanswered parser suggestion remains unbound metadata; it does not
+      // prevent the root Agent from resolving the actual request itself.
+      expect((await scope.readWritingScope(f.tx, f.subject)).writing?.kind).toBe('needs_input')
+      await expect(scope.assertWritingTarget(f.tx, f.subject, { orderIndex: 1 })).resolves.toBeDefined()
     })
   it.each(['legacy', 'bounded', 'selection', 'review', 'denied', 'parent', 'readonly', 'nonempty', 'cancelled'] as const)(
     'cannot expand a %s boundary', async scenario => {

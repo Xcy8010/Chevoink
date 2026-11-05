@@ -101,9 +101,11 @@ export async function requestToolApproval(token: RunLeaseToken, input: { expecte
     const assistant = frame.state.messages[index]
     const call = assistant?.role === 'assistant' ? assistant.toolCalls?.find(call => !frame.state.messages.slice(index + 1).some(message => message.role === 'tool' && message.toolCallId === call.id)) : undefined
     if (!call || call.id !== input.callId || call.incomplete) return runtimeError('RUNTIME_STATE_CONFLICT', '审批不是当前完整待执行调用。')
-    const grant = current.configuration.toolAuthority.find(grant => grant.name === call.name)
+    const tooling = await (await import('./native-tool-policy.js')).readEffectiveNativeTooling(tx, token, current.configuration,
+      (await import('../../../shared/contracts/task-spec-contracts.js')).taskSpecSchema.parse(current.originalSpec))
+    const grant = tooling.toolAuthority.find(grant => grant.name === call.name)
     if (!grant || grant.permission === 'deny'
-      || !current.configuration.tools.some(tool => tool.function.name === call.name)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '审批不能扩大冻结工具权限。')
+      || !tooling.tools.some(tool => tool.function.name === call.name)) runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '审批不能扩大实际工具权限。')
     const args = runtimeJson(input.normalize(coerceToolArgumentEnvelope(call.arguments ? parseToolArgsTolerant(call.arguments, false) : {})))
     const key = requestKey(token.taskRootId, frame.snapshotHash, call.id)
     const existing = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: key } })

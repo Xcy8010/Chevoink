@@ -167,12 +167,7 @@ describe('tool schema provider contract', () => {
   it('shows only title, content and the frozen optional global position for one new chapter', () => {
     const generic = toOpenAITools([chapterCreateTool])
     const definition = toOpenAITools([chapterCreateTool], globalScope)[0].function
-    expect(definition.parameters).toMatchObject({ type: 'object', required: ['title'], additionalProperties: false,
-      properties: { position: { type: 'integer', enum: [7] } } })
-    expect(Object.keys(definition.parameters.properties as object).sort()).toEqual(['content', 'position', 'title'])
-    expect(definition.description).toContain('冻结的全书第 7 章')
-    expect(definition.description).toContain('只填 title 标题即可')
-    expect(definition.description).toContain('不要猜测卷')
+    expect(definition.parameters).toEqual(generic[0].function.parameters)
     expect(toOpenAITools([chapterCreateTool])).toEqual(generic)
     expect(chapterCreateTool.parameters.safeParse({ title: '合成标题' }).success).toBe(true)
     // Provider presentation never strips actual conflicting model arguments.
@@ -212,11 +207,8 @@ describe('tool schema provider contract', () => {
       tailVolume: { version: 1, targetOrderIndex: 49, previousChapterId: 'previous48', previousRevision: 6 } } }
     const original = structuredClone(scope)
     const presentation = toOpenAITools([storyCompilerPrepareTool], scope)[0].function
-    expect(presentation.parameters.properties).not.toHaveProperty('chapterId')
-    expect(presentation.parameters).toMatchObject({ required: ['intentSummary', 'volumeDecision'], additionalProperties: false,
-      properties: { targetOrderIndex: { enum: [49] } } })
-    expect(presentation.description).toContain('前章只作参考')
-    expect(presentation.description).toContain('冻结的全书第 49 章')
+    expect(presentation.parameters).toEqual(toOpenAIParameters(storyCompilerPrepareTool.parameters))
+    expect(presentation.parameters.required).not.toContain('volumeDecision')
     const full = toOpenAIParameters(storyCompilerPrepareTool.parameters)
     const previous = { ...full, required: [...new Set([...(full.required as string[]), 'volumeDecision'])] }
     expect(originalToolParameterSchemas(storyCompilerPrepareTool, scope)).toContainEqual(previous)

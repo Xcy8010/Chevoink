@@ -48,7 +48,7 @@ import { buildQualityEvidenceSources, renderQualityEvidenceSources, type Quality
 import { buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from '../knowledge/writing.js'
 import { renderChapterWritingBackground } from '../writing-request-context.js'
 import { resolveDurableAuxiliaryRuntime, resolveReviewModelRuntime } from '../runtime-auxiliary-call.js'
-import { readQualityFormatRecovery, claimQualityFormatRecovery, claimCurrentQualityFormatRecovery, bindQualityFormatRecovery, hasReconciledQualityRequest, type QualityFormatRecovery } from '../quality-format-recovery.js'
+import { canStartFreshQualityCheck, readQualityFormatRecovery, claimQualityFormatRecovery, claimCurrentQualityFormatRecovery, bindQualityFormatRecovery, hasReconciledQualityRequest, type QualityFormatRecovery } from '../quality-format-recovery.js'
 import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
 import { runtimeJson } from '../runtime-common.js'
 import { copiesQualityNeighborClause, qualityRepairSurroundings, renderQualityNeighbors } from '../quality-neighbor-context.js'
@@ -430,11 +430,12 @@ export const qualityAnalyzeTool = defineTool({
     const sameFailedContext = existing?.status === 'failed' && !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics)
       && (matchingContext || ['humanity-context.v2', 'humanity-context.v3', 'humanity-context.v4', 'humanity-context.v5', 'humanity-context.v6'].some(protocol => cacheMetrics.qualityContextHash === qualityReviewContextHash(bundle, protocol as 'humanity-context.v2' | 'humanity-context.v3' | 'humanity-context.v4' | 'humanity-context.v5' | 'humanity-context.v6')))
     if (sameFailedContext && existing.chapterRevision === bundle.chapter.revision
-      && !await prisma.$transaction(tx => hasReconciledQualityRequest(tx, ctx, existing))) {
+      && !await prisma.$transaction(tx => hasReconciledQualityRequest(tx, ctx, existing))
+      && !await prisma.$transaction(tx => canStartFreshQualityCheck(tx, ctx, existing.id, bundle.chapter))) {
       formatRecovery = await prisma.$transaction(tx => readQualityFormatRecovery(tx, ctx, { chapterId }))
       if (!formatRecovery || !await prisma.$transaction(tx => claimQualityFormatRecovery(tx, ctx, formatRecovery!))) return {
         outcome: 'failed' as const, failureCode: 'QUALITY_REPORT_INCOMPLETE', reviewOutcome: 'evidence_repair_required', summary: '质量检查尚未完成', display: reportDisplay(await getQualityReport(ctx.userId, ctx.novelId, existing.id)),
-        output: '当前失败报告已保留；本输入的一次格式恢复不可用或已经使用，不再派发重复检查。检查未完成，不能提交或宣称通过；请暂停并展示真实原因。',
+        output: '当前失败报告已保留；本输入的一次格式恢复不可用或已经使用，不再派发重复检查。检查未完成，需如实说明；普通正文保存和提交仍可执行，不能宣称检查通过。',
       }
     }
     const deterministic = analyzeDeterministicQuality(bundle.chapter.content, bundle.recentChapters.map((chapter) => chapter.content))

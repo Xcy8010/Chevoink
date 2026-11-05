@@ -98,12 +98,13 @@ export async function prepareAuxiliaryModelOperation(token: RunLeaseToken, input
       || source.revision + 1 !== state.frame.revision || (service?.parent.operationKey ?? parent.operationKey) !== `exec:${source.state.nextOperationSequence}`
       || !call || call.name !== (service?.parent.action ?? parent.action) || call.incomplete || call.arguments !== original.normalization.rawArguments
       || runtimeJson(service?.original.args ?? original.args).hash !== original.normalization.normalizedArgsHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '独立模型缺少原工具调用关联。')
-    const grant = state.configuration.toolAuthority.find(item => item.name === parent.action)
+    const admitted = (await import('./native-tool-policy.js')).readNativeToolAdmission(parent)
+    const grant = admitted?.grant ?? state.configuration.toolAuthority.find(item => item.name === parent.action)
     const modeAllowed = parent.action === 'continuity_validate' ? ['plan', 'build', 'review'].includes(state.configuration.mode) : parent.action === 'novel_export' ? ['plan', 'build', 'review'].includes(state.configuration.mode)
       : parent.action === 'research_dossier_build' ? ['plan', 'build'].includes(state.configuration.mode)
       : parent.action === 'creative_critique' ? ['build', 'review'].includes(state.configuration.mode) : state.configuration.mode === 'build'
     if (!modeAllowed || !grant || grant.permission === 'deny'
-      || !state.configuration.tools.some(tool => tool.function.name === parent.action)) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原任务不允许独立检查或修订。')
+      || !(admitted || state.configuration.tools.some(tool => tool.function.name === parent.action))) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原任务不允许独立检查或修订。')
     if (!service && (grant.permission === 'ask' || grant.alwaysConfirm)) await assertToolApproval(tx, lease, source.snapshotHash, original.callId, parent.action, call.arguments, original.normalization.normalizedArgsHash)
     if (captured.step === 'publish_advice') {
       const { exportWorkSchema } = await import('./runtime-export-contract.js')

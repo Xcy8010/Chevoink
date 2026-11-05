@@ -62,15 +62,16 @@ describe('frozen chapter plan dependencies', () => {
     expect(readWritingPlanContext({ planContext: context })).toEqual(context)
     expect(readWritingPlanContext({})).toBeNull()
   })
-  it('blocks missing, stale, ambiguous or incorrectly identified chapter plans', async () => {
+  it('leaves missing, stale and ambiguous plans optional while rejecting an explicitly wrong target', async () => {
     const db = database([outline])
-    await expect(prepareWritingPlanContext(tx(db), subject, future)).rejects.toMatchObject({ code: 'DETAIL_PLAN_REQUIRED' })
+    await expect(prepareWritingPlanContext(tx(db), subject, future)).resolves.toBeNull()
     db.agentArtifact.findMany.mockResolvedValue([outline, detail(), { ...detail(), id: 'd2' }])
-    await expect(prepareWritingPlanContext(tx(db), subject, future)).rejects.toMatchObject({ code: 'PLAN_TARGET_AMBIGUOUS' })
+    await expect(prepareWritingPlanContext(tx(db), subject, future)).resolves.toBeNull()
     expect((await prepareWritingPlanContext(tx(db), subject, future, 'd2'))?.detail.id).toBe('d2')
-    await expect(prepareWritingPlanContext(tx(db), subject, { chapter: { id: 'created-manually' }, targetOrderIndex: 1 })).rejects.toMatchObject({ code: 'DETAIL_PLAN_REQUIRED' })
+    await expect(prepareWritingPlanContext(tx(db), subject, future, 'foreign-id')).rejects.toMatchObject({ code: 'PLAN_TARGET_INVALID' })
+    await expect(prepareWritingPlanContext(tx(db), subject, { chapter: { id: 'created-manually' }, targetOrderIndex: 1 })).resolves.toBeNull()
     db.agentArtifact.findMany.mockResolvedValue([{ ...outline, content: '新大纲' }, detail()])
-    await expect(prepareWritingPlanContext(tx(db), subject, future)).rejects.toMatchObject({ code: 'PLAN_REVIEW_REQUIRED' })
+    await expect(prepareWritingPlanContext(tx(db), subject, future)).resolves.toBeNull()
   })
   it('blocks a changed or hidden dependency before effects and upgrades only the frozen future identity', async () => {
     const db = database(), context = await prepareWritingPlanContext(tx(db), subject, future)

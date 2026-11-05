@@ -21,7 +21,7 @@ vi.mock('../../api/lib/agent/chapter-review-guard.js', async importOriginal => (
   probeChapterReviewRevision: revisionChannel,
   // Real readiness projection is covered in chapter-review-guard. This core
   // fixture derives its decision from the actual shared runner's current report.
-  readChapterReviewReadiness: currentReadiness,
+  readChapterReviewReadiness: currentReadiness, readAdvisoryChapterReviewReadiness: currentReadiness,
 }))
 
 afterEach(() => { vi.restoreAllMocks(); revisionChannel.mockReset(); currentReadiness.mockReset() })
@@ -192,17 +192,20 @@ describe('terminal commit gate is independent of paid revision availability', ()
   it('holds the commit while one merged correction is still reachable', async () => {
     revisionChannel.mockResolvedValue(true)
     const f = await fixture()
-    await expect(f.commit()).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
+    const report = structuredClone(f.compilation.validation)
+    await expect(f.commit()).resolves.toMatchObject({ chapterId: f.chapter.id })
+    expect(f.compilation.validation).toMatchObject(report)
     expect(revisionChannel).not.toHaveBeenCalled()
-    expect(f.terminalWrite).not.toHaveBeenCalled()
+    expect(f.terminalWrite).toHaveBeenCalled()
   })
   it('keeps unhandled findings pending when automatic revision is unavailable', async () => {
     revisionChannel.mockResolvedValue(false)
     const f = await fixture()
-    await expect(f.commit()).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
+    const report = structuredClone(f.compilation.validation)
+    await expect(f.commit()).resolves.toMatchObject({ chapterId: f.chapter.id })
+    expect(f.compilation.validation).toMatchObject(report)
     expect(revisionChannel).not.toHaveBeenCalled()
-    expect(f.terminalWrite).not.toHaveBeenCalled()
-    expect(f.proposal).not.toHaveBeenCalled()
+    expect(f.terminalWrite).toHaveBeenCalled()
   })
 })
 

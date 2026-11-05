@@ -3,6 +3,7 @@ import { verifyChildGrant } from './runtime-child.js'
 import { nextStagnantBatch } from './semantic-progress.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
+import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { promisesFurtherAction } from './completion-guard.js'
 import { durableChatResultSchema } from './runtime-common.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
@@ -76,21 +77,15 @@ export async function advanceDurableCompletionObligations(token: RunLeaseToken, 
     if (!blockers.length) return null
     // Only already-adapted domain work can be requested automatically.
     if (blockers.some(item => !['unfinished_todo', 'uncommitted_compilation'].includes(item.code))) return { kind: 'reconciliation_required' as const, blockers }
-    const { frame, configuration } = await readExecutionStateInTransaction(tx, lease.taskRootId)
+    const { frame, configuration, originalSpec } = await readExecutionStateInTransaction(tx, lease.taskRootId)
+    const effective = await (await import('./native-tool-policy.js')).readEffectiveNativeTooling(tx, lease, configuration, taskSpecSchema.parse(originalSpec))
     const requiredTools: string[] = blockers.map(item => item.code === 'unfinished_todo' ? 'todo_write' : 'chapter_bridge_commit')
     const observed = z.object({ reviewObservation: reviewObservationSchema.optional() }).parse(evidence.snapshot).reviewObservation
     if (observed) {
       if (runtimeJson(observed.observations).hash !== observed.fingerprint) return runtimeError('RUNTIME_RECEIPT_INVALID', '当前审查观察指纹不一致。')
-      if (observed.observations.some(item => item.state === 'blocked')) return { kind: 'reconciliation_required' as const, blockers }
-      for (const item of observed.observations) {
-        if (item.state === 'check_required') requiredTools.push(...item.requiredToolNames)
-      }
-      if (observed.observations.some(item => item.state === 'must_pass_required'
-        && !['chapter_edit_range', ...(item.selectionOnly ? [] : ['chapter_write'])].some(name => configuration.tools.some(tool => tool.function.name === name)
-          && configuration.toolAuthority.some(grant => grant.name === name && grant.permission !== 'deny')))) return { kind: 'reconciliation_required' as const, blockers }
     }
-    if (configuration.mode !== 'build' || requiredTools.some(name => !configuration.tools.some(tool => tool.function.name === name)
-      || !configuration.toolAuthority.some(grant => grant.name === name && grant.permission !== 'deny'))) return { kind: 'reconciliation_required' as const, blockers }
+    if (configuration.mode !== 'build' || requiredTools.some(name => !effective.tools.some(tool => tool.function.name === name)
+      || !effective.toolAuthority.some(grant => grant.name === name && grant.permission !== 'deny'))) return { kind: 'reconciliation_required' as const, blockers }
     return appendContinuation(tx, lease, frame, 'domain_incomplete', blockers, observed)
   }, { timeoutMs: 20_000 })
 }

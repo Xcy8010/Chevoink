@@ -1,3 +1,4 @@
+import { initializeExecutionState, saveExecutionState } from '../support/native-tool-test-state.js'
 import * as reviewGuard from '../../api/lib/agent/chapter-review-guard.js'
 import { qualityReportGetTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
@@ -23,7 +24,7 @@ import * as runtimeOperations from '../../api/lib/agent/runtime-operations.js'
 import { collectDurableToolEvidence } from '../../api/lib/agent/runtime-evidence.js'
 import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
 import { acquireRunLease } from '../../api/lib/agent/runtime-lease.js'
-import { initializeExecutionState, saveExecutionState } from '../../api/lib/agent/runtime-state.js'
+
 import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { toOpenAITools } from '../../api/lib/agent/tools/registry.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'

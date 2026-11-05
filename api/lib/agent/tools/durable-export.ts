@@ -34,8 +34,9 @@ async function assertCapture(tx: RuntimeTx, ctx: ToolContext, tool: AgentTool, a
   if (taskSpecSchema.parse(current.originalSpec).scope.novelId !== ctx.novelId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '导出目标与原任务不一致。')
   if (frame.state.phase !== 'idle' || frame.revision !== capability.cursor.expectedRevision || frame.snapshotHash !== capability.cursor.expectedHash
     || capability.operationKey !== `exec:${frame.state.nextOperationSequence}`) return runtimeError('RUNTIME_STATE_CONFLICT', '导出快照必须来自原待执行位置。')
-  const grant = current.configuration.toolAuthority.find(item => item.name === tool.name)
-  const definition = current.configuration.tools.find(item => item.function.name === tool.name)
+  const tooling = await (await import('../native-tool-policy.js')).readEffectiveNativeTooling(tx, lease, current.configuration, taskSpecSchema.parse(current.originalSpec))
+  const grant = tooling.toolAuthority.find(item => item.name === tool.name)
+  const definition = tooling.tools.find(item => item.function.name === tool.name)
   if (!grant || grant.permission === 'deny' || !definition || !originalToolParameterSchemas(tool, taskSpecSchema.parse(current.originalSpec).scope).some(schema => runtimeJson(schema).hash === runtimeJson(definition.function.parameters).hash)) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原任务未允许此次导出。')
   const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId } })
   const session = await tx.agentSession.findUnique({ where: { id: root.sessionId } })

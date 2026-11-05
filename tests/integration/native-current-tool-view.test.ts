@@ -16,6 +16,8 @@ import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import { chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { coordinatedWriterParameters } from '../../api/lib/agent/coordinated-writing-input.js'
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
+import { readCurrentSavedTaskChapters } from '../../api/lib/agent/saved-chapter-work.js'
+import { readCompletedWritingPresentation } from '../../api/lib/agent/writing-scope.js'
 
 // Requires the same explicitly isolated PostgreSQL fixture as the native gates.
 // No live provider or availability skip is introduced by this regression.
@@ -88,6 +90,12 @@ describe('native current parameters after a historical coordination call', () =>
       if (written.kind === 'tool') expect(written.result.outcome).not.toBe('failed')
       const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
       expect(chapter).toMatchObject({ content: '当前参数实际保存的正文', revision: 2 })
+      await prisma.$transaction(async tx => {
+        const subject = { userId: f.userId, novelId: f.novelId, runId: f.runId }
+        expect(await readCurrentSavedTaskChapters(tx, subject)).toMatchObject([{ id: f.chapterId, content: chapter.content }])
+        expect(await readCompletedWritingPresentation(tx, subject)).toMatchObject({ chapters: [{ id: f.chapterId,
+          completion: { compilationId: null, quality: 'missing', continuity: 'missing' } }] })
+      })
       const final = await loadExecutionState(f.userId, f.runId)
       expect(runtimeJson(final.configuration).hash).toBe(oldConfig)
       expect(final.head.configurationHash).toBe(oldConfigHash)

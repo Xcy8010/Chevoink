@@ -1,3 +1,4 @@
+import { initializeExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
 import { describe,expect,it,vi } from 'vitest'
 import { z } from 'zod'
 import { env } from '../../api/config/env.js'
@@ -10,7 +11,7 @@ import { withRunLease } from '../../api/lib/agent/runtime-lease.js'
 import { modelRouteRevision } from '../../api/lib/agent/runtime-model-cursor.js'
 import * as runtimeOperations from '../../api/lib/agent/runtime-operations.js'
 import { reduceExecutionReceipt } from '../../api/lib/agent/runtime-reducer.js'
-import { initializeExecutionState,loadExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
 import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
@@ -60,7 +61,7 @@ describe.runIf(available)('durable structural mutation batch', () => {
       if (checkpoints) {
         const current = await loadExecutionState(f.userId, f.runId)
         const window = getCreditWindow()
-        await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+        await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
         vi.stubGlobal('fetch', vi.fn(async () => new Response(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: calls.map((call, index) => ({ index, id: call.id,
           type: 'function', function: { name: call.name, arguments: call.arguments } })) }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 10, completion_tokens: 0 } })}
 

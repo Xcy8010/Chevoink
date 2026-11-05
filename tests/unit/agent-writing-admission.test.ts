@@ -11,7 +11,7 @@ describe('ambiguous writing admission', () => {
     expect(spec.writingPacing).toBe('conversation_only')
     expect(spec.scope.writing).toBeUndefined()
     expect(isContinuationRequest(prompt)).toBe(false)
-    expect(restrictToolsToTask([chapterReadTool, chapterWriteTool, chapterCreateTool], spec)).toEqual([chapterReadTool])
+    expect(restrictToolsToTask([chapterReadTool, chapterWriteTool, chapterCreateTool], spec)).toEqual([chapterReadTool, chapterWriteTool, chapterCreateTool])
   })
   it('retains explicit actions and exact existing-task continuations', () => {
     expect(buildTaskSpec({ runId: 'synthetic-run', novelId: 'synthetic-novel', prompt: '下一步帮我修改第71、72章' }).writingPacing).not.toBe('conversation_only')

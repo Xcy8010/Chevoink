@@ -136,3 +136,5 @@ describe('continuity preflight rejection through actual tool admission and failu
     expect(mocks.provider).not.toHaveBeenCalled()
   })
 })
+vi.mock('../../api/lib/agent/native-tool-policy.js', async importOriginal => ({ ...await importOriginal<typeof import('../../api/lib/agent/native-tool-policy.js')>(), readEffectiveNativeTooling: async (_tx: unknown, _lease: unknown, configuration: { tools: unknown[]; toolAuthority: unknown[] }) => configuration }))
+vi.mock('../../api/lib/agent/runtime-tool-view.js', async original => ({ ...await original<object>(), verifiedAssistantToolViews: async (_tx: unknown, _root: unknown, _frame: unknown, tools: unknown[]) => tools }))

@@ -32,11 +32,10 @@ export async function assertCurrentToolPolicy(tx: RuntimeTx, token: RunLeaseToke
   const normalization = input?.normalization as Prisma.JsonObject | undefined
   // Internal primitives and recorded rejection observations have no cursor grant.
   if (!normalization) return
-  const [{ readExecutionStateInTransaction }, { applySessionToolPolicy }, { getToolByName }] = await Promise.all([
-    import('./runtime-state.js'), import('./agents.js'), import('./tools/registry.js'),
+  const [{ readExecutionStateInTransaction }, { getToolByName }] = await Promise.all([
+    import('./runtime-state.js'), import('./tools/registry.js'),
   ])
   const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: token.taskRootId } })
-  await tx.$queryRaw`SELECT id FROM agent_sessions WHERE id = ${root.sessionId} FOR SHARE`
   const session = await tx.agentSession.findUnique({ where: { id: root.sessionId } })
   // This existing, explicitly frozen recovery reader is intentionally absent
   // from the public legacy registry; use its real metadata, not a blanket grant.
@@ -46,13 +45,20 @@ export async function assertCurrentToolPolicy(tx: RuntimeTx, token: RunLeaseToke
     tool = { ...reader, execute: (ctx, args) => reader.execute(ctx, reader.parameters.parse(args)) }
   }
   if (!session || session.userId !== token.userId || session.novelId !== root.novelId || !tool) return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '当前会话不再允许执行原工具。')
-  const { configuration } = await readExecutionStateInTransaction(tx, token.taskRootId)
-  const grant = configuration.toolAuthority.find(item => item.name === operation.action)
+  const { configuration, originalSpec } = await readExecutionStateInTransaction(tx, token.taskRootId)
+  const admission = (await import('./native-tool-policy.js')).readNativeToolAdmission(operation)
+  let grant = admission?.grant ?? configuration.toolAuthority.find(item => item.name === operation.action)
+  {
+    const tooling = await (await import('./native-tool-policy.js')).readEffectiveNativeTooling(tx, token, configuration,
+      (await import('../../../shared/contracts/task-spec-contracts.js')).taskSpecSchema.parse(originalSpec))
+    const current = tooling.toolAuthority.find(item => item.name === operation.action)
+    if (!grant || !current || current.permission === 'deny') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '当前实际权限已撤销此工具。')
+    grant = { ...grant, permission: grant.permission === 'deny' ? 'deny'
+      : grant.permission === 'ask' || current.permission === 'ask' ? 'ask' : 'allow',
+      alwaysConfirm: grant.alwaysConfirm || current.alwaysConfirm, dangerous: grant.dangerous || current.dangerous }
+  }
   if (!grant || grant.permission === 'deny') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '原任务没有此次工具授权。')
-  const effective = applySessionToolPolicy([{ ...tool, permission: { ...tool.permission, [configuration.mode]: grant.permission } }],
-    configuration.mode, session.toolPolicy, session.sandboxMode === 'read_only' ? 'read_only' : 'workspace')[0]
-  if (!effective || effective.permission[configuration.mode] === 'deny') return runtimeError('RUNTIME_EFFECT_NOT_AUTHORIZED', '会话权限已收紧，本次操作尚未执行。')
-  if (effective.permission[configuration.mode] === 'ask' || grant.alwaysConfirm) {
+  if (grant.permission === 'ask' || grant.alwaysConfirm) {
     if (typeof input?.callId !== 'string' || typeof normalization.sourceSnapshotHash !== 'string'
       || typeof normalization.rawArguments !== 'string' || typeof normalization.normalizedArgsHash !== 'string') return runtimeError('RUNTIME_RECEIPT_INVALID', '原工具审批身份缺失。')
     const { assertToolApproval } = await import('./runtime-approval.js')

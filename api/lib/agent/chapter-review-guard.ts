@@ -444,7 +444,7 @@ export async function assertChapterReviewWriteAdmission(tx: Prisma.TransactionCl
 /** Ordinary manuscript tools use the original writing grant, not the paid
  * reviewer's repair allowance. Callers still fence the run, target and body CAS
  * in this transaction. Reviews certify only the body they actually checked. */
-export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClient,
+async function assertAutomaticChapterRevision(tx: Prisma.TransactionClient,
   subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number },
   options: ChapterReviewRevisionOptions) {
 
@@ -507,6 +507,44 @@ export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClie
     ? prepareReviewCycleTransition(tx, subject, current, latest.id, options.after, options.editRanges, options.readScope) : undefined
 }
 
+/** Ordinary tools are already admitted by their actual grant and target fence.
+ * Optional review history cannot revoke that permission. */
+export async function assertChapterManuscriptRevision(tx: Prisma.TransactionClient,
+  subject: { userId: string; novelId: string; runId: string }, chapter: { id: string; revision: number },
+  options: ChapterReviewRevisionOptions) {
+  if (options.requireQualityChannel) return assertAutomaticChapterRevision(tx, subject, chapter, options)
+  await lockNovelActiveScope(tx, subject.novelId)
+  await assertSelectionBodyEffect(tx, subject, chapter, options)
+  const original = await readOriginalTaskRequest(tx, subject)
+  const runIds = await originalTaskRunIds(tx, subject, original)
+  const current = await tx.chapter.findFirst({ where: { id: chapter.id, revision: chapter.revision, authorId: subject.userId,
+    ...activeChapterScope(subject.novelId) }, select: { id: true, title: true, revision: true, content: true, orderIndex: true } })
+  if (!current) throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '章节已变化或不属于当前作者作品，正文未写入。')
+  await tx.$queryRaw(Prisma.sql`SELECT id FROM story_compilations WHERE user_id = ${subject.userId}
+    AND novel_id = ${subject.novelId} AND chapter_id = ${chapter.id} AND run_id IN (${Prisma.join(runIds)}) ORDER BY id FOR UPDATE`)
+  const compilations = await tx.storyCompilation.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
+    chapterId: chapter.id, runId: { in: runIds } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+  const latest = compilations[0]
+  if (options.retainedFindings?.length) {
+    const readiness = latest && await readChapterReviewReadiness(tx, subject, latest.id, { readScope: options.readScope })
+    if (!readiness) throw new DataAccessError(409, 'REVIEW_DECISION_REQUIRED', '没有当前版本可引用的真实报告，未保存留置或改稿。')
+    await recordChapterReviewDecisions(tx, subject, readiness, options.retainedFindings)
+  }
+  if (!latest || typeof options.after !== 'string' || options.after === current.content) return
+  let transition: Awaited<ReturnType<typeof prepareReviewCycleTransition>>
+  try {
+    transition = await prepareReviewCycleTransition(tx, subject, current, latest.id, options.after, options.editRanges, options.readScope)
+  } catch (error) {
+    if (!(error instanceof DataAccessError) || !['PLAN_CONTEXT_STALE', 'REVIEW_CYCLE_CONFLICT'].includes(error.code)) throw error
+  }
+  if (!transition) return
+  return async () => {
+    try { await transition() } catch (error) {
+      if (!(error instanceof DataAccessError) || error.code !== 'REVIEW_CYCLE_CONFLICT') throw error
+    }
+  }
+}
+
 /** Automatic repair keeps the author's manuscript scope. Ordinary manuscript
  * tools and review tools share that scope; a report never grants new writes. */
 export async function assertChapterReviewRevision(
@@ -515,7 +553,7 @@ export async function assertChapterReviewRevision(
   chapter: { id: string; revision: number },
   options?: ChapterReviewRevisionOptions,
 ) {
-  return assertChapterManuscriptRevision(tx, subject, chapter, options ?? {})
+  return assertAutomaticChapterRevision(tx, subject, chapter, options ?? {})
 }
 
 /** Read-only projection of current manuscript authority before automatic repair.
@@ -575,11 +613,20 @@ export async function readChapterReviewRevisionGuidance(tx: Prisma.TransactionCl
     const local = localEditGuidance((await readOriginalTaskRequest(tx, subject)).spec)
     if (local) return local
     if (originalSelectionBoundary((await readOriginalTaskRequest(tx, subject)).spec)) return '原任务只授权作者所选正文范围。读取当前正文，用 chapter_edit_range 的逐字唯一锚点或选区内坐标连续修改，所有补丁必须保留原选区外文本；每批最多8处，不限制原授权内批次数。不得 chapter_write、chapter_append、改名或通过其他工具扩大范围。最终所需检查须绑定最后保存版本。'
-    return '在作者授权范围内依据当前正文连续修订。优先用 chapter_edit_range 的唯一原文片段合并安全修法；按实际剧情判断意见。需要保留的意见用当前报告 retainedFindings 引用并说明理由。修改后复查最终版的连续性和人类感质量，再提交章节。'
+    return '在作者授权范围内依据当前正文连续修订。优先用 chapter_edit_range 的唯一原文片段合并安全修法；按实际剧情判断意见。需要保留的意见用当前报告 retainedFindings 引用并说明理由。根据原请求与实际需要决定是否调用检查；保存与报告通过分别说明。'
   } catch (error) {
     if (error instanceof DataAccessError && ['AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_AUTOMATION_STOPPED', 'REVIEW_REPAIR_RECHECK_REQUIRED'].includes(error.code)) {
       return `${error.message}保留事实错误及其证据，当前版本不能宣称通过。`
     }
     throw error
+  }
+}
+
+/** Read-only ordinary workflow feedback cannot make an optional stale plan a
+ * tool permission. Strict callers retain readChapterReviewReadiness. */
+export async function readAdvisoryChapterReviewReadiness(...args: Parameters<typeof readChapterReviewReadiness>) {
+  try { return await readChapterReviewReadiness(...args) } catch (error) {
+    if (!(error instanceof DataAccessError) || error.code !== 'PLAN_CONTEXT_STALE') throw error
+    return null
   }
 }

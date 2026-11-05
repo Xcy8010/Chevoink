@@ -1,4 +1,5 @@
 import { chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
+import { AGENT_TOOL_EXECUTION_POLICY } from '../../api/lib/agent/tool-execution-guidance.js'
 import { advanceDurableMemory } from '../../api/lib/agent/runtime-memory.js'
 import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
 import { taskSpawnTool, taskWaitTool } from '../../api/lib/agent/tools/task-orchestration-tools.js'
@@ -224,7 +225,7 @@ describe.runIf(available)('real durable default execution control', () => {
         tools: [{ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } }],
         toolAuthority: [{ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
         snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
-          messages: [{ role: 'user', content: '修改本章' }], successfulToolSignatures: [] } })
+          messages: [{ role: 'system', content: AGENT_TOOL_EXECUTION_POLICY }, { role: 'user', content: '修改本章' }], successfulToolSignatures: [] } })
       let firstProgress = ''
       for (let index = 0; index < 5; index++) {
         const { frame } = await loadExecutionState(f.userId, f.runId)

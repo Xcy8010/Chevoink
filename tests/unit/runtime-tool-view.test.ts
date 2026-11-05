@@ -143,8 +143,9 @@ describe('assistant tool view source', () => {
     // sourceFixture authenticates operation/request/result/outbox hashes and
     // the real assistant boundary, not merely a schema helper return value.
     const result = verifiedAssistantToolViews(f.tx as unknown as RuntimeTx, 'root', f.frame, frozen, scope)
-    if (['previous', 'current', 'frozen'].includes(scenario)) await expect(result).resolves.toEqual(source)
-    else await expect(result).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+    // This is the server-authenticated request actually sent for this result.
+    // Today's catalog does not rewrite it or grant execution permission.
+    await expect(result).resolves.toEqual(source)
     expect(frozen).toEqual(original)
     expect(f.attempt.requestSnapshot).toEqual(journal)
     expect(f.attempt.requestHash).toBe(runtimeJson(journal).hash)

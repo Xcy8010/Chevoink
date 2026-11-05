@@ -1,7 +1,5 @@
 import { createConfirmedVolume } from '../volume-create-intent.js'
-import { assertWritingStructureAuthority } from '../writing-scope.js'
-import { readOriginalTaskRequest } from '../original-request.js'
-import { taskSpecSchema } from '../../../../shared/contracts/task-spec-contracts.js'
+import { assertWritingStructureAuthority, assertWritingTarget, readWritingScope, bindWritingChapter } from '../writing-scope.js'
 import { writingVolumeBoundarySchema } from '../../../../shared/contracts/writing-volume-contracts.js'
 import { createWritingTailVolume } from '../writing-volume.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
@@ -11,6 +9,7 @@ import { readSemanticStructureHash } from '../semantic-progress.js'
 import type { ToolContext } from './types.js'
 import { z } from 'zod'
 
+import { activeChapterScope } from '../../data/internal.js'
 import { DataAccessError } from '../../prisma.js'
 import {
   createVolumeData,
@@ -29,8 +28,9 @@ import { executeDurableCreate } from './durable-create.js'
 import { getStructureRevisionHash } from '../../data/volume.js'
 import { withAgentManuscriptWrite } from '../manuscript-scope.js'
 
-async function withStructureProgress<T>(ctx: ToolContext, work: (tx: Prisma.TransactionClient) => Promise<T>, effect: 'structure' | 'metadata' = 'structure') {
+async function withStructureProgress<T>(ctx: ToolContext, work: (tx: Prisma.TransactionClient) => Promise<T>, effect: 'structure' | 'metadata' = 'structure', chapterIds: readonly string[] = []) {
   return withAgentManuscriptWrite(ctx, async tx => {
+    for (const chapterId of chapterIds) await assertWritingTarget(tx, ctx, { chapterId, effect: 'changeset' })
     const beforeHash = await readSemanticStructureHash(tx, ctx.novelId)
     const value = await work(tx)
     const afterHash = await readSemanticStructureHash(tx, ctx.novelId)
@@ -79,7 +79,7 @@ export const volumeListTool = defineTool({
 export const volumeCreateTool = defineTool({
   name: 'volume_create',
   title: '新建卷',
-  description: '为当前作品显式新建一卷，取得真实卷编号后再创建章节或按原授权迁入章节。普通结构任务可指定插入位置；仅写下一章的尾卷任务必须提供已准备的同一收束证据，只能创建原目标的新尾卷，不能顺带移动旧章。',
+  description: '为当前作品新建一卷，title为卷名，summary可选；position可指定插入位置，省略时添加到末尾。返回真实volumeId，可在后续章节工具中使用。根据作者请求和已读目录决定卷名、位置及内容，不需要先完成正文编译或检查报告。',
   parameters: z.object({
     title: z.string().min(1).max(128),
     summary: z.string().optional(),
@@ -90,13 +90,6 @@ export const volumeCreateTool = defineTool({
   permission: { ...STRUCTURE_PERMISSION, plan: 'allow' },
   readOnly: false,
   async execute(ctx, args): Promise<ToolResult> {
-    if (ctx.mode === 'plan') {
-      const original = await readOriginalTaskRequest(ctx.transaction ?? prisma, ctx)
-      const spec = taskSpecSchema.safeParse(original.spec).data
-      if (spec?.scope.volumeCreationProtocol !== 1 || spec.scope.authorEffects?.structure !== true && !spec.scope.volumeCreateIntent) {
-        throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原规划任务未授权创建卷，目录未改变。')
-      }
-    }
     if (ctx.durableCreate) {
       const captured = { ...ctx, toolAuthority: new Map(ctx.toolAuthority), durableCreate: { ...ctx.durableCreate, lease: { ...ctx.durableCreate.lease }, cursor: { ...ctx.durableCreate.cursor } } }
       const normalize = (raw: unknown) => {
@@ -204,7 +197,7 @@ function defineChapterMoveTool(name: 'chapter_move' | 'chapter_move_to_volume', 
     readOnly: false,
     async execute(ctx, { chapterId, ...input }) {
       assertProtectedChapterUntouched(ctx, chapterId)
-      const { value: chapter, semanticTransition } = await withStructureProgress(ctx, tx => moveChapterData(ctx.userId, ctx.novelId, chapterId, input, tx))
+      const { value: chapter, semanticTransition } = await withStructureProgress(ctx, tx => moveChapterData(ctx.userId, ctx.novelId, chapterId, input, tx), 'structure', [chapterId])
       return chapter
         ? {
             semanticTransition,
@@ -235,7 +228,28 @@ export const chapterSplitTool = defineTool({
   readOnly: false,
   async execute(ctx, { chapterId, ...input }) {
     assertProtectedChapterUntouched(ctx, chapterId)
-    const { value: result, semanticTransition } = await withStructureProgress(ctx, tx => splitChapterData(ctx.userId, ctx.novelId, chapterId, input, tx))
+    const { value: result, semanticTransition } = await withStructureProgress(ctx, async tx => {
+      const scope = await readWritingScope(tx, ctx)
+      let orderIndex: number | undefined
+      let newSlot: NonNullable<typeof scope.writing>['targets'][number] | undefined
+      if (scope.writing?.kind === 'bounded') {
+        const source = await tx.chapter.findFirst({ where: { id: chapterId, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) }, select: { orderIndex: true } })
+        if (!source) return null
+        orderIndex = source.orderIndex + 1
+        const slot = scope.writing.targets.find(target => target.orderIndex === orderIndex && target.chapterId === null)
+        newSlot = slot
+        if (!slot || scope.bindings?.targets.some(target => target.orderIndex === orderIndex)) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '拆分将新增范围外章节，当前已绑定目标没有可用的新章位置。')
+        await assertWritingTarget(tx, ctx, { orderIndex, effect: 'create' })
+      }
+      const result = await splitChapterData(ctx.userId, ctx.novelId, chapterId, input, tx)
+      if (result && newSlot && (result.second.orderIndex !== newSlot.orderIndex
+        || newSlot.volumeId && result.second.volumeId !== newSlot.volumeId
+        || newSlot.positionInVolume !== undefined && result.second.orderInVolume !== newSlot.positionInVolume)) {
+        throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '拆分结果的真实卷或章位置与已绑定新章目标不一致。')
+      }
+      if (result && orderIndex !== undefined) await bindWritingChapter(tx, ctx, orderIndex, result.second.id)
+      return result
+    }, 'structure', [chapterId])
     return result
       ? { semanticTransition, output: `已将《${result.first.title}》拆分，并创建相邻章节《${result.second.title}》（chapterId=${result.second.id}）。`, summary: `拆分《${result.first.title}》`, affectedChapterIds: [result.first.id, result.second.id] }
       : { output: '目标章节不存在或不属于当前作品。', outcome: 'failed' as const }
@@ -257,7 +271,7 @@ export const chapterMergeTool = defineTool({
   readOnly: false,
   async execute(ctx, { targetChapterId, ...input }) {
     assertProtectedChapterUntouched(ctx, targetChapterId, input.sourceChapterId)
-    const { value: chapter, semanticTransition } = await withStructureProgress(ctx, tx => mergeChaptersData(ctx.userId, ctx.novelId, targetChapterId, input, tx))
+    const { value: chapter, semanticTransition } = await withStructureProgress(ctx, tx => mergeChaptersData(ctx.userId, ctx.novelId, targetChapterId, input, tx), 'structure', [targetChapterId, input.sourceChapterId])
     return chapter
       ? {
           semanticTransition,

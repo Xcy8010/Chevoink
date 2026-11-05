@@ -321,8 +321,12 @@ export async function admitChildExecutionInTransaction(tx: RuntimeTx, parent: Ru
   if (operation.action === 'task_send' && (input.childIndex !== 0 || input.targetSessionId !== nativeArgs?.sessionId || !input.targetSessionId)) {
     return runtimeError('RUNTIME_CHILD_SOURCE_REQUIRED', '返工窗口必须精确匹配当前原生调用的目标。')
   }
-  const configuration = intersectChildConfiguration(current.configuration, input.configuration, input.roleTools)
   const parentSpec = taskSpecSchema.parse(root.specSnapshot)
+  const existing = await tx.agentChildExecutionGrant.findUnique({ where: { parentOperationId_childIndex: { parentOperationId: operation.id, childIndex: input.childIndex } } })
+  const existingSnapshot = existing ? verifyChildGrant(existing) : null
+  const ceiling = existingSnapshot ? existingSnapshot.configuration as ChildConfiguration : { ...current.configuration,
+    ...await (await import('./native-tool-policy.js')).readEffectiveNativeTooling(tx, parent, current.configuration, parentSpec) }
+  const configuration = intersectChildConfiguration(ceiling, input.configuration, input.roleTools)
   const spec = taskSpecSchema.parse(JSON.parse(JSON.stringify(input.spec)))
   if ((operation.action.startsWith('subagent_') ? input.kind !== 'inline' || input.childIndex !== 0 : input.kind !== 'spawned')) return runtimeError('RUNTIME_CHILD_SOURCE_REQUIRED', '子任务种类与原调用不一致。')
   if (input.kind === 'inline') {
@@ -335,8 +339,6 @@ export async function admitChildExecutionInTransaction(tx: RuntimeTx, parent: Ru
   // create a foreign chapter, novel, selection, or phased authorization.
   if (spec.authorization || runtimeJson(spec.scope).hash !== runtimeJson(parentSpec.scope).hash
     || runtimeJson(spec.hardConstraints).hash !== runtimeJson(parentSpec.hardConstraints).hash) return runtimeError('RUNTIME_SCOPE_MISMATCH', '子任务不能扩大原任务范围或硬约束。')
-  const existing = await tx.agentChildExecutionGrant.findUnique({ where: { parentOperationId_childIndex: { parentOperationId: operation.id, childIndex: input.childIndex } } })
-  const existingSnapshot = existing ? verifyChildGrant(existing) : null
   // Numerical ceilings in old grants were server defaults, not author limits.
   // Replay retains them exactly; new rows use positive storage-only values.
   const compatibilityTokenLimit = existingSnapshot?.tokenCeiling ?? COMPATIBILITY_TOKEN_LIMIT

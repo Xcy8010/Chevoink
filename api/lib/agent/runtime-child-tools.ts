@@ -240,7 +240,8 @@ export async function executeDurableChildTool(parent: RunLeaseToken, cursor: Too
         const budget = await readTaskBudgetInTransaction(tx, parent.taskRootId)
         if (budget.unresolvedAttempts > 0n) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原任务存在未知支出，不能分配新子任务。')
         const tokenCeiling = COMPATIBILITY_TOKEN_LIMIT
-        const inheritedConfiguration = Object.fromEntries(Object.entries(source.configuration).filter(([key]) => key !== 'pinnedSubagentId')) as ChildConfiguration
+        const tooling = await (await import('./native-tool-policy.js')).readEffectiveNativeTooling(tx, parent, source.configuration, parentSpec)
+        const inheritedConfiguration = { ...Object.fromEntries(Object.entries(source.configuration).filter(([key]) => key !== 'pinnedSubagentId')), ...tooling } as ChildConfiguration
         const configuration: ChildConfiguration = { ...inheritedConfiguration, mode, agentType: role,
           model: childModelForRuntime(source.configuration.model, selection.runtime,
             selection.selected ? selection.selected.selection.customModelId ?? null : source.configuration.model.customModelId, selection.price) }

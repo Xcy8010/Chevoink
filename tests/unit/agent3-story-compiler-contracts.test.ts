@@ -86,6 +86,7 @@ describe('严谨创作落实连续性警告', () => {
     const runQuery = vi.spyOn(prisma.agentRun, 'findMany').mockResolvedValue([{ id: 'r', userId: 'u', novelId: 'n' }] as never)
     vi.spyOn(prisma.agentRunEvent, 'findMany').mockResolvedValue([])
     vi.spyOn(prisma.agentSession, 'findUnique').mockResolvedValue({ userId: 'u', novelId: 'n', sandboxMode: 'workspace', toolPolicy: { contentWrite: 'allow' } } as never)
+    vi.spyOn(readiness, 'readAdvisoryChapterReviewReadiness').mockImplementation((...args) => readiness.readChapterReviewReadiness(...args))
     vi.spyOn(readiness, 'readChapterReviewReadiness').mockResolvedValue(completeReadiness())
     const commit = vi.spyOn(compiler, 'commitChapterBridge').mockResolvedValue({ compilationId: 'comp', chapterId: 'c', chapterRevision: 1, skippedMemoryCount: 0, retainedIssueCount: 0 })
     const tx = { $queryRaw: vi.fn().mockResolvedValue([{ id: 'n' }]), agentRun: { findMany: runQuery, findFirst: vi.fn().mockResolvedValue({ id: 'r' }),
@@ -128,6 +129,7 @@ describe('严谨创作落实连续性警告', () => {
     const f = fixture(false)
     vi.spyOn(originalRequest, 'readOriginalTaskRequest').mockResolvedValue({ prompt: '写完章节', spec: { scope: { terminalEvidenceProtocol: 2, continuityEvidenceProtocol: 1 } }, taskId: 'task', sourceRunId: 'r', parentRunId: null } as never)
     vi.spyOn(compiler, 'compilationRunScope').mockResolvedValue({ run: { id: 'r' } })
+    vi.spyOn(readiness, 'readAdvisoryChapterReviewReadiness').mockImplementation((...args) => readiness.readChapterReviewReadiness(...args))
     vi.spyOn(readiness, 'readChapterReviewReadiness').mockResolvedValue(null)
     Object.assign(f.compilation, { qualityReports: [], targetOrderIndex: 1 })
     const source = vi.spyOn(continuitySource, 'readCompilerContinuitySource').mockResolvedValue(inheritedSource())
@@ -303,6 +305,7 @@ describe('严谨创作落实连续性警告', () => {
     const report = { id: 'report', userId: f.ctx.userId, novelId: f.ctx.novelId, chapterId: f.chapter.id, chapterRevision: scenario === 'stale' ? 0 : 1,
       status: scenario === 'failed' ? 'failed' : 'passed', deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(f.chapter.content).digest('hex') },
       findings: [{ id: 'candidate', severity: 'warning', disposition: 'pending', authorFeedback: null, evidenceExcerpt: '原文', explanation: '需要澄清真实动作', suggestion: '按作者授权处理' }] }
+    vi.spyOn(readiness, 'readAdvisoryChapterReviewReadiness').mockImplementation((...args) => readiness.readChapterReviewReadiness(...args))
     vi.spyOn(readiness, 'readChapterReviewReadiness').mockResolvedValue({ ...completeReadiness(), ready: scenario === 'current', revision: 1,
       continuity: 'complete', quality: scenario === 'current' ? 'complete' : 'incomplete', qualityReportId: scenario === 'current' ? report.id : null,
       requiredTools: [], qualityCandidateCount: scenario === 'current' ? 1 : 0, decisionPending: scenario === 'current',
@@ -418,8 +421,9 @@ describe('严谨创作落实连续性警告', () => {
       vi.mocked(readiness.readChapterReviewReadiness).mockResolvedValue(state)
       const before = JSON.stringify(f.validation), result = await chapterBridgeCommitTool.execute(f.ctx, args)
       if (scenario === 'stale-body') {
-        expect(result).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_CHECK_REQUIRED' })
-        expect(f.commit).not.toHaveBeenCalled()
+        expect(result.summary).toBe('章节已提交')
+        expect(f.commit).toHaveBeenCalled()
+        expect(state.continuity).toBe('stale')
       } else {
         expect(result.summary).toBe('章节已提交')
         expect(f.commit).toHaveBeenCalledWith(expect.objectContaining({ exitState: storyStateSchema.parse({}), lastUnfinishedAction: '' }), undefined)
@@ -493,14 +497,14 @@ describe('Agent 3.0 Story Compiler 契约', () => {
     purpose: '让守军从正门撤往水渠', goal, obstacle: '正门被叛军封锁', choice: '让侦察兵带路绕行水渠',
     cost: '放弃正门的补给车，人员无新增伤亡', turn: '撤离队伍抵达水渠入口',
   })
-  it('完整字符串化场景数组按等价表示恢复，残文及超额场景仍拒绝', () => {
+  it('完整字符串化场景数组按等价表示恢复，残文仍拒绝', () => {
     const tool = allTools.find(item => item.name === 'scene_task_build')!
     const tasks = [syntheticScene('守住城门'), syntheticScene('护送百姓')]
     expect(tool.parameters.parse(tool.coerceArgs!({ tasks: JSON.stringify(tasks) })))
       .toEqual(tool.parameters.parse(tool.coerceArgs!({ tasks })))
     expect(tool.parameters.parse(normalizeToolInput(tool, { tasks: JSON.stringify(JSON.stringify(tasks)) })))
       .toEqual(tool.parameters.parse(normalizeToolInput(tool, { tasks })))
-    for (const value of ['[{"goal":"残文', JSON.stringify([...tasks, ...tasks, tasks[0]]), '{"goal":"非数组"}']) {
+    for (const value of ['[{"goal":"残文', '{"goal":"非数组"}']) {
       expect(tool.parameters.safeParse(tool.coerceArgs!({ tasks: value })).success).toBe(false)
     }
   })
@@ -515,8 +519,8 @@ describe('Agent 3.0 Story Compiler 契约', () => {
   })
   it('严谨规则保留可选只读检查及原始修复授权边界', () => {
     const text = renderTaskSpec(buildTaskSpec({ runId: 'r', novelId: 'n', prompt: '写下一章', creativeFreedom: 'balanced' }))
-    expect(text).toContain('写作交付先完成当前版本连续性与质量检查')
-    expect(text).toContain('修订后只读复核当前版本两类检查，最后提交终态')
+    expect(text).toContain('检查建议和未完成报告不阻止保存或提交')
+    expect(text).toContain('原作者明确要求的检查目标须如实完成或说明尚未完成')
     expect(text).toContain('质量警告与审美建议，应与事实修法优先合并处理')
     expect(text).toContain('本任务冻结的新建目标章')
     expect(text).toContain('不能硬性限定只调用一次')
@@ -539,12 +543,13 @@ describe('Agent 3.0 Story Compiler 契约', () => {
     expect(tool.parameters.safeParse(normalized).success).toBe(false)
   })
 
-  it('超过四个场景明确校验失败，不截掉后续场景后报成功', () => {
+  it('完整保留并接受超过四个场景，不截掉后续场景', () => {
     const tool = allTools.find(item => item.name === 'scene_task_build')!
     const tasks = Array.from({ length: 5 }, (_, index) => syntheticScene(`保留场景${index + 1}`))
     const normalized = tool.coerceArgs!({ arguments: { tasks } }) as { tasks: Array<{ goal: string }> }
     expect(normalized.tasks.map(task => task.goal)).toEqual(tasks.map(task => task.goal))
-    expect(tool.parameters.safeParse(normalized).success).toBe(false)
+    expect(tool.parameters.safeParse(normalized).success).toBe(true)
+    expect(tool.parameters.parse(normalized).tasks).toHaveLength(5)
     expect(tool.parameters.safeParse(tool.coerceArgs!({ tasks: tasks.slice(0, 4) })).success).toBe(true)
   })
 

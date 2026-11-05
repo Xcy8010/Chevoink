@@ -60,3 +60,9 @@ describe('actual authority and historical structural failure records', () => {
     expect(findToolRestriction([item], action, args)).toEqual(item)
   })
 })
+
+it.each(['SCOPE_NEEDS_INPUT', 'AUTHOR_INPUT_REQUIRED', 'TASK_SCOPE_REQUIRED', 'COMPILATION_STAGE_CONFLICT', 'PLAN_CONTEXT_STALE'])('keeps old %s as audit rather than a revived tool ban', code => {
+  const item = { action: 'chapter_write', target: 'chapter', code, reason: '旧流程拒绝' }
+  expect(findToolRestriction([item], item.action, { chapterId: 'chapter' })).toBeUndefined()
+  expect(toolRestrictionSchema.parse(item)).toEqual(item)
+})

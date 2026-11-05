@@ -5,7 +5,7 @@ import type { Prisma } from '@prisma/client'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 const db = vi.hoisted(() => ({
   volume: { findFirst: vi.fn() },
-  novel: { findFirst: vi.fn() }, agentArtifact: { findMany: vi.fn() }, agentRun: { findFirst: vi.fn(), findMany: vi.fn(), findFirstOrThrow: vi.fn(), findUniqueOrThrow: vi.fn() }, chapter: { findFirst: vi.fn(), findMany: vi.fn(), count: vi.fn() },
+  novel: { findFirst: vi.fn() }, agentArtifact: { findMany: vi.fn() }, agentRun: { update: vi.fn(), findFirst: vi.fn(), findMany: vi.fn(), findFirstOrThrow: vi.fn(), findUniqueOrThrow: vi.fn() }, chapter: { findFirst: vi.fn(), findMany: vi.fn(), count: vi.fn() },
   agentSession: { findFirst: vi.fn() }, agentChildExecutionGrant: { findUnique: vi.fn() }, agentMessage: { findFirst: vi.fn() }, chapterQualityReport: { findFirst: vi.fn(), findUnique: vi.fn() },
   storyCompilation: { findFirst: vi.fn(), findUniqueOrThrow: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), update: vi.fn(), create: vi.fn() },
   chapterBridge: { findFirst: vi.fn(), update: vi.fn() }, sceneTask: { updateMany: vi.fn() }, agentGoalExecution: { findUnique: vi.fn() },
@@ -44,6 +44,7 @@ beforeEach(() => {
   db.agentSession.findFirst.mockResolvedValue(null); db.agentChildExecutionGrant.findUnique.mockResolvedValue(null); db.agentMessage.findFirst.mockResolvedValue(null); db.chapterQualityReport.findFirst.mockResolvedValue(null)
   db.chapterQualityReport.findUnique.mockImplementation(query => db.chapterQualityReport.findFirst(query))
   db.agentRun.findFirst.mockResolvedValue({ id: 'new-run', userId: 'u', novelId: 'n', status: 'running', startRequest: { prompt: '写下一章' }, createdAt: new Date('2026-09-20T03:22:41Z'), runtimeProtocolVersion: 0, taskRootId: null, sessionId: 'session', taskSpec: spec('写下一章') })
+  db.agentRun.update.mockImplementation(async ({ data }) => { const current = await db.agentRun.findFirst({ where: { id: 'new-run' } }); Object.assign(current, data); return current })
   db.agentRun.findFirstOrThrow.mockImplementation(query => db.agentRun.findFirst(query))
   db.agentRun.findMany.mockResolvedValue([])
   db.agentRun.findUniqueOrThrow.mockImplementation(query => db.agentRun.findFirst(query))
@@ -127,15 +128,15 @@ describe('story compiler task identity', () => {
   })
 
   it.each([
-    { stage: 'prepare', sceneCount: 0, content: null, revision: 3, next: '下一步调用 scene_task_build', avoid: '不重复 PREPARE/BEAT' },
-    { stage: 'beat', sceneCount: 1, content: '  \n', revision: 3, next: '调用 chapter_write 保存正文', avoid: '下一步调用 scene_task_build' },
-    { stage: 'write', sceneCount: 1, content: '已保存正文', revision: 4, next: '当前正文与本编译绑定写入版本', avoid: '终态已提交且匹配当前正文' },
-    { stage: 'write', sceneCount: 1, content: '已保存正文', revision: 3, next: '调用 chapter_bridge_commit', avoid: '终态已提交且匹配当前正文' },
-    { stage: 'commit', sceneCount: 1, content: '已保存正文', revision: 3, next: '终态已提交且匹配当前正文 revision/hash', avoid: '下一步调用 scene_task_build' },
-    { stage: 'commit', sceneCount: 1, content: '已保存正文', revision: 4, next: '不能宣称完成', avoid: '终态已提交且匹配当前正文' },
-    { stage: 'commit', sceneCount: 1, content: '同版本变更正文', revision: 3, next: '不能宣称完成', avoid: '终态已提交且匹配当前正文' },
-    { stage: 'commit', sceneCount: 1, content: '  ', revision: 3, next: '尚无合法非空正文', avoid: '终态已提交且匹配当前正文' },
-    { stage: 'write', sceneCount: 1, content: null, revision: 3, next: '尚无合法非空正文', avoid: '终态已提交且匹配当前正文' },
+    { stage: 'prepare', sceneCount: 0, content: null, revision: 3, next: '目标尚无非空正文', avoid: '不重复 PREPARE/BEAT' },
+    { stage: 'beat', sceneCount: 1, content: '  \n', revision: 3, next: '目标尚无非空正文', avoid: '下一步调用 scene_task_build' },
+    { stage: 'write', sceneCount: 1, content: '已保存正文', revision: 4, next: '已有非空正文', avoid: '终态已提交且匹配当前正文' },
+    { stage: 'write', sceneCount: 1, content: '已保存正文', revision: 3, next: '保存不等于报告通过', avoid: '终态已提交且匹配当前正文' },
+    { stage: 'commit', sceneCount: 1, content: '已保存正文', revision: 3, next: '与当前正文 revision/hash 匹配的提交', avoid: '下一步调用 scene_task_build' },
+    { stage: 'commit', sceneCount: 1, content: '已保存正文', revision: 4, next: '保存不等于报告通过', avoid: '终态已提交且匹配当前正文' },
+    { stage: 'commit', sceneCount: 1, content: '同版本变更正文', revision: 3, next: '保存不等于报告通过', avoid: '终态已提交且匹配当前正文' },
+    { stage: 'commit', sceneCount: 1, content: '  ', revision: 3, next: '目标尚无非空正文', avoid: '终态已提交且匹配当前正文' },
+    { stage: 'write', sceneCount: 1, content: null, revision: 3, next: '目标尚无非空正文', avoid: '终态已提交且匹配当前正文' },
   ])('derives recovery from actual $stage/$sceneCount scenes/body/revision without a persisted mutation', async scenario => {
     const chapterId = scenario.stage === 'prepare' ? null : 'own32'
     db.chapter.findFirst.mockResolvedValue(scenario.content === null ? null : { id: 'own32', revision: scenario.revision, content: scenario.content })
@@ -147,7 +148,7 @@ describe('story compiler task identity', () => {
     const digest = await buildStoryCompilerDigest('u', 'n', 'old31', 'new-run')
     expect(digest).toContain(scenario.next)
     expect(digest).not.toContain(scenario.avoid)
-    if (scenario.sceneCount > 0 && scenario.stage !== 'commit') expect(digest).toContain('不重复 PREPARE/BEAT')
+    expect(digest).not.toContain('工具会补齐必要检查')
     if (scenario.content !== null) expect(digest).toContain('缺失或旧版本报告不代表通过')
     expect(db.storyCompilation.create).not.toHaveBeenCalled()
     expect(db.storyCompilation.update).not.toHaveBeenCalled()
@@ -363,12 +364,12 @@ describe('story compiler task identity', () => {
     db.storyCharter.findFirst.mockResolvedValue({ revision: 1, oneLinePromise: '故事承诺' })
     const digest = await buildStoryCompilerDigest('u', 'n', null)
     expect(digest).toContain('故事承诺')
-    expect(digest).toContain('本任务尚未建立编译')
+    expect(digest).toContain('本任务没有编译记录')
     expect(db.storyCompilation.findFirst).not.toHaveBeenCalled()
     expect(db.agentRun.findFirst).not.toHaveBeenCalled()
   })
   it('states that the current task has no compiler even without charter or historical bridge', async () => {
-    expect(await buildStoryCompilerDigest('u', 'n', 'old31', 'new-run')).toContain('本任务尚未建立编译')
+    expect(await buildStoryCompilerDigest('u', 'n', 'old31', 'new-run')).toContain('本任务没有编译记录')
     expect(db.storyCompilation.create).not.toHaveBeenCalled()
     expect(await buildStoryCompilerDigest('u', 'n', null)).toBeNull()
   })
@@ -376,15 +377,17 @@ describe('story compiler task identity', () => {
 
 
 describe('tool target recovery stays within the original grant', () => {
-  it('rejects an unresolved prepare before target queries or compilation effects', async () => {
+  it('prepares the Agent-selected real target without a parser permission barrier', async () => {
     const current = await db.agentRun.findFirst({ where: { id: ctx.runId } })
     const unresolved = spec('单独写这章内容')
     unresolved.scope.writing = { ...unresolved.scope.writing, kind: 'needs_input', targets: [] } as never
     db.agentRun.findFirst.mockResolvedValue({ ...current, chapterId: null, startRequest: { prompt: '单独写这章内容' }, taskSpec: unresolved })
-    await expect(storyCompilerPrepareTool.execute(ctx, { targetOrderIndex: 1, intentSummary: '写本章' }))
-      .rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT', message: expect.stringContaining('ask_user只问一次') })
-    expect(db.chapter.findFirst).not.toHaveBeenCalled()
-    expect(db.storyCompilation.create).not.toHaveBeenCalled()
+    db.chapter.findFirst.mockImplementation(async ({ where }) => where.id === 'target1' || where.orderIndex === 1
+      ? { id: 'target1', title: '目标章', orderIndex: 1, revision: 1, content: '', volumeId: 'v' } : null)
+    const result = await storyCompilerPrepareTool.execute(ctx, { targetOrderIndex: 1, intentSummary: '写本章' })
+    expect(result.output).toContain('目标全书第 1 章')
+    expect(db.storyCompilation.create).toHaveBeenCalledOnce()
+    expect(db.agentRun.update).not.toHaveBeenCalled()
   })
   it.each([true, false])('returns the verified compiler binding only when it belongs to this task: owned=%s', async owned => {
     const current = await db.agentRun.findFirst({ where: { id: ctx.runId } })
@@ -421,9 +424,8 @@ it.each([false, true])('digest preserves recovery tools after a plan change, wit
     preparedContext: { planContext, terminalContentHash: runtimeJson({ content: '已保存正文' }).hash } })
   db.agentArtifact.findMany.mockResolvedValue([])
   const digest = await buildStoryCompilerDigest('u', 'n', null, 'new-run')
-  expect(digest).toContain('needs-review')
-  expect(digest).toContain('plan_read')
-  expect(digest).toContain('story_compiler_prepare')
+  expect(digest).toContain('旧编译不能认证新版')
+  expect(digest).toContain('普通正文工具仍可按原请求使用')
   expect(digest).not.toContain('终态已提交且匹配当前正文 revision/hash')
   expect(db.storyCompilation.update).not.toHaveBeenCalled()
   expect(db.storyCompilation.create).not.toHaveBeenCalled()
@@ -436,7 +438,9 @@ describe('same-task explicit tail-volume reprepare', () => {
     const task = spec('写下一章')
     Object.assign(task.scope.writing, { tailVolume: { version: 1, creationProtocol: 2, targetOrderIndex: 32, previousChapterId: 'old31', previousRevision: 3 } })
     const readRun = db.agentRun.findFirst.getMockImplementation()!
-    db.agentRun.findFirst.mockImplementation(async query => ({ ...await readRun(query), taskSpec: task }))
+    let writingBindings: unknown = null
+    db.agentRun.update.mockImplementation(async ({ data }) => { writingBindings = data.writingBindings; return { writingBindings } })
+    db.agentRun.findFirst.mockImplementation(async query => ({ ...await readRun(query), taskSpec: task, writingBindings }))
     const previous = { id: 'old31', title: '旧城', orderIndex: 31, revision: 3, content: proposal.boundary.quote, volumeId: 'old-volume', volume: { id: 'old-volume', title: '旧卷', summary: '旧困局' } }
     db.chapter.findFirst.mockImplementation(async ({ where }) => where.orderIndex === 32 ? null : previous)
     const compilations: Array<Record<string, unknown>> = []
@@ -476,3 +480,4 @@ describe('same-task explicit tail-volume reprepare', () => {
     expect(f.create).toHaveBeenCalledOnce()
   })
 })
+vi.mock('../../api/lib/agent/saved-chapter-work.js', () => ({ readCurrentSavedTaskChapters: vi.fn(async () => []) }))

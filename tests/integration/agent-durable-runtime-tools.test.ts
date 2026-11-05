@@ -1,3 +1,4 @@
+import { initializeExecutionState, saveExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
 import { createHash,randomUUID } from 'node:crypto'
 import { describe,expect,it,vi } from 'vitest'
 import { z } from 'zod'
@@ -9,7 +10,7 @@ import { markProviderDispatched,prepareProviderAttempt,recordProviderResult,reco
 import { reduceExecutionReceipt } from '../../api/lib/agent/runtime-reducer.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { preparePricedProviderOperation } from '../../api/lib/agent/runtime-settlement.js'
-import { initializeExecutionState,loadExecutionState,saveExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../../api/lib/agent/runtime-tool-cursor.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
@@ -32,7 +33,7 @@ describe.runIf(available)('saved-cursor tool dispatch', () => {
       let lease = await claim(f)
       const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
       const window = getCreditWindow()
-      await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, dailyUsedMilli: 0, bonusBalanceMilli: 0, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+      await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 10000, dailyUsedMilli: 0, bonusBalanceMilli: 0, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
       const initialized = await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
         model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
         tools: [], toolAuthority: [], protectedChapterIds: [], pinnedSkillVersions: [] }, snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0,

@@ -4,8 +4,8 @@ import { bindAgentWritingScope } from '../agent-writing-scope.js'
 import { defineTool } from './types.js'
 
 export const taskScopeBindTool = defineTool({
-  name: 'task_scope_bind', title: '确定正文任务',
-  description: '由你根据完整作者请求、当前章节和同聊天上下文理解本轮正文意图。准备新写、修改或检查章节前，读取需要的目录/正文，再用真实章节ID或全书序号提交本次目标；不要要求作者重复已经给出的目标。intent区分新写、修改、仅检查；local用于语义局部修改，先自行读取定位再精确片段编辑。preserveText是作者明确要求保留且在原文唯一存在的文字。requiredChecks记录作者或当前写作合同要求的连续性、人类感检查。数量与章节范围按作者真实要求填写，不能把自己的建议或引用内容当授权。系统只校验真实对象、模式、选区、版本和归属；不要求作者使用固定关键词。不涉及正文的讨论可直接回答，无需调用。相同绑定可恢复复用，已锁定目标不能扩展；不重新启动或重复写已完成章节。',
+  name: 'task_scope_bind', title: '记录正文计划',
+  description: '可选：记录你根据完整作者请求和已读上下文制定的正文计划，普通正文和结构工具不需要先调用本工具。intent区分写作、修订和检查；目标使用真实章节ID或全书序号。preserveText记录作者明确要求保留的原文，requiredChecks记录拟进行的检查。计划不是工具权限，不因未记录计划要求作者重复目标；直接按真实请求使用普通工具，真实选区、模式、归属和当前版本仍生效。相同记录可恢复复用，不以计划记录宣称正文已完成。',
   parameters: agentWritingScopeInputSchema,
   permission: { plan: 'deny', build: 'allow', review: 'deny' }, readOnly: false,
   async execute(ctx, args) {

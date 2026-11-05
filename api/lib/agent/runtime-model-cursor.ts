@@ -4,9 +4,22 @@ import { runtimeError, runtimeJson } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionStateInTransaction } from './runtime-state.js'
 import { preparePricedProviderOperationInTransaction } from './runtime-settlement.js'
+import { readEffectiveNativeTooling } from './native-tool-policy.js'
 
 export type ModelExecutionCursor = { expectedRevision: number; expectedHash: string }
 export type FrozenModelRoute = { weightedRoute?: import('../../../shared/contracts/model-weighted-routes.js').WeightedRouteSelection; provider: string; model: string; endpoint: string; reasoningEffort: string }
+
+function toolSubset(value: unknown, available: unknown) {
+  if (!Array.isArray(value) || !Array.isArray(available)) return false
+  const definitions = new Map(available.map(tool => [tool.function.name, runtimeJson(tool).hash]))
+  const names = new Set<string>()
+  return value.every(tool => {
+    const name = tool?.function?.name
+    if (typeof name !== 'string' || names.has(name) || definitions.get(name) !== runtimeJson(tool).hash) return false
+    names.add(name)
+    return true
+  })
+}
 
 /** No secret in this digest. The bootstrapper must freeze the same resolved route. */
 export function modelRouteRevision(route: FrozenModelRoute): string {
@@ -24,7 +37,9 @@ export async function validateModelCursor(token: RunLeaseToken, cursor: ModelExe
     const frame = await readExecutionFrame(tx, token.taskRootId, cursor.expectedRevision)
     if (frame.snapshotHash !== cursor.expectedHash || frame.state.phase !== 'idle' || frame.state.pendingOperationId
       || input.operationKey !== `exec:${frame.state.nextOperationSequence}` || input.parentOperationId) runtimeError('RUNTIME_STATE_CONFLICT', '主模型调用必须来自原空闲执行位置。')
-    const projected = await currentNativeToolViews(current.configuration.tools, taskSpecSchema.parse(current.originalSpec).scope)
+    const spec = taskSpecSchema.parse(current.originalSpec)
+    const effective = current.frame.state.phase === 'idle' ? await readEffectiveNativeTooling(tx, token, current.configuration, spec) : current.configuration
+    const projected = await currentNativeToolViews(effective.tools, spec.scope)
     let tools: unknown = projected
     let previousTools: unknown = previousImplicitStrictToolViews(current.configuration.tools, projected)
     if (current.frame.state.phase === 'awaiting_operation' && current.frame.state.pendingOperationId) {
@@ -41,8 +56,9 @@ export async function validateModelCursor(token: RunLeaseToken, cursor: ModelExe
       previousTools = undefined
     }
     const toolHash = runtimeJson(input.tools).hash
-    if (runtimeJson(input.messages).hash !== runtimeJson(frame.state.messages).hash || toolHash !== runtimeJson(tools).hash
-      && (previousTools === undefined || toolHash !== runtimeJson(previousTools).hash)) runtimeError('RUNTIME_IDENTITY_CONFLICT', '模型上下文或工具列表与冻结执行状态不同。')
+    const toolsMatch = previousTools === undefined ? toolHash === runtimeJson(tools).hash
+      : toolSubset(input.tools, tools) || toolSubset(input.tools, previousTools)
+    if (runtimeJson(input.messages).hash !== runtimeJson(frame.state.messages).hash || !toolsMatch) runtimeError('RUNTIME_IDENTITY_CONFLICT', '模型上下文或工具列表与实际权限或原请求不同。')
     const model = current.configuration.model
     if (model.tier !== input.tier || model.provider !== input.route.provider || model.modelName !== input.route.model
       || model.reasoningEffort !== input.route.reasoningEffort || model.routeRevision !== modelRouteRevision(input.route)) runtimeError('RUNTIME_IDENTITY_CONFLICT', '模型路由与冻结配置不同，不能静默切换供应商或模型。')

@@ -1,10 +1,10 @@
-import { assertWritingPlanContextCurrent, renderWritingPlanContext } from '../writing-plan-context.js'
+import { renderWritingPlanContext } from '../writing-plan-context.js'
 import { reviewContinuity } from '../continuity-review.js'
 import { readWritingContinuityReference, renderWritingContinuityReference } from '../writing-continuity-reference.js'
 import type { ToolResult } from './types.js'
 export { parseIndependentContinuityResult, continuityCriticSystem, continuityReviewTail, parseContinuityPatches, standaloneContinuityBindingHash } from '../continuity-history.js'
 import { retainedFindings } from './chapter-arguments.js'
-import { readChapterReviewReadiness, chapterReviewDecisionGuidance, type ChapterReviewReadiness } from '../chapter-review-guard.js'
+import { readChapterReviewReadiness, readAdvisoryChapterReviewReadiness, chapterReviewDecisionGuidance } from '../chapter-review-guard.js'
 import { runtimeJson } from '../runtime-common.js'
 import { persistedContentHash } from '../semantic-progress.js'
 import type { Prisma } from '@prisma/client'
@@ -202,7 +202,7 @@ export const storyCompilerPrepareTool = defineTool({
   name: 'story_compiler_prepare',
   title: '准备章节写作',
   description:
-    '章节写作及需要最终检查、提交章节桥的既有章修订所需 PREPARE 步骤：召回 Story Charter、待兑现承诺、前章终态、故事记忆和近期首尾结构，并建立可追踪 Chapter Bridge。条件局部修订先按已保存正文建立本次检查所需场景，不创造新情节或扩大写入范围。无需章节桥的独立选区润色、改标题、调整元数据时禁止调用。intentSummary只写一句短意图，不复制正文、长纲或历史。新章尚未创建时传目标全书序号，已有章传chapterId；原任务目标不明时先用ask_user一次问清，不猜章节、不生成长参数。',
+    '读取前章、计划、故事记忆和章节桥作为可选写作上下文。已有章传chapterId，新章可传全书targetOrderIndex；intentSummary用一句话说明当前意图。普通正文和结构工具可直接使用，不要求先准备或固定步骤。',
   parameters: z.object({
     chapterId: z.string().min(1).optional(),
     targetOrderIndex: z.number().int().min(1).optional(),
@@ -215,8 +215,6 @@ export const storyCompilerPrepareTool = defineTool({
   async execute(ctx, args) {
     const db = ctx.transaction ?? prisma
     const scope = await readWritingScope(db, ctx)
-    if (scope.writing?.kind === 'needs_input') throw new DataAccessError(409, 'SCOPE_NEEDS_INPUT',
-      '原任务尚未确认目标章节，本次未建立编译、未写正文。用ask_user只问一次要处理的具体章节，等待作者明确回答后沿原任务受理；不要猜targetOrderIndex、重发准备参数或重新创建任务。')
     if (args.chapterId && args.targetOrderIndex !== undefined) {
       const frozen = scope.writing?.kind === 'bounded' && scope.writing.targets.find(target => target.orderIndex === args.targetOrderIndex)
       const chapter = frozen ? await db.chapter.findFirst({ where: { id: args.chapterId, authorId: ctx.userId, ...activeChapterScope(ctx.novelId) },
@@ -239,7 +237,7 @@ export const storyCompilerPrepareTool = defineTool({
       runId: ctx.runId, targetOrderIndex: prepared.compilation.targetOrderIndex, phase: 'prepare' as const } : undefined
     const items = [
       renderWritingPlanContext(prepared.compilation.preparedContext),
-      `本章卷处理决定：${JSON.stringify((prepared.compilation.preparedContext as Record<string, unknown>).volumeDecision)}；当前卷与计划：${JSON.stringify((prepared.compilation.preparedContext as Record<string, unknown>).volumeContext)}。仅章数增加不能作为收束。若真实卷目标已完成，先重新PREPARE提交证据，先显式创建该新卷，再用返回的真实卷编号创建章节；没有权限或证据则延续当前卷。`,
+      `已记录的卷安排：${JSON.stringify((prepared.compilation.preparedContext as Record<string, unknown>).volumeDecision)}；卷上下文：${JSON.stringify((prepared.compilation.preparedContext as Record<string, unknown>).volumeContext)}。按作者要求和真实剧情决定后续工具。`,
       bridge.lastUnfinishedAction ? `未完成动作：${bridge.lastUnfinishedAction}` : '前章无明确未完成动作',
       bridge.location || bridge.storyTime ? `连续时空：${bridge.storyTime || '未标注'} · ${bridge.location || '未标注'}` : '时空状态待 Scene Task 明确',
       bridge.emotionAftermath.length ? `情绪余波：${bridge.emotionAftermath.join('；')}` : '情绪余波待 Scene Task 明确',
@@ -247,7 +245,7 @@ export const storyCompilerPrepareTool = defineTool({
       bridge.openLoops.length ? `开放钩子：${bridge.openLoops.slice(0, 4).join('；')}` : '无已记录开放钩子',
     ]
     return {
-      output: `PREPARE 完成，compilationId=${prepared.compilation.id}，chapterId=${prepared.compilation.chapterId ?? '尚未创建（写入后取真实编号）'}，目标全书第 ${prepared.compilation.targetOrderIndex} 章。章节编号与编译编号不可混用。${prepared.charter ? `已加载 Story Charter r${prepared.charter.revision}` : '当前无 Story Charter，旧作可继续，但新书长纲应先建立。'}下一步只调用一次 scene_task_build 生成 1–4 个 Scene Task，禁止直接跳到正文；精品候选取舍由服务端记录，不需要手工补 alternatives。\n${items.join('\n')}\n${renderWritingContinuityReference(prepared.continuityReference) ?? ''}`,
+      output: `上下文已准备，compilationId=${prepared.compilation.id}，chapterId=${prepared.compilation.chapterId ?? '尚未创建'}，目标全书第 ${prepared.compilation.targetOrderIndex} 章。根据原请求选择写入、场景记录或检查，不要求固定顺序。\n${items.join('\n')}\n${renderWritingContinuityReference(prepared.continuityReference) ?? ''}`,
       summary: `准备第 ${prepared.compilation.targetOrderIndex} 章写作`,
       ...(workflowMilestone ? { workflowMilestone } : {}),
       display: {
@@ -262,7 +260,7 @@ export const sceneTaskBuildTool = defineTool({
   name: 'scene_task_build',
   title: '构建场景任务',
   description:
-    'Story Compiler 的 BEAT 步骤。一次提交本章完整的 1–4 个场景，不是正文。先遵从完整原请求的类型、情绪承诺、身份、剧情、篇幅与精确停笔位置；不能为场景模板扩写成交或打脸。cost 记录已设定代价或实际后果，可写无额外损失或本次收益，不强加能力惩罚；low rhetoric 控制修饰密度，不压低情绪。每个 purpose/goal/obstacle/choice/cost/turn 用一句短句（建议 60 字内）；entryState/exitState 只填本场景变化的字段，每个状态列表建议最多 3 项，勿复制人物档案。省略未变化状态、styleBudget、alternatives 和 compilationId 可显著缩短参数，服务端解析当前编译并补齐流程元数据。顶层直接传 tasks 数组，禁止套 arguments 信封或为了补元数据重复调用。先构造一个完整 JSON 对象，勿把 tasks 数组编码为字符串或混入正文；将下例短句替换为本章真实场景。最小原生参数示例：{"tasks":[{"purpose":"概述本场景作用","goal":"人物当前目标","obstacle":"本场景阻力","choice":"人物本场景选择","cost":"已设定代价或本次实际结果","turn":"本场景状态变化"}]}',
+    '保存或更新本章场景记录，用于辅助写作；场景数量和使用顺序由Agent按原请求决定。状态字段只填变化，省略未变化字段。cost记录实际后果，不额外强加损失。最小原生参数示例：{"tasks":[{"purpose":"概述本场景作用","goal":"人物当前目标","obstacle":"本场景阻力","choice":"人物本场景选择","cost":"已设定代价或本次实际结果","turn":"本场景状态变化"}]}',
   parameters: z.object({
     compilationId: z.string().min(1).optional(),
     tasks: z.array(sceneTaskInputSchema.extend({
@@ -270,7 +268,7 @@ export const sceneTaskBuildTool = defineTool({
       exitState: sceneTaskInputSchema.shape.exitState.prefault({}),
       styleBudget: sceneTaskInputSchema.shape.styleBudget.default({ description: 'low', dialogue: 'medium', rhetoric: 'low' }),
     }), { error: issue => typeof issue.input === 'string'
-      ? 'tasks 内层 JSON 不是有效数组；请改用原生 tasks 数组原样提交完整 1–4 个场景，不补闭合符或缺失业务内容。' : undefined }).min(1).max(4),
+      ? 'tasks 内层 JSON 不是有效数组；请改用原生 tasks 数组原样提交完整场景，不补闭合符或缺失业务内容。' : undefined }).min(1),
     alternatives: z.array(z.object({
       label: z.string().min(1).max(120).default('备选推进'),
       tradeoff: z.string().min(1).max(500).default('与当前 Scene Task 链相比的节奏和冲突取舍。'),
@@ -395,19 +393,12 @@ export const sceneTaskBuildTool = defineTool({
     })
     const compilation = candidates[0]
     if (!compilation) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND', output: `未找到本任务指定的活跃 compilationId，章节编号与编译编号不可混用。${await missingCompilationGuidance(db, ctx, scope)}`, summary: '未找到场景编译状态' }
-    if (!['prepare', 'beat'].includes(compilation.stage) && compilation.sceneTasks.length > 0) {
-      return {
-        output: `compilationId=${compilation.id} 已建立 ${compilation.sceneTasks.length} 个 Scene Task 并进入 ${compilation.stage} 阶段，无需重复构建。`,
-        summary: `复用 ${compilation.sceneTasks.length} 个场景任务`,
-        display: { kind: 'storyCompiler', compilationId: compilation.id, phase: compilation.stage, title: '场景任务已建立', detail: `${compilation.sceneTasks.length} 个场景`, items: compilation.sceneTasks.map((task) => `${task.ordinal}. ${task.purpose}｜转折：${task.turn}`) },
-      }
-    }
     const saved = await saveSceneTasksWithMilestone({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id, tasks: args.tasks, alternatives: args.alternatives }, ctx.transaction)
     const { tasks } = saved
     return {
       ...(saved.scenesFirstForTarget ? { workflowMilestone: { version: 1 as const, userId: ctx.userId, novelId: ctx.novelId,
         runId: ctx.runId, targetOrderIndex: saved.targetOrderIndex, phase: 'scenes' as const } } : {}),
-      output: `BEAT 完成，已为 compilationId=${compilation.id} 建立 ${tasks.length} 个 Scene Task；精品候选取舍已由服务端记录。现在按顺序完成连贯正文，再提交章节终态。写作交付按原始作者请求完成当前版本连续性与质量检查，仅原始请求可明确跳过。相关安全事实与质量修法优先合并为 chapter_edit_range patches（每次最多8处），也可连续单片段替换或 chapter_write，不硬性限制为一次调用或要求每次覆盖全部候选。每次依据当前正文精确定位，不把报告当作额外权限；全部修改后只读复核最终版本两类检查，最后提交终态。不能安全落实的意见保留，可用 retainedFindings 绑定当前报告并说明原因；留置不冒充修复，不为清零意见循环改稿。付费检查、自动修订和未知调用保持既有保护。`,
+      output: `已为 compilationId=${compilation.id} 保存 ${tasks.length} 个场景任务。根据原请求继续写作、修改或检查。正文保存与报告通过分别说明，不自动追加检查。`,
       summary: `建立 ${tasks.length} 个场景任务`,
       display: {
         kind: 'storyCompiler', compilationId: compilation.id, phase: 'beat', title: '场景任务',
@@ -432,17 +423,22 @@ export const chapterBridgeGetTool = defineTool({
       include: { bridge: true, sceneTasks: { orderBy: { ordinal: 'asc' } }, chapter: true } })
     if (!compilation && !args.compilationId) return { output: `当前任务尚未建立章节桥。${await missingCompilationGuidance(db, ctx, scope)}`, summary: '本任务尚未建立章节桥' }
     if (!compilation?.bridge) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND', output: '没有当前作者任务可读取的章节桥。', summary: '未找到章节编译状态' }
-    await assertWritingPlanContextCurrent(db, { userId: ctx.userId, novelId: ctx.novelId }, compilation.preparedContext)
     const continuityReference = await readWritingContinuityReference(db, ctx, compilation.targetOrderIndex)
-    const review = await readChapterReviewReadiness(db, ctx, compilation.id)
+    let review: Awaited<ReturnType<typeof readChapterReviewReadiness>> = null
+    let planStale = false
+    try { review = await readChapterReviewReadiness(db, ctx, compilation.id) } catch (error) {
+      if (!(error instanceof DataAccessError) || error.code !== 'PLAN_CONTEXT_STALE') throw error
+      planStale = true
+    }
     const retained = review?.retainedDecisions ?? []
     const items = [`第 ${compilation.targetOrderIndex} 章；${review?.terminalCommitted ? '当前正文已提交' : '当前正文尚未提交'}`,
-      `连续性报告：${review?.continuity ?? 'missing'}；人类感质量报告：${review?.quality ?? 'missing'}；提纲一致性：${review?.planAlignment ?? '未绑定提纲'}`,
+      `连续性报告：${planStale ? '待核（冻结计划已变化）' : review?.continuity ?? 'missing'}；人类感质量报告：${planStale ? '待核（冻结计划已变化）' : review?.quality ?? 'missing'}；提纲一致性：${planStale ? 'stale' : review?.planAlignment ?? '未绑定提纲'}`,
       `剩余意见 ${review?.decisionEntries?.length ?? 0} 条，已明确保留 ${retained.length} 条。保留意见不等于已修复。`]
     return { summary: `读取第 ${compilation.targetOrderIndex} 章章节桥`,
       ...(review?.decisionFeedback ? { reviewDecisionFeedback: review.decisionFeedback } : {}),
       output: `compilationId=${compilation.id}；chapterId=${compilation.chapterId ?? '尚未创建'}；revision=${compilation.chapter?.revision ?? '无正文'}\n${items.join('\n')}
 ${renderWritingPlanContext(compilation.preparedContext)}
+${planStale ? '冻结计划已变化，以下保留原始历史报告，不能认证当前正文：' + JSON.stringify(compilation.validation) : ''}
 原章节桥保存的前章来源：${JSON.stringify({ chapterId: compilation.bridge.fromChapterId, revision: compilation.bridge.sourceRevision })}
 ${renderWritingContinuityReference(continuityReference) ?? ''}
 场景任务：${JSON.stringify(compilation.sceneTasks.map(task => ({ ordinal: task.ordinal, purpose: task.purpose, goal: task.goal, obstacle: task.obstacle, cost: task.cost, turn: task.turn })))}
@@ -473,53 +469,22 @@ export const continuityValidateTool = defineTool({
   },
 })
 
-export async function prepareChapterCommitReviews(ctx: ToolContext, args: { compilationId?: string }): Promise<ToolResult | undefined> {
-  const scope = await compilationRunScope(prisma, ctx)
-  const compilation = await prisma.storyCompilation.findFirst({ where: { userId: ctx.userId, novelId: ctx.novelId, ...scope,
-    ...(args.compilationId ? { id: args.compilationId } : {}), status: { in: ['active', 'completed'] } },
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], include: { chapter: true, bridge: true } })
-  if (!compilation?.chapter || !compilation.bridge) throw new DataAccessError(404, 'COMPILATION_NOT_FOUND', '没有本任务可提交的已保存章节。')
-  if (compilation.status === 'active' && await prisma.storyCompilation.findFirst({ where: { userId: ctx.userId, novelId: ctx.novelId, ...scope,
-    chapterId: compilation.chapterId, createdAt: { gt: compilation.createdAt } }, select: { id: true } }))
-    return { outcome: 'failed', failureCode: 'COMPILATION_STAGE_CONFLICT', summary: '章节编译已被后续准备替代',
-      output: '该章已有本任务后续准备的编译。旧编译及其报告保留，请读取当前任务章节桥；本次未追加检查或提交。' }
-    const attempted = new Set<string>(), changed = new Set<string>()
-    for (;;) {
-      const readiness: ChapterReviewReadiness | null = await readChapterReviewReadiness(prisma, ctx, compilation.id)
-      if (!readiness) throw new DataAccessError(409, 'CONTINUITY_CHECK_REQUIRED', '当前正文与检查状态无法确认。')
-      const required = [...readiness.requiredTools].sort((a,b) => Number(b.name === 'quality_analyze') - Number(a.name === 'quality_analyze'))
-      if (!required.length) break
-      const unavailable = ctx.toolAuthority && required.find(tool => !ctx.toolAuthority!.has(tool.name) || ctx.toolAuthority!.get(tool.name)!.permission === 'deny')
-      if (unavailable) return { outcome: 'failed', failureCode: unavailable.name === 'quality_analyze' ? 'QUALITY_CHECK_REQUIRED' : 'CONTINUITY_CHECK_REQUIRED',
-        summary: '当前任务缺少必要检查工具', output: `当前任务未提供可执行的 ${unavailable.name}。正文与已有报告已保留，章节尚未提交。` }
-      if (!ctx.registeredReview) return { outcome: 'failed' as const,
-        failureCode: readiness.requiredTools[0]!.name === 'quality_analyze' ? 'QUALITY_CHECK_REQUIRED' : 'CONTINUITY_CHECK_REQUIRED',
-        summary: '章节尚未提交', output: `当前正文仍缺少 ${readiness.requiredTools.map(tool => tool.name === 'quality_analyze' ? '人类感质量检查' : '连续性检查').join('、')}报告，已保存内容保留。` }
-      const next = required[0], key = readiness.revision + ':' + next.name
-      if (attempted.has(key)) return { outcome: 'failed' as const, failureCode: 'CONTINUITY_REPORT_INCOMPLETE',
-        summary: '章节尚未提交', output: '当前检查报告尚未完成，正文与原报告已保留。' }
-      attempted.add(key)
-      const reviewed = await ctx.registeredReview(next.name, next.args, changed.has(next.name) ? { readOnly: true } : undefined)
-      if (reviewed.outcome === 'failed') return { ...reviewed, output: reviewed.output + '\n本次未提交。' }
-      const current = await prisma.chapter.findUniqueOrThrow({ where: { id: compilation.chapter.id } })
-      if (current.revision !== readiness.revision) changed.add(next.name)
-    }
-
-}
-
 export const chapterBridgeCommitTool = defineTool({
   name: 'chapter_bridge_commit', title: '提交章节',
-  description: '提交本任务当前章节。补齐作者要求的连续性与人类感质量检查；有授权时局部改稿并复查最终版，再原子提交。仍有意见时须如实处理或明确说明保留理由。',
+  description: '提交本任务当前已保存的章节版本。检查工具可根据作者请求独立调用；报告缺失、不完整或含建议不会阻止保存和提交，报告状态仍须如实说明，不能把提交称为检查通过。',
   parameters: z.object({ compilationId: z.string().min(1).optional(), chapterSummary: z.string().max(2000).optional(), retainedFindings }).passthrough(),
   permission: { plan: 'deny', build: 'allow', review: 'deny' } as const, readOnly: false,
   async execute(ctx, args): Promise<ToolResult> {
-    if (!ctx.transaction) { const failed = await prepareChapterCommitReviews(ctx, args); if (failed) return failed }
     const db = ctx.transaction ?? prisma
     const scope = await compilationRunScope(db, ctx)
     let compilation = await db.storyCompilation.findFirst({ where: { userId: ctx.userId, novelId: ctx.novelId, ...scope,
       ...(args.compilationId ? { id: args.compilationId } : {}), status: { in: ['active', 'completed'] } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], include: { chapter: true, bridge: true } })
     if (!compilation?.chapter || !compilation.bridge) throw new DataAccessError(404, 'COMPILATION_NOT_FOUND', '没有本任务可提交的已保存章节。')
+    if (compilation.status === 'active' && await db.storyCompilation.findFirst({ where: { userId: ctx.userId, novelId: ctx.novelId, ...scope,
+      chapterId: compilation.chapterId, createdAt: { gt: compilation.createdAt } }, select: { id: true } }))
+      return { outcome: 'failed', failureCode: 'COMPILATION_STAGE_CONFLICT', summary: '章节编译已被后续准备替代',
+        output: '该章已有本任务后续准备的编译，请读取当前章节桥；本次未覆盖新编译或重复提交。' }
     compilation = await db.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id }, include: { chapter: true, bridge: true } })
     const chapter = compilation.chapter!
     let result: Awaited<ReturnType<typeof commitChapterBridge>>
@@ -531,9 +496,9 @@ export const chapterBridgeCommitTool = defineTool({
       const current = await readChapterReviewReadiness(db, ctx, compilation.id)
       return { outcome: 'failed', failureCode: error.code, summary: error.code === 'COMPILATION_STAGE_CONFLICT' ? '章节编译已被后续准备替代' : '章节尚未提交', output: `${error.message}\n${current ? chapterReviewDecisionGuidance(current) : ''}\n当前真实意见：${JSON.stringify(current?.decisionDetails ?? [])}\n需明确处置：${JSON.stringify(current?.requiredDecisions ?? [])}\n保留原文时请引用这些当前 source/reportId/findingId 并说明具体理由；真实硬通过要求不能以保留代替。` }
     }
-    const final = await readChapterReviewReadiness(db, ctx, result.compilationId)
+    const final = await readAdvisoryChapterReviewReadiness(db, ctx, result.compilationId)
     const remaining = final?.decisionEntries?.length ?? 0, retainedCount = final?.retainedDecisions?.length ?? 0
-    return { output: `当前正文及所需检查已保存，章节已提交。连续性报告：${final?.continuity}；人类感质量报告：${final?.quality}。${remaining ? `当前仍有 ${remaining} 条报告意见，其中 ${retainedCount} 条已明确保留；保留不代表已修复。` : '当前完整报告没有剩余意见。'}`, summary: '章节已提交',
+    return { output: `当前正文已保存，章节已提交。连续性报告：${final?.continuity ?? '未核验'}；人类感质量报告：${final?.quality ?? '未核验'}。${remaining ? `当前仍有 ${remaining} 条报告意见，其中 ${retainedCount} 条已明确保留；保留不代表已修复。` : '提交不表示检查已完成或通过；检查结论以实际报告为准。'}`, summary: '章节已提交',
       semanticTransition: { targetId: result.compilationId, beforeHash: runtimeJson({ committed: false }).hash, afterHash: runtimeJson(result).hash },
       display: { kind: 'storyCompiler', compilationId: result.compilationId, phase: 'commit', title: '章节已提交', detail: 'r' + result.chapterRevision, items: [`保留意见 ${retainedCount} 条`] } }
   },

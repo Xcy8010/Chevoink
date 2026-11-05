@@ -1,8 +1,8 @@
 import { PLAN_FAILURE_CODES } from '../novel-plan-contract.js'
 import { z } from 'zod'
+import { withRunLease } from '../runtime-lease.js'
 import { DataAccessError } from '../../prisma.js'
 import { runtimeError, runtimeJson } from '../runtime-common.js'
-import { withRunLease, type RunLeaseToken } from '../runtime-lease.js'
 import { compilerStateHash, compilerObservationSchema } from '../runtime-compiler-observation.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { readAdmittedReviewWork } from '../runtime-writing-service.js'
@@ -19,77 +19,6 @@ const failures = new Set<string>([...PLAN_FAILURE_CODES, 'TOOL_COMPILER_REQUIRED
   'SCENE_TASK_COUNT_INVALID', 'NOVEL_NOT_FOUND', 'CHAPTER_NOT_FOUND', 'TARGET_CHAPTER_GAP', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT',
   'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST', 'CONTINUITY_INPUT_STALE', 'CONTINUITY_CHECK_REQUIRED', 'CONTINUITY_REPORT_INCOMPLETE', 'CONTINUITY_ERRORS_REMAIN', 'QUALITY_CHECK_REQUIRED', 'REVIEW_DECISION_REQUIRED'])
 
-const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
-
-function registeredCommitReviews(ctx: ToolContext, lease: RunLeaseToken, parent: Awaited<ReturnType<typeof readAdmittedReviewWork>>): NonNullable<ToolContext['registeredReview']> {
-  return async (name, args, options) => {
-    const services = await import('../runtime-writing-service.js')
-    const state = await withRunLease(lease, async tx => {
-      const hash = await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, args.compilationId)
-      if (!hash) return runtimeError('COMPILATION_NOT_FOUND', '没有当前任务可检查的章节。')
-      const chapterId = (await tx.storyCompilation.findUniqueOrThrow({ where: { id: args.compilationId }, select: { chapterId: true } })).chapterId!
-      const requestSource = await import('../original-request.js'), original = await requestSource.readOriginalTaskRequest(tx, ctx)
-      const runIds = await requestSource.originalTaskRunIds(tx, ctx, original)
-      // Reconcile before a real review dispatch, including when the body became
-      // stale after the commit's first readiness read. Local delivery needs no call.
-      if (!(await (await import('../continuity-review.js')).readContinuityRequestBilling(tx, ctx, { runIds, chapter: { id: chapterId } }, null)).known)
-        return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原请求用量或费用尚未确认，未追加检查。')
-      const children = await tx.agentOperation.findMany({ where: { taskRootId: lease.taskRootId, parentOperationId: parent.operation.id, kind: 'internal' },
-        include: { effectReceipt: true }, orderBy: { createdAt: 'asc' } })
-      for (const child of children) if (runtimeJson(child.inputSnapshot).hash !== child.inputHash
-        || child.effectReceipt && runtimeJson(child.effectReceipt.result).hash !== child.effectReceipt.resultHash)
-        return runtimeError('RUNTIME_RECEIPT_INVALID', '原检查操作或回执损坏，未追加请求。')
-      const same = children.filter(child => child.action === name)
-      const repaired = same.some(child => { const progress = object(object(child.effectReceipt?.result).progress)
-        return child.status === 'succeeded' && progress.kind === 'content_revision' && progress.beforeHash !== progress.afterHash })
-      const readOnly = options?.readOnly || repaired
-      const step = name === 'quality_analyze' ? readOnly ? 'quality_verify' as const : 'quality' as const
-        : readOnly ? 'continuity_verify' as const : 'continuity' as const
-      const contextHash = name === 'continuity_validate' ? (await (await import('../continuity-review.js')).buildContinuitySnapshot(ctx, args, tx)).contextHash
-        : runtimeJson(JSON.parse(JSON.stringify(await (await import('../humanity-quality.js')).buildHumanityQualityContext(ctx.userId, ctx.novelId,
-          chapterId, ctx.runId, tx)))).hash
-      const key = services.writingServiceOperationKey(parent.operation.id, step, contextHash)
-      const existing = children.find(child => child.operationKey === key)
-      const source = [...children].reverse().find(child => child.status === 'succeeded' && child.effectReceipt && object(object(child.effectReceipt.result).toolResult).outcome !== 'failed')
-      const role = same.map(child => object(object(child.inputSnapshot).input).work).map(object).find(work => work.route && work.price)
-      return { baseline: { id: args.compilationId, hash }, readOnly, step, key, contextHash, existing,
-        source: source?.effectReceipt ? { operationId: source.id, resultHash: source.effectReceipt.resultHash } : null,
-        frozenReview: role ? { route: (await import('../runtime-auxiliary-call.js')).auxiliaryRouteSchema.parse(role.route),
-          price: (await import('../../billing/token-price.js')).tokenPriceSchema.parse(role.price) } : undefined }
-    })
-    let admitted: Awaited<ReturnType<typeof services.prepareWritingServiceStep>>
-    if (state.existing) {
-      const saved = z.object({ input: z.record(z.string(), z.unknown()) }).parse(state.existing.inputSnapshot).input
-      admitted = await services.prepareWritingServiceStep(lease, saved)
-    } else {
-      const reviewContext = state.readOnly ? { ...ctx, sandboxMode: 'read_only' as const } : ctx
-      const work = name === 'continuity_validate'
-        ? await (await import('./durable-continuity.js')).prepareContinuityWork(reviewContext, lease, { operationKey: state.key,
-          observedRevision: parent.input.normalization.sourceRevision, baseline: state.baseline, args, ...(state.frozenReview ? { frozenReview: state.frozenReview } : {}) })
-        : await (await import('./durable-quality.js')).prepareQualityWork(reviewContext, lease, { operationKey: state.key,
-          observedRevision: parent.input.normalization.sourceRevision, baseline: state.baseline, args, ...(state.readOnly ? { serviceReadOnly: true } : {}),
-          ...(state.frozenReview ? { frozenReview: state.frozenReview } : {}) })
-      const frozen = object(work)
-      if (frozen.kind === 'rejected') return { outcome: 'failed', failureCode: String(frozen.code), summary: '检查未完成', output: String(frozen.message) }
-      if (frozen.contextHash !== state.contextHash) return runtimeError('CONTINUITY_INPUT_STALE', '正文或检查来源已变化，未发送旧请求。')
-      const manifest = await withRunLease(lease, tx => services.requiredCommitReviewManifest(tx, ctx, args.compilationId))
-      admitted = await services.prepareWritingServiceStep(lease, { novelId: ctx.novelId, callId: ctx.callId, args, baseline: state.baseline, work,
-        serviceAdmission: { version: 1, parentOperationId: parent.operation.id, parentInputHash: parent.operation.inputHash,
-          sourceRevision: parent.input.normalization.sourceRevision, sourceSnapshotHash: parent.input.normalization.sourceSnapshotHash,
-          step: state.step, chapterId: manifest.chapterId, source: state.source } })
-    }
-    const reviewContext = state.readOnly ? { ...ctx, sandboxMode: 'read_only' as const } : ctx
-    const receipt = name === 'continuity_validate'
-      ? await (await import('./durable-continuity.js')).executePreparedContinuityWork(reviewContext, lease, admitted.id)
-      : await (await import('./durable-quality.js')).executePreparedQualityWork(reviewContext, lease, admitted.id)
-    const failure = failedToolResultSchema.safeParse(receipt.result)
-    return failure.success ? { ...failure.data.toolResult, outcome: 'failed', failureCode: failure.data.code }
-      : z.object({ toolResult: z.custom<ToolResult>() }).parse(receipt.result).toolResult
-  }
-}
-
-/** These tools are DB-only. Model critics/repairs must use separately
- * receipted provider operations, never this retryable transaction adapter. */
 export async function executeDurableCompiler(ctx: ToolContext, tool: AgentTool, raw: unknown): Promise<ToolResult> {
   const capability = ctx.durableCompiler && { ...ctx.durableCompiler, lease: { ...ctx.durableCompiler.lease },
     cursor: { ...ctx.durableCompiler.cursor }, baseline: ctx.durableCompiler.baseline && { ...ctx.durableCompiler.baseline } }
@@ -121,27 +50,19 @@ export async function executePreparedCompilerWork(ctx: ToolContext, lease: impor
   const { args, baseline } = z.object({ args: z.record(z.string(), z.unknown()), baseline: compilerObservationSchema.nullable() }).parse(input)
   const capability = { lease, operationKey: operation.operationKey, baseline,
     cursor: { expectedRevision: input.normalization.sourceRevision, expectedHash: input.normalization.sourceSnapshotHash } }
-  if (tool.name === 'chapter_bridge_commit' && !await withRunLease(lease, tx => tx.agentEffectReceipt.findUnique({ where: { operationId: operation.id } }))) {
-    let unavailableCode = 'CONTINUITY_CHECK_REQUIRED'
-    try { await withRunLease(lease, async tx => {
-      const services = await import('../runtime-writing-service.js')
-      await services.requiredCommitReviewManifest(tx, ctx, typeof args.compilationId === 'string' ? args.compilationId : undefined)
-      const readiness = await (await import('../chapter-review-guard.js')).readChapterReviewReadiness(tx, ctx,
-        typeof args.compilationId === 'string' ? args.compilationId : undefined)
-      if (readiness?.requiredTools.some(tool => tool.name === 'quality_analyze')) unavailableCode = 'QUALITY_CHECK_REQUIRED'
-      await services.readWritingServiceConfirmations(tx, lease, readiness?.requiredTools.map(tool => tool.name) ?? [])
-    }) } catch (error) {
-      if (!(error instanceof DataAccessError) || error.code !== 'RUNTIME_EFFECT_NOT_AUTHORIZED') throw error
-      return recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code: unavailableCode,
-        output: `${error.message}当前必要检查未取得，正文已保留，章节尚未提交。`, summary: '当前任务缺少必要检查工具' })
+  if (tool.name === 'chapter_bridge_commit' && !await withRunLease(lease, tx => tx.agentEffectReceipt.findUnique({ where: { operationId } }))) {
+    // Old commits may already own a dispatched check. Recover only those real
+    // rows with their original work/route/price; never synthesize new checks.
+    const pending = await withRunLease(lease, tx => tx.agentOperation.findMany({ where: { taskRootId: lease.taskRootId,
+      parentOperationId: operation.id, kind: 'internal', status: 'prepared' }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }))
+    for (const child of pending) {
+      if (runtimeJson(child.inputSnapshot).hash !== child.inputHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原提交内部操作输入损坏。')
+      if (child.action === 'continuity_validate') await (await import('./durable-continuity.js')).executePreparedContinuityWork(ctx, lease, child.id)
+      else if (child.action === 'quality_analyze') await (await import('./durable-quality.js')).executePreparedQualityWork(ctx, lease, child.id)
+      else return runtimeError('RUNTIME_RECEIPT_INVALID', '原提交内部操作类型不匹配。')
     }
-    const failed = await (await import('./story-compiler-tools.js')).prepareChapterCommitReviews({ ...ctx,
-      registeredReview: registeredCommitReviews(ctx, lease, { operation, input }) }, args)
-    if (failed) {
-      if (failed.reviewOutcome === 'provider_unresolved') return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原检查用量或费用尚未确认，章节未提交。')
-      return recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code: failed.failureCode ?? 'CONTINUITY_REPORT_INCOMPLETE',
-        output: failed.output, summary: failed.summary ?? '章节尚未提交' })
-    }
+    if (await withRunLease(lease, tx => tx.agentOperation.count({ where: { taskRootId: lease.taskRootId, parentOperationId: operation.id,
+      kind: 'internal', status: 'prepared' } }))) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原提交内部请求尚未结清，保留原操作待核，未提前完成父提交。')
   }
   const receipt = await commitOperationEffect(lease, operation.id, operation.inputHash, async tx => {
     ctx.signal.throwIfAborted()

@@ -7,7 +7,7 @@ import { readExecutionFrame } from './runtime-state.js'
 import { toOpenAIToolPresentation } from './tool-schema.js'
 
 export type NativeToolView = { type: 'function'; function: { name: string; strict?: boolean; description: string; parameters: Record<string, unknown> } }
-const simplified = new Set(['chapter_write', 'chapter_append', 'chapter_edit_range', 'continuity_validate', 'chapter_bridge_commit'])
+const simplified = new Set(['chapter_write', 'chapter_append', 'chapter_edit_range', 'continuity_validate', 'chapter_bridge_commit', 'scene_task_build'])
 const retiredFields: Record<string, readonly string[]> = {
   chapter_write: ['writing'], chapter_append: ['writing'], chapter_edit_range: ['writing'],
   continuity_validate: ['terminalState', 'inheritedProofs', 'terminalPatch'],
@@ -36,7 +36,18 @@ export function projectNativeToolViews(frozen: readonly NativeToolView[], curren
     const tool = byName.get(definition.function.name)
     if (!tool || !simplified.has(tool.name)) return definition
     const next = toOpenAIToolPresentation(tool, scope), original = definition.function.parameters
-    const old = properties(original), present = properties(next.parameters), removed = new Set(retiredFields[tool.name])
+    const old = properties(original), present = properties(next.parameters)
+    if (tool.name === 'scene_task_build') {
+      const oldTasks = object(old.tasks), currentTasks = object(present.tasks)
+      // Only the exact former built-in four-scene cap is retired. Custom
+      // item contracts and tighter bounds remain part of the source view.
+      if (runtimeJson(oldTasks).hash === runtimeJson({ ...currentTasks, maxItems: 4 }).hash) {
+        return { ...definition, function: { ...definition.function, description: next.description,
+          parameters: { ...original, properties: { ...old, tasks: currentTasks } } } }
+      }
+      return definition
+    }
+    const removed = new Set(retiredFields[tool.name])
     const custom = Object.fromEntries(Object.entries(old).filter(([key]) => !(key in present) && !removed.has(key)))
     const fields = Object.fromEntries(Object.entries(present).map(([key, value]) => {
       const retiredPlatformLimit = key === 'retainedFindings' && old[key] && runtimeJson(old[key]).hash === runtimeJson(retiredRetentionField).hash
@@ -80,8 +91,9 @@ export async function currentNativeToolViews(frozen: readonly NativeToolView[], 
 /** The exact previous Chat presentation: only this release's newly explicit
  * non-strict default is removed. Original explicit choices stay significant. */
 export function previousImplicitStrictToolViews(frozen: readonly NativeToolView[], current: readonly NativeToolView[]): NativeToolView[] {
-  return current.map((definition, index) => {
-    if (frozen[index].function.strict !== undefined || definition.function.strict !== false) return definition
+  return current.map(definition => {
+    const original = frozen.find(item => item.function.name === definition.function.name)
+    if (!original || original.function.strict !== undefined || definition.function.strict !== false) return definition
     const { strict: _strict, ...fn } = definition.function
     return { ...definition, function: fn }
   })
@@ -151,22 +163,9 @@ export async function readAssistantToolViews(tx: RuntimeTx, taskRootId: string, 
   return runtimeError('RUNTIME_SOURCE_REQUIRED', '没有产生当前助手调用的模型请求。')
 }
 
-/** The source view must be an exact authenticated historical/current view;
- * provider evidence cannot add tool authority. */
+/** The authenticated actual request owns the schema. Execution permission is
+ * checked separately against real role/session/delegation grants. */
 export async function verifiedAssistantToolViews(tx: RuntimeTx, taskRootId: string, frame: Awaited<ReturnType<typeof readExecutionFrame>>,
-  frozen: readonly NativeToolView[], scope: TaskSpec['scope']): Promise<NativeToolView[]> {
-  const source = await readAssistantToolViews(tx, taskRootId, frame)
-  const hash = runtimeJson(source).hash
-  if (hash === runtimeJson(frozen).hash) return source
-  const current = await currentNativeToolViews(frozen, scope)
-  if (hash === runtimeJson(current).hash) return source
-  // Previous releases projected the same built-in fields but left Chat's
-  // non-strict default implicit. Authenticate that exact view as well when
-  // consuming an already paid assistant result. Never strip an explicit
-  // original strict choice or normalize any source request in place.
-  const previous = previousImplicitStrictToolViews(frozen, current)
-  if (hash !== runtimeJson(previous).hash) {
-    return runtimeError('RUNTIME_IDENTITY_CONFLICT', '实际模型工具视图不属于原配置或当前投影。')
-  }
-  return source
+  _frozen: readonly NativeToolView[], _scope: TaskSpec['scope']): Promise<NativeToolView[]> {
+  return readAssistantToolViews(tx, taskRootId, frame)
 }

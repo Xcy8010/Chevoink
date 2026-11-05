@@ -64,8 +64,6 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
       .map(output => ({ description: output.description, required: output.minimumChineseCharacters!,
         actual: output.kind === 'text' || output.kind === 'validation_report' ? countReportChineseCharacters(last.content ?? '') : null }))
     const blockers = [
-      ...(!lease.parent && spec.scope.agentWritingBinding && spec.intent !== 'review' && !writingDelivery && !limitedWritingDelivery
-        ? [{ code: 'writing_delivery_missing', reference: root.id }] : []),
       ...reportLengthChecks.filter(check => check.actual === null || check.actual < check.required)
         .map(check => ({ code: 'report_length_unmet', reference: check.description })),
       ...memoryWork.filter(item => !item.completed).map(item => ({ code: 'unresolved_memory_job', reference: item.job.id })),
@@ -73,8 +71,6 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
       ...postconditionChecks.filter(item => item.severity === 'error' && item.status !== 'passed').map(item => ({ code: `postcondition_${item.status}`, reference: item.code })),
       ...todos.filter(item => !(limitedWritingDelivery && limitedReviewDependency(item.content))
         && (item.status === 'pending' || item.status === 'in_progress')).map(item => ({ code: 'unfinished_todo', reference: runtimeJsonHash({ content: item.content }) })),
-      ...compilations.filter(item => !writingDelivery && !limitedWritingDelivery?.chapters.some(chapter => chapter.compilationId === item.id)
-        && (item.status === 'active' || item.status === 'completed' && (!item.bridge?.committedAt || item.chapter?.revision !== item.bridge.targetRevision))).map(item => ({ code: 'uncommitted_compilation', reference: item.id })),
       ...pendingOperations.map(item => ({ code: 'unresolved_operation', reference: item.id })),
       ...subtasks.filter(item => !['completed', 'cancelled'].includes(item.status)).map(item => ({ code: 'unresolved_subtask', reference: item.id })),
       ...limitedChildren.map(item => ({ code: 'limited_child_delivery', reference: item.childRunId })),

@@ -1,3 +1,4 @@
+import { initializeExecutionState, saveExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
 import { createHash } from 'node:crypto'
 import { describe, expect, it, vi, type MockInstance } from 'vitest'
 import { z } from 'zod'
@@ -11,7 +12,7 @@ import { extractReaderNavigationHtml } from '../../api/lib/web-reader-quality.js
 import * as sources from '../../api/lib/agent/research-sources.js'
 import * as reducer from '../../api/lib/agent/runtime-reducer.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
-import { initializeExecutionState, loadExecutionState, saveExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { resolveDurableApproval } from '../../api/lib/agent/runtime-approval.js'
@@ -36,7 +37,7 @@ async function start(f: Fixture, tool: Pick<AgentTool, 'name' | 'description' | 
     messages: [{ role: 'user', content: 'Search public sources' }, { role: 'assistant', content: null, toolCalls: [{ id: 'original-search', name: tool.name, arguments: JSON.stringify(toolArgs) }] }], successfulToolSignatures: [] } })
   await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running' } })
   const period = getCreditWindow()
-  await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 20000, periodStartedAt: period.startedAt, periodEndsAt: period.endsAt } })
+  await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 20000, periodStartedAt: period.startedAt, periodEndsAt: period.endsAt } })
   return lease
 }
 async function webFixture(work: (f: Fixture, lease: Awaited<ReturnType<typeof start>>, transport: MockInstance<typeof search.searchWeb>) => Promise<void>, permission: 'allow' | 'ask' = 'allow') {

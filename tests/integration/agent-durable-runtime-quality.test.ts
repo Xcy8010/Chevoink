@@ -1,3 +1,4 @@
+import { initializeExecutionState, saveExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
 import { persistCurrentContinuityReport, continuityOpinionsFromSourceQuotes } from '../support/current-continuity-report.js'
 import { Prisma } from '@prisma/client'
 import { createHash,randomUUID } from 'node:crypto'
@@ -14,7 +15,7 @@ import * as runtimeOperations from '../../api/lib/agent/runtime-operations.js'
 import * as toolCursor from '../../api/lib/agent/runtime-tool-cursor.js'
 import { qualityWorkContextProjection } from '../../api/lib/agent/tools/durable-quality.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
-import { initializeExecutionState, saveExecutionState } from '../../api/lib/agent/runtime-state.js'
+
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { commitChapterBridge,prepareStoryCompilation,recordStoryCompilerWrite,saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
 import * as storyMemory from '../../api/lib/agent/story-memory.js'
@@ -85,7 +86,7 @@ describe.runIf(available)('native paid failed quality response and limited deliv
       await persistCurrentContinuityReport({ ...f, compilationId, expectedChapterRevision: chapter.revision, independentCheck: 'complete', opinions: snapshot => continuityOpinionsFromSourceQuotes(scenario === 'continuity-error' ? [{ signal: 'body', severity: 'error', evidence: '沿着山路向上走去', suggestion: '核对行动状态' }] : [], snapshot) })
     }
     const window = getCreditWindow()
-    await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+    await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
     vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(selectedRuntime)
     vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
       rateCardId: 'failed-quality-proof-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
@@ -266,7 +267,7 @@ describe.runIf(available)('new-draft quality-first prepayment admission', () => 
               { id: 'quality-first', name: 'quality_analyze', arguments: JSON.stringify({ compilationId }) },
             ] }], successfulToolSignatures: [] } })
         const window = getCreditWindow()
-        await prisma.creditAccount.create({ data: { userId: base.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+        await createToolFixtureCreditAccount({ data: { userId: base.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
         vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(selectedRuntime)
         vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
           rateCardId: 'quality-first-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
@@ -558,7 +559,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
           messages: [{ role: 'user', content: '完整检查本章' }, { role: 'assistant', content: null, toolCalls: calls }], successfulToolSignatures: [] } }))
       const window = getCreditWindow()
-      await lifecycle.phase('credit.seed', () => prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } }))
+      await lifecycle.phase('credit.seed', () => createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } }))
       const runtime = vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(selectedRuntime)
       vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
         rateCardId: 'quality-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
@@ -1104,7 +1105,7 @@ describe.runIf(available).each(['continuity', 'quality'] as const)('真实报告
             { id: 'again', name: tool.name, arguments: JSON.stringify({ compilationId }) },
           ] }], successfulToolSignatures: [] } })
       const window = getCreditWindow()
-      await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+      await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
       const runtime = vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(selectedRuntime)
       vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
         rateCardId: 'cached-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
@@ -1218,7 +1219,7 @@ describe.runIf(available)('既有章节独立检查', () => {
             { id: 'cached', name, arguments: JSON.stringify({ chapterId: f.chapterId }) },
           ] }], successfulToolSignatures: [] } })
       const window = getCreditWindow()
-      await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+      await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
       vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(selectedRuntime)
       vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
         rateCardId: 'standalone-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })
@@ -1260,7 +1261,7 @@ describe.runIf(available)('既有章节独立检查', () => {
         snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
           messages: [{ role: 'user', content: '只检查已有章' }, { role: 'assistant', content: null, toolCalls: calls }], successfulToolSignatures: [] } })
       const window = getCreditWindow()
-      await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+      await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
       vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(selectedRuntime)
       vi.spyOn(tokenPrices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000,
         rateCardId: 'standalone-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })

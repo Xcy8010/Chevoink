@@ -1,3 +1,5 @@
+import { lockNovelActiveScope } from '../data/novel-write-lock.js'
+import { originalTaskRunIds } from './original-request.js'
 import { createVolumeData } from '../data/volume.js'
 import type { Prisma } from '@prisma/client'
 import { DataAccessError } from '../prisma.js'
@@ -53,64 +55,57 @@ export async function assertWritingVolumeBoundary(tx: Prisma.TransactionClient, 
   return proposed
 }
 
-/** Only the chapter-create effect calls this, under its novel lock and live fence. */
-export async function assertPreparedWritingVolumeDecision(tx: Prisma.TransactionClient, subject: Subject, targetOrderIndex: number, input?: WritingNewVolume) {
-  const scope = await readWritingScope(tx, subject)
-  const capability = scope.writing?.tailVolume
-  if (!capability && !input) return
-  const compilation = await tx.storyCompilation.findFirst({ where: { userId: subject.userId, novelId: subject.novelId,
-    runId: { in: [...new Set([scope.sourceRunId, subject.runId])] }, status: 'active', targetOrderIndex }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
-  const prepared = compilation?.preparedContext as Record<string, unknown> | null
-  const decision = prepared?.volumeDecision as { kind?: string; newVolume?: unknown } | undefined
-  if (decision?.kind !== (input ? 'new_volume' : 'continue') || input && runtimeJson(decision.newVolume).hash !== runtimeJson(input).hash) {
-    throw new DataAccessError(400, 'INVALID_ARGUMENTS', `请先在本任务PREPARE显式保存${input ? 'new_volume及同一份收束证据' : 'continue及未收束理由'}，然后创建本章。当前卷上下文：${JSON.stringify(await readWritingVolumeContext(tx, subject, targetOrderIndex))}`)
-  }
-  if (capability) {
-    const previous = await tx.chapter.findFirst({ where: { authorId: subject.userId, ...activeChapterScope(subject.novelId) }, orderBy: { orderIndex: 'desc' } })
-    const preparedPrevious = prepared?.previousChapter as { id?: string; revision?: number } | undefined
-    if (scope.parentRunId || capability.targetOrderIndex !== targetOrderIndex || !previous || previous.orderIndex + 1 !== targetOrderIndex
-      || previous.id !== capability.previousChapterId || previous.revision !== capability.previousRevision
-      || preparedPrevious?.id !== previous.id || preparedPrevious.revision !== previous.revision) {
-      throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '卷处理决定的冻结前章或当前版本不匹配，未创建或移动任何章节。')
+/** Same-task tail identity is durable even when no compiler was prepared. */
+async function readTailVolumeBinding(tx: Prisma.TransactionClient, subject: Subject, targetOrderIndex: number, scope: Awaited<ReturnType<typeof readWritingScope>>) {
+  const runIds = await originalTaskRunIds(tx, subject, scope)
+  const compilations = await tx.storyCompilation.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
+    runId: { in: runIds }, targetOrderIndex }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+  let binding = scope.bindings?.tailVolumes?.find(item => item.targetOrderIndex === targetOrderIndex)
+  for (const compilation of compilations) {
+    const prepared = compilation.preparedContext && typeof compilation.preparedContext === 'object' && !Array.isArray(compilation.preparedContext) ? compilation.preparedContext : {}
+    const old = prepared.createdTailVolume
+    if (old === undefined) continue
+    if (!old || typeof old !== 'object' || Array.isArray(old) || typeof old.id !== 'string' || !old.id
+      || typeof old.proposalHash !== 'string' || !/^[a-f0-9]{64}$/u.test(old.proposalHash) || old.targetOrderIndex !== targetOrderIndex) {
+      throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原尾卷绑定损坏，未创建替代卷。')
     }
+    const historical = { targetOrderIndex, proposalHash: old.proposalHash, volumeId: old.id }
+    if (binding && runtimeJson(binding).hash !== runtimeJson(historical).hash) throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '同任务尾卷绑定相互冲突。')
+    binding = historical
   }
-  return { compilation: compilation!, prepared: prepared!, scope }
+  return { binding, compilations }
 }
 
 export async function createWritingTailVolume(tx: Prisma.TransactionClient, subject: Subject, targetOrderIndex: number, input: WritingNewVolume) {
-  const proposed = await assertWritingVolumeBoundary(tx, subject, targetOrderIndex, input)
-  const validated = await assertPreparedWritingVolumeDecision(tx, subject, targetOrderIndex, proposed)
-  const created = validated?.prepared.createdTailVolume as { id?: string; proposalHash?: string; targetOrderIndex?: number } | undefined
-  const proposalHash = runtimeJson(proposed).hash
-  if (created) {
-    if (created.proposalHash !== proposalHash || created.targetOrderIndex !== targetOrderIndex || !created.id) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '本任务已有不同的新卷创建决定，未再创建卷。')
-    const volume = await tx.volume.findFirst({ where: { id: created.id, novelId: subject.novelId, ...activeVolumeWhere } })
-    if (!volume) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原新卷已归档或不存在，未创建替代卷。')
-    return volume
+  await lockNovelActiveScope(tx, subject.novelId)
+  const proposed = writingNewVolumeSchema.parse(input), proposalHash = runtimeJson(proposed).hash
+  const scope = await readWritingScope(tx, subject)
+  const { binding, compilations } = await readTailVolumeBinding(tx, subject, targetOrderIndex, scope)
+  if (binding && binding.proposalHash !== proposalHash) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '本任务已有不同的新卷创建决定，未再创建卷。')
+  const existing = binding ? await tx.volume.findFirst({ where: { id: binding.volumeId, novelId: subject.novelId, ...activeVolumeWhere } }) : null
+  if (binding && !existing) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原新卷已归档或不存在，未创建替代卷。')
+  if (!binding) await assertWritingVolumeBoundary(tx, subject, targetOrderIndex, proposed)
+  const volume = existing ?? await createVolumeData(subject.userId, subject.novelId, { title: proposed.title, summary: proposed.summary }, tx)
+  if (!scope.bindings?.tailVolumes?.some(item => item.targetOrderIndex === targetOrderIndex)) {
+    await tx.agentRun.update({ where: { id: scope.sourceRunId }, data: { writingBindings: runtimeJson({ ...scope.bindings,
+      version: 1, taskId: scope.taskId, targets: scope.bindings?.targets ?? [],
+      tailVolumes: [...(scope.bindings?.tailVolumes ?? []), { targetOrderIndex, proposalHash, volumeId: volume.id }] }).value } })
   }
-  const volume = await createVolumeData(subject.userId, subject.novelId, { title: proposed.title, summary: proposed.summary }, tx)
-  if (validated?.scope.writing?.tailVolume?.creationProtocol === 2) await tx.storyCompilation.update({ where: { id: validated.compilation.id }, data: {
-    preparedContext: runtimeJson({ ...validated.prepared, createdTailVolume: { id: volume.id, proposalHash, targetOrderIndex } }).value } })
+  // Preserve the old cache for historical readers; it is optional bookkeeping.
+  const active = compilations.find(item => item.status === 'active')
+  if (active && !binding) {
+    const prepared = active.preparedContext && typeof active.preparedContext === 'object' && !Array.isArray(active.preparedContext) ? active.preparedContext : {}
+    await tx.storyCompilation.update({ where: { id: active.id }, data: { preparedContext:
+      runtimeJson({ ...prepared, createdTailVolume: { id: volume.id, proposalHash, targetOrderIndex } }).value } })
+  }
   return volume
 }
 
-/** Explicit new-task placement keeps the old chapter target and predecessor fence. */
+/** Explicit placement checks a known creation identity, without a PREPARE gate. */
 export async function assertExplicitWritingVolumePlacement(tx: Prisma.TransactionClient, subject: Subject, targetOrderIndex: number, volumeId?: string) {
   const scope = await readWritingScope(tx, subject)
-  const compilation = await tx.storyCompilation.findFirst({ where: { userId: subject.userId, novelId: subject.novelId,
-    runId: { in: [...new Set([scope.sourceRunId, subject.runId])] }, status: 'active', targetOrderIndex }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
-  const prepared = compilation?.preparedContext as Record<string, unknown> | null
-  const decision = prepared?.volumeDecision as { kind?: string; newVolume?: WritingNewVolume } | undefined
-  await assertPreparedWritingVolumeDecision(tx, subject, targetOrderIndex, decision?.kind === 'new_volume' ? decision.newVolume : undefined)
-  if (decision?.kind === 'new_volume') {
-    const created = prepared?.createdTailVolume as { id?: string; targetOrderIndex?: number; proposalHash?: string } | undefined
-    if (!volumeId || created?.id !== volumeId || created.targetOrderIndex !== targetOrderIndex
-      || created.proposalHash !== runtimeJson(decision.newVolume).hash
-      || !await tx.volume.findFirst({ where: { id: volumeId, novelId: subject.novelId, ...activeVolumeWhere } })) {
-      throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '请先明确创建本任务已决定的新卷，再使用返回的真实卷编号创建目标章。')
-    }
-  } else if (volumeId) {
-    const previous = await tx.chapter.findFirst({ where: { authorId: subject.userId, ...activeChapterScope(subject.novelId) }, orderBy: { orderIndex: 'desc' } })
-    if (previous?.volumeId !== volumeId) throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '本任务决定延续当前卷，不能改到另一卷。')
+  const { binding } = await readTailVolumeBinding(tx, subject, targetOrderIndex, scope)
+  if (binding && (binding.volumeId !== volumeId || !await tx.volume.findFirst({ where: { id: binding.volumeId, novelId: subject.novelId, ...activeVolumeWhere } }))) {
+    throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '章节位置与本任务已创建的真实尾卷不一致。')
   }
 }

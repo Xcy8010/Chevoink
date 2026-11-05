@@ -6,6 +6,7 @@ import { archiveEarlyToolRounds, estimateChatMessagesTokens, estimateToolDefinit
 import { executionContextReadTool } from './tools/task-context-tools.js'
 import { toOpenAIParameters } from './tool-schema.js'
 import { randomUUID } from 'node:crypto'
+import { AGENT_TOOL_EXECUTION_POLICY } from './tool-execution-guidance.js'
 
 /** Storage-pressure compaction is NOT a budget checkpoint and grants no tokens.
  * Each replacement points to the still-persisted, hash-verified original frame.
@@ -16,6 +17,16 @@ export async function advanceDurableContext(token: RunLeaseToken, inputLimit?: n
   return withRunLease(lease, async tx => {
     const { frame, configuration } = await readExecutionStateInTransaction(tx, lease.taskRootId)
     if (frame.state.phase !== 'idle') return null
+    // Only a new model boundary can receive current guidance. Never alter a
+    // paid assistant call awaiting execution, or an already prepared request.
+    if (frame.state.messages.at(-1)?.role !== 'assistant'
+      && !frame.state.messages.some(message => message.role === 'system' && message.content.includes(AGENT_TOOL_EXECUTION_POLICY))) {
+      const messages = [...frame.state.messages]
+      const position = messages.findIndex(message => message.role !== 'system')
+      messages.splice(position < 0 ? messages.length : position, 0, { role: 'system', content: AGENT_TOOL_EXECUTION_POLICY })
+      return saveExecutionStateInTransaction(tx, lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
+        snapshot: { ...frame.state, messages } })
+    }
     const beforeBytes = Buffer.byteLength(JSON.stringify(frame.state.messages), 'utf8')
     const modelPressure = inputLimit !== undefined && estimateChatMessagesTokens(frame.state.messages) + estimateToolDefinitionTokens(configuration.tools) > inputLimit
     if (!modelPressure && (beforeBytes < 256 * 1024 || frame.state.messages.at(-1)?.role !== 'tool')) return null

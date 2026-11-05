@@ -10,7 +10,7 @@ vi.mock('../../api/lib/agent/runtime-reducer.js', () => ({ reduceExecutionReceip
 vi.mock('../../api/lib/agent/writing-scope.js', () => ({ readWritingScope: mocks.scope, assertQuestionWritingScope: mocks.assertScope }))
 vi.mock('../../api/lib/agent/writing-clarification.js', () => ({ recordWritingClarification: mocks.clarify }))
 vi.mock('../../api/lib/agent/runtime-common.js', async original => ({ ...await original<object>(), databaseNow: mocks.now }))
-import { executeDurableQuestion, readDurableAuthorInputBoundary } from '../../api/lib/agent/runtime-question.js'
+import { executeDurableQuestion, validateHistoricalQuestionReceipt } from '../../api/lib/agent/runtime-question.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import type { RunLeaseToken } from '../../api/lib/agent/runtime-lease.js'
@@ -61,10 +61,9 @@ describe('durable question semantic scope receipts', () => {
     expect(mocks.reduce).toHaveBeenCalledOnce()
   })
   it('distinguishes a received but unaccepted answer from a confirmed writing target', async () => {
-    expect(await executeDurableQuestion(lease, cursor, ctx, tool, args)).toMatchObject({ kind: 'needs_attention', authorInputRequired: true,
-      frame: { revision: 2, snapshotHash: 'reduced' } })
+    expect(await executeDurableQuestion(lease, cursor, ctx, tool, args)).toMatchObject({ kind: 'tool', result: { display: { kind: 'question' } } })
     expect((await mocks.commit.mock.results[0].value).result).toMatchObject({ toolResult: {
-      failureCode: 'AUTHOR_INPUT_REQUIRED', display: { answer: answer!.payload.answer, scopeResolution: 'needs_input' } } })
+      display: { answer: answer!.payload.answer } } })
   })
   it('does not mark an ordinary creative preference as manuscript authority', async () => {
     frozenScope('bounded')
@@ -77,11 +76,10 @@ describe('durable question semantic scope receipts', () => {
   it('keeps an unanswered required scope unresolved without recording an author grant', async () => {
     answer = null
     mocks.now.mockResolvedValue(new Date('2031-01-01T00:00:00.000Z'))
-    expect(await executeDurableQuestion(lease, cursor, ctx, tool, args)).toMatchObject({ kind: 'needs_attention', authorInputRequired: true,
-      frame: { revision: 2, snapshotHash: 'reduced' } })
+    expect(await executeDurableQuestion(lease, cursor, ctx, tool, args)).toMatchObject({ kind: 'tool', result: { display: { unanswered: true } } })
     expect(mocks.clarify).not.toHaveBeenCalled()
   })
-  it.each([true, false])('recovers only the verified current required-scope effect, required=%s', async required => {
+  it.each([true, false])('validates old required-scope receipts without pausing again, required=%s', async required => {
     const input = runtimeJson({ input: { callId: ctx.callId, args } })
     const result = runtimeJson({ toolResult: { output: 'reply', ...(required ? { failureCode: 'AUTHOR_INPUT_REQUIRED' } : {}) } })
     const frame = { revision: 2, snapshotHash: 'frame', state: { phase: 'idle', messages: [
@@ -93,12 +91,11 @@ describe('durable question semantic scope receipts', () => {
       effectReceipt: { result: result.value, resultHash: result.hash } }])
     mocks.tx.agentExecutionOutbox.findUnique.mockResolvedValue({ taskRootId: lease.taskRootId, operationId: 'operation', type: 'effect.committed',
       payload: { operationId: 'operation', resultHash: result.hash } })
-    expect(await readDurableAuthorInputBoundary(lease)).toEqual(required ? { kind: 'needs_attention', frame, authorInputRequired: true,
-      reason: expect.any(String) } : null)
+    expect(await validateHistoricalQuestionReceipt(lease)).toBeNull()
     if (required) {
       mocks.tx.agentOperation.findMany.mockResolvedValue([{ id: 'operation', inputSnapshot: input.value, inputHash: 'corrupt',
         effectReceipt: { result: result.value, resultHash: result.hash } }])
-      await expect(readDurableAuthorInputBoundary(lease)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+      await expect(validateHistoricalQuestionReceipt(lease)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
     }
   })
   it.each([true, false])('uses saved normalization for wrapped string options without reinterpreting history, required=%s', async required => {
@@ -115,10 +112,10 @@ describe('durable question semantic scope receipts', () => {
       effectReceipt: { result: result.value, resultHash: result.hash } }])
     mocks.tx.agentExecutionOutbox.findUnique.mockResolvedValue({ taskRootId: lease.taskRootId, operationId: 'operation', type: 'effect.committed',
       payload: { operationId: 'operation', resultHash: result.hash } })
-    expect(await readDurableAuthorInputBoundary(lease)).toEqual(required ? expect.objectContaining({ kind: 'needs_attention', authorInputRequired: true }) : null)
+    expect(await validateHistoricalQuestionReceipt(lease)).toBeNull()
     if (required) {
       mocks.frame.mockResolvedValue({ snapshotHash: 'wrong-source' })
-      await expect(readDurableAuthorInputBoundary(lease)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+      await expect(validateHistoricalQuestionReceipt(lease)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
     }
   })
   it('does not turn an already consumed failed/imported ask into a missing-success receipt error', async () => {
@@ -127,7 +124,7 @@ describe('durable question semantic scope receipts', () => {
       { role: 'tool', toolCallId: ctx.callId, content: 'scope/schema rejected' },
     ] } } })
     mocks.tx.agentOperation.findMany.mockResolvedValue([])
-    expect(await readDurableAuthorInputBoundary(lease)).toBeNull()
+    expect(await validateHistoricalQuestionReceipt(lease)).toBeNull()
   })
   it('rejects an answer linked to a different question before any clarification effect', async () => {
     answer!.payload.requestHash = 'wrong-question'

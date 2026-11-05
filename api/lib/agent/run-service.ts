@@ -1,8 +1,7 @@
 import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
-import { freezeWritingScope, readWritingScope, writingScopeResolvesInput } from './writing-scope.js'
+import { freezeWritingScope, readWritingScope } from './writing-scope.js'
 import { enableAgentWritingScope } from './agent-writing-scope.js'
 import { isInternalAgentArtifact } from './artifact-visibility.js'
-import { savedRunUsageSchema } from './checkpoint.js'
 import { syncBuiltinSkillCatalog } from './skills/service.js'
 import { readAuthorEnded } from './author-ended.js'
 import { readRunOutcome } from './run-outcome.js'
@@ -1189,24 +1188,8 @@ async function continueLoopRunLocked(
   }
   const resumePrompt = originalPrompt || queuedInput?.prompt
   if (!resumePrompt?.trim()) throw new DataAccessError(409, 'RUN_INPUT_REQUIRED', '该历史任务缺少完整原始需求，无法安全继续。请在输入框重新说明本次任务；已保存内容不会改变。')
-  // Establish original-input integrity first: a corrupted request is not a
-  // clarification. A timeout still grants no decision or wider scope, and is
-  // rejected before credit/model/event admission or any continuation writes.
-  const savedUsage = savedRunUsageSchema.safeParse(run.usage)
-  const frozen = taskSpecSchema.safeParse(run.taskSpec)
-  const inputMarker = savedUsage.success ? savedUsage.data.checkpoint?.authorInputRequired : undefined
-  let authorInputRequired = Boolean(inputMarker)
-  if (frozen.success && (inputMarker || frozen.data.scope.writing?.kind === 'needs_input' || frozen.data.scope.localEditBoundary?.kind === 'needs_input')) {
-    const effective = frozen.data.scope.writingClarificationProtocol !== undefined || frozen.data.scope.writingTargetProtocol === 2
-      ? await prisma.$transaction(tx => readWritingScope(tx, { userId, novelId: run.novelId, runId })) : null
-    if (inputMarker && effective && await prisma.$transaction(tx => writingScopeResolvesInput(tx,
-      { userId, novelId: run.novelId, runId }, effective, inputMarker))) authorInputRequired = false
-    const effectiveSpec = effective ? taskSpecSchema.parse(effective.spec) : frozen.data
-    if (!frozen.data.scope.authorEffects) authorInputRequired ||= effectiveSpec.scope.localEditBoundary?.kind === 'needs_input'
-      || (effective?.writing ?? effectiveSpec.scope.writing)?.kind === 'needs_input'
-  }
-  if (authorInputRequired) throw new DataAccessError(409, 'AUTHOR_INPUT_REQUIRED',
-    '原任务仍等待作者明确目标章节与范围，不能选择默认方案继续。请在输入框发送明确的新指令；原合同、用量与已保存内容保留，超时旧提问不会自动恢复。')
+  // Continue restores the authentic original request. An unanswered creative
+  // question is context for the Agent, not a server-side permission decision.
   await assertManagedAttachmentsAccess(queuedInput?.attachments, userId)
   // A genuinely admitted continuation follows the author's current selection.
   const nextTier = (model?.modelTier ?? run.modelTier) as CreditModelTier

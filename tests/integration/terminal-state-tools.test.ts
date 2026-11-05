@@ -1,3 +1,4 @@
+import { initializeExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
@@ -6,7 +7,7 @@ import { prisma } from '../../api/lib/prisma.js'
 import { prepareStoryCompilation, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
 import { inspectTerminalReview, terminalReviewFailure, terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
-import { initializeExecutionState } from '../../api/lib/agent/runtime-state.js'
+
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { chapterBridgeCommitTool, chapterBridgeGetTool, continuityValidateTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import * as credits from '../../api/lib/credits.js'
@@ -51,7 +52,7 @@ describe.runIf(available)('frozen candidate judgments and current reports throug
           ...(retired ? [{ id: 'current-commit', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId }) }] : []),
         ] }] } })
     const window = credits.getCreditWindow()
-    await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+    await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
     vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 10000, provider: 'fixture', modelName: 'fixture',
       baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-not-real', reasoningEffort: 'high', reasoningEfforts: ['none', 'high'],
       reasoningParameterMode: 'native', thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null })

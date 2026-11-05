@@ -17,12 +17,12 @@ describe('Agent 新章卷归属', () => {
   it('exposes a new-volume proposal only for the new server-frozen capability', () => {
     const writing = { version: 1 as const, kind: 'bounded' as const, targets: [{ orderIndex: 2, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false }
     const old = toOpenAIToolPresentation(chapterCreateTool, { novelId: 'n', writing })
-    expect(old.parameters.properties).not.toHaveProperty('newVolume')
+    expect(old.parameters.properties).toHaveProperty('newVolume')
     const fresh = toOpenAIToolPresentation(chapterCreateTool, { novelId: 'n', writing: { ...writing, tailVolume: { version: 1, targetOrderIndex: 2, previousChapterId: 'c1', previousRevision: 1 } } })
     expect(fresh.parameters.properties).toHaveProperty('newVolume')
-    expect(fresh.description).toContain('不能按章数切卷')
+    expect(fresh.description).toBe(old.description)
     const prepare = toOpenAIToolPresentation(storyCompilerPrepareTool, { novelId: 'n', writing: { ...writing, tailVolume: { version: 1, targetOrderIndex: 2, previousChapterId: 'c1', previousRevision: 1 } } })
-    expect(prepare.parameters.required).toContain('volumeDecision')
+    expect(prepare.parameters.required).not.toContain('volumeDecision')
     expect(toOpenAIToolPresentation(storyCompilerPrepareTool, { novelId: 'n', writing }).parameters.required).not.toContain('volumeDecision')
   })
   it('后方存在空卷时仍追加到最后一个已有章节所在卷', () => {

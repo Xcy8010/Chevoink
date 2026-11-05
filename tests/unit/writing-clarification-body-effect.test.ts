@@ -47,9 +47,9 @@ describe('authenticated clarification at ordinary body-effect admission', () => 
     const editRanges = [{ start, end, newText: '门悄然开了。' }]
     const after = f.chapter.content.slice(0, start) + editRanges[0].newText + f.chapter.content.slice(end)
     const options = { mutation: 'range' as const, after, editRanges }
-    await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, options)).rejects.toMatchObject({
-      code: scenario === 'chapter' ? 'REPAIR_NOT_AUTHORIZED' : 'AUTHOR_LOCAL_SCOPE',
-    })
+    // Unresolved language is not an effect boundary. Once an authentic
+    // answer binds precise text, the concrete local boundary is enforced below.
+    await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, options)).resolves.toBeUndefined()
     expect(await recordWritingClarification(f.tx, f.subject, { callId: 'actual-author-answer', question: '请明确目标或原文',
       options: [{ label: '第5章' }, { label: '补充原文' }], answer: scenario === 'chapter' ? '第5章' : '原文是“门开了。”', source: 'legacy_question' })).toBeTruthy()
     await expect(assertChapterManuscriptRevision(f.tx, f.subject, f.chapter, options)).resolves.toBeUndefined()
