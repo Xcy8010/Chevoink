@@ -562,17 +562,17 @@ describe.runIf(available)('durable native child HTTP path in isolated PG', () =>
     const exec = await execution(f, taskSpawnTool, { tasks: [{ title: '目标窗口', brief: '只读审阅原始作品设定并提交完整报告，不改动正文。' }], mode: 'review', inherit: 'brief' })
     await executeDurableToolStep(exec.lease, new AbortController().signal)
     const original = await prisma.agentChildExecutionGrant.findFirstOrThrow({ where: { parentRootId: exec.root.id }, include: { childRun: true } })
+    const targetSessionId = kind === 'foreign' ? (await prisma.agentSession.create({ data: { userId: f.userId, novelId: f.novelId, title: '其他任务窗口' } })).id : original.childRun.sessionId
+    const parent = await loadExecutionState(f.userId, exec.runId)
+    await saveExecutionState(exec.lease, { expectedRevision: parent.frame.revision, expectedHash: parent.frame.snapshotHash,
+      snapshot: { ...parent.frame.state, messages: [...parent.frame.state.messages, { role: 'assistant', content: null, toolCalls: [{ id: 'denied-rework', name: 'task_send',
+        arguments: JSON.stringify({ sessionId: targetSessionId, prompt: '继续只读复核并提交报告。', mode: 'review' }) }] }] } })
     await dispatchDurableChild(f.userId, original.childRunId).catch(() => {})
     if (kind === 'failed') await prisma.$transaction(async tx => {
       await tx.agentChildExecutionGrant.update({ where: { id: original.id }, data: { status: 'failed' } })
       await tx.agentRun.update({ where: { id: original.childRunId }, data: { status: 'failed' } })
       await tx.agentTaskRoot.update({ where: { id: original.childRun.taskRootId! }, data: { status: 'cancelled' } })
     })
-    const targetSessionId = kind === 'foreign' ? (await prisma.agentSession.create({ data: { userId: f.userId, novelId: f.novelId, title: '其他任务窗口' } })).id : original.childRun.sessionId
-    const parent = await loadExecutionState(f.userId, exec.runId)
-    await saveExecutionState(exec.lease, { expectedRevision: parent.frame.revision, expectedHash: parent.frame.snapshotHash,
-      snapshot: { ...parent.frame.state, messages: [...parent.frame.state.messages, { role: 'assistant', content: null, toolCalls: [{ id: 'denied-rework', name: 'task_send',
-        arguments: JSON.stringify({ sessionId: targetSessionId, prompt: '继续只读复核并提交报告。', mode: 'review' }) }] }] } })
     await expect(executeDurableToolStep(exec.lease, new AbortController().signal)).rejects.toMatchObject({ code: kind === 'unknown' ? 'RUNTIME_RECONCILIATION_REQUIRED' : 'RUNTIME_CHILD_REWORK_NOT_READY' })
     expect(await prisma.agentChildExecutionGrant.count({ where: { parentRootId: exec.root.id } })).toBe(1)
     expect(fetcher).toHaveBeenCalledOnce()
@@ -608,13 +608,19 @@ describe.runIf(available)('durable native child HTTP path in isolated PG', () =>
   it('attributes child usage to the parent goal once and retains the main currentRunId', async () => fixture(async f => {
     const fetcher = mockProvider()
     const exec = await execution(f, subAgentRunTool, { subagentId: f.definitionId, task: '只读审阅并提交完整报告' }, false, false, true)
+    const sourceAttempts = await prisma.agentProviderAttempt.findMany({ where: { runId: exec.runId, operation: { action: 'fixture_model_turn' } } })
+    for (const attempt of sourceAttempts) await syncGoalDurableUsage(attempt.id)
+    const baselineUsage = await prisma.agentGoalUsage.findMany({ where: { goalId: exec.goalId! }, orderBy: { sourceKey: 'asc' } })
+    expect(baselineUsage).toHaveLength(sourceAttempts.length)
+    expect(baselineUsage.every(row => row.status === 'known' && row.inputTokens === 0n && row.outputTokens === 0n)).toBe(true)
     await executeDurableToolStep(exec.lease, new AbortController().signal)
     const grant = await prisma.agentChildExecutionGrant.findFirstOrThrow({ where: { parentRootId: exec.root.id } })
     expect(await prisma.agentGoalExecution.findUniqueOrThrow({ where: { runId: grant.childRunId } })).toMatchObject({ goalId: exec.goalId, goalRevision: 1, epoch: 1n,
       trigger: 'subagent', sourceEventId: `child-grant:${grant.id}`, taskRootId: verifyChildGrant(grant).taskSpec.id })
     expect((await prisma.agentGoal.findUniqueOrThrow({ where: { id: exec.goalId! } })).currentRunId).toBe(exec.runId)
     expect(await prisma.agentGoalBudget.findUniqueOrThrow({ where: { goalId: exec.goalId! } })).toMatchObject({ tokensUsed: 60n, tokensReserved: 0n })
-    expect(await prisma.agentGoalUsage.count({ where: { goalId: exec.goalId! } })).toBe(1)
+    expect(await prisma.agentGoalUsage.count({ where: { goalId: exec.goalId! } })).toBe(baselineUsage.length + 1)
+    expect(await prisma.agentGoalUsage.findMany({ where: { sourceKey: { in: baselineUsage.map(row => row.sourceKey) } }, orderBy: { sourceKey: 'asc' } })).toEqual(baselineUsage)
     const raw = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { action: { not: 'fixture_model_turn' } }, runId: grant.childRunId }, include: { usageReceipt: true } })
     const budget = await prisma.agentGoalBudget.findUniqueOrThrow({ where: { goalId: exec.goalId! } })
     const ledger = await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })

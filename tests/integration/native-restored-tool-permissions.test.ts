@@ -120,20 +120,21 @@ describe('split uses an actual new-chapter slot rather than a phase allowance', 
       expect(await prisma.chapter.count({ where: { novelId: f.novelId } })).toBe(2)
     }
   }, undefined, bounded ? '修改本章' : '授权自主创作全书，并拆分已有章节。', { freezeWriting: bounded }))
-  it('rejects splitting a concretely frozen local region without changing either body or structure', async () => fixture(async f => {
+  it('rejects splitting an actual frozen editor selection without changing body or structure', async () => fixture(async f => {
     const runId = randomUUID(), prompt = '仅修改第1章。将“原文”改为“修订文”。'
-    const task = buildTaskSpec({ ...f, runId, prompt, authorWritingProtocol: 2, localEditProtocol: 1 })
+    const selection = { text: '原文', start: 0, end: 2 }
+    const task = buildTaskSpec({ ...f, runId, prompt, selection, manuscriptProtocol: 1, authorWritingProtocol: 2, localEditProtocol: 1 })
     await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, chapterId: f.chapterId, status: 'queued',
-      mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', taskSpec: runtimeJson(JSON.parse(JSON.stringify(task))).value, startRequest: { prompt } } })
+      mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', taskSpec: runtimeJson(JSON.parse(JSON.stringify(task))).value, startRequest: { prompt, selection } } })
     const source = await prisma.agentMessage.create({ data: { runId, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
     const frozen = await prisma.$transaction(tx => freezeWritingScope(tx, { ...f, runId }, task, prompt, 2))
-    expect(frozen.scope.localEditBoundary?.regions.length).toBeGreaterThan(0)
+    expect(frozen.scope.selectionBoundary).toMatchObject({ chapterId: f.chapterId, start: 0, end: 2 })
     await prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(frozen))).value } })
     const root = await initializeDurableTask({ userId: f.userId, runId, sourceMessageId: source.id })
     await claim({ ...f, runId, rootId: root.id })
     const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     await expectToolDenied(chapterSplitTool.execute({ ...f, runId, callId: 'local-split', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced',
-      signal: new AbortController().signal, emit: () => {} }, { chapterId: f.chapterId, splitOffset: 1, newChapterTitle: '越界新章' }), { code: 'AUTHOR_LOCAL_SCOPE' })
+      signal: new AbortController().signal, emit: () => {} }, { chapterId: f.chapterId, splitOffset: 1, newChapterTitle: '越界新章' }), { code: 'AUTHOR_SELECTION_SCOPE' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
     expect(await prisma.chapter.count({ where: { novelId: f.novelId } })).toBe(1)
   }))

@@ -7,7 +7,7 @@ import { modelRouteRevision, prepareModelCursorOperation, validateModelCursor } 
 import { currentNativeToolViews } from '../../api/lib/agent/runtime-tool-view.js'
 import { toOpenAIToolPresentation } from '../../api/lib/agent/tool-schema.js'
 import * as operations from '../../api/lib/agent/runtime-operations.js'
-import { settleProviderOperation, type DurableTokenPrice } from '../../api/lib/agent/runtime-settlement.js'
+import { preparePricedProviderOperation, settleProviderOperation, type DurableTokenPrice } from '../../api/lib/agent/runtime-settlement.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { resolveDurableApproval } from '../../api/lib/agent/runtime-approval.js'
@@ -30,11 +30,11 @@ const price: DurableTokenPrice = { version: 'credits-v2-itemized', modelTier: 's
   rateCardId: 'ordinary-writer-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } }
 
 describe.runIf(available)('ordinary writer actual PG body and original task cursor', () => {
-  it.each(['draft', 'shell-draft', 'shell-approve', 'shell-deny', 'shell-approved-resume', 'rollback-body', 'stale-body', 'narrowed-policy', 'resume-after-body', 'complete-chain', 'complete-reduce-recovery'] as const)('%s preserves the real body transaction and task identity', async scenario => {
+  it.each(['draft', 'shell-draft', 'shell-approve', 'shell-deny', 'shell-approved-resume', 'rollback-body', 'stale-body', 'narrowed-policy', 'resume-after-body', 'complete-chain', 'complete-reduce-recovery', 'unknown-paid'] as const)('%s preserves the real body transaction and task identity', async scenario => {
     await fixture(async f => {
       let lease = await claim(f)
       await prisma.agentRun.update({ where: { id: f.runId }, data: { status: 'running' } })
-      const fullChain = scenario === 'complete-chain' || scenario === 'complete-reduce-recovery'
+      const fullChain = scenario === 'complete-chain' || scenario === 'complete-reduce-recovery' || scenario === 'unknown-paid'
       const resumedBody = scenario === 'resume-after-body' || scenario === 'shell-approved-resume'
       const serviceAsk = ['shell-approve', 'shell-deny', 'shell-approved-resume'].includes(scenario)
       const originalFlag = featureFlags.isAgent2FeatureEnabled
@@ -175,15 +175,21 @@ describe.runIf(available)('ordinary writer actual PG body and original task curs
         await model([{ id: 'explicit-quality', name: 'quality_analyze', arguments: JSON.stringify({ compilationId: compilationBefore.id }) },
           { id: 'explicit-continuity', name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilationBefore.id }) },
           { id: 'commit-current', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId: compilationBefore.id }) }])
-        if (scenario === 'complete-chain') {
-          const usage = originalAttempts[0].usageReceipt!
-          await prisma.agentProviderUsageReceipt.update({ where: { attemptId: usage.attemptId }, data: { settlementStatus: 'pending' } })
+        if (scenario === 'unknown-paid') {
+          const request = { endpoint: 'https://provider.invalid/v1', body: { model: 'fixture', max_tokens: 100 } }
+          const unknownOperation = await preparePricedProviderOperation(lease, { key: 'fixture-unknown-payment', action: 'chat', request, price })
+          const attempt = await operations.prepareProviderAttempt(lease, { operationId: unknownOperation.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request })
+          await operations.markProviderDispatched(lease, attempt.id, 0)
+          await operations.recordProviderResult({ userId: f.userId, attemptId: attempt.id, requestHash: attempt.requestHash,
+            outcome: 'unknown', result: { reason: 'synthetic interrupted response' } })
+          const original = await prisma.agentProviderAttempt.findUniqueOrThrow({ where: { id: attempt.id } })
           const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
           await expect(step()).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
           expect(fetcher).not.toHaveBeenCalled()
+          expect(await prisma.agentProviderAttempt.findUniqueOrThrow({ where: { id: attempt.id } })).toEqual(original)
           expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(ledger)
           expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilationBefore.id } })).toMatchObject({ committedAt: null })
-          await prisma.agentProviderUsageReceipt.update({ where: { attemptId: usage.attemptId }, data: { settlementStatus: usage.settlementStatus } })
+          return
         }
         for (let index = 0; index < 2; index++) {
           const checked = await step()

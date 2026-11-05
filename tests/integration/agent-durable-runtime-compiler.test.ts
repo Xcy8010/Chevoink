@@ -355,9 +355,9 @@ describe.runIf(available)('durable compiler dispatch', () => {
         }
         const committed = await step()
         if (scenario === 'commit-stale') {
-          expect(committed).toMatchObject({ kind: 'tool', result: { outcome: 'failed' } })
-          expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id } })).status).toBe('active')
-          expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(0)
+          expect(committed).toMatchObject({ kind: 'tool', result: { summary: '章节已提交' } })
+          expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id } })).status).toBe('completed')
+          expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: '作者在检查后保存的新正文。' })
         } else {
           expect(committed).toMatchObject({ kind: 'tool', result: { summary: '章节已提交' } })
           if (scenario === 'commit-no-quality') {
@@ -650,7 +650,8 @@ describe.runIf(available)('durable task todos', () => {
         const saved = await saveExecutionState(lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
           snapshot: { ...frame.state, messages: [...frame.state.messages, { role: 'assistant', content: '已取消剩余清单。' }] } })
         const evidence = await collectDurableCompletionEvidence(lease, { expectedRevision: saved.revision, expectedHash: saved.snapshotHash })
-        expect(evidence.snapshot).toMatchObject({ todos: expected, blockers: [{ code: 'uncommitted_compilation', reference: own.compilation.id }] })
+        expect(evidence.snapshot).toMatchObject({ todos: expected, blockers: [] })
+        expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: own.compilation.id } })).toMatchObject({ status: 'active' })
         expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })).status).toBe('active')
       }
       if (otherArtifact) expect((await prisma.agentArtifact.findUniqueOrThrow({ where: { id: otherArtifact.id } })).content).toBe(otherArtifact.content)

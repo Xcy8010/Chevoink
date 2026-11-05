@@ -115,7 +115,7 @@ describe.runIf(available)('saved-cursor tool dispatch', () => {
       expect(written.kind).toBe('tool')
       if (written.kind === 'tool') expect(written.result.outcome === 'failed').toBe(scenario.endsWith('conflict') || scenario === 'denied')
       expect(await executeDurableToolStep(lease, signal)).toEqual({ kind: 'idle' })
-      expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(premature ? 6 : 4)
+      expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(premature ? 8 : 6)
       const saved = isPlan ? await prisma.agentArtifact.findUniqueOrThrow({ where: { id: plan.id } }) : await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
       expect(saved.content).toBe(scenario.endsWith('conflict') ? '作者并发修改' : scenario === 'denied' ? '原文' : writeArgs.content)
     })
@@ -143,7 +143,7 @@ describe.runIf(available)('durable actual reads', () => {
       if (memory) await prisma.projectMemoryEntry.update({ where: { id: memory.id }, data: { content: '后来修改的记忆' } })
       const ctx: ToolContext = { ...f, callId: 'read', mode: 'review', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {},
         toolAuthority: new Map([[tool.name, { permission: 'allow', alwaysConfirm: false, dangerous: false }]]),
-        durableRead: { lease, operationKey: 'exec:0', cursor: { expectedRevision: 0, expectedHash: initial.frame.snapshotHash } } }
+        durableRead: { lease, operationKey: `exec:${initial.frame.state.nextOperationSequence}`, cursor: { expectedRevision: initial.frame.revision, expectedHash: initial.frame.snapshotHash } } }
       const replay = scenario === 'structure' ? await structureOutlineTool.execute(ctx, {}) : scenario === 'novel' ? await novelGetContextTool.execute(ctx, {}) : scenario === 'memory' ? await memorySearchTool.execute(ctx, { query: '原章' }) : await chapterListSummariesTool.execute(ctx, { count: 2 })
       expect(replay.output).toBe(first.result.output)
       if (scenario === 'structure') {
@@ -153,7 +153,7 @@ describe.runIf(available)('durable actual reads', () => {
         expect(fresh.stateHash).not.toBe(replay.validationEvidence?.stateHash)
       }
       expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } })).toBe(1)
-      expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(2)
+      expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(4)
     })
   })
   it.each(['chapter', 'plan', 'chapter-missing', 'plan-missing'] as const)('%s preserves the original observation on replay', async scenario => {
@@ -170,7 +170,7 @@ describe.runIf(available)('durable actual reads', () => {
           messages: [{ role: 'user', content: '读取' }, { role: 'assistant', content: null, toolCalls: [{ id: 'read-call', name: tool.name, arguments: JSON.stringify(args) }] }], successfulToolSignatures: [] } })
       const ctx: ToolContext = { ...f, callId: 'read-call', mode: 'review', creativeFreedom: 'balanced', qualityMode: 'premium', emit: () => {}, signal: new AbortController().signal,
         toolAuthority: new Map([[tool.name, { permission: 'allow', alwaysConfirm: false, dangerous: false }]]),
-        durableRead: { lease, operationKey: 'exec:0', cursor: { expectedRevision: 0, expectedHash: state.frame.snapshotHash } } }
+        durableRead: { lease, operationKey: `exec:${state.frame.state.nextOperationSequence}`, cursor: { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash } } }
       const result = await tool.execute(ctx, args)
       expect(result.outcome === 'failed').toBe(scenario.endsWith('missing'))
       if (scenario === 'chapter') expect(result.observedState).toMatchObject({ kind: 'chapter', id: f.chapterId })
@@ -178,7 +178,7 @@ describe.runIf(available)('durable actual reads', () => {
       await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '作者新正文', revision: { increment: 1 } } })
       await prisma.agentArtifact.update({ where: { id: plan.id }, data: { content: '作者新计划' } })
       expect(await tool.execute(ctx, args)).toEqual(result)
-      expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(2)
+      expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(4)
       expect(await prisma.agentEffectReceipt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(1)
     })
   }, 30_000)
@@ -284,7 +284,7 @@ describe.runIf(available)('durable actual plan writes', () => {
           messages: [{ role: 'user', content: '规划' }, { role: 'assistant', content: null, toolCalls: [{ id: 'plan-call', name: 'plan_save', arguments: JSON.stringify({ arguments: args }) }] }], successfulToolSignatures: [] } })
       const ctx: ToolContext = { ...f, callId: 'plan-call', mode, creativeFreedom: 'balanced', qualityMode: 'premium', emit: () => {}, signal: new AbortController().signal,
         toolAuthority: new Map([['plan_save', { permission: mode === 'review' ? 'deny' : 'allow', alwaysConfirm: false, dangerous: false }]]),
-        durablePlan: { lease, operationKey: 'exec:0', cursor: { expectedRevision: 0, expectedHash: state.frame.snapshotHash }, expected: { id: existing?.id ?? null, hash: existing ? planTargetHash(existing) : null } } }
+        durablePlan: { lease, operationKey: `exec:${state.frame.state.nextOperationSequence}`, cursor: { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash }, expected: { id: existing?.id ?? null, hash: existing ? planTargetHash(existing) : null } } }
       if (scenario === 'conflict') await prisma.agentArtifact.update({ where: { id: existing!.id }, data: { content: '作者修改后的计划' } })
       if (scenario === 'review') {
         await expectToolDenied(planSaveTool.execute(ctx, args), { code: 'RUNTIME_EFFECT_NOT_AUTHORIZED' })
@@ -292,7 +292,7 @@ describe.runIf(available)('durable actual plan writes', () => {
         return
       }
       if (scenario === 'legacy-prepared-create') await prepareToolCursorOperation(lease, ctx.durablePlan!.cursor, {
-        key: 'exec:0', action: 'plan_save', callId: 'plan-call', targetId: f.novelId, effectDomain: 'plan', effectiveArgs: args,
+        key: `exec:${state.frame.state.nextOperationSequence}`, action: 'plan_save', callId: 'plan-call', targetId: f.novelId, effectDomain: 'plan', effectiveArgs: args,
         normalize: raw => Object.fromEntries(Object.entries(planSaveTool.parameters.parse(planSaveTool.coerceArgs!(raw))).filter(([, value]) => value !== undefined)),
         operationInput: runtimeJson({ callId: 'plan-call', novelId: f.novelId, args, expected: { id: null, hash: null } }).value,
       })
@@ -300,7 +300,7 @@ describe.runIf(available)('durable actual plan writes', () => {
       expect(await planSaveTool.execute(ctx, args)).toEqual(result)
       const failed = ['missing-kind', 'conflict', 'missing', 'placeholder', 'append-stale'].includes(scenario)
       expect(result.outcome === 'failed').toBe(failed)
-      expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(2)
+      expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(4)
       const artifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId } })
       expect(artifacts).toHaveLength(existing || !failed ? 1 : 0)
       if (!failed) {
@@ -336,13 +336,13 @@ describe.runIf(available)('durable pre-execution rejection', () => {
         toolAuthority: [{ name, permission: scenario === 'denied' || scenario === 'atomic-gap' ? 'deny' : scenario === 'approval' ? 'ask' : 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
         snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
           messages: [{ role: 'user', content: '读取' }, { role: 'assistant', content: null, toolCalls: [{ id: 'call', name, arguments: raw, ...(scenario === 'incomplete' ? { incomplete: true } : {}) }] }], successfulToolSignatures: [] } })
-      const cursor = { expectedRevision: 0, expectedHash: initial.frame.snapshotHash }
-      if (scenario === 'atomic-gap') await prisma.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: f.rootId, runId: f.runId, eventKey: `state:${f.rootId}:1`, type: 'fixture-conflict', payload: {} } })
+      const cursor = { expectedRevision: initial.frame.revision, expectedHash: initial.frame.snapshotHash }
+      if (scenario === 'atomic-gap') await prisma.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: f.rootId, runId: f.runId, eventKey: `state:${f.rootId}:${cursor.expectedRevision + 1}`, type: 'fixture-conflict', payload: {} } })
       const invoke = () => rejectToolCursorCall(lease, cursor, scenario === 'wrong-call' ? 'other' : 'call', hasValidator ? candidate : undefined)
       if (['valid', 'approval', 'wrong-call', 'atomic-gap', 'schema-changed', 'schema-coerced', 'coercion-fault'].includes(scenario)) {
         await expect(invoke()).rejects.toThrow()
         expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } })).toBe(0)
-        expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(0)
+        expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(initial.frame.revision)
         return
       }
       const rejected = await invoke()
@@ -361,7 +361,7 @@ describe.runIf(available)('durable pre-execution rejection', () => {
       expect(reduced.state).toMatchObject({ phase: 'idle', turn: 0, nextOperationSequence: 1 })
       const replay = await invoke()
       await reduceExecutionReceipt(lease, { expectedRevision: replay.pending.revision, expectedHash: replay.pending.snapshotHash, operationId: replay.operation.id })
-      expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(2)
+      expect((await loadExecutionState(f.userId, f.runId)).frame.revision).toBe(4)
       expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } })).toBe(1)
       expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'effect.committed' } })).toBe(0)
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('原文')

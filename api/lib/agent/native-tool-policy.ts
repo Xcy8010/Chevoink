@@ -62,7 +62,8 @@ export async function readEffectiveNativeTooling(tx: RuntimeTx, lease: RunLeaseT
   }
   if (goal) {
     const source = await tx.agentGoal.findUniqueOrThrow({ where: { id: goal.goalId } })
-    tools = intersectToolAuthority(tools, configuration.mode, new Map(await (await import('./goal-activation.js')).readGoalActivationToolCeiling(tx, source)))
+    const activationCeiling = await (await import('./goal-activation.js')).readGoalActivationToolCeiling(tx, source)
+    if (activationCeiling !== null) tools = intersectToolAuthority(tools, configuration.mode, new Map(activationCeiling))
   }
   const { toOpenAITools } = await import('./tools/registry.js')
   const previous = await (await import('./runtime-tool-view.js')).currentNativeToolViews(configuration.tools, task.scope)

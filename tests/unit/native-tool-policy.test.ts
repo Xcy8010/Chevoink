@@ -1,5 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 const parentState = vi.hoisted(() => vi.fn())
+const activationCeiling = vi.hoisted(() => vi.fn())
+vi.mock('../../api/lib/agent/goal-activation.js', async original => ({ ...await original<object>(), readGoalActivationToolCeiling: activationCeiling }))
 vi.mock('../../api/lib/agent/runtime-state.js', async original => ({ ...await original<object>(), readExecutionStateInTransaction: parentState }))
 import { readEffectiveNativeTooling, readNativeToolAdmission } from '../../api/lib/agent/native-tool-policy.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
@@ -11,7 +13,7 @@ const lease = { userId: 'owner', runId: 'run', taskRootId: 'root', ownerId: 'wor
 const definition = { type: 'function' as const, function: { name: 'chapter_read', description: '合成读取', parameters: { type: 'object' } } }
 const grant = { name: 'chapter_read', permission: 'ask' as const, dangerous: false, alwaysConfirm: false }
 const configuration = { mode: 'build' as const, agentType: 'orchestrator', tools: [definition], toolAuthority: [grant] }
-const db = { $queryRaw: vi.fn().mockResolvedValue([]), agentTaskRoot: { findUniqueOrThrow: vi.fn() }, agentSession: { findFirst: vi.fn() }, agentGoalExecution: { findFirst: vi.fn() } }
+const db = { agentGoal: { findUniqueOrThrow: vi.fn() }, $queryRaw: vi.fn().mockResolvedValue([]), agentTaskRoot: { findUniqueOrThrow: vi.fn() }, agentSession: { findFirst: vi.fn() }, agentGoalExecution: { findFirst: vi.fn() } }
 const task = buildTaskSpec({ runId: 'run', novelId: 'novel', prompt: '再检查一下能否新增后续卷', authorWritingProtocol: 2 })
 const current = (token: RunLeaseToken = lease, settings = configuration) => readEffectiveNativeTooling(db as unknown as RuntimeTx, token,
   settings as Parameters<typeof readEffectiveNativeTooling>[2], { ...task, scope: { ...task.scope, authorEffects: { ...task.scope.authorEffects!, structure: false, manuscript: false },
@@ -19,6 +21,8 @@ const current = (token: RunLeaseToken = lease, settings = configuration) => read
 
 beforeEach(() => {
   vi.resetAllMocks()
+  activationCeiling.mockResolvedValue(null)
+  db.agentGoal.findUniqueOrThrow.mockResolvedValue({ id: 'goal' })
   db.$queryRaw.mockResolvedValue([])
   db.agentTaskRoot.findUniqueOrThrow.mockImplementation(async ({ where }) => ({ id: where.id, userId: 'owner', novelId: 'novel', sessionId: where.id === 'parent' ? 'parent-session' : 'session' }))
   parentState.mockResolvedValue({ configuration, originalSpec: task })
@@ -102,4 +106,14 @@ it.each(['ask', 'deny', 'alwaysConfirm'] as const)('preserves an existing actual
   if (restriction === 'deny') expect(recovered).toBeUndefined()
   else expect(recovered).toMatchObject({ permission: 'ask', alwaysConfirm: saved.alwaysConfirm })
   expect(result.tools.some(tool => tool.function.name === 'volume_create')).toBe(true)
+})
+
+
+it.each([null, []])('distinguishes an absent goal activation ceiling from an explicit empty ceiling: %j', async ceiling => {
+  db.agentGoalExecution.findFirst.mockResolvedValue({ goalId: 'goal' })
+  activationCeiling.mockResolvedValue(ceiling)
+  const result = await current()
+  expect(result.tools.some(tool => tool.function.name === 'chapter_read')).toBe(ceiling === null)
+  expect(result.tools.some(tool => tool.function.name === 'volume_create')).toBe(ceiling === null)
+  expect(runtimeJson(configuration).hash).toBe(runtimeJson({ mode: 'build', agentType: 'orchestrator', tools: [definition], toolAuthority: [grant] }).hash)
 })

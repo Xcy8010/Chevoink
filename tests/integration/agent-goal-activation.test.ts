@@ -1,3 +1,4 @@
+import { reconcileGoalUsage } from '../../api/lib/agent/goal-budget.js'
 import { initializeExecutionState, saveExecutionState } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -220,7 +221,11 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
     expect(commandsBeforeReadiness).toHaveLength(3)
     expect(commandsBeforeReadiness.map(command => command.requestId).sort()).toEqual([enableRequestId, pauseRequestId, resumeRequestId].sort())
     expect(commandsBeforeReadiness.filter(command => command.requestId.startsWith('enable:'))).toEqual([enableCommand])
-    const action = await prisma.$transaction(async tx => reconcileGoalActivation(tx, await lockOwnedGoal(tx, f.userId, f.sessionId, initial.id), new Date()))
+    let action = await prisma.$transaction(async tx => reconcileGoalActivation(tx, await lockOwnedGoal(tx, f.userId, f.sessionId, initial.id), new Date()))
+    if (operationStatus === 'prepared') {
+      await reconcileGoalUsage(initial.id)
+      action = await prisma.$transaction(async tx => reconcileGoalActivation(tx, await lockOwnedGoal(tx, f.userId, f.sessionId, initial.id), new Date()))
+    }
     const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: root.id, type: 'run.paused' }, orderBy: { sequence: 'desc' } })
     if (operationStatus === 'unknown') {
       expect(action).toBe(true)

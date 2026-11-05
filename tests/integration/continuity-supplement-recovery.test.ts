@@ -482,7 +482,9 @@ describe.runIf(available)('historical supplemental records and ordinary current 
       const unknown = await prisma.aiUsageLog.findFirstOrThrow({ where: { userId: f.userId, id: { notIn: s.before.usage.map(row => row.id) } } })
       expect(unknown).toMatchObject({ usageSource: 'unknown', billingStatus: 'pending_usage' })
     }
-    expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: s.compilation.id } })).committedAt).toBeNull()
+    const finalBridge = await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: s.compilation.id } })
+    if (kind === 'unknown' || kind === 'conflict') expect(finalBridge.committedAt).not.toBeNull()
+    else expect(finalBridge.committedAt).toBeNull()
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: s.chapter.id } })).toEqual(s.chapter); await s.unchangedOriginal()
   }, undefined, prompt, options), 30000)
 

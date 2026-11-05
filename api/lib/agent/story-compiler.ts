@@ -14,7 +14,7 @@ import { taskSpecSchema, sceneTaskInputSchema, storyCharterInputSchema } from '.
 import { runtimeJson } from './runtime-common.js'
 import type { WritingWorkflowMilestone } from './semantic-progress.js'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
-import { readWritingVolumeContext, assertWritingVolumeBoundary, isWritingVolumeTargetOrderIndex } from './writing-volume.js'
+import { readWritingVolumeContext, assertWritingVolumeBoundary, isWritingVolumeTargetOrderIndex, readTailVolumeBinding } from './writing-volume.js'
 import { writingVolumeDecisionSchema, type WritingVolumeDecision } from '../../../shared/contracts/writing-volume-contracts.js'
 import { readReviewCycle } from './review-cycle.js'
 import { saveStoryMemory } from './story-memory.js'
@@ -161,12 +161,12 @@ async function resolveTarget(userId: string, novelId: string, chapterId: string 
   const chapter = chapterId
     ? await db.chapter.findFirst({
         where: { id: chapterId, ...activeChapterScope(novelId), authorId: userId },
-        select: { id: true, title: true, orderIndex: true, revision: true, content: true },
+        select: { id: true, title: true, orderIndex: true, revision: true, content: true, volumeId: true },
       })
     : targetOrderIndex
       ? await db.chapter.findFirst({
           where: { ...activeChapterScope(novelId), authorId: userId, orderIndex: targetOrderIndex },
-          select: { id: true, title: true, orderIndex: true, revision: true, content: true },
+          select: { id: true, title: true, orderIndex: true, revision: true, content: true, volumeId: true },
         })
       : null
   if (chapterId && !chapter) {
@@ -231,7 +231,16 @@ export async function prepareStoryCompilation(input: {
   const volumeContext = previousChapter ? await readWritingVolumeContext(db, input, target.targetOrderIndex) : null
   const volumeDecision = input.volumeDecision ? writingVolumeDecisionSchema.parse(input.volumeDecision)
     : { kind: 'continue' as const, reason: target.chapter ? '原目标章已创建，保持其所在卷；本次审视不迁移既有章。' : '尚无本卷主困局已收束的真实原文依据，先延续当前卷；本章必须推进原目标，章数不能代替边界判断。' }
-  if (volumeDecision.kind === 'new_volume') await assertWritingVolumeBoundary(db, input, target.targetOrderIndex, volumeDecision.newVolume)
+  let reusedTailVolume: { id: string; proposalHash: string; targetOrderIndex: number } | undefined
+  if (volumeDecision.kind === 'new_volume') {
+    const { binding } = await readTailVolumeBinding(db, input, target.targetOrderIndex, writing)
+    if (binding) {
+      const volume = await db.volume.findFirst({ where: { id: binding.volumeId, novelId: input.novelId, ...activeVolumeWhere }, select: { id: true } })
+      if (!volume || binding.proposalHash !== runtimeJson(volumeDecision.newVolume).hash || target.chapter && target.chapter.volumeId !== volume.id)
+        throw new DataAccessError(409, 'AUTHOR_CHAPTER_SCOPE', '原尾卷决定或已绑定章节的真实卷位置不一致，未创建替代卷。')
+      reusedTailVolume = { id: volume.id, proposalHash: binding.proposalHash, targetOrderIndex: target.targetOrderIndex }
+    } else await assertWritingVolumeBoundary(db, input, target.targetOrderIndex, volumeDecision.newVolume)
+  }
   const memory = await db.projectMemoryEntry.findMany({
     where: {
       novelId: input.novelId,
@@ -269,11 +278,11 @@ export async function prepareStoryCompilation(input: {
   })
   // A repeated PREPARE must retain the volume already created for this same
   // original task/target. A changed proposal cannot mint a replacement volume.
-  const priorVolumes = !target.chapter ? priorRepairStates.flatMap(item => {
+  const priorVolumes = !reusedTailVolume && !target.chapter ? priorRepairStates.flatMap(item => {
     const prepared = item.preparedContext as Record<string, unknown> | null
     return prepared?.createdTailVolume ? [{ prepared, binding: prepared.createdTailVolume as { id?: string; proposalHash?: string; targetOrderIndex?: number } }] : []
   }) : []
-  const createdTailVolume = priorVolumes[0]?.binding
+  const createdTailVolume = reusedTailVolume ?? priorVolumes[0]?.binding
   for (const { prepared, binding } of priorVolumes) {
     const priorPrevious = prepared.previousChapter as { id?: string; revision?: number } | null
     const capability = writing.writing?.tailVolume
@@ -673,7 +682,6 @@ export async function commitChapterBridge(input: {
   const now = new Date()
   const source = compilation.bridge.fromChapterId ? await db.chapter.findFirst({ where: { id: compilation.bridge.fromChapterId,
     authorId: input.userId, ...activeChapterScope(input.novelId) }, select: { revision: true } }) : null
-  if (compilation.bridge.fromChapterId && !source) throw new DataAccessError(409, 'CONTINUITY_INPUT_STALE', '衔接来源已归档，章节未提交。')
   // Commit manuscript delivery. Keep historical fact ledgers/proofs and
   // original bridge facts; report advice never becomes a supported fact.
   await db.chapterBridge.update({ where: { id: compilation.bridge.id }, data: { targetRevision: chapter.revision, committedAt: now,

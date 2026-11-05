@@ -493,12 +493,13 @@ describe.runIf(available)('canonical durable child grants', () => {
     }
     // Critics are now body-read-only by default. Their admission is allowed;
     // none can turn a read baseline into author permission to edit this target.
+    state = await loadExecutionState(f.userId, child.runId)
+    await saveExecutionState(child, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash,
+      snapshot: { ...state.frame.state, messages: [...state.frame.state.messages.slice(0, -1), { role: 'assistant', content: null,
+        toolCalls: indirect.map((call, index) => ({ id: `readonly-${index}`, name: call.name, arguments: JSON.stringify(call.args) })) }] } })
     for (const [index, call] of indirect.entries()) {
-      state = await loadExecutionState(f.userId, child.runId)
+      const { frame } = await loadExecutionState(f.userId, child.runId)
       const args = call.tool.parameters.parse(call.args)
-      const frame = await saveExecutionState(child, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash,
-        snapshot: { ...state.frame.state, messages: [...state.frame.state.messages.slice(0, index === 0 ? -1 : undefined),
-          { role: 'assistant', content: null, toolCalls: [{ id: `readonly-${index}`, name: call.name, arguments: JSON.stringify(call.args) }] }] } })
       const prepared = await prepareToolCursorOperation(child, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash }, {
         key: `exec:${frame.state.nextOperationSequence}`, action: call.name, callId: `readonly-${index}`, targetId: child.taskRootId,
         effectDomain: 'read', effectiveArgs: args, operationInput: { callId: `readonly-${index}`, args }, normalize: raw => call.tool.parameters.parse(raw) })

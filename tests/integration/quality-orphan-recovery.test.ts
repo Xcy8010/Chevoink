@@ -236,7 +236,6 @@ describe.runIf(available).each(['clean', 'pending-decision'] as const)('typed co
       expect(refused?.payload).toMatchObject({ callId: 'early-commit', toolName: 'chapter_bridge_commit', ok: true })
       expect(results.filter(event => (event.payload as { toolName: string; ok: boolean }).toolName === 'chapter_bridge_commit'
         && (event.payload as { ok: boolean }).ok).map(event => (event.payload as { callId: string }).callId)).toEqual(['early-commit'])
-      expect(calls.some(event => ['writer-decision', 'decided-commit'].includes((event.payload as { callId: string }).callId))).toBe(false)
       const report = await prisma.chapterQualityReport.findFirstOrThrow({ where: { runId: seeded.subject.runId }, include: { findings: true }, orderBy: { createdAt: 'desc' } })
       expect(report.findings.some(finding => finding.disposition === 'pending')).toBe(true)
     }

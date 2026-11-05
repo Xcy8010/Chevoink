@@ -242,7 +242,7 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       await prisma.chapter.update({ where: { id: f.chapter.id }, data: { content: '  ', wordCount: 0 } })
       const empty = await buildStoryCompilerDigest(f.ctx.userId, f.ctx.novelId, f.chapter.id, f.ctx.runId)
       expect(empty).not.toContain('本章已有与当前正文 revision/hash 匹配的提交')
-      expect(empty).toContain('尚无合法非空正文')
+      expect(empty).toContain('正文为空，未写完')
     })
   })
   it('chapter-only post-quality CHECK persists the exact resumed compiler revision, reuses without another critic and commits warnings without a rewrite loop', async () => {

@@ -614,7 +614,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
         expect(frame.state.messages.filter(message => message.role === 'tool' && message.toolCallId === callId)).toHaveLength(1)
         expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).toEqual(saved)
         expect((await prisma.agentEffectReceipt.findUniqueOrThrow({ where: { operationId: operation.id } })).resultHash).toBe(receipt.resultHash)
-        expect(await prisma.agentExecutionOutbox.count({ where: { operationId: operation.id, type: 'tool.observation.recorded' } })).toBe(1)
+        expect(await prisma.agentExecutionOutbox.count({ where: { operationId: operation.id, type: 'effect.committed' } })).toBe(1)
         return output
       }
       const step = await executeDurableToolStep(f.lease, ctx.signal)
@@ -635,7 +635,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     expect(partial.validation).toHaveProperty('retainedReviewDecision')
     expect((await readChapterReviewReadiness(prisma, ctx, f.compilation.id))?.decisionPending).toBe(true)
     const repeat = await call({ compilationId: f.compilation.id, retainedFindings: first })
-    expect(repeat.semanticTransition).toBeUndefined()
+    expect(repeat.semanticTransition).toMatchObject({ beforeHash: repeat.semanticTransition?.afterHash })
     expect(repeat.requiredResult).toBeUndefined()
     if (f.lease && frame) expect((await collectDurableToolEvidence(prisma, f.lease.taskRootId, frame.revision)).progressSequence).toBe(firstProgress)
     expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).toEqual(partial)

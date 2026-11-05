@@ -157,7 +157,8 @@ describe.runIf(available)('ordinary native continuity review on an existing task
       expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toMatchObject({ committedAt: null })
       return
     }
-    expect(outcome).toMatchObject({ result: { reviewCompleted: true } })
+    expect(outcome).toMatchObject({ result: { reviewCompleted: false, reviewOutcome: 'stale' } })
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ revision: 6, content: content.replace(broken, corrected) })
     for (let index = 0; index < 2; index++) {
       let checked = await step()
       if (checked.kind === 'waiting_approval') {

@@ -1,4 +1,4 @@
-import * as nativeQuality from '../../api/lib/agent/tools/durable-quality.js'
+import * as toolCursor from '../../api/lib/agent/runtime-tool-cursor.js'
 import { chatWithTools } from '../../api/lib/ai-service.js'
 import { modelRouteRevision } from '../../api/lib/agent/runtime-model-cursor.js'
 import { currentNativeToolViews } from '../../api/lib/agent/runtime-tool-view.js'
@@ -158,9 +158,9 @@ describe.runIf(available)('current native writing and historical configuration a
     }
     let oldRequests: Awaited<ReturnType<typeof prisma.agentProviderAttempt.findMany>> | undefined
     if (scenario === 'merged-revision-restart') {
-      const prepare = nativeQuality.prepareQualityWork; let interrupted = false
-      vi.spyOn(nativeQuality, 'prepareQualityWork').mockImplementation(async (...args) => {
-        if (!interrupted && (await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).revision === 3) { interrupted = true; throw Error('interrupted after actual continuity CAS') }
+      const prepare = toolCursor.prepareToolCursorOperation; let interrupted = false
+      vi.spyOn(toolCursor, 'prepareToolCursorOperation').mockImplementation(async (...args) => {
+        if (!interrupted && args[2].action === 'quality_analyze' && (await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).revision === 3) { interrupted = true; throw Error('interrupted after actual continuity CAS') }
         return prepare(...args)
       })
       await expect(executeDurableToolStep(lease, new AbortController().signal)).rejects.toThrow('interrupted after actual continuity CAS')

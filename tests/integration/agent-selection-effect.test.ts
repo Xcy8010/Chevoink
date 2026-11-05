@@ -194,7 +194,7 @@ describe.skipIf(!available)('versioned original author selection effect', () => 
   }, false, '修改第一章第二段'))
 
   it.each(['chapter_write', 'chapter_append', 'chapter_rename', 'chapter_create', 'volume_create'])(
-    'receipts local cursor denial of %s and reaches the next allowed read without budget effects', action => fixture('durable', async (ctx, _spec, _invoke, lease) => {
+    'keeps local body limits while recording %s and returning to reads', action => fixture('durable', async (ctx, _spec, _invoke, lease) => {
       const tools = [chapterReadTool, volumeListTool, chapterWriteTool, chapterAppendTool, chapterRenameTool, chapterCreateTool, volumeCreateTool]
       const before = await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })
       const budget = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: lease!.taskRootId } })
@@ -213,15 +213,18 @@ describe.skipIf(!available)('versioned original author selection effect', () => 
       })
       await executeDurableToolStep(lease!, ctx.signal)
       await executeDurableToolStep(lease!, ctx.signal)
-      expect(await executeDurableToolStep(lease!, ctx.signal)).toMatchObject({ kind: 'tool', result: { outcome: 'failed', output: expect.stringMatching(/局部|选区/u) } })
+      const selected = await executeDurableToolStep(lease!, ctx.signal)
+      if (action === 'volume_create') expect(selected).toMatchObject({ kind: 'tool', result: { observedState: { kind: 'volume' } } })
+      else expect(selected).toMatchObject({ kind: 'tool', result: { outcome: 'failed', output: expect.stringMatching(/局部|选区/u) } })
       expect(await executeDurableToolStep(lease!, ctx.signal)).toMatchObject({ kind: 'tool' })
       expect(await executeDurableToolStep(lease!, ctx.signal)).toEqual({ kind: 'idle' })
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toEqual(before)
       expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(1)
-      expect(await prisma.volume.count({ where: { novelId: ctx.novelId } })).toBe(1)
+      expect(await prisma.volume.count({ where: { novelId: ctx.novelId } })).toBe(action === 'volume_create' ? 2 : 1)
       expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: lease!.taskRootId } })).toEqual(budget)
       const receipt = await prisma.agentOperation.findFirstOrThrow({ where: {  taskRootId: lease!.taskRootId, action }, include: { effectReceipt: true } })
-      expect(receipt).toMatchObject({ status: 'failed', effectReceipt: { result: { code: 'AUTHOR_LOCAL_SCOPE' } } })
+      if (action === 'volume_create') expect(receipt).toMatchObject({ status: 'succeeded' })
+      else expect(receipt).toMatchObject({ status: 'failed', effectReceipt: { result: { code: 'AUTHOR_LOCAL_SCOPE' } } })
       expect((await loadExecutionState(ctx.userId, ctx.runId)).frame.state.messages.filter(message => message.role === 'tool' && message.toolCallId === 'denied')).toHaveLength(1)
     }, false, '只润色第二段'))
 
@@ -333,7 +336,7 @@ describe.skipIf(!available)('versioned original author selection effect', () => 
       expect(state.messages.filter(message => message.role === 'tool' && message.toolCallId === 'read-after')).toHaveLength(1)
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toEqual(before)
       expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(1)
-      if (action === 'volume_update') expect(await prisma.volume.findMany({ where: { novelId: ctx.novelId } })).toEqual([{ ...volume, title: '不允许改卷', updatedAt: expect.any(Date) }])
+      if (action === 'volume_update') expect(await prisma.volume.findMany({ where: { novelId: ctx.novelId } })).toEqual([{ ...volume, title: '不允许改卷', revision: volume.revision + 1, updatedAt: expect.any(Date) }])
       else expect(await prisma.volume.findMany({ where: { novelId: ctx.novelId } })).toEqual([volume])
       expect(await prisma.storyCompilation.count({ where: { novelId: ctx.novelId } })).toBe(0)
       expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: lease!.taskRootId } })).toEqual(budget)

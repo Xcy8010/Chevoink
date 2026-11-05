@@ -341,8 +341,8 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
     const normalization = { version: 1 as const, rawArguments: call!.arguments, normalizedArgsHash,
       sourceRevision: frame.revision, sourceSnapshotHash: frame.snapshotHash }
     const oldGrant = current.configuration.toolAuthority.find(item => item.name === input.action)
-    const toolAdmission = admitted ?? (published && (runtimeJsonHash(oldGrant ?? null) !== runtimeJsonHash(grant)
-      || runtimeJsonHash(oldDefinition?.function.parameters ?? null) !== runtimeJsonHash(published.function.parameters))
+    const toolAdmission = admitted ?? (published && (!oldGrant || !oldDefinition || runtimeJsonHash(oldGrant) !== runtimeJsonHash(grant)
+      || runtimeJsonHash(oldDefinition.function.parameters) !== runtimeJsonHash(published.function.parameters))
       ? { version: 1 as const, grant: grant!, definition: published } : null)
     const operation = await prepareOperationInTransaction(tx, token, { key: input.key, kind: 'tool', action: input.action,
       input: runtimeJson({ ...base, normalization, ...(toolAdmission ? { toolAdmission } : {}) }).value })

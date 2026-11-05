@@ -56,7 +56,7 @@ export async function assertWritingVolumeBoundary(tx: Prisma.TransactionClient, 
 }
 
 /** Same-task tail identity is durable even when no compiler was prepared. */
-async function readTailVolumeBinding(tx: Prisma.TransactionClient, subject: Subject, targetOrderIndex: number, scope: Awaited<ReturnType<typeof readWritingScope>>) {
+export async function readTailVolumeBinding(tx: Prisma.TransactionClient, subject: Subject, targetOrderIndex: number, scope: Awaited<ReturnType<typeof readWritingScope>>) {
   const runIds = await originalTaskRunIds(tx, subject, scope)
   const compilations = await tx.storyCompilation.findMany({ where: { userId: subject.userId, novelId: subject.novelId,
     runId: { in: runIds }, targetOrderIndex }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })

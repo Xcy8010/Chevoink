@@ -169,7 +169,7 @@ describe.runIf(available)('real durable default execution control', () => {
       const token = await claim(f)
       const raw = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })
       const op = await prepareOperation(token, { key: 'first', kind: 'provider', action: 'chat', input: {} })
-      const attempt = await prepareProviderAttempt(token, { operationId: op.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request: { body: { max_tokens: 100 } } })
+      const attempt = await prepareProviderAttempt(token, { operationId: op.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request })
       expect((await markProviderDispatched(token, attempt.id)).dispatchGranted).toBe(true)
       const identity = { userId: f.userId, attemptId: attempt.id, requestHash: attempt.requestHash }
       await recordProviderUsage({ ...identity, revision: 1, usage: { source: 'reported', promptTokens: 10000000, completionTokens: 123, cacheHitTokens: null, cacheMissTokens: null } })
@@ -411,7 +411,7 @@ describe.runIf(available)('actual saved-frame consumers beyond historical defaul
         tools: [{ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } }],
         toolAuthority: [{ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
         snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
-          messages: [{ role: 'user', content: '修改本章' }], successfulToolSignatures: [] } })
+          messages: [{ role: 'system', content: AGENT_TOOL_EXECUTION_POLICY }, { role: 'user', content: '修改本章' }], successfulToolSignatures: [] } })
       for (let round = 0; round < 8; round++) {
         const { frame } = await loadExecutionState(f.userId, f.runId)
         const messages = [...frame.state.messages]
