@@ -235,6 +235,7 @@ export function AgentPanel({
   const messages = useMemo(() => projectOutgoingMessages(storeLoadedSessionId === sessionId ? canonicalMessages : [], outgoing, sendScope, novelId, sessionId, requestClocks), [canonicalMessages, outgoing, sendScope, novelId, sessionId, storeLoadedSessionId, requestClocks])
   const lastUserRequest = [...messages].reverse().find(message => message.role === 'user')
   const waitingRequest = lastUserRequest?.requestTiming && !messages.some(item => item.role === 'assistant' && item.runId === lastUserRequest.runId) ? lastUserRequest : undefined
+  const preparingRequest = lastUserRequest?.requestTiming?.status === 'running' && lastUserRequest.requestTiming.elapsedMs === null
   const hasOutgoing = messages.some(message => message.delivery)
   const deliveryErrorRef = useRef<{ clientRequestId: string; scope: string; sessionId: string | null; message: string } | null>(null)
   const { recentConversationText, blockInfoById, lastAssistantId } = useMemo(() => projectMessages(messages), [messages])
@@ -1790,7 +1791,7 @@ export function AgentPanel({
               </div>
             ) : null}
             {waitingRequest?.requestTiming ? <ProcessDuration timing={waitingRequest.requestTiming} /> : null}
-            {activityRunActive ? <ProcessingHint visible={awaiting} /> : null}
+            {activityRunActive ? <ProcessingHint visible={awaiting && !preparingRequest} /> : null}
             {pendingApproval ? (
               <AgentPermissionCard approval={pendingApproval} onResolve={handleResolveApproval} />
             ) : null}

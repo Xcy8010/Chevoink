@@ -2384,6 +2384,44 @@ describe('BYOK paid-tool isolation', () => {
 })
 
 describe('original task context on resume', () => {
+  it('clears a proven obsolete target wait and tells the model to resume original work without choosing generated options', async () => {
+    const prompt = '人物表达僵硬，全部重写。'
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt })
+    taskSpec.scope.writingClarificationProtocol = 2
+    taskSpec.scope.writing = { version: 1, kind: 'needs_input', targets: [], repairAuthorized: false, titleAndBodyOnly: false }
+    const writing = { ...taskSpec.scope.writing, kind: 'bounded' as const, targets: [{ chapterId: 'c', orderIndex: 1 }], repairAuthorized: true }
+    const effective = { ...taskSpec, scope: { ...taskSpec.scope, writing } }, before = JSON.stringify(taskSpec)
+    mocks.currentOriginal = { prompt, taskSpec }
+    const marker = { version: 1, kind: 'writing_scope', callId: 'old-question' }
+    const checkpoint = { version: 2, controlPolicy: 'until_completion', origin: 'system_default', activeExecutionMs: 1,
+      runStartedAt: Date.now() - 1000, resumeCount: 0, compactionCount: 0, maxTurns: 100, tokenBudget: 100000,
+      writeProgress: 0, writeBaseline: 0, readProgress: 0, readBaseline: 0, progressSignatures: [], authorInputRequired: marker,
+      toolRestrictions: [{ action: 'story_compiler_prepare', target: 'c', code: 'SCOPE_NEEDS_INPUT', reason: '历史错误目标拦截' }] }
+    mocks.update.mockResolvedValueOnce({ taskSpec, currentTurn: 4, startedAt: new Date(checkpoint.runStartedAt),
+      usage: { promptTokens: 90, completionTokens: 10, totalTokens: 100, checkpoint } })
+    const scopeModule = await import('../../api/lib/agent/writing-scope.js')
+    // This loop test consumes a proven read projection; the correction unit
+    // and actual PostgreSQL continuation tests verify the admission proof.
+    const scope = vi.spyOn(scopeModule, 'readWritingScope').mockResolvedValue({ prompt, spec: effective, taskId: taskSpec.id,
+      sourceRunId: 'run', parentRunId: null, writing, bindings: null, clarification: null,
+      targetCorrection: { version: 1, taskId: taskSpec.id, sourceRunId: 'run', chapterId: 'c', orderIndex: 1,
+        chapterTitle: '合成章', originalScopeHash: 'a'.repeat(64), effectiveScopeHash: 'b'.repeat(64) } })
+    const resolved = vi.spyOn(scopeModule, 'writingScopeResolvesInput').mockResolvedValue(true)
+    const view = vi.spyOn(scopeModule, 'effectiveWritingTaskSpec').mockResolvedValue(effective)
+    mocks.chat.mockImplementationOnce(async input => {
+      expect(input.messages.some(message => message.content?.includes('[系统·原任务目标已核实]')
+        && message.content.includes('chapterId=c') && message.content.includes('没有被作者选中'))).toBe(true)
+      expect(mocks.runs.get('run')?.usage).toMatchObject({ totalTokens: 100, checkpoint: { toolRestrictions: [] } })
+      expect((mocks.runs.get('run')?.usage as { checkpoint: object }).checkpoint).not.toHaveProperty('authorInputRequired')
+      return fixtureBudgetExhausted()
+    })
+    try {
+      await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build', prompt: '继续', resume: true })
+      expect(mocks.chat).toHaveBeenCalledOnce()
+      expect(events().some(event => event.type === 'tool.call' && event.toolName === 'ask_user')).toBe(false)
+      expect(JSON.stringify(taskSpec)).toBe(before)
+    } finally { scope.mockRestore(); resolved.mockRestore(); view.mockRestore() }
+  })
   it('reports unknown model billing accurately instead of a model outage or a blind retry', async () => {
     const check = tool('continuity_validate', async () => { throw new DataAccessError(409, 'AI_PROVIDER_BILLING_UNCONFIRMED', '原请求用量或费用尚未确认。') })
     const outcome = await handleToolCall(call('billing-check', check.name), [check], context(), { emit: mocks.emit }, 'message', 'run')

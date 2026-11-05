@@ -156,7 +156,7 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
 
   it('recovers an admitted old binder target through a read projection and genuine author continuation, preserving its frozen evidence', () => fixture('修改正文', async (ctx, before) => {
     await prisma.agentRun.update({ where: { id: ctx.runId }, data: { status: 'completed' } })
-    const runId = randomUUID(), prompt = '修改正文', chapterId = before[0].id
+    const runId = randomUUID(), prompt = '人物表达太僵硬，全部重新写。', chapterId = before[0].id
     const startRequest = withHumanAdmission({ novelId: ctx.novelId, sessionId: ctx.sessionId, chapterId, prompt, mode: 'build' })
     const fresh = buildTaskSpec({ runId, novelId: ctx.novelId, chapterId, prompt, authorWritingProtocol: 2, localEditProtocol: 1, reviewProtocol: 1 })
     await prisma.agentRun.create({ data: { id: runId, userId: ctx.userId, novelId: ctx.novelId, sessionId: ctx.sessionId, chapterId,
@@ -177,11 +177,16 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
     await prisma.agentRun.update({ where: { id: runId }, data: { taskSpec: frozen.value, usage: runtimeJson(usage).value } })
     await prisma.agentRunEvent.createMany({ data: [
       { runId, seq: 1, type: 'tool.result', payload: { callId: 'failed-prepare', toolName: 'story_compiler_prepare', failureCode: 'SCOPE_NEEDS_INPUT' } },
-      { runId, seq: 2, type: 'tool.call', payload: { callId: marker.callId, toolName: 'ask_user', args: { question: '这次是指修改当前章节吗？', options: [{ label: '当前章节' }, { label: '我补充' }] } } },
+      { runId, seq: 2, type: 'tool.call', payload: { callId: marker.callId, toolName: 'ask_user', args: {
+        question: '这次的「全部重新写」是指把第 1 章《合成章1》整章重写吗？',
+        options: [{ label: '重写第1章整章', detail: '保留既有情节，重新处理对白。' },
+          { label: '只修改会面这一段', detail: '其余原文不动。' },
+          { label: '第1、2章一起重写', detail: '先处理第一章，随后处理第二章。' }] } } },
       { runId, seq: 3, type: 'run.paused', payload: {} },
     ] })
     const effective = await prisma.$transaction(tx => readWritingScope(tx, subject))
     expect(effective.targetCorrection).toMatchObject({ taskId: spec.id, chapterId })
+    expect(effective.writing?.targets).toEqual([{ chapterId, orderIndex: 1 }])
     expect(await prisma.$transaction(tx => writingScopeResolvesInput(tx, subject, effective, marker))).toBe(true)
     expect(await prisma.$transaction(tx => writingScopeResolvesInput(tx, subject, effective, { ...marker, kind: 'local_edit_scope' }))).toBe(false)
     expect(await prisma.$transaction(tx => writingScopeResolvesInput(tx, subject, effective, { ...marker, callId: 'unrecorded-question' }))).toBe(false)

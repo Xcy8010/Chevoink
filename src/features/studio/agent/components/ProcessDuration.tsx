@@ -22,7 +22,8 @@ export function ProcessDuration({ timing, active = false }: { timing: AgentRunTi
   useSyncExternalStore(ticking ? subscribe : idleSubscribe, ticking ? snapshot : idleSnapshot, idleSnapshot)
   const elapsed = runElapsedMs(timing, Date.now())
   const live = active || timing.status === 'running'
-  const seconds = elapsed === null ? live ? 0 : null : Math.floor(Math.max(0, elapsed) / 1000)
+  if (elapsed === null && live) return <span role="status" className="agent-processing-shimmer text-[11px] text-[var(--text-secondary)]" data-process-duration>正在准备中...</span>
+  const seconds = elapsed === null ? null : Math.floor(Math.max(0, elapsed) / 1000)
   const units = seconds === null ? [] : [
     ...(seconds >= 3600 ? [{ value: Math.floor(seconds / 3600), label: '小时' }] : []),
     ...(seconds >= 60 ? [{ value: Math.floor(seconds / 60) % 60, label: '分钟' }] : []),

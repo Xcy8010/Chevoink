@@ -1172,12 +1172,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // cursor or draft lifecycle, including preparation-end cleanup.
       if (event.runId !== state.runId && ['run.started', 'message.start', 'text.delta', 'text.final', 'reasoning.delta', 'tool.call', 'tool.result', 'tool.delta', 'tool.deferred', 'tool.preparation.end', 'step.finish', 'run.paused', 'run.finished', 'error'].includes(event.type)) return {}
 
-      // A fresh local admission may observe its actual first start at any seq.
-      // Resume/history snapshots cannot establish the original submit interval.
-      if (event.type === 'run.started' && !event.authorContinue && state.motionAfterSeq === 0
-        && !state.messages.some(message => (message.runTiming?.sourceRunId ?? message.runId) === event.runId && message.runTiming)) {
-        useOutgoingMessages.getState().observeOriginalStart(event.runId, event.ts)
-      }
+      // Only accepted live events can establish a local response clock. Start
+      // metadata and historical replay cannot masquerade as model output.
+      if (state.motionAfterSeq !== null && event.seq > state.motionAfterSeq) useOutgoingMessages.getState().observeEvent(event)
 
       const timingEvent = ['run.started', 'run.paused', 'run.finished'].includes(event.type) || event.type === 'error' && !event.recoverable
       const timedMessages = timingEvent ? state.messages.map(message => (message.runTiming?.sourceRunId ?? message.runId) === event.runId

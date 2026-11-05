@@ -6,10 +6,46 @@ import { ProcessDuration } from '../../src/features/studio/agent/components/Proc
 import { MessageTime, UserMessageActions } from '../../src/features/studio/agent/components/MessageActions'
 import { AgentMessageParts } from '../../src/features/studio/agent/components/AgentMessageParts'
 import type { AgentRunTiming } from '../../shared/contracts/agent-events.js'
+import { useOutgoingMessages } from '../../src/features/studio/agent/outgoing-messages'
+import { useAgentStore } from '../../src/features/studio/agent/agentStore'
 
 const timing: AgentRunTiming = { elapsedMs: 2000, activeSince: '2026-10-18T00:00:00Z', status: 'running', lastSeq: 1 }
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-10-18T00:00:03Z')) })
-afterEach(() => { cleanup(); vi.useRealTimers() })
+afterEach(() => { cleanup(); useOutgoingMessages.setState({ items: [], requestClocks: [] }); useAgentStore.getState().resetRun(); vi.useRealTimers() })
+
+it('shows preparation immediately and ticks during response silence, then keeps the same reading on completion', () => {
+  const id = useOutgoingMessages.getState().add('scope', 'novel', 'session', '合成请求', [])
+  function Display() {
+    const clocks = useOutgoingMessages(state => state.requestClocks)
+    return <ProcessDuration timing={clocks[0].timing} />
+  }
+  render(<Display />)
+  expect(screen.getByRole('status').textContent).toBe('正在准备中...')
+  act(() => vi.advanceTimersByTime(20000))
+  expect(screen.queryByLabelText('20 秒')).toBeNull()
+  useOutgoingMessages.getState().update(id, { runId: 'run', status: 'sent' })
+  useAgentStore.getState().beginRun('run', '合成请求', 'session', [], null, id)
+  const apply = useAgentStore.getState().applyEvent
+  act(() => apply({ type: 'run.started', runId: 'run', seq: 1, ts: new Date().toISOString(), mode: 'build', title: '任务', agent: { type: 'novelist', title: '助手', model: 'speed' } }))
+  expect(screen.getByRole('status').textContent).toBe('正在准备中...')
+  act(() => apply({ type: 'text.delta', runId: 'foreign', messageId: 'm', seq: 2, ts: new Date().toISOString(), delta: '别的任务' }))
+  expect(screen.getByRole('status').textContent).toBe('正在准备中...')
+  act(() => apply({ type: 'text.delta', runId: 'run', messageId: 'm', seq: 2, ts: new Date().toISOString(), delta: '响应' }))
+  expect(screen.getByLabelText('0 秒')).toBeTruthy()
+  for (let second = 1; second <= 10; second++) {
+    act(() => vi.advanceTimersByTime(1000))
+    expect(screen.getByLabelText(`${second} 秒`)).toBeTruthy()
+  }
+  // Replayed admission and subsequent chunks must not restart the display.
+  act(() => apply({ type: 'run.started', runId: 'run', seq: 1, ts: new Date().toISOString(), mode: 'build', title: '任务', agent: { type: 'novelist', title: '助手', model: 'speed' } }))
+  act(() => apply({ type: 'text.delta', runId: 'run', messageId: 'm', seq: 3, ts: new Date().toISOString(), delta: '续流' }))
+  expect(screen.getByLabelText('10 秒')).toBeTruthy()
+  act(() => apply({ type: 'run.finished', runId: 'run', seq: 4, ts: new Date().toISOString(), status: 'succeeded' }))
+  expect(screen.getByLabelText('10 秒')).toBeTruthy()
+  expect(vi.getTimerCount()).toBe(0)
+  act(() => vi.advanceTimersByTime(30000))
+  expect(screen.getByLabelText('10 秒')).toBeTruthy()
+})
 
 it('ticks from the real start, then freezes and releases the clock on termination', () => {
   const { rerender } = render(<ProcessDuration timing={timing} />)
@@ -100,17 +136,21 @@ it('updates today to month/day after an idle midnight and cleans up on unmount',
 })
 
 
-it('uses a zero initial UI slot only for an active unknown interval and preserves unknown history', () => {
+it('animates preparation without a clock until the first response and preserves unknown history', () => {
   const unknown: AgentRunTiming = { elapsedMs: null, activeSince: null, status: 'unknown', lastSeq: 0 }
   const { container, rerender } = render(<ProcessDuration timing={unknown} active />)
-  expect(screen.getByLabelText('0 秒')).toBeTruthy()
+  expect(screen.getByRole('status').textContent).toBe('正在准备中...')
+  expect(screen.getByRole('status').className).toContain('agent-processing-shimmer')
+  expect(vi.getTimerCount()).toBe(0)
+  act(() => vi.advanceTimersByTime(10000))
+  expect(screen.getByRole('status').textContent).toBe('正在准备中...')
   expect(unknown.elapsedMs).toBeNull()
-  const widthClass = container.querySelector('[data-process-duration]')!.className
+  vi.setSystemTime(new Date('2026-10-18T00:00:03Z'))
   rerender(<ProcessDuration timing={{ ...timing, elapsedMs: 56000 }} />)
   expect(screen.getByLabelText('59 秒')).toBeTruthy()
   act(() => vi.advanceTimersByTime(1000))
   expect(screen.getByLabelText('1 分钟 0 秒')).toBeTruthy()
-  expect(container.querySelector('[data-process-duration]')!.className).toBe(widthClass)
+  expect(screen.queryByRole('status')).toBeNull()
   expect(container.querySelectorAll('.tabular-nums').length).toBeGreaterThan(1)
   rerender(<ProcessDuration timing={unknown} />)
   expect(screen.getByText('未知')).toBeTruthy()

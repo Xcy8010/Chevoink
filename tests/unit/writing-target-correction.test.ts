@@ -83,8 +83,23 @@ it('releases only the obsolete target question backed by the original failed pre
     question: '是要《让主角牺牲》吗？', options: [{ label: '是' }, { label: '我补充' }] } } } as never)
   expect(await boundRevisionCorrectionResolvesInput(f.tx, subject, scope, { kind: 'writing_scope', callId: 'question' })).toBe(false)
   f.mocks.agentRunEvent.findFirst.mockResolvedValueOnce({ runId: 'source', seq: 20, payload: { toolName: 'ask_user', args: {
-    question: '这次是指把第3章整章重写吗？', options: [{ label: '第3章，人物离开' }, { label: '第3章，人物留下' }] } } } as never)
+    question: '第3章的人物是要离开还是留下？', options: [{ label: '离开' }, { label: '留下' }] } } } as never)
   expect(await boundRevisionCorrectionResolvesInput(f.tx, subject, scope, { kind: 'writing_scope', callId: 'question' })).toBe(false)
   f.mocks.agentRunEvent.findFirst.mockResolvedValue(null as never)
   expect(await boundRevisionCorrectionResolvesInput(f.tx, subject, scope, { kind: 'writing_scope', callId: 'unrelated' })).toBe(false)
+})
+
+it('resumes the original single chapter without selecting assistant-authored alternative ranges or creative details', async () => {
+  const f = fixture(), projected = await f.project(), frozen = JSON.stringify(f.spec)
+  vi.spyOn(originalModule, 'originalTaskRunIds').mockResolvedValue(['source'])
+  const options = [{ label: '重写第3章《候车》整章', detail: '保留既有情节，重新处理人物对白。' },
+    { label: '只修改会面这一段', detail: '其余原文不改。' },
+    { label: '第1、2章也一起重写', detail: '先改第一章，随后改第二章。' }]
+  f.mocks.agentRunEvent.findFirst.mockResolvedValueOnce({ runId: 'source', seq: 20, payload: { toolName: 'ask_user', args: {
+    question: '这次的「全部重新写」是指把第 3 章《候车》整章重写吗？', options } } } as never)
+  const scope = { ...f.original, spec: projected!.spec, writing: projected!.writing, targetCorrection: projected!.correction }
+  expect(await boundRevisionCorrectionResolvesInput(f.tx, subject, scope, { kind: 'writing_scope', callId: 'question' })).toBe(true)
+  expect(scope.writing.targets).toEqual([{ chapterId: 'chapter', orderIndex: 3 }])
+  expect(scope).not.toHaveProperty('selectedOption')
+  expect(JSON.stringify(f.spec)).toBe(frozen)
 })

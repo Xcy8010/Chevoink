@@ -1,15 +1,15 @@
 import { create } from 'zustand'
-import type { AgentAttachmentMeta, AgentRunTiming, AgentUIMessage } from '../../../../shared/contracts/index'
+import type { AgentAttachmentMeta, AgentRunTiming, AgentUIMessage, AgentStreamEvent } from '../../../../shared/contracts/index'
 import { settleRunTiming, timestamp, unknownRunTiming } from '../../../../shared/agent-timing'
 
 type OutgoingAnchor = { messageId: string | null; runId: string | null; previousOutgoingId?: string; previousClientRequestId?: string }
 export type OutgoingMessage = { clientRequestId: string; anchor: OutgoingAnchor; id: string; scope: string; novelId: string; sessionId: string | null; runId?: string; status: 'sending' | 'failed' | 'sent'; error?: string; message: AgentUIMessage }
 export type AuthorMessage = AgentUIMessage & { delivery?: Pick<OutgoingMessage, 'status' | 'error'>; requestTiming?: AgentRunTiming }
-type RequestClock = Pick<OutgoingMessage, 'id' | 'clientRequestId' | 'scope' | 'novelId' | 'sessionId' | 'runId'> & { sentAt: string; overheadMs: number | null; timing: AgentRunTiming }
+type RequestClock = Pick<OutgoingMessage, 'id' | 'clientRequestId' | 'scope' | 'novelId' | 'sessionId' | 'runId'> & { responded: boolean; eventOffsetMs: number | null; retiredRunIds: string[]; timing: AgentRunTiming }
 type OutgoingState = {
   items: OutgoingMessage[]
   requestClocks: RequestClock[]
-  observeOriginalStart: (runId: string, startedAt: string) => void
+  observeEvent: (event: AgentStreamEvent) => void
   add: (scope: string, novelId: string, sessionId: string | null, prompt: string, attachments: AgentAttachmentMeta[], anchor?: Pick<OutgoingAnchor, 'messageId' | 'runId'>, clientRequestId?: string) => string
   update: (id: string, patch: Partial<Pick<OutgoingMessage, 'sessionId' | 'runId' | 'status' | 'error'>>) => void
   remove: (id: string) => void
@@ -20,11 +20,23 @@ type OutgoingState = {
 export const useOutgoingMessages = create<OutgoingState>((set, get) => ({
   items: [],
   requestClocks: [],
-  observeOriginalStart: (runId, startedAt) => set(state => {
-    const started = timestamp(startedAt)
-    if (started === null) return state
-    const requestClocks = state.requestClocks.map(clock => clock.runId === runId && clock.overheadMs === null
-      ? { ...clock, overheadMs: Math.max(0, started - timestamp(clock.sentAt)!) } : clock)
+  observeEvent: event => set(state => {
+    const response = (event.type === 'text.delta' || event.type === 'reasoning.delta') && Boolean(event.delta.trim())
+      || event.type === 'text.final' && Boolean(event.text.trim())
+      || event.type === 'tool.call' || event.type === 'tool.delta' && event.argsChars > 0
+    const stopped = event.type === 'run.paused' || event.type === 'run.finished' || event.type === 'error' && !event.recoverable
+    if (!response && !stopped && event.type !== 'run.started') return state
+    const now = new Date().toISOString()
+    const requestClocks = state.requestClocks.map(clock => {
+      if ((clock.timing.sourceRunId ?? clock.runId) !== event.runId) return clock
+      let timing = clock.timing
+      if (response && !clock.responded && timing.status === 'running') timing = { ...timing, elapsedMs: 0, activeSince: now, status: 'running', lastSeq: event.seq }
+      else if (event.type === 'run.started' && timing.status !== 'running') timing = { ...timing, activeSince: clock.responded ? now : null, status: 'running', lastSeq: event.seq }
+      else if (stopped) timing = { ...settleRunTiming(timing, now, event.type === 'run.paused'), lastSeq: event.seq }
+      if (timing === clock.timing) return clock
+      return { ...clock, responded: clock.responded || response, timing,
+        eventOffsetMs: timestamp(event.ts) === null ? clock.eventOffsetMs : Date.now() - timestamp(event.ts)! }
+    })
     return requestClocks.every((clock, index) => clock === state.requestClocks[index]) ? state : { requestClocks }
   }),
   add: (scope, novelId, sessionId, prompt, attachments, anchor = { messageId: null, runId: null }, clientRequestId = crypto.randomUUID()) => {
@@ -34,7 +46,7 @@ export const useOutgoingMessages = create<OutgoingState>((set, get) => ({
     ] }
     const previous = [...get().items].reverse().find(item => item.novelId === novelId && (item.scope === scope || Boolean(sessionId && item.sessionId === sessionId)))
     set(state => ({ items: [...state.items, { id, clientRequestId, scope, novelId, sessionId, message, status: 'sending', anchor: { ...anchor, previousOutgoingId: previous?.id, previousClientRequestId: previous?.clientRequestId } }],
-      requestClocks: [...state.requestClocks, { id, clientRequestId, scope, novelId, sessionId, sentAt: message.createdAt, overheadMs: null, timing: { elapsedMs: 0, activeSince: message.createdAt, status: 'running', lastSeq: 0 } }] }))
+      requestClocks: [...state.requestClocks, { id, clientRequestId, scope, novelId, sessionId, responded: false, eventOffsetMs: null, retiredRunIds: [], timing: { elapsedMs: null, activeSince: null, status: 'running', lastSeq: 0 } }] }))
     return id
   },
   update: (id, patch) => set(state => ({ items: state.items.map(item => item.id === id ? { ...item, ...patch } : item),
@@ -54,20 +66,54 @@ function inScope(item: Pick<OutgoingMessage, 'scope' | 'novelId' | 'sessionId'>,
   return item.novelId === novelId && (item.scope === scope || Boolean(sessionId && item.sessionId === sessionId))
 }
 
-/** Local send latency belongs to display only. Server activity still owns pause,
- * resume and completion, and a session with no local send retains unknown time. */
+/** Response time is a local display fact, never admission, usage or billing time.
+ * History supplies identity/terminal evidence without replacing a live clock. */
 function observeRequestClock(clock: RequestClock, messages: AgentUIMessage[]): RequestClock {
   const user = messages.find(message => message.role === 'user' && (message.clientRequestId === clock.clientRequestId || message.id === clock.id))
   const runId = user?.runId ?? clock.runId
   if (!runId) return clock
   const related = messages.filter(message => message.runId === runId || Boolean(clock.timing.scopeId && message.runTiming?.scopeId === clock.timing.scopeId))
-  const server = [...related].reverse().find(message => message.runTiming)?.runTiming
-  const overheadMs = clock.overheadMs
+  const latest = [...related].reverse().find(message => message.runTiming)
+  const server = latest?.runTiming
+  const hasOutput = related.some(message => message.role === 'assistant' && message.parts.some(part =>
+    (part.type === 'text' || part.type === 'reasoning') ? Boolean(part.text.trim()) : part.type === 'tool-call'))
+  let responded = clock.responded
+  let retiredRunIds = clock.retiredRunIds
   let timing = clock.timing
-  if (server) timing = { ...server, elapsedMs: server.elapsedMs !== null && overheadMs !== null ? server.elapsedMs + overheadMs : server.elapsedMs }
-  else if (related.some(message => message.completedAt)) timing = { ...unknownRunTiming(), status: 'finished' }
-  if (clock.runId === runId && clock.overheadMs === overheadMs && JSON.stringify(clock.timing) === JSON.stringify(timing)) return clock
-  return { ...clock, runId, overheadMs, timing }
+  if (server) {
+    const source = server.sourceRunId ?? latest!.runId
+    const currentSource = clock.timing.sourceRunId ?? runId
+    const changedSource = source !== currentSource
+    // Only a server-confirmed shared scope can link a new execution. Once it
+    // has advanced, an old execution's delayed snapshot cannot take it back.
+    if (changedSource && (retiredRunIds.includes(source) || !server.scopeId
+      || !(server.scopeId === clock.timing.scopeId || !clock.timing.scopeId && latest!.runId === runId))) return clock
+    if (changedSource) retiredRunIds = [...retiredRunIds, currentSource]
+    timing = { ...timing, scopeId: server.scopeId ?? timing.scopeId, sourceRunId: source }
+    const fresh = changedSource || server.lastSeq > clock.timing.lastSeq
+      || server.lastSeq === clock.timing.lastSeq && !(server.status === 'running' && ['paused', 'finished'].includes(clock.timing.status))
+    if (fresh && !responded && hasOutput && server.status === 'running') {
+      // This is the first observed response to a local send, not evidence of
+      // its earlier token time. Never backfill the server's admission interval.
+      timing = { ...timing, elapsedMs: 0, activeSince: new Date().toISOString(), status: 'running', lastSeq: server.lastSeq }
+      responded = true
+    }
+    else {
+      if (fresh) {
+        if (server.status === 'finished' || server.status === 'paused') {
+          const stoppedAt = timestamp(latest?.completedAt ?? server.completedAt)
+          const stop = stoppedAt === null ? Date.now() : Math.min(Date.now(), Math.max(timestamp(timing.activeSince) ?? 0, stoppedAt + (clock.eventOffsetMs ?? 0)))
+          timing = { ...settleRunTiming(timing, new Date(stop).toISOString(), server.status === 'paused'), lastSeq: server.lastSeq }
+        } else if (responded && timing.status !== 'running' && server.status === 'running') {
+          const startedAt = timestamp(server.activeSince)
+          timing = { ...timing, status: 'running', activeSince: startedAt === null ? null : new Date(Math.min(Date.now(), startedAt + (clock.eventOffsetMs ?? 0))).toISOString(), lastSeq: server.lastSeq }
+        }
+      }
+    }
+  }
+  else if (related.some(message => message.runId === (timing.sourceRunId ?? runId) && message.completedAt)) timing = { ...unknownRunTiming(), status: 'finished' }
+  if (clock.runId === runId && clock.responded === responded && retiredRunIds === clock.retiredRunIds && JSON.stringify(clock.timing) === JSON.stringify(timing)) return clock
+  return { ...clock, runId, responded, retiredRunIds, timing }
 }
 function matchesOutgoingMessage(message: AgentUIMessage, item: OutgoingMessage) {
   return message.role === 'user' && (message.clientRequestId === item.clientRequestId || message.id === item.id || Boolean(item.runId && message.runId === item.runId))

@@ -1212,6 +1212,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     } else await persistCheckpoint()
     if (taskSpec.scope.agentWritingProtocol === 1) taskSpec = await prisma.$transaction(tx => effectiveWritingTaskSpec(tx,
       { userId: params.userId, novelId: params.novelId, runId }, taskSpec))
+    let resumedWritingTarget: { chapterId: string; orderIndex: number } | undefined
     if ((authorInputRequired || taskSpec.scope.writing?.kind === 'needs_input')
       && (taskSpec.scope.writingClarificationProtocol !== undefined || taskSpec.scope.writingTargetProtocol === 2)) {
       const marker = authorInputRequired
@@ -1233,6 +1234,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         }
         await persistCheckpoint()
       }
+      if (resolved.scope.targetCorrection && !authorInputRequired) resumedWritingTarget = resolved.scope.targetCorrection
     }
     const responseContinue: TaskResponseContinue | undefined = params.resume && params.authorContinue && legacyOwnerReceipt
       ? { ...params.authorContinue, ownerSeq: legacyOwnerReceipt.seq, ownerHash: legacyOwnerReceipt.hash } : undefined
@@ -1747,6 +1749,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     let authorEndRequested = false
     if (continuingTask) messages.push({ role: 'user', content: `[系统] 恢复指定任务 ${taskSpec.id}，不是恢复整个会话的历史工作。原目标：${taskSpec.goals.join('；')}。\n${renderTodoItems(todoItems)}\n历史中其他任务的并行窗口、待办与一次性指令不构成本任务的授权；禁止重新启动它们。被停止时生成但未成功执行的工具不是已保存成果。先核对本任务已保存进度，执行剩余工作。仅尚有多个独立执行单元的长任务或复杂任务需要建立待办；没有清单不是未完成的证据，确已完成时直接交付，禁止在结尾补造已完成清单、提交空清单或覆盖历史待办。不得仅回复下一步打算就结束，也不得将未完成项标为已完成。` })
     const frozenWritingHint = frozenWritingToolGuidance('story_compiler_prepare', taskSpec.scope)
+    if (resumedWritingTarget) messages.push({ role: 'user', content: `[系统·原任务目标已核实] 原作者请求已明确授权修改全书第${resumedWritingTarget.orderIndex}章，chapterId=${resumedWritingTarget.chapterId}。旧的章节目标重复问询已解除；按完整原请求和已保存进度直接继续，不重复询问同一目标。先前ask_user的备选及详情由助手生成，没有被作者选中，不是作者新增要求，不要采用其中的扩章、缩小范围或剧情选择。未选择这些备选不妨碍执行原任务。本次继续不扩大目标、不重置用量；实际正文、检查和提交仍须以当前真实版本为准。` })
     if (frozenWritingHint) messages.push({ role: 'user', content: `[系统·本任务冻结目标] ${frozenWritingHint}` })
     const currentChapterReview = currentReviewState.value
     if (continuingTask && requiresManuscriptDelivery(taskSpec)) messages.push({ role: 'user', content:
