@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { coverChildSchema, coverRequest, coverUnitSchema, coverUnitUsage, coverWorkSchema } from './runtime-cover-contract.js'
+import { coverChargeKey, coverChildSchema, coverRequest, coverRouteWork, coverUnitSchema, coverUnitUsage, coverWorkSchema } from './runtime-cover-contract.js'
 import { imageBlobSchema } from './provider-image-storage.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { enforceCoverTitleInPrompt } from './tools/cover-prompt.js'
@@ -12,25 +12,28 @@ export async function readCoverAdmission(tx: RuntimeTx, attemptId: string) {
   if (!attempt) return null
   const operation = attempt.operation, parent = operation.parent
   if (operation.kind !== 'provider' || operation.action !== 'cover_generate_image' || !parent || parent.kind !== 'tool' || parent.action !== 'cover_generate'
-    || operation.operationKey !== `cover:${parent.id}:0` || parent.taskRootId !== operation.taskRootId || operation.attempts.length !== 1 || attempt.attemptKey !== '1'
+    || parent.taskRootId !== operation.taskRootId || operation.attempts.length !== 1 || attempt.attemptKey !== '1'
     || runtimeJson(parent.inputSnapshot).hash !== parent.inputHash || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash) return null
   const original = z.object({ input: z.object({ work: coverWorkSchema, novelId: z.string(), callId: z.string(), args: z.object({ prompt: z.string(), count: z.number().optional() }),
     normalization: z.object({ normalizedArgsHash: z.string(), sourceRevision: z.number().int().nonnegative(), sourceSnapshotHash: z.string(), rawArguments: z.string() }) }) }).safeParse(parent.inputSnapshot)
   const child = z.object({ input: coverChildSchema }).safeParse(operation.inputSnapshot)
   if (!original.success || !child.success) return null
   const work = original.data.input.work, input = child.data.input
+  const routeIndex = input.routeIndex ?? 0
+  if (routeIndex > (work.fallbackRoutes?.length ?? 0) || operation.operationKey !== `cover:${parent.id}:${routeIndex}`) return null
+  const routeWork = coverRouteWork(work, routeIndex)
   await (await import('./runtime-tool-cursor.js')).readToolOperationSource(tx, parent)
   if (work.novelId !== original.data.input.novelId || work.novelId !== operation.taskRoot.novelId || work.count !== (original.data.input.args.count ?? 1)
     || runtimeJson(original.data.input.args).hash !== original.data.input.normalization.normalizedArgsHash
-    || input.parentInputHash !== parent.inputHash || input.workHash !== runtimeJson(work).hash || input.chargeKey !== `image:${parent.id}`
-    || input.usageLogId !== createHash('sha256').update(`cover:${parent.id}:0`).digest('hex')
+    || input.parentInputHash !== parent.inputHash || input.workHash !== runtimeJson(work).hash || input.chargeKey !== coverChargeKey(parent.id, routeIndex)
+    || input.usageLogId !== createHash('sha256').update(`cover:${parent.id}:${routeIndex}`).digest('hex')
     || work.prompt !== enforceCoverTitleInPrompt(original.data.input.args.prompt.trim(), work.title, work.displayTitle)
-    || runtimeJson(input.request).hash !== runtimeJson(coverRequest(work)).hash || attempt.provider !== work.route.provider || attempt.model !== work.route.modelName
+    || runtimeJson(input.request).hash !== runtimeJson(coverRequest(routeWork)).hash || attempt.provider !== routeWork.route.provider || attempt.model !== routeWork.route.modelName
     || !attempt.requestSnapshot || runtimeJson(attempt.requestSnapshot).hash !== attempt.requestHash
     || runtimeJson(attempt.requestSnapshot).hash !== runtimeJson({ provider: attempt.provider, model: attempt.model, request: input.request }).hash) return null
   const log = await tx.aiUsageLog.findUnique({ where: { id: input.usageLogId } })
   if (!log || log.userId !== operation.taskRoot.userId || log.novelId !== work.novelId || log.agentRunId !== parent.originRunId
-    || log.providerType !== 'image' || log.action !== 'generateCoverImage' || log.modelName !== work.route.modelName || log.providerMode !== work.route.providerMode
+    || log.providerType !== 'image' || log.action !== 'generateCoverImage' || log.modelName !== routeWork.route.modelName || log.providerMode !== routeWork.route.providerMode
     || log.targetType !== 'imageCharge' || log.targetId !== input.chargeKey || log.creditChargeMilli !== 6000
     || !log.billingEvidence || runtimeJson(log.billingEvidence).hash !== runtimeJson({ taskRootId: operation.taskRootId, operationId: operation.id }).hash) return null
   const debit = await tx.creditLedgerEntry.findUnique({ where: { idempotencyKey: input.chargeKey } })

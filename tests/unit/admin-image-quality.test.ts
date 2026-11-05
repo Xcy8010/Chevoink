@@ -42,6 +42,28 @@ beforeEach(() => {
 })
 
 const input = { prompt: 'Synthetic cover title', size: '768x1024' as const, count: 1 }
+it('saves image fallback routes, preserves encrypted keys on unrelated edits and omits text capability constraints', async () => {
+  await updateAdminModel('admin', 'image', { routes: [{ label: '备用生图', provider: 'deepseek', modelName: 'image-alias',
+    baseUrl: 'https://backup.invalid/generate', apiKey: 'synthetic-test-key', enabled: true }], reasoningEfforts: ['none', 'high'], visionEnabled: true })
+  const metadata = mocks.row.metadata as { routes: Array<{ id: string; apiKeyCiphertext: string }> }
+  expect(metadata.routes).toHaveLength(1)
+  const frozen = metadata.routes[0]
+  expect(frozen.apiKeyCiphertext).not.toBe('synthetic-test-key')
+  const presented = (await getAdminModelManagement()).models[0].routes!
+  expect(presented[0]).toMatchObject({ id: frozen.id, apiKeyConfigured: true, modelName: 'image-alias' })
+  expect(JSON.stringify(presented)).not.toContain('synthetic-test-key')
+  expect(JSON.stringify(presented)).not.toContain(frozen.apiKeyCiphertext)
+  await updateAdminModel('admin', 'image', { displayName: '新生图名称', routes: presented.map(({ apiKeyConfigured: _configured, ...route }) => route) })
+  expect((mocks.row.metadata as typeof metadata).routes[0]).toMatchObject(frozen)
+  expect((await resolveCoverImageRuntime()).route.modelName).toBe(mocks.row.modelName)
+})
+
+it.each(['vision', 'web_search', 'web_fetch'])('rejects fallback routes on %s tools', async modelKind => {
+  mocks.row = { ...mocks.row, tier: null, metadata: { modelKind } }
+  await expect(updateAdminModel('admin', 'image', { routes: [{ label: '错误线路', provider: 'relay', modelName: 'alias',
+    baseUrl: 'https://backup.invalid/generate', apiKey: 'synthetic-test-key', enabled: true }] })).rejects.toMatchObject({ code: 'MODEL_ROUTES_INVALID' })
+  expect(mocks.update).not.toHaveBeenCalled()
+})
 async function captureBothPaths() {
   const runtime = await resolveCoverImageRuntime()
   const work = coverWorkSchema.parse({ version: 1, novelId: 'novel', title: 'Synthetic title', displayTitle: null,

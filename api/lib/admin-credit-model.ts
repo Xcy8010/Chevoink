@@ -350,9 +350,10 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
     const currentCapabilities = parseModelCapabilities(model.metadata, model.provider)
     const reasoningEfforts = input.reasoningEfforts ?? currentCapabilities.reasoningEfforts
     const defaultReasoningEffort = input.defaultReasoningEffort ?? currentCapabilities.defaultReasoningEffort
-    const routes = saveModelRoutes(input.routes ?? presentModelRoutes(model.metadata).map(({ apiKeyConfigured: _configured, ...route }) => route), model.metadata, reasoningEfforts,
-      { contextWindowTokens: input.contextWindowTokens ?? currentCapabilities.contextWindowTokens, visionEnabled: input.visionEnabled ?? currentCapabilities.visionEnabled })
-    if (routes.length && !isServerModelTier(model.tier)) throw new DataAccessError(400, 'MODEL_ROUTES_INVALID', '仅文本内置模型支持供应商线路。')
+    const imageModel = adminModelKind(model.metadata) === 'image_generation'
+    const routes = saveModelRoutes(input.routes ?? presentModelRoutes(model.metadata).map(({ apiKeyConfigured: _configured, ...route }) => route), model.metadata, imageModel ? [] : reasoningEfforts,
+      imageModel ? undefined : { contextWindowTokens: input.contextWindowTokens ?? currentCapabilities.contextWindowTokens, visionEnabled: input.visionEnabled ?? currentCapabilities.visionEnabled })
+    if (routes.length && !imageModel && !isServerModelTier(model.tier)) throw new DataAccessError(400, 'MODEL_ROUTES_INVALID', '仅文本内置模型与图片生成支持供应商线路。')
     assertProviderReasoningEfforts(input.provider ?? model.provider, reasoningEfforts)
     if (!reasoningEfforts.includes(defaultReasoningEffort)) throw new DataAccessError(400, 'VALIDATION_ERROR', '默认推理强度必须包含在模型支持档位中。')
     const nextModelName = input.modelName?.trim() || model.modelName

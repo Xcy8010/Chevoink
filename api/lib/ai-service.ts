@@ -1536,19 +1536,28 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
 }
 
 /** Credentials stay in memory; durable callers freeze only the public route. */
-export async function resolveCoverImageRuntime() {
+export type CoverImageRuntime = { apiKey: string; route: { modelConfigId?: string; modelConfigRevision?: number; routeId?: string;
+  provider: string; modelName: string; baseUrl: string; providerMode: string; quality?: string }; fallbackRuntimes?: CoverImageRuntime[] }
+
+export async function resolveCoverImageRuntime(): Promise<CoverImageRuntime> {
   const configured = await getToolModelRuntime('tool:image-generation')
   const apiKey = configured?.apiKey ?? env.aiImageApiKey
   ensureImageProviderConfigured(apiKey)
   const quality = configured?.imageQuality?.defaultValue
-  return { apiKey, route: { ...(configured?.modelConfigId ? { modelConfigId: configured.modelConfigId, modelConfigRevision: configured.modelConfigRevision } : {}), provider: configured?.provider ?? env.aiProviderMode, modelName: configured?.modelName ?? env.aiImageModel,
+  const identity = configured?.modelConfigId ? { modelConfigId: configured.modelConfigId, modelConfigRevision: configured.modelConfigRevision } : {}
+  return { apiKey, route: { ...identity, provider: configured?.provider ?? env.aiProviderMode, modelName: configured?.modelName ?? env.aiImageModel,
     baseUrl: configured?.baseUrl ?? env.aiImageBaseUrl, providerMode: env.aiProviderMode,
-    ...(quality != null ? { quality } : {}) } }
+    ...(quality != null ? { quality } : {}) },
+    ...(configured?.routes?.length ? { fallbackRuntimes: configured.routes.map(route => ({ apiKey: route.apiKey,
+      route: { ...identity, routeId: route.id, provider: route.provider, modelName: route.modelName, baseUrl: route.baseUrl,
+        providerMode: env.aiProviderMode, ...(quality != null ? { quality } : {}) } })) } : {}) }
 }
 
 export function parseCoverImageResponse(httpStatus: number, body: string) {
   let payload: unknown
-  try { payload = JSON.parse(body) } catch { throw new DataAccessError(502, 'AI_PROVIDER_INVALID_RESPONSE', '图片模型返回了无法解析的响应。') }
+  try { payload = JSON.parse(body) } catch {
+    if (httpStatus >= 200 && httpStatus < 300) throw new DataAccessError(502, 'AI_PROVIDER_INVALID_RESPONSE', '图片模型返回了无法解析的响应。')
+  }
   const decoded = payload && typeof payload === 'object' ? payload as { data?: unknown; error?: { message?: unknown } } : {}
   if (httpStatus < 200 || httpStatus >= 300) throw new ImageProviderFailure(httpStatus, 502, 'AI_PROVIDER_ERROR',
     typeof decoded.error?.message === 'string' ? decoded.error.message : '图片模型服务暂时不可用。')
@@ -1559,6 +1568,11 @@ export function parseCoverImageResponse(httpStatus: number, body: string) {
   }).filter((item): item is string => Boolean(item))
   if (!imageUrls.length) throw new DataAccessError(502, 'AI_PROVIDER_EMPTY_RESPONSE', '图片模型未返回有效图片。')
   return imageUrls
+}
+
+/** Complete rejected/empty responses only. Transport, partial bodies and storage failures remain unknown. */
+export function coverImageFailureMayRetry(httpStatus: number, code?: string) {
+  return [429, 500, 502, 503, 504].includes(httpStatus) || httpStatus >= 200 && httpStatus < 300 && code === 'AI_PROVIDER_EMPTY_RESPONSE'
 }
 
 /** Transport only. The caller must already own the sole committed permit. */
@@ -1573,45 +1587,30 @@ async function generateImageUrls(
   prompt: string,
   size: string,
   count: number,
-  options: { signal?: AbortSignal; beforeDispatch?: () => Promise<void> } = {},
+  options: { signal?: AbortSignal; beforeDispatch?: (runtime: CoverImageRuntime) => Promise<void>;
+    onKnownFailure?: (runtime: CoverImageRuntime, status: number, empty: boolean) => Promise<void> } = {},
 ) {
-  const runtime = await resolveCoverImageRuntime()
-
+  const pool = await resolveCoverImageRuntime()
+  const runtimes = [pool, ...(pool.fallbackRuntimes ?? [])]
   const startedAt = Date.now()
-  await options.beforeDispatch?.()
-  options.signal?.throwIfAborted()
-  // Node 内置 fetch 默认 5 分钟头超时，第三方生图服务经常超过，这里用 undici 显式放宽到 aiImageTimeoutMs
-  const response = await requestCoverImages(runtime, { prompt, size, count }, options.signal)
-
-  const payload = await parseJsonResponse(response as unknown as Response)
-  if (!response.ok) {
-    throw new ImageProviderFailure(response.status,
-      502,
-      'AI_PROVIDER_ERROR',
-      typeof payload.error?.message === 'string' ? payload.error.message : '图片模型服务暂时不可用。',
-    )
+  for (const [index, runtime] of runtimes.entries()) {
+    await options.beforeDispatch?.(runtime)
+    options.signal?.throwIfAborted()
+    const response = await requestCoverImages(runtime, { prompt, size, count }, options.signal)
+    // Read the complete body before classifying it. Partial bodies are unknown.
+    const body = await response.text()
+    let imageUrls: string[]
+    try { imageUrls = parseCoverImageResponse(response.status, body) }
+    catch (error) {
+      if (!coverImageFailureMayRetry(response.status, error instanceof DataAccessError ? error.code : undefined)) throw error
+      await options.onKnownFailure?.(runtime, response.status, error instanceof DataAccessError && error.code === 'AI_PROVIDER_EMPTY_RESPONSE')
+      if (index === runtimes.length - 1) throw error
+      options.signal?.throwIfAborted()
+      continue
+    }
+    return { imageUrls, modelName: runtime.route.modelName, durationMs: Date.now() - startedAt }
   }
-
-  const images = Array.isArray(payload.data) ? payload.data : []
-  const imageUrls = images
-    .map((item: { url?: unknown; b64_json?: unknown }) => {
-      if (typeof item?.url === 'string') {
-        return item.url
-      }
-
-      if (typeof item?.b64_json === 'string') {
-        return `data:image/png;base64,${item.b64_json}`
-      }
-
-      return null
-    })
-    .filter((item: string | null): item is string => Boolean(item))
-
-  if (imageUrls.length === 0) {
-    throw new DataAccessError(502, 'AI_PROVIDER_EMPTY_RESPONSE', '图片模型未返回有效图片。')
-  }
-
-  return { imageUrls, modelName: runtime.route.modelName, durationMs: Date.now() - startedAt }
+  throw new DataAccessError(409, 'MODEL_ROUTES_INVALID', '图片线路池为空。')
 }
 
 class ImageProviderFailure extends DataAccessError {
@@ -1746,11 +1745,12 @@ export async function generateCoverImageData(
   options.signal?.throwIfAborted()
   const goal = currentGoalExecution()
   const chargeKey = `image:${randomUUID()}`
-  const observation = goal ? await withoutGoalEffects(() => prisma.aiUsageLog.create({ data: {
-    userId, novelId: input.novelId ?? null, agentRunId: goal.runId, providerType: 'image', providerMode: env.aiProviderMode,
+  const createObservation = () => withoutGoalEffects(() => prisma.aiUsageLog.create({ data: {
+    userId, novelId: input.novelId ?? null, agentRunId: goal?.runId, providerType: 'image', providerMode: env.aiProviderMode,
     modelName: env.aiImageModel, action: 'generateCoverImage', durationMs: 0, billingStatus: 'prepared', usageSource: 'unknown',
     targetType: 'imageCharge', targetId: chargeKey,
-  } })) : null
+  } }))
+  let observation = goal ? await createObservation() : null
   if (observation) await reserveGoalUsage(`legacy:${observation.id}`, 0)
   let charged = false, dispatched = false
   let generated: { imageUrls: string[]; modelName: string; durationMs: number }
@@ -1767,19 +1767,45 @@ export async function generateCoverImageData(
     metadata: { count: input.count, size: input.size },
   }))
   charged = true
-    generated = await generateImageUrls(input.prompt, input.size, input.count, { signal: options.signal, beforeDispatch: async () => {
+    generated = await generateImageUrls(input.prompt, input.size, input.count, { signal: options.signal,
+      onKnownFailure: async (runtime, httpStatus, empty) => {
+        if (!observation) await withoutGoalEffects(() => prisma.aiUsageLog.create({ data: { userId, novelId: input.novelId ?? null, agentRunId: goal?.runId,
+          providerType: 'image', providerMode: runtime.route.providerMode, providerName: runtime.route.provider, modelName: runtime.route.modelName,
+          action: 'generateCoverImageRouteFailure', targetType: 'imageCharge', targetId: chargeKey,
+          durationMs: 0, creditChargeMilli: 0, billingStatus: 'provider_rejected', usageSource: 'fixed_unit',
+          billingEvidence: { chargeKey, httpStatus, outcome: empty ? 'empty' : 'rejected',
+            ...(runtime.route.routeId ? { routeId: runtime.route.routeId } : {}) } } }))
+        if (observation) {
+          const observationId = observation.id
+          await withoutGoalEffects(() => prisma.aiUsageLog.update({ where: { id: observationId }, data: {
+            modelName: runtime.route.modelName, billingStatus: 'provider_rejected', usageSource: 'fixed_unit', creditChargeMilli: 0,
+            requestTokens: 0, responseTokens: 0, billingEvidence: { chargeKey, httpStatus, outcome: empty ? 'empty' : 'rejected' } } }))
+          await syncGoalLegacyUsage(observation.id)
+          observation = null
+        }
+        dispatched = false
+      }, beforeDispatch: async runtime => {
       await assertGoalProviderAdmission()
       options.signal?.throwIfAborted()
-      if (observation) await withoutGoalEffects(() => prisma.aiUsageLog.update({ where: { id: observation.id }, data: { billingStatus: 'pending_usage', creditChargeMilli: IMAGE_CALL_MILLI } }))
+      if (goal && !observation) {
+        observation = await createObservation()
+        await reserveGoalUsage(`legacy:${observation.id}`, 0)
+      }
+      if (observation) {
+        const observationId = observation.id
+        await withoutGoalEffects(() => prisma.aiUsageLog.update({ where: { id: observationId }, data: {
+          modelName: runtime.route.modelName, providerName: runtime.route.provider, billingStatus: 'pending_usage', creditChargeMilli: 0 } }))
+      }
       options.signal?.throwIfAborted()
       dispatched = true
     } })
   } catch (error) {
     if (observation) {
+      const observationId = observation.id
       const rejected = error instanceof ImageProviderFailure && [400, 401, 403, 404, 422, 429].includes(error.providerStatus)
-      await withoutGoalEffects(() => prisma.aiUsageLog.update({ where: { id: observation.id }, data: {
+      await withoutGoalEffects(() => prisma.aiUsageLog.update({ where: { id: observationId }, data: {
         billingStatus: !dispatched ? 'not_dispatched' : rejected ? 'provider_rejected' : 'pending_usage',
-        creditChargeMilli: charged ? IMAGE_CALL_MILLI : 0,
+        creditChargeMilli: 0,
       } }))
       await syncGoalLegacyUsage(observation.id)
     }
@@ -1795,9 +1821,10 @@ export async function generateCoverImageData(
     throw error
   }
   if (observation) {
+    const observationId = observation.id
     // Image generation uses the existing fixed-per-call tariff, not text
     // tokens. An actual image response confirms this non-token operation.
-    await withoutGoalEffects(() => prisma.aiUsageLog.update({ where: { id: observation.id }, data: {
+    await withoutGoalEffects(() => prisma.aiUsageLog.update({ where: { id: observationId }, data: {
       modelName: generated.modelName, durationMs: generated.durationMs, requestTokens: 0, responseTokens: 0,
       creditChargeMilli: IMAGE_CALL_MILLI, usageSource: 'fixed_unit', billingStatus: 'observed',
     } }))

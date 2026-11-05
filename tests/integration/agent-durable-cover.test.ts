@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -37,6 +38,98 @@ async function resumeOriginalPause(lease: Awaited<ReturnType<typeof claim>>) {
 }
 
 describe.runIf(available)('fixed-price cover generation genuine PG admission and recovery', () => {
+  it.each(['primary-success', 'rejected-fallback', 'empty-fallback', 'all-failed', 'unknown', 'partial-body', 'cancelled', 'refund-pending', 'fallback-result-recovery', 'nonretryable'] as const)(
+    '%s preserves physical route receipts and only advances after confirmed failure and refund', scenario => fixture(async f => {
+      const parentDirectory = path.resolve(os.tmpdir()), directory = await mkdtemp(path.join(parentDirectory, 'chevoink-cover-pg-'))
+      if (path.dirname(directory) !== parentDirectory || !path.basename(directory).startsWith('chevoink-cover-pg-')) throw Error('Unexpected fixture cleanup target')
+      vi.stubEnv('AGENT_IMAGE_RESPONSE_DIR', directory)
+      try {
+        let lease = await claim(f)
+        const signal = controller(), tool = coverGenerateTool, args = { prompt: '雨夜车站，清晰书名', count: 1 }
+        const window = getCreditWindow()
+        await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 20000,
+          dailyUsedMilli: 0, bonusBalanceMilli: 0, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+        await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'balanced',
+          model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+          tools: [{ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } }],
+          toolAuthority: [{ name: tool.name, permission: 'allow', dangerous: false, alwaysConfirm: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
+        snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null, successfulToolSignatures: [],
+          messages: [{ role: 'user', content: '生成一张封面候选。' }, { role: 'assistant', content: null, toolCalls: [{ id: 'cover-fallback', name: tool.name, arguments: JSON.stringify(args) }] }] } })
+        const backup = { apiKey: 'isolated-backup-key', route: { ...runtime.route, routeId: randomUUID(), provider: 'backup-fixture', modelName: 'backup-cover', baseUrl: 'https://backup.invalid/generate' } }
+        vi.spyOn(ai, 'resolveCoverImageRuntime').mockResolvedValue({ ...runtime, fallbackRuntimes: [backup] })
+        vi.spyOn(novelData, 'normalizeCoverImageUrl').mockResolvedValue('/api/uploads/novel-covers/fixture.png')
+        const transport = vi.spyOn(ai, 'requestCoverImages').mockImplementation(async (selected, input) => {
+          expect(input).toMatchObject({ count: 1, size: FIXED_NOVEL_COVER_SIZE })
+          expect(input.prompt).toContain('持久执行测试')
+          if (scenario === 'unknown') throw Error('original response lost')
+          if (scenario === 'partial-body') return new Response(new ReadableStream({ start(stream) {
+            stream.enqueue(new TextEncoder().encode('{"data":[')); stream.error(Error('body disconnected'))
+          } })) as unknown as Awaited<ReturnType<typeof ai.requestCoverImages>>
+          const primary = selected.route.modelName === runtime.route.modelName
+          if (primary && scenario === 'cancelled') signal.abort(Error('author cancelled'))
+          const status = primary && scenario === 'nonretryable' ? 401
+            : scenario === 'all-failed' || primary && scenario !== 'primary-success' && scenario !== 'empty-fallback' ? 503 : 200
+          const data = primary && scenario === 'empty-fallback' ? [] : [{ url: 'https://images.invalid/result.png' }]
+          return new Response(JSON.stringify({ data }), { status }) as unknown as Awaited<ReturnType<typeof ai.requestCoverImages>>
+        })
+        if (scenario === 'refund-pending') vi.spyOn(credits, 'reconcileCreditRefunds').mockRejectedValueOnce(Error('wallet reconciliation deferred'))
+        if (scenario === 'fallback-result-recovery') {
+          const original = operations.recordProviderResult
+          vi.spyOn(operations, 'recordProviderResult').mockImplementation(async input => {
+            if (transport.mock.calls.length === 2) { vi.mocked(operations.recordProviderResult).mockImplementation(original); throw Error('backup response DB reply lost') }
+            return original(input)
+          })
+        }
+        const step = () => executeDurableToolStep(lease, signal.signal)
+        if (scenario === 'fallback-result-recovery') {
+          await expect(step()).rejects.toThrow('backup response DB reply lost')
+          expect(transport).toHaveBeenCalledTimes(2)
+          lease = await resumeOriginalPause(lease)
+        }
+        if (['unknown', 'partial-body', 'cancelled', 'refund-pending'].includes(scenario)) {
+          await expect(step()).rejects.toThrow()
+          expect(transport).toHaveBeenCalledOnce()
+          expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(1)
+          expect(await prisma.coverAsset.count({ where: { ownerUserId: f.userId } })).toBe(0)
+          if (scenario === 'unknown' || scenario === 'partial-body') {
+            await expect(step()).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
+            expect((await readTaskBudget(lease)).unresolvedAttempts).toBe(1n)
+            expect(transport).toHaveBeenCalledOnce()
+          }
+          if (scenario === 'refund-pending') {
+            expect(await prisma.creditRefundIntent.count({ where: { originalEntry: { userId: f.userId } } })).toBe(1)
+            expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, kind: 'refund' } })).toBe(0)
+          }
+          return
+        }
+        const failed = scenario === 'all-failed' || scenario === 'nonretryable'
+        expect(await step()).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { display: { kind: 'coverImages' } } })
+        const attempts = await prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId } }, include: { operation: true, usageReceipt: true } })
+        const calls = scenario === 'primary-success' || scenario === 'nonretryable' ? 1 : 2
+        expect(transport).toHaveBeenCalledTimes(calls)
+        expect(attempts).toHaveLength(calls)
+        for (const attempt of attempts) {
+          expect(attempt.usageReceipt).toMatchObject({ source: 'fixed_unit', settlementStatus: 'fixed_unit' })
+          expect(await prisma.$transaction(tx => readCoverUnit(tx, attempt.id))).not.toBeNull()
+        }
+        const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'cover_generate' } })
+        expect(new Set(attempts.map(attempt => attempt.operation.operationKey))).toEqual(new Set(Array.from({ length: calls }, (_, index) => `cover:${parent.id}:${index}`)))
+        const debits = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId, kind: 'usage' } })
+        expect(new Set(debits.map(debit => debit.idempotencyKey))).toEqual(new Set(calls === 1 ? [`image:${parent.id}`] : [`image:${parent.id}`, `image:${parent.id}:route:1`]))
+        const bill = await getTaskCreditUsage(f.userId, lease.runId)
+        expect(bill.charged).toBe(calls * 6)
+        expect(bill.refunded).toBe(failed ? calls * 6 : (calls - 1) * 6)
+        expect(bill.unresolvedProviderAttempts).toBe(0)
+        expect((await readTaskBudget(lease)).unresolvedAttempts).toBe(0n)
+        const assets = await prisma.coverAsset.findMany({ where: { ownerUserId: f.userId } })
+        expect(assets).toHaveLength(failed ? 0 : 1)
+        if (!failed) expect(assets[0].modelName).toBe(scenario === 'primary-success' ? runtime.route.modelName : backup.route.modelName)
+        expect((await prisma.novel.findUniqueOrThrow({ where: { id: f.novelId } })).coverAssetId).toBeNull()
+      } finally {
+        vi.unstubAllEnvs()
+        await rm(directory, { recursive: true, force: true })
+      }
+    }))
   it.each(['success', 'raw-recovery', 'blob-recovery', 'asset-recovery', 'receipt-recovery', 'unknown', 'unknown-refund-recovery', 'dispatch-crash', 'debit-rollback',
     'exhausted', 'changed-route', 'cancel-after-response', 'deleted-asset', 'storage-pending', 'empty', 'rejected', 'partial', 'ask-resume', 'denied', 'current-deny', 'adopt-cover', 'adopt-empty-late-refund', 'adopt-refund-race'] as const)('%s retains the original paid request and owned candidates', scenario => fixture(async f => {
     const parentDirectory = path.resolve(os.tmpdir()), directory = await mkdtemp(path.join(parentDirectory, 'chevoink-cover-pg-'))

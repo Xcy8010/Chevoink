@@ -1,14 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { FIXED_NOVEL_COVER_SIZE } from '../../../../shared/contracts/index.js'
-import { parseCoverImageResponse, requestCoverImages, resolveCoverImageRuntime } from '../../ai-service.js'
+import { coverImageFailureMayRetry, parseCoverImageResponse, requestCoverImages, resolveCoverImageRuntime } from '../../ai-service.js'
 import { consumeCreditsInTransaction, recordImageRefundIntentInTransaction, reconcileCreditRefunds } from '../../credits.js'
 import { createCoverAssetsInTransaction, recoverCoverAssetStorageData } from '../../data-access.js'
 import { prisma } from '../../prisma.js'
 import { withoutGoalEffects } from '../goal-context.js'
 import { syncGoalDurableUsage } from '../goal-budget.js'
-import { coverChildSchema, coverProjection, coverRequest, coverWorkSchema, type CoverWork } from '../runtime-cover-contract.js'
-import { writeCoverUnit } from '../runtime-cover-accounting.js'
+import { coverChargeKey, coverChildSchema, coverProjection, coverRequest, coverRouteWork, coverWorkSchema, type CoverWork } from '../runtime-cover-contract.js'
+import { readCoverUnit, writeCoverUnit } from '../runtime-cover-accounting.js'
+import type { RuntimeTx } from '../runtime-common.js'
 import { imageBlobSchema, prepareImageResponseStorage, readImageResponse, storeImageResponse } from '../provider-image-storage.js'
 import { runtimeError, runtimeJson } from '../runtime-common.js'
 import { withManuscriptRunLease, withRunLease, type RunLeaseToken } from '../runtime-lease.js'
@@ -28,18 +29,38 @@ function assertPublicRoute(route: CoverWork['route']) {
   if (url.username || url.password || url.search || url.hash) return runtimeError('RUNTIME_INPUT_INVALID', '图片服务路由含不可持久化的认证参数。')
 }
 
-async function prepareImage(ctx: ToolContext, lease: RunLeaseToken, parentId: string, work: CoverWork) {
+/** Every predecessor must have a sealed retryable result and a completed refund.
+ * An unknown, cancellation, storage failure or incomplete refund cannot advance. */
+async function assertRouteAdvance(tx: RuntimeTx, parentId: string, work: CoverWork, index: number) {
+  if (!index) return
+  const parent = await tx.agentOperation.findUniqueOrThrow({ where: { id: parentId } })
+  for (let previous = 0; previous < index; previous++) {
+    const operation = await tx.agentOperation.findUnique({ where: { taskRootId_operationKey: { taskRootId: parent.taskRootId, operationKey: `cover:${parentId}:${previous}` } }, include: { attempts: true } })
+    const unit = operation?.attempts.length === 1 ? await readCoverUnit(tx, operation.attempts[0].id) : null
+    const pointer = unit ? z.object({ result: imageBlobSchema }).parse(unit.attempt.result).result : null
+    if (!unit || !pointer || !coverImageFailureMayRetry(pointer.httpStatus, unit.proof.outcome === 'empty' ? 'AI_PROVIDER_EMPTY_RESPONSE' : undefined)
+      || unit.proof.outcome === 'images' || unit.input.workHash !== runtimeJson(work).hash) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原图片线路未确认失败，不能切换备用线路。')
+    const refund = await tx.creditLedgerEntry.findUnique({ where: { idempotencyKey: `refund:${unit.input.chargeKey}` } })
+    const metadata = refund?.metadata as { originalEntryId?: string } | null
+    if (!refund || refund.userId !== unit.debit.userId || refund.kind !== 'refund' || refund.sourceType !== 'image_generation'
+      || refund.deltaMilli !== 6000 || metadata?.originalEntryId !== unit.debit.id) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原图片退款尚未完成，未请求备用线路。')
+  }
+}
+
+async function prepareImage(ctx: ToolContext, lease: RunLeaseToken, parentId: string, work: CoverWork, index: number) {
+  const routeWork = coverRouteWork(work, index)
   const operation = await withRunLease(lease, async tx => {
     const parent = await readAdmittedToolOperation(lease, { operationId: parentId, action: 'cover_generate', novelId: ctx.novelId, callId: ctx.callId }, tx)
     if (parent.operation.status !== 'prepared' || runtimeJson(parent.input.work).hash !== runtimeJson(work).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '封面工作与原调用不一致。')
     await assertCurrentToolPolicy(tx, lease, parent.operation)
-    return prepareOperationInTransaction(tx, lease, { key: `cover:${parentId}:0`, kind: 'provider', action: 'cover_generate_image', parentOperationId: parentId,
-      input: runtimeJson({ version: 1, parentInputHash: parent.operation.inputHash, workHash: runtimeJson(work).hash, chargeKey: `image:${parentId}`,
-        usageLogId: createHash('sha256').update(`cover:${parentId}:0`).digest('hex'), request: coverRequest(work) }).value })
+    await assertRouteAdvance(tx, parentId, work, index)
+    return prepareOperationInTransaction(tx, lease, { key: `cover:${parentId}:${index}`, kind: 'provider', action: 'cover_generate_image', parentOperationId: parentId,
+      input: runtimeJson({ version: 1, parentInputHash: parent.operation.inputHash, workHash: runtimeJson(work).hash, chargeKey: coverChargeKey(parentId, index),
+        ...(index ? { routeIndex: index } : {}), usageLogId: createHash('sha256').update(`cover:${parentId}:${index}`).digest('hex'), request: coverRequest(routeWork) }).value })
   })
   const input = coverChildSchema.parse(z.object({ input: z.unknown() }).parse(operation.inputSnapshot).input)
-  const attempt = await prepareProviderAttempt(lease, { operationId: operation.id, attemptKey: '1', provider: work.route.provider,
-    model: work.route.modelName, request: runtimeJson(input.request).value })
+  const attempt = await prepareProviderAttempt(lease, { operationId: operation.id, attemptKey: '1', provider: routeWork.route.provider,
+    model: routeWork.route.modelName, request: runtimeJson(input.request).value })
   return { operation, input, attempt }
 }
 
@@ -52,8 +73,9 @@ async function refundNoResult(userId: string, attemptId: string, requestHash: st
   await withoutGoalEffects(() => reconcileCreditRefunds({ userId, limit: 10 })).catch(() => { /* Durable original obligation remains. */ })
 }
 
-async function generate(ctx: ToolContext, lease: RunLeaseToken, parentId: string, work: CoverWork) {
-  const prepared = await prepareImage(ctx, lease, parentId, work)
+async function generateRoute(ctx: ToolContext, lease: RunLeaseToken, parentId: string, frozenWork: CoverWork, index: number) {
+  const work = coverRouteWork(frozenWork, index)
+  const prepared = await prepareImage(ctx, lease, parentId, frozenWork, index)
   const identity = { userId: ctx.userId, attemptId: prepared.attempt.id, requestHash: prepared.attempt.requestHash }
   let saved: Awaited<ReturnType<typeof readImageResponse>>
   if (['succeeded', 'failed'].includes(prepared.attempt.status)) {
@@ -73,7 +95,9 @@ async function generate(ctx: ToolContext, lease: RunLeaseToken, parentId: string
     await recordProviderResult({ ...identity, outcome: saved.pointer.httpStatus >= 200 && saved.pointer.httpStatus < 300 ? 'succeeded' : 'failed', result: saved.pointer })
   } else {
     if (prepared.attempt.status !== 'prepared') return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原封面调用已终止，未重新生成。')
-    const runtime = await resolveCoverImageRuntime()
+    const pool = await resolveCoverImageRuntime()
+    const runtime = index === 0 ? pool : pool.fallbackRuntimes?.find(candidate => candidate.route.routeId === work.route.routeId)
+    if (!runtime) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原图片备用线路已不可用，尚未派发。')
     const { modelConfigId: _currentId, modelConfigRevision: _currentRevision, ...legacyRoute } = runtime.route
     const comparableRoute = work.route.modelConfigId ? runtime.route : legacyRoute
     if (runtimeJson(comparableRoute).hash !== runtimeJson(work.route).hash) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '图片服务路由已变化，尚未派发。')
@@ -82,11 +106,12 @@ async function generate(ctx: ToolContext, lease: RunLeaseToken, parentId: string
     const permit = await withManuscriptRunLease(lease, async tx => {
       const parent = await readAdmittedToolOperation(lease, { operationId: parentId, action: 'cover_generate', novelId: ctx.novelId, callId: ctx.callId }, tx)
       await assertCurrentToolPolicy(tx, lease, parent.operation)
+      await assertRouteAdvance(tx, parentId, frozenWork, index)
       if (!await tx.novel.findFirst({ where: { id: work.novelId, authorId: ctx.userId, status: { not: 'archived' } }, select: { id: true } })) return runtimeError('RUNTIME_SCOPE_MISMATCH', '作品已不可用于生成封面。')
       const current = await tx.agentProviderAttempt.findUniqueOrThrow({ where: { id: prepared.attempt.id } })
       if (current.status !== 'prepared') return { dispatchGranted: false }
       const binding = { version: 1, taskRootId: lease.taskRootId, parentOperationId: parentId, parentInputHash: parent.operation.inputHash,
-        operationId: prepared.operation.id, requestHash: current.requestHash, workHash: runtimeJson(work).hash, tariff: work.tariff,
+        operationId: prepared.operation.id, requestHash: current.requestHash, workHash: runtimeJson(frozenWork).hash, tariff: work.tariff,
         amountMilli: work.amountMilli, chargeKey: prepared.input.chargeKey }
       if (await tx.creditLedgerEntry.findUnique({ where: { idempotencyKey: prepared.input.chargeKey } })) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原图片扣费与派发状态不一致，未重复扣费。')
       await consumeCreditsInTransaction(tx, { userId: ctx.userId, amountMilli: work.amountMilli, kind: 'usage', sourceType: 'image_generation',
@@ -128,7 +153,7 @@ async function generate(ctx: ToolContext, lease: RunLeaseToken, parentId: string
   await syncGoalDurableUsage(identity.attemptId)
   if (outcome !== 'images') {
     await withoutGoalEffects(() => reconcileCreditRefunds({ userId: ctx.userId, limit: 10 })).catch(() => undefined)
-    return { failure: true as const }
+    return { failure: true as const, retryable: coverImageFailureMayRetry(saved.pointer.httpStatus, outcome === 'empty' ? 'AI_PROVIDER_EMPTY_RESPONSE' : undefined) }
   }
   ctx.signal.throwIfAborted()
   const imageIds = work.assetIds.slice(0, urls.length)
@@ -159,6 +184,15 @@ async function generate(ctx: ToolContext, lease: RunLeaseToken, parentId: string
   return { failure: false as const, images }
 }
 
+async function generate(ctx: ToolContext, lease: RunLeaseToken, parentId: string, work: CoverWork) {
+  for (let index = 0; index <= (work.fallbackRoutes?.length ?? 0); index++) {
+    ctx.signal.throwIfAborted()
+    const result = await generateRoute(ctx, lease, parentId, work, index)
+    if (!result.failure || !result.retryable || index === (work.fallbackRoutes?.length ?? 0)) return result
+  }
+  return runtimeError('RUNTIME_RECEIPT_INVALID', '图片线路池为空。')
+}
+
 export async function executeDurableCover(ctx: ToolContext, tool: AgentTool, raw: unknown): Promise<ToolResult> {
   const capability = ctx.durableCover
   if (!capability || tool.name !== 'cover_generate' || capability.lease.userId !== ctx.userId || capability.lease.runId !== ctx.runId) return runtimeError('RUNTIME_SCOPE_MISMATCH', '封面生成缺少原任务能力。')
@@ -174,9 +208,11 @@ export async function executeDurableCover(ctx: ToolContext, tool: AgentTool, raw
     const novel = await prisma.novel.findFirst({ where: { id: ctx.novelId, authorId: ctx.userId }, select: { title: true, displayTitle: true } })
     if (!novel) return runtimeError('RUNTIME_SCOPE_MISMATCH', '作品不存在或无权访问。')
     const runtime = await resolveCoverImageRuntime(); assertPublicRoute(runtime.route)
+    for (const candidate of runtime.fallbackRuntimes ?? []) assertPublicRoute(candidate.route)
     const parsed = coverGenerateTool.parameters.parse(args), count = parsed.count ?? 1
     work = coverWorkSchema.parse({ version: 1, novelId: ctx.novelId, ...novel, prompt: enforceCoverTitleInPrompt(parsed.prompt.trim(), novel.title, novel.displayTitle),
-      count, size: FIXED_NOVEL_COVER_SIZE, assetIds: Array.from({ length: count }, () => randomUUID()), tariff: 'image_call_6000_v1', amountMilli: 6000, route: runtime.route })
+      count, size: FIXED_NOVEL_COVER_SIZE, assetIds: Array.from({ length: count }, () => randomUUID()), tariff: 'image_call_6000_v1', amountMilli: 6000, route: runtime.route,
+      ...(runtime.fallbackRuntimes?.length ? { fallbackRoutes: runtime.fallbackRuntimes.map(candidate => candidate.route) } : {}) })
   }
   const prepared = await prepareToolCursorOperation(lease, capability.cursor, { key: capability.operationKey, action: tool.name, callId: ctx.callId,
     effectDomain: 'metadata', targetId: lease.taskRootId, effectiveArgs: args, normalize, operationInput: runtimeJson({ novelId: ctx.novelId, callId: ctx.callId, args, work }).value })

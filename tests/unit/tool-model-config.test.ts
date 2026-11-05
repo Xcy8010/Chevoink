@@ -1,12 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { webToolEndpoint } from '../../api/lib/web-tool-provider.js'
 import { clearToolModelRuntimeCache, getToolModelRuntime } from '../../api/lib/tool-model-config.js'
+import { randomUUID } from 'node:crypto'
 
 const mocks = vi.hoisted(() => ({ find: vi.fn(), decrypt: vi.fn() }))
-vi.mock('../../api/lib/prisma.js', () => ({ prisma: { aiModelConfig: { findFirst: mocks.find } } }))
+vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<object>(), prisma: { aiModelConfig: { findFirst: mocks.find } } }))
 vi.mock('../../api/lib/secret-box.js', () => ({ decryptSecret: mocks.decrypt }))
 beforeEach(() => { clearToolModelRuntimeCache(); mocks.find.mockReset(); mocks.decrypt.mockReset().mockImplementation((value: string) => `clear-${value}`) })
 const record = (key: string) => ({ provider: 'deepseek', modelName: key, baseUrl: 'https://api.deepseek.com', apiKeyCiphertext: key })
+it('loads enabled image fallback credentials in configured order only into the private runtime', async () => {
+  const routes = ['first', 'disabled', 'last'].map(label => ({ id: randomUUID(), label, enabled: label !== 'disabled', provider: 'image-relay', modelName: label, baseUrl: `https://${label}.invalid/generate`, apiKeyCiphertext: label }))
+  mocks.find.mockResolvedValue({ ...record('image'), metadata: { routes } })
+  const runtime = await getToolModelRuntime('tool:image-generation')
+  expect(runtime?.routes).toEqual([routes[0], routes[2]].map(({ id, provider, modelName, baseUrl, apiKeyCiphertext }) => ({ id, provider, modelName, baseUrl, apiKey: `clear-${apiKeyCiphertext}` })))
+  expect(mocks.decrypt).not.toHaveBeenCalledWith('disabled')
+})
 
 describe('independent admin tool runtime configuration', () => {
   it('scopes Search and Fetch queries and caches their distinct credentials', async () => {

@@ -3,9 +3,10 @@ import { resolveSystemModelConfig } from './model-lifecycle.js'
 import { decryptSecret } from './secret-box.js'
 import type { WebToolProtocol } from '../../shared/contracts/web-tool.js'
 import type { ImageQualityConfig } from '../../shared/contracts/image-model.js'
+import { readModelRoutes } from './model-route-pool.js'
 
 export type ToolModelKey = 'tool:image-generation' | 'tool:image-vision' | 'tool:web-search' | 'tool:web-fetch'
-export type ToolModelRuntime = { provider: string; modelName: string; baseUrl: string; apiKey: string; imageQuality?: ImageQualityConfig; webToolProtocol?: WebToolProtocol; modelConfigId?: string; modelConfigRevision?: number }
+export type ToolModelRuntime = { provider: string; modelName: string; baseUrl: string; apiKey: string; routes?: Array<{ id: string; provider: string; modelName: string; baseUrl: string; apiKey: string }>; imageQuality?: ImageQualityConfig; webToolProtocol?: WebToolProtocol; modelConfigId?: string; modelConfigRevision?: number }
 
 const cache = new Map<ToolModelKey, { expiresAt: number; value: ToolModelRuntime | null }>()
 
@@ -41,7 +42,10 @@ export async function getToolModelRuntime(key: ToolModelKey): Promise<ToolModelR
   const value = record && record.modelName !== 'unconfigured' && record.baseUrl && record.apiKeyCiphertext
     ? { ...(record.id ? { modelConfigId: record.id, modelConfigRevision: record.revision } : {}), provider: record.provider, modelName: record.modelName, baseUrl: record.baseUrl, apiKey: decryptSecret(record.apiKeyCiphertext),
         ...((key === 'tool:web-search' || key === 'tool:web-fetch') && metadata.webToolProtocol !== undefined ? { webToolProtocol: metadata.webToolProtocol as WebToolProtocol } : {}),
-        ...(key === 'tool:image-generation' && metadata.imageQuality ? { imageQuality: metadata.imageQuality as ImageQualityConfig } : {}) }
+        ...(key === 'tool:image-generation' && metadata.imageQuality ? { imageQuality: metadata.imageQuality as ImageQualityConfig } : {}),
+        ...(key === 'tool:image-generation' ? { routes: readModelRoutes(metadata).filter(route => route.enabled).map(route => ({
+          id: route.id, provider: route.provider, modelName: route.modelName, baseUrl: route.baseUrl, apiKey: decryptSecret(route.apiKeyCiphertext),
+        })) } : {}) }
     : null
   cache.set(key, { expiresAt: Date.now() + 30_000, value })
   return value
