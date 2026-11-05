@@ -1,4 +1,4 @@
-import { initializeExecutionState, saveExecutionState } from '../support/native-tool-test-state.js'
+import { initializeExecutionState, saveExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { describe,expect,it,vi } from 'vitest'
 import { z } from 'zod'
@@ -52,7 +52,7 @@ describe.runIf(available)('parent completion with an already verified limited ch
     const initial = await initializeExecutionState(lease, { configuration, snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
       messages: [{ role: 'user', content: '修改本章' }, { role: 'assistant', content: null, toolCalls: [{ id: 'delegate', name: tool.name, arguments: JSON.stringify(args) }] }], successfulToolSignatures: [] } })
     const prepared = await prepareToolCursorOperation(lease, { expectedRevision: initial.frame.revision, expectedHash: initial.frame.snapshotHash }, {
-      key: 'exec:0', action: tool.name, callId: 'delegate', targetId: f.rootId, effectDomain: 'read', effectiveArgs: args,
+      key: `exec:${initial.frame.state.nextOperationSequence}`, action: tool.name, callId: 'delegate', targetId: f.rootId, effectDomain: 'read', effectiveArgs: args,
       normalize: value => tool.parameters.parse(value), operationInput: { callId: 'delegate', args } })
     const grant = await admitChildExecution(lease, { parentOperationId: prepared.operation.id, childIndex: 0, kind: 'spawned', role: 'orchestrator',
       name: '本章写作', prompt: '修改本章', spec: { ...f.spec, id: randomUUID(), runId: undefined }, configuration,
@@ -116,7 +116,7 @@ describe.runIf(available)('parent completion with an already verified limited ch
         expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).status).toBe(beforeFinishStatus)
         expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'execution.completion.decided' } })).toBe(0)
       }
-      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
     } finally {
       await prisma.agentChildExecutionGrant.deleteMany({ where: { parentRootId: f.rootId } })
     }
@@ -167,67 +167,44 @@ describe.runIf(available)('durable explicit memory save', () => {
   })
 })
 
-describe.runIf(available)('durable domain continuation', () => {
-  it.each(['own', 'old-task', 'denied', 'unknown-operation', 'stale-cursor', 'rollback', 'stagnant-resume'] as const)('%s keeps domain follow-up inside the original scope', async scenario => {
-    await fixture(async f => {
-      let lease = await claim(f)
-      const tool = chapterBridgeCommitTool
-      const initialized = await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
-        model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
-        tools: [{ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } }],
-        toolAuthority: [{ name: tool.name, permission: scenario === 'denied' ? 'deny' : 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
-        snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
-          messages: [{ role: 'user', content: '修改本章' }, { role: 'assistant', content: '正文已保存' }], successfulToolSignatures: [] } })
-      const other = scenario === 'old-task' ? await prisma.agentRun.create({ data: { userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', status: 'queued', engine: 'loop', startRequest: { prompt: '授权自主创作全书，并修改已有章节。' } } }) : null
-      const compilation = await prepareStoryCompilation({ ...f, runId: other?.id ?? f.runId, chapterId: f.chapterId, mode: 'balanced', intentSummary: '尚未提交章节' })
-      if (other) await prisma.agentRun.update({ where: { id: other.id }, data: { status: 'failed' } })
-      if (scenario === 'unknown-operation') await prisma.agentOperation.create({ data: { id: randomUUID(), taskRootId: f.rootId, originRunId: f.runId,
-        operationKey: 'unknown-test', kind: 'provider', action: 'fixture', inputHash: runtimeJson({}).hash, inputSnapshot: {}, status: 'unknown' } })
-      if (scenario === 'rollback') await prisma.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: f.rootId, runId: f.runId,
-        eventKey: `state:${f.rootId}:1`, type: 'fixture.conflict', payload: {} } })
-      const invoke = () => advanceDurableCompletionObligations(lease, { expectedRevision: 0, expectedHash: scenario === 'stale-cursor' ? 'f'.repeat(64) : initialized.frame.snapshotHash })
-      if (scenario === 'rollback' || scenario === 'stale-cursor') {
-        await expect(invoke()).rejects.toThrow()
-        expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'execution.continuation' } })).toBe(0)
-      } else if (scenario === 'old-task') expect(await invoke()).toBeNull()
-      else if (scenario === 'denied' || scenario === 'unknown-operation') {
-        expect(await invoke()).toMatchObject({ kind: 'reconciliation_required' })
-        expect(await runReviewedDurableExecution(lease, new AbortController().signal)).toMatchObject({ kind: 'needs_attention', blockers: expect.any(Array) })
-        expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).status).toBe('paused')
-        expect((await loadExecutionState(f.userId, f.runId)).frame.snapshotHash).toBe(initialized.frame.snapshotHash)
-        expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+describe.runIf(available)('ordinary compiler records and actual continuation boundaries', () => {
+  it.each(['own', 'old-task', 'denied', 'unknown-operation', 'stale-cursor', 'existing-event', 'repeated-candidate'] as const)('%s keeps completion independent of optional compiler steps', scenario => fixture(async f => {
+    const lease = await claim(f), tool = chapterBridgeCommitTool
+    const initialized = await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+      model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+      tools: [{ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } }],
+      toolAuthority: [{ name: tool.name, permission: scenario === 'denied' ? 'deny' : 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
+      snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+        messages: [{ role: 'user', content: '修改本章' }, { role: 'assistant', content: '正文已保存' }], successfulToolSignatures: [] } })
+    const other = scenario === 'old-task' ? await prisma.agentRun.create({ data: { userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, mode: 'act', action: 'workspaceAgent',
+      agentType: 'writingOrchestrator', status: 'queued', engine: 'loop', startRequest: { prompt: '授权自主创作全书，并修改已有章节。' } } }) : null
+    const prepared = await prepareStoryCompilation({ ...f, runId: other?.id ?? f.runId, chapterId: f.chapterId, mode: 'balanced', intentSummary: '可选章节记录' })
+    const compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id } })
+    if (other) await prisma.agentRun.update({ where: { id: other.id }, data: { status: 'failed' } })
+    if (scenario === 'unknown-operation') await prisma.agentOperation.create({ data: { id: randomUUID(), taskRootId: f.rootId, originRunId: f.runId,
+      operationKey: 'unknown-test', kind: 'provider', action: 'fixture', inputHash: runtimeJson({}).hash, inputSnapshot: {}, status: 'unknown' } })
+    if (scenario === 'existing-event') await prisma.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: f.rootId, runId: f.runId,
+      eventKey: 'existing-fixture:' + f.rootId, type: 'fixture.conflict', payload: {} } })
+    const invoke = (frame = initialized.frame) => advanceDurableCompletionObligations(lease, { expectedRevision: frame.revision,
+      expectedHash: scenario === 'stale-cursor' ? 'f'.repeat(64) : frame.snapshotHash })
+    if (scenario === 'stale-cursor') await expect(invoke()).rejects.toMatchObject({ code: 'RUNTIME_STATE_CONFLICT' })
+    else if (scenario === 'unknown-operation') {
+      expect(await invoke()).toMatchObject({ kind: 'reconciliation_required', blockers: [expect.objectContaining({ code: 'unresolved_operation' })] })
+      expect(await runReviewedDurableExecution(lease, new AbortController().signal)).toMatchObject({ kind: 'needs_attention' })
+      expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).status).toBe('paused')
+    } else {
+      expect(await invoke()).toBeNull()
+      if (scenario === 'repeated-candidate') for (let index = 0; index < 5; index++) {
+        const { frame } = await loadExecutionState(f.userId, f.runId)
+        const next = await saveExecutionState(lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
+          snapshot: { ...frame.state, messages: [...frame.state.messages, { role: 'assistant', content: '正文已保存' }] } })
+        expect(await invoke(next)).toBeNull()
       }
-      else {
-        const result = await invoke()
-        expect(result).toMatchObject({ kind: 'continued' })
-        const event = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'execution.continuation' } })
-        expect(event.payload).toMatchObject({ reason: 'domain_incomplete', reminderIndex: 1, blockers: [{ code: 'uncommitted_compilation', reference: compilation.compilation.id }] })
-        const state = await loadExecutionState(f.userId, f.runId)
-        expect(state.frame.state.messages.filter(item => item.role === 'user')).toHaveLength(1)
-        expect(state.frame.state.turn).toBe(0)
-        if (scenario === 'stagnant-resume') {
-          for (let index = 2; index <= 5; index++) {
-            const previous = await loadExecutionState(f.userId, lease.runId)
-            const candidate = await saveExecutionState(lease, { expectedRevision: previous.frame.revision, expectedHash: previous.frame.snapshotHash,
-              snapshot: { ...previous.frame.state, messages: [...previous.frame.state.messages, { role: 'assistant', content: '正文已保存' }] } })
-            if (index === 3) {
-              await pauseDurableTask(f.userId, lease.runId)
-              const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'run.paused' }, orderBy: { sequence: 'desc' } })
-              const resumed = await resumeDurableTask({ userId: f.userId, runId: lease.runId, pauseEventId: pause.id })
-              lease = await claim({ userId: f.userId, runId: resumed.run.id })
-            }
-            expect(await advanceDurableCompletionObligations(lease, { expectedRevision: candidate.revision, expectedHash: candidate.snapshotHash }))
-              .toMatchObject({ kind: 'continued' })
-          }
-          const events = await prisma.agentExecutionOutbox.findMany({ where: { taskRootId: f.rootId, type: 'execution.continuation' }, orderBy: { sequence: 'asc' } })
-          expect(events.map(item => (item.payload as { reminderIndex: number }).reminderIndex)).toEqual([1, 2, 3, 4, 5])
-          expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })).status).toBe('active')
-          expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'execution.completion.decided' } })).toBe(0)
-        }
-      }
-      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
-    })
-  })
+    }
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).toEqual(compilation)
+    expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'execution.continuation' } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId, action: { not: 'fixture_model_turn' } } } })).toBe(0)
+  }))
 })
 
 describe.runIf(available)('durable completion without an extra model call', () => {
@@ -283,8 +260,8 @@ describe.runIf(available)('durable completion without an extra model call', () =
         }
         expect(fetch).not.toHaveBeenCalled()
         expect(route).not.toHaveBeenCalled()
-        expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
-        expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+        expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
+        expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
       }, undefined, '不要修改已有章节，回答你好')
     })
 })

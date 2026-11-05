@@ -363,9 +363,9 @@ export async function saveSceneTasks(input: {
   }
   await tx.$queryRaw`SELECT id FROM story_compilations WHERE id = ${input.compilationId} AND user_id = ${input.userId} AND novel_id = ${input.novelId} FOR UPDATE`
   const compilation = await tx.storyCompilation.findFirst({
-    where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, status: 'active' },
+    where: { id: input.compilationId, userId: input.userId, novelId: input.novelId, status: { in: ['active', 'completed'] } },
   })
-  if (!compilation) throw new DataAccessError(404, 'COMPILATION_NOT_FOUND', '写作编译任务不存在、已结束或不属于当前作品。')
+  if (!compilation) throw new DataAccessError(404, 'COMPILATION_NOT_FOUND', '场景记录不存在、已被替代或不属于当前作品。')
   const beatCandidates = normalizeBeatCandidates(input.tasks, input.alternatives)
   await tx.sceneTask.deleteMany({ where: { compilationId: compilation.id } })
   await tx.sceneTask.createMany({
@@ -408,7 +408,7 @@ export async function saveSceneTasksWithMilestone(input: Parameters<typeof saveS
   await lockNovelActiveScope(transaction, input.novelId)
   const scope = await compilationRunScope(transaction, input)
   const compilation = await transaction.storyCompilation.findFirst({ where: { id: input.compilationId, userId: input.userId,
-    novelId: input.novelId, status: 'active', ...scope }, select: { targetOrderIndex: true } })
+    novelId: input.novelId, status: { in: ['active', 'completed'] }, ...scope }, select: { targetOrderIndex: true } })
   if (!compilation) throw new DataAccessError(404, 'COMPILATION_NOT_FOUND', '场景编译不属于当前原任务，未保存场景。')
   const original = await readWritingScope(transaction, input)
   const runIds = await (await import('./original-request.js')).originalTaskRunIds(transaction, input, original)

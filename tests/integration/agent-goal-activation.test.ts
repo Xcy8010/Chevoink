@@ -1,3 +1,4 @@
+import { initializeExecutionState, saveExecutionState } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { env } from '../../api/config/env.js'
@@ -15,8 +16,8 @@ import { readGoalActivationToolCeiling } from '../../api/lib/agent/goal-activati
 import { reconcileGoalActivation } from '../../api/lib/agent/goal-activation-supervisor.js'
 import { lockOwnedGoal } from '../../api/lib/agent/goal-store.js'
 import { acquireRunLease, releaseRunLease } from '../../api/lib/agent/runtime-lease.js'
-import { initializeExecutionState, loadExecutionState } from '../../api/lib/agent/runtime-state.js'
-import { saveExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
+
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
 import { consumeDurableGoalConsent, consumeLegacyGoalConsent } from '../../api/lib/agent/goal-consent.js'
@@ -116,7 +117,7 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
     expect(await prisma.agentGoalCommand.count({ where: { userId: f.userId } })).toBe(1)
     expect(await prisma.agentRun.count({ where: { userId: f.userId } })).toBe(1)
     expect(await prisma.agentQueuedRequest.count({ where: { userId: f.userId, status: 'consented' } })).toBe(2)
-    expect(await prisma.agentProviderAttempt.count({ where: { runId: f.runId } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' } }, runId: f.runId } })).toBe(0)
   })
   it('retains a late consent visibly after source settlement and never revives or sends it as a new task', async () => {
     const f = await fixture('写下一章'), id = randomUUID()
@@ -171,7 +172,7 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
     expect(after.head.configurationHash).toBe(before.head.configurationHash)
     expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: root.id } })).toEqual(budget)
     expect(await prisma.agentGoalCommand.count({ where: { userId: f.userId } })).toBe(1)
-    expect(await prisma.agentProviderAttempt.count({ where: { runId: { in: [f.runId, resumed.run.id] } } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' } }, runId: { in: [f.runId, resumed.run.id] } } })).toBe(0)
     await releaseRunLease(owner)
   })
   it('does not move a retained consent onto a different task root in the same owner/window', async () => {
@@ -233,7 +234,7 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
       expect(await prisma.agentGoal.findUniqueOrThrow({ where: { id: initial.id } })).toEqual(held)
       expect(await prisma.agentRun.count({ where: { taskRootId: root.id } })).toBe(1)
       expect(await prisma.agentEffectReceipt.count({ where: { operationId: pending.operation.id } })).toBe(0)
-      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: root.id } } })).toBe(0)
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: root.id } } })).toBe(0)
       return
     }
     expect(action).toMatchObject({ kind: 'activation_continue', runId: f.runId })
@@ -268,7 +269,7 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
     expect(await prisma.agentRun.count({ where: { taskRootId: root.id } })).toBe(1)
     expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: root.id } })).status).toBe('paused')
     expect(await prisma.agentEffectReceipt.count({ where: { operationId: pending.operation.id } })).toBe(0)
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: root.id } } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: root.id } } })).toBe(0)
     await prisma.novel.update({ where: { id: f.novelId }, data: { manuscriptRevision: manuscript.manuscriptRevision } })
     const commandsBeforeResume = await prisma.agentGoalCommand.findMany({ where: { userId: f.userId }, orderBy: { requestId: 'asc' } })
     expect(commandsBeforeResume).toEqual(commandsBeforeReadiness)
@@ -289,12 +290,12 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
     expect((await loadExecutionState(f.userId, resumed.run.id)).frame.snapshotHash).toBe(pending.pending.snapshotHash)
     expect((await executeDurableToolStep(owner, f.ctx.signal)).kind).toBe('tool')
     expect((await executeDurableToolStep(owner, f.ctx.signal)).kind).toBe('idle')
-    expect(await prisma.agentOperation.count({ where: { taskRootId: root.id, operationKey: key } })).toBe(1)
+    expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, taskRootId: root.id, operationKey: key } })).toBe(1)
     expect(await prisma.agentEffectReceipt.count({ where: { operationId: pending.operation.id } })).toBe(1)
     expect(await prisma.agentGoalCommand.findMany({ where: { userId: f.userId }, orderBy: { requestId: 'asc' } })).toEqual(commandsBeforeResume)
     expect(await prisma.agentGoalCommand.count({ where: { userId: f.userId, requestId: { startsWith: 'enable:' } } })).toBe(1)
     expect(await prisma.agentGoalCommand.count({ where: { userId: f.userId } })).toBe(3)
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: root.id } } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: root.id } } })).toBe(0)
     await releaseRunLease(owner)
   })
   afterAll(async () => { env.agentGoalEnabled = priorEnabled; await prisma.$disconnect() })
@@ -312,7 +313,7 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
     expect(await prisma.agentRun.findUnique({ where: { id: f.runId } })).toEqual(before)
     await superviseAgentGoal(f.userId, f.sessionId, goal!.id)
     expect(await prisma.agentGoalExecution.count({ where: { goalId: goal!.id } })).toBe(0)
-    expect(await prisma.agentProviderAttempt.count({ where: { runId: f.runId } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' } }, runId: f.runId } })).toBe(0)
     expect(f.ctx.emit).toHaveBeenCalledWith(expect.objectContaining({ type: 'goal.snapshot' }))
   })
   it.each(['unknown-source', 'no-request', 'discussion-en', 'discussion-en-2', 'discussion-zh', 'inline-child', 'spawned', 'specialist', 'foreign-session', 'foreign-owner'])('rejects %s without goal/command effects', async kind => {
@@ -388,7 +389,7 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
         expect(await prisma.agentGoalExecution.findUniqueOrThrow({ where: { runId: f.runId } })).toEqual(bindingBefore)
         expect(await prisma.agentGoalEvidence.findUniqueOrThrow({ where: { id: grantBefore.id } })).toEqual(grantBefore)
         expect(await prisma.agentGoal.findUniqueOrThrow({ where: { id: initial.id } })).toEqual(record)
-        expect(await prisma.agentProviderAttempt.count({ where: { runId: f.runId } })).toBe(0)
+        expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' } }, runId: f.runId } })).toBe(0)
         await prisma.novel.update({ where: { id: f.novelId }, data: { manuscriptRevision: manuscript.manuscriptRevision } })
       }
       await startLegacyRuntimeRun(f.userId, f.runId, true, { goalId: initial.id, epoch: record.epoch })
@@ -398,7 +399,7 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
     }
     expect((await readAgentGoal(f.userId, f.sessionId))?.tokensUsed).toBe(initial.tokensUsed)
     expect(await prisma.agentRun.count({ where: { userId: f.userId } })).toBe(1)
-    expect(await prisma.agentProviderAttempt.count({ where: { runId: f.runId } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' } }, runId: f.runId } })).toBe(0)
   })
   it('retains the original activation ceiling only for revision 1, while a new human objective revision has independent native authority', async () => {
     const f = await fixture('请启用目标模式，调研一段历史背景'), initial = await enable(f)
@@ -443,7 +444,7 @@ describe.skipIf(!available)('current task goal activation (isolated PostgreSQL g
     await superviseAgentGoal(f.userId, f.sessionId, goal.id)
     expect(await readAgentGoal(f.userId, f.sessionId)).toMatchObject({ status: 'completed' })
     expect(await prisma.agentRun.count({ where: { userId: f.userId } })).toBe(1)
-    expect(await prisma.agentProviderAttempt.count({ where: { runId: f.runId } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' } }, runId: f.runId } })).toBe(0)
   })
   it('commits durable cursor/effect/pending goal together, projects once, and preserves root configuration/budget', async () => {
     const f = await fixture()

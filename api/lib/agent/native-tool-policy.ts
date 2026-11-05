@@ -53,6 +53,9 @@ export async function readEffectiveNativeTooling(tx: RuntimeTx, lease: RunLeaseT
     .filter(tool => !session.spawnedFromSessionId || !ORCHESTRATION_TOOL_NAMES.has(tool.name))
   let tools = applySessionToolPolicy(restrictToolsToTask(candidates, task, configuration.mode), configuration.mode, session.toolPolicy,
     session.sandboxMode === 'read_only' || session.sandboxMode === 'full_access' ? session.sandboxMode : 'workspace')
+  const ceiling = new Map(snapshotToolAuthority(tools, configuration.mode))
+  for (const grant of configuration.toolAuthority) ceiling.set(grant.name, grant)
+  tools = intersectToolAuthority(tools, configuration.mode, ceiling)
   if (lease.parent) {
     tools = intersectToolAuthority(tools, configuration.mode, new Map(configuration.toolAuthority.map(grant => [grant.name, grant])))
     tools = intersectToolAuthority(tools, configuration.mode, new Map(parentTooling!.toolAuthority.map(grant => [grant.name, grant])))

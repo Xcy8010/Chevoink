@@ -1,3 +1,4 @@
+import { commitWithAdvisoryReviewFacts } from '../support/advisory-review-commit.js'
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
@@ -133,8 +134,8 @@ describe.runIf(available)('frozen proposal history and ordinary current report c
         expect(source).toMatchObject({ id: chapter.id, revision: 8 })
         await persistCurrentContinuityReport({ ...subject, compilationId: prepared.compilation.id, expectedChapterRevision: 1 })
         await prisma.chapter.update({ where: { id: chapter.id }, data: { content: chapter.content + ' An author correction.' } })
-        await expect(commitChapterBridge({ ...subject, compilationId: prepared.compilation.id, chapterSummary: 'Next record.',
-          hookDecision: '', delayedHookReason: '', openingStructure: 'Close', endingStructure: 'Record' })).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+        await commitWithAdvisoryReviewFacts({ ...subject, compilationId: prepared.compilation.id, chapterSummary: 'Next record.',
+          hookDecision: '', delayedHookReason: '', openingStructure: 'Close', endingStructure: 'Record' })
         expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: originalBytes.id } })).toEqual(originalBytes)
       }
       expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)

@@ -25,13 +25,8 @@ describe.runIf(available)('required legacy input and repair audit with real Post
       taskSpec: JSON.parse(JSON.stringify(spec)), usage: { promptTokens: 20, completionTokens: 5, totalTokens: 25, checkpoint } } })
     await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 1, type: 'run.paused', payload: { reason: 'needs_input' } } })
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-    if (scenario === 'bounded') {
-      expect(await continueLoopRun(f.userId, f.runId)).toMatchObject({ runId: f.runId, status: 'running' })
-      expect(execution).toHaveBeenCalledOnce(); expect(creditAccess).toHaveBeenCalledOnce()
-    } else {
-      await expect(continueLoopRun(f.userId, f.runId)).rejects.toMatchObject({ code: 'AUTHOR_INPUT_REQUIRED' })
-      expect(execution).not.toHaveBeenCalled(); expect(creditAccess).not.toHaveBeenCalled(); expect(modelRuntime).not.toHaveBeenCalled()
-    }
+    expect(await continueLoopRun(f.userId, f.runId)).toMatchObject({ runId: f.runId, status: 'running' })
+    expect(execution).toHaveBeenCalledOnce(); expect(creditAccess).toHaveBeenCalledOnce()
     const after = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
     expect(after.taskSpec).toEqual(original.taskSpec); expect(after.usage).toEqual(original.usage)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapter)

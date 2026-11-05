@@ -1,3 +1,4 @@
+import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { randomUUID } from 'node:crypto'
 import request from 'supertest'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
@@ -170,8 +171,7 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
           expect(await prisma.aiUsageLog.count({ where: { agentRunId: runId } })).toBe(3)
         }
         for (const chapter of chapters.slice(0, 2)) {
-          await expect(chapterWriteTool.execute({ ...ctx, callId: `deny-${chapter.id}` }, { chapterId: chapter.id, content: '未授权替换' }))
-            .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+          await expectToolDenied(chapterWriteTool.execute({ ...ctx, callId: `deny-${chapter.id}` }, { chapterId: chapter.id, content: '未授权替换' }), { code: 'AUTHOR_CHAPTER_SCOPE' })
           expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
         }
         if (scenario !== 'changed-during-provider') expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapters[2].id } })).toEqual(chapters[2])

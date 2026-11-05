@@ -1,3 +1,5 @@
+import { expectToolDenied } from '../support/expect-tool-denied.js'
+import { commitWithAdvisoryReviewFacts } from '../support/advisory-review-commit.js'
 import { initializeExecutionState, saveExecutionState } from '../support/native-tool-test-state.js'
 import * as reviewGuard from '../../api/lib/agent/chapter-review-guard.js'
 import { qualityReportGetTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
@@ -42,7 +44,6 @@ import { askUserTool } from '../../api/lib/agent/tools/interact-tools.js'
 import * as questionPermissions from '../../api/lib/agent/permissions.js'
 import { resolveLoopRunQuestion } from '../../api/lib/agent/run-service.js'
 import { resolveDurableQuestion } from '../../api/lib/agent/runtime-question.js'
-import { runDurableExecution } from '../../api/lib/agent/runtime-executor.js'
 import * as aiService from '../../api/lib/ai-service.js'
 import { readOriginalTaskRequest } from '../../api/lib/agent/original-request.js'
 import { shortSceneRequest, firstChapterAnswer, placementQuestion } from '../support/writing-clarification-fixture.js'
@@ -76,7 +77,7 @@ async function fixture(prompt: string, work: (ctx: ToolContext) => Promise<void>
 }
 describe.skipIf(!available)('authenticated empty-book clarification', () => {
   it.each((['none', 'before-reduction', 'after-reduction'] as const).flatMap(crash => [false, true].map(wrapped => ({ crash, wrapped }))))(
-    'pauses the original durable task after an unaccepted scope answer, crash=$crash wrapped=$wrapped', ({ crash, wrapped }) => fixture(shortSceneRequest, async ctx => {
+    'returns the actual answer to the Agent without a parser-driven pause, crash=$crash wrapped=$wrapped', ({ crash, wrapped }) => fixture(shortSceneRequest, async ctx => {
       const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx,
         buildTaskSpec({ ...ctx, prompt: shortSceneRequest, authorWritingProtocol: 2, reviewProtocol: 1, localEditProtocol: 1 }), shortSceneRequest, 2))
       await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value, status: 'queued' } })
@@ -107,15 +108,16 @@ describe.skipIf(!available)('authenticated empty-book clarification', () => {
           })
           try { await expect(executeDurableToolStep(lease, ctx.signal)).rejects.toThrow('synthetic question reduction crash') } finally { fault.mockRestore() }
         }
-        const result = await runDurableExecution(lease, ctx.signal)
-        expect(result).toMatchObject({ kind: 'needs_attention', authorInputRequired: true, frame: { state: { phase: 'idle' } } })
+        await executeDurableToolStep(lease, ctx.signal)
+        expect(await executeDurableToolStep(lease, ctx.signal)).toMatchObject({ kind: 'idle' })
+        expect((await loadExecutionState(ctx.userId, ctx.runId)).frame.state).toMatchObject({ phase: 'idle' })
         expect(model).not.toHaveBeenCalled()
-        expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).toMatchObject({ status: 'paused', taskRootId: root.id })
+        expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).status).not.toBe('paused')
         const after = await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: root.id } })
         expect(after.inputHash).toBe(root.inputHash)
         expect(after.specSnapshot).toEqual(root.specSnapshot)
         expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: root.id } })).toEqual(budget)
-        expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: root.id } } })).toBe(0)
+        expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: root.id } } })).toBe(0)
         expect(await prisma.agentOperation.count({ where: { taskRootId: root.id, action: 'ask_user', status: 'succeeded' } })).toBe(1)
         expect(await prisma.agentArtifact.count({ where: { runId: ctx.runId, metadata: { path: ['writingScopeClarification'], equals: true } } })).toBe(0)
         expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(0)
@@ -160,8 +162,7 @@ describe.skipIf(!available)('authenticated empty-book clarification', () => {
       await chapterReadTool.execute({ ...ctx, callId: 'read-clarified' }, { chapterId: chapter.id })
       await chapterEditRangeTool.execute({ ...ctx, callId: 'edit-clarified' }, { chapterId: chapter.id, oldText: '门开了。', newText: '门缓缓开了。' })
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({ content: body.replace('门开了。', '门缓缓开了。'), revision: chapter.revision + 1 })
-      if (local) await expect(chapterWriteTool.execute({ ...ctx, callId: 'deny-whole' }, { chapterId: chapter.id, content: '整章重写。' }))
-        .rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      if (local) await expectToolDenied(chapterWriteTool.execute({ ...ctx, callId: 'deny-whole' }, { chapterId: chapter.id, content: '整章重写。' }), { code: 'AUTHOR_LOCAL_SCOPE' })
       const after = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
       expect(after.taskSpec).toEqual(before.taskSpec)
       expect(after.startRequest).toEqual(before.startRequest)
@@ -173,7 +174,7 @@ describe.skipIf(!available)('authenticated empty-book clarification', () => {
     await admit(ctx)
     const frozenRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
     const originHash = runtimeJson({ spec: frozenRun.taskSpec, request: frozenRun.startRequest }).hash
-    await expect(prisma.$transaction(tx => assertWritingTarget(tx, ctx, { orderIndex: 1 }))).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+    expect((await readWritingScope(prisma, ctx)).writing).toMatchObject({ kind: 'needs_input', targets: [] })
     if (mode === 'legacy') {
       const answered = await legacyAnswer(ctx, firstChapterAnswer)
       expect(answered.semanticTransition).toBeDefined()
@@ -221,8 +222,8 @@ describe.skipIf(!available)('authenticated empty-book clarification', () => {
     const created = await chapterCreateTool.execute(ctx, { title: '过关赛', content: body })
     const chapterId = created.observedState!.id
     expect(await readNewDraftWritingAuthority(prisma, ctx, { id: chapterId, orderIndex: 1 })).toBeTruthy()
-    await expect(commitChapterBridge({ ...ctx, compilationId: prepared.compilation.id, chapterSummary: '过关', exitState: { knowledge: [], body: [], objects: [], relationships: [], emotion: [], openLoops: [] },
-      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '门闩', endingStructure: '放行' })).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+    await commitWithAdvisoryReviewFacts({ ...ctx, compilationId: prepared.compilation.id, chapterSummary: '过关', exitState: { knowledge: [], body: [], objects: [], relationships: [], emotion: [], openLoops: [] },
+      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '门闩', endingStructure: '放行' })
     const current = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: prepared.compilation.id }, include: { chapter: true, bridge: true, sceneTasks: true } })
     await persistCurrentContinuityReport({ ...ctx, compilationId: current.id, expectedChapterRevision: current.chapter!.revision })
     await prisma.chapterQualityReport.create({ data: { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: current.id, chapterId,
@@ -346,11 +347,11 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
         expect(result.kind).toBe('tool')
         if (result.kind === 'tool') expect(result.result.outcome, result.result.output).toBeUndefined()
       }
-      const first = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: root.id, operationKey: 'exec:0' }, include: { effectReceipt: true } })
+      const first = await prisma.agentOperation.findFirstOrThrow({ where: { action: { not: 'fixture_model_turn' }, taskRootId: root.id, operationKey: 'exec:0' }, include: { effectReceipt: true } })
       expect(first.effectReceipt!.result).toMatchObject({ code: 'INVALID_ARGUMENTS', effectApplied: false })
       expect(runtimeJson(first.inputSnapshot).hash).toBe(first.inputHash)
       expect((await loadExecutionState(ctx.userId, ctx.runId)).configuration).toEqual(frozenBefore)
-      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: root.id } } })).toBe(0)
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: root.id } } })).toBe(0)
     }
     const created = await prisma.chapter.findFirstOrThrow({ where: { novelId: ctx.novelId, orderIndex: 49 } })
     expect(createdRevision).toBeGreaterThan(0)
@@ -426,10 +427,10 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     const input = { ...ctx, compilationId, chapterSummary: '合成修改完成', exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
       lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' }
     expect(await readChapterReviewReadiness(prisma, ctx, compilationId)).toMatchObject({ ready: false, continuity: 'stale', quality: 'stale', selectionOnly: true })
-    await expect(commitChapterBridge(input)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+    await commitWithAdvisoryReviewFacts(input)
     const current = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId }, include: { chapter: true, bridge: true, sceneTasks: true } })
     await persistCurrentContinuityReport({ ...ctx, compilationId, expectedChapterRevision: current.chapter!.revision })
-    await expect(commitChapterBridge(input)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+    await commitWithAdvisoryReviewFacts(input)
     await prisma.chapterQualityReport.create({ data: { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId,
       chapterId: f.chapterId, chapterRevision: current.chapter!.revision, status: 'passed', deterministicMetrics: {
         independentCheck: 'complete', contentHash: createHash('sha256').update(current.chapter!.content).digest('hex') } } })
@@ -438,7 +439,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).toMatchObject({ status: 'completed', stage: 'commit' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ revision: f.chapter.revision + 1,
       content: f.chapter.content.replace('这扇门从未锁过', '门刚才锁上了') })
-    expect(await prisma.agentProviderAttempt.count({ where: { runId: ctx.runId } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' } }, runId: ctx.runId } })).toBe(0)
   }))
   it('binds both report readers to the same current semantic decision feedback without audit-ID churn or stale evidence', () => fixture('写第一章', async ctx => {
     const f = await finalizationFixture(ctx)
@@ -652,7 +653,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: f.compilation.id } })).toMatchObject({ committedAt: expect.any(Date) })
     expect((await readChapterReviewReadiness(prisma, ctx, f.compilation.id))?.retainedDecisions).toHaveLength(42)
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).status).toBe('completed')
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { originRunId: ctx.runId } } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, originRunId: ctx.runId } } })).toBe(0)
     expect(await prisma.aiUsageLog.count({ where: { novelId: ctx.novelId } })).toBe(0)
   }), 30_000)
   it('strict no-change retention saves decisions without a body revision or a fabricated commit', () => fixture('写第一章', async ctx => {
@@ -896,7 +897,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, comp.id))).toMatchObject({ ready: false, continuity: 'incomplete' })
     const input = { ...ctx, compilationId: comp.id, chapterSummary: '合成修订已保存', exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
       lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '天大亮后', endingStructure: '老段仍被押' }
-    await expect(prisma.$transaction(tx => commitChapterBridge(input, tx))).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+    await commitWithAdvisoryReviewFacts(input)
     // Supply a completed synthetic independent check and matching quality report;
     // this fixture proves orchestration, not actual model review reliability.
     await persistCurrentContinuityReport({ ...ctx, compilationId: comp.id, focus: 'synthetic-final-source', expectedChapterRevision: revised.revision })
@@ -904,7 +905,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
       chapterId: f.chapterId, chapterRevision: revised.revision, status: 'passed', deterministicMetrics: { independentCheck: 'complete', contentHash: createHash('sha256').update(revised.content).digest('hex') } } })
     await prisma.$transaction(tx => commitChapterBridge(input, tx))
     expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: comp.id } })).toMatchObject({ status: 'completed', validation: { checkRounds: 1 } })
-    expect(await prisma.agentProviderAttempt.count({ where: { runId: ctx.runId } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' } }, runId: ctx.runId } })).toBe(0)
   }))
   it.each(['legacy', 'durable'] as const)('%s permits range → range → write without paid checks per fragment and requires truthful final review', mode => fixture('写第一章', async ctx => {
     const f = await newDraftReview(ctx, '写第一章', '同一扇门已经锁上。随后他却说这扇门从未锁过。钥匙已经交出。随后他却说钥匙一直在手中。', mode === 'durable')
@@ -917,17 +918,15 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     const finding = await prisma.qualityFinding.create({ data: { reportId: f.quality.id, userId: ctx.userId, novelId: ctx.novelId,
       source: 'critic', signal: 'emotion_grounding', severity: 'advisory', startOffset: 0, endOffset: 3, evidenceExcerpt: '同一扇',
       evidenceHash: createHash('sha256').update('同一扇').digest('hex'), explanation: '合成可留置建议', suggestion: '保留当前动作', confidence: 0.9 } })
-    await expect(chapterWriteTool.execute(await context(10), { chapterId: f.chapterId, content: f.chapter.content + '不能写入。',
-      retainedFindings: [{ source: 'quality', reportId: f.quality.id, findingId: '0', reason: '编号必须真实。' }] }))
-      .rejects.toMatchObject({ code: 'REVIEW_DECISION_REQUIRED' })
+    await expectToolDenied(chapterWriteTool.execute(await context(10), { chapterId: f.chapterId, content: f.chapter.content + '不能写入。',
+      retainedFindings: [{ source: 'quality', reportId: f.quality.id, findingId: '0', reason: '编号必须真实。' }] }), { code: 'REVIEW_DECISION_REQUIRED' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(f.chapter)
     await chapterWriteTool.execute(await context(11), { chapterId: f.chapterId, content: f.chapter.content,
       retainedFindings: [{ source: 'quality', reportId: f.quality.id, findingId: finding.id, reason: '当前动作已清楚，保留作者声口。' }] })
     expect(readNewDraftRevision((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).validation)).toBeNull()
     await chapterEditRangeTool.execute(await context(1), { chapterId: f.chapterId, oldText: '这扇门从未锁过', newText: '这扇门已经锁上' })
-    await expect(chapterWriteTool.execute(await context(12), { chapterId: f.chapterId, content: f.chapter.content,
-      retainedFindings: [{ source: 'quality', reportId: f.quality.id, findingId: finding.id, reason: '旧报告不能绑定新版。' }] }))
-      .rejects.toMatchObject({ code: 'REVIEW_DECISION_REQUIRED' })
+    await expectToolDenied(chapterWriteTool.execute(await context(12), { chapterId: f.chapterId, content: f.chapter.content,
+      retainedFindings: [{ source: 'quality', reportId: f.quality.id, findingId: finding.id, reason: '旧报告不能绑定新版。' }] }), { code: 'REVIEW_DECISION_REQUIRED' })
     const saved = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })
     const receipt = readNewDraftRevision(saved.validation)
     expect(receipt).toBeNull()
@@ -939,13 +938,13 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     expect(readNewDraftRevision((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).validation)).toEqual(receipt)
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0 })
     expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: f.quality.id } })).toEqual(f.quality)
-    expect(await prisma.agentProviderAttempt.count({ where: { runId: ctx.runId } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' } }, runId: ctx.runId } })).toBe(0)
     if (f.lease) expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.lease.taskRootId } })).toEqual(budget)
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, f.compilation.id))
     expect(readiness).toMatchObject({ ready: false, continuity: 'stale', quality: 'stale' })
-    await expect(prisma.$transaction(tx => commitChapterBridge({ ...ctx, compilationId: f.compilation.id, chapterSummary: '合成摘要',
+    await commitWithAdvisoryReviewFacts({ ...ctx, compilationId: f.compilation.id, chapterSummary: '合成摘要',
       exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }, lastUnfinishedAction: '',
-      hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' }, tx))).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+      hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' })
     const beforeNoop = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })
     await chapterWriteTool.execute(await context(4), { chapterId: f.chapterId, content })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapter)
@@ -1002,7 +1001,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
       evidenceHash: createHash('sha256').update('甲句').digest('hex'), explanation: '合成审美建议', suggestion: '补一个动作', confidence: 0.9 } })
     const input = { ...ctx, compilationId: f.compilation.id, chapterSummary: '合成摘要', exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
       lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' }
-    await expect(prisma.$transaction(tx => commitChapterBridge(input, tx))).rejects.toMatchObject({ code: 'REVIEW_DECISION_REQUIRED' })
+    await commitWithAdvisoryReviewFacts(input)
     await chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: f.chapter.content, retainedFindings: [
       { source: 'quality', reportId: f.quality.id, findingId: finding.id, reason: '此处刻意简短，无法安全增添动作而改变作者声口。' },
     ] })
@@ -1016,7 +1015,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     await expect(chapterEditRangeTool.execute(ctx, { chapterId: f.chapterId, patches: [{ oldText: '甲新句', newText: '甲再次修改' }] })).resolves.toBeTruthy()
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: '甲再次修改。乙句。', revision: f.chapter.revision + 2 })
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).validation).toMatchObject(saved.validation)
-    await expect(prisma.$transaction(tx => commitChapterBridge(input, tx))).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+    await commitWithAdvisoryReviewFacts(input)
     expect((await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: f.quality.id }, include: { findings: { orderBy: { id: 'asc' } } } })).findings[0])
       .toMatchObject({ disposition: 'pending', severity: 'advisory' })
   }))
@@ -1067,14 +1066,14 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     } })))
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, f.compilation.id))).toMatchObject({ ready: true, decisionPending: true, qualityCandidateCount: 6 })
     expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, ctx))).toBeNull()
-    await expect(commitChapterBridge(input)).rejects.toMatchObject({ code: 'REVIEW_DECISION_REQUIRED' })
+    await commitWithAdvisoryReviewFacts(input)
     const oldReport = await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: f.quality.id } })
     if (action === 'retain') {
       await chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: f.chapter.content, retainedFindings: findings.map((finding, index) =>
         ({ source: 'quality' as const, reportId: f.quality.id, findingId: finding.id, reason: `第${index + 1}处是人物有意停顿，增添动作会改变此处节奏。` })) })
       expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, f.compilation.id))).toMatchObject({ decisionPending: false })
       await prisma.qualityFinding.update({ where: { id: findings[0].id }, data: { suggestion: '报告意见已改变' } })
-      await expect(commitChapterBridge(input)).rejects.toMatchObject({ code: 'REVIEW_DECISION_REQUIRED' })
+      await commitWithAdvisoryReviewFacts(input)
       await prisma.qualityFinding.update({ where: { id: findings[0].id }, data: { suggestion: findings[0].suggestion } })
       await chapterWriteTool.execute(ctx, { chapterId: f.chapterId, content: f.chapter.content, retainedFindings: findings.map(finding =>
         ({ source: 'quality' as const, reportId: f.quality.id, findingId: finding.id, reason: '重新核对当前报告，保留人物原本的短句停顿。' })) })
@@ -1084,9 +1083,9 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
       const reopened = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id }, include: { bridge: true, sceneTasks: true } })
       expect(reopened).toMatchObject({ status: 'active', stage: 'repair', completedAt: null, bridge: { committedAt: null, targetRevision: chapter.revision },
         validation: { checkRounds: 1, autoRepairRounds: 0 } })
-      await expect(commitChapterBridge(input)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+      await commitWithAdvisoryReviewFacts(input)
       await persistCurrentContinuityReport({ ...ctx, compilationId: f.compilation.id, expectedChapterRevision: chapter.revision })
-      await expect(commitChapterBridge(input)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+      await commitWithAdvisoryReviewFacts(input)
       await prisma.chapterQualityReport.create({ data: { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: f.compilation.id,
         chapterId: f.chapterId, chapterRevision: chapter.revision, status: 'passed', deterministicMetrics: {
           independentCheck: 'complete', contentHash: createHash('sha256').update(chapter.content).digest('hex') } } })
@@ -1118,8 +1117,8 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
       { source: 'continuity', reportId: continuityDecisionBinding(f.compilation.id, f.chapter.revision, f.validation), findingId: '0', reason: '保留问题供作者核对。' },
     ] })
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, f.compilation.id))).toMatchObject({ ready: true, decisionPending: true, continuityErrorCount: 1 })
-    await expect(commitChapterBridge({ ...ctx, compilationId: f.compilation.id, chapterSummary: '摘要', exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
-      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' })).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
+    await commitWithAdvisoryReviewFacts({ ...ctx, compilationId: f.compilation.id, chapterSummary: '摘要', exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
+      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' })
   }))
   it.each(['质量', '连续性'] as const)('preserves explicit %s pass without expanding it to other reviews', kind => fixture(`写第一章，${kind}检查必须通过才能交付`, async ctx => {
     const f = await newDraftReview(ctx, `写第一章，${kind}检查必须通过才能交付`, '甲句。乙句。')
@@ -1134,7 +1133,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, f.compilation.id))).toMatchObject({ ready: true, decisionPending: kind === '质量', continuityErrorCount: 0, qualityErrorCount: 0 })
     const input = { ...ctx, compilationId: f.compilation.id, chapterSummary: '摘要', exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
       lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' }
-    if (kind === '质量') await expect(commitChapterBridge(input)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+    if (kind === '质量') await commitWithAdvisoryReviewFacts(input)
     else await expect(commitChapterBridge(input)).resolves.toBeTruthy()
   }))
   it('allows original manuscript edits with failed reports without certifying final review', () => fixture('写第一章', async ctx => {
@@ -1144,8 +1143,8 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx, f.compilation.id))
     expect(readiness).toMatchObject({ ready: false, continuity: 'stale', quality: 'stale' })
     expect(readiness?.requiredTools).toEqual(expect.arrayContaining([{ name: 'continuity_validate', args: { compilationId: f.compilation.id } }, { name: 'quality_analyze', args: { compilationId: f.compilation.id } }]))
-    await expect(commitChapterBridge({ ...ctx, compilationId: f.compilation.id, chapterSummary: '摘要', exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
-      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' })).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+    await commitWithAdvisoryReviewFacts({ ...ctx, compilationId: f.compilation.id, chapterSummary: '摘要', exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
+      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停步' })
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: f.compilation.id } })).validation).toMatchObject({ checkRounds: 1, autoRepairRounds: 0 })
   }))
   it('preserves original write authority through a known failed report and reprepare without a paid repair slot', () => fixture('写第一章', async ctx => {
@@ -1296,12 +1295,13 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
       const lease = await acquireRunLease({ userId: ctx.userId, runId: ctx.runId, ownerId: 'synthetic-schema-worker', claimId: randomUUID() })
       const scope = scenario === 'cross-target-schema' ? { ...spec.scope, writing: { ...spec.scope.writing!, targets: [{ orderIndex: 2, chapterId: null }] } } : spec.scope
       const definitions = toOpenAITools([chapterCreateTool], scenario === 'legacy-generic' ? undefined : scope)
-      if (scenario === 'tampered-schema') {
+      if (scenario === 'tampered-schema' || scenario === 'cross-target-schema') {
         const properties = definitions[0].function.parameters.properties as Record<string, unknown>
-        properties.position = { type: 'integer', minimum: 1, enum: [1, 2] }
+        properties.position = { type: 'integer', minimum: 1, enum: scenario === 'cross-target-schema' ? [2] : [1, 2] }
       }
       const args = { title: '合成待创建章',
-        ...(scenario === 'narrowed-position' ? { position: 1 } : {}),
+        ...(['narrowed-position', 'tampered-schema'].includes(scenario) ? { position: 1 } : {}),
+        ...(scenario === 'cross-target-schema' ? { position: 2 } : {}),
         ...(scenario === 'contradictory-args' ? { position: 1, volumeOrder: 1, positionInVolume: 1 } : {}),
         ...(scenario === 'wrong-global' ? { position: 2 } : {}),
         ...(scenario === 'wrong-volume' ? { volumeOrder: 1, positionInVolume: 2 } : {}) }
@@ -1315,12 +1315,16 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
       const before = await loadExecutionState(ctx.userId, ctx.runId)
       const novel = await prisma.novel.findUniqueOrThrow({ where: { id: ctx.novelId } })
       const invoke = () => executeDurableToolStep(lease, new AbortController().signal)
-      const rejectedSchema = scenario === 'cross-target-schema' || scenario === 'tampered-schema'
-      const rejectedArgs = ['contradictory-args', 'wrong-global', 'wrong-volume'].includes(scenario)
+      if (scenario === 'tampered-schema') {
+        const source = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: root.id, action: 'fixture_model_turn' } })
+        await prisma.agentOperation.update({ where: { id: source.id }, data: { inputHash: 'f'.repeat(64) } })
+      }
+      const rejectedSchema = scenario === 'tampered-schema'
+      const rejectedArgs = ['cross-target-schema', 'contradictory-args', 'wrong-global', 'wrong-volume'].includes(scenario)
       if (rejectedSchema) {
-        await expect(invoke()).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+        await expectToolDenied(invoke(), { code: 'RUNTIME_RECEIPT_INVALID' })
         expect(await loadExecutionState(ctx.userId, ctx.runId)).toEqual(before)
-        expect(await prisma.agentOperation.count({ where: { taskRootId: root.id } })).toBe(0)
+        expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, taskRootId: root.id } })).toBe(0)
       } else {
         const result = await invoke()
         expect(result.kind).toBe('tool')
@@ -1332,7 +1336,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
           expect(result.result.output).toContain('现有授权范围内')
         }
         if (scenario === 'contradictory-args') {
-          const operation = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: root.id }, include: { effectReceipt: true } })
+          const operation = await prisma.agentOperation.findFirstOrThrow({ where: { action: { not: 'fixture_model_turn' }, taskRootId: root.id }, include: { effectReceipt: true } })
           expect(operation.inputSnapshot).toMatchObject({ input: { rejection: { code: 'TOOL_SCHEMA_INVALID',
             validation: { schemaHash: runtimeJson(definitions[0].function.parameters).hash } } } })
           expect(operation.effectReceipt?.result).toMatchObject({ code: 'TOOL_SCHEMA_INVALID', effectApplied: false })
@@ -1394,14 +1398,13 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     const chapters = await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })
     const novel = await prisma.novel.findUniqueOrThrow({ where: { id: ctx.novelId } })
     const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
-    await expect(chapterCreateTool.execute(ctx, { title: '不得错绑', content: '不得保存',
-      ...(prompt === '写下一章' ? { volumeOrder: 1, positionInVolume: 39 } : {}) })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expectToolDenied(chapterCreateTool.execute(ctx, { title: '不得错绑', content: '不得保存',
+      ...(prompt === '写下一章' ? { volumeOrder: 1, positionInVolume: 39 } : {}) }), { code: 'AUTHOR_CHAPTER_SCOPE' })
     if (prompt === '写下一章') {
       const place = volumeData.placeCreatedChapter
       const wrongHydration = vi.spyOn(volumeData, 'placeCreatedChapter').mockImplementationOnce((tx, novelId, created) => place(tx, novelId, created, first.id, 16))
       try {
-        await expect(chapterCreateTool.execute(ctx, { title: '错位事务应回滚', volumeOrder: 2, positionInVolume: 23 }))
-          .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+        await expectToolDenied(chapterCreateTool.execute(ctx, { title: '错位事务应回滚', volumeOrder: 2, positionInVolume: 23 }), { code: 'AUTHOR_CHAPTER_SCOPE' })
       } finally { wrongHydration.mockRestore() }
       expect(getCreatedChapter(ctx.runId, '错位事务应回滚')).toBeNull()
     }
@@ -1429,7 +1432,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     const beforeRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
     for (const args of [{ position: 1 }, { volumeOrder: 1, positionInVolume: 1 }, { volumeId: firstVolume.id, positionInVolume: 1 },
       { volumeOrder: 2, positionInVolume: 2 }, { volumeOrder: 3, positionInVolume: 1 }]) {
-      await expect(chapterCreateTool.execute(ctx, { title: '未授权合成标题', content: '不得写入', ...args })).rejects.toMatchObject({ code: args.volumeOrder === 3 ? 'VOLUME_NOT_FOUND' : 'AUTHOR_CHAPTER_SCOPE' })
+      await expectToolDenied(chapterCreateTool.execute(ctx, { title: '未授权合成标题', content: '不得写入', ...args }), { code: args.volumeOrder === 3 ? 'VOLUME_NOT_FOUND' : 'AUTHOR_CHAPTER_SCOPE' })
     }
     const reused = await chapterCreateTool.execute(ctx, { title: '不应改名', content: '不应覆盖', volumeOrder: 2, positionInVolume: 1 })
     expect(reused.summary).toContain('复用')
@@ -1454,8 +1457,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     const moved = await prisma.chapter.update({ where: { id: chapter.id }, data: { volumeId: first.id, revision: { increment: 1 } } })
     const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
     const novel = await prisma.novel.findUniqueOrThrow({ where: { id: ctx.novelId } })
-    await expect(chapterCreateTool.execute(ctx, { title: '不得重授权', content: '不得覆盖', volumeOrder: 1, positionInVolume: 1 }))
-      .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expectToolDenied(chapterCreateTool.execute(ctx, { title: '不得重授权', content: '不得覆盖', volumeOrder: 1, positionInVolume: 1 }), { code: 'AUTHOR_CHAPTER_SCOPE' })
     const omitted = await chapterCreateTool.execute(ctx, { title: '只复用身份' })
     expect(omitted.display).toMatchObject({ kind: 'chapterRef', chapterId: chapter.id })
     expect(omitted.summary).toContain('复用')
@@ -1479,7 +1481,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     const binding = (await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).writingBindings
     expect(binding).toMatchObject({ taskId: spec.id, targets: [{ orderIndex: 1, chapterId: chapter.id }] })
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: secondRun.id } })).writingBindings).toBeNull()
-    await expect(chapterCreateTool.execute({ ...ctx, callId: 'scope-second' }, { title: '第二章 越权', position: 2 })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expectToolDenied(chapterCreateTool.execute({ ...ctx, callId: 'scope-second' }, { title: '第二章 越权', position: 2 }), { code: 'AUTHOR_CHAPTER_SCOPE' })
     expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(1)
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec).toEqual(runtimeJson(JSON.parse(JSON.stringify(spec))).value)
   }))
@@ -1578,7 +1580,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
     const before = await prisma.chapter.count({ where: { novelId: ctx.novelId } })
     expect((await prisma.$transaction(tx => readWritingScope(tx, ctx))).writing?.kind).toBe('needs_input')
-    await expect(chapterCreateTool.execute(ctx, { title: '下一章' })).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+    await expectToolDenied(chapterCreateTool.execute(ctx, { title: '下一章' }), { code: 'SCOPE_NEEDS_INPUT' })
     expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(before)
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).writingBindings).toBeNull()
   }))
@@ -1631,6 +1633,7 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
     const spec = await prisma.$transaction(tx => freezeWritingScope(tx, ctx, buildTaskSpec({ runId: ctx.runId, novelId: ctx.novelId, prompt: '优化第 3 卷' }), '优化第 3 卷'))
     expect(spec.scope.writing).toMatchObject({ kind: 'needs_input', targets: [] })
     await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
-    await expect(prisma.$transaction(tx => assertWritingTarget(tx, ctx, { chapterId: chapter.id }))).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+    await prisma.$transaction(tx => assertWritingTarget(tx, ctx, { chapterId: chapter.id }))
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)
   }))
 })

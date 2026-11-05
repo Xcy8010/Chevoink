@@ -24,6 +24,9 @@ export async function readCurrentSavedTaskChapters(tx: Prisma.TransactionClient,
   }
   const run = await tx.agentRun.findFirst({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId }, select: { taskRootId: true } })
   if (run?.taskRootId) {
+    // A task root exists before native execution is initialized. Without a
+    // saved execution head it has no durable body effect to present.
+    if (!await tx.agentExecutionState.findUnique({ where: { taskRootId: run.taskRootId }, select: { taskRootId: true } })) return []
     const state = await (await import('./runtime-state.js')).readExecutionStateInTransaction(tx, run.taskRootId)
     const evidence = await (await import('./runtime-evidence.js')).collectDurableToolEvidence(tx, run.taskRootId, state.frame.revision)
     for (const effect of evidence.effects) {

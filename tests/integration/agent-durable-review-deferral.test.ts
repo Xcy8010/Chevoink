@@ -1,9 +1,10 @@
+import { initializeExecutionState } from '../support/native-tool-test-state.js'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { prisma } from '../../api/lib/prisma.js'
 import * as chapterTools from '../../api/lib/agent/tools/chapter-tools.js'
 import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
-import { initializeExecutionState, loadExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { projectExecutionFrame } from '../../api/lib/agent/runtime-frame-events.js'
 import { claim, fixture } from '../support/agent-durable-runtime-fixture.js'
@@ -30,7 +31,7 @@ describe('native review proposal deferral', () => {
     await executeDurableToolStep(lease, new AbortController().signal)
     const before = (await loadExecutionState(f.userId, f.runId)).frame
     const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-    const operations = await prisma.agentOperation.findMany({ where: { taskRootId: f.rootId } })
+    const operations = await prisma.agentOperation.findMany({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } })
     const receipts = await prisma.agentEffectReceipt.count({ where: { operation: { taskRootId: f.rootId } } })
     const reason = '当前核验没有事实错误；请逐项说明保留理由并保存章节进度。'
     const admission = vi.spyOn(chapterTools, 'preflightChapterReviewWrite').mockResolvedValue({
@@ -54,7 +55,7 @@ describe('native review proposal deferral', () => {
     expect(admission.mock.calls.every(([ctx]) => !!ctx.transaction && ctx.durableContent?.expectedRevision === chapter.revision)).toBe(true)
     expect(await executeDurableToolStep(lease, new AbortController().signal)).toEqual({ kind: 'idle' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapter)
-    expect(await prisma.agentOperation.findMany({ where: { taskRootId: f.rootId } })).toEqual(operations)
+    expect(await prisma.agentOperation.findMany({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } })).toEqual(operations)
     expect(await prisma.agentEffectReceipt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(receipts)
     expect(await prisma.aiUsageLog.count({ where: { agentRunId: f.runId } })).toBe(0)
     expect(fetch).not.toHaveBeenCalled()

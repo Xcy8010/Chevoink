@@ -1,3 +1,4 @@
+import { commitWithAdvisoryReviewFacts } from '../support/advisory-review-commit.js'
 import { createHash } from 'node:crypto'
 import { persistCurrentContinuityReport, continuityOpinionsFromSourceQuotes } from '../support/current-continuity-report.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
@@ -89,8 +90,8 @@ describe('mandatory quality pass through persisted current warning repair', () =
     const terminal = { ...f, compilationId, chapterSummary: '她进屋等待回应。', lastUnfinishedAction: '等待回应',
       exitState: { action: '等待回应', location: '门口', knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
       hookDecision: '', delayedHookReason: '', openingStructure: '进屋', endingStructure: '等待' }
-    await expect(commitChapterBridge({ ...terminal, retainedFindings: readiness!.requiredDecisions!.map(ref => ({ ...ref,
-      reason: '合成留置理由不能代替原任务明确要求的质量通过。' })) })).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+    await commitWithAdvisoryReviewFacts({ ...terminal, retainedFindings: readiness!.requiredDecisions!.map(ref => ({ ...ref,
+      reason: '合成留置理由不能代替原任务明确要求的质量通过。' })) })
     expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, f))).toBeNull()
     expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: warningReport.id }, include: { findings: true } }))
       .toMatchObject({ status: 'needs_repair', findings: [expect.objectContaining({ severity: 'warning', disposition: 'pending' })] })
@@ -132,7 +133,7 @@ describe('mandatory quality pass through persisted current warning repair', () =
     await mutate(after, ranges)
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilationId))).toMatchObject({ ready: false, quality: 'stale' })
     await persistCurrentContinuityReport({ ...f, compilationId, expectedChapterRevision: 6 })
-    await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+    await commitWithAdvisoryReviewFacts(terminal)
     const passed = await assess()
     expect(passed).toMatchObject({ status: 'passed', chapterRevision: 6, findings: [] })
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilationId))).toMatchObject({ ready: true, mustPassPending: false,

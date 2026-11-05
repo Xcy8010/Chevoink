@@ -1,3 +1,4 @@
+import { initializeExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { buildContinuityReviewManifest, inspectContinuityV4 } from '../../api/lib/agent/continuity-review-v4.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
 import { terminalEvidenceContext } from '../../api/lib/agent/terminal-evidence-context.js'
@@ -9,7 +10,7 @@ import { available, claim, fixture } from '../support/agent-durable-runtime-fixt
 import { prisma } from '../../api/lib/prisma.js'
 import { prepareStoryCompilation, saveSceneTasks, commitChapterBridge } from '../../api/lib/agent/story-compiler.js'
 import { chapterBridgeGetTool, continuityValidateTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
-import { initializeExecutionState } from '../../api/lib/agent/runtime-state.js'
+
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { currentTerminalReview, terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
 import { persistHumanityQualityReport } from '../../api/lib/agent/humanity-quality.js'
@@ -91,9 +92,9 @@ describe.runIf(available)('native continuity origin remains a real operation and
     expect(currentTerminalReview(originalAudit, content, context)?.deliveryEligibility.eligible).not.toBe(true)
     const protectedUsage = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } }), protectedArtifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
     // Native provider results settle through operation receipts, not legacy logs.
-    const nativeAttempts = () => prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId, kind: 'provider' } },
+    const nativeAttempts = () => prisma.agentProviderAttempt.findMany({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId, kind: 'provider' } },
       include: { usageReceipt: true, operation: { include: { events: { orderBy: { id: 'asc' } } } } }, orderBy: { id: 'asc' } })
-    const nativeLedger = () => prisma.creditLedgerEntry.findMany({ where: { userId: f.userId, kind: 'usage' }, orderBy: { id: 'asc' } })
+    const nativeLedger = async () => prisma.creditLedgerEntry.findMany({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId, kind: 'usage' }), orderBy: { id: 'asc' } })
     const protectedAttempts = await nativeAttempts(), protectedLedger = await nativeLedger()
     expect(protectedUsage).toHaveLength(0)
     expect(protectedAttempts).toHaveLength(1); expect(protectedLedger).toHaveLength(1)

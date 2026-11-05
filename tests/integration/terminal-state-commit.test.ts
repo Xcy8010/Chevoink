@@ -1,3 +1,4 @@
+import { commitWithAdvisoryReviewFacts } from '../support/advisory-review-commit.js'
 import { describe, expect, it, vi } from 'vitest'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
 import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
@@ -27,7 +28,7 @@ describe.runIf(available)('terminal candidates at the actual transaction boundar
     await persistCurrentContinuityReport({ ...f, compilationId, expectedChapterRevision: 4 })
     const terminal = { ...f, compilationId, chapterSummary: '她放下信件，等待回答。', ...candidate,
       hookDecision: '', delayedHookReason: '', openingStructure: '放信', endingStructure: '等待', expectedChapterRevision: 4 }
-    await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+    await commitWithAdvisoryReviewFacts(terminal)
     await persistHumanityQualityReport({ ...f, compilationId, chapterId: f.chapterId, chapterRevision: 4, mode: 'balanced', criticComplete: true,
       criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
     const provider = vi.spyOn(aiService, 'generateTextCompletion')
@@ -60,7 +61,7 @@ describe.runIf(available)('terminal candidates at the actual transaction boundar
     // Candidate strings are no longer fact certification or a submission gate.
     // Even a mismatched extra string cannot overwrite the existing fact ledger.
     await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '医师确认林舟右掌没有骨裂。' } })
-    await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+    await commitWithAdvisoryReviewFacts(terminal)
     await prisma.chapter.update({ where: { id: f.chapterId }, data: { content } })
     const first = await commitChapterBridge(terminal)
     const committed = await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId } })

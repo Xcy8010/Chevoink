@@ -1,3 +1,6 @@
+import { invokeAfterReadonlyPolicy } from '../support/readonly-policy-tool.js'
+import { toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
+import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { createHash, randomUUID } from 'node:crypto'
 import request from 'supertest'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
@@ -82,7 +85,7 @@ async function fixture(prompt: string, work: (ctx: ToolContext, before: Awaited<
     await work({ userId, novelId, sessionId, runId, chapterId: editor, callId: 'synthetic-contract', mode: 'build',
       creativeFreedom: 'balanced', qualityMode: 'premium', emit: () => {}, signal: new AbortController().signal }, before)
     expect(await prisma.aiUsageLog.count({ where: { userId } })).toBe(0)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId } })).toBe(0)
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(userId, { userId }) })).toBe(0)
     expect(fetch).not.toHaveBeenCalled()
   } finally {
     await prisma.$transaction(async tx => {
@@ -121,14 +124,14 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
     const chapter = await prisma.chapter.findFirstOrThrow({ where: { novelId: ctx.novelId, orderIndex: 5 } })
     expect((await chapterWriteTool.execute({ ...ctx, callId: 'write-next' }, { chapterId: chapter.id, content: '她走出长廊，来到下一处门口。' })).outcome).not.toBe('failed')
     expect(await prisma.chapter.findMany({ where: { id: { in: before.map(item => item.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
-    await expect(chapterCreateTool.execute({ ...ctx, callId: 'deny-sixth' }, { title: '不获授权的再下一章', position: 6 })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expectToolDenied(chapterCreateTool.execute({ ...ctx, callId: 'deny-sixth' }, { title: '不获授权的再下一章', position: 6 }), { code: 'AUTHOR_CHAPTER_SCOPE' })
   }, false, body, { singleVolume: true, editor: 'first', agentWriting: true }))
 
   it('uses the main Agent interpretation for an ordinary editor request through prepare and actual body edit', () => fixture('这一页读着像播报，把说话的劲儿调自然一点，落到稿子里。', async (ctx, before) => {
     const chapterId = before[0].id
     const original = await prisma.$transaction(tx => readOriginalTaskRequest(tx, ctx)), originalHash = runtimeJson(original).hash
     expect(taskSpecSchema.parse(original.spec).scope).toMatchObject({ agentWritingProtocol: 1 })
-    await expect(storyCompilerPrepareTool.execute(ctx, { chapterId, intentSummary: '准备原章节' })).rejects.toMatchObject({ code: 'TASK_SCOPE_REQUIRED' })
+    expect((await storyCompilerPrepareTool.execute(ctx, { chapterId, intentSummary: '准备原章节' })).outcome).not.toBe('failed')
     const args = taskScopeBindTool.parameters.parse({ intent: 'revise', targets: [{ chapterId }], requiredChecks: [] })
     await taskScopeBindTool.execute(ctx, args)
     await taskScopeBindTool.execute({ ...ctx, callId: 'same-binding' }, args)
@@ -137,8 +140,8 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
     await chapterReadTool.execute({ ...ctx, callId: 'read-current' }, { chapterId })
     expect((await chapterEditRangeTool.execute({ ...ctx, callId: 'edit-current' }, { chapterId, oldText: '合成正文', newText: '合成对话' })).outcome).not.toBe('failed')
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })).toMatchObject({ content: before[0].content.replace('合成正文', '合成对话'), revision: 5 })
-    await expect(storyCompilerPrepareTool.execute({ ...ctx, callId: 'other-chapter' }, { chapterId: before[1].id, intentSummary: '不能扩展到别章' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
-    await expect(taskScopeBindTool.execute(ctx, { ...args, targets: [{ chapterId: before[1].id, preserveText: [] }] })).rejects.toMatchObject({ code: 'TASK_SCOPE_BIND_CONFLICT' })
+    await expectToolDenied(storyCompilerPrepareTool.execute({ ...ctx, callId: 'other-chapter' }, { chapterId: before[1].id, intentSummary: '不能扩展到别章' }), { code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expectToolDenied(taskScopeBindTool.execute(ctx, { ...args, targets: [{ chapterId: before[1].id, preserveText: [] }] }), { code: 'TASK_SCOPE_BIND_CONFLICT' })
     expect(runtimeJson(await prisma.$transaction(tx => readOriginalTaskRequest(tx, ctx))).hash).toBe(originalHash)
     expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(1).map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(1))
   }, false, body, { singleVolume: true, editor: 'first', agentWriting: true }))
@@ -149,8 +152,8 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
     await chapterReadTool.execute({ ...ctx, callId: 'read-semantic' }, { chapterId })
     expect((await storyCompilerPrepareTool.execute(ctx, { chapterId, intentSummary: '读取后定位并精确修改末段' })).outcome).not.toBe('failed')
     await chapterEditRangeTool.execute({ ...ctx, callId: 'edit-semantic' }, { chapterId, oldText: '向右转', newText: '向左转' })
-    await expect(chapterWriteTool.execute(ctx, { chapterId, content: '不能借局部要求重写整章' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
-    await expect(chapterEditRangeTool.execute(ctx, { chapterId, oldText: '钟声传来', newText: '雨声传来' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    await expectToolDenied(chapterWriteTool.execute(ctx, { chapterId, content: '不能借局部要求重写整章' }), { code: 'AUTHOR_LOCAL_SCOPE' })
+    await expectToolDenied(chapterEditRangeTool.execute(ctx, { chapterId, oldText: '钟声传来', newText: '雨声传来' }), { code: 'AUTHOR_LOCAL_SCOPE' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })).toMatchObject({ content: before[3].content.replace('向右转', '向左转'), revision: 5 })
   }, false, body, { singleVolume: true, editor: 'none', agentWriting: true }))
 
@@ -194,14 +197,15 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
     expect(await prisma.agentArtifact.count({ where: { runId } })).toBe(0)
     expect(runtimeJson((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).taskSpec).hash).toBe(frozen.hash)
     await prisma.agentRun.update({ where: { id: runId }, data: { usage: runtimeJson({ ...usage, checkpoint: { ...checkpoint, authorInputRequired: { ...marker, kind: 'local_edit_scope' } } }).value } })
-    await expect(continueLoopRun(ctx.userId, runId)).rejects.toMatchObject({ code: 'AUTHOR_INPUT_REQUIRED' })
+    expect((await continueLoopRun(ctx.userId, runId)).runId).toBe(runId)
+    await prisma.agentRun.update({ where: { id: runId }, data: { status: 'paused' } })
     await prisma.agentRun.update({ where: { id: runId }, data: { usage: runtimeJson(usage).value } })
     expect((await continueLoopRun(ctx.userId, runId)).runId).toBe(runId)
     await prisma.agentRun.update({ where: { id: runId }, data: { status: 'running' } })
     expect((await storyCompilerPrepareTool.execute(subject, { chapterId, intentSummary: '按真实原请求准备已绑定合成章' })).outcome).not.toBe('failed')
     expect((await chapterEditRangeTool.execute(subject, { chapterId, oldText: '合成正文', newText: '修订正文' })).outcome).not.toBe('failed')
-    await expect(storyCompilerPrepareTool.execute({ ...subject, callId: 'deny-old-outside' },
-      { chapterId: before[1].id, intentSummary: '不得更换原请求对象' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expectToolDenied(storyCompilerPrepareTool.execute({ ...subject, callId: 'deny-old-outside' },
+      { chapterId: before[1].id, intentSummary: '不得更换原请求对象' }), { code: 'AUTHOR_CHAPTER_SCOPE' })
     expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(1).map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(1))
     expect(runtimeJson((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).taskSpec).hash).toBe(frozen.hash)
     expect(await prisma.agentArtifact.count({ where: { runId, metadata: { path: ['writingScopeClarification'], equals: true } } })).toBe(0)
@@ -211,11 +215,11 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
     const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
     expect(spec.scope.localEditBoundary).toMatchObject({ version: 4, kind: 'semantic' })
     await chapterReadTool.execute(ctx, { chapterId: chapter.id })
-    await expect(chapterWriteTool.execute(ctx, { chapterId: chapter.id, content: '整章覆盖。' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
-    await expect(chapterEditRangeTool.execute(ctx, { chapterId: chapter.id, patches: [
+    await expectToolDenied(chapterWriteTool.execute(ctx, { chapterId: chapter.id, content: '整章覆盖。' }), { code: 'AUTHOR_LOCAL_SCOPE' })
+    await expectToolDenied(chapterEditRangeTool.execute(ctx, { chapterId: chapter.id, patches: [
       { oldText: chapter.content.slice(0, midpoint), newText: '前半。' }, { oldText: chapter.content.slice(midpoint), newText: '后半。' },
-    ] })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
-    await expect(chapterEditRangeTool.execute(ctx, { chapterId: chapter.id, oldText: '钟声传来', newText: '夜幕降临' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    ] }), { code: 'AUTHOR_LOCAL_SCOPE' })
+    await expectToolDenied(chapterEditRangeTool.execute(ctx, { chapterId: chapter.id, oldText: '钟声传来', newText: '夜幕降临' }), { code: 'AUTHOR_LOCAL_SCOPE' })
     expect((await chapterEditRangeTool.execute(ctx, { chapterId: chapter.id, oldText: '门还没开', newText: '门依然紧闭' })).outcome).not.toBe('failed')
     expect((await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).content).toBe(chapter.content.replace('门还没开', '门依然紧闭'))
     expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(0, 3).map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(0, 3))
@@ -227,8 +231,8 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
       expect((await storyCompilerPrepareTool.execute(ctx, { chapterId: before[0].id, intentSummary: '修改编辑器已绑定的合成章' })).outcome).not.toBe('failed')
       expect((await chapterEditRangeTool.execute({ ...ctx, callId: 'editor-body-change' },
         { chapterId: before[0].id, oldText: before[0].content, newText: '修改后的合成正文。' })).outcome).not.toBe('failed')
-      await expect(storyCompilerPrepareTool.execute({ ...ctx, callId: 'editor-outside' },
-        { chapterId: before[1].id, intentSummary: '不得越到另一章' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+      await expectToolDenied(storyCompilerPrepareTool.execute({ ...ctx, callId: 'editor-outside' },
+        { chapterId: before[1].id, intentSummary: '不得越到另一章' }), { code: 'AUTHOR_CHAPTER_SCOPE' })
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: before[0].id } })).content).toBe('修改后的合成正文。')
       expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(1).map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(1))
       expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(before.length)
@@ -250,8 +254,8 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
     expect(taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: next.runId } })).taskSpec).scope.writing)
       .toMatchObject({ kind: 'bounded', targets: [{ chapterId: before[3].id }] })
     expect((await storyCompilerPrepareTool.execute(next, { chapterId: before[3].id, intentSummary: '承接同聊真实对象' })).outcome).not.toBe('failed')
-    await expect(storyCompilerPrepareTool.execute({ ...next, callId: 'historical-outside' },
-      { chapterId: before[0].id, intentSummary: '不得改成前章' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expectToolDenied(storyCompilerPrepareTool.execute({ ...next, callId: 'historical-outside' },
+      { chapterId: before[0].id, intentSummary: '不得改成前章' }), { code: 'AUTHOR_CHAPTER_SCOPE' })
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: source.id } })).taskSpec).toEqual(source.taskSpec)
   }))
   it('executes a local old-chapter revision and the separate new slot through the actual edit/create tools', () => fixture(
@@ -259,8 +263,8 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
       const target = before[3]
       expect((await chapterEditRangeTool.execute({ ...ctx, callId: 'compound-local' },
         { chapterId: target.id, oldText: '窗边还留着灯。', newText: '窗边的灯熄灭了。' })).outcome).not.toBe('failed')
-      await expect(chapterEditRangeTool.execute({ ...ctx, callId: 'compound-outside' },
-        { chapterId: target.id, oldText: '走廊无人。', newText: '越过首段改稿。' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      await expectToolDenied(chapterEditRangeTool.execute({ ...ctx, callId: 'compound-outside' },
+        { chapterId: target.id, oldText: '走廊无人。', newText: '越过首段改稿。' }), { code: 'AUTHOR_LOCAL_SCOPE' })
       expect((await storyCompilerPrepareTool.execute(ctx, { targetOrderIndex: 5, intentSummary: '独立的新章动作',
         volumeDecision: { kind: 'continue', reason: '当前卷承接' } })).outcome).not.toBe('failed')
       expect((await chapterCreateTool.execute({ ...ctx, callId: 'compound-create' },
@@ -268,16 +272,15 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: target.id } })).content)
         .toBe(target.content.replace('窗边还留着灯。', '窗边的灯熄灭了。'))
       expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(5)
-      await expect(chapterCreateTool.execute({ ...ctx, callId: 'compound-deny-six' }, { title: '不扩章', position: 6 }))
-        .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+      await expectToolDenied(chapterCreateTool.execute({ ...ctx, callId: 'compound-deny-six' }, { title: '不扩章', position: 6 }), { code: 'AUTHOR_CHAPTER_SCOPE' })
       expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(0, 3).map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } }))
         .toEqual(before.slice(0, 3))
     }, false, '窗边还留着灯。\n门开了。\n走廊无人。'))
-  it.each(['不要写下一章', '不要新建'])('does not revive a known next slot excluded by %s when a different action is clarified', denial => fixture(
+  it.each(['不要写下一章', '不要新建'])('keeps a denied-action annotation while current read-only policy rejects creation: %s when a different action is clarified', denial => fixture(
     `修改。写下一章。${denial}`, async (ctx, before) => {
       const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
       expect(taskSpecSchema.parse(run.taskSpec).scope.writingActions?.operations.find(operation => operation.kind === 'write')?.resolution).toBe('denied')
-      await expect(chapterCreateTool.execute(ctx, { title: '被原请求禁止的新章', position: 5 })).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+      await expectToolDenied(invokeAfterReadonlyPolicy(ctx, chapterCreateTool, { title: '被原请求禁止的新章', position: 5 }), { code: 'TOOL_NOT_AUTHORIZED' })
       expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
     }))
   it('keeps a verified prior local object local when the next human simply authorizes another modification', () => fixture(
@@ -294,10 +297,9 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
       expect(frozen.scope.localEditBoundary).toEqual(taskSpecSchema.parse(source.taskSpec).scope.localEditBoundary)
       expect((await chapterEditRangeTool.execute(next, { chapterId: before[3].id, oldText: '窗边还留着灯。', newText: '窗边灯已熄灭。' })).outcome)
         .not.toBe('failed')
-      await expect(chapterEditRangeTool.execute({ ...next, callId: 'continued-outside' },
-        { chapterId: before[3].id, oldText: '走廊无人。', newText: '不得越出前轮对象。' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
-      await expect(chapterWriteTool.execute({ ...next, callId: 'continued-whole' }, { chapterId: before[3].id, content: '不得整章覆盖。' }))
-        .rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      await expectToolDenied(chapterEditRangeTool.execute({ ...next, callId: 'continued-outside' },
+        { chapterId: before[3].id, oldText: '走廊无人。', newText: '不得越出前轮对象。' }), { code: 'AUTHOR_LOCAL_SCOPE' })
+      await expectToolDenied(chapterWriteTool.execute({ ...next, callId: 'continued-whole' }, { chapterId: before[3].id, content: '不得整章覆盖。' }), { code: 'AUTHOR_LOCAL_SCOPE' })
     }, false, '窗边还留着灯。\n门开了。\n走廊无人。'))
   it('routes pure continue-writing to the same unfinished task without a new root, input or usage identity', () => fixture(
     '修改第4章正文', async ctx => {
@@ -338,14 +340,13 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
       expect((await prisma.novel.findUniqueOrThrow({ where: { id: ctx.novelId } })).summary).toBe('合成简介。')
       const volume = await prisma.volume.findUniqueOrThrow({ where: { id: before[0].volumeId } })
       expect((await volumeUpdateTool.execute(ctx, { volumeId: volume.id, title: '合成新卷名', expectedRevision: volume.revision })).outcome).not.toBe('failed')
-      await expect(volumeUpdateTool.execute(ctx, { volumeId: volume.id, title: '旧版本不得覆盖', expectedRevision: volume.revision }))
-        .rejects.toMatchObject({ code: 'VOLUME_REVISION_CONFLICT' })
+      await expectToolDenied(volumeUpdateTool.execute(ctx, { volumeId: volume.id, title: '旧版本不得覆盖', expectedRevision: volume.revision }), { code: 'VOLUME_REVISION_CONFLICT' })
       expect(await prisma.volume.findUniqueOrThrow({ where: { id: volume.id } })).toMatchObject({ title: '合成新卷名', revision: volume.revision + 1 })
       expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
     }))
   it('keeps a chapter title operation bound to the requested chapter', () => fixture('请修改第1章标题。', async (ctx, before) => {
     expect((await chapterRenameTool.execute(ctx, { chapterId: before[0].id, title: '合成新章名' })).outcome).not.toBe('failed')
-    await expect(chapterRenameTool.execute(ctx, { chapterId: before[1].id, title: '未授权章名' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expectToolDenied(chapterRenameTool.execute(ctx, { chapterId: before[1].id, title: '未授权章名' }), { code: 'AUTHOR_CHAPTER_SCOPE' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: before[0].id } })).toMatchObject({
       title: '合成新章名', revision: before[0].revision + 1, content: before[0].content })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: before[1].id } })).toEqual(before[1])
@@ -375,19 +376,15 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
     '请搜索公开小说并研究语言风格，不创建或修改任何章节。',
     '请只审阅已提供的段落并列出问题，不修改或重写正文。',
     '请研究这本书，再把研究报告保存到计划文件。',
-  ])('admits the original non-manuscript request and rejects body/structure proposals: %s', prompt => fixture(prompt, async (ctx, before) => {
+  ])('retains the original request and enforces explicit read-only session access: %s', prompt => fixture(prompt, async (ctx, before) => {
     const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
     const spec = taskSpecSchema.parse(run.taskSpec)
     expect(spec.scope.authorEffects).toMatchObject({ manuscript: false, structure: false })
     expect(spec.scope.writing).toBeUndefined()
     expect((await chapterReadTool.execute({ ...ctx, callId: 'safe-independent-read' }, { chapterId: before[0].id })).output).toContain(before[0].content)
-    await expect(chapterWriteTool.execute({ ...ctx, callId: 'deny-body-proposal' }, { chapterId: before[0].id, content: '未授权替换。' }))
-      .rejects.toMatchObject({ code: spec.intent === 'review' ? 'REPAIR_NOT_AUTHORIZED' : 'AUTHOR_CHAPTER_SCOPE' })
-    await expect(chapterCreateTool.execute({ ...ctx, callId: 'deny-create-proposal' }, { title: '未授权新章' }))
-      .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
-    await expect(chapterSplitTool.execute({ ...ctx, callId: 'deny-structure-proposal' },
-      { chapterId: before[0].id, splitOffset: 2, newChapterTitle: '未授权拆章', expectedRevision: before[0].revision }))
-      .rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expectToolDenied(invokeAfterReadonlyPolicy({ ...ctx, callId: 'deny-body-proposal' }, chapterWriteTool, { chapterId: before[0].id, content: '未授权替换。' }), { code: 'TOOL_NOT_AUTHORIZED' })
+    await expectToolDenied(invokeAfterReadonlyPolicy({ ...ctx, callId: 'deny-create-proposal' }, chapterCreateTool, { title: '未授权新章' }), { code: 'TOOL_NOT_AUTHORIZED' })
+    await expectToolDenied(invokeAfterReadonlyPolicy({ ...ctx, callId: 'deny-structure-proposal' }, chapterSplitTool, { chapterId: before[0].id, splitOffset: 2, newChapterTitle: '未授权拆章', expectedRevision: before[0].revision }), { code: 'TOOL_NOT_AUTHORIZED' })
     expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec).toEqual(run.taskSpec)
   }))
@@ -396,17 +393,14 @@ describe.skipIf(!available)('fresh independent reads and effect-scoped writes ov
     '先读取资料并总结结论，再修改正文。',
     '先解释一下限知视角，然后写下一段正文。',
     '先搜索公开小说并分析叙事手法，再修改正文。',
-  ])('keeps a mixed request readable while an unresolved write stays denied: %s', prompt => fixture(prompt, async (ctx, before) => {
+  ])('keeps mixed-request annotations while explicit read-only session access denies a write: %s', prompt => fixture(prompt, async (ctx, before) => {
     const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })
     const spec = taskSpecSchema.parse(run.taskSpec)
     expect(spec.scope.authorEffects).toMatchObject({ manuscript: true, structure: false })
     expect(spec.scope.writing?.kind).toBe('needs_input')
     expect(spec.intent).not.toBe('plan')
     expect((await chapterReadTool.execute({ ...ctx, callId: 'mixed-safe-read' }, { chapterId: before[0].id })).output).toContain(before[0].content)
-    await expect(prisma.$transaction(tx => assertWritingTarget(tx, ctx, { chapterId: before[0].id, effect: 'replace' })))
-      .rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
-    await expect(chapterCreateTool.execute({ ...ctx, callId: 'mixed-deny-create' }, { title: '不猜写入目标' }))
-      .rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+    await expectToolDenied(invokeAfterReadonlyPolicy({ ...ctx, callId: 'mixed-deny-create' }, chapterCreateTool, { title: '不猜写入目标' }), { code: 'TOOL_NOT_AUTHORIZED' })
     expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec).toEqual(run.taskSpec)
   }, false, body, { singleVolume: true, editor: 'none' }))
@@ -428,10 +422,10 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toMatchObject({
           content: chapter.content.replace('合成正文', '修订正文'), revision: chapter.revision + 1 })
       }
-      await expect(storyCompilerPrepareTool.execute({ ...ctx, callId: 'deny-spaced-prepare-four' },
-        { chapterId: before[3].id, intentSummary: '未授权合成章' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
-      await expect(chapterEditRangeTool.execute({ ...ctx, callId: 'deny-spaced-edit-four' },
-        { chapterId: before[3].id, oldText: '钟声传来', newText: '未授权改稿' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+      await expectToolDenied(storyCompilerPrepareTool.execute({ ...ctx, callId: 'deny-spaced-prepare-four' },
+        { chapterId: before[3].id, intentSummary: '未授权合成章' }), { code: 'AUTHOR_CHAPTER_SCOPE' })
+      await expectToolDenied(chapterEditRangeTool.execute({ ...ctx, callId: 'deny-spaced-edit-four' },
+        { chapterId: before[3].id, oldText: '钟声传来', newText: '未授权改稿' }), { code: 'AUTHOR_CHAPTER_SCOPE' })
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: before[3].id } })).toEqual(before[3])
       expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(4)
       expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec).toEqual(run.taskSpec)
@@ -553,8 +547,8 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
         .toMatchObject({ ready: false })
       await expect(chapterBridgeCommitTool.execute(ctx, { compilationId: next.id, chapterSummary: '不能以重准备清空义务', exitState: empty.exitState,
         lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '等候', endingStructure: '未开门' }))
-        .resolves.toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_CHECK_REQUIRED' })
-      expect((await prisma.chapterBridge.findFirstOrThrow({ where: { compilationId: next.id } })).committedAt).toBeNull()
+        .resolves.toMatchObject({ summary: '章节已提交', output: expect.stringContaining('missing') })
+      expect((await prisma.chapterBridge.findFirstOrThrow({ where: { compilationId: next.id } })).committedAt).toBeInstanceOf(Date)
       expect(await prisma.agentArtifact.findMany({ where: { id: { in: history.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(history)
       expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
     }, false, body + '林舟右掌有伤。'))
@@ -571,20 +565,19 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
     expect((await prepare(ctx)).outcome).not.toBe('failed')
     const pending = await preflightChapterReviewWrite(ctx, 'chapter_edit_range', { chapterId: before[3].id, oldText: '向左走', newText: '向右走' })
     expect(pending).toMatchObject({ kind: 'decision_required', code: 'AUTHOR_LOCAL_SCOPE', conditional: { state: 'checks_required' } })
-    for (const chapterId of [before[3].id, before[0].id]) await expect(chapterEditRangeTool.execute(ctx,
-      { chapterId, oldText: chapterId === before[3].id ? '向左走' : before[0].content, newText: '未经证实' }))
-      .rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
-    await expect(chapterWriteTool.execute(ctx, { chapterId: before[3].id, content: '整章覆盖' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    for (const chapterId of [before[3].id, before[0].id]) await expectToolDenied(chapterEditRangeTool.execute(ctx,
+      { chapterId, oldText: chapterId === before[3].id ? '向左走' : before[0].content, newText: '未经证实' }), { code: 'AUTHOR_LOCAL_SCOPE' })
+    await expectToolDenied(chapterWriteTool.execute(ctx, { chapterId: before[3].id, content: '整章覆盖' }), { code: 'AUTHOR_LOCAL_SCOPE' })
     await expect(prisma.$transaction(tx => assertChapterReviewRevision(tx, ctx, before[3])))
       .rejects.toMatchObject({ code: 'REPAIR_NOT_AUTHORIZED' })
     expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
   }))
   it.each(['不要修改本章。', '本章不得修改。', '不修改这章。', '本章保持不变。'])(
-    'preserves a resolved same-target prohibition without isolated exclusion reparsing: %s', denial => fixture(reviewRequests[1] + denial, async (ctx, before) => {
+    'preserves the prohibition annotation and current read-only effect denial: %s', denial => fixture(reviewRequests[1] + denial, async (ctx, before) => {
       const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
       expect(spec.scope.writingInterpretation?.revisionDenied).toBe(true)
       expect(spec.scope.writing?.kind).toBe('needs_input')
-      await expect(prepare(ctx)).rejects.toMatchObject({ code: expect.stringMatching(/SCOPE_NEEDS_INPUT|AUTHOR_LOCAL_SCOPE/) })
+      await expectToolDenied(invokeAfterReadonlyPolicy(ctx, storyCompilerPrepareTool, { targetOrderIndex: 4, intentSummary: '当前会话明确只读' }), { code: 'TOOL_NOT_AUTHORIZED' })
       expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
       expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
     }))
@@ -633,7 +626,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       const mixed = { chapterId: before[3].id, patches: [{ oldText: '向左走', newText: '向右走' }, { oldText: '门还没开', newText: '门框新增了机械结构' }] }
       expect(await preflightChapterReviewWrite(ctx, 'chapter_edit_range', mixed)).toMatchObject({ kind: 'decision_required',
         conditional: { state: 'proposal_outside_evidence', unprovenPatchIndexes: [1] } })
-      await expect(chapterEditRangeTool.execute(ctx, mixed)).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      await expectToolDenied(chapterEditRangeTool.execute(ctx, mixed), { code: 'AUTHOR_LOCAL_SCOPE' })
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: before[3].id } })).toEqual(before[3])
       expect(await preflightChapterReviewWrite(ctx, 'chapter_edit_range', { chapterId: before[3].id, oldText: '向左走', newText: '向右走' }))
         .toMatchObject({ kind: 'allow' })
@@ -643,21 +636,17 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
         await prisma.chapterQualityReport.update({ where: { id: report.id }, data: scenario === 'failed' ? { status: 'failed' }
           : scenario === 'different-compilation' ? { compilationId: null }
             : { deterministicMetrics: { ...originalMetrics, [scenario === 'hash' ? 'contentHash' : 'qualityContextHash']: '0'.repeat(64) } } })
-        await expect(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '向左走', newText: '向右走' }))
-          .rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+        await expectToolDenied(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '向左走', newText: '向右走' }), { code: 'AUTHOR_LOCAL_SCOPE' })
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: before[3].id } })).toEqual(before[3])
         await prisma.chapterQualityReport.update({ where: { id: report.id }, data: { status: report.status, deterministicMetrics: originalMetrics, compilationId: compilation.id } })
       }
       await prisma.qualityFinding.update({ where: { id: report.findings[0].id }, data: { evidenceHash: '0'.repeat(64) } })
-      await expect(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '向左走', newText: '向右走' }))
-        .rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      await expectToolDenied(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '向左走', newText: '向右走' }), { code: 'AUTHOR_LOCAL_SCOPE' })
       await prisma.qualityFinding.update({ where: { id: report.findings[0].id }, data: { evidenceHash: report.findings[0].evidenceHash } })
-      await expect(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '门还没开', newText: '门已打开' }))
-        .rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      await expectToolDenied(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '门还没开', newText: '门已打开' }), { code: 'AUTHOR_LOCAL_SCOPE' })
       expect((await chapterEditRangeTool.execute({ ...ctx, callId: 'conditional-actual-range' },
         { chapterId: before[3].id, oldText: '向左走', newText: '向右走' })).outcome).not.toBe('failed')
-      await expect(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '向右走', newText: '往右走' }))
-        .rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      await expectToolDenied(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '向右走', newText: '往右走' }), { code: 'AUTHOR_LOCAL_SCOPE' })
       await assess(false)
     }
     expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, ctx))).toMatchObject({ ready: true,
@@ -730,8 +719,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
     }
     const current = await prisma.chapter.findUniqueOrThrow({ where: { id: before[3].id } })
     expect(current).toMatchObject({ content: body, revision: before[3].revision + 2 })
-    await expect(chapterEditRangeTool.execute(ctx, { chapterId: current.id, oldText: '“向左走。”', newText: '「向左走。」' }))
-      .rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    await expectToolDenied(chapterEditRangeTool.execute(ctx, { chapterId: current.id, oldText: '“向左走。”', newText: '「向左走。」' }), { code: 'AUTHOR_LOCAL_SCOPE' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: current.id } })).toEqual(current)
     expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(0, 3).map(c => c.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(0, 3))
   }))
@@ -748,7 +736,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
     'keeps write-family paragraph work local through actual HTTP admission: %s', prompt => fixture(prompt, async (ctx, before) => {
       const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
       expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'bounded', regions: [{ chapterId: before[3].id, start: 4, end: 7 }] })
-      await expect(chapterWriteTool.execute(ctx, { chapterId: before[3].id, content: '不得扩大为整章替换。' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      await expectToolDenied(chapterWriteTool.execute(ctx, { chapterId: before[3].id, content: '不得扩大为整章替换。' }), { code: 'AUTHOR_LOCAL_SCOPE' })
       expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
       expect((await chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '第二段', newText: '第二段修正' })).outcome).not.toBe('failed')
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: before[3].id } })).content).toBe('第一段\n第二段修正\n第三段')
@@ -758,7 +746,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
     '第二卷第2章正文，将“源短句”改为“新短句”。', async (ctx, before) => {
       const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
       expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'bounded', regions: [{ chapterId: before[3].id, start: 3, end: 6 }] })
-      await expect(chapterWriteTool.execute(ctx, { chapterId: before[3].id, content: '不得扩大为全章。' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      await expectToolDenied(chapterWriteTool.execute(ctx, { chapterId: before[3].id, content: '不得扩大为全章。' }), { code: 'AUTHOR_LOCAL_SCOPE' })
       expect((await chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '源短句', newText: '新短句' })).outcome).not.toBe('failed')
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: before[3].id } })).content).toBe('前段。新短句尾。后段。')
       expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(0, 3).map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(0, 3))
@@ -768,7 +756,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       '第二卷第2章正文，将“源短句”改为“新短句”。' + protection, async (ctx, before) => {
         const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
         expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'needs_input', regions: [] })
-        await expect(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '源短句', newText: '新短句' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+        await expectToolDenied(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '源短句', newText: '新短句' }), { code: 'AUTHOR_LOCAL_SCOPE' })
         expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
         expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
       }, false, '前段。源短句尾。后段。'))
@@ -780,8 +768,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       '第二卷第2章正文，' + request, async (ctx, before) => {
         const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
         expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'needs_input', regions: [] })
-        await expect(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: request.includes('保护') ? '尾' : request.includes('外') ? '外“内”' : '原短', newText: '不应执行' }))
-          .rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+        await expectToolDenied(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: request.includes('保护') ? '尾' : request.includes('外') ? '外“内”' : '原短', newText: '不应执行' }), { code: 'AUTHOR_LOCAL_SCOPE' })
         expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
         expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
       }, false, '前段。原短。外“内”。保护句尾。后段。'))
@@ -792,16 +779,15 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       '第二卷第2章正文，' + request, async (ctx, before) => {
         const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
         expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'needs_input', regions: [] })
-        await expect(chapterWriteTool.execute(ctx, { chapterId: before[3].id, content: '不能退为整章授权。' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+        await expectToolDenied(chapterWriteTool.execute(ctx, { chapterId: before[3].id, content: '不能退为整章授权。' }), { code: 'AUTHOR_LOCAL_SCOPE' })
         expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
       }, false, '前段。原短句。后段。'))
   it('keeps the chapter identity when only its local quotation is ambiguous', () => fixture(requests[0] + concerns, async (ctx, before) => {
     const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
     expect(spec).toMatchObject({ ambiguity: 'must_ask', scope: { writing: { kind: 'bounded', targets: [{ chapterId: before[3].id }] },
       localEditBoundary: { kind: 'needs_input', regions: [] }, writingInterpretation: { reasons: expect.arrayContaining(['LOCAL_ANCHOR_UNRESOLVED']) } } })
-    await expect(prepare(ctx)).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
-    await expect(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '向左走。', newText: '向右走。' }))
-      .rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    await expectToolDenied(prepare(ctx), { code: 'AUTHOR_LOCAL_SCOPE' })
+    await expectToolDenied(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '向左走。', newText: '向右走。' }), { code: 'AUTHOR_LOCAL_SCOPE' })
     expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
   }, true))
   it.each(['完成第二卷第2章质量检查，判断是否需要局部修订。', '请阅读这句：“修改第二卷第2章”。'])(
@@ -819,13 +805,13 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
     'preserves a protected quotation even when the same text was cited as an issue: %s', protection => fixture(requests[0] + concerns + protection, async (ctx, before) => {
       const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
       expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'needs_input', regions: [] })
-      await expect(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '向左走。', newText: '向右走。' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+      await expectToolDenied(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '向左走。', newText: '向右走。' }), { code: 'AUTHOR_LOCAL_SCOPE' })
       expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
     }))
   it('does not create a relative next chapter when the same request forbids chapter creation', () => fixture('续写下一章，不新建章节。', async (ctx, before) => {
     const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
     expect(spec.scope).toMatchObject({ writing: { kind: 'needs_input', targets: [] }, writingInterpretation: { creationDenied: true } })
-    await expect(chapterCreateTool.execute(ctx, { title: '不得创建', volumeOrder: 2, positionInVolume: 3 })).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+    await expectToolDenied(chapterCreateTool.execute(ctx, { title: '不得创建', volumeOrder: 2, positionInVolume: 3 }), { code: 'SCOPE_NEEDS_INPUT' })
     expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
   }))
   it.each(['writing', 'localEditBoundary', 'writingInterpretation'] as const)(
@@ -833,8 +819,8 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
       delete spec.scope[field]
       await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: spec } })
-      await expect(prepare(ctx)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
-      await expect(chapterWriteTool.execute(ctx, { chapterId: before[3].id, content: '不应扩大为整章权限。' })).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+      await expectToolDenied(prepare(ctx), { code: 'RUNTIME_RECEIPT_INVALID' })
+      await expectToolDenied(chapterWriteTool.execute(ctx, { chapterId: before[3].id, content: '不应扩大为整章权限。' }), { code: 'RUNTIME_RECEIPT_INVALID' })
       expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
       expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
     }))
@@ -859,8 +845,8 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       const ctx: ToolContext = { userId, novelId, sessionId, runId, chapterId: null, callId: 'true-author-answer', mode: 'build',
         qualityMode: 'premium', creativeFreedom: 'balanced', signal: new AbortController().signal, emit: () => {} }
       expect((await novelCreateTool.execute(ctx, { title: '合成首章作品', summary: '用于校验首章确认与实际正文写入。', tags: [ALL_NOVEL_TAGS[0]] })).outcome).not.toBe('failed')
-      await expect(storyCompilerPrepareTool.execute({ ...ctx, callId: 'before-answer-prepare' }, { targetOrderIndex: 1,
-        intentSummary: '作者尚未确认章节落点', volumeDecision: { kind: 'continue', reason: '第一卷首章' } })).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+      await expectToolDenied(storyCompilerPrepareTool.execute({ ...ctx, callId: 'before-answer-prepare' }, { targetOrderIndex: 1,
+        intentSummary: '作者尚未确认章节落点', volumeDecision: { kind: 'continue', reason: '第一卷首章' } }), { code: 'SCOPE_NEEDS_INPUT' })
       expect(await prisma.storyCompilation.count({ where: { runId } })).toBe(0)
       const wait = questionPermissions.waitForQuestionAnswer
       const waitingSpy = vi.spyOn(questionPermissions, 'waitForQuestionAnswer').mockImplementation((id, callId, timeout, signal) => {
@@ -878,11 +864,11 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       const chapter = await prisma.chapter.findFirstOrThrow({ where: { novelId, orderIndex: 1 } })
       expect((await chapterWriteTool.execute({ ...ctx, callId: 'write-answered-first' }, { chapterId: chapter.id, content: '她在门口等候。窗外天亮了。' })).outcome).not.toBe('failed')
       expect((await chapterEditRangeTool.execute({ ...ctx, callId: 'edit-answered-first' }, { chapterId: chapter.id, oldText: '窗外天亮了', newText: '窗外雨停了' })).outcome).not.toBe('failed')
-      await expect(chapterCreateTool.execute({ ...ctx, callId: 'deny-second-after-answer' }, { title: '不得扩成第二章', volumeOrder: 1, positionInVolume: 2 })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+      await expectToolDenied(chapterCreateTool.execute({ ...ctx, callId: 'deny-second-after-answer' }, { title: '不得扩成第二章', volumeOrder: 1, positionInVolume: 2 }), { code: 'AUTHOR_CHAPTER_SCOPE' })
       expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).taskSpec).toEqual(frozen)
       expect(await prisma.chapter.count({ where: { novelId } })).toBe(1)
       expect(await prisma.aiUsageLog.count({ where: { userId } })).toBe(0)
-      expect(await prisma.creditLedgerEntry.count({ where: { userId } })).toBe(0)
+      expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(userId, { userId }) })).toBe(0)
       expect(fetch).not.toHaveBeenCalled()
     } finally {
       restoreWait()

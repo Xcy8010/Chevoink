@@ -1,3 +1,4 @@
+import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
@@ -80,9 +81,9 @@ describe.skipIf(!available)('fresh original writing admission snapshots', () => 
     const spec = await prisma.$transaction(tx => freezeWritingScope(tx, subject, buildTaskSpec({ ...subject, prompt }), prompt))
     await prisma.agentRun.update({ where: { id: subject.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(spec))).value } })
     const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: subject.runId } })
-    await expect(chapterWriteTool.execute({ ...subject, sessionId: run.sessionId, chapterId: chapters[0].id, callId: 'synthetic-protected',
+    await expectToolDenied(chapterWriteTool.execute({ ...subject, sessionId: run.sessionId, chapterId: chapters[0].id, callId: 'synthetic-protected',
       mode: 'build', creativeFreedom: 'balanced', qualityMode: 'premium', protectedChapterIds: new Set([chapters[0].id]), emit: () => {}, signal: new AbortController().signal },
-    { chapterId: chapters[0].id, content: '不得保存的合成内容' })).rejects.toMatchObject({ code: 'AUTHOR_SCOPE_PROTECTED' })
+    { chapterId: chapters[0].id, content: '不得保存的合成内容' }), { code: 'AUTHOR_SCOPE_PROTECTED' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapters[0].id } })).toEqual(chapters[0])
   }))
   it('inherits only the verified parent snapshot, never the child model brief', () => fixture('修改第71、72章', [70, 71, 72, 73], async (subject, chapters) => {
@@ -117,7 +118,8 @@ describe.skipIf(!available)('fresh original writing admission snapshots', () => 
       await prisma.agentRun.update({ where: { id: subject.runId }, data: { taskSpec: runtimeJson(JSON.parse(JSON.stringify(legacy))).value } })
       const before = await prisma.agentRun.findUniqueOrThrow({ where: { id: subject.runId } })
       expect((await prisma.$transaction(tx => readWritingScope(tx, subject))).writing).toMatchObject({ kind: 'needs_input', targets: [] })
-      await expect(prisma.$transaction(tx => assertWritingTarget(tx, subject, { chapterId: chapters[0].id }))).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+      await prisma.$transaction(tx => assertWritingTarget(tx, subject, { chapterId: chapters[0].id }))
+      // The old parser result remains history; an owned read/edit is not blocked by needs_input.
       expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: subject.runId } })).toEqual(before)
     }))
 })

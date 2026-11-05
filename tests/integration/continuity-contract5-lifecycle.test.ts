@@ -1,3 +1,4 @@
+import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
@@ -207,7 +208,7 @@ describe.runIf(available)('ordinary continuity reports preserve frozen contract5
           const fee = await prisma.aiUsageLog.findFirstOrThrow({ where: { userId: f.userId } })
           await prisma.aiUsageLog.update({ where: { id: fee.id }, data: { billingStatus: 'pending_settlement' } })
           const fees = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
-          await expect(continuityValidateTool.execute({ ...s.ctx, callId: 'unknown-no-redispatch' }, args)).rejects.toMatchObject({ code: 'AI_PROVIDER_BILLING_UNCONFIRMED' })
+          await expectToolDenied(continuityValidateTool.execute({ ...s.ctx, callId: 'unknown-no-redispatch' }, args), { code: 'AI_PROVIDER_BILLING_UNCONFIRMED' })
           expect(requests).toHaveLength(before)
           expect(await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(fees)
           expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: s.compilation.id } })).committedAt).toBeNull()

@@ -100,10 +100,13 @@ export async function continueCurrentReviewWorkflow(f: Subject, input: {
     try {
     const last = [...request.messages].reverse().find(message => message.role === 'tool')
     let next: string | undefined
+    let nextArgs: Record<string, unknown> | undefined
+    let nextCallId: string | undefined
     let retainedFindings: Array<{ source: 'quality' | 'continuity'; reportId: string; findingId: string; reason: string }> | undefined
     if (input.missingCommit) return { content: summary, reasoning: '', toolCalls: [], finishReason: 'stop',
       usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
     if (!last || !calls.length) next = input.readFirst ? 'chapter_bridge_get' : 'quality_analyze'
+    else if (String(last.toolCallId).startsWith('current-recovery-final-check-')) next = 'chapter_bridge_commit'
     else if (last.toolCallId === 'current-recovery-chapter_bridge_get') next = 'quality_analyze'
     else if (last.toolCallId === 'current-recovery-quality_analyze') {
       expect(last.content).toContain('修订')
@@ -153,9 +156,20 @@ export async function continueCurrentReviewWorkflow(f: Subject, input: {
         next = 'chapter_bridge_commit'
       }
     }
+    // The main model explicitly selects final checks; commit performs no paid work.
+    if (next === 'chapter_bridge_commit') {
+      const current = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, input.compilationId))
+      expect(calls.length, JSON.stringify(current)).toBeLessThan(12)
+      const pending = current!.requiredTools[0]
+      if (pending) { next = pending.name; nextArgs = { ...pending.args, readOnly: true }; nextCallId = 'current-recovery-final-check-' + calls.length }
+      else if (input.currentDecisions && !retainedFindings) {
+        retainedFindings = current!.decisionDetails!.map(({ source, reportId, findingId }) => ({ source, reportId, findingId,
+          reason: '保留当前真实报告意见供作者判断，本次仅删除明确重复动作；未声称意见已修复。' }))
+      }
+    }
     if (next) calls.push(next)
-    return { content: next ? '' : summary, reasoning: '', toolCalls: next ? [{ id: retainedFindings ? 'current-recovery-retained-commit' : `current-recovery-${next}`, name: next,
-      arguments: JSON.stringify({ compilationId: input.compilationId, ...(retainedFindings ? { retainedFindings } : {}) }) }] : [], finishReason: next ? 'tool_calls' : 'stop',
+    return { content: next ? '' : summary, reasoning: '', toolCalls: next ? [{ id: nextCallId ?? (retainedFindings ? 'current-recovery-retained-commit' : `current-recovery-${next}`), name: next,
+      arguments: JSON.stringify(nextArgs ?? { compilationId: input.compilationId, ...(retainedFindings ? { retainedFindings } : {}) }) }] : [], finishReason: next ? 'tool_calls' : 'stop',
       usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null } }
     } catch (error) { modelFailures.push(error); throw error }
   })
@@ -190,7 +204,7 @@ export async function continueCurrentReviewWorkflow(f: Subject, input: {
     expect(applied).toEqual([expect.objectContaining({ chapterId: chapter.id, sourceRevision: original.revision + 1,
       targetRevision: chapter.revision, before: duplicated, after: chapter.content })])
     expect(run.status).toBe('completed'); expect(compilation.bridge!.committedAt).not.toBeNull()
-    expect(calls.slice(0, input.readFirst ? 4 : 3)).toEqual([...(input.readFirst ? ['chapter_bridge_get'] : []), 'quality_analyze', 'continuity_validate', 'chapter_bridge_commit'])
+    expect([...calls.slice(0, input.readFirst ? 3 : 2), calls.at(-1)]).toEqual([...(input.readFirst ? ['chapter_bridge_get'] : []), 'quality_analyze', 'continuity_validate', 'chapter_bridge_commit'])
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, input.compilationId))
     expect(readiness).toMatchObject({ ready: true, revision: chapter.revision, quality: 'complete', continuity: 'complete', terminalCommitted: true, decisionPending: false })
     if (input.currentDecisions) {

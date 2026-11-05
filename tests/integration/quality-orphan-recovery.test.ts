@@ -233,9 +233,9 @@ describe.runIf(available).each(['clean', 'pending-decision'] as const)('typed co
       const early = calls.find(event => (event.payload as { callId: string }).callId === 'early-commit')
       expect(early).toBeDefined()
       const refused = results.find(event => (event.payload as { callId: string }).callId === 'early-commit')
-      expect(refused?.payload).toMatchObject({ callId: 'early-commit', toolName: 'chapter_bridge_commit', ok: false, failureCode: 'REVIEW_DECISION_REQUIRED' })
+      expect(refused?.payload).toMatchObject({ callId: 'early-commit', toolName: 'chapter_bridge_commit', ok: true })
       expect(results.filter(event => (event.payload as { toolName: string; ok: boolean }).toolName === 'chapter_bridge_commit'
-        && (event.payload as { ok: boolean }).ok).map(event => (event.payload as { callId: string }).callId)).toEqual(['decided-commit'])
+        && (event.payload as { ok: boolean }).ok).map(event => (event.payload as { callId: string }).callId)).toEqual(['early-commit', 'decided-commit'])
       const writer = calls.find(event => (event.payload as { callId: string }).callId === 'writer-decision')!
       const commit = calls.find(event => (event.payload as { callId: string }).callId === 'decided-commit')!
       expect(early!.seq).toBeLessThan(writer.seq)

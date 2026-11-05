@@ -1,3 +1,4 @@
+import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { randomUUID } from 'node:crypto'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
@@ -145,10 +146,10 @@ describe.runIf(available)('unbound conversation through the real legacy loop and
     await prisma.agentRun.update({ where: { id: started.id }, data: { taskSpec: runtimeJson(startedSpec).value } })
     await prisma.storyCompilation.create({ data: { userId: f.userId, novelId: novel.id, runId: started.id, chapterId: chapter.id,
       targetOrderIndex: 1, sourcePromptHash: runtimeJson(prompt).hash, preparedContext: {} } })
-    await expect(taskRespondTool.execute({ ...subject, runId: started.id, chapterId: chapter.id, mode: 'build', creativeFreedom: 'balanced',
+    await expectToolDenied(taskRespondTool.execute({ ...subject, runId: started.id, chapterId: chapter.id, mode: 'build', creativeFreedom: 'balanced',
       qualityMode: 'premium', callId: 'started-reply', signal: new AbortController().signal, emit: () => {}, respondTask: async text => ({
         ...await prisma.$transaction(tx => assertTaskResponseEligible(tx, { ...subject, runId: started.id })), answer: text,
-      }) }, { answer })).rejects.toMatchObject({ code: 'TASK_RESPONSE_WORK_PENDING' })
+      }) }, { answer }), { code: 'TASK_RESPONSE_WORK_PENDING' })
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: started.id } })).status).toBe('running')
     expect(await prisma.agentMessage.count({ where: { runId: started.id, role: 'assistant' } })).toBe(0)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(chapter)

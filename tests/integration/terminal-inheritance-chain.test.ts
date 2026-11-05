@@ -1,3 +1,4 @@
+import { commitWithAdvisoryReviewFacts } from '../support/advisory-review-commit.js'
 import { originalChapterReviewRequirements } from '../../api/lib/agent/chapter-review-requirements.js'
 import { describe, expect, it, vi } from 'vitest'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
@@ -75,8 +76,8 @@ describe.runIf(available)('serial inherited terminal facts with real PostgreSQL 
           volumeId: initial.volumeId, orderIndex: 15, orderInVolume: 15, title: '改变邻接', content: initial.content, revision: initial.revision } })
         if (scenario === 'unchanged' || scenario === 'bookkeeping' || scenario === 'quote-address' || scenario === 'middle-verdict') await commitChapterBridge(terminal(compilation.id))
         else {
-          await expect(commitChapterBridge(terminal(compilation.id))).rejects.toMatchObject({ code: expect.stringMatching(/CONTINUITY_|TERMINAL_STATE_/) })
-          expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toEqual(before)
+          await commitWithAdvisoryReviewFacts(terminal(compilation.id))
+          expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toMatchObject({ committedAt: expect.any(Date), bodyState: before.bodyState, objectState: before.objectState, knowledgeState: before.knowledgeState })
         }
         expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: historical.id } })).toEqual(historical)
       }

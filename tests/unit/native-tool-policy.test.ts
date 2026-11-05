@@ -33,6 +33,7 @@ it('restores real-role tools missing from a legacy inferred catalog without chan
   expect(result.tools.some(tool => tool.function.name === 'volume_create')).toBe(true)
   expect(result.tools.some(tool => tool.function.name === 'chapter_write')).toBe(true)
   expect(result.toolAuthority.find(item => item.name === 'volume_create')?.permission).not.toBe('deny')
+  expect(result.toolAuthority.find(item => item.name === 'chapter_read')).toEqual(grant)
   expect(runtimeJson(configuration).hash).toBe(before)
   expect(configuration.tools).toEqual([definition])
   expect(db.agentSession.findFirst).toHaveBeenCalledWith({ where: { id: 'session', userId: 'owner', novelId: 'novel' } })
@@ -92,4 +93,13 @@ it.each(['deny', 'read_only'])('intersects an issued child ceiling with the curr
   const result = await current(token, child)
   expect(result.toolAuthority.some(item => item.name === 'chapter_write')).toBe(false)
   expect(parentState).toHaveBeenCalledWith(db, 'parent')
+})
+
+it.each(['ask', 'deny', 'alwaysConfirm'] as const)('preserves an existing actual root %s grant while restoring missing names', async restriction => {
+  const saved = { ...grant, permission: restriction === 'deny' ? 'deny' as const : restriction === 'ask' ? 'ask' as const : 'allow' as const, alwaysConfirm: restriction === 'alwaysConfirm' }
+  const result = await current(lease, { ...configuration, toolAuthority: [saved] })
+  const recovered = result.toolAuthority.find(item => item.name === 'chapter_read')
+  if (restriction === 'deny') expect(recovered).toBeUndefined()
+  else expect(recovered).toMatchObject({ permission: 'ask', alwaysConfirm: saved.alwaysConfirm })
+  expect(result.tools.some(tool => tool.function.name === 'volume_create')).toBe(true)
 })

@@ -157,7 +157,7 @@ export async function readAssistantToolViews(tx: RuntimeTx, taskRootId: string, 
     if (runtimeJson(projected).hash !== runtimeJson(assistant).hash
       && (result.reasoning !== '' || runtimeJson(legacyProjected).hash !== runtimeJson(assistant).hash)) return runtimeError('RUNTIME_RECEIPT_INVALID', '当前助手调用不是原模型结果。')
     const request = object(object(attempt.requestSnapshot).request)
-    if (runtimeJson(request).hash !== runtimeJson(object(object(operation.inputSnapshot).input).request).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原助手请求不属于对应模型操作。')
+    if (runtimeJson(request).hash !== runtimeJson(object(object(operation.inputSnapshot).input).request ?? null).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原助手请求不属于对应模型操作。')
     return toolViews.parse(object(request.body).tools ?? [])
   }
   return runtimeError('RUNTIME_SOURCE_REQUIRED', '没有产生当前助手调用的模型请求。')

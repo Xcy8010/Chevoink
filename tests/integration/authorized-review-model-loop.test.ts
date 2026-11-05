@@ -127,12 +127,14 @@ describe('authorized current-report workflow through the real model loop', () =>
       try {
       const observations = request.messages.filter(item => item.role === 'tool')
       const last = observations.at(-1)
-      let next: { name: string; args: { chapterId?: string; compilationId?: string; retainedFindings?: Array<{ source: 'quality'; reportId: string; findingId: string; reason: string }> } } | undefined
+      let nextCallId: string | undefined
+      let next: { name: string; args: { readOnly?: boolean; chapterId?: string; compilationId?: string; retainedFindings?: Array<{ source: 'quality'; reportId: string; findingId: string; reason: string }> } } | undefined
       if (!last || last.toolCallId === 'old-third-r5') {
         if (scenario === 'legacy-phase-checkpoint') expect(request.messages.some(item => typeof item.content === 'string' && item.content.includes('系统·当前检查合同') && item.content.includes('不是永久撤销原作者授权'))).toBe(true)
         expect(JSON.stringify(request.tools)).toContain('quality_analyze')
         next = { name: 'quality_analyze', args: { chapterId: f.chapterId } }
-      } else if (last.toolCallId === 'walk-quality_analyze') {
+      } else if (String(last.toolCallId).startsWith('walk-final-check-')) next = { name: 'chapter_bridge_commit', args: { compilationId: compilation.id } }
+      else if (last.toolCallId === 'walk-quality_analyze') {
         const saved = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
         expect((saved.usage as { checkpoint?: { pendingReviews?: unknown[] } } | null)?.checkpoint?.pendingReviews ?? []).toEqual([])
         expect(last.content).toContain('正文已变化')
@@ -165,8 +167,14 @@ describe('authorized current-report workflow through the real model loop', () =>
             && String(message.content).includes(finding.suggestion))).toBe(true)
         }
       }
+      if (next?.name === 'chapter_bridge_commit') {
+        const current = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, compilation.id))
+        expect(calls.length, JSON.stringify(current)).toBeLessThan(10)
+        const pending = current!.requiredTools[0]
+        if (pending) { next = { name: pending.name, args: { ...pending.args, readOnly: true } }; nextCallId = 'walk-final-check-' + calls.length }
+      }
       if (next) calls.push(next)
-      return { content: next ? '' : summary, reasoning: '', toolCalls: next ? [{ id: next.args.retainedFindings ? 'walk-retained-commit' : `walk-${next.name}`, name: next.name, arguments: JSON.stringify(next.args) }] : [],
+      return { content: next ? '' : summary, reasoning: '', toolCalls: next ? [{ id: nextCallId ?? (next.args.retainedFindings ? 'walk-retained-commit' : `walk-${next.name}`), name: next.name, arguments: JSON.stringify(next.args) }] : [],
         finishReason: next ? 'tool_calls' : 'stop', usage: { promptTokens: 10, completionTokens: 2, totalTokens: 12, promptCacheHitTokens: null, promptCacheMissTokens: null } }
       } catch (error) { modelFailures.push(error); throw error }
     })
@@ -182,8 +190,10 @@ describe('authorized current-report workflow through the real model loop', () =>
     expect(ready).toMatchObject({ ready: true, revision: current.revision, continuity: 'complete', quality: 'complete', terminalCommitted: true, decisionPending: false })
     const delivery = await prisma.$transaction(tx => readCompletedWritingPresentation(tx, f))
     expect(delivery).toMatchObject({ chapters: [{ id: f.chapterId, revision: current.revision, content: current.content }] })
-    expect(calls.map(item => item.name)).toEqual(['quality_analyze', 'continuity_validate', 'chapter_bridge_commit'])
-    expect(calls.filter(item => !(item.args as { retainedFindings?: unknown }).retainedFindings).every(item => Object.keys(item.args as object).length === 1)).toBe(true)
+    expect(calls.slice(0, 2).map(item => item.name)).toEqual(['quality_analyze', 'continuity_validate'])
+    expect(calls.at(-1)?.name).toBe('chapter_bridge_commit')
+    expect(calls.slice(2, -1).every(item => ['quality_analyze', 'continuity_validate'].includes(item.name) && (item.args as { readOnly?: boolean }).readOnly)).toBe(true)
+    expect(calls.filter(item => !(item.args as { retainedFindings?: unknown }).retainedFindings).every(item => Object.keys(item.args as object).every(key => ['chapterId', 'compilationId', 'readOnly'].includes(key)))).toBe(true)
     expect(actions.filter(action => action === 'agent3HumanityRevision')).toHaveLength(1)
     expect(actions.filter(action => action === 'agent3ContinuityRevision')).toHaveLength(1)
     const history = await prisma.agentRunEvent.findMany({ where: { runId: f.runId }, orderBy: { seq: 'asc' } })
@@ -194,7 +204,7 @@ describe('authorized current-report workflow through the real model loop', () =>
       expect(ready?.decisionDetails?.some(item => item.source === 'quality' && item.evidence === '他攥紧信封。')).toBe(true)
     }
     expect(history.at(-1)?.payload).toMatchObject({ type: 'run.finished', status: 'succeeded' })
-    expect(chat).toHaveBeenCalledTimes(4)
+    expect(chat).toHaveBeenCalledTimes(calls.length + 1)
     if (scenario === 'legacy-phase-checkpoint') expect(history.filter(event => event.seq <= 4834)).toEqual(originalHistory)
     const reports = await prisma.chapterQualityReport.findMany({ where: { runId: f.runId }, include: { findings: true } })
     if (scenario === 'final-advisory') {

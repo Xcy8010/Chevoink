@@ -1,3 +1,4 @@
+import { resolveDurableApproval } from '../../api/lib/agent/runtime-approval.js'
 import { initializeExecutionState } from '../support/native-tool-test-state.js'
 import { Prisma } from '@prisma/client'
 import { randomUUID } from 'node:crypto'
@@ -59,8 +60,8 @@ describe.runIf(available)('durable chapter rename', () => {
         toolAuthority: [{ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
         snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
           messages: [{ role: 'user', content: '修改标题' }, { role: 'assistant', content: null, toolCalls: [{ id: 'rename', name: tool.name, arguments: JSON.stringify(args) }] }], successfulToolSignatures: [] } })
-      const { operation } = await prepareToolCursorOperation(lease, { expectedRevision: 0, expectedHash: initial.frame.snapshotHash }, {
-        key: 'exec:0', action: tool.name, callId: 'rename', targetId: f.chapterId,
+      const { operation } = await prepareToolCursorOperation(lease, { expectedRevision: initial.frame.revision, expectedHash: initial.frame.snapshotHash }, {
+        key: `exec:${initial.frame.state.nextOperationSequence}`, action: tool.name, callId: 'rename', targetId: f.chapterId,
         operationInput: { callId: 'rename', args }, effectiveArgs: args, normalize: parsed => tool.parameters.parse(parsed),
       })
       const work = vi.fn(async (tx: Parameters<Parameters<typeof commitOperationEffect>[3]>[0]) => {
@@ -281,6 +282,12 @@ describe.runIf(available)('saved task directive identity', () => {
         snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
           messages: [{ role: 'user', content: '本次只处理第19章' }, { role: 'assistant', content: null, toolCalls: [{ id: 'save-directive', name: tool.name,
             arguments: JSON.stringify(args) }] }], successfulToolSignatures: [] } })
+      if (scenario !== 'denied') {
+        const waiting = await executeDurableToolStep(lease, new AbortController().signal)
+        expect(waiting.kind).toBe('waiting_approval')
+        if (waiting.kind !== 'waiting_approval') throw Error('Expected current plan-mode directive approval')
+        await resolveDurableApproval({ userId: f.userId, runId: f.runId, requestId: waiting.approvalId, callId: 'save-directive', approved: true, alwaysAllow: false })
+      }
       const original = runtimeOperations.commitOperationEffect
       if (scenario === 'rollback' || scenario === 'replace-rollback') vi.spyOn(runtimeOperations, 'commitOperationEffect').mockImplementationOnce(async (token, operationId, hash, work) => original(token, operationId, hash, async tx => {
         await work(tx)
@@ -436,7 +443,10 @@ describe.runIf(available)('durable charter partial updates', () => {
       const concurrent = scenario === 'stale' ? await upsertStoryCharter(f.userId, f.novelId, { protagonistDesire: '作者刚刚修改的欲望' }) : null
       const result = await executeDurableToolStep(lease, new AbortController().signal)
       const saved = await prisma.storyCharter.findUnique({ where: { novelId: f.novelId } })
-      if (scenario === 'incomplete-create') {
+      if (scenario === 'legacy-schema') {
+        expect(result).toMatchObject({ kind: 'tool', result: { outcome: 'failed' } })
+        expect(saved).toEqual(before)
+      } else if (scenario === 'incomplete-create') {
         expect(result).toMatchObject({ kind: 'tool', result: { outcome: 'failed' } })
         expect(saved).toBeNull()
         expect(await prisma.agentOperation.findFirst({ where: { taskRootId: f.rootId, action: 'story_charter_save' }, include: { effectReceipt: true } }))

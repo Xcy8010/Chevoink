@@ -1,3 +1,4 @@
+import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
@@ -37,7 +38,7 @@ describe.skipIf(!available)('durable locator protocol identity', () => {
       const args = { chapterId, oldText: '纸条仍有缺角。堡内老卫站着。', newText: '纸条仍有缺角。\n\n堡内老卫坐下。' }
       const old = await prepareOperation(lease, { key: 'old-exact-operation', kind: 'tool', action: 'chapter_edit_range', input: runtimeJson({ callId: ctx.callId, novelId, chapterId, expectedRevision: chapter.revision, args }).value })
       const oldCtx = { ...ctx, durableContent: { lease, operationKey: 'old-exact-operation', chapterId, expectedRevision: chapter.revision } }
-      await expect(chapterEditRangeTool.execute(oldCtx, args)).rejects.toMatchObject({ code: 'CHAPTER_ANCHOR_CONFLICT' })
+      await expectToolDenied(chapterEditRangeTool.execute(oldCtx, args), { code: 'CHAPTER_ANCHOR_CONFLICT' })
       expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ inputHash: old.inputHash, inputSnapshot: old.inputSnapshot })
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapterId } })).toEqual(chapter)
       const budget = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: lease.taskRootId } })

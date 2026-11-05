@@ -1,4 +1,4 @@
-import { initializeExecutionState } from '../support/native-tool-test-state.js'
+import { initializeExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
@@ -65,7 +65,7 @@ describe.runIf(available)('durable research and plan artifacts', () => {
     const artifact = await prisma.agentArtifact.findFirstOrThrow({ where: { runId: f.runId, artifactType: 'researchReport' } })
     expect(artifact).toMatchObject({ content: updated.section.content, metadata: { revision: 2 } })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: '原文' })
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
     expect(network).not.toHaveBeenCalled()
   }, undefined, '分析这本小说'))
 

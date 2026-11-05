@@ -1,4 +1,4 @@
-import { initializeExecutionState } from '../support/native-tool-test-state.js'
+import { initializeExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { prisma } from '../../api/lib/prisma.js'
@@ -60,7 +60,7 @@ describe.runIf(available)('durable image observation actual PG transactions', ()
         expect(await step()).toMatchObject({ kind: 'tool', result: { outcome: 'failed' } })
         expect(read).not.toHaveBeenCalled()
         expect(fetcher).not.toHaveBeenCalled()
-        expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+        expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
         return
       }
     }
@@ -110,8 +110,8 @@ describe.runIf(available)('durable image observation actual PG transactions', ()
       expect(await step(new AbortController().signal)).toMatchObject({ kind: 'tool', result: { summary: '查看 1 张图片' } })
     } else expect(await step()).toMatchObject({ kind: 'tool', result: scenario === 'unknown-retry-usage' ? { outcome: 'failed' } : { summary: '查看 1 张图片' } })
     expect(fetcher).toHaveBeenCalledTimes(scenario === 'known-retry' ? 2 : 1)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
-    const attempts = await prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId } }, include: { usageReceipt: true } })
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
+    const attempts = await prisma.agentProviderAttempt.findMany({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } }, include: { usageReceipt: true } })
     expect(attempts).toHaveLength(scenario === 'known-retry' ? 2 : 1)
     for (const attempt of attempts) {
       expect(JSON.stringify(attempt.requestSnapshot)).not.toContain(runtime.apiKey)

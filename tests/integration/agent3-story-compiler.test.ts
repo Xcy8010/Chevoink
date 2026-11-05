@@ -1,3 +1,4 @@
+import { commitWithAdvisoryReviewFacts } from '../support/advisory-review-commit.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { randomInt, randomUUID } from 'node:crypto'
 import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
@@ -104,9 +105,9 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
     expect(fresh.targetOrderIndex).toBe(4)
     const preparedDigest = await buildStoryCompilerDigest(userId, novelId, chapter1Id, freshId)
     expect(preparedDigest).toContain('Scene Task 0 个')
-    expect(preparedDigest).toContain('下一步调用 scene_task_build')
+    expect(preparedDigest).toContain('场景与编译为可选协作记录')
     expect(preparedDigest).not.toContain('不重复 PREPARE/BEAT')
-    expect(preparedDigest).toContain('不能宣称该章已写完或完成')
+    expect(preparedDigest).toContain('目标尚无非空正文')
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: old.compilation.id } })).status).toBe('active')
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter1Id } })).toEqual(original)
     // A real new chapter created during this contract remains available from a
@@ -312,11 +313,11 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       chapterRevision: chapter3.revision, mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
     await prisma.chapter.update({ where: { id: chapter2Id }, data: { content: { set: '用户在第三章写作期间修改了第二章结尾。' }, revision: { increment: 1 } } })
     await expect(prisma.$transaction(tx => readChapterReviewReadiness(tx, { userId, novelId, runId }, compilation.id))).resolves.toMatchObject({ continuity: 'stale', terminalCommitted: false })
-    await expect(commitChapterBridge({
-      userId, novelId, compilationId: compilation.id, chapterSummary: '测试',
+    await commitWithAdvisoryReviewFacts({
+      userId, novelId, runId, compilationId: compilation.id, chapterSummary: '测试',
       exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
       lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '悬念',
-    })).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+    })
 
     const repaired = await prisma.chapter.update({ where: { id: chapter3Id }, data: { content: { set: '根据最新章尾，两人停在楼梯转角，头顶多出一声脚步。' }, revision: { increment: 1 } } })
     await recordStoryCompilerWrite({ userId, novelId, runId, chapterId: repaired.id, chapterOrderIndex: 3, chapterRevision: repaired.revision })
@@ -337,16 +338,16 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       const terminal = { userId, novelId, runId: run.id, compilationId: compilation.id, chapterSummary: '停在询问之前。',
         exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
         lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停在提问之前' }
-      await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+      await commitWithAdvisoryReviewFacts(terminal)
       expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toBeNull()
-      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).status).toBe('active')
+      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).status).toBe('completed')
       await saveSceneTasks({ userId, novelId, compilationId: compilation.id, tasks: [{ purpose: '推进门前选择', goal: '进门', obstacle: '不知价格',
         choice: '握住门把手', cost: '暂缓询问', turn: '停住动作', entryState: terminal.exitState, exitState: terminal.exitState,
         styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] })
       const completeChecks = async () => {
         const current = await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })
         await persistCurrentContinuityReport({ userId, novelId, runId: run.id, compilationId: compilation.id, expectedChapterRevision: current.revision })
-        await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'QUALITY_CHECK_REQUIRED' })
+        await commitWithAdvisoryReviewFacts(terminal)
         await persistHumanityQualityReport({ userId, novelId, runId: run.id, compilationId: compilation.id, chapterId: chapter.id,
           chapterRevision: current.revision, mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
       }
@@ -387,7 +388,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
       await prisma.chapter.update({ where: { id: chapter.id }, data: { content: '同版本号下作者改变了正文。' } })
       expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toBeNull()
       await expect(prisma.$transaction(tx => assertCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }, captured!))).rejects.toMatchObject({ code: 'WRITING_DELIVERY_STALE' })
-      await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+      await commitWithAdvisoryReviewFacts(terminal)
       await completeChecks()
       await commitChapterBridge(terminal)
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).preparedContext).toMatchObject({ terminalContentHash: runtimeJson({ content: '同版本号下作者改变了正文。' }).hash })

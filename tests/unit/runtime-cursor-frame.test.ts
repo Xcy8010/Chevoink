@@ -1,3 +1,5 @@
+import { z } from 'zod'
+import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { runtimeJson, type RuntimeTx } from '../../api/lib/agent/runtime-common.js'
 import type { RunLeaseToken } from '../../api/lib/agent/runtime-lease.js'
@@ -9,19 +11,21 @@ const lease = vi.hoisted(() => ({ withRunLease: vi.fn() }))
 vi.mock('../../api/lib/agent/runtime-lease.js', () => ({ withRunLease: lease.withRunLease }))
 vi.mock('../../api/lib/agent/native-tool-policy.js', async original => ({ ...await original<object>(),
   readEffectiveNativeTooling: async (_tx: unknown, _lease: unknown, configuration: unknown) => configuration }))
+const sourceTools = vi.hoisted(() => ({ getToolByName: vi.fn() }))
+vi.mock('../../api/lib/agent/tools/registry.js', () => sourceTools)
 
 const reachedOperation = new Error('synthetic operation boundary reached')
-function fixture(action: 'prepare' | 'reject' | 'reduce') {
+function fixture(action: 'prepare' | 'reject' | 'reduce', source?: { args: string; schema: Record<string, unknown> }) {
   const snapshot = { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
     messages: [{ role: 'user', content: '合成原始请求' }], successfulToolSignatures: [] }
   const first = { revision: 0, previousHash: null, snapshot, snapshotHash: runtimeJson(snapshot).hash }
   const latestSnapshot = { ...snapshot, phase: action === 'reduce' ? 'awaiting_operation' : 'idle',
     pendingOperationId: action === 'reduce' ? 'operation' : null, nextOperationSequence: action === 'reduce' ? 1 : 0,
-    messages: [...snapshot.messages, { role: 'assistant', content: null, toolCalls: [{ id: 'call', name: 'chapter_read', arguments: '{}' }] }] }
+    messages: [...snapshot.messages, { role: 'assistant', content: null, toolCalls: [{ id: 'call', name: 'chapter_read', arguments: source?.args ?? '{}' }] }] }
   const latest = { ...first, revision: 1, previousHash: first.snapshotHash, snapshot: latestSnapshot, snapshotHash: runtimeJson(latestSnapshot).hash }
   const configuration = { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
     model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
-    tools: [{ type: 'function', function: { name: 'chapter_read', description: '', parameters: { type: 'object' } } }],
+    tools: [{ type: 'function', function: { name: 'chapter_read', description: '', parameters: source?.schema ?? { type: 'object' } } }],
     toolAuthority: [{ name: 'chapter_read', permission: action === 'reject' ? 'deny' : 'allow', alwaysConfirm: false, dangerous: false }],
     protectedChapterIds: [], pinnedSkillVersions: [] }
   const root = { specSnapshot: JSON.parse(JSON.stringify(buildTaskSpec({ runId: 'run', novelId: 'novel', prompt: '合成原始请求' }))), requestSnapshot: { content: '合成原始请求' }, inputHash: '' }
@@ -47,7 +51,7 @@ const actions = {
   reduce: (cursor: { expectedRevision: number; expectedHash: string }) => reduceExecutionReceipt(token, { ...cursor, operationId: 'operation' }),
 }
 
-beforeEach(() => { vi.clearAllMocks() })
+beforeEach(() => { vi.clearAllMocks(); sourceTools.getToolByName.mockReturnValue(undefined) })
 describe('verified frame reuse within one cursor transaction', () => {
   it.for(Object.keys(actions) as Array<keyof typeof actions>)('%s keeps the caller hash check without reading the current frame twice', async action => {
     const f = fixture(action)
@@ -76,3 +80,22 @@ describe('verified frame reuse within one cursor transaction', () => {
   })
 })
 vi.mock('../../api/lib/agent/runtime-tool-view.js', async original => ({ ...await original<object>(), verifiedAssistantToolViews: async (_tx: unknown, _root: unknown, _frame: unknown, tools: unknown[]) => tools }))
+
+  it.each(['wrapped', 'enum', 'extra', 'missing'] as const)('validates %s after representation decoding without stripping custom source constraints', async kind => {
+    const raw = { chapterId: 'c', offset: kind === 'enum' ? '1' : '0', ...(kind === 'extra' ? { injected: 'discarded by final parse' } : {}) }
+    if (kind === 'missing') delete (raw as { chapterId?: string }).chapterId
+    const schema = { type: 'object', properties: { chapterId: { type: 'string', minLength: 1 }, offset: { type: 'integer', enum: [0] } },
+      required: ['chapterId', 'offset'], additionalProperties: false }
+    const f = fixture('prepare', { args: JSON.stringify({ input: raw }), schema })
+    const tool = { parameters: z.object({ chapterId: z.string(), offset: z.number() }),
+      coerceArgs: (value: unknown) => { const item = value as Record<string, unknown>; return { ...item, offset: Number(item.offset) } } }
+    sourceTools.getToolByName.mockReturnValue(tool)
+    const call = prepareToolCursorOperation(token, { expectedRevision: f.latest.revision, expectedHash: f.latest.snapshotHash }, {
+      key: 'exec:0', action: 'chapter_read', callId: 'call', targetId: 'root', effectDomain: 'read',
+      operationInput: { callId: 'call', args: { chapterId: 'c', offset: 0 } }, effectiveArgs: { chapterId: 'c', offset: 0 },
+      normalize: value => tool.parameters.parse(normalizeToolInput(tool, value)),
+    })
+    if (kind === 'wrapped') await expect(call).rejects.toBe(reachedOperation)
+    else await expect(call).rejects.toMatchObject({ code: 'RUNTIME_INPUT_INVALID' })
+    expect(f.queries.agentOperation.findUnique).toHaveBeenCalledTimes(kind === 'wrapped' ? 1 : 0)
+  })

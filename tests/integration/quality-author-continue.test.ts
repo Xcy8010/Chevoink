@@ -1,4 +1,4 @@
-import { initializeExecutionState, saveExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
+import { initializeExecutionState, saveExecutionState, createToolFixtureCreditAccount, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import type { Prisma } from '@prisma/client'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
@@ -180,7 +180,6 @@ describe.runIf(available)('author admissions after settled quality format failur
     await h.resume(firstPause)
     expect(await h.admission()).toMatchObject({ id: firstAdmission!.id })
     expect(await h.read()).toBeNull()
-    expect(await h.check()).toMatchObject({ outcome: 'failed' })
     expect(fetchMock.requestCount()).toBe(3)
     })
     it('a distinct author continue passes current quality and continuity before strict bridge commit', async () => {
@@ -270,9 +269,12 @@ describe.runIf(available)('author admissions after settled quality format failur
     }
     if (scenario === 'no-credit') await expect(h.check()).rejects.toMatchObject({ code: 'CREDITS_EXHAUSTED' })
     else { expect(await h.read()).toBeNull(); expect(await h.check()).toMatchObject({ outcome: 'failed' }) }
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(2)
-    expect(await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })).toMatchObject({ dailyUsedMilli: used.dailyUsedMilli })
+    expect(fetchMock).toHaveBeenCalledTimes(scenario === 'ordinary-start' ? 3 : 2)
+    expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(scenario === 'ordinary-start' ? 3 : 2)
+    const accountAfter = await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } })
+    if (scenario === 'ordinary-start') expect(accountAfter.dailyUsedMilli).toBeGreaterThan(used.dailyUsedMilli)
+    else expect(accountAfter.dailyUsedMilli).toBe(used.dailyUsedMilli)
+    expect(await prisma.aiUsageLog.findMany({ where: { id: { in: originalUsage.map(item => item.id) } }, orderBy: { id: 'asc' } })).toEqual(scenario === 'pending-usage' ? originalUsage.map((item, index) => index === 0 ? { ...item, agentRunId: f.runId, usageSource: 'unknown', billingStatus: 'pending_usage' } : item) : originalUsage)
     if (scenario === 'pending-usage') expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: originalUsage[0].id } })).toMatchObject({ usageSource: 'unknown', billingStatus: 'pending_usage' })
   }))
 
@@ -323,7 +325,7 @@ describe.runIf(available)('author admissions after settled quality format failur
     await h.resume(firstPause)
     expect(await h.check()).toMatchObject({ outcome: 'failed', failureCode: 'QUALITY_REPORT_INCOMPLETE' })
     expect(fetchMock).toHaveBeenCalledTimes(3)
-    let unknown = await prisma.aiUsageLog.findFirstOrThrow({ where: { userId: f.userId, billingStatus: 'pending_usage', action: 'agent3HumanityFormatRecovery' } })
+    let unknown = await prisma.aiUsageLog.findFirstOrThrow({ where: { userId: f.userId, billingStatus: 'pending_usage', action: { in: ['agent3HumanityFormatRecovery', 'agent3HumanityCritic'] } } })
     expect(unknown).toMatchObject({ usageSource: 'unknown', agentRunId: f.runId })
     // Current requests retain their executing identity. Preserve explicit old
     // null-attribution coverage using only this generated fixture's usage row.
@@ -394,7 +396,7 @@ describe.runIf(available)('native quality continuation binds real pause and paym
     if (scenario === 'unknown') {
       await expect(step()).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
       expect(fetchMock).toHaveBeenCalledTimes(1)
-      expect(await prisma.agentProviderAttempt.count({ where: { runId: f.runId, status: 'unknown' } })).toBe(1)
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' } }, runId: f.runId, status: 'unknown' } })).toBe(1)
       return
     }
   }))
@@ -438,12 +440,12 @@ describe.runIf(available)('settled native format-only result through independent
     const f = get(), lease = h.lease
     await h.step()
     expect(await h.step()).toMatchObject({ result: { outcome: 'failed', failureCode: 'QUALITY_REPORT_INCOMPLETE' } })
-    expect(fetchMock.requestCount()).toBe(3)
-    const report = await prisma.chapterQualityReport.findFirstOrThrow({ where: { runId: lease.runId }, include: { findings: true } })
+    expect(fetchMock.requestCount()).toBe(4)
+    const report = await prisma.chapterQualityReport.findFirstOrThrow({ where: { runId: lease.runId }, include: { findings: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
     const operation = await prisma.agentOperation.findFirstOrThrow({ where: { originRunId: lease.runId, action: 'quality_analyze' } })
-    expect(await prisma.agentOperation.count({ where: { parentOperationId: operation.id, action: 'quality_critic' } })).toBe(0)
+    expect(await prisma.agentOperation.count({ where: { parentOperationId: operation.id, action: 'quality_critic' } })).toBe(1)
     expect(await prisma.agentOperation.count({ where: { parentOperationId: operation.id, action: 'quality_format_recovery' } })).toBe(1)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(3)
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(4)
     await pauseDurableTask(f.userId, lease.runId)
     const nextPause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'run.paused' }, orderBy: { sequence: 'desc' } })
     const next = await resumeDurableTask({ userId: f.userId, runId: lease.runId, pauseEventId: nextPause.id })

@@ -1,4 +1,4 @@
-import { saveExecutionState, initializeExecutionState } from '../support/native-tool-test-state.js'
+import { saveExecutionState, initializeExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { observeSemanticTransition, nextStagnantBatch } from '../../api/lib/agent/semantic-progress.js'
 import { collectDurableToolEvidence } from '../../api/lib/agent/runtime-evidence.js'
 import { advanceDurableToolStagnation } from '../../api/lib/agent/runtime-continuation.js'
@@ -146,7 +146,7 @@ describe.runIf(available)('model assignments and native configuration real isola
     const oldParameters = previousConfigurationParameters()
     const exec = await execution(f, '请切换到 模型B', configureAgentTool, args, undefined, oldParameters)
     const prepared = phase === 'prepared' ? await prepareToolCursorOperation(exec.lease,
-      { expectedRevision: exec.initial.frame.revision, expectedHash: exec.initial.frame.snapshotHash }, { key: 'exec:0', action: 'agent_configure', callId: exec.callId,
+      { expectedRevision: exec.initial.frame.revision, expectedHash: exec.initial.frame.snapshotHash }, { key: `exec:${exec.initial.frame.state.nextOperationSequence}`, action: 'agent_configure', callId: exec.callId,
         effectDomain: 'configuration', targetId: exec.root.id, effectiveArgs: args, normalize: value => configureAgentSchema.parse(value), operationInput: runtimeJson({ callId: exec.callId, args }).value }) : null
     expect((await executeDurableToolStep(exec.lease, new AbortController().signal)).kind).toBe('tool')
     const after = await loadExecutionState(f.userId, exec.runId)
@@ -196,7 +196,7 @@ describe.runIf(available)('model assignments and native configuration real isola
     expect(await prisma.agentConfigurationChange.count({ where: { runId: exec.runId } })).toBe(1)
     expect((await getModelAssignments(f.userId, f.novelId)).effective).toEqual({})
     expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
   }))
   it('requires the observed other-window revision and does not overwrite a later UI preference', async () => fixture(async f => {
     const targetId = randomUUID()
@@ -275,7 +275,7 @@ describe.runIf(available)('model assignments and native configuration real isola
     const stored = await getModelAssignments(f.userId, f.novelId)
     expect(stored.novel?.revision).toBe(6)
     expect(Object.keys(stored.novel!.assignments)).toHaveLength(5)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
   }), 30000)
 
   it('global role progress reflects the stored global selection even when a novel override masks it', async () => fixture(async f => {
@@ -319,7 +319,7 @@ describe.runIf(available)('model assignments and native configuration real isola
       expect(fetcher).toHaveBeenCalledOnce()
       expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ model: 'fixture-dynamic', reasoning_effort: 'max' })
       expect((await prisma.agentOperation.findUniqueOrThrow({ where: { id: prior.id } })).inputHash).toBe(prior.inputHash)
-      expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, modelTier: tier, deltaMilli: { lt: 0 } } })).toBe(1)
+      expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId, modelTier: tier, deltaMilli: { lt: 0 } }) })).toBe(1)
       expect(JSON.stringify(state.configuration)).not.toContain('isolated-never-used')
     } finally {
       await prisma.aiModelConfigVersion.deleteMany({ where: { modelConfigId: id } })
@@ -362,7 +362,7 @@ describe.runIf(available)('model assignments and native configuration real isola
       expect((await prisma.novelImportJob.findUniqueOrThrow({ where: { intentId: otherIntent.intentId } })).modelSelection)
         .toEqual({ kind: 'basic', modelConfigId: fallback.id, modelConfigRevision: fallback.revision, resolvedTier: 'speed' })
       expect(http).not.toHaveBeenCalled()
-      expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+      expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
       expect(await prisma.aiUsageLog.count({ where: { userId: f.userId } })).toBe(0)
     } finally {
       await prisma.user.delete({ where: { id: foreignUserId } })

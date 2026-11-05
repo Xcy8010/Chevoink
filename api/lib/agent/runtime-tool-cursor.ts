@@ -290,8 +290,14 @@ export async function prepareToolCursorOperation(token: RunLeaseToken, cursor: T
       const views = await verifiedAssistantToolViews(tx, token.taskRootId, frame, current.configuration.tools, originalTask.scope)
       const definition = views.find(tool => tool.function.name === input.action)
       const raw = coerceToolArgumentEnvelope(call!.arguments ? parseToolArgsTolerant(call!.arguments, false) : {})
-      if (!definition || !z.fromJSONSchema(definition.function.parameters).safeParse(raw).success
-        || hasRetiredNativeArguments(input.action, raw)) return runtimeError('RUNTIME_INPUT_INVALID', '工具参数不符合产生本轮助手的实际工具视图，未执行。')
+      const sourceTool = (await import('./tools/registry.js')).getToolByName(input.action)
+      // Decode the same supported representations as live dispatch before
+      // validating the actual published contract. Do not use the adapter's
+      // final parse here: it may strip custom fields before they are checked.
+      const sourceNormalized = sourceTool ? normalizeToolInput(sourceTool, raw) : raw
+      if (!definition || hasRetiredNativeArguments(input.action, raw)
+        || !z.fromJSONSchema(definition.function.parameters).safeParse(sourceNormalized).success)
+        return runtimeError('RUNTIME_INPUT_INVALID', '工具参数不符合产生本轮助手的实际工具视图，未执行。')
       published = definition
     }
     let normalized: unknown

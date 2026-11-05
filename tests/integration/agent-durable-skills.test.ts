@@ -1,4 +1,4 @@
-import { initializeExecutionState } from '../support/native-tool-test-state.js'
+import { initializeExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
@@ -31,8 +31,8 @@ async function skillFixture(work: (f: F) => Promise<void>) {
     vi.stubGlobal('fetch', network)
     try {
       await work(f)
-      expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
-      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+      expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
       expect(network).not.toHaveBeenCalled()
     } finally {
       await prisma.agentSkillDefinition.deleteMany({ where: { ownerUserId: f.userId } })

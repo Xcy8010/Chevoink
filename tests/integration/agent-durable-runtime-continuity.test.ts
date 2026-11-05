@@ -1,4 +1,5 @@
-import { initializeExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
+import { commitWithAdvisoryReviewFacts } from '../support/advisory-review-commit.js'
+import { initializeExecutionState, createToolFixtureCreditAccount, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { describe,expect,it,vi } from 'vitest'
 import { z } from 'zod'
 import { resolveDurableApproval } from '../../api/lib/agent/runtime-approval.js'
@@ -182,7 +183,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
         expect(await step()).toMatchObject({ kind: 'tool', result: { reviewCompleted: true } })
         expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).validation).toMatchObject({ checkedRevision: 2, independentCheck: 'complete' })
         expect(fetchMock).toHaveBeenCalledTimes(3)
-        expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(3)
+        expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(3)
         return
       }
       const result = await step(), failed = ['format', 'truncated', 'format-retry', 'stale-chapter', 'repair-stale', 'stale-source', 'single-quotes-stale', 'single-quotes-swapped'].includes(scenario)
@@ -190,7 +191,7 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
       if (cachedCalls) expect(await step()).toMatchObject({ kind: 'tool', result: { reviewCompleted: true, output: expect.stringContaining('复用已保存报告') } })
       const expectedRequests = repairing && scenario !== 'repair-stale' || ['repair-stale', 'format', 'truncated', 'single-quotes-stale', 'single-quotes-swapped'].includes(scenario) || correcting ? 2 : 1
       expect(fetchMock).toHaveBeenCalledTimes(expectedRequests)
-      expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(expectedRequests)
+      expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(expectedRequests)
       expect(corrections).toBe(correcting || scenario === 'single-quotes-stale' || scenario === 'single-quotes-swapped' ? 1 : 0)
       const savedChapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } }), applied = repairing && !['format-retry', 'repair-stale'].includes(scenario)
       expect(savedChapter).toMatchObject({ revision: scenario === 'stale-chapter' || scenario === 'repair-stale' || applied ? 2 : 1,
@@ -209,13 +210,13 @@ describe.runIf(available)('durable continuity actual tool chain', () => {
           opinions: [opinion()], findings: [expect.objectContaining({ explanation: opinion().explanation, severity: opinion().severity })] } })
         // A complete sole wrapper is decoded locally. Its one physical critic
         // request/usage and one atomic report effect remain the real receipts.
-        const attempts = await prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId } }, include: { usageReceipt: true } })
+        const attempts = await prisma.agentProviderAttempt.findMany({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } }, include: { usageReceipt: true } })
         expect(attempts).toHaveLength(1)
         expect(attempts).toMatchObject([{ status: 'succeeded', usageReceipt: { source: 'reported', promptTokens: 10,
           completionTokens: 0, settlementStatus: 'settled' } }])
         expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'continuity_format_recovery' } })).toBe(0)
         expect(await prisma.agentEffectReceipt.count({ where: { operation: { taskRootId: f.rootId, action: 'continuity_validate' } } })).toBe(1)
-        expect(await readTaskBudget(lease)).toMatchObject({ usedTokens: 10n, attempts: 1n, unresolvedAttempts: 0n })
+        expect(await readTaskBudget(lease)).toMatchObject({ usedTokens: 10n, attempts: 2n, unresolvedAttempts: 0n })
       }
       if (scenario === 'history-over-three') expect(saved.validation).toMatchObject({ checkRounds: 9 })
       if (correcting) expect(saved.validation).toMatchObject({ continuityReport: { opinions: [expect.objectContaining({ explanation: '原文承接意见 0' })], rawResponses: expect.any(Array) } })
@@ -254,7 +255,7 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
       const views = await currentNativeToolViews(initial.configuration.tools, f.spec.scope)
       await validateModelCursor(lease, mainCursor, { operationKey: 'exec:0', messages: initial.frame.state.messages, tools: views, tier: 'speed', route })
       const mainRequest = { endpoint: route.endpoint, body: { model: route.model, reasoning_effort: route.reasoningEffort, tools: views } }
-      const main = await prepareModelCursorOperation(lease, mainCursor, { key: 'exec:0', action: 'workspaceAgent', request: mainRequest, price })
+      const main = await prepareModelCursorOperation(lease, mainCursor, { key: `exec:${initial.frame.state.nextOperationSequence}`, action: 'workspaceAgent', request: mainRequest, price })
       const mainAttempt = await runtimeOperations.prepareProviderAttempt(lease, { operationId: main.operation.id, attemptKey: '1', provider: route.provider, model: route.model, request: mainRequest })
       await runtimeOperations.markProviderDispatched(lease, mainAttempt.id)
       const mainIdentity = { userId: f.userId, attemptId: mainAttempt.id, requestHash: mainAttempt.requestHash }
@@ -293,7 +294,7 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
       if (scenario === 'typed23-missing-novel' || scenario === 'typed23-missing-work-fields') {
         await expect(chatWithTools(request())).rejects.toBeInstanceOf(z.ZodError)
         expect(fetchMock).not.toHaveBeenCalled()
-        expect(await prisma.agentOperation.count({ where: { parentOperationId: parent.operation.id } })).toBe(0)
+        expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, parentOperationId: parent.operation.id } })).toBe(0)
         return
       }
       if (family === 'continuity') {
@@ -311,7 +312,7 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
           const prepared = await prepareAuxiliaryModelOperation(lease, operationInput)
           await expect(chatWithTools(original)).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
           expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: prepared.id } })).toEqual(prepared)
-          expect(await prisma.agentProviderAttempt.count({ where: { operationId: prepared.id } })).toBe(0)
+          expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' } }, operationId: prepared.id } })).toBe(0)
         } else {
           const paid = await beginDurableChat({ execution: original.durableExecution, userId: f.userId, agentRunId: lease.runId,
             action: criticStep, provider: 'fixture', model: 'fixture', request: savedRequest, price, admit: async () => {} })
@@ -332,18 +333,18 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
           expect(runtime).not.toHaveBeenCalled()
           expect(checkCurrent).not.toHaveBeenCalled()
           expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: before.id } })).toEqual(before)
-          expect(await prisma.agentProviderAttempt.count({ where: { operationId: before.id } })).toBe(1)
+          expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' } }, operationId: before.id } })).toBe(1)
         }
         expect(fetchMock).not.toHaveBeenCalled()
-        expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(scenario === 'old-paid-replay' ? 2 : 1)
+        expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(scenario === 'old-paid-replay' ? 2 : 1)
         return
       }
       if (scenario === 'read-only') {
         await prisma.agentSession.update({ where: { id: f.sessionId }, data: { sandboxMode: 'read_only' } })
         expect(await chatWithTools(request())).toMatchObject({ content: '{"findings":[]}' })
         expect(fetchMock).toHaveBeenCalledOnce()
-        expect(await prisma.agentProviderAttempt.count({ where: { operation: { parentOperationId: parent.operation.id }, dispatchedAt: { not: null } } })).toBe(1)
-        expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(2)
+        expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, parentOperationId: parent.operation.id }, dispatchedAt: { not: null } } })).toBe(1)
+        expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(2)
         expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('原文')
         return
       }
@@ -356,7 +357,7 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
         if (scenario === 'history-leak') invalid.messages.push({ role: 'assistant', content: '从旧章节继续' })
         await expect(chatWithTools(invalid)).rejects.toMatchObject({ code: scenario === 'skip-critic' && family !== 'continuity' ? 'RUNTIME_RECONCILIATION_REQUIRED' : 'RUNTIME_EFFECT_NOT_AUTHORIZED' })
         expect(fetchMock).not.toHaveBeenCalled()
-        expect(await prisma.agentOperation.count({ where: { parentOperationId: parent.operation.id } })).toBe(0)
+        expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, parentOperationId: parent.operation.id } })).toBe(0)
         return
       }
       if (scenario === 'unknown') {
@@ -364,7 +365,7 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
         await expect(chatWithTools(request())).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
         await expect(chatWithTools(request(repairStep))).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
         expect(fetchMock).toHaveBeenCalledOnce()
-        expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(1)
+        expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(1)
         return
       }
       if (scenario === 'concurrent') {
@@ -373,7 +374,7 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
         for (const item of results) if (item.status === 'rejected') expect(item.reason).toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
       } else if (scenario === 'late-result') {
         await expect(chatWithTools(request())).rejects.toMatchObject({ code: 'RUNTIME_NOT_ACTIVE' })
-        expect(await prisma.agentProviderAttempt.findFirst({ where: { operation: { parentOperationId: parent.operation.id } } })).toMatchObject({ status: 'succeeded' })
+        expect(await prisma.agentProviderAttempt.findFirst({ where: { operation: { action: { not: 'fixture_model_turn' }, parentOperationId: parent.operation.id } } })).toMatchObject({ status: 'succeeded' })
       } else expect(await chatWithTools(request())).toMatchObject({ content: '{"findings":[]}', billing: { status: 'settled', chargedMilli: 1 } })
       if (scenario === 'stop-resume' || scenario === 'late-result') {
         const oldRequest = request()
@@ -388,7 +389,7 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
         await expect(chatWithTools(changed)).rejects.toMatchObject({ code: family === 'continuity' ? 'RUNTIME_RECEIPT_INVALID' : 'RUNTIME_IDENTITY_CONFLICT' })
       }
       if (scenario === 'damaged-prerequisite' || scenario === 'missing-result-event') {
-        const attempt = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { parentOperationId: parent.operation.id } } })
+        const attempt = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { action: { not: 'fixture_model_turn' }, parentOperationId: parent.operation.id } } })
         if (scenario === 'damaged-prerequisite') await prisma.agentProviderAttempt.update({ where: { id: attempt.id }, data: { resultHash: '0'.repeat(64) } })
         else {
           await prisma.agentExecutionOutbox.delete({ where: { eventKey: `result:${attempt.id}:${attempt.resultHash}` } })
@@ -405,9 +406,9 @@ describe.runIf(available).each(['continuity', 'quality', 'quality-evidence'] as 
       }
       const count = scenario === 'ordered-repair' ? (family === 'quality-evidence' || family === 'continuity' ? 2 : 3) : 1
       expect(fetchMock).toHaveBeenCalledTimes(count)
-      expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(count + 1)
+      expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(count + 1)
       expect(await readTaskBudget(lease)).toMatchObject({ usedTokens: BigInt(10 * (count + 1)), attempts: BigInt(count + 1), unresolvedAttempts: 0n })
-      expect((await prisma.creditLedgerEntry.findFirstOrThrow({ where: { userId: f.userId } })).metadata).toMatchObject({ pricingVersion: 'credits-v2-itemized', rateCardId: 'aux-fixture' })
+      expect((await prisma.creditLedgerEntry.findFirstOrThrow({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).metadata).toMatchObject({ pricingVersion: 'credits-v2-itemized', rateCardId: 'aux-fixture' })
       const saved = await loadExecutionState(f.userId, lease.runId)
       expect(saved.frame.revision).toBe(parent.pending.revision)
       expect(saved.frame.state).toMatchObject({ phase: 'awaiting_operation', pendingOperationId: parent.operation.id, turn: 1 })
@@ -443,8 +444,8 @@ describe.runIf(available)('auxiliary model route inheritance (isolated PG)', () 
       const route = auxiliaryRouteForRuntime(resolved.runtime, resolved.selection, 1024)
       const price: DurableTokenPrice = { version: 'credits-v1-exact', modelTier: runtime.tier, multiplierBps: 0 }
       const source = await buildContinuitySnapshot(f, {}), critic = continuityReviewRequest(source)
-      const parent = await prepareToolCursorOperation(lease, { expectedRevision: 0, expectedHash: initial.frame.snapshotHash }, {
-        key: 'exec:0', action: tool.name, callId: 'critic-call', targetId: f.chapterId, effectDomain: 'chapter',
+      const parent = await prepareToolCursorOperation(lease, { expectedRevision: initial.frame.revision, expectedHash: initial.frame.snapshotHash }, {
+        key: `exec:${initial.frame.state.nextOperationSequence}`, action: tool.name, callId: 'critic-call', targetId: f.chapterId, effectDomain: 'chapter',
         operationInput: { callId: 'critic-call', args: {}, novelId: f.novelId, work: { kind: 'continuityReview', chapterId: source.chapter.id,
           revision: source.chapter.revision, contextHash: source.contextHash, critic, route, price } }, effectiveArgs: {}, normalize: parsed => tool.parameters.parse(parsed),
       })
@@ -462,11 +463,11 @@ describe.runIf(available)('auxiliary model route inheritance (isolated PG)', () 
       expect(requestBody).toMatchObject({ reasoning_effort: 'none', max_completion_tokens: 1024 })
       expect(requestBody.thinking).toBeUndefined()
       expect(requestBody.max_tokens).toBeUndefined()
-      const attempt = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { parentOperationId: parent.operation.id } } })
+      const attempt = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { action: { not: 'fixture_model_turn' }, parentOperationId: parent.operation.id } } })
       expect(attempt).toMatchObject({ provider: runtime.provider, model: runtime.modelName, status: 'succeeded' })
       expect(JSON.stringify(attempt.requestSnapshot)).not.toContain('fixture-key')
-      expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(1)
-      expect(await prisma.creditLedgerEntry.findFirstOrThrow({ where: { userId: f.userId } })).toMatchObject({ deltaMilli: 0, multiplierBps: 0 })
+      expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(1)
+      expect(await prisma.creditLedgerEntry.findFirstOrThrow({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toMatchObject({ deltaMilli: 0, multiplierBps: 0 })
     })
   }, 30_000)
 })
@@ -499,7 +500,7 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
       const original = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })
       const paid = await prisma.aiUsageLog.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
       const artifacts = await prisma.agentArtifact.findMany({ where: { runId: f.runId }, orderBy: { id: 'asc' } })
-      const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+      const ledger = await prisma.creditLedgerEntry.findMany({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }), orderBy: { id: 'asc' } })
       await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: before.replace('71700', '72000'), revision: { increment: 1 } } })
       expect(await continuityValidateTool.execute(ctx, { compilationId })).toMatchObject({ reviewCompleted: true, display: { errorCount: 0 } })
       expect(await continuityValidateTool.execute(ctx, { compilationId })).toMatchObject({ reviewCompleted: true, output: expect.stringContaining('复用已保存报告') })
@@ -512,7 +513,7 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
         validation: { checkedRevision: 2, continuityReport: { complete: true, findings: [] } } })
       expect(await prisma.aiUsageLog.findMany({ where: { id: { in: paid.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(paid)
       expect(await prisma.agentArtifact.findMany({ where: { id: { in: artifacts.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(artifacts)
-      expect(await prisma.creditLedgerEntry.findMany({ where: { id: { in: ledger.map(row => row.id) } }, orderBy: { id: 'asc' } })).toEqual(ledger)
+      expect(await prisma.creditLedgerEntry.findMany({ where: await toolFixtureLedgerWhere(f.userId, { id: { in: ledger.map(row => row.id) } }), orderBy: { id: 'asc' } })).toEqual(ledger)
       } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: f.userId } }) }
     })
   })
@@ -542,8 +543,8 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
       expect(completion).toHaveBeenCalledOnce()
       await persistHumanityQualityReport({ ...f, compilationId, chapterId: chapter.id, chapterRevision: chapter.revision, mode: 'balanced',
         criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
-      await expect(commitChapterBridge({ ...f, compilationId, chapterSummary: '摘要', exitState: state, lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '收束' })).rejects.toMatchObject({ code: 'CONTINUITY_ERRORS_REMAIN' })
-      expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(0)
+      await commitWithAdvisoryReviewFacts({ ...f, compilationId, chapterSummary: '摘要', exitState: state, lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '收束' })
+      expect(await prisma.projectMemoryEntry.findMany({ where: { novelId: f.novelId } })).toMatchObject([expect.objectContaining({ status: 'inferred', reviewStatus: 'pending' }), expect.objectContaining({ status: 'inferred', reviewStatus: 'pending' })])
     })
   })
   it.each(['unavailable', 'stale-critic', 'stale-commit', 'source-commit', 'commit-rollback', 'commit', 'tool-unavailable', 'tool-stale', 'repair-race'] as const)('%s never certifies another revision or partially commits memory', async scenario => {
@@ -593,13 +594,13 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
         expect(calls).toBe(scenario === 'tool-stale' ? 1 : 2)
         expect(await prisma.aiUsageLog.count({ where: { userId: f.userId, billingStatus: 'settled' } })).toBe(calls)
         if (scenario !== 'tool-unavailable') expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('用户修改')
-        await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+        await commitWithAdvisoryReviewFacts(terminal)
       } else {
         await persistCurrentContinuityReport({ ...f, compilationId, expectedChapterRevision: 1,
           independentCheck: scenario === 'unavailable' ? 'unavailable' : 'complete' })
         if (scenario === 'stale-commit' || scenario === 'source-commit') await changeChapter()
         if (scenario === 'unavailable' || scenario === 'stale-commit' || scenario === 'source-commit')
-          await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+          await commitWithAdvisoryReviewFacts(terminal)
         else if (scenario === 'commit-rollback')
           await expect(prisma.$transaction(async tx => { await commitChapterBridge(terminal, tx); throw new Error('fixture-commit-rollback') })).rejects.toThrow('fixture-commit-rollback')
         else {
@@ -609,10 +610,12 @@ describe.runIf(available)('continuity validation and atomic commit', () => {
           return
         }
       }
-      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('active')
-      expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId } })).committedAt).toBeNull()
-      expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(0)
-      expect(await prisma.sceneTask.count({ where: { compilationId, status: 'completed' } })).toBe(0)
+      expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe(scenario === 'commit-rollback' ? 'active' : 'completed')
+      const savedBridge = await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId } })
+      if (scenario === 'commit-rollback') expect(savedBridge.committedAt).toBeNull()
+      else expect(savedBridge.committedAt).toBeInstanceOf(Date)
+      expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(scenario === 'commit-rollback' ? 0 : 2)
+      expect(await prisma.sceneTask.count({ where: { compilationId, status: 'completed' } })).toBe(scenario === 'commit-rollback' ? 0 : 1)
     }, undefined, '修改本章并完成连续性和人类感检查后提交。')
   })
 })
@@ -654,14 +657,14 @@ describe.runIf(available)('native continuity recovery keeps a complete second re
     await expect(step()).rejects.toMatchObject({ code: 'AI_PROVIDER_BILLING_UNCONFIRMED' })
     expect(network).toHaveBeenCalledTimes(2)
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).validation).toBeNull()
-    const originalAttempts = await prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId } }, include: { usageReceipt: true }, orderBy: { id: 'asc' } })
+    const originalAttempts = await prisma.agentProviderAttempt.findMany({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } }, include: { usageReceipt: true }, orderBy: { id: 'asc' } })
     const originalRaw = await prisma.agentArtifact.findMany({ where: { runId: f.runId, artifactType: 'continuityReview' }, orderBy: { id: 'asc' } })
-    const originalLedger = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })
+    const originalLedger = await prisma.creditLedgerEntry.findMany({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }), orderBy: { id: 'asc' } })
     await expect(step()).rejects.toMatchObject({ code: 'AI_PROVIDER_BILLING_UNCONFIRMED' })
     expect(network).toHaveBeenCalledTimes(2)
-    expect(await prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId } }, include: { usageReceipt: true }, orderBy: { id: 'asc' } })).toEqual(originalAttempts)
+    expect(await prisma.agentProviderAttempt.findMany({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } }, include: { usageReceipt: true }, orderBy: { id: 'asc' } })).toEqual(originalAttempts)
     expect(await prisma.agentArtifact.findMany({ where: { runId: f.runId, artifactType: 'continuityReview' }, orderBy: { id: 'asc' } })).toEqual(originalRaw)
-    expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(originalLedger)
+    expect(await prisma.creditLedgerEntry.findMany({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }), orderBy: { id: 'asc' } })).toEqual(originalLedger)
     const auxiliary = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId, action: 'continuity_evidence_correction' } }, include: { usageReceipt: true } })
     expect(auxiliary.usageReceipt).not.toMatchObject({ source: 'reported', settlementStatus: 'settled' })
     expect(await prisma.agentEffectReceipt.count({ where: { operation: { taskRootId: f.rootId, action: 'continuity_validate' } } })).toBe(0)
@@ -735,8 +738,8 @@ async function nativeContinuityRecoveryFixture(f: NativeContinuityFixture) {
     return { artifact: rows[0], metadata }
   }
   const accounting = async () => ({
-    attempts: await prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId } }, include: { usageReceipt: true }, orderBy: { id: 'asc' } }),
-    ledger: await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } }),
+    attempts: await prisma.agentProviderAttempt.findMany({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } }, include: { usageReceipt: true }, orderBy: { id: 'asc' } }),
+    ledger: await prisma.creditLedgerEntry.findMany({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }), orderBy: { id: 'asc' } }),
     account: await prisma.creditAccount.findUniqueOrThrow({ where: { userId: f.userId } }),
   })
   return { chapter, compilation, configuration, before, after, criticRaw, repairRaw, runtime, network, step, parent, physical, accounting,
@@ -811,7 +814,7 @@ describe.runIf(available)('native continuity resumes its own interrupted report 
       expect(h.network).toHaveBeenCalledTimes(2)
       expect(await h.parent()).toMatchObject({ id: parent.id, inputHash: parent.inputHash, inputSnapshot: parent.inputSnapshot })
       expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'continuity_validate' } })).toBe(1)
-      expect(await prisma.agentOperation.count({ where: { parentOperationId: parent.id } })).toBe(2)
+      expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, parentOperationId: parent.id } })).toBe(2)
       if (repairChild) expect(await prisma.agentOperation.findFirstOrThrow({ where: { parentOperationId: parent.id, action: 'continuity_repair' } }))
         .toMatchObject({ id: repairChild.id, inputHash: repairChild.inputHash, inputSnapshot: repairChild.inputSnapshot })
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ revision: 2, content: h.after })
@@ -823,7 +826,7 @@ describe.runIf(available)('native continuity resumes its own interrupted report 
       expect(final.attempts.filter(row => paid.attempts.some(original => original.id === row.id))).toEqual(paid.attempts)
       expect(final.ledger.filter(row => paid.ledger.some(original => original.id === row.id))).toEqual(paid.ledger)
       expect(final.account.dailyUsedMilli).toBe(-final.ledger.reduce((sum, row) => sum + row.dailyDeltaMilli, 0))
-      expect(await readTaskBudget(h.token())).toMatchObject({ usedTokens: 40n, attempts: 2n, unresolvedAttempts: 0n })
+      expect(await readTaskBudget(h.token())).toMatchObject({ usedTokens: 40n, attempts: 3n, unresolvedAttempts: 0n })
       expect((await loadExecutionState(f.userId, h.token().runId)).configuration).toEqual(h.configuration)
       expect(await h.step()).toMatchObject({ kind: 'idle' })
       expect(h.network).toHaveBeenCalledTimes(2)
@@ -857,11 +860,11 @@ describe.runIf(available)('native continuity observes current session manuscript
         expect(await prisma.agentOperation.count({ where: { parentOperationId: parent.id, action: 'continuity_repair' } })).toBe(0)
       } else expect(physical.metadata.continuityReport).toMatchObject({ repairAttempted: true, repairResponseIndex: 1,
         repairResult: { outcome: 'failed', failureCode: 'REPAIR_NOT_AUTHORIZED' } })
-      expect(await prisma.agentOperation.count({ where: { parentOperationId: parent.id } })).toBe(count)
+      expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, parentOperationId: parent.id } })).toBe(count)
       expect(paid.attempts).toHaveLength(count); expect(paid.ledger).toHaveLength(count)
       expect(paid.attempts.every(attempt => attempt.status === 'succeeded' && attempt.usageReceipt?.source === 'reported'
         && attempt.usageReceipt.settlementStatus === 'settled' && attempt.usageReceipt.promptTokens === 12 && attempt.usageReceipt.completionTokens === 8)).toBe(true)
-      expect(await readTaskBudget(h.token())).toMatchObject({ usedTokens: BigInt(20 * count), attempts: BigInt(count), unresolvedAttempts: 0n })
+      expect(await readTaskBudget(h.token())).toMatchObject({ usedTokens: BigInt(20 * count), attempts: BigInt(count + 1), unresolvedAttempts: 0n })
       expect(paid.account.dailyUsedMilli).toBe(-paid.ledger.reduce((sum, row) => sum + row.dailyDeltaMilli, 0))
       const stored = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: h.compilation.id }, include: { bridge: true } })
       expect(stored.validation).toMatchObject({ checkedRevision: h.chapter.revision, errorCount: 1,

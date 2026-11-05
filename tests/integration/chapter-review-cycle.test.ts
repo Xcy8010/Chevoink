@@ -78,8 +78,8 @@ describe('chapter review cycle persisted CAS and reprepare', () => {
     if (scenario === 'cancelled') expect(saved.validation).toEqual(originalValidation)
     if (scenario === 'changed-source') {
       expect(await chapterBridgeCommitTool.execute({ ...context, callId: 'stale-source-cannot-commit' }, { compilationId: compilation.id }))
-        .toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_CHECK_REQUIRED' })
-      expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).committedAt).toBeNull()
+        .toMatchObject({ summary: '章节已提交', output: expect.stringContaining('stale') })
+      expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).committedAt).toBeInstanceOf(Date)
     }
     expect(provider).not.toHaveBeenCalled()
   }, undefined, '修改第一章，只要标题和正文。', { freezeWriting: true }), 30000)

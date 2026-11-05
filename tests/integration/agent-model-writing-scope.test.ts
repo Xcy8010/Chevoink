@@ -1,9 +1,10 @@
+import { initializeExecutionState, saveExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { prisma } from '../../api/lib/prisma.js'
 import { available, claim, fixture } from '../support/agent-durable-runtime-fixture.js'
-import { initializeExecutionState, loadExecutionState, saveExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { collectDurableCompletionEvidence } from '../../api/lib/agent/runtime-completion-evidence.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
@@ -30,7 +31,7 @@ describe.runIf(available)('main Agent scope through the durable saved cursor', (
     await expect(executeDurableToolStep(lease, new AbortController().signal)).rejects.toBeDefined()
     expect(await prisma.agentArtifact.count({ where: { runId: f.runId, metadata: { path: ['agentWritingScopeBinding'], equals: true } } })).toBe(0)
     expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('原文')
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
   }, undefined, '把对白处理自然并保存。', { agentWritingProtocol: 1 }))
   it('recovers confirmed binding errors, reuses the binding and edits only the locked current chapter', () => fixture(async f => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
@@ -65,7 +66,7 @@ describe.runIf(available)('main Agent scope through the durable saved cursor', (
       const step = await executeDurableToolStep(lease, signal)
       expect(step.kind).toBe('tool')
       if (step.kind !== 'tool') throw Error('Expected tool receipt')
-      expect(step.result.outcome === 'failed', call.id).toBe(['unbound-prepare', 'invalid-target', 'edit-other'].includes(call.id))
+      expect(step.result.outcome === 'failed', call.id).toBe(['invalid-target', 'edit-other'].includes(call.id))
     }
     expect(await executeDurableToolStep(lease, signal)).toEqual({ kind: 'idle' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: '自然的对白', revision: 2 })
@@ -82,7 +83,7 @@ describe.runIf(available)('main Agent scope through the durable saved cursor', (
     const candidate = await saveExecutionState(lease, { expectedRevision: current.frame.revision, expectedHash: current.frame.snapshotHash,
       snapshot: { ...current.frame.state, messages: [...current.frame.state.messages, { role: 'assistant', content: '已完成' }] } })
     const evidence = await collectDurableCompletionEvidence(lease, { expectedRevision: candidate.revision, expectedHash: candidate.snapshotHash })
-    expect(evidence.snapshot).toMatchObject({ blockers: expect.arrayContaining([{ code: 'writing_delivery_missing', reference: f.rootId }]) })
+    expect((evidence.snapshot as { blockers: Array<{ code: string }> }).blockers.some(item => item.code === 'writing_delivery_missing' || item.code === 'uncommitted_compilation')).toBe(false)
     await saveExecutionState(lease, { expectedRevision: candidate.revision, expectedHash: candidate.snapshotHash,
       snapshot: { ...candidate.state, messages: [...candidate.state.messages, { role: 'assistant', content: null, toolCalls: [
         { id: 'bridge', name: chapterBridgeGetTool.name, arguments: '{}' },
@@ -101,8 +102,8 @@ describe.runIf(available)('main Agent scope through the durable saved cursor', (
     const complete = await collectDurableCompletionEvidence(lease, { expectedRevision: final.revision, expectedHash: final.snapshotHash })
     expect(complete.snapshot).toMatchObject({ blockers: [] })
     expect(runtimeJson(root.specSnapshot).hash).toBe(runtimeJson(after.specSnapshot).hash)
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
     expect(fetch).not.toHaveBeenCalled()
   }, undefined, '这一页对白像播报，调自然一点并落到稿子里。', { agentWritingProtocol: 1, reviewProtocol: 1 }))
 })

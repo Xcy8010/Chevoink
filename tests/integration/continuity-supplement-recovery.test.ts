@@ -1,3 +1,4 @@
+import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
@@ -474,8 +475,8 @@ describe.runIf(available)('historical supplemental records and ordinary current 
       expect(network).toHaveBeenCalledTimes(2); await assertNewSettlement(f, s, 2)
     } else {
       expect(result).toMatchObject({ outcome: 'failed' })
-      for (const callId of ['duplicate-continue', 'worker-restart']) await expect(continuityValidateTool.execute({ ...ctx, callId },
-        { compilationId: s.compilation.id })).rejects.toMatchObject({ code: 'AI_PROVIDER_BILLING_UNCONFIRMED' })
+      for (const callId of ['duplicate-continue', 'worker-restart']) await expectToolDenied(continuityValidateTool.execute({ ...ctx, callId },
+        { compilationId: s.compilation.id }), { code: 'AI_PROVIDER_BILLING_UNCONFIRMED' })
       expect(network).toHaveBeenCalledOnce()
       const unknown = await prisma.aiUsageLog.findFirstOrThrow({ where: { userId: f.userId, id: { notIn: s.before.usage.map(row => row.id) } } })
       expect(unknown).toMatchObject({ usageSource: 'unknown', billingStatus: 'pending_usage' })
@@ -492,7 +493,7 @@ describe.runIf(available)('historical supplemental records and ordinary current 
     const first = continuityValidateTool.execute({ ...ctx, callId: 'current-a' }, { compilationId: s.compilation.id })
     try {
       await started
-      await expect(continuityValidateTool.execute({ ...ctx, callId: 'current-b' }, { compilationId: s.compilation.id })).rejects.toMatchObject({ code: 'AI_PROVIDER_BILLING_UNCONFIRMED' })
+      await expectToolDenied(continuityValidateTool.execute({ ...ctx, callId: 'current-b' }, { compilationId: s.compilation.id }), { code: 'AI_PROVIDER_BILLING_UNCONFIRMED' })
     } finally { release() }
     expect(await first).toMatchObject({ reviewCompleted: true }); expect(network).toHaveBeenCalledOnce()
     await assertNewSettlement(f, s); await s.unchangedOriginal()
@@ -579,7 +580,7 @@ describe.runIf(available)('historical supplemental records and ordinary current 
     const current = continuityValidateTool.execute(ownerContext(4, 'legitimate-current-owner'), args)
     try {
       await started
-      if (race === 'duplicate-current-owner') await expect(continuityValidateTool.execute(ownerContext(4, 'duplicate-current-owner'), args)).rejects.toMatchObject({ code: 'AI_PROVIDER_BILLING_UNCONFIRMED' })
+      if (race === 'duplicate-current-owner') await expectToolDenied(continuityValidateTool.execute(ownerContext(4, 'duplicate-current-owner'), args), { code: 'AI_PROVIDER_BILLING_UNCONFIRMED' })
     } finally { release() }
     expect(await current).toMatchObject({ reviewCompleted: true }); expect(network).toHaveBeenCalledOnce()
     await assertNewSettlement(f, s); await s.unchangedOriginal()

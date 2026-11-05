@@ -1,4 +1,4 @@
-import { initializeExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
+import { initializeExecutionState, createToolFixtureCreditAccount, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { mkdtemp, rm, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
@@ -163,7 +163,7 @@ describe.runIf(available)('durable export preserves original manuscript, optiona
         expect(children).toHaveLength(1); expect(children[0].originRunId).toBe(f.runId)
         expect(children[0].attempts).toHaveLength(1)
         expect(children[0].attempts[0]).toMatchObject({ runId: f.runId, status: 'succeeded', usageReceipt: { source: 'reported', settlementStatus: 'settled', promptTokens: 10, completionTokens: 5 } })
-        expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, idempotencyKey: `operation:${children[0].id}` } })).toBe(1)
+        expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId, idempotencyKey: `operation:${children[0].id}` }) })).toBe(1)
       }
       if (scenario === 'zip-recovery') {
         await unlink(path.join(directory, publication.zip.key))
@@ -176,7 +176,7 @@ describe.runIf(available)('durable export preserves original manuscript, optiona
         expect(await getDurableExport(publication.exportId)).toBeNull()
       }
       expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'export.published' } })).toBe(1)
-      expect(JSON.stringify(await prisma.agentOperation.findMany({ where: { taskRootId: f.rootId } }))).not.toContain('isolated-export-fixture-key')
+      expect(JSON.stringify(await prisma.agentOperation.findMany({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } }))).not.toContain('isolated-export-fixture-key')
       expect(runtimeJson(publication).hash).toBe(runtimeJson(exportPublicationSchema.parse((await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { id: event.id } })).payload)).hash)
     } finally { vi.unstubAllEnvs(); await rm(directory, { recursive: true, force: true }) }
   }, undefined, '一键导出当前作品，保留原文。'))

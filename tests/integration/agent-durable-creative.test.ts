@@ -1,4 +1,4 @@
-import { initializeExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
+import { initializeExecutionState, createToolFixtureCreditAccount, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { prisma } from '../../api/lib/prisma.js'
@@ -68,7 +68,7 @@ describe.runIf(available)('durable independent creative artifacts', () => {
     if (scenario === 'changed-free-route') {
       await expect(executeDurableToolStep(lease, new AbortController().signal)).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
       expect(fetch).not.toHaveBeenCalled()
-      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
       return
     }
     if (scenario === 'result-recovery' || scenario === 'receipt-recovery') {
@@ -77,12 +77,12 @@ describe.runIf(available)('durable independent creative artifacts', () => {
     } else expect(await executeDurableToolStep(lease, new AbortController().signal)).toMatchObject({ kind: 'tool', result:
       scenario === 'wrong-critique' || scenario === 'stale-body' || scenario === 'archived-before-dispatch' ? { outcome: 'failed' } : { summary: expect.stringContaining(revision ? '选择性修订稿' : '独立批评') } })
     expect(fetch).toHaveBeenCalledTimes(scenario === 'wrong-critique' || scenario === 'archived-before-dispatch' ? 0 : 1)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, kind: 'usage' } })).toBe(scenario === 'wrong-critique' || scenario === 'archived-before-dispatch' ? 0 : 1)
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId, kind: 'usage' }) })).toBe(scenario === 'wrong-critique' || scenario === 'archived-before-dispatch' ? 0 : 1)
     const generated = await prisma.agentArtifact.findMany({ where: { runId: f.runId, ...(critique ? { id: { not: critique.id } } : {}) } })
     expect(generated).toHaveLength(scenario === 'wrong-critique' || scenario === 'stale-body' || scenario === 'archived-before-dispatch' ? 0 : 1)
     expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(scenario === 'stale-body' ? '作者新的正文' : '原文')
     if (fetch.mock.calls.length) {
-      const provider = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId } } })
+      const provider = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })
       expect(JSON.stringify(provider.requestSnapshot)).not.toContain('isolated-fake-key')
       expect(provider.status).toBe('succeeded')
     }

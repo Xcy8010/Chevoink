@@ -95,7 +95,9 @@ describe.runIf(available)('current native writing and historical configuration a
           { name: 'story_compiler_prepare', args: { chapterId: f.chapterId, intentSummary: '核对箱子锁扣' } },
           { name: 'scene_task_build', args: { tasks: [{ purpose: '检查箱子', entryState: {}, goal: '核对锁扣', obstacle: '灯光不足', choice: '挪近灯光', cost: '时间', turn: '核对完成', exitState: {}, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] } },
           { name: 'chapter_read', args: { chapterId: f.chapterId } }, { name: 'chapter_write', args: { chapterId: f.chapterId, content } },
-        ] : [{ name: 'chapter_bridge_commit', args: { compilationId } }]
+        ] : [{ name: 'quality_analyze', args: { compilationId } }, { name: 'continuity_validate', args: { compilationId } },
+          { name: 'quality_analyze', args: { compilationId, readOnly: true } }, { name: 'continuity_validate', args: { compilationId, readOnly: true } },
+          { name: 'chapter_bridge_commit', args: { compilationId } }]
         if (observations) {
           expect(compilationId).toBeTruthy(); expect(observations).toContain('chapter_write')
           expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content, revision: 2 })
@@ -150,6 +152,10 @@ describe.runIf(available)('current native writing and historical configuration a
       previousMemorySourceOperationId = previousEffect.operationId
     }
     await model()
+    for (let index = 0; index < 2; index++) {
+      const checked = await executeDurableToolStep(lease, new AbortController().signal)
+      expect(checked.kind).toBe('tool'); if (checked.kind === 'tool') expect(checked.result.outcome).not.toBe('failed')
+    }
     let oldRequests: Awaited<ReturnType<typeof prisma.agentProviderAttempt.findMany>> | undefined
     if (scenario === 'merged-revision-restart') {
       const prepare = nativeQuality.prepareQualityWork; let interrupted = false
@@ -166,6 +172,10 @@ describe.runIf(available)('current native writing and historical configuration a
       const resumed = await resumeDurableTask({ userId: f.userId, runId: lease.runId, pauseEventId: paused.id })
       lease = await claim({ userId: f.userId, runId: resumed.run.id }, 'after-current-cas')
     }
+    for (let index = 0; index < 2; index++) {
+      const checked = await executeDurableToolStep(lease, new AbortController().signal)
+      expect(checked.kind).toBe('tool'); if (checked.kind === 'tool') expect(checked.result.outcome).not.toBe('failed')
+    }
     const result = await executeDurableToolStep(lease, new AbortController().signal)
     expect(result).toMatchObject({ kind: 'tool', result: { summary: '章节已提交' } })
     expect(result).not.toHaveProperty('result.outcome', 'failed')
@@ -181,8 +191,7 @@ describe.runIf(available)('current native writing and historical configuration a
     expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'chapter_bridge_commit', status: 'succeeded' } })).toBe(1)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: after, revision: changed ? 3 : 2 })
     expect((await loadExecutionState(f.userId, lease.runId)).head.configurationHash).toBe(configurationHash)
-    const commitOperation = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'chapter_bridge_commit' } })
-    const reportOperations = await prisma.agentOperation.findMany({ where: { parentOperationId: commitOperation.id, action: 'continuity_validate' } })
+    const reportOperations = await prisma.agentOperation.findMany({ where: { taskRootId: f.rootId, kind: 'tool', action: 'continuity_validate' } })
     for (const operation of reportOperations) expect(operation.inputSnapshot).toMatchObject({ input: { work: { kind: 'continuityReview', chapterId: f.chapterId,
       price: { modelTier: 'speed', multiplierBps: price.multiplierBps, rateCardId: price.rateCardId } } } })
     if (scenario === 'ordinary-presentation') {
@@ -238,7 +247,7 @@ describe.runIf(available)('current native writing and historical configuration a
     const events = await loadPersistedEvents(lease.runId, 0)
     expect(events.filter(event => event.type === 'tool.result' && event.toolName === 'chapter_write')).toMatchObject([{ ok: true }])
     expect(fetcher).toHaveBeenCalledTimes(expectedReviews + mainRequests)
-    const first = await prisma.agentOperation.findFirstOrThrow({ where: { parentOperationId: commitOperation.id, action: 'continuity_validate' }, orderBy: { createdAt: 'asc' } })
+    const first = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, kind: 'tool', action: 'continuity_validate' }, orderBy: { createdAt: 'asc' } })
     expect(runtimeJson((first.inputSnapshot as { input: { work: { price: unknown } } }).input.work.price).hash).toBe(runtimeJson(price).hash)
   }, undefined, scenario === 'ordinary-presentation' ? '完整重写当前章节' : '完整重写当前章节，只输出标题和正文。', { freezeWriting: true, writingCoordinationProtocol: 2, continuityReportProtocol: 5,
     continuityEvidenceProtocol: 1, terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2 }), 30000)

@@ -1,3 +1,4 @@
+import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -314,8 +315,8 @@ describe.skipIf(!available)('fresh research navigation with isolated PostgreSQL 
         ...(direction === 'navigation to body' ? { purpose: 'navigation' } : {}) }
       await recordResearchReadFailure(scope, source.id, failure)
       const before = await getResearchReadFailure(scope, source.id)
-      await expect(webReadTool.execute(call(scope), { sourceId: source.id, refresh: true,
-        ...(direction === 'body to navigation' ? { purpose: 'navigation' as const } : {}) })).rejects.toMatchObject({ code: 'WEB_READ_BLOCKED' })
+      await expectToolDenied(webReadTool.execute(call(scope), { sourceId: source.id, refresh: true,
+        ...(direction === 'body to navigation' ? { purpose: 'navigation' as const } : {}) }), { code: 'WEB_READ_BLOCKED' })
       expect(await getResearchReadFailure(scope, source.id)).toEqual(before)
       await saveResearchContent(scope, source.id, navigation(commentUrl))
       expect(await getResearchReadFailure(scope, source.id)).toEqual(before)
@@ -329,8 +330,7 @@ describe.skipIf(!available)('fresh research navigation with isolated PostgreSQL 
       const { sources } = await seedSearch(scope)
       await prisma.webToolCall.create({ data: { id: digest('unknown source dispatch'), runId: scope.runId, requestHash: digest(commentUrl), kind: 'fetch',
         amountMilli: 0, multiplierBps: 10000, status: 'dispatched' } })
-      for (const purpose of [undefined, 'navigation'] as const) await expect(webReadTool.execute(call(scope), { sourceId: sources[0].id, ...(purpose ? { purpose } : {}) }))
-        .rejects.toMatchObject({ code: 'RESEARCH_REQUEST_UNCERTAIN' })
+      for (const purpose of [undefined, 'navigation'] as const) await expectToolDenied(webReadTool.execute(call(scope), { sourceId: sources[0].id, ...(purpose ? { purpose } : {}) }), { code: 'RESEARCH_REQUEST_UNCERTAIN' })
       expect(await prisma.agentResearchRequest.count({ where: { scopeKey, kind: 'read' } })).toBe(0)
       expect(await claimResearchReadHandoff(scope, [])).toBeNull()
       expect(supplier.navigation).not.toHaveBeenCalled(); expect(supplier.body).not.toHaveBeenCalled()
@@ -387,7 +387,7 @@ describe.skipIf(!available)('fresh research navigation with isolated PostgreSQL 
   ])('applies original %s before any request or ledger debit', async (restriction, url) => {
     await fixture(async ({ scope, scopeKey }) => {
       const source = await registerResearchSource(scope, url, target.title)
-      await expect(webReadTool.execute(call(scope), { sourceId: source.id })).rejects.toMatchObject({ code: 'RESEARCH_SOURCE_SCOPE_MISMATCH' })
+      await expectToolDenied(webReadTool.execute(call(scope), { sourceId: source.id }), { code: 'RESEARCH_SOURCE_SCOPE_MISMATCH' })
       expect(supplier.body).not.toHaveBeenCalled(); expect(supplier.navigation).not.toHaveBeenCalled()
       expect(await prisma.agentResearchRequest.count({ where: { scopeKey } })).toBe(0)
       expect(await prisma.webToolCall.count({ where: { runId: scope.runId } })).toBe(0)
@@ -452,7 +452,7 @@ describe.skipIf(!available)('fresh research navigation with isolated PostgreSQL 
       const source = scenario === 'provider 403' ? book : await registerResearchSource(scope, loginUrl, '登录账户')
       supplier.body.mockResolvedValueOnce({ ...assessReaderText(''), status: 'blocked', code: 'WEB_READ_BLOCKED',
         provider: scenario === 'provider 403' ? 'deepseek' : 'direct', finalUrl: source.canonicalUrl, retryable: false, contentKind: 'article' })
-      await expect(webReadTool.execute(call(scope), { sourceId: source.id, refresh: true })).rejects.toMatchObject({ code: 'WEB_READ_BLOCKED' })
+      await expectToolDenied(webReadTool.execute(call(scope), { sourceId: source.id, refresh: true }), { code: 'WEB_READ_BLOCKED' })
       await expect(assertResearchAlternativeAllowed(scope)).rejects.toMatchObject({ code: 'RESEARCH_ALTERNATIVE_DENIED' })
       expect(await getResearchReadTarget(scope)).toMatchObject({ title: target.title, author: target.author })
     }, { prompt: prompt.replace('不得另选作品。', '如果首选不可读，可以另选作品。') })
@@ -469,7 +469,7 @@ describe.skipIf(!available)('fresh research navigation with isolated PostgreSQL 
         id: 'opening', order: 0, content: '这里只分析首选的已有片段。', citations: [citation(prior)] } })
       supplier.body.mockResolvedValueOnce({ ...assessReaderText(''), status: 'blocked', code: 'WEB_READ_BLOCKED', provider: 'direct',
         finalUrl: chapterUrl, retryable: false, contentKind: 'article' })
-      await expect(webReadTool.execute(call(scope), { sourceId: chapter.id, refresh: true })).rejects.toMatchObject({ code: 'WEB_READ_BLOCKED' })
+      await expectToolDenied(webReadTool.execute(call(scope), { sourceId: chapter.id, refresh: true }), { code: 'WEB_READ_BLOCKED' })
       await assertResearchAlternativeAllowed(scope)
       const other = { title: '渡口札记', author: '沈舟' }, url = 'https://fiction.example.com/books/ferry'
       await seedSearch(scope, [{ title: other.title, url, snippet: `作者：${other.author}`, source: 'fiction.example.com' }])

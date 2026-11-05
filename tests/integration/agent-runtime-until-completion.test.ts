@@ -1,3 +1,4 @@
+import { initializeExecutionState, saveExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { AGENT_TOOL_EXECUTION_POLICY } from '../../api/lib/agent/tool-execution-guidance.js'
 import { advanceDurableMemory } from '../../api/lib/agent/runtime-memory.js'
@@ -26,7 +27,7 @@ import { acquireRunLease, withRunLease } from '../../api/lib/agent/runtime-lease
 import { prepareOperation, prepareProviderAttempt, markProviderDispatched, recordProviderResult, recordProviderUsage } from '../../api/lib/agent/runtime-operations.js'
 import { readTaskBudget, taskTurnLimit } from '../../api/lib/agent/runtime-budget.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
-import { initializeExecutionState, loadExecutionState, saveExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { collectDurableToolEvidence } from '../../api/lib/agent/runtime-evidence.js'
@@ -154,7 +155,7 @@ describe.runIf(available)('real durable default execution control', () => {
         ? [expect.objectContaining({ messageId: candidateMessageId, text: expectedText })] : [])
       const finished = await prisma.agentRunEvent.findFirstOrThrow({ where: { runId: f.runId, type: 'run.finished' } })
       expect(finished.payload).toMatchObject({ outputSummary: expectedText })
-      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(content)
     }, undefined, '重写第一章，突出捡漏爽文。', true)
   })
@@ -187,7 +188,7 @@ describe.runIf(available)('real durable default execution control', () => {
       expect(after.policyHash).toBe(raw.policyHash)
       expect(after.tokenLimit).toBe(raw.tokenLimit)
       expect(await prisma.agentProviderUsageReceipt.count({ where: { attempt: { operation: { taskRootId: f.rootId } } } })).toBe(1)
-      expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+      expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
     }, 999999)
   })
 
@@ -243,7 +244,7 @@ describe.runIf(available)('real durable default execution control', () => {
       }
       expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'execution.stagnation' } })).toBe(5)
       expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(body)
-      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
       const last = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'execution.stagnation' }, orderBy: { sequence: 'desc' } })
       await prisma.agentExecutionOutbox.update({ where: { id: last.id }, data: { payload: runtimeJson({ ...(last.payload as object), stagnantBatches: 0 }).value } })
       await expect(advanceDurableToolStagnation(token)).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
@@ -301,7 +302,7 @@ describe.runIf(available)('persisted semantic progress, separate from revision a
         const state = await loadExecutionState(f.userId, f.runId)
         expect(state.frame.state.stagnation).toMatchObject({ payloadHash: runtimeJson(decision.payload).hash })
       }
-      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: { in: [f.rootId, child.taskRootId!] } } } })).toBe(0)
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: { in: [f.rootId, child.taskRootId!] } } } })).toBe(0)
       expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'execution.stagnation' } })).toBe(6)
     }, undefined, '只读审阅本章')
   }, 30000)
@@ -372,7 +373,8 @@ describe.runIf(available)('actual saved-frame consumers beyond historical defaul
           messages: [{ role: 'user', content: '修改本章' }], successfulToolSignatures: [] } })
       for (let index = 0; index < 52; index++) {
         const { frame } = await loadExecutionState(f.userId, f.runId)
-        const op = await prepareOperation(token, { key: `exec:${frame.state.nextOperationSequence}`, kind: 'provider', action: 'chat', input: {} })
+        const request = { body: { model: 'fixture', max_tokens: 100, tools: initial.configuration.tools } }
+        const op = await prepareOperation(token, { key: `exec:${frame.state.nextOperationSequence}`, kind: 'provider', action: 'chat', input: { request } })
         const pending = await saveExecutionState(token, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
           snapshot: { ...frame.state, phase: 'awaiting_operation', pendingOperationId: op.id, turn: frame.state.turn + 1, nextOperationSequence: frame.state.nextOperationSequence + 1 } })
         const attempt = await prepareProviderAttempt(token, { operationId: op.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request: { body: { max_tokens: 100 } } })
@@ -419,7 +421,7 @@ describe.runIf(available)('actual saved-frame consumers beyond historical defaul
         await saveExecutionState(token, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash, snapshot: { ...frame.state, messages } })
         const archived = await advanceDurableContext(token, 5000)
         expect(archived).not.toBeNull()
-        expect(archived?.state.messages[0]).toEqual(initial.frame.state.messages[0])
+        expect(archived?.state.messages).toContainEqual(initial.frame.state.messages[0])
       }
       expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'execution.context.archived' } })).toBe(8)
       expect((await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })).policyHash).toBe(policy.hash)

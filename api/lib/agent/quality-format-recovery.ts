@@ -27,7 +27,7 @@ export type CurrentQualityFormatWitness = { callId: string; startedAt: Date; con
 /** A compilation is context, not a new format-recovery allowance. Provider
  * admission is itself a durable claim, even if its later report effect rolls back. */
 export async function hasQualityFormatRecoveryClaim(tx: Prisma.TransactionClient, subject: Subject,
-  chapterId: string, chapterRevision: number, exceptOperationId?: string) {
+  chapterId: string, chapterRevision: number, exceptOperationId?: string, options: { unfinishedOnly?: boolean } = {}) {
   const original = await readOriginalTaskRequest(tx, subject)
   const ids = await originalTaskRunIds(tx, subject, original)
   const run = await tx.agentRun.findFirstOrThrow({ where: { id: subject.runId, userId: subject.userId, novelId: subject.novelId } })
@@ -53,7 +53,7 @@ export async function hasQualityFormatRecoveryClaim(tx: Prisma.TransactionClient
       })
       return claim.taskId === original.taskId && claim.chapterId === chapterId && claim.chapterRevision === chapterRevision
       && (!exceptOperationId || claim.operationId !== exceptOperationId)
-      && (!oldAdmission || !finished)
+      && (options.unfinishedOnly ? !finished : !oldAdmission || !finished)
     })
   })) return true
   const operations = await tx.agentOperation.findMany({ where: { originRunId: { in: ids }, action: 'quality_format_recovery',
@@ -62,9 +62,13 @@ export async function hasQualityFormatRecoveryClaim(tx: Prisma.TransactionClient
     if (item.parentOperationId === exceptOperationId) return false
     const work = object(object(item.parent?.inputSnapshot).input).work
     const chapter = object(object(work).chapter)
-    return object(work).kind === 'check' && [5, 6, 7, 8, 9, 10, 11].includes(Number(object(work).version))
+    const version = Number(object(work).version)
+    const supported = options.unfinishedOnly ? Number.isInteger(version) && version >= 5 && version <= 14
+      : [5, 6, 7, 8, 9, 10, 11].includes(version)
+    return object(work).kind === 'check' && supported
       && chapter.id === chapterId && chapter.revision === chapterRevision
-      && (!admission || item.createdAt >= admission.at || item.status !== 'succeeded' || item.parent?.status !== 'succeeded')
+      && (options.unfinishedOnly ? item.status !== 'succeeded' || item.parent?.status !== 'succeeded'
+        : !admission || item.createdAt >= admission.at || item.status !== 'succeeded' || item.parent?.status !== 'succeeded')
   })
 }
 
@@ -245,5 +249,6 @@ export async function canStartFreshQualityCheck(tx: Prisma.TransactionClient, su
       action: { startsWith: 'agent3Humanity' }, createdAt: { gte: first.createdAt },
       OR: [{ billingStatus: 'pending_usage' }, { usageSource: 'unknown' }] }] } })
     || await tx.agentProviderAttempt.count({ where: { runId: { in: ids }, status: { in: ['dispatching', 'unknown'] } } })) return false
+  if (await hasQualityFormatRecoveryClaim(tx, subject, chapter.id, chapter.revision, undefined, { unfinishedOnly: true })) return false
   return !!await readQualityUnavailableProof(tx, subject, ids, report, chapter, run.taskRootId, { allowFormatRecovery: true })
 }

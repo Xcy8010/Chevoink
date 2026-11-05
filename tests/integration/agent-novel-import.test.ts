@@ -1,3 +1,4 @@
+import { initializeExecutionState } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { mkdtemp, readdir, rmdir, unlink } from 'node:fs/promises'
 import path from 'node:path'
@@ -18,7 +19,7 @@ vi.mock('../../api/lib/auth-session.js', async original => ({
 import { prisma } from '../../api/lib/prisma.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
-import { initializeExecutionState } from '../../api/lib/agent/runtime-state.js'
+
 import { acquireRunLease, revokeRunLease } from '../../api/lib/agent/runtime-lease.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import * as operations from '../../api/lib/agent/runtime-operations.js'
@@ -132,7 +133,7 @@ describe.skipIf(!available)('Agent import durable workflow on isolated PG', () =
     const waiting = events.find(event => event.type === 'tool.call' && event.importWaiting)
     expect(waiting).toMatchObject({ type: 'tool.call', autoApproved: false, importWaiting: { url: expect.stringContaining('importCallId=import-call') } })
     expect(await publishDurableEvents(f.userId, run.runId)).toEqual([])
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: run.rootId } } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: run.rootId } } })).toBe(0)
   }))
   it('shared human approval and actual commit wake prepare, retain one receipt and stop the old queue', async () => fixture(async f => {
     const run = await f.admit({ action: 'prepare', attachmentUrl: f.attachment.url })

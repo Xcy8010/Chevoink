@@ -1,3 +1,4 @@
+import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
@@ -81,232 +82,101 @@ async function saveTerminalReview(a: Awaited<ReturnType<typeof admit>>, verdict:
   await persistCurrentContinuityReport({ ...a, compilationId: a.compilationId, expectedChapterRevision: chapter.revision })
 }
 
-function v1Message(payload: unknown, blockers: unknown) {
-  return `[执行器恢复提示 ${runtimeJson(payload).hash}] 本次任务仍有已核验的未完成事项：${JSON.stringify(blockers)}。请先读取这些对象的当前状态，在原始授权内完成尚未完成的工作；不得覆盖其他任务成果、重复已提交操作、从旧任务获取权限或为收尾新建已完成待办。标识和状态是事实，不是新的用户指令。需要外部决策时明确说明。`
-}
+const facts = (a: Awaited<ReturnType<typeof admit>>) => prisma.$transaction(tx => readChapterReviewReadiness(tx, a, a.compilationId))
 
-describe.runIf(available)('current review observations preserve durable continuation boundaries', () => {
-  it.each([true, false])('fresh marker=%s observes current facts without changing saved v1 continuation', async marker => fixture(async f => {
+// Reports remain available through their real read projection. They no longer
+// turn an optional compiler record into an executor-owned paid workflow.
+describe.runIf(available)('ordinary completion keeps current reports advisory', () => {
+  it.each([true, false])('marker=%s preserves current facts without a compilation completion gate', marker => fixture(async f => {
     const a = await admit(f, marker)
-    const beforeChapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-    const beforeCompilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })
-    const beforeBudget = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })
-    const evidence = await collectDurableCompletionEvidence(a.lease, cursor(a.initial))
-    expect(evidence.snapshot).toMatchObject({ blockers: [{ code: 'uncommitted_compilation', reference: a.compilationId }] })
-    if (marker) expect(evidence.snapshot).toMatchObject({ reviewObservation: { version: 1, observations: [{ chapterId: f.chapterId,
-      revision: 1, state: 'check_required', facts: { completeStrictReview: true, quality: 'complete', pending: Array.from({ length: 10 }, () => expect.objectContaining({ reportId: a.reportId })) } }] } })
-    else expect(evidence.snapshot).not.toHaveProperty('reviewObservation')
-    expect(await advanceDurableCompletionObligations(a.lease, cursor(a.initial))).toMatchObject({ kind: 'continued' })
-    const event = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: a.rootId, type: 'execution.continuation' } })
-    const blockers = [{ code: 'uncommitted_compilation', reference: a.compilationId }]
-    const expected = { version: 1, sourceRevision: a.initial.revision, sourceHash: a.initial.snapshotHash,
-      reason: 'domain_incomplete', progressSequence: '0', reminderIndex: 1, blockers }
-    expect(event.payload).toEqual(expected)
-    const state = await loadExecutionState(a.userId, a.runId)
-    expect(state.frame.state.messages.at(-1)).toEqual({ role: 'system', content: v1Message(expected, blockers) })
-    expect(state.frame.state.messages.filter(message => message.role === 'user')).toHaveLength(1)
-    expect(state.frame.state.turn).toBe(0)
-    expect(state.frame.state.nextOperationSequence).toBe(0)
-    const observations = await prisma.agentExecutionOutbox.findMany({ where: { taskRootId: a.rootId, type: 'execution.review_observation' } })
-    expect(observations).toHaveLength(marker ? 1 : 0)
-    if (marker) {
-      const note = state.frame.state.messages.at(-2)
-      expect(note).toMatchObject({ role: 'system', content: expect.stringContaining('连续性=missing') })
-      expect(note?.content).toContain('当前版本尚缺有效检查')
-    }
-    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(beforeChapter)
-    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })).toEqual(beforeCompilation)
-    expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })).toEqual(beforeBudget)
+    const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })
+    const budget = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })
+    expect(await facts(a)).toMatchObject({ ready: false, continuity: 'missing', quality: 'complete' })
+    expect((await collectDurableCompletionEvidence(a.lease, cursor(a.initial))).snapshot).toMatchObject({ blockers: [] })
+    expect(await advanceDurableCompletionObligations(a.lease, cursor(a.initial))).toBeNull()
+    expect((await loadExecutionState(a.userId, a.runId)).frame.snapshotHash).toBe(a.initial.snapshotHash)
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })).toEqual(before)
+    expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })).toEqual(budget)
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: a.rootId } } })).toBe(0)
+    expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: a.rootId, type: 'execution.continuation' } })).toBe(0)
   }))
 
-  it('observes a later current body without reusing the old report or granting a paid retry', async () => fixture(async f => {
+  it.each(['changed-body', 'incomplete'] as const)('%s report stays truthful without requesting another check', scenario => fixture(async f => {
     const a = await admit(f)
-    await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '作者后来保存的正文。', revision: 2 } })
-    const evidence = await collectDurableCompletionEvidence(a.lease, cursor(a.initial))
-    expect(evidence.snapshot).toMatchObject({ reviewObservation: { observations: [{ revision: 2, state: 'check_required',
-      requiredToolNames: ['continuity_validate', 'quality_analyze'], facts: { quality: 'stale', pending: [],
-        binding: { qualityReportId: null, qualityReportHash: null } } }] } })
+    if (scenario === 'changed-body') await prisma.chapter.update({ where: { id: f.chapterId }, data: { content: '作者后来保存的正文。', revision: 2 } })
+    else await prisma.chapterQualityReport.update({ where: { id: a.reportId }, data: { status: 'failed', deterministicMetrics: { independentCheck: 'unavailable' } } })
+    expect(await facts(a)).toMatchObject({ ready: false, continuity: 'missing', quality: scenario === 'changed-body' ? 'stale' : 'incomplete' })
+    expect((await collectDurableCompletionEvidence(a.lease, cursor(a.initial))).snapshot).toMatchObject({ blockers: [] })
+    expect(await advanceDurableCompletionObligations(a.lease, cursor(a.initial))).toBeNull()
     expect((await loadExecutionState(a.userId, a.runId)).frame.snapshotHash).toBe(a.initial.snapshotHash)
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: a.rootId } } })).toBe(0)
-    expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: a.rootId, type: 'execution.review_observation' } })).toBe(0)
   }))
 
-  it('continues mixed missing continuity and incomplete quality through the original tools', async () => fixture(async f => {
-    const a = await admit(f)
-    await prisma.chapterQualityReport.update({ where: { id: a.reportId }, data: { status: 'failed', deterministicMetrics: { independentCheck: 'unavailable' } } })
-    expect((await collectDurableCompletionEvidence(a.lease, cursor(a.initial))).snapshot).toMatchObject({ reviewObservation: { observations: [{ state: 'check_required',
-      facts: { continuity: 'missing', quality: 'incomplete', requiredTools: [expect.objectContaining({ name: 'continuity_validate' }), expect.objectContaining({ name: 'quality_analyze' })] } }] } })
-    expect(await advanceDurableCompletionObligations(a.lease, cursor(a.initial))).toMatchObject({ kind: 'continued' })
-    expect((await loadExecutionState(a.userId, a.runId)).frame.revision).toBe(a.initial.revision + 1)
-    expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: a.rootId, type: { in: ['execution.review_observation', 'execution.continuation'] } } })).toBe(2)
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: a.rootId } } })).toBe(0)
-  }))
-
-  it.each(['unknown', 'denied', 'rollback', 'stale'] as const)('%s refuses follow-up atomically without recording an actionable observation', async scenario => fixture(async f => {
+  it.each(['unknown', 'denied', 'existing-event', 'stale'] as const)('%s preserves actual reconciliation and cursor boundaries', scenario => fixture(async f => {
     const a = await admit(f, true, scenario === 'denied')
     if (scenario === 'unknown') await prisma.agentOperation.create({ data: { id: randomUUID(), taskRootId: a.rootId, originRunId: a.runId,
       operationKey: 'sidecar-unknown', kind: 'provider', action: 'fixture', inputHash: runtimeJson({}).hash, inputSnapshot: {}, status: 'unknown' } })
-    if (scenario === 'rollback') await prisma.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: a.rootId, runId: a.runId,
-      eventKey: `state:${a.rootId}:1`, type: 'fixture.conflict', payload: {} } })
+    if (scenario === 'existing-event') await prisma.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: a.rootId, runId: a.runId,
+      eventKey: 'existing-fixture-event:' + a.rootId, type: 'fixture.conflict', payload: {} } })
     const invoke = () => advanceDurableCompletionObligations(a.lease, { expectedRevision: a.initial.revision,
       expectedHash: scenario === 'stale' ? 'f'.repeat(64) : a.initial.snapshotHash })
-    if (scenario === 'unknown' || scenario === 'denied') expect(await invoke()).toMatchObject({ kind: 'reconciliation_required' })
-    else await expect(invoke()).rejects.toThrow()
+    if (scenario === 'unknown') expect(await invoke()).toMatchObject({ kind: 'reconciliation_required', blockers: [expect.objectContaining({ code: 'unresolved_operation' })] })
+    else if (scenario === 'stale') await expect(invoke()).rejects.toMatchObject({ code: 'RUNTIME_STATE_CONFLICT' })
+    else expect(await invoke()).toBeNull()
     expect((await loadExecutionState(a.userId, a.runId)).frame.snapshotHash).toBe(a.initial.snapshotHash)
     expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: a.rootId, type: { in: ['execution.review_observation', 'execution.continuation'] } } })).toBe(0)
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: a.rootId } } })).toBe(0)
   }))
 
-  it('records five changed report observations without a fixed reminder stop', async () => fixture(async f => {
+  it('reads five changed opinions without treating them as mandatory model work', () => fixture(async f => {
     const a = await admit(f)
     let frame = a.initial
     const fingerprints: string[] = []
     for (let index = 1; index <= 5; index++) {
-      await prisma.qualityFinding.updateMany({ where: { reportId: a.reportId }, data: { explanation: `当前合成证据变化${index}` } })
-      if (index > 1) frame = await saveExecutionState(a.lease, { ...cursor(frame),
-        snapshot: { ...frame.state, messages: [...frame.state.messages, { role: 'assistant', content: '正文已保存。' }] } })
-      const evidence = await collectDurableCompletionEvidence(a.lease, cursor(frame))
-      const observation = (evidence.snapshot as { reviewObservation: { fingerprint: string } }).reviewObservation
-      fingerprints.push(observation.fingerprint)
-      expect(await advanceDurableCompletionObligations(a.lease, cursor(frame))).toMatchObject({ kind: 'continued' })
-      frame = (await loadExecutionState(a.userId, a.runId)).frame
+      await prisma.qualityFinding.updateMany({ where: { reportId: a.reportId }, data: { explanation: '当前合成证据变化' + index } })
+      if (index > 1) frame = await saveExecutionState(a.lease, { ...cursor(frame), snapshot: { ...frame.state,
+        messages: [...frame.state.messages, { role: 'assistant', content: '正文已保存。' }] } })
+      const current = await facts(a)
+      expect(current!.decisionDetails!.some(item => item.explanation === '当前合成证据变化' + index)).toBe(true)
+      fingerprints.push(runtimeJson(current!.decisionDetails).hash)
+      expect(await advanceDurableCompletionObligations(a.lease, cursor(frame))).toBeNull()
     }
     expect(new Set(fingerprints).size).toBe(5)
-    const events = await prisma.agentExecutionOutbox.findMany({ where: { taskRootId: a.rootId, type: 'execution.continuation' }, orderBy: { sequence: 'asc' } })
-    expect(events.map(event => (event.payload as { reminderIndex: number }).reminderIndex)).toEqual([1, 2, 3, 4, 5])
+    expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: a.rootId, type: 'execution.continuation' } })).toBe(0)
     expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: a.rootId } } })).toBe(0)
   }))
 
-  it('persists current commit readiness independently of historical unknown verdicts', async () => fixture(async f => {
+  it('preserves current completed reports and historical unknown verdicts independently', () => fixture(async f => {
     const a = await admit(f, true, false, { terminal: true })
     await saveTerminalReview(a, 'unknown')
     await prisma.qualityFinding.deleteMany({ where: { reportId: a.reportId } })
-    const chapterBefore = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-    const compilationBefore = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })
-    const budgetBefore = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })
-    const evidence = await collectDurableCompletionEvidence(a.lease, cursor(a.initial))
-    expect(evidence.snapshot).toMatchObject({ blockers: [{ code: 'uncommitted_compilation', reference: a.compilationId }],
-      reviewObservation: { observations: [{ compilationId: a.compilationId, chapterId: f.chapterId, revision: 1,
-        state: 'commit_available', requiredToolNames: [], facts: { continuity: 'complete', quality: 'complete' } }] } })
-    const observation = (evidence.snapshot as { reviewObservation: { fingerprint: string; observations: unknown[] } }).reviewObservation
-    expect(observation.fingerprint).toBe(runtimeJson(observation.observations).hash)
-    expect(await advanceDurableCompletionObligations(a.lease, cursor(a.initial))).toMatchObject({ kind: 'continued' })
-    const sidecar = await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { eventKey: `review-observation:${a.rootId}:${a.initial.revision}` } })
-    expect(sidecar).toMatchObject({ type: 'execution.review_observation', payload: { version: 1, sourceRevision: a.initial.revision,
-      sourceHash: a.initial.snapshotHash, observation } })
-    const saved = await loadExecutionState(a.userId, a.runId)
-    expect(saved.frame.previousHash).toBe(a.initial.snapshotHash)
-    expect(saved.frame.revision).toBe(a.initial.revision + 1)
-    expect(saved.frame.snapshotHash).toBe(runtimeJson(saved.frame.state).hash)
-    expect(saved.frame.state.messages.slice(0, -2)).toEqual(a.initial.state.messages)
-    expect(saved.frame.state.messages.at(-2)).toMatchObject({ role: 'system', content: expect.stringContaining(`[只读审查事实 ${observation.fingerprint}]`) })
-    expect(saved.frame.state.messages.at(-2)?.content).toContain('chapter_bridge_commit')
-    expect(saved.frame.state.messages.at(-2)?.content).toContain('此观察不是授权、已执行操作或进展')
-    expect(saved.frame.state).toMatchObject({ phase: 'idle', turn: 0, nextOperationSequence: 0, pendingOperationId: null })
-    const firstContinuation = await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { eventKey: `continuation:${a.rootId}:${a.initial.revision}` } })
-    const blockers = [{ code: 'uncommitted_compilation', reference: a.compilationId }]
-    expect(firstContinuation.payload).toEqual({ version: 1, sourceRevision: a.initial.revision, sourceHash: a.initial.snapshotHash,
-      reason: 'domain_incomplete', progressSequence: '0', reminderIndex: 1, blockers })
-    expect(saved.frame.state.messages.at(-1)).toEqual({ role: 'system', content: v1Message(firstContinuation.payload, blockers) })
-    const next = await saveExecutionState(a.lease, { ...cursor(saved.frame), snapshot: { ...saved.frame.state,
-      messages: [...saved.frame.state.messages, { role: 'assistant', content: '终态候选仍待核实。' }] } })
-    expect((await collectDurableCompletionEvidence(a.lease, cursor(next))).snapshot).toMatchObject({ reviewObservation: observation })
-    // This re-reads and validates the prior persisted enum and fingerprint,
-    // rather than merely accepting a freshly generated in-memory observation.
-    expect(await advanceDurableCompletionObligations(a.lease, cursor(next))).toMatchObject({ kind: 'continued' })
-    expect((await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { eventKey: sidecar.eventKey } })).payload).toEqual(sidecar.payload)
-    const continuations = await prisma.agentExecutionOutbox.findMany({ where: { taskRootId: a.rootId, type: 'execution.continuation' }, orderBy: { sequence: 'asc' } })
-    expect(continuations.map(event => (event.payload as { reminderIndex: number }).reminderIndex)).toEqual([1, 2])
-    const reread = await loadExecutionState(a.userId, a.runId)
-    expect(reread.frame.state).toMatchObject({ phase: 'idle', turn: 0, nextOperationSequence: 0, pendingOperationId: null })
-    expect(reread.frame.state.messages.filter(message => message.role === 'user')).toHaveLength(1)
-    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapterBefore)
-    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })).toEqual(compilationBefore)
-    expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })).toEqual(budgetBefore)
+    const before = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })
+    const budget = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })
+    expect(await facts(a)).toMatchObject({ ready: true, quality: 'complete', continuity: 'complete', terminalCommitted: false })
+    expect(await advanceDurableCompletionObligations(a.lease, cursor(a.initial))).toBeNull()
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })).toEqual(before)
+    expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })).toEqual(budget)
     expect(await prisma.agentOperation.count({ where: { taskRootId: a.rootId } })).toBe(0)
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: a.rootId } } })).toBe(0)
     expect(await prisma.aiUsageLog.count({ where: { agentRunId: a.runId } })).toBe(0)
   }))
 
   it.each([
     { toolName: 'continuity_validate', access: 'missing' }, { toolName: 'continuity_validate', access: 'denied' },
     { toolName: 'quality_analyze', access: 'missing' }, { toolName: 'quality_analyze', access: 'denied' },
-  ] as const)('terminal review preserves the original $toolName $access boundary without dispatch or charge', async ({ toolName, access }) => fixture(async f => {
+  ] as const)('$toolName $access never launches a report request during completion', ({ toolName, access }) => fixture(async f => {
     const a = await admit(f, true, false, { terminal: true,
       ...(access === 'missing' ? { missingTools: [toolName] } : { deniedTools: [toolName] }) })
     await saveTerminalReview(a, 'unknown')
-    // Force an independent original check obligation as well as the terminal
-    // candidate obligation; neither may be lost by classifying the next step.
     await prisma.chapterQualityReport.delete({ where: { id: a.reportId } })
-    const chapterBefore = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-    const budgetBefore = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })
-    // Both missing/denied capabilities are still required by this snapshot:
-    // continuity is deliberately made incomplete as well as quality missing.
     await prisma.storyCompilation.update({ where: { id: a.compilationId }, data: { validation: {} } })
-    const incomplete = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })
-    expect((await collectDurableCompletionEvidence(a.lease, cursor(a.initial))).snapshot).toMatchObject({
-      reviewObservation: { observations: [{ state: 'check_required', requiredToolNames: ['continuity_validate', 'quality_analyze'],
-        facts: { continuity: 'missing', quality: 'missing' } }] } })
-    expect(await advanceDurableCompletionObligations(a.lease, cursor(a.initial))).toMatchObject({ kind: 'reconciliation_required' })
-    expect((await loadExecutionState(a.userId, a.runId)).frame.snapshotHash).toBe(a.initial.snapshotHash)
-    expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: a.rootId,
-      type: { in: ['execution.review_observation', 'execution.continuation'] } } })).toBe(0)
-    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapterBefore)
-    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })).toEqual(incomplete)
-    expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })).toEqual(budgetBefore)
+    const chapter = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
+    const compilation = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })
+    expect(await facts(a)).toMatchObject({ ready: false, quality: 'missing', continuity: 'missing' })
+    expect(await advanceDurableCompletionObligations(a.lease, cursor(a.initial))).toBeNull()
+    expect((await loadExecutionState(a.userId, a.runId)).configuration.toolAuthority.find(grant => grant.name === toolName)?.permission).toBe(access === 'denied' ? 'deny' : undefined)
+    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapter)
+    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })).toEqual(compilation)
     expect(await prisma.agentOperation.count({ where: { taskRootId: a.rootId } })).toBe(0)
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: a.rootId } } })).toBe(0)
     expect(await prisma.aiUsageLog.count({ where: { agentRunId: a.runId } })).toBe(0)
   }))
-
-  it('a real unknown operation blocks terminal follow-up without hiding its outcome or buying another request', async () => fixture(async f => {
-    const a = await admit(f, true, false, { terminal: true })
-    await saveTerminalReview(a, 'unknown')
-    await prisma.qualityFinding.deleteMany({ where: { reportId: a.reportId } })
-    const operation = await prisma.agentOperation.create({ data: { id: randomUUID(), taskRootId: a.rootId, originRunId: a.runId,
-      operationKey: 'terminal-sidecar-unknown', kind: 'provider', action: 'continuity_validate', inputHash: runtimeJson({}).hash,
-      inputSnapshot: {}, status: 'unknown' } })
-    const budgetBefore = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })
-    const evidence = await collectDurableCompletionEvidence(a.lease, cursor(a.initial))
-    expect(evidence.snapshot).toMatchObject({ blockers: expect.arrayContaining([{ code: 'unresolved_operation', reference: operation.id }]),
-      reviewObservation: { observations: [{ state: 'commit_available' }] } })
-    expect(await advanceDurableCompletionObligations(a.lease, cursor(a.initial))).toMatchObject({ kind: 'reconciliation_required',
-      blockers: expect.arrayContaining([{ code: 'unresolved_operation', reference: operation.id }]) })
-    expect((await loadExecutionState(a.userId, a.runId)).frame.snapshotHash).toBe(a.initial.snapshotHash)
-    expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: operation.id } })).toEqual(operation)
-    expect(await prisma.agentOperation.count({ where: { taskRootId: a.rootId } })).toBe(1)
-    expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: a.rootId,
-      type: { in: ['execution.review_observation', 'execution.continuation'] } } })).toBe(0)
-    expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })).toEqual(budgetBefore)
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: a.rootId } } })).toBe(0)
-    expect(await prisma.aiUsageLog.count({ where: { agentRunId: a.runId } })).toBe(0)
-  }))
-
-  it.each(['decision_required', 'commit_available'] as const)('preserves an actionable %s without requiring a new paid review', async expectedState => fixture(async f => {
-    const a = await admit(f, true, false, { terminal: true, missingTools: ['continuity_validate', 'quality_analyze'] })
-    await saveTerminalReview(a, expectedState === 'decision_required' ? 'unknown' : 'supported')
-    if (expectedState === 'commit_available') await prisma.qualityFinding.deleteMany({ where: { reportId: a.reportId } })
-    const chapterBefore = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-    const compilationBefore = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })
-    const budgetBefore = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })
-    const evidence = await collectDurableCompletionEvidence(a.lease, cursor(a.initial))
-    expect(evidence.snapshot).toMatchObject({ reviewObservation: { observations: [{ state: expectedState, requiredToolNames: [],
-      facts: { continuity: 'complete', quality: 'complete' } }] } })
-    if (expectedState === 'decision_required') expect(evidence.snapshot).toMatchObject({ reviewObservation: { observations: [{
-      facts: { pending: Array.from({ length: 10 }, () => expect.objectContaining({ reportId: a.reportId })) } }] } })
-    expect(await advanceDurableCompletionObligations(a.lease, cursor(a.initial))).toMatchObject({ kind: 'continued' })
-    const saved = await loadExecutionState(a.userId, a.runId)
-    expect(saved.frame.state).toMatchObject({ phase: 'idle', turn: 0, nextOperationSequence: 0, pendingOperationId: null })
-    expect(saved.configuration.tools.map(tool => tool.function.name)).toEqual(['chapter_bridge_commit'])
-    const observation = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: a.rootId, type: 'execution.review_observation' } })
-    expect(observation.payload).toMatchObject({ observation: { observations: [{ state: expectedState }] } })
-    expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(chapterBefore)
-    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: a.compilationId } })).toEqual(compilationBefore)
-    expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: a.rootId } })).toEqual(budgetBefore)
-    expect(await prisma.agentOperation.count({ where: { taskRootId: a.rootId } })).toBe(0)
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: a.rootId } } })).toBe(0)
-    expect(await prisma.aiUsageLog.count({ where: { agentRunId: a.runId } })).toBe(0)
-  }))
-
 })

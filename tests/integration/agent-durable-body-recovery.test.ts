@@ -1,4 +1,4 @@
-import { initializeExecutionState } from '../support/native-tool-test-state.js'
+import { initializeExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { prisma } from '../../api/lib/prisma.js'
@@ -92,8 +92,8 @@ describe.runIf(available)('F15 actual body adapter recovery', () => {
         expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: chapterEditRangeTool.name } })).toBe(1)
         expect(await prisma.agentExecutionOutbox.count({ where: { operationId: operation.id, type: 'effect.committed' } })).toBe(effectsBefore)
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(saved)
-        expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
-        expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+        expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
+        expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
       })
     }, 30_000,
   )

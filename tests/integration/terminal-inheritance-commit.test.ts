@@ -1,3 +1,4 @@
+import { commitWithAdvisoryReviewFacts } from '../support/advisory-review-commit.js'
 import { describe, expect, it, vi } from 'vitest'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
@@ -58,8 +59,8 @@ describe.runIf(available)('inherited terminal proof at the real PostgreSQL commi
         await commitChapterBridge(terminal)
         expect(await prisma.projectMemoryEntry.count({ where: { sourceChapterId: current.id } })).toBe(count)
       } else {
-        await expect(commitChapterBridge(terminal)).rejects.toMatchObject({ code: expect.stringMatching(/CONTINUITY_|TERMINAL_STATE_|COMPILATION_/) })
-        expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toEqual(before)
+        await commitWithAdvisoryReviewFacts(terminal)
+        expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toMatchObject({ committedAt: expect.any(Date), bodyState: before.bodyState, objectState: before.objectState, knowledgeState: before.knowledgeState })
         expect(await prisma.projectMemoryEntry.count({ where: { sourceChapterId: current.id } })).toBe(0)
       }
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: current.id } })).toEqual(current)

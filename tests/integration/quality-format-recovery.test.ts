@@ -363,13 +363,21 @@ describe.runIf(available)('settled legacy quality format recovery', () => {
       expect(fetchMock).toHaveBeenCalledTimes(expected)
       const paid = await prisma.aiUsageLog.findMany({ where: { userId: f.userId, action: { startsWith: 'agent3Humanity' } }, orderBy: { createdAt: 'asc' } })
       expect(paid.every(item => item.usageSource === 'reported' && item.billingStatus === 'settled')).toBe(true)
-      expect(paid.filter(item => item.action === 'agent3HumanityFormatRecovery')).toHaveLength(1)
+      const fresh = scenario === 'old-valid' || scenario === 'old-repair'
+      expect(paid.filter(item => item.action === 'agent3HumanityFormatRecovery')).toHaveLength(fresh ? 0 : 1)
       expect(paid).toHaveLength(expected + (scenario.startsWith('old-') ? 1 : 0))
       const reports = await prisma.chapterQualityReport.findMany({ where: { chapterId: f.chapterId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
       expect(reports).toHaveLength(2)
-      expect(reports[0]).toMatchObject({ status: 'failed', deterministicMetrics: { formatRecovery: { state: 'claimed' } } })
-      expect(reports[1]).toMatchObject({ status: scenario === 'live-failed' ? 'failed' : scenario === 'old-repair' ? 'repaired' : 'passed',
-        deterministicMetrics: { formatRecovery: { reportId: sourceReportId ?? reports[0].id, state: scenario === 'live-failed' ? 'failed' : 'completed' } } })
+      expect(reports[0]).toMatchObject({ status: 'failed' })
+      expect(reports[1]).toMatchObject({ status: scenario === 'live-failed' ? 'failed' : scenario === 'old-repair' ? 'repaired' : 'passed' })
+      if (fresh) {
+        expect(reports[0].id).toBe(sourceReportId)
+        expect(reports[0].deterministicMetrics).not.toHaveProperty('formatRecovery')
+        expect(reports[1].deterministicMetrics).not.toHaveProperty('formatRecovery')
+      } else {
+        expect(reports[0]).toMatchObject({ deterministicMetrics: { formatRecovery: { state: 'claimed' } } })
+        expect(reports[1]).toMatchObject({ deterministicMetrics: { formatRecovery: { reportId: sourceReportId ?? reports[0].id, state: scenario === 'live-failed' ? 'failed' : 'completed' } } })
+      }
       expect(await prisma.$transaction(tx => readQualityFormatRecovery(tx, { userId: f.userId, novelId: f.novelId, runId: f.runId }, { chapterId: f.chapterId }))).toBeNull()
       if (scenario !== 'old-repair') {
         const after = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })

@@ -383,7 +383,7 @@ export const sceneTaskBuildTool = defineTool({
       where: {
         userId: ctx.userId,
         novelId: ctx.novelId,
-        status: 'active',
+        status: { in: ['active', 'completed'] },
         ...scope,
         ...(ctx.durableCompiler ? { id: ctx.durableCompiler.baseline?.id ?? '__missing__' } : args.compilationId ? { id: args.compilationId } : {}),
       },
@@ -392,7 +392,7 @@ export const sceneTaskBuildTool = defineTool({
       take: 6,
     })
     const compilation = candidates[0]
-    if (!compilation) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND', output: `未找到本任务指定的活跃 compilationId，章节编号与编译编号不可混用。${await missingCompilationGuidance(db, ctx, scope)}`, summary: '未找到场景编译状态' }
+    if (!compilation) return { outcome: 'failed' as const, failureCode: 'COMPILATION_NOT_FOUND', output: `未找到本任务指定的 compilationId，章节编号与编译编号不可混用。${await missingCompilationGuidance(db, ctx, scope)}`, summary: '未找到场景编译记录' }
     const saved = await saveSceneTasksWithMilestone({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, compilationId: compilation.id, tasks: args.tasks, alternatives: args.alternatives }, ctx.transaction)
     const { tasks } = saved
     return {

@@ -1,3 +1,4 @@
+import { commitWithAdvisoryReviewFacts } from '../support/advisory-review-commit.js'
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
@@ -72,8 +73,8 @@ describe.runIf(available)('joint evidence survives actual save, readiness and co
     const stale = await prisma.$transaction(tx => readChapterReviewReadiness(tx, { userId: f.userId, novelId: f.novelId, runId: nextRun }, final.id))
     expect(stale).toMatchObject({ ready: false, continuity: 'stale' })
     const memoryBefore = await prisma.projectMemoryEntry.findMany({ where: { sourceChapterId: third.id }, orderBy: { id: 'asc' } })
-    await expect(commitChapterBridge({ userId: f.userId, novelId: f.novelId, runId: nextRun, compilationId: final.id, ...candidate,
-      chapterSummary: 'Resources recorded.', hookDecision: '', delayedHookReason: '', openingStructure: 'Record', endingStructure: 'Continue' })).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+    await commitWithAdvisoryReviewFacts({ userId: f.userId, novelId: f.novelId, runId: nextRun, compilationId: final.id, ...candidate,
+      chapterSummary: 'Resources recorded.', hookDecision: '', delayedHookReason: '', openingStructure: 'Record', endingStructure: 'Continue' })
     expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: final.id } })).toEqual(final.bridge)
     expect(await prisma.projectMemoryEntry.findMany({ where: { sourceChapterId: third.id }, orderBy: { id: 'asc' } })).toEqual(memoryBefore)
     for (const history of histories) expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: history.id } })).toEqual(history)

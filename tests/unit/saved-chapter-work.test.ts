@@ -44,3 +44,11 @@ it('does not treat an empty create, no-op or future revision as a completed body
   parts = [effect()]; current.revision = 2
   expect(await readCurrentSavedTaskChapters(tx, subject)).toEqual([])
 })
+
+it('returns no native body proof before the first execution frame, without using legacy messages', async () => {
+  const pending = { ...tx, agentRun: { findFirst: vi.fn(async () => ({ taskRootId: 'root' })) },
+    agentExecutionState: { findUnique: vi.fn(async () => null) } } as unknown as Prisma.TransactionClient
+  vi.mocked(tx.agentMessage.findMany).mockClear()
+  expect(await readCurrentSavedTaskChapters(pending, subject)).toEqual([])
+  expect(tx.agentMessage.findMany).not.toHaveBeenCalled()
+})

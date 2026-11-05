@@ -25,7 +25,7 @@ describe.runIf(available)('new ordinary quality calls after a settled standalone
     const args = { chapterId: f.chapterId }
     await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'balanced',
       model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
-      tools: [chapterReadTool, qualityAnalyzeTool].map(tool => ({ type: 'function', function: toOpenAIToolPresentation(tool, f.spec.scope) })),
+      tools: [chapterReadTool, qualityAnalyzeTool].map(tool => ({ type: 'function', function: { name: tool.name, ...toOpenAIToolPresentation(tool, f.spec.scope) } })),
       toolAuthority: [chapterReadTool, qualityAnalyzeTool].map(tool => ({ name: tool.name, permission: 'allow', dangerous: false, alwaysConfirm: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
       snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null, successfulToolSignatures: [],
         messages: [{ role: 'user', content: '检查当前章质量' }, { role: 'assistant', content: null, toolCalls: [{ id: 'actual-read', name: 'chapter_read', arguments: JSON.stringify(args) }, { id: 'first-check', name: 'quality_analyze', arguments: JSON.stringify(args) }] }] } })
@@ -46,7 +46,7 @@ describe.runIf(available)('new ordinary quality calls after a settled standalone
     expect(transport.mock.calls.length).toBeGreaterThan(before)
     expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: old.id } })).toEqual(old)
     expect(await prisma.chapterQualityReport.count({ where: { chapterId: f.chapterId } })).toBe(2)
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId }, status: { in: ['dispatching', 'unknown'] } } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId }, status: { in: ['dispatching', 'unknown'] } } })).toBe(0)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: '原文', revision: 1 })
   }, undefined, '检查当前章质量'), DURABLE_FULL_CHAIN_TEST_TIMEOUT_MS)
 })

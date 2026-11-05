@@ -132,6 +132,7 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: duplicated, revision: original.revision + 1 })
       next = 'quality_analyze'
     }
+    else if (String(last.toolCallId).startsWith('current-recovery-final-check-')) next = 'chapter_bridge_commit'
     else if (last.toolCallId === 'current-recovery-chapter_bridge_get') next = 'quality_analyze'
     else if (last.toolCallId === 'current-recovery-quality_analyze') {
       if (input.setupAfterRecovery) {
@@ -183,6 +184,13 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
           reason: '保留这项实际报告建议：本次只删除明确重复动作，保留其余叙事节奏，供作者继续判断；未声称该建议已修复。' }))
         next = 'chapter_bridge_commit'
       }
+    }
+    // The main model explicitly selects final checks; commit performs no paid work.
+    if (next === 'chapter_bridge_commit') {
+      const current = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, input.compilationId))
+      expect(calls.length, JSON.stringify(current)).toBeLessThan(12)
+      const pending = current!.requiredTools[0]
+      if (pending) { next = pending.name; nextArgs = { ...pending.args, readOnly: true }; nextCallId = 'current-recovery-final-check-' + calls.length }
     }
     if (next) calls.push(next)
     return { content: next ? '' : summary, reasoning: '', toolCalls: next ? [{ id: nextCallId ?? (retainedFindings ? 'current-recovery-retained-commit' : `current-recovery-${next}`), name: next,

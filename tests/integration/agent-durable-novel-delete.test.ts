@@ -1,10 +1,11 @@
+import { initializeExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { prisma } from '../../api/lib/prisma.js'
 import * as operations from '../../api/lib/agent/runtime-operations.js'
 import { runtimeTransaction, runtimeJson } from '../../api/lib/agent/runtime-common.js'
-import { initializeExecutionState } from '../../api/lib/agent/runtime-state.js'
+
 import { executeDurableToolStep, getDurableToolAdapterNames } from '../../api/lib/agent/runtime-tool-step.js'
 import { commitNovelDeletion } from '../../api/lib/agent/runtime-novel-delete.js'
 import * as deletionRuntime from '../../api/lib/agent/runtime-novel-delete.js'
@@ -41,7 +42,7 @@ describe.runIf(available)('native deletion commits real effects outside the hear
       const waiting = await step()
       if (waiting.kind !== 'waiting_approval') throw Error('Expected exact original deletion approval')
       expect(await prisma.novel.findUnique({ where: { id: f.novelId } })).not.toBeNull()
-      expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId } })).toBe(0)
+      expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } })).toBe(0)
       await resolveDurableApproval({ userId: f.userId, runId: f.runId, requestId: waiting.approvalId,
         callId: 'delete-call', approved: scenario !== 'denied', alwaysAllow: false })
       if (scenario === 'denied') {
@@ -52,7 +53,7 @@ describe.runIf(available)('native deletion commits real effects outside the hear
       if (scenario === 'rename-before') {
         await prisma.novel.update({ where: { id: f.novelId }, data: { title: '变更后的合成名称' } })
         await expect(step()).rejects.toMatchObject({ code: 'RUNTIME_DELETE_TITLE_MISMATCH' })
-        expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId } })).toBe(0); return
+        expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } })).toBe(0); return
       }
       if (scenario === 'cursor') await prisma.agentRunEvent.create({ data: { runId: f.runId, seq: 17, type: 'fixture', payload: { originalSequence: 17 } } })
       let historicalRunId: string | undefined
@@ -166,7 +167,7 @@ describe.runIf(available)('native deletion commits real effects outside the hear
           expect((await loadDurableEvents(f.userId, historicalRunId, 0))[0]).toMatchObject({ type: 'error', code: 'NOVEL_DELETED' })
           expect(oldState.obligations).toBeNull()
           if (scenario === 'not-dispatched') {
-            expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+            expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
             expect(await prisma.aiUsageLog.findFirstOrThrow({ where: { userId: f.userId } })).toMatchObject({ billingStatus: 'not_dispatched', creditChargeMilli: 0, novelId: null, agentRunId: historicalRunId })
           }
         }

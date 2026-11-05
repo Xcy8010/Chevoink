@@ -30,3 +30,15 @@ describe('durable format recovery reservations without a parent report effect', 
       expect(await hasQualityFormatRecoveryClaim(db, subject, 'c', 5)).toBe(false)
     })
 })
+
+  it.each([12, 13, 14])('work %s waits for the provider and parent effect, even across admission changes', async version => {
+    const operation = { id: 'recovery', parentOperationId: 'parent', createdAt: new Date('2026-01-01'), status: 'succeeded',
+      parent: { status: 'prepared', inputSnapshot: { input: { work: { kind: 'check', version, chapter: { id: 'c', revision: 4 } } } } } }
+    const db = { agentRun: { findFirstOrThrow: vi.fn().mockResolvedValue({ id: 'run' }) },
+      chapterQualityReport: { findMany: vi.fn().mockResolvedValue([]) }, agentOperation: { findMany: vi.fn().mockResolvedValue([operation]) } } as unknown as Prisma.TransactionClient
+    expect(await hasQualityFormatRecoveryClaim(db, subject, 'c', 4, undefined, { unfinishedOnly: true })).toBe(true)
+    operation.parent.status = 'succeeded'
+    expect(await hasQualityFormatRecoveryClaim(db, subject, 'c', 4, undefined, { unfinishedOnly: true })).toBe(false)
+    operation.status = 'unknown'
+    expect(await hasQualityFormatRecoveryClaim(db, subject, 'c', 4, undefined, { unfinishedOnly: true })).toBe(true)
+  })

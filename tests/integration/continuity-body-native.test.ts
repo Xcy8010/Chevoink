@@ -119,20 +119,23 @@ describe.runIf(available)('ordinary native continuity review on an existing task
     vi.stubGlobal('fetch', fetcher)
     const args = { compilationId: compilation.id }, step = () => executeDurableToolStep(lease, signal)
     await model([{ id: 'read-current', name: 'chapter_bridge_get', arguments: JSON.stringify(args) },
-      { id: scenario === 'unknown-history' ? 'body-review' : 'commit-current', name: scenario === 'unknown-history' ? 'continuity_validate' : 'chapter_bridge_commit', arguments: JSON.stringify(args) },
-      ...(scenario === 'unknown-history' ? [{ id: 'known-body-new-call', name: 'continuity_validate', arguments: JSON.stringify(args) }] : [])])
+      { id: 'body-review', name: 'continuity_validate', arguments: JSON.stringify(args) },
+      ...(scenario === 'unknown-history' ? [{ id: 'known-body-new-call', name: 'continuity_validate', arguments: JSON.stringify(args) }] : [
+        { id: 'explicit-quality', name: 'quality_analyze', arguments: JSON.stringify({ ...args, readOnly: true }) },
+        { id: 'explicit-final-continuity', name: 'continuity_validate', arguments: JSON.stringify({ ...args, readOnly: true }) },
+        { id: 'commit-current', name: 'chapter_bridge_commit', arguments: JSON.stringify(args) }])])
     expect(await step()).toMatchObject({ kind: 'tool' })
     if (ask) {
       const waiting = await step()
       expect(waiting.kind).toBe('waiting_approval')
       if (waiting.kind !== 'waiting_approval') throw new Error('Missing actual commit service approval')
       const approval = await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { id: waiting.approvalId } })
-      expect(approval.payload).toMatchObject({ writingServices: { version: 1, chapterId: chapter.id } })
+      expect(approval.payload).toMatchObject({ toolName: 'continuity_validate', callId: 'body-review', args })
       expect(JSON.stringify(approval.payload)).toContain('continuity_validate')
       expect(fetcher).not.toHaveBeenCalled()
-      await resolveDurableApproval({ userId: f.userId, runId: f.runId, requestId: waiting.approvalId, callId: 'commit-current', approved: scenario !== 'approval-denied', alwaysAllow: false })
+      await resolveDurableApproval({ userId: f.userId, runId: f.runId, requestId: waiting.approvalId, callId: 'body-review', approved: scenario !== 'approval-denied', alwaysAllow: false })
     }
-    const outcome = await step()
+    let outcome = await step()
     expect(outcome.kind).toBe('tool')
     if (scenario === 'approval-denied') {
       expect(outcome).toMatchObject({ result: { outcome: 'failed' } })
@@ -154,11 +157,23 @@ describe.runIf(available)('ordinary native continuity review on an existing task
       expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toMatchObject({ committedAt: null })
       return
     }
+    expect(outcome).toMatchObject({ result: { reviewCompleted: true } })
+    for (let index = 0; index < 2; index++) {
+      let checked = await step()
+      if (checked.kind === 'waiting_approval') {
+        const approval = await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { id: checked.approvalId } })
+        await resolveDurableApproval({ userId: f.userId, runId: f.runId, requestId: checked.approvalId,
+          callId: (approval.payload as { callId: string }).callId, approved: true, alwaysAllow: false })
+        checked = await step()
+      }
+      expect(checked).toMatchObject({ kind: 'tool', result: { reviewCompleted: true } })
+    }
+    outcome = await step()
     expect(outcome).toMatchObject({ result: { summary: '章节已提交' } })
     const finalQuality = await prisma.chapterQualityReport.findFirstOrThrow({ where: { userId: f.userId, chapterId: chapter.id, chapterRevision: 6 },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], include: { findings: true } })
     const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'chapter_bridge_commit' }, include: { effectReceipt: true }, orderBy: { createdAt: 'asc' } })
-    const repair = await prisma.agentOperation.findFirstOrThrow({ where: { parentOperationId: parent.id, action: 'continuity_validate', kind: 'internal' }, include: { effectReceipt: true }, orderBy: { createdAt: 'asc' } })
+    const repair = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'continuity_validate', kind: 'tool', inputSnapshot: { path: ['input', 'callId'], equals: 'body-review' } }, include: { effectReceipt: true }, orderBy: { createdAt: 'asc' } })
     const memoryJobId = z.object({ memoryJobId: z.string() }).parse(repair.effectReceipt!.result).memoryJobId
     const repairJob = await prisma.memoryExtractionJob.findUniqueOrThrow({ where: { id: memoryJobId } })
     expect(repairJob).toMatchObject({ novelId: f.novelId, chapterId: chapter.id, chapterRevision: 6,

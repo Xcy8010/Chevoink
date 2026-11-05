@@ -1,4 +1,4 @@
-import { initializeExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
+import { initializeExecutionState, createToolFixtureCreditAccount, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
@@ -90,7 +90,7 @@ describe.runIf(available)('fixed-price cover generation genuine PG admission and
         if (['unknown', 'partial-body', 'cancelled', 'refund-pending'].includes(scenario)) {
           await expect(step()).rejects.toThrow()
           expect(transport).toHaveBeenCalledOnce()
-          expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(1)
+          expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(1)
           expect(await prisma.coverAsset.count({ where: { ownerUserId: f.userId } })).toBe(0)
           if (scenario === 'unknown' || scenario === 'partial-body') {
             await expect(step()).rejects.toMatchObject({ code: 'RUNTIME_RECONCILIATION_REQUIRED' })
@@ -99,13 +99,13 @@ describe.runIf(available)('fixed-price cover generation genuine PG admission and
           }
           if (scenario === 'refund-pending') {
             expect(await prisma.creditRefundIntent.count({ where: { originalEntry: { userId: f.userId } } })).toBe(1)
-            expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, kind: 'refund' } })).toBe(0)
+            expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId, kind: 'refund' }) })).toBe(0)
           }
           return
         }
         const failed = scenario === 'all-failed' || scenario === 'nonretryable'
         expect(await step()).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { display: { kind: 'coverImages' } } })
-        const attempts = await prisma.agentProviderAttempt.findMany({ where: { operation: { taskRootId: f.rootId } }, include: { operation: true, usageReceipt: true } })
+        const attempts = await prisma.agentProviderAttempt.findMany({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } }, include: { operation: true, usageReceipt: true } })
         const calls = scenario === 'primary-success' || scenario === 'nonretryable' ? 1 : 2
         expect(transport).toHaveBeenCalledTimes(calls)
         expect(attempts).toHaveLength(calls)
@@ -115,7 +115,7 @@ describe.runIf(available)('fixed-price cover generation genuine PG admission and
         }
         const parent = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'cover_generate' } })
         expect(new Set(attempts.map(attempt => attempt.operation.operationKey))).toEqual(new Set(Array.from({ length: calls }, (_, index) => `cover:${parent.id}:${index}`)))
-        const debits = await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId, kind: 'usage' } })
+        const debits = await prisma.creditLedgerEntry.findMany({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId, kind: 'usage' }) })
         expect(new Set(debits.map(debit => debit.idempotencyKey))).toEqual(new Set(calls === 1 ? [`image:${parent.id}`] : [`image:${parent.id}`, `image:${parent.id}:route:1`]))
         const bill = await getTaskCreditUsage(f.userId, lease.runId)
         expect(bill.charged).toBe(calls * 6)
@@ -170,7 +170,7 @@ describe.runIf(available)('fixed-price cover generation genuine PG admission and
         await resolveDurableApproval({ userId: f.userId, runId: lease.runId, requestId: waiting.approvalId, callId: 'original-cover', approved: scenario !== 'denied', alwaysAllow: false })
         if (scenario === 'denied') {
           expect(await step()).toMatchObject({ kind: 'tool', result: { outcome: 'failed' } })
-          expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+          expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
           expect(transport).not.toHaveBeenCalled(); return
         }
       }
@@ -203,8 +203,8 @@ describe.runIf(available)('fixed-price cover generation genuine PG admission and
       if (scenario === 'debit-rollback' || scenario === 'exhausted' || scenario === 'changed-route') {
         await expect(step()).rejects.toThrow()
         expect(transport).not.toHaveBeenCalled()
-        expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
-        expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId }, dispatchedAt: { not: null } } })).toBe(0)
+        expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
+        expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId }, dispatchedAt: { not: null } } })).toBe(0)
         return
       }
       if (scenario === 'unknown' || scenario === 'dispatch-crash' || scenario === 'unknown-refund-recovery') {
@@ -220,7 +220,7 @@ describe.runIf(available)('fixed-price cover generation genuine PG admission and
       }
       if (scenario === 'cancel-after-response') {
         await expect(step()).rejects.toThrow()
-        expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId }, status: 'succeeded' } })).toBe(1)
+        expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId }, status: 'succeeded' } })).toBe(1)
         expect(await prisma.coverAsset.count({ where: { ownerUserId: f.userId } })).toBe(0)
         expect(transport).toHaveBeenCalledOnce(); return
       }
@@ -230,10 +230,10 @@ describe.runIf(available)('fixed-price cover generation genuine PG admission and
       expect(transport).toHaveBeenCalledOnce()
       expect((await loadExecutionState(f.userId, lease.runId)).frame.state.phase).toBe('idle')
       expect((await readTaskBudget(lease)).unresolvedAttempts).toBe(0n)
-      const attempt = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId } }, include: { usageReceipt: true } })
+      const attempt = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } }, include: { usageReceipt: true } })
       expect(attempt.usageReceipt).toMatchObject({ source: 'fixed_unit', promptTokens: null, completionTokens: null, settlementStatus: 'fixed_unit' })
       expect(await prisma.$transaction(tx => readCoverUnit(tx, attempt.id))).not.toBeNull()
-      expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, kind: 'usage', deltaMilli: -6000 } })).toBe(1)
+      expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId, kind: 'usage', deltaMilli: -6000 }) })).toBe(1)
       const bill = await getTaskCreditUsage(f.userId, lease.runId)
       expect(bill.charged).toBe(6)
       expect(bill.unresolvedProviderAttempts).toBe(0)

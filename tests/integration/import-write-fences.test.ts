@@ -1,3 +1,4 @@
+import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
@@ -110,7 +111,7 @@ describe.skipIf(!available)('import write fences: real isolated PostgreSQL', () 
           await lockNovelActiveScope(tx, f.novel.id)
           await tx.novel.update({ where: { id: f.novel.id }, data: { manuscriptRevision } })
         })
-        await expect(chapterCreateTool.execute(context, { title: 'Unauthorized next' })).rejects.toMatchObject({ code: 'IMPORT_SCOPE_CHANGED' })
+        await expectToolDenied(chapterCreateTool.execute(context, { title: 'Unauthorized next' }), { code: 'IMPORT_SCOPE_CHANGED' })
         await expect(continueLoopRun(f.user.id, f.run.id)).rejects.toMatchObject({ code: 'IMPORT_SCOPE_CHANGED' })
         expect(await prisma.chapter.count({ where: { novelId: f.novel.id } })).toBe(1)
       }

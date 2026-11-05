@@ -1,3 +1,4 @@
+import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { initializeExecutionState, saveExecutionState } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -62,7 +63,7 @@ describe.runIf(available)('plain title storage and frozen automatic tail-volume 
     const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     await expect(prepareStoryCompilation({ ...ctx, chapterId: undefined, targetOrderIndex: 2, mode: 'balanced', intentSummary: '写下一章' })).rejects.toMatchObject({ code: 'INVALID_ARGUMENTS' })
     expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
-    await expect(chapterCreateTool.execute(ctx, { title: '继续原卷' })).rejects.toMatchObject({ code: 'INVALID_ARGUMENTS' })
+    await expectToolDenied(chapterCreateTool.execute(ctx, { title: '继续原卷' }), { code: 'INVALID_ARGUMENTS' })
     expect(await prisma.chapter.count({ where: { novelId: f.novelId } })).toBe(1)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
     await prepare(ctx)
@@ -76,7 +77,7 @@ describe.runIf(available)('plain title storage and frozen automatic tail-volume 
       await prepare(other.ctx)
     } else await prepare(ctx, scenario === 'new-decision-without-proposal' ? proposed : undefined)
     if (scenario === 'changed-previous') await prisma.chapter.update({ where: { id: f.chapterId }, data: { revision: { increment: 1 } } })
-    await expect(chapterCreateTool.execute(ctx, { title: '不得悄然延续' })).rejects.toMatchObject({ code: scenario === 'changed-previous' ? 'AUTHOR_CHAPTER_SCOPE' : 'INVALID_ARGUMENTS' })
+    await expectToolDenied(chapterCreateTool.execute(ctx, { title: '不得悄然延续' }), { code: scenario === 'changed-previous' ? 'AUTHOR_CHAPTER_SCOPE' : 'INVALID_ARGUMENTS' })
     expect(await prisma.chapter.count({ where: { novelId: f.novelId } })).toBe(1)
     expect(await prisma.volume.count({ where: { novelId: f.novelId } })).toBe(1)
   }))
@@ -127,7 +128,7 @@ describe.runIf(available)('plain title storage and frozen automatic tail-volume 
     await chapterRenameTool.execute(ctx, { chapterId: f.chapterId, title: '第47章〈〉' })
     const literal = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     expect(literal).toMatchObject({ title: '第47章〈〉', content: saved.content, revision: saved.revision + 1 })
-    await expect(chapterRenameTool.execute(ctx, { chapterId: f.chapterId, title: '   ' })).rejects.toMatchObject({ code: 'CHAPTER_RENAME_INVALID' })
+    await expectToolDenied(chapterRenameTool.execute(ctx, { chapterId: f.chapterId, title: '   ' }), { code: 'CHAPTER_RENAME_INVALID' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(literal)
   }))
   it('an explicitly requested literal Agent chapter name creates actual body without relaxing target authority', async () => fixture(async f => {
@@ -135,7 +136,7 @@ describe.runIf(available)('plain title storage and frozen automatic tail-volume 
     await prepare(ctx)
     const result = await chapterCreateTool.execute(ctx, { title: '第2章《》', content: '林舟沿着墙边走到门前。' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: result.observedState!.id } })).toMatchObject({ title: '第2章《》', content: '林舟沿着墙边走到门前。', orderIndex: 2 })
-    await expect(chapterCreateTool.execute(ctx, { title: '仍须限制范围', position: 3 })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expectToolDenied(chapterCreateTool.execute(ctx, { title: '仍须限制范围', position: 3 }), { code: 'AUTHOR_CHAPTER_SCOPE' })
     expect(await prisma.chapter.count({ where: { novelId: f.novelId } })).toBe(2)
   }))
   it('every prepare reads the volume goal and exposes saved-plan mismatch instead of a chapter-count threshold', async () => fixture(async f => {
@@ -154,8 +155,8 @@ describe.runIf(available)('plain title storage and frozen automatic tail-volume 
     const { ctx, spec } = await admission(f, '写下一章', initial => ({ ...initial, scope: { ...initial.scope, volumeCreationProtocol: 1 } }))
     expect(spec.scope.writing?.tailVolume?.creationProtocol).toBe(2)
     await prepare(ctx, proposed)
-    await expect(chapterCreateTool.execute(ctx, { title: '聚沙', newVolume: proposed })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
-    await expect(chapterCreateTool.execute(ctx, { title: '聚沙' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expectToolDenied(chapterCreateTool.execute(ctx, { title: '聚沙', newVolume: proposed }), { code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expectToolDenied(chapterCreateTool.execute(ctx, { title: '聚沙' }), { code: 'AUTHOR_CHAPTER_SCOPE' })
     expect(await prisma.volume.count({ where: { novelId: f.novelId } })).toBe(1)
     const volume = await volumeCreateTool.execute(ctx, { ...proposed, targetOrderIndex: 2 })
     const reprepare = await prepare(ctx, proposed)
@@ -164,7 +165,7 @@ describe.runIf(available)('plain title storage and frozen automatic tail-volume 
     expect(replay.observedState!.id).toBe(volume.observedState!.id)
     expect(await prisma.volume.count({ where: { novelId: f.novelId } })).toBe(2)
     const old = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-    await expect(chapterCreateTool.execute(ctx, { title: '聚沙', volumeId: old.volumeId })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expectToolDenied(chapterCreateTool.execute(ctx, { title: '聚沙', volumeId: old.volumeId }), { code: 'AUTHOR_CHAPTER_SCOPE' })
     expect(await prisma.chapter.count({ where: { novelId: f.novelId } })).toBe(1)
     const result = await chapterCreateTool.execute(ctx, { title: '聚沙', content: '流民来到城下。', volumeId: volume.observedState!.id })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: result.observedState!.id } })).toMatchObject({ volumeId: volume.observedState!.id, orderIndex: 2, orderInVolume: 1 })
@@ -185,7 +186,7 @@ describe.runIf(available)('plain title storage and frozen automatic tail-volume 
     expect(replay.observedState!.id).toBe(created.id)
     expect(await prisma.volume.count({ where: { novelId: f.novelId } })).toBe(2)
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: created.id } })).toEqual(created)
-    await expect(volumeCreateTool.execute(ctx, { title: '独立越权新卷' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expectToolDenied(volumeCreateTool.execute(ctx, { title: '独立越权新卷' }), { code: 'AUTHOR_CHAPTER_SCOPE' })
   }))
   it.each(['stale', 'quote', 'previous-id', 'same-conflict', 'old-freeze', 'fixed-volume', 'selection', 'title-only', 'readonly', 'protected', 'inline-child', 'missing-prepare'] as const)(
     '%s cannot widen chapter creation or change an existing chapter', async scenario => fixture(async f => {
@@ -204,11 +205,11 @@ describe.runIf(available)('plain title storage and frozen automatic tail-volume 
         if (scenario === 'quote') proposed.boundary.quote = '不存在的收束原文，请勿臆造旧目标胜利'
         if (scenario === 'previous-id') proposed.boundary.previousChapterId = randomUUID()
         if (scenario === 'same-conflict') proposed.boundary.nextConflict = proposed.boundary.completedObjective
-        await expect(prepare(ctx, proposed)).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+        await expectToolDenied(prepare(ctx, proposed), { code: 'AUTHOR_CHAPTER_SCOPE' })
       } else {
         if (scenario !== 'missing-prepare') await prepare(ctx)
         const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-        await expect(chapterCreateTool.execute(ctx, { title: '新章', newVolume: proposed })).rejects.toMatchObject({ code: scenario === 'missing-prepare' ? 'INVALID_ARGUMENTS' : 'AUTHOR_CHAPTER_SCOPE' })
+        await expectToolDenied(chapterCreateTool.execute(ctx, { title: '新章', newVolume: proposed }), { code: scenario === 'missing-prepare' ? 'INVALID_ARGUMENTS' : 'AUTHOR_CHAPTER_SCOPE' })
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
       }
       expect(await prisma.volume.count({ where: { novelId: f.novelId } })).toBe(1)
@@ -269,7 +270,7 @@ describe.runIf(available)('plain title storage and frozen automatic tail-volume 
     expect(rename.operation.inputSnapshot).toMatchObject({ input: { args: { title: '第3章《》' } } })
     expect(runtimeJson(rename.result).hash).toBe(rename.resultHash)
     expect(await prisma.volume.count({ where: { novelId: f.novelId } })).toBe(2)
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: lease.taskRootId } } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: lease.taskRootId } } })).toBe(0)
     expect((await prisma.$transaction(tx => readWritingVolumeContext(tx, ctx, 2)))?.previousChapter.id).toBe(f.chapterId)
   }))
 })

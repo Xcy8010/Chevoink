@@ -38,14 +38,14 @@ describe('container wire decoding with native frozen operation recovery', () => 
     if (scenario === 'prepared') {
       vi.spyOn(operations, 'commitOperationEffect').mockRejectedValueOnce(new Error('synthetic interruption before DB effect'))
       await expect(step()).rejects.toThrow('synthetic interruption before DB effect')
-      frozen = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, operationKey: 'exec:0' } })
+      frozen = await prisma.agentOperation.findFirstOrThrow({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId, operationKey: 'exec:0' } })
       expect(frozen.status).toBe('prepared')
       expect(await prisma.storyCompilation.count({ where: { runId: f.runId } })).toBe(0)
     }
     if (scenario === 'succeeded') {
       vi.spyOn(reducer, 'reduceExecutionReceipt').mockRejectedValueOnce(new Error('synthetic interruption after actual receipt'))
       await expect(step()).rejects.toThrow('synthetic interruption after actual receipt')
-      frozen = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, operationKey: 'exec:0' } })
+      frozen = await prisma.agentOperation.findFirstOrThrow({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId, operationKey: 'exec:0' } })
       expect(frozen.status).toBe('succeeded')
       expect(await prisma.storyCompilation.count({ where: { runId: f.runId } })).toBe(1)
     }
@@ -64,7 +64,7 @@ describe('container wire decoding with native frozen operation recovery', () => 
       if (scenario === 'rejected-old') await operations.recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash,
         code: 'TOOL_SCHEMA_INVALID', output: '旧版本已确认未执行：volumeDecision要求对象。', summary: '参数校验失败' })
       else await prisma.agentOperation.update({ where: { id: operation.id }, data: { status: 'unknown' } })
-      frozen = await prisma.agentOperation.findFirstOrThrow({ where: { id: operation.id } })
+      frozen = await prisma.agentOperation.findFirstOrThrow({ where: { action: { not: 'fixture_model_turn' }, id: operation.id } })
     }
     const receiptBefore = frozen ? await prisma.agentEffectReceipt.findUnique({ where: { operationId: frozen.id } }) : null
     if (scenario === 'unknown') {
@@ -91,7 +91,7 @@ describe('container wire decoding with native frozen operation recovery', () => 
         expect(await prisma.storyCompilation.count({ where: { runId: f.runId } })).toBe(1)
       } else {
         expect(await prisma.storyCompilation.count({ where: { runId: f.runId } })).toBe(1)
-        const operation = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, operationKey: 'exec:0' } })
+        const operation = await prisma.agentOperation.findFirstOrThrow({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId, operationKey: 'exec:0' } })
         expect(operation.inputSnapshot).toMatchObject({ input: { args: canonical,
           normalization: { version: 1, rawArguments, normalizedArgsHash: runtimeJson(canonical).hash } } })
       }
@@ -105,7 +105,7 @@ describe('container wire decoding with native frozen operation recovery', () => 
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(source)
     expect((await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId } })).specSnapshot).toEqual(root.specSnapshot)
     expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })).toEqual(budget)
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
     expect(normalizeToolInput(storyCompilerPrepareTool, wire)).toEqual(canonical)
   }, undefined, '写下一章', { freezeWriting: true }))
 })

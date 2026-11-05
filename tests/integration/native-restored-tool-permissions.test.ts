@@ -1,3 +1,4 @@
+import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { randomUUID } from 'node:crypto'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { freezeWritingScope } from '../../api/lib/agent/writing-scope.js'
@@ -111,7 +112,7 @@ describe('split uses an actual new-chapter slot rather than a phase allowance', 
     const context = { ...f, callId: 'split', mode: 'build' as const, creativeFreedom: 'balanced' as const, qualityMode: 'balanced' as const, signal: new AbortController().signal, emit: () => {} }
     const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
     if (bounded) {
-      await expect(chapterSplitTool.execute(context, { chapterId: f.chapterId, splitOffset: 1, newChapterTitle: '后半章' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+      await expectToolDenied(chapterSplitTool.execute(context, { chapterId: f.chapterId, splitOffset: 1, newChapterTitle: '后半章' }), { code: 'AUTHOR_CHAPTER_SCOPE' })
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
       expect(await prisma.chapter.count({ where: { novelId: f.novelId } })).toBe(1)
     } else {
@@ -131,8 +132,8 @@ describe('split uses an actual new-chapter slot rather than a phase allowance', 
     const root = await initializeDurableTask({ userId: f.userId, runId, sourceMessageId: source.id })
     await claim({ ...f, runId, rootId: root.id })
     const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-    await expect(chapterSplitTool.execute({ ...f, runId, callId: 'local-split', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced',
-      signal: new AbortController().signal, emit: () => {} }, { chapterId: f.chapterId, splitOffset: 1, newChapterTitle: '越界新章' })).rejects.toMatchObject({ code: 'AUTHOR_LOCAL_SCOPE' })
+    await expectToolDenied(chapterSplitTool.execute({ ...f, runId, callId: 'local-split', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced',
+      signal: new AbortController().signal, emit: () => {} }, { chapterId: f.chapterId, splitOffset: 1, newChapterTitle: '越界新章' }), { code: 'AUTHOR_LOCAL_SCOPE' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
     expect(await prisma.chapter.count({ where: { novelId: f.novelId } })).toBe(1)
   }))
@@ -152,8 +153,8 @@ describe('split respects explicit volume placement of a new slot', () => {
     const root = await initializeDurableTask({ userId: f.userId, runId, sourceMessageId: source.id })
     await claim({ ...f, runId, rootId: root.id })
     const before = await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })
-    await expect(chapterSplitTool.execute({ ...f, runId, callId: 'wrong-volume-split', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced',
-      signal: new AbortController().signal, emit: () => {} }, { chapterId: f.chapterId, splitOffset: 1, newChapterTitle: '错误位置新章' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expectToolDenied(chapterSplitTool.execute({ ...f, runId, callId: 'wrong-volume-split', mode: 'build', creativeFreedom: 'balanced', qualityMode: 'balanced',
+      signal: new AbortController().signal, emit: () => {} }, { chapterId: f.chapterId, splitOffset: 1, newChapterTitle: '错误位置新章' }), { code: 'AUTHOR_CHAPTER_SCOPE' })
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
     expect(await prisma.chapter.count({ where: { novelId: f.novelId } })).toBe(1)
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).writingBindings).toBeNull()

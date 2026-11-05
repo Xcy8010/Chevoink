@@ -82,7 +82,7 @@ describe.runIf(available)('durable domain reads', () => {
         })
         await expect(executeDurableToolStep(lease, new AbortController().signal)).rejects.toThrow('fixture failure after artifact creation')
         expect(await prisma.agentArtifact.count({ where: { runId: f.runId } })).toBe(0)
-        const pending = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action }, include: { effectReceipt: true } })
+        const pending = await prisma.agentOperation.findFirstOrThrow({ where: {  taskRootId: f.rootId, action }, include: { effectReceipt: true } })
         expect(pending.effectReceipt).toBeNull()
       }
       const outcome = await executeDurableToolStep(lease, new AbortController().signal)
@@ -99,7 +99,7 @@ describe.runIf(available)('durable domain reads', () => {
         expect(state.frame.state.messages.at(-1)?.content).not.toContain('reusedCount')
         expect((await prisma.researchDossier.findFirstOrThrow({ where: { novelId: f.novelId } })).reusedCount).toBe(1)
       }
-      expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action } })).toBe(1)
+      expect(await prisma.agentOperation.count({ where: {  taskRootId: f.rootId, action } })).toBe(1)
       if (action === 'project_search') {
         expect(outcome.result.output.match(/\[content@/g)).toHaveLength(25)
         expect(await prisma.agentArtifact.count({ where: { runId: f.runId } })).toBe(1)
@@ -116,7 +116,7 @@ describe.runIf(available)('durable domain reads', () => {
       }
       // Dispatching again after reduction must not repeat the read or create another artifact.
       expect(await executeDurableToolStep(lease, new AbortController().signal)).toMatchObject({ kind: 'idle' })
-      expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action } })).toBe(scenario === 'search-repeat' ? 2 : 1)
+      expect(await prisma.agentOperation.count({ where: {  taskRootId: f.rootId, action } })).toBe(scenario === 'search-repeat' ? 2 : 1)
       if (action === 'project_search') expect(await prisma.agentArtifact.count({ where: { runId: f.runId } })).toBe(scenario === 'search-repeat' ? 2 : 1)
     })
   })
@@ -144,11 +144,8 @@ describe.runIf(available)('durable service dispatch', () => {
         taskSpec: JSON.parse(JSON.stringify(spec)) } })
       await prisma.agentMessage.create({ data: { runId, sessionId: f.sessionId, role: 'user', parts: [{ type: 'text', text: prompt }] } })
       const admitted = await initializePersistedLoopRun(f.userId, runId, input)
-      const expected = scenario === 'network-denied' ? ['chapter_read', 'chapter_write', 'plan_save', 'volume_create', 'execution_context_read']
-        : scenario === 'search-only' ? ['chapter_read', 'web_search', 'research_report_save', 'research_report_read', 'execution_context_read']
-        : scenario === 'research' ? ['chapter_read', 'web_search', 'web_read', 'research_report_save', 'research_report_read', 'execution_context_read']
-        : scenario === 'conversation' ? ['chapter_read', 'web_search', 'web_read', 'research_report_read', 'execution_context_read']
-        : ['chapter_read', 'web_search', 'web_read', 'plan_save', ...(scenario === 'proposal' ? ['research_report_read'] : []), 'execution_context_read']
+      const expected = [...candidates.filter(tool => !(scenario === 'network-denied' && ['web_search', 'web_read'].includes(tool.name))
+        && !(scenario === 'search-only' && tool.name === 'web_read')).map(tool => tool.name), 'execution_context_read']
       expect(admitted.configuration.tools.map(tool => tool.function.name)).toEqual(expected)
       expect(admitted.configuration.toolAuthority.map(tool => tool.name)).toEqual(expected)
       tools.mockReturnValue([])
@@ -354,7 +351,7 @@ describe.runIf(available)('durable context archive', () => {
       vi.stubGlobal('fetch', fetchMock)
       await expect(executeDurableStep(lease, new AbortController().signal)).rejects.toMatchObject({ code: 'RUNTIME_CONTEXT_LIMIT' })
       expect(fetchMock).not.toHaveBeenCalled()
-      expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId } })).toBe(0)
+      expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } })).toBe(0)
       expect((await loadExecutionState(f.userId, f.runId)).frame.snapshotHash).toBe(state.frame.snapshotHash)
     })
   })

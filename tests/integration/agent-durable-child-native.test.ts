@@ -1,4 +1,4 @@
-import { initializeExecutionState, saveExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
+import { initializeExecutionState, saveExecutionState, createToolFixtureCreditAccount, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
@@ -9,7 +9,20 @@ import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
 import { acquireRunLease } from '../../api/lib/agent/runtime-lease.js'
 import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
-import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
+import { executeDurableToolStep as executeStep } from '../../api/lib/agent/runtime-tool-step.js'
+import { resolveDurableApproval } from '../../api/lib/agent/runtime-approval.js'
+
+// This fixture explicitly approves its orchestration tools through the real
+// current approval receipt; a frozen allow never bypasses a current ask.
+async function executeDurableToolStep(...args: Parameters<typeof executeStep>) {
+  const result = await executeStep(...args)
+  if (result.kind !== 'waiting_approval') return result
+  const [lease] = args
+  const approval = await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { id: result.approvalId } })
+  const callId = (approval.payload as { callId: string }).callId
+  await resolveDurableApproval({ userId: lease.userId, runId: lease.runId, requestId: result.approvalId, callId, approved: true, alwaysAllow: false })
+  return executeStep(...args)
+}
 import { runReviewedDurableExecution } from '../../api/lib/agent/runtime-executor.js'
 import { dispatchDurableChild, awaitDurableChildren } from '../../api/lib/agent/runtime-child-tools.js'
 import { admitChildExecution, verifyChildGrant, assertPinnedChildCompletion } from '../../api/lib/agent/runtime-child.js'
@@ -313,7 +326,7 @@ describe.runIf(available)('durable native child HTTP path in isolated PG', () =>
     await executeDurableToolStep(exec.lease, new AbortController().signal)
     const grant = await prisma.agentChildExecutionGrant.findFirstOrThrow({ where: { parentRootId: exec.root.id } })
     await dispatchDurableChild(f.userId, grant.childRunId).catch(() => {})
-    const attempt = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { runId: grant.childRunId } })
+    const attempt = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { action: { not: 'fixture_model_turn' } }, runId: grant.childRunId } })
     await expect(deleteAgentSessionData(f.userId, f.sessionId)).rejects.toMatchObject({ code: 'RUNTIME_CHILD_DELETION_BLOCKED' })
     expect(await prisma.agentSession.findUnique({ where: { id: f.sessionId } })).not.toBeNull()
     expect(await prisma.agentChildExecutionGrant.findUnique({ where: { id: grant.id } })).not.toBeNull()
@@ -349,7 +362,7 @@ describe.runIf(available)('durable native child HTTP path in isolated PG', () =>
       expect((await loadExecutionState(f.userId, exec.runId)).configuration.model).toEqual(exec.initial.configuration.model)
       expect(fetcher).toHaveBeenCalledOnce()
       expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body)).model).toBe('platform-B')
-      const modelOp = await prisma.agentOperation.findFirstOrThrow({ where: { originRunId: grant.childRunId, kind: 'provider' } })
+      const modelOp = await prisma.agentOperation.findFirstOrThrow({ where: { action: { not: 'fixture_model_turn' }, originRunId: grant.childRunId, kind: 'provider' } })
       expect(modelOp.inputSnapshot).toMatchObject({ input: { billing: childPrice } })
     } finally {
       await prisma.aiModelConfigVersion.deleteMany({ where: { modelConfigId: { in: ids } } })
@@ -429,7 +442,7 @@ describe.runIf(available)('durable native child HTTP path in isolated PG', () =>
     expect(grant.tokenCeiling).toBe(500)
     const child = await loadExecutionState(f.userId, grant.childRunId)
     expect(child.frame.state.messages[0]).toMatchObject({ content: 'KEEP_CONTEXT'.repeat(10000) })
-    expect((await prisma.agentProviderAttempt.findFirstOrThrow({ where: { runId: grant.childRunId } })).dispatchedAt).not.toBeNull()
+    expect((await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { action: { not: 'fixture_model_turn' } }, runId: grant.childRunId } })).dispatchedAt).not.toBeNull()
     const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body))
     expect(body.messages[0].content).toContain('KEEP_CONTEXT'.repeat(10000))
     expect(body.max_completion_tokens ?? body.max_tokens).toBe(100)
@@ -600,16 +613,16 @@ describe.runIf(available)('durable native child HTTP path in isolated PG', () =>
     expect((await prisma.agentGoal.findUniqueOrThrow({ where: { id: exec.goalId! } })).currentRunId).toBe(exec.runId)
     expect(await prisma.agentGoalBudget.findUniqueOrThrow({ where: { goalId: exec.goalId! } })).toMatchObject({ tokensUsed: 60n, tokensReserved: 0n })
     expect(await prisma.agentGoalUsage.count({ where: { goalId: exec.goalId! } })).toBe(1)
-    const raw = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { runId: grant.childRunId }, include: { usageReceipt: true } })
+    const raw = await prisma.agentProviderAttempt.findFirstOrThrow({ where: { operation: { action: { not: 'fixture_model_turn' } }, runId: grant.childRunId }, include: { usageReceipt: true } })
     const budget = await prisma.agentGoalBudget.findUniqueOrThrow({ where: { goalId: exec.goalId! } })
-    const ledger = await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })
+    const ledger = await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })
     await expect(prisma.$transaction(tx => withGoalTransaction(tx, () => withoutGoalEffects(() => observeGoalUsage(`durable:${raw.id}`,
       { inputTokens: 50, outputTokens: 10, creditsMilli: 0, status: 'known' }))))).rejects.toMatchObject({ code: 'GOAL_USAGE_TRANSACTION_REQUIRED' })
     expect(await prisma.agentProviderAttempt.findUniqueOrThrow({ where: { id: raw.id }, include: { usageReceipt: true } })).toEqual(raw)
     await syncGoalDurableUsage(raw.id)
     await syncGoalDurableUsage(raw.id)
     expect(await prisma.agentGoalBudget.findUniqueOrThrow({ where: { goalId: exec.goalId! } })).toEqual(budget)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(ledger)
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(ledger)
     expect(fetcher).toHaveBeenCalledOnce()
   }), 30000)
 

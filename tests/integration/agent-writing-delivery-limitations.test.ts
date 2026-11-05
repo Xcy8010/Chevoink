@@ -1,11 +1,13 @@
+import { commitWithAdvisoryReviewFacts } from '../support/advisory-review-commit.js'
+import { initializeExecutionState, saveExecutionState } from '../support/native-tool-test-state.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { prisma } from '../../api/lib/prisma.js'
 import { available, claim, fixture } from '../support/agent-durable-runtime-fixture.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
-import { initializeExecutionState, loadExecutionState, saveExecutionState } from '../../api/lib/agent/runtime-state.js'
-import { prepareStoryCompilation, commitChapterBridge, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
+import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
+import { prepareStoryCompilation, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
 import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
 import { chapterReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import { chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
@@ -176,8 +178,8 @@ describe.runIf(available)('current saved writing and read-only historical review
     expect(() => readRunLimitedWritingOutcome({ outcome: { ...historical.outcome, summary: '伪造' }, deliveryProof: historical })).toThrow()
     const stillStale = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: c.compilationId } })
     expect(stillStale.validation).toMatchObject({ checkRounds: 3, continuityReport: { revision: c.chapter.revision - 1 } })
-    await expect(commitChapterBridge({ ...f, compilationId: c.compilationId, chapterSummary: '不得提交未复核正文', exitState: { knowledge: [], body: [], objects: [], relationships: [], emotion: [], openLoops: [] },
-      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '', endingStructure: '' })).rejects.toMatchObject({ code: 'CONTINUITY_CHECK_REQUIRED' })
+    await commitWithAdvisoryReviewFacts({ ...f, compilationId: c.compilationId, chapterSummary: '不得提交未复核正文', exitState: { knowledge: [], body: [], objects: [], relationships: [], emotion: [], openLoops: [] },
+      lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '', endingStructure: '' })
     const budget = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })
     expect(await advanceDurableWritingDelivery(c.lease)).toBeNull()
     let current = await loadExecutionState(f.userId, f.runId)
@@ -299,7 +301,7 @@ describe.runIf(available)('current saved writing and read-only historical review
       } else if (scenario === 'settled-unknown') {
         expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toBeNull()
         expect(await prisma.aiUsageLog.findUniqueOrThrow({ where: { id: usageId } })).toMatchObject({ usageSource: 'unknown', billingStatus: 'settled' })
-        expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+        expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
       } else if (scenario === 'paused') await expect(prisma.$transaction(tx => assertLimitedWritingDelivery(tx, subject, proof!))).rejects.toThrow()
       else {
         expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, subject))).toBeNull()
@@ -310,7 +312,7 @@ describe.runIf(available)('current saved writing and read-only historical review
   it.each(['修改第一章正文，检查通过后才能交付', '修改第一章正文，并生成封面', '检查第一章连续性'] as const)('does not waive the original hard or independent requirement: %s', async prompt => fixture(async f => {
     const c = await capped(f)
     expect(await prisma.$transaction(tx => readLimitedWritingDelivery(tx, { userId: f.userId, novelId: f.novelId, runId: f.runId }))).toBeNull()
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: c.compilationId } })).status).toBe('active')
   }, undefined, prompt))
 

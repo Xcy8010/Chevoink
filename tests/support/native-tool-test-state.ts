@@ -15,12 +15,12 @@ import type { RunLeaseToken } from '../../api/lib/agent/runtime-lease.js'
 async function appendModelResult(lease: RunLeaseToken, assistant: NonNullable<ReturnType<typeof assistantTail>>) {
   const current = await loadExecutionState(lease.userId, lease.runId), { frame, configuration } = current
   const model = configuration.model
-  const request = { endpoint: 'https://provider.invalid/v1', body: { model: model.modelName, messages: frame.state.messages, tools: configuration.tools } }
+  const request = { endpoint: 'https://provider.invalid/v1', body: { model: model.modelName, messages: frame.state.messages, tools: configuration.tools, max_tokens: model.maxOutputTokens ?? 128 } }
   const price = { version: 'credits-v1-exact' as const, modelTier: model.tier, multiplierBps: 0 }
   const prepared = await prepareModelCursorOperation(lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash },
     { key: 'exec:' + frame.state.nextOperationSequence, action: 'fixture_model_turn', request, price })
   const attempt = await prepareProviderAttempt(lease, { operationId: prepared.operation.id, attemptKey: '1', provider: model.provider, model: model.modelName, request })
-  await markProviderDispatched(lease, attempt.id)
+  await markProviderDispatched(lease, attempt.id, 0)
   const identity = { userId: lease.userId, attemptId: attempt.id, requestHash: attempt.requestHash }
   await recordProviderUsage({ ...identity, revision: 1, usage: { source: 'reported', promptTokens: 0, completionTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0 } })
   await recordProviderResult({ ...identity, outcome: 'succeeded', result: { content: assistant.content ?? '', reasoning: assistant.reasoning ?? '',
@@ -55,4 +55,12 @@ export async function saveExecutionState(lease: RunLeaseToken, input: Parameters
 export async function createToolFixtureCreditAccount(input: { data: Prisma.CreditAccountUncheckedCreateInput }) {
   const { userId, ...values } = input.data
   return prisma.creditAccount.upsert({ where: { userId }, create: input.data, update: values })
+}
+
+/** Counts and snapshots for a tool exclude only this adapter's separately
+ * authenticated zero-charge model source. Real auxiliary attempts/charges,
+ * including zero-charge tools, remain visible to the original assertions. */
+export async function toolFixtureLedgerWhere(userId: string, where: Prisma.CreditLedgerEntryWhereInput = {}): Promise<Prisma.CreditLedgerEntryWhereInput> {
+  const sources = await prisma.agentOperation.findMany({ where: { action: 'fixture_model_turn', taskRoot: { userId } }, select: { id: true } })
+  return { AND: [where, { OR: [{ referenceId: null }, { referenceId: { notIn: sources.map(source => source.id) } }, { deltaMilli: { not: 0 } }] }] }
 }

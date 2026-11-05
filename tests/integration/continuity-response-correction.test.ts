@@ -1,3 +1,4 @@
+import { initializeExecutionState } from '../support/native-tool-test-state.js'
 import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
@@ -5,7 +6,7 @@ import { prisma } from '../../api/lib/prisma.js'
 import * as credits from '../../api/lib/credits.js'
 import * as tokenPrices from '../../api/lib/billing/resolve-token-price.js'
 import { prepareStoryCompilation, saveSceneTasks } from '../../api/lib/agent/story-compiler.js'
-import { initializeExecutionState } from '../../api/lib/agent/runtime-state.js'
+
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
 import { chapterBridgeGetTool, continuityValidateTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { readHistoricalStandaloneContinuityContext, standaloneContinuityBindingHash } from '../../api/lib/agent/continuity-history.js'

@@ -1,4 +1,4 @@
-import { initializeExecutionState, saveExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
+import { initializeExecutionState, saveExecutionState, createToolFixtureCreditAccount, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { createHash } from 'node:crypto'
 import { describe, expect, it, vi, type MockInstance } from 'vitest'
 import { z } from 'zod'
@@ -68,7 +68,7 @@ describe.runIf(available)('durable web identity, research budget and dispatch fe
       expect(await prisma.agentEffectReceipt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
     } else expect(await executeDurableToolStep(lease, signal())).toMatchObject({ kind: 'tool' })
     expect(transport).toHaveBeenCalledOnce()
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, kind: 'usage' } })).toBe(1)
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId, kind: 'usage' }) })).toBe(1)
     expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'approval.requested' } })).toBe(1)
     expect(await prisma.webToolCall.count({ where: { runId: f.runId, status: 'completed' } })).toBe(1)
   }, 'ask'))
@@ -89,7 +89,7 @@ describe.runIf(available)('durable web identity, research budget and dispatch fe
     }
     expect(await executeDurableToolStep(lease, signal())).toMatchObject({ kind: scenario === 'receipt' ? 'recovered' : 'tool' })
     expect(transport).toHaveBeenCalledTimes(1)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, kind: 'usage' } })).toBe(1)
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId, kind: 'usage' }) })).toBe(1)
     const row = await prisma.webToolCall.findFirstOrThrow({ where: { runId: f.runId } })
     expect(row.amountMilli).toBe(2000)
     expect(await prisma.webToolCall.count({ where: { runId: lease.runId } })).toBe(lease.runId === f.runId ? 1 : 0)
@@ -110,7 +110,7 @@ describe.runIf(available)('durable web identity, research budget and dispatch fe
     if (scenario === 'exhausted') expect(await executeDurableToolStep(lease, controller.signal)).toMatchObject({ kind: 'tool', result: { outcome: 'failed', failureCode: 'CREDITS_EXHAUSTED' } })
     else await expect(executeDurableToolStep(lease, controller.signal)).rejects.toThrow()
     expect(transport).not.toHaveBeenCalled()
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
     expect(await prisma.webToolCall.count({ where: { runId: f.runId } })).toBe(0)
     expect(await prisma.agentResearchRequest.count({ where: { ownerRunId: f.runId } })).toBe(0)
   }))
@@ -142,7 +142,7 @@ describe.runIf(available)('durable web identity, research budget and dispatch fe
     await expect(executeDurableToolStep(nextLease, signal())).rejects.toMatchObject({ code: 'CREDIT_WEB_TOOL_PENDING' })
     expect(transport).toHaveBeenCalledTimes(1)
     expect(await prisma.webToolCall.count({ where: { runId: f.runId } })).toBe(1)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, kind: 'usage' } })).toBe(1)
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId, kind: 'usage' }) })).toBe(1)
     expect(await prisma.agentResearchRequest.count({ where: { ownerRunId: f.runId, status: 'consumed' } })).toBe(1)
   }))
 

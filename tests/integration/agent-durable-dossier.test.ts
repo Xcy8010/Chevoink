@@ -1,4 +1,4 @@
-import { initializeExecutionState, createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
+import { initializeExecutionState, createToolFixtureCreditAccount, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { prisma } from '../../api/lib/prisma.js'
@@ -131,8 +131,8 @@ describe.runIf(available)('research dossier owns its original queries, synthesis
     if (scenario === 'invalid-complete') { expect(rows[0].factCards).toEqual([]); expect(rows[0].marketPatterns).toEqual([]) }
     const webCalls = await prisma.webToolCall.findMany({ where: { runId: f.runId } })
     expect(webCalls.every(call => call.amountMilli === 0 && call.multiplierBps === 0)).toBe(true)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, sourceType: 'web_search', deltaMilli: { not: 0 } } })).toBe(0)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId, sourceType: 'model_tokens' } })).toBe(fetch.mock.calls.length)
-    expect(JSON.stringify(await prisma.agentOperation.findMany({ where: { taskRootId: f.rootId } }))).not.toContain('isolated-search-key')
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId, sourceType: 'web_search', deltaMilli: { not: 0 } }) })).toBe(0)
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId, sourceType: 'model_tokens' }) })).toBe(fetch.mock.calls.length)
+    expect(JSON.stringify(await prisma.agentOperation.findMany({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } }))).not.toContain('isolated-search-key')
   }, undefined, scenario === 'force-human' ? '请重新建立研究档案。' : '请建立创作研究档案。'))
 })

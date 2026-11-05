@@ -1,3 +1,4 @@
+import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -96,10 +97,10 @@ describe.skipIf(!available)('R05 private attachment access paths', () => {
     expect(response.text).not.toContain(secret)
   })
   it('does not let read_file read another user file', async () => {
-    await expect(readFileTool.execute(context(other), { url: ownedUrl })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    await expectToolDenied(readFileTool.execute(context(other), { url: ownedUrl }), { code: 'FORBIDDEN' })
   })
   it('does not send another user image to the vision provider', async () => {
-    await expect(viewImageTool.execute(context(other), { url: imageUrl })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    await expectToolDenied(viewImageTool.execute(context(other), { url: imageUrl }), { code: 'FORBIDDEN' })
     expect(vision).not.toHaveBeenCalled()
   })
   it('does not load another user image into main-model inputs', async () => {

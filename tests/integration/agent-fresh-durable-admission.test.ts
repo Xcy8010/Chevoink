@@ -508,7 +508,9 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
           { index: 1, id: 'fresh-scenes', type: 'function', function: { name: 'scene_task_build', arguments: JSON.stringify({ tasks: [scene] }) } },
           { index: 2, id: 'fresh-read', type: 'function', function: { name: 'chapter_read', arguments: JSON.stringify({ chapterId: f.chapterId }) } },
           { index: 3, id: 'fresh-writer', type: 'function', function: { name: 'chapter_write', arguments: JSON.stringify({ chapterId: f.chapterId, content }) } },
-          { index: 4, id: 'fresh-commit', type: 'function', function: { name: 'chapter_bridge_commit', arguments: JSON.stringify({ chapterSummary: '仍停在原地' }) } },
+          { index: 4, id: 'fresh-quality', type: 'function', function: { name: 'quality_analyze', arguments: JSON.stringify({ chapterId: f.chapterId, readOnly: true }) } },
+          { index: 5, id: 'fresh-continuity', type: 'function', function: { name: 'continuity_validate', arguments: JSON.stringify({ chapterId: f.chapterId, readOnly: true }) } },
+          { index: 6, id: 'fresh-commit', type: 'function', function: { name: 'chapter_bridge_commit', arguments: JSON.stringify({ chapterSummary: '仍停在原地' }) } },
         ] } : { content: '第一章已保存并完成核对。' }
       } else {
         criticCalls++

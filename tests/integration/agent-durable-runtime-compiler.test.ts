@@ -1,4 +1,5 @@
-import { initializeExecutionState, saveExecutionState } from '../support/native-tool-test-state.js'
+import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
+import { initializeExecutionState, saveExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { describe,expect,it,vi } from 'vitest'
@@ -87,7 +88,7 @@ describe.runIf(available)('first writing workflow milestones are bounded persist
     const saved = await loadExecutionState(f.userId, f.runId)
     await expect(withRunLease(lease, tx => collectDurableToolEvidence(tx, f.rootId, saved.frame.revision)))
       .rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
   }), 15000)
 
   it('a native spawned child cannot expand compiler identity, and its failed receipt buys no child or parent workflow progress', async () => writingFixture(async f => {
@@ -97,7 +98,7 @@ describe.runIf(available)('first writing workflow milestones are bounded persist
       checkpointIndex: 0, phase: 'idle', pendingOperationId: null, messages: [{ role: 'user', content: '修改本章' },
         { role: 'assistant', content: null, toolCalls: [{ id: 'spawn', name: 'task_spawn', arguments: JSON.stringify(args) }] }], successfulToolSignatures: [] } })
     const op = await prepareToolCursorOperation(parent, { expectedRevision: initial.frame.revision, expectedHash: initial.frame.snapshotHash },
-      { key: 'exec:0', action: 'task_spawn', callId: 'spawn', targetId: f.rootId, effectDomain: 'read', effectiveArgs: args,
+      { key: `exec:${initial.frame.state.nextOperationSequence}`, action: 'task_spawn', callId: 'spawn', targetId: f.rootId, effectDomain: 'read', effectiveArgs: args,
         operationInput: { callId: 'spawn', args }, normalize: raw => taskSpawnTool.parameters.parse(raw) })
     const grant = await admitChildExecution(parent, { parentOperationId: op.operation.id, childIndex: 0, kind: 'spawned', role: 'orchestrator',
       name: args.tasks[0].title, prompt: args.tasks[0].brief,
@@ -126,7 +127,7 @@ describe.runIf(available)('first writing workflow milestones are bounded persist
     expect(childEvidence.effects).toEqual([]); expect(childEvidence.progressSequence).toBe('0')
     const parentState = await loadExecutionState(f.userId, f.runId)
     expect((await withRunLease(parent, tx => collectDurableToolEvidence(tx, f.rootId, parentState.frame.revision))).progressSequence).toBe('0')
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: { in: [f.rootId, child.taskRootId] } } } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: { in: [f.rootId, child.taskRootId] } } } })).toBe(0)
   }), 15000)
   it('an already saved PREPARE can advance through first scenes and actual next-chapter body, without certifying delivery', async () => writingFixture(async f => {
     await claim(f)
@@ -148,7 +149,7 @@ describe.runIf(available)('first writing workflow milestones are bounded persist
     expect(after).toEqual({ ...old, updatedAt: after.updatedAt })
     expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, f))).toBeNull()
     expect((await sceneTaskBuildTool.execute(ctx, { compilationId: prepared.compilation.id, tasks })).workflowMilestone).toBeUndefined()
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
   }, undefined, '写下一章'), 15000)
 
   it.each(['prepare', 'scenes'] as const)('%s rollback preserves the genuinely first opportunity', async phase => writingFixture(async f => {
@@ -186,8 +187,8 @@ describe.runIf(available)('first writing workflow milestones are bounded persist
     const reviewed = await persistCurrentContinuityReport({ ...f, compilationId: replacement.id, expectedChapterRevision: 1, opinions: [] })
     expect(reviewed.result).toMatchObject({ reviewCompleted: true })
     expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: replacement.id } })).validation).toMatchObject({ independentCheck: 'complete', checkedRevision: 1 })
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
   }), 15000)
 
   it('concurrent prepare and scene saves serialize one first observation per phase', async () => writingFixture(async f => {
@@ -215,7 +216,7 @@ describe.runIf(available)('first writing workflow milestones are bounded persist
     expect((await sceneTaskBuildTool.execute(ctx, { compilationId: prepared.compilation.id, tasks })).workflowMilestone)
       .toMatchObject({ runId: resumed.run.id, phase: 'scenes' })
     expect((await storyCompilerPrepareTool.execute(ctx, { chapterId: f.chapterId, intentSummary: '继续同一任务' })).workflowMilestone).toBeUndefined()
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
   }), 15000)
 })
 
@@ -293,7 +294,7 @@ describe.runIf(available)('durable compiler dispatch', () => {
       if (scenario === 'replay') {
         const tool: AgentTool = { ...storyCompilerPrepareTool, execute: (ctx, args) => storyCompilerPrepareTool.execute(ctx, storyCompilerPrepareTool.parameters.parse(args)) }
         const ctx: ToolContext = { ...f, mode: 'build', callId: 'prepare', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {},
-          durableCompiler: { lease, cursor: { expectedRevision: 0, expectedHash: initialized.frame.snapshotHash }, operationKey: 'exec:0', baseline: null } }
+          durableCompiler: { lease, cursor: { expectedRevision: initialized.frame.revision, expectedHash: initialized.frame.snapshotHash }, operationKey: `exec:${initialized.frame.state.nextOperationSequence}`, baseline: null } }
         expect(await executeDurableCompiler(ctx, tool, prepareArgs)).toEqual(prepared.result)
         expect(await prisma.storyCompilation.count({ where: { runId: f.runId } })).toBe(1)
       }
@@ -353,17 +354,16 @@ describe.runIf(available)('durable compiler dispatch', () => {
           expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(0)
         }
         const committed = await step()
-        if (scenario === 'commit-stale' || scenario === 'commit-no-quality') {
+        if (scenario === 'commit-stale') {
           expect(committed).toMatchObject({ kind: 'tool', result: { outcome: 'failed' } })
           expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id } })).status).toBe('active')
           expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(0)
-          if (scenario === 'commit-no-quality') {
-            expect(committed).toMatchObject({ result: { failureCode: 'QUALITY_CHECK_REQUIRED' } })
-            expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: id } })).committedAt).toBeNull()
-            expect(await prisma.chapterQualityReport.count({ where: { compilationId: id } })).toBe(0)
-          }
         } else {
           expect(committed).toMatchObject({ kind: 'tool', result: { summary: '章节已提交' } })
+          if (scenario === 'commit-no-quality') {
+            expect(await prisma.chapterQualityReport.count({ where: { compilationId: id } })).toBe(0)
+            expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, id))).toMatchObject({ quality: 'missing' })
+          }
           if (scenario === 'commit-retain') {
             const operation = await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'chapter_bridge_commit' }, orderBy: { createdAt: 'desc' } })
             expect(operation.inputSnapshot).toMatchObject({ input: { args: { retainedFindings: retained } } })
@@ -551,8 +551,8 @@ describe.runIf(available)('completed next-chapter existing plan reconciliation',
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: chapter.id } })).toEqual(completed)
     expect(await prisma.chapterQualityReport.findMany({ where: { compilationId }, orderBy: { id: 'asc' } })).toEqual(reports)
     expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'chapter_bridge_commit' } })).toBe(1)
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
-    expect(await prisma.creditLedgerEntry.count({ where: { userId: f.userId } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
+    expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
     const events = await publishDurableEvents(f.userId, lease.runId, 200)
     expect(events.filter(event => event.type === 'tool.deferred')).toMatchObject([
       { callId: 'extra-check', toolName: 'quality_analyze', execution: 'not_dispatched' },
@@ -613,7 +613,7 @@ describe.runIf(available)('durable task todos', () => {
       expect(JSON.parse(artifact!.content)).toEqual(initial)
       if (scenario === 'replay') {
         const ctx: ToolContext = { ...f, mode, callId: 'todo-first', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {},
-          durableTask: { lease, operationKey: 'exec:0', cursor: { expectedRevision: 0, expectedHash: initialized.frame.snapshotHash } } }
+          durableTask: { lease, operationKey: `exec:${initialized.frame.state.nextOperationSequence}`, cursor: { expectedRevision: initialized.frame.revision, expectedHash: initialized.frame.snapshotHash } } }
         expect(await executeDurableTodo(ctx, args)).toEqual(first.kind === 'tool' ? first.result : undefined)
         expect((await prisma.agentArtifact.findUniqueOrThrow({ where: { id: artifact!.id } })).updatedAt).toEqual(artifact!.updatedAt)
       }
@@ -692,7 +692,7 @@ describe.runIf(available)('durable history observations', () => {
       await prisma.agentSession.update({ where: { id: f.sessionId }, data: { title: '改变了的任务标题' } })
       const ctx: ToolContext = { ...f, callId: 'history', mode: 'review', creativeFreedom: 'balanced', qualityMode: 'premium', signal: new AbortController().signal, emit: () => {},
         toolAuthority: new Map([[action, { permission: 'allow', alwaysConfirm: false, dangerous: false }]]),
-        durableRead: { lease, operationKey: 'exec:0', cursor: { expectedRevision: 0, expectedHash: initialized.frame.snapshotHash } } }
+        durableRead: { lease, operationKey: `exec:${initialized.frame.state.nextOperationSequence}`, cursor: { expectedRevision: initialized.frame.revision, expectedHash: initialized.frame.snapshotHash } } }
       const replay = await executeDurableRead(ctx, action, args, normalize, async () => { throw new Error('Replay must not read changed history') })
       expect(replay).toEqual(result.result)
       expect((await loadExecutionState(f.userId, f.runId)).configuration).toEqual(initialized.configuration)

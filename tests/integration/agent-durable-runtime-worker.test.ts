@@ -100,7 +100,8 @@ describe.runIf(available)('durable worker orchestration', () => {
         requests++
         if (scenario === 'unknown') throw new Error('fixture disconnected')
         const body = JSON.parse(String(init.body))
-        expect(body.messages[0].content).toBe('检查本章')
+        expect(body.messages).toContainEqual(expect.objectContaining({ role: 'user', content: '检查本章' }))
+        expect(body.messages).toContainEqual(expect.objectContaining({ role: 'system', content: expect.stringContaining('[当前工具执行规则]') }))
         if (requests === 2) expect(body.messages.at(-1)).toMatchObject({ role: 'tool', tool_call_id: scenario === 'checkpoint-noop' ? 'noop' : writes ? 'write' : 'read' })
         if (continues && requests > 2) {
           expect(body.messages.at(-1)).toMatchObject({ role: 'system' })

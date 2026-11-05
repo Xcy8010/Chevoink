@@ -63,7 +63,7 @@ describe.runIf(available)('durable workspace changes', () => {
     expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe(scenario === 'approved' ? '新文' : '原文')
     expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'approval.requested' } })).toBe(1)
     expect(await prisma.changeSet.count({ where: { userId: f.userId } })).toBe(1)
-    expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+    expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } } })).toBe(0)
   }))
 
   it.each(['bulk_replace_preview', 'entity_rename_preview'] as const)('recovers one %s receipt without creating another preview', name => fixture(async f => {

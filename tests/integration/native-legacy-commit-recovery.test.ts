@@ -30,7 +30,7 @@ describe.runIf(available)('existing commit internal work survives the workflow u
     const model = { tier: 'speed' as const, provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high' as const, routeRevision: 'a'.repeat(64) }
     const initial = await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator',
       creativeFreedom: 'balanced', qualityMode: 'balanced', model,
-      tools: tools.map(tool => ({ type: 'function', function: toOpenAIToolPresentation(tool, f.spec.scope) })),
+      tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, ...toOpenAIToolPresentation(tool, f.spec.scope) } })),
       toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', dangerous: false, alwaysConfirm: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
       snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
         successfulToolSignatures: [], messages: [{ role: 'user', content: '修改本章并检查质量。' }, { role: 'assistant', content: null,
@@ -71,7 +71,7 @@ describe.runIf(available)('existing commit internal work survives the workflow u
       await expect(executePreparedCompilerWork(ctx, lease, parent.operation.id, chapterBridgeCommitTool)).rejects.toThrow('fixture crash before internal receipt')
       interrupted.mockRestore()
       expect(await prisma.agentEffectReceipt.count({ where: { operationId: internal.id } })).toBe(0)
-      expect(await prisma.agentProviderAttempt.count({ where: { operation: { parentOperationId: internal.id }, status: 'succeeded' } })).toBe(1)
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, parentOperationId: internal.id }, status: 'succeeded' } })).toBe(1)
       expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: parent.operation.id } })).toMatchObject({ status: 'prepared' })
       await executePreparedCompilerWork(ctx, lease, parent.operation.id, chapterBridgeCommitTool)
       expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: internal.id } })).toMatchObject({ status: 'succeeded', inputHash: frozenInputHash })
@@ -82,10 +82,10 @@ describe.runIf(available)('existing commit internal work survives the workflow u
       expect(await prisma.agentEffectReceipt.count({ where: { operationId: { in: [internal.id, parent.operation.id] } } })).toBe(0)
       expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: parent.operation.id } })).toMatchObject({ status: 'prepared' })
       expect(await prisma.agentOperation.findUniqueOrThrow({ where: { id: internal.id } })).toMatchObject({ status: 'prepared', inputHash: frozenInputHash })
-      expect(await prisma.agentProviderAttempt.count({ where: { operation: { parentOperationId: internal.id }, status: { in: ['dispatching', 'unknown'] } } })).toBe(1)
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { action: { not: 'fixture_model_turn' }, parentOperationId: internal.id }, status: { in: ['dispatching', 'unknown'] } } })).toBe(1)
     }
     expect(fetcher).toHaveBeenCalledOnce()
-    expect(await prisma.agentOperation.count({ where: { parentOperationId: parent.operation.id, kind: 'internal' } })).toBe(1)
+    expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, parentOperationId: parent.operation.id, kind: 'internal' } })).toBe(1)
     expect((await loadExecutionState(f.userId, f.runId)).head.configurationHash).toBe(initial.head.configurationHash)
   }, undefined, '修改本章并检查质量。'), DURABLE_FULL_CHAIN_TEST_TIMEOUT_MS)
 })

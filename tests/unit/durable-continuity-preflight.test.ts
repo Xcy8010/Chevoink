@@ -16,6 +16,7 @@ vi.mock('../../api/lib/agent/runtime-state.js', async original => ({ ...await or
   readExecutionStateInTransaction: mocks.state, readExecutionFrame: mocks.frame, saveExecutionStateInTransaction: mocks.save,
 }))
 vi.mock('../../api/lib/agent/runtime-auxiliary-call.js', async original => ({ ...await original<object>(), callDurableAuxiliary: mocks.provider }))
+vi.mock('../../api/lib/agent/tools/registry.js', () => ({ getToolByName: () => undefined }))
 vi.mock('../../api/lib/agent/runtime-operations.js', async original => {
   const actual = await original<typeof import('../../api/lib/agent/runtime-operations.js')>()
   return { ...actual, commitOperationEffect: (lease, id, hash, work) => actual.commitOperationEffectInTransaction(mocks.tx, lease, id, hash, work) }

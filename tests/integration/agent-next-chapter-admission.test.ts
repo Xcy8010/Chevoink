@@ -1,3 +1,4 @@
+import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { randomUUID } from 'node:crypto'
 import request from 'supertest'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
@@ -90,10 +91,10 @@ describe.skipIf(!available)('fresh HTTP same next-chapter identity and actual PG
     expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(4)
     const scope = await prisma.$transaction(tx => readWritingScope(tx, ctx))
     expect(scope.bindings?.targets).toEqual([{ orderIndex: 4, chapterId: created.id }])
-    await expect(chapterCreateTool.execute({ ...ctx, callId: 'deny-fifth' },
-      { title: '不得续建第五章', volumeOrder: 1, positionInVolume: 5 })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
-    for (const chapter of before) await expect(chapterWriteTool.execute({ ...ctx, callId: `deny-${chapter.orderIndex}` },
-      { chapterId: chapter.id, content: '不得覆盖前章。' })).rejects.toMatchObject({ code: 'AUTHOR_CHAPTER_SCOPE' })
+    await expectToolDenied(chapterCreateTool.execute({ ...ctx, callId: 'deny-fifth' },
+      { title: '不得续建第五章', volumeOrder: 1, positionInVolume: 5 }), { code: 'AUTHOR_CHAPTER_SCOPE' })
+    for (const chapter of before) await expectToolDenied(chapterWriteTool.execute({ ...ctx, callId: `deny-${chapter.orderIndex}` },
+      { chapterId: chapter.id, content: '不得覆盖前章。' }), { code: 'AUTHOR_CHAPTER_SCOPE' })
     expect(await prisma.chapter.findMany({ where: { id: { in: before.map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
     expect(await prisma.$transaction(tx => freezeWritingScope(tx, ctx, spec, '写全部章节', 1))).toEqual(spec)
   }))
@@ -105,9 +106,9 @@ describe.skipIf(!available)('fresh HTTP same next-chapter identity and actual PG
   ] as const)('denies an ordinal or cardinality conflict before any prepare/create effect: %s', (prompt, editor) => fixture(prompt, async (ctx, before) => {
     const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
     expect(spec.scope.writing).toMatchObject({ kind: 'needs_input', targets: [] })
-    await expect(prepare(ctx)).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
-    await expect(chapterCreateTool.execute({ ...ctx, callId: 'denied-create' },
-      { title: '不得创建', volumeOrder: 1, positionInVolume: 4 })).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+    await expectToolDenied(prepare(ctx), { code: 'SCOPE_NEEDS_INPUT' })
+    await expectToolDenied(chapterCreateTool.execute({ ...ctx, callId: 'denied-create' },
+      { title: '不得创建', volumeOrder: 1, positionInVolume: 4 }), { code: 'SCOPE_NEEDS_INPUT' })
     expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
     expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
   }, editor))
@@ -122,7 +123,7 @@ describe.skipIf(!available)('fresh HTTP same next-chapter identity and actual PG
     if (!marker) delete spec.scope.writingTargetProtocol
     await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: spec, status: 'awaiting_approval' } })
     expect(await prisma.$transaction(tx => freezeWritingScope(tx, ctx, spec, nextChapterContinuationPrompt, 1))).toEqual(spec)
-    await expect(prepare(ctx)).rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+    await expectToolDenied(prepare(ctx), { code: 'SCOPE_NEEDS_INPUT' })
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).status).toBe('awaiting_approval')
     expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
   }))
