@@ -29,7 +29,7 @@ export const skillCatalogTool = defineTool({
     const runtime = await resolveEnabledRuntimeSkills(ctx.userId, ctx.novelId, ctx.runId, ctx.transaction)
     const items = args.phase ? runtime.filter((item) => item.phases.includes(args.phase!)) : runtime
     return {
-      output: items.map((item) => `${item.id}@${item.version} [${item.phases.join('/')}] ${item.synopsis}${item.attribution ? ` 来源说明：${item.attribution}` : ''}`).join('\n'),
+      output: items.map((item) => `${item.id}@${item.version}（${item.name}）[${item.phases.join('/')}] ${item.synopsis}${item.attribution ? ` 来源说明：${item.attribution}` : ''}`).join('\n'),
       summary: `创作能力 · ${items.length} 项`,
     }
   },

@@ -72,16 +72,17 @@ function currentFixture() {
   vi.spyOn(prisma.agentArtifact, 'findUnique').mockImplementation(async ({ where }) => artifacts.get(where.id!) as never ?? null)
   vi.spyOn(prisma.agentArtifact, 'create').mockImplementation(async ({ data }) => { const row = { ...data, updatedAt: new Date() }; artifacts.set(data.id!, row); return row as never })
   vi.spyOn(prisma.agentArtifact, 'update').mockImplementation(async ({ where, data }) => { const row = { ...artifacts.get(where.id!), ...data, updatedAt: new Date() }; artifacts.set(where.id!, row); return row as never })
-  vi.spyOn(prisma.aiUsageLog, 'findMany').mockResolvedValue([])
+  vi.spyOn(prisma.aiUsageLog, 'findMany').mockResolvedValue([{ id: 'fixture-usage', usageSource: 'reported', billingStatus: 'settled',
+    requestTokens: 12, responseTokens: 8, reservedCreditMilli: 0 }] as never)
   const usageCount = vi.spyOn(prisma.aiUsageLog, 'count').mockResolvedValue(0)
   vi.spyOn(prisma.agentOperation, 'findMany').mockResolvedValue([])
   vi.spyOn(prisma, '$transaction').mockImplementation(async work => typeof work === 'function' ? work(prisma) : Promise.all(work) as never)
   const proposal = vi.spyOn(memory, 'saveStoryMemory').mockResolvedValue({ id: 'memory' } as never)
   const ctx: ToolContext = { userId: 'u', novelId: 'n', runId: 'r', sessionId: 's', chapterId: 'c', callId: 'current-check', mode: 'build',
     creativeFreedom: 'stable', qualityMode: 'balanced', signal: new AbortController().signal, emit: () => {} }
-  const dispatch = vi.fn(async () => ({ content: '{"findings":[]}', usageIds: [], billingKnown: true }))
+  const dispatch = vi.fn(async () => ({ content: '{"findings":[]}', usageIds: ['fixture-usage'], billingKnown: true }))
   const review = (opinions: ContinuityOpinion[] = []) => {
-    dispatch.mockResolvedValueOnce({ content: JSON.stringify({ findings: opinions }), usageIds: [], billingKnown: true })
+    dispatch.mockResolvedValueOnce({ content: JSON.stringify({ findings: opinions }), usageIds: ['fixture-usage'], billingKnown: true })
     return reviewContinuity(ctx, { compilationId: 'comp' }, { allowRepair: false, dispatch })
   }
   currentReadiness.mockImplementation(async () => {

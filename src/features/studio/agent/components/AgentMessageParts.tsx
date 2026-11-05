@@ -1120,7 +1120,7 @@ const SubAgentCallCard = memo(function SubAgentCallCard({
   )
 })
 
-const ReasoningPart = memo(function ReasoningPart({ text, streaming, count, actions }: { text: string; streaming: boolean; count: number; actions: string[] }) {
+const ReasoningPart = memo(function ReasoningPart({ text, streaming, count, title: receiptTitle }: { text: string; streaming: boolean; count: number; title: string }) {
   const [expanded, setExpanded] = useState(false)
   const contentId = useId()
   const contentRef = useRef<HTMLDivElement>(null)
@@ -1132,14 +1132,9 @@ const ReasoningPart = memo(function ReasoningPart({ text, streaming, count, acti
     node.scrollTop = node.scrollHeight
     lastScrollTop.current = node.scrollTop
   }, [expanded, text])
-  const sentences = text.split(/(?<=[。！？.!?])\s*|\n+/).map(line => line.trim()).filter(line => /[\p{L}\p{N}]/u.test(line))
-  // Extract a real later judgment, without rewriting an intention as success.
-  const conclusion = [...sentences].reverse().find(sentence => !/^(?:先|首先|接下来|下一步|然后|再|需要|准备|计划|打算|调用|工具参数|调用参数|我(?:们)?(?:会|将|先|需要|准备|打算|要)|(?:I|We) (?:will|need|should|plan|want)\b|(?:call|invoke|arguments)\b)/i.test(sentence) && !/[？?]$/.test(sentence))
-  const preview = (streaming ? sentences.at(-1) : conclusion)?.replace(/\s+/g, ' ').slice(0, 42)
-  const title = streaming ? `正在分析…${preview ? ` · ${preview}` : ''}`
-    : preview ? preview : actions.length ? `分析记录 · ${actions.at(-1)}` : '分析记录'
+  const title = receiptTitle || (streaming ? '正在梳理当前任务' : '进度记录')
   return <div className="text-[11px] text-[var(--text-secondary)]" data-agent-analysis="true" data-reasoning-running={streaming || undefined}>
-    <button type="button" aria-label="思考过程" aria-expanded={expanded} aria-controls={contentId} disabled={!text}
+    <button type="button" aria-label="任务进度" aria-expanded={expanded} aria-controls={contentId} disabled={!text}
       onClick={() => {
         if (!expanded) { pinnedToBottom.current = true; lastScrollTop.current = 0 }
         setExpanded(value => !value)
@@ -1272,7 +1267,7 @@ export const AgentMessageParts = memo(function AgentMessageParts({
           const group = localAnalysisGroups?.get(originalIndex)
           if (group && (group.messageId !== (messageId ?? blockId ?? '') || group.firstIndex !== originalIndex)) return null
           return <AgentProcessRegion key={group?.id ?? `analysis:${index}`} open={!collapsed}>
-            <ReasoningPart text={group?.text ?? ''} count={group?.count ?? 1} actions={group?.actions ?? []} streaming={group && activeAnalysisGroupId ? group.id === activeAnalysisGroupId : streaming && (group ? group.lastMessageId === (messageId ?? blockId ?? '') && group.lastIndex === parts.length - 1 : index === authorParts.length - 1)} />
+            <ReasoningPart text={group?.text ?? ''} count={group?.count ?? 1} title={group?.title ?? ''} streaming={group && activeAnalysisGroupId ? group.id === activeAnalysisGroupId : streaming && (group ? group.lastMessageId === (messageId ?? blockId ?? '') && group.lastIndex === parts.length - 1 : index === authorParts.length - 1)} />
           </AgentProcessRegion>
         }
         if (part.type === 'tool-call') {

@@ -195,7 +195,7 @@ vi.mock('../../api/lib/prisma.js', () => {
   agentChildExecutionGrant: { findUnique: vi.fn(async () => null), findMany: vi.fn(async () => []) },
   storyCompilation: { findMany: vi.fn(async () => []), findFirst: vi.fn(async () => null) },
   chapterQualityReport: { findFirst: vi.fn(async () => null) },
-  agentArtifact: { findMany: vi.fn(async () => []) },
+  agentArtifact: { findMany: vi.fn(async () => []), findFirst: vi.fn(async () => null) },
   agentOperation: { count: vi.fn(async () => 0) },
   agentSubtaskRun: { count: vi.fn(async () => 0) },
   agentSession: { update: vi.fn(async () => ({})), findUnique: vi.fn(async () => null),
@@ -2474,6 +2474,22 @@ describe('original task context on resume', () => {
     expect(mocks.chat).toHaveBeenCalledOnce()
     expect(events().filter(event => event.type === 'tool.result')).toEqual(expect.arrayContaining([expect.objectContaining({ summary: '模型网关超时', ok: false })]))
     expect(events()).toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'failed' }))
+  })
+  it('publishes only private response activity while preserving native reasoning for the next model turn', async () => {
+    const privateReasoning = '好。开始。\n\n调用 chapter_read，chapterId=private-id。'
+    mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
+      input.onChunk?.({ type: 'reasoning-delta', delta: privateReasoning.slice(0, 5) })
+      input.onChunk?.({ type: 'reasoning-delta', delta: privateReasoning.slice(5) })
+      expect(events().filter(event => event.type === 'reasoning.delta')).toEqual([
+        { type: 'reasoning.delta', messageId: expect.any(String), delta: '', activity: true },
+        { type: 'reasoning.delta', messageId: expect.any(String), delta: '', activity: true },
+      ])
+      return { ...response('', [call('read')]), reasoning: privateReasoning }
+    })
+    queue(response('已核对。'))
+    await run()
+    expect(mocks.chat.mock.calls[1][0].messages).toContainEqual(expect.objectContaining({ role: 'assistant', reasoning: privateReasoning }))
+    expect(JSON.stringify(events().filter(event => event.type === 'reasoning.delta'))).not.toContain('private-id')
   })
   it('announces parameter preparation before the model finishes, without admitting execution early', async () => {
     mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {

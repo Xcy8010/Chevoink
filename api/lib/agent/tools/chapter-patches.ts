@@ -27,16 +27,20 @@ export function composeChapterEdit(before: string, args: {
           offsets.push(at); body += before[at]
         }
         const at = needle.trim() ? body.indexOf(needle) : -1
-        if (at < 0 || body.indexOf(needle, at + 1) !== -1) invalid(`第 ${index + 1} 处原文锚点${at < 0 ? '未匹配（0处）' : '匹配多处'}`)
+        if (at < 0 || body.indexOf(needle, at + 1) !== -1) invalid(`第 ${index + 1} 处原文锚点${at < 0 ? '未匹配（0处）' : '匹配多处（换行等价匹配仍不唯一）'}`)
         start = offsets[at]; end = offsets[at + needle.length - 1] + 1
-      } else invalid(`第 ${index + 1} 处原文锚点${start < 0 ? '未匹配（0处）' : '匹配多处'}`)
+      } else {
+        const offsets: number[] = []
+        for (let at = before.indexOf(patch.oldText); at >= 0; at = before.indexOf(patch.oldText, at + 1)) offsets.push(at)
+        invalid(`第 ${index + 1} 处原文锚点${!offsets.length ? '未匹配（0处）' : `匹配 ${offsets.length} 处，起点为 ${offsets.slice(0, 5).join('、')}${offsets.length > 5 ? '等' : ''}；请带上各处不同的上下文，不能任取一处`}`)
+      }
     }
     if (typeof patch.newText !== 'string' || start === undefined || end === undefined
       || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > before.length) invalid()
-    return { start: start!, end: end!, newText: patch.newText! }
+    return { start: start!, end: end!, newText: patch.newText!, patchIndex: index + 1 }
   }).sort((a, b) => a.start - b.start || a.end - b.end)
   for (let index = 1; index < ranges.length; index++) {
-    if (ranges[index].start < ranges[index - 1].end || ranges[index].start === ranges[index - 1].start) invalid()
+    if (ranges[index].start < ranges[index - 1].end || ranges[index].start === ranges[index - 1].start) invalid(`第 ${ranges[index - 1].patchIndex} 与第 ${ranges[index].patchIndex} 处替换区间重叠，请合并同一位置的修改或重新取得互不重叠的原文`)
   }
   let after = before
   for (const range of [...ranges].reverse()) after = after.slice(0, range.start) + range.newText + after.slice(range.end)
@@ -64,5 +68,5 @@ export function composeChapterEdit(before: string, args: {
       prior.newText += effect.newText
     } else canonical.push(effect)
   }
-  return { after, ranges: canonical }
+  return { after, ranges: canonical.map(({ start, end, newText }) => ({ start, end, newText })) }
 }

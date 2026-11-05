@@ -552,13 +552,11 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   const { bootstrapPrompt, novelDataBundle } = ruleBundleSplit
 
   // 逐轮可变内容的 digest 统一收集，全部进尾部快照；system 只留任务内稳定的固定规则
-  const skillDigest = skillRoute && !automaticBuiltinSkills && !skillRoute.selected.length && !routingSkills?.length
-    ? '本轮是讨论或作品操作，不自动装载章节正文技法，不增加正文、检查或提交义务；直接完成作者当前请求。'
-    : skillRoute
+  const skillDigest = skillRoute
     ? buildSkillExecutionDigest(skillRoute, input.taskSpec.creativeFreedom, {
         // 已启用但本轮未加载的技能对模型公开元数据：作者自建、尤其是导入的技能
         // 否则永远不会被想起来，也就无从判断“什么时候该用”。
-        availableSkills: routingSkills ?? undefined,
+        availableSkills: runtimeSkills ?? undefined,
         pinnedSkillIds,
       })
     : 'Skill OS 当前未对该账号启用；直接遵从作者目标，不得自行套用未知写作模板。'

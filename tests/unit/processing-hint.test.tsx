@@ -15,7 +15,7 @@ function expectActiveAnalysis(container: HTMLElement) {
   expect(rows).toHaveLength(1)
   expect(rows[0].getAttribute('data-reasoning-running')).toBe('true')
   expect(rows[0].querySelector('[class~="motion-safe:animate-pulse"]')).toBeTruthy()
-  expect(rows[0].querySelector('button')?.textContent).toMatch(/^正在分析…/)
+  expect(rows[0].querySelector('button')?.textContent).toBe('正在梳理当前任务')
 }
 
 function LiveParts() {
@@ -32,7 +32,7 @@ it('keeps local reasoning active after finalized prose, then hands off to one an
   const streaming = () => isAssistantMessageStreaming(message, 'r', 'm', true, ['m'])
   const view = render(<AgentMessageParts parts={message.parts} streaming={streaming()} runActive />)
   expectActiveAnalysis(view.container)
-  expect(view.container.textContent).toContain('正在分析… · 接着核对时间与地点。')
+  expect(view.container.textContent).toContain('正在梳理当前任务')
   message.parts.push({ type: 'tool-call', callId: 'write', toolName: 'chapter_write', title: '撰写本章', status: 'running', preparing: true, args: null })
   view.rerender(<AgentMessageParts parts={message.parts.slice()} streaming={streaming()} runActive />)
   expect(view.container.querySelector('[data-reasoning-running]')).toBeNull()
@@ -132,7 +132,7 @@ it.each(['text.delta', 'reasoning.delta'] as const)('hands off immediately to re
       expect(view.container.textContent).not.toContain(`第${seq}处调整让人物的选择更清楚。`)
     } else {
       expectActiveAnalysis(view.container)
-      expect(view.container.textContent).toContain(`正在分析… · 第${seq}处`)
+      expect(view.container.textContent).toContain('正在梳理当前任务')
       expect(vi.getTimerCount()).toBe(1)
     }
     expect(view.container.textContent).not.toContain('正在处理...')
@@ -140,7 +140,7 @@ it.each(['text.delta', 'reasoning.delta'] as const)('hands off immediately to re
     if (type === 'text.delta') expect(view.container.textContent).toContain(`第${seq}处调整让人物的选择更清楚。`)
     else {
       expectActiveAnalysis(view.container)
-      expect(view.container.textContent).toContain(`第${seq}处调整让人物的选择更清楚。`)
+      expect(view.container.textContent).not.toContain(`第${seq}处调整让人物的选择更清楚。`)
     }
     expect(useAgentStore.getState().textRevealTargets).toEqual({})
     expect(vi.getTimerCount()).toBe(1)
@@ -157,29 +157,32 @@ it.each(['text.delta', 'reasoning.delta'] as const)('hands off immediately to re
     expect(view.container.textContent).not.toContain('新的可见输出')
   } else {
     expectActiveAnalysis(view.container)
-    expect(view.container.textContent).toContain('正在分析… · 新的可见输出')
+    expect(view.container.textContent).toContain('正在梳理当前任务')
+    expect(view.container.textContent).not.toContain('新的可见输出')
   }
   act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS - 17))
   if (type === 'text.delta') expect(view.container.textContent).toContain('新的可见输出')
   else {
     expectActiveAnalysis(view.container)
-    expect(view.container.textContent).toContain('正在分析… · 新的可见输出')
+    expect(view.container.textContent).toContain('正在梳理当前任务')
+    expect(view.container.textContent).not.toContain('新的可见输出')
   }
   expect(screen.queryByRole('status')).toBeNull()
   expect(vi.getTimerCount()).toBe(1)
   act(() => vi.advanceTimersByTime(1))
   expect(screen.getAllByRole('status')).toHaveLength(1)
-  // An ambiguous tool prefix remains hidden and cannot extend that deadline.
+  // Text classification may withhold protocol prose; private model tokens
+  // still prove response activity without publishing that prose.
   const lastVisibleOutput = useAgentStore.getState().lastVisibleOutput
   act(() => apply({ ...base, seq: 7, type, delta: '\n\n调用 chapter_' }))
-  expect(screen.getByRole('status')).toBeTruthy()
+  expect(screen.queryByRole('status') !== null).toBe(type === 'text.delta')
   expect(view.container.textContent).not.toContain('chapter_')
-  expect(useAgentStore.getState().lastVisibleOutput).toEqual(lastVisibleOutput)
-  // Drain the whitespace-only reveal frames; they must not create a silence deadline.
+  if (type === 'text.delta') expect(useAgentStore.getState().lastVisibleOutput).toEqual(lastVisibleOutput)
+  else expect(useAgentStore.getState().lastVisibleOutput?.at).toBeGreaterThan(lastVisibleOutput!.at)
   act(() => vi.advanceTimersByTime(64))
   expect(useAgentStore.getState().textRevealTargets).toEqual({})
-  expect(screen.getAllByRole('status')).toHaveLength(1)
-  expect(vi.getTimerCount()).toBe(0)
+  expect(screen.queryByRole('status') !== null).toBe(type === 'text.delta')
+  expect(vi.getTimerCount()).toBe(type === 'text.delta' ? 0 : 1)
   act(() => apply({ ...base, seq: 8, type: 'run.paused', reason: 'needs_input' }))
   view.unmount()
   expect(vi.getTimerCount()).toBe(0)
@@ -209,17 +212,17 @@ it.each(['text.delta', 'reasoning.delta'] as const)('keeps truthful waiting feed
   const base = { runId: 'r', messageId: 'm', ts: new Date().toISOString() }
   act(() => apply({ ...base, seq: 1, type: 'message.start', role: 'assistant' }))
   act(() => apply({ ...base, seq: 2, type, delta: '调用 chapter_' }))
-  expect(view.result.current).toBe(true)
+  expect(view.result.current).toBe(type === 'text.delta')
   expect(projectAgentAuthorParts(useAgentStore.getState().messages[0].parts, true).every(part => part.type === 'reasoning' && !part.text)).toBe(true)
-  expect(useAgentStore.getState().lastVisibleOutput).toBeNull()
+  expect(useAgentStore.getState().lastVisibleOutput === null).toBe(type === 'text.delta')
   act(() => apply({ ...base, seq: 3, type, delta: 'write，chapterId=private-id。\n\n' }))
-  expect(view.result.current).toBe(true)
+  expect(view.result.current).toBe(type === 'text.delta')
   const parts = projectAgentAuthorParts(useAgentStore.getState().messages[0].parts, true)
   expect(parts.every(part => (part.type === 'text' || part.type === 'reasoning') && part.text.trim() === '')).toBe(true)
   expect(JSON.stringify(parts)).not.toMatch(/chapter_write|chapterId|private-id/)
   act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS))
   expect(view.result.current).toBe(true)
-  expect(useAgentStore.getState().lastVisibleOutput).toBeNull()
+  expect(useAgentStore.getState().lastVisibleOutput === null).toBe(type === 'text.delta')
 })
 
 it('does not let old-run or whitespace events suppress waiting; replay does not extend the timer', () => {

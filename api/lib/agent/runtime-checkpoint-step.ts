@@ -7,6 +7,7 @@ import { executionContextReadTool } from './tools/task-context-tools.js'
 import { toOpenAIParameters } from './tool-schema.js'
 import { randomUUID } from 'node:crypto'
 import { AGENT_TOOL_EXECUTION_POLICY } from './tool-execution-guidance.js'
+import { COLLABORATION_MARKER, readWritingCollaborationDigest } from './writing-collaboration.js'
 
 /** Storage-pressure compaction is NOT a budget checkpoint and grants no tokens.
  * Each replacement points to the still-persisted, hash-verified original frame.
@@ -26,6 +27,17 @@ export async function advanceDurableContext(token: RunLeaseToken, inputLimit?: n
       messages.splice(position < 0 ? messages.length : position, 0, { role: 'system', content: AGENT_TOOL_EXECUTION_POLICY })
       return saveExecutionStateInTransaction(tx, lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
         snapshot: { ...frame.state, messages } })
+    }
+    if (frame.state.messages.at(-1)?.role !== 'assistant') {
+      const root = await tx.agentTaskRoot.findUniqueOrThrow({ where: { id: lease.taskRootId }, select: { novelId: true } })
+      const digest = await readWritingCollaborationDigest(tx, { userId: lease.userId, novelId: root.novelId, runId: lease.runId })
+      const messages = frame.state.messages.filter(message => !(message.role === 'system' && message.content.startsWith(COLLABORATION_MARKER)))
+      if (digest) {
+        const position = messages.findIndex(message => message.role !== 'system')
+        messages.splice(position < 0 ? messages.length : position, 0, { role: 'system', content: digest })
+      }
+      if (runtimeJson(messages).hash !== runtimeJson(frame.state.messages).hash) return saveExecutionStateInTransaction(tx, lease,
+        { expectedRevision: frame.revision, expectedHash: frame.snapshotHash, snapshot: { ...frame.state, messages } })
     }
     const beforeBytes = Buffer.byteLength(JSON.stringify(frame.state.messages), 'utf8')
     const modelPressure = inputLimit !== undefined && estimateChatMessagesTokens(frame.state.messages) + estimateToolDefinitionTokens(configuration.tools) > inputLimit

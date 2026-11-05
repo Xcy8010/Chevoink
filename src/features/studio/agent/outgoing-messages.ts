@@ -22,6 +22,7 @@ export const useOutgoingMessages = create<OutgoingState>((set, get) => ({
   requestClocks: [],
   observeEvent: event => set(state => {
     const response = (event.type === 'text.delta' || event.type === 'reasoning.delta') && Boolean(event.delta.trim())
+      || event.type === 'reasoning.delta' && event.activity === true
       || event.type === 'text.final' && Boolean(event.text.trim())
       || event.type === 'tool.call' || event.type === 'tool.delta' && event.argsChars > 0
     const stopped = event.type === 'run.paused' || event.type === 'run.finished' || event.type === 'error' && !event.recoverable
@@ -76,7 +77,8 @@ function observeRequestClock(clock: RequestClock, messages: AgentUIMessage[]): R
   const latest = [...related].reverse().find(message => message.runTiming)
   const server = latest?.runTiming
   const hasOutput = related.some(message => message.role === 'assistant' && message.parts.some(part =>
-    (part.type === 'text' || part.type === 'reasoning') ? Boolean(part.text.trim()) : part.type === 'tool-call'))
+    part.type === 'reasoning' ? Boolean(part.text.trim() || part.activity)
+      : part.type === 'text' ? Boolean(part.text.trim()) : part.type === 'tool-call'))
   let responded = clock.responded
   let retiredRunIds = clock.retiredRunIds
   let timing = clock.timing

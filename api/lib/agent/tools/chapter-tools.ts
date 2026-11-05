@@ -216,7 +216,7 @@ export const chapterCreateTool = defineTool({
   name: 'chapter_create',
   title: '新建章节',
   description:
-    '在当前作品原子创建一个新章节。默认title只写实际章名，不重复章号或书名号；作者明确命名照其要求。作者说“全书第 N 章”时只传 position=N；作者说“第 M 卷第 N 章/卷内第 N 章”时必须传 volumeOrder=M（或 volumeId）与 positionInVolume=N，位置必须是数字，严禁改用全书 position，严禁先建到错误卷再移动。沿用现有卷时不要传newVolume；新任务先调用volume_create取得真实volumeId再创建本章；newVolume仅保留旧冻结任务已通过PREPARE新卷决定的历史兼容，不得与固定卷或卷内位置混用。未指定位置时紧接全书最后一个已有章节。仅用于新增章节；重写已有章节必须用 chapter_write。创建成功后必须复用返回的 chapterId 写正文，绝不要重复创建同名章。',
+    '建立只有标题与位置的空章节，取得真实 chapterId；本工具负责章节身份和结构，正文由后续 chapter_write 写入。默认title只写实际章名，不重复章号或书名号；作者明确命名照其要求。作者说“全书第 N 章”时只传 position=N；作者说“第 M 卷第 N 章/卷内第 N 章”时传 volumeOrder=M（或 volumeId）与 positionInVolume=N，两个坐标系不得混用。沿用现有卷时不要传newVolume；新任务需要新卷时先用volume_create取得真实volumeId；newVolume保留旧冻结请求兼容。未指定位置时紧接全书最后一个已有章节。已有目标或恢复时先核对真实身份，复用已绑定章节；已有正文先读后按原请求修改，不重建或覆盖已完成内容。创建成功后使用返回的 chapterId 调用 chapter_write，不能把创建空章说成正文已写完。',
   coerceArgs(raw) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw
     const args = { ...raw } as Record<string, unknown>

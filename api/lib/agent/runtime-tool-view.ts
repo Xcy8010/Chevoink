@@ -7,8 +7,9 @@ import { readExecutionFrame } from './runtime-state.js'
 import { toOpenAIToolPresentation } from './tool-schema.js'
 
 export type NativeToolView = { type: 'function'; function: { name: string; strict?: boolean; description: string; parameters: Record<string, unknown> } }
-const simplified = new Set(['chapter_write', 'chapter_append', 'chapter_edit_range', 'continuity_validate', 'chapter_bridge_commit', 'scene_task_build'])
+const simplified = new Set(['chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'continuity_validate', 'chapter_bridge_commit', 'scene_task_build'])
 const retiredFields: Record<string, readonly string[]> = {
+  chapter_create: ['content'],
   chapter_write: ['writing'], chapter_append: ['writing'], chapter_edit_range: ['writing'],
   continuity_validate: ['terminalState', 'inheritedProofs', 'terminalPatch'],
   chapter_bridge_commit: ['decisionOnly', 'terminalState', 'exitState', 'lastUnfinishedAction', 'openingStructure', 'endingStructure', 'hookDecision', 'delayedHookReason'],
@@ -107,6 +108,9 @@ export async function needsNativeToolProjection(frozen: readonly NativeToolView[
 }
 
 export function hasRetiredNativeArguments(action: string, args: unknown): boolean {
+  // content remains executable when it came from an authenticated historical
+  // model view. New views omit it; their own parser owns the input contract.
+  if (action === 'chapter_create') return false
   return (retiredFields[action] ?? []).some(key => Object.prototype.hasOwnProperty.call(object(args), key))
 }
 

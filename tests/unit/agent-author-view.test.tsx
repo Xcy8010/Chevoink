@@ -48,10 +48,10 @@ it('projects legacy history, pagination, A -> B -> A cache and copy without touc
   const original = structuredClone(history)
   useAgentStore.getState().restoreMessages([history], 'A')
   const expected = getMessageText(projectAgentAuthorMessage(history).parts)
-  expect(useAgentStore.getState().messages[0].parts[0]).toEqual(history.parts[0])
+  expect(useAgentStore.getState().messages[0].parts[0]).toEqual({ type: 'reasoning', text: '', activity: true })
   expect(getMessageText(useAgentStore.getState().messages[0].parts)).toBe(expected)
   useAgentStore.getState().prependMessages([{ ...history, id: 'older' }])
-  expect(useAgentStore.getState().messages[0].parts[0]).toEqual(history.parts[0])
+  expect(useAgentStore.getState().messages[0].parts[0]).toEqual({ type: 'reasoning', text: '', activity: true })
   useAgentStore.getState().resetRun()
   useAgentStore.getState().restoreMessages([], 'B')
   useAgentStore.getState().resetRun()
@@ -69,9 +69,9 @@ it('holds every streamed split before first render, then uses the same final/his
     useAgentStore.setState({ runId: 'r', phase: 'running', lastSeq: 0, messages: [{ ...history, parts: [] }] })
     apply({ type: 'reasoning.delta', messageId: 'a', delta: '先核对人物动机。' }, 1)
     apply({ type: 'text.delta', messageId: 'a', delta: raw.slice(0, split) }, 2)
-    expect(useAgentStore.getState().messages[0].parts).toEqual([{ type: 'reasoning', text: '先核对人物动机。' }])
+    expect(useAgentStore.getState().messages[0].parts).toEqual([{ type: 'reasoning', text: '', activity: true }])
     apply({ type: 'text.delta', messageId: 'a', delta: raw.slice(split) }, 3)
-    expect(useAgentStore.getState().messages[0].parts).toEqual([{ type: 'reasoning', text: '先核对人物动机。' }])
+    expect(useAgentStore.getState().messages[0].parts).toEqual([{ type: 'reasoning', text: '', activity: true }])
     apply({ type: 'text.final', messageId: 'a', text: `${raw}\n\n${manuscript}`, asReasoning: false }, 4)
     expect(getMessageText(useAgentStore.getState().messages[0].parts)).toBe(projectAgentAuthorText(`${raw}\n\n${manuscript}`).trim())
     // Replayed sequence is ignored; reconnect cannot append a raw old fragment.
@@ -80,7 +80,7 @@ it('holds every streamed split before first render, then uses the same final/his
   }
 })
 
-it('shows sanitized expandable thinking and preserves visible real failure and intent', () => {
+it('keeps private reasoning hidden and preserves visible real failure and intent', () => {
   const tool: AgentMessagePart = { type: 'tool-call', callId: 'failure', toolName: 'future_unknown_tool', title: 'future_unknown_tool',
     status: 'failed', summary: 'HTTP Error P2002 at hidden/stack.ts:3', args: {
       chapterId: 'cmttleebg03h9wqox9lieracs', secretField: 'hidden-param', nested: { key: 'hidden-json' }, reason: '避免人物前后矛盾', content: manuscript,
@@ -88,9 +88,9 @@ it('shows sanitized expandable thinking and preserves visible real failure and i
   const view = render(<AgentMessageParts parts={[...history.parts, tool]} streaming={false} runActive summaryExpanded />)
   expect(view.container.textContent).not.toContain('hidden English')
   expect(view.container.querySelector('.max-h-44')).toBeNull()
-  expect(screen.getByRole('button', { name: '思考过程' }).textContent).toBe('分析记录')
-  fireEvent.click(screen.getByRole('button', { name: '思考过程' }))
-  expect(view.container.querySelector('.max-h-44')?.textContent).toContain('先核对人物动机。')
+  expect(screen.getByRole('button', { name: '任务进度' }).textContent).toBe('进度记录')
+  fireEvent.click(screen.getByRole('button', { name: '任务进度' }))
+  expect(view.container.querySelector('.max-h-44')).toBeNull()
   expect(screen.getByText('推进创作')).toBeTruthy()
   expect(screen.getByText('本次操作未完成。请核对当前成果后重试，或调整要求。')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: '展开工具详情' }))
@@ -149,7 +149,7 @@ it('keeps unfinished work actionable in default collapsed history while preservi
   expect(screen.queryByText('hidden English reasoning')).toBeNull()
 })
 
-it('retains every real thinking split through final, reconnect and cache without exposing partial protocol or copying thinking', () => {
+it('retains episode markers through every split, reconnect and cache without storing private reasoning', () => {
   const thinking = `先核对人物动机。\n\n${raw}\n\n再检查情节承接。`
   for (let split = 1; split < thinking.length; split++) {
     useAgentStore.getState().resetRun()
@@ -161,16 +161,16 @@ it('retains every real thinking split through final, reconnect and cache without
     apply({ type: 'reasoning.delta', messageId: 'a', delta: '重复' }, 3)
     apply({ type: 'reasoning.delta', messageId: 'a', delta: '外部', runId: 'foreign' }, 99)
     apply({ type: 'text.final', messageId: 'a', text: '最终回复', asReasoning: false }, 4)
-    expect(useAgentStore.getState().messages[0].parts[0]).toEqual({ type: 'reasoning', text: thinking })
+    expect(useAgentStore.getState().messages[0].parts[0]).toEqual({ type: 'reasoning', text: '', activity: true })
     expect(getMessageText(useAgentStore.getState().messages[0].parts)).toBe('最终回复')
     const view = render(<AgentMessageParts parts={useAgentStore.getState().messages[0].parts} streaming={false} runActive={false} summaryExpanded />)
-    fireEvent.click(screen.getByRole('button', { name: '思考过程' }))
-    expect(view.container.querySelector('.max-h-44')?.textContent).toContain('再检查情节承接。')
+    fireEvent.click(screen.getByRole('button', { name: '任务进度' }))
+    expect(view.container.textContent).not.toContain('再检查情节承接。')
     expect(view.container.textContent).not.toMatch(/scene_task_build|compilationId|cmttle/)
     cleanup()
     useAgentStore.getState().resetRun()
     useAgentStore.getState().restoreMessages(readSessionMessagesCache('A')!, 'A')
-    expect(useAgentStore.getState().messages[0].parts[0]).toEqual({ type: 'reasoning', text: thinking })
+    expect(useAgentStore.getState().messages[0].parts[0]).toEqual({ type: 'reasoning', text: '', activity: true })
   }
 })
 
@@ -181,19 +181,19 @@ it('does not reinterpret narrated text or asReasoning final as actual thinking',
   expect(useAgentStore.getState().messages[0].parts).toEqual([])
   apply({ type: 'reasoning.delta', messageId: 'a', delta: '实际思考。' }, 3)
   apply({ type: 'text.final', messageId: 'a', text: '供应商汇总', asReasoning: true }, 4)
-  expect(useAgentStore.getState().messages[0].parts).toEqual([{ type: 'reasoning', text: '实际思考。' }])
+  expect(useAgentStore.getState().messages[0].parts).toEqual([{ type: 'reasoning', text: '', activity: true }])
   expect(getMessageText(useAgentStore.getState().messages[0].parts)).toBe('')
 })
 
-it('renders actual thinking previews and expandable sanitized historical thought', () => {
+it('renders neutral progress before receipts without exposing historical thought', () => {
   const view = render(<AgentMessageParts parts={[{ type: 'reasoning', text: '先核对人' }]} streaming runActive />)
-  expect(screen.getByText('正在分析… · 先核对人')).toBeTruthy()
-  expect(screen.getByRole('button', { name: '思考过程' }).getAttribute('aria-expanded')).toBe('false')
+  expect(screen.getByText('正在梳理当前任务')).toBeTruthy()
+  expect(screen.getByRole('button', { name: '任务进度' }).getAttribute('aria-expanded')).toBe('false')
   expect(view.container.querySelector('.max-h-44')).toBeNull()
   view.rerender(<AgentMessageParts parts={[{ type: 'reasoning', text: '先核对人物动机。\n\n调用 chapter_write，chapterId=private-id。' }]} streaming={false} runActive={false} summaryExpanded />)
-  expect(screen.getByText('分析记录')).toBeTruthy()
-  fireEvent.click(screen.getByRole('button', { name: '思考过程' }))
-  expect(view.container.querySelector('.max-h-44')?.textContent).toContain('先核对人物动机。')
+  expect(screen.getByText('进度记录')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '任务进度' }))
+  expect(view.container.querySelector('.max-h-44')).toBeNull()
   expect(view.container.textContent).not.toMatch(/chapter_write|chapterId|private-id/)
 })
 

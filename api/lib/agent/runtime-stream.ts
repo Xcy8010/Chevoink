@@ -1,3 +1,4 @@
+import { publicAgentProgressEvent } from '../../../shared/agent-progress.js'
 import { publicReviewExecution } from '../../../shared/review-lifecycle.js'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { Response } from 'express'
@@ -38,7 +39,7 @@ export async function streamDurableRun(userId: string, runId: string, sinceSeq: 
       }
       for (const event of page) {
         if (event.type === 'run.paused' && await isDurablePauseResumed(userId, runId, event.seq)) { cursor = event.seq; continue }
-        const visible = publicReviewExecution(event)
+        const visible = publicAgentProgressEvent(publicReviewExecution(event))
         if (!await write(`id: ${visible.seq}\nevent: ${visible.type}\ndata: ${JSON.stringify(visible)}\n\n`)) return
         cursor = event.seq
         if (event.type === 'run.paused' || event.type === 'run.finished' || (event.type === 'error' && !event.recoverable)) return

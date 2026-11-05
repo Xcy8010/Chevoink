@@ -78,7 +78,7 @@ it('merges full seq0 replay without removing settled tools or duplicating saved 
     source.send({ ...base, seq: 8, type: 'text.final', messageId: 'saved-a', text: '已有结果。\n\n', asReasoning: false })
   })
   const parts = useAgentStore.getState().messages.find(message => message.id === 'saved-a')!.parts
-  expect(parts.filter(part => part.type === 'reasoning')).toEqual([{ type: 'reasoning', text: '先核对承接。' }])
+  expect(parts.filter(part => part.type === 'reasoning')).toEqual([{ type: 'reasoning', text: '', activity: true }])
   expect(parts.filter(part => part.type === 'text')).toEqual([{ type: 'text', text: '已有结果。\n\n' }])
   expect(toolIds()).toEqual(['old-write', 'old-plan'])
   expect(activityIds()).toEqual(['old-write', 'old-plan'])
@@ -135,7 +135,7 @@ it('preserves interleaved reasoning/tool segments and saved content while replay
     source.send({ ...base, seq: 10, type: 'text.delta', messageId: 'saved-a', delta: '完整' });
     source.send({ ...base, seq: 11, type: 'tool.result', messageId: 'saved-a', callId: 'old-plan', toolName: 'plan_save', ok: true, summary: '已保存' }) })
   expect(useAgentStore.getState().messages[1].parts.map(part => part.type === 'tool-call' ? part.callId : part.text)).toEqual([
-    '第一段判断。', 'old-write', '第二段判断。', 'old-plan', '第三段判断。', '完整结果。\n\n',
+    '', 'old-write', '', 'old-plan', '', '完整结果。\n\n',
   ])
   expect(activityIds()).toEqual(['old-write', 'old-plan'])
 })
@@ -169,7 +169,7 @@ it('uses real tool boundaries to repair old flattened reasoning without duplicat
     source.send({ ...base, seq: 7, type: 'reasoning.delta', messageId: 'saved-a', delta: '第三段。' })
     source.send({ ...base, seq: 8, type: 'step.finish', turn: 1, usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 } })
   })
-  expect(useAgentStore.getState().messages[1].parts.map(part => part.type === 'tool-call' ? part.callId : part.text)).toEqual(['第一段。', 'old-write', '第二段。', 'old-plan', '第三段。'])
+  expect(useAgentStore.getState().messages[1].parts.map(part => part.type === 'tool-call' ? part.callId : part.text)).toEqual(['', 'old-write', '', 'old-plan', ''])
   expect(activityIds()).toEqual(['old-write', 'old-plan'])
 })
 
@@ -199,4 +199,29 @@ it('a failed history refresh keeps the correct cached session journal and ignore
   expect(useAgentStore.getState()).toMatchObject({ loadedSessionId: 'session-a', messages: before.messages, workspaceActivities: before.workspaceActivities })
   expect(failSessionHistoryHydration('session-b', null)).toBe(false)
   expect(activityIds()).toEqual(['old-write', 'old-plan'])
+})
+
+
+it('preserves private activity across a batched whitespace marker without exposing thinking', () => {
+  const frames: FrameRequestCallback[] = []
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.push(callback); return frames.length })
+  vi.stubGlobal('cancelAnimationFrame', vi.fn())
+  const hook = renderHook(() => useAgentStream())
+  act(() => { restoreActiveRunHistory([], 'run-a', 'session-a'); hook.result.current.connect('run-a') })
+  act(() => {
+    Source.opened[0].send({ ...base, seq: 1, type: 'message.start', role: 'assistant', messageId: 'm' })
+    Source.opened[0].send({ ...base, seq: 2, type: 'reasoning.delta', messageId: 'm', delta: '', activity: true })
+    Source.opened[0].send({ ...base, seq: 3, type: 'reasoning.delta', messageId: 'm', delta: '' })
+    for (const callback of frames.splice(0)) callback(0)
+  })
+  expect(useAgentStore.getState().lastVisibleOutput).toMatchObject({ runId: 'run-a' })
+  expect(useAgentStore.getState().messages[0].parts).toEqual([{ type: 'reasoning', text: '', activity: true }])
+  const clock = useAgentStore.getState().lastVisibleOutput
+  act(() => {
+    Source.opened[0].send({ ...base, seq: 3, type: 'reasoning.delta', messageId: 'm', delta: '', activity: true })
+    Source.opened[0].send({ ...base, runId: 'other-run', seq: 99, type: 'reasoning.delta', messageId: 'm', delta: '', activity: true })
+    for (const callback of frames.splice(0)) callback(0)
+  })
+  expect(useAgentStore.getState().lastVisibleOutput).toBe(clock)
+  expect(useAgentStore.getState().lastSeq).toBe(3)
 })

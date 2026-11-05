@@ -60,7 +60,7 @@ it('keeps preparation uncounted before configuration, ensureSession and HTTP, re
   expect(elapsed('session-a')).toBeNull()
 })
 
-it('starts on actual response, ignores later server clock replacement, excludes pauses and freezes without a final jump', () => {
+it.each([false, true])('starts on actual response, preserves private activity=%s, excludes pauses and freezes without a final jump', privateMarker => {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:00Z'))
   const id = useOutgoingMessages.getState().add('scope', 'a', 's', '合成请求', [])
   const clientRequestId = useOutgoingMessages.getState().items[0].clientRequestId
@@ -79,7 +79,7 @@ it('starts on actual response, ignores later server clock replacement, excludes 
   // An empty assistant/start is admission, not the model's first response.
   assistant = { ...assistant, parts: [] }
   expect(runElapsedMs(observe(), Date.now())).toBeNull()
-  apply({ type: 'reasoning.delta', runId: 'A', messageId: 'assistant', seq: 9, ts: '2026-11-05T00:00:09Z', delta: '开始分析' })
+  apply({ type: 'reasoning.delta', runId: 'A', messageId: 'assistant', seq: 9, ts: '2026-11-05T00:00:09Z', delta: privateMarker ? '' : '开始分析', ...(privateMarker ? { activity: true as const } : {}) })
   expect(runElapsedMs(observe(), Date.now())).toBe(0)
   vi.advanceTimersByTime(3000)
   expect(runElapsedMs(observe(), Date.now())).toBe(3000)
@@ -498,4 +498,40 @@ it('does not erase a newer unrelated error while reconciling an older accepted d
   expect(useOutgoingMessages.getState().items).toEqual([])
   expect(context.setActionError).not.toHaveBeenCalled()
   expect(context.setActionNotice).not.toHaveBeenCalled()
+})
+
+
+it.each([false, true])('observes a responding restored run with legacy/private marker=%s at the same local instant', privateMarker => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:20Z'))
+  const id = useOutgoingMessages.getState().add('scope', 'a', 's', '合成请求', [])
+  const clientRequestId = useOutgoingMessages.getState().items[0].clientRequestId
+  useOutgoingMessages.getState().update(id, { runId: 'A', status: 'sent' })
+  observeInitialStart('A', id)
+  const user: AgentUIMessage = { ...row('user', 'A', 'user'), clientRequestId }
+  const assistant: AgentUIMessage = { ...row('assistant', 'A'), parts: [{ type: 'reasoning', text: privateMarker ? '' : '实际模型输出', ...(privateMarker ? { activity: true as const } : {}) }], runTiming: {
+    elapsedMs: 10000, activeSince: '2026-11-05T00:00:05Z', status: 'running', lastSeq: 8,
+  } }
+  useOutgoingMessages.getState().reconcile([user, assistant], 'scope', 'a', 's')
+  let clock = useOutgoingMessages.getState().requestClocks[0]
+  expect(clock.responded).toBe(true)
+  expect(clock.timing.activeSince).toBe('2026-11-05T00:00:20.000Z')
+  expect(runElapsedMs(clock.timing, Date.now())).toBe(0)
+  vi.advanceTimersByTime(3000)
+  useOutgoingMessages.getState().reconcile([user, assistant], 'scope', 'a', 's')
+  clock = useOutgoingMessages.getState().requestClocks[0]
+  expect(runElapsedMs(clock.timing, Date.now())).toBe(3000)
+})
+
+
+it('keeps a restored blank episode without response activity in preparation', () => {
+  const id = useOutgoingMessages.getState().add('scope', 'a', 's', '合成请求', [])
+  const clientRequestId = useOutgoingMessages.getState().items[0].clientRequestId
+  useOutgoingMessages.getState().update(id, { runId: 'A', status: 'sent' })
+  observeInitialStart('A', id)
+  const user: AgentUIMessage = { ...row('user', 'A', 'user'), clientRequestId }
+  const assistant: AgentUIMessage = { ...row('assistant', 'A'), parts: [{ type: 'reasoning', text: '' }], runTiming: {
+    elapsedMs: 10000, activeSince: '2026-11-05T00:00:05Z', status: 'running', lastSeq: 8,
+  } }
+  useOutgoingMessages.getState().reconcile([user, assistant], 'scope', 'a', 's')
+  expect(useOutgoingMessages.getState().requestClocks[0]).toMatchObject({ responded: false, timing: { elapsedMs: null, activeSince: null } })
 })

@@ -14,7 +14,7 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import type { TaskSpec } from '../../shared/contracts/index.js'
 import { configureAgentTool } from '../../api/lib/agent/tools/configuration-tools.js'
 import { agentModelSelectionSchema, modelReasoningEffortSchema } from '../../shared/contracts/agent-model-assignments.js'
-import { toolWithNativeView } from '../../api/lib/agent/runtime-tool-view.js'
+import { toolWithNativeView, projectNativeToolViews, hasRetiredNativeArguments } from '../../api/lib/agent/runtime-tool-view.js'
 
 vi.mock('zod', async importOriginal => {
   const actual = await importOriginal<typeof import('zod')>()
@@ -39,6 +39,19 @@ it('preserves the exact pre-window agent_configure parameter schema for frozen c
 // 回归：novel_import 顶层 discriminatedUnion 转换后没有 type，DeepSeek 按 type null 拒绝，
 // 导致线上继续任务时报 Invalid schema for function 'novel_import'。
 describe('tool schema provider contract', () => {
+  it('exposes identity-only new chapter calls and preserves the exact combined historical parser', () => {
+    const original = toOpenAIParameters(chapterCreateTool.parameters)
+    const old = { type: 'function' as const, function: { name: 'chapter_create', description: '历史创建合同', parameters: original } }
+    const next = projectNativeToolViews([old], [chapterCreateTool], { novelId: 'novel' })[0]
+    expect(next.function.parameters).not.toHaveProperty('properties.content')
+    expect(toOpenAITools([chapterCreateTool])[0].function.parameters).not.toHaveProperty('properties.content')
+    expect(next.function.description).toContain('空章节')
+    const input = { title: '历史章', content: '旧模型已返回的完整正文。' }
+    expect(toolWithNativeView(chapterCreateTool, old).parameters.parse(input)).toMatchObject(input)
+    expect(hasRetiredNativeArguments('chapter_create', input)).toBe(false)
+    expect(originalToolParameterSchemas(chapterCreateTool, { novelId: 'novel' })).toContainEqual(original)
+    expect(old.function.parameters).toHaveProperty('properties.content')
+  })
   it.each([chapterWriteTool, chapterAppendTool, chapterEditRangeTool])('publishes ordinary $name parameters even with a historical marker while preserving the exact historical parser', tool => {
     const legacyScope: TaskSpec['scope'] = { novelId: 'novel' }, markedScope: TaskSpec['scope'] = { novelId: 'novel', writingCoordinationProtocol: 1 }
     const legacy = toOpenAIParameters(tool.parameters)

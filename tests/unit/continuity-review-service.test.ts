@@ -47,7 +47,7 @@ describe('one ordinary continuity report', () => {
     expect(bound.unlocatedIndexes).toEqual([])
   })
   it('exposes only actual visible source IDs in the critic request and accepts no free manuscript quote field', () => {
-    const request = continuityReviewRequest({ chapter: { id: 'c' }, original: { prompt: '检查本章' }, sources: [{ ...source(), chapterId: 'c', revision: 4, orderIndex: 1 }] } as Parameters<typeof continuityReviewRequest>[0])
+    const request = continuityReviewRequest({ chapter: { id: 'c' }, original: { taskId: 'task', prompt: '检查本章' }, sources: [{ ...source(), chapterId: 'c', revision: 4, orderIndex: 1 }] } as Parameters<typeof continuityReviewRequest>[0])
     expect(request.content).toContain(table().entries[0].id.slice(0, 13))
     expect(request.content).not.toContain(table().entries[0].id)
     expect(continuityReportResponseSchema.safeParse({ findings: [opinion()] }).success).toBe(true)
@@ -189,12 +189,24 @@ function runnerFixture() {
   vi.spyOn(locks, 'lockNovelActiveScope').mockResolvedValue(undefined)
   vi.spyOn(manuscript, 'assertAgentManuscriptCurrent').mockResolvedValue(undefined)
   vi.spyOn(prisma.chapter, 'findFirst').mockImplementation(async args => args?.where?.id === 'c' && args.where.authorId === 'u' ? { ...chapter } as never : null)
-  vi.spyOn(prisma.chapter, 'findMany').mockResolvedValue([])
-  vi.spyOn(prisma.storyCompilation, 'findFirst').mockImplementation(async args => args?.where?.userId === 'u' && args.where.novelId === 'n' ? { ...compilation } as never : null)
+  const previousRead = vi.spyOn(prisma.chapter, 'findMany').mockResolvedValue([])
+  const compilationRead = vi.spyOn(prisma.storyCompilation, 'findFirst').mockImplementation(async args => args?.where?.userId === 'u' && args.where.novelId === 'n' ? { ...compilation } as never : null)
   vi.spyOn(prisma.storyCompilation, 'findUniqueOrThrow').mockImplementation(async () => ({ ...compilation } as never))
   vi.spyOn(prisma.storyCompilation, 'update').mockImplementation(async ({ data }) => { Object.assign(compilation, data); return { ...compilation } as never })
   vi.spyOn(prisma.agentArtifact, 'findUnique').mockImplementation(async ({ where }) => artifacts.get(where.id!) as never ?? null)
-  vi.spyOn(prisma.agentArtifact, 'findMany').mockResolvedValue([])
+  vi.spyOn(prisma.agentArtifact, 'findMany').mockImplementation(async args => {
+    if (args?.where?.artifactType !== 'continuityReview') return []
+    const where = args.where as { AND?: Array<{ metadata?: { path: string[]; equals?: unknown; lte?: number } }>; NOT?: { metadata: { path: string[]; equals: unknown } } }
+    return [...artifacts.values()].reverse().filter(row => {
+      const report = (row.metadata as { continuityReport?: ContinuityReport })?.continuityReport
+      if (!report) return false
+      const value = report as unknown as Record<string, unknown>
+      return (where.AND ?? []).every(item => !item.metadata || (item.metadata.lte !== undefined
+        ? typeof value[item.metadata.path[1]] === 'number' && (value[item.metadata.path[1]] as number) <= item.metadata.lte
+        : value[item.metadata.path[1]] === item.metadata.equals))
+        && (!where.NOT || value[where.NOT.metadata.path[1]] !== where.NOT.metadata.equals)
+    }).slice(0, 1) as never
+  })
   vi.spyOn(prisma.agentArtifact, 'create').mockImplementation(async ({ data }) => { const row = { ...data, updatedAt: new Date() }; artifacts.set(data.id!, row); return row as never })
   vi.spyOn(prisma.agentArtifact, 'update').mockImplementation(async ({ where, data }) => { const row = { ...artifacts.get(where.id!), ...data, updatedAt: new Date() }; artifacts.set(where.id!, row); return row as never })
   vi.spyOn(prisma.aiUsageLog, 'findMany').mockImplementation(async () => fees as never)
@@ -214,7 +226,7 @@ function runnerFixture() {
     return { content: await answer(action), usageIds: [fee.id], billingKnown: true }
   }
   const report = () => (Array.from(artifacts.values()).at(-1)!.metadata as { continuityReport: ContinuityReport }).continuityReport
-  return { chapter, compilation, artifacts, fees, operations, ctx, controller, requests, dispatch, report, sessionRead }
+  return { chapter, compilation, artifacts, fees, operations, ctx, controller, requests, dispatch, report, sessionRead, previousRead, compilationRead }
 }
 
 function repairFixture() {
@@ -230,6 +242,61 @@ function repairFixture() {
 }
 
 describe('known failure recovery preserves report and paid evidence', () => {
+  it('reuses a new full review across changed focus without dispatch or rewriting the original report', async () => {
+    const f = runnerFixture()
+    await reviewContinuity(f.ctx, { compilationId: 'comp', focus: '人物知识' }, { allowRepair: false, dispatch: f.dispatch(() => '{"findings":[]}') })
+    const originalReport = structuredClone(f.report()), originalArtifact = structuredClone(f.artifacts.get(originalReport.id))
+    const dispatch = vi.fn(async () => { throw Error('Same full sources must not be repurchased for another attention focus') })
+    const result = await reviewContinuity({ ...f.ctx, callId: 'focus-change' }, { compilationId: 'comp', focus: '物品' }, { allowRepair: false, dispatch })
+    expect(result).toMatchObject({ reviewCompleted: true, reviewOutcome: 'complete' })
+    expect(result.output).toContain('复用已保存报告')
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(f.report()).toMatchObject({ fullReviewKey: originalReport.fullReviewKey, reusedReportId: originalReport.id, revision: 4, focus: '物品' })
+    expect(f.report().contextHash).toBe((await buildContinuitySnapshot(f.ctx, { compilationId: 'comp', focus: f.report().focus })).contextHash)
+    await reviewContinuity({ ...f.ctx, callId: 'focus-cleared' }, { compilationId: 'comp' }, { allowRepair: false, dispatch })
+    expect(f.report()).not.toHaveProperty('focus')
+    expect(f.report().contextHash).toBe((await buildContinuitySnapshot(f.ctx, { compilationId: 'comp', focus: f.report().focus })).contextHash)
+    expect(f.artifacts.get(originalReport.id)).toEqual(originalArtifact)
+    expect(f.fees).toHaveLength(1)
+  })
+  it('invalidates reuse on a real previous-source change and keeps the old report as historical evidence', async () => {
+    const f = runnerFixture(), previous = { id: 'prior', title: '前章', revision: 2, content: '钥匙在甲手中。', orderIndex: 0 }
+    f.previousRead.mockImplementation(async () => [{ ...previous }] as never)
+    await reviewContinuity(f.ctx, { compilationId: 'comp' }, { allowRepair: false, dispatch: f.dispatch(() => '{"findings":[]}') })
+    const baseline = structuredClone(f.report())
+    previous.content = '钥匙在乙手中。'; previous.revision++
+    let input = ''
+    const base = f.dispatch(() => JSON.stringify({ findings: [opinion()], reassessment: [{ findingIndex: 0, classification: 'missed', explanation: '原文已有算术问题，前次漏报。' }] }))
+    const result = await reviewContinuity(f.ctx, { compilationId: 'comp' }, { allowRepair: false, dispatch: async request => { input = request.content; return base(request) } })
+    expect(f.requests).toHaveLength(2)
+    expect(f.report().fullReviewKey).not.toBe(baseline.fullReviewKey)
+    expect(f.report()).toMatchObject({ revision: 4, findings: [{ severity: 'error' }], baseline: { reportId: baseline.id, revision: 4 }, reassessment: [{ classification: 'missed' }] })
+    const prior = JSON.parse(input).priorReview
+    expect(prior.sourceSnapshots[1]).toMatchObject({ revision: 2, content: '钥匙在甲手中。' })
+    expect(JSON.parse(input).sources[1]).toMatchObject({ revision: 3, content: '钥匙在乙手中。' })
+    expect(result).toMatchObject({ reviewCompleted: true, reviewOutcome: 'decision_required' })
+  })
+  it('keeps before and after revisions honest when a standalone check follows an actual body edit', async () => {
+    const f = runnerFixture()
+    f.compilationRead.mockResolvedValue(null)
+    await reviewContinuity(f.ctx, { chapterId: 'c' }, { allowRepair: false, dispatch: f.dispatch(() => JSON.stringify({ findings: [opinion()] })) })
+    const baseline = structuredClone(f.report())
+    f.chapter.content = body.replace('三千四百', '三万四千'); f.chapter.revision++
+    let input = ''
+    const base = f.dispatch(() => '{"findings":[],"reassessment":[{"baselineFindingId":"0","classification":"resolved","explanation":"本版总额与十分之一一致。"}]}')
+    await reviewContinuity(f.ctx, { chapterId: 'c' }, { allowRepair: false, dispatch: async request => { input = request.content; return base(request) } })
+    expect(f.report()).toMatchObject({ revision: 5, baseline: { revision: 4, reportId: baseline.id }, reassessment: [{ classification: 'resolved' }] })
+    expect(JSON.parse(input).priorReview.sourceSnapshots[0].content).toBe(body)
+    expect(JSON.parse(input).sources[0].content).toBe(f.chapter.content)
+    expect((f.artifacts.get(baseline.id)?.metadata as { continuityReport: ContinuityReport }).continuityReport.revision).toBe(4)
+  })
+  it('does not mark an old frozen request as a new full-review protocol', async () => {
+    const f = runnerFixture(), criticRequest = { system: '旧冻结规则', content: '旧冻结正文与证据' }
+    await reviewContinuity(f.ctx, { compilationId: 'comp' }, { criticRequest, allowRepair: false, dispatch: f.dispatch(() => '{"findings":[]}') })
+    expect(f.report()).not.toHaveProperty('reviewProtocol')
+    expect(f.report()).not.toHaveProperty('fullReviewKey')
+    expect(f.report()).not.toHaveProperty('sourceSnapshots')
+  })
   it('uses the exact critic request frozen before a prompt update without rewriting its hash', async () => {
     const f = runnerFixture()
     const critic = { system: '原冻结连续性规则', content: JSON.stringify({ current: f.chapter.content, source: '原冻结证据' }) }

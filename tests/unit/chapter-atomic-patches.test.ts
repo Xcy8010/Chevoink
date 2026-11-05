@@ -3,6 +3,15 @@ import { composeChapterEdit } from '../../api/lib/agent/tools/chapter-patches.js
 import { chapterEditArguments } from '../../api/lib/agent/tools/chapter-arguments.js'
 
 describe('one immutable chapter patch batch', () => {
+  it('identifies a repeated short anchor and permits a corrected non-overlapping batch', () => {
+    const body = '上午还剩三天。\n夜里还剩三天。'
+    expect(() => composeChapterEdit(body, { patches: [{ oldText: '上午还剩三天。', newText: '上午还剩两天。' },
+      { oldText: '还剩三天。', newText: '还剩一天。' }] })).toThrow(expect.objectContaining({ code: 'CHAPTER_ANCHOR_CONFLICT', message: expect.stringContaining('第 2 处原文锚点匹配 2 处') }))
+    expect(composeChapterEdit(body, { patches: [{ oldText: '上午还剩三天。', newText: '上午还剩两天。' },
+      { oldText: '夜里还剩三天。', newText: '夜里还剩一天。' }] }).after).toBe('上午还剩两天。\n夜里还剩一天。')
+    expect(() => composeChapterEdit('甲门锁着。', { patches: [{ oldText: '甲门锁着。', newText: '门开了。' },
+      { oldText: '锁着', newText: '打开' }] })).toThrow(expect.objectContaining({ message: expect.stringContaining('第 1 与第 2 处替换区间重叠') }))
+  })
   it('rejects all seven edits when only the third anchor changes punctuation, then accepts the corrected exact batch', () => {
     const fragments = ['甲门锁着。', '乙灯亮着。', '「请稍等。」', '丙窗关着。', '丁箱封着。', '戊轮停着。', '己阀闭着。']
     const original = fragments.join('\n\n')

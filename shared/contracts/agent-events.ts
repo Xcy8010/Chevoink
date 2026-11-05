@@ -382,7 +382,7 @@ export type AgentStreamEventBody =
       compilationId: string | null; receipt: AgentReviewFailureReconciliation | AgentCancelledReviewRetirement | AgentAuthorReviewReplacement | AgentAuthorContinuedReview }
   | { type: 'text.delta'; messageId: string; delta: string }
   | { type: 'text.final'; messageId: string; text: string; asReasoning: boolean }
-  | { type: 'reasoning.delta'; messageId: string; delta: string }
+  | { type: 'reasoning.delta'; messageId: string; delta: string; activity?: true }
   | {
       type: 'tool.call'
       messageId: string
@@ -501,7 +501,7 @@ export type AgentStreamEvent = {
 /** 消息分部：AgentMessage.parts 的元素结构，前端按 type 分发渲染 */
 export type AgentMessagePart =
   | { type: 'text'; text: string }
-  | { type: 'reasoning'; text: string; durationMs?: number }
+  | { type: 'reasoning'; text: string; durationMs?: number; activity?: true }
   | {
       type: 'tool-call'
       callId: string

@@ -26,6 +26,7 @@ import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 import { DataAccessError, prisma } from '../../api/lib/prisma.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import * as repairAudit from '../../api/lib/agent/quality-repair-audit.js'
+import * as standaloneHistory from '../../api/lib/agent/standalone-quality-history.js'
 afterEach(() => vi.restoreAllMocks())
 
 function runtime(tier: 'lite' | 'custom' | 'speed', multiplierBps = 0): NonNullable<ToolContext['modelRuntime']> {
@@ -37,6 +38,7 @@ function context(modelRuntime: ToolContext['modelRuntime']): ToolContext {
     creativeFreedom: 'bold', qualityMode: 'balanced', modelRuntime, signal: new AbortController().signal, emit: vi.fn() }
 }
 beforeEach(() => {
+  vi.spyOn(standaloneHistory, 'readStandalonePriorQualityJudgment').mockResolvedValue(null)
   // This suite owns selected-model inheritance. Real audit persistence and its
   // ownership/replay fences are exercised by the dedicated audit suites.
   vi.spyOn(repairAudit, 'persistQualityRepairAttemptAudit').mockResolvedValue(undefined)

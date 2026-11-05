@@ -28,22 +28,18 @@ it('projects an unchanged 75-part history once while 40 further deltas arrive', 
   console.info('[synthetic-projection]', JSON.stringify({ historyParts: 75, deltas: 40, markdownParses: vi.mocked(fromMarkdown).mock.calls.length, elapsedMs: Math.round(performance.now() - start) }))
   expect(state.messages[0].parts.slice(0, 75)).toEqual(preserved)
   expect(state.messages[0].parts.slice(0, 75).every((part, index) => part === preserved[index])).toBe(true)
-  expect(state.messages[0].parts.at(-1)).toEqual({ type: 'reasoning', text: '继续核对。'.repeat(40) })
+  expect(state.messages[0].parts.at(-1)).toEqual({ type: 'reasoning', text: '', activity: true })
   expect(initialParses).toBeGreaterThan(0)
   expect(fromMarkdown).toHaveBeenCalledTimes(initialParses)
 })
 
-it('keeps streaming and finished reasoning projections separate for the same immutable part', () => {
-  const ordinary: AgentMessagePart = Object.freeze({ type: 'reasoning', text: '还在核对人物动机。' })
-  expect(projectAgentAuthorParts([ordinary], true)[0]).toBe(ordinary)
-  const tail: AgentMessagePart = Object.freeze({ type: 'reasoning', text: '已核对人物动机。\n\n新到达的普通尾句' })
-  expect(projectAgentAuthorParts([tail], true)[0]).toBe(tail)
-  const part: AgentMessagePart = Object.freeze({ type: 'reasoning', text: '还在核对人物动机。\n\n“尚未闭合的引用' })
-  const streaming = [{ type: 'reasoning', text: '还在核对人物动机。\n\n' }]
-  expect(projectAgentAuthorParts([part], true)).toEqual(streaming)
-  expect(projectAgentAuthorParts([part], false)).toEqual([part])
-  expect(projectAgentAuthorParts([part], true)).toEqual(streaming)
-  expect(projectAgentAuthorParts([part], false)[0]).toBe(part)
+it('reuses safe episode markers in streaming and finished projections without mutating private source', () => {
+  const part: AgentMessagePart = Object.freeze({ type: 'reasoning', text: '私人思考。\n\n“尚未闭合的引用' })
+  const streaming = projectAgentAuthorParts([part], true)
+  expect(streaming).toEqual([{ type: 'reasoning', text: '', activity: true }])
+  expect(projectAgentAuthorParts([part], false)).toEqual(streaming)
+  expect(projectAgentAuthorParts([part], true)[0]).toBe(streaming[0])
+  expect(part.text).toBe('私人思考。\n\n“尚未闭合的引用')
 })
 
 it('replaces preparation, execution and failure parts without caching a false success or hiding real failure', () => {

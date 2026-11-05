@@ -518,7 +518,7 @@ function buildUnloadedSkillGuide(decision: SkillRouteDecision, options: SkillDig
   const available = options.availableSkills
   if (!available || available.length === 0) return null
   const loadedIds = new Set(decision.selected.map((skill) => skill.id))
-  const rest = available.filter((skill) => !loadedIds.has(skill.id) && skill.status === 'active' && Boolean(resolveSkillResource(skill, decision.phase)))
+  const rest = available.filter((skill) => !loadedIds.has(skill.id) && skill.status === 'active')
   if (rest.length === 0) return null
 
   const lines = [...rest]
@@ -532,14 +532,14 @@ function buildUnloadedSkillGuide(decision: SkillRouteDecision, options: SkillDig
 
   return `本轮未加载、但当前作品已启用的技能：
 ${lines.join('\n')}
-使用判断：作者点名某个技能，或本轮需求与某条技能的描述/适用场景明确吻合时，先用 skill_load 按当前阶段 ${decision.phase} 加载它再动手；同类能力下作者技能与导入技能优先于内置技能。不要为了展示能力批量加载。`
+使用判断：这些是可发现的元数据，尚未加载或使用。当前阶段 ${decision.phase} 不是整项任务的阶段上限；进入写作、复查或修订子任务时，根据实际问题用 skill_load 加载对应 phase 的说明。目录未列全时用 skill_catalog 查看。作者点名或描述明确吻合时先读说明，再把方法用于当前产出；同版本同阶段已加载则复用。连续性与人类感职责不同，不能用前者代替后者；不要批量加载无关技能，也不能仅因列出名称就声称用过。`
 }
 
 export function buildSkillExecutionDigest(decision: SkillRouteDecision, freedom: CreativeFreedom, options: SkillDigestOptions = {}): string {
   const unloadedGuide = buildUnloadedSkillGuide(decision, options)
   if (decision.selected.length === 0) {
     return [
-      `${freedomGuidance(freedom)}\n本轮没有命中需要加载的创作 Skill；不得为了展示能力强行套用写作模板。`,
+      '本轮没有自动加载创作 Skill；目录仅供按需发现，不增加正文、检查或提交义务，不得为了展示能力强行套用写作模板。',
       unloadedGuide,
     ].filter((block): block is string => Boolean(block)).join('\n\n')
   }

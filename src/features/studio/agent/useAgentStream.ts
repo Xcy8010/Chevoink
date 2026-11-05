@@ -62,7 +62,8 @@ function mergePendingEvents(pending: AgentStreamEvent[]): AgentStreamEvent[] {
       last.messageId === event.messageId
     ) {
       // 用后一条的 seq/ts，保证 store 的 lastSeq 正确推进
-      merged[merged.length - 1] = { ...event, delta: last.delta + event.delta }
+      merged[merged.length - 1] = { ...event, delta: last.delta + event.delta,
+        ...(event.type === 'reasoning.delta' && last.type === 'reasoning.delta' && (event.activity || last.activity) ? { activity: true as const } : {}) }
       continue
     }
 

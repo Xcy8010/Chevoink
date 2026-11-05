@@ -27,6 +27,14 @@ export function toOpenAIToolPresentation(tool: Pick<AgentTool, 'name' | 'descrip
 }
 
 function toolPresentation(tool: Pick<AgentTool, 'name' | 'description'>, parameters: Record<string, unknown>, scope?: TaskSpec['scope']): { description: string; parameters: Record<string, unknown> } {
+  // New model calls create identity/structure only. The execution schema keeps
+  // content for already-frozen legacy requests; never rewrite their snapshots.
+  if (tool.name === 'chapter_create') {
+    const properties = parameters.properties as Record<string, unknown>
+    return { description: tool.description, parameters: { ...parameters,
+      properties: Object.fromEntries(Object.entries(properties).filter(([key]) => key !== 'content')),
+      required: (parameters.required as string[] ?? []).filter(key => key !== 'content') } }
+  }
   if (tool.name === 'novel_update_meta' && scope?.novelInitializationProtocol === 1 && scope.novelInitializationTarget === 'empty') {
     return { description: `${tool.description} 完整初始化时一次提供title、summary与tags；缺字段不会保存任何内容。单项修改任务仍可只传所需字段。`, parameters }
   }

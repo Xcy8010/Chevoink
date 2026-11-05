@@ -6,6 +6,7 @@ import * as review from '../../api/lib/agent/review-completion.js'
 import * as auxiliaryRuntime from '../../api/lib/agent/runtime-auxiliary-call.js'
 import * as formatRecovery from '../../api/lib/agent/quality-format-recovery.js'
 import * as repairAudit from '../../api/lib/agent/quality-repair-audit.js'
+import * as standaloneHistory from '../../api/lib/agent/standalone-quality-history.js'
 import { beginTextRequest } from '../../api/lib/text-request-trace.js'
 import { selectAutomaticQualityFindings, qualityAutoRepairPending } from '../../api/lib/agent/quality-report-contract.js'
 
@@ -182,6 +183,7 @@ describe('严谨创作自动落实质量建议', () => {
   afterEach(() => vi.restoreAllMocks())
   const digest = (content: string) => createHash('sha256').update(content).digest('hex')
   function fixture(cached: boolean, behavior = 'apply') {
+    vi.spyOn(standaloneHistory, 'readStandalonePriorQualityJudgment').mockResolvedValue(null)
     const audit = vi.spyOn(repairAudit, 'persistQualityRepairAttemptAudit').mockImplementation(async () => {})
     guard.probe.mockReset().mockResolvedValue({ open: true })
     guard.readiness.mockReset().mockResolvedValue(null)

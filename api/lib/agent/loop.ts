@@ -40,6 +40,7 @@ import { applySessionToolPolicy, getAgentDefinition, getToolsForAgent, type Agen
 import { deregisterActiveRun, registerActiveRun, getActiveRun } from './active-runs.js'
 import { clearRunBaselines, getLastTouchedChapter } from './baseline.js'
 import { AGENT_BEHAVIOR_CORE, assembleContext, insertSubagentCatalog } from './context.js'
+import { readWritingCollaborationDigest, COLLABORATION_MARKER } from './writing-collaboration.js'
 import { captureUserDirectives, compactSessionContext } from './context-engine.js'
 import { syncNovelMemoryProjection } from './story-memory.js'
 import { resolveAgent2FeatureFlags } from '../agent2-feature-flags.js'
@@ -1901,6 +1902,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       lastActivityAt = Date.now()
 
       await refreshPhaseSkills()
+      // Replace the advisory snapshot, including after history compaction or
+      // Continue. It never changes tool admission or completion decisions.
+      for (let index = messages.length - 1; index >= 0; index--) {
+        if (messages[index].role === 'system' && typeof messages[index].content === 'string'
+          && (messages[index].content as string).startsWith(COLLABORATION_MARKER)) messages.splice(index, 1)
+      }
+      const collaboration = await readWritingCollaborationDigest(prisma, { userId: params.userId, novelId: params.novelId, runId })
+      if (collaboration) messages.push({ role: 'system', content: collaboration })
       if (activeReviewStateHint) {
         const index = messages.indexOf(activeReviewStateHint)
         if (index >= 0) messages.splice(index, 1)
@@ -1968,7 +1977,6 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const explanatoryResponse = !requiresManuscriptDelivery(taskSpec)
         && (taskSpec.scope.authorEffects?.manuscript === false || taskSpec.writingPacing === 'conversation_only')
       const visibleTextStreamer = createVisibleTextStreamer()
-      const visibleReasoningStreamer = createVisibleTextStreamer()
       let writingTextHeld = requiresCompletedWritingPresentation(taskSpec)
       let writingTextBuffer = ''
       const releaseWritingToolText = () => {
@@ -2003,7 +2011,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         temperature: taskSpec.creativeFreedom === 'stable' ? 0.45 : taskSpec.creativeFreedom === 'bold' ? 0.85 : 0.65,
         onChunk: (chunk) => {
           if (chunk.type === 'text-delta') {
-            // 正文与 reasoning 都逐 token 实时播出，但只播清洗后的安全增量；轮末由 text.final 统一结算整段
+            // 正文实时播出清洗后的安全增量；轮末由 text.final 统一结算整段
             if (liveTurn) liveTurn.streamedText += chunk.delta
             lastActivityAt = Date.now()
             handleRepeatHit(repeatDetector.push(executionTextDetector.push(chunk.delta)))
@@ -2016,10 +2024,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             if (liveTurn) liveTurn.streamedReasoning += chunk.delta
             lastActivityAt = Date.now()
             handleRepeatHit(repeatDetector.push(executionReasoningDetector.push(chunk.delta)))
-            const reasoningIncrement = visibleReasoningStreamer.push(chunk.delta)
-            if (reasoningIncrement) {
-              bus.emit({ type: 'reasoning.delta', messageId, delta: reasoningIncrement })
-            }
+            // Native reasoning stays private; only response activity reaches authors.
+            if (chunk.delta.trim()) bus.emit({ type: 'reasoning.delta', messageId, delta: '', activity: true })
           } else if (chunk.type === 'tool-call-start') {
             releaseWritingToolText()
             lastActivityAt = Date.now()
@@ -2103,7 +2109,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const authorContent = ordinaryResponse ? ordinaryResponse.answer : explanatoryResponse ? result.content : humanizeAgentVisibleText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
 
       // 主流 Agent 标准（Codex 等）：任务过程中的进展正文同样是对话正文信道，作者实时可见、刷新后仍在；
-      // 只有模型原生 reasoning 才进思考信道，执行旁白不再改道思考区。
+      // 模型原生 reasoning 只保留内部协议与活动标记，执行旁白不改道进度区。
       // text.delta 已实时显示供应商原始流；无论最终是否有干净文本，都要发 text.final 做归一化，
       // 这样 DSML/乱码被清洗成空串时能立即从界面移除，而不是残留到刷新前。
       const deferWritingCompletionText = taskSpec.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED') || Boolean(ordinaryResponse) || (completedWritingWrapUp.value !== null || effectiveToolCalls.length === 0 && requiresCompletedWritingPresentation(taskSpec))
@@ -2112,7 +2118,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const parts: AgentMessagePart[] = []
       if (liveTurn) liveTurn.parts = parts
       if (result.reasoning) {
-        // 思考信道作者可见：落库同样清洗，避免刷新后历史思考行里残留英文协议词汇
+        // 保留内部诊断；历史读取与公开事件仅投影不含思考内容的进度标记。
         parts.push({ type: 'reasoning', text: normalizeExecutionText(result.reasoning) })
       }
       if (authorContent) {

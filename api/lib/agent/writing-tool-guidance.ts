@@ -33,5 +33,5 @@ export function frozenWritingToolGuidance(action: string, scope?: TaskSpec['scop
   if (action === 'story_compiler_prepare') return `${frozen}仅本任务尚未准备时，先纠正 story_compiler_prepare：省略 chapterId，targetOrderIndex 可省略或只填数字 ${target.orderIndex}，intentSummary 填本章实际写作目标。${writing?.tailVolume
     ? 'volumeDecision 必填，按已读取的卷目标与前章事实决定 continue 或 new_volume，并给出真实理由。'
     : ''}前章只作承接参考，不是本次写入目标；准备失败后应先纠正准备参数，不要跳过准备直接创建章节。已有本任务编译时复用返回的 compilationId。`
-  return `${frozen}仅目标尚未创建时，先完成本任务 PREPARE 并保存卷决定。continue 沿用当前卷时，chapter_create 最小参数为 {"title":"章节名称"}（content 可选）；省略 newVolume、volumeId、volumeOrder、positionInVolume，服务器按冻结全书位置定位。只有 PREPARE 已保存 new_volume 决定且真实卷目标已收束时才填写 newVolume；newVolume 表示新增卷，不能填写已有卷或与已有卷定位混用。位置字段需要填写时使用整数，不用字符串；title 默认只写章名，作者明确指定的非空命名均可使用，不因章号或书名号拒绝创建。`
+  return `${frozen}仅目标尚未创建时建立空章。continue 沿用当前卷时，chapter_create 最小参数为 {"title":"章节名称"}；不传正文，取得真实 chapterId 后用 chapter_write 写入。省略 newVolume、volumeId、volumeOrder、positionInVolume，服务器按冻结全书位置定位。旧冻结任务只有 PREPARE 已保存 new_volume 决定且真实卷目标已收束时才填写 newVolume；newVolume 表示新增卷，不能填写已有卷或与已有卷定位混用。位置字段使用整数；title 默认只写章名，作者明确指定的非空命名均可使用。已有准备或章节均复用，准备、检查不构成普通写入的阶段许可。`
 }

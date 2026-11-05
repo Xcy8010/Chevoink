@@ -1,3 +1,4 @@
+import { publicAgentProgressEvent } from '../../../../shared/agent-progress.js'
 import { create } from 'zustand'
 import { createAgentAuthorTextStream, projectAgentAuthorParts, projectAgentAuthorText, projectAgentToolSummary } from '../../../../shared/agent-author-view.js'
 import { getAgentToolPresentation } from '../../../../shared/agent-tool-presentation.js'
@@ -32,7 +33,6 @@ import type {
 type MessageReplay = { started: boolean; text: string; reasoning: string; afterCallId: string | null; reasoningSlot: number; lastPart: 'text' | 'reasoning' | 'tool' | null; seenCalls: Set<string> }
 const restoredMessageReplay = new Map<string, MessageReplay>()
 const authorTextStreams = new Map<string, ReturnType<typeof createAgentAuthorTextStream>>()
-const reasoningTextStreams = new Map<string, { part: AgentMessagePart; stream: ReturnType<typeof createAgentAuthorTextStream> }>()
 
 export type AgentRunPhase =
   | 'idle'
@@ -476,10 +476,9 @@ function deriveSessionStateFromMessages(messages: AgentUIMessage[]): {
   return { workspaceActivities, todos }
 }
 
-// Preserve cumulative supplier thinking and transient drafts internally. Author
-// projection happens at render/copy boundaries, never destructively per delta.
+// Browser state and caches retain episode markers, never private supplier reasoning.
 function projectStoredParts(parts: AgentMessagePart[]): AgentMessagePart[] {
-  return parts.flatMap(part => part.type === 'reasoning' || part.type === 'tool-call' && part.preparing
+  return parts.flatMap(part => part.type === 'tool-call' && part.preparing
     ? [part] : projectAgentAuthorParts([part]))
 }
 
@@ -514,14 +513,15 @@ function appendDelta(
   parts: AgentMessagePart[],
   type: 'text' | 'reasoning',
   delta: string,
+  activity?: true,
 ): AgentMessagePart[] {
   const last = parts[parts.length - 1]
 
   if (last && last.type === type) {
-    return [...parts.slice(0, -1), { ...last, text: last.text + delta }]
+    return [...parts.slice(0, -1), { ...last, text: last.text + delta, ...(activity ? { activity } : {}) }]
   }
 
-  return [...parts, { type, text: delta }]
+  return [...parts, { type, text: delta, ...(activity ? { activity } : {}) }]
 }
 
 /** A partial replay never shrinks saved text; only new suffixes or text.final replace it. */
@@ -534,15 +534,16 @@ function reconcileReplayedText(parts: AgentMessagePart[], text: string): AgentMe
   return last < 0 ? [...parts, { type: 'text', text: suffix }] : parts.map((part, index) => index === last && part.type === 'text' ? { ...part, text: part.text + suffix } : part)
 }
 
-function reconcileReplayedReasoning(parts: AgentMessagePart[], replay: MessageReplay, final = false): AgentMessagePart[] {
+function reconcileReplayedReasoning(parts: AgentMessagePart[], replay: MessageReplay, final = false, activity?: true): AgentMessagePart[] {
   const start = replay.afterCallId ? parts.findIndex(part => part.type === 'tool-call' && part.callId === replay.afterCallId) + 1 : 0
   const next = parts.findIndex((part, index) => index >= start && part.type === 'tool-call' && !part.preparing)
   const end = next < 0 ? parts.length : next
   const slots = parts.flatMap((part, index) => index >= start && index < end && part.type === 'reasoning' ? [index] : [])
   const target = slots[replay.reasoningSlot]
-  if (target === undefined) return [...parts.slice(0, end), { type: 'reasoning', text: replay.reasoning }, ...parts.slice(end)]
+  if (target === undefined) return [...parts.slice(0, end), { type: 'reasoning', text: replay.reasoning, ...(activity ? { activity } : {}) }, ...parts.slice(end)]
   return parts.map((part, index) => index === target && part.type === 'reasoning'
-    && (final || !part.text.startsWith(replay.reasoning)) ? { ...part, text: replay.reasoning } : part)
+    && (final || !part.text.startsWith(replay.reasoning) || activity && !part.activity)
+    ? { ...part, text: replay.reasoning, ...(activity ? { activity } : {}) } : part)
 }
 
 function finalizeReplayedReasoning(messages: AgentUIMessage[], event: { runId: string; messageId: string; callId: string }): AgentUIMessage[] {
@@ -784,7 +785,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   restoreMessages: (messages, sessionId = null, snapshot) => {
     authorTextStreams.clear()
-    reasoningTextStreams.clear()
     restoredMessageReplay.clear()
     const restored = decorateAcceptedMessages(messages.map(projectStoredMessage))
     const derived = deriveSessionStateFromMessages(restored)
@@ -868,7 +868,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   resetRun: () => {
     authorTextStreams.clear()
-    reasoningTextStreams.clear()
     restoredMessageReplay.clear()
     // 离开旧会话前把最新消息（含刚直播完的内容）快照进缓存：切回来可零延迟复原
     const { loadedSessionId: leavingSessionId, messages: leavingMessages, todos } = get()
@@ -1162,8 +1161,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     }) }
   }),
 
-  applyEvent: (event) =>
+  applyEvent: (incomingEvent) =>
     set((state) => {
+      const event = publicAgentProgressEvent(incomingEvent)
       // 重放/重连去重：只接受更新的 seq
       if (event.seq <= state.lastSeq && event.runId === state.runId) {
         return {}
@@ -1216,7 +1216,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             if (messageBelongsToRun(existing, event.runId) && existing.role === 'assistant' && replay && !replay.started) {
               replay.started = true
               authorTextStreams.delete(key)
-              reasoningTextStreams.delete(key)
             }
             return base
           }
@@ -1261,7 +1260,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
         case 'text.final': {
           authorTextStreams.delete(`${event.runId}:${event.messageId}`)
-          reasoningTextStreams.delete(`${event.runId}:${event.messageId}`)
           const text = event.asReasoning ? '' : projectAgentAuthorText(event.text)
           const replay = restoredMessageReplay.get(`${event.runId}:${event.messageId}`)
           if (replay?.started) { replay.text = text; replay.lastPart = 'text' }
@@ -1286,29 +1284,18 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
         case 'reasoning.delta': {
           if (!isRunActive(state.phase)) return base
-          const previous = state.messages.find(message => message.id === event.messageId)?.parts.at(-1)
           const key = `${event.runId}:${event.messageId}`
           const replay = restoredMessageReplay.get(key)
           if (replay?.started && replay.lastPart !== 'reasoning') {
             replay.reasoning = ''
             replay.reasoningSlot++
             replay.lastPart = 'reasoning'
-            reasoningTextStreams.delete(key)
           }
-          const cached = reasoningTextStreams.get(key)
-          const stream = cached && cached.part === previous ? cached.stream : createAgentAuthorTextStream()
-          if (!replay?.started && cached?.part !== previous && previous?.type === 'reasoning') stream.push(previous.text)
-          const visibleDelta = stream.push(event.delta)
           if (replay?.started) replay.reasoning += event.delta
           const messages = updateMessageParts(state.messages, event.messageId, parts => replay?.started
-            ? reconcileReplayedReasoning(parts, replay) : appendDelta(parts, 'reasoning', event.delta))
-          const current = messages.find(message => message.id === event.messageId)?.parts.at(-1)
-          // Use the same published prefix as the message renderer. Raw model
-          // tokens, hidden protocol and unfinished paragraphs are not visible
-          // progress; an existing thinking card alone cannot reset silence.
-          if (current) reasoningTextStreams.set(key, { part: current, stream })
+            ? reconcileReplayedReasoning(parts, replay, false, event.activity) : appendDelta(parts, 'reasoning', event.delta, event.activity))
           return { ...base, messages,
-            ...(visibleDelta.trim() ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}) }
+            ...(event.activity ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}) }
         }
 
         case 'tool.call': {

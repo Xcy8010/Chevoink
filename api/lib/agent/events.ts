@@ -1,3 +1,4 @@
+import { publicAgentProgressEvent } from '../../../shared/agent-progress.js'
 import { publicReviewExecution } from '../../../shared/review-lifecycle.js'
 import type { AgentStreamEvent, AgentStreamEventBody } from '../../../shared/contracts/index.js'
 import { prisma } from '../prisma.js'
@@ -54,7 +55,7 @@ export function publicRunEvent(event: AgentStreamEvent, notices: ReadonlyMap<str
     seq: event.seq, runId: event.runId, ts: event.ts, type: 'error', code: `run_${notice.status}`,
     message: notice.text, recoverable: notice.status === 'paused',
   }
-  return publicReviewExecution(event)
+  return publicAgentProgressEvent(publicReviewExecution(event))
 }
 
 type EventListener = (event: AgentStreamEvent) => void

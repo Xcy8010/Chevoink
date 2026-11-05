@@ -1,6 +1,7 @@
 import type { AgentMessagePart, AgentUIMessage } from './contracts/index.js'
 import { containsAgentProtocolArtifact, mapAgentVisibleProse, normalizeAgentCitationLinks, stripAgentProtocolArtifacts } from './agent-output.js'
 import { getAgentToolPresentation, hasAgentToolPresentation } from './agent-tool-presentation.js'
+import { publicAgentProgressPart, normalizeAgentProgressText } from './agent-progress.js'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 
 const parameterLabels: Record<string, string> = {
@@ -174,12 +175,12 @@ function projectAuthorPart(part: AgentMessagePart, streamingReasoning: boolean):
   const cache = part.type === 'reasoning' && streamingReasoning ? streamingReasoningPartCache : authorPartCache
   if (cache.has(part)) return cache.get(part)!
   let projected: AgentMessagePart | null = part
-  if (part.type === 'text' || part.type === 'reasoning') {
-    // Re-project accumulated thinking through the same incremental classifier.
-    // An incomplete protocol/quote prefix must never escape expanded UI.
-    const text = part.type === 'reasoning' && streamingReasoning
-      ? createAgentAuthorTextStream().push(part.text) : projectAgentAuthorText(part.text)
-    projected = text.trim() || part.type === 'reasoning' && streamingReasoning && part.text.trim()
+  if (part.type === 'reasoning') {
+    projected = publicAgentProgressPart(part)
+  } else if (part.type === 'text') {
+    // Ordinary reply prose keeps its existing presentation boundary.
+    const text = projectAgentAuthorText(part.text)
+    projected = text.trim()
       ? text === part.text ? part : { ...part, text } : null
   } else if (part.type === 'tool-call') {
     const title = getAgentToolPresentation(part.toolName).label
@@ -205,7 +206,7 @@ export function projectAgentAuthorParts(parts: readonly AgentMessagePart[], stre
 }
 
 export function projectAgentToolSummary(summary: string, status: string): string {
-  const visible = projectAgentAuthorText(summary)
+  const visible = projectAgentAuthorText(normalizeAgentProgressText(summary))
   if (/\b(?:Error|Exception|P\d{4}|HTTP|attempt|parser|workVersion)\b|\bat \S+\([^\n]+:\d+|[{}]/.test(visible)
     || !/[\p{Script=Han}]/u.test(visible)) {
     return status === 'failed' ? '本次操作未完成。请核对当前成果后重试，或调整要求。'

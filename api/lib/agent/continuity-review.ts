@@ -21,13 +21,16 @@ import { parseQualityRepairResponse, partitionQualityRepairResponse, QUALITY_REP
 import { runtimeJson } from './runtime-common.js'
 import { parseContinuityReportEnvelope } from './continuity-format-recovery.js'
 import { isKnownTextRequestBilling } from './text-request-billing.js'
+import { CONTINUITY_FULL_REVIEW_PROTOCOL, continuityFullReviewKey, reviewReceiptsKnown, REVIEW_REASSESSMENT_RULE } from './review-baseline.js'
 import type { ToolContext, ToolResult } from './tools/types.js'
 
 const textHash = (text: string) => createHash('sha256').update(text).digest('hex')
 const findingSchema = z.object({ signal: continuityFindingInputSchema.shape.signal, severity: continuityFindingInputSchema.shape.severity,
   explanation: z.string().min(1).max(1000), suggestion: z.string().min(1).max(1000),
   evidence: z.array(z.object({ sourceId: z.string().min(1).max(96) }).strict()).min(1).max(8) }).strict()
-export const continuityReportResponseSchema = z.object({ findings: z.array(findingSchema), planAlignment: planAlignmentSchema.optional() }).strict()
+const reassessmentSchema = z.array(z.object({ baselineFindingId: z.string().optional(), findingIndex: z.number().int().nonnegative().optional(),
+  classification: z.enum(['old_retained', 'resolved', 'not_supported', 'regression', 'missed', 'advice']), explanation: z.string().min(1).max(1000) }).strict())
+export const continuityReportResponseSchema = z.object({ findings: z.array(findingSchema), planAlignment: planAlignmentSchema.optional(), reassessment: reassessmentSchema.optional() }).strict()
 export type ContinuityOpinion = z.infer<typeof findingSchema>
 type LocatedFinding = ContinuityFindingInput & { id: string; explanation: string; startOffset: number; endOffset: number;
   references: Array<{ sourceId: string; chapterId: string; revision: number; source: 'current' | 'previous'; start: number; end: number; quote: string }> }
@@ -36,6 +39,11 @@ export type ContinuityReport = { version: 1; id: string; taskId: string; chapter
   planAlignment?: PlanAlignment;
   focus?: string;
   sourceVersions?: Array<{ chapterId: string; revision: number; contentHash: string }>;
+  reviewProtocol?: typeof CONTINUITY_FULL_REVIEW_PROTOCOL; fullReviewKey?: string; reusedReportId?: string;
+  sourceSnapshots?: Array<{ chapterId: string; revision: number; orderIndex: number; source: 'current' | 'previous'; content: string }>;
+  baseline?: { reportId: string; revision: number; contentHash: string; sourceVersions?: ContinuityReport['sourceVersions'] | null;
+    sourceSnapshots?: ContinuityReport['sourceSnapshots'] | null; findings: LocatedFinding[]; retainedProposals?: ContinuityReport['retainedProposals'] };
+  reassessment?: z.infer<typeof reassessmentSchema>;
   contentHash: string; complete: boolean; findings: LocatedFinding[]; opinions: ContinuityOpinion[]; unlocatedIndexes: number[];
   rawResponses: string[]; usageIds: string[]; nativeReceiptIds?: string[]; billingKnown: boolean; repairAttempted?: boolean; repairResponseIndex?: number; repairResult?: ToolResult; repairFailure?: string;
   incompleteResponses?: number[];
@@ -116,7 +124,31 @@ export async function buildContinuitySnapshot(ctx: Pick<ToolContext, 'userId' | 
     table: buildQualityEvidenceSources({ userId: ctx.userId, novelId: ctx.novelId, chapterId: source.id, chapterRevision: source.revision }, source.content) }))
   const contextHash = runtimeJson({ taskId: original.taskId, chapterId, sources: sources.map(source => ({ chapterId: source.chapterId,
     revision: source.revision, orderIndex: source.orderIndex, contentHash: source.table.contentHash })), authorRequest: original.prompt, focus: args.focus ?? null, ...(planContext ? { planContextHash: writingPlanContextHash(planContext) } : {}) }).hash
-  return { chapter, previous, compilation, original, runIds, sources, contextHash, planContext }
+  const fullReviewKey = continuityFullReviewKey({ chapter, original, sources }, planContext ? writingPlanContextHash(planContext) : null)
+  const scope = { artifactType: 'continuityReview' as const, runId: { in: runIds }, run: { userId: ctx.userId, novelId: ctx.novelId },
+    AND: [{ metadata: { path: ['continuityReport', 'taskId'], equals: original.taskId } },
+      { metadata: { path: ['continuityReport', 'chapterId'], equals: chapterId } },
+      { metadata: { path: ['continuityReport', 'complete'], equals: true } },
+      { metadata: { path: ['continuityReport', 'billingKnown'], equals: true } }] }
+  const [matchingRows, priorRows] = await Promise.all([
+    db.agentArtifact.findMany({ where: { ...scope, AND: [...scope.AND,
+      { metadata: { path: ['continuityReport', 'reviewProtocol'], equals: CONTINUITY_FULL_REVIEW_PROTOCOL } },
+      { metadata: { path: ['continuityReport', 'fullReviewKey'], equals: fullReviewKey } }] }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1 }),
+    db.agentArtifact.findMany({ where: { ...scope, NOT: { metadata: { path: ['continuityReport', 'contextHash'], equals: contextHash } }, AND: [...scope.AND,
+      { metadata: { path: ['continuityReport', 'revision'], lte: chapter.revision } }] }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1 }),
+  ])
+  const reports = [...matchingRows, ...priorRows].flatMap(row => {
+    const metadata = row.metadata && typeof row.metadata === 'object' && !Array.isArray(row.metadata) ? row.metadata : {}
+    const value = metadata.continuityReport as ContinuityReport | undefined
+    return value?.version === 1 && value.taskId === original.taskId && value.chapterId === chapterId && value.complete && value.billingKnown
+      && Array.isArray(value.usageIds) && Array.isArray(value.findings) && Array.isArray(value.opinions) && Array.isArray(value.rawResponses) ? [value] : []
+  })
+  const billing = reports.length ? await readContinuityRequestBilling(db, ctx, { runIds, chapter }) : null
+  const known = reports.filter(report => billing && reviewReceiptsKnown(report, billing))
+  const compatibleReport = known.find(report => report.reviewProtocol === CONTINUITY_FULL_REVIEW_PROTOCOL && report.fullReviewKey === fullReviewKey
+    && report.revision === chapter.revision && report.contentHash === textHash(chapter.content) && (!planContext || report.planAlignment?.status === 'reviewed'))
+  const priorReport = known.find(report => report.revision <= chapter.revision && report.contextHash !== contextHash)
+  return { chapter, previous, compilation, original, runIds, sources, contextHash, planContext, fullReviewKey, compatibleReport, priorReport }
 }
 
 /** Only an actual table entry can supply evidence; explanations are opinions. */
@@ -155,8 +187,13 @@ const criticSystem = `你是中文小说连续性编辑。完整阅读本章和�
 只输出一个完整 findings JSON 数据对象，无问题时输出 {"findings":[]}。不输出审查过程、输入正文、证据表或下面的 JSON Schema；Schema 仅约束报告格式，不是待填写或回显的报告内容。
 报告须满足以下全部约束：${JSON.stringify(z.toJSONSchema(continuityReportResponseSchema, { io: 'input' }))}`
 
-export function continuityReviewRequest(snapshot: Pick<ContinuitySnapshot, 'chapter' | 'sources' | 'original'> & Partial<Pick<ContinuitySnapshot, 'planContext'>>, focus?: string) {
-  return { system: criticSystem + (snapshot.planContext ? `\n${renderPlanAlignmentInstructions(snapshot.planContext)}` : ''), content: JSON.stringify({ ...(snapshot.planContext ? { planContext: snapshot.planContext } : {}), authorRequest: snapshot.original.prompt, focus: focus ?? null,
+export function continuityReviewRequest(snapshot: Pick<ContinuitySnapshot, 'chapter' | 'sources' | 'original'> & Partial<Pick<ContinuitySnapshot, 'planContext' | 'fullReviewKey' | 'priorReport'>>, focus?: string) {
+  const prior = snapshot.priorReport
+  return { system: criticSystem + `\n${REVIEW_REASSESSMENT_RULE}\n有历史报告时可附加reassessment逐项说明分类、理由及baselineFindingId或当前findingIndex；缺少分类不能删除findings。` + (snapshot.planContext ? `\n${renderPlanAlignmentInstructions(snapshot.planContext)}` : ''), content: JSON.stringify({ reviewProtocol: CONTINUITY_FULL_REVIEW_PROTOCOL,
+    fullReviewKey: snapshot.fullReviewKey ?? continuityFullReviewKey(snapshot, snapshot.planContext ? writingPlanContextHash(snapshot.planContext) : null),
+    ...(prior ? { priorReview: { reportId: prior.id, revision: prior.revision, contentHash: prior.contentHash, sourceVersions: prior.sourceVersions ?? null,
+      sourceSnapshots: prior.sourceSnapshots ?? null, findings: prior.findings, retainedProposals: prior.retainedProposals ?? [], sourceContentStatus: prior.sourceSnapshots ? 'recorded' : 'not_recorded' } } : {}),
+    ...(snapshot.planContext ? { planContext: snapshot.planContext } : {}), authorRequest: snapshot.original.prompt, focus: focus ?? null,
     currentChapter: snapshot.chapter.id, sources: snapshot.sources.map(source => ({ chapterId: source.chapterId, revision: source.revision,
       orderIndex: source.orderIndex, source: source.source, content: source.content, evidence: renderQualityEvidenceSources(source.table) })) }) }
 }
@@ -218,6 +255,7 @@ ${report.findings.map(finding => `[${finding.id}/${finding.severity}/${finding.s
 ${report.unlocatedIndexes.map(index => `未定位意见[${index}]：${JSON.stringify(report.opinions[index])}`).join('\n')}
 提纲一致性：${snapshot.planContext ? report.planAlignment?.status ?? 'unknown' : '未绑定提纲'}；${JSON.stringify(alignmentFindings)}${alignmentUnknown ? '；提纲语义复核尚未取得可核对的完整结果，未当作通过；不要原样重复收费请求，先核对保存的报告与原作者检查授权。' : ''}\n${report.retainedProposals?.length ? `修订保留建议：${JSON.stringify(report.retainedProposals.map(item => ({ source: 'continuity', reportId: report.id, ...item })))}` : ''}
 ${report.repairUnresolved?.length ? `自动修订仍待核对（未当作已处理或已修复）：${JSON.stringify(report.repairUnresolved)}` : ''}
+${report.baseline ? `历史对照reportId=${report.baseline.reportId} · r${report.baseline.revision}（旧意见不是事实认证）：${report.reassessment ? JSON.stringify(report.reassessment) : '本次未提供结构化分类；不能据此认定旧问题已解决或新问题是回归。'}` : ''}
 ${report.repairFailure ? `报告已取得，自动修订未应用：${report.repairFailure}` : ''}`,
     display: { kind: 'storyCompiler', compilationId: snapshot.compilation?.id ?? '', phase: errors ? 'repair' : 'check', title: '连续性检查',
       detail: `${errors} 错误 · ${warnings} 警告`, errorCount: errors, warningCount: warnings,
@@ -313,6 +351,17 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
     criticRequest?: ReturnType<typeof continuityReviewRequest>; compactRepair?: boolean } = {}): Promise<ToolResult> {
   ctx.signal.throwIfAborted()
   const snapshot = options.snapshot ?? await buildContinuitySnapshot(ctx, args)
+  const criticRequest = options.criticRequest ?? continuityReviewRequest(snapshot, args.focus)
+  // The explicit marker lives inside the frozen request, so an old admitted
+  // native request remains byte-for-byte old and is never relabeled v1.
+  let fullReview = false
+  let requestBaseline: ContinuityReport['baseline']
+  try { const input = JSON.parse(criticRequest.content); fullReview = input.reviewProtocol === CONTINUITY_FULL_REVIEW_PROTOCOL && input.fullReviewKey === snapshot.fullReviewKey
+    // This is the exact admitted request's historical input, not a newer report
+    // discovered while resuming the same frozen native work.
+    if (fullReview && input.priorReview) requestBaseline = input.priorReview as ContinuityReport['baseline']
+  }
+  catch { /* Historical requests may contain plain text. */ }
   const id = runtimeJson({ kind: 'continuity-report', taskId: snapshot.original.taskId, chapterId: snapshot.chapter.id, contextHash: snapshot.contextHash }).hash
   const saved = await prisma.agentArtifact.findUnique({ where: { id } })
   const metadata = saved?.metadata && typeof saved.metadata === 'object' && !Array.isArray(saved.metadata) ? saved.metadata as Record<string, unknown> : {}
@@ -323,6 +372,19 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
   const retired = new Set(billing.retiredUsageIds ?? [])
   const previous = savedReport && !(savedReport.usageIds.some(id => retired.has(id)) || retired.size > 0 && !savedReport.billingKnown)
     ? savedReport : undefined
+  if (previous?.reviewProtocol === CONTINUITY_FULL_REVIEW_PROTOCOL && previous.complete && !reviewReceiptsKnown(previous, billing))
+    throw new DataAccessError(409, 'AI_PROVIDER_BILLING_UNCONFIRMED', '原完整报告缺少可核对的实际请求回执，未作为复用依据或重复请求。')
+  if (!saved && fullReview && snapshot.compatibleReport && reviewReceiptsKnown(snapshot.compatibleReport, billing)) {
+    const original = snapshot.compatibleReport
+    const { focus: _originalFocus, ...originalReport } = original
+    const reused: ContinuityReport = { ...originalReport, ...(args.focus ? { focus: args.focus } : {}), id,
+      contextHash: snapshot.contextHash, reusedReportId: original.reusedReportId ?? original.id }
+    await assertCurrent(ctx, args, snapshot)
+    await prisma.agentArtifact.create({ data: { id, runId: ctx.runId, artifactType: 'continuityReview', title: '连续性检查',
+      content: JSON.stringify(reused), metadata: runtimeJson({ continuityReport: reused, requestClosed: true, callId: ctx.callId, contextHash: snapshot.contextHash }).value } })
+    await saveReport(ctx, args, snapshot, reused)
+    return finishContinuityReview(ctx, args, snapshot, reused, { ...options, allowRepair: false }, true)
+  }
   if (previous?.complete) {
     ctx.signal.throwIfAborted()
     const cached = { ...previous, billingKnown: true }
@@ -361,6 +423,9 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
   let report: ContinuityReport = { version: 1, id, taskId: snapshot.original.taskId, chapterId: snapshot.chapter.id, revision: snapshot.chapter.revision,
     ...(options.resumeKnownRequest ? { nativeOperationId: options.resumeKnownRequest } : {}),
     ...(args.focus ? { focus: args.focus } : {}),
+    ...(fullReview ? { reviewProtocol: CONTINUITY_FULL_REVIEW_PROTOCOL, fullReviewKey: snapshot.fullReviewKey,
+      sourceSnapshots: snapshot.sources.map(({ chapterId, revision, orderIndex, source, content }) => ({ chapterId, revision, orderIndex, source, content })),
+      ...(requestBaseline ? { baseline: requestBaseline } : {}) } : {}),
     sourceVersions: snapshot.sources.map(source => ({ chapterId: source.chapterId, revision: source.revision, contentHash: source.table.contentHash })),
     contextHash: snapshot.contextHash, contentHash: textHash(snapshot.chapter.content), complete: false,
     opinions: previous?.opinions ?? [], findings: [], unlocatedIndexes: [], rawResponses: [], usageIds: [], billingKnown: true, history,
@@ -377,7 +442,7 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
     return response.content
   }
   try {
-    const request = options.criticRequest ?? continuityReviewRequest(snapshot, args.focus)
+    const request = criticRequest
     let opinions = [...report.opinions]
     const completedRaw = previous && [previous, ...(previous.history ?? [])].filter(row => row.billingKnown && !row.usageIds.some(id => retired.has(id))).some(row => row.rawResponses.some((raw, index) =>
       !row.incompleteResponses?.includes(index) && continuityFormatRecoveryPreservesOpinions(inspectContinuityOpinions(JSON.stringify({ findings: opinions })), inspectContinuityOpinions(raw))))
@@ -418,7 +483,17 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
     }
     const alignmentRaw = report.rawResponses.map((raw, index) => ({ raw, index })).reverse().find(({ raw, index }) => !report.incompleteResponses?.includes(index) && (() => { try { return !!parseContinuityReportEnvelope(raw).record?.planAlignment } catch { return false } })())?.raw
     const planAlignment = snapshot.planContext ? readPlanAlignment(alignmentRaw ?? '', snapshot.planContext, snapshot.sources) : undefined
-    report = { ...report, ...(planAlignment ? { planAlignment } : {}), opinions, ...bound, complete: parsed && !bound.unlocatedIndexes.length && report.billingKnown }
+    const reassessment = fullReview ? report.rawResponses.flatMap((raw, index) => {
+      if (report.incompleteResponses?.includes(index)) return []
+      try { const value = reassessmentSchema.safeParse(parseContinuityReportEnvelope(raw).record?.reassessment)
+        return value.success ? [value.data.filter(item => (item.baselineFindingId !== undefined || item.findingIndex !== undefined)
+          && (['old_retained', 'resolved', 'not_supported'].includes(item.classification) ? item.baselineFindingId !== undefined
+            : ['regression', 'missed'].includes(item.classification) ? item.findingIndex !== undefined : true)
+          && (item.baselineFindingId === undefined || report.baseline?.findings.some(finding => finding.id === item.baselineFindingId))
+          && (item.findingIndex === undefined || !!bound.findings.find(finding => finding.id === String(item.findingIndex))))] : []
+      } catch { return [] }
+    }).at(-1) : undefined
+    report = { ...report, ...(planAlignment ? { planAlignment } : {}), ...(reassessment ? { reassessment } : {}), opinions, ...bound, complete: parsed && !bound.unlocatedIndexes.length && report.billingKnown }
     await saveReport(ctx, args, snapshot, report)
     return finishContinuityReview(ctx, args, snapshot, report, { ...options, dispatch, nativeOperationId: options.resumeKnownRequest })
   } catch (error) {

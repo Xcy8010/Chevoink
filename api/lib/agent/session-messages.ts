@@ -1,3 +1,4 @@
+import { publicAgentProgressPart } from '../../../shared/agent-progress.js'
 import { loadServerRunNotices } from './events.js'
 import { publicReviewExecution } from '../../../shared/review-lifecycle.js'
 import type { Prisma } from '@prisma/client'
@@ -44,8 +45,8 @@ function visibleHistoryParts(parts: AgentMessagePart[], run: { runtimeProtocolVe
   if (serverNotice) parts = parts.filter(part => part.type !== 'text')
   const stopped = run.runtimeProtocolVersion === 1 && ['paused', 'completed'].includes(run.taskRoot?.status ?? '')
   return parts.map(part => {
-    if (part.type !== 'tool-call') return part
-    const visible = publicReviewExecution(part.snapshot ? { ...part, snapshot: undefined } : part)
+    if (part.type !== 'tool-call') return publicAgentProgressPart(part)
+    const visible = publicAgentProgressPart(publicReviewExecution(part.snapshot ? { ...part, snapshot: undefined } : part))
     // Match the existing live terminal reducer without marking the operation
     // failed in execution storage: an unknown result still needs reconciliation.
     return stopped && part.status === 'running' ? { ...visible, status: 'failed' as const, summary: run.taskRoot?.status === 'paused' ? '已停止' : '已中断' } : visible

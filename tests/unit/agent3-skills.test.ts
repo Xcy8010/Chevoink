@@ -10,6 +10,15 @@ import {
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 
 describe('Agent 3.0 Skill OS deterministic router', () => {
+  it('makes later-phase skills discoverable without pretending they are loaded or forcing all resources', () => {
+    const late = { ...skillCatalog[0], id: 'later-review', name: '后续审阅', phases: ['critique' as const], resources: { critique: '只有需要审阅时加载的独立说明。' } }
+    const decision = routeSkills({ mode: 'build', intent: 'write', freedom: 'balanced', prompt: '写两章', catalog: [] })
+    const digest = buildSkillExecutionDigest(decision, 'balanced', { availableSkills: [late] })
+    expect(digest).toContain('later-review')
+    expect(digest).toContain('critique')
+    expect(digest).not.toContain('只有需要审阅时加载的独立说明')
+    expect(digest).toContain('尚未加载或使用')
+  })
   it.each(['减少AI味', '减少 AI 味', '减少 A I 痕迹', '降低机器味', '去除人工智能痕迹'])('equivalent style requests reserve the same specialist slot: %s', prompt => {
     const decision = routeSkills({ mode: 'build', intent: 'write', freedom: 'balanced', phase: 'draft', prompt: `续写下一章，${prompt}。` })
     expect(decision.selected.map(skill => skill.id)).toContain('cn-prose-specificity.v3')
