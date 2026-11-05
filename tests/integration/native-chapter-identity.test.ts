@@ -13,6 +13,7 @@ import { reduceExecutionReceipt } from '../../api/lib/agent/runtime-reducer.js'
 import { advanceDurableContext } from '../../api/lib/agent/runtime-checkpoint-step.js'
 import { AGENT_TOOL_EXECUTION_POLICY } from '../../api/lib/agent/tool-execution-guidance.js'
 import { COLLABORATION_MARKER, readWritingCollaborationDigest } from '../../api/lib/agent/writing-collaboration.js'
+import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 
 it('recovers a paid historical combined create once, then creates a real empty identity before a separate body write', async () => {
   await fixture(async f => {
@@ -29,7 +30,7 @@ it('recovers a paid historical combined create once, then creates a real empty i
     const price = { version: 'credits-v2-itemized' as const, modelTier: 'speed' as const, multiplierBps: 10000, rateCardId: 'chapter-identity-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } }
     const model = async (tools: NativeToolView[], name: string, args: Record<string, unknown>, callId: string) => {
       const { frame } = await loadExecutionState(f.userId, f.runId)
-      const request = { endpoint: route.endpoint, body: { tools } }
+      const request = runtimeJson({ endpoint: route.endpoint, body: { tools } }).value
       const prepared = await prepareModelCursorOperation(lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash }, { key: `exec:${frame.state.nextOperationSequence}`, action: 'workspaceAgent', request, price })
       const attempt = await prepareProviderAttempt(lease, { operationId: prepared.operation.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request })
       expect(await advanceDurableContext(lease)).toBeNull()

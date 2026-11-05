@@ -9,7 +9,7 @@ describe.runIf(available)('standalone quality historical judgment ownership in P
     const content = '当前合成正文。', hash = createHash('sha256').update('旧合成正文。').digest('hex')
     await prisma.chapter.update({ where: { id: f.chapterId }, data: { content, revision: 5 } })
     const otherRun = await prisma.agentRun.create({ data: { id: randomUUID(), userId: f.userId, novelId: f.novelId,
-      chapterId: f.chapterId, sessionId: f.sessionId, status: 'paused', mode: 'act', action: 'workspaceAgent',
+      chapterId: f.chapterId, sessionId: f.sessionId, status: 'paused', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator',
       engine: 'loop', taskSpec: { ...JSON.parse(JSON.stringify(f.spec)), id: 'other-task' } } })
     const own = await prisma.chapterQualityReport.create({ data: { userId: f.userId, novelId: f.novelId,
       chapterId: f.chapterId, runId: f.runId, chapterRevision: 5, status: 'stale', checkedAt: new Date('2026-01-01'),

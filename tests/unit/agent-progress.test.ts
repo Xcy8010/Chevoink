@@ -25,7 +25,7 @@ describe('author progress boundary', () => {
     expect(publicAgentProgressEvent({ ...base, type: 'text.delta', messageId: 'm', delta: text })).toMatchObject({ delta: text })
   })
   it('does not turn a successful report receipt into repaired issues or completed goals', () => {
-    const part: Extract<AgentMessagePart, { type: 'tool-call' }> = { type: 'tool-call', callId: 'check', toolName: 'quality_analyze', title: '', status: 'success', summary: '已取得报告，仍有两处意见。' }
+    const part: Extract<AgentMessagePart, { type: 'tool-call' }> = { type: 'tool-call', callId: 'check', toolName: 'quality_analyze', title: '', args: {}, status: 'success', summary: '已取得报告，仍有两处意见。' }
     expect(agentToolProgress(part)).toBe(part.summary)
     expect(agentToolProgress({ ...part, reviewOutcome: 'decision_required' })).toBe('已取得报告，仍有两处意见。（仍需处理）')
     expect(agentToolProgress({ ...part, status: 'running' })).toBe('正在复查章节')
