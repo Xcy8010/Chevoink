@@ -1,3 +1,5 @@
+import { AGENT_TOOL_EXECUTION_POLICY } from '../../api/lib/agent/tool-execution-guidance.js'
+import { prepareApprovedFixtureTool } from '../support/approved-tool-fixture.js'
 import { initializeExecutionState, saveExecutionState, createToolFixtureCreditAccount, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
@@ -44,7 +46,6 @@ import { forkAgentSessionData } from '../../api/lib/agent/run-service.js'
 import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
 import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
-import { prepareToolCursorOperation } from '../../api/lib/agent/runtime-tool-cursor.js'
 import { childContext } from '../../api/lib/agent/runtime-child-tools.js'
 import { deleteLoopSessionMessage, rollbackLoopSessionFromMessage, listLoopSessionMessages, loadCurrentTodoSnapshot } from '../../api/lib/agent/session-messages.js'
 import { withGoalTransaction, withoutGoalEffects } from '../../api/lib/agent/goal-context.js'
@@ -265,7 +266,7 @@ describe.runIf(available)('durable native child HTTP path in isolated PG', () =>
     const spawnArgs = { tasks: [{ title: '历史窗口', brief: '只读审阅原始作品设定并提交完整报告，保持原有正文不变。' }], mode: 'review', inherit: 'brief' }
     const frame = await saveExecutionState(exec.lease, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash, snapshot: { ...state.frame.state,
       messages: [...state.frame.state.messages, { role: 'assistant', content: null, toolCalls: [{ id: 'cancelled-window', name: taskSpawnTool.name, arguments: JSON.stringify(spawnArgs) }] }] } })
-    const prepared = await prepareToolCursorOperation(exec.lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash }, {
+    const prepared = await prepareApprovedFixtureTool(exec.lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash }, {
       key: `exec:${frame.state.nextOperationSequence}`, action: taskSpawnTool.name, callId: 'cancelled-window', targetId: exec.root.id,
       effectDomain: 'read', effectiveArgs: spawnArgs, operationInput: { callId: 'cancelled-window', args: spawnArgs }, normalize: raw => taskSpawnTool.parameters.parse(raw) })
     const cancelled = await admitChildExecution(exec.lease, { parentOperationId: prepared.operation.id, childIndex: 0, kind: 'spawned', role: 'orchestrator',
@@ -387,7 +388,8 @@ describe.runIf(available)('durable native child HTTP path in isolated PG', () =>
     const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body))
     expect(body).toMatchObject({ model: selection === 'inherit' || selection === 'explicit-effort' ? '模型A' : '模型B', reasoning_effort: selection === 'inherit' ? 'low' : selection === 'explicit-effort' ? 'medium' : 'high' })
     expect(body.messages[0]).toEqual({ role: 'system', content: '完整原始作品设定 KEEP_CONTEXT' })
-    expect(body.messages[1]).toEqual({ role: 'user', content: '只读审阅并提交报告' })
+    expect(body.messages.filter((message: { role: string; content: string }) => message.role === 'system' && message.content === AGENT_TOOL_EXECUTION_POLICY)).toHaveLength(1)
+    expect(body.messages.filter((message: { role: string; content: string }) => message.role !== 'system' || message.content !== AGENT_TOOL_EXECUTION_POLICY)[1]).toEqual({ role: 'user', content: '只读审阅并提交报告' })
     const parent = await loadExecutionState(f.userId, exec.runId)
     expect(parent.configuration).toEqual(exec.initial.configuration)
     expect(parent.frame.state.messages.at(-1)).toMatchObject({ role: 'tool', toolCallId: exec.callId })

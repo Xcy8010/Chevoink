@@ -46,7 +46,7 @@ describe('actual native permissions after a clipped historical catalog', () => {
       const request = { endpoint: route.endpoint, body: { tools } }
       const price = { version: 'credits-v2-itemized' as const, modelTier: 'speed' as const, multiplierBps: 10000,
         rateCardId: 'restored-tool-fixture', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } }
-      const model = await prepareModelCursorOperation(lease, cursor, { key, action: 'model_request', input: runtimeJson({ request, price }).value })
+      const model = await prepareModelCursorOperation(lease, cursor, { key, action: 'model_request', request: runtimeJson(request).value, price })
       const attempt = await prepareProviderAttempt(lease, { operationId: model.operation.id, attemptKey: '1', provider: 'fixture', model: 'fixture', request })
       await markProviderDispatched(lease, attempt.id)
       const identity = { userId: f.userId, attemptId: attempt.id, requestHash: attempt.requestHash }
@@ -119,9 +119,9 @@ describe('split uses an actual new-chapter slot rather than a phase allowance', 
       expect(await chapterSplitTool.execute(context, { chapterId: f.chapterId, splitOffset: 1, newChapterTitle: '后半章' })).not.toHaveProperty('outcome', 'failed')
       expect(await prisma.chapter.count({ where: { novelId: f.novelId } })).toBe(2)
     }
-  }, undefined, bounded ? '修改本章' : '整理作品结构并拆分已有章节', { freezeWriting: bounded }))
+  }, undefined, bounded ? '修改本章' : '授权自主创作全书，并拆分已有章节。', { freezeWriting: bounded }))
   it('rejects splitting a concretely frozen local region without changing either body or structure', async () => fixture(async f => {
-    const runId = randomUUID(), prompt = '只修改第1章“原文”'
+    const runId = randomUUID(), prompt = '仅修改第1章。将“原文”改为“修订文”。'
     const task = buildTaskSpec({ ...f, runId, prompt, authorWritingProtocol: 2, localEditProtocol: 1 })
     await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: f.novelId, sessionId: f.sessionId, chapterId: f.chapterId, status: 'queued',
       mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', taskSpec: runtimeJson(JSON.parse(JSON.stringify(task))).value, startRequest: { prompt } } })

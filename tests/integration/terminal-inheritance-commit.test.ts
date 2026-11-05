@@ -61,7 +61,7 @@ describe.runIf(available)('inherited terminal proof at the real PostgreSQL commi
       } else {
         await commitWithAdvisoryReviewFacts(terminal)
         expect(await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).toMatchObject({ committedAt: expect.any(Date), bodyState: before.bodyState, objectState: before.objectState, knowledgeState: before.knowledgeState })
-        expect(await prisma.projectMemoryEntry.count({ where: { sourceChapterId: current.id } })).toBe(0)
+        expect(await prisma.projectMemoryEntry.findMany({ where: { sourceChapterId: current.id }, select: { memoryType: true, status: true } })).toEqual(expect.arrayContaining([{ memoryType: 'chapterSummary', status: 'inferred' }, { memoryType: 'sceneState', status: 'inferred' }]))
       }
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: current.id } })).toEqual(current)
       expect(await prisma.agentArtifact.findUniqueOrThrow({ where: { id: history.id } })).toEqual(history)

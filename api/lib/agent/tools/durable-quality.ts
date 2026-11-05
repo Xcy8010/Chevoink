@@ -12,7 +12,6 @@ import { withRunLease, type RunLeaseToken } from '../runtime-lease.js'
 import { readExecutionStateInTransaction } from '../runtime-state.js'
 import { compilerStateHash, compilerObservationSchema } from '../runtime-compiler-observation.js'
 import { markChapterReviewCycleVerification } from '../review-cycle-store.js'
-import { readObservedBaseline } from '../runtime-observed-baseline.js'
 import { prepareToolCursorOperation, rejectToolCursorCall } from '../runtime-tool-cursor.js'
 import { readAdmittedReviewWork } from '../runtime-writing-service.js'
 import { commitOperationEffect, recordToolFailure } from '../runtime-operations.js'
@@ -362,20 +361,19 @@ export async function prepareQualityWork(ctx: ToolContext, lease: import('../run
       return z.object({ input: z.object({ work: workSchema }) }).parse(existing.inputSnapshot).input.work
     }
     const reject = (code: string, message: string) => ({ kind: 'rejected' as const, code, message })
-    const comp = baseline ? await tx.storyCompilation.findFirst({ where: { id: baseline.id, userId: ctx.userId, novelId: ctx.novelId, run: { taskRootId: lease.taskRootId }, status: { in: ['active', 'completed'] } } }) : null
+    const compilationId = typeof args.compilationId === 'string' ? args.compilationId : baseline?.id
+    const comp = compilationId ? await tx.storyCompilation.findFirst({ where: { id: compilationId, userId: ctx.userId, novelId: ctx.novelId, run: { taskRootId: lease.taskRootId }, status: { in: ['active', 'completed'] } } }) : null
     const chapterId = await resolveQualityChapterTarget({ userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId,
       chapterId: typeof args.chapterId === 'string' ? args.chapterId : undefined,
       compilationId: typeof args.compilationId === 'string' ? args.compilationId : undefined,
       fallbackChapterId: comp?.chapterId ?? ctx.chapterId }, tx)
     if (!chapterId) return reject('CHAPTER_NOT_FOUND', '请先读取目标章节或本任务章节桥。')
-    if (args.compilationId && args.compilationId !== comp?.id) return reject('QUALITY_COMPILATION_SCOPE_INVALID', '指定编译没有本任务已读取的观察，不调用模型。')
+    if (args.compilationId && args.compilationId !== comp?.id) return reject('QUALITY_COMPILATION_SCOPE_INVALID', '指定编译不属于当前任务，不调用模型。')
     const bundle = await buildHumanityQualityContext(ctx.userId, ctx.novelId, chapterId, ctx.runId, tx)
     if (!bundle.chapter.content.trim()) return reject('QUALITY_SOURCE_STALE', '目标正文为空，未调用质量模型。')
-    if (bundle.compilation && (!comp || comp.id !== bundle.compilation.id || await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, comp.id) !== baseline?.hash)) return reject('TOOL_COMPILER_STALE', '请先读取当前任务章节桥，不检查未经观察的新编译。')
-    if (!bundle.compilation) {
-      const observed = await readObservedBaseline(tx, lease.taskRootId, input.observedRevision, { kind: 'chapter', id: chapterId })
-      if (observed?.kind !== 'chapter' || observed.revision !== bundle.chapter.revision) return reject('QUALITY_SOURCE_STALE', '请先 chapter_read 读取当前正文版本，未调用模型。')
-    }
+    if (args.compilationId && bundle.compilation?.id !== comp?.id) return reject('QUALITY_COMPILATION_SCOPE_INVALID', '指定编译不是当前目标章节的编译，不调用模型。')
+    // This check reads and freezes the current owned manuscript itself. An
+    // earlier bridge/read observation is context, not permission to review.
     const state = await readExecutionStateInTransaction(tx, lease.taskRootId)
     const writable = await chapterRevisionWritable(tx, lease)
     const deterministic = analyzeDeterministicQuality(bundle.chapter.content, bundle.recentChapters.map(item => item.content))
@@ -395,10 +393,13 @@ export async function prepareQualityWork(ctx: ToolContext, lease: import('../run
       && matchingContext && !qualityReportHasDroppedFindings(cacheMetrics) && qualityReportCheckedCurrentContent(existingReport, bundle.chapter.revision, bundle.chapter.content)
       ? { id: existingReport.id, hash: jsonHash(await getQualityReport(ctx.userId, ctx.novelId, existingReport.id, tx)) } : null
     const sources = buildQualityEvidenceSources({ userId: ctx.userId, novelId: ctx.novelId, chapterId, chapterRevision: bundle.chapter.revision }, bundle.chapter.content)
-    return { kind: 'check' as const, version: 14 as const, parserVersion: 3 as const, repairSourceReferences: true as const, formatRecovery, deadlineAt: Date.now() + env.aiTextTimeoutMs, sources, compiler: bundle.compilation ? baseline : null,
+    const compilerHash = bundle.compilation ? await compilerStateHash(tx, ctx.userId, ctx.novelId, lease.taskRootId, bundle.compilation.id) : null
+    if (bundle.compilation && !compilerHash) return reject('QUALITY_COMPILATION_SCOPE_INVALID', '当前编译不属于本任务，不调用模型。')
+    const compiler = bundle.compilation && compilerHash ? { id: bundle.compilation.id, hash: compilerHash } : null
+    return { kind: 'check' as const, version: 14 as const, parserVersion: 3 as const, repairSourceReferences: true as const, formatRecovery, deadlineAt: Date.now() + env.aiTextTimeoutMs, sources, compiler,
       chapter: { id: chapterId, title: bundle.chapter.title, revision: bundle.chapter.revision, content: bundle.chapter.content }, contextHash: jsonHash(bundle),
       recentContents: bundle.recentChapters.map(item => item.content), feedback: bundle.feedback,
-      mode: state.configuration.qualityMode, repair: !input.serviceReadOnly && comp?.status !== 'completed' && writable && state.configuration.mode === 'build' && state.configuration.creativeFreedom === 'balanced' && !state.configuration.protectedChapterIds.includes(chapterId)
+      mode: state.configuration.qualityMode, repair: !input.serviceReadOnly && bundle.compilation?.status !== 'completed' && writable && state.configuration.mode === 'build' && state.configuration.creativeFreedom === 'balanced' && !state.configuration.protectedChapterIds.includes(chapterId)
         && (!cached || !!existingReport && qualityAutoRepairPending(existingReport) && (!!bundle.compilation || existingReport.runId === ctx.runId)),
       criticInput: buildCriticInput(bundle, deterministic.metrics, sources),
       repairContext: buildQualityRepairContext(bundle), repairContextComplete: true as const,

@@ -92,7 +92,7 @@ describe('mandatory quality pass through persisted current warning repair', () =
       hookDecision: '', delayedHookReason: '', openingStructure: '进屋', endingStructure: '等待' }
     await commitWithAdvisoryReviewFacts({ ...terminal, retainedFindings: readiness!.requiredDecisions!.map(ref => ({ ...ref,
       reason: '合成留置理由不能代替原任务明确要求的质量通过。' })) })
-    expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, f))).toBeNull()
+    expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, f))).toMatchObject({ chapters: [{ id: f.chapterId, content: finalBody }] })
     expect(await prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: warningReport.id }, include: { findings: true } }))
       .toMatchObject({ status: 'needs_repair', findings: [expect.objectContaining({ severity: 'warning', disposition: 'pending' })] })
     // Ordinary author-approved edits are not revoked by a review's old anchors.

@@ -1,3 +1,4 @@
+import { assertOriginalAuthorContext } from '../support/original-author-context.js'
 import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { randomUUID } from 'node:crypto'
 import request from 'supertest'
@@ -103,17 +104,15 @@ describe.skipIf(!available)('fresh HTTP same next-chapter identity and actual PG
     ['续写下一章，作为第5章正式写入。只写这一章。', false],
     ['在当前章之后写下一章，作为第4章正式写入。只写这一章。', true],
     ['写第4至5章。只写这一章。', false],
-  ] as const)('denies an ordinal or cardinality conflict before any prepare/create effect: %s', (prompt, editor) => fixture(prompt, async (ctx, before) => {
+  ] as const)('preserves an ordinal or cardinality conflict in main Agent context: %s', (prompt, editor) => fixture(prompt, async (ctx, before) => {
     const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
     expect(spec.scope.writing).toMatchObject({ kind: 'needs_input', targets: [] })
-    await expectToolDenied(prepare(ctx), { code: 'SCOPE_NEEDS_INPUT' })
-    await expectToolDenied(chapterCreateTool.execute({ ...ctx, callId: 'denied-create' },
-      { title: '不得创建', volumeOrder: 1, positionInVolume: 4 }), { code: 'SCOPE_NEEDS_INPUT' })
+    await assertOriginalAuthorContext(ctx, prompt)
     expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
     expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
   }, editor))
 
-  it.each([true, false])('never reparses a frozen needs-input run on continuation, new marker=%s', marker => fixture(nextChapterContinuationPrompt, async (ctx, before) => {
+  it.each([true, false])('preserves the frozen old judgment and full author context on continuation, new marker=%s', marker => fixture(nextChapterContinuationPrompt, async (ctx, before) => {
     const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
     // These simulate frozen contracts admitted before per-action projections.
     // A new bound writingActions plus an empty scalar is invalid hybrid data.
@@ -123,7 +122,7 @@ describe.skipIf(!available)('fresh HTTP same next-chapter identity and actual PG
     if (!marker) delete spec.scope.writingTargetProtocol
     await prisma.agentRun.update({ where: { id: ctx.runId }, data: { taskSpec: spec, status: 'awaiting_approval' } })
     expect(await prisma.$transaction(tx => freezeWritingScope(tx, ctx, spec, nextChapterContinuationPrompt, 1))).toEqual(spec)
-    await expectToolDenied(prepare(ctx), { code: 'SCOPE_NEEDS_INPUT' })
+    await assertOriginalAuthorContext(ctx, nextChapterContinuationPrompt)
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).status).toBe('awaiting_approval')
     expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
   }))

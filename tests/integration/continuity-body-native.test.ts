@@ -121,8 +121,8 @@ describe.runIf(available)('ordinary native continuity review on an existing task
     await model([{ id: 'read-current', name: 'chapter_bridge_get', arguments: JSON.stringify(args) },
       { id: 'body-review', name: 'continuity_validate', arguments: JSON.stringify(args) },
       ...(scenario === 'unknown-history' ? [{ id: 'known-body-new-call', name: 'continuity_validate', arguments: JSON.stringify(args) }] : [
-        { id: 'explicit-quality', name: 'quality_analyze', arguments: JSON.stringify({ ...args, readOnly: true }) },
-        { id: 'explicit-final-continuity', name: 'continuity_validate', arguments: JSON.stringify({ ...args, readOnly: true }) },
+        { id: 'explicit-quality', name: 'quality_analyze', arguments: JSON.stringify({ ...args }) },
+        { id: 'explicit-final-continuity', name: 'continuity_validate', arguments: JSON.stringify({ ...args }) },
         { id: 'commit-current', name: 'chapter_bridge_commit', arguments: JSON.stringify(args) }])])
     expect(await step()).toMatchObject({ kind: 'tool' })
     if (ask) {
@@ -166,7 +166,10 @@ describe.runIf(available)('ordinary native continuity review on an existing task
           callId: (approval.payload as { callId: string }).callId, approved: true, alwaysAllow: false })
         checked = await step()
       }
-      expect(checked).toMatchObject({ kind: 'tool', result: { reviewCompleted: true } })
+      expect(checked.kind, JSON.stringify(checked)).toBe('tool')
+          if (checked.kind === 'tool') expect(checked.result.outcome, JSON.stringify(checked.result)).not.toBe('failed')
+          if (index === 0) expect(await prisma.chapterQualityReport.findFirstOrThrow({ where: { userId: f.userId, chapterId: f.chapterId }, orderBy: { createdAt: 'desc' } })).toMatchObject({ chapterRevision: 6 })
+          else expect(checked).toMatchObject({ result: { reviewCompleted: true } })
     }
     outcome = await step()
     expect(outcome).toMatchObject({ result: { summary: '章节已提交' } })

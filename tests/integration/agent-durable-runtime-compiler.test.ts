@@ -1,3 +1,4 @@
+import { prepareApprovedFixtureTool } from '../support/approved-tool-fixture.js'
 import { readChapterReviewReadiness } from '../../api/lib/agent/chapter-review-guard.js'
 import { initializeExecutionState, saveExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
@@ -10,7 +11,6 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { collectDurableCompletionEvidence } from '../../api/lib/agent/runtime-completion-evidence.js'
 import { collectDurableToolEvidence } from '../../api/lib/agent/runtime-evidence.js'
 import { admitChildExecution } from '../../api/lib/agent/runtime-child.js'
-import { prepareToolCursorOperation } from '../../api/lib/agent/runtime-tool-cursor.js'
 import { taskSpawnTool } from '../../api/lib/agent/tools/task-orchestration-tools.js'
 import { publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
 import { initializeDurableTask } from '../../api/lib/agent/runtime-identity.js'
@@ -97,7 +97,7 @@ describe.runIf(available)('first writing workflow milestones are bounded persist
     const initial = await initializeExecutionState(parent, { configuration: cfg, snapshot: { version: 1, turn: 0, nextOperationSequence: 0,
       checkpointIndex: 0, phase: 'idle', pendingOperationId: null, messages: [{ role: 'user', content: '修改本章' },
         { role: 'assistant', content: null, toolCalls: [{ id: 'spawn', name: 'task_spawn', arguments: JSON.stringify(args) }] }], successfulToolSignatures: [] } })
-    const op = await prepareToolCursorOperation(parent, { expectedRevision: initial.frame.revision, expectedHash: initial.frame.snapshotHash },
+    const op = await prepareApprovedFixtureTool(parent, { expectedRevision: initial.frame.revision, expectedHash: initial.frame.snapshotHash },
       { key: `exec:${initial.frame.state.nextOperationSequence}`, action: 'task_spawn', callId: 'spawn', targetId: f.rootId, effectDomain: 'read', effectiveArgs: args,
         operationInput: { callId: 'spawn', args }, normalize: raw => taskSpawnTool.parameters.parse(raw) })
     const grant = await admitChildExecution(parent, { parentOperationId: op.operation.id, childIndex: 0, kind: 'spawned', role: 'orchestrator',

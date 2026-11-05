@@ -89,9 +89,8 @@ describe.runIf(available)('real context assembly with and without a writing volu
     expect(subject).toEqual({ userId: f.userId, novelId: input.novelId, runId: input.runId })
     expect(target).toBe(2)
     const text = assembled.messages.map(message => typeof message.content === 'string' ? message.content : '').join('\n')
-    expect(text).toContain('本章必须审视卷目标')
     expect(text).toContain('守住城门并查清粮道')
-    expect(text).toContain('PREPARE明确 volumeDecision')
+    expect(text).not.toContain('PREPARE明确 volumeDecision')
     expect(await prisma.storyCompilation.count({ where: { runId: input.runId } })).toBe(0)
   }))
 

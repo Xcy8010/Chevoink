@@ -1,3 +1,4 @@
+import { AGENT_TOOL_EXECUTION_POLICY } from '../../api/lib/agent/tool-execution-guidance.js'
 import { saveExecutionState, initializeExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { observeSemanticTransition, nextStagnantBatch } from '../../api/lib/agent/semantic-progress.js'
 import { collectDurableToolEvidence } from '../../api/lib/agent/runtime-evidence.js'
@@ -315,7 +316,9 @@ describe.runIf(available)('model assignments and native configuration real isola
       expect(state.configuration.model).toMatchObject({ tier, modelName: 'fixture-dynamic', reasoningEffort: 'max' })
       const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response('data: {"choices":[{"delta":{"content":"任务已完成"},"finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":10,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":50}}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))
       vi.stubGlobal('fetch', fetcher)
-      expect((await executeDurableStep(exec.lease, new AbortController().signal)).kind).toBe('model')
+      expect((await executeDurableStep(exec.lease, new AbortController().signal)).kind).toBe('context')
+    expect(fetcher).not.toHaveBeenCalled()
+    expect((await executeDurableStep(exec.lease, new AbortController().signal)).kind).toBe('model')
       expect(fetcher).toHaveBeenCalledOnce()
       expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ model: 'fixture-dynamic', reasoning_effort: 'max' })
       expect((await prisma.agentOperation.findUniqueOrThrow({ where: { id: prior.id } })).inputHash).toBe(prior.inputHash)
@@ -404,12 +407,15 @@ describe.runIf(available)('model assignments and native configuration real isola
     expect(JSON.stringify(state.configuration)).not.toContain('isolated-never-used')
     const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response('data: {"choices":[{"delta":{"content":"任务已完成"},"finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":10,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":50}}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }))
     vi.stubGlobal('fetch', fetcher)
+    expect((await executeDurableStep(exec.lease, new AbortController().signal)).kind).toBe('context')
+    expect(fetcher).not.toHaveBeenCalled()
     expect((await executeDurableStep(exec.lease, new AbortController().signal)).kind).toBe('model')
     expect(fetcher).toHaveBeenCalledOnce()
     const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body))
     expect(body).toMatchObject({ model: '模型B', reasoning_effort: 'high' })
     expect(body.messages[0]).toEqual({ role: 'system', content: '同一任务完整设定' })
-    expect(body.messages[1]).toEqual({ role: 'user', content: '请切换到 模型B high' })
+    expect(body.messages.filter((message: { role: string; content: string }) => message.role === 'system' && message.content === AGENT_TOOL_EXECUTION_POLICY)).toHaveLength(1)
+    expect(body.messages.filter((message: { role: string; content: string }) => message.role !== 'system' || message.content !== AGENT_TOOL_EXECUTION_POLICY)[1]).toEqual({ role: 'user', content: '请切换到 模型B high' })
     expect(body.messages.some((message: { role: string; tool_call_id?: string }) => message.role === 'tool' && message.tool_call_id === exec.callId)).toBe(true)
     expect((await prisma.agentOperation.findUniqueOrThrow({ where: { id: prior.id } })).inputHash).toBe(prior.inputHash)
   }))
@@ -483,7 +489,7 @@ describe.runIf(available)('model assignments and native configuration real isola
     }
     const call = async (args: Record<string, unknown>) => {
       const state = await prisma.$transaction(tx => readExecutionStateInTransaction(tx, exec.root.id))
-      await (await import('../../api/lib/agent/runtime-state.js')).saveExecutionState(exec.lease, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash,
+      await saveExecutionState(exec.lease, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash,
         snapshot: { ...state.frame.state, messages: [...state.frame.state.messages, { role: 'assistant', content: null,
           toolCalls: [{ id: randomUUID(), name: 'agent_configure', arguments: JSON.stringify(args) }] }] } })
       return executeDurableToolStep(exec.lease, new AbortController().signal)

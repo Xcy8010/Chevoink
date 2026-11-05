@@ -1,3 +1,4 @@
+import { readContinuityReport } from '../../api/lib/agent/continuity-review.js'
 import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { describe, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
@@ -219,9 +220,10 @@ describe.runIf(available)('ordinary continuity reports preserve frozen contract5
         await quality(f, s.compilation.id, current.revision)
         const commit = await chapterBridgeCommitTool.execute({ ...s.ctx, callId: 'commit-current', sandboxMode: undefined }, args)
         if (saved.findings.length) {
-          expect(commit).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_ERRORS_REMAIN' })
-          expect(commit.output).toContain(saved.id)
-          expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: s.compilation.id } })).committedAt).toBeNull()
+          expect(commit.outcome, commit.output).not.toBe('failed')
+          expect(commit.output).toContain('报告意见')
+          expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: s.compilation.id } })).committedAt).not.toBeNull()
+          expect(readContinuityReport((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })).validation, current)).toEqual(saved)
         } else {
           expect(commit).not.toMatchObject({ outcome: 'failed' })
           expect(await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, s.compilation.id))).toMatchObject({ terminalCommitted: true })

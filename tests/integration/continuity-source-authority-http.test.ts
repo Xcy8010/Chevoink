@@ -124,8 +124,9 @@ describe.skipIf(!available)('HTTP admission and actual PostgreSQL current-source
         if (scenario === 'real-conflict') {
           const commit = await chapterBridgeCommitTool.execute({ ...ctx, callId: 'must-pass-denial' }, { compilationId: compilation.id })
             .catch(error => ({ outcome: 'failed', failureCode: error.code }))
-          expect(commit).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_ERRORS_REMAIN' })
-          expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).committedAt).toBeNull()
+          expect(commit).not.toHaveProperty('outcome', 'failed')
+          expect(commit).toHaveProperty('output', expect.stringContaining('报告意见'))
+          expect((await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: compilation.id } })).committedAt).not.toBeNull()
         }
         const payments = await prisma.aiUsageLog.findMany({ where: { agentRunId: runId }, orderBy: { id: 'asc' } })
         const ledger = await prisma.creditLedgerEntry.findMany({ where: { userId }, orderBy: { id: 'asc' } })

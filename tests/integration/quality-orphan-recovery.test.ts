@@ -235,12 +235,10 @@ describe.runIf(available).each(['clean', 'pending-decision'] as const)('typed co
       const refused = results.find(event => (event.payload as { callId: string }).callId === 'early-commit')
       expect(refused?.payload).toMatchObject({ callId: 'early-commit', toolName: 'chapter_bridge_commit', ok: true })
       expect(results.filter(event => (event.payload as { toolName: string; ok: boolean }).toolName === 'chapter_bridge_commit'
-        && (event.payload as { ok: boolean }).ok).map(event => (event.payload as { callId: string }).callId)).toEqual(['early-commit', 'decided-commit'])
-      const writer = calls.find(event => (event.payload as { callId: string }).callId === 'writer-decision')!
-      const commit = calls.find(event => (event.payload as { callId: string }).callId === 'decided-commit')!
-      expect(early!.seq).toBeLessThan(writer.seq)
-      expect(refused!.seq).toBeLessThan(writer.seq)
-      expect(writer.seq).toBeLessThan(commit.seq)
+        && (event.payload as { ok: boolean }).ok).map(event => (event.payload as { callId: string }).callId)).toEqual(['early-commit'])
+      expect(calls.some(event => ['writer-decision', 'decided-commit'].includes((event.payload as { callId: string }).callId))).toBe(false)
+      const report = await prisma.chapterQualityReport.findFirstOrThrow({ where: { runId: seeded.subject.runId }, include: { findings: true }, orderBy: { createdAt: 'desc' } })
+      expect(report.findings.some(finding => finding.disposition === 'pending')).toBe(true)
     }
     expect(fetchMock).toHaveBeenCalledTimes(scenario === 'clean' ? 1 : 3)
     expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: seeded.subject.runId } })).toMatchObject({ status: 'completed',

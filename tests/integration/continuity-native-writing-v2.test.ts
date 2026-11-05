@@ -96,7 +96,7 @@ describe.runIf(available)('current native writing and historical configuration a
           { name: 'scene_task_build', args: { tasks: [{ purpose: '检查箱子', entryState: {}, goal: '核对锁扣', obstacle: '灯光不足', choice: '挪近灯光', cost: '时间', turn: '核对完成', exitState: {}, styleBudget: { description: 'low', dialogue: 'low', rhetoric: 'low' } }] } },
           { name: 'chapter_read', args: { chapterId: f.chapterId } }, { name: 'chapter_write', args: { chapterId: f.chapterId, content } },
         ] : [{ name: 'quality_analyze', args: { compilationId } }, { name: 'continuity_validate', args: { compilationId } },
-          { name: 'quality_analyze', args: { compilationId, readOnly: true } }, { name: 'continuity_validate', args: { compilationId, readOnly: true } },
+          { name: 'quality_analyze', args: { compilationId } }, { name: 'continuity_validate', args: { compilationId } },
           { name: 'chapter_bridge_commit', args: { compilationId } }]
         if (observations) {
           expect(compilationId).toBeTruthy(); expect(observations).toContain('chapter_write')
@@ -154,7 +154,7 @@ describe.runIf(available)('current native writing and historical configuration a
     await model()
     for (let index = 0; index < 2; index++) {
       const checked = await executeDurableToolStep(lease, new AbortController().signal)
-      expect(checked.kind).toBe('tool'); if (checked.kind === 'tool') expect(checked.result.outcome).not.toBe('failed')
+      expect(checked.kind).toBe('tool'); if (checked.kind === 'tool') expect(checked.result.outcome, JSON.stringify(checked.result)).not.toBe('failed')
     }
     let oldRequests: Awaited<ReturnType<typeof prisma.agentProviderAttempt.findMany>> | undefined
     if (scenario === 'merged-revision-restart') {
@@ -174,7 +174,7 @@ describe.runIf(available)('current native writing and historical configuration a
     }
     for (let index = 0; index < 2; index++) {
       const checked = await executeDurableToolStep(lease, new AbortController().signal)
-      expect(checked.kind).toBe('tool'); if (checked.kind === 'tool') expect(checked.result.outcome).not.toBe('failed')
+      expect(checked.kind).toBe('tool'); if (checked.kind === 'tool') expect(checked.result.outcome, JSON.stringify(checked.result)).not.toBe('failed')
     }
     const result = await executeDurableToolStep(lease, new AbortController().signal)
     expect(result).toMatchObject({ kind: 'tool', result: { summary: '章节已提交' } })

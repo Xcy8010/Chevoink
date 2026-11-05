@@ -1,3 +1,4 @@
+import { assertOriginalAuthorContext } from '../support/original-author-context.js'
 import { invokeAfterReadonlyPolicy } from '../support/readonly-policy-tool.js'
 import { toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { expectToolDenied } from '../support/expect-tool-denied.js'
@@ -491,8 +492,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
     const frozen = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
     expect(frozen.scope.writing).toMatchObject({ kind: 'needs_input', targets: [] })
     expect(frozen.scope.writingInterpretation?.reasons).toContain('conflicting_targets')
-    await expect(prisma.$transaction(tx => assertWritingTarget(tx, ctx, { orderIndex: 5, effect: 'create' })))
-      .rejects.toMatchObject({ code: 'SCOPE_NEEDS_INPUT' })
+    await assertOriginalAuthorContext(ctx)
     expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
   }, false, body, { singleVolume: false, editor: 'none' }))
   it('preserves historical judgments while candidate omission cannot block current reports and delivery', () => fixture(
@@ -752,68 +752,60 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       expect(await prisma.chapter.findMany({ where: { id: { in: before.slice(0, 3).map(chapter => chapter.id) } }, orderBy: { orderIndex: 'asc' } })).toEqual(before.slice(0, 3))
     }, false, '前段。源短句尾。后段。'))
   it.each(['禁止修订“源短句”。', '“源短句”，保持不变。', '“短句尾”，保持不变。', '不要修改第二段。'])(
-    'preserves local protection during a real source transform: %s', protection => fixture(
+    'preserves the full protected-source request for the main Agent: %s', protection => fixture(
       '第二卷第2章正文，将“源短句”改为“新短句”。' + protection, async (ctx, before) => {
-        const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
-        expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'needs_input', regions: [] })
-        await expectToolDenied(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '源短句', newText: '新短句' }), { code: 'AUTHOR_LOCAL_SCOPE' })
-        expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
-        expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
-      }, false, '前段。源短句尾。后段。'))
+      await assertOriginalAuthorContext(ctx, '第二卷第2章正文，将“源短句”改为“新短句”。' + protection)
+      expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+      expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
+    }, false, '前段。源短句尾。后段。'))
   it.each(['修订“原短句', '修订"原短句', "修订'原短句", '修订“外“内”尾',
     '修订第4章的“原短句', '修改第4章“原短句', '修订第4章。将“原短句',
     '修订第4章参考文案中的“原短句', '修订第4章中的参考原文“原短句', '修订“尾”。禁止修订参考原文“保护句尾',
     '修订“尾”。禁止修订“保护句尾', '修订“尾”。禁止修订"保护句尾', "修订“尾”。禁止修订'保护句尾"])(
-    'rejects unclosed source or protection without a shortened saved-body grant: %s', request => fixture(
+    'preserves unclosed quotes verbatim for the main Agent: %s', request => fixture(
       '第二卷第2章正文，' + request, async (ctx, before) => {
-        const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
-        expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'needs_input', regions: [] })
-        await expectToolDenied(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: request.includes('保护') ? '尾' : request.includes('外') ? '外“内”' : '原短', newText: '不应执行' }), { code: 'AUTHOR_LOCAL_SCOPE' })
-        expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
-        expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
-      }, false, '前段。原短。外“内”。保护句尾。后段。'))
+      await assertOriginalAuthorContext(ctx, '第二卷第2章正文，' + request)
+      expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+      expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
+    }, false, '前段。原短。外“内”。保护句尾。后段。'))
   it.each(['修订第4章的“原短句”', '修订第4章参考文案中的“原短句”',
     '替换第4章中的“原短句”', '第4章中的“原短句”替换',
     '修订第4章。禁止修订“原短句”。', '修改第4章。“原短句”，保持不变。'])(
-    'never discards an unresolved or protected source and retains whole-chapter authority: %s', request => fixture(
+    'preserves unresolved and protected source words in actual Agent context: %s', request => fixture(
       '第二卷第2章正文，' + request, async (ctx, before) => {
-        const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
-        expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'needs_input', regions: [] })
-        await expectToolDenied(chapterWriteTool.execute(ctx, { chapterId: before[3].id, content: '不能退为整章授权。' }), { code: 'AUTHOR_LOCAL_SCOPE' })
-        expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
-      }, false, '前段。原短句。后段。'))
-  it('keeps the chapter identity when only its local quotation is ambiguous', () => fixture(requests[0] + concerns, async (ctx, before) => {
-    const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
-    expect(spec).toMatchObject({ ambiguity: 'must_ask', scope: { writing: { kind: 'bounded', targets: [{ chapterId: before[3].id }] },
-      localEditBoundary: { kind: 'needs_input', regions: [] }, writingInterpretation: { reasons: expect.arrayContaining(['LOCAL_ANCHOR_UNRESOLVED']) } } })
-    await expectToolDenied(prepare(ctx), { code: 'AUTHOR_LOCAL_SCOPE' })
-    await expectToolDenied(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '向左走。', newText: '向右走。' }), { code: 'AUTHOR_LOCAL_SCOPE' })
-    expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
-  }, true))
-  it.each(['完成第二卷第2章质量检查，判断是否需要局部修订。', '请阅读这句：“修改第二卷第2章”。'])(
-    'does not promote review or quoted data into a chapter mutation: %s', prompt => fixture(prompt, async (ctx, before) => {
-      await expect(chapterWriteTool.execute(ctx, { chapterId: before[3].id, content: '不能改写。' })).rejects.toBeTruthy()
+      await assertOriginalAuthorContext(ctx, '第二卷第2章正文，' + request)
       expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+      expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
+    }, false, '前段。原短句。后段。'))
+  it('preserves chapter and ambiguous local words in actual Agent context', () => fixture(requests[0] + concerns, async (ctx, before) => {
+      await assertOriginalAuthorContext(ctx, requests[0] + concerns)
+      expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+      expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
+    }, true))
+  it.each(['完成第二卷第2章质量检查，判断是否需要局部修订。', '请阅读这句：“修改第二卷第2章”。'])(
+    'presents review and quoted instructions verbatim to the main Agent: %s', prompt => fixture(prompt, async (ctx, before) => {
+      await assertOriginalAuthorContext(ctx, prompt)
+      expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+      expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
     }))
   it.each(['检查是否需要修改第二段。', '只检查第4章是否需要修订正文。', '请勿再修改第4章。',
     '修订第4章正文。不得修改。'])(
-    'retains assessment and bare-denial boundaries through actual HTTP admission: %s', prompt => fixture(prompt, async (ctx, before) => {
-      await expect(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '向右转', newText: '向左转' })).rejects.toBeTruthy()
+    'preserves assessment and negative instructions through real HTTP context: %s', prompt => fixture(prompt, async (ctx, before) => {
+      await assertOriginalAuthorContext(ctx, prompt)
       expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+      expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
     }))
   it.each(['禁止修订“向左走。”。', '不调整“向左走。”。', '“向左走。”，保持不变。'])(
-    'preserves a protected quotation even when the same text was cited as an issue: %s', protection => fixture(requests[0] + concerns + protection, async (ctx, before) => {
-      const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
-      expect(spec.scope.localEditBoundary).toMatchObject({ kind: 'needs_input', regions: [] })
-      await expectToolDenied(chapterEditRangeTool.execute(ctx, { chapterId: before[3].id, oldText: '向左走。', newText: '向右走。' }), { code: 'AUTHOR_LOCAL_SCOPE' })
+    'preserves protection and cited issue together in main Agent context: %s', protection => fixture(requests[0] + concerns + protection, async (ctx, before) => {
+      await assertOriginalAuthorContext(ctx, requests[0] + concerns + protection)
       expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+      expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
     }))
-  it('does not create a relative next chapter when the same request forbids chapter creation', () => fixture('续写下一章，不新建章节。', async (ctx, before) => {
-    const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
-    expect(spec.scope).toMatchObject({ writing: { kind: 'needs_input', targets: [] }, writingInterpretation: { creationDenied: true } })
-    await expectToolDenied(chapterCreateTool.execute(ctx, { title: '不得创建', volumeOrder: 2, positionInVolume: 3 }), { code: 'SCOPE_NEEDS_INPUT' })
-    expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
-  }))
+  it('preserves the author prohibition against chapter creation in main Agent context', () => fixture('续写下一章，不新建章节。', async (ctx, before) => {
+      await assertOriginalAuthorContext(ctx, '续写下一章，不新建章节。')
+      expect(await prisma.chapter.findMany({ where: { novelId: ctx.novelId }, orderBy: { orderIndex: 'asc' } })).toEqual(before)
+      expect(await prisma.storyCompilation.count({ where: { runId: ctx.runId } })).toBe(0)
+    }))
   it.each(['writing', 'localEditBoundary', 'writingInterpretation'] as const)(
     'rejects a partial frozen2 projection with missing %s before prepare or writes', field => fixture(requests[0] + concerns, async (ctx, before) => {
       const spec = taskSpecSchema.parse((await prisma.agentRun.findUniqueOrThrow({ where: { id: ctx.runId } })).taskSpec)
@@ -845,8 +837,7 @@ describe.skipIf(!available)('unified fresh HTTP author contract with actual Post
       const ctx: ToolContext = { userId, novelId, sessionId, runId, chapterId: null, callId: 'true-author-answer', mode: 'build',
         qualityMode: 'premium', creativeFreedom: 'balanced', signal: new AbortController().signal, emit: () => {} }
       expect((await novelCreateTool.execute(ctx, { title: '合成首章作品', summary: '用于校验首章确认与实际正文写入。', tags: [ALL_NOVEL_TAGS[0]] })).outcome).not.toBe('failed')
-      await expectToolDenied(storyCompilerPrepareTool.execute({ ...ctx, callId: 'before-answer-prepare' }, { targetOrderIndex: 1,
-        intentSummary: '作者尚未确认章节落点', volumeDecision: { kind: 'continue', reason: '第一卷首章' } }), { code: 'SCOPE_NEEDS_INPUT' })
+      await assertOriginalAuthorContext(ctx, shortSceneRequest)
       expect(await prisma.storyCompilation.count({ where: { runId } })).toBe(0)
       const wait = questionPermissions.waitForQuestionAnswer
       const waitingSpy = vi.spyOn(questionPermissions, 'waitForQuestionAnswer').mockImplementation((id, callId, timeout, signal) => {

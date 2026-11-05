@@ -349,10 +349,14 @@ describe.runIf(available)('durable context archive', () => {
         baseUrl: 'https://provider.invalid/v1', apiKey: 'not-real', reasoningEffort: 'high', reasoningEfforts: ['high'], visionEnabled: false, contextWindowTokens: 16000 })
       const fetchMock = vi.fn(() => { throw new Error('must not dispatch') })
       vi.stubGlobal('fetch', fetchMock)
+      expect((await executeDurableStep(lease, new AbortController().signal)).kind).toBe('context')
+      const guided = await loadExecutionState(f.userId, f.runId)
+      expect(guided.frame.state.messages).toContainEqual({ role: 'user', content })
+      expect(guided.frame.revision).toBe(state.frame.revision + 1)
       await expect(executeDurableStep(lease, new AbortController().signal)).rejects.toMatchObject({ code: 'RUNTIME_CONTEXT_LIMIT' })
       expect(fetchMock).not.toHaveBeenCalled()
       expect(await prisma.agentOperation.count({ where: { action: { not: 'fixture_model_turn' }, taskRootId: f.rootId } })).toBe(0)
-      expect((await loadExecutionState(f.userId, f.runId)).frame.snapshotHash).toBe(state.frame.snapshotHash)
+      expect((await loadExecutionState(f.userId, f.runId)).frame.snapshotHash).toBe(guided.frame.snapshotHash)
     })
   })
 
@@ -428,7 +432,7 @@ describe.runIf(available)('durable context archive', () => {
       }
       if (!archived) throw new Error('Expected archived frame')
       const args = { revision: scenario === 'future' ? 999999 : 0, hash: scenario === 'wrong-hash' ? 'b'.repeat(64) : initial.frame.snapshotHash,
-        messageIndex: 2, offset: 7, limit: 3000 }
+        messageIndex: 3, offset: 7, limit: 3000 }
       await saveExecutionState(lease, { expectedRevision: archived.revision, expectedHash: archived.snapshotHash,
         snapshot: { ...archived.state, messages: [...archived.state.messages, { role: 'assistant', content: null,
           toolCalls: [{ id: 'read-archive', name: tool.name, arguments: JSON.stringify(args) }] }] } })
@@ -437,7 +441,7 @@ describe.runIf(available)('durable context archive', () => {
         if (result.kind !== 'tool') throw new Error('Expected archive read observation')
         if (scenario === 'future' || scenario === 'wrong-hash') expect(result.result.outcome).toBe('failed')
         else expect(JSON.parse(result.result.output)).toMatchObject({ offset: 7, nextOffset: 3007,
-          content: JSON.stringify(messages[2]).slice(7, 3007), totalChars: JSON.stringify(messages[2]).length })
+          content: JSON.stringify(messages[3]).slice(7, 3007), totalChars: JSON.stringify(messages[3]).length })
       }
     })
   }, 15_000)

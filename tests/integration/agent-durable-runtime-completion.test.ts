@@ -1,3 +1,4 @@
+import { prepareApprovedFixtureTool } from '../support/approved-tool-fixture.js'
 import { initializeExecutionState, saveExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { describe,expect,it,vi } from 'vitest'
@@ -31,7 +32,6 @@ import { getStructureReportObservation } from '../../api/lib/data-access.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { available,claim,fixture,novelFixture } from '../support/agent-durable-runtime-fixture.js'
 import { admitChildExecution } from '../../api/lib/agent/runtime-child.js'
-import { prepareToolCursorOperation } from '../../api/lib/agent/runtime-tool-cursor.js'
 import { reduceExecutionReceipt } from '../../api/lib/agent/runtime-reducer.js'
 import { taskSpawnTool } from '../../api/lib/agent/tools/task-orchestration-tools.js'
 import { collectDurableCompletionEvidence } from '../../api/lib/agent/runtime-completion-evidence.js'
@@ -51,7 +51,7 @@ describe.runIf(available)('parent completion with an already verified limited ch
       toolAuthority: [{ name: tool.name, permission: 'allow' as const, alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] }
     const initial = await initializeExecutionState(lease, { configuration, snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
       messages: [{ role: 'user', content: '修改本章' }, { role: 'assistant', content: null, toolCalls: [{ id: 'delegate', name: tool.name, arguments: JSON.stringify(args) }] }], successfulToolSignatures: [] } })
-    const prepared = await prepareToolCursorOperation(lease, { expectedRevision: initial.frame.revision, expectedHash: initial.frame.snapshotHash }, {
+    const prepared = await prepareApprovedFixtureTool(lease, { expectedRevision: initial.frame.revision, expectedHash: initial.frame.snapshotHash }, {
       key: `exec:${initial.frame.state.nextOperationSequence}`, action: tool.name, callId: 'delegate', targetId: f.rootId, effectDomain: 'read', effectiveArgs: args,
       normalize: value => tool.parameters.parse(value), operationInput: { callId: 'delegate', args } })
     const grant = await admitChildExecution(lease, { parentOperationId: prepared.operation.id, childIndex: 0, kind: 'spawned', role: 'orchestrator',

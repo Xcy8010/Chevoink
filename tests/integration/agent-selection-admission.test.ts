@@ -1,3 +1,4 @@
+import { assertOriginalAuthorContext } from '../support/original-author-context.js'
 import { invokeAfterReadonlyPolicy } from '../support/readonly-policy-tool.js'
 import { toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { expectToolDenied } from '../support/expect-tool-denied.js'
@@ -136,9 +137,7 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
     spec.scope.writing = { version: 1, kind: 'needs_input', targets: [], repairAuthorized: true, titleAndBodyOnly: false }
     await prisma.agentRun.update({ where: { id: result.runId }, data: { status: 'running', taskSpec: spec } })
     expect(await prisma.$transaction(tx => freezeWritingScope(tx, { ...f, runId: result.runId }, spec, '修改第一章', 1))).toEqual(spec)
-    await expectToolDenied(chapterEditRangeTool.execute({ ...f, runId: result.runId, mode: 'build', callId: 'old-frozen-denied',
-      creativeFreedom: 'balanced', qualityMode: 'balanced', emit: () => {}, signal: new AbortController().signal },
-    { chapterId: f.chapterId, oldText: '选区原文。', newText: '不能扩大旧授权。' }), { code: 'SCOPE_NEEDS_INPUT' })
+    await assertOriginalAuthorContext({ ...f, runId: result.runId })
     expect((await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).content).toBe('前😀段。选区原文。后段。')
     expect(await prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) })).toBe(0)
     expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })).taskSpec).toEqual(spec)

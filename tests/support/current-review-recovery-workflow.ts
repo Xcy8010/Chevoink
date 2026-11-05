@@ -161,7 +161,7 @@ export async function continueCurrentReviewWorkflow(f: Subject, input: {
       const current = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, input.compilationId))
       expect(calls.length, JSON.stringify(current)).toBeLessThan(12)
       const pending = current!.requiredTools[0]
-      if (pending) { next = pending.name; nextArgs = { ...pending.args, readOnly: true }; nextCallId = 'current-recovery-final-check-' + calls.length }
+      if (pending) { next = pending.name; nextArgs = { ...pending.args }; nextCallId = 'current-recovery-final-check-' + calls.length }
       else if (input.currentDecisions && !retainedFindings) {
         retainedFindings = current!.decisionDetails!.map(({ source, reportId, findingId }) => ({ source, reportId, findingId,
           reason: '保留当前真实报告意见供作者判断，本次仅删除明确重复动作；未声称意见已修复。' }))

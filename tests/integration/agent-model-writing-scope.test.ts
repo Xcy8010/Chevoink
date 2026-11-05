@@ -25,7 +25,7 @@ describe.runIf(available)('main Agent scope through the durable saved cursor', (
       tools: [{ type: 'function', function: { name: taskScopeBindTool.name, description: taskScopeBindTool.description, parameters: z.toJSONSchema(taskScopeBindTool.parameters, { io: 'input' }) } }],
       toolAuthority: [{ name: taskScopeBindTool.name, permission: 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
       snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
-        messages: [{ role: 'assistant', content: null, toolCalls: [{ id: 'late-binding', name: taskScopeBindTool.name,
+        messages: [{ role: 'user', content: '把对白处理自然并保存。' }, { role: 'assistant', content: null, toolCalls: [{ id: 'late-binding', name: taskScopeBindTool.name,
           arguments: JSON.stringify({ intent: 'revise', targets: [{ chapterId: f.chapterId }] }) }] }], successfulToolSignatures: [] } })
     await pauseDurableTask(f.userId, f.runId)
     await expect(executeDurableToolStep(lease, new AbortController().signal)).rejects.toBeDefined()

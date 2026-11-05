@@ -200,10 +200,10 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       const beat = await buildStoryCompilerDigest(f.ctx.userId, f.ctx.novelId, f.chapter.id, f.ctx.runId)
       expect(beat).toContain('阶段 beat')
       expect(beat).toContain('Scene Task 1 个')
-      expect(beat).toContain('不重复 PREPARE/BEAT')
-      expect(beat).toContain('调用 chapter_write 保存正文')
-      expect(beat).not.toContain('场景与编译为可选协作记录')
-      expect(beat).toContain('不能宣称已写完或完成')
+      expect(beat).toContain('目标尚无非空正文')
+      expect(beat).toContain('根据原请求选择创建或写入')
+      expect(beat).toContain('场景与编译为可选协作记录')
+      expect(beat).toContain('正文为空，未写完')
       expect(await prisma.storyCompilation.count({ where: { novelId: f.ctx.novelId } })).toBe(1)
     })
   })
@@ -238,7 +238,7 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       await prisma.chapter.update({ where: { id: f.chapter.id }, data: { content: '同版本正文变更的合成回归' } })
       const stale = await buildStoryCompilerDigest(f.ctx.userId, f.ctx.novelId, f.chapter.id, f.ctx.runId)
       expect(stale).not.toContain('本章已有与当前正文 revision/hash 匹配的提交')
-      expect(stale).toContain('不能宣称完成')
+      expect(stale).toContain('已有非空正文')
       await prisma.chapter.update({ where: { id: f.chapter.id }, data: { content: '  ', wordCount: 0 } })
       const empty = await buildStoryCompilerDigest(f.ctx.userId, f.ctx.novelId, f.chapter.id, f.ctx.runId)
       expect(empty).not.toContain('本章已有与当前正文 revision/hash 匹配的提交')
@@ -280,7 +280,7 @@ describe.skipIf(!available)('compiler recovery through historical goal continuat
       expect(await prisma.aiUsageLog.findMany({ where: { userId: ctx.userId, action: 'agent3ContinuityCritic' } })).toMatchObject([
         { agentRunId: ctx.runId, usageSource: 'reported', billingStatus: 'settled', requestTokens: 12, responseTokens: 8 },
       ])
-      expect(await chapterBridgeCommitTool.execute(ctx, {})).toMatchObject({ summary: '章节已提交', output: expect.stringContaining('stale') })
+      expect(await chapterBridgeCommitTool.execute(ctx, {})).toMatchObject({ summary: '章节已提交', output: expect.stringContaining('当前正文已保存') })
       const currentQuality = await persistHumanityQualityReport({ ...f.ctx, chapterId: changed.id, compilationId: f.compilationId, chapterRevision: changed.revision,
         mode: 'balanced', criticComplete: true, criticFindings: [], deterministicFindings: [], deterministicMetrics: {} })
       expect(currentQuality).toMatchObject({ chapterRevision: changed.revision, status: 'passed',

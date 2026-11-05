@@ -141,7 +141,7 @@ describe.runIf(available)('ordinary writer actual PG body and original task curs
         await prisma.agentSession.update({ where: { id: f.sessionId }, data: { toolPolicy: { contentWrite: 'deny' } } })
         expect(await execute()).toMatchObject({ outcome: 'failed' })
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ revision: 1, content: '原文' })
-        expect(await prisma.agentEffectReceipt.count({ where: { operation: { taskRootId: f.rootId, action: 'chapter_write' } } })).toBe(0)
+        expect(await prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'chapter_write' }, include: { effectReceipt: true } })).toMatchObject({ status: 'failed', effectReceipt: { result: { effectApplied: false, code: 'TOOL_NOT_AUTHORIZED' } } })
         expect(fetcher).not.toHaveBeenCalled(); return
       }
       if (resumedBody) {
@@ -172,8 +172,8 @@ describe.runIf(available)('ordinary writer actual PG body and original task curs
       expect(await prisma.agentProviderAttempt.findMany({ where: { id: { in: originalAttempts.map(row => row.id) } }, include: { usageReceipt: true }, orderBy: { id: 'asc' } })).toEqual(originalAttempts)
       expect(await prisma.creditLedgerEntry.findMany({ where: { userId: f.userId }, orderBy: { id: 'asc' } })).toEqual(originalLedger)
       if (fullChain) {
-        await model([{ id: 'explicit-quality', name: 'quality_analyze', arguments: JSON.stringify({ compilationId: compilationBefore.id, readOnly: true }) },
-          { id: 'explicit-continuity', name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilationBefore.id, readOnly: true }) },
+        await model([{ id: 'explicit-quality', name: 'quality_analyze', arguments: JSON.stringify({ compilationId: compilationBefore.id }) },
+          { id: 'explicit-continuity', name: 'continuity_validate', arguments: JSON.stringify({ compilationId: compilationBefore.id }) },
           { id: 'commit-current', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId: compilationBefore.id }) }])
         if (scenario === 'complete-chain') {
           const usage = originalAttempts[0].usageReceipt!
@@ -187,7 +187,10 @@ describe.runIf(available)('ordinary writer actual PG body and original task curs
         }
         for (let index = 0; index < 2; index++) {
           const checked = await step()
-          expect(checked).toMatchObject({ kind: 'tool', result: { reviewCompleted: true } })
+          expect(checked.kind, JSON.stringify(checked)).toBe('tool')
+          if (checked.kind === 'tool') expect(checked.result.outcome, JSON.stringify(checked.result)).not.toBe('failed')
+          if (index === 0) expect(await prisma.chapterQualityReport.findFirstOrThrow({ where: { userId: f.userId, chapterId: f.chapterId }, orderBy: { createdAt: 'desc' } })).toMatchObject({ chapterRevision: 2 })
+          else expect(checked).toMatchObject({ result: { reviewCompleted: true } })
         }
         if (scenario === 'complete-reduce-recovery') {
           const reduction = vi.spyOn(reducer, 'reduceExecutionReceipt').mockRejectedValueOnce(Error('interrupted after actual chapter commit'))

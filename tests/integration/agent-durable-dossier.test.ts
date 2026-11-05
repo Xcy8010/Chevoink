@@ -85,7 +85,7 @@ describe.runIf(available)('research dossier owns its original queries, synthesis
       return
     }
     if (scenario === 'review-deny') {
-      await expect(step()).rejects.toMatchObject({ code: 'RUNTIME_EFFECT_NOT_AUTHORIZED' })
+      expect(await step()).toMatchObject({ kind: 'tool', result: { outcome: 'failed', failureCode: 'TOOL_NOT_AUTHORIZED' } })
       expect(searches).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled()
       return
     }

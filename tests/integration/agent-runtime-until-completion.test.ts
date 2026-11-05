@@ -1,10 +1,10 @@
+import { prepareApprovedFixtureTool } from '../support/approved-tool-fixture.js'
 import { initializeExecutionState, saveExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { chapterBridgeCommitTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import { AGENT_TOOL_EXECUTION_POLICY } from '../../api/lib/agent/tool-execution-guidance.js'
 import { advanceDurableMemory } from '../../api/lib/agent/runtime-memory.js'
 import { persistCurrentContinuityReport } from '../support/current-continuity-report.js'
 import { taskSpawnTool, taskWaitTool } from '../../api/lib/agent/tools/task-orchestration-tools.js'
-import { prepareToolCursorOperation } from '../../api/lib/agent/runtime-tool-cursor.js'
 import { admitChildExecution } from '../../api/lib/agent/runtime-child.js'
 import { commitOperationEffect } from '../../api/lib/agent/runtime-operations.js'
 import { toOpenAIParameters } from '../../api/lib/agent/tool-schema.js'
@@ -273,7 +273,7 @@ describe.runIf(available)('persisted semantic progress, separate from revision a
         snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
           messages: [{ role: 'user', content: '只读审阅本章' }, { role: 'assistant', content: null, toolCalls: [{ id: 'spawn', name: 'task_spawn', arguments: JSON.stringify(args) }] }], successfulToolSignatures: [] } })
       const prepare = async (frame: typeof initial.frame, action: string, callId: string, input: Record<string, unknown>, tool: typeof taskSpawnTool | typeof taskWaitTool) =>
-        prepareToolCursorOperation(token, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash }, { key: `exec:${frame.state.nextOperationSequence}`, action, callId,
+        prepareApprovedFixtureTool(token, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash }, { key: `exec:${frame.state.nextOperationSequence}`, action, callId,
           targetId: f.rootId, effectDomain: 'read', effectiveArgs: input, operationInput: { callId, args: input }, normalize: raw => tool.parameters.parse(raw) })
       const spawned = await prepare(initial.frame, 'task_spawn', 'spawn', args, taskSpawnTool)
       const grant = await admitChildExecution(token, { parentOperationId: spawned.operation.id, childIndex: 0, kind: 'spawned', role: 'orchestrator', name: args.tasks[0].title,

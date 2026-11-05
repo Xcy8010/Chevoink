@@ -1,3 +1,4 @@
+import { prepareApprovedFixtureTool } from '../support/approved-tool-fixture.js'
 import { initializeExecutionState, saveExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { setTimeout as contentionTimer } from 'node:timers/promises'
@@ -106,7 +107,7 @@ async function prepareFixture(userId: string, spawned: boolean, tokenBudget: num
   const initial = await initializeExecutionState(lease, { configuration, snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0,
     phase: 'idle', pendingOperationId: null, messages: [{ role: 'user', content: '原始已授权上下文，必须保留' },
       { role: 'assistant', content: null, toolCalls: [{ id: 'delegate', name: tool.name, arguments: JSON.stringify(args) }] }], successfulToolSignatures: [] } })
-  const prepared = await prepareToolCursorOperation(lease, { expectedRevision: initial.frame.revision, expectedHash: initial.frame.snapshotHash }, {
+  const prepared = await prepareApprovedFixtureTool(lease, { expectedRevision: initial.frame.revision, expectedHash: initial.frame.snapshotHash }, {
     key: `exec:${initial.frame.state.nextOperationSequence}`, action: tool.name, callId: 'delegate', targetId: root.id, effectDomain: 'read', effectiveArgs: args,
     normalize: value => tool.parameters.parse(value), operationInput: { callId: 'delegate', args } })
   const input = { parentOperationId: prepared.operation.id, childIndex: 0, kind: spawned ? 'spawned' as const : 'inline' as const, role: 'research' as const,

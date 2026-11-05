@@ -1,3 +1,4 @@
+import { createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
 import { initializeExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
@@ -68,7 +69,7 @@ describe.runIf(available)('native deletion commits real effects outside the hear
       }
       if (scenario === 'billing') {
         const window = getCreditWindow()
-        await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+        await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 10000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
         const log = await prisma.aiUsageLog.create({ data: { userId: f.userId, novelId: f.novelId, chapterId: f.chapterId, agentRunId: f.runId,
           providerType: 'text', providerMode: 'default', modelName: 'original-model', action: 'workspaceAgent', targetType: 'agentRun', targetId: f.runId,
           requestTokens: 100, responseTokens: 10, promptCacheHitTokens: 40, promptCacheMissTokens: 60, creditChargeMilli: 1000, durationMs: 1, billingStatus: 'settled' } })

@@ -167,7 +167,7 @@ describe.runIf(available)('current saved writing and read-only historical review
       else expect(currentWitness).toBeNull()
     } finally { await prisma.aiUsageLog.deleteMany({ where: { id: { in: [evidence.paid.id, ...(duplicateUsage ? [duplicateUsage] : [])] } } }) }
   }))
-  it('keeps historical v1 proof readable but cannot project or complete an unreviewed revision after three checks', async () => fixture(async f => {
+  it('keeps historical v1 proof audit-only while the actual saved commit can complete with honest review limitations', async () => fixture(async f => {
     const model = vi.spyOn(ai, 'generateTextCompletion').mockRejectedValue(new Error('No model dispatch permitted'))
     const c = await capped(f)
     const subject = { userId: f.userId, novelId: f.novelId, runId: f.runId }
@@ -194,16 +194,16 @@ describe.runIf(available)('current saved writing and read-only historical review
         sourceRevision: current.frame.revision - 1, sourceHash: 'a'.repeat(64), revision: current.frame.revision,
         snapshotHash: current.frame.snapshotHash, proof: projected.value, proofHash: projected.hash } } })
     const evidence = await collectDurableCompletionEvidence(c.lease, { expectedRevision: current.frame.revision, expectedHash: current.frame.snapshotHash })
-    expect(evidence.snapshot.blockers.length).toBeGreaterThan(0)
+    expect(evidence.snapshot).toHaveProperty('blockers', [])
     expect(evidence.snapshot.limitedWritingDelivery).toBeUndefined()
-    await expect(finalizeDurableTask(c.lease, { expectedRevision: current.frame.revision, expectedHash: current.frame.snapshotHash })).rejects.toMatchObject({ code: 'RUNTIME_COMPLETION_BLOCKED' })
+    await finalizeDurableTask(c.lease, { expectedRevision: current.frame.revision, expectedHash: current.frame.snapshotHash })
     const finished = await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })
-    expect(finished.status).not.toBe('completed')
+    expect(finished.status).toBe('completed')
     expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'writing.delivery.projected' } })).toBe(1)
     const compiler = await prisma.storyCompilation.findUniqueOrThrow({ where: { id: c.compilationId }, include: { bridge: true, sceneTasks: true } })
-    expect(compiler.status).toBe('active')
-    expect(compiler.bridge!.committedAt).toBeNull()
-    expect(compiler.sceneTasks.map(scene => scene.status)).toEqual(['writing', 'writing', 'writing'])
+    expect(compiler.status).toBe('completed')
+    expect(compiler.bridge!.committedAt).not.toBeNull()
+    expect(compiler.sceneTasks.map(scene => scene.status)).toEqual(['completed', 'completed', 'completed'])
     expect(compiler.validation).toEqual(stillStale.validation)
     expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: f.rootId } })).toEqual(budget)
     expect(model).not.toHaveBeenCalled()

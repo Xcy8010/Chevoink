@@ -1,3 +1,4 @@
+import { createToolFixtureCreditAccount } from '../support/native-tool-test-state.js'
 import { initializeExecutionState, toolFixtureLedgerWhere } from '../support/native-tool-test-state.js'
 import { buildContinuityReviewManifest, inspectContinuityV4 } from '../../api/lib/agent/continuity-review-v4.js'
 import { inspectContinuityResponse } from '../../api/lib/agent/continuity-format-recovery.js'
@@ -45,7 +46,7 @@ describe.runIf(available)('native continuity origin remains a real operation and
       toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false })), protectedChapterIds: [], pinnedSkillVersions: [] },
       snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null, successfulToolSignatures: [], messages: [{ role: 'user', content: 'Review this chapter.' }, { role: 'assistant', content: null, toolCalls: calls }] } })
     const window = credits.getCreditWindow()
-    await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+    await createToolFixtureCreditAccount({ data: { userId: f.userId, dailyAllowanceMilli: 100000, periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
     const runtime = { tier: 'speed' as const, multiplierBps: 10000, provider: 'fixture', modelName: 'fixture', baseUrl: 'https://provider.invalid/v1', apiKey: 'fixture-only', reasoningEffort: 'high' as const, reasoningEfforts: ['none', 'high'] as Array<'none' | 'high'>, reasoningParameterMode: 'native' as const, thinkingEnabled: false, visionEnabled: false, contextWindowTokens: null }
     vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue(runtime)
     vi.spyOn(prices, 'resolveDurableTokenPrice').mockResolvedValue({ version: 'credits-v2-itemized', modelTier: 'speed', multiplierBps: 10000, rateCardId: 'native-origin', rates: { inputNano: 100000, cacheNano: 100000, outputNano: 1000000 } })

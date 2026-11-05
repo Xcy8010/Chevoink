@@ -227,7 +227,11 @@ describe.runIf(available)('new-draft quality-first prepayment admission', () => 
           const report = await prisma.chapterQualityReport.findFirstOrThrow({ where: { chapterId } })
           expect(report.deterministicMetrics).toMatchObject({ autoRepairAttempted: true })
           expect(await prisma.aiUsageLog.findMany({ where: { userId: base.userId } })).toEqual([expect.objectContaining({ usageSource: 'unknown', billingStatus: 'pending_usage' })])
-          expect(await chapterBridgeCommitTool.execute(ctx, { compilationId })).toMatchObject({ outcome: 'failed' })
+          const unknownUsage = await prisma.aiUsageLog.findMany({ where: { userId: base.userId } })
+          const unknownLedger = await prisma.creditLedgerEntry.findMany({ where: { userId: base.userId }, orderBy: { id: 'asc' } })
+          expect(await chapterBridgeCommitTool.execute(ctx, { compilationId })).not.toHaveProperty('outcome', 'failed')
+          expect(await prisma.aiUsageLog.findMany({ where: { userId: base.userId } })).toEqual(unknownUsage)
+          expect(await prisma.creditLedgerEntry.findMany({ where: { userId: base.userId }, orderBy: { id: 'asc' } })).toEqual(unknownLedger)
           expect(repair).toHaveBeenCalledOnce()
         } finally { await prisma.aiUsageLog.deleteMany({ where: { userId: base.userId } }) }
         return
@@ -738,7 +742,12 @@ describe.runIf(available)('durable quality actual tool chain', () => {
           expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('自动修订') } })
         }
         const recovered = await verification(() => prisma.chapterQualityReport.findFirstOrThrow({ where: { chapterId: f.chapterId, status: 'repaired' }, include: { findings: true } }))
-        expect(recovered).toMatchObject({ chapterRevision: 2, repairRound: 1, deterministicMetrics: { formatRecovery: { reportId: oldReport.id, state: 'completed' } } })
+        expect(recovered).toMatchObject({ chapterRevision: 2, repairRound: 1, deterministicMetrics: scenario === 'old-format-full-chain'
+          ? { independentCheck: 'complete', autoRepairAttempted: true } : { formatRecovery: { reportId: oldReport.id, state: 'completed' } } })
+        if (scenario === 'old-format-full-chain') {
+          expect(recovered.deterministicMetrics).not.toHaveProperty('formatRecovery')
+          expect(await verification(() => prisma.chapterQualityReport.findUniqueOrThrow({ where: { id: oldReport.id } }))).toEqual(oldReport)
+        }
         expect(recovered.findings[0].disposition).toBe('repaired')
         expect(await verification(() => prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } }))).toMatchObject({ content: '新文', revision: 2 })
         await commitWithAdvisoryReviewFacts({ ...f, compilationId, chapterSummary: '本章新终态', exitState: state, lastUnfinishedAction: '', hookDecision: '',
@@ -763,10 +772,16 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(await verification(() => prisma.agentOperation.findUniqueOrThrow({ where: { id: admittedLegacy!.id }, select: { id: true, inputHash: true, inputSnapshot: true } }))).toEqual(admittedLegacy)
         expect(fetchMock).toHaveBeenCalledTimes(5)
         expect(await verification(async () => prisma.creditLedgerEntry.count({ where: await toolFixtureLedgerWhere(f.userId, { userId: f.userId }) }))).toBe(5)
-        const format = await verification(() => prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_format_recovery' } }))
         const repair = await verification(() => prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_repair' } }))
-        expect(repair.parentOperationId).toBe(format.parentOperationId)
-        expect(await verification(() => prisma.agentOperation.count({ where: { parentOperationId: format.parentOperationId, action: 'quality_critic' } }))).toBe(0)
+        if (scenario === 'old-format-full-chain') {
+          expect(repair.parentOperationId).not.toBe(admittedLegacy!.id)
+          expect(await verification(() => prisma.agentOperation.count({ where: { parentOperationId: repair.parentOperationId, action: 'quality_critic' } }))).toBe(1)
+          expect(await verification(() => prisma.agentOperation.count({ where: { parentOperationId: repair.parentOperationId, action: 'quality_format_recovery' } }))).toBe(0)
+        } else {
+          const format = await verification(() => prisma.agentOperation.findFirstOrThrow({ where: { taskRootId: f.rootId, action: 'quality_format_recovery' } }))
+          expect(repair.parentOperationId).toBe(format.parentOperationId)
+          expect(await verification(() => prisma.agentOperation.count({ where: { parentOperationId: format.parentOperationId, action: 'quality_critic' } }))).toBe(0)
+        }
         return
       }
       if (scenario === 'format-expired') {
@@ -889,7 +904,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toMatchObject({ content: before, revision: 1 })
         return
       }
-      const failed = ['invalid-source-id', 'evidence-unresolved', 'format', 'truncated', 'stale-chapter', 'stale-compiler', 'missing', 'repair-stale', 'stale-source', 'legacy-quality-stale', 'v2-quality-stale', 'duplicate-keys', 'mixed-source', 'v4-parser-noise', 'format-recovery-stale', 'format-expired', 'synthetic-partial', 'v5-parser-mechanical'].includes(scenario)
+      const failed = ['invalid-source-id', 'evidence-unresolved', 'format', 'truncated', 'stale-chapter', 'stale-compiler', 'repair-stale', 'stale-source', 'legacy-quality-stale', 'v2-quality-stale', 'duplicate-keys', 'mixed-source', 'v4-parser-noise', 'format-recovery-stale', 'format-expired', 'synthetic-partial', 'v5-parser-mechanical'].includes(scenario)
       const userEdited = ['stale-chapter', 'repair-stale', 'legacy-quality-stale', 'v2-quality-stale', 'format-recovery-stale'].includes(scenario)
       const repairedOnDisk = ['repair', 'evidence-corrected', 'format-retry', 'rollback-resume', 'format-valid-repair', 'format-recovery-rollback'].includes(scenario)
       expect(result).toMatchObject({ kind: 'tool', result: failed ? { outcome: 'failed' } : { summary: expect.stringContaining('质量检查') } })
@@ -921,13 +936,13 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       }
       if (scenario === 'full-chain') {
         expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('连续性检查') } })
-        expect(await step()).toMatchObject({ result: { outcome: 'failed', failureCode: 'REVIEW_DECISION_REQUIRED' } })
-        expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('active')
-        expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBe(0)
+        expect(await step()).toMatchObject({ result: { summary: '章节已提交' } })
+        expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilationId } })).status).toBe('completed')
+        expect(await prisma.projectMemoryEntry.count({ where: { novelId: f.novelId } })).toBeGreaterThan(0)
       }
-      const expectedRequests = scenario === 'missing' || scenario === 'format-expired' ? 0
+      const expectedRequests = scenario === 'format-expired' ? 0
         : scenario === 'full-chain' ? 4
-        : ['evidence-corrected', 'format-retry', 'repair', 'format-valid-repair', 'format-recovery-rollback'].includes(scenario) ? 3
+        : ['evidence-corrected', 'format-retry', 'repair', 'format-valid-repair', 'format-recovery-rollback', 'format'].includes(scenario) ? 3
         : ['format-35', 'invalid-source-id', 'mixed-source', 'context-change', 'evidence-unresolved', 'rollback-resume', 'format', 'duplicate-keys', 'format-valid', 'format-recovery-stale', 'synthetic-partial', 'v5-parser-mechanical'].includes(scenario) ? 2 : 1
       expect(fetchMock).toHaveBeenCalledTimes(expectedRequests)
       if (scenario === 'invalid-source-id' || scenario === 'mixed-source') {
@@ -1000,7 +1015,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         expect(reports[0]).toMatchObject({ status: 'failed', criticVersion: 'humanity-critic.v5' })
         expect(reports[0].deterministicMetrics).not.toHaveProperty('criticResponse')
       }
-      if (['missing', 'stale-chapter', 'stale-compiler', 'repair-stale', 'stale-source', 'legacy-quality-stale', 'v2-quality-stale', 'format-recovery-stale', 'format-expired'].includes(scenario)) expect(reports).toHaveLength(0)
+      if (['stale-chapter', 'stale-compiler', 'repair-stale', 'stale-source', 'legacy-quality-stale', 'v2-quality-stale', 'format-recovery-stale', 'format-expired'].includes(scenario)) expect(reports).toHaveLength(0)
       else {
         expect(reports).toHaveLength(scenario === 'context-change' || scenario === 'repair' ? 2 : 1)
         expect(reports[0]).toMatchObject({ chapterRevision: repairedOnDisk ? 2 : 1, repairRound: repairedOnDisk ? 1 : 0, status: failed ? 'failed' : repairedOnDisk ? 'repaired' : scenario === 'protected' ? 'needs_repair' : 'passed' })

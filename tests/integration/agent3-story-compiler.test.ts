@@ -339,7 +339,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
         exitState: { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] },
         lastUnfinishedAction: '', hookDecision: '', delayedHookReason: '', openingStructure: '动作', endingStructure: '停在提问之前' }
       await commitWithAdvisoryReviewFacts(terminal)
-      expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toBeNull()
+      expect(await prisma.$transaction(tx => readCompletedWritingDelivery(tx, { userId, novelId, runId: run.id }))).toMatchObject({ chapters: [{ id: chapter.id, revision: chapter.revision }] })
       expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: compilation.id } })).status).toBe('completed')
       await saveSceneTasks({ userId, novelId, compilationId: compilation.id, tasks: [{ purpose: '推进门前选择', goal: '进门', obstacle: '不知价格',
         choice: '握住门把手', cost: '暂缓询问', turn: '停住动作', entryState: terminal.exitState, exitState: terminal.exitState,

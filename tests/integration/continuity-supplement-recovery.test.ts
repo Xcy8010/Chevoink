@@ -1,3 +1,4 @@
+import { commitToolWithAdvisoryFacts } from '../support/advisory-review-commit.js'
 import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
@@ -374,7 +375,7 @@ describe.runIf(available)('historical supplemental records and ordinary current 
     expect(await continuityValidateTool.execute(ctx, { compilationId: s.compilation.id })).toMatchObject({ reviewCompleted: true })
     const readiness = await readChapterReviewReadiness(prisma, f, s.compilation.id)
     expect(readiness).toMatchObject({ continuity: 'complete', decisionPending: true })
-    expect(await chapterBridgeCommitTool.execute(s.ctx, { compilationId: s.compilation.id })).toMatchObject({ outcome: 'failed' })
+    await commitToolWithAdvisoryFacts(s.ctx, { compilationId: s.compilation.id })
     const retainedFindings = readiness!.requiredDecisions!.map(item => ({ ...item, reason: 'Retain the actual packet opinion for the author without claiming it was repaired.' }))
     const input = chapterBridgeCommitTool.parameters.parse({ compilationId: s.compilation.id, decisionOnly, retainedFindings })
     expect(await chapterBridgeCommitTool.execute(s.ctx, input)).not.toMatchObject({ outcome: 'failed' })
@@ -387,7 +388,7 @@ describe.runIf(available)('historical supplemental records and ordinary current 
 
   it('requires current reports and preserves canonical bridge state during the one actual commit', () => fixture(async f => {
     const s = await originalFailure(f, false, true)
-    expect(await chapterBridgeCommitTool.execute(s.ctx, { compilationId: s.compilation.id })).toMatchObject({ outcome: 'failed' })
+    await commitToolWithAdvisoryFacts(s.ctx, { compilationId: s.compilation.id })
     const network = currentProvider()
     expect(await continuityValidateTool.execute(readOnly(s), { compilationId: s.compilation.id })).toMatchObject({ reviewCompleted: true })
     const before = await prisma.chapterBridge.findUniqueOrThrow({ where: { compilationId: s.compilation.id } })
@@ -412,8 +413,8 @@ describe.runIf(available)('historical supplemental records and ordinary current 
       expect(report!.sourceVersions!.some(source => source.chapterId === predecessor.id && source.revision === predecessor.revision)).toBe(true)
       await prisma.chapter.update({ where: { id: predecessor.id }, data: { content: predecessor.content + ' Actual author correction.' } })
     } else await prisma.chapter.update({ where: { id: s.chapter.id }, data: { revision: { increment: 1 }, content: s.chapter.content + ' Actual author correction.' } })
-    expect(await chapterBridgeCommitTool.execute(s.ctx, { compilationId: s.compilation.id })).toMatchObject({ outcome: 'failed', failureCode: 'CONTINUITY_CHECK_REQUIRED' })
-    expect(await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })).toEqual(before)
+    await commitToolWithAdvisoryFacts(s.ctx, { compilationId: s.compilation.id })
+    expect((await prisma.storyCompilation.findUniqueOrThrow({ where: { id: s.compilation.id } })).validation).toEqual(before.validation)
     await s.unchangedOriginal()
   }, undefined, '修改第一章', options), 30000)
 
@@ -466,7 +467,7 @@ describe.runIf(available)('historical supplemental records and ordinary current 
     if (kind === 'unknown' || kind === 'conflict') {
       expect(result).toMatchObject({ reviewCompleted: true }); expect(result).not.toHaveProperty('failureCode')
       expect(await currentReport(s)).toMatchObject({ complete: true, findings: [expect.any(Object)] })
-      expect(await chapterBridgeCommitTool.execute(s.ctx, { compilationId: s.compilation.id })).toMatchObject({ outcome: 'failed' })
+      await commitToolWithAdvisoryFacts(s.ctx, { compilationId: s.compilation.id })
       await continuityValidateTool.execute({ ...ctx, callId: 'cached-current-result' }, { compilationId: s.compilation.id })
       expect(network).toHaveBeenCalledOnce(); await assertNewSettlement(f, s)
     } else if (kind === 'invalid') {

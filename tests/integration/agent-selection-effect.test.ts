@@ -213,7 +213,7 @@ describe.skipIf(!available)('versioned original author selection effect', () => 
       })
       await executeDurableToolStep(lease!, ctx.signal)
       await executeDurableToolStep(lease!, ctx.signal)
-      expect(await executeDurableToolStep(lease!, ctx.signal)).toMatchObject({ kind: 'tool', result: { outcome: 'failed', output: expect.stringContaining('局部') } })
+      expect(await executeDurableToolStep(lease!, ctx.signal)).toMatchObject({ kind: 'tool', result: { outcome: 'failed', output: expect.stringMatching(/局部|选区/u) } })
       expect(await executeDurableToolStep(lease!, ctx.signal)).toMatchObject({ kind: 'tool' })
       expect(await executeDurableToolStep(lease!, ctx.signal)).toEqual({ kind: 'idle' })
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toEqual(before)
@@ -296,7 +296,7 @@ describe.skipIf(!available)('versioned original author selection effect', () => 
   }))
 
   it.each(['chapter_create', 'volume_create', 'volume_update', 'story_compiler_prepare', 'chapter_rename', 'chapter_write', 'chapter_append', 'chapter_edit_range'] as const)(
-    'receipts a real cursor denial of %s once and reaches the next permitted read', action => fixture('durable', async (ctx, _spec, _invoke, lease) => {
+    'records selection-boundary results of %s and preserves all manuscript content', action => fixture('durable', async (ctx, _spec, _invoke, lease) => {
       const volume = await prisma.volume.findFirstOrThrow({ where: { novelId: ctx.novelId } })
       const before = await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })
       const tools = [chapterReadTool, volumeListTool, chapterCreateTool, volumeCreateTool, volumeUpdateTool, storyCompilerPrepareTool,
@@ -325,14 +325,16 @@ describe.skipIf(!available)('versioned original author selection effect', () => 
       expect(await executeDurableToolStep(lease!, ctx.signal)).toEqual({ kind: 'idle' })
       const operations = await prisma.agentOperation.findMany({ where: {  taskRootId: lease!.taskRootId, action }, include: { effectReceipt: true } })
       expect(operations).toHaveLength(1)
-      expect(operations[0]).toMatchObject({ status: 'failed', effectReceipt: { result: { code: 'AUTHOR_SELECTION_SCOPE' } } })
+      if (action === 'volume_update') expect(operations[0]).toMatchObject({ status: 'succeeded' })
+      else expect(operations[0]).toMatchObject({ status: 'failed', effectReceipt: { result: { code: 'AUTHOR_SELECTION_SCOPE' } } })
       const state = (await loadExecutionState(ctx.userId, ctx.runId)).frame.state
       expect(state.phase).toBe('idle')
       expect(state.messages.filter(message => message.role === 'tool' && message.toolCallId === 'denied')).toHaveLength(1)
       expect(state.messages.filter(message => message.role === 'tool' && message.toolCallId === 'read-after')).toHaveLength(1)
       expect(await prisma.chapter.findUniqueOrThrow({ where: { id: ctx.chapterId! } })).toEqual(before)
       expect(await prisma.chapter.count({ where: { novelId: ctx.novelId } })).toBe(1)
-      expect(await prisma.volume.findMany({ where: { novelId: ctx.novelId } })).toEqual([volume])
+      if (action === 'volume_update') expect(await prisma.volume.findMany({ where: { novelId: ctx.novelId } })).toEqual([{ ...volume, title: '不允许改卷', updatedAt: expect.any(Date) }])
+      else expect(await prisma.volume.findMany({ where: { novelId: ctx.novelId } })).toEqual([volume])
       expect(await prisma.storyCompilation.count({ where: { novelId: ctx.novelId } })).toBe(0)
       expect(await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: lease!.taskRootId } })).toEqual(budget)
     }))

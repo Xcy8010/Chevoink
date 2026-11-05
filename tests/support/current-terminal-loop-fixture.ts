@@ -190,7 +190,7 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
       const current = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, input.compilationId))
       expect(calls.length, JSON.stringify(current)).toBeLessThan(12)
       const pending = current!.requiredTools[0]
-      if (pending) { next = pending.name; nextArgs = { ...pending.args, readOnly: true }; nextCallId = 'current-recovery-final-check-' + calls.length }
+      if (pending) { next = pending.name; nextArgs = { ...pending.args }; nextCallId = 'current-recovery-final-check-' + calls.length }
     }
     if (next) calls.push(next)
     return { content: next ? '' : summary, reasoning: '', toolCalls: next ? [{ id: nextCallId ?? (retainedFindings ? 'current-recovery-retained-commit' : `current-recovery-${next}`), name: next,
@@ -217,7 +217,7 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
   } else if (input.missingCommit) {
     expect(critic).not.toHaveBeenCalled(); expect(chapter).toEqual(original)
     expect(compilation.bridge!.committedAt).toBeNull(); expect(run.status).toBe('failed')
-    expect(run.errorMessage).toContain('当前授权章节尚无与最新正文和检查报告一致的提交回执')
+    expect(run.errorMessage).toContain('当前目标章节尚无与最新正文一致的保存证据')
     expect(events.some(event => event.type === 'error' && (event.payload as { code: string; message: string }).code === 'run_failed'
       && (event.payload as { message: string }).message === run.errorMessage)).toBe(true)
     expect(events.filter(event => event.type === 'tool.call')).toEqual([])
@@ -248,7 +248,9 @@ export async function continueCurrentTerminalLoop(f: Subject, input: {
     expect(continuityRequests).toHaveLength(1)
     expect(run.status).toBe('completed'); expect(compilation.bridge!.committedAt).not.toBeNull()
     const prefix = input.setupAfterRecovery ? ['chapter_read', 'chapter_edit_range', 'quality_analyze', 'chapter_edit_range'] : input.readFirst ? ['chapter_bridge_get'] : []
-    expect(calls.slice(0, prefix.length + 3)).toEqual([...prefix, 'quality_analyze', 'continuity_validate', 'chapter_bridge_commit'])
+    expect(calls.slice(0, prefix.length + 2)).toEqual([...prefix, 'quality_analyze', 'continuity_validate'])
+    expect(calls.at(-1)).toBe('chapter_bridge_commit')
+    expect(calls.slice(prefix.length + 2, -1).every(name => name === 'quality_analyze' || name === 'continuity_validate')).toBe(true)
     const readiness = await prisma.$transaction(tx => readChapterReviewReadiness(tx, f, input.compilationId))
     expect(readiness).toMatchObject({ ready: true, revision: chapter.revision, quality: 'complete', continuity: 'complete', terminalCommitted: true, decisionPending: false })
     const finalContinuity = readContinuityReport(compilation.validation, chapter)
