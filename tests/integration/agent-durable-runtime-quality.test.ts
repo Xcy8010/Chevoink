@@ -520,6 +520,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
     vi.spyOn(storyMemory, 'processMemoryExtractionJob').mockResolvedValue(undefined)
     const authorRequest = '改写当前章为都市异能爽文第一章。主角陆望，31岁，夜班设备维护员。1800字，低谷仅一段；觉醒后识别旧镜头的价值；停在买主报价前；只输出标题与正文。'
     const retaining = scenario === 'retain' || scenario === 'mixed-retain'
+    const legacyFullChain = scenario === 'old-format-full-chain' || scenario === 'v9-format-full-chain'
     const noOpRepair = scenario === 'no-op-repair'
     const checkingOriginal = scenario === 'original-request' || scenario === 'original-request-resume'
     const oldWorkVersion = scenario === 'legacy-quality-resume' || scenario === 'legacy-quality-stale' ? 1 : scenario === 'v2-quality-resume' || scenario === 'v2-quality-stale' ? 2 : scenario === 'v4-parser-noise' ? 4 : scenario === 'v9-quality-resume' ? 9 : null
@@ -536,7 +537,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       const compilation = await lifecycle.phase('compiler.prepare', () => prepareStoryCompilation({ ...f, chapterId: f.chapterId, mode: 'balanced', intentSummary: '检查本章' }))
       const compilationId = compilation.compilation.id
       const state = { knowledge: [], emotion: [], body: [], objects: [], relationships: [], openLoops: [] }
-      await lifecycle.phase('compiler.tasks', () => saveSceneTasks({ ...f, compilationId, tasks: [{ purpose: '推进场景', entryState: state, goal: '寻找线索', obstacle: '门已上锁', choice: '绕路', cost: '耗费时间', turn: '发现脚印', exitState: state,
+      if (!legacyFullChain) await lifecycle.phase('compiler.tasks', () => saveSceneTasks({ ...f, compilationId, tasks: [{ purpose: '推进场景', entryState: state, goal: '寻找线索', obstacle: '门已上锁', choice: '绕路', cost: '耗费时间', turn: '发现脚印', exitState: state,
         styleBudget: { description: 'low', dialogue: 'medium', rhetoric: 'low' } }] }))
       if (['old-format-full-chain', 'v9-format-full-chain'].includes(scenario)) {
         await lifecycle.phase('baseline', async () => {
@@ -546,6 +547,9 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       }
       const tools = [chapterBridgeGetTool, chapterReadTool, qualityAnalyzeTool, continuityValidateTool, chapterBridgeCommitTool]
       const calls = [{ id: 'bridge', name: 'chapter_bridge_get', arguments: JSON.stringify({ compilationId }) }, { id: 'check', name: 'quality_analyze', arguments: JSON.stringify({ compilationId }) }]
+      // Quality reads its own current owned body and compiler binding. The
+      // historical full chain needs no preliminary bridge/scene stage.
+      if (legacyFullChain) calls.shift()
       if (scenario === 'retain' || noOpRepair || scenario === 'success' || scenario === 'repair' || scenario === 'context-change' || scenario === 'format' || scenario === 'v9-quality-resume') calls.push({ id: 'cached', name: 'quality_analyze', arguments: JSON.stringify({ compilationId }) })
       if (scenario === 'standalone') {
         await prisma.storyCompilation.delete({ where: { id: compilationId } })
@@ -664,7 +668,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
       })
       vi.stubGlobal('fetch', fetchMock)
       const step = () => lifecycle.phase('step', () => executeDurableToolStep(lease, signal))
-      if (scenario !== 'missing') await step()
+      if (scenario !== 'missing' && !legacyFullChain) await step()
       if (scenario === 'v5-parser-mechanical' || scenario === 'v6-parser-mechanical' || scenario === 'v7-parser-mechanical') {
         const originalPrepare = toolCursor.prepareToolCursorOperation
         vi.spyOn(toolCursor, 'prepareToolCursorOperation').mockImplementationOnce(async (token, cursor, input, tx) => {
@@ -704,9 +708,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
           await active(() => saveExecutionState(lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
             snapshot: { ...frame.state, messages: [...frame.state.messages, { role: 'assistant', content: null, toolCalls: next }] } }))
         })
-        await append([{ id: 'recovery-bridge', name: 'chapter_bridge_get', arguments: JSON.stringify({ compilationId }) },
-          { id: 'restore-quality', name: 'quality_analyze', arguments: JSON.stringify({ compilationId }) }])
-        await step()
+        await append([{ id: 'restore-quality', name: 'quality_analyze', arguments: JSON.stringify({ compilationId }) }])
         if (scenario === 'v9-format-full-chain') {
           const originalPrepare = toolCursor.prepareToolCursorOperation
           let frozenRecovery: { id: string; inputHash: string; inputSnapshot: Prisma.JsonValue } | undefined
@@ -753,11 +755,9 @@ describe.runIf(available)('durable quality actual tool chain', () => {
         await commitWithAdvisoryReviewFacts({ ...f, compilationId, chapterSummary: '本章新终态', exitState: state, lastUnfinishedAction: '', hookDecision: '',
           delayedHookReason: '', openingStructure: '动作', endingStructure: '动作', requireQuality: true, qualityReportId: recovered.id })
         expect(await lifecycle.phase('memory', () => advanceDurableMemory(lease))).not.toBeNull()
-        await append([{ id: 'current-bridge', name: 'chapter_bridge_get', arguments: JSON.stringify({ compilationId }) },
-          { id: 'current-continuity', name: 'continuity_validate', arguments: JSON.stringify({ compilationId }) },
+        await append([{ id: 'current-continuity', name: 'continuity_validate', arguments: JSON.stringify({ compilationId }) },
           { id: 'current-quality', name: 'quality_analyze', arguments: JSON.stringify({ compilationId }) },
           { id: 'current-commit', name: 'chapter_bridge_commit', arguments: JSON.stringify({ compilationId }) }])
-        await step()
         expect(await step()).toMatchObject({ result: { summary: expect.stringContaining('连续性检查') } })
         const currentQuality = await step()
         expect(currentQuality).toMatchObject({ kind: 'tool', result: { summary: '人类感质量检查' } })

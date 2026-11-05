@@ -405,9 +405,10 @@ export async function recordChapterReviewDecisions(tx: Prisma.TransactionClient,
     ...activeChapterScope(subject.novelId) }, select: { content: true } })
   if (!chapter) throw new DataAccessError(409, 'CHAPTER_REVISION_CONFLICT', '正文已变化，未保存旧版本决定。')
   const validation = compilation.validation && typeof compilation.validation === 'object' && !Array.isArray(compilation.validation) ? compilation.validation : {}
-  await tx.storyCompilation.update({ where: { id: compilation.id }, data: { validation: runtimeJson({ ...validation,
+  const next = runtimeJson({ ...validation,
     retainedReviewDecision: { version: 1, chapterId: readiness.chapterId, revision: readiness.revision,
-      ...readiness.decisionBinding, contentHash: runtimeJson({content: chapter.content}).hash, findings } }).value } })
+      ...readiness.decisionBinding, contentHash: runtimeJson({content: chapter.content}).hash, findings } })
+  if (next.hash !== runtimeJson(validation).hash) await tx.storyCompilation.update({ where: { id: compilation.id }, data: { validation: next.value } })
   return { changed: runtimeJson(findings).hash !== runtimeJson(readiness.retainedDecisions ?? []).hash, findings }
 }
 
