@@ -91,7 +91,7 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
     const { humanizeAgentVisibleText } = await import('./visible-text.js')
     if (appended.role === 'assistant') {
       const events: AgentStreamEventBody[] = []
-      if (appended.reasoning) events.push({ type: 'reasoning.delta', messageId, delta: humanizeAgentVisibleText(appended.reasoning) })
+      if (appended.reasoning) events.push({ type: 'reasoning.delta', messageId, delta: appended.reasoning })
       events.push({ type: 'text.final', messageId, text: humanizeAgentVisibleText(appended.content ?? ''), asReasoning: false })
       return events
     }

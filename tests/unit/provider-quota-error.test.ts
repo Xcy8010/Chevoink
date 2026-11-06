@@ -20,6 +20,7 @@ import { ModelRouteRejected } from '../../api/lib/model-route-pool.js'
 import { isProviderQuotaError } from '../../api/lib/provider-quota-error.js'
 
 const observedMessage = 'You account balance exceeded your current quota'
+const insufficientBalanceMessage = 'Insufficient Balance (request_id: 00000000-0000-4000-8000-000000000001)'
 const customRuntime = { tier: 'custom' as const, provider: 'fixture', modelName: 'fixture', apiKey: 'fixture-key',
   baseUrl: 'https://fixture.test/v1', reasoningEffort: 'high' as const, multiplierBps: 0, visionEnabled: false, contextWindowTokens: null }
 const invokeChat = (custom = false) => chatWithTools({ messages: [], tools: [], providerApiKey: 'fixture-key',
@@ -43,15 +44,27 @@ afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
 
 describe('supplier quota error boundary', () => {
   it.each([{ code: 'insufficient_quota' }, { type: 'insufficient_quota' }, { code: 'quota_exceeded' },
-    { type: 'insufficient_balance' }, { message: observedMessage }, observedMessage])('recognizes explicit quota evidence %j', error => {
+    { type: 'insufficient_balance' }, { message: observedMessage }, observedMessage,
+    { message: 'Insufficient Balance' }, 'Insufficient Balance', { message: insufficientBalanceMessage }, insufficientBalanceMessage])('recognizes explicit quota evidence %j', error => {
     expect(isProviderQuotaError(error)).toBe(true)
   })
   it.each([{ code: 'rate_limit_exceeded' }, { type: 'tokens', message: 'Rate limit reached' }, { message: 'quota mentioned in a story' },
-    { message: `He said "${observedMessage}"` }, { choices: [{ message: { content: observedMessage } }] }, null])('rejects unrelated evidence %j', error => {
+    { message: `He said "${observedMessage}"` }, { choices: [{ message: { content: observedMessage } }] },
+    { message: `He said "${insufficientBalanceMessage}"` }, { message: `${insufficientBalanceMessage} is dialogue.` },
+    { message: 'Insufficient Balance (request_id: not-a-uuid)' }, { message: 'Insufficient Balance while standing on one foot' },
+    { choices: [{ message: { content: insufficientBalanceMessage } }] }, { content: insufficientBalanceMessage }, null])('rejects unrelated evidence %j', error => {
     expect(isProviderQuotaError(error)).toBe(false)
   })
 
   for (const [channel, invoke] of [['chat', invokeChat], ['auxiliary', invokeAuxiliary]] as const) {
+    it.each([400, 402, 429])(`${channel} classifies HTTP %i balance message with request ID and no quota code`, async status => {
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: { message: insufficientBalanceMessage } }), { status })))
+      await expect(invoke()).rejects.toMatchObject({ code: 'AI_PROVIDER_QUOTA_EXCEEDED', message: expect.stringContaining('这不是 Chevoink Credits 不足') })
+      expect(fetch).toHaveBeenCalledOnce()
+      expect(mocks.charge).not.toHaveBeenCalled()
+      expect(mocks.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { usageSource: 'unknown', billingStatus: 'pending_usage' } }))
+      expect(mocks.updateMany.mock.calls.some(([arg]) => arg.data.reservedCreditMilli === 0)).toBe(false)
+    })
     it.each([402, 429])(`${channel} classifies HTTP %i quota with unknown usage and no retry`, async status => {
       const fetcher = vi.fn(async () => new Response(JSON.stringify({ error: { code: 'insufficient_quota', message: observedMessage } }), { status }))
       vi.stubGlobal('fetch', fetcher)
@@ -61,8 +74,8 @@ describe('supplier quota error boundary', () => {
       expect(mocks.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { usageSource: 'unknown', billingStatus: 'pending_usage' } }))
       expect(mocks.updateMany.mock.calls.some(([arg]) => arg.data.reservedCreditMilli === 0)).toBe(false)
     })
-    it(`${channel} classifies the observed plain HTTP quota message`, async () => {
-      vi.stubGlobal('fetch', vi.fn(async () => new Response(observedMessage, { status: 402 })))
+    it.each([observedMessage, insufficientBalanceMessage])(`${channel} classifies the observed plain HTTP quota message: %s`, async message => {
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(message, { status: 402 })))
       await expect(invoke()).rejects.toMatchObject({ code: 'AI_PROVIDER_QUOTA_EXCEEDED' })
       expect(fetch).toHaveBeenCalledOnce()
     })
@@ -81,8 +94,8 @@ describe('supplier quota error boundary', () => {
       expect(mocks.charge).toHaveBeenCalledWith(expect.objectContaining({ requestTokens: 12, responseTokens: 3 }))
       expect(fetch).toHaveBeenCalledOnce()
     })
-    it(`${channel} preserves same-frame SSE usage before stopping at quota`, async () => {
-      vi.stubGlobal('fetch', vi.fn(async () => stream([{ usage: { prompt_tokens: 15, completion_tokens: 2 }, error: { message: observedMessage } }])))
+    it.each([observedMessage, insufficientBalanceMessage])(`${channel} preserves same-frame SSE usage before stopping at quota: %s`, async message => {
+      vi.stubGlobal('fetch', vi.fn(async () => stream([{ usage: { prompt_tokens: 15, completion_tokens: 2 }, error: { message } }])))
       await expect(invoke()).rejects.toMatchObject({ code: 'AI_PROVIDER_QUOTA_EXCEEDED' })
       const observations = [...mocks.update.mock.calls, ...mocks.updateMany.mock.calls].map(([arg]) => arg.data)
       expect(observations).toContainEqual(expect.objectContaining({ requestTokens: 15, responseTokens: 2, usageSource: 'reported' }))
@@ -95,13 +108,13 @@ describe('supplier quota error boundary', () => {
       expect(observations).toContainEqual(expect.objectContaining({ requestTokens: 21, responseTokens: 4, usageSource: 'reported' }))
     })
     it(`${channel} preserves partial known SSE usage and keeps the missing count unknown`, async () => {
-      vi.stubGlobal('fetch', vi.fn(async () => stream([{ usage: { prompt_tokens: 21 }, error: { code: 'insufficient_quota' } }])))
+      vi.stubGlobal('fetch', vi.fn(async () => stream([{ usage: { prompt_tokens: 21 }, error: { message: insufficientBalanceMessage } }])))
       await expect(invoke()).rejects.toMatchObject({ code: 'AI_PROVIDER_QUOTA_EXCEEDED' })
       const observations = [...mocks.update.mock.calls, ...mocks.updateMany.mock.calls].map(([arg]) => arg.data)
       expect(observations).toContainEqual(expect.objectContaining({ requestTokens: 21, responseTokens: null, usageSource: 'unknown' }))
     })
-    it(`${channel} keeps missing SSE usage unknown`, async () => {
-      vi.stubGlobal('fetch', vi.fn(async () => stream([{ error: { code: 'insufficient_quota' } }])))
+    it.each([{ code: 'insufficient_quota' }, { message: insufficientBalanceMessage }])(`${channel} keeps missing SSE usage unknown: %j`, async error => {
+      vi.stubGlobal('fetch', vi.fn(async () => stream([{ error }])))
       await expect(invoke()).rejects.toMatchObject({ code: 'AI_PROVIDER_QUOTA_EXCEEDED' })
       expect(mocks.charge).not.toHaveBeenCalled()
       expect(mocks.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { usageSource: 'unknown', billingStatus: 'pending_usage' } }))
@@ -121,11 +134,11 @@ describe('supplier quota error boundary', () => {
       expect(mocks.charge).not.toHaveBeenCalled()
       expect(fetch).toHaveBeenCalledOnce()
     })
-    it(`${channel} returns normal narrative containing the quota phrase unchanged`, async () => {
-      vi.stubGlobal('fetch', vi.fn(async () => stream([{ choices: [{ delta: { content: observedMessage }, finish_reason: 'stop' }] },
+    it.each([observedMessage, insufficientBalanceMessage])(`${channel} returns normal narrative containing the quota phrase unchanged: %s`, async message => {
+      vi.stubGlobal('fetch', vi.fn(async () => stream([{ choices: [{ delta: { content: message }, finish_reason: 'stop' }] },
         { usage: { prompt_tokens: 10, completion_tokens: 10 } }])))
       const result = await invoke()
-      expect(typeof result === 'string' ? result : result.content).toBe(observedMessage)
+      expect(typeof result === 'string' ? result : result.content).toBe(message)
     })
   }
 
@@ -141,8 +154,8 @@ describe('supplier quota error boundary', () => {
     expect(config).toEqual(original)
   })
 
-  it('preserves HTTP quota usage and classification in the durable rejection contract', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":{"code":"insufficient_quota"},"usage":{"prompt_tokens":12,"completion_tokens":3}}', { status: 429 })))
+  it.each([{ code: 'insufficient_quota' }, { message: insufficientBalanceMessage }])('preserves HTTP quota usage and classification in the durable rejection contract: %j', async error => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error, usage: { prompt_tokens: 12, completion_tokens: 3 } }), { status: 429 })))
     await expect(chatWithTools({ messages: [], tools: [], providerApiKey: 'fixture-key',
       usageLog: { userId: 'owner', action: 'quota-fixture' }, durableExecution: {
         operationKey: 'operation', attemptKey: '1', lease: { userId: 'owner', runId: 'run', taskRootId: 'task', epoch: 1, leaseToken: 'lease' },

@@ -17,9 +17,67 @@ export function useMessageScroll({
   // 自动跟随开关：用户上滑离开底部后暂停自动滚底（避免运行中回看历史被强制弹回），滚回底部附近自动恢复
   const pinnedToBottomRef = useRef(true)
   const lastScrollTopRef = useRef(0)
+  const draggingRef = useRef(false)
   const scopeOwner = useRef({ key: scopeKey })
   if (scopeOwner.current.key !== scopeKey) scopeOwner.current = { key: scopeKey }
-  useLayoutEffect(() => { pinnedToBottomRef.current = true; lastScrollTopRef.current = 0 }, [scopeKey])
+  useLayoutEffect(() => {
+    pinnedToBottomRef.current = true
+    lastScrollTopRef.current = 0
+    draggingRef.current = false
+  }, [scopeKey])
+
+  // Scroll events also come from browser anchoring when virtualized history
+  // changes height. Pause on upward input before native smooth scrolling starts:
+  // its first scroll event can arrive after the next follow frame.
+  useEffect(() => {
+    const node = scrollRef.current
+    if (!node || collapsed) return
+    let touchY: number | undefined
+    const pauseForUpwardInput = (event: Event) => {
+      if (event.defaultPrevented || !(event.target instanceof Element)) return
+      // An inner reasoning/history scroller owns input while it can scroll up.
+      for (let target: Element | null = event.target; target && target !== node; target = target.parentElement) {
+        if (target.scrollHeight <= target.clientHeight) continue
+        const style = getComputedStyle(target)
+        if (/(auto|scroll)/.test(style.overflowY)
+          && (target.scrollTop > 0 || /^(contain|none)$/.test(style.overscrollBehaviorY))) return
+      }
+      if (node.scrollTop > 0) pinnedToBottomRef.current = false
+    }
+    const wheel = (event: WheelEvent) => {
+      if (event.deltaY < 0) pauseForUpwardInput(event)
+    }
+    const touchStart = (event: TouchEvent) => { touchY = event.touches[0]?.clientY }
+    const touchMove = (event: TouchEvent) => {
+      const nextY = event.touches[0]?.clientY
+      if (nextY !== undefined && touchY !== undefined && nextY > touchY) pauseForUpwardInput(event)
+      touchY = nextY
+    }
+    const key = (event: KeyboardEvent) => {
+      const target = event.target
+      if (target instanceof HTMLElement && (target.isContentEditable || target.closest('input, textarea, select, [contenteditable="true"]'))) return
+      if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || event.key === ' ' && event.shiftKey) pauseForUpwardInput(event)
+    }
+    const pointerDown = (event: PointerEvent) => { draggingRef.current = event.target === node }
+    const pointerUp = () => { draggingRef.current = false }
+    node.addEventListener('wheel', wheel, { passive: true })
+    node.addEventListener('touchstart', touchStart, { passive: true })
+    node.addEventListener('touchmove', touchMove, { passive: true })
+    node.addEventListener('keydown', key)
+    node.addEventListener('pointerdown', pointerDown)
+    window.addEventListener('pointerup', pointerUp)
+    window.addEventListener('pointercancel', pointerUp)
+    return () => {
+      draggingRef.current = false
+      node.removeEventListener('wheel', wheel)
+      node.removeEventListener('touchstart', touchStart)
+      node.removeEventListener('touchmove', touchMove)
+      node.removeEventListener('keydown', key)
+      node.removeEventListener('pointerdown', pointerDown)
+      window.removeEventListener('pointerup', pointerUp)
+      window.removeEventListener('pointercancel', pointerUp)
+    }
+  }, [conversationLoading, collapsed, scopeKey])
 
   // 消息更新自动滚动到底部（仅当用户本就贴底时）。
   // 消息流用 content-visibility 虚拟化，scrollHeight 起初只是估算值：面板新挂载（如进入沉浸层）时
@@ -60,7 +118,7 @@ export function useMessageScroll({
     return () => cancelAnimationFrame(frame)
   }, [messages, pendingApproval, pendingQuestion, conversationLoading, collapsed, scopeKey])
 
-  // 跟踪用户是否贴底。只要出现一次「向上滚动」就立刻脱离贴底：
+  // 跟踪用户是否贴底。一次有交互来源的「向上滚动」就立刻脱离贴底：
   // 流式输出时每个增量都会触发自动滚底，若只用「距底 80px」判定，用户手指刚上滑十几像素
   // 就会被下一个增量拽回底部、并把贴底标记重新置回 true，表现为整个对话根本滑不动。
   const handleMessagesScroll = useCallback(() => {
@@ -73,13 +131,13 @@ export function useMessageScroll({
     const distanceToBottom = node.scrollHeight - node.scrollTop - node.clientHeight
     // scrollTop 变小但人仍在底部 → 是内容高度变化（content-visibility 估算修正/清空重建）
     // 引发的浏览器钳制，不是用户上滑，不能据此关闭贴底跟随
-    if (node.scrollTop < previousTop - 2 && distanceToBottom > 1) {
+    if (draggingRef.current && node.scrollTop < previousTop - 2 && distanceToBottom > 1) {
       pinnedToBottomRef.current = false
       return
     }
     // 只在回到底部附近时恢复贴底；不在中途向下滚时置 false——自动滚底后底部内容真实布局撑高会让
     // 距底距离瞬间超阈值，若据此关贴底会把追底收敛循环自己打断
-    if (distanceToBottom < 80) {
+    if (node.scrollTop > previousTop && distanceToBottom < 80) {
       pinnedToBottomRef.current = true
     }
   }, [])

@@ -47,7 +47,9 @@ flowchart TD
 
 只读协作快照来自原任务的实际工具/持久回执和真实报告；逐章展示空章或保存正文、连续性状态及人类感状态。它不调度付费检查，不新增授权、阶段门或完成判定。新模型边界刷新该快照；已经准备或结果未知的请求保持原样。正文和前文版本、对象归属、租约、取消、真实选区及未知费用校验继续有效。
 
-用户可见的进展摘要由实际工具状态与回执生成，分别表述准备、进行中、成功、失败及尚待处理。模型内部推演保留在内部协议中，不从其最后一句生成摘要，也不在展开区显示。公开事件、历史恢复、浏览器缓存和渲染使用同一投影。仅进展回执规范化传输换行，用户原文、正文、引用和工具参数不被改写。私有模型活动标记保留既有实时与重连响应计时，不把活动当成动作完成。
+用户可见的进展摘要由实际工具状态与回执生成，分别表述准备、进行中、成功、失败及尚待处理。展开区展示模型实际返回的思考内容，摘要与详情分开，不用回执摘要覆盖思考正文，也不从思考的最后一句猜测完成状态。公开事件、历史恢复、浏览器缓存和渲染保留同一份思考内容。仅进展回执与思考展示规范化传输换行，用户原文、正文、引用和工具参数不被改写。模型活动标记保留既有实时与重连响应计时，不把活动当成动作完成。
+
+普通收尾先简短说明实际结果，只补充影响交付的未解决事项或必要取舍，不逐条复述修改、报告意见和保留理由。可选下一步建议合在一句话中，不展开后续方案；完整报告、详细解释和排他输出遵从作者原请求。提示词默认简洁不构成输出截断或完成判定。
 
 ## 官方参考与验证边界
 
@@ -64,4 +66,4 @@ The primary agent retains the complete author objective and observes each chapte
 
 Review uses a stable rubric, prior judgments and actual versioned changes. It distinguishes persistent issues, regressions, previously missed issues, retracted judgments and optional advice. Real new issues remain visible; neither a fixed iteration count nor a save/report gate produces completion. Current-source complete reports may be reused only with compatible protocol, task, dependencies and known accounting. Frozen requests and prices remain unchanged.
 
-Public progress derives from actual tool states and receipts across streaming, history, cache and rendering. Private reasoning is never a progress summary. Activity metadata preserves response clocks without claiming completion. Advisory task context adds no permission, fee, semantic progress or completion authority. Release gates and honest acceptance limitations remain unchanged.
+Public progress derives from actual tool states and receipts. Expanded details preserve the model-returned reasoning across streaming, history, cache and rendering, separately from receipt-based headings. Activity metadata preserves response clocks without claiming completion. Default final replies briefly state the actual result and material unresolved issues, without repeating every edit or review finding; explicit requests for detail or exclusive output take precedence. Advisory task context adds no permission, fee, semantic progress or completion authority. Release gates and honest acceptance limitations remain unchanged.

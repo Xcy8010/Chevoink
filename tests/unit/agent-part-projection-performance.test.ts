@@ -28,15 +28,15 @@ it('projects an unchanged 75-part history once while 40 further deltas arrive', 
   console.info('[synthetic-projection]', JSON.stringify({ historyParts: 75, deltas: 40, markdownParses: vi.mocked(fromMarkdown).mock.calls.length, elapsedMs: Math.round(performance.now() - start) }))
   expect(state.messages[0].parts.slice(0, 75)).toEqual(preserved)
   expect(state.messages[0].parts.slice(0, 75).every((part, index) => part === preserved[index])).toBe(true)
-  expect(state.messages[0].parts.at(-1)).toEqual({ type: 'reasoning', text: '', activity: true })
+  expect(state.messages[0].parts.at(-1)).toEqual({ type: 'reasoning', text: '继续核对。'.repeat(40), activity: true })
   expect(initialParses).toBeGreaterThan(0)
   expect(fromMarkdown).toHaveBeenCalledTimes(initialParses)
 })
 
-it('reuses safe episode markers in streaming and finished projections without mutating private source', () => {
+it('reuses returned reasoning in streaming and finished projections without mutating source', () => {
   const part: AgentMessagePart = Object.freeze({ type: 'reasoning', text: '私人思考。\n\n“尚未闭合的引用' })
   const streaming = projectAgentAuthorParts([part], true)
-  expect(streaming).toEqual([{ type: 'reasoning', text: '', activity: true }])
+  expect(streaming).toEqual([{ ...part, activity: true }])
   expect(projectAgentAuthorParts([part], false)).toEqual(streaming)
   expect(projectAgentAuthorParts([part], true)[0]).toBe(streaming[0])
   expect(part.text).toBe('私人思考。\n\n“尚未闭合的引用')

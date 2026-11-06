@@ -476,7 +476,7 @@ function deriveSessionStateFromMessages(messages: AgentUIMessage[]): {
   return { workspaceActivities, todos }
 }
 
-// Browser state and caches retain episode markers, never private supplier reasoning.
+// Browser state and caches retain returned reasoning separately from reply prose.
 function projectStoredParts(parts: AgentMessagePart[]): AgentMessagePart[] {
   return parts.flatMap(part => part.type === 'tool-call' && part.preparing
     ? [part] : projectAgentAuthorParts([part]))

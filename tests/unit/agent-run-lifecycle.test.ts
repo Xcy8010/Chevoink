@@ -2475,21 +2475,26 @@ describe('original task context on resume', () => {
     expect(events().filter(event => event.type === 'tool.result')).toEqual(expect.arrayContaining([expect.objectContaining({ summary: '模型网关超时', ok: false })]))
     expect(events()).toContainEqual(expect.objectContaining({ type: 'run.finished', status: 'failed' }))
   })
-  it('publishes only private response activity while preserving native reasoning for the next model turn', async () => {
+  it('publishes returned reasoning while preserving native reasoning for the next model turn', async () => {
     const privateReasoning = '好。开始。\n\n调用 chapter_read，chapterId=private-id。'
     mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {
       input.onChunk?.({ type: 'reasoning-delta', delta: privateReasoning.slice(0, 5) })
-      input.onChunk?.({ type: 'reasoning-delta', delta: privateReasoning.slice(5) })
+      input.onChunk?.({ type: 'reasoning-delta', delta: privateReasoning.slice(5, 7) })
+      input.onChunk?.({ type: 'reasoning-delta', delta: privateReasoning.slice(7) })
       expect(events().filter(event => event.type === 'reasoning.delta')).toEqual([
-        { type: 'reasoning.delta', messageId: expect.any(String), delta: '', activity: true },
-        { type: 'reasoning.delta', messageId: expect.any(String), delta: '', activity: true },
+        { type: 'reasoning.delta', messageId: expect.any(String), delta: privateReasoning.slice(0, 5), activity: true },
+        { type: 'reasoning.delta', messageId: expect.any(String), delta: '\n\n' },
+        { type: 'reasoning.delta', messageId: expect.any(String), delta: privateReasoning.slice(7), activity: true },
       ])
       return { ...response('', [call('read')]), reasoning: privateReasoning }
     })
     queue(response('已核对。'))
     await run()
     expect(mocks.chat.mock.calls[1][0].messages).toContainEqual(expect.objectContaining({ role: 'assistant', reasoning: privateReasoning }))
-    expect(JSON.stringify(events().filter(event => event.type === 'reasoning.delta'))).not.toContain('private-id')
+    expect(events().filter(event => event.type === 'reasoning.delta').map(event => event.delta).join('')).toBe(privateReasoning)
+    expect(mocks.persist).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({
+      parts: expect.arrayContaining([{ type: 'reasoning', text: privateReasoning }]),
+    }) }))
   })
   it('announces parameter preparation before the model finishes, without admitting execution early', async () => {
     mocks.chat.mockImplementationOnce(async (input: Parameters<typeof chatType>[0]) => {

@@ -72,7 +72,7 @@ it('rejects a different owner before loading any run correlation or messages', a
 })
 
 
-it.each([undefined, 20])('restores receipt progress without exposing private reasoning or changing user/input escapes (runLimit=%s)', async runLimit => {
+it.each([undefined, 20])('restores returned reasoning and receipts without changing user/input escapes (runLimit=%s)', async runLimit => {
   const literal = '第一行\\n第二行'
   const run = { userId: 'owner', startRequest: request, runtimeProtocolVersion: 0, taskRoot: null, status: 'completed', finishedAt: null, goalExecution: null, messages: [{ id: 'author' }] }
   const records = [
@@ -87,9 +87,9 @@ it.each([undefined, 20])('restores receipt progress without exposing private rea
   const history = await listLoopSessionMessages('owner', 'session', { runLimit })
   expect(history.messages[0].parts).toEqual([{ type: 'text', text: literal }])
   expect(history.messages[1].parts).toEqual([
-    { type: 'reasoning', text: '', activity: true },
+    { type: 'reasoning', text: '好。开始。private analysis。', activity: true },
     { ...records[1].parts[1], summary: '已保存正文。\n检查尚未完成。' },
   ])
-  expect(JSON.stringify(history)).not.toContain('private analysis')
+  expect(JSON.stringify(history)).toContain('private analysis')
   expect(records).toEqual(original)
 })

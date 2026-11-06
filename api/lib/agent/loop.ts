@@ -1015,7 +1015,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     const live = liveTurn
     if (!live) return
     const fallbackParts: AgentMessagePart[] = []
-    if (live.streamedReasoning.trim()) fallbackParts.push({ type: 'reasoning', text: normalizeExecutionText(live.streamedReasoning) })
+    if (live.streamedReasoning.trim()) fallbackParts.push({ type: 'reasoning', text: live.streamedReasoning })
     if (live.streamedText.trim()) fallbackParts.push({ type: 'text', text: humanizeAgentVisibleText(live.streamedText) })
     // 优先用正式组装的 parts（含工具卡片）；模型流式中断、parts 尚未组装时退化为已流式原文
     const partsToSave = live.parts.length > 0 ? live.parts : fallbackParts
@@ -2024,8 +2024,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
             if (liveTurn) liveTurn.streamedReasoning += chunk.delta
             lastActivityAt = Date.now()
             handleRepeatHit(repeatDetector.push(executionReasoningDetector.push(chunk.delta)))
-            // Native reasoning stays private; only response activity reaches authors.
-            if (chunk.delta.trim()) bus.emit({ type: 'reasoning.delta', messageId, delta: '', activity: true })
+            // Preserve the provider channel, including whitespace between chunks.
+            if (chunk.delta) bus.emit({ type: 'reasoning.delta', messageId, delta: chunk.delta, ...(chunk.delta.trim() ? { activity: true as const } : {}) })
           } else if (chunk.type === 'tool-call-start') {
             releaseWritingToolText()
             lastActivityAt = Date.now()
@@ -2109,7 +2109,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const authorContent = ordinaryResponse ? ordinaryResponse.answer : explanatoryResponse ? result.content : humanizeAgentVisibleText(result.content ? stripAgentProtocolArtifacts(result.content) : '')
 
       // 主流 Agent 标准（Codex 等）：任务过程中的进展正文同样是对话正文信道，作者实时可见、刷新后仍在；
-      // 模型原生 reasoning 只保留内部协议与活动标记，执行旁白不改道进度区。
+      // 模型返回的 reasoning 单独保留，执行旁白不改道思考区。
       // text.delta 已实时显示供应商原始流；无论最终是否有干净文本，都要发 text.final 做归一化，
       // 这样 DSML/乱码被清洗成空串时能立即从界面移除，而不是残留到刷新前。
       const deferWritingCompletionText = taskSpec.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED') || Boolean(ordinaryResponse) || (completedWritingWrapUp.value !== null || effectiveToolCalls.length === 0 && requiresCompletedWritingPresentation(taskSpec))
@@ -2118,8 +2118,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const parts: AgentMessagePart[] = []
       if (liveTurn) liveTurn.parts = parts
       if (result.reasoning) {
-        // 保留内部诊断；历史读取与公开事件仅投影不含思考内容的进度标记。
-        parts.push({ type: 'reasoning', text: normalizeExecutionText(result.reasoning) })
+        parts.push({ type: 'reasoning', text: result.reasoning })
       }
       if (authorContent) {
         parts.push({ type: 'text', text: authorContent })

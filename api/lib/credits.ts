@@ -607,7 +607,7 @@ export async function reserveTokenCredits(userId: string, usageId: string, input
         if (available <= 0) throw new DataAccessError(402, balance > 0 ? 'CREDITS_RESERVED' : 'CREDITS_EXHAUSTED', balance > 0 ? '可用额度暂被进行中或待核调用预留，请等待结算或预留释放。' : '今日额度已用尽。')
         const unknown = await tx.aiUsageLog.count({ where: { userId, modelName: usage.modelName, modelTier: usage.modelTier,
           billingStatus: 'pending_usage', usageSource: 'unknown', createdAt: { gte: new Date(Date.now() - RESERVATION_TTL_MS) } } })
-        if (unknown >= 3) throw new DataAccessError(429, 'CREDITS_PROVIDER_UNSTABLE', '此模型近期多次未返回用量，暂缓新调用；可切换其他模型或使用自定义模型，30分钟窗口过后可重试。')
+        if (unknown >= 3) throw new DataAccessError(429, 'CREDITS_PROVIDER_UNSTABLE', '该模型近期多次调用未取得可核对的用量，暂缓新调用。请联系管理员核对上游服务，或切换其他模型/自定义模型；30分钟窗口过后可重试。')
         const held = tokenReservationMilli(price, inputEstimate, maxOutput, balance, available)
         await tx.aiUsageLog.update({ where: { id: usageId }, data: { reservedCreditMilli: held,
           reservationExpiresAt: new Date(setting.publicBetaEnabled ? Math.min(Date.now() + RESERVATION_TTL_MS, account.periodEndsAt.getTime()) : Date.now() + RESERVATION_TTL_MS) } })

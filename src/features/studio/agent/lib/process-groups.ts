@@ -1,12 +1,12 @@
 import type { AgentUIMessage } from '../../../../../shared/contracts/index'
 import { isResearchCall } from './research-groups'
 import { projectAgentAuthorParts } from '../../../../../shared/agent-author-view'
-import { agentToolProgress } from '../../../../../shared/agent-progress'
+import { agentToolProgress, normalizeAgentProgressText } from '../../../../../shared/agent-progress'
 
 export type AnalysisGroup = { id: string; messageId: string; firstIndex: number; count: number; labels: string[]; actions: string[]; text: string; title: string; lastMessageId: string; lastIndex: number }
 export type MessageAnalysisGroups = ReadonlyMap<number, AnalysisGroup>
 
-/** Episode markers group real execution receipts without exposing private reasoning. */
+/** Reasoning episodes keep their full body; only real receipts supply a title. */
 export function projectAnalysisGroups(messages: readonly Pick<AgentUIMessage, 'id' | 'role' | 'runId' | 'goalId' | 'parts'>[], _activeMessageId?: string) {
   const result = new Map<string, Map<number, AnalysisGroup>>()
   let active: AnalysisGroup | undefined
@@ -21,6 +21,8 @@ export function projectAnalysisGroups(messages: readonly Pick<AgentUIMessage, 'i
       if (part.type === 'reasoning') {
         active ??= { id: `${message.id}:analysis:${index}`, messageId: message.id, firstIndex: index, count: 0, labels: [], actions: [], text: '', title: '', lastMessageId: message.id, lastIndex: index }
         active.count++; active.lastMessageId = message.id; active.lastIndex = index
+        const text = normalizeAgentProgressText(part.text)
+        if (text) active.text += `${active.text ? '\n\n' : ''}${text}`
         groups.set(index, active)
       } else if (part.type === 'tool-call') {
         if (active) {
@@ -33,8 +35,7 @@ export function projectAnalysisGroups(messages: readonly Pick<AgentUIMessage, 'i
               const prior = active.labels.indexOf(part.callId)
               if (prior < 0) { active.labels.push(part.callId); active.actions.push(label) }
               else active.actions[prior] = label
-              active.text = active.actions.join('\n\n')
-              active.title = label
+              active.title = label.split('\n')[0]
             }
           }
         }

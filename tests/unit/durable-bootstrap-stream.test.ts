@@ -21,6 +21,18 @@ const resumed: AgentStreamEvent = { type: 'run.started', agent: { type: 'orchest
 afterEach(() => vi.clearAllMocks())
 
 describe('same-run bootstrap stream resume', () => {
+  it.each([0, 1])('preserves returned reasoning through durable live/replay SSE from cursor %i', async cursor => {
+    const reasoning: AgentStreamEvent = { type: 'reasoning.delta', runId: 'run', seq: 2, ts: paused.ts, messageId: 'model-message', delta: '先比较人物动机。\\n再核对 chapter_read 和 chapterId=target。' }
+    const end = { ...paused, seq: 3 }
+    vi.mocked(isDurablePauseResumed).mockResolvedValue(false)
+    vi.mocked(loadDurableEvents).mockResolvedValue([reasoning, end])
+    const response = new StreamResponse()
+    await streamDurableRun('owner', 'run', cursor, response as unknown as Response)
+    const data = response.chunks.flatMap(chunk => chunk.split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)) as AgentStreamEvent))
+    expect(data[0]).toEqual({ ...reasoning, activity: true })
+    expect(response.writableEnded).toBe(true)
+    expect(reasoning.delta).toContain('\\n')
+  })
   it.each([0, 1, 2])('keeps the stream open across a verified resumed pause from cursor %i', async cursor => {
     let initialized = false
     const started: AgentStreamEvent = { ...resumed, seq: 3, authorContinue: undefined }

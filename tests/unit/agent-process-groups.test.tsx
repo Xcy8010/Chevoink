@@ -13,7 +13,7 @@ function Transcript({ messages }: { messages: AgentUIMessage[] }) {
   const analysis = projectAnalysisGroups(messages), research = projectResearchGroups(messages)
   return <>{messages.map(item => <AgentMessageParts key={item.id} messageId={item.id} parts={item.parts} analysisGroups={analysis.get(item.id)} researchGroups={research.get(item.id)} streaming={false} runActive summaryExpanded />)}</>
 }
-it('merges receipt progress across research without publishing private reasoning or hiding failures', () => {
+it('merges full reasoning across research with a separate truthful receipt title', () => {
   const messages = [message('a', [reason(), tool('search')]), message('b', [reason(), tool('read', 'web_read'), reason()])]
   const original = JSON.stringify(messages)
   const { container } = render(<Transcript messages={messages} />)
@@ -22,8 +22,8 @@ it('merges receipt progress across research without publishing private reasoning
   const toggle = screen.getByRole('button', { name: '任务进度' })
   expect(toggle.textContent).toContain('未完成：查询服务暂不可用')
   fireEvent.click(toggle)
-  expect(container.querySelector('.max-h-44')?.textContent).toContain('查询服务暂不可用')
-  expect(container.textContent).not.toMatch(/已全部修复|好。|开始。|chapter_write|chapterId|secret/)
+  expect(container.querySelector('.max-h-44')?.textContent).toBe(Array(3).fill('好。开始。已全部修复。\n调用 chapter_write，chapterId=secret。').join('\n\n'))
+  expect(toggle.textContent).not.toMatch(/已全部修复|好。|开始。|chapter_write|chapterId|secret/)
   expect(container.querySelectorAll('[data-agent-research-id]')).toHaveLength(1)
   expect(container.textContent).toContain('本次未取得参考资料')
   expect(JSON.stringify(messages)).toBe(original)
@@ -35,13 +35,13 @@ it('shows neutral current work before receipts, then upgrades the same episode t
   for (const [part, expected] of [
     [{ ...tool('read', 'chapter_read'), status: 'running', preparing: true }, '正在准备核对前文'],
     [{ ...tool('read', 'chapter_read'), status: 'running' }, '正在核对前文'],
-    [{ ...tool('read', 'chapter_read'), status: 'success', summary: '已读取上一章结尾。\\n人物尚未获得线索。' }, '已读取上一章结尾。\n人物尚未获得线索。'],
+    [{ ...tool('read', 'chapter_read'), status: 'success', summary: '已读取上一章结尾。\\n人物尚未获得线索。' }, '已读取上一章结尾。'],
   ] as const) {
     view.rerender(<AgentMessageParts parts={[reason(), part]} streaming runActive />)
     expect(screen.getByRole('button', { name: '任务进度' }).textContent).toBe(expected)
   }
   fireEvent.click(screen.getByRole('button', { name: '任务进度' }))
-  expect(view.container.querySelector('.max-h-44')?.textContent).toBe('已读取上一章结尾。\n人物尚未获得线索。')
+  expect(view.container.querySelector('.max-h-44')?.textContent).toBe('好。开始。已全部修复。\n调用 chapter_write，chapterId=secret。')
 })
 it.each(['success', 'failed', 'denied', 'running'] as const)('uses actual %s tool state without converting the model plan to completion', status => {
   const part = { ...tool('read', 'chapter_read'), status, summary: status === 'success' ? '已读取章节，人物位置仍需核对。' : '未取得章节。' }
@@ -54,15 +54,15 @@ it('keeps report receipt findings unresolved and does not infer repaired issues 
   render(<AgentMessageParts parts={[reason(), { ...tool('review', 'quality_analyze'), status: 'success', summary: '已取得报告，仍有两处表达意见。' }]} streaming={false} runActive summaryExpanded />)
   expect(screen.getByRole('button', { name: '任务进度' }).textContent).toBe('已取得报告，仍有两处表达意见。')
 })
-it('keeps expansion, right rail and scroll ownership through receipt updates and completion', () => {
+it('keeps expansion, right rail and scroll ownership through reasoning updates and completion', () => {
   let height = 500
   const positions = new WeakMap<Element, number>()
   vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockImplementation(function (this: Element) { return this.classList.contains('max-h-44') ? height : 0 })
   vi.spyOn(Element.prototype, 'clientHeight', 'get').mockImplementation(function (this: Element) { return this.classList.contains('max-h-44') ? 100 : 0 })
   vi.spyOn(Element.prototype, 'scrollTop', 'get').mockImplementation(function (this: Element) { return positions.get(this) ?? 0 })
   vi.spyOn(Element.prototype, 'scrollTop', 'set').mockImplementation(function (this: Element, top: number) { positions.set(this, Math.max(0, Math.min(top, this.scrollHeight - this.clientHeight))) })
-  let summary = '已读取前文。'
-  const parts = (): AgentMessagePart[] => [reason(), { ...tool('read', 'web_search'), status: 'success', summary }, reason()]
+  let thinking = '继续比较资料。'
+  const parts = (): AgentMessagePart[] => [reason(), { ...tool('read', 'web_search'), status: 'success', summary: '已读取前文。' }, { type: 'reasoning', text: thinking }]
   const view = render(<AgentMessageParts parts={parts()} streaming runActive />)
   const toggle = screen.getByRole('button', { name: '任务进度' })
   const controls = toggle.querySelector('[data-analysis-controls]')!
@@ -71,7 +71,7 @@ it('keeps expansion, right rail and scroll ownership through receipt updates and
   fireEvent.click(toggle)
   const content = view.container.querySelector<HTMLDivElement>('.max-h-44')!
   expect(content.scrollTop).toBe(400)
-  const append = (nextHeight: number) => { height = nextHeight; summary += '已取得新的参考资料。'; view.rerender(<AgentMessageParts parts={parts()} streaming runActive />) }
+  const append = (nextHeight: number) => { height = nextHeight; thinking += '继续比较新的参考资料。'; view.rerender(<AgentMessageParts parts={parts()} streaming runActive />) }
   append(700); expect(content.scrollTop).toBe(600)
   content.scrollTop = 590; fireEvent.scroll(content)
   append(900); expect(content.scrollTop).toBe(590)

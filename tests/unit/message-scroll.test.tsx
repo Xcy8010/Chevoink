@@ -2,6 +2,7 @@
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { useMessageScroll } from '../../src/features/studio/agent/components/use-message-scroll'
+import type { AgentUIMessage } from '../../shared/contracts/index'
 
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
@@ -13,9 +14,18 @@ function fixture() {
   return { ...hook, node }
 }
 
+function touch(type: string, clientY: number) {
+  const event = new Event(type)
+  Object.defineProperty(event, 'touches', { value: [{ clientY }] })
+  return event
+}
+
 it('releases following on upward navigation and restores only near the bottom', () => {
-  const { result, node } = fixture()
+  const { result, node, rerender } = fixture()
+  rerender({ loading: false })
   result.current.lastScrollTopRef.current = 800
+  node.scrollTop = 800
+  node.dispatchEvent(new WheelEvent('wheel', { deltaY: -20 }))
   node.scrollTop = 780
   act(() => result.current.handleMessagesScroll())
   expect(result.current.pinnedToBottomRef.current).toBe(false)
@@ -30,6 +40,96 @@ it('does not mistake a bottom clamp for upward user navigation', () => {
   node.scrollTop = 800
   act(() => result.current.handleMessagesScroll())
   expect(result.current.pinnedToBottomRef.current).toBe(true)
+})
+
+it('keeps send following when layout moves the viewport upward before the next frame', () => {
+  let frame!: FrameRequestCallback
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation(next => { frame = next; return 1 })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {})
+  const { result, node, rerender } = fixture()
+  result.current.lastScrollTopRef.current = 1200
+  node.scrollTop = 600
+  rerender({ loading: false })
+  // Appending a prompt changes content-visibility and can shrink earlier rows.
+  // Browser anchoring moves upward while the appended prompt is still below.
+  act(() => result.current.handleMessagesScroll())
+  expect(result.current.pinnedToBottomRef.current).toBe(true)
+  act(() => frame(0))
+  expect(node.scrollTop).toBe(1000)
+})
+
+it.each(['wheel', 'touchmove', 'keydown', 'pointerdown'])('preserves intentional scrollback from %s while a follow frame is queued', input => {
+  const frames: FrameRequestCallback[] = []
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation(next => { frames.push(next); return frames.length })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {})
+  const { result, node, rerender } = fixture()
+  rerender({ loading: false })
+  const followFrame = frames.at(-1)!
+  result.current.lastScrollTopRef.current = 800
+  node.scrollTop = 800
+  if (input === 'touchmove') node.dispatchEvent(touch('touchstart', 10))
+  node.dispatchEvent(input === 'keydown' ? new KeyboardEvent(input, { key: 'PageUp' })
+    : input === 'wheel' ? new WheelEvent(input, { deltaY: -20 })
+      : input === 'touchmove' ? touch(input, 30) : new Event(input))
+  // Native smooth keyboard/touch scrolling may not deliver its first scroll
+  // until after an already queued follow frame. Input must stop that frame.
+  if (input !== 'pointerdown') {
+    act(() => followFrame(0))
+    expect(node.scrollTop).toBe(800)
+    expect(result.current.pinnedToBottomRef.current).toBe(false)
+  }
+  node.scrollTop = 780
+  act(() => result.current.handleMessagesScroll())
+  expect(result.current.pinnedToBottomRef.current).toBe(false)
+  act(() => followFrame(0))
+  expect(node.scrollTop).toBe(780)
+})
+
+it('leaves nested scrolling, editable keys and downward input with their owners', () => {
+  const frames: FrameRequestCallback[] = []
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation(next => { frames.push(next); return frames.length })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {})
+  const { result, node, rerender } = fixture()
+  rerender({ loading: false })
+  node.scrollTop = 800
+  const inner = document.createElement('div')
+  inner.style.overflowY = 'auto'
+  Object.defineProperties(inner, { clientHeight: { value: 100 }, scrollHeight: { value: 300 } })
+  inner.scrollTop = 100
+  const input = document.createElement('textarea')
+  node.append(inner, input)
+  inner.dispatchEvent(new WheelEvent('wheel', { deltaY: -20, bubbles: true }))
+  inner.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }))
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }))
+  node.dispatchEvent(new WheelEvent('wheel', { deltaY: 20 }))
+  node.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown' }))
+  expect(result.current.pinnedToBottomRef.current).toBe(true)
+  // None of those inputs should label a later layout correction as scrollback.
+  node.dispatchEvent(new Event('pointerdown'))
+  window.dispatchEvent(new Event('pointerup'))
+  result.current.lastScrollTopRef.current = 800
+  node.scrollTop = 600
+  act(() => result.current.handleMessagesScroll())
+  expect(result.current.pinnedToBottomRef.current).toBe(true)
+})
+
+it('keeps canonical request replacement and queued-message updates from overriding scrollback', () => {
+  vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(1)
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {})
+  const row = (id: string, runId = 'new'): AgentUIMessage => ({ id, runId, role: 'user', createdAt: '', parts: [{ type: 'text', text: '请求' }] })
+  const { result, rerender } = renderHook(({ messages, loading }) => useMessageScroll({ scopeKey: 'task-a', messages, conversationLoading: loading, pendingApproval: null, pendingQuestion: null, collapsed: false }), { initialProps: { messages: [row('previous', 'old')], loading: true } })
+  const node = document.createElement('div')
+  Object.defineProperties(node, { clientHeight: { value: 200 }, scrollHeight: { value: 1000 } })
+  result.current.scrollRef.current = node
+  rerender({ messages: [row('previous', 'old'), row('optimistic')], loading: false })
+  result.current.lastScrollTopRef.current = 800
+  node.scrollTop = 800
+  node.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }))
+  node.scrollTop = 500
+  act(() => result.current.handleMessagesScroll())
+  rerender({ messages: [row('previous', 'old'), row('canonical'), row('queued', 'queued')], loading: false })
+  expect(result.current.pinnedToBottomRef.current).toBe(false)
+  expect(node.scrollTop).toBe(500)
 })
 
 it('follows changing layout only while pinned and cancels queued frames on unmount', () => {
@@ -73,6 +173,7 @@ it('fences an already queued scroll frame after a task scope changes', () => {
   rerender({ scope: 'a' })
   const oldFrame = frames.at(-1)!
   rerender({ scope: 'b' })
+  rerender({ scope: 'a' })
   node.scrollTop = 123
   act(() => oldFrame(0))
   expect(node.scrollTop).toBe(123)

@@ -1,7 +1,7 @@
 import { DataAccessError } from './prisma.js'
 
 const quotaCodes = new Set(['insufficient_quota', 'quota_exceeded', 'insufficient_balance'])
-const observedQuotaMessage = /^(?:you|your) account balance exceeded your current quota[.!]?$/i
+const observedQuotaMessage = /^(?:(?:you|your) account balance exceeded your current quota[.!]?|insufficient balance(?:\s+\(request_id:\s*[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\))?)$/i
 
 /** Only inspect a provider error envelope (or a non-OK HTTP error body).
  * Never inspect assistant text, tool arguments or other narrative content. */

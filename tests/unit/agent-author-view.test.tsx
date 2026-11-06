@@ -8,6 +8,7 @@ import { AgentPermissionCard } from '../../src/features/studio/agent/components/
 import { useAgentStore, readSessionMessagesCache } from '../../src/features/studio/agent/agentStore'
 import { getMessageText } from '../../src/features/studio/agent/lib/panel-helpers'
 import { describeToolArguments } from '../../src/features/studio/agent/tool-argument-view'
+import { normalizeAgentProgressText } from '../../shared/agent-progress.js'
 
 afterEach(() => { cleanup(); useAgentStore.getState().resetRun() })
 it.each(['accepted', 'needs_input', 'unanswered', 'legacy'] as const)('distinguishes question transport from writing target acceptance: %s', state => {
@@ -48,10 +49,10 @@ it('projects legacy history, pagination, A -> B -> A cache and copy without touc
   const original = structuredClone(history)
   useAgentStore.getState().restoreMessages([history], 'A')
   const expected = getMessageText(projectAgentAuthorMessage(history).parts)
-  expect(useAgentStore.getState().messages[0].parts[0]).toEqual({ type: 'reasoning', text: '', activity: true })
+  expect(useAgentStore.getState().messages[0].parts[0]).toEqual({ ...history.parts[0], activity: true })
   expect(getMessageText(useAgentStore.getState().messages[0].parts)).toBe(expected)
   useAgentStore.getState().prependMessages([{ ...history, id: 'older' }])
-  expect(useAgentStore.getState().messages[0].parts[0]).toEqual({ type: 'reasoning', text: '', activity: true })
+  expect(useAgentStore.getState().messages[0].parts[0]).toEqual({ ...history.parts[0], activity: true })
   useAgentStore.getState().resetRun()
   useAgentStore.getState().restoreMessages([], 'B')
   useAgentStore.getState().resetRun()
@@ -69,9 +70,9 @@ it('holds every streamed split before first render, then uses the same final/his
     useAgentStore.setState({ runId: 'r', phase: 'running', lastSeq: 0, messages: [{ ...history, parts: [] }] })
     apply({ type: 'reasoning.delta', messageId: 'a', delta: '先核对人物动机。' }, 1)
     apply({ type: 'text.delta', messageId: 'a', delta: raw.slice(0, split) }, 2)
-    expect(useAgentStore.getState().messages[0].parts).toEqual([{ type: 'reasoning', text: '', activity: true }])
+    expect(useAgentStore.getState().messages[0].parts).toEqual([{ type: 'reasoning', text: '先核对人物动机。', activity: true }])
     apply({ type: 'text.delta', messageId: 'a', delta: raw.slice(split) }, 3)
-    expect(useAgentStore.getState().messages[0].parts).toEqual([{ type: 'reasoning', text: '', activity: true }])
+    expect(useAgentStore.getState().messages[0].parts).toEqual([{ type: 'reasoning', text: '先核对人物动机。', activity: true }])
     apply({ type: 'text.final', messageId: 'a', text: `${raw}\n\n${manuscript}`, asReasoning: false }, 4)
     expect(getMessageText(useAgentStore.getState().messages[0].parts)).toBe(projectAgentAuthorText(`${raw}\n\n${manuscript}`).trim())
     // Replayed sequence is ignored; reconnect cannot append a raw old fragment.
@@ -80,7 +81,7 @@ it('holds every streamed split before first render, then uses the same final/his
   }
 })
 
-it('keeps private reasoning hidden and preserves visible real failure and intent', () => {
+it('expands returned reasoning while preserving private tool arguments and real failure', () => {
   const tool: AgentMessagePart = { type: 'tool-call', callId: 'failure', toolName: 'future_unknown_tool', title: 'future_unknown_tool',
     status: 'failed', summary: 'HTTP Error P2002 at hidden/stack.ts:3', args: {
       chapterId: 'cmttleebg03h9wqox9lieracs', secretField: 'hidden-param', nested: { key: 'hidden-json' }, reason: '避免人物前后矛盾', content: manuscript,
@@ -90,13 +91,13 @@ it('keeps private reasoning hidden and preserves visible real failure and intent
   expect(view.container.querySelector('.max-h-44')).toBeNull()
   expect(screen.getByRole('button', { name: '任务进度' }).textContent).toBe('进度记录')
   fireEvent.click(screen.getByRole('button', { name: '任务进度' }))
-  expect(view.container.querySelector('.max-h-44')).toBeNull()
+  expect(view.container.querySelector('.max-h-44')?.textContent).toBe(history.parts[0].type === 'reasoning' ? history.parts[0].text : '')
   expect(screen.getByText('推进创作')).toBeTruthy()
   expect(screen.getByText('本次操作未完成。请核对当前成果后重试，或调整要求。')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: '展开工具详情' }))
   expect(screen.getByText('避免人物前后矛盾')).toBeTruthy()
   expect(screen.getByText(`${manuscript.length} 字`)).toBeTruthy()
-  expect(view.container.textContent).not.toMatch(/future_unknown_tool|hidden-param|hidden-json|cmttle|secretField|chapterId|P2002/)
+  expect(view.container.textContent).not.toMatch(/future_unknown_tool|hidden-param|hidden-json|secretField|P2002/)
   expect(describeToolArguments({ chapterId: 'private-id', unknown: { content: 'hidden' } })).toEqual([])
 })
 
@@ -149,29 +150,39 @@ it('keeps unfinished work actionable in default collapsed history while preservi
   expect(screen.queryByText('hidden English reasoning')).toBeNull()
 })
 
-it('retains episode markers through every split, reconnect and cache without storing private reasoning', () => {
-  const thinking = `先核对人物动机。\n\n${raw}\n\n再检查情节承接。`
+it('retains full returned reasoning through every split, reconnect and cache', () => {
+  const thinking = `先核对人物动机。\\r\\n\\n${raw}\n\n再检查情节承接。`
   for (let split = 1; split < thinking.length; split++) {
     useAgentStore.getState().resetRun()
     useAgentStore.getState().resumeRun('r', 'A')
     apply({ type: 'message.start', messageId: 'a' }, 1)
     apply({ type: 'reasoning.delta', messageId: 'a', delta: thinking.slice(0, split) }, 2)
-    expect(JSON.stringify(projectAgentAuthorParts(useAgentStore.getState().messages[0].parts, true))).not.toMatch(/scene_task_build|compilationId|cmttle/)
+    expect(projectAgentAuthorParts(useAgentStore.getState().messages[0].parts, true)[0]).toMatchObject({ text: thinking.slice(0, split) })
     apply({ type: 'reasoning.delta', messageId: 'a', delta: thinking.slice(split) }, 3)
     apply({ type: 'reasoning.delta', messageId: 'a', delta: '重复' }, 3)
     apply({ type: 'reasoning.delta', messageId: 'a', delta: '外部', runId: 'foreign' }, 99)
     apply({ type: 'text.final', messageId: 'a', text: '最终回复', asReasoning: false }, 4)
-    expect(useAgentStore.getState().messages[0].parts[0]).toEqual({ type: 'reasoning', text: '', activity: true })
+    expect(useAgentStore.getState().messages[0].parts[0]).toEqual({ type: 'reasoning', text: thinking, activity: true })
     expect(getMessageText(useAgentStore.getState().messages[0].parts)).toBe('最终回复')
     const view = render(<AgentMessageParts parts={useAgentStore.getState().messages[0].parts} streaming={false} runActive={false} summaryExpanded />)
     fireEvent.click(screen.getByRole('button', { name: '任务进度' }))
-    expect(view.container.textContent).not.toContain('再检查情节承接。')
-    expect(view.container.textContent).not.toMatch(/scene_task_build|compilationId|cmttle/)
+    expect(view.container.querySelector('.max-h-44')?.textContent).toBe(normalizeAgentProgressText(thinking))
     cleanup()
     useAgentStore.getState().resetRun()
     useAgentStore.getState().restoreMessages(readSessionMessagesCache('A')!, 'A')
-    expect(useAgentStore.getState().messages[0].parts[0]).toEqual({ type: 'reasoning', text: '', activity: true })
+    expect(useAgentStore.getState().messages[0].parts[0]).toEqual({ type: 'reasoning', text: thinking, activity: true })
   }
+})
+
+it('replaces an old stripped cache marker with authoritative server reasoning', () => {
+  const stale: AgentUIMessage = { ...history, parts: [{ type: 'reasoning', text: '', activity: true }] }
+  useAgentStore.getState().restoreMessages([stale], 'previous-version')
+  useAgentStore.getState().resetRun()
+  useAgentStore.getState().restoreMessages(readSessionMessagesCache('previous-version')!, 'previous-version')
+  expect(useAgentStore.getState().messages[0].parts[0]).toMatchObject({ text: '' })
+  useAgentStore.getState().restoreMessages([history], 'previous-version')
+  expect(useAgentStore.getState().messages[0].parts[0]).toMatchObject(history.parts[0])
+  expect(readSessionMessagesCache('previous-version')![0].parts[0]).toMatchObject(history.parts[0])
 })
 
 it('does not reinterpret narrated text or asReasoning final as actual thinking', () => {
@@ -181,11 +192,11 @@ it('does not reinterpret narrated text or asReasoning final as actual thinking',
   expect(useAgentStore.getState().messages[0].parts).toEqual([])
   apply({ type: 'reasoning.delta', messageId: 'a', delta: '实际思考。' }, 3)
   apply({ type: 'text.final', messageId: 'a', text: '供应商汇总', asReasoning: true }, 4)
-  expect(useAgentStore.getState().messages[0].parts).toEqual([{ type: 'reasoning', text: '', activity: true }])
+  expect(useAgentStore.getState().messages[0].parts).toEqual([{ type: 'reasoning', text: '实际思考。', activity: true }])
   expect(getMessageText(useAgentStore.getState().messages[0].parts)).toBe('')
 })
 
-it('renders neutral progress before receipts without exposing historical thought', () => {
+it('renders neutral titles and expands historical returned reasoning', () => {
   const view = render(<AgentMessageParts parts={[{ type: 'reasoning', text: '先核对人' }]} streaming runActive />)
   expect(screen.getByText('正在梳理当前任务')).toBeTruthy()
   expect(screen.getByRole('button', { name: '任务进度' }).getAttribute('aria-expanded')).toBe('false')
@@ -193,8 +204,7 @@ it('renders neutral progress before receipts without exposing historical thought
   view.rerender(<AgentMessageParts parts={[{ type: 'reasoning', text: '先核对人物动机。\n\n调用 chapter_write，chapterId=private-id。' }]} streaming={false} runActive={false} summaryExpanded />)
   expect(screen.getByText('进度记录')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: '任务进度' }))
-  expect(view.container.querySelector('.max-h-44')).toBeNull()
-  expect(view.container.textContent).not.toMatch(/chapter_write|chapterId|private-id/)
+  expect(view.container.querySelector('.max-h-44')?.textContent).toBe('先核对人物动机。\n\n调用 chapter_write，chapterId=private-id。')
 })
 
 

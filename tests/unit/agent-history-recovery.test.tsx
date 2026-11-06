@@ -78,7 +78,7 @@ it('merges full seq0 replay without removing settled tools or duplicating saved 
     source.send({ ...base, seq: 8, type: 'text.final', messageId: 'saved-a', text: '已有结果。\n\n', asReasoning: false })
   })
   const parts = useAgentStore.getState().messages.find(message => message.id === 'saved-a')!.parts
-  expect(parts.filter(part => part.type === 'reasoning')).toEqual([{ type: 'reasoning', text: '', activity: true }])
+  expect(parts.filter(part => part.type === 'reasoning')).toEqual([{ type: 'reasoning', text: '先核对承接。', activity: true }])
   expect(parts.filter(part => part.type === 'text')).toEqual([{ type: 'text', text: '已有结果。\n\n' }])
   expect(toolIds()).toEqual(['old-write', 'old-plan'])
   expect(activityIds()).toEqual(['old-write', 'old-plan'])
@@ -135,7 +135,7 @@ it('preserves interleaved reasoning/tool segments and saved content while replay
     source.send({ ...base, seq: 10, type: 'text.delta', messageId: 'saved-a', delta: '完整' });
     source.send({ ...base, seq: 11, type: 'tool.result', messageId: 'saved-a', callId: 'old-plan', toolName: 'plan_save', ok: true, summary: '已保存' }) })
   expect(useAgentStore.getState().messages[1].parts.map(part => part.type === 'tool-call' ? part.callId : part.text)).toEqual([
-    '', 'old-write', '', 'old-plan', '', '完整结果。\n\n',
+    '第一段判断。', 'old-write', '第二段判断。', 'old-plan', '第三段判断。', '完整结果。\n\n',
   ])
   expect(activityIds()).toEqual(['old-write', 'old-plan'])
 })
@@ -169,7 +169,7 @@ it('uses real tool boundaries to repair old flattened reasoning without duplicat
     source.send({ ...base, seq: 7, type: 'reasoning.delta', messageId: 'saved-a', delta: '第三段。' })
     source.send({ ...base, seq: 8, type: 'step.finish', turn: 1, usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 } })
   })
-  expect(useAgentStore.getState().messages[1].parts.map(part => part.type === 'tool-call' ? part.callId : part.text)).toEqual(['', 'old-write', '', 'old-plan', ''])
+  expect(useAgentStore.getState().messages[1].parts.map(part => part.type === 'tool-call' ? part.callId : part.text)).toEqual(['第一段。', 'old-write', '第二段。', 'old-plan', '第三段。'])
   expect(activityIds()).toEqual(['old-write', 'old-plan'])
 })
 

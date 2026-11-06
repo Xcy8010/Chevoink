@@ -66,5 +66,18 @@ it.each(['创建新作品并保存简介标签。', '写下一章。', '只输�
   for (const required of ['真实完成后', '1–2 条与最新作品阶段相符', '本轮最新成功回执', '不重复完成事项', '不把未知状态说成缺失',
     '建议不调用 ask_user、不要求回答、不建立待办或执行新任务', '简短认可不自动选择多个建议之一', '仅要标题正文、仅要结果或明确不要建议时不附加',
     '任务未完成、失败或结果未知时先如实说明']) expect(text).toContain(required)
+  expect(text).toContain('默认用一句话给出')
+  expect(text).toContain('不展开后续方案')
+  expect(spec).toEqual(before)
+})
+
+it.each(['把第三章修好并保存。', '详细解释每处修改，完整列出复查意见。', '只输出标题正文，不要总结。'])('keeps concise defaults subordinate to the complete author request: %s', prompt => {
+  const spec = task(prompt), before = structuredClone(spec), text = taskOperatingGuidance(spec, 'build')!
+  expect(text).toContain('默认简短收尾，先说实际结果')
+  expect(text).toContain('影响交付的未解决事项或必要取舍')
+  expect(text).toContain('不逐条复述修改、报告意见及每条保留理由')
+  expect(text).toContain('作者要求完整报告、详细解释或具体改动时按要求展开')
+  expect(text).toContain('不用简短默认截断所需内容')
+  expect(text).toContain('作者指定标题正文时交付当前已保存版本')
   expect(spec).toEqual(before)
 })

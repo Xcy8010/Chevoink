@@ -1,23 +1,30 @@
 import type { AgentMessagePart, AgentStreamEvent } from './contracts/index.js'
 import { getAgentToolPresentation } from './agent-tool-presentation.js'
 
-/** Only progress receipts decode transport escapes; manuscripts and arguments do not. */
+/** Only progress/reasoning presentation decodes escapes; manuscripts and arguments do not. */
 export function normalizeAgentProgressText(text: string): string {
   return text.replace(/\\r\\n|\\n/g, '\n').replace(/\r\n/g, '\n').trim()
 }
 
-/** Reasoning is private protocol/accounting data. Keep only its episode marker. */
+/** Publish only the provider-returned reasoning and its public timing/activity. */
 export function publicAgentProgressPart(part: AgentMessagePart): AgentMessagePart {
-  if (part.type === 'reasoning') return part.text
-    ? { ...part, text: '', ...(part.text.trim() ? { activity: true as const } : {}) } : part
+  if (part.type === 'reasoning') return {
+    type: 'reasoning', text: part.text,
+    ...(part.durationMs !== undefined ? { durationMs: part.durationMs } : {}),
+    ...(part.activity || part.text.trim() ? { activity: true as const } : {}),
+  }
   if (part.type !== 'tool-call' || !part.summary) return part
   const summary = normalizeAgentProgressText(part.summary)
   return summary === part.summary ? part : { ...part, summary }
 }
 
 export function publicAgentProgressEvent(event: AgentStreamEvent): AgentStreamEvent {
-  if (event.type === 'reasoning.delta') return event.delta
-    ? { ...event, delta: '', ...(event.delta.trim() ? { activity: true as const } : {}) } : event
+  // Keep deltas verbatim: an escape or a word can span transport chunks.
+  if (event.type === 'reasoning.delta') return {
+    type: event.type, runId: event.runId, seq: event.seq, ts: event.ts,
+    messageId: event.messageId, delta: event.delta,
+    ...(event.activity || event.delta.trim() ? { activity: true as const } : {}),
+  }
   if (event.type === 'tool.result') return { ...event, summary: normalizeAgentProgressText(event.summary) }
   return event
 }

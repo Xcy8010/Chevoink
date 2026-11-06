@@ -41,6 +41,7 @@ import { projectAgentAuthorParts, projectAgentAuthorText } from '../../../../../
 import { describeToolArguments, getToolTargetTitle } from '../tool-argument-view'
 import { getAgentToolPresentation } from '../../../../../shared/agent-tool-presentation'
 import { projectedReviewAction, type ReviewOutcome } from '../../../../../shared/review-lifecycle.js'
+import { normalizeAgentProgressText } from '../../../../../shared/agent-progress.js'
 
 /**
  * 消息 Parts 渲染器（plan/13 §5.3 + plan/20 §3.3）：
@@ -1267,7 +1268,7 @@ export const AgentMessageParts = memo(function AgentMessageParts({
           const group = localAnalysisGroups?.get(originalIndex)
           if (group && (group.messageId !== (messageId ?? blockId ?? '') || group.firstIndex !== originalIndex)) return null
           return <AgentProcessRegion key={group?.id ?? `analysis:${index}`} open={!collapsed}>
-            <ReasoningPart text={group?.text ?? ''} count={group?.count ?? 1} title={group?.title ?? ''} streaming={group && activeAnalysisGroupId ? group.id === activeAnalysisGroupId : streaming && (group ? group.lastMessageId === (messageId ?? blockId ?? '') && group.lastIndex === parts.length - 1 : index === authorParts.length - 1)} />
+            <ReasoningPart text={group?.text ?? normalizeAgentProgressText(part.text)} count={group?.count ?? 1} title={group?.title ?? ''} streaming={group && activeAnalysisGroupId ? group.id === activeAnalysisGroupId : streaming && (group ? group.lastMessageId === (messageId ?? blockId ?? '') && group.lastIndex === parts.length - 1 : index === authorParts.length - 1)} />
           </AgentProcessRegion>
         }
         if (part.type === 'tool-call') {
