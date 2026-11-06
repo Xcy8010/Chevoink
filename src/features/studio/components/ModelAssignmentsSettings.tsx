@@ -1,3 +1,5 @@
+import { modelPriceOptionText } from '../../../../shared/model-price-format'
+import { ModelPriceDetails, ModelPriceSummary } from './ModelPriceDetails'
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiClientError, requestJson } from '@/app/api-client'
@@ -28,7 +30,7 @@ export default function ModelAssignmentsSettings({ novelId, novelTitle }: { nove
   const customModels = useQuery({ queryKey: ['credits', 'custom-models'], queryFn: fetchCustomModels, staleTime: 30_000 })
   const options: ModelOption[] = [
     ...(models.data?.models ?? []).filter(model => model.available && model.tier !== 'basic').map(model => ({ id: model.tier, label: model.label,
-      price: typeof model.multiplier === 'number' ? model.multiplier === 0 ? model.freePromotion ? '限时免费' : '免费' : `${model.multiplier.toFixed(1)}x` : undefined,
+      price: modelPriceOptionText(model),
       selection: { modelTier: model.tier as AgentModelSelection['modelTier'] }, efforts: model.reasoningEfforts, vision: model.visionEnabled })),
     ...(customModels.data?.models ?? []).filter(model => model.enabled).map(model => ({ id: `custom:${model.id}`, label: model.displayName || model.modelName, price: 'BYOK', selection: { modelTier: 'custom' as const, customModelId: model.id }, efforts: model.reasoningEfforts, vision: model.visionEnabled })),
   ]
@@ -94,6 +96,7 @@ export default function ModelAssignmentsSettings({ novelId, novelTitle }: { nove
     </div>
     {error ? <p role="alert" className="text-sm text-rose-500">{error}</p> : null}
     {assignments.isPending ? <p role="status" className="text-sm text-[var(--text-secondary)]">加载中…</p> : null}
+    <details><summary className="cursor-pointer py-2 text-sm">内置模型价格与能力</summary><div className="space-y-1">{(models.data?.models ?? []).filter(model => model.available).map(model => <div key={model.tier} className="flex items-center justify-between text-sm"><span>{model.label} · <ModelPriceSummary model={model} /></span><ModelPriceDetails model={model} /></div>)}</div></details>
     <div>{MODEL_ASSIGNMENT_TASKS.slice(0, 6).map(row)}</div>
     <details><summary className="cursor-pointer py-2 text-sm text-[var(--text-secondary)]">其它工具</summary><div>{MODEL_ASSIGNMENT_TASKS.slice(6).map(row)}</div></details>
     <Button disabled={!ready || !draft || busy} onClick={() => void save()}>{busy ? '保存中…' : '保存'}</Button>

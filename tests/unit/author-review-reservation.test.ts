@@ -13,8 +13,8 @@ const prepared = () => ({ id: 'usage', userId: 'author', billingStatus: 'authori
   billingSnapshot: price, billingEvidence: { policy: FALLBACK_USAGE_POLICY, inputEstimate: 1000, outputEstimate: 0, responseObserved: false } })
 beforeEach(() => {
   vi.resetAllMocks(); mocks.row.mockResolvedValue(prepared()); mocks.ledger.mockResolvedValue(null)
-  mocks.account.mockResolvedValue({ suspendedAt: null, dailyAllowanceMilli: 50000, dailyUsedMilli: 0, bonusBalanceMilli: 0 })
-  const tx = { aiUsageLog: { findFirstOrThrow: mocks.row, update: mocks.update, count: vi.fn(async () => 0),
+  mocks.account.mockResolvedValue({ userId: 'author', suspendedAt: null, dailyAllowanceMilli: 50000, dailyUsedMilli: 0, bonusBalanceMilli: 0 })
+  const tx = { user: { findFirst: vi.fn(async () => null) }, aiUsageLog: { findFirstOrThrow: mocks.row, update: mocks.update, count: vi.fn(async () => 0),
     aggregate: vi.fn(async () => ({ _sum: { reservedCreditMilli: 18023 } })) }, creditLedgerEntry: { findUnique: mocks.ledger },
     creditAccount: { upsert: vi.fn(), findUniqueOrThrow: mocks.account } }
   mocks.transaction.mockImplementation(async work => work(tx))

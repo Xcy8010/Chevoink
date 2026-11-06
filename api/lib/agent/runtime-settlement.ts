@@ -93,7 +93,7 @@ export async function settleProviderOperation(input: { userId: string; attemptId
     // Missing cache detail stays null; known input/output totals can settle.
     const amountMilli = frozenPrice.version === V1_PRICING_VERSION
       ? calculateV1ChargeMilli(usage.promptTokens, usage.completionTokens, frozenPrice.multiplierBps)
-      : calculateV2UserChargeMilli(usage.promptTokens, usage.completionTokens, usage.cacheHitTokens, frozenPrice.rates, frozenPrice.v1CeilingBps)
+      : calculateV2UserChargeMilli(usage.promptTokens, usage.completionTokens, usage.cacheHitTokens, frozenPrice.rates, frozenPrice.v1CeilingBps, frozenPrice.activity)
     const priorMetadata = priorCharge?.metadata && typeof priorCharge.metadata === 'object' && !Array.isArray(priorCharge.metadata)
       ? priorCharge.metadata : null
     // Equal-rate/zero-input operations could already settle without this
@@ -106,7 +106,7 @@ export async function settleProviderOperation(input: { userId: string; attemptId
       modelTier: frozenPrice.modelTier, multiplierBps: frozenPrice.multiplierBps,
       requestTokens: usage.promptTokens, responseTokens: usage.completionTokens,
       allowPartialOnExhaustion: true,
-      metadata: { pricingVersion: frozenPrice.version, taskRootId: operation.taskRootId, operationId: operation.id,
+      metadata: { ...(frozenPrice.activity ? { activity: frozenPrice.activity } : {}), pricingVersion: frozenPrice.version, taskRootId: operation.taskRootId, operationId: operation.id,
         ...(frozenPrice.version === V2_PRICING_VERSION ? { rateCardId: frozenPrice.rateCardId, rates: frozenPrice.rates, cacheHitTokens: usage.cacheHitTokens, cacheMissTokens: usage.cacheMissTokens,
           ...(missingCacheConcession ? { cachePricingPolicy: 'unknown-cache-discount-2026-09-09', platformAbsorbsDifference: true } : {}),
           ...(frozenPrice.v1CeilingBps !== undefined ? { v1CeilingBps: frozenPrice.v1CeilingBps } : {}) } : {}),

@@ -15,11 +15,11 @@ function LocationProbe() { const location = useLocation(); return <><span data-t
 function mount(initial = '/admin/models') { const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } }); return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[initial]}><AdminModelsPage /><LocationProbe /></MemoryRouter></QueryClientProvider>) }
 beforeEach(() => { vi.clearAllMocks(); vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); vi.spyOn(window, 'confirm').mockReturnValue(true); mocks.get.mockResolvedValue({ models: [row('a', 'speed', '极速'), row('b', 'builtin_0123456789abcdef', '动态模型')], trend: [] }); mocks.create.mockResolvedValue({ id: 'new', tier: 'builtin_fedcba9876543210' }); mocks.reorder.mockResolvedValue({ ok: true }); mocks.update.mockResolvedValue({ ok: true }) })
 afterEach(() => { cleanup(); clearAdminModelHistoryDrafts(); vi.restoreAllMocks() })
-it('saves image fallback routes from the image lines section without enabling text weighted routing', async () => {
+it('saves image fallback routes independently of optional image weighted admission', async () => {
   mocks.get.mockResolvedValue({ models: [{ ...row('image', 'speed', '备用生图配置'), modelKind: 'image_generation', tier: 'tool_image', selectable: false, isDefault: false }], trend: [] })
   mount('/admin/models?model=image&section=routes')
   await screen.findByText('图片生成备用线路')
-  expect(screen.queryByRole('button', { name: /权重线路/ })).toBeNull()
+  expect(screen.getByRole('button', { name: /权重线路/ }).getAttribute('aria-pressed')).toBe('false')
   expect(screen.queryByText('此工具使用基本配置中的独立地址和密钥。')).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: '添加供应商线路' }))
   fireEvent.change(screen.getByLabelText('模型 ID'), { target: { value: 'backup-image' } })

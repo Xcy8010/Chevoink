@@ -8,10 +8,10 @@ import { useAdminQueryState } from '../../src/features/admin/admin-query-state'
 vi.mock('../../src/features/admin/admin-shared', async original => ({ ...await original<object>(), useAdminSession: () => ({ admin: { id: 'fixture-admin', nickname: '演示管理员', isSuperAdmin: true }, denied: false, isLoading: false }) }))
 vi.mock('../../src/components/ui/toast-context', () => ({ useToast: () => ({ error: vi.fn() }) }))
 afterEach(cleanup)
-it('maps all fifteen existing routes and searches only page/action definitions', () => {
-  expect(adminPages).toHaveLength(15)
-  expect(new Set(adminPages.map(page => page.to)).size).toBe(15)
-  expect(searchAdminPages('协议').map(page => page.to)).toEqual(['/admin/models'])
+it('maps all nineteen existing and added routes and searches only page/action definitions', () => {
+  expect(adminPages).toHaveLength(19)
+  expect(new Set(adminPages.map(page => page.to)).size).toBe(19)
+  expect(searchAdminPages('协议').map(page => page.to)).toEqual(['/admin/content', '/admin/models'])
   expect(searchAdminPages('用户正文')).toEqual([])
 })
 it('offers direct mobile models, grouped page search, and collapsible business groups', () => {
@@ -19,7 +19,7 @@ it('offers direct mobile models, grouped page search, and collapsible business g
   expect(screen.getByRole('navigation', { name: '手机后台导航' }).textContent).toContain('模型')
   expect(screen.getByRole('button', { name: '用户与权益' }).getAttribute('aria-expanded')).toBe('true')
   fireEvent.change(screen.getByRole('textbox', { name: '搜索后台页面及操作' }), { target: { value: '协议' } })
-  expect(screen.getByRole('region', { name: '页面搜索结果' }).textContent).toBe('模型中心')
+  expect(screen.getByRole('region', { name: '页面搜索结果' }).textContent).toBe('公告与帮助政策模型中心')
   fireEvent.click(screen.getByRole('button', { name: '全部' }))
   const dialog = screen.getByRole('dialog', { name: '全部管理页面' })
   expect(dialog).toBeTruthy()

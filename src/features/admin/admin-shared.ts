@@ -45,6 +45,11 @@ export function formatTokens(value: number): string {
 /* ---------------- 操作动作文案 ---------------- */
 
 const ACTION_LABELS: Record<string, string> = {
+  'tester.grant': '授予测试员资格', 'tester.revoke': '撤销测试员资格',
+  'site_content.create': '新增公开内容草稿', 'site_content.save': '保存公开内容草稿', 'site_content.publish': '发布公开内容',
+  'site_content.withdraw': '撤下公开内容', 'site_content.delete': '删除公开展示', 'site_content.restore': '恢复内容版本', 'site_content.replaced': '替换公告',
+  'registration.legal_consent': '注册协议确认',
+
   'admin.login': '登录后台',
   'admin.change_own_password': '修改自己密码',
   'user.ban': '封禁用户',

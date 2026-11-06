@@ -1,17 +1,22 @@
+import { imagePriceSchema } from '../billing/image-price.js'
 import { z } from 'zod'
 import { FIXED_NOVEL_COVER_SIZE } from '../../../shared/contracts/index.js'
 import { runtimeJson } from './runtime-common.js'
 import type { ToolResult } from './tools/types.js'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
-const coverRouteSchema = z.object({ modelConfigId: z.string().min(1).max(64).optional(), modelConfigRevision: z.number().int().positive().optional(),
+export const coverRouteSchema = z.object({ modelConfigId: z.string().min(1).max(64).optional(), modelConfigRevision: z.number().int().positive().optional(),
   routeId: z.string().uuid().optional(), provider: z.string().min(1), modelName: z.string().min(1), baseUrl: z.string().min(1), providerMode: z.string(), quality: z.string().optional() }).strict()
-export const coverWorkSchema = z.object({ version: z.literal(1), novelId: z.string().min(1), title: z.string(), displayTitle: z.string().nullable(),
+const coverCommonSchema = z.object({ novelId: z.string().min(1), title: z.string(), displayTitle: z.string().nullable(),
   prompt: z.string().min(4), count: z.number().int().min(1).max(2), size: z.literal(FIXED_NOVEL_COVER_SIZE),
-  assetIds: z.array(z.string().uuid()).min(1).max(2), tariff: z.literal('image_call_6000_v1'), amountMilli: z.literal(6000),
+  assetIds: z.array(z.string().uuid()).min(1).max(2),
   route: coverRouteSchema,
   fallbackRoutes: z.array(coverRouteSchema).min(1).max(7).optional(),
-}).strict().refine(value => value.assetIds.length === value.count && new Set(value.assetIds).size === value.count)
+}).strict()
+export const coverWorkSchema = z.discriminatedUnion('version', [
+  coverCommonSchema.extend({ version: z.literal(1), tariff: z.literal('image_call_6000_v1'), amountMilli: z.literal(6000) }),
+  coverCommonSchema.extend({ version: z.literal(2), tariff: z.literal('image_call_scheduled_v2'), amountMilli: z.number().int().nonnegative(), price: imagePriceSchema }),
+]).refine(value => value.assetIds.length === value.count && new Set(value.assetIds).size === value.count && (value.version === 1 || value.price.amountMilli === value.amountMilli))
 export type CoverWork = z.infer<typeof coverWorkSchema>
 export const coverChildSchema = z.object({ version: z.literal(1), parentInputHash: hash, workHash: hash,
   routeIndex: z.number().int().min(1).max(7).optional(), chargeKey: z.string(), usageLogId: z.string(), request: z.unknown() }).strict()
@@ -25,10 +30,14 @@ export function coverRequest(work: CoverWork) {
   return runtimeJson({ endpoint: work.route.baseUrl, body: { model: work.route.modelName, prompt: work.prompt, size: work.size, n: work.count,
     ...(work.route.quality !== undefined ? { quality: work.route.quality } : {}) } }).value
 }
-export const coverUnitSchema = z.object({ operationId: z.string(), parentOperationId: z.string(), attemptId: z.string(),
+const coverUnitCommonSchema = z.object({ operationId: z.string(), parentOperationId: z.string(), attemptId: z.string(),
   parentInputHash: hash, requestHash: hash, resultHash: hash, debitId: z.string(), chargeKey: z.string(),
-  tariff: z.literal('image_call_6000_v1'), chargedMilli: z.literal(6000), units: z.literal(1),
+  units: z.literal(1),
   outcome: z.enum(['images', 'empty', 'rejected', 'invalid']) }).strict()
+export const coverUnitSchema = z.discriminatedUnion('tariff', [
+  coverUnitCommonSchema.extend({ tariff: z.literal('image_call_6000_v1'), chargedMilli: z.literal(6000) }),
+  coverUnitCommonSchema.extend({ tariff: z.literal('image_call_scheduled_v2'), chargedMilli: z.number().int().min(0).max(2147483647) }),
+])
 export const coverUnitUsage = { source: 'fixed_unit', promptTokens: null, completionTokens: null, cacheHitTokens: null, cacheMissTokens: null } as const
 
 /** Never re-embed provider base64 in a bounded operation/cursor receipt. */

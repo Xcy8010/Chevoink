@@ -13,7 +13,7 @@ export const fallbackUsageEvidenceSchema = z.object({
 
 export function priceTokenEvidence(price: TokenPrice, input: number, output: number, hits: number | null = null) {
   return price.version === 'credits-v2-itemized'
-    ? calculateV2UserChargeMilli(input, output, hits, price.rates, price.v1CeilingBps)
+    ? calculateV2UserChargeMilli(input, output, hits, price.rates, price.v1CeilingBps, price.activity)
     : calculateV1ChargeMilli(input, output, price.multiplierBps)
 }
 

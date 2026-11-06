@@ -1,3 +1,4 @@
+import { integrationLegalConsent } from '../support/legal-consent.js'
 import { randomInt } from 'node:crypto'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -16,7 +17,7 @@ function sessionCookie(response: request.Response): string {
 async function registerAdmin(superAdmin: boolean): Promise<{ cookie: string; id: string }> {
   const unique = randomInt(0, 10_000_000).toString().padStart(7, '0')
   const phone = `+861387${unique}`
-  const response = await request(app).post('/api/auth/register').send({
+  const response = await request(app).post('/api/auth/register').send({ ...await integrationLegalConsent(),
     phone,
     nickname: `盲评测试${unique}`,
     password: 'Blind-Review-123!',

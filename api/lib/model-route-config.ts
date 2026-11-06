@@ -1,7 +1,8 @@
+import { imageQualityConfigSchema } from '../../shared/contracts/image-model.js'
 import { z } from 'zod'
 import { DataAccessError } from './prisma.js'
 
-const storedSchema = z.array(z.object({ id: z.string().uuid(), label: z.string(), provider: z.string(), modelName: z.string(), baseUrl: z.string(), apiKeyCiphertext: z.string(), enabled: z.boolean(), reasoningEfforts: z.array(z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])).optional(), contextWindowTokens: z.number().optional(), visionEnabled: z.boolean().optional() })).max(7)
+const storedSchema = z.array(z.object({ id: z.string().uuid(), label: z.string(), provider: z.string(), modelName: z.string(), baseUrl: z.string(), apiKeyCiphertext: z.string(), enabled: z.boolean(), imageQuality: imageQualityConfigSchema.optional(), reasoningEfforts: z.array(z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])).optional(), contextWindowTokens: z.number().optional(), visionEnabled: z.boolean().optional() })).max(7)
 
 /** Stored configuration only; reading a tool route does not load text dispatch or retry classes. */
 export function readModelRoutes(metadata: unknown) {

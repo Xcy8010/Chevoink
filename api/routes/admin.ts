@@ -1,3 +1,4 @@
+import { modelActivitiesSchema } from '../../shared/model-activity.js'
 import { setPublicBetaEnabled } from '../lib/credit-policy.js'
 import { getAdminYunshuModelUsage, getAdminYunshuOperations } from '../lib/admin-yunshu-usage.js'
 import { Router, type Request, type Response } from 'express'
@@ -202,6 +203,9 @@ const adminModelUpdateSchema = z.object({
   modelKind: adminModelKindSchema.optional(),
   imageQuality: imageQualityConfigSchema.optional(),
   webToolProtocol: webToolProtocolSchema.optional(),
+  activities: modelActivitiesSchema.nullable().optional(),
+  publicDescription: z.string().trim().max(2000).optional(),
+  publicFeatures: z.array(z.string().trim().min(1).max(200)).max(20).optional(),
   freePromotion: modelPromotionSchema.nullable().optional(),
   routes: modelRoutesInputSchema.optional(),
   weightedRoutes: weightedRoutesInputSchema.optional(),
@@ -210,7 +214,7 @@ const adminModelUpdateSchema = z.object({
   modelName: z.string().trim().min(1).max(160).optional(),
   baseUrl: z.string().trim().url().max(512).nullable().optional(),
   apiKey: z.string().trim().min(8).max(2_000).optional(),
-  multiplier: z.number().min(0).max(100).optional(),
+  multiplier: z.number().min(0).max(100).refine(value => Math.abs(value * 10000 - Math.round(value * 10000)) < 0.000001, '倍率最多四位小数').optional(),
   enabled: z.boolean().optional(),
   selectable: z.boolean().optional(),
   isDefault: z.boolean().optional(),

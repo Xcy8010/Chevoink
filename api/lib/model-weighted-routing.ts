@@ -10,7 +10,7 @@ export function resolveWeightedModelRuntime<T extends RoutingRuntime>(runtime: T
   if (!selection || runtime.tier === 'custom') return runtime
   if (selection.source === 'primary') return { ...runtime, weightedRoute: selection }
   const candidate = runtime.weightedRoutes?.candidates.find(route => route.id === selection.candidateId)
-  if (!candidate) throw new DataAccessError(409, 'MODEL_TIER_UNAVAILABLE', '原供应商线路已不可用。')
+  if (!candidate || candidate.enabled === false || !candidate.apiKeyCiphertext) throw new DataAccessError(409, 'MODEL_TIER_UNAVAILABLE', '原供应商线路已不可用。')
   return { ...runtime, provider: candidate.provider, modelName: candidate.modelName, baseUrl: candidate.baseUrl,
     apiKey: decryptSecret(candidate.apiKeyCiphertext), weightedRoute: selection }
 }
@@ -20,14 +20,16 @@ export function resolveWeightedModelRuntime<T extends RoutingRuntime>(runtime: T
 export function selectWeightedModelRuntime<T extends RoutingRuntime>(runtime: T, random: () => number = Math.random): T {
   const config = runtime.weightedRoutes
   if (runtime.tier === 'custom' || runtime.weightedRoute || !config?.candidates.length) return runtime
+  const available = config.candidates.filter(route => route.enabled !== false && route.weight > 0)
+  if (config.primaryWeight + available.reduce((sum, route) => sum + route.weight, 0) <= 0) throw new DataAccessError(409, 'MODEL_ROUTES_INVALID', '没有可用的权重线路。')
   const point = random() * 100
   let boundary = config.primaryWeight
   if (point < boundary) return resolveWeightedModelRuntime(runtime, { source: 'primary' })
-  for (const route of config.candidates) {
+  for (const route of available) {
     boundary += route.weight
     if (point < boundary) return resolveWeightedModelRuntime(runtime, { source: 'candidate', candidateId: route.id })
   }
-  return resolveWeightedModelRuntime(runtime, { source: 'candidate', candidateId: config.candidates.at(-1)!.id })
+  return resolveWeightedModelRuntime(runtime, { source: 'candidate', candidateId: available.at(-1)!.id })
 }
 
 /** Actual route identity only: credentials and endpoint URLs never enter logs. */

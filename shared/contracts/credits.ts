@@ -5,6 +5,13 @@ export * from './model-tier.js'
 export type ModelReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export type CreditModelOption = {
+  publicDescription?: string
+  publicFeatures?: string[]
+  baseMultiplier?: number
+  discountRatio?: number | null
+  basePricing?: { inputPerMillion: number; cachePerMillion: number; outputPerMillion: number } | null
+  activity?: { name: string | null; revision: number; timezone: import('../model-activity.js').ModelActivities['timezone']; asOf: string; nextSwitchAt: string | null;
+    rules: Array<Omit<import('../model-activity.js').ModelActivityRule, 'id'>> } | null
   freePromotion?: import('../model-promotion.js').ModelPromotion | null
   pricing?: CreditLedgerItem['pricing']
   tier: Exclude<CreditModelTier, 'custom'>
@@ -18,6 +25,7 @@ export type CreditModelOption = {
 }
 
 export type CreditAccountSummary = {
+  tester?: { eligible: boolean; pauseExempt: boolean; threshold: number; target: number; balanceBasis: 'ledger' }
   plan: 'public_beta' | 'free'
   publicBetaEnabled: boolean
   publicBetaRevision: number
@@ -41,6 +49,9 @@ export type CreditAccountSummary = {
 }
 
 export type CreditLedgerItem = {
+  baseMultiplier?: number
+  activity?: { id: string | null; name: string | null; revision: number; timezone: string; admittedAt: string }
+
   estimatedUsage?: boolean
   /** Original settled price; never today's model configuration. */
   pricing?: { version: 'credits-v2-itemized'; rateCardId: string; inputPerMillion: number; cachePerMillion: number; outputPerMillion: number; v1CeilingMultiplier?: number } | null

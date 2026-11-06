@@ -3,6 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ pending: vi.fn(), model: vi.fn(), account: vi.fn(), setting: vi.fn(), initialize: vi.fn() }))
 vi.mock('../../api/lib/prisma.js', () => {
   const tx = {
+    // This fixture is an ordinary account on the legacy channel, with no tester grant.
+    user: { findFirst: vi.fn(async () => null) },
+    appReleaseChannel: { findMany: vi.fn(async () => []) },
     $queryRaw: vi.fn(async () => [{ id: 'global' }]),
     creditSystemSetting: { findUniqueOrThrow: mocks.setting, upsert: mocks.initialize },
     creditAccount: { upsert: vi.fn(), updateMany: vi.fn(), findUniqueOrThrow: mocks.account },
@@ -20,7 +23,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   mocks.setting.mockResolvedValue({ dailyAllowanceMilli: 450000, globallyPaused: false, publicBetaEnabled: true, resetHourUtc8: 15 })
   mocks.initialize.mockResolvedValue({ dailyAllowanceMilli: 450000, globallyPaused: false, publicBetaEnabled: true, resetHourUtc8: 15 })
-  mocks.account.mockResolvedValue({ dailyAllowanceMilli: 450000, dailyUsedMilli: 0, bonusBalanceMilli: 0, periodStartedAt: start, suspendedAt: null })
+  mocks.account.mockResolvedValue({ userId: 'owner', dailyAllowanceMilli: 450000, dailyUsedMilli: 0, bonusBalanceMilli: 0, periodStartedAt: start, suspendedAt: null })
   mocks.pending.mockResolvedValue({ _sum: { reservedCreditMilli: 0 } })
   mocks.model.mockResolvedValue({ tier: 'speed', modelName: 'fixture', baseUrl: 'https://fixture.example/v1', apiKeyCiphertext: 'fixture' })
 })
@@ -45,14 +48,14 @@ describe('P0 credit admission and auxiliary model ownership', () => {
     await expect(assertCreditAccess('owner', 'speed')).rejects.toMatchObject({ code: 'CREDITS_RESERVED' })
   })
   it('keeps the zero-rate free tier usable with no remaining balance or reservations', async () => {
-    mocks.account.mockResolvedValue({ dailyAllowanceMilli: 450000, dailyUsedMilli: 450000, bonusBalanceMilli: 0, periodStartedAt: start, suspendedAt: null })
+    mocks.account.mockResolvedValue({ userId: 'owner', dailyAllowanceMilli: 450000, dailyUsedMilli: 450000, bonusBalanceMilli: 0, periodStartedAt: start, suspendedAt: null })
     mocks.pending.mockResolvedValue({ _sum: { reservedCreditMilli: 450000 } })
     mocks.model.mockResolvedValueOnce({ tier: 'lite', modelName: 'fixture-free', baseUrl: 'https://fixture.example/v1', apiKeyCiphertext: 'fixture', multiplierBps: 0 })
     await expect(assertCreditAccess('owner', 'lite')).resolves.toBeUndefined()
     expect(mocks.pending).not.toHaveBeenCalled()
   })
   it('permits BYOK with zero balance and pending platform usage', async () => {
-    mocks.account.mockResolvedValue({ dailyAllowanceMilli: 450000, dailyUsedMilli: 450000, bonusBalanceMilli: 0, periodStartedAt: start, suspendedAt: null })
+    mocks.account.mockResolvedValue({ userId: 'owner', dailyAllowanceMilli: 450000, dailyUsedMilli: 450000, bonusBalanceMilli: 0, periodStartedAt: start, suspendedAt: null })
     mocks.pending.mockResolvedValue({ _sum: { reservedCreditMilli: 1000 } })
     await expect(assertCreditAccess('owner', 'custom')).resolves.toBeUndefined()
     expect(mocks.pending).not.toHaveBeenCalled()
@@ -60,7 +63,7 @@ describe('P0 credit admission and auxiliary model ownership', () => {
   })
   it.each([false, true])('allows BYOK when platform credits are suspended (global=%s)', async (globallyPaused) => {
     mocks.setting.mockResolvedValue({ globallyPaused, dailyAllowanceMilli: 450000, resetHourUtc8: 15 })
-    mocks.account.mockResolvedValue({ suspendedAt: new Date() })
+    mocks.account.mockResolvedValue({ userId: 'owner', suspendedAt: new Date() })
     await expect(assertCreditAccess('owner', 'custom')).resolves.toBeUndefined()
     expect(mocks.account).not.toHaveBeenCalled()
     expect(mocks.pending).not.toHaveBeenCalled()

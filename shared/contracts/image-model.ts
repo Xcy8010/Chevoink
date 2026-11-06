@@ -10,5 +10,11 @@ export const IMAGE_QUALITY_OPTIONS = [
 export const imageQualityConfigSchema = z.object({
   supportedValues: z.array(z.string().trim().min(1)),
   defaultValue: z.string().trim().min(1).nullable(),
-})
+}).refine(value => value.defaultValue === null || value.supportedValues.includes(value.defaultValue), '默认图片质量须包含在支持值中')
 export type ImageQualityConfig = z.infer<typeof imageQualityConfigSchema>
+
+export type PublicImageModel = {
+  label: string; available: boolean; publicDescription: string; publicFeatures: string[]
+  basePerCallCredits: number; perCallCredits: number; baseMultiplier: number; multiplier: number; discountRatio: number | null
+  activity: import('./credits.js').CreditModelOption['activity']
+}

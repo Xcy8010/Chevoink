@@ -1,11 +1,132 @@
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { assertMigrationEnvironment, assertDatabaseIdentity, assertFindingIndex, assertMigrationState, migrationChecksum, migrationName, releaseMigrationPlan,
   fetchMigrationName, fetchMigrationChecksum, fetchSeedEvidence, assertFetchSeed,
   webToolBillingMigrationName, webToolBillingMigrationChecksum, assertWebToolBillingState,
-  adminModelLifecycleMigrationName, adminModelLifecycleMigrationChecksum, lifecycleColumns, lifecycleIndexes, assertAdminModelLifecycleState } from '../../scripts/verify-release-migration.mjs'
+  adminModelLifecycleMigrationName, adminModelLifecycleMigrationChecksum, lifecycleColumns, lifecycleIndexes, assertAdminModelLifecycleState,
+  adminExperiencePlan, adminExperienceMigrations, assertAdminExperienceState, readAdminExperienceState } from '../../scripts/verify-release-migration.mjs'
+
+// Static catalog captured after the four frozen SQL files in isolated PostgreSQL.
+const experienceCatalog = {
+  tables: [
+    {"name":"app_release_channels","kind":"r"},
+    {"name":"app_release_operations","kind":"r"},
+    {"name":"app_releases","kind":"r"},
+    {"name":"credit_accounts","kind":"r"},
+    {"name":"image_operations","kind":"r"},
+    {"name":"site_content_versions","kind":"r"},
+    {"name":"site_contents","kind":"r"},
+    {"name":"tester_entitlements","kind":"r"},
+    {"name":"user_legal_consents","kind":"r"},
+  ],
+  columns: [
+    {"table":"app_release_channels","name":"channel","type":"character varying(16)","required":true,"defaultValue":null},
+    {"table":"app_release_channels","name":"release_id","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"app_release_channels","name":"revision","type":"integer","required":true,"defaultValue":"1"},
+    {"table":"app_release_channels","name":"updated_at","type":"timestamp(3) without time zone","required":true,"defaultValue":null},
+    {"table":"app_release_channels","name":"enabled","type":"boolean","required":true,"defaultValue":"true"},
+    {"table":"app_release_operations","name":"id","type":"character varying(100)","required":true,"defaultValue":null},
+    {"table":"app_release_operations","name":"request_hash","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"app_release_operations","name":"action","type":"character varying(24)","required":true,"defaultValue":null},
+    {"table":"app_release_operations","name":"actor_id","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"app_release_operations","name":"release_id","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"app_release_operations","name":"previous_release_id","type":"character varying(64)","required":false,"defaultValue":null},
+    {"table":"app_release_operations","name":"status","type":"character varying(24)","required":true,"defaultValue":null},
+    {"table":"app_release_operations","name":"result","type":"jsonb","required":false,"defaultValue":null},
+    {"table":"app_release_operations","name":"created_at","type":"timestamp(3) without time zone","required":true,"defaultValue":"CURRENT_TIMESTAMP"},
+    {"table":"app_release_operations","name":"updated_at","type":"timestamp(3) without time zone","required":true,"defaultValue":null},
+    {"table":"app_releases","name":"id","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"app_releases","name":"label","type":"character varying(100)","required":true,"defaultValue":null},
+    {"table":"app_releases","name":"source_sha","type":"character varying(40)","required":true,"defaultValue":null},
+    {"table":"app_releases","name":"artifact_sha256","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"app_releases","name":"manifest","type":"jsonb","required":true,"defaultValue":null},
+    {"table":"app_releases","name":"public_notes","type":"jsonb","required":true,"defaultValue":null},
+    {"table":"app_releases","name":"compatibility_version","type":"integer","required":true,"defaultValue":null},
+    {"table":"app_releases","name":"verified_at","type":"timestamp(3) without time zone","required":false,"defaultValue":null},
+    {"table":"app_releases","name":"registered_by_id","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"app_releases","name":"created_at","type":"timestamp(3) without time zone","required":true,"defaultValue":"CURRENT_TIMESTAMP"},
+    {"table":"app_releases","name":"validation_state","type":"character varying(24)","required":true,"defaultValue":"'draft'::character varying"},
+    {"table":"credit_accounts","name":"tester_topup_sequence","type":"integer","required":true,"defaultValue":"0"},
+    {"table":"image_operations","name":"id","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"image_operations","name":"user_id","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"image_operations","name":"operation_id","type":"character varying(100)","required":true,"defaultValue":null},
+    {"table":"image_operations","name":"request_hash","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"image_operations","name":"input_snapshot","type":"jsonb","required":true,"defaultValue":null},
+    {"table":"image_operations","name":"state","type":"character varying(24)","required":true,"defaultValue":"'prepared'::character varying"},
+    {"table":"image_operations","name":"route_index","type":"integer","required":true,"defaultValue":"0"},
+    {"table":"image_operations","name":"result","type":"jsonb","required":false,"defaultValue":null},
+    {"table":"image_operations","name":"error_code","type":"character varying(100)","required":false,"defaultValue":null},
+    {"table":"image_operations","name":"created_at","type":"timestamp(3) without time zone","required":true,"defaultValue":"CURRENT_TIMESTAMP"},
+    {"table":"image_operations","name":"updated_at","type":"timestamp(3) without time zone","required":true,"defaultValue":null},
+    {"table":"site_content_versions","name":"id","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"site_content_versions","name":"content_id","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"site_content_versions","name":"content_version","type":"integer","required":true,"defaultValue":null},
+    {"table":"site_content_versions","name":"payload","type":"jsonb","required":true,"defaultValue":null},
+    {"table":"site_content_versions","name":"hash","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"site_content_versions","name":"published_at","type":"timestamp(3) without time zone","required":true,"defaultValue":"CURRENT_TIMESTAMP"},
+    {"table":"site_content_versions","name":"effective_at","type":"timestamp(3) without time zone","required":false,"defaultValue":null},
+    {"table":"site_contents","name":"id","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"site_contents","name":"kind","type":"character varying(24)","required":true,"defaultValue":null},
+    {"table":"site_contents","name":"key","type":"character varying(80)","required":true,"defaultValue":null},
+    {"table":"site_contents","name":"revision","type":"integer","required":true,"defaultValue":"1"},
+    {"table":"site_contents","name":"draft","type":"jsonb","required":true,"defaultValue":null},
+    {"table":"site_contents","name":"withdrawn","type":"boolean","required":true,"defaultValue":"false"},
+    {"table":"site_contents","name":"deleted_at","type":"timestamp(3) without time zone","required":false,"defaultValue":null},
+    {"table":"site_contents","name":"published_version_id","type":"character varying(64)","required":false,"defaultValue":null},
+    {"table":"site_contents","name":"created_at","type":"timestamp(3) without time zone","required":true,"defaultValue":"CURRENT_TIMESTAMP"},
+    {"table":"site_contents","name":"updated_at","type":"timestamp(3) without time zone","required":true,"defaultValue":null},
+    {"table":"tester_entitlements","name":"user_id","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"tester_entitlements","name":"enabled","type":"boolean","required":true,"defaultValue":"true"},
+    {"table":"tester_entitlements","name":"revision","type":"integer","required":true,"defaultValue":"1"},
+    {"table":"tester_entitlements","name":"reason","type":"character varying(500)","required":true,"defaultValue":null},
+    {"table":"tester_entitlements","name":"granted_by_id","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"tester_entitlements","name":"expires_at","type":"timestamp(3) without time zone","required":false,"defaultValue":null},
+    {"table":"tester_entitlements","name":"created_at","type":"timestamp(3) without time zone","required":true,"defaultValue":"CURRENT_TIMESTAMP"},
+    {"table":"tester_entitlements","name":"updated_at","type":"timestamp(3) without time zone","required":true,"defaultValue":null},
+    {"table":"user_legal_consents","name":"id","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"user_legal_consents","name":"user_id","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"user_legal_consents","name":"version_id","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"user_legal_consents","name":"kind","type":"character varying(24)","required":true,"defaultValue":null},
+    {"table":"user_legal_consents","name":"hash","type":"character varying(64)","required":true,"defaultValue":null},
+    {"table":"user_legal_consents","name":"accepted_at","type":"timestamp(3) without time zone","required":true,"defaultValue":"CURRENT_TIMESTAMP"},
+  ],
+  indexes: [
+    {"table":"app_release_channels","name":"app_release_channels_pkey","definition":"CREATE UNIQUE INDEX app_release_channels_pkey ON public.app_release_channels USING btree (channel)","valid":true,"ready":true},
+    {"table":"app_release_operations","name":"app_release_operations_pkey","definition":"CREATE UNIQUE INDEX app_release_operations_pkey ON public.app_release_operations USING btree (id)","valid":true,"ready":true},
+    {"table":"app_releases","name":"app_releases_pkey","definition":"CREATE UNIQUE INDEX app_releases_pkey ON public.app_releases USING btree (id)","valid":true,"ready":true},
+    {"table":"image_operations","name":"image_operations_pkey","definition":"CREATE UNIQUE INDEX image_operations_pkey ON public.image_operations USING btree (id)","valid":true,"ready":true},
+    {"table":"image_operations","name":"image_operations_user_id_operation_id_key","definition":"CREATE UNIQUE INDEX image_operations_user_id_operation_id_key ON public.image_operations USING btree (user_id, operation_id)","valid":true,"ready":true},
+    {"table":"site_content_versions","name":"site_content_versions_content_id_content_version_key","definition":"CREATE UNIQUE INDEX site_content_versions_content_id_content_version_key ON public.site_content_versions USING btree (content_id, content_version)","valid":true,"ready":true},
+    {"table":"site_content_versions","name":"site_content_versions_effective_at_idx","definition":"CREATE INDEX site_content_versions_effective_at_idx ON public.site_content_versions USING btree (effective_at)","valid":true,"ready":true},
+    {"table":"site_content_versions","name":"site_content_versions_pkey","definition":"CREATE UNIQUE INDEX site_content_versions_pkey ON public.site_content_versions USING btree (id)","valid":true,"ready":true},
+    {"table":"site_contents","name":"site_contents_kind_key_key","definition":"CREATE UNIQUE INDEX site_contents_kind_key_key ON public.site_contents USING btree (kind, key)","valid":true,"ready":true},
+    {"table":"site_contents","name":"site_contents_pkey","definition":"CREATE UNIQUE INDEX site_contents_pkey ON public.site_contents USING btree (id)","valid":true,"ready":true},
+    {"table":"tester_entitlements","name":"tester_entitlements_pkey","definition":"CREATE UNIQUE INDEX tester_entitlements_pkey ON public.tester_entitlements USING btree (user_id)","valid":true,"ready":true},
+    {"table":"user_legal_consents","name":"user_legal_consents_pkey","definition":"CREATE UNIQUE INDEX user_legal_consents_pkey ON public.user_legal_consents USING btree (id)","valid":true,"ready":true},
+    {"table":"user_legal_consents","name":"user_legal_consents_user_id_kind_key","definition":"CREATE UNIQUE INDEX user_legal_consents_user_id_kind_key ON public.user_legal_consents USING btree (user_id, kind)","valid":true,"ready":true},
+  ],
+  constraints: [
+    {"table":"app_release_channels","name":"app_release_channels_pkey","kind":"p","definition":"PRIMARY KEY (channel)","valid":true},
+    {"table":"app_release_channels","name":"app_release_channels_release_id_fkey","kind":"f","definition":"FOREIGN KEY (release_id) REFERENCES app_releases(id)","valid":true},
+    {"table":"app_release_operations","name":"app_release_operations_pkey","kind":"p","definition":"PRIMARY KEY (id)","valid":true},
+    {"table":"app_releases","name":"app_releases_pkey","kind":"p","definition":"PRIMARY KEY (id)","valid":true},
+    {"table":"app_releases","name":"app_releases_validation_state_check","kind":"c","definition":"CHECK (((validation_state)::text = ANY ((ARRAY['draft'::character varying, 'verified'::character varying])::text[])))","valid":true},
+    {"table":"image_operations","name":"image_operations_pkey","kind":"p","definition":"PRIMARY KEY (id)","valid":true},
+    {"table":"site_content_versions","name":"site_content_versions_content_id_fkey","kind":"f","definition":"FOREIGN KEY (content_id) REFERENCES site_contents(id) ON UPDATE CASCADE ON DELETE RESTRICT","valid":true},
+    {"table":"site_content_versions","name":"site_content_versions_content_version_check","kind":"c","definition":"CHECK ((content_version > 0))","valid":true},
+    {"table":"site_content_versions","name":"site_content_versions_pkey","kind":"p","definition":"PRIMARY KEY (id)","valid":true},
+    {"table":"site_contents","name":"site_contents_pkey","kind":"p","definition":"PRIMARY KEY (id)","valid":true},
+    {"table":"site_contents","name":"site_contents_revision_check","kind":"c","definition":"CHECK ((revision > 0))","valid":true},
+    {"table":"tester_entitlements","name":"tester_entitlements_pkey","kind":"p","definition":"PRIMARY KEY (user_id)","valid":true},
+    {"table":"tester_entitlements","name":"tester_entitlements_user_id_fkey","kind":"f","definition":"FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE","valid":true},
+    {"table":"user_legal_consents","name":"user_legal_consents_kind_check","kind":"c","definition":"CHECK (((kind)::text = ANY ((ARRAY['terms'::character varying, 'privacy'::character varying])::text[])))","valid":true},
+    {"table":"user_legal_consents","name":"user_legal_consents_pkey","kind":"p","definition":"PRIMARY KEY (id)","valid":true},
+    {"table":"user_legal_consents","name":"user_legal_consents_user_id_fkey","kind":"f","definition":"FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE CASCADE ON DELETE RESTRICT","valid":true},
+    {"table":"user_legal_consents","name":"user_legal_consents_version_id_fkey","kind":"f","definition":"FOREIGN KEY (version_id) REFERENCES site_content_versions(id) ON UPDATE CASCADE ON DELETE RESTRICT","valid":true},
+  ],
+}
 
 function fixture() {
   const root = mkdtempSync(path.join(tmpdir(), 'chevoink-release-migration-'))
@@ -26,6 +147,98 @@ function fixture() {
 }
 
 describe('exact reviewed production migration', () => {
+  const experienceFixture = () => {
+    const f = fixture()
+    writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), readFileSync(new URL('../fixtures/release-admin-model-lifecycle.schema.prisma', import.meta.url)))
+    writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), readFileSync('prisma/schema.prisma'))
+    for (const [name] of adminExperienceMigrations) {
+      mkdirSync(path.join(f.candidate, `prisma/migrations/${name}`))
+      writeFileSync(path.join(f.candidate, `prisma/migrations/${name}/migration.sql`), readFileSync(`prisma/migrations/${name}/migration.sql`))
+    }
+    return f
+  }
+  it('permits only the frozen four-migration admin experience batch', () => {
+    const f = experienceFixture()
+    expect(releaseMigrationPlan(f.candidate, f.baseline)).toBe(adminExperiencePlan)
+  })
+  it.each(['schema', 'baseline', 'history', 'sql', 'crlf-sql', 'extra', 'additional', 'missing', 'already-present'])('rejects admin experience %s outside the exact batch', kind => {
+    const f = experienceFixture()
+    const [name] = adminExperienceMigrations[0]
+    const sql = path.join(f.candidate, `prisma/migrations/${name}/migration.sql`)
+    if (kind === 'schema') writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), '// unrelated')
+    if (kind === 'baseline') writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), '// unrelated')
+    if (kind === 'history') writeFileSync(path.join(f.candidate, 'prisma/migrations/old/migration.sql'), 'SELECT 2;')
+    if (kind === 'sql') writeFileSync(sql, 'SELECT 2;')
+    if (kind === 'crlf-sql') writeFileSync(sql, readFileSync(sql, 'utf8').replaceAll('\n', '\r\n'))
+    if (kind === 'extra') writeFileSync(path.join(f.candidate, `prisma/migrations/${name}/extra.sql`), 'SELECT 2;')
+    if (kind === 'additional') {
+      mkdirSync(path.join(f.candidate, 'prisma/migrations/unreviewed'))
+      writeFileSync(path.join(f.candidate, 'prisma/migrations/unreviewed/migration.sql'), 'SELECT 2;')
+    }
+    if (kind === 'missing') rmSync(sql)
+    if (kind === 'already-present') {
+      mkdirSync(path.join(f.baseline, `prisma/migrations/${name}`))
+      writeFileSync(path.join(f.baseline, `prisma/migrations/${name}/migration.sql`), readFileSync(sql))
+    }
+    expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
+  })
+  it('requires all four pending before, all four exact successful receipts after, and full historical row preservation', () => {
+    const old = { migration_name: 'old', checksum: 'a'.repeat(64), finished_at: new Date(), rolled_back_at: null, applied_steps_count: 1, historyHash: 'a'.repeat(32) }
+    const complete = adminExperienceMigrations.map(([migration_name, checksum]) => ({ ...old, migration_name, checksum }))
+    const sums = [['old', 'b'.repeat(64)], ...adminExperienceMigrations]
+    const before = [old], after = [old, ...complete]
+    expect(() => assertMigrationState(before, sums, 'before', undefined, adminExperiencePlan)).not.toThrow()
+    expect(() => assertMigrationState(after, sums, 'after', JSON.parse(JSON.stringify(before)), adminExperiencePlan)).not.toThrow()
+    for (const rows of [[], [old, complete[0]], after, [old, old]])
+      expect(() => assertMigrationState(rows, sums, 'before', undefined, adminExperiencePlan)).toThrow()
+    for (let i = 0; i < complete.length; i++) {
+      for (const change of [{ checksum: 'c'.repeat(64) }, { finished_at: null }, { rolled_back_at: new Date() }, { applied_steps_count: 0 }]) {
+        const changed = complete.map((row, j) => j === i ? { ...row, ...change } : row)
+        expect(() => assertMigrationState([old, ...changed], sums, 'after', before, adminExperiencePlan)).toThrow()
+      }
+      expect(() => assertMigrationState([old, ...complete.filter((_, j) => j !== i)], sums, 'after', before, adminExperiencePlan)).toThrow()
+    }
+    expect(() => assertMigrationState([...after, { ...old, migration_name: 'extra' }], sums, 'after', before, adminExperiencePlan)).toThrow()
+    expect(() => assertMigrationState([{ ...old, historyHash: 'b'.repeat(32) }, ...complete], sums, 'after', before, adminExperiencePlan)).toThrow()
+    expect(() => assertMigrationState([{ ...old, historyHash: undefined }], sums, 'before', undefined, adminExperiencePlan)).toThrow()
+    expect(() => assertMigrationState(before, sums.slice(0, -1), 'before', undefined, adminExperiencePlan)).toThrow()
+    expect(() => assertMigrationState(after, sums, 'after', [old, complete[0]], adminExperiencePlan)).toThrow()
+  })
+  it('pins all eight new table catalogs and the sequence column without inspecting dynamic rows', async () => {
+    const before = { tables: [{ name: 'credit_accounts', kind: 'r' }], columns: [], indexes: [], constraints: [] }
+    expect(() => assertAdminExperienceState(before, 'before')).not.toThrow()
+    expect(() => assertAdminExperienceState(experienceCatalog, 'after', before)).not.toThrow()
+    expect(() => assertAdminExperienceState(experienceCatalog, 'before')).toThrow()
+    expect(() => assertAdminExperienceState({ ...before, tables: [] }, 'before')).toThrow()
+    expect(() => assertAdminExperienceState(experienceCatalog, 'after', experienceCatalog)).toThrow()
+    for (const key of ['tables', 'columns', 'indexes', 'constraints'] as const) {
+      expect(() => assertAdminExperienceState({ ...experienceCatalog, [key]: experienceCatalog[key].slice(1) }, 'after', before)).toThrow()
+      expect(() => assertAdminExperienceState({ ...experienceCatalog, [key]: [...experienceCatalog[key], experienceCatalog[key][0]] }, 'after', before)).toThrow()
+    }
+    for (const [table, name] of [['credit_accounts', 'tester_topup_sequence'], ['app_releases', 'verified_at'], ['app_releases', 'validation_state'], ['app_release_channels', 'enabled']]) {
+      const columns = experienceCatalog.columns.map(row => row.table === table && row.name === name ? { ...row, required: !row.required, defaultValue: 'wrong' } : row)
+      expect(() => assertAdminExperienceState({ ...experienceCatalog, columns }, 'after', before)).toThrow()
+    }
+    for (const key of ['indexes', 'constraints'] as const) {
+      const rows = experienceCatalog[key].map(row => ({ ...row, valid: false }))
+      expect(() => assertAdminExperienceState({ ...experienceCatalog, [key]: rows }, 'after', before)).toThrow()
+    }
+    const statements: string[] = []
+    const state = await readAdminExperienceState({ $queryRawUnsafe: async (sql: string) => {
+      statements.push(sql)
+      return [experienceCatalog.tables, experienceCatalog.columns, experienceCatalog.indexes, experienceCatalog.constraints][statements.length - 1]
+    } })
+    expect(state).toEqual(experienceCatalog)
+    expect(statements).toHaveLength(4)
+    for (const sql of statements) {
+      expect(sql.trim()).toMatch(/^SELECT /)
+      expect(sql).toMatch(/FROM pg_(class|attribute|index|constraint) /)
+      expect(sql).not.toMatch(/FROM "?(credit_accounts|users|site_contents|ai_model_configs)"?\s/i)
+    }
+    const script = readFileSync('deploy/deploy-production.sh', 'utf8')
+    expect(script).toContain('"$MIGRATION_PLAN" == "20261106_admin_model_experience"')
+  })
+
   const lifecycleFixture = () => {
     const f = fixture()
     writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), readFileSync(new URL('../fixtures/release-web-tool-billing.schema.prisma', import.meta.url)))

@@ -1,3 +1,6 @@
+import appReleaseRoutes, { publicAppReleaseRouter } from './routes/app-releases.js'
+import { appReleaseCapabilityGuard } from './lib/app-release-capabilities.js'
+import testerRoutes from './routes/testers.js'
 import express, {
   type Request,
   type Response,
@@ -6,6 +9,7 @@ import express, {
 import cors from 'cors'
 import agentRoutes from './routes/agent.js'
 import adminRoutes from './routes/admin.js'
+import siteContentRoutes, { publicSiteContentRouter } from './routes/site-content.js'
 import aiRoutes from './routes/ai.js'
 import authRoutes from './routes/auth.js'
 import commentsRoutes from './routes/comments.js'
@@ -92,7 +96,13 @@ app.use(async (req: Request, res: Response, next: NextFunction) => {
   next()
 })
 
+app.use('/api/app-releases', publicAppReleaseRouter)
+app.use('/api/admin/app-releases', appReleaseRoutes)
+app.use('/api', appReleaseCapabilityGuard)
 app.use('/api/agent', agentRoutes)
+app.use('/api/admin/site-content', siteContentRoutes)
+app.use('/api/site-content', publicSiteContentRouter)
+app.use('/api/admin/testers', testerRoutes)
 app.use('/api/admin', adminRoutes)
 app.use('/api/ai', aiRoutes)
 app.use('/api/auth', authRoutes)

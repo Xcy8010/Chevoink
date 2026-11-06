@@ -1,3 +1,4 @@
+import { usePublicSiteContent } from '@/features/site-content/public-api'
 import { useQuery } from '@tanstack/react-query'
 import { fetchPublicCreditPolicy } from './credits-api'
 import { useMemo, useState } from 'react'
@@ -9,8 +10,9 @@ import AccountLayout from './AccountLayout'
 import { getAccountDocs, DOC_GROUPS } from './docs-content'
 
 export default function AccountDocsPage() {
+  const content = usePublicSiteContent()
   const policy = useQuery({ queryKey: ['credits', 'public-policy'], queryFn: fetchPublicCreditPolicy, staleTime: 20_000, refetchInterval: 60_000 })
-  const docs = useMemo(() => getAccountDocs(policy.data?.publicBetaEnabled), [policy.data?.publicBetaEnabled])
+  const docs = useMemo(() => getAccountDocs(policy.data?.publicBetaEnabled, content.data?.help), [policy.data?.publicBetaEnabled, content.data?.help])
   const [searchParams, setSearchParams] = useSearchParams()
   const [keyword, setKeyword] = useState('')
   const activeDoc = docs.find((doc) => doc.key === searchParams.get('doc')) ?? docs[0]

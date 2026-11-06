@@ -1,3 +1,4 @@
+import { integrationLegalConsent } from '../support/legal-consent.js'
 import { randomInt } from 'node:crypto'
 
 import request from 'supertest'
@@ -22,7 +23,7 @@ describe.skipIf(!dbAvailable)('Agent 2.0 P2 全书检索与 ChangeSet（需 DB�
     const unique = randomInt(0, 10_000_000).toString().padStart(7, '0')
     const register = await request(app)
       .post('/api/auth/register')
-      .send({ phone: `+861394${unique}`, nickname: `ChangeSet测试${unique}`, password: 'ChangeSet-Test-123!' })
+      .send({ ...await integrationLegalConsent(), phone: `+861394${unique}`, nickname: `ChangeSet测试${unique}`, password: 'ChangeSet-Test-123!' })
     expect(register.status).toBe(201)
     const cookies = Array.isArray(register.headers['set-cookie']) ? register.headers['set-cookie'] : [register.headers['set-cookie']]
     cookie = cookies.find((item: string) => item?.startsWith('chevoink_session=')) as string

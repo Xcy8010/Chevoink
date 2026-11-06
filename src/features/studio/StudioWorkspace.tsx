@@ -1,3 +1,4 @@
+import { SiteAnnouncements } from '@/features/site-content/public'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ComponentProps } from 'react'
@@ -4004,6 +4005,7 @@ export default function StudioWorkspace() {
         data-platform={platformCapabilities.native ? 'app' : 'web'}
         data-visual-viewport={platformCapabilities.visualViewport ? 'supported' : 'fallback'}
       >
+        <SiteAnnouncements scope="studio" />
         <div className="flex min-h-0 flex-1 flex-col lg:hidden">
           <StudioMobileHeader
             view={mobileView}

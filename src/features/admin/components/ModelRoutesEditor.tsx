@@ -1,3 +1,4 @@
+import { IMAGE_QUALITY_OPTIONS } from '../../../../shared/contracts/image-model'
 import { useState } from 'react'
 import type { ModelRouteInput } from '../../../../shared/contracts/model-routes'
 import TextInput from './AdminTextInput'
@@ -27,6 +28,7 @@ export function ModelRoutesEditor({ routes, onChange, defaults, imageGeneration 
           return <label key={effort}><input type="checkbox" checked={selected.includes(effort)} onChange={event => update(index, { reasoningEfforts: event.target.checked ? [...selected, effort] : selected.filter(value => value !== effort) })} />{effort}</label>
         })}</div></div>
         <label className="text-sm"><input type="checkbox" checked={route.visionEnabled ?? defaults.visionEnabled ?? false} onChange={event => update(index, { visionEnabled: event.target.checked })} />支持 OpenAI 兼容图片输入</label></> : null}
+        {imageGeneration && <label className="text-sm">此线路图片质量<select value={route.imageQuality ? route.imageQuality.defaultValue ?? '' : '__inherit'} onChange={event => update(index, { imageQuality: event.target.value === '__inherit' ? undefined : { supportedValues: event.target.value ? [event.target.value] : [], defaultValue: event.target.value || null } })}><option value="__inherit">沿用主配置</option><option value="">不传质量参数</option>{route.imageQuality?.defaultValue && !IMAGE_QUALITY_OPTIONS.some(option => option.value === route.imageQuality?.defaultValue) ? <option value={route.imageQuality.defaultValue}>{route.imageQuality.defaultValue}</option> : null}{IMAGE_QUALITY_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>}
         <label className="text-sm sm:col-span-2">API Key<TextInput type="password" autoComplete="new-password" value={route.apiKey ?? ''} placeholder={route.id ? '留空保持已有密钥' : '填写此账号的密钥'} onChange={event => update(index, { apiKey: event.target.value || undefined })} /></label>
       </div> : null}
       <div className="flex items-center justify-between"><label className="text-sm"><input type="checkbox" checked={route.enabled} onChange={event => update(index, { enabled: event.target.checked })} /> 启用</label><Button size="sm" variant="ghost" onClick={() => { onChange(routes.filter((_, i) => i !== index)); setActive(null) }}>移除线路</Button></div>

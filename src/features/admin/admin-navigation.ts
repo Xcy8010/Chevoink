@@ -1,5 +1,6 @@
 export const adminNavigation = [
   { label: '内容与社区', items: [
+    { to: '/admin/content', label: '公告与帮助政策', keywords: '公告 帮助 文档 用户协议 服务条款 隐私政策 发布 草稿' },
     { to: '/admin/novels', label: '作品管理', keywords: '内容 下架 恢复' },
     { to: '/admin/posts', label: '社区帖子', keywords: '社区 帖子' },
     { to: '/admin/comments', label: '社区评论', keywords: '评论 作品 帖子' },
@@ -7,6 +8,7 @@ export const adminNavigation = [
     { to: '/admin/messages', label: '消息稽核', keywords: '私人消息 稽核' },
   ] },
   { label: '用户与权益', items: [
+    { to: '/admin/testers', label: '测试员权益', keywords: '测试员 资格 内测 自动补额' },
     { to: '/admin/users', label: '用户管理', keywords: '角色 封禁' },
     { to: '/admin/credits', label: 'Credits 权益', keywords: '账户 额度 全局政策 暂停 重置 奖励 赠送 扣减 覆盖' },
   ] },
@@ -20,6 +22,8 @@ export const adminNavigation = [
     { to: '/admin/tokens', label: '用量与运行', keywords: 'Token 调用 健康 成本 余额 缓存' },
   ] },
   { label: '系统管理', items: [
+    { to: '/admin/app-releases', label: '应用版本', keywords: '稳定 测试 灰度 全量 版本 回退 发布 更新 产物' },
+    { to: '/admin/site-settings', label: '站点设置', keywords: '名称 Logo 页脚 关于 联系 导航' },
     { to: '/admin/settings', label: '管理员安全', keywords: '密码 手机 安全' },
     { to: '/admin/logs', label: '操作审计', keywords: '日志 管理员 变更' },
   ] },

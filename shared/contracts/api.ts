@@ -66,6 +66,7 @@ export type RegisterRequest = {
   phone?: string
   password?: string
   nickname: string
+  legalConsent?: import('./site-content.js').LegalConsent
   referralCode?: string
 }
 
@@ -114,6 +115,7 @@ export type SmsRegisterRequest = {
   phone: string
   code: string
   password?: string
+  legalConsent?: import('./site-content.js').LegalConsent
   referralCode?: string
 }
 
@@ -482,6 +484,7 @@ export type GenerateCoverPromptResponse = ApiSuccess<{
 }>
 
 export type GenerateCoverImageRequest = {
+  operationId?: string
   prompt: string
   size: AiImageSize
   count: number
@@ -579,6 +582,7 @@ export type AgentActionResponse = ApiSuccess<AgentActionResultPayload>
 export type GetAiConfigResponse = ApiSuccess<{
   textModelLabel: string
   imageModelLabel: string
+  imageModel?: import('./image-model.js').PublicImageModel
   providerMode: AiProviderMode
   contextWindow: {
     maxTokens: number

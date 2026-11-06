@@ -100,3 +100,15 @@ describe('Style learning durable chunk transitions', () => {
     expect(store.row).toMatchObject({ status: 'processing', claimToken: 'newer-worker', processed: 0, reports: [], response: null })
   })
 })
+
+it('retains the persisted job price when only the later admission timestamp differs', async () => {
+  const original = { version: 'credits-v1-exact' as const, modelTier: 'standard' as const, multiplierBps: 12000,
+    activity: { baseMultiplierBps: 12000, effectiveMultiplierBps: 12000, revision: 2, timezone: 'Asia/Shanghai' as const, admittedAt: '2026-11-02T14:00:00.000Z', activityId: null, activityName: null } }
+  const runtime = await getModelTierRuntime()
+  vi.mocked(getModelTierRuntime).mockResolvedValue({ ...runtime, tier: 'standard', multiplierBps: 12000, tokenPrice: { ...original, activity: { ...original.activity, admittedAt: '2026-11-02T14:05:00.000Z' } } })
+  store.row!.selection = { modelTier: 'standard', reasoningEffort: 'high' }
+  store.row!.modelIdentity = { price: original, multiplier: 12000, reasoning: 'high', model: 'fixture', endpointHash: createHash('sha256').update('https://fixture.invalid/v1').digest('hex'), provider: 'test' }
+  await processStyleChunk(snapshot())
+  expect(generateTextCompletion).toHaveBeenCalledOnce()
+  expect(vi.mocked(generateTextCompletion).mock.calls[0][2]).toMatchObject({ operationPrice: original })
+})

@@ -1,3 +1,4 @@
+import { usePublicSiteContent } from '@/features/site-content/public-api'
 import { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode, UIEvent, useEffect, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -42,6 +43,9 @@ export default function AppShell({ title, description, children }: AppShellProps
   const toast = useToast()
   const navigate = useNavigate()
   const location = useLocation()
+  const publishedContent = usePublicSiteContent()
+  const siteSettings = publishedContent.data?.settings
+  const headerNavItems = siteSettings ? siteSettings.navigation.map(item => ({href:item.url,label:item.label})) : desktopNavItems
   const quickCreateOpen = useShellStore((state) => state.quickCreateOpen)
   const openQuickCreate = useShellStore((state) => state.openQuickCreate)
   const closeQuickCreate = useShellStore((state) => state.closeQuickCreate)
@@ -309,6 +313,9 @@ export default function AppShell({ title, description, children }: AppShellProps
         <button type="button" className={actionButtonClass} onClick={() => openAccountRoute('/me')}>
           <UserRound className="h-4 w-4 text-[var(--text-secondary)]" />
           个人中心
+        </button>
+        <button type="button" className={actionButtonClass} onClick={() => openAccountRoute('/version')}>
+          <span aria-hidden="true" className="w-4 text-center text-xs">v</span>应用版本
         </button>
         <button type="button" className={actionButtonClass} onClick={() => openAccountRoute('/settings')}>
           <Settings className="h-4 w-4 text-[var(--text-secondary)]" />
@@ -690,25 +697,25 @@ export default function AppShell({ title, description, children }: AppShellProps
                   <Link to="/" className="flex min-w-0 items-center gap-3">
                     <span className="inline-flex h-10 w-10 items-center justify-center overflow-hidden rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[color:var(--surface-default)]/96 md:h-11 md:w-11">
                       <AppImage
-                        src="/favicon.png"
-                        alt="启创墨域 Logo"
+                        src={siteSettings?.logoUrl ?? '/favicon.png'}
+                        alt={`${siteSettings?.name ?? brandMeta.productName} Logo`}
                         className="h-full w-full"
                         priority
                       />
                     </span>
                     <span className="min-w-0">
                       <span className="block truncate text-[11px] font-semibold uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
-                        {brandMeta.productNameEn}
+                        {siteSettings ? null : brandMeta.productNameEn}
                       </span>
-                      <span className="block truncate text-base font-semibold text-[var(--text-primary)]">{brandMeta.productName}</span>
+                      <span className="block truncate text-base font-semibold text-[var(--text-primary)]">{siteSettings?.name ?? brandMeta.productName}</span>
                     </span>
                   </Link>
 
-                  <nav className="ml-2 hidden items-center gap-1 lg:flex">
-                    {desktopNavItems.map((item) => (
-                      <NavLink key={item.href} to={item.href} className={topNavClass}>
-                        {item.label}
-                      </NavLink>
+                  <nav aria-label="站点导航" className="ml-2 hidden items-center gap-1 lg:flex">
+                    {headerNavItems.map((item) => item.href.startsWith('/') ? (
+                      <NavLink key={item.href} to={item.href} className={topNavClass}>{item.label}</NavLink>
+                    ) : (
+                      <a key={item.href} href={item.href} target="_blank" rel="noopener noreferrer" className={topNavClass({isActive:false})}>{item.label}</a>
                     ))}
                   </nav>
 
@@ -756,11 +763,11 @@ export default function AppShell({ title, description, children }: AppShellProps
                   )}
                 >
                   <GlobalSearchBox />
-                  <nav className="hidden items-center gap-1 overflow-x-auto md:flex lg:hidden">
-                    {desktopNavItems.map((item) => (
-                      <NavLink key={item.href} to={item.href} className={topNavClass}>
-                        {item.label}
-                      </NavLink>
+                  <nav aria-label="站点导航" className={cn('items-center gap-1 overflow-x-auto', siteSettings?.navigation.length ? 'flex lg:hidden' : 'hidden md:flex lg:hidden')}>
+                    {headerNavItems.map((item) => item.href.startsWith('/') ? (
+                      <NavLink key={item.href} to={item.href} className={topNavClass}>{item.label}</NavLink>
+                    ) : (
+                      <a key={item.href} href={item.href} target="_blank" rel="noopener noreferrer" className={topNavClass({isActive:false})}>{item.label}</a>
                     ))}
                   </nav>
                 </div>

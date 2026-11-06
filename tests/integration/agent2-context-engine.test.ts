@@ -1,3 +1,4 @@
+import { integrationLegalConsent } from '../support/legal-consent.js'
 import { randomInt, randomUUID } from 'node:crypto'
 
 import request from 'supertest'
@@ -34,7 +35,7 @@ describe.skipIf(!dbAvailable)('Agent 2.0 P3 上下文引擎（需 DB）', () => 
     const phone = `+861393${unique}`
     const register = await request(app)
       .post('/api/auth/register')
-      .send({ phone, nickname: `上下文评测${unique}`, password: 'Context-Test-123!' })
+      .send({ ...await integrationLegalConsent(), phone, nickname: `上下文评测${unique}`, password: 'Context-Test-123!' })
     expect(register.status).toBe(201)
     const cookies = Array.isArray(register.headers['set-cookie']) ? register.headers['set-cookie'] : [register.headers['set-cookie']]
     cookie = cookies.find((item: string) => item?.startsWith('chevoink_session=')) as string

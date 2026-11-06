@@ -69,6 +69,6 @@ export async function readEffectiveNativeTooling(tx: RuntimeTx, lease: RunLeaseT
   const previous = await (await import('./runtime-tool-view.js')).currentNativeToolViews(configuration.tools, task.scope)
   // Existing custom parameter contracts remain significant. Missing tool names
   // may be restored from actual permissions without rewriting old contracts.
-  const definitions = toOpenAITools(tools, task.scope).map(definition => previous.find(item => item.function.name === definition.function.name) ?? definition)
+  const definitions = tools.map(tool => previous.find(item => item.function.name === tool.name) ?? toOpenAITools([tool], task.scope)[0])
   return { tools: definitions, toolAuthority: [...snapshotToolAuthority(tools, configuration.mode)].map(([name, grant]) => ({ name, ...grant })) }
 }

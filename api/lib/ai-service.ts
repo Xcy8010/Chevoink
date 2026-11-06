@@ -1,3 +1,6 @@
+import { publicImagePrice } from './billing/public-model-price.js'
+import { resolveSystemModelConfig } from './model-lifecycle.js'
+import { decryptSecret } from './secret-box.js'
 import { randomUUID } from 'node:crypto'
 import { scheduledHistoryPrefix, scheduledToolHistoryIds } from './agent/tool-turn-history.js'
 import { reviewResponseFormatPayload, type ReviewResponseFormat } from './ai-response-format.js'
@@ -37,7 +40,7 @@ import type {
 import { createCoverAssetsData, ensureNovelOwner } from './data-access.js'
 import { assertCreditAccess, consumeCredits, consumeTokenCredits, reserveTokenCredits, getModelTierRuntime, getAuxiliaryModelRuntime, IMAGE_CALL_MILLI, recordImageRefundIntent, reconcileCreditRefunds } from './credits.js'
 import { FALLBACK_USAGE_POLICY, priceTokenEvidence } from './billing/reservation-policy.js'
-import { tokenPriceSchema, frozenTokenPriceMatchesModel, type TokenPrice } from './billing/token-price.js'
+import { tokenPriceSchema, frozenTokenPriceMatchesModel, operationModelMultiplier, type TokenPrice } from './billing/token-price.js'
 import type { CreditModelTier } from '../../shared/contracts/index.js'
 import {
   FANQIE_ALL_CATEGORIES,
@@ -73,6 +76,8 @@ type TextCompletionOptions = {
    * reservation, model or price authority. */
   singlePhysicalRequest?: true
   modelTier?: CreditModelTier
+  /** Explicit original operation/job price; runtime caches alone grant no price authority. */
+  operationPrice?: TokenPrice
   /** Server-resolved runtime only; never accept provider credentials from tool arguments. */
   modelRuntime?: Awaited<ReturnType<typeof getModelTierRuntime>>
   multiplierBps?: number
@@ -218,10 +223,10 @@ async function prepareTextUsage(input: {
   userId: string; action: string; modelName: string; modelTier: CreditModelTier; multiplierBps: number;
   novelId?: string | null; chapterId?: string | null; targetType?: string; targetId?: string | null;
   agentRunId?: string | null; turn?: number | null; providerName?: string | null;
-  inputEstimate: number; maxOutput: number; frozenPrice?: TokenPrice; routeEvidence?: Prisma.InputJsonObject;
+  inputEstimate: number; maxOutput: number; operationPrice?: TokenPrice; frozenPrice?: TokenPrice; routeEvidence?: Prisma.InputJsonObject;
 }) {
-  const { inputEstimate, maxOutput, frozenPrice, routeEvidence, ...identity } = input
-  const price = frozenPrice ? tokenPriceSchema.parse(frozenPrice) : input.modelTier === 'custom' ? { version: 'byok-exempt' }
+  const { inputEstimate, maxOutput, frozenPrice, operationPrice, routeEvidence, ...identity } = input
+  const price = frozenPrice || operationPrice ? tokenPriceSchema.parse(frozenPrice ?? operationPrice) : input.modelTier === 'custom' ? { version: 'byok-exempt' }
     : await resolveTokenPrice(input.modelTier, input.multiplierBps)
   if (frozenPrice && !frozenTokenPriceMatchesModel(frozenPrice, input.modelTier, input.multiplierBps)) {
     throw new DataAccessError(409, 'TEXT_REQUEST_PRICE_CONFLICT', '本次检查的冻结费率与当前模型不一致。')
@@ -703,6 +708,7 @@ export function buildProviderToolChoice(input: ProviderReasoningInput, requested
 }
 
 export type ChatWithToolsParams = {
+  operationPrice?: TokenPrice
   weightedRoute?: WeightedRouteSelection
   physicalRouteId?: string
   /** Internal structured auxiliary response contract, frozen with its route. */
@@ -850,12 +856,17 @@ function snapshotDurableChatParams(params: ChatWithToolsParams): ChatWithToolsPa
 }
 
 async function chatWithGoalAccounting(params: ChatWithToolsParams): Promise<ChatCompletionResult> {
-  if (!params.durableExecution && params.freePromotion && params.usageLog.modelTier !== 'custom') {
+  if (!params.durableExecution && !params.operationPrice && params.freePromotion && params.usageLog.modelTier !== 'custom') {
     params = { ...params, usageLog: { ...params.usageLog, multiplierBps: effectiveModelMultiplier({
       multiplierBps: params.usageLog.multiplierBps ?? 10000, metadata: { freePromotion: params.freePromotion },
     }) } }
   }
   params = { ...params, usageLog: { ...params.usageLog } }
+  if (!params.durableExecution && !params.operationPrice && params.usageLog.modelTier !== 'custom') {
+    const operationPrice = await resolveTokenPrice(params.usageLog.modelTier ?? 'speed', params.usageLog.multiplierBps ?? 10000, { freshOperation: true })
+    params = { ...params, operationPrice, usageLog: { ...params.usageLog, multiplierBps: operationModelMultiplier(operationPrice, params.usageLog.multiplierBps ?? 10000) } }
+  }
+  if (!params.durableExecution && params.operationPrice) params = { ...params, usageLog: { ...params.usageLog, multiplierBps: operationModelMultiplier(params.operationPrice, params.usageLog.multiplierBps ?? 10000) } }
   if (!params.durableExecution) return withModelRoutePool(params, chatWithToolsImpl)
   return withLeaseHeartbeat(params.durableExecution.lease, params.signal, signal => chatWithToolsImpl({ ...params, signal }))
 }
@@ -948,7 +959,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   const prepared = durable ? undefined : await prepareTextUsage({ ...params.usageLog, modelName: model,
     inputEstimate: estimateTokenCount(encodedBody), maxOutput: params.maxOutputTokens ?? env.aiTextMaxOutputTokens,
     modelTier: tier, multiplierBps: params.usageLog.multiplierBps ?? 10000,
-    providerName: params.provider ?? env.aiTextProvider, routeEvidence })
+    providerName: params.provider ?? env.aiTextProvider, operationPrice: params.operationPrice, routeEvidence })
   if (params.signal?.aborted) {
     await markUnobservedUsage(prepared?.id, false)
     params.signal.throwIfAborted()
@@ -1037,12 +1048,12 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     if (quotaRejected) throw providerQuotaError(tier === 'custom')
     if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion)
       && (durable || await hasKnownZeroProviderRejection(prepared?.id, params.usageLog.userId, response.status))) {
-      throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), typeof payload.error?.message === 'string' ? payload.error.message : undefined)
+      throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), undefined)
     }
     throw new DataAccessError(
       502,
       'AI_PROVIDER_ERROR',
-      typeof payload.error?.message === 'string' ? payload.error.message : '模型服务暂时不可用。',
+      '模型服务暂时不可用。',
     )
   }
 
@@ -1303,9 +1314,15 @@ async function generateGoalTextCompletion(systemPrompt: string, userPrompt: stri
   if (assigned) options = { ...options, modelRuntime: assigned.runtime, reasoningEffort: assigned.runtime.reasoningEffort, multiplierBps: undefined, boundedReview: false }
   const resolvedRuntime = options.modelRuntime ?? await getModelTierRuntime(options.modelTier ?? 'speed', options.userId)
   const sourceRuntime = options.authorizedRequest || options.singlePhysicalRequest ? resolvedRuntime : selectWeightedModelRuntime(resolvedRuntime)
-  const modelRuntime = sourceRuntime.tier === 'custom' ? sourceRuntime : { ...sourceRuntime, multiplierBps: effectiveModelMultiplier({
+  const resolvedModelRuntime = sourceRuntime.tier === 'custom' ? sourceRuntime : { ...sourceRuntime, multiplierBps: effectiveModelMultiplier({
     multiplierBps: sourceRuntime.multiplierBps, metadata: { freePromotion: sourceRuntime.freePromotion },
   }) }
+  const operationPrice = options.authorizedRequest?.price ?? options.operationPrice ?? (sourceRuntime.tier === 'custom' ? undefined
+    : await resolveTokenPrice(sourceRuntime.tier, review ? resolvedModelRuntime.multiplierBps : options.multiplierBps ?? resolvedModelRuntime.multiplierBps, { freshOperation: true }))
+  const selectedMultiplier = review ? resolvedModelRuntime.multiplierBps : options.multiplierBps ?? resolvedModelRuntime.multiplierBps
+  const operationMultiplier = operationPrice ? operationModelMultiplier(operationPrice, selectedMultiplier) : selectedMultiplier
+  options = { ...options, operationPrice, multiplierBps: operationMultiplier }
+  const modelRuntime = operationPrice ? { ...resolvedModelRuntime, multiplierBps: operationMultiplier } : resolvedModelRuntime
   // Exact author-bound requests bypass HTTP rate-limit retries. In particular,
   // a supplemental continuity answer buys one physical request only.
   if (options.authorizedRequest || options.singlePhysicalRequest) return generateTextCompletionImpl(systemPrompt, userPrompt, {
@@ -1371,7 +1388,7 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     modelName: modelRuntime.modelName ?? env.aiTextModel, modelTier: modelRuntime.tier,
     multiplierBps: options.multiplierBps ?? modelRuntime.multiplierBps,
     novelId: options.novelId, chapterId: options.chapterId, agentRunId: options.agentRunId, targetType: options.targetType, targetId: options.targetId,
-    providerName: modelRuntime.provider, frozenPrice: options.authorizedRequest?.price, routeEvidence })
+    providerName: modelRuntime.provider, frozenPrice: options.authorizedRequest?.price, operationPrice: options.operationPrice, routeEvidence })
   let dispatched = false
   const request = beginTextRequest(prepared.id)
   try {
@@ -1494,9 +1511,9 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     }
     if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion)
       && await hasKnownZeroProviderRejection(prepared.id, options.userId, response.status)) {
-      throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), typeof payload.error?.message === 'string' ? payload.error.message : undefined)
+      throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), undefined)
     }
-    throw new DataAccessError(502, [408, 504].includes(response.status) ? 'AI_PROVIDER_TIMEOUT' : 'AI_PROVIDER_ERROR', typeof payload.error?.message === 'string' ? payload.error.message : '模型服务暂时不可用。')
+    throw new DataAccessError(502, [408, 504].includes(response.status) ? 'AI_PROVIDER_TIMEOUT' : 'AI_PROVIDER_ERROR', '模型服务暂时不可用。')
   }
   if (typeof content !== 'string' || !content.trim()) {
     throw new DataAccessError(502, 'AI_PROVIDER_EMPTY_RESPONSE', '模型未返回有效内容。')
@@ -1536,21 +1553,45 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
 }
 
 /** Credentials stay in memory; durable callers freeze only the public route. */
-export type CoverImageRuntime = { apiKey: string; route: { modelConfigId?: string; modelConfigRevision?: number; routeId?: string;
+export type CoverImageRuntime = { price?: import('./billing/image-price.js').ImagePrice; apiKey: string; route: { modelConfigId?: string; modelConfigRevision?: number; routeId?: string;
   provider: string; modelName: string; baseUrl: string; providerMode: string; quality?: string }; fallbackRuntimes?: CoverImageRuntime[] }
 
-export async function resolveCoverImageRuntime(): Promise<CoverImageRuntime> {
+export async function resolveCoverImageRuntime(frozenRoute?: CoverImageRuntime['route']): Promise<CoverImageRuntime> {
   const configured = await getToolModelRuntime('tool:image-generation')
-  const apiKey = configured?.apiKey ?? env.aiImageApiKey
+  let apiKey = configured?.apiKey ?? env.aiImageApiKey
   ensureImageProviderConfigured(apiKey)
-  const quality = configured?.imageQuality?.defaultValue
+  let quality = configured?.imageQuality?.defaultValue
   const identity = configured?.modelConfigId ? { modelConfigId: configured.modelConfigId, modelConfigRevision: configured.modelConfigRevision } : {}
-  return { apiKey, route: { ...identity, provider: configured?.provider ?? env.aiProviderMode, modelName: configured?.modelName ?? env.aiImageModel,
-    baseUrl: configured?.baseUrl ?? env.aiImageBaseUrl, providerMode: env.aiProviderMode,
+  let selected: { provider: string; modelName: string; baseUrl: string; routeId?: string } | undefined
+  if (configured?.weightedRoutes?.candidates.length) {
+    const pool = configured.weightedRoutes
+    let candidate: typeof pool.candidates[number] | undefined
+    if (frozenRoute?.routeId) {
+      candidate = pool.candidates.find(route => route.id === frozenRoute.routeId)
+      if (!candidate && !configured.routes?.some(route => route.id === frozenRoute.routeId)) throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', '原图片线路已不可用，未重新抽取。')
+    } else if (!frozenRoute) {
+      const point = Math.random() * 100
+      let boundary = pool.primaryWeight
+      for (const route of pool.candidates.filter(route => route.enabled !== false && route.weight > 0)) {
+        if (point >= boundary && point < boundary + route.weight) { candidate = route; break }
+        boundary += route.weight
+      }
+    }
+    if (candidate) {
+      if (candidate.enabled === false || !candidate.apiKeyCiphertext) throw new DataAccessError(409, 'RUNTIME_RECONCILIATION_REQUIRED', '原图片线路已不可用。')
+      apiKey = decryptSecret(candidate.apiKeyCiphertext)
+      quality = candidate.imageQuality?.defaultValue
+      selected = { provider: candidate.provider, modelName: candidate.modelName, baseUrl: candidate.baseUrl, routeId: candidate.id }
+    }
+  }
+  const fallback = frozenRoute?.routeId ? configured?.routes?.find(route => route.id === frozenRoute.routeId) : undefined
+  if (fallback) { apiKey = fallback.apiKey; selected = fallback; quality = fallback.imageQuality ? fallback.imageQuality.defaultValue : configured?.imageQuality?.defaultValue }
+  return { ...(configured?.imagePrice ? { price: configured.imagePrice } : {}), apiKey, route: { ...identity, ...(selected?.routeId ? { routeId: selected.routeId } : {}), ...(fallback ? { routeId: fallback.id } : {}), provider: selected?.provider ?? configured?.provider ?? env.aiProviderMode, modelName: selected?.modelName ?? configured?.modelName ?? env.aiImageModel,
+    baseUrl: selected?.baseUrl ?? configured?.baseUrl ?? env.aiImageBaseUrl, providerMode: env.aiProviderMode,
     ...(quality != null ? { quality } : {}) },
     ...(configured?.routes?.length ? { fallbackRuntimes: configured.routes.map(route => ({ apiKey: route.apiKey,
       route: { ...identity, routeId: route.id, provider: route.provider, modelName: route.modelName, baseUrl: route.baseUrl,
-        providerMode: env.aiProviderMode, ...(quality != null ? { quality } : {}) } })) } : {}) }
+        providerMode: env.aiProviderMode, ...((route.imageQuality ? route.imageQuality.defaultValue : configured.imageQuality?.defaultValue) != null ? { quality: (route.imageQuality ? route.imageQuality.defaultValue : configured.imageQuality?.defaultValue) ?? undefined } : {}) } })) } : {}) }
 }
 
 export function parseCoverImageResponse(httpStatus: number, body: string) {
@@ -1559,8 +1600,8 @@ export function parseCoverImageResponse(httpStatus: number, body: string) {
     if (httpStatus >= 200 && httpStatus < 300) throw new DataAccessError(502, 'AI_PROVIDER_INVALID_RESPONSE', '图片模型返回了无法解析的响应。')
   }
   const decoded = payload && typeof payload === 'object' ? payload as { data?: unknown; error?: { message?: unknown } } : {}
-  if (httpStatus < 200 || httpStatus >= 300) throw new ImageProviderFailure(httpStatus, 502, 'AI_PROVIDER_ERROR',
-    typeof decoded.error?.message === 'string' ? decoded.error.message : '图片模型服务暂时不可用。')
+  if (httpStatus < 200 || httpStatus >= 300) throw new ImageProviderFailure(httpStatus, 502, [408, 504].includes(httpStatus) ? 'AI_PROVIDER_TIMEOUT' : 'AI_PROVIDER_ERROR',
+    '图片模型服务暂时不可用。')
   const images: unknown[] = Array.isArray(decoded.data) ? decoded.data : []
   const imageUrls = images.map(item => {
     const image = item && typeof item === 'object' ? item as { url?: unknown; b64_json?: unknown } : {}
@@ -1572,7 +1613,7 @@ export function parseCoverImageResponse(httpStatus: number, body: string) {
 
 /** Complete rejected/empty responses only. Transport, partial bodies and storage failures remain unknown. */
 export function coverImageFailureMayRetry(httpStatus: number, code?: string) {
-  return [429, 500, 502, 503, 504].includes(httpStatus) || httpStatus >= 200 && httpStatus < 300 && code === 'AI_PROVIDER_EMPTY_RESPONSE'
+  return [429, 500, 502, 503].includes(httpStatus) || httpStatus >= 200 && httpStatus < 300 && code === 'AI_PROVIDER_EMPTY_RESPONSE'
 }
 
 /** Transport only. The caller must already own the sole committed permit. */
@@ -1591,7 +1632,7 @@ async function generateImageUrls(
     onKnownFailure?: (runtime: CoverImageRuntime, status: number, empty: boolean) => Promise<void> } = {},
 ) {
   const pool = await resolveCoverImageRuntime()
-  const runtimes = [pool, ...(pool.fallbackRuntimes ?? [])]
+  const runtimes = [pool, ...(pool.fallbackRuntimes ?? [])].map(runtime => ({ ...runtime, price: pool.price }))
   const startedAt = Date.now()
   for (const [index, runtime] of runtimes.entries()) {
     await options.beforeDispatch?.(runtime)
@@ -1620,10 +1661,13 @@ class ImageProviderFailure extends DataAccessError {
 }
 
 export async function getAiConfigPayload() {
+  const image = await resolveSystemModelConfig('tool:image-generation')
+  const imageModel = publicImagePrice(image ? { ...image, enabled: image.enabled && image.modelName !== 'unconfigured' && Boolean(image.baseUrl && image.apiKeyCiphertext) } : { displayName: '图片生成', enabled: Boolean(env.aiImageApiKey), multiplierBps: 10000 })
   return {
     // 用户侧只暴露产品档位，不返回供应商的真实 model id。
     textModelLabel: '极速',
-    imageModelLabel: '图片生成',
+    imageModelLabel: imageModel.label,
+    imageModel,
     providerMode: env.aiProviderMode,
     contextWindow: {
       maxTokens: env.aiTextContextMaxTokens,
@@ -1742,9 +1786,11 @@ export async function generateCoverImageData(
     throw new DataAccessError(400, 'IMAGE_PROMPT_INVALID', '请提供封面提示词。')
   }
   if (input.novelId) await ensureNovelOwner(userId, input.novelId)
+  if (input.operationId) return (await import('./image-operation.js')).executeImageOperation(userId, input, options.signal)
   options.signal?.throwIfAborted()
   const goal = currentGoalExecution()
   const chargeKey = `image:${randomUUID()}`
+  let amountMilli = IMAGE_CALL_MILLI
   const createObservation = () => withoutGoalEffects(() => prisma.aiUsageLog.create({ data: {
     userId, novelId: input.novelId ?? null, agentRunId: goal?.runId, providerType: 'image', providerMode: env.aiProviderMode,
     modelName: env.aiImageModel, action: 'generateCoverImage', durationMs: 0, billingStatus: 'prepared', usageSource: 'unknown',
@@ -1757,16 +1803,6 @@ export async function generateCoverImageData(
   try {
   await assertGoalProviderAdmission()
   options.signal?.throwIfAborted()
-  await withoutGoalEffects(() => consumeCredits({
-    userId,
-    amountMilli: IMAGE_CALL_MILLI,
-    kind: 'usage',
-    sourceType: 'image_generation',
-    idempotencyKey: chargeKey,
-    referenceId: input.novelId ?? null,
-    metadata: { count: input.count, size: input.size },
-  }))
-  charged = true
     generated = await generateImageUrls(input.prompt, input.size, input.count, { signal: options.signal,
       onKnownFailure: async (runtime, httpStatus, empty) => {
         if (!observation) await withoutGoalEffects(() => prisma.aiUsageLog.create({ data: { userId, novelId: input.novelId ?? null, agentRunId: goal?.runId,
@@ -1798,6 +1834,12 @@ export async function generateCoverImageData(
       }
       options.signal?.throwIfAborted()
       dispatched = true
+      if (!charged) {
+        amountMilli = runtime.price?.amountMilli ?? IMAGE_CALL_MILLI
+        await withoutGoalEffects(() => consumeCredits({ userId, amountMilli, kind: 'usage', sourceType: 'image_generation', idempotencyKey: chargeKey,
+          referenceId: input.novelId ?? null, ...(runtime.price ? { multiplierBps: runtime.price.effectiveMultiplierBps } : {}), metadata: { count: input.count, size: input.size, ...(runtime.price ? { price: runtime.price, ...(runtime.price.activity ? { activity: runtime.price.activity } : {}) } : {}) } }))
+        charged = true
+      }
     } })
   } catch (error) {
     if (observation) {
@@ -1809,7 +1851,7 @@ export async function generateCoverImageData(
       } }))
       await syncGoalLegacyUsage(observation.id)
     }
-    if (!charged) throw error
+    if (!charged || amountMilli === 0) throw error
     const outcome = error instanceof DataAccessError && error.code === 'AI_PROVIDER_EMPTY_RESPONSE' ? 'empty'
       : !dispatched || error instanceof DataAccessError && error.code === 'AI_PROVIDER_ERROR' ? 'rejected' : 'unknown'
     await withoutGoalEffects(() => recordImageRefundIntent(userId, chargeKey, { outcome, deliveredImages: 0 }))
@@ -1826,7 +1868,7 @@ export async function generateCoverImageData(
     // tokens. An actual image response confirms this non-token operation.
     await withoutGoalEffects(() => prisma.aiUsageLog.update({ where: { id: observationId }, data: {
       modelName: generated.modelName, durationMs: generated.durationMs, requestTokens: 0, responseTokens: 0,
-      creditChargeMilli: IMAGE_CALL_MILLI, usageSource: 'fixed_unit', billingStatus: 'observed',
+      creditChargeMilli: amountMilli, usageSource: 'fixed_unit', billingStatus: 'observed',
     } }))
     await syncGoalLegacyUsage(observation.id)
   }

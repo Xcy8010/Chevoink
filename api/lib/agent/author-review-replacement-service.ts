@@ -10,7 +10,7 @@ import { env } from '../../config/env.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { getModelTierRuntime } from '../credits.js'
 import { resolveTokenPrice } from '../billing/resolve-token-price.js'
-import { tokenPriceSchema } from '../billing/token-price.js'
+import { tokenPriceSchema, frozenEffectiveMultiplier } from '../billing/token-price.js'
 import { priceTokenEvidence } from '../billing/reservation-policy.js'
 import { MAX_CREDIT_STORAGE_INT } from '../billing/pricing.js'
 import { generateTextCompletion } from '../ai-service.js'
@@ -171,7 +171,7 @@ async function quoteFacts(tx: Prisma.TransactionClient, userId: string, runId: s
   if (runtime.tier !== tier || runtime.reasoningEffort !== reasoningEffort) refuse('当前模型身份无法完整核实，未替换模型。')
   const model = modelSchema.parse({ ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier, customModelId, reasoningEffort, provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel, multiplierBps: runtime.multiplierBps })
   const price = tokenPriceSchema.parse(await resolveTokenPrice(tier, runtime.multiplierBps))
-  if (price.modelTier !== tier || price.multiplierBps !== runtime.multiplierBps) refuse('当前模型与实际费率身份不一致，未创建报价。')
+  if (price.modelTier !== tier || frozenEffectiveMultiplier(price) !== runtime.multiplierBps) refuse('当前模型与实际费率身份不一致，未创建报价。')
   const deterministic = analyzeDeterministicQuality(bundle.chapter.content, bundle.recentChapters.map(item => item.content))
   const sources = buildQualityEvidenceSources({ userId, novelId: run.novelId, chapterId: pending.chapterId, chapterRevision: bundle.chapter.revision }, bundle.chapter.content)
   const system = buildCriticSystem('balanced'), content = buildCriticInput(bundle, deterministic.metrics, sources)

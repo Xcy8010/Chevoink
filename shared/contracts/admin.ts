@@ -428,6 +428,11 @@ export type AdminModelManagementPayload = {
     webToolProtocol?: import('./web-tool.js').WebToolProtocol
     imageQuality?: import('./image-model.js').ImageQualityConfig
     perCallCredits?: number
+    activities?: import('../model-activity.js').ModelActivities | null
+    activityStatus?: import('./credits.js').CreditModelOption['activity']
+    baseMultiplier?: number
+    publicDescription?: string
+    publicFeatures?: string[]
     freePromotion?: import('../model-promotion.js').ModelPromotion | null
     routes?: import('./model-routes.js').ModelRouteView[]
     weightedRoutes?: import('./model-weighted-routes.js').WeightedRoutesView

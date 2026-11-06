@@ -32,6 +32,11 @@ export function getActiveRun(runId: string): ActiveRun | undefined {
   return activeRuns.get(runId)
 }
 
+/** Local executors include non-loop runs absent from the durable run query. */
+export function getActiveRunUserIds(): string[] {
+  return [...new Set([...activeRuns.values()].map(run => run.userId))]
+}
+
 export function countActiveRunsByUser(userId: string): number {
   let count = 0
   for (const run of activeRuns.values()) {

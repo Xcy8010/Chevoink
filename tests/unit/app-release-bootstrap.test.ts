@@ -1,0 +1,14 @@
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { bootstrapAppRelease, selectedArtifactUrl } from '../../src/features/app-releases/bootstrap'
+import type { AppReleaseBootstrap } from '../../shared/contracts/app-release'
+const mocks=vi.hoisted(()=>({request:vi.fn()}))
+vi.mock('../../src/app/api-client',()=>({requestJson:mocks.request}))
+let location:{pathname:string;search:string;hash:string;replace:ReturnType<typeof vi.fn>;assign:ReturnType<typeof vi.fn>}
+let document:{documentElement:{dataset:Record<string,string>}}
+const selection:AppReleaseBootstrap={mode:'artifact',channel:'stable',release:{id:'stable-version',label:'Stable',notes:{features:['Feature'],fixes:[],changes:[]},entryUrl:'/api/app-releases/artifacts/stable-version/index.html',capabilities:[]}}
+beforeEach(()=>{vi.clearAllMocks();location={pathname:'/studio',search:'?novel=synthetic',hash:'#draft',replace:vi.fn(),assign:vi.fn()};document={documentElement:{dataset:{}}};vi.stubGlobal('location',location);vi.stubGlobal('document',document);vi.stubGlobal('window',{addEventListener:vi.fn(),setInterval:vi.fn()});mocks.request.mockResolvedValue(selection)})
+afterEach(()=>vi.unstubAllGlobals())
+it('redirects initial current launcher to the exact server-selected artifact and preserves canonical route',async()=>{expect(await bootstrapAppRelease()).toBe(false);expect(location.replace).toHaveBeenCalledWith('/api/app-releases/artifacts/stable-version/index.html?route=%2Fstudio%3Fnovel%3Dsynthetic%23draft');expect(mocks.request).toHaveBeenCalledWith('/api/app-releases/bootstrap')})
+it('does not trust a client URL channel and renders only when the served marker matches server selection',async()=>{location.search='?channel=test';document.documentElement.dataset.appRelease='test-version';expect(await bootstrapAppRelease()).toBe(false);expect(location.replace).toHaveBeenCalledWith(expect.stringContaining('stable-version'));document.documentElement.dataset.appRelease='stable-version';expect(await bootstrapAppRelease()).toBe(true)})
+it('preserves legacy only when server says no configured channel, and propagates configured failures',async()=>{mocks.request.mockResolvedValue({mode:'legacy',channel:'stable',release:null});expect(await bootstrapAppRelease()).toBe(true);mocks.request.mockRejectedValue(new Error('configured artifact invalid'));await expect(bootstrapAppRelease()).rejects.toThrow('configured artifact invalid');expect(location.replace).not.toHaveBeenCalled()})
+it('keeps recovery control plane independently reachable and rejects unsafe return routes',async()=>{location.pathname='/admin/app-releases';expect(await bootstrapAppRelease()).toBe(true);expect(mocks.request).not.toHaveBeenCalled();expect(selectedArtifactUrl(selection,'//evil.example')).toBe('/api/app-releases/artifacts/stable-version/index.html?route=%2F')})

@@ -1,8 +1,10 @@
+import { applyTesterCreditFloor, isEffectiveTester, TESTER_CREDIT_RULE } from './tester-entitlement.js'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 
 import { Prisma, type CreditLedgerEntry, type CreditAccount, type CreditSystemSetting } from '@prisma/client'
 import { z } from 'zod'
 import { webToolRefundEvidenceSchema } from './billing/web-tool-refund.js'
+import { publicModelPrice } from './billing/public-model-price.js'
 import { effectiveModelMultiplier, readModelPromotion } from '../../shared/model-promotion.js'
 
 import { isBuiltInModelTier, isServerModelTier, taskSpecSchema } from '../../shared/contracts/index.js'
@@ -25,10 +27,10 @@ import { readWeightedRoutes } from './model-weighted-config.js'
 import type { WeightedRoutesStored, WeightedRouteSelection } from '../../shared/contracts/model-weighted-routes.js'
 import { assertCreditInteger, BillingInputError, calculateV1ChargeMilli, calculateV2UserChargeMilli } from './billing/pricing.js'
 import { equalLegacyMetadata, prepareCreditRequest, readCreditFingerprint } from './billing/credit-request.js'
-import { getActiveTokenPrice, getActiveTokenPrices } from './billing/rate-cards.js'
+import { getActiveTokenPrices } from './billing/rate-cards.js'
 import { tokenPriceSchema, frozenTokenPriceMatchesModel, type TokenPrice } from './billing/token-price.js'
 import { fallbackUsageEvidenceSchema, FALLBACK_USAGE_POLICY, RESERVATION_TTL_MS, tokenReservationMilli } from './billing/reservation-policy.js'
-import { presentLedgerPrice, readLedgerPriceMetadata } from './billing/ledger-presentation.js'
+import { presentLedgerPrice, readLedgerPriceMetadata, readLedgerActivity } from './billing/ledger-presentation.js'
 
 export const CREDIT_MILLI = 1000
 export const PUBLIC_BETA_DAILY_MILLI = 450 * CREDIT_MILLI
@@ -215,12 +217,10 @@ async function listPublicModelOptions(): Promise<CreditModelOption[]> {
     const capabilities = parseModelCapabilities(item.metadata, item.provider)
     // 0 倍率档对用户公示为免费：不列分项费率，历史费率卡不参与免费档结算。
     const multiplierBps = effectiveModelMultiplier(item)
-    const price = multiplierBps === 0 || readModelPromotion(item.metadata) ? undefined : activePrices.get(item.tier)
     return [{
-      pricing: price ? presentLedgerPrice({ pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates, v1CeilingBps: price.v1CeilingBps }).pricing : null,
+      ...publicModelPrice(item, item.tier, activePrices.get(item.tier)),
       tier: item.tier as CreditModelOption['tier'],
       label: item.displayName,
-      multiplier: multiplierBps / 10000,
       freePromotion: multiplierBps === 0 ? readModelPromotion(item.metadata) : null,
       available: item.enabled && item.selectable && isConfiguredBuiltIn(item),
       selectedByDefault: item.isDefault,
@@ -276,6 +276,7 @@ async function toCreditSummary(
   const dailyRemainingMilli = Math.max(0, account.dailyAllowanceMilli - account.dailyUsedMilli)
   const totalRemainingMilli = dailyRemainingMilli + Math.max(0, account.bonusBalanceMilli)
   const reservedMilli = await reservedTokenCredits(db, account.userId)
+  const tester = await isEffectiveTester(db, account.userId)
   const usedPercent = account.dailyAllowanceMilli > 0
     ? Math.min(100, Math.round((account.dailyUsedMilli / account.dailyAllowanceMilli) * 1000) / 10)
     : 100
@@ -296,7 +297,8 @@ async function toCreditSummary(
     resetsAt: account.periodEndsAt.toISOString(),
     resetTimeZone: 'UTC+8',
     globallyPaused: setting.globallyPaused,
-    suspended: Boolean(account.suspendedAt),
+    suspended: Boolean(account.suspendedAt) && !tester,
+    tester: { eligible: tester, pauseExempt: tester, threshold: TESTER_CREDIT_RULE.thresholdMilli / 1000, target: TESTER_CREDIT_RULE.targetMilli / 1000, balanceBasis: TESTER_CREDIT_RULE.balanceBasis },
     models: await listPublicModelOptions(),
     archivedModelTiers: (await prisma.aiModelConfig.findMany({ where: { ownerUserId: null, archivedAt: { not: null } }, select: { tier: true, archivedAt: true } })).flatMap(row => row.archivedAt && row.tier ? [row.tier] : []),
   }
@@ -356,6 +358,7 @@ async function presentCreditLedgerEntries(db: Prisma.TransactionClient, entries:
   }
   const ledger: CreditLedgerItem[] = entries.map((entry) => {
     const originalPrice = presentLedgerPrice(entry.metadata)
+    const originalActivity = readLedgerActivity(entry.metadata)
     const logId = originalKey(entry).slice('usage:'.length)
     const candidateRun = taskByLogId.get(logId) ?? entry.referenceId
     return {
@@ -367,7 +370,10 @@ async function presentCreditLedgerEntries(db: Prisma.TransactionClient, entries:
     taskRunId: candidateRun && runOwners.get(candidateRun) === entry.userId ? candidateRun : null,
     modelTier: entry.modelTier as CreditModelTier | null,
     ...(modelLabels.has(entry.modelTier) ? { modelLabel: modelLabels.get(entry.modelTier) } : {}),
-    multiplier: entry.multiplierBps / 10000,
+    multiplier: (originalActivity?.effectiveMultiplierBps ?? entry.multiplierBps) / 10000,
+    ...(originalActivity ? { baseMultiplier: originalActivity.baseMultiplierBps / 10000,
+      activity: { id: originalActivity.activityId, name: originalActivity.activityName, revision: originalActivity.revision,
+        timezone: originalActivity.timezone, admittedAt: originalActivity.admittedAt } } : {}),
     requestTokens: entry.requestTokens,
     responseTokens: entry.responseTokens,
     pricing: originalPrice.pricing,
@@ -598,8 +604,10 @@ export async function reserveTokenCredits(userId: string, usageId: string, input
         if (usage.modelTier === 'custom' || usage.reservedCreditMilli > 0) return
         if (!authorReview && usage.billingStatus !== 'prepared') throw new DataAccessError(409, 'CREDIT_USAGE_MISMATCH', '不能为已执行请求重复预留额度。')
         const price = tokenPriceSchema.parse(usage.billingSnapshot)
-        const { account, setting } = await ensureAccountWithDb(tx, userId)
-        if (account.suspendedAt) throw new DataAccessError(423, setting.globallyPaused ? 'CREDITS_GLOBALLY_PAUSED' : 'CREDITS_ACCOUNT_SUSPENDED', '当前模型服务已暂停。')
+        const ensured = await ensureAccountWithDb(tx, userId)
+        const setting = ensured.setting
+        const account = await applyTesterCreditFloor(tx, ensured.account, 'token-reservation')
+        if (account.suspendedAt && !await isEffectiveTester(tx, userId)) throw new DataAccessError(423, setting.globallyPaused ? 'CREDITS_GLOBALLY_PAUSED' : 'CREDITS_ACCOUNT_SUSPENDED', '当前模型服务已暂停。')
         // 0 倍率免费档不产生费用：不预留、不受余额与预留占用闸门限制。
         if (price.version === 'credits-v1-exact' && price.multiplierBps === 0) return
         const balance = Math.max(0, account.dailyAllowanceMilli - account.dailyUsedMilli) + account.bonusBalanceMilli
@@ -624,8 +632,8 @@ export async function assertCreditAccess(userId: string, tier: CreditModelTier =
   // availability are checked by getModelTierRuntime; account bans remain in auth.
   if (tier === 'custom') return
   if (!isServerModelTier(tier) || (tier === 'basic' && requireSelectable)) throw new DataAccessError(409, 'MODEL_TIER_UNAVAILABLE', '该模型档位尚未开放。')
-  const { account, setting } = await ensureCreditAccount(userId)
-  if (account.suspendedAt) {
+  const { account, setting } = await creditTransaction(async tx => { const state = await ensureAccountWithDb(tx, userId); return { ...state, account: await applyTesterCreditFloor(tx, state.account, 'model-admission') } })
+  if (account.suspendedAt && !await isEffectiveTester(prisma, userId)) {
     throw new DataAccessError(423, setting.globallyPaused ? 'CREDITS_GLOBALLY_PAUSED' : 'CREDITS_ACCOUNT_SUSPENDED', setting.globallyPaused ? '公测模型服务已由管理员暂停，请稍后再试。' : '当前账户的模型使用权限已暂停。')
   }
   const model = await prisma.aiModelConfig.findFirst({
@@ -737,16 +745,16 @@ export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userI
   const capabilities = parseModelCapabilities(config.metadata, config.provider)
   const reasoningEffort = requestedReasoningEffort ?? capabilities.defaultReasoningEffort
   if (!capabilities.reasoningEfforts.includes(reasoningEffort)) throw new DataAccessError(400, 'REASONING_EFFORT_UNSUPPORTED', '该模型不支持所选推理强度。')
+  const admittedAt = Date.now()
+  const multiplierBps = effectiveModelMultiplier(config, admittedAt)
+  const tokenPrice = await (await import('./billing/resolve-token-price.js')).resolveTokenPrice(tier, multiplierBps, { model: config, now: admittedAt })
   return {
     tier,
     ...(config.id ? { modelConfigId: config.id, modelConfigRevision: config.revision } : {}),
-    multiplierBps: effectiveModelMultiplier(config),
+    multiplierBps,
     freePromotion: readModelPromotion(config.metadata),
     ...(readWeightedRoutes(config.metadata)?.candidates.length ? { weightedRoutes: readWeightedRoutes(config.metadata) } : {}),
-    // 0 倍率免费档不绑定费率卡：价格语义恒为免费，展示与指纹不带历史卡价。
-    tokenPrice: readModelPromotion(config.metadata)
-      ? tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier: tier, multiplierBps: effectiveModelMultiplier(config) })
-      : effectiveModelMultiplier(config) === 0 ? undefined : (await getActiveTokenPrice(tier) ?? undefined),
+    tokenPrice,
     provider: config.provider,
     modelName: config.modelName === 'unconfigured' ? null : config.modelName,
     baseUrl: config.baseUrl,
@@ -827,8 +835,10 @@ export async function consumeCreditsInTransaction(tx: Prisma.TransactionClient, 
     }
   }
 
-  const { account, setting } = await ensureAccountWithDb(tx, input.userId)
-  if (account.suspendedAt) throw new DataAccessError(423, setting.globallyPaused ? 'CREDITS_GLOBALLY_PAUSED' : 'CREDITS_ACCOUNT_SUSPENDED', setting.globallyPaused ? '公测模型服务已由管理员暂停，请稍后再试。' : '当前账户的模型使用权限已暂停。')
+  const state = await ensureAccountWithDb(tx, input.userId)
+  const setting = state.setting
+  const account = input.kind === 'usage' ? await applyTesterCreditFloor(tx, state.account, 'charge-admission') : state.account
+  if (account.suspendedAt && !await isEffectiveTester(tx, input.userId)) throw new DataAccessError(423, setting.globallyPaused ? 'CREDITS_GLOBALLY_PAUSED' : 'CREDITS_ACCOUNT_SUSPENDED', setting.globallyPaused ? '公测模型服务已由管理员暂停，请稍后再试。' : '当前账户的模型使用权限已暂停。')
 
   const dailyRemaining = Math.max(0, account.dailyAllowanceMilli - account.dailyUsedMilli)
   const ownUsageId = input.sourceType === 'model_tokens' && input.idempotencyKey.startsWith('usage:') ? input.idempotencyKey.slice(6) : undefined
@@ -843,7 +853,7 @@ export async function consumeCreditsInTransaction(tx: Prisma.TransactionClient, 
   const actualCharge = Math.min(totalRemaining, amountMilli)
   const dailyCharge = Math.min(dailyRemaining, actualCharge)
   const bonusCharge = actualCharge - dailyCharge
-  const updated = await tx.creditAccount.update({
+  let updated = await tx.creditAccount.update({
     where: { userId: input.userId },
     data: {
       dailyUsedMilli: { increment: dailyCharge },
@@ -869,6 +879,7 @@ export async function consumeCreditsInTransaction(tx: Prisma.TransactionClient, 
     },
   })
   await recordGoalFixedCharge(tx, ledgerEntry, goalBinding)
+  if (input.kind === 'usage' && actualCharge > 0) updated = await applyTesterCreditFloor(tx, updated, 'known-charge-settlement')
   return {
     chargedMilli: actualCharge,
     remainingMilli: Math.max(0, updated.dailyAllowanceMilli - updated.dailyUsedMilli) + updated.bonusBalanceMilli,
@@ -948,7 +959,10 @@ export async function recordImageRefundIntentInTransaction(tx: Prisma.Transactio
       throw new DataAccessError(409, 'CREDIT_REFUND_IDENTITY_INVALID', '未找到匹配的原图片收费，不能创建退款。')
     }
     return tx.creditRefundIntent.upsert({ where: { originalEntryId: original.id }, update: {}, create: {
-      originalEntryId: original.id, reason: 'image_generation_unavailable', evidence: parsed.data,
+      // Immediate reconciliation uses the application clock; a DB-default
+      // rounded/ahead timestamp must not postpone a newly verified obligation.
+      // Existing intents retain their stored retry backoff via update: {}.
+      originalEntryId: original.id, reason: 'image_generation_unavailable', evidence: parsed.data, nextAttemptAt: new Date(),
     } })
 }
 
@@ -1148,7 +1162,7 @@ export async function consumeTokenCredits(input: {
         ? original.metadata : null
       const retainedDiscount = originalMetadata?.cachePricingPolicy === 'unknown-cache-discount-2026-09-09'
       const cacheHitTokens = retainedDiscount ? null : usage.promptCacheHitTokens
-      amountMilli = validateBillingInput(() => calculateV2UserChargeMilli(billedInput, billedOutput, cacheHitTokens, frozen.rates, frozen.v1CeilingBps))
+      amountMilli = validateBillingInput(() => calculateV2UserChargeMilli(billedInput, billedOutput, cacheHitTokens, frozen.rates, frozen.v1CeilingBps, frozen.activity))
       metadata = { pricingVersion: frozen.version, rateCardId: frozen.rateCardId, rates: frozen.rates,
         cacheHitTokens, cacheMissTokens: retainedDiscount ? originalMetadata!.cacheMissTokens : usage.promptCacheMissTokens,
         ...(cacheHitTokens === null ? { cachePricingPolicy: 'unknown-cache-discount-2026-09-09', platformAbsorbsDifference: true } : {}),
@@ -1159,6 +1173,7 @@ export async function consumeTokenCredits(input: {
       amountMilli = calculateTokenChargeMilli(billedInput, billedOutput, multiplierBps)
       if (estimated) metadata = { usagePolicy: FALLBACK_USAGE_POLICY, estimated: true }
     }
+    if (frozen?.activity) metadata = { ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}), activity: frozen.activity }
     const charged = await consumeCreditsInTransaction(tx, { ...request, amountMilli, requestTokens: billedInput, responseTokens: billedOutput,
       multiplierBps: frozen?.multiplierBps ?? multiplierBps, metadata })
     // CR03: ledger, wallet and displayed charge commit together. The previously

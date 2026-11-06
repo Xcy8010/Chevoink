@@ -621,7 +621,7 @@ export function generateCoverImages(
 ): Promise<GenerateCoverImageResponse['data']> {
   return requestData<GenerateCoverImageResponse['data']>('/api/ai/cover-image', {
     method: 'POST',
-    body: JSON.stringify(request),
+    body: JSON.stringify({ ...request, operationId: request.operationId ?? crypto.randomUUID() }),
     timeoutMs: 0,
   })
 }

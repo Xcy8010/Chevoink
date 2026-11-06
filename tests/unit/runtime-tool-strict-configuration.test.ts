@@ -13,12 +13,13 @@ function fixture(strict: unknown) {
   const head = { configuration, configurationHash: runtimeJson({ configuration, inputHash: root.inputHash }).hash, revision: 0 }
   const snapshot = { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
     messages: [{ role: 'user', content: 'synthetic' }], successfulToolSignatures: [] }
-  const frame = { revision: 0, snapshot, snapshotHash: runtimeJson(snapshot).hash, previousHash: null }
-  const tx = { agentExecutionState: { findUnique: vi.fn(async () => head) }, agentTaskRoot: { findUniqueOrThrow: vi.fn(async () => root) },
-    agentExecutionFrame: { findFirst: vi.fn(async () => ({ revision: 0 })), findUnique: vi.fn(async () => frame) },
-    agentExecutionOutbox: { findUnique: vi.fn(async () => ({ taskRootId: 'root', type: 'execution.state.saved',
-      payload: { revision: 0, snapshotHash: frame.snapshotHash, previousHash: null } })) } }
-  return { tx: tx as unknown as RuntimeTx, head }
+  const frame = { revision: 0, snapshot, snapshotHash: runtimeJson(snapshot).hash, previousHash: null as string | null }
+  const event = { taskRootId: 'root', type: 'execution.state.saved',
+    payload: { revision: 0, snapshotHash: frame.snapshotHash, previousHash: frame.previousHash } }
+  const tx = { agentExecutionState: { findUnique: vi.fn<() => Promise<typeof head | null>>(async () => head) }, agentTaskRoot: { findUniqueOrThrow: vi.fn(async () => root) },
+    agentExecutionFrame: { findFirst: vi.fn<() => Promise<typeof frame | null>>(async () => frame), findUnique: vi.fn<() => Promise<typeof frame | null>>(async () => frame) },
+    agentExecutionOutbox: { findUnique: vi.fn<() => Promise<typeof event | null>>(async () => event) } }
+  return { tx: tx as unknown as RuntimeTx, queries: tx, head, frame, event }
 }
 
 it.each([undefined, false, true])('reads persisted strict=%s without defaulting or changing the original configuration identity', async strict => {
@@ -35,3 +36,27 @@ it('rejects an invalid strict value and an unauthenticated strict change', async
   f.head.configuration.tools[0].function.strict = true
   await expect(readExecutionStateInTransaction(f.tx, 'root')).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
 })
+
+it.each(['head-missing', 'latest-missing', 'head-revision', 'snapshot', 'snapshot-invalid',
+  'event-missing', 'event-root', 'event-type', 'event-payload', 'initial-chain', 'previous-missing', 'previous-hash'] as const)(
+  'rejects %s while reusing the latest row and retaining its live receipt checks', async fault => {
+    const f = fixture(false)
+    if (fault === 'head-missing') f.queries.agentExecutionState.findUnique.mockResolvedValueOnce(null)
+    if (fault === 'latest-missing') f.queries.agentExecutionFrame.findFirst.mockResolvedValueOnce(null)
+    if (fault === 'head-revision') f.head.revision = 1
+    if (fault === 'snapshot') f.frame.snapshot.messages[0].content = 'changed without a matching hash'
+    if (fault === 'snapshot-invalid') f.frame.snapshot.messages = []
+    if (fault === 'event-missing') f.queries.agentExecutionOutbox.findUnique.mockResolvedValueOnce(null)
+    if (fault === 'event-root') f.event.taskRootId = 'another-root'
+    if (fault === 'event-type') f.event.type = 'another.event'
+    if (fault === 'event-payload') f.event.payload.snapshotHash = 'b'.repeat(64)
+    if (fault === 'initial-chain') f.event.payload.previousHash = f.frame.previousHash = 'b'.repeat(64)
+    if (fault === 'previous-missing' || fault === 'previous-hash') {
+      f.event.payload.revision = f.frame.revision = f.head.revision = 1
+      f.event.payload.previousHash = f.frame.previousHash = 'b'.repeat(64)
+      f.queries.agentExecutionFrame.findUnique.mockResolvedValueOnce(fault === 'previous-missing'
+        ? null : { ...f.frame, snapshotHash: 'c'.repeat(64) })
+    }
+    await expect(readExecutionStateInTransaction(f.tx, 'root')).rejects.toMatchObject({ code: fault === 'head-missing'
+      ? 'RUNTIME_STATE_REQUIRED' : fault === 'snapshot-invalid' ? 'RUNTIME_STATE_INVALID' : 'RUNTIME_RECEIPT_INVALID' })
+  })

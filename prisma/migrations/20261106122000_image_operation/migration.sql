@@ -1,0 +1,2 @@
+CREATE TABLE "image_operations" ("id" VARCHAR(64) PRIMARY KEY,"user_id" VARCHAR(64) NOT NULL,"operation_id" VARCHAR(100) NOT NULL,"request_hash" VARCHAR(64) NOT NULL,"input_snapshot" JSONB NOT NULL,"state" VARCHAR(24) NOT NULL DEFAULT 'prepared',"route_index" INTEGER NOT NULL DEFAULT 0,"result" JSONB,"error_code" VARCHAR(100),"created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,"updated_at" TIMESTAMP(3) NOT NULL);
+CREATE UNIQUE INDEX "image_operations_user_id_operation_id_key" ON "image_operations"("user_id","operation_id");

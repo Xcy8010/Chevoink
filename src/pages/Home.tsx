@@ -1,3 +1,4 @@
+import { SiteAnnouncements, SiteInformation } from '@/features/site-content/public'
 import { useState } from 'react'
 
 import AppState from '@/components/ui/AppState'
@@ -15,6 +16,10 @@ import { useHomeData } from '@/features/home/useHomeData'
  * - 电脑端：主内容 + 右侧信息聚合面板
  */
 export default function Home() {
+  return <><SiteAnnouncements scope="home" /><HomeContent /><SiteInformation /></>
+}
+
+function HomeContent() {
   const { device } = useDevice()
   const { data, isLoading, isError, error, isFetching, refetch } = useHomeData()
   // 分类筛选：点击导航标签后在首页底部展示同标签作品，不跳发现页

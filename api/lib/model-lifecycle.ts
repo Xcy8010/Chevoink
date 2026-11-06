@@ -1,3 +1,5 @@
+import { readModelActivities } from '../../shared/model-activity.js'
+import { admitModelPrice } from './billing/model-activity-price.js'
 import { Prisma, type AiModelConfig } from '@prisma/client'
 import { DataAccessError, prisma } from './prisma.js'
 import type { AdminModelKind } from '../../shared/contracts/admin-model-lifecycle.js'
@@ -24,24 +26,28 @@ export async function resolveSystemModelConfig(role: string, db: Db = prisma): P
 export async function modelLifecyclePrice(db: Db, model: Pick<AiModelConfig, 'tier' | 'multiplierBps' | 'metadata'>): Promise<TokenPrice | null> {
   if (adminModelKind(model.metadata) !== 'text' || !model.tier) return null
   const multiplierBps = effectiveModelMultiplier(model)
-  if (multiplierBps === 0 || readModelPromotion(model.metadata)) return tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier: model.tier, multiplierBps })
+  if (multiplierBps === 0 || readModelPromotion(model.metadata)) return admitModelPrice(model, model.tier as import('../../shared/contracts/credits.js').CreditModelTier)
   const card = await db.creditRateCard.findFirst({ where: { modelTier: model.tier, status: 'active' } })
   if (card) {
     const price = tokenPriceSchema.parse(card.price)
     if (price.version !== 'credits-v2-itemized' || price.rateCardId !== card.id || price.modelTier !== model.tier || runtimeJson(price).hash !== card.priceHash) throw new DataAccessError(409, 'MODEL_PRICE_UNVERIFIED', '现行费率无法核验，不能移交系统用途。')
-    return price
+    return admitModelPrice(model, model.tier as import('../../shared/contracts/credits.js').CreditModelTier, price)
   }
   if (await db.creditRateCardEvent.count({ where: { status: 'active', card: { modelTier: model.tier } } })) throw new DataAccessError(409, 'MODEL_PRICE_UNVERIFIED', '费率已迁移但当前费率不可用。')
-  return tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier: model.tier, multiplierBps })
+  return admitModelPrice(model, model.tier as import('../../shared/contracts/credits.js').CreditModelTier)
 }
 export function modelFeeIdentity(model: Pick<AiModelConfig, 'multiplierBps' | 'metadata'>, price: TokenPrice | null): string {
   const kind = adminModelKind(model.metadata)
-  if (kind === 'image_generation') return runtimeJson({ tariff: 'image_call_6000_v1', amountMilli: 6000 }).hash
+  const activity = readModelActivities(model.metadata)
+  const scheduled = activity ? { baseMultiplierBps: model.multiplierBps, activities: { timezone: activity.timezone, rules: activity.rules.map(({ id: _id, name: _name, ...rule }) => rule) } } : {}
+  if (kind === 'image_generation') return activity
+    ? runtimeJson({ tariff: 'image_call_scheduled_v2', baseAmountMilli: 6000, baseMultiplierBps: model.multiplierBps, ...scheduled }).hash
+    : runtimeJson({ tariff: 'image_call_6000_v1', amountMilli: 6000 }).hash
   if (kind === 'vision') return runtimeJson({ tariff: 'platform_vision_v1', amountMilli: 0 }).hash
   if (kind === 'web_search' || kind === 'web_fetch') return runtimeJson({ tariff: 'web_tool_v1', amountMilli: webToolChargeMilli(effectiveModelMultiplier(model)) }).hash
   const fee = price?.version === 'credits-v2-itemized' ? { version: price.version, rates: price.rates, v1CeilingBps: price.v1CeilingBps ?? null }
     : { version: price?.version ?? 'fixed-tool', multiplierBps: effectiveModelMultiplier(model) }
-  return runtimeJson({ fee, promotion: readModelPromotion(model.metadata) }).hash
+  return runtimeJson({ fee, promotion: readModelPromotion(model.metadata), ...scheduled }).hash
 }
 
 /** Immutable and encrypted server-only copy. Identical replay is safe; collisions fail closed. */

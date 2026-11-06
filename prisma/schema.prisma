@@ -339,6 +339,8 @@ enum PrivacyLevel {
 }
 
 model User {
+  testerEntitlement TesterEntitlement?
+  legalConsents UserLegalConsent[]
   modelAssignments AgentModelAssignment[]
   novelImportJobs NovelImportJob[]
   novelImportIntents NovelImportIntent[]
@@ -1194,6 +1196,7 @@ model AiUsageLog {
 
 /// 用户额度账户。金额统一使用 milli-credit（1000 milli = 1 Credit），避免浮点误差。
 model CreditAccount {
+  testerTopupSequence Int @default(0) @map("tester_topup_sequence")
   userId              String    @id @map("user_id") @db.VarChar(64)
   dailyAllowanceMilli Int       @default(450000) @map("daily_allowance_milli")
   dailyUsedMilli      Int       @default(0) @map("daily_used_milli")
@@ -3389,4 +3392,117 @@ model AiModelConfigVersion {
   model AiModelConfig @relation(fields: [modelConfigId], references: [id], onDelete: NoAction)
   @@id([modelConfigId, revision])
   @@map("ai_model_config_versions")
+}
+
+// Content drafts and immutable publication snapshots. Existing users are never backfilled with consent.
+model SiteContent {
+  id                 String @id @default(cuid()) @db.VarChar(64)
+  kind               String @db.VarChar(24)
+  key                String @db.VarChar(80)
+  revision           Int @default(1)
+  draft              Json
+  withdrawn          Boolean @default(false)
+  deletedAt          DateTime? @map("deleted_at")
+  publishedVersionId String? @map("published_version_id") @db.VarChar(64)
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+  versions           SiteContentVersion[]
+  @@unique([kind, key])
+  @@map("site_contents")
+}
+model SiteContentVersion {
+  id             String @id @default(cuid()) @db.VarChar(64)
+  contentId      String @map("content_id") @db.VarChar(64)
+  contentVersion Int @map("content_version")
+  payload        Json
+  hash           String @db.VarChar(64)
+  publishedAt    DateTime @default(now()) @map("published_at")
+  effectiveAt    DateTime? @map("effective_at")
+  content        SiteContent @relation(fields: [contentId], references: [id], onDelete: Restrict)
+  consents       UserLegalConsent[]
+  @@unique([contentId, contentVersion])
+  @@index([effectiveAt])
+  @@map("site_content_versions")
+}
+model UserLegalConsent {
+  id            String @id @default(cuid()) @db.VarChar(64)
+  userId        String @map("user_id") @db.VarChar(64)
+  versionId     String @map("version_id") @db.VarChar(64)
+  kind          String @db.VarChar(24)
+  hash          String @db.VarChar(64)
+  acceptedAt    DateTime @default(now()) @map("accepted_at")
+  user          User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  version       SiteContentVersion @relation(fields: [versionId], references: [id], onDelete: Restrict)
+  @@unique([userId, kind])
+  @@map("user_legal_consents")
+}
+
+
+/// Independent entitlement; never grants administrator role.
+model TesterEntitlement {
+  userId String @id @map("user_id") @db.VarChar(64)
+  enabled Boolean @default(true)
+  revision Int @default(1)
+  reason String @db.VarChar(500)
+  grantedById String @map("granted_by_id") @db.VarChar(64)
+  expiresAt DateTime? @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@map("tester_entitlements")
+}
+
+/// Immutable installed artifact identity, separate from model revisions.
+model AppRelease {
+  id String @id @db.VarChar(64)
+  label String @db.VarChar(100)
+  sourceSha String @map("source_sha") @db.VarChar(40)
+  artifactSha256 String @map("artifact_sha256") @db.VarChar(64)
+  manifest Json
+  publicNotes Json @map("public_notes")
+  compatibilityVersion Int @map("compatibility_version")
+  verifiedAt DateTime? @map("verified_at")
+  validationState String @default("draft") @map("validation_state") @db.VarChar(24)
+  registeredById String @map("registered_by_id") @db.VarChar(64)
+  createdAt DateTime @default(now()) @map("created_at")
+  channels AppReleaseChannel[]
+  @@map("app_releases")
+}
+model AppReleaseChannel {
+  enabled Boolean @default(true)
+  channel String @id @db.VarChar(16)
+  releaseId String @map("release_id") @db.VarChar(64)
+  revision Int @default(1)
+  updatedAt DateTime @updatedAt @map("updated_at")
+  release AppRelease @relation(fields: [releaseId], references: [id])
+  @@map("app_release_channels")
+}
+model AppReleaseOperation {
+  id String @id @db.VarChar(100)
+  requestHash String @map("request_hash") @db.VarChar(64)
+  action String @db.VarChar(24)
+  actorId String @map("actor_id") @db.VarChar(64)
+  releaseId String @map("release_id") @db.VarChar(64)
+  previousReleaseId String? @map("previous_release_id") @db.VarChar(64)
+  status String @db.VarChar(24)
+  result Json?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@map("app_release_operations")
+}
+
+model ImageOperation {
+ id String @id @default(uuid()) @db.VarChar(64)
+ userId String @map("user_id") @db.VarChar(64)
+ operationId String @map("operation_id") @db.VarChar(100)
+ requestHash String @map("request_hash") @db.VarChar(64)
+ inputSnapshot Json @map("input_snapshot")
+ state String @default("prepared") @db.VarChar(24)
+ routeIndex Int @default(0) @map("route_index")
+ result Json?
+ errorCode String? @map("error_code") @db.VarChar(100)
+ createdAt DateTime @default(now()) @map("created_at")
+ updatedAt DateTime @updatedAt @map("updated_at")
+ @@unique([userId, operationId])
+ @@map("image_operations")
 }

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, symlinkSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { observeProduction, observationProgram } from './production-observation.mjs'
@@ -285,7 +285,17 @@ for (const scenario of ['workflow-change', 'hidden-change-and-revert', 'merge', 
       f.event.before = f.git(['rev-parse', 'HEAD']); f.revision = f.commit(productionRequestTitle({ ...f.input, requestId: scenario === 'duplicate-uuid' ? requestId : '87654321-1234-1234-1234-123456789abc' })); f.event.after = f.revision
     }
     if (scenario === 'noncanonical') { writeFileSync(path.join(f.directory, '.github/production-request.json'), JSON.stringify(f.input)); f.git(['add', '.']); f.git(['commit', '--amend', '--no-edit']); f.revision = f.git(['rev-parse', 'HEAD']); f.event.after = f.revision }
-    if (scenario === 'symlink') { unlinkSync(path.join(f.directory, '.github/production-request.json')); symlinkSync('../controller.mjs', path.join(f.directory, '.github/production-request.json')); f.git(['add', '.']); f.git(['commit', '--amend', '--no-edit']); f.revision = f.git(['rev-parse', 'HEAD']); f.event.after = f.revision }
+    if (scenario === 'symlink') {
+      // This guard consumes Git objects, so construct the real symlink tree
+      // mode directly without requiring host filesystem symlink privileges.
+      const requestPath = '.github/production-request.json'
+      writeFileSync(path.join(f.directory, requestPath), '../controller.mjs')
+      const blob = f.git(['hash-object', '-w', requestPath])
+      f.git(['update-index', '--cacheinfo', '120000', blob, requestPath])
+      f.git(['commit', '--amend', '--no-edit'])
+      f.revision = f.git(['rev-parse', 'HEAD']); f.event.after = f.revision
+      assert.match(f.git(['ls-tree', f.revision, '--', requestPath]), /^120000 blob [a-f0-9]{40}\t/)
+    }
     if (scenario === 'merge') {
       f.git(['checkout', '-b', 'topic', f.candidate]); writeFileSync(path.join(f.directory, 'untrusted'), 'x'); f.commit('topic')
       f.git(['checkout', 'main']); f.git(['merge', '--no-ff', 'topic', '-m', productionRequestTitle(f.input)])
@@ -299,7 +309,9 @@ for (const scenario of ['workflow-change', 'hidden-change-and-revert', 'merge', 
     if (scenario === 'wrong-after') f.event.after = baseline
     if (scenario === 'created') f.event.created = true
     if (scenario === 'deleted') f.event.deleted = true
-    assert.throws(() => verifyProductionRequestGraph(f.revision, f.event, f.git))
+    const reads = []
+    assert.throws(() => verifyProductionRequestGraph(f.revision, f.event, args => { reads.push(args); return f.git(args) }))
+    if (scenario === 'symlink') assert.equal(reads.some(args => args[0] === 'show'), false)
   })
 }
 test('push admission rejects stale main, absent CI and wrong event before protected execution', async t => {

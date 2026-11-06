@@ -1,3 +1,4 @@
+import { imageQualityConfigSchema } from './image-model.js'
 import { z } from 'zod'
 
 export const modelRouteInputSchema = z.object({
@@ -8,6 +9,7 @@ export const modelRouteInputSchema = z.object({
   baseUrl: z.string().trim().url().max(512).refine(value => /^https?:\/\//.test(value), '仅支持 HTTP(S)'),
   apiKey: z.string().trim().min(8).max(2000).optional(),
   enabled: z.boolean(),
+  imageQuality: imageQualityConfigSchema.optional(),
   reasoningEfforts: z.array(z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])).min(1).max(7).optional(),
   contextWindowTokens: z.number().int().min(16_000).max(4_000_000).optional(),
   visionEnabled: z.boolean().optional(),

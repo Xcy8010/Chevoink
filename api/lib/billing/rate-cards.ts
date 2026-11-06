@@ -27,6 +27,7 @@ async function assertAdmin(tx: RuntimeTx, actorId: string, mutation = true) {
 
 function checkedPrice(card: { id: string; modelTier: string; price: unknown; priceHash: string }) {
   const price = itemizedTokenPriceSchema.parse(card.price)
+  if (price.activity) throw new DataAccessError(409, 'CREDIT_RATE_CARD_CORRUPT', '基础费率卡不能包含调用活动快照。')
   if (price.rateCardId !== card.id || price.modelTier !== card.modelTier || runtimeJson(price).hash !== card.priceHash) throw new DataAccessError(409, 'CREDIT_RATE_CARD_CORRUPT', '原费率卡不可核对。')
   return price
 }
@@ -34,6 +35,7 @@ function checkedPrice(card: { id: string; modelTier: string; price: unknown; pri
 /** Rates are immutable even in draft. Revise by creating another version. */
 export async function createRateCard(actorId: string, input: unknown) {
   const price = itemizedTokenPriceSchema.parse(input)
+  if (price.activity) throw new DataAccessError(400, 'CREDIT_RATE_CARD_INVALID', '活动须在模型时段中配置，不能写入基础费率卡。')
   z.string().min(1).max(64).parse(price.rateCardId)
   const frozen = runtimeJson(price)
   return runtimeTransaction(async tx => {

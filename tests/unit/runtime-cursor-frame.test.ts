@@ -34,7 +34,7 @@ function fixture(action: 'prepare' | 'reject' | 'reduce', source?: { args: strin
   const events = [first, latest].map(frame => ({ taskRootId: 'root', type: 'execution.state.saved',
     payload: { revision: frame.revision, previousHash: frame.previousHash, snapshotHash: frame.snapshotHash } }))
   const tx = { agentExecutionState: { findUnique: vi.fn().mockResolvedValue(head) }, agentTaskRoot: { findUniqueOrThrow: vi.fn().mockResolvedValue(root) },
-    agentExecutionFrame: { findFirst: vi.fn().mockResolvedValue({ revision: 1 }),
+    agentExecutionFrame: { findFirst: vi.fn().mockResolvedValue(latest),
       findUnique: vi.fn(async ({ where }: { where: { taskRootId_revision: { revision: number } } }) => where.taskRootId_revision.revision === 1 ? latest : first) },
     agentExecutionOutbox: { findUnique: vi.fn(async ({ where }: { where: { eventKey: string } }) => events[Number(where.eventKey.split(':').at(-1))]) },
     agentOperation: { findFirst: vi.fn().mockRejectedValue(reachedOperation), findUnique: vi.fn().mockRejectedValue(reachedOperation) } }
@@ -57,7 +57,7 @@ describe('verified frame reuse within one cursor transaction', () => {
     const f = fixture(action)
     await expect(actions[action]({ expectedRevision: 1, expectedHash: 'b'.repeat(64) })).rejects.toMatchObject({ code: 'RUNTIME_STATE_CONFLICT' })
     expect(f.queries.agentExecutionOutbox.findUnique).toHaveBeenCalledTimes(1)
-    expect(f.queries.agentExecutionFrame.findUnique.mock.calls.map(([query]) => query.where.taskRootId_revision.revision)).toEqual([1, 0])
+    expect(f.queries.agentExecutionFrame.findUnique.mock.calls.map(([query]) => query.where.taskRootId_revision.revision)).toEqual([0])
     expect(f.queries.agentOperation.findFirst).not.toHaveBeenCalled()
     expect(f.queries.agentOperation.findUnique).not.toHaveBeenCalled()
     // With the exact same legal phase/call but correct hash, reach the real

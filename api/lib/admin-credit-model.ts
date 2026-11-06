@@ -1,8 +1,13 @@
+import { assertImageActivityConfiguration } from './billing/image-price.js'
+import { assertAppReleaseModelCapabilities } from './app-release-model-capabilities.js'
+import { isEffectiveTester, effectiveTesterIds } from './tester-entitlement.js'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 
 import { Prisma, type AiModelConfig } from '@prisma/client'
 import { z } from 'zod'
-import { effectiveModelMultiplier, readModelPromotion, modelPromotionSchema } from '../../shared/model-promotion.js'
+import { readModelActivities, modelActivitiesSchema, type ModelActivities } from '../../shared/model-activity.js'
+import { publicModelPrice, publicImagePrice } from './billing/public-model-price.js'
+import { baseModelMultiplier, effectiveModelMultiplier, readModelPromotion, modelPromotionSchema } from '../../shared/model-promotion.js'
 
 import type { AdminCreditsManagementPayload, AdminModelManagementPayload } from '../../shared/contracts/index.js'
 import type { ImageQualityConfig } from '../../shared/contracts/image-model.js'
@@ -10,7 +15,7 @@ import type { ModelReasoningEffort } from '../../shared/contracts/index.js'
 import { isBuiltInModelTier, isServerModelTier } from '../../shared/contracts/index.js'
 import { creditTransaction, lockCreditPolicy } from './credit-policy.js'
 import { buildNewCreditAccountData, ensureCreditAccount, getCreditWindow, parseModelCapabilities } from './credits.js'
-import { getActiveRun, stopAgentRun, stopActiveRunsByUser, stopAllActiveRuns } from './agent/active-runs.js'
+import { getActiveRun, getActiveRunUserIds, stopAgentRun, stopActiveRunsByUser, stopAllActiveRuns } from './agent/active-runs.js'
 import { env } from '../config/env.js'
 import { DataAccessError, prisma } from './prisma.js'
 import { getPagedAdminCreditAccounts } from './admin-credit-accounts.js'
@@ -30,18 +35,20 @@ import { webToolChargeMilli } from '../../shared/web-tool-pricing.js'
 
 const MILLI = 1000
 
-async function stopCreditRuns(userIds?: string[], capturedIds?: string[]): Promise<number> {
-  const runs = await prisma.agentRun.findMany({ where: { engine: 'loop', status: { in: ['queued', 'running', 'awaiting_approval'] },
+async function stopCreditRuns(userIds?: string[], capturedIds?: string[], exemptTesters = false): Promise<number> {
+  let runs = await prisma.agentRun.findMany({ where: { engine: 'loop', status: { in: ['queued', 'running', 'awaiting_approval'] },
     ...(capturedIds ? { id: { in: capturedIds } } : {}),
     ...(userIds ? { userId: { in: userIds } } : {}) }, select: { id: true, userId: true } })
+  if (exemptTesters) { const exempt = await effectiveTesterIds(prisma); runs = runs.filter(run => !exempt.has(run.userId)) }
   const localIds = new Set(runs.filter(run => getActiveRun(run.id)).map(run => run.id))
-  const { stopLoopRun } = await import('./agent/run-service.js')
+  const stopLoopRun = runs.length ? (await import('./agent/run-service.js')).stopLoopRun : undefined
   let stoppedRemote = 0
   let stoppedLocal = 0
   try {
     for (const run of runs) {
+      if (exemptTesters && await isEffectiveTester(prisma, run.userId)) continue
       try {
-        const result = await stopLoopRun(run.userId, run.id)
+        const result = await stopLoopRun!(run.userId, run.id)
         if (result.stopped && !localIds.has(run.id)) stoppedRemote++
       } catch (error) {
         // A task can finish between the snapshot and its stop transaction.
@@ -51,7 +58,10 @@ async function stopCreditRuns(userIds?: string[], capturedIds?: string[]): Promi
     }
   } finally {
     // Preserve the existing local abort behavior, including non-loop engines.
-    if (capturedIds) for (const runId of capturedIds) stoppedLocal += Number(stopAgentRun(runId))
+    if (exemptTesters) {
+      for (const userId of new Set(userIds ?? getActiveRunUserIds())) if (!await isEffectiveTester(prisma, userId)) stoppedLocal += stopActiveRunsByUser(userId)
+    }
+    else if (capturedIds) for (const runId of capturedIds) stoppedLocal += Number(stopAgentRun(runId))
     else if (userIds) for (const userId of userIds) stoppedLocal += stopActiveRunsByUser(userId)
     else stoppedLocal = stopAllActiveRuns()
   }
@@ -168,7 +178,7 @@ export async function setAdminUsersSuspended(userIds: string[], paused: boolean)
   return {
     users: updated.count,
     paused,
-    stoppedRuns: paused ? await stopCreditRuns(normalized) : 0,
+    stoppedRuns: paused ? await stopCreditRuns(normalized, undefined, true) : 0,
   }
 }
 
@@ -209,7 +219,7 @@ export async function setCreditsGloballyPaused(paused: boolean): Promise<{ pause
     })
     await tx.creditAccount.updateMany({ data: { suspendedAt: paused ? new Date() : null } })
   })
-  return { paused, stoppedRuns: paused ? await stopCreditRuns() : 0 }
+  return { paused, stoppedRuns: paused ? await stopCreditRuns(undefined, undefined, true) : 0 }
 }
 
 type ToolEnvironment = Pick<typeof env,
@@ -278,7 +288,13 @@ export async function getAdminModelManagement(view: 'active' | 'archived' | 'all
         pricing: price ? presentLedgerPrice({ pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates, v1CeilingBps: price.v1CeilingBps }).pricing : null,
         id: model.id, revision: model.revision, archivedAt: model.archivedAt?.toISOString() ?? null, archiveReason: model.archiveReason, tier: model.tier, sortOrder: model.sortOrder, modelKind, provider: fallback?.provider ?? model.provider, displayName: model.displayName,
         modelName: fallback?.modelName ?? model.modelName, baseUrl: fallback?.baseUrl ?? model.baseUrl, multiplier: effectiveModelMultiplier(model) / 10_000,
+        baseMultiplier: model.multiplierBps / 10000,
+        publicDescription: typeof metadata.publicDescription === 'string' ? metadata.publicDescription : '',
+        publicFeatures: Array.isArray(metadata.publicFeatures) ? metadata.publicFeatures as string[] : [],
+        activities: readModelActivities(model.metadata),
+        activityStatus: modelKind === 'image_generation' ? publicImagePrice(model).activity : model.tier && isServerModelTier(model.tier) ? publicModelPrice(model, model.tier, prices.get(model.tier)).activity : null,
         freePromotion: readModelPromotion(model.metadata),
+        ...(modelKind === 'image_generation' ? { perCallCredits: publicImagePrice(model).perCallCredits } : {}),
         ...(modelKind === 'web_search' || modelKind === 'web_fetch' ? { perCallCredits: webToolChargeMilli(model.multiplierBps) / MILLI } : {}),
         enabled: model.enabled || Boolean(fallback), selectable: model.selectable, isDefault: model.isDefault,
         apiKeyConfigured: Boolean(model.apiKeyCiphertext) || Boolean(fallback?.apiKeyConfigured), requestCount: row?._count._all ?? 0,
@@ -302,6 +318,9 @@ export type UpdateAdminModelInput = {
   modelKind?: AdminModelKind
   webToolProtocol?: import('../../shared/contracts/web-tool.js').WebToolProtocol
   imageQuality?: ImageQualityConfig
+  activities?: ModelActivities | null
+  publicDescription?: string
+  publicFeatures?: string[]
   freePromotion?: import('../../shared/model-promotion.js').ModelPromotion | null
   routes?: ModelRouteInput[]
   weightedRoutes?: WeightedRoutesInput
@@ -347,10 +366,16 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
         throw new DataAccessError(400, 'MODEL_PROMOTION_INVALID', '限时免费须使用 0 倍率、未来截止时间及有效的到期倍率。')
       }
     }
+    if (input.activities !== undefined && input.activities !== null) {
+      const parsed = modelActivitiesSchema.safeParse(input.activities)
+      if (!parsed.success) throw new DataAccessError(400, 'MODEL_ACTIVITY_INVALID', parsed.error.issues.map(issue => issue.message).join('；'))
+      if (adminModelKind(model.metadata) !== 'text' && adminModelKind(model.metadata) !== 'image_generation') throw new DataAccessError(400, 'MODEL_ACTIVITY_INVALID', '活动仅适用于内置文本和图片生成。')
+    }
     const currentCapabilities = parseModelCapabilities(model.metadata, model.provider)
     const reasoningEfforts = input.reasoningEfforts ?? currentCapabilities.reasoningEfforts
     const defaultReasoningEffort = input.defaultReasoningEffort ?? currentCapabilities.defaultReasoningEffort
     const imageModel = adminModelKind(model.metadata) === 'image_generation'
+    if (imageModel) assertImageActivityConfiguration(Math.round((input.multiplier ?? model.multiplierBps / 10000) * 10000), input.activities === undefined ? readModelActivities(model.metadata) : input.activities)
     const routes = saveModelRoutes(input.routes ?? presentModelRoutes(model.metadata).map(({ apiKeyConfigured: _configured, ...route }) => route), model.metadata, imageModel ? [] : reasoningEfforts,
       imageModel ? undefined : { contextWindowTokens: input.contextWindowTokens ?? currentCapabilities.contextWindowTokens, visionEnabled: input.visionEnabled ?? currentCapabilities.visionEnabled })
     if (routes.length && !imageModel && !isServerModelTier(model.tier)) throw new DataAccessError(400, 'MODEL_ROUTES_INVALID', '仅文本内置模型与图片生成支持供应商线路。')
@@ -396,7 +421,7 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
         baseUrl: input.baseUrl === undefined ? undefined : input.baseUrl?.trim() || null,
         apiKeyCiphertext: input.apiKey?.trim() ? encryptSecret(input.apiKey.trim()) : undefined,
         multiplierBps: input.multiplier === undefined
-          ? (input.freePromotion === null ? effectiveModelMultiplier(model) : undefined)
+          ? (input.freePromotion === null ? baseModelMultiplier(model) : undefined)
           : Math.round(input.multiplier * 10_000),
         enabled: input.enabled,
         selectable: input.selectable,
@@ -405,6 +430,9 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
           ...(model.metadata && typeof model.metadata === 'object' && !Array.isArray(model.metadata) ? model.metadata : {}),
           ...(routes ? { routes } : {}),
           ...(input.weightedRoutes !== undefined ? { weightedRoutes: saveWeightedRoutes(input.weightedRoutes, model.metadata) } : {}),
+          ...(input.activities !== undefined ? { activities: input.activities ? { ...input.activities, revision: (readModelActivities(model.metadata)?.revision ?? 0) + 1 } : null } : {}),
+          ...(input.publicDescription !== undefined ? { publicDescription: input.publicDescription } : {}),
+          ...(input.publicFeatures !== undefined ? { publicFeatures: input.publicFeatures } : {}),
           freePromotion,
           ...(isWebTool && input.webToolProtocol !== undefined ? { webToolProtocol: input.webToolProtocol } : {}),
           ...(input.imageQuality !== undefined ? { imageQuality: input.imageQuality } : {}),
@@ -425,6 +453,7 @@ export async function updateAdminModel(adminId: string, modelId: string, input: 
   await creditTransaction(async tx => {
     await lockCatalog(tx, adminId)
     const changed = await updateAdminModelWithTx(tx, modelId, input)
+    await assertAppReleaseModelCapabilities(tx, adminId, changed.after, input)
     const routeKeysReplaced = [...(input.routes ?? []), ...(input.weightedRoutes?.candidates ?? [])].filter(route=>Boolean(route.apiKey)).map(route=>route.id ?? route.label)
     await tx.adminAuditLog.create({data:{adminId,action:'models.update',targetType:'aiModelConfig',targetId:modelId,ip,
       detail:adminModelChangeDetail(changed.before,changed.after,Boolean(input.apiKey?.trim()),routeKeysReplaced)}})
@@ -451,7 +480,8 @@ export async function createAdminModel(adminId: string, input: UpdateAdminModelI
     const tier = modelKind === 'text' ? `builtin_${randomBytes(8).toString('hex')}` : null
     const model = await tx.aiModelConfig.create({ data: { key: tier ?? `tool:variant:${randomUUID()}`, tier, metadata: { modelKind }, provider: input.provider ?? 'openai', displayName: input.displayName ?? '新模型',
       modelName: 'unconfigured', enabled: false, selectable: false, isDefault: false, sortOrder: Math.max(-1, ...rows.map(row => row.sortOrder)) + 1 } })
-    await updateAdminModelWithTx(tx, model.id, { ...input, expectedRevision: undefined })
+    const changed = await updateAdminModelWithTx(tx, model.id, { ...input, expectedRevision: undefined })
+    await assertAppReleaseModelCapabilities(tx, adminId, changed.after, input)
     await tx.adminAuditLog.create({ data: { adminId, action: 'models.create', targetType: 'aiModelConfig', targetId: model.id, detail: { tier, displayName: input.displayName ?? model.displayName } } })
     return { id: model.id, tier }
   })

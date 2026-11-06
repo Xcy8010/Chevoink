@@ -11,12 +11,22 @@ export const webToolBillingMigrationName = '20261020120000_web_tool_billing'
 export const webToolBillingMigrationChecksum = 'f7797fe83d78f72a07c9c6e4b8a6cc17ff758db54b1709776f9b1dd35b7933f0'
 export const adminModelLifecycleMigrationName = '20261101120000_admin_model_lifecycle'
 export const adminModelLifecycleMigrationChecksum = 'ced5cef83baa1d9bfe9ebe54e5c39388e85f7e6ea0ee9aa7c2257958e9181baf'
+export const adminExperiencePlan = '20261106_admin_model_experience'
+export const adminExperienceMigrations = [
+  ['20261106120000_site_content', 'e482a56f154bc0207c5a221a823869151518a4ac3253c2d5e7ea6c8f928d4bde'],
+  ['20261106121000_tester_app_release', '978cc8ec92106adefdf372583960e7af18f8a8444ae383d682a51aeae9dd4d33'],
+  ['20261106122000_image_operation', 'e2875436ca2e5280fe742bcc9c9c2e2bfc6a99a01bff9bb2639a0a621ef0569e'],
+  ['20261106123000_app_release_validation', '22fa01d898965c11c356f9f1bb311661c24e75cbd6fd0334190d1f69866bf7bc'],
+]
+// Frozen bdf8032da9970fdbeafdbbee76dba14886d3a75e -> reviewed admin/model candidate.
+const adminExperienceCandidateSchema = '47366b5ecb5d6cd6f4029b9134c8164812349b546f24dfc8551184475810f4db'
 // Frozen ae6cd5f7d43e77e1a75ce9c4d2dfe3ce60ee568e -> 8ba827a5029010f4ad87e3c6e59a513edb90ce53 schema pair.
 const lifecycleCandidateSchema = 'da62c9651530ce93646848e7be0f0634787ef397317a1e4d321e3242ffca265f'
 const billingBaselineSchema = 'e7752d3afe61d9e6172404cf5ea93cec78087dab274743804f3a90fd2b01d774'
 const billingCandidateSchema = 'f981e01401a19d5a18e0c28556a12cb2fb0b35eefe6a9be2975980da2ddf5afa'
 const reviewed = new Map([[migrationName, migrationChecksum], [fetchMigrationName, fetchMigrationChecksum],
   [webToolBillingMigrationName, webToolBillingMigrationChecksum], [adminModelLifecycleMigrationName, adminModelLifecycleMigrationChecksum]])
+reviewed.set(adminExperiencePlan, createHash('sha256').update(JSON.stringify(adminExperienceMigrations)).digest('hex'))
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
@@ -40,6 +50,12 @@ export function releaseMigrationPlan(candidate, baseline) {
   const currentFiles = files(path.join(candidate, 'prisma/migrations'))
   const oldFiles = files(path.join(baseline, 'prisma/migrations'))
   if (next === previous && JSON.stringify(currentFiles) === JSON.stringify(oldFiles)) return 'routine'
+  const experienceTargets = new Map(adminExperienceMigrations.map(([name, hash]) => [`${name}/migration.sql`, hash]))
+  if (digest(previous.replaceAll('\r\n', '\n')) === lifecycleCandidateSchema
+    && digest(next.replaceAll('\r\n', '\n')) === adminExperienceCandidateSchema
+    && !oldFiles.some(([name]) => experienceTargets.has(name))
+    && JSON.stringify(currentFiles.filter(([name]) => !experienceTargets.has(name))) === JSON.stringify(oldFiles)
+    && [...experienceTargets].every(([name, hash]) => currentFiles.find(([file]) => file === name)?.[1] === hash)) return adminExperiencePlan
   const lifecycleTarget = `${adminModelLifecycleMigrationName}/migration.sql`
   if (digest(previous.replaceAll('\r\n', '\n')) === billingCandidateSchema
     && digest(next.replaceAll('\r\n', '\n')) === lifecycleCandidateSchema
@@ -68,20 +84,26 @@ export function assertMigrationState(rows, checksums, phase, before, plan = migr
   if (!reviewed.has(plan)) throw Error('Unapproved migration plan')
   if (!['before', 'after'].includes(phase)) throw Error('Invalid migration verification phase')
   const expected = new Map(checksums)
-  if (phase === 'before') expected.delete(plan)
+  const additions = plan === adminExperiencePlan ? new Map(adminExperienceMigrations) : new Map([[plan, reviewed.get(plan)]])
+  for (const [name, hash] of additions) {
+    if (checksums.find(([key]) => key === name)?.[1] !== hash) throw Error('Approved migration files are missing or changed')
+    if (phase === 'before') expected.delete(name)
+  }
   if (rows.length !== expected.size) throw Error('Unexpected pending, duplicate or additional migration')
   if (phase === 'after') assertMigrationState(before, checksums, 'before', undefined, plan)
   const previous = new Map((before ?? []).map(row => [row.migration_name, row]))
   for (const row of rows) {
     if (!expected.has(row.migration_name) || !/^[a-f0-9]{64}$/.test(row.checksum)
       || !row.finished_at || row.rolled_back_at || !Number.isInteger(row.applied_steps_count) || row.applied_steps_count < 1) throw Error('Migration history is not fully verified')
+    if (plan === adminExperiencePlan && !/^[a-f0-9]{32}$/.test(row.historyHash)) throw Error('Migration history fingerprint missing')
     if (phase === 'after') {
-      if (row.migration_name === plan) {
-        if (row.checksum !== reviewed.get(plan)) throw Error('New migration checksum mismatch')
+      if (additions.has(row.migration_name)) {
+        if (row.checksum !== additions.get(row.migration_name)) throw Error('New migration checksum mismatch')
       } else {
         const old = previous.get(row.migration_name)
         if (!old || row.checksum !== old.checksum || new Date(row.finished_at).toISOString() !== new Date(old.finished_at).toISOString()
-          || row.applied_steps_count !== old.applied_steps_count) throw Error('Historical migration changed during deployment')
+          || row.applied_steps_count !== old.applied_steps_count
+          || (plan === adminExperiencePlan && row.historyHash !== old.historyHash)) throw Error('Historical migration changed during deployment')
       }
     }
     expected.delete(row.migration_name)
@@ -208,6 +230,47 @@ export async function readAdminModelLifecycleState(tx, phase) {
   return { ...state, indexes, foreignKeys, bindings, invalid }
 }
 
+const adminExperienceTables = ['site_contents', 'site_content_versions', 'user_legal_consents', 'tester_entitlements',
+  'app_releases', 'app_release_channels', 'app_release_operations', 'image_operations']
+// Frozen from the four exact SQL files applied in an isolated PostgreSQL database.
+export const adminExperienceCatalogHash = 'ea8e4194253f74a11c51ce775ab5633345fdc724be383ea3c2ba4123ecd2e61b'
+export function adminExperienceCatalogDigest(state) {
+  return digest(JSON.stringify(['tables', 'columns', 'indexes', 'constraints'].map(key => [key, state[key].map(row => JSON.stringify(row)).sort()])))
+}
+export function assertAdminExperienceState(state, phase, before) {
+  if (!['before', 'after'].includes(phase)) throw Error('Invalid admin experience phase')
+  const empty = { tables: [{ name: 'credit_accounts', kind: 'r' }], columns: [], indexes: [], constraints: [] }
+  if (phase === 'before') {
+    if (adminExperienceCatalogDigest(state) !== adminExperienceCatalogDigest(empty)) throw Error('Admin experience objects already exist or baseline is missing')
+    return
+  }
+  assertAdminExperienceState(before, 'before')
+  if (adminExperienceCatalogDigest(state) !== adminExperienceCatalogHash) throw Error('Admin experience catalog mismatch')
+}
+
+/** Catalog only: no user rows, balances, content, provider keys or policy snapshots. */
+export async function readAdminExperienceState(tx) {
+  const tableList = adminExperienceTables.map(name => `'${name}'`).join(',')
+  const tables = await tx.$queryRawUnsafe(`SELECT c.relname AS name, c.relkind::text AS kind
+    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname=current_schema() AND c.relname IN (${tableList}, 'credit_accounts') ORDER BY c.relname`)
+  const columns = await tx.$queryRawUnsafe(`SELECT c.relname AS table, a.attname AS name, format_type(a.atttypid,a.atttypmod) AS type,
+    a.attnotnull AS required, pg_get_expr(d.adbin,d.adrelid) AS "defaultValue"
+    FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+    LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+    WHERE n.nspname=current_schema() AND a.attnum>0 AND NOT a.attisdropped
+      AND (c.relname IN (${tableList}) OR (c.relname='credit_accounts' AND a.attname='tester_topup_sequence')) ORDER BY c.relname,a.attnum`)
+  const indexes = await tx.$queryRawUnsafe(`SELECT t.relname AS table, c.relname AS name, pg_get_indexdef(i.indexrelid) AS definition,
+    i.indisvalid AS valid, i.indisready AS ready
+    FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+    WHERE n.nspname=current_schema() AND t.relname IN (${tableList}) ORDER BY t.relname,c.relname`)
+  const constraints = await tx.$queryRawUnsafe(`SELECT t.relname AS table, k.conname AS name, k.contype::text AS kind,
+    pg_get_constraintdef(k.oid) AS definition, k.convalidated AS valid
+    FROM pg_constraint k JOIN pg_class t ON t.oid=k.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+    WHERE n.nspname=current_schema() AND t.relname IN (${tableList}) ORDER BY t.relname,k.conname`)
+  return { tables, columns, indexes, constraints }
+}
+
 export function assertMigrationEnvironment(environment, shared) {
   if (environment.APP_ENV !== 'production' || shared.APP_ENV !== 'production'
     || !shared.DATABASE_URL || environment.DATABASE_URL !== shared.DATABASE_URL) throw Error('Production migration environment mismatch')
@@ -244,13 +307,20 @@ async function main() {
       await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY')
       const [database] = await tx.$queryRawUnsafe('SELECT current_database() AS database, current_schema() AS schema')
       assertDatabaseIdentity(database, expectedDatabase)
-      const rows = await tx.$queryRawUnsafe('SELECT migration_name, checksum, finished_at, rolled_back_at, applied_steps_count FROM "_prisma_migrations" ORDER BY migration_name')
+      const rows = await tx.$queryRawUnsafe(`SELECT migration_name, checksum, finished_at, rolled_back_at, applied_steps_count
+        ${plan === adminExperiencePlan ? ', md5(to_jsonb(m)::text) AS "historyHash"' : ''}
+        FROM "_prisma_migrations" m ORDER BY migration_name`)
       const checksums = files(path.join(candidate, 'prisma/migrations')).filter(([name]) => name.endsWith('/migration.sql'))
         .map(([name, hash]) => [name.slice(0, -'/migration.sql'.length), hash])
       const before = phase === 'after' ? JSON.parse(readFileSync(path.join(candidate, '.release-migration-before.json'), 'utf8')) : null
       if (before && (before.migration !== plan || before.checksum !== reviewed.get(plan) || before.phase !== 'before')) throw Error('Migration preflight receipt mismatch')
       if (before) assertDatabaseIdentity(database, before.database)
       assertMigrationState(rows, checksums, phase, before?.migrations, plan)
+      if (plan === adminExperiencePlan) {
+        const catalog = await readAdminExperienceState(tx)
+        assertAdminExperienceState(catalog, phase, before?.catalog)
+        return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, catalog }
+      }
       if (plan === adminModelLifecycleMigrationName) {
         const lifecycle = await readAdminModelLifecycleState(tx, phase)
         assertAdminModelLifecycleState(lifecycle, phase, before?.lifecycle)

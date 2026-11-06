@@ -1,3 +1,4 @@
+import { integrationLegalConsent } from '../support/legal-consent.js'
 import request from 'supertest'
 import { randomInt } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -25,7 +26,7 @@ describe.skipIf(!dbAvailable)('Agent 2.0 P1 卷章结构（需 DB）', () => {
     const phone = `+861395${unique}`
     const register = await request(app)
       .post('/api/auth/register')
-      .send({ phone, nickname: `卷章结构测试${unique}`, password: 'Volume-Test-123!' })
+      .send({ ...await integrationLegalConsent(), phone, nickname: `卷章结构测试${unique}`, password: 'Volume-Test-123!' })
     expect(register.status).toBe(201)
     const cookies = Array.isArray(register.headers['set-cookie'])
       ? register.headers['set-cookie']

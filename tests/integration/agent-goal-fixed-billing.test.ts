@@ -1,3 +1,7 @@
+import assert from 'node:assert/strict'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { env } from '../../api/config/env.js'
@@ -19,6 +23,9 @@ afterAll(() => prisma.$disconnect())
 afterEach(() => { vi.restoreAllMocks(); imageTransport.mockReset() })
 
 async function fixture(work: (context: GoalExecutionContext) => Promise<void>, explicitLimits = false) {
+  const previousImageDirectory = process.env.AGENT_IMAGE_RESPONSE_DIR
+  const imageDirectory = await mkdtemp(path.join(tmpdir(), 'chevoink-goal-images-'))
+  process.env.AGENT_IMAGE_RESPONSE_DIR = imageDirectory
   const previous = env.agentGoalEnabled
   env.agentGoalEnabled = true
   const user = await prisma.user.create({ data: { nickname: `goal-fee-${randomUUID()}`, passwordHash: 'fixture-only' } })
@@ -40,16 +47,21 @@ async function fixture(work: (context: GoalExecutionContext) => Promise<void>, e
     await prisma.agentRun.deleteMany({ where: { userId: user.id } })
     await prisma.agentSession.deleteMany({ where: { userId: user.id } })
     await prisma.aiUsageLog.deleteMany({ where: { userId: user.id } })
+    await prisma.imageOperation.deleteMany({ where: { userId: user.id } })
     await prisma.coverAsset.deleteMany({ where: { ownerUserId: user.id } })
     await prisma.novel.deleteMany({ where: { authorId: user.id } })
     await prisma.user.delete({ where: { id: user.id } })
     env.agentGoalEnabled = previous
+    if (previousImageDirectory === undefined) delete process.env.AGENT_IMAGE_RESPONSE_DIR
+    else process.env.AGENT_IMAGE_RESPONSE_DIR = previousImageDirectory
+    assert(path.resolve(imageDirectory).startsWith(path.resolve(tmpdir()) + path.sep + 'chevoink-goal-images-'), 'Unexpected test image directory')
+    await rm(imageDirectory, { recursive: true, force: true })
   }
 }
 
 describe.skipIf(!dbAvailable)('goal fixed-fee ledger integration', () => {
-  it.each(['success', 'timeout', 'partial-body', 'all-rejected', 'all-empty'] as const)(
-    'keeps separate physical legacy image observations for routed %s without mirroring wallet charges twice', async scenario => {
+  it.each((['success', 'timeout', 'partial-body', 'all-rejected', 'all-empty'] as const).flatMap(scenario => [false, true].map(stable => ({ scenario, stable }))))(
+    'keeps physical image observations for routed $scenario stable=$stable without mirroring wallet charges twice', async ({ scenario, stable }) => {
       await fixture(async context => {
         vi.spyOn(toolConfig, 'getToolModelRuntime').mockResolvedValue({ provider: 'primary-fixture', modelName: 'primary-image', baseUrl: 'https://primary.invalid/generate', apiKey: 'isolated-primary-key',
           routes: [{ id: randomUUID(), provider: 'backup-fixture', modelName: 'backup-image', baseUrl: 'https://backup.invalid/generate', apiKey: 'isolated-backup-key' }] })
@@ -64,8 +76,9 @@ describe.skipIf(!dbAvailable)('goal fixed-fee ledger integration', () => {
           if (scenario === 'all-rejected') return new Response('{"error":{"message":"fixture unavailable"}}', { status: 503 })
           return new Response(JSON.stringify({ data: scenario === 'all-empty' ? [] : [{ url: 'https://images.invalid/cover.png' }] }))
         })
+        const operationId = randomUUID()
         const generate = () => withGoalExecutionContext(context, () => generateCoverImageData(context.userId,
-          { novelId: context.novelId, prompt: '合成封面测试', size: '768x1024', count: 1 }))
+          { ...(stable ? { operationId } : {}), novelId: context.novelId, prompt: '合成封面测试', size: '768x1024', count: 1 }))
         if (scenario === 'success') expect((await generate()).images).toHaveLength(1)
         else await expect(generate()).rejects.toThrow()
         expect(imageTransport).toHaveBeenCalledTimes(2)
@@ -91,11 +104,39 @@ describe.skipIf(!dbAvailable)('goal fixed-fee ledger integration', () => {
         expect(after).toEqual(before)
         expect(await prisma.agentGoalUsage.count({ where: { goalId: context.goalId, status: 'unknown' } })).toBe(unknown ? 1 : 0)
         expect(imageTransport).toHaveBeenCalledTimes(2)
+        if (stable && unknown) {
+          await expect(withGoalExecutionContext(context, () => generateCoverImageData(context.userId, { operationId: operationId + ':next', novelId: context.novelId, prompt: '新的合成封面测试', size: '768x1024', count: 1 })))
+            .rejects.toMatchObject({ code: 'GOAL_RECONCILIATION_REQUIRED' })
+          expect(imageTransport).toHaveBeenCalledTimes(2)
+        }
         const assets = await prisma.coverAsset.findMany({ where: { ownerUserId: context.userId } })
         expect(assets).toHaveLength(scenario === 'success' ? 1 : 0)
         if (scenario === 'success') expect(assets[0].modelName).toBe('backup-image')
       })
     })
+  it.each(['cancel', 'budget'] as const)('stable image fallback observes real goal %s after a complete first rejection', async scenario => {
+    await fixture(async context => {
+      vi.spyOn(toolConfig, 'getToolModelRuntime').mockResolvedValue({ provider: 'primary-fixture', modelName: 'primary-image', baseUrl: 'https://primary.invalid/generate', apiKey: 'isolated-primary-key',
+        routes: [{ id: randomUUID(), provider: 'backup-fixture', modelName: 'backup-image', baseUrl: 'https://backup.invalid/generate', apiKey: 'isolated-backup-key' }] })
+      imageTransport.mockImplementationOnce(async () => {
+        if (scenario === 'cancel') {
+          const goal = (await readAgentGoal(context.userId, context.sessionId))!
+          await actOnAgentGoal(context.userId, context.sessionId, context.goalId, { requestId: randomUUID(), expectedStateVersion: goal.stateVersion, action: 'cancel' })
+        } else await prisma.agentGoalBudget.update({ where: { goalId: context.goalId }, data: { activeTimeMs: 60001n } })
+        return new Response('{}', { status: 503 })
+      })
+      await expect(withGoalExecutionContext(context, () => generateCoverImageData(context.userId,
+        { operationId: randomUUID(), novelId: context.novelId, prompt: '有界合成封面测试', size: '768x1024', count: 1 })))
+        .rejects.toMatchObject({ code: scenario === 'cancel' ? 'GOAL_EXECUTION_FENCED' : 'GOAL_BUDGET_EXHAUSTED' })
+      expect(imageTransport).toHaveBeenCalledOnce()
+      expect(await prisma.creditLedgerEntry.count({ where: { userId: context.userId, kind: 'usage', deltaMilli: -6000 } })).toBe(1)
+      expect(await prisma.creditLedgerEntry.count({ where: { userId: context.userId, kind: 'refund', deltaMilli: 6000 } })).toBe(1)
+      expect(await prisma.agentGoalUsage.count({ where: { goalId: context.goalId, status: 'unknown' } })).toBe(0)
+      const budget = await prisma.agentGoalBudget.findUniqueOrThrow({ where: { goalId: context.goalId } })
+      expect(budget.creditsUsedMicros).toBe(0n)
+      if (scenario === 'budget') expect(budget.activeTimeMs).toBeGreaterThanOrEqual(60001n)
+    }, scenario === 'budget')
+  })
   it.each(['image_generation', 'web_search', 'web_fetch'])('counts %s once and refunds after cancellation without reopening the goal', async sourceType => {
     await fixture(async context => {
       const key = `goal-fixed:${randomUUID()}`

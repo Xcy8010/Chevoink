@@ -47,7 +47,7 @@ async function fixture() {
     agentTaskRoot: { findUnique: vi.fn(async () => ({ ...root, inputHash })), findUniqueOrThrow: vi.fn(async () => ({ ...root, inputHash })) },
     agentOperation: { findUnique: vi.fn(async () => operation) },
     agentExecutionFrame: { findUnique: vi.fn(async ({ where }: { where: { taskRootId_revision: { revision: number } } }) => frames[where.taskRootId_revision.revision] ?? null),
-      findFirst: vi.fn(async () => ({ revision: frames.at(-1)!.revision })) },
+      findFirst: vi.fn(async () => frames.at(-1)) },
     agentExecutionState: { findUnique: vi.fn(async () => head) },
     novel: { findUnique: vi.fn(async () => liveNovel ? { id: 'novel' } : null) }, agentRun: { findUnique: vi.fn(async () => liveRun ? { id: 'run' } : null) } } as unknown as RuntimeTx
   const archive = await writeNovelDeletionArchive(tx, { taskRootId: root.id, operationId: operation.id, inputHash: operation.inputHash, runId: 'run' },

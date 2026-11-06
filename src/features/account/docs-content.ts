@@ -1,3 +1,4 @@
+import { policyProtectedHelpSections, type HelpDocument } from '../../../shared/contracts/site-content'
 export type DocSection = {
   id: string
   heading: string
@@ -671,9 +672,17 @@ export const DOC_GROUPS = DOCS.reduce<string[]>((groups, doc) => {
 }, [])
 
 /** Current policy claims are conditional; historical release notes stay intact. */
-export function getAccountDocs(publicBetaEnabled: boolean | undefined): DocEntry[] {
-  if (publicBetaEnabled === true) return DOCS
-  return DOCS.map(doc => {
+export function getAccountDocs(publicBetaEnabled: boolean | undefined, overrides: Record<string, HelpDocument> = {}): DocEntry[] {
+  const protectedSections = policyProtectedHelpSections
+  const docs = DOCS.map(doc => {
+    const override = overrides[doc.key]
+    if (!override) return doc
+    // Live policy facts continue to come from the product policy below.
+    const protectedIds = protectedSections[doc.key] ?? []
+    return {...doc, ...override, sections: doc.sections.map(section => protectedIds.includes(section.id) ? section : override.sections.find(item => item.id === section.id) ?? section)}
+  })
+  if (publicBetaEnabled === true) return docs
+  return docs.map(doc => {
     if (doc.key === 'changelog') return doc
     return { ...doc, summary: doc.key === 'plan' ? '免费版套餐权益与后续套餐规划。' : doc.summary,
       sections: doc.sections.filter(section => !(doc.key === 'credits' && section.id === 'reset')).map(section => ({ ...section,

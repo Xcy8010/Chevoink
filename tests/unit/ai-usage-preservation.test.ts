@@ -808,7 +808,7 @@ describe('explicit zero provider usage is not missing usage', () => {
   })
   it('releases a provider-rejected auxiliary request rather than holding the account', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":{"message":"rate limited"}}', { status: 429 })))
-    await expect(generateTextCompletion('system', 'user', { userId: 'test', action: 'test' })).rejects.toThrow('rate limited')
+    await expect(generateTextCompletion('system', 'user', { userId: 'test', action: 'test' })).rejects.toMatchObject({ code: 'AI_PROVIDER_ERROR', message: '模型服务暂时不可用。' })
     expect(fetch).toHaveBeenCalledOnce() // No readable terminal ledger proof in this fixture.
     expect(mocks.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { billingStatus: 'provider_rejected', reservedCreditMilli: 0, reservationExpiresAt: null } }))
     expect(mocks.charge).not.toHaveBeenCalled()

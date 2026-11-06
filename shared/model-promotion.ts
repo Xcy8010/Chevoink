@@ -1,3 +1,4 @@
+import { evaluateModelActivity, readModelActivities } from './model-activity.js'
 import { z } from 'zod'
 
 export const modelPromotionSchema = z.object({
@@ -16,8 +17,14 @@ export function readModelPromotion(metadata: unknown): ModelPromotion | null {
 }
 
 /** Resolve before freezing a new operation's price. Never alter saved receipts. */
-export function effectiveModelMultiplier(model: { multiplierBps: number; metadata?: unknown }, now = Date.now()): number {
+export function baseModelMultiplier(model: { multiplierBps: number; metadata?: unknown }, now = Date.now()): number {
   const promotion = readModelPromotion(model.metadata)
   if (model.multiplierBps !== 0 || !promotion || now < Date.parse(promotion.endsAt)) return model.multiplierBps
   return Math.round(promotion.afterMultiplier * 10000)
+}
+
+/** New admissions only. Existing operations always read their frozen price. */
+export function effectiveModelMultiplier(model: { multiplierBps: number; metadata?: unknown }, now = Date.now()): number {
+  const base = baseModelMultiplier(model, now), activities = readModelActivities(model.metadata)
+  return activities ? evaluateModelActivity(activities, base, now).effectiveMultiplierBps : base
 }

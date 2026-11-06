@@ -918,7 +918,7 @@ export function toCoverAsset(record: CoverAssetRecord): CoverAsset {
     imageUrl: record.imageUrl,
     prompt: record.prompt ?? null,
     negativePrompt: record.negativePrompt ?? null,
-    modelName: record.modelName ?? null,
+    modelName: record.modelName ? '图片生成' : null,
     width: record.width ?? null,
     height: record.height ?? null,
     createdAt: toIso(record.createdAt) ?? nowIso(),

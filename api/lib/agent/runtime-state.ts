@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { AgentExecutionFrame } from '@prisma/client'
 import { z } from 'zod'
 import { tokenPriceSchema } from '../billing/token-price.js'
 import { weightedRouteSelectionSchema } from '../../../shared/contracts/model-weighted-routes.js'
@@ -61,6 +62,11 @@ function parseSnapshot(input: unknown) {
 export async function readExecutionFrame(tx: RuntimeTx, taskRootId: string, revision: number) {
   const frame = await tx.agentExecutionFrame.findUnique({ where: { taskRootId_revision: { taskRootId, revision } } })
   if (!frame) return runtimeError('RUNTIME_STATE_REQUIRED', '执行快照缺失，不能用历史摘要代替。')
+  return verifyExecutionFrame(tx, taskRootId, revision, frame)
+}
+
+/** Reuse only the row read in this transaction; every receipt/chain check remains live. */
+async function verifyExecutionFrame(tx: RuntimeTx, taskRootId: string, revision: number, frame: AgentExecutionFrame) {
   const state = parseSnapshotState(frame.snapshot)
   const snapshotHash = runtimeJsonHash(state)
   const event = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `state:${taskRootId}:${revision}` } })
@@ -81,12 +87,12 @@ export async function readExecutionStateInTransaction(tx: RuntimeTx, taskRootId:
   const configuration = configurationSchema.safeParse(head.configuration)
   if (!configuration.success || runtimeJsonHash({ configuration: head.configuration, inputHash: root.inputHash }) !== head.configurationHash
     || runtimeJsonHash({ spec: root.specSnapshot, request: root.requestSnapshot }) !== root.inputHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原始输入或配置快照损坏。')
-  const latest = await tx.agentExecutionFrame.findFirst({ where: { taskRootId }, orderBy: { revision: 'desc' }, select: { revision: true } })
+  const latest = await tx.agentExecutionFrame.findFirst({ where: { taskRootId }, orderBy: { revision: 'desc' } })
   if (!latest || latest.revision !== head.revision) runtimeError('RUNTIME_RECEIPT_INVALID', '执行头指针与最新快照不一致。')
   // 旧快照的工具参数可能缺顶层 type（被供应商拒绝、任务无法继续）；读取时统一修复，与新转换哈希口径一致。
   const storedConfiguration = { ...configuration.data, tools: configuration.data.tools.map(tool => ({ ...tool, function: { ...tool.function, parameters: withObjectType(tool.function.parameters) } })) }
   return { head, configuration: storedConfiguration, originalRequest: root.requestSnapshot, originalSpec: root.specSnapshot,
-    frame: await readFrame(tx, taskRootId, head.revision) }
+    frame: await verifyExecutionFrame(tx, taskRootId, head.revision, latest) }
 }
 
 const readState = readExecutionStateInTransaction

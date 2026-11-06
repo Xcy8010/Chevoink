@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({ row: {} as Record<string, unknown>, update: vi
 vi.mock('undici', async original => ({ ...await original<typeof import('undici')>(), fetch: mocks.fetch }))
 vi.mock('../../api/lib/secret-box.js', async original => ({ ...await original<object>(), decryptSecret: () => 'offline-image-key' }))
 vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<object>(), prisma: {
+  appReleaseChannel: { findMany: vi.fn(async () => []) }, // This fixture exercises the unconfigured legacy channel.
   aiModelConfig: { findMany: vi.fn(async (args: { select?: unknown }) => args.select ? [] : [mocks.row]),
     findUnique: vi.fn(async () => mocks.row), findFirst: vi.fn(async () => mocks.row), findFirstOrThrow: vi.fn(async () => mocks.row), update: mocks.update },
   aiUsageLog: { groupBy: vi.fn(async () => []), findMany: vi.fn(async () => []), create: mocks.usage, findUnique: vi.fn(async () => null) },
@@ -135,3 +136,20 @@ it('invalidates the cached image quality when the admin changes the default, pre
 })
 
 vi.mock('../../api/lib/model-lifecycle.js', async original => ({ ...await original<object>(), captureAdminModelVersion: vi.fn(async () => {}) }))
+
+it.each([0, 5000, 15000])('keeps the unchanged v1 image tariff when legacy declared multiplier is %s and no activity exists', async multiplierBps => {
+  mocks.row.multiplierBps = multiplierBps
+  const captured = await captureBothPaths()
+  expect(captured.runtime.price).toBeUndefined()
+  expect(captured.work).toMatchObject({ version: 1, tariff: 'image_call_6000_v1', amountMilli: 6000 })
+  expect(mocks.charge).toHaveBeenCalledWith(expect.objectContaining({ amountMilli: 6000 }))
+})
+it('rejects saving a positive image activity at zero base, while accepting explicitly free activity', async () => {
+  const activities = { revision: 0, timezone: 'Asia/Shanghai' as const, rules: [{ id: 'explicit', name: '明确活动', enabled: true, startDate: null, endDate: null,
+    weekdays: [0, 1, 2, 3, 4, 5, 6], allDay: true, startTime: '00:00', endTime: '00:00', multiplierBps: 10000 }] }
+  mocks.row.multiplierBps = 0
+  await expect(updateAdminModel('admin', 'image', { activities })).rejects.toMatchObject({ code: 'MODEL_ACTIVITY_BASE_REQUIRED' })
+  expect(mocks.update).not.toHaveBeenCalled()
+  await expect(updateAdminModel('admin', 'image', { activities: { ...activities, rules: [{ ...activities.rules[0], multiplierBps: 0 }] } })).resolves.toBeUndefined()
+  expect((await resolveCoverImageRuntime()).price?.amountMilli).toBe(0)
+})

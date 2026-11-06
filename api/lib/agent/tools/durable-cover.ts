@@ -40,10 +40,11 @@ async function assertRouteAdvance(tx: RuntimeTx, parentId: string, work: CoverWo
     const pointer = unit ? z.object({ result: imageBlobSchema }).parse(unit.attempt.result).result : null
     if (!unit || !pointer || !coverImageFailureMayRetry(pointer.httpStatus, unit.proof.outcome === 'empty' ? 'AI_PROVIDER_EMPTY_RESPONSE' : undefined)
       || unit.proof.outcome === 'images' || unit.input.workHash !== runtimeJson(work).hash) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原图片线路未确认失败，不能切换备用线路。')
+    if (unit.work.amountMilli === 0) continue
     const refund = await tx.creditLedgerEntry.findUnique({ where: { idempotencyKey: `refund:${unit.input.chargeKey}` } })
     const metadata = refund?.metadata as { originalEntryId?: string } | null
     if (!refund || refund.userId !== unit.debit.userId || refund.kind !== 'refund' || refund.sourceType !== 'image_generation'
-      || refund.deltaMilli !== 6000 || metadata?.originalEntryId !== unit.debit.id) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原图片退款尚未完成，未请求备用线路。')
+      || refund.deltaMilli !== unit.work.amountMilli || metadata?.originalEntryId !== unit.debit.id) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原图片退款尚未完成，未请求备用线路。')
   }
 }
 
@@ -68,6 +69,8 @@ async function refundNoResult(userId: string, attemptId: string, requestHash: st
   await withoutGoalEffects(() => prisma.$transaction(async tx => {
     const attempt = await lockOwnedAttempt(tx, userId, attemptId, requestHash)
     if (!attempt.dispatchedAt) return runtimeError('RUNTIME_RECEIPT_INVALID', '未派发图片调用不能创建退款。')
+    const debit = await tx.creditLedgerEntry.findUnique({ where: { idempotencyKey: chargeKey } })
+    if (debit?.deltaMilli === 0) return
     await recordImageRefundIntentInTransaction(tx, userId, chargeKey, { outcome, deliveredImages: 0 })
   }))
   await withoutGoalEffects(() => reconcileCreditRefunds({ userId, limit: 10 })).catch(() => { /* Durable original obligation remains. */ })
@@ -95,8 +98,9 @@ async function generateRoute(ctx: ToolContext, lease: RunLeaseToken, parentId: s
     await recordProviderResult({ ...identity, outcome: saved.pointer.httpStatus >= 200 && saved.pointer.httpStatus < 300 ? 'succeeded' : 'failed', result: saved.pointer })
   } else {
     if (prepared.attempt.status !== 'prepared') return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原封面调用已终止，未重新生成。')
-    const pool = await resolveCoverImageRuntime()
-    const runtime = index === 0 ? pool : pool.fallbackRuntimes?.find(candidate => candidate.route.routeId === work.route.routeId)
+    const pool = await resolveCoverImageRuntime(work.route)
+    const runtime = work.route.routeId && pool.route.routeId !== work.route.routeId
+      ? pool.fallbackRuntimes?.find(candidate => candidate.route.routeId === work.route.routeId) : pool
     if (!runtime) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原图片备用线路已不可用，尚未派发。')
     const { modelConfigId: _currentId, modelConfigRevision: _currentRevision, ...legacyRoute } = runtime.route
     const comparableRoute = work.route.modelConfigId ? runtime.route : legacyRoute
@@ -115,10 +119,10 @@ async function generateRoute(ctx: ToolContext, lease: RunLeaseToken, parentId: s
         amountMilli: work.amountMilli, chargeKey: prepared.input.chargeKey }
       if (await tx.creditLedgerEntry.findUnique({ where: { idempotencyKey: prepared.input.chargeKey } })) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原图片扣费与派发状态不一致，未重复扣费。')
       await consumeCreditsInTransaction(tx, { userId: ctx.userId, amountMilli: work.amountMilli, kind: 'usage', sourceType: 'image_generation',
-        idempotencyKey: prepared.input.chargeKey, referenceId: prepared.operation.id, metadata: { novelId: work.novelId, agentCover: binding } })
+        idempotencyKey: prepared.input.chargeKey, referenceId: prepared.operation.id, ...(work.version === 2 ? { multiplierBps: work.price.effectiveMultiplierBps } : {}), metadata: { novelId: work.novelId, agentCover: binding, ...(work.version === 2 ? { price: work.price, ...(work.price.activity ? { activity: work.price.activity } : {}) } : {}) } })
       await tx.aiUsageLog.create({ data: { id: prepared.input.usageLogId, userId: ctx.userId, novelId: work.novelId, agentRunId: parent.operation.originRunId,
         providerType: 'image', providerMode: work.route.providerMode, modelName: work.route.modelName, action: 'generateCoverImage', durationMs: 0,
-        targetType: 'imageCharge', targetId: prepared.input.chargeKey, creditChargeMilli: 6000, usageSource: 'unknown', billingStatus: 'pending_usage',
+        targetType: 'imageCharge', targetId: prepared.input.chargeKey, creditChargeMilli: work.amountMilli, usageSource: 'unknown', billingStatus: 'pending_usage',
         billingEvidence: { taskRootId: lease.taskRootId, operationId: prepared.operation.id } } })
       const marked = await markProviderDispatchedInTransaction(tx, lease, current.id, 0)
       if (!marked.dispatchGranted) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原图片派发未能原子提交。')
@@ -147,7 +151,7 @@ async function generateRoute(ctx: ToolContext, lease: RunLeaseToken, parentId: s
   await withoutGoalEffects(() => prisma.$transaction(async tx => {
     await lockOwnedAttempt(tx, ctx.userId, identity.attemptId, identity.requestHash)
     await writeCoverUnit(tx, identity.attemptId, outcome)
-    if (outcome !== 'images') await recordImageRefundIntentInTransaction(tx, ctx.userId, prepared.input.chargeKey,
+    if (outcome !== 'images' && work.amountMilli > 0) await recordImageRefundIntentInTransaction(tx, ctx.userId, prepared.input.chargeKey,
       { outcome: outcome === 'invalid' ? 'unknown' : outcome, deliveredImages: 0 })
   }))
   await syncGoalDurableUsage(identity.attemptId)
@@ -210,8 +214,8 @@ export async function executeDurableCover(ctx: ToolContext, tool: AgentTool, raw
     const runtime = await resolveCoverImageRuntime(); assertPublicRoute(runtime.route)
     for (const candidate of runtime.fallbackRuntimes ?? []) assertPublicRoute(candidate.route)
     const parsed = coverGenerateTool.parameters.parse(args), count = parsed.count ?? 1
-    work = coverWorkSchema.parse({ version: 1, novelId: ctx.novelId, ...novel, prompt: enforceCoverTitleInPrompt(parsed.prompt.trim(), novel.title, novel.displayTitle),
-      count, size: FIXED_NOVEL_COVER_SIZE, assetIds: Array.from({ length: count }, () => randomUUID()), tariff: 'image_call_6000_v1', amountMilli: 6000, route: runtime.route,
+    work = coverWorkSchema.parse({ ...(runtime.price ? { version: 2, tariff: runtime.price.tariff, amountMilli: runtime.price.amountMilli, price: runtime.price } : { version: 1, tariff: 'image_call_6000_v1', amountMilli: 6000 }), novelId: ctx.novelId, ...novel, prompt: enforceCoverTitleInPrompt(parsed.prompt.trim(), novel.title, novel.displayTitle),
+      count, size: FIXED_NOVEL_COVER_SIZE, assetIds: Array.from({ length: count }, () => randomUUID()), route: runtime.route,
       ...(runtime.fallbackRuntimes?.length ? { fallbackRoutes: runtime.fallbackRuntimes.map(candidate => candidate.route) } : {}) })
   }
   const prepared = await prepareToolCursorOperation(lease, capability.cursor, { key: capability.operationKey, action: tool.name, callId: ctx.callId,

@@ -161,6 +161,9 @@ export function updateAdminModel(modelId: string, payload: {
   expectedRevision?: number
   webToolProtocol?: import('../../../shared/contracts/web-tool').WebToolProtocol
   imageQuality?: import('../../../shared/contracts/image-model').ImageQualityConfig
+  activities?: import('../../../shared/model-activity').ModelActivities | null
+  publicDescription?: string
+  publicFeatures?: string[]
   freePromotion?: import('../../../shared/model-promotion').ModelPromotion | null
   routes?: import('../../../shared/contracts/model-routes').ModelRouteInput[]
   weightedRoutes?: import('../../../shared/contracts/model-weighted-routes').WeightedRoutesInput

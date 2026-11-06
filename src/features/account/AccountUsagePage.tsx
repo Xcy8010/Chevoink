@@ -1,3 +1,4 @@
+import LedgerActivityPrice from './LedgerActivityPrice'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { CalendarDays, Gift, LoaderCircle, RefreshCcw, UserPlus } from 'lucide-react'
@@ -27,6 +28,7 @@ function LedgerRow({ item, onTask }: { item: CreditLedgerItem; onTask?: (runId: 
     <li className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-[#efefec] px-5 py-4 last:border-b-0 dark:border-[var(--border-subtle)]">
       <div className="min-w-0">
         <p className="truncate text-sm font-medium">{ledgerLabel(item)}</p>
+        <LedgerActivityPrice item={item} />
         {item.taskRunId && onTask && <button type="button" onClick={() => onTask(item.taskRunId!)}
           className="mt-1 text-xs underline underline-offset-4">查看所属任务费用</button>}
         <p className="mt-1 text-xs text-[var(--text-tertiary)]">

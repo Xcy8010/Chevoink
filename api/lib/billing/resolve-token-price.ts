@@ -1,3 +1,4 @@
+import { readModelActivities } from '../../../shared/model-activity.js'
 import type { CreditModelTier } from '../../../shared/contracts/credits.js'
 import type { RunLeaseToken } from '../agent/runtime-lease.js'
 import { withRunLease } from '../agent/runtime-lease.js'
@@ -5,7 +6,8 @@ import { runtimeError, runtimeJson } from '../agent/runtime-common.js'
 import { tokenPriceSchema, type TokenPrice } from './token-price.js'
 import { getActiveTokenPrice } from './rate-cards.js'
 import { prisma } from '../prisma.js'
-import { readModelPromotion } from '../../../shared/model-promotion.js'
+import { admitModelPrice } from './model-activity-price.js'
+import { effectiveModelMultiplier, readModelPromotion } from '../../../shared/model-promotion.js'
 
 /** Recover an operation's exact price before consulting today's active rate card.
  * No fee changes on replay, even after the old card is retired. */
@@ -28,20 +30,27 @@ export async function resolveDurableTokenPrice(lease: RunLeaseToken, key: string
 }
 
 /** Used before default/non-streaming requests as well as durable operations. */
-export async function resolveTokenPrice(modelTier: CreditModelTier, multiplierBps: number): Promise<TokenPrice> {
+export async function resolveTokenPrice(modelTier: CreditModelTier, multiplierBps: number, admission?: { model: { multiplierBps: number; metadata?: unknown }; now: number } | { freshOperation: true }): Promise<TokenPrice> {
   if (modelTier === 'custom') return tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier, multiplierBps: 0 })
+  if (admission && 'freshOperation' in admission) {
+    const now = Date.now()
+    const model = await prisma.aiModelConfig.findFirst({ where: { ownerUserId: null, tier: modelTier }, select: { multiplierBps: true, metadata: true } })
+    admission = model ? { model, now } : undefined
+    if (model) multiplierBps = effectiveModelMultiplier(model, now)
+  }
   // 0 倍率档由产品公示为真免费：恒定按 v1-exact 零费结算，历史遗留费率卡不得再对免费档收费。
   // 与准入 assertCreditAccess、预留豁免 reserveTokenCredits 保持同一判定源（倍率为 0）。
-  if (multiplierBps === 0) return tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier, multiplierBps: 0 })
-  const model = await prisma.aiModelConfig.findFirst({ where: { ownerUserId: null, tier: modelTier }, select: { metadata: true } })
+  if (multiplierBps === 0) return admission ? admitModelPrice(admission.model, modelTier, null, admission.now) : tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier, multiplierBps: 0 })
+  const configured = admission?.model ?? await prisma.aiModelConfig.findFirst({ where: { ownerUserId: null, tier: modelTier }, select: { multiplierBps: true, metadata: true } })
+  const model = configured ? { metadata: configured.metadata, multiplierBps: readModelActivities(configured.metadata) ? configured.multiplierBps : multiplierBps } : null
   // A timed-free offer explicitly declares its post-offer multiplier. Historical
   // rate cards must not silently replace that advertised price. Existing
   // operations return their frozen receipt before reaching this resolver.
-  if (readModelPromotion(model?.metadata)) return tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier, multiplierBps })
+  if (readModelPromotion(model?.metadata)) return model ? admitModelPrice(model, modelTier, null, admission?.now) : tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier, multiplierBps })
   const active = await getActiveTokenPrice(modelTier)
-  if (active) return active
+  if (active) return model ? admitModelPrice(model, modelTier, active, admission?.now) : active
   // Compatibility during rollout only; an already migrated tier cannot silently revert.
   const migrated = await prisma.creditRateCardEvent.findFirst({ where: { status: 'active', card: { modelTier } }, select: { id: true } })
   if (migrated) return runtimeError('RUNTIME_PRICE_REQUIRED', '此档位的新费率暂未生效，不能退回旧公式收费。')
-  return tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier, multiplierBps })
+  return model ? admitModelPrice(model, modelTier, null, admission?.now) : tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier, multiplierBps })
 }

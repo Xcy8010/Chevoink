@@ -1,3 +1,4 @@
+import { integrationLegalConsent } from '../support/legal-consent.js'
 import request from 'supertest'
 import { randomInt } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -61,7 +62,7 @@ describe.skipIf(!dbAvailable)('应用冒烟（需 DB）', () => {
 
     const registerRes = await request(app)
       .post('/api/auth/register')
-      .send({ phone, nickname: `冒烟测试用户${unique}`, password })
+      .send({ ...await integrationLegalConsent(), phone, nickname: `冒烟测试用户${unique}`, password })
     expect(registerRes.status).toBe(201)
     expect(registerRes.body.data.tokens.accessToken).toContain('v2.')
     // v2 双 cookie：access + refresh 同时下发

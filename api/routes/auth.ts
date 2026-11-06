@@ -1,3 +1,5 @@
+import { readPublicSiteContent } from '../lib/site-content.js'
+import { legalConsentSchema } from '../../shared/contracts/site-content.js'
 import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
 
@@ -20,6 +22,10 @@ import { normalizePhoneNumber } from '../lib/phone.js'
 import { sendAuthSmsCode, verifyAuthSmsCode } from '../lib/sms-service.js'
 
 const router = Router()
+router.get('/legal-policies',async(_req:Request,res:Response)=>{
+  const requestId=createRequestId()
+  try{const {legal}=await readPublicSiteContent();res.json(buildSuccess(requestId,{legal}))}catch(error){sendRouteError(res,requestId,error)}
+})
 
 /* ---------------- 请求体校验 schema（文案与历史提示保持一致） ---------------- */
 
@@ -36,6 +42,7 @@ const registerSchema = z.object({
   nickname: z.string().min(1),
   password: z.string().optional(),
   referralCode: z.string().max(24).optional(),
+  legalConsent: legalConsentSchema.optional(),
 })
 
 const smsRegisterSchema = z.object({
@@ -43,6 +50,7 @@ const smsRegisterSchema = z.object({
   code: z.string().min(1),
   password: z.string().optional(),
   referralCode: z.string().max(24).optional(),
+  legalConsent: legalConsentSchema.optional(),
 })
 
 const loginSchema = z.object({
@@ -156,6 +164,7 @@ router.post('/register', async (req: Request, res: Response): Promise<void> => {
       nickname: body.nickname.trim(),
       password: body.password?.trim() || undefined,
       referralCode: body.referralCode?.trim() || undefined,
+      legalConsent: body.legalConsent,
     })
 
     const tokens = await createSession(user.id, res)
@@ -181,6 +190,7 @@ router.post('/sms/register', async (req: Request, res: Response): Promise<void> 
       phone,
       password: body.password?.trim() || undefined,
       referralCode: body.referralCode?.trim() || undefined,
+      legalConsent: body.legalConsent,
     })
 
     const tokens = await createSession(user.id, res)

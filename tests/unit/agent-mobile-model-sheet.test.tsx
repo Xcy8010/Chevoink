@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import userEvent from '@testing-library/user-event'
 import { AgentMobileModelSheet } from '../../src/features/studio/agent/components/AgentMobileModelSheet'
 
 const originalShow = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'showModal')
@@ -21,9 +22,9 @@ afterEach(() => {
 function setup() {
   const callbacks = { onTier: vi.fn(), onCustom: vi.fn(), onReasoning: vi.fn(), onSettings: vi.fn(), onClose: vi.fn() }
   const view = render(<AgentMobileModelSheet {...callbacks} modelOptions={[
-    { tier: 'speed', label: '极速', available: true, multiplier: 1, selectedByDefault: true },
-    { tier: 'standard', label: '标准', available: true, multiplier: 2, selectedByDefault: false },
-    { tier: 'basic', label: '不可用', available: false, multiplier: 0, selectedByDefault: false },
+    { tier: 'speed', label: '极速', available: true, multiplier: 1, selectedByDefault: true, reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'high', visionEnabled: true },
+    { tier: 'standard', label: '标准', available: true, multiplier: 2, selectedByDefault: false, reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'high', visionEnabled: false },
+    { tier: 'basic', label: '不可用', available: false, multiplier: 0, selectedByDefault: false, reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'high', visionEnabled: false },
   ]} customModels={[]} customModelId={null} modelTier="speed" activeModelLabel="极速" activeReasoningEffort="high" activeReasoningEfforts={['low', 'high']} />)
   return { ...callbacks, ...view }
 }
@@ -31,9 +32,9 @@ function setup() {
 it('exposes selected model/effort and real callbacks with a single modal surface', () => {
   const view = setup()
   expect(screen.getAllByRole('dialog')).toHaveLength(1)
-  expect(screen.getByRole('button', { name: /极速\s*1.0x/ }).getAttribute('aria-pressed')).toBe('true')
+  expect(screen.getByRole('button', { name: /极速\s*1x/ }).getAttribute('aria-pressed')).toBe('true')
   expect(screen.queryByText('不可用')).toBeNull()
-  fireEvent.click(screen.getByRole('button', { name: /标准\s*2.0x/ }))
+  fireEvent.click(screen.getByRole('button', { name: /标准\s*2x/ }))
   expect(view.onTier).toHaveBeenCalledWith('standard')
   fireEvent.change(screen.getByRole('slider', { name: '调整当前模型推理强度' }), { target: { value: '0' } })
   expect(view.onReasoning).toHaveBeenCalledWith('low')
@@ -52,4 +53,25 @@ it('locks background scrolling and restores it and focus when closed', () => {
   expect(document.body.style.overflow).toBe('')
   expect(document.activeElement).toBe(trigger)
   trigger.remove()
+})
+
+it('shows an active discount at narrow width while details leave selection and thinking unchanged', async () => {
+  const user = userEvent.setup()
+  const onTier = vi.fn(), onReasoning = vi.fn()
+  render(<AgentMobileModelSheet modelOptions={[{ tier: 'speed', label: '极速', available: true, multiplier: 0.125, baseMultiplier: 1.5,
+    selectedByDefault: true, reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'high', visionEnabled: true,
+    activity: { name: '晚间优惠', revision: 1, timezone: 'Asia/Shanghai', asOf: '2026-11-06T12:00:00Z', nextSwitchAt: null, rules: [] } }]}
+    customModels={[{ id: 'mine', displayName: '我的模型', enabled: true, provider: 'owned', modelName: 'owned-model', baseUrl: 'https://owned.invalid/v1', apiKeyConfigured: true, reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'high', visionEnabled: false, contextWindowTokens: null, createdAt: '', updatedAt: '' }]} customModelId={null} modelTier="speed" activeModelLabel="极速"
+    activeReasoningEffort="high" activeReasoningEfforts={['low', 'high']} onTier={onTier} onCustom={vi.fn()} onReasoning={onReasoning} onSettings={vi.fn()} onClose={vi.fn()} />)
+  const row = screen.getByRole('button', { name: /极速.*晚间优惠.*1.5x.*0.125x/ })
+  expect(row.querySelector('s')?.textContent).toBe('1.5x')
+  await user.click(screen.getByLabelText('极速价格与能力详情'))
+  expect(screen.getByRole('tooltip').closest('dialog')).toBe(screen.getByRole('dialog'))
+  expect(onTier).not.toHaveBeenCalled()
+  expect(onReasoning).not.toHaveBeenCalled()
+  expect(screen.getByRole('button', { name: /我的模型.*自有密钥/ })).toBeTruthy()
+  fireEvent.change(screen.getByRole('slider', { name: '调整当前模型推理强度' }), { target: { value: '0' } })
+  expect(onReasoning).toHaveBeenCalledWith('low')
+  fireEvent.click(row)
+  expect(onTier).toHaveBeenCalledWith('speed')
 })

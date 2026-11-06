@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
 import { FIXED_NOVEL_COVER_SIZE } from '../../../../shared/contracts/index.js'
@@ -39,6 +40,7 @@ export const coverGenerateTool = defineTool({
     const finalPrompt = enforceCoverTitleInPrompt(args.prompt.trim(), novel.title, novel.displayTitle)
 
     const { images } = await generateCoverImageData(ctx.userId, {
+      operationId: 'legacy-cover:' + createHash('sha256').update(String(ctx.runId) + ':' + String(ctx.callId)).digest('hex'),
       prompt: finalPrompt,
       size: FIXED_NOVEL_COVER_SIZE,
       count: args.count ?? 1,

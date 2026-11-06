@@ -32,7 +32,7 @@ it('uses only the primary when it succeeds', async () => {
   expect(mocks.refund).not.toHaveBeenCalled()
 })
 
-it.each([429, 500, 502, 503, 504, 200])('routes a complete %s failure to the next account and charges the logical call once', async status => {
+it.each([429, 500, 502, 503, 200])('routes a complete %s failure to the next account and charges the logical call once', async status => {
   mocks.fetch.mockResolvedValueOnce(new Response(status === 200 ? '{"data":[]}' : 'upstream unavailable', { status })).mockResolvedValueOnce(success())
   await generateCoverImageData('owner', input)
   expect(mocks.fetch).toHaveBeenCalledTimes(2)
@@ -48,8 +48,9 @@ it.each([429, 500, 502, 503, 504, 200])('routes a complete %s failure to the nex
   expect(mocks.usage).toHaveBeenCalledWith({ data: expect.objectContaining({ modelName: 'image-a', action: 'generateCoverImageRouteFailure', creditChargeMilli: 0 }) })
 })
 
-it.each(['timeout', 'partial-body', 'invalid', 'unauthorized', 'cancelled'] as const)('does not switch after %s', async scenario => {
+it.each(['timeout', 'gateway-timeout', 'partial-body', 'invalid', 'unauthorized', 'cancelled'] as const)('does not switch after %s', async scenario => {
   const abort = new AbortController()
+  if (scenario === 'gateway-timeout') mocks.fetch.mockResolvedValueOnce(new Response('{}', { status: 504 }))
   if (scenario === 'timeout') mocks.fetch.mockRejectedValueOnce(new DOMException('timeout', 'TimeoutError'))
   if (scenario === 'partial-body') mocks.fetch.mockResolvedValueOnce({ status: 503, text: async () => { throw Error('connection lost') } })
   if (scenario === 'invalid') mocks.fetch.mockResolvedValueOnce(new Response('not json'))
@@ -59,7 +60,7 @@ it.each(['timeout', 'partial-body', 'invalid', 'unauthorized', 'cancelled'] as c
   expect(mocks.fetch).toHaveBeenCalledOnce()
   expect(mocks.assets).not.toHaveBeenCalled()
   expect(mocks.refund).toHaveBeenCalledOnce()
-  if (scenario === 'timeout' || scenario === 'partial-body') expect(mocks.refund).toHaveBeenCalledWith('owner', expect.any(String), { outcome: 'unknown', deliveredImages: 0 })
+  if (scenario === 'timeout' || scenario === 'gateway-timeout' || scenario === 'partial-body') expect(mocks.refund).toHaveBeenCalledWith('owner', expect.any(String), { outcome: 'unknown', deliveredImages: 0 })
 })
 
 it('exhausts the configured pool once and records one refund obligation', async () => {

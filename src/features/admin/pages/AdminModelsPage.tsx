@@ -1,3 +1,4 @@
+import { modelActivitiesSchema, type ModelActivities } from '../../../../shared/model-activity'
 import { isBuiltInModelTier } from '../../../../shared/contracts/model-tier'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -29,6 +30,7 @@ function toolPrice(multiplier: number): string {
 export type ModelRow = NonNullable<ReturnType<typeof getAdminModelManagement> extends Promise<infer T> ? T : never>['models'][number]
 const emptyForm = {
     webToolProtocol: '' as '' | WebToolProtocol,
+    publicDescription: '', publicFeatures: [] as string[], activities: { revision: 0, timezone: 'Asia/Shanghai', rules: [] } as ModelActivities,
     provider: '', displayName: '', modelName: '', baseUrl: '', apiKey: '', multiplier: '1',
     imageQuality: undefined as ImageQualityConfig | undefined, imageQualityCustomValues: '',
     enabled: true, selectable: true, isDefault: false,
@@ -69,10 +71,11 @@ export default function AdminModelsPage() {
     if (!editing) return
     const initial = {
       webToolProtocol: editing.webToolProtocol ?? (editing.provider.trim().toLowerCase() === 'deepseek' ? 'deepseek' : editing.provider.trim().toLowerCase() === 'bocha' ? 'bocha' : ''),
+      publicDescription: editing.publicDescription ?? '', publicFeatures: editing.publicFeatures ?? [], activities: editing.activities ?? { revision: 0, timezone: 'Asia/Shanghai', rules: [] },
       provider: editing.provider, displayName: editing.displayName, modelName: editing.modelName,
       imageQuality: editing.imageQuality,
       imageQualityCustomValues: editing.imageQuality?.supportedValues.filter(value => !IMAGE_QUALITY_OPTIONS.some(option => option.value === value)).join(', ') ?? '',
-      baseUrl: editing.baseUrl ?? '', apiKey: '', multiplier: String(editing.multiplier),
+      baseUrl: editing.baseUrl ?? '', apiKey: '', multiplier: String(editing.baseMultiplier ?? editing.multiplier),
       enabled: editing.enabled, selectable: editing.selectable, isDefault: editing.isDefault,
       reasoningEfforts: editing.reasoningEfforts, defaultReasoningEffort: editing.defaultReasoningEffort,
       reasoningParameterMode: editing.reasoningParameterMode ?? '',
@@ -111,11 +114,12 @@ export default function AdminModelsPage() {
         throw new Error(missing.message)
       }
       setFieldError(null)
+      if ((editingKind === 'text' || editingKind === 'image_generation') && form.activities.rules.length) modelActivitiesSchema.parse(form.activities)
       const limitedFree = Number(form.multiplier) === 0 && form.limitedFree
       const expires = Date.parse(form.freeUntil)
       if (limitedFree && (!Number.isFinite(expires) || expires <= Date.now())) throw new Error('请选择未来的截止时间')
       const { limitedFree: _limited, freeUntil: _until, afterMultiplier: _after, imageQualityCustomValues: _customQuality, ...fields } = form
-      const payload = { ...fields, selectable: editingKind === 'text' ? form.selectable : false, isDefault: editingKind === 'text' ? form.isDefault : false, visionEnabled: editingKind === 'vision' ? true : form.visionEnabled, expectedRevision: editing.id ? editing.revision : undefined, webToolProtocol: (editingKind === 'web_search' || editingKind === 'web_fetch') && form.webToolProtocol ? form.webToolProtocol : undefined, weightedRoutes: editingKind === 'text' && (editing.weightedRoutes || form.weightedRoutes.candidates.length) ? form.weightedRoutes : undefined, imageQuality: editingKind === 'image_generation' ? form.imageQuality : undefined, baseUrl: form.baseUrl || null, apiKey: form.apiKey || undefined, multiplier: Number(form.multiplier), contextWindowTokens: editingKind === 'text' ? Number(form.contextWindowTokens) : undefined,
+      const payload = { ...fields, selectable: editingKind === 'text' ? form.selectable : false, isDefault: editingKind === 'text' ? form.isDefault : false, visionEnabled: editingKind === 'vision' ? true : form.visionEnabled, expectedRevision: editing.id ? editing.revision : undefined, webToolProtocol: (editingKind === 'web_search' || editingKind === 'web_fetch') && form.webToolProtocol ? form.webToolProtocol : undefined, publicFeatures: form.publicFeatures.map(value => value.trim()).filter(Boolean), activities: (editingKind === 'text' || editingKind === 'image_generation') && (editing.activities || form.activities.rules.length) ? form.activities : undefined, weightedRoutes: (editingKind === 'text' || editingKind === 'image_generation') && (editing.weightedRoutes || form.weightedRoutes.candidates.length) ? form.weightedRoutes : undefined, imageQuality: editingKind === 'image_generation' ? form.imageQuality : undefined, baseUrl: form.baseUrl || null, apiKey: form.apiKey || undefined, multiplier: Number(form.multiplier), contextWindowTokens: editingKind === 'text' ? Number(form.contextWindowTokens) : undefined,
         reasoningParameterMode: editingKind === 'text' ? form.reasoningParameterMode || null : undefined,
         outputTokenParameter: editingKind === 'text' ? form.outputTokenParameter || null : undefined,
         thinkingEnabled: editingKind === 'text' ? form.thinkingEnabled === '' ? null : form.thinkingEnabled === 'enabled' : undefined,

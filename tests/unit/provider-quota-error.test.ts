@@ -10,7 +10,7 @@ vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: mocks.access, r
   getModelTierRuntime: mocks.runtime }))
 vi.mock('../../api/lib/secret-box.js', () => ({ decryptSecret: (value: string) => value, encryptSecret: (value: string) => value }))
 vi.mock('../../api/lib/billing/resolve-token-price.js', async original => ({ ...await original<object>(),
-  resolveTokenPrice: async () => ({ version: 'credits-v1-exact' }) }))
+  resolveTokenPrice: async (modelTier: string, multiplierBps: number) => ({ version: 'credits-v1-exact', modelTier, multiplierBps }) }))
 vi.mock('../../api/lib/agent/runtime-provider.js', () => ({ beginDurableChat: mocks.begin }))
 vi.mock('../../api/lib/agent/runtime-heartbeat.js', () => ({ withLeaseHeartbeat: (_lease: unknown, signal: AbortSignal | undefined,
   invoke: (signal: AbortSignal | undefined) => unknown) => invoke(signal) }))

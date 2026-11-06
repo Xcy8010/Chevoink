@@ -42,16 +42,16 @@ export function assertItemizedRates(rates: ItemizedTokenRates): void {
 
 /** Owner-approved missing-cache concession (2026-09-09). Counts must already
  * be reported; discount unknown input without changing the original evidence. */
-export function calculateV2UserChargeMilli(promptTokens: number, completionTokens: number, cacheHitTokens: number | null, rates: ItemizedTokenRates, v1CeilingBps?: number): number {
+export function calculateV2UserChargeMilli(promptTokens: number, completionTokens: number, cacheHitTokens: number | null, rates: ItemizedTokenRates, v1CeilingBps?: number, activity?: { baseMultiplierBps: number; effectiveMultiplierBps: number }): number {
   assertItemizedRates(rates)
   return cacheHitTokens === null
-    ? calculateV2ChargeMilli(promptTokens, completionTokens, null, { ...rates, inputNano: rates.cacheNano }, v1CeilingBps)
-    : calculateV2ChargeMilli(promptTokens, completionTokens, cacheHitTokens, rates, v1CeilingBps)
+    ? calculateV2ChargeMilli(promptTokens, completionTokens, null, { ...rates, inputNano: rates.cacheNano }, v1CeilingBps, activity)
+    : calculateV2ChargeMilli(promptTokens, completionTokens, cacheHitTokens, rates, v1CeilingBps, activity)
 }
 
 /** Plan30 §13.8.2/4: sum exact nano amounts, round once to wallet milli.
  * Missing cache is computable only for equal input/cache rates (d=1). */
-export function calculateV2ChargeMilli(promptTokens: number, completionTokens: number, cacheHitTokens: number | null, rates: ItemizedTokenRates, v1CeilingBps?: number): number {
+export function calculateV2ChargeMilli(promptTokens: number, completionTokens: number, cacheHitTokens: number | null, rates: ItemizedTokenRates, v1CeilingBps?: number, activity?: { baseMultiplierBps: number; effectiveMultiplierBps: number }): number {
   assertCreditInteger(promptTokens)
   assertCreditInteger(completionTokens)
   assertItemizedRates(rates)
@@ -61,9 +61,18 @@ export function calculateV2ChargeMilli(promptTokens: number, completionTokens: n
   } else if (promptTokens !== 0 && rates.inputNano !== rates.cacheNano) throw new BillingCacheUsageRequired()
   const hit = BigInt(cacheHitTokens ?? 0)
   const nano = (BigInt(promptTokens) - hit) * BigInt(rates.inputNano) + hit * BigInt(rates.cacheNano) + BigInt(completionTokens) * BigInt(rates.outputNano)
-  let milli = (nano + 999999n) / 1000000n
+  // Rate cards already include the base multiplier. Apply only the scheduled
+  // effective/base ratio, at the raw nano level, with one final wallet rounding.
+  if (activity) { assertCreditInteger(activity.baseMultiplierBps); assertCreditInteger(activity.effectiveMultiplierBps) }
+  const numerator = BigInt(activity?.effectiveMultiplierBps ?? 1)
+  const denominator = BigInt(activity?.baseMultiplierBps ?? 1)
+  if (numerator < 0n || denominator <= 0n) throw new BillingInputError()
+  let milli = (nano * numerator + 1000000n * denominator - 1n) / (1000000n * denominator)
   if (v1CeilingBps !== undefined) {
-    const ceiling = BigInt(calculateV1ChargeMilli(promptTokens, completionTokens, v1CeilingBps))
+    assertCreditInteger(v1CeilingBps)
+    const units = BigInt(promptTokens) > BigInt(completionTokens) * 10n ? BigInt(promptTokens) : BigInt(completionTokens) * 10n
+    const divisor = 100000n * denominator
+    const ceiling = (units * BigInt(v1CeilingBps) * numerator + divisor - 1n) / divisor
     if (milli > ceiling) milli = ceiling
   }
   if (milli > BigInt(MAX_CREDIT_STORAGE_INT)) throw new BillingInputError()

@@ -6,7 +6,7 @@ import type { AgentRunEvent, AiUsageLog, Prisma } from '@prisma/client'
 import type { AgentAuthorReviewReplacement, CreditModelTier, ModelReasoningEffort } from '../../../shared/contracts/index.js'
 import { DataAccessError } from '../prisma.js'
 import { getModelTierRuntime } from '../credits.js'
-import { tokenPriceSchema, type TokenPrice } from '../billing/token-price.js'
+import { tokenPriceSchema, tokenPriceConfiguration, frozenEffectiveMultiplier, type TokenPrice } from '../billing/token-price.js'
 import { resolveTokenPrice } from '../billing/resolve-token-price.js'
 import { FALLBACK_USAGE_POLICY, priceTokenEvidence } from '../billing/reservation-policy.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
@@ -186,7 +186,7 @@ async function current(tx: Prisma.TransactionClient, input: AuthorReviewReplacem
     const runtime = resolveWeightedModelRuntime(await getModelTierRuntime(model.tier, subject.userId, model.customModelId, model.reasoningEffort), model.weightedRoute)
     const liveModel: Model = { ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier: runtime.tier, customModelId: model.customModelId, reasoningEffort: runtime.reasoningEffort,
       provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel, multiplierBps: runtime.multiplierBps }
-    if (hash(liveModel) !== hash(model) || hash(await resolveTokenPrice(model.tier, model.multiplierBps)) !== hash(input.expected.price)) reject('当前模型选择、配置或冻结费率已变化。')
+    if (hash(liveModel) !== hash(model) || hash(tokenPriceConfiguration(await resolveTokenPrice(model.tier, model.multiplierBps))) !== hash(tokenPriceConfiguration(input.expected.price))) reject('当前模型选择、配置或冻结费率已变化。')
   }
   const deterministic = analyzeDeterministicQuality(bundle.chapter.content, bundle.recentChapters.map(item => item.content))
   const sources = buildQualityEvidenceSources({ userId: subject.userId, novelId: subject.novelId, chapterId: pending.chapterId, chapterRevision: input.expected.currentRevision }, bundle.chapter.content)
@@ -195,7 +195,7 @@ async function current(tx: Prisma.TransactionClient, input: AuthorReviewReplacem
     { role: 'system', content: system }, { role: 'user', content },
   ])) reject('实际提示词或保守输入上限不一致。')
   const quote = priceTokenEvidence(input.expected.price, input.conservativeInputTokenCeiling, input.maxOutputTokens, 0)
-  if (quote !== input.maxCreditMilli || input.expected.price.modelTier !== model.tier || input.expected.price.multiplierBps !== model.multiplierBps) reject('授权金额与当前模型的正常输出上限报价不一致。')
+  if (quote !== input.maxCreditMilli || input.expected.price.modelTier !== model.tier || frozenEffectiveMultiplier(input.expected.price) !== model.multiplierBps) reject('授权金额与当前模型的正常输出上限报价不一致。')
   if (frozen && (frozen.specHash !== hash(original.spec) || hash([...ids].sort()) !== hash(frozen.lineageIds)
     || frozen.originalUsageHash !== hash(oldUsage) || frozen.sourceEventsHash !== hash(events)
     || frozen.sourceCallEventId !== call.id || frozen.sourceResultId !== result.id || frozen.quotedMaximumCreditMilli !== quote

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({ findModel: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), findUsage: vi.fn(),
-  charge: vi.fn(), access: vi.fn(), reserve: vi.fn(), runtime: vi.fn() }))
+  charge: vi.fn(), access: vi.fn(), reserve: vi.fn(), runtime: vi.fn(), price: vi.fn() }))
 vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error {
   constructor(readonly status: number, readonly code: string, message: string) { super(message) }
 }, prisma: { agentGoalUsage: { findUnique: vi.fn(async () => null) }, agentModelAssignment: { findMany: vi.fn(async () => []) },
@@ -11,10 +11,11 @@ vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: mocks.access, r
   consumeTokenCredits: mocks.charge, getModelTierRuntime: mocks.runtime }))
 vi.mock('../../api/lib/secret-box.js', () => ({ decryptSecret: (value: string) => value, encryptSecret: (value: string) => value }))
 vi.mock('../../api/lib/billing/resolve-token-price.js', async original => ({ ...await original<object>(),
-  resolveTokenPrice: async (modelTier: string, multiplierBps: number) => ({ version: 'credits-v1-exact', modelTier, multiplierBps }) }))
+  resolveTokenPrice: mocks.price }))
 
 import { chatWithTools, generateTextCompletion } from '../../api/lib/ai-service.js'
 import { ModelRouteRejected } from '../../api/lib/model-route-pool.js'
+import { priceTokenEvidence } from '../../api/lib/billing/reservation-policy.js'
 
 type Usage = Record<string, unknown> & { id: string; userId: string; billingStatus: string }
 let rows: Map<string, Usage>
@@ -35,6 +36,7 @@ function invoke(channel: 'chat' | 'auxiliary' | 'quality' | 'continuity', userId
 }
 beforeEach(() => {
   vi.clearAllMocks(); rows = new Map()
+  mocks.price.mockReset().mockImplementation(async (modelTier: string, multiplierBps: number) => ({ version: 'credits-v1-exact', modelTier, multiplierBps }))
   mocks.findModel.mockResolvedValue({ id: 'selected', ...runtime, metadata: { routes: [] } })
   mocks.access.mockResolvedValue(undefined)
   mocks.create.mockImplementation(async ({ data }) => {
@@ -141,4 +143,92 @@ describe('actual singleton rate-limit request accounting', () => {
       expect(rows.get('usage-1')).toMatchObject({ billingStatus: 'prepared', reservedCreditMilli: 123 })
     })
   }
+})
+describe('logical operation price admission', () => {
+  it('refreshes an independent operation instead of authorizing from the cached run price', async () => {
+    const original = { version: 'credits-v1-exact' as const, modelTier: 'standard' as const, multiplierBps: 0 }
+    const next = { ...original, multiplierBps: 12000 }
+    mocks.price.mockResolvedValueOnce(original).mockResolvedValueOnce(next)
+    const fetcher = vi.fn(async () => response()); vi.stubGlobal('fetch', fetcher)
+    const cached = { ...runtime, multiplierBps: 0, tokenPrice: original, reasoningEfforts: [...runtime.reasoningEfforts] }
+    const options = { userId: 'two-operations', action: 'operation-price-fixture', modelRuntime: cached }
+    await generateTextCompletion('system', 'first', options)
+    await generateTextCompletion('system', 'second', options)
+    expect(mocks.price).toHaveBeenCalledTimes(2)
+    expect(mocks.price.mock.calls.every(([, , admission]) => admission.freshOperation === true)).toBe(true)
+    expect(rows.get('usage-1')).toMatchObject({ multiplierBps: 0, billingSnapshot: original })
+    expect(rows.get('usage-2')).toMatchObject({ multiplierBps: 12000, billingSnapshot: next })
+    expect(cached.tokenPrice).toEqual(original)
+  })
+  it('keeps one admitted price across a known-zero HTTP retry crossing the price boundary', async () => {
+    vi.useFakeTimers()
+    const original = { version: 'credits-v1-exact' as const, modelTier: 'standard' as const, multiplierBps: 12000 }
+    mocks.price.mockResolvedValueOnce(original).mockResolvedValue({ ...original, multiplierBps: 24000 })
+    const fetcher = vi.fn().mockImplementationOnce(async () => rejection()).mockImplementation(async () => response())
+    vi.stubGlobal('fetch', fetcher)
+    const pending = invoke('chat', 'same-operation-price')
+    await vi.advanceTimersByTimeAsync(60000)
+    await pending
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(mocks.price).toHaveBeenCalledOnce()
+    expect(rows.get('usage-1')?.billingSnapshot).toEqual(original)
+    expect(rows.get('usage-2')?.billingSnapshot).toEqual(original)
+    await invoke('chat', 'next-operation-price')
+    expect(rows.get('usage-3')?.billingSnapshot).toMatchObject({ multiplierBps: 24000 })
+  })
+  it('keeps an explicitly authorized old quote after the runtime cache and current price change', async () => {
+    const original = { version: 'credits-v1-exact' as const, modelTier: 'standard' as const, multiplierBps: 12000 }
+    mocks.price.mockResolvedValue({ ...original, multiplierBps: 24000 })
+    const fetcher = vi.fn(async () => response()); vi.stubGlobal('fetch', fetcher)
+    await generateTextCompletion('system', 'whole chapter', { userId: 'owner', novelId: 'novel', chapterId: 'chapter', agentRunId: 'original-run', targetType: 'chapter', targetId: 'new-call',
+      action: 'agent3HumanityAuthorReplacement', maxOutputTokens: 100, modelRuntime: { ...runtime, multiplierBps: 24000, tokenPrice: { ...original, multiplierBps: 24000 }, reasoningEfforts: [...runtime.reasoningEfforts] },
+      authorizedRequest: { price: original, inputTokenCeiling: 1000, maxCreditMilli: 120, beforeDispatch: async () => undefined } })
+    expect(mocks.price).not.toHaveBeenCalled()
+    expect(rows.get('usage-1')).toMatchObject({ multiplierBps: 12000, billingSnapshot: original })
+    expect(fetcher).toHaveBeenCalledOnce()
+  })
+})
+
+describe('V2 route metadata and frozen itemized price ownership', () => {
+  const card = { version: 'credits-v2-itemized' as const, modelTier: 'standard' as const, multiplierBps: 11000,
+    rateCardId: 'original-card', rates: { inputNano: 110000, cacheNano: 27500, outputNano: 1100000 } }
+  it.each(['chat', 'auxiliary'] as const)('%s keeps nominal route metadata across retry while the next operation admits a new card', async channel => {
+    vi.useFakeTimers()
+    const next = { ...card, rateCardId: 'next-card', rates: { inputNano: 220000, cacheNano: 55000, outputNano: 2200000 } }
+    mocks.price.mockResolvedValueOnce(card).mockResolvedValue(next)
+    const fetcher = vi.fn().mockImplementationOnce(async () => rejection()).mockImplementation(async () => response())
+    vi.stubGlobal('fetch', fetcher)
+    const pending = invoke(channel, 'v2-operation')
+    await vi.advanceTimersByTimeAsync(60000)
+    await pending
+    expect(mocks.price).toHaveBeenCalledOnce()
+    for (const id of ['usage-1', 'usage-2']) expect(rows.get(id)).toMatchObject({ multiplierBps: 12000, billingSnapshot: card })
+    expect(mocks.charge.mock.calls.at(-1)?.[0]).toMatchObject({ multiplierBps: 12000 })
+    await invoke(channel, 'v2-next-operation')
+    expect(mocks.price).toHaveBeenCalledTimes(2)
+    expect(rows.get('usage-3')).toMatchObject({ multiplierBps: 12000, billingSnapshot: next })
+    expect(card.rates).toEqual({ inputNano: 110000, cacheNano: 27500, outputNano: 1100000 })
+    expect(fetcher).toHaveBeenCalledTimes(3)
+  })
+  it.each(['chat', 'auxiliary'] as const)('%s uses explicit activity effective metadata without rewriting the frozen card rates', async channel => {
+    const price = { ...card, activity: { baseMultiplierBps: 12000, effectiveMultiplierBps: 6000, revision: 3, timezone: 'Asia/Shanghai' as const,
+      admittedAt: '2026-11-06T12:00:00Z', activityId: 'evening', activityName: '晚间折扣' } }
+    mocks.price.mockResolvedValue(price)
+    vi.stubGlobal('fetch', vi.fn(async () => response()))
+    await invoke(channel, 'v2-activity-operation')
+    expect(rows.get('usage-1')).toMatchObject({ multiplierBps: 6000, billingSnapshot: price })
+    expect(mocks.charge.mock.calls[0][0]).toMatchObject({ multiplierBps: 6000 })
+    expect(rows.get('usage-1')?.billingSnapshot).toEqual(price)
+  })
+  it('keeps an explicit old V2 authorization and nominal route without resolving a newer price', async () => {
+    expect(priceTokenEvidence(card, 1000, 100, 0)).toBe(220)
+    mocks.price.mockResolvedValue({ ...card, rateCardId: 'new-card' })
+    const fetcher = vi.fn(async () => response()); vi.stubGlobal('fetch', fetcher)
+    await generateTextCompletion('system', 'whole chapter', { userId: 'owner', novelId: 'novel', chapterId: 'chapter', agentRunId: 'run', targetType: 'chapter', targetId: 'answer',
+      action: 'agent3HumanityAuthorReplacement', maxOutputTokens: 100, modelRuntime: { ...runtime, multiplierBps: 15000, reasoningEfforts: [...runtime.reasoningEfforts] },
+      authorizedRequest: { price: card, inputTokenCeiling: 1000, maxCreditMilli: 220, beforeDispatch: async () => undefined } })
+    expect(mocks.price).not.toHaveBeenCalled()
+    expect(rows.get('usage-1')).toMatchObject({ multiplierBps: 15000, billingSnapshot: card })
+    expect(fetcher).toHaveBeenCalledOnce()
+  })
 })

@@ -57,3 +57,17 @@ describe('zero-rate built-in tiers are permanently free', () => {
     await expect(resolveTokenPrice('ultimate', 35000)).resolves.toEqual({ version: 'credits-v1-exact', modelTier: 'ultimate', multiplierBps: 35000 })
   })
 })
+
+it('refreshes cached zero activity at the next independent operation while retaining the original frozen receipt', async () => {
+  mocks.model.mockResolvedValue({ multiplierBps: 12000, metadata: { activities: { revision: 2, timezone: 'Asia/Shanghai', rules: [{ id: 'free-hour', name: '免费时段', enabled: true,
+    startDate: null, endDate: null, weekdays: [1], allDay: false, startTime: '22:00', endTime: '23:00', multiplierBps: 0 }] } } })
+  const now = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-11-02T22:59:59+08:00'))
+  try {
+    const first = await resolveTokenPrice('standard', 0, { freshOperation: true })
+    now.mockReturnValue(Date.parse('2026-11-02T23:00:00+08:00'))
+    const second = await resolveTokenPrice('standard', 0, { freshOperation: true })
+    expect(first).toMatchObject({ multiplierBps: 0, activity: { effectiveMultiplierBps: 0, activityId: 'free-hour' } })
+    expect(second).toMatchObject({ multiplierBps: 12000, activity: { effectiveMultiplierBps: 12000, activityId: null } })
+    expect(first.activity?.effectiveMultiplierBps).toBe(0)
+  } finally { now.mockRestore() }
+})

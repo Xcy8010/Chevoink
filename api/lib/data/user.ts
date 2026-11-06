@@ -1,3 +1,5 @@
+import { verifyRegistrationConsent } from '../site-content.js'
+import type { LegalConsent } from '../../../shared/contracts/site-content.js'
 /**
  * 用户/资料/互动域数据访问
  * 由 data-access.ts 按域拆分而来（声明顺序与原文件一致）；
@@ -809,6 +811,7 @@ export async function registerUserData(input: {
   nickname?: string
   password?: string
   referralCode?: string
+  legalConsent?: LegalConsent
 }): Promise<User> {
   const email = input.email?.trim() || undefined
   const phone = input.phone ? normalizePhoneNumber(input.phone) : undefined
@@ -836,6 +839,7 @@ export async function registerUserData(input: {
   }
 
   const created = await prisma.$transaction(async (tx) => {
+    const consent = await verifyRegistrationConsent(tx, input.legalConsent)
     const user = await tx.user.create({
       data: {
         id: randomUUID(),
@@ -849,6 +853,9 @@ export async function registerUserData(input: {
         isAuthor: false,
       },
     })
+    const acceptedAt = consent.acceptedAt
+    await tx.userLegalConsent.createMany({data:consent.versions.map(item => ({...item,userId:user.id,acceptedAt}))})
+    await tx.adminAuditLog.create({data:{adminId:user.id,action:'registration.legal_consent',targetType:'user',targetId:user.id,detail:{versions:consent.versions,acceptedAt:acceptedAt.toISOString()}}})
     await initializeNewUserCredits(tx, user.id, input.referralCode)
     return user
   })

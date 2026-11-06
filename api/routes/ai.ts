@@ -25,6 +25,7 @@ const coverPromptSchema = z.object({
 })
 
 const coverImageSchema = z.object({
+  operationId: z.string().min(1).max(100).regex(/^[A-Za-z0-9:_-]+$/),
   prompt: z.string().min(1),
   count: z.number().int().min(1),
   novelId: z.string().nullable().optional(),
@@ -97,6 +98,7 @@ router.post('/cover-image', async (req: Request, res: Response): Promise<void> =
     const count = Math.min(body.count, 4)
 
     const payload = await generateCoverImageData(userId, {
+      operationId: body.operationId,
       prompt: body.prompt.trim(),
       size: FIXED_NOVEL_COVER_SIZE,
       count,

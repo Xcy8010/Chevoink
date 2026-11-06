@@ -1,3 +1,4 @@
+import { assertAppReleaseModelCapabilities } from './app-release-model-capabilities.js'
 import { Prisma, type AiModelConfig } from '@prisma/client'
 import { archiveAdminModelSchema, restoreAdminModelSchema, type AdminModelLifecyclePreview, type AdminModelLifecycleResult } from '../../shared/contracts/admin-model-lifecycle.js'
 import { DataAccessError } from './prisma.js'
@@ -90,6 +91,7 @@ export async function archiveAdminModel(adminId: string, id: string, raw: unknow
     await captureAdminModelVersion(tx, model)
     if (candidate) {
       const target = await platformModel(tx, candidate.id)
+      await assertAppReleaseModelCapabilities(tx, adminId, target, null)
       await captureAdminModelVersion(tx, target)
       for (const roleKey of view.systemRoles) await tx.aiModelSystemBinding.upsert({ where: { roleKey },
         create: { roleKey, modelConfigId: target.id }, update: { modelConfigId: target.id, revision: { increment: 1 } } })

@@ -1,3 +1,4 @@
+import { useRegistrationPolicies } from '@/features/site-content/public-api'
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Eye, EyeOff, Lock, MessageSquareText, Smartphone, UserRound } from 'lucide-react'
@@ -90,6 +91,10 @@ function normalizeRedirectPath(input: string | null): string {
  * - 密码框带眼睛按钮切换明文，默认隐藏
  */
 export default function AuthPage({ mode }: AuthPageProps) {
+  const legalQuery = useRegistrationPolicies()
+  const [acceptedPolicies, setAcceptedPolicies] = useState('')
+  const legal = legalQuery.data?.legal
+  const legalKey = legal?.terms && legal.privacy ? `${legal.terms.id}:${legal.privacy.id}` : ''
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const queryClient = useQueryClient()
@@ -245,6 +250,7 @@ export default function AuthPage({ mode }: AuthPageProps) {
                 phone: buildPhoneSubmitValue(phone),
                 code: code.trim(),
                 referralCode,
+                legalConsent: acceptedPolicies && acceptedPolicies === legalKey && legal?.terms && legal.privacy ? {termsVersionId:legal.terms.id, privacyVersionId:legal.privacy.id} : undefined,
               } satisfies SmsRegisterRequest),
             })
           : await requestJson<AuthSessionPayload>('/api/auth/sms/login', {
@@ -445,6 +451,7 @@ export default function AuthPage({ mode }: AuthPageProps) {
             </>
           )}
 
+          {isSmsFlow && shouldCollectProfile ? <div className="text-sm leading-6">{legal?.registrationAvailable ? <label className="flex items-start gap-2"><input type="checkbox" checked={Boolean(legalKey && acceptedPolicies===legalKey)} onChange={event=>setAcceptedPolicies(event.target.checked ? legalKey : '')}/><span>我已阅读并同意 <Link className="underline" to="/legal?kind=terms" target="_blank">服务条款</Link> 与 <Link className="underline" to="/legal?kind=privacy" target="_blank">隐私政策</Link></span></label> : <p>{legalQuery.isLoading ? '正在读取注册政策…' : '正式服务条款与隐私政策尚未生效，暂时无法注册。'}</p>}</div> : null}
           {hintMessage ? (
             <p className="rounded-[var(--radius-md)] bg-[var(--surface-muted)] px-4 py-3 text-sm leading-6 text-[var(--text-secondary)]">
               {hintMessage}
@@ -457,7 +464,7 @@ export default function AuthPage({ mode }: AuthPageProps) {
             </p>
           ) : null}
 
-          <Button type="submit" variant="primary" disabled={submitting} className="h-12 w-full text-base">
+          <Button type="submit" variant="primary" disabled={submitting || (isSmsFlow && shouldCollectProfile && (!legalKey || acceptedPolicies !== legalKey))} className="h-12 w-full text-base">
             {submitting ? '提交中…' : !isSmsFlow ? '登录' : shouldCollectProfile ? '完成注册' : '验证后直接登录'}
           </Button>
         </form>

@@ -34,13 +34,13 @@ export async function readCoverAdmission(tx: RuntimeTx, attemptId: string) {
   const log = await tx.aiUsageLog.findUnique({ where: { id: input.usageLogId } })
   if (!log || log.userId !== operation.taskRoot.userId || log.novelId !== work.novelId || log.agentRunId !== parent.originRunId
     || log.providerType !== 'image' || log.action !== 'generateCoverImage' || log.modelName !== routeWork.route.modelName || log.providerMode !== routeWork.route.providerMode
-    || log.targetType !== 'imageCharge' || log.targetId !== input.chargeKey || log.creditChargeMilli !== 6000
+    || log.targetType !== 'imageCharge' || log.targetId !== input.chargeKey || log.creditChargeMilli !== work.amountMilli
     || !log.billingEvidence || runtimeJson(log.billingEvidence).hash !== runtimeJson({ taskRootId: operation.taskRootId, operationId: operation.id }).hash) return null
   const debit = await tx.creditLedgerEntry.findUnique({ where: { idempotencyKey: input.chargeKey } })
   const metadata = debit?.metadata && typeof debit.metadata === 'object' && !Array.isArray(debit.metadata) ? debit.metadata.agentCover : null
   const binding = { version: 1, taskRootId: operation.taskRootId, parentOperationId: parent.id, parentInputHash: parent.inputHash,
     operationId: operation.id, requestHash: attempt.requestHash, workHash: input.workHash, tariff: work.tariff, amountMilli: work.amountMilli, chargeKey: input.chargeKey }
-  if (!debit || debit.userId !== operation.taskRoot.userId || debit.sourceType !== 'image_generation' || debit.kind !== 'usage' || debit.deltaMilli !== -6000
+  if (!debit || debit.userId !== operation.taskRoot.userId || debit.sourceType !== 'image_generation' || debit.kind !== 'usage' || debit.deltaMilli !== -work.amountMilli
     || debit.referenceId !== operation.id || !metadata || runtimeJson(metadata).hash !== runtimeJson(binding).hash) return null
   return { attempt, operation, parent, input, work, debit }
 }
@@ -60,7 +60,7 @@ export async function readCoverUnit(tx: RuntimeTx, attemptId: string) {
   if (!proof.success || !event || event.type !== 'cover.fixed_unit.observed' || event.taskRootId !== operation.taskRootId || event.operationId !== operation.id
     || runtimeJson(proof.data).hash !== runtimeJson({ ...proof.data, operationId: operation.id, parentOperationId: parent.id, attemptId,
       parentInputHash: parent.inputHash, requestHash: attempt.requestHash, resultHash: attempt.resultHash, debitId: debit.id,
-      chargeKey: input.chargeKey, tariff: work.tariff, chargedMilli: 6000, units: 1 }).hash) return null
+      chargeKey: input.chargeKey, tariff: work.tariff, chargedMilli: work.amountMilli, units: 1 }).hash) return null
   const resultEvent = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `result:${attempt.id}:${attempt.resultHash}` } })
   if (!resultEvent || resultEvent.type !== 'provider.result.recorded' || resultEvent.taskRootId !== operation.taskRootId || resultEvent.operationId !== operation.id
     || runtimeJson(resultEvent.payload).hash !== runtimeJson({ attemptId, status: attempt.status, resultHash: attempt.resultHash }).hash) return null
@@ -80,7 +80,7 @@ export async function writeCoverUnit(tx: RuntimeTx, attemptId: string, outcome: 
   if (!attempt.dispatchedAt || !attempt.resultHash || !['succeeded', 'failed'].includes(attempt.status) || runtimeJson(attempt.result).hash !== attempt.resultHash) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '图片原响应尚未核实。')
   const payload = coverUnitSchema.parse({ operationId: operation.id, parentOperationId: parent.id, attemptId, parentInputHash: parent.inputHash,
     requestHash: attempt.requestHash, resultHash: attempt.resultHash, debitId: debit.id, chargeKey: input.chargeKey,
-    tariff: work.tariff, chargedMilli: 6000, units: 1, outcome })
+    tariff: work.tariff, chargedMilli: work.amountMilli, units: 1, outcome })
   const eventKey = `settlement:${operation.id}`, existing = await tx.agentExecutionOutbox.findUnique({ where: { eventKey } })
   if (existing && (existing.type !== 'cover.fixed_unit.observed' || runtimeJson(existing.payload).hash !== runtimeJson(payload).hash)) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '图片单位回执已有其他结果。')
   if (!existing) await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: operation.taskRootId, operationId: operation.id, runId: attempt.runId,
@@ -89,7 +89,7 @@ export async function writeCoverUnit(tx: RuntimeTx, attemptId: string, outcome: 
   if (old && (old.revision !== 1 || old.observationHash !== observationHash)) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '图片用量不得替换原观察。')
   if (!old) await tx.agentProviderUsageReceipt.create({ data: { attemptId, revision: 1, ...coverUnitUsage, observationHash, settlementStatus: 'fixed_unit' } })
   await tx.aiUsageLog.update({ where: { id: input.usageLogId }, data: { usageSource: 'fixed_unit', billingStatus: 'observed',
-    creditChargeMilli: 6000, requestTokens: null, responseTokens: null } })
+    creditChargeMilli: work.amountMilli, requestTokens: null, responseTokens: null } })
   return payload
 }
 
@@ -128,10 +128,10 @@ export async function adoptCoverGoalAccounting(tx: RuntimeTx, goalId: string, lo
   const refund = await tx.creditLedgerEntry.findUnique({ where: { idempotencyKey: `refund:${unit.input.chargeKey}` } })
   if (refund) {
     const metadata = refund.metadata && typeof refund.metadata === 'object' && !Array.isArray(refund.metadata) ? refund.metadata : null
-    if (refund.userId !== log.userId || refund.kind !== 'refund' || refund.sourceType !== 'image_generation' || refund.deltaMilli !== 6000
+    if (refund.userId !== log.userId || refund.kind !== 'refund' || refund.sourceType !== 'image_generation' || refund.deltaMilli !== unit.work.amountMilli
       || metadata?.originalEntryId !== unit.debit.id) return runtimeError('RUNTIME_RECEIPT_INVALID', '封面退款与原费用不一致。')
   }
-  const creditsMicros = refund ? 0n : 6000000n
+  const creditsMicros = refund ? 0n : BigInt(unit.work.amountMilli) * 1000n
   await tx.agentGoalUsage.create({ data: { sourceKey, goalId, runId: unit.attempt.runId, status: 'known', creditsMicros } })
   await tx.agentGoalBudget.update({ where: { goalId }, data: { creditsUsedMicros: { increment: creditsMicros } } })
   await (await import('./goal-store.js')).changeGoal(tx, goal, {}, 'usage.updated')

@@ -65,7 +65,7 @@ function fixture(action: Action, fresh = false) {
     payload: { revision: frame.revision, previousHash: frame.previousHash, snapshotHash: frame.snapshotHash } }))
   const tx = {
     agentTaskRoot: { findUniqueOrThrow: vi.fn(async () => root) }, agentExecutionState: { findUnique: vi.fn(async () => head), updateMany: vi.fn() },
-    agentExecutionFrame: { findFirst: vi.fn(async () => ({ revision: head.revision })), findUnique: vi.fn(async ({ where }) => frames[where.taskRootId_revision.revision]), create: vi.fn() },
+    agentExecutionFrame: { findFirst: vi.fn(async () => frames[head.revision]), findUnique: vi.fn(async ({ where }) => frames[where.taskRootId_revision.revision]), create: vi.fn() },
     agentExecutionOutbox: { findUnique: vi.fn(async ({ where }) => events[Number(where.eventKey.split(':').at(-1))]),
       findFirst: vi.fn(async () => null), create: vi.fn() },
     agentOperation: { findUniqueOrThrow: vi.fn(async () => operation), findUnique: vi.fn(async () => fresh ? null : operation),

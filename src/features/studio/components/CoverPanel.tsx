@@ -1,3 +1,7 @@
+import { useQuery } from '@tanstack/react-query'
+import { requestJson } from '@/app/api-client'
+import type { GetAiConfigResponse } from '../../../../shared/contracts/api'
+import { formatModelPrice } from '../../../../shared/model-price-format'
 import { Check, Download, ImagePlus, LoaderCircle, PenLine, Sparkles, Upload } from 'lucide-react'
 import { useRef, useState } from 'react'
 
@@ -54,6 +58,8 @@ export default function CoverPanel({
   onDownloadAsset,
   onClose,
 }: CoverPanelProps) {
+  const imageConfig = useQuery({ queryKey: ['ai', 'public-config'], queryFn: () => requestJson<GetAiConfigResponse['data']>('/api/ai/config'), staleTime: 20000, refetchInterval: query => { const next = query.state.data?.imageModel?.activity?.nextSwitchAt; return next ? Math.max(1000, Math.min(60000, Date.parse(next) - Date.now())) : 60000 } })
+  const price = imageConfig.data?.imageModel
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
   // 智能模式：一键从作品信息生成提示词；手动模式：直接编写提示词，降低上手门槛
   const [promptMode, setPromptMode] = useState<'smart' | 'manual'>('smart')
@@ -176,6 +182,8 @@ export default function CoverPanel({
             所有封面统一裁成书封比例 {FIXED_NOVEL_COVER_WIDTH} × {FIXED_NOVEL_COVER_HEIGHT}。
           </p>
 
+          {price && <details className="rounded-xl border border-[var(--border-subtle)] p-3 text-xs"><summary className="cursor-pointer">{price.label}{price.activity?.name && <> · {price.activity.name}</>} · {price.activity?.name && price.basePerCallCredits > price.perCallCredits && <><s>{formatModelPrice(price.basePerCallCredits)} Credits / 批</s> → </>}当前 {formatModelPrice(price.perCallCredits)} Credits / 批</summary><div className="mt-2 space-y-1"><p>{price.publicDescription}</p>{price.publicFeatures.map((feature, index) => <p key={index}>{feature}</p>)}<p>基础 {price.activity?.name && price.basePerCallCredits > price.perCallCredits ? <s>{formatModelPrice(price.basePerCallCredits)} Credits / 批</s> : <>{formatModelPrice(price.basePerCallCredits)} Credits / 批</>} · 当前 {formatModelPrice(price.multiplier)}x{price.discountRatio !== null ? ' · 当前 / 基础 ' + formatModelPrice(price.discountRatio) : ''}</p>{price.activity && <><p>活动时区：{price.activity.timezone} · 当前 {price.activity.name ?? '无活动'}</p>{price.activity.rules.map((rule, index) => <p key={index}>{rule.name}：{rule.enabled ? '启用' : '停用'}；{rule.startDate ?? '不限开始'} 至 {rule.endDate ? rule.endDate + '（不含）' : '不限结束'}；周{rule.weekdays.map(day => ['日', '一', '二', '三', '四', '五', '六'][day]).join('、')}；{rule.allDay ? '全天' : rule.startTime + '–' + rule.endTime + (rule.endTime < rule.startTime ? '（跨夜）' : '')}；{formatModelPrice(rule.multiplierBps / 10000)}x</p>)}{price.activity.nextSwitchAt && <p>下次切换：{new Intl.DateTimeFormat('zh-CN', { timeZone: price.activity.timezone, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(price.activity.nextSwitchAt))}（{price.activity.timezone}）</p>}</>}</div></details>}
+          {imageConfig.isError && <p className="text-xs text-[var(--text-tertiary)]">图片价格暂不可用。</p>}
           <div className="grid gap-2">
             <Button onClick={onGenerateImages} disabled={generatingImage} className="w-full justify-center">
               {generatingImage ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ImagePlus className="h-4 w-4" />}

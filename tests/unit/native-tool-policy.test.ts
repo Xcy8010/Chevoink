@@ -1,3 +1,4 @@
+import * as toolSchema from '../../api/lib/agent/tool-schema.js'
 import { beforeEach, expect, it, vi } from 'vitest'
 const parentState = vi.hoisted(() => vi.fn())
 const activationCeiling = vi.hoisted(() => vi.fn())
@@ -116,4 +117,25 @@ it.each([null, []])('distinguishes an absent goal activation ceiling from an exp
   expect(result.tools.some(tool => tool.function.name === 'chapter_read')).toBe(ceiling === null)
   expect(result.tools.some(tool => tool.function.name === 'volume_create')).toBe(ceiling === null)
   expect(runtimeJson(configuration).hash).toBe(runtimeJson({ mode: 'build', agentType: 'orchestrator', tools: [definition], toolAuthority: [grant] }).hash)
+})
+
+it('retains custom definitions and generates only missing tool definitions', async () => {
+  const presentation = vi.spyOn(toolSchema, 'toOpenAIToolPresentation')
+  const custom = { ...definition, function: { ...definition.function, strict: true,
+    parameters: { type: 'object', additionalProperties: false, properties: { chapterId: { type: 'string', const: 'owned-chapter' } }, required: ['chapterId'] } } }
+  const settings = { ...configuration, tools: [custom] }, before = runtimeJson(settings).hash
+  const result = await current(lease, settings)
+  expect(result.tools.find(tool => tool.function.name === 'chapter_read')).toEqual(custom)
+  expect(presentation.mock.calls.some(([tool]) => tool.name === 'chapter_read')).toBe(false)
+  expect(presentation.mock.calls.some(([tool]) => tool.name === 'volume_create')).toBe(true)
+  expect(runtimeJson(settings).hash).toBe(before)
+})
+
+it('rechecks a session revocation on the next call without retaining earlier write authority', async () => {
+  expect((await current()).toolAuthority.some(item => item.name === 'chapter_write')).toBe(true)
+  db.agentSession.findFirst.mockResolvedValue({ toolPolicy: { contentWrite: 'deny' }, sandboxMode: 'workspace', spawnedFromSessionId: null })
+  const next = await current()
+  expect(next.tools.some(tool => tool.function.name === 'chapter_write')).toBe(false)
+  expect(next.toolAuthority.some(item => item.name === 'chapter_write')).toBe(false)
+  expect(next.toolAuthority.some(item => item.name === 'chapter_read')).toBe(true)
 })

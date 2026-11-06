@@ -23,7 +23,7 @@ function mount(novelId = 'novel-a', novelTitle = '作品 A') {
 beforeEach(() => {
   vi.clearAllMocks()
   savedRows = new Map()
-  api.summary.mockResolvedValue({ models: [{ tier: 'speed', label: '极速', available: true, reasoningEfforts: ['low', 'medium', 'high'], visionEnabled: false }, { tier: 'basic', label: '基础', available: true, reasoningEfforts: ['high'], visionEnabled: false }] })
+  api.summary.mockResolvedValue({ models: [{ tier: 'speed', label: '极速', available: true, multiplier: 1, selectedByDefault: true, defaultReasoningEffort: 'high', reasoningEfforts: ['low', 'medium', 'high'], visionEnabled: false }, { tier: 'basic', label: '基础', available: true, multiplier: 1, selectedByDefault: false, defaultReasoningEffort: 'high', reasoningEfforts: ['high'], visionEnabled: false }] })
   api.custom.mockResolvedValue({ models: [{ id: 'custom-a', displayName: '我的文本模型', enabled: true, reasoningEfforts: ['low', 'high'], visionEnabled: false }, { id: 'custom-v', displayName: '我的图片模型', enabled: true, reasoningEfforts: ['medium', 'high'], visionEnabled: true }] })
   api.request.mockImplementation(async (path: string, init?: RequestInit) => {
     if (init?.method === 'PATCH') {
@@ -53,6 +53,7 @@ describe('model assignment settings', () => {
     expect(screen.queryByRole('combobox', { name: '质量检查模型' })).toBeNull()
     expect(screen.queryByRole('combobox', { name: '连续性检查模型' })).toBeNull()
     expect(screen.getAllByText('跟随对话中当前选择的模型与 Credits 倍率')).toHaveLength(2)
+    expect(screen.getAllByText('内置模型价格与能力')).toHaveLength(1)
     expect(api.request.mock.calls.some(call => call[1]?.method === 'PATCH')).toBe(false)
   })
   it('inherits global choices without sending an override and saves only changed work with the novel revision', async () => {
@@ -128,4 +129,20 @@ describe('model assignment settings', () => {
     expect((screen.getByRole('combobox', { name: '主 Agent模型' }) as HTMLSelectElement).value).toBe('speed')
     expect(api.request.mock.calls.filter(call => call[1]?.method === 'PATCH')).toHaveLength(1)
   })
+})
+
+it('shows one shared discount catalog and precise native option text without changing the assignment', async () => {
+  api.summary.mockResolvedValue({ models: [{ tier: 'speed', label: '极速', available: true, multiplier: 0.125, baseMultiplier: 1.5,
+    selectedByDefault: true, reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'high', visionEnabled: false,
+    activity: { name: '晚间优惠', revision: 1, timezone: 'Asia/Shanghai', asOf: '2026-11-06T12:00:00Z', nextSwitchAt: null, rules: [] } }] })
+  mount()
+  await waitFor(() => expect((screen.getByRole('combobox', { name: '正文写作模型' }) as HTMLSelectElement).disabled).toBe(false))
+  expect(screen.getAllByText('内置模型价格与能力')).toHaveLength(1)
+  expect(screen.getAllByRole('option', { name: '极速 · 晚间优惠 · 原1.5x → 0.125x' }).length).toBeGreaterThan(0)
+  const info = screen.getByLabelText('极速价格与能力详情')
+  expect(info.closest('details')!.parentElement!.querySelector('s')?.textContent).toBe('1.5x')
+  fireEvent.click(info)
+  expect((screen.getByRole('combobox', { name: '正文写作模型' }) as HTMLSelectElement).value).toBe('')
+  expect((screen.getByRole('button', { name: '保存' }) as HTMLButtonElement).disabled).toBe(true)
+  expect(api.request.mock.calls.some(call => call[1]?.method === 'PATCH')).toBe(false)
 })

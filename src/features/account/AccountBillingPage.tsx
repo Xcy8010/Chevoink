@@ -1,3 +1,4 @@
+import LedgerActivityPrice from './LedgerActivityPrice'
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, LoaderCircle, ReceiptText, RefreshCcw } from 'lucide-react'
 import { useMemo, useState } from 'react'
@@ -38,6 +39,7 @@ function BillingRow({ item }: { item: CreditLedgerItem }) {
     <li className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-[#efefec] px-5 py-3.5 last:border-b-0 dark:border-[var(--border-subtle)]">
       <div className="min-w-0">
         <p className="truncate text-sm">{ledgerLabel(item)}</p>
+        <LedgerActivityPrice item={item} />
         <p className="mt-0.5 text-xs text-[var(--text-tertiary)]">{formatTime(item.createdAt)}</p>
       </div>
       <span className={`text-sm font-medium tabular-nums ${positive ? 'text-emerald-600 dark:text-emerald-400' : 'text-[var(--text-primary)]'}`}>

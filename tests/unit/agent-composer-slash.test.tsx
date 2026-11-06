@@ -459,3 +459,27 @@ it('detects complete caret tokens while reserving exact goal aliases', () => {
   const quotedDraft = `${longPrefix} “引用 /file”`
   expect(findComposerSlashToken(quotedDraft, quotedDraft.length - 1)).toBeNull()
 })
+
+it('shows precise scheduled prices while independent details preserve model choice and thinking editing', () => {
+  const input = props()
+  input.modelOptions = [{ tier: 'speed', label: '极速', available: true, selectedByDefault: true, multiplier: 0.125, baseMultiplier: 1.5,
+    reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'high', visionEnabled: true,
+    activity: { name: '晚间优惠', revision: 1, timezone: 'Asia/Shanghai', asOf: '2026-11-06T12:00:00Z', nextSwitchAt: null, rules: [] } }]
+  render(<AgentComposer {...input} />)
+  const info = screen.getByLabelText('极速价格与能力详情')
+  const row = info.closest('.group\\/model-row') ?? info.closest('details')!.parentElement!
+  expect(row.querySelector('s')?.textContent).toBe('1.5x')
+  expect(row.textContent).toContain('晚间优惠')
+  expect(row.textContent).toContain('0.125x')
+  const menu = info.closest('details')!.parentElement!.closest('details')!
+  fireEvent.click(menu.querySelector(':scope > summary')!)
+  expect(menu.open).toBe(true)
+  fireEvent.focus(info)
+  expect(info.closest('details')!.open).toBe(true)
+  expect(input.onModelTierChange).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByLabelText('编辑极速思考模式'))
+  expect(input.onModelTierChange).not.toHaveBeenCalled()
+  expect(input.onReasoningEffortChange).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: /低\s*low/, hidden: true }))
+  expect(input.onReasoningEffortChange).toHaveBeenCalledWith('tier:speed', 'low')
+})

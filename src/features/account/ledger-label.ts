@@ -4,7 +4,7 @@ import type { CreditLedgerItem } from '../../../shared/contracts'
 export const SOURCE_LABELS: Record<string, string> = {
   model_tokens: '文本模型', image_generation: '生图模型', web_search: '联网搜索', web_fetch: '网页抓取', view_image: '查看图片',
   referral_inviter: '邀请奖励', referral_invitee: '受邀奖励', admin_reset: '管理员重置', admin_reset_all: '管理员全体重置',
-  admin_bonus_adjustment: '管理员奖励调整',
+  admin_bonus_adjustment: '管理员奖励调整', tester_auto_topup: '测试员自动补额',
 }
 
 /** 文本模型行按实际调用档位展示模型名，而非笼统的「文本模型」 */

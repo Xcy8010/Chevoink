@@ -1,3 +1,4 @@
+import { integrationLegalConsent } from '../support/legal-consent.js'
 import { advanceReviewCycle, beginReviewCycle, reviewCycleContentHash } from '../../api/lib/agent/review-cycle.js'
 import { randomInt, randomUUID } from 'node:crypto'
 import { Prisma } from '@prisma/client'
@@ -42,7 +43,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 人类感质量门（需 DB）', () => 
   beforeAll(async () => {
     const unique = randomInt(0, 10_000_000).toString().padStart(7, '0')
     const phone = `+861374${unique}`
-    const register = await request(app).post('/api/auth/register').send({ phone, nickname: `质量门测试${unique}`, password: 'Humanity-Gate-123!' })
+    const register = await request(app).post('/api/auth/register').send({ ...await integrationLegalConsent(), phone, nickname: `质量门测试${unique}`, password: 'Humanity-Gate-123!' })
     expect(register.status).toBe(201)
     const cookies = Array.isArray(register.headers['set-cookie']) ? register.headers['set-cookie'] : [register.headers['set-cookie']]
     cookie = cookies.find((item: string) => item?.startsWith('chevoink_session=')) as string

@@ -1,3 +1,4 @@
+import { tokenPriceSchema, tokenPriceConfiguration } from '../billing/token-price.js'
 import type { Prisma, StyleLearningJob } from '@prisma/client'
 import { isDeepStrictEqual } from 'node:util'
 import { createHash, randomUUID } from 'node:crypto'
@@ -159,12 +160,17 @@ export async function processStyleChunk(initial: StyleLearningJob) {
       await assertAccess(profile.userId!, profile.novelId!, true)
       const selection = styleModelSelectionSchema.parse(job.selection)
       const runtime = await getModelTierRuntime(selection.modelTier, profile.userId!, selection.customModelId, selection.reasoningEffort)
-      if (!isDeepStrictEqual(json(identity(runtime)), job.modelIdentity)) throw new DataAccessError(409, 'STYLE_MODEL_CHANGED', '模型配置或价格已变化，请重新创建学习任务并确认。')
+      const storedIdentity = job.modelIdentity as Record<string, Prisma.JsonValue>
+      const frozenPrice = tokenPriceSchema.safeParse(storedIdentity.price)
+      const currentIdentity = identity(runtime)
+      const currentComparable = { ...currentIdentity, price: runtime.tokenPrice ? tokenPriceConfiguration(runtime.tokenPrice) : null }
+      const storedComparable = { ...storedIdentity, price: frozenPrice.success ? tokenPriceConfiguration(frozenPrice.data) : storedIdentity.price }
+      if (!isDeepStrictEqual(json(currentComparable), json(storedComparable))) throw new DataAccessError(409, 'STYLE_MODEL_CHANGED', '模型配置或价格已变化，请重新创建学习任务并确认。')
       const sample = (job.chunks as unknown as { name: string; content: string }[])[job.processed]
       const stillActive = await prisma.styleLearningJob.findFirst({ where: { id: job.id, status: 'processing', profile: owned(profile.userId!, profile.novelId!) }, select: { id: true } })
       if (!stillActive) return
       providerStarted = true
-      const response = await generateTextCompletion(STYLE_ANALYSIS_PROMPT, JSON.stringify({ sample: sample.content }), { userId: profile.userId!, novelId: profile.novelId!, action: 'style_learning', targetType: 'style_learning', targetId: `${job.id}:${job.processed}`, modelRuntime: runtime, explicitModelSelection: true, signal: AbortSignal.timeout(10 * 60_000), temperature: 0.2 })
+      const response = await generateTextCompletion(STYLE_ANALYSIS_PROMPT, JSON.stringify({ sample: sample.content }), { userId: profile.userId!, novelId: profile.novelId!, action: 'style_learning', targetType: 'style_learning', targetId: `${job.id}:${job.processed}`, modelRuntime: runtime, operationPrice: frozenPrice.success ? frozenPrice.data : undefined, explicitModelSelection: true, signal: AbortSignal.timeout(10 * 60_000), temperature: 0.2 })
       // Pause may change revision, but never admits another processing attempt. Status fences stale results.
       const saved = await prisma.styleLearningJob.updateMany({ where: { id: job.id, status: 'processing', claimToken: job.claimToken }, data: { response, status: 'analyzing', leaseUntil: null, revision: { increment: 1 } } })
       if (!saved.count) return
