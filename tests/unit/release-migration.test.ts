@@ -6,7 +6,8 @@ import { assertMigrationEnvironment, assertDatabaseIdentity, assertFindingIndex,
   fetchMigrationName, fetchMigrationChecksum, fetchSeedEvidence, assertFetchSeed,
   webToolBillingMigrationName, webToolBillingMigrationChecksum, assertWebToolBillingState,
   adminModelLifecycleMigrationName, adminModelLifecycleMigrationChecksum, lifecycleColumns, lifecycleIndexes, assertAdminModelLifecycleState,
-  adminExperiencePlan, adminExperienceMigrations, assertAdminExperienceState, readAdminExperienceState } from '../../scripts/verify-release-migration.mjs'
+  adminExperiencePlan, adminExperienceMigrations, assertAdminExperienceState, readAdminExperienceState,
+  appReleaseRetentionMigrationName, appReleaseRetentionMigrationChecksum, retentionColumns, retentionIndexes, retentionConstraints, assertAppReleaseRetentionState, readAppReleaseRetentionState } from '../../scripts/verify-release-migration.mjs'
 
 // Static catalog captured after the four frozen SQL files in isolated PostgreSQL.
 const experienceCatalog = {
@@ -147,10 +148,99 @@ function fixture() {
 }
 
 describe('exact reviewed production migration', () => {
+  const retentionFixture = () => {
+    const f = fixture()
+    const baseline = readFileSync(new URL('../fixtures/release-admin-experience.schema.prisma', import.meta.url), 'utf8').replaceAll('\r\n', '\n')
+    // Frozen additive delta; future application schema edits cannot broaden this approval.
+    const model = `/// Durable, irreversible claim made before deleting an obsolete application artifact.
+model AppReleaseRetirement {
+  releaseId String @id @map("release_id") @db.VarChar(64)
+  operationId String @unique @map("operation_id") @db.VarChar(36)
+  artifactSha256 String @map("artifact_sha256") @db.VarChar(64)
+  quarantineName String @map("quarantine_name") @db.VarChar(128)
+  triggerOperationId String? @map("trigger_operation_id") @db.VarChar(100)
+  state String @default("pending") @db.VarChar(24)
+  errorCode String? @map("error_code") @db.VarChar(80)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  completedAt DateTime? @map("completed_at")
+  release AppRelease @relation(fields: [releaseId], references: [id], onDelete: Restrict)
+  @@index([state, createdAt])
+  @@map("app_release_retirements")
+}
+`
+    const candidate = baseline.replace('  channels AppReleaseChannel[]\n', '  channels AppReleaseChannel[]\n  retirement AppReleaseRetirement?\n')
+      .replace('model AppReleaseChannel {', model + 'model AppReleaseChannel {')
+    writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), baseline)
+    writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), candidate)
+    mkdirSync(path.join(f.candidate, `prisma/migrations/${appReleaseRetentionMigrationName}`))
+    writeFileSync(path.join(f.candidate, `prisma/migrations/${appReleaseRetentionMigrationName}/migration.sql`), readFileSync(`prisma/migrations/${appReleaseRetentionMigrationName}/migration.sql`))
+    return f
+  }
+  it('permits only the exact frozen retention schema pair and single SQL', () => {
+    const f = retentionFixture()
+    expect(releaseMigrationPlan(f.candidate, f.baseline)).toBe(appReleaseRetentionMigrationName)
+  })
+  it.each(['schema', 'baseline', 'history', 'sql', 'crlf-sql', 'extra', 'additional', 'missing', 'already-present'])('rejects retention %s outside its frozen approval', kind => {
+    const f = retentionFixture()
+    const relative = `prisma/migrations/${appReleaseRetentionMigrationName}/migration.sql`, sql = path.join(f.candidate, relative)
+    if (kind === 'schema') writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), '// unrelated')
+    if (kind === 'baseline') writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), '// unrelated')
+    if (kind === 'history') writeFileSync(path.join(f.candidate, 'prisma/migrations/old/migration.sql'), 'SELECT 2;')
+    if (kind === 'sql') writeFileSync(sql, 'SELECT 2;')
+    if (kind === 'crlf-sql') writeFileSync(sql, readFileSync(sql, 'utf8').replaceAll('\n', '\r\n'))
+    if (kind === 'extra') writeFileSync(path.join(f.candidate, `prisma/migrations/${appReleaseRetentionMigrationName}/extra.sql`), 'SELECT 2;')
+    if (kind === 'additional') { mkdirSync(path.join(f.candidate, 'prisma/migrations/unreviewed')); writeFileSync(path.join(f.candidate, 'prisma/migrations/unreviewed/migration.sql'), 'SELECT 2;') }
+    if (kind === 'missing') rmSync(sql)
+    if (kind === 'already-present') { mkdirSync(path.dirname(path.join(f.baseline, relative))); writeFileSync(path.join(f.baseline, relative), readFileSync(sql)) }
+    expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
+  })
+  it('requires only retention pending, one exact successful row afterwards and unchanged full historical rows', () => {
+    const old = { migration_name: 'old', checksum: 'a'.repeat(64), finished_at: new Date(), rolled_back_at: null, applied_steps_count: 1, historyHash: 'a'.repeat(32) }
+    const target = { ...old, migration_name: appReleaseRetentionMigrationName, checksum: appReleaseRetentionMigrationChecksum }
+    const checksums = [['old', 'b'.repeat(64)], [appReleaseRetentionMigrationName, appReleaseRetentionMigrationChecksum]]
+    const assert = (rows: unknown[], phase: string, before?: unknown[]) => assertMigrationState(rows, checksums, phase, before, appReleaseRetentionMigrationName)
+    expect(() => assert([old], 'before')).not.toThrow()
+    expect(() => assert([old, target], 'after', JSON.parse(JSON.stringify([old])))).not.toThrow()
+    for (const rows of [[], [old, target], [old, old], [{ ...old, finished_at: null }], [{ ...old, historyHash: undefined }]]) expect(() => assert(rows, 'before')).toThrow()
+    for (const changed of [{ checksum: 'c'.repeat(64) }, { finished_at: null }, { rolled_back_at: new Date() }, { applied_steps_count: 0 }, { historyHash: undefined }])
+      expect(() => assert([old, { ...target, ...changed }], 'after', [old])).toThrow()
+    for (const rows of [[old], [old, target, target], [old, target, { ...old, migration_name: 'extra' }], [{ ...old, historyHash: 'b'.repeat(32) }, target]]) expect(() => assert(rows, 'after', [old])).toThrow()
+    expect(() => assert([old, target], 'after', [old, target])).toThrow()
+  })
+  it('requires exact retention catalog, restrict FK, valid full indexes and an empty claim table before restart', async () => {
+    const before = { tables: [], columns: [], indexes: [], constraints: [], rowCount: null }
+    const after = { tables: [{ name: 'app_release_retirements', kind: 'r' }], columns: retentionColumns, indexes: retentionIndexes, constraints: retentionConstraints, rowCount: 0 }
+    expect(() => assertAppReleaseRetentionState(before, 'before')).not.toThrow()
+    expect(() => assertAppReleaseRetentionState(after, 'after', before)).not.toThrow()
+    expect(() => assertAppReleaseRetentionState(after, 'before')).toThrow()
+    expect(() => assertAppReleaseRetentionState(after, 'after', after)).toThrow()
+    expect(() => assertAppReleaseRetentionState(before, 'invalid')).toThrow()
+    for (const key of ['tables', 'columns', 'indexes', 'constraints'] as const) {
+      expect(() => assertAppReleaseRetentionState({ ...after, [key]: after[key].slice(1) }, 'after', before)).toThrow()
+      expect(() => assertAppReleaseRetentionState({ ...after, [key]: [...after[key], after[key][0]] }, 'after', before)).toThrow()
+    }
+    for (const changed of [
+      { ...after, rowCount: 1 }, { ...after, tables: [{ name: 'app_release_retirements', kind: 'v' }] },
+      { ...after, columns: after.columns.map(row => row.name === 'state' ? { ...row, defaultValue: "'complete'::character varying" } : row) },
+      { ...after, columns: after.columns.map(row => row.name === 'trigger_operation_id' ? { ...row, required: true } : row) },
+      { ...after, indexes: after.indexes.map(row => ({ ...row, valid: false })) },
+      { ...after, indexes: after.indexes.map(row => ({ ...row, definition: row.definition.replace('btree', 'hash') })) },
+      { ...after, constraints: after.constraints.map(row => ({ ...row, definition: row.definition.replace('DELETE RESTRICT', 'DELETE CASCADE') })) },
+    ]) expect(() => assertAppReleaseRetentionState(changed, 'after', before)).toThrow()
+    const statements: string[] = []
+    const tx = { $queryRawUnsafe: async (sql: string) => { statements.push(sql); return [after.tables, after.columns, after.indexes, after.constraints, [{ count: 0 }]][statements.length - 1] } }
+    expect(await readAppReleaseRetentionState(tx, 'after')).toEqual(after)
+    expect(statements).toHaveLength(5)
+    expect(statements[4]).toBe('SELECT count(*)::int AS count FROM app_release_retirements')
+    for (const sql of statements) expect(sql.trim()).toMatch(/^SELECT /)
+    expect(readFileSync('deploy/deploy-production.sh', 'utf8')).toContain('"$MIGRATION_PLAN" == "20261107010000_app_release_retention"')
+  })
+
   const experienceFixture = () => {
     const f = fixture()
     writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), readFileSync(new URL('../fixtures/release-admin-model-lifecycle.schema.prisma', import.meta.url)))
-    writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), readFileSync('prisma/schema.prisma'))
+    writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), readFileSync(new URL('../fixtures/release-admin-experience.schema.prisma', import.meta.url)))
     for (const [name] of adminExperienceMigrations) {
       mkdirSync(path.join(f.candidate, `prisma/migrations/${name}`))
       writeFileSync(path.join(f.candidate, `prisma/migrations/${name}/migration.sql`), readFileSync(`prisma/migrations/${name}/migration.sql`))

@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto'
+import { appReleasePeriods } from '../../shared/app-release-periods.js'
+import { claimAppReleaseRetirement, pendingReleaseCandidates, planAppReleaseRetention, requireRetainedRelease, scheduleAppReleaseRetention } from './app-release-retention.js'
 import type { AppRelease, AppReleaseChannel, Prisma } from '@prisma/client'
 import type { Request } from 'express'
 import { appReleaseManifestSchema, type AdminAppRelease, type AppReleaseAction, type AppReleaseBootstrap, type AppReleaseCapability, type AppReleaseExecute, type AppReleasePreview, type AppReleaseReceipt } from '../../shared/contracts/app-release.js'
@@ -17,12 +19,14 @@ const compatible=(row:AppRelease)=>{const manifest=appReleaseManifestSchema.pars
 async function installedRelease(row:AppRelease,full=false){const installed=await readInstalledAppRelease(row.id,full);if(installed.artifactSha256!==row.artifactSha256||installed.manifest.sourceSha!==row.sourceSha||fingerprint(installed.manifest)!==fingerprint(appReleaseManifestSchema.parse(row.manifest)))throw new DataAccessError(503,'APP_RELEASE_ARTIFACT_CHANGED','应用版本文件与登记信息不一致。');return installed}
 export async function importAppRelease(actorId:string,releaseId:string,ip:string|null){
  await superAdmin(prisma,actorId)
- const installed=await readInstalledAppRelease(releaseId,true),manifest=installed.manifest
  return prisma.$transaction(async tx=>{
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(804726)`
   await superAdmin(tx,actorId)
+  await requireRetainedRelease(tx,releaseId)
+  const installed=await readInstalledAppRelease(releaseId,true),manifest=installed.manifest
   const old=await tx.appRelease.findUnique({where:{id:releaseId}})
   if(old){if(old.artifactSha256!==installed.artifactSha256)throw new DataAccessError(409,'APP_RELEASE_IMMUTABLE','版本编号已绑定其他不可变产物。');return present(old)}
+  if((await pendingReleaseCandidates(tx)).some(row=>row.id!==releaseId))throw new DataAccessError(409,'APP_RELEASE_CANDIDATE_PENDING','已有待分配候选，请先完成或核对该版本，不能继续积累候选。')
   const verified=manifest.validation.status==='verified'
   const row=await tx.appRelease.create({data:{id:releaseId,label:manifest.label,sourceSha:manifest.sourceSha,artifactSha256:installed.artifactSha256,manifest:JSON.parse(JSON.stringify(manifest)) as Prisma.InputJsonObject,publicNotes:JSON.parse(JSON.stringify(manifest.publicNotes)) as Prisma.InputJsonObject,compatibilityVersion:manifest.compatibility.api,verifiedAt:verified&&manifest.validation.status==='verified'?new Date(manifest.validation.verifiedAt):null,validationState:verified?'verified':'draft',registeredById:actorId}})
   await tx.adminAuditLog.create({data:{adminId:actorId,action:'app_release.import',targetType:'app_release',targetId:releaseId,ip,detail:{sourceSha:row.sourceSha,artifactSha256:row.artifactSha256,validationState:row.validationState}}})
@@ -43,17 +47,29 @@ export async function selectAppReleaseForUser(userId:string|null,tx:Transaction=
  return{mode:'artifact',channel,release:{id:row.id,label:row.label,notes:manifest.publicNotes,entryUrl:`${manifest.basePath}index.html`,capabilities:manifest.capabilities}}
 }
 export async function requireAppReleaseCapability(req:Request,capability:AppReleaseCapability){const selection=await selectAppRelease(req);if(selection.mode==='artifact'&&!selection.release!.capabilities.includes(capability))throw new DataAccessError(403,'APP_RELEASE_CAPABILITY_DISABLED','当前应用版本尚未开放此功能。');return selection}
-export async function listAppReleases(actorId:string){await superAdmin(prisma,actorId);const[releases,channels,operations]=await Promise.all([prisma.appRelease.findMany({orderBy:{createdAt:'desc'},take:100}),prisma.appReleaseChannel.findMany(),prisma.appReleaseOperation.findMany({where:{status:'applied'},orderBy:{createdAt:'desc'},take:50})]);return{releases:releases.map(present),stable:channelView(channels.find(row=>row.channel==='stable')),test:channelView(channels.find(row=>row.channel==='test')),operations:operations.map(row=>row.result as unknown as AppReleaseReceipt)}}
+export async function listAppReleases(actorId:string){
+ await superAdmin(prisma,actorId)
+ const[releases,channels,operations,retired]=await Promise.all([prisma.appRelease.findMany({orderBy:{createdAt:'desc'}}),prisma.appReleaseChannel.findMany(),prisma.appReleaseOperation.findMany({where:{status:'applied'},orderBy:{createdAt:'asc'}}),prisma.appReleaseRetirement.findMany()])
+ const unavailable=new Set(retired.map(row=>row.releaseId)),used=new Set([...operations.map(row=>row.releaseId),...channels.filter(row=>row.enabled).map(row=>row.releaseId)])
+ const receipts=operations.map(row=>row.result as unknown as AppReleaseReceipt),periods=appReleasePeriods(receipts)
+ return{releases:releases.filter(row=>!unavailable.has(row.id)).map(row=>({...present(row),lifecycle:used.has(row.id)?'retained' as const:'candidate' as const,effectivePeriods:periods.get(row.id)??[]})),stable:channelView(channels.find(row=>row.channel==='stable')),test:channelView(channels.find(row=>row.channel==='test')),operations:receipts.slice(-50).reverse(),retention:{limit:2,pending:retired.filter(row=>row.state!=='deleted'&&!row.errorCode).length,failed:retired.filter(row=>row.state!=='deleted'&&row.errorCode).length}}
+}
 async function preview(tx:Transaction,actorId:string,action:AppReleaseAction,releaseId:string):Promise<AppReleasePreview>{
  await superAdmin(tx,actorId)
  const row=await tx.appRelease.findUnique({where:{id:releaseId}})
  if(!row)throw new DataAccessError(404,'APP_RELEASE_NOT_FOUND','应用版本尚未登记。')
+ if(action!=='withdraw_test')await requireRetainedRelease(tx,releaseId)
  const channels=await tx.appReleaseChannel.findMany(),stable=channelView(channels.find(item=>item.channel==='stable')),test=channelView(channels.find(item=>item.channel==='test'))
  const blockers:string[]=[]
- if(action!=='withdraw_test'&&(row.validationState!=='verified'||!row.verifiedAt))blockers.push('版本缺少原始同 SHA 完整 CI 验证证据。')
- if(action!=='withdraw_test'&&!compatible(row))blockers.push('版本与当前 API、加法数据库结构、任务协议或注册政策界面不兼容。')
- if(action!=='withdraw_test'){try{await installedRelease(row,true)}catch{blockers.push('版本文件或不可变清单校验失败。')}}
- else {const fallback=stable?.enabled?await tx.appRelease.findUnique({where:{id:stable.releaseId}}):null;if(!fallback||fallback.validationState!=='verified'||!compatible(fallback))blockers.push('稳定版回退入口尚未通过兼容验证。');else{try{await installedRelease(fallback,true)}catch{blockers.push('稳定版回退入口文件校验失败。')}}}
+ const applying=action!=='withdraw_test'&&action!=='discard_candidate'
+ if(applying&&(row.validationState!=='verified'||!row.verifiedAt))blockers.push('版本缺少原始同 SHA 完整 CI 验证证据。')
+ if(applying&&!compatible(row))blockers.push('版本与当前 API、加法数据库结构、任务协议或注册政策界面不兼容。')
+ if(applying){try{await installedRelease(row,true)}catch{blockers.push('版本文件或不可变清单校验失败。')}}
+ else if(action==='withdraw_test'){const fallback=stable?.enabled?await tx.appRelease.findUnique({where:{id:stable.releaseId}}):null;if(!fallback||fallback.validationState!=='verified'||!compatible(fallback))blockers.push('稳定版回退入口尚未通过兼容验证。');else{try{await installedRelease(fallback,true)}catch{blockers.push('稳定版回退入口文件校验失败。')}}}
+ if(action==='discard_candidate'){
+  const history=await tx.appReleaseOperation.findMany({where:{releaseId}})
+  if(channels.some(channel=>channel.enabled&&channel.releaseId===releaseId)||history.some(operation=>operation.releaseId===releaseId))blockers.push('该版本已有应用记录或待核对操作，不能作为未分配候选放弃。')
+ }
  const {legal}=await readPublicSiteContent(tx)
  if(action==='assign_test'&&(!stable||!stable.enabled))blockers.push('请先登记并启用经过验证的稳定版，保证测试入口与稳定入口有明确身份。')
  if(action==='withdraw_test'&&(!test||!test.enabled||test.releaseId!==releaseId))blockers.push('目标不是当前启用的测试版。')
@@ -62,14 +78,14 @@ async function preview(tx:Transaction,actorId:string,action:AppReleaseAction,rel
   const historical=await tx.appReleaseOperation.findFirst({where:{releaseId,status:'applied',action:{in:['full_release','rollback']}}})
   if(!historical)blockers.push('该版本没有稳定版发布历史，不能作为回退目标。')
  }
- const expectedRevision=(action==='assign_test'||action==='withdraw_test'?test:stable)?.revision??0
+ const expectedRevision=action==='discard_candidate'?0:(action==='assign_test'||action==='withdraw_test'?test:stable)?.revision??0
  const identity={actorId,action,releaseId,artifactSha256:row.artifactSha256,stable,test,legal:{terms:legal.terms?.id??null,privacy:legal.privacy?.id??null}}
- return{action,release:present(row),stable,test,expectedRevision,previewHash:fingerprint(identity),blockers,impact:action==='assign_test'?'仅有效测试员和超级管理员使用此版本；其他账号继续使用稳定版。':action==='withdraw_test'?'停止测试分流，测试员后续入口与新功能权限回到稳定版。':action==='rollback'?`将应用前端与新功能能力切换到指定历史稳定版本；不恢复数据库，不修改已接纳任务的模型、价格或版本绑定。${test?.enabled?' 当前测试分流继续使用 '+test.releaseId+'，可另行撤回。':' 当前未启用测试分流。'}`:'将所有账号切换到此稳定版本，并同时停用测试分流；保留原测试版指针和历史记录。'}
+ return{action,release:present(row),stable,test,expectedRevision,previewHash:fingerprint(identity),blockers,impact:action==='discard_candidate'?'仅放弃尚未分配的候选并自动清理它的文件，不改变当前稳定版或测试版。':action==='assign_test'?'仅有效测试员和超级管理员使用此版本；其他账号继续使用稳定版。':action==='withdraw_test'?'停止测试分流，测试员后续入口与新功能权限回到稳定版。':action==='rollback'?`将应用前端与新功能能力切换到指定历史稳定版本；不恢复数据库，不修改已接纳任务的模型、价格或版本绑定。${test?.enabled?' 当前测试分流继续使用 '+test.releaseId+'，可另行撤回。':' 当前未启用测试分流。'}`:'将所有账号切换到此稳定版本，并同时停用测试分流；保留原测试版指针和历史记录。'}
 }
 export async function previewAppRelease(actorId:string,action:AppReleaseAction,releaseId:string){return prisma.$transaction(async tx=>{await tx.$executeRaw`SELECT pg_advisory_xact_lock(804726)`;return preview(tx,actorId,action,releaseId)},{timeout:30000})}
 export async function executeAppRelease(actorId:string,input:AppReleaseExecute,ip:string|null){
  const requestHash=fingerprint({actorId,...input})
- return prisma.$transaction(async tx=>{
+ const result=await prisma.$transaction(async tx=>{
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(804726)`
   await superAdmin(tx,actorId)
   const old=await tx.appReleaseOperation.findUnique({where:{id:input.operationId}})
@@ -79,14 +95,18 @@ export async function executeAppRelease(actorId:string,input:AppReleaseExecute,i
   if(view.blockers.length)throw new DataAccessError(409,'APP_RELEASE_BLOCKED',view.blockers.join(' '))
   const channel=input.action==='assign_test'||input.action==='withdraw_test'?'test':'stable'
   const previous=channel==='test'?view.test:view.stable
-  const revision=input.expectedRevision+1,enabled=input.action!=='withdraw_test'
-  await tx.appReleaseChannel.upsert({where:{channel},create:{channel,releaseId:input.releaseId,revision,enabled},update:{releaseId:input.releaseId,revision,enabled}})
+  const revision=input.action==='discard_candidate'?0:input.expectedRevision+1,enabled=input.action!=='withdraw_test'
+  if(input.action==='discard_candidate')await claimAppReleaseRetirement(tx,view.release,input.operationId)
+  else await tx.appReleaseChannel.upsert({where:{channel},create:{channel,releaseId:input.releaseId,revision,enabled},update:{releaseId:input.releaseId,revision,enabled}})
   if(input.action==='full_release'&&view.test)await tx.appReleaseChannel.update({where:{channel:'test'},data:{enabled:false,revision:{increment:1}}})
-  const receipt:AppReleaseReceipt={operationId:input.operationId,status:'applied',action:input.action,releaseId:input.releaseId,previousReleaseId:previous?.releaseId??null,revision,appliedAt:new Date().toISOString(),...(input.action==='full_release'&&view.test?{testRevision:view.test.revision+1}:{})}
+  const receipt:AppReleaseReceipt={operationId:input.operationId,status:'applied',action:input.action,releaseId:input.releaseId,previousReleaseId:input.action==='discard_candidate'?null:previous?.releaseId??null,revision,appliedAt:new Date().toISOString(),...(input.action==='full_release'&&view.test?{testRevision:view.test.revision+1}:{})}
   await tx.appReleaseOperation.create({data:{id:input.operationId,actorId,action:input.action,requestHash,releaseId:input.releaseId,previousReleaseId:receipt.previousReleaseId,status:'applied',result:receipt}})
   await tx.adminAuditLog.create({data:{adminId:actorId,action:`app_release.${input.action}`,targetType:'app_release',targetId:input.releaseId,ip,detail:{operationId:input.operationId,artifactSha256:view.release.artifactSha256,sourceSha:view.release.sourceSha,previousReleaseId:receipt.previousReleaseId,previousRevision:input.expectedRevision,revision,...(input.action==='full_release'?{previousTestChannel:view.test,testRevision:receipt.testRevision??0}:{})}}})
+  await planAppReleaseRetention(tx,input.operationId)
   return receipt
  },{timeout:30000})
+ scheduleAppReleaseRetention()
+ return result
 }
 export async function reconcileAppRelease(actorId:string,operationId:string){
  return prisma.$transaction(async tx=>{

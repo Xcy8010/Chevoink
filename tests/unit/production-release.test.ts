@@ -40,6 +40,14 @@ describe('production release gates', () => {
   })
 })
 describe('committed production source identity', () => {
+  it('runs old-copy cleanup after completed deployment and releasing the shared lock', () => {
+    const script = readFileSync(new URL('../../deploy/deploy-production.sh', import.meta.url), 'utf8')
+    const completed = script.lastIndexOf('phase completed'), unlock = script.lastIndexOf('flock -u 9'), cleanup = script.lastIndexOf('APP_ENV=production node scripts/prune-application-copies.mjs')
+    expect(completed).toBeGreaterThan(0)
+    expect(unlock).toBeGreaterThan(completed)
+    expect(cleanup).toBeGreaterThan(unlock)
+    expect(script.slice(cleanup)).toContain('cleanup needs review')
+  })
   it('compares canonical committed bytes, including removed-source baseline, without packaging local secrets/drafts', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'chevoink-package-test-'))
     const git = (...args: string[]) => execFileSync('git', args, { cwd: root }).toString().trim()
@@ -55,6 +63,8 @@ describe('committed production source identity', () => {
     expect(readFileSync(path.join(root, '.env'), 'utf8')).toBe('private-test-only')
     expect(productionSourcePath('.env')).toBe(false)
     expect(productionSourcePath('output/private.json')).toBe(false)
+    expect(productionSourcePath('scripts/prune-application-copies.mjs')).toBe(true)
+    expect(productionSourcePath('scripts/prune-application-copies.evidence.json')).toBe(false)
     git('config', 'core.autocrlf', 'true')
     const archive = path.join(root, 'release.tar.gz')
     archiveRevision(revision, archive, root)

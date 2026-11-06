@@ -11,6 +11,9 @@ export const webToolBillingMigrationName = '20261020120000_web_tool_billing'
 export const webToolBillingMigrationChecksum = 'f7797fe83d78f72a07c9c6e4b8a6cc17ff758db54b1709776f9b1dd35b7933f0'
 export const adminModelLifecycleMigrationName = '20261101120000_admin_model_lifecycle'
 export const adminModelLifecycleMigrationChecksum = 'ced5cef83baa1d9bfe9ebe54e5c39388e85f7e6ea0ee9aa7c2257958e9181baf'
+export const appReleaseRetentionMigrationName = '20261107010000_app_release_retention'
+export const appReleaseRetentionMigrationChecksum = '04c0397ce2534083461e58030b7cb8c169ea3e215e2a3d83164481b2d759ccca'
+const appReleaseRetentionCandidateSchema = '7873d4e27151613e878436c3323c13dbeff337411e1eb42c7b8b344dfd014c18'
 export const adminExperiencePlan = '20261106_admin_model_experience'
 export const adminExperienceMigrations = [
   ['20261106120000_site_content', 'e482a56f154bc0207c5a221a823869151518a4ac3253c2d5e7ea6c8f928d4bde'],
@@ -27,6 +30,8 @@ const billingCandidateSchema = 'f981e01401a19d5a18e0c28556a12cb2fb0b35eefe6a9be2
 const reviewed = new Map([[migrationName, migrationChecksum], [fetchMigrationName, fetchMigrationChecksum],
   [webToolBillingMigrationName, webToolBillingMigrationChecksum], [adminModelLifecycleMigrationName, adminModelLifecycleMigrationChecksum]])
 reviewed.set(adminExperiencePlan, createHash('sha256').update(JSON.stringify(adminExperienceMigrations)).digest('hex'))
+reviewed.set(appReleaseRetentionMigrationName, appReleaseRetentionMigrationChecksum)
+const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName])
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
@@ -50,6 +55,12 @@ export function releaseMigrationPlan(candidate, baseline) {
   const currentFiles = files(path.join(candidate, 'prisma/migrations'))
   const oldFiles = files(path.join(baseline, 'prisma/migrations'))
   if (next === previous && JSON.stringify(currentFiles) === JSON.stringify(oldFiles)) return 'routine'
+  const retentionTarget = `${appReleaseRetentionMigrationName}/migration.sql`
+  if (digest(previous.replaceAll('\r\n', '\n')) === adminExperienceCandidateSchema
+    && digest(next.replaceAll('\r\n', '\n')) === appReleaseRetentionCandidateSchema
+    && !oldFiles.some(([name]) => name === retentionTarget)
+    && JSON.stringify(currentFiles.filter(([name]) => name !== retentionTarget)) === JSON.stringify(oldFiles)
+    && currentFiles.find(([name]) => name === retentionTarget)?.[1] === appReleaseRetentionMigrationChecksum) return appReleaseRetentionMigrationName
   const experienceTargets = new Map(adminExperienceMigrations.map(([name, hash]) => [`${name}/migration.sql`, hash]))
   if (digest(previous.replaceAll('\r\n', '\n')) === lifecycleCandidateSchema
     && digest(next.replaceAll('\r\n', '\n')) === adminExperienceCandidateSchema
@@ -95,7 +106,7 @@ export function assertMigrationState(rows, checksums, phase, before, plan = migr
   for (const row of rows) {
     if (!expected.has(row.migration_name) || !/^[a-f0-9]{64}$/.test(row.checksum)
       || !row.finished_at || row.rolled_back_at || !Number.isInteger(row.applied_steps_count) || row.applied_steps_count < 1) throw Error('Migration history is not fully verified')
-    if (plan === adminExperiencePlan && !/^[a-f0-9]{32}$/.test(row.historyHash)) throw Error('Migration history fingerprint missing')
+    if (fullHistoryPlans.has(plan) && !/^[a-f0-9]{32}$/.test(row.historyHash)) throw Error('Migration history fingerprint missing')
     if (phase === 'after') {
       if (additions.has(row.migration_name)) {
         if (row.checksum !== additions.get(row.migration_name)) throw Error('New migration checksum mismatch')
@@ -103,7 +114,7 @@ export function assertMigrationState(rows, checksums, phase, before, plan = migr
         const old = previous.get(row.migration_name)
         if (!old || row.checksum !== old.checksum || new Date(row.finished_at).toISOString() !== new Date(old.finished_at).toISOString()
           || row.applied_steps_count !== old.applied_steps_count
-          || (plan === adminExperiencePlan && row.historyHash !== old.historyHash)) throw Error('Historical migration changed during deployment')
+          || (fullHistoryPlans.has(plan) && row.historyHash !== old.historyHash)) throw Error('Historical migration changed during deployment')
       }
     }
     expected.delete(row.migration_name)
@@ -271,6 +282,55 @@ export async function readAdminExperienceState(tx) {
   return { tables, columns, indexes, constraints }
 }
 
+// Exact additive retention-claim DDL. No claim writer runs until the API restart.
+export const retentionColumns = [
+  ['release_id', 'character varying(64)', true], ['operation_id', 'character varying(36)', true],
+  ['artifact_sha256', 'character varying(64)', true], ['quarantine_name', 'character varying(128)', true],
+  ['trigger_operation_id', 'character varying(100)'], ['state', 'character varying(24)', true, "'pending'::character varying"],
+  ['error_code', 'character varying(80)'], ['created_at', 'timestamp(3) without time zone', true, 'CURRENT_TIMESTAMP'],
+  ['updated_at', 'timestamp(3) without time zone', true], ['completed_at', 'timestamp(3) without time zone'],
+].map(([name, type, required = false, defaultValue = null]) => ({ name, type, required, defaultValue }))
+export const retentionIndexes = [
+  ['app_release_retirements_pkey', true, ['release_id']],
+  ['app_release_retirements_operation_id_key', true, ['operation_id']],
+  ['app_release_retirements_state_created_at_idx', false, ['state', 'created_at']],
+].map(([name, unique, columns]) => ({ name, unique, columns, definition: `CREATE ${unique ? 'UNIQUE ' : ''}INDEX ${name} ON public.app_release_retirements USING btree (${columns.join(', ')})`, valid: true, ready: true, partial: false, expression: false }))
+export const retentionConstraints = [
+  { name: 'app_release_retirements_pkey', kind: 'p', definition: 'PRIMARY KEY (release_id)', valid: true },
+  { name: 'app_release_retirements_release_id_fkey', kind: 'f', definition: 'FOREIGN KEY (release_id) REFERENCES app_releases(id) ON UPDATE CASCADE ON DELETE RESTRICT', valid: true },
+]
+export function assertAppReleaseRetentionState(state, phase, before) {
+  if (!['before', 'after'].includes(phase)) throw Error('Invalid retention phase')
+  if (phase === 'before') {
+    if (state.tables.length || state.columns.length || state.indexes.length || state.constraints.length || state.rowCount !== null) throw Error('Retention objects already exist')
+    return
+  }
+  assertAppReleaseRetentionState(before, 'before')
+  if (!sameRows(state.tables, [{ name: 'app_release_retirements', kind: 'r' }]) || !sameRows(state.columns, retentionColumns)
+    || !sameRows(state.indexes, retentionIndexes) || !sameRows(state.constraints, retentionConstraints) || state.rowCount !== 0) throw Error('Retention migration catalog or initial rows mismatch')
+}
+/** Only PostgreSQL metadata and the new empty claim table are read. */
+export async function readAppReleaseRetentionState(tx, phase) {
+  const tables = await tx.$queryRawUnsafe(`SELECT c.relname AS name, c.relkind::text AS kind FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname=current_schema() AND c.relname='app_release_retirements' ORDER BY c.relname`)
+  const columns = await tx.$queryRawUnsafe(`SELECT a.attname AS name, format_type(a.atttypid,a.atttypmod) AS type,
+    a.attnotnull AS required, pg_get_expr(d.adbin,d.adrelid) AS "defaultValue"
+    FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+    LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+    WHERE n.nspname=current_schema() AND c.relname='app_release_retirements' AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum`)
+  const indexes = await tx.$queryRawUnsafe(`SELECT c.relname AS name, i.indisunique AS unique, pg_get_indexdef(i.indexrelid) AS definition,
+    ARRAY(SELECT a.attname::text FROM unnest(i.indkey) WITH ORDINALITY k(num,ord)
+      JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.num ORDER BY k.ord) AS columns,
+    i.indisvalid AS valid, i.indisready AS ready, i.indpred IS NOT NULL AS partial, i.indexprs IS NOT NULL AS expression
+    FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+    WHERE n.nspname=current_schema() AND t.relname='app_release_retirements' ORDER BY c.relname`)
+  const constraints = await tx.$queryRawUnsafe(`SELECT k.conname AS name, k.contype::text AS kind, pg_get_constraintdef(k.oid) AS definition, k.convalidated AS valid
+    FROM pg_constraint k JOIN pg_class t ON t.oid=k.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+    WHERE n.nspname=current_schema() AND t.relname='app_release_retirements' ORDER BY k.conname`)
+  const rowCount = phase === 'after' ? (await tx.$queryRawUnsafe('SELECT count(*)::int AS count FROM app_release_retirements'))[0].count : null
+  return { tables, columns, indexes, constraints, rowCount }
+}
+
 export function assertMigrationEnvironment(environment, shared) {
   if (environment.APP_ENV !== 'production' || shared.APP_ENV !== 'production'
     || !shared.DATABASE_URL || environment.DATABASE_URL !== shared.DATABASE_URL) throw Error('Production migration environment mismatch')
@@ -308,7 +368,7 @@ async function main() {
       const [database] = await tx.$queryRawUnsafe('SELECT current_database() AS database, current_schema() AS schema')
       assertDatabaseIdentity(database, expectedDatabase)
       const rows = await tx.$queryRawUnsafe(`SELECT migration_name, checksum, finished_at, rolled_back_at, applied_steps_count
-        ${plan === adminExperiencePlan ? ', md5(to_jsonb(m)::text) AS "historyHash"' : ''}
+        ${fullHistoryPlans.has(plan) ? ', md5(to_jsonb(m)::text) AS "historyHash"' : ''}
         FROM "_prisma_migrations" m ORDER BY migration_name`)
       const checksums = files(path.join(candidate, 'prisma/migrations')).filter(([name]) => name.endsWith('/migration.sql'))
         .map(([name, hash]) => [name.slice(0, -'/migration.sql'.length), hash])
@@ -316,6 +376,11 @@ async function main() {
       if (before && (before.migration !== plan || before.checksum !== reviewed.get(plan) || before.phase !== 'before')) throw Error('Migration preflight receipt mismatch')
       if (before) assertDatabaseIdentity(database, before.database)
       assertMigrationState(rows, checksums, phase, before?.migrations, plan)
+      if (plan === appReleaseRetentionMigrationName) {
+        const retention = await readAppReleaseRetentionState(tx, phase)
+        assertAppReleaseRetentionState(retention, phase, before?.retention)
+        return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, retention }
+      }
       if (plan === adminExperiencePlan) {
         const catalog = await readAdminExperienceState(tx)
         assertAdminExperienceState(catalog, phase, before?.catalog)

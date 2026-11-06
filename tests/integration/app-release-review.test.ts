@@ -48,6 +48,7 @@ afterAll(async()=>{
  await prisma.appReleaseChannel.deleteMany({where:{channel:{in:['stable','test']}}})
  for(const channel of channels)await prisma.appReleaseChannel.create({data:channel})
  await prisma.appReleaseOperation.deleteMany({where:{actorId:adminId}})
+ await prisma.appReleaseRetirement.deleteMany({where:{releaseId:{in:ids}}})
  await prisma.appRelease.deleteMany({where:{id:{in:ids}}})
  await prisma.aiModelSystemBinding.deleteMany({where:{roleKey:{in:roles}}})
  await prisma.aiModelConfigVersion.deleteMany({where:{modelConfigId:{in:models}}})

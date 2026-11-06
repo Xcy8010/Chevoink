@@ -40,7 +40,7 @@ const [root,manifestPath,revision]=process.argv.slice(2);
 const manifest=JSON.parse(readFileSync(manifestPath,'utf8'));
 if(manifest.revision!==revision || !manifest.files.length) throw Error('baseline identity mismatch');
 for(const file of manifest.files){
-  if(!/^(api|shared|prisma)\//.test(file.path) && !['.node-version','package.json','package-lock.json','ecosystem.config.cjs'].includes(file.path)) throw Error('invalid manifest path');
+  if(!/^(api|shared|prisma)\//.test(file.path) && !['.node-version','package.json','package-lock.json','ecosystem.config.cjs','scripts/prune-application-copies.mjs'].includes(file.path)) throw Error('invalid manifest path');
   const full=resolve(root,file.path);
   if(!full.startsWith(root+'/') || !lstatSync(full).isFile() || createHash('sha256').update(readFileSync(full)).digest('hex')!==file.sha256) throw Error('active source mismatch: '+file.path);
 }
@@ -71,7 +71,7 @@ verify_baseline
 [[ "$(snapshot_process)" == "$PROCESS_BEFORE" ]]
 printf '{"revision":"%s","archiveSha256":"%s"}\n' "$REVISION" "$ARCHIVE_HASH" > "$STAGE/.chevoink-release.json"
 phase prepared
-if [[ "$MIGRATION_PLAN" == "20261009010000_quality_finding_span_identity" || "$MIGRATION_PLAN" == "20261019120000_web_fetch_tool_config" || "$MIGRATION_PLAN" == "20261020120000_web_tool_billing" || "$MIGRATION_PLAN" == "20261101120000_admin_model_lifecycle" || "$MIGRATION_PLAN" == "20261106_admin_model_experience" ]]; then
+if [[ "$MIGRATION_PLAN" == "20261009010000_quality_finding_span_identity" || "$MIGRATION_PLAN" == "20261019120000_web_fetch_tool_config" || "$MIGRATION_PLAN" == "20261020120000_web_tool_billing" || "$MIGRATION_PLAN" == "20261101120000_admin_model_lifecycle" || "$MIGRATION_PLAN" == "20261106_admin_model_experience" || "$MIGRATION_PLAN" == "20261107010000_app_release_retention" ]]; then
   DOTENV_CONFIG_QUIET=true node --import dotenv/config scripts/verify-release-migration.mjs before "$STAGE" "$CURRENT" "$STAGE/.release-migration-before.json"
   phase migrating
   npx prisma migrate deploy
@@ -114,3 +114,11 @@ pm2 save
 # Existing Nginx configuration is unchanged: no reload/fence.
 phase completed
 echo "[chevoink] deployed $REVISION; previous release retained at $PREVIOUS"
+# Cleanup has its own durable receipt and reacquires the same lock without waiting.
+# A completed API deployment is never retried because copy cleanup needs review.
+trap - ERR
+if flock -u 9 && APP_ENV=production node scripts/prune-application-copies.mjs; then
+  :
+else
+  echo "[chevoink] deployment completed; old application copy cleanup needs review (部署已完成，旧副本清理需核对)" >&2
+fi

@@ -1,12 +1,50 @@
-import { useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { ChevronLeft, ChevronRight, Megaphone, X } from 'lucide-react'
+import type { PublicSiteContent } from '../../../shared/contracts/site-content'
+import './announcements.css'
 import { dismissalIsActive, dismissalKey, usePublicSiteContent } from './public-api'
 
 function readDismissals(storage: Storage): Record<string, number> {
   try { const value: unknown=JSON.parse(storage.getItem('site-announcement-dismissals') ?? '{}'); return value && typeof value==='object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).filter((entry): entry is [string,number]=>typeof entry[1]==='number')) : {} } catch { return {} }
 }
+type PublicAnnouncement=PublicSiteContent['announcements'][number]
+function AnnouncementDialog({item,index,total,onClose,onDismiss,onPrevious,onNext,returnFocus,id}:{item:PublicAnnouncement;index:number;total:number;onClose:()=>void;onDismiss:()=>void;onPrevious:()=>void;onNext:()=>void;returnFocus:HTMLElement|null;id:string}) {
+  const dialog=useRef<HTMLDialogElement>(null)
+  const titleId=useId()
+  useEffect(()=>{
+    const node=dialog.current!
+    const previous=document.activeElement instanceof HTMLElement?document.activeElement:null
+    const overflow=document.body.style.overflow
+    document.body.style.overflow='hidden'
+    node.showModal()
+    node.querySelector<HTMLButtonElement>('button')?.focus({preventScroll:true})
+    return()=>{node.close();document.body.style.overflow=overflow;const target=returnFocus?.isConnected?returnFocus:previous;if(target?.isConnected)target.focus({preventScroll:true})}
+  },[returnFocus])
+  return createPortal(<dialog ref={dialog} id={id} data-native-back-dismiss aria-modal="true" aria-labelledby={titleId} onKeyDown={event=>{
+    if(event.key!=='Tab')return
+    const buttons=Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'))
+    const first=buttons[0],last=buttons[buttons.length-1]
+    if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus()}
+    else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus()}
+  }} onCancel={event=>{event.preventDefault();onClose()}} onClick={event=>{
+    if(event.target!==event.currentTarget)return
+    const rect=event.currentTarget.getBoundingClientRect()
+    if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)onClose()
+  }} className="site-announcement-dialog">
+    <div className="site-announcement-dialog-frame">
+      <header className="site-announcement-dialog-header"><h2 id={titleId} className="min-w-0 text-base font-semibold">{item.title}</h2><button type="button" onClick={onClose} aria-label="关闭公告弹窗" className="site-announcement-dialog-close"><X aria-hidden="true" size={18}/></button></header>
+      <div key={dismissalKey(item.id,item.contentVersion)} className="site-announcement-dialog-body"><p className="whitespace-pre-wrap break-words text-sm leading-7">{item.body}</p></div>
+      <footer className="site-announcement-dialog-footer">{total>1?<nav aria-label="公告切换" className="flex items-center gap-2"><button type="button" aria-label="上一条公告" disabled={index===0} onClick={onPrevious} className="site-announcement-dialog-close"><ChevronLeft aria-hidden="true" size={18}/></button><span className="text-xs tabular-nums text-[var(--text-secondary)]">{index+1} / {total}</span><button type="button" aria-label="下一条公告" disabled={index===total-1} onClick={onNext} className="site-announcement-dialog-close"><ChevronRight aria-hidden="true" size={18}/></button></nav>:<span/>}<button type="button" onClick={onDismiss} className="rounded-lg border border-[var(--border-strong)] px-3 py-2 text-sm hover:bg-[var(--surface-muted)]">关闭本条公告</button></footer>
+    </div>
+  </dialog>,document.fullscreenElement??document.body)
+}
 export function SiteAnnouncements({scope}:{scope:'home'|'studio'}) {
   const query=usePublicSiteContent()
   const [dismissed,setDismissed]=useState<Record<string,number>>({})
+  const [openedKey,setOpenedKey]=useState<string|null>(null)
+  const origin=useRef<HTMLElement|null>(null)
+  const dialogId=useId()
   const data=query.data
   if (!data) return null
   const now=Date.parse(data.serverNow)+Date.now()-query.dataUpdatedAt
@@ -15,13 +53,27 @@ export function SiteAnnouncements({scope}:{scope:'home'|'studio'}) {
     const stored=readDismissals(item.dismissal.mode==='session' ? sessionStorage : localStorage)
     return (item.scope===scope || item.scope==='both') && now >= Date.parse(item.startsAt) && (item.endsAt === null || now < Date.parse(item.endsAt)) && !dismissalIsActive(dismissed[key] ?? stored[key],item.dismissal,now)
   })
-  return <div aria-label="站点公告" className={scope === 'studio' ? 'max-h-32 shrink-0 space-y-2 overflow-y-auto' : 'space-y-2'}>{items.map(item=><aside key={dismissalKey(item.id,item.contentVersion)} className="flex items-start gap-4 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-4 py-3 text-sm"><div className="min-w-0 flex-1"><p className="font-medium">{item.title}</p><p className="mt-1 whitespace-pre-wrap text-[var(--text-secondary)]">{item.body}</p></div><button type="button" aria-label={`关闭公告：${item.title}`} onClick={()=>{
+  if(!items.length)return null
+  const first=items[0],index=items.findIndex(item=>dismissalKey(item.id,item.contentVersion)===openedKey),active=index<0?null:items[index]
+  function dismiss(item:PublicAnnouncement) {
     const key=dismissalKey(item.id,item.contentVersion)
     const storage=item.dismissal.mode==='session' ? sessionStorage : localStorage
     const entries={...readDismissals(storage),[key]:now}
     try { storage.setItem('site-announcement-dismissals',JSON.stringify(Object.fromEntries(Object.entries(entries).sort((a,b)=>b[1]-a[1]).slice(0,100)))) } catch { /* The current view still dismisses when browser storage is unavailable. */ }
     setDismissed(current=>({...current,[key]:now}))
-  }}>关闭</button></aside>)}</div>
+    if(openedKey===key){const next=items.find(candidate=>dismissalKey(candidate.id,candidate.contentVersion)!==key);setOpenedKey(next?dismissalKey(next.id,next.contentVersion):null)}
+  }
+  return <div aria-label="站点公告" className={scope==='studio'?'site-announcements-studio':'site-announcements-home'}>
+    <aside className={'site-announcement-card '+(scope==='studio'?'site-announcement-dock':'site-announcement-banner')}>
+      <button type="button" aria-label={'打开公告：'+first.title} aria-haspopup="dialog" aria-expanded={Boolean(active)} aria-controls={dialogId} className="site-announcement-open" onClick={event=>{origin.current=event.currentTarget;setOpenedKey(dismissalKey(first.id,first.contentVersion))}}>
+        <Megaphone aria-hidden="true" size={16} className="shrink-0 text-[var(--text-secondary)]"/>
+        <span className="min-w-0 flex-1 text-left"><span className="block truncate text-sm font-medium">{first.title}</span>{scope==='home'?<span className="block truncate text-xs text-[var(--text-secondary)]">{first.body}</span>:null}</span>
+        {items.length>1?<span className="shrink-0 text-xs text-[var(--text-secondary)]">{items.length}条</span>:null}<ChevronRight aria-hidden="true" size={16} className="shrink-0 text-[var(--text-secondary)]"/>
+      </button>
+      <button type="button" aria-label={'关闭公告：'+first.title} onClick={()=>dismiss(first)} className="site-announcement-dismiss"><X aria-hidden="true" size={16}/></button>
+    </aside>
+    {active?<AnnouncementDialog item={active} index={index} total={items.length} id={dialogId} returnFocus={origin.current} onClose={()=>setOpenedKey(null)} onDismiss={()=>dismiss(active)} onPrevious={()=>setOpenedKey(dismissalKey(items[index-1].id,items[index-1].contentVersion))} onNext={()=>setOpenedKey(dismissalKey(items[index+1].id,items[index+1].contentVersion))}/>:null}
+  </div>
 }
 export function SiteInformation() {
   const {data}=usePublicSiteContent()

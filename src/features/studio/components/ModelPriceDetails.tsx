@@ -1,12 +1,13 @@
 import { formatModelPrice } from '../../../../shared/model-price-format'
 import { modelPublicCopy } from '../../../../shared/model-public-copy'
-import { useCallback, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, ChevronRight, Clock3 } from 'lucide-react'
 import type { CreditModelOption, ModelReasoningEffort } from '../../../../shared/contracts/credits'
 
 const effortLabels: Record<ModelReasoningEffort, string> = { none: '关闭', minimal: '轻度', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高' }
 const effortOrder: ModelReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+let closeActiveDetails: (() => void) | null = null
 
 /** The row shows the current multiplier; activity labels sit beside the model name. */
 export function ModelPriceSummary({ model }: { model: CreditModelOption }) {
@@ -27,9 +28,19 @@ export function ModelPriceDetails({ model, children, className = '', reasoningEf
   const returnFocus = useRef<HTMLElement | null>(null)
   const closeTimer = useRef<ReturnType<typeof setTimeout>>()
   const panelId = useId()
-  const close = useCallback(() => { clearTimeout(closeTimer.current); setOpen(false); setReasoningOpen(false) }, [])
+  const close = useCallback(() => {
+    if (closeActiveDetails === close) closeActiveDetails = null
+    clearTimeout(closeTimer.current); setOpen(false); setReasoningOpen(false)
+  }, [])
+  useEffect(() => () => {
+    clearTimeout(closeTimer.current)
+    if (closeActiveDetails === close) closeActiveDetails = null
+  }, [close])
   const contains = useCallback((target: EventTarget | null) => target instanceof Node && Boolean(anchor.current?.contains(target) || panel.current?.contains(target)), [])
-  const keepOpen = () => { clearTimeout(closeTimer.current); setOpen(true) }
+  const keepOpen = () => {
+    if (closeActiveDetails !== close) { closeActiveDetails?.(); closeActiveDetails = close }
+    clearTimeout(closeTimer.current); setOpen(true)
+  }
   const leave = (target: EventTarget | null) => {
     if (contains(target) || contains(document.activeElement)) return
     clearTimeout(closeTimer.current)

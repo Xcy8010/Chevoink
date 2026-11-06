@@ -1,18 +1,19 @@
 import { beforeEach, expect, it, vi } from 'vitest'
-import type { AppRelease, AppReleaseChannel, AppReleaseOperation } from '@prisma/client'
+import type { AppRelease, AppReleaseChannel, AppReleaseOperation, AppReleaseRetirement } from '@prisma/client'
 import type { Request } from 'express'
 import { executeAppRelease, importAppRelease, previewAppRelease, reconcileAppRelease, requireAppReleaseCapability, selectAppRelease } from '../../api/lib/app-releases.js'
-import type { AppReleaseManifest } from '../../shared/contracts/app-release.js'
-const state=vi.hoisted(()=>({releases:[] as AppRelease[],channels:[] as AppReleaseChannel[],operations:[] as AppReleaseOperation[],audits:[] as unknown[],artifacts:new Map<string,{manifest:AppReleaseManifest;artifactSha256:string}>(),superAdmin:true,testers:new Set<string>(),policy:true,terms:'terms' as string|null,privacy:'privacy' as string|null,failAudit:false,serial:Promise.resolve<unknown>(undefined)}))
+import type { AppReleaseManifest, AppReleaseAction } from '../../shared/contracts/app-release.js'
+const state=vi.hoisted(()=>({releases:[] as AppRelease[],channels:[] as AppReleaseChannel[],operations:[] as AppReleaseOperation[],retirements:[] as AppReleaseRetirement[],audits:[] as unknown[],artifacts:new Map<string,{manifest:AppReleaseManifest;artifactSha256:string}>(),superAdmin:true,testers:new Set<string>(),policy:true,terms:'terms' as string|null,privacy:'privacy' as string|null,failAudit:false,serial:Promise.resolve<unknown>(undefined)}))
 const db={
  $executeRaw:vi.fn(async()=>1),
+ appReleaseRetirement:{findUnique:vi.fn(async({where}:{where:{releaseId:string}})=>state.retirements.find(row=>row.releaseId===where.releaseId)??null),findMany:vi.fn(async()=>state.retirements),create:vi.fn(async({data}:{data:AppReleaseRetirement})=>{const row={...data,createdAt:new Date(),updatedAt:new Date(),completedAt:null,errorCode:null};state.retirements.push(row);return row})},
  user:{findUnique:vi.fn(async()=>({role:'admin',isSuperAdmin:state.superAdmin,bannedAt:null}))},
  appRelease:{findUnique:vi.fn(async({where}:{where:{id:string}})=>state.releases.find(row=>row.id===where.id)??null),create:vi.fn(async({data}:{data:AppRelease})=>{const row={...data,createdAt:new Date()};state.releases.push(row);return row}),findMany:vi.fn(async()=>state.releases)},
  appReleaseChannel:{findMany:vi.fn(async()=>state.channels),upsert:vi.fn(async({where,create,update}:{where:{channel:string};create:AppReleaseChannel;update:Partial<AppReleaseChannel>})=>{let row=state.channels.find(item=>item.channel===where.channel);if(row)Object.assign(row,update);else{row={...create,updatedAt:new Date()};state.channels.push(row)}return row}),update:vi.fn(async({where,data}:{where:{channel:string};data:{enabled:boolean;revision:{increment:number}}})=>{const row=state.channels.find(item=>item.channel===where.channel)!;row.enabled=data.enabled;row.revision+=data.revision.increment;return row})},
  appReleaseOperation:{findUnique:vi.fn(async({where}:{where:{id:string}})=>state.operations.find(row=>row.id===where.id)??null),findFirst:vi.fn(async({where}:{where:{releaseId:string;status:string;action:{in:string[]}}})=>state.operations.find(row=>row.releaseId===where.releaseId&&row.status===where.status&&where.action.in.includes(row.action))??null),findMany:vi.fn(async()=>state.operations),create:vi.fn(async({data}:{data:AppReleaseOperation})=>{const row={...data,createdAt:new Date(),updatedAt:new Date()};state.operations.push(row);return row})},
  adminAuditLog:{create:vi.fn(async({data}:{data:unknown})=>{if(state.failAudit)throw Error('audit failure');state.audits.push(data);return data})},
 }
-const prisma={...db,$transaction:async<T>(work:(tx:typeof db)=>Promise<T>)=>{const run=state.serial.then(async()=>{const snapshot=structuredClone({releases:state.releases,channels:state.channels,operations:state.operations,audits:state.audits});try{return await work(db)}catch(error){Object.assign(state,snapshot);throw error}});state.serial=run.catch(()=>{});return run}}
+const prisma={...db,$transaction:async<T>(work:(tx:typeof db)=>Promise<T>)=>{const run=state.serial.then(async()=>{const snapshot=structuredClone({releases:state.releases,channels:state.channels,operations:state.operations,retirements:state.retirements,audits:state.audits});try{return await work(db)}catch(error){Object.assign(state,snapshot);throw error}});state.serial=run.catch(()=>{});return run}}
 vi.mock('../../api/lib/prisma.js',()=>({prisma:new Proxy({}, {get:(_target,key)=>prisma[key as keyof typeof prisma]}),DataAccessError:class extends Error{constructor(public status:number,public code:string,message:string){super(message)}}}))
 vi.mock('../../api/lib/auth-session.js',()=>({getSessionUserId:(req:Request)=>req.headers['fixture-user']??null}))
 vi.mock('../../api/lib/tester-entitlement.js',()=>({isEffectiveTester:async(_db:unknown,id:string)=>state.testers.has(id)}))
@@ -23,8 +24,8 @@ function release(id:string){const data=manifest(id);state.artifacts.set(id,{mani
 function channel(name:string,id:string,revision=1){state.channels.push({channel:name,releaseId:id,revision,enabled:true,updatedAt:new Date()})}
 const req=(user?:string,extra:Record<string,string>={})=>({headers:{...(user?{'fixture-user':user}:{}),...extra}} as unknown as Request)
 let sequence=0
-async function operation(action:'assign_test'|'full_release'|'rollback'|'withdraw_test',releaseId:string){const view=await previewAppRelease('admin',action,releaseId);return{action,releaseId,expectedRevision:view.expectedRevision,previewHash:view.previewHash,operationId:`00000000-0000-4000-8000-${String(++sequence).padStart(12,'0')}`}}
-beforeEach(()=>{vi.clearAllMocks();state.releases=[];state.channels=[];state.operations=[];state.audits=[];state.artifacts.clear();state.superAdmin=true;state.testers.clear();state.policy=true;state.terms='terms';state.privacy='privacy';state.failAudit=false;state.serial=Promise.resolve()})
+async function operation(action:AppReleaseAction,releaseId:string){const view=await previewAppRelease('admin',action,releaseId);return{action,releaseId,expectedRevision:view.expectedRevision,previewHash:view.previewHash,operationId:`00000000-0000-4000-8000-${String(++sequence).padStart(12,'0')}`}}
+beforeEach(()=>{vi.clearAllMocks();state.releases=[];state.channels=[];state.operations=[];state.retirements=[];state.audits=[];state.artifacts.clear();state.superAdmin=true;state.testers.clear();state.policy=true;state.terms='terms';state.privacy='privacy';state.failAudit=false;state.serial=Promise.resolve()})
 it('selects real assigned artifacts from server tester qualification, never a URL or header',async()=>{release('stable-version');release('test-version');channel('stable','stable-version');channel('test','test-version');state.testers.add('tester');expect((await selectAppRelease(req('ordinary',{'x-release-channel':'test','x-release-id':'test-version'}))).release!.id).toBe('stable-version');expect((await selectAppRelease(req('tester'))).release!.id).toBe('test-version');state.testers.delete('tester');expect((await selectAppRelease(req('tester'))).release!.id).toBe('stable-version');await expect(requireAppReleaseCapability(req('ordinary'),'siteContent')).rejects.toMatchObject({code:'APP_RELEASE_CAPABILITY_DISABLED'})})
 it('preserves unconfigured legacy behavior but fails configured missing or incompatible artifacts',async()=>{expect(await selectAppRelease(req())).toEqual({mode:'legacy',channel:'stable',release:null});const row=release('stable-version');channel('stable',row.id);state.artifacts.clear();await expect(selectAppRelease(req())).rejects.toThrow('missing artifact');const data=manifest(row.id);data.compatibility.legalConsentUi=false;row.manifest=JSON.parse(JSON.stringify(data));await expect(selectAppRelease(req())).rejects.toMatchObject({code:'APP_RELEASE_UNAVAILABLE'})})
 it('imports only protected manifest identity, retaining drafts honestly and forbidding replacement',async()=>{const data=manifest('draft-version');data.validation={status:'draft'};state.artifacts.set(data.id,{manifest:data,artifactSha256:'c'.repeat(64)});const imported=await importAppRelease('admin',data.id,null);expect(imported).toMatchObject({validationState:'draft',verifiedAt:null,sourceSha:'a'.repeat(40)});state.artifacts.set(data.id,{manifest:data,artifactSha256:'d'.repeat(64)});await expect(importAppRelease('admin',data.id,null)).rejects.toMatchObject({code:'APP_RELEASE_IMMUTABLE'})})
@@ -70,4 +71,51 @@ it('does not report absence while a concurrent execute transaction is still in f
  releaseWrite()
  await execute
  expect(await reconciliation).toMatchObject({status:'applied',receipt:{operationId:input.operationId}})
+})
+it('admits only one durable unassigned candidate under concurrent registration',async()=>{
+ for(const id of ['candidate-a','candidate-b'])state.artifacts.set(id,{manifest:manifest(id),artifactSha256:'b'.repeat(64)})
+ const results=await Promise.allSettled([importAppRelease('admin','candidate-a',null),importAppRelease('admin','candidate-b',null)])
+ expect(results.filter(result=>result.status==='fulfilled')).toHaveLength(1)
+ expect(results.find(result=>result.status==='rejected')).toMatchObject({reason:{code:'APP_RELEASE_CANDIDATE_PENDING'}})
+ expect(state.releases).toHaveLength(1);expect(state.audits).toHaveLength(1)
+})
+it('can explicitly discard an unverified candidate to release its slot without changing channels or falsifying CI',async()=>{
+ const draft=manifest('draft-candidate');draft.validation={status:'draft'}
+ state.artifacts.set(draft.id,{manifest:draft,artifactSha256:'b'.repeat(64)})
+ await importAppRelease('admin',draft.id,null)
+ const before=structuredClone(state.channels),input=await operation('discard_candidate',draft.id)
+ expect((await previewAppRelease('admin','discard_candidate',draft.id)).impact).toContain('不改变当前稳定版或测试版')
+ await expect(executeAppRelease('admin',input,null)).resolves.toMatchObject({action:'discard_candidate',revision:0,previousReleaseId:null})
+ expect(state.channels).toEqual(before)
+ expect(state.retirements[0]).toMatchObject({releaseId:draft.id,state:'pending',triggerOperationId:input.operationId})
+ expect(state.releases[0].validationState).toBe('draft')
+ state.artifacts.set('next-candidate',{manifest:manifest('next-candidate'),artifactSha256:'b'.repeat(64)})
+ await expect(importAppRelease('admin','next-candidate',null)).resolves.toMatchObject({id:'next-candidate'})
+})
+it('blocks candidate discard when a version is active, previously used or has an unknown operation',async()=>{
+ release('active');await executeAppRelease('admin',await operation('full_release','active'),null)
+ expect((await previewAppRelease('admin','discard_candidate','active')).blockers).not.toEqual([])
+ release('unknown-candidate');state.operations.push({id:'unknown',releaseId:'unknown-candidate',status:'unknown'} as AppReleaseOperation)
+ expect((await previewAppRelease('admin','discard_candidate','unknown-candidate')).blockers).not.toEqual([])
+ expect(state.retirements).toEqual([])
+})
+it('keeps successful historical UUID receipts available after the obsolete version is claimed and its files disappear',async()=>{
+ release('release-a');const original=await operation('full_release','release-a');const applied=await executeAppRelease('admin',original,null)
+ release('release-b');await executeAppRelease('admin',await operation('full_release','release-b'),null)
+ release('release-c');await executeAppRelease('admin',await operation('assign_test','release-c'),null)
+ expect(state.retirements.map(row=>row.releaseId)).toEqual(['release-a'])
+ state.artifacts.delete('release-a')
+ await expect(previewAppRelease('admin','assign_test','release-a')).rejects.toMatchObject({code:'APP_RELEASE_RETIRED'})
+ await expect(executeAppRelease('admin',original,null)).resolves.toMatchObject({...applied,replayed:true})
+ await expect(reconcileAppRelease('admin',original.operationId)).resolves.toMatchObject({status:'applied',receipt:applied})
+ expect(state.channels.find(row=>row.channel==='stable')?.releaseId).toBe('release-b')
+ expect(state.channels.find(row=>row.channel==='test')?.releaseId).toBe('release-c')
+})
+it('rolls back the new channel and receipt when its durable retirement claim cannot be saved',async()=>{
+ release('release-a');await executeAppRelease('admin',await operation('full_release','release-a'),null)
+ release('release-b');await executeAppRelease('admin',await operation('full_release','release-b'),null)
+ release('release-c');const input=await operation('assign_test','release-c'),before=structuredClone({channels:state.channels,operations:state.operations,audits:state.audits})
+ db.appReleaseRetirement.create.mockRejectedValueOnce(Error('claim persistence failed'))
+ await expect(executeAppRelease('admin',input,null)).rejects.toThrow('claim persistence failed')
+ expect(state.channels).toEqual(before.channels);expect(state.operations).toEqual(before.operations);expect(state.audits).toEqual(before.audits);expect(state.retirements).toEqual([])
 })

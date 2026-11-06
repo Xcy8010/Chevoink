@@ -3466,7 +3466,24 @@ model AppRelease {
   registeredById String @map("registered_by_id") @db.VarChar(64)
   createdAt DateTime @default(now()) @map("created_at")
   channels AppReleaseChannel[]
+  retirement AppReleaseRetirement?
   @@map("app_releases")
+}
+/// Durable, irreversible claim made before deleting an obsolete application artifact.
+model AppReleaseRetirement {
+  releaseId String @id @map("release_id") @db.VarChar(64)
+  operationId String @unique @map("operation_id") @db.VarChar(36)
+  artifactSha256 String @map("artifact_sha256") @db.VarChar(64)
+  quarantineName String @map("quarantine_name") @db.VarChar(128)
+  triggerOperationId String? @map("trigger_operation_id") @db.VarChar(100)
+  state String @default("pending") @db.VarChar(24)
+  errorCode String? @map("error_code") @db.VarChar(80)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  completedAt DateTime? @map("completed_at")
+  release AppRelease @relation(fields: [releaseId], references: [id], onDelete: Restrict)
+  @@index([state, createdAt])
+  @@map("app_release_retirements")
 }
 model AppReleaseChannel {
   enabled Boolean @default(true)

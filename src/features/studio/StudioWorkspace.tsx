@@ -4005,7 +4005,6 @@ export default function StudioWorkspace() {
         data-platform={platformCapabilities.native ? 'app' : 'web'}
         data-visual-viewport={platformCapabilities.visualViewport ? 'supported' : 'fallback'}
       >
-        <SiteAnnouncements scope="studio" />
         <div className="flex min-h-0 flex-1 flex-col lg:hidden">
           <StudioMobileHeader
             view={mobileView}
@@ -4475,6 +4474,7 @@ export default function StudioWorkspace() {
           ) : null}
           </div>
         </div>
+        <SiteAnnouncements scope="studio" />
       </div>
 
       {editorChapterSettingsOpen && chapterDraft ? (

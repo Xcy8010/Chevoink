@@ -5,7 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const productionSourcePath = value => /^(api|shared|prisma)\//.test(value)
-  || ['.node-version', 'package.json', 'package-lock.json', 'ecosystem.config.cjs'].includes(value)
+  || ['.node-version', 'package.json', 'package-lock.json', 'ecosystem.config.cjs', 'scripts/prune-application-copies.mjs'].includes(value)
 const digest = value => createHash('sha256').update(value).digest('hex')
 
 export function archiveRevision(revision, archive, root) {

@@ -101,3 +101,30 @@ it('supports keyboard preview, Escape, outside dismissal and reopening by hover'
   await user.click(screen.getByRole('button', { name: '外部' })); expect(screen.queryByRole('dialog', { name: '浮层模型模型详情' })).toBeNull()
   await user.hover(card()); expect(details()).toBeTruthy()
 })
+it('switches rapid row hovers immediately even when the previous model still owns keyboard focus', () => {
+  vi.useFakeTimers()
+  render(<>{['甲', '乙', '丙'].map(label => <ModelPriceDetails key={label} model={{ ...model, label }}><button>{label}</button></ModelPriceDetails>)}</>)
+  act(() => screen.getByRole('button', { name: '甲', exact: true }).focus())
+  let previous = screen.getByLabelText('甲模型卡片')
+  for (const label of ['乙', '丙', '甲', '丙', '乙']) {
+    const next = screen.getByLabelText(label + '模型卡片')
+    fireEvent.mouseLeave(previous, { relatedTarget: next })
+    fireEvent.mouseEnter(next)
+    expect(screen.getAllByRole('dialog')).toHaveLength(1)
+    expect(screen.getByRole('dialog', { name: label + '模型详情' })).toBeTruthy()
+    previous = next
+  }
+  act(() => vi.advanceTimersByTime(160))
+  expect(screen.getAllByRole('dialog')).toHaveLength(1)
+  expect(screen.getByRole('dialog', { name: '乙模型详情' })).toBeTruthy()
+})
+it('releases the active popup when its model is removed and lets another catalog open normally', () => {
+  const view = render(<ModelPriceDetails model={model} />)
+  fireEvent.mouseEnter(card())
+  view.unmount()
+  expect(screen.queryByRole('dialog')).toBeNull()
+  render(<ModelPriceDetails model={{ ...model, label: '另一个模型' }} />)
+  fireEvent.mouseEnter(screen.getByLabelText('另一个模型模型卡片'))
+  expect(screen.getAllByRole('dialog')).toHaveLength(1)
+  expect(screen.getByRole('dialog', { name: '另一个模型模型详情' })).toBeTruthy()
+})

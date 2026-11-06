@@ -61,7 +61,7 @@ export function verifyMaintenanceSource(input: MaintenanceInput, root: string) {
   const bytes = readFileSync(input.candidateProof)
   if (hash(bytes) !== input.candidateProofSha256) refuse('MAINTENANCE_PROOF_CHANGED')
   const proof = z.object({revision:sha,files:z.array(z.object({path:z.string(),sha256:digest}).strict()).min(1)}).strict().parse(JSON.parse(bytes.toString('utf8')))
-  const required = ['.node-version','package.json','package-lock.json','ecosystem.config.cjs','scripts/app-release-maintenance.ts']
+  const required = ['.node-version','package.json','package-lock.json','ecosystem.config.cjs','scripts/app-release-maintenance.ts','scripts/prune-application-copies.mjs']
   const allowed = (file:string) => /^(api|shared|prisma)\//.test(file) || required.includes(file)
   if (proof.revision !== input.candidateSha || new Set(proof.files.map(file=>file.path)).size !== proof.files.length
     || required.some(file=>!proof.files.some(entry=>entry.path===file))) refuse('MAINTENANCE_PROOF_INCOMPLETE')

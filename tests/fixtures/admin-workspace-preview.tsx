@@ -44,6 +44,11 @@ const releaseIndex:AdminAppReleaseIndex={
  operations:[{operationId:'00000000-0000-4000-8000-000000000010',status:'applied',action:'full_release',releaseId:'layout-stable',previousReleaseId:'layout-previous',revision:3,appliedAt:now}],
 }
 const simulatedOperations=new Map<string,AppReleaseReceipt>()
+if(params.get('retention')==='two'){
+ releaseIndex.releases=releaseIndex.releases.slice(0,2).map((item,index)=>({...item,lifecycle:'retained',createdAt:'2026-11-06T21:06:48Z',effectivePeriods:[{channel:index?'test':'stable',startsAt:index?'2026-11-06T21:07:21Z':'2026-11-06T20:03:34Z',endsAt:null}]}))
+ releaseIndex.retention={limit:2,pending:0,failed:0}
+ if(params.has('candidate'))releaseIndex.releases.push({...release,id:'layout-pending',label:'合成待分配候选',validationState:'verified',lifecycle:'candidate'})
+}
 const feedback={id:'layout-feedback',kind:'bug',status:'pending',excerpt:'公开合成反馈：窄屏布局中需要清晰的操作入口。',imageCount:0,contact:'合成联系说明',source:'studio-mobile',createdAt:now,handledAt:null,user,content:'公开合成反馈正文，仅用于检查详情、工程信息和操作布局。',imageUrls:[],pageUrl:'/studio',clientInfo:{userAgent:'Synthetic browser / layout preview',platform:'Synthetic platform',language:'zh-CN',viewport:{width:390,height:844},online:true,languages:['zh-CN','en'],extra:null},handledByNickname:null,updatedAt:now}
 const suite={id:'layout-suite',name:'公开合成草稿套件',datasetVersion:'layout-fixture-v1',rubricVersion:'layout-rubric-v1',status:'draft',sampleCount:2,reviewCount:0,createdAt:now,updatedAt:now}
 window.fetch = async (input, init) => {

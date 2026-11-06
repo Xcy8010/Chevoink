@@ -109,7 +109,7 @@ describe('bounded source-verified maintenance wrapper',()=>{
 })
 function sourceFixture(){
   const f=fixture(),root=path.join(f.directory,'stage');mkdirSync(root)
-  const values:Record<string,string>={'.node-version':'22.23.2\n','package.json':JSON.stringify({engines:{node:'22.23.2',npm:'10.9.8'}}),'package-lock.json':'{}','ecosystem.config.cjs':'module.exports={}\n','scripts/app-release-maintenance.ts':'// synthetic CLI\n','api/service.ts':'// synthetic API\n','shared/contract.ts':'// synthetic contract\n','prisma/schema.prisma':'// synthetic schema\n'}
+  const values:Record<string,string>={'.node-version':'22.23.2\n','package.json':JSON.stringify({engines:{node:'22.23.2',npm:'10.9.8'}}),'package-lock.json':'{}','ecosystem.config.cjs':'module.exports={}\n','scripts/app-release-maintenance.ts':'// synthetic CLI\n','scripts/prune-application-copies.mjs':'// synthetic cleanup\n','api/service.ts':'// synthetic API\n','shared/contract.ts':'// synthetic contract\n','prisma/schema.prisma':'// synthetic schema\n'}
   for(const [relative,bytes]of Object.entries(values)){const full=path.join(root,relative);mkdirSync(path.dirname(full),{recursive:true});writeFileSync(full,bytes)}
   const proof={revision:candidate,files:Object.entries(values).map(([relative,bytes])=>({path:relative,sha256:sha(bytes)}))}
   const save=()=>{const bytes=JSON.stringify(proof);writeFileSync(f.input.candidateProof,bytes);f.input.candidateProofSha256=sha(bytes)}
@@ -117,11 +117,12 @@ function sourceFixture(){
 }
 describe('explicit checked-file candidate proof, not fabricated Git/CI identity',()=>{
   it('verifies all backend/shared/schema/runtime files and requires the CLI itself',()=>{const f=sourceFixture();expect(()=>verifyMaintenanceSource(f.input,f.root)).not.toThrow()})
-  it.each(['file','extra','missing-cli','wrong-revision','proof-hash','private-path','traversal'] as const)('rejects %s before production services are loaded',kind=>{
+  it.each(['file','extra','missing-cli','missing-prune-helper','wrong-revision','proof-hash','private-path','traversal'] as const)('rejects %s before production services are loaded',kind=>{
     const f=sourceFixture()
     if(kind==='file')writeFileSync(path.join(f.root,'api/service.ts'),'changed')
     if(kind==='extra')writeFileSync(path.join(f.root,'api/extra.ts'),'extra')
     if(kind==='missing-cli')f.proof.files=f.proof.files.filter(file=>file.path!=='scripts/app-release-maintenance.ts')
+    if(kind==='missing-prune-helper')f.proof.files=f.proof.files.filter(file=>file.path!=='scripts/prune-application-copies.mjs')
     if(kind==='wrong-revision')f.proof.revision='2'.repeat(40)
     if(kind==='private-path')f.proof.files.push({path:'.env',sha256:sha('no real file')})
     if(kind==='traversal')f.proof.files.push({path:'api/../../outside',sha256:sha('no real file')})

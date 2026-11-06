@@ -1,4 +1,5 @@
 import app from './app.js'
+import { enableAppReleaseRetention, scheduleAppReleaseRetention } from './lib/app-release-retention.js'
 import { dispatchStyleLearning } from './lib/agent/style-learning.js'
 import { env } from './config/env.js'
 import { recoverOrphanLoopRuns, recoverDurableLoopRuns, recoverStaleLoopRuns } from './lib/agent/run-service.js'
@@ -20,6 +21,7 @@ await recoverOrphanLoopRuns()
 let refundSweepRunning = false
 let importRecoveryRunning = false
 function recoverSavedTasks() {
+  scheduleAppReleaseRetention()
   // Durable completion/restoration notifications survive the upload kill switch.
   if (!importRecoveryRunning) {
     importRecoveryRunning = true
@@ -48,6 +50,7 @@ function recoverSavedTasks() {
 // 只绑回环地址：Node 只服务 nginx 反代（127.0.0.1:3001），不直接暴露公网，
 // 避免绕过 nginx 的限流/体积限制/安全头；本地开发 vite proxy 同样走 localhost
 const server = app.listen(env.port, '127.0.0.1', () => {
+  enableAppReleaseRetention()
   console.log(`[chevoink] server ready on ${env.serverUrl}`)
   void runDueAgentSchedules()
   recoverSavedTasks()
