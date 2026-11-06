@@ -202,7 +202,7 @@ it('counts a new visible final result but not an identical replay or hidden fina
   expect(view.result.current).toBe(true)
 })
 
-it.each(['text.delta', 'reasoning.delta'] as const)('keeps truthful waiting feedback while %s contains invisible progress', type => {
+it.each(['text.delta', 'reasoning.delta'] as const)('tracks %s waiting activity while preserving its display contract', type => {
   vi.useFakeTimers()
   useAgentStore.getState().resetRun()
   useAgentStore.getState().resumeRun('r', 'session')
@@ -213,13 +213,14 @@ it.each(['text.delta', 'reasoning.delta'] as const)('keeps truthful waiting feed
   act(() => apply({ ...base, seq: 1, type: 'message.start', role: 'assistant' }))
   act(() => apply({ ...base, seq: 2, type, delta: '调用 chapter_' }))
   expect(view.result.current).toBe(type === 'text.delta')
-  expect(projectAgentAuthorParts(useAgentStore.getState().messages[0].parts, true).every(part => part.type === 'reasoning' && !part.text)).toBe(true)
+  const firstParts = projectAgentAuthorParts(useAgentStore.getState().messages[0].parts, true)
+  expect(firstParts).toEqual(type === 'text.delta' ? [] : [{ type: 'reasoning', text: '调用 chapter_', activity: true }])
   expect(useAgentStore.getState().lastVisibleOutput === null).toBe(type === 'text.delta')
   act(() => apply({ ...base, seq: 3, type, delta: 'write，chapterId=private-id。\n\n' }))
   expect(view.result.current).toBe(type === 'text.delta')
   const parts = projectAgentAuthorParts(useAgentStore.getState().messages[0].parts, true)
-  expect(parts.every(part => (part.type === 'text' || part.type === 'reasoning') && part.text.trim() === '')).toBe(true)
-  expect(JSON.stringify(parts)).not.toMatch(/chapter_write|chapterId|private-id/)
+  expect(parts).toEqual(type === 'text.delta' ? [] : [{ type: 'reasoning', text: '调用 chapter_write，chapterId=private-id。\n\n', activity: true }])
+  if (type === 'text.delta') expect(JSON.stringify(parts)).not.toMatch(/chapter_write|chapterId|private-id/)
   act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS))
   expect(view.result.current).toBe(true)
   expect(useAgentStore.getState().lastVisibleOutput === null).toBe(type === 'text.delta')
