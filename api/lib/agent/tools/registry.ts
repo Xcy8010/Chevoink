@@ -1,4 +1,4 @@
-import { toOpenAIToolPresentation } from '../tool-schema.js'
+import { toOpenAIParameters, toOpenAIToolPresentation } from '../tool-schema.js'
 import { describeAgentToolContract } from './contract.js'
 import { hasAgentToolPresentation } from '../../../../shared/agent-tool-presentation.js'
 import { configureAgentTool, modelListTool } from './configuration-tools.js'
@@ -247,6 +247,9 @@ export const allTools: AgentTool<any>[] = [
 
 const toolsByName = new Map(allTools.map((tool) => [tool.name, tool]))
 if (toolsByName.size !== allTools.length) throw new Error('Duplicate registered agent tool')
+// Registered built-in parameter schemas are immutable. Cache only their base
+// conversion; custom/replaced schemas stay dynamic, as do description and scope.
+const builtInParameters = new WeakMap<AgentTool['parameters'], Record<string, unknown>>()
 
 /** Every field comes from the actual registered definition. No independent
  * allowlist, model call, permission widening or execution side effect. */
@@ -277,11 +280,24 @@ export function getToolsForMode(mode: AgentExecutionMode): AgentTool[] {
 
 /** zod schema → OpenAI function calling 定义（zod v4 原生转换） */
 export function toOpenAITools(tools: AgentTool[], scope?: TaskSpec['scope']): OpenAIToolDefinition[] {
-  return tools.map((tool) => ({
-    type: 'function',
-    function: {
-      name: tool.name,
-      ...toOpenAIToolPresentation(tool, scope),
+  return tools.map((tool) => {
+    let parameters: Record<string, unknown> | undefined
+    if (toolsByName.get(tool.name)?.parameters === tool.parameters) {
+      let base = builtInParameters.get(tool.parameters)
+      if (!base) {
+        base = toOpenAIParameters(tool.parameters)
+        builtInParameters.set(tool.parameters, base)
+      }
+      // Presentation and callers receive their own entire JSON tree, including
+      // nested arrays/properties; neither can mutate the cached base.
+      parameters = structuredClone(base)
     }
-  }))
+    return {
+      type: 'function',
+      function: {
+        name: tool.name,
+        ...toOpenAIToolPresentation(tool, scope, parameters),
+      }
+    }
+  })
 }

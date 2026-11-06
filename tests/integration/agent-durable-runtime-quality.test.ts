@@ -508,7 +508,7 @@ describe.runIf(available)('durable quality actual tool chain', () => {
   for (const scenario of scenarios) it(`${scenario} preserves paid results and atomic business effects`, {
     timeout: scenario === 'v9-format-full-chain' ? DURABLE_FULL_CHAIN_TEST_TIMEOUT_MS : undefined,
   }, async ({ signal }) => {
-    const lifecycle = createDurableTestLifecycle(signal, scenario === 'v9-format-full-chain'
+    const lifecycle = createDurableTestLifecycle(signal, ['old-format-full-chain', 'v9-format-full-chain'].includes(scenario)
       ? entry => console.info('[durable-quality-stage]', JSON.stringify(entry)) : undefined)
     // Profiling remains an explicit diagnostic, outside normal CI timing.
     // The collected CI samples include ~177ms in inspector.post alone; leaving

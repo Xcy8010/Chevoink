@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-import { toOpenAIParameters, withObjectType, originalToolParameterSchemas } from '../../api/lib/agent/tool-schema.js'
-import { getToolsForMode, toOpenAITools } from '../../api/lib/agent/tools/registry.js'
+import { toOpenAIParameters, toOpenAIToolPresentation, withObjectType, originalToolParameterSchemas } from '../../api/lib/agent/tool-schema.js'
+import { getToolByName, getToolsForMode, toOpenAITools } from '../../api/lib/agent/tools/registry.js'
 import { novelImportArguments } from '../../api/lib/agent/tools/import-tools.js'
 import { chapterCreateTool, chapterWriteTool, chapterAppendTool, chapterEditRangeTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { coordinatedWriterParameters } from '../../api/lib/agent/coordinated-writing-input.js'
@@ -19,6 +19,95 @@ import { toolWithNativeView, projectNativeToolViews, hasRetiredNativeArguments }
 vi.mock('zod', async importOriginal => {
   const actual = await importOriginal<typeof import('zod')>()
   return { ...actual, z: { ...actual.z, toJSONSchema: vi.fn(actual.z.toJSONSchema) } }
+})
+
+describe('registered built-in parameter cache', () => {
+  it('converts a registered base once and deeply isolates every returned nested object and array', () => {
+    const tool = getToolByName('novel_import')!
+    const expected = toOpenAIParameters(tool.parameters), conversion = vi.mocked(z.toJSONSchema)
+    conversion.mockClear()
+    try {
+      const first = toOpenAITools([tool])[0].function
+      expect(conversion).toHaveBeenCalledTimes(1)
+      const second = toOpenAITools([tool])[0].function
+      expect(conversion).toHaveBeenCalledTimes(1)
+      const alternatives = first.parameters.oneOf as Array<{ properties: Record<string, Record<string, unknown>>; required: string[] }>
+      alternatives[0].properties.action.const = 'foreign-action'
+      alternatives[0].required.push('foreign-field')
+      alternatives.push({ properties: { foreign: { type: 'boolean' } }, required: ['foreign'] })
+      expect(second.parameters).toEqual(expected)
+      expect(toOpenAITools([tool])[0].function.parameters).toEqual(expected)
+      const renamed = toOpenAITools([{ ...tool, description: 'Current synthetic description' }])[0].function
+      expect(renamed.description).toBe('Current synthetic description')
+      expect(renamed.strict).toBe(false)
+      expect(renamed.parameters.type).toBe('object')
+      expect(conversion).toHaveBeenCalledTimes(1)
+      expect(first.parameters).not.toBe(second.parameters)
+      expect(first.parameters.oneOf).not.toBe(second.parameters.oneOf)
+    } finally { conversion.mockClear() }
+  })
+  it('reapplies current scope presentation without leaking initialization guidance or nested mutations', () => {
+    const tool = getToolByName('novel_update_meta')!, generic = toOpenAITools([tool])[0].function
+    const scope: TaskSpec['scope'] = { novelId: 'synthetic', novelInitializationProtocol: 1, novelInitializationTarget: 'empty' }
+    const scoped = toOpenAITools([tool], scope)[0].function
+    expect(scoped.description).toContain('完整初始化时一次提供title、summary与tags')
+    expect(generic.description).not.toContain('完整初始化时一次提供title、summary与tags')
+    expect(scoped.parameters).toEqual(generic.parameters)
+    const properties = scoped.parameters.properties as Record<string, { items: Record<string, unknown> }>
+    properties.tags.items.minLength = 999
+    expect(toOpenAITools([tool])[0].function).toEqual(generic)
+    expect(toOpenAITools([tool], scope)[0].function.parameters).toEqual(generic.parameters)
+    expect(generic.parameters).not.toBe(scoped.parameters)
+  })
+  it('converts replaced registered-name parameters on each call while preserving custom strict semantics', () => {
+    const registered = getToolByName('novel_import')!, parameters = z.object({ custom: z.string(), optional: z.number().optional() }).strict()
+    const custom = { ...registered, parameters, description: 'Replacement schema' }, conversion = vi.mocked(z.toJSONSchema)
+    conversion.mockClear()
+    try {
+      const first = toOpenAITools([custom])[0].function, second = toOpenAITools([custom])[0].function
+      expect(conversion).toHaveBeenCalledTimes(2)
+      expect(first).toEqual(second)
+      expect(first.strict).toBe(false)
+      expect(first.description).toBe('Replacement schema')
+      expect(first.parameters).toMatchObject({ type: 'object', additionalProperties: false, required: ['custom'] })
+      expect(first.parameters.properties).toHaveProperty('optional')
+      expect(toOpenAITools([registered])[0].function.parameters).toHaveProperty('oneOf')
+    } finally { conversion.mockClear() }
+  })
+  it('does not reuse a registered schema cache for a custom name sharing that same schema object', () => {
+    const registered = getToolByName('novel_import')!, custom = { ...registered, name: 'synthetic_custom_import' }
+    toOpenAITools([registered])
+    const conversion = vi.mocked(z.toJSONSchema); conversion.mockClear()
+    try {
+      expect(toOpenAITools([custom])).toEqual(toOpenAITools([custom]))
+      expect(conversion).toHaveBeenCalledTimes(2)
+    } finally { conversion.mockClear() }
+  })
+  const dynamicConversion = (route: string, parameters: z.ZodType) => route === 'generic' ? toOpenAIParameters(parameters)
+    : route === 'presentation' ? toOpenAIToolPresentation({ name: 'synthetic_dynamic', description: 'Dynamic', parameters }).parameters
+    : toOpenAITools([{ ...getToolByName('novel_import')!, name: 'synthetic_dynamic', parameters }])[0].function.parameters
+  it.each(['generic', 'presentation', 'unregistered'])('keeps mutable metadata live through the %s path', route => {
+    const field = z.string(), parameters = z.object({ value: field }).strict()
+    try {
+      z.globalRegistry.add(field, { description: 'Before metadata update' })
+      const first = dynamicConversion(route, parameters)
+      z.globalRegistry.add(field, { description: 'After metadata update' })
+      expect(first).toHaveProperty('properties.value.description', 'Before metadata update')
+      expect(dynamicConversion(route, parameters)).toHaveProperty('properties.value.description', 'After metadata update')
+    } finally { z.globalRegistry.remove(field) }
+  })
+  it.each(['generic', 'presentation', 'unregistered'])('keeps lazy target metadata live through the %s path', route => {
+    const field = z.string(), parameters = z.lazy(() => z.object({ value: field }).strict())
+    const conversion = vi.mocked(z.toJSONSchema); conversion.mockClear()
+    try {
+      z.globalRegistry.add(field, { description: 'Before lazy metadata update' })
+      const first = dynamicConversion(route, parameters)
+      z.globalRegistry.add(field, { description: 'After lazy metadata update' })
+      expect(first).toHaveProperty('properties.value.description', 'Before lazy metadata update')
+      expect(dynamicConversion(route, parameters)).toHaveProperty('properties.value.description', 'After lazy metadata update')
+      expect(conversion).toHaveBeenCalledTimes(2)
+    } finally { z.globalRegistry.remove(field); conversion.mockClear() }
+  })
 })
 
 it('preserves the exact pre-window agent_configure parameter schema for frozen calls', () => {
