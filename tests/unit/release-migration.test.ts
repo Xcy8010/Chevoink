@@ -237,6 +237,25 @@ model AppReleaseRetirement {
     expect(readFileSync('deploy/deploy-production.sh', 'utf8')).toContain('"$MIGRATION_PLAN" == "20261107010000_app_release_retention"')
   })
 
+  it('accepts the PostgreSQL SELECT projection key order without weakening retention values', async () => {
+    const before = { tables: [], columns: [], indexes: [], constraints: [], rowCount: null }
+    // This is the actual SELECT projection order, different from the frozen
+    // expectation object's insertion order: definition precedes columns.
+    const indexes = retentionIndexes.map(({ name, unique, columns, definition, ...flags }) => ({ name, unique, definition, columns, ...flags }))
+    const expected = { tables: [{ name: 'app_release_retirements', kind: 'r' }], columns: retentionColumns, indexes: retentionIndexes, constraints: retentionConstraints, rowCount: 0 }
+    let query = 0
+    const statements: string[] = []
+    const tx = { $queryRawUnsafe: async (sql: string) => { statements.push(sql); return [expected.tables, expected.columns, indexes, expected.constraints, [{ count: 0 }]][query++] } }
+    const actual = await readAppReleaseRetentionState(tx, 'after')
+    expect(statements[2].indexOf('AS definition')).toBeLessThan(statements[2].indexOf('AS columns'))
+    expect(actual).toEqual(expected)
+    expect(() => assertAppReleaseRetentionState(actual, 'after', before)).not.toThrow()
+    const reversedIndexColumns = { ...actual, indexes: indexes.map(row => ({ ...row, columns: [...row.columns].reverse() })) }
+    expect(() => assertAppReleaseRetentionState(reversedIndexColumns, 'after', before)).toThrow(/indexes/)
+    expect(() => assertAppReleaseRetentionState({ ...actual, indexes: indexes.map(row => ({ ...row, unexpected: true })) }, 'after', before)).toThrow(/indexes/)
+    expect(() => assertAppReleaseRetentionState({ ...actual, rowCount: 1 }, 'after', before)).toThrow(/rowCount/)
+  })
+
   const experienceFixture = () => {
     const f = fixture()
     writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), readFileSync(new URL('../fixtures/release-admin-model-lifecycle.schema.prisma', import.meta.url)))

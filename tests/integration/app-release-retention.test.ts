@@ -3,7 +3,7 @@ import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:
 import os from 'node:os'
 import path from 'node:path'
 import type { AppReleaseChannel, Prisma } from '@prisma/client'
-import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
 import { executeAppRelease, importAppRelease, previewAppRelease, reconcileAppRelease } from '../../api/lib/app-releases.js'
 import { pendingReleaseCandidates, planAppReleaseRetention, retireAppReleaseArtifact } from '../../api/lib/app-release-retention.js'
@@ -17,7 +17,10 @@ import { verifyTestDatabase } from '../support/database-preflight.js'
 await verifyTestDatabase(true)
 const root=await realpath(await mkdtemp(path.join(os.tmpdir(),'chevoink-retirement-pg-')))
 const previousRoot=process.env.APP_RELEASE_ARTIFACT_ROOT,adminId=randomUUID(),ids:string[]=[]
-const realTransaction=prisma.$transaction.bind(prisma)
+// Prisma exposes this method through a dynamic proxy whose descriptor can have
+// value: undefined. Restore the captured callable, never a spy's synthetic descriptor.
+const originalTransaction=prisma.$transaction
+const realTransaction=originalTransaction.bind(prisma)
 let savedChannels:AppReleaseChannel[]=[],channelsCaptured=false
 const exists=(file:string)=>access(file).then(()=>true,()=>false)
 async function prepare(letter:string) {
@@ -60,7 +63,7 @@ beforeEach(async()=>{
  await prisma.appReleaseChannel.deleteMany({where:{channel:{in:['stable','test']}}})
 })
 afterEach(async()=>{
- vi.restoreAllMocks();await cleanOwnRows()
+ await cleanOwnRows()
  if(channelsCaptured)for(const channel of savedChannels)await prisma.appReleaseChannel.create({data:channel})
  savedChannels=[];channelsCaptured=false
 })
@@ -127,8 +130,9 @@ it.each(['channel','receipt','claim'] as const)('rolls actual PostgreSQL channel
  const count=await prisma.appReleaseOperation.count({where:{actorId:adminId}})
  let injected=false
  const delegate=failure==='channel'?'appReleaseChannel':failure==='receipt'?'appReleaseOperation':'appReleaseRetirement',method=failure==='channel'?'upsert':'create'
- const interception=vi.spyOn(prisma,'$transaction').mockImplementationOnce(work=>realTransaction(async tx=>{
+ const interception=(work:unknown,options?:Parameters<typeof realTransaction>[1])=>{
   if(typeof work!=='function')throw Error('Expected interactive service transaction')
+  return realTransaction(async tx=>{
   const guarded=new Proxy(tx,{get(target,key,receiver){
    if(key!==delegate)return Reflect.get(target,key,receiver)
    return new Proxy(target[delegate],{get(model,field,inner){
@@ -140,8 +144,11 @@ it.each(['channel','receipt','claim'] as const)('rolls actual PostgreSQL channel
    }})
   }}) as Prisma.TransactionClient
   return work(guarded)
- },{timeout:30000}))
- try{await expect(executeAppRelease(adminId,request,null)).rejects.toThrow('Synthetic '+failure+' transaction failure')}finally{interception.mockRestore()}
+  },options)
+ }
+ prisma.$transaction=interception as typeof originalTransaction
+ try{await expect(executeAppRelease(adminId,request,null)).rejects.toThrow('Synthetic '+failure+' transaction failure')}finally{prisma.$transaction=originalTransaction}
+ expect(prisma.$transaction).toBe(originalTransaction)
  expect(injected).toBe(true)
  expect(await prisma.appReleaseChannel.findMany({orderBy:{channel:'asc'}})).toEqual(before)
  expect(await prisma.appReleaseOperation.count({where:{actorId:adminId}})).toBe(count)

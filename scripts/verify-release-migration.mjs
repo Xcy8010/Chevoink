@@ -306,8 +306,19 @@ export function assertAppReleaseRetentionState(state, phase, before) {
     return
   }
   assertAppReleaseRetentionState(before, 'before')
-  if (!sameRows(state.tables, [{ name: 'app_release_retirements', kind: 'r' }]) || !sameRows(state.columns, retentionColumns)
-    || !sameRows(state.indexes, retentionIndexes) || !sameRows(state.constraints, retentionConstraints) || state.rowCount !== 0) throw Error('Retention migration catalog or initial rows mismatch')
+  const expected = { tables: [{ name: 'app_release_retirements', kind: 'r' }], columns: retentionColumns,
+    indexes: retentionIndexes, constraints: retentionConstraints, rowCount: 0 }
+  // PostgreSQL/Prisma object key insertion order is not DDL. Preserve every
+  // field and value, index-column array order and duplicate catalog rows.
+  const catalogRows = rows => rows.map(row => JSON.stringify(Object.fromEntries(Object.entries(row).sort(([left], [right]) => left.localeCompare(right))))).sort()
+  const differences = {}
+  for (const key of ['tables', 'columns', 'indexes', 'constraints']) {
+    if (JSON.stringify(catalogRows(state[key])) !== JSON.stringify(catalogRows(expected[key]))) differences[key] = { actual: state[key], expected: expected[key] }
+  }
+  if (state.rowCount !== 0) differences.rowCount = { actual: state.rowCount, expected: 0 }
+  // Only this new table's catalog definitions and count appear in diagnostics;
+  // no claim rows, users, content, environment or connection strings are read.
+  if (Object.keys(differences).length) throw Error('Retention migration catalog or initial rows mismatch: ' + JSON.stringify(differences))
 }
 /** Only PostgreSQL metadata and the new empty claim table are read. */
 export async function readAppReleaseRetentionState(tx, phase) {
