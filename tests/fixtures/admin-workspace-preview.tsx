@@ -1,3 +1,4 @@
+import type { AdminAppRelease, AdminAppReleaseIndex, AppReleaseExecute, AppReleasePreview, AppReleaseReceipt } from '../../shared/contracts/app-release'
 import { adminYunshuOperationsFixture } from './admin-yunshu-operations'
 import { createRoot } from 'react-dom/client'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
@@ -35,13 +36,43 @@ const pagination = { page:1,pageSize:10,total:1,totalPages:1 }
 const empty = { items:[],pagination:{...pagination,total:0} }
 const settings={...defaultSiteSettings,about:'用于布局审查的公开合成站点介绍。',footer:'公开合成预览',contact:{label:'联系支持',url:'https://example.com/support',details:'此处仅为合成展示。'}}
 const contentRows=[{id:'layout-notice',kind:'announcement',key:'layout-notice',payload:{title:'公开合成公告',body:'这是用于检查后台列表与编辑弹层的合成公告。',scope:'both',startsAt:null,endsAt:null,dismissal:{mode:'version'}},revision:1,deletedAt:null,withdrawn:false,status:'draft',published:null,history:[]},{id:'layout-settings',kind:'settings',key:'main',payload:settings,revision:2,deletedAt:null,withdrawn:false,status:'active',published:{id:'settings-version',contentVersion:1,hash:'a'.repeat(64),payload:settings,publishedAt:now},history:[]}]
-const release={id:'layout-version-1',label:'公开合成版本 1.0',sourceSha:'a'.repeat(40),artifactSha256:'b'.repeat(64),publicNotes:{features:['公开合成新增功能'],fixes:['公开合成修复说明'],changes:['公开合成改进说明']},validationState:'draft',verifiedAt:null,compatibility:{api:1,schema:1,task:1,legalConsentUi:true},capabilities:['siteContent'],ciRunId:null,createdAt:now}
+const release:AdminAppRelease={id:'layout-version-1',label:'公开合成版本 1.0',sourceSha:'a'.repeat(40),artifactSha256:'b'.repeat(64),publicNotes:{features:['公开合成新增功能'],fixes:['公开合成修复说明'],changes:['公开合成改进说明']},validationState:'draft',verifiedAt:null,compatibility:{api:1,schema:1,task:1,legalConsentUi:true},capabilities:['siteContent'],ciRunId:null,createdAt:now}
+// Synthetic state only: no original CI or deployment acceptance is asserted by this preview.
+const releaseIndex:AdminAppReleaseIndex={
+ releases:[['layout-stable','合成当前稳定版'],['layout-test','合成当前测试版'],['layout-candidate','合成下一候选版'],['layout-previous','合成历史稳定版']].map(([id,label])=>({...release,id,label,validationState:'verified',verifiedAt:now,ciRunId:'synthetic-ui-preview-only'})),
+ stable:{releaseId:'layout-stable',revision:3,enabled:true},test:{releaseId:'layout-test',revision:2,enabled:true},
+ operations:[{operationId:'00000000-0000-4000-8000-000000000010',status:'applied',action:'full_release',releaseId:'layout-stable',previousReleaseId:'layout-previous',revision:3,appliedAt:now}],
+}
+const simulatedOperations=new Map<string,AppReleaseReceipt>()
 const feedback={id:'layout-feedback',kind:'bug',status:'pending',excerpt:'公开合成反馈：窄屏布局中需要清晰的操作入口。',imageCount:0,contact:'合成联系说明',source:'studio-mobile',createdAt:now,handledAt:null,user,content:'公开合成反馈正文，仅用于检查详情、工程信息和操作布局。',imageUrls:[],pageUrl:'/studio',clientInfo:{userAgent:'Synthetic browser / layout preview',platform:'Synthetic platform',language:'zh-CN',viewport:{width:390,height:844},online:true,languages:['zh-CN','en'],extra:null},handledByNickname:null,updatedAt:now}
 const suite={id:'layout-suite',name:'公开合成草稿套件',datasetVersion:'layout-fixture-v1',rubricVersion:'layout-rubric-v1',status:'draft',sampleCount:2,reviewCount:0,createdAt:now,updatedAt:now}
 window.fetch = async (input, init) => {
  const url=new URL(typeof input==='string'?input:input instanceof Request?input.url:input.href,location.origin)
  const method=init?.method??'GET'
  const model=models.find(item=>url.pathname.startsWith('/api/admin/models/'+item.id+'/'))
+ if(params.get('simulate')==='releases'&&url.pathname.startsWith('/api/admin/app-releases/')){
+  const body=JSON.parse(String(init?.body??'{}'))
+  if(url.pathname.endsWith('/preview')){
+   const selected=releaseIndex.releases.find(item=>item.id===body.releaseId)!
+   const value:AppReleasePreview={action:body.action,release:selected,stable:releaseIndex.stable,test:releaseIndex.test,expectedRevision:(body.action==='assign_test'||body.action==='withdraw_test'?releaseIndex.test:releaseIndex.stable)?.revision??0,previewHash:'c'.repeat(64),blockers:[],impact:'纯合成界面预览：仅更新当前页面内存中的渠道状态，不执行真实发布。'}
+   return Response.json({success:true,data:value})
+  }
+  if(url.pathname.endsWith('/execute')){
+   const operation=body as AppReleaseExecute
+   let receipt=simulatedOperations.get(operation.operationId)
+   if(!receipt){
+    const channel=operation.action==='assign_test'||operation.action==='withdraw_test'?'test':'stable',previous=releaseIndex[channel]
+    receipt={operationId:operation.operationId,status:'applied',action:operation.action,releaseId:operation.releaseId,previousReleaseId:previous?.releaseId??null,revision:operation.expectedRevision+1,appliedAt:now}
+    releaseIndex[channel]={releaseId:operation.releaseId,revision:receipt.revision,enabled:operation.action!=='withdraw_test'}
+    if(operation.action==='full_release'&&releaseIndex.test)releaseIndex.test={...releaseIndex.test,enabled:false,revision:releaseIndex.test.revision+1}
+    simulatedOperations.set(operation.operationId,receipt);releaseIndex.operations.unshift(receipt)
+   }
+   if(params.get('outcome')==='unknown')throw Error('合成响应丢失；没有访问真实服务器')
+   return Response.json({success:true,data:receipt})
+  }
+  if(url.pathname.includes('/operations/'))return Response.json({success:true,data:{status:simulatedOperations.has(url.pathname.split('/').at(-1)!)?'applied':'not_applied',receipt:simulatedOperations.get(url.pathname.split('/').at(-1)!)??null}})
+  if(url.pathname.endsWith('/import')){releaseIndex.releases.unshift({...releaseIndex.releases[2],id:body.releaseId,label:'合成登记版本'});return Response.json({success:true,data:releaseIndex.releases[0]})}
+ }
  if(model&&method==='POST'&&url.pathname.endsWith('/diagnostics')) {
   const body=JSON.parse(String(init?.body??'{}'))
   return Response.json({success:true,data:{id:'synthetic-diagnostic',requestKey:body.requestKey,modelConfigId:model.id,configRevision:String(model.revision),modelName:model.modelName,provider:model.provider,modelKind:model.modelKind,mode:body.mode,status:'configuration_passed',stale:false,createdAt:now,finishedAt:now,failure:null,checks:[{field:'baseUrl',passed:true,message:'公开合成端点通过静态检查，未请求上游。'}],metrics:{responseHeadersMs:null,firstEventMs:null,firstThinkingMs:null,firstTextMs:null,totalMs:null,outputTokens:null,tokensPerSecond:null},fee:{identity:'synthetic-platform-only',owner:'platform',status:'not_requested',currency:'CNY',amountMicros:null,maximumMicros:null},livePolicy:{enabled:false,maximumCostMicros:null,blockedReason:'真实请求尚未开放。'}}})
@@ -58,7 +89,7 @@ window.fetch = async (input, init) => {
   data=url.pathname.endsWith('/health')?{...context,observation:'no_samples',counts:{total:0,success:0,failure:0,pending:0,cancelled:0,unknown:0},lastSampleAt:null,firstTextMs:null,p50Ms:null,p95Ms:null,tokensPerSecond:null}:{...context,...empty}
  }
  else if(url.pathname==='/api/admin/site-content') data=contentRows
- else if(url.pathname==='/api/admin/app-releases') data={releases:[release],stable:null,test:null,operations:[]}
+ else if(url.pathname==='/api/admin/app-releases') data=releaseIndex
  else if(url.pathname==='/api/admin/users/'+user.id) data={user:{...user,bio:'公开合成介绍'},stats:{novels:2,posts:1,comments:0,favorites:0,totalTokens:100,webSearchCalls:0,imageCalls:0}}
  else if(url.pathname==='/api/admin/users') data={items:[user],pagination}
  else if(url.pathname==='/api/admin/novels') data={items:[{id:'public-fixture-novel',title:'山海之间：公开合成作品',displayTitle:null,status:'published',visibility:'public',categoryName:'幻想',wordCount:12400,chapterCount:8,commentCount:2,favoriteCount:0,publishedAt:now,updatedAt:now,author:user}],pagination}

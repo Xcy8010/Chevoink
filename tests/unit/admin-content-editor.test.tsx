@@ -5,12 +5,13 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { defaultSiteSettings } from '../../src/features/site-content/defaults'
 import AdminContentPage from '../../src/features/admin/pages/AdminContentPage'
 import type { ContentRow } from '../../shared/contracts/site-content'
-const mocks=vi.hoisted(()=>({request:vi.fn(),admin:{id:'fixture-admin',isSuperAdmin:true}}))
+const mocks=vi.hoisted(()=>({request:vi.fn(),success:vi.fn(),error:vi.fn(),info:vi.fn(),admin:{id:'fixture-admin',isSuperAdmin:true}}))
+vi.mock('../../src/components/ui/toast-context',()=>({useToast:()=>({success:mocks.success,error:mocks.error,info:mocks.info})}))
 vi.mock('../../src/app/api-client',()=>({requestJson:mocks.request}))
 vi.mock('../../src/features/admin/admin-shared',()=>({useAdminSession:()=>({admin:mocks.admin})}))
 vi.mock('../../src/features/admin/AdminLayout',()=>({
  AdminCard:({children}:{children:React.ReactNode})=><section>{children}</section>,
- AdminPageHeader:({title}:{title:string})=><h1>{title}</h1>,
+ AdminPageHeader:({title,extra}:{title:string;extra?:React.ReactNode})=><header><h1>{title}</h1>{extra}</header>,
  StatusPill:({children}:{children:React.ReactNode})=><span>{children}</span>,
 }))
 function notice(id='notice-a',revision=7):ContentRow{
@@ -64,6 +65,7 @@ it('keeps edited content on a revision conflict and sends the selected server re
  expect(JSON.parse(call[1].body)).toMatchObject({expectedRevision:7,action:'save',draft:{payload:{title:'未保存标题'}}})
  expect((screen.getByRole('textbox',{name:'标题'}) as HTMLInputElement).value).toBe('未保存标题')
  expect(screen.getByRole('button',{name:'发布已保存草稿'}).hasAttribute('disabled')).toBe(true)
+ expect(mocks.success).not.toHaveBeenCalled()
 })
 it('confirms announcement replacement and preserves both expected revisions',async()=>{
  const current=notice(),replaced=notice('notice-b',12)
@@ -75,6 +77,7 @@ it('confirms announcement replacement and preserves both expected revisions',asy
  expect(screen.getAllByRole('dialog')).toHaveLength(1)
  fireEvent.click(within(screen.getByRole('dialog',{name:'确认发布公告？'})).getByRole('button',{name:'确认'}))
  await waitFor(()=>expect(mocks.request).toHaveBeenCalledWith('/api/admin/site-content/notice-a',expect.objectContaining({body:JSON.stringify({expectedRevision:7,action:'publish',replace:{id:'notice-b',expectedRevision:12}})})))
+ await waitFor(()=>expect(mocks.success).toHaveBeenCalledWith('公告已发布。'))
 })
 it('keeps deleted records read-only and requires confirmation before restoring',async()=>{
  const deleted={...notice(),deletedAt:'2026-11-06T02:00:00.000Z'}
@@ -111,6 +114,7 @@ it('uses currently public settings when no management record exists and saves on
  expect(post[0]).toBe('/api/admin/site-content')
  expect(JSON.parse(post[1].body)).toEqual({kind:'settings',key:'main',payload:settings})
  expect(mocks.request.mock.calls.filter(([,options])=>options?.method==='POST')).toHaveLength(1)
+ await waitFor(()=>expect(mocks.success).toHaveBeenCalledWith('站点设置草稿已保存，尚未发布。'))
 })
 it('opens the existing settings draft rather than replacing it with public or blank values',async()=>{
  const draft={...defaultSiteSettings,name:'管理草稿名称',footer:'待发布页脚'}
@@ -121,4 +125,20 @@ it('opens the existing settings draft rather than replacing it with public or bl
  expect((screen.getByRole('textbox',{name:'站点名称'}) as HTMLInputElement).value).toBe(draft.name)
  expect((screen.getByRole('textbox',{name:'页脚'}) as HTMLTextAreaElement).value).toBe(draft.footer)
  expect(screen.getByRole('dialog').textContent).toContain('修订 4')
+})
+
+it('separates the currently public settings from the saved management draft and previews without publishing',async()=>{
+ const publicSettings={...defaultSiteSettings,name:'当前公开名称',about:'当前公开介绍'}
+ const draft={...defaultSiteSettings,name:'尚未发布的草稿名称',about:'草稿介绍'}
+ const row={kind:'settings',key:'main',id:'settings',payload:draft,revision:4,status:'active',published:{id:'published',contentVersion:2,hash:'a'.repeat(64),payload:publicSettings,publishedAt:'2026-11-06T00:00:00Z'},history:[],deletedAt:null,withdrawn:false}
+ mocks.request.mockImplementation(async(url:string)=>url==='/api/site-content'?{settings:publicSettings}:[row])
+ mount(true);await screen.findByText('当前公开名称',{selector:'h3'})
+ const publicCard=screen.getByRole('heading',{name:'当前公开资料'}).closest('section')!
+ const draftCard=screen.getByRole('heading',{name:'管理草稿'}).closest('section')!
+ expect(within(publicCard).getByText('当前公开介绍')).toBeTruthy()
+ expect(within(draftCard).getByText('尚未发布的草稿名称')).toBeTruthy()
+ expect(within(publicCard).queryByText('尚未发布的草稿名称')).toBeNull()
+ fireEvent.click(within(draftCard).getByRole('button',{name:'预览已保存草稿'}))
+ expect(within(screen.getByRole('dialog')).getByRole('heading',{name:'尚未发布的草稿名称'})).toBeTruthy()
+ expect(mocks.request.mock.calls.some(([,options])=>options?.method==='POST')).toBe(false)
 })

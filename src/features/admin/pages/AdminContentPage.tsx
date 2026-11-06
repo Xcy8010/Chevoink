@@ -1,3 +1,4 @@
+import { useToast } from '@/components/ui/toast-context'
 import { defaultSiteSettings, effectiveSiteSettings } from '@/features/site-content/defaults'
 import { formatShanghaiDateInput, parseShanghaiDateInput } from '../site-content-time'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -79,6 +80,7 @@ function ContentPreview({draft}:{draft:ContentDraft}) {
 type Action='publish'|'withdraw'|'delete'|'restore'
 export default function AdminContentPage({settingsOnly=false}:{settingsOnly?:boolean}) {
   const {admin}=useAdminSession()
+  const toast=useToast()
   const client=useQueryClient()
   const query=useQuery({queryKey:['admin','site-content'],queryFn:()=>requestJson<ContentRow[]>('/api/admin/site-content'),refetchInterval:60000})
   const publicQuery=useQuery({queryKey:['site-content','public'],queryFn:()=>requestJson<PublicSiteContent>('/api/site-content'),enabled:settingsOnly})
@@ -112,24 +114,34 @@ export default function AdminContentPage({settingsOnly=false}:{settingsOnly?:boo
     const parsed=contentDraftSchema.safeParse(draft)
     if (!parsed.success) {setMessage(parsed.error.issues.map(issue=>issue.message).join('；'));return}
     setBusy(true);setMessage('')
-    try {const row=await requestJson<ContentRow>(`/api/admin/site-content${selected ? `/${selected.id}` : ''}`,{method:'POST',body:JSON.stringify(selected ? {expectedRevision:selected.revision,action:'save',draft:parsed.data}:parsed.data)});try{localStorage.removeItem(storageKey(selected?.id ?? `new-${draft.kind}`))}catch{/* Browser storage is optional. */}setSelected(row);setDraft({kind:row.kind,key:row.key,payload:row.payload} as ContentDraft);setDirty(false);await client.invalidateQueries({queryKey:['admin','site-content']});setMessage('草稿已保存。')} catch(error){setMessage(error instanceof Error?error.message:'保存失败。')}finally{setBusy(false)}
+    try {const row=await requestJson<ContentRow>(`/api/admin/site-content${selected ? `/${selected.id}` : ''}`,{method:'POST',body:JSON.stringify(selected ? {expectedRevision:selected.revision,action:'save',draft:parsed.data}:parsed.data)});try{localStorage.removeItem(storageKey(selected?.id ?? `new-${draft.kind}`))}catch{/* Browser storage is optional. */}setSelected(row);setDraft({kind:row.kind,key:row.key,payload:row.payload} as ContentDraft);setDirty(false);await client.invalidateQueries({queryKey:['admin','site-content']});setMessage('草稿已保存。');toast.success(labels[draft.kind]+'草稿已保存，尚未发布。')} catch(error){setMessage(error instanceof Error?error.message:'保存失败。')}finally{setBusy(false)}
   }
   async function operate() {
     if(!selected || !confirm)return
     setBusy(true);setMessage('')
-    try {const replaced=rows.find(row=>row.id===replacement);const row=await requestJson<ContentRow>(`/api/admin/site-content/${selected.id}`,{method:'POST',body:JSON.stringify({expectedRevision:selected.revision,action:confirm,...(confirm==='publish' && replaced ? {replace:{id:replaced.id,expectedRevision:replaced.revision}}:{})})});setSelected(row);setConfirm(null);await Promise.all([client.invalidateQueries({queryKey:['admin','site-content']}),client.invalidateQueries({queryKey:['site-content','public']})]);setMessage('操作已完成。')}catch(error){setMessage(error instanceof Error?error.message:'操作失败。')}finally{setBusy(false)}
+    try {const replaced=rows.find(row=>row.id===replacement);const row=await requestJson<ContentRow>(`/api/admin/site-content/${selected.id}`,{method:'POST',body:JSON.stringify({expectedRevision:selected.revision,action:confirm,...(confirm==='publish' && replaced ? {replace:{id:replaced.id,expectedRevision:replaced.revision}}:{})})});setSelected(row);setConfirm(null);await Promise.all([client.invalidateQueries({queryKey:['admin','site-content']}),client.invalidateQueries({queryKey:['site-content','public']})]);setMessage('操作已完成。');toast.success(labels[draft.kind]+({publish:'已发布。',withdraw:'已撤下。',delete:'已删除。',restore:'已恢复。'}[confirm]))}catch(error){setMessage(error instanceof Error?error.message:'操作失败。')}finally{setBusy(false)}
   }
+  const settingsRow=rows.find(row=>row.kind==='settings'&&row.key==='main')
+  const publicSettings=effectiveSiteSettings(publicQuery.data?.settings)
   const title=(row:ContentRow)=>'title' in row.payload?row.payload.title:row.payload.name
   const visible=rows.filter(row=>(filter==='all'||row.kind===filter)&&(row.key+' '+title(row)).toLowerCase().includes(search.toLowerCase()))
   return <>
-    <AdminPageHeader title={settingsOnly?'站点设置':'公告与帮助政策'} description={settingsOnly?'维护站点公开资料与联系入口。':'维护公告、帮助文档、服务条款和隐私政策。'}/>
-    <div className="admin-toolbar admin-content-toolbar">
-      {!settingsOnly?<><input aria-label="搜索内容" placeholder="搜索标题或编号" className={inputClass} value={search} onChange={event=>setSearch(event.target.value)}/><select aria-label="内容类型" className={inputClass} value={filter} onChange={event=>setFilter(event.target.value)}><option value="all">全部类型</option>{(['announcement','help','terms','privacy'] as const).map(kind=><option key={kind} value={kind}>{labels[kind]}</option>)}</select></>:null}
-      <div className="flex flex-wrap gap-2 md:ml-auto">{settingsOnly?<Button disabled={busy||query.isLoading||query.isError||publicQuery.isLoading} onClick={()=>choose(rows.find(row=>row.key==='main')??null,'settings')}>编辑站点资料</Button>:(['announcement','help','terms','privacy'] as const).map(kind=><Button key={kind} disabled={busy} onClick={()=>choose(null,kind)}>新建{labels[kind]}</Button>)}</div>
-    </div>
-    {query.isLoading?<p role="status" className="py-12 text-center">加载中…</p>:query.isError?<p role="alert" className="py-8">内容读取失败。<button onClick={()=>void query.refetch()}>重试</button></p>:<AdminCard>
-      <h2 className="mb-2 font-semibold">{settingsOnly?'站点配置':'内容列表'} <span className="ml-2 text-xs font-normal text-[var(--text-secondary)]">{visible.length} 项</span></h2>
-      {settingsOnly&&!visible.length?<div className="py-3"><p className="mb-4 text-xs text-[var(--text-secondary)]">{publicQuery.data?.settings?'当前公开资料 · 尚无管理草稿':'当前默认资料 · 尚未建立管理记录'}</p><ContentPreview draft={{kind:'settings',key:'main',payload:effectiveSiteSettings(publicQuery.data?.settings)}}/></div>:visible.length?visible.map(row=><article key={row.id} className="admin-list-row">
+    <AdminPageHeader title={settingsOnly?'站点设置':'公告与帮助政策'} description={settingsOnly?'维护站点公开资料与联系入口。':'维护公告、帮助文档、服务条款和隐私政策。'} extra={settingsOnly?<Button variant="primary" disabled={busy||query.isLoading||query.isError||publicQuery.isLoading&&!settingsRow} onClick={()=>choose(settingsRow??null,'settings')}>编辑站点资料</Button>:undefined}/>
+    {!settingsOnly?<div className="admin-toolbar admin-content-toolbar">
+      <><input aria-label="搜索内容" placeholder="搜索标题或编号" className={inputClass} value={search} onChange={event=>setSearch(event.target.value)}/><select aria-label="内容类型" className={inputClass} value={filter} onChange={event=>setFilter(event.target.value)}><option value="all">全部类型</option>{(['announcement','help','terms','privacy'] as const).map(kind=><option key={kind} value={kind}>{labels[kind]}</option>)}</select></>
+      <div className="flex flex-wrap gap-2 md:ml-auto">{(['announcement','help','terms','privacy'] as const).map(kind=><Button key={kind} disabled={busy} onClick={()=>choose(null,kind)}>新建{labels[kind]}</Button>)}</div>
+    </div>:null}
+    {query.isLoading?<p role="status" className="py-12 text-center">加载中…</p>:query.isError?<p role="alert" className="py-8">内容读取失败。<button onClick={()=>void query.refetch()}>重试</button></p>:settingsOnly?<div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1.6fr)_minmax(280px,1fr)]">
+      <AdminCard><div className="mb-4 flex flex-wrap items-center justify-between gap-2"><h2 className="font-semibold">当前公开资料</h2><StatusPill tone={publicQuery.data?.settings?'success':'neutral'}>{publicQuery.data?.settings?'已发布':'默认资料'}</StatusPill></div>
+        {publicQuery.isLoading?<p role="status">正在读取公开资料…</p>:publicQuery.isError?<p role="alert">公开资料读取失败。<Button onClick={()=>void publicQuery.refetch()}>重试</Button></p>:<>
+          <div className="mb-4 flex items-center gap-3">{publicSettings.logoUrl?<img src={publicSettings.logoUrl} alt="当前站点 Logo" className="h-12 w-12 rounded-lg object-contain"/>:null}<h3 className="text-xl font-semibold">{publicSettings.name}</h3></div>
+          <dl className="admin-site-fields"><dt>关于站点</dt><dd>{publicSettings.about||'未设置'}</dd><dt>页脚</dt><dd>{publicSettings.footer||'未设置'}</dd><dt>帮助入口</dt><dd>{publicSettings.docsLabel}</dd><dt>联系入口</dt><dd>{publicSettings.contact.label||'未设置'}{publicSettings.contact.url?<span className="mt-1 block break-all text-xs text-[var(--text-secondary)]">{publicSettings.contact.url}</span>:null}</dd><dt>联系方式</dt><dd>{publicSettings.contact.details||'未设置'}</dd><dt>站点导航</dt><dd><div className="flex flex-wrap gap-2">{publicSettings.navigation.length?publicSettings.navigation.map((item,index)=><span key={index} className="rounded-md border border-[var(--border-default)] px-2 py-1">{item.label}</span>):'未设置'}</div></dd></dl>
+        </>}
+      </AdminCard>
+      <AdminCard><h2 className="font-semibold">管理草稿</h2><p className="mt-3 text-lg font-medium">{settingsRow?title(settingsRow):publicSettings.name}</p><p className="mt-2 text-sm text-[var(--text-secondary)]">{settingsRow?settingsRow.deletedAt?'草稿已删除，可在编辑中恢复。':'已保存修订 '+settingsRow.revision:'尚未建立管理记录。'}</p><p className="mt-3 text-sm text-[var(--text-secondary)]">{settingsRow?.published?'最近发布：'+new Date(settingsRow.published.publishedAt).toLocaleString():'尚未发布管理草稿。'}</p><p className="mt-3 text-sm text-[var(--text-secondary)]">保存草稿后仍需手动发布，公开资料才会更新。</p><div className="mt-5 flex flex-wrap gap-2">{settingsRow?<Button disabled={busy} onClick={()=>{choose(settingsRow);setPreview(true)}}>预览已保存草稿</Button>:null}</div></AdminCard>
+    </div>:<AdminCard>
+      <h2 className="mb-2 font-semibold">内容列表 <span className="ml-2 text-xs font-normal text-[var(--text-secondary)]">{visible.length} 项</span></h2>
+      {visible.length?visible.map(row=><article key={row.id} className="admin-list-row">
         <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="font-medium">{title(row)||'未命名'}</h3><StatusPill tone={row.deletedAt?'danger':row.status==='active'?'success':'neutral'}>{row.deletedAt?'已删除（可恢复）':statuses[row.status]}</StatusPill></div><div className="admin-list-meta"><span>{labels[row.kind]}</span><span>编号：{row.key}</span><span>内容版本：{row.published?.contentVersion ?? '尚未发布'}</span>{row.kind==='announcement'?<span>{{home:'首页',studio:'创作中心',both:'首页和创作中心'}[row.payload.scope]}</span>:null}</div></div>
         <Button size="sm" onClick={()=>choose(row)} disabled={busy} aria-label={'编辑'+labels[row.kind]+'：'+title(row)}>编辑{labels[row.kind]}</Button>
       </article>):<p className="py-12 text-center text-[var(--text-secondary)]">{rows.length?'没有匹配内容':'暂无内容，请先新建。'}</p>}

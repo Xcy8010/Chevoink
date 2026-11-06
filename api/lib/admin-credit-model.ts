@@ -1,3 +1,4 @@
+import { modelPublicCopy } from '../../shared/model-public-copy.js'
 import { assertImageActivityConfiguration } from './billing/image-price.js'
 import { assertAppReleaseModelCapabilities } from './app-release-model-capabilities.js'
 import { isEffectiveTester, effectiveTesterIds } from './tester-entitlement.js'
@@ -289,8 +290,7 @@ export async function getAdminModelManagement(view: 'active' | 'archived' | 'all
         id: model.id, revision: model.revision, archivedAt: model.archivedAt?.toISOString() ?? null, archiveReason: model.archiveReason, tier: model.tier, sortOrder: model.sortOrder, modelKind, provider: fallback?.provider ?? model.provider, displayName: model.displayName,
         modelName: fallback?.modelName ?? model.modelName, baseUrl: fallback?.baseUrl ?? model.baseUrl, multiplier: effectiveModelMultiplier(model) / 10_000,
         baseMultiplier: model.multiplierBps / 10000,
-        publicDescription: typeof metadata.publicDescription === 'string' ? metadata.publicDescription : '',
-        publicFeatures: Array.isArray(metadata.publicFeatures) ? metadata.publicFeatures as string[] : [],
+        ...modelPublicCopy(modelKind === 'text' ? model.tier : null, metadata),
         activities: readModelActivities(model.metadata),
         activityStatus: modelKind === 'image_generation' ? publicImagePrice(model).activity : model.tier && isServerModelTier(model.tier) ? publicModelPrice(model, model.tier, prices.get(model.tier)).activity : null,
         freePromotion: readModelPromotion(model.metadata),

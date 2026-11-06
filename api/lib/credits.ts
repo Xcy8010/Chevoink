@@ -1,3 +1,4 @@
+import { modelPublicCopy } from '../../shared/model-public-copy.js'
 import { applyTesterCreditFloor, isEffectiveTester, TESTER_CREDIT_RULE } from './tester-entitlement.js'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 
@@ -219,6 +220,7 @@ async function listPublicModelOptions(tester: boolean): Promise<CreditModelOptio
     const multiplierBps = effectiveModelMultiplier(item)
     return [{
       ...publicModelPrice(item, item.tier, activePrices.get(item.tier)),
+      ...modelPublicCopy(item.tier, item.metadata),
       tier: item.tier as CreditModelOption['tier'],
       label: item.displayName,
       freePromotion: multiplierBps === 0 ? readModelPromotion(item.metadata) : null,

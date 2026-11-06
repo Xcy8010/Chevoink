@@ -4,10 +4,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import AdminContentPage from '../../src/features/admin/pages/AdminContentPage'
 import type { ContentDraft } from '../../shared/contracts/site-content'
-const mocks=vi.hoisted(()=>({request:vi.fn(),admin:{id:'fixture-admin',isSuperAdmin:true}}))
+const mocks=vi.hoisted(()=>({request:vi.fn(),success:vi.fn(),error:vi.fn(),info:vi.fn(),admin:{id:'fixture-admin',isSuperAdmin:true}}))
+vi.mock('../../src/components/ui/toast-context',()=>({useToast:()=>({success:mocks.success,error:mocks.error,info:mocks.info})}))
 vi.mock('../../src/app/api-client',()=>({requestJson:mocks.request}))
 vi.mock('../../src/features/admin/admin-shared',()=>({useAdminSession:()=>({admin:mocks.admin})}))
-vi.mock('../../src/features/admin/AdminLayout',()=>({AdminCard:({children}:{children:React.ReactNode})=><section>{children}</section>,AdminPageHeader:({title}:{title:string})=><h1>{title}</h1>,StatusPill:({children}:{children:React.ReactNode})=><span>{children}</span>}))
+vi.mock('../../src/features/admin/AdminLayout',()=>({AdminCard:({children}:{children:React.ReactNode})=><section>{children}</section>,AdminPageHeader:({title,extra}:{title:string;extra?:React.ReactNode})=><header><h1>{title}</h1>{extra}</header>,StatusPill:({children}:{children:React.ReactNode})=><span>{children}</span>}))
 function mount(){const client=new QueryClient({defaultOptions:{queries:{retry:false,gcTime:Infinity}}});render(<QueryClientProvider client={client}><AdminContentPage/></QueryClientProvider>)}
 beforeEach(()=>{vi.clearAllMocks();localStorage.clear();mocks.request.mockImplementation(async(_url:string,options?:RequestInit)=>{if(!options)return[];const draft=JSON.parse(String(options.body)) as ContentDraft;return{...draft,id:'notice',revision:1,status:'draft',deletedAt:null,withdrawn:false,published:null,history:[]}})})
 afterEach(cleanup)

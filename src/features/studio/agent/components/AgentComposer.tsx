@@ -1,4 +1,4 @@
-import { ModelPriceDetails, ModelPriceSummary } from '../../components/ModelPriceDetails'
+import { ModelActivityBadge, ModelPriceDetails, ModelPriceSummary } from '../../components/ModelPriceDetails'
 import {
   useEffect,
   useId,
@@ -11,7 +11,7 @@ import {
   type KeyboardEvent,
   type MouseEvent,
 } from 'react'
-import { ArrowUp, Bot, BookOpenText, Check, ChevronDown, ChevronRight, Feather, FileText, Image, LoaderCircle, Mic, Pencil, Play, Plus, Rocket, Scale, Settings2, Square, Target, Wrench, X } from 'lucide-react'
+import { ArrowUp, Bot, BookOpenText, Check, ChevronDown, ChevronRight, Feather, FileText, Image, LoaderCircle, Mic, Play, Plus, Rocket, Scale, Settings2, Square, Target, Wrench, X } from 'lucide-react'
 import { ReasoningSlider } from './ReasoningSlider'
 import StyleLearningDialog from '../../components/StyleLearningDialog'
 import { SubagentPicker } from './SubagentPicker'
@@ -119,7 +119,6 @@ const CREATIVE_MODES: Array<{ value: CreativeFreedom; label: string; description
 ]
 
 const REASONING_ORDER: ModelReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
-const REASONING_LABELS: Record<ModelReasoningEffort, string> = { none: '关闭', minimal: '轻度', low: '低', medium: '中', high: '高', xhigh: '极高', max: 'Max' }
 
 /** 与技能区保持一致的阶段中文名 */
 const SKILL_PHASE_LABELS: Record<string, string> = {
@@ -318,7 +317,6 @@ export function AgentComposer({
   const composingRef = useRef(false)
   const slashCardRef = useRef<HTMLDivElement | null>(null)
   const slashReturnCaret = useRef<{ offset: number; preceding: string[] } | null>(null)
-  const [editingReasoningTier, setEditingReasoningTier] = useState<Exclude<CreditModelTier, 'custom'> | null>(null)
   // 手机端模型二级列表改为受控视图：触屏没有 hover，靠 focus-within 显示会残留/溢出，
   // 点击「模型」行进入模型列表、返回或选中后回到根视图；桌面端仍走 hover/focus 行为完全不变
   const [mobileModelsOpen, setMobileModelsOpen] = useState(false)
@@ -1189,7 +1187,7 @@ export function AgentComposer({
             </div>
           </details>
           {canUseGoalEntry ? <GoalModeChip active={goalActive} draft={goalMode} busy={sending || voiceActive || disabled} onOpen={() => onGoalOpen?.()} onCancel={() => setGoalMode(false)} /> : null}
-          <details ref={modelMenuRef} className="group/model relative z-[120] ml-auto min-w-0" data-disabled={disabled || undefined} onToggle={(event) => { if (!(event.currentTarget as HTMLDetailsElement).open) { setMobileModelsOpen(false); setEditingReasoningTier(null) } }}>
+          <details ref={modelMenuRef} className="group/model relative z-[120] ml-auto min-w-0" data-disabled={disabled || undefined} onToggle={(event) => { if (!(event.currentTarget as HTMLDetailsElement).open) { setMobileModelsOpen(false) } }}>
             <summary
               onClick={(event) => {
                 if (disabled) { event.preventDefault(); return }
@@ -1212,22 +1210,23 @@ export function AgentComposer({
               <div className="group/models relative">
                 <button type="button" onClick={() => setMobileModelsOpen(true)} className="flex h-9 w-full items-center justify-between rounded-[9px] px-2.5 text-xs hover:bg-[var(--surface-muted)]"><span className="font-medium text-[var(--text-primary)]">模型</span><span className="inline-flex max-w-36 items-center gap-1 truncate text-[var(--text-secondary)]">{activeModelLabel}<ChevronRight className="h-3 w-3" /></span></button>
                 <div className={cn('invisible absolute bottom-0 right-[calc(100%-1px)] z-[150] w-60 translate-x-1 rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1.5 opacity-0 shadow-[0_18px_46px_rgba(15,23,42,0.2)] transition-[opacity,transform,visibility] duration-150 ease-out group-hover/models:visible group-hover/models:translate-x-0 group-hover/models:opacity-100 group-focus-within/models:visible group-focus-within/models:translate-x-0 group-focus-within/models:opacity-100 group-has-[[data-model-price-open]]/models:visible group-has-[[data-model-price-open]]/models:translate-x-0 group-has-[[data-model-price-open]]/models:opacity-100 mobile:left-0 mobile:right-0 mobile:w-auto mobile:translate-x-0 mobile:overflow-y-auto mobile:max-h-72 mobile:transition-none mobile:pointer-events-auto', mobileModelsOpen ? 'mobile:visible mobile:opacity-100' : 'mobile:hidden')}>
-                  <button type="button" onClick={(event) => { event.currentTarget.blur(); setEditingReasoningTier(null); setMobileModelsOpen(false) }} className="mb-1 hidden h-8 w-full items-center gap-1.5 rounded-[8px] px-2 text-xs text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] mobile:flex" aria-label="返回模型菜单"><ChevronRight className="h-3.5 w-3.5 rotate-180" />返回</button>
+                  <button type="button" onClick={(event) => { event.currentTarget.blur(); setMobileModelsOpen(false) }} className="mb-1 hidden h-8 w-full items-center gap-1.5 rounded-[8px] px-2 text-xs text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] mobile:flex" aria-label="返回模型菜单"><ChevronRight className="h-3.5 w-3.5 rotate-180" />返回</button>
                   <p className="px-2 pb-1 pt-1 text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--text-tertiary)]">可用内置模型</p>
-                  {editingReasoningTier ? (() => {
-                    const option = modelOptions.find((item) => item.tier === editingReasoningTier)
-                    if (!option) return null
-                    const efforts = orderedReasoningEfforts(option.reasoningEfforts)
-                    const modelKey = `tier:${option.tier}`
-                    const selected = reasoningSelections[modelKey] && efforts.includes(reasoningSelections[modelKey])
-                      ? reasoningSelections[modelKey]
-                      : option.defaultReasoningEffort
-                    return <div className="absolute bottom-0 right-[calc(100%+7px)] z-[160] w-52 rounded-[14px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1.5 shadow-[0_18px_46px_rgba(15,23,42,0.2)] motion-safe:origin-bottom-right motion-safe:animate-[agent-menu-in_140ms_cubic-bezier(.2,.8,.2,1)] mobile:left-0 mobile:right-0 mobile:bottom-0 mobile:w-auto mobile:overflow-y-auto mobile:max-h-64 mobile:shadow-none">
-                      <div className="flex items-center justify-between px-2 pb-1 pt-1"><div><p className="text-[10px] text-[var(--text-tertiary)]">{option.label}</p><p className="text-xs font-medium text-[var(--text-primary)]">思考模式</p></div><button type="button" onClick={() => setEditingReasoningTier(null)} className="inline-flex h-7 w-7 items-center justify-center rounded-[7px] text-[var(--text-tertiary)] hover:bg-[var(--surface-muted)]" aria-label="关闭思考模式设置"><X className="h-3.5 w-3.5" /></button></div>
-                      {efforts.map((effort) => <button key={effort} type="button" onClick={() => onReasoningEffortChange(modelKey, effort)} className={cn('flex h-9 w-full items-center justify-between rounded-[8px] px-2.5 text-left text-xs transition-colors hover:bg-[var(--surface-muted)]', effort === selected && 'bg-[var(--surface-muted)] font-medium')}><span>{REASONING_LABELS[effort]}</span><span className="inline-flex items-center gap-2 text-[10px] text-[var(--text-tertiary)]">{effort}{effort === selected ? <Check className="h-3.5 w-3.5 text-[var(--text-primary)]" /> : null}</span></button>)}
-                    </div>
-                  })() : null}
-                  {modelOptions.filter((option) => option.available).map((option) => <ModelPriceDetails key={option.tier} model={option} className={cn('group/model-row flex min-h-9 w-full items-center rounded-[8px] hover:bg-[var(--surface-muted)]', option.tier === modelTier && 'bg-[var(--surface-muted)] font-medium')}><button type="button" onClick={() => { onModelTierChange(option.tier); modelMenuRef.current?.removeAttribute('open'); setEditingReasoningTier(null); setMobileModelsOpen(false) }} className="flex min-h-9 min-w-0 flex-1 items-center gap-2 px-2.5 py-1 text-left text-xs"><span className="flex min-w-0 flex-1 items-center gap-1.5"><span className="min-w-0 truncate">{option.label}</span>{option.multiplier === 0 ? <span className="shrink-0 rounded-full bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium leading-none text-[var(--color-error)]">{option.freePromotion ? '限时免费' : '免费'}</span> : null}</span><span className="max-w-[48%] text-right text-[10px] tabular-nums text-[var(--text-tertiary)]"><ModelPriceSummary model={option} /></span>{option.tier === modelTier ? <Check className="h-3.5 w-3.5 shrink-0 group-hover/model-row:invisible group-focus-within/model-row:invisible" /> : null}</button><button type="button" onClick={(event) => { event.stopPropagation(); setEditingReasoningTier(option.tier) }} className="invisible mr-1 inline-flex h-7 shrink-0 items-center gap-1 rounded-[7px] px-2 text-[10px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-default)] group-hover/model-row:visible group-focus-within/model-row:visible mobile:visible" aria-label={`编辑${option.label}思考模式`}><Pencil className="h-3 w-3" />编辑</button></ModelPriceDetails>)}
+                  {modelOptions.filter(option => option.available).map(option => {
+                    const modelKey = 'tier:' + option.tier
+                    const selectedEffort = reasoningSelections[modelKey]
+                    return <ModelPriceDetails key={option.tier} model={option}
+                      reasoningEffort={selectedEffort && option.reasoningEfforts.includes(selectedEffort) ? selectedEffort : option.defaultReasoningEffort}
+                      onReasoningChange={effort => onReasoningEffortChange(modelKey, effort)}
+                      className={cn('rounded-[8px] hover:bg-[var(--surface-muted)]', option.tier === modelTier && 'bg-[var(--surface-muted)] font-medium')}>
+                      <button type="button" onClick={() => { onModelTierChange(option.tier); modelMenuRef.current?.removeAttribute('open'); setMobileModelsOpen(false) }}
+                        className="flex min-h-9 w-full items-center gap-2 px-2.5 py-1 text-left text-xs">
+                        <span className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5"><span className="min-w-0 truncate">{option.label}</span><ModelActivityBadge model={option} /></span>
+                        <span className="shrink-0 text-right text-[10px] text-[var(--text-tertiary)]"><ModelPriceSummary model={option} /></span>
+                        <span className="inline-flex w-4 shrink-0 justify-end">{option.tier === modelTier ? <Check className="h-3.5 w-3.5" /> : null}</span>
+                      </button>
+                    </ModelPriceDetails>
+                  })}
                   {customModels.some((model) => model.enabled) ? <><div className="mx-2 my-1 border-t border-[var(--border-subtle)]" /><p className="px-2 pb-1 pt-1 text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--text-tertiary)]">自定义模型</p>{customModels.filter((model) => model.enabled).map((model) => <button key={model.id} type="button" onClick={() => { onCustomModelChange(model.id); onModelTierChange('custom'); modelMenuRef.current?.removeAttribute('open'); setMobileModelsOpen(false) }} className={cn('flex h-9 w-full items-center gap-2 rounded-[8px] px-2.5 text-left text-xs hover:bg-[var(--surface-muted)]', modelTier === 'custom' && model.id === customModelId && 'bg-[var(--surface-muted)] font-medium')}><span className="min-w-0 flex-1 truncate">{model.displayName}</span><span className="text-[10px] text-[var(--text-tertiary)]">BYOK</span>{modelTier === 'custom' && model.id === customModelId ? <Check className="h-3.5 w-3.5" /> : null}</button>)}</> : null}
                 </div>
               </div>

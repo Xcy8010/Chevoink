@@ -45,6 +45,11 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 const efforts: ModelReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+it('fills the same editable public writing copy in model management without replacing configured copy', async () => {
+  expect((await getAdminModelManagement()).models[0]).toMatchObject({ publicDescription: expect.stringContaining('情节构思'), publicFeatures: ['情节构思', '段落续写', '日常修改'] })
+  await updateAdminModel('admin', 'builtin', { publicDescription: '站点自定义介绍', publicFeatures: ['自定义特性'] })
+  expect((await getAdminModelManagement()).models[0]).toMatchObject({ publicDescription: '站点自定义介绍', publicFeatures: ['自定义特性'] })
+})
 it.each((['native', 'omit'] as const).flatMap(reasoningParameterMode => efforts.map(reasoningEffort => ({ reasoningParameterMode, reasoningEffort }))))('roundtrips declared builtin $reasoningParameterMode $reasoningEffort capabilities into Agent and auxiliary HTTP bodies', async ({ reasoningParameterMode, reasoningEffort }) => {
   await updateAdminModel('admin', 'builtin', { reasoningParameterMode, outputTokenParameter: 'max_completion_tokens', thinkingEnabled: false, reasoningEfforts: efforts })
   expect((await getAdminModelManagement()).models[0]).toMatchObject({ reasoningParameterMode, outputTokenParameter: 'max_completion_tokens', thinkingEnabled: false })
