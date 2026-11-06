@@ -8,9 +8,11 @@ import { useAdminQueryState } from '../../src/features/admin/admin-query-state'
 vi.mock('../../src/features/admin/admin-shared', async original => ({ ...await original<object>(), useAdminSession: () => ({ admin: { id: 'fixture-admin', nickname: '演示管理员', isSuperAdmin: true }, denied: false, isLoading: false }) }))
 vi.mock('../../src/components/ui/toast-context', () => ({ useToast: () => ({ error: vi.fn() }) }))
 afterEach(cleanup)
-it('maps all nineteen existing and added routes and searches only page/action definitions', () => {
-  expect(adminPages).toHaveLength(19)
-  expect(new Set(adminPages.map(page => page.to)).size).toBe(19)
+it('maps eighteen management routes with tester identity inside users and searches only page/action definitions', () => {
+  expect(adminPages).toHaveLength(18)
+  expect(new Set(adminPages.map(page => page.to)).size).toBe(18)
+  expect(adminPages.some(page => page.to === '/admin/testers')).toBe(false)
+  expect(searchAdminPages('测试员').map(page => page.to)).toContain('/admin/users')
   expect(searchAdminPages('协议').map(page => page.to)).toEqual(['/admin/content', '/admin/models'])
   expect(searchAdminPages('用户正文')).toEqual([])
 })

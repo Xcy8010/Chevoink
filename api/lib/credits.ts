@@ -201,7 +201,7 @@ export async function ensureCreditAccount(userId: string, now = new Date()) {
   return ensureAccountWithDb(prisma, userId, now)
 }
 
-async function listPublicModelOptions(): Promise<CreditModelOption[]> {
+async function listPublicModelOptions(tester: boolean): Promise<CreditModelOption[]> {
   const configs = await prisma.aiModelConfig.findMany({
     where: { ownerUserId: null, tier: { not: null } },
     orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
@@ -213,7 +213,7 @@ async function listPublicModelOptions(): Promise<CreditModelOption[]> {
     return { ...item, pricing: price ? presentLedgerPrice({ pricingVersion: price.version, rateCardId: price.rateCardId, rates: price.rates, v1CeilingBps: price.v1CeilingBps }).pricing : null }
   })
   return configs.flatMap((item) => {
-    if (item.archivedAt || !item.tier || !isBuiltInModelTier(item.tier)) return []
+    if (item.archivedAt || !item.tier || !isBuiltInModelTier(item.tier) || (!item.selectable && !(tester && testerModelSelectable(item.metadata)))) return []
     const capabilities = parseModelCapabilities(item.metadata, item.provider)
     // 0 倍率档对用户公示为免费：不列分项费率，历史费率卡不参与免费档结算。
     const multiplierBps = effectiveModelMultiplier(item)
@@ -222,7 +222,7 @@ async function listPublicModelOptions(): Promise<CreditModelOption[]> {
       tier: item.tier as CreditModelOption['tier'],
       label: item.displayName,
       freePromotion: multiplierBps === 0 ? readModelPromotion(item.metadata) : null,
-      available: item.enabled && item.selectable && isConfiguredBuiltIn(item),
+      available: item.enabled && isConfiguredBuiltIn(item),
       selectedByDefault: item.isDefault,
       ...capabilities,
     }]
@@ -299,7 +299,7 @@ async function toCreditSummary(
     globallyPaused: setting.globallyPaused,
     suspended: Boolean(account.suspendedAt) && !tester,
     tester: { eligible: tester, pauseExempt: tester, threshold: TESTER_CREDIT_RULE.thresholdMilli / 1000, target: TESTER_CREDIT_RULE.targetMilli / 1000, balanceBasis: TESTER_CREDIT_RULE.balanceBasis },
-    models: await listPublicModelOptions(),
+    models: await listPublicModelOptions(tester),
     archivedModelTiers: (await prisma.aiModelConfig.findMany({ where: { ownerUserId: null, archivedAt: { not: null } }, select: { tier: true, archivedAt: true } })).flatMap(row => row.archivedAt && row.tier ? [row.tier] : []),
   }
 }
@@ -627,6 +627,11 @@ export async function reserveTokenCredits(userId: string, usageId: string, input
   }
 }
 
+/** Missing metadata never grants tester-only selection. Public selection remains independent. */
+function testerModelSelectable(metadata: unknown): boolean {
+  return Boolean(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && 'testerSelectable' in metadata && metadata.testerSelectable === true)
+}
+
 export async function assertCreditAccess(userId: string, tier: CreditModelTier = 'speed', requireSelectable = true): Promise<void> {
   // Credits suspension controls platform-funded calls. BYOK ownership and model
   // availability are checked by getModelTierRuntime; account bans remain in auth.
@@ -636,10 +641,16 @@ export async function assertCreditAccess(userId: string, tier: CreditModelTier =
   if (account.suspendedAt && !await isEffectiveTester(prisma, userId)) {
     throw new DataAccessError(423, setting.globallyPaused ? 'CREDITS_GLOBALLY_PAUSED' : 'CREDITS_ACCOUNT_SUSPENDED', setting.globallyPaused ? '公测模型服务已由管理员暂停，请稍后再试。' : '当前账户的模型使用权限已暂停。')
   }
-  const model = await prisma.aiModelConfig.findFirst({
+  let model = await prisma.aiModelConfig.findFirst({
     where: { ownerUserId: null, tier, archivedAt: null, enabled: true, ...(requireSelectable ? { selectable: true } : {}) },
     select: { tier: true, modelName: true, baseUrl: true, apiKeyCiphertext: true, multiplierBps: true, metadata: true },
   })
+  if (!model && requireSelectable && await isEffectiveTester(prisma, userId)) {
+    model = await prisma.aiModelConfig.findFirst({
+      where: { ownerUserId: null, tier, archivedAt: null, enabled: true, metadata: { path: ['testerSelectable'], equals: true } },
+      select: { tier: true, modelName: true, baseUrl: true, apiKeyCiphertext: true, multiplierBps: true, metadata: true },
+    })
+  }
   if (!model || !isConfiguredBuiltIn(model)) {
     const configuredModels = await prisma.aiModelConfig.count({ where: { ownerUserId: null } })
     // 仅兼容迁移尚未应用的旧库；只要已有模型配置，就严格服从 enabled/selectable。
@@ -674,7 +685,7 @@ export async function resolveAuxiliaryModelSelection(userId: string) {
   return { runtime, selection: { tier: runtime.tier, customModelId: custom?.id ?? null, reasoningEffort: runtime.reasoningEffort } }
 }
 
-export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userId?: string, customModelId?: string | null, requestedReasoningEffort?: ModelReasoningEffort, retained?: RetainedModelContext): Promise<{
+export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userId?: string, customModelId?: string | null, requestedReasoningEffort?: ModelReasoningEffort, retained?: RetainedModelContext, requireSelectable = false): Promise<{
   modelConfigId?: string
   modelConfigRevision?: number
   weightedRoutes?: WeightedRoutesStored
@@ -710,8 +721,11 @@ export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userI
   }
   if (!isServerModelTier(tier)) throw new DataAccessError(409, 'MODEL_TIER_UNAVAILABLE', '该模型档位尚未开放。')
   let config = await prisma.aiModelConfig.findFirst({
-    where: { ownerUserId: null, tier, archivedAt: null, enabled: true, ...(tier.startsWith('builtin_') ? { selectable: true } : {}) },
+    where: { ownerUserId: null, tier, archivedAt: null, enabled: true, ...(tier.startsWith('builtin_') || requireSelectable ? { selectable: true } : {}) },
   })
+  if (!config && !retained && (tier.startsWith('builtin_') || requireSelectable) && userId && await isEffectiveTester(prisma, userId)) {
+    config = await prisma.aiModelConfig.findFirst({ where: { ownerUserId: null, tier, archivedAt: null, enabled: true, metadata: { path: ['testerSelectable'], equals: true } } })
+  }
   if (retained && (!config || config.archivedAt || retained.modelConfigId && retained.modelConfigId !== config.id || retained.modelConfigRevision && retained.modelConfigRevision !== config.revision)) config = await resolveRetainedModelConfig(tier, retained)
   if (tier === 'basic' && !retained) {
     const originalRole = config ?? await prisma.aiModelConfig.findFirst({ where: { ownerUserId: null, tier } })

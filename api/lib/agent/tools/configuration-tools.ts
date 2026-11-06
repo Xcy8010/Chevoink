@@ -1,3 +1,4 @@
+import { isEffectiveTester } from '../../tester-entitlement.js'
 import { selectWeightedModelRuntime } from '../../model-weighted-routing.js'
 import { selectableModelTierSchema, isBuiltInModelTier } from '../../../../shared/contracts/model-tier.js'
 import { z } from 'zod'
@@ -36,7 +37,9 @@ export const modelListTool = defineTool({ name: 'model_list', title: '查看可�
     const windows = await (ctx.transaction ?? prisma).agentSession.findMany({ where: { userId: ctx.userId, status: 'active' },
       orderBy: { updatedAt: 'desc' }, take: 100, select: { id: true, novelId: true, title: true } })
     const windowConfigurations = await Promise.all(windows.map(window => getWindowConfiguration(ctx.userId, window.id, ctx.transaction ?? prisma)))
-    const rows = await (ctx.transaction ?? prisma).aiModelConfig.findMany({ where: { enabled: true, OR: [{ ownerUserId: ctx.userId }, { ownerUserId: null, selectable: true, tier: { not: null } }] },
+    const tester = await isEffectiveTester(ctx.transaction ?? prisma, ctx.userId)
+    const rows = await (ctx.transaction ?? prisma).aiModelConfig.findMany({ where: { enabled: true, archivedAt: null, OR: [{ ownerUserId: ctx.userId },
+      { ownerUserId: null, tier: { not: null }, OR: [{ selectable: true }, ...(tester ? [{ metadata: { path: ['testerSelectable'], equals: true } }] : [])] }] },
       orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
       select: { id: true, tier: true, ownerUserId: true, displayName: true, modelName: true, provider: true, metadata: true, baseUrl: true, apiKeyCiphertext: true } })
     return { output: JSON.stringify({ models: rows.filter(row => (row.ownerUserId || isBuiltInModelTier(row.tier)) && row.modelName !== 'unconfigured' && (row.tier === 'speed' || Boolean(row.baseUrl && row.apiKeyCiphertext))).map(row => ({ modelTier: row.ownerUserId ? 'custom' : row.tier, ...(row.ownerUserId ? { customModelId: row.id } : {}),
@@ -75,7 +78,7 @@ export async function configureAgent(ctx: ToolContext, args: ConfigureArgs) {
     : window.configuration.model ?? inherited ?? { modelTier: 'speed' as const }
   const selection = args.model ? { ...args.model, reasoningEffort: args.reasoningEffort ?? args.model.reasoningEffort }
     : args.reasoningEffort ? agentModelSelectionSchema.parse({ ...targetModel, reasoningEffort: args.reasoningEffort }) : undefined
-  const chosen = selection ? await (appliesToRun ? admitAssignedModel : resolveAssignedModel)(ctx.userId, selection) : undefined
+  const chosen = selection ? await (appliesToRun ? admitAssignedModel(ctx.userId, selection) : resolveAssignedModel(ctx.userId, selection, false, true)) : undefined
   const requestHash = runtimeJson(args).hash
   const apply = async (tx: Prisma.TransactionClient) => {
     const current = await lockOwnedRun(tx, ctx.userId, ctx.runId)

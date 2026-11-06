@@ -77,16 +77,16 @@ describe.skipIf(!available)('tester entitlement real isolated PostgreSQL',()=>{
   expect(refund.deltaMilli).toBe(-original.deltaMilli)
   expect(refund.metadata).toMatchObject({originalEntryId:original.id})
  })
- it('audits grants/revocation idempotently and never accepts ordinary admin or self-declaration',async()=>{
-  const actor=await user(false,true),target=await user(),ordinaryAdmin=await user()
+ it('audits ordinary-admin grants/revocation idempotently and refuses user self-declaration',async()=>{
+  const target=await user(),ordinaryAdmin=await user()
   await prisma.user.update({where:{id:ordinaryAdmin},data:{role:'admin'}})
   const input={enabled:true,reason:'合成资格变更',expiresAt:null,expectedRevision:0,operationId:randomUUID()}
-  await expect(updateTester(ordinaryAdmin,target,input,null)).rejects.toMatchObject({code:'SUPER_ADMIN_REQUIRED'})
-  expect(await updateTester(actor,target,input,null)).toMatchObject({revision:1,replayed:false})
-  expect(await updateTester(actor,target,input,null)).toMatchObject({revision:1,replayed:true})
-  await expect(updateTester(actor,target,{...input,enabled:false},null)).rejects.toMatchObject({code:'TESTER_OPERATION_CONFLICT'})
+  await expect(updateTester(target,target,input,null)).rejects.toMatchObject({code:'ADMIN_REQUIRED'})
+  expect(await updateTester(ordinaryAdmin,target,input,null)).toMatchObject({revision:1,replayed:false})
+  expect(await updateTester(ordinaryAdmin,target,input,null)).toMatchObject({revision:1,replayed:true})
+  await expect(updateTester(ordinaryAdmin,target,{...input,enabled:false},null)).rejects.toMatchObject({code:'TESTER_OPERATION_CONFLICT'})
   await setCreditsGloballyPaused(true)
-  await updateTester(actor,target,{enabled:false,reason:'撤销合成资格',expiresAt:null,expectedRevision:1,operationId:randomUUID()},null)
+  await updateTester(ordinaryAdmin,target,{enabled:false,reason:'撤销合成资格',expiresAt:null,expectedRevision:1,operationId:randomUUID()},null)
   expect(await isEffectiveTester(prisma,target)).toBe(false)
   await expect(debit(target,'image:'+randomUUID())).rejects.toMatchObject({code:'CREDITS_GLOBALLY_PAUSED'})
  })

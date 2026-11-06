@@ -32,6 +32,8 @@ import type {
   AdminUserFavoriteNovelRow,
   AdminUserFollowRow,
   AdminUserRow,
+  AdminUserIdentityInput,
+  AdminUserIdentityResult,
   AgentBlindReviewAssignment,
   AgentBlindReviewSubmission,
   CorpusDocumentImport,
@@ -168,7 +170,7 @@ export function updateAdminModel(modelId: string, payload: {
   routes?: import('../../../shared/contracts/model-routes').ModelRouteInput[]
   weightedRoutes?: import('../../../shared/contracts/model-weighted-routes').WeightedRoutesInput
   provider?: string; displayName?: string; modelName?: string; baseUrl?: string | null; apiKey?: string
-  multiplier?: number; enabled?: boolean; selectable?: boolean; isDefault?: boolean
+  multiplier?: number; enabled?: boolean; selectable?: boolean; testerSelectable?: boolean; isDefault?: boolean
   reasoningParameterMode?: 'native' | 'omit' | null
   outputTokenParameter?: 'max_tokens' | 'max_completion_tokens' | null
   thinkingEnabled?: boolean | null
@@ -328,6 +330,10 @@ export function unbanAdminUser(userId: string): Promise<{ ok: boolean }> {
 
 export function setAdminUserRole(userId: string, role: 'user' | 'admin'): Promise<{ ok: boolean }> {
   return requestJson(`/api/admin/users/${userId}/role`, { method: 'POST', body: JSON.stringify({ role }) })
+}
+
+export function updateAdminUserIdentity(userId: string, input: AdminUserIdentityInput): Promise<AdminUserIdentityResult> {
+  return requestJson('/api/admin/users/' + encodeURIComponent(userId) + '/identity', { method: 'PUT', body: JSON.stringify(input) })
 }
 
 export function resetAdminUserPassword(userId: string): Promise<{ tempPassword: string }> {

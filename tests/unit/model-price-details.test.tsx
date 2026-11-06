@@ -4,136 +4,93 @@ import { afterEach, expect, it, vi } from 'vitest'
 import userEvent from '@testing-library/user-event'
 import { formatModelPrice, modelPriceOptionText } from '../../shared/model-price-format'
 import { ModelPriceDetails, ModelPriceSummary } from '../../src/features/studio/components/ModelPriceDetails'
-
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
-
-it('shows precise public prices and opens independent details by hover, focus and click', () => {
+const model = { tier: 'speed' as const, label: '浮层模型', multiplier: 0.125, baseMultiplier: 1, available: true, selectedByDefault: false,
+  reasoningEfforts: ['high' as const], defaultReasoningEffort: 'high' as const, visionEnabled: false }
+const card = () => screen.getByLabelText('浮层模型模型卡片')
+it('shows precise public details on the original whole row hover and focus without an info control', () => {
   vi.useFakeTimers()
   const select = vi.fn()
-  render(<div onClick={select}><ModelPriceDetails model={{ tier: 'speed', label: '轻盈', multiplier: 0.125, baseMultiplier: 1.5, discountRatio: 1 / 12, publicDescription: '适合构思', publicFeatures: ['长篇'],
+  render(<ModelPriceDetails model={{ ...model, baseMultiplier: 1.5, discountRatio: 1 / 12, publicDescription: '适合构思', publicFeatures: ['长篇'],
     activity: { name: '夜间活动', revision: 1, timezone: 'Asia/Shanghai', asOf: '2026-11-06T12:00:00Z', nextSwitchAt: null, rules: [] },
-    available: true, selectedByDefault: false, reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'high', visionEnabled: true }} /></div>)
-  const summary = screen.getByLabelText('轻盈价格与能力详情'), details = summary.closest('details')!
+    reasoningEfforts: ['low', 'high'], visionEnabled: true,
+    basePricing: {inputPerMillion:110,cachePerMillion:27.5,outputPerMillion:1100},
+    pricing: {version:'credits-v2-itemized',rateCardId:'fixture-price',inputPerMillion:110,cachePerMillion:27.5,outputPerMillion:1100} }}><button onClick={select}>选择模型</button></ModelPriceDetails>)
+  expect(card().querySelector('svg, summary')).toBeNull()
   expect(formatModelPrice(0.125)).toBe('0.125')
-  fireEvent.mouseEnter(details); expect(details.open).toBe(true)
-  fireEvent.mouseLeave(details); act(() => vi.advanceTimersByTime(160)); expect(details.open).toBe(false)
-  fireEvent.focus(summary); expect(details.open).toBe(true)
-  fireEvent.blur(details, { relatedTarget: null }); expect(details.open).toBe(false)
-  fireEvent.click(summary); expect(details.open).toBe(true)
-  expect(select).not.toHaveBeenCalled()
+  fireEvent.mouseEnter(card()); expect(screen.getByRole('tooltip')).toBeTruthy()
   expect(screen.getByText('1.5x', { selector: 's' })).toBeTruthy()
   expect(screen.getByText('0.125x')).toBeTruthy()
   expect(screen.getAllByText(/夜间活动/).length).toBeGreaterThan(0)
   expect(screen.getByText('适合构思')).toBeTruthy()
   expect(screen.getByText(/思考强度：low、high/)).toBeTruthy()
+  expect(screen.getByRole('tooltip').textContent).not.toMatch(/基础价格|当前价格|当前计价|图片输入|百万 Token|fixture-price/)
+  fireEvent.mouseLeave(card()); act(() => vi.advanceTimersByTime(160)); expect(screen.queryByRole('tooltip')).toBeNull()
+  act(() => screen.getByRole('button', { name: '选择模型' }).focus()); expect(screen.getByRole('tooltip')).toBeTruthy()
+  fireEvent.blur(card(), { relatedTarget: null }); expect(screen.queryByRole('tooltip')).toBeNull()
+  expect(select).not.toHaveBeenCalled()
 })
-
 it('keeps precise free activity and legacy free promotion labels', () => {
-  const model = { tier: 'speed' as const, label: '免费模型', multiplier: 0, baseMultiplier: 1.5, available: true, selectedByDefault: false,
-    reasoningEfforts: ['high' as const], defaultReasoningEffort: 'high' as const, visionEnabled: false,
+  const free = { ...model, label: '免费模型', multiplier: 0, baseMultiplier: 1.5,
     activity: { name: '周末免费', revision: 2, timezone: 'Asia/Shanghai' as const, asOf: '2026-11-06T12:00:00Z', nextSwitchAt: null, rules: [] } }
-  render(<ModelPriceSummary model={model} />)
-  expect(screen.getByText('周末免费')).toBeTruthy()
-  expect(screen.getByText('1.5x', { selector: 's' })).toBeTruthy()
-  expect(screen.getByText('0x')).toBeTruthy()
-  expect(modelPriceOptionText(model)).toBe('周末免费 · 原1.5x → 免费')
-  expect(modelPriceOptionText({ ...model, activity: null, freePromotion: { endsAt: '2026-11-07T00:00:00Z', afterMultiplier: 1.5 } })).toBe('限时免费')
+  render(<ModelPriceSummary model={free} />)
+  expect(screen.getByText('周末免费')).toBeTruthy(); expect(screen.getByText('1.5x', { selector: 's' })).toBeTruthy(); expect(screen.getByText('0x')).toBeTruthy()
+  expect(modelPriceOptionText(free)).toBe('周末免费 · 原1.5x → 免费')
+  expect(modelPriceOptionText({ ...free, activity: null, freePromotion: { endsAt: '2026-11-07T00:00:00Z', afterMultiplier: 1.5 } })).toBe('限时免费')
 })
-
-const floatingModel = { tier: 'speed' as const, label: '浮层模型', multiplier: 0.125, baseMultiplier: 1, available: true, selectedByDefault: false,
-  reasoningEfforts: ['high' as const], defaultReasoningEffort: 'high' as const, visionEnabled: false }
-it.each([{ width: 1440, height: 1000, left: 850, top: 715 }, { width: 390, height: 844, left: 346, top: 526.67 }])(
-  'fits a full-height price detail above the observed bottom anchor at $width by $height', ({ width, height, left, top }) => {
+it.each([{ width: 1440, height: 1000, left: 850, top: 715, rowWidth: 226 }, { width: 390, height: 844, left: 12, top: 526.67, rowWidth: 366 }])(
+  'keeps the row detail inside the viewport at $width by $height', ({ width, height, left, top, rowWidth }) => {
     vi.stubGlobal('innerWidth', width); vi.stubGlobal('innerHeight', height)
-    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ left, right: left + 32, top, bottom: top + 32, width: 32, height: 32 } as DOMRect)
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ left, right: left + rowWidth, top, bottom: top + 40, width: rowWidth, height: 40 } as DOMRect)
     vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(318)
-    render(<ModelPriceDetails model={floatingModel} />)
-    fireEvent.mouseEnter(screen.getByLabelText('浮层模型价格与能力详情').closest('details')!)
+    render(<ModelPriceDetails model={model} />); fireEvent.mouseEnter(card())
     const tooltip = screen.getByRole('tooltip')
-    expect(tooltip.parentElement).toBe(document.body)
-    expect(tooltip.style.position || getComputedStyle(tooltip).position).toBe('fixed')
-    expect(tooltip.style.transform).toBe('translateY(-100%)')
-    expect(Number.parseFloat(tooltip.style.top) - Number.parseFloat(tooltip.style.maxHeight)).toBeGreaterThanOrEqual(8)
-    expect(Number.parseFloat(tooltip.style.top)).toBeLessThanOrEqual(height - 8)
+    expect(tooltip.parentElement).toBe(document.body); expect(tooltip.style.position).toBe('fixed')
+    expect(Number.parseFloat(tooltip.style.top)).toBeGreaterThanOrEqual(8)
+    expect(Number.parseFloat(tooltip.style.top) + Math.min(320, height - 16)).toBeLessThanOrEqual(height - 8)
     expect(Number.parseFloat(tooltip.style.left)).toBeGreaterThanOrEqual(8)
     expect(Number.parseFloat(tooltip.style.left) + Number.parseFloat(tooltip.style.width)).toBeLessThanOrEqual(width - 8)
+    if (width === 390) expect(Number.parseFloat(tooltip.style.top) + Number.parseFloat(tooltip.style.maxHeight)).toBeLessThanOrEqual(top - 10)
   })
-it('keeps a native-dialog tooltip inside the top layer and limits it when both sides are short', () => {
+it('keeps native-dialog details in the top layer and clamps a short viewport on resize', () => {
   vi.stubGlobal('innerWidth', 320); vi.stubGlobal('innerHeight', 240)
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ left: 280, right: 312, top: 100, bottom: 132, width: 32, height: 32 } as DOMRect)
   vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(318)
-  render(<dialog open aria-label="移动模型"><ModelPriceDetails model={floatingModel} /></dialog>)
-  const summary = screen.getByLabelText('浮层模型价格与能力详情')
-  fireEvent.click(summary)
+  render(<dialog open aria-label="移动模型"><ModelPriceDetails model={model} /></dialog>); fireEvent.mouseEnter(card())
   const tooltip = screen.getByRole('tooltip')
   expect(tooltip.parentElement).toBe(screen.getByRole('dialog', { name: '移动模型' }))
   expect(Number.parseFloat(tooltip.style.top) + Number.parseFloat(tooltip.style.maxHeight)).toBeLessThanOrEqual(232)
-  fireEvent.resize(window)
-  expect(summary.closest('details')!.open).toBe(true)
+  fireEvent.resize(window); expect(screen.getByRole('tooltip')).toBeTruthy()
 })
-it('keeps hover and keyboard focus across the portal without selecting its owner', () => {
-  vi.useFakeTimers()
-  const select = vi.fn()
-  render(<div onClick={select}><ModelPriceDetails model={floatingModel} /></div>)
-  const summary = screen.getByLabelText('浮层模型价格与能力详情'), details = summary.closest('details')!
-  fireEvent.mouseEnter(details)
+it('keeps hover and focus across the portal, then Escape returns focus without selecting', () => {
+  vi.useFakeTimers(); const select = vi.fn()
+  render(<div onClick={select}><ModelPriceDetails model={model} /></div>); fireEvent.mouseEnter(card())
   const tooltip = screen.getByRole('tooltip')
-  fireEvent.mouseLeave(details, { relatedTarget: tooltip })
-  fireEvent.mouseEnter(tooltip)
-  act(() => vi.advanceTimersByTime(160))
-  expect(details.open).toBe(true)
-  fireEvent.click(tooltip)
-  expect(select).not.toHaveBeenCalled()
-  fireEvent.focus(tooltip)
-  fireEvent.blur(details, { relatedTarget: tooltip })
-  expect(details.open).toBe(true)
-  fireEvent.keyDown(window, { key: 'Escape' })
-  expect(details.open).toBe(false)
-  expect(document.activeElement).toBe(summary)
+  fireEvent.mouseLeave(card(), { relatedTarget: tooltip }); fireEvent.mouseEnter(tooltip); act(() => vi.advanceTimersByTime(160))
+  expect(screen.getByRole('tooltip')).toBeTruthy(); fireEvent.click(tooltip); expect(select).not.toHaveBeenCalled()
+  act(() => tooltip.focus()); fireEvent.blur(card(), { relatedTarget: tooltip }); expect(screen.getByRole('tooltip')).toBeTruthy()
+  fireEvent.keyDown(window, { key: 'Escape' }); expect(screen.queryByRole('tooltip')).toBeNull(); expect(document.activeElement).toBe(card())
 })
-
-it('keeps the first real mouse click open after hover and focus inside a native dialog', async () => {
+it('selects the row on the first real mouse click and leaves reasoning edit independent', async () => {
+  const user = userEvent.setup(), selected = vi.fn(), edit = vi.fn()
+  render(<dialog open><ModelPriceDetails model={model}><button onClick={selected}>选择模型</button><button onClick={edit}>编辑思考强度</button></ModelPriceDetails></dialog>)
+  await user.hover(screen.getByRole('button', { name: '选择模型' })); expect(screen.getByRole('tooltip').closest('dialog')).toBe(screen.getByRole('dialog'))
+  await user.click(screen.getByRole('button', { name: '选择模型' })); expect(selected).toHaveBeenCalledOnce(); expect(screen.queryByRole('tooltip')).toBeNull()
+  await user.click(screen.getByRole('button', { name: '编辑思考强度' })); expect(edit).toHaveBeenCalledOnce(); expect(selected).toHaveBeenCalledOnce()
+})
+it('selects with one touch tap without a details icon intercepting it', async () => {
   const user = userEvent.setup(), selected = vi.fn()
-  render(<dialog open><div onClick={selected}><ModelPriceDetails model={floatingModel} /></div></dialog>)
-  const summary = screen.getByLabelText('浮层模型价格与能力详情')
-  const order: string[] = []
-  for (const type of ['mouseover', 'focus', 'click']) summary.addEventListener(type, () => order.push(type))
-  await user.click(summary)
-  expect(order).toEqual(['mouseover', 'focus', 'click'])
-  expect(screen.getByRole('tooltip').closest('dialog')).toBe(screen.getByRole('dialog'))
-  expect(summary.getAttribute('aria-expanded')).toBe('true')
-  expect(selected).not.toHaveBeenCalled()
-  await user.click(summary)
-  expect(screen.queryByRole('tooltip')).toBeNull()
-  expect(selected).not.toHaveBeenCalled()
+  render(<dialog open><ModelPriceDetails model={model}><button onClick={selected}>选择模型</button></ModelPriceDetails></dialog>)
+  const button = screen.getByRole('button', { name: '选择模型' })
+  await user.pointer([{ keys: '[TouchA>]', target: button }, { keys: '[/TouchA]', target: button }])
+  expect(selected).toHaveBeenCalledOnce(); expect(screen.queryByRole('tooltip')).toBeNull()
 })
-
-it('opens and closes native-dialog details with real touch taps without selecting the model', async () => {
-  const user = userEvent.setup(), selected = vi.fn()
-  render(<dialog open><div onClick={selected}><ModelPriceDetails model={floatingModel} /></div></dialog>)
-  const summary = screen.getByLabelText('浮层模型价格与能力详情')
-  const tap = async () => { await user.pointer([{ keys: '[TouchA>]', target: summary }, { keys: '[/TouchA]', target: summary }]) }
-  await tap()
-  expect(screen.getByRole('tooltip').closest('dialog')).toBe(screen.getByRole('dialog'))
-  expect(selected).not.toHaveBeenCalled()
-  await tap()
-  expect(screen.queryByRole('tooltip')).toBeNull()
-  expect(selected).not.toHaveBeenCalled()
-})
-it('keeps keyboard focus preview and Escape while outside dismissal resets the next explicit click', async () => {
+it('supports keyboard preview, Escape, outside dismissal and reopening by hover', async () => {
   const user = userEvent.setup()
-  render(<><ModelPriceDetails model={floatingModel} /><button type="button">外部</button></>)
-  const summary = screen.getByLabelText('浮层模型价格与能力详情')
-  await user.tab()
-  expect(document.activeElement).toBe(summary)
-  expect(screen.getByRole('tooltip')).toBeTruthy()
-  await user.keyboard('{Escape}')
-  expect(screen.queryByRole('tooltip')).toBeNull()
-  expect(document.activeElement).toBe(summary)
-  await user.click(summary)
-  expect(screen.getByRole('tooltip')).toBeTruthy()
-  await user.click(screen.getByRole('button', { name: '外部' }))
-  expect(screen.queryByRole('tooltip')).toBeNull()
-  await user.click(summary)
-  expect(screen.getByRole('tooltip')).toBeTruthy()
+  render(<><ModelPriceDetails model={model} /><button>外部</button></>); await user.tab()
+  expect(document.activeElement).toBe(card()); expect(screen.getByRole('tooltip')).toBeTruthy()
+  await user.keyboard('{Escape}'); expect(screen.queryByRole('tooltip')).toBeNull(); expect(document.activeElement).toBe(card())
+  await user.hover(card()); expect(screen.getByRole('tooltip')).toBeTruthy()
+  await user.click(screen.getByRole('button', { name: '外部' })); expect(screen.queryByRole('tooltip')).toBeNull()
+  await user.hover(card()); expect(screen.getByRole('tooltip')).toBeTruthy()
 })

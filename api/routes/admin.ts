@@ -1,3 +1,5 @@
+import { userIdentityUpdateSchema } from '../../shared/contracts/tester.js'
+import { updateUserIdentity } from '../lib/tester-entitlement.js'
 import { modelActivitiesSchema } from '../../shared/model-activity.js'
 import { setPublicBetaEnabled } from '../lib/credit-policy.js'
 import { getAdminYunshuModelUsage, getAdminYunshuOperations } from '../lib/admin-yunshu-usage.js'
@@ -217,6 +219,7 @@ const adminModelUpdateSchema = z.object({
   multiplier: z.number().min(0).max(100).refine(value => Math.abs(value * 10000 - Math.round(value * 10000)) < 0.000001, '倍率最多四位小数').optional(),
   enabled: z.boolean().optional(),
   selectable: z.boolean().optional(),
+  testerSelectable: z.boolean().optional(),
   isDefault: z.boolean().optional(),
   reasoningParameterMode: z.enum(['native', 'omit']).nullable().optional(),
   outputTokenParameter: z.enum(['max_tokens', 'max_completion_tokens']).nullable().optional(),
@@ -607,6 +610,15 @@ router.post('/users/:userId/unban', async (req: Request, res: Response): Promise
   } catch (error) {
     sendRouteError(res, requestId, error)
   }
+})
+
+router.put('/users/:userId/identity', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try {
+    const admin = await requireAdmin(req)
+    const input = parseBody(userIdentityUpdateSchema, req.body, '请核对身份、资格变更原因和有效期。')
+    res.status(200).json(buildSuccess(requestId, await updateUserIdentity(admin.id, req.params.userId, input, getRequestIp(req))))
+  } catch (error) { sendRouteError(res, requestId, error) }
 })
 
 router.post('/users/:userId/role', async (req: Request, res: Response): Promise<void> => {

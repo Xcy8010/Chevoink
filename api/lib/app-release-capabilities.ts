@@ -13,15 +13,16 @@ export async function appReleaseCapabilityGuard(req:Request,res:Response,next:Ne
  const path=rawPath.toLowerCase()
  const capabilities:AppReleaseCapability[]=[]
  const adminContent=/^\/admin\/site-content(?:\/|$)/.test(path),publicContent=/^\/site-content(?:\/|$)/.test(path),testers=/^\/admin\/testers(?:\/|$)/.test(path)
+ const identityTesterWrite=req.method==='PUT'&&/^\/admin\/users\/[^/]+\/identity$/.test(path)&&Boolean(req.body&&typeof req.body==='object'&&'tester'in req.body)
  const modelWrite=['POST','PATCH','PUT'].includes(req.method)&&/^\/admin\/models(?:\/[^/]+)?$/.test(path)
  const summary=req.method==='GET'&&path==='/credits/summary'
- if(!adminContent&&!publicContent&&!testers&&!modelWrite&&!summary){next();return}
+ if(!adminContent&&!publicContent&&!testers&&!identityTesterWrite&&!modelWrite&&!summary){next();return}
  const requestId=createRequestId()
  try{
-  if(adminContent||testers||modelWrite)await requireAdmin(req)
+  if(adminContent||testers||identityTesterWrite||modelWrite)await requireAdmin(req)
   if(summary)requireSessionUserId(req)
   if(adminContent||publicContent)capabilities.push('siteContent')
-  if(testers)capabilities.push('testerManagement')
+  if(testers||identityTesterWrite)capabilities.push('testerManagement')
   if(modelWrite&&req.body&&typeof req.body==='object'&&!Array.isArray(req.body)){
    const body=req.body as Record<string,unknown>
    let image=body.modelKind==='image_generation'

@@ -17,7 +17,7 @@ import { clearAdminModelHistoryDrafts } from './components/AdminModelDraftRecove
 
 let draftSessionOwner: string | null = null
 const scrollPositions = new Map<string, number>()
-const pageIcons: Record<string, typeof Users> = { '/admin/content': FileText, '/admin/site-settings': Settings, '/admin/testers': Users, '/admin/app-releases': Workflow, '/admin/users': Users, '/admin/credits': CreditCard, '/admin/novels': BookOpen, '/admin/posts': MessageSquare, '/admin/comments': MessageSquare, '/admin/feedback': MessageSquare, '/admin/messages': MessageSquare, '/admin/creation-records': Activity, '/admin/evals': Activity, '/admin/craft': FileText, '/admin/models': Workflow, '/admin/tokens': Activity, '/admin/settings': Settings, '/admin/logs': Shield }
+const pageIcons: Record<string, typeof Users> = { '/admin/content': FileText, '/admin/site-settings': Settings, '/admin/app-releases': Workflow, '/admin/users': Users, '/admin/credits': CreditCard, '/admin/novels': BookOpen, '/admin/posts': MessageSquare, '/admin/comments': MessageSquare, '/admin/feedback': MessageSquare, '/admin/messages': MessageSquare, '/admin/creation-records': Activity, '/admin/evals': Activity, '/admin/craft': FileText, '/admin/models': Workflow, '/admin/tokens': Activity, '/admin/settings': Settings, '/admin/logs': Shield }
 const mobileItems = [
   { to: '/admin', label: '总览', icon: LayoutDashboard },
   { to: '/admin/users', label: '用户', icon: Users },
@@ -162,7 +162,7 @@ export function AdminPageHeader({ title, description, extra }: { title: string; 
 
 export function AdminCard({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <section className={cn('admin-section min-w-0 py-4', className)}>
+    <section className={cn('admin-section min-w-0', className)}>
       {children}
     </section>
   )
@@ -243,7 +243,7 @@ export function AdminPager({
   }
 
   return (
-    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--border-default)] pt-3">
+    <div className="admin-pager mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--border-default)] pt-3">
       <p className="text-xs text-[var(--text-secondary)]">共 {pagination.total} 条</p>
       <div className="flex flex-wrap items-center gap-3">
         <label className="flex items-center gap-1.5 text-xs text-[var(--text-secondary)]">
@@ -367,7 +367,7 @@ export function AdminConfirmDialog({
   const blocked = confirmText !== undefined && typed.trim() !== confirmText
 
   return (
-    <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-labelledby={titleId} ref={dialogRef} tabIndex={-1}>
+    <div className="admin-portal fixed inset-0 z-[130] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-labelledby={titleId} ref={dialogRef} tabIndex={-1}>
       <div className="w-full max-w-md rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-5">
         <h3 id={titleId} className="text-base font-semibold">{title}</h3>
         <div className="mt-2 text-sm text-[var(--text-secondary)]">{description}</div>

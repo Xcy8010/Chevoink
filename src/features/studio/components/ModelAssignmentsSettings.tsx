@@ -96,7 +96,7 @@ export default function ModelAssignmentsSettings({ novelId, novelTitle }: { nove
     </div>
     {error ? <p role="alert" className="text-sm text-rose-500">{error}</p> : null}
     {assignments.isPending ? <p role="status" className="text-sm text-[var(--text-secondary)]">加载中…</p> : null}
-    <details><summary className="cursor-pointer py-2 text-sm">内置模型价格与能力</summary><div className="space-y-1">{(models.data?.models ?? []).filter(model => model.available).map(model => <div key={model.tier} className="flex items-center justify-between text-sm"><span>{model.label} · <ModelPriceSummary model={model} /></span><ModelPriceDetails model={model} /></div>)}</div></details>
+    <details><summary className="cursor-pointer py-2 text-sm">内置模型价格与能力</summary><div className="space-y-1">{(models.data?.models ?? []).filter(model => model.available).map(model => <ModelPriceDetails key={model.tier} model={model} className="rounded-lg px-3 py-2 hover:bg-[var(--surface-muted)]"><span tabIndex={0} className="flex items-center justify-between gap-3 text-sm"><span>{model.label}</span><ModelPriceSummary model={model} /></span></ModelPriceDetails>)}</div></details>
     <div>{MODEL_ASSIGNMENT_TASKS.slice(0, 6).map(row)}</div>
     <details><summary className="cursor-pointer py-2 text-sm text-[var(--text-secondary)]">其它工具</summary><div>{MODEL_ASSIGNMENT_TASKS.slice(6).map(row)}</div></details>
     <Button disabled={!ready || !draft || busy} onClick={() => void save()}>{busy ? '保存中…' : '保存'}</Button>

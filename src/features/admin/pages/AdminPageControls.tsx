@@ -7,6 +7,6 @@ export function AdminCommunityTabs() {
   </nav>
 }
 
-export function AdminRowActions({ children, label = '更多操作' }: { children: ReactNode; label?: string }) {
-  return <details className="relative" onKeyDown={event => { if (event.key === 'Escape') { event.currentTarget.open = false; event.currentTarget.querySelector('summary')?.focus() } }}><summary className="flex min-h-11 cursor-pointer items-center justify-center rounded-lg border border-[var(--border-default)] px-3 text-sm">{label}</summary><div className="mt-2 flex min-w-36 flex-col gap-2 rounded-lg border border-[var(--border-default)] bg-[var(--surface-default)] p-2">{children}</div></details>
+export function AdminRowActions({ children, label = '行操作' }: { children: ReactNode; label?: string }) {
+  return <div role="group" aria-label={label} className="admin-row-actions">{children}</div>
 }

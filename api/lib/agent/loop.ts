@@ -1063,7 +1063,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       // Historical runs keep their known consumption, without inventing earned slices.
       checkpointRestored = true
     }
-    let modelRuntime = selectWeightedModelRuntime(await getModelTierRuntime(params.modelTier ?? 'speed', params.userId, params.customModelId, params.reasoningEffort))
+    let modelRuntime = selectWeightedModelRuntime(await getModelTierRuntime(params.modelTier ?? 'speed', params.userId, params.customModelId, params.reasoningEffort,
+      { userId: params.userId, runId, modelConfigId: storedRun.modelConfigId, modelConfigRevision: storedRun.modelConfigRevision }))
     let runtimeModelName = modelRuntime.modelName ?? agent.model
     assertTaskAuthorizationRuntimeReady(storedRun.taskSpec, { userId: params.userId, sessionId: params.sessionId, novelId: params.novelId })
     await prisma.agentSession.update({

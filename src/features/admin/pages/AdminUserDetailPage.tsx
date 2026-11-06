@@ -1,3 +1,4 @@
+import AdminUserIdentityDialog from '../components/AdminUserIdentityDialog'
 import { AdminRowActions } from './AdminPageControls'
 import { Link, useLocation, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -6,7 +7,7 @@ import { ArrowLeft } from 'lucide-react'
 import Button from '@/components/ui/Button'
 import { useToast } from '@/components/ui/toast-context'
 import { ApiClientError } from '@/app/api-client'
-import { banAdminUser, getAdminUserDetail, resetAdminUserPassword, setAdminUserRole, unbanAdminUser } from '../api'
+import { banAdminUser, getAdminUserDetail, resetAdminUserPassword, unbanAdminUser } from '../api'
 import { AdminCard, AdminConfirmDialog, AdminPanelState, StatusPill } from '../AdminLayout'
 import { formatDateTime, formatTokens, useAdminSession } from '../admin-shared'
 import { useState } from 'react'
@@ -24,7 +25,7 @@ export default function AdminUserDetailPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
   const { admin } = useAdminSession()
-  const isSuperAdmin = Boolean(admin?.isSuperAdmin)
+  const [showIdentity,setShowIdentity] = useState(false)
   const [showBanDialog, setShowBanDialog] = useState(false)
   const [showResetDialog, setShowResetDialog] = useState(false)
   const [tempPassword, setTempPassword] = useState<string | null>(null)
@@ -67,15 +68,6 @@ export default function AdminUserDetailPage() {
     onError: (error) => toast.error(error instanceof ApiClientError ? error.message : '重置失败'),
   })
 
-  const roleMutation = useMutation({
-    mutationFn: (nextRole: 'user' | 'admin') => setAdminUserRole(userId, nextRole),
-    onSuccess: () => {
-      toast.success('角色已更新')
-      invalidate()
-    },
-    onError: (error) => toast.error(error instanceof ApiClientError ? error.message : '角色更新失败'),
-  })
-
   const detail = query.data
   const user = detail?.user
 
@@ -109,7 +101,7 @@ export default function AdminUserDetailPage() {
                       )}
                     </div>
                     <p className="mt-0.5 text-sm text-[var(--text-secondary)]">
-                      {ROLE_LABELS[user.role] ?? user.role}
+                      {user.isSuperAdmin?'超级管理员':ROLE_LABELS[user.role] ?? user.role}{user.tester?.effective||user.isSuperAdmin?<span className="ml-2 text-xs text-[var(--color-success)]">测试员</span>:null}
                       {user.bio ? <span className="mx-1.5">·</span> : null}
                       {user.bio ?? ''}
                     </p>
@@ -123,20 +115,7 @@ export default function AdminUserDetailPage() {
                   >
                     创作记录
                   </Link>
-                  <AdminRowActions label="账户管理">{isSuperAdmin && user.id !== admin?.id ? (
-                    <label className="flex items-center gap-1.5 text-xs text-[var(--text-secondary)]">
-                      身份
-                      <select
-                        value={user.role === 'admin' ? 'admin' : 'user'}
-                        disabled={roleMutation.isPending}
-                        onChange={(event) => roleMutation.mutate(event.target.value as 'user' | 'admin')}
-                        className="rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] px-2 py-1 text-xs text-[var(--text-primary)] outline-none"
-                      >
-                        <option value="user">用户</option>
-                        <option value="admin">管理</option>
-                      </select>
-                    </label>
-                  ) : null}
+                  <AdminRowActions label="账户管理"><Button onClick={()=>setShowIdentity(true)}>编辑身份</Button>
                   {user.role !== 'admin' ? (
                     <>
                       {user.bannedAt ? (
@@ -211,6 +190,7 @@ export default function AdminUserDetailPage() {
         ) : null}
       </AdminPanelState>
 
+      {showIdentity&&user?<AdminUserIdentityDialog key={user.id} user={user} adminId={admin?.id ?? ""} isSuperAdmin={Boolean(admin?.isSuperAdmin)} onClose={()=>setShowIdentity(false)} onSaved={()=>{invalidate();setShowIdentity(false);toast.success("身份已更新")}}/>:null}
       <AdminConfirmDialog
         open={showBanDialog}
         title="封禁用户"

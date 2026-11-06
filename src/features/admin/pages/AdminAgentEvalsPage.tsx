@@ -165,13 +165,14 @@ export default function AdminAgentEvalsPage() {
       </AdminCard> : null}
 
       {tab === 'suites' ? <AdminCard><h2 className="mb-3 text-sm font-semibold">套件列表</h2><AdminPanelState state={suitesQuery.isPending ? 'loading' : suitesQuery.isError ? 'error' : !suites.length ? 'empty' : 'ready'}><ul className="divide-y divide-[var(--border-default)]">{suites.map(suite => <li key={suite.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><p className="font-semibold">{suite.name}</p><p className="mt-1 text-sm text-[var(--text-secondary)]">{STATUS_LABELS[suite.status]} · {suite.sampleCount} 个样本 · {suite.reviewCount} 份评审</p><p className="mt-1 text-xs text-[var(--text-secondary)]">数据集 {suite.datasetVersion} · 量表 {suite.rubricVersion}</p></div><Button onClick={() => { setSelectedSuiteId(suite.id); setTab(suite.status === 'active' ? 'review' : suite.status === 'draft' && admin?.isSuperAdmin ? 'create' : admin?.isSuperAdmin ? 'results' : 'review') }}>查看套件</Button></li>)}</ul></AdminPanelState></AdminCard> : null}
-      <AdminCard>
+      {tab !== 'suites' ? <AdminCard>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-sm font-semibold">评测套件</h2>
             <p className="mt-1 text-xs text-[var(--text-secondary)]">激活后样本冻结；仅超级管理员可揭盲查看汇总。</p>
           </div>
           <select
+            aria-label="评测套件"
             value={selectedSuite?.id ?? ''}
             onChange={(event) => setSelectedSuiteId(event.target.value)}
             className={`${inputClass} w-full md:w-72`}
@@ -198,7 +199,7 @@ export default function AdminAgentEvalsPage() {
             </div>
           ) : null}
         </AdminPanelState>
-      </AdminCard>
+      </AdminCard> : null}
 
       {admin?.isSuperAdmin && selectedSuite?.status === 'draft' ? <div hidden={tab !== 'create'}><SampleCreator key={selectedSuite.id} suiteId={selectedSuite.id} /></div> : null}
 

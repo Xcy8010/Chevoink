@@ -55,7 +55,7 @@ it('locks background scrolling and restores it and focus when closed', () => {
   trigger.remove()
 })
 
-it('shows an active discount at narrow width while details leave selection and thinking unchanged', async () => {
+it('shows whole-card details at narrow width and selects with one touch tap without intercepting thinking', async () => {
   const user = userEvent.setup()
   const onTier = vi.fn(), onReasoning = vi.fn()
   render(<AgentMobileModelSheet modelOptions={[{ tier: 'speed', label: '极速', available: true, multiplier: 0.125, baseMultiplier: 1.5,
@@ -65,13 +65,21 @@ it('shows an active discount at narrow width while details leave selection and t
     activeReasoningEffort="high" activeReasoningEfforts={['low', 'high']} onTier={onTier} onCustom={vi.fn()} onReasoning={onReasoning} onSettings={vi.fn()} onClose={vi.fn()} />)
   const row = screen.getByRole('button', { name: /极速.*晚间优惠.*1.5x.*0.125x/ })
   expect(row.querySelector('s')?.textContent).toBe('1.5x')
-  await user.click(screen.getByLabelText('极速价格与能力详情'))
+  expect(screen.queryByLabelText('极速价格与能力详情')).toBeNull()
+  await user.hover(row)
   expect(screen.getByRole('tooltip').closest('dialog')).toBe(screen.getByRole('dialog'))
+  expect(screen.getByRole('tooltip').textContent).toContain('思考强度：low、high')
+  expect(screen.getByRole('tooltip').textContent).not.toContain('图片输入')
+  expect(screen.getByRole('tooltip').textContent).not.toContain('基础价格')
+  expect(screen.getByRole('tooltip').textContent).not.toContain('当前价格')
+  expect(screen.getByRole('tooltip').textContent).not.toContain('当前计价')
   expect(onTier).not.toHaveBeenCalled()
   expect(onReasoning).not.toHaveBeenCalled()
   expect(screen.getByRole('button', { name: /我的模型.*自有密钥/ })).toBeTruthy()
   fireEvent.change(screen.getByRole('slider', { name: '调整当前模型推理强度' }), { target: { value: '0' } })
   expect(onReasoning).toHaveBeenCalledWith('low')
-  fireEvent.click(row)
-  expect(onTier).toHaveBeenCalledWith('speed')
+  await user.pointer([{ keys: '[TouchA>]', target: row }, { keys: '[/TouchA]', target: row }])
+  expect(onTier).toHaveBeenCalledExactlyOnceWith('speed')
+  expect(onReasoning).toHaveBeenCalledTimes(1)
+  expect(screen.queryByRole('tooltip')).toBeNull()
 })

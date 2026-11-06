@@ -3,6 +3,7 @@
  * 由 data-access.ts 按域拆分而来（声明顺序与原文件一致）；
  * 本文件为 api/lib/data-access.ts 桶文件的重导出源，禁止绕过桶文件新增消费者。
  */
+import { presentTesterIdentity } from '../tester-entitlement.js'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import type {
@@ -56,6 +57,8 @@ export type AdminUserRow = {
   phone: string | null
   email: string | null
   role: string
+  isSuperAdmin?: boolean
+  tester?: import('../../../shared/contracts/tester.js').TesterIdentity
   bannedAt: string | null
   createdAt: string
   lastActiveAt: string | null
@@ -483,6 +486,8 @@ export async function listAdminUsersData(input: {
         phone: true,
         email: true,
         role: true,
+        isSuperAdmin: true,
+        testerEntitlement: true,
         bannedAt: true,
         createdAt: true,
         lastActiveAt: true,
@@ -500,6 +505,8 @@ export async function listAdminUsersData(input: {
     phone: record.phone,
     email: record.email,
     role: record.role,
+    isSuperAdmin: record.isSuperAdmin,
+    tester: presentTesterIdentity(record),
     bannedAt: toIso(record.bannedAt),
     createdAt: record.createdAt.toISOString(),
     lastActiveAt: toIso(record.lastActiveAt),
@@ -528,6 +535,8 @@ export async function getAdminUserDetailData(userId: string): Promise<{
       email: true,
       bio: true,
       role: true,
+      isSuperAdmin: true,
+      testerEntitlement: true,
       bannedAt: true,
       createdAt: true,
       lastActiveAt: true,
@@ -558,6 +567,8 @@ export async function getAdminUserDetailData(userId: string): Promise<{
       phone: record.phone,
       email: record.email,
       role: record.role,
+      isSuperAdmin: record.isSuperAdmin,
+      tester: presentTesterIdentity(record),
       bannedAt: toIso(record.bannedAt),
       createdAt: record.createdAt.toISOString(),
       lastActiveAt: toIso(record.lastActiveAt),

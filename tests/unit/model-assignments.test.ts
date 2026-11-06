@@ -82,3 +82,19 @@ describe('owned sparse model assignments', () => {
     expect(mocks.credit).not.toHaveBeenCalled()
   })
 })
+
+it('checks new standalone saved assignments while retaining the original frozen execution context', async () => {
+  const selection={modelTier:'standard' as const,reasoningEffort:'high' as const}
+  mocks.findMany.mockResolvedValue([{scopeKey:'',revision:1,assignments:{style_learning:selection}}])
+  await assignedTaskModel('owner','novel','style_learning')
+  expect(mocks.runtime).toHaveBeenLastCalledWith('standard','owner',undefined,'high',undefined,true)
+  const frozen={version:1 as const,globalRevision:1,novelRevision:0,assignments:{style_learning:selection},sources:{style_learning:'global' as const}}
+  await withModelAssignmentContext({userId:'owner',novelId:'novel',frozen},async()=>{
+    await assignedTaskModel('owner','novel','style_learning')
+    expect(mocks.runtime).toHaveBeenLastCalledWith('standard','owner',undefined,'high',undefined,false)
+    await assignedTaskModel('owner','novel','style_learning',undefined,false,true)
+    expect(mocks.runtime).toHaveBeenLastCalledWith('standard','owner',undefined,'high',undefined,true)
+  })
+  await assignedTaskModel('owner','novel','style_learning',frozen,true)
+  expect(mocks.runtime).toHaveBeenLastCalledWith('standard','owner',undefined,'high',undefined,false)
+})

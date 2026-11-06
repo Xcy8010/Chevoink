@@ -1,7 +1,7 @@
 import { useAdminDialog } from '../admin-dialog'
 import { useAdminQueryState } from '../admin-query-state'
 import { useAdminNumberQuery } from './admin-page-query'
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import Button from '@/components/ui/Button'
@@ -29,6 +29,19 @@ const SOURCE_LABELS: Record<string, string> = {
 function sourceLabel(source: string | null): string {
   if (!source) return '未知来源'
   return SOURCE_LABELS[source] ?? source
+}
+
+const CLIENT_FIELD_LABELS: Record<string,string> = {
+  userAgent:'浏览器标识',platform:'平台',language:'语言',languages:'语言列表',appVersion:'应用版本',version:'版本',
+  screen:'屏幕',viewport:'可视区域',width:'宽度',height:'高度',devicePixelRatio:'像素倍率',timeZone:'时区',
+  online:'网络在线',cookieEnabled:'允许 Cookie',deviceMemory:'设备内存',hardwareConcurrency:'处理器线程数',
+  browser:'浏览器',os:'操作系统',client:'客户端',native:'原生应用',url:'地址',
+}
+function ClientInfoValue({value}:{value:unknown}):ReactNode {
+  if(value===null||value===undefined)return '—'
+  if(Array.isArray(value))return <ol className="list-inside list-decimal space-y-1">{value.map((item,index)=><li key={index}><ClientInfoValue value={item}/></li>)}</ol>
+  if(typeof value==='object')return <dl className="space-y-2">{Object.entries(value).map(([key,item])=><div key={key}><dt className="text-[var(--text-secondary)]">{CLIENT_FIELD_LABELS[key]??key}</dt><dd className="break-words text-[var(--text-primary)]"><ClientInfoValue value={item}/></dd></div>)}</dl>
+  return typeof value==='boolean'?(value?'是':'否'):String(value)
 }
 
 /** 反馈处理页：三个状态页签，已采纳/已忽略页签内可撤销回待处理 */
@@ -156,7 +169,7 @@ export default function AdminFeedbackPage() {
             <>
               <ul className="divide-y divide-[var(--border-default)] md:max-h-[60vh] md:overflow-y-auto md:pr-1">
                 {data.items.map((row) => (
-                  <li key={row.id} className="flex items-start justify-between gap-3 py-3">
+                  <li key={row.id} className="flex flex-col gap-3 py-3 sm:flex-row sm:items-start sm:justify-between">
                     <button type="button" onClick={() => setDetailId(row.id)} className="min-w-0 flex-1 text-left">
                       <p className="break-words text-sm leading-relaxed">{row.excerpt}</p>
                       <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-[var(--text-secondary)]">
@@ -175,7 +188,7 @@ export default function AdminFeedbackPage() {
                       </div>
                       <p className="mt-1 truncate text-xs text-[var(--text-secondary)]">联系方式：{row.contact?.trim() || '未填写'}</p>
                     </button>
-                    <div className="flex shrink-0 items-center gap-1.5">
+                    <div className="flex shrink-0 items-center justify-end gap-1.5">
                       <Button size="sm" variant="ghost" onClick={() => setDetailId(row.id)}>
                         详情
                       </Button>
@@ -200,10 +213,10 @@ export default function AdminFeedbackPage() {
       </AdminCard>
 
       {detailId !== null ? (
-        <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-labelledby="admin-feedback-detail-title" ref={dialogRef} tabIndex={-1}>
-          <div className="max-h-[88vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-5">
-            <div className="mb-3 flex items-center justify-between gap-3"><h2 id="admin-feedback-detail-title" className="font-semibold">反馈详情</h2><Button variant="ghost" onClick={() => setDetailId(null)}>关闭</Button></div>
-            <AdminPanelState state={detailQuery.isLoading ? 'loading' : detailQuery.isError ? 'error' : 'ready'}>
+        <div className="admin-portal fixed inset-0 z-[130] flex items-center justify-center bg-black/40 p-3">
+          <div className="admin-editor-dialog !max-w-2xl" role="dialog" aria-modal="true" aria-labelledby="admin-feedback-detail-title" ref={dialogRef} tabIndex={-1}>
+            <div className="admin-editor-header"><h2 id="admin-feedback-detail-title" className="font-semibold">反馈详情</h2><Button variant="ghost" onClick={() => setDetailId(null)}>关闭</Button></div>
+            <div className="admin-editor-body"><AdminPanelState state={detailQuery.isLoading ? 'loading' : detailQuery.isError ? 'error' : 'ready'}>
               {detail ? (
                 <>
                   <div className="flex items-start justify-between gap-3">
@@ -231,14 +244,6 @@ export default function AdminFeedbackPage() {
                       <dd className="mt-0.5 break-all text-[var(--text-primary)]">{detail.contact?.trim() || '未填写'}</dd>
                     </div>
                     <div>
-                      <dt>用户 ID</dt>
-                      <dd className="mt-0.5 break-all text-[var(--text-primary)]">{detail.user.id}</dd>
-                    </div>
-                    <div className="sm:col-span-2">
-                      <dt>提交页面</dt>
-                      <dd className="mt-0.5 break-all text-[var(--text-primary)]">{detail.pageUrl ?? '—'}</dd>
-                    </div>
-                    <div>
                       <dt>处理人</dt>
                       <dd className="mt-0.5 text-[var(--text-primary)]">{detail.handledByNickname ?? '—'}</dd>
                     </div>
@@ -246,13 +251,14 @@ export default function AdminFeedbackPage() {
                       <dt>处理时间</dt>
                       <dd className="mt-0.5 text-[var(--text-primary)]">{formatDateTime(detail.handledAt)}</dd>
                     </div>
-                    {Object.keys(detail.clientInfo).length > 0 ? (
-                      <div className="sm:col-span-2">
-                        <dt>客户端信息</dt>
-                        <dd className="mt-0.5 break-all text-[var(--text-primary)]">{JSON.stringify(detail.clientInfo)}</dd>
-                      </div>
-                    ) : null}
                   </dl>
+
+                  <details className="mt-4 rounded-lg border border-[var(--border-default)] p-3 text-xs">
+                    <summary className="cursor-pointer font-medium">工程详情（客户端与提交页面）</summary>
+                    <dl className="mt-3 grid gap-3 sm:grid-cols-2"><div><dt className="text-[var(--text-secondary)]">用户 ID</dt><dd className="break-all">{detail.user.id}</dd></div><div><dt className="text-[var(--text-secondary)]">提交页面</dt><dd className="break-all">{detail.pageUrl??'—'}</dd></div>
+                      {Object.entries(detail.clientInfo).map(([key,value])=><div key={key}><dt className="text-[var(--text-secondary)]">{CLIENT_FIELD_LABELS[key]??key}</dt><dd className="mt-1 min-w-0 break-words"><ClientInfoValue value={value}/></dd></div>)}
+                    </dl>
+                  </details>
 
                   {detail.imageUrls.length > 0 ? (
                     <div className="mt-4 grid grid-cols-3 gap-2">
@@ -268,10 +274,10 @@ export default function AdminFeedbackPage() {
                     </div>
                   ) : null}
 
-                  <div className="mt-5 flex justify-end gap-2">{rowActions(detail)}</div>
                 </>
               ) : null}
-            </AdminPanelState>
+            </AdminPanelState></div>
+            {detail?<footer className="admin-editor-footer"><Button onClick={()=>setDetailId(null)}>完成</Button><div className="flex gap-2">{rowActions(detail)}</div></footer>:null}
           </div>
         </div>
       ) : null}

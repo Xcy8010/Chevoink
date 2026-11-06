@@ -55,7 +55,6 @@ async function preview(tx:Transaction,actorId:string,action:AppReleaseAction,rel
  if(action!=='withdraw_test'){try{await installedRelease(row,true)}catch{blockers.push('版本文件或不可变清单校验失败。')}}
  else {const fallback=stable?.enabled?await tx.appRelease.findUnique({where:{id:stable.releaseId}}):null;if(!fallback||fallback.validationState!=='verified'||!compatible(fallback))blockers.push('稳定版回退入口尚未通过兼容验证。');else{try{await installedRelease(fallback,true)}catch{blockers.push('稳定版回退入口文件校验失败。')}}}
  const {legal}=await readPublicSiteContent(tx)
- if(action!=='withdraw_test'&&!legal.registrationAvailable)blockers.push('正式服务条款和隐私政策尚未同时生效。')
  if(action==='assign_test'&&(!stable||!stable.enabled))blockers.push('请先登记并启用经过验证的稳定版，保证测试入口与稳定入口有明确身份。')
  if(action==='withdraw_test'&&(!test||!test.enabled||test.releaseId!==releaseId))blockers.push('目标不是当前启用的测试版。')
  if(action==='rollback'){
@@ -64,7 +63,7 @@ async function preview(tx:Transaction,actorId:string,action:AppReleaseAction,rel
   if(!historical)blockers.push('该版本没有稳定版发布历史，不能作为回退目标。')
  }
  const expectedRevision=(action==='assign_test'||action==='withdraw_test'?test:stable)?.revision??0
- const identity={actorId,action,releaseId,artifactSha256:row.artifactSha256,stable,test,legal:legal.terms&&legal.privacy?[legal.terms.id,legal.privacy.id]:null}
+ const identity={actorId,action,releaseId,artifactSha256:row.artifactSha256,stable,test,legal:{terms:legal.terms?.id??null,privacy:legal.privacy?.id??null}}
  return{action,release:present(row),stable,test,expectedRevision,previewHash:fingerprint(identity),blockers,impact:action==='assign_test'?'仅有效测试员和超级管理员使用此版本；其他账号继续使用稳定版。':action==='withdraw_test'?'停止测试分流，测试员后续入口与新功能权限回到稳定版。':action==='rollback'?`将应用前端与新功能能力切换到指定历史稳定版本；不恢复数据库，不修改已接纳任务的模型、价格或版本绑定。${test?.enabled?' 当前测试分流继续使用 '+test.releaseId+'，可另行撤回。':' 当前未启用测试分流。'}`:'将所有账号切换到此稳定版本，并同时停用测试分流；保留原测试版指针和历史记录。'}
 }
 export async function previewAppRelease(actorId:string,action:AppReleaseAction,releaseId:string){return prisma.$transaction(async tx=>{await tx.$executeRaw`SELECT pg_advisory_xact_lock(804726)`;return preview(tx,actorId,action,releaseId)},{timeout:30000})}

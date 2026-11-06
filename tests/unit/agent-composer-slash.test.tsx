@@ -460,26 +460,43 @@ it('detects complete caret tokens while reserving exact goal aliases', () => {
   expect(findComposerSlashToken(quotedDraft, quotedDraft.length - 1)).toBeNull()
 })
 
-it('shows precise scheduled prices while independent details preserve model choice and thinking editing', () => {
+it('shows precise prices on whole-card hover and focus while preserving selection and thinking editing', () => {
   const input = props()
   input.modelOptions = [{ tier: 'speed', label: '极速', available: true, selectedByDefault: true, multiplier: 0.125, baseMultiplier: 1.5,
     reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'high', visionEnabled: true,
     activity: { name: '晚间优惠', revision: 1, timezone: 'Asia/Shanghai', asOf: '2026-11-06T12:00:00Z', nextSwitchAt: null, rules: [] } }]
   render(<AgentComposer {...input} />)
-  const info = screen.getByLabelText('极速价格与能力详情')
-  const row = info.closest('.group\\/model-row') ?? info.closest('details')!.parentElement!
+  const row = screen.getByLabelText('极速模型卡片')
+  expect(screen.queryByLabelText('极速价格与能力详情')).toBeNull()
   expect(row.querySelector('s')?.textContent).toBe('1.5x')
   expect(row.textContent).toContain('晚间优惠')
   expect(row.textContent).toContain('0.125x')
-  const menu = info.closest('details')!.parentElement!.closest('details')!
+  const menu = row.closest('details')!
   fireEvent.click(menu.querySelector(':scope > summary')!)
   expect(menu.open).toBe(true)
-  fireEvent.focus(info)
-  expect(info.closest('details')!.open).toBe(true)
+  fireEvent.mouseEnter(row)
+  expect(screen.getByRole('tooltip').parentElement).toBe(document.body)
+  expect(screen.getByRole('tooltip').textContent).toContain('思考强度：low、high')
+  expect(screen.getByRole('tooltip').textContent).not.toContain('图片输入')
+  expect(screen.getByRole('tooltip').textContent).not.toContain('基础价格')
+  expect(screen.getByRole('tooltip').textContent).not.toContain('当前价格')
+  expect(screen.getByRole('tooltip').textContent).not.toContain('当前计价')
+  fireEvent.keyDown(window, { key: 'Escape' })
+  expect(screen.queryByRole('tooltip')).toBeNull()
+  const chooseModel = within(row).getByRole('button', { name: /极速.*晚间优惠/, hidden: true })
+  expect(document.activeElement).toBe(chooseModel)
+  act(() => chooseModel.blur())
+  act(() => chooseModel.focus())
+  expect(screen.getByRole('tooltip')).toBeTruthy()
   expect(input.onModelTierChange).not.toHaveBeenCalled()
   fireEvent.click(screen.getByLabelText('编辑极速思考模式'))
   expect(input.onModelTierChange).not.toHaveBeenCalled()
   expect(input.onReasoningEffortChange).not.toHaveBeenCalled()
   fireEvent.click(screen.getByRole('button', { name: /低\s*low/, hidden: true }))
   expect(input.onReasoningEffortChange).toHaveBeenCalledWith('tier:speed', 'low')
+  expect(input.onModelTierChange).not.toHaveBeenCalled()
+  fireEvent.click(chooseModel)
+  expect(input.onModelTierChange).toHaveBeenCalledExactlyOnceWith('speed')
+  expect(menu.open).toBe(false)
+  expect(screen.queryByRole('tooltip')).toBeNull()
 })

@@ -11,12 +11,15 @@ export function updateModelAssignmentContext(userId: string, novelId: string, fr
 }
 
 /** Only a matching execution context can supply frozen preferences. No credentials enter persistence. */
-export async function assignedTaskModel(userId: string, novelId: string | null | undefined, task: ModelAssignmentTask, frozen?: FrozenModelAssignments, frozenExecution = false) {
+export async function assignedTaskModel(userId: string, novelId: string | null | undefined, task: ModelAssignmentTask, frozen?: FrozenModelAssignments, frozenExecution = false, requireSelectable = false) {
   const context = contexts.getStore()
   const matching = context?.userId === userId && context.novelId === novelId
   const preferences = frozen ?? (matching ? context.frozen : frozenExecution ? undefined : await freezeModelAssignments(userId, novelId ?? undefined))
   const selection = preferences?.assignments[task]
-  return selection ? resolveAssignedModel(userId, selection, task === 'vision') : undefined
+  // Standalone saved preferences are a new selection; a matching run/frozen
+  // execution retains its admission. New job creators can explicitly opt in.
+  const freshSelection = requireSelectable || (!matching && !frozen && !frozenExecution)
+  return selection ? resolveAssignedModel(userId, selection, task === 'vision', freshSelection) : undefined
 }
 
 export const TEXT_ACTION_TASKS: Readonly<Record<string, ModelAssignmentTask>> = {

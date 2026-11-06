@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { Prisma, type CreditAccount } from '@prisma/client'
 import { prisma, DataAccessError } from './prisma.js'
+import type { UserIdentityUpdate, TesterIdentity, UserIdentityUpdateResult } from '../../shared/contracts/tester.js'
 import { creditTransaction } from './credit-policy.js'
 
 export const TESTER_CREDIT_RULE = { version: 'tester-floor-20-target-450-v1', thresholdMilli: 20000, targetMilli: 450000, balanceBasis: 'ledger' } as const
@@ -30,6 +31,11 @@ export async function applyTesterCreditFloor(tx: Prisma.TransactionClient, accou
       beforeBalanceMilli: balance, afterBalanceMilli: balance + delta, thresholdMilli: TESTER_CREDIT_RULE.thresholdMilli, targetMilli: TESTER_CREDIT_RULE.targetMilli, sequence } } })
   return updated
 }
+export function presentTesterIdentity(user: { role: string; isSuperAdmin: boolean; bannedAt: Date | null; testerEntitlement: { enabled: boolean; revision: number; expiresAt: Date | null; reason: string } | null }, now = new Date()): TesterIdentity {
+  const grant = user.testerEntitlement
+  return { enabled: grant?.enabled ?? false, effective: !user.bannedAt && (user.role === 'admin' && user.isSuperAdmin || Boolean(grant?.enabled && (!grant.expiresAt || grant.expiresAt > now))),
+    revision: grant?.revision ?? 0, expiresAt: grant?.expiresAt?.toISOString() ?? null, reason: grant?.reason ?? null }
+}
 export async function listTesters(search = '', page = 1) {
   const now = new Date(), keyword = search.trim()
   const where: Prisma.UserWhereInput = keyword ? { OR: [{ id: keyword }, { nickname: { contains: keyword, mode: 'insensitive' } }, { email: { contains: keyword, mode: 'insensitive' } }, { phone: { contains: keyword } }] } : {}
@@ -46,7 +52,7 @@ export async function updateTester(actorId: string, userId: string, input: Teste
   const auditId = createHash('sha256').update('tester:' + actorId + ':' + input.operationId).digest('hex')
   return creditTransaction(async tx => {
     const actor = await tx.user.findUnique({ where: { id: actorId }, select: { role: true, isSuperAdmin: true, bannedAt: true } })
-    if (!actor || actor.role !== 'admin' || !actor.isSuperAdmin || actor.bannedAt) throw new DataAccessError(403, 'SUPER_ADMIN_REQUIRED', '该操作仅限超级管理员。')
+    if (!actor || actor.role !== 'admin' || actor.bannedAt) throw new DataAccessError(403, 'ADMIN_REQUIRED', '该操作仅限管理员。')
     const replay = await tx.adminAuditLog.findUnique({ where: { id: auditId } })
     if (replay) {
       const detail = replay.detail as Prisma.JsonObject
@@ -65,5 +71,44 @@ export async function updateTester(actorId: string, userId: string, input: Teste
     await tx.adminAuditLog.create({ data: { id: auditId, adminId: actorId, action: input.enabled ? 'tester.grant' : 'tester.revoke', targetType: 'user', targetId: userId, ip,
       detail: { requestHash, revision, enabled: input.enabled, reason: input.reason, expiresAt: input.expiresAt, previousRevision: old?.revision ?? 0 } } })
     return { revision, replayed: false }
+  })
+}
+
+/** Identity changes and their replay/audit receipt commit together; no partial role/grant save. */
+export async function updateUserIdentity(actorId: string, userId: string, input: UserIdentityUpdate, ip: string | null): Promise<UserIdentityUpdateResult> {
+  const requestHash = createHash('sha256').update(JSON.stringify({ userId, ...input })).digest('hex')
+  const auditId = createHash('sha256').update('user-identity:' + actorId + ':' + input.operationId).digest('hex')
+  return creditTransaction(async tx => {
+    const actor = await tx.user.findUnique({ where: { id: actorId }, select: { role: true, isSuperAdmin: true, bannedAt: true } })
+    if (!actor || actor.role !== 'admin' || actor.bannedAt) throw new DataAccessError(403, 'ADMIN_REQUIRED', '该操作仅限管理员。')
+    if (input.role !== undefined && !actor.isSuperAdmin) throw new DataAccessError(403, 'SUPER_REQUIRED', '仅超级管理可以设置用户身份。')
+    const replay = await tx.adminAuditLog.findUnique({ where: { id: auditId } })
+    if (replay) {
+      const detail = replay.detail as Prisma.JsonObject
+      if (detail.requestHash !== requestHash) throw new DataAccessError(409, 'USER_IDENTITY_OPERATION_CONFLICT', '同一请求编号的目标或内容已改变。')
+      return { ...(detail.result as unknown as Omit<UserIdentityUpdateResult, 'replayed'>), replayed: true }
+    }
+    const user = await tx.user.findUnique({ where: { id: userId }, select: { id: true, role: true, isSuperAdmin: true, bannedAt: true, testerEntitlement: true } })
+    if (!user) throw new DataAccessError(404, 'USER_NOT_FOUND', '用户不存在。')
+    if (input.role !== undefined) {
+      if (actorId === userId) throw new DataAccessError(400, 'VALIDATION_ERROR', '不能修改当前登录管理员自己的角色。')
+      if (user.isSuperAdmin) throw new DataAccessError(400, 'VALIDATION_ERROR', '超级管理身份唯一，不可修改。')
+      if (user.role !== input.expectedRole) throw new DataAccessError(409, 'USER_IDENTITY_CONFLICT', '用户身份已变化，请刷新后核对。')
+    }
+    const old = user.testerEntitlement
+    if (input.tester) {
+      if (user.role === 'admin' && user.isSuperAdmin && !input.tester.enabled) throw new DataAccessError(409, 'SUPER_ADMIN_TESTER_REQUIRED', '超级管理员默认具备测试员资格。')
+      if ((old?.revision ?? 0) !== input.tester.expectedRevision) throw new DataAccessError(409, 'TESTER_REVISION_CONFLICT', '测试员资格已变化，请刷新后核对。')
+      if (input.tester.expiresAt && Date.parse(input.tester.expiresAt) <= Date.now()) throw new DataAccessError(400, 'TESTER_EXPIRY_INVALID', '有效期须晚于当前时间。')
+    }
+    const role = input.role ?? user.role
+    if (input.role !== undefined) await tx.user.update({ where: { id: userId }, data: { role: input.role } })
+    const grant = input.tester ? await tx.testerEntitlement.upsert({ where: { userId },
+      create: { userId, enabled: input.tester.enabled, reason: input.tester.reason, expiresAt: input.tester.expiresAt ? new Date(input.tester.expiresAt) : null, grantedById: actorId },
+      update: { enabled: input.tester.enabled, reason: input.tester.reason, expiresAt: input.tester.expiresAt ? new Date(input.tester.expiresAt) : null, grantedById: actorId, revision: { increment: 1 } } }) : old
+    const result = { role, tester: presentTesterIdentity({ ...user, role, testerEntitlement: grant }) }
+    await tx.adminAuditLog.create({ data: { id: auditId, adminId: actorId, action: 'user.set_identity', targetType: 'user', targetId: userId, ip,
+      detail: { requestHash, previousRole: user.role, previousTesterRevision: old?.revision ?? 0, result } } })
+    return { ...result, replayed: false }
   })
 }

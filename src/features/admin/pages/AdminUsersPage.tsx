@@ -1,3 +1,4 @@
+import AdminUserIdentityDialog from '../components/AdminUserIdentityDialog'
 import { useAdminNumberQuery } from './admin-page-query'
 import { useAdminQueryState } from '../admin-query-state'
 import { AdminRowActions } from './AdminPageControls'
@@ -14,7 +15,6 @@ import {
   banAdminUser,
   listAdminUsers,
   resetAdminUserPassword,
-  setAdminUserRole,
   unbanAdminUser,
 } from '../api'
 import { AdminCard, AdminConfirmDialog, AdminPageHeader, AdminPager, AdminPanelState, StatusPill } from '../AdminLayout'
@@ -25,13 +25,13 @@ export default function AdminUsersPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
   const { admin } = useAdminSession()
-  const isSuperAdmin = Boolean(admin?.isSuperAdmin)
   const [search, setSearch] = useAdminQueryState('search', '')
   const [keyword, setKeyword] = useState(search)
   const [role, setRole] = useAdminQueryState('role', '')
   const [status, setStatus] = useAdminQueryState('status', '')
   const [page, setPage] = useAdminNumberQuery('page', 1)
   const [pageSize, setPageSize] = useAdminNumberQuery('pageSize', 10)
+  const [identityUser,setIdentityUser] = useState<AdminUserRow|null>(null)
   const [pendingBan, setPendingBan] = useState<AdminUserRow | null>(null)
   const [pendingReset, setPendingReset] = useState<AdminUserRow | null>(null)
   const [tempPassword, setTempPassword] = useState<string | null>(null)
@@ -77,16 +77,6 @@ export default function AdminUsersPage() {
     onError: (error) => toast.error(error instanceof ApiClientError ? error.message : '解封失败'),
   })
 
-  const roleMutation = useMutation({
-    mutationFn: ({ userId, role: nextRole }: { userId: string; role: 'user' | 'admin' }) =>
-      setAdminUserRole(userId, nextRole),
-    onSuccess: () => {
-      toast.success('角色已更新')
-      invalidate()
-    },
-    onError: (error) => toast.error(error instanceof ApiClientError ? error.message : '角色更新失败'),
-  })
-
   const resetMutation = useMutation({
     mutationFn: (userId: string) => resetAdminUserPassword(userId),
     onSuccess: (result) => {
@@ -97,19 +87,13 @@ export default function AdminUsersPage() {
     onError: (error) => toast.error(error instanceof ApiClientError ? error.message : '重置失败'),
   })
 
-  const handleRoleChange = (user: AdminUserRow, nextRole: string) => {
-    const current = user.role === 'admin' ? 'admin' : 'user'
-    if (nextRole === current || !nextRole) return
-    roleMutation.mutate({ userId: user.id, role: nextRole as 'user' | 'admin' })
-  }
-
   const data = query.data
 
   return (
     <div>
       <AdminPageHeader
         title="用户管理"
-        description="查看注册用户、封禁违规账号、调整角色或重置密码"
+        description="查看用户、管理身份与测试资格、处理账号状态"
       />
 
       <AdminCard className="mb-4">
@@ -158,10 +142,6 @@ export default function AdminUsersPage() {
             <option value="true">已封禁</option>
             <option value="online">在线</option>
           </select>
-
-          {!isSuperAdmin ? (
-            <p className="text-xs text-[var(--text-secondary)]">仅超级管理可调整用户身份</p>
-          ) : null}
         </div>
       </AdminCard>
 
@@ -194,17 +174,9 @@ export default function AdminUsersPage() {
                       作品 / 帖子 {user.novelCount} / {user.postCount} · 注册 {formatDateTime(user.createdAt)}
                     </p>
                     <div className="mt-2.5 flex flex-wrap items-center gap-2">
-                      <span className="text-sm text-[var(--text-secondary)]">{user.role === 'admin' ? '管理' : '用户'}</span>
-                      <AdminRowActions label="更多操作">
-<label className="text-sm">身份<select aria-label={`调整 ${user.nickname} 的身份`} title={!isSuperAdmin ? '仅超级管理员可调整身份' : user.id === admin?.id ? '不能修改自己的身份' : undefined}
-                        value={user.role === 'admin' ? 'admin' : 'user'}
-                        disabled={!isSuperAdmin || user.id === admin?.id}
-                        onChange={(event) => handleRoleChange(user, event.target.value)}
-                        className="rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] px-2 py-1 text-xs text-[var(--text-primary)] outline-none disabled:opacity-60"
-                      >
-                        <option value="user">用户</option>
-                        <option value="admin">管理</option>
-                      </select></label>
+                      <span className="text-sm text-[var(--text-secondary)]">{user.isSuperAdmin?'超级管理员':user.role === 'admin' ? '管理员' : '用户'}</span>{user.tester?.effective||user.isSuperAdmin?<StatusPill tone="success">测试员</StatusPill>:user.tester?.enabled?<StatusPill>测试已过期</StatusPill>:null}
+                      <AdminRowActions label="用户操作">
+<Link to={"/admin/users/"+user.id} state={{adminReturnTo:location.pathname+location.search}} className="inline-flex items-center rounded-md px-2 text-sm hover:underline">查看</Link><Button size="sm" onClick={()=>setIdentityUser(user)}>编辑身份</Button>
                         {user.bannedAt ? (
                           <Button size="sm" onClick={() => unbanMutation.mutate(user.id)} disabled={unbanMutation.isPending}>
                             解封
@@ -226,7 +198,7 @@ export default function AdminUsersPage() {
               </ul>
 
               <div className="hidden overflow-x-auto md:block">
-                <table className="w-full min-w-[900px] text-sm">
+                <table className="admin-users-table w-full min-w-[960px] text-sm">
                   <thead>
                     <tr className="text-left text-xs text-[var(--text-secondary)]">
                       <th className="pb-2 font-normal">用户</th>
@@ -250,7 +222,7 @@ export default function AdminUsersPage() {
                         </td>
 
                         <td className="py-2.5">
-                          <span className="text-sm text-[var(--text-secondary)]">{user.role === 'admin' ? '管理' : '用户'}</span>
+                          <span className="text-sm text-[var(--text-secondary)]">{user.isSuperAdmin?'超级管理员':user.role === 'admin' ? '管理员' : '用户'}</span>{user.tester?.effective||user.isSuperAdmin?<StatusPill tone="success">测试员</StatusPill>:user.tester?.enabled?<StatusPill>测试已过期</StatusPill>:null}
                         </td>
                         <td className="py-2.5">
                           {user.bannedAt ? (
@@ -267,16 +239,8 @@ export default function AdminUsersPage() {
                         <td className="py-2.5 text-[var(--text-secondary)]">{formatDateTime(user.createdAt)}</td>
                         <td className="py-2.5 text-[var(--text-secondary)]">{formatDateTime(user.lastActiveAt)}</td>
                         <td className="py-2.5">
-                          <AdminRowActions label="更多操作">
-<label className="text-sm">身份<select aria-label={`调整 ${user.nickname} 的身份`} title={!isSuperAdmin ? '仅超级管理员可调整身份' : user.id === admin?.id ? '不能修改自己的身份' : undefined}
-                            value={user.role === 'admin' ? 'admin' : 'user'}
-                            disabled={!isSuperAdmin || user.id === admin?.id}
-                            onChange={(event) => handleRoleChange(user, event.target.value)}
-                            className="rounded-lg border border-[var(--border-strong)] bg-[var(--surface-default)] px-2 py-1 text-xs text-[var(--text-primary)] outline-none disabled:opacity-60"
-                          >
-                            <option value="user">用户</option>
-                            <option value="admin">管理</option>
-                          </select></label>
+                          <AdminRowActions label="用户操作">
+<Link to={"/admin/users/"+user.id} state={{adminReturnTo:location.pathname+location.search}} className="inline-flex items-center rounded-md px-2 text-sm hover:underline">查看</Link><Button size="sm" onClick={()=>setIdentityUser(user)}>编辑身份</Button>
                             {user.bannedAt ? (
                               <Button size="sm" onClick={() => unbanMutation.mutate(user.id)} disabled={unbanMutation.isPending}>
                                 解封
@@ -310,6 +274,7 @@ export default function AdminUsersPage() {
         </AdminPanelState>
       </AdminCard>
 
+      {identityUser?<AdminUserIdentityDialog key={identityUser.id} user={identityUser} adminId={admin?.id ?? ""} isSuperAdmin={Boolean(admin?.isSuperAdmin)} onClose={()=>setIdentityUser(null)} onSaved={()=>{invalidate();setIdentityUser(null);toast.success("身份已更新")}}/>:null}
       <AdminConfirmDialog
         open={pendingBan !== null}
         title="封禁用户"

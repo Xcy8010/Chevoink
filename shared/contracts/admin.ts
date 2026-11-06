@@ -17,6 +17,8 @@ export type AdminUserRow = {
   phone: string | null
   email: string | null
   role: 'user' | 'author' | 'admin'
+  isSuperAdmin?: boolean
+  tester?: import('./tester.js').TesterIdentity
   bannedAt: string | null
   createdAt: string
   lastActiveAt: string | null
@@ -448,6 +450,7 @@ export type AdminModelManagementPayload = {
     multiplier: number
     enabled: boolean
     selectable: boolean
+    testerSelectable?: boolean
     isDefault: boolean
     apiKeyConfigured: boolean
     requestCount: number

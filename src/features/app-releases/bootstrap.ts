@@ -6,9 +6,6 @@ export function selectedArtifactUrl(selection:AppReleaseBootstrap,route:string){
  return `${selection.release.entryUrl}?route=${encodeURIComponent(route)}`
 }
 export async function bootstrapAppRelease():Promise<boolean>{
- // The current control-plane UI remains reachable after selecting an older artifact.
- // Backend operations still require a freshly verified super administrator.
- if(/^\/admin\/app-releases(?:\/|$)/.test(location.pathname))return true
  const selection=await requestJson<AppReleaseBootstrap>('/api/app-releases/bootstrap')
  const loaded=document.documentElement.dataset.appRelease
  if(selection.mode==='artifact'&&selection.release?.id!==loaded){
@@ -22,7 +19,7 @@ export async function bootstrapAppRelease():Promise<boolean>{
 function watchLegacyRelease(){
  let busy=false
  async function check(){
-  if(busy||document.getElementById('app-release-update')||/^\/admin\/app-releases(?:\/|$)/.test(location.pathname))return
+  if(busy||document.getElementById('app-release-update'))return
   busy=true
   try{
    const selection=await requestJson<AppReleaseBootstrap>('/api/app-releases/bootstrap')

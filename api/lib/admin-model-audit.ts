@@ -20,7 +20,7 @@ function snapshot(model: AiModelConfig): Record<string, Prisma.InputJsonValue | 
   const imageQuality = imageQualityConfigSchema.safeParse(metadata.imageQuality)
   return {
     displayName:model.displayName,provider:model.provider,modelName:model.modelName,endpoint:endpoint(model.baseUrl),keyConfigured:Boolean(model.apiKeyCiphertext),
-    multiplierBps:model.multiplierBps,enabled:model.enabled,selectable:model.selectable,isDefault:model.isDefault,
+    multiplierBps:model.multiplierBps,enabled:model.enabled,selectable:model.selectable,testerSelectable:metadata.testerSelectable === true,isDefault:model.isDefault,
     capabilities:JSON.parse(JSON.stringify(capabilities)) as Prisma.InputJsonObject,
     webToolProtocol:metadata.webToolProtocol === 'deepseek' || metadata.webToolProtocol === 'bocha' ? metadata.webToolProtocol : null,
     imageQuality:imageQuality.success ? imageQuality.data : null,

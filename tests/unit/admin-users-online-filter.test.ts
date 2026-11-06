@@ -24,6 +24,8 @@ function baseRecord(overrides: Record<string, unknown> = {}) {
     phone: '13800000000',
     email: null,
     role: 'user',
+    isSuperAdmin: false,
+    testerEntitlement: null,
     bannedAt: null,
     createdAt: new Date(NOW - 86_400_000),
     lastActiveAt: new Date(NOW - 60_000),

@@ -13,6 +13,7 @@ vi.mock('../../api/lib/prisma.js', async original => ({ ...await original<object
   },
   aiUsageLog: { groupBy: vi.fn(async () => []), findMany: vi.fn(async () => []), findUnique: vi.fn(async () => null),
     create: vi.fn(async () => ({ id: 'usage' })), update: vi.fn(async () => ({ id: 'usage' })), updateMany: vi.fn(async () => ({ count: 1 })) },
+  appReleaseChannel: { findMany: vi.fn(async () => []) },
   adminAuditLog: { create: vi.fn(async () => ({})) },
   user: { findUnique: vi.fn(async () => ({ role: 'admin', isSuperAdmin: true, bannedAt: null })) },
   $queryRaw: vi.fn(async () => []),
@@ -105,3 +106,18 @@ it.each(['opaque', 'openai', 'deepseek'].flatMap(provider => efforts.map(reasoni
 })
 
 vi.mock('../../api/lib/model-lifecycle.js', async original => ({ ...await original<object>(), captureAdminModelVersion: vi.fn(async () => {}) }))
+
+it.each([
+  {enabled:true,selectable:false,testerSelectable:true,expected:true},
+  {enabled:true,selectable:true,testerSelectable:true,expected:false},
+  {enabled:false,selectable:false,testerSelectable:true,expected:false},
+  {enabled:true,selectable:false,testerSelectable:false,expected:false},
+])('persists tester selection only for enabled hidden text models ($enabled/$selectable/$testerSelectable)', async ({expected,...input}) => {
+  expect((await getAdminModelManagement()).models[0].testerSelectable).toBe(false)
+  await updateAdminModel('admin','builtin',input)
+  expect(mocks.row.metadata).toMatchObject({testerSelectable:expected,customMarker:'preserved'})
+  expect((await getAdminModelManagement()).models[0].testerSelectable).toBe(expected)
+  await updateAdminModel('admin','builtin',{displayName:'synthetic unrelated edit'})
+  expect(mocks.row.metadata).toMatchObject({testerSelectable:expected})
+  expect(fetch).not.toHaveBeenCalled()
+})

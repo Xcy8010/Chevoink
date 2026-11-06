@@ -252,9 +252,9 @@ export async function prepareNovelImport(scope: NovelImportScope, intentId: stri
       ownerUserId: scope.userId, enabled: true }, select: { id: true } })) fail('IMPORT_MODEL_UNAVAILABLE', '本次自定义模型不可用。', 403)
     const { assignedTaskModel } = await import('./agent/model-assignment-context.js')
     const { resolveAssignedModel } = await import('./agent/model-assignments.js')
-    const selected = explicitSelection?.kind === 'custom' ? await resolveAssignedModel(scope.userId, { modelTier: 'custom', customModelId: explicitSelection.customModelId, reasoningEffort: explicitSelection.reasoningEffort })
-      : explicitSelection?.kind === 'builtin' ? await resolveAssignedModel(scope.userId, { modelTier: explicitSelection.modelTier, reasoningEffort: explicitSelection.reasoningEffort })
-      : explicitSelection ? undefined : await assignedTaskModel(scope.userId, scope.novelId, 'import_analysis')
+    const selected = explicitSelection?.kind === 'custom' ? await resolveAssignedModel(scope.userId, { modelTier: 'custom', customModelId: explicitSelection.customModelId, reasoningEffort: explicitSelection.reasoningEffort }, false, true)
+      : explicitSelection?.kind === 'builtin' ? await resolveAssignedModel(scope.userId, { modelTier: explicitSelection.modelTier, reasoningEffort: explicitSelection.reasoningEffort }, false, true)
+      : explicitSelection ? undefined : await assignedTaskModel(scope.userId, scope.novelId, 'import_analysis', undefined, false, true)
     const requestedModelSelection: NovelImportModelSelection = selected ? selected.selection.modelTier === 'custom'
       ? { kind: 'custom', customModelId: selected.selection.customModelId!, reasoningEffort: selected.selection.reasoningEffort }
       : { kind: 'builtin', modelTier: selected.selection.modelTier, reasoningEffort: selected.selection.reasoningEffort }

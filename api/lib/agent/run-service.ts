@@ -1197,7 +1197,7 @@ async function continueLoopRunLocked(
   if (nextTier === 'custom' && !nextCustomModelId) throw new DataAccessError(400, 'VALIDATION_ERROR', '请选择要使用的自定义模型。')
   const nextReasoningEffort = (model?.reasoningEffort ?? run.reasoningEffort) as ModelReasoningEffort
   await assertCreditAccess(userId, nextTier)
-  await getModelTierRuntime(nextTier, userId, nextCustomModelId, nextReasoningEffort)
+  const nextModelRuntime = await getModelTierRuntime(nextTier, userId, nextCustomModelId, nextReasoningEffort)
   try {
     eventStartSeq = await prepareRunEventResume(run.id)
   } catch {
@@ -1220,7 +1220,9 @@ async function continueLoopRunLocked(
   }
   // Persist a model change only after the exact target/input/time checks pass.
   if (nextTier !== run.modelTier || nextCustomModelId !== run.customModelId || nextReasoningEffort !== run.reasoningEffort) {
-    await prisma.agentRun.update({ where: { id: run.id }, data: { modelTier: nextTier, customModelId: nextCustomModelId, reasoningEffort: nextReasoningEffort } })
+    const modelChanged = nextTier !== run.modelTier || nextCustomModelId !== (run.modelTier === 'custom' ? run.customModelId : null)
+    await prisma.agentRun.update({ where: { id: run.id }, data: { modelTier: nextTier, customModelId: nextCustomModelId, reasoningEffort: nextReasoningEffort,
+      ...(modelChanged ? { modelConfigId: nextModelRuntime.modelConfigId ?? null, modelConfigRevision: nextModelRuntime.modelConfigRevision ?? null } : {}) } })
   }
   const continueFrom = !activation ? await prisma.agentRunEvent.findFirst({ where: { runId: run.id,
     type: { in: ['run.paused', 'run.finished'] }, seq: { lte: eventStartSeq } }, orderBy: { seq: 'desc' }, select: { id: true } }) : null

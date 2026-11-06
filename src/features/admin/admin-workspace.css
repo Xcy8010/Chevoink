@@ -58,7 +58,7 @@ html.dark .admin-workspace, html.dark body:has(.admin-workspace) {
 }
 .admin-workspace main { background: var(--app-bg); }
 .admin-workspace .admin-sidebar { background: var(--surface-default); }
-.admin-workspace .admin-section { border: 1px solid var(--border-default); border-radius: 14px; padding: 22px; background: var(--surface-default); box-shadow: 0 2px 5px rgb(15 23 42 / .025); }
+.admin-workspace .admin-section { border: 1px solid var(--border-default); border-radius: 14px; padding: 18px; background: var(--surface-default); box-shadow: 0 2px 5px rgb(15 23 42 / .025); }
 .admin-workspace main :where(button,select,textarea) { border-radius: 6px; box-shadow: none; }
 .admin-workspace .admin-section :where(h2,h3) { letter-spacing: -.01em; }
 .admin-workspace .admin-toolbar { background: transparent; }
@@ -74,19 +74,19 @@ html.dark .admin-workspace, html.dark body:has(.admin-workspace) {
 .admin-workspace :is(button, a, input, select, textarea):focus-visible { outline: 2px solid var(--color-brand); outline-offset: 3px; }
 /* TextInput already draws a themed focus border on its outer field. */
 .admin-workspace .admin-text-input > input:focus-visible { outline: none; }
-.admin-workspace :is(button, select, input):not([type=checkbox]):not([type=radio]) { min-height: 44px; }
+.admin-workspace :is(button, select, input):not([type=checkbox]):not([type=radio]) { min-height: 36px; }
 .admin-workspace .admin-skip-link { position: fixed; top: -100px; left: 16px; z-index: 200; padding: 12px 20px; background: var(--surface-default); }
 .admin-workspace .admin-skip-link:focus { top: 8px; }
-.admin-workspace :is(td,th) { padding-top: 12px; padding-bottom: 12px; }
+.admin-workspace :is(td,th) { padding-top: 8px; padding-bottom: 8px; }
 .admin-workspace :is(p,td,dd,span) { overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) { .admin-workspace * { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }
 
 .admin-portal { font-size: 14px; line-height: 1.6; }
-.admin-portal :is(button,select,input):not([type=checkbox]) { min-height:44px; }
+.admin-portal :is(button,select,input):not([type=checkbox]) { min-height:36px; }
 
 .admin-workspace { --chart-1: #6675dc; --chart-2: #3b9d8c; --chart-3: #d6943d; --chart-4: #bc75b1; }
 html.dark .admin-workspace { --chart-1: #9ba6ff; --chart-2: #68c9b5; --chart-3: #eab468; --chart-4: #d69dcd; }
-.admin-workspace .admin-page-header { margin-bottom: 24px; }
+.admin-workspace .admin-page-header { margin-bottom: 20px; }
 .admin-workspace .admin-page-header h1 { font-size: 24px; letter-spacing: -.04em; font-weight: 650; }
 .admin-workspace .admin-page-header p { max-width: 68ch; line-height: 1.8; }
 .admin-workspace .admin-toolbar { padding: 12px 16px; border: 1px solid var(--border-default); border-radius: 12px; background: var(--surface-default); }
@@ -110,3 +110,60 @@ html.dark .admin-workspace { --chart-1: #9ba6ff; --chart-2: #68c9b5; --chart-3: 
 .admin-workspace .admin-metric-card:hover { background: var(--surface-muted); }
 .admin-workspace .admin-panel-state { border: 1px dashed var(--border-strong); border-radius: 14px; background: var(--surface-default); }
 @media(max-width: 639px) { .admin-workspace .admin-section { padding: 16px; } .admin-workspace .admin-page-header h1 { font-size: 21px; } .admin-workspace .admin-chart svg { height: 200px; } }
+
+/* Compact desktop controls, with full touch targets on narrow/coarse screens. */
+.admin-workspace main :is(button,select,input):not([type=checkbox]):not([type=radio]),
+.admin-portal :is(button,select,input):not([type=checkbox]):not([type=radio]) { min-height: 36px; }
+.admin-workspace main :is(select,input):not([type=checkbox]):not([type=radio]),
+.admin-portal :is(select,input):not([type=checkbox]):not([type=radio]),
+.admin-workspace main button.inline-flex, .admin-portal button.inline-flex { height: 36px; }
+.admin-workspace .admin-text-input { min-height: 36px; height: 36px; }
+.admin-workspace .admin-text-input > input:not([type=checkbox]):not([type=radio]) { height: 34px; min-height: 34px; }
+.admin-workspace .admin-pager button { width: 36px; }
+.admin-workspace .admin-row-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 4px 8px; }
+.admin-workspace .admin-row-actions > div { display: flex; flex-wrap: wrap; gap: 4px 8px; margin: 0; padding: 0; border: 0; }
+.admin-workspace .admin-row-actions :is(button,a,select):not([type=checkbox]):not([type=radio]) { flex: 0 0 auto; min-height: 32px; height: 32px; font-size: 13px; }
+.admin-workspace .admin-row-actions button { padding-inline: 9px; }
+.admin-workspace .admin-list-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px 20px; align-items: center; padding: 14px 0; border-top: 1px solid var(--border-default); }
+.admin-workspace .admin-list-row:first-child { border-top: 0; }
+.admin-workspace .admin-list-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 5px; font-size: 12px; color: var(--text-secondary); }
+.admin-workspace .admin-content-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 16px; }
+.admin-workspace .admin-content-toolbar input { max-width: 280px; }
+.admin-workspace .admin-content-toolbar select { width: auto; }
+.admin-workspace .admin-release-actions { max-width: 300px; }
+.admin-workspace .admin-release-actions button { font-size: 12px; padding-inline: 8px; }
+.admin-workspace .admin-note-preview { margin-top: 6px; color: var(--text-secondary); font-size: 13px; }
+.admin-portal { color: var(--text-primary); }
+.admin-portal .admin-editor-dialog { display: flex; flex-direction: column; width: min(960px,100%); max-height: calc(100dvh - 48px); overflow: hidden; border: 1px solid var(--border-default); border-radius: 14px; background: var(--surface-default); box-shadow: 0 20px 70px #0003; }
+.admin-portal .admin-editor-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 18px 24px; border-bottom: 1px solid var(--border-default); }
+.admin-portal .admin-editor-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 20px 24px; }
+.admin-portal .admin-editor-footer { flex-shrink: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 24px; border-top: 1px solid var(--border-default); background: var(--surface-default); }
+.admin-portal .admin-form-group { margin: 0 0 20px; padding: 16px; border: 1px solid var(--border-default); border-radius: 10px; }
+.admin-portal .admin-form-group > legend { padding-inline: 6px; font-weight: 600; }
+.admin-portal .admin-form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px 20px; }
+.admin-portal .admin-form-wide { grid-column: 1 / -1; }
+.admin-portal textarea { resize: vertical; min-height: 110px; }
+.admin-portal :is(input,select,textarea) { max-width: 100%; color: var(--text-primary); }
+.admin-portal :is(button,a,input,select,textarea):focus-visible { outline: 2px solid var(--color-brand); outline-offset: 2px; }
+@media (max-width: 767px), (pointer: coarse) {
+  .admin-workspace :is(button,select,input):not([type=checkbox]):not([type=radio]),
+  .admin-workspace main :is(button,select,input):not([type=checkbox]):not([type=radio]),
+  .admin-workspace .admin-row-actions :is(button,a,select):not([type=checkbox]):not([type=radio]),
+  .admin-portal :is(button,select,input):not([type=checkbox]):not([type=radio]) { min-height: 44px; height: auto; }
+  .admin-workspace .admin-text-input { min-height: 44px; height: 44px; }
+  .admin-workspace .admin-text-input > input:not([type=checkbox]):not([type=radio]) { height: 42px; min-height: 42px; }
+  .admin-workspace .admin-pager button { width: 44px; }
+}
+@media (max-width: 767px) {
+  .admin-workspace .admin-list-row { grid-template-columns: minmax(0,1fr); gap: 10px; }
+  .admin-workspace .admin-release-actions { max-width: none; }
+  .admin-workspace .admin-content-toolbar input { max-width: none; }
+  .admin-portal .admin-editor-dialog { max-height: calc(100dvh - 24px); }
+  .admin-portal .admin-editor-header, .admin-portal .admin-editor-footer { padding: 12px 16px; }
+  .admin-portal .admin-editor-body { padding: 16px; }
+  .admin-portal .admin-form-grid { grid-template-columns: minmax(0,1fr); }
+  .admin-portal .admin-form-group { padding: 12px; }
+}
+
+.admin-workspace .admin-users-table td:last-child { min-width: 260px; }
+.admin-workspace .admin-users-table td { vertical-align: middle; }

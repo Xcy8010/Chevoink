@@ -1,3 +1,5 @@
+import { encryptSecret } from '../../api/lib/secret-box.js'
+import { quoteAuthorReviewReplacement, submitAuthorReviewReplacement, getAuthorReviewReplacementStatus } from '../../api/lib/agent/author-review-replacement-service.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { describe, expect, it, vi } from 'vitest'
@@ -364,4 +366,73 @@ describe.runIf(available)('persisted independent author-review dependency (real 
       expect(await prisma.$transaction(tx => readAuthorReviewReplacementStatus(tx, h.input.subject, h.input.authorizationId))).toMatchObject({ status: 'incomplete' })
       await expect(h.claim()).rejects.toThrow()
     }))
+})
+
+async function selectionFixture(f: F, work: (h: Awaited<ReturnType<typeof prepare>>, a: {id:string;tier:string}, b: {id:string;revision:number}) => Promise<void>) {
+  const h=await prepare(f)
+  vi.mocked(credits.getModelTierRuntime).mockRestore()
+  expect(await prisma.aiModelConfig.count({where:{ownerUserId:null,tier:'standard',enabled:true,archivedAt:null}})).toBe(0)
+  const metadata={modelKind:'text',testerSelectable:true,reasoningEfforts:['none','medium'],defaultReasoningEffort:'medium',contextWindowTokens:128000,reasoningParameterMode:'native',thinkingEnabled:false}
+  const data={provider:'Xiaomi',displayName:'Synthetic replacement selection',modelName:'mimo-v2.6-flash',baseUrl:'https://provider.invalid/v1',apiKeyCiphertext:encryptSecret('synthetic-only-key'),enabled:true,multiplierBps:12000,metadata}
+  const a=await prisma.aiModelConfig.create({data:{...data,key:randomUUID(),tier:'builtin_'+randomUUID().replaceAll('-','').slice(0,16),selectable:true}})
+  const b=await prisma.aiModelConfig.create({data:{...data,key:randomUUID(),tier:'standard',selectable:false}})
+  try {
+    await prisma.agentRun.update({where:{id:f.runId},data:{modelTier:a.tier!,modelConfigId:a.id,modelConfigRevision:a.revision,modelPriceSnapshot:{version:'credits-v1-exact',modelTier:a.tier!,multiplierBps:12000}}})
+    await work(h,{id:a.id,tier:a.tier!},b)
+  } finally {
+    await prisma.aiModelConfigVersion.deleteMany({where:{modelConfigId:{in:[a.id,b.id]}}})
+    await prisma.aiModelConfig.deleteMany({where:{id:{in:[a.id,b.id]}}})
+  }
+}
+describe.runIf(available)('replacement selection service real PostgreSQL boundary',()=>{
+  it('refuses a new hidden named-tier quote for ordinary authors with no run, event, usage or provider effects',async()=>fixture(async f=>selectionFixture(f,async h=>{
+    const before=await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}}),events=await prisma.agentRunEvent.findMany({where:{runId:f.runId},orderBy:{seq:'asc'}})
+    const provider=vi.fn();vi.stubGlobal('fetch',provider)
+    await expect(quoteAuthorReviewReplacement(f.userId,f.runId,{modelTier:'standard',reasoningEffort:'medium'})).rejects.toMatchObject({code:'MODEL_TIER_UNAVAILABLE'})
+    expect(await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}})).toEqual(before)
+    expect(await prisma.agentRunEvent.findMany({where:{runId:f.runId},orderBy:{seq:'asc'}})).toEqual(events)
+    expect(await prisma.aiUsageLog.findUniqueOrThrow({where:{id:h.oldUsage.id}})).toEqual(h.oldUsage)
+    expect(provider).not.toHaveBeenCalled()
+  })))
+  it('rechecks a tester revoked after quote and rolls back before binding or authorization changes',async()=>fixture(async f=>selectionFixture(f,async h=>{
+    await prisma.testerEntitlement.create({data:{userId:f.userId,grantedById:f.userId,reason:'Synthetic quote grant'}})
+    const provider=vi.fn();vi.stubGlobal('fetch',provider)
+    const quote=await quoteAuthorReviewReplacement(f.userId,f.runId,{modelTier:'standard',reasoningEffort:'medium'})
+    const before=await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}}),events=await prisma.agentRunEvent.findMany({where:{runId:f.runId},orderBy:{seq:'asc'}})
+    await prisma.testerEntitlement.update({where:{userId:f.userId},data:{enabled:false}})
+    await expect(submitAuthorReviewReplacement(f.userId,f.runId,quote.quoteToken)).rejects.toMatchObject({code:'MODEL_TIER_UNAVAILABLE'})
+    expect(await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}})).toEqual(before)
+    expect(await prisma.agentRunEvent.findMany({where:{runId:f.runId},orderBy:{seq:'asc'}})).toEqual(events)
+    expect(await prisma.aiUsageLog.findUniqueOrThrow({where:{id:h.oldUsage.id}})).toEqual(h.oldUsage)
+    expect(provider).not.toHaveBeenCalled()
+  })))
+  it('quotes the same admitted hidden model and reasoning-only change without re-admitting or changing its old records',async()=>fixture(async f=>selectionFixture(f,async(h,_a,b)=>{
+    await prisma.agentRun.update({where:{id:f.runId},data:{modelTier:'standard',modelConfigId:b.id,modelConfigRevision:b.revision,modelPriceSnapshot:{version:'credits-v1-exact',modelTier:'standard',multiplierBps:12000}}})
+    const before=await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}}),events=await prisma.agentRunEvent.findMany({where:{runId:f.runId},orderBy:{seq:'asc'}})
+    const provider=vi.fn();vi.stubGlobal('fetch',provider)
+    expect((await quoteAuthorReviewReplacement(f.userId,f.runId,{reasoningEffort:'none'})).currentModel).toMatchObject({modelTier:'standard',reasoningEffort:'none'})
+    expect(await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}})).toEqual(before)
+    expect(await prisma.agentRunEvent.findMany({where:{runId:f.runId},orderBy:{seq:'asc'}})).toEqual(events)
+    expect(await prisma.aiUsageLog.findUniqueOrThrow({where:{id:h.oldUsage.id}})).toEqual(h.oldUsage)
+    expect(provider).not.toHaveBeenCalled()
+  })))
+  it('binds B on an authorized switch, preserves original price/unknown evidence, and replays without new qualification or send',async()=>fixture(async f=>selectionFixture(f,async(h,_a,b)=>{
+    await prisma.testerEntitlement.create({data:{userId:f.userId,grantedById:f.userId,reason:'Synthetic binding grant'}})
+    const before=await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}})
+    const ai=await import('../../api/lib/ai-service.js')
+    const sender=vi.spyOn(ai,'generateTextCompletion').mockRejectedValue(new Error('Synthetic provider boundary: no request'))
+    const provider=vi.fn();vi.stubGlobal('fetch',provider)
+    const quote=await quoteAuthorReviewReplacement(f.userId,f.runId,{modelTier:'standard',reasoningEffort:'medium'})
+    await submitAuthorReviewReplacement(f.userId,f.runId,quote.quoteToken)
+    await vi.waitFor(async()=>expect((await getAuthorReviewReplacementStatus(f.userId,f.runId,quote.authorizationId)).state).toBe('incomplete'))
+    const changed=await prisma.agentRun.findUniqueOrThrow({where:{id:f.runId}})
+    expect(changed).toMatchObject({modelTier:'standard',modelConfigId:b.id,modelConfigRevision:b.revision,modelPriceSnapshot:before.modelPriceSnapshot,taskSpec:before.taskSpec})
+    const priorUsage=before.usage as Prisma.JsonObject,priorCheckpoint=priorUsage.checkpoint as Prisma.JsonObject
+    expect(changed.usage).toEqual({...priorUsage,checkpoint:{...priorCheckpoint,reviewAttempts:[...(priorCheckpoint.reviewAttempts as Prisma.JsonArray),'author-replacement:'+sha(quote.authorizationId)]}})
+    await prisma.testerEntitlement.update({where:{userId:f.userId},data:{enabled:false}})
+    const runtime=vi.spyOn(credits,'getModelTierRuntime').mockRejectedValue(new Error('A replay must not resolve a new model'))
+    expect(await submitAuthorReviewReplacement(f.userId,f.runId,quote.quoteToken)).toMatchObject({state:'incomplete'})
+    expect(runtime).not.toHaveBeenCalled();expect(sender).toHaveBeenCalledOnce();expect(provider).not.toHaveBeenCalled()
+    expect(await prisma.aiUsageLog.findUniqueOrThrow({where:{id:h.oldUsage.id}})).toEqual(h.oldUsage)
+  })))
 })

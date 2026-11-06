@@ -1,6 +1,7 @@
+import { encryptSecret } from '../../api/lib/secret-box.js'
 import { expectToolDenied } from '../support/expect-tool-denied.js'
 import { randomUUID } from 'node:crypto'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { executeAgentRun } from '../../api/lib/agent/loop.js'
@@ -19,6 +20,11 @@ import { taskRespondTool } from '../../api/lib/agent/tools/task-response-tool.js
 import { continueLoopRun } from '../../api/lib/agent/run-service.js'
 
 describe.runIf(available)('unbound conversation through the real legacy loop and database context', () => {
+  const selectionModelIds:string[]=[]
+  afterEach(async()=>{
+    await prisma.aiModelConfigVersion.deleteMany({where:{modelConfigId:{in:selectionModelIds}}})
+    await prisma.aiModelConfig.deleteMany({where:{id:{in:selectionModelIds.splice(0)}}})
+  })
   beforeEach(() => {
     const actual = featureFlags.isAgent2FeatureEnabled
     vi.spyOn(featureFlags, 'isAgent2FeatureEnabled').mockImplementation((feature, userId) =>
@@ -29,13 +35,21 @@ describe.runIf(available)('unbound conversation through the real legacy loop and
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Live provider/network requests are forbidden in this fixture'))
   })
 
-  it('resumes an actual human markerless Continue, reads necessary context and saves its normal answer without upgrading the task', async () => fixture(async f => {
+  it.each([false,true])('resumes an actual human markerless Continue without upgrading the task; explicit A to B switch=%s', async switched => fixture(async f => {
     const novel = await prisma.novel.create({ data: { authorId: f.userId, title: '历史问答继续合成作品', slug: randomUUID(), summary: '' } })
     const volume = await prisma.volume.create({ data: { novelId: novel.id, title: '第一卷', orderIndex: 1 } })
     const chapter = await prisma.chapter.create({ data: { authorId: f.userId, novelId: novel.id, volumeId: volume.id,
       title: '第一章', content: '合成正文保持原样。', orderIndex: 1, orderInVolume: 1 } })
     const session = await prisma.agentSession.create({ data: { userId: f.userId, novelId: novel.id, title: '原问题继续' } })
     const runId = randomUUID(), prompt = '第一卷要写多少章？', answer = '根据卷纲，第一卷计划二十章。'
+    const selectionModels=[]
+    if(switched)for(const label of ['a','b']) {
+      const tier='builtin_'+randomUUID().replaceAll('-','').slice(0,16)
+      const row=await prisma.aiModelConfig.create({data:{key:tier,tier,provider:'fixture',displayName:'Synthetic continue '+label,modelName:'synthetic-'+label,baseUrl:'https://provider.invalid/v1',apiKeyCiphertext:encryptSecret('synthetic-offline-only'),enabled:true,selectable:true,multiplierBps:0,metadata:{reasoningEfforts:['high'],defaultReasoningEffort:'high',reasoningParameterMode:'omit'}}})
+      selectionModels.push(row);selectionModelIds.push(row.id)
+    }
+    const initialTier=selectionModels[0]?.tier??'speed'
+    const originalPrice=switched?{version:'credits-v1-exact',modelTier:initialTier,multiplierBps:0}:undefined
     const startedAt = new Date(Date.now() - 2000), stoppedAt = new Date(startedAt.getTime() + 100)
     const startRequest = withHumanAdmission({ sessionId: session.id, novelId: novel.id, chapterId: chapter.id, prompt, mode: 'build' })
     const usage = { promptTokens: 1000, completionTokens: 50, totalTokens: 1050, checkpoint: {
@@ -44,7 +58,8 @@ describe.runIf(available)('unbound conversation through the real legacy loop and
       readProgress: 3, readBaseline: 0, progressSignatures: [], reviewAttempts: ['original-synthetic-settled-receipt'] } }
     await prisma.agentRun.create({ data: { id: runId, userId: f.userId, novelId: novel.id, sessionId: session.id, chapterId: chapter.id,
       status: 'failed', mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', runtimeProtocolVersion: 0,
-      manuscriptRevision: novel.manuscriptRevision, modelTier: 'speed', reasoningEffort: 'high', currentTurn: 4, startedAt, finishedAt: stoppedAt,
+      manuscriptRevision: novel.manuscriptRevision, modelTier: initialTier, reasoningEffort: 'high', currentTurn: 4, startedAt, finishedAt: stoppedAt,
+      ...(switched?{modelConfigId:selectionModels[0].id,modelConfigRevision:selectionModels[0].revision,modelPriceSnapshot:originalPrice}:{}),
       startRequest, usage } })
     await prisma.agentMessage.create({ data: { runId, sessionId: session.id, role: 'user', parts: [{ type: 'text', text: prompt }] } })
     await prisma.agentMessage.create({ data: { runId, sessionId: session.id, role: 'assistant', parts: [
@@ -64,9 +79,11 @@ describe.runIf(available)('unbound conversation through the real legacy loop and
       type: 'run.finished', runId, seq: 2, ts: stoppedAt.toISOString(), status: 'failed', usage: { promptTokens: 1000, completionTokens: 50, totalTokens: 1050 },
       artifacts: [], outputSummary: '',
     } } })
+    if(switched)await prisma.aiUsageLog.create({data:{userId:f.userId,agentRunId:runId,providerType:'text',providerMode:'synthetic',modelName:'synthetic-a',action:'syntheticOldUnknown',targetType:'agentRun',targetId:runId,durationMs:0,usageSource:'unknown',billingStatus:'pending_usage',reservedCreditMilli:9000}})
     const priorPayments = await prisma.aiUsageLog.findMany({ where: { agentRunId: runId } })
-    vi.spyOn(credits, 'assertCreditAccess').mockResolvedValue(undefined)
-    vi.spyOn(credits, 'getModelTierRuntime').mockResolvedValue({ tier: 'speed', multiplierBps: 0, provider: 'fixture', modelName: 'fixture-main',
+    if(!switched)vi.spyOn(credits, 'assertCreditAccess').mockResolvedValue(undefined)
+    const resolver=vi.spyOn(credits, 'getModelTierRuntime')
+    if(!switched)resolver.mockResolvedValue({ tier: 'speed', multiplierBps: 0, provider: 'fixture', modelName: 'fixture-main',
       baseUrl: 'https://provider.invalid/v1', apiKey: null, reasoningEffort: 'high', reasoningEfforts: ['high'], visionEnabled: false, contextWindowTokens: 128000 })
     const callUsage = { promptTokens: 10, completionTokens: 0, totalTokens: 10, promptCacheHitTokens: null, promptCacheMissTokens: null }
     const chat = vi.spyOn(aiService, 'chatWithTools').mockResolvedValueOnce({ content: '', reasoning: '', finishReason: 'tool_calls',
@@ -76,13 +93,18 @@ describe.runIf(available)('unbound conversation through the real legacy loop and
         for (const index of [0, 1, 2]) expect(input.messages.some(message => message.role === 'tool' && message.toolCallId === `continued-read-${index}`)).toBe(true)
         return { content: answer, reasoning: '', finishReason: 'stop', toolCalls: [], usage: callUsage }
       })
-    expect(await continueLoopRun(f.userId, runId)).toMatchObject({ runId, status: 'running' })
+    expect(await continueLoopRun(f.userId, runId,switched?{modelTier:selectionModels[1].tier as `builtin_${string}`,reasoningEffort:'high'}:undefined)).toMatchObject({ runId, status: 'running' })
     await vi.waitFor(async () => expect((await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })).status).toBe('completed'), { timeout: 10000, interval: 20 })
     const completed = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
     expect(chat).toHaveBeenCalledTimes(2)
     expect(completed).toMatchObject({ currentTurn: 6, outputSummary: answer, runtimeProtocolVersion: 0, taskRootId: null,
-      modelTier: 'speed', customModelId: null, reasoningEffort: 'high', startRequest, usage: { totalTokens: 1070,
+      modelTier: switched?selectionModels[1].tier:'speed', customModelId: null, reasoningEffort: 'high', startRequest, usage: { totalTokens: 1070,
         checkpoint: { tokenBudget: 9000, maxTurns: 50, resumeCount: 1, reviewAttempts: usage.checkpoint.reviewAttempts } } })
+    if(switched){
+      expect(completed).toMatchObject({modelConfigId:selectionModels[1].id,modelConfigRevision:selectionModels[1].revision,modelPriceSnapshot:originalPrice})
+      expect(resolver).toHaveBeenCalledWith(selectionModels[1].tier,f.userId,null,'high',{userId:f.userId,runId,modelConfigId:selectionModels[1].id,modelConfigRevision:selectionModels[1].revision})
+      expect(chat.mock.calls.every(([input])=>input.model==='synthetic-b')).toBe(true)
+    }
     expect(runtimeJson(completed.taskSpec).hash).toBe(admitted.hash)
     const starts = await prisma.agentRunEvent.findMany({ where: { runId, type: 'run.started' }, orderBy: { seq: 'desc' } })
     expect(starts[0].payload).toMatchObject({ authorContinue: { eventId: terminal.id, afterSeq: 2 } })
@@ -177,7 +199,7 @@ describe.runIf(available)('unbound conversation through the real legacy loop and
     const reader = vi.spyOn(volumeContext, 'readWritingVolumeContext')
     await executeAgentRun({ runId, sessionId: session.id, userId: f.userId, novelId: novel.id, chapterId: null,
       mode: 'build', prompt, modelTier: tier, ...(tier === 'custom' ? { customModelId: 'fixture-custom-route' } : {}) })
-    expect(runtime).toHaveBeenCalledWith(tier, f.userId, tier === 'custom' ? 'fixture-custom-route' : undefined, undefined)
+    expect(runtime).toHaveBeenCalledWith(tier, f.userId, tier === 'custom' ? 'fixture-custom-route' : undefined, undefined, {userId:f.userId,runId,modelConfigId:null,modelConfigRevision:null})
     expect(chat).toHaveBeenCalledOnce()
     expect(reader).not.toHaveBeenCalled()
     const saved = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })

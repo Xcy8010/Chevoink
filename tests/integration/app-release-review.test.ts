@@ -14,6 +14,7 @@ import { getAdminModelLifecyclePreview } from '../../api/lib/admin-model-lifecyc
 import { sealAppArtifact } from '../../scripts/app-release-artifact.mjs'
 import { verifyTestDatabase } from '../support/database-preflight.js'
 import { integrationLegalConsent } from '../support/legal-consent.js'
+import { readPublicSiteContent, verifyRegistrationConsent } from '../../api/lib/site-content.js'
 
 // Synthetic-only isolated database. Never seeds a production policy or artifact.
 await verifyTestDatabase(true)
@@ -58,6 +59,22 @@ afterAll(async()=>{
  await rm(root,{recursive:true,force:true});await prisma.$disconnect()
 })
 describe('actual release and admin routers on isolated PostgreSQL',()=>{
+ it('routes a compatible test release without official policies while actual registration stays unavailable',async()=>{
+  const policies=await prisma.siteContent.findMany({where:{kind:{in:['terms','privacy']}},select:{id:true,withdrawn:true}})
+  try{
+   await prisma.siteContent.updateMany({where:{id:{in:policies.map(row=>row.id)}},data:{withdrawn:true}})
+   expect((await readPublicSiteContent()).legal).toEqual({terms:null,privacy:null,registrationAvailable:false})
+   const view=await previewAppRelease(adminId,'assign_test',ids[1])
+   expect(view.blockers).toEqual([])
+   await expect(prisma.$transaction(tx=>verifyRegistrationConsent(tx,undefined))).rejects.toMatchObject({code:'POLICY_UNAVAILABLE'})
+   const receipt=await executeAppRelease(adminId,{action:'assign_test',releaseId:ids[1],expectedRevision:view.expectedRevision,previewHash:view.previewHash,operationId:randomUUID()},null)
+   expect(receipt).toMatchObject({status:'applied',releaseId:ids[1]})
+   expect((await readPublicSiteContent()).legal.registrationAvailable).toBe(false)
+  }finally{
+   await prisma.appReleaseChannel.deleteMany({where:{channel:'test',releaseId:ids[1]}})
+   for(const policy of policies)await prisma.siteContent.update({where:{id:policy.id},data:{withdrawn:policy.withdrawn}})
+  }
+ })
  it.each(['/api/ADMIN/site-content','/api/admin/SITE-content/','/api/admin/TESTERS','/api/ADMIN/testers/'])('denies actual router case/trailing variants without selected feature %s',async url=>{const response=await request(app).get(url).set('Authorization',`Bearer ${token}`);expect(response.status).toBe(403);expect(response.body.error.code).toBe('APP_RELEASE_CAPABILITY_DISABLED')})
  it('guards encoded model IDs and trailing slashes on actual model update routes',async()=>{const row=await model({});const encoded=row.id.replace(/^./,char=>'%'+char.charCodeAt(0).toString(16));const response=await request(app).patch(`/api/ADMIN/models/${encoded}/`).set('Authorization',`Bearer ${token}`).send({imageQuality:quality});expect(response.status).toBe(403);expect(response.body.error.code).toBe('APP_RELEASE_CAPABILITY_DISABLED');expect((await prisma.aiModelConfig.findUniqueOrThrow({where:{id:row.id}})).revision).toBe(row.revision)})
  it.each(['routes','weightedRoutes'])('denies nested image quality in parsed actual %s configuration',async field=>{const row=await model({});const route={label:'Synthetic nested route',provider:'fixture',modelName:'fixture',baseUrl:'https://fixture.invalid/v1',apiKey:'synthetic-only-key',imageQuality:quality,enabled:true};const body=field==='routes'?{routes:[route]}:{weightedRoutes:{primaryWeight:50,candidates:[{...route,weight:50}]}};const response=await patch(row.id,body);expect(response.status).toBe(403);expect(response.body.error.code).toBe('APP_RELEASE_CAPABILITY_DISABLED')})

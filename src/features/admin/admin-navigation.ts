@@ -8,8 +8,7 @@ export const adminNavigation = [
     { to: '/admin/messages', label: '消息稽核', keywords: '私人消息 稽核' },
   ] },
   { label: '用户与权益', items: [
-    { to: '/admin/testers', label: '测试员权益', keywords: '测试员 资格 内测 自动补额' },
-    { to: '/admin/users', label: '用户管理', keywords: '角色 封禁' },
+    { to: '/admin/users', label: '用户管理', keywords: '角色 身份 测试员 资格 权益 封禁' },
     { to: '/admin/credits', label: 'Credits 权益', keywords: '账户 额度 全局政策 暂停 重置 奖励 赠送 扣减 覆盖' },
   ] },
   { label: '创作运营', items: [

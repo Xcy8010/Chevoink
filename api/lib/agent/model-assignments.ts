@@ -5,11 +5,11 @@ import { assertCreditAccess, getModelTierRuntime } from '../credits.js'
 import { DataAccessError, prisma } from '../prisma.js'
 
 /** A newly selected model without an effort uses its configured native default. */
-export async function resolveAssignedModel(userId: string, input: AgentModelSelection, needsVision = false) {
+export async function resolveAssignedModel(userId: string, input: AgentModelSelection, needsVision = false, requireSelectable = false) {
   const selection = agentModelSelectionSchema.parse(input)
-  const candidate = await getModelTierRuntime(selection.modelTier, userId, selection.customModelId)
+  const candidate = await getModelTierRuntime(selection.modelTier, userId, selection.customModelId, undefined, undefined, requireSelectable)
   const runtime = selection.reasoningEffort === undefined ? candidate
-    : await getModelTierRuntime(selection.modelTier, userId, selection.customModelId, selection.reasoningEffort)
+    : await getModelTierRuntime(selection.modelTier, userId, selection.customModelId, selection.reasoningEffort, undefined, requireSelectable)
   if (needsVision && !runtime.visionEnabled) throw new DataAccessError(400, 'MODEL_VISION_REQUIRED', '所选模型不支持图片理解。')
   return { runtime, selection: { ...selection, reasoningEffort: runtime.reasoningEffort } }
 }
@@ -45,7 +45,7 @@ export async function patchModelAssignments(userId: string, raw: PatchModelAssig
   if (input.novelId) await requireNovel(userId, input.novelId)
   const patch: Partial<Record<keyof ModelAssignments, AgentModelSelection | null>> = {}
   for (const [key, selection] of Object.entries(input.assignments)) {
-    patch[key as keyof ModelAssignments] = selection === null ? null : (await resolveAssignedModel(userId, selection, key === 'vision')).selection
+    patch[key as keyof ModelAssignments] = selection === null ? null : (await resolveAssignedModel(userId, selection, key === 'vision', true)).selection
   }
   try {
     await prisma.$transaction(tx => applyModelAssignmentsPatch(tx, userId, input, patch))

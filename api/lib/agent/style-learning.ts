@@ -63,8 +63,8 @@ export async function startStyleLearning(userId: string, novelId: string, raw: S
     return view(old)
   }
   const selected = input.model ? await resolveAssignedModel(userId, { modelTier: input.model.modelTier,
-    ...(input.model.modelTier === 'custom' ? { customModelId: input.model.customModelId! } : {}), reasoningEffort: input.model.reasoningEffort })
-    : await assignedTaskModel(userId, novelId, 'style_learning')
+    ...(input.model.modelTier === 'custom' ? { customModelId: input.model.customModelId! } : {}), reasoningEffort: input.model.reasoningEffort }, false, true)
+    : await assignedTaskModel(userId, novelId, 'style_learning', undefined, false, true)
   if (!selected) throw new DataAccessError(400, 'STYLE_MODEL_REQUIRED', '请选择分析模型。')
   const selection = styleModelSelectionSchema.parse({ ...selected.selection, customModelId: selected.selection.customModelId ?? null })
   const runtime = selected.runtime

@@ -166,7 +166,9 @@ async function quoteFacts(tx: Prisma.TransactionClient, userId: string, runId: s
   const customModelId = tier === 'custom' ? selection.customModelId ?? run.customModelId : null
   if (tier === 'custom' && !customModelId) refuse('当前选择缺少自定义模型身份。')
   const reasoningEffort = effort.parse(selection.reasoningEffort ?? run.reasoningEffort)
-  const baseRuntime = await getModelTierRuntime(tier, userId, customModelId, reasoningEffort)
+  let baseRuntime = await getModelTierRuntime(tier, userId, customModelId, reasoningEffort)
+  const modelChanged = baseRuntime.tier !== run.modelTier || customModelId !== (run.modelTier === 'custom' ? run.customModelId : null)
+  if (modelChanged) baseRuntime = await getModelTierRuntime(tier, userId, customModelId, reasoningEffort, undefined, true)
   const runtime = locking ? resolveWeightedModelRuntime(baseRuntime, weightedRoute) : selectWeightedModelRuntime(baseRuntime)
   if (runtime.tier !== tier || runtime.reasoningEffort !== reasoningEffort) refuse('当前模型身份无法完整核实，未替换模型。')
   const model = modelSchema.parse({ ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier, customModelId, reasoningEffort, provider: runtime.provider, modelName: runtime.modelName ?? env.aiTextModel, multiplierBps: runtime.multiplierBps })
@@ -189,7 +191,8 @@ async function quoteFacts(tx: Prisma.TransactionClient, userId: string, runId: s
   return { authorization, binding: { runHash: hash({ id: run.id, sessionId: run.sessionId, modelTier: run.modelTier,
     customModelId: run.customModelId, reasoningEffort: run.reasoningEffort, manuscriptRevision: run.manuscriptRevision,
     currentTurn: run.currentTurn, usage: run.usage, startRequest: run.startRequest, taskSpec: run.taskSpec, writingBindings: run.writingBindings }),
-    originalHash: hash({ original, lineage: [...lineage].sort() }), usageHash: hash(usages), eventsHash: hash(events), runtimeHash: runtimeFingerprint(runtime) } }
+    originalHash: hash({ original, lineage: [...lineage].sort() }), usageHash: hash(usages), eventsHash: hash(events), runtimeHash: runtimeFingerprint(runtime) },
+    modelConfigId: runtime.modelConfigId ?? null, modelConfigRevision: runtime.modelConfigRevision ?? null }
 }
 
 /** Reads current facts and signs a short-lived price envelope; no authorization,
@@ -199,7 +202,8 @@ export async function quoteAuthorReviewReplacement(userId: string, runId: string
   const facts = await prisma.$transaction(async tx => {
     const run = await ownedRun(tx, userId, runId), latest = await latestStatus(tx, { userId, runId, novelId: run.novelId })
     if (latest && ['authorized', 'claimed', 'waiting_usage'].includes(latest.status.status)) refuse('原检查已有待确认结果，请查看原状态；换报价不能再次派发。')
-    return quoteFacts(tx, userId, runId, parsed, nonce, false)
+    const { authorization, binding } = await quoteFacts(tx, userId, runId, parsed, nonce, false)
+    return { authorization, binding }
   }, { isolationLevel: 'RepeatableRead' })
   const payload = payloadSchema.parse({ version: 1, purpose, expiresAt: Date.now() + lifetimeMs, ...facts })
   const { authorization: input } = payload, model = input.expected.model
@@ -303,12 +307,14 @@ export async function submitAuthorReviewReplacement(userId: string, runId: strin
       const existing = await tx.agentRunEvent.findFirst({ where: authorizationEventWhere(runId, input.authorizationId) })
       if (existing) return { kind: 'status' as const, status: statusDto(input.authorizationId, await readAuthorReviewReplacementStatus(tx, input.subject, input.authorizationId)) }
       const selected = input.expected.model
-      const facts = await quoteFacts(tx, userId, runId, continueAgentLoopRunSchema.parse({ modelTier: selected.tier, customModelId: selected.customModelId,
+      const { authorization, binding, modelConfigId, modelConfigRevision } = await quoteFacts(tx, userId, runId, continueAgentLoopRunSchema.parse({ modelTier: selected.tier, customModelId: selected.customModelId,
         reasoningEffort: selected.reasoningEffort }), input.authority.quoteNonce, true, selected.weightedRoute)
-      if (hash(facts) !== hash({ authorization: input, binding: payload.binding })) refuse('正文、完整上下文、当前模型或正常价格已变化，请重新查看报价。')
+      if (hash({ authorization, binding }) !== hash({ authorization: input, binding: payload.binding })) refuse('正文、完整上下文、当前模型或正常价格已变化，请重新查看报价。')
       if (payload.expiresAt <= Date.now()) refuse('报价在确认前已过期，请重新查看当前报价。')
       if (run.modelTier !== selected.tier || run.customModelId !== selected.customModelId || run.reasoningEffort !== selected.reasoningEffort) {
-        await tx.agentRun.update({ where: { id: runId }, data: { modelTier: selected.tier, customModelId: selected.customModelId, reasoningEffort: selected.reasoningEffort } })
+        const modelChanged = run.modelTier !== selected.tier || selected.customModelId !== (run.modelTier === 'custom' ? run.customModelId : null)
+        await tx.agentRun.update({ where: { id: runId }, data: { modelTier: selected.tier, customModelId: selected.customModelId, reasoningEffort: selected.reasoningEffort,
+          ...(modelChanged ? { modelConfigId, modelConfigRevision } : {}) } })
       }
       const authorized = await authorizeAuthorReviewReplacement(tx, input as AuthorReviewReplacementAuthorization)
       if (authorized.status === 'replayed') return { kind: 'status' as const,

@@ -309,12 +309,12 @@ describe('authenticated author review quote and sole sender', () => {
     expect(JSON.stringify(mocks.run)).toBe(JSON.stringify(JSON.parse(before).run))
   })
   it('binds an explicit new UI model in the same transaction and retains original counters/status', async () => {
-    mocks.runtime.mockResolvedValue({ ...(await mocks.runtime()), tier: 'builtin_1234567890abcdef', multiplierBps: 17500 })
+    mocks.runtime.mockResolvedValue({ ...(await mocks.runtime()), tier: 'builtin_1234567890abcdef', modelConfigId:'selected-b',modelConfigRevision:7,multiplierBps: 17500 })
     mocks.price.mockResolvedValue({ version: 'credits-v1-exact', modelTier: 'builtin_1234567890abcdef', multiplierBps: 17500 })
     const beforeUsage = JSON.stringify(mocks.run.usage), quote = await quoteAuthorReviewReplacement('owner', 'run', { modelTier: 'builtin_1234567890abcdef' })
     await submitAuthorReviewReplacement('owner', 'run', quote.quoteToken)
     await settled(quote.authorizationId)
-    expect(mocks.update).toHaveBeenCalledExactlyOnceWith({ where: { id: 'run' }, data: { modelTier: 'builtin_1234567890abcdef', customModelId: null, reasoningEffort: 'medium' } })
+    expect(mocks.update).toHaveBeenCalledExactlyOnceWith({ where: { id: 'run' }, data: { modelTier: 'builtin_1234567890abcdef', customModelId: null, reasoningEffort: 'medium',modelConfigId:'selected-b',modelConfigRevision:7 } })
     expect(mocks.run.status).toBe('failed'); expect(mocks.run.currentTurn).toBe(7); expect(JSON.stringify(mocks.run.usage)).toBe(beforeUsage)
     expect(mocks.authorize.mock.calls[0][1].expected.model).toMatchObject({ tier: 'builtin_1234567890abcdef', multiplierBps: 17500 })
   })
@@ -466,4 +466,70 @@ it('freezes one weighted builtin candidate in a new author quote and never redra
       weightedRoute: { source: 'candidate', candidateId: 'replacement-relay' }, tier: 'standard', multiplierBps: 12000 },
       authorizedRequest: { price: { modelTier: 'standard', multiplierBps: 12000 } } })
   } finally { draw.mockRestore(); decrypt.mockRestore() }
+})
+
+describe('replacement new selection versus admitted model identity', () => {
+  it('refuses switching an ordinary author from speed to hidden standard before quote writes or provider calls', async () => {
+    mocks.run.modelTier='speed';mocks.run.modelConfigId='model-a';mocks.run.modelConfigRevision=3
+    const runtime=await mocks.runtime(),before=snapshot()
+    mocks.runtime.mockImplementation(async (_tier,_user,_custom,_effort,_retained,selectable) => {
+      if(selectable)throw new DataAccessError(409,'MODEL_TIER_UNAVAILABLE','synthetic hidden model')
+      return runtime
+    })
+    await expect(quoteAuthorReviewReplacement('owner','run',{modelTier:'standard'})).rejects.toMatchObject({code:'MODEL_TIER_UNAVAILABLE'})
+    expect(mocks.runtime).toHaveBeenLastCalledWith('standard','owner',null,'medium',undefined,true)
+    expect(snapshot()).toBe(before)
+    expect(mocks.update).not.toHaveBeenCalled();expect(mocks.authorize).not.toHaveBeenCalled();expect(mocks.providerRequest).not.toHaveBeenCalled()
+  })
+  it('rechecks tester revocation between a changed-model quote and submit without mutating run or authorization', async () => {
+    mocks.run.modelTier='speed'
+    const runtime=await mocks.runtime();let eligible=true
+    mocks.runtime.mockImplementation(async (_tier,_user,_custom,_effort,_retained,selectable) => {
+      if(selectable&&!eligible)throw new DataAccessError(409,'MODEL_TIER_UNAVAILABLE','synthetic revoked grant')
+      return runtime
+    })
+    const quote=await quoteAuthorReviewReplacement('owner','run',{modelTier:'standard'}),before=snapshot()
+    eligible=false
+    await expect(submitAuthorReviewReplacement('owner','run',quote.quoteToken)).rejects.toMatchObject({code:'MODEL_TIER_UNAVAILABLE'})
+    expect(snapshot()).toBe(before)
+    expect(mocks.update).not.toHaveBeenCalled();expect(mocks.authorize).not.toHaveBeenCalled();expect(mocks.claim).not.toHaveBeenCalled();expect(mocks.providerRequest).not.toHaveBeenCalled()
+  })
+  it('keeps same-model and reasoning-only quotes on their admitted binding without refreshing old price or checking new selection', async () => {
+    mocks.run.modelConfigId='original-a';mocks.run.modelConfigRevision=1;mocks.run.modelPriceSnapshot={frozen:'original-price'}
+    const runtime=await mocks.runtime()
+    mocks.runtime.mockImplementation(async (_tier,_user,_custom,reasoningEffort,_retained,selectable) => {
+      if(selectable)throw new DataAccessError(409,'MODEL_TIER_UNAVAILABLE','synthetic hidden model')
+      return {...runtime,modelConfigId:'current-a',modelConfigRevision:8,reasoningEffort}
+    })
+    const quote=await quoteAuthorReviewReplacement('owner','run',{modelTier:'standard',reasoningEffort:'none'})
+    await submitAuthorReviewReplacement('owner','run',quote.quoteToken)
+    expect((await settled(quote.authorizationId)).state).toBe('complete')
+    expect(mocks.run).toMatchObject({modelConfigId:'original-a',modelConfigRevision:1,modelPriceSnapshot:{frozen:'original-price'},reasoningEffort:'none'})
+    expect(mocks.runtime.mock.calls.every(call=>call[5]!==true)).toBe(true)
+  })
+  it('binds an explicitly selected B configuration and replays its existing authorization without another admission or charge', async () => {
+    mocks.run.modelTier='speed';mocks.run.modelConfigId='model-a';mocks.run.modelConfigRevision=1;mocks.run.modelPriceSnapshot={frozen:'a-price'}
+    const runtime=await mocks.runtime()
+    mocks.runtime.mockResolvedValue({...runtime,modelConfigId:'model-b',modelConfigRevision:7})
+    const quote=await quoteAuthorReviewReplacement('owner','run',{modelTier:'standard'})
+    await submitAuthorReviewReplacement('owner','run',quote.quoteToken)
+    expect((await settled(quote.authorizationId)).state).toBe('complete')
+    expect(mocks.run).toMatchObject({modelTier:'standard',modelConfigId:'model-b',modelConfigRevision:7,modelPriceSnapshot:{frozen:'a-price'}})
+    const calls=mocks.runtime.mock.calls.length
+    mocks.runtime.mockRejectedValue(new Error('Existing authorization must not re-admit'))
+    expect(await submitAuthorReviewReplacement('owner','run',quote.quoteToken)).toMatchObject({state:'complete'})
+    expect(mocks.runtime).toHaveBeenCalledTimes(calls)
+    expect(mocks.providerRequest).toHaveBeenCalledOnce();expect(mocks.claim).toHaveBeenCalledOnce()
+  })
+  it('treats a different owned custom ID as a real model change and clears obsolete platform config binding', async () => {
+    mocks.run.modelTier='custom';mocks.run.customModelId='custom-a';mocks.run.modelConfigId='obsolete-platform';mocks.run.modelConfigRevision=1
+    const runtime=await mocks.runtime()
+    mocks.runtime.mockResolvedValue({...runtime,tier:'custom',multiplierBps:0})
+    mocks.price.mockResolvedValue({version:'credits-v1-exact',modelTier:'custom',multiplierBps:0})
+    const quote=await quoteAuthorReviewReplacement('owner','run',{modelTier:'custom',customModelId:'custom-b'})
+    expect(mocks.runtime).toHaveBeenCalledWith('custom','owner','custom-b','medium',undefined,true)
+    await submitAuthorReviewReplacement('owner','run',quote.quoteToken)
+    expect((await settled(quote.authorizationId)).state).toBe('complete')
+    expect(mocks.run).toMatchObject({modelTier:'custom',customModelId:'custom-b',modelConfigId:null,modelConfigRevision:null})
+  })
 })

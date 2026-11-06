@@ -1,3 +1,4 @@
+import { defaultSiteSettings, effectiveSiteSettings } from '@/features/site-content/defaults'
 import { usePublicSiteContent } from '@/features/site-content/public-api'
 import { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode, UIEvent, useEffect, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
@@ -20,7 +21,7 @@ import { isWindowsDesktopApp } from '@/lib/desktop-app'
 import { cn } from '@/lib/utils'
 import { useOnlineStatus } from '@/hooks/useOnlineStatus'
 import { useShellStore } from '@/store/useShellStore'
-import { desktopNavItems, mobileNavItems, workspaceLinks } from '@/types/app'
+import { mobileNavItems, workspaceLinks } from '@/types/app'
 
 type AppShellProps = {
   title: string
@@ -45,7 +46,8 @@ export default function AppShell({ title, description, children }: AppShellProps
   const location = useLocation()
   const publishedContent = usePublicSiteContent()
   const siteSettings = publishedContent.data?.settings
-  const headerNavItems = siteSettings ? siteSettings.navigation.map(item => ({href:item.url,label:item.label})) : desktopNavItems
+  const effectiveSettings = effectiveSiteSettings(siteSettings)
+  const headerNavItems = effectiveSettings.navigation.map(item => ({href:item.url,label:item.label}))
   const quickCreateOpen = useShellStore((state) => state.quickCreateOpen)
   const openQuickCreate = useShellStore((state) => state.openQuickCreate)
   const closeQuickCreate = useShellStore((state) => state.closeQuickCreate)
@@ -697,8 +699,8 @@ export default function AppShell({ title, description, children }: AppShellProps
                   <Link to="/" className="flex min-w-0 items-center gap-3">
                     <span className="inline-flex h-10 w-10 items-center justify-center overflow-hidden rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[color:var(--surface-default)]/96 md:h-11 md:w-11">
                       <AppImage
-                        src={siteSettings?.logoUrl ?? '/favicon.png'}
-                        alt={`${siteSettings?.name ?? brandMeta.productName} Logo`}
+                        src={effectiveSettings.logoUrl ?? defaultSiteSettings.logoUrl}
+                        alt={`${effectiveSettings.name} Logo`}
                         className="h-full w-full"
                         priority
                       />
@@ -707,7 +709,7 @@ export default function AppShell({ title, description, children }: AppShellProps
                       <span className="block truncate text-[11px] font-semibold uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
                         {siteSettings ? null : brandMeta.productNameEn}
                       </span>
-                      <span className="block truncate text-base font-semibold text-[var(--text-primary)]">{siteSettings?.name ?? brandMeta.productName}</span>
+                      <span className="block truncate text-base font-semibold text-[var(--text-primary)]">{effectiveSettings.name}</span>
                     </span>
                   </Link>
 

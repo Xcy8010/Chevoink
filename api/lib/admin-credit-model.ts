@@ -296,7 +296,7 @@ export async function getAdminModelManagement(view: 'active' | 'archived' | 'all
         freePromotion: readModelPromotion(model.metadata),
         ...(modelKind === 'image_generation' ? { perCallCredits: publicImagePrice(model).perCallCredits } : {}),
         ...(modelKind === 'web_search' || modelKind === 'web_fetch' ? { perCallCredits: webToolChargeMilli(model.multiplierBps) / MILLI } : {}),
-        enabled: model.enabled || Boolean(fallback), selectable: model.selectable, isDefault: model.isDefault,
+        enabled: model.enabled || Boolean(fallback), selectable: model.selectable, testerSelectable: metadata.testerSelectable === true, isDefault: model.isDefault,
         apiKeyConfigured: Boolean(model.apiKeyCiphertext) || Boolean(fallback?.apiKeyConfigured), requestCount: row?._count._all ?? 0,
         requestTokens: row?._sum.requestTokens ?? 0, responseTokens: row?._sum.responseTokens ?? 0,
         ...(capabilities.reasoningParameterMode ? { reasoningParameterMode: capabilities.reasoningParameterMode } : {}),
@@ -332,6 +332,7 @@ export type UpdateAdminModelInput = {
   multiplier?: number
   enabled?: boolean
   selectable?: boolean
+  testerSelectable?: boolean
   isDefault?: boolean
   reasoningParameterMode?: 'native' | 'omit' | null
   outputTokenParameter?: 'max_tokens' | 'max_completion_tokens' | null
@@ -433,6 +434,7 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
           ...(input.activities !== undefined ? { activities: input.activities ? { ...input.activities, revision: (readModelActivities(model.metadata)?.revision ?? 0) + 1 } : null } : {}),
           ...(input.publicDescription !== undefined ? { publicDescription: input.publicDescription } : {}),
           ...(input.publicFeatures !== undefined ? { publicFeatures: input.publicFeatures } : {}),
+          testerSelectable: nextEnabled && !nextSelectable && adminModelKind(model.metadata) === 'text' && (input.testerSelectable ?? metadata.testerSelectable === true),
           freePromotion,
           ...(isWebTool && input.webToolProtocol !== undefined ? { webToolProtocol: input.webToolProtocol } : {}),
           ...(input.imageQuality !== undefined ? { imageQuality: input.imageQuality } : {}),

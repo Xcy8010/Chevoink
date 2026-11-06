@@ -53,7 +53,7 @@ export const modelAssignmentTool = defineTool({ name: 'model_assign', title: 'åˆ
       const authority = (tx: import('@prisma/client').Prisma.TransactionClient, effectiveReasoningEffort?: string) => assertConfigurationAuthority(tx, ctx, {
         model: args.model, task: args.task, global: args.scope === 'global', effectiveReasoningEffort })
       await runtimeTransaction(authority)
-      const selected = await resolveAssignedModel(ctx.userId, args.model, args.task === 'vision')
+      const selected = await resolveAssignedModel(ctx.userId, args.model, args.task === 'vision', true)
       const requestHash = runtimeJson(args).hash
       const work = async (tx: import('@prisma/client').Prisma.TransactionClient) => {
         const run = await lockOwnedRun(tx, ctx.userId, ctx.runId)

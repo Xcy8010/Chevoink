@@ -45,6 +45,7 @@ beforeEach(() => {
   mocks.active.mockReturnValue(false)
   mocks.activeRun.mockReturnValue(undefined)
   mocks.count.mockResolvedValue(0)
+  mocks.tierRuntime.mockImplementation(async tier=>({tier,modelConfigId:'selected-model',modelConfigRevision:2}))
   mocks.prepare.mockResolvedValue(72)
   mocks.terminal.mockResolvedValue({ id: 'pause-72' })
   mocks.find.mockResolvedValueOnce(run).mockResolvedValue({ id: 'run19' })
@@ -324,7 +325,7 @@ describe('continue API exact target', () => {
     expect(await continueLoopRun('u', 'run19', { modelTier: 'lite', customModelId: null, reasoningEffort: 'high' })).toMatchObject({ runId: 'run19' })
     expect(mocks.creditAccess).toHaveBeenCalledWith('u', 'lite')
     expect(mocks.tierRuntime).toHaveBeenCalledWith('lite', 'u', null, 'high')
-    expect(mocks.runUpdate).toHaveBeenCalledWith({ where: { id: 'run19' }, data: { modelTier: 'lite', customModelId: null, reasoningEffort: 'high' } })
+    expect(mocks.runUpdate).toHaveBeenCalledWith({ where: { id: 'run19' }, data: { modelTier: 'lite', customModelId: null, reasoningEffort: 'high', modelConfigId:'selected-model',modelConfigRevision:2 } })
     expect(mocks.execute.mock.calls[0][0]).toMatchObject({ runId: 'run19', modelTier: 'lite', customModelId: null, reasoningEffort: 'high', resume: true })
   })
   it('keeps the saved tier and skips the write-back when no model selection travels with the resume', async () => {
@@ -334,4 +335,21 @@ describe('continue API exact target', () => {
     expect(mocks.runUpdate).not.toHaveBeenCalled()
     expect(mocks.execute.mock.calls[0][0]).toMatchObject({ modelTier: 'speed', reasoningEffort: 'high' })
   })
+})
+
+it('binds B only for an actual model change and preserves the original price/checkpoint contract', async () => {
+  const original={...run,modelConfigId:'model-a',modelConfigRevision:1,modelPriceSnapshot:{frozen:'original-price'},usage:{known:123}}
+  mocks.find.mockReset().mockImplementation(async args=>args.where.id?original:{id:run.id})
+  mocks.tierRuntime.mockResolvedValue({tier:'standard',modelConfigId:'model-b',modelConfigRevision:7})
+  const before=JSON.stringify(original)
+  await continueLoopRun('u',run.id,{modelTier:'standard',reasoningEffort:'high'})
+  expect(mocks.runUpdate).toHaveBeenCalledWith({where:{id:run.id},data:{modelTier:'standard',customModelId:null,reasoningEffort:'high',modelConfigId:'model-b',modelConfigRevision:7}})
+  expect(JSON.stringify(original)).toBe(before)
+})
+it('keeps same-model reasoning changes on the admitted revision instead of replacing its identity or price', async () => {
+  const original={...run,modelConfigId:'model-a',modelConfigRevision:1,modelPriceSnapshot:{frozen:'original-price'}}
+  mocks.find.mockReset().mockImplementation(async args=>args.where.id?original:{id:run.id})
+  mocks.tierRuntime.mockResolvedValue({tier:'speed',modelConfigId:'current-a',modelConfigRevision:8})
+  await continueLoopRun('u',run.id,{modelTier:'speed',reasoningEffort:'low'})
+  expect(mocks.runUpdate).toHaveBeenCalledWith({where:{id:run.id},data:{modelTier:'speed',customModelId:null,reasoningEffort:'low'}})
 })

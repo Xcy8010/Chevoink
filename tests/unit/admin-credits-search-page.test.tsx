@@ -66,7 +66,6 @@ it.each([{ label: '重置', word: 'RESET_USER', suspended: false }, { label: '�
   mount(); await screen.findByRole('link', { name: '目标作者' }); search('outside-user-id')
   await waitFor(() => expect(mocks.credits).toHaveBeenLastCalledWith('outside-user-id', { page:1,pageSize:20 }))
   const link = await screen.findByRole('link', { name: '目标作者' })
-  fireEvent.click(within(link.closest('tr')!).getByText('更多操作'))
   fireEvent.click(within(link.closest('tr')!).getByRole('button', { name: label, exact: true }))
   expect(mocks.reset).not.toHaveBeenCalled(); expect(mocks.pause).not.toHaveBeenCalled()
   await confirm(word)

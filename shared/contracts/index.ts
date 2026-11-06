@@ -36,3 +36,5 @@ export * from './novel-plans.js'
 export * from './site-content.js'
 
 export * from './app-release.js'
+
+export * from './tester.js'

@@ -1,6 +1,7 @@
+import { userIdentityUpdateSchema } from '../../shared/contracts/tester.js'
 import { describe, expect, it, vi } from 'vitest'
 import type { CreditAccount, Prisma } from '@prisma/client'
-import { applyTesterCreditFloor, isEffectiveTester, testerTopupDelta, TESTER_CREDIT_RULE } from '../../api/lib/tester-entitlement.js'
+import { applyTesterCreditFloor, isEffectiveTester, testerTopupDelta, TESTER_CREDIT_RULE, presentTesterIdentity } from '../../api/lib/tester-entitlement.js'
 const now = new Date('2026-11-06T12:00:00Z')
 function fixture(enabled = true, bonus = 0, used = 431000) {
  let account: CreditAccount = { userId: 'synthetic-tester', dailyAllowanceMilli: 450000, dailyUsedMilli: used, bonusBalanceMilli: bonus, testerTopupSequence: 0, suspendedAt: now, periodStartedAt: now, periodEndsAt: new Date(now.getTime()+86400000), createdAt: now, updatedAt: now }
@@ -46,4 +47,19 @@ describe('independent tester credit entitlement', () => {
   const f=fixture();await isEffectiveTester(f.tx,'synthetic-tester',now)
   expect(f.db.user.findFirst).toHaveBeenCalledWith({where:{id:'synthetic-tester',bannedAt:null,OR:[{role:'admin',isSuperAdmin:true},{testerEntitlement:{is:{enabled:true,OR:[{expiresAt:null},{expiresAt:{gt:now}}]}}}]},select:{id:true}})
  })
+})
+
+it('requires an actual role revision and rejects self-declared privilege fields at the identity boundary', () => {
+ const operationId='00000000-0000-4000-8000-000000000001'
+ expect(userIdentityUpdateSchema.safeParse({operationId,role:'admin',expectedRole:'user'}).success).toBe(true)
+ for(const input of [{operationId},{operationId,role:'admin'},{operationId,role:'superadmin',expectedRole:'user'},{operationId,isSuperAdmin:true},{operationId,tester:{enabled:true,reason:'synthetic',expiresAt:null,expectedRevision:0},isSuperAdmin:true}])expect(userIdentityUpdateSchema.safeParse(input).success).toBe(false)
+})
+it('presents intrinsic super-admin tester status and strict grant expiry without changing stored grants', () => {
+ const ordinary={role:'user',isSuperAdmin:false,bannedAt:null,testerEntitlement:null}
+ expect(presentTesterIdentity(ordinary,now)).toEqual({enabled:false,effective:false,revision:0,expiresAt:null,reason:null})
+ expect(presentTesterIdentity({...ordinary,role:'admin',isSuperAdmin:true},now).effective).toBe(true)
+ expect(presentTesterIdentity({...ordinary,role:'admin',isSuperAdmin:true,bannedAt:now},now).effective).toBe(false)
+ const grant={enabled:true,revision:2,expiresAt:now,reason:'synthetic'}
+ expect(presentTesterIdentity({...ordinary,testerEntitlement:grant},now).effective).toBe(false)
+ expect(presentTesterIdentity({...ordinary,testerEntitlement:grant},new Date(now.getTime()-1)).effective).toBe(true)
 })

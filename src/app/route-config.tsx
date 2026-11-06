@@ -82,7 +82,6 @@ const AdminAgentEvalsPage = lazyPage(() => import('@/features/admin/pages/AdminA
 const AdminCraftLibraryPage = lazyPage(() => import('@/features/admin/pages/AdminCraftLibraryPage'))
 const AdminFeedbackPage = lazyPage(() => import('@/features/admin/pages/AdminFeedbackPage'))
 const AdminLogsPage = lazyPage(() => import('@/features/admin/pages/AdminLogsPage'))
-const AdminTestersPage = lazyPage(() => import('@/features/admin/pages/AdminTestersPage'))
 const AdminSettingsPage = lazyPage(() => import('@/features/admin/pages/AdminSettingsPage'))
 const AdminAppReleasesPage = lazyPage(() => import('@/features/admin/pages/AdminAppReleasesPage'))
 const AppVersionPage = lazyPage(() => import('@/features/app-releases/AppVersionPage'))
@@ -103,7 +102,7 @@ export type AppRouteDefinition = {
 export const appRoutes: AppRouteDefinition[] = [
   {path:'/admin/app-releases',title:'应用版本',description:'管理具体应用产物与版本通道。',element:<AdminLayout><AdminAppReleasesPage/></AdminLayout>,useShell:false},
   {path:'/version',title:'应用版本',description:'查看当前版本的新增功能、改进和修复。',element:<AppVersionPage/>},
-  {path:'/admin/testers',title:'测试员权益',description:'管理独立测试资格。',element:<AdminLayout><AdminTestersPage/></AdminLayout>,useShell:false},
+  {path:'/admin/testers',title:'用户身份管理',description:'测试员资格统一在用户管理维护。',element:<Navigate to="/admin/users" replace/>,useShell:false},
   {path:'/admin/content',title:'公告与帮助政策',description:'管理站点公开内容。',element:<AdminLayout><AdminContentPage/></AdminLayout>,useShell:false},
   {path:'/admin/site-settings',title:'站点设置',description:'管理站点资料与联系入口。',element:<AdminLayout><AdminSiteSettingsPage/></AdminLayout>,useShell:false},
   {path:'/legal',title:'正式政策',description:'服务条款与隐私政策。',element:<LegalPage/>},

@@ -82,6 +82,6 @@ export async function applyWindowConfiguration(tx: Prisma.TransactionClient, use
 
 export async function patchWindowConfiguration(userId: string, sessionId: string, input: PatchAgentWindowConfiguration) {
   await getWindowConfiguration(userId, sessionId)
-  const model = input.model ? (await resolveAssignedModel(userId, input.model)).selection : input.model
+  const model = input.model ? (await resolveAssignedModel(userId, input.model, false, true)).selection : input.model
   return prisma.$transaction(tx => applyWindowConfiguration(tx, userId, sessionId, { ...input, ...(model !== undefined ? { model } : {}) }))
 }

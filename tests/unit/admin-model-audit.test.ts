@@ -23,3 +23,9 @@ it('tracks original route capability-only edits and presents URL fingerprints wi
   expect(detail.changes).toEqual([expect.objectContaining({field:'routes',before:[expect.objectContaining({contextWindowTokens:64000,reasoningEfforts:['high'],visionEnabled:false})],after:[expect.objectContaining({contextWindowTokens:128000,reasoningEfforts:['high','max'],visionEnabled:true,endpoint:{origin:'https://example.invalid',pathFingerprint:expect.any(String),hasQuery:true}})]})])
   for(const secret of ['synthetic-route-cipher','synthetic-opaque-cipher','synthetic-query','secret-path'])expect(JSON.stringify(detail)).not.toContain(secret)
 })
+
+it('audits tester-only visibility independently from public selection without exposing arbitrary metadata', () => {
+  const before=model({testerSelectable:false})
+  const detail=adminModelChangeDetail(before,{...before,revision:2,metadata:{testerSelectable:true}},false)
+  expect(detail.changes).toEqual([{field:'testerSelectable',before:false,after:true}])
+})
