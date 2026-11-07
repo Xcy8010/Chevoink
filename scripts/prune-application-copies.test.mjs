@@ -6,7 +6,7 @@ import os from 'node:os'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { parseMountinfo, planApplicationCopies, pruneApplicationCopies, readProcessReferences, lockIsHeld } from './prune-application-copies.mjs'
+import { parseMountinfo, planApplicationCopies, planDependencyCaches, pruneApplicationCopies, readProcessReferences, lockIsHeld } from './prune-application-copies.mjs'
 
 const sha = character => character.repeat(40)
 const ids = ['10000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002']
@@ -303,4 +303,267 @@ test('relative Node entry through opaque root alias also fails closed without fo
   assert.equal(result.operations.length, 0)
   assert.equal(result.skipped.find(item => item.name === oldName).reason, 'COPY_PROCESS_ROOT_LINK_UNVERIFIED')
   assert.equal(fs.readFileSync(path.join(f.old, 'source.js'), 'utf8'), 'export const version = 1\n')
+})
+
+
+function cacheFixture(t) {
+  const f = fixture(t), cache = path.join(f.old, 'node_modules')
+  fs.mkdirSync(path.join(f.old, 'plan', 'evidence'), { recursive: true })
+  fs.writeFileSync(path.join(f.old, 'plan', 'evidence', 'sentinel.json'), '{"preserve":true}\n')
+  fs.mkdirSync(path.join(f.old, 'api'));fs.chmodSync(path.join(f.old, 'api'), 0o775)
+  fs.writeFileSync(path.join(f.old, 'api', 'source.js'), 'source must remain')
+  json(path.join(f.old, '.release-migration-before.json'), { catalog: 'before' })
+  json(path.join(f.old, '.release-migration-after.json'), { catalog: 'after' })
+  for (const directory of [cache, path.join(f.root, 'current', 'node_modules'), path.join(f.root, baseline, 'node_modules')]) {
+    fs.mkdirSync(path.join(directory, 'pkg'), { recursive: true, mode: 0o700 })
+    fs.writeFileSync(path.join(directory, 'pkg', 'index.js'), 'dependency bytes')
+    fs.mkdirSync(path.join(directory, 'empty'), { mode: 0o700 })
+  }
+  return { ...f, cache }
+}
+function retainedSource(directory) {
+  const records = []
+  function walk(directory) {
+    for (const name of fs.readdirSync(directory).filter(name => name !== 'node_modules')) {
+      const file = path.join(directory, name), value = fs.lstatSync(file, { bigint: true })
+      records.push({ path: file, dev: String(value.dev), ino: String(value.ino), mode: String(value.mode), ...(value.isFile() ? { sha256: hash(fs.readFileSync(file)) } : {}) })
+      if (value.isDirectory() && !value.isSymbolicLink()) walk(file)
+    }
+  }
+  walk(directory);return records
+}
+function cacheJournal(f) {
+  const receipt = path.join(f.store, ids[0] + '.jsonl')
+  return { receipt, rows: fs.readFileSync(receipt, 'utf8').trim().split('\n').map(JSON.parse), isolated: path.join(f.store, ids[0]), manifest: path.join(f.store, ids[0] + '.cache-manifest.json') }
+}
+function preparedCacheJob(f, progress = 'isolated') {
+  const receipt = path.join(f.store, ids[0] + '.jsonl'), isolated = path.join(f.store, ids[0])
+  const processes = () => (progress === 'started' ? fs.existsSync(receipt) : fs.existsSync(isolated))
+    ? [{ pid: 43, cwd: progress === 'started' ? f.old : isolated, args: ['node'], node: true }] : []
+  const result = pruneApplicationCopies({ ...f.options, processes })
+  assert.equal(result.operations?.[0]?.state, 'deferred', JSON.stringify(result))
+  assert.equal(result.operations[0].reason, 'COPY_PROCESS_REFERENCE')
+  const job = cacheJournal(f)
+  if (progress === 'deleting') fs.appendFileSync(job.receipt, JSON.stringify({ operationId: ids[0], kind: 'dependency_cache', state: 'deleting' }) + '\n')
+  return { ...job, progress }
+}
+
+test('cache-only deletion leaves source, protected evidence and four metadata files at their original paths and hashes', t => {
+  const f = cacheFixture(t), original = retainedSource(f.old)
+  const current = retainedSource(path.join(f.root, 'current', 'node_modules')), keptBaseline = retainedSource(path.join(f.root, baseline, 'node_modules'))
+  assert.equal(planApplicationCopies(f.options).candidates.length, 0)
+  assert.equal(planDependencyCaches(f.options).candidates[0].cache.name, 'node_modules')
+  const result = pruneApplicationCopies(f.options)
+  assert.equal(result.status, 'inspected', JSON.stringify(result));assert.equal(result.operations.length, 1)
+  assert.equal(result.operations[0].kind, 'dependency_cache');assert.equal(result.operations[0].scope, 'node_modules_only')
+  assert.equal(result.operations[0].state, 'deleted');assert.equal(result.operations[0].cacheLogicalFileBytes, String(Buffer.byteLength('dependency bytes')))
+  assert.equal(result.operations[0].sourceRetained, true);assert(!fs.existsSync(f.cache));assert.deepEqual(retainedSource(f.old), original)
+  assert.deepEqual(retainedSource(path.join(f.root, 'current', 'node_modules')), current)
+  assert.deepEqual(retainedSource(path.join(f.root, baseline, 'node_modules')), keptBaseline)
+  const journal = cacheJournal(f), manifest = JSON.parse(fs.readFileSync(journal.manifest, 'utf8'))
+  assert.deepEqual(journal.rows.map(row => row.state), ['started', 'isolated', 'deleting', 'deleted'])
+  assert(journal.rows.every(row => row.kind === 'dependency_cache'))
+  assert.equal(journal.rows[0].manifest.sha256, hash(fs.readFileSync(journal.manifest)))
+  assert.equal(journal.rows[0].evidence.length, 4);assert.equal(manifest.entries.length, 3)
+  assert(fs.statSync(journal.receipt).size < 2097152)
+})
+
+for (const kind of ['marker', 'journal', 'process', 'cross-dependency']) test(`cache-only common ${kind} qualification cannot be bypassed by a full-copy failure`, t => {
+  const f = cacheFixture(t);let options = f.options
+  if (kind === 'marker') json(path.join(f.old, '.chevoink-release.json'), { revision: sha('a'), archiveSha256: 'f'.repeat(64) })
+  if (kind === 'journal') f.journal(sha('c'), ['switched', 'healthy'])
+  if (kind === 'process') options = { ...options, processes: () => [{ pid: 42, cwd: f.root, args: ['node', path.join(oldName, 'api', 'source.js')], node: true }] }
+  if (kind === 'cross-dependency') { const destination = path.join(f.root, 'current', 'node_modules');fs.rmSync(destination, { recursive: true });link(f.cache, destination) }
+  const result = pruneApplicationCopies(options)
+  assert.equal(result.operations.length, 0);assert(fs.existsSync(path.join(f.cache, 'pkg', 'index.js')))
+  assert(result.skipped.some(item => item.name === oldName && item.kind === 'dependency_cache'))
+})
+
+test('cache-only keeps current and exact-baseline caches and skips unknown and migrated roots', t => {
+  const f = cacheFixture(t), unknown = path.join(f.root, 'release-' + sha('e'));fs.mkdirSync(unknown)
+  const target = path.join(f.base, 'original-copy');fs.mkdirSync(target);fs.mkdirSync(path.join(target, 'node_modules'))
+  link(target, path.join(f.root, `previous-${sha('e')}-for-${sha('b')}`))
+  const plan = planDependencyCaches(f.options)
+  assert.deepEqual(plan.candidates.map(item => item.name), [oldName])
+  assert(fs.existsSync(path.join(target, 'node_modules')));assert(fs.existsSync(unknown))
+})
+
+test('cache-only never follows a node_modules root symlink', t => {
+  const f = cacheFixture(t), target = path.join(f.base, 'external-cache');fs.renameSync(f.cache, target);link(target, f.cache)
+  const result = pruneApplicationCopies(f.options)
+  assert.equal(result.operations.length, 0);assert(result.skipped.some(item => item.kind === 'dependency_cache' && item.reason === 'COPY_OWNER_OR_PATH_CHANGED'))
+  assert.equal(fs.readFileSync(path.join(target, 'pkg', 'index.js'), 'utf8'), 'dependency bytes')
+})
+
+test('cache-only refuses nested same-device mounts without traversing or renaming the cache', t => {
+  const f = cacheFixture(t), options = { ...f.options, mountinfo: () => f.options.mountinfo() + mount(path.join(f.cache, 'pkg')) }
+  const result = pruneApplicationCopies(options)
+  assert.equal(result.operations.length, 0);assert(result.skipped.some(item => item.kind === 'dependency_cache' && item.reason === 'COPY_NESTED_MOUNT'))
+  assert(fs.existsSync(f.cache))
+})
+
+for (const name of ['evidence', 'investigation', 'logs', '.git', 'PGDATA', '.env']) test(`cache-only strict recursive guard preserves nested ${name}`, t => {
+  const f = cacheFixture(t), file = path.join(f.cache, 'pkg', name)
+  if (name === '.env') fs.writeFileSync(file, 'private fixture')
+  else { fs.mkdirSync(file);fs.writeFileSync(path.join(file, 'sentinel'), 'preserve') }
+  const result = pruneApplicationCopies(f.options)
+  assert.equal(result.operations.length, 0);assert(result.skipped.some(item => item.kind === 'dependency_cache' && item.reason === 'COPY_PROTECTED_DATA'))
+  assert(fs.existsSync(file))
+})
+
+for (const kind of ['parent', 'cache']) test(`cache-only binds the ${kind} inode before isolation`, t => {
+  const f = cacheFixture(t);let changed = false
+  const processes = () => {
+    if (!changed && fs.existsSync(path.join(f.store, ids[0] + '.jsonl'))) {
+      changed = true
+      if (kind === 'cache') { fs.renameSync(f.cache, path.join(f.base, 'original-cache'));fs.mkdirSync(f.cache) }
+      else {
+        const saved = path.join(f.base, 'original-source');fs.renameSync(f.old, saved);fs.mkdirSync(f.old)
+        for (const name of ['.chevoink-release.json', '.release-health.json', '.release-migration-before.json', '.release-migration-after.json']) fs.copyFileSync(path.join(saved, name), path.join(f.old, name))
+      }
+    }
+    return []
+  }
+  const result = pruneApplicationCopies({ ...f.options, processes })
+  assert.equal(result.operations[0].state, 'deferred')
+  assert.equal(result.operations[0].reason, kind === 'cache' ? 'CACHE_IDENTITY_CHANGED' : 'CACHE_PARENT_IDENTITY_CHANGED')
+  assert(fs.existsSync(kind === 'cache' ? path.join(f.base, 'original-cache') : path.join(f.base, 'original-source')))
+})
+
+test('cache-only binds the quarantine inode after isolation', t => {
+  const f = cacheFixture(t);let changed = false
+  const isolated = path.join(f.store, ids[0])
+  const result = pruneApplicationCopies({ ...f.options, processes: () => {
+    if (!changed && fs.existsSync(isolated)) { changed = true;fs.renameSync(isolated, path.join(f.base, 'original-cache'));fs.mkdirSync(isolated);fs.writeFileSync(path.join(isolated, 'sentinel'), 'replacement') }
+    return []
+  } })
+  assert.equal(result.operations[0].state, 'deferred');assert.equal(result.operations[0].reason, 'CACHE_IDENTITY_CHANGED')
+  assert.equal(fs.readFileSync(path.join(isolated, 'sentinel'), 'utf8'), 'replacement')
+})
+
+for (const kind of ['keeper', 'marker', 'fourth-metadata']) test(`cache-only refuses a ${kind} change after registration`, t => {
+  const f = cacheFixture(t);let changed = false
+  const result = pruneApplicationCopies({ ...f.options, processes: () => {
+    if (!changed && fs.existsSync(path.join(f.store, ids[0] + '.jsonl'))) {
+      changed = true
+      if (kind === 'keeper') json(path.join(f.root, 'current', '.chevoink-release.json'), { revision: sha('d'), archiveSha256: 'e'.repeat(64) })
+      if (kind === 'marker') json(path.join(f.old, '.chevoink-release.json'), { revision: sha('b'), archiveSha256: 'e'.repeat(64) })
+      if (kind === 'fourth-metadata') json(path.join(f.old, '.release-migration-after.json'), { catalog: 'changed' })
+    }
+    return []
+  } })
+  assert.equal(result.operations[0].state, 'deferred');assert.equal(result.operations[0].reason, kind === 'keeper' ? 'COPY_KEEPERS_CHANGED' : 'CACHE_PARENT_METADATA_CHANGED')
+  assert(fs.existsSync(f.cache))
+})
+
+for (const progress of ['started', 'isolated', 'deleting']) test(`cache-only same UUID resumes ${progress} and retains protected source`, t => {
+  const f = cacheFixture(t), original = retainedSource(f.old), job = preparedCacheJob(f, progress)
+  if (progress === 'deleting') fs.unlinkSync(path.join(job.isolated, 'pkg', 'index.js'))
+  f.copy(oldestName, sha('a'));f.journal(sha('b'))
+  const result = pruneApplicationCopies(f.options)
+  assert.equal(result.status, 'recovered');assert.equal(result.operations.length, 1);assert.equal(result.operations[0].operationId, ids[0])
+  assert.equal(result.operations[0].kind, 'dependency_cache');assert.equal(result.operations[0].state, 'deleted')
+  assert(!fs.existsSync(f.cache));assert(!fs.existsSync(job.isolated));assert.deepEqual(retainedSource(f.old), original)
+  assert(fs.existsSync(path.join(f.root, oldestName)))
+})
+
+for (const change of ['missing-before-deleting', 'unknown-entry', 'content', 'file-inode']) test(`cache-only recovery rejects ${change}`, t => {
+  const f = cacheFixture(t), job = preparedCacheJob(f, change === 'missing-before-deleting' ? 'isolated' : 'deleting')
+  const file = path.join(job.isolated, 'pkg', 'index.js')
+  if (change === 'missing-before-deleting') fs.unlinkSync(file)
+  if (change === 'unknown-entry') fs.writeFileSync(path.join(job.isolated, 'unknown.js'), 'not registered')
+  if (change === 'content') fs.writeFileSync(file, 'changed content')
+  if (change === 'file-inode') { fs.renameSync(file, path.join(f.base, 'original-module.js'));fs.writeFileSync(file, 'dependency bytes') }
+  const result = pruneApplicationCopies(f.options)
+  const expected = { 'missing-before-deleting': 'CACHE_ENTRY_MISSING', 'unknown-entry': 'CACHE_UNKNOWN_ENTRY', content: 'CACHE_ENTRY_CHANGED', 'file-inode': 'CACHE_ENTRY_CHANGED' }
+  assert.equal(result.operations[0].state, 'deferred');assert.equal(result.operations[0].reason, expected[change]);assert(fs.existsSync(job.isolated))
+})
+
+test('cache-only recovery rechecks new process references and bind mounts', t => {
+  const f = cacheFixture(t), job = preparedCacheJob(f)
+  const busy = pruneApplicationCopies({ ...f.options, processes: () => [{ pid: 44, cwd: job.isolated, args: ['node'], node: true }] })
+  assert.equal(busy.operations[0].reason, 'COPY_PROCESS_REFERENCE')
+  const mounted = pruneApplicationCopies({ ...f.options, mountinfo: () => f.options.mountinfo() + mount(path.join(job.isolated, 'pkg')) })
+  assert.equal(mounted.reason ?? mounted.operations[0].reason, 'COPY_NESTED_MOUNT');assert(fs.existsSync(job.isolated))
+})
+
+test('cache-only after-delete crash reconciles absence with unchanged original metadata and manifest', t => {
+  const f = cacheFixture(t), original = retainedSource(f.old), job = preparedCacheJob(f, 'deleting');fs.rmSync(job.isolated, { recursive: true })
+  const result = pruneApplicationCopies(f.options)
+  assert.equal(result.operations[0].state, 'absent_reconciled');assert.equal(result.operations[0].kind, 'dependency_cache')
+  assert.deepEqual(retainedSource(f.old), original)
+})
+
+test('cache-only never deletes a cache recreated after its terminal receipt', t => {
+  const f = cacheFixture(t);assert.equal(pruneApplicationCopies(f.options).operations[0].state, 'deleted')
+  fs.mkdirSync(f.cache);fs.writeFileSync(path.join(f.cache, 'sentinel'), 'new unknown cache')
+  const result = pruneApplicationCopies(f.options)
+  assert.equal(result.operations.length, 0);assert(result.skipped.some(item => item.reason === 'CACHE_RECREATED_AFTER_TERMINAL'))
+  assert.equal(fs.readFileSync(path.join(f.cache, 'sentinel'), 'utf8'), 'new unknown cache')
+  assert.equal(cacheJournal(f).rows.filter(row => row.state === 'started').length, 1)
+})
+
+test('cache-only manifest may exceed the legacy 2 MiB receipt limit but is separately pinned and bounded', t => {
+  const f = cacheFixture(t), job = preparedCacheJob(f)
+  const bytes = Buffer.concat([fs.readFileSync(job.manifest), Buffer.alloc(2097152, 0x20)]);fs.writeFileSync(job.manifest, bytes)
+  const rows = job.rows;rows[0].manifest.sha256 = hash(bytes);fs.writeFileSync(job.receipt, rows.map(JSON.stringify).join('\n') + '\n')
+  assert(fs.statSync(job.manifest).size > 2097152);assert(fs.statSync(job.receipt).size < 2097152)
+  const result = pruneApplicationCopies(f.options)
+  assert.equal(result.operations[0].state, 'deleted', JSON.stringify(result))
+})
+
+for (const kind of ['digest', 'size']) test(`cache-only refuses changed manifest ${kind}`, t => {
+  const f = cacheFixture(t), job = preparedCacheJob(f)
+  if (kind === 'digest') fs.appendFileSync(job.manifest, ' ')
+  else fs.truncateSync(job.manifest, 32 * 1024 * 1024 + 1)
+  const result = pruneApplicationCopies(f.options)
+  assert.equal(result.operations[0].state, 'deferred');assert.equal(result.operations[0].reason, kind === 'digest' ? 'CACHE_MANIFEST_CHANGED' : 'CACHE_MANIFEST_LIMIT')
+  assert(fs.existsSync(job.isolated))
+})
+
+test('legacy full-copy receipts cannot be reinterpreted by adding a cache manifest field', t => {
+  const f = fixture(t), job = preparedJob(f, 'isolated')
+  const rows = fs.readFileSync(job.receipt, 'utf8').trim().split('\n').map(JSON.parse);rows[0].cache = { name: 'node_modules', dev: rows[0].dev, ino: rows[0].ino }
+  fs.writeFileSync(job.receipt, rows.map(JSON.stringify).join('\n') + '\n')
+  const result = pruneApplicationCopies(f.options)
+  assert.equal(result.reason, 'COPY_RECEIPT_INVALID');assert(fs.existsSync(job.isolated))
+})
+
+
+test('cache-only nested dependency links are unlinked without deleting their external targets', t => {
+  const f = cacheFixture(t), external = path.join(f.base, 'external-dependency');fs.mkdirSync(external)
+  fs.writeFileSync(path.join(external, 'sentinel'), 'external bytes');link(external, path.join(f.cache, 'linked-package'))
+  const result = pruneApplicationCopies(f.options)
+  assert.equal(result.operations[0].state, 'deleted');assert(!fs.existsSync(f.cache))
+  assert.equal(fs.readFileSync(path.join(external, 'sentinel'), 'utf8'), 'external bytes')
+})
+
+test('cache-only recovery refuses a changed registered symlink', t => {
+  const f = cacheFixture(t), first = path.join(f.base, 'link-first'), second = path.join(f.base, 'link-second')
+  fs.mkdirSync(first);fs.mkdirSync(second);link(first, path.join(f.cache, 'linked-package'))
+  const job = preparedCacheJob(f, 'deleting'), saved = path.join(job.isolated, 'linked-package')
+  fs.unlinkSync(saved);link(second, saved)
+  const result = pruneApplicationCopies(f.options)
+  assert.equal(result.operations[0].reason, 'CACHE_ENTRY_CHANGED');assert(fs.existsSync(job.isolated))
+  assert(fs.existsSync(first));assert(fs.existsSync(second))
+})
+
+test('cache-only recovery refuses a replacement parent even when its metadata bytes match', t => {
+  const f = cacheFixture(t), job = preparedCacheJob(f), saved = path.join(f.base, 'original-parent');fs.renameSync(f.old, saved);fs.mkdirSync(f.old)
+  for (const name of ['.chevoink-release.json', '.release-health.json', '.release-migration-before.json', '.release-migration-after.json']) fs.copyFileSync(path.join(saved, name), path.join(f.old, name))
+  const result = pruneApplicationCopies(f.options)
+  assert.equal(result.operations[0].reason, 'CACHE_PARENT_IDENTITY_CHANGED');assert(fs.existsSync(job.isolated));assert(fs.existsSync(saved))
+})
+
+test('cache-only recovery refuses missing original metadata before reconciling a deleted cache', t => {
+  const f = cacheFixture(t), job = preparedCacheJob(f, 'deleting');fs.rmSync(job.isolated, { recursive: true });fs.unlinkSync(path.join(f.old, '.release-migration-after.json'))
+  const result = pruneApplicationCopies(f.options)
+  assert.equal(result.operations[0].state, 'deferred');assert.equal(result.operations[0].reason, 'CACHE_PARENT_METADATA_CHANGED')
+})
+
+test('an orphan cache manifest never authorizes fresh cache deletion', t => {
+  const f = cacheFixture(t);fs.mkdirSync(f.store, { mode: 0o700 })
+  json(path.join(f.store, ids[0] + '.cache-manifest.json'), { version: 1, kind: 'dependency_cache' })
+  const result = pruneApplicationCopies(f.options)
+  assert.equal(result.reason, 'COPY_QUARANTINE_UNKNOWN');assert(fs.existsSync(f.cache))
 })

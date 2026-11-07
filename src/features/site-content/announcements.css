@@ -1,7 +1,7 @@
 .site-announcements-home { margin-bottom: 12px; }
-.site-announcements-studio { display: flex; flex-shrink: 0; padding: 4px 12px max(6px,var(--safe-bottom,0px)); }
+.site-announcements-studio { display: flex; min-width: 0; flex-shrink: 0; margin: 8px 8px 4px; }
 .site-announcement-card { display: flex; align-items: center; min-width: 0; border: 1px solid var(--border-subtle); border-radius: 10px; background: var(--surface-default); color: var(--text-primary); }
-.site-announcement-dock { width: 320px; max-width: 100%; height: 40px; box-shadow: 0 2px 8px #00000006; }
+.site-announcement-dock { width: 100%; max-width: 100%; height: 40px; box-shadow: 0 2px 8px #00000006; }
 .site-announcement-banner { width: 100%; padding-block: 5px; background: var(--surface-muted); }
 .site-announcement-open { display: flex; flex: 1; min-width: 0; height: 100%; align-items: center; gap: 8px; padding: 0 10px; }
 .site-announcement-dismiss,.site-announcement-dialog-close { display: inline-flex; flex-shrink: 0; width: 32px; height: 32px; padding: 0; align-items: center; justify-content: center; border-radius: 7px; color: var(--text-secondary); }
@@ -26,3 +26,7 @@
  .site-announcement-dialog-footer > button { min-height: 44px; }
 }
 @media(prefers-reduced-motion:reduce) { .site-announcement-dock .site-announcement-dismiss { transition: none; } }
+
+/* Body portals need the same neutral palette as the actual Studio dialogs. */
+.site-announcement-dialog.studio-workspace { background: var(--surface-default); font-family: var(--studio-body-font); }
+.site-announcement-dialog.studio-workspace button:focus-visible { outline-color: var(--text-primary); }

@@ -9,8 +9,9 @@ export const productionSourcePath = value => /^(api|shared|prisma)\//.test(value
 const digest = value => createHash('sha256').update(value).digest('hex')
 
 export function archiveRevision(revision, archive, root) {
-  // Windows checkout settings must not rewrite committed LF bytes in releases.
-  execFileSync('git', ['-c', 'core.autocrlf=false', 'archive', '--format=tar.gz', `--output=${archive}`, revision], { cwd: root })
+  // Preserve committed LF bytes and owner-only archive modes. Git's default
+  // tar mask creates group-writable source directories rejected by retention.
+  execFileSync('git', ['-c', 'core.autocrlf=false', '-c', 'tar.umask=0077', 'archive', '--format=tar.gz', `--output=${archive}`, revision], { cwd: root })
 }
 
 export function sourceManifest(revision, root) {

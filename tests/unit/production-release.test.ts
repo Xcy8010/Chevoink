@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { gunzipSync } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
 import { assertReleaseCi } from '../../scripts/release-ci.mjs'
 import { archiveRevision, productionSourcePath, sourceManifest } from '../../scripts/release-package.mjs'
@@ -40,6 +41,30 @@ describe('production release gates', () => {
   })
 })
 describe('committed production source identity', () => {
+  it('packages source directories and files without group/world write regardless of repository tar defaults', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'chevoink-package-mode-'))
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: root }).toString().trim()
+    git('init', '--quiet'); git('config', 'user.name', 'Release test'); git('config', 'user.email', 'release@example.invalid')
+    git('config', 'core.autocrlf', 'false'); git('config', 'tar.umask', '0002')
+    mkdirSync(path.join(root, 'api', 'nested'), { recursive: true })
+    writeFileSync(path.join(root, 'api', 'nested', 'server.ts'), 'export const fixture = true\n')
+    git('add', 'api'); git('commit', '--quiet', '-m', 'fixture')
+    const archive = path.join(root, 'release.tar.gz')
+    archiveRevision(git('rev-parse', 'HEAD'), archive, root)
+    const tar = gunzipSync(readFileSync(archive)), modes = new Map<string, number>()
+    for (let offset = 0; offset + 512 <= tar.length;) {
+      const header = tar.subarray(offset, offset + 512)
+      if (header.every(byte => byte === 0)) break
+      const text = (start: number, length: number) => header.subarray(start, start + length).toString().split('\0')[0].trim()
+      const size = parseInt(text(124, 12), 8) || 0
+      modes.set(text(0, 100), parseInt(text(100, 8), 8) & 0o777)
+      offset += 512 + Math.ceil(size / 512) * 512
+    }
+    expect(modes.get('api/')).toBe(0o700)
+    expect(modes.get('api/nested/')).toBe(0o700)
+    expect(modes.get('api/nested/server.ts')).toBe(0o600)
+    expect(execFileSync('tar', ['-xOf', archive, 'api/nested/server.ts']).toString()).toBe('export const fixture = true\n')
+  })
   it('runs old-copy cleanup after completed deployment and releasing the shared lock', () => {
     const script = readFileSync(new URL('../../deploy/deploy-production.sh', import.meta.url), 'utf8')
     const completed = script.lastIndexOf('phase completed'), unlock = script.lastIndexOf('flock -u 9'), cleanup = script.lastIndexOf('APP_ENV=production node scripts/prune-application-copies.mjs')

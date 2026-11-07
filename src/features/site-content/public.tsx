@@ -9,7 +9,7 @@ function readDismissals(storage: Storage): Record<string, number> {
   try { const value: unknown=JSON.parse(storage.getItem('site-announcement-dismissals') ?? '{}'); return value && typeof value==='object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).filter((entry): entry is [string,number]=>typeof entry[1]==='number')) : {} } catch { return {} }
 }
 type PublicAnnouncement=PublicSiteContent['announcements'][number]
-function AnnouncementDialog({item,index,total,onClose,onDismiss,onPrevious,onNext,returnFocus,id}:{item:PublicAnnouncement;index:number;total:number;onClose:()=>void;onDismiss:()=>void;onPrevious:()=>void;onNext:()=>void;returnFocus:HTMLElement|null;id:string}) {
+function AnnouncementDialog({item,index,total,onClose,onDismiss,onPrevious,onNext,returnFocus,id,scope}:{scope:'home'|'studio';item:PublicAnnouncement;index:number;total:number;onClose:()=>void;onDismiss:()=>void;onPrevious:()=>void;onNext:()=>void;returnFocus:HTMLElement|null;id:string}) {
   const dialog=useRef<HTMLDialogElement>(null)
   const titleId=useId()
   useEffect(()=>{
@@ -31,7 +31,7 @@ function AnnouncementDialog({item,index,total,onClose,onDismiss,onPrevious,onNex
     if(event.target!==event.currentTarget)return
     const rect=event.currentTarget.getBoundingClientRect()
     if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)onClose()
-  }} className="site-announcement-dialog">
+  }} className={'site-announcement-dialog'+(scope==='studio'?' studio-workspace':'')}>
     <div className="site-announcement-dialog-frame">
       <header className="site-announcement-dialog-header"><h2 id={titleId} className="min-w-0 text-base font-semibold">{item.title}</h2><button type="button" onClick={onClose} aria-label="关闭公告弹窗" className="site-announcement-dialog-close"><X aria-hidden="true" size={18}/></button></header>
       <div key={dismissalKey(item.id,item.contentVersion)} className="site-announcement-dialog-body"><p className="whitespace-pre-wrap break-words text-sm leading-7">{item.body}</p></div>
@@ -72,7 +72,7 @@ export function SiteAnnouncements({scope}:{scope:'home'|'studio'}) {
       </button>
       <button type="button" aria-label={'关闭公告：'+first.title} onClick={()=>dismiss(first)} className="site-announcement-dismiss"><X aria-hidden="true" size={16}/></button>
     </aside>
-    {active?<AnnouncementDialog item={active} index={index} total={items.length} id={dialogId} returnFocus={origin.current} onClose={()=>setOpenedKey(null)} onDismiss={()=>dismiss(active)} onPrevious={()=>setOpenedKey(dismissalKey(items[index-1].id,items[index-1].contentVersion))} onNext={()=>setOpenedKey(dismissalKey(items[index+1].id,items[index+1].contentVersion))}/>:null}
+    {active?<AnnouncementDialog scope={scope} item={active} index={index} total={items.length} id={dialogId} returnFocus={origin.current} onClose={()=>setOpenedKey(null)} onDismiss={()=>dismiss(active)} onPrevious={()=>setOpenedKey(dismissalKey(items[index-1].id,items[index-1].contentVersion))} onNext={()=>setOpenedKey(dismissalKey(items[index+1].id,items[index+1].contentVersion))}/>:null}
   </div>
 }
 export function SiteInformation() {

@@ -1,4 +1,3 @@
-import { SiteAnnouncements } from '@/features/site-content/public'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ComponentProps } from 'react'
@@ -4474,7 +4473,6 @@ export default function StudioWorkspace() {
           ) : null}
           </div>
         </div>
-        <SiteAnnouncements scope="studio" />
       </div>
 
       {editorChapterSettingsOpen && chapterDraft ? (

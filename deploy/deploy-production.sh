@@ -20,9 +20,9 @@ JOURNAL="$APP_ROOT/app/.release-$REVISION.jsonl"
 [[ "$(pwd -P)" == "$STAGE" && ! -L "$CURRENT" && -d "$CURRENT" && ! -e "$PREVIOUS" && ! -e "$JOURNAL" ]]
 [[ "$(id -un)" == ubuntu && -f "$APP_ROOT/shared/app.env" && -S "$HOME/.pm2/rpc.sock" ]]
 [[ "$(sha256sum "$ARCHIVE" | cut -d' ' -f1)" == "$ARCHIVE_HASH" ]]
+umask 077
 exec 9>"$APP_ROOT/app/.release.lock"
 flock -n 9
-umask 077
 phase() { printf '{"revision":"%s","phase":"%s","at":"%s"}\n' "$REVISION" "$1" "$(date -u +%FT%TZ)" >> "$JOURNAL"; }
 trap 'echo "[chevoink] release stopped; inspect $JOURNAL and actual paths/process before retrying" >&2' ERR
 PINNED_NODE=$(tr -d '\r\n' < .node-version)

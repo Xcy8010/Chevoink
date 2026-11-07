@@ -28,6 +28,7 @@ it('uses announcement id and content version for dismissal and shows a newly pub
   const client=mount(<SiteAnnouncements scope="studio"/>)
   fireEvent.click(await screen.findByRole('button',{name:'打开公告：服务通知'}))
   await screen.findByText('正文第一版')
+  expect(screen.getByRole('dialog').classList.contains('studio-workspace')).toBe(true)
   fireEvent.click(screen.getByRole('button',{name:'关闭本条公告'}))
   expect(screen.queryByText('正文第一版')).toBeNull()
   const next={...current,announcements:[{...current.announcements[0],contentVersion:2,body:'正文第二版'}]}

@@ -20,7 +20,7 @@ it('shows precise public details on the original whole row hover and focus witho
   expect(card().querySelector('svg, summary')).toBeNull()
   expect(formatModelPrice(0.125)).toBe('0.125')
   fireEvent.mouseEnter(card()); expect(details()).toBeTruthy()
-  expect(screen.queryByText('1.5x')).toBeNull()
+  expect(screen.getByText('1.5x').tagName).toBe('DEL')
   expect(screen.getByText('0.125x')).toBeTruthy()
   expect(screen.getAllByText(/夜间活动/).length).toBeGreaterThan(0)
   expect(screen.getByText('适合构思')).toBeTruthy()
@@ -35,10 +35,24 @@ it('keeps precise free activity and legacy free promotion labels', () => {
   const free = { ...model, label: '免费模型', multiplier: 0, baseMultiplier: 1.5,
     activity: { name: '周末免费', revision: 2, timezone: 'Asia/Shanghai' as const, asOf: '2026-11-06T12:00:00Z', nextSwitchAt: null, rules: [] } }
   render(<><ModelPriceSummary model={free} /><ModelActivityBadge model={free} /></>)
-  expect(screen.getByText('周末免费')).toBeTruthy(); expect(screen.queryByText('1.5x')).toBeNull(); expect(screen.getByText('0x')).toBeTruthy()
+  expect(screen.getByText('周末免费')).toBeTruthy(); expect(screen.getByText('1.5x').tagName).toBe('DEL'); expect(screen.getByText('0x')).toBeTruthy()
   expect(modelPriceOptionText(free)).toBe('周末免费 · 原1.5x → 免费')
   expect(modelPriceOptionText({ ...free, activity: null, freePromotion: { endsAt: '2026-11-07T00:00:00Z', afterMultiplier: 1.5 } })).toBe('限时免费')
 })
+it('shows the real original multiplier before the discounted value in the row and the detail card', () => {
+  render(<ModelPriceDetails model={{ ...model, baseMultiplier: 1.8, multiplier: 0.9 }} />)
+  expect(card().querySelector('del')?.textContent).toBe('1.8x')
+  expect(card().textContent).toContain('0.9x')
+  fireEvent.mouseEnter(card())
+  expect(details().querySelector('del')?.textContent).toBe('1.8x')
+  expect(details().textContent).toContain('0.9x')
+})
+it.each([{ baseMultiplier: undefined, multiplier: 0.9 }, { baseMultiplier: 0.9, multiplier: 0.9 }, { baseMultiplier: 0.9, multiplier: 1.8 }])(
+  'does not invent an original discount for $baseMultiplier to $multiplier', values => {
+    const view = render(<ModelPriceSummary model={{ ...model, ...values }} />)
+    expect(view.container.querySelector('del')).toBeNull()
+    expect(view.container.textContent).toBe(formatModelPrice(values.multiplier) + 'x')
+  })
 it.each([{ width: 1440, height: 1000, left: 850, top: 715, rowWidth: 226 }, { width: 390, height: 844, left: 12, top: 526.67, rowWidth: 366 }])(
   'keeps the row detail inside the viewport at $width by $height', ({ width, height, left, top, rowWidth }) => {
     vi.stubGlobal('innerWidth', width); vi.stubGlobal('innerHeight', height)

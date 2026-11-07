@@ -14,7 +14,7 @@ document.documentElement.classList.toggle('light', !query.has('dark'))
 window.fetch = async () => new Response(JSON.stringify({ success: false, error: { code: 'LOCAL_PREVIEW_ONLY', message: '本地交互预览不调用真实接口。' } }), { status: 403, headers: { 'content-type': 'application/json' } })
 const options: CreditModelOption[] = BUILT_IN_MODEL_TIERS.map((tier, index) => ({
   ...modelPublicCopy(tier, null), tier, label: ['轻量', '极速', '标准', '性能', '极致'][index],
-  multiplier: [0, query.has('promotion') ? 0.125 : 1.5, 1.2, 1.6, 2.5][index], baseMultiplier: [0, 1.5, 1.2, 1.6, 2.5][index],
+  multiplier: [0, query.has('promotion') ? 0.9 : 1.5, 1.2, 1.6, 2.5][index], baseMultiplier: [0, query.has('promotion') ? 1.8 : 1.5, 1.2, 1.6, 2.5][index],
   available: true, selectedByDefault: tier === 'speed', reasoningEfforts: ['low', 'high', 'max'], defaultReasoningEffort: 'high', visionEnabled: false,
   ...(tier === 'speed' && query.has('promotion') ? { activity: { name: '夜间折扣', revision: 1, timezone: 'Asia/Shanghai' as const, asOf: '2026-11-07T00:00:00Z', nextSwitchAt: '2026-11-08T00:00:00Z', rules: [] } } : {}),
 }))

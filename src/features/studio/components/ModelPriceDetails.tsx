@@ -9,9 +9,12 @@ const effortLabels: Record<ModelReasoningEffort, string> = { none: '关闭', min
 const effortOrder: ModelReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 let closeActiveDetails: (() => void) | null = null
 
-/** The row shows the current multiplier; activity labels sit beside the model name. */
+/** Discounted models keep their original multiplier beside the current value. */
 export function ModelPriceSummary({ model }: { model: CreditModelOption }) {
-  return <span className="whitespace-nowrap tabular-nums">{formatModelPrice(model.multiplier)}x</span>
+  return <span className="whitespace-nowrap tabular-nums">
+    {model.baseMultiplier !== undefined && model.baseMultiplier > model.multiplier ? <del className="mr-1.5 text-[var(--text-tertiary)] line-through">{formatModelPrice(model.baseMultiplier)}x</del> : null}
+    <span>{formatModelPrice(model.multiplier)}x</span>
+  </span>
 }
 
 export function ModelActivityBadge({ model }: { model: CreditModelOption }) {

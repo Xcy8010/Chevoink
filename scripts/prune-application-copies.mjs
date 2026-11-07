@@ -64,14 +64,15 @@ function keeperState(root, context, mounts) {
   if (baseline.revision !== previous.exec(names[0])[1]) fail('COPY_BASELINE_INVALID')
   return { current: { name: 'current', ...current, ...identity(stat(currentPath)) }, baseline: { name: names[0], ...baseline, ...identity(stat(baselinePath)) }, currentJournal }
 }
-function treeSafe(directory, context, mounts) {
+function treeSafe(directory, context, mounts, observe) {
   noMount(directory, mounts);owned(directory, context, 'isDirectory');protectedData(directory)
   for (const name of fs.readdirSync(directory)) {
     const file = path.join(directory, name), value = stat(file)
     if (!value) fail('COPY_TREE_CHANGED')
-    if (value.isSymbolicLink()) continue // unlink only; never traverse a target
+    if (value.isSymbolicLink()) { observe?.(file, value);continue } // unlink only; never traverse a target
     if (value.uid !== BigInt(context.uid) || String(value.dev) !== context.dev) fail('COPY_OWNER_OR_PATH_CHANGED')
-    if (value.isDirectory()) treeSafe(file, context, mounts)
+    observe?.(file, value)
+    if (value.isDirectory()) treeSafe(file, context, mounts, observe)
     else if (!value.isFile()) fail('COPY_SPECIAL_FILE')
   }
 }
@@ -189,6 +190,115 @@ export function planApplicationCopies(options) {
   }
   return { root, context, keep, candidates, skipped }
 }
+// Independent cache eligibility: source subdirectories may remain protected or
+// writable, but the copy root, deployment identity and every cache item may not.
+function cacheParent(state, keep, name, isolated) {
+  const { root, context, mounts, processes } = state, match = previous.exec(name)
+  if (!match || name === keep.baseline.name) fail('CACHE_PARENT_NOT_RETIRABLE')
+  const directory = path.join(root, name), value = owned(directory, context, 'isDirectory')
+  noMount(directory, mounts)
+  const original = marker(directory, context), journal = completed(root, match[2], context)
+  if (original.revision !== match[1]) fail('COPY_MARKER_NAME_MISMATCH')
+  const targets = [directory, ...(isolated ? [isolated] : [])]
+  if (processUse(processes, targets, root).length) fail('COPY_PROCESS_REFERENCE')
+  if (dependencyReferences(root, context, processes).some(link => link.source !== name && targets.some(target => within(target, link.target)))) fail('COPY_DEPENDENCY_REFERENCE')
+  const evidence = metadata.filter(item => stat(path.join(directory, item))).map(item => {
+    const file = path.join(directory, item);owned(file, context, 'isFile')
+    return { name: item, sha256: digest(bounded(file)) }
+  })
+  return { name, revision: match[1], successor: match[2], ...identity(value), markerSha256: original.sha256, journalSha256: journal, evidence }
+}
+export function planDependencyCaches(options) {
+  const state = environment(options), { root, context, mounts } = state, keep = keeperState(root, context, mounts), candidates = [], skipped = []
+  for (const name of fs.readdirSync(root).sort()) {
+    if (!previous.test(name) || name === keep.baseline.name || stat(path.join(root, name))?.isSymbolicLink()) continue
+    const cache = path.join(root, name, 'node_modules')
+    if (!stat(cache)) continue
+    try {
+      const parent = cacheParent(state, keep, name), value = owned(cache, context, 'isDirectory')
+      treeSafe(cache, context, mounts)
+      candidates.push({ ...parent, cache: { name: 'node_modules', ...identity(value) } })
+    } catch (error) { skipped.push({ name, kind: 'dependency_cache', reason: code(error) }) }
+  }
+  return { keep, candidates, skipped }
+}
+// The observed production caches have about 35,000 items each. A separate
+// bounded manifest supports them without enlarging the 2 MiB journal reader.
+const cacheManifestLimit = 32 * 1024 * 1024, cacheEntryLimit = 100000
+function fileDigest(file, expected) {
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
+  try {
+    const before = fs.fstatSync(fd, { bigint: true })
+    if (!before.isFile() || !sameIdentity(before, identity(expected)) || before.size !== expected.size || before.mtimeNs !== expected.mtimeNs) fail('CACHE_ENTRY_CHANGED')
+    const hash = createHash('sha256'), buffer = Buffer.allocUnsafe(65536)
+    let count
+    while ((count = fs.readSync(fd, buffer, 0, buffer.length, null))) hash.update(buffer.subarray(0, count))
+    const after = fs.fstatSync(fd, { bigint: true })
+    if (after.size !== before.size || after.mtimeNs !== before.mtimeNs) fail('CACHE_ENTRY_CHANGED')
+    return hash.digest('hex')
+  } finally { fs.closeSync(fd) }
+}
+function cacheInventory(directory, context, mounts) {
+  const value = owned(directory, context, 'isDirectory'), entries = [];let logicalFileBytes = 0n, serializedEntryBytes = 0
+  const attributes = value => ({ ...identity(value), uid: Number(value.uid), gid: Number(value.gid), mode: (value.mode & 0o7777n).toString(8) })
+  treeSafe(directory, context, mounts, (file, value) => {
+    if (entries.length >= cacheEntryLimit || value.uid !== BigInt(context.uid) || String(value.dev) !== context.dev) fail('CACHE_MANIFEST_LIMIT_OR_OWNER')
+    const entry = { relative: path.relative(directory, file).split(path.sep).join('/'), ...attributes(value), type: value.isDirectory() ? 'directory' : value.isSymbolicLink() ? 'symlink' : 'file' }
+    if (value.isFile()) { entry.size = String(value.size);entry.mtimeNs = String(value.mtimeNs);entry.sha256 = fileDigest(file, value);logicalFileBytes += value.size }
+    if (value.isSymbolicLink()) entry.target = fs.readlinkSync(file)
+    serializedEntryBytes += Buffer.byteLength(JSON.stringify(entry)) + 1
+    if (serializedEntryBytes > cacheManifestLimit) fail('CACHE_MANIFEST_LIMIT')
+    entries.push(entry)
+  })
+  entries.sort((left, right) => left.relative.localeCompare(right.relative))
+  return { root: attributes(value), entries, logicalFileBytes: String(logicalFileBytes) }
+}
+function readCacheManifest(store, job, context, mounts) {
+  owned(store, context, 'isDirectory');noMount(store, mounts)
+  const file = path.join(store, job.manifest.name), value = owned(file, context, 'isFile')
+  if (value.size > BigInt(cacheManifestLimit)) fail('CACHE_MANIFEST_LIMIT')
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0)), bytes = Buffer.alloc(Number(value.size))
+  try {
+    const opened = fs.fstatSync(fd, { bigint: true })
+    if (!sameIdentity(opened, identity(value)) || opened.size !== value.size || opened.mtimeNs !== value.mtimeNs) fail('CACHE_MANIFEST_CHANGED')
+    let offset = 0
+    while (offset < bytes.length) {
+      const read = fs.readSync(fd, bytes, offset, bytes.length - offset, null)
+      if (!read) fail('CACHE_MANIFEST_CHANGED')
+      offset += read
+    }
+    const after = fs.fstatSync(fd, { bigint: true })
+    if (after.size !== value.size || after.mtimeNs !== value.mtimeNs) fail('CACHE_MANIFEST_CHANGED')
+  } finally { fs.closeSync(fd) }
+  if (digest(bytes) !== job.manifest.sha256) fail('CACHE_MANIFEST_CHANGED')
+  const manifest = JSON.parse(bytes.toString('utf8'))
+  if (manifest.version !== 1 || manifest.kind !== 'dependency_cache' || manifest.operationId !== job.operationId
+    || !Array.isArray(manifest.entries) || manifest.entries.length > cacheEntryLimit || manifest.entries.length !== job.manifest.entries
+    || manifest.logicalFileBytes !== job.manifest.logicalFileBytes || !/^[0-9]+$/.test(manifest.logicalFileBytes)
+    || !manifest.root || manifest.root.dev !== job.cache.dev || manifest.root.ino !== job.cache.ino) fail('CACHE_MANIFEST_INVALID')
+  const names = new Set();let total = 0n
+  for (const entry of manifest.entries) {
+    if (typeof entry.relative !== 'string' || !entry.relative || entry.relative.includes('\\') || entry.relative.split('/').some(part => !part || part === '.' || part === '..')
+      || path.posix.isAbsolute(entry.relative) || /^[A-Za-z]:/.test(entry.relative) || names.has(entry.relative)
+      || !['file', 'directory', 'symlink'].includes(entry.type) || !/^\d+$/.test(entry.dev) || !/^\d+$/.test(entry.ino)
+      || entry.dev !== context.dev || entry.uid !== context.uid || !Number.isInteger(entry.gid) || !/^[0-7]{1,4}$/.test(entry.mode)
+      || entry.type === 'file' && (!/^\d+$/.test(entry.size) || !/^\d+$/.test(entry.mtimeNs) || !/^[a-f0-9]{64}$/.test(entry.sha256))
+      || entry.type === 'symlink' && typeof entry.target !== 'string') fail('CACHE_MANIFEST_INVALID')
+    names.add(entry.relative);if (entry.type === 'file') total += BigInt(entry.size)
+  }
+  if (String(total) !== manifest.logicalFileBytes) fail('CACHE_MANIFEST_INVALID')
+  return manifest
+}
+function verifyCacheInventory(directory, expected, context, mounts, allowMissing) {
+  const actual = cacheInventory(directory, context, mounts)
+  if (JSON.stringify(actual.root) !== JSON.stringify(expected.root)) fail('CACHE_IDENTITY_CHANGED')
+  const entries = new Map(expected.entries.map(entry => [entry.relative, entry]))
+  for (const entry of actual.entries) {
+    if (!entries.has(entry.relative)) fail('CACHE_UNKNOWN_ENTRY')
+    if (JSON.stringify(entry) !== JSON.stringify(entries.get(entry.relative))) fail('CACHE_ENTRY_CHANGED')
+  }
+  if (!allowMissing && actual.entries.length !== expected.entries.length) fail('CACHE_ENTRY_MISSING')
+}
 function syncDirectory(directory) {
   if (process.platform === 'win32') return
   const fd = fs.openSync(directory, 'r');try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
@@ -226,6 +336,13 @@ function readJob(file, id, context) {
     || !job.evidence.some(item => item.name === metadata[0]) || new Set(job.evidence.map(item => item.name)).size !== job.evidence.length
     || job.evidence.some(item => !metadata.includes(item.name) || !/^[a-f0-9]{64}$/.test(item.sha256))
     || rows.some(row => row.operationId !== id || !['started', 'isolated', 'deleting', 'deferred', 'deleted', 'absent_reconciled'].includes(row.state))) fail('COPY_RECEIPT_INVALID')
+  if (job.kind === 'dependency_cache') {
+    if (job.cache?.name !== 'node_modules' || !/^\d+$/.test(job.cache.dev) || !/^\d+$/.test(job.cache.ino) || job.cache.dev !== job.dev
+      || job.manifest?.name !== id + '.cache-manifest.json' || !/^[a-f0-9]{64}$/.test(job.manifest.sha256)
+      || !Number.isInteger(job.manifest.entries) || job.manifest.entries < 0 || job.manifest.entries > cacheEntryLimit
+      || !/^[0-9]+$/.test(job.manifest.logicalFileBytes) || !job.initialKeep
+      || rows.some(row => row.kind !== 'dependency_cache')) fail('CACHE_RECEIPT_INVALID')
+  } else if (job.kind !== undefined || job.cache !== undefined || job.manifest !== undefined || rows.some(row => row.kind !== undefined)) fail('COPY_RECEIPT_INVALID')
   const match = previous.exec(job.name)
   if (job.revision !== match[1] || job.successor !== match[2]
     || job.evidence.find(item => item.name === metadata[0]).sha256 !== job.markerSha256
@@ -235,6 +352,7 @@ function readJob(file, id, context) {
 function resume(file, id, options) {
   const state = environment(options), { root, context } = state, store = path.join(root, '.retired-copies')
   const { job, last, progress } = readJob(file, id, context)
+  if (job.kind === 'dependency_cache') return resumeDependencyCache(file, { job, last, progress }, options)
   const expectedKeep = keeperState(root, context, state.mounts)
   if (terminal.has(last.state)) return { operationId: id, state: last.state }
   const source = path.join(root, job.name), isolated = path.join(store, id)
@@ -281,9 +399,58 @@ function resume(file, id, options) {
     return { operationId: id, state: 'deferred', reason }
   }
 }
+function resumeDependencyCache(file, record, options) {
+  const { job, last, progress } = record, { root, context } = environment(options), store = path.join(root, '.retired-copies')
+  const parent = path.join(root, job.name), source = path.join(parent, 'node_modules'), isolated = path.join(store, job.operationId)
+  const result = (state, reason) => ({ operationId: job.operationId, kind: 'dependency_cache', scope: 'node_modules_only', name: job.name,
+    state, ...(reason ? { reason } : {}), cacheLogicalFileBytes: job.manifest.logicalFileBytes, sourceRetained: true })
+  if (terminal.has(last.state)) return result(last.state)
+  try {
+    const guardParent = () => {
+      const fresh = environment(options), keep = keeperState(root, context, fresh.mounts)
+      owned(store, context, 'isDirectory');noMount(store, fresh.mounts)
+      if (JSON.stringify(keep) !== JSON.stringify(job.initialKeep)) fail('COPY_KEEPERS_CHANGED')
+      const current = cacheParent(fresh, keep, job.name, isolated)
+      if (current.dev !== job.dev || current.ino !== job.ino) fail('CACHE_PARENT_IDENTITY_CHANGED')
+      if (current.markerSha256 !== job.markerSha256 || current.journalSha256 !== job.journalSha256 || JSON.stringify(current.evidence) !== JSON.stringify(job.evidence)) fail('CACHE_PARENT_METADATA_CHANGED')
+      return fresh
+    }
+    const first = guardParent(), manifest = readCacheManifest(store, job, context, first.mounts)
+    const guard = directory => {
+      const fresh = guardParent()
+      if (!sameIdentity(stat(directory), job.cache)) fail('CACHE_IDENTITY_CHANGED')
+      verifyCacheInventory(directory, manifest, context, fresh.mounts, progress === 'deleting')
+    }
+    if (stat(source) && stat(isolated)) fail('CACHE_PATHS_AMBIGUOUS')
+    if (!stat(source) && !stat(isolated)) {
+      if (progress !== 'deleting') fail('CACHE_PATHS_UNKNOWN')
+      guardParent();append(file, { operationId: job.operationId, kind: job.kind, state: 'absent_reconciled' }, context)
+      return result('absent_reconciled')
+    }
+    if (stat(source)) {
+      if (progress !== 'started') fail('CACHE_PATHS_AMBIGUOUS')
+      guard(source)
+      fs.renameSync(source, isolated);syncDirectory(parent);syncDirectory(store)
+      append(file, { operationId: job.operationId, kind: job.kind, state: 'isolated' }, context)
+    }
+    guard(isolated)
+    append(file, { operationId: job.operationId, kind: job.kind, state: 'deleting' }, context)
+    guard(isolated)
+    fs.rmSync(isolated, { recursive: true, force: false, maxRetries: 0 })
+    syncDirectory(store)
+    guardParent() // The source and all four metadata paths must still be unchanged.
+    append(file, { operationId: job.operationId, kind: job.kind, state: 'deleted' }, context)
+    return result('deleted')
+  } catch (error) {
+    const reason = code(error)
+    if (last.state !== 'deferred' || last.reason !== reason) append(file, { operationId: job.operationId, kind: job.kind, state: 'deferred', reason }, context)
+    return result('deferred', reason)
+  }
+}
 /** Root/process/mount providers are injectable for temporary-directory tests.
  * Production CLI below accepts no root option and requires the deployment lock. */
 export function pruneApplicationCopies(options) {
+  const operations = []
   try {
     const state = environment(options), { root, context } = state, store = path.join(root, '.retired-copies')
     keeperState(root, context, state.mounts)
@@ -291,17 +458,27 @@ export function pruneApplicationCopies(options) {
     owned(store, context, 'isDirectory');noMount(store, state.mounts)
     const entries = fs.readdirSync(store), receipts = entries.filter(name => uuid.test(name.slice(0, -6)) && name.endsWith('.jsonl'))
     for (const name of entries) {
-      const id = name.replace(/\.jsonl$|\.evidence$/g, '')
+      const id = name.replace(/\.jsonl$|\.evidence$|\.cache-manifest\.json$/g, '')
       if (!uuid.test(id) || !receipts.includes(id + '.jsonl')) fail('COPY_QUARANTINE_UNKNOWN')
     }
+    const records = new Map(receipts.map(name => [name.slice(0, -6), readJob(path.join(store, name), name.slice(0, -6), context)]))
+    for (const name of entries.filter(name => name.endsWith('.cache-manifest.json'))) {
+      if (records.get(name.slice(0, -'.cache-manifest.json'.length))?.job.kind !== 'dependency_cache') fail('COPY_QUARANTINE_UNKNOWN')
+    }
     const pending = receipts.filter(name => {
-      const id = name.slice(0, -6), job = readJob(path.join(store, name), id, context)
-      if (terminal.has(job.last.state) && stat(path.join(store, id))) fail('COPY_QUARANTINE_UNKNOWN')
-      return !terminal.has(job.last.state)
+      const id = name.slice(0, -6), record = records.get(id)
+      if (terminal.has(record.last.state) && stat(path.join(store, id))) fail('COPY_QUARANTINE_UNKNOWN')
+      return !terminal.has(record.last.state)
     })
     if (pending.length) return { status: 'recovered', operations: pending.map(name => resume(path.join(store, name), name.slice(0, -6), options)) }
-    const plan = planApplicationCopies(options), operations = []
-    for (const candidate of plan.candidates) {
+    const recreated = new Set([...records.values()].filter(record => record.job.kind === 'dependency_cache' && terminal.has(record.last.state)
+      && stat(path.join(root, record.job.name, 'node_modules'))).map(record => record.job.name))
+    const plan = planApplicationCopies(options)
+    const needsCachePlan = fs.readdirSync(root).some(name => previous.test(name) && name !== plan.keep.baseline.name
+      && !stat(path.join(root, name))?.isSymbolicLink() && stat(path.join(root, name, 'node_modules')) && !plan.candidates.some(item => item.name === name))
+    const caches = needsCachePlan ? planDependencyCaches(options) : { keep: plan.keep, candidates: [], skipped: [] }
+    if (JSON.stringify(plan.keep) !== JSON.stringify(caches.keep)) fail('COPY_KEEPERS_CHANGED')
+    for (const candidate of plan.candidates.filter(item => !recreated.has(item.name))) {
       const id = (options.uuid ?? randomUUID)()
       if (!uuid.test(id)) fail('COPY_OPERATION_ID_INVALID')
       const source = path.join(root, candidate.name), proof = []
@@ -314,8 +491,27 @@ export function pruneApplicationCopies(options) {
       operations.push(resume(file, id, options))
       if (operations.at(-1).state === 'deferred') break
     }
-    return { status: 'inspected', keep: plan.keep, operations, skipped: plan.skipped }
-  } catch (error) { return { status: 'skipped', reason: code(error) } }
+    if (!operations.some(item => item.state === 'deferred')) for (const candidate of caches.candidates.filter(item => !recreated.has(item.name) && !plan.candidates.some(full => full.name === item.name))) {
+      const id = (options.uuid ?? randomUUID)()
+      if (!uuid.test(id)) fail('COPY_OPERATION_ID_INVALID')
+      const inventory = cacheInventory(path.join(root, candidate.name, 'node_modules'), context, environment(options).mounts)
+      if (inventory.root.dev !== candidate.cache.dev || inventory.root.ino !== candidate.cache.ino) fail('CACHE_IDENTITY_CHANGED')
+      const manifest = { version: 1, kind: 'dependency_cache', operationId: id, ...inventory }, bytes = Buffer.from(JSON.stringify(manifest) + '\n')
+      if (bytes.length > cacheManifestLimit) fail('CACHE_MANIFEST_LIMIT')
+      const manifestName = id + '.cache-manifest.json'
+      fs.writeFileSync(path.join(store, manifestName), bytes, { flag: 'wx', mode: 0o600 })
+      const manifestFd = fs.openSync(path.join(store, manifestName), 'r+');try { fs.fsyncSync(manifestFd) } finally { fs.closeSync(manifestFd) };syncDirectory(store)
+      const job = { version: 1, kind: 'dependency_cache', state: 'started', operationId: id, ...candidate, initialKeep: caches.keep,
+        manifest: { name: manifestName, sha256: digest(bytes), entries: inventory.entries.length, logicalFileBytes: inventory.logicalFileBytes } }
+      const file = path.join(store, id + '.jsonl')
+      fs.writeFileSync(file, JSON.stringify({ ...job, at: new Date().toISOString() }) + '\n', { flag: 'wx', mode: 0o600 })
+      const fd = fs.openSync(file, 'r+');try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) };syncDirectory(store)
+      operations.push(resume(file, id, options))
+      if (operations.at(-1).state === 'deferred') break
+    }
+    return { status: 'inspected', keep: plan.keep, operations, skipped: [...plan.skipped, ...caches.skipped,
+      ...[...recreated].map(name => ({ name, kind: 'dependency_cache', reason: 'CACHE_RECREATED_AFTER_TERMINAL' }))] }
+  } catch (error) { return { status: 'skipped', reason: code(error), ...(operations.length ? { operations } : {}) } }
 }
 export function lockIsHeld(text, pid, value) {
   const major = ((value.dev >> 8n) & 0xfffn) | ((value.dev >> 32n) & 0xfffff000n)
