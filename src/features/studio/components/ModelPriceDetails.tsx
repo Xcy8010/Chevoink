@@ -8,6 +8,17 @@ import type { CreditModelOption, ModelReasoningEffort } from '../../../../shared
 const effortLabels: Record<ModelReasoningEffort, string> = { none: '关闭', minimal: '轻度', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高' }
 const effortOrder: ModelReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 let closeActiveDetails: (() => void) | null = null
+const nightLabel = '夜间折扣'
+const weekdays = [1, 2, 3, 4, 5, 6, 0]
+const weekdayLabels = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+
+function scheduledNightDiscounts(activity: CreditModelOption['activity']) {
+  if (!activity) return []
+  const offset = activity.timezone === 'UTC' ? 'Z' : '+08:00'
+  const asOf = Date.parse(activity.asOf)
+  return activity.rules.filter(rule => rule.enabled && rule.name === nightLabel &&
+    (rule.endDate === null || Date.parse(rule.endDate + 'T00:00:00' + offset) > asOf))
+}
 
 /** Discounted models keep their original multiplier beside the current value. */
 export function ModelPriceSummary({ model }: { model: CreditModelOption }) {
@@ -21,14 +32,7 @@ export function ModelActivityBadge({ model }: { model: CreditModelOption }) {
   const activity = model.activity
   const currentLabel = activity?.name ?? (model.multiplier === 0 ? model.freePromotion ? '限时免费' : '免费' : null)
   const labels = currentLabel ? [currentLabel] : []
-  const nightLabel = '夜间折扣'
-  if (activity && activity.name !== nightLabel) {
-    const offset = activity.timezone === 'UTC' ? 'Z' : '+08:00'
-    const asOf = Date.parse(activity.asOf)
-    const scheduled = activity.rules.some(rule => rule.enabled && rule.name === nightLabel &&
-      (rule.endDate === null || Date.parse(rule.endDate + 'T00:00:00' + offset) > asOf))
-    if (scheduled) labels.push(nightLabel)
-  }
+  if (activity?.name !== nightLabel && scheduledNightDiscounts(activity).length) labels.push(nightLabel)
   return labels.map(label => {
     const free = label === '免费' || label === '限时免费'
     const colors = free ? 'rounded-full bg-red-500/10 text-[var(--color-error)]' : 'rounded-md bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
@@ -110,8 +114,11 @@ export function ModelPriceDetails({ model, children, className = '', reasoningEf
   }, [open, model, reasoningOpen, contains, close])
   const copy = modelPublicCopy(model.tier, model)
   const effort = reasoningEffort && model.reasoningEfforts.includes(reasoningEffort) ? reasoningEffort : model.defaultReasoningEffort
+  const activityName = model.activity?.name
+  const nightRules = open ? scheduledNightDiscounts(model.activity) : []
+  const otherActivityName = activityName === nightLabel ? null : activityName
   const zone = model.activity?.timezone ?? 'Asia/Shanghai'
-  const zoneLabel = zone === 'Asia/Shanghai' ? '北京时间' : zone === 'UTC' ? 'UTC' : zone
+  const zoneLabel = zone === 'Asia/Shanghai' ? '北京时间' : 'UTC'
   const timestamp = (value: string) => new Intl.DateTimeFormat('zh-CN', { timeZone: zone, month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(value))
   return <div ref={anchor} aria-label={model.label + '模型卡片'} aria-describedby={open ? panelId : undefined} tabIndex={children ? undefined : 0}
     data-model-price-open={open ? '' : undefined} className={'relative min-w-0 ' + className}
@@ -145,10 +152,20 @@ export function ModelPriceDetails({ model, children, className = '', reasoningEf
         {effortOrder.filter(value => model.reasoningEfforts.includes(value)).map(value => <button key={value} type="button" aria-label={'设置' + model.label + '思考强度为' + effortLabels[value]} aria-pressed={value === effort}
           onClick={() => { onReasoningChange(value); setReasoningOpen(false) }} className="flex min-h-9 w-full items-center justify-between rounded-lg px-2.5 text-left hover:bg-[var(--surface-muted)]"><span>{effortLabels[value]}</span>{value === effort ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : null}</button>)}
       </div> : null}
-      {model.freePromotion || model.activity?.name ? <div className="mt-3 space-y-1 text-xs leading-5 text-[var(--text-secondary)]">
-        <p className="flex items-center gap-1.5 font-medium"><Clock3 className="h-3.5 w-3.5 shrink-0" />{model.activity?.name ?? '限时免费'}</p>
+      {model.freePromotion || otherActivityName ? <div className="mt-3 space-y-1 text-xs leading-5 text-[var(--text-secondary)]">
+        <p className="flex items-center gap-1.5 font-medium"><Clock3 className="h-3.5 w-3.5 shrink-0" />{otherActivityName ?? '限时免费'}</p>
         {model.freePromotion ? <p>免费至{timestamp(model.freePromotion.endsAt)}（{zoneLabel}），之后为{formatModelPrice(model.freePromotion.afterMultiplier)}x。</p>
           : model.activity?.nextSwitchAt ? <p>下次调整：{timestamp(model.activity.nextSwitchAt)}（{zoneLabel}）</p> : null}
+      </div> : null}
+      {nightRules.length || activityName === nightLabel ? <div className="mt-3 space-y-1 text-xs leading-5 text-[var(--text-secondary)]">
+        <p className="flex items-center gap-1.5 font-medium"><Clock3 className="h-3.5 w-3.5 shrink-0" />{nightLabel}</p>
+        {nightRules.map((rule, index) => {
+          const days = rule.weekdays.length === 7 ? '每天' : weekdays.filter(day => rule.weekdays.includes(day)).map(day => weekdayLabels[day]).join('、')
+          const endLabel = rule.endTime < rule.startTime ? '到次日' : '到'
+          const hours = rule.allDay ? '全天' : `${rule.startTime} ${endLabel} ${rule.endTime}`
+          const dates = [rule.startDate && rule.startDate + ' 开始', rule.endDate && rule.endDate + ' 00:00 结束'].filter(Boolean).join(' · ')
+          return <p key={index}>{days} {hours}（{zoneLabel}）{dates ? <span className="block">{dates}</span> : null}</p>
+        })}
       </div> : null}
     </div>, anchor.current?.closest('dialog') ?? document.fullscreenElement ?? document.body)}
   </div>

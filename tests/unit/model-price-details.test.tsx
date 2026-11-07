@@ -71,6 +71,45 @@ it('advertises a scheduled night discount in daylight while keeping the current 
   view.rerender(row({ ...daytime, activity: { ...activity, asOf: '2026-11-07T16:00:00Z' } }))
   expect(screen.queryByText(rule.name)).toBeNull()
 })
+it('shows the configured night hours in the detail card before and during the discount', () => {
+  const rule = { name: '夜间折扣', enabled: true, startDate: null, endDate: '2026-11-09',
+    weekdays: [0, 1, 2, 3, 4, 5, 6], allDay: false, startTime: '22:00', endTime: '08:00', multiplierBps: 9000 }
+  const activity = { name: null, revision: 1, timezone: 'Asia/Shanghai' as const, asOf: '2026-11-07T04:00:00Z',
+    nextSwitchAt: '2026-11-07T14:00:00Z', rules: [rule] }
+  const daytime = { ...model, multiplier: 1.8, baseMultiplier: 1.8, activity }
+  const view = render(<ModelPriceDetails model={daytime} />)
+  fireEvent.mouseEnter(card())
+
+  const hours = '每天 22:00 到次日 08:00（北京时间）'
+  expect(screen.getByText(rule.name)).toBeTruthy()
+  expect(screen.getByText(hours)).toBeTruthy()
+  expect(details().querySelector('del')).toBeNull()
+
+  view.rerender(<ModelPriceDetails model={{ ...daytime, multiplier: 0.9, activity: { ...activity, name: rule.name,
+    asOf: '2026-11-07T14:00:00Z', nextSwitchAt: '2026-11-08T00:00:00Z' } }} />)
+  expect(screen.getByText(hours)).toBeTruthy()
+  expect(screen.getByText('2026-11-09 00:00 结束')).toBeTruthy()
+  expect(details().textContent).not.toContain('下次调整')
+  expect(details().querySelector('del')?.textContent).toBe('1.8x')
+
+  view.rerender(<ModelPriceDetails model={{ ...daytime, activity: { ...activity, asOf: '2026-11-08T16:00:00Z' } }} />)
+  expect(screen.queryByText(rule.name)).toBeNull()
+  expect(screen.queryByText(hours)).toBeNull()
+  view.rerender(<ModelPriceDetails model={{ ...daytime, activity: { ...activity, rules: [{ ...rule, enabled: false }] } }} />)
+  expect(screen.queryByText(rule.name)).toBeNull()
+})
+it('shows only the configured weekdays, windows and time zone alongside a free offer', () => {
+  const night = { name: '夜间折扣', enabled: true, startDate: '2026-11-08', endDate: null,
+    weekdays: [0, 1], allDay: false, startTime: '21:30', endTime: '05:30', multiplierBps: 9000 }
+  render(<ModelPriceDetails model={{ ...model, multiplier: 0, freePromotion: { endsAt: '2026-11-08T00:00:00Z', afterMultiplier: 1 },
+    activity: { name: null, revision: 1, timezone: 'UTC', asOf: '2026-11-07T12:00:00Z', nextSwitchAt: null,
+      rules: [night, { ...night, weekdays: [6], allDay: true }] } }} />)
+  fireEvent.mouseEnter(card())
+  expect(screen.getByText('周一、周日 21:30 到次日 05:30（UTC）')).toBeTruthy()
+  expect(screen.getByText('周六 全天（UTC）')).toBeTruthy()
+  expect(screen.getAllByText('2026-11-08 开始')).toHaveLength(2)
+  expect(screen.getByText(/免费至.*之后为1x/)).toBeTruthy()
+})
 it('shows the real original multiplier before the discounted value in the row and the detail card', () => {
   render(<ModelPriceDetails model={{ ...model, baseMultiplier: 1.8, multiplier: 0.9 }} />)
   expect(card().querySelector('del')?.textContent).toBe('1.8x')
