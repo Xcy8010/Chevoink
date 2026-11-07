@@ -1,5 +1,6 @@
 import { defaultSiteSettings, effectiveSiteSettings } from '@/features/site-content/defaults'
 import { usePublicSiteContent } from '@/features/site-content/public-api'
+import SiteSupportLink from '@/features/site-content/SiteSupportLink'
 import { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode, UIEvent, useEffect, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -327,6 +328,7 @@ export default function AppShell({ title, description, children }: AppShellProps
           <FileText className="h-4 w-4 text-[var(--text-secondary)]" />
           我的创作
         </button>
+        <SiteSupportLink href={effectiveSettings.contact.url} className={actionButtonClass} onClick={closeAccountMenu} />
         <button type="button" className={actionButtonClass} onClick={() => void handleLogout()}>
           <LogOut className="h-4 w-4 text-[var(--text-secondary)]" />
           退出登录
@@ -602,7 +604,7 @@ export default function AppShell({ title, description, children }: AppShellProps
                     >
                       <Avatar name={sessionUser.nickname} src={sessionUser.avatarUrl} size="md" className="h-11 w-11 border-0 bg-transparent" />
                     </button>
-                    {/* 悬停浮层：头像+昵称+四个快捷入口；fixed 脱离 aside 的 overflow 裁剪，pl-6 与头像区域重叠避免悬停闪断 */}
+                    {/* fixed 脱离 aside 的 overflow 裁剪，pl-6 与头像区域重叠避免悬停闪断 */}
                     <div className="invisible fixed bottom-5 left-[52px] z-50 pl-6 opacity-0 transition-opacity duration-150 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100">
                       <div className="w-60 rounded-[24px] border border-[var(--border-strong)] bg-[var(--surface-default)] p-2 shadow-[0_12px_28px_rgba(17,24,39,0.12)]">
                         <div className="flex items-center gap-3 rounded-[18px] px-3 py-3">
@@ -629,6 +631,7 @@ export default function AppShell({ title, description, children }: AppShellProps
                           <FileText className="h-4 w-4 text-[var(--text-secondary)]" />
                           我的创作
                         </button>
+                        <SiteSupportLink href={effectiveSettings.contact.url} className={accountActionClass} />
                         <button type="button" className={accountActionClass} onClick={() => void handleLogout()}>
                           <LogOut className="h-4 w-4 text-[var(--text-secondary)]" />
                           退出登录

@@ -1,4 +1,4 @@
-import { integrationLegalConsent } from '../support/legal-consent.js'
+import { integrationSmsRegistration } from '../support/sms-registration.js'
 import { commitWithAdvisoryReviewFacts } from '../support/advisory-review-commit.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { randomInt, randomUUID } from 'node:crypto'
@@ -53,7 +53,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 Story Compiler 与 Chapter Bridge（需
     const unique = randomInt(0, 10_000_000).toString().padStart(7, '0')
     const phone = `+861373${unique}`
     const register = await request(app).post('/api/auth/register')
-      .send({ ...await integrationLegalConsent(), phone, nickname: `故事编译测试${unique}`, password: 'Story-Compiler-123!' })
+      .send({ ...await integrationSmsRegistration(phone), phone, nickname: `故事编译测试${unique}`, password: 'Story-Compiler-123!' })
     expect(register.status).toBe(201)
     const cookies = Array.isArray(register.headers['set-cookie']) ? register.headers['set-cookie'] : [register.headers['set-cookie']]
     const cookie = cookies.find((item: string) => item?.startsWith('chevoink_session=')) as string

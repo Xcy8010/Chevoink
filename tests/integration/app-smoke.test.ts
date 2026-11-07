@@ -1,4 +1,4 @@
-import { integrationLegalConsent } from '../support/legal-consent.js'
+import { integrationSmsRegistration } from '../support/sms-registration.js'
 import request from 'supertest'
 import { randomInt } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -55,6 +55,34 @@ describe('应用冒烟（无 DB 依赖）', () => {
 })
 
 describe.skipIf(!dbAvailable)('应用冒烟（需 DB）', () => {
+  it('两个注册入口竞争时仅创建一个账号，过期协议同意不会消费短信验证码', async () => {
+    const unique = randomInt(0, 10_000_000).toString().padStart(7, '0')
+    const phone = `+861379${unique}`
+    const { code, legalConsent } = await integrationSmsRegistration(phone)
+    const registration = { phone, code, legalConsent, nickname: `注册并发${unique}` }
+
+    const stale = await request(app).post('/api/auth/sms/register').send({
+      ...registration,
+      legalConsent: { ...legalConsent, termsVersionId: 'stale-fixture' },
+    })
+    expect(stale.status).toBe(409)
+    expect(stale.body.error.code).toBe('POLICY_CONSENT_REQUIRED')
+    expect(stale.headers['set-cookie']).toBeUndefined()
+    expect(await prisma.smsVerificationCode.count({ where: { phone, purpose: 'register', consumedAt: null } })).toBe(1)
+
+    const results = await Promise.all([
+      request(app).post('/api/auth/register').send(registration),
+      request(app).post('/api/auth/sms/register').send(registration),
+    ])
+    expect(results.filter(response => response.status === 201)).toHaveLength(1)
+    const rejected = results.find(response => response.status !== 201)
+    expect(['SMS_CODE_INVALID', 'AUTH_ACCOUNT_EXISTS']).toContain(rejected?.body.error.code)
+    expect(rejected?.headers['set-cookie']).toBeUndefined()
+    const created = await prisma.user.findUniqueOrThrow({ where: { phone } })
+    expect(await prisma.userLegalConsent.count({ where: { userId: created.id } })).toBe(2)
+    expect(await prisma.smsVerificationCode.count({ where: { phone, purpose: 'register', consumedAt: { not: null } } })).toBe(1)
+  })
+
   it('注册→登录→登出全链路', async () => {
     const unique = randomInt(0, 10_000_000).toString().padStart(7, '0')
     const phone = `+861398${unique}`
@@ -62,7 +90,7 @@ describe.skipIf(!dbAvailable)('应用冒烟（需 DB）', () => {
 
     const registerRes = await request(app)
       .post('/api/auth/register')
-      .send({ ...await integrationLegalConsent(), phone, nickname: `冒烟测试用户${unique}`, password })
+      .send({ ...await integrationSmsRegistration(phone), phone, nickname: `冒烟测试用户${unique}`, password })
     expect(registerRes.status).toBe(201)
     expect(registerRes.body.data.tokens.accessToken).toContain('v2.')
     // v2 双 cookie：access + refresh 同时下发

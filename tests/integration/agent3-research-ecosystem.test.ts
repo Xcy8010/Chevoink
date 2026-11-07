@@ -1,4 +1,4 @@
-import { integrationLegalConsent } from '../support/legal-consent.js'
+import { integrationSmsRegistration } from '../support/sms-registration.js'
 import { randomInt, randomUUID } from 'node:crypto'
 
 import request from 'supertest'
@@ -32,8 +32,8 @@ describe.skipIf(!dbAvailable)('Agent 3.0 研究、反馈与邀请共享闭环（
     const unique = randomInt(0, 10_000_000).toString().padStart(7, '0')
     const ownerPhone = `+861356${unique}`
     const recipientPhone = `+861346${unique}`
-    const owner = await request(app).post('/api/auth/register').send({ ...await integrationLegalConsent(), phone: ownerPhone, nickname: `研究台作者${unique}`, password: 'Research-Test-123!' })
-    const recipient = await request(app).post('/api/auth/register').send({ ...await integrationLegalConsent(), phone: recipientPhone, nickname: `技能接收者${unique}`, password: 'Research-Test-123!' })
+    const owner = await request(app).post('/api/auth/register').send({ ...await integrationSmsRegistration(ownerPhone), phone: ownerPhone, nickname: `研究台作者${unique}`, password: 'Research-Test-123!' })
+    const recipient = await request(app).post('/api/auth/register').send({ ...await integrationSmsRegistration(recipientPhone), phone: recipientPhone, nickname: `技能接收者${unique}`, password: 'Research-Test-123!' })
     expect(owner.status).toBe(201)
     expect(recipient.status).toBe(201)
     cookie = (Array.isArray(owner.headers['set-cookie']) ? owner.headers['set-cookie'] : [owner.headers['set-cookie']]).find((item: string) => item?.startsWith('chevoink_session=')) as string

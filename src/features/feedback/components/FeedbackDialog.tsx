@@ -5,6 +5,9 @@ import { createPortal } from 'react-dom'
 import Button from '@/components/ui/Button'
 import { useToast } from '@/components/ui/toast-context'
 import { ApiClientError } from '@/app/api-client'
+import { effectiveSiteSettings } from '@/features/site-content/defaults'
+import { usePublicSiteContent } from '@/features/site-content/public-api'
+import SiteSupportLink from '@/features/site-content/SiteSupportLink'
 import {
   FEEDBACK_QQ_GROUP_NUMBER,
   FEEDBACK_QQ_GROUP_URL,
@@ -51,6 +54,8 @@ function createImageId(): string {
 export default function FeedbackDialog({ open, kind, source, onClose }: FeedbackDialogProps) {
   const toast = useToast()
   const copy = KIND_COPY[kind]
+  const siteContent = usePublicSiteContent(open)
+  const supportUrl = effectiveSiteSettings(siteContent.data?.settings).contact.url
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [content, setContent] = useState('')
   const [contact, setContact] = useState('')
@@ -348,7 +353,8 @@ export default function FeedbackDialog({ open, kind, source, onClose }: Feedback
           </p>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t border-[var(--border-subtle)] px-5 py-3.5">
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--border-subtle)] px-5 py-3.5">
+          <SiteSupportLink href={supportUrl} className="mr-auto inline-flex min-h-9 items-center gap-2 rounded-xl px-2 text-sm text-[var(--text-primary)] hover:bg-[var(--surface-muted)]" />
           <Button variant="ghost" size="sm" onClick={onClose} disabled={submitting}>
             取消
           </Button>

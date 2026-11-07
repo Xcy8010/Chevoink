@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import SettingsPage from '../../src/app/routes/SettingsPage'
 import { ANDROID_APK_URL } from '../../src/app/routes/settings/client-os'
@@ -27,6 +27,22 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.clearAllMocks() })
 async function show() { await act(async () => { render(<MemoryRouter><SettingsPage /></MemoryRouter>) }) }
+
+function PolicyRouteProbe() {
+  const { search } = useLocation()
+  return <output>{new URLSearchParams(search).get('kind')}</output>
+}
+
+it.each([['用户协议', 'terms'], ['隐私政策', 'privacy']])('opens %s from settings without a signed-in session', async (label, kind) => {
+  await act(async () => {
+    render(<MemoryRouter initialEntries={['/settings']}><Routes>
+      <Route path="/settings" element={<SettingsPage />} />
+      <Route path="/legal" element={<PolicyRouteProbe />} />
+    </Routes></MemoryRouter>)
+  })
+  fireEvent.click(screen.getByRole('button', { name: label }))
+  expect(screen.getByText(kind)).toBeTruthy()
+})
 
 it('offers narrow native actions only in Windows settings', async () => {
   vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Windows NT 10.0 ChevoinkDesktop/1.0.4')

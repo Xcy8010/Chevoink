@@ -281,6 +281,10 @@ function GeneralPanel(props: Props) {
           </span>
           <ChevronRight className="h-4 w-4 text-[var(--text-tertiary)]" />
         </button>
+        <div className="flex flex-wrap gap-x-5 gap-y-2 pt-3 text-sm text-[var(--text-secondary)]">
+          <a href="/legal?kind=terms" target="_blank" rel="noopener noreferrer" className="rounded-sm underline-offset-4 hover:underline">用户协议</a>
+          <a href="/legal?kind=privacy" target="_blank" rel="noopener noreferrer" className="rounded-sm underline-offset-4 hover:underline">隐私政策</a>
+        </div>
       </SettingsGroup>
     </div>
   )

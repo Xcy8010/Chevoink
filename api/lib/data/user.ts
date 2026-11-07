@@ -12,6 +12,7 @@ import { initializeNewUserCredits } from '../credits.js'
 import { evictUserBanCache } from '../auth-session.js'
 import { normalizePhoneNumber } from '../phone.js'
 import { DataAccessError, prisma } from '../prisma.js'
+import { prepareAuthSmsCode } from '../sms-service.js'
 import { buildAutoNickname, commentInclude, conversationInclude, ensureNonEmptyText, ensureUserExists, excerptContent, isUserOnline, novelInclude, nowIso, postInclude, resolveEffectiveNovelTitle, toConversation, toCoverAsset, toIso, toNovel, toPost, toUser, toUserSummary, type UserRecord } from './internal.js'
 import { getViewerLikedCommentIds } from './comment.js'
 import { attachPostViewerFlags, getViewerPostFlags } from './post.js'
@@ -807,28 +808,26 @@ export async function markInteractionSeenData(
 
 export async function registerUserData(input: {
   email?: string
-  phone?: string
+  phone: string
+  code: string
   nickname?: string
   password?: string
   referralCode?: string
   legalConsent?: LegalConsent
 }): Promise<User> {
   const email = input.email?.trim() || undefined
-  const phone = input.phone ? normalizePhoneNumber(input.phone) : undefined
+  const smsProof = await prepareAuthSmsCode({ phone: input.phone, purpose: 'register', code: input.code })
+  const phone = smsProof.phone
   const password = input.password?.trim() ? ensureNonEmptyText(input.password, 'password') : undefined
   const nickname = input.nickname?.trim()
     ? ensureNonEmptyText(input.nickname, 'nickname')
     : await buildAutoNickname({ phone, email })
 
-  if (!email && !phone) {
-    throw new DataAccessError(400, 'VALIDATION_ERROR', '请至少填写邮箱或手机号。')
-  }
-
   const duplicated = await prisma.user.findFirst({
     where: {
       OR: [
         ...(email ? [{ email }] : []),
-        ...(phone ? [{ phone }] : []),
+        { phone },
         { nickname },
       ],
     },
@@ -840,11 +839,12 @@ export async function registerUserData(input: {
 
   const created = await prisma.$transaction(async (tx) => {
     const consent = await verifyRegistrationConsent(tx, input.legalConsent)
+    await smsProof.consume(tx)
     const user = await tx.user.create({
       data: {
         id: randomUUID(),
         email: email ?? null,
-        phone: phone ?? null,
+        phone,
         passwordHash: password ? hashPassword(password) : createUnsetPasswordHash(),
         nickname,
         avatarUrl: null,

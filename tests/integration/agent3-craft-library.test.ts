@@ -1,4 +1,4 @@
-import { integrationLegalConsent } from '../support/legal-consent.js'
+import { integrationSmsRegistration } from '../support/sms-registration.js'
 import { randomInt, randomUUID } from 'node:crypto'
 
 import request from 'supertest'
@@ -31,7 +31,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 合法文笔库闭环（需 DB）', () 
   beforeAll(async () => {
     const unique = randomInt(0, 10_000_000).toString().padStart(7, '0')
     const phone = `+861376${unique}`
-    const register = await request(app).post('/api/auth/register').send({ ...await integrationLegalConsent(), phone, nickname: `文笔库测试${unique}`, password: 'Craft-Library-123!' })
+    const register = await request(app).post('/api/auth/register').send({ ...await integrationSmsRegistration(phone), phone, nickname: `文笔库测试${unique}`, password: 'Craft-Library-123!' })
     expect(register.status).toBe(201)
     const cookies = Array.isArray(register.headers['set-cookie']) ? register.headers['set-cookie'] : [register.headers['set-cookie']]
     cookie = cookies.find((item: string) => item?.startsWith('chevoink_session=')) as string

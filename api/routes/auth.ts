@@ -36,21 +36,16 @@ const sendSmsCodeSchema = z.object({
   captchaAnswer: z.string().min(1),
 })
 
-const registerSchema = z.object({
-  email: z.string().optional(),
-  phone: z.string().optional(),
-  nickname: z.string().min(1),
-  password: z.string().optional(),
-  referralCode: z.string().max(24).optional(),
-  legalConsent: legalConsentSchema.optional(),
-})
-
 const smsRegisterSchema = z.object({
   phone: z.string().min(1),
   code: z.string().min(1),
   password: z.string().optional(),
   referralCode: z.string().max(24).optional(),
   legalConsent: legalConsentSchema.optional(),
+})
+const legacyRegisterSchema = smsRegisterSchema.extend({
+  email: z.string().optional(),
+  nickname: z.string().min(1),
 })
 
 const loginSchema = z.object({
@@ -147,24 +142,15 @@ router.post('/sms/send-code', async (req: Request, res: Response): Promise<void>
   }
 })
 
-router.post('/register', async (req: Request, res: Response): Promise<void> => {
+async function registerWithSms(req: Request, res: Response, schema: typeof smsRegisterSchema | typeof legacyRegisterSchema): Promise<void> {
   const requestId = createRequestId()
 
   try {
-    const body = parseBody(registerSchema, req.body, '请完整填写注册信息。')
-
-    if (!body.email?.trim() && !body.phone?.trim()) {
-      res.status(400).json(buildError(requestId, 'VALIDATION_ERROR', '请至少填写邮箱或手机号。'))
-      return
-    }
-
+    const body = parseBody(schema, req.body, '请输入手机号和验证码。')
     const user = await registerUserData({
-      email: body.email?.trim() || undefined,
-      phone: body.phone?.trim() || undefined,
-      nickname: body.nickname.trim(),
+      ...body,
       password: body.password?.trim() || undefined,
       referralCode: body.referralCode?.trim() || undefined,
-      legalConsent: body.legalConsent,
     })
 
     const tokens = await createSession(user.id, res)
@@ -172,33 +158,10 @@ router.post('/register', async (req: Request, res: Response): Promise<void> => {
   } catch (error) {
     sendRouteError(res, requestId, error)
   }
-})
+}
 
-router.post('/sms/register', async (req: Request, res: Response): Promise<void> => {
-  const requestId = createRequestId()
-
-  try {
-    const body = parseBody(smsRegisterSchema, req.body, '请输入手机号和验证码。')
-
-    const { phone } = await verifyAuthSmsCode({
-      phone: body.phone,
-      purpose: 'register',
-      code: body.code,
-    })
-
-    const user = await registerUserData({
-      phone,
-      password: body.password?.trim() || undefined,
-      referralCode: body.referralCode?.trim() || undefined,
-      legalConsent: body.legalConsent,
-    })
-
-    const tokens = await createSession(user.id, res)
-    res.status(201).json(buildSuccess(requestId, { user, tokens }))
-  } catch (error) {
-    sendRouteError(res, requestId, error)
-  }
-})
+router.post('/register', (req, res) => registerWithSms(req, res, legacyRegisterSchema))
+router.post('/sms/register', (req, res) => registerWithSms(req, res, smsRegisterSchema))
 
 router.post('/login', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()

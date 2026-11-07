@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import userEvent from '@testing-library/user-event'
+import type { CreditModelOption } from '../../shared/contracts/credits'
 import { formatModelPrice, modelPriceOptionText } from '../../shared/model-price-format'
 import { ModelActivityBadge, ModelPriceDetails, ModelPriceSummary } from '../../src/features/studio/components/ModelPriceDetails'
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
@@ -38,6 +39,37 @@ it('keeps precise free activity and legacy free promotion labels', () => {
   expect(screen.getByText('周末免费')).toBeTruthy(); expect(screen.getByText('1.5x').tagName).toBe('DEL'); expect(screen.getByText('0x')).toBeTruthy()
   expect(modelPriceOptionText(free)).toBe('周末免费 · 原1.5x → 免费')
   expect(modelPriceOptionText({ ...free, activity: null, freePromotion: { endsAt: '2026-11-07T00:00:00Z', afterMultiplier: 1.5 } })).toBe('限时免费')
+})
+it.each([
+  { label: '免费', freePromotion: null },
+  { label: '限时免费', freePromotion: { endsAt: '2026-11-07T00:00:00Z', afterMultiplier: 1.5 } },
+])('uses the original red badge for $label', ({ label, freePromotion }) => {
+  render(<ModelActivityBadge model={{ ...model, multiplier: 0, freePromotion }} />)
+  expect(screen.getByText(label).classList.contains('bg-red-500/10')).toBe(true)
+  expect(screen.getByText(label).classList.contains('text-[var(--color-error)]')).toBe(true)
+})
+it('advertises a scheduled night discount in daylight while keeping the current multiplier', () => {
+  const rule = { name: '夜间折扣', enabled: true, startDate: null, endDate: '2026-11-08',
+    weekdays: [0, 1, 2, 3, 4, 5, 6], allDay: false, startTime: '22:00', endTime: '08:00', multiplierBps: 9000 }
+  const activity = { name: null, revision: 1, timezone: 'Asia/Shanghai' as const, asOf: '2026-11-07T04:00:00Z',
+    nextSwitchAt: '2026-11-07T14:00:00Z', rules: [rule] }
+  const daytime = { ...model, multiplier: 1.8, baseMultiplier: 1.8, activity }
+  const row = (option: CreditModelOption) =>
+    <><ModelActivityBadge model={option} /><ModelPriceSummary model={option} /></>
+  const view = render(row(daytime))
+  expect(screen.getByText(rule.name).getAttribute('title')).toBe('仅在设定时段生效')
+  expect(screen.getByText('1.8x').tagName).toBe('SPAN')
+  expect(view.container.querySelector('del')).toBeNull()
+
+  view.rerender(row({ ...daytime, multiplier: 0.9, activity: { ...activity, name: rule.name, asOf: '2026-11-07T14:00:00Z' } }))
+  expect(screen.getByText(rule.name).getAttribute('title')).toBeNull()
+  expect(screen.getByText('1.8x').tagName).toBe('DEL')
+  expect(screen.getByText('0.9x')).toBeTruthy()
+
+  view.rerender(row({ ...daytime, activity: { ...activity, rules: [{ ...rule, enabled: false }] } }))
+  expect(screen.queryByText(rule.name)).toBeNull()
+  view.rerender(row({ ...daytime, activity: { ...activity, asOf: '2026-11-07T16:00:00Z' } }))
+  expect(screen.queryByText(rule.name)).toBeNull()
 })
 it('shows the real original multiplier before the discounted value in the row and the detail card', () => {
   render(<ModelPriceDetails model={{ ...model, baseMultiplier: 1.8, multiplier: 0.9 }} />)

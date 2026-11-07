@@ -9,7 +9,7 @@ export const defaultSiteSettings = {
   about: '',
   footer: '',
   docsLabel: '帮助文档',
-  contact: { label: '', url: null, details: '' },
+  contact: { label: '联系客服', url: 'https://work.weixin.qq.com/kfid/kfc79a6e1508b365a61', details: '' },
   navigation: desktopNavItems.map(item => ({ label: item.label, url: item.href })),
 } satisfies SiteSettings
 

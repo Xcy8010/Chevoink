@@ -1,5 +1,6 @@
 import { createHash, randomInt, randomUUID } from 'node:crypto'
 
+import type { Prisma } from '@prisma/client'
 import { sms } from 'tencentcloud-sdk-nodejs-sms'
 
 import { env } from '../config/env.js'
@@ -178,7 +179,9 @@ export async function sendAuthSmsCode(input: { phone: string; purpose: SmsAuthPu
   }
 }
 
-export async function verifyAuthSmsCode(input: { phone: string; purpose: SmsAuthPurpose; code: string }) {
+type SmsCodeInput = { phone: string; purpose: SmsAuthPurpose; code: string }
+
+export async function prepareAuthSmsCode(input: SmsCodeInput) {
   if (!env.authSessionSecret) {
     throw new DataAccessError(500, 'AUTH_SESSION_SECRET_MISSING', '服务端认证密钥未配置。')
   }
@@ -191,21 +194,13 @@ export async function verifyAuthSmsCode(input: { phone: string; purpose: SmsAuth
     throw new DataAccessError(400, 'VALIDATION_ERROR', '验证码格式不正确。')
   }
 
+  // A consumed or expired newest record must not revive an older code.
   const record = await prisma.smsVerificationCode.findFirst({
-    where: {
-      phone,
-      purpose,
-      consumedAt: null,
-      expiresAt: {
-        gt: new Date(),
-      },
-    },
-    orderBy: {
-      createdAt: 'desc',
-    },
+    where: { phone, purpose },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
   })
 
-  if (!record) {
+  if (!record || record.consumedAt || record.expiresAt <= new Date()) {
     throw new DataAccessError(400, 'SMS_CODE_INVALID', '验证码已失效或不存在，请重新获取。')
   }
 
@@ -213,10 +208,16 @@ export async function verifyAuthSmsCode(input: { phone: string; purpose: SmsAuth
     throw new DataAccessError(429, 'SMS_CODE_ATTEMPTS_EXCEEDED', '验证码尝试次数过多，请重新获取。')
   }
 
+  const availableRecord = (now: Date) => ({
+    id: record.id,
+    consumedAt: null,
+    expiresAt: { gt: now },
+    attempts: { lt: 5 },
+  })
   const codeHash = hashVerificationCode(phone, purpose, code)
   if (codeHash !== record.codeHash) {
-    await prisma.smsVerificationCode.update({
-      where: { id: record.id },
+    await prisma.smsVerificationCode.updateMany({
+      where: availableRecord(new Date()),
       data: {
         attempts: {
           increment: 1,
@@ -226,18 +227,23 @@ export async function verifyAuthSmsCode(input: { phone: string; purpose: SmsAuth
     throw new DataAccessError(400, 'SMS_CODE_INVALID', '验证码错误。')
   }
 
-  await prisma.smsVerificationCode.updateMany({
-    where: {
-      phone,
-      purpose,
-      consumedAt: null,
-    },
-    data: {
-      consumedAt: new Date(),
-    },
-  })
-
   return {
     phone,
+    async consume(db: Pick<Prisma.TransactionClient, 'smsVerificationCode'>) {
+      const now = new Date()
+      const claimed = await db.smsVerificationCode.updateMany({
+        where: availableRecord(now),
+        data: { consumedAt: now },
+      })
+      if (claimed.count !== 1) {
+        throw new DataAccessError(400, 'SMS_CODE_INVALID', '验证码已失效或不存在，请重新获取。')
+      }
+    },
   }
+}
+
+export async function verifyAuthSmsCode(input: SmsCodeInput) {
+  const proof = await prepareAuthSmsCode(input)
+  await proof.consume(prisma)
+  return { phone: proof.phone }
 }

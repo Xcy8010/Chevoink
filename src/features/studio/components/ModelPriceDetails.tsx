@@ -18,8 +18,23 @@ export function ModelPriceSummary({ model }: { model: CreditModelOption }) {
 }
 
 export function ModelActivityBadge({ model }: { model: CreditModelOption }) {
-  const label = model.activity?.name ?? (model.multiplier === 0 ? model.freePromotion ? '限时免费' : '免费' : null)
-  return label ? <span className="max-w-full shrink-0 rounded-md bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium leading-none text-emerald-700 dark:text-emerald-400">{label}</span> : null
+  const activity = model.activity
+  const currentLabel = activity?.name ?? (model.multiplier === 0 ? model.freePromotion ? '限时免费' : '免费' : null)
+  const labels = currentLabel ? [currentLabel] : []
+  const nightLabel = '夜间折扣'
+  if (activity && activity.name !== nightLabel) {
+    const offset = activity.timezone === 'UTC' ? 'Z' : '+08:00'
+    const asOf = Date.parse(activity.asOf)
+    const scheduled = activity.rules.some(rule => rule.enabled && rule.name === nightLabel &&
+      (rule.endDate === null || Date.parse(rule.endDate + 'T00:00:00' + offset) > asOf))
+    if (scheduled) labels.push(nightLabel)
+  }
+  return labels.map(label => {
+    const free = label === '免费' || label === '限时免费'
+    const colors = free ? 'rounded-full bg-red-500/10 text-[var(--color-error)]' : 'rounded-md bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
+    return <span key={label} title={label === nightLabel && activity?.name !== label ? '仅在设定时段生效' : undefined}
+      className={`max-w-full shrink-0 px-1.5 py-0.5 text-[10px] font-medium leading-none ${colors}`}>{label}</span>
+  })
 }
 
 type Props = { model: CreditModelOption; children?: ReactNode; className?: string; reasoningEffort?: ModelReasoningEffort; onReasoningChange?: (effort: ModelReasoningEffort) => void }

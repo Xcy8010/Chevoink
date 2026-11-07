@@ -61,13 +61,9 @@ export type AuthTokenPair = {
   expiresInSeconds: number
 }
 
-export type RegisterRequest = {
+export type RegisterRequest = SmsRegisterRequest & {
   email?: string
-  phone?: string
-  password?: string
   nickname: string
-  legalConsent?: import('./site-content.js').LegalConsent
-  referralCode?: string
 }
 
 export type LoginRequest = {
@@ -611,7 +607,7 @@ export const apiEndpointCatalog: ApiEndpointDefinition[] = [
   { method: 'GET', path: '/api/meta', summary: '项目元信息与模块状态' },
   { method: 'GET', path: '/api/meta/contracts', summary: '接口契约清单与实体索引' },
   { method: 'GET', path: '/api/auth/captcha', summary: '获取登录注册前的人机验证挑战' },
-  { method: 'POST', path: '/api/auth/register', summary: '本地注册并建立服务端会话' },
+  { method: 'POST', path: '/api/auth/register', summary: '通过手机短信验证注册并建立服务端会话' },
   { method: 'POST', path: '/api/auth/login', summary: '本地登录并建立服务端会话' },
   { method: 'POST', path: '/api/auth/sms/send-code', summary: '完成人机验证后发送短信验证码' },
   { method: 'POST', path: '/api/auth/sms/register', summary: '通过手机号验证码注册并建立服务端会话' },

@@ -2,8 +2,8 @@ import { useQuery } from '@tanstack/react-query'
 import { requestJson } from '@/app/api-client'
 import type { Announcement, PublicSiteContent } from '../../../shared/contracts/site-content'
 
-export function usePublicSiteContent() {
-  return useQuery({queryKey:['site-content','public'],queryFn:()=>requestJson<PublicSiteContent>('/api/site-content'),staleTime:0,refetchOnWindowFocus:true,refetchInterval:query=>{
+export function usePublicSiteContent(enabled = true) {
+  return useQuery({queryKey:['site-content','public'],queryFn:()=>requestJson<PublicSiteContent>('/api/site-content'),enabled,staleTime:0,refetchOnWindowFocus:true,refetchInterval:query=>{
     const data=query.state.data
     const remaining=data?.nextBoundaryAt ? Date.parse(data.nextBoundaryAt)-Date.parse(data.serverNow)-(Date.now()-query.state.dataUpdatedAt) : 60000
     return Math.max(250,Math.min(60000,remaining+100))

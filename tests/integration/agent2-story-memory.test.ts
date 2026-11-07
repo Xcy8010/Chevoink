@@ -1,4 +1,4 @@
-import { integrationLegalConsent } from '../support/legal-consent.js'
+import { integrationSmsRegistration } from '../support/sms-registration.js'
 import { randomInt, randomUUID } from 'node:crypto'
 
 import request from 'supertest'
@@ -46,7 +46,7 @@ describe.skipIf(!dbAvailable)('Agent 2.0 P4 故事记忆与混合召回（需 DB
     const unique = randomInt(0, 10_000_000).toString().padStart(7, '0')
     const phone = `+861392${unique}`
     const register = await request(app).post('/api/auth/register')
-      .send({ ...await integrationLegalConsent(), phone, nickname: `记忆评测${unique}`, password: 'Memory-Test-123!' })
+      .send({ ...await integrationSmsRegistration(phone), phone, nickname: `记忆评测${unique}`, password: 'Memory-Test-123!' })
     const cookies = Array.isArray(register.headers['set-cookie']) ? register.headers['set-cookie'] : [register.headers['set-cookie']]
     const cookie = cookies.find((item: string) => item?.startsWith('chevoink_session=')) as string
     userId = (await prisma.user.findUniqueOrThrow({ where: { phone }, select: { id: true } })).id

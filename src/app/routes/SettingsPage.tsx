@@ -5,12 +5,14 @@ import {
   Check,
   ChevronLeft,
   Download,
+  FileText,
   KeyRound,
   Lock,
   LogOut,
   Maximize,
   Moon,
   RefreshCw,
+  ShieldCheck,
   Smartphone,
   Sun,
   UserRound,
@@ -740,6 +742,16 @@ export default function SettingsPage() {
         )
       : null
 
+  const legalSection = (
+    <section>
+      <SectionTitle>协议与政策</SectionTitle>
+      <div className="divide-y divide-[var(--border-subtle)]">
+        <SettingsRow icon={<FileText className="h-[18px] w-[18px]" />} title="用户协议" chevron="right" onClick={() => navigate('/legal?kind=terms')} />
+        <SettingsRow icon={<ShieldCheck className="h-[18px] w-[18px]" />} title="隐私政策" chevron="right" onClick={() => navigate('/legal?kind=privacy')} />
+      </div>
+    </section>
+  )
+
   if (authStatus === 'unavailable') {
     return (
       <AppState
@@ -763,6 +775,8 @@ export default function SettingsPage() {
         </section>
 
         {aboutSection}
+
+        {legalSection}
 
         <AppState
           title="登录后可管理完整的账户设置"
@@ -958,6 +972,8 @@ export default function SettingsPage() {
 
       {/* 分组六：关于（仅 APP 壳内） */}
       {aboutSection}
+
+      {legalSection}
 
       {/* 分组七：客户端安装（仅手机浏览器） */}
       {clientSection}
