@@ -127,6 +127,9 @@ export default function AuthPage({ mode }: AuthPageProps) {
 
   const isSmsFlow = isRegisterPage || loginMethod === 'sms'
   const shouldCollectProfile = isRegisterPage || smsAccountStatus === 'new'
+  const requiresPolicyConsent = isSmsFlow ? shouldCollectProfile : Boolean(legal?.registrationAvailable)
+  const hasPolicyConsent = Boolean(legal?.registrationAvailable && legalKey && acceptedPolicies === legalKey)
+  const policyConsentPending = (!isSmsFlow && legalQuery.isLoading) || (requiresPolicyConsent && !hasPolicyConsent)
 
   const refreshCaptcha = useCallback(async () => {
     setLoadingCaptcha(true)
@@ -230,6 +233,7 @@ export default function AuthPage({ mode }: AuthPageProps) {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (policyConsentPending) return
     setSubmitting(true)
     setErrorMessage('')
     setHintMessage('')
@@ -451,7 +455,27 @@ export default function AuthPage({ mode }: AuthPageProps) {
             </>
           )}
 
-          {isSmsFlow && shouldCollectProfile ? <div className="text-sm leading-6">{legal?.registrationAvailable ? <label className="flex items-start gap-2"><input type="checkbox" checked={Boolean(legalKey && acceptedPolicies===legalKey)} onChange={event=>setAcceptedPolicies(event.target.checked ? legalKey : '')}/><span>我已阅读并同意 <Link className="underline" to="/legal?kind=terms" target="_blank">服务条款</Link> 与 <Link className="underline" to="/legal?kind=privacy" target="_blank">隐私政策</Link></span></label> : <p>{legalQuery.isLoading ? '正在读取注册政策…' : '正式服务条款与隐私政策尚未生效，暂时无法注册。'}</p>}</div> : null}
+          {requiresPolicyConsent && (legal?.registrationAvailable ? (
+            <div className="flex items-center justify-center gap-2 text-sm leading-6">
+              <input
+                id="auth-policy-consent"
+                type="checkbox"
+                className="shrink-0"
+                aria-labelledby="auth-policy-text"
+                checked={hasPolicyConsent}
+                onChange={(event) => setAcceptedPolicies(event.target.checked ? legalKey : '')}
+              />
+              <span id="auth-policy-text">
+                <label htmlFor="auth-policy-consent">我已阅读并同意</label>{' '}
+                <Link className="underline" to="/legal?kind=terms" target="_blank">服务条款</Link> 与{' '}
+                <Link className="underline" to="/legal?kind=privacy" target="_blank">隐私政策</Link>
+              </span>
+            </div>
+          ) : (
+            <p className="text-center text-sm leading-6">
+              {legalQuery.isLoading ? '正在读取注册政策…' : '正式服务条款与隐私政策尚未生效，暂时无法注册。'}
+            </p>
+          ))}
           {hintMessage ? (
             <p className="rounded-[var(--radius-md)] bg-[var(--surface-muted)] px-4 py-3 text-sm leading-6 text-[var(--text-secondary)]">
               {hintMessage}
@@ -464,7 +488,7 @@ export default function AuthPage({ mode }: AuthPageProps) {
             </p>
           ) : null}
 
-          <Button type="submit" variant="primary" disabled={submitting || (isSmsFlow && shouldCollectProfile && (!legalKey || acceptedPolicies !== legalKey))} className="h-12 w-full text-base">
+          <Button type="submit" variant="primary" disabled={submitting || policyConsentPending} className="h-12 w-full text-base">
             {submitting ? '提交中…' : !isSmsFlow ? '登录' : shouldCollectProfile ? '完成注册' : '验证后直接登录'}
           </Button>
         </form>

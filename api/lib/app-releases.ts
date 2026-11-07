@@ -44,7 +44,7 @@ export async function selectAppReleaseForUser(userId:string|null,tx:Transaction=
  if(!row||row.validationState!=='verified'||!row.verifiedAt||!compatible(row))throw new DataAccessError(503,'APP_RELEASE_UNAVAILABLE','已配置的应用版本尚未通过兼容验证。')
  await installedRelease(row)
  const manifest=appReleaseManifestSchema.parse(row.manifest)
- return{mode:'artifact',channel,release:{id:row.id,label:row.label,notes:manifest.publicNotes,entryUrl:`${manifest.basePath}index.html`,capabilities:manifest.capabilities}}
+ return{mode:'artifact',channel,release:{id:row.id,label:row.label,notes:manifest.publicNotes,entryUrl:`${manifest.basePath}index.html`,capabilities:manifest.capabilities,activatedAt:selected.updatedAt.toISOString()}}
 }
 export async function requireAppReleaseCapability(req:Request,capability:AppReleaseCapability){const selection=await selectAppRelease(req);if(selection.mode==='artifact'&&!selection.release!.capabilities.includes(capability))throw new DataAccessError(403,'APP_RELEASE_CAPABILITY_DISABLED','当前应用版本尚未开放此功能。');return selection}
 export async function listAppReleases(actorId:string){

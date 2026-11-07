@@ -22,7 +22,7 @@ export const appReleaseManifestSchema=z.object({
 })
 export type AppReleaseManifest=z.infer<typeof appReleaseManifestSchema>
 export type PublicReleaseNotes=z.infer<typeof publicReleaseNotesSchema>
-export type PublicAppRelease={id:string;label:string;notes:PublicReleaseNotes;entryUrl:string;capabilities:AppReleaseCapability[]}
+export type PublicAppRelease={id:string;label:string;notes:PublicReleaseNotes;entryUrl:string;capabilities:AppReleaseCapability[];activatedAt?:string}
 export type AppReleaseBootstrap={mode:'legacy'|'artifact';channel:'stable'|'test';release:PublicAppRelease|null}
 export const appReleaseActions=['assign_test','full_release','rollback','withdraw_test','discard_candidate'] as const
 export type AppReleaseAction=typeof appReleaseActions[number]

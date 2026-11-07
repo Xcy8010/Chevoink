@@ -8,7 +8,7 @@ import { releaseEntryScript } from '../../scripts/app-release-artifact.mjs'
 import type { AppReleaseBootstrap } from '../../shared/contracts/app-release'
 const mocks=vi.hoisted(()=>({request:vi.fn()}))
 vi.mock('../../src/app/api-client',()=>({requestJson:mocks.request}))
-const selected:AppReleaseBootstrap={mode:'artifact',channel:'test',release:{id:'selected-b',label:'Synthetic B',notes:{features:['Synthetic fixture'],fixes:[],changes:[]},entryUrl:'/api/app-releases/artifacts/selected-b/index.html',capabilities:[]}}
+const selected:AppReleaseBootstrap={mode:'artifact',channel:'test',release:{id:'selected-b',label:'Synthetic B',notes:{features:['Synthetic fixture'],fixes:['Synthetic fix'],changes:['Synthetic change']},activatedAt:'2026-11-07T10:28:59.756Z',entryUrl:'/api/app-releases/artifacts/selected-b/index.html',capabilities:[]}}
 const originalShow=Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype,'showModal'),originalClose=Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype,'close')
 let legacyFocus:EventListener|undefined
 beforeEach(()=>{
@@ -69,6 +69,9 @@ it('keeps the launcher watcher and exact route refresh callback without automati
  expect(await bootstrapAppRelease()).toBe(true)
  legacyFocus=listener.mock.calls.find(([event])=>event==='focus')![1] as EventListener
  window.dispatchEvent(new Event('focus'));await screen.findByRole('dialog',{name:'应用版本已更新'})
+ expect(screen.getByRole('heading',{name:'更新日志'})).toBeTruthy()
+ expect(screen.getByText('Synthetic fixture')).toBeTruthy()
+ expect(screen.getByText(/更新时间 .*18:28:59（北京时间）/).getAttribute('datetime')).toBe(selected.release!.activatedAt)
  expect(location.assign).not.toHaveBeenCalled();expect(location.replace).not.toHaveBeenCalled()
  fireEvent.click(screen.getByRole('button',{name:'立即刷新'}))
  expect(location.assign).toHaveBeenCalledExactlyOnceWith('/api/app-releases/artifacts/selected-b/index.html?route=%2Fstudio%3Fnovel%3Dsynthetic%23draft')
@@ -85,6 +88,13 @@ it.each(['artifact','legacy'] as const)('executes the serialized artifact notice
  const selection=mode==='artifact'?selected:{mode:'legacy',channel:'stable',release:null}
  const fetch=vi.fn(async()=>({ok:true,json:async()=>({success:true,data:selection})})),run=artifact(fetch)
  run.check();run.check();await screen.findByRole('dialog',{name:'应用版本已更新'})
+ if(mode==='artifact'){
+  expect(screen.getAllByRole('listitem').map(item=>item.textContent)).toEqual(['Synthetic fixture','Synthetic fix','Synthetic change'])
+  expect(screen.getByText(/更新时间 .*18:28:59（北京时间）/).getAttribute('datetime')).toBe(selected.release!.activatedAt)
+ }else{
+  expect(screen.queryByRole('heading',{name:'更新日志'})).toBeNull()
+  expect(screen.queryByText(/更新时间/)).toBeNull()
+ }
  expect(fetch).toHaveBeenCalledOnce();expect(fetch).toHaveBeenCalledWith('/api/app-releases/bootstrap',{credentials:'include',cache:'no-store'})
  expect(run.location.assign).not.toHaveBeenCalled();fireEvent.click(screen.getByRole('button',{name:'立即刷新'}))
  expect(run.location.assign).toHaveBeenCalledExactlyOnceWith(mode==='artifact'?'/api/app-releases/artifacts/selected-b/index.html?route=%2Fstudio%3Fdraft%3Dsynthetic%23chapter':'/studio?draft=synthetic#chapter')

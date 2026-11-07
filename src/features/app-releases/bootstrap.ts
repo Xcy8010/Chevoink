@@ -24,8 +24,8 @@ function watchLegacyRelease(){
   busy=true
   try{
    const selection=await requestJson<AppReleaseBootstrap>('/api/app-releases/bootstrap')
-   if(selection.mode!=='artifact')return
-   showAppReleaseUpdateNotice(`应用版本 ${selection.release!.label} 已可用。`,()=>location.assign(selectedArtifactUrl(selection,location.pathname+location.search+location.hash)!))
+   if(selection.mode!=='artifact'||!selection.release)return
+   showAppReleaseUpdateNotice(`版本「${selection.release.label}」已可用。`,()=>location.assign(selectedArtifactUrl(selection,location.pathname+location.search+location.hash)!),selection.release)
   }finally{busy=false}
  }
  window.addEventListener('focus',()=>{void check().catch(()=>{})})

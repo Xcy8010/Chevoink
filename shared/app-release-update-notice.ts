@@ -1,6 +1,8 @@
 /** Also serialized into immutable release-entry.js. Keep this renderer self-contained:
  * no imports, module closures or runtime helpers. Refresh remains caller-owned. */
-export function showAppReleaseUpdateNotice(message: string, onRefresh: () => void) {
+import type { PublicAppRelease } from './contracts/app-release.js'
+
+export function showAppReleaseUpdateNotice(message: string, onRefresh: () => void, release?: Pick<PublicAppRelease, 'notes' | 'activatedAt'> | null) {
   if (document.getElementById('app-release-update')) return
   const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
   const overflow = document.body.style.overflow
@@ -38,7 +40,45 @@ export function showAppReleaseUpdateNotice(message: string, onRefresh: () => voi
   const hint = document.createElement('p')
   hint.textContent = '也可以稍后刷新，继续留在当前界面。'
   Object.assign(hint.style, { margin: "8px 0 0", color: "var(--text-secondary,#666)", fontSize: "13px" })
-  body.append(description, hint)
+  body.append(description)
+  if (release?.activatedAt) {
+    const date = new Date(release.activatedAt)
+    if (Number.isFinite(date.getTime())) {
+      const time = document.createElement('time')
+      time.dateTime = release.activatedAt
+      const formatted = new Intl.DateTimeFormat('zh-CN', {
+        timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+      }).format(date)
+      time.textContent = `更新时间 ${formatted}（北京时间）`
+      Object.assign(time.style, { display: 'block', marginTop: '4px', color: 'var(--text-secondary,#666)', fontSize: '13px' })
+      body.append(time)
+    }
+  }
+  if (release?.notes) {
+    const notes = document.createElement('section')
+    Object.assign(notes.style, { margin: '16px 0', paddingTop: '12px', borderTop: '1px solid var(--border-subtle,#d4d4d4)' })
+    const heading = document.createElement('h3')
+    heading.textContent = '更新日志'
+    Object.assign(heading.style, { margin: '0', fontSize: '14px', fontWeight: '600' })
+    notes.append(heading)
+    for (const [label, entries] of [['新增', release.notes.features], ['修复', release.notes.fixes], ['调整', release.notes.changes]] as const) {
+      if (!entries.length) continue
+      const group = document.createElement('h4')
+      group.textContent = label
+      Object.assign(group.style, { margin: '8px 0 0', fontSize: '13px', fontWeight: '600' })
+      const list = document.createElement('ul')
+      Object.assign(list.style, { margin: '2px 0 0', paddingInlineStart: '20px', listStyleType: 'disc', overflowWrap: 'anywhere' })
+      for (const entry of entries) {
+        const item = document.createElement('li')
+        item.textContent = entry
+        list.append(item)
+      }
+      notes.append(group, list)
+    }
+    body.append(notes)
+  }
+  body.append(hint)
   const footer = document.createElement('footer')
   Object.assign(footer.style, { display: "flex", flexShrink: "0", justifyContent: "flex-end", gap: "8px", padding: "14px 20px", borderTop: "1px solid var(--border-subtle,#d4d4d4)" })
   const later = document.createElement('button')
