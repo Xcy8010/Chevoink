@@ -14,6 +14,10 @@ export const adminModelLifecycleMigrationChecksum = 'ced5cef83baa1d9bfe9ebe54e5c
 export const appReleaseRetentionMigrationName = '20261107010000_app_release_retention'
 export const appReleaseRetentionMigrationChecksum = '04c0397ce2534083461e58030b7cb8c169ea3e215e2a3d83164481b2d759ccca'
 const appReleaseRetentionCandidateSchema = '7873d4e27151613e878436c3323c13dbeff337411e1eb42c7b8b344dfd014c18'
+export const announcementReadsMigrationName = '20261108120000_site_announcement_reads'
+export const announcementReadsMigrationChecksum = '36096e6622d4f68947252897d15a4a91f5f3c07ffd14dcc0daa8315afdd3dd3c'
+const announcementReadsCandidateSchema = '1e33e41db6208c87ff874b522328f301dfabfe3f4ecab0bbff115173e161c856'
+const announcementReadsTable = 'site_announcement_reads'
 export const adminExperiencePlan = '20261106_admin_model_experience'
 export const adminExperienceMigrations = [
   ['20261106120000_site_content', 'e482a56f154bc0207c5a221a823869151518a4ac3253c2d5e7ea6c8f928d4bde'],
@@ -31,7 +35,8 @@ const reviewed = new Map([[migrationName, migrationChecksum], [fetchMigrationNam
   [webToolBillingMigrationName, webToolBillingMigrationChecksum], [adminModelLifecycleMigrationName, adminModelLifecycleMigrationChecksum]])
 reviewed.set(adminExperiencePlan, createHash('sha256').update(JSON.stringify(adminExperienceMigrations)).digest('hex'))
 reviewed.set(appReleaseRetentionMigrationName, appReleaseRetentionMigrationChecksum)
-const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName])
+reviewed.set(announcementReadsMigrationName, announcementReadsMigrationChecksum)
+const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName])
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
@@ -55,6 +60,12 @@ export function releaseMigrationPlan(candidate, baseline) {
   const currentFiles = files(path.join(candidate, 'prisma/migrations'))
   const oldFiles = files(path.join(baseline, 'prisma/migrations'))
   if (next === previous && JSON.stringify(currentFiles) === JSON.stringify(oldFiles)) return 'routine'
+  const announcementTarget = `${announcementReadsMigrationName}/migration.sql`
+  if (digest(previous.replaceAll('\r\n', '\n')) === appReleaseRetentionCandidateSchema
+    && digest(next.replaceAll('\r\n', '\n')) === announcementReadsCandidateSchema
+    && !oldFiles.some(([name]) => name === announcementTarget)
+    && JSON.stringify(currentFiles.filter(([name]) => name !== announcementTarget)) === JSON.stringify(oldFiles)
+    && currentFiles.find(([name]) => name === announcementTarget)?.[1] === announcementReadsMigrationChecksum) return announcementReadsMigrationName
   const retentionTarget = `${appReleaseRetentionMigrationName}/migration.sql`
   if (digest(previous.replaceAll('\r\n', '\n')) === adminExperienceCandidateSchema
     && digest(next.replaceAll('\r\n', '\n')) === appReleaseRetentionCandidateSchema
@@ -299,15 +310,32 @@ export const retentionConstraints = [
   { name: 'app_release_retirements_pkey', kind: 'p', definition: 'PRIMARY KEY (release_id)', valid: true },
   { name: 'app_release_retirements_release_id_fkey', kind: 'f', definition: 'FOREIGN KEY (release_id) REFERENCES app_releases(id) ON UPDATE CASCADE ON DELETE RESTRICT', valid: true },
 ]
-export function assertAppReleaseRetentionState(state, phase, before) {
-  if (!['before', 'after'].includes(phase)) throw Error('Invalid retention phase')
+const retentionState = { tables: [{ name: 'app_release_retirements', kind: 'r' }], columns: retentionColumns,
+  indexes: retentionIndexes, constraints: retentionConstraints, rowCount: 0 }
+const announcementReadsState = {
+  tables: [{ name: announcementReadsTable, kind: 'r' }],
+  columns: ['user_id', 'version_id'].map(name => ({ name, type: 'character varying(64)', required: true, defaultValue: null })),
+  indexes: [
+    ['site_announcement_reads_pkey', true, ['user_id', 'version_id']],
+    ['site_announcement_reads_version_id_idx', false, ['version_id']],
+  ].map(([name, unique, columns]) => ({
+    name, unique, columns, definition: `CREATE ${unique ? 'UNIQUE ' : ''}INDEX ${name} ON public.site_announcement_reads USING btree (${columns.join(', ')})`,
+    valid: true, ready: true, partial: false, expression: false,
+  })),
+  constraints: [
+    { name: 'site_announcement_reads_pkey', kind: 'p', definition: 'PRIMARY KEY (user_id, version_id)', valid: true },
+    { name: 'site_announcement_reads_user_id_fkey', kind: 'f', definition: 'FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE CASCADE ON DELETE CASCADE', valid: true },
+    { name: 'site_announcement_reads_version_id_fkey', kind: 'f', definition: 'FOREIGN KEY (version_id) REFERENCES site_content_versions(id) ON UPDATE CASCADE ON DELETE CASCADE', valid: true },
+  ],
+  rowCount: 0,
+}
+function assertAddedTableState(state, phase, before, expected, label) {
+  if (!['before', 'after'].includes(phase)) throw Error(`Invalid ${label.toLowerCase()} phase`)
   if (phase === 'before') {
-    if (state.tables.length || state.columns.length || state.indexes.length || state.constraints.length || state.rowCount !== null) throw Error('Retention objects already exist')
+    if (state.tables.length || state.columns.length || state.indexes.length || state.constraints.length || state.rowCount !== null) throw Error(`${label} objects already exist`)
     return
   }
-  assertAppReleaseRetentionState(before, 'before')
-  const expected = { tables: [{ name: 'app_release_retirements', kind: 'r' }], columns: retentionColumns,
-    indexes: retentionIndexes, constraints: retentionConstraints, rowCount: 0 }
+  assertAddedTableState(before, 'before', undefined, expected, label)
   // PostgreSQL/Prisma object key insertion order is not DDL. Preserve every
   // field and value, index-column array order and duplicate catalog rows.
   const catalogRows = rows => rows.map(row => JSON.stringify(Object.fromEntries(Object.entries(row).sort(([left], [right]) => left.localeCompare(right))))).sort()
@@ -318,28 +346,42 @@ export function assertAppReleaseRetentionState(state, phase, before) {
   if (state.rowCount !== 0) differences.rowCount = { actual: state.rowCount, expected: 0 }
   // Only this new table's catalog definitions and count appear in diagnostics;
   // no claim rows, users, content, environment or connection strings are read.
-  if (Object.keys(differences).length) throw Error('Retention migration catalog or initial rows mismatch: ' + JSON.stringify(differences))
+  if (Object.keys(differences).length) throw Error(`${label} migration catalog or initial rows mismatch: ` + JSON.stringify(differences))
 }
-/** Only PostgreSQL metadata and the new empty claim table are read. */
-export async function readAppReleaseRetentionState(tx, phase) {
+export function assertAppReleaseRetentionState(state, phase, before) {
+  assertAddedTableState(state, phase, before, retentionState, 'Retention')
+}
+export function assertAnnouncementReadsState(state, phase, before) {
+  assertAddedTableState(state, phase, before, announcementReadsState, 'Announcement reads')
+}
+
+/** Only PostgreSQL metadata and a count of the new table are read.
+ * table comes exclusively from the two fixed, reviewed call sites below. */
+async function readAddedTableState(tx, phase, table) {
   const tables = await tx.$queryRawUnsafe(`SELECT c.relname AS name, c.relkind::text AS kind FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-    WHERE n.nspname=current_schema() AND c.relname='app_release_retirements' ORDER BY c.relname`)
+    WHERE n.nspname=current_schema() AND c.relname='${table}' ORDER BY c.relname`)
   const columns = await tx.$queryRawUnsafe(`SELECT a.attname AS name, format_type(a.atttypid,a.atttypmod) AS type,
     a.attnotnull AS required, pg_get_expr(d.adbin,d.adrelid) AS "defaultValue"
     FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
     LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
-    WHERE n.nspname=current_schema() AND c.relname='app_release_retirements' AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum`)
+    WHERE n.nspname=current_schema() AND c.relname='${table}' AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum`)
   const indexes = await tx.$queryRawUnsafe(`SELECT c.relname AS name, i.indisunique AS unique, pg_get_indexdef(i.indexrelid) AS definition,
     ARRAY(SELECT a.attname::text FROM unnest(i.indkey) WITH ORDINALITY k(num,ord)
       JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.num ORDER BY k.ord) AS columns,
     i.indisvalid AS valid, i.indisready AS ready, i.indpred IS NOT NULL AS partial, i.indexprs IS NOT NULL AS expression
     FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace
-    WHERE n.nspname=current_schema() AND t.relname='app_release_retirements' ORDER BY c.relname`)
+    WHERE n.nspname=current_schema() AND t.relname='${table}' ORDER BY c.relname`)
   const constraints = await tx.$queryRawUnsafe(`SELECT k.conname AS name, k.contype::text AS kind, pg_get_constraintdef(k.oid) AS definition, k.convalidated AS valid
     FROM pg_constraint k JOIN pg_class t ON t.oid=k.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
-    WHERE n.nspname=current_schema() AND t.relname='app_release_retirements' ORDER BY k.conname`)
-  const rowCount = phase === 'after' ? (await tx.$queryRawUnsafe('SELECT count(*)::int AS count FROM app_release_retirements'))[0].count : null
+    WHERE n.nspname=current_schema() AND t.relname='${table}' ORDER BY k.conname`)
+  const rowCount = phase === 'after' ? (await tx.$queryRawUnsafe(`SELECT count(*)::int AS count FROM ${table}`))[0].count : null
   return { tables, columns, indexes, constraints, rowCount }
+}
+export function readAppReleaseRetentionState(tx, phase) {
+  return readAddedTableState(tx, phase, 'app_release_retirements')
+}
+export function readAnnouncementReadsState(tx, phase) {
+  return readAddedTableState(tx, phase, announcementReadsTable)
 }
 
 export function assertMigrationEnvironment(environment, shared) {
@@ -387,6 +429,11 @@ async function main() {
       if (before && (before.migration !== plan || before.checksum !== reviewed.get(plan) || before.phase !== 'before')) throw Error('Migration preflight receipt mismatch')
       if (before) assertDatabaseIdentity(database, before.database)
       assertMigrationState(rows, checksums, phase, before?.migrations, plan)
+      if (plan === announcementReadsMigrationName) {
+        const announcementReads = await readAnnouncementReadsState(tx, phase)
+        assertAnnouncementReadsState(announcementReads, phase, before?.announcementReads)
+        return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, announcementReads }
+      }
       if (plan === appReleaseRetentionMigrationName) {
         const retention = await readAppReleaseRetentionState(tx, phase)
         assertAppReleaseRetentionState(retention, phase, before?.retention)

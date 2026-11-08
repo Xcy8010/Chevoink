@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { isTestDatabaseRequired } from '../support/database-availability.js'
 import { verifyTestDatabase } from '../support/database-preflight.js'
+import { assertAnnouncementReadsState, readAnnouncementReadsState } from '../../scripts/verify-release-migration.mjs'
 
 const ready = await verifyTestDatabase(isTestDatabaseRequired())
 
@@ -19,6 +20,13 @@ describe.skipIf(!ready)('announcement inbox with isolated PostgreSQL', () => {
       startsAt: date(-30_000).toISOString(), endsAt: null, dismissal: { mode: 'version' },
     }
     try {
+      const catalog = await prisma.$transaction(async tx => {
+        await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY')
+        return readAnnouncementReadsState(tx, 'after')
+      })
+      assertAnnouncementReadsState(catalog, 'after', { tables: [], columns: [], indexes: [], constraints: [], rowCount: null })
+      expect(() => assertAnnouncementReadsState({ ...catalog, rowCount: 1 }, 'after',
+        { tables: [], columns: [], indexes: [], constraints: [], rowCount: null })).toThrow(/rowCount/)
       await prisma.user.createMany({ data: [
         { id: authorId, nickname: '合成账号 A', passwordHash: 'unusable', createdAt: date(-60_000) },
         { id: otherId, nickname: '合成账号 B', passwordHash: 'unusable', createdAt: date(-45_000) },

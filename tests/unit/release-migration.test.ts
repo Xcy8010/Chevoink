@@ -7,7 +7,8 @@ import { assertMigrationEnvironment, assertDatabaseIdentity, assertFindingIndex,
   webToolBillingMigrationName, webToolBillingMigrationChecksum, assertWebToolBillingState,
   adminModelLifecycleMigrationName, adminModelLifecycleMigrationChecksum, lifecycleColumns, lifecycleIndexes, assertAdminModelLifecycleState,
   adminExperiencePlan, adminExperienceMigrations, assertAdminExperienceState, readAdminExperienceState,
-  appReleaseRetentionMigrationName, appReleaseRetentionMigrationChecksum, retentionColumns, retentionIndexes, retentionConstraints, assertAppReleaseRetentionState, readAppReleaseRetentionState } from '../../scripts/verify-release-migration.mjs'
+  appReleaseRetentionMigrationName, appReleaseRetentionMigrationChecksum, retentionColumns, retentionIndexes, retentionConstraints, assertAppReleaseRetentionState, readAppReleaseRetentionState,
+  announcementReadsMigrationName, announcementReadsMigrationChecksum, assertAnnouncementReadsState } from '../../scripts/verify-release-migration.mjs'
 
 // Static catalog captured after the four frozen SQL files in isolated PostgreSQL.
 const experienceCatalog = {
@@ -195,11 +196,65 @@ model AppReleaseRetirement {
     if (kind === 'already-present') { mkdirSync(path.dirname(path.join(f.baseline, relative))); writeFileSync(path.join(f.baseline, relative), readFileSync(sql)) }
     expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
   })
-  it('requires only retention pending, one exact successful row afterwards and unchanged full historical rows', () => {
+  const announcementFixture = () => {
+    const f = retentionFixture()
+    const schema = readFileSync(path.join(f.candidate, 'prisma/schema.prisma'), 'utf8')
+    const retentionFile = `prisma/migrations/${appReleaseRetentionMigrationName}/migration.sql`
+    mkdirSync(path.dirname(path.join(f.baseline, retentionFile)))
+    writeFileSync(path.join(f.baseline, retentionFile), readFileSync(path.join(f.candidate, retentionFile)))
+    writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), schema)
+    const model = `model SiteAnnouncementRead {
+  userId    String @map("user_id") @db.VarChar(64)
+  versionId String @map("version_id") @db.VarChar(64)
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  version   SiteContentVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, versionId])
+  @@index([versionId])
+  @@map("site_announcement_reads")
+}
+
+`
+    const candidate = schema
+      .replace('  legalConsents UserLegalConsent[]\n', '  legalConsents UserLegalConsent[]\n  announcementReads SiteAnnouncementRead[]\n')
+      .replace('  consents       UserLegalConsent[]\n', '  consents       UserLegalConsent[]\n  announcementReads SiteAnnouncementRead[]\n')
+      .replace('model UserLegalConsent {', model + 'model UserLegalConsent {')
+    writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), candidate)
+    const relative = `prisma/migrations/${announcementReadsMigrationName}/migration.sql`
+    const sql = path.join(f.candidate, relative)
+    mkdirSync(path.dirname(sql))
+    // Compare the exact archive bytes, independent of Windows checkout EOL.
+    writeFileSync(sql, readFileSync(relative, 'utf8').replaceAll('\r\n', '\n'))
+    return { ...f, sql }
+  }
+  it('accepts only the exact announcement-read schema pair and sole reviewed migration', () => {
+    const f = announcementFixture()
+    expect(releaseMigrationPlan(f.candidate, f.baseline)).toBe(announcementReadsMigrationName)
+    expect(readFileSync('deploy/deploy-production.sh', 'utf8')).toContain('"$MIGRATION_PLAN" == "20261108120000_site_announcement_reads"')
+  })
+  it.each(['baseline', 'schema', 'history', 'sql', 'additional'])('rejects announcement-read %s outside its exact approval', kind => {
+    const f = announcementFixture()
+    if (kind === 'baseline') writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), '// unrelated')
+    if (kind === 'schema') writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), '// unrelated')
+    if (kind === 'history') writeFileSync(path.join(f.candidate, 'prisma/migrations/old/migration.sql'), 'SELECT 2;')
+    if (kind === 'sql') writeFileSync(f.sql, 'SELECT 2;')
+    if (kind === 'additional') writeFileSync(path.join(path.dirname(f.sql), 'extra.sql'), 'SELECT 2;')
+    expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
+  })
+  it('rejects a preexisting announcement receipt table before migration', () => {
+    const before = { tables: [], columns: [], indexes: [], constraints: [], rowCount: null }
+    expect(() => assertAnnouncementReadsState(before, 'before')).not.toThrow()
+    expect(() => assertAnnouncementReadsState({ ...before, tables: [{ name: 'site_announcement_reads', kind: 'r' }] }, 'before')).toThrow()
+    expect(() => assertAnnouncementReadsState(before, 'after', before)).toThrow()
+  })
+  it.each([
+    [appReleaseRetentionMigrationName, appReleaseRetentionMigrationChecksum],
+    [announcementReadsMigrationName, announcementReadsMigrationChecksum],
+  ])('requires only %s pending, one exact successful row afterwards and unchanged full history', (migration, checksum) => {
     const old = { migration_name: 'old', checksum: 'a'.repeat(64), finished_at: new Date(), rolled_back_at: null, applied_steps_count: 1, historyHash: 'a'.repeat(32) }
-    const target = { ...old, migration_name: appReleaseRetentionMigrationName, checksum: appReleaseRetentionMigrationChecksum }
-    const checksums = [['old', 'b'.repeat(64)], [appReleaseRetentionMigrationName, appReleaseRetentionMigrationChecksum]]
-    const assert = (rows: unknown[], phase: string, before?: unknown[]) => assertMigrationState(rows, checksums, phase, before, appReleaseRetentionMigrationName)
+    const target = { ...old, migration_name: migration, checksum }
+    const checksums = [['old', 'b'.repeat(64)], [migration, checksum]]
+    const assert = (rows: unknown[], phase: string, before?: unknown[]) => assertMigrationState(rows, checksums, phase, before, migration)
     expect(() => assert([old], 'before')).not.toThrow()
     expect(() => assert([old, target], 'after', JSON.parse(JSON.stringify([old])))).not.toThrow()
     for (const rows of [[], [old, target], [old, old], [{ ...old, finished_at: null }], [{ ...old, historyHash: undefined }]]) expect(() => assert(rows, 'before')).toThrow()
