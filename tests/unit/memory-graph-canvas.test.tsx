@@ -21,7 +21,12 @@ vi.mock('@xyflow/react', () => ({
   Background: () => null, Controls: () => null, Handle: () => null, BaseEdge: () => null,
   BackgroundVariant: { Dots: 'dots' }, Position: { Left: 'left', Right: 'right' },
 }))
-vi.mock('../../src/features/studio/components/MemoryGraphGalaxy', () => ({ default: ({ nodes, selectedId, active }: { nodes: unknown[]; selectedId: string | null; active: boolean }) => <div data-testid="galaxy" data-nodes={nodes.length} data-selected={selectedId} data-active={String(active)} /> }))
+vi.mock('../../src/features/studio/components/MemoryGraphGalaxy', () => ({
+  default: ({ nodes, selectedId, active, onSelect }: { nodes: unknown[]; selectedId: string | null; active: boolean; onSelect: (id: string) => void }) =>
+    <div data-testid="galaxy" data-nodes={nodes.length} data-selected={selectedId} data-active={String(active)}>
+      <button type="button" onClick={() => onSelect('node-002')}>选择第三个星图节点</button>
+    </div>,
+}))
 
 /** A controllable worker: the test, never render(), chooses when geometry returns. */
 class LayoutWorker {
@@ -137,16 +142,27 @@ describe('关系网视图交互', () => {
     expect(LayoutWorker.instances).toHaveLength(2)
   })
 
-  it('收起时选中另一个节点会打开新的详情', () => {
+  it('收起时在两种视图切换节点只更新高亮和右下角入口', () => {
     render(<MemoryGraphCanvas graph={memoryGraphFixture} />)
     finish()
     fireEvent.click(screen.getByRole('button', { name: '测试实体 1' }))
     fireEvent.click(screen.getByRole('button', { name: '收起实体详情' }))
     fireEvent.click(screen.getByRole('button', { name: '测试实体 2', exact: true }))
-    const detail = screen.getByRole('complementary', { name: '实体详情' })
-    expect(detail.querySelector('p')?.textContent).toBe('测试实体 2')
-    expect(screen.queryByRole('button', { name: '展开实体详情' })).toBeNull()
+    const restore = screen.getByRole('button', { name: '展开实体详情' })
+    expect(restore.textContent).toContain('测试实体 2')
+    expect(screen.queryByRole('complementary', { name: '实体详情' })).toBeNull()
     expect(state.nodes.find((node) => node.id === 'node-001')?.className).toContain('is-focused')
+    expect(state.edges.filter(edge => (edge.data as { focused: boolean }).focused)
+      .every(edge => edge.source === 'node-001' || edge.target === 'node-001')).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: '三维星系视图' }))
+    finish()
+    fireEvent.click(screen.getByRole('button', { name: '选择第三个星图节点' }))
+    expect(screen.getByTestId('galaxy').dataset.selected).toBe('node-002')
+    expect(restore.textContent).toContain('测试实体 3')
+    expect(screen.queryByRole('complementary', { name: '实体详情' })).toBeNull()
+    fireEvent.click(restore)
+    expect(screen.getByRole('complementary', { name: '实体详情' }).querySelector('p')?.textContent).toBe('测试实体 3')
   })
 
   it('星系布局仅首次访问计算，切换和同拓扑轮询保持选择及原视图实例', () => {

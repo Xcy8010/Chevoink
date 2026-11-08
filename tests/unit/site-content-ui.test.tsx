@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { SiteAnnouncements, SiteInformation } from '../../src/features/site-content/public'
 import { dismissalIsActive, dismissalKey } from '../../src/features/site-content/public-api'
 import { DOCS, getAccountDocs } from '../../src/features/account/docs-content'
-import type { PublicSiteContent } from '../../shared/contracts/site-content'
+import type { AnnouncementInbox, PublicSiteContent, ReadAnnouncementsRequest } from '../../shared/contracts/site-content'
+import AnnouncementBell from '../../src/features/site-content/AnnouncementBell'
+import { useShellStore } from '../../src/store/useShellStore'
 const mocks=vi.hoisted(()=>({request:vi.fn()}))
 vi.mock('../../src/app/api-client',()=>({requestJson:mocks.request}))
 function data():PublicSiteContent {
@@ -16,6 +18,7 @@ function mount(element:React.ReactNode) {const client=new QueryClient({defaultOp
 const originalShow=Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype,'showModal')
 const originalClose=Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype,'close')
 beforeEach(()=>{vi.useRealTimers();vi.clearAllMocks();sessionStorage.clear();localStorage.clear();focusManager.setFocused(true)
+ useShellStore.setState({ authStatus: 'guest', sessionUser: null })
  Object.defineProperty(HTMLDialogElement.prototype,'showModal',{configurable:true,value:vi.fn(function(this:HTMLDialogElement){this.setAttribute('open','')})})
  Object.defineProperty(HTMLDialogElement.prototype,'close',{configurable:true,value:vi.fn(function(this:HTMLDialogElement){this.removeAttribute('open')})})
 })
@@ -23,6 +26,86 @@ afterEach(()=>{cleanup();vi.useRealTimers();vi.restoreAllMocks()
  if(originalShow)Object.defineProperty(HTMLDialogElement.prototype,'showModal',originalShow);else Reflect.deleteProperty(HTMLDialogElement.prototype,'showModal')
  if(originalClose)Object.defineProperty(HTMLDialogElement.prototype,'close',originalClose);else Reflect.deleteProperty(HTMLDialogElement.prototype,'close')
 })
+function signedInAnnouncements(withOlder = false) {
+  useShellStore.setState({
+    authStatus: 'authenticated', sessionUser: {
+      id: 'author', nickname: '作者', avatarUrl: null, email: null, phone: null, passwordConfigured: false,
+      followerCount: 0, followingCount: 0, novelCount: 0, postCount: 0, unreadMessageCount: 0, unreadNotificationCount: 0,
+      createdAt: '2026-11-06T00:00:00Z', updatedAt: '2026-11-06T00:00:00Z',
+    },
+  })
+  const site = data()
+  site.announcements[0].versionId = 'notice-v1'
+  if (withOlder) site.announcements.push({
+    ...site.announcements[0], id: 'older', versionId: 'older-v1', title: '较早公告',
+  })
+  const inbox: AnnouncementInbox = { viewerId: 'author', serverNow: site.serverNow, nextBoundaryAt: null, items: site.announcements.map(item => ({
+    id: item.id, contentVersion: item.contentVersion, versionId: item.versionId!, title: item.title,
+    body: item.body, publishedAt: item.startsAt, unread: true,
+  })) }
+  const markRead = vi.fn((input: ReadAnnouncementsRequest) => {
+    const items = inbox.items.filter(item => item.unread && input.action === 'one' && item.versionId === input.versionId)
+    for (const item of items) item.unread = false
+    return { readVersionIds: items.map(item => item.versionId) }
+  })
+  const respond = async (url: string, init?: RequestInit) => url.endsWith('/read')
+    ? markRead(JSON.parse(String(init?.body)))
+    : structuredClone(url.endsWith('/announcements') ? inbox : site)
+  mocks.request.mockImplementation(respond)
+  return { site, inbox, markRead, respond }
+}
+
+function mountStudioAnnouncements() {
+  return mount(<><SiteAnnouncements scope="studio" /><AnnouncementBell placement="studio" /></>)
+}
+
+it('marks the displayed announcement read from the dock and clears the only bell dot', async () => {
+  const { markRead } = signedInAnnouncements()
+  mountStudioAnnouncements()
+  await screen.findByRole('button', { name: '未读通知' })
+  fireEvent.click(await screen.findByRole('button', { name: '打开公告：服务通知' }))
+  await screen.findByRole('button', { name: '通知中心' })
+  expect(markRead).toHaveBeenCalledExactlyOnceWith({ viewerId: 'author', action: 'one', versionId: 'notice-v1' })
+  expect(screen.getByRole('dialog', { name: '服务通知' })).toBeTruthy()
+})
+
+it('marks the exact dock version even if the inbox request has not finished', async () => {
+  const { markRead, respond } = signedInAnnouncements()
+  let firstInbox = true
+  let finishInbox: (() => void) | undefined
+  mocks.request.mockImplementation((url: string, init?: RequestInit) => {
+    if (firstInbox && url.endsWith('/announcements')) {
+      firstInbox = false
+      return new Promise(resolve => { finishInbox = () => resolve(respond(url, init)) })
+    }
+    return respond(url, init)
+  })
+  mountStudioAnnouncements()
+  fireEvent.click(await screen.findByRole('button', { name: '打开公告：服务通知' }))
+  await waitFor(() => expect(markRead).toHaveBeenCalledExactlyOnceWith({ viewerId: 'author', action: 'one', versionId: 'notice-v1' }))
+  await act(async () => finishInbox?.())
+  expect(screen.getByRole('button', { name: '通知中心' })).toBeTruthy()
+  expect(screen.getByRole('dialog', { name: '服务通知' })).toBeTruthy()
+})
+
+it('closes the dock batch after the bell reads its displayed announcement and preserves other unread notifications', async () => {
+  const { site, inbox, markRead } = signedInAnnouncements(true)
+  const client = mountStudioAnnouncements()
+  await screen.findByRole('button', { name: '打开公告：服务通知' })
+  fireEvent.click(await screen.findByRole('button', { name: '未读通知' }))
+  const bell = screen.getByRole('dialog', { name: '通知中心' })
+  fireEvent.click(await within(bell).findByRole('button', { name: /服务通知.*未读/ }))
+  await waitFor(() => expect(screen.queryByLabelText('站点公告')).toBeNull())
+  expect(inbox.items.find(item => item.id === 'older')?.unread).toBe(true)
+  expect(markRead).toHaveBeenCalledExactlyOnceWith({ viewerId: 'author', action: 'one', versionId: 'notice-v1' })
+  expect(screen.getByRole('button', { name: '未读通知' }).querySelector('.site-announcement-bell-dot')).toBeTruthy()
+
+  const newVersion = { ...site.announcements[0], contentVersion: 2, versionId: 'notice-v2', title: '新发布公告' }
+  await act(async () => client.setQueryData(['site-content', 'public'], { ...site, announcements: [newVersion, site.announcements[1]] }))
+  expect(await screen.findByRole('button', { name: '打开公告：新发布公告' })).toBeTruthy()
+  expect(screen.queryByRole('button', { name: '打开公告：较早公告' })).toBeNull()
+})
+
 it('uses announcement id and content version for dismissal and shows a newly published version',async()=>{
   const current=data();mocks.request.mockResolvedValue(current)
   const client=mount(<SiteAnnouncements scope="studio"/>)

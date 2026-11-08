@@ -86,7 +86,7 @@ export type ContentRow = ContentDraft & { id: string; revision: number; deletedA
 export type PublicLegal = { id: string; hash: string; contentVersion: number; payload: LegalDocument }
 export type PublicSiteContent = {
   serverNow: string; nextBoundaryAt: string | null;
-  announcements: Array<PublishedAnnouncement & { id: string; contentVersion: number }>;
+  announcements: Array<PublishedAnnouncement & { id: string; contentVersion: number; versionId?: string }>;
   settings: SiteSettings | null; help: Record<string, HelpDocument>;
   legal: { terms: PublicLegal | null; privacy: PublicLegal | null; registrationAvailable: boolean };
 }

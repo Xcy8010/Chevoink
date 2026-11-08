@@ -51,7 +51,7 @@ export default function MemoryGraphCanvas({ graph }: { graph: MemoryGraph }) {
   const focusAfterToggle = useRef(false)
   const selectNode = useCallback((id: string | null) => {
     setSelectedId(id)
-    setDetailCollapsed(false)
+    if (id === null) setDetailCollapsed(false)
   }, [])
   const [mode, setMode] = useState<'map' | 'galaxy'>('map')
   const [galaxyVisited, setGalaxyVisited] = useState(false)

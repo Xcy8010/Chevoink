@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ChevronLeft, ChevronRight, Megaphone, X } from 'lucide-react'
 import type { PublicSiteContent } from '../../../shared/contracts/site-content'
@@ -11,6 +11,7 @@ function readDismissals(storage: Storage, key = 'site-announcement-dismissals'):
   try { const value: unknown=JSON.parse(storage.getItem(key) ?? '{}'); return value && typeof value==='object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).filter((entry): entry is [string,number]=>typeof entry[1]==='number')) : {} } catch { return {} }
 }
 const studioDockSuppressionKey = 'studio-announcement-dock-suppressed'
+const dockReadKey = (viewerId: string, key: string) => 'read:' + viewerId + ':' + key
 type PublicAnnouncement=PublicSiteContent['announcements'][number]
 function AnnouncementDialog({item,index,total,onClose,onDismiss,onPrevious,onNext,onViewAll,returnFocus,id,scope}:{scope:'home'|'studio';item:PublicAnnouncement;index:number;total:number;onClose:()=>void;onDismiss:()=>void;onPrevious:()=>void;onNext:()=>void;onViewAll:()=>void;returnFocus:HTMLElement|null;id:string}) {
   const dialog=useRef<HTMLDialogElement>(null)
@@ -50,30 +51,53 @@ export function SiteAnnouncements({scope}:{scope:'home'|'studio'}) {
   const [openedKey,setOpenedKey]=useState<string|null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
   const origin=useRef<HTMLElement|null>(null)
+  const previousUnreadCard = useRef<{ viewerId: string; key: string; batch: string[] } | null>(null)
   const dialogId=useId()
   const history = historyOpen && <AnnouncementHistoryDialog returnFocus={origin.current} onClose={() => setHistoryOpen(false)} />
   const data=query.data
-  if (!data) return history || null
-  const now=Date.parse(data.serverNow)+Date.now()-query.dataUpdatedAt
-  const items=data.announcements.filter(item=>{
+  const now=data ? Date.parse(data.serverNow)+Date.now()-query.dataUpdatedAt : 0
+  const items=(data?.announcements ?? []).filter(item=>{
     const key=dismissalKey(item.id,item.contentVersion)
     const stored=readDismissals(item.dismissal.mode==='session' ? sessionStorage : localStorage)
-    return !(key in dockSuppressed) && (item.scope===scope || item.scope==='both') && now >= Date.parse(item.startsAt) && (item.endsAt === null || now < Date.parse(item.endsAt)) && !dismissalIsActive(dismissed[key] ?? stored[key],item.dismissal,now)
+    const suppressed = key in dockSuppressed || (viewerId !== null && dockReadKey(viewerId, key) in dockSuppressed)
+    return !suppressed && (item.scope===scope || item.scope==='both') && now >= Date.parse(item.startsAt) && (item.endsAt === null || now < Date.parse(item.endsAt)) && !dismissalIsActive(dismissed[key] ?? stored[key],item.dismissal,now)
   })
-  if (!items.length) return history || null
-  const unread = new Map((inbox.data?.items ?? []).filter(item => item.unread).map(item => [dismissalKey(item.id, item.contentVersion), item.versionId]))
+  const receipts = new Map((inbox.data?.items ?? []).map(item => [dismissalKey(item.id, item.contentVersion), item]))
   const eligible = new Map(items.map(item => [dismissalKey(item.id, item.contentVersion), item]))
-  const newestUnread = scope === 'studio' ? [...unread.keys()].find(key => eligible.has(key)) : undefined
-  const first = (newestUnread && eligible.get(newestUnread)) || items[0]
-  const isNew = scope === 'studio' && unread.has(dismissalKey(first.id, first.contentVersion))
+  const newestUnread = scope === 'studio' ? [...receipts].find(([key, item]) => item.unread && eligible.has(key)) : undefined
+  const first = (newestUnread && eligible.get(newestUnread[0])) || items[0]
+  const firstKey = first ? dismissalKey(first.id, first.contentVersion) : null
+  const isNew = scope === 'studio' && firstKey !== null && receipts.get(firstKey)?.unread === true
   const index = items.findIndex(item => dismissalKey(item.id, item.contentVersion) === openedKey)
   const active = index < 0 ? null : items[index]
+
+  function suppressDock(keys: string[]) {
+    const suppressed = { ...dockSuppressed }
+    for (const key of keys) suppressed[key] = now
+    setDockSuppressed(suppressed)
+    try { sessionStorage.setItem(studioDockSuppressionKey, JSON.stringify(suppressed)) } catch { /* In-memory suppression still applies. */ }
+  }
+
+  useLayoutEffect(() => {
+    const previous = previousUnreadCard.current
+    previousUnreadCard.current = viewerId && firstKey && isNew
+      ? { viewerId, key: firstKey, batch: [...eligible.keys()] }
+      : null
+    // A receipt from the inbox closes the displayed batch before another card can flash.
+    // A read from the open dock detail must leave that dialog in place.
+    if (previous && previous.viewerId === viewerId && previous.key !== openedKey && receipts.get(previous.key)?.unread === false) {
+      suppressDock(previous.batch.map(key => dockReadKey(previous.viewerId, key)))
+    }
+  })
+
+  if (!first) return history || null
 
   function openItem(item: PublicAnnouncement) {
     const key = dismissalKey(item.id, item.contentVersion)
     setOpenedKey(key)
-    const versionId = unread.get(key)
-    if (viewerId && versionId) read.mutate({ viewerId, action: 'one', versionId })
+    const receipt = receipts.get(key)
+    const versionId = item.versionId ?? receipt?.versionId
+    if (scope === 'studio' && viewerId && versionId && receipt?.unread !== false) read.mutate({ viewerId, action: 'one', versionId })
   }
   function dismiss(item:PublicAnnouncement, collapseDock = false) {
     const key=dismissalKey(item.id,item.contentVersion)
@@ -83,10 +107,7 @@ export function SiteAnnouncements({scope}:{scope:'home'|'studio'}) {
     setDismissed(current=>({...current,[key]:now}))
     if (collapseDock) {
       // Dismiss the card once. Other items in this batch remain in the bell inbox.
-      const suppressed = { ...dockSuppressed }
-      for (const candidateKey of eligible.keys()) if (candidateKey !== key) suppressed[candidateKey] = now
-      setDockSuppressed(suppressed)
-      try { sessionStorage.setItem(studioDockSuppressionKey, JSON.stringify(suppressed)) } catch { /* In-memory suppression still applies. */ }
+      suppressDock([...eligible.keys()].filter(candidateKey => candidateKey !== key))
       setOpenedKey(null)
     } else if (openedKey === key) {
       const next = items.find(candidate => dismissalKey(candidate.id, candidate.contentVersion) !== key)

@@ -80,7 +80,7 @@ export async function readPublicSiteContent(tx: Transaction = prisma): Promise<P
       const payload = publishedAnnouncementSchema.parse(published.payload)
       boundaries.push(Date.parse(payload.startsAt))
       if (payload.endsAt !== null) boundaries.push(Date.parse(payload.endsAt))
-      if (announcementStatus({published:true,withdrawn:false,...payload}, now) === 'active') result.announcements.push({...payload,id:row.id,contentVersion:published.contentVersion})
+      if (announcementStatus({published:true,withdrawn:false,...payload}, now) === 'active') result.announcements.push({...payload,id:row.id,contentVersion:published.contentVersion,versionId:published.id})
     } else if (row.kind === 'settings') result.settings = siteSettingsSchema.parse(published.payload)
     else if (row.kind === 'help') result.help[row.key] = helpDocumentSchema.parse(published.payload)
     else boundaries.push(...row.versions.flatMap(item => item.effectiveAt ? [item.effectiveAt.getTime()] : []))
