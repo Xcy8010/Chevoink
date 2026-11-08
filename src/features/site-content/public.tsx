@@ -5,13 +5,14 @@ import type { PublicSiteContent } from '../../../shared/contracts/site-content'
 import './announcements.css'
 import { dismissalIsActive, dismissalKey, usePublicSiteContent } from './public-api'
 import { useAnnouncementInbox } from './announcement-inbox-api'
+import { AnnouncementHistoryDialog } from './AnnouncementBell'
 
 function readDismissals(storage: Storage, key = 'site-announcement-dismissals'): Record<string, number> {
   try { const value: unknown=JSON.parse(storage.getItem(key) ?? '{}'); return value && typeof value==='object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).filter((entry): entry is [string,number]=>typeof entry[1]==='number')) : {} } catch { return {} }
 }
 const studioDockSuppressionKey = 'studio-announcement-dock-suppressed'
 type PublicAnnouncement=PublicSiteContent['announcements'][number]
-function AnnouncementDialog({item,index,total,onClose,onDismiss,onPrevious,onNext,returnFocus,id,scope}:{scope:'home'|'studio';item:PublicAnnouncement;index:number;total:number;onClose:()=>void;onDismiss:()=>void;onPrevious:()=>void;onNext:()=>void;returnFocus:HTMLElement|null;id:string}) {
+function AnnouncementDialog({item,index,total,onClose,onDismiss,onPrevious,onNext,onViewAll,returnFocus,id,scope}:{scope:'home'|'studio';item:PublicAnnouncement;index:number;total:number;onClose:()=>void;onDismiss:()=>void;onPrevious:()=>void;onNext:()=>void;onViewAll:()=>void;returnFocus:HTMLElement|null;id:string}) {
   const dialog=useRef<HTMLDialogElement>(null)
   const titleId=useId()
   useEffect(()=>{
@@ -37,7 +38,7 @@ function AnnouncementDialog({item,index,total,onClose,onDismiss,onPrevious,onNex
     <div className="site-announcement-dialog-frame">
       <header className="site-announcement-dialog-header"><h2 id={titleId} className="min-w-0 text-base font-semibold">{item.title}</h2><button type="button" onClick={onClose} aria-label="关闭公告弹窗" className="site-announcement-dialog-close"><X aria-hidden="true" size={18}/></button></header>
       <div key={dismissalKey(item.id,item.contentVersion)} className="site-announcement-dialog-body"><p className="whitespace-pre-wrap break-words text-sm leading-7">{item.body}</p></div>
-      <footer className="site-announcement-dialog-footer">{total>1?<nav aria-label="公告切换" className="flex items-center gap-2"><button type="button" aria-label="上一条公告" disabled={index===0} onClick={onPrevious} className="site-announcement-dialog-close"><ChevronLeft aria-hidden="true" size={18}/></button><span className="text-xs tabular-nums text-[var(--text-secondary)]">{index+1} / {total}</span><button type="button" aria-label="下一条公告" disabled={index===total-1} onClick={onNext} className="site-announcement-dialog-close"><ChevronRight aria-hidden="true" size={18}/></button></nav>:<span/>}<button type="button" onClick={onDismiss} className="rounded-lg border border-[var(--border-strong)] px-3 py-2 text-sm hover:bg-[var(--surface-muted)]">关闭本条公告</button></footer>
+      <footer className="site-announcement-dialog-footer"><button type="button" onClick={onViewAll} className="site-announcement-view-all">查看全部公告</button>{total>1?<nav aria-label="公告切换" className="flex items-center gap-2"><button type="button" aria-label="上一条公告" disabled={index===0} onClick={onPrevious} className="site-announcement-dialog-close"><ChevronLeft aria-hidden="true" size={18}/></button><span className="text-xs tabular-nums text-[var(--text-secondary)]">{index+1} / {total}</span><button type="button" aria-label="下一条公告" disabled={index===total-1} onClick={onNext} className="site-announcement-dialog-close"><ChevronRight aria-hidden="true" size={18}/></button></nav>:null}<button type="button" onClick={onDismiss} className="rounded-lg border border-[var(--border-strong)] px-3 py-2 text-sm hover:bg-[var(--surface-muted)]">关闭本条公告</button></footer>
     </div>
   </dialog>,document.fullscreenElement??document.body)
 }
@@ -47,21 +48,24 @@ export function SiteAnnouncements({scope}:{scope:'home'|'studio'}) {
   const [dismissed,setDismissed]=useState<Record<string,number>>({})
   const [dockSuppressed, setDockSuppressed] = useState(() => scope === 'studio' ? readDismissals(sessionStorage, studioDockSuppressionKey) : {})
   const [openedKey,setOpenedKey]=useState<string|null>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const origin=useRef<HTMLElement|null>(null)
   const dialogId=useId()
+  const history = historyOpen && <AnnouncementHistoryDialog returnFocus={origin.current} onClose={() => setHistoryOpen(false)} />
   const data=query.data
-  if (!data) return null
+  if (!data) return history || null
   const now=Date.parse(data.serverNow)+Date.now()-query.dataUpdatedAt
   const items=data.announcements.filter(item=>{
     const key=dismissalKey(item.id,item.contentVersion)
     const stored=readDismissals(item.dismissal.mode==='session' ? sessionStorage : localStorage)
     return !(key in dockSuppressed) && (item.scope===scope || item.scope==='both') && now >= Date.parse(item.startsAt) && (item.endsAt === null || now < Date.parse(item.endsAt)) && !dismissalIsActive(dismissed[key] ?? stored[key],item.dismissal,now)
   })
-  if (!items.length) return null
+  if (!items.length) return history || null
   const unread = new Map((inbox.data?.items ?? []).filter(item => item.unread).map(item => [dismissalKey(item.id, item.contentVersion), item.versionId]))
   const eligible = new Map(items.map(item => [dismissalKey(item.id, item.contentVersion), item]))
   const newestUnread = scope === 'studio' ? [...unread.keys()].find(key => eligible.has(key)) : undefined
   const first = (newestUnread && eligible.get(newestUnread)) || items[0]
+  const isNew = scope === 'studio' && unread.has(dismissalKey(first.id, first.contentVersion))
   const index = items.findIndex(item => dismissalKey(item.id, item.contentVersion) === openedKey)
   const active = index < 0 ? null : items[index]
 
@@ -91,27 +95,28 @@ export function SiteAnnouncements({scope}:{scope:'home'|'studio'}) {
   }
   return <div aria-label="站点公告" className={scope==='studio'?'site-announcements-studio':'site-announcements-home'}>
     <aside className={'site-announcement-card '+(scope==='studio'?'site-announcement-dock':'site-announcement-banner')}>
-      {scope === 'studio' && <button
-        type="button"
-        aria-label={'关闭公告：'+first.title}
-        onClick={() => dismiss(first, true)}
-        className="site-announcement-dismiss site-announcement-dock-action"
-      >
-        <ChevronRight aria-hidden="true" size={16} className="site-announcement-dock-chevron" />
-        <X aria-hidden="true" size={16} className="site-announcement-dock-close" />
-      </button>}
       <button type="button" aria-label={'打开公告：'+first.title} aria-haspopup="dialog" aria-expanded={Boolean(active)} aria-controls={dialogId} className="site-announcement-open" onClick={event=>{origin.current=event.currentTarget;openItem(first)}}>
         {scope === 'home' && <Megaphone aria-hidden="true" size={16} className="shrink-0 text-[var(--text-secondary)]" />}
         <span className="min-w-0 flex-1 text-left">
+          {isNew && <span className="site-announcement-dock-new">NEW</span>}
           <span className={'block text-sm font-medium ' + (scope === 'studio' ? 'site-announcement-dock-title' : 'truncate')}>{first.title}</span>
           {scope === 'home' && <span className="block truncate text-xs text-[var(--text-secondary)]">{first.body}</span>}
         </span>
         {items.length > 1 && <span className="shrink-0 text-xs text-[var(--text-secondary)]">{items.length}条</span>}
         {scope === 'home' && <ChevronRight aria-hidden="true" size={16} className="shrink-0 text-[var(--text-secondary)]" />}
       </button>
-      {scope === 'home' && <button type="button" aria-label={'关闭公告：'+first.title} onClick={() => dismiss(first)} className="site-announcement-dismiss"><X aria-hidden="true" size={16} /></button>}
+      <button
+        type="button"
+        aria-label={'关闭公告：'+first.title}
+        onClick={() => dismiss(first, scope === 'studio')}
+        className={'site-announcement-dismiss' + (scope === 'studio' ? ' site-announcement-dock-action' : '')}
+      >
+        {scope === 'studio' && <ChevronRight aria-hidden="true" size={16} className="site-announcement-dock-chevron" />}
+        <X aria-hidden="true" size={16} className={scope === 'studio' ? 'site-announcement-dock-close' : undefined} />
+      </button>
     </aside>
-    {active?<AnnouncementDialog scope={scope} item={active} index={index} total={items.length} id={dialogId} returnFocus={origin.current} onClose={()=>setOpenedKey(null)} onDismiss={()=>dismiss(active)} onPrevious={()=>openItem(items[index-1])} onNext={()=>openItem(items[index+1])}/>:null}
+    {active?<AnnouncementDialog scope={scope} item={active} index={index} total={items.length} id={dialogId} returnFocus={origin.current} onClose={()=>setOpenedKey(null)} onDismiss={()=>dismiss(active)} onPrevious={()=>openItem(items[index-1])} onNext={()=>openItem(items[index+1])} onViewAll={() => { setOpenedKey(null); setHistoryOpen(true) }}/>:null}
+    {history}
   </div>
 }
 export function SiteInformation() {

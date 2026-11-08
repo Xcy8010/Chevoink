@@ -1,5 +1,6 @@
 import { useToast } from '@/components/ui/toast-context'
 import { defaultSiteSettings, effectiveSiteSettings } from '@/features/site-content/defaults'
+import { refreshPublishedAnnouncements } from '@/features/site-content/announcement-inbox-api'
 import { formatShanghaiDateInput, parseShanghaiDateInput } from '../site-content-time'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
@@ -119,7 +120,7 @@ export default function AdminContentPage({settingsOnly=false}:{settingsOnly?:boo
   async function operate() {
     if(!selected || !confirm)return
     setBusy(true);setMessage('')
-    try {const replaced=rows.find(row=>row.id===replacement);const row=await requestJson<ContentRow>(`/api/admin/site-content/${selected.id}`,{method:'POST',body:JSON.stringify({expectedRevision:selected.revision,action:confirm,...(confirm==='publish' && replaced ? {replace:{id:replaced.id,expectedRevision:replaced.revision}}:{})})});setSelected(row);setConfirm(null);await Promise.all([client.invalidateQueries({queryKey:['admin','site-content']}),client.invalidateQueries({queryKey:['site-content','public']})]);setMessage('操作已完成。');toast.success(labels[draft.kind]+({publish:'已发布。',withdraw:'已撤下。',delete:'已删除。',restore:'已恢复。'}[confirm]))}catch(error){setMessage(error instanceof Error?error.message:'操作失败。')}finally{setBusy(false)}
+    try {const replaced=rows.find(row=>row.id===replacement);const row=await requestJson<ContentRow>(`/api/admin/site-content/${selected.id}`,{method:'POST',body:JSON.stringify({expectedRevision:selected.revision,action:confirm,...(confirm==='publish' && replaced ? {replace:{id:replaced.id,expectedRevision:replaced.revision}}:{})})});setSelected(row);setConfirm(null);await Promise.all([client.invalidateQueries({queryKey:['admin','site-content']}),row.kind==='announcement' ? refreshPublishedAnnouncements(client) : client.invalidateQueries({queryKey:['site-content','public']})]);setMessage('操作已完成。');toast.success(labels[draft.kind]+({publish:'已发布。',withdraw:'已撤下。',delete:'已删除。',restore:'已恢复。'}[confirm]))}catch(error){setMessage(error instanceof Error?error.message:'操作失败。')}finally{setBusy(false)}
   }
   const settingsRow=rows.find(row=>row.kind==='settings'&&row.key==='main')
   const publicSettings=effectiveSiteSettings(publicQuery.data?.settings)

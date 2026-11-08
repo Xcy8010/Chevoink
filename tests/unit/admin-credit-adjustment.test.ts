@@ -4,7 +4,7 @@ import { adminCreditAdjustmentSchema, MAX_CREDIT_MILLI } from '../../shared/cont
 import { DataAccessError } from '../../api/lib/prisma.js'
 
 const mocks = vi.hoisted(() => ({
-  user: { findUnique: vi.fn() }, creditAccount: { upsert: vi.fn(), update: vi.fn() },
+  user: { findUnique: vi.fn() }, creditAccount: { upsert: vi.fn(), update: vi.fn() }, userNotification: { create: vi.fn() },
   adminAuditLog: { findUnique: vi.fn(), create: vi.fn() }, creditLedgerEntry: { create: vi.fn() }, aiUsageLog: { aggregate: vi.fn() },
 }))
 vi.mock('../../api/lib/credit-policy.js', () => ({
@@ -24,6 +24,9 @@ it('credits the invitation reward bucket with an atomic matching ledger and dura
   const payload = input()
   expect(await adjustAdminBonusCredits('admin', 'user', payload)).toMatchObject({ previousBonusBalanceMilli: 5000, bonusBalanceMilli: 6250, deltaMilli: 1250 })
   expect(mocks.creditAccount.update).toHaveBeenCalledWith({ where: { userId: 'user' }, data: { bonusBalanceMilli: 6250 } })
+  expect(mocks.userNotification.create).toHaveBeenCalledWith({ data: {
+    userId: 'user', title: '你收到了奖励额度', body: '管理员已发放 1.25 奖励额度。操作完成时的奖励额度余额为 6.25。',
+  } })
   expect(mocks.creditLedgerEntry.create).toHaveBeenCalledWith({ data: expect.objectContaining({ deltaMilli: 1250, bonusDeltaMilli: 1250, dailyDeltaMilli: 0, kind: 'admin_adjustment', sourceType: 'admin_bonus_adjustment' }) })
   expect(mocks.adminAuditLog.create).toHaveBeenCalledWith({ data: expect.objectContaining({ adminId: 'admin', action: 'credits.adjust_bonus', detail: expect.objectContaining({ reason: '客服补偿', ...payload, bonusBalanceMilli: 6250 }) }) })
 })
@@ -54,11 +57,18 @@ it('replays original outcome after balance changed and rejects reuse with differ
   await expect(adjustAdminBonusCredits('admin', 'user', { ...payload, amountMilli: 9 })).rejects.toMatchObject({ code: 'CREDIT_ADJUSTMENT_IDENTITY_CONFLICT' })
   expect(mocks.creditAccount.upsert).not.toHaveBeenCalled()
   expect(mocks.creditAccount.update).not.toHaveBeenCalled()
+  expect(mocks.userNotification.create).not.toHaveBeenCalled()
 })
 it('propagates ledger failure so the enclosing database transaction rolls back', async () => {
   mocks.creditLedgerEntry.create.mockRejectedValueOnce(new DataAccessError(503, 'FIXTURE', 'fixture failure'))
   await expect(adjustAdminBonusCredits('admin', 'user', input())).rejects.toMatchObject({ code: 'FIXTURE' })
   expect(mocks.adminAuditLog.create).not.toHaveBeenCalled()
+})
+it('propagates notification insert failures through the same credit transaction', async () => {
+  mocks.userNotification.create.mockRejectedValueOnce(new DataAccessError(503, 'NOTICE_FIXTURE', 'fixture failure'))
+  await expect(adjustAdminBonusCredits('admin', 'user', input())).rejects.toMatchObject({ code: 'NOTICE_FIXTURE' })
+  expect(mocks.creditLedgerEntry.create).toHaveBeenCalledOnce()
+  expect(mocks.adminAuditLog.create).toHaveBeenCalledOnce()
 })
 it('rejects decimals, negatives, unsafe integers, overflow, blank reason and zero deltas before execution', () => {
   for (const patch of [{ amountMilli: -1 }, { amountMilli: 1.1 }, { amountMilli: MAX_CREDIT_MILLI + 1 }, { amountMilli: Number.MAX_SAFE_INTEGER }, { amountMilli: 0 }, { expectedBonusBalanceMilli: -1 }, { reason: ' ' }, { mode: 'bad' }]) {

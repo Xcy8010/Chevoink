@@ -69,6 +69,25 @@ async function stopCreditRuns(userIds?: string[], capturedIds?: string[], exempt
   return Math.max(localIds.size, stoppedLocal) + stoppedRemote
 }
 
+async function notifyCreditReset(tx: Prisma.TransactionClient, accounts: { userId: string }[]) {
+  if (accounts.length) await tx.userNotification.createMany({ data: accounts.map(({ userId }) => ({
+    userId, title: '每日额度已重置', body: '管理员已重置你的每日额度，当前周期已使用的每日额度已清零。',
+  })) })
+}
+
+async function updateCreditSuspension(tx: Prisma.TransactionClient, paused: boolean, userIds?: string[]) {
+  const changed = await tx.creditAccount.updateManyAndReturn({
+    where: { ...(userIds && { userId: { in: userIds } }), suspendedAt: paused ? null : { not: null } },
+    data: { suspendedAt: paused ? new Date() : null },
+    select: { userId: true },
+  })
+  if (changed.length) await tx.userNotification.createMany({ data: changed.map(({ userId }) => ({
+    userId,
+    title: paused ? '账户额度已暂停' : '账户额度已恢复',
+    body: paused ? '管理员已暂停你的账户额度。' : '管理员已恢复你的账户额度。',
+  })) })
+}
+
 async function executeCreditReset(adminId: string, requestKey: string, scope: string[] | 'all',
   work: (tx: Prisma.TransactionClient) => Promise<number>): Promise<{ users: number; stoppedRuns: number }> {
   if (!/^[a-zA-Z0-9_-]{8,100}$/.test(requestKey)) throw new DataAccessError(400, 'CREDIT_RESET_KEY_INVALID', '重置请求编号无效。')
@@ -163,6 +182,7 @@ export async function resetAdminUsersCredits(userIds: string[], adminId: string,
         idempotencyKey: `admin-reset:${account.userId}:${randomUUID()}`,
       })) })
     }
+    await notifyCreditReset(tx, accounts)
     return accounts.length
   })
   return result
@@ -172,12 +192,12 @@ export async function setAdminUsersSuspended(userIds: string[], paused: boolean)
   const normalized = [...new Set(userIds.map((id) => id.trim()).filter(Boolean))].slice(0, 200)
   if (normalized.length === 0) throw new DataAccessError(400, 'VALIDATION_ERROR', '请选择至少一个用户。')
   await Promise.all(normalized.map((userId) => ensureCreditAccount(userId)))
-  const updated = await prisma.creditAccount.updateMany({
-    where: { userId: { in: normalized } },
-    data: { suspendedAt: paused ? new Date() : null },
+  const users = await creditTransaction(async tx => {
+    await updateCreditSuspension(tx, paused, normalized)
+    return tx.creditAccount.count({ where: { userId: { in: normalized } } })
   })
   return {
-    users: updated.count,
+    users,
     paused,
     stoppedRuns: paused ? await stopCreditRuns(normalized, undefined, true) : 0,
   }
@@ -204,6 +224,7 @@ export async function resetAllAdminCredits(adminId: string, requestKey: string =
         })),
       })
     }
+    await notifyCreditReset(tx, accounts)
     return accounts.length
   })
   return result
@@ -212,13 +233,13 @@ export async function resetAllAdminCredits(adminId: string, requestKey: string =
 export async function setCreditsGloballyPaused(paused: boolean): Promise<{ paused: boolean; stoppedRuns: number }> {
   // 把全局状态落到每个账户，而不只保存一个 UI 布尔值：这样新用户会继承暂停，
   // 管理员又可以在全局暂停期间单独恢复选中用户。再次切换全局状态时重新统一所有账户。
-  await prisma.$transaction(async (tx) => {
+  await creditTransaction(async tx => {
     await tx.creditSystemSetting.upsert({
       where: { id: 'global' },
       create: { id: 'global', globallyPaused: paused, dailyAllowanceMilli: 450_000, resetHourUtc8: 15 },
       update: { globallyPaused: paused },
     })
-    await tx.creditAccount.updateMany({ data: { suspendedAt: paused ? new Date() : null } })
+    await updateCreditSuspension(tx, paused)
   })
   return { paused, stoppedRuns: paused ? await stopCreditRuns(undefined, undefined, true) : 0 }
 }

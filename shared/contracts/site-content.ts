@@ -47,16 +47,25 @@ export type AnnouncementNotification = {
   publishedAt: string
   unread: boolean
 }
+export type PersonalNotification = {
+  id: string
+  title: string
+  body: string
+  publishedAt: string
+  unread: boolean
+}
 export type AnnouncementInbox = {
   viewerId: string | null
   serverNow: string
   nextBoundaryAt: string | null
   items: AnnouncementNotification[]
+  personalItems?: PersonalNotification[]
 }
 export type ReadAnnouncementsRequest =
   | { viewerId: string; action: 'one'; versionId: string }
-  | { viewerId: string; action: 'all' }
-export type ReadAnnouncementsResult = { readVersionIds: string[] }
+  | { viewerId: string; action: 'personal'; notificationId: string }
+  | { viewerId: string; action: 'all' | 'allNotifications' }
+export type ReadAnnouncementsResult = { readVersionIds: string[]; readNotificationIds?: string[] }
 export const legalDocumentSchema = z.object({ title: z.string().trim().min(1).max(160), body: text.min(1), effectiveAt: z.iso.datetime() })
 export const contentDraftSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('announcement'), key: z.string().regex(/^[a-z0-9-]+$/).max(80), payload: announcementSchema }),

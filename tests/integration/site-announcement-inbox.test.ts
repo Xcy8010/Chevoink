@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { isTestDatabaseRequired } from '../support/database-availability.js'
 import { verifyTestDatabase } from '../support/database-preflight.js'
-import { assertAnnouncementReadsState, readAnnouncementReadsState } from '../../scripts/verify-release-migration.mjs'
+import { assertAnnouncementReadsState, readAnnouncementReadsState, assertUserNotificationsState, readUserNotificationsState } from '../../scripts/verify-release-migration.mjs'
 
 const ready = await verifyTestDatabase(isTestDatabaseRequired())
 
@@ -22,11 +22,16 @@ describe.skipIf(!ready)('announcement inbox with isolated PostgreSQL', () => {
     try {
       const catalog = await prisma.$transaction(async tx => {
         await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY')
-        return readAnnouncementReadsState(tx, 'after')
+        return {
+          announcementReads: await readAnnouncementReadsState(tx, 'after'),
+          userNotifications: await readUserNotificationsState(tx, 'after'),
+        }
       })
-      assertAnnouncementReadsState(catalog, 'after', { tables: [], columns: [], indexes: [], constraints: [], rowCount: null })
-      expect(() => assertAnnouncementReadsState({ ...catalog, rowCount: 1 }, 'after',
-        { tables: [], columns: [], indexes: [], constraints: [], rowCount: null })).toThrow(/rowCount/)
+      const empty = { tables: [], columns: [], indexes: [], constraints: [], rowCount: null }
+      assertAnnouncementReadsState(catalog.announcementReads, 'after', empty)
+      assertUserNotificationsState(catalog.userNotifications, 'after', empty)
+      expect(() => assertAnnouncementReadsState({ ...catalog.announcementReads, rowCount: 1 }, 'after', empty)).toThrow(/rowCount/)
+      expect(() => assertUserNotificationsState({ ...catalog.userNotifications, rowCount: 1 }, 'after', empty)).toThrow(/rowCount/)
       await prisma.user.createMany({ data: [
         { id: authorId, nickname: '合成账号 A', passwordHash: 'unusable', createdAt: date(-60_000) },
         { id: otherId, nickname: '合成账号 B', passwordHash: 'unusable', createdAt: date(-45_000) },
@@ -52,6 +57,52 @@ describe.skipIf(!ready)('announcement inbox with isolated PostgreSQL', () => {
       await prisma.siteContentVersion.deleteMany({ where: { contentId } })
       await prisma.siteContent.deleteMany({ where: { id: contentId } })
       await prisma.user.deleteMany({ where: { id: { in: [authorId, otherId] } } })
+      await prisma.$disconnect()
+    }
+  })
+
+  it('delivers each committed credit change once, with owner-only list and read actions', async () => {
+    const { prisma } = await import('../../api/lib/prisma.js')
+    const { markAnnouncementsRead, readAnnouncementInbox } = await import('../../api/lib/site-announcement-inbox.js')
+    const { adjustAdminBonusCredits } = await import('../../api/lib/admin-credit-adjustment.js')
+    const { resetAdminUsersCredits, setAdminUsersSuspended } = await import('../../api/lib/admin-credit-model.js')
+    const userId = randomUUID(), otherId = randomUUID(), adminId = randomUUID()
+    try {
+      await prisma.user.createMany({ data: [
+        { id: userId, nickname: '合成收件人', passwordHash: 'unusable' },
+        { id: otherId, nickname: '合成其他用户', passwordHash: 'unusable' },
+        { id: adminId, nickname: '合成管理员', passwordHash: 'unusable', role: 'admin', isSuperAdmin: true },
+      ] })
+      const gift = { mode: 'add' as const, amountMilli: 500_000, expectedBonusBalanceMilli: 0, reason: '仅供后台测试的内部备注', requestKey: randomUUID() }
+      await Promise.all([adjustAdminBonusCredits(adminId, userId, gift), adjustAdminBonusCredits(adminId, userId, gift)])
+      const reset = randomUUID()
+      await resetAdminUsersCredits([userId], adminId, reset)
+      await resetAdminUsersCredits([userId], adminId, reset)
+      await setAdminUsersSuspended([userId], false)
+      await setAdminUsersSuspended([userId], true)
+      await setAdminUsersSuspended([userId], true)
+      await setAdminUsersSuspended([userId], false)
+
+      const recipient = await readAnnouncementInbox(userId)
+      const privateItems = recipient.personalItems!
+      expect(privateItems.map(item => item.title).sort()).toEqual(['你收到了奖励额度', '每日额度已重置', '账户额度已暂停', '账户额度已恢复'].sort())
+      expect(privateItems.every(item => item.unread)).toBe(true)
+      expect(JSON.stringify(privateItems)).not.toContain(gift.reason)
+      expect((await readAnnouncementInbox(otherId)).personalItems).toEqual([])
+      expect((await readAnnouncementInbox(null)).personalItems).toBeUndefined()
+      const notificationId = privateItems[0].id
+      expect(await markAnnouncementsRead(otherId, { viewerId: otherId, action: 'personal', notificationId })).toEqual({ readVersionIds: [], readNotificationIds: [] })
+      await expect(markAnnouncementsRead(otherId, { viewerId: userId, action: 'allNotifications' })).rejects.toMatchObject({ code: 'ANNOUNCEMENT_VIEWER_CHANGED' })
+      await markAnnouncementsRead(userId, { viewerId: userId, action: 'all' })
+      expect((await readAnnouncementInbox(userId)).personalItems?.filter(item => item.unread)).toHaveLength(4)
+      const result = await markAnnouncementsRead(userId, { viewerId: userId, action: 'personal', notificationId })
+      expect(result.readNotificationIds).toEqual([notificationId])
+      const all = await markAnnouncementsRead(userId, { viewerId: userId, action: 'allNotifications' })
+      expect(all.readNotificationIds).toHaveLength(3)
+      expect((await readAnnouncementInbox(userId)).personalItems?.every(item => !item.unread)).toBe(true)
+    } finally {
+      await prisma.adminAuditLog.deleteMany({ where: { adminId } })
+      await prisma.user.deleteMany({ where: { id: { in: [userId, otherId, adminId] } } })
       await prisma.$disconnect()
     }
   })

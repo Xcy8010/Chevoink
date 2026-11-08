@@ -71,7 +71,7 @@ verify_baseline
 [[ "$(snapshot_process)" == "$PROCESS_BEFORE" ]]
 printf '{"revision":"%s","archiveSha256":"%s"}\n' "$REVISION" "$ARCHIVE_HASH" > "$STAGE/.chevoink-release.json"
 phase prepared
-if [[ "$MIGRATION_PLAN" == "20261009010000_quality_finding_span_identity" || "$MIGRATION_PLAN" == "20261019120000_web_fetch_tool_config" || "$MIGRATION_PLAN" == "20261020120000_web_tool_billing" || "$MIGRATION_PLAN" == "20261101120000_admin_model_lifecycle" || "$MIGRATION_PLAN" == "20261106_admin_model_experience" || "$MIGRATION_PLAN" == "20261107010000_app_release_retention" || "$MIGRATION_PLAN" == "20261108120000_site_announcement_reads" ]]; then
+if [[ "$MIGRATION_PLAN" == "20261009010000_quality_finding_span_identity" || "$MIGRATION_PLAN" == "20261019120000_web_fetch_tool_config" || "$MIGRATION_PLAN" == "20261020120000_web_tool_billing" || "$MIGRATION_PLAN" == "20261101120000_admin_model_lifecycle" || "$MIGRATION_PLAN" == "20261106_admin_model_experience" || "$MIGRATION_PLAN" == "20261107010000_app_release_retention" || "$MIGRATION_PLAN" == "20261108120000_site_announcement_reads" || "$MIGRATION_PLAN" == "20261108140000_user_notifications" ]]; then
   DOTENV_CONFIG_QUIET=true node --import dotenv/config scripts/verify-release-migration.mjs before "$STAGE" "$CURRENT" "$STAGE/.release-migration-before.json"
   phase migrating
   npx prisma migrate deploy

@@ -8,7 +8,8 @@ import { assertMigrationEnvironment, assertDatabaseIdentity, assertFindingIndex,
   adminModelLifecycleMigrationName, adminModelLifecycleMigrationChecksum, lifecycleColumns, lifecycleIndexes, assertAdminModelLifecycleState,
   adminExperiencePlan, adminExperienceMigrations, assertAdminExperienceState, readAdminExperienceState,
   appReleaseRetentionMigrationName, appReleaseRetentionMigrationChecksum, retentionColumns, retentionIndexes, retentionConstraints, assertAppReleaseRetentionState, readAppReleaseRetentionState,
-  announcementReadsMigrationName, announcementReadsMigrationChecksum, assertAnnouncementReadsState } from '../../scripts/verify-release-migration.mjs'
+  announcementReadsMigrationName, announcementReadsMigrationChecksum, assertAnnouncementReadsState,
+  userNotificationsMigrationName, userNotificationsMigrationChecksum } from '../../scripts/verify-release-migration.mjs'
 
 // Static catalog captured after the four frozen SQL files in isolated PostgreSQL.
 const experienceCatalog = {
@@ -241,6 +242,25 @@ model AppReleaseRetirement {
     if (kind === 'additional') writeFileSync(path.join(path.dirname(f.sql), 'extra.sql'), 'SELECT 2;')
     expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
   })
+  it('accepts only the exact successor notification schema and additive migration', () => {
+    const f = announcementFixture()
+    const announcementPath = `prisma/migrations/${announcementReadsMigrationName}/migration.sql`
+    mkdirSync(path.join(f.baseline, 'prisma/migrations', announcementReadsMigrationName))
+    writeFileSync(path.join(f.baseline, announcementPath), readFileSync(f.sql))
+    writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), readFileSync(path.join(f.candidate, 'prisma/schema.prisma')))
+    writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), readFileSync('prisma/schema.prisma', 'utf8').replaceAll('\r\n', '\n'))
+    const relative = `prisma/migrations/${userNotificationsMigrationName}/migration.sql`
+    mkdirSync(path.dirname(path.join(f.candidate, relative)))
+    const sql = readFileSync(relative, 'utf8').replaceAll('\r\n', '\n')
+    writeFileSync(path.join(f.candidate, relative), sql)
+    expect(releaseMigrationPlan(f.candidate, f.baseline)).toBe(userNotificationsMigrationName)
+    expect(readFileSync('deploy/deploy-production.sh', 'utf8')).toContain('"$MIGRATION_PLAN" == "20261108140000_user_notifications"')
+    writeFileSync(path.join(f.candidate, relative), sql + 'SELECT 1;')
+    expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
+    writeFileSync(path.join(f.candidate, relative), sql)
+    writeFileSync(path.join(f.candidate, announcementPath), 'SELECT 1;')
+    expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
+  })
   it('rejects a preexisting announcement receipt table before migration', () => {
     const before = { tables: [], columns: [], indexes: [], constraints: [], rowCount: null }
     expect(() => assertAnnouncementReadsState(before, 'before')).not.toThrow()
@@ -250,6 +270,7 @@ model AppReleaseRetirement {
   it.each([
     [appReleaseRetentionMigrationName, appReleaseRetentionMigrationChecksum],
     [announcementReadsMigrationName, announcementReadsMigrationChecksum],
+    [userNotificationsMigrationName, userNotificationsMigrationChecksum],
   ])('requires only %s pending, one exact successful row afterwards and unchanged full history', (migration, checksum) => {
     const old = { migration_name: 'old', checksum: 'a'.repeat(64), finished_at: new Date(), rolled_back_at: null, applied_steps_count: 1, historyHash: 'a'.repeat(32) }
     const target = { ...old, migration_name: migration, checksum }

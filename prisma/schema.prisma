@@ -342,6 +342,7 @@ model User {
   testerEntitlement TesterEntitlement?
   legalConsents UserLegalConsent[]
   announcementReads SiteAnnouncementRead[]
+  notifications     UserNotification[]
   modelAssignments AgentModelAssignment[]
   novelImportJobs NovelImportJob[]
   novelImportIntents NovelImportIntent[]
@@ -3435,6 +3436,19 @@ model SiteAnnouncementRead {
   @@id([userId, versionId])
   @@index([versionId])
   @@map("site_announcement_reads")
+}
+
+model UserNotification {
+  id        String   @id @default(cuid()) @db.VarChar(64)
+  userId    String   @map("user_id") @db.VarChar(64)
+  title     String   @db.VarChar(160)
+  body      String
+  createdAt DateTime @default(now()) @map("created_at")
+  readAt    DateTime? @map("read_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("user_notifications")
 }
 
 model UserLegalConsent {

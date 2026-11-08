@@ -7,11 +7,8 @@ const db = vi.hoisted(() => ({
   documents: [] as Array<ReturnType<typeof notice>>,
   createMany: vi.fn(),
 }))
-vi.mock('../../api/lib/prisma.js', () => ({
-  DataAccessError: class extends Error {
-    constructor(public status: number, public code: string, message: string) { super(message) }
-  },
-  prisma: {
+vi.mock('../../api/lib/prisma.js', () => {
+  const prisma = {
     user: { findUnique: async ({ where }: { where: { id: string } }) => {
       const createdAt = db.users.get(where.id)
       return createdAt ? { createdAt } : null
@@ -23,8 +20,15 @@ vi.mock('../../api/lib/prisma.js', () => ({
         where.versionId.in.filter(id => db.reads.has(where.userId + ':' + id)).map(versionId => ({ versionId })),
       createMany: db.createMany,
     },
-  },
-}))
+    userNotification: { findMany: async () => [] },
+  }
+  return {
+    DataAccessError: class extends Error {
+      constructor(public status: number, public code: string, message: string) { super(message) }
+    },
+    prisma: { ...prisma, $transaction: (work: (tx: typeof prisma) => unknown) => work(prisma) },
+  }
+})
 
 function notice(id: string, publishedAt: string, startsAt = publishedAt, endsAt: string | null = null) {
   return {

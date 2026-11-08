@@ -11,6 +11,7 @@ import { DataAccessError, prisma } from './prisma.js'
 export async function readAnnouncementInbox(
   viewerId: string | null,
   db: Prisma.TransactionClient = prisma,
+  includePersonal = true,
 ): Promise<AnnouncementInbox> {
   const [documents, viewer] = await Promise.all([
     db.siteContent.findMany({
@@ -59,8 +60,18 @@ export async function readAnnouncementInbox(
     for (const item of items) if (readIds.has(item.versionId)) item.unread = false
   }
   items.sort((a, b) => b.publishedAt.localeCompare(a.publishedAt) || b.versionId.localeCompare(a.versionId))
+  const personal = viewerId && includePersonal
+    ? await db.userNotification.findMany({
+      where: { userId: viewerId },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: { id: true, title: true, body: true, createdAt: true, readAt: true },
+    })
+    : null
   return {
     viewerId,
+    ...(personal && { personalItems: personal.map(({ createdAt, readAt, ...item }) => ({
+      ...item, publishedAt: createdAt.toISOString(), unread: readAt === null,
+    })) }),
     serverNow: new Date(now).toISOString(),
     nextBoundaryAt: Number.isFinite(nextBoundary) ? new Date(nextBoundary).toISOString() : null,
     items,
@@ -72,15 +83,31 @@ export async function markAnnouncementsRead(
   input: ReadAnnouncementsRequest,
 ): Promise<ReadAnnouncementsResult> {
   if (input.viewerId !== userId) throw new DataAccessError(409, 'ANNOUNCEMENT_VIEWER_CHANGED', '登录账号已变更，请刷新后重试。')
-  const { items } = await readAnnouncementInbox(userId)
-  const readVersionIds = items
-    .filter(item => item.unread && (input.action === 'all' || item.versionId === input.versionId))
-    .map(item => item.versionId)
-  if (readVersionIds.length) {
-    await prisma.siteAnnouncementRead.createMany({
-      data: readVersionIds.map(versionId => ({ userId, versionId })),
-      skipDuplicates: true,
+  if (input.action === 'personal') {
+    const updated = await prisma.userNotification.updateMany({
+      where: { id: input.notificationId, userId, readAt: null },
+      data: { readAt: new Date() },
     })
+    return { readVersionIds: [], readNotificationIds: updated.count ? [input.notificationId] : [] }
   }
-  return { readVersionIds }
+  return prisma.$transaction(async tx => {
+    const { items, serverNow } = await readAnnouncementInbox(userId, tx, false)
+    const readVersionIds = items
+      .filter(item => item.unread && (input.action !== 'one' || item.versionId === input.versionId))
+      .map(item => item.versionId)
+    if (readVersionIds.length) {
+      await tx.siteAnnouncementRead.createMany({
+        data: readVersionIds.map(versionId => ({ userId, versionId })),
+        skipDuplicates: true,
+      })
+    }
+    if (input.action !== 'allNotifications') return { readVersionIds }
+    const cutoff = new Date(serverNow)
+    const updated = await tx.userNotification.updateManyAndReturn({
+      where: { userId, readAt: null, createdAt: { lte: cutoff } },
+      data: { readAt: cutoff },
+      select: { id: true },
+    })
+    return { readVersionIds, readNotificationIds: updated.map(item => item.id) }
+  })
 }

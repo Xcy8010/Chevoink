@@ -43,6 +43,15 @@ export async function adjustAdminBonusCredits(adminId: string, userId: string, i
           kind: 'admin_adjustment', sourceType: 'admin_bonus_adjustment', referenceId: adminId, idempotencyKey: `admin-bonus:${id}`, metadata: { mode: input.mode, reason: input.reason, requestKey: input.requestKey } } })
         await tx.adminAuditLog.create({ data: { id, adminId, action: 'credits.adjust_bonus', targetType: 'user', targetId: userId, ip,
           detail: { ...result, expectedBonusBalanceMilli: input.expectedBonusBalanceMilli, reason: input.reason, requestHash } } })
+        if (deltaMilli !== 0) {
+          const amount = (Math.abs(deltaMilli) / 1000).toLocaleString('zh-CN', { maximumFractionDigits: 3 })
+          const remaining = (balance / 1000).toLocaleString('zh-CN', { maximumFractionDigits: 3 })
+          await tx.userNotification.create({ data: {
+            userId,
+            title: deltaMilli > 0 ? '你收到了奖励额度' : '奖励额度已调整',
+            body: `管理员已${deltaMilli > 0 ? '发放' : '扣减'} ${amount} 奖励额度。操作完成时的奖励额度余额为 ${remaining}。`,
+          } })
+        }
         return result
       })
     } catch (error) {

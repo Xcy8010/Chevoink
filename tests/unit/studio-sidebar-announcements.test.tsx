@@ -27,13 +27,13 @@ it('places the single compact announcement directly above the actual sidebar acc
  expect(screen.getByTestId('main').contains(notice)).toBe(false)
  expect(screen.getByTestId('workspace').lastElementChild).toBe(screen.getByTestId('main'))
 })
-it('places the hover-to-close icons before a wrapping announcement title', () => {
+it('places the hover-to-close icons after a wrapping announcement title', () => {
  const title = '这是一条用于验证窄侧栏标题完整显示的合成公告'
  state.content!.announcements[0].title = title
  render(<Fixture />)
  const open = screen.getByRole('button', { name: '打开公告：' + title })
  const close = screen.getByRole('button', { name: '关闭公告：' + title })
- expect(open.previousElementSibling).toBe(close)
+ expect(open.nextElementSibling).toBe(close)
  expect(close.querySelector('.site-announcement-dock-chevron')).toBeTruthy()
  expect(close.querySelector('.site-announcement-dock-close')).toBeTruthy()
  expect(screen.getByText(title).classList.contains('site-announcement-dock-title')).toBe(true)
@@ -52,6 +52,7 @@ it('prioritizes the latest unread notice and dismisses the batch without reading
  state.inbox={viewerId:'author',serverNow:first.startsAt,nextBoundaryAt:null,items:[second,first].map(item=>({...item,versionId:item.id+'-v1',publishedAt:item.startsAt,unread:true}))}
  const view=render(<Fixture/>)
  expect(screen.queryByText(first.title)).toBeNull()
+ expect(screen.getByText('NEW').className).toBe('site-announcement-dock-new')
  fireEvent.click(screen.getByRole('button',{name:'关闭公告：'+second.title}))
  expect(screen.queryByLabelText('站点公告')).toBeNull()
  expect(state.markRead).not.toHaveBeenCalled()
@@ -63,11 +64,30 @@ it('prioritizes the latest unread notice and dismisses the batch without reading
  expect(screen.getByRole('button',{name:'打开公告：'+fresh.title})).toBeTruthy()
  expect(screen.queryByText(first.title)).toBeNull()
 })
+it('opens public history from the announcement detail and restores focus to the sidebar', () => {
+ const first = state.content!.announcements[0]
+ state.inbox = { viewerId: 'author', serverNow: first.startsAt, nextBoundaryAt: null, items: [
+   { ...first, versionId: 'current', publishedAt: first.startsAt, unread: false },
+   { ...first, id: 'history', versionId: 'history', title: '历史公告', body: '历史公告正文', publishedAt: first.startsAt, unread: false },
+ ], personalItems: [{ id: 'private', title: '个人额度通知', body: '私人正文', publishedAt: first.startsAt, unread: true }] }
+ render(<Fixture />)
+ const trigger = screen.getByRole('button', { name: '打开公告：侧栏合成公告' })
+ fireEvent.click(trigger)
+ fireEvent.click(screen.getByRole('button', { name: '查看全部公告' }))
+ expect(screen.getByRole('dialog', { name: '全部公告' })).toBeTruthy()
+ expect(screen.queryByText('个人额度通知')).toBeNull()
+ fireEvent.click(screen.getByRole('button', { name: /历史公告/ }))
+ expect(screen.getByText('历史公告正文')).toBeTruthy()
+ fireEvent.click(screen.getByRole('button', { name: '关闭全部公告' }))
+ expect(document.activeElement).toBe(trigger)
+})
+
 it('opens the actual sidebar notice in a Studio-themed body portal and restores focus without persisting modal close',()=>{
  render(<Fixture/>);const trigger=screen.getByRole('button',{name:'打开公告：侧栏合成公告'})
  fireEvent.click(trigger);const dialog=screen.getByRole('dialog',{name:'侧栏合成公告'})
  expect(dialog.parentElement).toBe(document.body);expect(dialog.classList.contains('studio-workspace')).toBe(true)
  expect(screen.getByText('合成公告正文')).toBeTruthy()
+ expect(screen.getByRole('button',{name:'查看全部公告'})).toBeTruthy()
  fireEvent.click(screen.getByRole('button',{name:'关闭公告弹窗'}))
  expect(screen.queryByRole('dialog')).toBeNull();expect(document.activeElement).toBe(trigger)
  expect(localStorage.getItem('site-announcement-dismissals')).toBeNull()

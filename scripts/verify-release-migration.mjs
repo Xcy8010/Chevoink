@@ -18,6 +18,10 @@ export const announcementReadsMigrationName = '20261108120000_site_announcement_
 export const announcementReadsMigrationChecksum = '36096e6622d4f68947252897d15a4a91f5f3c07ffd14dcc0daa8315afdd3dd3c'
 const announcementReadsCandidateSchema = '1e33e41db6208c87ff874b522328f301dfabfe3f4ecab0bbff115173e161c856'
 const announcementReadsTable = 'site_announcement_reads'
+export const userNotificationsMigrationName = '20261108140000_user_notifications'
+export const userNotificationsMigrationChecksum = '312ba252d6159c02696f9b60d2eaa31a855f7fc53912479f0ebcaaf643a8f03a'
+const userNotificationsCandidateSchema = '19f4edd40b6bc2fb8012a823f0f5581f92ca05258ab38ffb86ae682ef0d1833f'
+const userNotificationsTable = 'user_notifications'
 export const adminExperiencePlan = '20261106_admin_model_experience'
 export const adminExperienceMigrations = [
   ['20261106120000_site_content', 'e482a56f154bc0207c5a221a823869151518a4ac3253c2d5e7ea6c8f928d4bde'],
@@ -36,7 +40,8 @@ const reviewed = new Map([[migrationName, migrationChecksum], [fetchMigrationNam
 reviewed.set(adminExperiencePlan, createHash('sha256').update(JSON.stringify(adminExperienceMigrations)).digest('hex'))
 reviewed.set(appReleaseRetentionMigrationName, appReleaseRetentionMigrationChecksum)
 reviewed.set(announcementReadsMigrationName, announcementReadsMigrationChecksum)
-const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName])
+reviewed.set(userNotificationsMigrationName, userNotificationsMigrationChecksum)
+const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName, userNotificationsMigrationName])
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
@@ -60,6 +65,12 @@ export function releaseMigrationPlan(candidate, baseline) {
   const currentFiles = files(path.join(candidate, 'prisma/migrations'))
   const oldFiles = files(path.join(baseline, 'prisma/migrations'))
   if (next === previous && JSON.stringify(currentFiles) === JSON.stringify(oldFiles)) return 'routine'
+  const notificationTarget = `${userNotificationsMigrationName}/migration.sql`
+  if (digest(previous.replaceAll('\r\n', '\n')) === announcementReadsCandidateSchema
+    && digest(next.replaceAll('\r\n', '\n')) === userNotificationsCandidateSchema
+    && !oldFiles.some(([name]) => name === notificationTarget)
+    && JSON.stringify(currentFiles.filter(([name]) => name !== notificationTarget)) === JSON.stringify(oldFiles)
+    && currentFiles.find(([name]) => name === notificationTarget)?.[1] === userNotificationsMigrationChecksum) return userNotificationsMigrationName
   const announcementTarget = `${announcementReadsMigrationName}/migration.sql`
   if (digest(previous.replaceAll('\r\n', '\n')) === appReleaseRetentionCandidateSchema
     && digest(next.replaceAll('\r\n', '\n')) === announcementReadsCandidateSchema
@@ -329,6 +340,29 @@ const announcementReadsState = {
   ],
   rowCount: 0,
 }
+const userNotificationsState = {
+  tables: [{ name: userNotificationsTable, kind: 'r' }],
+  columns: [
+    ['id', 'character varying(64)'],
+    ['user_id', 'character varying(64)'],
+    ['title', 'character varying(160)'],
+    ['body', 'text'],
+    ['created_at', 'timestamp(3) without time zone', true, 'CURRENT_TIMESTAMP'],
+    ['read_at', 'timestamp(3) without time zone', false],
+  ].map(([name, type, required = true, defaultValue = null]) => ({ name, type, required, defaultValue })),
+  indexes: [
+    ['user_notifications_pkey', true, ['id']],
+    ['user_notifications_user_id_created_at_idx', false, ['user_id', 'created_at']],
+  ].map(([name, unique, columns]) => ({
+    name, unique, columns, definition: `CREATE ${unique ? 'UNIQUE ' : ''}INDEX ${name} ON public.user_notifications USING btree (${columns.join(', ')})`,
+    valid: true, ready: true, partial: false, expression: false,
+  })),
+  constraints: [
+    { name: 'user_notifications_pkey', kind: 'p', definition: 'PRIMARY KEY (id)', valid: true },
+    { name: 'user_notifications_user_id_fkey', kind: 'f', definition: 'FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE CASCADE ON DELETE CASCADE', valid: true },
+  ],
+  rowCount: 0,
+}
 function assertAddedTableState(state, phase, before, expected, label) {
   if (!['before', 'after'].includes(phase)) throw Error(`Invalid ${label.toLowerCase()} phase`)
   if (phase === 'before') {
@@ -355,8 +389,12 @@ export function assertAnnouncementReadsState(state, phase, before) {
   assertAddedTableState(state, phase, before, announcementReadsState, 'Announcement reads')
 }
 
+export function assertUserNotificationsState(state, phase, before) {
+  assertAddedTableState(state, phase, before, userNotificationsState, 'User notifications')
+}
+
 /** Only PostgreSQL metadata and a count of the new table are read.
- * table comes exclusively from the two fixed, reviewed call sites below. */
+ * table comes exclusively from the fixed, reviewed call sites below. */
 async function readAddedTableState(tx, phase, table) {
   const tables = await tx.$queryRawUnsafe(`SELECT c.relname AS name, c.relkind::text AS kind FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname=current_schema() AND c.relname='${table}' ORDER BY c.relname`)
@@ -382,6 +420,10 @@ export function readAppReleaseRetentionState(tx, phase) {
 }
 export function readAnnouncementReadsState(tx, phase) {
   return readAddedTableState(tx, phase, announcementReadsTable)
+}
+
+export function readUserNotificationsState(tx, phase) {
+  return readAddedTableState(tx, phase, userNotificationsTable)
 }
 
 export function assertMigrationEnvironment(environment, shared) {
@@ -429,6 +471,11 @@ async function main() {
       if (before && (before.migration !== plan || before.checksum !== reviewed.get(plan) || before.phase !== 'before')) throw Error('Migration preflight receipt mismatch')
       if (before) assertDatabaseIdentity(database, before.database)
       assertMigrationState(rows, checksums, phase, before?.migrations, plan)
+      if (plan === userNotificationsMigrationName) {
+        const userNotifications = await readUserNotificationsState(tx, phase)
+        assertUserNotificationsState(userNotifications, phase, before?.userNotifications)
+        return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, userNotifications }
+      }
       if (plan === announcementReadsMigrationName) {
         const announcementReads = await readAnnouncementReadsState(tx, phase)
         assertAnnouncementReadsState(announcementReads, phase, before?.announcementReads)

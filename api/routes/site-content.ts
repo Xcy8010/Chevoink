@@ -18,6 +18,7 @@ publicSiteContentRouter.get('/announcements', async (req, res) => {
   const requestId = createRequestId()
   try {
     const viewerId = getSessionUserId(req)
+    res.set('Cache-Control', 'private, no-store')
     res.json(buildSuccess(requestId, await readAnnouncementInbox(viewerId)))
   } catch (error) { sendRouteError(res, requestId, error) }
 })
@@ -25,13 +26,15 @@ publicSiteContentRouter.get('/announcements', async (req, res) => {
 const idSchema = z.string().min(1).max(64)
 const readAnnouncementsSchema = z.discriminatedUnion('action', [
   z.strictObject({ action: z.literal('one'), viewerId: idSchema, versionId: idSchema }),
+  z.strictObject({ action: z.literal('personal'), viewerId: idSchema, notificationId: idSchema }),
   z.strictObject({ action: z.literal('all'), viewerId: idSchema }),
+  z.strictObject({ action: z.literal('allNotifications'), viewerId: idSchema }),
 ])
 publicSiteContentRouter.post('/announcements/read', async (req, res) => {
   const requestId = createRequestId()
   try {
     const userId = requireSessionUserId(req)
-    const input = parseBody(readAnnouncementsSchema, req.body, '请选择要标记已读的公告。')
+    const input = parseBody(readAnnouncementsSchema, req.body, '请选择要标记已读的通知。')
     res.json(buildSuccess(requestId, await markAnnouncementsRead(userId, input)))
   } catch (error) { sendRouteError(res, requestId, error) }
 })
