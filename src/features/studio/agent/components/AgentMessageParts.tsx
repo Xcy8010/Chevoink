@@ -766,7 +766,9 @@ export function ToolDisplayRenderer({
     case 'chapterRef':
       return (
         <p className="text-[11px] text-[var(--text-secondary)]">
-          章节「<ToolTargetLink title={display.title} onNavigate={onNavigateTarget} />」 · {display.wordCount} 字
+          章节「<ToolTargetLink title={display.title} onNavigate={onNavigateTarget} />」 · {display.range
+            ? display.range.end > display.range.start ? `正文第 ${display.range.start + 1}–${display.range.end} 字` : '本次未读到正文'
+            : `${display.wordCount} 字`}
         </p>
       )
     case 'planFile':

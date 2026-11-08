@@ -210,6 +210,47 @@ it('hands the shimmer between model work, tool execution and the next step, then
   expect(view.container.textContent).not.toMatch(/RAW_THOUGHT_ONLY|正在处理/)
 })
 
+it('shows distinct search terms, actual matching chapter locations, and other read results', () => {
+  const hits = call('search', 'project_search', {
+    display: { kind: 'projectSearch', query: '旧钥匙', total: 1, matches: [{
+      volumeTitle: '归途卷', chapterId: 'PRIVATE_CHAPTER', chapterTitle: '关门前', field: 'content', offset: 41,
+      length: 3, contextBefore: '她摸到一把', match: '旧钥匙', contextAfter: '。',
+    }] },
+  })
+  const legacy = call('older', 'project_search', { summary: '全书检索“收据” · 0 处' })
+  const read = call('chapter', 'chapter_read', { display: {
+    kind: 'chapterRef', chapterId: 'PRIVATE_CHAPTER', title: '关门前', wordCount: 920, range: { start: 20, end: 75 },
+  } })
+  const view = render(<Transcript messages={[message('read', [hits, legacy, read])]} />)
+  for (const toggle of view.container.querySelectorAll('[data-author-activity] > button')) fireEvent.click(toggle)
+  expect(screen.getByText('搜索「旧钥匙」 · 1 处')).toBeTruthy()
+  expect(screen.getByText('搜索「收据」 · 无匹配')).toBeTruthy()
+  expect(screen.getByText(/正文第 42 字/)).toBeTruthy()
+  expect(screen.getByText(/正文第 21–75 字/)).toBeTruthy()
+  expect(screen.getByText('旧钥匙').tagName).toBe('MARK')
+  expect(screen.getByRole('button', { name: '《关门前》' })).toBeTruthy()
+  expect(view.container.textContent).not.toContain('PRIVATE_CHAPTER')
+})
+
+it('keeps a visible thinking step before a newly emitted report and opens a later tool below it', () => {
+  const text: AgentMessagePart = { type: 'text', text: '前文已经有来访情节。' }
+  const tool = call('new-check', 'chapter_read', { status: 'running' })
+  const view = render(<AuthorActivityParts parts={[reasoning]} messageId="work" runActive workingLabel="梳理前文" />)
+  const original = view.container.querySelector('[data-author-step] > button')!
+  view.rerender(<AuthorActivityParts parts={[reasoning, text]} messageId="work" runActive workingLabel="梳理前文" />)
+  const paragraph = screen.getByText(text.text)
+  expect(view.container.querySelector('[data-author-step] > button')).toBe(original)
+  expect(original.compareDocumentPosition(paragraph) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+  const projection = projectActivityGroups([message('work', [reasoning, text, tool])])
+  view.rerender(<AuthorActivityParts parts={[reasoning, text, tool]} messageId="work" runActive
+    groups={projection.byMessage.get('work')} activeGroupId={projection.runningByRun.get('r')?.id} />)
+  const activeTool = screen.getByRole('button', { name: '正在核对前文' })
+  expect(view.container.querySelector('[data-author-step] > button')).toBe(original)
+  expect(paragraph.compareDocumentPosition(activeTool) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(view.container.querySelectorAll('.agent-processing-shimmer')).toHaveLength(1)
+})
+
 it('keeps the import confirmation reachable without opening the activity', () => {
   const part = call('import', 'novel_import', {
     status: 'running', importWaiting: { url: '/studio/novel/work?import=ready', expiresAt: '2099-01-01' },

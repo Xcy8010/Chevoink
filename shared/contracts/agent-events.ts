@@ -1,5 +1,6 @@
 import type { AgentAttachmentMeta } from './agent-attachments.js'
 import type { AgentExecutionMode, EntityId } from './models.js'
+import type { ProjectSearchMatch } from './search-contracts.js'
 import type { ReviewOutcome } from '../review-lifecycle.js'
 
 /** Server proof that a review request returned, even if its local report write failed.
@@ -117,7 +118,8 @@ export type AgentToolDisplayPayload =
       description: string
     }
   | { kind: 'markdown'; markdown: string }
-  | { kind: 'chapterRef'; chapterId: EntityId; title: string; wordCount: number }
+  | { kind: 'readSources'; items: Array<{ title: string; preview?: string; target?: { kind: 'chapter' | 'plan'; id: EntityId } }> }
+  | { kind: 'chapterRef'; chapterId: EntityId; title: string; wordCount: number; range?: { start: number; end: number } }
   | { kind: 'sessionRename'; sessionId: EntityId; title: string }
   | { kind: 'plan'; summary: string; steps: Array<{ title: string; detail?: string }> }
   | { kind: 'planFile'; artifactId: EntityId; title: string; content: string }
@@ -225,6 +227,13 @@ export type AgentToolDisplayPayload =
         afterPreview: string
         selected: boolean
       }>
+    }
+  | {
+      kind: 'projectSearch'
+      query: string
+      total: number
+      matches: Array<Pick<ProjectSearchMatch,
+        'chapterId' | 'chapterTitle' | 'volumeTitle' | 'field' | 'offset' | 'length' | 'contextBefore' | 'match' | 'contextAfter'>>
     }
   | {
       kind: 'webSearch'

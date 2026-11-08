@@ -31,7 +31,7 @@ it('reveals an atomic final answer after real finish, then folds process rows wi
   const view = render(<Harness />)
   act(() => { event({ type: 'text.final', messageId: 'answer', text: answer }); event({ type: 'run.finished', status: 'succeeded', usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, artifacts: [] }) })
   expect(useAgentStore.getState().phase).toBe('succeeded')
-  expect(useAgentStore.getState().messages.at(-1)?.parts).toEqual([{ type: 'text', text: answer }, expect.objectContaining({ type: 'tool-call', callId: 'read', status: 'success' })])
+  expect(useAgentStore.getState().messages.at(-1)?.parts).toEqual([expect.objectContaining({ type: 'tool-call', callId: 'read', status: 'success' }), { type: 'text', text: answer }])
   expect(view.container.textContent).not.toContain(answer)
   expect(screen.getByText('已核对合成资料')).toBeTruthy()
   await act(async () => { await vi.advanceTimersByTimeAsync(16) })
@@ -107,6 +107,20 @@ it('keeps a prepared tool row stable through batched completion and exits withou
   fireEvent.click(screen.getByRole('button', { name: '查看 1 项操作' }))
   expect(history.container.querySelector('.agent-tool-enter')).toBeNull()
 })
+it.each(['call', 'result', 'preview'] as const)('places new streamed commentary according to a preceding %s, then keeps that slot', boundary => {
+  start()
+  if (boundary === 'call') event({ type: 'tool.call', messageId: 'answer', callId: 'read', toolName: 'chapter_read', title: '读取', args: {} })
+  else if (boundary === 'result') event({ type: 'tool.result', messageId: 'answer', callId: 'read', toolName: 'chapter_read', ok: true, summary: '读取完成' })
+  else event({ type: 'tool.delta', messageId: 'answer', callId: 'read', toolName: 'chapter_read', argsChars: 4 })
+  event({ type: 'text.delta', messageId: 'answer', delta: '人物直到抵达河岸才知道信寄错了。\n\n' })
+  const parts = () => useAgentStore.getState().messages.at(-1)?.parts
+  const types = boundary === 'preview' ? ['text', 'tool-call'] : ['tool-call', 'text']
+  expect(parts()?.map(part => part.type)).toEqual(types)
+  event({ type: 'text.final', messageId: 'answer', text: '人物在渡口才知道信寄错了。' })
+  expect(parts()?.map(part => part.type)).toEqual(types)
+  expect(parts()?.filter(part => part.type === 'text')).toEqual([{ type: 'text', text: '人物在渡口才知道信寄错了。' }])
+})
+
 it('keeps streamed prose before its tool through preview, admission, finalization, and an authoritative correction', async () => {
   vi.useFakeTimers(); start(); const view = render(<Harness />)
   const parts = () => useAgentStore.getState().messages.at(-1)?.parts

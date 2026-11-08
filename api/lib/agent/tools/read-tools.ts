@@ -195,12 +195,14 @@ export const chapterReadTool = defineTool({
       .filter(Boolean)
       .join('\n')
 
+    const range = { start: Math.min(offset, chapter.content.length), end: Math.min(offset + slice.length, chapter.content.length) }
     return {
       output,
       summary: `读取《${chapter.title}》 ${offset}-${offset + slice.length} 字`,
+      display: { kind: 'chapterRef', chapterId: chapter.id, title: chapter.title, wordCount: chapter.wordCount, range },
       observedState: { kind: 'chapter', id: chapter.id, revision: chapter.revision },
       observedChapterRange: { targetId: chapter.id, contentHash: createHash('sha256').update(chapter.content).digest('hex'),
-        start: Math.min(offset, chapter.content.length), end: Math.min(offset + slice.length, chapter.content.length) },
+        ...range },
     }
   },
 })
@@ -242,14 +244,17 @@ export const chapterListSummariesTool = defineTool({
     const start = Math.max(0, centerIndex - Math.floor(count / 2))
     const picked = chapters.slice(start, start + count)
 
-    const lines = picked.map((chapter) => {
+    const sources = picked.map((chapter) => {
       const digest = chapter.summary?.trim() || `（无摘要，开头：${clip(chapter.content.replace(/\s+/g, ' '), 120)}）`
-      return `第${chapter.orderIndex}章《${chapter.title}》[${chapter.id}]：${clip(digest, 300)}`
+      return { chapter, digest }
     })
 
     return {
-      output: lines.join('\n'),
+      output: sources.map(({ chapter, digest }) => `第${chapter.orderIndex}章《${chapter.title}》[${chapter.id}]：${clip(digest, 300)}`).join('\n'),
       summary: `读取 ${picked.length} 章摘要`,
+      display: { kind: 'readSources', items: sources.map(({ chapter, digest }) => ({
+        title: chapter.title, preview: clip(digest, 120), target: { kind: 'chapter', id: chapter.id },
+      })) },
     }
   },
 })
@@ -299,7 +304,7 @@ export const memorySearchTool = defineTool({
     }, ctx.transaction)
 
     if (entries.length === 0) {
-      return { output: `没有找到与"${args.query}"相关的记忆条目。` }
+      return { output: `没有找到与"${args.query}"相关的记忆条目。`, summary: `检索"${args.query}" · 命中 0 条` }
     }
 
     const lines = entries.map(
@@ -309,6 +314,7 @@ export const memorySearchTool = defineTool({
     return {
       output: lines.join('\n'),
       summary: `检索"${args.query}" · 命中 ${entries.length} 条`,
+      display: { kind: 'readSources', items: entries.map(entry => ({ title: entry.title, preview: clip(entry.content, 120) })) },
       ...(ctx.transaction ? { observedMemories: await Promise.all(entries.map(async entry => {
         const memory = await ctx.transaction!.projectMemoryEntry.findUniqueOrThrow({ where: { id: entry.id } })
         const { memoryTargetHash } = await import('../runtime-memory.js')
@@ -378,6 +384,7 @@ export const planReadTool = defineTool({
     return {
       output: `计划属性：${JSON.stringify(links)}\n《${plan.title}》（planId=${plan.id}，contentHash=${createHash('sha256').update(plan.content).digest('hex')}，${plan.content.length} 字，本次${offset}–${end}）：\n${plan.content.slice(offset, end)}${end < plan.content.length ? `\n[尚有后文；使用plan_read、同一planId和offset=${end}继续读取，不能把本段当全文]` : ''}`,
       summary: `读取计划《${plan.title}》`,
+      display: { kind: 'readSources', items: [{ title: plan.title, preview: clip(plan.content.slice(offset, end), 120), target: { kind: 'plan', id: plan.id } }] },
       ...(offset === 0 && end === plan.content.length ? { observedState: { kind: 'plan' as const, id: plan.id, hash: planTargetHash(plan) } } : {}),
     }
   },

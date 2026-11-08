@@ -592,6 +592,7 @@ html.dark .studio-workspace :is(
 }
 @media (prefers-reduced-motion: reduce) {
   .agent-processing-shimmer { animation: none; background: none; color: var(--text-secondary); }
+  .agent-activity-step .agent-processing-shimmer { color: var(--text-primary); }
 }
 
 /* Agent 工具执行态：保留 Harness 式紧凑流程行，只让一像素进度线和状态文字轻微移动，

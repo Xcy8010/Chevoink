@@ -85,6 +85,7 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
   const openingByRun = new Map<string, string | null>()
   const savedReplyByRun = new Map<string, string>()
   const lastCallByRun = new Map<string, ActivityCall>()
+  const lastGroupByRun = new Map<string, ActivityGroup>()
   const groups: ActivityGroup[] = []
   const seen = new Map<string, { group?: ActivityGroup; calls: ActivityCall[]; index: number }>()
   const branches = new Map<string, ActivityCall[]>()
@@ -164,6 +165,7 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
     }
   }
   for (const group of groups) {
+    lastGroupByRun.set(group.runId, group)
     if (group.calls.some(part => part.status === 'running')) runningByRun.set(group.runId, group)
     for (const part of group.calls) {
       lastCallByRun.set(group.runId, part)
@@ -171,5 +173,5 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
       if (reply) savedReplyByRun.set(group.runId, reply)
     }
   }
-  return { byMessage, runningByRun, openingByRun, savedReplyByRun, lastCallByRun }
+  return { byMessage, runningByRun, openingByRun, savedReplyByRun, lastCallByRun, lastGroupByRun }
 }

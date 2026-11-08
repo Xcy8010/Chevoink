@@ -523,28 +523,35 @@ function appendReasoningDelta(
   return [...parts, { type: 'reasoning', text: delta, ...(activity ? { activity } : {}) }]
 }
 
-/** A provider turn has one public prose slot before its tool batch. A late
- * final can normalize or clear that slot without moving it behind the tools. */
-function replaceAuthorText(parts: AgentMessagePart[], text: string): AgentMessagePart[] {
+/** Keep an existing prose slot. New prose follows witnessed tool execution
+ * and precedes previews or saved tool receipts not yet reached in replay. */
+function replaceAuthorText(parts: AgentMessagePart[], text: string, replayedCalls?: ReadonlySet<string>): AgentMessagePart[] {
   const withoutText = parts.filter(part => part.type !== 'text')
   if (!text) return withoutText
-  const anchor = parts.findIndex(part => part.type === 'text' || part.type === 'tool-call')
-  const at = anchor < 0 ? withoutText.length : anchor
+  let at = parts.findIndex(part => part.type === 'text')
+  if (at < 0) {
+    let after = 0
+    for (const [index, part] of parts.entries()) {
+      if (part.type === 'tool-call' && !part.preparing && (!replayedCalls || replayedCalls.has(part.callId))) after = index + 1
+    }
+    const nextTool = parts.findIndex((part, index) => index >= after && part.type === 'tool-call')
+    at = nextTool < 0 ? parts.length : nextTool
+  }
   return [...withoutText.slice(0, at), { type: 'text', text }, ...withoutText.slice(at)]
 }
 
-function appendAuthorText(parts: AgentMessagePart[], delta: string): AgentMessagePart[] {
+function appendAuthorText(parts: AgentMessagePart[], delta: string, replayedCalls?: ReadonlySet<string>): AgentMessagePart[] {
   let index = parts.length - 1
   while (index >= 0 && parts[index].type !== 'text') index--
-  if (index < 0) return replaceAuthorText(parts, delta)
+  if (index < 0) return replaceAuthorText(parts, delta, replayedCalls)
   return parts.map((part, at) => at === index && part.type === 'text' ? { ...part, text: part.text + delta } : part)
 }
 
 /** A partial replay never shrinks saved text; only new suffixes or text.final replace it. */
-function reconcileReplayedText(parts: AgentMessagePart[], text: string): AgentMessagePart[] {
+function reconcileReplayedText(parts: AgentMessagePart[], replay: MessageReplay): AgentMessagePart[] {
   const saved = parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('')
-  if (saved.startsWith(text) || !text.startsWith(saved)) return parts
-  return appendAuthorText(parts, text.slice(saved.length))
+  if (saved.startsWith(replay.text) || !replay.text.startsWith(saved)) return parts
+  return appendAuthorText(parts, replay.text.slice(saved.length), replay.seenCalls)
 }
 
 function reconcileReplayedReasoning(parts: AgentMessagePart[], replay: MessageReplay, final = false, activity?: true): AgentMessagePart[] {
@@ -567,8 +574,9 @@ function finalizeReplayedReasoning(messages: AgentUIMessage[], event: { runId: s
 
 function noteReplayedTool(event: { runId: string; messageId: string; callId: string }) {
   const replay = restoredMessageReplay.get(`${event.runId}:${event.messageId}`)
-  if (!replay?.started || replay.seenCalls.has(event.callId)) return
+  if (!replay || replay.seenCalls.has(event.callId)) return
   replay.seenCalls.add(event.callId)
+  if (!replay.started) return
   replay.afterCallId = event.callId
   replay.reasoningSlot = -1
   replay.lastPart = 'tool'
@@ -1228,6 +1236,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             const key = `${event.runId}:${event.messageId}`, replay = restoredMessageReplay.get(key)
             if (messageBelongsToRun(existing, event.runId) && existing.role === 'assistant' && replay && !replay.started) {
               replay.started = true
+              replay.seenCalls.clear()
               authorTextStreams.delete(key)
             }
             return base
@@ -1260,7 +1269,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           const replay = restoredMessageReplay.get(key)
           if (replay?.started) { replay.text += delta; if (delta) replay.lastPart = 'text' }
           const messages = delta ? updateMessageParts(owned, event.messageId, parts => replay?.started
-            ? reconcileReplayedText(parts, replay.text) : appendAuthorText(parts, delta)) : state.messages
+            ? reconcileReplayedText(parts, replay) : appendAuthorText(parts, delta, replay?.seenCalls)) : state.messages
           const text = messages.find(message => message.id === event.messageId)?.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('') ?? ''
           return {
             ...base,
@@ -1289,7 +1298,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
               ? { textRevealTargets: { ...state.textRevealTargets, [event.messageId]: text } } : {}),
             finalizedTextIds: state.finalizedTextIds.includes(event.messageId)
               ? state.finalizedTextIds : [...state.finalizedTextIds, event.messageId],
-            messages: updateMessageParts(text ? owned : state.messages, event.messageId, parts => replaceAuthorText(parts, text)),
+            messages: updateMessageParts(text ? owned : state.messages, event.messageId, parts => replaceAuthorText(parts, text, replay?.seenCalls)),
           }
         }
 

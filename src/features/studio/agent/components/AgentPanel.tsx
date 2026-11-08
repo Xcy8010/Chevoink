@@ -522,7 +522,9 @@ export function AgentPanel({
   const waitingForFirstResponse = lastUserRequest?.runId === runId && lastUserRequest.requestTiming?.elapsedMs === null
   const workingMessage = workingLabel && runId && !waitingForFirstResponse
     ? [...messages].reverse().find(message => message.role === 'assistant' && message.runId === runId) : undefined
-  const workingGroup = workingMessage ? [...(activityGroups.byMessage.get(workingMessage.id)?.values() ?? [])].at(-1) : undefined
+  const latestWorkingGroup = workingMessage ? [...(activityGroups.byMessage.get(workingMessage.id)?.values() ?? [])].at(-1) : undefined
+  const workingGroup = latestWorkingGroup ?? (workingMessage && runId && !getMessageText(workingMessage.parts)
+    ? activityGroups.lastGroupByRun.get(runId) : undefined)
   const workingMessageId = workingGroup?.messageId ?? workingMessage?.id
   const creditSummaryQuery = useQuery({
     queryKey: ['credits', 'summary'],

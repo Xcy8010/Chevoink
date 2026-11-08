@@ -77,6 +77,13 @@ export const projectSearchTool = defineTool({
     return {
       output: `全书检索命中 ${result.total} 处${result.truncated ? `（查询仅返回前 ${result.matches.length} 处）` : ''}，索引状态 ${result.indexState}。${artifact ? `本次返回结果已保存为 artifactId=${artifact.id}，${ctx.transaction ? '以下包含本次全部返回结果' : `上下文仅保留前 ${visibleMatches.length} 处`}。` : ''}\n${lines.join('\n') || '无匹配。'}`,
       summary: `全书检索“${args.query}” · ${result.total} 处`,
+      display: {
+        kind: 'projectSearch',
+        query: result.query,
+        total: result.total,
+        matches: result.matches.slice(0, 20).map(({ chapterId, chapterTitle, volumeTitle, field, offset, length, contextBefore, match, contextAfter }) =>
+          ({ chapterId, chapterTitle, volumeTitle, field, offset, length, contextBefore, match, contextAfter })),
+      },
     }
   },
 })

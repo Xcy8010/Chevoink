@@ -1,4 +1,4 @@
-import { memo, useEffect, useId, useMemo, useState, type ReactNode } from 'react'
+import { memo, useEffect, useId, useLayoutEffect, useMemo, useState, type ReactNode } from 'react'
 import { BookOpenText, Bot, Brain, ChevronDown, CircleHelp, ClipboardCheck, Download, FilePenLine, FileText, Globe2, Search } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -9,7 +9,7 @@ import { activityChapterId, projectActivityGroups, type ActivityCall, type Activ
 import { projectAgentAuthorParts, projectAgentAuthorText } from '../../../../../shared/agent-author-view.js'
 import { getAgentToolPresentation } from '../../../../../shared/agent-tool-presentation.js'
 import type { AgentRunTiming } from '../../../../../shared/contracts/agent-events.js'
-import type { AgentMessagePart } from '../../../../../shared/contracts/index.js'
+import type { AgentMessagePart, AgentToolDisplayPayload } from '../../../../../shared/contracts/index.js'
 import { AgentMarkdownText } from './AgentMarkdownText'
 import { ToolDisplayRenderer } from './AgentMessageParts'
 import { AgentProcessRegion } from './AgentProcessRegion'
@@ -99,6 +99,7 @@ function activitySummary(part: ActivityCall, runActive: boolean, titles?: Readon
     const result = part.toolName === 'quality_report_get' ? '已查看复查报告' : `${detail ? action : '复查'}完成`
     return `${result}${outcome ? ` · ${outcome}` : ''}`
   }
+  if (detail && display?.kind === 'projectSearch') return `搜索「${display.query}」 · ${display.total ? `${display.total} 处` : '无匹配'}`
   if (display?.kind === 'webSearch') {
     if (display.provider === 'unavailable') return '未取得网页资料'
     if (detail) return `搜索网页 · ${display.results.length} 条结果`
@@ -119,33 +120,81 @@ function hasCurrentFailure(part: ActivityCall) {
     || part.display?.kind === 'webSearch' && part.display.provider === 'unavailable'
 }
 
+const readDetails: Record<string, RegExp> = {
+  project_search: /^全书检索[“"](.+)[”"] · (\d+) 处$/u,
+  chapter_read: /^读取《(.+)》 (\d+)-(\d+) 字$/u,
+  chapter_list_summaries: /^读取 \d+ 章摘要$/u,
+  novel_get_context: /^读取《.+》上下文 · \d+ 章$/u,
+  plan_read: /^读取计划《.+》$/u,
+  memory_search: /^检索["“].+["”] · 命中 \d+ 条$/u,
+}
+
+function savedReadDetail(part: ActivityCall) {
+  if (part.status !== 'success' || part.display || !part.summary) return undefined
+  const match = readDetails[part.toolName]?.exec(part.summary)
+  if (!match) return undefined
+  if (part.toolName === 'project_search') return `搜索「${match[1]}」 · ${match[2] === '0' ? '无匹配' : `${match[2]} 处`}`
+  if (part.toolName === 'chapter_read') return `《${match[1]}》 · ${match[2] === match[3] ? '本次未读到正文' : `正文第 ${Number(match[2]) + 1}–${match[3]} 字`}`
+  return part.summary
+}
+
+function ProjectSearchLocations({ display, onOpen }: {
+  display: Extract<AgentToolDisplayPayload, { kind: 'projectSearch' }>; onOpen: (chapterId: string) => void
+}) {
+  if (!display.matches.length) return null
+  return <div className="space-y-1 text-xs leading-5 text-[var(--text-secondary)]">
+    <ul className="space-y-2">
+      {display.matches.map(hit => <li key={`${hit.chapterId}:${hit.field}:${hit.offset}`} className="min-w-0">
+        <p className="break-words">
+          {hit.volumeTitle ? <span>{hit.volumeTitle} · </span> : null}
+          <button type="button" onClick={() => onOpen(hit.chapterId)} className="text-[var(--text-primary)] underline-offset-2 hover:underline focus-visible:underline">《{hit.chapterTitle}》</button>
+          <span> · {hit.field === 'content' ? `正文第 ${hit.offset + 1} 字` : hit.field === 'summary' ? '章节摘要' : '章节标题'}</span>
+        </p>
+        <p className="whitespace-pre-wrap break-words">{hit.contextBefore}<mark className="bg-transparent font-medium text-[var(--text-primary)]">{hit.match}</mark>{hit.contextAfter}</p>
+      </li>)}
+    </ul>
+    {display.total > display.matches.length ? <p>显示前 {display.matches.length} 处，共 {display.total} 处</p> : null}
+  </div>
+}
+
 const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles }: { part: ActivityCall; runActive: boolean; titles?: ReadonlyMap<string, string> }) {
   const navigate = useAgentStore(state => state.requestToolNavigation)
   const spotlight = useAgentStore(state => state.requestMemorySpotlight)
   const Icon = toolIcon(part)
   const display = part.display
   const chapterId = activityChapterId(part)
-  const navigable = Boolean(chapterId) || display?.kind === 'planFile' || display?.kind === 'planDiff' || display?.kind === 'planRename'
+  const planId = part.toolName === 'plan_read' && !display ? (part.args as { planId?: unknown } | null)?.planId : undefined
+  const navigable = Boolean(chapterId) || typeof planId === 'string' || display?.kind === 'planFile' || display?.kind === 'planDiff' || display?.kind === 'planRename'
   const openTarget = navigable ? () => navigate(part.toolName, chapterId ? { chapterId } : part.args, display) : undefined
+  const detail = savedReadDetail(part)
   const memory = part.status === 'success' ? getMemorySpotlight(part.toolName, part.args) : null
   const hasResultTarget = display?.kind === 'chapterDiff' || display?.kind === 'chapterRef' || display?.kind === 'planFile' || display?.kind === 'planDiff' || display?.kind === 'planRename'
-  return <li className="min-w-0 py-1" data-activity-tool={part.toolName}>
+  return <li className="min-w-0 py-1 font-normal" data-activity-tool={part.toolName}>
     <div className="flex min-w-0 items-start gap-2 text-xs leading-5 text-[var(--text-secondary)]">
       <Icon aria-hidden className="mt-[3px] h-3.5 w-3.5 shrink-0 text-[var(--text-tertiary)]" />
-      <span className="min-w-0 break-words">{activitySummary(part, runActive, titles, true)}</span>
-      {openTarget && !hasResultTarget ? <button type="button" onClick={openTarget} className="shrink-0 underline-offset-2 hover:underline focus-visible:underline">打开章节</button> : null}
+      <span className="min-w-0 break-words">{detail ?? activitySummary(part, runActive, titles, true)}</span>
+      {openTarget && !hasResultTarget ? <button type="button" onClick={openTarget} className="shrink-0 underline-offset-2 hover:underline focus-visible:underline">{typeof planId === 'string' ? '打开计划' : '打开章节'}</button> : null}
       {memory ? <button type="button" onClick={() => spotlight(memory.type, memory.title)} className="shrink-0 underline-offset-2 hover:underline focus-visible:underline">查看设定</button> : null}
     </div>
     {display ? <div className="min-w-0 pl-[22px]">
-      {display.kind === 'subagentReport'
-        ? <p className="whitespace-pre-wrap break-words text-xs text-[var(--text-secondary)]">{projectAgentAuthorText(display.report)}</p>
-        : <ToolDisplayRenderer display={display} onNavigateTarget={openTarget} authorActivity />}
+      {display.kind === 'projectSearch' ? <ProjectSearchLocations display={display} onOpen={chapterId => navigate(part.toolName, { chapterId })} />
+        : display.kind === 'readSources' ? <ul className="space-y-2 text-xs leading-5 text-[var(--text-secondary)]">
+          {display.items.map(({ title, preview, target }, index) => <li key={target?.id ?? index} className="min-w-0 break-words">
+            {target ? <button type="button" className="text-[var(--text-primary)] underline-offset-2 hover:underline focus-visible:underline"
+              onClick={() => navigate(part.toolName, target.kind === 'chapter' ? { chapterId: target.id } : { planId: target.id })}>《{title}》</button>
+              : <p className="text-[var(--text-primary)]">{title}</p>}
+            {preview ? <p className="whitespace-pre-wrap">{preview}</p> : null}
+          </li>)}
+        </ul>
+          : display.kind === 'subagentReport'
+            ? <p className="whitespace-pre-wrap break-words text-xs text-[var(--text-secondary)]">{projectAgentAuthorText(display.report)}</p>
+            : <ToolDisplayRenderer display={display} onNavigateTarget={openTarget} authorActivity />}
     </div> : null}
   </li>
 })
 
-const ActivityRow = memo(function ActivityRow({ group, runActive, active, workingLabel, titles }: {
-  group?: ActivityGroup; runActive: boolean; active: boolean; workingLabel?: string; titles?: ReadonlyMap<string, string>
+const ActivityRow = memo(function ActivityRow({ group, runActive, active, workingLabel, settledLabel, titles }: {
+  group?: ActivityGroup; runActive: boolean; active: boolean; workingLabel?: string; settledLabel?: string; titles?: ReadonlyMap<string, string>
 }) {
   const [open, setOpen] = useState(false)
   const detailsId = useId()
@@ -158,14 +207,14 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
   const part = running ?? unresolved ?? calls.at(-1)
   const Icon = part && !workingLabel ? toolIcon(part) : Brain
   const importWaiting = calls.find(call => isOpenImport(call, runActive))
-  const label = workingLabel ?? (part ? activitySummary(part, runActive, titles) : '')
+  const label = workingLabel ?? (part ? activitySummary(part, runActive, titles) : settledLabel)
   const executing = Boolean(active && running && !importWaiting && running.toolName !== 'ask_user')
 
   return <div className="min-w-0" data-author-activity={group ? '' : undefined} data-author-working={workingLabel ? '' : undefined} data-author-step>
     <button type="button" aria-expanded={group ? open : undefined} aria-controls={group ? detailsId : undefined}
       disabled={!group} onClick={() => setOpen(value => !value)}
-      className="agent-activity-step inline-flex min-h-8 max-w-full items-center gap-2 px-1 text-left text-xs leading-5 text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] focus-visible:text-[var(--text-primary)] focus-visible:underline focus-visible:outline-none">
-      <Icon aria-hidden className="h-3.5 w-3.5 shrink-0" />
+      className="agent-activity-step inline-flex min-h-8 max-w-full items-center gap-2 px-1 text-left text-sm font-medium leading-7 text-[var(--text-primary)] focus-visible:underline focus-visible:outline-none">
+      <Icon aria-hidden className="h-4 w-4 shrink-0" />
       <span className="min-w-0 break-words">
         <span aria-live={active || running || workingLabel ? 'polite' : undefined} data-activity-running={executing || undefined}
           className={executing || workingLabel ? 'agent-processing-shimmer' : undefined}>{label}</span>
@@ -195,7 +244,7 @@ export function AuthorActivitySummary({ timing, active, open, onToggle }: { timi
 }
 
 export function AuthorProgressText({ text }: { text: string }) {
-  return <p className="break-words text-sm leading-7 text-[var(--text-primary)]" data-author-progress>{text}</p>
+  return <p className="break-words text-sm font-medium leading-7 text-[var(--text-primary)]" data-author-progress>{text}</p>
 }
 
 export const AuthorActivityParts = memo(function AuthorActivityParts({
@@ -228,6 +277,15 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
 
   const stepKey = `${messageId}:step`
   const liveGroupId = workingGroupId ?? (workingLabel ? [...(localGroups?.values() ?? [])].at(-1)?.id : undefined)
+  const [openingWork, setOpeningWork] = useState<string>()
+  useLayoutEffect(() => {
+    if (!openingWork && workingLabel && !liveGroupId && !receivedText) setOpeningWork(workingLabel)
+  }, [openingWork, workingLabel, liveGroupId, receivedText])
+  const firstText = authorParts.findIndex(part => part.type === 'text')
+  const firstTool = authorParts.findIndex(part => part.type === 'tool-call' && localGroups?.get(part.callId)?.messageId === messageId)
+  // Public prose is a visible boundary. A later tool must not reuse a step
+  // on the other side of that prose, even though both share a provider turn.
+  const keepOpeningWork = Boolean(openingWork && firstText >= 0 && (firstTool < 0 || firstText < firstTool))
   const entries = authorParts.map<ReactNode>((part, index) => {
       if (part.type === 'text') {
         const identity = `${messageId}:text:${textOrdinal++}`
@@ -241,7 +299,7 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
       if (part.type !== 'tool-call' || part.subagentCallId) return null
       const group = localGroups?.get(part.callId)
       if (!group || group.messageId !== messageId || group.firstCallId !== part.callId || rendered.has(group.id)) return null
-      const key = rendered.size ? group.id : stepKey
+      const key = rendered.size || keepOpeningWork ? group.id : stepKey
       rendered.add(group.id)
       return <AgentProcessRegion key={key} open={processOpen ?? true}>
         {group.transition ? <AuthorProgressText text={group.transition} /> : null}
@@ -249,10 +307,13 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
           workingLabel={liveGroupId === group.id ? workingLabel : undefined} />
       </AgentProcessRegion>
   })
-  if (workingLabel && !liveGroupId) entries.push(
-    <AgentProcessRegion key={stepKey} open={processOpen ?? true}>
-      <ActivityRow key="activity" runActive={runActive} active={false} workingLabel={workingLabel} />
-    </AgentProcessRegion>,
-  )
-  return <div className="space-y-2">{entries}</div>
+  if (keepOpeningWork && (runActive || processOpen !== undefined) || workingLabel && !liveGroupId) {
+    const step = <AgentProcessRegion key={stepKey} open={processOpen ?? true}>
+      <ActivityRow key="activity" runActive={runActive} active={false}
+        workingLabel={liveGroupId || firstTool >= 0 ? undefined : workingLabel} settledLabel={openingWork} />
+    </AgentProcessRegion>
+    if (keepOpeningWork) entries.unshift(step)
+    else entries.push(step)
+  }
+  return <div className="space-y-2 font-medium">{entries}</div>
 })

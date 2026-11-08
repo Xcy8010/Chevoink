@@ -102,6 +102,12 @@ describe.runIf(available)('durable domain reads', () => {
       expect(await prisma.agentOperation.count({ where: {  taskRootId: f.rootId, action } })).toBe(1)
       if (action === 'project_search') {
         expect(outcome.result.output.match(/\[content@/g)).toHaveLength(25)
+        const display = outcome.result.display
+        expect(display).toMatchObject({ kind: 'projectSearch', query: '原文', total: 25 })
+        if (display?.kind !== 'projectSearch') throw new Error('Expected the project search display')
+        expect(display.matches).toHaveLength(20)
+        expect(display.matches[1]).toEqual({ chapterId: f.chapterId, chapterTitle: '原章', volumeTitle: '卷', field: 'content',
+          offset: 3, length: 2, contextBefore: '原文。', match: '原文', contextAfter: expect.stringMatching(/^。原文。/) })
         expect(await prisma.agentArtifact.count({ where: { runId: f.runId } })).toBe(1)
       }
       const evidence = await withRunLease(lease, tx => collectDurableToolEvidence(tx, f.rootId, state.frame.revision))

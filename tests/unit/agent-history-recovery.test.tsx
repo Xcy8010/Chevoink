@@ -36,7 +36,7 @@ beforeEach(() => {
   Source.opened = []
   vi.stubGlobal('EventSource', Source)
 })
-afterEach(() => { cleanup(); useAgentStore.getState().resetRun(); vi.unstubAllGlobals(); vi.restoreAllMocks(); localStorage.clear() })
+afterEach(() => { cleanup(); useAgentStore.getState().resetRun(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); localStorage.clear() })
 
 it('keeps server-saved tools and change counts through A -> B -> A when legacy replay contains only the new attempt tail', () => {
   const hook = renderHook(() => useAgentStream())
@@ -109,6 +109,31 @@ it('anchors the first visible final before restored tools and keeps another turn
     expect.objectContaining({ type: 'tool-call', callId: 'old-plan', status: 'success' }),
   ])
   expect(messages.find(message => message.id === 'terminal')?.parts).toEqual([{ type: 'text', text: '已保存第一章。' }])
+})
+
+it.each([true, false])('places new commentary after a witnessed tool without crossing unreplayed receipts (from start=%s)', async fromStart => {
+  vi.useFakeTimers()
+  const saved = history()
+  saved[1].parts = saved[1].parts.filter(part => part.type !== 'text')
+  const hook = renderHook(() => useAgentStream())
+  act(() => { restoreActiveRunHistory(saved, 'run-a', 'session-a'); hook.result.current.connect('run-a', fromStart ? 0 : 50) })
+  const source = Source.opened[0]
+  const offset = fromStart ? 0 : 50
+  act(() => {
+    if (fromStart) source.send({ ...base, seq: 1, type: 'message.start', messageId: 'saved-a', role: 'assistant' })
+    source.send(result(offset + 2))
+    source.send({ ...base, seq: offset + 3, type: 'text.delta', messageId: 'saved-a', delta: '错送的信已经回到邮差手中。\n\n' })
+  })
+  await act(async () => { await vi.advanceTimersByTimeAsync(32) })
+  const parts = () => useAgentStore.getState().messages.find(message => message.id === 'saved-a')?.parts
+  const order = () => parts()?.map(part => part.type === 'tool-call' ? part.callId : part.type)
+  expect(order()).toEqual(['reasoning', 'old-write', 'text', 'old-plan'])
+  act(() => {
+    source.send({ ...base, seq: offset + 4, type: 'tool.call', messageId: 'saved-a', callId: 'old-plan', toolName: 'plan_save', title: '保存计划', args: {} })
+    source.send({ ...base, seq: offset + 5, type: 'text.final', messageId: 'saved-a', text: '邮差已拿回错送的信。', asReasoning: false })
+  })
+  expect(order()).toEqual(['reasoning', 'old-write', 'text', 'old-plan'])
+  expect(parts()?.find(part => part.type === 'text')).toEqual({ type: 'text', text: '邮差已拿回错送的信。' })
 })
 
 it('rejects text targeted at another run’s restored message', () => {
