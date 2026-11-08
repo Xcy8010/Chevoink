@@ -35,6 +35,8 @@ it('renders published identity and safe configured links in both actual desktop 
  fireEvent.click(within(navigations[0]).getByRole('link',{name:'精选分类'}));expect(screen.getByTestId('current-route').textContent).toBe('/discover')
  expect(screen.getAllByRole('link').some(link=>link.getAttribute('href')==='/messages')).toBe(true)
  expect(screen.queryByText('管理员')).toBeNull()
+ const bell = screen.getByRole('button', { name: '公告通知' })
+ expect(bell.nextElementSibling).toBe(screen.getByRole('button', { name: '切换主题' }))
 })
 it('updates actual header only from published query data and preserves legacy identity/navigation when no settings are published',async()=>{
  const current=data();current.settings=null;mocks.request.mockResolvedValue(current)

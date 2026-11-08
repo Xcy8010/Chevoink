@@ -3,6 +3,7 @@ import { BookOpen, BookOpenText, Bug, Crosshair, ExternalLink, FilePlus2, Flag, 
 import { Link } from 'react-router-dom'
 
 import FeedbackDialog from '@/features/feedback/components/FeedbackDialog'
+import AnnouncementBell from '@/features/site-content/AnnouncementBell'
 import { cn } from '@/lib/utils'
 import type { FeedbackKind, Novel } from '../../../../shared/contracts/index.js'
 import StudioMoreMenu, { type StudioSettingsSection } from './StudioMoreMenu'
@@ -178,6 +179,7 @@ export default function StudioCommandBar(props: Props) {
       <div className="ml-auto flex shrink-0 items-center gap-1.5">
         {/* 发布/预览已收进顶栏「发布」「查看」菜单；最右侧返回首页保持不变 */}
         {props.perspective === 'ide' ? <StudioMoreMenu onOpenStudioSettings={props.onOpenStudioSettings} /> : null}
+        <AnnouncementBell placement="studio" />
         <Link to="/" className="inline-flex h-8 items-center gap-1.5 rounded-[8px] border border-[var(--border-subtle)] px-2.5 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)]"><Home className="h-3.5 w-3.5" /><span className="hidden 2xl:inline">返回首页</span></Link>
       </div>
       <FeedbackDialog open={feedbackKind !== null} kind={feedbackKind ?? 'suggestion'} source={`studio-${props.perspective}`} onClose={() => setFeedbackKind(null)} />

@@ -7,6 +7,15 @@ import StudioMobileNavigation from '@/features/studio/components/StudioMobileNav
 import WorkspaceNovelSwitcher from '@/features/studio/components/WorkspaceNovelSwitcher'
 import InviteCreditsDialog from '@/features/account/InviteCreditsDialog'
 import type { MobileView } from '@/features/studio/types'
+import { mockNativeDialog } from '../helpers/test-native-dialog'
+
+vi.mock('@/features/site-content/announcement-inbox-api', () => ({
+  useAnnouncementInbox: () => ({
+    query: { data: { items: [] }, refetch: vi.fn() },
+    read: { reset: vi.fn() },
+    viewerId: null,
+  }),
+}))
 
 beforeEach(() => { vi.stubGlobal('innerWidth', 390) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); document.body.style.overflow = '' })
@@ -74,6 +83,26 @@ function openNavigation() {
 }
 
 describe('controlled mobile workspace navigation', () => {
+  it('places the announcement bell at the right edge of the brand header and closes it before the drawer', ({ onTestFinished }) => {
+    const restore = mockNativeDialog()
+    onTestFinished(() => { cleanup(); restore() })
+    render(<Harness />)
+    openNavigation()
+    const bell = screen.getByRole('button', { name: '公告通知' })
+    const navigation = screen.getByRole('dialog', { name: '创作区导航' })
+    expect(bell.parentElement?.lastElementChild).toBe(bell)
+    expect(bell.closest('header')?.querySelector('h2')?.textContent).toBe('Chevoink')
+
+    fireEvent.click(bell)
+    const inbox = screen.getByRole('dialog', { name: '公告通知' })
+    expect(navigation.contains(inbox)).toBe(true)
+    fireEvent.keyDown(inbox, { key: 'Escape' })
+    fireEvent(inbox, new Event('cancel', { cancelable: true }))
+    expect(screen.queryByRole('dialog', { name: '公告通知' })).toBeNull()
+    expect(screen.getByRole('dialog', { name: '创作区导航' })).toBe(navigation)
+    expect(document.activeElement).toBe(bell)
+  })
+
   it('keeps the visual close transition mounted while removing it from interaction, then cleans up', () => {
     vi.useFakeTimers()
     try {

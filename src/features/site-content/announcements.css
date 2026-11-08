@@ -30,3 +30,68 @@
 /* Body portals need the same neutral palette as the actual Studio dialogs. */
 .site-announcement-dialog.studio-workspace { background: var(--surface-default); font-family: var(--studio-body-font); }
 .site-announcement-dialog.studio-workspace button:focus-visible { outline-color: var(--text-primary); }
+
+.site-announcement-bell {
+  position: relative; display: inline-grid; flex: none; width: 44px; height: 44px; place-items: center;
+  padding: 0; border: 1px solid var(--border-subtle); border-radius: 999px;
+  background: var(--surface-default); color: var(--text-secondary);
+}
+.site-announcement-bell--compact { width: 32px; height: 32px; border-radius: 8px; }
+.site-announcement-bell--compact svg { width: 16px; height: 16px; }
+.site-announcement-bell:hover, .site-announcement-bell[aria-expanded="true"] {
+  background: var(--surface-muted); color: var(--text-primary);
+}
+.site-announcement-bell-dot, .site-announcement-inbox-row-dot {
+  display: block; width: 7px; height: 7px; flex: none; border-radius: 50%; background: #f43f5e;
+}
+.site-announcement-bell-dot {
+  position: absolute; top: -3px; right: -3px; box-shadow: 0 0 0 2px var(--surface-default);
+}
+.site-announcement-inbox {
+  position: fixed; inset: var(--announcement-top) var(--announcement-right) auto auto; margin: 0;
+  width: min(400px, calc(100vw - var(--announcement-right) - 12px)); max-width: none;
+  max-height: min(32rem, calc(100dvh - var(--announcement-top) - max(12px, var(--safe-bottom, 0px))));
+  overflow: hidden; padding: 0; border: 1px solid var(--border-subtle); border-radius: 16px;
+  background: var(--surface-default); color: var(--text-primary); box-shadow: 0 16px 52px #0004;
+}
+.site-announcement-inbox--mobile { left: 12px; right: 12px; width: auto; }
+.site-announcement-inbox::backdrop { background: transparent; }
+.site-announcement-inbox--mobile::backdrop { background: #0004; }
+.site-announcement-inbox-frame { display: flex; flex-direction: column; max-height: inherit; }
+.site-announcement-inbox-header {
+  display: flex; flex: none; align-items: center; gap: 8px; padding: 8px 10px 8px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.site-announcement-inbox-count {
+  color: var(--text-secondary); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.site-announcement-inbox-action {
+  display: inline-flex; min-height: 36px; flex: none; align-items: center; gap: 5px; padding: 0 7px;
+  border-radius: 8px; color: var(--text-primary); font-size: 12px; white-space: nowrap;
+}
+.site-announcement-inbox-action:disabled { color: var(--text-tertiary); opacity: .65; }
+.site-announcement-inbox-action:not(:disabled):hover, .site-announcement-inbox-row:hover { background: var(--surface-muted); }
+.site-announcement-bell:focus-visible, .site-announcement-inbox button:focus-visible {
+  outline: 2px solid var(--text-primary); outline-offset: -2px;
+}
+.site-announcement-inbox-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.site-announcement-inbox-list { padding: 5px; }
+.site-announcement-inbox-list:empty { display: none; }
+.site-announcement-inbox-list li + li { border-top: 1px solid var(--border-subtle); }
+.site-announcement-inbox-row {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 62px; padding: 10px 9px;
+  border-radius: 9px; text-align: left; font-size: 13px;
+}
+.site-announcement-inbox-row:not([data-unread]) .site-announcement-inbox-row-dot { visibility: hidden; }
+.site-announcement-inbox-new {
+  border-radius: 4px; padding: 1px 5px; background: var(--surface-muted); color: var(--text-primary);
+  font-size: 9px; font-weight: 700; line-height: 1.5; letter-spacing: .04em;
+}
+.site-announcement-inbox-row:hover .site-announcement-inbox-new { background: var(--surface-default); }
+.site-announcement-inbox-empty { padding: 28px 12px; color: var(--text-secondary); text-align: center; font-size: 13px; }
+.site-announcement-inbox-detail { padding: 16px 18px 20px; }
+.site-announcement-inbox-error { flex: none; padding: 8px 14px; color: var(--text-primary); background: var(--surface-muted); font-size: 12px; }
+@media (max-width: 639px) {
+  .site-announcement-inbox { left: 12px; right: 12px; width: auto; }
+  .site-announcement-inbox-action { min-height: 44px; }
+}

@@ -12,6 +12,7 @@ import { novelImportApi } from '../../src/features/studio/import-api'
 
 vi.mock('../../src/features/feedback/components/FeedbackDialog', () => ({ default: () => null }))
 vi.mock('../../src/features/studio/components/StudioMoreMenu', () => ({ default: () => null }))
+vi.mock('../../src/features/site-content/AnnouncementBell', () => ({ default: () => null }))
 vi.mock('../../src/features/studio/agent/components/AgentOperationsCenter', () => ({ default: () => null }))
 vi.mock('../../src/features/account/CustomModelSettingsDialog', () => ({ CustomModelSettingsContent: () => null }))
 vi.mock('../../src/features/account/InviteCreditsDialog', () => ({ default: () => null }))

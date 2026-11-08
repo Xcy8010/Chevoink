@@ -37,6 +37,26 @@ const announcementFields = {
 export const announcementSchema = z.object(announcementFields).refine(value => value.startsAt === null || value.endsAt === null || Date.parse(value.endsAt) > Date.parse(value.startsAt), '结束时间必须晚于开始时间')
 export const publishedAnnouncementSchema = z.object({...announcementFields, startsAt:z.iso.datetime()}).refine(value => value.endsAt === null || Date.parse(value.endsAt) > Date.parse(value.startsAt), '结束时间必须晚于实际发布时间')
 export type PublishedAnnouncement = z.infer<typeof publishedAnnouncementSchema>
+
+export type AnnouncementNotification = {
+  id: string
+  versionId: string
+  contentVersion: number
+  title: string
+  body: string
+  publishedAt: string
+  unread: boolean
+}
+export type AnnouncementInbox = {
+  viewerId: string | null
+  serverNow: string
+  nextBoundaryAt: string | null
+  items: AnnouncementNotification[]
+}
+export type ReadAnnouncementsRequest =
+  | { viewerId: string; action: 'one'; versionId: string }
+  | { viewerId: string; action: 'all' }
+export type ReadAnnouncementsResult = { readVersionIds: string[] }
 export const legalDocumentSchema = z.object({ title: z.string().trim().min(1).max(160), body: text.min(1), effectiveAt: z.iso.datetime() })
 export const contentDraftSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('announcement'), key: z.string().regex(/^[a-z0-9-]+$/).max(80), payload: announcementSchema }),

@@ -1,5 +1,6 @@
 import { defaultSiteSettings, effectiveSiteSettings } from '@/features/site-content/defaults'
 import { usePublicSiteContent } from '@/features/site-content/public-api'
+import AnnouncementBell from '@/features/site-content/AnnouncementBell'
 import SiteSupportLink from '@/features/site-content/SiteSupportLink'
 import { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode, UIEvent, useEffect, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
@@ -725,6 +726,7 @@ export default function AppShell({ title, description, children }: AppShellProps
                   </nav>
 
                   <div className="ml-auto flex items-center gap-1 md:gap-2">
+                    {!isStudioRoute && !isReaderRoute && <AnnouncementBell placement="site" />}
                     <Button
                       onClick={toggleTheme}
                       variant="ghost"

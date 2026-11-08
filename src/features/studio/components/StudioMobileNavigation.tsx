@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
+import AnnouncementBell from '@/features/site-content/AnnouncementBell'
 
 type Props = { open: boolean; onClose: () => void; novelSwitcher?: ReactNode; children: ReactNode }
 const focusableSelector = 'button:not(:disabled), summary, a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
@@ -48,6 +49,7 @@ export default function StudioMobileNavigation({ open, onClose, novelSwitcher, c
       if (!contains(event.target as Node)) (inviteDialog()?.querySelector<HTMLElement>(focusableSelector) ?? firstControl()).focus({ preventScroll: true })
     }
     const keydown = (event: KeyboardEvent) => {
+      if (panel.querySelector('dialog[open][data-announcement-inbox]')) return
       if (event.key === 'Escape') {
         // The switcher's own Escape handler dismisses its nested menu first.
         if (novelMenu() || inviteDialog()) return
@@ -89,7 +91,10 @@ export default function StudioMobileNavigation({ open, onClose, novelSwitcher, c
       <div ref={panelRef} id="studio-mobile-navigation" role="dialog" aria-modal="true" aria-label="创作区导航" tabIndex={-1} className="studio-mobile-drawer absolute inset-y-0 left-0 flex w-[min(330px,calc(100%_-_44px))] max-w-full flex-col overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--app-bg)] pb-[max(12px,var(--safe-bottom,0px))] pl-[var(--safe-left,0px)] pr-[var(--safe-right,0px)] pt-[var(--safe-top,0px)] text-[var(--text-primary)] shadow-xl">
         <header className="flex min-h-14 shrink-0 items-center justify-between gap-2 px-4">
           <h2 className="flex items-center gap-2 text-sm font-semibold"><img src="/chevoink-agent.png" alt="" className="h-6 w-6 object-contain" />Chevoink</h2>
-          <button type="button" aria-label="关闭创作区导航" onClick={onClose} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none"><X className="h-5 w-5" /></button>
+          <div className="flex shrink-0 items-center gap-1">
+            <button type="button" aria-label="关闭创作区导航" onClick={onClose} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none"><X className="h-5 w-5" /></button>
+            <AnnouncementBell placement="studio-mobile" />
+          </div>
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain [&_button]:min-h-11">
           {novelSwitcher ? <div className="px-4 pb-3">{novelSwitcher}</div> : null}

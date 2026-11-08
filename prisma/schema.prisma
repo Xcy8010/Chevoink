@@ -341,6 +341,7 @@ enum PrivacyLevel {
 model User {
   testerEntitlement TesterEntitlement?
   legalConsents UserLegalConsent[]
+  announcementReads SiteAnnouncementRead[]
   modelAssignments AgentModelAssignment[]
   novelImportJobs NovelImportJob[]
   novelImportIntents NovelImportIntent[]
@@ -3420,10 +3421,22 @@ model SiteContentVersion {
   effectiveAt    DateTime? @map("effective_at")
   content        SiteContent @relation(fields: [contentId], references: [id], onDelete: Restrict)
   consents       UserLegalConsent[]
+  announcementReads SiteAnnouncementRead[]
   @@unique([contentId, contentVersion])
   @@index([effectiveAt])
   @@map("site_content_versions")
 }
+model SiteAnnouncementRead {
+  userId    String @map("user_id") @db.VarChar(64)
+  versionId String @map("version_id") @db.VarChar(64)
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  version   SiteContentVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, versionId])
+  @@index([versionId])
+  @@map("site_announcement_reads")
+}
+
 model UserLegalConsent {
   id            String @id @default(cuid()) @db.VarChar(64)
   userId        String @map("user_id") @db.VarChar(64)

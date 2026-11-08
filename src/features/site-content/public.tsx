@@ -4,10 +4,12 @@ import { ChevronLeft, ChevronRight, Megaphone, X } from 'lucide-react'
 import type { PublicSiteContent } from '../../../shared/contracts/site-content'
 import './announcements.css'
 import { dismissalIsActive, dismissalKey, usePublicSiteContent } from './public-api'
+import { useAnnouncementInbox } from './announcement-inbox-api'
 
-function readDismissals(storage: Storage): Record<string, number> {
-  try { const value: unknown=JSON.parse(storage.getItem('site-announcement-dismissals') ?? '{}'); return value && typeof value==='object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).filter((entry): entry is [string,number]=>typeof entry[1]==='number')) : {} } catch { return {} }
+function readDismissals(storage: Storage, key = 'site-announcement-dismissals'): Record<string, number> {
+  try { const value: unknown=JSON.parse(storage.getItem(key) ?? '{}'); return value && typeof value==='object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).filter((entry): entry is [string,number]=>typeof entry[1]==='number')) : {} } catch { return {} }
 }
+const studioDockSuppressionKey = 'studio-announcement-dock-suppressed'
 type PublicAnnouncement=PublicSiteContent['announcements'][number]
 function AnnouncementDialog({item,index,total,onClose,onDismiss,onPrevious,onNext,returnFocus,id,scope}:{scope:'home'|'studio';item:PublicAnnouncement;index:number;total:number;onClose:()=>void;onDismiss:()=>void;onPrevious:()=>void;onNext:()=>void;returnFocus:HTMLElement|null;id:string}) {
   const dialog=useRef<HTMLDialogElement>(null)
@@ -41,7 +43,9 @@ function AnnouncementDialog({item,index,total,onClose,onDismiss,onPrevious,onNex
 }
 export function SiteAnnouncements({scope}:{scope:'home'|'studio'}) {
   const query=usePublicSiteContent()
+  const { query: inbox, read, viewerId } = useAnnouncementInbox(scope === 'studio')
   const [dismissed,setDismissed]=useState<Record<string,number>>({})
+  const [dockSuppressed, setDockSuppressed] = useState(() => scope === 'studio' ? readDismissals(sessionStorage, studioDockSuppressionKey) : {})
   const [openedKey,setOpenedKey]=useState<string|null>(null)
   const origin=useRef<HTMLElement|null>(null)
   const dialogId=useId()
@@ -51,28 +55,50 @@ export function SiteAnnouncements({scope}:{scope:'home'|'studio'}) {
   const items=data.announcements.filter(item=>{
     const key=dismissalKey(item.id,item.contentVersion)
     const stored=readDismissals(item.dismissal.mode==='session' ? sessionStorage : localStorage)
-    return (item.scope===scope || item.scope==='both') && now >= Date.parse(item.startsAt) && (item.endsAt === null || now < Date.parse(item.endsAt)) && !dismissalIsActive(dismissed[key] ?? stored[key],item.dismissal,now)
+    return !(key in dockSuppressed) && (item.scope===scope || item.scope==='both') && now >= Date.parse(item.startsAt) && (item.endsAt === null || now < Date.parse(item.endsAt)) && !dismissalIsActive(dismissed[key] ?? stored[key],item.dismissal,now)
   })
-  if(!items.length)return null
-  const first=items[0],index=items.findIndex(item=>dismissalKey(item.id,item.contentVersion)===openedKey),active=index<0?null:items[index]
-  function dismiss(item:PublicAnnouncement) {
+  if (!items.length) return null
+  const unread = new Map((inbox.data?.items ?? []).filter(item => item.unread).map(item => [dismissalKey(item.id, item.contentVersion), item.versionId]))
+  const eligible = new Map(items.map(item => [dismissalKey(item.id, item.contentVersion), item]))
+  const newestUnread = scope === 'studio' ? [...unread.keys()].find(key => eligible.has(key)) : undefined
+  const first = (newestUnread && eligible.get(newestUnread)) || items[0]
+  const index = items.findIndex(item => dismissalKey(item.id, item.contentVersion) === openedKey)
+  const active = index < 0 ? null : items[index]
+
+  function openItem(item: PublicAnnouncement) {
+    const key = dismissalKey(item.id, item.contentVersion)
+    setOpenedKey(key)
+    const versionId = unread.get(key)
+    if (viewerId && versionId) read.mutate({ viewerId, action: 'one', versionId })
+  }
+  function dismiss(item:PublicAnnouncement, collapseDock = false) {
     const key=dismissalKey(item.id,item.contentVersion)
     const storage=item.dismissal.mode==='session' ? sessionStorage : localStorage
     const entries={...readDismissals(storage),[key]:now}
     try { storage.setItem('site-announcement-dismissals',JSON.stringify(Object.fromEntries(Object.entries(entries).sort((a,b)=>b[1]-a[1]).slice(0,100)))) } catch { /* The current view still dismisses when browser storage is unavailable. */ }
     setDismissed(current=>({...current,[key]:now}))
-    if(openedKey===key){const next=items.find(candidate=>dismissalKey(candidate.id,candidate.contentVersion)!==key);setOpenedKey(next?dismissalKey(next.id,next.contentVersion):null)}
+    if (collapseDock) {
+      // Dismiss the card once. Other items in this batch remain in the bell inbox.
+      const suppressed = { ...dockSuppressed }
+      for (const candidateKey of eligible.keys()) if (candidateKey !== key) suppressed[candidateKey] = now
+      setDockSuppressed(suppressed)
+      try { sessionStorage.setItem(studioDockSuppressionKey, JSON.stringify(suppressed)) } catch { /* In-memory suppression still applies. */ }
+      setOpenedKey(null)
+    } else if (openedKey === key) {
+      const next = items.find(candidate => dismissalKey(candidate.id, candidate.contentVersion) !== key)
+      setOpenedKey(next ? dismissalKey(next.id, next.contentVersion) : null)
+    }
   }
   return <div aria-label="站点公告" className={scope==='studio'?'site-announcements-studio':'site-announcements-home'}>
     <aside className={'site-announcement-card '+(scope==='studio'?'site-announcement-dock':'site-announcement-banner')}>
-      <button type="button" aria-label={'打开公告：'+first.title} aria-haspopup="dialog" aria-expanded={Boolean(active)} aria-controls={dialogId} className="site-announcement-open" onClick={event=>{origin.current=event.currentTarget;setOpenedKey(dismissalKey(first.id,first.contentVersion))}}>
+      <button type="button" aria-label={'打开公告：'+first.title} aria-haspopup="dialog" aria-expanded={Boolean(active)} aria-controls={dialogId} className="site-announcement-open" onClick={event=>{origin.current=event.currentTarget;openItem(first)}}>
         <Megaphone aria-hidden="true" size={16} className="shrink-0 text-[var(--text-secondary)]"/>
         <span className="min-w-0 flex-1 text-left"><span className="block truncate text-sm font-medium">{first.title}</span>{scope==='home'?<span className="block truncate text-xs text-[var(--text-secondary)]">{first.body}</span>:null}</span>
         {items.length>1?<span className="shrink-0 text-xs text-[var(--text-secondary)]">{items.length}条</span>:null}<ChevronRight aria-hidden="true" size={16} className="shrink-0 text-[var(--text-secondary)]"/>
       </button>
-      <button type="button" aria-label={'关闭公告：'+first.title} onClick={()=>dismiss(first)} className="site-announcement-dismiss"><X aria-hidden="true" size={16}/></button>
+      <button type="button" aria-label={'关闭公告：'+first.title} onClick={()=>dismiss(first, scope === 'studio')} className="site-announcement-dismiss"><X aria-hidden="true" size={16}/></button>
     </aside>
-    {active?<AnnouncementDialog scope={scope} item={active} index={index} total={items.length} id={dialogId} returnFocus={origin.current} onClose={()=>setOpenedKey(null)} onDismiss={()=>dismiss(active)} onPrevious={()=>setOpenedKey(dismissalKey(items[index-1].id,items[index-1].contentVersion))} onNext={()=>setOpenedKey(dismissalKey(items[index+1].id,items[index+1].contentVersion))}/>:null}
+    {active?<AnnouncementDialog scope={scope} item={active} index={index} total={items.length} id={dialogId} returnFocus={origin.current} onClose={()=>setOpenedKey(null)} onDismiss={()=>dismiss(active)} onPrevious={()=>openItem(items[index-1])} onNext={()=>openItem(items[index+1])}/>:null}
   </div>
 }
 export function SiteInformation() {

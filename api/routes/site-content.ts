@@ -1,4 +1,6 @@
 import { Router } from 'express'
+import { getSessionUserId, requireSessionUserId } from '../lib/auth-session.js'
+import { markAnnouncementsRead, readAnnouncementInbox } from '../lib/site-announcement-inbox.js'
 import { z } from 'zod'
 import { contentDraftSchema } from '../../shared/contracts/site-content.js'
 import { requireAdmin, getRequestIp } from '../lib/admin-auth.js'
@@ -12,6 +14,28 @@ publicSiteContentRouter.get('/', async (_req,res) => {
   const requestId = createRequestId()
   try { res.json(buildSuccess(requestId,await readPublicSiteContent())) } catch(error) { sendRouteError(res,requestId,error) }
 })
+publicSiteContentRouter.get('/announcements', async (req, res) => {
+  const requestId = createRequestId()
+  try {
+    const viewerId = getSessionUserId(req)
+    res.json(buildSuccess(requestId, await readAnnouncementInbox(viewerId)))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
+
+const idSchema = z.string().min(1).max(64)
+const readAnnouncementsSchema = z.discriminatedUnion('action', [
+  z.strictObject({ action: z.literal('one'), viewerId: idSchema, versionId: idSchema }),
+  z.strictObject({ action: z.literal('all'), viewerId: idSchema }),
+])
+publicSiteContentRouter.post('/announcements/read', async (req, res) => {
+  const requestId = createRequestId()
+  try {
+    const userId = requireSessionUserId(req)
+    const input = parseBody(readAnnouncementsSchema, req.body, '请选择要标记已读的公告。')
+    res.json(buildSuccess(requestId, await markAnnouncementsRead(userId, input)))
+  } catch (error) { sendRouteError(res, requestId, error) }
+})
+
 const router = Router()
 router.get('/',async(req,res)=>{
   const requestId = createRequestId()
