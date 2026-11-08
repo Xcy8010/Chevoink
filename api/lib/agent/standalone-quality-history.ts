@@ -31,5 +31,5 @@ export async function readStandalonePriorQualityJudgment(db: Prisma.TransactionC
 
 export type StandalonePriorQualityJudgment = Awaited<ReturnType<typeof readStandalonePriorQualityJudgment>>
 export function renderStandalonePriorQualityJudgment(judgment: StandalonePriorQualityJudgment): string {
-  return judgment ? `${REVIEW_REASSESSMENT_RULE}\n同任务独立旧版质量判断（仅历史意见；处置不是当前复检；未保存的旧版全文保持未知）：${JSON.stringify(judgment)}` : ''
+  return judgment ? `${REVIEW_REASSESSMENT_RULE}\n这是修订复核。先检验仍会影响交付的旧问题，再核对可确认的改动与相邻段落；保留有用的节奏与声口。只有当前证据显示实质影响时才补报，审美建议留作参考。\n同任务独立旧版质量判断（仅历史意见；处置不是当前复检；未保存的旧版全文保持未知）：${JSON.stringify(judgment)}` : ''
 }

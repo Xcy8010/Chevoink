@@ -75,18 +75,16 @@ import { projectOutgoingMessages, useOutgoingMessages } from '../outgoing-messag
 import { ProcessDuration } from './ProcessDuration'
 import { isRunActive, readSessionMessagesCache, restoreActiveRunHistory, failSessionHistoryHydration, useAgentStore, type ComposerReference } from '../agentStore'
 import { selectAgentActivityRunActive, selectAgentGoalView, selectAgentPanelPhase } from '../goal-selectors'
-import { useMessageBlockExpansion } from './use-message-block-expansion'
 import { buildGoalResumeModel } from '../goal-command'
-import { isAssistantMessageStreaming, formatSessionTime, getMessageText, phaseLabel, shouldKeepLiveSessionMessages, skillPhaseLabel } from '../lib/panel-helpers'
+import { formatSessionTime, getMessageText, phaseLabel, shouldKeepLiveSessionMessages, skillPhaseLabel } from '../lib/panel-helpers'
 import { useProcessingHint } from '../useProcessingHint'
 import { useAgentStream } from '../useAgentStream'
 import { resolveComposerModelEffort, useAgentModelPreference } from '../useAgentModelPreference'
 import { useAgentGoalStream } from '../useAgentGoalStream'
 import { useGoalBarVisibility } from '../useGoalBarVisibility'
 import { openGoalEntry } from '../goal-entry'
-import { projectBlockTimings, projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
-import { projectAnalysisGroups } from '../lib/process-groups'
-import { projectResearchGroups } from '../lib/research-groups'
+import { projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
+import { projectActivityGroups } from '../lib/activity-groups'
 import { useMessageScroll } from './use-message-scroll'
 import { useComposerInset } from './use-composer-inset'
 import { useRunControls } from './use-run-controls'
@@ -97,8 +95,7 @@ import { AgentComposer } from './AgentComposer'
 import { AgentGoalBar } from './AgentGoalBar'
 import { GoalEditorDialog, type GoalEditBase } from './GoalEditorDialog'
 import { AgentQueueTray } from './AgentQueueTray'
-import { AgentMessageParts } from './AgentMessageParts'
-import { AgentProcessRegion } from './AgentProcessRegion'
+import { AuthorActivityParts } from './AuthorActivityParts'
 import { AgentPermissionCard } from './AgentPermissionCard'
 import { AgentQuestionCard } from './AgentQuestionCard'
 import { ProcessingHint } from './ProcessingHint'
@@ -122,6 +119,7 @@ type AgentPanelProps = {
   initializingNovel?: boolean
   emptyStateSeed?: string
   chapterId?: EntityId | null
+  activityChapterTitles?: ReadonlyMap<string, string>
   selection?: { text: string; start?: number; end?: number } | null
   ensureSession: () => Promise<EntityId>
   /** SSE 事件透传：宿主据此同步章节树/编辑器等工作区状态 */
@@ -186,6 +184,7 @@ export function AgentPanel({
   initializingNovel = false,
   emptyStateSeed,
   chapterId,
+  activityChapterTitles,
   selection,
   ensureSession,
   onStreamEvent,
@@ -239,18 +238,9 @@ export function AgentPanel({
   const hasOutgoing = messages.some(message => message.delivery)
   const deliveryErrorRef = useRef<{ clientRequestId: string; scope: string; sessionId: string | null; message: string } | null>(null)
   const { recentConversationText, blockInfoById, lastAssistantId } = useMemo(() => projectMessages(messages), [messages])
-  const analysisGroups = useMemo(() => projectAnalysisGroups(messages, isRunActive(phase) ? messages.at(-1)?.id : undefined), [messages, phase])
-  const researchGroups = useMemo(() => projectResearchGroups(messages), [messages])
-  // 正文已定稿的消息 id：定稿后不再画流式光标（等答题/审批/工具执行期间光标不应常闪）
-  const finalizedTextIds = useAgentStore((state) => state.finalizedTextIds)
+  const activityGroups = useMemo(() => projectActivityGroups(messages), [messages])
   const textRevealTargets = useAgentStore(state => state.textRevealTargets)
   const finishTextReveal = useAgentStore(state => state.finishTextReveal)
-  const motionAfterSeq = useAgentStore(state => state.motionAfterSeq)
-  const liveToolCallIds = useAgentStore(state => state.liveToolCallIds)
-  const settlingBlocks = useMemo(() => new Set(Object.keys(textRevealTargets).flatMap(id => {
-    const block = blockInfoById.get(id)
-    return block ? [block.firstId] : []
-  })), [textRevealTargets, blockInfoById])
   const pendingApproval = useAgentStore((state) => state.pendingApproval)
   const pendingQuestion = useAgentStore((state) => state.pendingQuestion)
   const usage = useAgentStore((state) => state.usage)
@@ -522,10 +512,10 @@ export function AgentPanel({
   const goalBar = useGoalBarVisibility(userId, sessionId, goalView.goal)
   const panelPhase = selectAgentPanelPhase(goalView, phase)
   const active = isRunActive(panelPhase)
-  const blockTimings = useMemo(() => projectBlockTimings(messages, blockInfoById, active ? runId : null), [messages, blockInfoById, active, runId])
-  const lastAnalysisMessage = messages.at(-1)
-  const activeAnalysisGroupId = active && lastAnalysisMessage?.role === 'assistant' && lastAnalysisMessage.parts.at(-1)?.type === 'reasoning'
-    ? analysisGroups.get(lastAnalysisMessage.id)?.get(lastAnalysisMessage.parts.length - 1)?.id : undefined
+  const currentActivity = active && runId ? activityGroups.runningByRun.get(runId) : undefined
+  const latestMessage = messages.at(-1)
+  const thinking = panelPhase === 'running' && latestMessage?.runId === runId && latestMessage.role === 'assistant'
+    && latestMessage.parts.at(-1)?.type === 'reasoning'
   const activityRunActive = selectAgentActivityRunActive(goalView, phase)
   const creditSummaryQuery = useQuery({
     queryKey: ['credits', 'summary'],
@@ -884,10 +874,6 @@ export function AgentPanel({
     void copyInviteLink()
   }, [copyInviteLink, inviteDialogOpen, referralQuery.data?.inviteUrl])
 
-
-  const { isExpanded: isBlockExpanded, toggle: handleToggleBlockSummary } = useMessageBlockExpansion({
-    sessionId, messages, blocks: blockInfoById, goalView, phase: panelPhase, runId: runId ?? resumeableRunId,
-  })
 
   useEffect(
     () => () => {
@@ -1703,46 +1689,27 @@ export function AgentPanel({
               }
 
               const block = blockInfoById.get(message.id)
-              const isBlockFirst = block?.firstId === message.id
               const isBlockLast = block?.lastId === message.id
-              const blockExpanded = isBlockExpanded(block, message.runId)
-              // 仅当前 run 的消息视为活跃：新任务开始时历史块保持折叠，不会被全局 active 连带展开
               const messageRunActive = active && message.runId === runId
-              const settling = Boolean(block && settlingBlocks.has(block.firstId))
-              const blockCollapsed = !messageRunActive && !blockExpanded && !settling
-              const hasTextPart = message.parts.some((part) => part.type === 'text')
-              // 折叠态下块内非最后一条的过程正文会折进摘要行（与传给 AgentMessageParts 的口径一致）
-              const textCollapsible = !isBlockLast && (block?.ops ?? 0) > 0
-              // 保留过程节点完成退出动画，再移除不再贡献内容的消息外壳。
+              const messageActivities = activityGroups.byMessage.get(message.id)
+              const hasActivity = messageActivities && [...messageActivities.values()].some(group => group.messageId === message.id)
+              if (!hasActivity && !getMessageText(message.parts, message.role)) return null
 
               return (
-                <AgentProcessRegion
+                <div
                   key={JSON.stringify([novelId, sessionId, voiceScopeKey ?? null, message.id])}
-                  open={!blockCollapsed || Boolean(isBlockFirst) || hasTextPart && !textCollapsible}
                   id={`agent-message-${message.id}`}
-                  // 正在流式的消息不加 content-visibility，避免高度估算干扰自动滚底
-                  className={cn('group/reply min-w-0', message.id !== lastAssistantId && 'agent-msg-cv')}
+                  className={cn('group/reply min-w-0', message.id !== lastAssistantId && !messageRunActive && 'agent-msg-cv')}
                 >
-                  <AgentMessageParts
+                  <AuthorActivityParts
                     parts={message.parts}
-                    researchGroups={researchGroups.get(message.id)}
-                    analysisGroups={analysisGroups.get(message.id)}
-                    activeAnalysisGroupId={activeAnalysisGroupId}
+                    groups={messageActivities}
+                    activeGroupId={currentActivity?.id}
                     messageId={message.id}
                     revealText={textRevealTargets[message.id]}
                     onTextRevealed={finishTextReveal}
-                    liveToolCallIds={liveToolCallIds}
-                    settling={settling}
-                    animateLive={message.runId === runId && motionAfterSeq !== null && (messageRunActive || settling)}
-                    streaming={isAssistantMessageStreaming(message, runId, lastAssistantId, active, finalizedTextIds)}
                     runActive={messageRunActive}
-                    blockId={block?.firstId}
-                    summaryCount={isBlockFirst ? block?.ops : undefined}
-                    summaryTiming={isBlockFirst && block ? blockTimings.get(block.firstId) : undefined}
-                    summaryExpanded={blockExpanded}
-                    onToggleSummary={handleToggleBlockSummary}
-                    // 折叠态下过程进展正文一并收进耗时摘要，只留块内最后一条（结尾总结）的正文
-                    textCollapsible={textCollapsible}
+                    activityChapterTitles={activityChapterTitles}
                   />
                   {/* Only confirmed completed replies expose copy and branch actions. */}
                   {isBlockLast && !messageRunActive && message.completedAt && getMessageText(message.parts, message.role) ? (
@@ -1776,7 +1743,7 @@ export function AgentPanel({
                       <MessageTime value={message.completedAt} label="完成时间" className="ml-2 opacity-0 transition-opacity group-hover/reply:opacity-100 group-focus-within/reply:opacity-100 mobile:opacity-100" />
                     </div>
                   ) : null}
-                </AgentProcessRegion>
+                </div>
               )
             })}
             {/* 分支副本尚无新对话：底部分隔线提示可从此继续聊，一发新消息就消失 */}
@@ -1791,7 +1758,8 @@ export function AgentPanel({
               </div>
             ) : null}
             {waitingRequest?.requestTiming ? <ProcessDuration timing={waitingRequest.requestTiming} /> : null}
-            {activityRunActive ? <ProcessingHint visible={awaiting && !preparingRequest} /> : null}
+            {activityRunActive ? <ProcessingHint visible={!currentActivity && (awaiting || thinking)
+              && !preparingRequest && !pendingApproval && !pendingQuestion} /> : null}
             {pendingApproval ? (
               <AgentPermissionCard approval={pendingApproval} onResolve={handleResolveApproval} />
             ) : null}

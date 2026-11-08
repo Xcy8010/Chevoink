@@ -1,3 +1,5 @@
+import type { TaskSpec } from '../../../shared/contracts/index.js'
+import { hasOriginalRepairAuthority } from './original-request.js'
 import { createHash } from 'node:crypto'
 
 type RepairFinding = { severity: string; startOffset: number; endOffset: number; disposition?: string; authorFeedback?: string | null }
@@ -41,6 +43,16 @@ export function selectAutomaticQualityFindings<T extends RepairFinding>(findings
     if (selected.length === 8) break
   }
   return selected
+}
+
+export function standaloneAdviceReportOnly(scope: TaskSpec['scope'] | undefined, authorRequest: string | null): boolean {
+  return scope?.agentWritingProtocol === 1 && !scope.agentWritingBinding && !hasOriginalRepairAuthority(authorRequest)
+}
+
+/** A report can retain suggestions without requiring their application. */
+export function pendingQualityDecisions<T extends RepairFinding>(findings: readonly T[], adviceOnly: boolean): T[] {
+  return findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected'
+    && (!adviceOnly || finding.severity !== 'advisory'))
 }
 
 /** 检查报告缓存不等于已执行修订；失败/已尝试/已改文的报告均不得重新派发。 */

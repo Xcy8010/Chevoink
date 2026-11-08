@@ -38,7 +38,7 @@ import { AgentProcessRegion } from './AgentProcessRegion'
 import { useStreamingTextState } from '../../components/use-streaming-text'
 import { useAgentStore } from '../agentStore'
 import { projectAgentAuthorParts, projectAgentAuthorText } from '../../../../../shared/agent-author-view.js'
-import { describeToolArguments, getToolTargetTitle } from '../tool-argument-view'
+import { describeToolArguments, getMemorySpotlight, getToolTargetTitle } from '../tool-argument-view'
 import { getAgentToolPresentation } from '../../../../../shared/agent-tool-presentation'
 import { projectedReviewAction, type ReviewOutcome } from '../../../../../shared/review-lifecycle.js'
 import { normalizeAgentProgressText } from '../../../../../shared/agent-progress.js'
@@ -133,9 +133,11 @@ function computeLineDiff(before: string, after: string): DiffLine[] | null {
 function DiffCard({
   display,
   onNavigateTarget,
+  authorActivity = false,
 }: {
   display: Extract<AgentToolDisplayPayload, { kind: 'chapterDiff' }>
   onNavigateTarget?: () => void
+  authorActivity?: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
   const diffLines = useMemo(
@@ -151,7 +153,7 @@ function DiffCard({
         <button
           type="button"
           onClick={() => setExpanded((value) => !value)}
-          aria-label={expanded ? '收起章节变更' : '展开章节变更'}
+          aria-label={expanded ? '收起章节变更' : authorActivity ? '查看修改' : '展开章节变更'}
           className="absolute inset-0 z-0"
         />
         {onNavigateTarget ? (
@@ -175,7 +177,8 @@ function DiffCard({
           <span className={cn(addedChars >= 0 ? 'text-emerald-600' : 'text-rose-500')}>
             {addedChars === 0 ? display.before === display.after ? '正文未变化' : '等长修改' : `${addedChars >= 0 ? '+' : ''}${addedChars} 字`}
           </span>
-          {display.appliedDirectly && display.before !== display.after ? <span>已写入</span> : null}
+          {authorActivity ? <span>{expanded ? '收起修改' : '查看修改'}</span>
+            : display.appliedDirectly && display.before !== display.after ? <span>已写入</span> : null}
           <span className="relative inline-flex h-4 w-4 items-center justify-center">
             <FileText className={cn('h-3.5 w-3.5 transition-opacity', !expanded && 'group-hover:opacity-0')} />
             <ChevronDown className={cn('absolute h-3.5 w-3.5 transition-[opacity,transform]', expanded ? 'rotate-180 opacity-100' : 'opacity-0 group-hover:opacity-100')} />
@@ -243,7 +246,7 @@ const storyCompilerPhaseLabel = {
   charter: '创作宪章', prepare: '准备', beat: '场景', write: '写作', check: '检查', repair: '修补', commit: '提交',
 } as const
 
-function StoryCompilerCard({ display }: { display: Extract<AgentToolDisplayPayload, { kind: 'storyCompiler' }> }) {
+function StoryCompilerCard({ display, authorActivity = false }: { display: Extract<AgentToolDisplayPayload, { kind: 'storyCompiler' }>; authorActivity?: boolean }) {
   const [expanded, setExpanded] = useState(false)
   const detailsId = useId()
   const hasProblems = (display.errorCount ?? 0) > 0 || (display.warningCount ?? 0) > 0
@@ -255,10 +258,10 @@ function StoryCompilerCard({ display }: { display: Extract<AgentToolDisplayPaylo
           <Brain className={cn('h-3.5 w-3.5 transition-opacity', display.items.length > 0 && !expanded && 'group-hover:opacity-0')} />
           {display.items.length > 0 ? <ChevronDown className={cn('absolute h-3.5 w-3.5 transition-[opacity,transform]', expanded ? 'rotate-180 opacity-100' : 'opacity-0 group-hover:opacity-100')} /> : null}
         </span>
-        <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-secondary)]">{storyCompilerPhaseLabel[display.phase]} · {projectAgentAuthorText(display.detail)}</span>
+        <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-secondary)]">{authorActivity ? '查看章节检查详情' : `${storyCompilerPhaseLabel[display.phase]} · ${projectAgentAuthorText(display.detail)}`}</span>
         {hasProblems ? (
           <span className={cn('shrink-0 text-[11px]', (display.errorCount ?? 0) > 0 ? 'text-rose-500' : 'text-amber-500')}>
-            {(display.errorCount ?? 0) > 0 ? `${display.errorCount} 错误` : `${display.warningCount} 警告`}
+            {(display.errorCount ?? 0) > 0 ? `${display.errorCount} ${authorActivity ? '处待核对' : '错误'}` : `${display.warningCount} ${authorActivity ? '条建议' : '警告'}`}
           </span>
         ) : null}
       </button>
@@ -271,7 +274,7 @@ function StoryCompilerCard({ display }: { display: Extract<AgentToolDisplayPaylo
   )
 }
 
-function QualityReportCard({ display }: { display: Extract<AgentToolDisplayPayload, { kind: 'qualityReport' }> }) {
+function QualityReportCard({ display, authorActivity = false }: { display: Extract<AgentToolDisplayPayload, { kind: 'qualityReport' }>; authorActivity?: boolean }) {
   const [expanded, setExpanded] = useState(false)
   const detailsId = useId()
   const repaired = display.findings.filter((finding) => finding.disposition === 'repaired').length
@@ -285,7 +288,7 @@ function QualityReportCard({ display }: { display: Extract<AgentToolDisplayPaylo
           <Wrench className={cn('h-3.5 w-3.5 transition-opacity', !expanded && 'group-hover:opacity-0')} />
           <ChevronDown className={cn('absolute h-3.5 w-3.5 transition-[opacity,transform]', expanded ? 'rotate-180 opacity-100' : 'opacity-0 group-hover:opacity-100')} />
         </span>
-        <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-secondary)]">质量报告 · r{display.chapterRevision} · {display.findings.length} 条证据</span>
+        <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-secondary)]">{authorActivity ? '查看复查报告' : `质量报告 · r${display.chapterRevision} · ${display.findings.length} 条证据`}</span>
         <span className={cn('shrink-0 text-[11px]', warnings > 0 ? 'text-amber-500' : 'text-emerald-600')}>
           {display.status === 'failed' || display.status === 'analyzing' ? '检查未完成' : display.status === 'stale' ? '旧版报告'
             : warnings > 0 ? `${warnings} 条需关注` : suggestions > 0 ? `检查完成 · ${suggestions} 条建议` : repaired > 0 ? `已应用 ${repaired} 处` : '检查完成'}
@@ -299,7 +302,7 @@ function QualityReportCard({ display }: { display: Extract<AgentToolDisplayPaylo
               <div key={finding.id} className="border-b border-[var(--border-subtle)] py-2 last:border-b-0">
                 <div className="flex items-center justify-between gap-2">
                   <span className={cn('text-[11px] font-medium', finding.severity === 'warning' || finding.severity === 'error' ? 'text-amber-600' : 'text-[var(--text-secondary)]')}>{finding.label}</span>
-                  <span className="text-[10px] text-[var(--text-secondary)]">{finding.disposition === 'repaired' ? '已自动修复' : '审美建议'}</span>
+                  <span className="text-[10px] text-[var(--text-secondary)]">{finding.disposition === 'repaired' ? '已修复' : finding.severity === 'advisory' ? '建议' : '待核对'}</span>
                 </div>
                 <blockquote className="mt-1 border-l-2 border-[var(--border-subtle)] pl-2 text-[11px] leading-5 text-[var(--text-primary)]">{finding.evidence}</blockquote>
                 <p className="mt-1 text-[11px] leading-5 text-[var(--text-secondary)]">{finding.explanation}</p>
@@ -726,22 +729,24 @@ function TaskOrchestrationCard({
   )
 }
 
-function ToolDisplayRenderer({
+export function ToolDisplayRenderer({
   display,
   onNavigateTarget,
+  authorActivity = false,
 }: {
   display: AgentToolDisplayPayload
   onNavigateTarget?: () => void
+  authorActivity?: boolean
 }) {
   switch (display.kind) {
     case 'chapterDiff':
-      return <DiffCard display={display} onNavigateTarget={onNavigateTarget} />
+      return <DiffCard display={display} onNavigateTarget={onNavigateTarget} authorActivity={authorActivity} />
     case 'plan':
       return <PlanCard display={display} />
     case 'storyCompiler':
-      return <StoryCompilerCard display={display} />
+      return <StoryCompilerCard display={display} authorActivity={authorActivity} />
     case 'qualityReport':
-      return <QualityReportCard display={display} />
+      return <QualityReportCard display={display} authorActivity={authorActivity} />
     case 'coverImages':
       return <CoverImagesCard display={display} />
     case 'webSearch':
@@ -842,7 +847,7 @@ function ToolDisplayRenderer({
       return (
         <div className="border-l-2 border-[var(--border-strong)] pl-3 text-[11px] leading-5 text-[var(--text-secondary)]">
           <p className="font-medium text-[var(--text-primary)]">
-            全书变更 · {display.selectedCount}/{display.patchCount} 项 · {display.status}
+            全书变更 · {display.selectedCount}/{display.patchCount} 项{authorActivity ? '' : ` · ${display.status}`}
           </p>
           <p>作品变更已同步到审查抽屉。</p>
         </div>
@@ -878,15 +883,6 @@ const WRITE_TOOL_NAMES = new Set([
   'novel_publish', 'novel_archive', 'novel_delete',
 ])
 const NAVIGABLE_TOOL_NAMES = new Set(['chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'plan_save', 'plan_rename'])
-
-/** 沉淀单张记忆卡的写工具：点击不展开参数，而是去记忆中心定位闪一下对应卡片 */
-function memorySpotlightType(toolName: string, args: unknown): string | null {
-  if (toolName === 'memory_event_save') return 'timelineEvent'
-  if (toolName === 'memory_relation_save') return 'relationshipState'
-  if (toolName !== 'memory_save') return null
-  const record = typeof args === 'object' && args !== null ? (args as Record<string, unknown>) : null
-  return typeof record?.memoryType === 'string' ? record.memoryType : null
-}
 
 /** 工具真实执行耗时：不足 1 秒的瞬时操作不展示，避免满屏无意义的 0.0s */
 function formatToolDuration(durationMs: number | undefined): string | null {
@@ -929,11 +925,9 @@ const ToolCallCard = memo(function ToolCallCard({
   // 联网搜索过程态：复用 tool.call args 里的 query，免新增事件类型
   const argsRecord = typeof part.args === 'object' && part.args !== null ? (part.args as Record<string, unknown>) : null
   // 记忆沉淀卡：去掉参数展开，点击整行去记忆中心看对应卡片
-  const spotlightType = part.status === 'success' ? memorySpotlightType(part.toolName, part.args) : null
-  const spotlightTitle = part.toolName === 'memory_relation_save' && typeof argsRecord?.fromName === 'string'
-    && typeof argsRecord.toName === 'string' && typeof argsRecord.relationType === 'string'
-    ? `${argsRecord.fromName}→${argsRecord.toName}:${argsRecord.relationType}`
-    : spotlightType && typeof argsRecord?.title === 'string' ? argsRecord.title : ''
+  const spotlight = part.status === 'success' ? getMemorySpotlight(part.toolName, part.args) : null
+  const spotlightType = spotlight?.type ?? null
+  const spotlightTitle = spotlight?.title ?? ''
   const rowExpandable = spotlightType === null && (expandable || collapsible)
   const webSearchQuery =
     part.toolName === 'web_search' && typeof argsRecord?.query === 'string' ? argsRecord.query : ''

@@ -30,7 +30,7 @@ export async function prepareCreativeReview(ctx: ToolContext, args: Args, phase:
   if (start >= end) throw new DataAccessError(422, 'CREATIVE_RANGE_INVALID', '批评或修订范围为空或超出当前正文。')
   const { catalog, routerVersion } = await resolveRuntimeSkillContext(ctx.userId, ctx.novelId, ctx.runId, ctx.transaction)
   const resources = args.skillIds.map(id => loadSkill(id, phase, args.creativeFreedom, catalog)).filter(Boolean).join('\n\n')
-  const localReview = phase === 'critique' && routerVersion === SKILL_ROUTER_VERSION
+  const localReview = phase === 'critique' && ['4.3.0', SKILL_ROUTER_VERSION].includes(routerVersion)
     && (start > 0 || end < chapter.content.length) ? `\n${LOCAL_FICTION_REVIEW_GUIDANCE}` : ''
   const source = chapter.content.slice(start, end)
   if (phase === 'critique') return creativeReviewWorkSchema.parse({ version: 1, phase, chapter, start, end,

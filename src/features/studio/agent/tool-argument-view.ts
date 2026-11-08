@@ -47,6 +47,19 @@ export function describeToolArguments(args: unknown): ToolArgumentRow[] {
   })
 }
 
+export function getMemorySpotlight(toolName: string, args: unknown): { type: string; title: string } | null {
+  const record = args as { memoryType?: unknown; title?: unknown; fromName?: unknown; toName?: unknown; relationType?: unknown } | null
+  const type = toolName === 'memory_event_save' ? 'timelineEvent'
+    : toolName === 'memory_relation_save' ? 'relationshipState'
+      : toolName === 'memory_save' && typeof record?.memoryType === 'string' ? record.memoryType : null
+  if (!type) return null
+  const title = toolName === 'memory_relation_save' && typeof record?.fromName === 'string'
+    && typeof record.toName === 'string' && typeof record.relationType === 'string'
+    ? `${record.fromName}→${record.toName}:${record.relationType}`
+    : typeof record?.title === 'string' ? record.title : ''
+  return { type, title }
+}
+
 export function getToolTargetTitle(display: AgentToolDisplayPayload | undefined, args: unknown): string | null {
   if (display?.kind === 'chapterDiff') return display.chapterTitle
   if (display?.kind === 'chapterRef') return display.title

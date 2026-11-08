@@ -322,12 +322,24 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     const result = await assembleContext(input)
     const text = result.messages.map(message => String(message.content)).join('\n\n')
 
-    expect(result.skillRoute?.selected).toEqual([])
+    expect(result.skillRoute?.selected.map(skill => skill.id)).toEqual(expect.arrayContaining([
+      'cn-webfiction-draft.v3', 'cn-character-voice.v3', 'cn-emotion-grounding.v3',
+    ]))
     expect(String(result.messages[0].content)).toContain(MANUSCRIPT_WRITING_CORE)
     expect(text.split(MANUSCRIPT_WRITING_CORE)).toHaveLength(2)
     expect(text).not.toContain('AI 痕迹规避')
     expect(text).not.toContain(LOCAL_FICTION_REVIEW_GUIDANCE)
     expect(String(result.messages.at(-1)?.content).startsWith(input.prompt)).toBe(true)
+  })
+
+  it('retains the frozen 4.3.0 unbound draft route while using the same writing core', async () => {
+    const input = interpretedInput('续写下一章，保持慢热。')
+    input.taskSpec = enableAgentWritingScope(input.taskSpec)
+    vi.mocked(prisma.$transaction).mockResolvedValueOnce(input.taskSpec)
+    vi.mocked(resolveRuntimeSkillContext).mockResolvedValueOnce({ catalog: skillCatalog, routerVersion: '4.3.0' })
+    const result = await assembleContext(input)
+    expect(result.skillRoute?.selected).toEqual([])
+    expect(String(result.messages[0].content)).toContain(MANUSCRIPT_WRITING_CORE)
   })
 
   it('injects one core and one shared skill boundary when draft resources are active', async () => {

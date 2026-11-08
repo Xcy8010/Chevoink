@@ -281,7 +281,7 @@ export const historicalBuiltinCatalog: AgentSkill[] = [
 ]
 
 export const BUILTIN_SKILL_PACK_VERSION = '4.0.1'
-export const SKILL_ROUTER_VERSION = '4.3.0'
+export const SKILL_ROUTER_VERSION = '4.4.0'
 const RELEASE_GUIDANCE = '本任务的完整原始作者要求与服务端冻结边界优先。局部修改先读取当前正文，再用唯一原文片段精确修订，不借整章覆盖扩大范围；定位不足先补充证据。正文改变后完成本任务要求的当前版本检查。严格审查逐项实际应用或记录有依据的保留理由；保存、检查完成和任务交付分别按真实结果汇报。'
 
 /** Frozen 3.5 pack, including resources not yet loaded by an existing run. */
@@ -430,7 +430,7 @@ export function routeSkills(input: {
   const normalizedPrompt = input.prompt.trim()
   // Only current built-in routing normalizes equivalent author language. Saved
   // runs and user-authored trigger expressions keep their original semantics.
-  const builtinPrompt = ['3.6.0', '3.7.0', '4.0.0', '4.1.0', '4.2.0', SKILL_ROUTER_VERSION].includes(routerVersion) ? normalizedPrompt.replace(/(?:A\s*I\s*(?:味|痕迹|感)|人工智能\s*(?:味|痕迹)|机器味)/giu, 'AI味') : normalizedPrompt
+  const builtinPrompt = ['3.6.0', '3.7.0', '4.0.0', '4.1.0', '4.2.0', '4.3.0', SKILL_ROUTER_VERSION].includes(routerVersion) ? normalizedPrompt.replace(/(?:A\s*I\s*(?:味|痕迹|感)|人工智能\s*(?:味|痕迹)|机器味)/giu, 'AI味') : normalizedPrompt
   const isEnabled = (skill: AgentSkill): boolean => input.enabledSkillIds?.has(skill.id) ?? true
 
   const pinnedCandidates: SkillRouteCandidate[] = input.pinnedSkillIds?.size
@@ -451,7 +451,7 @@ export function routeSkills(input: {
     }
   }
 
-  const usesDraftFoundation = ['4.1.0', '4.2.0', SKILL_ROUTER_VERSION].includes(routerVersion)
+  const usesDraftFoundation = ['4.1.0', '4.2.0', '4.3.0', SKILL_ROUTER_VERSION].includes(routerVersion)
     && input.intent === 'write' && phase === 'draft'
   const scored = catalog
     .filter((skill) => !pinnedIds.has(skill.id) && isEnabled(skill) && skill.status === 'active' && skill.intents.includes(input.intent) && modeMatches(skill, input.mode, phase) &&

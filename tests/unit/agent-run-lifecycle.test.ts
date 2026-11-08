@@ -4204,6 +4204,42 @@ describe('source acquisition in the real Agent loop', () => {
 })
 
 describe('ordinary chapter summary presentation', () => {
+  it.each([
+    ['写下一章。', '已完成第1章《当前章》。\n\n阿岚把旧碗放回柜上。铜钱压在碗底。'],
+    ['写下一章，并逐条说明人物和情节的改动。', '阿岚把旧碗放回柜上。铜钱压在碗底。门外脚步声渐远。'],
+  ])('uses the same-task write receipt for an unbound Studio closing: %s', async (prompt, expected) => {
+    const { enableAgentWritingScope } = await import('../../api/lib/agent/agent-writing-scope.js')
+    const { readCurrentSavedTaskChapters } = await import('../../api/lib/agent/saved-chapter-work.js')
+    const savedChapters = vi.mocked(readCurrentSavedTaskChapters)
+    const spec = enableAgentWritingScope(buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'c', prompt, authorWritingProtocol: 2 }))
+    expect(spec.scope).toMatchObject({ agentWritingProtocol: 1, authorEffects: { manuscript: true } })
+    expect(spec.scope.agentWritingBinding).toBeUndefined()
+    mocks.currentOriginal = { prompt, taskSpec: spec }
+    mocks.realWritingCompletion = true
+    mocks.committedChapter.mockResolvedValue(true)
+    const chapter = mocks.chapters[0]
+    chapter.title = '当前章'
+    const summary = '阿岚把旧碗放回柜上。铜钱压在碗底。门外脚步声渐远。'
+    const writer = tool('chapter_write', async () => {
+      const before = chapter.content
+      chapter.content = '天亮之前，阿岚把旧碗放回柜上。铜钱压在碗底，门外的脚步声渐渐远去。'
+      chapter.revision += 1
+      savedChapters.mockResolvedValue([{ ...chapter, contentHash: 'a'.repeat(64), sourceHash: 'b'.repeat(64) }])
+      return { output: '当前正文已保存', display: { kind: 'chapterDiff', chapterId: chapter.id, chapterTitle: chapter.title,
+        before, after: chapter.content, revision: chapter.revision, appliedDirectly: true } }
+    }, false)
+    mocks.tools = [writer]
+    queue(response('', [call('save', 'chapter_write')]), response(summary))
+    try {
+      await run(prompt)
+      expect(writer.execute).toHaveBeenCalledOnce()
+      expect(mocks.chat).toHaveBeenCalledTimes(2)
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: expected })
+      expect(events().filter(event => event.type === 'text.final').at(-1)).toMatchObject({ text: expected })
+    } finally {
+      savedChapters.mockResolvedValue([])
+    }
+  })
   it.each(['current', 'stale-summary', 'revision-race', 'report-race', 'missing-commit', 'recovered-current', 'recovered-revision-race', 'recovered-report-race'] as const)('binds summary and replay to current committed proof: %s', async scenario => {
     const recovering = scenario.startsWith('recovered-')
     const caseKind = scenario.replace(/^recovered-/u, '')

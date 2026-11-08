@@ -8,6 +8,7 @@ import { isAgent2FeatureEnabled } from '../../agent2-feature-flags.js'
 import { assertCraftOutputSafe } from '../craft-library.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from '../runtime-common.js'
 import { commitOperationEffect, prepareOperation, recordToolFailure } from '../runtime-operations.js'
+import { chapterAnchorFailureSummary } from '../tool-failure-recovery.js'
 import { recordChapterBaseline } from '../baseline.js'
 import { enqueueChapterMemoryExtraction } from '../story-memory.js'
 import { updateOwnedChapterAtRevision } from './chapter-mutation.js'
@@ -143,7 +144,7 @@ export async function executeDurableChapter(ctx: ToolContext, action: Action, in
     tx => applyDurableChapterBody(ctx, tx, { taskRootId: lease.taskRootId, action, args, expectedRevision, anchorProtocol })).catch(async error => {
     if (!prepared || !(error instanceof DataAccessError) || ![...PLAN_FAILURE_CODES, 'TASK_SCOPE_REQUIRED', 'AUTHOR_LOCAL_SCOPE', 'AUTHOR_LOCAL_STALE', 'AUTHOR_SELECTION_SCOPE', 'AUTHOR_SELECTION_STALE', 'CHAPTER_REVISION_CONFLICT', 'CHAPTER_ANCHOR_CONFLICT', 'AUTHOR_CHAPTER_SCOPE', 'SCOPE_NEEDS_INPUT', 'RUNTIME_SCOPE_MISMATCH', 'RUNTIME_PARENT_LEASE_LOST', 'REVIEW_AUTOMATION_STOPPED', 'REPAIR_NOT_AUTHORIZED', 'REVIEW_REPAIR_RECHECK_REQUIRED', 'REVIEW_MERGED_REVISION_REQUIRED', 'REVIEW_CYCLE_DECISION_REQUIRED'].includes(error.code)) throw error
     return recordToolFailure(lease, { operationId: operation.id, inputHash: operation.inputHash, code: error.code,
-      summary: '正文变更未执行', output: error.message })
+      summary: error.code === 'CHAPTER_ANCHOR_CONFLICT' ? chapterAnchorFailureSummary(error.message) : '正文变更未执行', output: error.message })
   })
   const failed = failedToolResultSchema.safeParse(receipt.result)
   if (failed.success) {

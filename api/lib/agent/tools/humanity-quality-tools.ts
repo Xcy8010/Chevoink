@@ -42,7 +42,7 @@ import {
 } from '../humanity-quality.js'
 import { defineTool, type ToolContext, type ToolResult } from './types.js'
 import { coerceToolArgumentEnvelope, firstDefined } from './argument-coercion.js'
-import { REPAIR_BLOCK_CODES, REPAIR_CHANNEL_CODES, qualityReportCheckedCurrentContent, qualityAutoRepairPending, selectAutomaticQualityFindings } from '../quality-report-contract.js'
+import { REPAIR_BLOCK_CODES, REPAIR_CHANNEL_CODES, qualityReportCheckedCurrentContent, qualityAutoRepairPending, pendingQualityDecisions, selectAutomaticQualityFindings, standaloneAdviceReportOnly } from '../quality-report-contract.js'
 import { probeChapterReviewRevision, readChapterReviewRevisionGuidance, readChapterReviewReadiness, qualityDecisionSnapshotHash, chapterReviewDecisionGuidance } from '../chapter-review-guard.js'
 import { verificationQualityAdviceRequiresDecision } from '../review-cycle.js'
 import { buildQualityEvidenceSources, renderQualityEvidenceSources, type QualityEvidenceSources, inspectCorrectableCriticResponse, parseQualityJsonObject, correctQualityEvidence, qualityEvidenceSourceCorrectionSystem, unlocatedQualityEvidence, qualityReportHasDroppedFindings, qualityCorrectionResponseWitness } from '../quality-evidence.js'
@@ -185,13 +185,14 @@ export function buildCriticInput(bundle: Awaited<ReturnType<typeof buildHumanity
 }
 
 type FrozenQualityRuntime = Pick<Awaited<ReturnType<typeof resolveDurableAuxiliaryRuntime>>, 'runtime'>
-async function finishQualityReview(ctx: ToolContext, report: QualityReport, bindingSuffix = '', cached = false, allowRepair = true, frozenQuality?: FrozenQualityRuntime): Promise<ToolResult> {
-  const result = await finishQualityReviewResult(ctx, report, bindingSuffix, cached, allowRepair, frozenQuality)
-  const pending = report.findings.some(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected')
-  return { ...result, reviewOutcome: result.semanticTransition || result.outcome === 'failed' ? 'stale' : pending ? 'decision_required' : 'complete' }
+async function finishQualityReview(ctx: ToolContext, report: QualityReport, bindingSuffix = '', cached = false, allowRepair = true, frozenQuality?: FrozenQualityRuntime, adviceOnly = false): Promise<ToolResult> {
+  const pending = pendingQualityDecisions(report.findings, adviceOnly)
+  const result = await finishQualityReviewResult(ctx, report, pending, bindingSuffix, cached, allowRepair, frozenQuality)
+  return { ...result, reviewOutcome: result.reviewOutcome ?? (result.semanticTransition || result.outcome === 'failed' ? 'stale'
+    : pending.length ? 'decision_required' : 'complete') }
 }
 
-async function finishQualityReviewResult(ctx: ToolContext, report: QualityReport, bindingSuffix = '', cached = false, allowRepair = true, frozenQuality?: FrozenQualityRuntime): Promise<ToolResult> {
+async function finishQualityReviewResult(ctx: ToolContext, report: QualityReport, pending: QualityReport['findings'], bindingSuffix = '', cached = false, allowRepair = true, frozenQuality?: FrozenQualityRuntime): Promise<ToolResult> {
   ctx.signal.throwIfAborted()
   const checkedRevision = report.chapterRevision
   const warningCount = report.findings.filter(finding => finding.severity === 'warning').length
@@ -199,10 +200,10 @@ async function finishQualityReviewResult(ctx: ToolContext, report: QualityReport
   // 自动修订写的是作者正文：只读沙箱与受限子任务不获授权，只保存检查意见（正文由各自的写入工具负责）。
   const automatic = allowRepair && ctx.mode === 'build' && ctx.creativeFreedom === 'balanced' && !ctx.protectedChapterIds?.has(report.chapterId)
     && !ctx.inlineChild && ctx.sandboxMode !== 'read_only'
-  const decisionGuidance = report.findings.some(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected')
+  const decisionGuidance = pending.length
     ? await prisma.$transaction(tx => readChapterReviewRevisionGuidance(tx, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId },
       { id: report.chapterId, revision: report.chapterRevision })) : ''
-  const selected = automatic && qualityAutoRepairPending(report) ? selectAutomaticQualityFindings(report.findings) : []
+  const selected = automatic && qualityAutoRepairPending(report) ? selectAutomaticQualityFindings(pending) : []
   if (selected.length) {
     ctx.signal.throwIfAborted()
     try {
@@ -244,7 +245,8 @@ async function finishQualityReviewResult(ctx: ToolContext, report: QualityReport
     }
   }
   const reason = !automatic ? '本次只保存检查意见，正文未改动；修订须由原始请求明确授权'
-    : report.findings.length ? '自动修订已尝试、报告不属于当前修订任务或没有待处理的安全候选；剩余意见仍保留待审' : '未发现有证据的问题'
+    : pending.length ? '自动修订已尝试、报告不属于当前修订任务或没有待处理的安全候选；剩余意见仍保留待审'
+      : advisoryCount ? '建议已保存在报告中，可按需要查看' : '未发现有证据的问题'
   return { output: `质量报告 ${report.id}${cached ? '已复用' : '已完成'}，绑定 r${report.chapterRevision}，状态=${report.status}：${warningCount} 个需关注、${advisoryCount} 个建议。${reason}，不重复调用模型；工具执行成功只表示报告已取得，${report.findings.length ? '检查完成仍有意见，不能宣称全部建议已应用或全部问题已解决；剩余意见保留待审，不要求为清零意见改稿' : '本次完整检查未发现有证据的问题'}。${report.status === 'needs_repair' ? '不能宣称质量检查通过。' : ''}${decisionGuidance}${bindingSuffix}\n${renderQualityReportFindings(report)}`,
     summary: `人类感质量检查完成${cached ? '（复用）' : ''} · ${warningCount} 关注 ${advisoryCount} 建议`, display: reportDisplay(report) }
 }
@@ -423,10 +425,11 @@ export const qualityAnalyzeTool = defineTool({
     const existing = await getLatestQualityReport(ctx.userId, ctx.novelId, chapterId, prisma, bundle.compilation?.id ?? null)
     const contextHash = qualityReviewContextHash(bundle)
     const cacheMetrics = existing?.deterministicMetrics
+    const adviceOnly = !bundle.compilation && standaloneAdviceReportOnly(ctx.writingScope, bundle.originalRequest)
     const matchingContext = !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics) && cacheMetrics.qualityContextHash === contextHash
     if (existing && matchingContext && existing.compilationId === (bundle.compilation?.id ?? null) && existing.criticVersion === HUMANITY_CRITIC_VERSION && !qualityReportHasDroppedFindings(cacheMetrics) && qualityReportCheckedCurrentContent(existing, bundle.chapter.revision, bundle.chapter.content)) {
       const hydrated = await getQualityReport(ctx.userId, ctx.novelId, existing.id)
-      return finishQualityReview(ctx, hydrated, '', true, bundle.compilation?.status !== 'completed')
+      return finishQualityReview(ctx, hydrated, '', true, bundle.compilation?.status !== 'completed', undefined, adviceOnly)
     }
     let formatRecovery: QualityFormatRecovery | null = null
     const sameFailedContext = existing?.status === 'failed' && !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics)
@@ -603,7 +606,7 @@ export const qualityAnalyzeTool = defineTool({
       droppedCount ? `${droppedCount} 条因字段不完整未纳入报告` : '',
     ].filter(Boolean).join('；')
     const bindingSuffix = bindingNote ? `（${bindingNote}；已纳入意见均逐字绑定。）` : ''
-    return finishQualityReview(formatRecovery ? { ...ctx, signal: reviewSignal } : ctx, report, bindingSuffix, false, bundle.compilation?.status !== 'completed', resolved)
+    return finishQualityReview(formatRecovery ? { ...ctx, signal: reviewSignal } : ctx, report, bindingSuffix, false, bundle.compilation?.status !== 'completed', resolved, adviceOnly)
   },
 })
 

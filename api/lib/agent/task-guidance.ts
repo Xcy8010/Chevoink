@@ -27,6 +27,9 @@ export function taskOperatingGuidance(task: TaskSpec, mode: AgentExecutionMode):
   const local = task.scope.localEditBoundary
   if (task.scope.selection || local && local.version !== 3) return `${shared}
 本次是限定范围修改。读取原文及必要邻文，用唯一原文锚点或冻结选区修改；不扩展到其他段落，不例行创建整章计划。核对受影响的事实与检查要求，已有安全修法尽量集中处理后再核验最终版本。`
+  if (task.scope.agentWritingProtocol === 1 && !task.scope.agentWritingBinding) return `${shared}
+本次正文协作以完整原请求和当前章的真实回执为准。需要新章时先创建空章再写；用已有前文、计划和技能支持写作。按作者要求和具体风险决定是否需要检查：先核对会影响交付的事实、因果或人物知识；普通写作无需例行追加两种整章审读。有报告时区分已证实的问题和可选建议，把相关修法集中成一批。修订后核对原问题、改动处和受影响的前文；可选建议留在报告，正文保存后交付。明确要求的复核照常完成，无法完成时说明实际影响。
+作者未指定回复方式时，收尾先给一句已保存的结果，只有需要说明的实际影响或一个情节要点才加一句。详细意见留在相应报告。写作完成后直接收尾，只有作者要求时才附后续建议。`
   if (task.scope.writingCoordinationProtocol === 2) return `${shared}
 本次整章写作由真实正文工具自动协调保存、当前连续性与质量报告、原授权内一次集中局部修订、新版复检及实际章末提交。随正文明确实际场景、已发生的章末状态和文学决定；计划不冒充事实。完整报告中的真实问题或未知不等于工具未执行。后端按原阶段、预算和回执执行确定的下一步，不靠重复主模型回合选择检查工具。不要手工重买成功或未知的检查，也不以候选改写补充判断额度；确缺新阶段权限时使用真实具体问题卡说明该一次检查及费用上限。实际提交与交付证明齐备后直接交付当前保存稿。`
   if (task.scope.writingCoordinationProtocol) return `${shared}

@@ -5,7 +5,7 @@ import { prisma, DataAccessError } from '../../api/lib/prisma.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { buildQualityEvidenceSources, locateQualityFindingSpans } from '../../api/lib/agent/quality-evidence.js'
 import { bindContinuityOpinions, inspectContinuityOpinions, correctContinuitySourceIds, continuityFormatRecoveryPreservesOpinions,
-  buildContinuitySnapshot, enrichContinuitySnapshot, continuityReviewRequest, continuityReportResponseSchema, readContinuityRequestBilling, reviewContinuity,
+  buildContinuitySnapshot, enrichContinuitySnapshot, continuityReviewRequest, continuityReportResponseSchema, readContinuityRequestBilling, reviewContinuity, continuityReviewResult,
   type ContinuityOpinion, type ContinuityReport, type ContinuityDispatch } from '../../api/lib/agent/continuity-review.js'
 import * as original from '../../api/lib/agent/original-request.js'
 import * as humanity from '../../api/lib/agent/humanity-quality.js'
@@ -243,6 +243,25 @@ function repairFixture() {
 }
 
 describe('known failure recovery preserves report and paid evidence', () => {
+  it('retains all review evidence while distinguishing standalone cautions from required decisions', async () => {
+    const f = runnerFixture()
+    const warning = { ...opinion(), severity: 'warning' as const }
+    await reviewContinuity(f.ctx, { compilationId: 'comp' }, { allowRepair: false, dispatch: f.dispatch(() => JSON.stringify({ findings: [warning] })) })
+    const report = f.report()
+    const compiled = await buildContinuitySnapshot(f.ctx, { compilationId: 'comp' })
+    const standalone = { ...compiled, compilation: null, planContext: null }
+    expect(continuityReviewResult(standalone, report)).toMatchObject({
+      reviewCompleted: true, reviewOutcome: 'complete', reviewRequestFinished: { revision: report.revision, contentHash: report.contentHash },
+      output: expect.stringContaining(warning.explanation),
+    })
+    expect(continuityReviewResult(compiled, report)).toMatchObject({ reviewCompleted: true, reviewOutcome: 'decision_required' })
+    expect(continuityReviewResult(standalone, { ...report, findings: [{ ...report.findings[0], severity: 'error' }] }))
+      .toMatchObject({ reviewCompleted: true, reviewOutcome: 'decision_required' })
+    expect(continuityReviewResult(standalone, { ...report, complete: false, unlocatedIndexes: [0] })).toMatchObject({
+      reviewCompleted: false, reviewOutcome: 'evidence_repair_required', failureCode: 'CONTINUITY_REPORT_INCOMPLETE',
+      reviewRequestFinished: { revision: report.revision, contentHash: report.contentHash },
+    })
+  })
   it('keeps current-source snapshots independent of report history and accounting reads', async () => {
     const f = runnerFixture()
     f.historyRead.mockImplementation(async () => { throw Error('A current-source snapshot must not load historical reports') })

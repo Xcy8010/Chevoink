@@ -16,7 +16,7 @@ import { readEffectiveWritingRequest as readOriginalTaskRequest } from './writin
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { buildHumanityQualityContext, qualityCompilationScope, resolveQualityChapterTarget } from './humanity-quality.js'
 import { readNewDraftWritingAuthority } from './writing-scope.js'
-import { selectAutomaticQualityFindings } from './quality-report-contract.js'
+import { selectAutomaticQualityFindings, standaloneAdviceReportOnly } from './quality-report-contract.js'
 import { parseQualityRepairResponse, partitionQualityRepairResponse, QUALITY_REPAIR_RETAIN_RULE } from './quality-repair-response.js'
 import { runtimeJson } from './runtime-common.js'
 import { parseContinuityReportEnvelope } from './continuity-format-recovery.js'
@@ -198,7 +198,10 @@ const criticSystem = `你是中文小说连续性编辑。完整阅读本章和�
 
 export function continuityReviewRequest(snapshot: Pick<ContinuitySnapshot, 'chapter' | 'sources' | 'original'> & Partial<Pick<ContinuitySnapshot, 'planContext' | 'fullReviewKey' | 'priorReport' | 'compatibleReport'>>, focus?: string) {
   const prior = snapshot.priorReport
-  return { system: criticSystem + `\n${REVIEW_REASSESSMENT_RULE}\n有历史报告时可附加reassessment逐项说明分类、理由及baselineFindingId或当前findingIndex；缺少分类不能删除findings。` + (snapshot.planContext ? `\n${renderPlanAlignmentInstructions(snapshot.planContext)}` : ''), content: JSON.stringify({ reviewProtocol: CONTINUITY_FULL_REVIEW_PROTOCOL,
+  const verification = prior && prior.revision < snapshot.chapter.revision
+    ? '\n这是修订后的复核。先查前一版已定位的具体问题，再查本次改动及受影响的原文依据；只有新证据能说明实际矛盾时才新增意见。保留全部来源及作者要求的检查覆盖。'
+    : ''
+  return { system: criticSystem + `\n${REVIEW_REASSESSMENT_RULE}\n有历史报告时可附加reassessment逐项说明分类、理由及baselineFindingId或当前findingIndex；缺少分类不能删除findings。` + verification + (snapshot.planContext ? `\n${renderPlanAlignmentInstructions(snapshot.planContext)}` : ''), content: JSON.stringify({ reviewProtocol: CONTINUITY_FULL_REVIEW_PROTOCOL,
     fullReviewKey: snapshot.fullReviewKey ?? continuityFullReviewKey(snapshot, snapshot.planContext ? writingPlanContextHash(snapshot.planContext) : null),
     ...(snapshot.compatibleReport ? { reusableReportId: snapshot.compatibleReport.id } : {}),
     ...(prior ? { priorReview: { reportId: prior.id, revision: prior.revision, contentHash: prior.contentHash, sourceVersions: prior.sourceVersions ?? null,
@@ -250,16 +253,18 @@ export async function bindContinuityReport(tx: Prisma.TransactionClient, snapsho
   }
 }
 
-function reportResult(snapshot: ContinuitySnapshot, report: ContinuityReport, cached = false): ToolResult {
+export function continuityReviewResult(snapshot: ContinuitySnapshot, report: ContinuityReport, cached = false): ToolResult {
   const alignmentFindings = report.planAlignment?.findings ?? []
   const errors = report.findings.filter(finding => finding.severity === 'error').length + (report.planAlignment?.status === 'reviewed' ? alignmentFindings.filter(finding => finding.severity === 'error').length : 0), warnings = report.findings.filter(finding => finding.severity === 'warning').length + (report.planAlignment?.status === 'reviewed' ? alignmentFindings.filter(finding => finding.severity === 'warning').length : 0)
   const alignmentUnknown = !!snapshot.planContext && report.planAlignment?.status !== 'reviewed'
   return { ...(report.complete && report.billingKnown && !alignmentUnknown ? {} : { outcome: 'failed' as const, failureCode: !report.billingKnown ? 'AI_PROVIDER_BILLING_UNCONFIRMED' : alignmentUnknown ? 'PLAN_ALIGNMENT_UNVERIFIED' : 'CONTINUITY_REPORT_INCOMPLETE' }),
-    reviewCompleted: report.complete, reviewOutcome: !report.billingKnown ? 'provider_unresolved' : !report.complete ? 'evidence_repair_required' : report.findings.length ? 'decision_required' : 'complete',
+    reviewCompleted: report.complete && !alignmentUnknown,
+    reviewOutcome: !report.billingKnown ? 'provider_unresolved' : !report.complete || alignmentUnknown ? 'evidence_repair_required'
+      : errors > 0 || Boolean(snapshot.compilation && warnings > 0) ? 'decision_required' : 'complete',
     reviewRequestFinished: report.billingKnown ? { version: 1, chapterId: report.chapterId, revision: report.revision, contentHash: report.contentHash } : undefined,
     summary: report.complete ? `连续性检查完成 · ${errors} 错误 ${warnings} 警告` : '连续性报告未完成',
     output: `reportId=${report.id}；chapterId=${report.chapterId}；revision=${report.revision}\n所检 r${report.revision}${cached ? '复用已保存报告' : '已保存连续性报告'}：${errors} 个错误、${warnings} 个警告。${report.complete
-      ? errors ? '报告已保存，请核对以下事实问题。' : warnings ? '以下为连续性建议，已保留在报告中；不要求反复改稿将建议清零。' : '未发现连续性问题。'
+      ? errors ? '报告已保存，请核对以下事实问题。' : warnings ? snapshot.compilation ? '以下警告保留在当前报告，按编译要求处理或明确保留。' : '以下为连续性建议，已保留在报告中；不要求反复改稿将建议清零。' : '未发现连续性问题。'
       : `有 ${report.unlocatedIndexes.length} 条意见未定位，报告未完成。`}
 ${report.findings.map(finding => `[${finding.id}/${finding.severity}/${finding.signal}] ${finding.startOffset >= 0 ? `本章范围[${finding.startOffset},${finding.endOffset})` : '前文意见'}；原文：${JSON.stringify(finding.evidence)}\n证据：${JSON.stringify(finding.references)}\n解释：${finding.explanation}\n建议：${finding.suggestion}`).join('\n')}
 ${report.unlocatedIndexes.map(index => `未定位意见[${index}]：${JSON.stringify(report.opinions[index])}`).join('\n')}
@@ -537,18 +542,22 @@ async function finishContinuityReview(ctx: ToolContext, args: ContinuityReviewAr
   const priorFailure = report.repairResult?.outcome === 'failed' ? report.repairResult : undefined
   if (priorFailure && (priorFailure.failureCode !== 'CONTINUITY_REPAIR_FAILED' || savedRepair === undefined)) return priorFailure
   if (!report.complete || report.repairAttempted && !savedRepair && !options.resumeRepair || options.allowRepair === false || ctx.mode !== 'build' || ctx.creativeFreedom !== 'balanced'
-    || ctx.inlineChild || ctx.sandboxMode === 'read_only' || ctx.protectedChapterIds?.has(report.chapterId)) return reportResult(snapshot, report, cached)
+    || ctx.inlineChild || ctx.sandboxMode === 'read_only' || ctx.protectedChapterIds?.has(report.chapterId)) return continuityReviewResult(snapshot, report, cached)
   const { automaticChapterRevisionWritable } = await import('./tools/chapter-mutation.js')
-  if (!await automaticChapterRevisionWritable(prisma, ctx)) return reportResult(snapshot, report, cached)
-  const allowed = await effectiveOriginalRepairAuthority(prisma, ctx, snapshot.original, snapshot.chapter.id) || !!await readNewDraftWritingAuthority(prisma, ctx, snapshot.chapter)
-  const selected = allowed ? selectAutomaticQualityFindings(report.findings.filter(finding => finding.startOffset >= 0 && finding.endOffset > finding.startOffset)) : []
-  if (!selected.length) return reportResult(snapshot, report, cached)
+  if (!await automaticChapterRevisionWritable(prisma, ctx)) return continuityReviewResult(snapshot, report, cached)
+  const explicitRepair = await effectiveOriginalRepairAuthority(prisma, ctx, snapshot.original, snapshot.chapter.id)
+  const allowed = explicitRepair || !!await readNewDraftWritingAuthority(prisma, ctx, snapshot.chapter)
+  const adviceOnly = !snapshot.compilation && !report.repairAttempted && !explicitRepair
+    && standaloneAdviceReportOnly(ctx.writingScope, snapshot.original.prompt)
+  const selected = allowed ? selectAutomaticQualityFindings(report.findings.filter(finding => finding.startOffset >= 0
+    && finding.endOffset > finding.startOffset && (!adviceOnly || finding.severity === 'error'))) : []
+  if (!selected.length) return continuityReviewResult(snapshot, report, cached)
   const { probeChapterReviewRevision, readChapterReviewReadiness } = await import('./chapter-review-guard.js')
   const review = snapshot.compilation ? await readChapterReviewReadiness(prisma, ctx, snapshot.compilation.id) : null
-  if ((await import('./review-cycle.js')).verificationQualityAdviceRequiresDecision(review, selected)) return reportResult(snapshot, report, cached)
+  if ((await import('./review-cycle.js')).verificationQualityAdviceRequiresDecision(review, selected)) return continuityReviewResult(snapshot, report, cached)
   const preflight = await prisma.$transaction(tx => probeChapterReviewRevision(tx, ctx,
     { id: snapshot.chapter.id, revision: snapshot.chapter.revision }, { mutation: 'replace' }))
-  if (!preflight.open) return reportResult(snapshot, { ...report, repairFailure: preflight.message }, cached)
+  if (!preflight.open) return continuityReviewResult(snapshot, { ...report, repairFailure: preflight.message }, cached)
   const { buildQualityRepairContext } = await import('./tools/humanity-quality-tools.js')
   const writingContext = buildQualityRepairContext(await buildHumanityQualityContext(ctx.userId, ctx.novelId, snapshot.chapter.id, ctx.runId))
   // Same per-report local repair policy as humanity. This never blocks later
@@ -606,7 +615,7 @@ async function finishContinuityReview(ctx: ToolContext, args: ContinuityReviewAr
   if (!patches.length) {
     report = { ...report, repairFailure: unresolved.length ? '本次修订提议存在冲突或缺项，原意见全部保留待审；正文未修改。' : '修订器没有提出安全且必要的局部替换，原意见保留待审。' }
     await saveReport(ctx, args, snapshot, report)
-    return { ...reportResult(snapshot, report), ...(unresolved.length ? { summary: '连续性报告已保存 · 自动修订待核对' } : {}) }
+    return { ...continuityReviewResult(snapshot, report), ...(unresolved.length ? { summary: '连续性报告已保存 · 自动修订待核对' } : {}) }
   }
   const apply = async (tx: Prisma.TransactionClient) => {
     await lockNovelActiveScope(tx, ctx.novelId); await assertCurrent(ctx, args, snapshot, tx)
@@ -623,7 +632,7 @@ async function finishContinuityReview(ctx: ToolContext, args: ContinuityReviewAr
     if ((await import('../agent2-feature-flags.js')).isAgent2FeatureEnabled('memory2', ctx.userId)) await (await import('./story-memory.js')).enqueueChapterMemoryExtraction({
       novelId: ctx.novelId, chapterId: updated.id, chapterRevision: updated.revision, before: snapshot.chapter.content, after }, tx)
     const { repairFailure: _failure, ...appliedReport } = report
-    const checked = reportResult(snapshot, appliedReport)
+    const checked = continuityReviewResult(snapshot, appliedReport)
     const result: ToolResult = { reviewCompleted: false, reviewOutcome: 'stale', reviewRequestFinished: checked.reviewRequestFinished,
       summary: `连续性检查完成 · 已局部修订至 r${updated.revision}，需复查`,
       output: `已局部修订 ${ranges.length} 处至 r${updated.revision}，需复查最终版的连续性与人类感质量。以下为改前 r${report.revision} 报告：\n${checked.output}`,
@@ -645,7 +654,7 @@ async function finishContinuityReview(ctx: ToolContext, args: ContinuityReviewAr
         opinions: report.opinions, complete: report.complete, billingKnown: actual.known, error: error instanceof DataAccessError ? error.code : 'CONTINUITY_REPAIR_FAILED' }] }
     const knownFailure = actual.known && !ctx.signal.aborted && error instanceof DataAccessError
       && !error.code.startsWith('RUNTIME_') && error.code !== 'AI_PROVIDER_BILLING_UNCONFIRMED'
-    if (knownFailure) report = { ...report, repairResult: { ...reportResult(snapshot, report), outcome: 'failed', failureCode: error.code,
+    if (knownFailure) report = { ...report, repairResult: { ...continuityReviewResult(snapshot, report), outcome: 'failed', failureCode: error.code,
       summary: '连续性报告已保存 · 自动修订未应用' } }
     await savePhysicalReport(ctx, snapshot, report)
     if (!knownFailure) throw error

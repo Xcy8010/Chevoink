@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { toolFailureRecovery, toolRecoveryKey } from '../../api/lib/agent/tool-failure-recovery.js'
+import { chapterAnchorFailureSummary, toolFailureRecovery, toolRecoveryKey } from '../../api/lib/agent/tool-failure-recovery.js'
 import { findToolRestriction, isInputScopedFailure, restoreToolRestriction, toolFailureInputHash } from '../../api/lib/agent/tool-local-failure.js'
 import { frozenWritingToolGuidance } from '../../api/lib/agent/writing-tool-guidance.js'
 import type { TaskSpec } from '../../shared/contracts/index.js'
@@ -68,6 +68,14 @@ describe('chapter authority failure feedback', () => {
     expect(recovery.guidance).not.toContain('chapter_write')
     expect(toolRecoveryKey('chapter_edit_range', 'CHAPTER_ANCHOR_CONFLICT', { chapterId: 'c' }))
       .toBe(toolRecoveryKey('chapter_write', 'CHAPTER_ANCHOR_CONFLICT', { chapterId: 'c' }))
+  })
+  it.each([
+    ['第 3 处原文锚点未匹配（0处）', '这批修改未保存，第 3 处未找到对应原文'],
+    ['第 2 处原文锚点匹配 3 处，起点为 2、4、6', '这批修改未保存，第 2 处对应多处原文'],
+    ['第 1 与第 5 处替换区间重叠，请合并', '这批修改未保存，第 1 与第 5 处重叠'],
+    ['定位失败', '这批修改未保存，需要重新定位原文'],
+  ])('describes the atomic edit failure from its actual locator result', (message, summary) => {
+    expect(chapterAnchorFailureSummary(message)).toBe(summary)
   })
   it('continues a saved report through ordinary authorized local edits after automatic repair fails', () => {
     const recovery = toolFailureRecovery('CONTINUITY_REPAIR_FAILED')!

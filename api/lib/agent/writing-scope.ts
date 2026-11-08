@@ -1001,7 +1001,12 @@ function withoutWritingReceiptClauses(sentence: string, delivery: PresentationDe
   return result && ending && !/[。！？!?]$/u.test(result) ? result + ending : result
 }
 
-export function completedWritingPresentationText(delivery: PresentationDelivery, candidateText: string): string {
+export function usesBriefStandaloneWritingClosing(prompt: string): boolean {
+  return allowsChapterArtifactPresentation(prompt, false)
+    && !/(?:只要|仅|贴出|输出|展示|发我|给我|回复).{0,12}(?:正文|原文|全文)|(?:全文|原文)(?:贴出|发我|给我)|详细|逐条|列出|解释|分析|复盘|报告|说明|对照|\b(?:explain|summary|details|report|list|full text)\b/iu.test(prompt)
+}
+
+export function completedWritingPresentationText(delivery: PresentationDelivery, candidateText: string, briefClosing = false): string {
   const receipt = `${delivery.chapters.map(chapter => `已保存《${chapter.title}》（r${chapter.revision}）`).join('；')}，章节终态已提交。`
   const completion = `已完成${delivery.chapters.map(chapter => {
     const ordinal = `第${chapter.orderIndex}章`, title = plainChapterTitle(chapter.title)
@@ -1023,6 +1028,11 @@ export function completedWritingPresentationText(delivery: PresentationDelivery,
     return supported
   }).map(sentence => withoutWritingReceiptClauses(sentence, delivery)).join('').trim()
   if (showFullText && delivery.titleAndBodyOnly) return delivery.text
+  // This only shapes the optional wrap-up after an ordinary, saved chapter
+  // write. Full text and explicitly requested explanations stay intact.
+  if (!showFullText && briefClosing) {
+    summary = summarySentences(summary).filter(sentence => sentence.trim()).slice(0, 2).join('').trim()
+  }
   // Completion was verified against current saved text and reports above.
   // Completion identity comes only from the verified current delivery; the
   // model's natural wrap-up supplies the content description without a retry.

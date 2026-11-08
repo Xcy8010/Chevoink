@@ -4,7 +4,7 @@ import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { observedReviewOutcome, projectedReviewAction, type ReviewOutcome } from '../../../shared/review-lifecycle.js'
 import { readSettledQualityReviews, readQualityReviewAdmission } from './quality-review-admission.js'
 import { observeChapterReviewProgress, observeLegacyContentProgress, observeRequiredResult, observeSemanticTransition, observeSemanticReadProgress, observeWritingWorkflowMilestone, nextStagnantBatch } from './semantic-progress.js'
-import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, readCompletedWritingDelivery, readRecoveredChapterDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery } from './writing-scope.js'
+import { freezeWritingScope, effectiveWritingTaskSpec, readWritingScope, readCompletedWritingDelivery, readRecoveredChapterDelivery, readCompletedWritingPresentation, requiresCompletedWritingPresentation, completedWritingPresentationText, assertCompletedWritingDelivery, usesBriefStandaloneWritingClosing } from './writing-scope.js'
 import { readPersistedWritingWorkflowMilestones } from './story-compiler.js'
 import { consumeTextRequestRecovery, createTextRequestTrace, textRequestsFinished, withTextRequestTrace } from '../text-request-trace.js'
 import { readReviewRequestRecovery, readCompletedReviewRequestRecovery } from './review-request-recovery.js'
@@ -69,7 +69,7 @@ import { createExecutionTextDetector, normalizeExecutionText } from './execution
 import { toolSignature, ToolAdmissionGuard } from './tool-signature.js'
 import { toolTurnHistory } from './tool-turn-history.js'
 import { emptyResponseRecoveryOutputTokens, isContinuationRequest, isExplicitAuthorEnd, hasAuthorEnded, promisesFurtherAction, requiresNextChapterDelivery } from './completion-guard.js'
-import { toolFailureRecovery } from './tool-failure-recovery.js'
+import { chapterAnchorFailureSummary, toolFailureRecovery } from './tool-failure-recovery.js'
 import { frozenWritingToolGuidance, writingPreparationGuidance } from './writing-tool-guidance.js'
 import { findToolRestriction, isHistoricalReviewRestriction, isInputScopedFailure, restoreToolRestriction, toolFailureInputHash, toolRestrictionTarget, type ToolRestriction } from './tool-local-failure.js'
 import { assertLimitedWritingDelivery, type LimitedWritingDelivery } from './writing-delivery-limitations.js'
@@ -676,7 +676,8 @@ export async function handleToolCall(
     }
     const recovery = error instanceof DataAccessError ? toolFailureRecovery(error.code) : undefined
     if (recovery && error instanceof DataAccessError) return {
-      ...fail(recovery.label, `工具 ${call.name} 未完成（${error.code}）：${error.message} ${recovery.guidance} ${frozenWritingToolGuidance(call.name, ctx.writingScope)}`, 'failed'),
+      ...fail(error.code === 'CHAPTER_ANCHOR_CONFLICT' ? chapterAnchorFailureSummary(error.message) : recovery.label,
+        `工具 ${call.name} 未完成（${error.code}）：${error.message} ${recovery.guidance} ${frozenWritingToolGuidance(call.name, ctx.writingScope)}`, 'failed'),
       recoveryCode: error.code,
     }
     const message = error instanceof DataAccessError ? error.message : '内部执行异常，本次操作未确认完成；请核对已保存状态，不要盲目重复写入'
@@ -1978,7 +1979,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const explanatoryResponse = !requiresManuscriptDelivery(taskSpec)
         && (taskSpec.scope.authorEffects?.manuscript === false || taskSpec.writingPacing === 'conversation_only')
       const visibleTextStreamer = createVisibleTextStreamer()
-      let writingTextHeld = requiresCompletedWritingPresentation(taskSpec)
+      const requiredWritingPresentation = requiresCompletedWritingPresentation(taskSpec)
+      const savedUnboundWriting = !requiredWritingPresentation && params.mode === 'build'
+        && taskSpec.scope.agentWritingProtocol === 1 && !taskSpec.scope.agentWritingBinding
+        && taskSpec.scope.authorEffects?.manuscript === true && ['write', 'revise'].includes(taskSpec.intent)
+        && (writeProgressCount > 0 || params.resume === true) && usesBriefStandaloneWritingClosing(params.prompt)
+      let writingTextHeld = requiredWritingPresentation || savedUnboundWriting
       let writingTextBuffer = ''
       const releaseWritingToolText = () => {
         if (completedWritingWrapUp.value) return
@@ -2113,7 +2119,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       // 模型返回的 reasoning 单独保留，执行旁白不改道思考区。
       // text.delta 已实时显示供应商原始流；无论最终是否有干净文本，都要发 text.final 做归一化，
       // 这样 DSML/乱码被清洗成空串时能立即从界面移除，而不是残留到刷新前。
-      const deferWritingCompletionText = taskSpec.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED') || Boolean(ordinaryResponse) || (completedWritingWrapUp.value !== null || effectiveToolCalls.length === 0 && requiresCompletedWritingPresentation(taskSpec))
+      const deferWritingCompletionText = taskSpec.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED') || Boolean(ordinaryResponse) || (completedWritingWrapUp.value !== null || effectiveToolCalls.length === 0 && (requiredWritingPresentation || savedUnboundWriting))
       if (result.content && !deferWritingCompletionText) bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
 
       const parts: AgentMessagePart[] = []
@@ -2301,9 +2307,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           continue
         }
 
-        const savedCandidate = !prematureFinish && !report?.content && requiresCompletedWritingPresentation(taskSpec) ? await prisma.$transaction(tx => readCompletedWritingPresentation(tx,
+        const savedCandidate = !prematureFinish && !report?.content && (requiredWritingPresentation || savedUnboundWriting) ? await prisma.$transaction(tx => readCompletedWritingPresentation(tx,
           { userId: params.userId, novelId: params.novelId, runId }), { timeout: 20_000 }) : null
-        if (!prematureFinish && !report?.content && requiresCompletedWritingPresentation(taskSpec) && !savedCandidate) {
+        if (!prematureFinish && !report?.content && requiredWritingPresentation && !savedCandidate) {
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts.filter(part => part.type !== 'text'))
           bus.emit({ type: 'step.finish', turn, usage: result.usage })
           await finalizeFailedWithNotice('当前目标章节尚无与最新正文一致的保存证据，不能确认完成；已保存内容保留。')
@@ -2331,7 +2337,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
           bus.emit({ type: 'text.final', messageId, text: delivered, asReasoning: false })
         } else if (savedCandidate) {
-          lastAssistantText = completedWritingPresentationText(savedCandidate, authorContent)
+          lastAssistantText = completedWritingPresentationText(savedCandidate, authorContent, savedUnboundWriting)
         } else {
           if (deferWritingCompletionText) bus.emit({ type: 'text.final', messageId, text: authorContent, asReasoning: false })
           await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
@@ -2558,7 +2564,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           return { ...proof, answer }
         } : undefined
         const executionTools = coordinatedCommit ? tools.map(tool => tool.name === call.name ? coordinatedCommit! : tool) : tools
-        const outcome = await handleToolCall(call, executionTools, { ...toolContext, callId: call.id, messageId, respondTask }, bus, messageId, runId,
+        const outcome = await handleToolCall(call, executionTools, { ...toolContext, writingScope: taskSpec.scope, callId: call.id, messageId, respondTask }, bus, messageId, runId,
           undefined, coordinatedCommit || bootstrapCall?.id === call.id ? async () => { await bus.persist() } : undefined)
         if (!outcome) continue
         if (outcome.terminalResponse && outcome.part.status === 'success' && responseNative) {

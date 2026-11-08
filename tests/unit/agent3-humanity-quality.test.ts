@@ -256,12 +256,14 @@ describe('严谨创作自动落实质量建议', () => {
     expect(f.report).toEqual(before)
   })
   it.each([true, false])('reports completed cached=%s advice counts without an author-approval summary', async cached => {
-    const f = fixture(cached); f.ctx.creativeFreedom = 'stable'
+    const f = fixture(cached)
+    f.ctx.writingScope = { novelId: 'n', agentWritingProtocol: 1, authorEffects: { manuscript: true } } as ToolContext['writingScope']
     const before = JSON.stringify(f.report)
     const result = await qualityAnalyzeTool.execute(f.ctx, { chapterId: 'c' })
     expect(result.summary).toBe('人类感质量检查完成' + (cached ? '（复用）' : '') + ' · 0 关注 8 建议')
     expect(result.summary).not.toContain('待决定')
     expect(result.output).toContain('8 个建议')
+    expect(result.reviewOutcome).toBe('complete')
     expect(f.reserve).not.toHaveBeenCalled(); expect(f.model).not.toHaveBeenCalled(); expect(f.write).not.toHaveBeenCalled()
     expect(JSON.stringify(f.report)).toBe(before)
   })

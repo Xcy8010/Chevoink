@@ -1540,6 +1540,7 @@ export default function StudioWorkspace() {
     })
   }, [currentNovel, myNovelsQuery.data, navigationSessionsQuery.data?.items])
 
+  const activityChapterTitles = useMemo(() => new Map(chapters.map(chapter => [chapter.id, chapter.title])), [chapters])
   const activeChapterListItem = useMemo(
     () => chapters.find((item) => item.id === selectedChapterId) ?? null,
     [chapters, selectedChapterId],
@@ -3802,6 +3803,7 @@ export default function StudioWorkspace() {
           chapterId={
             selectedChapterId && !selectedChapterId.startsWith('local-') ? selectedChapterId : null
           }
+          activityChapterTitles={activityChapterTitles}
           selection={editorSelection.text.trim() ? editorSelection : null}
           ensureSession={ensureAgentLoopSession}
           onGoalSessionCreated={handleGoalSessionCreated}

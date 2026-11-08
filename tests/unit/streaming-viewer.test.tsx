@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { StrictMode, useLayoutEffect, useRef } from 'react'
+import { StrictMode, useLayoutEffect, useRef, useState } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import LocalFirstTextarea from '../../src/features/studio/components/LocalFirstTextarea'
@@ -159,6 +159,27 @@ it('keeps Work viewer IME input across lock and failed-write unlock without comm
   fireEvent.compositionEnd(node)
   act(() => vi.advanceTimersByTime(40))
   expect(change).toHaveBeenCalledExactlyOnceWith({ ...draft, content: '中文候选尚未完成' })
+})
+it('shows the current chapter count beside its title across edits, preview and document switches', () => {
+  const props = { positionScope: 'task-a', selection: { start: 0, end: 0, text: '' }, onSelectionChange: vi.fn(), onAddSelection: vi.fn(), onClose: vi.fn(), onBlur: vi.fn() }
+  const initial = { id: 'a', title: '第一章', summary: '', content: '初稿', orderIndex: 1, revision: 1, localOnly: false, status: 'draft' as const, visibility: 'private' as const }
+  function Viewer({ preview }: { preview?: string }) {
+    const [draft, setDraft] = useState(initial)
+    return <StudioChapterViewer {...props} draft={draft} onChange={setDraft} streamingContent={preview} writeLocked={preview !== undefined} />
+  }
+  const view = render(<Viewer />)
+  expect(screen.getByText('第一章').nextElementSibling?.textContent).toBe('2 字')
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '作者改稿' } })
+  act(() => vi.advanceTimersByTime(160))
+  expect(screen.getByText('4 字')).toBeTruthy()
+  view.rerender(<Viewer preview={'新'.repeat(4011)} />)
+  expect(screen.getByText('4,011 字')).toBeTruthy()
+  view.rerender(<Viewer />)
+  expect(screen.getByText('4 字')).toBeTruthy()
+  view.rerender(<StudioChapterViewer {...props} draft={{ ...initial, id: 'b', title: '第二章', content: '' }} onChange={vi.fn()} />)
+  expect(screen.getByText('第二章').nextElementSibling?.textContent).toBe('0 字')
+  view.rerender(<StudioChapterViewer {...props} draft={null} onChange={vi.fn()} workspaceDocument={{ id: 'catalog', kind: 'catalog', title: '目录', content: '', description: '' }} />)
+  expect(screen.queryByText(/\d 字/)).toBeNull()
 })
 it('commits the author candidate if IME ends under the lock and fences callbacks across a task/document reset', () => {
   const author = vi.fn(), locked = vi.fn(), other = vi.fn()

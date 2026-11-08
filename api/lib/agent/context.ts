@@ -526,16 +526,21 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   // 作者手动指定的技能必须真实存在于本作品已启用目录，避免前端传入陈旧 id 或越权 id。
   const enabledSkillIds = runtimeSkills ? new Set(runtimeSkills.map((skill) => skill.id)) : null
   const pinnedSkillIds = (input.pinnedSkillIds ?? []).filter((skillId) => enabledSkillIds?.has(skillId) ?? false)
-  // The persisted router version also freezes task-purpose routing, including
-  // an empty selection. Legacy 4.1 keeps its original interpretation on resume.
+  // Saved router identities keep their original routing and prompt resources.
   const currentSkillRouter = !skillContext || skillContext.routerVersion === SKILL_ROUTER_VERSION
+  const writingCoreRouter = currentSkillRouter || skillContext?.routerVersion === '4.3.0'
+  const manuscriptDelivery = requiresManuscriptDelivery(input.taskSpec)
+  const nativeDraft = currentSkillRouter && writingResources && input.mode === 'build'
+    && input.taskSpec.scope.agentWritingProtocol === 1 && input.taskSpec.scope.authorEffects?.manuscript === true
+    && input.taskSpec.intent === 'write' && !input.taskSpec.scope.selectionBoundary
+    && !['proposal_only', 'conversation_only'].includes(input.taskSpec.writingPacing ?? '')
   const interpretedSkills = Boolean(input.taskSpec.scope.authorEffects) && skillContext !== null
-    && (currentSkillRouter || skillContext.routerVersion === '4.2.0')
+    && (writingCoreRouter || skillContext.routerVersion === '4.2.0')
   const planningSkills = interpretedSkills && (input.taskSpec.intent === 'plan' || input.taskSpec.writingPacing === 'proposal_only'
     || input.mode === 'plan' && input.taskSpec.scope.authorEffects?.manuscript)
   const reviewingSkills = interpretedSkills && (input.taskSpec.intent === 'review'
     || input.mode === 'review' && input.taskSpec.scope.authorEffects?.manuscript)
-  const automaticBuiltinSkills = !interpretedSkills || requiresManuscriptDelivery(input.taskSpec) || planningSkills || reviewingSkills
+  const automaticBuiltinSkills = !interpretedSkills || manuscriptDelivery || nativeDraft || planningSkills || reviewingSkills
   const routingSkills = runtimeSkills?.filter(skill => automaticBuiltinSkills || skill.owner !== 'chevoink' || pinnedSkillIds.includes(skill.id))
   const skillIntent = planningSkills ? 'plan' : reviewingSkills ? 'review' : input.taskSpec.intent
   const skillRoute = skillFeatureEnabled
@@ -552,11 +557,10 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     : null
   // Protocol 1 can write directly from its unbound first turn. Use the
   // original author intent for prose guidance without changing task authority.
-  const manuscriptDelivery = requiresManuscriptDelivery(input.taskSpec)
-  const useWritingCore = currentSkillRouter && writingResources && input.mode === 'build'
+  const useWritingCore = writingCoreRouter && writingResources && input.mode === 'build'
     && (manuscriptDelivery || (input.taskSpec.scope.agentWritingProtocol === 1
       && input.taskSpec.scope.authorEffects?.manuscript === true))
-  const genreDigest = writingResources && input.mode === 'build' && manuscriptDelivery
+  const genreDigest = writingResources && input.mode === 'build' && (manuscriptDelivery || nativeDraft)
     ? buildGenreWritingDigest(ruleBundleSplit.tagNames, 3, input.prompt, useWritingCore) : null
   const { bootstrapPrompt, novelDataBundle } = ruleBundleSplit
 
