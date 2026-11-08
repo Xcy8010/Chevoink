@@ -969,6 +969,10 @@ html.dark .studio-workspace .agent-composer-goal { background: #333333; }
 }
 
 /* Received Agent content settles without changing real task/tool status. */
+@media (hover: hover) {
+  .agent-activity-step .agent-activity-chevron { opacity: 0; }
+  .agent-activity-step:is(:hover, :focus-visible) .agent-activity-chevron { opacity: 1; }
+}
 .agent-process-region { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows 200ms var(--easing-default), opacity 160ms ease; }
 .agent-process-region[data-agent-process-open='false'] { grid-template-rows: 0fr; opacity: 0; pointer-events: none; }
 @keyframes agent-tool-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }

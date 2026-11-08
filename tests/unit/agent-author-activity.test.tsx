@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
+import { useState } from 'react'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, expect, it } from 'vitest'
 import type { AgentMessagePart, AgentUIMessage } from '../../shared/contracts/index.js'
-import { AuthorActivityParts } from '../../src/features/studio/agent/components/AuthorActivityParts'
+import { AuthorActivityParts, AuthorActivitySummary } from '../../src/features/studio/agent/components/AuthorActivityParts'
 import { projectActivityGroups, type ActivityCall } from '../../src/features/studio/agent/lib/activity-groups'
 
 afterEach(cleanup)
@@ -109,6 +110,46 @@ it('opens useful cover, plan and report details without displaying their interna
   fireEvent.click(screen.getByRole('button', { name: '展开质量报告' }))
   expect(screen.getByText('表达建议')).toBeTruthy()
   expect(view.container.textContent).not.toMatch(/PRIVATE_|internal-chapter-id|r222|已允许|INTERNAL_FAILURE_CODE/)
+})
+
+it('shows elapsed processing time and folds the completed process without hiding the final reply', () => {
+  const parts: AgentMessagePart[] = [
+    reasoning,
+    { type: 'text', text: '我会先查看前文。' },
+    call('read', 'chapter_read'),
+    { type: 'text', text: '这是最终回复。' },
+  ]
+  function TimedReply({ active }: { active: boolean }) {
+    const [expanded, setExpanded] = useState(false)
+    const open = active || expanded
+    return <>
+      <AuthorActivitySummary active={active} open={open}
+        timing={{ elapsedMs: 65000, activeSince: active ? new Date().toISOString() : null, lastSeq: 2, status: active ? 'running' : 'finished' }}
+        onToggle={active ? undefined : () => setExpanded(value => !value)} />
+      <AuthorActivityParts parts={parts} messageId="mixed" runActive={active} processOpen={open} activityChapterTitles={titles} />
+    </>
+  }
+  const view = render(<TimedReply active />)
+  const readLabel = `已查看《${title}》`
+  expect(document.querySelector('[data-process-duration]')?.textContent).toBe('已处理 1 分钟 5 秒')
+  expect(screen.getByRole('button', { name: readLabel })).toBeTruthy()
+
+  view.rerender(<TimedReply active={false} />)
+  const summary = screen.getByRole('button', { name: /^用时/, expanded: false })
+  expect(summary.textContent).toBe('用时 1 分钟 5 秒')
+  expect(screen.queryByRole('button', { name: readLabel })).toBeNull()
+  expect(screen.getByText('我会先查看前文。').closest('[aria-hidden="true"]')).toBeTruthy()
+  expect(screen.getByText('这是最终回复。').closest('[aria-hidden="true"]')).toBeNull()
+
+  fireEvent.click(summary)
+  const step = screen.getByRole('button', { name: readLabel })
+  const arrow = step.querySelector('.agent-activity-chevron')
+  expect(arrow?.previousElementSibling?.textContent).toBe(readLabel)
+  fireEvent.click(step)
+  expect(screen.getByRole('button', { name: '打开章节' })).toBeTruthy()
+  fireEvent.click(summary)
+  expect(screen.queryByRole('button', { name: readLabel })).toBeNull()
+  expect(screen.getByText('这是最终回复。')).toBeTruthy()
 })
 
 it('keeps the import confirmation reachable without opening the activity', () => {

@@ -83,7 +83,7 @@ import { resolveComposerModelEffort, useAgentModelPreference } from '../useAgent
 import { useAgentGoalStream } from '../useAgentGoalStream'
 import { useGoalBarVisibility } from '../useGoalBarVisibility'
 import { openGoalEntry } from '../goal-entry'
-import { projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
+import { projectBlockTimings, projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
 import { projectActivityGroups } from '../lib/activity-groups'
 import { useMessageScroll } from './use-message-scroll'
 import { useComposerInset } from './use-composer-inset'
@@ -95,7 +95,9 @@ import { AgentComposer } from './AgentComposer'
 import { AgentGoalBar } from './AgentGoalBar'
 import { GoalEditorDialog, type GoalEditBase } from './GoalEditorDialog'
 import { AgentQueueTray } from './AgentQueueTray'
-import { AuthorActivityParts } from './AuthorActivityParts'
+import { AuthorActivityParts, AuthorActivitySummary } from './AuthorActivityParts'
+import { AgentProcessRegion } from './AgentProcessRegion'
+import { useMessageBlockExpansion } from './use-message-block-expansion'
 import { AgentPermissionCard } from './AgentPermissionCard'
 import { AgentQuestionCard } from './AgentQuestionCard'
 import { ProcessingHint } from './ProcessingHint'
@@ -240,6 +242,7 @@ export function AgentPanel({
   const { recentConversationText, blockInfoById, lastAssistantId } = useMemo(() => projectMessages(messages), [messages])
   const activityGroups = useMemo(() => projectActivityGroups(messages), [messages])
   const textRevealTargets = useAgentStore(state => state.textRevealTargets)
+  const settlingBlocks = useMemo(() => new Set(Object.keys(textRevealTargets).map(id => blockInfoById.get(id)?.firstId)), [textRevealTargets, blockInfoById])
   const finishTextReveal = useAgentStore(state => state.finishTextReveal)
   const pendingApproval = useAgentStore((state) => state.pendingApproval)
   const pendingQuestion = useAgentStore((state) => state.pendingQuestion)
@@ -512,6 +515,10 @@ export function AgentPanel({
   const goalBar = useGoalBarVisibility(userId, sessionId, goalView.goal)
   const panelPhase = selectAgentPanelPhase(goalView, phase)
   const active = isRunActive(panelPhase)
+  const blockTimings = useMemo(() => projectBlockTimings(messages, blockInfoById, active ? runId : null), [messages, blockInfoById, active, runId])
+  const { isExpanded: isBlockExpanded, toggle: toggleBlock } = useMessageBlockExpansion({
+    sessionId, messages, blocks: blockInfoById, goalView, phase: panelPhase, runId: runId ?? resumeableRunId,
+  })
   const currentActivity = active && runId ? activityGroups.runningByRun.get(runId) : undefined
   const latestMessage = messages.at(-1)
   const thinking = panelPhase === 'running' && latestMessage?.runId === runId && latestMessage.role === 'assistant'
@@ -1689,18 +1696,30 @@ export function AgentPanel({
               }
 
               const block = blockInfoById.get(message.id)
+              const isBlockFirst = block?.firstId === message.id
               const isBlockLast = block?.lastId === message.id
               const messageRunActive = active && message.runId === runId
+              const blockRunActive = active && runId !== null && Boolean(block?.runIds?.includes(runId))
               const messageActivities = activityGroups.byMessage.get(message.id)
               const hasActivity = messageActivities && [...messageActivities.values()].some(group => group.messageId === message.id)
-              if (!hasActivity && !getMessageText(message.parts, message.role)) return null
+              const hasProcess = Boolean(block?.ops)
+              const authorText = getMessageText(message.parts, message.role)
+              const timing = isBlockFirst ? blockTimings.get(message.id) : undefined
+              const showSummary = timing && (hasProcess || blockRunActive || timing.elapsedMs !== null)
+              const settling = settlingBlocks.has(block?.firstId)
+              const processOpen = !hasProcess || blockRunActive || settling || isBlockExpanded(block, message.runId)
+              if (!showSummary && !hasActivity && !authorText) return null
+              const wholeMessageIsProcess = hasProcess && !isBlockFirst && (!isBlockLast || !authorText)
 
               return (
-                <div
+                <AgentProcessRegion
                   key={JSON.stringify([novelId, sessionId, voiceScopeKey ?? null, message.id])}
+                  open={!wholeMessageIsProcess || processOpen}
                   id={`agent-message-${message.id}`}
                   className={cn('group/reply min-w-0', message.id !== lastAssistantId && !messageRunActive && 'agent-msg-cv')}
                 >
+                  {showSummary ? <AuthorActivitySummary timing={timing} active={blockRunActive} open={processOpen}
+                    onToggle={hasProcess && !blockRunActive && !settling ? () => toggleBlock(message.id) : undefined} /> : null}
                   <AuthorActivityParts
                     parts={message.parts}
                     groups={messageActivities}
@@ -1709,15 +1728,17 @@ export function AgentPanel({
                     revealText={textRevealTargets[message.id]}
                     onTextRevealed={finishTextReveal}
                     runActive={messageRunActive}
+                    processOpen={hasProcess && !wholeMessageIsProcess ? processOpen : undefined}
+                    collapseText={hasProcess && !isBlockLast && !wholeMessageIsProcess}
                     activityChapterTitles={activityChapterTitles}
                   />
                   {/* Only confirmed completed replies expose copy and branch actions. */}
-                  {isBlockLast && !messageRunActive && message.completedAt && getMessageText(message.parts, message.role) ? (
+                  {isBlockLast && !messageRunActive && message.completedAt && authorText ? (
                     <div className="mt-1 flex items-center justify-start gap-0.5">
                       <button
                         type="button"
                         onClick={() =>
-                          void handleCopyText(message.id, getMessageText(message.parts, message.role))
+                          void handleCopyText(message.id, authorText)
                         }
                         className="inline-flex h-6 w-6 items-center justify-center rounded-md text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"
                         aria-label="复制回复"
@@ -1743,7 +1764,7 @@ export function AgentPanel({
                       <MessageTime value={message.completedAt} label="完成时间" className="ml-2 opacity-0 transition-opacity group-hover/reply:opacity-100 group-focus-within/reply:opacity-100 mobile:opacity-100" />
                     </div>
                   ) : null}
-                </div>
+                </AgentProcessRegion>
               )
             })}
             {/* 分支副本尚无新对话：底部分隔线提示可从此继续聊，一发新消息就消失 */}

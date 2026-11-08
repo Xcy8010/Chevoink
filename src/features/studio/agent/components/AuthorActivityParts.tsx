@@ -8,10 +8,12 @@ import { getMemorySpotlight } from '../tool-argument-view'
 import { activityChapterId, projectActivityGroups, type ActivityCall, type ActivityGroup, type MessageActivityGroups } from '../lib/activity-groups'
 import { projectAgentAuthorParts, projectAgentAuthorText } from '../../../../../shared/agent-author-view.js'
 import { getAgentToolPresentation } from '../../../../../shared/agent-tool-presentation.js'
+import type { AgentRunTiming } from '../../../../../shared/contracts/agent-events.js'
 import type { AgentMessagePart } from '../../../../../shared/contracts/index.js'
 import { AgentMarkdownText } from './AgentMarkdownText'
 import { ToolDisplayRenderer } from './AgentMessageParts'
 import { AgentProcessRegion } from './AgentProcessRegion'
+import { ProcessDuration } from './ProcessDuration'
 
 const actionNames: Record<string, string> = {
   chapter_read: '查看章节', chapter_list_summaries: '查看章节摘要', project_search: '搜索前文',
@@ -157,12 +159,14 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, titles
 
   return <div className="min-w-0" data-author-activity>
     <button type="button" aria-expanded={open} aria-controls={detailsId} onClick={() => setOpen(value => !value)}
-      className="flex min-h-8 w-full min-w-0 items-center gap-2 rounded-md px-1 text-left text-xs leading-5 text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1">
+      className="agent-activity-step inline-flex min-h-8 max-w-full items-center gap-2 rounded-md px-1 text-left text-xs leading-5 text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1">
       {active && running && !importWaiting && running.toolName !== 'ask_user'
         ? <LoaderCircle aria-hidden className="h-3.5 w-3.5 shrink-0 motion-safe:animate-spin" data-activity-running />
         : <Icon aria-hidden className="h-3.5 w-3.5 shrink-0" />}
-      <span className="min-w-0 flex-1 break-words" aria-live={active || running ? 'polite' : undefined}>{label}</span>
-      <ChevronDown aria-hidden className={cn('h-3.5 w-3.5 shrink-0 motion-safe:transition-transform', open ? 'rotate-0' : '-rotate-90')} />
+      <span className="min-w-0 break-words">
+        <span aria-live={active || running ? 'polite' : undefined}>{label}</span>
+        <ChevronDown aria-hidden className={cn('agent-activity-chevron ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-[opacity,transform]', open ? 'rotate-0' : '-rotate-90')} />
+      </span>
     </button>
     {importWaiting?.importWaiting ? <a className="ml-6 text-xs underline" href={importWaiting.importWaiting.url}>核对原文并确认导入</a> : null}
     <AgentProcessRegion open={open} id={detailsId}>
@@ -173,14 +177,29 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, titles
   </div>
 })
 
+export function AuthorActivitySummary({ timing, active, open, onToggle }: { timing: AgentRunTiming; active: boolean; open: boolean; onToggle?: () => void }) {
+  const label = active || timing.elapsedMs !== null
+    ? <ProcessDuration timing={timing} active={active} />
+    : <span className="text-[11px] text-[var(--text-secondary)]">查看处理过程</span>
+  return <div className="mb-2 border-b border-[var(--border-subtle)] pb-1.5">
+    {onToggle ? <button type="button" aria-expanded={open} onClick={onToggle}
+      className="inline-flex min-h-7 items-center gap-1 rounded-sm text-left text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1">
+      {label}
+      <ChevronDown aria-hidden className={cn('h-3.5 w-3.5 shrink-0 motion-safe:transition-transform', !open && '-rotate-90')} />
+    </button> : <div className="flex min-h-7 items-center">{label}</div>}
+  </div>
+}
+
 export const AuthorActivityParts = memo(function AuthorActivityParts({
-  parts, messageId, groups, activeGroupId, runActive, revealText, onTextRevealed, activityChapterTitles,
+  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, revealText, onTextRevealed, activityChapterTitles,
 }: {
   parts: AgentMessagePart[]
   messageId: string
   groups?: MessageActivityGroups
   activeGroupId?: string
   runActive: boolean
+  processOpen?: boolean
+  collapseText?: boolean
   revealText?: string
   onTextRevealed?: (messageId: string, text: string) => void
   activityChapterTitles?: ReadonlyMap<string, string>
@@ -192,24 +211,28 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   useEffect(() => {
     if (revealText !== undefined && !revealed.pending) onTextRevealed?.(messageId, receivedText)
   }, [revealText, revealed.pending, messageId, receivedText, onTextRevealed])
+  const lastToolIndex = authorParts.reduce((last, part, index) => part.type === 'tool-call' ? index : last, -1)
   let textOffset = 0
   let textOrdinal = 0
   const rendered = new Set<string>()
 
   return <div className="space-y-2">
-    {authorParts.map(part => {
+    {authorParts.map((part, index) => {
       if (part.type === 'text') {
         const identity = `${messageId}:text:${textOrdinal++}`
         const text = part.text.slice(0, Math.max(0, revealed.text.length - textOffset))
         textOffset += part.text.length
-        return <AgentMarkdownText key={identity} text={text} identity={identity} />
+        const paragraph = <AgentMarkdownText key={identity} text={text} identity={identity} />
+        return processOpen !== undefined && (collapseText || index < lastToolIndex)
+          ? <AgentProcessRegion key={identity} open={processOpen}>{paragraph}</AgentProcessRegion>
+          : paragraph
       }
       if (part.type !== 'tool-call' || part.subagentCallId) return null
       const group = localGroups?.get(part.callId)
       if (!group || group.messageId !== messageId || group.firstCallId !== part.callId || rendered.has(group.id)) return null
       rendered.add(group.id)
-      return <ActivityRow key={group.id} group={group} runActive={runActive}
-        active={activeGroupId === group.id} titles={activityChapterTitles} />
+      const row = <ActivityRow key={group.id} group={group} runActive={runActive} active={activeGroupId === group.id} titles={activityChapterTitles} />
+      return processOpen === undefined ? row : <AgentProcessRegion key={group.id} open={processOpen}>{row}</AgentProcessRegion>
     })}
   </div>
 })
