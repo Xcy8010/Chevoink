@@ -1,8 +1,9 @@
 import { z } from 'zod'
 import { prisma, DataAccessError } from '../../prisma.js'
 import { runtimeJson } from '../runtime-common.js'
-import { loadSkill } from '../skills/index.js'
-import { resolveEnabledRuntimeSkills } from '../skills/service.js'
+import { LOCAL_FICTION_REVIEW_GUIDANCE } from '../knowledge/writing.js'
+import { loadSkill, SKILL_ROUTER_VERSION } from '../skills/index.js'
+import { resolveRuntimeSkillContext } from '../skills/service.js'
 import type { ToolContext, ToolResult } from './types.js'
 import { activeChapterScope } from '../../data/internal.js'
 import { assertAgentManuscriptCurrent } from '../manuscript-scope.js'
@@ -27,11 +28,13 @@ export async function prepareCreativeReview(ctx: ToolContext, args: Args, phase:
   if (!chapter) throw new DataAccessError(404, 'CREATIVE_SOURCE_NOT_FOUND', '章节不存在或不属于当前作品。')
   const start = args.start ?? 0, end = Math.min(args.end ?? chapter.content.length, chapter.content.length)
   if (start >= end) throw new DataAccessError(422, 'CREATIVE_RANGE_INVALID', '批评或修订范围为空或超出当前正文。')
-  const runtime = await resolveEnabledRuntimeSkills(ctx.userId, ctx.novelId, ctx.runId, ctx.transaction)
-  const resources = args.skillIds.map(id => loadSkill(id, phase, args.creativeFreedom, runtime)).filter(Boolean).join('\n\n')
+  const { catalog, routerVersion } = await resolveRuntimeSkillContext(ctx.userId, ctx.novelId, ctx.runId, ctx.transaction)
+  const resources = args.skillIds.map(id => loadSkill(id, phase, args.creativeFreedom, catalog)).filter(Boolean).join('\n\n')
+  const localReview = phase === 'critique' && routerVersion === SKILL_ROUTER_VERSION
+    && (start > 0 || end < chapter.content.length) ? `\n${LOCAL_FICTION_REVIEW_GUIDANCE}` : ''
   const source = chapter.content.slice(start, end)
   if (phase === 'critique') return creativeReviewWorkSchema.parse({ version: 1, phase, chapter, start, end,
-    system: `你是与写作者上下文隔离的小说批评编辑。只依据给定原文指出问题，不续写、不改写、不套固定检查表。每条含编号、短引文、问题和修改方向；把事实硬伤与审美建议分开。\n${resources}`,
+    system: `你是与写作者上下文隔离的小说批评编辑。只依据给定原文指出问题，不续写、不改写、不套固定检查表。每条含编号、短引文、问题和修改方向；把事实硬伤与审美建议分开。${localReview}\n${resources}`,
     content: `章节：${chapter.title}，revision=${chapter.revision}，范围=[${start},${end})\n原文：\n${source}`, temperature: 0.25,
     artifactType: 'continuityReview', title: `${chapter.title} · 独立批评`, summary: `revision ${chapter.revision} / ${args.skillIds.join(',')}`,
     metadata: { chapterId: chapter.id, revision: chapter.revision, start, end, skillIds: args.skillIds, phase }, critique: null })

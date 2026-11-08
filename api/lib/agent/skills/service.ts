@@ -15,7 +15,7 @@ import type {
 } from '../../../../shared/contracts/index.js'
 import { DataAccessError, prisma } from '../../prisma.js'
 import { customSkillToRuntime, buildCustomSkillArtifacts } from './custom.js'
-import { frozenV360BuiltinCatalog, frozenV350BuiltinCatalog, historicalBuiltinCatalog, routeSkills, skillCatalog, SKILL_ROUTER_VERSION, type AgentSkill } from './index.js'
+import { frozenV400BuiltinCatalog, frozenV360BuiltinCatalog, frozenV350BuiltinCatalog, historicalBuiltinCatalog, routeSkills, skillCatalog, SKILL_ROUTER_VERSION, type AgentSkill } from './index.js'
 import { getSkillUsage } from './receipts.js'
 
 const BUILTIN_SOURCE = 'builtin'
@@ -86,7 +86,7 @@ export async function syncBuiltinSkillCatalog(tx?: Prisma.TransactionClient): Pr
   if (tx) { for (const operation of definitionOperations) await operation }
   else await prisma.$transaction(definitionOperations)
 
-  const versionOperations = [...historicalBuiltinCatalog, ...frozenV350BuiltinCatalog, ...frozenV360BuiltinCatalog, ...skillCatalog].map((skill) => client.agentSkillVersion.upsert({
+  const versionOperations = [...historicalBuiltinCatalog, ...frozenV350BuiltinCatalog, ...frozenV360BuiltinCatalog, ...frozenV400BuiltinCatalog, ...skillCatalog].map((skill) => client.agentSkillVersion.upsert({
     where: { skillId_version: { skillId: skill.id, version: skill.version } },
     create: {
       skillId: skill.id,
@@ -648,7 +648,8 @@ export async function resolveRuntimeSkillContext(userId: string, novelId: string
   const routerVersion = durable ? durable.configuration.skillRouterVersion ?? '3.1.0' : saved?.routerVersion ?? SKILL_ROUTER_VERSION
   const builtinCatalog = routerVersion === '3.6.0' ? frozenV350BuiltinCatalog
     : routerVersion === '3.7.0' ? frozenV360BuiltinCatalog
-      : ['4.0.0', '4.1.0', SKILL_ROUTER_VERSION].includes(routerVersion) ? skillCatalog : historicalBuiltinCatalog
+      : ['4.0.0', '4.1.0', '4.2.0'].includes(routerVersion) ? frozenV400BuiltinCatalog
+        : routerVersion === SKILL_ROUTER_VERSION ? skillCatalog : historicalBuiltinCatalog
   const pinned = new Map([...readSelected(saved?.loaded ?? []), ...readSelected(saved?.selected ?? [])].map(item => [item.id, item.version]))
   const frozenInventory = durable?.configuration.skillInventoryVersion === 1
     ? new Map(durable.configuration.pinnedSkillVersions.map(item => [item.id, item.version])) : null

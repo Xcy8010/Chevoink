@@ -145,7 +145,22 @@ export const GENRE_WRITING_CARDS: Record<string, WritingKnowledgeCard[]> = {
   ],
 }
 
-/** 按重要性取通用卡 top N，拼成常驻注入段（≤300 字目标） */
+export const MANUSCRIPT_WRITING_CORE = `【正文写作核心】
+按作者这次的明确要求写这本书，承接已确认的设定、发生过的事和人物经历。当前要求可以改变旧风格。只有关键要求无法协调、且会改变交付时才问一个具体问题。作品标签、样章风格和通用技巧作为参考。
+
+先想读者为什么值得经历这一段。它可以兑现期待、推进事件、改变关系、让损失被感到，也可以让人物相处、取乐或喘息。按本书和本场选择开头、详略与收束。阻力、反转和悬念在它们有作用时使用。
+
+让读者从人物此刻注意什么、知道或误解什么、想争取或保住什么，看懂他为什么作出这个选择。只用有关的经历。同一人面对不同关系可以换说法。对白从各自目的和理解出发，直说、沉默、争执或解释都可成立。人物差异来自他们关心和回避的事。
+
+让重要选择的结果进入后续处境。按已建立的条件判断救援、交易、送达和其他行动是否完成。已经发生的收益、照顾和安稳继续有效，除非后来有故事内的充分原因改变它们。让专业信息帮助读者理解眼前决定，保留新条件、误会被澄清和人物有理由的复述，删去已经说清且没有新作用的重复解释。
+
+按作者所需的情绪幅度写。允许直写心理、热烈宣泄、幽默和克制。爽文交付约定的主动与收益，悬疑提供可回看的依据，科幻让规则影响选择，关系故事让相处留下变化，治愈和日常允许拒绝与平静。同人及非人角色遵守已确认的设定和改写边界。混合题材按本段要兑现的体验取舍。
+
+交付前只处理会影响这次阅读的具体问题。保留有效的原稿、声口、情感和节奏，在授权范围内作最小调整。按作者指定的正文或格式交付，审读意见留给明确要求分析或修稿的任务。`
+
+export const LOCAL_FICTION_REVIEW_GUIDANCE = '用一句话说明作者想让读者体验什么。找出至多三处实质影响，逐项给出原文位置、读者会失去的理解或期待、最小修法及应保留的内容。把疑点、事实错误和审美选择分开。现稿成立时可以零修改。需要改变作者意图才能修正时，把冲突交还作者决定。'
+
+/** 保留已冻结的通用写作卡，供旧提示与离线基线对照。 */
 export function buildGeneralWritingDigest(limit = 3): string {
   const cards = [...GENERAL_WRITING_CARDS].sort((a, b) => b.importance - a.importance).slice(0, limit)
   return `写作软质量信号（仅在原文有证据时使用，作品自身风格优先）：\n${cards
@@ -158,8 +173,18 @@ export const WRITING_REQUEST_GUIDANCE = '本次完整原始作者请求是创作
 
 const genreAliases: Record<string, string[]> = { 言情: ['言情', '爱情'], 慢热: ['慢热', '舒缓', '慢节奏'], 现实: ['现实', '写实'], 幽默: ['幽默', '喜剧', '搞笑'], 爽文: ['爽文', '爽感'] }
 
+const CURRENT_GENRE_GUIDANCE: Record<string, string> = {
+  爽文的阅读承诺与兑现: '让主角用读者能理解的优势主动争取本章约定的东西。得到的资源、地位或机会应改变后续选择，后续期待可以从已经兑现的收益长出来。',
+  首章收益与情绪强度: '捡漏时写清别人不知道的优势、可理解的获利空间，以及主角据此作出的主动决定。发现和期待可以兑现爽感，按作者要求停在问价、报价或交易前。',
+  硬设定自洽: '遵守已确立的能力边界、代价和完成条件。让读者理解什么规则改变了人物的选择；探索、协作和日常也能展示设定的影响。',
+  尺度感与陌生化: '如果本场承担探索或奇观，让陌生尺度通过人物的感知、行动或生活后果变得可理解。熟悉物件在新环境里的用途也可以承载这种感受。',
+  红鲱鱼与公平性: '承担公平推理承诺时，让读者凭已出现的线索回看关键推断。误导可来自线索的另一种合理解释或人物的知识盲区。',
+  压迫感营造: '需要压迫感时，可用视角人物察觉到的环境变化、时间压力或可信误判积累危险感。平静调查也可以靠发现推进。',
+  口语化对话: '选择人物在当下关系和处境中会用的说法。直说、行话、省略、打断和潜台词按交际目的取舍。',
+}
+
 /** Small soft-card recall only; the unabridged request remains the model's authority. */
-export function buildGenreWritingDigest(tagNames: string[], limit = 3, originalRequest = ''): string | null {
+export function buildGenreWritingDigest(tagNames: string[], limit = 3, originalRequest = '', useCurrentGuidance = false): string | null {
   const clauses = originalRequest.split(/[。！？!?；;，,\n]+/u).map(clause => {
     const change = clause.search(/现在|这次|本次|改成|改为|改写成/u)
     return change >= 0 ? clause.slice(change) : /以前|原来|原先|之前|曾经/u.test(clause) ? '' : clause
@@ -185,5 +210,5 @@ export function buildGenreWritingDigest(tagNames: string[], limit = 3, originalR
     return null
   }
   const top = matched.sort((a, b) => b.importance - a.importance).slice(0, limit)
-  return `题材阅读体验参考（${requested.size ? '本次作者请求优先' : '作品标签次级参考'}，不是硬性模板）：\n${top.map((card) => `[${card.topic}] ${card.content}`).join('\n')}`
+  return `题材阅读体验参考（${requested.size ? '本次作者请求优先' : '作品标签次级参考'}，不是硬性模板）：\n${top.map((card) => `[${card.topic}] ${(useCurrentGuidance && CURRENT_GENRE_GUIDANCE[card.topic]) || card.content}`).join('\n')}`
 }

@@ -280,9 +280,8 @@ export const historicalBuiltinCatalog: AgentSkill[] = [
   },
 ]
 
-export const BUILTIN_SKILL_PACK_VERSION = '4.0.0'
-// 4.0 publishes the current pack; historical router identities keep their own catalogs.
-export const SKILL_ROUTER_VERSION = '4.2.0'
+export const BUILTIN_SKILL_PACK_VERSION = '4.0.1'
+export const SKILL_ROUTER_VERSION = '4.3.0'
 const RELEASE_GUIDANCE = '本任务的完整原始作者要求与服务端冻结边界优先。局部修改先读取当前正文，再用唯一原文片段精确修订，不借整章覆盖扩大范围；定位不足先补充证据。正文改变后完成本任务要求的当前版本检查。严格审查逐项实际应用或记录有依据的保留理由；保存、检查完成和任务交付分别按真实结果汇报。'
 
 /** Frozen 3.5 pack, including resources not yet loaded by an existing run. */
@@ -302,10 +301,56 @@ export const frozenV360BuiltinCatalog: AgentSkill[] = frozenV350BuiltinCatalog.m
       : resource])),
 }))
 
-/** New admissions use 4.0; stable IDs and resource content remain compatible. */
-export const skillCatalog: AgentSkill[] = frozenV360BuiltinCatalog.map(skill => ({
-  ...skill, version: BUILTIN_SKILL_PACK_VERSION,
+/** Baseline for routers 4.0 through 4.2, including skills not yet loaded. */
+export const frozenV400BuiltinCatalog: AgentSkill[] = frozenV360BuiltinCatalog.map(skill => ({
+  ...skill, version: '4.0.0',
 }))
+
+const CURRENT_WRITING_SKILLS: Record<string, Partial<Pick<AgentSkill, 'description' | 'synopsis'>> & { resources: AgentSkill['resources'] }> = {
+  'cn-scene-task.v3': {
+    description: '按本场阅读体验选择需要写清的行动、相处或后果。',
+    synopsis: '按场景作用选择必要信息；相处、兑现和喘息也可以独立成场。',
+    resources: {
+      scene: '写前按需确认场景的作用和承接点。行动或博弈场可核对目标、现有阻力、选择和后果。相处、兑现或喘息场可从人物共享的活动、注意力变化或自然停点组织。只取当前场景需要的部分，不展示场景任务包。',
+      draft: '按本场作用安排详略与终点。行动场让目标、选择与已发生结果可读；相处和喘息场可以从共同做完一件事、停留或离开收束。复用已确认的承接事实，场景建议不能越过作者的停笔位置。',
+    },
+  },
+  'cn-webfiction-draft.v3': {
+    description: '按本书声口把行动、感受、叙述与世界内材料写成可读正文。',
+    synopsis: '按场景选择叙述距离和信息载体，在作者指定的位置交付完整正文。',
+    resources: {
+      draft: '按本书视角和排版惯例呈现正文。面板、提示、数值、纸面文字和直接引文可以使用清晰的引号或结构化排版；作品名使用《》。历史作者规格只承接本次未改变的部分，旧展示格式不覆盖本轮交付要求。',
+    },
+  },
+  'cn-character-voice.v3': {
+    resources: {
+      draft: '多人面对同一件事时，可以通过他们各自追问的细节、称呼、认错或转移话题的方式辨认人物。只在带来行动、态度或信息变化时添加对白动作。',
+    },
+  },
+  'cn-emotion-grounding.v3': {
+    synopsis: '用人物在乎的事解释情绪变化，表达幅度由作者和情境决定。',
+    resources: {
+      draft: '情绪转折读来突然时，找出读者需要知道的触发点、人物在乎的事或接下来的决定。用这一场最有力的依据，允许直述、停顿或宣泄，不逐项补反应。',
+    },
+  },
+  'cn-prose-specificity.v3': {
+    resources: {
+      draft: '首次写作时先分清旁白、对话、纸面材料和机器报告的功能。必要术语、世界内格式和刻意回响可以保留；同一词或句式再次出现时，结合它在此处对阅读的实际作用判断。',
+    },
+  },
+  'cn-style-continuity.v3': {
+    resources: {
+      draft: '从近期正文选择与本场有关的叙述距离、语域或句段节奏。视角、时代、梦境、情绪或作者意图改变时，可以用一个可辨认的过渡进入新声口。',
+    },
+  },
+}
+
+export const skillCatalog: AgentSkill[] = frozenV400BuiltinCatalog.map(skill => {
+  const current = CURRENT_WRITING_SKILLS[skill.id]
+  if (!current) return { ...skill, version: BUILTIN_SKILL_PACK_VERSION }
+  const resources = Object.fromEntries(Object.entries(current.resources).map(([phase, resource]) => [phase, `${resource}\n${RELEASE_GUIDANCE}`]))
+  return { ...skill, ...current, version: BUILTIN_SKILL_PACK_VERSION, resources: { ...skill.resources, ...resources } }
+})
 
 const legacySkillAliases: Record<string, string> = {
   'scene-craft.v2': 'cn-scene-task.v3',
@@ -385,7 +430,7 @@ export function routeSkills(input: {
   const normalizedPrompt = input.prompt.trim()
   // Only current built-in routing normalizes equivalent author language. Saved
   // runs and user-authored trigger expressions keep their original semantics.
-  const builtinPrompt = ['3.6.0', '3.7.0', '4.0.0', '4.1.0', SKILL_ROUTER_VERSION].includes(routerVersion) ? normalizedPrompt.replace(/(?:A\s*I\s*(?:味|痕迹|感)|人工智能\s*(?:味|痕迹)|机器味)/giu, 'AI味') : normalizedPrompt
+  const builtinPrompt = ['3.6.0', '3.7.0', '4.0.0', '4.1.0', '4.2.0', SKILL_ROUTER_VERSION].includes(routerVersion) ? normalizedPrompt.replace(/(?:A\s*I\s*(?:味|痕迹|感)|人工智能\s*(?:味|痕迹)|机器味)/giu, 'AI味') : normalizedPrompt
   const isEnabled = (skill: AgentSkill): boolean => input.enabledSkillIds?.has(skill.id) ?? true
 
   const pinnedCandidates: SkillRouteCandidate[] = input.pinnedSkillIds?.size
@@ -406,6 +451,8 @@ export function routeSkills(input: {
     }
   }
 
+  const usesDraftFoundation = ['4.1.0', '4.2.0', SKILL_ROUTER_VERSION].includes(routerVersion)
+    && input.intent === 'write' && phase === 'draft'
   const scored = catalog
     .filter((skill) => !pinnedIds.has(skill.id) && isEnabled(skill) && skill.status === 'active' && skill.intents.includes(input.intent) && modeMatches(skill, input.mode, phase) &&
       skill.phases.includes(phase) && !blockedByNegative(skill, skill.owner === 'chevoink' ? builtinPrompt : normalizedPrompt))
@@ -415,8 +462,7 @@ export function routeSkills(input: {
       // author must name in every continuation. Keep specialist/custom trigger
       // semantics and frozen routers intact; only enabled eligible resources
       // participate, and their own instructions remain conditional on scene.
-      const foundation = ['4.1.0', SKILL_ROUTER_VERSION].includes(routerVersion) && input.intent === 'write' && phase === 'draft'
-        && skill.owner === 'chevoink' && ['cn-prose-specificity.v3', 'cn-character-voice.v3', 'cn-emotion-grounding.v3'].includes(skill.id)
+      const foundation = usesDraftFoundation && skill.owner === 'chevoink' && ['cn-prose-specificity.v3', 'cn-character-voice.v3', 'cn-emotion-grounding.v3'].includes(skill.id)
       const reasonCodes: SkillReasonCode[] = [...new Set([...matchedTriggers.map((trigger) => trigger.reasonCode),
         ...(foundation ? ['DRAFT_FOUNDATION' as const] : [])])]
       const score = Math.max(baseIntentScore(skill, input.intent), foundation ? 35 : 0) + matchedTriggers.reduce((total, trigger) => total + trigger.weight, 0) + skill.priority / 100
@@ -466,8 +512,7 @@ export function routeSkills(input: {
     ...primaryCandidates.filter((candidate) => !authorReserved.includes(candidate) && !explicitlyMatchedSpecialists.includes(candidate)),
     ...authorFallbackCandidates.filter((candidate) => !authorReserved.includes(candidate)),
   ]
-  const draftFoundation = ['4.1.0', SKILL_ROUTER_VERSION].includes(routerVersion) && input.intent === 'write' && phase === 'draft'
-  const hardCap = Math.min(6, (draftFoundation ? 6 : maxLoaded) + pinnedCandidates.length + authorReserved.length)
+  const hardCap = Math.min(6, (usesDraftFoundation ? 6 : maxLoaded) + pinnedCandidates.length + authorReserved.length)
   for (const candidate of orderedCandidates) {
     if (selectedCandidates.length >= hardCap) break
     // 手动指定不参与冲突让位：作者已经表态要用它。
@@ -545,18 +590,24 @@ export function buildSkillExecutionDigest(decision: SkillRouteDecision, freedom:
   }
 
   const pinned = new Set(options.pinnedSkillIds ?? [])
+  let sharedBoundary = ''
   const loaded = decision.selected.map((skill) => {
     const resolved = resolveSkillResource(skill, decision.phase)
     if (!resolved) return null
     const phaseLabel = resolved.phase === decision.phase ? decision.phase : `${resolved.phase}（本轮阶段 ${decision.phase} 未提供专用说明）`
     const pinnedMark = pinned.has(skill.id) ? ' / 作者本轮手动指定' : ''
-    return `[Skill ${skill.id}@${skill.version} / ${phaseLabel} / soft${pinnedMark}]\n${resolved.resource}`
+    let resource = resolved.resource
+    if (skill.owner === 'chevoink' && skill.version === BUILTIN_SKILL_PACK_VERSION && resource.includes(RELEASE_GUIDANCE)) {
+      resource = resource.replace(`\n${RELEASE_GUIDANCE}`, '')
+      sharedBoundary = `\n${RELEASE_GUIDANCE}`
+    }
+    return `[Skill ${skill.id}@${skill.version} / ${phaseLabel} / soft${pinnedMark}]\n${resource}`
   }).filter((item): item is string => Boolean(item)).join('\n\n')
 
   const head = `${freedomGuidance(freedom)}
 以下 Skill 已由服务端确定性路由并完整加载。它们是本轮工作方法，不是可忽略的候选，也不是逐项照抄到正文的检查表：
 ${loaded}
-共同边界：不得覆盖作者硬约束、故事事实、权限与版本校验；发生冲突时作者要求与有来源的故事证据优先。`
+共同边界：不得覆盖作者硬约束、故事事实、权限与版本校验；发生冲突时作者要求与有来源的故事证据优先。${sharedBoundary}`
 
   return [head, unloadedGuide].filter((block): block is string => Boolean(block)).join('\n\n')
 }

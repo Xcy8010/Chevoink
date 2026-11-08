@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { buildGeneralWritingDigest } from '../../api/lib/agent/knowledge/writing.js'
 import {
   buildSkillExecutionDigest,
+  BUILTIN_SKILL_PACK_VERSION,
   loadSkill,
   routeSkills,
   skillCatalog,
@@ -49,7 +50,9 @@ describe('Agent 3.0 Skill OS deterministic router', () => {
 
     const digest = buildSkillExecutionDigest(decision, 'balanced')
     expect(digest).toContain('已由服务端确定性路由并完整加载')
-    expect(digest).toContain('每个场景都要有目标、阻力和状态变化')
+    expect(digest).toContain('相处和喘息场可以从共同做完一件事')
+    expect(digest).not.toContain('每个场景都要有目标、阻力和状态变化')
+    expect(digest.match(/本任务的完整原始作者要求与服务端冻结边界优先/g)).toHaveLength(1)
     expect(digest).not.toContain('需要时调用 skill_load')
   })
 
@@ -97,7 +100,7 @@ describe('Agent 3.0 Skill OS deterministic router', () => {
   })
 
   it('旧会话中的 2.0 Skill id 可以安全迁移到 3.0 资源', () => {
-    expect(loadSkill('scene-craft.v2', 'draft', 'bold')).toContain('cn-scene-task.v3@4.0.0')
+    expect(loadSkill('scene-craft.v2', 'draft', 'bold')).toContain(`cn-scene-task.v3@${BUILTIN_SKILL_PACK_VERSION}`)
     expect(loadSkill('prose-specificity.v2', 'draft', 'balanced')).toContain('首次写作')
   })
 
@@ -121,7 +124,7 @@ describe('Agent 3.0 Skill OS deterministic router', () => {
 
   it('内置 Skill 均有版本、许可、负触发和上下文预算', () => {
     expect(skillCatalog.length).toBeGreaterThanOrEqual(10)
-    expect(skillCatalog.every((skill) => skill.version === '4.0.0')).toBe(true)
+    expect(skillCatalog.every((skill) => skill.version === BUILTIN_SKILL_PACK_VERSION)).toBe(true)
     expect(skillCatalog.every((skill) => skill.negativeTriggers.length > 0)).toBe(true)
     expect(skillCatalog.every((skill) => skill.tokenBudget > 0)).toBe(true)
     const adapted = skillCatalog.filter((skill) => skill.license !== 'internal')

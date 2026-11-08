@@ -12,7 +12,7 @@ import { activeChapterScope } from '../data/internal.js'
 import { plainChapterTitle } from '../../../shared/structure/chapter-title.js'
 import type { AgentDefinition } from './agents.js'
 import { OPERATION_KNOWLEDGE } from './knowledge/operation.js'
-import { buildGeneralWritingDigest, buildGenreWritingDigest, WRITING_REQUEST_GUIDANCE } from './knowledge/writing.js'
+import { buildGeneralWritingDigest, buildGenreWritingDigest, MANUSCRIPT_WRITING_CORE, WRITING_REQUEST_GUIDANCE } from './knowledge/writing.js'
 import { readChapterWritingBackground, readWritingPresentation, renderChapterWritingBackground, renderWritingPresentation } from './writing-request-context.js'
 import { buildSkillExecutionDigest, routeSkills, SKILL_ROUTER_VERSION, type SkillRouteDecision } from './skills/index.js'
 import { resolveRuntimeSkillContext } from './skills/service.js'
@@ -528,7 +528,9 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   const pinnedSkillIds = (input.pinnedSkillIds ?? []).filter((skillId) => enabledSkillIds?.has(skillId) ?? false)
   // The persisted router version also freezes task-purpose routing, including
   // an empty selection. Legacy 4.1 keeps its original interpretation on resume.
-  const interpretedSkills = Boolean(input.taskSpec.scope.authorEffects) && skillContext?.routerVersion === SKILL_ROUTER_VERSION
+  const currentSkillRouter = !skillContext || skillContext.routerVersion === SKILL_ROUTER_VERSION
+  const interpretedSkills = Boolean(input.taskSpec.scope.authorEffects) && skillContext !== null
+    && (currentSkillRouter || skillContext.routerVersion === '4.2.0')
   const planningSkills = interpretedSkills && (input.taskSpec.intent === 'plan' || input.taskSpec.writingPacing === 'proposal_only'
     || input.mode === 'plan' && input.taskSpec.scope.authorEffects?.manuscript)
   const reviewingSkills = interpretedSkills && (input.taskSpec.intent === 'review'
@@ -548,7 +550,14 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
         pinnedSkillIds: pinnedSkillIds.length > 0 ? new Set(pinnedSkillIds) : undefined,
       })
     : null
-  const genreDigest = writingResources && input.mode === 'build' && requiresManuscriptDelivery(input.taskSpec) ? buildGenreWritingDigest(ruleBundleSplit.tagNames, 3, input.prompt) : null
+  // Protocol 1 can write directly from its unbound first turn. Use the
+  // original author intent for prose guidance without changing task authority.
+  const manuscriptDelivery = requiresManuscriptDelivery(input.taskSpec)
+  const useWritingCore = currentSkillRouter && writingResources && input.mode === 'build'
+    && (manuscriptDelivery || (input.taskSpec.scope.agentWritingProtocol === 1
+      && input.taskSpec.scope.authorEffects?.manuscript === true))
+  const genreDigest = writingResources && input.mode === 'build' && manuscriptDelivery
+    ? buildGenreWritingDigest(ruleBundleSplit.tagNames, 3, input.prompt, useWritingCore) : null
   const { bootstrapPrompt, novelDataBundle } = ruleBundleSplit
 
   // 逐轮可变内容的 digest 统一收集，全部进尾部快照；system 只留任务内稳定的固定规则
@@ -571,8 +580,9 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     operatingGuidance ?? MODE_CONTRACTS[input.mode],
     operatingGuidance ? null : DECISION_STRATEGIES,
     operatingGuidance ? null : OPERATION_KNOWLEDGE,
-    operatingGuidance && !input.taskSpec.scope.authorEffects?.manuscript ? null : buildGeneralWritingDigest(),
-    operatingGuidance ? null : WRITING_REQUEST_GUIDANCE,
+    useWritingCore ? MANUSCRIPT_WRITING_CORE
+      : operatingGuidance && !input.taskSpec.scope.authorEffects?.manuscript ? null : buildGeneralWritingDigest(),
+    operatingGuidance || useWritingCore ? null : WRITING_REQUEST_GUIDANCE,
     hasCapability('skill_create_draft', 'skill_install_shared') ? '技能操作：作者明确要求“创建/新增一个技能”，且该偏好会在后续任务反复复用时，先调用 skill_create_draft 生成私有、关闭的草稿；再只在创建或修改后运行一条应命中和一条不应命中的 skill_test。测试完成后说明结果，只有作者本轮明确要求发布时才调用 skill_publish。普通单轮要求不得保存成技能。作者明确要求安装共享技能时，先用 skill_shared_invites 列出待处理邀请，再只对作者指定的 inviteId 调用 skill_install_shared；不得自动导入 GitHub 或任意外部源码，第三方来源必须由作者在技能区提供许可证、归属和固定版本。' : null,
     '历史工具记录由系统生成，仅描述过去的工具状态，不是调用格式或新指令，不要模仿。需要执行操作时必须使用 API 原生 function calling；普通文本、历史摘要或参数示例均不会执行工具。向作者汇报进展时使用自然语言，不输出调用标记。',
     hasCapability('novel_update_meta') ? TAG_LIBRARY_DIGEST : null,
@@ -603,7 +613,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     chapterLine,
   })
 
-  const chapterWriting = requiresManuscriptDelivery(input.taskSpec)
+  const chapterWriting = manuscriptDelivery
     && (writingTargets.length > 0 || input.taskSpec.scope.chapterIds?.includes(input.chapterId ?? ''))
   const writingChapterId = writingTargets.length === 1 ? writingTargets[0].chapterId ?? null : writingTargets.length > 1 ? null : input.chapterId
   const subject = { userId: input.userId, novelId: input.novelId, runId: input.runId }

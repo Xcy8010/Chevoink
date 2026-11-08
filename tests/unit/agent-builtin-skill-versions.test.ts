@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { frozenV360BuiltinCatalog, frozenV350BuiltinCatalog, historicalBuiltinCatalog, skillCatalog, loadSkill, routeSkills } from '../../api/lib/agent/skills/index.js'
+import { BUILTIN_SKILL_PACK_VERSION, frozenV400BuiltinCatalog, frozenV360BuiltinCatalog, frozenV350BuiltinCatalog, historicalBuiltinCatalog, skillCatalog, loadSkill, routeSkills } from '../../api/lib/agent/skills/index.js'
 import { createHash } from 'node:crypto'
 import { buildCustomSkillArtifacts } from '../../api/lib/agent/skills/custom.js'
 import { resolveEnabledRuntimeSkills, resolveRuntimeSkillContext, syncBuiltinSkillCatalog } from '../../api/lib/agent/skills/service.js'
@@ -8,17 +8,19 @@ import { prisma } from '../../api/lib/prisma.js'
 afterEach(() => vi.restoreAllMocks())
 
 describe('versioned built-in writing resources', () => {
-  it('creates 4.0.0 assets and preserves 3.5.0 without updating any immutable version', async () => {
+  it('creates the current pack and preserves 4.0.0 and 3.5.0 immutable assets', async () => {
     vi.spyOn(prisma.agentSkillDefinition, 'upsert').mockResolvedValue({} as never)
     const versions = vi.spyOn(prisma.agentSkillVersion, 'upsert').mockResolvedValue({} as never)
     vi.spyOn(prisma, '$transaction').mockResolvedValue([])
     await syncBuiltinSkillCatalog()
     const changed = ['cn-scene-task.v3', 'cn-webfiction-draft.v3', 'cn-emotion-grounding.v3']
     for (const id of changed) {
-      const call = versions.mock.calls.find(([input]) => input.where.skillId_version?.skillId === id && input.where.skillId_version.version === '4.0.0')![0]
-      expect(call.where.skillId_version).toEqual({ skillId: id, version: '4.0.0' })
-      expect(call.create).toMatchObject({ version: '4.0.0', contentHash: expect.stringMatching(/^[a-f0-9]{64}$/) })
-      expect(call.update).toEqual({})
+      const published = versions.mock.calls.filter(([input]) => input.where.skillId_version?.skillId === id)
+      for (const version of ['4.0.0', BUILTIN_SKILL_PACK_VERSION]) {
+        const call = published.find(([input]) => input.where.skillId_version?.version === version)![0]
+        expect(call.create).toMatchObject({ version, contentHash: expect.stringMatching(/^[a-f0-9]{64}$/) })
+        expect(call.update).toEqual({})
+      }
     }
     expect(versions.mock.calls.every(([input]) => Object.keys(input.update).length === 0)).toBe(true)
     // Exact pre-change manifest/instructions hash witnessed in the diagnostic.
@@ -42,8 +44,9 @@ describe('versioned built-in writing resources', () => {
     const runtime = await resolveEnabledRuntimeSkills('fixture-user', 'fixture-novel')
     const current = runtime.find(skill => skill.id === 'cn-webfiction-draft.v3')!
     expect(current).toBe(skillCatalog.find(skill => skill.id === current.id))
-    expect(current.version).toBe('4.0.0')
-    expect(current.resources.draft).toContain('低修辞预算只控制无功能修饰，不代表低情绪')
+    expect(current.version).toBe(BUILTIN_SKILL_PACK_VERSION)
+    expect(current.resources.draft).toContain('面板、提示、数值、纸面文字和直接引文')
+    expect(current.resources.draft).not.toContain('低修辞预算')
     expect(runtime.some(skill => skill.id === 'cn-scene-task.v3')).toBe(false)
     expect(runtime.find(skill => skill.id === 'custom.fixture')).toMatchObject({ version: '0.1.0', resources: instructions })
   })
@@ -55,25 +58,29 @@ describe('versioned built-in writing resources', () => {
     const readVersion = vi.spyOn(prisma.agentSkillVersion, 'findUnique')
     const runtime = await resolveRuntimeSkillContext('u', 'n', 'old-40')
     expect(runtime.routerVersion).toBe('4.0.0')
-    expect(runtime.catalog).toEqual(skillCatalog.filter(skill => skill.id !== 'cn-character-voice.v3'))
+    expect(runtime.catalog).toEqual(frozenV400BuiltinCatalog.filter(skill => skill.id !== 'cn-character-voice.v3'))
     expect(runtime.catalog.every(skill => skill.version === '4.0.0')).toBe(true)
     expect(readVersion).not.toHaveBeenCalled()
     expect(routeSkills({ mode: 'build', intent: 'write', freedom: 'balanced', prompt: '写下一章', ...runtime }).reasonCodes).not.toContain('DRAFT_FOUNDATION')
   })
 
-  it('marks a saved current 4.1 selection as frozen without changing its versions or stored records', async () => {
-    const saved = { routerVersion: '4.1.0', selected: [{ id: skillCatalog[3].id, version: skillCatalog[3].version }], loaded: [] }
+  it.each(['4.1.0', '4.2.0'])('preserves the exact 4.0.0 resources and routing for %s', async routerVersion => {
+    const skill = frozenV400BuiltinCatalog[3]
+    const saved = { routerVersion, selected: [{ id: skill.id, version: skill.version }], loaded: [] }
     const before = structuredClone(saved)
     vi.spyOn(prisma.agentSkillRun, 'findFirst').mockResolvedValue(saved as never)
     vi.spyOn(prisma.agentRun, 'findFirst').mockResolvedValue(null)
     vi.spyOn(prisma.agentSkillInstallation, 'findMany').mockResolvedValue([])
-    const result = await resolveRuntimeSkillContext('u', 'n', 'old-41')
-    expect(result).toMatchObject({ routerVersion: '4.1.0' })
-    expect(result.catalog).toEqual(skillCatalog)
+    const result = await resolveRuntimeSkillContext('u', 'n', 'old-writing-run')
+    expect(result).toMatchObject({ routerVersion })
+    expect(result.catalog).toEqual(frozenV400BuiltinCatalog)
     expect(saved).toEqual(before)
+    const routed = routeSkills({ mode: 'build', intent: 'write', freedom: 'balanced', prompt: '续写下一章，减少 A I 痕迹。', ...result })
+    expect(routed.reasonCodes).toEqual(expect.arrayContaining(['STYLE_RISK_HIGH', 'DRAFT_FOUNDATION']))
+    expect(loadSkill('cn-scene-task.v3', 'draft', 'balanced', result.catalog)).toContain('每个场景都要有目标、阻力和状态变化')
   })
 
-  it('a saved 3.7 router retains every 3.6 resource while new tasks use 4.0', async () => {
+  it('a saved 3.7 router retains every 3.6 resource', async () => {
     vi.spyOn(prisma.agentSkillRun, 'findFirst').mockResolvedValue({ routerVersion: '3.7.0', selected: [], loaded: [] } as never)
     vi.spyOn(prisma.agentRun, 'findFirst').mockResolvedValue(null)
     vi.spyOn(prisma.agentSkillInstallation, 'findMany').mockResolvedValue([])
@@ -83,7 +90,7 @@ describe('versioned built-in writing resources', () => {
     expect(result.catalog).toEqual(frozenV360BuiltinCatalog)
     expect(result.catalog.every(skill => skill.version === '3.6.0')).toBe(true)
     expect(readVersion).not.toHaveBeenCalled()
-    for (const old of result.catalog) expect(skillCatalog.find(skill => skill.id === old.id)?.resources).toEqual(old.resources)
+    for (const old of result.catalog) expect(frozenV400BuiltinCatalog.find(skill => skill.id === old.id)?.resources).toEqual(old.resources)
     expect(routeSkills({ mode: 'build', intent: 'revise', freedom: 'balanced', prompt: '减少 A I 痕迹，保留原事实。' }).selected.map(s => s.id))
       .toEqual(routeSkills({ mode: 'build', intent: 'revise', freedom: 'balanced', prompt: '减少 A I 痕迹，保留原事实。', routerVersion: '3.7.0', catalog: result.catalog }).selected.map(s => s.id))
   })
@@ -113,7 +120,8 @@ describe('versioned built-in writing resources', () => {
     expect(current.selected.map(skill => skill.id)).toContain('cn-webfiction-draft.v3')
     expect(current.selected.map(skill => skill.id)).toContain('cn-prose-specificity.v3')
     expect(frozen.selected.map(skill => skill.id)).not.toContain('cn-prose-specificity.v3')
-    expect(loadSkill('cn-webfiction-draft.v3', 'draft', 'balanced')).toContain('同句或跨句释因前')
+    expect(loadSkill('cn-webfiction-draft.v3', 'draft', 'balanced', frozenV400BuiltinCatalog)).toContain('同句或跨句释因前')
+    expect(loadSkill('cn-webfiction-draft.v3', 'draft', 'balanced')).not.toContain('同句或跨句释因前')
     expect(loadSkill('cn-prose-specificity.v3', 'critique', 'balanced')).toContain('证据必须包含拟修改对象')
   })
 

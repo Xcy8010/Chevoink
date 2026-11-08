@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../../api/lib/prisma.js', () => ({
   prisma: {
+    $transaction: vi.fn(),
     agentRun: { findFirst: vi.fn(async () => null) },
     // Context assembly covers ordinary runs; no persisted goal execution is
     // attached to this fixture.
@@ -72,9 +73,11 @@ const { buildStoryCompilerDigest } = await import('../../api/lib/agent/story-com
 const { readWritingContinuityReference } = await import('../../api/lib/agent/writing-continuity-reference.js')
 const { isAgent2FeatureEnabled } = await import('../../api/lib/agent2-feature-flags.js')
 const { resolveRuntimeSkillContext } = await import('../../api/lib/agent/skills/service.js')
-const { skillCatalog, SKILL_ROUTER_VERSION } = await import('../../api/lib/agent/skills/index.js')
+const { frozenV400BuiltinCatalog, skillCatalog, SKILL_ROUTER_VERSION } = await import('../../api/lib/agent/skills/index.js')
 const { buildTaskSpec } = await import('../../api/lib/agent/task-spec.js')
 const { freezeTaskCapabilities } = await import('../../api/lib/agent/task-capabilities.js')
+const { enableAgentWritingScope } = await import('../../api/lib/agent/agent-writing-scope.js')
+const { LOCAL_FICTION_REVIEW_GUIDANCE, MANUSCRIPT_WRITING_CORE } = await import('../../api/lib/agent/knowledge/writing.js')
 
 type AssembleInput = Parameters<typeof assembleContext>[0]
 
@@ -312,9 +315,44 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(written.skillRoute?.selected.map(skill => skill.id)).toEqual(expect.arrayContaining(['cn-character-voice.v3', 'cn-emotion-grounding.v3', 'cn-prose-specificity.v3']))
   })
 
+  it('sends the new writing core on the studio protocol first turn before optional binding', async () => {
+    const input = interpretedInput('续写下一章，写慢热日常。让纸鹭和老邮差分完信，保持纸鹭不会读心；只要标题和正文。')
+    input.taskSpec = enableAgentWritingScope(input.taskSpec)
+    vi.mocked(prisma.$transaction).mockResolvedValueOnce(input.taskSpec)
+    const result = await assembleContext(input)
+    const text = result.messages.map(message => String(message.content)).join('\n\n')
+
+    expect(result.skillRoute?.selected).toEqual([])
+    expect(String(result.messages[0].content)).toContain(MANUSCRIPT_WRITING_CORE)
+    expect(text.split(MANUSCRIPT_WRITING_CORE)).toHaveLength(2)
+    expect(text).not.toContain('AI 痕迹规避')
+    expect(text).not.toContain(LOCAL_FICTION_REVIEW_GUIDANCE)
+    expect(String(result.messages.at(-1)?.content).startsWith(input.prompt)).toBe(true)
+  })
+
+  it('injects one core and one shared skill boundary when draft resources are active', async () => {
+    const input = interpretedInput('续写下一章。科幻救援在腕签与床签一致且入舱锁定时完成。保留机器报告和已完成的救援，不加广播条件。')
+    const current = await assembleContext(input)
+    const text = current.messages.map(message => String(message.content)).join('\n\n')
+    expect(text.split(MANUSCRIPT_WRITING_CORE)).toHaveLength(2)
+    expect(text.match(/本任务的完整原始作者要求与服务端冻结边界优先/g)).toHaveLength(1)
+    expect(text).toContain('相处和喘息场可以从共同做完一件事')
+    expect(text).not.toContain('每个场景都要有目标、阻力和状态变化')
+    expect(text).not.toContain('设定服务于两难困境')
+    expect(text).not.toContain(LOCAL_FICTION_REVIEW_GUIDANCE)
+    expect(String(current.messages.at(-1)?.content).startsWith(input.prompt)).toBe(true)
+
+    vi.mocked(resolveRuntimeSkillContext).mockResolvedValueOnce({ catalog: frozenV400BuiltinCatalog, routerVersion: '4.2.0' })
+    const frozen = await assembleContext(input)
+    const baseline = frozen.messages.map(message => String(message.content)).join('\n\n')
+    expect(baseline).toContain('每个场景都要有目标、阻力和状态变化')
+    expect(baseline).toContain('AI 痕迹规避')
+    expect(baseline).not.toContain(MANUSCRIPT_WRITING_CORE)
+  })
+
   it('keeps the original routing interpretation for a frozen historical router', async () => {
     const input = interpretedInput('里面选哪个题材？')
-    vi.mocked(resolveRuntimeSkillContext).mockResolvedValueOnce({ catalog: skillCatalog, routerVersion: '4.0.0' })
+    vi.mocked(resolveRuntimeSkillContext).mockResolvedValueOnce({ catalog: frozenV400BuiltinCatalog, routerVersion: '4.0.0' })
     const result = await assembleContext(input)
     expect(result.skillRoute?.routerVersion).toBe('4.0.0')
     expect(result.skillRoute?.phase).toBe('draft')
@@ -331,7 +369,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(resumed.skillRoute?.routerVersion).toBe(SKILL_ROUTER_VERSION)
     expect(resumed.skillRoute?.selected).toEqual([])
     expect(resumed.availableSkillVersions).toEqual(fresh.availableSkillVersions)
-    vi.mocked(resolveRuntimeSkillContext).mockResolvedValueOnce({ catalog: skillCatalog, routerVersion: '4.1.0' })
+    vi.mocked(resolveRuntimeSkillContext).mockResolvedValueOnce({ catalog: frozenV400BuiltinCatalog, routerVersion: '4.1.0' })
     const legacy = await assembleContext({ ...input, includeCurrentRunHistory: true })
     expect(legacy.skillRoute?.routerVersion).toBe('4.1.0')
     expect(legacy.skillRoute?.selected.map(skill => skill.id)).toContain('cn-webfiction-draft.v3')
