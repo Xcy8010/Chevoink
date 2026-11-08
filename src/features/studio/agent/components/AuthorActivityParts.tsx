@@ -1,5 +1,5 @@
-import { memo, useEffect, useId, useMemo, useState } from 'react'
-import { BookOpenText, Bot, ChevronDown, CircleHelp, ClipboardCheck, Download, FilePenLine, FileText, Globe2, Search } from 'lucide-react'
+import { memo, useEffect, useId, useMemo, useState, type ReactNode } from 'react'
+import { BookOpenText, Bot, Brain, ChevronDown, CircleHelp, ClipboardCheck, Download, FilePenLine, FileText, Globe2, Search } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { useStreamingTextState } from '../../components/use-streaming-text'
@@ -144,36 +144,40 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles }:
   </li>
 })
 
-const ActivityRow = memo(function ActivityRow({ group, runActive, active, titles }: { group: ActivityGroup; runActive: boolean; active: boolean; titles?: ReadonlyMap<string, string> }) {
+const ActivityRow = memo(function ActivityRow({ group, runActive, active, workingLabel, titles }: {
+  group?: ActivityGroup; runActive: boolean; active: boolean; workingLabel?: string; titles?: ReadonlyMap<string, string>
+}) {
   const [open, setOpen] = useState(false)
   const detailsId = useId()
-  const latest = new Map(group.calls.map(part => [part.toolName, part]))
+  const calls = group?.calls ?? []
+  const latest = new Map(calls.map(part => [part.toolName, part]))
   // A successful retry for the same action supersedes the headline, but the
   // earlier failed receipt remains in the expanded timeline.
   const unresolved = [...latest.values()].find(hasCurrentFailure)
-  const running = runActive ? [...group.calls].reverse().find(part => part.status === 'running') : undefined
-  const part = running ?? unresolved ?? group.calls[group.calls.length - 1]
-  const Icon = toolIcon(part)
-  const importWaiting = group.calls.find(call => isOpenImport(call, runActive))
-  const label = activitySummary(part, runActive, titles)
+  const running = runActive ? [...calls].reverse().find(part => part.status === 'running') : undefined
+  const part = running ?? unresolved ?? calls.at(-1)
+  const Icon = part && !workingLabel ? toolIcon(part) : Brain
+  const importWaiting = calls.find(call => isOpenImport(call, runActive))
+  const label = workingLabel ?? (part ? activitySummary(part, runActive, titles) : '')
   const executing = Boolean(active && running && !importWaiting && running.toolName !== 'ask_user')
 
-  return <div className="min-w-0" data-author-activity>
-    <button type="button" aria-expanded={open} aria-controls={detailsId} onClick={() => setOpen(value => !value)}
+  return <div className="min-w-0" data-author-activity={group ? '' : undefined} data-author-working={workingLabel ? '' : undefined} data-author-step>
+    <button type="button" aria-expanded={group ? open : undefined} aria-controls={group ? detailsId : undefined}
+      disabled={!group} onClick={() => setOpen(value => !value)}
       className="agent-activity-step inline-flex min-h-8 max-w-full items-center gap-2 px-1 text-left text-xs leading-5 text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] focus-visible:text-[var(--text-primary)] focus-visible:underline focus-visible:outline-none">
       <Icon aria-hidden className="h-3.5 w-3.5 shrink-0" />
       <span className="min-w-0 break-words">
-        <span aria-live={active || running ? 'polite' : undefined} data-activity-running={executing || undefined}
-          className={executing ? 'agent-processing-shimmer' : undefined}>{label}</span>
-        <ChevronDown aria-hidden className={cn('agent-activity-chevron ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-[opacity,transform]', open ? 'rotate-0' : '-rotate-90')} />
+        <span aria-live={active || running || workingLabel ? 'polite' : undefined} data-activity-running={executing || undefined}
+          className={executing || workingLabel ? 'agent-processing-shimmer' : undefined}>{label}</span>
+        {group ? <ChevronDown aria-hidden className={cn('agent-activity-chevron ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-[opacity,transform]', open ? 'rotate-0' : '-rotate-90')} /> : null}
       </span>
     </button>
     {importWaiting?.importWaiting ? <a className="ml-6 text-xs underline" href={importWaiting.importWaiting.url}>核对原文并确认导入</a> : null}
-    <AgentProcessRegion open={open} id={detailsId}>
+    {group ? <AgentProcessRegion open={open} id={detailsId}>
       <ul className="ml-2 border-l border-[var(--border-subtle)] pl-3">
-        {[...group.calls, ...group.children].map(call => <ActivityDetail key={call.callId} part={call} runActive={runActive} titles={titles} />)}
+        {[...calls, ...group.children].map(call => <ActivityDetail key={call.callId} part={call} runActive={runActive} titles={titles} />)}
       </ul>
-    </AgentProcessRegion>
+    </AgentProcessRegion> : null}
   </div>
 })
 
@@ -181,7 +185,7 @@ export function AuthorActivitySummary({ timing, active, open, onToggle }: { timi
   const label = active || timing.elapsedMs !== null
     ? <ProcessDuration timing={timing} active={active} />
     : <span className="text-[11px] text-[var(--text-secondary)]">查看处理过程</span>
-  return <div className="mb-2 border-b border-[var(--border-subtle)] pb-1.5">
+  return <div className="mb-2 border-b border-[var(--border-subtle)] pb-1.5" data-author-timer>
     {onToggle ? <button type="button" aria-expanded={open} onClick={onToggle}
       className="inline-flex min-h-7 items-center gap-1 text-left text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:underline focus-visible:outline-none">
       {label}
@@ -194,14 +198,8 @@ export function AuthorProgressText({ text }: { text: string }) {
   return <p className="break-words text-sm leading-7 text-[var(--text-primary)]" data-author-progress>{text}</p>
 }
 
-export function AuthorWorkingSummary({ text }: { text: string }) {
-  return <p role="status" className="text-xs leading-6 text-[var(--text-secondary)]" data-author-working>
-    <span className="agent-processing-shimmer">{text}</span>
-  </p>
-}
-
 export const AuthorActivityParts = memo(function AuthorActivityParts({
-  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, workingLabel, revealText, onTextRevealed, activityChapterTitles,
+  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, workingLabel, workingGroupId, revealText, onTextRevealed, activityChapterTitles,
 }: {
   parts: AgentMessagePart[]
   messageId: string
@@ -211,6 +209,7 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   processOpen?: boolean
   collapseText?: boolean
   workingLabel?: string
+  workingGroupId?: string
   revealText?: string
   onTextRevealed?: (messageId: string, text: string) => void
   activityChapterTitles?: ReadonlyMap<string, string>
@@ -227,29 +226,33 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   let textOrdinal = 0
   const rendered = new Set<string>()
 
-  return <div className="space-y-2">
-    {authorParts.map((part, index) => {
+  const stepKey = `${messageId}:step`
+  const liveGroupId = workingGroupId ?? (workingLabel ? [...(localGroups?.values() ?? [])].at(-1)?.id : undefined)
+  const entries = authorParts.map<ReactNode>((part, index) => {
       if (part.type === 'text') {
         const identity = `${messageId}:text:${textOrdinal++}`
         const text = part.text.slice(0, Math.max(0, revealed.text.length - textOffset))
         textOffset += part.text.length
-        const paragraph = <AgentMarkdownText key={identity} text={text} identity={identity} />
-        return processOpen !== undefined && (collapseText || index < lastToolIndex)
-          ? <AgentProcessRegion key={identity} open={processOpen}>{paragraph}</AgentProcessRegion>
-          : paragraph
+        const inProcess = collapseText || index < lastToolIndex
+        return <AgentProcessRegion key={identity} open={!inProcess || processOpen !== false}>
+          <AgentMarkdownText text={text} identity={identity} />
+        </AgentProcessRegion>
       }
       if (part.type !== 'tool-call' || part.subagentCallId) return null
       const group = localGroups?.get(part.callId)
       if (!group || group.messageId !== messageId || group.firstCallId !== part.callId || rendered.has(group.id)) return null
+      const key = rendered.size ? group.id : stepKey
       rendered.add(group.id)
-      const row = <>
+      return <AgentProcessRegion key={key} open={processOpen ?? true}>
         {group.transition ? <AuthorProgressText text={group.transition} /> : null}
-        <ActivityRow group={group} runActive={runActive} active={activeGroupId === group.id} titles={activityChapterTitles} />
-      </>
-      return processOpen === undefined
-        ? <div key={group.id}>{row}</div>
-        : <AgentProcessRegion key={group.id} open={processOpen}>{row}</AgentProcessRegion>
-    })}
-    {workingLabel ? <AuthorWorkingSummary text={workingLabel} /> : null}
-  </div>
+        <ActivityRow key="activity" group={group} runActive={runActive} active={activeGroupId === group.id} titles={activityChapterTitles}
+          workingLabel={liveGroupId === group.id ? workingLabel : undefined} />
+      </AgentProcessRegion>
+  })
+  if (workingLabel && !liveGroupId) entries.push(
+    <AgentProcessRegion key={stepKey} open={processOpen ?? true}>
+      <ActivityRow key="activity" runActive={runActive} active={false} workingLabel={workingLabel} />
+    </AgentProcessRegion>,
+  )
+  return <div className="space-y-2">{entries}</div>
 })

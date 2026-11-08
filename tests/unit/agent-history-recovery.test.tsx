@@ -79,6 +79,7 @@ it('merges full seq0 replay without removing settled tools or duplicating saved 
   })
   const parts = useAgentStore.getState().messages.find(message => message.id === 'saved-a')!.parts
   expect(parts.filter(part => part.type === 'reasoning')).toEqual([{ type: 'reasoning', text: '先核对承接。', activity: true }])
+  expect(parts.map(part => part.type === 'tool-call' ? part.callId : part.type)).toEqual(['reasoning', 'text', 'old-write', 'old-plan'])
   expect(parts.filter(part => part.type === 'text')).toEqual([{ type: 'text', text: '已有结果。\n\n' }])
   expect(toolIds()).toEqual(['old-write', 'old-plan'])
   expect(activityIds()).toEqual(['old-write', 'old-plan'])
@@ -87,6 +88,41 @@ it('merges full seq0 replay without removing settled tools or duplicating saved 
   act(() => { hook.result.current.connect('run-a', 8); Source.opened[0].send(result(99)); Source.opened[1].send(result(7)); Source.opened[1].send(result(9, 'new-write', 'later-a')) })
   expect(activityIds()).toEqual(['old-write', 'old-plan', 'new-write'])
   expect(useAgentStore.getState().lastSeq).toBe(9)
+})
+
+it('anchors the first visible final before restored tools and keeps another turn’s final separate', () => {
+  const saved = history()
+  saved[1].parts = saved[1].parts.filter(part => part.type !== 'text')
+  const hook = renderHook(() => useAgentStream())
+  act(() => { restoreActiveRunHistory(saved, 'run-a', 'session-a'); hook.result.current.connect('run-a', 50) })
+  act(() => {
+    const source = Source.opened[0]
+    source.send({ ...base, seq: 51, type: 'text.final', messageId: 'saved-a', text: '查清了错送的那封信。', asReasoning: false })
+    source.send({ ...base, seq: 52, type: 'tool.call', messageId: 'terminal', callId: 'reply', toolName: 'task_respond', title: '答复', args: {} })
+    source.send({ ...base, seq: 53, type: 'tool.result', messageId: 'terminal', callId: 'reply', toolName: 'task_respond', ok: true, summary: '完成' })
+    source.send({ ...base, seq: 54, type: 'text.final', messageId: 'terminal', text: '已保存第一章。', asReasoning: false })
+  })
+  const { messages } = useAgentStore.getState()
+  expect(messages.find(message => message.id === 'saved-a')?.parts).toEqual([
+    expect.objectContaining({ type: 'reasoning' }), { type: 'text', text: '查清了错送的那封信。' },
+    expect.objectContaining({ type: 'tool-call', callId: 'old-write', status: 'success' }),
+    expect.objectContaining({ type: 'tool-call', callId: 'old-plan', status: 'success' }),
+  ])
+  expect(messages.find(message => message.id === 'terminal')?.parts).toEqual([{ type: 'text', text: '已保存第一章。' }])
+})
+
+it('rejects text targeted at another run’s restored message', () => {
+  const saved = history()
+  saved[1].runId = 'unrelated-run'
+  const hook = renderHook(() => useAgentStream())
+  act(() => { restoreActiveRunHistory(saved, 'run-a', 'session-a'); hook.result.current.connect('run-a') })
+  const before = useAgentStore.getState().messages
+  act(() => {
+    const source = Source.opened[0]
+    source.send({ ...base, seq: 1, type: 'text.delta', messageId: 'saved-a', delta: '无关回复。\n\n' })
+    source.send({ ...base, seq: 2, type: 'text.final', messageId: 'saved-a', text: '无关回复。', asReasoning: false })
+  })
+  expect(useAgentStore.getState().messages).toEqual(before)
 })
 
 it.each(['novel_update_meta', 'volume_create', 'plan_rename'])('creates one normal write activity from a result-only reconnect: %s', toolName => {

@@ -31,7 +31,7 @@ it('reveals an atomic final answer after real finish, then folds process rows wi
   const view = render(<Harness />)
   act(() => { event({ type: 'text.final', messageId: 'answer', text: answer }); event({ type: 'run.finished', status: 'succeeded', usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, artifacts: [] }) })
   expect(useAgentStore.getState().phase).toBe('succeeded')
-  expect(useAgentStore.getState().messages.at(-1)?.parts).toContainEqual({ type: 'text', text: answer })
+  expect(useAgentStore.getState().messages.at(-1)?.parts).toEqual([{ type: 'text', text: answer }, expect.objectContaining({ type: 'tool-call', callId: 'read', status: 'success' })])
   expect(view.container.textContent).not.toContain(answer)
   expect(screen.getByText('已核对合成资料')).toBeTruthy()
   await act(async () => { await vi.advanceTimersByTimeAsync(16) })
@@ -107,15 +107,20 @@ it('keeps a prepared tool row stable through batched completion and exits withou
   fireEvent.click(screen.getByRole('button', { name: '查看 1 项操作' }))
   expect(history.container.querySelector('.agent-tool-enter')).toBeNull()
 })
-it('preserves separate text parts when final consolidation changes their positions, and flushes replacement', async () => {
+it('keeps streamed prose before its tool through preview, admission, finalization, and an authoritative correction', async () => {
   vi.useFakeTimers(); start(); const view = render(<Harness />)
+  const parts = () => useAgentStore.getState().messages.at(-1)?.parts
+  const prose = '第一段信息已核实。\n\n第二段说明保持完整。'
   act(() => {
     event({ type: 'text.delta', messageId: 'answer', delta: '第一段信息已核实。\n\n' })
-    event({ type: 'tool.call', messageId: 'answer', callId: 'middle', toolName: 'chapter_read', title: '读取', args: {} })
+    event({ type: 'tool.delta', messageId: 'answer', callId: 'middle', toolName: 'chapter_read', argsChars: 2 })
     event({ type: 'text.delta', messageId: 'answer', delta: '第二段说明保持完整。\n\n' })
   })
+  expect(parts()).toEqual([{ type: 'text', text: prose + '\n\n' }, expect.objectContaining({ type: 'tool-call', callId: 'middle', preparing: true })])
+  act(() => event({ type: 'tool.call', messageId: 'answer', callId: 'middle', toolName: 'chapter_read', title: '读取', args: {} }))
   await act(async () => { await vi.advanceTimersByTimeAsync(32) })
-  act(() => event({ type: 'text.final', messageId: 'answer', text: '第一段信息已核实。\n\n第二段说明保持完整。' }))
+  act(() => event({ type: 'text.final', messageId: 'answer', text: prose }))
+  expect(parts()).toEqual([{ type: 'text', text: prose }, expect.objectContaining({ type: 'tool-call', callId: 'middle', preparing: false })])
   await act(async () => { await vi.advanceTimersByTimeAsync(400) })
   expect(view.container.textContent).toContain('第一段信息已核实。')
   expect(view.container.textContent).toContain('第二段说明保持完整。')
@@ -124,7 +129,9 @@ it('preserves separate text parts when final consolidation changes their positio
   expect(view.container.textContent).toContain('纠正后的完整说明。')
   expect(view.container.textContent).not.toContain('第一段信息')
   act(() => useAgentStore.getState().finishTextReveal('answer', '旧说明'))
-  expect(useAgentStore.getState().messages.at(-1)?.parts).toContainEqual({ type: 'text', text: '纠正后的完整说明。' })
+  expect(parts()?.[0]).toEqual({ type: 'text', text: '纠正后的完整说明。' })
+  act(() => event({ type: 'text.final', messageId: 'answer', text: '' }))
+  expect(parts()).toEqual([expect.objectContaining({ type: 'tool-call', callId: 'middle' })])
 })
 
 it('flushes hidden text without accumulating timers or replaying background chunks after return', () => {

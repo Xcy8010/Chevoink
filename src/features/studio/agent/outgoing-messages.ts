@@ -4,7 +4,7 @@ import { settleRunTiming, timestamp, unknownRunTiming } from '../../../../shared
 
 type OutgoingAnchor = { messageId: string | null; runId: string | null; previousOutgoingId?: string; previousClientRequestId?: string }
 export type OutgoingMessage = { clientRequestId: string; anchor: OutgoingAnchor; id: string; scope: string; novelId: string; sessionId: string | null; runId?: string; status: 'sending' | 'failed' | 'sent'; error?: string; message: AgentUIMessage }
-export type AuthorMessage = AgentUIMessage & { delivery?: Pick<OutgoingMessage, 'status' | 'error'>; requestTiming?: AgentRunTiming }
+export type AuthorMessage = AgentUIMessage & { delivery?: Pick<OutgoingMessage, 'status' | 'error'>; requestTiming?: AgentRunTiming; presentationId?: string }
 type RequestClock = Pick<OutgoingMessage, 'id' | 'clientRequestId' | 'scope' | 'novelId' | 'sessionId' | 'runId'> & { responded: boolean; eventOffsetMs: number | null; retiredRunIds: string[]; timing: AgentRunTiming }
 type OutgoingState = {
   items: OutgoingMessage[]
@@ -143,7 +143,7 @@ export function projectOutgoingMessages(messages: AgentUIMessage[], items: Outgo
       ? message.id === item.id || message.clientRequestId === item.clientRequestId || message.runId === item.runId
       : message.runId === item.runId || Boolean(item.timing.scopeId && message.runTiming?.scopeId === item.timing.scopeId))
     if (!clock) return message
-    return message.role === 'user' ? { ...message, requestTiming: clock.timing }
+    return message.role === 'user' ? { ...message, requestTiming: clock.timing, presentationId: clock.id }
       : { ...message, runTiming: { ...clock.timing, scopeId: clock.timing.scopeId ?? message.runTiming?.scopeId, sourceRunId: clock.timing.sourceRunId ?? message.runTiming?.sourceRunId } }
   })
 }

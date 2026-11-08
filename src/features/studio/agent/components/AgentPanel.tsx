@@ -72,7 +72,7 @@ import {
   type ContinueAgentLoopRunModel,
 } from '../agentApi'
 import { projectOutgoingMessages, useOutgoingMessages } from '../outgoing-messages'
-import { ProcessDuration } from './ProcessDuration'
+import { unknownRunTiming } from '../../../../../shared/agent-timing.js'
 import { isRunActive, readSessionMessagesCache, restoreActiveRunHistory, failSessionHistoryHydration, useAgentStore, type ComposerReference } from '../agentStore'
 import { selectAgentActivityRunActive, selectAgentGoalView, selectAgentPanelPhase } from '../goal-selectors'
 import { buildGoalResumeModel } from '../goal-command'
@@ -83,7 +83,7 @@ import { useAgentGoalStream } from '../useAgentGoalStream'
 import { useGoalBarVisibility } from '../useGoalBarVisibility'
 import { openGoalEntry } from '../goal-entry'
 import { projectBlockTimings, projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
-import { activityAnswerText, activityOpening, activityWorkingLabel, projectActivityGroups } from '../lib/activity-groups'
+import { activityAnswerText, activityWorkingLabel, projectActivityGroups } from '../lib/activity-groups'
 import { useMessageScroll } from './use-message-scroll'
 import { useComposerInset } from './use-composer-inset'
 import { useRunControls } from './use-run-controls'
@@ -94,7 +94,7 @@ import { AgentComposer } from './AgentComposer'
 import { AgentGoalBar } from './AgentGoalBar'
 import { GoalEditorDialog, type GoalEditBase } from './GoalEditorDialog'
 import { AgentQueueTray } from './AgentQueueTray'
-import { AuthorActivityParts, AuthorActivitySummary, AuthorProgressText, AuthorWorkingSummary } from './AuthorActivityParts'
+import { AuthorActivityParts, AuthorActivitySummary, AuthorProgressText } from './AuthorActivityParts'
 import { AgentProcessRegion } from './AgentProcessRegion'
 import { useMessageBlockExpansion } from './use-message-block-expansion'
 import { AgentPermissionCard } from './AgentPermissionCard'
@@ -233,10 +233,9 @@ export function AgentPanel({
   const sendScope = voiceScopeKey ?? `${novelId}:${sessionId ?? 'new'}`
   const messages = useMemo(() => projectOutgoingMessages(storeLoadedSessionId === sessionId ? canonicalMessages : [], outgoing, sendScope, novelId, sessionId, requestClocks), [canonicalMessages, outgoing, sendScope, novelId, sessionId, storeLoadedSessionId, requestClocks])
   const lastUserRequest = [...messages].reverse().find(message => message.role === 'user')
-  const waitingRequest = lastUserRequest?.requestTiming && !messages.some(item => item.role === 'assistant' && item.runId === lastUserRequest.runId) ? lastUserRequest : undefined
   const hasOutgoing = messages.some(message => message.delivery)
   const deliveryErrorRef = useRef<{ clientRequestId: string; scope: string; sessionId: string | null; message: string } | null>(null)
-  const { recentConversationText, blockInfoById, lastAssistantId } = useMemo(() => projectMessages(messages), [messages])
+  const { recentConversationText, blockInfoById, blockByAuthorId, lastAssistantId } = useMemo(() => projectMessages(messages), [messages])
   const activityGroups = useMemo(() => projectActivityGroups(messages), [messages])
   const textRevealTargets = useAgentStore(state => state.textRevealTargets)
   const settlingBlocks = useMemo(() => new Set(Object.keys(textRevealTargets).map(id => blockInfoById.get(id)?.firstId)), [textRevealTargets, blockInfoById])
@@ -520,8 +519,11 @@ export function AgentPanel({
   const working = activityRunActive && (panelPhase === 'starting' || panelPhase === 'running') && !pendingApproval && !pendingQuestion
   const currentActivity = working && runId ? activityGroups.runningByRun.get(runId) : undefined
   const workingLabel = working && !currentActivity ? activityWorkingLabel(runId ? activityGroups.lastCallByRun.get(runId) : undefined) : undefined
-  const workingMessageId = workingLabel && runId
-    ? [...messages].reverse().find(message => message.role === 'assistant' && message.runId === runId)?.id : undefined
+  const waitingForFirstResponse = lastUserRequest?.runId === runId && lastUserRequest.requestTiming?.elapsedMs === null
+  const workingMessage = workingLabel && runId && !waitingForFirstResponse
+    ? [...messages].reverse().find(message => message.role === 'assistant' && message.runId === runId) : undefined
+  const workingGroup = workingMessage ? [...(activityGroups.byMessage.get(workingMessage.id)?.values() ?? [])].at(-1) : undefined
+  const workingMessageId = workingGroup?.messageId ?? workingMessage?.id
   const creditSummaryQuery = useQuery({
     queryKey: ['credits', 'summary'],
     queryFn: fetchCreditSummary,
@@ -1624,9 +1626,17 @@ export function AgentPanel({
                 // Expanding execution history must not turn internal goal
                 // continuation context into another author request.
                 if (!shouldRenderAuthorMessage(message)) return null
+                const block = blockByAuthorId.get(message.id)
+                const preparing = !block && message.id === lastUserRequest?.id && message.delivery?.status !== 'failed'
+                  && (message.delivery?.status === 'sending' || message.requestTiming?.status === 'running' || working && message.runId === runId)
+                const headerActive = preparing || Boolean(active && runId && block?.runIds?.includes(runId))
+                const timing = (block ? blockTimings.get(block.firstId) : undefined) ?? message.requestTiming
+                const showSummary = headerActive || Boolean(block && (block.ops || timing?.elapsedMs != null))
+                const settling = block ? settlingBlocks.has(block.firstId) : false
+                const summaryOpen = headerActive || settling || isBlockExpanded(block, message.runId)
                 return (
                 <div
-                  key={message.id}
+                  key={message.presentationId ?? message.id}
                   id={`agent-message-${message.id}`}
                   className={cn('group/message flex flex-col items-end gap-1.5', !message.delivery && message.id !== messages.filter(item => item.role === 'user').at(-1)?.id && 'agent-msg-cv')}
                   onTouchStart={() => startLongPress(message.id)}
@@ -1680,6 +1690,11 @@ export function AgentPanel({
                         .join('')}
                     </div>
                   </div>
+{/* The timer belongs to the request, before and after the first streamed paragraph. */}
+                  {showSummary ? <div className="w-full pt-3">
+                    <AuthorActivitySummary timing={timing ?? unknownRunTiming()} active={headerActive} open={summaryOpen}
+                      onToggle={block?.ops && !headerActive && !settling ? () => toggleBlock(block.firstId) : undefined} />
+                  </div> : null}
                   {message.delivery?.status === 'failed' ? <div className="flex max-w-full items-center gap-2 text-xs text-[var(--text-secondary)]">
                     <span role="alert">发送未确认：{message.delivery.error}</span>
                     <button type="button" onClick={() => useOutgoingMessages.getState().remove(message.id)} className="shrink-0 underline">移除这条本地消息</button>
@@ -1705,10 +1720,9 @@ export function AgentPanel({
                 ? activityGroups.savedReplyByRun.get(message.runId) : undefined
               const firstRunId = block?.runIds?.[0] ?? message.runId
               const projectedOpening = activityGroups.openingByRun.get(firstRunId)
-              const opening = isBlockFirst && (blockRunActive || hasProcess) && projectedOpening !== null
-                ? projectedOpening ?? activityOpening : undefined
-              const timing = isBlockFirst ? blockTimings.get(message.id) : undefined
-              const showSummary = timing && (timing.elapsedMs !== null || hasProcess && !blockRunActive)
+              const opening = isBlockFirst && hasProcess ? projectedOpening ?? undefined : undefined
+              const timing = isBlockFirst && !block?.authorId ? blockTimings.get(message.id) : undefined
+              const showSummary = timing && (blockRunActive || timing.elapsedMs !== null || hasProcess)
               const settling = settlingBlocks.has(block?.firstId)
               const processOpen = !hasProcess || blockRunActive || settling || isBlockExpanded(block, message.runId)
               const messageWorkingLabel = message.id === workingMessageId ? workingLabel : undefined
@@ -1736,6 +1750,7 @@ export function AgentPanel({
                     processOpen={hasProcess && !wholeMessageIsProcess ? processOpen : undefined}
                     collapseText={hasProcess && !isBlockLast && !wholeMessageIsProcess}
                     workingLabel={messageWorkingLabel}
+                    workingGroupId={workingGroup?.id}
                     activityChapterTitles={activityChapterTitles}
                   />
                   {receipt ? <AuthorProgressText text={receipt} /> : null}
@@ -1785,14 +1800,6 @@ export function AgentPanel({
                 <span className="h-px flex-1 bg-[var(--border-subtle)]" />
               </div>
             ) : null}
-            {waitingRequest?.requestTiming || workingLabel && !workingMessageId ? <div className="space-y-2">
-              {waitingRequest?.requestTiming && (waitingRequest.requestTiming.elapsedMs !== null || !working)
-                ? <ProcessDuration timing={waitingRequest.requestTiming} /> : null}
-              {workingLabel && !workingMessageId ? <>
-                <AuthorProgressText text={activityOpening} />
-                <AuthorWorkingSummary text={workingLabel} />
-              </> : null}
-            </div> : null}
             {pendingApproval ? (
               <AgentPermissionCard approval={pendingApproval} onResolve={handleResolveApproval} />
             ) : null}

@@ -4,7 +4,7 @@ import { projectAgentAuthorParts } from '../../../../../shared/agent-author-view
 import { combineRunTimings, unknownRunTiming } from '../../../../../shared/agent-timing.js'
 import type { AgentRunTiming } from '../../../../../shared/contracts/agent-events.js'
 
-export type MessageBlock = { firstId: string; lastId: string; ops: number; goalId?: string; runIds?: string[] }
+export type MessageBlock = { firstId: string; lastId: string; ops: number; goalId?: string; runIds?: string[]; authorId?: string }
 
 export function projectBlockTimings(messages: readonly AgentUIMessage[], blocks: Map<string, MessageBlock>, activeRunId: string | null) {
   const byRun = new Map<string, AgentRunTiming>()
@@ -31,6 +31,8 @@ export function shouldRenderAuthorMessage(message: AgentUIMessage): boolean {
 /** Pure presentation projection: never mutates messages or changes run state. */
 export function projectMessages(messages: readonly AgentUIMessage[]) {
   const blockInfoById = new Map<string, MessageBlock>()
+  const blockByAuthorId = new Map<string, MessageBlock>()
+  let authorId: string | undefined
   let ids: string[] = []
   let assistantIds: string[] = []
   let goalId: string | null = null
@@ -40,8 +42,10 @@ export function projectMessages(messages: readonly AgentUIMessage[]) {
   let lastAssistantId: string | undefined
   const flush = () => {
     if (assistantIds.length > 0) {
-      const block = { firstId: assistantIds[0], lastId: assistantIds[assistantIds.length - 1], ops, runIds: [...runIds], ...(goalId ? { goalId } : {}) }
+      const block: MessageBlock = { firstId: assistantIds[0], lastId: assistantIds[assistantIds.length - 1], ops, runIds: [...runIds], ...(goalId ? { goalId } : {}), ...(authorId ? { authorId } : {}) }
       for (const id of ids) blockInfoById.set(id, block)
+      if (authorId) blockByAuthorId.set(authorId, block)
+      authorId = undefined
     }
     ids = []
     assistantIds = []
@@ -67,6 +71,7 @@ export function projectMessages(messages: readonly AgentUIMessage[]) {
       runIds.add(message.runId)
     } else {
       flush()
+      authorId = message.id
     }
   }
   flush()
@@ -78,5 +83,5 @@ export function projectMessages(messages: readonly AgentUIMessage[]) {
       break
     }
   }
-  return { blockInfoById, recentConversationText, lastAssistantId }
+  return { blockInfoById, blockByAuthorId, recentConversationText, lastAssistantId }
 }

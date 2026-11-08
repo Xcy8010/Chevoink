@@ -8,7 +8,7 @@ const message = (id: string, role: AgentUIMessage['role'], parts: AgentUIMessage
 
 describe('message presentation projection', () => {
   it('handles empty conversations without inventing a last assistant', () => {
-    expect(projectMessages([])).toEqual({ blockInfoById: new Map(), recentConversationText: '', lastAssistantId: undefined })
+    expect(projectMessages([])).toEqual({ blockInfoById: new Map(), blockByAuthorId: new Map(), recentConversationText: '', lastAssistantId: undefined })
   })
 
   it('preserves consecutive assistant blocks and excludes text and private reasoning from operation counts', () => {
@@ -22,10 +22,12 @@ describe('message presentation projection', () => {
     const before = structuredClone(messages)
     const result = projectMessages(messages)
     expect([...result.blockInfoById]).toEqual([
-      ['a1', { firstId: 'a1', lastId: 'a2', ops: 0, runIds: ['run'] }],
-      ['a2', { firstId: 'a1', lastId: 'a2', ops: 0, runIds: ['run'] }],
-      ['a3', { firstId: 'a3', lastId: 'a3', ops: 0, runIds: ['run'] }],
+      ['a1', { firstId: 'a1', lastId: 'a2', ops: 0, runIds: ['run'], authorId: 'u1' }],
+      ['a2', { firstId: 'a1', lastId: 'a2', ops: 0, runIds: ['run'], authorId: 'u1' }],
+      ['a3', { firstId: 'a3', lastId: 'a3', ops: 0, runIds: ['run'], authorId: 'u2' }],
     ])
+    expect(result.blockByAuthorId.get('u1')).toBe(result.blockInfoById.get('a1'))
+    expect(result.blockByAuthorId.get('u2')).toBe(result.blockInfoById.get('a3'))
     expect(result.lastAssistantId).toBe('a3')
     expect(result.recentConversationText).toBe('answer')
     expect(result.recentConversationText).not.toContain('thinking')
@@ -61,7 +63,7 @@ describe('message presentation projection', () => {
       { ...message('a2', 'assistant', [{ type: 'text', text: 'final' }]), goalId: 'goal', runId: 'r2' },
     ]
     const result = projectMessages(messages)
-    const block = { firstId: 'a1', lastId: 'a2', ops: 0, goalId: 'goal', runIds: ['r1', 'r2'] }
+    const block = { firstId: 'a1', lastId: 'a2', ops: 0, goalId: 'goal', runIds: ['r1', 'r2'], authorId: 'u1' }
     expect([...result.blockInfoById]).toEqual([['a1', block], ['resume', block], ['a2', block]])
     expect(result.recentConversationText).toBe('final')
     expect(projectMessages(messages.slice(0, 3)).recentConversationText).toBe('')
@@ -91,6 +93,8 @@ describe('message presentation projection', () => {
       message('ordinary', 'assistant'),
     ])
     expect(result.blockInfoById.has('natural')).toBe(false)
+    expect(result.blockByAuthorId.get('natural')?.firstId).toBe('a2')
+    expect(result.blockInfoById.get('a3')?.authorId).toBeUndefined()
     expect([...result.blockInfoById.values()].map(block => block.firstId)).toEqual(['a1', 'a2', 'a3', 'ordinary'])
   })
 })
