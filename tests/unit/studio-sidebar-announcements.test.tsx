@@ -27,6 +27,17 @@ it('places the single compact announcement directly above the actual sidebar acc
  expect(screen.getByTestId('main').contains(notice)).toBe(false)
  expect(screen.getByTestId('workspace').lastElementChild).toBe(screen.getByTestId('main'))
 })
+it('places the hover-to-close icons before a wrapping announcement title', () => {
+ const title = '这是一条用于验证窄侧栏标题完整显示的合成公告'
+ state.content!.announcements[0].title = title
+ render(<Fixture />)
+ const open = screen.getByRole('button', { name: '打开公告：' + title })
+ const close = screen.getByRole('button', { name: '关闭公告：' + title })
+ expect(open.previousElementSibling).toBe(close)
+ expect(close.querySelector('.site-announcement-dock-chevron')).toBeTruthy()
+ expect(close.querySelector('.site-announcement-dock-close')).toBeTruthy()
+ expect(screen.getByText(title).classList.contains('site-announcement-dock-title')).toBe(true)
+})
 it('removes the announcement and its wrapper entirely after closing without a ghost account row',()=>{
  const view=render(<Fixture/>),account=view.container.querySelector('[data-studio-region="sidebar-account"]')!,accountButton=screen.getByRole('button',{name:'创作者'}),main=screen.getByTestId('main')
  fireEvent.click(screen.getByRole('button',{name:'关闭公告：侧栏合成公告'}))

@@ -1,13 +1,23 @@
 .site-announcements-home { margin-bottom: 12px; }
 .site-announcements-studio { display: flex; min-width: 0; flex-shrink: 0; margin: 8px 8px 4px; }
 .site-announcement-card { display: flex; align-items: center; min-width: 0; border: 1px solid var(--border-subtle); border-radius: 10px; background: var(--surface-default); color: var(--text-primary); }
-.site-announcement-dock { width: 100%; max-width: 100%; height: 40px; box-shadow: 0 2px 8px #00000006; }
+.site-announcement-dock { width: 100%; max-width: 100%; min-height: 40px; box-shadow: 0 2px 8px #00000006; }
 .site-announcement-banner { width: 100%; padding-block: 5px; background: var(--surface-muted); }
 .site-announcement-open { display: flex; flex: 1; min-width: 0; height: 100%; align-items: center; gap: 8px; padding: 0 10px; }
 .site-announcement-dismiss,.site-announcement-dialog-close { display: inline-flex; flex-shrink: 0; width: 32px; height: 32px; padding: 0; align-items: center; justify-content: center; border-radius: 7px; color: var(--text-secondary); }
 .site-announcement-dismiss { margin-inline: 0 4px; }
-.site-announcement-dock .site-announcement-dismiss { opacity: 0; transition: opacity .12s; }
-.site-announcement-dock:hover .site-announcement-dismiss,.site-announcement-dock:focus-within .site-announcement-dismiss { opacity: 1; }
+.site-announcement-dock .site-announcement-open { align-self: stretch; height: auto; padding: 8px 10px 8px 2px; }
+.site-announcement-dock-title { overflow-wrap: anywhere; white-space: normal; }
+.site-announcement-dock .site-announcement-dock-action { margin-inline: 4px 0; }
+.site-announcement-dock-close { display: none; }
+.site-announcement-dock:hover .site-announcement-dock-chevron,
+.site-announcement-dock-action:focus-visible .site-announcement-dock-chevron { display: none; }
+.site-announcement-dock:hover .site-announcement-dock-close,
+.site-announcement-dock-action:focus-visible .site-announcement-dock-close { display: block; }
+@media (hover: none) {
+  .site-announcement-dock-chevron { display: none; }
+  .site-announcement-dock-close { display: block; }
+}
 .site-announcement-dismiss:hover,.site-announcement-dialog-close:hover { background: var(--surface-muted); color: var(--text-primary); }
 .site-announcement-dialog-close:disabled { opacity: .35; pointer-events: none; }
 .site-announcement-card :is(button):focus-visible,.site-announcement-dialog button:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
@@ -20,12 +30,12 @@
 .site-announcement-dialog-footer { border-top: 1px solid var(--border-subtle); }
 .site-announcement-dialog-close { width: 36px; height: 36px; }
 @media(max-width:767px),(hover:none),(pointer:coarse) {
- .site-announcement-dock { height: 46px; }
+ .site-announcement-dock { min-height: 46px; }
  .site-announcement-dismiss,.site-announcement-dialog-close { width: 44px; height: 44px; }
- .site-announcement-dock .site-announcement-dismiss { opacity: 1; }
+
  .site-announcement-dialog-footer > button { min-height: 44px; }
 }
-@media(prefers-reduced-motion:reduce) { .site-announcement-dock .site-announcement-dismiss { transition: none; } }
+
 
 /* Body portals need the same neutral palette as the actual Studio dialogs. */
 .site-announcement-dialog.studio-workspace { background: var(--surface-default); font-family: var(--studio-body-font); }

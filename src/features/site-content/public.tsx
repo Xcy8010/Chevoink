@@ -91,12 +91,25 @@ export function SiteAnnouncements({scope}:{scope:'home'|'studio'}) {
   }
   return <div aria-label="站点公告" className={scope==='studio'?'site-announcements-studio':'site-announcements-home'}>
     <aside className={'site-announcement-card '+(scope==='studio'?'site-announcement-dock':'site-announcement-banner')}>
+      {scope === 'studio' && <button
+        type="button"
+        aria-label={'关闭公告：'+first.title}
+        onClick={() => dismiss(first, true)}
+        className="site-announcement-dismiss site-announcement-dock-action"
+      >
+        <ChevronRight aria-hidden="true" size={16} className="site-announcement-dock-chevron" />
+        <X aria-hidden="true" size={16} className="site-announcement-dock-close" />
+      </button>}
       <button type="button" aria-label={'打开公告：'+first.title} aria-haspopup="dialog" aria-expanded={Boolean(active)} aria-controls={dialogId} className="site-announcement-open" onClick={event=>{origin.current=event.currentTarget;openItem(first)}}>
-        <Megaphone aria-hidden="true" size={16} className="shrink-0 text-[var(--text-secondary)]"/>
-        <span className="min-w-0 flex-1 text-left"><span className="block truncate text-sm font-medium">{first.title}</span>{scope==='home'?<span className="block truncate text-xs text-[var(--text-secondary)]">{first.body}</span>:null}</span>
-        {items.length>1?<span className="shrink-0 text-xs text-[var(--text-secondary)]">{items.length}条</span>:null}<ChevronRight aria-hidden="true" size={16} className="shrink-0 text-[var(--text-secondary)]"/>
+        {scope === 'home' && <Megaphone aria-hidden="true" size={16} className="shrink-0 text-[var(--text-secondary)]" />}
+        <span className="min-w-0 flex-1 text-left">
+          <span className={'block text-sm font-medium ' + (scope === 'studio' ? 'site-announcement-dock-title' : 'truncate')}>{first.title}</span>
+          {scope === 'home' && <span className="block truncate text-xs text-[var(--text-secondary)]">{first.body}</span>}
+        </span>
+        {items.length > 1 && <span className="shrink-0 text-xs text-[var(--text-secondary)]">{items.length}条</span>}
+        {scope === 'home' && <ChevronRight aria-hidden="true" size={16} className="shrink-0 text-[var(--text-secondary)]" />}
       </button>
-      <button type="button" aria-label={'关闭公告：'+first.title} onClick={()=>dismiss(first, scope === 'studio')} className="site-announcement-dismiss"><X aria-hidden="true" size={16}/></button>
+      {scope === 'home' && <button type="button" aria-label={'关闭公告：'+first.title} onClick={() => dismiss(first)} className="site-announcement-dismiss"><X aria-hidden="true" size={16} /></button>}
     </aside>
     {active?<AnnouncementDialog scope={scope} item={active} index={index} total={items.length} id={dialogId} returnFocus={origin.current} onClose={()=>setOpenedKey(null)} onDismiss={()=>dismiss(active)} onPrevious={()=>openItem(items[index-1])} onNext={()=>openItem(items[index+1])}/>:null}
   </div>
