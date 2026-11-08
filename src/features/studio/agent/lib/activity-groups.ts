@@ -31,11 +31,11 @@ function savedReply(part: ActivityCall) {
   if (part.status !== 'success') return undefined
   const display = part.display
   if (part.toolName === 'plan_save' && (display?.kind === 'planFile' || display?.kind === 'planDiff')) {
-    return `已将《${display.title}》保存到计划。`
+    return `已完成《${display.title}》的更新。`
   }
   if (display?.kind === 'chapterDiff' && (display.appliedDirectly || part.accepted) && display.before !== display.after) {
     return part.toolName === 'chapter_write' || part.toolName === 'chapter_append'
-      ? `已写入《${display.chapterTitle}》的正文。` : `已保存《${display.chapterTitle}》的修改。`
+      ? `已写入《${display.chapterTitle}》的正文。` : `已完成《${display.chapterTitle}》的修改。`
   }
 }
 

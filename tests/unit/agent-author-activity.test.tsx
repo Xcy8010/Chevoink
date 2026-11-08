@@ -53,7 +53,7 @@ it('preserves only the latest terminal status in the headline and the failed att
   fireEvent.click(toggle)
   view.rerender(<Transcript messages={[message('a', [failed]), message('b', [reasoning, saved('retry', 'chapter_edit_range')])]} />)
   const group = view.container.querySelector('[data-author-activity]')!
-  expect(within(group as HTMLElement).getByRole('button', { name: '已保存修改 · 2 次', expanded: true })).toBe(toggle)
+  expect(within(group as HTMLElement).getByRole('button', { name: '已完成修改', expanded: true })).toBe(toggle)
   expect(within(group as HTMLElement).getByText(failureReceipt)).toBeTruthy()
   expect(group.textContent).not.toMatch(/已允许|INTERNAL_FAILURE_CODE/)
   expect(group.querySelectorAll('[data-activity-tool="chapter_edit_range"]')).toHaveLength(2)
@@ -93,12 +93,12 @@ it('groups different targets and separates public progress and task ownership wi
   ]
   const view = render(<Transcript active="r" messages={messages(a, b)} />)
   expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(3)
-  const toggle = screen.getByRole('button', { name: '正在核对前文 · 2 次' })
+  const toggle = screen.getByRole('button', { name: '正在核对前文' })
   fireEvent.click(toggle)
   expect(toggle.closest('[data-author-activity]')?.querySelectorAll('[data-activity-tool="chapter_read"]')).toHaveLength(2)
   expect(view.container.querySelectorAll('[data-activity-running]')).toHaveLength(1)
   view.rerender(<Transcript messages={messages({ ...a, status: 'failed' }, { ...b, status: 'success' })} />)
-  expect(screen.getByRole('button', { name: '核对前文有未完成项 · 2 次', expanded: true })).toBe(toggle)
+  expect(screen.getByRole('button', { name: '核对前文有未完成项', expanded: true })).toBe(toggle)
 })
 
 it('splits repeated tools at another tool even when their activity labels match', () => {
@@ -115,6 +115,24 @@ it('splits repeated tools at another tool even when their activity labels match'
   expect(projection.byMessage.get('second')?.get(second.callId)).toBe(group)
   expect(projection.byMessage.get('skill')?.get(skill.callId)?.calls.map(part => part.callId)).toEqual([skill.callId])
   expect(projection.byMessage.get('last')?.get(last.callId)?.calls.map(part => part.callId)).toEqual([last.callId])
+})
+
+it('uses completion labels for saved actions while keeping all grouped receipts available', () => {
+  const view = render(<Transcript messages={[message('save', [
+    call('plan-1', 'plan_save'), call('plan-2', 'plan_save'),
+    call('setting', 'memory_save'), call('progress', 'chapter_bridge_commit'),
+    call('rename', 'plan_rename'), call('delete', 'plan_delete'),
+    call('failed-plan', 'plan_save', { status: 'failed' }),
+  ])]} />)
+  const plan = screen.getByRole('button', { name: '已完成创作计划', exact: true })
+  expect(screen.getByRole('button', { name: '已完成创作设定' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: '已完成章节进展' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: '已完成计划重命名' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: '已完成计划删除' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: '保存创作计划未完成' })).toBeTruthy()
+  fireEvent.click(plan)
+  expect(plan.closest('[data-author-activity]')?.querySelectorAll('[data-activity-tool="plan_save"]')).toHaveLength(2)
+  expect(view.container.textContent).not.toMatch(/已保存| · 2 次/)
 })
 
 it('keeps grouped subagent receipts associated with the correct call', () => {
@@ -194,7 +212,7 @@ it('uses visible prose first, with short milestone and saved-result fallbacks fo
   const silent = projectActivityGroups([read, outline])
   expect(silent.openingByRun.get('r')).toBe('我会先核对与这次任务有关的资料。')
   expect(silent.byMessage.get('outline')?.get('plan')?.transition).toMatch(/接下来整理创作计划/)
-  expect(silent.savedReplyByRun.get('r')).toBe('已将《第四章细纲》保存到计划。')
+  expect(silent.savedReplyByRun.get('r')).toBe('已完成《第四章细纲》的更新。')
 
   const prose: AgentMessagePart = { type: 'text', text: '我会让第四章承接上一章的来访。' }
   const final: AgentMessagePart = { type: 'text', text: '细纲保留了来访者未说明的目的。' }

@@ -90,7 +90,7 @@ function activitySummary(part: ActivityCall, runActive: boolean, titles?: Readon
     if (display.before === display.after) return `${named}正文未改动`
     if (!display.appliedDirectly && !part.accepted) return `已生成${named}的修改建议`
     if (isWrite) return grouped ? '已写入正文' : `已写入${named}正文 · ${display.after.length.toLocaleString('zh-CN')} 字`
-    return named ? `已保存${named}的修改` : '已保存修改'
+    return named ? `已完成${named}的修改` : '已完成修改'
   }
   if (isWrite) return '写入正文'
   if (review) {
@@ -105,6 +105,9 @@ function activitySummary(part: ActivityCall, runActive: boolean, titles?: Readon
     if (detail) return `搜索网页 · ${display.results.length} 条结果`
   }
   if (part.toolName === 'chapter_read' && title) return `已查看${named}`
+  if (part.toolName === 'plan_rename') return '已完成计划重命名'
+  if (part.toolName === 'plan_delete') return '已完成计划删除'
+  if (presentation.phase === 'save') return `已完成${presentation.label.replace(/^保存/, '')}`
   return `已${detail ? action : presentation.label}`
 }
 
@@ -218,9 +221,9 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
       disabled={!group} onClick={() => setOpen(value => !value)}
       className="agent-activity-step flex min-h-7 w-fit max-w-full items-center gap-2 px-1 text-left text-sm font-medium leading-7 text-[var(--text-secondary)] focus-visible:underline focus-visible:outline-none">
       <Icon aria-hidden className="h-4 w-4 shrink-0" />
-      <span className="min-w-0 break-words">
+      <span className="min-w-0 break-words text-balance">
         <span aria-live={active || running || workingLabel ? 'polite' : undefined} data-activity-running={executing || undefined}
-          className={executing || workingLabel ? 'agent-processing-shimmer' : undefined}>{label}{grouped ? ` · ${calls.length} 次` : null}</span>
+          className={executing || workingLabel ? 'agent-processing-shimmer' : undefined}>{label}</span>
         {group ? <ChevronDown aria-hidden className={cn('agent-activity-chevron ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-[opacity,transform]', open ? 'rotate-0' : '-rotate-90')} /> : null}
       </span>
     </button>
@@ -248,7 +251,7 @@ export function AuthorActivitySummary({ timing, active, open, onToggle }: { timi
 }
 
 export function AuthorProgressText({ text, className }: { text: string; className?: string }) {
-  return <p className={cn('break-words text-sm font-medium leading-7 text-[var(--text-primary)]', className)} data-author-progress>{text}</p>
+  return <p className={cn('break-words text-pretty text-sm font-medium leading-7 text-[var(--text-primary)]', className)} data-author-progress>{text}</p>
 }
 
 export const AuthorActivityParts = memo(function AuthorActivityParts({

@@ -52,9 +52,9 @@ const components: Components = {
   h4: ({ children }) => <h6 className={heading}>{children}</h6>,
   h5: ({ children }) => <h6 className={heading}>{children}</h6>,
   h6: ({ children }) => <h6 className={heading}>{children}</h6>,
-  p: ({ children }) => <p className="my-2 whitespace-pre-wrap first:mt-0 last:mb-0">{children}</p>,
-  ul: ({ children }) => <ul className="my-2 list-disc space-y-1 pl-6">{children}</ul>,
-  ol: ({ children, start }) => <ol start={start} className="my-2 list-decimal space-y-1 pl-6">{children}</ol>,
+  p: ({ children }) => <p className="my-2 whitespace-pre-wrap text-pretty first:mt-0 last:mb-0">{children}</p>,
+  ul: ({ children }) => <ul className="my-2 list-disc space-y-1 pl-6 text-pretty">{children}</ul>,
+  ol: ({ children, start }) => <ol start={start} className="my-2 list-decimal space-y-1 pl-6 text-pretty">{children}</ol>,
   blockquote: ({ children }) => <blockquote className="my-2 border-l-2 border-[var(--border-subtle)] pl-4 text-[var(--text-secondary)]">{children}</blockquote>,
   pre: ({ children }) => <pre tabIndex={0} className="my-2 max-w-full overflow-x-auto rounded-xl bg-[var(--bg-secondary)] p-3 text-xs leading-6">{children}</pre>,
   code: ({ children }) => <code className="font-mono">{children}</code>,
@@ -81,7 +81,7 @@ export const AgentMarkdownText = memo(function AgentMarkdownText({ text, streami
 }) {
   const content = useStreamingText(text, streaming, identity)
   if (!content.trim()) return null
-  const fallback = <p className="whitespace-pre-wrap break-words">{content}</p>
+  const fallback = <p className="whitespace-pre-wrap break-words text-pretty">{content}</p>
   return <div className="min-w-0 max-w-full break-words text-sm leading-7 text-[var(--text-primary)] [overflow-wrap:anywhere]">
     <MarkdownBoundary key={identity} fallback={fallback}><Suspense fallback={fallback}><Markdown text={content} /></Suspense></MarkdownBoundary>
   </div>
