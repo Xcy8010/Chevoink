@@ -29,11 +29,21 @@ export function publicAgentProgressEvent(event: AgentStreamEvent): AgentStreamEv
   return event
 }
 
+export function agentRunningToolLabel(toolName: string, chapterTitle?: string, detailLabel?: string): string {
+  const { phase, label } = getAgentToolPresentation(toolName)
+  const chapter = chapterTitle ? `《${chapterTitle}》` : ''
+  if (toolName === 'chapter_write' || toolName === 'chapter_append') return `正在写入${chapter}正文`
+  if (toolName === 'chapter_edit_range') return chapter ? `正在写入${chapter}的正文修改` : '正在写入正文修改'
+  if (toolName === 'plan_rename') return '正在重命名计划'
+  if (toolName === 'plan_delete') return '正在删除计划'
+  if (phase === 'save') return `正在写入${label.replace(/^保存/, '')}`
+  return `正在${detailLabel ?? label}`
+}
+
 /** Tool execution state is the witness; a model's intention is never completion. */
 export function agentToolProgress(part: Extract<AgentMessagePart, { type: 'tool-call' }>): string {
+  if (part.status === 'running') return agentRunningToolLabel(part.toolName)
   const label = getAgentToolPresentation(part.toolName).label
-  if (part.preparing) return `正在准备${label}`
-  if (part.status === 'running') return `正在${label}`
   const summary = normalizeAgentProgressText(part.summary ?? '')
   if (part.status === 'failed' || part.status === 'denied') {
     return `${label}${part.status === 'denied' ? '未获准' : '未完成'}${summary ? `：${summary}` : ''}`

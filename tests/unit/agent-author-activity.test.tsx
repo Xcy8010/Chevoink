@@ -31,7 +31,7 @@ function Transcript({ messages, active }: { messages: AgentUIMessage[]; active?:
 it('upgrades one focused disclosure from preparation to persisted write, without showing thought or parameters', () => {
   const preview = call('write', 'chapter_write', { status: 'running', preparing: true, args: null })
   const view = render(<Transcript active="r" messages={[message('a', [reasoning, preview])]} />)
-  const toggle = screen.getByRole('button', { name: '准备写入正文' })
+  const toggle = screen.getByRole('button', { name: '正在写入正文' })
   toggle.focus()
   fireEvent.click(toggle)
   view.rerender(<Transcript active="r" messages={[message('a', [reasoning, call('write', 'chapter_write', { status: 'running' })])]} />)
@@ -261,26 +261,37 @@ it('hands the shimmer between model work, tool execution and the next step, then
   expect(view.container.textContent).not.toMatch(/RAW_THOUGHT_ONLY|正在处理/)
 })
 
-it('shows distinct search terms, actual matching chapter locations, and other read results', () => {
+it('shows one compact location per matching chapter and keeps read targets accessible', () => {
   const hits = call('search', 'project_search', {
-    display: { kind: 'projectSearch', query: '旧钥匙', total: 1, matches: [{
+    display: { kind: 'projectSearch', query: '旧钥匙', total: 3, matches: [{
       volumeTitle: '归途卷', chapterId: 'PRIVATE_CHAPTER', chapterTitle: '关门前', field: 'content', offset: 41,
       length: 3, contextBefore: '她摸到一把', match: '旧钥匙', contextAfter: '。',
+    }, {
+      volumeTitle: '归途卷', chapterId: 'PRIVATE_CHAPTER', chapterTitle: '关门前', field: 'content', offset: 81,
+      length: 3, contextBefore: '门后的长段摘录', match: '旧钥匙', contextAfter: '。',
+    }, {
+      chapterId: 'PRIVATE_NEXT', chapterTitle: '交接', field: 'summary', offset: 0,
+      length: 3, contextBefore: '', match: '旧钥匙', contextAfter: '',
     }] },
   })
   const legacy = call('older', 'project_search', { summary: '全书检索“收据” · 0 处' })
   const read = call('chapter', 'chapter_read', { display: {
     kind: 'chapterRef', chapterId: 'PRIVATE_CHAPTER', title: '关门前', wordCount: 920, range: { start: 20, end: 75 },
   } })
-  const view = render(<Transcript messages={[message('read', [hits, legacy, read])]} />)
+  const plan = call('plan-read', 'plan_read', { display: {
+    kind: 'readSources', items: [{ title: '全书大纲', preview: '计划的长段摘录', target: { kind: 'plan', id: 'PRIVATE_PLAN' } }],
+  } })
+  const view = render(<Transcript messages={[message('read', [hits, legacy, read, plan])]} />)
   for (const toggle of view.container.querySelectorAll('[data-author-activity] > button')) fireEvent.click(toggle)
-  expect(screen.getByText('搜索「旧钥匙」 · 1 处')).toBeTruthy()
+  expect(screen.getByText('搜索「旧钥匙」 · 3 处')).toBeTruthy()
   expect(screen.getByText('搜索「收据」 · 无匹配')).toBeTruthy()
-  expect(screen.getByText(/正文第 42 字/)).toBeTruthy()
+  expect(screen.getByText(/正文第 42 字等/)).toBeTruthy()
   expect(screen.getByText(/正文第 21–75 字/)).toBeTruthy()
-  expect(screen.getByText('旧钥匙').tagName).toBe('MARK')
-  expect(screen.getByRole('button', { name: '《关门前》' })).toBeTruthy()
-  expect(view.container.textContent).not.toContain('PRIVATE_CHAPTER')
+  expect(screen.getAllByRole('button', { name: '《关门前》' })).toHaveLength(1)
+  expect(screen.getByRole('button', { name: '《交接》' })).toBeTruthy()
+  expect(screen.getByText('· 章节摘要')).toBeTruthy()
+  expect(screen.getByRole('button', { name: '《全书大纲》' })).toBeTruthy()
+  expect(view.container.textContent).not.toMatch(/PRIVATE_|她摸到一把|长段摘录|正文第 82 字/)
 })
 
 it('shows the opening report before the pending activity and reuses that activity for the first tool', () => {

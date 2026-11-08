@@ -33,7 +33,7 @@ it('shows neutral current work before receipts, then upgrades the same episode t
   expect(screen.getByRole('button', { name: '任务进度' }).textContent).toBe('正在梳理当前任务')
   expect(view.container.textContent).not.toContain('开始')
   for (const [part, expected] of [
-    [{ ...tool('read', 'chapter_read'), status: 'running', preparing: true }, '正在准备核对前文'],
+    [{ ...tool('read', 'chapter_read'), status: 'running', preparing: true }, '正在核对前文'],
     [{ ...tool('read', 'chapter_read'), status: 'running' }, '正在核对前文'],
     [{ ...tool('read', 'chapter_read'), status: 'success', summary: '已读取上一章结尾。\\n人物尚未获得线索。' }, '已读取上一章结尾。'],
   ] as const) {

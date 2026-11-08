@@ -8,6 +8,7 @@ import { getMemorySpotlight } from '../tool-argument-view'
 import { activityChapterId, activityTarget, projectActivityGroups, type ActivityCall, type ActivityGroup, type MessageActivityGroups } from '../lib/activity-groups'
 import { projectAgentAuthorParts, projectAgentAuthorText } from '../../../../../shared/agent-author-view.js'
 import { getAgentToolPresentation } from '../../../../../shared/agent-tool-presentation.js'
+import { agentRunningToolLabel } from '../../../../../shared/agent-progress.js'
 import type { AgentRunTiming } from '../../../../../shared/contracts/agent-events.js'
 import type { AgentMessagePart, AgentToolDisplayPayload } from '../../../../../shared/contracts/index.js'
 import { AgentMarkdownText } from './AgentMarkdownText'
@@ -73,10 +74,8 @@ function activitySummary(part: ActivityCall, runActive: boolean, titles?: Readon
   if (part.toolName === 'ask_user' && part.status === 'running' && runActive) return '等待你回答'
   if (part.status === 'running') {
     if (!runActive) return `${action}未完成`
-    if (part.preparing) return `准备${isWrite ? `写入${named}正文` : action}`
-    if (isWrite) return `正在写入${named}正文`
     if (review && title) return `正在复查${named}`
-    return `正在${detail ? action : presentation.label}`
+    return agentRunningToolLabel(part.toolName, title, detail ? action : undefined)
   }
   if (part.status !== 'success') {
     // Old persisted results do not carry failureCode. Only the server's exact
@@ -145,19 +144,19 @@ function ProjectSearchLocations({ display, onOpen }: {
   display: Extract<AgentToolDisplayPayload, { kind: 'projectSearch' }>; onOpen: (chapterId: string) => void
 }) {
   if (!display.matches.length) return null
-  return <div className="space-y-1 text-xs leading-5 text-[var(--text-secondary)]">
-    <ul className="space-y-2">
-      {display.matches.map(hit => <li key={`${hit.chapterId}:${hit.field}:${hit.offset}`} className="min-w-0">
-        <p className="break-words">
-          {hit.volumeTitle ? <span>{hit.volumeTitle} · </span> : null}
-          <button type="button" onClick={() => onOpen(hit.chapterId)} className="text-[var(--text-primary)] underline-offset-2 hover:underline focus-visible:underline">《{hit.chapterTitle}》</button>
-          <span> · {hit.field === 'content' ? `正文第 ${hit.offset + 1} 字` : hit.field === 'summary' ? '章节摘要' : '章节标题'}</span>
-        </p>
-        <p className="whitespace-pre-wrap break-words">{hit.contextBefore}<mark className="bg-transparent font-medium text-[var(--text-primary)]">{hit.match}</mark>{hit.contextAfter}</p>
-      </li>)}
-    </ul>
-    {display.total > display.matches.length ? <p>显示前 {display.matches.length} 处，共 {display.total} 处</p> : null}
-  </div>
+  const byChapter = new Map<string, typeof display.matches>()
+  for (const hit of display.matches) {
+    const matches = byChapter.get(hit.chapterId)
+    if (matches) matches.push(hit)
+    else byChapter.set(hit.chapterId, [hit])
+  }
+  return <ul className="space-y-0.5 text-xs leading-5 text-[var(--text-secondary)]">
+    {[...byChapter.values()].map(([hit, ...others]) => <li key={hit.chapterId} className="min-w-0 break-words">
+      {hit.volumeTitle ? <span>{hit.volumeTitle} · </span> : null}
+      <button type="button" onClick={() => onOpen(hit.chapterId)} className="text-[var(--text-primary)] underline-offset-2 hover:underline focus-visible:underline">《{hit.chapterTitle}》</button>
+      <span> · {hit.field === 'content' ? `正文第 ${hit.offset + 1} 字` : hit.field === 'summary' ? '章节摘要' : '章节标题'}{others.length ? '等' : ''}</span>
+    </li>)}
+  </ul>
 }
 
 const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles }: { part: ActivityCall; runActive: boolean; titles?: ReadonlyMap<string, string> }) {
@@ -181,16 +180,15 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles }:
     </div>
     {display ? <div className="min-w-0 pl-[22px]">
       {display.kind === 'projectSearch' ? <ProjectSearchLocations display={display} onOpen={chapterId => navigate(part.toolName, { chapterId })} />
-        : display.kind === 'readSources' ? <ul className="space-y-2 text-xs leading-5 text-[var(--text-secondary)]">
-          {display.items.map(({ title, preview, target }, index) => <li key={target?.id ?? index} className="min-w-0 break-words">
+        : display.kind === 'readSources' ? <ul className="space-y-0.5 text-xs leading-5 text-[var(--text-secondary)]">
+          {display.items.map(({ title, target }, index) => <li key={target?.id ?? index} className="min-w-0 break-words">
             {target ? <button type="button" className="text-[var(--text-primary)] underline-offset-2 hover:underline focus-visible:underline"
               onClick={() => navigate(part.toolName, target.kind === 'chapter' ? { chapterId: target.id } : { planId: target.id })}>《{title}》</button>
               : <p className="text-[var(--text-primary)]">{title}</p>}
-            {preview ? <p className="whitespace-pre-wrap">{preview}</p> : null}
           </li>)}
         </ul>
           : display.kind === 'subagentReport'
-            ? <p className="whitespace-pre-wrap break-words text-xs text-[var(--text-secondary)]">{projectAgentAuthorText(display.report)}</p>
+            ? <p className="line-clamp-2 break-words text-xs leading-5 text-[var(--text-secondary)]">{projectAgentAuthorText(display.report)}</p>
             : <ToolDisplayRenderer display={display} onNavigateTarget={openTarget} authorActivity />}
     </div> : null}
   </li>

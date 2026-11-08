@@ -774,7 +774,9 @@ export function ToolDisplayRenderer({
     case 'planFile':
       return (
         <p className="text-[11px] text-[var(--text-secondary)]">
-          计划「<ToolTargetLink title={display.title} onNavigate={onNavigateTarget} />」已写入计划文件夹 · {display.content.length} 字，可在左侧作品树直接编辑
+          计划「<ToolTargetLink title={display.title} onNavigate={onNavigateTarget} />」{authorActivity
+            ? ` · ${display.content.length} 字`
+            : `已写入计划文件夹 · ${display.content.length} 字，可在左侧作品树直接编辑`}
         </p>
       )
     case 'planDiff':

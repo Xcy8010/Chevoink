@@ -31,11 +31,21 @@ describe('author progress boundary', () => {
     expect(publicAgentProgressEvent(event)).toEqual({ ...base, type: event.type, messageId: 'm', delta: part.text, activity: true })
     expect(publicAgentProgressPart({ type: 'reasoning', text: '', activity: true })).toEqual({ type: 'reasoning', text: '', activity: true })
   })
+  it.each([
+    ['chapter_write', '正在写入正文'],
+    ['chapter_append', '正在写入正文'],
+    ['chapter_edit_range', '正在写入正文修改'],
+    ['plan_save', '正在写入创作计划'],
+  ])('uses the active action for %s while the draft streams', (toolName, label) => {
+    expect(agentToolProgress({ type: 'tool-call', callId: 'draft', toolName, title: '', args: null, status: 'running', preparing: true })).toBe(label)
+  })
+
   it('does not turn a successful report receipt into repaired issues or completed goals', () => {
     const part: Extract<AgentMessagePart, { type: 'tool-call' }> = { type: 'tool-call', callId: 'check', toolName: 'quality_analyze', title: '', args: {}, status: 'success', summary: '已取得报告，仍有两处意见。' }
     expect(agentToolProgress(part)).toBe(part.summary)
     expect(agentToolProgress({ ...part, reviewOutcome: 'decision_required' })).toBe('已取得报告，仍有两处意见。（仍需处理）')
     expect(agentToolProgress({ ...part, status: 'running' })).toBe('正在复查章节')
-    expect(agentToolProgress({ ...part, preparing: true })).toBe('正在准备复查章节')
+    expect(agentToolProgress({ ...part, status: 'running', preparing: true })).toBe('正在复查章节')
+    expect(agentToolProgress({ ...part, preparing: true })).toBe(part.summary)
   })
 })
