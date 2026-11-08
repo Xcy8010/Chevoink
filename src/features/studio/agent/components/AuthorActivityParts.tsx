@@ -1,4 +1,4 @@
-import { memo, useEffect, useId, useLayoutEffect, useMemo, useState, type ReactNode } from 'react'
+import { memo, useEffect, useId, useMemo, useState, type ReactNode } from 'react'
 import { BookOpenText, Bot, Brain, ChevronDown, CircleHelp, ClipboardCheck, Download, FilePenLine, FileText, Globe2, Search } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -193,8 +193,8 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles }:
   </li>
 })
 
-const ActivityRow = memo(function ActivityRow({ group, runActive, active, workingLabel, settledLabel, titles }: {
-  group?: ActivityGroup; runActive: boolean; active: boolean; workingLabel?: string; settledLabel?: string; titles?: ReadonlyMap<string, string>
+const ActivityRow = memo(function ActivityRow({ group, runActive, active, workingLabel, titles }: {
+  group?: ActivityGroup; runActive: boolean; active: boolean; workingLabel?: string; titles?: ReadonlyMap<string, string>
 }) {
   const [open, setOpen] = useState(false)
   const detailsId = useId()
@@ -207,13 +207,13 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
   const part = running ?? unresolved ?? calls.at(-1)
   const Icon = part && !workingLabel ? toolIcon(part) : Brain
   const importWaiting = calls.find(call => isOpenImport(call, runActive))
-  const label = workingLabel ?? (part ? activitySummary(part, runActive, titles) : settledLabel)
+  const label = workingLabel ?? (part ? activitySummary(part, runActive, titles) : undefined)
   const executing = Boolean(active && running && !importWaiting && running.toolName !== 'ask_user')
 
   return <div className="min-w-0" data-author-activity={group ? '' : undefined} data-author-working={workingLabel ? '' : undefined} data-author-step>
     <button type="button" aria-expanded={group ? open : undefined} aria-controls={group ? detailsId : undefined}
       disabled={!group} onClick={() => setOpen(value => !value)}
-      className="agent-activity-step inline-flex min-h-8 max-w-full items-center gap-2 px-1 text-left text-sm font-medium leading-7 text-[var(--text-primary)] focus-visible:underline focus-visible:outline-none">
+      className="agent-activity-step flex min-h-7 w-fit max-w-full items-center gap-2 px-1 text-left text-sm font-medium leading-7 text-[var(--text-secondary)] focus-visible:underline focus-visible:outline-none">
       <Icon aria-hidden className="h-4 w-4 shrink-0" />
       <span className="min-w-0 break-words">
         <span aria-live={active || running || workingLabel ? 'polite' : undefined} data-activity-running={executing || undefined}
@@ -243,8 +243,8 @@ export function AuthorActivitySummary({ timing, active, open, onToggle }: { timi
   </div>
 }
 
-export function AuthorProgressText({ text }: { text: string }) {
-  return <p className="break-words text-sm font-medium leading-7 text-[var(--text-primary)]" data-author-progress>{text}</p>
+export function AuthorProgressText({ text, className }: { text: string; className?: string }) {
+  return <p className={cn('break-words text-sm font-medium leading-7 text-[var(--text-primary)]', className)} data-author-progress>{text}</p>
 }
 
 export const AuthorActivityParts = memo(function AuthorActivityParts({
@@ -277,15 +277,6 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
 
   const stepKey = `${messageId}:step`
   const liveGroupId = workingGroupId ?? (workingLabel ? [...(localGroups?.values() ?? [])].at(-1)?.id : undefined)
-  const [openingWork, setOpeningWork] = useState<string>()
-  useLayoutEffect(() => {
-    if (!openingWork && workingLabel && !liveGroupId && !receivedText) setOpeningWork(workingLabel)
-  }, [openingWork, workingLabel, liveGroupId, receivedText])
-  const firstText = authorParts.findIndex(part => part.type === 'text')
-  const firstTool = authorParts.findIndex(part => part.type === 'tool-call' && localGroups?.get(part.callId)?.messageId === messageId)
-  // Public prose is a visible boundary. A later tool must not reuse a step
-  // on the other side of that prose, even though both share a provider turn.
-  const keepOpeningWork = Boolean(openingWork && firstText >= 0 && (firstTool < 0 || firstText < firstTool))
   const entries = authorParts.map<ReactNode>((part, index) => {
       if (part.type === 'text') {
         const identity = `${messageId}:text:${textOrdinal++}`
@@ -299,21 +290,20 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
       if (part.type !== 'tool-call' || part.subagentCallId) return null
       const group = localGroups?.get(part.callId)
       if (!group || group.messageId !== messageId || group.firstCallId !== part.callId || rendered.has(group.id)) return null
-      const key = rendered.size || keepOpeningWork ? group.id : stepKey
+      const key = rendered.size ? group.id : stepKey
       rendered.add(group.id)
       return <AgentProcessRegion key={key} open={processOpen ?? true}>
-        {group.transition ? <AuthorProgressText text={group.transition} /> : null}
+        {group.transition ? <AuthorProgressText text={group.transition} className="mb-4" /> : null}
         <ActivityRow key="activity" group={group} runActive={runActive} active={activeGroupId === group.id} titles={activityChapterTitles}
           workingLabel={liveGroupId === group.id ? workingLabel : undefined} />
       </AgentProcessRegion>
   })
-  if (keepOpeningWork && (runActive || processOpen !== undefined) || workingLabel && !liveGroupId) {
-    const step = <AgentProcessRegion key={stepKey} open={processOpen ?? true}>
-      <ActivityRow key="activity" runActive={runActive} active={false}
-        workingLabel={liveGroupId || firstTool >= 0 ? undefined : workingLabel} settledLabel={openingWork} />
-    </AgentProcessRegion>
-    if (keepOpeningWork) entries.unshift(step)
-    else entries.push(step)
+  if (workingLabel && !liveGroupId) {
+    // Public prose stays first. Until a tool arrives, this is the pending
+    // activity row, which the first tool takes over in the same position.
+    entries.push(<AgentProcessRegion key={stepKey} open={processOpen ?? true}>
+      <ActivityRow key="activity" runActive={runActive} active={false} workingLabel={workingLabel} />
+    </AgentProcessRegion>)
   }
-  return <div className="space-y-2 font-medium">{entries}</div>
+  return <div className="flex flex-col gap-4 font-medium">{entries}</div>
 })

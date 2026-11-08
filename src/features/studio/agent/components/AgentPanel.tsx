@@ -1729,7 +1729,7 @@ export function AgentPanel({
               const processOpen = !hasProcess || blockRunActive || settling || isBlockExpanded(block, message.runId)
               const messageWorkingLabel = message.id === workingMessageId ? workingLabel : undefined
               if (!showSummary && !hasActivity && !authorText && !opening && !receipt && !messageWorkingLabel) return null
-              const wholeMessageIsProcess = hasProcess && !isBlockFirst && !finalText && !receipt
+              const wholeMessageIsProcess = hasProcess && !showSummary && !finalText && !receipt
 
               return (
                 <AgentProcessRegion
@@ -1740,7 +1740,7 @@ export function AgentPanel({
                 >
                   {showSummary ? <AuthorActivitySummary timing={timing} active={blockRunActive} open={processOpen}
                     onToggle={hasProcess && !blockRunActive && !settling ? () => toggleBlock(message.id) : undefined} /> : null}
-                  {opening ? <AgentProcessRegion open={processOpen} className="mb-2"><AuthorProgressText text={opening} /></AgentProcessRegion> : null}
+                  {opening ? <AgentProcessRegion open={processOpen} className="mb-4"><AuthorProgressText text={opening} /></AgentProcessRegion> : null}
                   <AuthorActivityParts
                     parts={message.parts}
                     groups={messageActivities}

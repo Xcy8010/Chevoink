@@ -232,7 +232,7 @@ it('shows distinct search terms, actual matching chapter locations, and other re
   expect(view.container.textContent).not.toContain('PRIVATE_CHAPTER')
 })
 
-it('keeps a visible thinking step before a newly emitted report and opens a later tool below it', () => {
+it('shows the opening report before the pending activity and reuses that activity for the first tool', () => {
   const text: AgentMessagePart = { type: 'text', text: '前文已经有来访情节。' }
   const tool = call('new-check', 'chapter_read', { status: 'running' })
   const view = render(<AuthorActivityParts parts={[reasoning]} messageId="work" runActive workingLabel="梳理前文" />)
@@ -240,15 +240,25 @@ it('keeps a visible thinking step before a newly emitted report and opens a late
   view.rerender(<AuthorActivityParts parts={[reasoning, text]} messageId="work" runActive workingLabel="梳理前文" />)
   const paragraph = screen.getByText(text.text)
   expect(view.container.querySelector('[data-author-step] > button')).toBe(original)
-  expect(original.compareDocumentPosition(paragraph) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(paragraph.compareDocumentPosition(original) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
 
   const projection = projectActivityGroups([message('work', [reasoning, text, tool])])
   view.rerender(<AuthorActivityParts parts={[reasoning, text, tool]} messageId="work" runActive
     groups={projection.byMessage.get('work')} activeGroupId={projection.runningByRun.get('r')?.id} />)
   const activeTool = screen.getByRole('button', { name: '正在核对前文' })
   expect(view.container.querySelector('[data-author-step] > button')).toBe(original)
+  expect(activeTool).toBe(original)
   expect(paragraph.compareDocumentPosition(activeTool) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(view.container.querySelectorAll('[data-author-step]')).toHaveLength(1)
   expect(view.container.querySelectorAll('.agent-processing-shimmer')).toHaveLength(1)
+
+  const followup: AgentMessagePart = { type: 'text', text: '我已经查到来访的位置。' }
+  const finished = { ...tool, status: 'success' as const }
+  view.rerender(<AuthorActivityParts parts={[reasoning, text, finished, followup]} messageId="work" runActive={false} />)
+  expect(view.container.querySelectorAll('[data-author-step]')).toHaveLength(1)
+  expect(screen.getByRole('button', { name: '已核对前文' })).toBe(original)
+  expect(original.compareDocumentPosition(screen.getByText(followup.text)) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(view.container.textContent).not.toMatch(/梳理前文|RAW_THOUGHT_ONLY/)
 })
 
 it('keeps the import confirmation reachable without opening the activity', () => {
