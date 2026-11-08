@@ -1690,11 +1690,6 @@ export function AgentPanel({
                         .join('')}
                     </div>
                   </div>
-{/* The timer belongs to the request, before and after the first streamed paragraph. */}
-                  {showSummary ? <div className="w-full pt-3">
-                    <AuthorActivitySummary timing={timing ?? unknownRunTiming()} active={headerActive} open={summaryOpen}
-                      onToggle={block?.ops && !headerActive && !settling ? () => toggleBlock(block.firstId) : undefined} />
-                  </div> : null}
                   {message.delivery?.status === 'failed' ? <div className="flex max-w-full items-center gap-2 text-xs text-[var(--text-secondary)]">
                     <span role="alert">发送未确认：{message.delivery.error}</span>
                     <button type="button" onClick={() => useOutgoingMessages.getState().remove(message.id)} className="shrink-0 underline">移除这条本地消息</button>
@@ -1702,6 +1697,11 @@ export function AgentPanel({
                     onCopy={() => void handleCopyText(message.id, getMessageText(message.parts, message.role))}
                     onRollback={() => setConfirmAction({ kind: 'rollbackMessage', messageId: message.id })}
                     onDelete={() => setConfirmAction({ kind: 'deleteMessage', messageId: message.id })} /> : null}
+                  {/* The timer belongs to the request, before and after the first streamed paragraph. */}
+                  {showSummary ? <div className="w-full pt-3">
+                    <AuthorActivitySummary timing={timing ?? unknownRunTiming()} active={headerActive} open={summaryOpen}
+                      onToggle={block?.ops && !headerActive && !settling ? () => toggleBlock(block.firstId) : undefined} />
+                  </div> : null}
                 </div>
                 )
               }
