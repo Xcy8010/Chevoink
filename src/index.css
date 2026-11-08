@@ -576,7 +576,7 @@ html.dark .studio-workspace :is(
   animation: agent-fade-out var(--duration-normal) var(--easing-default) both;
 }
 
-/* Agent「正在处理...」占位文字：银色文字光泽（复用 skeleton-shimmer 位移动画，主题变量自适应深浅色） */
+/* Shared text shimmer for the active Agent step, in either theme. */
 .agent-processing-shimmer {
   background: linear-gradient(
     90deg,

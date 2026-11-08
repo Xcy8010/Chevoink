@@ -1,5 +1,5 @@
 import { memo, useEffect, useId, useMemo, useState } from 'react'
-import { BookOpenText, Bot, ChevronDown, CircleHelp, ClipboardCheck, Download, FilePenLine, FileText, Globe2, LoaderCircle, Search } from 'lucide-react'
+import { BookOpenText, Bot, ChevronDown, CircleHelp, ClipboardCheck, Download, FilePenLine, FileText, Globe2, Search } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { useStreamingTextState } from '../../components/use-streaming-text'
@@ -156,15 +156,15 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, titles
   const Icon = toolIcon(part)
   const importWaiting = group.calls.find(call => isOpenImport(call, runActive))
   const label = activitySummary(part, runActive, titles)
+  const executing = Boolean(active && running && !importWaiting && running.toolName !== 'ask_user')
 
   return <div className="min-w-0" data-author-activity>
     <button type="button" aria-expanded={open} aria-controls={detailsId} onClick={() => setOpen(value => !value)}
-      className="agent-activity-step inline-flex min-h-8 max-w-full items-center gap-2 rounded-md px-1 text-left text-xs leading-5 text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1">
-      {active && running && !importWaiting && running.toolName !== 'ask_user'
-        ? <LoaderCircle aria-hidden className="h-3.5 w-3.5 shrink-0 motion-safe:animate-spin" data-activity-running />
-        : <Icon aria-hidden className="h-3.5 w-3.5 shrink-0" />}
+      className="agent-activity-step inline-flex min-h-8 max-w-full items-center gap-2 px-1 text-left text-xs leading-5 text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] focus-visible:text-[var(--text-primary)] focus-visible:underline focus-visible:outline-none">
+      <Icon aria-hidden className="h-3.5 w-3.5 shrink-0" />
       <span className="min-w-0 break-words">
-        <span aria-live={active || running ? 'polite' : undefined}>{label}</span>
+        <span aria-live={active || running ? 'polite' : undefined} data-activity-running={executing || undefined}
+          className={executing ? 'agent-processing-shimmer' : undefined}>{label}</span>
         <ChevronDown aria-hidden className={cn('agent-activity-chevron ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-[opacity,transform]', open ? 'rotate-0' : '-rotate-90')} />
       </span>
     </button>
@@ -183,15 +183,25 @@ export function AuthorActivitySummary({ timing, active, open, onToggle }: { timi
     : <span className="text-[11px] text-[var(--text-secondary)]">查看处理过程</span>
   return <div className="mb-2 border-b border-[var(--border-subtle)] pb-1.5">
     {onToggle ? <button type="button" aria-expanded={open} onClick={onToggle}
-      className="inline-flex min-h-7 items-center gap-1 rounded-sm text-left text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1">
+      className="inline-flex min-h-7 items-center gap-1 text-left text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:underline focus-visible:outline-none">
       {label}
       <ChevronDown aria-hidden className={cn('h-3.5 w-3.5 shrink-0 motion-safe:transition-transform', !open && '-rotate-90')} />
     </button> : <div className="flex min-h-7 items-center">{label}</div>}
   </div>
 }
 
+export function AuthorProgressText({ text }: { text: string }) {
+  return <p className="break-words text-sm leading-7 text-[var(--text-primary)]" data-author-progress>{text}</p>
+}
+
+export function AuthorWorkingSummary({ text }: { text: string }) {
+  return <p role="status" className="text-xs leading-6 text-[var(--text-secondary)]" data-author-working>
+    <span className="agent-processing-shimmer">{text}</span>
+  </p>
+}
+
 export const AuthorActivityParts = memo(function AuthorActivityParts({
-  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, revealText, onTextRevealed, activityChapterTitles,
+  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, workingLabel, revealText, onTextRevealed, activityChapterTitles,
 }: {
   parts: AgentMessagePart[]
   messageId: string
@@ -200,6 +210,7 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   runActive: boolean
   processOpen?: boolean
   collapseText?: boolean
+  workingLabel?: string
   revealText?: string
   onTextRevealed?: (messageId: string, text: string) => void
   activityChapterTitles?: ReadonlyMap<string, string>
@@ -231,8 +242,14 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
       const group = localGroups?.get(part.callId)
       if (!group || group.messageId !== messageId || group.firstCallId !== part.callId || rendered.has(group.id)) return null
       rendered.add(group.id)
-      const row = <ActivityRow key={group.id} group={group} runActive={runActive} active={activeGroupId === group.id} titles={activityChapterTitles} />
-      return processOpen === undefined ? row : <AgentProcessRegion key={group.id} open={processOpen}>{row}</AgentProcessRegion>
+      const row = <>
+        {group.transition ? <AuthorProgressText text={group.transition} /> : null}
+        <ActivityRow group={group} runActive={runActive} active={activeGroupId === group.id} titles={activityChapterTitles} />
+      </>
+      return processOpen === undefined
+        ? <div key={group.id}>{row}</div>
+        : <AgentProcessRegion key={group.id} open={processOpen}>{row}</AgentProcessRegion>
     })}
+    {workingLabel ? <AuthorWorkingSummary text={workingLabel} /> : null}
   </div>
 })

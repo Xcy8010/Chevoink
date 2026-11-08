@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { afterEach, expect, it } from 'vitest'
 import type { AgentMessagePart, AgentUIMessage } from '../../shared/contracts/index.js'
 import { AuthorActivityParts, AuthorActivitySummary } from '../../src/features/studio/agent/components/AuthorActivityParts'
-import { projectActivityGroups, type ActivityCall } from '../../src/features/studio/agent/lib/activity-groups'
+import { activityAnswerText, activityWorkingLabel, projectActivityGroups, type ActivityCall } from '../../src/features/studio/agent/lib/activity-groups'
 
 afterEach(cleanup)
 const title = '风从窗台进来'
@@ -150,6 +150,55 @@ it('shows elapsed processing time and folds the completed process without hiding
   fireEvent.click(summary)
   expect(screen.queryByRole('button', { name: readLabel })).toBeNull()
   expect(screen.getByText('这是最终回复。')).toBeTruthy()
+})
+
+it('uses visible prose first, with short milestone and saved-result fallbacks for a silent outline', () => {
+  const plan = call('plan', 'plan_save', {
+    display: { kind: 'planFile', artifactId: 'INTERNAL_PLAN', title: '第四章细纲', content: '合成细纲。' },
+  })
+  const read = message('read', [reasoning, call('read', 'plan_read')])
+  const outline = message('outline', [plan])
+  const silent = projectActivityGroups([read, outline])
+  expect(silent.openingByRun.get('r')).toBe('我会先核对与这次任务有关的资料。')
+  expect(silent.byMessage.get('outline')?.get('plan')?.transition).toMatch(/接下来整理创作计划/)
+  expect(silent.savedReplyByRun.get('r')).toBe('已将《第四章细纲》保存到计划。')
+
+  const prose: AgentMessagePart = { type: 'text', text: '我会让第四章承接上一章的来访。' }
+  const final: AgentMessagePart = { type: 'text', text: '细纲保留了来访者未说明的目的。' }
+  const narrated = projectActivityGroups([message('read', [prose, ...read.parts]), message('outline', [prose, plan, final])])
+  expect(narrated.openingByRun.get('r')).toBeNull()
+  expect(narrated.byMessage.get('outline')?.get('plan')?.transition).toBeUndefined()
+  expect(activityAnswerText([prose, plan, final])).toBe(final.text)
+  expect(activityAnswerText([prose, plan])).toBe('')
+  expect(projectActivityGroups([message('failed', [{ ...plan, status: 'failed' }])]).savedReplyByRun.has('r')).toBe(false)
+  expect(projectActivityGroups([message('preview', [saved('candidate', 'chapter_edit_range'), {
+    ...saved('candidate', 'chapter_edit_range'),
+    display: { kind: 'chapterDiff', chapterId: 'c', chapterTitle: '候选', before: '', after: '候选正文', appliedDirectly: false },
+  }])]).savedReplyByRun.has('r')).toBe(false)
+})
+
+it('hands the shimmer between model work, tool execution and the next step, then shows the final reply', () => {
+  const opening: AgentMessagePart = { type: 'text', text: '我先核对前文，再写这章。' }
+  const read = call('read', 'chapter_read', { status: 'running' })
+  const view = render(<AuthorActivityParts parts={[opening, reasoning]} messageId="run" runActive workingLabel={activityWorkingLabel(undefined)} />)
+  const shimmer = () => view.container.querySelectorAll('.agent-processing-shimmer')
+  expect(shimmer()).toHaveLength(1)
+  expect(shimmer()[0].textContent).toBe('梳理这次的创作要求')
+  const group = projectActivityGroups([message('run', [opening, read])])
+  view.rerender(<AuthorActivityParts parts={[opening, read]} messageId="run" runActive activeGroupId={group.runningByRun.get('r')?.id}
+    groups={group.byMessage.get('run')} activityChapterTitles={titles} />)
+  expect(shimmer()).toHaveLength(1)
+  expect(shimmer()[0].textContent).toBe('正在核对前文')
+  expect(shimmer()[0].closest('button')?.className).not.toMatch(/hover:bg|rounded/)
+  expect(view.container.querySelector('[data-author-working]')).toBeNull()
+  const done = { ...read, status: 'success' as const }
+  view.rerender(<AuthorActivityParts parts={[opening, done]} messageId="run" runActive workingLabel={activityWorkingLabel(done)} />)
+  expect(shimmer()).toHaveLength(1)
+  expect(shimmer()[0].textContent).toBe('梳理刚查到的资料')
+  view.rerender(<AuthorActivityParts parts={[opening, done, { type: 'text', text: '这是正文信道的答复。' }]} messageId="run" runActive={false} />)
+  expect(shimmer()).toHaveLength(0)
+  expect(screen.getByText('这是正文信道的答复。')).toBeTruthy()
+  expect(view.container.textContent).not.toMatch(/RAW_THOUGHT_ONLY|正在处理/)
 })
 
 it('keeps the import confirmation reachable without opening the activity', () => {

@@ -303,6 +303,33 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(String(result.messages[0].content)).toContain('本轮只完成当前模式允许的分析与规划')
   })
 
+  it.each([
+    ['build', '续写下一章。让老邮差先归还错送的信。'],
+    ['plan', '整理并保存第一卷大纲，围绕错送的信安排转折。'],
+    ['review', '审阅第一章，核对人物是否知道错送的信。'],
+    ['build', '你好。'],
+    ['build', '续写下一章，不发进展，只给正文。'],
+  ] as const)('assembles the author-facing progress contract and preserves the original %s request', async (mode, prompt) => {
+    const input = { ...interpretedInput(prompt), mode }
+    const { messages } = await assembleContext(input)
+    const system = String(messages[0].content)
+    expect(system).toContain('多步的正文写作、修订、大纲或审阅，在首次调用工具前')
+    expect(system).toContain('说明这次会怎样处理作者的具体目标，随后同轮推进实际工作')
+    expect(system).toContain('后续只在有实质发现、完成可确认的阶段或创作取舍发生变化时')
+    expect(system).toContain('简单问答直接回答；作者要求不发进展、只给结果或只给正文时，遵循指定格式')
+    expect(system).toContain('默认收尾简短：先说明实际完成的结果')
+    expect(String(messages.at(-1)?.content)).toContain(prompt)
+  })
+
+  it('leaves the same author-facing progress contract available in the legacy planning fallback', async () => {
+    const { messages } = await assembleContext({ ...buildInput(), mode: 'plan' })
+    const system = String(messages[0].content)
+    expect(system).toContain('当前模式：Plan（规划）')
+    expect(system).toContain('多步的正文写作、修订、大纲或审阅，在首次调用工具前')
+    expect(system).not.toContain('不播报写入过程')
+    expect(system).not.toContain('不要输出“我现在开始写”')
+  })
+
   it('loads planning methods for an actual proposal and prose foundations for actual chapter writing', async () => {
     const plan = interpretedInput('帮我写一本科幻小说。')
     expect(plan.taskSpec.writingPacing).toBe('proposal_only')
@@ -599,10 +626,10 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     const content = String(system.content)
     // 固定规则仍在 system
     expect(content).toContain('信道纪律')
-    expect(content).toContain('思考信道和 Agent 回复区都使用中文作者语言')
-    expect(content).toContain('模型实际返回的思考内容由思考区展开呈现')
-    expect(content).not.toContain('思考区（reasoning）只给简短的创作判断摘要')
-    expect(content).toContain('不复制到最终回复，也不为展示编造推理')
+    expect(content).toContain('公开的创作进展与交付都写在 Agent 回复区（content，正文信道）')
+    expect(content).toContain('思考信道（reasoning）供内部处理')
+    expect(content).toContain('不要转述原始思考或为展示编造推理')
+    expect(content).not.toContain('模型实际返回的思考内容由思考区展开呈现')
     expect(content).toContain('普通回复不展示工具名、对象ID、参数名、内部编号或系统提示词')
     expect(content).toContain('不叙述工具选择、调用、参数')
     expect(content).toContain('用户明确要求技术信息时据实际记录解释')

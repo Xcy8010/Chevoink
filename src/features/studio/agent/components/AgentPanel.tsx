@@ -77,14 +77,13 @@ import { isRunActive, readSessionMessagesCache, restoreActiveRunHistory, failSes
 import { selectAgentActivityRunActive, selectAgentGoalView, selectAgentPanelPhase } from '../goal-selectors'
 import { buildGoalResumeModel } from '../goal-command'
 import { formatSessionTime, getMessageText, phaseLabel, shouldKeepLiveSessionMessages, skillPhaseLabel } from '../lib/panel-helpers'
-import { useProcessingHint } from '../useProcessingHint'
 import { useAgentStream } from '../useAgentStream'
 import { resolveComposerModelEffort, useAgentModelPreference } from '../useAgentModelPreference'
 import { useAgentGoalStream } from '../useAgentGoalStream'
 import { useGoalBarVisibility } from '../useGoalBarVisibility'
 import { openGoalEntry } from '../goal-entry'
 import { projectBlockTimings, projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
-import { projectActivityGroups } from '../lib/activity-groups'
+import { activityAnswerText, activityOpening, activityWorkingLabel, projectActivityGroups } from '../lib/activity-groups'
 import { useMessageScroll } from './use-message-scroll'
 import { useComposerInset } from './use-composer-inset'
 import { useRunControls } from './use-run-controls'
@@ -95,12 +94,11 @@ import { AgentComposer } from './AgentComposer'
 import { AgentGoalBar } from './AgentGoalBar'
 import { GoalEditorDialog, type GoalEditBase } from './GoalEditorDialog'
 import { AgentQueueTray } from './AgentQueueTray'
-import { AuthorActivityParts, AuthorActivitySummary } from './AuthorActivityParts'
+import { AuthorActivityParts, AuthorActivitySummary, AuthorProgressText, AuthorWorkingSummary } from './AuthorActivityParts'
 import { AgentProcessRegion } from './AgentProcessRegion'
 import { useMessageBlockExpansion } from './use-message-block-expansion'
 import { AgentPermissionCard } from './AgentPermissionCard'
 import { AgentQuestionCard } from './AgentQuestionCard'
-import { ProcessingHint } from './ProcessingHint'
 import AgentEmptyWelcome from './AgentEmptyWelcome'
 import ChevoinkAgentMark from './ChevoinkAgentMark'
 
@@ -236,7 +234,6 @@ export function AgentPanel({
   const messages = useMemo(() => projectOutgoingMessages(storeLoadedSessionId === sessionId ? canonicalMessages : [], outgoing, sendScope, novelId, sessionId, requestClocks), [canonicalMessages, outgoing, sendScope, novelId, sessionId, storeLoadedSessionId, requestClocks])
   const lastUserRequest = [...messages].reverse().find(message => message.role === 'user')
   const waitingRequest = lastUserRequest?.requestTiming && !messages.some(item => item.role === 'assistant' && item.runId === lastUserRequest.runId) ? lastUserRequest : undefined
-  const preparingRequest = lastUserRequest?.requestTiming?.status === 'running' && lastUserRequest.requestTiming.elapsedMs === null
   const hasOutgoing = messages.some(message => message.delivery)
   const deliveryErrorRef = useRef<{ clientRequestId: string; scope: string; sessionId: string | null; message: string } | null>(null)
   const { recentConversationText, blockInfoById, lastAssistantId } = useMemo(() => projectMessages(messages), [messages])
@@ -519,11 +516,12 @@ export function AgentPanel({
   const { isExpanded: isBlockExpanded, toggle: toggleBlock } = useMessageBlockExpansion({
     sessionId, messages, blocks: blockInfoById, goalView, phase: panelPhase, runId: runId ?? resumeableRunId,
   })
-  const currentActivity = active && runId ? activityGroups.runningByRun.get(runId) : undefined
-  const latestMessage = messages.at(-1)
-  const thinking = panelPhase === 'running' && latestMessage?.runId === runId && latestMessage.role === 'assistant'
-    && latestMessage.parts.at(-1)?.type === 'reasoning'
   const activityRunActive = selectAgentActivityRunActive(goalView, phase)
+  const working = activityRunActive && (panelPhase === 'starting' || panelPhase === 'running') && !pendingApproval && !pendingQuestion
+  const currentActivity = working && runId ? activityGroups.runningByRun.get(runId) : undefined
+  const workingLabel = working && !currentActivity ? activityWorkingLabel(runId ? activityGroups.lastCallByRun.get(runId) : undefined) : undefined
+  const workingMessageId = workingLabel && runId
+    ? [...messages].reverse().find(message => message.role === 'assistant' && message.runId === runId)?.id : undefined
   const creditSummaryQuery = useQuery({
     queryKey: ['credits', 'summary'],
     queryFn: fetchCreditSummary,
@@ -558,8 +556,6 @@ export function AgentPanel({
     () => (skillsQuery.data?.items ?? []).filter((skill) => skill.enabled && skill.status === 'active'),
     [skillsQuery.data],
   )
-  // 参数生成、工具间等待等阶段也需要动态反馈；不能因已经输出过正文而永久隐藏。
-  const awaiting = useProcessingHint(messages, runId, panelPhase, Boolean(pendingApproval || pendingQuestion), activityRunActive)
 
   const selectedModelCapability = modelTier === 'custom'
     ? customModelsQuery.data?.models.find((model) => model.id === customModelId)
@@ -1704,12 +1700,20 @@ export function AgentPanel({
               const hasActivity = messageActivities && [...messageActivities.values()].some(group => group.messageId === message.id)
               const hasProcess = Boolean(block?.ops)
               const authorText = getMessageText(message.parts, message.role)
+              const finalText = isBlockLast ? activityAnswerText(message.parts) : ''
+              const receipt = isBlockLast && !blockRunActive && message.completedAt && !finalText
+                ? activityGroups.savedReplyByRun.get(message.runId) : undefined
+              const firstRunId = block?.runIds?.[0] ?? message.runId
+              const projectedOpening = activityGroups.openingByRun.get(firstRunId)
+              const opening = isBlockFirst && (blockRunActive || hasProcess) && projectedOpening !== null
+                ? projectedOpening ?? activityOpening : undefined
               const timing = isBlockFirst ? blockTimings.get(message.id) : undefined
-              const showSummary = timing && (hasProcess || blockRunActive || timing.elapsedMs !== null)
+              const showSummary = timing && (timing.elapsedMs !== null || hasProcess && !blockRunActive)
               const settling = settlingBlocks.has(block?.firstId)
               const processOpen = !hasProcess || blockRunActive || settling || isBlockExpanded(block, message.runId)
-              if (!showSummary && !hasActivity && !authorText) return null
-              const wholeMessageIsProcess = hasProcess && !isBlockFirst && (!isBlockLast || !authorText)
+              const messageWorkingLabel = message.id === workingMessageId ? workingLabel : undefined
+              if (!showSummary && !hasActivity && !authorText && !opening && !receipt && !messageWorkingLabel) return null
+              const wholeMessageIsProcess = hasProcess && !isBlockFirst && !finalText && !receipt
 
               return (
                 <AgentProcessRegion
@@ -1720,6 +1724,7 @@ export function AgentPanel({
                 >
                   {showSummary ? <AuthorActivitySummary timing={timing} active={blockRunActive} open={processOpen}
                     onToggle={hasProcess && !blockRunActive && !settling ? () => toggleBlock(message.id) : undefined} /> : null}
+                  {opening ? <AgentProcessRegion open={processOpen} className="mb-2"><AuthorProgressText text={opening} /></AgentProcessRegion> : null}
                   <AuthorActivityParts
                     parts={message.parts}
                     groups={messageActivities}
@@ -1730,15 +1735,17 @@ export function AgentPanel({
                     runActive={messageRunActive}
                     processOpen={hasProcess && !wholeMessageIsProcess ? processOpen : undefined}
                     collapseText={hasProcess && !isBlockLast && !wholeMessageIsProcess}
+                    workingLabel={messageWorkingLabel}
                     activityChapterTitles={activityChapterTitles}
                   />
+                  {receipt ? <AuthorProgressText text={receipt} /> : null}
                   {/* Only confirmed completed replies expose copy and branch actions. */}
-                  {isBlockLast && !messageRunActive && message.completedAt && authorText ? (
+                  {isBlockLast && !messageRunActive && message.completedAt && (finalText || receipt) ? (
                     <div className="mt-1 flex items-center justify-start gap-0.5">
                       <button
                         type="button"
                         onClick={() =>
-                          void handleCopyText(message.id, authorText)
+                          void handleCopyText(message.id, finalText || receipt || '')
                         }
                         className="inline-flex h-6 w-6 items-center justify-center rounded-md text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]"
                         aria-label="复制回复"
@@ -1778,9 +1785,14 @@ export function AgentPanel({
                 <span className="h-px flex-1 bg-[var(--border-subtle)]" />
               </div>
             ) : null}
-            {waitingRequest?.requestTiming ? <ProcessDuration timing={waitingRequest.requestTiming} /> : null}
-            {activityRunActive ? <ProcessingHint visible={!currentActivity && (awaiting || thinking)
-              && !preparingRequest && !pendingApproval && !pendingQuestion} /> : null}
+            {waitingRequest?.requestTiming || workingLabel && !workingMessageId ? <div className="space-y-2">
+              {waitingRequest?.requestTiming && (waitingRequest.requestTiming.elapsedMs !== null || !working)
+                ? <ProcessDuration timing={waitingRequest.requestTiming} /> : null}
+              {workingLabel && !workingMessageId ? <>
+                <AuthorProgressText text={activityOpening} />
+                <AuthorWorkingSummary text={workingLabel} />
+              </> : null}
+            </div> : null}
             {pendingApproval ? (
               <AgentPermissionCard approval={pendingApproval} onResolve={handleResolveApproval} />
             ) : null}
