@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils'
 import { useStreamingTextState } from '../../components/use-streaming-text'
 import { useAgentStore } from '../agentStore'
 import { getMemorySpotlight } from '../tool-argument-view'
-import { activityChapterId, projectActivityGroups, type ActivityCall, type ActivityGroup, type MessageActivityGroups } from '../lib/activity-groups'
+import { activityChapterId, activityTarget, projectActivityGroups, type ActivityCall, type ActivityGroup, type MessageActivityGroups } from '../lib/activity-groups'
 import { projectAgentAuthorParts, projectAgentAuthorText } from '../../../../../shared/agent-author-view.js'
 import { getAgentToolPresentation } from '../../../../../shared/agent-tool-presentation.js'
 import type { AgentRunTiming } from '../../../../../shared/contracts/agent-events.js'
@@ -61,10 +61,10 @@ function reviewResult(part: ActivityCall) {
   }
 }
 
-function activitySummary(part: ActivityCall, runActive: boolean, titles?: ReadonlyMap<string, string>, detail = false): string {
+function activitySummary(part: ActivityCall, runActive: boolean, titles?: ReadonlyMap<string, string>, detail = false, grouped = false): string {
   const presentation = getAgentToolPresentation(part.toolName)
   const action = actionNames[part.toolName] ?? presentation.label
-  const title = chapterTitle(part, titles)
+  const title = grouped ? undefined : chapterTitle(part, titles)
   const display = part.display
   const named = title ? `《${title}》` : ''
   const isWrite = part.toolName === 'chapter_write' || part.toolName === 'chapter_append'
@@ -89,15 +89,15 @@ function activitySummary(part: ActivityCall, runActive: boolean, titles?: Readon
   if (display?.kind === 'chapterDiff') {
     if (display.before === display.after) return `${named}正文未改动`
     if (!display.appliedDirectly && !part.accepted) return `已生成${named}的修改建议`
-    if (isWrite) return `已写入${named}正文 · ${display.after.length.toLocaleString('zh-CN')} 字`
-    return `已保存${named}的修改`
+    if (isWrite) return grouped ? '已写入正文' : `已写入${named}正文 · ${display.after.length.toLocaleString('zh-CN')} 字`
+    return named ? `已保存${named}的修改` : '已保存修改'
   }
   if (isWrite) return '写入正文'
   if (review) {
     const outcome = reviewResult(part)
     if (outcome === '复查未完成' || outcome === '正文有新改动') return outcome
     const result = part.toolName === 'quality_report_get' ? '已查看复查报告' : `${detail ? action : '复查'}完成`
-    return `${result}${outcome ? ` · ${outcome}` : ''}`
+    return `${result}${outcome && !grouped ? ` · ${outcome}` : ''}`
   }
   if (detail && display?.kind === 'projectSearch') return `搜索「${display.query}」 · ${display.total ? `${display.total} 处` : '无匹配'}`
   if (display?.kind === 'webSearch') {
@@ -199,15 +199,18 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
   const [open, setOpen] = useState(false)
   const detailsId = useId()
   const calls = group?.calls ?? []
-  const latest = new Map(calls.map(part => [part.toolName, part]))
-  // A successful retry for the same action supersedes the headline, but the
-  // earlier failed receipt remains in the expanded timeline.
+  const grouped = calls.length > 1
+  const latest = new Map(calls.map(part => [activityTarget(part), part]))
+  // A successful retry for the same target supersedes the headline. The
+  // failed receipt stays in the expanded list.
   const unresolved = [...latest.values()].find(hasCurrentFailure)
   const running = runActive ? [...calls].reverse().find(part => part.status === 'running') : undefined
   const part = running ?? unresolved ?? calls.at(-1)
   const Icon = part && !workingLabel ? toolIcon(part) : Brain
   const importWaiting = calls.find(call => isOpenImport(call, runActive))
-  const label = workingLabel ?? (part ? activitySummary(part, runActive, titles) : undefined)
+  const label = workingLabel ?? (part && (grouped && !running && unresolved
+    ? `${getAgentToolPresentation(part.toolName).label}有未完成项`
+    : activitySummary(part, runActive, titles, false, grouped)))
   const executing = Boolean(active && running && !importWaiting && running.toolName !== 'ask_user')
 
   return <div className="min-w-0" data-author-activity={group ? '' : undefined} data-author-working={workingLabel ? '' : undefined} data-author-step>
@@ -217,14 +220,15 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
       <Icon aria-hidden className="h-4 w-4 shrink-0" />
       <span className="min-w-0 break-words">
         <span aria-live={active || running || workingLabel ? 'polite' : undefined} data-activity-running={executing || undefined}
-          className={executing || workingLabel ? 'agent-processing-shimmer' : undefined}>{label}</span>
+          className={executing || workingLabel ? 'agent-processing-shimmer' : undefined}>{label}{grouped ? ` · ${calls.length} 次` : null}</span>
         {group ? <ChevronDown aria-hidden className={cn('agent-activity-chevron ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-[opacity,transform]', open ? 'rotate-0' : '-rotate-90')} /> : null}
       </span>
     </button>
     {importWaiting?.importWaiting ? <a className="ml-6 text-xs underline" href={importWaiting.importWaiting.url}>核对原文并确认导入</a> : null}
     {group ? <AgentProcessRegion open={open} id={detailsId}>
       <ul className="ml-2 border-l border-[var(--border-subtle)] pl-3">
-        {[...calls, ...group.children].map(call => <ActivityDetail key={call.callId} part={call} runActive={runActive} titles={titles} />)}
+        {calls.flatMap(call => [call, ...(group.childrenByCall.get(call.callId) ?? [])]).map(call =>
+          <ActivityDetail key={JSON.stringify([call.subagentCallId ?? null, call.callId])} part={call} runActive={runActive} titles={titles} />)}
       </ul>
     </AgentProcessRegion> : null}
   </div>

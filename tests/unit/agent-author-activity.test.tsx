@@ -51,22 +51,20 @@ it('preserves only the latest terminal status in the headline and the failed att
   const view = render(<Transcript messages={[message('a', [failed])]} />)
   const toggle = screen.getByRole('button', { name: `《${title}》正文修改未保存` })
   fireEvent.click(toggle)
-  view.rerender(<Transcript messages={[message('a', [failed]), message('b', [reasoning, call('reread', 'chapter_read')]),
-    message('c', [saved('retry', 'chapter_edit_range')])]} />)
+  view.rerender(<Transcript messages={[message('a', [failed]), message('b', [reasoning, saved('retry', 'chapter_edit_range')])]} />)
   const group = view.container.querySelector('[data-author-activity]')!
-  expect(within(group as HTMLElement).getByRole('button', { name: `已保存《${title}》的修改`, expanded: true })).toBe(toggle)
+  expect(within(group as HTMLElement).getByRole('button', { name: '已保存修改 · 2 次', expanded: true })).toBe(toggle)
   expect(within(group as HTMLElement).getByText(failureReceipt)).toBeTruthy()
   expect(group.textContent).not.toMatch(/已允许|INTERNAL_FAILURE_CODE/)
   expect(group.querySelectorAll('[data-activity-tool="chapter_edit_range"]')).toHaveLength(2)
-  expect(group.querySelector('[data-activity-tool="chapter_read"]')).toBeTruthy()
   expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(1)
 })
 
 it('groups a 49-call timeline through replay, preserving author-facing paragraphs and every receipt in details', () => {
   const actions = [
-    ...Array.from({ length: 12 }, (_, i) => call(`read-${i}`, i % 2 ? 'chapter_read' : 'project_search')),
+    ...Array.from({ length: 12 }, (_, i) => call(`read-${i}`, i < 6 ? 'chapter_read' : 'project_search')),
     ...Array.from({ length: 12 }, (_, i) => saved(`write-${i}`)),
-    ...Array.from({ length: 12 }, (_, i) => call(`review-${i}`, i % 2 ? 'quality_analyze' : 'continuity_validate')),
+    ...Array.from({ length: 12 }, (_, i) => call(`review-${i}`, i < 6 ? 'quality_analyze' : 'continuity_validate')),
     ...Array.from({ length: 13 }, (_, i) => saved(`edit-${i}`, 'chapter_edit_range')),
   ]
   const messages = actions.map((part, i) => message(`m${i}`, i === 24
@@ -75,7 +73,7 @@ it('groups a 49-call timeline through replay, preserving author-facing paragraph
   const replayed = [...messages, message('replay', [{ ...actions[0], status: 'running', preparing: true }])]
   const view = render(<Transcript messages={messages} />)
   const summary = () => Array.from(view.container.querySelectorAll('[data-author-activity] > button'), button => button.textContent)
-  expect(summary()).toHaveLength(4)
+  expect(summary()).toHaveLength(6)
   expect(screen.getByText('初稿写好了。我现在核对人物前后的行动。')).toBeTruthy()
   const before = summary()
   view.rerender(<Transcript key="reopen" messages={replayed} />)
@@ -86,15 +84,50 @@ it('groups a 49-call timeline through replay, preserving author-facing paragraph
   expect(view.container.textContent).not.toMatch(/RAW_THOUGHT_ONLY|RAW_PARAMETER_ONLY|internal-chapter-id|已允许|INTERNAL_FAILURE_CODE/)
 })
 
-it('separates targets, author progress and task ownership while showing only one active animation', () => {
+it('groups different targets and separates public progress and task ownership with one active animation', () => {
   const a = call('a', 'chapter_read', { status: 'running', args: { chapterId: 'chapter-a' } })
   const b = call('b', 'chapter_read', { status: 'running', args: { chapterId: 'chapter-b' } })
-  const view = render(<Transcript active="r" messages={[
-    message('a', [a, b]), message('b', [{ type: 'text', text: '这段已看完。' }, call('c', 'chapter_read')]),
+  const messages = (first: ActivityCall, second: ActivityCall) => [
+    message('a', [first, second]), message('b', [{ type: 'text', text: '这段已看完。' }, call('c', 'chapter_read')]),
     message('c', [call('a', 'chapter_read')], 'another-run'),
-  ]} />)
-  expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(4)
+  ]
+  const view = render(<Transcript active="r" messages={messages(a, b)} />)
+  expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(3)
+  const toggle = screen.getByRole('button', { name: '正在核对前文 · 2 次' })
+  fireEvent.click(toggle)
+  expect(toggle.closest('[data-author-activity]')?.querySelectorAll('[data-activity-tool="chapter_read"]')).toHaveLength(2)
   expect(view.container.querySelectorAll('[data-activity-running]')).toHaveLength(1)
+  view.rerender(<Transcript messages={messages({ ...a, status: 'failed' }, { ...b, status: 'success' })} />)
+  expect(screen.getByRole('button', { name: '核对前文有未完成项 · 2 次', expanded: true })).toBe(toggle)
+})
+
+it('splits repeated tools at another tool even when their activity labels match', () => {
+  const first = call('outline', 'plan_read', { args: { planId: 'outline' } })
+  const second = call('chapter-plan', 'plan_read', { args: { planId: 'detail' } })
+  const skill = call('craft-skill', 'skill_load')
+  const last = call('later-plan', 'plan_read')
+  const projection = projectActivityGroups([
+    message('first', [first]), message('second', [reasoning, second]),
+    message('skill', [skill]), message('last', [last]),
+  ])
+  const group = projection.byMessage.get('first')?.get(first.callId)
+  expect(group?.calls.map(part => part.callId)).toEqual(['outline', 'chapter-plan'])
+  expect(projection.byMessage.get('second')?.get(second.callId)).toBe(group)
+  expect(projection.byMessage.get('skill')?.get(skill.callId)?.calls.map(part => part.callId)).toEqual([skill.callId])
+  expect(projection.byMessage.get('last')?.get(last.callId)?.calls.map(part => part.callId)).toEqual([last.callId])
+})
+
+it('keeps grouped subagent receipts associated with the correct call', () => {
+  const a = call('a', 'subagent_run')
+  const b = call('b', 'subagent_run')
+  const childA = call('child', 'plan_read', { subagentCallId: 'a' })
+  const childB = call('child', 'chapter_read', { subagentCallId: 'b' })
+  const view = render(<Transcript messages={[message('a', [a, childA]), message('b', [childB, b])]} />)
+  const rows = view.container.querySelectorAll('[data-author-activity] > button')
+  expect(rows).toHaveLength(1)
+  fireEvent.click(rows[0])
+  expect(Array.from(view.container.querySelectorAll('[data-activity-tool]'), el => el.getAttribute('data-activity-tool')))
+    .toEqual(['subagent_run', 'plan_read', 'subagent_run', 'chapter_read'])
 })
 
 it('opens useful cover, plan and report details without displaying their internal identifiers', () => {

@@ -10,7 +10,7 @@ export type ActivityGroup = {
   messageId: string
   firstCallId: string
   calls: ActivityCall[]
-  children: ActivityCall[]
+  childrenByCall: Map<string, ActivityCall[]>
   transition?: string
 }
 
@@ -66,7 +66,7 @@ export function activityChapterId(part: ActivityCall): string | undefined {
   return typeof id === 'string' ? id : undefined
 }
 
-function activityTarget(part: ActivityCall): string | undefined {
+export function activityTarget(part: ActivityCall): string | undefined {
   const chapterId = activityChapterId(part)
   if (chapterId) return `chapter:${chapterId}`
   const display = part.display
@@ -89,7 +89,7 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
   const groups: ActivityGroup[] = []
   const seen = new Map<string, { group?: ActivityGroup; calls: ActivityCall[]; index: number }>()
   const branches = new Map<string, ActivityCall[]>()
-  let current: { label: string; target?: string; group: ActivityGroup } | undefined
+  let current: ActivityGroup | undefined
   let previousScope: string | undefined
   let publicTextSinceAction = false
   const announcedMilestones = new Set<string>()
@@ -125,7 +125,7 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
         continue
       }
       if (part.subagentCallId) {
-        const parentKey = JSON.stringify([scope, part.subagentCallId])
+        const parentKey = JSON.stringify([scope, null, part.subagentCallId])
         const calls = branches.get(parentKey) ?? []
         branches.set(parentKey, calls)
         seen.set(identity, { calls, index: calls.length })
@@ -133,32 +133,23 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
         continue
       }
 
-      const { label, phase } = getAgentToolPresentation(part.toolName)
+      const { phase } = getAgentToolPresentation(part.toolName)
       const milestone = milestones[part.toolName === 'chapter_append' ? 'chapter_write' : part.toolName]
       const opening = !openingByRun.has(message.runId)
       if (opening) openingByRun.set(message.runId, phase === 'read' ? readOpening : milestone ?? activityOpening)
-      const target = activityTarget(part)
-      // Rereading the affected chapter to recover a failed edit is part of
-      // that activity. A different target or an author-visible paragraph ends it.
-      const lastAction = part.toolName === 'chapter_read' && target && target === current?.target && current.label !== label
-        ? [...current.group.calls].reverse().find(call => call.toolName !== 'chapter_read') : undefined
-      const recoveryRead = lastAction?.status === 'failed'
-        && (lastAction.toolName === 'chapter_edit_range' || lastAction.toolName === 'continuity_validate')
-      if (!current || (!recoveryRead && current.label !== label) || (target && current.target && target !== current.target)) {
-        const group: ActivityGroup = { id: JSON.stringify([message.id, part.callId]), runId: message.runId, messageId: message.id, firstCallId: part.callId, calls: [], children: [] }
-        if (!opening && !publicTextSinceAction && milestone && !announcedMilestones.has(milestone)) group.transition = milestone
+      if (!current || current.calls[0].toolName !== part.toolName) {
+        current = { id: JSON.stringify([message.id, part.callId]), runId: message.runId, messageId: message.id, firstCallId: part.callId, calls: [], childrenByCall: new Map() }
+        if (!opening && !publicTextSinceAction && milestone && !announcedMilestones.has(milestone)) current.transition = milestone
         if (milestone) announcedMilestones.add(milestone)
         publicTextSinceAction = false
-        current = { label, target, group }
-        groups.push(group)
-        if (part.toolName === 'subagent_run' || part.toolName === 'subagent_delegate') {
-          const parentKey = JSON.stringify([scope, part.callId])
-          group.children = branches.get(parentKey) ?? []
-          branches.set(parentKey, group.children)
-        }
+        groups.push(current)
       }
-      current.target ??= target
-      const group = current.group
+      const group = current
+      if (part.toolName === 'subagent_run' || part.toolName === 'subagent_delegate') {
+        const calls = branches.get(identity) ?? []
+        group.childrenByCall.set(part.callId, calls)
+        branches.set(identity, calls)
+      }
       seen.set(identity, { group, calls: group.calls, index: group.calls.length })
       group.calls.push(part)
       messageGroups.set(part.callId, group)
