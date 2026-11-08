@@ -33,6 +33,10 @@ describe.skipIf(!ready)('private studio conversation search on isolated PostgreS
       const goal = await prisma.agentGoal.create({ data: {
         userId: ids.a, novelId: owned.novel.id, sessionId: owned.session.id, executionOptions: {},
       } })
+      await prisma.agentGoalRevision.create({ data: {
+        goalId: goal.id, revision: 1, objective: '合成目标', request: {},
+        authorityHash: 'a'.repeat(64), sourceActionId: randomUUID(),
+      } })
       await prisma.agentGoalExecution.create({ data: {
         goalId: goal.id, goalRevision: 1, epoch: 1n, runId: owned.run.id,
         trigger: 'goal_auto', continuationIndex: 1, sourceEventId: randomUUID(),
