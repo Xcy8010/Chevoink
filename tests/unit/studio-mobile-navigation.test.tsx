@@ -83,14 +83,17 @@ function openNavigation() {
 }
 
 describe('controlled mobile workspace navigation', () => {
-  it('places the announcement bell at the right edge of the brand header and closes it before the drawer', ({ onTestFinished }) => {
+  it('places the borderless announcement bell just left of the drawer close button and dismisses its dialog first', ({ onTestFinished }) => {
     const restore = mockNativeDialog()
     onTestFinished(() => { cleanup(); restore() })
     render(<Harness />)
     openNavigation()
     const bell = screen.getByRole('button', { name: '公告通知' })
     const navigation = screen.getByRole('dialog', { name: '创作区导航' })
-    expect(bell.parentElement?.lastElementChild).toBe(bell)
+    const close = screen.getByRole('button', { name: '关闭创作区导航' })
+    expect(bell.nextElementSibling).toBe(close)
+    expect(bell.parentElement?.lastElementChild).toBe(close)
+    expect(bell.classList.contains('site-announcement-bell--plain')).toBe(true)
     expect(bell.closest('header')?.querySelector('h2')?.textContent).toBe('Chevoink')
 
     fireEvent.click(bell)
@@ -124,14 +127,14 @@ describe('controlled mobile workspace navigation', () => {
     const summary = screen.getByText('分类')
     summary.focus()
     fireEvent.keyDown(summary, { key: 'Tab' })
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: '关闭创作区导航' }))
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: '公告通知' }))
   })
   it('locks scroll, traps forward/backward focus, and restores focus/scroll on Escape', () => {
     document.body.style.overflow = 'clip'
     render(<Harness />)
     const draft = screen.getByRole('textbox', { name: '创作草稿' })
     const trigger = openNavigation()
-    const first = screen.getByRole('button', { name: '关闭创作区导航' })
+    const first = screen.getByRole('button', { name: '公告通知' })
     const last = screen.getByRole('button', { name: '最后一项' })
     expect(document.activeElement).toBe(first)
     expect(document.body.style.overflow).toBe('hidden')

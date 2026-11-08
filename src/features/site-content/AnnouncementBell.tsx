@@ -41,7 +41,11 @@ export default function AnnouncementBell({ placement }: { placement: Placement }
       aria-haspopup="dialog"
       aria-expanded={anchor !== null}
       aria-controls={anchor ? dialogId : undefined}
-      className={cn('site-announcement-bell', placement === 'studio' && 'site-announcement-bell--compact')}
+      className={cn(
+        'site-announcement-bell',
+        placement === 'studio' && 'site-announcement-bell--compact',
+        placement === 'studio-mobile' && 'site-announcement-bell--plain',
+      )}
       onClick={open}
     >
       <span className="relative inline-flex">

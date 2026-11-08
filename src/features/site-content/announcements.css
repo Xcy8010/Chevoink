@@ -51,6 +51,7 @@
 .site-announcement-bell:hover, .site-announcement-bell[aria-expanded="true"] {
   background: var(--surface-muted); color: var(--text-primary);
 }
+.site-announcement-bell.site-announcement-bell--plain { border: 0; border-radius: 8px; background: transparent; }
 .site-announcement-bell-dot, .site-announcement-inbox-row-dot {
   display: block; width: 7px; height: 7px; flex: none; border-radius: 50%; background: #f43f5e;
 }

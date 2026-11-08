@@ -6,7 +6,7 @@ import StudioWorkspaceSidebar from '../../src/features/studio/components/StudioW
 import { selectInitialTask } from '../../src/features/studio/lib/initial-task-selection'
 
 const remote = vi.hoisted(() => ({ items: [] as Array<{id: string; novelId: string; title: string; updatedAt: string}> }))
-vi.mock('@tanstack/react-query', () => ({ useQuery: ({queryKey}: {queryKey: string[]}) => ({ data: queryKey[2] === 'workspace-sidebar' ? remote : undefined }), useQueryClient: () => ({ invalidateQueries: vi.fn() }) }))
+vi.mock('@tanstack/react-query', () => ({ useQuery: ({queryKey}: {queryKey: string[]}) => ({ data: queryKey[2] === 'workspace-sidebar' ? remote : undefined }), useQueryClient: () => ({ invalidateQueries: vi.fn() }), useMutation: () => ({ mutate: vi.fn() }) }))
 vi.mock('react-router-dom', () => ({ useNavigate: () => vi.fn() }))
 vi.mock('../../src/components/ui/toast-context', () => ({ useToast: () => ({ success: vi.fn(), error: vi.fn() }) }))
 const noop = () => undefined

@@ -92,8 +92,8 @@ export default function StudioMobileNavigation({ open, onClose, novelSwitcher, c
         <header className="flex min-h-14 shrink-0 items-center justify-between gap-2 px-4">
           <h2 className="flex items-center gap-2 text-sm font-semibold"><img src="/chevoink-agent.png" alt="" className="h-6 w-6 object-contain" />Chevoink</h2>
           <div className="flex shrink-0 items-center gap-1">
-            <button type="button" aria-label="关闭创作区导航" onClick={onClose} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none"><X className="h-5 w-5" /></button>
             <AnnouncementBell placement="studio-mobile" />
+            <button type="button" aria-label="关闭创作区导航" onClick={onClose} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none"><X className="h-5 w-5" /></button>
           </div>
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain [&_button]:min-h-11">
