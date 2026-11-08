@@ -1,6 +1,6 @@
-import { useId, useMemo, useState, type CSSProperties } from 'react'
+import { useCallback, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { Background, BackgroundVariant, BaseEdge, Controls, Handle, MiniMap, Position, ReactFlow, type Edge, type EdgeProps, type Node, type NodeProps } from '@xyflow/react'
-import { LoaderCircle, Network, Orbit, X } from 'lucide-react'
+import { LoaderCircle, Network, Orbit, PanelBottomClose, PanelBottomOpen, X } from 'lucide-react'
 import '@xyflow/react/dist/style.css'
 import type { MemoryGraph, MemoryGraphNode } from '../../../../shared/contracts/index.js'
 import { buildReadableMemoryGraphEdges, MEMORY_NODE_HEIGHT, MEMORY_NODE_WIDTH, memoryGraphNeighborhood, memoryGraphTopologyKey, memoryNodeColor, type MemoryGraphRoute } from '../lib/memory-graph-layout'
@@ -43,10 +43,36 @@ const edgeTypes = { memory: MemoryRelationship }
 
 export default function MemoryGraphCanvas({ graph }: { graph: MemoryGraph }) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [detailCollapsed, setDetailCollapsed] = useState(false)
+  const detailId = useId()
+  const detailRef = useRef<HTMLElement>(null)
+  const collapseRef = useRef<HTMLButtonElement>(null)
+  const restoreRef = useRef<HTMLButtonElement>(null)
+  const focusAfterToggle = useRef(false)
+  const selectNode = useCallback((id: string | null) => {
+    setSelectedId(id)
+    setDetailCollapsed(false)
+  }, [])
   const [mode, setMode] = useState<'map' | 'galaxy'>('map')
   const [galaxyVisited, setGalaxyVisited] = useState(false)
   const selected = graph.nodes.find((node) => node.id === selectedId) ?? null
   const effectiveSelectedId = selected?.id ?? null
+
+  useLayoutEffect(() => {
+    // Keep the closing panel visible during its transition but remove its controls from focus and hit testing.
+    detailRef.current?.toggleAttribute('inert', detailCollapsed)
+    if (focusAfterToggle.current) {
+      focusAfterToggle.current = false
+      const target = detailCollapsed ? restoreRef.current : collapseRef.current
+      target?.focus({ preventScroll: true })
+    }
+  }, [detailCollapsed, effectiveSelectedId])
+
+  function toggleDetail(collapsed: boolean) {
+    focusAfterToggle.current = true
+    setDetailCollapsed(collapsed)
+  }
+
   const visibleIds = useMemo(() => new Set(graph.nodes.map((node) => node.id)), [graph.nodes])
   const readableEdges = useMemo(() => buildReadableMemoryGraphEdges(graph.edges, visibleIds, graph.nodes.length), [graph.edges, visibleIds, graph.nodes.length])
   // Topology keys remain equal across polling responses with identical entities and links.
@@ -69,13 +95,13 @@ export default function MemoryGraphCanvas({ graph }: { graph: MemoryGraph }) {
     height: MEMORY_NODE_HEIGHT,
     initialWidth: MEMORY_NODE_WIDTH,
     initialHeight: MEMORY_NODE_HEIGHT,
-    data: { memory, onSelect: setSelectedId, selected: memory.id === effectiveSelectedId, dimmed: effectiveSelectedId !== null && !neighbors.has(memory.id) },
+    data: { memory, onSelect: selectNode, selected: memory.id === effectiveSelectedId, dimmed: effectiveSelectedId !== null && !neighbors.has(memory.id) },
     className: `memory-map-node${memory.id === effectiveSelectedId ? ' is-focused' : ''}${effectiveSelectedId !== null && !neighbors.has(memory.id) ? ' is-dimmed' : ''}`,
     style: { '--memory-node-color': memoryNodeColor(memory.type), width: MEMORY_NODE_WIDTH, height: MEMORY_NODE_HEIGHT } as CSSProperties,
     draggable: false,
     focusable: false,
     selectable: false,
-  })), [graph.nodes, mapPositions, effectiveSelectedId, neighbors])
+  })), [graph.nodes, mapPositions, effectiveSelectedId, neighbors, selectNode])
   const edges = useMemo<FlowEdge[]>(() => readableEdges.filter((edge) => routes?.has(edge.id) && mapPositions?.has(edge.source) && mapPositions.has(edge.target)).map((edge) => ({
     id: edge.id,
     source: edge.source,
@@ -95,14 +121,14 @@ export default function MemoryGraphCanvas({ graph }: { graph: MemoryGraph }) {
         fitView fitViewOptions={{ padding: 0.18, maxZoom: 1.15 }}
         minZoom={0.08} maxZoom={2.2} nodesDraggable={false} nodesConnectable={false}
         elementsSelectable={false} panOnDrag zoomOnScroll zoomOnPinch preventScrolling
-        onNodeClick={(_, node) => setSelectedId(node.id)} onPaneClick={() => setSelectedId(null)} proOptions={{ hideAttribution: true }}
+        onNodeClick={(_, node) => selectNode(node.id)} onPaneClick={() => selectNode(null)} proOptions={{ hideAttribution: true }}
       >
         <Background variant={BackgroundVariant.Dots} gap={24} size={1} />
         <Controls showInteractive={false} position="top-right" />
         <MiniMap pannable zoomable position="bottom-left" style={{ width: 160, height: 112 }} nodeStrokeWidth={0} nodeBorderRadius={5} ariaLabel="关系网缩略图" nodeColor={(node) => memoryNodeColor(String((node.data as { memory?: MemoryGraphNode }).memory?.type ?? ''))} nodeClassName={(node) => effectiveSelectedId && !neighbors.has(node.id) ? 'memory-minimap-dimmed' : ''} />
       </ReactFlow> : null}
     </div>
-    {galaxyVisited ? <div className="memory-galaxy-view" hidden={mode !== 'galaxy'}>{galaxyPositions ? <MemoryGraphGalaxy nodes={galaxyNodes} edges={galaxyEdges} points={galaxyPositions} selectedId={effectiveSelectedId} onSelect={setSelectedId} active={mode === 'galaxy'} /> : null}</div> : null}
+    {galaxyVisited ? <div className="memory-galaxy-view" hidden={mode !== 'galaxy'}>{galaxyPositions ? <MemoryGraphGalaxy nodes={galaxyNodes} edges={galaxyEdges} points={galaxyPositions} selectedId={effectiveSelectedId} onSelect={selectNode} active={mode === 'galaxy'} /> : null}</div> : null}
     {currentLayout.pending ? <div className="memory-graph-loading" role="status"><LoaderCircle size={16} className="animate-spin" />正在布局关系网…</div> : null}
     {currentLayout.failed ? <div className="memory-graph-loading" role="alert">关系网布局载入失败。<button type="button" onClick={currentLayout.retry}>重试</button></div> : null}
     <div className="memory-graph-controls memory-graph-modes" role="group" aria-label="关系网视图">
@@ -110,19 +136,36 @@ export default function MemoryGraphCanvas({ graph }: { graph: MemoryGraph }) {
       <button type="button" title="三维星系" aria-label="三维星系视图" aria-pressed={mode === 'galaxy'} onClick={() => { setGalaxyVisited(true); setMode('galaxy') }}><Orbit size={18} /></button>
     </div>
     <div className="memory-graph-legend" aria-label="实体颜色"><span><i style={{ background: memoryNodeColor('character') }} />人物</span><span><i style={{ background: memoryNodeColor('item') }} />物品</span><span><i style={{ background: memoryNodeColor('location') }} />其他实体</span></div>
-    {selected ? <aside className="memory-graph-detail" aria-label="实体详情">
-      <div className="flex items-start gap-2">
-        <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: memoryNodeColor(selected.type) }} />
-        <div className="min-w-0 flex-1"><p className="break-words text-sm font-medium text-[var(--text-primary)]">{selected.label}</p><p className="mt-0.5 text-[10px] text-[var(--text-tertiary)]">{selected.type}</p></div>
-        <button type="button" onClick={() => setSelectedId(null)} className="memory-detail-close" aria-label="关闭实体详情" title="关闭实体详情"><X size={15} /></button>
-      </div>
-      {selected.description ? <p className="mt-2 whitespace-pre-wrap break-words text-xs leading-5 text-[var(--text-secondary)]">{selected.description}</p> : null}
-      {selected.aliases.length ? <p className="mt-2 break-words text-[10px] leading-5 text-[var(--text-tertiary)]">别名：{selected.aliases.join('、')}</p> : null}
-      {relations.length ? <ul className="memory-detail-relations" aria-label="直接关系">{relations.map((edge) => {
-        const outgoing = edge.source === selected.id
-        const other = nodeById.get(outgoing ? edge.target : edge.source)
-        return <li key={edge.id}><button type="button" onClick={() => setSelectedId(other!.id)}><span className="memory-relation-direction" aria-label={outgoing ? '指向' : '来自'}>{outgoing ? '→' : '←'}</span><span><strong>{other?.label}</strong><span>{edge.type}{edge.state ? ` · ${edge.state}` : ''}{edge.occurrences > 1 ? ` ×${edge.occurrences}` : ''}</span></span></button></li>
-      })}</ul> : null}
-    </aside> : null}
+    {selected ? <>
+      <aside ref={detailRef} id={detailId} className="memory-graph-detail" aria-label="实体详情"
+        aria-hidden={detailCollapsed || undefined} data-collapsed={detailCollapsed || undefined}>
+        <div className="flex items-start gap-2">
+          <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: memoryNodeColor(selected.type) }} />
+          <div className="min-w-0 flex-1"><p className="break-words text-sm font-medium text-[var(--text-primary)]">{selected.label}</p><p className="mt-0.5 text-[10px] text-[var(--text-tertiary)]">{selected.type}</p></div>
+          <div className="flex shrink-0 gap-1">
+            <button ref={collapseRef} type="button" onClick={() => toggleDetail(true)} className="memory-detail-action"
+              aria-label="收起实体详情" title="收起实体详情" aria-controls={detailId} aria-expanded={!detailCollapsed}>
+              <PanelBottomClose size={15} aria-hidden="true" />
+            </button>
+            <button type="button" onClick={() => selectNode(null)} className="memory-detail-action" aria-label="关闭实体详情" title="关闭实体详情"><X size={15} aria-hidden="true" /></button>
+          </div>
+        </div>
+        {selected.description ? <p className="mt-2 whitespace-pre-wrap break-words text-xs leading-5 text-[var(--text-secondary)]">{selected.description}</p> : null}
+        {selected.aliases.length ? <p className="mt-2 break-words text-[10px] leading-5 text-[var(--text-tertiary)]">别名：{selected.aliases.join('、')}</p> : null}
+        {relations.length ? <ul className="memory-detail-relations" aria-label="直接关系">{relations.map((edge) => {
+          const outgoing = edge.source === selected.id
+          const other = nodeById.get(outgoing ? edge.target : edge.source)
+          return <li key={edge.id}><button type="button" onClick={() => selectNode(other!.id)}><span className="memory-relation-direction" aria-label={outgoing ? '指向' : '来自'}>{outgoing ? '→' : '←'}</span><span><strong>{other?.label}</strong><span>{edge.type}{edge.state ? ` · ${edge.state}` : ''}{edge.occurrences > 1 ? ` ×${edge.occurrences}` : ''}</span></span></button></li>
+        })}</ul> : null}
+      </aside>
+      <button ref={restoreRef} type="button" className="memory-detail-restore"
+        disabled={!detailCollapsed} aria-hidden={!detailCollapsed || undefined} data-collapsed={detailCollapsed || undefined}
+        aria-label="展开实体详情" aria-controls={detailId} aria-expanded={false}
+        title={'展开实体详情 · ' + selected.label} onClick={() => toggleDetail(false)}>
+        <span className="memory-detail-restore-dot" style={{ background: memoryNodeColor(selected.type) }} />
+        <span className="truncate">{selected.label}</span>
+        <PanelBottomOpen size={15} aria-hidden="true" />
+      </button>
+    </> : null}
   </div>
 }

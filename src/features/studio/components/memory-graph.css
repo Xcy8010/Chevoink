@@ -1,4 +1,4 @@
-.memory-graph { container-type: inline-size; }
+.memory-graph { container-type: inline-size; --memory-detail-dock-bottom: 48px; --memory-detail-bottom: var(--memory-detail-dock-bottom); --memory-detail-ease: cubic-bezier(.22, .75, .2, 1); }
 .memory-graph .memory-map-view,
 .memory-graph .memory-galaxy-view,
 .memory-graph .memory-galaxy { position: absolute; inset: 0; }
@@ -28,9 +28,36 @@
 .memory-graph-legend { position: absolute; bottom: 12px; right: 12px; z-index: 4; display: flex; gap: 12px; padding: 6px 9px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--surface-elevated); color: var(--text-secondary); font-size: 10px; pointer-events: none; }
 .memory-graph-legend span { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 .memory-graph-legend i { width: 6px; height: 6px; border-radius: 50%; }
-.memory-graph-detail { position: absolute; z-index: 6; right: 12px; bottom: 48px; width: min(21rem, calc(100% - 24px)); max-height: calc(100% - 112px); overflow-y: auto; overscroll-behavior: contain; padding: 12px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface-elevated); box-shadow: var(--shadow-elevated); }
-.memory-detail-close { display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; flex: none; color: var(--text-tertiary); border-radius: 6px; }
-.memory-detail-close:hover { color: var(--text-primary); background: var(--surface-muted); }
+.memory-graph-detail {
+  position: absolute; z-index: 6; right: 12px; bottom: var(--memory-detail-bottom);
+  width: min(21rem, calc(100% - 24px)); max-height: calc(100% - 112px); overflow-y: auto; overscroll-behavior: contain;
+  padding: 12px; border: 1px solid var(--border-strong); border-radius: 12px;
+  background: var(--surface-elevated); box-shadow: var(--shadow-elevated);
+  transform: none; transform-origin: bottom right;
+  transition: transform 290ms var(--memory-detail-ease), opacity 190ms ease-out, visibility 0s;
+}
+.memory-graph-detail[data-collapsed] {
+  transform: translate(0, calc(var(--memory-detail-bottom) - var(--memory-detail-dock-bottom))) scale(.55);
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transition-delay: 0s, 55ms, 290ms;
+}
+.memory-detail-action { display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; flex: none; color: var(--text-tertiary); border-radius: 6px; }
+.memory-detail-action:hover { color: var(--text-primary); background: var(--surface-muted); }
+.memory-detail-restore {
+  position: absolute; z-index: 6; right: 12px; bottom: var(--memory-detail-dock-bottom);
+  display: flex; align-items: center; gap: 8px; min-height: 38px; max-width: min(14rem, calc(100% - 24px)); padding: 6px 10px;
+  border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface-elevated);
+  box-shadow: var(--shadow-elevated); color: var(--text-primary); font-size: 12px;
+  transform: translateY(5px) scale(.9); transform-origin: bottom right; opacity: 0; visibility: hidden; pointer-events: none;
+  transition: transform 220ms var(--memory-detail-ease), opacity 150ms ease-out, visibility 0s linear 220ms;
+}
+.memory-detail-restore[data-collapsed] {
+  transform: none; opacity: 1; visibility: visible; pointer-events: auto;
+  transition-delay: 85ms, 85ms, 0s;
+}
+.memory-detail-restore:hover { background: var(--surface-muted); }
+.memory-detail-restore svg, .memory-detail-restore-dot { flex: none; }
+.memory-detail-restore-dot { width: 7px; height: 7px; border-radius: 50%; }
 .memory-detail-relations { margin: 10px 0 0; padding: 8px 0 0; list-style: none; border-top: 1px solid var(--border-subtle); }
 .memory-detail-relations button { display: flex; width: 100%; gap: 8px; padding: 6px 4px; border-radius: 5px; text-align: left; color: var(--text-secondary); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .memory-detail-relations button:hover { background: var(--surface-muted); }
@@ -47,8 +74,11 @@
 @container (max-width: 640px) {
   .memory-graph .react-flow__controls-button,
   .memory-graph-controls button { width: 40px; height: 40px; }
-  .memory-graph-detail { bottom: 140px; max-height: min(42%, 240px, calc(100% - 204px)); }
-  .memory-graph.is-galaxy .memory-graph-detail { bottom: 48px; }
+  .memory-graph:not(.is-galaxy) .memory-graph-detail { --memory-detail-bottom: 140px; }
+  .memory-graph-detail { max-height: min(42%, 240px, calc(100% - 204px)); }
+  .memory-graph:not(.is-galaxy) .memory-detail-restore { max-width: max(48px, min(14rem, calc(100% - 184px))); }
+  .memory-detail-action { width: 40px; height: 40px; }
+  .memory-detail-restore { min-height: 44px; }
   .memory-graph-legend { gap: 8px; font-size: 9px; }
 }
 @media (prefers-reduced-motion: reduce) {
