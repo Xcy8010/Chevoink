@@ -3997,6 +3997,7 @@ export default function StudioWorkspace() {
     )
   }
 
+  const mobileConversationOwner = workspaceOwnerRef.current
   return (
     <>
       <div
@@ -4113,17 +4114,47 @@ export default function StudioWorkspace() {
             ) : null}
           </div>
 
-          <StudioMobileNavigation open={mobileMoreOpen} onClose={() => setMobileMoreOpen(false)}>
-            <StudioMobileMenu
+          <StudioMobileNavigation
+            open={mobileMoreOpen}
+            onClose={() => setMobileMoreOpen(false)}
+            onCreateNovel={handleCreateWorkspaceNovel}
+            creatingNovel={createNovelMutation.isPending}
+            onOpenSettings={() => { setStudioSettingsSection('general'); setStudioSettingsOpen(true) }}
+            accountCard={<StudioMobileAccountCard />}
+          >
+            {search => <StudioMobileMenu
               currentNovel={currentNovel}
               novels={novelOptions}
               loading={myNovelsQuery.isLoading}
               busy={createNovelMutation.isPending}
               view={mobileView}
+              search={search}
+              viewerId={taskUiUserId ?? ''}
+              recentSessions={navigationSessionsQuery.data?.items ?? []}
               onClose={() => setMobileMoreOpen(false)}
               onSelectNovel={handleSelectWorkspaceNovel}
+              onSelectSession={session => {
+                setMobileView('assistant')
+                setWorkspacePerspective('work')
+                if (session.novelId === activeNovelId) void handleSelectAgentTaskWindow(session.id)
+                else void switchWorkspaceNovel(session.novelId, session.id)
+              }}
+              onSessionChange={({ action, session }) => {
+                if (useShellStore.getState().sessionUser?.id !== session.userId) return
+                const removed = action === 'delete' || action === 'archive'
+                queryClient.setQueryData<{ items: AgentSession[] }>(['agent', 'sessions', 'workspace-navigation'], current => current && ({
+                  items: removed
+                    ? current.items.filter(item => item.id !== session.id)
+                    : current.items.map(item => item.id === session.id ? { ...session, novelTitle: session.novelTitle ?? item.novelTitle } : item),
+                }))
+                if (workspaceOwnerRef.current !== mobileConversationOwner) return
+                if (action === 'delete') handleAgentTaskDeleted(session.id)
+                else if (action === 'archive') handleAgentTaskArchived(session.id)
+                else if (action === 'rename') setAgentTaskWindows(current => current.map(item =>
+                  item.sessionId === session.id ? { ...item, title: session.title, customNamed: true, updatedAt: session.updatedAt } : item,
+                ))
+              }}
               onCreateNovel={handleCreateWorkspaceNovel}
-              accountCard={<StudioMobileAccountCard />}
               actions={[
                   { key: 'assistant', sectionLabel: '导航', label: '工作台', icon: MessageSquareText, action: () => { setMobileView('assistant'); setWorkspacePerspective('work') } },
                   { key: 'editor', label: '写作', icon: PenLine, action: () => { setMobileView('editor'); setWorkspacePerspective('ide') } },
@@ -4159,7 +4190,7 @@ export default function StudioWorkspace() {
                     disabled: deleteNovelMutation.isPending,
                   },
                 ]}
-            />
+            />}
           </StudioMobileNavigation>
         </div>
 

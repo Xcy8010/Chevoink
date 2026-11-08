@@ -61,16 +61,25 @@ describe('mobile workspace header', () => {
   })
 })
 
-function Harness({ onAction = () => {}, switcher, children }: { onAction?: () => void; switcher?: ReactNode; children?: ReactNode }) {
+function Harness({ onAction = () => {}, onCreate = () => {}, onSettings = () => {}, switcher, children }: {
+  onAction?: () => void
+  onCreate?: () => void
+  onSettings?: () => void
+  switcher?: ReactNode
+  children?: ReactNode
+}) {
   const [open, setOpen] = useState(false)
   return <>
     <button onClick={() => setOpen(true)}>导航入口</button>
     <textarea aria-label="创作草稿" defaultValue="保留中的草稿" />
-    <StudioMobileNavigation open={open} onClose={() => setOpen(false)} novelSwitcher={switcher ?? <button>选择作品</button>}>
-      <button onClick={() => { setOpen(false); onAction() }}>卷章操作</button>
-      <button disabled>不可用操作</button>
-      <button>最后一项</button>
-      {children}
+    <StudioMobileNavigation open={open} onClose={() => setOpen(false)} onCreateNovel={onCreate} onOpenSettings={onSettings}
+      accountCard={<span>作者信息</span>} novelSwitcher={switcher ?? <button>选择作品</button>}>
+      {search => <>
+        <button onClick={() => { setOpen(false); onAction() }}>卷章操作</button>
+        <button disabled>不可用操作</button>
+        {search && <p>搜索词：{search}</p>}
+        {children}
+      </>}
     </StudioMobileNavigation>
   </>
 }
@@ -83,18 +92,20 @@ function openNavigation() {
 }
 
 describe('controlled mobile workspace navigation', () => {
-  it('places the borderless announcement bell just left of the drawer close button and dismisses its dialog first', ({ onTestFinished }) => {
+  it('keeps account, borderless announcement bell and settings in the fixed footer and closes the inbox first', ({ onTestFinished }) => {
     const restore = mockNativeDialog()
     onTestFinished(() => { cleanup(); restore() })
     render(<Harness />)
     openNavigation()
     const bell = screen.getByRole('button', { name: '公告通知' })
     const navigation = screen.getByRole('dialog', { name: '创作区导航' })
-    const close = screen.getByRole('button', { name: '关闭创作区导航' })
-    expect(bell.nextElementSibling).toBe(close)
-    expect(bell.parentElement?.lastElementChild).toBe(close)
+    const settings = screen.getByRole('button', { name: '创作区设置' })
+    const scroll = navigation.querySelector('[data-studio-mobile-navigation-scroll]')
+    expect(bell.nextElementSibling).toBe(settings)
     expect(bell.classList.contains('site-announcement-bell--plain')).toBe(true)
-    expect(bell.closest('header')?.querySelector('h2')?.textContent).toBe('Chevoink')
+    expect(bell.closest('footer')?.contains(screen.getByText('作者信息'))).toBe(true)
+    expect(scroll?.contains(bell)).toBe(false)
+    expect(screen.getByRole('searchbox').closest('header')).toBeTruthy()
 
     fireEvent.click(bell)
     const inbox = screen.getByRole('dialog', { name: '公告通知' })
@@ -111,7 +122,9 @@ describe('controlled mobile workspace navigation', () => {
     try {
       render(<Harness />)
       openNavigation()
-      fireEvent.click(screen.getByRole('button', { name: '关闭导航遮罩' }))
+      const backdrop = screen.getByRole('button', { name: '关闭导航遮罩' })
+      expect(backdrop.querySelector('svg')).toBeNull()
+      fireEvent.click(backdrop)
       expect(screen.queryByRole('dialog', { name: '创作区导航' })).toBeNull()
       const closing = document.querySelector('.studio-mobile-navigation')
       expect(closing?.getAttribute('data-state')).toBe('closed')
@@ -121,23 +134,36 @@ describe('controlled mobile workspace navigation', () => {
     } finally { vi.useRealTimers() }
   })
 
-  it('includes category summaries but excludes their collapsed actions from keyboard wrapping', () => {
-    render(<Harness><details><summary>分类</summary><button>隐藏操作</button></details></Harness>)
+  it('forwards search only after IME composition and delegates the two drawer actions once', () => {
+    const create = vi.fn(), settings = vi.fn()
+    render(<Harness onCreate={create} onSettings={settings} />)
     openNavigation()
-    const summary = screen.getByText('分类')
-    summary.focus()
-    fireEvent.keyDown(summary, { key: 'Tab' })
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: '公告通知' }))
+    const search = screen.getByRole('searchbox')
+    expect(document.activeElement).toBe(screen.getByRole('dialog', { name: '创作区导航' }))
+    fireEvent.compositionStart(search)
+    fireEvent.change(search, { target: { value: 'duihua' } })
+    expect(screen.queryByText('搜索词：duihua')).toBeNull()
+    fireEvent.change(search, { target: { value: '对话' } })
+    fireEvent.compositionEnd(search)
+    expect(screen.getByText('搜索词：对话')).toBeTruthy()
+    fireEvent.keyDown(search, { key: 'Escape' })
+    expect(screen.queryByText('搜索词：对话')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '新建作品' }))
+    expect(create).toHaveBeenCalledOnce()
+    openNavigation()
+    fireEvent.click(screen.getByRole('button', { name: '创作区设置' }))
+    expect(settings).toHaveBeenCalledOnce()
   })
   it('locks scroll, traps forward/backward focus, and restores focus/scroll on Escape', () => {
     document.body.style.overflow = 'clip'
     render(<Harness />)
     const draft = screen.getByRole('textbox', { name: '创作草稿' })
     const trigger = openNavigation()
-    const first = screen.getByRole('button', { name: '公告通知' })
-    const last = screen.getByRole('button', { name: '最后一项' })
-    expect(document.activeElement).toBe(first)
+    const first = screen.getByRole('searchbox')
+    const last = screen.getByRole('button', { name: '创作区设置' })
+    expect(document.activeElement).toBe(screen.getByRole('dialog', { name: '创作区导航' }))
     expect(document.body.style.overflow).toBe('hidden')
+    first.focus()
     fireEvent.keyDown(first, { key: 'Tab', shiftKey: true })
     expect(document.activeElement).toBe(last)
     fireEvent.keyDown(last, { key: 'Tab' })
@@ -214,7 +240,7 @@ describe('controlled mobile workspace navigation', () => {
     const fallback = document.createElement('button')
     fallback.setAttribute('data-studio-mobile-primary-control', '')
     document.body.append(fallback)
-    const view = render(<StudioMobileNavigation open onClose={onClose} novelSwitcher={<button>作品</button>}><button>操作</button></StudioMobileNavigation>)
+    const view = render(<StudioMobileNavigation open onClose={onClose} onCreateNovel={vi.fn()} onOpenSettings={vi.fn()} accountCard={null} novelSwitcher={<button>作品</button>}>{() => <button>操作</button>}</StudioMobileNavigation>)
     trigger.remove()
     vi.stubGlobal('innerWidth', 1024)
     fireEvent(window, new Event('resize'))

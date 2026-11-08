@@ -65,7 +65,10 @@
   overflow: hidden; padding: 0; border: 1px solid var(--border-subtle); border-radius: 16px;
   background: var(--surface-default); color: var(--text-primary); box-shadow: 0 16px 52px #0004;
 }
-.site-announcement-inbox--mobile { left: 12px; right: 12px; width: auto; }
+.site-announcement-inbox--mobile {
+  inset: auto 12px var(--announcement-bottom) 12px; width: auto;
+  max-height: min(32rem, calc(100dvh - var(--announcement-bottom) - max(12px, var(--safe-top, 0px))));
+}
 .site-announcement-inbox::backdrop { background: transparent; }
 .site-announcement-inbox--mobile::backdrop { background: #0004; }
 .site-announcement-inbox-frame { display: flex; flex-direction: column; max-height: inherit; }

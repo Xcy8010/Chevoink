@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Gift } from 'lucide-react'
+import { ChevronRight, Gift } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { formatCreditAmount, formatCreditResetLabel } from '@/features/account/credit-format'
@@ -8,11 +8,7 @@ import InviteCreditsDialog from '@/features/account/InviteCreditsDialog'
 import Avatar from '@/features/community/components/Avatar'
 import { useShellStore } from '@/store/useShellStore'
 
-/**
- * 手机端「更多」面板顶部的账户额度卡。
- * 手机没有 Work 侧栏账户菜单，也没有 IDE 顶栏「…」菜单，
- * 剩余用量与邀请入口只能落在这里：放面板最顶部，展开即一眼可见。
- */
+/** 固定侧栏底栏的个人信息与可展开的用量、邀请入口。 */
 export default function StudioMobileAccountCard() {
   const sessionUser = useShellStore((state) => state.sessionUser)
   const [inviteOpen, setInviteOpen] = useState(false)
@@ -41,12 +37,18 @@ export default function StudioMobileAccountCard() {
     void copyInvite()
   }, [copyInvite, inviteOpen, referralQuery.data?.inviteUrl])
 
+  const nickname = sessionUser?.nickname ?? '创作者'
   return <>
-    <div className="mx-3 mb-1 rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-muted)] p-3">
-      <div className="flex items-center gap-3">
-        <Avatar name={sessionUser?.nickname ?? '创作者'} src={sessionUser?.avatarUrl} size="sm" className="h-9 w-9 shrink-0" />
+    <details className="min-w-0 flex-1">
+      <summary aria-label={nickname + '，账户与用量'} className="flex min-h-12 cursor-pointer list-none items-center gap-2 rounded-lg pr-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] [&::-webkit-details-marker]:hidden">
+        <Avatar name={nickname} src={sessionUser?.avatarUrl} size="sm" className="h-9 w-9 shrink-0" />
+        <span className="min-w-0 truncate text-[15px] font-semibold" title={nickname}>{nickname}</span>
+        <ChevronRight aria-hidden="true" className="h-4 w-4 shrink-0 text-[var(--text-secondary)]" />
+      </summary>
+      <div className="absolute inset-x-3 bottom-full z-10 mb-2 rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-3 shadow-xl">
+      <div className="flex items-center gap-2">
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[14px] font-medium text-[var(--text-primary)]">{sessionUser?.nickname ?? '创作者'}</p>
+          <p className="text-[13px] font-medium text-[var(--text-primary)]">账户与用量</p>
           <p className="mt-0.5 truncate text-[11px] text-[var(--text-tertiary)]">
             {exhausted
               ? '额度已耗尽，邀请好友领取 300 Credits！'
@@ -67,8 +69,8 @@ export default function StudioMobileAccountCard() {
         {/* 新窗口打开账户页，保留创作区当前状态方便回来继续写 */}
         <button type="button" onClick={() => window.open('/account/usage', '_blank', 'noopener,noreferrer')} className="-mr-1 inline-flex min-h-[32px] shrink-0 items-center px-1 font-medium text-[var(--text-secondary)]">用量明细 →</button>
       </div>
-    </div>
-    {/* 邀请弹窗 z-[140] 盖在底部面板（z-[70]）之上，不必先收起面板，关掉弹窗还能继续操作 */}
+      </div>
+    </details>
     <InviteCreditsDialog open={inviteOpen} referral={referralQuery.data ?? null} copied={inviteCopied} onCopy={() => void copyInvite()} onClose={() => { autoCopyRef.current = false; setInviteOpen(false) }} />
   </>
 }

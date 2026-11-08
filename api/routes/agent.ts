@@ -33,6 +33,7 @@ import {
   forkAgentSessionData,
   listAgentSessionHistoryData,
   listAgentSessionsData,
+  searchAgentSessionsData,
   listSessionRunStatuses,
   resolveLoopRunApproval,
   resolveLoopRunQuestion,
@@ -256,6 +257,19 @@ router.get('/sessions', async (req: Request, res: Response): Promise<void> => {
     const includeArchived = req.query.includeArchived === 'true'
     const payload = await listAgentSessionsData(userId, novelId, { query, includeArchived })
     res.status(200).json(buildSuccess(requestId, payload))
+  } catch (error) {
+    sendRouteError(res, requestId, error)
+  }
+})
+
+const sessionSearchSchema = z.strictObject({ query: z.string().trim().min(1).max(120) })
+
+router.post('/sessions/search', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try {
+    const userId = requireSessionUserId(req)
+    const { query } = parseBody(sessionSearchSchema, req.body, '请输入 1 至 120 个字的搜索词。')
+    res.json(buildSuccess(requestId, await searchAgentSessionsData(userId, query)))
   } catch (error) {
     sendRouteError(res, requestId, error)
   }

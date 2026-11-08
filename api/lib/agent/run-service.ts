@@ -16,6 +16,7 @@ import { MAIN_RUN_FILTER, prepareChildGrantDeletion } from './runtime-child.js'
 import { dispatchDurableChild } from './runtime-child-tools.js'
 
 import { Prisma, type AgentRun as AgentRunRecord } from '@prisma/client'
+import { projectAgentAuthorText } from '../../../shared/agent-author-view.js'
 
 import type {
   AgentActionHandoff,
@@ -1809,13 +1810,14 @@ function buildAgentRunResultPayload(
   }
 }
 
-export async function listAgentSessionsData(userId: string, novelId?: string, options?: { query?: string; includeArchived?: boolean }) {
+export async function listAgentSessionsData(userId: string, novelId?: string, options?: { query?: string; includeArchived?: boolean; ids?: string[] }) {
   const query = options?.query?.trim()
   const items = await prisma.agentSession.findMany({
     where: {
       userId,
       ...(novelId ? { novelId } : {}),
       ...(options?.includeArchived ? {} : { status: 'active' }),
+      ...(options?.ids ? { id: { in: options.ids }, novel: { authorId: userId } } : {}),
       ...(query ? { OR: [
         { title: { contains: query, mode: 'insensitive' } },
         { novel: { title: { contains: query, mode: 'insensitive' } } },
@@ -1838,6 +1840,79 @@ export async function listAgentSessionsData(userId: string, novelId?: string, op
   return {
     items: visible.map(toAgentSession),
   }
+}
+
+type SessionTextMatch = {
+  sessionId: string
+  runId: string
+  messageId: string
+  role: 'user' | 'assistant'
+  text: string
+  createdAt: Date
+  ordinal: bigint
+}
+
+export async function searchAgentSessionsData(userId: string, query: string) {
+  const limit = 100
+  const scope = Prisma.sql`
+    FROM agent_sessions s
+    JOIN novels n ON n.id = s.novel_id AND n.author_id = s.user_id
+  `
+  const owner = Prisma.sql`s.user_id = ${userId} AND s.status = 'active'`
+  const titles = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    SELECT s.id ${scope}
+    WHERE ${owner}
+      AND (strpos(lower(s.title), lower(${query})) > 0
+        OR strpos(lower(n.title), lower(${query})) > 0
+        OR strpos(lower(n.display_title), lower(${query})) > 0)
+    ORDER BY s.pinned_at DESC NULLS LAST, s.updated_at DESC, s.id
+    LIMIT ${limit}
+  `)
+  const ids = new Set(titles.map(row => row.id))
+  const needle = query.toLocaleLowerCase()
+  let cursor: SessionTextMatch | undefined
+
+  // Author text is literal. Project assistant text before matching so both
+  // removed protocol text and newly displayed labels follow the transcript.
+  while (ids.size < limit) {
+    const matches = await prisma.$queryRaw<SessionTextMatch[]>(Prisma.sql`
+      SELECT s.id AS "sessionId", r.id AS "runId", m.id AS "messageId", m.role,
+        part.value->>'text' AS text, m.created_at AS "createdAt", part.ordinality AS ordinal
+      ${scope}
+      JOIN agent_runs r ON r.session_id = s.id AND r.user_id = s.user_id AND r.novel_id = s.novel_id
+      JOIN agent_messages m ON m.run_id = r.id AND m.session_id = s.id
+      CROSS JOIN LATERAL jsonb_array_elements(
+        CASE WHEN jsonb_typeof(m.parts) = 'array' THEN m.parts ELSE '[]'::jsonb END
+      ) WITH ORDINALITY AS part(value, ordinality)
+      WHERE ${owner} AND m.role IN ('user', 'assistant')
+        AND part.value->>'type' = 'text' AND jsonb_typeof(part.value->'text') = 'string'
+        AND (m.role = 'assistant' OR strpos(lower(part.value->>'text'), lower(${query})) > 0)
+        AND NOT EXISTS (
+          SELECT 1 FROM agent_child_execution_grants g
+          WHERE g.child_run_id = r.id AND g.kind = 'inline'
+        )
+        AND NOT (
+          m.role = 'user'
+          AND EXISTS (SELECT 1 FROM agent_goal_executions e WHERE e.run_id = r.id AND e.trigger = 'goal_auto')
+          AND m.id = (SELECT first.id FROM agent_messages first WHERE first.run_id = r.id ORDER BY first.created_at, first.id LIMIT 1)
+        )
+        ${ids.size ? Prisma.sql`AND s.id NOT IN (${Prisma.join([...ids])})` : Prisma.empty}
+        ${cursor ? Prisma.sql`AND (m.created_at, m.id, part.ordinality) < (${cursor.createdAt}, ${cursor.messageId}, ${cursor.ordinal})` : Prisma.empty}
+      ORDER BY m.created_at DESC, m.id DESC, part.ordinality DESC
+      LIMIT ${limit}
+    `)
+    const hits = matches.filter(hit => hit.role === 'user' || projectAgentAuthorText(hit.text).toLocaleLowerCase().includes(needle))
+    const notices = await loadServerRunNotices(userId, hits.filter(hit => hit.role === 'assistant').map(hit => hit.runId))
+    for (const hit of hits) {
+      if (notices.has(hit.messageId)) continue
+      ids.add(hit.sessionId)
+      if (ids.size === limit) break
+    }
+    if (matches.length < limit) break
+    cursor = matches[matches.length - 1]
+  }
+
+  return ids.size ? listAgentSessionsData(userId, undefined, { ids: [...ids] }) : { items: [] }
 }
 
 export async function createAgentSessionData(userId: string, input: CreateAgentSessionRequest) {

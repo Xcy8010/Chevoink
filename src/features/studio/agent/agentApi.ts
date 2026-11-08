@@ -175,6 +175,10 @@ export function fetchAgentSessions(novelId?: string, options?: { query?: string;
   )
 }
 
+export function searchAgentSessions(query: string, signal?: AbortSignal): Promise<{ items: AgentSession[] }> {
+  return requestData('/api/agent/sessions/search', { method: 'POST', body: JSON.stringify({ query }), signal })
+}
+
 export function enqueueAgentRequest(input: EnqueueAgentRequest): Promise<{ id: string }> {
   return requestData('/api/agent/queue', { method: 'POST', body: JSON.stringify(input) })
 }

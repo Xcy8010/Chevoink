@@ -868,6 +868,10 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
 .agent-floating-footer [data-agent-composer] > *, .agent-floating-footer .agent-activity-capsule { pointer-events: auto; }
 .agent-composer-glass { background: var(--studio-composer-bg, var(--surface-default)); }
 
+.studio-mobile-drawer-search { background: var(--surface-muted); }
+html.dark .studio-mobile-drawer-search { background: #242424; }
+html.dark .studio-mobile-backdrop { background: rgb(28 28 28 / 82%); }
+
 /* Mobile creator surfaces share one palette, including body portals. Desktop tokens stay intact. */
 @media (max-width: 1023px) {
   .studio-workspace,

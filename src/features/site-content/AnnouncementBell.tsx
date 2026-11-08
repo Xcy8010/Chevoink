@@ -17,7 +17,7 @@ function PublishedTime({ value }: { value: string }) {
 }
 
 export default function AnnouncementBell({ placement }: { placement: Placement }) {
-  const [anchor, setAnchor] = useState<{ top: number; right: number } | null>(null)
+  const [anchor, setAnchor] = useState<{ top: number; right: number; bottom: number } | null>(null)
   const { query, read, viewerId } = useAnnouncementInbox(true, anchor !== null)
   const dialogId = useId()
   const trigger = useRef<HTMLButtonElement>(null)
@@ -27,7 +27,11 @@ export default function AnnouncementBell({ placement }: { placement: Placement }
 
   function open() {
     const rect = trigger.current!.getBoundingClientRect()
-    setAnchor({ top: rect.bottom + 8, right: Math.max(12, window.innerWidth - rect.right) })
+    setAnchor({
+      top: rect.bottom + 8,
+      right: Math.max(12, window.innerWidth - rect.right),
+      bottom: window.innerHeight - rect.top + 8,
+    })
     read.reset()
     if (viewerId) void query.refetch()
   }
@@ -78,7 +82,7 @@ type InboxDialogProps = {
   id: string
   returnFocus: HTMLButtonElement | null
   placement: Placement
-  anchor: { top: number; right: number }
+  anchor: { top: number; right: number; bottom: number }
   items: AnnouncementNotification[]
   unread: number
   viewerId: string | null
@@ -122,7 +126,11 @@ function InboxDialog(props: InboxDialogProps) {
     data-native-back-dismiss
     data-announcement-inbox
     className={cn('site-announcement-inbox', props.placement === 'studio-mobile' && 'site-announcement-inbox--mobile')}
-    style={{ '--announcement-top': props.anchor.top + 'px', '--announcement-right': props.anchor.right + 'px' } as CSSProperties}
+    style={{
+      '--announcement-top': props.anchor.top + 'px',
+      '--announcement-right': props.anchor.right + 'px',
+      '--announcement-bottom': props.anchor.bottom + 'px',
+    } as CSSProperties}
     onCancel={event => { event.preventDefault(); props.onClose() }}
     onClick={event => {
       if (event.target !== event.currentTarget) return
