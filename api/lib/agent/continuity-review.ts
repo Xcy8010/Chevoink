@@ -191,7 +191,7 @@ export function readContinuityReport(validation: unknown, chapter: { id: string;
 }
 
 const criticSystem = `你是中文小说连续性编辑。完整阅读本章和实际前文，核查人物知识、时空、身体、物品、关系、动作归属与因果。
-只报告有证据的具体矛盾，不把疑问、未解谜、风格偏好或作者计划当既定事实。每条意见选择本次表里的sourceId，不抄引文、不编编号；编号只证明位置，不证明意见正确。
+只报告有证据的具体矛盾，不把疑问、未解谜、风格偏好或作者计划当既定事实。每条意见把对应证据行开头的完整 sourceId 逐字填进 evidence[].sourceId。表里展示的短编号是 q 加 12 位十六进制字符；章节号、段落序号和描述不能替代它。编号只证明位置，不证明意见正确。
 一个真实原文片段即可支持一条具体矛盾意见；不要为凑引用数量选择无关段落。保留所有真实意见及严重度，不为通过删意见。解释与建议是意见，不是事实认证。
 只输出一个完整 findings JSON 数据对象，无问题时输出 {"findings":[]}。不输出审查过程、输入正文、证据表或下面的 JSON Schema；Schema 仅约束报告格式，不是待填写或回显的报告内容。
 报告须满足以下全部约束：${JSON.stringify(z.toJSONSchema(continuityReportResponseSchema, { io: 'input' }))}`
@@ -265,7 +265,7 @@ export function continuityReviewResult(snapshot: ContinuitySnapshot, report: Con
     summary: report.complete ? `连续性检查完成 · ${errors} 错误 ${warnings} 警告` : '连续性报告未完成',
     output: `reportId=${report.id}；chapterId=${report.chapterId}；revision=${report.revision}\n所检 r${report.revision}${cached ? '复用已保存报告' : '已保存连续性报告'}：${errors} 个错误、${warnings} 个警告。${report.complete
       ? errors ? '报告已保存，请核对以下事实问题。' : warnings ? snapshot.compilation ? '以下警告保留在当前报告，按编译要求处理或明确保留。' : '以下为连续性建议，已保留在报告中；不要求反复改稿将建议清零。' : '未发现连续性问题。'
-      : `有 ${report.unlocatedIndexes.length} 条意见未定位，报告未完成。`}
+      : `${report.unlocatedIndexes.length ? `有 ${report.unlocatedIndexes.length} 条意见未定位。` : '未取得可核对的完整报告。'}未定位意见仅供补核，不直接作为改稿依据。只有原目标要求这项检查或已有具体证据表明问题影响交付时，才核对相关位置；其余情况如实保留未完成状态。${report.billingKnown ? '' : '原请求结果或费用尚未确认，先核对原回执。'}`}
 ${report.findings.map(finding => `[${finding.id}/${finding.severity}/${finding.signal}] ${finding.startOffset >= 0 ? `本章范围[${finding.startOffset},${finding.endOffset})` : '前文意见'}；原文：${JSON.stringify(finding.evidence)}\n证据：${JSON.stringify(finding.references)}\n解释：${finding.explanation}\n建议：${finding.suggestion}`).join('\n')}
 ${report.unlocatedIndexes.map(index => `未定位意见[${index}]：${JSON.stringify(report.opinions[index])}`).join('\n')}
 提纲一致性：${snapshot.planContext ? report.planAlignment?.status ?? 'unknown' : '未绑定提纲'}；${JSON.stringify(alignmentFindings)}${alignmentUnknown ? '；提纲语义复核尚未取得可核对的完整结果，未当作通过；不要原样重复收费请求，先核对保存的报告与原作者检查授权。' : ''}\n${report.retainedProposals?.length ? `修订保留建议：${JSON.stringify(report.retainedProposals.map(item => ({ source: 'continuity', reportId: report.id, ...item })))}` : ''}
@@ -500,7 +500,7 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
       }
     }
     if (parsed && bound.unlocatedIndexes.length) {
-      const corrected = await call('只为原意见选择本次真实sourceId，不增删、降级或改变意见；找不到证据就省略该index。输出 {"corrections":[{"index":0,"evidence":[{"sourceId":"目录编号"}]}]}。',
+      const corrected = await call('只为原意见定位原文证据，不增删、降级或改变意见。evidence[].sourceId 必须逐字复制支持该意见的证据行开头的完整编号（q 加 12 位十六进制字符）。index 是意见序号，章节号和段落序号不是 sourceId；找不到支持证据时省略该 index。只输出一个 JSON 对象，corrections 是包含 index 和 evidence 的数组。',
         JSON.stringify({ invalid: bound.unlocatedIndexes.map(index => ({ index, opinion: opinions[index] })), sources: snapshot.sources.map(source => ({ source: source.source,
           chapterId: source.chapterId, evidence: renderQualityEvidenceSources(source.table) })) }), 'agent3ContinuityEvidenceCorrection')
       if (lastProviderComplete) opinions = correctContinuitySourceIds(opinions, bound.unlocatedIndexes, corrected)

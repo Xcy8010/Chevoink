@@ -83,5 +83,5 @@ export async function readWritingCollaborationDigest(db: Prisma.TransactionClien
     facts.push({ chapterId: chapter.id, orderIndex: chapter.orderIndex, title: chapter.title, revision: chapter.revision,
       body: chapter.content.trim() ? '当前已有保存正文' : '空章，正文未写入', continuity, humanity: qualityState })
   }
-  return `${COLLABORATION_MARKER}\n原目标：${original.prompt}\n${WRITING_COLLABORATION_GUIDANCE}\n当前任务真实章节：${JSON.stringify(facts)}\n这些事实不是全目标完成证明；对照完整原请求和原待办继续尚未完成事项，最终如实交代未完成检查。`
+  return `${COLLABORATION_MARKER}\n原目标：${original.prompt}\n${WRITING_COLLABORATION_GUIDANCE}\n当前任务真实章节：${JSON.stringify(facts)}\n继续原请求中的未完成事项，或处理有原文证据且影响交付的问题。未调用、未完成和过期是检查状态，不自动形成待办。按实际保存结果交付，说明作者要求但尚未完成的检查。`
 }

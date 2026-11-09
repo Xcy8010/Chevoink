@@ -117,6 +117,35 @@ it('splits repeated tools at another tool even when their activity labels match'
   expect(projection.byMessage.get('last')?.get(last.callId)?.calls.map(part => part.callId)).toEqual([last.callId])
 })
 
+it('names review types and groups consecutive matching checks without exposing finding totals', () => {
+  const continuity = call('continuity', 'continuity_validate', { display: {
+    kind: 'storyCompiler', phase: 'check', title: '章节衔接复查', detail: '已检查', items: ['检查项仍可展开'], errorCount: 2, warningCount: 3,
+  } })
+  const quality = call('quality', 'quality_analyze', { display: {
+    kind: 'qualityReport', reportId: 'PRIVATE_REVIEW', chapterId: 'internal-chapter-id', chapterRevision: 2,
+    status: 'passed', repairRound: 0,
+    findings: [{ id: 'advice', signal: 'wording', label: '人物表达', severity: 'advisory',
+      evidence: '合成片段。', explanation: '可收紧语气。', suggestion: '精简。', disposition: 'pending' }],
+  } })
+  const pending = { ...quality, callId: 'quality-pending', status: 'running' as const, display: undefined }
+  const view = render(<Transcript active="r" messages={[
+    message('a', [continuity]), message('b', [{ ...continuity, callId: 'continuity-again' }, quality]), message('c', [pending]),
+  ]} />)
+  expect(screen.getByRole('button', { name: '正在进行章节人类感复查', exact: true })).toBeTruthy()
+  const continuityRow = screen.getByRole('button', { name: '章节衔接复查完成', exact: true })
+  fireEvent.click(continuityRow)
+  expect(continuityRow.closest('[data-author-activity]')?.querySelectorAll('[data-activity-tool="continuity_validate"]')).toHaveLength(2)
+  fireEvent.click(screen.getAllByRole('button', { name: '展开检查详情' })[0])
+  expect(screen.getByText('检查项仍可展开')).toBeTruthy()
+  view.rerender(<Transcript messages={[
+    message('a', [continuity]), message('b', [{ ...continuity, callId: 'continuity-again' }, quality]),
+  ]} />)
+  fireEvent.click(screen.getByRole('button', { name: '章节人类感复查完成', exact: true }))
+  fireEvent.click(screen.getByRole('button', { name: '展开质量报告' }))
+  expect(screen.getByText('人物表达')).toBeTruthy()
+  expect(view.container.textContent).not.toMatch(/\d+\s*(?:条建议|条需关注|处待核对|错误)/)
+})
+
 it('uses completion labels for saved actions while keeping all grouped receipts available', () => {
   const view = render(<Transcript messages={[message('save', [
     call('plan-1', 'plan_save'), call('plan-2', 'plan_save'),

@@ -52,6 +52,7 @@ describe('one ordinary continuity report', () => {
     expect(request.content).not.toContain(table().entries[0].id)
     expect(continuityReportResponseSchema.safeParse({ findings: [opinion()] }).success).toBe(true)
     expect(continuityReportResponseSchema.safeParse({ findings: [{ ...opinion(), evidence: [{ sourceId: 'q123', quote: body }] }] }).success).toBe(false)
+    expect(request.system).toContain('章节号、段落序号和描述不能替代它')
     expect(request.system).not.toContain('terminalCandidate')
   })
   it('does not bind a foreign chapter or revision source ID', () => {
@@ -260,6 +261,7 @@ describe('known failure recovery preserves report and paid evidence', () => {
     expect(continuityReviewResult(standalone, { ...report, complete: false, unlocatedIndexes: [0] })).toMatchObject({
       reviewCompleted: false, reviewOutcome: 'evidence_repair_required', failureCode: 'CONTINUITY_REPORT_INCOMPLETE',
       reviewRequestFinished: { revision: report.revision, contentHash: report.contentHash },
+      output: expect.stringContaining('未定位意见仅供补核，不直接作为改稿依据'),
     })
   })
   it('keeps current-source snapshots independent of report history and accounting reads', async () => {

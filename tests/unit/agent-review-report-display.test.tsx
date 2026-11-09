@@ -109,7 +109,7 @@ it('keeps failures and prose visible with a factual analysis summary and folded 
     { type: 'text', text: '已保存本章正文。' },
   ]} streaming={false} runActive />)
   expect(screen.getByText('质量检查失败，请稍后重试')).toBeTruthy()
-  expect(screen.getByText('复查章节未完成：质量检查失败，请稍后重试')).toBeTruthy()
+  expect(screen.getByText('章节人类感复查未完成：质量检查失败，请稍后重试')).toBeTruthy()
   expect(view.container.querySelectorAll('[data-agent-analysis]')).toHaveLength(1)
   expect(screen.getByRole('button', { name: '任务进度' }).getAttribute('aria-expanded')).toBe('false')
   expect(view.container.querySelector('.max-h-44')).toBeNull()

@@ -44,8 +44,8 @@ describe('author progress boundary', () => {
     const part: Extract<AgentMessagePart, { type: 'tool-call' }> = { type: 'tool-call', callId: 'check', toolName: 'quality_analyze', title: '', args: {}, status: 'success', summary: '已取得报告，仍有两处意见。' }
     expect(agentToolProgress(part)).toBe(part.summary)
     expect(agentToolProgress({ ...part, reviewOutcome: 'decision_required' })).toBe('已取得报告，仍有两处意见。（仍需处理）')
-    expect(agentToolProgress({ ...part, status: 'running' })).toBe('正在复查章节')
-    expect(agentToolProgress({ ...part, status: 'running', preparing: true })).toBe('正在复查章节')
+    expect(agentToolProgress({ ...part, status: 'running' })).toBe('正在进行章节人类感复查')
+    expect(agentToolProgress({ ...part, status: 'running', preparing: true })).toBe('正在进行章节人类感复查')
     expect(agentToolProgress({ ...part, preparing: true })).toBe(part.summary)
   })
 })

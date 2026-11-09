@@ -20,7 +20,6 @@ const actionNames: Record<string, string> = {
   chapter_read: '查看章节', chapter_list_summaries: '查看章节摘要', project_search: '搜索前文',
   memory_search: '查找作品设定', web_search: '搜索网页', web_read: '查看网页', web_fetch: '查看网页',
   chapter_write: '写入正文', chapter_append: '续写正文', chapter_edit_range: '修改正文',
-  continuity_validate: '核对章节衔接', quality_analyze: '检查表达', quality_report_get: '查看复查报告',
 }
 
 function toolIcon(part: ActivityCall) {
@@ -44,21 +43,12 @@ function chapterTitle(part: ActivityCall, titles?: ReadonlyMap<string, string>) 
   return id ? titles?.get(id) : undefined
 }
 
-function reviewResult(part: ActivityCall) {
-  const display = part.display
-  if (part.reviewOutcome === 'stale') return '正文有新改动'
-  if (part.reviewOutcome === 'provider_unresolved' || part.reviewOutcome === 'provider_failed' || part.reviewOutcome === 'evidence_repair_required') return '复查未完成'
-  if (display?.kind === 'storyCompiler' && display.phase === 'check') {
-    if (display.errorCount) return `${display.errorCount} 处待核对`
-    if (display.warningCount) return `${display.warningCount} 条建议`
-  }
-  if (display?.kind === 'qualityReport') {
-    if (display.status === 'stale') return '正文有新改动'
-    if (display.status === 'analyzing' || display.status === 'failed') return '复查未完成'
-    const pending = display.findings.filter(finding => finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected')
-    const count = pending.filter(finding => finding.severity !== 'advisory').length
-    if (count) return `${count} 处待核对`
-    if (pending.length) return `${pending.length} 条建议`
+function reviewProblem(part: ActivityCall): 'stale' | 'incomplete' | undefined {
+  if (part.reviewOutcome === 'stale') return 'stale'
+  if (part.reviewOutcome === 'provider_unresolved' || part.reviewOutcome === 'provider_failed' || part.reviewOutcome === 'evidence_repair_required') return 'incomplete'
+  if (part.display?.kind === 'qualityReport') {
+    if (part.display.status === 'stale') return 'stale'
+    if (part.display.status === 'analyzing' || part.display.status === 'failed') return 'incomplete'
   }
 }
 
@@ -74,7 +64,6 @@ function activitySummary(part: ActivityCall, runActive: boolean, titles?: Readon
   if (part.toolName === 'ask_user' && part.status === 'running' && runActive) return '等待你回答'
   if (part.status === 'running') {
     if (!runActive) return `${action}未完成`
-    if (review && title) return `正在复查${named}`
     return agentRunningToolLabel(part.toolName, title, detail ? action : undefined)
   }
   if (part.status !== 'success') {
@@ -93,10 +82,10 @@ function activitySummary(part: ActivityCall, runActive: boolean, titles?: Readon
   }
   if (isWrite) return '写入正文'
   if (review) {
-    const outcome = reviewResult(part)
-    if (outcome === '复查未完成' || outcome === '正文有新改动') return outcome
-    const result = part.toolName === 'quality_report_get' ? '已查看复查报告' : `${detail ? action : '复查'}完成`
-    return `${result}${outcome && !grouped ? ` · ${outcome}` : ''}`
+    const problem = reviewProblem(part)
+    if (problem === 'stale') return `${presentation.label} · 正文有新改动`
+    if (problem === 'incomplete') return `${presentation.label}未完成`
+    return part.toolName === 'quality_report_get' ? '已查看复查报告' : `${presentation.label}完成`
   }
   if (detail && display?.kind === 'projectSearch') return `搜索「${display.query}」 · ${display.total ? `${display.total} 处` : '无匹配'}`
   if (display?.kind === 'webSearch') {
@@ -117,8 +106,7 @@ function isOpenImport(part: ActivityCall, runActive: boolean) {
 
 function hasCurrentFailure(part: ActivityCall) {
   return part.status === 'failed' || part.status === 'denied'
-    || reviewResult(part) === '复查未完成'
-    || part.display?.kind === 'qualityReport' && part.display.status === 'failed'
+    || reviewProblem(part) === 'incomplete'
     || part.display?.kind === 'webSearch' && part.display.provider === 'unavailable'
 }
 

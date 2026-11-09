@@ -33,6 +33,7 @@ it('retains original multi-chapter goal and distinguishes saved text from both m
   expect(digest).toContain('"body":"当前已有保存正文"')
   expect(digest).toContain('"continuity":"未调用"')
   expect(digest).toContain('"humanity":"未调用"')
+  expect(digest).toContain('未调用、未完成和过期是检查状态，不自动形成待办')
   expect(db.agentMessage.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ runId: { in: ['original', 'continue'] }, run: { userId: 'author', novelId: 'novel' } }) }))
   expect(db.chapter.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: { in: ['chapter'] }, authorId: 'author', novelId: 'novel' }) }))
 })

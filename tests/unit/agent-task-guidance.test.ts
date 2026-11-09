@@ -49,6 +49,17 @@ it('keeps complete chapter review and truthful partial completion without a fixe
   expect(text).not.toMatch(/重试 2 次|预算 3 次|只落盘一次/)
 })
 
+it('ends ordinary writing on verified delivery and keeps author-requested review separate', () => {
+  const spec = task('写第四章正文。')
+  spec.scope.agentWritingProtocol = 1
+  delete spec.scope.agentWritingBinding
+  const text = taskOperatingGuidance(spec, 'build')!
+  expect(text).toContain('已有保存回执且没有影响交付的具体事实、因果或人物知识问题，即可交付')
+  expect(text).toContain('只有建议或未定位的意见时，保留在报告里')
+  expect(text).toContain('写入后核对这些改动和受影响的前文')
+  expect(text).toContain('作者要求的检查照常完成')
+})
+
 it.each(['plan', 'review'] as const)('respects %s mode before selecting a manuscript-edit workflow', mode => {
   const spec = task('修改第三章第一段。')
   spec.scope.authorEffects!.manuscript = true

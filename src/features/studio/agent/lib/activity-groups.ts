@@ -43,10 +43,10 @@ export function activityWorkingLabel(part: ActivityCall | undefined) {
   if (!part) return '梳理这次的创作要求'
   if (part.status === 'failed' || part.status === 'denied') return '核对刚才未完成的步骤'
   if (part.toolName === 'plan_save') return '核对计划保存结果'
-  const { phase } = getAgentToolPresentation(part.toolName)
+  const { phase, label } = getAgentToolPresentation(part.toolName)
   if (phase === 'read') return '梳理刚查到的资料'
   if (phase === 'write' || phase === 'revise') return '核对刚处理的章节'
-  if (phase === 'review') return '整理复查结果'
+  if (phase === 'review') return label.endsWith('复查') ? `整理${label}结果` : '整理复查结果'
   return '整理这一步的结果'
 }
 

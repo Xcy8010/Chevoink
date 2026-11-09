@@ -259,9 +259,9 @@ function StoryCompilerCard({ display, authorActivity = false }: { display: Extra
           {display.items.length > 0 ? <ChevronDown className={cn('absolute h-3.5 w-3.5 transition-[opacity,transform]', expanded ? 'rotate-180 opacity-100' : 'opacity-0 group-hover:opacity-100')} /> : null}
         </span>
         <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-secondary)]">{authorActivity ? '查看章节检查详情' : `${storyCompilerPhaseLabel[display.phase]} · ${projectAgentAuthorText(display.detail)}`}</span>
-        {hasProblems ? (
+        {hasProblems && !authorActivity ? (
           <span className={cn('shrink-0 text-[11px]', (display.errorCount ?? 0) > 0 ? 'text-rose-500' : 'text-amber-500')}>
-            {(display.errorCount ?? 0) > 0 ? `${display.errorCount} ${authorActivity ? '处待核对' : '错误'}` : `${display.warningCount} ${authorActivity ? '条建议' : '警告'}`}
+            {(display.errorCount ?? 0) > 0 ? `${display.errorCount} 错误` : `${display.warningCount} 警告`}
           </span>
         ) : null}
       </button>
@@ -280,6 +280,9 @@ function QualityReportCard({ display, authorActivity = false }: { display: Extra
   const repaired = display.findings.filter((finding) => finding.disposition === 'repaired').length
   const warnings = display.findings.filter((finding) => (finding.severity === 'warning' || finding.severity === 'error') && finding.disposition !== 'repaired').length
   const suggestions = display.findings.filter(finding => finding.severity === 'advisory' && finding.disposition !== 'repaired' && finding.authorFeedback !== 'rejected').length
+  const status = display.status === 'failed' || display.status === 'analyzing' ? '检查未完成' : display.status === 'stale' ? '旧版报告' : null
+  const badge = status ?? (authorActivity ? null
+    : warnings > 0 ? `${warnings} 条需关注` : suggestions > 0 ? `检查完成 · ${suggestions} 条建议` : repaired > 0 ? `已应用 ${repaired} 处` : '检查完成')
 
   return (
     <div className="border-t border-[var(--border-subtle)]">
@@ -289,10 +292,7 @@ function QualityReportCard({ display, authorActivity = false }: { display: Extra
           <ChevronDown className={cn('absolute h-3.5 w-3.5 transition-[opacity,transform]', expanded ? 'rotate-180 opacity-100' : 'opacity-0 group-hover:opacity-100')} />
         </span>
         <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-secondary)]">{authorActivity ? '查看复查报告' : `质量报告 · r${display.chapterRevision} · ${display.findings.length} 条证据`}</span>
-        <span className={cn('shrink-0 text-[11px]', warnings > 0 ? 'text-amber-500' : 'text-emerald-600')}>
-          {display.status === 'failed' || display.status === 'analyzing' ? '检查未完成' : display.status === 'stale' ? '旧版报告'
-            : warnings > 0 ? `${warnings} 条需关注` : suggestions > 0 ? `检查完成 · ${suggestions} 条建议` : repaired > 0 ? `已应用 ${repaired} 处` : '检查完成'}
-        </span>
+        {badge ? <span className={cn('shrink-0 text-[11px]', status || warnings > 0 ? 'text-amber-500' : 'text-emerald-600')}>{badge}</span> : null}
       </button>
       {expanded ? (
         <div id={detailsId} className="pl-[22px]">

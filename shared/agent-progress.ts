@@ -37,6 +37,7 @@ export function agentRunningToolLabel(toolName: string, chapterTitle?: string, d
   if (toolName === 'plan_rename') return '正在重命名计划'
   if (toolName === 'plan_delete') return '正在删除计划'
   if (phase === 'save') return `正在写入${label.replace(/^保存/, '')}`
+  if (phase === 'review' && label.endsWith('复查')) return `正在进行${label}`
   return `正在${detailLabel ?? label}`
 }
 
