@@ -40,7 +40,7 @@ import { prepareAgentImage, readFileAsDataUrl, validateAgentFile } from '../agen
 import { uploadAgentAttachment } from '../agentApi'
 import { getChapterContent } from '../../api'
 import { useAgentStore, type ComposerReference } from '../agentStore'
-import { activateComposerDraft, sameComposerDraftScope, takeComposerSubmission, updateComposerDraft } from '../composer-drafts'
+import { activateComposerDraft, captureComposerSubmission, sameComposerDraftScope, updateComposerDraft } from '../composer-drafts'
 import { useVoiceInput } from '../hooks/useVoiceInput'
 import { AgentVoiceInputBar } from './AgentVoiceInputBar'
 import { insertVoiceTranscript } from '../voice-insertion'
@@ -430,12 +430,20 @@ export function AgentComposer({
   const canSend =
     !disabled && !sending && !voiceActive && !pendingVoice && uploading === 0 && (!isComposerBlank(prompt) || references.length > 0)
   const continueLock = useRef(false)
-  const showContinue = (!sending || continueLock.current) && Boolean(onContinue) && isComposerBlank(prompt) && references.length === 0 && attachments.length === 0
+  const submitting = sending && !continueLock.current
+  const showContinue = !submitting && Boolean(onContinue) && isComposerBlank(prompt) && references.length === 0 && attachments.length === 0
   const canContinue = showContinue && !running && !disabled && !sending && !voiceActive && !pendingVoice && uploading === 0
   const sendLock = useRef(new Set<string>())
   const currentScope = useRef(scope)
+  const focusAfterSend = useRef<string | null>(null)
   currentScope.current = scope
   useLayoutEffect(() => { setSending([...sendLock.current].some(owner => sameComposerDraftScope(owner, scope))) }, [scope])
+  useLayoutEffect(() => {
+    if (sending || focusAfterSend.current === null) return
+    const owner = focusAfterSend.current
+    focusAfterSend.current = null
+    if (sameComposerDraftScope(scope, owner)) editorRef.current?.focus({ preventScroll: true })
+  }, [scope, sending])
   async function handleContinue() {
     if (!canContinue || !onContinue || continueLock.current) return
     continueLock.current = true
@@ -692,7 +700,7 @@ export function AgentComposer({
     const sendingScope = scope
     sendLock.current.add(sendingScope)
     setSending(true)
-    const restoreDraft = takeComposerSubmission(sendingScope)
+    const clearSubmittedDraft = captureComposerSubmission(sendingScope)
     try {
       if (command.kind === 'control') {
         await onGoalCommand?.(command.action)
@@ -703,14 +711,15 @@ export function AgentComposer({
         if (sameComposerDraftScope(currentScope.current, sendingScope)) setGoalMode(false)
       } else if (pinnedSubagent) await onSend(effectivePrompt, pending, creativeFreedom, qualityMode, pinned, pinnedSubagent.id)
       else await onSend(effectivePrompt, pending, creativeFreedom, qualityMode, pinned)
+      clearSubmittedDraft()
       if (sameComposerDraftScope(currentScope.current, sendingScope)) setAttachError(null)
     } catch {
-      restoreDraft()
+      // The submitted draft stays available when delivery fails.
     } finally {
       sendLock.current.delete(sendingScope)
       if (sameComposerDraftScope(currentScope.current, sendingScope)) {
+        focusAfterSend.current = sendingScope
         setSending(false)
-        editorRef.current?.focus({ preventScroll: true })
       }
     }
   }
@@ -1027,7 +1036,7 @@ export function AgentComposer({
           ))}
         </div>
       )}
-      {(attachments.length > 0 || uploading > 0) && (
+      {!submitting && (attachments.length > 0 || uploading > 0) && (
         <div className="mb-2 flex flex-wrap items-center gap-2 px-1">
           {attachments.map((attachment) =>
             attachment.kind === 'image' ? (
@@ -1082,7 +1091,7 @@ export function AgentComposer({
         <p className="mb-1.5 px-1 text-[11px] text-red-500">{attachError}</p>
       )}
       <div className="relative min-h-12">
-        {isComposerBlank(prompt) && references.length === 0 ? (
+        {submitting || isComposerBlank(prompt) && references.length === 0 ? (
           <span className="pointer-events-none absolute left-1.5 top-1 text-sm leading-6 text-[var(--text-secondary)]">
             告诉我要做什么，我会自主完成…
           </span>
@@ -1097,6 +1106,7 @@ export function AgentComposer({
           aria-controls={slashVisible ? slashListId : undefined}
           aria-activedescendant={slashVisible && !slashSubmenu && activeSlashTool ? `${slashListId}-${activeSlashTool}` : undefined}
           contentEditable={!disabled && !voiceActive && !sending}
+          hidden={submitting}
           suppressContentEditableWarning
           onInput={(event) => { const composing = (event.nativeEvent as InputEvent).isComposing || composingRef.current; syncComposerFromDom(composing); refreshSlashToken(composing) }}
           onCompositionStart={() => { composingRef.current = true; setSlashToken(null); setSlashSubmenu(null) }}

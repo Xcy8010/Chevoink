@@ -67,19 +67,19 @@ export function updateComposerDraft(scope: string, update: (draft: Draft) => Dra
   save(key, draft)
   if (active === key) useAgentStore.setState(draft)
 }
-/** The outgoing message owns the submission while it is out of the editor. */
-export function takeComposerSubmission(scope: string): () => void {
+/** Only clear the submitted draft after delivery, in its originating window. */
+export function captureComposerSubmission(scope: string): () => void {
   const submitted = pick(useAgentStore.getState())
-  const update = (change: (draft: Draft) => Draft) => {
-    if (scope) updateComposerDraft(scope, change)
-    else useAgentStore.setState(change)
+  return () => {
+    const clear = (draft: Draft): Draft => {
+      if (draft.composerDraft !== submitted.composerDraft || draft.composerReferences !== submitted.composerReferences
+        || draft.composerAttachments !== submitted.composerAttachments || draft.composerSkillIds !== submitted.composerSkillIds
+        || draft.composerSubagent !== submitted.composerSubagent) return draft
+      return { ...empty(), composerUploading: draft.composerUploading, goalMode: draft.goalMode }
+    }
+    if (scope) updateComposerDraft(scope, clear)
+    else useAgentStore.setState(clear)
   }
-  update(draft => ({ ...empty(), composerUploading: draft.composerUploading, goalMode: draft.goalMode }))
-  return () => update(draft => {
-    if (draft.composerDraft || draft.composerReferences.length || draft.composerAttachments.length
-      || draft.composerSkillIds.length || draft.composerSubagent) return draft
-    return { ...submitted, composerUploading: draft.composerUploading, goalMode: draft.goalMode }
-  })
 }
 
 /** Lazy local window -> persisted session is an identity promotion, not a task switch. */

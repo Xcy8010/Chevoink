@@ -38,7 +38,7 @@ describe('Agent voice draft integration', () => {
     await act(async () => fireEvent.click(screen.getByRole('button', { name: '发送' })))
     expect(useAgentStore.getState().composerSubagent).toBeNull()
   })
-  it('clears the visible draft before the request returns and restores a failed send after session promotion', async () => {
+  it('hides the submitted draft while keeping it recoverable through a failed send and session promotion', async () => {
     const scope = 'u:n1:pending-send-test'
     activateComposerDraft(scope)
     const attachment = { id: 'file', kind: 'file' as const, name: '样本.txt', size: 4, url: '/files/sample.txt' }
@@ -47,13 +47,15 @@ describe('Agent voice draft integration', () => {
     const onSend = vi.fn(() => new Promise<void>((_, fail) => { reject = fail }))
     const input = { ...props(), voiceScopeKey: scope, onSend, onContinue: vi.fn() }
     const view = render(<AgentComposer {...input} />)
+    const editor = screen.getByRole<HTMLDivElement>('textbox', { name: 'Agent 提示词' })
 
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
 
     expect(onSend).toHaveBeenCalledWith('已有草稿', [attachment], 'balanced', 'premium', [], 'helper')
-    expect(screen.getByRole('textbox', { name: 'Agent 提示词' }).textContent).toBe('')
+    expect(editor.hidden).toBe(true)
     expect(screen.queryByRole('button', { name: '正在继续运行' })).toBeNull()
-    expect(useAgentStore.getState().composerAttachments).toEqual([])
+    expect(useAgentStore.getState().composerAttachments).toEqual([attachment])
+    expect(JSON.parse(localStorage.getItem(`chevoink:task-draft:v1:${scope}`)!).composerDraft).toBe('已有草稿')
 
     promoteComposerDraft(scope, 'u:n1:promoted-test')
     view.rerender(<AgentComposer {...input} voiceScopeKey="u:n1:promoted-test" />)
@@ -262,7 +264,8 @@ it('keeps send locks, drafts and focus owned by the task when an older send sett
   expect(onSend).toHaveBeenCalledTimes(2)
   const focusTarget = document.createElement('button'); document.body.append(focusTarget); focusTarget.focus()
   await act(async () => { finishA(); await Promise.resolve() })
-  expect(useAgentStore.getState().composerDraft).toBe('')
+  expect(useAgentStore.getState().composerDraft).toBe('B的新草稿')
+  expect((editor as HTMLDivElement).hidden).toBe(true)
   expect((screen.getByRole('button', { name: '发送' }) as HTMLButtonElement).disabled).toBe(true)
   expect(document.activeElement).toBe(focusTarget)
   await act(async () => { finishB(); await Promise.resolve() })
