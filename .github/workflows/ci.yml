@@ -129,6 +129,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       fail-fast: false
+      max-parallel: 10
       matrix: ${{ fromJSON(needs.test-plan.outputs.matrix) }}
 
     # Each shard owns a fresh PostgreSQL service. File parallelism remains off
