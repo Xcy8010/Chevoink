@@ -500,7 +500,7 @@ export async function reviewContinuity(ctx: ToolContext, args: ContinuityReviewA
       }
     }
     if (parsed && bound.unlocatedIndexes.length) {
-      const corrected = await call('只为原意见定位原文证据，不增删、降级或改变意见。evidence[].sourceId 必须逐字复制支持该意见的证据行开头的完整编号（q 加 12 位十六进制字符）。index 是意见序号，章节号和段落序号不是 sourceId；找不到支持证据时省略该 index。只输出一个 JSON 对象，corrections 是包含 index 和 evidence 的数组。',
+      const corrected = await call('只为原意见选择本次证据表中的真实sourceId，不增删、降级或改变意见。evidence[].sourceId 必须逐字复制支持该意见的证据行开头的完整编号（q 加 12 位十六进制字符）。index 是意见序号，章节号和段落序号不是 sourceId；找不到支持证据时省略该 index。只输出一个 JSON 对象，corrections 是包含 index 和 evidence 的数组。',
         JSON.stringify({ invalid: bound.unlocatedIndexes.map(index => ({ index, opinion: opinions[index] })), sources: snapshot.sources.map(source => ({ source: source.source,
           chapterId: source.chapterId, evidence: renderQualityEvidenceSources(source.table) })) }), 'agent3ContinuityEvidenceCorrection')
       if (lastProviderComplete) opinions = correctContinuitySourceIds(opinions, bound.unlocatedIndexes, corrected)
