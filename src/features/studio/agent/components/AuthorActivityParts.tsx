@@ -227,7 +227,7 @@ export function AuthorActivitySummary({ timing, active, open, onToggle }: { timi
   const label = active || timing.elapsedMs !== null
     ? <ProcessDuration timing={timing} active={active} />
     : <span className="text-sm leading-6 text-[var(--text-secondary)]">查看处理过程</span>
-  return <div className="mb-2 border-b border-[var(--border-subtle)] pb-1.5" data-author-timer>
+  return <div className="mb-1 border-b border-[var(--border-subtle)] pb-1.5" data-author-timer>
     {onToggle ? <button type="button" aria-expanded={open} onClick={onToggle}
       className="inline-flex min-h-7 items-center gap-1 text-left text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:underline focus-visible:outline-none">
       {label}
@@ -286,7 +286,7 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
       const key = rendered.size ? group.id : stepKey
       rendered.add(group.id)
       return <AgentProcessRegion key={key} open={processOpen ?? true}>
-        {group.transition ? <AuthorProgressText text={group.transition} className="mb-4" /> : null}
+        {group.transition ? <AuthorProgressText text={group.transition} className="mb-3" /> : null}
         <ActivityRow key="activity" group={group} runActive={runActive} active={activeGroupId === group.id} titles={activityChapterTitles}
           workingLabel={liveGroupId === group.id ? workingLabel : undefined} />
       </AgentProcessRegion>
@@ -298,5 +298,5 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
       <ActivityRow key="activity" runActive={runActive} active={false} workingLabel={workingLabel} />
     </AgentProcessRegion>)
   }
-  return <div className="flex flex-col gap-4 font-medium">{entries}</div>
+  return <div className="flex flex-col gap-3 font-medium">{entries}</div>
 })
