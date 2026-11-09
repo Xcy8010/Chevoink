@@ -67,6 +67,21 @@ export function updateComposerDraft(scope: string, update: (draft: Draft) => Dra
   save(key, draft)
   if (active === key) useAgentStore.setState(draft)
 }
+/** The outgoing message owns the submission while it is out of the editor. */
+export function takeComposerSubmission(scope: string): () => void {
+  const submitted = pick(useAgentStore.getState())
+  const update = (change: (draft: Draft) => Draft) => {
+    if (scope) updateComposerDraft(scope, change)
+    else useAgentStore.setState(change)
+  }
+  update(draft => ({ ...empty(), composerUploading: draft.composerUploading, goalMode: draft.goalMode }))
+  return () => update(draft => {
+    if (draft.composerDraft || draft.composerReferences.length || draft.composerAttachments.length
+      || draft.composerSkillIds.length || draft.composerSubagent) return draft
+    return { ...submitted, composerUploading: draft.composerUploading, goalMode: draft.goalMode }
+  })
+}
+
 /** Lazy local window -> persisted session is an identity promotion, not a task switch. */
 export function promoteComposerDraft(from: string, to: string) {
   const draft = active === from ? pick(useAgentStore.getState()) : read(from)

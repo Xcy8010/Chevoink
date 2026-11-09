@@ -449,10 +449,25 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
       summary: '先创建一部作品，再继续完善简介、章节和封面。', tagNames: [], chapterCount: 0, wordCount: 0, coverAssetId: null } as never)
     const { messages } = await assembleContext(input), system = String(messages[0].content)
     expect(system).toContain('占位状态不是创建授权')
-    expect(system).toContain('仅当原始作者请求明确创建正式作品，或已授权的正文写作确需正式作品时')
-    expect(system).toContain('普通问候、讨论、解释、建议或只读任务不创建作品')
+    expect(system).toContain('仅当原始作者请求明确创建正式作品，或要求把章节保存到作品且确需初始化时')
+    expect(system).toContain('只在聊天交付的试写、正文、讨论或答复直接交付，无需初始化')
     expect(system).not.toContain('作者本轮是在让你真正创建第一部作品')
   })
+
+  it.each(['请写一部海岛小说的第一章，不要大纲或分析。直接输出正文。', '按前情写下一章，直接在聊天输出正文。'])(
+    'gives the fresh Agent a chat delivery path without a forced manuscript target: %s', async prompt => {
+      const input = interpretedInput(prompt)
+      input.taskSpec = enableAgentWritingScope(input.taskSpec)
+      vi.mocked(prisma.$transaction).mockResolvedValueOnce(input.taskSpec)
+      const { messages } = await assembleContext(input)
+      const system = String(messages[0].content), intent = String(messages.at(-1)?.content)
+
+      expect(system).toContain('在聊天直接给出正文，省去执行说明、作品初始化、建章和写入')
+      expect(system).not.toContain('作者只要标题和正文时，交付当前已保存版本')
+      expect(intent.startsWith(prompt)).toBe(true)
+      expect(intent).not.toContain('[本任务目标] 写本任务要新增的下一章')
+    },
+  )
 
   it('does not require the research and prototype pipeline before an explicitly requested first chapter, including legacy guidance', async () => {
     const input = buildInput()

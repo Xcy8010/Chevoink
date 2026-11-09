@@ -1,6 +1,7 @@
 import { expect, it } from 'vitest'
 import { taskOperatingGuidance } from '../../api/lib/agent/task-guidance.js'
 import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
+import { enableAgentWritingScope } from '../../api/lib/agent/agent-writing-scope.js'
 
 function task(prompt: string) {
   return buildTaskSpec({ runId: 'run', novelId: 'novel', chapterId: 'chapter', prompt, authorWritingProtocol: 2 })
@@ -13,7 +14,7 @@ it('keeps legacy admission guidance unchanged instead of reclassifying a frozen 
 it.each([
   ['你好', '本次是聊天、提问或设定讨论'],
   ['如何写一个人物的犹豫？', '本次是聊天、提问或设定讨论'],
-  ['只讨论人物设定，不要改正文。', '本次未授权正文创作'],
+  ['只讨论人物设定，不要改正文。', '本次未授权作品正文写入'],
 ])('does not impose chapter work on an informational request: %s', (prompt, expected) => {
   const spec = task(prompt), before = structuredClone(spec), text = taskOperatingGuidance(spec, 'plan')!
   expect(text).toContain(expected)
@@ -47,6 +48,16 @@ it('keeps complete chapter review and truthful partial completion without a fixe
   expect(text).toContain('核验当前最终版本')
   expect(text).toContain('缺少必要检查时保留正文并报告未完成')
   expect(text).not.toMatch(/重试 2 次|预算 3 次|只落盘一次/)
+})
+
+it('separates direct manuscript replies from workspace writes before an unbound Agent decides the target', () => {
+  const spec = enableAgentWritingScope(task('请写一部海岛题材小说的第一章，不要大纲、分析或后续章节。直接输出正文。'))
+  const text = taskOperatingGuidance(spec, 'build')!
+
+  expect(text).toContain('直接输出正文且未要求在作品中保存时，在聊天直接给出正文')
+  expect(text).toContain('省去执行说明、作品初始化、建章和写入')
+  expect(text).toContain('同时要求展示正文时，按指定格式给出保存的版本')
+  expect(text).not.toContain('本次未授权作品正文写入')
 })
 
 it('ends ordinary writing on verified delivery and keeps author-requested review separate', () => {
@@ -89,6 +100,6 @@ it.each(['把第三章修好并保存。', '详细解释每处修改，完整列
   expect(text).toContain('不逐条复述修改、报告意见及每条保留理由')
   expect(text).toContain('作者要求完整报告、详细解释或具体改动时按要求展开')
   expect(text).toContain('不用简短默认截断所需内容')
-  expect(text).toContain('作者指定标题正文时交付当前已保存版本')
+  expect(text).toContain('作者指定仅交付标题正文时直接交付所需内容')
   expect(spec).toEqual(before)
 })

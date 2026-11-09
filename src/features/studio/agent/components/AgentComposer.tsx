@@ -40,7 +40,7 @@ import { prepareAgentImage, readFileAsDataUrl, validateAgentFile } from '../agen
 import { uploadAgentAttachment } from '../agentApi'
 import { getChapterContent } from '../../api'
 import { useAgentStore, type ComposerReference } from '../agentStore'
-import { activateComposerDraft, sameComposerDraftScope, updateComposerDraft } from '../composer-drafts'
+import { activateComposerDraft, sameComposerDraftScope, takeComposerSubmission, updateComposerDraft } from '../composer-drafts'
 import { useVoiceInput } from '../hooks/useVoiceInput'
 import { AgentVoiceInputBar } from './AgentVoiceInputBar'
 import { insertVoiceTranscript } from '../voice-insertion'
@@ -285,7 +285,6 @@ export function AgentComposer({
   // 草稿与附件存在全局 store：面板在沉浸/普通视图间重挂载时不丢失未发送内容
   const prompt = useAgentStore((state) => state.composerDraft)
   const attachments = useAgentStore((state) => state.composerAttachments)
-  const setAttachments = useAgentStore((state) => state.setComposerAttachments)
   const addAttachment = useAgentStore((state) => state.addComposerAttachment)
   const removeAttachment = useAgentStore((state) => state.removeComposerAttachment)
   const references = useAgentStore((state) => state.composerReferences)
@@ -299,7 +298,6 @@ export function AgentComposer({
   const goalMode = useAgentStore((state) => state.goalMode)
   const setGoalMode = useAgentStore((state) => state.setGoalMode)
   const toggleComposerSkill = useAgentStore((state) => state.toggleComposerSkill)
-  const setComposerSkillIds = useAgentStore((state) => state.setComposerSkillIds)
   const canUseGoalEntry = goalCreationEnabled || goalActive
   // 启动中（建会话 + 启动 run 的网络往返）：成功后才清空草稿，避免内容“瞬间消失”观感
   const [sending, setSending] = useState(false)
@@ -431,9 +429,9 @@ export function AgentComposer({
 
   const canSend =
     !disabled && !sending && !voiceActive && !pendingVoice && uploading === 0 && (!isComposerBlank(prompt) || references.length > 0)
-  const showContinue = Boolean(onContinue) && isComposerBlank(prompt) && references.length === 0 && attachments.length === 0
-  const canContinue = showContinue && !running && !disabled && !sending && !voiceActive && !pendingVoice && uploading === 0
   const continueLock = useRef(false)
+  const showContinue = (!sending || continueLock.current) && Boolean(onContinue) && isComposerBlank(prompt) && references.length === 0 && attachments.length === 0
+  const canContinue = showContinue && !running && !disabled && !sending && !voiceActive && !pendingVoice && uploading === 0
   const sendLock = useRef(new Set<string>())
   const currentScope = useRef(scope)
   currentScope.current = scope
@@ -672,47 +670,42 @@ export function AgentComposer({
       setAttachError('指定的子 Agent 不属于当前作品，请取消后重新选择。')
       return
     }
+    const parsedCommand = parseGoalCommand(current.draft)
+    // Existing goal controls remain available when goal creation is closed.
+    const command = !canUseGoalEntry && parsedCommand.kind === 'enable'
+      ? { kind: 'ordinary' as const }
+      : parsedCommand
+    if (command.kind === 'invalid') {
+      setAttachError(command.message)
+      return
+    }
+
+    const submitGoal = command.kind !== 'control' && canUseGoalEntry && (goalMode || command.kind === 'enable') ? onGoalSubmit : undefined
+    const objective = submitGoal && (command.kind === 'enable' ? command.body.trim() : effectivePrompt.trim())
+    if (objective === '') {
+      onGoalOpen?.()
+      setGoalMode(true)
+      return
+    }
     const pending = attachments
     const pinned = pinnedSkills.map((skill) => skill.id)
     const sendingScope = scope
     sendLock.current.add(sendingScope)
     setSending(true)
+    const restoreDraft = takeComposerSubmission(sendingScope)
     try {
-      const parsedCommand = parseGoalCommand(current.draft)
-      // A capability failure must not turn a leading /goal into a persistent
-      // goal request. Existing goal controls remain available through their
-      // explicit commands while the creation entry is closed.
-      const command = !canUseGoalEntry && parsedCommand.kind === 'enable'
-        ? { kind: 'ordinary' as const }
-        : parsedCommand
-      if (command.kind === 'invalid') {
-        setAttachError(command.message)
-        return
-      }
       if (command.kind === 'control') {
         await onGoalCommand?.(command.action)
-        if (command.action === 'clear') setGoalMode(false)
-      } else if (canUseGoalEntry && (goalMode || command.kind === 'enable') && onGoalSubmit) {
-        const objective = command.kind === 'enable' ? command.body.trim() : effectivePrompt.trim()
-        if (!objective) {
-          onGoalOpen?.()
-          setGoalMode(true)
-          return
-        }
-        if (pinnedSubagent) await onGoalSubmit(objective, pending, creativeFreedom, qualityMode, pinned, pinnedSubagent.id)
-        else await onGoalSubmit(objective, pending, creativeFreedom, qualityMode, pinned)
-        setGoalMode(false)
+        if (command.action === 'clear' && sameComposerDraftScope(currentScope.current, sendingScope)) setGoalMode(false)
+      } else if (submitGoal && objective) {
+        if (pinnedSubagent) await submitGoal(objective, pending, creativeFreedom, qualityMode, pinned, pinnedSubagent.id)
+        else await submitGoal(objective, pending, creativeFreedom, qualityMode, pinned)
+        if (sameComposerDraftScope(currentScope.current, sendingScope)) setGoalMode(false)
       } else if (pinnedSubagent) await onSend(effectivePrompt, pending, creativeFreedom, qualityMode, pinned, pinnedSubagent.id)
       else await onSend(effectivePrompt, pending, creativeFreedom, qualityMode, pinned)
-      if (sendingScope) updateComposerDraft(sendingScope, draft => draft.composerDraft === current.draft ? { ...draft, composerDraft: '', composerReferences: [], composerAttachments: [], composerSkillIds: [], composerSubagent: draft.composerSubagent?.id === pinnedSubagent?.id ? null : draft.composerSubagent } : draft)
-      if (currentScope.current !== sendingScope) return
-      setComposerContent('', [])
-      setAttachments([])
-      setComposerSkillIds([])
-      if (useAgentStore.getState().composerSubagent?.id === pinnedSubagent?.id) useAgentStore.setState({ composerSubagent: null })
-      setAttachError(null)
+      if (sameComposerDraftScope(currentScope.current, sendingScope)) setAttachError(null)
     } catch {
-      // 面板已展示错误提示；保留草稿与附件供用户重试
+      restoreDraft()
     } finally {
       sendLock.current.delete(sendingScope)
       if (sameComposerDraftScope(currentScope.current, sendingScope)) {

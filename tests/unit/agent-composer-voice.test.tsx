@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentComposer } from '../../src/features/studio/agent/components/AgentComposer'
 import { AgentMessageParts } from '../../src/features/studio/agent/components/AgentMessageParts'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
-import { activateComposerDraft } from '../../src/features/studio/agent/composer-drafts'
+import { activateComposerDraft, promoteComposerDraft } from '../../src/features/studio/agent/composer-drafts'
 import type { AgentGoalSnapshot, AgentUIMessage } from '../../shared/contracts/index.js'
 
 const voice = vi.hoisted(() => ({ options: undefined as undefined | { onTranscript: (text: string) => void }, state: 'idle', start: vi.fn(), cancel: vi.fn(), removeModel: vi.fn() }))
@@ -38,6 +38,32 @@ describe('Agent voice draft integration', () => {
     await act(async () => fireEvent.click(screen.getByRole('button', { name: '发送' })))
     expect(useAgentStore.getState().composerSubagent).toBeNull()
   })
+  it('clears the visible draft before the request returns and restores a failed send after session promotion', async () => {
+    const scope = 'u:n1:pending-send-test'
+    activateComposerDraft(scope)
+    const attachment = { id: 'file', kind: 'file' as const, name: '样本.txt', size: 4, url: '/files/sample.txt' }
+    useAgentStore.setState({ composerDraft: '已有草稿', composerAttachments: [attachment], composerSubagent: { id: 'helper', name: '资料助手', novelId: 'n1' } })
+    let reject!: (error: Error) => void
+    const onSend = vi.fn(() => new Promise<void>((_, fail) => { reject = fail }))
+    const input = { ...props(), voiceScopeKey: scope, onSend, onContinue: vi.fn() }
+    const view = render(<AgentComposer {...input} />)
+
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    expect(onSend).toHaveBeenCalledWith('已有草稿', [attachment], 'balanced', 'premium', [], 'helper')
+    expect(screen.getByRole('textbox', { name: 'Agent 提示词' }).textContent).toBe('')
+    expect(screen.queryByRole('button', { name: '正在继续运行' })).toBeNull()
+    expect(useAgentStore.getState().composerAttachments).toEqual([])
+
+    promoteComposerDraft(scope, 'u:n1:promoted-test')
+    view.rerender(<AgentComposer {...input} voiceScopeKey="u:n1:promoted-test" />)
+    await act(async () => reject(new Error('offline')))
+
+    expect(screen.getByRole('textbox', { name: 'Agent 提示词' }).textContent).toBe('已有草稿')
+    expect(useAgentStore.getState().composerAttachments).toEqual([attachment])
+    expect(useAgentStore.getState().composerSubagent?.id).toBe('helper')
+  })
+
   it('opens goal mode from the plus menu and promotes a leading goal command safely', () => {
     useAgentStore.setState({ composerDraft: '' })
     const onGoalOpen = vi.fn()
@@ -236,7 +262,7 @@ it('keeps send locks, drafts and focus owned by the task when an older send sett
   expect(onSend).toHaveBeenCalledTimes(2)
   const focusTarget = document.createElement('button'); document.body.append(focusTarget); focusTarget.focus()
   await act(async () => { finishA(); await Promise.resolve() })
-  expect(useAgentStore.getState().composerDraft).toBe('B的新草稿')
+  expect(useAgentStore.getState().composerDraft).toBe('')
   expect((screen.getByRole('button', { name: '发送' }) as HTMLButtonElement).disabled).toBe(true)
   expect(document.activeElement).toBe(focusTarget)
   await act(async () => { finishB(); await Promise.resolve() })

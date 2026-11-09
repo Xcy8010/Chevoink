@@ -37,7 +37,7 @@ it('offers model-driven body tools independently of lexical guesses while ordina
   const names = restrictToolsToTask(getToolsForMode('build'), f.spec, 'build').map(tool => tool.name)
   expect(names).toEqual(expect.arrayContaining(['task_scope_bind', 'chapter_read', 'chapter_edit_range']))
   expect(requiresManuscriptDelivery(f.spec)).toBe(false)
-  expect(renderTaskSpec(f.spec)).toContain('普通讨论直接回答')
+  expect(renderTaskSpec(f.spec)).toContain('在聊天交付正文或答复时直接输出')
   expect(f.artifacts).toHaveLength(0)
 })
 
