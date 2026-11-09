@@ -20,12 +20,23 @@ it('finishes on the original deadline despite changing pointer targets every fra
   const hook = renderHook(({ target, phase }) => useWorkSplitMotion(target, phase), { initialProps: { target: folded, phase: 'folded' } })
   hook.rerender({ target: open, phase: 'open' })
   expect(hook.result.current.viewer).toBe(0)
-  for (let index = 0; index < 10; index++) {
+  for (let index = 0; index < 14; index++) {
     hook.rerender({ target: { ...open, viewer: 220 + index * 4 }, phase: 'open' })
     act(() => vi.advanceTimersByTime(16))
   }
-  expect(hook.result.current.viewer).toBe(256)
+  expect(hook.result.current.viewer).toBe(272)
   expect(vi.getTimerCount()).toBe(0)
+})
+it('uses the original damped curve and completes within the old 220ms transition', () => {
+  const hook = renderHook(({ target, phase }) => useWorkSplitMotion(target, phase), { initialProps: { target: folded, phase: 'folded' } })
+  hook.rerender({ target: open, phase: 'open' })
+  act(() => vi.advanceTimersByTime(32))
+  expect(hook.result.current.viewer).toBeGreaterThan(300)
+  expect(hook.result.current.viewer).toBeLessThan(360)
+  act(() => vi.advanceTimersByTime(160))
+  expect(hook.result.current.viewer).toBeLessThan(600)
+  act(() => vi.advanceTimersByTime(32))
+  expect(hook.result.current.viewer).toBe(600)
 })
 it('reverses mid-animation from the displayed width instead of jumping to a stale endpoint', () => {
   const hook = renderHook(({ target, phase }) => useWorkSplitMotion(target, phase), { initialProps: { target: open, phase: 'open' } })

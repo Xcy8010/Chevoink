@@ -34,6 +34,8 @@ type Gesture = WorkSplitGesture & { pointer: number }
 
 export default function WorkPerspective({ conversationRail, conversation, activityDock, inspector, viewer, scopeKey, outerSidebarOpen = true, rightOpen, inspectorWidth, viewerWidth, onToggleRight, onSelectInspectorTab }: Props) {
   const root = useRef<HTMLDivElement>(null)
+  const contentHandle = useRef<HTMLDivElement>(null)
+  const restoreSeparatorFocus = useRef(false)
   const [width, setWidth] = useState(0)
   const [split, setSplit] = useState<WorkSplit>(() => {
     return restoreSplit(scopeKey, { viewer: viewerWidth, inspector: inspectorWidth === 520 ? 320 : inspectorWidth, chatCollapsed: false, viewerCollapsed: false, inspectorCollapsed: !rightOpen })
@@ -50,6 +52,11 @@ export default function WorkPerspective({ conversationRail, conversation, activi
   const geometry = fitWorkSplit(split, width || 1600, hasViewer)
   const inspectorOpen = !geometry.inspectorCollapsed
   const viewerOpen = hasViewer && !geometry.viewerCollapsed
+  useLayoutEffect(() => {
+    if (viewerOpen || !restoreSeparatorFocus.current) return
+    restoreSeparatorFocus.current = false
+    contentHandle.current?.focus()
+  }, [viewerOpen])
   const dockVisible = !geometry.chatCollapsed && shouldShowWorkActivityDock({ containerWidth: width, leftWidth: 44, rightWidth: geometry.inspector, hasActivity: Boolean(activityDock), hasViewer: viewerOpen })
   const floatDock = !outerSidebarOpen && dockVisible && width - geometry.inspector >= FLOATING_DOCK_MIN_CLEARANCE
   const motion = useWorkSplitMotion({ rail: geometry.rail, chat: Math.max(0, geometry.chat - (dockVisible && !floatDock ? 296 : 0)), viewer: viewerOpen ? geometry.viewer : 0, inspector: geometry.inspector, dock: dockVisible ? 296 : 0 }, `${geometry.chatCollapsed}:${viewerOpen}:${inspectorOpen}:${dockVisible}:${floatDock}`)
@@ -139,6 +146,7 @@ export default function WorkPerspective({ conversationRail, conversation, activi
     }
   }
   const separator = (boundary: 'content' | 'inspector', left: number, label: string) => <div
+    ref={boundary === 'content' ? contentHandle : undefined}
     role="separator" aria-orientation="vertical" aria-label={label} aria-valuenow={Math.round(left)} aria-valuemin={0} aria-valuemax={Math.round(width)} tabIndex={0}
     className="work-split-handle absolute inset-y-0 z-50 w-2 -translate-x-1/2 cursor-col-resize touch-none hover:bg-[var(--border-strong)] focus-visible:bg-[var(--border-strong)] focus-visible:outline-none" style={{ left: Math.max(4, Math.min((width || 1600) - 4, left)) }}
     onPointerDown={event => {
@@ -166,7 +174,11 @@ export default function WorkPerspective({ conversationRail, conversation, activi
         if (boundary === 'content') expand()
         else update({ ...split, inspectorCollapsed: false })
       }
-      else update(resizeWorkSplit(geometry, split, width, event.key === 'ArrowLeft' ? -32 : 32, boundary, hasViewer))
+      else {
+        const next = resizeWorkSplit(geometry, split, width, event.key === 'ArrowLeft' ? -32 : 32, boundary, hasViewer)
+        if (boundary === 'inspector' && next.viewerCollapsed) restoreSeparatorFocus.current = true
+        update(next)
+      }
     }}
   />
   return <WorkConversationContext.Provider value={context}><div ref={root} data-studio-layout="work" data-activity-dock={dockVisible ? 'visible' : 'hidden'} data-chat-collapsed={geometry.chatCollapsed} data-dragging={dragging} className="work-perspective relative flex h-full min-h-0 overflow-hidden bg-[var(--surface-default)]"

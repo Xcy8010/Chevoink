@@ -1000,8 +1000,7 @@ export function AgentComposer({
       onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDragActive(true) }}
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragActive(false) }}
       onDrop={(event) => void handleDrop(event)}
-      data-agent-composer-dragging={dragActive || undefined}
-      className={`agent-composer-glass ${goalMode ? 'agent-composer-goal' : ''} relative z-[80] rounded-[20px] border bg-[var(--studio-composer-bg,var(--surface-default))] p-2.5 shadow-sm motion-safe:transition-[border-color,box-shadow] ${dragActive ? 'border-[var(--text-primary)]' : 'border-[var(--border-subtle)]'}`}
+      className={`agent-composer-glass ${goalMode ? 'agent-composer-goal' : ''} relative z-[80] rounded-[20px] border bg-[var(--studio-composer-bg,var(--surface-default))] p-2.5 shadow-sm transition-colors ${dragActive ? 'border-[var(--text-primary)]' : 'border-[var(--border-subtle)]'}`}
     >
       {slashVisible ? <div
         ref={slashCardRef}

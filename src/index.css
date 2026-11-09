@@ -868,9 +868,9 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
 .agent-floating-footer [data-agent-composer], .agent-floating-footer [data-agent-activity] { pointer-events: none; }
 .agent-floating-footer [data-agent-composer] > *, .agent-floating-footer .agent-activity-capsule { pointer-events: auto; }
 .agent-composer-glass { background: var(--studio-composer-bg, var(--surface-default)); }
-.agent-composer-glass:not([data-agent-composer-dragging]):has([data-agent-composer-editor]:focus) {
-  border-color: color-mix(in srgb, var(--text-secondary) 70%, var(--border-subtle));
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--text-secondary) 20%, transparent);
+[data-agent-composer-editor] {
+  caret-color: var(--text-secondary);
+  caret-animation: manual;
 }
 
 .studio-mobile-drawer-search { background: var(--surface-muted); }

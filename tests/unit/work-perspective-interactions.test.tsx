@@ -26,7 +26,11 @@ beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, 'releasePointerCapture', { configurable: true, value: vi.fn() })
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); delete document.documentElement.dataset.studioResizing })
-function move(root: Element, x: number) { fireEvent.pointerMove(root, { clientX: x }); act(() => vi.advanceTimersByTime(300)) }
+function move(root: Element, x: number) {
+  fireEvent.pointerMove(root, { clientX: x })
+  act(() => vi.advanceTimersByTime(16))
+  act(() => vi.advanceTimersByTime(240))
+}
 it('preserves a folded viewer through delayed hydration, task revisit and remount, but opens for an explicit scoped selection', () => {
   const saved = { viewer: 600, inspector: 400, viewerCollapsed: true, inspectorCollapsed: false, chatCollapsed: false }
   localStorage.setItem('chevoink:work-split-v2:task-a', JSON.stringify(saved))
@@ -62,16 +66,19 @@ it('restores A/B/A widths and explicit collapsed flags, including remount', () =
   render(<WorkPerspective {...props()} />)
   expect(screen.getByRole('button', { name: '展开检查区' })).toBeTruthy()
 })
-it('retains pointer capture through pair fold and chat fold, preserving the exact input node', () => {
+it('retains pointer capture through viewer fold and chat fold, preserving the exact input node', () => {
   const view = render(<WorkPerspective {...props()} />)
   const root = view.container.querySelector('[data-studio-layout]')!
   const input = screen.getByRole('textbox')
   fireEvent.change(input, { target: { value: '不会丢失的附件旁草稿' } })
   fireEvent.pointerDown(screen.getByRole('separator', { name: '调整查看器与对话宽度' }), { button: 0, clientX: 600 })
-  move(root, 1300)
-  expect(root.getAttribute('data-activity-dock')).toBe('visible')
+  move(root, 980)
+  expect(view.container.querySelector('[data-studio-panel="workViewer"]')?.getAttribute('aria-hidden')).toBe('true')
+  expect(view.container.querySelector<HTMLElement>('[data-studio-panel="workInspector"]')?.style.width).toBe('400px')
+  expect(screen.getByRole('button', { name: '收起检查区' })).toBeTruthy()
+  expect(root.getAttribute('data-activity-dock')).toBe('hidden')
   expect(root.getAttribute('data-dragging')).toBe('true')
-  move(root, 1270)
+  move(root, 950)
   expect(view.container.querySelector('[data-studio-panel="workViewer"]')?.getAttribute('aria-hidden')).toBe('false')
   move(root, 100)
   expect(screen.getByText('浮动输入')).toBeTruthy()
@@ -83,6 +90,32 @@ it('retains pointer capture through pair fold and chat fold, preserving the exac
   expect(view.container.querySelector('[data-studio-panel="workViewer"]')?.getAttribute('aria-hidden')).toBe('true')
   expect(root.getAttribute('data-chat-collapsed')).toBe('false')
   expect(document.documentElement.dataset.studioResizing).toBeUndefined()
+})
+it('folds the viewer by its right seam and reverses while keeping the inspector open', () => {
+  const view = render(<WorkPerspective {...props()} />)
+  const root = view.container.querySelector('[data-studio-layout]')!
+  const viewer = view.container.querySelector('[data-studio-panel="workViewer"]')!
+  const inspector = view.container.querySelector<HTMLElement>('[data-studio-panel="workInspector"]')!
+  fireEvent.pointerDown(screen.getByRole('separator', { name: '调整检查区宽度' }), { button: 0, clientX: 1200 })
+  move(root, 820)
+  expect(viewer.getAttribute('aria-hidden')).toBe('true')
+  expect(inspector.style.width).toBe('780px')
+  expect(screen.getByRole('button', { name: '收起检查区' })).toBeTruthy()
+  move(root, 650)
+  expect(inspector.style.width).toBe('780px')
+  move(root, 680)
+  expect(viewer.getAttribute('aria-hidden')).toBe('false')
+  expect(root.getAttribute('data-dragging')).toBe('true')
+  fireEvent.pointerUp(root)
+})
+it('keeps keyboard focus on the remaining seam when the right seam folds the viewer', () => {
+  const view = render(<WorkPerspective {...props()} viewerWidth={240} />)
+  const right = screen.getByRole('separator', { name: '调整检查区宽度' })
+  right.focus()
+  fireEvent.keyDown(right, { key: 'ArrowLeft' })
+  expect(view.container.querySelector('[data-studio-panel="workViewer"]')?.getAttribute('aria-hidden')).toBe('true')
+  expect(document.activeElement).toBe(screen.getByRole('separator', { name: '调整查看器与对话宽度' }))
+  expect(screen.getByRole('button', { name: '收起检查区' })).toBeTruthy()
 })
 it('resets folded conversation on task change and releases a pending gesture on blur', () => {
   const view = render(<WorkPerspective {...props()} />)
@@ -122,8 +155,8 @@ it('reverses within the same pointer capture after reaching the right edge, and 
   move(root, 1750)
   fireEvent.pointerUp(root)
   expect(viewer.getAttribute('aria-hidden')).toBe('true')
-  fireEvent.pointerDown(handle, { button: 0, clientX: 1554 })
-  move(root, 1524)
+  fireEvent.pointerDown(handle, { button: 0, clientX: 1200 })
+  move(root, 1170)
   expect(viewer.getAttribute('aria-hidden')).toBe('false')
   fireEvent.pointerCancel(root)
   expect(root.getAttribute('data-dragging')).toBe('false')
