@@ -20,7 +20,7 @@ export function fitWorkSplit(state: WorkSplit, width: number, hasViewer: boolean
 }
 
 /** Pure mapping within one open/closed phase of a gesture. */
-export function resizeWorkSplit(start: WorkSplitGeometry, previous: WorkSplit, width: number, delta: number, boundary: 'content' | 'inspector', hasViewer: boolean): WorkSplit {
+export function resizeWorkSplit(start: WorkSplitGeometry, previous: WorkSplit, width: number, delta: number, boundary: 'content' | 'inspector', hasViewer: boolean, viewerFoldResistance = WORK_SPLIT.foldResistance): WorkSplit {
   const { chat, viewer, inspector, hysteresis, foldResistance, rail, conversationRail } = WORK_SPLIT
   const viewerVisible = hasViewer && !start.viewerCollapsed
   if (boundary === 'inspector' && viewerVisible) {
@@ -28,7 +28,7 @@ export function resizeWorkSplit(start: WorkSplitGeometry, previous: WorkSplit, w
     const folded = raw < inspector + (previous.inspectorCollapsed ? hysteresis : -foldResistance)
     const combinedWidth = start.viewer + start.inspector
     const rawViewer = combinedWidth - raw
-    const foldedViewer = !folded && !start.inspectorCollapsed && rawViewer <= viewer
+    const foldedViewer = !folded && !start.inspectorCollapsed && rawViewer < viewer - viewerFoldResistance
     const nextInspector = folded ? rail : Math.max(inspector, Math.min(combinedWidth - viewer, raw))
     const nextViewer = foldedViewer ? previous.viewer : Math.max(viewer, combinedWidth - nextInspector)
     const nextChat = width - conversationRail - nextInspector - nextViewer
@@ -48,11 +48,11 @@ export function resizeWorkSplit(start: WorkSplitGeometry, previous: WorkSplit, w
   const rawViewer = startingViewer - delta
   const rawChat = width - conversationRail - fixedInspector - rawViewer
   const foldedChat = rawChat < chat + (previous.chatCollapsed ? hysteresis : -foldResistance)
-  const foldedViewer = !foldedChat && rawViewer <= viewer
+  const foldedViewer = !foldedChat && rawViewer < viewer - viewerFoldResistance
   return { viewer: foldedViewer ? previous.viewer : Math.max(viewer, rawViewer), inspector: fixedInspector, chatCollapsed: foldedChat, viewerCollapsed: foldedViewer, inspectorCollapsed: start.inspectorCollapsed }
 }
 
-export type WorkSplitGesture = { x: number; left?: number; start: WorkSplitGeometry; width: number; boundary: 'content' | 'inspector'; hasViewer: boolean }
+export type WorkSplitGesture = { x: number; left?: number; start: WorkSplitGeometry; width: number; boundary: 'content' | 'inspector'; hasViewer: boolean; reopenViewerFrom?: number }
 
 /** Ordinary resizing is 1:1; near an edge, fit the shrink + resistance distance
  * into the available pointer travel so another fold never requires leaving the window. */
@@ -65,7 +65,7 @@ function boundedDragDelta(gesture: WorkSplitGesture, x: number): number {
   const available = delta >= 0 ? (gesture.left ?? 0) + width - 4 - gesture.x : gesture.x - (gesture.left ?? 0) - 4
   if (shrinkingViewer) {
     if (boundary === 'content' ? start.chatCollapsed : start.inspectorCollapsed) return delta
-    return delta * Math.max(1, (Math.max(0, start.viewer - viewer) + 2) / Math.max(1, available))
+    return delta * Math.max(1, (Math.max(0, start.viewer - viewer) + foldResistance + 2) / Math.max(1, available))
   }
   if (start.chatCollapsed || (delta >= 0 ? start.inspectorCollapsed : viewerVisible && boundary === 'inspector')) return delta
   const free = delta >= 0 ? start.inspector - inspector : start.chat - chat
@@ -74,9 +74,21 @@ function boundedDragDelta(gesture: WorkSplitGesture, x: number): number {
 
 /** Re-anchor at a fold and follow overshoot, so reversal never has to retrace dead travel. */
 export function advanceWorkSplitGesture(gesture: WorkSplitGesture, previous: WorkSplit, x: number): WorkSplit {
-  const next = resizeWorkSplit(gesture.start, previous, gesture.width, boundedDragDelta(gesture, x), gesture.boundary, gesture.hasViewer)
-  const changed = next.chatCollapsed !== previous.chatCollapsed || next.viewerCollapsed !== previous.viewerCollapsed || next.inspectorCollapsed !== previous.inspectorCollapsed
   const viewerVisible = gesture.hasViewer && !gesture.start.viewerCollapsed
+  const reversal = (gesture.reopenViewerFrom ?? x) - x
+  let next: WorkSplit
+  if (reversal > WORK_SPLIT.hysteresis) {
+    next = { ...previous, viewer: WORK_SPLIT.viewer + reversal, viewerCollapsed: false }
+    gesture.reopenViewerFrom = undefined
+  } else {
+    // Only the same capture of the viewer's left seam can reverse its fold.
+    if (reversal > 0) return previous
+    next = resizeWorkSplit(gesture.start, previous, gesture.width, boundedDragDelta(gesture, x), gesture.boundary, gesture.hasViewer)
+    if (gesture.reopenViewerFrom !== undefined || (viewerVisible && gesture.boundary === 'content' && next.viewerCollapsed)) {
+      gesture.reopenViewerFrom = x
+    }
+  }
+  const changed = next.chatCollapsed !== previous.chatCollapsed || next.viewerCollapsed !== previous.viewerCollapsed || next.inspectorCollapsed !== previous.inspectorCollapsed
   const foldedTowardLeft = viewerVisible && gesture.boundary === 'inspector' ? next.viewerCollapsed : next.chatCollapsed
   const foldedTowardRight = viewerVisible && gesture.boundary === 'content' ? next.viewerCollapsed : next.inspectorCollapsed
   if (changed || foldedTowardLeft && x < gesture.x || foldedTowardRight && x > gesture.x) {

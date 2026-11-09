@@ -31,7 +31,7 @@ function restoreSplit(scope: string | undefined, fallback: WorkSplit): WorkSplit
   } catch { /* Optional preferences. */ }
   return fallback
 }
-type Gesture = WorkSplitGesture & { pointer: number }
+type Gesture = WorkSplitGesture & { pointer: number; outerSidebar: 'open' | 'closed' | 'folded' }
 
 export default function WorkPerspective({ conversationRail, conversation, activityDock, inspector, viewer, scopeKey, outerSidebarOpen = true, onOuterSidebarOpenChange, rightOpen, inspectorWidth, viewerWidth, onToggleRight, onSelectInspectorTab }: Props) {
   const root = useRef<HTMLDivElement>(null)
@@ -108,8 +108,12 @@ export default function WorkPerspective({ conversationRail, conversation, activi
     const previous = splitRef.current
     const next = advanceWorkSplitGesture(gesture, previous, pendingX.current)
     update(next)
-    if (next.chatCollapsed && !previous.chatCollapsed && (!gesture.hasViewer || next.viewerCollapsed)) {
+    if (next.chatCollapsed && !previous.chatCollapsed && (!gesture.hasViewer || next.viewerCollapsed) && gesture.outerSidebar === 'open') {
+      gesture.outerSidebar = 'folded'
       onOuterSidebarOpenChange?.(false)
+    } else if (!next.chatCollapsed && previous.chatCollapsed && gesture.outerSidebar === 'folded') {
+      gesture.outerSidebar = 'open'
+      onOuterSidebarOpenChange?.(true)
     }
     pendingX.current = null
   }, [onOuterSidebarOpenChange, update])
@@ -167,7 +171,7 @@ export default function WorkPerspective({ conversationRail, conversation, activi
       if (viewerNode && !start.viewerCollapsed) start.viewer = viewerNode.getBoundingClientRect().width
       if (inspectorNode && !start.inspectorCollapsed) start.inspector = inspectorNode.getBoundingClientRect().width
       start.chat = start.chatCollapsed ? 0 : measured - start.rail - start.viewer - start.inspector
-      drag.current = { x: event.clientX, left: bounds.left, start, width: measured, boundary, pointer: event.pointerId, hasViewer }
+      drag.current = { x: event.clientX, left: bounds.left, start, width: measured, boundary, pointer: event.pointerId, hasViewer, outerSidebar: outerSidebarOpen ? 'open' : 'closed' }
       root.current.setPointerCapture(event.pointerId)
       document.documentElement.dataset.studioResizing = 'true'
       setDragging(true)
@@ -181,7 +185,7 @@ export default function WorkPerspective({ conversationRail, conversation, activi
         else update({ ...split, inspectorCollapsed: false })
       }
       else {
-        const next = resizeWorkSplit(geometry, split, width, event.key === 'ArrowLeft' ? -32 : 32, boundary, hasViewer)
+        const next = resizeWorkSplit(geometry, split, width, event.key === 'ArrowLeft' ? -32 : 32, boundary, hasViewer, 0)
         if (boundary === 'inspector' && next.viewerCollapsed) restoreSeparatorFocus.current = true
         update(next)
       }
