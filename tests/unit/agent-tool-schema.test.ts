@@ -180,16 +180,16 @@ describe('tool schema provider contract', () => {
     expect(originalToolParameterSchemas(researchReportSaveTool, { novelId: 'n' })).toContainEqual(previous)
     expect(previous.required).toEqual(['title', 'expectedRevision', 'section'])
   })
-  it('keeps historical nested proof data parseable while current continuity presentation requires only current source identifiers', () => {
+  it('keeps historical nested proof data parseable while the current continuity tool accepts source identifiers and the read-only option', () => {
     const legacyCandidate = terminalCandidateSchema.extend({ inheritedProofs: z.array(z.string().regex(/^[a-f0-9]{64}$/u)).optional() })
     const original = toOpenAIParameters(z.object({ terminalState: legacyCandidate.optional()
       .describe('写作交付前要提交的真实章末状态 {exitState,lastUnfinishedAction}；须在本次独立检查前给出。不能从场景计划抄事实，缺失信息保持未知。提交必须与此候选一致；单独审阅既有章省略。') }))
     const hash = runtimeJson(original).hash
     const current = toOpenAITools([continuityValidateTool], { novelId: 'n' })[0].function.parameters
-    expect(Object.keys(current.properties as object).sort()).toEqual(['chapterId', 'compilationId', 'focus'])
+    expect(Object.keys(current.properties as object).sort()).toEqual(['chapterId', 'compilationId', 'focus', 'readOnly'])
     expect(current).not.toHaveProperty('properties.terminalState')
     expect(continuityValidateTool.parameters.safeParse({ chapterId: 'chapter' }).success).toBe(true)
-    expect(continuityValidateTool.parameters.safeParse({ compilationId: 'comp' }).success).toBe(true)
+    expect(continuityValidateTool.parameters.parse({ compilationId: 'comp', readOnly: true })).toEqual({ compilationId: 'comp', readOnly: true })
     const parsed = legacyCandidate.parse({ exitState: {}, inheritedProofs: ['a'.repeat(64)] })
     expect(parsed.inheritedProofs).toEqual(['a'.repeat(64)])
     expect(runtimeJson(original).hash).toBe(hash)

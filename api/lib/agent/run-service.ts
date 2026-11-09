@@ -417,7 +417,8 @@ export async function startLoopRunLocked(
     const selected = await resolveAssignedModel(userId, agentModelSelectionSchema.parse(assigned))
     input = { ...input, ...selected.selection }
   }
-  input = { ...input, creativeFreedom: input.creativeFreedom ?? DEFAULT_CREATIVE_FREEDOM, ...(modelAssignments ? { modelAssignments } : {}) }
+  input = { ...input, ...(modelAssignments ? { modelAssignments } : {}) }
+  const creativeFreedom = input.creativeFreedom ?? DEFAULT_CREATIVE_FREEDOM
   if (!input.modelSelectionExplicit && (!input.modelTier || input.modelTier === 'speed') && !options.queuedRequest && !options.goal) {
     input = { ...input, modelTier: await freshSystemModelTier('speed') as CreditModelTier }
   }
@@ -483,8 +484,6 @@ export async function startLoopRunLocked(
       status: 'queued',
       engine: 'loop',
       inputSummary: input.prompt.slice(0, 300),
-      startRequest: JSON.parse(JSON.stringify({ ...(options.humanOrigin === 'http' && !options.goal && options.concurrencyScope !== 'orchestration'
-        ? withHumanAdmission(input) : input), ...(authorSteering ? { authorSteering } : {}) })) as Prisma.InputJsonValue,
       modelTier,
       modelConfigId: modelRuntime.modelConfigId, modelConfigRevision: modelRuntime.modelConfigRevision,
       modelPriceSnapshot: modelRuntime.tokenPrice ?? tokenPriceSchema.parse({ version: 'credits-v1-exact', modelTier, multiplierBps: modelRuntime.multiplierBps }),
@@ -543,7 +542,12 @@ export async function startLoopRunLocked(
     const durablePrevious = previousRun?.runtimeProtocolVersion === 1 && previousRun.taskRootId ? previousRun : null
     initializeGoalDurable = Boolean(durablePrevious && durablePrevious.status === 'completed')
     const previousSpec = initializeGoalDurable ? null : previousRun?.taskSpec
-    let created = await tx.agentRun.create({ ...runData, data: { ...runData.data, manuscriptRevision: manuscript.manuscriptRevision } })
+    // A first goal's saved start must still match its authenticated creation
+    // options. Its effective default belongs in the frozen task contract.
+    const startInput = freshGoal ? input : { ...input, creativeFreedom }
+    const startRequest = JSON.parse(JSON.stringify({ ...(options.humanOrigin === 'http' && !options.goal && options.concurrencyScope !== 'orchestration'
+      ? withHumanAdmission(startInput) : startInput), ...(authorSteering ? { authorSteering } : {}) })) as Prisma.InputJsonValue
+    let created = await tx.agentRun.create({ ...runData, data: { ...runData.data, startRequest, manuscriptRevision: manuscript.manuscriptRevision } })
     if (previousSpec && typeof previousSpec === 'object' && !Array.isArray(previousSpec)) {
       const inherited = taskSpecSchema.safeParse(previousSpec)
       created = await tx.agentRun.update({ where: { id: created.id }, data: {
@@ -574,7 +578,7 @@ export async function startLoopRunLocked(
         terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2,
         researchAdmission, researchNavigationAdmission: researchAdmission, networkAdmission, authorWritingProtocol: 2, novelInitializationProtocol: 1, novelInitializationTarget: manuscript.chapterCount === 0 && manuscript.wordCount === 0
           && (!manuscript.summary.trim() || !manuscript.displayTitle?.trim() && manuscript.summary === '先创建一部作品，再继续完善简介、章节和封面。')
-          && manuscript.tagNames.length === 0 ? 'empty' : 'existing', volumeCreationProtocol: 1, volumeCreateIntent, creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
+          && manuscript.tagNames.length === 0 ? 'empty' : 'existing', volumeCreationProtocol: 1, volumeCreateIntent, creativeFreedom, qualityMode: input.qualityMode })
       if (input.agentWritingProtocol === 1 && options.humanOrigin === 'http' && !options.goal && !session.spawnedFromRunId
         && (input.agentProfile ?? 'orchestrator') === 'orchestrator') {
         if (input.mode !== 'build') throw new DataAccessError(400, 'INVALID_ARGUMENTS', '正文任务解释只适用于创作模式。')
@@ -678,7 +682,7 @@ export async function startLoopRunLocked(
     prompt: input.prompt,
     selection: input.selection ?? null,
     attachments: input.attachments ?? [],
-    creativeFreedom: input.creativeFreedom,
+    creativeFreedom,
     qualityMode: input.qualityMode ?? 'premium',
     modelTier,
     customModelId: modelTier === 'custom' ? input.customModelId : null,

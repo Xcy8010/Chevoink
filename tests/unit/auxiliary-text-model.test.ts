@@ -80,7 +80,7 @@ describe('auxiliary text model inheritance', () => {
     expect(result.output).toContain('绑定 r4，状态=needs_repair')
     expect(result.output).toContain('不能宣称质量检查通过')
     expect(result.output).toContain('不要求为清零意见改稿')
-    expect(result.output).toContain('修订须由原始请求明确授权')
+    expect(result.output).toContain('修订须在原任务可写范围内')
     expect(result.output).toContain('"currentEvidence":true')
   })
   it.each(['lite', 'custom', 'speed'] as const)('preserves the full %s runtime when the selected model is free', tier => {

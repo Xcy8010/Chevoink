@@ -233,6 +233,8 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
       await superviseAgentGoal(f.userId, f.sessionId, goal.id)
       const original = await prisma.agentRun.findFirstOrThrow({ where: { goalExecution: { goalId: goal.id } } })
       expect(original.runtimeProtocolVersion).toBe(1)
+      expect(original.startRequest).not.toHaveProperty('creativeFreedom')
+      expect(original.taskSpec).toMatchObject({ creativeFreedom: 'stable' })
       const budget = await prisma.agentTaskBudget.findUniqueOrThrow({ where: { taskRootId: original.taskRootId! } })
       if (scenario === 'bootstrap-error') {
         vi.mocked(context.assembleContext).mockRejectedValueOnce(new Error('synthetic initialization failure'))

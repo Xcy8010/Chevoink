@@ -244,7 +244,7 @@ async function finishQualityReviewResult(ctx: ToolContext, report: QualityReport
         summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
     }
   }
-  const reason = !automatic ? '本次只保存检查意见，正文未改动'
+  const reason = !automatic ? '本次只保存检查意见，正文未改动；修订须在原任务可写范围内'
     : pending.length ? '自动修订已尝试、报告不属于当前修订任务或没有待处理的安全候选；剩余意见仍保留待审'
       : advisoryCount ? '建议已保存在报告中，可按需要查看' : '未发现有证据的问题'
   return { output: `质量报告 ${report.id}${cached ? '已复用' : '已完成'}，绑定 r${report.chapterRevision}，状态=${report.status}：${warningCount} 个需关注、${advisoryCount} 个建议。${reason}，不重复调用模型；工具执行成功只表示报告已取得，${report.findings.length ? '检查完成仍有意见，不能宣称全部建议已应用或全部问题已解决；剩余意见保留待审，不要求为清零意见改稿' : '本次完整检查未发现有证据的问题'}。${report.status === 'needs_repair' ? '不能宣称质量检查通过。' : ''}${decisionGuidance}${bindingSuffix}\n${renderQualityReportFindings(report)}`,
