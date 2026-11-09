@@ -1,4 +1,4 @@
-import { CREATIVE_FREEDOM_LABELS } from '../../../../../shared/contracts/agent-window-configuration.js'
+import { CREATIVE_FREEDOM_COMMON_DESCRIPTION, CREATIVE_FREEDOM_DESCRIPTIONS, CREATIVE_FREEDOM_LABELS } from '../../../../../shared/contracts/agent-window-configuration.js'
 import { ModelActivityBadge, ModelPriceDetails, ModelPriceSummary } from '../../components/ModelPriceDetails'
 import {
   useEffect,
@@ -114,9 +114,9 @@ type ParsedComposerContent = {
 }
 
 const CREATIVE_MODES: Array<{ value: CreativeFreedom; label: string; description: string; icon: typeof Feather }> = [
-  { value: 'stable', label: CREATIVE_FREEDOM_LABELS.stable, description: '默认。适合日常写作、续写与修改，延续作品设定和作者文风。', icon: Scale },
-  { value: 'balanced', label: CREATIVE_FREEDOM_LABELS.balanced, description: '强化因果与连续性，在本任务可写范围内直接落实有依据的修订。', icon: Feather },
-  { value: 'bold', label: '大胆创作', description: '适合试新场景和新结构，报告只提示不自动改写。', icon: Rocket },
+  { value: 'stable', label: CREATIVE_FREEDOM_LABELS.stable, description: CREATIVE_FREEDOM_DESCRIPTIONS.stable, icon: Scale },
+  { value: 'balanced', label: CREATIVE_FREEDOM_LABELS.balanced, description: CREATIVE_FREEDOM_DESCRIPTIONS.balanced, icon: Feather },
+  { value: 'bold', label: CREATIVE_FREEDOM_LABELS.bold, description: CREATIVE_FREEDOM_DESCRIPTIONS.bold, icon: Rocket },
 ]
 
 const REASONING_ORDER: ModelReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
@@ -1168,7 +1168,8 @@ export function AgentComposer({
               <span className="max-w-16 truncate mobile:hidden">{CREATIVE_MODES.find((item) => item.value === creativeFreedom)?.label}</span>
               <ChevronDown className="h-3 w-3 transition-transform group-open/mode:rotate-180" />
             </summary>
-            <div className="absolute bottom-full left-0 z-50 mb-2 w-64 overflow-hidden rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_14px_34px_rgba(15,23,42,0.16)] motion-safe:origin-bottom-left motion-safe:animate-[agent-menu-in_150ms_cubic-bezier(0.2,0.8,0.2,1)]">
+            <div className="absolute bottom-full left-0 z-50 mb-2 max-h-[60dvh] w-64 overflow-y-auto overscroll-contain rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_14px_34px_rgba(15,23,42,0.16)] motion-safe:origin-bottom-left motion-safe:animate-[agent-menu-in_150ms_cubic-bezier(0.2,0.8,0.2,1)]">
+              <p className="border-b border-[var(--border-subtle)] px-3 py-2 text-[10px] leading-4 text-[var(--text-tertiary)]">{CREATIVE_FREEDOM_COMMON_DESCRIPTION}</p>
               {CREATIVE_MODES.map((mode) => (
                 <button
                   key={mode.value}
@@ -1179,7 +1180,7 @@ export function AgentComposer({
                     creativeModeRef.current?.removeAttribute('open')
                   }}
                   aria-pressed={mode.value === creativeFreedom}
-                  className={`flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors first:rounded-t-[11px] last:rounded-b-[11px] ${mode.value === creativeFreedom ? 'bg-[var(--surface-muted)]' : 'bg-[var(--surface-default)] hover:bg-[var(--surface-muted)]'}`}
+                  className={`flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors ${mode.value === creativeFreedom ? 'bg-[var(--surface-muted)]' : 'bg-[var(--surface-default)] hover:bg-[var(--surface-muted)]'}`}
                 >
                   <mode.icon className={cn('mt-0.5 h-4 w-4 shrink-0', mode.value === 'bold' ? 'text-orange-600 dark:text-orange-400' : 'text-[var(--text-secondary)]')} />
                   <span className="min-w-0"><span className={cn('block text-xs font-medium', mode.value === 'bold' ? 'text-orange-600 dark:text-orange-400' : 'text-[var(--text-primary)]')}>{mode.label}</span><span className="mt-0.5 block text-[10px] leading-4 text-[var(--text-tertiary)]">{mode.description}</span></span>

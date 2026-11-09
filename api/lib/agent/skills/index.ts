@@ -362,8 +362,8 @@ const legacySkillAliases: Record<string, string> = {
 }
 
 function freedomGuidance(freedom: CreativeFreedom): string {
-  if (freedom === 'stable') return `创作模式：${CREATIVE_FREEDOM_LABELS.stable}。常规写作、续写与修改，延续已确立的文风、人物轨迹与段落节奏。`
-  if (freedom === 'bold') return '创作模式：大胆探索。允许明显的场景、结构和表达创新，优先打开新可能；核心设定和不可逆剧情仍服从作者与故事事实，质量报告只提示不自动改写。'
+  if (freedom === 'stable') return `创作模式：${CREATIVE_FREEDOM_LABELS.stable}。兼顾情节推进、表达和一致性。按作者要求建立新作品的基调，或延续已有作品的文风、人物轨迹与段落节奏。`
+  if (freedom === 'bold') return `创作模式：${CREATIVE_FREEDOM_LABELS.bold}。主动尝试更鲜明的场景、视角和结构，核心设定和不可逆剧情仍服从作者与故事事实。作者要求写正文时交付完整正文，质量报告只提示不自动改写。`
   return '创作模式：严谨创作。守住人物知识、因果、时空和已确立世界规则，服从本次作者类型与情绪承诺；严谨不等于克制。按原写作请求完成最终版本的连续性与人类感检查；使用付费修订工具时集中做一次有界自动修订，普通正文工具可在原授权内连续修改，可写章节内直接应用有明确依据的局部修法，无需逐项确认；只看不改和改后只读复核时传 readOnly=true。相关修法优先合并，保留真实剩余意见，不扩大任务范围。'
 }
 

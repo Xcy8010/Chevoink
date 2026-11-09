@@ -1,4 +1,4 @@
-import { CREATIVE_FREEDOM_LABELS } from '../../../../shared/contracts/agent-window-configuration.js'
+import { CREATIVE_FREEDOM_COMMON_DESCRIPTION, CREATIVE_FREEDOM_DESCRIPTIONS, CREATIVE_FREEDOM_LABELS } from '../../../../shared/contracts/agent-window-configuration.js'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -132,9 +132,9 @@ const SECTION_META: Record<StudioSettingsSection, { title: string; description: 
 }
 
 const FREEDOM_OPTIONS = [
-  { value: 'stable', label: CREATIVE_FREEDOM_LABELS.stable, description: '默认。适合日常写作、续写与修改，延续作品设定和作者文风。' },
-  { value: 'balanced', label: CREATIVE_FREEDOM_LABELS.balanced, description: '强化因果与连续性，在本任务可写范围内直接落实有依据的修订。' },
-  { value: 'bold', label: CREATIVE_FREEDOM_LABELS.bold, description: '允许更明显的结构、节奏和表达变化。' },
+  { value: 'stable', label: CREATIVE_FREEDOM_LABELS.stable, description: CREATIVE_FREEDOM_DESCRIPTIONS.stable },
+  { value: 'balanced', label: CREATIVE_FREEDOM_LABELS.balanced, description: CREATIVE_FREEDOM_DESCRIPTIONS.balanced },
+  { value: 'bold', label: CREATIVE_FREEDOM_LABELS.bold, description: CREATIVE_FREEDOM_DESCRIPTIONS.bold },
 ] as const
 
 type CreativeFreedom = typeof FREEDOM_OPTIONS[number]['value']
@@ -660,6 +660,7 @@ function WritingPanel(props: Props) {
   return (
     <div className="space-y-7">
       <SettingsGroup title={`当前窗口的创作模式（${preferences.title || props.taskTitle || '新任务'}）`}>
+        <p className="mb-3 text-xs leading-5 text-[var(--text-secondary)]">{CREATIVE_FREEDOM_COMMON_DESCRIPTION}</p>
         {preferences.error ? <p role="alert" className="py-2 text-xs text-rose-500">{preferences.error}</p> : null}
         <div className="divide-y divide-[var(--border-subtle)] border-y border-[var(--border-subtle)]">
           {FREEDOM_OPTIONS.map((option) => (

@@ -600,6 +600,19 @@ describe('Agent 3.0 Story Compiler 契约', () => {
     expect(commit?.parameters.safeParse({}).success).toBe(true)
   })
 
+  it.each([
+    ['stable', '平衡创作'], ['balanced', '严谨创作'], ['bold', '大胆创作'],
+  ] as const)('keeps creation and first-chapter writing available in %s guidance', (creativeFreedom, label) => {
+    const request = '创建一部悬疑小说并写第一章正文。'
+    const spec = buildTaskSpec({ runId: 'new-work', novelId: 'novel', chapterId: null, prompt: request, creativeFreedom })
+    for (const task of [spec, enableAgentWritingScope(spec)]) {
+      const text = renderTaskSpec(task)
+      expect(text).toContain(`创作模式：${label}`)
+      expect(text).toContain('均可按作者要求创建作品、写正文、续写和改稿')
+      expect(text).toContain(request)
+    }
+  })
+
   it.each([true, false])('injects strict revision guidance with and without an optional writing plan (unbound=%s)', unbound => {
     const request = '只看不改，帮我检查本章。'
     const spec = buildTaskSpec({ runId: 'strict', novelId: 'novel', chapterId: 'chapter', prompt: request, creativeFreedom: 'balanced' })
