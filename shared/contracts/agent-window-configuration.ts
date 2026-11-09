@@ -4,11 +4,10 @@ import type { CreativeFreedom } from './agent-events.js'
 
 export const DEFAULT_CREATIVE_FREEDOM = 'stable' satisfies CreativeFreedom
 export const CREATIVE_FREEDOM_LABELS = { stable: '平衡创作', balanced: '严谨创作', bold: '大胆创作' } satisfies Record<CreativeFreedom, string>
-export const CREATIVE_FREEDOM_COMMON_DESCRIPTION = '三种模式均支持创建作品、写正文、续写和改稿。创作范围以你的要求为准。'
 export const CREATIVE_FREEDOM_DESCRIPTIONS = {
-  stable: '默认。兼顾情节推进、表达和一致性。复查意见保留在报告中。',
-  balanced: '细查因果、人物与设定，在可写范围内直接修订有明确依据的问题。',
-  bold: '主动尝试更鲜明的场景、视角和结构。复查意见保留在报告中。',
+  stable: '默认。兼顾情节、节奏和文风。',
+  balanced: '细查因果和设定，直接修正明确问题。',
+  bold: '尝试新视角、新场景和新写法。',
 } satisfies Record<CreativeFreedom, string>
 
 export const agentWindowConfigurationSchema = z.object({

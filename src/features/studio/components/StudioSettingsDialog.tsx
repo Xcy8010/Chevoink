@@ -1,4 +1,4 @@
-import { CREATIVE_FREEDOM_COMMON_DESCRIPTION, CREATIVE_FREEDOM_DESCRIPTIONS, CREATIVE_FREEDOM_LABELS } from '../../../../shared/contracts/agent-window-configuration.js'
+import { CREATIVE_FREEDOM_DESCRIPTIONS, CREATIVE_FREEDOM_LABELS } from '../../../../shared/contracts/agent-window-configuration.js'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -660,13 +660,12 @@ function WritingPanel(props: Props) {
   return (
     <div className="space-y-7">
       <SettingsGroup title={`当前窗口的创作模式（${preferences.title || props.taskTitle || '新任务'}）`}>
-        <p className="mb-3 text-xs leading-5 text-[var(--text-secondary)]">{CREATIVE_FREEDOM_COMMON_DESCRIPTION}</p>
         {preferences.error ? <p role="alert" className="py-2 text-xs text-rose-500">{preferences.error}</p> : null}
         <div className="divide-y divide-[var(--border-subtle)] border-y border-[var(--border-subtle)]">
           {FREEDOM_OPTIONS.map((option) => (
             <button key={option.value} type="button" disabled={preferences.loading} onClick={() => updateFreedom(option.value)} className="flex w-full items-center gap-4 py-4 text-left disabled:opacity-50">
               <span className={cn('h-4 w-4 shrink-0 rounded-full border', creativeFreedom === option.value ? 'border-[5px] border-[var(--text-primary)]' : 'border-[var(--border-strong)]')} />
-              <span className="min-w-0 flex-1"><span className="block text-sm font-medium">{option.label}</span><span className="mt-1 block text-xs leading-5 text-[var(--text-tertiary)]">{option.description}</span></span>
+              <span className="min-w-0 flex-1"><span className="block text-sm font-medium">{option.label}</span><span className="mt-1 block text-xs leading-5 text-[var(--text-secondary)]">{option.description}</span></span>
             </button>
           ))}
         </div>

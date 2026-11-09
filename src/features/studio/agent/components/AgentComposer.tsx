@@ -1,4 +1,4 @@
-import { CREATIVE_FREEDOM_COMMON_DESCRIPTION, CREATIVE_FREEDOM_DESCRIPTIONS, CREATIVE_FREEDOM_LABELS } from '../../../../../shared/contracts/agent-window-configuration.js'
+import { CREATIVE_FREEDOM_DESCRIPTIONS, CREATIVE_FREEDOM_LABELS } from '../../../../../shared/contracts/agent-window-configuration.js'
 import { ModelActivityBadge, ModelPriceDetails, ModelPriceSummary } from '../../components/ModelPriceDetails'
 import {
   useEffect,
@@ -1169,7 +1169,6 @@ export function AgentComposer({
               <ChevronDown className="h-3 w-3 transition-transform group-open/mode:rotate-180" />
             </summary>
             <div className="absolute bottom-full left-0 z-50 mb-2 max-h-[60dvh] w-64 overflow-y-auto overscroll-contain rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_14px_34px_rgba(15,23,42,0.16)] motion-safe:origin-bottom-left motion-safe:animate-[agent-menu-in_150ms_cubic-bezier(0.2,0.8,0.2,1)]">
-              <p className="border-b border-[var(--border-subtle)] px-3 py-2 text-[10px] leading-4 text-[var(--text-tertiary)]">{CREATIVE_FREEDOM_COMMON_DESCRIPTION}</p>
               {CREATIVE_MODES.map((mode) => (
                 <button
                   key={mode.value}
@@ -1183,7 +1182,7 @@ export function AgentComposer({
                   className={`flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors ${mode.value === creativeFreedom ? 'bg-[var(--surface-muted)]' : 'bg-[var(--surface-default)] hover:bg-[var(--surface-muted)]'}`}
                 >
                   <mode.icon className={cn('mt-0.5 h-4 w-4 shrink-0', mode.value === 'bold' ? 'text-orange-600 dark:text-orange-400' : 'text-[var(--text-secondary)]')} />
-                  <span className="min-w-0"><span className={cn('block text-xs font-medium', mode.value === 'bold' ? 'text-orange-600 dark:text-orange-400' : 'text-[var(--text-primary)]')}>{mode.label}</span><span className="mt-0.5 block text-[10px] leading-4 text-[var(--text-tertiary)]">{mode.description}</span></span>
+                  <span className="min-w-0"><span className={cn('block text-xs font-medium', mode.value === 'bold' ? 'text-orange-600 dark:text-orange-400' : 'text-[var(--text-primary)]')}>{mode.label}</span><span className="mt-0.5 block text-[11px] leading-4 text-[var(--text-secondary)]">{mode.description}</span></span>
                 </button>
               ))}
             </div>
