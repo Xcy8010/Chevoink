@@ -94,9 +94,8 @@ it('reopens the viewer on a same-drag reversal without replacing the draft input
   fireEvent.pointerUp(root)
   expect(document.documentElement.dataset.studioResizing).toBeUndefined()
 })
-it('folds the left sidebar and restores it on a same-drag reversal from the viewer right seam', () => {
-  const onOuterSidebarOpenChange = vi.fn()
-  const view = render(<WorkPerspective {...props()} onOuterSidebarOpenChange={onOuterSidebarOpenChange} />)
+it('folds and restores the conversation on a same-drag reversal from the viewer right seam', () => {
+  const view = render(<WorkPerspective {...props()} />)
   const root = view.container.querySelector('[data-studio-layout]')!
   const viewer = view.container.querySelector('[data-studio-panel="workViewer"]')!
   const inspector = view.container.querySelector<HTMLElement>('[data-studio-panel="workInspector"]')!
@@ -112,10 +111,8 @@ it('folds the left sidebar and restores it on a same-drag reversal from the view
   expect(inspector.style.width).toBe('950px')
   move(root, 90)
   expect(root.getAttribute('data-chat-collapsed')).toBe('true')
-  expect(onOuterSidebarOpenChange).toHaveBeenNthCalledWith(1, false)
   move(root, 210)
   expect(root.getAttribute('data-chat-collapsed')).toBe('false')
-  expect(onOuterSidebarOpenChange).toHaveBeenNthCalledWith(2, true)
   expect(viewer.getAttribute('aria-hidden')).toBe('true')
   expect(root.getAttribute('data-dragging')).toBe('true')
   fireEvent.pointerUp(root)
@@ -151,9 +148,8 @@ it.each(['viewer', 'inspector', 'both'] as const)('restores the same conversatio
   expect(screen.getByText('完整会话')).toBeTruthy()
   expect(screen.getByRole('textbox')).toBe(input)
 })
-it('folds the conversation and left sidebar on a fresh inspector drag while leaving the viewer closed', () => {
-  const onOuterSidebarOpenChange = vi.fn()
-  const view = render(<WorkPerspective {...props()} onOuterSidebarOpenChange={onOuterSidebarOpenChange} />)
+it('folds the conversation on a fresh inspector drag while leaving the viewer closed', () => {
+  const view = render(<WorkPerspective {...props()} />)
   const root = view.container.querySelector('[data-studio-layout]')!
   const viewer = view.container.querySelector('[data-studio-panel="workViewer"]')!
   const handle = screen.getByRole('separator', { name: '调整查看器与对话宽度' })
@@ -164,18 +160,14 @@ it('folds the conversation and left sidebar on a fresh inspector drag while leav
   move(root, 1170)
   expect(viewer.getAttribute('aria-hidden')).toBe('true')
   expect(view.container.querySelector<HTMLElement>('[data-studio-panel="workInspector"]')?.style.width).toBe('430px')
-  expect(onOuterSidebarOpenChange).not.toHaveBeenCalled()
   move(root, 250)
   expect(root.getAttribute('data-chat-collapsed')).toBe('true')
   expect(screen.getByText('rail').getAttribute('aria-hidden')).toBe('true')
   expect(viewer.getAttribute('aria-hidden')).toBe('true')
-  expect(onOuterSidebarOpenChange).toHaveBeenCalledExactlyOnceWith(false)
   fireEvent.pointerUp(root)
-  view.rerender(<WorkPerspective {...props()} outerSidebarOpen={false} onOuterSidebarOpenChange={onOuterSidebarOpenChange} />)
   fireEvent.pointerDown(handle, { button: 0, clientX: 4 })
   move(root, 125)
   expect(root.getAttribute('data-chat-collapsed')).toBe('false')
-  expect(onOuterSidebarOpenChange).toHaveBeenCalledTimes(1)
   expect(viewer.getAttribute('aria-hidden')).toBe('true')
   fireEvent.pointerUp(root)
   act(() => openWorkDocument('task-a'))

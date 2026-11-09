@@ -52,7 +52,7 @@ export function resizeWorkSplit(start: WorkSplitGeometry, previous: WorkSplit, w
   return { viewer: foldedViewer ? previous.viewer : Math.max(viewer, rawViewer), inspector: fixedInspector, chatCollapsed: foldedChat, viewerCollapsed: foldedViewer, inspectorCollapsed: start.inspectorCollapsed }
 }
 
-export type WorkSplitGesture = { x: number; left?: number; start: WorkSplitGeometry; width: number; boundary: 'content' | 'inspector'; hasViewer: boolean; reopenViewerFrom?: number }
+export type WorkSplitGesture = { x: number; left?: number; start: WorkSplitGeometry; width: number; boundary: 'content' | 'inspector'; hasViewer: boolean; viewerFold?: { x: number; inspectorOpen: boolean } }
 
 /** Ordinary resizing is 1:1; near an edge, fit the shrink + resistance distance
  * into the available pointer travel so another fold never requires leaving the window. */
@@ -75,17 +75,25 @@ function boundedDragDelta(gesture: WorkSplitGesture, x: number): number {
 /** Re-anchor at a fold and follow overshoot, so reversal never has to retrace dead travel. */
 export function advanceWorkSplitGesture(gesture: WorkSplitGesture, previous: WorkSplit, x: number): WorkSplit {
   const viewerVisible = gesture.hasViewer && !gesture.start.viewerCollapsed
-  const reversal = (gesture.reopenViewerFrom ?? x) - x
+  const { viewerFold } = gesture
+  const reversal = (viewerFold?.x ?? x) - x
   let next: WorkSplit
-  if (reversal > WORK_SPLIT.hysteresis) {
-    next = { ...previous, viewer: WORK_SPLIT.viewer + reversal, viewerCollapsed: false }
-    gesture.reopenViewerFrom = undefined
+  if (viewerFold && reversal > WORK_SPLIT.hysteresis) {
+    const reopenInspector = viewerFold.inspectorOpen && previous.inspectorCollapsed
+    next = {
+      ...previous,
+      viewer: WORK_SPLIT.viewer + reversal,
+      viewerCollapsed: false,
+      ...(reopenInspector ? { inspector: WORK_SPLIT.inspector, inspectorCollapsed: false } : {}),
+    }
+    gesture.viewerFold = undefined
   } else {
     // Only the same capture of the viewer's left seam can reverse its fold.
     if (reversal > 0) return previous
     next = resizeWorkSplit(gesture.start, previous, gesture.width, boundedDragDelta(gesture, x), gesture.boundary, gesture.hasViewer)
-    if (gesture.reopenViewerFrom !== undefined || (viewerVisible && gesture.boundary === 'content' && next.viewerCollapsed)) {
-      gesture.reopenViewerFrom = x
+    if (viewerFold) viewerFold.x = x
+    else if (viewerVisible && gesture.boundary === 'content' && next.viewerCollapsed) {
+      gesture.viewerFold = { x, inspectorOpen: !next.inspectorCollapsed }
     }
   }
   const changed = next.chatCollapsed !== previous.chatCollapsed || next.viewerCollapsed !== previous.viewerCollapsed || next.inspectorCollapsed !== previous.inspectorCollapsed

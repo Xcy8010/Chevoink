@@ -11,7 +11,7 @@ import { WORK_OPEN_DOCUMENT } from './work-viewer-events'
 type Props = {
   conversationRail: ReactNode; conversation: ReactNode; activityDock?: ReactNode
   inspector: ReactNode; viewer?: ReactNode; viewerIdentity?: string | null; scopeKey?: string
-  outerSidebarOpen?: boolean; onOuterSidebarOpenChange?: (open: boolean) => void
+  outerSidebarOpen?: boolean
   rightOpen: boolean; inspectorWidth: number; viewerWidth: number
   onToggleRight: () => void; inspectorTab: WorkInspectorTab; onSelectInspectorTab: (tab: WorkInspectorTab) => void
 }
@@ -31,9 +31,9 @@ function restoreSplit(scope: string | undefined, fallback: WorkSplit): WorkSplit
   } catch { /* Optional preferences. */ }
   return fallback
 }
-type Gesture = WorkSplitGesture & { pointer: number; outerSidebar: 'open' | 'closed' | 'folded' }
+type Gesture = WorkSplitGesture & { pointer: number }
 
-export default function WorkPerspective({ conversationRail, conversation, activityDock, inspector, viewer, scopeKey, outerSidebarOpen = true, onOuterSidebarOpenChange, rightOpen, inspectorWidth, viewerWidth, onToggleRight, onSelectInspectorTab }: Props) {
+export default function WorkPerspective({ conversationRail, conversation, activityDock, inspector, viewer, scopeKey, outerSidebarOpen = true, rightOpen, inspectorWidth, viewerWidth, onToggleRight, onSelectInspectorTab }: Props) {
   const root = useRef<HTMLDivElement>(null)
   const contentHandle = useRef<HTMLDivElement>(null)
   const restoreSeparatorFocus = useRef(false)
@@ -105,18 +105,9 @@ export default function WorkPerspective({ conversationRail, conversation, activi
   const flush = useCallback(() => {
     const gesture = drag.current
     if (!gesture || pendingX.current === null) return
-    const previous = splitRef.current
-    const next = advanceWorkSplitGesture(gesture, previous, pendingX.current)
-    update(next)
-    if (next.chatCollapsed && !previous.chatCollapsed && (!gesture.hasViewer || next.viewerCollapsed) && gesture.outerSidebar === 'open') {
-      gesture.outerSidebar = 'folded'
-      onOuterSidebarOpenChange?.(false)
-    } else if (!next.chatCollapsed && previous.chatCollapsed && gesture.outerSidebar === 'folded') {
-      gesture.outerSidebar = 'open'
-      onOuterSidebarOpenChange?.(true)
-    }
+    update(advanceWorkSplitGesture(gesture, splitRef.current, pendingX.current))
     pendingX.current = null
-  }, [onOuterSidebarOpenChange, update])
+  }, [update])
   const finish = useCallback(() => {
     if (!drag.current) return
     cancelAnimationFrame(frame.current); frame.current = 0
@@ -171,7 +162,7 @@ export default function WorkPerspective({ conversationRail, conversation, activi
       if (viewerNode && !start.viewerCollapsed) start.viewer = viewerNode.getBoundingClientRect().width
       if (inspectorNode && !start.inspectorCollapsed) start.inspector = inspectorNode.getBoundingClientRect().width
       start.chat = start.chatCollapsed ? 0 : measured - start.rail - start.viewer - start.inspector
-      drag.current = { x: event.clientX, left: bounds.left, start, width: measured, boundary, pointer: event.pointerId, hasViewer, outerSidebar: outerSidebarOpen ? 'open' : 'closed' }
+      drag.current = { x: event.clientX, left: bounds.left, start, width: measured, boundary, pointer: event.pointerId, hasViewer }
       root.current.setPointerCapture(event.pointerId)
       document.documentElement.dataset.studioResizing = 'true'
       setDragging(true)

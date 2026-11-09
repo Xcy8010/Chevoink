@@ -75,7 +75,7 @@ describe('continuous Work gestures', () => {
     const reopened = advanceWorkSplitGesture(gesture, slightReversal, foldX + 49 - WORK_SPLIT.hysteresis)
     expect(reopened).toMatchObject({ viewerCollapsed: false, viewer: 245, inspector: 350, inspectorCollapsed: false })
   })
-  it('reopens the viewer from the left seam without changing a separately collapsed inspector', () => {
+  it('reopens both panes when the same left-seam drag folds the viewer and inspector', () => {
     const gesture: WorkSplitGesture = { x: 600, start: fitWorkSplit(state, width, true), width, boundary: 'content', hasViewer: true }
     const foldX = 600 + state.viewer - WORK_SPLIT.viewer + WORK_SPLIT.foldResistance + 1
     const folded = advanceWorkSplitGesture(gesture, state, foldX)
@@ -83,8 +83,19 @@ describe('continuous Work gestures', () => {
     expect(atMinimum).toMatchObject({ viewerCollapsed: true, inspector: WORK_SPLIT.inspector, inspectorCollapsed: false })
     const edge = advanceWorkSplitGesture(gesture, atMinimum, 1599)
     expect(edge).toMatchObject({ viewerCollapsed: true, inspectorCollapsed: true, chatCollapsed: false })
-    const reopened = advanceWorkSplitGesture(gesture, edge, 1569)
-    expect(reopened).toMatchObject({ viewerCollapsed: false, inspectorCollapsed: true, chatCollapsed: false })
+    const slightReversal = advanceWorkSplitGesture(gesture, edge, 1599 - WORK_SPLIT.hysteresis)
+    expect(slightReversal).toEqual(edge)
+    const reopened = advanceWorkSplitGesture(gesture, slightReversal, 1569)
+    expect(reopened).toMatchObject({ viewerCollapsed: false, viewer: 250, inspectorCollapsed: false, inspector: WORK_SPLIT.inspector, chatCollapsed: false })
+  })
+  it('leaves an inspector that was already folded closed when reopening the viewer', () => {
+    const closed = { ...state, inspectorCollapsed: true }
+    const gesture: WorkSplitGesture = { x: 600, start: fitWorkSplit(closed, width, true), width, boundary: 'content', hasViewer: true }
+    const foldX = 600 + state.viewer - WORK_SPLIT.viewer + WORK_SPLIT.foldResistance + 1
+    const folded = advanceWorkSplitGesture(gesture, closed, foldX)
+    expect(folded).toMatchObject({ viewerCollapsed: true, inspectorCollapsed: true })
+    const reopened = advanceWorkSplitGesture(gesture, folded, foldX - WORK_SPLIT.hysteresis - 1)
+    expect(reopened).toMatchObject({ viewerCollapsed: false, inspectorCollapsed: true })
   })
   it('keeps the viewer folded as a held right seam resizes and then folds and restores chat', () => {
     const gesture: WorkSplitGesture = { x: 1200, start: fitWorkSplit(state, width, true), width, boundary: 'inspector', hasViewer: true }
