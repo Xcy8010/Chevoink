@@ -11,6 +11,7 @@ import type { Response } from 'express'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { startAgentLoopRunSchema, taskSpecSchema } from '../../../shared/contracts/index.js'
+import { DEFAULT_CREATIVE_FREEDOM } from '../../../shared/contracts/agent-window-configuration.js'
 import { admissionModelOverride } from './model-assignment-admission.js'
 import { MAIN_RUN_FILTER, prepareChildGrantDeletion } from './runtime-child.js'
 import { dispatchDurableChild } from './runtime-child-tools.js'
@@ -192,7 +193,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
     if (current.status !== 'queued') throw new DataAccessError(409, 'RUN_IN_PROGRESS', '初始化期间任务状态已变化。')
     if (current.taskSpec) return taskSpecSchema.parse(current.taskSpec)
     let task = buildTaskSpec({ runId, novelId: run.novelId, chapterId: run.chapterId, prompt: input.prompt, selection: input.selection,
-      creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
+      creativeFreedom: input.creativeFreedom ?? 'balanced', qualityMode: input.qualityMode })
     if (task.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED')) {
       const chapters = await tx.chapter.findMany({ where: { ...activeChapterScope(run.novelId), authorId: userId }, select: { id: true } })
       task = { ...task, scope: { ...task.scope, chapterIds: chapters.map(chapter => chapter.id) } }
@@ -218,7 +219,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   const lease = await acquireRunLease({ userId, runId, ownerId: durableProcessOwner, claimId: randomUUID() })
   try {
     return await initializeExecutionState(lease, { ...(run.modelConfigId && run.modelConfigRevision ? { admittedModel: { modelConfigId: run.modelConfigId, modelConfigRevision: run.modelConfigRevision } } : {}), configuration: { version: 1, mode: input.mode, agentType: agent.type,
-      creativeFreedom: input.creativeFreedom ?? 'balanced', qualityMode: input.qualityMode ?? 'premium',
+      creativeFreedom: spec.creativeFreedom, qualityMode: spec.qualityMode,
       ...(input.modelAssignments ? { modelAssignments: input.modelAssignments } : {}),
       ...(input.pinnedSubagentId ? { pinnedSubagentId: input.pinnedSubagentId } : {}),
       model: { ...(runtime.modelConfigId ? { modelConfigId: runtime.modelConfigId, modelConfigRevision: runtime.modelConfigRevision } : {}),
@@ -416,7 +417,7 @@ export async function startLoopRunLocked(
     const selected = await resolveAssignedModel(userId, agentModelSelectionSchema.parse(assigned))
     input = { ...input, ...selected.selection }
   }
-  input = { ...input, ...(modelAssignments ? { modelAssignments } : {}) }
+  input = { ...input, creativeFreedom: input.creativeFreedom ?? DEFAULT_CREATIVE_FREEDOM, ...(modelAssignments ? { modelAssignments } : {}) }
   if (!input.modelSelectionExplicit && (!input.modelTier || input.modelTier === 'speed') && !options.queuedRequest && !options.goal) {
     input = { ...input, modelTier: await freshSystemModelTier('speed') as CreditModelTier }
   }
@@ -677,7 +678,7 @@ export async function startLoopRunLocked(
     prompt: input.prompt,
     selection: input.selection ?? null,
     attachments: input.attachments ?? [],
-    creativeFreedom: input.creativeFreedom ?? 'balanced',
+    creativeFreedom: input.creativeFreedom,
     qualityMode: input.qualityMode ?? 'premium',
     modelTier,
     customModelId: modelTier === 'custom' ? input.customModelId : null,
@@ -1245,7 +1246,7 @@ async function continueLoopRunLocked(
     prompt: resumePrompt,
     attachments: queuedInput?.attachments,
     selection: queuedInput?.selection,
-    creativeFreedom: queuedInput?.creativeFreedom,
+    creativeFreedom: queuedInput?.creativeFreedom ?? 'balanced',
     qualityMode: queuedInput?.qualityMode,
     pinnedSkillIds: queuedInput?.pinnedSkillIds,
     pinnedSubagentId: queuedInput?.pinnedSubagentId,

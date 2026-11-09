@@ -23,7 +23,7 @@ vi.mock('../../api/lib/agent/runtime-operations.js', async original => {
 })
 const lease = { userId: 'author', runId: 'run', taskRootId: 'root', ownerId: 'worker', claimId: 'claim', epoch: 1n }
 const context = { userId: lease.userId, runId: lease.runId, novelId: 'novel', callId: 'call', signal: new AbortController().signal }
-async function fixture(args: Record<string, string> = { chapterId: 'missing' }) {
+async function fixture(args: Record<string, string | boolean> = { chapterId: 'missing' }) {
   const spec = buildTaskSpec({ runId: lease.runId, novelId: context.novelId, chapterId: 'chapter', prompt: '检查本章' })
   const tools = await currentNativeToolViews([{ type: 'function', function: { name: 'continuity_validate', description: '', parameters: { type: 'object' } } }], spec.scope)
   const source = { revision: 0, snapshotHash: 'a'.repeat(64), state: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle',
@@ -60,7 +60,7 @@ beforeEach(() => vi.resetAllMocks())
 afterEach(() => vi.restoreAllMocks())
 describe('continuity preflight rejection through actual tool admission and failure receipts', () => {
   it.each([undefined, true])('passes frozen critic bytes and the admitted repair encoding without rewriting old work (%s)', async compactRepair => {
-    const f = await fixture({ chapterId: 'chapter' })
+    const f = await fixture({ chapterId: 'chapter', ...(compactRepair ? { readOnly: true } : {}) })
     const work = { kind: 'continuityReview', chapterId: 'chapter', revision: 4, contextHash: 'b'.repeat(64),
       critic: { system: '历史已冻结的完整检查规则', content: '历史已冻结的完整正文与证据' },
       route: { provider: 'fixture', model: 'fixture', baseUrl: 'https://fixture.invalid/v1', maxOutputTokens: 16384 },

@@ -1,6 +1,6 @@
 import { Prisma, type AgentRun } from '@prisma/client'
 import { z } from 'zod'
-import { agentWindowConfigurationSchema, type AgentWindowConfiguration, type AgentWindowConfigurationPayload, type PatchAgentWindowConfiguration } from '../../../shared/contracts/agent-window-configuration.js'
+import { DEFAULT_CREATIVE_FREEDOM, agentWindowConfigurationSchema, type AgentWindowConfiguration, type AgentWindowConfigurationPayload, type PatchAgentWindowConfiguration } from '../../../shared/contracts/agent-window-configuration.js'
 import { prisma, DataAccessError } from '../prisma.js'
 import { resolveAssignedModel } from './model-assignments.js'
 import { agentModelSelectionSchema } from '../../../shared/contracts/agent-model-assignments.js'
@@ -9,7 +9,7 @@ import { MAIN_RUN_FILTER } from './runtime-child.js'
 const storedConfigurationSchema = z.object({ revision: z.number().int().positive(), configuration: agentWindowConfigurationSchema }).strict()
 
 function projectRunWindowConfiguration(startRequest: Prisma.JsonValue | null, taskSpec: Prisma.JsonValue | null,
-  history: ReadonlyArray<{ response: Prisma.JsonValue }>): { modelSelectionSource: NonNullable<AgentWindowConfigurationPayload['modelSelectionSource']>; creativeFreedom: AgentWindowConfiguration['creativeFreedom'] } {
+  history: ReadonlyArray<{ response: Prisma.JsonValue }>): { modelSelectionSource: NonNullable<AgentWindowConfigurationPayload['modelSelectionSource']>; creativeFreedom: AgentWindowConfiguration['creativeFreedom'] | undefined } {
   const request = startRequest as Prisma.JsonObject | null
   const spec = taskSpec as Prisma.JsonObject | null
   const changes = history.map(change => change.response as Prisma.JsonObject).filter(change => change.appliesToRun !== false)
@@ -21,7 +21,7 @@ function projectRunWindowConfiguration(startRequest: Prisma.JsonValue | null, ta
   const mode = applied.map(change => change.creativeFreedom).find(value => value === 'stable' || value === 'balanced' || value === 'bold')
     ?? spec?.creativeFreedom ?? request?.creativeFreedom
   return { modelSelectionSource: inherited ? 'inherited' : modelChange || request?.modelSelectionExplicit === true ? 'explicit' : 'unknown',
-    creativeFreedom: mode === 'stable' || mode === 'bold' ? mode : 'balanced' }
+    creativeFreedom: mode === 'stable' || mode === 'balanced' || mode === 'bold' ? mode : undefined }
 }
 
 /** Active-run ownership is independent of preferences for future requests. */
@@ -29,7 +29,9 @@ export async function readRunWindowConfiguration(db: Prisma.TransactionClient | 
   run: Pick<AgentRun, 'id' | 'userId' | 'sessionId' | 'novelId' | 'taskRootId' | 'startRequest' | 'taskSpec'>) {
   const history = await db.agentConfigurationChange.findMany({ where: { run: { userId: run.userId, sessionId: run.sessionId, novelId: run.novelId,
     ...(run.taskRootId ? { taskRootId: run.taskRootId } : { id: run.id }) } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { response: true } })
-  return projectRunWindowConfiguration(run.startRequest, run.taskSpec, history)
+  const configuration = projectRunWindowConfiguration(run.startRequest, run.taskSpec, history)
+  // Older tasks without a stored mode used the strict default.
+  return { ...configuration, creativeFreedom: configuration.creativeFreedom ?? 'balanced' }
 }
 
 export async function getWindowConfiguration(userId: string, sessionId: string, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<AgentWindowConfigurationPayload> {
@@ -53,7 +55,7 @@ export async function getWindowConfiguration(userId: string, sessionId: string, 
       return { sessionId, novelId: session.novelId, title: session.title, revision: 0, source: 'last_run',
         modelSelectionSource: restored.modelSelectionSource,
         configuration: { model: restored.modelSelectionSource === 'inherited' || !model.success ? null : model.data,
-          creativeFreedom: restored.creativeFreedom } }
+          creativeFreedom: restored.creativeFreedom ?? DEFAULT_CREATIVE_FREEDOM } }
     }
   }
   return { sessionId, novelId: session.novelId, title: session.title, revision: stored?.revision ?? 0,

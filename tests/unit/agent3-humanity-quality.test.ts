@@ -267,6 +267,15 @@ describe('严谨创作自动落实质量建议', () => {
     expect(f.reserve).not.toHaveBeenCalled(); expect(f.model).not.toHaveBeenCalled(); expect(f.write).not.toHaveBeenCalled()
     expect(JSON.stringify(f.report)).toBe(before)
   })
+  it.each([true, false])('honors an explicit read-only check without buying a repair (cached=%s)', async cached => {
+    const f = fixture(cached)
+    const args = qualityAnalyzeTool.parameters.parse(qualityAnalyzeTool.coerceArgs!({ chapterId: 'c', readOnly: true }))
+    const result = await qualityAnalyzeTool.execute(f.ctx, args)
+    expect(result.display).toMatchObject({ kind: 'qualityReport', chapterRevision: 1 })
+    expect(f.reserve).not.toHaveBeenCalled()
+    expect(f.model).not.toHaveBeenCalled()
+    expect(f.write).not.toHaveBeenCalled()
+  })
   it('does not waive a genuine error or explicit mandatory pass at final verification', async () => {
     const f = fixture(true)
     guard.readiness.mockResolvedValue({ chapterId: 'c', reviewCycle: { edited: true }, qualityPassRequired: true, mustPassPending: true })
@@ -367,6 +376,8 @@ describe('严谨创作自动落实质量建议', () => {
       price: { version: 'credits-v1-exact' as const, modelTier: 'speed' as const, multiplierBps: 10000 } } }
     const prepared = await prepareQualityWork(f.ctx, lease, admission)
     if (prepared.kind !== 'check') throw new Error('Fixture must prepare a complete quality check')
+    expect(prepared.repair).toBe(true)
+    expect(await prepareQualityWork(f.ctx, lease, { ...admission, args: { ...admission.args, readOnly: true } })).toMatchObject({ kind: 'check', repair: false })
     expect(prepared.repairContextComplete).toBe(true)
     expect(prepared.repairContext).toBe(buildQualityRepairContext(f.bundle))
     const { repairContextComplete: _newFlag, ...oldWork } = prepared

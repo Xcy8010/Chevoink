@@ -50,7 +50,7 @@ export type ContinuityReport = { version: 1; id: string; taskId: string; chapter
   retainedProposals?: Array<{ findingId: string; reason: string }>;
   repairUnresolved?: Array<{ findingId: string; reason: string; retainedReasons?: string[] }>;
   history?: Array<{ rawResponses: string[]; incompleteResponses?: number[]; usageIds: string[]; nativeReceiptIds?: string[]; opinions: ContinuityOpinion[]; complete: boolean; billingKnown: boolean; error?: string; repairResult?: ToolResult; repairFailure?: string }> }
-export type ContinuityReviewArgs = { chapterId?: string; compilationId?: string; focus?: string }
+export type ContinuityReviewArgs = { chapterId?: string; compilationId?: string; focus?: string; readOnly?: boolean }
 export type ContinuitySnapshot = Awaited<ReturnType<typeof buildContinuitySnapshot>> & {
   compatibleReport?: ContinuityReport; priorReport?: ContinuityReport }
 
@@ -541,7 +541,7 @@ async function finishContinuityReview(ctx: ToolContext, args: ContinuityReviewAr
   const savedRepair = report.repairResponseIndex === undefined || report.incompleteResponses?.includes(report.repairResponseIndex) ? undefined : report.rawResponses[report.repairResponseIndex]
   const priorFailure = report.repairResult?.outcome === 'failed' ? report.repairResult : undefined
   if (priorFailure && (priorFailure.failureCode !== 'CONTINUITY_REPAIR_FAILED' || savedRepair === undefined)) return priorFailure
-  if (!report.complete || report.repairAttempted && !savedRepair && !options.resumeRepair || options.allowRepair === false || ctx.mode !== 'build' || ctx.creativeFreedom !== 'balanced'
+  if (!report.complete || report.repairAttempted && !savedRepair && !options.resumeRepair || args.readOnly || options.allowRepair === false || ctx.mode !== 'build' || ctx.creativeFreedom !== 'balanced'
     || ctx.inlineChild || ctx.sandboxMode === 'read_only' || ctx.protectedChapterIds?.has(report.chapterId)) return continuityReviewResult(snapshot, report, cached)
   const { automaticChapterRevisionWritable } = await import('./tools/chapter-mutation.js')
   if (!await automaticChapterRevisionWritable(prisma, ctx)) return continuityReviewResult(snapshot, report, cached)

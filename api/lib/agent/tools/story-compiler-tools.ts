@@ -450,8 +450,9 @@ ${renderWritingContinuityReference(continuityReference) ?? ''}
 
 export const continuityValidateTool = defineTool({
   name: 'continuity_validate', title: '检查章节连续性',
-  description: '检查指定已保存章节及真实前文，返回完整连续性报告。有原作者写入授权时可按已定位问题自动局部修订；正文变化后复查最终版本。报告完成与问题已解决分别说明。',
-  parameters: z.object({ chapterId: z.string().min(1).optional(), compilationId: z.string().min(1).optional(), focus: z.string().max(500).optional() }).passthrough(),
+  description: '检查指定已保存章节及真实前文，返回完整连续性报告。严谨创作可在原授权范围内按已定位问题自动局部修订。只看不改或改后只读复核传 readOnly=true。报告完成与问题已解决分别说明。',
+  parameters: z.object({ chapterId: z.string().min(1).optional(), compilationId: z.string().min(1).optional(), focus: z.string().max(500).optional(),
+    readOnly: z.boolean().optional().describe('只保存检查报告，不执行正文修订') }).passthrough(),
   permission: ALL_READ, readOnly: true,
   coerceArgs(raw) {
     const value = coerceToolArgumentEnvelope(raw)

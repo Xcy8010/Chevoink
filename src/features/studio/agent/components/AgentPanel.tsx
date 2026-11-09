@@ -441,7 +441,7 @@ export function AgentPanel({
   const qualityMode: StoryCompilerMode = 'premium'
   const modelPreference = useAgentModelPreference(novelId, sessionId, voiceScopeKey)
   const windowConfiguration = modelPreference.windowConfiguration
-  const creativeFreedom = windowConfiguration.configuration.creativeFreedom ?? 'balanced'
+  const creativeFreedom = windowConfiguration.configuration.creativeFreedom
   const setCreativeFreedom = (value: CreativeFreedom) => { void windowConfiguration.update({ creativeFreedom: value }).catch(() => {}) }
   const { modelTier, customModelId, reasoningSelections, inheritMain, explicit: modelSelectionExplicit, setFallbackTier } = modelPreference
   configurationHandler.current = event => {

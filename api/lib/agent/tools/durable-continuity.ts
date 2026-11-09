@@ -19,7 +19,7 @@ import { buildContinuitySnapshot, enrichContinuitySnapshot, continuityReviewRequ
 import { normalizeToolInput } from './input-validation.js'
 import type { AgentTool, ToolContext, ToolResult } from './types.js'
 
-const argsSchema = z.object({ chapterId: z.string().optional(), compilationId: z.string().optional(), focus: z.string().optional() })
+const argsSchema = z.object({ chapterId: z.string().optional(), compilationId: z.string().optional(), focus: z.string().optional(), readOnly: z.boolean().optional() })
 export const nativeContinuityWorkSchema = z.object({ kind: z.literal('continuityReview'),
   chapterId: z.string(), revision: z.number().int().positive(), contextHash: z.string(),
   compactRepair: z.literal(true).optional(),

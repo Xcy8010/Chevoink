@@ -1,9 +1,13 @@
 import { z } from 'zod'
 import { agentModelSelectionSchema } from './agent-model-assignments.js'
+import type { CreativeFreedom } from './agent-events.js'
+
+export const DEFAULT_CREATIVE_FREEDOM = 'stable' satisfies CreativeFreedom
+export const CREATIVE_FREEDOM_LABELS = { stable: '平衡创作', balanced: '严谨创作', bold: '大胆探索' } satisfies Record<CreativeFreedom, string>
 
 export const agentWindowConfigurationSchema = z.object({
   model: agentModelSelectionSchema.nullable().default(null),
-  creativeFreedom: z.enum(['stable', 'balanced', 'bold']).default('balanced'),
+  creativeFreedom: z.enum(['stable', 'balanced', 'bold']).default(DEFAULT_CREATIVE_FREEDOM),
 }).strict()
 export type AgentWindowConfiguration = z.infer<typeof agentWindowConfigurationSchema>
 export const patchAgentWindowConfigurationSchema = z.object({

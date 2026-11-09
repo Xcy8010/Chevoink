@@ -15,7 +15,7 @@ vi.mock('../../api/lib/agent/runtime-state.js', () => ({ readExecutionFrame: vi.
 const view = (name: string, parameters: Record<string, unknown>, description = '旧平台说明'): NativeToolView => ({ type: 'function', function: { name, parameters, description } })
 
 describe('current native built-in presentation', () => {
-  it.each(['chapter_write', 'chapter_append', 'chapter_edit_range', 'continuity_validate', 'chapter_bridge_commit'])('does not require a new provider source frame for metadata-only %s clarification', async action => {
+  it.each(['chapter_write', 'chapter_append', 'chapter_edit_range', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit'])('does not require a new provider source frame for metadata-only %s clarification', async action => {
     const tool = getToolByName(action)!, scope = { novelId: 'n' }
     const { strict: _strict, ...implicit } = (await currentNativeToolViews([view(action, toOpenAIParameters(tool.parameters))], scope))[0].function
     const frozen: NativeToolView[] = [{ type: 'function', function: implicit }]
@@ -53,6 +53,17 @@ describe('current native built-in presentation', () => {
     const validator = toolWithNativeView(chapterWriteTool, current[0]).parameters
     expect(validator.safeParse({ chapterId: 'c', content: '正文四个字', reviewer: 'author' }).success).toBe(true)
     for (const args of [{ content: '短', reviewer: 'author' }, { content: '正文四个字', reviewer: 'other' }, { content: '正文四个字' }]) expect(validator.safeParse(args).success).toBe(false)
+  })
+  it.each(['continuity_validate', 'quality_analyze'])('offers read-only checks on new requests while preserving the original %s schema', async action => {
+    const tool = getToolByName(action)!
+    const frozen = [view(action, { type: 'object', properties: { chapterId: { type: 'string', minLength: 3 } }, additionalProperties: false })]
+    const original = runtimeJson(frozen).hash
+    const [next] = await currentNativeToolViews(frozen, { novelId: 'n' })
+    const args = { chapterId: 'chapter', readOnly: true }
+    expect(toolWithNativeView(tool, next).parameters.parse(args)).toEqual(args)
+    expect(toolWithNativeView(tool, next).parameters.safeParse({ ...args, chapterId: 'x' }).success).toBe(false)
+    expect(toolWithNativeView(tool, frozen[0]).parameters.safeParse(args).success).toBe(false)
+    expect(runtimeJson(frozen).hash).toBe(original)
   })
   it('accepts only compilationId after the known old platform summary requirement is retired', () => {
     const frozen = [view('chapter_bridge_commit', { type: 'object', properties: { compilationId: { type: 'string', minLength: 1 },

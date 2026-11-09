@@ -1,3 +1,4 @@
+import { CREATIVE_FREEDOM_LABELS } from '../../../../shared/contracts/agent-window-configuration.js'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -131,9 +132,9 @@ const SECTION_META: Record<StudioSettingsSection, { title: string; description: 
 }
 
 const FREEDOM_OPTIONS = [
-  { value: 'stable', label: '平衡延续', description: '优先承接已有文风、人物轨迹与段落节奏。' },
-  { value: 'balanced', label: '严谨创作', description: '执行连续性与人类感检查，适合稳定生产。' },
-  { value: 'bold', label: '大胆探索', description: '允许更明显的结构、节奏和表达变化。' },
+  { value: 'stable', label: CREATIVE_FREEDOM_LABELS.stable, description: '默认。适合日常写作、续写与修改，延续作品设定和作者文风。' },
+  { value: 'balanced', label: CREATIVE_FREEDOM_LABELS.balanced, description: '强化因果与连续性，在本任务可写范围内直接落实有依据的修订。' },
+  { value: 'bold', label: CREATIVE_FREEDOM_LABELS.bold, description: '允许更明显的结构、节奏和表达变化。' },
 ] as const
 
 type CreativeFreedom = typeof FREEDOM_OPTIONS[number]['value']

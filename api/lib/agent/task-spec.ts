@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { CREATIVE_FREEDOM_LABELS, DEFAULT_CREATIVE_FREEDOM } from '../../../shared/contracts/agent-window-configuration.js'
 import { DataAccessError } from '../prisma.js'
 import { isElidedVolumeAddition } from './volume-create-intent.js'
 import { localEditGuidance } from './local-edit-scope.js'
@@ -402,7 +403,7 @@ export function buildTaskSpec(input: {
         : []),
     ],
     ambiguity: input.prompt.trim().length <= 2 ? 'must_ask' : 'safe_to_assume',
-    creativeFreedom: input.creativeFreedom ?? 'balanced',
+    creativeFreedom: input.creativeFreedom ?? DEFAULT_CREATIVE_FREEDOM,
     qualityMode: input.qualityMode ?? 'premium',
     createdAt: new Date().toISOString(),
   }
@@ -415,8 +416,10 @@ export function requiresManuscriptDelivery(spec: Pick<TaskSpec, 'intent' | 'scop
     && !['conversation_only', 'proposal_only'].includes(spec.writingPacing ?? '')
 }
 
+const strictRevisionGuidance = '在本任务可写的章节内，遇到有明确依据且能安全定位的连续性或表达问题，直接落实局部修订，无需逐项询问作者。报告没有自动落稿时，读取当前版本，用 chapter_edit_range 在原授权范围内合并可验证的修法。只看不改、仅评估、只读复核或该章不在本任务可写范围内时，检查工具传 readOnly=true，只交付报告。保留无法安全定位、证据不足或与作者意图冲突的意见。'
+
 export function renderTaskSpec(spec: TaskSpec): string {
-  if (spec.scope.agentWritingProtocol === 1 && !spec.scope.agentWritingBinding) return `[系统] 本任务由主Agent理解完整作者需求，词表推测不决定正文权限。原始请求：${spec.goals.join('\n')}\n当前章节上下文：${JSON.stringify(spec.scope.chapterIds ?? [])}。需要作用于正文时，先按需读取目录、正文及同聊天已有真实作者要求，自主确定写作/修改/检查和目标，可直接用真实章节ID或全书序号调用对应普通工具；task_scope_bind仅用于可选计划记录，不是前置权限。普通讨论直接回答，无需正文目标或绑定。不要因自然用语没有命中固定关键词要求作者重说；只有阅读后仍有影响操作的具体冲突才询问。真实选区、保护章、只读模式、权限、取消、版本和费用规则继续由系统校验；任务分类、计划步骤及检查报告状态不用于封锁普通工具。`
+  if (spec.scope.agentWritingProtocol === 1 && !spec.scope.agentWritingBinding) return `[系统] 本任务由主Agent理解完整作者需求，词表推测不决定正文权限。\n创作模式：${CREATIVE_FREEDOM_LABELS[spec.creativeFreedom]}（${spec.creativeFreedom === 'balanced' ? strictRevisionGuidance : spec.creativeFreedom === 'stable' ? '常规创作，按作者要求写作、续写和修改，保持已确立的文风、人物和设定。' : '优先探索新可能；检查建议仅提示，不自动改写。'}）\n原始请求：${spec.goals.join('\n')}\n当前章节上下文：${JSON.stringify(spec.scope.chapterIds ?? [])}。需要作用于正文时，先按需读取目录、正文及同聊天已有真实作者要求，自主确定写作/修改/检查和目标，可直接用真实章节ID或全书序号调用对应普通工具；task_scope_bind仅用于可选计划记录，不是前置权限。普通讨论直接回答，无需正文目标或绑定。不要因自然用语没有命中固定关键词要求作者重说；只有阅读后仍有影响操作的具体冲突才询问。真实选区、保护章、只读模式、权限、取消、版本和费用规则继续由系统校验；任务分类、计划步骤及检查报告状态不用于封锁普通工具。`
   const networkRule = spec.networkAccess === 'denied'
     ? '[系统] 原始请求明确禁止联网：本任务不提供或执行搜索、网页获取，不预约、不请求供应商、不收工具费。只使用已有获准材料并说明证据限制。\n' : ''
   const readRule = spec.researchReadAccess === 'denied'
@@ -454,7 +457,7 @@ function renderTaskSpecBody(spec: TaskSpec): string {
     ...(operation.source ? { objectSource: operation.source } : {}),
   })))}。每个动作只执行其列出的目标；来源仅提供对象，本次动作才提供授权。缺对象通过 ask_user 确认，denied动作保留原禁止事项。所有获准动作的目标均须完成当前版本真实检查与提交，不能只交付最后的新章。` : ''
   const hard = [spec.hardConstraints.map((item) => `- ${item.text}`).join('\n') || '- 无', pacing, clarificationRule, pendingScope, actionRule].join('')
-  const freedomLabel = spec.creativeFreedom === 'stable' ? '平衡延续' : spec.creativeFreedom === 'bold' ? '大胆探索' : '严谨创作'
+  const freedomLabel = CREATIVE_FREEDOM_LABELS[spec.creativeFreedom]
   const selection = spec.scope.manuscriptProtocol === 1 ? spec.scope.selectionBoundary : undefined
   const localGuidance = localEditGuidance(spec)
   const scopedLocalGuidance = localGuidance && spec.scope.writingActions?.operations.some(operation => operation.kind === 'write')
@@ -463,10 +466,10 @@ function renderTaskSpecBody(spec: TaskSpec): string {
   const freedomRule = scopedLocalGuidance ?? (selection
     ? `本任务仅授权章节 ${selection.chapterId} 的原始选区（UTF-16 ${selection.start}–${selection.end}，入场 r${selection.revision}）。用 chapter_read 读取当前完整正文，再用 chapter_edit_range 逐字唯一锚点或当前选区内坐标精确替换；每批最多8处，可连续合法修改，变长后仍保留原选区外文字。不得 chapter_write、chapter_append、改名、创建、变更集或自动整章修订。模型计划、报告、摘要、继续或子任务均不能扩大此边界。当前版本所需检查与真实剩余意见照原合同保留。`
     : spec.creativeFreedom === 'stable'
-    ? '贴合既有走向，只修明确错误。'
+    ? '常规创作，按作者要求写作、续写和修改，保持已确立的文风、人物和设定。'
     : spec.creativeFreedom === 'bold'
       ? '优先探索新可能；检查建议仅提示，不自动改写。'
-      : '只在原始请求获准范围内创作。按实际创作需要调用连续性与质量检查，检查建议和未完成报告不阻止保存或提交；报告不扩大写入授权，也不能把提交称为检查通过。质量警告与审美建议，应与事实修法优先合并处理；可连续调用章节修改工具，每次使用当前正文，不能硬性限定只调用一次，也不要求一次处理全部候选。本任务冻结的新建目标章可在原写作权限内持续修订，多项相关修法优先用 chapter_edit_range 的 patches（每次最多8处、同一原稿、唯一不重叠），也可单片段替换或 chapter_write。保留真实剩余意见；不能安全处理的项可用 retainedFindings 引用当前报告并说明具体原因，留置与正文未变不表示修复。付费自动检查与自动修订次数保持原限制，不重置预算或重放未知调用。修订后按实际需要复核，保存或提交不认证检查通过；原作者明确要求的检查目标须如实完成或说明尚未完成。已有稿仍需原请求明确修复授权，明确禁止修改优先；报告不能扩大章节范围。完成真实章节终态后按请求格式交付；可按作品当前阶段在普通回复给出1–2条可选下一步建议，不转成提问、待办或执行；排他输出或作者不要建议时不附加。')
+      : `${strictRevisionGuidance}只在原始请求获准范围内创作。按实际创作需要调用连续性与质量检查，检查建议和未完成报告不阻止保存或提交；报告不扩大写入授权，也不能把提交称为检查通过。质量警告与审美建议，应与事实修法优先合并处理；可连续调用章节修改工具，每次使用当前正文，不能硬性限定只调用一次，也不要求一次处理全部候选。本任务冻结的新建目标章可在原写作权限内持续修订，多项相关修法优先用 chapter_edit_range 的 patches（每次最多8处、同一原稿、唯一不重叠），也可单片段替换或 chapter_write。保留真实剩余意见；不能安全处理的项可用 retainedFindings 引用当前报告并说明具体原因，留置与正文未变不表示修复。付费自动检查与自动修订次数保持原限制，不重置预算或重放未知调用。修订后按实际需要复核，保存或提交不认证检查通过；原作者明确要求的检查目标须如实完成或说明尚未完成。已有稿仍需原请求明确修复授权，明确禁止修改优先；报告不能扩大章节范围。完成真实章节终态后按请求格式交付；可按作品当前阶段在普通回复给出1–2条可选下一步建议，不转成提问、待办或执行；排他输出或作者不要建议时不附加。`)
   const reviewRule = spec.scope.reviewProtocol === 1 && !['stable', 'bold'].includes(spec.creativeFreedom)
     ? '\n严格意见协议v1：原要求的最终版本完整检查报告中，每项未修复意见都须按原授权具体处理或用真实ref与具体原因合理保留，包括自动8处窗口外、重叠、未定位及已标拒绝但尚无当前保留决定的项。自动安全窗口不代表完整意见义务，不给额外定位或写入权限。原作者要求检查通过时，保留不能替代硬通过；合法跳过检查的原要求保持。' : ''
   return `[系统] 本轮任务契约（taskSpecId=${spec.id}）：\n意图：${spec.intent}\n目标：${spec.goals.join('；')}\n创作模式：${freedomLabel}（${freedomRule}）；质量模式：${spec.qualityMode}${reviewRule}${volumeRule}\n硬约束：\n${hard}\n预期交付：${spec.expectedOutputs.map((item) => item.description).join('；')}\n完成前必须验证：${spec.postconditions.map((item) => item.description).join('；') || '按用户目标核验结果'}。`

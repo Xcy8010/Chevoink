@@ -1,3 +1,4 @@
+import { CREATIVE_FREEDOM_LABELS } from '../../../../../shared/contracts/agent-window-configuration.js'
 import { ModelActivityBadge, ModelPriceDetails, ModelPriceSummary } from '../../components/ModelPriceDetails'
 import {
   useEffect,
@@ -113,8 +114,8 @@ type ParsedComposerContent = {
 }
 
 const CREATIVE_MODES: Array<{ value: CreativeFreedom; label: string; description: string; icon: typeof Feather }> = [
-  { value: 'stable', label: '平衡延续', description: '贴合既有走向，适合续写与轻量调整。', icon: Scale },
-  { value: 'balanced', label: '严谨创作', description: '默认；强化因果与连续性，按题材和作者要求创作。', icon: Feather },
+  { value: 'stable', label: CREATIVE_FREEDOM_LABELS.stable, description: '默认。适合日常写作、续写与修改，延续作品设定和作者文风。', icon: Scale },
+  { value: 'balanced', label: CREATIVE_FREEDOM_LABELS.balanced, description: '强化因果与连续性，在本任务可写范围内直接落实有依据的修订。', icon: Feather },
   { value: 'bold', label: '大胆创作', description: '适合试新场景和新结构，报告只提示不自动改写。', icon: Rocket },
 ]
 

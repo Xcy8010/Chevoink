@@ -403,7 +403,7 @@ export async function prepareQualityWork(ctx: ToolContext, lease: import('../run
       chapter: { id: chapterId, title: bundle.chapter.title, revision: bundle.chapter.revision, content: bundle.chapter.content }, contextHash: jsonHash(bundle),
       recentContents: bundle.recentChapters.map(item => item.content), feedback: bundle.feedback,
       ...(bundle.compilation || !standaloneAdviceReportOnly(ctx.writingScope, bundle.originalRequest) ? {} : { adviceOnly: true as const }),
-      mode: state.configuration.qualityMode, repair: !input.serviceReadOnly && bundle.compilation?.status !== 'completed' && writable && state.configuration.mode === 'build' && state.configuration.creativeFreedom === 'balanced' && !state.configuration.protectedChapterIds.includes(chapterId)
+      mode: state.configuration.qualityMode, repair: args.readOnly !== true && !input.serviceReadOnly && bundle.compilation?.status !== 'completed' && writable && state.configuration.mode === 'build' && state.configuration.creativeFreedom === 'balanced' && !state.configuration.protectedChapterIds.includes(chapterId)
         && (!cached || !!existingReport && qualityAutoRepairPending(existingReport) && (!!bundle.compilation || existingReport.runId === ctx.runId)),
       criticInput: buildCriticInput(bundle, deterministic.metrics, sources, HUMANITY_PROMPT_PROTOCOL, standaloneJudgment),
       repairContext: buildQualityRepairContext(bundle), repairContextComplete: true as const,

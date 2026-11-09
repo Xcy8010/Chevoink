@@ -35,6 +35,11 @@ describe('owned independent window configuration', () => {
     expect(await readRunWindowConfiguration(db, run)).toMatchObject({ modelSelectionSource: 'explicit', creativeFreedom: 'bold' })
     expect(mocks.read).not.toHaveBeenCalled()
   })
+  it('uses the historical strict fallback for a task that predates stored mode values', async () => {
+    const run = { id: 'old', userId: 'owner', novelId: 'novel', sessionId: 'window-a', taskRootId: null, startRequest: {}, taskSpec: {} }
+    const db = { agentConfigurationChange: { findMany: mocks.history } } as unknown as Parameters<typeof readRunWindowConfiguration>[0]
+    expect(await readRunWindowConfiguration(db, run)).toMatchObject({ creativeFreedom: 'balanced' })
+  })
   it('restores a resumed task from same-root receipts and preserves the latest model-setting source', async () => {
     mocks.latest.mockResolvedValue({ modelTier: 'custom', customModelId: 'model-b', reasoningEffort: 'high', taskRootId: 'root',
       startRequest: { modelAssignments: { assignments: { main: { modelTier: 'custom', customModelId: 'model-a' } } } }, taskSpec: { creativeFreedom: 'stable' }, configurationChanges: [] })
@@ -60,7 +65,7 @@ describe('owned independent window configuration', () => {
   it('keeps known inheritance and an explicitly saved null preference instead of pinning a historical resolved model', async () => {
     mocks.latest.mockResolvedValue({ modelTier: 'ultimate', reasoningEffort: 'high', startRequest: { modelAssignments: { assignments: { main: { modelTier: 'ultimate' } } } },
       taskSpec: {}, configurationChanges: [] })
-    expect(await getWindowConfiguration('owner', 'window-a')).toMatchObject({ modelSelectionSource: 'inherited', configuration: { model: null } })
+    expect(await getWindowConfiguration('owner', 'window-a')).toMatchObject({ modelSelectionSource: 'inherited', configuration: { model: null, creativeFreedom: 'stable' } })
     mocks.latest.mockClear()
     policies.set('window-a', { windowConfiguration: { revision: 3, configuration: { model: null, creativeFreedom: 'bold' } } })
     expect(await getWindowConfiguration('owner', 'window-a')).toMatchObject({ revision: 3, source: 'saved', configuration: { model: null, creativeFreedom: 'bold' } })
@@ -69,11 +74,17 @@ describe('owned independent window configuration', () => {
   it('reads an unconfigured window without model dispatch and separates same-novel windows', async () => {
     const a = await getWindowConfiguration('owner', 'window-a')
     const b = await getWindowConfiguration('owner', 'window-b')
-    expect(a.configuration).toEqual({ model: null, creativeFreedom: 'balanced' })
+    expect(a.configuration).toEqual({ model: null, creativeFreedom: 'stable' })
     expect(b.configuration).toEqual(a.configuration)
     expect(mocks.session.mock.calls.map(([query]) => query.where.id)).toEqual(['window-a', 'window-b'])
     expect(mocks.read).not.toHaveBeenCalled()
     expect(mocks.resolve).not.toHaveBeenCalled()
+  })
+  it('keeps a saved strict choice and defaults a saved model-only preference', async () => {
+    policies.set('window-a', { windowConfiguration: { revision: 1, configuration: { model: null, creativeFreedom: 'balanced' } } })
+    policies.set('window-b', { windowConfiguration: { revision: 1, configuration: { model: null } } })
+    expect(await getWindowConfiguration('owner', 'window-a')).toMatchObject({ source: 'saved', configuration: { creativeFreedom: 'balanced' } })
+    expect(await getWindowConfiguration('owner', 'window-b')).toMatchObject({ source: 'saved', configuration: { creativeFreedom: 'stable' } })
   })
   it('checks ownership before reading preferences or resolving a selected model', async () => {
     await expect(patchWindowConfiguration('owner', 'foreign', { expectedRevision: 0, model: { modelTier: 'speed' } })).rejects.toMatchObject({ code: 'NOT_FOUND' })

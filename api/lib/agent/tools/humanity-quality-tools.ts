@@ -244,7 +244,7 @@ async function finishQualityReviewResult(ctx: ToolContext, report: QualityReport
         summary: '人类感质量检查 · 修订未应用', display: reportDisplay(report) }
     }
   }
-  const reason = !automatic ? '本次只保存检查意见，正文未改动；修订须由原始请求明确授权'
+  const reason = !automatic ? '本次只保存检查意见，正文未改动'
     : pending.length ? '自动修订已尝试、报告不属于当前修订任务或没有待处理的安全候选；剩余意见仍保留待审'
       : advisoryCount ? '建议已保存在报告中，可按需要查看' : '未发现有证据的问题'
   return { output: `质量报告 ${report.id}${cached ? '已复用' : '已完成'}，绑定 r${report.chapterRevision}，状态=${report.status}：${warningCount} 个需关注、${advisoryCount} 个建议。${reason}，不重复调用模型；工具执行成功只表示报告已取得，${report.findings.length ? '检查完成仍有意见，不能宣称全部建议已应用或全部问题已解决；剩余意见保留待审，不要求为清零意见改稿' : '本次完整检查未发现有证据的问题'}。${report.status === 'needs_repair' ? '不能宣称质量检查通过。' : ''}${decisionGuidance}${bindingSuffix}\n${renderQualityReportFindings(report)}`,
@@ -386,10 +386,11 @@ export function buildQualityRepairContext(bundle: Awaited<ReturnType<typeof buil
 export const qualityAnalyzeTool = defineTool({
   name: 'quality_analyze',
   title: '人类感质量检查',
-  description: 'Humanity Quality Gate 的 CHECK 步骤。用于评估整章或完整长场景的人类感质量：当作者明确要求判断「有没有 AI 味 / 像不像 AI 写的」「文风是否自然、像真人」「要不要通篇精修润色」，或在整章写完要求深度审阅、或 Story Compiler 进入 CHECK 时，都必须调用本工具，而不是自己只读正文下结论。服务端先运行确定性统计，再启动与 Writer 隔离的 Critic；每条模型意见必须逐字定位正文才能保存。严谨创作会在同一次调用内有界自动修订，平衡延续与大胆探索只展示报告。标题、元数据、局部错字、单句润色、纯剧情/设定/写作建议等普通问答禁止触发。不得把科幻术语、华丽文风、口语或无悬念结尾按词表误判。',
+  description: 'Humanity Quality Gate 的 CHECK 步骤。用于评估整章或完整长场景的人类感质量：当作者明确要求判断「有没有 AI 味 / 像不像 AI 写的」「文风是否自然、像真人」「要不要通篇精修润色」，或在整章写完要求深度审阅、或 Story Compiler 进入 CHECK 时，都必须调用本工具，而不是自己只读正文下结论。服务端先运行确定性统计，再启动与 Writer 隔离的 Critic；每条模型意见必须逐字定位正文才能保存。严谨创作可在本任务可写范围内有界自动修订。只看不改或改后只读复核传 readOnly=true。平衡创作与大胆探索只展示报告。标题、元数据、局部错字、单句润色、纯剧情/设定/写作建议等普通问答禁止触发。不得把科幻术语、华丽文风、口语或无悬念结尾按词表误判。',
   parameters: z.object({
     chapterId: z.string().min(1).optional().describe('目标章节编号，从 chapter_read 或作品目录取得；独立检查既有章只需本参数，不用准备章节'),
     compilationId: z.string().min(1).optional().describe('当前写作流水线的编译编号；独立审阅省略，不要把它当 chapterId'),
+    readOnly: z.boolean().optional().describe('只保存检查报告，不执行正文修订'),
   }),
   permission: READ,
   readOnly: true,
@@ -400,6 +401,7 @@ export const qualityAnalyzeTool = defineTool({
     return {
       chapterId: firstDefined(record, ['chapterId', 'chapter_id', 'chapter']),
       compilationId: firstDefined(record, ['compilationId', 'compilation_id', 'compilation']),
+      readOnly: record.readOnly,
     }
   },
   async execute(ctx, args) {
@@ -425,11 +427,12 @@ export const qualityAnalyzeTool = defineTool({
     const existing = await getLatestQualityReport(ctx.userId, ctx.novelId, chapterId, prisma, bundle.compilation?.id ?? null)
     const contextHash = qualityReviewContextHash(bundle)
     const cacheMetrics = existing?.deterministicMetrics
+    const allowRepair = !args.readOnly && bundle.compilation?.status !== 'completed'
     const adviceOnly = !bundle.compilation && standaloneAdviceReportOnly(ctx.writingScope, bundle.originalRequest)
     const matchingContext = !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics) && cacheMetrics.qualityContextHash === contextHash
     if (existing && matchingContext && existing.compilationId === (bundle.compilation?.id ?? null) && existing.criticVersion === HUMANITY_CRITIC_VERSION && !qualityReportHasDroppedFindings(cacheMetrics) && qualityReportCheckedCurrentContent(existing, bundle.chapter.revision, bundle.chapter.content)) {
       const hydrated = await getQualityReport(ctx.userId, ctx.novelId, existing.id)
-      return finishQualityReview(ctx, hydrated, '', true, bundle.compilation?.status !== 'completed', undefined, adviceOnly)
+      return finishQualityReview(ctx, hydrated, '', true, allowRepair, undefined, adviceOnly)
     }
     let formatRecovery: QualityFormatRecovery | null = null
     const sameFailedContext = existing?.status === 'failed' && !!cacheMetrics && typeof cacheMetrics === 'object' && !Array.isArray(cacheMetrics)
@@ -606,7 +609,7 @@ export const qualityAnalyzeTool = defineTool({
       droppedCount ? `${droppedCount} 条因字段不完整未纳入报告` : '',
     ].filter(Boolean).join('；')
     const bindingSuffix = bindingNote ? `（${bindingNote}；已纳入意见均逐字绑定。）` : ''
-    return finishQualityReview(formatRecovery ? { ...ctx, signal: reviewSignal } : ctx, report, bindingSuffix, false, bundle.compilation?.status !== 'completed', resolved, adviceOnly)
+    return finishQualityReview(formatRecovery ? { ...ctx, signal: reviewSignal } : ctx, report, bindingSuffix, false, allowRepair, resolved, adviceOnly)
   },
 })
 

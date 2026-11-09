@@ -7,7 +7,7 @@ import { readExecutionFrame } from './runtime-state.js'
 import { toOpenAIToolPresentation } from './tool-schema.js'
 
 export type NativeToolView = { type: 'function'; function: { name: string; strict?: boolean; description: string; parameters: Record<string, unknown> } }
-const simplified = new Set(['chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'continuity_validate', 'chapter_bridge_commit', 'scene_task_build'])
+const simplified = new Set(['chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit', 'scene_task_build'])
 const retiredFields: Record<string, readonly string[]> = {
   chapter_create: ['content'],
   chapter_write: ['writing'], chapter_append: ['writing'], chapter_edit_range: ['writing'],

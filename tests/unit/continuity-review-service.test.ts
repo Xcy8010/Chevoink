@@ -632,6 +632,14 @@ describe('known failure recovery preserves report and paid evidence', () => {
     expect(result).toMatchObject({ reviewCompleted: true, reviewOutcome: 'decision_required' }); expect(result.outcome).not.toBe('failed')
     expect(f.requests).toEqual(['agent3ContinuityCritic']); expect(f.chapter.revision).toBe(4)
   })
+  it('saves evidence without a revision request when the check is explicitly read-only', async () => {
+    const f = runnerFixture(); f.ctx.creativeFreedom = 'balanced'
+    const result = await reviewContinuity(f.ctx, { compilationId: 'comp', readOnly: true }, { dispatch: f.dispatch(() => JSON.stringify({ findings: [opinion()] })) })
+    expect(result).toMatchObject({ reviewCompleted: true })
+    expect(f.report().findings).toHaveLength(1)
+    expect(f.requests).toEqual(['agent3ContinuityCritic'])
+    expect(f.chapter.revision).toBe(4)
+  })
   it('retains the repair response and fee when the author makes the session read-only before CAS', async () => {
     const f = runnerFixture(); f.ctx.creativeFreedom = 'balanced'
     vi.spyOn(guard, 'readChapterReviewReadiness').mockResolvedValue(null)

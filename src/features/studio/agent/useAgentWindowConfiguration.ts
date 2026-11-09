@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { requestJson } from '@/app/api-client'
-import { agentWindowConfigurationSchema, type AgentWindowConfigurationPayload, type AgentWindowConfiguration } from '../../../../shared/contracts/agent-window-configuration.js'
+import { DEFAULT_CREATIVE_FREEDOM, agentWindowConfigurationSchema, type AgentWindowConfigurationPayload, type AgentWindowConfiguration } from '../../../../shared/contracts/agent-window-configuration.js'
 
 type Changes = Partial<AgentWindowConfiguration>
 type Pending = { tail: Promise<unknown>; changes: Map<symbol, Changes>; confirmed?: AgentWindowConfigurationPayload }
@@ -59,21 +59,21 @@ export function useAgentWindowConfiguration(novelId: string, sessionId: string |
       const queue = pending.get(sessionId!)
       if (queue) {
         queue.confirmed = value
-        return { ...value, configuration: [...queue.changes.values()].reduce((current, patch) => ({ ...current, ...patch }), value.configuration) }
+        return { ...value, configuration: [...queue.changes.values()].reduce<AgentWindowConfiguration>((current, patch) => ({ ...current, ...patch }), value.configuration) }
       }
       return value
     },
     enabled: Boolean(sessionId), retry: false, staleTime: 0,
     refetchInterval: () => sessionId && !pending.has(sessionId) ? 5000 : false,
     initialData: !sessionId ? () => {
-      let configuration: AgentWindowConfiguration = { model: null, creativeFreedom: 'balanced' }
+      let configuration: AgentWindowConfiguration = { model: null, creativeFreedom: DEFAULT_CREATIVE_FREEDOM }
       if (typeof window !== 'undefined') {
         try { configuration = agentWindowConfigurationSchema.parse(JSON.parse(window.localStorage.getItem(`chevoink:window-configuration:${scope}`) ?? '{}')) } catch { /* An invalid old draft has no saved preference. */ }
       }
       return { sessionId: scope, novelId, title: '', revision: 0, configuration }
     } : undefined,
   })
-  const configuration = query.data?.configuration ?? { model: null, creativeFreedom: 'balanced' as const }
+  const configuration = query.data?.configuration ?? { model: null, creativeFreedom: DEFAULT_CREATIVE_FREEDOM }
   const update = (patch: Changes) => {
     setSaveError(null)
     if (!sessionId) {

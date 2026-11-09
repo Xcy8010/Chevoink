@@ -18,7 +18,8 @@ import * as novelTools from '../../api/lib/agent/tools/novel-tools.js'
 import { continuityValidateTool, continuityReviewTail, continuityCriticSystem, chapterBridgeCommitTool, chapterBridgeGetTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
-import { sceneTaskInputSchema, storyStateSchema } from '../../shared/contracts/index.js'
+import { enableAgentWritingScope } from '../../api/lib/agent/agent-writing-scope.js'
+import { sceneTaskInputSchema, storyStateSchema, taskSpecSchema } from '../../shared/contracts/index.js'
 import { allTools } from '../../api/lib/agent/tools/registry.js'
 import { buildTaskSpec, renderTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { normalizeBeatCandidates } from '../../api/lib/agent/story-compiler.js'
@@ -589,10 +590,22 @@ describe('Agent 3.0 Story Compiler 契约', () => {
 
   it('默认精品且终态提交允许空参数，由服务端解析当前编译状态', () => {
     const defaultSpec = buildTaskSpec({ runId: 'run-default', novelId: 'novel-1', chapterId: null, prompt: '写下一章' })
-    expect(defaultSpec).toMatchObject({ qualityMode: 'premium', creativeFreedom: 'balanced' })
-    expect(renderTaskSpec(defaultSpec)).toContain('创作模式：严谨创作')
+    expect(defaultSpec).toMatchObject({ qualityMode: 'premium', creativeFreedom: 'stable' })
+    expect(renderTaskSpec(defaultSpec)).toContain('创作模式：平衡创作')
+    expect(taskSpecSchema.parse({ ...defaultSpec, creativeFreedom: undefined }).creativeFreedom).toBe('balanced')
     const commit = allTools.find((tool) => tool.name === 'chapter_bridge_commit')
     expect(commit?.parameters.safeParse({}).success).toBe(true)
+  })
+
+  it.each([true, false])('injects strict revision guidance with and without an optional writing plan (unbound=%s)', unbound => {
+    const request = '只看不改，帮我检查本章。'
+    const spec = buildTaskSpec({ runId: 'strict', novelId: 'novel', chapterId: 'chapter', prompt: request, creativeFreedom: 'balanced' })
+    const prompt = renderTaskSpec(unbound ? enableAgentWritingScope(spec) : spec)
+    expect(prompt).toContain('创作模式：严谨创作')
+    expect(prompt).toContain('无需逐项询问作者')
+    expect(prompt).toContain('chapter_edit_range')
+    expect(prompt).toContain('readOnly=true')
+    expect(prompt).toContain(request)
   })
 
   it('场景任务不再因精品候选元数据缺失而失败，服务端会补齐两项审计候选', () => {

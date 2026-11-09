@@ -922,7 +922,7 @@ router.post('/runs', async (req: Request, res: Response): Promise<void> => {
       selection: body.selection ?? null,
       ...(body.agentWritingProtocol ? { agentWritingProtocol: body.agentWritingProtocol } : {}),
       attachments: body.attachments ?? [],
-      creativeFreedom: body.creativeFreedom ?? 'balanced',
+      creativeFreedom: body.creativeFreedom,
       qualityMode: body.qualityMode ?? 'premium',
       modelTier: body.modelTier,
       customModelId: body.customModelId,
