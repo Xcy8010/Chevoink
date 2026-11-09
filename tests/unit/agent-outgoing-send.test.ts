@@ -37,6 +37,34 @@ function sending(overrides: Record<string, unknown> = {}) {
   const send = loadCallback('handleSend', context) as (prompt: string, attachments: [], freedom: string, quality: string, skills: []) => Promise<void>
   return { context, send: () => send('合成请求', [], 'balanced', 'premium', []) }
 }
+it.each([null, 'chapter-a'])('only sends a manuscript selection with a chapter target (%s)', async chapterId => {
+  const selection = { start: 2, end: 4, text: '选文' }
+  const { context, send } = sending({ chapterId, selection })
+
+  await send()
+
+  expect(context.startAgentLoopRun).toHaveBeenCalledWith(expect.objectContaining({
+    chapterId,
+    prompt: '合成请求',
+    selection: chapterId ? selection : null,
+  }))
+})
+
+it('drops the selection when a deleted chapter is retried without a target', async () => {
+  class ApiError extends Error {
+    status = 404
+    code = 'CHAPTER_NOT_FOUND'
+  }
+  const selection = { start: 2, end: 4, text: '选文' }
+  const startAgentLoopRun = vi.fn().mockRejectedValueOnce(new ApiError()).mockResolvedValueOnce({ runId: 'run-a', runGoalId: null })
+  const { send } = sending({ chapterId: 'chapter-a', selection, AgentApiError: ApiError, startAgentLoopRun })
+
+  await send()
+
+  expect(startAgentLoopRun).toHaveBeenNthCalledWith(1, expect.objectContaining({ chapterId: 'chapter-a', selection }))
+  expect(startAgentLoopRun).toHaveBeenNthCalledWith(2, expect.objectContaining({ chapterId: null, selection: null }))
+})
+
 it('keeps preparation uncounted before configuration, ensureSession and HTTP, retaining its original task ownership', async () => {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-05T00:00:00Z'))
   const ready = deferred<void>(), ensured = deferred<string>(), admitted = deferred<{ runId: string; runGoalId: null }>()

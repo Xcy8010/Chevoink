@@ -381,6 +381,30 @@ describe.skipIf(!available)('fresh selected server admission transaction', () =>
     expect(await prisma.chapter.findUniqueOrThrow({ where: { id: f.chapterId } })).toEqual(before)
     expect(await prisma.chapterQualityReport.count({ where: { runId: result.runId } })).toBe(0)
   }))
+  it.each([false, true])('accepts a first chapter in an empty work with old selection metadata (durable=%s)', durable => fixture(async f => {
+    await prisma.chapter.delete({ where: { id: f.chapterId } })
+    const rollout = env.agentDurableRolloutUserIds
+    env.agentDurableRolloutUserIds = durable ? [f.userId] : []
+    const prompt = '请写一部海边小镇故事的第一章，只写正文。'
+    try {
+      const response = await request(app).post('/api/agent/runs')
+        .set('Cookie', `chevoink_session=${buildSessionTokens(f.userId, 0).accessToken}`)
+        .send({ novelId: f.novelId, sessionId: f.sessionId, chapterId: null, mode: 'build', prompt, agentWritingProtocol: 1,
+          selection: { start: 0, end: 2, text: '目录' } })
+
+      expect(response.status).toBe(200)
+      const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: response.body.data.runId as string } })
+      const spec = taskSpecSchema.parse(run.taskSpec)
+      expect(run).toMatchObject({ chapterId: null, runtimeProtocolVersion: durable ? 1 : 0, startRequest: { prompt, selection: null } })
+      expect(spec.scope.agentWritingProtocol).toBe(1)
+      expect(spec.scope.manuscriptProtocol).toBeUndefined()
+      expect(spec.scope.selectionBoundary).toBeUndefined()
+      expect(await prisma.agentMessage.findFirst({ where: { runId: run.id, role: 'user' }, select: { parts: true } }))
+        .toEqual({ parts: [{ type: 'text', text: prompt }] })
+      expect(await prisma.chapter.count({ where: { novelId: f.novelId } })).toBe(0)
+    } finally { env.agentDurableRolloutUserIds = rollout }
+  }))
+
   it('freezes owned revision and UTF-16 boundaries before asynchronous execution starts', () => fixture(async f => {
     const result = await startLoopRun(f.userId, { ...f, mode: 'build', prompt: '修改第一章选区', selection: { start: 5, end: 10, text: '选区原文。' } })
     const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: result.runId } })

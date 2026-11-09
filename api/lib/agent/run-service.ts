@@ -357,6 +357,7 @@ export async function startLoopRunLocked(
   options: StartLoopRunOptions = {},
 ): Promise<StartAgentLoopRunResponse> {
   input = persistedStartSchema.parse(JSON.parse(JSON.stringify(input)))
+  if (!input.chapterId?.trim() && input.selection) input = { ...input, selection: null }
   let steering: StartAgentLoopRunRequest | undefined
   if (!options.goal) {
     const resolved = await (await import('./goal-author-admission.js')).resolveGoalAuthorAdmission(userId, input,

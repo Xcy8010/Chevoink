@@ -1033,7 +1033,7 @@ export function AgentPanel({
             // Agent 默认最大权限：恒以 build 模式运行（后端路由也有强制兜底）
             mode: 'build' as const,
             prompt,
-            selection: selection ?? null,
+            selection: targetChapterId ? selection ?? null : null,
             attachments: attachments.length > 0 ? attachments : undefined,
             creativeFreedom: freedom,
             qualityMode: selectedQualityMode,

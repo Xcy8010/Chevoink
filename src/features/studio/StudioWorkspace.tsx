@@ -323,11 +323,7 @@ export default function StudioWorkspace() {
   })
   const agentRunAbortControllerRef = useRef<AbortController | null>(null)
   const coverGenerationWasActiveRef = useRef(false)
-  const [editorSelection, setEditorSelection] = useState<EditorSelectionState>({
-    start: 0,
-    end: 0,
-    text: '',
-  })
+  const [capturedSelection, setCapturedSelection] = useState<{ source: string; range: EditorSelectionState } | null>(null)
   const [coverKeywords, setCoverKeywords] = useState<string[]>([])
   const [coverMessage, setCoverMessage] = useState('先整理提示词，再生成候选封面。')
   const [pendingCoverUploadFile, setPendingCoverUploadFile] = useState<File | null>(null)
@@ -1632,6 +1628,16 @@ export default function StudioWorkspace() {
 
     return null
   }, [catalogDocument, catalogPreview, savedPlanFiles, selectedTreeItemId])
+
+  const selectionDocument = workspacePerspective === 'work' && workViewer !== 'document' ? null : activeWorkspaceDocument
+  const selectionChapter = selectionDocument || (workspacePerspective === 'work' && workViewer !== 'chapter') ? null : chapterDraft
+  const selectionSource = selectionDocument ? `${activeNovelId}:${selectionDocument.kind}:${selectionDocument.id}`
+    : selectionChapter ? `${activeNovelId}:chapter:${selectionChapter.id}` : null
+  if (capturedSelection && capturedSelection.source !== selectionSource) setCapturedSelection(null)
+  const editorSelection = capturedSelection?.range ?? { start: 0, end: 0, text: '' }
+  const handleEditorSelection = useCallback((range: EditorSelectionState) => {
+    setCapturedSelection(selectionSource && range.text ? { source: selectionSource, range } : null)
+  }, [selectionSource])
 
   const composerReferenceOptions = useMemo<Array<Omit<ComposerReference, 'offset'>>>(() => [
     {
@@ -3685,12 +3691,12 @@ export default function StudioWorkspace() {
     const text = editorSelection.text.trim()
     if (!text) return
     const volumeTitle = volumes.find((volume) => volume.id === activeChapterListItem?.volumeId)?.title
-    const sourceTitle = activeWorkspaceDocument?.title ?? (chapterDraft ? `${volumeTitle ? `${volumeTitle} / ` : ''}${chapterDraft.title || `第 ${chapterDraft.orderIndex} 章`}` : '')
+    const sourceTitle = selectionDocument?.title ?? (selectionChapter ? `${volumeTitle ? `${volumeTitle} / ` : ''}${selectionChapter.title || `第 ${selectionChapter.orderIndex} 章`}` : '')
     if (!sourceTitle) return
-    const sourceContent = activeWorkspaceDocument?.content ?? chapterDraft?.content ?? ''
+    const sourceContent = selectionDocument?.content ?? selectionChapter?.content ?? ''
     const startLine = sourceContent.slice(0, editorSelection.start).split('\n').length
     const endLine = startLine + Math.max(0, text.split('\n').length - 1)
-    const referenceKind = activeWorkspaceDocument?.kind ?? 'chapter'
+    const referenceKind = selectionDocument?.kind ?? 'chapter'
     const name = sourceTitle.trim().replace(/\.md$/i, '') || (referenceKind === 'catalog' ? '目录' : referenceKind === 'plan' ? '创作计划' : '章节正文')
     useAgentStore.getState().addComposerReference({
       id: `${activeNovelId}:${selectedTreeItemId ?? selectedChapterId ?? 'document'}:${editorSelection.start}:${editorSelection.end}`,
@@ -3804,7 +3810,7 @@ export default function StudioWorkspace() {
             selectedChapterId && !selectedChapterId.startsWith('local-') ? selectedChapterId : null
           }
           activityChapterTitles={activityChapterTitles}
-          selection={editorSelection.text.trim() ? editorSelection : null}
+          selection={selectionChapter?.id === selectedChapterId && editorSelection.text.trim() ? editorSelection : null}
           ensureSession={ensureAgentLoopSession}
           onGoalSessionCreated={handleGoalSessionCreated}
           onStreamEvent={handleAgentStreamEvent}
@@ -3940,7 +3946,7 @@ export default function StudioWorkspace() {
       chapterSaveMessage={saveDisplayMessage}
       latestWordCountLabel={latestWordCountLabel}
       selectedCommentCount={activeChapterListItem?.commentCount ?? 0}
-      onSelectionChange={setEditorSelection}
+      onSelectionChange={handleEditorSelection}
       selection={editorSelection}
       onAddSelection={handleAddViewerSelectionToAgent}
       onSave={() => void persistChapter('manual')}
@@ -4327,7 +4333,7 @@ export default function StudioWorkspace() {
                   draft={workViewer === 'chapter' ? chapterDraft : null}
                   workspaceDocument={workViewer === 'document' ? activeWorkspaceDocument : null}
                   loading={workViewer === 'chapter' ? chapterQuery.isLoading : plansLoadedNovelId !== activeNovelId || agentSessionsResolving} selection={editorSelection}
-                  onChange={handleChapterDraftChange} onSelectionChange={setEditorSelection}
+                  onChange={handleChapterDraftChange} onSelectionChange={handleEditorSelection}
                   onWorkspaceDocumentChange={handleWorkspaceDocumentChange}
                   onAddSelection={handleAddViewerSelectionToAgent}
                   onCreateVolume={handleRequestCreateVolume} onCreateChapter={handleRequestCreateChapter}
