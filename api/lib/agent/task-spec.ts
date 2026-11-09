@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { CREATIVE_FREEDOM_LABELS, DEFAULT_CREATIVE_FREEDOM } from '../../../shared/contracts/agent-window-configuration.js'
+import { CREATIVE_FREEDOM_LABELS } from '../../../shared/contracts/agent-window-configuration.js'
 import { DataAccessError } from '../prisma.js'
 import { isElidedVolumeAddition } from './volume-create-intent.js'
 import { localEditGuidance } from './local-edit-scope.js'
@@ -403,7 +403,9 @@ export function buildTaskSpec(input: {
         : []),
     ],
     ambiguity: input.prompt.trim().length <= 2 ? 'must_ask' : 'safe_to_assume',
-    creativeFreedom: input.creativeFreedom ?? DEFAULT_CREATIVE_FREEDOM,
+    // Fresh admission passes the window mode. Legacy contract reconstruction
+    // keeps the historical meaning when no mode was recorded.
+    creativeFreedom: input.creativeFreedom ?? 'balanced',
     qualityMode: input.qualityMode ?? 'premium',
     createdAt: new Date().toISOString(),
   }

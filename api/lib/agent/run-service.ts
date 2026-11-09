@@ -193,7 +193,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
     if (current.status !== 'queued') throw new DataAccessError(409, 'RUN_IN_PROGRESS', '初始化期间任务状态已变化。')
     if (current.taskSpec) return taskSpecSchema.parse(current.taskSpec)
     let task = buildTaskSpec({ runId, novelId: run.novelId, chapterId: run.chapterId, prompt: input.prompt, selection: input.selection,
-      creativeFreedom: input.creativeFreedom ?? 'balanced', qualityMode: input.qualityMode })
+      creativeFreedom: input.creativeFreedom, qualityMode: input.qualityMode })
     if (task.postconditions.some(item => item.code === 'EARLIER_CONTENT_UNCHANGED')) {
       const chapters = await tx.chapter.findMany({ where: { ...activeChapterScope(run.novelId), authorId: userId }, select: { id: true } })
       task = { ...task, scope: { ...task.scope, chapterIds: chapters.map(chapter => chapter.id) } }
@@ -1246,7 +1246,7 @@ async function continueLoopRunLocked(
     prompt: resumePrompt,
     attachments: queuedInput?.attachments,
     selection: queuedInput?.selection,
-    creativeFreedom: queuedInput?.creativeFreedom ?? 'balanced',
+    creativeFreedom: queuedInput?.creativeFreedom,
     qualityMode: queuedInput?.qualityMode,
     pinnedSkillIds: queuedInput?.pinnedSkillIds,
     pinnedSubagentId: queuedInput?.pinnedSubagentId,

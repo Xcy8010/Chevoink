@@ -18,6 +18,7 @@ import * as novelTools from '../../api/lib/agent/tools/novel-tools.js'
 import { continuityValidateTool, continuityReviewTail, continuityCriticSystem, chapterBridgeCommitTool, chapterBridgeGetTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
 import type { ToolContext } from '../../api/lib/agent/tools/types.js'
 
+import { agentWindowConfigurationSchema } from '../../shared/contracts/agent-window-configuration.js'
 import { enableAgentWritingScope } from '../../api/lib/agent/agent-writing-scope.js'
 import { sceneTaskInputSchema, storyStateSchema, taskSpecSchema } from '../../shared/contracts/index.js'
 import { allTools } from '../../api/lib/agent/tools/registry.js'
@@ -589,10 +590,12 @@ describe('Agent 3.0 Story Compiler 契约', () => {
   })
 
   it('默认精品且终态提交允许空参数，由服务端解析当前编译状态', () => {
-    const defaultSpec = buildTaskSpec({ runId: 'run-default', novelId: 'novel-1', chapterId: null, prompt: '写下一章' })
-    expect(defaultSpec).toMatchObject({ qualityMode: 'premium', creativeFreedom: 'stable' })
-    expect(renderTaskSpec(defaultSpec)).toContain('创作模式：平衡创作')
-    expect(taskSpecSchema.parse({ ...defaultSpec, creativeFreedom: undefined }).creativeFreedom).toBe('balanced')
+    const request = { runId: 'run-default', novelId: 'novel-1', chapterId: null, prompt: '写下一章' }
+    const fresh = buildTaskSpec({ ...request, creativeFreedom: agentWindowConfigurationSchema.parse({}).creativeFreedom })
+    expect(fresh).toMatchObject({ qualityMode: 'premium', creativeFreedom: 'stable' })
+    expect(renderTaskSpec(fresh)).toContain('创作模式：平衡创作')
+    expect(buildTaskSpec(request).creativeFreedom).toBe('balanced')
+    expect(taskSpecSchema.parse({ ...fresh, creativeFreedom: undefined }).creativeFreedom).toBe('balanced')
     const commit = allTools.find((tool) => tool.name === 'chapter_bridge_commit')
     expect(commit?.parameters.safeParse({}).success).toBe(true)
   })
