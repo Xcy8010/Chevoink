@@ -972,6 +972,8 @@ html.dark .studio-workspace .agent-composer-goal { background: #333333; }
 @media (hover: hover) {
   .agent-activity-step .agent-activity-chevron { opacity: 0; }
   .agent-activity-step:is(:hover, :focus-visible) .agent-activity-chevron { opacity: 1; }
+  .agent-activity-step:enabled:is(:hover, :focus-visible) .agent-activity-label { color: var(--text-primary); }
+  html.dark .agent-activity-step:enabled:is(:hover, :focus-visible) .agent-activity-label { color: #fff; }
 }
 .agent-process-region { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows 200ms var(--easing-default), opacity 160ms ease; }
 .agent-process-region[data-agent-process-open='false'] { grid-template-rows: 0fr; opacity: 0; pointer-events: none; }

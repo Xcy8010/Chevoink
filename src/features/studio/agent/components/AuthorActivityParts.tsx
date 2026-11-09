@@ -205,11 +205,11 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
   return <div className="min-w-0" data-author-activity={group ? '' : undefined} data-author-working={workingLabel ? '' : undefined} data-author-step>
     <button type="button" aria-expanded={group ? open : undefined} aria-controls={group ? detailsId : undefined}
       disabled={!group} onClick={() => setOpen(value => !value)}
-      className="agent-activity-step flex min-h-7 w-fit max-w-full items-center gap-2 px-1 text-left text-sm font-medium leading-7 text-[var(--text-secondary)] focus-visible:underline focus-visible:outline-none">
+      className="agent-activity-step flex min-h-7 w-fit max-w-full items-center gap-2 px-1 text-left text-base font-medium leading-7 text-[var(--text-secondary)] focus-visible:underline focus-visible:outline-none">
       <Icon aria-hidden className="h-4 w-4 shrink-0" />
       <span className="min-w-0 break-words text-balance">
         <span aria-live={active || running || workingLabel ? 'polite' : undefined} data-activity-running={executing || undefined}
-          className={executing || workingLabel ? 'agent-processing-shimmer' : undefined}>{label}</span>
+          className={cn('agent-activity-label', (executing || workingLabel) && 'agent-processing-shimmer')}>{label}</span>
         {group ? <ChevronDown aria-hidden className={cn('agent-activity-chevron ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-[opacity,transform]', open ? 'rotate-0' : '-rotate-90')} /> : null}
       </span>
     </button>
@@ -226,7 +226,7 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
 export function AuthorActivitySummary({ timing, active, open, onToggle }: { timing: AgentRunTiming; active: boolean; open: boolean; onToggle?: () => void }) {
   const label = active || timing.elapsedMs !== null
     ? <ProcessDuration timing={timing} active={active} />
-    : <span className="text-[11px] text-[var(--text-secondary)]">查看处理过程</span>
+    : <span className="text-sm text-[var(--text-secondary)]">查看处理过程</span>
   return <div className="mb-2 border-b border-[var(--border-subtle)] pb-1.5" data-author-timer>
     {onToggle ? <button type="button" aria-expanded={open} onClick={onToggle}
       className="inline-flex min-h-7 items-center gap-1 text-left text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:underline focus-visible:outline-none">
@@ -237,7 +237,7 @@ export function AuthorActivitySummary({ timing, active, open, onToggle }: { timi
 }
 
 export function AuthorProgressText({ text, className }: { text: string; className?: string }) {
-  return <p className={cn('break-words text-pretty text-sm font-medium leading-7 text-[var(--text-primary)]', className)} data-author-progress>{text}</p>
+  return <p className={cn('break-words text-pretty text-base font-medium leading-7 text-[var(--text-primary)]', className)} data-author-progress>{text}</p>
 }
 
 export const AuthorActivityParts = memo(function AuthorActivityParts({
