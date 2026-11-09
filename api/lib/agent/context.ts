@@ -618,8 +618,9 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     chapterLine,
   })
 
+  const canUseEditorWritingContext = !currentSkillRouter || input.taskSpec.scope.agentWritingProtocol !== 1
   const chapterWriting = manuscriptDelivery
-    && (writingTargets.length > 0 || input.taskSpec.scope.chapterIds?.includes(input.chapterId ?? ''))
+    && (writingTargets.length > 0 || canUseEditorWritingContext && input.taskSpec.scope.chapterIds?.includes(input.chapterId ?? ''))
   const writingChapterId = writingTargets.length === 1 ? writingTargets[0].chapterId ?? null : writingTargets.length > 1 ? null : input.chapterId
   const subject = { userId: input.userId, novelId: input.novelId, runId: input.runId }
   const referenceTarget = chapterWriting ? writingTargets[0]?.orderIndex ?? chapter?.orderIndex : undefined

@@ -361,6 +361,10 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(intent).toContain('续接已有章节看目标章尾，写新章按需要看紧邻前章的结尾')
     expect(intent).toContain('需要补读时用 chapter_read 指定相关章节和范围')
     expect(intent).not.toContain('[写前局部视图')
+    expect(input.taskSpec.scope.chapterIds).toContain(input.chapterId)
+    expect(readChapterWritingBackground).not.toHaveBeenCalled()
+    expect(readWritingContinuityReference).not.toHaveBeenCalled()
+    expect(readWritingPresentation).not.toHaveBeenCalled()
   })
 
   it('retains the frozen 4.3.0 unbound draft route while using the same writing core', async () => {
