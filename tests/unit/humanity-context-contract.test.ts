@@ -18,14 +18,19 @@ describe('contextual prose prompt and exact-edit contract (no literary score)', 
     const input = buildCriticInput(bundle, {}, sources)
     expect(input).toContain(sample.content)
     expect(sources.entries.map(entry => entry.text).join('')).toBe(sample.content)
-    if (!sample.target) return
+    if (!sample.target) {
+      const accepted = coerceCriticFindings({ findings: [] }, sources)!
+      expect(prepareQualityFindings(sample.content, [], accepted.findings, true, sources)).toMatchObject({ complete: true, findings: [] })
+      return
+    }
     const target = sources.entries.find(entry => entry.text === sample.target)!
     expect(target).toBeDefined()
     const result = coerceCriticFindings({ findings: [{ sourceId: target.id, signal: 'explanation_echo', severity: 'advisory',
       explanation: sample.rationale, suggestion: `仅减少证据中解释负担，保留${sample.preserve.join('、')}`, confidence: 0.6 }] }, sources)!
     const prepared = prepareQualityFindings(sample.content, [], result.findings, true, sources)
     expect(prepared.complete).toBe(true)
-    expect(prepared.findings).toMatchObject([{ start: sample.content.indexOf(sample.target), evidence: sample.target, severity: 'advisory' }])
+    const start = sample.content.indexOf(sample.target)
+    expect(prepared.findings).toMatchObject([{ start, end: start + sample.target.length, evidence: sample.target, severity: 'advisory' }])
     // Replacing only the bound target preserves the preceding scene and facts.
     const finding = prepared.findings[0]
     const replacement = sample.id === 'cross-sentence-crisis' ? '氧气耗尽，舱门自锁。救援艇还要六天。' : '女儿还没上车。她又拨了一遍。'

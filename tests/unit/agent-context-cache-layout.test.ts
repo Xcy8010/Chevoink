@@ -356,7 +356,11 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(text.split(MANUSCRIPT_WRITING_CORE)).toHaveLength(2)
     expect(text).not.toContain('AI 痕迹规避')
     expect(text).not.toContain(LOCAL_FICTION_REVIEW_GUIDANCE)
-    expect(String(result.messages.at(-1)?.content).startsWith(input.prompt)).toBe(true)
+    const intent = String(result.messages.at(-1)?.content)
+    expect(intent.startsWith(input.prompt)).toBe(true)
+    expect(intent).toContain('续接已有章节看目标章尾，写新章按需要看紧邻前章的结尾')
+    expect(intent).toContain('需要补读时用 chapter_read 指定相关章节和范围')
+    expect(intent).not.toContain('[写前局部视图')
   })
 
   it('retains the frozen 4.3.0 unbound draft route while using the same writing core', async () => {
@@ -367,6 +371,7 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     const result = await assembleContext(input)
     expect(result.skillRoute?.selected).toEqual([])
     expect(String(result.messages[0].content)).toContain(MANUSCRIPT_WRITING_CORE)
+    expect(String(result.messages.at(-1)?.content)).not.toContain('续接已有章节看目标章尾')
   })
 
   it('injects one core and one shared skill boundary when draft resources are active', async () => {

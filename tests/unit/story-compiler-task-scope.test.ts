@@ -340,6 +340,19 @@ describe('story compiler task identity', () => {
     db.storyCompilation.findFirst.mockResolvedValue({ id: 'broken', bridge: null })
     expect(await chapterBridgeGetTool.execute(ctx, {})).toMatchObject({ outcome: 'failed', failureCode: 'COMPILATION_NOT_FOUND' })
   })
+  it('reads saved scene choices as plans even when the chapter has saved prose', async () => {
+    const scene = { ordinal: 1, purpose: '和解', goal: '保住友谊', obstacle: '误会', choice: '当面道歉', cost: '说出实情', turn: '好友松口' }
+    db.storyCompilation.findFirst.mockImplementation(async query => query.include?.sceneTasks ? {
+      id: 'own-compiler', chapterId: 'own32', chapter: { revision: 2, content: '他把信留在门边。' },
+      targetOrderIndex: 32, stage: 'write', sceneTasks: [scene], bridge: { fromChapterId: 'old31', sourceRevision: 3 },
+    } : null)
+
+    const result = await chapterBridgeGetTool.execute(ctx, { compilationId: 'own-compiler' })
+
+    expect(result.output).toContain(`场景任务（计划）：${JSON.stringify([scene])}`)
+    expect(result.output).toContain('实际发生的事以已保存正文为准')
+    expect(db.storyCompilation.update).not.toHaveBeenCalled()
+  })
   it('re-reads predecessor evidence for bridge_get and never returns a stale saved injury reference', async () => {
     const stored = { version: 1, targetOrderIndex: 32, predecessor: { chapterId: 'old31', revision: 3 },
       facts: [{ field: 'body', claim: '旧版伤势已失效，不能复用此句' }] }

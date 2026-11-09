@@ -635,6 +635,9 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
   const continuityReferenceText = renderWritingContinuityReference(continuityReference)
   if (continuityReferenceText) intentSections.push(continuityReferenceText)
   if (localWritingContext) intentSections.push(localWritingContext)
+  if (currentSkillRouter && useWritingCore && hasCapability('chapter_read')) {
+    intentSections.push('参考原文时以作者本次要求为先。续接已有章节看目标章尾，写新章按需要看紧邻前章的结尾，改稿看拟改段落及必要上下文。已有摘录可作参考；需要补读时用 chapter_read 指定相关章节和范围。多章逐章定位，沿用适合本场的声口和视角，情绪与节奏随剧情变化。')
+  }
   if (frozenWriting) {
     intentSections.push(`[服务端冻结的本任务章节目标]\n${writingTargets.map(target => `全书第 ${target.orderIndex} 章，${target.chapterId ? `原目标 chapterId=${target.chapterId}` : '新增目标；真实绑定与已保存进度以下方本任务编译状态为准'}`).join('\n')}\n编辑器当前第${chapter?.orderIndex ?? '未知'}章只是界面位置，不能覆盖上述目标。历史任务的失败、检查上限和助手自述不属于当前目标；原目标未实际保存正文时，不能声称已写完或提交终态。taskSpec 的任务身份、章节编号、编译编号和派生窗口编号不能互换；只使用对应工具返回的真实身份。`)
   }

@@ -63,7 +63,7 @@ describe.skipIf(!dbAvailable)('Agent 3.0 人类感质量门（需 DB）', () => 
     const sample = HUMANITY_CONTEXT_SCENARIOS[1]
     const targetId = randomUUID()
     const volumeId = (await prisma.volume.findFirstOrThrow({ where: { novelId }, select: { id: true } })).id
-    const suffix = '\n走廊里的灯仍亮着。'
+    const suffix = '\n齐遥把扳手吐进掌心。“六天？行，先撑六分钟。”'
     const content = sample.content + suffix
     try {
       await prisma.chapter.create({ data: { id: targetId, novelId, authorId: userId, volumeId, orderIndex: 9001, orderInVolume: 9001,
@@ -82,7 +82,8 @@ describe.skipIf(!dbAvailable)('Agent 3.0 人类感质量门（需 DB）', () => 
       const changed = await applyQualityRepair({ userId, novelId, reportId: report.id, replacements: [{ findingId: report.findings[0].id, replacement }] })
       expect(changed.updated.content).toBe(content.replace(sample.target, replacement))
       expect(changed.updated.content.endsWith(suffix)).toBe(true)
-      for (const fact of sample.preserve) expect(changed.updated.content).toContain(fact)
+      expect(changed.updated.content).toContain('氧气耗尽，舱门自锁。救援艇还要六天。')
+      expect(changed.updated.content).not.toContain('所以他现在很着急')
       expect(changed.updated.revision).toBe(2)
       expect((await getQualityReport(userId, novelId, report.id)).findings[0].disposition).toBe('repaired')
     } finally { await prisma.chapter.deleteMany({ where: { id: targetId, novelId, authorId: userId } }) }

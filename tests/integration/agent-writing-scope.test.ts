@@ -527,8 +527,16 @@ describe.skipIf(!available)('atomic original chapter scope', () => {
             { id: 'commit', name: chapterBridgeCommitTool.name, arguments: JSON.stringify({ compilationId: f.compilation.id }) },
             { id: 'repeat', name: chapterBridgeCommitTool.name, arguments: JSON.stringify({ compilationId: f.compilation.id }) },
           ] }] } })
-      expect((await executeDurableToolStep(f.lease, ctx.signal)).kind).toBe('tool')
     }
+    const read = f.lease
+      ? await executeDurableToolStep(f.lease, ctx.signal).then(step => {
+        if (step.kind !== 'tool') throw new Error('Expected the real chapter bridge read')
+        return step.result
+      })
+      : await chapterBridgeGetTool.execute(ctx, { compilationId: f.compilation.id })
+    expect(read.output).toContain('场景任务（计划）：')
+    expect(read.output).toContain(`"choice":${JSON.stringify(f.compilation.sceneTasks[0].choice)}`)
+    expect(read.output).toContain('实际发生的事以已保存正文为准')
     const call = async (input: typeof args | { compilationId: string }) => {
       if (!f.lease) return chapterBridgeCommitTool.execute(ctx, input)
       const step = await executeDurableToolStep(f.lease, ctx.signal)

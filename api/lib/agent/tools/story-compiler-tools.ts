@@ -441,7 +441,8 @@ ${renderWritingPlanContext(compilation.preparedContext)}
 ${planStale ? '冻结计划已变化，以下保留原始历史报告，不能认证当前正文：' + JSON.stringify(compilation.validation) : ''}
 原章节桥保存的前章来源：${JSON.stringify({ chapterId: compilation.bridge.fromChapterId, revision: compilation.bridge.sourceRevision })}
 ${renderWritingContinuityReference(continuityReference) ?? ''}
-场景任务：${JSON.stringify(compilation.sceneTasks.map(task => ({ ordinal: task.ordinal, purpose: task.purpose, goal: task.goal, obstacle: task.obstacle, cost: task.cost, turn: task.turn })))}
+场景任务（计划）：${JSON.stringify(compilation.sceneTasks.map(task => ({ ordinal: task.ordinal, purpose: task.purpose, goal: task.goal, obstacle: task.obstacle, choice: task.choice, cost: task.cost, turn: task.turn })))}
+场景任务记录拟定选择及后果；实际发生的事以已保存正文为准。
 当前报告意见：${JSON.stringify(review?.decisionDetails ?? [])}
 明确保留意见：${JSON.stringify(retained)}\n${review ? chapterReviewDecisionGuidance(review) : ''}`,
       display: { kind: 'storyCompiler', compilationId: compilation.id, phase: compilation.stage, title: review?.terminalCommitted ? '章节已提交' : '章节桥', detail: items[1], items } }
