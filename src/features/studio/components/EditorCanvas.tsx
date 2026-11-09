@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { FilePenLine, FolderPlus, LoaderCircle, MessageSquarePlus, MoreHorizontal, RefreshCcw, Settings2, Upload } from 'lucide-react'
+import { useCallback, useLayoutEffect, useRef, useState } from 'react'
+import { ChevronDown, FilePenLine, FolderPlus, LoaderCircle, MessageSquarePlus, MoreHorizontal, RefreshCcw, Settings2, Upload } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
 import Surface from '@/components/ui/Surface'
@@ -61,6 +61,8 @@ type EditorCanvasProps = {
   embedded?: boolean
   /** mobile=手机端零卡片单滚动形态；默认保持桌面卡片形态 */
   variant?: 'default' | 'mobile'
+  onSelectMobileChapter?: () => void
+  mobileScope?: string | null
   /** Agent 正在流式生成的只读正文；未落库前覆盖显示但不触发用户草稿。 */
   streamingContent?: string
   writeLocked?: boolean
@@ -109,6 +111,8 @@ export default function EditorCanvas({
   onRejectPlanReviewHunk,
   embedded = false,
   variant = 'default',
+  onSelectMobileChapter,
+  mobileScope,
   streamingContent,
   writeLocked = false,
 }: EditorCanvasProps) {
@@ -125,6 +129,23 @@ export default function EditorCanvas({
   const streamingContainer = useStreamingAutoFollow<HTMLElement>(streaming, streamingContent)
   const streamingTextarea = useStreamingAutoFollow<HTMLTextAreaElement>(streaming, streamingContent)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const mobileChapterScope = JSON.stringify([mobileScope, chapterDraft?.id])
+  const mobileReviewScroll = useRef<{ scope: string; top: number } | null>(null)
+  const reviewingChapter = Boolean(pendingChapterReview)
+  const mobileChapterEditor = isMobile && !workspaceDocument && Boolean(chapterDraft)
+  const rememberMobileReviewScroll = useCallback((top: number) => {
+    mobileReviewScroll.current = { scope: mobileChapterScope, top }
+  }, [mobileChapterScope])
+
+  const editorViewport = streamingContainer.nodeRef
+  useLayoutEffect(() => {
+    if (!mobileChapterEditor || reviewingChapter) return
+    const viewport = editorViewport.current
+    const previous = mobileReviewScroll.current
+    if (viewport) viewport.scrollTop = previous?.scope === mobileChapterScope ? previous.top : 0
+    mobileReviewScroll.current = null
+  }, [editorViewport, mobileChapterEditor, mobileChapterScope, reviewingChapter])
+
   const sectionClassName = embedded
     ? 'flex h-full min-h-0 flex-col overflow-hidden bg-[var(--surface-default)]'
     : 'flex h-full min-h-0 flex-col overflow-hidden pb-2'
@@ -358,15 +379,36 @@ export default function EditorCanvas({
   }
 
   if (isMobile) {
+    const chapterTitle = (pendingChapterReview?.after.title ?? chapterDraft.title).trim() || `第 ${chapterDraft.orderIndex} 章`
+    const menuItemClassName = 'flex min-h-11 w-full items-center gap-2.5 px-4 text-left text-sm text-[var(--text-primary)] transition-colors active:bg-[var(--surface-muted)] disabled:opacity-40'
+    const runMenuAction = (action: () => void) => {
+      setMobileMenuOpen(false)
+      action()
+    }
+
     return (
-      <section className="relative flex min-h-0 flex-1 flex-col">
-        <div className="flex shrink-0 items-center justify-between gap-2 px-1 pb-2">
-          <span className="min-w-0 truncate text-xs text-[var(--text-tertiary)]">{latestWordCountLabel}</span>
-          <div className="relative flex shrink-0 items-center gap-1.5">
+      <section className="flex min-h-0 flex-1 flex-col bg-[var(--surface-default)]">
+        <div data-studio-region="mobile-writing-navigation" className="flex min-h-11 shrink-0 items-center gap-2 border-b border-[var(--border-subtle)] pl-4 pr-2">
+          {onSelectMobileChapter ? (
+            <button
+              type="button"
+              onClick={() => runMenuAction(onSelectMobileChapter)}
+              aria-label={`选择章节，当前：${chapterTitle}`}
+              className="-ml-1 inline-flex min-h-11 min-w-0 flex-1 items-center gap-1 rounded-md px-1 text-left text-sm font-medium text-[var(--text-primary)] active:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)]"
+            >
+              <span className="truncate">{chapterTitle}</span>
+              <ChevronDown aria-hidden="true" className="h-4 w-4 shrink-0 text-[var(--text-secondary)]" />
+            </button>
+          ) : (
+            <span className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--text-primary)]">{chapterTitle}</span>
+          )}
+          <span className="shrink-0 text-xs tabular-nums text-[var(--text-secondary)]">{latestWordCountLabel}</span>
+          <div className="relative shrink-0">
             <button
               type="button"
               onClick={() => setMobileMenuOpen((prev) => !prev)}
               aria-label="更多操作"
+              aria-expanded={mobileMenuOpen}
               className="inline-flex h-11 w-11 items-center justify-center rounded-lg text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-muted)] active:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none"
             >
               <MoreHorizontal className="h-4 w-4" />
@@ -374,28 +416,35 @@ export default function EditorCanvas({
             {mobileMenuOpen ? (
               <>
                 <div className="fixed inset-0 z-30" onClick={() => setMobileMenuOpen(false)} aria-hidden />
-                <div className="absolute right-0 top-full z-40 mt-2 w-44 overflow-hidden rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-default)] py-1 shadow-[0_16px_40px_rgba(15,23,42,0.16)]">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMobileMenuOpen(false)
-                      onOpenChapterSettings()
-                    }}
-                    className="flex min-h-[44px] w-full items-center gap-2.5 px-4 text-left text-sm text-[var(--text-primary)] transition-colors active:bg-[var(--surface-muted)]"
-                  >
-                    <Settings2 className="h-4 w-4 shrink-0 text-[var(--text-secondary)]" />
+                <div className="absolute right-0 top-full z-40 mt-1 max-h-[50dvh] w-52 overflow-y-auto overscroll-contain rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] py-1 shadow-[var(--shadow-modal)]">
+                  {pendingChapterReview ? (
+                    <div className="border-b border-[var(--border-subtle)] pb-1">
+                      {onKeepPendingReview ? (
+                        <button type="button" disabled={pendingChapterReviewBusy} onClick={() => runMenuAction(onKeepPendingReview)} className={menuItemClassName}>保留整章</button>
+                      ) : null}
+                      {onRevertPendingReview ? (
+                        <button type="button" disabled={pendingChapterReviewBusy} onClick={() => runMenuAction(onRevertPendingReview)} className={menuItemClassName}>
+                          {pendingChapterReview.rollbackSnapshot.kind === 'remove_created_chapter' ? '撤回新建章节' : '撤回本次整章修改'}
+                        </button>
+                      ) : null}
+                      {reviewFileCount > 1 && onNavigateReviewFile ? (
+                        <>
+                          <p className="px-4 pt-2 text-xs tabular-nums text-[var(--text-secondary)]">待审章节 {reviewFileIndex} / {reviewFileCount}</p>
+                          <button type="button" disabled={pendingChapterReviewBusy} onClick={() => runMenuAction(() => onNavigateReviewFile(-1))} className={menuItemClassName}>上一待审章节</button>
+                          <button type="button" disabled={pendingChapterReviewBusy} onClick={() => runMenuAction(() => onNavigateReviewFile(1))} className={menuItemClassName}>下一待审章节</button>
+                        </>
+                      ) : null}
+                    </div>
+                  ) : pendingReviewRemaining > 0 && onGoToNextReviewFile ? (
+                    <button type="button" onClick={() => runMenuAction(onGoToNextReviewFile)} className={menuItemClassName}>下一待审章节</button>
+                  ) : null}
+                  <button type="button" onClick={() => runMenuAction(onOpenChapterSettings)} className={menuItemClassName}>
+                    <Settings2 aria-hidden="true" className="h-4 w-4" />
                     章节设置
                   </button>
                   {onPublishNovel ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setMobileMenuOpen(false)
-                        onPublishNovel()
-                      }}
-                      className="flex min-h-[44px] w-full items-center gap-2.5 px-4 text-left text-sm text-[var(--text-primary)] transition-colors active:bg-[var(--surface-muted)]"
-                    >
-                      <Upload className="h-4 w-4 shrink-0 text-[var(--text-secondary)]" />
+                    <button type="button" onClick={() => runMenuAction(onPublishNovel)} className={menuItemClassName}>
+                      <Upload aria-hidden="true" className="h-4 w-4" />
                       {novelPublished ? '更新发布' : '发布作品'}
                     </button>
                   ) : null}
@@ -404,43 +453,35 @@ export default function EditorCanvas({
             ) : null}
           </div>
         </div>
-        <div ref={streamingContainer.ref} onScroll={streamingContainer.onScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1 pb-8 [-webkit-overflow-scrolling:touch]">
-          {pendingChapterReview ? (
-            <ChapterChangeReview
-              review={pendingChapterReview}
-              busy={pendingChapterReviewBusy}
-              onKeep={onKeepPendingReview ?? (() => undefined)}
-              onRevert={onRevertPendingReview ?? (() => undefined)}
-              onAcceptHunk={onAcceptReviewHunk}
-              onRejectHunk={onRejectReviewHunk}
-              fileIndex={reviewFileIndex}
-              fileCount={reviewFileCount}
-              onNavigateFile={onNavigateReviewFile}
-              className="min-h-[60vh]"
+        {pendingChapterReview ? (
+          <ChapterChangeReview
+            key={JSON.stringify([mobileChapterScope, pendingChapterReview.id])}
+            mobile
+            onMobileScroll={rememberMobileReviewScroll}
+            review={pendingChapterReview}
+            busy={pendingChapterReviewBusy}
+            onKeep={onKeepPendingReview ?? (() => undefined)}
+            onRevert={onRevertPendingReview ?? (() => undefined)}
+            onAcceptHunk={onAcceptReviewHunk}
+            onRejectHunk={onRejectReviewHunk}
+          />
+        ) : (
+          <div ref={streamingContainer.ref} onScroll={streamingContainer.onScroll} data-mobile-manuscript className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-8 pt-3 [-webkit-overflow-scrolling:touch]">
+            <LocalFirstTextarea
+              autoGrow
+              data-kb-reveal="off"
+              aria-label="章节正文"
+              value={chapterDraft.content}
+              readOnly={writeLocked}
+              resetKey={chapterDraft.id}
+              onCommit={(content) => onChange({ ...chapterDraft, content })}
+              onSelectionChange={onSelectionChange}
+              onBlur={() => onEditorBlur?.()}
+              className="studio-editor-content w-full bg-transparent text-[var(--text-primary)] outline-none"
+              placeholder="继续写这一章的正文。"
             />
-          ) : (
-            <>
-              <p className="border-b border-[var(--border-subtle)] pb-3 text-lg font-semibold tracking-[0.01em] text-[var(--text-primary)]">
-                {chapterDraft.title.trim() || `第 ${chapterDraft.orderIndex} 章`}
-              </p>
-              <LocalFirstTextarea
-                autoGrow
-                data-kb-reveal="off"
-                value={chapterDraft.content}
-                resetKey={chapterDraft.id}
-                onCommit={(content) => onChange({ ...chapterDraft, content })}
-                onSelectionChange={onSelectionChange}
-                onBlur={() => onEditorBlur?.()}
-                wrapperClassName="mt-3"
-                className="studio-editor-content w-full bg-transparent composer-body-text text-[var(--text-primary)] outline-none"
-                placeholder="继续写这一章的正文。"
-              />
-            </>
-          )}
-        </div>
-        {onGoToNextReviewFile && !pendingChapterReview ? (
-          <NextReviewFilePill count={pendingReviewRemaining} onClick={onGoToNextReviewFile} />
-        ) : null}
+          </div>
+        )}
       </section>
     )
   }

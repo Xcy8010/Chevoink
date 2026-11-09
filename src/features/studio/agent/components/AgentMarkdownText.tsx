@@ -82,7 +82,7 @@ export const AgentMarkdownText = memo(function AgentMarkdownText({ text, streami
   const content = useStreamingText(text, streaming, identity)
   if (!content.trim()) return null
   const fallback = <p className="whitespace-pre-wrap break-words text-pretty">{content}</p>
-  return <div className="min-w-0 max-w-full break-words text-[15px] leading-7 text-[var(--text-primary)] [overflow-wrap:anywhere]">
+  return <div className="min-w-0 max-w-full break-words text-[15px] font-normal leading-7 text-[var(--text-primary)] [overflow-wrap:anywhere]">
     <MarkdownBoundary key={identity} fallback={fallback}><Suspense fallback={fallback}><Markdown text={content} /></Suspense></MarkdownBoundary>
   </div>
 })

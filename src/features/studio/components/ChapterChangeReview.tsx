@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, X } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -22,6 +22,8 @@ type ChapterChangeReviewProps = {
   fileCount?: number
   onNavigateFile?: (offset: 1 | -1) => void
   className?: string
+  mobile?: boolean
+  onMobileScroll?: (top: number) => void
 }
 
 /** 把 diff 片段按 hunk 分组成渲染块：未变更片段独立成块，同一 hunk 的红/绿片段合成一块并挂块级定夺按钮 */
@@ -54,6 +56,8 @@ export default function ChapterChangeReview({
   fileCount = 1,
   onNavigateFile,
   className,
+  mobile = false,
+  onMobileScroll,
 }: ChapterChangeReviewProps) {
   const { segments, hunkCount } = useMemo(
     () => buildReviewDiff(review.before?.content ?? '', review.after.content),
@@ -81,6 +85,61 @@ export default function ChapterChangeReview({
 
   const [activeHunk, setActiveHunk] = useState(0)
   const hunkRefs = useRef<Array<HTMLDivElement | null>>([])
+  const mobileViewport = useRef<HTMLDivElement>(null)
+  const deferredMobileFocus = useRef<number | null>(null)
+  const [mobileHunkVisible, setMobileHunkVisible] = useState(false)
+  const currentHunk = Math.min(activeHunk, hunkCount - 1)
+
+  const revealMobileHunk = useCallback((index: number) => {
+    const viewport = mobileViewport.current
+    const target = hunkRefs.current[index]
+    if (!viewport || !target) return
+    viewport.scrollTop += target.getBoundingClientRect().top - viewport.getBoundingClientRect().top - 12
+  }, [])
+
+  const syncMobileHunk = useCallback(() => {
+    const viewport = mobileViewport.current
+    if (!viewport) return
+    onMobileScroll?.(viewport.scrollTop)
+    const { top, bottom } = viewport.getBoundingClientRect()
+    const isVisible = (node: HTMLDivElement | null) => {
+      if (!node) return false
+      const bounds = node.getBoundingClientRect()
+      const visibleHeight = Math.min(bounds.bottom, bottom) - Math.max(bounds.top, top)
+      return visibleHeight > 0 && visibleHeight >= Math.min(12, (bounds.bottom - bounds.top) / 2)
+    }
+    const index = isVisible(hunkRefs.current[currentHunk]) ? currentHunk : hunkRefs.current.findIndex(isVisible)
+    if (index >= 0 && index !== currentHunk) setActiveHunk(index)
+    setMobileHunkVisible(index >= 0)
+  }, [currentHunk, onMobileScroll])
+
+  useLayoutEffect(() => {
+    if (!mobile) return
+    const deferred = deferredMobileFocus.current
+    if (deferred !== null && hunkRefs.current[deferred]) {
+      deferredMobileFocus.current = null
+      revealMobileHunk(deferred)
+    }
+    syncMobileHunk()
+  }, [mobile, revealMobileHunk, syncMobileHunk, visibleBlocks])
+
+  useEffect(() => {
+    const viewport = mobileViewport.current
+    if (!viewport || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(syncMobileHunk)
+    observer.observe(viewport)
+    return () => observer.disconnect()
+  }, [syncMobileHunk])
+
+  function focusMobileHunk(index: number) {
+    setActiveHunk(index)
+    if (truncated && !hunkRefs.current[index]) {
+      deferredMobileFocus.current = index
+      setExpanded(true)
+      return
+    }
+    revealMobileHunk(index)
+  }
 
   // 块数因逐块定夺而减少时，把当前焦点块收回到有效范围
   useEffect(() => {
@@ -99,6 +158,7 @@ export default function ChapterChangeReview({
   // IDE 式快捷键：Ctrl+Enter 采纳整章、Ctrl+Backspace 拒绝整章（桌面端）；
   // 焦点在输入框（如 Agent 对话框）时忽略，避免打字时误触
   useEffect(() => {
+    if (mobile) return
     function handleKeyDown(event: KeyboardEvent) {
       if (!event.ctrlKey || busy) {
         return
@@ -118,7 +178,68 @@ export default function ChapterChangeReview({
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [busy, onKeep, onRevert])
+  }, [busy, mobile, onKeep, onRevert])
+
+  if (mobile) {
+    const newChapter = review.rollbackSnapshot.kind === 'remove_created_chapter'
+    const arrowClassName = 'flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-[var(--text-secondary)] active:bg-[var(--surface-muted)] disabled:opacity-35'
+    const hunkActionClassName = 'min-h-11 whitespace-nowrap rounded-md px-2 text-sm font-medium disabled:opacity-40'
+    return (
+      <>
+        <div ref={mobileViewport} onScroll={syncMobileHunk} data-mobile-manuscript className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-8 pt-3 [-webkit-overflow-scrolling:touch]">
+          {newChapter ? <p className="mb-3 text-xs text-[var(--text-secondary)]">新章节 · 待确认</p> : null}
+          <div className="studio-editor-content text-[var(--text-primary)]">
+            {visibleBlocks.map((block, blockIndex) => {
+              const { hunkIndex } = block
+              const active = hunkIndex !== null && hunkIndex === currentHunk
+              return (
+                <div
+                  key={blockIndex}
+                  ref={hunkIndex === null ? undefined : (node) => { hunkRefs.current[hunkIndex] = node }}
+                  aria-current={active ? 'true' : undefined}
+                  className={cn(hunkIndex !== null && (!newChapter || hunkCount > 1) &&
+                    (active ? 'shadow-[-2px_0_0_var(--color-success)] -ml-2 pl-2' : 'shadow-[-1px_0_0_var(--border-strong)] -ml-2 pl-2'))}
+                >
+                  {block.segments.map((segment, index) => {
+                    const text = segment.text.endsWith('\n') ? `${segment.text}\u00a0` : segment.text || '\u00a0'
+                    const paragraphClassName = 'block whitespace-pre-wrap break-words'
+                    if (segment.kind !== 'removed') return <div key={index} className={paragraphClassName}>{text}</div>
+                    return segment.text.trim()
+                      ? <del key={index} className={cn(paragraphClassName, 'text-[var(--color-error)] line-through')}>{text}</del>
+                      : <span key={index} className="block text-xs leading-6 text-[var(--color-error)]">删除空行</span>
+                  })}
+                </div>
+              )
+            })}
+            {truncated ? (
+              <button type="button" onClick={() => setExpanded(true)} className="mt-3 min-h-11 text-sm text-[var(--text-secondary)] underline underline-offset-4">
+                展开完整对比
+              </button>
+            ) : null}
+          </div>
+        </div>
+        {hunkCount > 0 ? (
+          <div role="group" aria-label="当前变更操作" aria-busy={busy} className="flex shrink-0 flex-wrap items-center justify-between gap-x-2 border-t border-[var(--border-subtle)] bg-[var(--surface-default)] px-2 py-1">
+            <div className="flex items-center">
+              <button type="button" onClick={() => focusMobileHunk(currentHunk - 1)} disabled={busy || currentHunk <= 0} aria-label="上一处变更" className={arrowClassName}>
+                <ArrowUp aria-hidden="true" className="h-4 w-4" />
+              </button>
+              <button type="button" onClick={() => focusMobileHunk(currentHunk)} disabled={busy} aria-label={`定位第 ${currentHunk + 1} 处变更，共 ${hunkCount} 处`} className="min-h-11 min-w-11 whitespace-nowrap rounded-md px-1 text-xs tabular-nums text-[var(--text-secondary)] active:bg-[var(--surface-muted)] disabled:opacity-40">
+                {currentHunk + 1} / {hunkCount}
+              </button>
+              <button type="button" onClick={() => focusMobileHunk(currentHunk + 1)} disabled={busy || currentHunk >= hunkCount - 1} aria-label="下一处变更" className={arrowClassName}>
+                <ArrowDown aria-hidden="true" className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex items-center gap-1">
+              <button type="button" onClick={() => onRejectHunk?.(currentHunk)} disabled={busy || !mobileHunkVisible || !onRejectHunk} className={cn(hunkActionClassName, 'text-[var(--text-secondary)] active:bg-[var(--surface-muted)]')}>撤回此处</button>
+              <button type="button" onClick={() => onAcceptHunk?.(currentHunk)} disabled={busy || !mobileHunkVisible || !onAcceptHunk} className={cn(hunkActionClassName, 'bg-[var(--surface-contrast)] text-[var(--text-contrast)] active:bg-[var(--surface-contrast-hover)]')}>保留此处</button>
+            </div>
+          </div>
+        ) : null}
+      </>
+    )
+  }
 
   return (
     <div className={cn('relative flex h-full min-h-0 flex-col', className)}>

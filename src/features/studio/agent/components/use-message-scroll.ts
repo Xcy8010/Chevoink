@@ -4,9 +4,10 @@ import { useKeyboardPushScroll } from '@/hooks/useKeyboardPushScroll'
 
 /** Owns only viewport following/navigation; history and request ownership stay outside. */
 export function useMessageScroll({
-  messages, pendingApproval, pendingQuestion, conversationLoading, collapsed, scopeKey,
+  messages, pendingApproval, pendingQuestion, conversationLoading, collapsed, scopeKey, revealingText,
 }: {
   scopeKey?: string
+  revealingText?: boolean
   messages: readonly AgentUIMessage[]
   pendingApproval: unknown
   pendingQuestion: unknown
@@ -14,6 +15,7 @@ export function useMessageScroll({
   collapsed: boolean
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const scrollContentRef = useRef<HTMLDivElement | null>(null)
   // 自动跟随开关：用户上滑离开底部后暂停自动滚底（避免运行中回看历史被强制弹回），滚回底部附近自动恢复
   const pinnedToBottomRef = useRef(true)
   const lastScrollTopRef = useRef(0)
@@ -79,6 +81,28 @@ export function useMessageScroll({
     }
   }, [conversationLoading, collapsed, scopeKey])
 
+  const followToBottom = useCallback((node: HTMLDivElement) => {
+    if (node.scrollHeight - node.scrollTop - node.clientHeight <= 1) return false
+    node.scrollTop = node.scrollHeight
+    lastScrollTopRef.current = node.scrollTop
+    return true
+  }, [])
+
+  // Revealing received text changes the rendered height without another message update.
+  useEffect(() => {
+    const node = scrollRef.current
+    const content = scrollContentRef.current
+    if (!revealingText || conversationLoading || collapsed || !node || !content) return
+    const owner = scopeOwner.current
+    const observer = new ResizeObserver(() => {
+      if (scopeOwner.current === owner && scrollRef.current === node && pinnedToBottomRef.current) {
+        followToBottom(node)
+      }
+    })
+    observer.observe(content)
+    return () => observer.disconnect()
+  }, [revealingText, conversationLoading, collapsed, scopeKey, followToBottom])
+
   // 消息更新自动滚动到底部（仅当用户本就贴底时）。
   // 消息流用 content-visibility 虚拟化，scrollHeight 起初只是估算值：面板新挂载（如进入沉浸层）时
   // 单次滚底只能跳到「估算底部」，随后底部消息真实布局、高度膨胀，位置会停在半山腰；
@@ -102,9 +126,7 @@ export function useMessageScroll({
       if (scopeOwner.current !== owner || scrollRef.current !== node || !pinnedToBottomRef.current) {
         return
       }
-      if (node.scrollHeight - node.scrollTop - node.clientHeight > 1) {
-        node.scrollTop = node.scrollHeight
-        lastScrollTopRef.current = node.scrollTop
+      if (followToBottom(node)) {
         stableTicks = 0
       } else {
         stableTicks += 1
@@ -116,7 +138,7 @@ export function useMessageScroll({
       }
     })
     return () => cancelAnimationFrame(frame)
-  }, [messages, pendingApproval, pendingQuestion, conversationLoading, collapsed, scopeKey])
+  }, [messages, pendingApproval, pendingQuestion, conversationLoading, collapsed, scopeKey, revealingText, followToBottom])
 
   // 跟踪用户是否贴底。一次有交互来源的「向上滚动」就立刻脱离贴底：
   // 流式输出时每个增量都会触发自动滚底，若只用「距底 80px」判定，用户手指刚上滑十几像素
@@ -174,5 +196,5 @@ export function useMessageScroll({
   // 键盘弹起 / 底部导航隐藏使消息容器变矮时，像微信/QQ 一样把对话顶上去
   useKeyboardPushScroll(scrollRef)
 
-  return { scrollRef, pinnedToBottomRef, lastScrollTopRef, handleMessagesScroll }
+  return { scrollRef, scrollContentRef, pinnedToBottomRef, lastScrollTopRef, handleMessagesScroll }
 }

@@ -4,7 +4,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { useMessageScroll } from '../../src/features/studio/agent/components/use-message-scroll'
 import type { AgentUIMessage } from '../../shared/contracts/index'
 
-afterEach(() => { cleanup(); vi.restoreAllMocks() })
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 function fixture() {
   const hook = renderHook(({ loading }) => useMessageScroll({ messages: [], pendingApproval: null, pendingQuestion: null, conversationLoading: loading, collapsed: false }), { initialProps: { loading: true } })
@@ -146,6 +146,43 @@ it('follows changing layout only while pinned and cancels queued frames on unmou
   expect(node.scrollTop).toBe(400)
   unmount()
   expect(cancel).toHaveBeenCalledWith(42)
+})
+
+it('follows rendered reply growth after the receipt, only while the reader is pinned', () => {
+  let resize!: () => void
+  const observe = vi.fn()
+  const disconnect = vi.fn()
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(callback: () => void) { resize = callback }
+    observe = observe
+    disconnect = disconnect
+  })
+  const messages: AgentUIMessage[] = []
+  const { result, rerender } = renderHook(({ revealingText }) => useMessageScroll({
+    messages, revealingText, conversationLoading: false, pendingApproval: null, pendingQuestion: null, collapsed: false,
+  }), { initialProps: { revealingText: false } })
+  const node = document.createElement('div')
+  const content = node.appendChild(document.createElement('div'))
+  let height = 1000
+  Object.defineProperties(node, { clientHeight: { value: 200 }, scrollHeight: { get: () => height } })
+  node.scrollTop = 800
+  result.current.scrollRef.current = node
+  result.current.scrollContentRef.current = content
+  rerender({ revealingText: true })
+  expect(observe).toHaveBeenCalledWith(content)
+
+  height = 1250
+  act(() => resize())
+  expect(node.scrollTop).toBe(1250)
+  expect(result.current.lastScrollTopRef.current).toBe(1250)
+
+  result.current.pinnedToBottomRef.current = false
+  node.scrollTop = 700
+  height = 1500
+  act(() => resize())
+  expect(node.scrollTop).toBe(700)
+  rerender({ revealingText: false })
+  expect(disconnect).toHaveBeenCalledOnce()
 })
 
 it('ignores hidden panels and removes navigation listeners on unmount', () => {

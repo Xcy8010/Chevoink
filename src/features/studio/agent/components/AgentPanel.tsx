@@ -504,8 +504,9 @@ export function AgentPanel({
   // 懒创建会话：首次发送时 sessionId 从 null 变为新建 id，此时正在流式输出，需跳过历史恢复避免冲掉直播消息
   const lazySessionRef = useRef<string | null>(null)
 
-  const { scrollRef, pinnedToBottomRef, lastScrollTopRef, handleMessagesScroll } = useMessageScroll({
+  const { scrollRef, scrollContentRef, pinnedToBottomRef, lastScrollTopRef, handleMessagesScroll } = useMessageScroll({
     scopeKey: sendScope, messages, pendingApproval, pendingQuestion, conversationLoading, collapsed: workConversation.collapsed,
+    revealingText: settlingBlocks.size > 0,
   })
   const goalView = selectAgentGoalView({ goal, goalSessionId, sessionId, runId, resumeableRunId, phase, runGoalId })
   const goalBar = useGoalBarVisibility(userId, sessionId, goalView.goal)
@@ -1597,7 +1598,7 @@ export function AgentPanel({
       {/* 消息流 */}
       <div data-agent-body className="agent-conversation-body">
       <div ref={scrollRef} onScroll={handleMessagesScroll} className="agent-conversation-scroll min-h-0 overflow-y-auto">
-      <div className={cn('agent-conversation-width', conversationLoading && 'flex items-center justify-center')}>
+      <div ref={scrollContentRef} className={cn('agent-conversation-width', conversationLoading && 'flex items-center justify-center')}>
         {conversationLoading ? (
           /* 任何「归属不明」的中间态都走 Codex 式 Agent 图标流光（居中）：图标形状作 mask、渐变光带扫过。
              必须排在内容分支之前：否则请求一返回就被 conversationReady 短路掉，1.5s 保底窗口形同虚设 */
@@ -1610,6 +1611,7 @@ export function AgentPanel({
           /* 已有内容直接呈现：切回已加载会话 / 同会话重用 / 直播收尾时不插任何加载态，做到「有缓存直接显示」。
              按会话取 key：跨会话切换重放淡入，同会话流式追加不重挂载 */
           <div className="flex flex-col gap-4 pb-2">
+            <span role="status" className="sr-only">{copiedId ? '已复制' : ''}</span>
             {olderPagination?.hasMore ? (
               <div className="flex justify-center pb-1">
                 <button
@@ -1700,7 +1702,7 @@ export function AgentPanel({
                     onRollback={() => setConfirmAction({ kind: 'rollbackMessage', messageId: message.id })}
                     onDelete={() => setConfirmAction({ kind: 'deleteMessage', messageId: message.id })} /> : null}
                   {/* The timer belongs to the request, before and after the first streamed paragraph. */}
-                  {showSummary ? <div className="w-full pt-3">
+                  {showSummary ? <div className="agent-reading-column pt-3">
                     <AuthorActivitySummary timing={timing ?? unknownRunTiming()} active={headerActive} open={summaryOpen}
                       onToggle={block?.ops && !headerActive && !settling ? () => toggleBlock(block.firstId) : undefined} />
                   </div> : null}
@@ -1736,7 +1738,7 @@ export function AgentPanel({
                   key={JSON.stringify([novelId, sessionId, voiceScopeKey ?? null, message.id])}
                   open={!wholeMessageIsProcess || processOpen}
                   id={`agent-message-${message.id}`}
-                  className={cn('group/reply min-w-0', message.id !== lastAssistantId && !messageRunActive && 'agent-msg-cv')}
+                  className={cn('agent-reading-column group/reply min-w-0', message.id !== lastAssistantId && !messageRunActive && 'agent-msg-cv')}
                 >
                   {showSummary ? <AuthorActivitySummary timing={timing} active={blockRunActive} open={processOpen}
                     onToggle={hasProcess && !blockRunActive && !settling ? () => toggleBlock(message.id) : undefined} /> : null}

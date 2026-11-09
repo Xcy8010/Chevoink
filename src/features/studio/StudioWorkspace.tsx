@@ -3193,9 +3193,15 @@ export default function StudioWorkspace() {
       return
     }
 
+    if (review.rollbackSnapshot.kind === 'remove_created_chapter' &&
+      buildReviewDiff(review.before?.content ?? '', review.after.content).hunkCount <= 1) {
+      handleRequestRejectPendingChapterReview(review)
+      return
+    }
+
     setWorkspaceDialog({
       title: '撤回这一处变更？',
-      description: '这一处绿色/红色片段将恢复为 AI 写入前的内容，撤回后不可恢复。',
+      description: '此处正文将恢复为 AI 写入前的内容，撤回后不可恢复。',
       confirmLabel: '撤回',
       cancelLabel: '再想想',
       tone: 'danger',
@@ -3934,7 +3940,7 @@ export default function StudioWorkspace() {
   }
 
   // Mobile and IDE use the same editing/review contract; only presentation differs.
-  function renderEditor(presentation: Pick<ComponentProps<typeof EditorCanvas>, 'variant' | 'embedded'>) {
+  function renderEditor(presentation: Pick<ComponentProps<typeof EditorCanvas>, 'variant' | 'embedded' | 'onSelectMobileChapter' | 'mobileScope'>) {
     return (
     <EditorCanvas
       {...presentation}
@@ -4005,6 +4011,11 @@ export default function StudioWorkspace() {
     )
   }
 
+  function openMobileChapters() {
+    setMobileView('chapters')
+    setWorkspacePerspective('ide')
+  }
+
   const mobileConversationOwner = workspaceOwnerRef.current
   return (
     <>
@@ -4031,13 +4042,15 @@ export default function StudioWorkspace() {
 
             {mobileView === 'editor' ? (
               <div className="flex min-h-0 flex-1 flex-col">
-                <div data-studio-region="mobile-writing-navigation" className="flex min-h-11 shrink-0 items-center border-b border-[var(--border-subtle)] px-3">
-                  <button type="button" onClick={() => { setMobileView('chapters'); setWorkspacePerspective('ide') }} className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-md px-1 text-xs font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] active:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none">
-                    <BookOpenText aria-hidden="true" className="h-4 w-4 shrink-0" /><span>选择章节</span>
-                  </button>
-                  <span className="ml-3 min-w-0 truncate text-xs text-[var(--text-tertiary)]">{activeWorkspaceDocument?.title || activeChapterListItem?.title || '正文与卷章'}</span>
-                </div>
-                {renderEditor({ variant: 'mobile' })}
+                {!chapterDraft || activeWorkspaceDocument ? (
+                  <div data-studio-region="mobile-writing-navigation" className="flex min-h-11 shrink-0 items-center border-b border-[var(--border-subtle)] px-3">
+                    <button type="button" onClick={openMobileChapters} className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-md px-1 text-xs font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] active:bg-[var(--surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] motion-reduce:transition-none">
+                      <BookOpenText aria-hidden="true" className="h-4 w-4 shrink-0" /><span>选择章节</span>
+                    </button>
+                    <span className="ml-3 min-w-0 truncate text-xs text-[var(--text-tertiary)]">{activeWorkspaceDocument?.title || activeChapterListItem?.title || '正文与卷章'}</span>
+                  </div>
+                ) : null}
+                {renderEditor({ variant: 'mobile', onSelectMobileChapter: openMobileChapters, mobileScope: taskUiScope })}
               </div>
             ) : null}
 

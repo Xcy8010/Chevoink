@@ -855,9 +855,10 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
   display: none;
 }
 
-/* One horizontal grid for messages and floating controls, including narrow IDE panels. */
+/* One horizontal grid for the conversation and floating controls, with a narrower reading column. */
 .agent-conversation-body { display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); flex: 1; min-height: 0; }
 .agent-conversation-width { width: 100%; max-width: 952px; min-width: 0; margin-inline: auto; }
+.agent-reading-column { width: 100%; max-width: 48rem; margin-inline: auto; }
 .agent-conversation-scroll { grid-area: 1 / 1; padding: 16px 0 calc(var(--agent-footer-height, 180px) + 16px); scroll-padding-bottom: calc(var(--agent-footer-height, 180px) + 16px); }
 .agent-conversation-scroll > .agent-conversation-width { min-height: 100%; padding-inline: 16px; overflow-wrap: anywhere; }
 .agent-conversation-scroll .agent-msg-cv { min-width: 0; max-width: 100%; }
@@ -867,6 +868,10 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
 .agent-floating-footer [data-agent-composer], .agent-floating-footer [data-agent-activity] { pointer-events: none; }
 .agent-floating-footer [data-agent-composer] > *, .agent-floating-footer .agent-activity-capsule { pointer-events: auto; }
 .agent-composer-glass { background: var(--studio-composer-bg, var(--surface-default)); }
+.agent-composer-glass:not([data-agent-composer-dragging]):has([data-agent-composer-editor]:focus) {
+  border-color: color-mix(in srgb, var(--text-secondary) 70%, var(--border-subtle));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--text-secondary) 20%, transparent);
+}
 
 .studio-mobile-drawer-search { background: var(--surface-muted); }
 html.dark .studio-mobile-drawer-search { background: #242424; }
