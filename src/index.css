@@ -861,7 +861,6 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
 .agent-reading-column { width: 100%; max-width: 48rem; margin-inline: auto; }
 .agent-conversation-scroll { grid-area: 1 / 1; padding: 16px 0 calc(var(--agent-footer-height, 180px) + 16px); scroll-padding-bottom: calc(var(--agent-footer-height, 180px) + 16px); }
 .agent-conversation-scroll > .agent-conversation-width { min-height: 100%; padding-inline: 16px; overflow-wrap: anywhere; }
-.agent-conversation-scroll .agent-msg-cv { min-width: 0; max-width: 100%; }
 .agent-floating-footer { grid-area: 1 / 1; align-self: end; z-index: 80; min-width: 0; pointer-events: none; background: transparent; }
 .agent-floating-footer > .agent-conversation-width > * { pointer-events: auto; }
 /* Padding/gaps are transparent hit-test space, not a full-width bottom card. */

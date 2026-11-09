@@ -11,7 +11,8 @@ import { WORK_OPEN_DOCUMENT } from './work-viewer-events'
 type Props = {
   conversationRail: ReactNode; conversation: ReactNode; activityDock?: ReactNode
   inspector: ReactNode; viewer?: ReactNode; viewerIdentity?: string | null; scopeKey?: string
-  outerSidebarOpen?: boolean; rightOpen: boolean; inspectorWidth: number; viewerWidth: number
+  outerSidebarOpen?: boolean; onOuterSidebarOpenChange?: (open: boolean) => void
+  rightOpen: boolean; inspectorWidth: number; viewerWidth: number
   onToggleRight: () => void; inspectorTab: WorkInspectorTab; onSelectInspectorTab: (tab: WorkInspectorTab) => void
 }
 const items = [
@@ -32,7 +33,7 @@ function restoreSplit(scope: string | undefined, fallback: WorkSplit): WorkSplit
 }
 type Gesture = WorkSplitGesture & { pointer: number }
 
-export default function WorkPerspective({ conversationRail, conversation, activityDock, inspector, viewer, scopeKey, outerSidebarOpen = true, rightOpen, inspectorWidth, viewerWidth, onToggleRight, onSelectInspectorTab }: Props) {
+export default function WorkPerspective({ conversationRail, conversation, activityDock, inspector, viewer, scopeKey, outerSidebarOpen = true, onOuterSidebarOpenChange, rightOpen, inspectorWidth, viewerWidth, onToggleRight, onSelectInspectorTab }: Props) {
   const root = useRef<HTMLDivElement>(null)
   const contentHandle = useRef<HTMLDivElement>(null)
   const restoreSeparatorFocus = useRef(false)
@@ -104,9 +105,14 @@ export default function WorkPerspective({ conversationRail, conversation, activi
   const flush = useCallback(() => {
     const gesture = drag.current
     if (!gesture || pendingX.current === null) return
-    update(advanceWorkSplitGesture(gesture, splitRef.current, pendingX.current))
+    const previous = splitRef.current
+    const next = advanceWorkSplitGesture(gesture, previous, pendingX.current)
+    update(next)
+    if (next.chatCollapsed && !previous.chatCollapsed && (!gesture.hasViewer || next.viewerCollapsed)) {
+      onOuterSidebarOpenChange?.(false)
+    }
     pendingX.current = null
-  }, [update])
+  }, [onOuterSidebarOpenChange, update])
   const finish = useCallback(() => {
     if (!drag.current) return
     cancelAnimationFrame(frame.current); frame.current = 0
@@ -195,7 +201,7 @@ export default function WorkPerspective({ conversationRail, conversation, activi
       <div aria-hidden={!inspectorOpen} {...(!inspectorOpen ? { inert: '' } : {})} className={cn('absolute inset-0 overflow-hidden transition-opacity duration-200', inspectorOpen ? 'opacity-100' : 'pointer-events-none opacity-0')}>{inspector}</div>
       {!inspectorOpen ? <div className="absolute inset-0 flex flex-col items-center py-2"><button type="button" onClick={toggleInspector} className="flex h-9 w-9 items-center justify-center" aria-label="展开检查区"><ChevronLeft className="h-4 w-4" /></button>{items.map(({ key, label, icon: Icon }) => <button key={key} type="button" aria-label={label} title={label} className="mt-2 flex h-9 w-9 items-center justify-center rounded-lg hover:bg-[var(--surface-muted)]" onClick={() => { onSelectInspectorTab(key); toggleInspector() }}><Icon className="h-4 w-4" /></button>)}</div> : <button type="button" onClick={toggleInspector} className="absolute left-1 top-2 z-20 rounded p-1.5 text-[var(--text-secondary)]" aria-label="收起检查区"><PanelRightClose className="h-4 w-4" /></button>}
     </aside>
-    {separator('content', width - motion.viewer - motion.inspector, hasViewer ? '调整查看器与对话宽度' : '调整对话宽度')}
+    {separator('content', width - motion.viewer - motion.inspector, viewerOpen ? '调整查看器与对话宽度' : '调整对话与右侧栏宽度')}
     {viewerOpen ? separator('inspector', width - motion.inspector, '调整检查区宽度') : null}
   </div></WorkConversationContext.Provider>
 }

@@ -13,7 +13,6 @@ describe('continuous Work gestures', () => {
     const folded = resizeWorkSplit(start, a, width, atMinimum, 'content', true)
     expect(folded).toMatchObject({ viewerCollapsed: true, inspectorCollapsed: false, inspector: 400 })
     expect(fitWorkSplit(folded, width, true)).toMatchObject({ viewer: 0, inspector: 400 })
-    expect(resizeWorkSplit(start, folded, width, 0, 'content', true)).toMatchObject(state)
   })
   it('folds only the viewer at its minimum when dragging its right seam left', () => {
     const start = fitWorkSplit(state, width, true)
@@ -25,7 +24,6 @@ describe('continuous Work gestures', () => {
     expect(fitWorkSplit(folded, width, true)).toMatchObject({ viewer: 0, inspector: 780 })
     const farther = resizeWorkSplit(start, folded, width, atMinimum - 200, 'inspector', true)
     expect(farther).toMatchObject({ viewerCollapsed: true, inspectorCollapsed: false, inspector: 780 })
-    expect(resizeWorkSplit(start, farther, width, 0, 'inspector', true)).toMatchObject(state)
   })
   it('collapses chat at the same 360px minimum and reverses in the held gesture', () => {
     const start = fitWorkSplit(state, width, true)
@@ -62,12 +60,20 @@ describe('continuous Work gestures', () => {
       expect(result.chat + result.rail + result.viewer + result.inspector).toBe(size)
     }
   })
-  it.each([['content', 1], ['inspector', -1]] as const)('uses hysteresis when reopening the viewer from the %s seam', (boundary, direction) => {
-    const start = fitWorkSplit(state, width, true)
-    const atMinimum = state.viewer - WORK_SPLIT.viewer
-    const folded = resizeWorkSplit(start, state, width, direction * atMinimum, boundary, true)
-    expect(resizeWorkSplit(start, folded, width, direction * (atMinimum - WORK_SPLIT.hysteresis), boundary, true).viewerCollapsed).toBe(true)
-    expect(resizeWorkSplit(start, folded, width, direction * (atMinimum - WORK_SPLIT.hysteresis - 1), boundary, true).viewerCollapsed).toBe(false)
+  it('hands a held left seam to the inspector after the viewer folds', () => {
+    const gesture: WorkSplitGesture = { x: 600, start: fitWorkSplit(state, width, true), width, boundary: 'content', hasViewer: true }
+    const folded = advanceWorkSplitGesture(gesture, state, 980)
+    expect(folded).toMatchObject({ viewerCollapsed: true, inspector: 400, inspectorCollapsed: false })
+    const narrower = advanceWorkSplitGesture(gesture, folded, 1030)
+    expect(narrower).toMatchObject({ viewerCollapsed: true, inspector: 350, inspectorCollapsed: false })
+    const wider = advanceWorkSplitGesture(gesture, narrower, 930)
+    expect(wider).toMatchObject({ viewerCollapsed: true, viewer: 600, inspector: 450, chatCollapsed: false })
+    const atMinimum = advanceWorkSplitGesture(gesture, wider, 1180)
+    expect(atMinimum).toMatchObject({ viewerCollapsed: true, inspector: WORK_SPLIT.inspector, inspectorCollapsed: false })
+    const edge = advanceWorkSplitGesture(gesture, atMinimum, 1599)
+    expect(edge).toMatchObject({ viewerCollapsed: true, inspectorCollapsed: true, chatCollapsed: false })
+    const reopened = advanceWorkSplitGesture(gesture, edge, 1569)
+    expect(reopened).toMatchObject({ viewerCollapsed: true, inspectorCollapsed: false })
   })
   it('opens a collapsed inspector after a short drag even without a viewer', () => {
     const closed = { ...state, inspectorCollapsed: true }
@@ -99,22 +105,18 @@ describe('continuous Work gestures', () => {
     expect(result.inspector).toBe(width)
     expect(result.chat + result.rail + result.viewer + result.inspector).toBe(width)
   })
-  it.each([
-    ['content', 600, 1, 'viewerCollapsed', 'inspectorCollapsed'],
-    ['inspector', 1200, -1, 'viewerCollapsed', 'inspectorCollapsed'],
-    ['inspector', 1200, 1, 'inspectorCollapsed', 'viewerCollapsed'],
-  ] as const)('reverses %s drag from %s in direction %s without leaving the viewport', (boundary, startX, direction, folded, staysOpen) => {
+  it('can reverse repeated independent inspector folds without leaving the viewport', () => {
     for (const left of [0, 280]) {
-      const gesture: WorkSplitGesture = { x: left + startX, left, start: fitWorkSplit(state, width, true), width, boundary, hasViewer: true }
-      const edge = left + (direction > 0 ? width - 1 : 1)
-      let current = advanceWorkSplitGesture(gesture, state, edge - direction * 70)
-      expect(current[folded]).toBe(true)
+      const gesture: WorkSplitGesture = { x: left + 1200, left, start: fitWorkSplit(state, width, true), width, boundary: 'inspector', hasViewer: true }
+      const edge = left + width - 1
+      let current = advanceWorkSplitGesture(gesture, state, edge - 70)
+      expect(current.inspectorCollapsed).toBe(true)
       for (let cycle = 0; cycle < 20; cycle++) {
         current = advanceWorkSplitGesture(gesture, current, edge)
-        expect(current[folded], `cycle ${cycle}`).toBe(true)
-        expect(current[staysOpen], `cycle ${cycle}`).toBe(false)
-        current = advanceWorkSplitGesture(gesture, current, edge - direction * 30)
-        expect(current[folded], `cycle ${cycle}`).toBe(false)
+        expect(current.inspectorCollapsed, `cycle ${cycle}`).toBe(true)
+        expect(current.viewerCollapsed, `cycle ${cycle}`).toBe(false)
+        current = advanceWorkSplitGesture(gesture, current, edge - 30)
+        expect(current.inspectorCollapsed, `cycle ${cycle}`).toBe(false)
       }
     }
   })

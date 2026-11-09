@@ -4357,6 +4357,7 @@ export default function StudioWorkspace() {
                 /> : undefined}
                 rightOpen={workRightOpen}
                 outerSidebarOpen={workspaceSidebarOpen}
+                onOuterSidebarOpenChange={setWorkspaceSidebarOpen}
                 scopeKey={workPanelScope}
                 viewerIdentity={workViewer ? `${workViewer}:${selectedTreeItemId ?? ''}` : null}
                 inspectorWidth={panelWidths.workInspector}
