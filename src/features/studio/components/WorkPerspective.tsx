@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { BookCopy, Brain, ChevronLeft, GitCompareArrows, Network, PanelRightClose, Wrench } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { WorkInspectorTab } from './WorkInspector'
@@ -182,7 +182,7 @@ export default function WorkPerspective({ conversationRail, conversation, activi
       }
     }}
   />
-  return <WorkConversationContext.Provider value={context}><div ref={root} data-studio-layout="work" data-activity-dock={dockVisible ? 'visible' : 'hidden'} data-chat-collapsed={geometry.chatCollapsed} data-dragging={dragging} className="work-perspective relative flex h-full min-h-0 overflow-hidden bg-[var(--surface-default)]"
+  return <WorkConversationContext.Provider value={context}><div ref={root} data-studio-layout="work" data-activity-dock={dockVisible ? 'visible' : 'hidden'} data-chat-collapsed={geometry.chatCollapsed} data-dragging={dragging} className="work-perspective relative flex h-full min-h-0 overflow-hidden bg-[var(--surface-default)]" style={{ '--work-agent-floating-dock-width': floatDock ? `${motion.dock}px` : undefined } as CSSProperties}
     onPointerMove={event => {
       if (!drag.current || drag.current.pointer !== event.pointerId) return
       pendingX.current = event.clientX

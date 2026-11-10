@@ -861,6 +861,34 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
 .agent-reading-column { width: 100%; max-width: 48rem; margin-inline: auto; }
 .agent-conversation-scroll { grid-area: 1 / 1; padding: 16px 0 calc(var(--agent-footer-height, 180px) + 16px); scroll-padding-bottom: calc(var(--agent-footer-height, 180px) + 16px); }
 .agent-conversation-scroll > .agent-conversation-width { min-height: 100%; padding-inline: 16px; overflow-wrap: anywhere; }
+
+/* Let the Work transcript scroll to the pane edge while keeping its content aligned with the composer. */
+.work-agent-frame :is(.agent-conversation-header, .agent-conversation-width) {
+  width: min(54rem, calc(100% - 32px));
+  margin-inline: auto;
+}
+.work-agent-frame .agent-conversation-scroll {
+  margin-inline: 6px calc(6px + var(--work-agent-floating-dock-width, 0px));
+  padding-inline-start: var(--work-agent-floating-dock-width, 0px);
+  min-width: 0;
+  scrollbar-gutter: stable both-edges;
+}
+.work-agent-frame .agent-conversation-scroll > .agent-conversation-width {
+  /* The two 6px margins and 5px gutters already account for 22px of the 32px inset. */
+  width: min(54rem, calc(100% - 10px));
+}
+@supports selector(::-webkit-scrollbar) {
+  .work-agent-frame .agent-conversation-scroll,
+  body.autohide-scrollbars .work-agent-frame .agent-conversation-scroll {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
+  .work-agent-frame .agent-conversation-scroll::-webkit-scrollbar { width: 5px; }
+  .work-agent-frame .agent-conversation-scroll::-webkit-scrollbar-button { display: none; }
+  .work-agent-frame .agent-conversation-scroll::-webkit-scrollbar-track {
+    margin-block: 12px calc(var(--agent-footer-height, 180px) + 12px);
+  }
+}
 .agent-floating-footer { grid-area: 1 / 1; align-self: end; z-index: 80; min-width: 0; pointer-events: none; background: transparent; }
 .agent-floating-footer > .agent-conversation-width > * { pointer-events: auto; }
 /* Padding/gaps are transparent hit-test space, not a full-width bottom card. */
@@ -869,7 +897,6 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
 .agent-composer-glass { background: var(--studio-composer-bg, var(--surface-default)); }
 [data-agent-composer-editor] {
   caret-color: var(--text-secondary);
-  caret-animation: manual;
 }
 
 .studio-mobile-drawer-search { background: var(--surface-muted); }
