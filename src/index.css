@@ -824,7 +824,8 @@ html[data-studio-reduced-motion='true'] .studio-settings-page * {
 .work-agent-compact .agent-conversation-scroll,
 .work-agent-compact [data-agent-activity] { display: none !important; }
 .work-agent-compact [data-agent-composer] { filter: drop-shadow(0 8px 20px #0001); }
-.work-agent-compact [data-agent-composer] > div { border-top-left-radius: 0; border-top-right-radius: 0; }
+.work-agent-compact [data-agent-composer] > div,
+.work-agent-compact .agent-composer-glass { border-top-left-radius: 0; border-top-right-radius: 0; }
 .work-agent-compact [data-agent-compact-restore] { z-index: 1; width: calc(100% - 32px); }
 .work-agent-compact .agent-queue-cap { margin-inline: 0; margin-bottom: 0; padding-bottom: 0; border-radius: 0; }
 @keyframes studio-change-reveal {
@@ -975,11 +976,25 @@ html.dark .studio-mobile-backdrop { background: rgb(28 28 28 / 82%); }
 }
 html.dark .studio-workspace .agent-goal-bar { background: #262626; }
 html.dark .studio-workspace .agent-composer-goal { background: #333333; }
-@supports (backdrop-filter: blur(8px)) {
-  .agent-composer-glass {
-    background: color-mix(in srgb, var(--studio-composer-bg, var(--surface-default)) 90%, transparent);
+@supports ((backdrop-filter: blur(8px)) or (-webkit-backdrop-filter: blur(8px))) {
+  .agent-composer-halo::before {
+    content: '';
+    position: absolute;
+    inset: -7px;
+    z-index: -1;
+    border-radius: 27px;
+    pointer-events: none;
     backdrop-filter: blur(10px) saturate(105%);
     -webkit-backdrop-filter: blur(10px) saturate(105%);
+    /* Fade the expanded backdrop into the chat instead of drawing another border. */
+    mask-image:
+      linear-gradient(to bottom, transparent, #000 8px, #000 calc(100% - 8px), transparent),
+      linear-gradient(to right, transparent, #000 8px, #000 calc(100% - 8px), transparent);
+    -webkit-mask-composite: source-in;
+    mask-composite: intersect;
+  }
+  .agent-composer-glass {
+    background: color-mix(in srgb, var(--studio-composer-bg, var(--surface-default)) 90%, transparent);
   }
   .agent-floating-footer .agent-activity-capsule {
     background: color-mix(in srgb, var(--surface-muted) 90%, transparent);
@@ -991,7 +1006,8 @@ html.dark .studio-workspace .agent-composer-goal { background: #333333; }
   .agent-floating-footer [data-agent-activity-capsules] { background: transparent; }
 }
 @media (prefers-reduced-transparency: reduce) {
-  .agent-composer-glass { background: var(--studio-composer-bg, var(--surface-default)); backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .agent-composer-halo::before { display: none; }
+  .agent-composer-glass { background: var(--studio-composer-bg, var(--surface-default)); }
   .agent-floating-footer .agent-activity-capsule { background: var(--surface-muted); backdrop-filter: none; -webkit-backdrop-filter: none; }
 }
 

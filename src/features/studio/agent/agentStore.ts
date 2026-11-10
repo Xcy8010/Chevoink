@@ -11,6 +11,7 @@ import type {
   AgentRunOutcome,
   AgentGoalSnapshot,
   AgentMessagePart,
+  AgentNextPrompt,
   AgentSessionRunStatus,
   AgentStreamEvent,
   AgentTodoItem,
@@ -221,6 +222,7 @@ type AgentStoreState = {
   /** 可信作者结束信号；用于区分作者主动结束与真实执行失败，禁止误显示继续/红灯。 */
   authorEnded: AgentAuthorEnded | null
   outcome: AgentRunOutcome | null
+  nextPrompt: AgentNextPrompt | null
   agentTitle: string
   messages: AgentUIMessage[]
   pendingApproval: PendingApproval | null
@@ -249,6 +251,7 @@ type AgentStoreState = {
   goalEventSequence: number
   /** 输入框草稿：提升到全局 store，避免面板重挂载时丢失未发送内容 */
   composerDraft: string
+  composerAcceptedNextPrompt: string | null
   /** 目标输入模式属于任务窗口草稿，不能与普通发送模式混用。 */
   goalMode: boolean
   /** 输入框附件（已上传成功的元数据）：同草稿提升全局，沉浸/普通视图重挂载不丢 */
@@ -297,7 +300,7 @@ type AgentStoreState = {
   /** 刷新历史或终态事件提供作者结束事实，并优先采用其最终待办快照。 */
   setAuthorEnded: (value: AgentAuthorEnded | null) => void
   setRunOutcome: (value: AgentRunOutcome | null) => void
-  restoreMessages: (messages: AgentUIMessage[], sessionId?: string | null, snapshot?: AgentTodoSnapshot | null) => void
+  restoreMessages: (messages: AgentUIMessage[], sessionId?: string | null, snapshot?: AgentTodoSnapshot | null, nextPrompt?: AgentNextPrompt) => void
   reconcileTodoSnapshot: (snapshot: AgentTodoSnapshot, sessionId: string, runId: string, expectedVersion: number) => void
   /** 加载更早对话：把更早轮次前插合并（按 id 去重），不触碰进行中的 run */
   prependMessages: (messages: AgentUIMessage[]) => void
@@ -639,6 +642,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   phase: 'idle',
   authorEnded: null,
   outcome: null,
+  nextPrompt: null,
   agentTitle: '写作主控',
   messages: [],
   pendingApproval: null,
@@ -659,6 +663,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   goalSessionId: null,
   goalEventSequence: 0,
   composerDraft: '',
+  composerAcceptedNextPrompt: null,
   goalMode: false,
   composerAttachments: [],
   composerReferences: [],
@@ -724,6 +729,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       phase: 'starting',
       authorEnded: null,
       outcome: null,
+      nextPrompt: null,
       activeSessionId: sessionId,
       loadedSessionId: sessionId,
       pendingApproval: null,
@@ -780,6 +786,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       phase: 'starting',
       authorEnded: null,
       outcome: null,
+      nextPrompt: null,
       activeSessionId: sessionId,
       loadedSessionId: sessionId,
       pendingApproval: null,
@@ -804,7 +811,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // Persisted tool history is authoritative; replay only reconciles later witnesses.
     }) }),
 
-  restoreMessages: (messages, sessionId = null, snapshot) => {
+  restoreMessages: (messages, sessionId = null, snapshot, nextPrompt) => {
     authorTextStreams.clear()
     restoredMessageReplay.clear()
     const restored = decorateAcceptedMessages(messages.map(projectStoredMessage))
@@ -823,6 +830,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       runGoalId: null,
       authorEnded: null,
       outcome: null,
+      nextPrompt: nextPrompt ?? null,
       resumeableRunId: null,
       activeSessionId: null,
       loadedSessionId: sessionId,
@@ -900,6 +908,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       phase: 'idle',
       authorEnded: null,
       outcome: null,
+      nextPrompt: null,
       activeSessionId: null,
       loadedSessionId: null,
       goal: null,
@@ -1085,7 +1094,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       } : {}
     }),
 
-  setComposerDraft: (value) => set({ composerDraft: value }),
+  setComposerDraft: (value) => set({ composerDraft: value, composerAcceptedNextPrompt: null }),
 
   setComposerAttachments: (list) => set({ composerAttachments: list }),
 
@@ -1111,7 +1120,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   clearComposerReferences: () => set({ composerReferences: [] }),
 
   setComposerContent: (draft, references) =>
-    set({ composerDraft: draft, composerReferences: references }),
+    set(state => ({ composerDraft: draft, composerReferences: references,
+      composerAcceptedNextPrompt: draft.trim() === state.composerAcceptedNextPrompt ? state.composerAcceptedNextPrompt : null })),
 
   bumpComposerUploading: (delta) =>
     set((state) => ({ composerUploading: Math.max(0, state.composerUploading + delta) })),
@@ -1587,6 +1597,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           return {
             ...base,
             phase: event.status,
+            nextPrompt: event.status === 'succeeded' && event.nextPrompt ? { runId: event.runId, text: event.nextPrompt } : null,
             ...(event.status !== 'succeeded' ? { textRevealTargets: {}, motionAfterSeq: null } : {}),
             authorEnded: event.authorEnded ?? null,
             outcome: event.outcome ?? null,

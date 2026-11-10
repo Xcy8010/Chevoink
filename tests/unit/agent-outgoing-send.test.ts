@@ -37,6 +37,39 @@ function sending(overrides: Record<string, unknown> = {}) {
   const send = loadCallback('handleSend', context) as (prompt: string, attachments: [], freedom: string, quality: string, skills: []) => Promise<void>
   return { context, send: () => send('合成请求', [], 'balanced', 'premium', []) }
 }
+it('requests a completion suggestion for a manual prompt but never chains a Tab-accepted prompt', async () => {
+  const manual = sending()
+  await manual.send()
+  expect(manual.context.startAgentLoopRun).toHaveBeenCalledWith(expect.objectContaining({ predictNextPrompt: true }))
+
+  useAgentStore.getState().resetRun()
+  useAgentStore.setState({ composerAcceptedNextPrompt: '合成请求' })
+  try {
+    const accepted = sending()
+    await accepted.send()
+    expect(accepted.context.startAgentLoopRun).toHaveBeenCalledOnce()
+    expect(accepted.context.startAgentLoopRun.mock.calls[0]?.[0]).not.toHaveProperty('predictNextPrompt')
+  } finally {
+    useAgentStore.setState({ composerAcceptedNextPrompt: null })
+  }
+})
+
+it('keeps the suggestion separate from chat and clears it for a new or failed run', () => {
+  const store = useAgentStore.getState()
+  const usage = { promptTokens: 2, completionTokens: 3, totalTokens: 5 }
+  store.beginRun('first', '合成请求', 'session-a')
+  store.applyEvent({ type: 'run.finished', runId: 'first', seq: 1, ts: '2026-11-11T00:00:00.000Z', status: 'succeeded', usage, artifacts: [],
+    outputSummary: '已完成。', nextPrompt: '先润色开头。' })
+  expect(useAgentStore.getState().nextPrompt).toEqual({ runId: 'first', text: '先润色开头。' })
+  expect(JSON.stringify(useAgentStore.getState().messages)).not.toContain('先润色开头。')
+
+  store.beginRun('second', '另一条请求', 'session-a')
+  expect(useAgentStore.getState().nextPrompt).toBeNull()
+  store.applyEvent({ type: 'run.finished', runId: 'second', seq: 1, ts: '2026-11-11T00:00:01.000Z', status: 'failed', usage, artifacts: [],
+    outputSummary: '未完成。', nextPrompt: '不要显示。' })
+  expect(useAgentStore.getState().nextPrompt).toBeNull()
+})
+
 it.each([null, 'chapter-a'])('only sends a manuscript selection with a chapter target (%s)', async chapterId => {
   const selection = { start: 2, end: 4, text: '选文' }
   const { context, send } = sending({ chapterId, selection })

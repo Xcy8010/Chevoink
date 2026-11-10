@@ -919,6 +919,7 @@ router.post('/runs', async (req: Request, res: Response): Promise<void> => {
       // 全权限产品决策：模式选择 UI 已下线，后端恒 build 兜底（mode 管道保留，回退只需还原 UI）
       mode: 'build',
       prompt: body.prompt.trim(),
+      ...(body.predictNextPrompt ? { predictNextPrompt: true } : {}),
       selection: body.selection ?? null,
       ...(body.agentWritingProtocol ? { agentWritingProtocol: body.agentWritingProtocol } : {}),
       attachments: body.attachments ?? [],

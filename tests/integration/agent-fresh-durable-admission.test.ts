@@ -18,6 +18,7 @@ import { dispatchFreshDurableRun, pauseFreshBootstrap, readFreshBootstrapAdmissi
 import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import * as executionState from '../../api/lib/agent/runtime-state.js'
 import { loadDurableEvents, isDurablePauseResumed, publishDurableEvents } from '../../api/lib/agent/runtime-event-projection.js'
+import { listLoopSessionMessages } from '../../api/lib/agent/session-messages.js'
 import { taskSpecSchema } from '../../shared/contracts/task-spec-contracts.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { available, fixture } from '../support/agent-durable-runtime-fixture.js'
@@ -96,6 +97,40 @@ async function bootstrapDiagnostic(runId: string, failures: ReturnType<typeof ob
 }
 
 describe.runIf(available)('fresh native admission and unstarted bootstrap', () => {
+  it('carries an opted-in suggestion through the existing paid-turn receipt without storing it in the answer', () => fixture(async f => {
+    await ready(f)
+    const window = credits.getCreditWindow()
+    await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000,
+      periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+    const answer = '你好。', nextPrompt = '帮我想一个短篇故事的开头'
+    const fetcher = vi.fn(async (_url: unknown, init: RequestInit) => {
+      const request = JSON.parse(String(init.body))
+      const marker = String(request.messages[0]?.content).match(/\[\[CHEVOINK_NEXT_PROMPT_[a-f0-9]{8}\]\]/u)?.[0]
+      expect(request.messages[0]).toMatchObject({ role: 'system' })
+      expect(marker).toBeTruthy()
+      const frame = { choices: [{ delta: { content: `${answer}\n${marker} ${nextPrompt}` }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 20, completion_tokens: 5 } }
+      return new Response(`data: ${JSON.stringify(frame)}\n\ndata: [DONE]\n\n`)
+    })
+    vi.stubGlobal('fetch', fetcher)
+    const run = await startLoopRun(f.userId, { sessionId: f.sessionId, novelId: f.novelId, prompt: '你好', mode: 'build',
+      predictNextPrompt: true }, { humanOrigin: 'http' })
+    await realBootstrap.dispatchFreshDurableRun(f.userId, run.runId)
+    const state = await loadExecutionState(f.userId, run.runId)
+    expect(state.frame.state).toMatchObject({ phase: 'completed' })
+    expect(state.frame.state.messages.at(-1)).toMatchObject({ role: 'assistant', content: answer, nextPrompt })
+    await publishDurableEvents(f.userId, run.runId)
+    const events = await loadDurableEvents(f.userId, run.runId, 0)
+    expect(events.filter(event => event.type === 'text.final')).toEqual([expect.objectContaining({ text: answer })])
+    expect(events.at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer, nextPrompt })
+    const saved = await prisma.agentMessage.findFirstOrThrow({ where: { runId: run.runId, role: 'assistant' } })
+    expect(saved.parts).toEqual([{ type: 'text', text: answer }])
+    const history = await listLoopSessionMessages(f.userId, f.sessionId, { runLimit: 1 })
+    expect(history.nextPrompt).toEqual({ runId: run.runId, text: nextPrompt })
+    expect(history.messages.find(message => message.id === saved.id)?.parts).toEqual(saved.parts)
+    expect(fetcher).toHaveBeenCalledOnce()
+  }))
+
   it('does not opt a fresh durable HTTP task into legacy terminal response schemas', () => fixture(async f => {
     const runtime = { tier: 'speed' as const, multiplierBps: 0, provider: 'fixture', modelName: 'fixture-main',
       baseUrl: 'https://provider.invalid/v1', apiKey: null, reasoningEffort: 'high' as const, reasoningEfforts: ['high' as const],

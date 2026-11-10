@@ -4,7 +4,7 @@ import { publicReviewExecution } from '../../../shared/review-lifecycle.js'
 import type { Prisma } from '@prisma/client'
 import { readAuthorEnded } from './author-ended.js'
 import { readRunOutcome } from './run-outcome.js'
-import type { AgentRun, AgentTodoSnapshot } from '../../../shared/contracts/index.js'
+import type { AgentNextPrompt, AgentRun, AgentTodoSnapshot } from '../../../shared/contracts/index.js'
 import { getTaskRunIds } from './task-lineage.js'
 import { loadSessionTodoItems } from './tools/todo-tools.js'
 import { readDurableTodoItems } from './tools/durable-todo.js'
@@ -106,7 +106,7 @@ async function normalizeLegacyViewedImageUrls(userId: string, parts: AgentMessag
 /** 刷新后「继续执行」按钮的数据来源：当前无活跃 run 时，仅当会话「最近一个」run 停在 failed/paused 才供前端续跑。
  * 不能取历史任意 failed run：旧 run 失败后作者已开新 run 并正常收尾时，任务已闭环，
  * 刷新后不应再冒「继续执行」按钮（作者反馈：收尾完成后刷新仍见按钮）。 */
-async function getSessionRunState(sessionId: string): Promise<{ activeRunId: string | null; runGoalId: string | null; resumeRunId: string | null; authorEnded?: AgentRun['authorEnded']; outcome?: AgentRun['outcome'] }> {
+async function getSessionRunState(sessionId: string, includeNextPrompt = false): Promise<{ activeRunId: string | null; runGoalId: string | null; resumeRunId: string | null; authorEnded?: AgentRun['authorEnded']; outcome?: AgentRun['outcome']; nextPrompt?: AgentNextPrompt }> {
   const local = getActiveRunIdBySession(sessionId)
   if (local) {
     const localRun = await prisma.agentRun.findUnique({ where: { id: local }, select: { goalExecution: { select: { goalId: true } } } })
@@ -120,7 +120,14 @@ async function getSessionRunState(sessionId: string): Promise<{ activeRunId: str
   const durableActive = run?.runtimeProtocolVersion === 1 && run.taskRoot?.status === 'active'
     && ['queued', 'running', 'awaiting_approval'].includes(run.status)
   const ending = readAuthorEnded(run?.usage)
+  const terminal = includeNextPrompt && run?.status === 'completed'
+    ? await prisma.agentRunEvent.findFirst({ where: { runId: run.id, type: 'run.finished' }, orderBy: { seq: 'desc' }, select: { payload: true } })
+    : null
+  const payload = terminal?.payload
+  const nextPrompt = payload && typeof payload === 'object' && !Array.isArray(payload)
+    && payload.status === 'succeeded' && typeof payload.nextPrompt === 'string' && payload.nextPrompt
   return { activeRunId: durableActive ? run.id : null, runGoalId: durableActive ? run.goalExecution?.goalId ?? null : null, ...ending, ...readRunOutcome(run?.usage),
+    ...(run && nextPrompt ? { nextPrompt: { runId: run.id, text: nextPrompt } } : {}),
     resumeRunId: !ending.authorEnded && run && (run.status === 'failed' || run.status === 'paused') ? run.id : null }
 }
 
@@ -166,6 +173,7 @@ export async function listLoopSessionMessages(
   resumeRunId: string | null
   authorEnded?: AgentRun['authorEnded']
   outcome?: AgentRun['outcome']
+  nextPrompt?: AgentNextPrompt
   todoSnapshot: AgentTodoSnapshot | null
   pagination: { hasMore: boolean; earliestRunStartedAt: string | null }
   /** 分支溯源：非空时前端在复制过来的对话下方渲染「从聊天中继续」分隔线 */
@@ -239,7 +247,7 @@ export async function listLoopSessionMessages(
 
     return {
       messages: pagedMessages,
-      ...await getSessionRunState(sessionId),
+      ...await getSessionRunState(sessionId, !options.beforeRunStartedAt),
       todoSnapshot: await loadCurrentTodoSnapshot(userId, sessionId),
       pagination: {
         hasMore,
@@ -307,7 +315,7 @@ export async function listLoopSessionMessages(
 
   return {
     messages,
-    ...await getSessionRunState(sessionId),
+    ...await getSessionRunState(sessionId, true),
     todoSnapshot: await loadCurrentTodoSnapshot(userId, sessionId),
     pagination: { hasMore: false, earliestRunStartedAt: null },
     fork,

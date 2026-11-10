@@ -82,6 +82,8 @@ type AgentComposerProps = {
   onStop: () => void
   onContinue?: () => Promise<void>
   continueLabel?: string
+  nextPrompt?: string
+  onAcceptNextPrompt?: () => void
   creativeFreedom: CreativeFreedom
   onCreativeFreedomChange: (value: CreativeFreedom) => void
   qualityMode: StoryCompilerMode
@@ -260,6 +262,8 @@ export function AgentComposer({
   onStop,
   onContinue,
   continueLabel = '继续运行',
+  nextPrompt,
+  onAcceptNextPrompt,
   creativeFreedom,
   onCreativeFreedomChange,
   qualityMode,
@@ -311,6 +315,8 @@ export function AgentComposer({
   const [slashSubmenu, setSlashSubmenu] = useState<string | null>(null)
   const [slashIndex, setSlashIndex] = useState(0)
   const slashListId = useId()
+  const nextPromptId = useId()
+  const [composing, setComposing] = useState(false)
   const slashSignature = useRef('')
   const dismissedSlash = useRef<string | null>(null)
   const composingRef = useRef(false)
@@ -330,7 +336,7 @@ export function AgentComposer({
   const voiceBookmark = useRef<{ scope: string; signature: string; offset: number; preceding: string[] } | null>(null)
   const [pendingVoice, setPendingVoice] = useState<{ scope: string; text: string } | null>(null)
   const voiceUndo = useRef<{ scope: string; after: string; draft: string; references: ComposerReference[] } | null>(null)
-  const caretAfterVoice = useRef<number | null>(null)
+  const caretAfterDraft = useRef<number | null>(null)
   const slashCaretReferences = useRef<string[] | null>(null)
   const scope = voiceScopeKey ?? ''
   const voice = useVoiceInput({
@@ -353,7 +359,7 @@ export function AgentComposer({
   useEffect(() => {
     voiceBookmark.current = null
     voiceUndo.current = null
-    caretAfterVoice.current = null
+    caretAfterDraft.current = null
     slashCaretReferences.current = null
     setPendingVoice(null)
     setMobileModelSheetOpen(false)
@@ -367,6 +373,7 @@ export function AgentComposer({
     dismissedSlash.current = null
     slashReturnCaret.current = null
     composingRef.current = false
+    setComposing(false)
   }, [scope, novelId])
 
   useEffect(() => {
@@ -397,7 +404,7 @@ export function AgentComposer({
     const current = useAgentStore.getState()
     const result = insertVoiceTranscript(current.composerDraft, current.composerReferences, text, offset, preceding)
     voiceUndo.current = { scope, after: composerSignature(result.draft, result.references), draft: current.composerDraft, references: current.composerReferences }
-    caretAfterVoice.current = result.caret
+    caretAfterDraft.current = result.caret
     setComposerContent(result.draft, result.references)
     setPendingVoice(null)
   }
@@ -433,6 +440,9 @@ export function AgentComposer({
   const submitting = sending && !continueLock.current
   const showContinue = !submitting && Boolean(onContinue) && isComposerBlank(prompt) && references.length === 0 && attachments.length === 0
   const canContinue = showContinue && !running && !disabled && !sending && !voiceActive && !pendingVoice && uploading === 0
+  const showPlaceholder = !composing && (submitting || (isComposerBlank(prompt) && references.length === 0))
+  const offeredNextPrompt = showPlaceholder && !running && !stopping && !disabled && !sending && !voiceActive &&
+    !pendingVoice && !showContinue && !goalMode && !goalActive && uploading === 0 && attachments.length === 0 ? nextPrompt : undefined
   const sendLock = useRef(new Set<string>())
   const currentScope = useRef(scope)
   const focusAfterSend = useRef<string | null>(null)
@@ -479,9 +489,9 @@ export function AgentComposer({
 
   useLayoutEffect(() => {
     const editor = editorRef.current
-    if (voiceActive || caretAfterVoice.current === null || !editor) return
-    const offset = caretAfterVoice.current
-    caretAfterVoice.current = null
+    if (voiceActive || caretAfterDraft.current === null || !editor) return
+    const offset = caretAfterDraft.current
+    caretAfterDraft.current = null
     const preceding = slashCaretReferences.current
     slashCaretReferences.current = null
     restoreEditorCaret(offset, preceding)
@@ -724,9 +734,22 @@ export function AgentComposer({
     }
   }
 
+  function acceptNextPrompt() {
+    if (!offeredNextPrompt || composingRef.current) return
+    caretAfterDraft.current = offeredNextPrompt.length
+    setComposerContent(offeredNextPrompt, [])
+    onAcceptNextPrompt?.()
+  }
+
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (voiceActive) { event.preventDefault(); return }
     if (event.nativeEvent.isComposing || composingRef.current || event.keyCode === 229) return
+    if (offeredNextPrompt && event.key === 'Tab' && !event.repeat && !event.defaultPrevented &&
+      !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && document.activeElement === event.currentTarget) {
+      event.preventDefault()
+      acceptNextPrompt()
+      return
+    }
     if (slashVisible && event.key === 'Escape') {
       event.preventDefault()
       if (slashToken) dismissedSlash.current = `${slashToken.start}:${slashToken.end}:${prompt}`
@@ -873,7 +896,7 @@ export function AgentComposer({
       const { start, end } = slashToken
       const draft = content.draft.slice(0, start) + content.draft.slice(end)
       const nextReferences = content.references.map(reference => ({ ...reference, offset: reference.offset >= end ? reference.offset - (end - start) : reference.offset }))
-      caretAfterVoice.current = start
+      caretAfterDraft.current = start
       slashCaretReferences.current = content.references.filter(reference => reference.offset <= start).map(reference => reference.id)
       slashReturnCaret.current = { offset: start, preceding: slashCaretReferences.current }
       setComposerContent(draft, nextReferences)
@@ -994,13 +1017,13 @@ export function AgentComposer({
     </div>)
   }
 
-  return (
+  return <div className="agent-composer-halo relative z-[80]">
     <div
       onDragEnter={(event) => { event.preventDefault(); setDragActive(true) }}
       onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDragActive(true) }}
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragActive(false) }}
       onDrop={(event) => void handleDrop(event)}
-      className={`agent-composer-glass ${goalMode ? 'agent-composer-goal' : ''} relative z-[80] rounded-[20px] border bg-[var(--studio-composer-bg,var(--surface-default))] p-2.5 shadow-sm transition-colors ${dragActive ? 'border-[var(--text-primary)]' : 'border-[var(--border-subtle)]'}`}
+      className={`agent-composer-glass ${goalMode ? 'agent-composer-goal' : ''} relative rounded-[20px] border bg-[var(--studio-composer-bg,var(--surface-default))] p-2.5 shadow-sm transition-colors ${dragActive ? 'border-[var(--text-primary)]' : 'border-[var(--border-subtle)]'}`}
     >
       {slashVisible ? <div
         ref={slashCardRef}
@@ -1091,7 +1114,7 @@ export function AgentComposer({
         <p className="mb-1.5 px-1 text-[11px] text-red-500">{attachError}</p>
       )}
       <div className="relative min-h-12">
-        {submitting || isComposerBlank(prompt) && references.length === 0 ? (
+        {showPlaceholder && !offeredNextPrompt ? (
           <span className="pointer-events-none absolute left-1.5 top-1 text-sm leading-6 text-[var(--text-secondary)]">
             告诉我要做什么，我会自主完成…
           </span>
@@ -1101,6 +1124,8 @@ export function AgentComposer({
           data-agent-composer-editor
           role="textbox"
           aria-label="Agent 提示词"
+          aria-describedby={offeredNextPrompt ? nextPromptId : undefined}
+          aria-keyshortcuts={offeredNextPrompt ? 'Tab' : undefined}
           aria-multiline="true"
           aria-haspopup="listbox"
           aria-expanded={slashVisible}
@@ -1110,8 +1135,8 @@ export function AgentComposer({
           hidden={submitting}
           suppressContentEditableWarning
           onInput={(event) => { const composing = (event.nativeEvent as InputEvent).isComposing || composingRef.current; syncComposerFromDom(composing); refreshSlashToken(composing) }}
-          onCompositionStart={() => { composingRef.current = true; setSlashToken(null); setSlashSubmenu(null) }}
-          onCompositionEnd={() => { composingRef.current = false; syncComposerFromDom(); refreshSlashToken() }}
+          onCompositionStart={() => { composingRef.current = true; setComposing(true); setSlashToken(null); setSlashSubmenu(null) }}
+          onCompositionEnd={() => { composingRef.current = false; setComposing(false); syncComposerFromDom(); refreshSlashToken() }}
           onKeyUp={event => { if (!['ArrowUp', 'ArrowDown', 'Enter', 'Escape'].includes(event.key)) refreshSlashToken(event.nativeEvent.isComposing) }}
           onClick={handleEditorClick}
           onKeyDown={handleKeyDown}
@@ -1119,6 +1144,20 @@ export function AgentComposer({
           className="max-h-40 min-h-12 w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent px-1.5 py-1 text-sm leading-7 text-[var(--text-primary)] focus:outline-none data-[disabled=true]:opacity-50"
           data-disabled={disabled}
         />
+        {offeredNextPrompt ? (
+          <button
+            type="button"
+            id={nextPromptId}
+            aria-label={'补全建议：' + offeredNextPrompt}
+            title={offeredNextPrompt}
+            onMouseDown={event => event.preventDefault()}
+            onClick={acceptNextPrompt}
+            className="absolute left-1.5 top-1 inline-flex h-7 max-w-[calc(100%-0.75rem)] items-center gap-2 rounded text-left text-sm leading-7 text-[var(--text-tertiary)] pointer-events-none [@media(pointer:coarse)]:pointer-events-auto hover:text-[var(--text-secondary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+          >
+            <span className="truncate">{offeredNextPrompt}</span>
+            <kbd aria-hidden="true" className="pointer-events-auto shrink-0 rounded border border-[var(--border-strong)] px-1.5 font-sans text-[10px] leading-4">Tab</kbd>
+          </button>
+        ) : null}
       </div>
       {pendingVoice?.scope === scope ? <div className="px-1.5 py-2 text-xs text-[var(--text-secondary)]" role="status">草稿已变化，转写文字尚未插入。<div className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap">{pendingVoice.text}</div><button type="button" disabled={disabled || running || sending || voiceActive} className="mr-3 min-h-11 underline disabled:opacity-50" onClick={() => { if (!disabled && !running && !sending && !voiceActive) applyVoiceText(pendingVoice.text) }}>插入到末尾</button><button type="button" className="min-h-11" onClick={() => setPendingVoice(null)}>放弃</button></div> : null}
       {voiceActive ? <AgentVoiceInputBar voice={voice} /> : null}
@@ -1279,5 +1318,5 @@ export function AgentComposer({
         )}
       </div>
     </div>
-  )
+  </div>
 }

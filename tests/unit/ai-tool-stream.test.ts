@@ -25,6 +25,46 @@ function stream(text: string) {
   } }))))
 }
 const invoke = () => chatWithTools({ messages: [], tools: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'test' } })
+describe('next prompt from the current response', () => {
+  const marker = '[[CHEVOINK_NEXT_PROMPT_1234abcd]]'
+  const options = { messages: [], tools: [], providerApiKey: 'fake-test-key', nextPromptMarker: marker, usageLog: { userId: 'test', action: 'test' } }
+  const response = (pieces: string[], reason: string, tools?: ReturnType<typeof delta>) => {
+    const text = pieces.map(content => ({ choices: [{ delta: { content } }] }))
+    stream([...text, ...(tools ? [tools] : []), ending(reason), { usage: { prompt_tokens: 35, completion_tokens: 20 } }]
+      .map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n')
+  }
+
+  it('never streams the marker or suggested text, and keeps measured usage on one HTTP request', async () => {
+    const body = '正文完成。\n\n第二段。\n'
+    response(Array.from(`${body}\n${marker} 把最后一段写短一点`), 'stop')
+    const visible: string[] = []
+    const result = await chatWithTools({ ...options, onChunk: chunk => { if (chunk.type === 'text-delta') visible.push(chunk.delta) } })
+    expect(visible.join('')).toBe(body)
+    expect(result).toMatchObject({ content: body, nextPrompt: '把最后一段写短一点', usage: { promptTokens: 35, completionTokens: 20 } })
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it.each(['length', 'tool_calls', 'stop'])('omits a %s suggestion without changing the answer', async reason => {
+    response(['只交付正文。', '\n', reason === 'length' ? marker.slice(0, -4) : marker, ...(reason === 'stop' ? [' 多行\n不是一条'] : reason === 'tool_calls' ? [' 有工具时不展示'] : [])],
+      reason, reason === 'tool_calls' ? delta('{}', true) : undefined)
+    const visible: string[] = []
+    const result = await chatWithTools({ ...options, onChunk: chunk => { if (chunk.type === 'text-delta') visible.push(chunk.delta) } })
+    expect(result.content).toBe('只交付正文。')
+    expect(result).not.toHaveProperty('nextPrompt')
+    expect(result.finishReason).toBe(reason)
+    expect(visible.join('')).toBe(result.content)
+  })
+
+  it('keeps an exact answer and normal line breaks if there is no reserved footer', async () => {
+    const body = '严格按格式：\n[[CHEVOINK_NEXT_PROMPT_foreign]]\n'
+    response(Array.from(body), 'stop')
+    const visible: string[] = []
+    const result = await chatWithTools({ ...options, onChunk: chunk => { if (chunk.type === 'text-delta') visible.push(chunk.delta) } })
+    expect(result.content).toBe(body)
+    expect(result).not.toHaveProperty('nextPrompt')
+    expect(visible.join('')).toBe(body)
+  })
+})
 describe('lossless tool argument transport', () => {
   it('sends explicit non-strict optional tools unchanged before one compatible gateway response', async () => {
     const presentation = toOpenAIToolPresentation(chapterCreateTool, { novelId: 'synthetic', writing: {

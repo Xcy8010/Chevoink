@@ -225,6 +225,7 @@ export function AgentPanel({
   const runSummary = useAgentStore((state) => state.outputSummary)
   const authorEnded = useAgentStore((state) => state.authorEnded)
   const outcome = useAgentStore((state) => state.outcome)
+  const completedNextPrompt = useAgentStore((state) => state.nextPrompt)
   const resumeableRunId = useAgentStore((state) => state.resumeableRunId)
   const canonicalMessages = useAgentStore((state) => state.messages)
   const storeLoadedSessionId = useAgentStore((state) => state.loadedSessionId)
@@ -359,7 +360,7 @@ export function AgentPanel({
         restoreActiveRunHistory(payload.messages, payload.activeRunId, sessionId, payload.todoSnapshot, payload.runGoalId)
         connect(payload.activeRunId, 0)
       } else {
-        now.restoreMessages(payload.messages, sessionId, payload.todoSnapshot)
+        now.restoreMessages(payload.messages, sessionId, payload.todoSnapshot, payload.nextPrompt)
         now.setAuthorEnded(payload.authorEnded ?? null)
         now.setRunOutcome(payload.outcome ?? null)
         now.noteResumeableRun(payload.resumeRunId ?? null)
@@ -376,8 +377,12 @@ export function AgentPanel({
     const version = useAgentStore.getState().todosVersion
     void fetchAgentSessionMessages(sessionId, { runLimit: 1 }).then(payload => {
       if (cancelled || viewSession.current !== sessionId) return
-      useAgentStore.getState().reconcileRunTimings(payload.messages, sessionId, runId)
-      if (payload.todoSnapshot) useAgentStore.getState().reconcileTodoSnapshot(payload.todoSnapshot, sessionId, runId, version)
+      const current = useAgentStore.getState()
+      current.reconcileRunTimings(payload.messages, sessionId, runId)
+      if (payload.todoSnapshot) current.reconcileTodoSnapshot(payload.todoSnapshot, sessionId, runId, version)
+      if (current.activeSessionId === sessionId && current.runId === runId && current.phase === 'succeeded' && payload.nextPrompt?.runId === runId) {
+        useAgentStore.setState({ nextPrompt: payload.nextPrompt })
+      }
     }).catch(() => { /* 保留直播进度，刷新历史时再次校准。 */ })
     return () => { cancelled = true }
   }, [sessionId, runId, todoSyncStage])
@@ -512,6 +517,10 @@ export function AgentPanel({
   const goalBar = useGoalBarVisibility(userId, sessionId, goalView.goal)
   const panelPhase = selectAgentPanelPhase(goalView, phase)
   const active = isRunActive(panelPhase)
+  const nextPrompt = sessionId && storeLoadedSessionId === sessionId
+    && (panelPhase === 'succeeded' || panelPhase === 'idle') && !settlingBlocks.size
+    && !lastUserRequest?.delivery && !queueQuery.data?.items.length
+    ? completedNextPrompt : null
   const blockTimings = useMemo(() => projectBlockTimings(messages, blockInfoById, active ? runId : null), [messages, blockInfoById, active, runId])
   const { isExpanded: isBlockExpanded, toggle: toggleBlock } = useMessageBlockExpansion({
     sessionId, messages, blocks: blockInfoById, goalView, phase: panelPhase, runId: runId ?? resumeableRunId,
@@ -967,7 +976,7 @@ export function AgentPanel({
           restoreActiveRunHistory(history, activeRunId, sessionId, payload.todoSnapshot, payload.runGoalId)
           connect(activeRunId, 0)
         } else {
-          useAgentStore.getState().restoreMessages(history, sessionId, payload.todoSnapshot)
+          useAgentStore.getState().restoreMessages(history, sessionId, payload.todoSnapshot, payload.nextPrompt)
           useAgentStore.getState().setAuthorEnded(payload.authorEnded ?? null)
           useAgentStore.getState().setRunOutcome(payload.outcome ?? null)
           // 无活跃 run：若服务端派生出可续跑的 failed/paused run，刷新后仍保留「继续执行」按钮
@@ -1010,6 +1019,7 @@ export function AgentPanel({
       // 用户主动发言视为回到对话最新处，重新开启自动跟随
       pinnedToBottomRef.current = true
       const sendingState = useAgentStore.getState()
+      const predictNextPrompt = sendingState.composerAcceptedNextPrompt !== prompt
       const previousRunId = sendingState.runId
       const lastCanonicalMessage = sendingState.loadedSessionId === sessionId ? sendingState.messages.at(-1) : undefined
       const clientRequestId = crypto.randomUUID()
@@ -1034,6 +1044,7 @@ export function AgentPanel({
             // Agent 默认最大权限：恒以 build 模式运行（后端路由也有强制兜底）
             mode: 'build' as const,
             prompt,
+            ...(predictNextPrompt ? { predictNextPrompt: true as const } : {}),
             selection: targetChapterId ? selection ?? null : null,
             attachments: attachments.length > 0 ? attachments : undefined,
             creativeFreedom: freedom,
@@ -1237,10 +1248,10 @@ export function AgentPanel({
       // 删除/回退后的重拉：不带分页参数走全量，避免已加载的更早轮次被页窗口截掉；
       // 同时清掉分页游标，防止顶部按钮残留过期状态
       const beforeRunId = useAgentStore.getState().runId
-      const { messages: history, authorEnded, outcome: restoredOutcome, todoSnapshot } = await fetchAgentSessionMessages(sessionId)
+      const { messages: history, authorEnded, outcome: restoredOutcome, todoSnapshot, nextPrompt } = await fetchAgentSessionMessages(sessionId)
       if (viewSession.current !== sessionId || useAgentStore.getState().runId !== beforeRunId) return
       setOlderPagination(null)
-      useAgentStore.getState().restoreMessages(history, sessionId, todoSnapshot)
+      useAgentStore.getState().restoreMessages(history, sessionId, todoSnapshot, nextPrompt)
       useAgentStore.getState().setAuthorEnded(authorEnded ?? null)
       useAgentStore.getState().setRunOutcome(restoredOutcome ?? null)
     } catch {
@@ -1930,6 +1941,10 @@ export function AgentPanel({
           voiceScopeKey={voiceScopeKey}
           voiceDisabled={voiceDisabled || sessionResolving}
           running={active}
+          nextPrompt={nextPrompt?.text}
+          onAcceptNextPrompt={() => {
+            if (nextPrompt) useAgentStore.setState({ composerAcceptedNextPrompt: nextPrompt.text, nextPrompt: null })
+          }}
           onContinue={canContinue ? goalView.runBelongsToGoal && !goalView.terminal ? handleGoalResume : handleContinue : undefined}
           disabled={conversationLoading || modelPreference.loading}
           onSend={(prompt, attachments, freedom, selectedQualityMode, pinnedSkillIds, pinnedSubagentId) => handleSend(prompt, attachments, freedom, selectedQualityMode, pinnedSkillIds, pinnedSubagentId)}

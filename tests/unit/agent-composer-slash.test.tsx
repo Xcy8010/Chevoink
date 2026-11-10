@@ -500,3 +500,58 @@ it('shows precise prices on whole-card hover and focus while preserving selectio
   expect(menu.open).toBe(false)
   expect(screen.queryByRole('dialog', { name: '极速模型详情' })).toBeNull()
 })
+
+describe('composer next-prompt completion', () => {
+  const suggestion = '按刚才的风格再写一章'
+  const defaultPlaceholder = '告诉我要做什么，我会自主完成…'
+  const offer = () => screen.queryByRole('button', { name: '补全建议：' + suggestion })
+
+  it('keeps the preview out of the draft and accepts only a plain focused Tab', async () => {
+    const input = { ...props(), nextPrompt: suggestion, onAcceptNextPrompt: vi.fn() }
+    const view = render(<AgentComposer {...input} />)
+    expect(offer()?.textContent).toBe(suggestion + 'Tab')
+    expect(editor().textContent).toBe('')
+    expect((screen.getByRole('button', { name: '发送' }) as HTMLButtonElement).disabled).toBe(true)
+
+    expect(fireEvent.keyDown(editor(), { key: 'Tab' })).toBe(true)
+    editor().focus()
+    expect(fireEvent.keyDown(editor(), { key: 'Tab', shiftKey: true })).toBe(true)
+    expect(fireEvent.keyDown(editor(), { key: 'Tab', repeat: true })).toBe(true)
+    fireEvent.compositionStart(editor())
+    expect(offer()).toBeNull()
+    expect(fireEvent.keyDown(editor(), { key: 'Tab' })).toBe(true)
+    fireEvent.compositionEnd(editor())
+    expect(fireEvent.keyDown(editor(), { key: 'Tab' })).toBe(false)
+
+    expect(editor().textContent).toBe(suggestion)
+    expect(window.getSelection()?.anchorOffset).toBe(suggestion.length)
+    expect(input.onAcceptNextPrompt).toHaveBeenCalledOnce()
+    expect(input.onSend).not.toHaveBeenCalled()
+    expect(offer()).toBeNull()
+    expect(fireEvent.keyDown(editor(), { key: 'Tab' })).toBe(true)
+
+    view.rerender(<AgentComposer {...input} nextPrompt={undefined} />)
+    await act(async () => fireEvent.keyDown(editor(), { key: 'Enter' }))
+    expect(input.onSend).toHaveBeenCalledWith(suggestion, [], 'balanced', 'premium', [])
+    expect(screen.getByText(defaultPlaceholder)).toBeTruthy()
+  })
+
+  it('preserves an existing draft and the running placeholder, and supports tap acceptance', () => {
+    const input = { ...props(), nextPrompt: suggestion, onAcceptNextPrompt: vi.fn() }
+    const view = render(<AgentComposer {...input} running />)
+    expect(screen.getByText(defaultPlaceholder)).toBeTruthy()
+    expect(offer()).toBeNull()
+    view.rerender(<AgentComposer {...input} />)
+    typeDraft('我想换个写法')
+    expect(offer()).toBeNull()
+    expect(fireEvent.keyDown(editor(), { key: 'Tab' })).toBe(true)
+    expect(useAgentStore.getState().composerDraft).toBe('我想换个写法')
+
+    editor().textContent = ''
+    fireEvent.input(editor())
+    fireEvent.click(offer()!)
+    expect(editor().textContent).toBe(suggestion)
+    expect(input.onAcceptNextPrompt).toHaveBeenCalledOnce()
+    expect(input.onSend).not.toHaveBeenCalled()
+  })
+})

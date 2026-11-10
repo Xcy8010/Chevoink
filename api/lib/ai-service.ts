@@ -11,6 +11,7 @@ import { assertGoalProviderAdmission, reserveGoalUsage, syncGoalLegacyUsage } fr
 import { beginTextRequest, recordTextRequestFailure, type TextRequestRecord } from './text-request-trace.js'
 import { isKnownTextRequestBilling, isKnownZeroTextRequestBilling } from './agent/text-request-billing.js'
 import { SseDataDecoder, readWithIdleTimeout } from './ai-sse.js'
+import { createNextPromptStream, splitNextPrompt } from './agent/next-prompt.js'
 import { beginDurableChat, type DurableChatExecution } from './agent/runtime-provider.js'
 import { validateModelCursor } from './agent/runtime-model-cursor.js'
 import type { settleProviderOperation } from './agent/runtime-settlement.js'
@@ -503,6 +504,7 @@ export type ChatStreamChunk =
 
 export type ChatCompletionResult = {
   content: string
+  nextPrompt?: string
   reasoning: string
   toolCalls: ToolCallRequest[]
   finishReason: 'stop' | 'tool_calls' | 'length'
@@ -739,6 +741,8 @@ export type ChatWithToolsParams = {
   reasoningParameterMode?: 'native' | 'omit'
   temperature?: number
   onChunk?: (chunk: ChatStreamChunk) => void
+  /** Internal output side channel for an opted-in author turn. */
+  nextPromptMarker?: string
   /** Internal budget observation, not a success event or executable result. */
   onUsage?: (usage: { promptTokens: number | null; completionTokens: number | null; totalTokens: number | null }) => void
   signal?: AbortSignal
@@ -1060,6 +1064,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   let content = ''
   let reasoning = ''
   let finishReason: ChatCompletionResult['finishReason'] = 'stop'
+  const nextPromptStream = params.nextPromptMarker && params.onChunk ? createNextPromptStream(params.nextPromptMarker) : null
   const usage: ChatTokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null }
   let promptUsageObserved = false
   let completionUsageObserved = false
@@ -1171,7 +1176,8 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
 
     if (typeof delta.content === 'string' && delta.content) {
       content += delta.content
-      params.onChunk?.({ type: 'text-delta', delta: delta.content })
+      const visibleDelta = nextPromptStream ? nextPromptStream.push(delta.content) : delta.content
+      if (visibleDelta) params.onChunk?.({ type: 'text-delta', delta: visibleDelta })
     }
 
     if (Array.isArray(delta.tool_calls)) {
@@ -1235,6 +1241,8 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     }
     frames.push(decoder.decode(), true)
     if (!streamFinished) throw new Error('模型连接提前结束，未执行未确认完整的工具；请继续当前任务。')
+    const visibleTail = nextPromptStream?.finish()
+    if (visibleTail) params.onChunk?.({ type: 'text-delta', delta: visibleTail })
     await persistObservation(true)
   } catch (error) {
     // A bad later frame/read must not erase usage already parsed from this read.
@@ -1281,11 +1289,14 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   }
   if (usage.totalTokens <= 0) usage.totalTokens = usage.promptTokens + usage.completionTokens
 
-  if (durable) return durable.finish({ content, reasoning, toolCalls, finishReason, usage })
+  const delivery = params.nextPromptMarker
+    ? splitNextPrompt(content, params.nextPromptMarker, finishReason === 'stop' && toolCalls.length === 0)
+    : { content }
+  const result = { ...delivery, reasoning, toolCalls, finishReason, usage }
+  if (durable) return durable.finish(result)
 
   await recordStreamUsage(true)
 
-  const result = { content, reasoning, toolCalls, finishReason, usage }
   if (params.usageLog.action === 'agentLoopTurn' && toolCalls.length === 0 && prepared) {
     // Reuse the single-use bounded-review proof. A returned stream alone does
     // not prove that its original reservation has settled.

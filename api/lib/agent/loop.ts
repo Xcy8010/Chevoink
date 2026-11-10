@@ -30,7 +30,8 @@ import type {
   CreditModelTier,
 } from '../../../shared/contracts/index.js'
 import { env } from '../../config/env.js'
-import { chatWithTools, type ChatMessage, type ToolCallRequest } from '../ai-service.js'
+import { chatWithTools, type ChatCompletionResult, type ChatMessage, type ToolCallRequest } from '../ai-service.js'
+import { addNextPromptInstruction } from './next-prompt.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { withGoalEffects, withGoalExecutionContext } from './goal-context.js'
 import { readGoalExecution } from './goal-fence.js'
@@ -132,6 +133,7 @@ export type ExecuteAgentRunParams = {
   chapterId: string | null
   mode: AgentExecutionMode
   prompt: string
+  predictNextPrompt?: boolean
   selection?: { text: string; start?: number; end?: number } | null
   /** 本轮附带附件元数据：持久化为用户消息 attachment parts 并注入上下文 */
   attachments?: AgentAttachmentMeta[]
@@ -696,13 +698,14 @@ async function finalizeLegacyRun(
   allowContextSideEffects = true,
   checkpoint?: RunCheckpointState,
   authorEnded?: { fulfilled: boolean; todoItems?: AgentTodoItem[] },
-  writingDelivery?: { messageId: string; subject: { userId: string; novelId: string; runId: string }; expected: NonNullable<Awaited<ReturnType<typeof readCompletedWritingDelivery>>>; signal: AbortSignal; parts?: AgentMessagePart[]; replaceCandidate?: boolean; displayText?: string },
+  writingDelivery?: { messageId: string; subject: { userId: string; novelId: string; runId: string }; expected: NonNullable<Awaited<ReturnType<typeof readCompletedWritingDelivery>>>; signal: AbortSignal; parts?: AgentMessagePart[]; replaceCandidate?: boolean; displayText?: string; nextPrompt?: string },
   withFailureStatus = false,
   limitedDelivery?: { subject: { userId: string; novelId: string; runId: string }; expected: LimitedWritingDelivery; signal: AbortSignal; messageId: string },
   pauseReason: 'user_stop' | 'needs_input' | 'review_receipt_pending' = 'user_stop',
   terminalFence?: (tx: Prisma.TransactionClient) => Promise<void>,
   responseDelivery?: { subject: { userId: string; novelId: string; sessionId: string; runId: string }; expected: TaskResponse;
-    signal: AbortSignal; messageId: string; parts: AgentMessagePart[]; assertObligations: () => void },
+    signal: AbortSignal; messageId: string; parts: AgentMessagePart[]; assertObligations: () => void; nextPrompt?: string },
+  nextPrompt?: string,
 ) {
   // 事件协议用 succeeded，DB 枚举用 completed
   const dbStatus = status === 'succeeded' ? 'completed' : status
@@ -714,9 +717,11 @@ async function finalizeLegacyRun(
     ? completedWritingPresentationText(writingDelivery.expected, writingDelivery.displayText ?? '')
     : writingDelivery?.displayText ?? writingDelivery?.expected.text
 
+  const suggestion = nextPrompt ?? responseDelivery?.nextPrompt ?? writingDelivery?.nextPrompt
   const terminalBody = status === 'paused'
     ? { type: 'run.paused' as const, reason: pauseReason }
-    : { type: 'run.finished' as const, status, usage, artifacts: [], outputSummary, ...(authorEnded ? { authorEnded } : {}), ...(limitedDelivery ? { outcome: limitedDelivery.expected.outcome } : {}) }
+    : { type: 'run.finished' as const, status, usage, artifacts: [], outputSummary, ...(authorEnded ? { authorEnded } : {}), ...(limitedDelivery ? { outcome: limitedDelivery.expected.outcome } : {}),
+      ...(status === 'succeeded' && suggestion ? { nextPrompt: suggestion } : {}) }
   let goalFenced = false
   let ownerFenced = false
   const committed = await bus.commitTerminal(terminalBody, async tx => {
@@ -1448,6 +1453,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     console.info('[agent-context-timing]', { runId, ...assembledContext.timings })
     console.info('[agent-context-input]', assembledContext.inputEstimates ?? {})
     const messages: ChatMessage[] = assembledContext.messages
+    const nextPromptMarker = params.predictNextPrompt && !ownedGoalExecution && (params.agentType ?? 'orchestrator') === 'orchestrator'
+      ? addNextPromptInstruction(messages) : undefined
     // The last assembled user message is the original goal input. Attach its
     // pixels before adding steering or orchestration messages to the tail.
     if (directVisionEnabled) {
@@ -1776,7 +1783,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         undefined, undefined, undefined, false, undefined, pendingReceipt ? 'review_receipt_pending' : forceWrapUpLocal || researchPartial ? 'needs_input' : 'user_stop')
     }
 
-    const finishPersistedWritingIfComplete = async (beforeFinish?: () => Promise<void>, candidate?: { messageId: string; text: string; parts: AgentMessagePart[]; expected?: NonNullable<Awaited<ReturnType<typeof readCompletedWritingDelivery>>> }) => {
+    const finishPersistedWritingIfComplete = async (beforeFinish?: () => Promise<void>, candidate?: { messageId: string; text: string; parts: AgentMessagePart[]; expected?: NonNullable<Awaited<ReturnType<typeof readCompletedWritingDelivery>>>; nextPrompt?: string }) => {
       const previousDelivery = completedWritingWrapUp.value
       completedWritingWrapUp.value = null
       if (pendingReviews.size) return false
@@ -1817,7 +1824,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           const displayText = completedWritingPresentationText(delivery, candidate?.text ?? '')
           const confirmed = await finalizeRun(runId, bus, 'succeeded', usage, turn, displayText.slice(0, 300), undefined, false, undefined, undefined,
             { messageId: candidate?.messageId ?? randomUUID(), subject: { userId: params.userId, novelId: params.novelId, runId }, expected: delivery, signal: controller.signal,
-              ...(candidate ? { parts: candidate.parts, replaceCandidate: true, displayText } : {}) },
+              ...(candidate ? { parts: candidate.parts, replaceCandidate: true, displayText, nextPrompt: exactProse ? undefined : candidate.nextPrompt } : {}) },
             false, undefined, 'user_stop')
           if (!confirmed) return 'stopped_unconfirmed' as const
           lastAssistantText = displayText
@@ -1999,11 +2006,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
 
       const observeTurnUsage = trackRequestUsage(usage)
       const recoverySystem = JSON.stringify(messages), recoveryContent = JSON.stringify(openAITools)
-      const result = bootstrapCall ? { content: '', reasoning: '', toolCalls: [bootstrapCall], finishReason: 'tool_calls' as const,
+      const result: ChatCompletionResult = bootstrapCall ? { content: '', reasoning: '', toolCalls: [bootstrapCall], finishReason: 'tool_calls' as const,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, promptCacheHitTokens: null, promptCacheMissTokens: null } } : await chatWithTools({
         weightedRoute: modelRuntime.weightedRoute, freePromotion: modelRuntime.freePromotion,
         onUsage: observeTurnUsage,
         messages,
+        nextPromptMarker,
         tools: openAITools,
         ...(requireNativeToolCall && openAITools.length > 0 ? { toolChoice: 'required' as const } : {}),
         model: runtimeModelName,
@@ -2136,7 +2144,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           // truncated text cannot restart chapter work or buy a summary retry.
           bus.emit({ type: 'step.finish', turn, usage: result.usage })
           liveTurn = null
-        }, { messageId, text: authorContent, parts, expected: completedWritingWrapUp.value })) return
+        }, { messageId, text: authorContent, parts, expected: completedWritingWrapUp.value, nextPrompt: effectiveToolCalls.length ? undefined : result.nextPrompt })) return
         // A newer manuscript/report is not the source of this model reply.
         // Do not publish its old summary or purchase another closing turn.
         forceWrapUpLocal = true
@@ -2226,7 +2234,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           await finalizeRun(runId, bus, 'succeeded', usage, turn, ordinaryResponse.answer.slice(0, 300), undefined, false,
             undefined, undefined, undefined, false, undefined, 'user_stop', undefined, {
               subject: { userId: params.userId, novelId: params.novelId, sessionId: params.sessionId, runId },
-              expected: ordinaryResponse, signal: controller.signal, messageId, parts,
+              expected: ordinaryResponse, signal: controller.signal, messageId, parts, nextPrompt: result.nextPrompt,
               assertObligations: () => {
                 controller.signal.throwIfAborted()
                 if (pendingReviews.size || forceWrapUpReason
@@ -2349,7 +2357,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           ? '连续多轮没有推进剩余工作，已保存进度并安全停止；任务未完成。'
           : targetEvidenceMissing ? researchLimitation : creationIncomplete ? '本任务请求创建章节，但尚无本任务成功创建且仍属于作者的章节；说明已保存，任务未完成。' : undefined,
           true, undefined, undefined, savedCandidate ? { messageId, subject: { userId: params.userId, novelId: params.novelId, runId }, expected: savedCandidate,
-            signal: controller.signal, parts, replaceCandidate: true, displayText: lastAssistantText } : undefined)
+            signal: controller.signal, parts, replaceCandidate: true, displayText: lastAssistantText } : undefined,
+          false, undefined, 'user_stop', undefined, undefined, savedCandidate?.titleAndBodyOnly ? undefined : result.nextPrompt)
         return
       }
 

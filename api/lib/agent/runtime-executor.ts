@@ -334,6 +334,7 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   if (price.modelTier !== tier.data) return runtimeError('RUNTIME_PRICE_INVALID', '冻结价目与当前模型身份不一致。')
   signal.throwIfAborted()
   const result = await chatWithTools({ messages: frame.state.messages, tools,
+    nextPromptMarker: configuration.nextPromptMarker,
     weightedRoute: runtime.weightedRoute, provider: runtime.provider, model: runtime.modelName ?? env.aiTextModel, providerBaseUrl: runtime.baseUrl,
     providerApiKey: runtime.apiKey, reasoningEffort: effort.data, maxOutputTokens, signal,
     durableExecution: { lease, operationKey, attemptKey: '1', price, cursor: { expectedRevision: frame.revision, expectedHash: frame.snapshotHash } },

@@ -80,7 +80,8 @@ import { isDefaultSessionTitle } from './session-title.js'
 import { withUserRunLock } from './run-lock.js'
 import { admitGoalRun, bindGoalRun, type GoalRunAdmission } from './goal-run-admission.js'
 import { assertGoalFence, readGoalExecution } from './goal-fence.js'
-import { withHumanAdmission } from './goal-activation-authority.js'
+import { readHumanAdmission, withHumanAdmission } from './goal-activation-authority.js'
+import { addNextPromptInstruction } from './next-prompt.js'
 import { freezeModelAssignments, resolveAssignedModel } from './model-assignments.js'
 import { getWindowConfiguration } from './window-configuration.js'
 import { frozenModelAssignmentsSchema, agentModelSelectionSchema } from '../../../shared/contracts/agent-model-assignments.js'
@@ -215,11 +216,15 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
     const catalog = await (await import('./productivity.js')).renderSubagentCatalog(userId, run.novelId, input.pinnedSubagentId)
     insertSubagentCatalog(assembled.messages, catalog, 'system')
   }
+  const nextPromptMarker = !goalBinding && !session.spawnedFromRunId && agent.type === 'orchestrator'
+    && readHumanAdmission(run.startRequest)?.request.predictNextPrompt
+    ? addNextPromptInstruction(assembled.messages) : undefined
   await initializeDurableTask({ userId, runId, sourceMessageId: original.id, tokenBudget: input.tokenBudget })
   const lease = await acquireRunLease({ userId, runId, ownerId: durableProcessOwner, claimId: randomUUID() })
   try {
     return await initializeExecutionState(lease, { ...(run.modelConfigId && run.modelConfigRevision ? { admittedModel: { modelConfigId: run.modelConfigId, modelConfigRevision: run.modelConfigRevision } } : {}), configuration: { version: 1, mode: input.mode, agentType: agent.type,
       creativeFreedom: spec.creativeFreedom, qualityMode: spec.qualityMode,
+      ...(nextPromptMarker ? { nextPromptMarker } : {}),
       ...(input.modelAssignments ? { modelAssignments: input.modelAssignments } : {}),
       ...(input.pinnedSubagentId ? { pinnedSubagentId: input.pinnedSubagentId } : {}),
       model: { ...(runtime.modelConfigId ? { modelConfigId: runtime.modelConfigId, modelConfigRevision: runtime.modelConfigRevision } : {}),
@@ -410,6 +415,7 @@ export async function startLoopRunLocked(
   const modelAssignments = input.modelAssignments ?? await freezeModelAssignments(userId, input.novelId)
   const networkAdmission = options.humanOrigin === 'http' && !options.goal && !session.spawnedFromRunId
     && options.concurrencyScope !== 'orchestration' ? 1 as const : undefined
+  if (!networkAdmission && input.predictNextPrompt) input = { ...input, predictNextPrompt: undefined }
   const researchAdmission = !input.selection ? networkAdmission : undefined
   const purposeSpec = buildTaskSpec({ runId: 'model-purpose', novelId: input.novelId, chapterId: input.chapterId, prompt: input.prompt, selection: input.selection, researchAdmission, networkAdmission })
   const writingPurpose = ['write', 'revise'].includes(purposeSpec.intent) && !['proposal_only', 'conversation_only'].includes(purposeSpec.writingPacing ?? '')
@@ -681,6 +687,7 @@ export async function startLoopRunLocked(
     chapterId,
     mode: input.mode,
     prompt: input.prompt,
+    predictNextPrompt: Boolean(networkAdmission && input.predictNextPrompt && (!input.agentProfile || input.agentProfile === 'orchestrator')),
     selection: input.selection ?? null,
     attachments: input.attachments ?? [],
     creativeFreedom,
@@ -1249,6 +1256,7 @@ async function continueLoopRunLocked(
     chapterId: run.chapterId,
     mode: run.mode === 'act' ? 'build' : run.mode,
     prompt: resumePrompt,
+    predictNextPrompt: !activation && readHumanAdmission(run.startRequest)?.request.predictNextPrompt,
     attachments: queuedInput?.attachments,
     selection: queuedInput?.selection,
     creativeFreedom: queuedInput?.creativeFreedom,

@@ -2,6 +2,7 @@ import { buildApiUrl } from '@/app/api-base'
 import { buildAuthHeader } from '@/lib/auth-token'
 import type { AgentQueueAction, AgentQueueSnapshot, EnqueueAgentRequest } from '../../../../shared/contracts/agent-queue.js'
 import type {
+  AgentNextPrompt,
   AgentSession,
   AgentSessionRunStatusPayload,
   AgentTodoItem,
@@ -151,17 +152,17 @@ export type AgentAuthorEndedPayload = { fulfilled: boolean; todoItems?: AgentTod
 /** 分支溯源：非空说明本任务是副本，forkedAt 之后的对话属于分支内新增 */
 export type AgentSessionForkInfo = { forkedFromSessionId: string; forkedFromMessageId: string | null; forkedAt: string | null }
 
+type AgentSessionMessagesResponse = { messages: AgentUIMessage[]; activeRunId: string | null; runGoalId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; outcome?: import('../../../../shared/contracts/models.js').AgentRunOutcome; nextPrompt?: AgentNextPrompt; todoSnapshot?: import('../../../../shared/contracts/index.js').AgentTodoSnapshot | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }
+
 export function fetchAgentSessionMessages(
   sessionId: string,
   options?: { runLimit?: number; beforeRunStartedAt?: string | null },
-): Promise<{ messages: AgentUIMessage[]; activeRunId: string | null; runGoalId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; outcome?: import('../../../../shared/contracts/models.js').AgentRunOutcome; todoSnapshot?: import('../../../../shared/contracts/index.js').AgentTodoSnapshot | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }> {
+): Promise<AgentSessionMessagesResponse> {
   const query = new URLSearchParams()
   if (options?.runLimit != null) query.set('runLimit', String(options.runLimit))
   if (options?.beforeRunStartedAt) query.set('before', options.beforeRunStartedAt)
   const suffix = query.toString() ? `?${query.toString()}` : ''
-  return requestData<{ messages: AgentUIMessage[]; activeRunId: string | null; runGoalId: string | null; resumeRunId?: string | null; authorEnded?: AgentAuthorEndedPayload | null; outcome?: import('../../../../shared/contracts/models.js').AgentRunOutcome; todoSnapshot?: import('../../../../shared/contracts/index.js').AgentTodoSnapshot | null; pagination?: AgentSessionMessagesPagination; fork?: AgentSessionForkInfo | null }>(
-    `/api/agent/sessions/${sessionId}/messages${suffix}`,
-  )
+  return requestData(`/api/agent/sessions/${sessionId}/messages${suffix}`)
 }
 
 /** 历史任务对话列表（后端已过滤空且未命名的会话） */

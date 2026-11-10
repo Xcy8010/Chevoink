@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { AgentExecutionFrame } from '@prisma/client'
 import { z } from 'zod'
+import { NEXT_PROMPT_MAX_LENGTH } from './next-prompt.js'
 import { tokenPriceSchema } from '../billing/token-price.js'
 import { weightedRouteSelectionSchema } from '../../../shared/contracts/model-weighted-routes.js'
 import { lockRunRoot, runtimeError, runtimeJson, runtimeJsonHash, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
@@ -19,7 +20,8 @@ const message = z.discriminatedUnion('role', [
     z.object({ type: z.literal('text'), text: z.string() }).strict(),
     z.object({ type: z.literal('image_url'), image_url: z.object({ url: z.string(), detail: z.enum(['low', 'high', 'auto']).optional() }).strict() }).strict(),
   ]))]) }).strict(),
-  z.object({ role: z.literal('assistant'), content: z.string().nullable(), reasoning: z.string().optional(), toolCalls: z.array(toolCall).optional() }).strict(),
+  z.object({ role: z.literal('assistant'), content: z.string().nullable(), reasoning: z.string().optional(), toolCalls: z.array(toolCall).optional(),
+    nextPrompt: z.string().min(1).max(NEXT_PROMPT_MAX_LENGTH).optional() }).strict(),
   z.object({ role: z.literal('tool'), toolCallId: z.string().min(1), content: z.string() }).strict(),
 ])
 
@@ -39,6 +41,7 @@ const configurationSchema = z.object({ version: z.literal(1), mode: z.enum(['pla
   skillRouterVersion: z.string().min(1).optional(),
   modelAssignments: frozenModelAssignmentsSchema.optional(),
   pinnedSubagentId: id.optional(),
+  nextPromptMarker: z.string().regex(/^\[\[CHEVOINK_NEXT_PROMPT_[a-f0-9]{8}\]\]$/u).optional(),
 }).strict().refine(value => new Set(value.tools.map(tool => tool.function.name)).size === value.tools.length
   && new Set(value.toolAuthority.map(tool => tool.name)).size === value.toolAuthority.length
   && value.tools.every(tool => value.toolAuthority.some(grant => grant.name === tool.function.name)))

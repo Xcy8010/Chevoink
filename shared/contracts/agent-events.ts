@@ -498,6 +498,7 @@ export type AgentStreamEventBody =
       usage: AgentTokenUsage
       artifacts: AgentArtifactRef[]
       outputSummary: string
+      nextPrompt?: string
     }
   | { type: 'error'; code: string; message: string; recoverable: boolean }
 
@@ -506,6 +507,8 @@ export type AgentStreamEvent = {
   runId: EntityId
   ts: string
 } & AgentStreamEventBody
+
+export type AgentNextPrompt = { runId: EntityId; text: string }
 
 /** 消息分部：AgentMessage.parts 的元素结构，前端按 type 分发渲染 */
 export type AgentMessagePart =
@@ -581,6 +584,8 @@ export interface AgentUIMessage {
 export interface StartAgentLoopRunRequest {
   /** Fresh main-Agent interpretation; historical tasks retain their contract. */
   agentWritingProtocol?: 1
+  /** Request one optional composer suggestion in the existing model reply. */
+  predictNextPrompt?: true
   /** UUID for matching this author message to local delivery UI, without idempotency semantics. */
   clientRequestId?: string
   sessionId: EntityId

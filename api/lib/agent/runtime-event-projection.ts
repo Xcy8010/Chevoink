@@ -187,6 +187,7 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
         bodies = [...(presentation ? [{ type: 'text.final' as const, messageId: durableMessageId(root.id, before.state.turn), text: presentation.text, asReasoning: false }] : []),
           { type: 'run.finished', status: 'succeeded', usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
             ...(validProof && proof.success && proof.data.limitedWritingDelivery ? { outcome: proof.data.limitedWritingDelivery.outcome } : {}),
+            ...(validProof && proof.success && !proof.data.limitedWritingDelivery && candidate.nextPrompt ? { nextPrompt: candidate.nextPrompt } : {}),
             artifacts: [], outputSummary: presentation?.text ?? candidate.content ?? '' }]
       } else if (source.type === 'run.paused') {
         const paused = durablePauseSchema.safeParse(source.payload)

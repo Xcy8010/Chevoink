@@ -4359,6 +4359,20 @@ describe('author-directed task ending in the real execution loop', () => {
     mocks.currentOriginal = { prompt, taskSpec: spec }
     return spec
   }
+  it('publishes an opted-in next prompt separately from the final answer after one model call', async () => {
+    const prompt = '第一卷要写多少章？'
+    await responseTask(prompt)
+    const answer = '{"chapter_count":20}', nextPrompt = '帮我分配这二十章的节奏'
+    queue({ ...response(answer), nextPrompt })
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build',
+      prompt, predictNextPrompt: true })
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    const request = mocks.chat.mock.calls[0][0] as Parameters<typeof chatType>[0]
+    expect(request.messages[0]).toMatchObject({ role: 'system', content: expect.stringContaining(request.nextPromptMarker!) })
+    expect(events().filter(event => event.type === 'text.final')).toEqual([expect.objectContaining({ text: answer })])
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer, nextPrompt })
+    expect(JSON.stringify(mocks.persist.mock.calls)).not.toContain(nextPrompt)
+  })
   it.each(['第一卷要写多少章？', '第一卷要写多少章', '第一卷写多少章合适？', '第二卷应该怎么分章？', '这个大纲第一卷要写多少章？', '你好'])(
     'lets the main Agent deliver an exact native response after context reads: %s', async prompt => {
       const spec = await responseTask(prompt), frozen = structuredClone(spec)

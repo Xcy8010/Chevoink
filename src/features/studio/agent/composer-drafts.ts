@@ -2,13 +2,13 @@ import { useAgentStore } from './agentStore'
 import { registerDesktopSave } from '@/lib/desktop-lifecycle'
 
 type State = ReturnType<typeof useAgentStore.getState>
-type Draft = Pick<State, 'composerDraft' | 'composerAttachments' | 'composerReferences' | 'composerSkillIds' | 'composerSubagent' | 'composerUploading' | 'goalMode'>
+type Draft = Pick<State, 'composerDraft' | 'composerAcceptedNextPrompt' | 'composerAttachments' | 'composerReferences' | 'composerSkillIds' | 'composerSubagent' | 'composerUploading' | 'goalMode'>
 const prefix = 'chevoink:task-draft:v1:'
 const cache = new Map<string, Draft>()
 const aliases = new Map<string, string>()
 let active: string | undefined
-const empty = (): Draft => ({ composerDraft: '', composerAttachments: [], composerReferences: [], composerSkillIds: [], composerSubagent: null, composerUploading: 0, goalMode: false })
-const pick = (state: State): Draft => ({ composerDraft: state.composerDraft, composerAttachments: state.composerAttachments, composerReferences: state.composerReferences, composerSkillIds: state.composerSkillIds, composerSubagent: state.composerSubagent, composerUploading: state.composerUploading, goalMode: state.goalMode })
+const empty = (): Draft => ({ composerDraft: '', composerAcceptedNextPrompt: null, composerAttachments: [], composerReferences: [], composerSkillIds: [], composerSubagent: null, composerUploading: 0, goalMode: false })
+const pick = (state: State): Draft => ({ composerDraft: state.composerDraft, composerAcceptedNextPrompt: state.composerAcceptedNextPrompt, composerAttachments: state.composerAttachments, composerReferences: state.composerReferences, composerSkillIds: state.composerSkillIds, composerSubagent: state.composerSubagent, composerUploading: state.composerUploading, goalMode: state.goalMode })
 const resolve = (scope: string): string => aliases.get(scope) ?? scope
 export const sameComposerDraftScope = (left: string, right: string): boolean => resolve(left) === resolve(right)
 
@@ -38,7 +38,9 @@ function read(scope: string): Draft {
       const pin = value.composerSubagent
       const composerSubagent = pin && typeof pin.id === 'string' && typeof pin.name === 'string' && typeof pin.novelId === 'string'
         ? { id: pin.id, name: pin.name, novelId: pin.novelId } : null
-      return { ...empty(), ...value, composerSubagent, composerUploading: 0 }
+      const composerAcceptedNextPrompt = typeof value.composerAcceptedNextPrompt === 'string' && value.composerDraft.trim() === value.composerAcceptedNextPrompt
+        ? value.composerAcceptedNextPrompt : null
+      return { ...empty(), ...value, composerAcceptedNextPrompt, composerSubagent, composerUploading: 0 }
     }
   } catch { /* Unavailable/corrupt storage must not prevent typing. */ }
   return empty()
@@ -73,6 +75,7 @@ export function captureComposerSubmission(scope: string): () => void {
   return () => {
     const clear = (draft: Draft): Draft => {
       if (draft.composerDraft !== submitted.composerDraft || draft.composerReferences !== submitted.composerReferences
+        || draft.composerAcceptedNextPrompt !== submitted.composerAcceptedNextPrompt
         || draft.composerAttachments !== submitted.composerAttachments || draft.composerSkillIds !== submitted.composerSkillIds
         || draft.composerSubagent !== submitted.composerSubagent) return draft
       return { ...empty(), composerUploading: draft.composerUploading, goalMode: draft.goalMode }
