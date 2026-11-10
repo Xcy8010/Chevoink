@@ -67,12 +67,12 @@ describe('continuous Work gestures', () => {
     const gesture: WorkSplitGesture = { x: 600, start: fitWorkSplit(state, width, true), width, boundary: 'content', hasViewer: true }
     const foldX = 600 + state.viewer - WORK_SPLIT.viewer + WORK_SPLIT.foldResistance + 1
     const folded = advanceWorkSplitGesture(gesture, state, foldX)
-    expect(folded).toMatchObject({ viewerCollapsed: true, inspector: 400, inspectorCollapsed: false })
-    const narrower = advanceWorkSplitGesture(gesture, folded, foldX + 50)
+    expect(folded).toMatchObject({ viewerCollapsed: true, inspector: 399, inspectorCollapsed: false })
+    const narrower = advanceWorkSplitGesture(gesture, folded, foldX + 49)
     expect(narrower).toMatchObject({ viewerCollapsed: true, inspector: 350, inspectorCollapsed: false })
-    const slightReversal = advanceWorkSplitGesture(gesture, narrower, foldX + 50 - WORK_SPLIT.hysteresis)
+    const slightReversal = advanceWorkSplitGesture(gesture, narrower, foldX + 49 - WORK_SPLIT.hysteresis)
     expect(slightReversal).toEqual(narrower)
-    const reopened = advanceWorkSplitGesture(gesture, slightReversal, foldX + 49 - WORK_SPLIT.hysteresis)
+    const reopened = advanceWorkSplitGesture(gesture, slightReversal, foldX + 48 - WORK_SPLIT.hysteresis)
     expect(reopened).toMatchObject({ viewerCollapsed: false, viewer: 245, inspector: 350, inspectorCollapsed: false })
   })
   it('reopens both panes when the same left-seam drag folds the viewer and inspector', () => {
@@ -121,14 +121,21 @@ describe('continuous Work gestures', () => {
     const reopened = advanceWorkSplitGesture(gesture, edge, 31)
     expect(reopened).toMatchObject({ viewerCollapsed: true, viewer: state.viewer, chatCollapsed: false })
   })
-  it('keeps the extra viewer resistance reachable during repeated folds near the right edge', () => {
+  it('applies the remaining drag to the inspector when one sample crosses the viewer threshold', () => {
+    const gesture: WorkSplitGesture = { x: 600, start: fitWorkSplit(state, width, true), width, boundary: 'content', hasViewer: true }
+    const next = advanceWorkSplitGesture(gesture, state, 1114)
+    expect(next).toMatchObject({ viewerCollapsed: true, inspector: 350, inspectorCollapsed: false })
+    const edge = advanceWorkSplitGesture(gesture, next, width - 4)
+    expect(edge).toMatchObject({ viewerCollapsed: true, inspectorCollapsed: true })
+  })
+  it('crosses both fold thresholds at the right edge even with one sample per direction', () => {
     const gesture: WorkSplitGesture = { x: 600, start: fitWorkSplit(state, width, true), width, boundary: 'content', hasViewer: true }
     let current = state
     for (let cycle = 0; cycle < 20; cycle++) {
-      current = advanceWorkSplitGesture(gesture, current, 1599)
-      expect(current).toMatchObject({ viewerCollapsed: true, inspector: 400, inspectorCollapsed: false })
-      current = advanceWorkSplitGesture(gesture, current, 1569)
-      expect(current).toMatchObject({ viewerCollapsed: false, viewer: 250, inspector: 400 })
+      current = advanceWorkSplitGesture(gesture, current, width - 4)
+      expect(current).toMatchObject({ viewerCollapsed: true, inspectorCollapsed: true })
+      current = advanceWorkSplitGesture(gesture, current, width - 34)
+      expect(current).toMatchObject({ viewerCollapsed: false, viewer: 250, inspector: WORK_SPLIT.inspector, inspectorCollapsed: false })
     }
   })
   it('opens a collapsed inspector after a short drag even without a viewer', () => {

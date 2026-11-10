@@ -187,7 +187,11 @@ export default function WorkPerspective({ conversationRail, conversation, activi
       if (!drag.current || drag.current.pointer !== event.pointerId) return
       pendingX.current = event.clientX
       if (!frame.current) frame.current = requestAnimationFrame(() => { frame.current = 0; flush() })
-    }} onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={() => { if (drag.current) finish() }}>
+    }} onPointerUp={event => {
+      if (!drag.current || drag.current.pointer !== event.pointerId) return
+      pendingX.current = event.clientX
+      finish()
+    }} onPointerCancel={finish} onLostPointerCapture={() => { if (drag.current) finish() }}>
     <aside className="work-split-column h-full shrink-0 overflow-hidden" style={{ width: motion.rail }} aria-hidden={geometry.chatCollapsed} {...(geometry.chatCollapsed ? { inert: '' } : {})}>{conversationRail}</aside>
     <main data-work-conversation className="work-split-column min-w-0 bg-[var(--surface-default)]" style={{ flex: `0 0 ${motion.chat}px` }}>{conversation}</main>
     <aside aria-hidden={!dockVisible} {...(!dockVisible ? { inert: '' } : {})} className={cn('work-activity-dock h-full min-h-0 shrink-0 overflow-hidden', dockVisible ? 'is-visible' : '', floatDock && 'absolute top-0 z-40')} style={{ width: motion.dock, ...(floatDock ? { right: motion.inspector } : {}) }}><div className="h-full w-[296px] px-3 py-4">{activityDock}</div></aside>

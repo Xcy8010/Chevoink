@@ -19,6 +19,10 @@ export function fitWorkSplit(state: WorkSplit, width: number, hasViewer: boolean
   return { ...state, inspector, viewer, rail, chatCollapsed, viewerCollapsed, inspectorCollapsed, chat: chatCollapsed ? 0 : Math.max(0, room - rail - viewer - inspector) }
 }
 
+function contentViewerWidth(start: WorkSplitGeometry, width: number): number {
+  return start.chatCollapsed ? width - WORK_SPLIT.conversationRail - WORK_SPLIT.chat - start.inspector : start.viewer
+}
+
 /** Pure mapping within one open/closed phase of a gesture. */
 export function resizeWorkSplit(start: WorkSplitGeometry, previous: WorkSplit, width: number, delta: number, boundary: 'content' | 'inspector', hasViewer: boolean, viewerFoldResistance = WORK_SPLIT.foldResistance): WorkSplit {
   const { chat, viewer, inspector, hysteresis, foldResistance, rail, conversationRail } = WORK_SPLIT
@@ -44,8 +48,7 @@ export function resizeWorkSplit(start: WorkSplitGeometry, previous: WorkSplit, w
     return { ...start, viewer: previous.viewer, chatCollapsed: foldedChat, inspectorCollapsed: foldedInspector, inspector: foldedInspector ? rail : Math.max(inspector, rawInspector) }
   }
   const fixedInspector = start.inspector
-  const startingViewer = start.chatCollapsed ? width - conversationRail - chat - fixedInspector : start.viewer
-  const rawViewer = startingViewer - delta
+  const rawViewer = contentViewerWidth(start, width) - delta
   const rawChat = width - conversationRail - fixedInspector - rawViewer
   const foldedChat = rawChat < chat + (previous.chatCollapsed ? hysteresis : -foldResistance)
   const foldedViewer = !foldedChat && rawViewer < viewer - viewerFoldResistance
@@ -65,7 +68,9 @@ function boundedDragDelta(gesture: WorkSplitGesture, x: number): number {
   const available = delta >= 0 ? (gesture.left ?? 0) + width - 4 - gesture.x : gesture.x - (gesture.left ?? 0) - 4
   if (shrinkingViewer) {
     if (boundary === 'content' ? start.chatCollapsed : start.inspectorCollapsed) return delta
-    return delta * Math.max(1, (Math.max(0, start.viewer - viewer) + foldResistance + 2) / Math.max(1, available))
+    const viewerTravel = Math.max(0, start.viewer - viewer) + foldResistance
+    const inspectorTravel = boundary === 'content' && !start.inspectorCollapsed ? Math.max(0, start.inspector - inspector) + foldResistance : 0
+    return delta * Math.max(1, (viewerTravel + inspectorTravel + 2) / Math.max(1, available))
   }
   if (start.chatCollapsed || (delta >= 0 ? start.inspectorCollapsed : viewerVisible && boundary === 'inspector')) return delta
   const free = delta >= 0 ? start.inspector - inspector : start.chat - chat
@@ -90,10 +95,21 @@ export function advanceWorkSplitGesture(gesture: WorkSplitGesture, previous: Wor
   } else {
     // Only the same capture of the viewer's left seam can reverse its fold.
     if (reversal > 0) return previous
-    next = resizeWorkSplit(gesture.start, previous, gesture.width, boundedDragDelta(gesture, x), gesture.boundary, gesture.hasViewer)
+    const { start, width, boundary, hasViewer } = gesture
+    const delta = boundedDragDelta(gesture, x)
+    next = resizeWorkSplit(start, previous, width, delta, boundary, hasViewer)
     if (viewerFold) viewerFold.x = x
-    else if (viewerVisible && gesture.boundary === 'content' && next.viewerCollapsed) {
+    else if (viewerVisible && boundary === 'content' && next.viewerCollapsed) {
       gesture.viewerFold = { x, inspectorOpen: !next.inspectorCollapsed }
+      if (!next.inspectorCollapsed) {
+        // A single pointer sample can cross both folds. Start the inspector at the viewer's threshold.
+        const viewerThreshold = contentViewerWidth(start, width) - WORK_SPLIT.viewer + WORK_SPLIT.foldResistance
+        const foldTravel = Math.max(start.chatCollapsed ? WORK_SPLIT.hysteresis : 0, viewerThreshold)
+        gesture.x += (x - gesture.x) * foldTravel / delta
+        gesture.start = fitWorkSplit(next, width, hasViewer)
+        next = resizeWorkSplit(gesture.start, next, width, boundedDragDelta(gesture, x), boundary, hasViewer)
+        if (!next.inspectorCollapsed) return next
+      }
     }
   }
   const changed = next.chatCollapsed !== previous.chatCollapsed || next.viewerCollapsed !== previous.viewerCollapsed || next.inspectorCollapsed !== previous.inspectorCollapsed
