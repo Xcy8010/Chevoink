@@ -27,8 +27,8 @@ it('places the single compact announcement directly above the actual sidebar acc
  expect(screen.getByTestId('main').contains(notice)).toBe(false)
  expect(screen.getByTestId('workspace').lastElementChild).toBe(screen.getByTestId('main'))
 })
-it('places the hover-to-close icons after a wrapping announcement title', () => {
- const title = '这是一条用于验证窄侧栏标题完整显示的合成公告'
+it('places the hover-to-close icons after a long announcement title', () => {
+ const title = '这是一条用于验证窄侧栏保留完整标题的合成公告'
  state.content!.announcements[0].title = title
  render(<Fixture />)
  const open = screen.getByRole('button', { name: '打开公告：' + title })
