@@ -60,17 +60,17 @@ afterEach(async () => {
 })
 
 describe('reader speech synthesis', () => {
-  it('does not retry a refused handshake or retain its partial output', async () => {
+  it.each(['403', '429'])('does not retry handshake %s or retain its partial output', async (status) => {
     mocks.ttsPromise.mockImplementationOnce(async (_text, output) => {
       await writeFile(output, 'partial')
-      throw new Error('Unexpected server response: 403')
+      throw new Error(`Unexpected server response: ${status}`)
     })
 
     await expect(synthesizeTtsBatchData(input)).rejects.toMatchObject({ status: 503, code: 'TTS_UNAVAILABLE' })
     expect(mocks.ttsPromise).toHaveBeenCalledTimes(1)
     expect(await readdir(mocks.cacheDir)).toEqual([])
     expect(console.error).toHaveBeenCalledWith('[tts] synthesize failed', expect.objectContaining({
-      requestId: input.requestId, reason: 'upstream_http', upstreamStatus: '403', attempts: 1,
+      requestId: input.requestId, reason: 'upstream_http', upstreamStatus: status, attempts: 1,
     }))
   })
 

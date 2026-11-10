@@ -133,7 +133,7 @@ export async function synthesizeTtsBatchData(input: SynthesizeTtsInput): Promise
   }
 }
 
-/** Edge TTS 合成失败后最多重试一次，握手 403 直接结束。 */
+/** Edge TTS 合成失败后最多重试一次，握手拒绝或限流时直接结束。 */
 async function synthesizeWithRetry(text: string, voiceId: string, filePath: string, requestId: string): Promise<void> {
   const tts = new EdgeTTS({
     voice: voiceId,
@@ -156,7 +156,7 @@ async function synthesizeWithRetry(text: string, voiceId: string, filePath: stri
       await unlink(temporaryPath).catch(() => undefined)
       const message = error instanceof Error ? error.message : ''
       const upstreamStatus = /^Unexpected server response: (\d{3})$/.exec(message)?.[1]
-      if (upstreamStatus === '403' || attempt === 2) {
+      if (upstreamStatus === '403' || upstreamStatus === '429' || attempt === 2) {
         const timedOut = /^Timed out\b/.test(message) || (error as NodeJS.ErrnoException | null)?.code === 'ETIMEDOUT'
         console.error('[tts] synthesize failed', {
           requestId,
