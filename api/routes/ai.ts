@@ -166,6 +166,7 @@ router.post('/tts/synthesize', async (req: Request, res: Response): Promise<void
       chapterId: body.chapterId.trim(),
       batchIndex: body.batchIndex,
       voiceId: body.voiceId.trim(),
+      requestId,
     })
 
     res.status(200)

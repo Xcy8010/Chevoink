@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto'
-import { mkdir, readdir, stat, unlink, utimes } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdir, readdir, rename, stat, unlink, utimes } from 'node:fs/promises'
 import path from 'node:path'
 
 import { EdgeTTS } from 'node-edge-tts'
@@ -58,6 +58,7 @@ type SynthesizeTtsInput = {
   chapterId: string
   batchIndex: number
   voiceId: string
+  requestId: string
 }
 
 /** 相同缓存键的并发请求合并为一次合成 */
@@ -118,7 +119,7 @@ export async function synthesizeTtsBatchData(input: SynthesizeTtsInput): Promise
 
   const task = (async () => {
     await mkdir(cacheDirectory, { recursive: true })
-    await synthesizeWithRetry(batch.text, input.voiceId, filePath)
+    await synthesizeWithRetry(batch.text, input.voiceId, filePath, input.requestId)
     void cleanupTtsCache(cacheDirectory).catch((): undefined => undefined)
     return filePath
   })()
@@ -132,8 +133,8 @@ export async function synthesizeTtsBatchData(input: SynthesizeTtsInput): Promise
   }
 }
 
-/** Edge TTS 合成（失败重试 1 次，见方案 2.2 降级链） */
-async function synthesizeWithRetry(text: string, voiceId: string, filePath: string): Promise<void> {
+/** Edge TTS 合成失败后最多重试一次，握手 403 直接结束。 */
+async function synthesizeWithRetry(text: string, voiceId: string, filePath: string, requestId: string): Promise<void> {
   const tts = new EdgeTTS({
     voice: voiceId,
     lang: 'zh-CN',
@@ -141,23 +142,34 @@ async function synthesizeWithRetry(text: string, voiceId: string, filePath: stri
     timeout: env.ttsTimeoutMs,
   })
 
-  let lastError: unknown = null
-
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  // The provider writes incrementally. Make only completed audio visible to cache readers.
+  const temporaryPath = `${filePath}.${randomUUID()}.tmp`
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
-      await tts.ttsPromise(text, filePath)
-      const fileStat = await stat(filePath)
-      if (fileStat.size === 0) {
+      await tts.ttsPromise(text, temporaryPath)
+      if ((await stat(temporaryPath)).size === 0) {
         throw new Error('empty tts output')
       }
+      await rename(temporaryPath, filePath)
       return
     } catch (error) {
-      lastError = error
-      await unlink(filePath).catch((): undefined => undefined)
+      await unlink(temporaryPath).catch(() => undefined)
+      const message = error instanceof Error ? error.message : ''
+      const upstreamStatus = /^Unexpected server response: (\d{3})$/.exec(message)?.[1]
+      if (upstreamStatus === '403' || attempt === 2) {
+        const timedOut = /^Timed out\b/.test(message) || (error as NodeJS.ErrnoException | null)?.code === 'ETIMEDOUT'
+        console.error('[tts] synthesize failed', {
+          requestId,
+          voiceId,
+          reason: upstreamStatus ? 'upstream_http' : timedOut ? 'timeout' : 'synthesis_error',
+          upstreamStatus,
+          attempts: attempt,
+        })
+        break
+      }
     }
   }
 
-  console.error('[tts] synthesize failed', lastError)
   throw new DataAccessError(503, 'TTS_UNAVAILABLE', '语音合成暂时不可用，请稍后重试。')
 }
 
