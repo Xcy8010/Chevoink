@@ -148,7 +148,7 @@ function isTtsRateLimited(key: string): boolean {
   return false
 }
 
-/** 听书批次合成：返回 audio/mpeg 二进制，错误仍走 JSON 错误结构 */
+/** 听书批次合成返回音频二进制，错误仍走 JSON 错误结构。 */
 router.post('/tts/synthesize', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
 
@@ -170,7 +170,7 @@ router.post('/tts/synthesize', async (req: Request, res: Response): Promise<void
     })
 
     res.status(200)
-    res.setHeader('Content-Type', 'audio/mpeg')
+    res.setHeader('Content-Type', filePath.endsWith('.wav') ? 'audio/wav' : 'audio/mpeg')
     // 同章同音色重听让浏览器再缓一层
     res.setHeader('Cache-Control', 'private, max-age=86400')
     res.sendFile(filePath)

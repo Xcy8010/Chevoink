@@ -31,6 +31,19 @@ function move(root: Element, x: number) {
   act(() => vi.advanceTimersByTime(16))
   act(() => vi.advanceTimersByTime(240))
 }
+it('keeps the activity dock beside the scrollbar without narrowing the conversation pane', () => {
+  const view = render(<WorkPerspective {...props()} viewer={undefined} inspectorWidth={320} />)
+  act(() => vi.advanceTimersByTime(240))
+  const root = view.container.querySelector('[data-studio-layout]')!
+  const conversation = root.querySelector<HTMLElement>('[data-work-conversation]')!
+  const dock = root.querySelector<HTMLElement>('.work-activity-dock')!
+  expect(root.getAttribute('data-activity-dock')).toBe('visible')
+  expect(conversation.style.flexBasis).toBe('1236px')
+  expect(dock.classList.contains('absolute')).toBe(true)
+  expect(dock.style.right).toBe('332px')
+  expect(dock.style.width).toBe('296px')
+})
+
 it('preserves a folded viewer through delayed hydration, task revisit and remount, but opens for an explicit scoped selection', () => {
   const saved = { viewer: 600, inspector: 400, viewerCollapsed: true, inspectorCollapsed: false, chatCollapsed: false }
   localStorage.setItem('chevoink:work-split-v2:task-a', JSON.stringify(saved))

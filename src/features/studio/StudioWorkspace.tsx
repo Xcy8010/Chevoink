@@ -4356,7 +4356,6 @@ export default function StudioWorkspace() {
                   writeLocked={workViewer === 'chapter' ? chapterStreamingPreview !== undefined : documentStreamingPreview !== undefined}
                 /> : undefined}
                 rightOpen={workRightOpen}
-                outerSidebarOpen={workspaceSidebarOpen}
                 scopeKey={workPanelScope}
                 viewerIdentity={workViewer ? `${workViewer}:${selectedTreeItemId ?? ''}` : null}
                 inspectorWidth={panelWidths.workInspector}

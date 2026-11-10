@@ -41,12 +41,15 @@ function parseReasoningEffort(value: string | undefined): 'low' | 'high' | 'max'
   return value === 'low' || value === 'max' ? value : 'high'
 }
 
+const appEnv = process.env.APP_ENV ?? 'development'
+const ttsProvider = process.env.TTS_PROVIDER?.trim() || (appEnv === 'production' ? 'local' : 'edge')
+
 export const env = {
   yunshuAdminAccessTokenFile: process.env.YUNSHU_ADMIN_ACCESS_TOKEN_FILE ?? '',
   yunshuAdminAccessToken: process.env.YUNSHU_ADMIN_ACCESS_TOKEN ?? '',
   agentGoalEnabled: parseBoolean(process.env.AGENT_GOAL_ENABLED, false),
   appName: process.env.APP_NAME ?? '启创墨域',
-  appEnv: process.env.APP_ENV ?? 'development',
+  appEnv,
   port: parsePositiveNumber(process.env.APP_PORT, 3001),
   webUrl: process.env.APP_WEB_URL ?? 'http://localhost:5173',
   serverUrl: process.env.APP_SERVER_URL ?? 'http://localhost:3001',
@@ -173,8 +176,9 @@ export const env = {
   webReaderFallback: process.env.WEB_READER_FALLBACK ?? 'off',
   webReaderJinaApiKey: process.env.JINA_READER_API_KEY ?? '',
   webReaderFirecrawlApiKey: process.env.FIRECRAWL_API_KEY ?? '',
-  // 听书 TTS（方案 17）：edge = 免费 Edge 神经音色；disabled = 全端隐藏听书入口
-  ttsProvider: process.env.TTS_PROVIDER ?? 'edge',
+  // 听书 TTS：生产默认离线合成，开发默认 Edge。其他值关闭听书。
+  ttsProvider: ttsProvider === 'local' || ttsProvider === 'edge' ? ttsProvider : 'disabled',
+  ttsLocalModelDir: process.env.TTS_LOCAL_MODEL_DIR ?? '',
   ttsDefaultVoice: process.env.TTS_DEFAULT_VOICE ?? 'zh-CN-YunjianNeural',
   ttsCacheDir: process.env.TTS_CACHE_DIR ?? '',
   ttsCacheMaxMb: parsePositiveNumber(process.env.TTS_CACHE_MAX_MB, 2048),

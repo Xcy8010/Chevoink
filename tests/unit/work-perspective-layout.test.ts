@@ -28,6 +28,12 @@ describe('Work activity dock responsive placement', () => {
     })).toBe(false)
   })
 
+  it('keeps the activity inline below the minimum centered reading width', () => {
+    const layout = { leftWidth: 44, rightWidth: 320, hasActivity: true, hasViewer: false }
+    expect(shouldShowWorkActivityDock({ ...layout, containerWidth: 1576 })).toBe(true)
+    expect(shouldShowWorkActivityDock({ ...layout, containerWidth: 1575 })).toBe(false)
+  })
+
   it('never competes with an open chapter viewer or empty activity state', () => {
     expect(shouldShowWorkActivityDock({
       containerWidth: 2560,

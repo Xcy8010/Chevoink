@@ -862,20 +862,29 @@ html[data-studio-resizing='true'] .studio-resizable-panel[data-sidebar-folding='
 .agent-conversation-scroll { grid-area: 1 / 1; padding: 16px 0 calc(var(--agent-footer-height, 180px) + 16px); scroll-padding-bottom: calc(var(--agent-footer-height, 180px) + 16px); }
 .agent-conversation-scroll > .agent-conversation-width { min-height: 100%; padding-inline: 16px; overflow-wrap: anywhere; }
 
-/* Let the Work transcript scroll to the pane edge while keeping its content aligned with the composer. */
+/* Center the chat column with the conversation rail where the available width permits it. */
+.work-agent-frame {
+  --work-agent-column-width: min(54rem, calc(var(--work-agent-chat-width, 100vw) + var(--work-agent-rail-width, 0px) - 2 * var(--work-agent-dock-reserve, 0px)));
+  --work-agent-column-shift: clamp(0px, calc((var(--work-agent-chat-width, 0px) - var(--work-agent-column-width) - 32px) / 2), calc(var(--work-agent-rail-width, 0px) / 2));
+}
+.work-agent-frame .work-agent-compact {
+  --work-agent-column-width: 54rem;
+  --work-agent-column-shift: 0px;
+}
 .work-agent-frame :is(.agent-conversation-header, .agent-conversation-width) {
-  width: min(54rem, calc(100% - 32px));
+  position: relative;
+  inset-inline-start: calc(0px - var(--work-agent-column-shift));
+  width: min(var(--work-agent-column-width), calc(100% - 32px));
   margin-inline: auto;
 }
 .work-agent-frame .agent-conversation-scroll {
-  margin-inline: 6px calc(6px + var(--work-agent-floating-dock-width, 0px));
-  padding-inline-start: var(--work-agent-floating-dock-width, 0px);
+  margin-inline: 6px;
   min-width: 0;
   scrollbar-gutter: stable both-edges;
 }
 .work-agent-frame .agent-conversation-scroll > .agent-conversation-width {
   /* The two 6px margins and 5px gutters already account for 22px of the 32px inset. */
-  width: min(54rem, calc(100% - 10px));
+  width: min(var(--work-agent-column-width), calc(100% - 10px));
 }
 @supports selector(::-webkit-scrollbar) {
   .work-agent-frame .agent-conversation-scroll,

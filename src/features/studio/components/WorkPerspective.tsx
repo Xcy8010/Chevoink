@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { BookCopy, Brain, ChevronLeft, GitCompareArrows, Network, PanelRightClose, Wrench } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { WorkInspectorTab } from './WorkInspector'
-import { FLOATING_DOCK_MIN_CLEARANCE, shouldShowWorkActivityDock } from './work-layout'
+import { WORK_ACTIVITY_DOCK_WIDTH, WORK_ACTIVITY_DOCK_EDGE_GAP, shouldShowWorkActivityDock } from './work-layout'
 import { advanceWorkSplitGesture, fitWorkSplit, resizeWorkSplit, WORK_SPLIT, type WorkSplit, type WorkSplitGesture } from './work-split'
 import { WorkConversationContext } from './work-conversation-context'
 import { useWorkSplitMotion } from './use-work-split-motion'
@@ -11,7 +11,6 @@ import { WORK_OPEN_DOCUMENT } from './work-viewer-events'
 type Props = {
   conversationRail: ReactNode; conversation: ReactNode; activityDock?: ReactNode
   inspector: ReactNode; viewer?: ReactNode; viewerIdentity?: string | null; scopeKey?: string
-  outerSidebarOpen?: boolean
   rightOpen: boolean; inspectorWidth: number; viewerWidth: number
   onToggleRight: () => void; inspectorTab: WorkInspectorTab; onSelectInspectorTab: (tab: WorkInspectorTab) => void
 }
@@ -33,7 +32,7 @@ function restoreSplit(scope: string | undefined, fallback: WorkSplit): WorkSplit
 }
 type Gesture = WorkSplitGesture & { pointer: number }
 
-export default function WorkPerspective({ conversationRail, conversation, activityDock, inspector, viewer, scopeKey, outerSidebarOpen = true, rightOpen, inspectorWidth, viewerWidth, onToggleRight, onSelectInspectorTab }: Props) {
+export default function WorkPerspective({ conversationRail, conversation, activityDock, inspector, viewer, scopeKey, rightOpen, inspectorWidth, viewerWidth, onToggleRight, onSelectInspectorTab }: Props) {
   const root = useRef<HTMLDivElement>(null)
   const contentHandle = useRef<HTMLDivElement>(null)
   const restoreSeparatorFocus = useRef(false)
@@ -58,9 +57,8 @@ export default function WorkPerspective({ conversationRail, conversation, activi
     restoreSeparatorFocus.current = false
     contentHandle.current?.focus()
   }, [viewerOpen])
-  const dockVisible = !geometry.chatCollapsed && shouldShowWorkActivityDock({ containerWidth: width, leftWidth: 44, rightWidth: geometry.inspector, hasActivity: Boolean(activityDock), hasViewer: viewerOpen })
-  const floatDock = !outerSidebarOpen && dockVisible && width - geometry.inspector >= FLOATING_DOCK_MIN_CLEARANCE
-  const motion = useWorkSplitMotion({ rail: geometry.rail, chat: Math.max(0, geometry.chat - (dockVisible && !floatDock ? 296 : 0)), viewer: viewerOpen ? geometry.viewer : 0, inspector: geometry.inspector, dock: dockVisible ? 296 : 0 }, `${geometry.chatCollapsed}:${viewerOpen}:${inspectorOpen}:${dockVisible}:${floatDock}`)
+  const dockVisible = !geometry.chatCollapsed && shouldShowWorkActivityDock({ containerWidth: width, leftWidth: geometry.rail, rightWidth: geometry.inspector, hasActivity: Boolean(activityDock), hasViewer: viewerOpen })
+  const motion = useWorkSplitMotion({ rail: geometry.rail, chat: geometry.chat, viewer: viewerOpen ? geometry.viewer : 0, inspector: geometry.inspector, dock: dockVisible ? WORK_ACTIVITY_DOCK_WIDTH : 0 }, `${geometry.chatCollapsed}:${viewerOpen}:${inspectorOpen}:${dockVisible}`)
   const update = useCallback((value: WorkSplit) => {
     splitRef.current = value; setSplit(value)
     if (previousScope.current && !drag.current) {
@@ -182,7 +180,7 @@ export default function WorkPerspective({ conversationRail, conversation, activi
       }
     }}
   />
-  return <WorkConversationContext.Provider value={context}><div ref={root} data-studio-layout="work" data-activity-dock={dockVisible ? 'visible' : 'hidden'} data-chat-collapsed={geometry.chatCollapsed} data-dragging={dragging} className="work-perspective relative flex h-full min-h-0 overflow-hidden bg-[var(--surface-default)]" style={{ '--work-agent-floating-dock-width': floatDock ? `${motion.dock}px` : undefined } as CSSProperties}
+  return <WorkConversationContext.Provider value={context}><div ref={root} data-studio-layout="work" data-activity-dock={dockVisible ? 'visible' : 'hidden'} data-chat-collapsed={geometry.chatCollapsed} data-dragging={dragging} className="work-perspective relative flex h-full min-h-0 overflow-hidden bg-[var(--surface-default)]"
     onPointerMove={event => {
       if (!drag.current || drag.current.pointer !== event.pointerId) return
       pendingX.current = event.clientX
@@ -193,8 +191,13 @@ export default function WorkPerspective({ conversationRail, conversation, activi
       finish()
     }} onPointerCancel={finish} onLostPointerCapture={() => { if (drag.current) finish() }}>
     <aside className="work-split-column h-full shrink-0 overflow-hidden" style={{ width: motion.rail }} aria-hidden={geometry.chatCollapsed} {...(geometry.chatCollapsed ? { inert: '' } : {})}>{conversationRail}</aside>
-    <main data-work-conversation className="work-split-column min-w-0 bg-[var(--surface-default)]" style={{ flex: `0 0 ${motion.chat}px` }}>{conversation}</main>
-    <aside aria-hidden={!dockVisible} {...(!dockVisible ? { inert: '' } : {})} className={cn('work-activity-dock h-full min-h-0 shrink-0 overflow-hidden', dockVisible ? 'is-visible' : '', floatDock && 'absolute top-0 z-40')} style={{ width: motion.dock, ...(floatDock ? { right: motion.inspector } : {}) }}><div className="h-full w-[296px] px-3 py-4">{activityDock}</div></aside>
+    <main data-work-conversation className="work-split-column min-w-0 bg-[var(--surface-default)]" style={{
+      flex: `0 0 ${motion.chat}px`,
+      '--work-agent-chat-width': `${motion.chat}px`,
+      '--work-agent-rail-width': `${motion.rail}px`,
+      '--work-agent-dock-reserve': `${dockVisible ? motion.dock + WORK_ACTIVITY_DOCK_EDGE_GAP : 0}px`,
+    } as CSSProperties}>{conversation}</main>
+    <aside aria-hidden={!dockVisible} {...(!dockVisible ? { inert: '' } : {})} className={cn('work-activity-dock absolute top-0 z-40 h-full min-h-0 overflow-hidden', dockVisible && 'is-visible')} style={{ width: motion.dock, right: motion.inspector + motion.viewer + WORK_ACTIVITY_DOCK_EDGE_GAP }}><div className="h-full px-3 py-4" style={{ width: WORK_ACTIVITY_DOCK_WIDTH }}>{activityDock}</div></aside>
     <section data-studio-panel="workViewer" aria-hidden={!viewerOpen} {...(!viewerOpen ? { inert: '' } : {})} className="work-split-column h-full min-h-0 shrink-0 overflow-hidden border-[var(--border-subtle)]" style={{ width: motion.viewer, borderLeftWidth: motion.viewer > 0 ? 1 : 0 }}><div className="h-full" style={{ minWidth: WORK_SPLIT.viewer }}>{retainedViewer}</div></section>
     <aside data-studio-panel="workInspector" className="work-split-column work-inspector-column relative ml-auto h-full min-h-0 shrink-0 overflow-hidden border-l border-[var(--border-subtle)] bg-[var(--app-bg)]" style={{ width: motion.inspector }}>
       <div aria-hidden={!inspectorOpen} {...(!inspectorOpen ? { inert: '' } : {})} className={cn('absolute inset-0 overflow-hidden transition-opacity duration-200', inspectorOpen ? 'opacity-100' : 'pointer-events-none opacity-0')}>{inspector}</div>
