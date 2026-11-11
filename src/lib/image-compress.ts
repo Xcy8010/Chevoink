@@ -4,6 +4,8 @@
  * 再铺白底压平透明通道，缩放到 512px 以内导出 JPEG——从此不存在透明像素。
  */
 
+import { PROFILE_IMAGE_MAX_BYTES, PROFILE_IMAGE_MAX_MB } from '../../shared/contracts/api.js'
+
 const SUPPORTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp']
 
 /** 头像输出的最大边长：展示最大不过 96px，512 已冗余 */
@@ -18,7 +20,19 @@ const TRIM_COLOR_TOLERANCE = 48
 /** 裁切后内容面积低于原图该比例时放弃 trim（防误裁纯色背景证件照），只做 flatten */
 const TRIM_MIN_AREA_RATIO = 0.4
 
-function readFileAsDataUrl(file: File): Promise<string> {
+export function getProfileImageUploadError(file: File, label: '头像' | '封面'): string | null {
+  if (!SUPPORTED_IMAGE_TYPES.includes(file.type)) {
+    return `${label}仅支持 PNG、JPG 或 WebP 图片。`
+  }
+
+  if (file.size > PROFILE_IMAGE_MAX_BYTES) {
+    return `${label}图片不能超过 ${PROFILE_IMAGE_MAX_MB}MB。`
+  }
+
+  return null
+}
+
+export function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => resolve(String(reader.result ?? ''))

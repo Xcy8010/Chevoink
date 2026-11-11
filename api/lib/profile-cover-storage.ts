@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, unlink } from 'node:fs/promises'
 import path from 'node:path'
 
+import { PROFILE_IMAGE_MAX_BYTES, PROFILE_IMAGE_MAX_MB } from '../../shared/contracts/api.js'
 import { env } from '../config/env.js'
+import { allowPublicUploadDirectory, writePublicUploadFile } from './public-upload-files.js'
 import { transcodeCoverImage } from './image-transcode.js'
 import { DataAccessError } from './prisma.js'
 
 const MANAGED_PROFILE_COVER_PREFIX = '/api/uploads/profile-covers/'
-const MAX_PROFILE_COVER_BYTES = 3 * 1024 * 1024
 
 const MIME_TO_EXTENSION = {
   'image/png': 'png',
@@ -45,8 +46,8 @@ function parseProfileCoverDataUrl(dataUrl: string): {
     throw new DataAccessError(400, 'VALIDATION_ERROR', '封面图片不能为空。')
   }
 
-  if (buffer.byteLength > MAX_PROFILE_COVER_BYTES) {
-    throw new DataAccessError(400, 'VALIDATION_ERROR', '封面图片不能超过 3MB。')
+  if (buffer.byteLength > PROFILE_IMAGE_MAX_BYTES) {
+    throw new DataAccessError(400, 'VALIDATION_ERROR', `封面图片不能超过 ${PROFILE_IMAGE_MAX_MB}MB。`)
   }
 
   return { mimeType, buffer }
@@ -57,19 +58,20 @@ export async function storeProfileCoverDataUrl(dataUrl: string): Promise<string>
   const profileCoverDirectory = getProfileCoverDirectory()
 
   await mkdir(profileCoverDirectory, { recursive: true })
+  await allowPublicUploadDirectory(profileCoverDirectory)
 
   // 优先 sharp 转 WebP + 缩略图；失败时降级原样落盘
   const transcoded = await transcodeCoverImage(buffer)
   if (transcoded) {
     const filename = `${randomUUID()}.webp`
-    await writeFile(path.join(profileCoverDirectory, filename), transcoded.main)
-    await writeFile(path.join(profileCoverDirectory, filename.replace(/\.webp$/, '.thumb.webp')), transcoded.thumb)
+    await writePublicUploadFile(path.join(profileCoverDirectory, filename), transcoded.main)
+    await writePublicUploadFile(path.join(profileCoverDirectory, filename.replace(/\.webp$/, '.thumb.webp')), transcoded.thumb)
     return `${MANAGED_PROFILE_COVER_PREFIX}${filename}`
   }
 
   const extension = MIME_TO_EXTENSION[mimeType]
   const filename = `${randomUUID()}.${extension}`
-  await writeFile(path.join(profileCoverDirectory, filename), buffer)
+  await writePublicUploadFile(path.join(profileCoverDirectory, filename), buffer)
 
   return `${MANAGED_PROFILE_COVER_PREFIX}${filename}`
 }

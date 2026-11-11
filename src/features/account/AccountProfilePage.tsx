@@ -7,6 +7,7 @@ import Avatar from '@/features/community/components/Avatar'
 import Button from '@/components/ui/Button'
 import { useToast } from '@/components/ui/toast-context'
 import { useShellStore } from '@/store/useShellStore'
+import { getProfileImageUploadError, readFileAsDataUrl } from '@/lib/image-compress'
 import type { UpdateMyAvatarRequest, UpdateMyProfileRequest, User } from '../../../shared/contracts'
 import AccountLayout from './AccountLayout'
 
@@ -73,30 +74,18 @@ export default function AccountProfilePage() {
     }
   }
 
-  function readImageAsDataUrl(file: File): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => resolve(String(reader.result ?? ''))
-      reader.onerror = () => reject(new Error('读取图片文件失败。'))
-      reader.readAsDataURL(file)
-    })
-  }
-
   async function handleAvatarChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) return
-    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
-      toast.error('头像仅支持 PNG、JPG 或 WebP 图片。')
-      return
-    }
-    if (file.size > 2 * 1024 * 1024) {
-      toast.error('头像图片不能超过 2MB。')
+    const validationError = getProfileImageUploadError(file, '头像')
+    if (validationError) {
+      toast.error(validationError)
       return
     }
     setAvatarSubmitting(true)
     try {
-      const dataUrl = await readImageAsDataUrl(file)
+      const dataUrl = await readFileAsDataUrl(file)
       const payload = await requestJson<{ user: User }>('/api/users/me/avatar', {
         method: 'PATCH',
         body: JSON.stringify({ avatarDataUrl: dataUrl } satisfies UpdateMyAvatarRequest),

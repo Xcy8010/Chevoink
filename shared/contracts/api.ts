@@ -124,6 +124,9 @@ export type UpdateMyProfileResponse = ApiSuccess<{
   user: User
 }>
 
+export const PROFILE_IMAGE_MAX_MB = 5
+export const PROFILE_IMAGE_MAX_BYTES = PROFILE_IMAGE_MAX_MB * 1024 * 1024
+
 export type UpdateMyAvatarRequest = {
   avatarDataUrl: string | null
 }

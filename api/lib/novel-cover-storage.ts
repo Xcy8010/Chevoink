@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { chmod, link, mkdir, open, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises'
+import { link, mkdir, open, readFile, realpath, unlink } from 'node:fs/promises'
 import path from 'node:path'
 
 import { env } from '../config/env.js'
 import { transcodeCoverImage } from './image-transcode.js'
 import { DataAccessError } from './prisma.js'
+import { allowPublicUploadDirectory, writePublicUploadFile } from './public-upload-files.js'
 
 const MANAGED_NOVEL_COVER_PREFIX = '/api/uploads/novel-covers/'
 const MAX_NOVEL_COVER_BYTES = 3 * 1024 * 1024
@@ -29,10 +30,6 @@ function getUploadsRoot() {
 
 function getNovelCoverDirectory() {
   return path.join(getUploadsRoot(), 'novel-covers')
-}
-
-async function allowPublicCoverDirectory(directory: string): Promise<void> {
-  await chmod(directory, (await stat(directory)).mode | 0o755)
 }
 
 function parseNovelCoverDataUrl(dataUrl: string): {
@@ -74,7 +71,7 @@ export async function storeImportedNovelCoverDataUrl(dataUrl: string): Promise<s
   const directory = getNovelCoverDirectory()
   await mkdir(directory, { recursive: true })
   if (await realpath(directory) !== directory) throw new DataAccessError(503, 'IMPORT_COVER_STORAGE_UNSAFE', '封面存储目录不可用。')
-  await allowPublicCoverDirectory(directory)
+  await allowPublicUploadDirectory(directory)
   const sha256 = createHash('sha256').update(buffer).digest('hex')
   const filename = `${sha256}.png`
   const target = path.join(directory, filename)
@@ -145,12 +142,6 @@ export async function storeNovelCoverFromRemoteUrl(remoteUrl: string): Promise<s
   return writeCoverBuffer(mimeType, buffer)
 }
 
-/** Public covers are served by Nginx under a different user; keep the private process umask. */
-async function writePublicCoverFile(filename: string, buffer: Buffer): Promise<void> {
-  await writeFile(filename, buffer)
-  await chmod(filename, 0o644)
-}
-
 async function writeCoverBuffer(
   mimeType: SupportedNovelCoverMimeType,
   buffer: Buffer,
@@ -158,20 +149,20 @@ async function writeCoverBuffer(
   const coverDirectory = getNovelCoverDirectory()
 
   await mkdir(coverDirectory, { recursive: true })
-  await allowPublicCoverDirectory(coverDirectory)
+  await allowPublicUploadDirectory(coverDirectory)
 
   // 优先 sharp 转 WebP + 缩略图；失败时降级原样落盘
   const transcoded = await transcodeCoverImage(buffer)
   if (transcoded) {
     const filename = `${randomUUID()}.webp`
-    await writePublicCoverFile(path.join(coverDirectory, filename), transcoded.main)
-    await writePublicCoverFile(path.join(coverDirectory, filename.replace(/\.webp$/, '.thumb.webp')), transcoded.thumb)
+    await writePublicUploadFile(path.join(coverDirectory, filename), transcoded.main)
+    await writePublicUploadFile(path.join(coverDirectory, filename.replace(/\.webp$/, '.thumb.webp')), transcoded.thumb)
     return `${MANAGED_NOVEL_COVER_PREFIX}${filename}`
   }
 
   const extension = MIME_TO_EXTENSION[mimeType]
   const filename = `${randomUUID()}.${extension}`
-  await writePublicCoverFile(path.join(coverDirectory, filename), buffer)
+  await writePublicUploadFile(path.join(coverDirectory, filename), buffer)
 
   return `${MANAGED_NOVEL_COVER_PREFIX}${filename}`
 }

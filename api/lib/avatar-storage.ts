@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, unlink } from 'node:fs/promises'
 import path from 'node:path'
 
+import { PROFILE_IMAGE_MAX_BYTES, PROFILE_IMAGE_MAX_MB } from '../../shared/contracts/api.js'
 import { env } from '../config/env.js'
+import { allowPublicUploadDirectory, writePublicUploadFile } from './public-upload-files.js'
 import { transcodeAvatarImage } from './image-transcode.js'
 import { DataAccessError } from './prisma.js'
 
 const MANAGED_AVATAR_PREFIX = '/api/uploads/avatars/'
-const MAX_AVATAR_BYTES = 2 * 1024 * 1024
 
 const MIME_TO_EXTENSION = {
   'image/png': 'png',
@@ -42,8 +43,8 @@ function parseAvatarDataUrl(dataUrl: string): { mimeType: SupportedAvatarMimeTyp
     throw new DataAccessError(400, 'VALIDATION_ERROR', '头像图片不能为空。')
   }
 
-  if (buffer.byteLength > MAX_AVATAR_BYTES) {
-    throw new DataAccessError(400, 'VALIDATION_ERROR', '头像图片不能超过 2MB。')
+  if (buffer.byteLength > PROFILE_IMAGE_MAX_BYTES) {
+    throw new DataAccessError(400, 'VALIDATION_ERROR', `头像图片不能超过 ${PROFILE_IMAGE_MAX_MB}MB。`)
   }
 
   return { mimeType, buffer }
@@ -58,19 +59,20 @@ export async function storeAvatarDataUrl(dataUrl: string): Promise<string> {
   const avatarDirectory = getAvatarDirectory()
 
   await mkdir(avatarDirectory, { recursive: true })
+  await allowPublicUploadDirectory(avatarDirectory)
 
   // 优先 sharp 转 WebP（trim+flatten+缩放）+ 缩略图；失败时降级原样落盘
   const transcoded = await transcodeAvatarImage(buffer)
   if (transcoded) {
     const filename = `${randomUUID()}.webp`
-    await writeFile(path.join(avatarDirectory, filename), transcoded.main)
-    await writeFile(path.join(avatarDirectory, filename.replace(/\.webp$/, '.thumb.webp')), transcoded.thumb)
+    await writePublicUploadFile(path.join(avatarDirectory, filename), transcoded.main)
+    await writePublicUploadFile(path.join(avatarDirectory, filename.replace(/\.webp$/, '.thumb.webp')), transcoded.thumb)
     return `${MANAGED_AVATAR_PREFIX}${filename}`
   }
 
   const extension = MIME_TO_EXTENSION[mimeType]
   const filename = `${randomUUID()}.${extension}`
-  await writeFile(path.join(avatarDirectory, filename), buffer)
+  await writePublicUploadFile(path.join(avatarDirectory, filename), buffer)
 
   return `${MANAGED_AVATAR_PREFIX}${filename}`
 }

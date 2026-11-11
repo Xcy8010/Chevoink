@@ -34,7 +34,8 @@ import Avatar from '@/features/community/components/Avatar'
 import { getMe, updateMyPrivacy } from '@/features/community/api'
 import ConfirmDialog from '@/features/studio/components/ConfirmDialog'
 import { useShellStore } from '@/store/useShellStore'
-import { prepareAvatarImage } from '@/lib/image-compress'
+import { getProfileImageUploadError, prepareAvatarImage, readFileAsDataUrl } from '@/lib/image-compress'
+import { PROFILE_IMAGE_MAX_MB } from '../../../shared/contracts/api.js'
 import { checkAppUpdate, type VersionManifest } from '@/lib/app-update'
 import { getNativeAppVersion, isNativeApp, openExternalUrl } from '@/lib/native-app'
 import { cn } from '@/lib/utils'
@@ -301,25 +302,6 @@ export default function SettingsPage() {
     syncUser(payload.user)
   }
 
-  async function readImageAsDataUrl(file: File): Promise<string> {
-    return new Promise<string>((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => resolve(String(reader.result ?? ''))
-      reader.onerror = () => reject(new Error('读取图片文件失败。'))
-      reader.readAsDataURL(file)
-    })
-  }
-
-  function validateImageFile(file: File, maxSizeMb: number, label: string) {
-    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
-      throw new Error(`${label}仅支持 PNG、JPG 或 WebP 图片。`)
-    }
-
-    if (file.size > maxSizeMb * 1024 * 1024) {
-      throw new Error(`${label}图片不能超过 ${maxSizeMb}MB。`)
-    }
-  }
-
   async function handleAvatarChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
 
@@ -327,10 +309,9 @@ export default function SettingsPage() {
       return
     }
 
-    try {
-      validateImageFile(file, 2, '头像')
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '头像文件无效。')
+    const validationError = getProfileImageUploadError(file, '头像')
+    if (validationError) {
+      toast.error(validationError)
       event.target.value = ''
       return
     }
@@ -357,8 +338,12 @@ export default function SettingsPage() {
     }
 
     try {
-      validateImageFile(file, 5, '封面')
-      setCoverDraft(await readImageAsDataUrl(file))
+      const validationError = getProfileImageUploadError(file, '封面')
+      if (validationError) {
+        toast.error(validationError)
+        return
+      }
+      setCoverDraft(await readFileAsDataUrl(file))
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '封面文件无效。')
     } finally {
@@ -820,7 +805,7 @@ export default function SettingsPage() {
             <Avatar name={sessionUser.nickname} src={sessionUser.avatarUrl} size="md" className="h-9 w-9 shrink-0" />
             <span className="min-w-0 flex-1">
               <span className="block text-[15px] font-medium text-[var(--text-primary)]">头像</span>
-              <span className="mt-0.5 block text-xs text-[var(--text-tertiary)]">PNG / JPG / WebP，不超过 2MB</span>
+              <span className="mt-0.5 block text-xs text-[var(--text-tertiary)]">PNG / JPG / WebP，不超过 {PROFILE_IMAGE_MAX_MB}MB</span>
             </span>
             {sessionUser.avatarUrl ? (
               <button
@@ -851,7 +836,7 @@ export default function SettingsPage() {
             </span>
             <span className="min-w-0 flex-1">
               <span className="block text-[15px] font-medium text-[var(--text-primary)]">个人主页封面</span>
-              <span className="mt-0.5 block text-xs text-[var(--text-tertiary)]">上传后可裁剪，统一按 3:1 展示</span>
+              <span className="mt-0.5 block text-xs text-[var(--text-tertiary)]">不超过 {PROFILE_IMAGE_MAX_MB}MB，上传后可裁剪为 3:1</span>
             </span>
             {sessionUser.profileCoverUrl ? (
               <button

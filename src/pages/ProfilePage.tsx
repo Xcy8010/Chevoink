@@ -15,7 +15,8 @@ import Avatar from '@/features/community/components/Avatar'
 import { getCoverUrl, listNovelCardsByIds } from '@/features/discover/api'
 import { getAllReadingProgress } from '@/features/home/reading-progress'
 import { getLocalShelf, subscribeShelfChange, updateShelfCover } from '@/features/home/local-shelf'
-import { prepareAvatarImage } from '@/lib/image-compress'
+import { getProfileImageUploadError, prepareAvatarImage, readFileAsDataUrl } from '@/lib/image-compress'
+import { PROFILE_IMAGE_MAX_MB } from '../../shared/contracts/api.js'
 import CreationPanel from '@/features/profile/components/CreationPanel'
 import ProfileHeader from '@/features/profile/components/ProfileHeader'
 import ShelfPanel, { type ShelfBook } from '@/features/profile/components/ShelfPanel'
@@ -305,25 +306,6 @@ export default function ProfilePage() {
     setAvatarError('')
   }
 
-  async function readImageAsDataUrl(file: File): Promise<string> {
-    return new Promise<string>((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => resolve(String(reader.result ?? ''))
-      reader.onerror = () => reject(new Error('读取图片文件失败。'))
-      reader.readAsDataURL(file)
-    })
-  }
-
-  function validateImageFile(file: File, maxSizeMb: number, label: string) {
-    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
-      throw new Error(`${label}仅支持 PNG、JPG 或 WebP 图片。`)
-    }
-
-    if (file.size > maxSizeMb * 1024 * 1024) {
-      throw new Error(`${label}图片不能超过 ${maxSizeMb}MB。`)
-    }
-  }
-
   async function uploadAvatar(avatarDataUrl: string | null) {
     const payload = await requestJson<{ user: User }>('/api/users/me/avatar', {
       method: 'PATCH',
@@ -349,10 +331,9 @@ export default function ProfilePage() {
 
     setAvatarError('')
 
-    try {
-      validateImageFile(file, 2, '头像')
-    } catch (error) {
-      setAvatarError(error instanceof Error ? error.message : '头像文件无效。')
+    const validationError = getProfileImageUploadError(file, '头像')
+    if (validationError) {
+      setAvatarError(validationError)
       event.target.value = ''
       return
     }
@@ -391,8 +372,12 @@ export default function ProfilePage() {
     }
 
     try {
-      validateImageFile(file, 5, '封面')
-      setCoverDraft(await readImageAsDataUrl(file))
+      const validationError = getProfileImageUploadError(file, '封面')
+      if (validationError) {
+        toast.error(validationError)
+        return
+      }
+      setCoverDraft(await readFileAsDataUrl(file))
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '封面文件无效。')
     } finally {
@@ -679,7 +664,7 @@ export default function ProfilePage() {
                     <div className="space-y-1">
                       <p className="text-sm font-medium text-[var(--text-primary)]">头像</p>
                       <p className="text-xs leading-6 text-[var(--text-tertiary)]">
-                        支持 PNG、JPG、WebP，大小不超过 2MB。
+                        支持 PNG、JPG、WebP，大小不超过 {PROFILE_IMAGE_MAX_MB}MB。
                       </p>
                     </div>
                   </div>
