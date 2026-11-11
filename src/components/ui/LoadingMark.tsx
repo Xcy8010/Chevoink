@@ -1,7 +1,7 @@
-export default function LoadingMark({ className }: { className?: string }) {
+export default function LoadingMark({ className, label = '加载中' }: { className?: string; label?: string }) {
   return (
-    <div role="status" aria-label="加载中" className={className}>
-      <span className="boot-mark" aria-hidden="true" />
+    <div role="status" aria-label={label} className={className}>
+      <span className="agent-loading-mark" aria-hidden="true" />
     </div>
   )
 }

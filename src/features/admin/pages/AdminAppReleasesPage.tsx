@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { requestJson } from '@/app/api-client'
-import { setSessionToken } from '@/lib/auth-token'
 import Button from '@/components/ui/Button'
 import { useToast } from '@/components/ui/toast-context'
 import { AdminCard, AdminPageHeader } from '../AdminLayout'
@@ -75,21 +74,6 @@ export default function AdminAppReleasesPage(){
   try{const result=await requestJson<AppReleasePreview>('/api/admin/app-releases/preview',{method:'POST',body:JSON.stringify({action,releaseId})});setConfirmation('');setView(result)}
   catch(error){report(error instanceof Error?error.message:'预览失败。','error')}finally{finish()}
  }
- async function openEmailRegistrationPreview(){
-  if(!test?.enabled||pending||!begin('正在开启邮箱注册预览…'))return
-  try{
-   const response=await fetch('/api/admin/app-releases/email-auth-preview',{
-    method:'POST',
-    credentials:'same-origin',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({releaseId:test.releaseId,revision:test.revision}),
-   })
-   const result=await response.json()
-   if(!response.ok||!result.success)throw new Error(result.error?.message??'暂时无法开启邮箱注册预览。')
-   setSessionToken(null)
-   window.location.replace('/register')
-  }catch(error){report(error instanceof Error?error.message:'暂时无法开启邮箱注册预览。','error');finish()}
- }
  async function execute(){
   if(!view||confirmation!==view.release.id||view.blockers.length||pending||!begin('正在'+labels[view.action]+'…'))return
   const operation:AppReleaseExecute={action:view.action,releaseId:view.release.id,expectedRevision:view.expectedRevision,previewHash:view.previewHash,operationId:crypto.randomUUID()}
@@ -124,9 +108,7 @@ export default function AdminAppReleasesPage(){
   {query.isLoading?<p role="status" className="py-12 text-center">加载中…</p>:query.isError?<p role="alert">版本读取失败。<Button onClick={()=>void query.refetch()}>重试</Button></p>:<>
    <div className="admin-channel-grid grid gap-4 md:grid-cols-2">
     <AdminCard><div className="flex items-center justify-between gap-2"><h2 className="text-sm font-medium text-[var(--text-secondary)]">当前稳定版</h2><span className="admin-channel-badge">{stableEnabled?'全体用户':'尚未启用'}</span></div><p className="mt-3 text-xl font-semibold">{stableEnabled&&stable?releaseName(stable.releaseId):'未配置稳定版本'}</p><p className="mt-2 text-sm text-[var(--text-secondary)]">{stableEnabled?'普通用户正在使用此版本。':'API 更新不代表已全量发布。'}</p><div className="mt-5 flex flex-wrap gap-2">{stableEnabled&&stable?<><Button onClick={()=>setDetail(query.data?.releases.find(item=>item.id===stable.releaseId)??null)} disabled={!query.data?.releases.some(item=>item.id===stable.releaseId)}>查看更新说明</Button><Button disabled={blocked} onClick={showHistory}>回退历史稳定版</Button></>:<Button disabled={blocked} onClick={()=>{setFilter('all');listHeading.current?.focus()}}>选择初始稳定版</Button>}</div></AdminCard>
-    <AdminCard><div className="flex items-center justify-between gap-2"><h2 className="text-sm font-medium text-[var(--text-secondary)]">当前测试版</h2><span className="admin-channel-badge">{testEnabled?'有效测试员':'跟随稳定版'}</span></div><p className="mt-3 text-xl font-semibold">{testEnabled&&test?releaseName(test.releaseId):'未开启测试分流'}</p><p className="mt-2 text-sm text-[var(--text-secondary)]">{testEnabled?'先由测试用户使用，通过后可发布给全部用户。':'从下方版本列表选择要推送的测试版本。'}</p><div className="mt-5 flex flex-wrap gap-2">{testEnabled&&test?<>{test.releaseId!==stable?.releaseId?<Button variant="primary" disabled={blocked} onClick={()=>void preview(test.releaseId,'full_release')}>发布为稳定版</Button>:null}<Button disabled={blocked} onClick={()=>void preview(test.releaseId,'withdraw_test')}>撤回测试分流</Button></>:<Button disabled={blocked} onClick={()=>{setFilter('all');listHeading.current?.focus()}}>选择测试版本</Button>}</div>
-     {testEnabled&&query.data?.emailAuthPreviewAvailable?<div className="mt-4 space-y-2 border-t border-[var(--border-subtle)] pt-4"><p className="text-sm text-[var(--text-secondary)]">当前浏览器将退出管理账户。邮箱注册预览有效 30 分钟。</p><Button disabled={blocked} onClick={()=>void openEmailRegistrationPreview()}>退出当前账户并预览注册</Button></div>:null}
-    </AdminCard>
+    <AdminCard><div className="flex items-center justify-between gap-2"><h2 className="text-sm font-medium text-[var(--text-secondary)]">当前测试版</h2><span className="admin-channel-badge">{testEnabled?'有效测试员':'跟随稳定版'}</span></div><p className="mt-3 text-xl font-semibold">{testEnabled&&test?releaseName(test.releaseId):'未开启测试分流'}</p><p className="mt-2 text-sm text-[var(--text-secondary)]">{testEnabled?'先由测试用户使用，通过后可发布给全部用户。':'从下方版本列表选择要推送的测试版本。'}</p><div className="mt-5 flex flex-wrap gap-2">{testEnabled&&test?<>{test.releaseId!==stable?.releaseId?<Button variant="primary" disabled={blocked} onClick={()=>void preview(test.releaseId,'full_release')}>发布为稳定版</Button>:null}<Button disabled={blocked} onClick={()=>void preview(test.releaseId,'withdraw_test')}>撤回测试分流</Button></>:<Button disabled={blocked} onClick={()=>{setFilter('all');listHeading.current?.focus()}}>选择测试版本</Button>}</div></AdminCard>
    </div>
    {candidates.map(item=><AdminCard key={item.id}><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">待分配候选 · {item.label}</h2><p className="mt-1 text-xs text-[var(--text-secondary)]">登记 {formatAppReleaseTime(item.createdAt)}（北京时间）</p></div><div className="flex flex-wrap gap-2"><Button onClick={()=>setDetail(item)}>查看详情</Button><Button disabled={blocked} onClick={()=>void preview(item.id,'discard_candidate')}>放弃候选</Button><Button variant="primary" disabled={blocked} onClick={()=>void preview(item.id,stableEnabled?'assign_test':'full_release')}>{stableEnabled?'分配测试版':'发布为稳定版'}</Button></div></div></AdminCard>)}
    {query.data?.retention?<p className="text-xs text-[var(--text-secondary)]">自动保留 {query.data.retention.limit} 个可用版本{query.data.retention.pending?' · '+query.data.retention.pending+' 项旧文件清理中':''}{query.data.retention.failed?' · '+query.data.retention.failed+' 项需要核对':''} · 时间为北京时间</p>:null}

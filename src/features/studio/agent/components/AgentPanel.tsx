@@ -23,6 +23,7 @@ import {
 
 import { useWorkConversation } from '../../components/work-conversation-context'
 import { WorkConversationRestore } from '../../components/WorkConversationRestore'
+import LoadingMark from '@/components/ui/LoadingMark'
 import { copyToClipboard } from '@/lib/clipboard'
 import { cn } from '@/lib/utils'
 import { useShellStore } from '@/store/useShellStore'
@@ -1613,11 +1614,7 @@ export function AgentPanel({
         {conversationLoading ? (
           /* 任何「归属不明」的中间态都走 Codex 式 Agent 图标流光（居中）：图标形状作 mask、渐变光带扫过。
              必须排在内容分支之前：否则请求一返回就被 conversationReady 短路掉，1.5s 保底窗口形同虚设 */
-          <div className="flex items-center justify-center" role="status" aria-label="正在载入对话">
-            <span
-              className="block h-12 w-12 bg-[length:220%_100%] bg-[linear-gradient(100deg,var(--text-tertiary)_38%,var(--text-primary)_50%,var(--text-tertiary)_62%)] motion-safe:animate-[agent-icon-shimmer_1.5s_linear_infinite] [mask-image:url(/chevoink-agent.png)] [mask-position:center] [mask-repeat:no-repeat] [mask-size:contain]"
-            />
-          </div>
+          <LoadingMark className="flex items-center justify-center" label="正在载入对话" />
         ) : conversationReady ? (
           /* 已有内容直接呈现：切回已加载会话 / 同会话重用 / 直播收尾时不插任何加载态，做到「有缓存直接显示」。
              按会话取 key：跨会话切换重放淡入，同会话流式追加不重挂载 */

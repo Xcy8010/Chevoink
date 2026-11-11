@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="preload" as="image" href="/chevoink-agent.png" />
     <!-- interactive-widget=resizes-content：Android Chrome 108+ 软键盘弹出时直接缩小布局视口，输入栏自动被顶起；iOS 由 lib/keyboard-inset.ts 兼容 -->
     <!-- maximum-scale=1 + user-scalable=no：APP/手机端按原生应用体验禁用双指缩放与双击放大 -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
@@ -12,59 +13,55 @@
       content="启创墨域是一个面向创作者与读者的 AI 小说创作与阅读社区。"
     />
     <title>启创墨域 - AI 小说创作与阅读社区</title>
-    <!-- 启动前置：同步读取持久化主题并预置 html class 与背景色，避免暗色用户冷启动白闪 -->
-    <script>
-      ;(function () {
-        var theme = 'light'
-        try {
-          var raw = localStorage.getItem('chevoink-shell')
-          if (raw) {
-            var saved = JSON.parse(raw)
-            if (saved && saved.state && saved.state.theme === 'dark') theme = 'dark'
-          }
-        } catch (_) {}
-        var root = document.documentElement
-        root.classList.add(theme)
-        var bg = theme === 'dark' ? '#111318' : '#f4f0e8'
-        root.style.backgroundColor = bg
-        var meta = document.querySelector('meta[name="theme-color"]')
-        if (meta) meta.setAttribute('content', bg)
-      })()
-    </script>
-    <!-- 同一加载图标从 HTML 首屏持续显示到会话核对结束。 -->
+    <!-- 启动和 Agent 对话共用的加载图标样式在首屏直接可用。 -->
     <style>
+      :root {
+        --boot-background: #f4f0e8;
+        --boot-mark-base: #7b8593;
+        --boot-mark-highlight: #111827;
+        background-color: var(--app-bg, var(--boot-background));
+        color-scheme: light;
+      }
+      html.dark {
+        --boot-background: #111318;
+        --boot-mark-base: #8993a2;
+        --boot-mark-highlight: #f3f5f7;
+        color-scheme: dark;
+      }
       .boot-splash {
         position: fixed;
         inset: 0;
         z-index: 1000;
         display: grid;
         place-items: center;
-        background: var(--app-bg, #f4f0e8);
+        background: var(--app-bg, var(--boot-background));
       }
-      .dark .boot-splash { background: var(--app-bg, #111318); }
-      .boot-mark {
+      .agent-loading-mark {
         display: block;
-        position: relative;
         width: 48px;
         height: 48px;
-        overflow: hidden;
-        border-radius: 14px;
-        background: url('/favicon.png') center / cover no-repeat;
+        background-image: linear-gradient(
+          100deg,
+          var(--text-tertiary, var(--boot-mark-base)) 38%,
+          var(--text-primary, var(--boot-mark-highlight)) 50%,
+          var(--text-tertiary, var(--boot-mark-base)) 62%
+        );
+        background-size: 220% 100%;
+        -webkit-mask: url('/chevoink-agent.png') center / contain no-repeat;
+        mask: url('/chevoink-agent.png') center / contain no-repeat;
       }
       @media (prefers-reduced-motion: no-preference) {
-        .boot-mark::after {
-          content: '';
-          position: absolute;
-          inset: 0;
-          background: linear-gradient(115deg, transparent 20%, rgba(255, 255, 255, 0.7) 50%, transparent 80%);
-          animation: boot-sheen 1.6s ease-in-out infinite;
+        .agent-loading-mark {
+          animation: agent-icon-shimmer 1.5s linear infinite;
         }
-        @keyframes boot-sheen {
-          0% { transform: translateX(-110%); }
-          75%, 100% { transform: translateX(110%); }
+        @keyframes agent-icon-shimmer {
+          0% { background-position: 220% 0; }
+          100% { background-position: -120% 0; }
         }
       }
     </style>
+    <!-- 同源脚本在首屏渲染前读取与设置页一致的持久化主题。 -->
+    <script src="/boot-theme.js"></script>
     <script type="module">
       if (import.meta.hot?.on) {
         import.meta.hot.on('vite:error', (error) => {
@@ -79,7 +76,7 @@
   </head>
   <body>
     <div id="app-loading" class="boot-splash" role="status" aria-label="加载中">
-      <span class="boot-mark" aria-hidden="true"></span>
+      <span class="agent-loading-mark" aria-hidden="true"></span>
     </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>

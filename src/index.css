@@ -799,12 +799,6 @@ html[data-studio-reduced-motion='true'] .studio-settings-page * {
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
-/* Agent 图标加载流光（Codex 式）：图标形状作为 mask，渐变光带从右向左扫过 */
-@keyframes agent-icon-shimmer {
-  0% { background-position: 220% 0; }
-  100% { background-position: -120% 0; }
-}
-
 @keyframes mode-label-in {
   from { opacity: 0; transform: translateY(3px); }
   to { opacity: 1; transform: translateY(0); }

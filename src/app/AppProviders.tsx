@@ -36,8 +36,6 @@ export default function AppProviders({ children }: PropsWithChildren) {
   useEffect(() => {
     document.documentElement.classList.remove('light', 'dark')
     document.documentElement.classList.add(theme)
-    // 清掉 index.html 引导脚本预置的内联背景色，交还给 CSS 变量接管，避免运行时切主题后残留旧色
-    document.documentElement.style.backgroundColor = ''
     // 读取当前页面实际配色，同步 APP 系统栏与浏览器 theme-color。
     restoreNativeSystemBarsToTheme()
   }, [theme])
