@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Minus, Plus, X } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
@@ -44,12 +44,15 @@ export default function ImageCropperDialog({
   const [zoom, setZoom] = useState(1)
   const [offset, setOffset] = useState({ x: 0, y: 0 })
 
-  // 打开新图片时重置缩放与位移
-  useEffect(() => {
+  // 缓存命中时图片可能已完成解码，此时直接读取尺寸。
+  useLayoutEffect(() => {
     if (open) {
       setZoom(1)
       setOffset({ x: 0, y: 0 })
-      setImageSize(null)
+      const image = imageRef.current
+      setImageSize(image?.complete && image.naturalWidth > 0
+        ? { width: image.naturalWidth, height: image.naturalHeight }
+        : null)
     }
   }, [open, imageDataUrl])
 
