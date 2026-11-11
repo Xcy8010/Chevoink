@@ -90,13 +90,16 @@ export function assertPreviewSmsSendAllowed() {
   }
 }
 
-export function requiresPhoneForEmailSignup(user: {
-  emailVerifiedAt: Date | null
-  phoneVerifiedAt: Date | null
-  phone: string | null
-  accountSetupStep: number | null
-  accountSetupFinishedAt: Date | null
-}) {
-  return Boolean(user.emailVerifiedAt && !user.phoneVerifiedAt && !user.phone
-    && (user.accountSetupStep || user.accountSetupFinishedAt))
+export function requiresStudioPhoneVerification(user: {
+  role?: string
+  isSuperAdmin?: boolean
+  bannedAt?: Date | null
+  emailVerifiedAt?: Date | null
+  phoneVerifiedAt?: Date | null
+  phone?: string | null
+  accountSetupStep?: number | null
+  accountSetupFinishedAt?: Date | null
+}, enabled = accountEmailAuthEnabled()) {
+  if (user.phoneVerifiedAt || (user.role === 'admin' && user.isSuperAdmin === true && user.bannedAt === null)) return false
+  return enabled || Boolean(user.emailVerifiedAt && !user.phone && (user.accountSetupStep || user.accountSetupFinishedAt))
 }

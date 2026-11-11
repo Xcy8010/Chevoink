@@ -85,6 +85,47 @@ export function IdentityVerificationForm({ kind, submitLabel, initialValue = '',
   )
 }
 
+export function SetupPasswordForm({ disabled, onSave }: { disabled: boolean; onSave: (password: string) => void }) {
+  const [password, setPassword] = useState('')
+  const [confirmation, setConfirmation] = useState('')
+  const [error, setError] = useState('')
+  const passwordId = useId()
+  const confirmationId = useId()
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (disabled) return
+    if (password !== confirmation) {
+      setError('两次输入的密码不一致。')
+      return
+    }
+    const normalizedPassword = password.trim()
+    if (normalizedPassword.length < 6 || normalizedPassword.length > 128) {
+      setError('请输入 6 至 128 个字符的登录密码。')
+      return
+    }
+    setError('')
+    onSave(normalizedPassword)
+  }
+
+  return (
+    <form className="space-y-4" onSubmit={submit}>
+      <div className="space-y-1.5">
+        <label className="block text-sm font-medium" htmlFor={passwordId}>输入登录密码</label>
+        <TextInput wrapperAs="span" id={passwordId} type="password" autoComplete="new-password" minLength={6} maxLength={128}
+          value={password} onChange={event => { setPassword(event.target.value); setError('') }} disabled={disabled} required />
+      </div>
+      <div className="space-y-1.5">
+        <label className="block text-sm font-medium" htmlFor={confirmationId}>确认登录密码</label>
+        <TextInput wrapperAs="span" id={confirmationId} type="password" autoComplete="new-password" minLength={6} maxLength={128}
+          value={confirmation} onChange={event => { setConfirmation(event.target.value); setError('') }} disabled={disabled} required />
+      </div>
+      {error && <p role="alert" className="text-sm leading-6 text-[var(--color-danger,#dc2626)]">{error}</p>}
+      <Button type="submit" variant="primary" className="w-full" disabled={disabled}>{disabled ? '保存中…' : '设置密码'}</Button>
+    </form>
+  )
+}
+
 export function PasswordVerificationForm({ user, onSaved, onSaving, disabled }: FormCallbacks & { user: User }) {
   const canEmail = Boolean(user.email && user.emailVerified)
   const canSms = Boolean(user.phone && user.phoneVerified)

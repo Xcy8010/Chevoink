@@ -239,6 +239,7 @@ function evictOldestAuthStateIfOverLimit(): void {
 }
 const BANNED_FLAG_KEY = Symbol('chevoinkBannedSession')
 const RESOLVED_USER_ID_KEY = Symbol('chevoinkResolvedUserId')
+const RESOLVED_TOKEN_VERSION_KEY = Symbol('chevoinkResolvedTokenVersion')
 const SESSION_UNAVAILABLE_KEY = Symbol('chevoinkSessionUnavailable')
 
 export function evictUserBanCache(userId: string): void {
@@ -390,6 +391,7 @@ export async function resolveSessionGate(req: Request, res: Response): Promise<v
   }
 
   setResolvedUserId(req, candidate.userId)
+  ;(req as Request & { [key: symbol]: unknown })[RESOLVED_TOKEN_VERSION_KEY] = candidate.tokenVersion
 }
 
 export function getSessionUserId(req: Request): string | null {
@@ -435,4 +437,13 @@ export function requireSessionUserId(req: Request): string {
   }
 
   return userId
+}
+
+export function requireVersionedSessionIdentity(req: Request) {
+  const userId = requireSessionUserId(req)
+  const tokenVersion = (req as Request & { [key: symbol]: unknown })[RESOLVED_TOKEN_VERSION_KEY]
+  if (typeof tokenVersion !== 'number') {
+    throw new DataAccessError(401, 'AUTH_SESSION_CHANGED', '请重新登录后继续设置密码。')
+  }
+  return { userId, tokenVersion }
 }

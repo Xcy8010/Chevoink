@@ -140,6 +140,40 @@ export async function accountPasswordIdentity(userId: string, channel: 'email' |
   throw new DataAccessError(400, 'AUTH_CONTACT_UNVERIFIED', '请使用已验证的邮箱或手机号。')
 }
 
+async function invalidatePasswordCodes(tx: Prisma.TransactionClient, userId: string) {
+  const consumedAt = new Date()
+  const purposes: ProofPurpose[] = ['reset_password', 'change_password']
+  await tx.emailVerificationCode.updateMany({
+    where: { userId, purpose: { in: purposes }, consumedAt: null }, data: { consumedAt },
+  })
+  await tx.smsVerificationCode.updateMany({
+    where: { userId, purpose: { in: purposes }, consumedAt: null }, data: { consumedAt },
+  })
+}
+
+export async function setInitialAccountPasswordData(userId: string, tokenVersion: number, password: string) {
+  const owner = await ensureUserExists(userId)
+  assertPreviewAccountAllowed(owner)
+  const unavailable = () => new DataAccessError(409, 'AUTH_SETUP_PASSWORD_UNAVAILABLE', '这一步已完成或账号已有密码，请刷新后继续。')
+  if (owner.tokenVersion !== tokenVersion || owner.bannedAt || !owner.emailVerifiedAt || owner.accountSetupStep !== 2
+    || !owner.passwordHash || hasConfiguredPassword(owner.passwordHash)) throw unavailable()
+
+  const passwordHash = hashPassword(password)
+  const updated = await prisma.$transaction(async tx => {
+    await lockAccountKey(tx, `account-password:${userId}`)
+    const [user] = await tx.user.updateManyAndReturn({
+      where: { id: userId, tokenVersion, bannedAt: null, emailVerifiedAt: { not: null },
+        accountSetupStep: 2, passwordHash: owner.passwordHash },
+      data: { passwordHash, accountSetupStep: 3, tokenVersion: { increment: 1 } },
+    })
+    if (!user) throw unavailable()
+    await invalidatePasswordCodes(tx, userId)
+    return user
+  })
+  evictUserBanCache(userId)
+  return { user: toUser(updated), tokenVersion: updated.tokenVersion }
+}
+
 export async function updateAccountPasswordWithCode(
   identity: Identity, purpose: ProofPurpose, code: string, password: string, userId?: string,
 ) {
@@ -164,14 +198,7 @@ export async function updateAccountPasswordWithCode(
       data: { passwordHash, tokenVersion: { increment: 1 } },
     })
     if (!result.count) throw invalidAccountCode()
-    const consumedAt = new Date()
-    const purposes: ProofPurpose[] = ['reset_password', 'change_password']
-    await tx.emailVerificationCode.updateMany({
-      where: { userId: ownerId, purpose: { in: purposes }, consumedAt: null }, data: { consumedAt },
-    })
-    await tx.smsVerificationCode.updateMany({
-      where: { userId: ownerId, purpose: { in: purposes }, consumedAt: null }, data: { consumedAt },
-    })
+    await invalidatePasswordCodes(tx, ownerId)
     return tx.user.findUniqueOrThrow({ where: { id: ownerId } })
   })
   evictUserBanCache(ownerId)
@@ -196,4 +223,17 @@ export async function advanceAccountSetupData(userId: string, step: 1 | 2 | 3, s
     },
   })
   return toUser(await ensureUserExists(userId))
+}
+
+export async function goBackAccountSetupData(userId: string, tokenVersion: number, step: 2 | 3) {
+  const owner = await ensureUserExists(userId)
+  assertPreviewAccountAllowed(owner)
+  if (owner.accountSetupStep !== step) return toUser(owner)
+  const previous = step === 3 ? 2 : 1
+  const [user] = await prisma.user.updateManyAndReturn({
+    where: { id: userId, tokenVersion, bannedAt: null, emailVerifiedAt: { not: null }, accountSetupStep: step,
+      accountSetupFinishedAt: null, accountSetupSkippedSteps: { equals: owner.accountSetupSkippedSteps } },
+    data: { accountSetupStep: previous, accountSetupSkippedSteps: owner.accountSetupSkippedSteps.filter(value => value !== previous) },
+  })
+  return toUser(user ?? await ensureUserExists(userId))
 }

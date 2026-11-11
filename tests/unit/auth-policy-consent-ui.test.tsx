@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import AuthPage from '../../src/app/routes/AuthPage'
 import AppRouter from '../../src/app/AppRouter'
 import { useShellStore } from '../../src/store/useShellStore'
-import type { User } from '../../shared/contracts'
+import type { AuthSessionPayload, User } from '../../shared/contracts'
 
 const mocks = vi.hoisted(() => ({ requestJson: vi.fn(), hydrateReadingSync: vi.fn() }))
 vi.mock('../../src/app/api-client', async (importOriginal) => ({
@@ -30,7 +30,7 @@ vi.mock('../../src/app/route-config', async () => {
       { path: '/', useShell: false, element: <p>首页内容</p> },
       { path: '/me', useShell: false, element: <><p>个人中心内容</p><Link to="/studio/novel/n1">进入创作区</Link><Link to="/administrator">普通页面</Link><Link to="/login">登录</Link><Link to="/register">注册</Link></> },
       { path: '/settings', useShell: false, element: <AccountSettings /> },
-      { path: '/studio/novel/:novelId', useShell: false, element: <p>创作内容</p> },
+      { path: '/studio/novel/:novelId', useShell: false, element: <><p>创作内容</p><Link to="/me">返回个人中心</Link></> },
       { path: '/admin', useShell: false, element: <button type="button">管理操作</button> },
       { path: '/admin/app-releases', useShell: false, element: <button type="button">管理操作</button> },
       { path: '/administrator', useShell: false, element: <p>普通页面内容</p> },
@@ -222,6 +222,16 @@ it('keeps password recovery available before email verification', async () => {
   const recovery = await screen.findByRole('dialog', { name: '找回密码' })
   expect(screen.getAllByRole('dialog')).toEqual([recovery])
   expect(screen.getByText('首页内容')).toBeTruthy()
+  expect(within(recovery).getByRole('textbox', { name: '验证码' })).toBeTruthy()
+})
+
+it('continues to require a verification code for password changes in settings', () => {
+  mountApp('/settings?section=password', { ...legacyUser, emailVerified: true, passwordConfigured: true })
+  const dialog = screen.getByRole('dialog', { name: '修改登录密码' })
+  expect(within(dialog).getByRole('combobox', { name: '发送验证码到' })).toBeTruthy()
+  expect(within(dialog).getByRole('textbox', { name: '验证码' })).toBeTruthy()
+  expect(within(dialog).getByRole('button', { name: '获取验证码' })).toBeTruthy()
+  expect(within(dialog).queryByRole('progressbar')).toBeNull()
 })
 
 it.each([null, 'reader@example.com'])('lets a signed-in user browse with email %s', email => {
@@ -290,7 +300,100 @@ it('verifies a stored email on request from account settings', async () => {
   expect(screen.getByRole('heading', { name: '账号安全' })).toBe(background)
 })
 
-it('allows each setup skip and requires only phone verification to enter studio', async () => {
+it('opens studio for a server-exempt administrator without changing their phone status or onboarding', () => {
+  mountApp('/studio/novel/n1', { ...legacyUser, role: 'admin', accountSetupStep: 1, studioPhoneVerificationRequired: false })
+  expect(screen.getByText('创作内容')).toBeTruthy()
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(useShellStore.getState().sessionUser?.phoneVerified).toBe(false)
+  expect(mocks.requestJson).not.toHaveBeenCalled()
+
+  fireEvent.click(screen.getByRole('link', { name: '返回个人中心' }))
+  expect(screen.getByText('个人中心内容')).toBeTruthy()
+  const setup = screen.getByRole('dialog', { name: '验证手机号' })
+  expect(within(setup).getByRole('button', { name: '跳过此步' })).toBeTruthy()
+})
+
+it.each([
+  { account: 'an ordinary admin', role: 'admin', emailAuthEnabled: true },
+  { account: 'an ordinary user', role: 'user', emailAuthEnabled: true },
+  { account: 'a user with email auth disabled', role: 'user', emailAuthEnabled: false },
+] as const)('keeps the server-required studio phone check for $account', ({ role, emailAuthEnabled }) => {
+  mountApp('/studio/novel/n1', { ...legacyUser, role, emailAuthEnabled, studioPhoneVerificationRequired: true })
+  expect(screen.getByRole('dialog', { name: '验证手机号' })).toBeTruthy()
+  expect(screen.queryByText('创作内容')).toBeNull()
+})
+
+it('sets the onboarding password with a matching pair and advances with the returned session', async () => {
+  const user: User = { ...legacyUser, emailVerified: true, passwordConfigured: false, accountSetupStep: 2 }
+  let complete!: (result: AuthSessionPayload) => void
+  mocks.requestJson.mockRejectedValueOnce(new Error('synthetic failure'))
+    .mockImplementationOnce(() => new Promise<AuthSessionPayload>(resolve => { complete = resolve }))
+  mountApp('/me', user)
+  const dialog = screen.getByRole('dialog', { name: '设置登录密码' })
+  const password = within(dialog).getByLabelText('输入登录密码') as HTMLInputElement
+  const confirmation = within(dialog).getByLabelText('确认登录密码') as HTMLInputElement
+  expect([...dialog.querySelectorAll('input')]).toEqual([password, confirmation])
+  expect([password.type, confirmation.type]).toEqual(['password', 'password'])
+  expect(within(dialog).getByText('设置后可使用密码登录。')).toBeTruthy()
+  expect(within(dialog).queryByRole('button', { name: '获取验证码' })).toBeNull()
+
+  fireEvent.change(password, { target: { value: 'synthetic-password' } })
+  fireEvent.change(confirmation, { target: { value: 'different-password' } })
+  const submit = within(dialog).getByRole('button', { name: '设置密码' }) as HTMLButtonElement
+  fireEvent.click(submit)
+  expect(within(dialog).getByRole('alert').textContent).toContain('两次输入的密码不一致')
+  expect(mocks.requestJson).not.toHaveBeenCalled()
+
+  fireEvent.change(confirmation, { target: { value: password.value } })
+  const skip = within(dialog).getByRole('button', { name: '跳过此步' }) as HTMLButtonElement
+  fireEvent.click(submit)
+  expect((await within(dialog).findByRole('alert')).textContent).toContain('暂时无法保存密码')
+  expect(submit.disabled).toBe(false)
+  expect(skip.disabled).toBe(false)
+
+  fireEvent.click(submit)
+  expect(submit.disabled).toBe(true)
+  expect(skip.disabled).toBe(true)
+  const back = within(dialog).getByRole('button', { name: '返回上一步' }) as HTMLButtonElement
+  expect(back.disabled).toBe(true)
+  fireEvent.submit(submit.form!)
+  fireEvent.click(skip)
+  fireEvent.click(back)
+  const expectedCall = ['/api/auth/account/setup/password', {
+    method: 'POST', body: JSON.stringify({ password: 'synthetic-password' }),
+  }]
+  expect(mocks.requestJson.mock.calls).toEqual([expectedCall, expectedCall])
+
+  const tokens = { accessToken: 'new-access', refreshToken: 'new-refresh', expiresInSeconds: 3600 }
+  const configured: User = { ...user, accountSetupStep: 3, passwordConfigured: true }
+  await act(async () => complete({ user: configured, tokens }))
+  expect(screen.getByRole('dialog', { name: '完善个人资料' })).toBe(dialog)
+  expect(within(dialog).getByText('添加昵称、头像和封面，也可稍后在设置中完善。')).toBeTruthy()
+  expect(useShellStore.getState().authTokens).toEqual(tokens)
+  expect(mocks.requestJson).toHaveBeenCalledTimes(2)
+
+  mocks.requestJson.mockResolvedValueOnce({ user: { ...configured, accountSetupStep: 2 } })
+  fireEvent.click(within(dialog).getByRole('button', { name: '返回上一步' }))
+  expect(await screen.findByRole('dialog', { name: '设置登录密码' })).toBe(dialog)
+  expect(dialog.querySelector('[data-step-direction]')?.getAttribute('data-step-direction')).toBe('back')
+  expect(document.activeElement).toBe(within(dialog).getByRole('heading', { name: '设置登录密码' }))
+  expect(within(dialog).getByText('已设置登录密码')).toBeTruthy()
+  expect(within(dialog).queryByLabelText('输入登录密码')).toBeNull()
+  expect(mocks.requestJson).toHaveBeenLastCalledWith('/api/auth/account/setup/back', {
+    method: 'POST', body: JSON.stringify({ step: 3 }),
+  })
+
+  mocks.requestJson.mockResolvedValueOnce({ user: configured })
+  fireEvent.click(within(dialog).getByRole('button', { name: '继续' }))
+  expect(await screen.findByRole('dialog', { name: '完善个人资料' })).toBe(dialog)
+  expect(dialog.querySelector('[data-step-direction]')?.getAttribute('data-step-direction')).toBe('forward')
+  expect(mocks.requestJson).toHaveBeenLastCalledWith('/api/auth/account/setup', {
+    method: 'POST', body: JSON.stringify({ step: 2, skip: false }),
+  })
+  expect(useShellStore.getState().authTokens).toEqual(tokens)
+})
+
+it('allows each setup skip and uses the legacy phone check when the server flag is missing', async () => {
   const user: User = { ...legacyUser, email: null, accountSetupStep: 1 }
   const steps = [2, 3, null] as const
   mocks.requestJson.mockImplementation(async (path, init) => {
@@ -302,11 +405,16 @@ it('allows each setup skip and requires only phone verification to enter studio'
   })
   mountApp('/me', user)
   const setup = await screen.findByRole('dialog', { name: '验证手机号' })
-  for (const heading of ['验证手机号', '设置登录密码', '完善个人资料']) {
+  for (const [index, heading] of ['验证手机号', '设置登录密码', '完善个人资料'].entries()) {
     expect(await screen.findByRole('dialog', { name: heading })).toBe(setup)
     expect(screen.getByText('个人中心内容')).toBeTruthy()
+    const progress = within(setup).getByRole('progressbar', { name: '账户设置进度' })
+    expect(progress.getAttribute('aria-valuenow')).toBe(String(index + 1))
+    expect(progress.getAttribute('aria-valuemax')).toBe('3')
+    expect(progress.textContent).toBe(`${index + 1}/3`)
+    expect(within(setup).queryByRole('button', { name: '退出登录' })).toBeNull()
+    expect(Boolean(within(setup).queryByRole('button', { name: '返回上一步' }))).toBe(index > 0)
     const skip = within(setup).getByRole('button', { name: '跳过此步' })
-    expect(skip.nextElementSibling?.textContent).toContain('退出登录')
     fireEvent.click(skip)
   }
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())

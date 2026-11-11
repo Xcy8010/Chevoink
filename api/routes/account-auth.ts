@@ -3,11 +3,11 @@ import { z } from 'zod'
 import { legalConsentSchema } from '../../shared/contracts/site-content.js'
 import { accountEmailAuthEnabled, assertPreviewEmailAllowed } from '../lib/account-email-auth-scope.js'
 import { verifyAuthCaptchaChallenge } from '../lib/auth-captcha.js'
-import { createSession, requireSessionUserId } from '../lib/auth-session.js'
+import { createSession, requireSessionUserId, requireVersionedSessionIdentity } from '../lib/auth-session.js'
 import {
   accountIdentity, accountPasswordIdentity, advanceAccountSetupData, bindAccountEmailData, bindAccountPhoneData,
-  canSendBindingEmail, canSendBindingPhone, canSendRegistrationEmail, findAccountByIdentity,
-  loginAccountEmailCodeData, registerEmailUserData, updateAccountPasswordWithCode,
+  canSendBindingEmail, canSendBindingPhone, canSendRegistrationEmail, findAccountByIdentity, goBackAccountSetupData,
+  loginAccountEmailCodeData, registerEmailUserData, setInitialAccountPasswordData, updateAccountPasswordWithCode,
 } from '../lib/data-access.js'
 import { sendAccountEmailCode } from '../lib/email-verification.js'
 import { buildSuccess, createRequestId } from '../lib/http.js'
@@ -139,6 +139,19 @@ export function accountAuthRoutes(consumeSmsIpQuota: (ip: string) => boolean) {
     const identity = await accountPasswordIdentity(userId, body.channel)
     const { user, tokenVersion } = await updateAccountPasswordWithCode(identity, 'change_password', body.code, body.password, userId)
     return { user, tokens: await createSession(user.id, res, tokenVersion) }
+  })
+
+  post('/account/setup/password', z.object({ password }).strict(), async (body, req, res) => {
+    if (!req.is('application/json')) throw new DataAccessError(415, 'VALIDATION_ERROR', '请通过设置表单提交密码。')
+    const session = requireVersionedSessionIdentity(req)
+    const result = await setInitialAccountPasswordData(session.userId, session.tokenVersion, body.password)
+    return { user: result.user, tokens: await createSession(result.user.id, res, result.tokenVersion) }
+  })
+
+  post('/account/setup/back', z.object({ step: z.union([z.literal(2), z.literal(3)]) }), async (body, req) => {
+    if (!req.is('application/json')) throw new DataAccessError(415, 'VALIDATION_ERROR', '请通过设置表单返回上一步。')
+    const session = requireVersionedSessionIdentity(req)
+    return { user: await goBackAccountSetupData(session.userId, session.tokenVersion, body.step) }
   })
 
   post('/account/setup', z.object({

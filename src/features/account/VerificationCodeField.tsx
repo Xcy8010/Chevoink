@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { RotateCw, X } from 'lucide-react'
 
@@ -19,8 +19,15 @@ export function AccountDialog({ title, description, step, brand, children, onClo
   onClose?: () => void
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null)
+  const transition = useRef({ step, backward: false })
   const titleId = useId()
   const descriptionId = useId()
+  const previous = transition.current
+  const backward = step === previous.step ? previous.backward
+    : step !== undefined && previous.step !== undefined && step < previous.step
+  useLayoutEffect(() => {
+    transition.current = { step, backward }
+  }, [step, backward])
   useEffect(() => {
     const dialog = dialogRef.current
     const previousFocus = document.activeElement
@@ -48,12 +55,18 @@ export function AccountDialog({ title, description, step, brand, children, onClo
         step ? 'max-w-[480px] md:max-w-[50rem]' : 'max-w-[440px]',
       )}
     >
-      <div key={step} className={cn(
+      <div key={step} data-step-direction={step ? (backward ? 'back' : 'forward') : undefined} className={cn(
         'max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain px-5 py-5 sm:px-7 sm:py-6',
         step && 'account-dialog-step md:grid md:min-h-[min(27rem,calc(100dvh-2rem))] md:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] md:grid-rows-[1fr_auto] md:items-start md:gap-x-12 md:gap-y-5 md:p-10',
       )}>
         <header className={cn('mb-5', step && 'md:mb-0')}>
-          {step && <p className="mb-3 text-xs font-medium tabular-nums text-[var(--text-secondary)]">第 {step} 步，共 3 步</p>}
+          {step && <div role="progressbar" aria-label="账户设置进度" aria-valuemin={0} aria-valuemax={3} aria-valuenow={step}
+            className="mb-3 flex items-center gap-2">
+            <span className="h-1.5 w-20 overflow-hidden rounded-full bg-[var(--surface-muted)]">
+              <span className="block h-full rounded-full bg-[var(--color-brand)]" style={{ width: `${step / 3 * 100}%` }} />
+            </span>
+            <span className="text-xs font-medium tabular-nums text-[var(--text-secondary)]">{step}/3</span>
+          </div>}
           <div className="flex items-center gap-3">
             {brand && <img src="/favicon.png" alt="" className="h-10 w-10 shrink-0 rounded-xl" />}
             <h2 id={titleId} tabIndex={-1} className={cn(

@@ -197,19 +197,36 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
     const user = await prisma.user.create({ data: {
       email, emailVerifiedAt: new Date(), accountSetupStep: 1, nickname: 'Setup fixture', passwordHash: 'unset:fixture',
     } })
-    const token = buildSessionTokens(user.id, 0).accessToken
+    const initial = buildSessionTokens(user.id, 0)
+    const token = initial.accessToken
     const post = (path: string, body: object, access = token) =>
       api().post(auth + path).set('Cookie', cookie(access)).send(body)
     expect((await post('/account/setup', { step: 3, skip: true })).body.data.user.accountSetupStep).toBe(1)
     expect((await post('/account/setup', { step: 1, skip: false })).body.error.code).toBe('AUTH_SETUP_INCOMPLETE')
-    expect((await post('/account/setup', { step: 1, skip: true })).body.data.user.accountSetupStep).toBe(2)
-    expect((await api().get('/api/users/me').set('Cookie', cookie(token))).body.data.user.accountSetupStep).toBe(2)
-    const code = await emailCode('/account/password/send-code', { channel: 'email' }, email, token)
     const password = 'synthetic-password'
-    const set = await post('/account/password', { channel: 'email', code, password })
-    expect(set.status, JSON.stringify(set.body)).toBe(200)
+    expect((await api().post(auth + '/account/setup/password').send({ password })).status).toBe(401)
+    expect((await post('/account/setup/password', { password })).body.error.code).toBe('AUTH_SETUP_PASSWORD_UNAVAILABLE')
+    expect((await post('/account/setup', { step: 1, skip: true })).body.data.user.accountSetupStep).toBe(2)
+    expect((await post('/account/setup/back', { step: 2 })).body.data.user.accountSetupStep).toBe(1)
+    expect((await post('/account/setup/back', { step: 2 })).body.data.user.accountSetupStep).toBe(1)
+    expect((await post('/account/setup', { step: 1, skip: true })).body.data.user.accountSetupStep).toBe(2)
+    expect((await post('/account/setup', { step: 2, skip: true })).body.data.user.accountSetupStep).toBe(3)
+    expect((await post('/account/setup/back', { step: 3 })).body.data.user.accountSetupStep).toBe(2)
+    expect((await api().get('/api/users/me').set('Cookie', cookie(token))).body.data.user.accountSetupStep).toBe(2)
+    expect((await api().post(auth + '/account/setup/password').set('Cookie', cookie(token)).type('form').send({ password })).status).toBe(415)
+    const pendingCode = await emailCode('/account/password/send-code', { channel: 'email' }, email, token)
+    const attempts = await Promise.all([post('/account/setup/password', { password }), post('/account/setup/password', { password })])
+    expect(attempts.filter(response => response.status === 200)).toHaveLength(1)
+    expect([401, 409]).toContain(attempts.find(response => response.status !== 200)?.status)
+    const set = attempts.find(response => response.status === 200)!
+    expect(set.body.data.user).toMatchObject({ id: user.id, hasPassword: true, accountSetupStep: 3 })
     expect((await api().get('/api/users/me').set('Cookie', cookie(token))).status).toBe(401)
+    expect((await api().get('/api/users/me').set('Cookie', `chevoink_refresh=${initial.refreshToken}`)).status).toBe(401)
     const fresh = set.body.data.tokens.accessToken as string
+    expect((await post('/account/password', { channel: 'email', code: pendingCode, password: 'new-password' }, fresh)).body.error.code)
+      .toBe('AUTH_CODE_INVALID')
+    expect((await post('/account/setup/back', { step: 3 }, fresh)).body.data.user).toMatchObject({ accountSetupStep: 2, hasPassword: true })
+    expect((await post('/account/setup/password', { password: 'new-password' }, fresh)).body.error.code).toBe('AUTH_SETUP_PASSWORD_UNAVAILABLE')
     expect((await post('/account/setup', { step: 2, skip: false }, fresh)).body.data.user.accountSetupStep).toBe(3)
     expect((await post('/account/setup', { step: 3, skip: true }, fresh)).body.data.user.accountSetupStep).toBeNull()
     expect(await prisma.user.findUnique({ where: { id: user.id } })).toMatchObject({
@@ -231,12 +248,17 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
     const smsOtp = await smsCode('/sms/send-code', { phone, purpose: 'login' }, phone)
     expect((await api().post(auth + '/sms/login').send({ phone, code: smsOtp })).body.data.user.id).toBe(user.id)
 
+    const changeCode = await emailCode('/account/password/send-code', { channel: 'email' }, email, fresh)
+    const changedPassword = 'changed-password'
+    const changed = await post('/account/password', { channel: 'email', code: changeCode, password: changedPassword }, fresh)
+    expect(changed.status).toBe(200)
+    expect((await api().post(auth + '/login').send({ identifier: email, password: changedPassword })).body.data.user.id).toBe(user.id)
     const resetCode = await smsCode('/reset/send-code', { identifier: phone }, phone)
     expect((await api().post(auth + '/sms/login').send({ phone, code: resetCode })).body.error.code).toBe('AUTH_CODE_INVALID')
     const reset = await api().post(auth + '/reset').send({ identifier: phone, code: resetCode, password: 'replacement-password' })
     expect(reset.body.data).toEqual({ ok: true })
     expect((await api().post(auth + '/reset').send({ identifier: phone, code: resetCode, password })).body.error.code).toBe('AUTH_CODE_INVALID')
-    expect((await api().post(auth + '/login').send({ identifier: email, password })).status).toBe(401)
+    expect((await api().post(auth + '/login').send({ identifier: email, password: changedPassword })).status).toBe(401)
   })
 
   it.each([
@@ -289,11 +311,11 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
     expect((await api().get('/api/admin/users').query({ search: email }).set('Cookie', cookie(access))).status).toBe(403)
   })
 
-  it('allows a legacy superadmin to use the main site and verify their phone independently of email', async () => {
+  it('allows a legacy admin to use the main site and verify their phone independently of email', async () => {
     const email = recipient()
     const phone = `+86137${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`
     const admin = await prisma.user.create({ data: {
-      email, phone, role: 'admin', isSuperAdmin: true, nickname: 'Legacy superadmin fixture',
+      email, phone, role: 'admin', nickname: 'Legacy admin fixture',
       passwordHash: hashPassword('legacy-admin-fixture-password'),
     } })
     const login = await api().post(auth + '/login').send({ phone, password: 'legacy-admin-fixture-password' })
@@ -315,6 +337,28 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
     const novel = await api().post('/api/novels').set('Cookie', cookie(access))
       .send({ title: '管理员创作测试', summary: '验证手机号通过后作品可访问' })
     expect(novel.status).toBe(201)
+  })
+
+  it('allows a superadmin without a verified phone to open their own studio', async () => {
+    const superAdmin = await prisma.user.create({ data: {
+      role: 'admin', isSuperAdmin: true, nickname: 'Superadmin studio fixture', passwordHash: 'unset:fixture',
+    } })
+    const otherOwner = await prisma.user.create({ data: {
+      role: 'admin', isSuperAdmin: true, nickname: 'Other owner fixture', passwordHash: 'unset:fixture',
+    } })
+    const cookieFor = (user: typeof superAdmin) => cookie(buildSessionTokens(user.id, user.tokenVersion).accessToken)
+    const session = cookieFor(superAdmin)
+    const draft = await api().post('/api/novels').set('Cookie', session)
+      .send({ title: '超级管理员草稿', summary: '创作区准入回归', visibility: 'private' })
+    expect(draft.status).toBe(201)
+    const id = draft.body.data.novel.id as string
+    expect((await api().get(`/api/novels/${id}/studio`).set('Cookie', session)).status).toBe(200)
+    expect((await api().get(`/api/novels/${id}/detail`).set('Cookie', session)).status).toBe(200)
+    expect((await api().get(`/api/novels/${id}/detail`).set('Cookie', cookieFor(otherOwner))).status).toBe(404)
+    await expect(assertStudioAccountAccess(superAdmin.id)).resolves.toBeUndefined()
+    const me = await api().get('/api/users/me').set('Cookie', session)
+    expect(me.body.data.user).toMatchObject({ phone: null, phoneVerified: false, studioPhoneVerificationRequired: false })
+    expect(me.body.data.authoredNovels).toEqual(expect.arrayContaining([expect.objectContaining({ id })]))
   })
 
   it('quarantines an uncertain SES send and still accepts the delivered proof if it arrives', async () => {

@@ -118,6 +118,7 @@ export interface User extends UserSummary {
   emailAuthEnabled?: boolean
   emailVerified?: boolean
   phoneVerified?: boolean
+  studioPhoneVerificationRequired?: boolean
   hasPassword?: boolean
   accountSetupStep?: 1 | 2 | 3 | null
   followerCount: number

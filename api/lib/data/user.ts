@@ -7,7 +7,7 @@ import type { LegalConsent } from '../../../shared/contracts/site-content.js'
  */
 import { randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
-import { accountEmailAuthEnabled, requiresPhoneForEmailSignup } from '../account-email-auth-scope.js'
+import { requiresStudioPhoneVerification } from '../account-email-auth-scope.js'
 import { lockAccountKey, prepareAccountEmailCode } from '../email-verification.js'
 import type { CommentTargetType, FollowUserItem, InteractionBadges, InteractionItem, Post, PrivacyLevel, PrivacySettings, ProfileVisibility, ReceivedLikeItem, User, UserMePayload, UserReplyItem } from '../../../shared/contracts/index.js'
 import { createUnsetPasswordHash, hashPassword, isLegacyPasswordHash, verifyPassword } from '../password.js'
@@ -27,8 +27,7 @@ import { activeChapterScope } from './internal.js'
 export async function getMePayloadData(userId: string): Promise<UserMePayload> {
   const user = await ensureUserExists(userId)
 
-  const emailAuth = accountEmailAuthEnabled()
-  const includeStudio = (!emailAuth || Boolean(user.phoneVerifiedAt)) && !requiresPhoneForEmailSignup(user)
+  const includeStudio = !requiresStudioPhoneVerification(user)
   const [draftChapters, recentPosts, recentComments, recentConversations, recentCoverAssets, authoredNovels] = await Promise.all([
       includeStudio ? prisma.chapter.findMany({
         where: {

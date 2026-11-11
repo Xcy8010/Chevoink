@@ -1,25 +1,27 @@
 import type { RequestHandler } from 'express'
-import { accountEmailAuthEnabled, requiresPhoneForEmailSignup } from './account-email-auth-scope.js'
+import { accountEmailAuthEnabled, requiresStudioPhoneVerification } from './account-email-auth-scope.js'
 import { getPublicSessionUserId, getSessionUserId } from './auth-session.js'
 import { createRequestId } from './http.js'
 import { DataAccessError, prisma } from './prisma.js'
 import { sendRouteError } from './route-error.js'
 
-export function accountAccessError(phoneVerified: boolean, studio: boolean) {
-  if (studio && !phoneVerified) return new DataAccessError(403, 'AUTH_PHONE_VERIFICATION_REQUIRED', '进入创作区前，请先验证手机号。')
+export function accountAccessError(phoneVerificationRequired: boolean, studio: boolean) {
+  if (studio && phoneVerificationRequired) return new DataAccessError(403, 'AUTH_PHONE_VERIFICATION_REQUIRED', '进入创作区前，请先验证手机号。')
 }
 
 export async function assertStudioAccountAccess(userId: string, enabled = accountEmailAuthEnabled()) {
   const user = await readAccountAccess(userId)
-  if (!enabled && !requiresPhoneForEmailSignup(user)) return
-  const error = accountAccessError(Boolean(user.phoneVerifiedAt), true)
+  const error = accountAccessError(requiresStudioPhoneVerification(user, enabled), true)
   if (error) throw error
 }
 
 async function readAccountAccess(userId: string) {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { emailVerifiedAt: true, phoneVerifiedAt: true, phone: true, accountSetupStep: true, accountSetupFinishedAt: true },
+    select: {
+      role: true, isSuperAdmin: true, bannedAt: true,
+      emailVerifiedAt: true, phoneVerifiedAt: true, phone: true, accountSetupStep: true, accountSetupFinishedAt: true,
+    },
   })
   if (!user) throw new DataAccessError(401, 'AUTH_INVALID_SESSION', '登录状态已失效，请重新登录。')
   return user
@@ -44,12 +46,10 @@ export const accountAccessGuard: RequestHandler = async (req, res, next) => {
     const userId = !enabled && !studio ? getPublicSessionUserId(req) : getSessionUserId(req)
     if (userId) {
       const user = await readAccountAccess(userId)
-      const phoneVerified = Boolean(user.phoneVerifiedAt)
-      if (enabled || requiresPhoneForEmailSignup(user)) {
-        const error = accountAccessError(phoneVerified, studio)
-        if (error) throw error
-        res.locals.allowStudioOwnerAccess = phoneVerified
-      }
+      const phoneVerificationRequired = requiresStudioPhoneVerification(user, enabled)
+      const error = accountAccessError(phoneVerificationRequired, studio)
+      if (error) throw error
+      res.locals.allowStudioOwnerAccess = !phoneVerificationRequired
     }
     next()
   } catch (error) {

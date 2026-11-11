@@ -25,7 +25,8 @@ function AppRoutes() {
   const authMode = path === '/login' ? 'login' : path === '/register' ? 'register' : undefined
   const checkingSession = useShellStore(state => state.authStatus === 'checking')
   const needsVerifiedPhone = useShellStore(state => state.authStatus === 'authenticated'
-    && state.sessionUser?.emailAuthEnabled === true && !state.sessionUser.phoneVerified)
+    && (state.sessionUser?.studioPhoneVerificationRequired
+      ?? (state.sessionUser?.emailAuthEnabled === true && !state.sessionUser.phoneVerified)))
   const studioPhoneRequired = needsVerifiedPhone && (path === '/studio' || path.startsWith('/studio/'))
   const hasOverlay = Boolean(authMode || studioPhoneRequired)
   useLayoutEffect(() => {
