@@ -1,10 +1,10 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Archive, BookOpenText, Bot, Bug, Check, ChevronDown, ChevronRight, Clock3, Copy, Crosshair, Flag, FolderDown,
-  Gauge, Gift, GitBranch, Home, Lightbulb, LoaderCircle, MessageSquare, MoreHorizontal, PencilLine, Pin, PinOff, Plus, RotateCcw,
+  Gauge, Gift, GitBranch, Home, Lightbulb, LoaderCircle, MoreHorizontal, PencilLine, Pin, PinOff, Plus, RotateCcw,
   Search, Settings2, Trash2, Upload, X,
 } from 'lucide-react'
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import { useToast } from '@/components/ui/toast-context'
@@ -106,6 +106,24 @@ const VISIBLE_PROJECT_TASKS = 5
 const VISIBLE_RECENT_TASKS = 10
 const workspaceSessionsKey = ['agent', 'sessions', 'workspace-navigation'] as const
 const sidebarRowClass = 'flex h-8 w-full items-center gap-2 rounded-[8px] px-2.5 text-left text-xs transition-colors hover:bg-[var(--surface-muted)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--border-strong)]'
+
+function TaskDisclosure({ id, label, open, children }: { id?: string; label?: string; open: boolean; children: ReactNode }) {
+  return (
+    <div
+      id={id}
+      role={label ? 'group' : undefined}
+      aria-label={label}
+      aria-hidden={!open || undefined}
+      {...(!open ? { inert: '' } : {})}
+      className={cn(
+        'grid transition-[grid-template-rows,opacity] duration-200 ease-out motion-reduce:transition-none',
+        open ? 'grid-rows-[1fr] opacity-100' : 'pointer-events-none grid-rows-[0fr] opacity-0',
+      )}
+    >
+      <div className="min-h-0 overflow-hidden">{children}</div>
+    </div>
+  )
+}
 
 function novelTitle(novel: Novel) {
   return novel.displayTitle?.trim() || novel.title?.trim() || '未命名作品'
@@ -544,7 +562,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
 
   function taskRow(task: SidebarTask, location: 'project' | 'recent' | 'pinned' = 'project') {
     const active = isActiveTask(task)
-    const selected = active && (location === 'project' || (!projectHasActiveTask && (location === 'recent' || !recentHasActiveTask)))
+    const selected = active && (location === 'project' ? projectHasActiveTask : !projectHasActiveTask && (location === 'recent' || !recentHasActiveTask))
     const signal = sessionSignals[task.id]
     const remoteStatus = remoteRunStatuses[task.id]?.status
     // 正在直播的任务窗口以本地 phase 为唯一真相：run-status 轮询最多滞后 10s，
@@ -563,7 +581,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
       : runningSessionIds.has(task.id) || remoteStatus === 'running' || remoteStatus === 'queued'
     // 异常中止持续显示（含当前任务窗口内），直到作者发新提示词或任务恢复运行
     const aborted = signal?.kind === 'failed' || livePhase === 'failed' || livePhase === 'cancelled'
-    // 状态指示器优先级：待作者选择（黄）> 运行中（转圈）> 异常中止（红）> 已完成（绿，仅未读且不在该窗口内）> 占位
+    // 状态指示器优先级：待作者选择（黄）> 运行中（转圈）> 异常中止（红）> 已完成（绿，仅未读且不在该窗口内）
     const indicator = awaiting
       ? <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden="true" />
       : spinning
@@ -572,13 +590,13 @@ export default function StudioWorkspaceSidebar(props: Props) {
           ? <span className="h-1.5 w-1.5 rounded-full bg-rose-500" aria-hidden="true" />
           : signal?.kind === 'done' && !active
             ? <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
-            : <MessageSquare className="h-3.5 w-3.5 text-[var(--text-tertiary)]" aria-hidden="true" />
+            : null
     const title = task.title || '新任务'
     const contextTarget = { kind: 'task' as const, id: task.id, novelId: task.novelId, title, pinned: Boolean(task.pinnedAt), temporary: task.temporary }
     return (
       <div
         key={task.novelId + ':' + task.id}
-        className="group/task relative"
+        className={cn('group/task relative', location === 'project' && 'mb-px')}
         onMouseEnter={(event) => scheduleTaskCard(event, task)}
         onMouseLeave={hideTaskCard}
       >
@@ -589,14 +607,14 @@ export default function StudioWorkspaceSidebar(props: Props) {
           disabled={props.taskSwitchLocked}
           className={cn(
             sidebarRowClass,
-            'disabled:opacity-50',
+            'pl-8 disabled:opacity-50',
             selected ? 'bg-[var(--surface-muted)] font-medium text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
           )}
           aria-current={selected ? 'page' : undefined}
           aria-label={location === 'recent' ? [title, novelTitles.get(task.novelId), '最近任务'].filter(Boolean).join('，') : undefined}
         >
-          <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">{indicator}</span>
           <span className="min-w-0 flex-1 truncate">{title}</span>
+          {indicator ? <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">{indicator}</span> : null}
           {task.isBranch ? <GitBranch className="h-3 w-3 shrink-0 text-[var(--text-tertiary)]" aria-label="分支任务" /> : null}
           {task.pinnedAt ? <Pin className="h-3 w-3 shrink-0 text-[var(--text-tertiary)]" aria-hidden="true" /> : null}
           {task.temporary ? null : <span className="hidden w-[46px] shrink-0 group-hover/task:block group-focus-within/task:block" aria-hidden="true" />}
@@ -670,9 +688,9 @@ export default function StudioWorkspaceSidebar(props: Props) {
             const showAll = expandedTaskLists.has(novel.id)
             const hiddenCount = tasks.length - VISIBLE_PROJECT_TASKS
             const taskListId = taskListPrefix + '-' + novel.id
-            const visibleTasks = showAll ? tasks : tasks.slice(0, VISIBLE_PROJECT_TASKS)
+            const visibleTasks = tasks.slice(0, VISIBLE_PROJECT_TASKS)
             const activeTask = tasks.find(isActiveTask)
-            if (!showAll && activeTask && !visibleTasks.includes(activeTask)) visibleTasks[VISIBLE_PROJECT_TASKS - 1] = activeTask
+            if (activeTask && !visibleTasks.includes(activeTask)) visibleTasks[VISIBLE_PROJECT_TASKS - 1] = activeTask
             const target = { kind: 'novel' as const, id: novel.id, title, pinned: Boolean(novel.pinnedAt) }
             return (
               <div key={novel.id} className="space-y-px">
@@ -726,9 +744,13 @@ export default function StudioWorkspaceSidebar(props: Props) {
                   </div>
                 </div>
                 {tasks.length ? (
-                  <div id={taskListId} role="group" aria-label={title + '的任务'} hidden={!expanded} className="space-y-px">
-                    {expanded ? visibleTasks.map(task => taskRow(task)) : null}
-                    {expanded && hiddenCount > 0 ? (
+                  <TaskDisclosure id={taskListId} label={title + '的任务'} open={expanded}>
+                    {tasks.map((task, index) => hiddenCount <= 0 || index < VISIBLE_PROJECT_TASKS - 1 ? taskRow(task) : (
+                      <TaskDisclosure key={task.id} open={showAll || visibleTasks.includes(task)}>
+                        {taskRow(task)}
+                      </TaskDisclosure>
+                    ))}
+                    {hiddenCount > 0 ? (
                       <button
                         type="button"
                         onClick={() => setExpandedTaskLists(current => toggleExpandedId(current, novel.id))}
@@ -740,7 +762,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
                         {showAll ? null : <span className="text-[10px] tabular-nums">{hiddenCount} 条</span>}
                       </button>
                     ) : null}
-                  </div>
+                  </TaskDisclosure>
                 ) : null}
               </div>
             )
