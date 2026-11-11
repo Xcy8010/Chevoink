@@ -184,7 +184,7 @@ export default function EmailAuthPage({ mode, onClose }: { mode: AuthMode; onClo
           <TextInput wrapperAs="span" type="password" autoComplete="new-password" placeholder="请再次输入新密码" value={passwordConfirm} onChange={event => setPasswordConfirm(event.target.value)} required disabled={submitting} minLength={6} maxLength={128} />
         </label>}
         {isRegister && (policy?.registrationAvailable && consentKey ? (
-          <div className="flex items-start gap-2.5 text-sm leading-6">
+          <div className="-ml-2 flex items-start gap-2.5 text-left text-sm leading-6">
             <input type="checkbox" id="email-auth-policy" className="mt-1 size-4 shrink-0" checked={Boolean(legalConsent)}
               onChange={event => setAcceptedPolicy(event.target.checked ? consentKey : '')} aria-labelledby="email-auth-policy-label" />
             <span id="email-auth-policy-label"><label htmlFor="email-auth-policy">我已阅读并同意</label>{' '}
