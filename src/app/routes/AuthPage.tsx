@@ -7,6 +7,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { ApiClientError, requestJson } from '@/app/api-client'
 import Button from '@/components/ui/Button'
 import AppImage from '@/components/ui/AppImage'
+import LoadingMark from '@/components/ui/LoadingMark'
 import TextInput from '@/components/ui/TextInput'
 import { hydrateReadingSync } from '@/features/home/reading-sync'
 import { brandMeta } from '@/lib/theme/tokens'
@@ -100,9 +101,7 @@ export default function AuthPage({ mode, onClose }: AuthPageProps & { onClose: (
     retry: false,
     staleTime: 0,
   })
-  if (options.isPending) return <AccountDialog title={mode === 'login' ? '登录启创墨域' : '创建账户'} onClose={onClose}>
-    <p role="status" className="text-sm text-[var(--text-secondary)]">正在读取登录方式…</p>
-  </AccountDialog>
+  if (options.isPending) return <LoadingMark className="boot-splash" />
   if (options.isError && !(options.error instanceof ApiClientError && options.error.status === 404)) {
     return <AccountDialog title="暂时无法读取登录方式" onClose={onClose}>
       <Button className="w-full" onClick={() => { void options.refetch() }}>重试</Button>

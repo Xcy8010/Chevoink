@@ -31,47 +31,38 @@
         if (meta) meta.setAttribute('content', bg)
       })()
     </script>
-    <!-- 启动占位屏：HTML 一到达就先展示品牌画面，React 挂载时 createRoot 会自动清掉 #root 内容 -->
+    <!-- 同一加载图标从 HTML 首屏持续显示到会话核对结束。 -->
     <style>
       .boot-splash {
         position: fixed;
         inset: 0;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 14px;
-        background: #f4f0e8;
-        color: #111827;
-        font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+        z-index: 1000;
+        display: grid;
+        place-items: center;
+        background: var(--app-bg, #f4f0e8);
       }
-      .dark .boot-splash { background: #111318; color: #f3f5f7; }
-      .boot-splash-name { font-size: 22px; font-weight: 600; letter-spacing: 0.35em; text-indent: 0.35em; }
-      .boot-splash-en { font-size: 11px; font-weight: 500; letter-spacing: 0.3em; text-indent: 0.3em; opacity: 0.45; text-transform: uppercase; }
-      .boot-splash-bar {
-        margin-top: 10px;
-        width: 96px;
-        height: 3px;
-        border-radius: 999px;
-        overflow: hidden;
-        background: rgba(128, 128, 128, 0.18);
+      .dark .boot-splash { background: var(--app-bg, #111318); }
+      .boot-mark {
+        display: block;
         position: relative;
+        width: 48px;
+        height: 48px;
+        overflow: hidden;
+        border-radius: 14px;
+        background: url('/favicon.png') center / cover no-repeat;
       }
-      .boot-splash-bar::after {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: -40%;
-        width: 40%;
-        height: 100%;
-        border-radius: 999px;
-        background: currentColor;
-        opacity: 0.55;
-        animation: boot-splash-slide 1.1s ease-in-out infinite;
-      }
-      @keyframes boot-splash-slide {
-        0% { left: -40%; }
-        100% { left: 100%; }
+      @media (prefers-reduced-motion: no-preference) {
+        .boot-mark::after {
+          content: '';
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(115deg, transparent 20%, rgba(255, 255, 255, 0.7) 50%, transparent 80%);
+          animation: boot-sheen 1.6s ease-in-out infinite;
+        }
+        @keyframes boot-sheen {
+          0% { transform: translateX(-110%); }
+          75%, 100% { transform: translateX(110%); }
+        }
       }
     </style>
     <script type="module">
@@ -87,13 +78,10 @@
     </script>
   </head>
   <body>
-    <div id="root">
-      <div class="boot-splash" aria-hidden="true">
-        <div class="boot-splash-name">启创墨域</div>
-        <div class="boot-splash-en">Chevoink</div>
-        <div class="boot-splash-bar"></div>
-      </div>
+    <div id="app-loading" class="boot-splash" role="status" aria-label="加载中">
+      <span class="boot-mark" aria-hidden="true"></span>
     </div>
+    <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

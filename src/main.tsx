@@ -1,6 +1,7 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { bootstrapAppRelease } from './features/app-releases/bootstrap'
+import AppState from './components/ui/AppState'
 import { setupKeyboardInsetWatcher } from './lib/keyboard-inset'
 import { setupSafeAreaFallback } from './lib/safe-area'
 import './index.css'
@@ -17,8 +18,14 @@ async function start(){
 }
 void start().catch(()=>{
   const root=document.getElementById('root')!
-  root.replaceChildren()
-  const message=document.createElement('p');message.textContent='应用版本暂时无法核对，请重试。'
-  const retry=document.createElement('button');retry.textContent='重试';retry.onclick=()=>location.reload()
-  root.append(message,retry)
+  document.getElementById('app-loading')?.remove()
+  createRoot(root).render(
+    <AppState
+      tone="error"
+      className="min-h-dvh md:min-h-dvh"
+      title="暂时无法打开应用"
+      description="请检查网络连接后重试。"
+      primaryAction={{label:'重新加载',onClick:()=>location.reload()}}
+    />,
+  )
 })

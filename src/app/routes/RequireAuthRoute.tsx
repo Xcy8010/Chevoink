@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
 import AppState from '@/components/ui/AppState'
+import LoadingMark from '@/components/ui/LoadingMark'
 import { useShellStore } from '@/store/useShellStore'
 
 type RequireAuthRouteProps = {
@@ -27,7 +28,7 @@ export default function RequireAuthRoute({
     : state
 
   if (authStatus === 'checking') {
-    return renderState(<AppState className={stateClassName} tone="loading" title="正在核对账户状态" description="很快就好。" />)
+    return renderState(<LoadingMark className="grid min-h-40 flex-1 place-items-center" />)
   }
 
   if (authStatus === 'unavailable') {

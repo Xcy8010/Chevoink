@@ -1,4 +1,4 @@
-import { PropsWithChildren, useEffect } from 'react'
+import { PropsWithChildren, useEffect, useLayoutEffect } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import { ACCOUNT_REQUIREMENT_EVENT, ApiClientError, requestJson } from '@/app/api-client'
@@ -23,10 +23,15 @@ const queryClient = new QueryClient({
 export default function AppProviders({ children }: PropsWithChildren) {
   const theme = useShellStore((state) => state.theme)
   const studioAppearance = useShellStore((state) => state.studioAppearance)
+  const authStatus = useShellStore((state) => state.authStatus)
   const setSessionChecking = useShellStore((state) => state.setSessionChecking)
   const setSessionUnavailable = useShellStore((state) => state.setSessionUnavailable)
   const setGuest = useShellStore((state) => state.setGuest)
   const syncSessionUser = useShellStore((state) => state.syncSessionUser)
+
+  useLayoutEffect(() => {
+    if (authStatus !== 'checking') document.getElementById('app-loading')?.remove()
+  }, [authStatus])
 
   useEffect(() => {
     document.documentElement.classList.remove('light', 'dark')
