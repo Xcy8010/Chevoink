@@ -19,6 +19,7 @@ import {
   updateNovelSchema,
   uploadNovelCoverSchema,
 } from '../../shared/contracts/index.js'
+import { env } from '../config/env.js'
 import { getPublicSessionUserId, getSessionUserId, requireSessionUserId } from '../lib/auth-session.js'
 import {
   createChapterData,
@@ -65,7 +66,9 @@ async function handleNovelDetailRequest(req: Request, res: Response, novelId: st
   const requestId = createRequestId()
 
   try {
-    const payload = await getNovelDetailData(novelId, getPublicSessionUserId(req))
+    const payload = await getNovelDetailData(
+      novelId, getPublicSessionUserId(req), res.locals.allowStudioOwnerAccess !== false,
+    )
     if (!payload) {
       res.status(404).json(buildError(requestId, 'NOVEL_NOT_FOUND', '未找到作品。'))
       return
@@ -82,7 +85,8 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
   const page = parsePositiveInt(req.query.page, 1)
   const pageSize = parsePositiveInt(req.query.pageSize, 12)
   const authorId = typeof req.query.authorId === 'string' && req.query.authorId.trim() ? req.query.authorId.trim() : undefined
-  const publishedOnly = req.query.status === 'published'
+  const publishedOnly = req.query.status === 'published' || (env.accountEmailAuthEnabled
+    && (!res.locals.allowStudioOwnerAccess || !authorId || authorId !== getPublicSessionUserId(req)))
   const tag = typeof req.query.tag === 'string' && req.query.tag.trim() ? req.query.tag.trim() : undefined
 
   try {
@@ -127,7 +131,9 @@ router.get('/cards', async (req: Request, res: Response): Promise<void> => {
   const ids = idsParam.split(',').map((id) => id.trim()).filter(Boolean)
 
   try {
-    const items = await listNovelCardsByIdsData(ids, getSessionUserId(req))
+    const items = await listNovelCardsByIdsData(
+      ids, getSessionUserId(req), res.locals.allowStudioOwnerAccess !== false,
+    )
     res.status(200).json(buildSuccess(requestId, { items }))
   } catch (error) {
     sendRouteError(res, requestId, error)
@@ -335,7 +341,9 @@ router.get('/:novelId/reader/:chapterId', async (req: Request, res: Response): P
   const requestId = createRequestId()
 
   try {
-    const payload = await getReaderPayloadData(req.params.novelId, req.params.chapterId, getPublicSessionUserId(req))
+    const payload = await getReaderPayloadData(
+      req.params.novelId, req.params.chapterId, getPublicSessionUserId(req), res.locals.allowStudioOwnerAccess !== false,
+    )
     if (!payload) {
       res.status(404).json(buildError(requestId, 'CHAPTER_NOT_FOUND', '未找到章节内容。'))
       return

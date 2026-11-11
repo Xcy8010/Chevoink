@@ -1,6 +1,6 @@
 import { useRegistrationPolicies } from '@/features/site-content/public-api'
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Eye, EyeOff, Lock, MessageSquareText, Smartphone, UserRound } from 'lucide-react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 
@@ -13,6 +13,8 @@ import { brandMeta } from '@/lib/theme/tokens'
 import { cn } from '@/lib/utils'
 import { useShellStore } from '@/store/useShellStore'
 import { useToast } from '@/components/ui/toast-context'
+import AppState from '@/components/ui/AppState'
+import EmailAuthPage from './EmailAuthPage'
 import type {
   AuthSessionPayload,
   LoginRequest,
@@ -91,6 +93,25 @@ function normalizeRedirectPath(input: string | null): string {
  * - 密码框带眼睛按钮切换明文，默认隐藏
  */
 export default function AuthPage({ mode }: AuthPageProps) {
+  const [params] = useSearchParams()
+  const options = useQuery({
+    queryKey: ['auth', 'options'],
+    queryFn: () => requestJson<{ emailAuthEnabled: boolean }>('/api/auth/options'),
+    retry: false,
+    staleTime: 0,
+  })
+  if (options.isPending) return <AppState tone="loading" title="正在读取登录方式" />
+  if (options.isError && !(options.error instanceof ApiClientError && options.error.status === 404)) {
+    return <AppState tone="error" title="暂时无法读取登录方式" primaryAction={{ label: '重试', onClick: () => { void options.refetch() } }} />
+  }
+  if (options.data?.emailAuthEnabled) {
+    const nextMode = mode === 'login' && params.get('recovery') === '1' ? 'recovery' : mode
+    return <EmailAuthPage key={nextMode} mode={nextMode} />
+  }
+  return <LegacyAuthPage key={mode} mode={mode} />
+}
+
+function LegacyAuthPage({ mode }: AuthPageProps) {
   const legalQuery = useRegistrationPolicies()
   const [acceptedPolicies, setAcceptedPolicies] = useState('')
   const legal = legalQuery.data?.legal

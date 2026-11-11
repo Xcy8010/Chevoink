@@ -376,6 +376,7 @@ function rankRelatedNovels<T extends RelatedNovelSignals & { id: string }>(
 export async function getNovelDetailData(
   novelId: string,
   viewerUserId?: string | null,
+  allowOwnerAccess = true,
 ): Promise<NovelDetailPayload | null> {
   const novel = await prisma.novel.findUnique({
     where: { id: novelId },
@@ -386,7 +387,7 @@ export async function getNovelDetailData(
     return null
   }
 
-  const isOwner = Boolean(viewerUserId && novel.authorId === viewerUserId)
+  const isOwner = allowOwnerAccess && Boolean(viewerUserId && novel.authorId === viewerUserId)
 
   // 非作者只能看公开的已发布/已完结作品，与首页榜单候选池口径保持一致
   if (!isOwner && (novel.visibility !== 'public' || (novel.status !== 'published' && novel.status !== 'completed'))) {

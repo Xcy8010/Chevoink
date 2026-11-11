@@ -62,6 +62,7 @@ import {
 import { SectionTitle, SettingsRow } from './settings/settings-row'
 import CustomModelSettingsDialog from '@/features/account/CustomModelSettingsDialog'
 import DesktopSettings from './settings/desktop-settings'
+import EmailAccountSettings from './settings/EmailAccountSettings'
 
 /** 等待指定毫秒（检测更新动画至少展示 1.5 秒，哪怕请求提前返回） */
 function delay(ms: number): Promise<void> {
@@ -919,7 +920,7 @@ export default function SettingsPage() {
       </section>
 
       {/* 分组四：账号安全 */}
-      <section>
+      {sessionUser.emailAuthEnabled ? <EmailAccountSettings user={sessionUser} /> : <section>
         <SectionTitle>账号安全</SectionTitle>
         <div className="divide-y divide-[var(--border-subtle)]">
           <SettingsRow
@@ -939,7 +940,7 @@ export default function SettingsPage() {
             onClick={() => setOpenDialog({ kind: 'password' })}
           />
         </div>
-      </section>
+      </section>}
 
       {/* 分组五：会话 */}
       <section>

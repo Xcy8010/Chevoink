@@ -1,7 +1,7 @@
 import { PropsWithChildren, useEffect } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
-import { ApiClientError, requestJson } from '@/app/api-client'
+import { ACCOUNT_REQUIREMENT_EVENT, ApiClientError, requestJson } from '@/app/api-client'
 import { DeviceProvider } from '@/components/layout/DeviceProvider'
 import { ToastProvider } from '@/components/ui/Toast'
 import UpdateBanner from '@/components/ui/UpdateBanner'
@@ -53,20 +53,22 @@ export default function AppProviders({ children }: PropsWithChildren) {
 
   useEffect(() => {
     let disposed = false
+    let refreshingRequirements = false
 
-    async function bootstrapShellSession() {
-      setSessionChecking()
+    async function bootstrapShellSession(requirementsOnly = false) {
+      const owner = useShellStore.getState().sessionUser?.id
+      if (!requirementsOnly) setSessionChecking()
 
       try {
         // 经 react-query 缓存拉取：与页面级 ['community','me'] 查询共享同一请求/缓存，避免首屏重复请求 /api/users/me
         const payload = await queryClient.fetchQuery({
           queryKey: ['community', 'me'],
           queryFn: () => requestJson<UserMePayload>('/api/users/me'),
-          staleTime: 30_000,
+          staleTime: requirementsOnly ? 0 : 30_000,
           retry: false,
         })
 
-        if (!disposed) {
+        if (!disposed && (!requirementsOnly || useShellStore.getState().sessionUser?.id === owner)) {
           if (!payload.user) {
             setGuest()
             return
@@ -79,14 +81,16 @@ export default function AppProviders({ children }: PropsWithChildren) {
           })
 
           // 登录后水合书架/阅读进度：拉取云端并合并本地，变更后刷新 /me 让书架列表重算
-          void hydrateReadingSync().then((changed) => {
-            if (changed && !disposed) {
-              void queryClient.invalidateQueries({ queryKey: ['community', 'me'] })
-            }
-          })
+          if (!requirementsOnly && !payload.user.requiresEmailBinding) {
+            void hydrateReadingSync().then((changed) => {
+              if (changed && !disposed) {
+                void queryClient.invalidateQueries({ queryKey: ['community', 'me'] })
+              }
+            })
+          }
         }
       } catch (error) {
-        if (disposed) {
+        if (disposed || requirementsOnly) {
           return
         }
 
@@ -99,10 +103,18 @@ export default function AppProviders({ children }: PropsWithChildren) {
       }
     }
 
+    function refreshAccountRequirements() {
+      if (refreshingRequirements || useShellStore.getState().authStatus !== 'authenticated') return
+      refreshingRequirements = true
+      void bootstrapShellSession(true).finally(() => { refreshingRequirements = false })
+    }
+
     void bootstrapShellSession()
+    window.addEventListener(ACCOUNT_REQUIREMENT_EVENT, refreshAccountRequirements)
 
     return () => {
       disposed = true
+      window.removeEventListener(ACCOUNT_REQUIREMENT_EVENT, refreshAccountRequirements)
     }
   }, [setGuest, setSessionChecking, setSessionUnavailable, syncSessionUser])
 

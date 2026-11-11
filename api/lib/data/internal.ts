@@ -6,6 +6,7 @@
 import type { Prisma } from '@prisma/client'
 import type { Chapter, ChapterListItem, Comment, CommentTargetType, Conversation, CoverAsset, Message, MessageCard, Novel, NovelCard, Pagination, Post, TopicSummary, User, UserSummary, Volume, VolumeListItem } from '../../../shared/contracts/index.js'
 import { hasConfiguredPassword } from '../password.js'
+import { env } from '../../config/env.js'
 import { DataAccessError, prisma } from '../prisma.js'
 
 // Creative scope only. Public readers and historical/moderation paths must not
@@ -57,6 +58,9 @@ export type UserRecord = {
   role: UserSummary['role']
   isAuthor: boolean
   email?: string | null
+  emailVerifiedAt?: Date | null
+  phoneVerifiedAt?: Date | null
+  accountSetupStep?: number | null
   phone?: string | null
   passwordHash?: string | null
   followerCount?: number | null
@@ -350,12 +354,22 @@ export function toUserSummary(user: UserRecord): UserSummary {
 
 
 
-export function toUser(user: UserRecord): User {
+export function toUser(user: UserRecord, options: { publicProfile?: boolean } = {}): User {
+  const passwordConfigured = hasConfiguredPassword(user.passwordHash)
+  const accountSetupStep = user.accountSetupStep
   return {
     ...toUserSummary(user),
-    email: user.email ?? null,
-    phone: user.phone ?? null,
-    passwordConfigured: hasConfiguredPassword(user.passwordHash),
+    email: options.publicProfile ? null : user.email ?? null,
+    phone: options.publicProfile ? null : user.phone ?? null,
+    passwordConfigured: !options.publicProfile && passwordConfigured,
+    ...(!options.publicProfile && env.accountEmailAuthEnabled ? {
+      emailAuthEnabled: true,
+      emailVerified: Boolean(user.emailVerifiedAt),
+      phoneVerified: Boolean(user.phoneVerifiedAt),
+      requiresEmailBinding: !user.emailVerifiedAt,
+      hasPassword: passwordConfigured,
+      accountSetupStep: accountSetupStep === 1 || accountSetupStep === 2 || accountSetupStep === 3 ? accountSetupStep : null,
+    } : {}),
     followerCount: user.followerCount ?? 0,
     followingCount: user.followingCount ?? 0,
     novelCount: user.novelCount ?? 0,

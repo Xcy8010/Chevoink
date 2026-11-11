@@ -125,6 +125,7 @@ export async function getHomePayloadData(viewerUserId?: string | null) {
 export async function listNovelCardsByIdsData(
   novelIds: string[],
   viewerUserId?: string | null,
+  allowOwnerAccess = true,
 ): Promise<NovelCard[]> {
   const ids = [...new Set(novelIds.filter(Boolean))].slice(0, 20)
   if (ids.length === 0) {
@@ -134,7 +135,7 @@ export async function listNovelCardsByIdsData(
   const records = await prisma.novel.findMany({
     where: {
       id: { in: ids },
-      OR: [searchableNovelWhere, ...(viewerUserId ? [{ authorId: viewerUserId }] : [])],
+      OR: [searchableNovelWhere, ...(viewerUserId && allowOwnerAccess ? [{ authorId: viewerUserId }] : [])],
     },
     include: novelInclude,
   })

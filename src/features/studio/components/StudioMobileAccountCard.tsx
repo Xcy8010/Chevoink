@@ -42,7 +42,10 @@ export default function StudioMobileAccountCard() {
     <details className="min-w-0 flex-1">
       <summary aria-label={nickname + '，账户与用量'} className="flex min-h-12 cursor-pointer list-none items-center gap-2 rounded-lg pr-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--text-primary)] [&::-webkit-details-marker]:hidden">
         <Avatar name={nickname} src={sessionUser?.avatarUrl} size="sm" className="h-9 w-9 shrink-0" />
-        <span className="min-w-0 truncate text-[15px] font-semibold" title={nickname}>{nickname}</span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[15px] font-semibold" title={nickname}>{nickname}</span>
+          {sessionUser?.emailAuthEnabled && sessionUser.email ? <span className="block truncate text-[11px] text-[var(--text-tertiary)]" title={sessionUser.email}>{sessionUser.email}</span> : null}
+        </span>
         <ChevronRight aria-hidden="true" className="h-4 w-4 shrink-0 text-[var(--text-secondary)]" />
       </summary>
       <div className="absolute inset-x-3 bottom-full z-10 mb-2 rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-3 shadow-xl">

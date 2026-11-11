@@ -29,6 +29,7 @@ import creditsRoutes from './routes/credits.js'
 import localModelConnectorRoutes from './routes/local-model-connector.js'
 import { env } from './config/env.js'
 import { getSessionUserId, markSessionUnavailable, resolveSessionGate } from './lib/auth-session.js'
+import { accountAccessGuard } from './lib/account-access.js'
 import { getUploadsStaticDirectory } from './lib/avatar-storage.js'
 import { agentAttachmentGateway } from './lib/agent-attachment-http.js'
 import { prisma } from './lib/prisma.js'
@@ -98,6 +99,7 @@ app.use(async (req: Request, res: Response, next: NextFunction) => {
 
 app.use('/api/app-releases', publicAppReleaseRouter)
 app.use('/api/admin/app-releases', appReleaseRoutes)
+app.use('/api', accountAccessGuard)
 app.use('/api', appReleaseCapabilityGuard)
 app.use('/api/agent', agentRoutes)
 app.use('/api/admin/site-content', siteContentRoutes)

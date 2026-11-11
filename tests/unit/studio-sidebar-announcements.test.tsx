@@ -2,6 +2,9 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import StudioWorkspaceSidebar from '../../src/features/studio/components/StudioWorkspaceSidebar'
+import StudioMobileAccountCard from '../../src/features/studio/components/StudioMobileAccountCard'
+import { useShellStore } from '../../src/store/useShellStore'
+import type { User } from '../../shared/contracts'
 import type { AnnouncementInbox, PublicSiteContent } from '../../shared/contracts/site-content'
 const state=vi.hoisted(()=>({content:undefined as PublicSiteContent|undefined,inbox:undefined as AnnouncementInbox|undefined,markRead:vi.fn()}))
 vi.mock('../../src/features/site-content/announcement-inbox-api',()=>({useAnnouncementInbox:()=>({query:{data:state.inbox},viewerId:'author',read:{mutate:state.markRead}})}))
@@ -13,6 +16,7 @@ const originalShow=Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype,'
 function Fixture(){return <div className="studio-workspace" data-testid="workspace"><StudioWorkspaceSidebar open onOpenChange={noop} perspective="work" perspectiveSwitchEnabled onPerspectiveChange={noop} currentNovelId="synthetic" currentNovelTitle="合成作品" novels={[]} currentTasks={[]} currentTasksNovelId="synthetic" activeTaskId={null} taskSwitchLocked={false} onSelectNovel={noop} onCreateNovel={noop} onCreateTask={noop} onSelectTask={noop} onRenameTask={noop} onCreateTaskInNovel={noop} onTaskDeleted={noop} onTaskForked={noop} onNovelDeleted={noop} onImportNovel={noop} autoFollow={false} onAutoFollowChange={noop} onOpenStudioSettings={noop}/><main data-testid="main">主工作区</main></div>}
 beforeEach(()=>{
  sessionStorage.clear();localStorage.clear()
+ useShellStore.setState({sessionUser:null})
  state.inbox=undefined;state.markRead.mockClear()
  const now=Date.now();state.content={serverNow:new Date(now).toISOString(),nextBoundaryAt:null,settings:null,help:{},legal:{terms:null,privacy:null,registrationAvailable:false},announcements:[{id:'sidebar-notice',contentVersion:1,title:'侧栏合成公告',body:'合成公告正文',scope:'studio',startsAt:new Date(now-1000).toISOString(),endsAt:null,dismissal:{mode:'version'}}]}
  Object.defineProperty(HTMLDialogElement.prototype,'showModal',{configurable:true,value:function(this:HTMLDialogElement){this.setAttribute('open','')}})
@@ -26,6 +30,23 @@ it('places the single compact announcement directly above the actual sidebar acc
  expect(account.closest('[data-workspace-sidebar]')).toBeTruthy()
  expect(screen.getByTestId('main').contains(notice)).toBe(false)
  expect(screen.getByTestId('workspace').lastElementChild).toBe(screen.getByTestId('main'))
+})
+it('places the email immediately below the nickname in both studio account controls', () => {
+  useShellStore.setState({ sessionUser: {
+    id: 'owner',
+    nickname: '合成作者',
+    email: 'writer@example.com',
+    emailAuthEnabled: true,
+    emailVerified: true,
+  } as User })
+  const view = render(<><Fixture /><StudioMobileAccountCard /></>)
+  const desktop = view.container.querySelector('[data-studio-region="sidebar-account"]')!
+  const mobile = view.container.querySelector('details > summary')!
+  for (const control of [desktop, mobile]) {
+    const email = control.querySelector('[title="writer@example.com"]')!
+    expect(email.textContent).toBe('writer@example.com')
+    expect(email.previousElementSibling?.textContent).toBe('合成作者')
+  }
 })
 it('places the hover-to-close icons after a long announcement title', () => {
  const title = '这是一条用于验证窄侧栏保留完整标题的合成公告'

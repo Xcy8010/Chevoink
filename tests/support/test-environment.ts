@@ -23,7 +23,7 @@ export function resolveTestEnvironment(inherited: NodeJS.ProcessEnv, fromFile: R
   for (const key of [
     'AI_TEXT_API_KEY', 'AI_IMAGE_API_KEY', 'AI_VISION_API_KEY', 'WEB_SEARCH_BOCHA_API_KEY',
     'FIRECRAWL_API_KEY', 'JINA_READER_API_KEY', 'SMS_TENCENT_SECRET_ID',
-    'SMS_TENCENT_SECRET_KEY', 'MODEL_CONFIG_ENCRYPTION_KEY',
+    'SMS_TENCENT_SECRET_KEY', 'EMAIL_TENCENT_SECRET_ID', 'EMAIL_TENCENT_SECRET_KEY', 'MODEL_CONFIG_ENCRYPTION_KEY',
   ]) candidate[key] ??= ''
   candidate.DOTENV_PATH = filePath
   return candidate

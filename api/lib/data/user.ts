@@ -6,6 +6,9 @@ import type { LegalConsent } from '../../../shared/contracts/site-content.js'
  * 本文件为 api/lib/data-access.ts 桶文件的重导出源，禁止绕过桶文件新增消费者。
  */
 import { randomUUID } from 'node:crypto'
+import type { Prisma } from '@prisma/client'
+import { env } from '../../config/env.js'
+import { lockAccountKey, prepareAccountEmailCode } from '../email-verification.js'
 import type { CommentTargetType, FollowUserItem, InteractionBadges, InteractionItem, Post, PrivacyLevel, PrivacySettings, ProfileVisibility, ReceivedLikeItem, User, UserMePayload, UserReplyItem } from '../../../shared/contracts/index.js'
 import { createUnsetPasswordHash, hashPassword, isLegacyPasswordHash, verifyPassword } from '../password.js'
 import { initializeNewUserCredits } from '../credits.js'
@@ -24,8 +27,12 @@ import { activeChapterScope } from './internal.js'
 export async function getMePayloadData(userId: string): Promise<UserMePayload> {
   const user = await ensureUserExists(userId)
 
-  const [draftChapters, recentPosts, recentComments, recentConversations, recentCoverAssets, authoredNovels] = await prisma.$transaction([
-      prisma.chapter.findMany({
+  if (env.accountEmailAuthEnabled && !user.emailVerifiedAt) {
+    return { user: { ...toUser(user), privacy: toPrivacySettings(user) }, shelf: [], drafts: [], activities: [], notifications: [] }
+  }
+  const includeStudio = !env.accountEmailAuthEnabled || Boolean(user.phoneVerifiedAt)
+  const [draftChapters, recentPosts, recentComments, recentConversations, recentCoverAssets, authoredNovels] = await Promise.all([
+      includeStudio ? prisma.chapter.findMany({
         where: {
           ...activeChapterScope(),
           authorId: userId,
@@ -33,7 +40,7 @@ export async function getMePayloadData(userId: string): Promise<UserMePayload> {
         },
         orderBy: [{ updatedAt: 'desc' }],
         take: 6,
-      }),
+      }) : [],
       prisma.post.findMany({
         where: { userId },
         include: postInclude,
@@ -58,20 +65,20 @@ export async function getMePayloadData(userId: string): Promise<UserMePayload> {
         orderBy: [{ lastMessageAt: 'desc' }, { createdAt: 'desc' }],
         take: 3,
       }),
-      prisma.coverAsset.findMany({
+      includeStudio ? prisma.coverAsset.findMany({
         where: {
           ownerUserId: userId,
         },
         orderBy: [{ createdAt: 'desc' }],
         take: 1,
-      }),
-      prisma.novel.findMany({
+      }) : [],
+      includeStudio ? prisma.novel.findMany({
         where: {
           authorId: userId,
         },
         include: novelInclude,
         orderBy: [{ updatedAt: 'desc' }],
-      }),
+      }) : [],
     ])
 
   return {
@@ -146,7 +153,7 @@ export async function getUserByIdData(userId: string, viewerUserId?: string | nu
     return null
   }
 
-  const payload = toUser(user)
+  const payload = toUser(user, { publicProfile: true })
 
   // 作者主页展示的作品数只统计对外可见的作品，不含草稿/私密/无公开章节的作品
   payload.novelCount = await prisma.novel.count({
@@ -838,32 +845,59 @@ export async function registerUserData(input: {
   }
 
   const created = await prisma.$transaction(async (tx) => {
-    const consent = await verifyRegistrationConsent(tx, input.legalConsent)
-    await smsProof.consume(tx)
-    const user = await tx.user.create({
-      data: {
-        id: randomUUID(),
-        email: email ?? null,
-        phone,
-        passwordHash: password ? hashPassword(password) : createUnsetPasswordHash(),
-        nickname,
-        avatarUrl: null,
-        bio: null,
-        role: 'user',
-        isAuthor: false,
-      },
-    })
-    const acceptedAt = consent.acceptedAt
-    await tx.userLegalConsent.createMany({data:consent.versions.map(item => ({...item,userId:user.id,acceptedAt}))})
-    await tx.adminAuditLog.create({data:{adminId:user.id,action:'registration.legal_consent',targetType:'user',targetId:user.id,detail:{versions:consent.versions,acceptedAt:acceptedAt.toISOString()}}})
-    await initializeNewUserCredits(tx, user.id, input.referralCode)
-    return user
+    return createRegisteredUser(tx, {
+      email: email ?? null,
+      phone,
+      phoneVerifiedAt: new Date(),
+      passwordHash: password ? hashPassword(password) : createUnsetPasswordHash(),
+      nickname,
+    }, input, smsProof.consume)
   })
 
   return toUser(created)
 }
 
 
+
+async function createRegisteredUser(
+  tx: Prisma.TransactionClient,
+  identity: Pick<Prisma.UserUncheckedCreateInput, 'email' | 'phone' | 'emailVerifiedAt' | 'phoneVerifiedAt' | 'accountSetupStep' | 'passwordHash' | 'nickname'>,
+  input: { legalConsent?: LegalConsent; referralCode?: string },
+  consumeProof: (tx: Prisma.TransactionClient) => Promise<void>,
+) {
+  const { acceptedAt, versions } = await verifyRegistrationConsent(tx, input.legalConsent)
+  await consumeProof(tx)
+  const user = await tx.user.create({ data: { id: randomUUID(), ...identity } })
+  await tx.userLegalConsent.createMany({ data: versions.map(item => ({ ...item, userId: user.id, acceptedAt })) })
+  await tx.adminAuditLog.create({ data: {
+    adminId: user.id, action: 'registration.legal_consent', targetType: 'user', targetId: user.id,
+    detail: { versions, acceptedAt: acceptedAt.toISOString() },
+  } })
+  await initializeNewUserCredits(tx, user.id, input.referralCode)
+  return user
+}
+
+export async function registerEmailUserData(input: {
+  email: string
+  code: string
+  legalConsent?: LegalConsent
+  referralCode?: string
+}): Promise<User> {
+  const consumeProof = await prepareAccountEmailCode({ email: input.email, purpose: 'register', userId: null }, input.code)
+  // Profile nicknames are public. Derive the placeholder independently of the address.
+  const nickname = `书友${randomUUID().slice(0, 8)}`
+  const user = await prisma.$transaction(async tx => {
+    await lockAccountKey(tx, `account-email-owner:${input.email}`)
+    if (await tx.user.findFirst({ where: { email: { equals: input.email, mode: 'insensitive' } }, select: { id: true } })) {
+      throw new DataAccessError(409, 'AUTH_ACCOUNT_EXISTS', '暂时无法使用此邮箱注册，请尝试登录或使用其他邮箱。')
+    }
+    return createRegisteredUser(tx, {
+      email: input.email, emailVerifiedAt: new Date(), nickname,
+      accountSetupStep: 1, passwordHash: createUnsetPasswordHash(),
+    }, input, consumeProof)
+  })
+  return toUser(user)
+}
 
 export async function loginUserData(phone: string, password: string): Promise<User | null> {
   const normalizedPhone = normalizePhoneNumber(ensureNonEmptyText(phone, 'phone'))
@@ -886,7 +920,7 @@ export async function loginUserData(phone: string, password: string): Promise<Us
   // 存量明文（local:）哈希验证通过后立即升级为 scrypt 重写入库，逐步清退明文存储
   if (isLegacyPasswordHash(user.passwordHash)) {
     void prisma.user
-      .update({ where: { id: user.id }, data: { passwordHash: hashPassword(normalizedPassword) } })
+      .updateMany({ where: { id: user.id, passwordHash: user.passwordHash }, data: { passwordHash: hashPassword(normalizedPassword) } })
       .catch(() => {})
   }
 

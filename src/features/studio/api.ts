@@ -1,6 +1,6 @@
 import type { PlanLinkFields, PlanMetadataPatch } from '../../../shared/contracts/novel-plans'
 import { buildApiUrl } from '@/app/api-base'
-import { ApiClientError } from '@/app/api-client'
+import { ApiClientError, notifyAccountRequirement } from '@/app/api-client'
 import { buildAuthHeader } from '@/lib/auth-token'
 import type {
   AgentActionResultPayload,
@@ -125,7 +125,8 @@ export async function requestData<T>(path: string, options?: RequestDataOptions)
 
     if (!response.ok) {
       const failure = result && typeof result === 'object' && 'error' in result ? result.error : undefined
-      const message = normalizeResponseError(response.status, failure?.message ?? (rawText || undefined))
+      const required = notifyAccountRequirement(response.status, failure?.code)
+      const message = required && failure?.message ? failure.message : normalizeResponseError(response.status, failure?.message ?? (rawText || undefined))
       throw new ApiClientError(message, response.status, failure?.fieldErrors, failure?.code)
     }
 

@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import type { RequestHandler } from 'express'
+import { assertStudioAccountAccess } from './account-access.js'
 import { getSessionUserId, resolveSessionGate } from './auth-session.js'
 import { MANAGED_AGENT_ATTACHMENT_PREFIX, readAuthorizedAgentAttachment } from './agent-attachment-storage.js'
 import { DataAccessError } from './prisma.js'
@@ -44,6 +45,7 @@ export const agentAttachmentGateway: RequestHandler = async (req, res, next) => 
     await resolveSessionGate(req, res)
     const userId = getSessionUserId(req)
     if (!userId) throw new DataAccessError(401, 'UNAUTHORIZED', '请登录后查看附件。')
+    await assertStudioAccountAccess(userId)
     const url = `${MANAGED_AGENT_ATTACHMENT_PREFIX}${decoded.slice('/agent-attachments/'.length)}`
     const bytes = await readAuthorizedAgentAttachment(url, userId)
     res.type(path.extname(url))

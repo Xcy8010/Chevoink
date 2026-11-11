@@ -329,6 +329,24 @@ enum SmsVerificationPurpose {
   reset_password
   admin_login
   admin_bind
+  bind_phone
+  change_password
+}
+
+enum EmailVerificationPurpose {
+  register
+  login
+  bind
+  reset_password
+  change_password
+}
+
+enum AccountVerificationSendState {
+  pending
+  accepted
+  rejected
+  unknown
+  suppressed
 }
 
 /// 隐私可见级别：公开 / 仅自己 / 仅互关可见
@@ -349,6 +367,12 @@ model User {
   id                         String                  @id @default(cuid()) @db.VarChar(64)
   email                      String?                 @unique @db.VarChar(255)
   phone                      String?                 @unique @db.VarChar(32)
+  emailVerifiedAt            DateTime?               @map("email_verified_at")
+  phoneVerifiedAt            DateTime?               @map("phone_verified_at")
+  accountSetupStep           Int?                    @map("account_setup_step")
+  accountSetupSkippedSteps   Int[]                   @default([]) @map("account_setup_skipped_steps")
+  accountSetupFinishedAt     DateTime?               @map("account_setup_finished_at")
+  emailVerificationCodes     EmailVerificationCode[]
   passwordHash               String                  @map("password_hash") @db.VarChar(255)
   nickname                   String                  @db.VarChar(64)
   avatarUrl                  String?                 @map("avatar_url")
@@ -449,6 +473,28 @@ model User {
   @@map("users")
 }
 
+model EmailVerificationCode {
+  id                String                     @id @db.VarChar(64)
+  email             String                     @db.VarChar(255)
+  purpose           EmailVerificationPurpose
+  userId            String?                    @map("user_id") @db.VarChar(64)
+  requesterKey      String                     @map("requester_key") @db.VarChar(64)
+  codeHash          String                     @map("code_hash") @db.VarChar(64)
+  expiresAt         DateTime                   @map("expires_at")
+  consumedAt        DateTime?                  @map("consumed_at")
+  attempts          Int                        @default(0)
+  sendState         AccountVerificationSendState @default(pending) @map("send_state")
+  providerRequestId String?                    @map("provider_request_id") @db.VarChar(128)
+  createdAt         DateTime                   @default(now()) @map("created_at")
+  user              User?                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([email, createdAt])
+  @@index([requesterKey, createdAt])
+  @@index([expiresAt])
+  @@index([userId])
+  @@map("email_verification_codes")
+}
+
 model SmsVerificationCode {
   id         String                 @id @default(cuid()) @db.VarChar(64)
   userId     String?                @map("user_id") @db.VarChar(64)
@@ -459,6 +505,7 @@ model SmsVerificationCode {
   consumedAt DateTime?              @map("consumed_at")
   attempts   Int                    @default(0)
   provider   String                 @default("tencentcloud") @db.VarChar(32)
+  sendState  AccountVerificationSendState? @map("send_state")
   meta       Json?
   createdAt  DateTime               @default(now()) @map("created_at")
   updatedAt  DateTime               @updatedAt @map("updated_at")

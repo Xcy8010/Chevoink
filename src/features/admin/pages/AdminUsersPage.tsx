@@ -167,6 +167,7 @@ export default function AdminUsersPage() {
                         <StatusPill>正常</StatusPill>
                       )}
                     </div>
+                    <p className="mt-1 break-all text-xs text-[var(--text-secondary)]">{user.email ?? '未绑定邮箱'}</p>
                     <p className="mt-1 truncate text-xs text-[var(--text-secondary)]">
                       最近活跃 {formatDateTime(user.lastActiveAt)}
                     </p>
@@ -218,7 +219,9 @@ export default function AdminUsersPage() {
                           <Link to={`/admin/users/${user.id}`} state={{ adminReturnTo: location.pathname + location.search }} className="font-medium hover:underline">
                             {user.nickname}
                           </Link>
-
+                          <div className="mt-0.5 max-w-64 truncate text-xs text-[var(--text-secondary)]" title={user.email ?? undefined}>
+                            {user.email ?? '未绑定邮箱'}
+                          </div>
                         </td>
 
                         <td className="py-2.5">

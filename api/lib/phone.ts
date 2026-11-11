@@ -26,6 +26,11 @@ export function normalizePhoneNumber(input: string): string {
   throw new DataAccessError(400, 'VALIDATION_ERROR', '手机号格式不正确。')
 }
 
+export function normalizeAccountPhoneNumber(input: string): string {
+  const digits = input.replace(/[\s-]/g, '')
+  return /^1\d{10}$/.test(digits) ? `+86${digits}` : normalizePhoneNumber(digits)
+}
+
 export function maskPhoneNumber(phone: string): string {
   const normalized = phone.replace(/^\+86/, '')
 

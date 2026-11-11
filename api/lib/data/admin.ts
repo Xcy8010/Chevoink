@@ -319,7 +319,7 @@ export async function bindAdminPhoneData(
     return { ok: false, reason: 'taken' }
   }
 
-  await prisma.user.update({ where: { id: adminId }, data: { phone } })
+  await prisma.user.update({ where: { id: adminId }, data: { phone, phoneVerifiedAt: new Date() } })
   return { ok: true }
 }
 

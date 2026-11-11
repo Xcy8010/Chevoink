@@ -2,6 +2,7 @@ import { Suspense } from 'react'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 
 import { appRoutes } from '@/app/route-config'
+import AccountAccessGate from '@/app/routes/AccountAccessGate'
 import AppShell from '@/components/layout/AppShell'
 import { Skeleton, SkeletonText } from '@/components/ui/Skeleton'
 
@@ -17,7 +18,7 @@ const defaultRouteFallback = (
 export default function AppRouter() {
   return (
     <BrowserRouter>
-      <Routes>
+      <AccountAccessGate><Routes>
         {appRoutes.map((route) => (
           <Route
             key={route.path}
@@ -34,7 +35,7 @@ export default function AppRouter() {
             }
           />
         ))}
-      </Routes>
+      </Routes></AccountAccessGate>
     </BrowserRouter>
   )
 }

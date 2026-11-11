@@ -82,6 +82,7 @@ export async function getReaderPayloadData(
   novelId: string,
   chapterId: string,
   userId: string | null,
+  allowOwnerAccess = true,
 ): Promise<ReaderPayload | null> {
   const [novel, currentChapter] = await prisma.$transaction([
     prisma.novel.findUnique({
@@ -94,7 +95,7 @@ export async function getReaderPayloadData(
   ])
 
   if (!novel || !currentChapter || currentChapter.novelId !== novelId) return null
-  const isOwner = userId !== null && novel.authorId === userId
+  const isOwner = allowOwnerAccess && userId !== null && novel.authorId === userId
   const now = new Date()
   if (!isOwner && (
     novel.visibility !== 'public' || (novel.status !== 'published' && novel.status !== 'completed')

@@ -379,7 +379,9 @@ export default function AppShell({ title, description, children }: AppShellProps
               </span>
               {!isCompactInline ? (
                 <span className="block truncate text-xs text-[var(--text-secondary)] md:text-sm">
-                  {sessionUser.isAuthor ? '继续管理作品与资料' : '继续管理书架与资料'}
+                  {sessionUser.emailAuthEnabled && sessionUser.email
+                    ? sessionUser.email
+                    : sessionUser.isAuthor ? '继续管理作品与资料' : '继续管理书架与资料'}
                 </span>
               ) : null}
             </span>
@@ -615,7 +617,7 @@ export default function AppShell({ title, description, children }: AppShellProps
                               {sessionUser.nickname}
                             </span>
                             <span className="block truncate text-[11px] leading-4 text-[var(--text-tertiary)]">
-                              {sessionUser.bio?.trim() ? sessionUser.bio : '-'}
+                              {sessionUser.emailAuthEnabled && sessionUser.email ? sessionUser.email : sessionUser.bio?.trim() || '-'}
                             </span>
                           </span>
                         </div>

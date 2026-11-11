@@ -33,7 +33,9 @@ import {
 } from '../lib/data-access.js'
 import { buildError, buildSuccess, createRequestId } from '../lib/http.js'
 import { parseBody } from '../lib/parse-body.js'
+import { env } from '../config/env.js'
 import { hasConfiguredPassword, verifyPassword } from '../lib/password.js'
+import { DataAccessError } from '../lib/prisma.js'
 import { sendRouteError } from '../lib/route-error.js'
 import { sendAuthSmsCode, verifyAuthSmsCode } from '../lib/sms-service.js'
 
@@ -191,6 +193,9 @@ router.post('/me/password/sms-code', async (req: Request, res: Response): Promis
   const requestId = createRequestId()
 
   try {
+    if (env.accountEmailAuthEnabled) {
+      throw new DataAccessError(400, 'AUTH_PASSWORD_VERIFICATION_REQUIRED', '请使用账号设置中的验证码修改密码。')
+    }
     const userId = requireSessionUserId(req)
     const credential = await getUserCredentialData(userId)
 
@@ -214,6 +219,9 @@ router.patch('/me/password', async (req: Request, res: Response): Promise<void> 
   const requestId = createRequestId()
 
   try {
+    if (env.accountEmailAuthEnabled) {
+      throw new DataAccessError(400, 'AUTH_PASSWORD_VERIFICATION_REQUIRED', '请使用账号设置中的验证码修改密码。')
+    }
     const userId = requireSessionUserId(req)
     const body = parseBody(updatePasswordSchema, req.body, '请输入登录密码。')
 

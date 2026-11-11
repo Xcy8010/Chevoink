@@ -162,6 +162,9 @@ export default function AccountProfilePage() {
                   {emailCopied ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}
                 </button>
               ) : null}
+              {user?.emailAuthEnabled && !user.emailVerified && <Link to="/settings?section=email" className="shrink-0 text-xs text-[var(--color-brand)]">
+                绑定
+              </Link>}
             </Row>
             {dirty ? (
               <div className="flex items-center justify-end gap-3 border-t border-[#efefec] bg-[#fafaf8] px-5 py-3 dark:border-[var(--border-subtle)] dark:bg-[var(--surface-muted)]">
@@ -179,17 +182,17 @@ export default function AccountProfilePage() {
           <section className="mt-5 overflow-hidden rounded-[16px] border border-[#e9e9e6] bg-white dark:border-[var(--border-subtle)] dark:bg-[var(--surface-default)]">
             <Row label="登录密码">
               <span className="text-sm">{user?.passwordConfigured ? '已设置登录密码' : '建议设置登录密码'}</span>
-              <Link to="/settings" className="inline-flex items-center gap-1.5 rounded-[8px] px-2 py-1 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[#f4f4f2] hover:text-[var(--text-primary)] dark:hover:bg-[var(--surface-muted)]">
+              <Link to={user?.emailAuthEnabled ? '/settings?section=password' : '/settings'} className="inline-flex items-center gap-1.5 rounded-[8px] px-2 py-1 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[#f4f4f2] hover:text-[var(--text-primary)] dark:hover:bg-[var(--surface-muted)]">
                 <KeyRound className="h-3.5 w-3.5" />
                 {user?.passwordConfigured ? '修改' : '去设置'}
               </Link>
             </Row>
             <Row label="绑定手机">
               <span className="text-sm">{user?.phone ? maskPhone(user.phone) : '未绑定'}</span>
-              <Link to="/settings" className="inline-flex items-center gap-1.5 rounded-[8px] px-2 py-1 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[#f4f4f2] hover:text-[var(--text-primary)] dark:hover:bg-[var(--surface-muted)]">
+              {(!user?.emailAuthEnabled || !user.phoneVerified) && <Link to={user?.emailAuthEnabled ? '/settings?section=phone' : '/settings'} className="inline-flex items-center gap-1.5 rounded-[8px] px-2 py-1 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[#f4f4f2] hover:text-[var(--text-primary)] dark:hover:bg-[var(--surface-muted)]">
                 <Phone className="h-3.5 w-3.5" />
-                管理
-              </Link>
+                {user?.emailAuthEnabled ? '验证' : '管理'}
+              </Link>}
             </Row>
             <Row label="加入时间">
               <span className="inline-flex items-center gap-1.5 text-sm">

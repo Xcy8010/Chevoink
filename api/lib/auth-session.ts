@@ -134,10 +134,13 @@ function writeSessionCookies(userId: string, tokenVersion: number, res: Response
 }
 
 /** 登录/重签会话：实时读库取最新 tokenVersion（不能走 60s 缓存，否则可能签出即刻失效的令牌） */
-export async function createSession(userId: string, res: Response) {
+export async function createSession(userId: string, res: Response, expectedTokenVersion?: number) {
   const state = await getUserAuthState(userId, { fresh: true })
   if (!state) throw new DataAccessError(401, 'AUTH_REQUIRED', '账号已不存在，请重新登录。')
   if (state.banned) throw new DataAccessError(403, 'AUTH_ACCOUNT_BANNED', '当前账号已被封禁。')
+  if (expectedTokenVersion !== undefined && state.tokenVersion !== expectedTokenVersion) {
+    throw new DataAccessError(401, 'AUTH_SESSION_CHANGED', '账号状态已变化，请重新登录。')
+  }
   return writeSessionCookies(userId, state.tokenVersion, res)
 }
 
