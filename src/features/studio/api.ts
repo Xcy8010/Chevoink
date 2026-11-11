@@ -1,5 +1,6 @@
 import type { PlanLinkFields, PlanMetadataPatch } from '../../../shared/contracts/novel-plans'
 import { buildApiUrl } from '@/app/api-base'
+import { ApiClientError } from '@/app/api-client'
 import { buildAuthHeader } from '@/lib/auth-token'
 import type {
   AgentActionResultPayload,
@@ -123,11 +124,9 @@ export async function requestData<T>(path: string, options?: RequestDataOptions)
     }
 
     if (!response.ok) {
-      const message =
-        result && typeof result === 'object' && 'error' in result
-          ? result.error.message
-          : rawText || undefined
-      throw new Error(normalizeResponseError(response.status, message))
+      const failure = result && typeof result === 'object' && 'error' in result ? result.error : undefined
+      const message = normalizeResponseError(response.status, failure?.message ?? (rawText || undefined))
+      throw new ApiClientError(message, response.status, failure?.fieldErrors, failure?.code)
     }
 
     if (!result || !result.success) {
@@ -140,6 +139,7 @@ export async function requestData<T>(path: string, options?: RequestDataOptions)
 
     return result.data
   } catch (error) {
+    if (error instanceof ApiClientError) throw error
     throw new Error(normalizeFetchError(error))
   } finally {
     if (timeoutId !== null) {

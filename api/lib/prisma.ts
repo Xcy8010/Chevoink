@@ -41,12 +41,14 @@ export const prisma = withGoalDatabaseFences(prismaClient)
 export class DataAccessError extends Error {
   status: number
   code: string
+  fieldErrors?: Record<string, string>
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, fieldErrors?: Record<string, string>) {
     super(message)
     this.name = 'DataAccessError'
     this.status = status
     this.code = code
+    this.fieldErrors = fieldErrors
   }
 }
 

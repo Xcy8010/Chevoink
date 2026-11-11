@@ -112,6 +112,10 @@ describe.runIf(available)('durable workspace changes', () => {
   }))
 
   it.each((['novel_publish', 'novel_archive'] as const).flatMap(action => (['approved', 'denied', 'renamed', 'receipt-recovery'] as const).map(scenario => [action, scenario] as const)))('%s %s preserves the original confirmation and one final receipt', (action, scenario) => fixture(async f => {
+    if (action === 'novel_publish') {
+      const cover = await prisma.coverAsset.create({ data: { ownerUserId: f.userId, novelId: f.novelId, sourceType: 'upload', imageUrl: '/fixture-cover.png' } })
+      await prisma.novel.update({ where: { id: f.novelId }, data: { coverAssetId: cover.id, summary: '合成作品简介', tagNames: ['科幻'] } })
+    }
     const lease = await start(f, action, { confirmTitle: '持久执行测试' })
     const waiting = await executeDurableToolStep(lease, signal())
     expect(waiting.kind).toBe('waiting_approval')
@@ -126,6 +130,15 @@ describe.runIf(available)('durable workspace changes', () => {
     const saved = await prisma.novel.findUniqueOrThrow({ where: { id: f.novelId } })
     expect(saved.status).toBe(scenario === 'approved' || scenario === 'receipt-recovery' ? action === 'novel_publish' ? 'published' : 'archived' : 'draft')
     expect(await prisma.agentEffectReceipt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(1)
+  }))
+
+  it('leaves an incomplete work in draft even after explicit Agent publication approval', () => fixture(async f => {
+    const lease = await start(f, 'novel_publish', { confirmTitle: '持久执行测试' })
+    await approve(lease, 'first')
+    expect(await executeDurableToolStep(lease, signal())).toMatchObject({
+      kind: 'tool', result: { outcome: 'failed', output: expect.stringContaining('封面、简介、标签') },
+    })
+    expect(await prisma.novel.findUniqueOrThrow({ where: { id: f.novelId } })).toMatchObject({ status: 'draft', publishedAt: null })
   }))
 
   it('recovers the original attachment bytes observation after the file becomes unavailable', () => fixture(async f => {

@@ -18,7 +18,7 @@ vi.mock('../../api/lib/agent/plan-artifacts.js', () => ({ listNovelPlanArtifacts
 import { activeChapterScope, activeVolumeWhere, recalculateNovelStats, updateActiveChapter, updateActiveVolume, volumeListItemInclude } from '../../api/lib/data/internal.js'
 import { deleteChapterData, getChapterData, getReaderPayloadData, getStudioPayloadData, publicChapterWhere, updateChapterData } from '../../api/lib/data/chapter.js'
 import { deleteVolumeData, ensureDefaultVolume, getStructureRevisionHash, mergeChaptersData, normalizeNovelStructure, resolveChapterPlacement, splitChapterData, updateVolumeData } from '../../api/lib/data/volume.js'
-import { publishNovelData } from '../../api/lib/data/novel.js'
+import { publishNovelData, updateNovelData } from '../../api/lib/data/novel.js'
 import { buildNovelExportZip } from '../../api/lib/export-service.js'
 
 const tx = db as unknown as Prisma.TransactionClient
@@ -220,9 +220,23 @@ describe('import archival: bounded creative data scope', () => {
   })
 
   it('rejects mixed active/archived publication selection before any snapshot write', async () => {
+    db.novel.findUnique.mockResolvedValue({ ...novel, coverAssetId: 'cover', summary: 'Story', tagNames: ['科幻'] })
     db.chapter.findMany.mockResolvedValue([chapter])
     await expect(publishNovelData('u', 'n', ['c', 'old'])).rejects.toMatchObject({ status: 409 })
     expect(db.chapter.findMany.mock.calls[0][0].where).toEqual({ ...activeChapterScope('n'), id: { in: ['c', 'old'] } })
+    expect(db.chapter.updateMany).not.toHaveBeenCalled()
+    expect(db.novel.update).not.toHaveBeenCalled()
+  })
+
+  it('reports missing metadata before writing the work or any chapter snapshot', async () => {
+    db.novel.findUnique.mockResolvedValue({ ...novel, status: 'draft', coverAssetId: null, tagNames: ['  '] })
+    const error = {
+      status: 400,
+      code: 'NOVEL_PUBLISH_METADATA_REQUIRED',
+      fieldErrors: { cover: expect.any(String), summary: expect.any(String), tags: expect.any(String) },
+    }
+    await expect(publishNovelData('u', 'n', ['c'])).rejects.toMatchObject(error)
+    await expect(updateNovelData('u', 'n', { status: 'published' })).rejects.toMatchObject(error)
     expect(db.chapter.updateMany).not.toHaveBeenCalled()
     expect(db.novel.update).not.toHaveBeenCalled()
   })

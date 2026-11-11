@@ -5,7 +5,7 @@ import { DataAccessError, normalizeDataAccessError } from './prisma.js'
 
 export function sendRouteError(res: Response, requestId: string, error: unknown): void {
   if (error instanceof DataAccessError) {
-    res.status(error.status).json(buildError(requestId, error.code, error.message))
+    res.status(error.status).json(buildError(requestId, error.code, error.message, error.fieldErrors))
     return
   }
 

@@ -12,12 +12,15 @@ import { plainChapterTitle } from '../../../shared/structure/chapter-title'
 import Button from '@/components/ui/Button'
 import Surface from '@/components/ui/Surface'
 import { useToast } from '@/components/ui/toast-context'
+import { ApiClientError } from '@/app/api-client'
 import { useAutoHideScrollbars } from '@/hooks/useAutoHideScrollbars'
 import { updateShelfCover } from '@/features/home/local-shelf'
 import FeedbackDialog from '@/features/feedback/components/FeedbackDialog'
+import { parseTagsText } from '@/lib/novel-tags'
 import { cn } from '@/lib/utils'
 import { DEFAULT_AGENT2_FEATURE_FLAGS } from '../../../shared/contracts/index.js'
 import type { AgentSession, AgentStreamEvent, Chapter, CoverAsset, FeedbackKind, Novel, StudioPayload, UserMePayload, Visibility } from '../../../shared/contracts/index.js'
+import { getMissingNovelPublishFields, isNovelPublicationTransition, NOVEL_PUBLISH_FIELDS, NOVEL_PUBLISH_METADATA_REQUIRED, type NovelPublishField } from '../../../shared/contracts/novel-publish.js'
 import { createWritingAgentSession, createNovelWorkspace, createChapterDraft, deleteNovelWorkspace, deleteChapterDraft, getChapterContent, getStudioPayload, getWritingAgentSessionHistory, listNovelPlanFiles, listWritingAgentSessions, publishNovelWorkspace, updateChapterDraft, updateWritingAgentSession, updateNovelMeta } from './api'
 import { downloadCoverAssetImage } from './cover-image'
 import { getMe } from '../community/api'
@@ -39,6 +42,7 @@ import type { NovelImportModelSelection } from '../../../shared/contracts/novel-
 import { buildReviewDiff, resolveReviewHunk } from './components/diff'
 import MetaPanel from './components/MetaPanel'
 import NovelCoverCropDialog from './components/NovelCoverCropDialog'
+import PublishMetadataDialog from './components/PublishMetadataDialog'
 import PublishNovelDialog from './components/PublishNovelDialog'
 import StudioCommandBar from './components/StudioCommandBar'
 import StudioMobileAccountCard from './components/StudioMobileAccountCard'
@@ -359,6 +363,7 @@ export default function StudioWorkspace() {
   } | null>(null)
   const [workspaceDialogBusy, setWorkspaceDialogBusy] = useState(false)
   const [publishDialogOpen, setPublishDialogOpen] = useState(false)
+  const [missingPublishFields, setMissingPublishFields] = useState<NovelPublishField[]>([])
   const [createNovelDialogOpen, setCreateNovelDialogOpen] = useState(false)
   const createChapterLockRef = useRef(false)
   const agentExecutionChapterTargetRef = useRef<string | null>(null)
@@ -372,7 +377,8 @@ export default function StudioWorkspace() {
 
   useEffect(() => subscribePlatformLifecycle({
     onBack: () => {
-      if (workspaceDialog) setWorkspaceDialog(null)
+      if (missingPublishFields.length) setMissingPublishFields([])
+      else if (workspaceDialog) setWorkspaceDialog(null)
       else if (activeChangeSetId) setActiveChangeSetId(null)
       else if (mobileMoreOpen) setMobileMoreOpen(false)
       else if (activeToolPanel) setActiveToolPanel(null)
@@ -383,7 +389,7 @@ export default function StudioWorkspace() {
       // SSE 以 seq 去重续传；这里只失效查询缓存，不重新启动 run，避免 APP 切后台造成重复写入。
       void queryClient.invalidateQueries({ queryKey: ['studio', activeNovelId] })
     },
-  }), [activeChangeSetId, activeNovelId, activeToolPanel, mobileBackView, mobileMoreOpen, mobileView, navigate, queryClient, workspaceDialog])
+  }), [activeChangeSetId, activeNovelId, activeToolPanel, missingPublishFields, mobileBackView, mobileMoreOpen, mobileView, navigate, queryClient, workspaceDialog])
 
   useEffect(() => {
     if (!coverGenerationBusy) {
@@ -670,6 +676,8 @@ export default function StudioWorkspace() {
     setNovelSaveState('idle')
     setNovelLastSavedAt(null)
     setNovelMessage('作品设置支持自动保存，也可以手动点击保存。')
+    setMissingPublishFields([])
+    setPublishDialogOpen(false)
     setEditorChapterSettingsOpen(false)
   }, [activeNovelId])
 
@@ -2027,6 +2035,7 @@ export default function StudioWorkspace() {
       if (context?.owner !== workspaceOwnerRef.current) return
       setNovelSaveState('error')
       setNovelMessage(error.message)
+      showMissingPublishFieldsFromError(error)
     },
     onSettled: (_data, error, _variables, context) => {
       context?.settle(error ? { error } : {})
@@ -2053,15 +2062,33 @@ export default function StudioWorkspace() {
     onError: (error: Error) => {
       setNovelSaveState('error')
       setNovelMessage(error.message)
-      toast.error(error.message)
+      if (!showMissingPublishFieldsFromError(error)) toast.error(error.message)
     },
   })
 
   const publishNovelMutation = useMutation({
     mutationFn: async ({ chapterIds, visibility }: { chapterIds: string[]; visibility: Visibility }) => {
+      const owner = workspaceOwnerRef.current
+      const settingsSave = novelSaveSettledRef.current
+      if (settingsSave) {
+        const result = await settingsSave
+        if (result.error) throw result.error
+      }
+      if (workspaceOwnerRef.current !== owner || owner.novelId !== activeNovelId) {
+        throw new Error('作品已切换，请重新发起发布。')
+      }
+      if (isNovelFormDirty(currentNovelStateRef.current, novelFormStateRef.current)) {
+        await saveNovelMutation.mutateAsync({ reason: 'manual' })
+      }
+      if (workspaceOwnerRef.current !== owner) throw new Error('作品已切换，请重新发起发布。')
+      if (isNovelFormDirty(currentNovelStateRef.current, novelFormStateRef.current)) {
+        throw new Error('作品设置已更新，请保存后重新发布。')
+      }
       return publishNovelWorkspace(activeNovelId, { chapterIds, visibility })
     },
-    onSuccess: ({ novel, publishedChapterIds }, variables) => {
+    onMutate: () => workspaceOwnerRef.current,
+    onSuccess: ({ novel, publishedChapterIds }, variables, owner) => {
+      if (owner !== workspaceOwnerRef.current) return
       const publishedSet = new Set(publishedChapterIds)
       const publishedAtFallback = novel.publishedAt ?? new Date().toISOString()
 
@@ -2144,11 +2171,11 @@ export default function StudioWorkspace() {
       void queryClient.invalidateQueries({ queryKey: ['reader', activeNovelId] })
       void queryClient.invalidateQueries({ queryKey: ['home'] })
     },
-    onError: (error: Error) => {
+    onError: (error: Error, _variables, owner) => {
+      if (owner !== workspaceOwnerRef.current) return
       setNovelSaveState('error')
       setNovelMessage(error.message)
-      // 发布弹窗还开着时，底层状态条被遮挡，用 toast 把后端校验信息顶到用户眼前
-      toast.error(error.message)
+      if (!showMissingPublishFieldsFromError(error)) toast.error(error.message)
     },
   })
 
@@ -2225,6 +2252,7 @@ export default function StudioWorkspace() {
     if (!novelForm || saveNovelMutation.isPending || novelForm.status === nextStatus) {
       return
     }
+    if (isNovelPublicationTransition(novelForm.status, nextStatus) && !ensureNovelPublishMetadata()) return
 
     const actionMap: Record<
       EditableNovelStatus,
@@ -2317,11 +2345,30 @@ export default function StudioWorkspace() {
     setPublishDialogOpen(true)
   }
 
-  /** 发布/完结共用的上架前置校验：0 章节先引导写作、无标签先引导设置；返回是否通过 */
+  function showMissingPublishFieldsFromError(error: Error): boolean {
+    if (!(error instanceof ApiClientError) || error.code !== NOVEL_PUBLISH_METADATA_REQUIRED) return false
+    const missing = (Object.keys(NOVEL_PUBLISH_FIELDS) as NovelPublishField[])
+      .filter((field) => Boolean(error.fieldErrors?.[field]))
+    if (!missing.length) return false
+    setPublishDialogOpen(false)
+    setMissingPublishFields(missing)
+    return true
+  }
+
+  function ensureNovelPublishMetadata(): boolean {
+    if (!novelForm) return false
+    const missing = getMissingNovelPublishFields({
+      coverAssetId: currentNovel?.coverAssetId,
+      summary: novelForm.summary,
+      tags: parseTagsText(novelForm.tagsText),
+    })
+    if (!missing.length) return true
+    setMissingPublishFields(missing)
+    return false
+  }
+
   function ensureNovelPublishable(action: '发布' | '完结') {
-    if (!novelForm) {
-      return false
-    }
+    if (!ensureNovelPublishMetadata()) return false
 
     // 0 章节的作品不允许上架，先引导去写第一章
     if (chapters.length === 0) {
@@ -2330,24 +2377,6 @@ export default function StudioWorkspace() {
         description: `${action}前需要至少写好一个章节，并在发布时选择公开，读者才能看到这部作品。`,
         confirmLabel: '我知道了',
         onConfirm: () => undefined,
-      })
-      return false
-    }
-
-    // 没有标签的作品先引导去作品设置选标签
-    const tags = novelForm.tagsText
-      .split(/[、/\s]+/)
-      .map((item) => item.trim())
-      .filter(Boolean)
-    if (tags.length === 0) {
-      setWorkspaceDialog({
-        title: '请先设置作品标签',
-        description: `${action}前需要为作品选择标签，读者才能在分类频道和搜索中找到这部作品。`,
-        confirmLabel: '展开作品设置',
-        onConfirm: () => {
-          setActiveToolPanel('meta')
-          setMobileView('meta')
-        },
       })
       return false
     }
@@ -2403,6 +2432,8 @@ export default function StudioWorkspace() {
       })
       return
     }
+
+    if (isNovelPublicationTransition(novelForm.status, 'completed') && !ensureNovelPublishMetadata()) return
 
     setWorkspaceDialog({
       title: '完结这部作品？',
@@ -4591,6 +4622,17 @@ export default function StudioWorkspace() {
         }}
         onConfirm={(chapterIds, visibility) => publishNovelMutation.mutate({ chapterIds, visibility })}
       />
+      {missingPublishFields.length ? (
+        <PublishMetadataDialog
+          missing={missingPublishFields}
+          onClose={() => setMissingPublishFields([])}
+          onOpenPanel={(panel) => {
+            setMissingPublishFields([])
+            setActiveToolPanel(panel)
+            setMobileView(panel)
+          }}
+        />
+      ) : null}
       <ExportDialog
         open={exportDialogOpen}
         novelId={currentNovel.id}

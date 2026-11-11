@@ -6,8 +6,10 @@
 import type { Prisma, Visibility as PrismaVisibility } from '@prisma/client'
 import type { CreateNovelRequest, Novel, NovelCard, NovelDetailPayload, UpdateNovelRequest, Visibility } from '../../../shared/contracts/index.js'
 import { NOVEL_TAG_GROUPS } from '../../../shared/contracts/novel-tags.js'
+import { isNovelPublicationTransition } from '../../../shared/contracts/novel-publish.js'
 import { hotScore, RECOMMEND_ALGORITHM_VERSIONS } from '../../../shared/recommend/scoring.js'
 import { storeNovelCoverDataUrl, storeNovelCoverFromRemoteUrl } from '../novel-cover-storage.js'
+import { requireNovelPublishMetadata } from '../novel-publish.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { buildPagination, buildSlug, chapterListItemSelect, commentInclude, ensureNonEmptyText, ensureNovelOwner, ensureUserExists, novelInclude, recalculateNovelStats, toComment, toNovel, toNovelCard, toPublishedChapterListItem, toPublishedVolumeListItem } from './internal.js'
 import { publicChapterWhere } from './chapter.js'
@@ -138,6 +140,14 @@ export async function updateNovelData(
     return null
   }
 
+  if (isNovelPublicationTransition(existing.status, input.status)) {
+    requireNovelPublishMetadata({
+      coverAssetId: input.coverAssetId === undefined ? existing.coverAssetId : input.coverAssetId,
+      summary: input.summary ?? existing.summary,
+      tagNames: input.tags ?? existing.tagNames,
+    })
+  }
+
   const nextTitle = input.title === undefined ? undefined : ensureNonEmptyText(input.title, 'title')
   const inputDisplayTitle = input.displayTitle === undefined ? undefined : input.displayTitle?.trim() || null
   // 各展示端统一优先读 displayTitle（它兼作 title 被占位名回滚时的备份），改书名时若调用方
@@ -191,19 +201,12 @@ export async function publishNovelData(
   chapterIds: string[],
   visibility: Visibility = 'public',
 ): Promise<{ novel: Novel; publishedChapterIds: string[] } | null> {
-  await ensureNovelOwner(userId, novelId)
-
-  const existing = await prisma.novel.findUnique({
-    where: { id: novelId },
-  })
-
-  if (!existing) {
-    return null
-  }
-
   const now = new Date()
 
   const updated = await prisma.$transaction(async (tx) => {
+    const existing = await ensureNovelOwner(userId, novelId, tx)
+    requireNovelPublishMetadata(existing)
+
     if (chapterIds.length > 0) {
       const selectedChapters = await tx.chapter.findMany({
         where: { ...activeChapterScope(novelId), id: { in: chapterIds } },

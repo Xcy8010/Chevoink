@@ -6,6 +6,7 @@ import type { Prisma } from '@prisma/client'
 import { DataAccessError, prisma } from '../../prisma.js'
 import { recalculateNovelStats } from '../../data/internal.js'
 import { ALL_NOVEL_TAGS, MAX_NOVEL_TAGS } from '../../../../shared/contracts/novel-tags.js'
+import { BOOTSTRAP_NOVEL_SUMMARY, getMissingNovelPublishFields, novelPublishMetadataMessage } from '../../../../shared/contracts/novel-publish.js'
 import { enforceCoverTitleInPrompt } from './cover-prompt.js'
 import { defineTool } from './types.js'
 
@@ -46,7 +47,7 @@ export const novelCreateTool = defineTool({
     const isBootstrap =
       !novel.displayTitle?.trim()
       && (novel.title === '未命名作品' || novel.title === '我的第一部作品')
-      && novel.summary === '先创建一部作品，再继续完善简介、章节和封面。'
+      && novel.summary === BOOTSTRAP_NOVEL_SUMMARY
       && novel.chapterCount === 0
       && novel.wordCount === 0
     if (!isBootstrap) return { outcome: 'failed', output: '当前已是正式作品，不能重复执行创建作品。如需调整，请使用重命名或更新作品设置。' }
@@ -228,13 +229,15 @@ export const novelPublishTool = defineTool({
     const db = ctx.transaction ?? prisma
     const novel = await db.novel.findFirst({
       where: { id: ctx.novelId, authorId: ctx.userId },
-      select: { title: true, displayTitle: true, status: true },
+      select: { title: true, displayTitle: true, status: true, coverAssetId: true, summary: true, tagNames: true },
     })
 
     if (!novel) {
       return { outcome: 'failed', output: '未找到当前作品。' }
     }
     if (args.confirmTitle.trim() !== (novel.displayTitle?.trim() || novel.title)) return { outcome: 'failed', output: '确认书名与当前作品不一致，作品未发布。请核对当前标题后再确认。' }
+    const missing = getMissingNovelPublishFields({ ...novel, tags: novel.tagNames })
+    if (missing.length) return { outcome: 'failed', output: novelPublishMetadataMessage(missing) }
     ctx.signal.throwIfAborted()
     await db.novel.update({
       where: { id: ctx.novelId },

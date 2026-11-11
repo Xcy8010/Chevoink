@@ -3,6 +3,7 @@
  * 由 StudioWorkspace.tsx 模块级拆分而来（声明顺序与原文件一致）。
  */
 import type { Novel, AgentSession } from '../../../../shared/contracts/index.js'
+import { BOOTSTRAP_NOVEL_SUMMARY } from '../../../../shared/contracts/novel-publish.js'
 import type { AgentTaskWindowState } from './workspace-types.js'
 
 
@@ -17,7 +18,7 @@ export const BOOTSTRAP_NOVEL_TITLE = '未命名作品'
 export const BOOTSTRAP_NOVEL_TITLES = new Set([BOOTSTRAP_NOVEL_TITLE, '我的第一部作品'])
 
 
-export const BOOTSTRAP_NOVEL_SUMMARY = '先创建一部作品，再继续完善简介、章节和封面。'
+export { BOOTSTRAP_NOVEL_SUMMARY }
 
 
 export const AGENT_WORKSPACE_STORAGE_PREFIX = 'studio-agent-workspace'
