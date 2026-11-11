@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { AlertCircle, LoaderCircle, SearchX } from 'lucide-react'
+import { Link } from 'react-router-dom'
 
 import Button from '@/components/ui/Button'
 import { cn } from '@/lib/utils'
@@ -62,12 +63,12 @@ export default function AppState({
           <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
             {primaryAction ? (
               primaryAction.href ? (
-                <a
-                  href={primaryAction.href}
+                <Link
+                  to={primaryAction.href}
                   className="inline-flex h-11 items-center justify-center rounded-[var(--radius-pill)] bg-[var(--surface-contrast)] px-4 text-sm font-medium text-[var(--text-contrast)] transition-colors hover:bg-[var(--surface-contrast-hover)]"
                 >
                   {primaryAction.label}
-                </a>
+                </Link>
               ) : (
                 <Button variant="primary" onClick={primaryAction.onClick}>
                   {primaryAction.label}
@@ -76,12 +77,12 @@ export default function AppState({
             ) : null}
             {secondaryAction ? (
               secondaryAction.href ? (
-                <a
-                  href={secondaryAction.href}
+                <Link
+                  to={secondaryAction.href}
                   className="inline-flex h-11 items-center justify-center rounded-[var(--radius-pill)] border border-[var(--border-strong)] bg-[var(--surface-default)] px-4 text-sm font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)]"
                 >
                   {secondaryAction.label}
-                </a>
+                </Link>
               ) : (
                 <Button variant="secondary" onClick={secondaryAction.onClick}>
                   {secondaryAction.label}

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useLocation } from 'react-router-dom'
 
 import AppState from '@/components/ui/AppState'
 import LoadingMark from '@/components/ui/LoadingMark'
@@ -19,7 +19,6 @@ export default function RequireAuthRoute({
   centered = false,
 }: RequireAuthRouteProps) {
   const location = useLocation()
-  const navigate = useNavigate()
   const authStatus = useShellStore((state) => state.authStatus)
   const isAuthenticated = useShellStore((state) => state.authStatus === 'authenticated' && !!state.sessionUser)
   const stateClassName = centered ? 'flex-1 shrink-0' : undefined
@@ -53,8 +52,8 @@ export default function RequireAuthRoute({
         icon={centered ? <img src="/favicon.png" alt="Chevoink" width={72} height={72} className="h-[72px] w-[72px] rounded-2xl object-contain" /> : undefined}
         title={title}
         description={description}
-        primaryAction={{ label: '去登录', onClick: () => navigate(`/login?redirect=${redirect}`) }}
-        secondaryAction={{ label: '创建账户', onClick: () => navigate(`/register?redirect=${redirect}`) }}
+        primaryAction={{ label: '去登录', href: `/login?redirect=${redirect}` }}
+        secondaryAction={{ label: '创建账户', href: `/register?redirect=${redirect}` }}
       />
     )
   }
