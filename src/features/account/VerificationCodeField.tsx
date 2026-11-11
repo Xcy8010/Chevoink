@@ -32,7 +32,7 @@ export function AccountDialog({ title, children, onClose }: {
       ref={dialogRef}
       aria-labelledby={titleId}
       onCancel={event => { event.preventDefault(); onClose?.() }}
-      className="fixed inset-0 m-auto w-[calc(100%-2rem)] max-w-[420px] overflow-hidden rounded-3xl border border-[var(--border-subtle)] bg-[var(--surface-default)] p-0 text-[var(--text-primary)] shadow-xl backdrop:bg-black/50"
+      className="animate-fade-in-up motion-reduce:!animate-none fixed inset-0 m-auto w-[calc(100%-2rem)] max-w-[420px] overflow-hidden rounded-3xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-0 text-[var(--text-primary)] shadow-xl backdrop:bg-black/50"
     >
       <div className="max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain px-5 py-5 sm:px-6">
         <header className="mb-5 flex items-center justify-between gap-3">
