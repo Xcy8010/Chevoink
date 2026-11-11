@@ -35,21 +35,21 @@ export default function PublishMetadataDialog({ missing, onClose, onOpenPanel }:
   onOpenPanel: (panel: 'cover' | 'meta') => void
 }) {
   const [showHelp, setShowHelp] = useState(false)
-  const [copyResult, setCopyResult] = useState('')
+  const [copyResult, setCopyResult] = useState<{ field: NovelPublishField; message: string } | null>(null)
   const helpLink = useRef<HTMLButtonElement>(null)
   const helpContent = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (showHelp) helpContent.current?.focus()
-    else helpLink.current?.focus()
+    if (showHelp) helpContent.current?.focus({ preventScroll: true })
+    else helpLink.current?.focus({ preventScroll: true })
   }, [showHelp])
 
   async function copyPrompt(field: NovelPublishField) {
     try {
       await navigator.clipboard.writeText(GUIDANCE[field].prompt)
-      setCopyResult(`已复制${NOVEL_PUBLISH_FIELDS[field]}提示词`)
+      setCopyResult({ field, message: `已复制${NOVEL_PUBLISH_FIELDS[field]}提示词` })
     } catch {
-      setCopyResult('复制失败，可以选中上方文字手动复制。')
+      setCopyResult({ field, message: '复制失败，可以选中上方文字手动复制。' })
     }
   }
 
@@ -60,7 +60,7 @@ export default function PublishMetadataDialog({ missing, onClose, onOpenPanel }:
       description={showHelp ? '你可以手动设置，也可以把提示词复制到当前作品的 Agent 输入框。' : novelPublishMetadataMessage(missing)}
       confirmLabel="我知道了"
       cancelLabel={showHelp ? '返回' : null}
-      onCancel={showHelp ? () => { setShowHelp(false); setCopyResult('') } : onClose}
+      onCancel={showHelp ? () => { setShowHelp(false); setCopyResult(null) } : onClose}
       onConfirm={onClose}
     >
       {showHelp ? (
@@ -76,10 +76,10 @@ export default function PublishMetadataDialog({ missing, onClose, onOpenPanel }:
                   <Button variant="ghost" size="sm" onClick={() => onOpenPanel(guidance.panel)}>{guidance.linkLabel}</Button>
                   <Button variant="secondary" size="sm" onClick={() => void copyPrompt(field)}>复制提示词</Button>
                 </div>
+                {copyResult?.field === field ? <p role="status" className="text-xs text-[var(--text-secondary)]">{copyResult.message}</p> : null}
               </section>
             )
           })}
-          <p role="status" className="text-xs text-[var(--text-secondary)]">{copyResult}</p>
         </div>
       ) : (
         <button
