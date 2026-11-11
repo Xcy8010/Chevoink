@@ -101,11 +101,9 @@ export default function EmailAuthPage({ mode, onClose }: { mode: AuthMode; onClo
       else result = await postAuth('/sms/login', { phone, code })
       setAuthenticated({ user: result.user, tokens: result.tokens })
       void queryClient.invalidateQueries()
-      if (!result.user.requiresEmailBinding) {
-        void hydrateReadingSync().then(changed => {
-          if (changed) void queryClient.invalidateQueries({ queryKey: ['community', 'me'] })
-        })
-      }
+      void hydrateReadingSync().then(changed => {
+        if (changed) void queryClient.invalidateQueries({ queryKey: ['community', 'me'] })
+      })
       navigate(redirect, { replace: true })
     } catch (error) {
       setError(authError(error, '暂时无法完成，请稍后重试。'))

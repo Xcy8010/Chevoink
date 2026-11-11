@@ -366,7 +366,6 @@ export function toUser(user: UserRecord, options: { publicProfile?: boolean } = 
       emailAuthEnabled: true,
       emailVerified: Boolean(user.emailVerifiedAt),
       phoneVerified: Boolean(user.phoneVerifiedAt),
-      requiresEmailBinding: !user.emailVerifiedAt,
       hasPassword: passwordConfigured,
       accountSetupStep: accountSetupStep === 1 || accountSetupStep === 2 || accountSetupStep === 3 ? accountSetupStep : null,
     } : {}),

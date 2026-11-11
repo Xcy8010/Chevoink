@@ -1,9 +1,9 @@
 import { usePublicSiteContent } from '@/features/site-content/public-api'
 import { useQuery } from '@tanstack/react-query'
 import { fetchPublicCreditPolicy } from './credits-api'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Search } from 'lucide-react'
-import { useSearchParams } from 'react-router-dom'
+import { useLocation, useSearchParams } from 'react-router-dom'
 
 import { cn } from '@/lib/utils'
 import AccountLayout from './AccountLayout'
@@ -14,8 +14,14 @@ export default function AccountDocsPage() {
   const policy = useQuery({ queryKey: ['credits', 'public-policy'], queryFn: fetchPublicCreditPolicy, staleTime: 20_000, refetchInterval: 60_000 })
   const docs = useMemo(() => getAccountDocs(policy.data?.publicBetaEnabled, content.data?.help), [policy.data?.publicBetaEnabled, content.data?.help])
   const [searchParams, setSearchParams] = useSearchParams()
+  const { hash } = useLocation()
   const [keyword, setKeyword] = useState('')
   const activeDoc = docs.find((doc) => doc.key === searchParams.get('doc')) ?? docs[0]
+  const activeSectionId = activeDoc.sections.find(section => hash === `#doc-${section.id}`)?.id
+
+  useEffect(() => {
+    if (activeSectionId) document.getElementById(`doc-${activeSectionId}`)?.scrollIntoView({ block: 'start' })
+  }, [activeDoc.key, activeSectionId])
 
   const filteredDocs = useMemo(() => {
     const kw = keyword.trim().toLowerCase()
@@ -35,8 +41,6 @@ export default function AccountDocsPage() {
   function jumpTo(sectionId: string) {
     document.getElementById(`doc-${sectionId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
-
-  if (policy.isLoading || policy.isError) return <AccountLayout withSidebar={false}><p className="px-5 py-9 text-sm text-[var(--text-secondary)]">{policy.isError ? '暂时无法读取文档。' : '加载中…'}</p></AccountLayout>
 
   return (
     <AccountLayout withSidebar={false}>
@@ -99,6 +103,9 @@ export default function AccountDocsPage() {
               <p className="mt-4 text-xs font-medium text-emerald-700 md:mt-0 dark:text-emerald-400">{activeDoc.group}</p>
               <h1 className="mt-2 text-3xl font-semibold tracking-[-.03em]">{activeDoc.title}</h1>
               <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">{activeDoc.summary}</p>
+              {activeDoc.sections.length === 0 && <p role="status" className="mt-3 text-sm text-[var(--text-secondary)]">
+                {policy.isLoading ? '正在读取当前套餐政策…' : '暂时无法读取当前套餐政策。'}
+              </p>}
               {activeDoc.sections.map((section) => (
                 <section key={section.id} className="mt-10">
                   <h2 id={`doc-${section.id}`} className="scroll-mt-20 text-xl font-semibold tracking-[-.02em]">{section.heading}</h2>

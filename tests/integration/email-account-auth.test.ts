@@ -242,7 +242,7 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
   it.each([
     { scenario: 'without a saved email', hasSavedEmail: false },
     { scenario: 'with a saved but unverified email', hasSavedEmail: true },
-  ])('keeps the old account and verified phone through email verification $scenario', async ({ hasSavedEmail }) => {
+  ])('allows legacy accounts to use the app and optionally verify an email $scenario', async ({ hasSavedEmail }) => {
     const email = recipient()
     const occupied = recipient()
     const phone = `+86138${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`
@@ -254,13 +254,21 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
       email: occupied, emailVerifiedAt: new Date(), nickname: 'Other fixture', passwordHash: 'unset:fixture',
     } })
     const login = await api().post(auth + '/login').send({ phone, password: 'legacy-fixture-password' })
+    expect(login.status).toBe(200)
     const access = login.body.data.tokens.accessToken as string
+    for (const path of ['/api/home', '/api/conversations', '/api/users/me/favorite-novels']) {
+      expect((await api().get(path).set('Cookie', cookie(access))).status).toBe(200)
+    }
+    const novel = await api().post('/api/novels').set('Cookie', cookie(access)).send({ title: '旧账户创作测试', summary: '验证旧账户作品访问' })
+    expect(novel.status).toBe(201)
     const own = await api().get('/api/users/me').set('Cookie', cookie(access))
-    expect(own.body.data.user).toMatchObject({ requiresEmailBinding: true, phoneVerified: true, emailVerified: false })
-    if (hasSavedEmail) expect(own.body.data.user.email).toBe(email)
-    expect((await api().post('/api/novels').set('Cookie', cookie(access)).send({})).body.error.code).toBe('AUTH_EMAIL_BIND_REQUIRED')
-    expect((await api().post(auth + '/account/setup').set('Cookie', cookie(access)).send({ step: 1, skip: true })).body.error.code)
-      .toBe('AUTH_EMAIL_BIND_REQUIRED')
+    expect(own.status).toBe(200)
+    expect(own.body.data.user).toMatchObject({ email: hasSavedEmail ? email : null, phoneVerified: true, emailVerified: false })
+    expect(own.body.data.user).not.toHaveProperty('requiresEmailBinding')
+    expect(own.body.data.authoredNovels).toEqual(expect.arrayContaining([expect.objectContaining({ id: novel.body.data.novel.id })]))
+    if (hasSavedEmail) {
+      expect((await api().post(auth + '/login').send({ identifier: email, password: 'legacy-fixture-password' })).status).toBe(401)
+    }
 
     const conflict = await api().post(auth + '/email/send-code').set('Cookie', cookie(access)).send({
       email: occupied.toUpperCase(), purpose: 'bind', ...await captcha(),
@@ -271,7 +279,7 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
       .toBe('AUTH_CODE_INVALID')
     const code = await emailCode('/email/send-code', { email, purpose: 'bind' }, email, access)
     const bound = await api().post(auth + '/account/email').set('Cookie', cookie(access)).send({ email, code })
-    expect(bound.body.data.user).toMatchObject({ id: legacy.id, email, phone, emailVerified: true, requiresEmailBinding: false, phoneVerified: true })
+    expect(bound.body.data.user).toMatchObject({ id: legacy.id, email, phone, emailVerified: true, phoneVerified: true })
     expect(await prisma.user.findUnique({ where: { id: legacy.id } })).toMatchObject({ passwordHash: legacy.passwordHash, phoneVerifiedAt: legacy.phoneVerifiedAt })
     expect(await prisma.user.findUnique({ where: { id: existing.id } })).toMatchObject({ email: occupied })
     const admin = await prisma.user.create({ data: { role: 'admin', nickname: 'Admin fixture', passwordHash: 'unset:fixture' } })
@@ -279,6 +287,34 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
       .set('Cookie', cookie(buildSessionTokens(admin.id, 0).accessToken))
     expect(search.body.data.items).toEqual([expect.objectContaining({ id: legacy.id, email })])
     expect((await api().get('/api/admin/users').query({ search: email }).set('Cookie', cookie(access))).status).toBe(403)
+  })
+
+  it('allows a legacy superadmin to use the main site and verify their phone independently of email', async () => {
+    const email = recipient()
+    const phone = `+86137${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`
+    const admin = await prisma.user.create({ data: {
+      email, phone, role: 'admin', isSuperAdmin: true, nickname: 'Legacy superadmin fixture',
+      passwordHash: hashPassword('legacy-admin-fixture-password'),
+    } })
+    const login = await api().post(auth + '/login').send({ phone, password: 'legacy-admin-fixture-password' })
+    expect(login.status).toBe(200)
+    const access = login.body.data.tokens.accessToken as string
+    for (const path of ['/api/home', '/api/conversations', '/api/users/me/favorite-novels', '/api/admin/users']) {
+      expect((await api().get(path).set('Cookie', cookie(access))).status).toBe(200)
+    }
+    for (const path of ['/api/novels/fixture/studio', `/api/uploads/agent-attachments/${admin.id}/sample.txt`]) {
+      const blocked = await api().get(path).set('Cookie', cookie(access))
+      expect(blocked.status).toBe(403)
+      expect(blocked.body.error.code).toBe('AUTH_PHONE_VERIFICATION_REQUIRED')
+    }
+    const code = await smsCode('/account/phone/send-code', { phone }, phone, access)
+    const bound = await api().post(auth + '/account/phone').set('Cookie', cookie(access)).send({ phone, code })
+    expect(bound.status).toBe(200)
+    expect(bound.body.data.user).toMatchObject({ id: admin.id, email, phone, phoneVerified: true, emailVerified: false })
+    await expect(assertStudioAccountAccess(admin.id)).resolves.toBeUndefined()
+    const novel = await api().post('/api/novels').set('Cookie', cookie(access))
+      .send({ title: '管理员创作测试', summary: '验证手机号通过后作品可访问' })
+    expect(novel.status).toBe(201)
   })
 
   it('quarantines an uncertain SES send and still accepts the delivered proof if it arrives', async () => {

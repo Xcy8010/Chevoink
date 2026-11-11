@@ -5,15 +5,14 @@ import { createRequestId } from './http.js'
 import { DataAccessError, prisma } from './prisma.js'
 import { sendRouteError } from './route-error.js'
 
-export function accountAccessError(emailVerified: boolean, phoneVerified: boolean, studio: boolean) {
-  if (!emailVerified) return new DataAccessError(403, 'AUTH_EMAIL_BIND_REQUIRED', '请先验证并绑定邮箱。')
+export function accountAccessError(phoneVerified: boolean, studio: boolean) {
   if (studio && !phoneVerified) return new DataAccessError(403, 'AUTH_PHONE_VERIFICATION_REQUIRED', '进入创作区前，请先验证手机号。')
 }
 
 export async function assertStudioAccountAccess(userId: string, enabled = accountEmailAuthEnabled()) {
   const user = await readAccountAccess(userId)
   if (!enabled && !requiresPhoneForEmailSignup(user)) return
-  const error = accountAccessError(Boolean(user.emailVerifiedAt), Boolean(user.phoneVerifiedAt), true)
+  const error = accountAccessError(Boolean(user.phoneVerifiedAt), true)
   if (error) throw error
 }
 
@@ -35,27 +34,19 @@ export function isStudioAccountRoute(path: string, method: string) {
   return !['GET', 'HEAD'].includes(method) && !/^\/novels\/[^/]+\/favorite$/.test(path)
 }
 
-function availableBeforeEmailBinding(path: string, method: string) {
-  if (/^\/(?:site-content|app-releases|admin|local-model-connector)(?:\/|$)/.test(path)) return true
-  if (['/health', '/meta', '/feedback'].includes(path)) return true
-  if (path === '/users/me' && ['GET', 'HEAD'].includes(method)) return true
-  return /^\/auth(?:\/|$)/.test(path) && !/^\/auth\/account\/(?:phone|password|setup)(?:\/|$)/.test(path)
-}
-
 export const accountAccessGuard: RequestHandler = async (req, res, next) => {
   if (req.method === 'OPTIONS') return next()
   const path = req.path.toLowerCase().replace(/\/$/, '')
-  if (availableBeforeEmailBinding(path, req.method)) return next()
-  const enabled = accountEmailAuthEnabled()
   const studio = isStudioAccountRoute(path, req.method)
-  if (!enabled && !studio && !/^\/novels(?:\/|$)/.test(path)) return next()
+  if (!studio && !/^\/novels(?:\/|$)/.test(path)) return next()
+  const enabled = accountEmailAuthEnabled()
   try {
     const userId = !enabled && !studio ? getPublicSessionUserId(req) : getSessionUserId(req)
     if (userId) {
       const user = await readAccountAccess(userId)
       const phoneVerified = Boolean(user.phoneVerifiedAt)
       if (enabled || requiresPhoneForEmailSignup(user)) {
-        const error = accountAccessError(Boolean(user.emailVerifiedAt), phoneVerified, studio)
+        const error = accountAccessError(phoneVerified, studio)
         if (error) throw error
         res.locals.allowStudioOwnerAccess = phoneVerified
       }

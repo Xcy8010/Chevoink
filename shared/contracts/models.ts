@@ -119,7 +119,6 @@ export interface User extends UserSummary {
   emailVerified?: boolean
   phoneVerified?: boolean
   hasPassword?: boolean
-  requiresEmailBinding?: boolean
   accountSetupStep?: 1 | 2 | 3 | null
   followerCount: number
   followingCount: number

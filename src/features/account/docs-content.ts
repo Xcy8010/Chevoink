@@ -601,9 +601,11 @@ export const DOCS: DocEntry[] = [
       },
       {
         id: 'security',
-        heading: '如何修改密码或绑定手机',
+        heading: '如何验证邮箱、手机号或修改密码',
         paragraphs: [
-          '在账户中心个人信息页的账户安全区块，点击对应管理入口跳转到设置页完成修改；修改后立即对新会话生效。',
+          '登录后，在「设置 → 账号安全 → 邮箱」填写地址，输入收到的验证码即可验证。账号已有邮箱时，可以验证原地址。已验证的邮箱可用于登录和找回密码。',
+          '收不到验证码时，请确认邮箱地址正确，并查看垃圾邮件。发送倒计时结束后可重新获取验证码。',
+          '你也可以在「账号安全」验证手机号或修改密码。修改密码时可使用已验证的邮箱或手机号接收验证码。',
         ],
       },
       {
@@ -681,6 +683,13 @@ export function getAccountDocs(publicBetaEnabled: boolean | undefined, overrides
     const protectedIds = protectedSections[doc.key] ?? []
     return {...doc, ...override, sections: doc.sections.map(section => protectedIds.includes(section.id) ? section : override.sections.find(item => item.id === section.id) ?? section)}
   })
+  if (publicBetaEnabled === undefined) {
+    return docs.map(doc => ({
+      ...doc,
+      summary: doc.key === 'plan' ? '套餐权益与后续套餐规划。' : doc.summary,
+      sections: doc.sections.filter(section => !protectedSections[doc.key]?.includes(section.id)),
+    }))
+  }
   if (publicBetaEnabled === true) return docs
   return docs.map(doc => {
     if (doc.key === 'changelog') return doc

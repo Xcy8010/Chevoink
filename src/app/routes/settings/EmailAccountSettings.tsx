@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { KeyRound, Mail, Smartphone } from 'lucide-react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 
 import { useToast } from '@/components/ui/toast-context'
 import { IdentityVerificationForm, PasswordVerificationForm } from '@/features/account/AccountVerificationForms'
@@ -33,7 +33,8 @@ export default function EmailAccountSettings({ user }: { user: User }) {
     toast.success(dialog === 'email' ? '邮箱已验证' : dialog === 'phone' ? '手机号已验证' : '登录密码已保存')
   }
 
-  const title = dialog === 'email' ? '绑定邮箱'
+  const initialEmail = user.email?.trim()
+  const title = dialog === 'email' ? (initialEmail ? '验证邮箱' : '绑定邮箱')
     : dialog === 'phone' ? '验证手机号'
       : hasPassword ? '修改登录密码' : '设置登录密码'
 
@@ -57,7 +58,10 @@ export default function EmailAccountSettings({ user }: { user: User }) {
       {dialog && <AccountDialog key={dialog} title={title} onClose={() => { if (!saving) open(null) }}>
         {dialog === 'password'
           ? <PasswordVerificationForm user={user} onSaved={saved} onSaving={setSaving} />
-          : <IdentityVerificationForm kind={dialog} submitLabel="验证并保存" onSaved={saved} onSaving={setSaving} />}
+          : <IdentityVerificationForm kind={dialog} initialValue={dialog === 'email' ? initialEmail : undefined}
+              submitLabel="验证并保存" onSaved={saved} onSaving={setSaving} />}
+        {dialog === 'email' && <Link className="mt-4 inline-block rounded text-sm text-[var(--color-brand)] underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2"
+          to="/account/docs?doc=faq#doc-security" target="_blank" rel="noreferrer">帮助</Link>}
       </AccountDialog>}
     </section>
   )

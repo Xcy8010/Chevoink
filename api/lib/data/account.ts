@@ -48,7 +48,7 @@ export async function canSendBindingEmail(userId: string, email: string) {
 export async function canSendBindingPhone(userId: string, phone: string) {
   const account = await ensureUserExists(userId)
   const existing = await findAccountByIdentity({ phone })
-  return Boolean(account.emailVerifiedAt && !account.phoneVerifiedAt
+  return Boolean(!account.phoneVerifiedAt
     && (!account.phone || account.phone === phone) && (!existing || existing.id === userId))
 }
 
@@ -123,7 +123,7 @@ export async function bindAccountPhoneData(userId: string, phone: string, code: 
     const conflict = await tx.user.findFirst({ where: { phone, id: { not: userId } }, select: { id: true } })
     if (conflict) throw new DataAccessError(409, 'AUTH_PHONE_UNAVAILABLE', '暂时无法绑定此手机号。')
     const updated = await tx.user.updateMany({
-      where: { id: userId, bannedAt: null, emailVerifiedAt: { not: null }, phoneVerifiedAt: null,
+      where: { id: userId, bannedAt: null, phoneVerifiedAt: null,
         OR: [{ phone: null }, { phone }] },
       data: { phone, phoneVerifiedAt: new Date() },
     })

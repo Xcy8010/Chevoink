@@ -37,11 +37,7 @@ function AppRoutes() {
   const closeOverlay = () => navigate(background, { replace: true })
 
   return (
-    <AccountAccessGate
-      studioPhoneRequired={studioPhoneRequired}
-      closeStudioGate={closeOverlay}
-      authDialog={authMode && !checkingSession && <AuthPage mode={authMode} onClose={closeOverlay} />}
-    >
+    <AccountAccessGate studioPhoneRequired={studioPhoneRequired} closeStudioGate={closeOverlay}>
       <Routes location={background}>
         {appRoutes.map((route) => (
           <Route
@@ -60,6 +56,7 @@ function AppRoutes() {
           />
         ))}
       </Routes>
+      {authMode && !checkingSession && <AuthPage mode={authMode} onClose={closeOverlay} />}
     </AccountAccessGate>
   )
 }

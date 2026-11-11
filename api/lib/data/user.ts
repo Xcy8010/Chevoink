@@ -28,9 +28,6 @@ export async function getMePayloadData(userId: string): Promise<UserMePayload> {
   const user = await ensureUserExists(userId)
 
   const emailAuth = accountEmailAuthEnabled()
-  if (emailAuth && !user.emailVerifiedAt) {
-    return { user: { ...toUser(user), privacy: toPrivacySettings(user) }, shelf: [], drafts: [], activities: [], notifications: [] }
-  }
   const includeStudio = (!emailAuth || Boolean(user.phoneVerifiedAt)) && !requiresPhoneForEmailSignup(user)
   const [draftChapters, recentPosts, recentComments, recentConversations, recentCoverAssets, authoredNovels] = await Promise.all([
       includeStudio ? prisma.chapter.findMany({

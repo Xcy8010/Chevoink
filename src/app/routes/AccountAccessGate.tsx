@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 
 import Button from '@/components/ui/Button'
 import { IdentityVerificationForm, PasswordVerificationForm } from '@/features/account/AccountVerificationForms'
@@ -8,7 +8,6 @@ import ProfileSetupForm from '@/features/account/ProfileSetupForm'
 import { authError, postAuth } from '@/features/account/auth-api'
 import { useUpdateAccountSession } from '@/features/account/use-account-session'
 import { AccountDialog } from '@/features/account/VerificationCodeField'
-import { hydrateReadingSync } from '@/features/home/reading-sync'
 import { useShellStore } from '@/store/useShellStore'
 import type { User } from '../../../shared/contracts'
 
@@ -40,35 +39,6 @@ function SignOutLink() {
     </button>
     {error && <p role="alert" className="text-xs text-[var(--color-danger,#dc2626)]">{error}</p>}
   </div>
-}
-
-function BindRequired({ returnPath, initialEmail }: { returnPath: string; initialEmail?: string }) {
-  const queryClient = useQueryClient()
-  const [binding, setBinding] = useState(false)
-  const verifying = Boolean(initialEmail)
-  if (!binding) {
-    return (
-      <AccountDialog key="notice" title={verifying ? '请先验证邮箱' : '请先绑定邮箱'}
-        description={verifying ? '验证当前邮箱后即可继续使用账户。' : '绑定的邮箱可用于登录、找回密码和接收账户通知。'}>
-        <Button variant="primary" className="w-full" onClick={() => setBinding(true)}>{verifying ? '前往验证' : '前往绑定'}</Button>
-      </AccountDialog>
-    )
-  }
-  return (
-    <AccountDialog key="form" title={verifying ? '验证邮箱' : '绑定邮箱'} description="验证邮箱后即可继续使用当前账户。">
-      <IdentityVerificationForm kind="email" initialValue={initialEmail} submitLabel={verifying ? '验证并继续' : '验证并绑定'} onSaved={() => {
-        void queryClient.invalidateQueries()
-        void hydrateReadingSync().then(changed => {
-          if (changed) void queryClient.invalidateQueries({ queryKey: ['community', 'me'] })
-        })
-      }} />
-      <nav className="mt-5 flex flex-wrap items-start justify-between gap-x-5 gap-y-3 text-sm" aria-label="账户帮助">
-        <Link className="text-[var(--color-brand)]" to="/account/docs" target="_blank" rel="noreferrer">帮助</Link>
-        <Link className="text-[var(--color-brand)]" to={`/login?recovery=1&redirect=${encodeURIComponent(returnPath)}`}>找回密码</Link>
-        <SignOutLink />
-      </nav>
-    </AccountDialog>
-  )
 }
 
 function AccountSetupStep({ user, step }: { user: User; step: 1 | 2 | 3 }) {
@@ -112,24 +82,19 @@ function AccountSetupStep({ user, step }: { user: User; step: 1 | 2 | 3 }) {
   )
 }
 
-export default function AccountAccessGate({ children, authDialog, studioPhoneRequired, closeStudioGate }: {
+export default function AccountAccessGate({ children, studioPhoneRequired, closeStudioGate }: {
   children: ReactNode
-  authDialog?: ReactNode
   studioPhoneRequired: boolean
   closeStudioGate: () => void
 }) {
-  const { pathname, search } = useLocation()
+  const { pathname } = useLocation()
   const user = useShellStore(state => state.sessionUser)
   const authenticated = useShellStore(state => state.authStatus === 'authenticated')
-  const recovery = pathname === '/login' && new URLSearchParams(search).get('recovery') === '1'
-  const exempt = /^\/admin(?:\/|$)/i.test(pathname) || pathname === '/account/docs' || pathname === '/legal' || recovery
-  const requiresAccountAccess = authenticated && user?.emailAuthEnabled && !exempt
-  const requiresEmail = requiresAccountAccess && user.requiresEmailBinding
+  const skipSetup = /^\/admin(?:\/|$)/i.test(pathname) || /^\/(?:login|register)\/?$/i.test(pathname)
+    || pathname === '/account/docs' || pathname === '/legal'
   let dialog: ReactNode = null
-  if (requiresAccountAccess) {
-    if (requiresEmail) {
-      dialog = <BindRequired key={user.id} returnPath={pathname + search} initialEmail={user.email?.trim()} />
-    } else if (user.accountSetupStep && !/^\/(?:login|register)\/?$/i.test(pathname)) {
+  if (authenticated && user?.emailAuthEnabled) {
+    if (user.accountSetupStep && !skipSetup) {
       const step = user.accountSetupStep
       const title = step === 1 ? '验证手机号' : step === 2 ? '设置登录密码' : '完善个人资料'
       dialog = (
@@ -145,5 +110,5 @@ export default function AccountAccessGate({ children, authDialog, studioPhoneReq
       )
     }
   }
-  return <>{children}{!requiresEmail && authDialog}{dialog}</>
+  return <>{children}{dialog}</>
 }

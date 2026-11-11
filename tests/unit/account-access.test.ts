@@ -21,11 +21,10 @@ describe('account access', () => {
     expect(isStudioAccountRoute(path, method)).toBe(false)
   })
 
-  it('requires email before the phone gate and permits verified accounts', () => {
-    expect(accountAccessError(false, true, true)?.code).toBe('AUTH_EMAIL_BIND_REQUIRED')
-    expect(accountAccessError(true, false, true)?.code).toBe('AUTH_PHONE_VERIFICATION_REQUIRED')
-    expect(accountAccessError(true, false, false)).toBeUndefined()
-    expect(accountAccessError(true, true, true)).toBeUndefined()
+  it('requires a verified phone for the studio', () => {
+    expect(accountAccessError(false, true)?.code).toBe('AUTH_PHONE_VERIFICATION_REQUIRED')
+    expect(accountAccessError(false, false)).toBeUndefined()
+    expect(accountAccessError(true, true)).toBeUndefined()
   })
 
   it('keeps contact information and verification state private', () => {

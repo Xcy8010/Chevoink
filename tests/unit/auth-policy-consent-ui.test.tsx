@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
@@ -9,19 +9,27 @@ import AppRouter from '../../src/app/AppRouter'
 import { useShellStore } from '../../src/store/useShellStore'
 import type { User } from '../../shared/contracts'
 
-const mocks = vi.hoisted(() => ({ requestJson: vi.fn() }))
+const mocks = vi.hoisted(() => ({ requestJson: vi.fn(), hydrateReadingSync: vi.fn() }))
 vi.mock('../../src/app/api-client', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../src/app/api-client')>(),
   requestJson: mocks.requestJson,
 }))
 vi.mock('../../src/components/ui/toast-context', () => ({ useToast: () => ({ error: vi.fn(), success: vi.fn() }) }))
 vi.mock('../../src/components/layout/AppShell', () => ({ default: () => null }))
+vi.mock('../../src/features/home/reading-sync', () => ({ hydrateReadingSync: mocks.hydrateReadingSync }))
 vi.mock('../../src/app/route-config', async () => {
   const { Link } = await import('react-router-dom')
+  const { default: EmailAccountSettings } = await import('../../src/app/routes/settings/EmailAccountSettings')
+  const { useShellStore: useFixtureShellStore } = await import('../../src/store/useShellStore')
+  function AccountSettings() {
+    const user = useFixtureShellStore(state => state.sessionUser)
+    return user && <EmailAccountSettings user={user} />
+  }
   return {
     appRoutes: [
       { path: '/', useShell: false, element: <p>首页内容</p> },
-      { path: '/me', useShell: false, element: <><p>个人中心内容</p><Link to="/studio/novel/n1">进入创作区</Link></> },
+      { path: '/me', useShell: false, element: <><p>个人中心内容</p><Link to="/studio/novel/n1">进入创作区</Link><Link to="/administrator">普通页面</Link><Link to="/login">登录</Link><Link to="/register">注册</Link></> },
+      { path: '/settings', useShell: false, element: <AccountSettings /> },
       { path: '/studio/novel/:novelId', useShell: false, element: <p>创作内容</p> },
       { path: '/admin', useShell: false, element: <button type="button">管理操作</button> },
       { path: '/admin/app-releases', useShell: false, element: <button type="button">管理操作</button> },
@@ -55,8 +63,8 @@ function mount(mode: 'login' | 'register', legal: typeof published | typeof unav
   return render(<QueryClientProvider client={client}><MemoryRouter><AuthPage mode={mode} onClose={vi.fn()} /></MemoryRouter></QueryClientProvider>)
 }
 
-function mountApp(path: string, user: User) {
-  useShellStore.setState({ authStatus: 'authenticated', sessionUser: user })
+function mountApp(path: string, user?: User) {
+  if (user) useShellStore.setState({ authStatus: 'authenticated', sessionUser: user })
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
   window.history.replaceState(null, '', path)
   render(<QueryClientProvider client={client}><AppRouter /></QueryClientProvider>)
@@ -64,6 +72,7 @@ function mountApp(path: string, user: User) {
 
 beforeEach(() => {
   mocks.requestJson.mockReset()
+  mocks.hydrateReadingSync.mockReset().mockResolvedValue(false)
   useShellStore.getState().setGuest()
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value(this: HTMLDialogElement) { this.setAttribute('open', '') } })
   Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, value(this: HTMLDialogElement) { this.removeAttribute('open') } })
@@ -162,14 +171,49 @@ it.each(['/admin', '/admin/', '/AdMiN/app-releases'])('leaves administrative con
   expect(screen.queryByRole('dialog')).toBeNull()
 })
 
-it.each(['/login', '/register'])('gives the required email dialog precedence at %s', async path => {
-  mocks.requestJson.mockResolvedValue({ emailAuthEnabled: true })
+it.each(['/login', '/register'])('shows the normal signed-in dialog at %s', async path => {
+  mocks.requestJson.mockImplementation(async request => request === '/api/auth/options' ? { emailAuthEnabled: true } : { legal: published })
   mountApp(path, legacyUser)
-  await act(async () => {})
-  const notice = screen.getByRole('dialog', { name: '请先验证邮箱' })
+  const notice = await screen.findByRole('dialog', { name: '你已经登录' })
   expect(screen.getAllByRole('dialog')).toEqual([notice])
   expect(screen.getByText('首页内容')).toBeTruthy()
-  expect(mocks.requestJson).not.toHaveBeenCalled()
+  fireEvent.click(within(notice).getByRole('button', { name: '继续前往' }))
+  expect(screen.getByText('个人中心内容')).toBeTruthy()
+  expect(screen.queryByRole('dialog')).toBeNull()
+})
+
+it.each([['登录', '登录启创墨域'], ['注册', '创建账户']])('opens %s over the page that launched it', async (linkName, title) => {
+  mocks.requestJson.mockImplementation(async request => request === '/api/auth/options' ? { emailAuthEnabled: true } : { legal: published })
+  mountApp('/me')
+  const background = screen.getByText('个人中心内容')
+  fireEvent.click(screen.getByRole('link', { name: linkName }))
+  const dialog = await screen.findByRole('dialog', { name: title })
+  expect(screen.getByText('个人中心内容')).toBe(background)
+  fireEvent.click(within(dialog).getByRole('button', { name: '关闭' }))
+  expect(window.location.pathname).toBe('/me')
+  expect(screen.getByText('个人中心内容')).toBe(background)
+  expect(screen.queryByRole('dialog')).toBeNull()
+})
+
+it('restores reading progress after an existing user without email logs in', async () => {
+  mocks.requestJson.mockImplementation(async request => {
+    if (request === '/api/auth/options') return { emailAuthEnabled: true }
+    if (request === '/api/auth/legal-policies') return { legal: published }
+    if (request === '/api/auth/login') return {
+      user: { ...legacyUser, email: null },
+      tokens: { accessToken: 'access', refreshToken: 'refresh', expiresInSeconds: 3600 },
+    }
+    throw new Error('unexpected auth operation')
+  })
+  mountApp('/login')
+  const login = await screen.findByRole('dialog', { name: '登录启创墨域' })
+  expect(within(login).getByRole('link', { name: '找回密码' })).toBeTruthy()
+  fireEvent.change(within(login).getByPlaceholderText('请输入您的邮箱或手机号'), { target: { value: '13800000000' } })
+  fireEvent.change(within(login).getByPlaceholderText('请输入您的密码'), { target: { value: '123456' } })
+  fireEvent.click(within(login).getByRole('button', { name: '登录', exact: true }))
+  expect(await screen.findByText('个人中心内容')).toBeTruthy()
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(mocks.hydrateReadingSync).toHaveBeenCalledTimes(1)
 })
 
 it('keeps password recovery available before email verification', async () => {
@@ -180,22 +224,36 @@ it('keeps password recovery available before email verification', async () => {
   expect(screen.getByText('首页内容')).toBeTruthy()
 })
 
-it('verifies a stored email from an editable dialog over the ordinary page', async () => {
-  const verified = { ...legacyUser, emailVerified: true, requiresEmailBinding: false }
+it.each([null, 'reader@example.com'])('lets a signed-in user browse with email %s', email => {
+  mountApp('/me', { ...legacyUser, email })
+  expect(screen.getByText('个人中心内容')).toBeTruthy()
+  expect(screen.queryByRole('dialog')).toBeNull()
+  fireEvent.click(screen.getByRole('link', { name: '普通页面' }))
+  expect(screen.getByText('普通页面内容')).toBeTruthy()
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(mocks.requestJson).not.toHaveBeenCalled()
+})
+
+it('verifies a stored email on request from account settings', async () => {
+  const verified = { ...legacyUser, emailVerified: true }
   mocks.requestJson.mockImplementation(async path => {
     if (path === '/api/auth/captcha') return { captchaId: 'captcha-1', imageBase64: 'data:image/png;base64,AA==' }
     if (path === '/api/auth/email/send-code') return { ok: true, expireInSeconds: 300, cooldownSeconds: 60 }
     if (path === '/api/auth/account/email') return { user: verified }
     throw new Error('unexpected auth operation')
   })
-  mountApp('/administrator', legacyUser)
-  const background = screen.getByText('普通页面内容')
-  const notice = screen.getByRole('dialog', { name: '请先验证邮箱' })
-  expect(notice.hasAttribute('open')).toBe(true)
-  fireEvent.click(within(notice).getByRole('button', { name: '前往验证' }))
+  mountApp('/settings', legacyUser)
+  const background = screen.getByRole('heading', { name: '账号安全' })
+  expect(screen.queryByRole('dialog')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: /邮箱.*未验证/ }))
   const dialog = screen.getByRole('dialog', { name: '验证邮箱', exact: true })
   expect(dialog.hasAttribute('open')).toBe(true)
-  expect(screen.getByText('普通页面内容')).toBe(background)
+  expect(screen.getByRole('heading', { name: '账号安全' })).toBe(background)
+  const help = within(dialog).getByRole('link', { name: '帮助' })
+  expect(help.getAttribute('href')).toBe('/account/docs?doc=faq#doc-security')
+  expect(help.getAttribute('target')).toBe('_blank')
+  expect(within(dialog).queryByRole('link', { name: '找回密码' })).toBeNull()
+  expect(within(dialog).queryByRole('button', { name: '找回密码' })).toBeNull()
   const email = within(dialog).getByRole('textbox', { name: '邮箱' }) as HTMLInputElement
   expect(email.value).toBe(legacyUser.email)
   expect(document.activeElement).toBe(email)
@@ -224,39 +282,25 @@ it('verifies a stored email from an editable dialog over the ordinary page', asy
     method: 'POST', body: JSON.stringify({ email: legacyUser.email, purpose: 'bind', captchaId: 'captcha-1', captchaAnswer: 'AB12' }),
   })
   fireEvent.change(within(dialog).getByRole('textbox', { name: '验证码' }), { target: { value: '123456' } })
-  fireEvent.click(within(dialog).getByRole('button', { name: '验证并继续' }))
+  fireEvent.click(within(dialog).getByRole('button', { name: '验证并保存' }))
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
   expect(mocks.requestJson).toHaveBeenCalledWith('/api/auth/account/email', {
     method: 'POST', body: JSON.stringify({ email: legacyUser.email, code: '123456' }),
   })
-  expect(screen.getByText('普通页面内容')).toBe(background)
+  expect(screen.getByRole('heading', { name: '账号安全' })).toBe(background)
 })
 
-it('prioritizes mandatory binding, allows each setup skip, and gates only studio for unverified phone', async () => {
+it('allows each setup skip and requires only phone verification to enter studio', async () => {
   const user: User = { ...legacyUser, email: null, accountSetupStep: 1 }
-  const verified: User = { ...user, email: legacyUser.email, emailVerified: true, requiresEmailBinding: false }
   const steps = [2, 3, null] as const
   mocks.requestJson.mockImplementation(async (path, init) => {
+    if (path === '/api/auth/account/phone') return { user: { ...user, accountSetupStep: null, phoneVerified: true } }
     if (path !== '/api/auth/account/setup') throw new Error('unexpected auth operation')
     const { step, skip } = JSON.parse(init.body) as { step: number; skip: boolean }
     expect(skip).toBe(true)
-    return { user: { ...verified, accountSetupStep: steps[step - 1] } }
+    return { user: { ...user, accountSetupStep: steps[step - 1] } }
   })
   mountApp('/me', user)
-  const notice = screen.getByRole('dialog', { name: '请先绑定邮箱' })
-  expect(within(notice).getAllByRole('button')).toHaveLength(1)
-  const background = screen.getByText('个人中心内容')
-  expect(fireEvent(notice, new Event('cancel', { cancelable: true }))).toBe(false)
-  expect(screen.queryByRole('textbox', { name: '邮箱' })).toBeNull()
-  fireEvent.click(within(notice).getByRole('button', { name: '前往绑定' }))
-  const bindDialog = screen.getByRole('dialog', { name: '绑定邮箱', exact: true })
-  expect(bindDialog.hasAttribute('open')).toBe(true)
-  expect((within(bindDialog).getByRole('textbox', { name: '邮箱' }) as HTMLInputElement).value).toBe('')
-  expect(screen.getByText('个人中心内容')).toBe(background)
-  expect(screen.getByRole('link', { name: '帮助' })).toBeTruthy()
-  expect(screen.getByRole('button', { name: '退出登录' })).toBeTruthy()
-  expect(screen.queryByRole('button', { name: '跳过此步' })).toBeNull()
-  act(() => { useShellStore.setState({ sessionUser: verified }) })
   const setup = await screen.findByRole('dialog', { name: '验证手机号' })
   for (const heading of ['验证手机号', '设置登录密码', '完善个人资料']) {
     expect(await screen.findByRole('dialog', { name: heading })).toBe(setup)
@@ -274,8 +318,13 @@ it('prioritizes mandatory binding, allows each setup skip, and gates only studio
   expect(window.location.pathname).toBe('/me')
   expect(screen.queryByRole('dialog')).toBeNull()
   fireEvent.click(screen.getByRole('link', { name: '进入创作区' }))
-  await screen.findByRole('dialog', { name: '验证手机号' })
-  act(() => { useShellStore.setState({ sessionUser: { ...verified, accountSetupStep: null, phoneVerified: true } }) })
+  const verification = await screen.findByRole('dialog', { name: '验证手机号' })
+  fireEvent.change(within(verification).getByRole('textbox', { name: '手机号' }), { target: { value: '13800000000' } })
+  fireEvent.change(within(verification).getByRole('textbox', { name: '验证码' }), { target: { value: '123456' } })
+  fireEvent.click(within(verification).getByRole('button', { name: '验证并进入' }))
   expect(await screen.findByText('创作内容')).toBeTruthy()
   expect(screen.queryByRole('dialog')).toBeNull()
+  expect(mocks.requestJson).toHaveBeenCalledWith('/api/auth/account/phone', {
+    method: 'POST', body: JSON.stringify({ phone: '+8613800000000', code: '123456' }),
+  })
 })

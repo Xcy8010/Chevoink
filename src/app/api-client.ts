@@ -5,7 +5,7 @@ import { buildApiUrl } from './api-base'
 export const ACCOUNT_REQUIREMENT_EVENT = 'chevoink:account-requirement'
 
 export function notifyAccountRequirement(status: number, code?: string) {
-  const required = status === 403 && (code === 'AUTH_EMAIL_BIND_REQUIRED' || code === 'AUTH_PHONE_VERIFICATION_REQUIRED')
+  const required = status === 403 && code === 'AUTH_PHONE_VERIFICATION_REQUIRED'
   if (required && typeof window !== 'undefined') {
     window.dispatchEvent(new Event(ACCOUNT_REQUIREMENT_EVENT))
   }
