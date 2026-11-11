@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, expect, it, vi } from 'vitest'
 
 import PublishMetadataDialog from '@/features/studio/components/PublishMetadataDialog'
+import { isExplicitNovelMetadataRequest } from '../../api/lib/agent/task-spec.js'
 import { BOOTSTRAP_NOVEL_SUMMARY, getMissingNovelPublishFields } from '../../shared/contracts/novel-publish.js'
 import { mockNativeDialog } from '../helpers/test-native-dialog'
 
@@ -37,6 +38,9 @@ it('lists only the missing fields and lets the author copy a prompt or open its 
     fireEvent.click(help.getByRole('button', { name: '复制封面提示词' }))
     await waitFor(() => expect(help.getByRole('status').textContent).toBe('已复制封面提示词'))
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining('生成一张封面候选图'))
+    fireEvent.click(help.getByRole('button', { name: '复制标签提示词' }))
+    await waitFor(() => expect(help.getByRole('status').textContent).toBe('已复制标签提示词'))
+    expect(isExplicitNovelMetadataRequest(writeText.mock.lastCall?.[0])).toBe(true)
     fireEvent.click(help.getByRole('button', { name: '打开作品设置' }))
     expect(openPanel).toHaveBeenCalledWith('meta')
   } finally {

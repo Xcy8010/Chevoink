@@ -27,7 +27,7 @@ const GUIDANCE = {
     path: '作品设置 → 标签 → 保存作品设置',
     panel: 'meta',
     linkLabel: '打开作品设置',
-    prompt: '请从站内标签库选择符合当前作品题材和风格的标签，并保存。',
+    prompt: '请设置当前作品的标签，从站内标签库选择符合题材和风格的标签并保存。',
   },
 } as const
 
