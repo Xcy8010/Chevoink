@@ -1,6 +1,6 @@
 import { useId, useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Eye, EyeOff, Lock, Mail } from 'lucide-react'
+import { Eye, EyeOff, Lock, Mail, Smartphone } from 'lucide-react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 
 import Button from '@/components/ui/Button'
@@ -17,7 +17,7 @@ import type { AuthSessionPayload } from '../../../shared/contracts'
 type AuthMode = 'login' | 'register' | 'recovery'
 type LoginMethod = 'password' | 'code'
 
-export default function EmailAuthPage({ mode }: { mode: AuthMode }) {
+export default function EmailAuthPage({ mode, onClose }: { mode: AuthMode; onClose: () => void }) {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const queryClient = useQueryClient()
@@ -43,6 +43,7 @@ export default function EmailAuthPage({ mode }: { mode: AuthMode }) {
   const usesPassword = isRecovery || !usesCode
   const email = emailAddress(identifier)
   const phone = isRegister ? '' : mainlandPhone(identifier)
+  const showPhoneIcon = !isRegister && /^\+?[\d -]+$/.test(identifier.trim())
   const target = email || phone
   const policyQuery = useRegistrationPolicies()
   const policy = policyQuery.data?.legal
@@ -115,19 +116,14 @@ export default function EmailAuthPage({ mode }: { mode: AuthMode }) {
 
   if (isAuthenticated && !isRecovery) {
     return (
-      <section className="mx-auto w-full max-w-[420px] space-y-5 px-3 py-8 sm:px-7">
-        <h1 className="text-2xl font-semibold tracking-tight">你已经登录</h1>
+      <AccountDialog title="你已经登录" onClose={onClose}>
         <Button variant="primary" className="w-full" onClick={() => navigate(redirect, { replace: true })}>继续前往</Button>
-      </section>
+      </AccountDialog>
     )
   }
 
   return (
-    <section className="mx-auto w-full max-w-[440px] px-1 py-7 sm:rounded-3xl sm:border sm:border-[var(--border-subtle)] sm:bg-[var(--surface-default)] sm:px-7 sm:py-8">
-      <div className="mb-7 flex items-center gap-3">
-        <img src="/favicon.png" alt="" className="h-11 w-11 rounded-xl" />
-        <h1 className="text-2xl font-semibold tracking-tight">{isRegister ? '创建账户' : isRecovery ? '找回密码' : '登录启创墨域'}</h1>
-      </div>
+    <AccountDialog brand title={isRegister ? '创建账户' : isRecovery ? '找回密码' : '登录启创墨域'} onClose={() => { if (!submitting) onClose() }}>
       {mode === 'login' && <div className="mb-6 flex gap-5 border-b border-[var(--border-subtle)]" aria-label="登录方式">
         {(['password', 'code'] as const).map(item => (
           <button key={item} type="button" aria-pressed={item === method} disabled={submitting}
@@ -145,7 +141,16 @@ export default function EmailAuthPage({ mode }: { mode: AuthMode }) {
             id={identityId}
             type={isRegister ? 'email' : 'text'}
             autoComplete={isRegister ? 'email' : 'username'}
-            leading={<Mail aria-hidden="true" className="h-4 w-4 shrink-0" />}
+            placeholder={isRegister ? 'name@example.com' : '请输入您的邮箱或手机号'}
+            leading={
+              <span aria-hidden="true" className={cn(
+                'relative block size-4 shrink-0',
+                !isRegister && !identifier.trim() && 'account-identifier-cycle',
+              )}>
+                <Mail className={cn('absolute inset-0 size-4 motion-safe:transition-opacity', showPhoneIcon && 'opacity-0')} />
+                {!isRegister && <Smartphone className={cn('absolute inset-0 size-4 motion-safe:transition-opacity', !showPhoneIcon && 'opacity-0')} />}
+              </span>
+            }
             value={identifier}
             onChange={event => { setIdentifier(event.target.value); setCode(''); setError('') }}
             required
@@ -161,6 +166,7 @@ export default function EmailAuthPage({ mode }: { mode: AuthMode }) {
             id={passwordId}
             type={passwordVisible ? 'text' : 'password'}
             autoComplete={isRecovery ? 'new-password' : 'current-password'}
+            placeholder={isRecovery ? '请输入新密码' : '请输入您的密码'}
             leading={<Lock aria-hidden="true" className="h-4 w-4 shrink-0" />}
             trailing={<button type="button" aria-label={passwordVisible ? '隐藏密码' : '显示密码'} onClick={() => setPasswordVisible(value => !value)} className="rounded p-1 focus-visible:outline focus-visible:outline-2">
               {passwordVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
@@ -175,11 +181,11 @@ export default function EmailAuthPage({ mode }: { mode: AuthMode }) {
         </div>}
         {isRecovery && <label className="block space-y-1.5 text-sm font-medium">
           <span>再次输入新密码</span>
-          <TextInput wrapperAs="span" type="password" autoComplete="new-password" value={passwordConfirm} onChange={event => setPasswordConfirm(event.target.value)} required disabled={submitting} minLength={6} maxLength={128} />
+          <TextInput wrapperAs="span" type="password" autoComplete="new-password" placeholder="请再次输入新密码" value={passwordConfirm} onChange={event => setPasswordConfirm(event.target.value)} required disabled={submitting} minLength={6} maxLength={128} />
         </label>}
         {isRegister && (policy?.registrationAvailable && consentKey ? (
           <div className="flex items-start gap-2.5 text-sm leading-6">
-            <input type="checkbox" id="email-auth-policy" className="mt-1 shrink-0" checked={Boolean(legalConsent)}
+            <input type="checkbox" id="email-auth-policy" className="mt-1 size-4 shrink-0" checked={Boolean(legalConsent)}
               onChange={event => setAcceptedPolicy(event.target.checked ? consentKey : '')} aria-labelledby="email-auth-policy-label" />
             <span id="email-auth-policy-label"><label htmlFor="email-auth-policy">我已阅读并同意</label>{' '}
               <Link className="underline underline-offset-2" to="/legal?kind=terms" target="_blank">服务条款</Link> 与{' '}
@@ -209,6 +215,6 @@ export default function EmailAuthPage({ mode }: { mode: AuthMode }) {
         <p className="mt-4 text-sm leading-6 text-[var(--text-secondary)]">可使用有效的常见邮箱地址，例如 QQ 邮箱、网易邮箱、Outlook 或 Gmail。邮件能否送达取决于邮箱服务商及所在组织的过滤规则。</p>
         <Button variant="primary" className="mt-5 w-full" onClick={() => setCodeHelpOpen(false)}>知道了</Button>
       </AccountDialog>}
-    </section>
+    </AccountDialog>
   )
 }

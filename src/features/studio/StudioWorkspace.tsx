@@ -5,14 +5,14 @@ import { hasComposerDraft, promoteComposerDraft } from './agent/composer-drafts'
 import { workspaceBodyChanges } from './agent/workspace-body-changes'
 import { shouldRetainAgentTaskWindow } from './lib/agent-session'
 import { useShellStore } from '@/store/useShellStore'
-import { BookOpen, BookOpenText, Brain, Bug, FileText, Flag, FolderDown, ImagePlus, Lightbulb, LogOut, MessageSquareText, Network, PanelRightOpen, PenLine, RefreshCcw, Settings2, SlidersHorizontal, Trash2, Upload, Wrench } from 'lucide-react'
+import { BookOpen, BookOpenText, Brain, Bug, FileText, Flag, FolderDown, ImagePlus, Lightbulb, LogOut, MessageSquareText, Network, PanelRightOpen, PenLine, Settings2, SlidersHorizontal, Trash2, Upload, Wrench } from 'lucide-react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { plainChapterTitle } from '../../../shared/structure/chapter-title'
 
-import Button from '@/components/ui/Button'
 import Surface from '@/components/ui/Surface'
 import { useToast } from '@/components/ui/toast-context'
 import { ApiClientError } from '@/app/api-client'
+import StudioOpenError from '@/features/studio/components/StudioOpenError'
 import { useAutoHideScrollbars } from '@/hooks/useAutoHideScrollbars'
 import { updateShelfCover } from '@/features/home/local-shelf'
 import FeedbackDialog from '@/features/feedback/components/FeedbackDialog'
@@ -3665,22 +3665,7 @@ export default function StudioWorkspace() {
   })
 
   if (studioQuery.isError) {
-    return (
-      <Surface as="section" padding="lg" className="space-y-4">
-        <div className="space-y-2">
-          <h2 className="text-lg font-semibold tracking-tight text-[var(--text-primary)]">
-            创作中心暂时无法打开
-          </h2>
-          <p className="text-sm leading-7 text-[var(--text-secondary)]">
-            {studioQuery.error instanceof Error ? studioQuery.error.message : '请稍后重试。'}
-          </p>
-        </div>
-        <Button onClick={() => studioQuery.refetch()} variant="secondary">
-          <RefreshCcw className="h-4 w-4" />
-          重新连接
-        </Button>
-      </Surface>
-    )
+    return <StudioOpenError error={studioQuery.error} retry={() => { void studioQuery.refetch() }} />
   }
 
   if (studioQuery.isLoading || !novelForm || !projectNotes || !coverForm || !currentNovel) {

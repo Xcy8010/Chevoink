@@ -1,10 +1,12 @@
-import { Suspense } from 'react'
-import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { Suspense, useLayoutEffect, useRef } from 'react'
+import { BrowserRouter, Route, Routes, useLocation, useNavigate, type Location } from 'react-router-dom'
 
 import { appRoutes } from '@/app/route-config'
 import AccountAccessGate from '@/app/routes/AccountAccessGate'
+import AuthPage from '@/app/routes/AuthPage'
 import AppShell from '@/components/layout/AppShell'
 import { Skeleton, SkeletonText } from '@/components/ui/Skeleton'
+import { useShellStore } from '@/store/useShellStore'
 
 /** 未指定专属骨架的懒加载路由通用占位 */
 const defaultRouteFallback = (
@@ -15,10 +17,27 @@ const defaultRouteFallback = (
   </div>
 )
 
-export default function AppRouter() {
+function AppRoutes() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const previousPage = useRef<Location | null>(null)
+  const path = location.pathname.toLowerCase().replace(/\/+$/, '')
+  const authMode = path === '/login' ? 'login' : path === '/register' ? 'register' : undefined
+  const needsVerifiedPhone = useShellStore(state => state.authStatus === 'authenticated'
+    && state.sessionUser?.emailAuthEnabled === true && !state.sessionUser.phoneVerified)
+  const studioPhoneRequired = needsVerifiedPhone && (path === '/studio' || path.startsWith('/studio/'))
+  const hasOverlay = Boolean(authMode || studioPhoneRequired)
+  useLayoutEffect(() => {
+    if (!hasOverlay && path !== '/create' && !/^\/admin(?:\/|$)/.test(path)) previousPage.current = location
+  }, [hasOverlay, location, path])
+  const previous = previousPage.current
+  const canShowPrevious = previous && !(studioPhoneRequired && /^\/studio(?:\/|$)/i.test(previous.pathname))
+  const background = hasOverlay ? (canShowPrevious ? previous : '/') : location
+  const closeOverlay = () => navigate(background, { replace: true })
+
   return (
-    <BrowserRouter>
-      <AccountAccessGate><Routes>
+    <AccountAccessGate studioPhoneRequired={studioPhoneRequired} closeStudioGate={closeOverlay}>
+      <Routes location={background}>
         {appRoutes.map((route) => (
           <Route
             key={route.path}
@@ -35,7 +54,12 @@ export default function AppRouter() {
             }
           />
         ))}
-      </Routes></AccountAccessGate>
-    </BrowserRouter>
+      </Routes>
+      {authMode && <AuthPage mode={authMode} onClose={closeOverlay} />}
+    </AccountAccessGate>
   )
+}
+
+export default function AppRouter() {
+  return <BrowserRouter><AppRoutes /></BrowserRouter>
 }

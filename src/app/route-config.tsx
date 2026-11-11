@@ -1,7 +1,6 @@
 import { lazy, type ComponentType, type ReactElement } from 'react'
 import { Navigate } from 'react-router-dom'
 
-import AuthPage from '@/app/routes/AuthPage'
 import NotFoundPage from '@/app/routes/NotFoundPage'
 import RequireAuthRoute from '@/app/routes/RequireAuthRoute'
 import AdminLayout from '@/features/admin/AdminLayout'
@@ -341,18 +340,6 @@ export const appRoutes: AppRouteDefinition[] = [
       </RequireAuthRoute>
     ),
     useShell: false,
-  },
-  {
-    path: '/login',
-    title: '登录启创墨域，继续你的阅读和创作',
-    description: '回到书架、草稿和互动记录，把上一次停下的地方接起来。',
-    element: <AuthPage mode="login" />,
-  },
-  {
-    path: '/register',
-    title: '创建你的启创墨域账户，开始写作和阅读',
-    description: '注册后即可收藏作品、发布内容，并把灵感整理成自己的小说。',
-    element: <AuthPage mode="register" />,
   },
   {
     path: '/create',

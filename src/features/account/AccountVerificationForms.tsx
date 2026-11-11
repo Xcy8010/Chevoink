@@ -1,4 +1,5 @@
 import { useId, useState, type FormEvent } from 'react'
+import { Mail, Smartphone } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
 import TextInput from '@/components/ui/TextInput'
@@ -58,6 +59,8 @@ export function IdentityVerificationForm({ kind, submitLabel, onSaved, onSaving,
           id={inputId}
           type={isEmail ? 'email' : 'tel'}
           autoComplete={isEmail ? 'email' : 'tel'}
+          placeholder={isEmail ? 'name@example.com' : '请输入您的手机号'}
+          leading={isEmail ? <Mail aria-hidden="true" className="size-4 shrink-0" /> : <Smartphone aria-hidden="true" className="size-4 shrink-0" />}
           value={value}
           onChange={event => { setValue(event.target.value); setCode(''); setError('') }}
           maxLength={isEmail ? 254 : 25}
@@ -148,11 +151,13 @@ export function PasswordVerificationForm({ user, onSaved, onSaving, disabled }: 
       <div className="space-y-1.5">
         <label className="block text-sm font-medium" htmlFor={passwordId}>新登录密码</label>
         <TextInput wrapperAs="span" id={passwordId} type="password" autoComplete="new-password" minLength={6} maxLength={128}
+          placeholder="请输入新密码"
           value={password} onChange={event => setPassword(event.target.value)} disabled={saving || disabled} required />
       </div>
       <div className="space-y-1.5">
         <label className="block text-sm font-medium" htmlFor={confirmationId}>再次输入新密码</label>
         <TextInput wrapperAs="span" id={confirmationId} type="password" autoComplete="new-password" minLength={6} maxLength={128}
+          placeholder="请再次输入新密码"
           value={confirmation} onChange={event => setConfirmation(event.target.value)} disabled={saving || disabled} required />
       </div>
       {error && <p role="alert" className="text-sm leading-6 text-[var(--color-danger,#dc2626)]">{error}</p>}

@@ -12,14 +12,13 @@ import { hydrateReadingSync } from '@/features/home/reading-sync'
 import { useShellStore } from '@/store/useShellStore'
 import type { User } from '../../../shared/contracts'
 
-function AccountScreen({ title, description, step, children }: { title: string; description?: string; step?: number; children: ReactNode }) {
+function AccountScreen({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
   const headingRef = useRef<HTMLHeadingElement>(null)
   useEffect(() => headingRef.current?.focus({ preventScroll: true }), [title])
   return (
     <main className="min-h-dvh bg-[var(--app-bg)] px-5 pb-10 pt-[max(2rem,var(--safe-top,0px))] text-[var(--text-primary)] sm:px-8 sm:pt-16">
       <section className="mx-auto w-full max-w-[430px] sm:rounded-3xl sm:border sm:border-[var(--border-subtle)] sm:bg-[var(--surface-default)] sm:p-8">
         <header className="mb-6 space-y-2">
-          {step && <p className="text-xs font-medium tabular-nums text-[var(--text-secondary)]">第 {step} 步，共 3 步</p>}
           <h1 ref={headingRef} tabIndex={-1} className="text-2xl font-semibold tracking-tight outline-none">{title}</h1>
           {description && <p className="text-sm leading-6 text-[var(--text-secondary)]">{description}</p>}
         </header>
@@ -89,7 +88,7 @@ function BindRequired({ returnPath }: { returnPath: string }) {
   )
 }
 
-function AccountSetup({ user, step }: { user: User; step: 1 | 2 | 3 }) {
+function AccountSetupStep({ user, step }: { user: User; step: 1 | 2 | 3 }) {
   const [pending, setPending] = useState(false)
   const [formSaving, setFormSaving] = useState(false)
   const [error, setError] = useState('')
@@ -97,7 +96,6 @@ function AccountSetup({ user, step }: { user: User; step: 1 | 2 | 3 }) {
   const isPhone = step === 1
   const isPassword = step === 2
   const fulfilled = isPhone ? user.phoneVerified : isPassword ? user.hasPassword ?? user.passwordConfigured : false
-  const title = isPhone ? '验证手机号' : isPassword ? '设置登录密码' : '完善个人资料'
 
   async function finish(skip: boolean) {
     if (pending || (skip && formSaving)) return
@@ -115,7 +113,7 @@ function AccountSetup({ user, step }: { user: User; step: 1 | 2 | 3 }) {
 
   const onSaved = () => { void finish(false) }
   return (
-    <AccountScreen title={title} step={step} description={isPhone ? '创作区需要已验证的手机号。' : undefined}>
+    <>
       {fulfilled ? <Button variant="primary" className="w-full" disabled={pending} onClick={onSaved}>{pending ? '提交中…' : '继续'}</Button>
         : isPhone ? <IdentityVerificationForm kind="phone" submitLabel="验证并继续" disabled={pending} onSaving={setFormSaving} onSaved={onSaved} />
           : isPassword ? <PasswordVerificationForm user={user} disabled={pending} onSaving={setFormSaving} onSaved={onSaved} />
@@ -125,11 +123,15 @@ function AccountSetup({ user, step }: { user: User; step: 1 | 2 | 3 }) {
         <Button variant="ghost" disabled={pending || formSaving} onClick={() => void finish(true)}>跳过此步</Button>
         <SignOutLink />
       </div>
-    </AccountScreen>
+    </>
   )
 }
 
-export default function AccountAccessGate({ children }: { children: ReactNode }) {
+export default function AccountAccessGate({ children, studioPhoneRequired, closeStudioGate }: {
+  children: ReactNode
+  studioPhoneRequired: boolean
+  closeStudioGate: () => void
+}) {
   const { pathname, search } = useLocation()
   const user = useShellStore(state => state.sessionUser)
   const authenticated = useShellStore(state => state.authStatus === 'authenticated')
@@ -138,13 +140,26 @@ export default function AccountAccessGate({ children }: { children: ReactNode })
   const recovery = pathname === '/login' && new URLSearchParams(search).get('recovery') === '1'
   if (pathname === '/account/docs' || pathname === '/legal' || recovery) return <>{children}</>
   if (user.requiresEmailBinding) return <BindRequired key={user.id} returnPath={pathname + search} />
-  if (user.accountSetupStep) return <AccountSetup key={user.id + ':' + user.accountSetupStep} user={user} step={user.accountSetupStep} />
-  if ((pathname === '/studio' || pathname.startsWith('/studio/')) && !user.phoneVerified) {
+  if (user.accountSetupStep && !/^\/(?:login|register)\/?$/i.test(pathname)) {
+    const step = user.accountSetupStep
+    const title = step === 1 ? '验证手机号' : step === 2 ? '设置登录密码' : '完善个人资料'
     return (
-      <AccountScreen title="进入创作区前验证手机" description="验证后会继续打开创作区。">
-        <IdentityVerificationForm key={user.id} kind="phone" submitLabel="验证并进入" onSaved={() => {}} />
-        <Link to="/me" className="mt-5 block w-fit text-sm text-[var(--color-brand)]">返回个人中心</Link>
-      </AccountScreen>
+      <>
+        {children}
+        <AccountDialog key={user.id} title={title} step={step} description={step === 1 ? '创作区需要已验证的手机号。' : undefined}>
+          <AccountSetupStep user={user} step={step} />
+        </AccountDialog>
+      </>
+    )
+  }
+  if (studioPhoneRequired) {
+    return (
+      <>
+        {children}
+        <AccountDialog title="验证手机号" description="验证后会继续打开创作区。" onClose={closeStudioGate}>
+          <IdentityVerificationForm key={user.id} kind="phone" submitLabel="验证并进入" onSaved={() => {}} />
+        </AccountDialog>
+      </>
     )
   }
   return <>{children}</>

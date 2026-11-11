@@ -48,14 +48,14 @@ export default function AppState({
     <section
       className={cn('flex min-h-[220px] items-center justify-center p-4 text-center md:min-h-[280px] md:p-5', className)}
     >
-      <div className="mx-auto flex max-w-xl flex-col items-center">
+      <div className={cn('mx-auto flex max-w-xl flex-col items-center', tone === 'error' && 'max-w-sm')}>
         {icon ?? <span className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--text-tertiary)]">
-          <Icon className={cn('h-5 w-5', tone === 'loading' && 'animate-spin')} />
+          <Icon aria-hidden="true" className={cn('h-5 w-5', tone === 'loading' && 'motion-safe:animate-spin')} />
         </span>}
         {eyebrow ? (
           <p className="mt-4 text-xs font-medium text-[var(--text-tertiary)]">{eyebrow}</p>
         ) : null}
-        <h2 className="mt-3 text-base font-medium text-[var(--text-primary)]">{title}</h2>
+        <h2 className={cn('mt-3 text-base font-medium text-[var(--text-primary)]', tone === 'error' && 'text-lg font-semibold tracking-tight')}>{title}</h2>
         {description ? <p className="mt-1.5 text-sm leading-6 text-[var(--text-tertiary)]">{description}</p> : null}
         {details ? <div className="mt-4 w-full text-left text-sm leading-6 text-[var(--text-secondary)]">{details}</div> : null}
         {primaryAction || secondaryAction ? (

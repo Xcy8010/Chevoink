@@ -113,11 +113,11 @@ export default function ProfileSetupForm({ user, disabled, onSaved, onSaving }: 
       </div>
       <div className="space-y-1.5">
         <label htmlFor={nicknameId} className="block text-sm font-medium">昵称</label>
-        <TextInput wrapperAs="span" id={nicknameId} value={nickname} maxLength={30} required disabled={busy} onChange={event => setNickname(event.target.value)} />
+        <TextInput wrapperAs="span" id={nicknameId} placeholder="请输入昵称" value={nickname} maxLength={30} required disabled={busy} onChange={event => setNickname(event.target.value)} />
       </div>
       <div className="space-y-1.5">
         <label htmlFor={bioId} className="block text-sm font-medium">简介</label>
-        <textarea id={bioId} value={bio} maxLength={80} rows={3} disabled={busy} onChange={event => setBio(event.target.value)}
+        <textarea id={bioId} placeholder="写一句话介绍自己" value={bio} maxLength={80} rows={3} disabled={busy} onChange={event => setBio(event.target.value)}
           className="w-full resize-y rounded-xl border border-[var(--border-strong)] bg-[var(--surface-default)] px-4 py-3 text-sm" />
       </div>
       {error && <p role="alert" className="text-sm leading-6 text-[var(--color-danger,#dc2626)]">{error}</p>}

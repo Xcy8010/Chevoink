@@ -13,7 +13,7 @@ import { brandMeta } from '@/lib/theme/tokens'
 import { cn } from '@/lib/utils'
 import { useShellStore } from '@/store/useShellStore'
 import { useToast } from '@/components/ui/toast-context'
-import AppState from '@/components/ui/AppState'
+import { AccountDialog } from '@/features/account/VerificationCodeField'
 import EmailAuthPage from './EmailAuthPage'
 import type {
   AuthSessionPayload,
@@ -92,7 +92,7 @@ function normalizeRedirectPath(input: string | null): string {
  * - 平板/电脑端居中卡片（max-w 420px），同一套表单自适应
  * - 密码框带眼睛按钮切换明文，默认隐藏
  */
-export default function AuthPage({ mode }: AuthPageProps) {
+export default function AuthPage({ mode, onClose }: AuthPageProps & { onClose: () => void }) {
   const [params] = useSearchParams()
   const options = useQuery({
     queryKey: ['auth', 'options'],
@@ -100,15 +100,23 @@ export default function AuthPage({ mode }: AuthPageProps) {
     retry: false,
     staleTime: 0,
   })
-  if (options.isPending) return <AppState tone="loading" title="正在读取登录方式" />
+  if (options.isPending) return <AccountDialog title={mode === 'login' ? '登录启创墨域' : '创建账户'} onClose={onClose}>
+    <p role="status" className="text-sm text-[var(--text-secondary)]">正在读取登录方式…</p>
+  </AccountDialog>
   if (options.isError && !(options.error instanceof ApiClientError && options.error.status === 404)) {
-    return <AppState tone="error" title="暂时无法读取登录方式" primaryAction={{ label: '重试', onClick: () => { void options.refetch() } }} />
+    return <AccountDialog title="暂时无法读取登录方式" onClose={onClose}>
+      <Button className="w-full" onClick={() => { void options.refetch() }}>重试</Button>
+    </AccountDialog>
   }
   if (options.data?.emailAuthEnabled) {
     const nextMode = mode === 'login' && params.get('recovery') === '1' ? 'recovery' : mode
-    return <EmailAuthPage key={nextMode} mode={nextMode} />
+    return <EmailAuthPage key={nextMode} mode={nextMode} onClose={onClose} />
   }
-  return <LegacyAuthPage key={mode} mode={mode} />
+  return (
+    <AccountDialog title={mode === 'login' ? '登录启创墨域' : '创建账户'} onClose={onClose}>
+      <LegacyAuthPage key={mode} mode={mode} />
+    </AccountDialog>
+  )
 }
 
 function LegacyAuthPage({ mode }: AuthPageProps) {
@@ -322,7 +330,7 @@ function LegacyAuthPage({ mode }: AuthPageProps) {
 
   if (isAuthenticated) {
     return (
-      <section className="mx-auto flex w-full max-w-[420px] flex-col items-center px-4 pt-10 text-center md:pt-16">
+      <section className="flex w-full flex-col items-center text-center">
         <span className="inline-flex h-16 w-16 items-center justify-center overflow-hidden rounded-full border border-[var(--border-subtle)] bg-[var(--surface-default)]">
           <AppImage src="/favicon.png" alt={`${brandMeta.productName} Logo`} className="h-full w-full" priority />
         </span>
@@ -350,25 +358,7 @@ function LegacyAuthPage({ mode }: AuthPageProps) {
 
   return (
     <div className="flex justify-center">
-      {/* 手机端全出血；md 起收成一张居中卡片，宽度对手机/平板/电脑分别自适应 */}
-      <section className="w-full max-w-[420px] px-1 pt-6 md:rounded-[28px] md:border md:border-[var(--border-subtle)] md:bg-[var(--surface-default)] md:px-8 md:py-9 md:shadow-[var(--shadow-card)]">
-        {/* 品牌问候区：头像 + 点击登录/注册（参考主流阅读 App 未登录个人中心） */}
-        <div className="flex items-center gap-4">
-          <span className="relative inline-flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-full border border-[var(--border-subtle)] bg-[var(--surface-muted)]">
-            <AppImage src="/favicon.png" alt={`${brandMeta.productName} Logo`} className="h-full w-full" priority />
-          </span>
-          <div className="min-w-0">
-            <h1 className="text-xl font-semibold tracking-tight text-[var(--text-primary)]">
-              {isRegisterPage ? '创建账户' : '点击登录/注册'}
-            </h1>
-            <p className="mt-1 text-sm text-[var(--text-tertiary)]">
-              {isRegisterPage
-                ? '注册后即可收藏作品、发布内容和创作小说'
-                : '登录后书架、草稿和互动记录都会同步保留'}
-            </p>
-          </div>
-        </div>
-
+      <section className="w-full">
         {/* 登录方式切换：X 风格文字 Tab + 下划线，注册页固定验证码流程 */}
         {!isRegisterPage ? (
           <div className="mt-7 flex border-b border-[var(--border-subtle)]">
@@ -542,24 +532,20 @@ function LegacyAuthPage({ mode }: AuthPageProps) {
       </section>
 
       {captchaDialogVisible ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
-          <div className="w-full max-w-[440px] rounded-[var(--radius-lg)] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-5 shadow-xl">
-            <div className="space-y-2">
-              <h3 className="text-lg font-semibold text-[var(--text-primary)]">完成人机验证</h3>
-              <p className="text-sm leading-6 text-[var(--text-secondary)]">请输入图片中的数字和字母，验证通过后才会发送短信验证码。</p>
-            </div>
-
+        <AccountDialog title="完成人机验证" description="请输入图片中的数字和字母，验证通过后才会发送短信验证码。">
             <div className="mt-4 space-y-3">
-              <div className="flex items-center gap-3">
+              <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                <div className="grid aspect-[140/52] place-items-center overflow-hidden rounded-lg bg-[var(--surface-muted)]">
                 {loadingCaptcha ? (
-                  <span className="inline-flex h-[64px] min-w-[168px] items-center text-sm text-[var(--text-secondary)]">加载中…</span>
+                  <span className="text-sm text-[var(--text-secondary)]">加载中…</span>
                 ) : captchaImageBase64 ? (
-                  <img src={captchaImageBase64} alt="图形验证码" className="h-[64px] w-[168px] object-contain" />
+                  <img src={captchaImageBase64} alt="图形验证码" className="block h-full w-full object-contain" />
                 ) : (
-                  <span className="inline-flex h-[64px] min-w-[168px] items-center text-sm text-[var(--text-secondary)]">请刷新验证码</span>
+                  <span className="text-sm text-[var(--text-secondary)]">请刷新验证码</span>
                 )}
-                <Button type="button" variant="secondary" onClick={() => void refreshCaptcha()} disabled={loadingCaptcha}>
-                  刷新验证码
+                </div>
+                <Button type="button" variant="ghost" size="sm" onClick={() => void refreshCaptcha()} disabled={loadingCaptcha}>
+                  刷新
                 </Button>
               </div>
 
@@ -602,8 +588,7 @@ function LegacyAuthPage({ mode }: AuthPageProps) {
                 {sendingCode ? '发送中…' : '确认并发送'}
               </Button>
             </div>
-          </div>
-        </div>
+        </AccountDialog>
       ) : null}
     </div>
   )

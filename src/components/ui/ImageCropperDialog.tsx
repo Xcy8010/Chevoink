@@ -35,6 +35,7 @@ export default function ImageCropperDialog({
   onCancel,
   onConfirm,
 }: ImageCropperDialogProps) {
+  const dialogRef = useRef<HTMLDialogElement | null>(null)
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const imageRef = useRef<HTMLImageElement | null>(null)
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; baseX: number; baseY: number } | null>(null)
@@ -43,6 +44,13 @@ export default function ImageCropperDialog({
   const [viewportWidth, setViewportWidth] = useState(0)
   const [zoom, setZoom] = useState(1)
   const [offset, setOffset] = useState({ x: 0, y: 0 })
+
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current
+    if (!dialog) return
+    dialog.showModal()
+    return () => dialog.close()
+  }, [open, imageDataUrl])
 
   // 缓存命中时图片可能已完成解码，此时直接读取尺寸。
   useLayoutEffect(() => {
@@ -69,7 +77,7 @@ export default function ImageCropperDialog({
     measure()
     window.addEventListener('resize', measure)
     return () => window.removeEventListener('resize', measure)
-  }, [open])
+  }, [open, imageDataUrl])
 
   const viewportHeight = viewportWidth > 0 ? viewportWidth / aspect : 0
 
@@ -159,8 +167,12 @@ export default function ImageCropperDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex min-h-0 items-center justify-center overflow-hidden bg-black/45 p-4 backdrop-blur-[2px]" role="dialog" aria-modal="true" aria-label={title}>
-      <div className="flex max-h-[calc(100dvh-2rem)] min-h-0 w-full max-w-[640px] flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-0 shadow-[var(--shadow-modal)] sm:max-h-[calc(100dvh-3rem)] sm:p-6">
+    <dialog ref={dialogRef} aria-label={title} onCancel={event => {
+      event.preventDefault()
+      event.stopPropagation()
+      if (!submitting) onCancel()
+    }} className="fixed inset-0 m-auto w-[calc(100%-2rem)] max-w-[640px] overflow-hidden rounded-[var(--radius-xl)] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-0 text-[var(--text-primary)] shadow-[var(--shadow-modal)] backdrop:bg-black/45 backdrop:backdrop-blur-[2px]">
+      <div className="flex max-h-[calc(100dvh-2rem)] min-h-0 flex-col overflow-hidden sm:max-h-[calc(100dvh-3rem)] sm:p-6">
         <div className="flex shrink-0 items-start justify-between gap-4 px-5 pt-5 sm:px-0 sm:pt-0">
           <div className="space-y-1">
             <h3 className="text-lg font-semibold text-[var(--text-primary)]">{title}</h3>
@@ -228,6 +240,6 @@ export default function ImageCropperDialog({
         </div>
         </div>
       </div>
-    </div>
+    </dialog>
   )
 }

@@ -1,47 +1,72 @@
-import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { RotateCw, X } from 'lucide-react'
 
 import { ApiClientError, requestJson } from '@/app/api-client'
 import Button from '@/components/ui/Button'
 import TextInput from '@/components/ui/TextInput'
+import { cn } from '@/lib/utils'
 import { authError, type CaptchaAnswer, type CodeReceipt } from './auth-api'
 
 type Captcha = { captchaId: string; imageBase64: string }
 
-export function AccountDialog({ title, children, onClose }: {
+export function AccountDialog({ title, description, step, brand, children, onClose }: {
   title: string
-  children: React.ReactNode
+  description?: string
+  step?: 1 | 2 | 3
+  brand?: boolean
+  children: ReactNode
   onClose?: () => void
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null)
   const titleId = useId()
+  const descriptionId = useId()
   useEffect(() => {
     const dialog = dialogRef.current
     const previousFocus = document.activeElement
     dialog?.showModal()
-    dialog?.querySelector<HTMLElement>('input:not([type="file"])')?.focus()
     return () => {
       dialog?.close()
       if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus({ preventScroll: true })
     }
   }, [])
+  useEffect(() => {
+    const dialog = dialogRef.current
+    const field = step ? undefined : dialog?.querySelector<HTMLElement>('input:not([type="file"])')
+    const focusTarget = field ?? dialog?.querySelector('h2')
+    focusTarget?.focus({ preventScroll: true })
+  }, [step])
 
   return createPortal(
     <dialog
       ref={dialogRef}
       aria-labelledby={titleId}
-      onCancel={event => { event.preventDefault(); onClose?.() }}
-      className="animate-fade-in-up motion-reduce:!animate-none fixed inset-0 m-auto w-[calc(100%-2rem)] max-w-[420px] overflow-hidden rounded-3xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-0 text-[var(--text-primary)] shadow-xl backdrop:bg-black/50"
+      aria-describedby={description ? descriptionId : undefined}
+      onCancel={event => { event.preventDefault(); event.stopPropagation(); onClose?.() }}
+      className={cn(
+        'account-dialog fixed inset-0 m-auto w-[calc(100%-2rem)] overflow-hidden rounded-3xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-0 text-[var(--text-primary)] shadow-xl backdrop:bg-black/45',
+        step ? 'max-w-[480px] md:max-w-[50rem]' : 'max-w-[440px]',
+      )}
     >
-      <div className="max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain px-5 py-5 sm:px-6">
-        <header className="mb-5 flex items-center justify-between gap-3">
-          <h2 id={titleId} className="text-lg font-semibold tracking-tight">{title}</h2>
-          {onClose && <Button variant="ghost" size="sm" className="w-9 shrink-0 px-0" aria-label="关闭" onClick={onClose}>
-            <X aria-hidden="true" className="h-4 w-4" />
-          </Button>}
+      <div key={step} className={cn(
+        'max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain px-5 py-5 sm:px-7 sm:py-6',
+        step && 'account-dialog-step md:grid md:min-h-[min(27rem,calc(100dvh-2rem))] md:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] md:items-start md:gap-12 md:p-10',
+      )}>
+        <header className={cn('mb-5', step && 'md:mb-0')}>
+          {step && <p className="mb-3 text-xs font-medium tabular-nums text-[var(--text-secondary)]">第 {step} 步，共 3 步</p>}
+          <div className="flex items-center gap-3">
+            {brand && <img src="/favicon.png" alt="" className="h-10 w-10 shrink-0 rounded-xl" />}
+            <h2 id={titleId} tabIndex={-1} className={cn(
+              'min-w-0 flex-1 font-semibold tracking-tight outline-none',
+              step ? 'text-2xl md:text-3xl' : brand ? 'text-xl' : 'text-lg',
+            )}>{title}</h2>
+            {onClose && <Button variant="ghost" size="sm" className="w-9 shrink-0 px-0" aria-label="关闭" onClick={onClose}>
+              <X aria-hidden="true" className="h-4 w-4" />
+            </Button>}
+          </div>
+          {description && <p id={descriptionId} className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">{description}</p>}
         </header>
-        {children}
+        <div className="min-w-0">{children}</div>
       </div>
     </dialog>,
     document.body,
@@ -94,16 +119,18 @@ function CaptchaPrompt({ onSend, onDone, onClose }: {
   return (
     <AccountDialog title="完成人机验证" onClose={() => { if (!sending) onClose() }}>
       <form className="space-y-4" onSubmit={event => void submit(event)}>
-        <div className="flex items-center gap-3">
-          {loading ? <span className="flex h-14 w-36 items-center text-sm text-[var(--text-secondary)]">加载中…</span>
-            : captcha ? <img className="h-14 w-36 object-contain" src={captcha.imageBase64} alt="图形验证码" />
-              : <span className="flex h-14 w-36 items-center text-sm text-[var(--text-secondary)]">请刷新验证码</span>}
+        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 sm:gap-3">
+          <div className="grid aspect-[140/52] place-items-center overflow-hidden rounded-lg bg-[var(--surface-muted)]">
+            {loading ? <span className="text-sm text-[var(--text-secondary)]">加载中…</span>
+              : captcha ? <img className="block h-full w-full object-contain" src={captcha.imageBase64} alt="图形验证码" />
+                : <span className="text-sm text-[var(--text-secondary)]">请刷新验证码</span>}
+          </div>
           <Button size="sm" variant="ghost" disabled={loading || sending} onClick={() => { setError(''); void refresh() }}>
             <RotateCw aria-hidden="true" className="h-3.5 w-3.5" /> 刷新
           </Button>
         </div>
         <label htmlFor={answerId} className="block text-sm font-medium">图中的数字和字母</label>
-        <TextInput wrapperAs="span" id={answerId} autoComplete="off" required maxLength={4} value={answer} onChange={event => setAnswer(event.target.value)} />
+        <TextInput wrapperAs="span" id={answerId} autoComplete="off" placeholder="请输入图中的字符" required maxLength={4} value={answer} onChange={event => setAnswer(event.target.value)} />
         {error && <p role="alert" className="text-sm text-[var(--color-danger,#dc2626)]">{error}</p>}
         <Button type="submit" variant="primary" className="w-full" disabled={!captcha || !answer.trim() || loading || sending}>
           {sending ? '发送中…' : '确认并发送'}

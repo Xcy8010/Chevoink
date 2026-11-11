@@ -506,6 +506,40 @@ body.autohide-scrollbars *:not([data-scrolling='true'])::-webkit-scrollbar-thumb
   animation: fade-in-up var(--duration-normal) var(--easing-default) both;
 }
 
+@media (prefers-reduced-motion: no-preference) {
+  .account-dialog[open] {
+    animation: account-dialog-in 230ms cubic-bezier(0.2, 0.75, 0.3, 1) both;
+  }
+
+  .account-dialog[open]::backdrop {
+    animation: fade-in 180ms ease-out both;
+  }
+
+  .account-dialog-step {
+    animation: fade-in-up 210ms cubic-bezier(0.2, 0.75, 0.3, 1) both;
+  }
+
+  .account-identifier-cycle > svg {
+    animation: account-identifier-in 6s ease-in-out infinite;
+  }
+
+  .account-identifier-cycle > svg + svg {
+    animation-delay: -3s;
+  }
+}
+
+@keyframes account-dialog-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes account-identifier-in {
+  0%, 38% { opacity: 1; transform: translateY(0); }
+  47%, 89% { opacity: 0; transform: translateY(-3px); }
+  90% { opacity: 0; transform: translateY(3px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
 .animate-fade-in {
   animation: fade-in var(--duration-normal) var(--easing-default) both;
 }

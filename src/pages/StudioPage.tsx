@@ -2,10 +2,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
-import AppState from '@/components/ui/AppState'
 import { StudioSkeleton } from '@/components/ui/Skeleton'
 import { getMe } from '@/features/community/api'
 import { createNovelWorkspace } from '@/features/studio/api'
+import StudioOpenError from '@/features/studio/components/StudioOpenError'
 import StudioWorkspace from '@/features/studio/StudioWorkspace'
 import type { Novel, UserMePayload } from '../../shared/contracts/index.js'
 
@@ -115,40 +115,20 @@ export default function StudioPage() {
 
   if (meQuery.isError) {
     return (
-      <AppState
-        tone="error"
-        title="创作中心暂时无法打开"
-        description={
-          (meQuery.error instanceof Error && meQuery.error.message) ||
-          '请稍后重试。'
-        }
-        primaryAction={{
-          label: '重新连接',
-          onClick: () => {
-            void meQuery.refetch()
-          },
-        }}
-        className="min-h-[360px]"
-      />
+      <StudioOpenError error={meQuery.error} retry={() => { void meQuery.refetch() }} />
     )
   }
 
   if (createNovelMutation.isError) {
     return (
-      <AppState
-        tone="error"
+      <StudioOpenError
+        error={createNovelMutation.error}
         title="新建作品暂时失败"
-        description={
-          createNovelMutation.error instanceof Error ? createNovelMutation.error.message : '请稍后重试。'
-        }
-        primaryAction={{
-          label: '重新创建',
-          onClick: () => {
-            createNovelMutation.reset()
-            createNovelMutation.mutate()
-          },
+        retryLabel="重新创建"
+        retry={() => {
+          createNovelMutation.reset()
+          createNovelMutation.mutate()
         }}
-        className="min-h-[360px]"
       />
     )
   }
