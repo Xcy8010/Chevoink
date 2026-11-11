@@ -5,7 +5,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import AuthPage from '../../src/app/routes/AuthPage'
-import AccountAccessGate from '../../src/app/routes/AccountAccessGate'
+import AppRouter from '../../src/app/AppRouter'
 import { useShellStore } from '../../src/store/useShellStore'
 import type { User } from '../../shared/contracts'
 
@@ -15,6 +15,16 @@ vi.mock('../../src/app/api-client', async (importOriginal) => ({
   requestJson: mocks.requestJson,
 }))
 vi.mock('../../src/components/ui/toast-context', () => ({ useToast: () => ({ error: vi.fn(), success: vi.fn() }) }))
+vi.mock('../../src/components/layout/AppShell', () => ({ default: () => null }))
+vi.mock('../../src/app/route-config', async () => {
+  const { Link } = await import('react-router-dom')
+  return {
+    appRoutes: [
+      { path: '/me', useShell: false, element: <><p>个人中心内容</p><Link to="/studio/novel/n1">进入创作区</Link></> },
+      { path: '/studio/novel/:novelId', useShell: false, element: <p>创作内容</p> },
+    ],
+  }
+})
 
 const published = { terms: { id: 'terms-1' }, privacy: { id: 'privacy-1' }, registrationAvailable: true }
 const unavailable = { terms: null, privacy: null, registrationAvailable: false }
@@ -28,7 +38,7 @@ function mount(mode: 'login' | 'register', legal: typeof published | typeof unav
     throw new Error('synthetic form submission')
   })
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
-  return render(<QueryClientProvider client={client}><MemoryRouter><AuthPage mode={mode} /></MemoryRouter></QueryClientProvider>)
+  return render(<QueryClientProvider client={client}><MemoryRouter><AuthPage mode={mode} onClose={vi.fn()} /></MemoryRouter></QueryClientProvider>)
 }
 
 beforeEach(() => {
@@ -43,6 +53,7 @@ afterEach(() => {
   else Reflect.deleteProperty(HTMLDialogElement.prototype, 'showModal')
   if (originalClose) Object.defineProperty(HTMLDialogElement.prototype, 'close', originalClose)
   else Reflect.deleteProperty(HTMLDialogElement.prototype, 'close')
+  window.history.replaceState(null, '', '/')
 })
 
 it.each(['login', 'register'] as const)('centers policy consent on %s and submits only after checking the current policies', async (mode) => {
@@ -90,7 +101,7 @@ it('registers by email with the current legal versions and preserves the referra
   })
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
   render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/register?ref=abc']}>
-    <AuthPage mode="register" />
+    <AuthPage mode="register" onClose={vi.fn()} />
   </MemoryRouter></QueryClientProvider>)
   const submit = await screen.findByRole('button', { name: '注册', exact: true }) as HTMLButtonElement
   expect(submit.disabled).toBe(true)
@@ -108,15 +119,17 @@ it('registers by email with the current legal versions and preserves the referra
 it('opens the signup code help without requesting a verification code', async () => {
   mocks.requestJson.mockImplementation(async path => path === '/api/auth/options' ? { emailAuthEnabled: true } : { legal: published })
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
-  render(<QueryClientProvider client={client}><MemoryRouter><AuthPage mode="register" /></MemoryRouter></QueryClientProvider>)
+  render(<QueryClientProvider client={client}><MemoryRouter><AuthPage mode="register" onClose={vi.fn()} /></MemoryRouter></QueryClientProvider>)
   const trigger = await screen.findByRole('button', { name: '收不到验证码' })
+  const registration = screen.getByRole('dialog', { name: '创建账户' })
   trigger.focus()
   fireEvent.click(trigger)
   const help = screen.getByRole('dialog', { name: '收不到验证码' })
   expect(within(help).getByText('chevoink@chevolink.com')).toBeTruthy()
   expect(mocks.requestJson.mock.calls.every(([path]) => !path.includes('send-code'))).toBe(true)
   fireEvent.click(within(help).getByRole('button', { name: '知道了' }))
-  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(screen.queryByRole('dialog', { name: '收不到验证码' })).toBeNull()
+  expect(screen.getByRole('dialog', { name: '创建账户' })).toBe(registration)
   expect(document.activeElement).toBe(trigger)
 })
 
@@ -141,10 +154,11 @@ it('prioritizes mandatory binding, allows each setup skip, and gates only studio
     return { user: { ...verified, accountSetupStep: steps[step - 1] } }
   })
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
-  const studio = <AccountAccessGate><p>创作内容</p></AccountAccessGate>
-  const view = render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/studio/novel/n1']}>{studio}</MemoryRouter></QueryClientProvider>)
+  window.history.replaceState(null, '', '/me')
+  render(<QueryClientProvider client={client}><AppRouter /></QueryClientProvider>)
   const notice = screen.getByRole('dialog', { name: '请先绑定邮箱' })
   expect(within(notice).getAllByRole('button')).toHaveLength(1)
+  expect(screen.queryByText('个人中心内容')).toBeNull()
   expect(fireEvent(notice, new Event('cancel', { cancelable: true }))).toBe(false)
   expect(screen.queryByRole('textbox', { name: '邮箱' })).toBeNull()
   fireEvent.click(within(notice).getByRole('button', { name: '前往绑定' }))
@@ -153,17 +167,25 @@ it('prioritizes mandatory binding, allows each setup skip, and gates only studio
   expect(screen.getByRole('button', { name: '退出登录' })).toBeTruthy()
   expect(screen.queryByRole('button', { name: '跳过此步' })).toBeNull()
   act(() => { useShellStore.setState({ sessionUser: verified }) })
+  const setup = await screen.findByRole('dialog', { name: '验证手机号' })
   for (const heading of ['验证手机号', '设置登录密码', '完善个人资料']) {
-    expect(await screen.findByRole('heading', { name: heading })).toBeTruthy()
-    const skip = screen.getByRole('button', { name: '跳过此步' })
+    expect(await screen.findByRole('dialog', { name: heading })).toBe(setup)
+    expect(screen.getByText('个人中心内容')).toBeTruthy()
+    const skip = within(setup).getByRole('button', { name: '跳过此步' })
     expect(skip.nextElementSibling?.textContent).toContain('退出登录')
     fireEvent.click(skip)
   }
-  expect(await screen.findByRole('heading', { name: '进入创作区前验证手机' })).toBeTruthy()
-  expect(screen.queryByText('创作内容')).toBeNull()
-  view.unmount()
-  render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/me']}>
-    <AccountAccessGate><p>个人中心内容</p></AccountAccessGate>
-  </MemoryRouter></QueryClientProvider>)
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  fireEvent.click(screen.getByRole('link', { name: '进入创作区' }))
+  const phoneGate = await screen.findByRole('dialog', { name: '验证手机号' })
   expect(screen.getByText('个人中心内容')).toBeTruthy()
+  expect(screen.queryByText('创作内容')).toBeNull()
+  fireEvent.click(within(phoneGate).getByRole('button', { name: '关闭' }))
+  expect(window.location.pathname).toBe('/me')
+  expect(screen.queryByRole('dialog')).toBeNull()
+  fireEvent.click(screen.getByRole('link', { name: '进入创作区' }))
+  await screen.findByRole('dialog', { name: '验证手机号' })
+  act(() => { useShellStore.setState({ sessionUser: { ...verified, accountSetupStep: null, phoneVerified: true } }) })
+  expect(await screen.findByText('创作内容')).toBeTruthy()
+  expect(screen.queryByRole('dialog')).toBeNull()
 })
