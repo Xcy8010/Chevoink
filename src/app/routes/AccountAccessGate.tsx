@@ -114,13 +114,15 @@ function AccountSetupStep({ user, step }: { user: User; step: 1 | 2 | 3 }) {
   const onSaved = () => { void finish(false) }
   return (
     <>
-      {fulfilled ? <Button variant="primary" className="w-full" disabled={pending} onClick={onSaved}>{pending ? '提交中…' : '继续'}</Button>
-        : isPhone ? <IdentityVerificationForm kind="phone" submitLabel="验证并继续" disabled={pending} onSaving={setFormSaving} onSaved={onSaved} />
-          : isPassword ? <PasswordVerificationForm user={user} disabled={pending} onSaving={setFormSaving} onSaved={onSaved} />
-            : <ProfileSetupForm user={user} disabled={pending} onSaving={setFormSaving} onSaved={onSaved} />}
-      {error && <p role="alert" className="mt-3 text-sm text-[var(--color-danger,#dc2626)]">{error}</p>}
-      <div className="mt-4 flex items-center justify-between gap-3">
-        <Button variant="ghost" disabled={pending || formSaving} onClick={() => void finish(true)}>跳过此步</Button>
+      <div className="min-w-0">
+        {fulfilled ? <Button variant="primary" className="w-full" disabled={pending} onClick={onSaved}>{pending ? '提交中…' : '继续'}</Button>
+          : isPhone ? <IdentityVerificationForm kind="phone" submitLabel="验证并继续" disabled={pending} onSaving={setFormSaving} onSaved={onSaved} />
+            : isPassword ? <PasswordVerificationForm user={user} disabled={pending} onSaving={setFormSaving} onSaved={onSaved} />
+              : <ProfileSetupForm user={user} disabled={pending} onSaving={setFormSaving} onSaved={onSaved} />}
+        {error && <p role="alert" className="mt-3 text-sm text-[var(--color-danger,#dc2626)]">{error}</p>}
+      </div>
+      <div className="mt-4 flex items-center justify-between gap-3 md:col-span-2 md:mt-0">
+        <Button variant="ghost" className="-ml-3" disabled={pending || formSaving} onClick={() => void finish(true)}>跳过此步</Button>
         <SignOutLink />
       </div>
     </>

@@ -50,7 +50,7 @@ export function AccountDialog({ title, description, step, brand, children, onClo
     >
       <div key={step} className={cn(
         'max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain px-5 py-5 sm:px-7 sm:py-6',
-        step && 'account-dialog-step md:grid md:min-h-[min(27rem,calc(100dvh-2rem))] md:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] md:items-start md:gap-12 md:p-10',
+        step && 'account-dialog-step md:grid md:min-h-[min(27rem,calc(100dvh-2rem))] md:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] md:grid-rows-[1fr_auto] md:items-start md:gap-x-12 md:gap-y-5 md:p-10',
       )}>
         <header className={cn('mb-5', step && 'md:mb-0')}>
           {step && <p className="mb-3 text-xs font-medium tabular-nums text-[var(--text-secondary)]">第 {step} 步，共 3 步</p>}
@@ -66,7 +66,7 @@ export function AccountDialog({ title, description, step, brand, children, onClo
           </div>
           {description && <p id={descriptionId} className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">{description}</p>}
         </header>
-        <div className="min-w-0">{children}</div>
+        {step ? children : <div className="min-w-0">{children}</div>}
       </div>
     </dialog>,
     document.body,
