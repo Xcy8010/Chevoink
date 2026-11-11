@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 
@@ -11,22 +11,6 @@ import { AccountDialog } from '@/features/account/VerificationCodeField'
 import { hydrateReadingSync } from '@/features/home/reading-sync'
 import { useShellStore } from '@/store/useShellStore'
 import type { User } from '../../../shared/contracts'
-
-function AccountScreen({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
-  const headingRef = useRef<HTMLHeadingElement>(null)
-  useEffect(() => headingRef.current?.focus({ preventScroll: true }), [title])
-  return (
-    <main className="min-h-dvh bg-[var(--app-bg)] px-5 pb-10 pt-[max(2rem,var(--safe-top,0px))] text-[var(--text-primary)] sm:px-8 sm:pt-16">
-      <section className="mx-auto w-full max-w-[430px] sm:rounded-3xl sm:border sm:border-[var(--border-subtle)] sm:bg-[var(--surface-default)] sm:p-8">
-        <header className="mb-6 space-y-2">
-          <h1 ref={headingRef} tabIndex={-1} className="text-2xl font-semibold tracking-tight outline-none">{title}</h1>
-          {description && <p className="text-sm leading-6 text-[var(--text-secondary)]">{description}</p>}
-        </header>
-        {children}
-      </section>
-    </main>
-  )
-}
 
 function SignOutLink() {
   const [pending, setPending] = useState(false)
@@ -58,22 +42,21 @@ function SignOutLink() {
   </div>
 }
 
-function BindRequired({ returnPath }: { returnPath: string }) {
+function BindRequired({ returnPath, initialEmail }: { returnPath: string; initialEmail?: string }) {
   const queryClient = useQueryClient()
   const [binding, setBinding] = useState(false)
+  const verifying = Boolean(initialEmail)
   if (!binding) {
     return (
-      <main className="min-h-dvh bg-[var(--app-bg)]">
-        <AccountDialog title="请先绑定邮箱">
-          <p className="text-sm leading-6 text-[var(--text-secondary)]">绑定的邮箱可用于登录、找回密码和接收账户通知。</p>
-          <Button variant="primary" className="mt-5 w-full" onClick={() => setBinding(true)}>前往绑定</Button>
-        </AccountDialog>
-      </main>
+      <AccountDialog key="notice" title={verifying ? '请先验证邮箱' : '请先绑定邮箱'}
+        description={verifying ? '验证当前邮箱后即可继续使用账户。' : '绑定的邮箱可用于登录、找回密码和接收账户通知。'}>
+        <Button variant="primary" className="w-full" onClick={() => setBinding(true)}>{verifying ? '前往验证' : '前往绑定'}</Button>
+      </AccountDialog>
     )
   }
   return (
-    <AccountScreen title="绑定邮箱" description="验证邮箱后即可继续使用当前账户。">
-      <IdentityVerificationForm kind="email" submitLabel="验证并绑定" onSaved={() => {
+    <AccountDialog key="form" title={verifying ? '验证邮箱' : '绑定邮箱'} description="验证邮箱后即可继续使用当前账户。">
+      <IdentityVerificationForm kind="email" initialValue={initialEmail} submitLabel={verifying ? '验证并继续' : '验证并绑定'} onSaved={() => {
         void queryClient.invalidateQueries()
         void hydrateReadingSync().then(changed => {
           if (changed) void queryClient.invalidateQueries({ queryKey: ['community', 'me'] })
@@ -84,7 +67,7 @@ function BindRequired({ returnPath }: { returnPath: string }) {
         <Link className="text-[var(--color-brand)]" to={`/login?recovery=1&redirect=${encodeURIComponent(returnPath)}`}>找回密码</Link>
         <SignOutLink />
       </nav>
-    </AccountScreen>
+    </AccountDialog>
   )
 }
 
@@ -129,40 +112,38 @@ function AccountSetupStep({ user, step }: { user: User; step: 1 | 2 | 3 }) {
   )
 }
 
-export default function AccountAccessGate({ children, studioPhoneRequired, closeStudioGate }: {
+export default function AccountAccessGate({ children, authDialog, studioPhoneRequired, closeStudioGate }: {
   children: ReactNode
+  authDialog?: ReactNode
   studioPhoneRequired: boolean
   closeStudioGate: () => void
 }) {
   const { pathname, search } = useLocation()
   const user = useShellStore(state => state.sessionUser)
   const authenticated = useShellStore(state => state.authStatus === 'authenticated')
-  if (!authenticated || !user?.emailAuthEnabled) return <>{children}</>
-
   const recovery = pathname === '/login' && new URLSearchParams(search).get('recovery') === '1'
-  if (pathname === '/account/docs' || pathname === '/legal' || recovery) return <>{children}</>
-  if (user.requiresEmailBinding) return <BindRequired key={user.id} returnPath={pathname + search} />
-  if (user.accountSetupStep && !/^\/(?:login|register)\/?$/i.test(pathname)) {
-    const step = user.accountSetupStep
-    const title = step === 1 ? '验证手机号' : step === 2 ? '设置登录密码' : '完善个人资料'
-    return (
-      <>
-        {children}
+  const exempt = /^\/admin(?:\/|$)/i.test(pathname) || pathname === '/account/docs' || pathname === '/legal' || recovery
+  const requiresAccountAccess = authenticated && user?.emailAuthEnabled && !exempt
+  const requiresEmail = requiresAccountAccess && user.requiresEmailBinding
+  let dialog: ReactNode = null
+  if (requiresAccountAccess) {
+    if (requiresEmail) {
+      dialog = <BindRequired key={user.id} returnPath={pathname + search} initialEmail={user.email?.trim()} />
+    } else if (user.accountSetupStep && !/^\/(?:login|register)\/?$/i.test(pathname)) {
+      const step = user.accountSetupStep
+      const title = step === 1 ? '验证手机号' : step === 2 ? '设置登录密码' : '完善个人资料'
+      dialog = (
         <AccountDialog key={user.id} title={title} step={step} description={step === 1 ? '创作区需要已验证的手机号。' : undefined}>
           <AccountSetupStep user={user} step={step} />
         </AccountDialog>
-      </>
-    )
-  }
-  if (studioPhoneRequired) {
-    return (
-      <>
-        {children}
+      )
+    } else if (studioPhoneRequired) {
+      dialog = (
         <AccountDialog title="验证手机号" description="验证后会继续打开创作区。" onClose={closeStudioGate}>
           <IdentityVerificationForm key={user.id} kind="phone" submitLabel="验证并进入" onSaved={() => {}} />
         </AccountDialog>
-      </>
-    )
+      )
+    }
   }
-  return <>{children}</>
+  return <>{children}{!requiresEmail && authDialog}{dialog}</>
 }

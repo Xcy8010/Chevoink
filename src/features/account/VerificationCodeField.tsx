@@ -44,7 +44,7 @@ export function AccountDialog({ title, description, step, brand, children, onClo
       aria-describedby={description ? descriptionId : undefined}
       onCancel={event => { event.preventDefault(); event.stopPropagation(); onClose?.() }}
       className={cn(
-        'account-dialog fixed inset-0 m-auto w-[calc(100%-2rem)] overflow-hidden rounded-3xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-0 text-[var(--text-primary)] shadow-xl backdrop:bg-black/45',
+        'account-dialog fixed inset-0 m-auto w-[calc(100%-2rem)] overflow-hidden rounded-3xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-0 text-[var(--text-primary)] shadow-xl backdrop:bg-black/25 backdrop:backdrop-blur-sm',
         step ? 'max-w-[480px] md:max-w-[50rem]' : 'max-w-[440px]',
       )}
     >

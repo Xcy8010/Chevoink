@@ -14,11 +14,12 @@ type FormCallbacks = {
   disabled?: boolean
 }
 
-export function IdentityVerificationForm({ kind, submitLabel, onSaved, onSaving, disabled }: FormCallbacks & {
+export function IdentityVerificationForm({ kind, submitLabel, initialValue = '', onSaved, onSaving, disabled }: FormCallbacks & {
   kind: 'email' | 'phone'
   submitLabel: string
+  initialValue?: string
 }) {
-  const [value, setValue] = useState('')
+  const [value, setValue] = useState(initialValue)
   const [code, setCode] = useState('')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
