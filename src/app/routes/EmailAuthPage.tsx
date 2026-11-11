@@ -203,7 +203,7 @@ export default function EmailAuthPage({ mode }: { mode: AuthMode }) {
       {codeHelpOpen && <AccountDialog title="收不到验证码" onClose={() => setCodeHelpOpen(false)}>
         <ol className="list-decimal space-y-3 pl-5 text-sm leading-6 text-[var(--text-secondary)]">
           <li>核对邮箱拼写和后缀，确认收件箱能够接收新邮件。</li>
-          <li>检查垃圾邮件、广告邮件和企业邮箱隔离区。发件人为 <span className="break-all font-medium text-[var(--text-primary)]">chevoink@chevolink.com</span>，主题为「【启创墨域】邮箱验证码」。</li>
+          <li>检查垃圾邮件、广告邮件和企业邮箱隔离区。发件人为 <span className="whitespace-nowrap font-medium text-[var(--text-primary)]">chevoink@chevolink.com</span>，主题为「【启创墨域】邮箱验证码」。</li>
           <li>等待片刻，倒计时结束后再发送一次。企业或学校邮箱可能有拦截规则，可以联系邮箱管理员。</li>
         </ol>
         <p className="mt-4 text-sm leading-6 text-[var(--text-secondary)]">可使用有效的常见邮箱地址，例如 QQ 邮箱、网易邮箱、Outlook 或 Gmail。邮件能否送达取决于邮箱服务商及所在组织的过滤规则。</p>

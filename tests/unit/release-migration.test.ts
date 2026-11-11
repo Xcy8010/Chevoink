@@ -242,17 +242,41 @@ model AppReleaseRetirement {
     if (kind === 'additional') writeFileSync(path.join(path.dirname(f.sql), 'extra.sql'), 'SELECT 2;')
     expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
   })
-  it('accepts only the exact successor notification schema and additive migration', () => {
+  const notificationFixture = () => {
     const f = announcementFixture()
     const announcementPath = `prisma/migrations/${announcementReadsMigrationName}/migration.sql`
     mkdirSync(path.join(f.baseline, 'prisma/migrations', announcementReadsMigrationName))
     writeFileSync(path.join(f.baseline, announcementPath), readFileSync(f.sql))
-    writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), readFileSync(path.join(f.candidate, 'prisma/schema.prisma')))
-    writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), readFileSync('prisma/schema.prisma', 'utf8').replaceAll('\r\n', '\n'))
+    const previous = readFileSync(path.join(f.candidate, 'prisma/schema.prisma'), 'utf8')
+    writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), previous)
+    // This approved historical schema must remain independent of future schema changes.
+    const model = `model UserNotification {
+  id        String   @id @default(cuid()) @db.VarChar(64)
+  userId    String   @map("user_id") @db.VarChar(64)
+  title     String   @db.VarChar(160)
+  body      String
+  createdAt DateTime @default(now()) @map("created_at")
+  readAt    DateTime? @map("read_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("user_notifications")
+}
+
+`
+    const schema = previous
+      .replace('  announcementReads SiteAnnouncementRead[]\n', '  announcementReads SiteAnnouncementRead[]\n  notifications     UserNotification[]\n')
+      .replace('model UserLegalConsent {', model + 'model UserLegalConsent {')
+    writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), schema)
     const relative = `prisma/migrations/${userNotificationsMigrationName}/migration.sql`
     mkdirSync(path.dirname(path.join(f.candidate, relative)))
     const sql = readFileSync(relative, 'utf8').replaceAll('\r\n', '\n')
     writeFileSync(path.join(f.candidate, relative), sql)
+    return { ...f, announcementPath, relative, sql, schema }
+  }
+  it('accepts only the exact successor notification schema and additive migration', () => {
+    const f = notificationFixture()
+    const { announcementPath, relative, sql } = f
     expect(releaseMigrationPlan(f.candidate, f.baseline)).toBe(userNotificationsMigrationName)
     expect(readFileSync('deploy/deploy-production.sh', 'utf8')).toContain('"$MIGRATION_PLAN" == "20261108140000_user_notifications"')
     writeFileSync(path.join(f.candidate, relative), sql + 'SELECT 1;')
@@ -260,6 +284,20 @@ model AppReleaseRetirement {
     writeFileSync(path.join(f.candidate, relative), sql)
     writeFileSync(path.join(f.candidate, announcementPath), 'SELECT 1;')
     expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
+  })
+  it('keeps the email account migration outside the historical production approvals', () => {
+    const f = notificationFixture()
+    const migration = '20261112090000_email_account_auth'
+    const previousSchema = path.join(f.baseline, 'prisma/schema.prisma')
+    writeFileSync(previousSchema, f.schema)
+    mkdirSync(path.dirname(path.join(f.baseline, f.relative)))
+    writeFileSync(path.join(f.baseline, f.relative), f.sql)
+    writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), readFileSync('prisma/schema.prisma'))
+    const migrationFile = `prisma/migrations/${migration}/migration.sql`
+    mkdirSync(path.dirname(path.join(f.candidate, migrationFile)))
+    writeFileSync(path.join(f.candidate, migrationFile), readFileSync(migrationFile))
+    expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow('Unapproved schema change')
+    expect(() => assertMigrationState([], [], 'before', undefined, migration)).toThrow('Unapproved migration plan')
   })
   it('rejects a preexisting announcement receipt table before migration', () => {
     const before = { tables: [], columns: [], indexes: [], constraints: [], rowCount: null }
