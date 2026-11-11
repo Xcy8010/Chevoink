@@ -30,8 +30,11 @@ it('lists only the missing fields and lets the author copy a prompt or open its 
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
   try {
     render(<PublishMetadataDialog missing={['cover', 'tags']} onClose={vi.fn()} onOpenPanel={openPanel} />)
-    expect(screen.getByRole('dialog', { name: '还不能发布这部作品' }).textContent).toContain('封面、标签')
-    fireEvent.click(screen.getByRole('button', { name: '如何设置？' }))
+    const notice = screen.getByRole('dialog', { name: '还不能发布这部作品' })
+    const helpButton = within(notice).getByRole('button', { name: '如何设置？' })
+    expect(notice.getAttribute('aria-describedby')).toBe(within(notice).getByText('请先设置作品的封面、标签，然后再发布。').id)
+    expect(helpButton.closest('footer')).toBe(within(notice).getByRole('button', { name: '我知道了' }).closest('footer'))
+    fireEvent.click(helpButton)
     const help = within(screen.getByRole('dialog', { name: '如何设置作品信息' }))
     expect(help.getByText('作品设置 → 标签 → 保存作品设置')).toBeTruthy()
     expect(help.queryByRole('heading', { name: '简介' })).toBeNull()

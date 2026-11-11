@@ -8,7 +8,6 @@ import {
   novelPublishMetadataMessage,
   type NovelPublishField,
 } from '../../../../shared/contracts/novel-publish.js'
-import ConfirmDialog from './ConfirmDialog'
 
 const GUIDANCE = {
   cover: {
@@ -39,17 +38,18 @@ export default function PublishMetadataDialog({ missing, onClose, onOpenPanel }:
   const [showHelp, setShowHelp] = useState(false)
   const [copyResult, setCopyResult] = useState<{ field: NovelPublishField; success: boolean } | null>(null)
   const titleId = useId()
-  const helpLink = useRef<HTMLButtonElement>(null)
-  const helpDialog = useRef<HTMLDialogElement>(null)
+  const descriptionId = useId()
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  const titleRef = useRef<HTMLHeadingElement>(null)
 
   useEffect(() => {
-    if (!showHelp) {
-      helpLink.current?.focus({ preventScroll: true })
-      return
-    }
-    const dialog = helpDialog.current
+    const dialog = dialogRef.current
     dialog?.showModal()
     return () => dialog?.close()
+  }, [])
+
+  useEffect(() => {
+    titleRef.current?.focus({ preventScroll: true })
   }, [showHelp])
 
   function returnToNotice() {
@@ -66,25 +66,32 @@ export default function PublishMetadataDialog({ missing, onClose, onOpenPanel }:
     }
   }
 
-  if (showHelp) {
-    return createPortal(
-      <dialog
-        ref={helpDialog}
-        data-native-back-dismiss
-        aria-labelledby={titleId}
-        onCancel={(event) => { event.preventDefault(); returnToNotice() }}
-        className="studio-workspace fixed inset-0 m-auto max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-[34rem] flex-col overflow-hidden rounded-[22px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-0 text-[var(--text-primary)] shadow-[0_24px_64px_rgba(15,23,42,0.2)] backdrop:bg-black/30 backdrop:backdrop-blur-[2px] open:flex"
-      >
-        <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border-subtle)] px-4 py-4 sm:px-6 sm:py-5">
-          <div className="min-w-0">
-            <h2 id={titleId} className="text-lg font-semibold leading-6">如何设置作品信息</h2>
-            <p className="mt-1.5 text-sm leading-5 text-[var(--text-secondary)]">手动设置，或把提示词复制到 Agent 输入框。</p>
-          </div>
-          <Button variant="ghost" size="sm" className="h-9 w-9 shrink-0 rounded-lg px-0" onClick={onClose} aria-label="关闭设置帮助">
-            <X aria-hidden="true" className="h-4 w-4" />
-          </Button>
-        </header>
+  return createPortal(
+    <dialog
+      ref={dialogRef}
+      data-native-back-dismiss
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
+      onCancel={(event) => {
+        event.preventDefault()
+        if (showHelp) returnToNotice()
+        else onClose()
+      }}
+      className={`studio-workspace fixed inset-0 m-auto max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-[22px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-0 text-[var(--text-primary)] shadow-[0_24px_64px_rgba(15,23,42,0.2)] backdrop:bg-black/30 backdrop:backdrop-blur-[2px] open:flex ${showHelp ? 'max-w-[34rem]' : 'max-w-[28rem]'}`}
+    >
+      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border-subtle)] px-4 py-3 sm:px-6 sm:py-4">
+        <div className="min-w-0">
+          <h2 id={titleId} ref={titleRef} tabIndex={-1} className="text-lg font-semibold leading-6 outline-none">
+            {showHelp ? '如何设置作品信息' : '还不能发布这部作品'}
+          </h2>
+          {showHelp ? <p id={descriptionId} className="mt-1.5 text-sm leading-5 text-[var(--text-secondary)]">手动设置，或把提示词复制到 Agent 输入框。</p> : null}
+        </div>
+        <Button variant="ghost" size="sm" className="-mr-1 h-9 w-9 shrink-0 rounded-lg px-0" onClick={onClose} aria-label={showHelp ? '关闭设置帮助' : '关闭发布提示'}>
+          <X aria-hidden="true" className="h-4 w-4" />
+        </Button>
+      </header>
 
+      {showHelp ? (
         <div data-publish-help-content className="min-h-0 flex-1 divide-y divide-[var(--border-subtle)] overflow-y-auto overscroll-contain px-4 sm:px-6">
           {missing.map((field) => {
             const guidance = GUIDANCE[field]
@@ -121,33 +128,31 @@ export default function PublishMetadataDialog({ missing, onClose, onOpenPanel }:
             )
           })}
         </div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6">
+          <p id={descriptionId} className="flex min-h-24 items-center py-5 text-sm leading-6 text-[var(--text-secondary)]">
+            {novelPublishMetadataMessage(missing)}
+          </p>
+        </div>
+      )}
 
-        <footer className="flex shrink-0 justify-end border-t border-[var(--border-subtle)] px-4 py-3 sm:px-6">
+      <footer className="flex shrink-0 items-center justify-end gap-3 border-t border-[var(--border-subtle)] px-4 py-3 sm:px-6">
+        {showHelp ? (
           <Button variant="secondary" size="sm" onClick={returnToNotice}>返回</Button>
-        </footer>
-      </dialog>,
-      document.body,
-    )
-  }
-
-  return (
-    <ConfirmDialog
-      open
-      title="还不能发布这部作品"
-      description={novelPublishMetadataMessage(missing)}
-      confirmLabel="我知道了"
-      cancelLabel={null}
-      onCancel={onClose}
-      onConfirm={onClose}
-    >
-      <button
-        ref={helpLink}
-        type="button"
-        onClick={() => setShowHelp(true)}
-        className="mt-3 rounded px-1 py-1 text-sm font-medium text-blue-600 underline-offset-4 hover:underline focus-visible:outline focus-visible:outline-2 dark:text-blue-400"
-      >
-        如何设置？
-      </button>
-    </ConfirmDialog>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={() => setShowHelp(true)}
+              className="mr-auto min-h-9 rounded-lg text-sm font-medium text-blue-600 underline-offset-4 hover:underline focus-visible:outline focus-visible:outline-2 dark:text-blue-400"
+            >
+              如何设置？
+            </button>
+            <Button variant="secondary" size="sm" onClick={onClose}>我知道了</Button>
+          </>
+        )}
+      </footer>
+    </dialog>,
+    document.body,
   )
 }

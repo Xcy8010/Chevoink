@@ -11,7 +11,7 @@ type CoverActions = {
   activeNovelId: string
   currentNovel: Novel | null
   coverForm: CoverFormState | null
-  pendingCoverUploadFile: File | null
+  isActiveNovel: (novelId: string) => boolean
   setCoverForm: Dispatch<SetStateAction<CoverFormState | null>>
   setCoverKeywords: Dispatch<SetStateAction<string[]>>
   setCoverMessage: Dispatch<SetStateAction<string>>
@@ -22,13 +22,12 @@ type CoverActions = {
   setWorkspaceDialog: (dialog: { title: string; description: string; confirmLabel?: string; cancelLabel?: string; onConfirm: () => void }) => void
   setCoverGenerationBusy: Dispatch<SetStateAction<boolean>>
   setCurrentNovel: Dispatch<SetStateAction<Novel | null>>
-  setPendingCoverUploadFile: Dispatch<SetStateAction<File | null>>
   syncStudioPayload: (updater: (current: StudioPayload | undefined) => StudioPayload | undefined) => void
 }
 
 /** Cover API mutations and cache propagation, independent from editor/layout orchestration. */
 export function useCoverActions({
-  activeNovelId, currentNovel, coverForm, pendingCoverUploadFile, setCoverForm, setCoverKeywords, setCoverMessage, setActiveToolPanel, setMobileView, setCoverAssets, setSelectedCoverId, setWorkspaceDialog, setCoverGenerationBusy, setCurrentNovel, setPendingCoverUploadFile, syncStudioPayload,
+  activeNovelId, currentNovel, coverForm, isActiveNovel, setCoverForm, setCoverKeywords, setCoverMessage, setActiveToolPanel, setMobileView, setCoverAssets, setSelectedCoverId, setWorkspaceDialog, setCoverGenerationBusy, setCurrentNovel, syncStudioPayload,
 }: CoverActions) {
   const queryClient = useQueryClient()
   const toast = useToast()
@@ -116,59 +115,40 @@ export function useCoverActions({
   })
 
   const coverUploadMutation = useMutation({
-    mutationFn: async (crop: NovelCoverCropState) => {
-      if (!currentNovel) {
-        throw new Error('作品信息尚未加载完成。')
-      }
-
-      if (!pendingCoverUploadFile) {
-        throw new Error('还没有选择要上传的封面图片。')
-      }
-
-      const coverDataUrl = await buildFixedNovelCoverDataUrl(pendingCoverUploadFile, crop)
-      return uploadNovelCover(currentNovel.id, { coverDataUrl })
+    mutationFn: async ({ novelId, file, crop }: { novelId: string; file: File; crop: NovelCoverCropState }) => {
+      const coverDataUrl = await buildFixedNovelCoverDataUrl(file, crop)
+      return uploadNovelCover(novelId, { coverDataUrl })
     },
     onSuccess: ({ novel, asset }) => {
-      setCoverAssets((current) => [asset, ...current.filter((item) => item.id !== asset.id)])
-      setSelectedCoverId(asset.id)
-      setCurrentNovel((current) =>
-        current
-          ? {
-              ...novel,
-              coverUrl: asset.imageUrl,
-              coverAssetId: asset.id,
-            }
-          : current,
-      )
-      setCoverMessage('本地封面已按固定书封比例上传，并设为当前作品封面。')
-      setActiveToolPanel('cover')
-      setMobileView('cover')
       // 封面更换后同步本机书架快照与站内缓存列表，避免书架/收藏/详情继续显示旧封面
       updateShelfCover(novel.id, asset.imageUrl)
       void queryClient.invalidateQueries({ queryKey: ['novel-detail', novel.id] })
       void queryClient.invalidateQueries({ queryKey: ['studio', 'my-novels'] })
       void queryClient.invalidateQueries({ queryKey: ['community', 'me'] })
       void queryClient.invalidateQueries({ queryKey: ['home'] })
+      if (!isActiveNovel(novel.id)) {
+        void queryClient.invalidateQueries({ queryKey: ['studio', novel.id] })
+        return
+      }
+      const cover = { coverUrl: asset.imageUrl, coverAssetId: asset.id }
+      setCoverAssets((current) => [asset, ...current.filter((item) => item.id !== asset.id)])
+      setSelectedCoverId(asset.id)
+      setCurrentNovel((current) => current?.id === novel.id ? { ...current, ...cover } : current)
+      setCoverMessage('本地封面已按固定书封比例上传，并设为当前作品封面。')
       syncStudioPayload((current) =>
-        current
+        current?.novel.id === novel.id
           ? {
               ...current,
-              novel: {
-                ...current.novel,
-                ...novel,
-                coverUrl: asset.imageUrl,
-                coverAssetId: asset.id,
-              },
+              novel: { ...current.novel, ...cover },
               coverAssets: [asset, ...current.coverAssets.filter((item) => item.id !== asset.id)],
             }
           : current,
       )
     },
-    onSettled: () => {
-      setPendingCoverUploadFile(null)
-    },
-    onError: (error: Error) => {
+    onError: (error: Error, { novelId }) => {
+      if (!isActiveNovel(novelId)) return
       setCoverMessage(error.message)
+      toast.error(error.message)
     },
   })
 

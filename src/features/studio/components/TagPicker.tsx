@@ -1,6 +1,7 @@
-import { useMemo, useState } from 'react'
-import { Search, X } from 'lucide-react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { Minus, Plus, Search, X } from 'lucide-react'
 
+import Button from '@/components/ui/Button'
 import { MAX_NOVEL_TAGS, NOVEL_TAG_GROUPS } from '@/lib/novel-tags'
 import { cn } from '@/lib/utils'
 
@@ -9,9 +10,15 @@ type TagPickerProps = {
   onChange: (tags: string[]) => void
 }
 
-/** 作品标签选择器：从统一标签体系中点选，支持输入搜索过滤 */
 export default function TagPicker({ value, onChange }: TagPickerProps) {
+  const [open, setOpen] = useState(false)
   const [filter, setFilter] = useState('')
+  const chooserId = useId()
+  const searchRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (open) searchRef.current?.focus({ preventScroll: true })
+  }, [open])
 
   const normalizedFilter = filter.trim().toLowerCase()
   const filteredGroups = useMemo(() => {
@@ -33,78 +40,101 @@ export default function TagPicker({ value, onChange }: TagPickerProps) {
   }
 
   return (
-    <div className="space-y-2.5">
+    <div role="group" aria-label="标签">
+      <div className="flex flex-wrap items-center justify-between gap-x-2">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-[var(--text-primary)]">标签</span>
+          <span className="text-xs tabular-nums text-[var(--text-tertiary)]">{value.length}/{MAX_NOVEL_TAGS}</span>
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-expanded={open}
+          aria-controls={chooserId}
+          className="gap-1 rounded-lg px-2"
+          onClick={() => {
+            if (open) setFilter('')
+            setOpen(!open)
+          }}
+        >
+          {open ? <Minus aria-hidden="true" className="h-3.5 w-3.5" /> : <Plus aria-hidden="true" className="h-3.5 w-3.5" />}
+          {open ? '收起标签' : '添加标签'}
+        </Button>
+      </div>
+
       {value.length > 0 ? (
-        <div className="flex flex-wrap gap-1.5">
-          {value.map((tag) => (
+        <div className="flex flex-wrap gap-1.5 pt-1">
+          {value.map((tag, index) => (
             <span
               key={tag}
-              className="inline-flex items-center gap-1 rounded-[var(--radius-pill)] bg-[var(--surface-contrast)] py-1 pl-3 pr-1.5 text-xs font-medium text-[var(--text-contrast)]"
+              title={index === 0 ? '主分类' : undefined}
+              className="inline-flex min-h-7 items-center gap-1 rounded-full bg-[var(--surface-muted)] pl-2.5 pr-1 text-xs font-medium text-[var(--text-primary)]"
             >
               {tag}
               <button
                 type="button"
-                aria-label={`移除标签 ${tag}`}
+                aria-label={'移除标签 ' + tag}
                 onClick={() => toggleTag(tag)}
-                className="rounded-full p-0.5 opacity-75 transition-opacity hover:opacity-100"
+                className="inline-flex h-6 w-6 items-center justify-center rounded-full text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]"
               >
-                <X className="h-3 w-3" />
+                <X aria-hidden="true" className="h-3 w-3" />
               </button>
             </span>
           ))}
         </div>
-      ) : (
-        <p className="text-xs text-[var(--text-tertiary)]">还没有选择标签，先从下面挑选最贴合作品的分类和题材。</p>
-      )}
+      ) : null}
 
-      <label className="flex h-9 items-center gap-2 rounded-[var(--radius-pill)] border border-[var(--border-subtle)] bg-[var(--surface-default)] px-3 text-sm focus-within:border-[var(--accent-border)]">
-        <Search className="h-3.5 w-3.5 shrink-0 text-[var(--text-tertiary)]" />
-        <input
-          value={filter}
-          onChange={(event) => setFilter(event.target.value)}
-          placeholder="搜索标签，如：玄幻、系统、甜宠"
-          className="min-w-0 flex-1 border-0 bg-transparent p-0 text-sm text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)]"
-        />
-      </label>
+      <div id={chooserId} hidden={!open} className="space-y-2.5 pt-2.5">
+        <label className="flex h-9 items-center gap-2 rounded-lg border border-[var(--border-subtle)] px-3 focus-within:border-[var(--accent-border)] focus-within:ring-2 focus-within:ring-[var(--focus-ring)]">
+          <Search aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-[var(--text-tertiary)]" />
+          <input
+            ref={searchRef}
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+            aria-label="搜索标签"
+            placeholder="搜索标签"
+            className="min-w-0 flex-1 border-0 bg-transparent p-0 text-sm text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)]"
+          />
+        </label>
 
-      <div className="max-h-56 space-y-3 overflow-y-auto rounded-[14px] border border-[var(--border-subtle)] p-3">
-        {filteredGroups.length === 0 ? (
-          <p className="py-2 text-center text-xs text-[var(--text-tertiary)]">没有匹配的标签，换个关键词试试。</p>
-        ) : (
-          filteredGroups.map((group) => (
-            <section key={group.label}>
-              <p className="text-xs font-medium text-[var(--text-tertiary)]">{group.label}</p>
-              <div className="mt-1.5 flex flex-wrap gap-1.5">
-                {group.tags.map((tag) => {
-                  const selected = value.includes(tag)
-                  const disabled = !selected && value.length >= MAX_NOVEL_TAGS
-                  return (
-                    <button
-                      key={tag}
-                      type="button"
-                      onClick={() => toggleTag(tag)}
-                      disabled={disabled}
-                      className={cn(
-                        'rounded-[var(--radius-pill)] px-2.5 py-1 text-xs transition-colors',
-                        selected
-                          ? 'bg-[var(--surface-contrast)] font-medium text-[var(--text-contrast)]'
-                          : 'bg-[var(--surface-muted)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
-                        disabled && 'cursor-not-allowed opacity-45',
-                      )}
-                    >
-                      {tag}
-                    </button>
-                  )
-                })}
-              </div>
-            </section>
-          ))
-        )}
+        <div className="max-h-44 space-y-2.5 overflow-y-auto overscroll-contain pr-1">
+          {filteredGroups.length === 0 ? (
+            <p className="py-1 text-xs text-[var(--text-tertiary)]">没有匹配的标签</p>
+          ) : (
+            filteredGroups.map((group) => (
+              <section key={group.label}>
+                <p className="text-xs font-medium text-[var(--text-tertiary)]">{group.label}</p>
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {group.tags.map((tag) => {
+                    const selected = value.includes(tag)
+                    const disabled = !selected && value.length >= MAX_NOVEL_TAGS
+                    return (
+                      <button
+                        key={tag}
+                        type="button"
+                        aria-pressed={selected}
+                        onClick={() => toggleTag(tag)}
+                        disabled={disabled}
+                        className={cn(
+                          'min-h-7 rounded-full px-2.5 text-xs transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]',
+                          selected
+                            ? 'bg-[var(--surface-contrast)] font-medium text-[var(--text-contrast)]'
+                            : 'bg-[var(--surface-muted)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
+                          disabled && 'cursor-not-allowed opacity-45',
+                        )}
+                      >
+                        {tag}
+                      </button>
+                    )
+                  })}
+                </div>
+              </section>
+            ))
+          )}
+        </div>
+
+        <p className="text-xs text-[var(--text-tertiary)]">第一个标签是作品的主分类。</p>
       </div>
-
-      <p className="text-xs text-[var(--text-tertiary)]">
-        已选 {value.length} / {MAX_NOVEL_TAGS} 个，第一个标签会作为作品的主分类。
-      </p>
     </div>
   )
 }

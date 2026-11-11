@@ -9,7 +9,7 @@ type ConfirmDialogProps = {
   title: string
   description: string
   confirmLabel?: string
-  cancelLabel?: string | null
+  cancelLabel?: string
   tone?: 'default' | 'danger'
   busy?: boolean
   onConfirm: () => void
@@ -67,11 +67,9 @@ export default function ConfirmDialog({
         {children}
 
         <div className="mt-6 flex items-center justify-end gap-2">
-          {cancelLabel === null ? null : (
-            <Button onClick={onCancel} variant="ghost" disabled={busy}>
-              {cancelLabel}
-            </Button>
-          )}
+          <Button onClick={onCancel} variant="ghost" disabled={busy}>
+            {cancelLabel}
+          </Button>
           <Button
             onClick={onConfirm}
             variant={tone === 'danger' ? 'primary' : 'secondary'}

@@ -330,7 +330,7 @@ export default function StudioWorkspace() {
   const [capturedSelection, setCapturedSelection] = useState<{ source: string; range: EditorSelectionState } | null>(null)
   const [coverKeywords, setCoverKeywords] = useState<string[]>([])
   const [coverMessage, setCoverMessage] = useState('先整理提示词，再生成候选封面。')
-  const [pendingCoverUploadFile, setPendingCoverUploadFile] = useState<File | null>(null)
+  const [pendingCoverUpload, setPendingCoverUpload] = useState<{ novelId: string; file: File } | null>(null)
   const [editorChapterSettingsOpen, setEditorChapterSettingsOpen] = useState(false)
   // 计划设置抽屉：值为计划文件 id（本地产物 id 或 server- 前缀 id）
   const [planSettingsPlanId, setPlanSettingsPlanId] = useState<string | null>(null)
@@ -663,6 +663,7 @@ export default function StudioWorkspace() {
     // 命中渲染入口的骨架短路，整个工作区卸载重建，左侧栏滚动与展开状态全部丢失。
     // 仅清编辑态与选中态，防止旧作品的草稿/脏标记/封面选中泄漏进新作品上下文。
     setSelectedCoverId(null)
+    setPendingCoverUpload(null)
     setChapters([])
     setVolumes([])
     // Selection is restored by the task-scoped panel hook, not by novel resets.
@@ -2581,11 +2582,14 @@ export default function StudioWorkspace() {
   }
 
   const { coverPromptMutation, coverImageMutation, coverUploadMutation, coverSelectMutation } = useCoverActions({
-    activeNovelId, currentNovel, coverForm, pendingCoverUploadFile, setCoverForm, setCoverKeywords, setCoverMessage, setActiveToolPanel, setMobileView, setCoverAssets, setSelectedCoverId, setWorkspaceDialog, setCoverGenerationBusy, setCurrentNovel, setPendingCoverUploadFile, syncStudioPayload,
+    activeNovelId, currentNovel, coverForm, isActiveNovel: (novelId) => workspaceOwnerRef.current.novelId === novelId,
+    setCoverForm, setCoverKeywords, setCoverMessage, setActiveToolPanel, setMobileView, setCoverAssets, setSelectedCoverId, setWorkspaceDialog, setCoverGenerationBusy, setCurrentNovel, syncStudioPayload,
   })
 
   function handleOpenCoverCropDialog(file: File) {
-    setPendingCoverUploadFile(file)
+    if (currentNovel?.id === activeNovelId && !coverUploadMutation.isPending) {
+      setPendingCoverUpload({ novelId: activeNovelId, file })
+    }
   }
 
   function handleDownloadCoverAsset(asset: CoverAsset) {
@@ -3787,7 +3791,9 @@ export default function StudioWorkspace() {
       activeNovelId,
       currentTaskWindow?.customNamed ? currentTaskWindow.title : undefined,
     )
-    for (const key of ['workspace-navigation', 'workspace-sidebar']) queryClient.setQueryData<{ items: AgentSession[] }>(['agent', 'sessions', key], current => ({ items: [createdSession, ...(current?.items ?? []).filter(session => session.id !== createdSession.id)] }))
+    queryClient.setQueryData<{ items: AgentSession[] }>(['agent', 'sessions', 'workspace-navigation'], current => ({
+      items: [createdSession, ...(current?.items ?? []).filter((session) => session.id !== createdSession.id)],
+    }))
     // 未命名空白作品一旦产生会话就属于用户真实内容；立即刷新全局导航会话，
     // 避免紧接着切换/新建作品时仍按“无会话引导作品”将它过滤掉。
     void queryClient.invalidateQueries({ queryKey: ['agent', 'sessions'] })
@@ -3951,16 +3957,15 @@ export default function StudioWorkspace() {
         {activeToolPanel === 'meta' && novelForm ? (
           <MetaPanel
             novelForm={novelForm}
-            wordCountLabel={wordCountLabel}
-            chapterCountLabel={chapterCountLabel}
-            coverLabel={coverLabel}
-            message={novelSaveDisplayMessage}
+            coverUrl={currentNovel?.coverUrl}
+            message={novelSaveState === 'idle' ? '' : novelSaveDisplayMessage}
             saving={saveNovelMutation.isPending}
             onChange={setNovelForm}
             onRequestVisibilityAction={handleRequestNovelVisibilityAction}
             onRequestStatusAction={handleRequestNovelStatusAction}
             detailPreviewHref={detailPreviewHref}
             onOpenCover={() => setActiveToolPanel('cover')}
+            onCoverFile={handleOpenCoverCropDialog}
             onSave={handleSaveNovel}
             onClose={() => setActiveToolPanel(null)}
           />
@@ -4146,19 +4151,19 @@ export default function StudioWorkspace() {
             ) : null}
 
             {mobileView === 'meta' ? (
-              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-0.5 pb-4">
+              <div className="min-h-0 flex-1 overflow-hidden">
                 <MetaPanel
+                  mobile
                   novelForm={novelForm}
-                  wordCountLabel={wordCountLabel}
-                  chapterCountLabel={chapterCountLabel}
-                  coverLabel={coverLabel}
-                  message={novelSaveDisplayMessage}
+                  coverUrl={currentNovel.coverUrl}
+                  message={novelSaveState === 'idle' ? '' : novelSaveDisplayMessage}
                   saving={saveNovelMutation.isPending}
                   onChange={setNovelForm}
                   onRequestVisibilityAction={handleRequestNovelVisibilityAction}
                   onRequestStatusAction={handleRequestNovelStatusAction}
                   detailPreviewHref={detailPreviewHref}
                   onOpenCover={() => setMobileView('cover')}
+                  onCoverFile={handleOpenCoverCropDialog}
                   onSave={handleSaveNovel}
                   onClose={() => setMobileView('assistant')}
                 />
@@ -4548,7 +4553,7 @@ export default function StudioWorkspace() {
 
           {activeToolPanel && activeToolPanel !== 'assistant' ? (
             <div className="fixed inset-0 z-[90] hidden bg-[rgba(15,23,42,0.18)] md:block" onClick={() => setActiveToolPanel(null)}>
-              <div className="absolute inset-y-4 right-4 w-[24rem] max-w-[calc(100vw-2rem)] xl:w-[26rem]" onClick={(event) => event.stopPropagation()}>
+              <div className={cn('absolute inset-y-4 right-4 max-w-[calc(100vw-2rem)]', activeToolPanel === 'meta' ? 'max-h-[48rem] w-[29rem]' : 'w-[24rem] xl:w-[26rem]')} onClick={(event) => event.stopPropagation()}>
                 {renderToolPanel()}
               </div>
             </div>
@@ -4697,15 +4702,21 @@ export default function StudioWorkspace() {
         onClose={() => setVolumeSettings(null)}
       /> : null}
       <NovelCoverCropDialog
-        open={Boolean(pendingCoverUploadFile)}
-        file={pendingCoverUploadFile}
+        open={pendingCoverUpload?.novelId === activeNovelId}
+        file={pendingCoverUpload?.novelId === activeNovelId ? pendingCoverUpload.file : null}
         busy={coverUploadMutation.isPending}
         onClose={() => {
           if (!coverUploadMutation.isPending) {
-            setPendingCoverUploadFile(null)
+            setPendingCoverUpload(null)
           }
         }}
-        onConfirm={(crop) => coverUploadMutation.mutate(crop)}
+        onConfirm={(crop) => {
+          const upload = pendingCoverUpload
+          if (upload?.novelId !== activeNovelId) return
+          coverUploadMutation.mutate({ ...upload, crop }, {
+            onSettled: () => setPendingCoverUpload((current) => current === upload ? null : current),
+          })
+        }}
       />
       {featureFlags.changeSet ? <ChangeSetDrawer
         changeSetId={activeChangeSetId}

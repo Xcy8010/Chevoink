@@ -28,7 +28,7 @@ vi.mock('../../src/features/studio/api', () => ({
   deleteNovelWorkspace: mocks.deleteNovelWorkspace,
 }))
 
-vi.mock('@tanstack/react-query', () => ({ useQuery: () => ({ data: undefined }), useQueryClient: () => ({ invalidateQueries: vi.fn() }), useMutation: () => ({ mutate: vi.fn() }) }))
+vi.mock('@tanstack/react-query', () => ({ useQuery: () => ({ data: undefined }), useQueryClient: () => ({ invalidateQueries: vi.fn(), setQueryData: vi.fn() }), useMutation: () => ({ mutate: vi.fn() }) }))
 vi.mock('react-router-dom', () => ({ useNavigate: () => vi.fn() }))
 vi.mock('../../src/components/ui/toast-context', () => ({ useToast: () => ({ success: vi.fn(), error: vi.fn() }) }))
 

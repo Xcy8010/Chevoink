@@ -16,11 +16,11 @@ afterEach(() => { cleanup(); vi.clearAllMocks() })
 
 function fixture(overrides: Partial<Parameters<typeof useCoverActions>[0]> = {}) {
   const state: Parameters<typeof useCoverActions>[0] = {
-    activeNovelId: 'novel', currentNovel: null, pendingCoverUploadFile: null,
+    activeNovelId: 'novel', currentNovel: null, isActiveNovel: (id) => id === 'novel',
     coverForm: { novelTitle: ' Title ', summary: ' Summary ', genre: 'fantasy', protagonist: '', stylePreference: '', prompt: 'Cover', negativePrompt: '', size: '768x1024', count: 1 },
     setCoverForm: vi.fn(), setCoverKeywords: vi.fn(), setCoverMessage: vi.fn(), setActiveToolPanel: vi.fn(),
     setMobileView: vi.fn(), setCoverAssets: vi.fn(), setSelectedCoverId: vi.fn(), setWorkspaceDialog: vi.fn(),
-    setCoverGenerationBusy: vi.fn(), setCurrentNovel: vi.fn(), setPendingCoverUploadFile: vi.fn(), syncStudioPayload: vi.fn(), ...overrides,
+    setCoverGenerationBusy: vi.fn(), setCurrentNovel: vi.fn(), syncStudioPayload: vi.fn(), ...overrides,
   }
   const client = new QueryClient({ defaultOptions: { mutations: { retry: false, gcTime: 0 } } })
   const toast = { toast: vi.fn(), success: vi.fn(), error: vi.fn(), info: vi.fn() }
@@ -96,14 +96,14 @@ it('does not open a completion dialog for zero generated candidates', async () =
   expect(state.setWorkspaceDialog).not.toHaveBeenCalled()
 })
 
-it('uploads the cropped image and synchronizes shelf, novel and cached candidates', async () => {
+it('uploads the cropped image, keeps the current panel, and preserves the rest of the novel metadata', async () => {
   image.crop.mockResolvedValue('data:image/png;base64,test')
   api.upload.mockResolvedValue({ novel, asset })
   const file = new File(['image'], 'cover.png', { type: 'image/png' })
-  const { result, state, client } = fixture({ currentNovel: novel, pendingCoverUploadFile: file })
+  const { result, state, client } = fixture({ currentNovel: novel })
   const invalidate = vi.spyOn(client, 'invalidateQueries')
   const crop = { zoom: 1, offsetX: 0, offsetY: 0 }
-  await act(async () => { await result.current.coverUploadMutation.mutateAsync(crop) })
+  await act(async () => { await result.current.coverUploadMutation.mutateAsync({ novelId: novel.id, file, crop }) })
   expect(image.crop).toHaveBeenCalledWith(file, crop)
   expect(api.upload).toHaveBeenCalledWith('novel', { coverDataUrl: 'data:image/png;base64,test' })
   expect(image.shelf).toHaveBeenCalledWith('novel', asset.imageUrl)
@@ -111,20 +111,44 @@ it('uploads the cropped image and synchronizes shelf, novel and cached candidate
   const assets = vi.mocked(state.setCoverAssets).mock.calls[0][0]
   expect(typeof assets === 'function' ? assets([asset]) : assets).toEqual([asset])
   const update = vi.mocked(state.setCurrentNovel).mock.calls[0][0]
-  expect(typeof update === 'function' ? update(novel) : update).toEqual({ ...novel, coverUrl: asset.imageUrl, coverAssetId: asset.id })
+  const edited = { ...novel, summary: '新简介' }
+  expect(typeof update === 'function' ? update(edited) : update).toEqual({ ...edited, coverUrl: asset.imageUrl, coverAssetId: asset.id })
   expect(typeof update === 'function' ? update(null) : update).toBeNull()
   const sync = vi.mocked(state.syncStudioPayload).mock.calls[0][0]
   expect(sync({ ...payload, coverAssets: [asset] })?.coverAssets).toEqual([asset])
   expect(sync(undefined)).toBeUndefined()
-  expect(state.setPendingCoverUploadFile).toHaveBeenLastCalledWith(null)
+  expect(state.setActiveToolPanel).not.toHaveBeenCalled()
+  expect(state.setMobileView).not.toHaveBeenCalled()
 })
 
-it.each([false, true])('rejects uploads before required novel/file state exists (%s)', async (hasNovel) => {
-  const { result, state } = fixture({ currentNovel: hasNovel ? novel : null })
-  await act(async () => { await expect(result.current.coverUploadMutation.mutateAsync({ zoom: 1, offsetX: 0, offsetY: 0 })).rejects.toThrow() })
+it('shows crop failures without uploading an invalid image', async () => {
+  image.crop.mockRejectedValue(new Error('无效图片'))
+  const { result, state, toast } = fixture()
+  const file = new File(['invalid'], 'cover.png', { type: 'image/png' })
+  const crop = { zoom: 1, offsetX: 0, offsetY: 0 }
+  await act(async () => { await expect(result.current.coverUploadMutation.mutateAsync({ novelId: novel.id, file, crop })).rejects.toThrow('无效图片') })
   expect(api.upload).not.toHaveBeenCalled()
-  expect(state.setCoverMessage).toHaveBeenCalled()
-  expect(state.setPendingCoverUploadFile).toHaveBeenCalledWith(null)
+  expect(state.setCoverMessage).toHaveBeenCalledWith('无效图片')
+  expect(toast.error).toHaveBeenCalledWith('无效图片')
+})
+
+it('updates the original shelf without replacing the next novel after a switch during upload', async () => {
+  let activeNovelId = novel.id
+  const { result, state, client } = fixture({ isActiveNovel: (id) => id === activeNovelId })
+  const invalidate = vi.spyOn(client, 'invalidateQueries')
+  image.crop.mockResolvedValue('data:image/png;base64,test')
+  api.upload.mockImplementation(async () => {
+    activeNovelId = 'another-novel'
+    return { novel, asset }
+  })
+  const file = new File(['image'], 'cover.png', { type: 'image/png' })
+  const crop = { zoom: 1, offsetX: 0, offsetY: 0 }
+  await act(async () => { await result.current.coverUploadMutation.mutateAsync({ novelId: novel.id, file, crop }) })
+  expect(image.shelf).toHaveBeenCalledWith(novel.id, asset.imageUrl)
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ['studio', novel.id] })
+  expect(state.setCoverAssets).not.toHaveBeenCalled()
+  expect(state.setCurrentNovel).not.toHaveBeenCalled()
+  expect(state.syncStudioPayload).not.toHaveBeenCalled()
 })
 
 it('selects a saved cover using its prompt when the form is absent', async () => {

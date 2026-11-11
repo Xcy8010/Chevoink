@@ -1,10 +1,10 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Archive, BookOpenText, Bot, Bug, Check, ChevronDown, ChevronRight, Clock3, Copy, Crosshair, Flag, FolderDown,
-  Gauge, Gift, GitBranch, Home, Lightbulb, LoaderCircle, MoreHorizontal, PencilLine, Pin, PinOff, Plus, RotateCcw,
+  Gauge, Gift, GitBranch, Home, Lightbulb, LoaderCircle, MessageSquare, MoreHorizontal, PencilLine, Pin, PinOff, Plus, RotateCcw,
   Search, Settings2, Trash2, Upload, X,
 } from 'lucide-react'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import { useToast } from '@/components/ui/toast-context'
@@ -102,6 +102,10 @@ const COLLAPSE_AT = MIN_WIDTH
 const PEEK_MAX_WIDTH = 288
 /** 旧版默认宽度，仅精确匹配时迁移到新默认，保留用户主动拖拽的值 */
 const LEGACY_DEFAULT_WIDTH = 304
+const VISIBLE_PROJECT_TASKS = 5
+const VISIBLE_RECENT_TASKS = 10
+const workspaceSessionsKey = ['agent', 'sessions', 'workspace-navigation'] as const
+const sidebarRowClass = 'flex h-8 w-full items-center gap-2 rounded-[8px] px-2.5 text-left text-xs transition-colors hover:bg-[var(--surface-muted)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--border-strong)]'
 
 function novelTitle(novel: Novel) {
   return novel.displayTitle?.trim() || novel.title?.trim() || '未命名作品'
@@ -121,6 +125,13 @@ function sortWorkspaceItemsByLatest<T extends { updatedAt: string }>(items: T[])
     return Number.isFinite(parsed) ? parsed : 0
   }
   return [...items].sort((left, right) => timestamp(right.updatedAt) - timestamp(left.updatedAt))
+}
+
+function toggleExpandedId(ids: Set<string>, id: string): Set<string> {
+  const next = new Set(ids)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  return next
 }
 
 function initialWidth() {
@@ -153,7 +164,9 @@ export default function StudioWorkspaceSidebar(props: Props) {
   const [inviteCopied, setInviteCopied] = useState(false)
   const [feedbackKind, setFeedbackKind] = useState<FeedbackKind | null>(null)
   const [warningDismissed, setWarningDismissed] = useState(false)
-  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set([props.currentNovelId]))
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => new Set())
+  const [expandedTaskLists, setExpandedTaskLists] = useState<Set<string>>(() => new Set())
+  const taskListPrefix = useId()
   const [context, setContext] = useState<ContextTarget | null>(null)
   const contextTriggerRef = useRef<HTMLElement | null>(null)
   const [rename, setRename] = useState<RenameTarget | null>(null)
@@ -200,7 +213,7 @@ export default function StudioWorkspaceSidebar(props: Props) {
     return sortWorkspaceItemsByLatest([...props.novels, ...retained].filter(novel => novel.status !== 'archived'))
   }, [props.novels, novelSnapshots, taskSnapshots])
   const sessionsQuery = useQuery({
-    queryKey: ['agent', 'sessions', 'workspace-sidebar'],
+    queryKey: workspaceSessionsKey,
     queryFn: () => fetchAgentSessions(),
     staleTime: 15_000,
     enabled: props.open || peek || searchOpen,
@@ -230,6 +243,9 @@ export default function StudioWorkspaceSidebar(props: Props) {
   }, [localTasks, props.currentTasksNovelId, props.novels])
   function forgetTask(taskId: string) {
     setTaskSnapshots(current => Object.fromEntries(Object.entries(current).map(([owner, tasks]) => [owner, tasks.filter(task => task.id !== taskId)])))
+    queryClient.setQueryData<{ items: AgentSession[] }>(workspaceSessionsKey, current => current && {
+      items: current.items.filter(session => session.id !== taskId),
+    })
     props.onTaskDeleted(taskId)
   }
   // 任务状态信号：本地 SSE 实时层（agentStore）+ 服务端 run-status 轮询兑底，
@@ -268,7 +284,6 @@ export default function StudioWorkspaceSidebar(props: Props) {
   // 用真实余额而不是取整百分比判耗尽：0.4% 会四舍五入成 0%，但额度还能用
   const creditsExhausted = summary ? summary.totalRemaining <= 0 : false
 
-  useLayoutEffect(() => setExpandedProjects((current) => new Set(current).add(props.currentNovelId)), [props.currentNovelId])
   useEffect(() => {
     const key = summary?.resetsAt && warningThreshold ? `chevoink:credit-warning:${summary.resetsAt}:${warningThreshold}` : null
     setWarningDismissed(Boolean(key && window.localStorage.getItem(key) === 'dismissed'))
@@ -516,9 +531,20 @@ export default function StudioWorkspaceSidebar(props: Props) {
   }
   const pinnedNovels = sortWorkspaceItemsByLatest(novels.filter((item) => item.pinnedAt))
   const pinnedSessions = sortWorkspaceItemsByLatest(sessions.filter((item) => item.pinnedAt))
+  const novelTitles = new Map(novels.map(novel => [novel.id, novelTitle(novel)]))
+  const recentTasks = sessions
+    .filter(session => novelTitles.has(session.novelId))
+    .map(toSidebarTask)
+    .sort((left, right) => right.lastActiveAt.localeCompare(left.lastActiveAt) || left.id.localeCompare(right.id))
+    .slice(0, VISIBLE_RECENT_TASKS)
+  const isActiveTask = (task: SidebarTask) => task.novelId === props.currentNovelId && task.id === props.activeTaskId
+  const projectHasActiveTask = !collapsedProjects.has(props.currentNovelId) &&
+    novelTitles.has(props.currentNovelId) && projectTasks(props.currentNovelId).some(isActiveTask)
+  const recentHasActiveTask = recentTasks.some(isActiveTask)
 
-  function taskRow(task: SidebarTask, compact = false) {
-    const active = task.novelId === props.currentNovelId && task.id === props.activeTaskId
+  function taskRow(task: SidebarTask, location: 'project' | 'recent' | 'pinned' = 'project') {
+    const active = isActiveTask(task)
+    const selected = active && (location === 'project' || (!projectHasActiveTask && (location === 'recent' || !recentHasActiveTask)))
     const signal = sessionSignals[task.id]
     const remoteStatus = remoteRunStatuses[task.id]?.status
     // 正在直播的任务窗口以本地 phase 为唯一真相：run-status 轮询最多滞后 10s，
@@ -546,8 +572,61 @@ export default function StudioWorkspaceSidebar(props: Props) {
           ? <span className="h-1.5 w-1.5 rounded-full bg-rose-500" aria-hidden="true" />
           : signal?.kind === 'done' && !active
             ? <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
-            : <span className="h-1.5 w-1.5 rounded-full" aria-hidden="true" />
-    return <div key={`${task.novelId}:${task.id}`} className="group/task relative" onMouseEnter={(event) => scheduleTaskCard(event, task)} onMouseLeave={hideTaskCard}><button type="button" onClick={() => props.onSelectTask(task.id, task.novelId)} onContextMenu={(event) => openContext(event, { kind: 'task', id: task.id, novelId: task.novelId, title: task.title, pinned: Boolean(task.pinnedAt), temporary: task.temporary })} disabled={props.taskSwitchLocked} className={cn('group flex w-full items-center gap-2 rounded-[8px] pl-2.5 pr-2 text-left text-[12px] transition-colors disabled:opacity-50', compact ? 'h-8' : 'h-9', active ? 'bg-[var(--surface-muted)] font-medium text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]')} aria-current={active ? 'page' : undefined}><span className="flex h-3 w-3 shrink-0 items-center justify-center">{indicator}</span><span className="min-w-0 flex-1 truncate">{task.title || '新任务'}</span>{task.isBranch ? <GitBranch className="h-3 w-3 shrink-0 text-[var(--text-tertiary)]" aria-label="分支任务" /> : null}{task.pinnedAt ? <Pin className="h-3 w-3 shrink-0 text-[var(--text-tertiary)]" /> : null}{/* 悬停时右侧让位给置顶/归档按钮，避免按钮盖住标题末尾 */}{task.temporary ? null : <span className="w-0 shrink-0 transition-[width] duration-150 group-hover/task:w-[46px]" aria-hidden="true" />}</button>{task.temporary ? null : <div className="absolute right-1 top-0 flex h-full items-center gap-0.5 opacity-0 transition-opacity group-hover/task:opacity-100 focus-within:opacity-100"><button type="button" disabled={busy} onClick={() => void togglePin({ kind: 'task', id: task.id, novelId: task.novelId, title: task.title, pinned: Boolean(task.pinnedAt), temporary: task.temporary })} className="inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-tertiary)] hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)] disabled:opacity-40" aria-label={task.pinnedAt ? '取消置顶' : '置顶任务'} title={task.pinnedAt ? '取消置顶' : '置顶'}>{task.pinnedAt ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}</button><button type="button" disabled={busy} onClick={() => requestArchive({ kind: 'task', id: task.id, novelId: task.novelId, title: task.title, pinned: Boolean(task.pinnedAt), temporary: task.temporary })} className="inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-tertiary)] hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)] disabled:opacity-40" aria-label="归档任务" title="归档"><Archive className="h-3.5 w-3.5" /></button></div>}</div>
+            : <MessageSquare className="h-3.5 w-3.5 text-[var(--text-tertiary)]" aria-hidden="true" />
+    const title = task.title || '新任务'
+    const contextTarget = { kind: 'task' as const, id: task.id, novelId: task.novelId, title, pinned: Boolean(task.pinnedAt), temporary: task.temporary }
+    return (
+      <div
+        key={task.novelId + ':' + task.id}
+        className="group/task relative"
+        onMouseEnter={(event) => scheduleTaskCard(event, task)}
+        onMouseLeave={hideTaskCard}
+      >
+        <button
+          type="button"
+          onClick={() => props.onSelectTask(task.id, task.novelId)}
+          onContextMenu={(event) => openContext(event, contextTarget)}
+          disabled={props.taskSwitchLocked}
+          className={cn(
+            sidebarRowClass,
+            'disabled:opacity-50',
+            selected ? 'bg-[var(--surface-muted)] font-medium text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
+          )}
+          aria-current={selected ? 'page' : undefined}
+          aria-label={location === 'recent' ? [title, novelTitles.get(task.novelId), '最近任务'].filter(Boolean).join('，') : undefined}
+        >
+          <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">{indicator}</span>
+          <span className="min-w-0 flex-1 truncate">{title}</span>
+          {task.isBranch ? <GitBranch className="h-3 w-3 shrink-0 text-[var(--text-tertiary)]" aria-label="分支任务" /> : null}
+          {task.pinnedAt ? <Pin className="h-3 w-3 shrink-0 text-[var(--text-tertiary)]" aria-hidden="true" /> : null}
+          {task.temporary ? null : <span className="hidden w-[46px] shrink-0 group-hover/task:block group-focus-within/task:block" aria-hidden="true" />}
+        </button>
+        {task.temporary ? null : (
+          <div className="pointer-events-none absolute right-1 top-0 flex h-full items-center gap-0.5 opacity-0 transition-opacity group-hover/task:pointer-events-auto group-hover/task:opacity-100 group-focus-within/task:pointer-events-auto group-focus-within/task:opacity-100">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void togglePin(contextTarget)}
+              className="inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-tertiary)] hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)] disabled:opacity-40"
+              aria-label={task.pinnedAt ? '取消置顶' : '置顶任务'}
+              title={task.pinnedAt ? '取消置顶' : '置顶'}
+            >
+              {task.pinnedAt ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => requestArchive(contextTarget)}
+              className="inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-tertiary)] hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)] disabled:opacity-40"
+              aria-label="归档任务"
+              title="归档"
+            >
+              <Archive className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+      </div>
+    )
   }
 
   function body() {
@@ -568,15 +647,112 @@ export default function StudioWorkspaceSidebar(props: Props) {
           <div className="relative"><button type="button" onMouseDown={(event) => event.stopPropagation()} onClick={() => setMoreMenu((value) => !value)} className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2.5 text-left text-xs text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"><MoreHorizontal className="h-4 w-4" />更多</button>{moreMenu ? <div onMouseDown={(event) => event.stopPropagation()} className="absolute left-2 right-2 top-full z-40 rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1 shadow-xl"><button type="button" onClick={() => props.onOpenStudioSettings('archives')} className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2 text-xs hover:bg-[var(--surface-muted)]"><Archive className="h-3.5 w-3.5" />归档内容</button><button type="button" onClick={() => props.onOpenStudioSettings('general')} className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2 text-xs hover:bg-[var(--surface-muted)]"><Settings2 className="h-3.5 w-3.5" />创作区设置</button></div> : null}</div>
         </div>
 
-        {pinnedNovels.length || pinnedSessions.length ? <section className="pb-4"><p className="px-2 pb-1.5 text-[10px] font-semibold uppercase tracking-[.12em] text-[var(--text-tertiary)]">置顶</p>{pinnedNovels.map((novel) => <button key={novel.id} type="button" onClick={() => props.onSelectNovel(novel.id)} onContextMenu={(event) => openContext(event, { kind: 'novel', id: novel.id, title: novelTitle(novel), pinned: true })} className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2.5 text-left text-xs text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"><BookOpenText className="h-3.5 w-3.5" /><span className="min-w-0 flex-1 truncate">{novelTitle(novel)}</span><Pin className="h-3 w-3" /></button>)}{pinnedSessions.map((session) => taskRow(toSidebarTask(session), true))}</section> : null}
+        {pinnedNovels.length || pinnedSessions.length ? <section className="pb-4"><p className="px-2.5 pb-1.5 text-[11px] font-medium text-[var(--text-tertiary)]">置顶</p>{pinnedNovels.map((novel) => <button key={novel.id} type="button" onClick={() => props.onSelectNovel(novel.id)} onContextMenu={(event) => openContext(event, { kind: 'novel', id: novel.id, title: novelTitle(novel), pinned: true })} className={cn(sidebarRowClass, 'text-[var(--text-secondary)]')}><BookOpenText className="h-3.5 w-3.5 shrink-0" /><span className="min-w-0 flex-1 truncate">{novelTitle(novel)}</span><Pin className="h-3 w-3" /></button>)}{pinnedSessions.map((session) => taskRow(toSidebarTask(session), 'pinned'))}</section> : null}
 
-        <section><div className="flex items-center justify-between px-2 pb-1.5"><p className="text-[10px] font-semibold uppercase tracking-[.12em] text-[var(--text-tertiary)]">作品</p><button type="button" onClick={props.onCreateNovel} disabled={props.switchingNovel} className="inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-tertiary)] hover:bg-[var(--surface-muted)] disabled:opacity-40" aria-label="新建作品"><Plus className="h-3.5 w-3.5" /></button></div>
-          {/* 有缓存数据时直接渲染列表，后台刷新不替换内容，避免跨作品切换/二次进入时闪烁 */}
-          {props.novelsLoading && novels.length === 0 ? <p className="px-2 py-3 text-xs text-[var(--text-tertiary)]">正在读取作品…</p> : novels.map((novel) => {
-            const title = novelTitle(novel); const tasks = projectTasks(novel.id); const expanded = expandedProjects.has(novel.id); const shown = expanded ? tasks : tasks.slice(0, 5)
-            return <div key={novel.id} className="mb-1"><div className="group/novel relative"><button type="button" onClick={() => { props.onSelectNovel(novel.id); setExpandedProjects((current) => new Set(current).add(novel.id)) }} onContextMenu={(event) => openContext(event, { kind: 'novel', id: novel.id, title, pinned: Boolean(novel.pinnedAt) })} className={cn('flex h-9 w-full items-center gap-2 rounded-[8px] pl-2.5 pr-2 text-left text-xs', novel.id === props.currentNovelId ? 'font-medium text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]')}><BookOpenText className="h-3.5 w-3.5" /><span className="min-w-0 flex-1 truncate">{title}</span>{/* 悬停时用更多/新建任务按钮替掉任务数角标 */}<span className="text-[9px] tabular-nums text-[var(--text-tertiary)] transition-opacity group-hover/novel:opacity-0">{tasks.length || `${novel.chapterCount}章`}</span><span className="w-0 shrink-0 transition-[width] duration-150 group-hover/novel:w-[46px]" aria-hidden="true" /></button><div className="absolute right-1 top-0 flex h-full items-center gap-0.5 opacity-0 transition-opacity group-hover/novel:opacity-100 focus-within:opacity-100"><button type="button" onMouseDown={(event) => event.stopPropagation()} onClick={(event) => openContextAt(event.currentTarget, { kind: 'novel', id: novel.id, title, pinned: Boolean(novel.pinnedAt) })} className="inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-tertiary)] hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)]" aria-label="作品更多操作" title="更多"><MoreHorizontal className="h-3.5 w-3.5" /></button><button type="button" disabled={props.taskSwitchLocked} onClick={() => props.onCreateTaskInNovel(novel.id)} className="inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-tertiary)] hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)] disabled:opacity-40" aria-label="在该作品新建任务" title="新建任务"><Plus className="h-3.5 w-3.5" /></button></div></div><div className="ml-5">{shown.map((task) => taskRow(task))}{tasks.length > 5 ? <button type="button" onClick={() => setExpandedProjects((current) => { const next = new Set(current); if (next.has(novel.id)) next.delete(novel.id); else next.add(novel.id); return next })} className="flex h-8 items-center gap-1 px-2 text-[11px] text-[var(--text-tertiary)] hover:text-[var(--text-primary)]">{expanded ? '收起' : `展开全部 ${tasks.length} 条`}<ChevronRight className={cn('h-3 w-3 transition-transform', expanded && 'rotate-90')} /></button> : null}</div></div>
+        <section aria-label="作品" className="space-y-0.5">
+          <div className="flex items-center justify-between px-2.5 pb-1">
+            <h2 className="text-[11px] font-medium text-[var(--text-tertiary)]">作品</h2>
+            <button
+              type="button"
+              onClick={props.onCreateNovel}
+              disabled={props.switchingNovel}
+              className="inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-tertiary)] hover:bg-[var(--surface-muted)] disabled:opacity-40"
+              aria-label="新建作品"
+              title="新建作品"
+            >
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+          </div>
+          {props.novelsLoading && novels.length === 0 ? <p className="px-2.5 py-3 text-xs text-[var(--text-tertiary)]">正在读取作品…</p> : novels.map((novel) => {
+            const title = novelTitle(novel)
+            const tasks = projectTasks(novel.id)
+            const expanded = !collapsedProjects.has(novel.id)
+            const showAll = expandedTaskLists.has(novel.id)
+            const hiddenCount = tasks.length - VISIBLE_PROJECT_TASKS
+            const taskListId = taskListPrefix + '-' + novel.id
+            const visibleTasks = showAll ? tasks : tasks.slice(0, VISIBLE_PROJECT_TASKS)
+            const activeTask = tasks.find(isActiveTask)
+            if (!showAll && activeTask && !visibleTasks.includes(activeTask)) visibleTasks[VISIBLE_PROJECT_TASKS - 1] = activeTask
+            const target = { kind: 'novel' as const, id: novel.id, title, pinned: Boolean(novel.pinnedAt) }
+            return (
+              <div key={novel.id} className="space-y-px">
+                <div className="group/novel relative">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!tasks.length) props.onSelectNovel(novel.id)
+                      else setCollapsedProjects(current => toggleExpandedId(current, novel.id))
+                    }}
+                    onContextMenu={(event) => openContext(event, target)}
+                    disabled={!tasks.length && props.taskSwitchLocked}
+                    aria-expanded={tasks.length ? expanded : undefined}
+                    aria-controls={tasks.length ? taskListId : undefined}
+                    className={cn(
+                      sidebarRowClass,
+                      'font-medium group-hover/novel:pr-[54px] group-focus-within/novel:pr-[54px] disabled:opacity-50',
+                      novel.id === props.currentNovelId ? 'text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
+                    )}
+                  >
+                    <BookOpenText className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    <span className="min-w-0 flex-1 truncate">{title}</span>
+                    {tasks.length ? (
+                      <span className="inline-flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums text-[var(--text-tertiary)] group-hover/novel:hidden group-focus-within/novel:hidden" aria-hidden="true">
+                        {tasks.length}
+                        <ChevronRight className={cn('h-3 w-3 motion-safe:transition-transform', expanded && 'rotate-90')} />
+                      </span>
+                    ) : null}
+                  </button>
+                  <div className="pointer-events-none absolute right-1 top-0 flex h-full items-center gap-0.5 opacity-0 transition-opacity group-hover/novel:pointer-events-auto group-hover/novel:opacity-100 group-focus-within/novel:pointer-events-auto group-focus-within/novel:opacity-100">
+                    <button
+                      type="button"
+                      onMouseDown={(event) => event.stopPropagation()}
+                      onClick={(event) => openContextAt(event.currentTarget, target)}
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-tertiary)] hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)]"
+                      aria-label="作品更多操作"
+                      title="更多"
+                    >
+                      <MoreHorizontal className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={props.taskSwitchLocked}
+                      onClick={() => props.onCreateTaskInNovel(novel.id)}
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-tertiary)] hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)] disabled:opacity-40"
+                      aria-label="在该作品新建任务"
+                      title="新建任务"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+                {tasks.length ? (
+                  <div id={taskListId} role="group" aria-label={title + '的任务'} hidden={!expanded} className="space-y-px">
+                    {expanded ? visibleTasks.map(task => taskRow(task)) : null}
+                    {expanded && hiddenCount > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => setExpandedTaskLists(current => toggleExpandedId(current, novel.id))}
+                        aria-expanded={showAll}
+                        className={cn(sidebarRowClass, 'text-[11px] text-[var(--text-tertiary)] hover:text-[var(--text-primary)]')}
+                      >
+                        <ChevronRight className={cn('h-3.5 w-3.5 shrink-0 motion-safe:transition-transform', showAll && 'rotate-90')} aria-hidden="true" />
+                        <span>{showAll ? '收起多余任务' : '展开显示'}</span>
+                        {showAll ? null : <span className="text-[10px] tabular-nums">{hiddenCount} 条</span>}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            )
           })}
         </section>
+
+        {recentTasks.length ? (
+          <section aria-label="最近任务" className="mt-4 space-y-px">
+            <h2 className="px-2.5 pb-1.5 text-[11px] font-medium text-[var(--text-tertiary)]">最近任务</h2>
+            {recentTasks.map(task => taskRow(task, 'recent'))}
+          </section>
+        ) : null}
       </div>
 
       <div className="relative shrink-0 border-t border-[var(--border-subtle)]" ref={accountRef} data-studio-region="sidebar-account">
@@ -619,7 +795,15 @@ export default function StudioWorkspaceSidebar(props: Props) {
     {searchOpen ? <div className="fixed inset-0 z-[180] flex items-start justify-center bg-black/25 px-4 pt-[10vh] backdrop-blur-[2px]" onMouseDown={() => setSearchOpen(false)}><section role="dialog" aria-modal="true" aria-label="搜索作品、任务与聊天记录" onMouseDown={(event) => event.stopPropagation()} className="w-full max-w-2xl overflow-hidden rounded-[18px] border border-[var(--border-subtle)] bg-[var(--surface-default)] shadow-[0_28px_90px_rgba(15,23,42,.24)]"><div className="flex h-14 items-center gap-3 border-b border-[var(--border-subtle)] px-4"><Search className="h-4 w-4 text-[var(--text-tertiary)]" /><input autoFocus value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="搜索作品、任务或聊天记录" className="min-w-0 flex-1 bg-transparent text-sm outline-none" /><kbd className="rounded border border-[var(--border-subtle)] px-1.5 py-0.5 text-[10px] text-[var(--text-tertiary)]">Esc</kbd></div><div className="max-h-[62vh] overflow-y-auto p-2"><p className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[.12em] text-[var(--text-tertiary)]">作品</p>{foundNovels.map((item) => <button key={item.id} type="button" onClick={() => { props.onSelectNovel(item.id); setSearchOpen(false) }} className="flex h-10 w-full items-center gap-3 rounded-[9px] px-3 text-left text-xs hover:bg-[var(--surface-muted)]"><BookOpenText className="h-4 w-4 text-[var(--text-tertiary)]" /><span className="flex-1 truncate">{novelTitle(item)}</span><span className="text-[10px] text-[var(--text-tertiary)]">作品</span></button>)}<p className="mt-2 px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[.12em] text-[var(--text-tertiary)]">任务与聊天记录</p>{foundSessions.map((session) => <button key={session.id} type="button" onClick={() => { props.onSelectTask(session.id, session.novelId); setSearchOpen(false) }} className="flex h-10 w-full items-center gap-3 rounded-[9px] px-3 text-left text-xs hover:bg-[var(--surface-muted)]"><Clock3 className="h-4 w-4 text-[var(--text-tertiary)]" /><span className="min-w-0 flex-1 truncate">{session.title}</span><span className="max-w-36 truncate text-[10px] text-[var(--text-tertiary)]">{session.novelTitle ?? '任务'}</span></button>)}{needle && !foundNovels.length && !foundSessions.length ? <p className="px-3 py-10 text-center text-xs text-[var(--text-tertiary)]">没有找到相关作品、任务或聊天记录</p> : null}</div></section></div> : null}
 
     {context ? <div onMouseDown={(event) => event.stopPropagation()} className="fixed z-[190] max-h-[calc(100dvh-24px)] w-48 overflow-y-auto rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1 shadow-2xl" style={{ left: Math.min(context.x, window.innerWidth - 208), top: Math.max(12, Math.min(context.y, window.innerHeight - (context.kind === 'novel' ? 424 : 304))) }}>
-      {context.kind === 'novel' ? <><button type="button" disabled={props.taskSwitchLocked} onClick={() => { const novelId = context.id; setContext(null); props.onCreateTaskInNovel(novelId) }} className={menuItem}><PencilLine className="h-3.5 w-3.5" />新建对话</button><div className={menuDivider} /></> : null}
+      {context.kind === 'novel' ? <>
+        <button type="button" disabled={props.taskSwitchLocked} onClick={() => { const novelId = context.id; setContext(null); props.onSelectNovel(novelId) }} className={menuItem}>
+          <BookOpenText className="h-3.5 w-3.5" />进入作品
+        </button>
+        <button type="button" disabled={props.taskSwitchLocked} onClick={() => { const novelId = context.id; setContext(null); props.onCreateTaskInNovel(novelId) }} className={menuItem}>
+          <PencilLine className="h-3.5 w-3.5" />新建对话
+        </button>
+        <div className={menuDivider} />
+      </> : null}
       <button type="button" disabled={busy || ('temporary' in context && context.temporary)} onClick={() => void togglePin(context)} className={menuItem}>{context.pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}{context.pinned ? '取消置顶' : '置顶'}</button>
       <button type="button" disabled={busy} onClick={() => beginRename(context)} className={menuItem}><PencilLine className="h-3.5 w-3.5" />重命名</button>
       {context.kind === 'task' ? <><button type="button" disabled={context.temporary} onClick={() => void copyTaskId(context.id)} className={menuItem} title={context.temporary ? '新对话发出第一条消息后才有任务 ID' : '复制任务 ID'}><Copy className="h-3.5 w-3.5" />复制任务 ID</button><button type="button" disabled={busy || context.temporary} onClick={() => { const target = { kind: 'forkTask' as const, id: context.id, title: context.title }; setContext(null); setDanger(target) }} className={menuItem} title={context.temporary ? '新对话还没有可复制的上下文' : '复制成同名分支任务'}><GitBranch className="h-3.5 w-3.5" />创建分支</button></> : null}
