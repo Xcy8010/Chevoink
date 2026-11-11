@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
 import { legalConsentSchema } from '../../shared/contracts/site-content.js'
-import { env } from '../config/env.js'
+import { accountEmailAuthEnabled, assertPreviewEmailAllowed } from '../lib/account-email-auth-scope.js'
 import { verifyAuthCaptchaChallenge } from '../lib/auth-captcha.js'
 import { createSession, requireSessionUserId } from '../lib/auth-session.js'
 import {
@@ -36,7 +36,9 @@ function checkCaptcha(body: { captchaId: string; captchaAnswer: string }) {
 export function accountAuthRoutes(consumeSmsIpQuota: (ip: string) => boolean) {
   const router = Router()
   router.get('/options', (_req, res) => {
-    res.json(buildSuccess(createRequestId(), { emailAuthEnabled: env.accountEmailAuthEnabled }))
+    res.setHeader('Cache-Control', 'private, no-store')
+    res.setHeader('Vary', 'Cookie, Authorization')
+    res.json(buildSuccess(createRequestId(), { emailAuthEnabled: accountEmailAuthEnabled() }))
   })
 
   function post<T extends z.ZodTypeAny>(
@@ -47,7 +49,7 @@ export function accountAuthRoutes(consumeSmsIpQuota: (ip: string) => boolean) {
     router.post(path, async (req, res) => {
       const requestId = createRequestId()
       try {
-        if (!env.accountEmailAuthEnabled) throw new DataAccessError(404, 'AUTH_FEATURE_DISABLED', '此认证方式暂未启用。')
+        if (!accountEmailAuthEnabled()) throw new DataAccessError(404, 'AUTH_FEATURE_DISABLED', '此认证方式暂未启用。')
         const body = parseBody(schema, req.body, '请检查填写的信息和验证码。')
         res.status(status).json(buildSuccess(requestId, await handler(body, req, res)))
       } catch (error) {
@@ -64,6 +66,7 @@ export function accountAuthRoutes(consumeSmsIpQuota: (ip: string) => boolean) {
   }
 
   post('/email/send-code', z.object({ email, purpose: z.enum(['register', 'login', 'bind']), ...captcha }), async (body, req) => {
+    assertPreviewEmailAllowed(body.email)
     checkCaptcha(body)
     const address = body.email
     const purpose = body.purpose
@@ -82,11 +85,13 @@ export function accountAuthRoutes(consumeSmsIpQuota: (ip: string) => boolean) {
   post('/email/register', z.object({
     email, code: emailCode, legalConsent: legalConsentSchema, referralCode: z.string().trim().max(24).optional(),
   }), async (body, _req, res) => {
+    assertPreviewEmailAllowed(body.email)
     const user = await registerEmailUserData(body)
     return { user, tokens: await createSession(user.id, res) }
   }, 201)
 
   post('/email/login', z.object({ email, code: emailCode }), async (body, _req, res) => {
+    assertPreviewEmailAllowed(body.email)
     const { user, tokenVersion } = await loginAccountEmailCodeData(body.email, body.code)
     return { user, tokens: await createSession(user.id, res, tokenVersion) }
   })
@@ -108,6 +113,7 @@ export function accountAuthRoutes(consumeSmsIpQuota: (ip: string) => boolean) {
   post('/reset/send-code', z.object({ identifier, ...captcha }), async (body, req) => {
     checkCaptcha(body)
     const identity = accountIdentity(body.identifier)
+    if ('email' in identity) assertPreviewEmailAllowed(identity.email)
     const account = await findAccountByIdentity(identity, true)
     const userId = account?.id ?? null
     const deliver = Boolean(account && !account.bannedAt)

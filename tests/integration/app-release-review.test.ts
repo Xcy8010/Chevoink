@@ -7,6 +7,7 @@ import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Prisma } from '@prisma/client'
 import app from '../../api/app.js'
+import { env } from '../../api/config/env.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { createSession } from '../../api/lib/auth-session.js'
 import { executeAppRelease, previewAppRelease, reconcileAppRelease } from '../../api/lib/app-releases.js'
@@ -60,6 +61,43 @@ afterAll(async()=>{
  await rm(root,{recursive:true,force:true});await prisma.$disconnect()
 })
 describe('actual release and admin routers on isolated PostgreSQL',()=>{
+ it('uses the same browser grant for anonymous test assets and registration options, then revokes both on withdrawal',async()=>{
+  const previous={webUrl:env.webUrl,accountEmailAuthEnabled:env.accountEmailAuthEnabled,accountEmailAuthTestRecipient:env.accountEmailAuthTestRecipient}
+  const webUrl='https://preview.example.test',revision=7,recipient='approved-preview@example.test'
+  Object.assign(env,{webUrl,accountEmailAuthEnabled:false,accountEmailAuthTestRecipient:recipient})
+  const api=()=>request(app)
+  const bootstrap='/api/app-releases/bootstrap',options='/api/auth/options'
+  const testAsset=`/api/app-releases/artifacts/${ids[1]}/assets/app.js`
+  try{
+   await prisma.appReleaseChannel.create({data:{channel:'test',releaseId:ids[1],revision,enabled:true}})
+   expect((await api().get(bootstrap+'?channel=test').set('X-Release-Channel','test')).body.data).toMatchObject({channel:'stable',release:{id:ids[0]}})
+   expect((await api().get(options)).body.data.emailAuthEnabled).toBe(false)
+   expect((await api().get(testAsset)).status).toBe(403)
+   const launch=await api().post('/api/admin/app-releases/email-auth-preview').set('Host','preview.example.test')
+    .set('Origin',webUrl).set('X-Forwarded-Proto','https').set('Cookie',`chevoink_session=${token}`)
+    .send({releaseId:ids[1],revision})
+   expect(launch.status).toBe(200)
+   const cookies=launch.headers['set-cookie'] as unknown as string[]
+   const previewCookie=cookies.find(value=>value.startsWith('__Host-chevoink_email_auth_preview='))!.split(';')[0]
+   expect(cookies).toEqual(expect.arrayContaining([expect.stringMatching(/^chevoink_session=;.*Max-Age=0/)]))
+   expect((await api().get(bootstrap).set('Cookie',previewCookie)).body.data).toMatchObject({channel:'test',release:{id:ids[1]}})
+   expect((await api().get(testAsset).set('Cookie',previewCookie)).status).toBe(200)
+   expect((await api().get(options).set('Cookie',previewCookie)).body.data.emailAuthEnabled).toBe(true)
+   expect((await api().get(options).set('Cookie',`${previewCookie}; chevoink_session=${token}`)).body.data.emailAuthEnabled).toBe(false)
+   const wrongEmail=await api().post('/api/auth/email/send-code').set('Cookie',previewCookie)
+    .send({email:'other-preview@example.test',purpose:'register',captchaId:'fixture',captchaAnswer:'fixture'})
+   expect(wrongEmail.body.error.code).toBe('AUTH_PREVIEW_RECIPIENT_REQUIRED')
+   const smsRegister=await api().post('/api/auth/sms/register').set('Cookie',previewCookie).send({})
+   expect(smsRegister.body.error.code).toBe('AUTH_EMAIL_REGISTRATION_REQUIRED')
+   await prisma.appReleaseChannel.update({where:{channel:'test'},data:{enabled:false,revision:{increment:1}}})
+   expect((await api().get(bootstrap).set('Cookie',previewCookie)).body.data).toMatchObject({channel:'stable',release:{id:ids[0]}})
+   expect((await api().get(options).set('Cookie',previewCookie)).body.data.emailAuthEnabled).toBe(false)
+   expect((await api().get(testAsset).set('Cookie',previewCookie)).status).toBe(403)
+  }finally{
+   Object.assign(env,previous)
+   await prisma.appReleaseChannel.deleteMany({where:{channel:'test',releaseId:ids[1]}})
+  }
+ })
  it('routes a compatible test release without official policies while actual registration stays unavailable',async()=>{
   const policies=await prisma.siteContent.findMany({where:{kind:{in:['terms','privacy']}},select:{id:true,withdrawn:true}})
   try{

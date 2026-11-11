@@ -7,7 +7,7 @@ import type { LegalConsent } from '../../../shared/contracts/site-content.js'
  */
 import { randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
-import { env } from '../../config/env.js'
+import { accountEmailAuthEnabled, requiresPhoneForEmailSignup } from '../account-email-auth-scope.js'
 import { lockAccountKey, prepareAccountEmailCode } from '../email-verification.js'
 import type { CommentTargetType, FollowUserItem, InteractionBadges, InteractionItem, Post, PrivacyLevel, PrivacySettings, ProfileVisibility, ReceivedLikeItem, User, UserMePayload, UserReplyItem } from '../../../shared/contracts/index.js'
 import { createUnsetPasswordHash, hashPassword, isLegacyPasswordHash, verifyPassword } from '../password.js'
@@ -27,10 +27,11 @@ import { activeChapterScope } from './internal.js'
 export async function getMePayloadData(userId: string): Promise<UserMePayload> {
   const user = await ensureUserExists(userId)
 
-  if (env.accountEmailAuthEnabled && !user.emailVerifiedAt) {
+  const emailAuth = accountEmailAuthEnabled()
+  if (emailAuth && !user.emailVerifiedAt) {
     return { user: { ...toUser(user), privacy: toPrivacySettings(user) }, shelf: [], drafts: [], activities: [], notifications: [] }
   }
-  const includeStudio = !env.accountEmailAuthEnabled || Boolean(user.phoneVerifiedAt)
+  const includeStudio = (!emailAuth || Boolean(user.phoneVerifiedAt)) && !requiresPhoneForEmailSignup(user)
   const [draftChapters, recentPosts, recentComments, recentConversations, recentCoverAssets, authoredNovels] = await Promise.all([
       includeStudio ? prisma.chapter.findMany({
         where: {

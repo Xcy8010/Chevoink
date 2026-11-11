@@ -9,7 +9,8 @@ import { assertMigrationEnvironment, assertDatabaseIdentity, assertFindingIndex,
   adminExperiencePlan, adminExperienceMigrations, assertAdminExperienceState, readAdminExperienceState,
   appReleaseRetentionMigrationName, appReleaseRetentionMigrationChecksum, retentionColumns, retentionIndexes, retentionConstraints, assertAppReleaseRetentionState, readAppReleaseRetentionState,
   announcementReadsMigrationName, announcementReadsMigrationChecksum, assertAnnouncementReadsState,
-  userNotificationsMigrationName, userNotificationsMigrationChecksum } from '../../scripts/verify-release-migration.mjs'
+  userNotificationsMigrationName, userNotificationsMigrationChecksum,
+  emailAccountMigrationName, emailAccountMigrationChecksum } from '../../scripts/verify-release-migration.mjs'
 
 // Static catalog captured after the four frozen SQL files in isolated PostgreSQL.
 const experienceCatalog = {
@@ -285,19 +286,88 @@ model AppReleaseRetirement {
     writeFileSync(path.join(f.candidate, announcementPath), 'SELECT 1;')
     expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
   })
-  it('keeps the email account migration outside the historical production approvals', () => {
+  const emailAccountFixture = () => {
     const f = notificationFixture()
-    const migration = '20261112090000_email_account_auth'
-    const previousSchema = path.join(f.baseline, 'prisma/schema.prisma')
-    writeFileSync(previousSchema, f.schema)
+    writeFileSync(path.join(f.baseline, 'prisma/schema.prisma'), f.schema)
     mkdirSync(path.dirname(path.join(f.baseline, f.relative)))
     writeFileSync(path.join(f.baseline, f.relative), f.sql)
-    writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), readFileSync('prisma/schema.prisma'))
-    const migrationFile = `prisma/migrations/${migration}/migration.sql`
-    mkdirSync(path.dirname(path.join(f.candidate, migrationFile)))
-    writeFileSync(path.join(f.candidate, migrationFile), readFileSync(migrationFile))
-    expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow('Unapproved schema change')
-    expect(() => assertMigrationState([], [], 'before', undefined, migration)).toThrow('Unapproved migration plan')
+    const verificationModel = `model EmailVerificationCode {
+  id                String                     @id @db.VarChar(64)
+  email             String                     @db.VarChar(255)
+  purpose           EmailVerificationPurpose
+  userId            String?                    @map("user_id") @db.VarChar(64)
+  requesterKey      String                     @map("requester_key") @db.VarChar(64)
+  codeHash          String                     @map("code_hash") @db.VarChar(64)
+  expiresAt         DateTime                   @map("expires_at")
+  consumedAt        DateTime?                  @map("consumed_at")
+  attempts          Int                        @default(0)
+  sendState         AccountVerificationSendState @default(pending) @map("send_state")
+  providerRequestId String?                    @map("provider_request_id") @db.VarChar(128)
+  createdAt         DateTime                   @default(now()) @map("created_at")
+  user              User?                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([email, createdAt])
+  @@index([requesterKey, createdAt])
+  @@index([expiresAt])
+  @@index([userId])
+  @@map("email_verification_codes")
+}
+
+`
+    const schema = f.schema
+      .replace('  admin_bind\n}', `  admin_bind
+  bind_phone
+  change_password
+}
+
+enum EmailVerificationPurpose {
+  register
+  login
+  bind
+  reset_password
+  change_password
+}
+
+enum AccountVerificationSendState {
+  pending
+  accepted
+  rejected
+  unknown
+  suppressed
+}`)
+      .replace('  passwordHash               String', `  emailVerifiedAt            DateTime?               @map("email_verified_at")
+  phoneVerifiedAt            DateTime?               @map("phone_verified_at")
+  accountSetupStep           Int?                    @map("account_setup_step")
+  accountSetupSkippedSteps   Int[]                   @default([]) @map("account_setup_skipped_steps")
+  accountSetupFinishedAt     DateTime?               @map("account_setup_finished_at")
+  emailVerificationCodes     EmailVerificationCode[]
+  passwordHash               String`)
+      .replace('model SmsVerificationCode {', verificationModel + 'model SmsVerificationCode {')
+      .replace('  provider   String                 @default("tencentcloud") @db.VarChar(32)\n',
+        '  provider   String                 @default("tencentcloud") @db.VarChar(32)\n  sendState  AccountVerificationSendState? @map("send_state")\n')
+    writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), schema)
+    const relative = `prisma/migrations/${emailAccountMigrationName}/migration.sql`
+    const migrationPath = path.join(f.candidate, relative)
+    mkdirSync(path.dirname(migrationPath))
+    writeFileSync(migrationPath, readFileSync(relative, 'utf8').replaceAll('\r\n', '\n'))
+    return { ...f, migrationPath }
+  }
+
+  it('admits the exact email account schema and migration', () => {
+    const f = emailAccountFixture()
+    expect(releaseMigrationPlan(f.candidate, f.baseline)).toBe(emailAccountMigrationName)
+    const deploy = readFileSync('deploy/deploy-production.sh', 'utf8')
+    expect(deploy).toContain('"$MIGRATION_PLAN" == "20261112090000_email_account_auth" && "$PUBLICATION" != api-only')
+    expect(deploy.indexOf('email account migration requires API-only deployment')).toBeLessThan(deploy.indexOf('phase migrating'))
+  })
+
+  it.each(['schema', 'history', 'sql', 'extra'])('rejects email account %s outside its frozen approval', change => {
+    const f = emailAccountFixture()
+    if (change === 'schema') writeFileSync(path.join(f.candidate, 'prisma/schema.prisma'), '// unrelated')
+    if (change === 'history') writeFileSync(path.join(f.candidate, f.relative), 'SELECT 1;')
+    if (change === 'sql') writeFileSync(f.migrationPath, 'SELECT 1;')
+    if (change === 'extra') writeFileSync(path.join(path.dirname(f.migrationPath), 'extra.sql'), 'SELECT 1;')
+    expect(() => releaseMigrationPlan(f.candidate, f.baseline)).toThrow()
   })
   it('rejects a preexisting announcement receipt table before migration', () => {
     const before = { tables: [], columns: [], indexes: [], constraints: [], rowCount: null }
@@ -309,6 +379,7 @@ model AppReleaseRetirement {
     [appReleaseRetentionMigrationName, appReleaseRetentionMigrationChecksum],
     [announcementReadsMigrationName, announcementReadsMigrationChecksum],
     [userNotificationsMigrationName, userNotificationsMigrationChecksum],
+    [emailAccountMigrationName, emailAccountMigrationChecksum],
   ])('requires only %s pending, one exact successful row afterwards and unchanged full history', (migration, checksum) => {
     const old = { migration_name: 'old', checksum: 'a'.repeat(64), finished_at: new Date(), rolled_back_at: null, applied_steps_count: 1, historyHash: 'a'.repeat(32) }
     const target = { ...old, migration_name: migration, checksum }

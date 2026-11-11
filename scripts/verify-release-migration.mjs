@@ -22,6 +22,9 @@ export const userNotificationsMigrationName = '20261108140000_user_notifications
 export const userNotificationsMigrationChecksum = '312ba252d6159c02696f9b60d2eaa31a855f7fc53912479f0ebcaaf643a8f03a'
 const userNotificationsCandidateSchema = '19f4edd40b6bc2fb8012a823f0f5581f92ca05258ab38ffb86ae682ef0d1833f'
 const userNotificationsTable = 'user_notifications'
+export const emailAccountMigrationName = '20261112090000_email_account_auth'
+export const emailAccountMigrationChecksum = '07112bd97b8b5163f951d748df6d6681be343b9456866f2329235d9f07b48740'
+const emailAccountCandidateSchema = '8d8b27d023654f0330e35f81a12ee1894f0017dce1f31d663a3fd93d77dc1ecc'
 export const adminExperiencePlan = '20261106_admin_model_experience'
 export const adminExperienceMigrations = [
   ['20261106120000_site_content', 'e482a56f154bc0207c5a221a823869151518a4ac3253c2d5e7ea6c8f928d4bde'],
@@ -41,7 +44,8 @@ reviewed.set(adminExperiencePlan, createHash('sha256').update(JSON.stringify(adm
 reviewed.set(appReleaseRetentionMigrationName, appReleaseRetentionMigrationChecksum)
 reviewed.set(announcementReadsMigrationName, announcementReadsMigrationChecksum)
 reviewed.set(userNotificationsMigrationName, userNotificationsMigrationChecksum)
-const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName, userNotificationsMigrationName])
+reviewed.set(emailAccountMigrationName, emailAccountMigrationChecksum)
+const fullHistoryPlans = new Set([adminExperiencePlan, appReleaseRetentionMigrationName, announcementReadsMigrationName, userNotificationsMigrationName, emailAccountMigrationName])
 const oldIndex = 'quality_findings_report_id_source_signal_evidence_hash_key'
 const newIndex = 'quality_findings_report_source_signal_span_key'
 const oldDeclaration = '@@unique([reportId, source, signal, evidenceHash])'
@@ -65,6 +69,12 @@ export function releaseMigrationPlan(candidate, baseline) {
   const currentFiles = files(path.join(candidate, 'prisma/migrations'))
   const oldFiles = files(path.join(baseline, 'prisma/migrations'))
   if (next === previous && JSON.stringify(currentFiles) === JSON.stringify(oldFiles)) return 'routine'
+  const emailTarget = `${emailAccountMigrationName}/migration.sql`
+  if (digest(previous.replaceAll('\r\n', '\n')) === userNotificationsCandidateSchema
+    && digest(next.replaceAll('\r\n', '\n')) === emailAccountCandidateSchema
+    && !oldFiles.some(([name]) => name === emailTarget)
+    && JSON.stringify(currentFiles.filter(([name]) => name !== emailTarget)) === JSON.stringify(oldFiles)
+    && currentFiles.find(([name]) => name === emailTarget)?.[1] === emailAccountMigrationChecksum) return emailAccountMigrationName
   const notificationTarget = `${userNotificationsMigrationName}/migration.sql`
   if (digest(previous.replaceAll('\r\n', '\n')) === announcementReadsCandidateSchema
     && digest(next.replaceAll('\r\n', '\n')) === userNotificationsCandidateSchema
@@ -426,6 +436,132 @@ export function readUserNotificationsState(tx, phase) {
   return readAddedTableState(tx, phase, userNotificationsTable)
 }
 
+const smsPurposeBefore = ['login', 'register', 'reset_password', 'admin_login', 'admin_bind']
+const emailPurposeAfter = ['register', 'login', 'bind', 'reset_password', 'change_password']
+const verificationStates = ['pending', 'accepted', 'rejected', 'unknown', 'suppressed']
+const emailUserColumns = [
+  ['email_verified_at', 'timestamp(3) without time zone'],
+  ['phone_verified_at', 'timestamp(3) without time zone'],
+  ['account_setup_step', 'integer'],
+  ['account_setup_skipped_steps', 'integer[]', true, 'ARRAY[]::integer[]'],
+  ['account_setup_finished_at', 'timestamp(3) without time zone'],
+]
+const smsStateColumn = ['send_state', '"AccountVerificationSendState"']
+const emailCodeTable = 'email_verification_codes'
+const emailCodeCatalog = {
+  tables: [{ name: emailCodeTable, kind: 'r' }],
+  columns: [
+    ['id', 'character varying(64)'], ['email', 'character varying(255)'],
+    ['purpose', '"EmailVerificationPurpose"'], ['user_id', 'character varying(64)', false],
+    ['requester_key', 'character varying(64)'], ['code_hash', 'character varying(64)'],
+    ['expires_at', 'timestamp(3) without time zone'], ['consumed_at', 'timestamp(3) without time zone', false],
+    ['attempts', 'integer', true, '0'], ['send_state', '"AccountVerificationSendState"', true, "'pending'::\"AccountVerificationSendState\""],
+    ['provider_request_id', 'character varying(128)', false],
+    ['created_at', 'timestamp(3) without time zone', true, 'CURRENT_TIMESTAMP'],
+  ].map(([name, type, required = true, defaultValue = null]) => ({ name, type, required, defaultValue })),
+  indexes: [
+    ['pkey', true, ['id']], ['email_created_at_idx', false, ['email', 'created_at']],
+    ['requester_key_created_at_idx', false, ['requester_key', 'created_at']],
+    ['expires_at_idx', false, ['expires_at']], ['user_id_idx', false, ['user_id']],
+  ].map(([suffix, unique, columns]) => ({
+    name: `${emailCodeTable}_${suffix}`, unique, columns,
+    definition: `CREATE ${unique ? 'UNIQUE ' : ''}INDEX ${emailCodeTable}_${suffix} ON public.${emailCodeTable} USING btree (${columns.join(', ')})`,
+    valid: true, ready: true, partial: false, expression: false,
+  })),
+  constraints: [
+    { name: 'email_verification_codes_pkey', kind: 'p', definition: 'PRIMARY KEY (id)', valid: true },
+    { name: 'email_verification_codes_user_id_fkey', kind: 'f', definition: 'FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE CASCADE ON DELETE CASCADE', valid: true },
+  ],
+  rowCount: 0,
+}
+const emailIndexName = 'users_verified_email_ci_key'
+const setupConstraintName = 'users_account_setup_step_check'
+const columnTuples = columns => columns.map(({ name, type, required, defaultValue }) => [name, type, required, defaultValue])
+const expectedColumns = tuples => tuples.map(([name, type, required = false, defaultValue = null]) => [name, type, required, defaultValue])
+const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
+
+export function assertEmailAccountCatalog(state, phase, before) {
+  if (!['before', 'after'].includes(phase)) throw Error('Invalid email account migration phase')
+  const after = phase === 'after'
+  const { codeTable, userColumns, smsColumns, emailIndexes, setupConstraints, enumLabels } = state
+  if (after) assertEmailAccountCatalog(before, 'before')
+  assertAddedTableState({ ...codeTable, rowCount: after ? 0 : null }, phase, before?.codeTable, emailCodeCatalog, 'Email verification')
+  if (!same(columnTuples(userColumns), expectedColumns(after ? emailUserColumns : []))
+    || !same(columnTuples(smsColumns), expectedColumns(after ? [smsStateColumn] : []))) {
+    throw Error('Email account column catalog mismatch')
+  }
+  const labels = name => enumLabels.find(row => row.name === name)?.labels ?? null
+  if (!same(labels('SmsVerificationPurpose'), after ? [...smsPurposeBefore, 'bind_phone', 'change_password'] : smsPurposeBefore)
+    || !same(labels('EmailVerificationPurpose'), after ? emailPurposeAfter : null)
+    || !same(labels('AccountVerificationSendState'), after ? verificationStates : null)
+    || enumLabels.length !== (after ? 3 : 1)) throw Error('Email account enum catalog mismatch')
+  if (!after) {
+    if (emailIndexes.length || setupConstraints.length || codeTable.rowCount !== null) throw Error('Email account objects already exist')
+    return
+  }
+  const [index] = emailIndexes, [constraint] = setupConstraints
+  if (emailIndexes.length !== 1 || !index.valid || !index.ready || !index.unique || !index.expression || !index.partial
+    || index.definition !== 'CREATE UNIQUE INDEX users_verified_email_ci_key ON public.users USING btree (lower((email)::text)) WHERE (email_verified_at IS NOT NULL)') {
+    throw Error('Verified email index mismatch')
+  }
+  if (setupConstraints.length !== 1 || constraint.kind !== 'c' || !constraint.valid
+    || constraint.definition.replace(/[()]/g, '').replace(/\s+/g, ' ').trim() !== 'CHECK account_setup_step >= 1 AND account_setup_step <= 3') {
+    throw Error('Account setup constraint mismatch')
+  }
+}
+
+export async function readEmailAccountCatalog(tx, phase) {
+  const [codeTable, users, sms, enumLabels] = await Promise.all([
+    readAddedTableState(tx, phase, emailCodeTable),
+    readAddedTableState(tx, 'before', 'users'),
+    readAddedTableState(tx, 'before', 'sms_verification_codes'),
+    tx.$queryRaw`SELECT t.typname AS name, array_agg(e.enumlabel::text ORDER BY e.enumsortorder) AS labels
+      FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace JOIN pg_enum e ON e.enumtypid=t.oid
+      WHERE n.nspname=current_schema() AND t.typname IN ('SmsVerificationPurpose','EmailVerificationPurpose','AccountVerificationSendState')
+      GROUP BY t.typname ORDER BY t.typname`,
+  ])
+  return { codeTable, enumLabels,
+    userColumns: users.columns.filter(row => emailUserColumns.some(([name]) => name === row.name)),
+    smsColumns: sms.columns.filter(row => row.name === smsStateColumn[0]),
+    emailIndexes: users.indexes.filter(row => row.name === emailIndexName),
+    setupConstraints: users.constraints.filter(row => row.name === setupConstraintName),
+  }
+}
+
+async function readEmailAccountMigrationState(tx, phase, before) {
+  const catalog = await readEmailAccountCatalog(tx, phase)
+  assertEmailAccountCatalog(catalog, phase, before?.catalog)
+  if (phase === 'before') {
+    const [{ proofCutoff }] = await tx.$queryRaw`SELECT statement_timestamp() AS "proofCutoff"`
+    return { catalog, proofCutoff, verification: null }
+  }
+  const proofCutoff = new Date(before.proofCutoff)
+  if (!Number.isFinite(+proofCutoff)) throw Error('Missing email migration proof cutoff')
+  const [verification] = await tx.$queryRaw`WITH evidence AS (
+    SELECT u.id,
+      max(c.consumed_at) FILTER (WHERE c.consumed_at <= ${proofCutoff}::timestamptz AT TIME ZONE 'UTC') AS latest_before,
+      bool_or(c.consumed_at = u.phone_verified_at) AS matches_mark
+    FROM users u JOIN sms_verification_codes c ON c.phone=u.phone
+    WHERE c.consumed_at IS NOT NULL AND (
+      (c.user_id=u.id AND c.purpose IN ('login','admin_login','reset_password')) OR
+      (c.user_id IS NULL AND c.purpose='register' AND c.consumed_at BETWEEN u.created_at AND u.created_at + interval '5 seconds')
+    ) GROUP BY u.id
+  )
+  SELECT count(*) FILTER (WHERE u.phone_verified_at IS NOT NULL)::int AS "verifiedPhones",
+    count(*) FILTER (WHERE u.email_verified_at IS NOT NULL OR u.account_setup_step IS NOT NULL
+      OR cardinality(u.account_setup_skipped_steps) <> 0 OR u.account_setup_finished_at IS NOT NULL)::int AS "legacyAccountChanges",
+    count(*) FILTER (WHERE u.phone_verified_at IS NOT NULL AND NOT coalesce(evidence.matches_mark, false))::int AS "unprovenPhones",
+    count(*) FILTER (WHERE evidence.latest_before IS NOT NULL AND
+      (u.phone_verified_at IS NULL OR u.phone_verified_at < evidence.latest_before))::int AS "missingPhoneProofs",
+    (SELECT count(*)::int FROM sms_verification_codes WHERE send_state IS NOT NULL) AS "legacySmsStateChanges"
+  FROM users u LEFT JOIN evidence ON evidence.id=u.id`
+  if (catalog.codeTable.rowCount !== 0 || verification.legacyAccountChanges !== 0 || verification.unprovenPhones !== 0
+    || verification.missingPhoneProofs !== 0 || verification.legacySmsStateChanges !== 0) {
+    throw Error('Email account migration initial state or phone evidence mismatch')
+  }
+  return { catalog, proofCutoff, verification }
+}
+
 export function assertMigrationEnvironment(environment, shared) {
   if (environment.APP_ENV !== 'production' || shared.APP_ENV !== 'production'
     || !shared.DATABASE_URL || environment.DATABASE_URL !== shared.DATABASE_URL) throw Error('Production migration environment mismatch')
@@ -454,7 +590,13 @@ async function main() {
   const sharedPath = '/opt/chevoink/shared/app.env'
   if (realpathSync(path.join(candidate, '.env')) !== sharedPath) throw Error('Shared production environment path mismatch')
   const { parse } = await import('dotenv')
-  const expectedDatabase = assertMigrationEnvironment(process.env, parse(readFileSync(sharedPath)))
+  const shared = parse(readFileSync(sharedPath))
+  const expectedDatabase = assertMigrationEnvironment(process.env, shared)
+  const emailAuthOff = value => value == null || /^(?:false|0|off|no)?$/i.test(value.trim())
+  if (plan === emailAccountMigrationName
+    && (!emailAuthOff(shared.ACCOUNT_EMAIL_AUTH_ENABLED) || !emailAuthOff(process.env.ACCOUNT_EMAIL_AUTH_ENABLED))) {
+    throw Error('The shared email auth switch must be off for this migration')
+  }
   const { PrismaClient } = await import('@prisma/client')
   const db = new PrismaClient()
   try {
@@ -471,6 +613,10 @@ async function main() {
       if (before && (before.migration !== plan || before.checksum !== reviewed.get(plan) || before.phase !== 'before')) throw Error('Migration preflight receipt mismatch')
       if (before) assertDatabaseIdentity(database, before.database)
       assertMigrationState(rows, checksums, phase, before?.migrations, plan)
+      if (plan === emailAccountMigrationName) {
+        const emailAccounts = await readEmailAccountMigrationState(tx, phase, before?.emailAccounts)
+        return { migration: plan, checksum: reviewed.get(plan), phase, checkedAt: new Date().toISOString(), database, migrations: rows, emailAccounts }
+      }
       if (plan === userNotificationsMigrationName) {
         const userNotifications = await readUserNotificationsState(tx, phase)
         assertUserNotificationsState(userNotifications, phase, before?.userNotifications)

@@ -1,4 +1,5 @@
 BEGIN;
+SET LOCAL lock_timeout = '5s';
 
 ALTER TYPE "SmsVerificationPurpose" ADD VALUE 'bind_phone';
 ALTER TYPE "SmsVerificationPurpose" ADD VALUE 'change_password';

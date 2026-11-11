@@ -1,13 +1,18 @@
-import { beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { AppRelease, AppReleaseChannel, AppReleaseOperation, AppReleaseRetirement } from '@prisma/client'
-import type { Request } from 'express'
-import { executeAppRelease, importAppRelease, previewAppRelease, reconcileAppRelease, requireAppReleaseCapability, selectAppRelease } from '../../api/lib/app-releases.js'
+import type { Request, Response } from 'express'
+import { env } from '../../api/config/env.js'
+import { accountEmailAuthEnabled, withAccountEmailAuthPreview, writeAccountEmailAuthPreviewGrant } from '../../api/lib/account-email-auth-scope.js'
+import { executeAppRelease, importAppRelease, previewAppRelease, reconcileAppRelease, requireAppReleaseCapability, resolveEmailAuthPreview, selectAppRelease, verifyEmailAuthPreviewLaunch } from '../../api/lib/app-releases.js'
 import type { AppReleaseManifest, AppReleaseAction } from '../../shared/contracts/app-release.js'
 const state=vi.hoisted(()=>({releases:[] as AppRelease[],channels:[] as AppReleaseChannel[],operations:[] as AppReleaseOperation[],retirements:[] as AppReleaseRetirement[],audits:[] as unknown[],artifacts:new Map<string,{manifest:AppReleaseManifest;artifactSha256:string}>(),superAdmin:true,testers:new Set<string>(),policy:true,terms:'terms' as string|null,privacy:'privacy' as string|null,failAudit:false,serial:Promise.resolve<unknown>(undefined)}))
 const db={
  $executeRaw:vi.fn(async()=>1),
  appReleaseRetirement:{findUnique:vi.fn(async({where}:{where:{releaseId:string}})=>state.retirements.find(row=>row.releaseId===where.releaseId)??null),findMany:vi.fn(async()=>state.retirements),create:vi.fn(async({data}:{data:AppReleaseRetirement})=>{const row={...data,createdAt:new Date(),updatedAt:new Date(),completedAt:null,errorCode:null};state.retirements.push(row);return row})},
- user:{findUnique:vi.fn(async()=>({role:'admin',isSuperAdmin:state.superAdmin,bannedAt:null}))},
+ user:{findUnique:vi.fn(async({where}:{where:{id:string}})=>({
+  role:'admin',isSuperAdmin:state.superAdmin,bannedAt:null,
+  email:where.id==='email-fixture'?'approved@example.test':'ordinary@example.test',emailVerifiedAt:new Date(),
+ }))},
  appRelease:{findUnique:vi.fn(async({where}:{where:{id:string}})=>state.releases.find(row=>row.id===where.id)??null),create:vi.fn(async({data}:{data:AppRelease})=>{const row={...data,createdAt:new Date()};state.releases.push(row);return row}),findMany:vi.fn(async()=>state.releases)},
  appReleaseChannel:{findMany:vi.fn(async()=>state.channels),upsert:vi.fn(async({where,create,update}:{where:{channel:string};create:AppReleaseChannel;update:Partial<AppReleaseChannel>})=>{let row=state.channels.find(item=>item.channel===where.channel);if(row)Object.assign(row,update);else{row={...create,updatedAt:new Date()};state.channels.push(row)}return row}),update:vi.fn(async({where,data}:{where:{channel:string};data:{enabled:boolean;revision:{increment:number}}})=>{const row=state.channels.find(item=>item.channel===where.channel)!;row.enabled=data.enabled;row.revision+=data.revision.increment;return row})},
  appReleaseOperation:{findUnique:vi.fn(async({where}:{where:{id:string}})=>state.operations.find(row=>row.id===where.id)??null),findFirst:vi.fn(async({where}:{where:{releaseId:string;status:string;action:{in:string[]}}})=>state.operations.find(row=>row.releaseId===where.releaseId&&row.status===where.status&&where.action.in.includes(row.action))??null),findMany:vi.fn(async()=>state.operations),create:vi.fn(async({data}:{data:AppReleaseOperation})=>{const row={...data,createdAt:new Date(),updatedAt:new Date()};state.operations.push(row);return row})},
@@ -24,6 +29,47 @@ function release(id:string){const data=manifest(id);state.artifacts.set(id,{mani
 function channel(name:string,id:string,revision=1){state.channels.push({channel:name,releaseId:id,revision,enabled:true,updatedAt:new Date()})}
 const req=(user?:string,extra:Record<string,string>={})=>({headers:{...(user?{'fixture-user':user}:{}),...extra}} as unknown as Request)
 let sequence=0
+const originalPreviewEnv={accountEmailAuthEnabled:env.accountEmailAuthEnabled,accountEmailAuthTestRecipient:env.accountEmailAuthTestRecipient,authSessionSecret:env.authSessionSecret}
+afterEach(()=>{Object.assign(env,originalPreviewEnv)})
+it('authorizes only a fresh signed preview for the assigned revision, guest, or verified test identity',async()=>{
+ Object.assign(env,{accountEmailAuthEnabled:false,accountEmailAuthTestRecipient:'approved@example.test',authSessionSecret:'synthetic-test-key'})
+ release('stable-version');release('test-version');channel('stable','stable-version');channel('test','test-version',7)
+ state.testers.add('admin')
+ expect(await verifyEmailAuthPreviewLaunch('admin','test-version',7)).toBe('approved@example.test')
+ await expect(verifyEmailAuthPreviewLaunch('admin','test-version',6)).rejects.toMatchObject({code:'AUTH_PREVIEW_ASSIGNMENT_CHANGED'})
+ const append=vi.fn()
+ writeAccountEmailAuthPreviewGrant({append} as unknown as Response,{issuerId:'admin',releaseId:'test-version',revision:7},'approved@example.test')
+ const header=String(append.mock.calls[0][1])
+ expect(header).toMatch(/Path=\/; Secure; HttpOnly; SameSite=Strict; Max-Age=1800$/)
+ const cookie=header.split(';')[0]
+ const anonymous=req(undefined,{cookie})
+ const preview=await resolveEmailAuthPreview(anonymous)
+ expect(preview?.selection).toMatchObject({channel:'test',release:{id:'test-version'}})
+ expect(await withAccountEmailAuthPreview(preview!,async()=>({
+  enabled:accountEmailAuthEnabled(),selected:(await selectAppRelease(anonymous)).release?.id,
+ }))).toEqual({enabled:true,selected:'test-version'})
+ expect(accountEmailAuthEnabled()).toBe(false)
+ expect(await resolveEmailAuthPreview(req('email-fixture',{cookie,authorization:'Bearer fixture'}))).toEqual(preview)
+ expect(await resolveEmailAuthPreview(req('ordinary',{cookie}))).toBeUndefined()
+ expect(await resolveEmailAuthPreview(req(undefined,{'x-preview-cookie':cookie}))).toBeUndefined()
+ expect(await resolveEmailAuthPreview(req(undefined,{cookie:cookie+'0'}))).toBeUndefined()
+ state.testers.delete('admin')
+ expect(await resolveEmailAuthPreview(anonymous)).toBeUndefined()
+ state.testers.add('admin')
+ state.superAdmin=false
+ expect(await resolveEmailAuthPreview(anonymous)).toBeUndefined()
+ await expect(verifyEmailAuthPreviewLaunch('admin','test-version',7)).rejects.toMatchObject({code:'SUPER_ADMIN_REQUIRED'})
+ state.superAdmin=true
+ const assignment=state.channels[1]
+ assignment.revision=8
+ expect(await resolveEmailAuthPreview(anonymous)).toBeUndefined()
+ assignment.revision=7
+ assignment.enabled=false
+ expect(await resolveEmailAuthPreview(anonymous)).toBeUndefined()
+ assignment.enabled=true
+ const clock=vi.spyOn(Date,'now').mockReturnValue(Date.now()+30*60*1000)
+ try{expect(await resolveEmailAuthPreview(anonymous)).toBeUndefined()}finally{clock.mockRestore()}
+})
 async function operation(action:AppReleaseAction,releaseId:string){const view=await previewAppRelease('admin',action,releaseId);return{action,releaseId,expectedRevision:view.expectedRevision,previewHash:view.previewHash,operationId:`00000000-0000-4000-8000-${String(++sequence).padStart(12,'0')}`}}
 beforeEach(()=>{vi.clearAllMocks();state.releases=[];state.channels=[];state.operations=[];state.retirements=[];state.audits=[];state.artifacts.clear();state.superAdmin=true;state.testers.clear();state.policy=true;state.terms='terms';state.privacy='privacy';state.failAudit=false;state.serial=Promise.resolve()})
 it('selects real assigned artifacts from server tester qualification, never a URL or header',async()=>{release('stable-version');release('test-version');channel('stable','stable-version');channel('test','test-version');state.testers.add('tester');expect((await selectAppRelease(req('ordinary',{'x-release-channel':'test','x-release-id':'test-version'}))).release!.id).toBe('stable-version');expect((await selectAppRelease(req('tester'))).release).toMatchObject({id:'test-version',activatedAt:state.channels.find(row=>row.channel==='test')!.updatedAt.toISOString()});state.testers.delete('tester');expect((await selectAppRelease(req('tester'))).release!.id).toBe('stable-version');await expect(requireAppReleaseCapability(req('ordinary'),'siteContent')).rejects.toMatchObject({code:'APP_RELEASE_CAPABILITY_DISABLED'})})

@@ -10,7 +10,8 @@ param(
   [string]$OperationId,
   [string]$RequestId,
   [string]$RequestSha,
-  [switch]$SkipLocalChecks
+  [switch]$SkipLocalChecks,
+  [switch]$ApiOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -67,7 +68,13 @@ try {
   Invoke-Checked ssh.exe ($sshArguments + @("${UserName}@${HostName}", $preflight)) | Out-Null
   Invoke-Checked scp.exe ($scpArguments + @($package.archive, "${UserName}@${HostName}:$remoteArchive")) | Out-Null
   Invoke-Checked scp.exe ($scpArguments + @($package.baselineManifest, "${UserName}@${HostName}:$remoteManifest")) | Out-Null
-  $remote = "set -eu; test `"`$(sha256sum '$remoteArchive' | cut -d' ' -f1)`" = '$($package.archiveSha256)'; mkdir -m 700 '/opt/chevoink/app/release-$revision'; tar -xzf '$remoteArchive' -C '/opt/chevoink/app/release-$revision'; cd '/opt/chevoink/app/release-$revision'; tr -d '\r' < deploy/deploy-production.sh | bash -s -- '$revision' '$($package.archiveSha256)' '$ExpectedCurrentRevision' '$remoteArchive' '$remoteManifest'"
+  $publication = if ($ApiOnly) { 'api-only' } else { 'full' }
+  $priorPublicIndexHash = $null
+  if ($ApiOnly) {
+    $priorPublicIndexHash = ((Invoke-Checked ssh.exe ($sshArguments + @("${UserName}@${HostName}", 'sha256sum /var/www/chevoink/current/index.html'))) -split '\s+')[0]
+    if ($priorPublicIndexHash -notmatch '^[a-f0-9]{64}$') { throw 'Cannot verify the current public launcher.' }
+  }
+  $remote = "set -eu; test `"`$(sha256sum '$remoteArchive' | cut -d' ' -f1)`" = '$($package.archiveSha256)'; mkdir -m 700 '/opt/chevoink/app/release-$revision'; tar -xzf '$remoteArchive' -C '/opt/chevoink/app/release-$revision'; cd '/opt/chevoink/app/release-$revision'; tr -d '\r' < deploy/deploy-production.sh | bash -s -- '$revision' '$($package.archiveSha256)' '$ExpectedCurrentRevision' '$remoteArchive' '$remoteManifest' '$publication'"
   Invoke-Checked ssh.exe ($sshArguments + @("${UserName}@${HostName}", $remote))
   $health = (Invoke-Checked curl.exe @('--fail', '--silent', '--show-error', '--max-time', '20', "$PublicUrl/api/health")) -join "`n" | ConvertFrom-Json
   if (-not $health.success -or $health.data.appEnv -ne 'production') { throw 'Public production health check failed.' }
@@ -75,6 +82,7 @@ try {
   $publicIndexHash = (Get-FileHash -LiteralPath (Join-Path $packageDirectory 'public-index.html') -Algorithm SHA256).Hash.ToLowerInvariant()
   $remoteIndexHash = ((Invoke-Checked ssh.exe ($sshArguments + @("${UserName}@${HostName}", 'sha256sum /var/www/chevoink/current/index.html'))) -split '\s+')[0]
   if ($publicIndexHash -ne $remoteIndexHash) { throw 'Public index differs from the deployed entry page.' }
+  if ($ApiOnly -and $publicIndexHash -ne $priorPublicIndexHash) { throw 'API-only deployment changed the public launcher.' }
   if ($ReceiptPath) {
     $receipt = @{ schemaVersion = 1; runId = $OperationId; requestId = $RequestId; requestSha = $RequestSha; revision = $revision; baseline = $ExpectedCurrentRevision;
       ciRunId = $CiRunId; archiveSha256 = $package.archiveSha256; publicIndexSha256 = $publicIndexHash; verifiedAt = [DateTime]::UtcNow.ToString('o') }

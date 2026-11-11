@@ -19,7 +19,7 @@ import {
   updateNovelSchema,
   uploadNovelCoverSchema,
 } from '../../shared/contracts/index.js'
-import { env } from '../config/env.js'
+import { accountEmailAuthEnabled } from '../lib/account-email-auth-scope.js'
 import { getPublicSessionUserId, getSessionUserId, requireSessionUserId } from '../lib/auth-session.js'
 import {
   createChapterData,
@@ -85,7 +85,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
   const page = parsePositiveInt(req.query.page, 1)
   const pageSize = parsePositiveInt(req.query.pageSize, 12)
   const authorId = typeof req.query.authorId === 'string' && req.query.authorId.trim() ? req.query.authorId.trim() : undefined
-  const publishedOnly = req.query.status === 'published' || (env.accountEmailAuthEnabled
+  const publishedOnly = req.query.status === 'published' || res.locals.allowStudioOwnerAccess === false || (accountEmailAuthEnabled()
     && (!res.locals.allowStudioOwnerAccess || !authorId || authorId !== getPublicSessionUserId(req)))
   const tag = typeof req.query.tag === 'string' && req.query.tag.trim() ? req.query.tag.trim() : undefined
 

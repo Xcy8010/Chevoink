@@ -6,7 +6,7 @@
 import type { Prisma } from '@prisma/client'
 import type { Chapter, ChapterListItem, Comment, CommentTargetType, Conversation, CoverAsset, Message, MessageCard, Novel, NovelCard, Pagination, Post, TopicSummary, User, UserSummary, Volume, VolumeListItem } from '../../../shared/contracts/index.js'
 import { hasConfiguredPassword } from '../password.js'
-import { env } from '../../config/env.js'
+import { accountEmailAuthEnabled } from '../account-email-auth-scope.js'
 import { DataAccessError, prisma } from '../prisma.js'
 
 // Creative scope only. Public readers and historical/moderation paths must not
@@ -362,7 +362,7 @@ export function toUser(user: UserRecord, options: { publicProfile?: boolean } = 
     email: options.publicProfile ? null : user.email ?? null,
     phone: options.publicProfile ? null : user.phone ?? null,
     passwordConfigured: !options.publicProfile && passwordConfigured,
-    ...(!options.publicProfile && env.accountEmailAuthEnabled ? {
+    ...(!options.publicProfile && accountEmailAuthEnabled() ? {
       emailAuthEnabled: true,
       emailVerified: Boolean(user.emailVerifiedAt),
       phoneVerified: Boolean(user.phoneVerifiedAt),

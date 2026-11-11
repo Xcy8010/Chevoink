@@ -3,7 +3,10 @@ import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import app from '../../api/app.js'
 import { env } from '../../api/config/env.js'
+import { assertPreviewSmsSendAllowed, withAccountEmailAuthPreview } from '../../api/lib/account-email-auth-scope.js'
+import { assertStudioAccountAccess } from '../../api/lib/account-access.js'
 import { buildSessionTokens } from '../../api/lib/auth-session.js'
+import { sendAccountEmailCode } from '../../api/lib/email-verification.js'
 import { hashPassword } from '../../api/lib/password.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { handleTestDatabaseUnavailable } from '../support/database-availability.js'
@@ -101,6 +104,60 @@ describe.skipIf(!available)('email-first accounts against isolated PostgreSQL an
     Object.assign(env, saved)
     vi.unstubAllGlobals()
     await prisma.$disconnect()
+  })
+
+  it('reserves only one scoped registration dispatch across concurrent sends and subsequent delivery states', async () => {
+    const email = recipient()
+    const preview = {
+      recipient: email,
+      selection: { mode: 'legacy', channel: 'stable', release: null } as const,
+    }
+    await withAccountEmailAuthPreview(preview, async () => {
+      const send = () => sendAccountEmailCode({ email, purpose: 'register', userId: null }, '198.51.100.200', true)
+      await expect(sendAccountEmailCode({ email: recipient(), purpose: 'register', userId: null }, '198.51.100.200', true))
+        .rejects.toMatchObject({ code: 'AUTH_PREVIEW_RECIPIENT_REQUIRED' })
+      await expect(sendAccountEmailCode({ email, purpose: 'login', userId: null }, '198.51.100.200', true))
+        .rejects.toMatchObject({ code: 'AUTH_PREVIEW_REGISTRATION_ONLY' })
+      expect(assertPreviewSmsSendAllowed).toThrow(expect.objectContaining({ code: 'AUTH_PREVIEW_SMS_DISABLED' }))
+      const results = await Promise.allSettled([send(), send()])
+      expect(results).toEqual(expect.arrayContaining([
+        expect.objectContaining({ status: 'fulfilled' }),
+        expect.objectContaining({ status: 'rejected', reason: expect.objectContaining({ code: 'AUTH_PREVIEW_DISPATCH_USED' }) }),
+      ]))
+      await vi.waitFor(async () => {
+        expect(await prisma.emailVerificationCode.findFirst({ where: { email } })).toMatchObject({ sendState: 'accepted' })
+      })
+      for (const sendState of ['pending', 'unknown', 'rejected'] as const) {
+        await prisma.emailVerificationCode.updateMany({ where: { email }, data: { sendState } })
+        await expect(send()).rejects.toMatchObject({ code: 'AUTH_PREVIEW_DISPATCH_USED' })
+      }
+      expect(deliveryCalls.get(email)).toBe(1)
+      expect(await prisma.emailVerificationCode.count({ where: { email } })).toBe(1)
+    })
+  })
+
+  it('keeps phone-skipped email signups out of Studio and private attachments after preview ends', async () => {
+    const emailOnly = await prisma.user.create({ data: {
+      email: recipient(), emailVerifiedAt: new Date(), accountSetupFinishedAt: new Date(),
+      accountSetupSkippedSteps: [1, 2, 3], nickname: 'Email preview fixture', passwordHash: 'unset:fixture',
+    } })
+    const ordinary = await prisma.user.create({ data: {
+      phone: '+8613800000067', nickname: 'Ordinary stable fixture', passwordHash: 'unset:fixture',
+    } })
+    const previouslyEnabled = env.accountEmailAuthEnabled
+    env.accountEmailAuthEnabled = false
+    try {
+      const token = buildSessionTokens(emailOnly.id, emailOnly.tokenVersion).accessToken
+      expect((await api().get(auth + '/options').set('Cookie', cookie(token))).body.data.emailAuthEnabled).toBe(false)
+      for (const url of ['/api/novels/fixture/studio', `/api/uploads/agent-attachments/${emailOnly.id}/sample.txt`]) {
+        const response = await api().get(url).set('Cookie', cookie(token))
+        expect(response.status).toBe(403)
+        expect(response.body.error.code).toBe('AUTH_PHONE_VERIFICATION_REQUIRED')
+      }
+      await expect(assertStudioAccountAccess(ordinary.id)).resolves.toBeUndefined()
+    } finally {
+      env.accountEmailAuthEnabled = previouslyEnabled
+    }
   })
 
   it('requires server captcha, isolates purposes and consumes a registration code exactly once', async () => {

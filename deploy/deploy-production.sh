@@ -9,6 +9,8 @@ ARCHIVE_HASH="${2:?archive digest}"
 BASELINE="${3:?expected active SHA}"
 ARCHIVE="${4:?archive path}"
 MANIFEST="${5:?baseline manifest}"
+PUBLICATION="${6:-full}"
+[[ "$PUBLICATION" == full || "$PUBLICATION" == api-only ]]
 [[ "$REVISION" =~ ^[a-f0-9]{40}$ && "$BASELINE" =~ ^[a-f0-9]{40}$ && "$ARCHIVE_HASH" =~ ^[a-f0-9]{64}$ ]]
 [[ "$ARCHIVE" == "/tmp/chevoink-$REVISION.tar.gz" && "$MANIFEST" == "/tmp/chevoink-$REVISION-baseline.json" ]]
 APP_ROOT=/opt/chevoink
@@ -23,7 +25,10 @@ JOURNAL="$APP_ROOT/app/.release-$REVISION.jsonl"
 umask 077
 exec 9>"$APP_ROOT/app/.release.lock"
 flock -n 9
-phase() { printf '{"revision":"%s","phase":"%s","at":"%s"}\n' "$REVISION" "$1" "$(date -u +%FT%TZ)" >> "$JOURNAL"; }
+if [[ "$PUBLICATION" == api-only ]]; then
+  WEB_INDEX_BEFORE=$(sha256sum "$WEB_ROOT/index.html" | cut -d' ' -f1)
+fi
+phase() { printf '{"revision":"%s","phase":"%s","at":"%s","publication":"%s"}\n' "$REVISION" "$1" "$(date -u +%FT%TZ)" "$PUBLICATION" >> "$JOURNAL"; }
 trap 'echo "[chevoink] release stopped; inspect $JOURNAL and actual paths/process before retrying" >&2' ERR
 PINNED_NODE=$(tr -d '\r\n' < .node-version)
 [[ "$PINNED_NODE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
@@ -56,6 +61,10 @@ PROCESS_BEFORE=$(snapshot_process)
 # The helper accepts byte-identical schemas or an exact reviewed migration plan.
 # There is no generic schema override; routine releases never connect to the DB.
 MIGRATION_PLAN=$(node scripts/verify-release-migration.mjs plan "$STAGE" "$CURRENT")
+if [[ "$MIGRATION_PLAN" == "20261112090000_email_account_auth" && "$PUBLICATION" != api-only ]]; then
+  echo '[chevoink] email account migration requires API-only deployment' >&2
+  exit 1
+fi
 node --input-type=module -e '
 import {readFileSync} from "node:fs";import {execFileSync} from "node:child_process";
 const p=JSON.parse(readFileSync("package.json","utf8"));
@@ -71,7 +80,7 @@ verify_baseline
 [[ "$(snapshot_process)" == "$PROCESS_BEFORE" ]]
 printf '{"revision":"%s","archiveSha256":"%s"}\n' "$REVISION" "$ARCHIVE_HASH" > "$STAGE/.chevoink-release.json"
 phase prepared
-if [[ "$MIGRATION_PLAN" == "20261009010000_quality_finding_span_identity" || "$MIGRATION_PLAN" == "20261019120000_web_fetch_tool_config" || "$MIGRATION_PLAN" == "20261020120000_web_tool_billing" || "$MIGRATION_PLAN" == "20261101120000_admin_model_lifecycle" || "$MIGRATION_PLAN" == "20261106_admin_model_experience" || "$MIGRATION_PLAN" == "20261107010000_app_release_retention" || "$MIGRATION_PLAN" == "20261108120000_site_announcement_reads" || "$MIGRATION_PLAN" == "20261108140000_user_notifications" ]]; then
+if [[ "$MIGRATION_PLAN" == "20261009010000_quality_finding_span_identity" || "$MIGRATION_PLAN" == "20261019120000_web_fetch_tool_config" || "$MIGRATION_PLAN" == "20261020120000_web_tool_billing" || "$MIGRATION_PLAN" == "20261101120000_admin_model_lifecycle" || "$MIGRATION_PLAN" == "20261106_admin_model_experience" || "$MIGRATION_PLAN" == "20261107010000_app_release_retention" || "$MIGRATION_PLAN" == "20261108120000_site_announcement_reads" || "$MIGRATION_PLAN" == "20261108140000_user_notifications" || "$MIGRATION_PLAN" == "20261112090000_email_account_auth" ]]; then
   DOTENV_CONFIG_QUIET=true node --import dotenv/config scripts/verify-release-migration.mjs before "$STAGE" "$CURRENT" "$STAGE/.release-migration-before.json"
   phase migrating
   npx prisma migrate deploy
@@ -103,13 +112,17 @@ import {readFileSync} from "node:fs";
 const h=JSON.parse(readFileSync(".release-health.json","utf8"));
 if(!h.success || h.data?.appEnv!=="production") throw Error("production health failed");'
 phase healthy
-# Preserve old hashed assets/native downloads; publish the entry page last.
-while IFS= read -r -d '' entry; do
-  install -D -m 644 "$entry" "$WEB_ROOT/${entry#dist/}"
-done < <(find dist -type f ! -path dist/index.html -print0)
-install -m 644 dist/index.html "$WEB_ROOT/.index.html.next"
-mv -f "$WEB_ROOT/.index.html.next" "$WEB_ROOT/index.html"
-cmp -s dist/index.html "$WEB_ROOT/index.html"
+if [[ "$PUBLICATION" == full ]]; then
+  # Preserve old hashed assets/native downloads; publish the entry page last.
+  while IFS= read -r -d '' entry; do
+    install -D -m 644 "$entry" "$WEB_ROOT/${entry#dist/}"
+  done < <(find dist -type f ! -path dist/index.html -print0)
+  install -m 644 dist/index.html "$WEB_ROOT/.index.html.next"
+  mv -f "$WEB_ROOT/.index.html.next" "$WEB_ROOT/index.html"
+  cmp -s dist/index.html "$WEB_ROOT/index.html"
+else
+  [[ "$(sha256sum "$WEB_ROOT/index.html" | cut -d' ' -f1)" == "$WEB_INDEX_BEFORE" ]]
+fi
 pm2 save
 # Existing Nginx configuration is unchanged: no reload/fence.
 phase completed

@@ -9,6 +9,7 @@ import { getSessionUserId } from './auth-session.js'
 import { isEffectiveTester } from './tester-entitlement.js'
 import { readInstalledAppRelease } from './app-release-artifacts.js'
 import { readPublicSiteContent } from './site-content.js'
+import { accountEmailAuthPreview, configuredPreviewRecipient, readAccountEmailAuthPreviewGrant, type AccountEmailAuthPreview } from './account-email-auth-scope.js'
 
 type Transaction=Prisma.TransactionClient
 const fingerprint=(value:unknown)=>createHash('sha256').update(JSON.stringify(value,(_key,item:unknown)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.entries(item).sort(([left],[right])=>left.localeCompare(right,'en'))):item)).digest('hex')
@@ -33,18 +34,55 @@ export async function importAppRelease(actorId:string,releaseId:string,ip:string
   return present(row)
  })
 }
-export async function selectAppRelease(req:Request,tx:Transaction=prisma):Promise<AppReleaseBootstrap>{return selectAppReleaseForUser(getSessionUserId(req),tx)}
+export async function selectAppRelease(req:Request,tx:Transaction=prisma):Promise<AppReleaseBootstrap>{return accountEmailAuthPreview()?.selection??selectAppReleaseForUser(getSessionUserId(req),tx)}
 export async function selectAppReleaseForUser(userId:string|null,tx:Transaction=prisma):Promise<AppReleaseBootstrap>{
  const channels=await tx.appReleaseChannel.findMany()
  const stable=channels.find(row=>row.channel==='stable'&&row.enabled),test=channels.find(row=>row.channel==='test'&&row.enabled)
  const channel=test&&userId&&await isEffectiveTester(tx,userId)?'test':'stable'
  const selected=channel==='test'?test:stable
  if(!selected)return{mode:'legacy',channel:'stable',release:null}
+ return selectAssignedRelease(tx,selected,channel)
+}
+async function selectAssignedRelease(tx:Transaction,selected:AppReleaseChannel,channel:'stable'|'test'):Promise<AppReleaseBootstrap>{
  const row=await tx.appRelease.findUnique({where:{id:selected.releaseId}})
  if(!row||row.validationState!=='verified'||!row.verifiedAt||!compatible(row))throw new DataAccessError(503,'APP_RELEASE_UNAVAILABLE','已配置的应用版本尚未通过兼容验证。')
  await installedRelease(row)
  const manifest=appReleaseManifestSchema.parse(row.manifest)
  return{mode:'artifact',channel,release:{id:row.id,label:row.label,notes:manifest.publicNotes,entryUrl:`${manifest.basePath}index.html`,capabilities:manifest.capabilities,activatedAt:selected.updatedAt.toISOString()}}
+}
+async function readActiveTestAssignment(tx:Transaction,releaseId:string,revision:number){
+ return (await tx.appReleaseChannel.findMany()).find(row=>row.channel==='test'&&row.enabled&&row.releaseId===releaseId&&row.revision===revision)
+}
+export async function verifyEmailAuthPreviewLaunch(actorId:string,releaseId:string,revision:number,tx:Transaction=prisma){
+ const recipient=configuredPreviewRecipient()
+ if(!recipient)throw new DataAccessError(404,'AUTH_PREVIEW_UNAVAILABLE','邮箱注册预览暂未配置。')
+ await superAdmin(tx,actorId)
+ if(!await isEffectiveTester(tx,actorId))throw new DataAccessError(403,'AUTH_PREVIEW_FORBIDDEN','当前账户无法开启邮箱注册预览。')
+ const assignment=await readActiveTestAssignment(tx,releaseId,revision)
+ if(!assignment)throw new DataAccessError(409,'AUTH_PREVIEW_ASSIGNMENT_CHANGED','当前测试版已变化，请刷新后重试。')
+ await selectAssignedRelease(tx,assignment,'test')
+ return recipient
+}
+export async function resolveEmailAuthPreview(req:Request,tx:Transaction=prisma):Promise<AccountEmailAuthPreview|undefined>{
+ const grant=readAccountEmailAuthPreviewGrant(req)
+ if(!grant)return undefined
+ const userId=getSessionUserId(req)
+ const [assignment,issuer]=await Promise.all([
+  readActiveTestAssignment(tx,grant.releaseId,grant.revision),
+  tx.user.findUnique({where:{id:grant.issuerId},select:{role:true,isSuperAdmin:true,bannedAt:true}}),
+ ])
+ if(!assignment||issuer?.role!=='admin'||!issuer.isSuperAdmin||issuer.bannedAt||!await isEffectiveTester(tx,grant.issuerId))return undefined
+ if(userId){
+  const user=await tx.user.findUnique({where:{id:userId},select:{email:true,emailVerifiedAt:true,bannedAt:true}})
+  if(!user?.emailVerifiedAt||user.bannedAt||user.email?.toLowerCase()!==grant.recipient)return undefined
+ }
+ try{
+  const selection=await selectAssignedRelease(tx,assignment,'test')
+  return{selection,recipient:grant.recipient}
+ }catch{
+  // A broken or unverified artifact cannot carry preview authorization.
+  return undefined
+ }
 }
 export async function requireAppReleaseCapability(req:Request,capability:AppReleaseCapability){const selection=await selectAppRelease(req);if(selection.mode==='artifact'&&!selection.release!.capabilities.includes(capability))throw new DataAccessError(403,'APP_RELEASE_CAPABILITY_DISABLED','当前应用版本尚未开放此功能。');return selection}
 export async function listAppReleases(actorId:string){
@@ -52,7 +90,7 @@ export async function listAppReleases(actorId:string){
  const[releases,channels,operations,retired]=await Promise.all([prisma.appRelease.findMany({orderBy:{createdAt:'desc'}}),prisma.appReleaseChannel.findMany(),prisma.appReleaseOperation.findMany({where:{status:'applied'},orderBy:{createdAt:'asc'}}),prisma.appReleaseRetirement.findMany()])
  const unavailable=new Set(retired.map(row=>row.releaseId)),used=new Set([...operations.map(row=>row.releaseId),...channels.filter(row=>row.enabled).map(row=>row.releaseId)])
  const receipts=operations.map(row=>row.result as unknown as AppReleaseReceipt),periods=appReleasePeriods(receipts)
- return{releases:releases.filter(row=>!unavailable.has(row.id)).map(row=>({...present(row),lifecycle:used.has(row.id)?'retained' as const:'candidate' as const,effectivePeriods:periods.get(row.id)??[]})),stable:channelView(channels.find(row=>row.channel==='stable')),test:channelView(channels.find(row=>row.channel==='test')),operations:receipts.slice(-50).reverse(),retention:{limit:2,pending:retired.filter(row=>row.state!=='deleted'&&!row.errorCode).length,failed:retired.filter(row=>row.state!=='deleted'&&row.errorCode).length}}
+ return{releases:releases.filter(row=>!unavailable.has(row.id)).map(row=>({...present(row),lifecycle:used.has(row.id)?'retained' as const:'candidate' as const,effectivePeriods:periods.get(row.id)??[]})),stable:channelView(channels.find(row=>row.channel==='stable')),test:channelView(channels.find(row=>row.channel==='test')),operations:receipts.slice(-50).reverse(),retention:{limit:2,pending:retired.filter(row=>row.state!=='deleted'&&!row.errorCode).length,failed:retired.filter(row=>row.state!=='deleted'&&row.errorCode).length},emailAuthPreviewAvailable:Boolean(configuredPreviewRecipient()&&channels.some(row=>row.channel==='test'&&row.enabled))}
 }
 async function preview(tx:Transaction,actorId:string,action:AppReleaseAction,releaseId:string):Promise<AppReleasePreview>{
  await superAdmin(tx,actorId)

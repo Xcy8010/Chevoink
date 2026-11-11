@@ -1,6 +1,6 @@
 import type { RequestHandler } from 'express'
-import { env } from '../config/env.js'
-import { getSessionUserId } from './auth-session.js'
+import { accountEmailAuthEnabled, requiresPhoneForEmailSignup } from './account-email-auth-scope.js'
+import { getPublicSessionUserId, getSessionUserId } from './auth-session.js'
 import { createRequestId } from './http.js'
 import { DataAccessError, prisma } from './prisma.js'
 import { sendRouteError } from './route-error.js'
@@ -10,9 +10,9 @@ export function accountAccessError(emailVerified: boolean, phoneVerified: boolea
   if (studio && !phoneVerified) return new DataAccessError(403, 'AUTH_PHONE_VERIFICATION_REQUIRED', '进入创作区前，请先验证手机号。')
 }
 
-export async function assertStudioAccountAccess(userId: string) {
-  if (!env.accountEmailAuthEnabled) return
+export async function assertStudioAccountAccess(userId: string, enabled = accountEmailAuthEnabled()) {
   const user = await readAccountAccess(userId)
+  if (!enabled && !requiresPhoneForEmailSignup(user)) return
   const error = accountAccessError(Boolean(user.emailVerifiedAt), Boolean(user.phoneVerifiedAt), true)
   if (error) throw error
 }
@@ -20,7 +20,7 @@ export async function assertStudioAccountAccess(userId: string) {
 async function readAccountAccess(userId: string) {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { emailVerifiedAt: true, phoneVerifiedAt: true },
+    select: { emailVerifiedAt: true, phoneVerifiedAt: true, phone: true, accountSetupStep: true, accountSetupFinishedAt: true },
   })
   if (!user) throw new DataAccessError(401, 'AUTH_INVALID_SESSION', '登录状态已失效，请重新登录。')
   return user
@@ -43,17 +43,22 @@ function availableBeforeEmailBinding(path: string, method: string) {
 }
 
 export const accountAccessGuard: RequestHandler = async (req, res, next) => {
-  if (!env.accountEmailAuthEnabled || req.method === 'OPTIONS') return next()
+  if (req.method === 'OPTIONS') return next()
   const path = req.path.toLowerCase().replace(/\/$/, '')
   if (availableBeforeEmailBinding(path, req.method)) return next()
+  const enabled = accountEmailAuthEnabled()
+  const studio = isStudioAccountRoute(path, req.method)
+  if (!enabled && !studio && !/^\/novels(?:\/|$)/.test(path)) return next()
   try {
-    const userId = getSessionUserId(req)
+    const userId = !enabled && !studio ? getPublicSessionUserId(req) : getSessionUserId(req)
     if (userId) {
       const user = await readAccountAccess(userId)
       const phoneVerified = Boolean(user.phoneVerifiedAt)
-      const error = accountAccessError(Boolean(user.emailVerifiedAt), phoneVerified, isStudioAccountRoute(path, req.method))
-      if (error) throw error
-      res.locals.allowStudioOwnerAccess = phoneVerified
+      if (enabled || requiresPhoneForEmailSignup(user)) {
+        const error = accountAccessError(Boolean(user.emailVerifiedAt), phoneVerified, studio)
+        if (error) throw error
+        res.locals.allowStudioOwnerAccess = phoneVerified
+      }
     }
     next()
   } catch (error) {

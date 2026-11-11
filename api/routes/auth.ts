@@ -1,7 +1,7 @@
 import { readPublicSiteContent } from '../lib/site-content.js'
 import { legalConsentSchema } from '../../shared/contracts/site-content.js'
 import { Router, type Request, type Response } from 'express'
-import { env } from '../config/env.js'
+import { accountEmailAuthEnabled, assertPreviewSmsSendAllowed } from '../lib/account-email-auth-scope.js'
 import { accountAuthRoutes } from './account-auth.js'
 import { z } from 'zod'
 
@@ -144,8 +144,9 @@ router.post('/sms/send-code', async (req: Request, res: Response): Promise<void>
       return
     }
 
-    if (env.accountEmailAuthEnabled) {
+    if (accountEmailAuthEnabled()) {
       if (body.purpose === 'register') throw new DataAccessError(400, 'AUTH_EMAIL_REGISTRATION_REQUIRED', '请使用邮箱注册。')
+      assertPreviewSmsSendAllowed()
       const account = await findAccountByIdentity({ phone })
       const payload = await sendAuthSmsCode({
         phone, purpose: 'login', account: { userId: account?.id ?? null, deliver: Boolean(account && !account.bannedAt) },
@@ -183,7 +184,7 @@ async function registerWithSms(req: Request, res: Response, schema: typeof smsRe
   const requestId = createRequestId()
 
   try {
-    if (env.accountEmailAuthEnabled) throw new DataAccessError(400, 'AUTH_EMAIL_REGISTRATION_REQUIRED', '请使用邮箱注册。')
+    if (accountEmailAuthEnabled()) throw new DataAccessError(400, 'AUTH_EMAIL_REGISTRATION_REQUIRED', '请使用邮箱注册。')
     const body = parseBody(schema, req.body, '请输入手机号和验证码。')
     const user = await registerUserData({
       ...body,
@@ -205,7 +206,7 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
   const requestId = createRequestId()
 
   try {
-    const enabled = env.accountEmailAuthEnabled
+    const enabled = accountEmailAuthEnabled()
     const body = parseBody(accountLoginSchema, req.body, enabled ? '请输入您的邮箱或手机号和密码。' : '请输入手机号和密码。')
     const identity = 'identifier' in body ? body.identifier : body.phone
     if (enabled && !consumePasswordAttempt(req.ip ?? 'unknown')) {
@@ -216,7 +217,7 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
       : null
     const user = enabled ? verified?.user : await loginUserData(identity, body.password)
     if (!user) {
-      res.status(401).json(buildError(requestId, 'AUTH_INVALID_CREDENTIALS', env.accountEmailAuthEnabled ? '邮箱、手机号或密码不正确。' : '手机号或密码不正确。'))
+      res.status(401).json(buildError(requestId, 'AUTH_INVALID_CREDENTIALS', enabled ? '邮箱、手机号或密码不正确。' : '手机号或密码不正确。'))
       return
     }
 
@@ -233,7 +234,7 @@ router.post('/sms/login', async (req: Request, res: Response): Promise<void> => 
   try {
     const body = parseBody(smsLoginSchema, req.body, '请输入手机号和验证码。')
 
-    if (env.accountEmailAuthEnabled) {
+    if (accountEmailAuthEnabled()) {
       const { user, tokenVersion } = await loginAccountSmsCodeData(normalizePhoneNumber(body.phone), body.code)
       const tokens = await createSession(user.id, res, tokenVersion)
       res.json(buildSuccess(requestId, { user, tokens }))

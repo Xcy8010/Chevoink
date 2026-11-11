@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
+import { assertPreviewAccountAllowed, assertPreviewEmailAllowed } from '../account-email-auth-scope.js'
 import { evictUserBanCache } from '../auth-session.js'
 import { invalidAccountCode, lockAccountKey, prepareAccountEmailCode } from '../email-verification.js'
 import { hashPassword, hasConfiguredPassword, isLegacyPasswordHash, verifyPassword } from '../password.js'
@@ -54,12 +55,14 @@ export async function canSendBindingPhone(userId: string, phone: string) {
 const dummyPasswordHash = 'scrypt:6a7b37e1c7f68cd8f8ac04c1bed0d398:' + '0'.repeat(128)
 
 export async function loginAccountUserData(identity: Identity, password: string) {
+  if ('email' in identity) assertPreviewEmailAllowed(identity.email)
   const user = await findAccountByIdentity(identity)
   const hashed = user?.passwordHash ?? dummyPasswordHash
   // Keep a password derivation on unknown, unset and historical hash paths.
   const configuredScrypt = hashed.startsWith('scrypt:')
   const matched = verifyPassword(password, configuredScrypt ? hashed : dummyPasswordHash)
   if (!user || !(configuredScrypt ? matched : verifyPassword(password, hashed))) return null
+  assertPreviewAccountAllowed(user)
 
   if (isLegacyPasswordHash(hashed)) {
     await prisma.user.updateMany({ where: { id: user.id, passwordHash: hashed }, data: { passwordHash: hashPassword(password) } })
@@ -77,6 +80,7 @@ export async function loginAccountEmailCodeData(email: string, code: string) {
 
 export async function loginAccountSmsCodeData(phone: string, code: string) {
   const user = await findAccountByIdentity({ phone })
+  assertPreviewAccountAllowed(user)
   const proof = await prepareAuthSmsCode({ phone, code, purpose: 'login', ownerId: user?.id ?? null })
   if (!user || user.bannedAt) throw invalidAccountCode()
   const updated = await prisma.$transaction(async tx => {
@@ -139,7 +143,9 @@ export async function accountPasswordIdentity(userId: string, channel: 'email' |
 export async function updateAccountPasswordWithCode(
   identity: Identity, purpose: ProofPurpose, code: string, password: string, userId?: string,
 ) {
+  if ('email' in identity) assertPreviewEmailAllowed(identity.email)
   const owner = await findAccountByIdentity(identity, true)
+  assertPreviewAccountAllowed(owner)
   const scopeId = owner?.id ?? null
   const consume = 'email' in identity
     ? await prepareAccountEmailCode({ email: identity.email, userId: scopeId, purpose }, code)

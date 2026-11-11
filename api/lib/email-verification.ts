@@ -1,6 +1,7 @@
 import { createHmac, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { EmailVerificationPurpose, Prisma } from '@prisma/client'
 import { env } from '../config/env.js'
+import { accountEmailAuthPreview, assertPreviewEmailAllowed } from './account-email-auth-scope.js'
 import { DataAccessError, prisma } from './prisma.js'
 import { EMAIL_CODE_COOLDOWN_SECONDS, emailCodeConfig, sendTencentEmailCode } from './tencent-ses.js'
 
@@ -16,6 +17,14 @@ export async function lockAccountKey(tx: Pick<Prisma.TransactionClient, '$execut
 }
 
 export async function sendAccountEmailCode(scope: CodeScope, requester: string, deliver: boolean) {
+  const preview = accountEmailAuthPreview()
+  if (preview) {
+    assertPreviewEmailAllowed(scope.email)
+    if (scope.purpose !== 'register') {
+      throw new DataAccessError(403, 'AUTH_PREVIEW_REGISTRATION_ONLY', '此预览只开放注册验证码发送。')
+    }
+  }
+  const codeScope = preview ? { ...scope, email: preview.recipient } : scope
   const config = emailCodeConfig()
   const requesterKey = digest(`account-email-requester:${requester}`)
   const id = randomUUID()
@@ -24,13 +33,19 @@ export async function sendAccountEmailCode(scope: CodeScope, requester: string, 
 
   const shouldSend = await prisma.$transaction(async tx => {
     await lockAccountKey(tx, `account-email-send-ip:${requesterKey}`)
-    await lockAccountKey(tx, `account-email-send-address:${scope.email}`)
+    await lockAccountKey(tx, `account-email-send-address:${codeScope.email}`)
+    if (preview && await tx.emailVerificationCode.findFirst({
+      where: { email: { equals: codeScope.email, mode: 'insensitive' }, sendState: { not: 'suppressed' } },
+      select: { id: true },
+    })) {
+      throw new DataAccessError(409, 'AUTH_PREVIEW_DISPATCH_USED', '本次预览的测试验证码发送机会已使用。')
+    }
     const now = Date.now()
     const dayStart = new Date(now - 24 * hourMs)
     const hourStart = new Date(now - hourMs)
     const [recentAddress, requesterDay, requesterHour] = await Promise.all([
       tx.emailVerificationCode.findMany({
-        where: { email: scope.email, createdAt: { gte: dayStart } },
+        where: { email: codeScope.email, createdAt: { gte: dayStart } },
         select: { createdAt: true, expiresAt: true, sendState: true },
         orderBy: { createdAt: 'desc' },
         take: 10,
@@ -51,7 +66,7 @@ export async function sendAccountEmailCode(scope: CodeScope, requester: string, 
     const uncertain = recentAddress.some(item => ['pending', 'unknown'].includes(item.sendState) && +item.expiresAt > now)
     const send = deliver && !uncertain
     await tx.emailVerificationCode.create({
-      data: { ...scope, id, requesterKey, codeHash: codeDigest(id, code),
+      data: { ...codeScope, id, requesterKey, codeHash: codeDigest(id, code),
         expiresAt: new Date(now + expireInSeconds * 1000), sendState: send ? 'pending' : 'suppressed' },
     })
     return send
@@ -60,7 +75,7 @@ export async function sendAccountEmailCode(scope: CodeScope, requester: string, 
   if (shouldSend) {
     // Return after the reservation in both branches so provider latency cannot
     // expose whether the target account exists. Never replay a pending send.
-    void sendTencentEmailCode(scope.email, code, config).then(result =>
+    void sendTencentEmailCode(codeScope.email, code, config).then(result =>
       prisma.emailVerificationCode.update({
         where: { id }, data: { sendState: result.state, providerRequestId: result.requestId },
       }),
@@ -75,6 +90,7 @@ export function invalidAccountCode() {
 }
 
 export async function prepareAccountEmailCode(scope: CodeScope, code: string) {
+  assertPreviewEmailAllowed(scope.email)
   const record = await prisma.emailVerificationCode.findFirst({
     where: { ...scope, sendState: { not: 'suppressed' } },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],

@@ -30,6 +30,8 @@ import localModelConnectorRoutes from './routes/local-model-connector.js'
 import { env } from './config/env.js'
 import { getSessionUserId, markSessionUnavailable, resolveSessionGate } from './lib/auth-session.js'
 import { accountAccessGuard } from './lib/account-access.js'
+import { resolveEmailAuthPreview } from './lib/app-releases.js'
+import { withAccountEmailAuthPreview } from './lib/account-email-auth-scope.js'
 import { getUploadsStaticDirectory } from './lib/avatar-storage.js'
 import { agentAttachmentGateway } from './lib/agent-attachment-http.js'
 import { prisma } from './lib/prisma.js'
@@ -97,6 +99,15 @@ app.use(async (req: Request, res: Response, next: NextFunction) => {
   next()
 })
 
+app.use('/api', async (req, _res, next) => {
+  try {
+    const preview = await resolveEmailAuthPreview(req)
+    if (preview) return withAccountEmailAuthPreview(preview, next)
+    next()
+  } catch (error) {
+    next(error)
+  }
+})
 app.use('/api/app-releases', publicAppReleaseRouter)
 app.use('/api/admin/app-releases', appReleaseRoutes)
 app.use('/api', accountAccessGuard)

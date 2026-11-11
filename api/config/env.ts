@@ -62,6 +62,7 @@ export const env = {
   authCookieDomain: process.env.AUTH_COOKIE_DOMAIN ?? '',
   authCookieSecure: parseBoolean(process.env.AUTH_COOKIE_SECURE, false),
   accountEmailAuthEnabled: parseBoolean(process.env.ACCOUNT_EMAIL_AUTH_ENABLED, false),
+  accountEmailAuthTestRecipient: process.env.ACCOUNT_EMAIL_AUTH_TEST_RECIPIENT?.trim().toLowerCase() ?? '',
   emailTencentSecretId: process.env.EMAIL_TENCENT_SECRET_ID ?? '',
   emailTencentSecretKey: process.env.EMAIL_TENCENT_SECRET_KEY ?? '',
   emailTencentRegion: process.env.EMAIL_TENCENT_REGION?.trim() ?? '',

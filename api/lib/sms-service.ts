@@ -4,6 +4,7 @@ import type { Prisma } from '@prisma/client'
 import { sms } from 'tencentcloud-sdk-nodejs-sms'
 
 import { env } from '../config/env.js'
+import { assertPreviewSmsSendAllowed } from './account-email-auth-scope.js'
 import { prisma, DataAccessError } from './prisma.js'
 import { normalizePhoneNumber } from './phone.js'
 import { invalidAccountCode, lockAccountKey } from './email-verification.js'
@@ -111,6 +112,7 @@ async function ensureSmsSendAllowed(phone: string, purpose: SmsAuthPurpose) {
 }
 
 export async function sendAuthSmsCode(input: { phone: string; purpose: SmsAuthPurpose; account?: AccountSmsOptions }) {
+  assertPreviewSmsSendAllowed()
   ensureSmsConfigured()
 
   if (!env.authSessionSecret) {
