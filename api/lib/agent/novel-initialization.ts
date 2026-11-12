@@ -128,10 +128,10 @@ export async function readNovelInitializationCompletion(db: Prisma.TransactionCl
   return !novel || missing.length ? { status: 'incomplete', missing } : { status: 'complete', title: novel.title, missing: [] }
 }
 
-async function hasSameTaskPlaceholderRename(db: Prisma.TransactionClient, ctx: Subject, original: Original, novel: NovelMetadata) {
+async function hasSameTaskPlaceholderRename(db: Prisma.TransactionClient, ctx: ToolContext, original: Original, novel: NovelMetadata) {
   if (!novel.displayTitle?.trim() || novel.summary !== BOOTSTRAP_NOVEL_SUMMARY || !isEmptyNovelMetadata({ ...novel, displayTitle: null })) return false
   const renames = await readSetupObservations(db, ctx, original, ['novel_rename'])
-  return renames.some(observation => {
+  return [...renames, ...(ctx.legacyBatchRenames ?? [])].some(observation => {
     const snapshot = asRecord(observation.snapshot)
     const title = asRecord(observation.args)?.title
     return typeof title === 'string' && title.trim() === novel.title && novel.title === novel.displayTitle && snapshot?.target === 'novel'
@@ -146,17 +146,21 @@ export async function assertNovelMetadataIntent(db: Prisma.TransactionClient, ct
   const spec = taskSpecSchema.safeParse(original.spec).data
   // Historical build tasks keep their frozen tool grant and observed metadata
   // CAS. Fresh initialization semantics never retrofit those contracts.
-  if (spec && !spec.scope.novelInitializationProtocol) return false
-  const complete = spec?.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED') === true
+  if (spec && !spec.scope.novelInitializationProtocol) return { completeInitialization: false }
+  const completeInitialization = spec?.postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED') === true
   if (original.prompt && isExplicitNovelMetadataRequest(original.prompt)) {
     const choice = await readDirectionChoice(db, ctx, original)
     if (choice && declined(choice.answer)) throw new DataAccessError(409, 'NOVEL_DIRECTION_REQUIRED', '作者已选择暂不初始化，未覆盖作品信息。')
-    return complete
+    return { completeInitialization }
   }
-  if (original.prompt && isNovelDirectionSetup(original.prompt) && spec?.scope.novelInitializationTarget !== 'existing'
-    && (isEmptyNovelMetadata(novel) || spec?.scope.novelInitializationTarget === 'empty' && await hasSameTaskPlaceholderRename(db, ctx, original, novel))) {
-    await assertDirectionChoice(db, ctx, original)
-    return complete
+  if (original.prompt && isNovelDirectionSetup(original.prompt) && spec?.scope.novelInitializationTarget !== 'existing') {
+    const empty = isEmptyNovelMetadata(novel)
+    const titleAlreadySaved = !empty && spec?.scope.novelInitializationTarget === 'empty' && await hasSameTaskPlaceholderRename(db, ctx, original, novel)
+    if (empty || titleAlreadySaved) {
+      await assertDirectionChoice(db, ctx, original)
+      // The durable reducer requires all three fields in the current operation.
+      return { completeInitialization, canOmitTitle: titleAlreadySaved && ctx.legacyBatchRenames !== undefined }
+    }
   }
   throw new DataAccessError(409, 'NOVEL_SETUP_AUTHORITY_REQUIRED', '修改已有内容或已设置元信息的作品，需要作者明确的修改意图；方向选择不等于覆盖现有作品。')
 }

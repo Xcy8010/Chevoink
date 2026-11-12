@@ -19,6 +19,9 @@ import type { RunLeaseToken } from '../runtime-lease.js'
 export type ToolContext = {
   /** Main legacy executor only; absent for children, durable and non-native calls. */
   respondTask?: (answer: string) => Promise<import('../task-response.js').TaskResponse>
+  /** Successful direct renames before message persistence. Only the main legacy
+   * loop injects this for metadata updates, including an empty batch. */
+  legacyBatchRenames?: ReadonlyArray<{ args: unknown; snapshot?: AgentRollbackSnapshot }>
   userId: string
   novelId: string
   chapterId: string | null

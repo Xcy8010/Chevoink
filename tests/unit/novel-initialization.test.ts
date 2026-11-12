@@ -82,22 +82,35 @@ it('recognizes an authenticated direction choice independent of question phrasin
     data: { title: fields.title, displayTitle: fields.title, summary: fields.summary, tagNames: fields.tags } })
 })
 
-it('finishes only a placeholder rename proved by this setup and the current saved title', async () => {
+it('recovers a partial rename only with a current title from this setup and an actual direction choice', async () => {
   const spec = buildTaskSpec({ runId: 'r', novelId: 'n', prompt: directionPrompt,
     novelInitializationProtocol: 2, novelInitializationTarget: 'empty' })
   mocks.original.mockResolvedValue({ prompt: directionPrompt, spec, sourceRunId: 'r', taskId: 'task' })
   const renamed = { ...empty, title: '此前改了一半', displayTitle: '此前改了一半', summary: BOOTSTRAP_NOVEL_SUMMARY }
   mocks.db.novel.findFirst.mockResolvedValue(renamed)
-  const ctx = context()
+  const ctx = { ...context(), legacyBatchRenames: [] }
   ctx.authorQuestionAnswers?.set('q', { ...who, question: '喜欢哪条线？', answer: '幻想冒险', purpose: 'novel_direction' })
-  await expect(novelUpdateMetaTool.execute(ctx, fields)).rejects.toMatchObject({ code: 'NOVEL_SETUP_AUTHORITY_REQUIRED' })
+  const remaining = { summary: fields.summary, tags: fields.tags }
+  await expect(novelUpdateMetaTool.execute(ctx, remaining)).rejects.toMatchObject({ code: 'NOVEL_SETUP_AUTHORITY_REQUIRED' })
   const rename = { type: 'tool-call', toolName: 'novel_rename', status: 'success', args: { title: renamed.title },
-    snapshot: { target: 'novel', targetId: 'another-novel', field: 'title', previousValue: '未命名作品' } }
+    snapshot: { target: 'novel', targetId: who.novelId, field: 'title', previousValue: '未命名作品' } }
+  for (const snapshot of [{ ...rename.snapshot, targetId: 'another-novel' }, { ...rename.snapshot, previousValue: '原有书名' }]) {
+    mocks.db.agentMessage.findMany.mockResolvedValue([{ parts: [{ ...rename, snapshot }] }])
+    await expect(novelUpdateMetaTool.execute(ctx, remaining)).rejects.toMatchObject({ code: 'NOVEL_SETUP_AUTHORITY_REQUIRED' })
+  }
   mocks.db.agentMessage.findMany.mockResolvedValue([{ parts: [rename] }])
-  await expect(novelUpdateMetaTool.execute(ctx, fields)).rejects.toMatchObject({ code: 'NOVEL_SETUP_AUTHORITY_REQUIRED' })
-  mocks.db.agentMessage.findMany.mockResolvedValue([{ parts: [{ ...rename, snapshot: { ...rename.snapshot, targetId: who.novelId } }] }])
-  await expect(novelUpdateMetaTool.execute(ctx, fields)).resolves.toMatchObject({ summary: expect.any(String) })
-  expect(mocks.db.novel.update).toHaveBeenCalledOnce()
+  await expect(novelUpdateMetaTool.execute({ ...context(), legacyBatchRenames: [] }, remaining)).rejects.toMatchObject({ code: 'NOVEL_DIRECTION_REQUIRED' })
+  await expect(novelUpdateMetaTool.execute(ctx, { summary: fields.summary })).rejects.toMatchObject({ code: 'INVALID_ARGUMENTS' })
+  await expect(novelUpdateMetaTool.execute({ ...ctx, legacyBatchRenames: undefined }, remaining)).rejects.toMatchObject({ code: 'INVALID_ARGUMENTS' })
+  expect(mocks.db.novel.update).not.toHaveBeenCalled()
+  await expect(novelUpdateMetaTool.execute(ctx, remaining)).resolves.toMatchObject({ summary: expect.any(String) })
+  expect(mocks.db.novel.update).toHaveBeenCalledExactlyOnceWith({ where: { id: who.novelId }, data: { summary: fields.summary, tagNames: fields.tags } })
+})
+
+it('requires a title for fresh setup when there is no successful placeholder rename', async () => {
+  await expect(novelUpdateMetaTool.execute({ ...context('幻想冒险'), legacyBatchRenames: [] }, { summary: fields.summary, tags: fields.tags }))
+    .rejects.toMatchObject({ code: 'INVALID_ARGUMENTS' })
+  expect(mocks.db.novel.update).not.toHaveBeenCalled()
 })
 
 it('reuses a structured same-task answer in saved history without treating unrelated answers as direction approval', async () => {
@@ -271,7 +284,8 @@ it.each([
   expect(spec.postconditions).toContainEqual(expect.objectContaining({ code: 'NOVEL_METADATA_INITIALIZED' }))
   expect(restrictToolsToTask([novelUpdateMetaTool], spec, 'plan').map(tool => tool.name)).toContain('novel_update_meta')
   mocks.original.mockResolvedValue({ prompt, spec })
-  await expect(assertNovelMetadataIntent(mocks.db as unknown as Prisma.TransactionClient, context(), { ...empty, summary: '作者已有简介' })).resolves.toBe(true)
+  await expect(assertNovelMetadataIntent(mocks.db as unknown as Prisma.TransactionClient, context(), { ...empty, summary: '作者已有简介' }))
+    .resolves.toEqual({ completeInitialization: true })
 })
 
 it('keeps the frozen legacy build metadata grant without retrofitting fresh initialization semantics', async () => {

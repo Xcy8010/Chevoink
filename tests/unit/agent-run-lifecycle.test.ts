@@ -18,6 +18,7 @@ import { persistedContentHash } from '../../api/lib/agent/semantic-progress.js'
 import { toolFailureInputHash } from '../../api/lib/agent/tool-local-failure.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import { terminalCandidateSchema } from '../../api/lib/agent/terminal-state-review.js'
+import { BOOTSTRAP_NOVEL_SUMMARY } from '../../shared/contracts/novel-publish.js'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
 
 const mocks = vi.hoisted(() => ({
@@ -154,6 +155,12 @@ vi.mock('../../api/lib/prisma.js', () => {
     constructor(readonly status: number, readonly code: string, message: string) { super(message) }
   },
   agentRun: {
+    updateMany: async (input: Query & { data: Record<string, unknown> }) => {
+      const row = ownedRun(input)
+      if (!row) return { count: 0 }
+      Object.assign(row, input.data)
+      return { count: 1 }
+    },
     update: async (input: Query & { data: Record<string, unknown> }) => {
       const result = await mocks.update(input)
       const id = String(input.where?.id ?? 'run')
@@ -186,7 +193,8 @@ vi.mock('../../api/lib/prisma.js', () => {
       return [...mocks.runs.values()].filter(row => matches(row, input.where))
     }, count: vi.fn(async () => 0),
   },
-  novel: { findFirst: vi.fn(async (input: Query) => matches({ id: 'novel', authorId: 'user', manuscriptRevision: 1 }, input.where) ? { id: 'novel', authorId: 'user', manuscriptRevision: 1 } : null) },
+  novel: { findFirst: vi.fn(async (input: Query) => matches({ id: 'novel', authorId: 'user', manuscriptRevision: 1 }, input.where) ? { id: 'novel', authorId: 'user', manuscriptRevision: 1 } : null),
+    update: vi.fn() },
   chapter: {
     findMany: vi.fn(async (input: Query) => mocks.chapters.filter(row => matches(row, input.where))),
     findFirst: vi.fn(async (input: Query) => mocks.chapters.find(row => matches(row, input.where)) ?? null),
@@ -359,7 +367,8 @@ vi.mock('../../api/lib/agent/events.js', () => ({ createRunEventBus: (runId: str
     if (mocks.buses.get(runId) === bus) mocks.buses.delete(runId)
   },
 }))
-vi.mock('../../api/lib/agent/permissions.js', () => ({ cancelAllQuestions: vi.fn(), grantAlwaysAllow: vi.fn(), hasAlwaysAllow: () => false, rejectAllApprovals: vi.fn(), waitForApproval: mocks.approval }))
+vi.mock('../../api/lib/agent/permissions.js', () => ({ cancelAllQuestions: vi.fn(), grantAlwaysAllow: vi.fn(), hasAlwaysAllow: () => false,
+  rejectAllApprovals: vi.fn(), waitForApproval: mocks.approval, waitForQuestionAnswer: vi.fn() }))
 vi.mock('../../api/lib/agent/tools/todo-tools.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../api/lib/agent/tools/todo-tools.js')>(),
   loadSessionTodoItems: mocks.todos, cancelTaskTodoItems: vi.fn(async () => []), renderTodoItems: (items: AgentTodoItem[]) => JSON.stringify(items),
@@ -4904,6 +4913,62 @@ describe('author-directed task ending in the real execution loop', () => {
       expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     } finally {
       novels.mockImplementation(previousNovel)
+      messages.mockImplementation(previousMessages)
+    }
+  })
+
+  it('finishes legacy setup when the confirmed title and remaining metadata are saved in the same tool batch', async () => {
+    const { prisma } = await import('../../api/lib/prisma.js')
+    const { waitForQuestionAnswer } = await import('../../api/lib/agent/permissions.js')
+    const { askUserTool } = await import('../../api/lib/agent/tools/interact-tools.js')
+    const { novelRenameTool, novelUpdateMetaTool } = await import('../../api/lib/agent/tools/novel-tools.js')
+    const prompt = '帮我创建一部末日生存类型的小说'
+    mocks.currentOriginal = { prompt, taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', prompt,
+      novelInitializationProtocol: 2, novelInitializationTarget: 'empty' }) }
+    const title = '漫长的停电', summary = '旧城区的幸存者互助求生。', tags = ['都市']
+    const novel = { title: '未命名作品', displayTitle: null as string | null, summary: BOOTSTRAP_NOVEL_SUMMARY,
+      tagNames: [] as string[], chapterCount: 0, wordCount: 0 }
+    const novels = vi.mocked(prisma.novel.findFirst), previousNovel = novels.getMockImplementation()!
+    const updates = vi.mocked(prisma.novel.update)
+    const messages = vi.mocked(prisma.agentMessage.findMany), previousMessages = messages.getMockImplementation()!
+    const outline = tool('plan_save', async () => { throw new Error('Wait for the next author request before writing an outline') }, false)
+    mocks.tools = [askUserTool, novelRenameTool, novelUpdateMetaTool, outline]
+    novels.mockImplementation(async input => {
+      const owned = await previousNovel(input)
+      return owned && { ...owned, ...novel }
+    })
+    updates.mockImplementation(async input => {
+      for (const [key, value] of Object.entries(input.data)) if (value !== undefined) Object.assign(novel, { [key]: value })
+      return novel as Awaited<ReturnType<typeof prisma.novel.update>>
+    })
+    messages.mockImplementation(async input => {
+      const filter = input?.where?.runId
+      if (input?.where?.role !== 'assistant' || !filter || typeof filter === 'string') return previousMessages(input)
+      const writes = mocks.persist.mock.calls as unknown as Array<[{ create?: { runId: string; role: string; parts: AgentMessagePart[] } }]>
+      return writes.flatMap(([{ create }]) => create?.role === 'assistant' && Array.isArray(filter.in) && filter.in.includes(create.runId)
+        ? [{ parts: create.parts }] : []) as Awaited<ReturnType<typeof prisma.agentMessage.findMany>>
+    })
+    vi.mocked(waitForQuestionAnswer).mockResolvedValueOnce({ answer: '长期断电', timedOut: false })
+    try {
+      queue(response('', [call('direction', 'ask_user', JSON.stringify({ purpose: 'novel_direction',
+        question: '你想写哪一种末日？', options: [{ label: '长期断电' }, { label: '冰期' }] }))]),
+      response('', [call('rename', 'novel_rename', JSON.stringify({ title })),
+        call('metadata', 'novel_update_meta', JSON.stringify({ summary, tags })), call('premature-outline', 'plan_save')]))
+      await run(prompt)
+      expect(waitForQuestionAnswer).toHaveBeenCalledOnce()
+      expect(mocks.chat).toHaveBeenCalledTimes(2)
+      expect(updates.mock.calls.map(([input]) => input)).toEqual([
+        { where: { id: 'novel' }, data: { title, displayTitle: title } },
+        { where: { id: 'novel' }, data: { summary, tagNames: tags } },
+      ])
+      expect(outline.execute).not.toHaveBeenCalled()
+      expect(events().filter(event => event.type === 'text.final')).toEqual([
+        expect.objectContaining({ text: `已保存《${title}》的书名、简介和标签。要不要开始写大纲？` }),
+      ])
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    } finally {
+      novels.mockImplementation(previousNovel)
+      updates.mockReset()
       messages.mockImplementation(previousMessages)
     }
   })

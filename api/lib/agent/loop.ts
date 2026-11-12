@@ -2416,6 +2416,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       const novelSetupOnly = hasNovelDirectionDelivery(taskSpec)
       let questionTimedOut = false
       let novelSetupSaved = false
+      const legacyBatchRenames: ToolCallOutcome['part'][] = []
       const decisionFeedback: NonNullable<ToolCallOutcome['reviewDecisionFeedback']>[] = []
       const admitRegisteredReview = async (dispatch: PendingReviewCall) => {
         const key = `${dispatch.compilationId ?? dispatch.chapterId}:${dispatch.toolName}`
@@ -2626,9 +2627,11 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           return { ...proof, answer }
         } : undefined
         const executionTools = coordinatedCommit ? tools.map(tool => tool.name === call.name ? coordinatedCommit! : tool) : tools
-        const outcome = await handleToolCall(call, executionTools, { ...toolContext, writingScope: taskSpec.scope, callId: call.id, messageId, respondTask }, bus, messageId, runId,
+        const outcome = await handleToolCall(call, executionTools, { ...toolContext, writingScope: taskSpec.scope, callId: call.id, messageId, respondTask,
+          legacyBatchRenames: call.name === 'novel_update_meta' ? legacyBatchRenames : undefined }, bus, messageId, runId,
           undefined, coordinatedCommit || bootstrapCall?.id === call.id ? async () => { await bus.persist() } : undefined)
         if (!outcome) continue
+        if (call.name === 'novel_rename' && outcome.part.status === 'success') legacyBatchRenames.push(outcome.part)
         if (initializationCompletionRequired && ['novel_create', 'novel_update_meta'].includes(call.name)) {
           initializationAuthorityBlocked = outcome.failureCode === 'NOVEL_SETUP_AUTHORITY_REQUIRED'
         }

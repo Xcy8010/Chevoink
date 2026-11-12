@@ -130,9 +130,11 @@ export const novelUpdateMetaTool = defineTool({
       return { outcome: 'failed' as const, output: '未找到当前作品。' }
     }
 
-    const completeInitialization = await assertNovelMetadataIntent(ctx.transaction ?? prisma, ctx, novel)
-    if (completeInitialization && (!args.title?.trim() || !args.summary?.trim() || !args.tags?.length)) {
-      throw new DataAccessError(400, 'INVALID_ARGUMENTS', '完整初始化需要一次提供书名、简介与标签；尚未保存任何字段，请补齐三项后重试。')
+    const { completeInitialization, canOmitTitle } = await assertNovelMetadataIntent(ctx.transaction ?? prisma, ctx, novel)
+    if (completeInitialization && ((!canOmitTitle && !args.title?.trim()) || !args.summary?.trim() || !args.tags?.length)) {
+      throw new DataAccessError(400, 'INVALID_ARGUMENTS', canOmitTitle
+        ? '补全作品信息需要同时提供简介与标签，本次未修改。'
+        : '完整初始化需要一次提供书名、简介与标签；尚未保存任何字段，请补齐三项后重试。')
     }
     if (args.title === undefined && args.summary === undefined && args.tags === undefined) {
       return { outcome: 'failed' as const, output: '没有提供需要修改的书名、简介或标签。' }
