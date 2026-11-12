@@ -4373,6 +4373,57 @@ describe('author-directed task ending in the real execution loop', () => {
     expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer, nextPrompt })
     expect(JSON.stringify(mocks.persist.mock.calls)).not.toContain(nextPrompt)
   })
+  it.each([
+    { prompt: '第一卷要写多少章？', nextPrompt: '帮我分配这二十章的节奏', published: true },
+    { prompt: '第一卷要写多少章？只回答数字。', nextPrompt: '帮我分配这二十章的节奏', published: false },
+    { prompt: '第一卷要写多少章？别再在结尾给我补全提示。', nextPrompt: '帮我分配这二十章的节奏', published: false },
+    { prompt: '第一卷要写多少章？', nextPrompt: { invalid: 'model metadata' }, published: false },
+  ])('keeps the native answer exact and handles advisory metadata from the same call ($published, $prompt)', async ({ prompt, nextPrompt, published }) => {
+    await responseTask(prompt)
+    const { taskRespondTool } = await import('../../api/lib/agent/tools/task-response-tool.js')
+    mocks.tools = [taskRespondTool]
+    const answer = '20'
+    queue(response('', [call('reply', 'task_respond', JSON.stringify({ answer, nextPrompt }))]))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build',
+      prompt, predictNextPrompt: true })
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    const request = mocks.chat.mock.calls[0][0] as Parameters<typeof chatType>[0]
+    expect(Boolean(request.nextPromptMarker)).toBe(!prompt.includes('只回答') && !prompt.includes('补全提示'))
+    expect(events().filter(event => event.type === 'text.final')).toEqual([expect.objectContaining({ text: answer })])
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer })
+    if (published) expect(events().at(-1)).toMatchObject({ nextPrompt })
+    else expect(events().at(-1)).not.toHaveProperty('nextPrompt')
+    expect(JSON.stringify(mocks.persist.mock.calls)).not.toContain('nextPrompt')
+    expect(JSON.stringify(events().filter(event => event.type === 'tool.call' || event.type === 'tool.result'))).not.toContain('nextPrompt')
+  })
+  it.each([
+    { answer: '渡桥段落放在第一卷收尾。\n下一步建议：把渡桥段落分成三个场景。', suppressed: false, nextPrompt: '帮我把渡桥段落分成三个场景。' },
+    { answer: '渡桥段落放在第一卷收尾。\n\n如果你愿意，我可以接着帮你核对伏笔。', suppressed: false, nextPrompt: '帮我核对伏笔。' },
+    { answer: '渡桥段落放在第一卷收尾。\n下一步建议：把渡桥段落分成三个场景。', suppressed: true, nextPrompt: undefined },
+    { answer: '渡桥段落放在第一卷收尾。', suppressed: false, nextPrompt: undefined },
+  ])('reuses an explicit conversational follow-up only when appropriate ($suppressed, $nextPrompt)', async ({ answer, suppressed, nextPrompt }) => {
+    const prompt = '渡桥段落放在哪一卷合适？'
+    await responseTask(prompt)
+    queue({ ...response(answer), ...(suppressed ? { nextPromptSuppressed: true as const } : {}) })
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'build',
+      prompt, predictNextPrompt: true })
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer })
+    if (nextPrompt) expect(events().at(-1)).toMatchObject({ nextPrompt })
+    else expect(events().at(-1)).not.toHaveProperty('nextPrompt')
+  })
+  it('reuses the title of an actual saved plan when the ordinary wrap-up omits the footer', async () => {
+    const prompt = '保存渡桥计划。'
+    mocks.tools = [tool('plan_save', async () => ({ output: '已保存',
+      display: { kind: 'planFile', artifactId: 'saved-plan', title: '渡桥计划', content: '渡桥分成三个场景。' } }), false)]
+    queue(response('', [call('save', 'plan_save')]), response('渡桥计划已保存。'))
+    await executeAgentRun({ runId: 'run', sessionId: 'session', userId: 'user', novelId: 'novel', chapterId: 'c', mode: 'plan',
+      prompt, predictNextPrompt: true })
+    expect(mocks.tools[0].execute).toHaveBeenCalledOnce()
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: '渡桥计划已保存。',
+      nextPrompt: '帮我核对计划《渡桥计划》与已有创作设定是否一致。' })
+  })
   it.each(['第一卷要写多少章？', '第一卷要写多少章', '第一卷写多少章合适？', '第二卷应该怎么分章？', '这个大纲第一卷要写多少章？', '你好'])(
     'lets the main Agent deliver an exact native response after context reads: %s', async prompt => {
       const spec = await responseTask(prompt), frozen = structuredClone(spec)

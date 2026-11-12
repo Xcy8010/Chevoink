@@ -65,6 +65,7 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
         reasoning: result.reasoning,
         ...(result.responsesContinuation ? { responsesContinuation: result.responsesContinuation } : {}),
         ...(result.nextPrompt && result.finishReason === 'stop' && !result.toolCalls.length ? { nextPrompt: result.nextPrompt } : {}),
+        ...(result.nextPromptSuppressed ? { nextPromptSuppressed: true as const } : {}),
         ...(result.toolCalls.length ? { toolCalls: result.toolCalls } : {}) }
     } else if (operation.kind === 'tool') {
       const receipt = operation.effectReceipt, parsedInput = toolInput.safeParse(operation.inputSnapshot)

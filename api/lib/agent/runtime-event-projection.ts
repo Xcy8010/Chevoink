@@ -15,6 +15,7 @@ import { verifyChildGrant } from './runtime-child.js'
 import { readParentContentionScope } from './runtime-parent-contention.js'
 import { savedChapterPresentationSchema } from './writing-scope.js'
 import { limitedWritingDeliverySchema, limitedWritingOutcomeSchema } from './writing-delivery-limitations.js'
+import { NEXT_PROMPT_MAX_LENGTH } from './next-prompt.js'
 
 /** Only this DB-locked allocator writes UI events for the durable protocol.
  * New source families retain their outbox rows until their projector is added;
@@ -184,10 +185,13 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
         const usage = await tx.agentProviderUsageReceipt.aggregate({ where: { attempt: { operation: { taskRootId: { in: roots } } } }, _sum: { promptTokens: true, completionTokens: true } })
         const promptTokens = usage._sum.promptTokens ?? 0, completionTokens = usage._sum.completionTokens ?? 0
         const presentation = validProof && proof.success ? proof.data.chapterPresentation : null
+        const receiptSuggestion = z.object({ nextPrompt: z.string().min(1).max(NEXT_PROMPT_MAX_LENGTH).nullable() }).safeParse(receipt.result)
+        const nextPrompt = validProof && proof.success && !proof.data.limitedWritingDelivery
+          ? receiptSuggestion.success ? receiptSuggestion.data.nextPrompt : candidate.nextPrompt : undefined
         bodies = [...(presentation ? [{ type: 'text.final' as const, messageId: durableMessageId(root.id, before.state.turn), text: presentation.text, asReasoning: false }] : []),
           { type: 'run.finished', status: 'succeeded', usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
             ...(validProof && proof.success && proof.data.limitedWritingDelivery ? { outcome: proof.data.limitedWritingDelivery.outcome } : {}),
-            ...(validProof && proof.success && !proof.data.limitedWritingDelivery && candidate.nextPrompt ? { nextPrompt: candidate.nextPrompt } : {}),
+            ...(nextPrompt ? { nextPrompt } : {}),
             artifacts: [], outputSummary: presentation?.text ?? candidate.content ?? '' }]
       } else if (source.type === 'run.paused') {
         const paused = durablePauseSchema.safeParse(source.payload)

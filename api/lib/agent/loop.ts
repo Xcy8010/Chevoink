@@ -31,7 +31,7 @@ import type {
 } from '../../../shared/contracts/index.js'
 import { env } from '../../config/env.js'
 import { chatWithTools, type ChatCompletionResult, type ChatMessage, type ToolCallRequest } from '../ai-service.js'
-import { addNextPromptInstruction } from './next-prompt.js'
+import { addNextPromptInstruction, allowsNextPrompt, readTaskResponseNextPrompt, selectCompletedNextPrompt } from './next-prompt.js'
 import { DataAccessError, prisma } from '../prisma.js'
 import { withGoalEffects, withGoalExecutionContext } from './goal-context.js'
 import { readGoalExecution } from './goal-fence.js'
@@ -1454,6 +1454,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     console.info('[agent-context-input]', assembledContext.inputEstimates ?? {})
     const messages: ChatMessage[] = assembledContext.messages
     const nextPromptMarker = params.predictNextPrompt && !ownedGoalExecution && (params.agentType ?? 'orchestrator') === 'orchestrator'
+      && !taskSpec.scope.writing?.titleAndBodyOnly && allowsNextPrompt(params.prompt)
       ? addNextPromptInstruction(messages) : undefined
     // The last assembled user message is the original goal input. Attach its
     // pixels before adding steering or orchestration messages to the tail.
@@ -1718,6 +1719,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
     // C3：规划类任务必须以 plan_save 落盘收尾，只聊天不落盘时回填提醒
     const expectsPlanSave = taskSpec.intent !== 'research_analysis' && params.mode === 'plan' && /(规划|大纲|计划)/.test(params.prompt)
     let planSavePerformed = false
+    const savedPlansForNextPrompt = new Map<string, string>()
     let planSaveReminders = 0
     // 长任务防早停：待办清单（todo_write 维护）未全部完成就想收尾时，回填强指令让它接着执行
     // 续跑时从会话恢复既有清单，新任务从空开始（避免上一个任务的残留待办干扰）
@@ -2100,6 +2102,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           }))
         : []
       const effectiveToolCalls = result.toolCalls.length > 0 ? [...result.toolCalls] : recoveredToolCalls
+      const responseCall = effectiveToolCalls.length === 1 && result.toolCalls[0]?.name === 'task_respond' ? result.toolCalls[0] : undefined
+      const responseSuggestion = responseCall ? readTaskResponseNextPrompt(responseCall.arguments) : undefined
+      if (responseCall && responseSuggestion) effectiveToolCalls[0] = { ...responseCall, arguments: responseSuggestion.args }
+      const nextPromptReady = Boolean(nextPromptMarker && result.finishReason === 'stop' && !effectiveToolCalls.length)
       if (effectiveToolCalls.length) releaseWritingToolText()
       let ordinaryResponse: TaskResponse | undefined
       if (ordinaryResponseAvailable && effectiveToolCalls.length === 0 && result.content.trim()
@@ -2145,7 +2151,9 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           // truncated text cannot restart chapter work or buy a summary retry.
           bus.emit({ type: 'step.finish', turn, usage: result.usage })
           liveTurn = null
-        }, { messageId, text: authorContent, parts, expected: completedWritingWrapUp.value, nextPrompt: effectiveToolCalls.length ? undefined : result.nextPrompt })) return
+        }, { messageId, text: authorContent, parts, expected: completedWritingWrapUp.value,
+          nextPrompt: nextPromptReady ? selectCompletedNextPrompt(authorContent, result,
+            { kind: 'chapter', title: completedWritingWrapUp.value.chapters.at(-1)?.title ?? '' }) : undefined })) return
         // A newer manuscript/report is not the source of this model reply.
         // Do not publish its old summary or purchase another closing turn.
         forceWrapUpLocal = true
@@ -2235,7 +2243,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           await finalizeRun(runId, bus, 'succeeded', usage, turn, ordinaryResponse.answer.slice(0, 300), undefined, false,
             undefined, undefined, undefined, false, undefined, 'user_stop', undefined, {
               subject: { userId: params.userId, novelId: params.novelId, sessionId: params.sessionId, runId },
-              expected: ordinaryResponse, signal: controller.signal, messageId, parts, nextPrompt: result.nextPrompt,
+              expected: ordinaryResponse, signal: controller.signal, messageId, parts,
+              nextPrompt: nextPromptReady ? selectCompletedNextPrompt(ordinaryResponse.answer, result) : undefined,
               assertObligations: () => {
                 controller.signal.throwIfAborted()
                 if (pendingReviews.size || forceWrapUpReason
@@ -2359,7 +2368,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           : targetEvidenceMissing ? researchLimitation : creationIncomplete ? '本任务请求创建章节，但尚无本任务成功创建且仍属于作者的章节；说明已保存，任务未完成。' : undefined,
           true, undefined, undefined, savedCandidate ? { messageId, subject: { userId: params.userId, novelId: params.novelId, runId }, expected: savedCandidate,
             signal: controller.signal, parts, replaceCandidate: true, displayText: lastAssistantText } : undefined,
-          false, undefined, 'user_stop', undefined, undefined, savedCandidate?.titleAndBodyOnly ? undefined : result.nextPrompt)
+          false, undefined, 'user_stop', undefined, undefined, nextPromptReady && !savedCandidate?.titleAndBodyOnly
+            ? selectCompletedNextPrompt(lastAssistantText, result, savedCandidate
+              ? { kind: 'chapter', title: savedCandidate.chapters.at(-1)?.title ?? '' }
+              : { kind: 'plan', title: [...savedPlansForNextPrompt.values()].at(-1) ?? '' }) : undefined)
         return
       }
 
@@ -2585,6 +2597,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
               subject: { userId: params.userId, novelId: params.novelId, sessionId: params.sessionId, runId },
               expected: outcome.terminalResponse, signal: controller.signal, messageId, parts: responseParts,
               assertObligations: assertResponseObligations,
+              nextPrompt: nextPromptMarker ? selectCompletedNextPrompt(outcome.terminalResponse.answer, responseSuggestion?.proposal ?? {}) : undefined,
             })
           liveTurn = null
           return
@@ -2645,6 +2658,17 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         }
         if (call.name === 'plan_save' && outcome.part.status === 'success') {
           planSavePerformed = true
+        }
+        if (nextPromptMarker && outcome.part.status === 'success') {
+          const display = outcome.part.display
+          if (call.name === 'plan_save' && (display?.kind === 'planFile' && display.content.trim() || display?.kind === 'planDiff' && display.after.trim())) {
+            savedPlansForNextPrompt.delete(display.artifactId)
+            savedPlansForNextPrompt.set(display.artifactId, display.title)
+          }
+          if (call.name === 'plan_rename' && display?.kind === 'planRename' && savedPlansForNextPrompt.has(display.artifactId)) {
+            savedPlansForNextPrompt.set(display.artifactId, display.title)
+          }
+          if (call.name === 'plan_delete' && display?.kind === 'planDelete') savedPlansForNextPrompt.delete(display.artifactId)
         }
         // 同步待办清单快照：防早停拦截与预算收尾都依赖它判断任务是否真的做完
         if (call.name === 'todo_write' && outcome.part.status === 'success' && outcome.part.display?.kind === 'todoList') {

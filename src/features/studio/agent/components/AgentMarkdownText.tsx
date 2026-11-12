@@ -1,18 +1,12 @@
-import { Component, Suspense, lazy, memo, type ReactNode } from 'react'
+import { Component, memo, type ReactNode } from 'react'
+import ReactMarkdown, { type Components } from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useStreamingText } from '../../components/use-streaming-text'
-import type { Components } from 'react-markdown'
-
-// Keep the parser out of the initial workbench chunk. Failure retains the answer.
-const Markdown = lazy(async () => {
-  const [renderer, gfm, protocol] = await Promise.all([import('react-markdown'), import('remark-gfm'), import('../../../../../shared/agent-output.js')])
-  const plugins = [gfm.default, () => removeProtocolText(protocol)]
-  return { default: ({ text }: { text: string }) => <renderer.default skipHtml remarkPlugins={plugins}
-    urlTransform={safeLink} components={components}>{protocol.stripAgentProtocolArtifacts(text)}</renderer.default> }
-})
+import { containsAgentProtocolArtifact, stripAgentProtocolArtifacts } from '../../../../../shared/agent-output.js'
 
 type MarkdownNode = { type: string; value?: string; children?: MarkdownNode[] }
 /** Clean protocol artifacts after parsing, never inside code examples or JSON fences. */
-function removeProtocolText({ containsAgentProtocolArtifact, stripAgentProtocolArtifacts }: typeof import('../../../../../shared/agent-output.js')) {
+function removeProtocolText() {
   return (tree: MarkdownNode) => {
     const visit = (node: MarkdownNode) => {
       if (node.type === 'code' || node.type === 'inlineCode') return
@@ -69,6 +63,16 @@ const components: Components = {
   img: ({ alt }) => <span className="text-[var(--text-secondary)]">{alt ? `[图片：${alt}，未自动加载]` : '[图片未自动加载]'}</span>,
 }
 
+const plugins = [remarkGfm, removeProtocolText]
+
+// Studio and creation records are already lazy routes. Paint the real block
+// layout with the history, so parsing cannot move adjacent tool rows later.
+function Markdown({ text }: { text: string }) {
+  return <ReactMarkdown skipHtml remarkPlugins={plugins} urlTransform={safeLink} components={components}>
+    {stripAgentProtocolArtifacts(text)}
+  </ReactMarkdown>
+}
+
 class MarkdownBoundary extends Component<{ children: ReactNode; fallback: ReactNode }, { failed: boolean }> {
   state = { failed: false }
   static getDerivedStateFromError() { return { failed: true } }
@@ -83,6 +87,6 @@ export const AgentMarkdownText = memo(function AgentMarkdownText({ text, streami
   if (!content.trim()) return null
   const fallback = <p className="whitespace-pre-wrap break-words text-pretty">{content}</p>
   return <div className="min-w-0 max-w-full break-words text-sm font-normal leading-7 text-[var(--text-primary)] [overflow-wrap:anywhere]">
-    <MarkdownBoundary key={identity} fallback={fallback}><Suspense fallback={fallback}><Markdown text={content} /></Suspense></MarkdownBoundary>
+    <MarkdownBoundary key={identity} fallback={fallback}><Markdown text={content} /></MarkdownBoundary>
   </div>
 })

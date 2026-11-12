@@ -13,6 +13,9 @@ import { readParentContentionScope } from './runtime-parent-contention.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
 import { readSavedWritingPresentation, shouldUseSavedWritingPresentation, savedChapterPresentationProof } from './writing-scope.js'
 import { assertLimitedWritingDelivery, limitedWritingDeliverySchema } from './writing-delivery-limitations.js'
+import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
+import { originalPrompt } from './original-request.js'
+import { allowsNextPrompt, selectCompletedNextPrompt } from './next-prompt.js'
 
 const liveStatuses = ['queued', 'running', 'awaiting_approval'] as const
 const maxEpoch = 9223372036854775807n
@@ -28,7 +31,7 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     await lockNovelActiveScope(tx, identity.novelId)
     const { lockWritingRunLineage } = await import('./writing-scope.js')
     await lockWritingRunLineage(tx, { userId: lease.userId, novelId: identity.novelId, runId: lease.runId })
-    await assertRunGoalFence(tx, lease.userId, lease.runId)
+    const goal = await assertRunGoalFence(tx, lease.userId, lease.runId)
     if (lease.parent) await assertRunGoalFence(tx, lease.userId, lease.parent.runId)
     const { run, root } = await lockRunRoot(tx, lease.userId, lease.runId)
     const parent = await assertChildParentFence(tx, run.id, lease.parent)
@@ -43,7 +46,7 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     if (childGrants.some(grant => grant.status !== 'completed' || grant.childRun.status !== 'completed' || grant.childRun.taskRoot?.status !== 'completed')) return runtimeError('RUNTIME_CHILD_COMPLETION_REQUIRED', '子任务尚未获得真实完成终态，父任务不能宣称完成。')
     await assertPinnedChildCompletion(tx, root.id)
     const facts = z.object({ blockers: z.array(z.unknown()), candidateHash: z.string(), limitedWritingDelivery: limitedWritingDeliverySchema.optional() }).parse(evidence.snapshot)
-    const { frame } = await readExecutionStateInTransaction(tx, root.id)
+    const { frame, configuration, originalRequest, originalSpec } = await readExecutionStateInTransaction(tx, root.id)
     const candidate = frame.state.messages.at(-1)
     if (facts.blockers.length || candidate?.role !== 'assistant' || !candidate.content?.trim() || promisesFurtherAction(candidate.content)) {
       return runtimeError('RUNTIME_COMPLETION_BLOCKED', '原任务仍有未完成事项，不能提交完成终态。')
@@ -59,6 +62,24 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     const savedPresentation = await readSavedWritingPresentation(tx, subject)
     const chapterPresentation = savedPresentation && shouldUseSavedWritingPresentation(savedPresentation, candidate.content)
       ? savedChapterPresentationProof(subject, savedPresentation) : null
+    let nextPrompt: string | undefined
+    if (configuration.nextPromptMarker && !goal && !parent && !limited && allowsNextPrompt(originalPrompt(originalRequest))) {
+      const spec = taskSpecSchema.safeParse(originalSpec)
+      if (spec.success && !spec.data.scope.writing?.titleAndBodyOnly) {
+        const saved = z.object({
+          deliverables: z.array(z.object({ kind: z.enum(['plan', 'chapter']), title: z.string(), status: z.string(), characters: z.number(), sourceOperationId: z.string() })),
+          effects: z.array(z.object({ operationId: z.string(), action: z.string(), outcome: z.string() })),
+        }).safeParse(evidence.snapshot)
+        const actions = new Map(saved.success ? saved.data.effects.filter(effect => effect.outcome === 'succeeded')
+          .map(effect => [effect.operationId, effect.action]) : [])
+        const deliverable = saved.success ? saved.data.deliverables.reverse().find(item => {
+          const action = actions.get(item.sourceOperationId)
+          return item.status === 'current' && item.characters > 0 && (item.kind === 'plan' ? action === 'plan_save'
+            : action === 'chapter_create' || action === 'chapter_write' || action === 'chapter_append' || action === 'chapter_edit_range')
+        }) : undefined
+        nextPrompt = selectCompletedNextPrompt(candidate.content, candidate, deliverable)
+      }
+    }
     const operation = await prepareOperationInTransaction(tx, lease, {
       key: `finalize:${frame.revision}`, kind: 'internal', action: 'completion_finalize',
       input: runtimeJson({ sourceRevision: frame.revision, sourceHash: frame.snapshotHash, evidenceHash: evidence.snapshotHash,
@@ -68,6 +89,7 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     const receipt = await commitOperationEffectInTransaction(tx, lease, operation.id, operation.inputHash,
       async () => runtimeJson({ version: 1, sourceRevision: frame.revision, sourceHash: frame.snapshotHash,
         candidateHash: facts.candidateHash, evidenceHash: evidence.snapshotHash, evidence: evidence.snapshot,
+        ...(configuration.nextPromptMarker ? { nextPrompt: nextPrompt ?? null } : {}),
         ...(limited ? { limitedWritingDelivery: limited, outcome: limited.outcome } : {}),
         ...(chapterPresentation ? { chapterPresentation } : {}) }).value)
     const next = await saveExecutionStateInTransaction(tx, lease, { ...expected,

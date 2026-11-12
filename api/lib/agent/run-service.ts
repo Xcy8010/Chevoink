@@ -81,7 +81,7 @@ import { withUserRunLock } from './run-lock.js'
 import { admitGoalRun, bindGoalRun, type GoalRunAdmission } from './goal-run-admission.js'
 import { assertGoalFence, readGoalExecution } from './goal-fence.js'
 import { readHumanAdmission, withHumanAdmission } from './goal-activation-authority.js'
-import { addNextPromptInstruction } from './next-prompt.js'
+import { addNextPromptInstruction, allowsNextPrompt } from './next-prompt.js'
 import { freezeModelAssignments, resolveAssignedModel } from './model-assignments.js'
 import { getWindowConfiguration } from './window-configuration.js'
 import { frozenModelAssignmentsSchema, agentModelSelectionSchema } from '../../../shared/contracts/agent-model-assignments.js'
@@ -218,6 +218,7 @@ export async function initializePersistedLoopRun(userId: string, runId: string, 
   }
   const nextPromptMarker = !goalBinding && !session.spawnedFromRunId && agent.type === 'orchestrator'
     && readHumanAdmission(run.startRequest)?.request.predictNextPrompt
+    && !spec.scope.writing?.titleAndBodyOnly && allowsNextPrompt(input.prompt)
     ? addNextPromptInstruction(assembled.messages) : undefined
   await initializeDurableTask({ userId, runId, sourceMessageId: original.id, tokenBudget: input.tokenBudget })
   const lease = await acquireRunLease({ userId, runId, ownerId: durableProcessOwner, claimId: randomUUID() })

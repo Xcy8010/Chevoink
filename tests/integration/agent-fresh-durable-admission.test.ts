@@ -97,7 +97,12 @@ async function bootstrapDiagnostic(runId: string, failures: ReturnType<typeof ob
 }
 
 describe.runIf(available)('fresh native admission and unstarted bootstrap', () => {
-  it.each(['chat', 'terra'] as const)('carries a %s suggestion through the existing model receipt without storing it in the answer', protocol => fixture(async f => {
+  it.each([
+    { protocol: 'chat', source: 'footer' },
+    { protocol: 'terra', source: 'footer' },
+    { protocol: 'chat', source: 'visible-offer' },
+    { protocol: 'terra', source: 'skip' },
+  ] as const)('carries a $protocol $source suggestion decision from the same model request to history', ({ protocol, source }) => fixture(async f => {
     await ready(f)
     const terra = protocol === 'terra'
     if (terra) {
@@ -107,13 +112,16 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     const window = credits.getCreditWindow()
     await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000,
       periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
-    const answer = '你好。', nextPrompt = '帮我想一个短篇故事的开头'
+    const answer = source === 'footer' ? '你好。' : '渡桥放在第一卷收尾。\n下一步建议：把渡桥段落分成三个场景。'
+    const nextPrompt = source === 'footer' ? '帮我想一个短篇故事的开头'
+      : source === 'visible-offer' ? '帮我把渡桥段落分成三个场景。' : undefined
     const fetcher = vi.fn(async (_url: unknown, init: RequestInit) => {
       const request = JSON.parse(String(init.body))
       const system = (terra ? request.input : request.messages).find((item: { role?: string }) => item.role === 'system')
       const marker = String(system?.content).match(/\[\[CHEVOINK_NEXT_PROMPT_[a-f0-9]{8}\]\]/u)?.[0]
       expect(marker).toBeTruthy()
-      const text = [answer, [marker, nextPrompt].join(' ')].join(terra ? '\r\n  ' : '\n')
+      const proposal = source === 'skip' ? '[[CHEVOINK_NO_NEXT_PROMPT]]' : nextPrompt
+      const text = source === 'visible-offer' ? answer : [answer, [marker, proposal].join(' ')].join(terra ? '\r\n  ' : '\n')
       const frame = terra ? { type: 'response.completed', response: { status: 'completed', output: [
         { type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] },
       ], usage: { input_tokens: 20, output_tokens: 5 } } }
@@ -121,21 +129,58 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
       return new Response(`data: ${JSON.stringify(frame)}\n\ndata: [DONE]\n\n`)
     })
     vi.stubGlobal('fetch', fetcher)
-    const run = await startLoopRun(f.userId, { sessionId: f.sessionId, novelId: f.novelId, prompt: '你好', mode: 'build',
+    const run = await startLoopRun(f.userId, { sessionId: f.sessionId, novelId: f.novelId, prompt: source === 'footer' ? '你好' : '渡桥段落放在哪一卷合适？', mode: 'build',
       predictNextPrompt: true }, { humanOrigin: 'http' })
     await realBootstrap.dispatchFreshDurableRun(f.userId, run.runId)
     const state = await loadExecutionState(f.userId, run.runId)
     expect(state.frame.state).toMatchObject({ phase: 'completed' })
-    expect(state.frame.state.messages.at(-1)).toMatchObject({ role: 'assistant', content: answer, nextPrompt })
+    const candidate = state.frame.state.messages.at(-1)
+    expect(candidate).toMatchObject({ role: 'assistant', content: answer })
+    if (source === 'footer') expect(candidate).toMatchObject({ nextPrompt })
+    else expect(candidate).not.toHaveProperty('nextPrompt')
+    if (source === 'skip') expect(candidate).toMatchObject({ nextPromptSuppressed: true })
     const history = await listLoopSessionMessages(f.userId, f.sessionId, { runLimit: 1 })
     const events = await loadDurableEvents(f.userId, run.runId, 0)
     expect(events.filter(event => event.type === 'text.final')).toEqual([expect.objectContaining({ text: answer })])
-    expect(events.at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer, nextPrompt })
+    expect(events.at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer })
+    if (nextPrompt) expect(events.at(-1)).toMatchObject({ nextPrompt })
+    else expect(events.at(-1)).not.toHaveProperty('nextPrompt')
     const saved = await prisma.agentMessage.findFirstOrThrow({ where: { runId: run.runId, role: 'assistant' } })
     expect(saved.parts).toEqual([{ type: 'text', text: answer }])
-    expect(history.nextPrompt).toEqual({ runId: run.runId, text: nextPrompt })
+    expect(history.nextPrompt).toEqual(nextPrompt ? { runId: run.runId, text: nextPrompt } : undefined)
     expect(history.messages.find(message => message.id === saved.id)?.parts).toEqual(saved.parts)
     expect(fetcher).toHaveBeenCalledExactlyOnceWith(terra ? 'https://yunshu.chevolink.com/v1/responses' : 'https://provider.invalid/v1/chat/completions', expect.any(Object))
+  }))
+
+  it('suggests a concrete follow-up for a verified current plan when the model returns no footer', () => fixture(async f => {
+    await ready(f)
+    const window = credits.getCreditWindow()
+    await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000,
+      periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
+    const title = '渡桥情节', answer = '渡桥情节计划已保存。'
+    const fetcher = vi.fn(async (_url: unknown, init: RequestInit) => {
+      const request = JSON.parse(String(init.body))
+      const afterTool = request.messages.some((message: { role: string }) => message.role === 'tool')
+      const choice = afterTool ? { delta: { content: answer }, finish_reason: 'stop' } : { delta: { tool_calls: [{
+        index: 0, id: 'call_save_plan', function: { name: 'plan_save', arguments: JSON.stringify({ title, content: '渡桥发生在第一卷收尾。', planKind: 'outline' }) },
+      }] }, finish_reason: 'tool_calls' }
+      const frame = { choices: [choice], usage: { prompt_tokens: 20, completion_tokens: 5 } }
+      return new Response(`data: ${JSON.stringify(frame)}\n\ndata: [DONE]\n\n`)
+    })
+    vi.stubGlobal('fetch', fetcher)
+    const run = await startLoopRun(f.userId, { sessionId: f.sessionId, novelId: f.novelId, prompt: '请制定并保存渡桥情节计划。', mode: 'build',
+      predictNextPrompt: true }, { humanOrigin: 'http' })
+    await realBootstrap.dispatchFreshDurableRun(f.userId, run.runId)
+    const state = await loadExecutionState(f.userId, run.runId)
+    expect(state.frame.state.phase).toBe('completed')
+    expect(state.frame.state.messages.at(-1)).not.toHaveProperty('nextPrompt')
+    const plan = await prisma.agentArtifact.findFirstOrThrow({ where: { runId: run.runId, artifactType: 'chapterPlan' } })
+    expect(plan).toMatchObject({ title, content: '渡桥发生在第一卷收尾。' })
+    const history = await listLoopSessionMessages(f.userId, f.sessionId, { runLimit: 1 })
+    const nextPrompt = '帮我核对计划《渡桥情节》与已有创作设定是否一致。'
+    expect(history.nextPrompt).toEqual({ runId: run.runId, text: nextPrompt })
+    expect((await loadDurableEvents(f.userId, run.runId, 0)).at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', nextPrompt })
+    expect(fetcher).toHaveBeenCalledTimes(2)
   }))
 
   it('does not opt a fresh durable HTTP task into legacy terminal response schemas', () => fixture(async f => {

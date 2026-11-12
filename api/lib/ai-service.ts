@@ -552,6 +552,7 @@ export type ChatStreamChunk =
 export type ChatCompletionResult = {
   content: string
   nextPrompt?: string
+  nextPromptSuppressed?: true
   reasoning: string
   responsesContinuation?: ResponsesContinuation
   toolCalls: ToolCallRequest[]
@@ -1417,17 +1418,18 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
     reader.releaseLock()
   }
 
+  const truncated = (finishReason as ChatCompletionResult['finishReason']) === 'length'
   const toolCalls: ToolCallRequest[] = [...toolCallsByIndex.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([, entry], index) => ({
       id: entry.id || `call_${index}`,
       name: entry.name,
       arguments: entry.arguments || '{}',
-      ...(finishReason === 'length' ? { incomplete: true } : {}),
+      ...(truncated ? { incomplete: true } : {}),
     }))
     .filter((call) => call.name)
 
-  if (toolCalls.length > 0 && (finishReason as ChatCompletionResult['finishReason']) !== 'length') {
+  if (toolCalls.length > 0 && !truncated) {
     finishReason = 'tool_calls'
   }
 
@@ -1444,6 +1446,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAltern
     : { content }
   const reasoningItems = responsesFrame?.reasoningItems()
   const result: ChatCompletionResult = { ...delivery, reasoning, toolCalls, finishReason, usage,
+    ...(params.nextPromptMarker && truncated ? { nextPromptSuppressed: true as const } : {}),
     ...(finishReason === 'tool_calls' && responsesBinding && reasoningItems?.length
       ? { responsesContinuation: { binding: responsesBinding, items: reasoningItems } } : {}) }
   if (durable) return durable.finish(result)

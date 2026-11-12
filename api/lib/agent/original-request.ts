@@ -9,7 +9,7 @@ import { activeChapterScope } from '../data/internal.js'
 type Subject = { userId: string; novelId: string; runId: string }
 type OriginalRequest = { prompt: string | null; spec: unknown; taskId: string; sourceRunId: string; parentRunId: string | null }
 const record = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
-function originalPrompt(value: unknown): string | null {
+export function originalPrompt(value: unknown): string | null {
   const object = record(value)
   if (typeof object?.prompt === 'string') return object.prompt
   const texts = Array.isArray(value) ? value.flatMap(part => {

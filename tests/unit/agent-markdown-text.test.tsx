@@ -1,19 +1,12 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentMarkdownText } from '../../src/features/studio/agent/components/AgentMarkdownText'
 
 afterEach(() => { cleanup(); vi.useRealTimers() })
-// These assertions cover rendering/security, not Vite's cold dependency transform
-// speed. Await the real lazy dependencies before the default 1s DOM deadline.
-beforeAll(async () => {
-  await Promise.all([import('react-markdown'), import('remark-gfm'), import('../../shared/agent-output.js')])
-}, 30_000)
-
 describe('J4 assistant Markdown', () => {
-  it('removes hidden tool-status line boxes and empty paragraphs without flattening prose or code', async () => {
+  it('lays out real paragraphs and code in the first render, without hidden tool-status line boxes', () => {
     const view = render(<AgentMarkdownText text={'核对前章。\n[调用工具 novel_get_context：读取上下文]\n[调用工具 chapter_read：读取正文]\n[调用工具 memory_search：检索]\n\n[调用工具 other：准备]\n\n第一行\n第二行\n\n```text\n[调用工具 example：保留代码]\n```'} />)
-    await waitFor(() => expect(view.container.querySelector('code')).toBeTruthy())
     expect([...view.container.querySelectorAll('p')].map(p => p.textContent)).toEqual(['核对前章。', '第一行\n第二行'])
     expect(view.container.querySelector('code')?.textContent).toContain('[调用工具 example：保留代码]')
   })

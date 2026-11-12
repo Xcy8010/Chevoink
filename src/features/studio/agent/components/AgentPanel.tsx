@@ -81,10 +81,11 @@ import { formatSessionTime, getMessageText, phaseLabel, shouldKeepLiveSessionMes
 import { useAgentStream } from '../useAgentStream'
 import { resolveComposerModelEffort, useAgentModelPreference } from '../useAgentModelPreference'
 import { useAgentGoalStream } from '../useAgentGoalStream'
+import { useActivityWorkingLabel } from '../useProcessingHint'
 import { useGoalBarVisibility } from '../useGoalBarVisibility'
 import { openGoalEntry } from '../goal-entry'
 import { projectBlockTimings, projectMessages, shouldRenderAuthorMessage } from '../lib/message-projection'
-import { activityAnswerText, activityWorkingLabel, projectActivityGroups } from '../lib/activity-groups'
+import { activityAnswerText, projectActivityGroups } from '../lib/activity-groups'
 import { useMessageScroll } from './use-message-scroll'
 import { useComposerInset } from './use-composer-inset'
 import { useRunControls } from './use-run-controls'
@@ -518,9 +519,10 @@ export function AgentPanel({
   const goalBar = useGoalBarVisibility(userId, sessionId, goalView.goal)
   const panelPhase = selectAgentPanelPhase(goalView, phase)
   const active = isRunActive(panelPhase)
-  const nextPrompt = sessionId && storeLoadedSessionId === sessionId
-    && (panelPhase === 'succeeded' || panelPhase === 'idle') && !settlingBlocks.size
-    && !lastUserRequest?.delivery && !queueQuery.data?.items.length
+  const nextPrompt = completedNextPrompt && sessionId && storeLoadedSessionId === sessionId
+    && (panelPhase === 'idle' || panelPhase === 'succeeded' && runId === completedNextPrompt.runId)
+    && (!lastUserRequest?.delivery || lastUserRequest.delivery.status === 'sent' && lastUserRequest.runId === completedNextPrompt.runId)
+    && !queueQuery.data?.items.length
     ? completedNextPrompt : null
   const blockTimings = useMemo(() => projectBlockTimings(messages, blockInfoById, active ? runId : null), [messages, blockInfoById, active, runId])
   const { isExpanded: isBlockExpanded, toggle: toggleBlock } = useMessageBlockExpansion({
@@ -529,7 +531,7 @@ export function AgentPanel({
   const activityRunActive = selectAgentActivityRunActive(goalView, phase)
   const working = activityRunActive && (panelPhase === 'starting' || panelPhase === 'running') && !pendingApproval && !pendingQuestion
   const currentActivity = working && runId ? activityGroups.runningByRun.get(runId) : undefined
-  const workingLabel = working && !currentActivity ? activityWorkingLabel(runId ? activityGroups.lastCallByRun.get(runId) : undefined) : undefined
+  const workingLabel = useActivityWorkingLabel(messages, runId, panelPhase, working && !currentActivity, activityGroups)
   const waitingForFirstResponse = lastUserRequest?.runId === runId && lastUserRequest.requestTiming?.elapsedMs === null
   const workingMessage = workingLabel && runId && !waitingForFirstResponse
     ? [...messages].reverse().find(message => message.role === 'assistant' && message.runId === runId) : undefined

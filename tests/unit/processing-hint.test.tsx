@@ -5,9 +5,10 @@ import { ProcessingHint } from '../../src/features/studio/agent/components/Proce
 import { AgentMessageParts } from '../../src/features/studio/agent/components/AgentMessageParts'
 import { projectAgentAuthorParts } from '../../shared/agent-author-view'
 import { isAssistantMessageStreaming, shouldShowProcessingHint } from '../../src/features/studio/agent/lib/panel-helpers'
+import { projectActivityGroups } from '../../src/features/studio/agent/lib/activity-groups'
 import type { AgentUIMessage } from '../../shared/contracts/index.js'
 import { useAgentStore } from '../../src/features/studio/agent/agentStore'
-import { OUTPUT_SILENCE_MS, useProcessingHint } from '../../src/features/studio/agent/useProcessingHint'
+import { OUTPUT_SILENCE_MS, useActivityWorkingLabel, useProcessingHint } from '../../src/features/studio/agent/useProcessingHint'
 afterEach(() => { cleanup(); useAgentStore.getState().resetRun(); vi.useRealTimers() })
 
 function expectActiveAnalysis(container: HTMLElement) {
@@ -107,6 +108,33 @@ it('hides on published paragraph output and returns only after silence without a
   expect(view.result.current).toBe(true)
   view.unmount()
   expect(vi.getTimerCount()).toBe(0)
+})
+
+it('removes the initial thinking label when author text arrives and reserves a different hint for a silent gap', () => {
+  vi.useFakeTimers()
+  const store = useAgentStore.getState()
+  store.resumeRun('r', 'session')
+  const base = { messageId: 'm', runId: 'r', ts: new Date().toISOString() }
+  const view = renderHook(() => {
+    const messages = useAgentStore(state => state.messages)
+    const groups = projectActivityGroups(messages)
+    return useActivityWorkingLabel(messages, 'r', 'running', !groups.runningByRun.has('r'), groups)
+  })
+  expect(view.result.current).toBe('正在思考')
+  act(() => store.applyEvent({ ...base, type: 'reasoning.delta', delta: '合成内部思考。', activity: true, seq: 1 }))
+  expect(view.result.current).toBe('正在思考')
+  act(() => store.applyEvent({ ...base, type: 'text.delta', delta: '我先核对这段对话。\n\n', seq: 2 }))
+  expect(view.result.current).toBeUndefined()
+  act(() => vi.advanceTimersByTime(OUTPUT_SILENCE_MS - 1))
+  expect(view.result.current).toBeUndefined()
+  act(() => vi.advanceTimersByTime(1))
+  expect(view.result.current).toBe('正在处理…')
+  act(() => store.applyEvent({ ...base, messageId: 'later', type: 'message.start', role: 'assistant', seq: 3 }))
+  expect(view.result.current).toBe('正在处理…')
+  act(() => store.applyEvent({ ...base, messageId: 'later', type: 'tool.call', callId: 'read', toolName: 'chapter_read', args: {}, title: '核对前文', seq: 4 }))
+  expect(view.result.current).toBeUndefined()
+  act(() => store.applyEvent({ ...base, messageId: 'later', type: 'tool.result', callId: 'read', toolName: 'chapter_read', ok: true, summary: '已核对', durationMs: 10, seq: 5 }))
+  expect(view.result.current).toBe('梳理刚查到的资料')
 })
 
 it.each(['text.delta', 'reasoning.delta'] as const)('hands off immediately to real %s activity, and restores one timer after silence', type => {

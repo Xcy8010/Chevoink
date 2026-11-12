@@ -173,6 +173,7 @@ export const durableChatResultSchema = z.object({
   content: z.string(), reasoning: z.string(), finishReason: z.enum(['stop', 'tool_calls', 'length']),
   responsesContinuation: responsesContinuationSchema.optional(),
   nextPrompt: z.string().min(1).max(NEXT_PROMPT_MAX_LENGTH).optional(),
+  nextPromptSuppressed: z.literal(true).optional(),
   toolCalls: z.array(z.object({ id: z.string(), name: z.string(), arguments: z.string(), incomplete: z.boolean().optional() })),
   usage: z.object({ promptTokens: count, completionTokens: count, totalTokens: count, promptCacheHitTokens: count.nullable(), promptCacheMissTokens: count.nullable() }),
 }).strict()

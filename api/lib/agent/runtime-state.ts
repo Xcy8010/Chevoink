@@ -23,7 +23,8 @@ const message = z.discriminatedUnion('role', [
   ]))]) }).strict(),
   z.object({ role: z.literal('assistant'), content: z.string().nullable(), reasoning: z.string().optional(), toolCalls: z.array(toolCall).optional(),
     responsesContinuation: responsesContinuationSchema.optional(),
-    nextPrompt: z.string().min(1).max(NEXT_PROMPT_MAX_LENGTH).optional() }).strict(),
+    nextPrompt: z.string().min(1).max(NEXT_PROMPT_MAX_LENGTH).optional(),
+    nextPromptSuppressed: z.literal(true).optional() }).strict(),
   z.object({ role: z.literal('tool'), toolCallId: z.string().min(1), content: z.string() }).strict(),
 ])
 
