@@ -3962,7 +3962,7 @@ export default function StudioWorkspace() {
   }
 
   // Mobile and IDE use the same editing/review contract; only presentation differs.
-  function renderEditor(presentation: Pick<ComponentProps<typeof EditorCanvas>, 'variant' | 'embedded' | 'onSelectMobileChapter' | 'mobileScope'>) {
+  function renderEditor(presentation: Pick<ComponentProps<typeof EditorCanvas>, 'variant' | 'onSelectMobileChapter' | 'mobileScope'> = {}) {
     return (
     <EditorCanvas
       {...presentation}
@@ -4311,7 +4311,7 @@ export default function StudioWorkspace() {
           />
 
           <div className="min-h-0 flex-1 overflow-hidden">
-            <div className="studio-perspective-enter h-full min-h-0">
+            <div key={workspacePerspective} data-studio-perspective={workspacePerspective} className="studio-perspective-enter h-full min-h-0">
             {featureFlags.dualWorkspace && workspacePerspective === 'work' ? (
               <WorkPerspective
                 conversationRail={<AgentConversationRail conversations={agentConversationRailItems} onSelectConversation={(messageId) => window.dispatchEvent(new CustomEvent('chevoink:agent-conversation-navigate', { detail: { messageId } }))} />}
@@ -4405,7 +4405,7 @@ export default function StudioWorkspace() {
               agentWidth={panelWidths.agent}
               agentOpen={ideAgentOpen}
             >
-              <div className="relative min-h-0 border-r border-[var(--border-subtle)]">
+              <div className="relative min-h-0 min-w-0 border-r border-[var(--border-subtle)]">
                 <IdeNavigationRail
                   tab={ideSidebarTab}
                   open={ideTreeOpen}
@@ -4476,11 +4476,11 @@ export default function StudioWorkspace() {
                 /> : null}
               </div>
 
-              <div className="min-h-0 border-r border-[var(--border-subtle)] bg-[var(--surface-default)]">
-                {renderEditor({ embedded: true })}
+              <div data-studio-region="ide-editor" className="min-h-0 min-w-0 border-r border-[var(--border-subtle)] bg-[var(--surface-default)]">
+                {renderEditor()}
               </div>
 
-              <div className="relative flex h-full min-h-0 overflow-hidden bg-[var(--app-bg)]">
+              <div className="relative flex h-full min-h-0 min-w-0 overflow-hidden bg-[var(--app-bg)]">
                 {ideAgentOpen ? <PanelResizeHandle
                   panel="agent"
                   side="left"

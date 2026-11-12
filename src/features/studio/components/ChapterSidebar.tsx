@@ -74,7 +74,7 @@ type ChapterSidebarProps = {
   onMovePlan?: (planId: string, position: number) => void | Promise<void>
   /** 打开章节设置抽屉（会先切到该章） */
   onOpenChapterSettings: (chapterId: string) => void
-  /** 打开卷设置抽屉；卷行的章数在悬停、聚焦或触摸时可达 */
+  /** 打开卷设置抽屉 */
   onOpenVolumeSettings?: (volumeId: string) => void
   /** 打开计划设置抽屉（改名 / 删除） */
   onOpenPlanSettings: (planId: string) => void
@@ -363,13 +363,16 @@ export default function ChapterSidebar({
                               event.stopPropagation()
                               onOpenVolumeSettings(volume.id)
                             }}
-                            className="ml-auto inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-full px-1.5 text-[10px] text-[var(--text-tertiary)] transition hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                            className="ml-auto inline-flex h-11 min-w-11 shrink-0 items-center justify-center gap-1 rounded-full px-1.5 text-[10px] text-[var(--text-tertiary)] transition hover:bg-[var(--surface-default)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] [@media(min-width:768px)_and_(hover:hover)_and_(pointer:fine)]:h-7 [@media(min-width:768px)_and_(hover:hover)_and_(pointer:fine)]:min-w-7"
                             aria-label={`卷设置：${volume.title}`}
                             title="卷设置"
                           >
-                            <span className="md:group-hover/volume:hidden md:group-focus-within/volume:hidden">共{volumeChapters.length}章</span>
-                            <span className="hidden items-center gap-1 md:group-hover/volume:inline-flex md:group-focus-within/volume:inline-flex">
-                              <Settings2 className="h-3 w-3" />设置
+                            <span aria-hidden="true" className="hidden [@media(min-width:768px)_and_(hover:hover)_and_(pointer:fine)]:inline md:group-hover/volume:hidden md:group-focus-within/volume:hidden">
+                              共{volumeChapters.length}章
+                            </span>
+                            <span aria-hidden="true" className="inline-flex items-center gap-1 [@media(min-width:768px)_and_(hover:hover)_and_(pointer:fine)]:hidden md:group-hover/volume:inline-flex md:group-focus-within/volume:inline-flex">
+                              <Settings2 data-volume-settings-icon className="h-3.5 w-3.5" />
+                              <span className="hidden [@media(min-width:768px)_and_(hover:hover)_and_(pointer:fine)]:inline">设置</span>
                             </span>
                           </button>
                         ) : (

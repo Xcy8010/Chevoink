@@ -22,6 +22,7 @@ type ChapterChangeReviewProps = {
   fileCount?: number
   onNavigateFile?: (offset: 1 | -1) => void
   className?: string
+  inline?: boolean
   mobile?: boolean
   onMobileScroll?: (top: number) => void
 }
@@ -56,6 +57,7 @@ export default function ChapterChangeReview({
   fileCount = 1,
   onNavigateFile,
   className,
+  inline = false,
   mobile = false,
   onMobileScroll,
 }: ChapterChangeReviewProps) {
@@ -152,7 +154,7 @@ export default function ChapterChangeReview({
     }
     const clamped = ((nextIndex % hunkCount) + hunkCount) % hunkCount
     setActiveHunk(clamped)
-    hunkRefs.current[clamped]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    hunkRefs.current[clamped]?.scrollIntoView({ behavior: inline ? 'auto' : 'smooth', block: 'center' })
   }
 
   // IDE 式快捷键：Ctrl+Enter 采纳整章、Ctrl+Backspace 拒绝整章（桌面端）；
@@ -160,11 +162,11 @@ export default function ChapterChangeReview({
   useEffect(() => {
     if (mobile) return
     function handleKeyDown(event: KeyboardEvent) {
-      if (!event.ctrlKey || busy) {
+      if (!event.ctrlKey || busy || event.defaultPrevented) {
         return
       }
-      const target = event.target as HTMLElement | null
-      if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable)) {
+      const target = event.target
+      if (target instanceof HTMLElement && (target.matches('textarea, input') || target.isContentEditable || target.closest('[aria-modal="true"]'))) {
         return
       }
       if (event.key === 'Enter') {
@@ -241,21 +243,29 @@ export default function ChapterChangeReview({
     )
   }
 
-  return (
-    <div className={cn('relative flex h-full min-h-0 flex-col', className)}>
-      <div className="flex min-h-0 flex-1 flex-col rounded-[24px] border border-[var(--border-strong)] bg-[var(--surface-default)]">
-        {/* 标题在滚动区外：与正常编辑态一致，滚动 diff 正文时不会从标题上方穿透 */}
-        <div className="border-b border-[var(--border-subtle)] px-5 pb-4 pt-5">
-          <p className="text-lg font-semibold tracking-[0.01em] text-[var(--text-primary)]">
-            {review.after.title.trim() || `第 ${review.after.orderIndex} 章`}
-          </p>
-          <p className="mt-1 text-xs leading-5 text-[var(--text-tertiary)]">
-            {review.description} · 绿色背景为新增、红色背景为删除，可逐块或整章定夺。
-          </p>
-        </div>
+  const actionHover = inline ? 'hover:bg-[var(--surface-hover)]' : 'hover:bg-zinc-700/70'
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-24 pt-4">
-          <div className="text-sm leading-8 text-[var(--text-primary)]">
+  return (
+    <div data-studio-region={inline ? 'ide-chapter-review' : undefined} className={cn('relative flex h-full min-h-0 flex-col', className)}>
+      <div className={cn('flex min-h-0 flex-1 flex-col', !inline && 'rounded-[24px] border border-[var(--border-strong)] bg-[var(--surface-default)]')}>
+        {inline ? (
+          <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--border-subtle)] px-4 py-2 text-xs xl:px-6" title={review.description}>
+            <span className="font-medium text-[var(--text-primary)]">待审变更</span>
+            <span className="text-[var(--text-tertiary)]">绿色为新增，红色为删除</span>
+          </div>
+        ) : (
+          <div className="border-b border-[var(--border-subtle)] px-5 pb-4 pt-5">
+            <p className="text-lg font-semibold tracking-[0.01em] text-[var(--text-primary)]">
+              {review.after.title.trim() || `第 ${review.after.orderIndex} 章`}
+            </p>
+            <p className="mt-1 text-xs leading-5 text-[var(--text-tertiary)]">
+              {review.description} · 绿色背景为新增、红色背景为删除，可逐块或整章定夺。
+            </p>
+          </div>
+        )}
+
+        <div className={cn('min-h-0 flex-1 overflow-y-auto overscroll-contain', inline ? 'px-4 py-4 motion-safe:scroll-smooth xl:px-6' : 'px-5 pb-24 pt-4')}>
+          <div className={cn('text-[var(--text-primary)]', inline ? 'studio-editor-content' : 'text-sm leading-8')}>
           {visibleBlocks.map((block, blockIndex) => {
             if (block.hunkIndex === null) {
               return (
@@ -273,8 +283,9 @@ export default function ChapterChangeReview({
                   hunkRefs.current[hunkIndex] = element
                 }}
                 className={cn(
-                  'relative my-1 rounded-[10px]',
-                  activeHunk === hunkIndex && 'ring-1 ring-[rgba(15,23,42,0.30)]',
+                  'relative my-1',
+                  inline ? 'rounded-sm' : 'rounded-[10px]',
+                  activeHunk === hunkIndex && (inline ? 'outline outline-1 outline-[var(--border-strong)]' : 'ring-1 ring-[rgba(15,23,42,0.30)]'),
                 )}
               >
                 {block.segments.map((segment, segmentIndex) =>
@@ -282,9 +293,10 @@ export default function ChapterChangeReview({
                     <div
                       key={`seg-${segmentIndex}`}
                       className={cn(
-                        'whitespace-pre-wrap break-words rounded-[6px] px-1',
-                        segment.kind === 'added' && 'bg-[rgba(34,197,94,0.16)]',
-                        segment.kind === 'removed' && 'bg-[rgba(239,68,68,0.16)]',
+                        'whitespace-pre-wrap break-words',
+                        inline ? 'border-s-2 ps-2 pe-16' : 'rounded-[6px] px-1',
+                        segment.kind === 'added' && (inline ? 'border-emerald-500/60 bg-emerald-500/10' : 'bg-[rgba(34,197,94,0.16)]'),
+                        segment.kind === 'removed' && (inline ? 'border-rose-500/60 bg-rose-500/10' : 'bg-[rgba(239,68,68,0.16)]'),
                       )}
                     >
                       {segment.text || '\u00A0'}
@@ -292,7 +304,7 @@ export default function ChapterChangeReview({
                   ),
                 )}
                 {/* 块级定夺：片段右下角 ✕ 撤回（弹窗确认）/ ✓ 采纳 */}
-                <div className="absolute -bottom-3 right-2 z-10 flex items-center gap-1 rounded-full border border-[var(--border-strong)] bg-[var(--surface-default)] px-1.5 py-1 shadow-md">
+                <div className={cn('absolute z-10 flex items-center gap-1', inline ? 'end-1 top-0.5' : '-bottom-3 right-2 rounded-full border border-[var(--border-strong)] bg-[var(--surface-default)] px-1.5 py-1 shadow-md')}>
                   <button
                     type="button"
                     onClick={() => {
@@ -337,71 +349,71 @@ export default function ChapterChangeReview({
       </div>
 
       {/* IDE 式浮动审查条：块导航 / 整章拒绝·采纳 / 多文件切换（自适应换行，兼容手机与平板） */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center px-3">
-        <div className="pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-1 rounded-[14px] border border-[rgba(24,24,27,0.5)] bg-[rgba(24,24,27,0.94)] px-2 py-1.5 text-xs text-zinc-100 shadow-xl backdrop-blur">
+      <div className={cn('flex shrink-0 justify-center px-3', inline ? 'border-t border-[var(--border-subtle)]' : 'pointer-events-none absolute inset-x-0 bottom-3 z-20')}>
+        <div role="group" aria-label="章节审查操作" className={cn('pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-1 px-2 py-1.5 text-xs', inline ? 'text-[var(--text-primary)]' : 'rounded-[14px] border border-[rgba(24,24,27,0.5)] bg-[rgba(24,24,27,0.94)] text-zinc-100 shadow-xl backdrop-blur')}>
           <button
             type="button"
             onClick={() => focusHunk(activeHunk - 1)}
             disabled={hunkCount === 0}
-            className="flex h-7 w-7 items-center justify-center rounded-[8px] transition hover:bg-zinc-700/70 disabled:opacity-40"
+            className={cn('flex h-7 w-7 items-center justify-center rounded-md transition-colors disabled:opacity-40', actionHover)}
             aria-label="上一处变更"
           >
             <ArrowUp className="h-3.5 w-3.5" />
           </button>
-          <span className="min-w-[2.6rem] text-center tabular-nums text-zinc-300">
+          <span className={cn('min-w-[2.6rem] text-center tabular-nums', inline ? 'text-[var(--text-secondary)]' : 'text-zinc-300')}>
             {hunkCount === 0 ? '0 / 0' : `${activeHunk + 1} / ${hunkCount}`}
           </span>
           <button
             type="button"
             onClick={() => focusHunk(activeHunk + 1)}
             disabled={hunkCount === 0}
-            className="flex h-7 w-7 items-center justify-center rounded-[8px] transition hover:bg-zinc-700/70 disabled:opacity-40"
+            className={cn('flex h-7 w-7 items-center justify-center rounded-md transition-colors disabled:opacity-40', actionHover)}
             aria-label="下一处变更"
           >
             <ArrowDown className="h-3.5 w-3.5" />
           </button>
 
-          <span className="mx-1 h-4 w-px bg-zinc-700" />
+          <span className={cn('mx-1 h-4 w-px', inline ? 'bg-[var(--border-subtle)]' : 'bg-zinc-700')} />
 
           <button
             type="button"
             onClick={onRevert}
             disabled={busy}
-            className="flex h-7 items-center gap-1 rounded-[8px] px-2 transition hover:bg-zinc-700/70 disabled:opacity-50"
+            className={cn('flex h-7 items-center gap-1 rounded-md px-2 transition-colors disabled:opacity-50', actionHover)}
           >
             拒绝
-            <span className="hidden text-[10px] text-zinc-500 md:inline">Ctrl+Backspace</span>
+            <span className={cn('hidden text-[10px]', inline ? 'text-[var(--text-tertiary)] xl:inline' : 'text-zinc-500 md:inline')}>Ctrl+Backspace</span>
           </button>
           <button
             type="button"
             onClick={onKeep}
             disabled={busy}
-            className="flex h-7 items-center gap-1 rounded-[8px] bg-zinc-100 px-2 font-medium text-zinc-900 transition hover:bg-white disabled:opacity-50"
+            className={cn('flex h-7 items-center gap-1 rounded-md px-2 font-medium transition-colors disabled:opacity-50', inline ? 'bg-[var(--surface-contrast)] text-[var(--text-contrast)] hover:bg-[var(--surface-contrast-hover)]' : 'bg-zinc-100 text-zinc-900 hover:bg-white')}
           >
             采纳
-            <span className="hidden text-[10px] text-zinc-500 md:inline">Ctrl+Enter</span>
+            <span className={cn('hidden text-[10px]', inline ? 'opacity-75 xl:inline' : 'text-zinc-500 md:inline')}>Ctrl+Enter</span>
           </button>
 
           {fileCount > 1 && onNavigateFile ? (
             <>
-              <span className="mx-1 h-4 w-px bg-zinc-700" />
+              <span className={cn('mx-1 h-4 w-px', inline ? 'bg-[var(--border-subtle)]' : 'bg-zinc-700')} />
               <button
                 type="button"
                 onClick={() => onNavigateFile(-1)}
                 disabled={busy}
-                className="flex h-7 w-7 items-center justify-center rounded-[8px] transition hover:bg-zinc-700/70 disabled:opacity-50"
+                className={cn('flex h-7 w-7 items-center justify-center rounded-md transition-colors disabled:opacity-50', actionHover)}
                 aria-label="上一个待审文件"
               >
                 <ChevronLeft className="h-3.5 w-3.5" />
               </button>
-              <span className="whitespace-nowrap text-zinc-300">
+              <span className={cn('whitespace-nowrap', inline ? 'text-[var(--text-secondary)]' : 'text-zinc-300')}>
                 文件 {fileIndex} / {fileCount}
               </span>
               <button
                 type="button"
                 onClick={() => onNavigateFile(1)}
                 disabled={busy}
-                className="flex h-7 w-7 items-center justify-center rounded-[8px] transition hover:bg-zinc-700/70 disabled:opacity-50"
+                className={cn('flex h-7 w-7 items-center justify-center rounded-md transition-colors disabled:opacity-50', actionHover)}
                 aria-label="下一个待审文件"
               >
                 <ChevronRight className="h-3.5 w-3.5" />

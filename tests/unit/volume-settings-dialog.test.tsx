@@ -22,6 +22,26 @@ async function openConfirmation() {
 }
 
 describe('volume settings confirmation and operation ownership', () => {
+  it('moves keyboard focus into the sheet, wraps Tab and restores the trigger on dismissal', () => {
+    const props = propsFor()
+    const page = (open: boolean) => <><button type="button">打开卷设置</button><VolumeSettingsDialog {...props} open={open} /></>
+    const view = render(page(false))
+    const trigger = screen.getByRole('button', { name: '打开卷设置' })
+    trigger.focus()
+    view.rerender(page(true))
+    const panel = screen.getByRole('dialog', { name: '卷设置' })
+    const close = within(panel).getByRole('button', { name: '关闭卷设置' })
+    const done = within(panel).getByRole('button', { name: '完成' })
+    expect(document.activeElement).toBe(panel)
+    fireEvent.keyDown(panel, { key: 'Tab' })
+    expect(document.activeElement).toBe(close)
+    fireEvent.keyDown(close, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(done)
+    fireEvent.keyDown(done, { key: 'Escape' })
+    expect(props.onClose).toHaveBeenCalledOnce()
+    view.rerender(page(false))
+    expect(document.activeElement).toBe(trigger)
+  })
   it('blocks the sole remaining volume but allows the last volume when another exists', () => {
     const props = propsFor()
     const view = render(<VolumeSettingsDialog {...props} volumes={[props.volumes[0]]} />)
@@ -65,6 +85,9 @@ describe('volume settings confirmation and operation ownership', () => {
     render(<VolumeSettingsDialog {...props} />)
     const confirmation = await openConfirmation()
     expect(props.beforeChange).toHaveBeenCalledOnce()
+    expect(api.deleteVolume).not.toHaveBeenCalled()
+    fireEvent.keyDown(screen.getByRole('dialog', { name: '卷设置' }), { key: 'Enter' })
+    expect(document.activeElement).toBe(confirmation.getByRole('button', { name: '关闭确认弹窗' }))
     expect(api.deleteVolume).not.toHaveBeenCalled()
     expect(confirmation.getByText(/开头.*正文保留/)).toBeTruthy()
     fireEvent.click(confirmation.getByRole('button', { name: '删除卷并保留章节' }))
@@ -118,6 +141,10 @@ describe('volume settings confirmation and operation ownership', () => {
     const view = render(<VolumeSettingsDialog {...props} />)
     fireEvent.click(screen.getByRole('button', { name: '删除卷' }))
     await waitFor(() => expect(api.getStudioPayload).toHaveBeenCalledOnce())
+    const panel = screen.getByRole('dialog', { name: '卷设置' })
+    fireEvent.keyDown(panel, { key: 'Escape' })
+    fireEvent.click(panel.parentElement!)
+    expect(props.onClose).not.toHaveBeenCalled()
     view.rerender(<VolumeSettingsDialog {...propsFor('other')} />)
     await act(async () => resolve(payload(props)))
     expect(screen.queryByRole('dialog', { name: '删除卷' })).toBeNull()
