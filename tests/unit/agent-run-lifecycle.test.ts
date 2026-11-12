@@ -4950,11 +4950,17 @@ describe('author-directed task ending in the real execution loop', () => {
     })
     vi.mocked(waitForQuestionAnswer).mockResolvedValueOnce({ answer: '长期断电', timedOut: false })
     try {
-      queue(response('', [call('direction', 'ask_user', JSON.stringify({ purpose: 'novel_direction',
+      queue(response('', [call('invalid-save', 'novel_update_meta', JSON.stringify({ title: '', summary, tags })),
+        call('save-before-direction', 'novel_update_meta', JSON.stringify({ title, summary, tags })),
+        call('direction', 'ask_user', JSON.stringify({ purpose: 'novel_direction',
         question: '你想写哪一种末日？', options: [{ label: '长期断电' }, { label: '冰期' }] }))]),
       response('', [call('rename', 'novel_rename', JSON.stringify({ title })),
         call('metadata', 'novel_update_meta', JSON.stringify({ summary, tags })), call('premature-outline', 'plan_save')]))
       await run(prompt)
+      expect(events().find(event => event.type === 'tool.result' && event.callId === 'invalid-save'))
+        .toMatchObject({ ok: false, failureCode: 'TOOL_SCHEMA_INVALID' })
+      expect(events().find(event => event.type === 'tool.result' && event.callId === 'save-before-direction'))
+        .toMatchObject({ ok: false, failureCode: 'NOVEL_DIRECTION_REQUIRED' })
       expect(waitForQuestionAnswer).toHaveBeenCalledOnce()
       expect(mocks.chat).toHaveBeenCalledTimes(2)
       expect(updates.mock.calls.map(([input]) => input)).toEqual([
@@ -4973,7 +4979,7 @@ describe('author-directed task ending in the real execution loop', () => {
     }
   })
 
-  it.each(['no-progress', 'authority-denial'] as const)('ends incomplete novel setup without repeating the same completion reminder: %s', async scenario => {
+  it('ends incomplete novel setup without repeating the same completion reminder', async () => {
     const { prisma } = await import('../../api/lib/prisma.js')
     const prompt = '帮我创建一部末日生存类型的小说'
     mocks.currentOriginal = { prompt, taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', prompt,
@@ -4985,11 +4991,7 @@ describe('author-directed task ending in the real execution loop', () => {
     })
     try {
       const incomplete = response('已经全部保存完毕。')
-      if (scenario === 'authority-denial') {
-        const blocked = tool('novel_update_meta', async () => { throw new DataAccessError(409, 'NOVEL_SETUP_AUTHORITY_REQUIRED', '当前状态下不能保存作品信息') }, false)
-        mocks.tools = [blocked]
-        queue(response('', [call('failed-save', 'novel_update_meta')]), incomplete)
-      } else queue(incomplete, incomplete)
+      queue(incomplete, incomplete)
       await run(prompt)
       expect(mocks.chat).toHaveBeenCalledTimes(2)
       expect(events().filter(event => event.type === 'text.final' && event.text)).toEqual([
@@ -4997,6 +4999,43 @@ describe('author-directed task ending in the real execution loop', () => {
       ])
       expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
       expect(mocks.runs.get('run')).toMatchObject({ status: 'failed' })
+    } finally {
+      novels.mockImplementation(previous)
+    }
+  })
+  it('ends legacy novel setup on a real metadata authority denial without another paid turn or sibling write', async () => {
+    const { prisma } = await import('../../api/lib/prisma.js')
+    const { novelUpdateMetaTool } = await import('../../api/lib/agent/tools/novel-tools.js')
+    const prompt = '帮我创建一部末日生存类型的小说'
+    mocks.currentOriginal = { prompt, taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', prompt,
+      novelInitializationProtocol: 2, novelInitializationTarget: 'empty' }) }
+    const novel = { title: '已有作品', displayTitle: '已有作品', summary: '作者已经保存的简介', tagNames: ['都市'], chapterCount: 0, wordCount: 0 }
+    const novels = vi.mocked(prisma.novel.findFirst), previous = novels.getMockImplementation()!
+    novels.mockImplementation(async input => {
+      const owned = await previous(input)
+      return owned && { ...owned, ...novel }
+    })
+    const outline = tool('plan_save', async () => { throw new Error('A blocked setup must not start an outline') }, false)
+    mocks.tools = [novelUpdateMetaTool, outline]
+    const args = JSON.stringify({ title: '漫长的停电', summary: '旧城区的幸存者互助求生。', tags: ['都市'] })
+    try {
+      queue(response('', [call('failed-save', 'novel_update_meta', args), call('premature-outline', 'plan_save')], 31),
+        response('', [call('repeated-save', 'novel_update_meta', args)], 43))
+      await run(prompt)
+      expect(mocks.chat).toHaveBeenCalledOnce()
+      expect(prisma.novel.update).not.toHaveBeenCalled()
+      expect(outline.execute).not.toHaveBeenCalled()
+      expect(events().find(event => event.type === 'tool.result' && event.callId === 'failed-save'))
+        .toMatchObject({ ok: false, failureCode: 'NOVEL_SETUP_AUTHORITY_REQUIRED' })
+      expect(events().filter(event => event.type === 'text.final' && event.text)).toEqual([
+        expect.objectContaining({ text: expect.stringContaining('缺少修改这些作品信息的授权') }),
+      ])
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+      expect(mocks.runs.get('run')).toMatchObject({ status: 'failed', currentTurn: 1, usage: { totalTokens: 31 } })
+      const writes = mocks.persist.mock.calls as unknown as Array<[{ create?: { parts?: AgentMessagePart[] } }]>
+      expect(writes.flatMap(([entry]) => entry.create?.parts ?? [])).toContainEqual(
+        expect.objectContaining({ type: 'tool-call', callId: 'failed-save', status: 'failed' }),
+      )
     } finally {
       novels.mockImplementation(previous)
     }

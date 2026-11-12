@@ -12,7 +12,7 @@ import { readObservedBaseline } from './runtime-observed-baseline.js'
 import { formatDurableToolObservation, formatReferencedToolObservation, TOOL_OBSERVATION_INLINE_BYTES } from './runtime-common.js'
 import { executionContextReadTool } from './tools/task-context-tools.js'
 import { toOpenAIParameters } from './tool-schema.js'
-import { hasNovelDirectionDelivery, novelSetupNotice } from './novel-initialization.js'
+import { hasNovelDirectionDelivery, isNovelSetupAuthorityFailure, NOVEL_SETUP_BLOCKED_NOTICE, novelSetupNotice } from './novel-initialization.js'
 import { QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 export { formatDurableToolObservation } from './runtime-common.js'
 
@@ -76,7 +76,8 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
       const parsedResult = toolResult.safeParse(receipt?.result)
       if (!receipt || !parsedInput.success || !parsedResult.success || runtimeJsonHash(receipt.result) !== receipt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '工具输入关联或结果回执缺失。')
       const failed = operation.status === 'failed'
-      if (failed && !failedToolResultSchema.safeParse(receipt.result).success) runtimeError('RUNTIME_RECEIPT_INVALID', '工具失败观察不完整。')
+      const failure = failed ? failedToolResultSchema.safeParse(receipt.result) : null
+      if (failure && !failure.success) runtimeError('RUNTIME_RECEIPT_INVALID', '工具失败观察不完整。')
       const event = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `${failed ? 'observation' : 'effect'}:${operation.id}` } })
       if (!event || event.taskRootId !== lease.taskRootId || event.operationId !== operation.id || event.type !== (failed ? 'tool.observation.recorded' : 'effect.committed')
         || runtimeJsonHash(event.payload) !== runtimeJsonHash({ operationId: operation.id, resultHash: receipt.resultHash, ...(failed ? { outcome: 'failed' } : {}) })) runtimeError('RUNTIME_RECEIPT_INVALID', '工具结果与持久事件不一致。')
@@ -110,8 +111,7 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
         if (rejection.code === 'TOOL_CONTRACT_RETIRED' && !hasRetiredNativeArguments(operation.action, parseToolArgsTolerant(rejection.rawArguments, false))) runtimeError('RUNTIME_RECEIPT_INVALID', '旧协调拒绝与实际原调用不一致。')
         if ((rejection.code === 'TOOL_SCHEMA_INVALID') !== Boolean(rejection.validation)
           || (rejection.validation && (!definition || runtimeJsonHash(definition.function.parameters) !== rejection.validation.schemaHash))) runtimeError('RUNTIME_RECEIPT_INVALID', '字段拒绝回执未绑定原始工具schema。')
-        const failure = failedToolResultSchema.safeParse(receipt.result)
-        if (!failed || !failure.success || failure.data.code !== rejection.code || normalization
+        if (!failure?.success || failure.data.code !== rejection.code || normalization
           || rejection.sourceRevision >= frame.revision || source.snapshotHash !== rejection.sourceSnapshotHash
           || runtimeJsonHash(source.state.messages) !== runtimeJsonHash(frame.state.messages)
           || rejection.rawArguments !== calls![0].arguments || rejection.incomplete !== Boolean(calls![0].incomplete)
@@ -134,28 +134,31 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
         && Buffer.byteLength(output, 'utf8') > TOOL_OBSERVATION_INLINE_BYTES
         ? formatReferencedToolObservation(operation.action, output, { operationId: operation.id, resultHash: receipt.resultHash })
         : formatDurableToolObservation(operation.action, output) }
-      if (!failed && !lease.parent && assistant?.role === 'assistant' && ['ask_user', 'novel_create', 'novel_update_meta'].includes(operation.action)) {
+      if (!lease.parent && assistant?.role === 'assistant' && ['ask_user', 'novel_create', 'novel_update_meta'].includes(operation.action)) {
         const spec = taskSpecSchema.safeParse(current.originalSpec).data
         const directionSetup = spec?.scope.novelInitializationProtocol === 2 && hasNovelDirectionDelivery(spec)
         const tool = parsedResult.data.toolResult
-        const timeout = operation.action === 'ask_user' && tool.questionTimedOut
+        const timeout = !failed && operation.action === 'ask_user' && tool.questionTimedOut
         const display = z.object({ kind: z.literal('question'), answer: z.string().min(1) }).safeParse(tool.display)
-        const answeredDirection = operation.action === 'ask_user' && directionSetup
+        const answeredDirection = !failed && operation.action === 'ask_user' && directionSetup
           && parsedInput.data.input.args.purpose === 'novel_direction' && display.success
         const metadata = z.object({ title: z.string().trim().min(1), summary: z.string().trim().min(1), tags: z.array(z.string()).min(1) })
           .safeParse(parsedInput.data.input.args)
-        const setupTitle = operation.action !== 'ask_user' && directionSetup && metadata.success ? metadata.data.title : ''
-        if (timeout || answeredDirection || setupTitle) {
+        const setupTitle = !failed && operation.action !== 'ask_user' && directionSetup && metadata.success ? metadata.data.title : ''
+        const setupBlocked = directionSetup && isNovelSetupAuthorityFailure(operation.action, failure?.data?.code)
+        if (timeout || answeredDirection || setupTitle || setupBlocked) {
           const finished = new Set(frame.state.messages.slice(assistantIndex + 1)
             .flatMap(item => item.role === 'tool' ? [item.toolCallId] : []))
           for (const sibling of assistant.toolCalls ?? []) {
             if (sibling.id !== callId && !finished.has(sibling.id)) followup.push({ role: 'tool', toolCallId: sibling.id,
-              content: timeout || setupTitle ? '本轮已结束，此调用未执行。' : '此调用在作者回答前拟定，未执行。请按作者实际选择重新拟定下一步。' })
+              content: answeredDirection && !timeout ? '此调用在作者回答前拟定，未执行。请按作者实际选择重新拟定下一步。' : '本轮已结束，此调用未执行。' })
           }
         }
         if (timeout || setupTitle) followup.push({ role: 'assistant',
           content: timeout ? QUESTION_TIMEOUT_NOTICE : novelSetupNotice(setupTitle),
           localCompletion: { kind: timeout ? 'question_timeout' : 'novel_setup', operationId: operation.id } })
+        if (setupBlocked) followup.push({ role: 'assistant', content: NOVEL_SETUP_BLOCKED_NOTICE,
+          localCompletion: { kind: 'novel_setup_blocked', operationId: operation.id } })
       }
     } else return runtimeError('RUNTIME_STATE_CONFLICT', '内部操作不能伪装成模型工具回复。')
     const snapshot = { ...frame.state, phase: 'idle' as const, pendingOperationId: null, messages: [...frame.state.messages, appended, ...followup] }

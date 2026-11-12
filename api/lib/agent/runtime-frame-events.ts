@@ -2,10 +2,12 @@ import { z } from 'zod'
 import { REVIEW_OUTCOMES } from '../../../shared/review-lifecycle.js'
 import type { AgentExecutionOutbox } from '@prisma/client'
 import type { AgentStreamEventBody, AgentToolDisplayPayload, AgentMessagePart, AgentRollbackSnapshot } from '../../../shared/contracts/index.js'
+import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
 import { projectReviewWriteDeferral } from './runtime-review-deferral.js'
-import { novelSetupNotice } from './novel-initialization.js'
+import { hasNovelDirectionDelivery, isNovelSetupAuthorityFailure, NOVEL_SETUP_BLOCKED_NOTICE, novelSetupNotice } from './novel-initialization.js'
+import { failedToolResultSchema } from './runtime-reducer.js'
 import { QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 
 export const durableMessageId = (rootId: string, turn: number) => `dm-${runtimeJson({ rootId, turn }).hash.slice(0, 48)}`
@@ -111,10 +113,23 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
         const direction = z.object({ purpose: z.literal('novel_direction') }).safeParse(args).success
           && z.object({ kind: z.literal('question'), answer: z.string().min(1) }).safeParse(parsedResult.data.toolResult.display).success
         const title = z.object({ title: z.string().trim().min(1) }).safeParse(args)
-        const validTerminal = terminal?.localCompletion?.operationId === operation.id && !terminal.toolCalls?.length
-          && (terminal.localCompletion.kind === 'question_timeout' ? operation.action === 'ask_user' && parsedResult.data.toolResult.questionTimedOut
-            && terminal.content === QUESTION_TIMEOUT_NOTICE
-            : ['novel_create', 'novel_update_meta'].includes(operation.action) && title.success && terminal.content === novelSetupNotice(title.data.title))
+        const blocked = terminal?.localCompletion?.kind === 'novel_setup_blocked'
+        let validTerminal = false
+        if (terminal?.localCompletion?.operationId === operation.id && !terminal.toolCalls?.length) {
+          if (blocked) {
+            const failure = failedToolResultSchema.safeParse(receipt.result)
+            const spec = taskSpecSchema.safeParse(current.originalSpec).data
+            validTerminal = failure.success && isNovelSetupAuthorityFailure(operation.action, failure.data.code)
+              && spec?.scope.novelInitializationProtocol === 2 && hasNovelDirectionDelivery(spec)
+              && terminal.content === NOVEL_SETUP_BLOCKED_NOTICE
+          } else if (terminal.localCompletion.kind === 'question_timeout') {
+            validTerminal = operation.action === 'ask_user' && parsedResult.data.toolResult.questionTimedOut === true
+              && terminal.content === QUESTION_TIMEOUT_NOTICE
+          } else {
+            validTerminal = ['novel_create', 'novel_update_meta'].includes(operation.action) && title.success
+              && terminal.content === novelSetupNotice(title.data.title)
+          }
+        }
         const skipped = terminal ? followup.slice(0, -1) : followup
         let assistantIndex = previous.state.messages.length - 1
         while (previous.state.messages[assistantIndex]?.role === 'tool') assistantIndex--
@@ -123,7 +138,7 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
           .flatMap(message => message.role === 'tool' ? [message.toolCallId] : []))
         const expected = assistant?.role === 'assistant'
           ? assistant.toolCalls?.filter(call => call.id !== appended.toolCallId && !answered.has(call.id)).map(call => call.id) ?? [] : []
-        if (operation.status !== 'succeeded' || (terminal ? !validTerminal : operation.action !== 'ask_user' || !direction)
+        if (operation.status !== (blocked ? 'failed' : 'succeeded') || (terminal ? !validTerminal : operation.action !== 'ask_user' || !direction)
           || runtimeJson(frame.state.messages.slice(0, previous.state.messages.length)).hash !== runtimeJson(previous.state.messages).hash
           || skipped.length !== expected.length || skipped.some((message, index) => message.role !== 'tool' || message.toolCallId !== expected[index])) {
           return runtimeError('RUNTIME_RECEIPT_INVALID', '本轮收尾与原工具回执不一致。')

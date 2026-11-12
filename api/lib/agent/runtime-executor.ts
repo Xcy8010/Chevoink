@@ -33,6 +33,7 @@ import { consumeDurableConfigurationConsent } from './configuration-journal.js'
 import { awaitDurableChildren, wakeDurableChildren } from './runtime-child-tools.js'
 import { verifyChildGrant } from './runtime-child.js'
 import { renderWritingPresentation, writingPresentationPreference } from './writing-request-context.js'
+import { NOVEL_SETUP_BLOCKED_NOTICE } from './novel-initialization.js'
 
 const reasoning = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 const durableModelTier = creditModelTierSchema
@@ -252,8 +253,14 @@ export async function executeDurableStep(token: RunLeaseToken, signal: AbortSign
   const lease = { ...token }
   signal.throwIfAborted()
   const localCompletion = await validateHistoricalQuestionReceipt(lease)
-  if (localCompletion && (lease.parent || !await consumeDurableSteering(lease))) return { kind: 'completion_review' as const, frame: localCompletion,
-    evidence: await collectDurableCompletionEvidence(lease, { expectedRevision: localCompletion.revision, expectedHash: localCompletion.snapshotHash }) }
+  if (localCompletion && (lease.parent || !await consumeDurableSteering(lease))) {
+    const last = localCompletion.state.messages.at(-1)
+    if (last?.role === 'assistant' && last.localCompletion?.kind === 'novel_setup_blocked') {
+      return { kind: 'needs_attention' as const, authorInputRequired: true, reason: NOVEL_SETUP_BLOCKED_NOTICE, frame: localCompletion }
+    }
+    return { kind: 'completion_review' as const, frame: localCompletion,
+      evidence: await collectDurableCompletionEvidence(lease, { expectedRevision: localCompletion.revision, expectedHash: localCompletion.snapshotHash }) }
+  }
   const importBoundary = await readDurableImportBoundary(lease)
   if (importBoundary) return importBoundary
   // Goal continuations carry the author's real steering message in AgentMessage;

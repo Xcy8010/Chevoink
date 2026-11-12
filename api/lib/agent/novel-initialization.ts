@@ -30,6 +30,12 @@ export function novelSetupNotice(title: string): string {
   return `已保存《${title}》的书名、简介和标签。要不要开始写大纲？`
 }
 
+export const NOVEL_SETUP_BLOCKED_NOTICE = '本轮无法保存作品信息，自动执行已停止。已保存的内容会保留。'
+
+export function isNovelSetupAuthorityFailure(action: string, code: string | undefined): boolean {
+  return code === 'NOVEL_SETUP_AUTHORITY_REQUIRED' && (action === 'novel_create' || action === 'novel_update_meta')
+}
+
 function latestDirectionChoice(choices: DirectionChoice[], structured: boolean) {
   return choices.filter(choice => choice.answer.trim() && (choice.purpose === 'novel_direction'
     // Frozen version-one tasks can still use their already accepted answers.

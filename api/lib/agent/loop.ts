@@ -2632,7 +2632,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           undefined, coordinatedCommit || bootstrapCall?.id === call.id ? async () => { await bus.persist() } : undefined)
         if (!outcome) continue
         if (call.name === 'novel_rename' && outcome.part.status === 'success') legacyBatchRenames.push(outcome.part)
-        if (initializationCompletionRequired && ['novel_create', 'novel_update_meta'].includes(call.name)) {
+        const isNovelMetadataWrite = call.name === 'novel_create' || call.name === 'novel_update_meta'
+        if (initializationCompletionRequired && isNovelMetadataWrite) {
           initializationAuthorityBlocked = outcome.failureCode === 'NOVEL_SETUP_AUTHORITY_REQUIRED'
         }
         if (outcome.terminalResponse && outcome.part.status === 'success' && responseNative) {
@@ -2726,7 +2727,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           authorEndRequested = true
         }
         questionTimedOut = outcome.questionTimedOut === true
-        novelSetupSaved = novelSetupOnly && outcome.part.status === 'success' && ['novel_create', 'novel_update_meta'].includes(call.name)
+        novelSetupSaved = novelSetupOnly && outcome.part.status === 'success' && isNovelMetadataWrite
         parts.push(outcome.part)
         // 子 Agent 内嵌执行产生的内部工具卡片随父消息一并直播与落库，刷新后仍可展开查看
         if (outcome.extraParts?.length) parts.push(...outcome.extraParts)
@@ -2735,6 +2736,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         // author's choice. The next model turn must see the actual choice.
         if (forceWrapUpReason || authorEndRequested || questionTimedOut || novelSetupSaved || (novelSetupOnly && questionAnswer)) {
           break
+        }
+        if (novelSetupOnly && isNovelMetadataWrite && initializationAuthorityBlocked && !pendingReviews.size) {
+          await finishWithNotice('novel_setup', '当前任务缺少修改这些作品信息的授权，初始化尚未完成，本轮已结束。已保存的内容会保留。', 'failed')
+          return
         }
       }
 
