@@ -62,8 +62,11 @@ export function AccountDialog({ title, description, step, brand, children, onClo
         <header className={cn('mb-5', step && 'md:mb-0')}>
           {step && <div role="progressbar" aria-label="账户设置进度" aria-valuemin={0} aria-valuemax={3} aria-valuenow={step}
             className="mb-3 flex items-center gap-2">
-            <span className="h-1.5 w-20 overflow-hidden rounded-full bg-[var(--surface-muted)]">
-              <span className="block h-full rounded-full bg-[var(--color-brand)]" style={{ width: `${step / 3 * 100}%` }} />
+            <span aria-hidden="true" className="grid w-20 grid-cols-3 gap-1">
+              {[1, 2, 3].map(segment => (
+                <span key={segment} className={cn('h-1.5 rounded-full',
+                  segment <= step ? 'bg-[var(--color-brand)]' : 'bg-[var(--surface-muted)]')} />
+              ))}
             </span>
             <span className="text-xs font-medium tabular-nums text-[var(--text-secondary)]">{step}/3</span>
           </div>}
