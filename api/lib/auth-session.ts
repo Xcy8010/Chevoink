@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { Request, Response } from 'express'
+import { isLegacyAccountMissingEmail } from '../../shared/account-contact.js'
 
 import { env } from '../config/env.js'
 import { prisma, DataAccessError } from './prisma.js'
@@ -214,6 +215,7 @@ interface UserAuthState {
   banned: boolean
   tokenVersion: number
   checkedAt: number
+  missingLegacyEmail: boolean
 }
 
 const AUTH_STATE_CACHE_TTL_MS = 60_000
@@ -240,6 +242,7 @@ function evictOldestAuthStateIfOverLimit(): void {
 const BANNED_FLAG_KEY = Symbol('chevoinkBannedSession')
 const RESOLVED_USER_ID_KEY = Symbol('chevoinkResolvedUserId')
 const RESOLVED_TOKEN_VERSION_KEY = Symbol('chevoinkResolvedTokenVersion')
+const MISSING_LEGACY_EMAIL_KEY = Symbol('chevoinkMissingLegacyEmail')
 const SESSION_UNAVAILABLE_KEY = Symbol('chevoinkSessionUnavailable')
 
 export function evictUserBanCache(userId: string): void {
@@ -278,12 +281,14 @@ export async function readUserAuthState(userId: string, options: { fresh?: boole
   }
 
   try {
-    const user = await prisma.user.findUnique({ where: { id: userId }, select: { bannedAt: true, tokenVersion: true } })
+    const user = await prisma.user.findUnique({ where: { id: userId },
+      select: { bannedAt: true, tokenVersion: true, phone: true, email: true, emailVerifiedAt: true } })
     if (!user) {
       evictUserBanCache(userId)
       return { status: 'notFound' }
     }
-    const state: UserAuthState = { banned: user.bannedAt !== null, tokenVersion: user.tokenVersion, checkedAt: Date.now() }
+    const state: UserAuthState = { banned: user.bannedAt !== null, tokenVersion: user.tokenVersion, checkedAt: Date.now(),
+      missingLegacyEmail: isLegacyAccountMissingEmail({ phone: user.phone, email: user.email, emailVerified: Boolean(user.emailVerifiedAt) }) }
     userAuthStateCache.set(userId, state)
     evictOldestAuthStateIfOverLimit()
     return { status: 'verified', state }
@@ -392,6 +397,11 @@ export async function resolveSessionGate(req: Request, res: Response): Promise<v
 
   setResolvedUserId(req, candidate.userId)
   ;(req as Request & { [key: symbol]: unknown })[RESOLVED_TOKEN_VERSION_KEY] = candidate.tokenVersion
+  ;(req as Request & { [key: symbol]: unknown })[MISSING_LEGACY_EMAIL_KEY] = state.missingLegacyEmail
+}
+
+export function sessionMissingLegacyEmail(req: Request) {
+  return (req as Request & { [key: symbol]: unknown })[MISSING_LEGACY_EMAIL_KEY] === true
 }
 
 export function getSessionUserId(req: Request): string | null {

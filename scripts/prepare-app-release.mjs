@@ -24,7 +24,8 @@ export async function prepareAppRelease({root,revision,id,label,notes,capabiliti
  const legalConsentUi=authSource.includes('legalConsent:')&&authSource.includes('termsVersionId')&&authSource.includes('privacyVersionId')
  await mkdir(out,{recursive:false})
  dependencies.execute(process.execPath,[path.join(root,'node_modules/vite/bin/vite.js'),'build','--base',`/api/app-releases/artifacts/${id}/`,'--outDir',out],{cwd:root,windowsHide:true,stdio:'inherit',env:{...process.env,VITE_API_BASE_URL:''}})
- return sealAppArtifact(out,{id,label,sourceSha:revision,compatibility:{api:1,schema:1,task:1,legalConsentUi},capabilities,publicNotes:notes,validation})
+ const enabledCapabilities=[...new Set([...capabilities,'legacyEmailBinding'])]
+ return sealAppArtifact(out,{id,label,sourceSha:revision,compatibility:{api:1,schema:1,task:1,legalConsentUi},capabilities:enabledCapabilities,publicNotes:notes,validation})
 }
 async function main(){
  const args=process.argv.slice(2),command=args.shift(),options={}

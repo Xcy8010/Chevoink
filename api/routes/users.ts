@@ -103,7 +103,7 @@ router.get('/me', async (req: Request, res: Response): Promise<void> => {
 
   try {
     const userId = requireSessionUserId(req)
-    const payload = await getMePayloadData(userId)
+    const payload = await getMePayloadData(userId, { emailBindingRequired: res.locals.emailBindingRequired === true })
     res.status(200).json(buildSuccess(requestId, payload))
   } catch (error) {
     sendRouteError(res, requestId, error)

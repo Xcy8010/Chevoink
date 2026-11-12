@@ -34,6 +34,8 @@ vi.mock('../../src/app/route-config', async () => {
       { path: '/admin', useShell: false, element: <button type="button">管理操作</button> },
       { path: '/admin/app-releases', useShell: false, element: <button type="button">管理操作</button> },
       { path: '/administrator', useShell: false, element: <p>普通页面内容</p> },
+      { path: '/account/docs', useShell: false, element: <p>帮助内容</p> },
+      { path: '/legal', useShell: false, element: <p>政策内容</p> },
     ],
   }
 })
@@ -49,9 +51,9 @@ const legacyUser = {
   emailAuthEnabled: true,
   emailVerified: false,
   phoneVerified: false,
-  requiresEmailBinding: true,
   accountSetupStep: null,
 } as User
+const phoneOnlyUser: User = { ...legacyUser, email: null, phone: '+8613800000000', phoneVerified: true, role: 'admin' }
 
 function mount(mode: 'login' | 'register', legal: typeof published | typeof unavailable = published) {
   mocks.requestJson.mockImplementation(async (path) => {
@@ -68,6 +70,13 @@ function mountApp(path: string, user?: User) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
   window.history.replaceState(null, '', path)
   render(<QueryClientProvider client={client}><AppRouter /></QueryClientProvider>)
+}
+
+function submitEmailBinding(dialog: HTMLElement, email: string) {
+  const fields = within(dialog)
+  fireEvent.change(fields.getByRole('textbox', { name: '邮箱' }), { target: { value: email } })
+  fireEvent.change(fields.getByRole('textbox', { name: '验证码' }), { target: { value: '123456' } })
+  fireEvent.click(fields.getByRole('button', { name: '验证并绑定' }))
 }
 
 beforeEach(() => {
@@ -164,22 +173,31 @@ it('opens the signup code help without requesting a verification code', async ()
 })
 
 it.each(['/admin', '/admin/', '/AdMiN/app-releases'])('leaves administrative controls available at %s', path => {
-  mountApp(path, { ...legacyUser, accountSetupStep: 1 })
+  mountApp(path, { ...phoneOnlyUser, accountSetupStep: 1 })
   const action = screen.getByRole('button', { name: '管理操作' })
   action.focus()
   expect(document.activeElement).toBe(action)
   expect(screen.queryByRole('dialog')).toBeNull()
 })
 
+it.each([
+  { path: '/account/docs?doc=faq#doc-security', content: '帮助内容' },
+  { path: '/legal?kind=terms', content: '政策内容' },
+])('keeps $path available to accounts awaiting binding', ({ path, content }) => {
+  mountApp(path, phoneOnlyUser)
+  expect(screen.getByText(content)).toBeTruthy()
+  expect(screen.queryByRole('dialog')).toBeNull()
+})
+
 it.each(['/login', '/register'])('shows the normal signed-in dialog at %s', async path => {
   mocks.requestJson.mockImplementation(async request => request === '/api/auth/options' ? { emailAuthEnabled: true } : { legal: published })
-  mountApp(path, legacyUser)
+  mountApp(path, phoneOnlyUser)
   const notice = await screen.findByRole('dialog', { name: '你已经登录' })
   expect(screen.getAllByRole('dialog')).toEqual([notice])
   expect(screen.getByText('首页内容')).toBeTruthy()
   fireEvent.click(within(notice).getByRole('button', { name: '继续前往' }))
   expect(screen.getByText('个人中心内容')).toBeTruthy()
-  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(screen.getByRole('dialog', { name: '请先绑定邮箱' })).toBeTruthy()
 })
 
 it.each([['登录', '登录启创墨域'], ['注册', '创建账户']])('opens %s over the page that launched it', async (linkName, title) => {
@@ -200,7 +218,7 @@ it('restores reading progress after an existing user without email logs in', asy
     if (request === '/api/auth/options') return { emailAuthEnabled: true }
     if (request === '/api/auth/legal-policies') return { legal: published }
     if (request === '/api/auth/login') return {
-      user: { ...legacyUser, email: null },
+      user: phoneOnlyUser,
       tokens: { accessToken: 'access', refreshToken: 'refresh', expiresInSeconds: 3600 },
     }
     throw new Error('unexpected auth operation')
@@ -212,13 +230,13 @@ it('restores reading progress after an existing user without email logs in', asy
   fireEvent.change(within(login).getByPlaceholderText('请输入您的密码'), { target: { value: '123456' } })
   fireEvent.click(within(login).getByRole('button', { name: '登录', exact: true }))
   expect(await screen.findByText('个人中心内容')).toBeTruthy()
-  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(screen.getAllByRole('dialog')).toEqual([screen.getByRole('dialog', { name: '请先绑定邮箱' })])
   expect(mocks.hydrateReadingSync).toHaveBeenCalledTimes(1)
 })
 
 it('keeps password recovery available before email verification', async () => {
   mocks.requestJson.mockImplementation(async path => path === '/api/auth/options' ? { emailAuthEnabled: true } : { legal: published })
-  mountApp('/login?recovery=1', legacyUser)
+  mountApp('/login?recovery=1', phoneOnlyUser)
   const recovery = await screen.findByRole('dialog', { name: '找回密码' })
   expect(screen.getAllByRole('dialog')).toEqual([recovery])
   expect(screen.getByText('首页内容')).toBeTruthy()
@@ -234,14 +252,94 @@ it('continues to require a verification code for password changes in settings', 
   expect(within(dialog).queryByRole('progressbar')).toBeNull()
 })
 
-it.each([null, 'reader@example.com'])('lets a signed-in user browse with email %s', email => {
-  mountApp('/me', { ...legacyUser, email })
+it.each([
+  { caseName: 'no saved contact', user: { ...legacyUser, email: null, phone: null } },
+  { caseName: 'a saved but unverified email', user: { ...phoneOnlyUser, email: legacyUser.email, requiresEmailBinding: true } },
+  { caseName: 'email auth disabled', user: { ...phoneOnlyUser, emailAuthEnabled: false } },
+])('lets a signed-in account with $caseName browse', ({ user }) => {
+  mountApp('/me', user)
   expect(screen.getByText('个人中心内容')).toBeTruthy()
   expect(screen.queryByRole('dialog')).toBeNull()
   fireEvent.click(screen.getByRole('link', { name: '普通页面' }))
   expect(screen.getByText('普通页面内容')).toBeTruthy()
   expect(screen.queryByRole('dialog')).toBeNull()
   expect(mocks.requestJson).not.toHaveBeenCalled()
+})
+
+it('opens required binding when the existing phone-only session is restored', () => {
+  mountApp('/me')
+  const background = screen.getByText('个人中心内容')
+  act(() => useShellStore.setState({ authStatus: 'checking' }))
+  expect(screen.queryByRole('dialog')).toBeNull()
+  act(() => useShellStore.getState().syncSessionUser({ user: { ...phoneOnlyUser, role: 'user' } }))
+  expect(screen.getByRole('dialog', { name: '请先绑定邮箱' })).toBeTruthy()
+  expect(screen.getByText('个人中心内容')).toBe(background)
+})
+
+it('binds a signed-in phone-only administrator over the original main-site page', async () => {
+  const email = 'bound@example.com'
+  mocks.requestJson.mockResolvedValue({ user: { ...phoneOnlyUser, email, emailVerified: true } })
+  mountApp('/me', phoneOnlyUser)
+  const background = screen.getByText('个人中心内容')
+  const notice = screen.getByRole('dialog', { name: '请先绑定邮箱' })
+  expect(notice.hasAttribute('open')).toBe(true)
+  expect(fireEvent(notice, new Event('cancel', { cancelable: true }))).toBe(false)
+  fireEvent.click(within(notice).getByRole('button', { name: '前往绑定' }))
+
+  const form = screen.getByRole('dialog', { name: '绑定邮箱', exact: true })
+  expect(form.hasAttribute('open')).toBe(true)
+  expect(fireEvent(form, new Event('cancel', { cancelable: true }))).toBe(false)
+  const fields = within(form)
+  expect(fields.queryByRole('button', { name: '关闭' })).toBeNull()
+  expect(fields.queryByRole('button', { name: '跳过此步' })).toBeNull()
+  expect(fields.queryByRole('link', { name: '找回密码' })).toBeNull()
+  expect(fields.queryByRole('button', { name: '找回密码' })).toBeNull()
+  expect(fields.getByRole('link', { name: '帮助' }).getAttribute('href')).toBe('/account/docs?doc=faq#doc-security')
+  expect(fields.getByRole('button', { name: '退出登录' })).toBeTruthy()
+  const emailInput = fields.getByRole('textbox', { name: '邮箱' }) as HTMLInputElement
+  expect(emailInput.value).toBe('')
+  expect(document.activeElement).toBe(emailInput)
+  expect(screen.getByText('个人中心内容')).toBe(background)
+
+  submitEmailBinding(form, email)
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  expect(mocks.requestJson).toHaveBeenCalledExactlyOnceWith('/api/auth/account/email', {
+    method: 'POST', body: JSON.stringify({ email, code: '123456' }),
+  })
+  expect(window.location.pathname).toBe('/me')
+  expect(screen.getByText('个人中心内容')).toBe(background)
+  expect(mocks.hydrateReadingSync).toHaveBeenCalledTimes(1)
+})
+
+it('keeps the required binding prompt above the settings deep link', () => {
+  mountApp('/settings?section=email', phoneOnlyUser)
+  expect(screen.getByRole('heading', { name: '账号安全' })).toBeTruthy()
+  expect(screen.getAllByRole('dialog')).toEqual([screen.getByRole('dialog', { name: '请先绑定邮箱' })])
+})
+
+it('requires the studio phone step after required email binding when phone proof is still needed', async () => {
+  const unverified = { ...phoneOnlyUser, phoneVerified: false, studioPhoneVerificationRequired: true }
+  const email = 'bound@example.com'
+  mocks.requestJson.mockResolvedValue({ user: { ...unverified, email, emailVerified: true } })
+  mountApp('/studio/novel/n1', unverified)
+  expect(screen.queryByText('创作内容')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '前往绑定' }))
+  submitEmailBinding(screen.getByRole('dialog', { name: '绑定邮箱' }), email)
+  expect(await screen.findByRole('dialog', { name: '验证手机号' })).toBeTruthy()
+  expect(screen.queryByText('创作内容')).toBeNull()
+})
+
+it('allows signing out from mandatory email binding', async () => {
+  mocks.requestJson.mockImplementation(async path => {
+    if (path === '/api/auth/logout') return { ok: true }
+    return path === '/api/auth/options' ? { emailAuthEnabled: true } : { legal: published }
+  })
+  mountApp('/me', phoneOnlyUser)
+  fireEvent.click(screen.getByRole('button', { name: '前往绑定' }))
+  fireEvent.click(screen.getByRole('button', { name: '退出登录' }))
+  expect(await screen.findByRole('dialog', { name: '登录启创墨域' })).toBeTruthy()
+  expect(mocks.requestJson).toHaveBeenCalledWith('/api/auth/logout', { method: 'POST', body: '{}' })
+  expect(useShellStore.getState().authStatus).toBe('guest')
 })
 
 it('verifies a stored email on request from account settings', async () => {

@@ -1,7 +1,7 @@
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import type { RequestHandler } from 'express'
-import { assertStudioAccountAccess } from './account-access.js'
+import { assertLegacyEmailBound, assertStudioAccountAccess } from './account-access.js'
 import { accountEmailAuthEnabled } from './account-email-auth-scope.js'
 import { resolveEmailAuthPreview } from './app-releases.js'
 import { getSessionUserId, resolveSessionGate } from './auth-session.js'
@@ -47,6 +47,7 @@ export const agentAttachmentGateway: RequestHandler = async (req, res, next) => 
     await resolveSessionGate(req, res)
     const userId = getSessionUserId(req)
     if (!userId) throw new DataAccessError(401, 'UNAUTHORIZED', '请登录后查看附件。')
+    await assertLegacyEmailBound(req)
     await assertStudioAccountAccess(userId, accountEmailAuthEnabled() || Boolean(await resolveEmailAuthPreview(req)))
     const url = `${MANAGED_AGENT_ATTACHMENT_PREFIX}${decoded.slice('/agent-attachments/'.length)}`
     const bytes = await readAuthorizedAgentAttachment(url, userId)

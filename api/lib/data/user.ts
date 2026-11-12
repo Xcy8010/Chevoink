@@ -24,8 +24,11 @@ import { activeChapterScope } from './internal.js'
 
 
 
-export async function getMePayloadData(userId: string): Promise<UserMePayload> {
+export async function getMePayloadData(userId: string, { emailBindingRequired = false } = {}): Promise<UserMePayload> {
   const user = await ensureUserExists(userId)
+  if (emailBindingRequired) {
+    return { user: { ...toUser(user), privacy: toPrivacySettings(user) }, shelf: [], drafts: [], activities: [], notifications: [] }
+  }
 
   const includeStudio = !requiresStudioPhoneVerification(user)
   const [draftChapters, recentPosts, recentComments, recentConversations, recentCoverAssets, authoredNovels] = await Promise.all([

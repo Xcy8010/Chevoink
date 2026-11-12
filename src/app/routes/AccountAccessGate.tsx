@@ -1,15 +1,71 @@
 import { useRef, useState, type ReactNode } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 
 import Button from '@/components/ui/Button'
+import { requiresLegacyEmailBinding } from '@/features/account/account-access'
 import { IdentityVerificationForm, SetupPasswordForm } from '@/features/account/AccountVerificationForms'
 import ProfileSetupForm from '@/features/account/ProfileSetupForm'
 import { authError, postAuth } from '@/features/account/auth-api'
 import { useUpdateAccountSession } from '@/features/account/use-account-session'
 import { AccountDialog } from '@/features/account/VerificationCodeField'
+import { hydrateReadingSync } from '@/features/home/reading-sync'
 import { cn } from '@/lib/utils'
 import { useShellStore } from '@/store/useShellStore'
 import type { AuthSessionPayload, User } from '../../../shared/contracts'
+
+function LegacyEmailBindingDialog() {
+  const [binding, setBinding] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [signingOut, setSigningOut] = useState(false)
+  const [error, setError] = useState('')
+  const queryClient = useQueryClient()
+  const navigate = useNavigate()
+
+  async function signOut() {
+    if (saving || signingOut) return
+    setSigningOut(true)
+    setError('')
+    try {
+      await postAuth('/logout', {})
+      useShellStore.getState().setGuest()
+      queryClient.clear()
+      navigate('/login', { replace: true })
+    } catch (error) {
+      setError(authError(error, '暂时无法确认退出登录，请稍后重试。'))
+    } finally {
+      setSigningOut(false)
+    }
+  }
+
+  if (!binding) {
+    return (
+      <AccountDialog key="notice" title="请先绑定邮箱" description="绑定的邮箱可用于登录、找回密码和接收账户通知。">
+        <Button variant="primary" className="w-full" onClick={() => setBinding(true)}>前往绑定</Button>
+      </AccountDialog>
+    )
+  }
+
+  return (
+    <AccountDialog key="binding" title="绑定邮箱" description="验证邮箱后即可继续使用当前账户。">
+      <IdentityVerificationForm kind="email" submitLabel="验证并绑定" disabled={signingOut} onSaving={setSaving} onSaved={() => {
+        void queryClient.invalidateQueries()
+        void hydrateReadingSync().then(changed => {
+          if (changed) void queryClient.invalidateQueries({ queryKey: ['community', 'me'] })
+        })
+      }} />
+      <nav className="mt-5 flex items-center justify-between gap-3 text-sm" aria-label="账户帮助">
+        <Link className="rounded text-[var(--color-brand)] underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2"
+          to="/account/docs?doc=faq#doc-security" target="_blank" rel="noreferrer">帮助</Link>
+        <button type="button" disabled={saving || signingOut} onClick={() => void signOut()}
+          className="rounded text-[var(--text-secondary)] underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 disabled:opacity-50">
+          {signingOut ? '退出中…' : '退出登录'}
+        </button>
+      </nav>
+      {error && <p role="alert" className="mt-2 text-xs text-[var(--color-danger,#dc2626)]">{error}</p>}
+    </AccountDialog>
+  )
+}
 
 function AccountSetupStep({ user, step }: { user: User; step: 1 | 2 | 3 }) {
   const requestPending = useRef(false)
@@ -87,12 +143,13 @@ export default function AccountAccessGate({ children, studioPhoneRequired, close
   const user = useShellStore(state => state.sessionUser)
   const authenticated = useShellStore(state => state.authStatus === 'authenticated')
   const studioPhoneExempt = user?.studioPhoneVerificationRequired === false && !user.phoneVerified
-  const skipSetup = /^\/admin(?:\/|$)/i.test(pathname) || /^\/(?:login|register)\/?$/i.test(pathname)
-    || pathname === '/account/docs' || pathname === '/legal'
-    || (studioPhoneExempt && /^\/studio(?:\/|$)/i.test(pathname))
+  const skipAccountDialogs = /^\/admin(?:\/|$)/i.test(pathname) || /^\/(?:login|register|account\/docs|legal)\/?$/i.test(pathname)
+  const skipSetup = skipAccountDialogs || (studioPhoneExempt && /^\/studio(?:\/|$)/i.test(pathname))
   let dialog: ReactNode = null
   if (authenticated && user) {
-    if (user.emailAuthEnabled && user.accountSetupStep && !skipSetup) {
+    if (!skipAccountDialogs && requiresLegacyEmailBinding(user)) {
+      dialog = <LegacyEmailBindingDialog key={user.id} />
+    } else if (user.emailAuthEnabled && user.accountSetupStep && !skipSetup) {
       const step = user.accountSetupStep
       const title = step === 1 ? '验证手机号' : step === 2 ? '设置登录密码' : '完善个人资料'
       const description = step === 1 ? (studioPhoneExempt ? undefined : '创作区需要已验证的手机号。')

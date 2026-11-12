@@ -3,6 +3,7 @@ import { KeyRound, Mail, Smartphone } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
 
 import { useToast } from '@/components/ui/toast-context'
+import { requiresLegacyEmailBinding } from '@/features/account/account-access'
 import { IdentityVerificationForm, PasswordVerificationForm } from '@/features/account/AccountVerificationForms'
 import { AccountDialog } from '@/features/account/VerificationCodeField'
 import type { User } from '../../../../shared/contracts'
@@ -16,7 +17,8 @@ export default function EmailAccountSettings({ user }: { user: User }) {
   const [saving, setSaving] = useState(false)
   const toast = useToast()
   const section = params.get('section')
-  const dialog = (section === 'email' && !user.emailVerified) || (section === 'phone' && !user.phoneVerified) || section === 'password' ? section : null
+  const allowedSection = (section === 'email' && !user.emailVerified) || (section === 'phone' && !user.phoneVerified) || section === 'password'
+  const dialog = allowedSection && !requiresLegacyEmailBinding(user) ? section : null
   const hasPassword = user.hasPassword ?? user.passwordConfigured
 
   function open(next: AccountDialogKind | null) {

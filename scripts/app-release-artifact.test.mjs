@@ -25,3 +25,11 @@ function preparation(id,{dirty=false,attempt=1,ciSha='a'.repeat(40)}={}){
 test('preparation refuses dirty candidates before building or reading CI',async()=>{const test=preparation('dirty-preparation',{dirty:true});let read=false;test.dependencies.readCi=async()=>{read=true;return ciEvidence(test.options.revision)};await assert.rejects(prepareAppRelease(test.options,test.dependencies),/clean exact/);assert.equal(read,false);assert.ok(test.calls.every(call=>call.program==='git'))})
 test('preparation accepts original same-SHA evidence but refuses reruns and unrelated SHA evidence',async()=>{const original=preparation('original-preparation');const result=await prepareAppRelease(original.options,original.dependencies);assert.equal(result.manifest.validation.status,'verified');assert.equal(result.manifest.validation.originalAttempt,1);const rerun=preparation('rerun-preparation',{attempt:2});await assert.rejects(prepareAppRelease(rerun.options,rerun.dependencies),/original same-SHA/);assert.ok(rerun.calls.every(call=>call.program==='git'));const unrelated=preparation('wrong-ci-preparation',{ciSha:'b'.repeat(40)});await assert.rejects(prepareAppRelease(unrelated.options,unrelated.dependencies),/Incomplete original same-SHA/)})
 test('draft preparation performs no CI lookup and remains activation-ineligible',async()=>{const draft=preparation('honest-draft-preparation');draft.options.draft=true;draft.dependencies.readCi=async()=>{throw Error('Draft must not assert CI')};const result=await prepareAppRelease(draft.options,draft.dependencies);assert.equal(result.manifest.validation.status,'draft')})
+test('preparation includes legacy email binding once by default',async()=>{
+ for(const [suffix,capabilities] of [['default',[]],['explicit',['legacyEmailBinding']]]){
+  const fixture=preparation(`legacy-email-${suffix}`)
+  fixture.options.capabilities=capabilities
+  const result=await prepareAppRelease(fixture.options,fixture.dependencies)
+  assert.deepEqual(result.manifest.capabilities,['legacyEmailBinding'])
+ }
+})

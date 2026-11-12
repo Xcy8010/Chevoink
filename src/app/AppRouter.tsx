@@ -6,6 +6,7 @@ import AccountAccessGate from '@/app/routes/AccountAccessGate'
 import AuthPage from '@/app/routes/AuthPage'
 import AppShell from '@/components/layout/AppShell'
 import { Skeleton, SkeletonText } from '@/components/ui/Skeleton'
+import { requiresLegacyEmailBinding } from '@/features/account/account-access'
 import { useShellStore } from '@/store/useShellStore'
 
 /** 未指定专属骨架的懒加载路由通用占位 */
@@ -27,13 +28,16 @@ function AppRoutes() {
   const needsVerifiedPhone = useShellStore(state => state.authStatus === 'authenticated'
     && (state.sessionUser?.studioPhoneVerificationRequired
       ?? (state.sessionUser?.emailAuthEnabled === true && !state.sessionUser.phoneVerified)))
-  const studioPhoneRequired = needsVerifiedPhone && (path === '/studio' || path.startsWith('/studio/'))
-  const hasOverlay = Boolean(authMode || studioPhoneRequired)
+  const needsEmailBinding = useShellStore(state => state.authStatus === 'authenticated' && requiresLegacyEmailBinding(state.sessionUser))
+  const studio = path === '/studio' || path.startsWith('/studio/')
+  const studioPhoneRequired = studio && needsVerifiedPhone
+  const studioBlocked = studio && (needsVerifiedPhone || needsEmailBinding)
+  const hasOverlay = Boolean(authMode || studioBlocked)
   useLayoutEffect(() => {
     if (!hasOverlay && path !== '/create' && !/^\/admin(?:\/|$)/.test(path)) previousPage.current = location
   }, [hasOverlay, location, path])
   const previous = previousPage.current
-  const canShowPrevious = previous && !(studioPhoneRequired && /^\/studio(?:\/|$)/i.test(previous.pathname))
+  const canShowPrevious = previous && !(studioBlocked && /^\/studio(?:\/|$)/i.test(previous.pathname))
   const background = hasOverlay ? (canShowPrevious ? previous : '/') : location
   const closeOverlay = () => navigate(background, { replace: true })
 

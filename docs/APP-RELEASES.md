@@ -45,6 +45,8 @@ node scripts/prepare-app-release.mjs install --source <已准备目录>
 
 服务端能力映射：`siteContent` 控制公告/站点资料/帮助的公开与管理接口；`testerManagement` 控制新测试员管理接口；`imageQuality`、`modelPromotions`、`imageWeightedRoutes`、`publicModelDetails` 控制实际模型配置键，公开模型详情只返回对应允许字段。既有文本权重和已运行 Agent 请求不经过这些增量配置闸口。价格计算依然遵守全局模型、活动与冻结价格合同，不宣称有两套计费 API。
 
+准备工具默认加入 `legacyEmailBinding`。邮箱功能开启后，选中带此能力版本的旧手机号账号只有在缺少邮箱地址时才必须补绑。绑定、认证和帮助入口继续可达。先部署支持该能力的 API，再登记新清单。历史产物沿用其清单和原行为。
+
 没有配置通道时保留现有应用；一旦配置，缺失、损坏、未验证或不兼容的产物明确报错，不悄悄回落其他版本。首次需要显式登记并全量启用一个经过验证的兼容稳定产物，之后才允许分配测试版，确保稳定与测试身份真实明确。
 
 ## 操作与恢复
