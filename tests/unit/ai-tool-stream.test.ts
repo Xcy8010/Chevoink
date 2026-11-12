@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SseDataDecoder } from '../../api/lib/ai-sse.js'
 import { collapseEarlyToolRounds, releaseCompletedReasoning } from '../../api/lib/agent/context-budget.js'
 import { toolTurnHistory } from '../../api/lib/agent/tool-turn-history.js'
+import { addNextPromptInstruction } from '../../api/lib/agent/next-prompt.js'
 import type { ChatMessage } from '../../api/lib/ai-service.js'
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: vi.fn(), reserveTokenCredits: vi.fn(), consumeTokenCredits: vi.fn(async () => ({ chargedMilli: 0 })) }))
 vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } }, prisma: { aiUsageLog: { create: vi.fn(async () => ({ id: 'usage' })), findUnique: vi.fn(async () => null), update: vi.fn(async () => ({ id: 'usage' })), updateMany: vi.fn(async () => ({ count: 1 })) }, agentGoalUsage: { findUnique: vi.fn(async () => null) } } }))
@@ -65,6 +66,31 @@ describe('next prompt from the current response', () => {
     expect(result.content).toBe(body)
     expect(result).not.toHaveProperty('nextPrompt')
     expect(visible.join('')).toBe(body)
+  })
+
+  it.each(['completed', 'tool call', 'author opt-out'] as const)('handles a %s suggestion through Terra Responses', async scenario => {
+    const answer = '计划已保存。', suggestion = '帮我复核刚保存的计划。'
+    const messages: ChatMessage[] = [{ role: 'user', content: scenario === 'author opt-out' ? '只回复保存结果。不要给后续建议。' : '保存计划。' }]
+    const nextPromptMarker = addNextPromptInstruction(messages)
+    const text = scenario === 'author opt-out' ? answer : [answer, [nextPromptMarker, suggestion].join(' ')].join('\n')
+    const output = [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] }]
+    stream([
+      { type: 'response.output_text.delta', delta: text.slice(0, answer.length + 5) },
+      { type: 'response.completed', response: { status: 'completed', output: scenario === 'tool call' ? [...output,
+        { type: 'function_call', id: 'fc_plan', call_id: 'call_plan', name: 'plan_read', status: 'completed', arguments: '{}' }] : output,
+        usage: { input_tokens: 35, output_tokens: 20 } } },
+    ].map(frame => 'data: ' + JSON.stringify(frame) + '\n\n').join(''))
+    const visible: string[] = []
+    const result = await chatWithTools({ ...options, messages, nextPromptMarker, provider: 'custom', model: 'gpt-6.1-terra', providerBaseUrl: 'https://yunshu.chevolink.com/v1',
+      tools: [{ type: 'function', function: { name: 'plan_read', description: 'Synthetic', parameters: { type: 'object' } } }],
+      onChunk: chunk => { if (chunk.type === 'text-delta') visible.push(chunk.delta) } })
+    expect(fetch).toHaveBeenCalledExactlyOnceWith('https://yunshu.chevolink.com/v1/responses', expect.objectContaining({
+      body: expect.stringContaining('作者只要指定内容或不要建议'),
+    }))
+    expect(result).toMatchObject({ content: answer, finishReason: scenario === 'tool call' ? 'tool_calls' : 'stop',
+      usage: { promptTokens: 35, completionTokens: 20 } })
+    expect(result.nextPrompt).toBe(scenario === 'completed' ? suggestion : undefined)
+    expect(visible.join('')).toBe(answer)
   })
 })
 describe('lossless tool argument transport', () => {

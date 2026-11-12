@@ -4,7 +4,7 @@ export const NEXT_PROMPT_MAX_LENGTH = 80
 const marker = '[[CHEVOINK_NEXT_PROMPT_91a5ed28]]'
 
 export function addNextPromptInstruction(messages: ChatMessage[]): string {
-  const instruction = `【输入框建议】仅当你已正常完成当前请求、无需调用工具或等待作者决定，并且上下文中有明确的下一步时，可在完整答复后另起一行写 ${marker}，同一行在标记后写一条不超过 ${NEXT_PROMPT_MAX_LENGTH} 字的下一条作者指令。用作者当前的语言、口吻和具体目标写成可直接发送的一句话。完整答复保持正文和指定格式原样，不要把建议混进正文、代码或数据。没有合适建议，或无法保留原要求时，省略此行。此建议不会执行，不改变当前任务、权限或交付要求，也不为它补读资料或调用工具。`
+  const instruction = `【输入框建议】当你已正常完成当前请求、无需调用工具或等待作者决定，且已有明确的下一步时，请在完整答复后另起一行写 ${marker}，同一行在标记后写一条不超过 ${NEXT_PROMPT_MAX_LENGTH} 字的下一条作者指令。用作者当前的语言、口吻和具体目标写成可直接发送的一句话。完整答复保持正文和指定格式原样，不要把建议混进正文、代码或数据。作者只要指定内容或不要建议，或没有合适的下一步时，省略此行。此建议不会执行，不改变当前任务、权限或交付要求，也不为它补读资料或调用工具。`
   const system = messages.find(message => message.role === 'system')
   if (system) system.content += `\n\n${instruction}`
   else messages.unshift({ role: 'system', content: instruction })

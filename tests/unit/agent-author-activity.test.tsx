@@ -31,7 +31,7 @@ function Transcript({ messages, active }: { messages: AgentUIMessage[]; active?:
 it('upgrades one focused disclosure from preparation to persisted write, without showing thought or parameters', () => {
   const preview = call('write', 'chapter_write', { status: 'running', preparing: true, args: null })
   const view = render(<Transcript active="r" messages={[message('a', [reasoning, preview])]} />)
-  const toggle = screen.getByRole('button', { name: '正在写入正文' })
+  const toggle = screen.getByRole('button', { name: '正在准备 · 撰写章节' })
   toggle.focus()
   fireEvent.click(toggle)
   view.rerender(<Transcript active="r" messages={[message('a', [reasoning, call('write', 'chapter_write', { status: 'running' })])]} />)
@@ -73,7 +73,7 @@ it('groups a 49-call timeline through replay, preserving author-facing paragraph
   const replayed = [...messages, message('replay', [{ ...actions[0], status: 'running', preparing: true }])]
   const view = render(<Transcript messages={messages} />)
   const summary = () => Array.from(view.container.querySelectorAll('[data-author-activity] > button'), button => button.textContent)
-  expect(summary()).toHaveLength(6)
+  expect(summary()).toHaveLength(5)
   expect(screen.getByText('初稿写好了。我现在核对人物前后的行动。')).toBeTruthy()
   const before = summary()
   view.rerender(<Transcript key="reopen" messages={replayed} />)
@@ -101,20 +101,52 @@ it('groups different targets and separates public progress and task ownership wi
   expect(screen.getByRole('button', { name: '核对前文有未完成项', expanded: true })).toBe(toggle)
 })
 
-it('splits repeated tools at another tool even when their activity labels match', () => {
+it('folds related reads in order and starts a fresh group after an update or unrelated tool', () => {
   const first = call('outline', 'plan_read', { args: { planId: 'outline' } })
   const second = call('chapter-plan', 'plan_read', { args: { planId: 'detail' } })
   const skill = call('craft-skill', 'skill_load')
+  const chapter = call('previous', 'chapter_read')
+  const structure = call('structure', 'structure_outline')
+  const setting = call('setting', 'story_charter_get')
   const last = call('later-plan', 'plan_read')
+  const save = call('save', 'plan_save')
+  const next = call('after-save', 'plan_read')
   const projection = projectActivityGroups([
     message('first', [first]), message('second', [reasoning, second]),
-    message('skill', [skill]), message('last', [last]),
+    message('skill', [skill, chapter, structure, setting]),
+    message('last', [{ type: 'text', text: '资料已核对。' }, last, save, next]),
   ])
   const group = projection.byMessage.get('first')?.get(first.callId)
-  expect(group?.calls.map(part => part.callId)).toEqual(['outline', 'chapter-plan'])
+  expect(group?.calls.map(part => part.callId)).toEqual(['outline', 'chapter-plan', 'craft-skill', 'previous', 'structure', 'setting'])
   expect(projection.byMessage.get('second')?.get(second.callId)).toBe(group)
-  expect(projection.byMessage.get('skill')?.get(skill.callId)?.calls.map(part => part.callId)).toEqual([skill.callId])
+  expect(projection.byMessage.get('skill')?.get(skill.callId)).toBe(group)
+  expect(group?.readLabel).toBe('查看创作资料')
   expect(projection.byMessage.get('last')?.get(last.callId)?.calls.map(part => part.callId)).toEqual([last.callId])
+  expect(projection.byMessage.get('last')?.get(next.callId)?.calls.map(part => part.callId)).toEqual([next.callId])
+})
+
+it('shows one parameter preview and uses actual call events to advance the visible step', () => {
+  const preview = (id: string, name: string) => call(id, name, { status: 'running', preparing: true, args: null })
+  const plan = preview('plan', 'plan_read')
+  const chapter = preview('read', 'chapter_read')
+  const next = preview('save', 'plan_save')
+  const timeline = (...parts: ActivityCall[]) => <Transcript active="r" messages={[message('batch', parts)]} />
+  const view = render(timeline(plan, chapter, next))
+  const toggle = screen.getByRole('button', { name: '正在准备 · 查看创作资料' })
+  fireEvent.click(toggle)
+  expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(1)
+  expect(view.container.querySelectorAll('[data-activity-preparing]')).toHaveLength(1)
+  expect(view.container.querySelector('[data-activity-running]')).toBeNull()
+  expect(view.container.querySelectorAll('[data-activity-tool]')).toHaveLength(1)
+  view.rerender(timeline({ ...plan, preparing: false }, chapter, next))
+  expect(screen.getByRole('button', { name: '正在查看创作资料', expanded: true })).toBe(toggle)
+  expect(view.container.querySelectorAll('[data-activity-running]')).toHaveLength(1)
+  expect(view.container.querySelector('[data-activity-preparing]')).toBeNull()
+  view.rerender(timeline({ ...plan, status: 'success', preparing: false }, { ...chapter, preparing: false }, next))
+  expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(1)
+  expect(Array.from(view.container.querySelectorAll('[data-activity-tool]'), node => node.getAttribute('data-activity-tool')))
+    .toEqual(['plan_read', 'chapter_read'])
+  expect(screen.getByRole('button', { name: '正在查看创作资料', expanded: true })).toBe(toggle)
 })
 
 it('folds creation settings and the cover workflow while keeping the live row and ordered receipts', () => {
@@ -301,7 +333,7 @@ it('hands the shimmer between model work, tool execution and the next step, then
   const view = render(<AuthorActivityParts parts={[opening, reasoning]} messageId="run" runActive workingLabel={activityWorkingLabel(undefined)} />)
   const shimmer = () => view.container.querySelectorAll('.agent-processing-shimmer')
   expect(shimmer()).toHaveLength(1)
-  expect(shimmer()[0].textContent).toBe('正在思考中')
+  expect(shimmer()[0].textContent).toBe('正在思考')
   const step = view.container.querySelector('[data-author-step] > button')
   const openingNode = screen.getByText(opening.text)
   expect(step?.querySelector('.lucide-brain')).toBeTruthy()

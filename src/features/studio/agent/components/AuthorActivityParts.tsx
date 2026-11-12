@@ -18,6 +18,11 @@ import { ProcessDuration } from './ProcessDuration'
 
 const actionNames: Record<string, string> = {
   chapter_read: '查看章节', chapter_list_summaries: '查看章节摘要', project_search: '搜索前文',
+  novel_get_context: '读取作品上下文', chapter_bridge_get: '查看前章承接', plan_read: '查看创作计划',
+  research_report_read: '查看调研报告', research_dossier_get: '查看调研档案', first_three_prototype_get: '查看前三章方案',
+  craft_search: '查找写作技法', retrieval_trace_read: '查看检索记录', skill_catalog: '查看技能目录',
+  skill_load: '加载创作技能', skill_run_explain: '查看技能执行说明', skill_shared_invites: '查看技能邀请',
+  volume_list: '查看卷目录', structure_outline: '查看卷章结构',
   memory_search: '查找作品设定', web_search: '搜索网页', web_read: '查看网页', web_fetch: '查看网页',
   chapter_write: '写入正文', chapter_append: '续写正文', chapter_edit_range: '修改正文',
   directive_list: '查看写作要求', memory_review_list: '核对记忆冲突', story_charter_get: '查看故事宪章',
@@ -67,6 +72,7 @@ function activitySummary(part: ActivityCall, runActive: boolean, titles?: Readon
   if (part.toolName === 'ask_user' && part.status === 'running' && runActive) return '等待你回答'
   if (part.status === 'running') {
     if (!runActive) return `${action}未完成`
+    if (part.preparing) return `正在准备 · ${detail ? action : presentation.label}`
     return agentRunningToolLabel(part.toolName, title, detail ? action : undefined)
   }
   if (part.status !== 'success') {
@@ -206,10 +212,16 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
   const part = running ?? unresolved ?? calls.at(-1)
   const Icon = part && !workingLabel ? toolIcon(part) : Brain
   const importWaiting = calls.find(call => isOpenImport(call, runActive))
-  const label = workingLabel ?? (part && (grouped && !running && unresolved
-    ? `${getAgentToolPresentation(part.toolName).label}有未完成项`
-    : activitySummary(part, runActive, titles, false, grouped)))
-  const executing = Boolean(active && running && !importWaiting && running.toolName !== 'ask_user')
+  const readLabel = group?.readLabel
+  let label = workingLabel
+  if (!label && part) {
+    if (readLabel && running) label = `${running.preparing ? '正在准备 · ' : '正在'}${readLabel}`
+    else if (readLabel) label = unresolved || [...latest.values()].some(call => call.status === 'running')
+      ? `${readLabel}有未完成项` : `已${readLabel}`
+    else if (grouped && !running && unresolved) label = `${getAgentToolPresentation(part.toolName).label}有未完成项`
+    else label = activitySummary(part, runActive, titles, false, grouped)
+  }
+  const showingActivity = Boolean(active && running && !importWaiting && running.toolName !== 'ask_user')
 
   return <div className="min-w-0" data-author-activity={group ? '' : undefined} data-author-working={workingLabel ? '' : undefined} data-author-step>
     <button type="button" aria-expanded={group ? open : undefined} aria-controls={group ? detailsId : undefined}
@@ -217,8 +229,10 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
       className="agent-activity-step flex min-h-7 w-fit max-w-full items-center gap-2 px-1 text-left text-sm font-medium leading-7 text-[var(--text-secondary)] focus-visible:underline focus-visible:outline-none">
       <Icon aria-hidden className="h-4 w-4 shrink-0" />
       <span className="min-w-0 break-words text-balance">
-        <span aria-live={active || running || workingLabel ? 'polite' : undefined} data-activity-running={executing || undefined}
-          className={cn('agent-activity-label', (executing || workingLabel) && 'agent-processing-shimmer')}>{label}</span>
+        <span aria-live={active || running || workingLabel ? 'polite' : undefined}
+          data-activity-preparing={showingActivity && running?.preparing || undefined}
+          data-activity-running={showingActivity && !running?.preparing || undefined}
+          className={cn('agent-activity-label', (showingActivity || workingLabel) && 'agent-processing-shimmer')}>{label}</span>
         {group ? <ChevronDown aria-hidden className={cn('agent-activity-chevron ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-[opacity,transform]', open ? 'rotate-0' : '-rotate-90')} /> : null}
       </span>
     </button>

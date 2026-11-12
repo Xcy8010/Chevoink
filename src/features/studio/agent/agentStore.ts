@@ -1301,11 +1301,19 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           if (replay?.started) { replay.text = text; replay.lastPart = 'text' }
           const previousText = state.messages.find(message => message.id === event.messageId)?.parts
             .filter(part => part.type === 'text').map(part => part.text).join('') ?? ''
+          // A tool-only turn may have no rendered assistant row to finish a
+          // reveal. An empty final must also clear any prior partial reveal.
+          const visible = Boolean(text.trim())
+          const animateText = visible && state.motionAfterSeq !== null && event.seq > state.motionAfterSeq
+          const revealTargets = animateText || (!visible && event.messageId in state.textRevealTargets) ? { ...state.textRevealTargets } : undefined
+          if (revealTargets) {
+            if (animateText) revealTargets[event.messageId] = text
+            else delete revealTargets[event.messageId]
+          }
           return {
             ...base,
-            ...(text.trim() && text !== previousText ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
-            ...(state.motionAfterSeq !== null && event.seq > state.motionAfterSeq
-              ? { textRevealTargets: { ...state.textRevealTargets, [event.messageId]: text } } : {}),
+            ...(visible && text !== previousText ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
+            ...(revealTargets ? { textRevealTargets: revealTargets } : {}),
             finalizedTextIds: state.finalizedTextIds.includes(event.messageId)
               ? state.finalizedTextIds : [...state.finalizedTextIds, event.messageId],
             messages: updateMessageParts(text ? owned : state.messages, event.messageId, parts => replaceAuthorText(parts, text, replay?.seenCalls)),

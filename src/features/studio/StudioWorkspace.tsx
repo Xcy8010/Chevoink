@@ -329,7 +329,7 @@ export default function StudioWorkspace() {
   const coverGenerationWasActiveRef = useRef(false)
   const [capturedSelection, setCapturedSelection] = useState<{ source: string; range: EditorSelectionState } | null>(null)
   const [coverKeywords, setCoverKeywords] = useState<string[]>([])
-  const [coverMessage, setCoverMessage] = useState('先整理提示词，再生成候选封面。')
+  const [coverMessage, setCoverMessage] = useState('')
   const [pendingCoverUpload, setPendingCoverUpload] = useState<{ novelId: string; file: File } | null>(null)
   const [editorChapterSettingsOpen, setEditorChapterSettingsOpen] = useState(false)
   // 计划设置抽屉：值为计划文件 id（本地产物 id 或 server- 前缀 id）
@@ -641,8 +641,8 @@ export default function StudioWorkspace() {
       setActiveToolPanel('meta')
       setMobileView('meta')
     } else if (requestedPanel === 'cover') {
-      setActiveToolPanel('cover')
-      setMobileView('cover')
+      if (window.innerWidth >= 1024) setActiveToolPanel('cover')
+      else setMobileView('cover')
     }
 
     const nextSearchParams = new URLSearchParams(searchParams)
@@ -3896,46 +3896,41 @@ export default function StudioWorkspace() {
       )
   }
 
-  function renderCoverToolPanel(close?: () => void) {
+  function renderCoverToolPanel(modal = false) {
     if (!coverForm || !currentNovel) {
       return null
     }
 
     return (
-      <Surface as="section" padding="md" className="flex h-full min-h-0 flex-col overflow-hidden md:w-[24rem] xl:w-[26rem]">
-        <CoverPanel
-          coverForm={coverForm}
-          coverAssets={coverAssets}
-          selectedCover={selectedCover}
-          currentCoverId={currentNovel.coverAssetId}
-          coverKeywords={coverKeywords}
-          coverMessage={coverMessage}
-          generatingPrompt={coverPromptMutation.isPending}
-          generatingImage={coverGenerationBusy}
-          generationProgress={coverGenerationProgress}
-          selectingCover={coverSelectMutation.isPending}
-          formatDateTime={formatDateTime}
-          onChange={setCoverForm}
-          onUploadFile={handleOpenCoverCropDialog}
-          onGeneratePrompt={() => coverPromptMutation.mutate()}
-          onGenerateImages={() => coverImageMutation.mutate()}
-          onSelectAsset={setSelectedCoverId}
-          onApplyCover={() => selectedCover && coverSelectMutation.mutate(selectedCover)}
-          onApplyAsset={(asset) => coverSelectMutation.mutate(asset)}
-          onDownloadAsset={handleDownloadCoverAsset}
-          onClose={close ?? (() => setActiveToolPanel(null))}
-        />
-      </Surface>
+      <CoverPanel
+        modal={modal}
+        coverForm={coverForm}
+        coverAssets={coverAssets}
+        selectedCover={selectedCover}
+        currentCoverId={currentNovel.coverAssetId}
+        coverKeywords={coverKeywords}
+        coverMessage={coverMessage}
+        generatingPrompt={coverPromptMutation.isPending}
+        generatingImage={coverGenerationBusy}
+        generationProgress={coverGenerationProgress}
+        selectingCover={coverSelectMutation.isPending}
+        formatDateTime={formatDateTime}
+        onChange={setCoverForm}
+        onUploadFile={handleOpenCoverCropDialog}
+        onGeneratePrompt={() => coverPromptMutation.mutate()}
+        onGenerateImages={() => coverImageMutation.mutate()}
+        onSelectAsset={setSelectedCoverId}
+        onApplyCover={() => selectedCover && coverSelectMutation.mutate(selectedCover)}
+        onApplyAsset={(asset) => coverSelectMutation.mutate(asset)}
+        onDownloadAsset={handleDownloadCoverAsset}
+        onClose={() => setActiveToolPanel(null)}
+      />
     )
   }
 
   function renderToolPanel() {
     if (!activeToolPanel) {
       return null
-    }
-
-    if (activeToolPanel === 'cover') {
-      return renderCoverToolPanel(() => setActiveToolPanel(null))
     }
 
     return (
@@ -4132,7 +4127,7 @@ export default function StudioWorkspace() {
 
             {mobileView === 'cover' ? (
               <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                {renderCoverToolPanel(() => setMobileView('assistant'))}
+                {renderCoverToolPanel()}
               </div>
             ) : null}
 
@@ -4537,15 +4532,16 @@ export default function StudioWorkspace() {
             onTaskArchived={handleAgentTaskArchived}
           />
 
-          {activeToolPanel && activeToolPanel !== 'assistant' ? (
+          {activeToolPanel === 'meta' ? (
             <div className="fixed inset-0 z-[90] hidden bg-[rgba(15,23,42,0.18)] md:block" onClick={() => setActiveToolPanel(null)}>
-              <div className={cn('absolute inset-y-4 right-4 max-w-[calc(100vw-2rem)]', activeToolPanel === 'meta' ? 'max-h-[48rem] w-[29rem]' : 'w-[24rem] xl:w-[26rem]')} onClick={(event) => event.stopPropagation()}>
+              <div className="absolute inset-y-4 right-4 max-h-[48rem] w-[29rem] max-w-[calc(100vw-2rem)]" onClick={(event) => event.stopPropagation()}>
                 {renderToolPanel()}
               </div>
             </div>
           ) : null}
           </div>
         </div>
+        {activeToolPanel === 'cover' ? renderCoverToolPanel(true) : null}
       </div>
 
       {editorChapterSettingsOpen && chapterDraft ? (
@@ -4619,8 +4615,12 @@ export default function StudioWorkspace() {
           onClose={() => setMissingPublishFields([])}
           onOpenPanel={(panel) => {
             setMissingPublishFields([])
-            setActiveToolPanel(panel)
-            setMobileView(panel)
+            if (panel === 'cover' && window.innerWidth < 1024) {
+              setMobileView('cover')
+            } else {
+              setActiveToolPanel(panel)
+              if (panel === 'meta') setMobileView('meta')
+            }
           }}
         />
       ) : null}
@@ -4691,6 +4691,7 @@ export default function StudioWorkspace() {
         open={pendingCoverUpload?.novelId === activeNovelId}
         file={pendingCoverUpload?.novelId === activeNovelId ? pendingCoverUpload.file : null}
         busy={coverUploadMutation.isPending}
+        trapFocus
         onClose={() => {
           if (!coverUploadMutation.isPending) {
             setPendingCoverUpload(null)

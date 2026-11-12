@@ -11,6 +11,7 @@ export type ActivityGroup = {
   firstCallId: string
   calls: ActivityCall[]
   childrenByCall: Map<string, ActivityCall[]>
+  readLabel?: string
   transition?: string
 }
 
@@ -40,7 +41,7 @@ function savedReply(part: ActivityCall) {
 }
 
 export function activityWorkingLabel(part: ActivityCall | undefined) {
-  if (!part) return '正在思考中'
+  if (!part) return '正在思考'
   if (part.status === 'failed' || part.status === 'denied') return '核对刚才未完成的步骤'
   if (part.toolName === 'plan_save') return '核对计划保存结果'
   const { phase, label } = getAgentToolPresentation(part.toolName)
@@ -78,11 +79,10 @@ export function activityTarget(part: ActivityCall): string | undefined {
 }
 
 const activityFamilies = new Map([
-  ['directive_list', 'settings'], ['memory_review_list', 'settings'], ['story_charter_get', 'settings'],
-  ['character_voice_get', 'settings'], ['experience_anchor_get', 'settings'], ['style_profile_get', 'settings'],
   ['cover_prompt_set', 'cover'], ['cover_generate', 'cover'],
   ['chapter_write', 'chapter-body'], ['chapter_append', 'chapter-body'],
 ])
+const creationReadLabels = new Set(['核对前文', '查看创作设定', '查看创作资料', '查看作品结构'])
 
 function canGroup(current: ActivityGroup, next: ActivityCall, afterText: boolean): boolean {
   const first = current.calls[0]
@@ -92,6 +92,8 @@ function canGroup(current: ActivityGroup, next: ActivityCall, afterText: boolean
     const chapterId = activityChapterId(next)
     return activityFamilies.get(next.toolName) === family && chapterId !== undefined && chapterId === activityChapterId(first)
   }
+  if (creationReadLabels.has(getAgentToolPresentation(first.toolName).label)
+    && creationReadLabels.has(getAgentToolPresentation(next.toolName).label)) return true
   return first.toolName === next.toolName || family !== undefined && family === activityFamilies.get(next.toolName)
 }
 
@@ -107,13 +109,32 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
   const groups: ActivityGroup[] = []
   const seen = new Map<string, { group?: ActivityGroup; calls: ActivityCall[]; index: number }>()
   const branches = new Map<string, ActivityCall[]>()
+  const transcript = messages.map(message => ({
+    message,
+    scope: JSON.stringify([message.runId, message.goalId ?? null]),
+    parts: message.role === 'assistant'
+      ? projectAgentAuthorParts(message.parts.filter(part => part.type !== 'reasoning'), false, { includePreparing: true })
+      : [],
+  }))
+  const callIdentity = (scope: string, part: ActivityCall) => JSON.stringify([scope, part.subagentCallId ?? null, part.callId])
+  // Parameter deltas can describe several proposed calls in the same provider
+  // turn. Only call/result events establish which operations have started.
+  const reportedCalls = new Map<string, { scope: string; status: ActivityCall['status'] }>()
+  for (const { scope, parts } of transcript) {
+    for (const part of parts) {
+      if (part.type !== 'tool-call' || part.preparing) continue
+      const id = callIdentity(scope, part)
+      if (part.status !== 'running' || !reportedCalls.has(id)) reportedCalls.set(id, { scope, status: part.status })
+    }
+  }
+  const executingScopes = new Set([...reportedCalls.values()].filter(call => call.status === 'running').map(call => call.scope))
+  const displayedPreparations = new Set<string>()
   let current: ActivityGroup | undefined
   let previousScope: string | undefined
   let publicTextSinceAction = false
   const announcedMilestones = new Set<string>()
 
-  for (const message of messages) {
-    const scope = JSON.stringify([message.runId, message.goalId ?? null])
+  for (const { message, scope, parts } of transcript) {
     if (message.role !== 'assistant' || scope !== previousScope) {
       current = undefined
       publicTextSinceAction = false
@@ -124,7 +145,6 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
 
     const messageGroups = new Map<string, ActivityGroup>()
     byMessage.set(message.id, messageGroups)
-    const parts = projectAgentAuthorParts(message.parts.filter(part => part.type !== 'reasoning'), false, { includePreparing: true })
     for (const part of parts) {
       if (part.type !== 'tool-call') {
         if (part.type === 'text') {
@@ -133,7 +153,11 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
         }
         continue
       }
-      const identity = JSON.stringify([scope, part.subagentCallId ?? null, part.callId])
+      const identity = callIdentity(scope, part)
+      if (part.preparing) {
+        if (part.subagentCallId || reportedCalls.has(identity) || executingScopes.has(scope) || displayedPreparations.has(scope)) continue
+        displayedPreparations.add(scope)
+      }
       const prior = seen.get(identity)
       if (prior) {
         const original = prior.calls[prior.index]
@@ -162,6 +186,10 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
       }
       publicTextSinceAction = false
       const group = current
+      const first = group.calls[0]
+      if (first && phase === 'read' && getAgentToolPresentation(first.toolName).label !== getAgentToolPresentation(part.toolName).label) {
+        group.readLabel = '查看创作资料'
+      }
       if (part.toolName === 'subagent_run' || part.toolName === 'subagent_delegate') {
         const calls = branches.get(identity) ?? []
         group.childrenByCall.set(part.callId, calls)

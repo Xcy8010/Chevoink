@@ -1,17 +1,18 @@
 import { useQuery } from '@tanstack/react-query'
-import { requestJson } from '@/app/api-client'
-import type { GetAiConfigResponse } from '../../../../shared/contracts/api'
-import { formatModelPrice } from '../../../../shared/model-price-format'
-import { Check, Download, ImagePlus, LoaderCircle, PenLine, Sparkles, Upload } from 'lucide-react'
-import { useRef, useState } from 'react'
+import { Check, ChevronDown, Download, ImagePlus, LoaderCircle, PenLine, Sparkles, Upload, X } from 'lucide-react'
+import { useId, useRef, useState } from 'react'
 
+import { requestJson } from '@/app/api-client'
 import Button from '@/components/ui/Button'
-import Tag from '@/components/ui/Tag'
+import { cn } from '@/lib/utils'
+import type { GetAiConfigResponse } from '../../../../shared/contracts/api'
 import { FIXED_NOVEL_COVER_HEIGHT, FIXED_NOVEL_COVER_WIDTH, type CoverAsset } from '../../../../shared/contracts/index.js'
+import { formatModelPrice } from '../../../../shared/model-price-format'
 
 import type { CoverFormState } from '../types'
 import ImageLightbox from './ImageLightbox'
-import { InputLabel, SelectControl, ToolShell } from './StudioControls'
+import { SelectControl } from './StudioControls'
+import { useDialogFocusTrap } from './use-dialog-focus-trap'
 
 type CoverPanelProps = {
   coverForm: CoverFormState
@@ -34,347 +35,313 @@ type CoverPanelProps = {
   onApplyAsset: (asset: CoverAsset) => void
   onDownloadAsset: (asset: CoverAsset) => void
   onClose: () => void
+  modal?: boolean
 }
 
+const textareaClass = 'w-full min-w-0 resize-y rounded-xl border border-[var(--border-subtle)] bg-transparent px-3 py-2.5 text-sm leading-6 text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)] focus:border-[var(--border-strong)] focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]'
+const controlClass = 'min-h-11 rounded-xl'
+const disclosureClass = 'flex min-h-11 cursor-pointer items-center gap-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--text-primary)]'
+
 export default function CoverPanel({
-  coverForm,
-  coverAssets,
-  selectedCover,
-  currentCoverId,
-  coverKeywords,
-  coverMessage,
-  generatingPrompt,
-  generatingImage,
-  generationProgress,
-  selectingCover,
-  formatDateTime,
-  onChange,
-  onUploadFile,
-  onGeneratePrompt,
-  onGenerateImages,
-  onSelectAsset,
-  onApplyCover,
-  onApplyAsset,
-  onDownloadAsset,
-  onClose,
+  coverForm, coverAssets, selectedCover, currentCoverId, coverKeywords, coverMessage,
+  generatingPrompt, generatingImage, generationProgress, selectingCover, formatDateTime,
+  onChange, onUploadFile, onGeneratePrompt, onGenerateImages, onSelectAsset, onApplyCover, onApplyAsset, onDownloadAsset,
+  onClose, modal = false,
 }: CoverPanelProps) {
-  const imageConfig = useQuery({ queryKey: ['ai', 'public-config'], queryFn: () => requestJson<GetAiConfigResponse['data']>('/api/ai/config'), staleTime: 20000, refetchInterval: query => { const next = query.state.data?.imageModel?.activity?.nextSwitchAt; return next ? Math.max(1000, Math.min(60000, Date.parse(next) - Date.now())) : 60000 } })
-  const price = imageConfig.data?.imageModel
-  const uploadInputRef = useRef<HTMLInputElement | null>(null)
-  // 智能模式：一键从作品信息生成提示词；手动模式：直接编写提示词，降低上手门槛
+  const imageConfig = useQuery({
+    queryKey: ['ai', 'public-config'],
+    queryFn: () => requestJson<GetAiConfigResponse['data']>('/api/ai/config'),
+    staleTime: 20000,
+    refetchInterval: query => {
+      const next = query.state.data?.imageModel?.activity?.nextSwitchAt
+      return next ? Math.max(1000, Math.min(60000, Date.parse(next) - Date.now())) : 60000
+    },
+  })
+  const uploadInputRef = useRef<HTMLInputElement>(null)
+  const panelRef = useRef<HTMLElement>(null)
+  const titleId = useId()
   const [promptMode, setPromptMode] = useState<'smart' | 'manual'>('smart')
-  // 点击封面图后全屏放大查看，支持下载
   const [previewAsset, setPreviewAsset] = useState<CoverAsset | null>(null)
+  useDialogFocusTrap({ panel: panelRef, open: modal, onClose })
 
-  return (
-    <ToolShell
-      title="AI 封面"
-      description="一键生成提示词和候选图，也可以自己写提示词或直接上传封面。"
-      actions={
-        <Button variant="ghost" size="sm" onClick={onClose}>
-          收起
-        </Button>
-      }
+  const progress = Math.round(generationProgress)
+  const currentSelected = Boolean(selectedCover && currentCoverId === selectedCover.id)
+  const panel = (
+    <section
+      ref={panelRef}
+      role={modal ? 'dialog' : undefined}
+      aria-modal={modal || undefined}
+      aria-labelledby={modal ? titleId : undefined}
+      tabIndex={modal ? -1 : undefined}
+      className={cn(
+        'relative flex min-h-0 min-w-0 flex-col overflow-hidden text-[var(--text-primary)] outline-none',
+        modal
+          ? 'h-[min(48rem,calc(100dvh-3rem))] w-full max-w-[60rem] rounded-2xl border border-[var(--border-subtle)] bg-[var(--app-bg)] shadow-[var(--shadow-modal)] lg:bg-[var(--surface-default)]'
+          : 'flex-1 bg-[var(--app-bg)]',
+      )}
     >
-      <div className="scrollbar-none flex h-full min-h-0 max-w-full flex-col gap-4 overflow-y-auto overflow-x-hidden overscroll-contain">
-        <input
-          ref={uploadInputRef}
-          type="file"
-          accept="image/png,image/jpeg,image/webp"
-          className="hidden"
-          onChange={(event) => {
-            const file = event.target.files?.[0]
-            if (file) {
-              onUploadFile(file)
-            }
-            event.target.value = ''
-          }}
-        />
+      {modal ? (
+        <header className="flex shrink-0 items-center justify-between gap-4 border-b border-[var(--border-subtle)] px-6 py-2.5">
+          <h2 id={titleId} className="text-lg font-semibold">封面工坊</h2>
+          <Button variant="ghost" aria-label="关闭封面工坊" onClick={onClose} className={cn(controlClass, 'w-11 p-0')}>
+            <X aria-hidden="true" className="h-5 w-5" />
+          </Button>
+        </header>
+      ) : null}
 
-        {/* 用 flex 纵排而非 grid 隐式 auto 列：auto 轨道会按子项 max-content 取宽，
-            智能生成回填的长提示词会把 textarea 固有宽度撑大，进而横向撑开整个容器 */}
-        <div className="flex min-w-0 flex-col gap-4">
-          {/* 提示词模式切换 */}
-          <div className="grid grid-cols-2 gap-1 rounded-[16px] border border-[var(--border-subtle)] bg-[var(--surface-muted)] p-1">
+      <input
+        ref={uploadInputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        aria-label="选择封面图片"
+        hidden
+        onChange={(event) => {
+          const file = event.target.files?.[0]
+          if (file) onUploadFile(file)
+          event.target.value = ''
+        }}
+      />
+
+      <div className={cn(
+        'min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain',
+          modal && 'lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:overflow-hidden',
+      )}>
+        <section aria-label="生成设置" className={cn('min-w-0 space-y-4 p-4', modal && 'lg:overflow-y-auto lg:overscroll-contain lg:p-6')}>
+          <div aria-label="提示词方式" role="group" className="grid grid-cols-2 gap-1 rounded-xl border border-[var(--border-subtle)] p-1">
             {([
               ['smart', '智能生成', Sparkles],
               ['manual', '手动输入', PenLine],
             ] as const).map(([mode, label, Icon]) => (
-              <button
+              <Button
                 key={mode}
-                type="button"
                 onClick={() => setPromptMode(mode)}
-                className={
-                  promptMode === mode
-                    ? 'inline-flex min-h-10 items-center justify-center gap-2 rounded-[12px] bg-[var(--surface-default)] text-sm font-medium text-[var(--text-primary)] shadow-[var(--shadow-soft)] transition'
-                    : 'inline-flex min-h-10 items-center justify-center gap-2 rounded-[12px] text-sm font-medium text-[var(--text-secondary)] transition hover:text-[var(--text-primary)]'
-                }
+                variant="ghost"
                 aria-pressed={promptMode === mode}
+                className={cn(controlClass, 'min-w-0 px-2', promptMode === mode && 'bg-[var(--surface-muted)] text-[var(--text-primary)]')}
               >
-                <Icon className="h-4 w-4" />
+                <Icon aria-hidden="true" className="h-4 w-4 shrink-0" />
                 {label}
-              </button>
+              </Button>
             ))}
           </div>
 
           {promptMode === 'smart' ? (
-            <div className="space-y-3">
-              <p className="text-sm leading-6 text-[var(--text-secondary)]">
-                AI 会根据书名、简介和题材自动提炼封面提示词，生成后可继续微调。
-              </p>
-              <Button onClick={onGeneratePrompt} variant="secondary" disabled={generatingPrompt} className="w-full justify-center">
-                {generatingPrompt ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                智能生成提示词
-              </Button>
-              {coverForm.prompt ? (
-                <label className="space-y-2">
-                  <InputLabel label="封面提示词" hint="可以在这里继续微调，满意后直接生成封面。" />
-                  <textarea
-                    value={coverForm.prompt}
-                    onChange={(event) => onChange({ ...coverForm, prompt: event.target.value })}
-                    rows={4}
-                    className="w-full rounded-[20px] border border-[var(--border-strong)] bg-[var(--surface-default)] px-4 py-3 text-sm leading-7 text-[var(--text-primary)] outline-none transition focus:border-[var(--accent-border)] focus:ring-2 focus:ring-[var(--focus-ring)]"
-                  />
-                </label>
-              ) : null}
-            </div>
-          ) : (
-            <div className="space-y-4">
-              <label className="space-y-2">
-                <InputLabel label="封面提示词" hint="描述想要的画面，例如：夜色中的舰桥，单人背影，电影感。" />
-                <textarea
-                  value={coverForm.prompt}
-                  onChange={(event) => onChange({ ...coverForm, prompt: event.target.value })}
-                  rows={4}
-                  className="w-full rounded-[20px] border border-[var(--border-strong)] bg-[var(--surface-default)] px-4 py-3 text-sm leading-7 text-[var(--text-primary)] outline-none transition focus:border-[var(--accent-border)] focus:ring-2 focus:ring-[var(--focus-ring)]"
-                  placeholder="想要什么样的封面，直接写在这里。"
-                />
-              </label>
-              <label className="space-y-2">
-                <InputLabel label="不想要的元素（可选）" />
-                <textarea
-                  value={coverForm.negativePrompt}
-                  onChange={(event) => onChange({ ...coverForm, negativePrompt: event.target.value })}
-                  rows={2}
-                  className="w-full rounded-[20px] border border-[var(--border-strong)] bg-[var(--surface-default)] px-4 py-3 text-sm leading-7 text-[var(--text-primary)] outline-none transition focus:border-[var(--accent-border)] focus:ring-2 focus:ring-[var(--focus-ring)]"
-                  placeholder="例如：杂乱、模糊、过曝"
-                />
-              </label>
-            </div>
-          )}
+            <Button variant="secondary" onClick={onGeneratePrompt} disabled={generatingPrompt} className={controlClass}>
+              {generatingPrompt ? <LoaderCircle aria-hidden="true" className="h-4 w-4 motion-safe:animate-spin" /> : <Sparkles aria-hidden="true" className="h-4 w-4" />}
+              {generatingPrompt ? '正在生成提示词' : '智能生成提示词'}
+            </Button>
+          ) : null}
 
-          <div className="flex items-center gap-3">
-            <label className="flex flex-1 items-center gap-2">
-              <span className="shrink-0 text-sm text-[var(--text-secondary)]">候选数量</span>
+          <label className="block space-y-2">
+            <span className="text-sm font-medium">封面提示词</span>
+            <textarea
+              value={coverForm.prompt}
+              onChange={(event) => onChange({ ...coverForm, prompt: event.target.value })}
+              rows={4}
+              className={textareaClass}
+              placeholder={promptMode === 'smart' ? '可根据作品信息生成提示词，也可直接输入。' : '例如：夜色中的舰桥，单人背影，电影感'}
+            />
+          </label>
+          {coverKeywords.length ? (
+            <ul aria-label="封面关键词" className="flex flex-wrap gap-1.5 text-xs text-[var(--text-secondary)]">
+              {coverKeywords.map((keyword) => <li key={keyword} className="rounded-md bg-[var(--surface-muted)] px-2 py-1">{keyword}</li>)}
+            </ul>
+          ) : null}
+
+          {promptMode === 'manual' ? (
+            <label className="block space-y-2">
+              <span className="text-sm font-medium">不想要的元素 <span className="font-normal text-[var(--text-secondary)]">（可选）</span></span>
+              <textarea
+                value={coverForm.negativePrompt}
+                onChange={(event) => onChange({ ...coverForm, negativePrompt: event.target.value })}
+                rows={2}
+                className={textareaClass}
+                placeholder="例如：杂乱、模糊、过曝"
+              />
+            </label>
+          ) : null}
+
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-[var(--border-subtle)] pt-3">
+            <label className="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+              候选数量
               <SelectControl
                 value={coverForm.count}
+                className="rounded-xl border-[var(--border-subtle)] bg-transparent"
                 onChange={(event) => onChange({ ...coverForm, count: Number(event.target.value) })}
               >
-                {[1, 2, 3, 4].map((count) => (
-                  <option key={count} value={count}>
-                    {count} 张
-                  </option>
-                ))}
+                {[1, 2, 3, 4].map((count) => <option key={count} value={count}>{count} 张</option>)}
               </SelectControl>
             </label>
+            <span className="text-xs text-[var(--text-secondary)]">{FIXED_NOVEL_COVER_WIDTH} × {FIXED_NOVEL_COVER_HEIGHT} px</span>
           </div>
-          <p className="text-xs leading-5 text-[var(--text-tertiary)]">
-            所有封面统一裁成书封比例 {FIXED_NOVEL_COVER_WIDTH} × {FIXED_NOVEL_COVER_HEIGHT}。
-          </p>
+          {imageConfig.data?.imageModel && <CoverPrice price={imageConfig.data.imageModel} />}
+          {imageConfig.isError && <p className="text-sm text-[var(--text-secondary)]">图片价格暂不可用。</p>}
+        </section>
 
-          {price && <details className="rounded-xl border border-[var(--border-subtle)] p-3 text-xs"><summary className="cursor-pointer">{price.label}{price.activity?.name && <> · {price.activity.name}</>} · {price.activity?.name && price.basePerCallCredits > price.perCallCredits && <><s>{formatModelPrice(price.basePerCallCredits)} Credits / 批</s> → </>}当前 {formatModelPrice(price.perCallCredits)} Credits / 批</summary><div className="mt-2 space-y-1"><p>{price.publicDescription}</p>{price.publicFeatures.map((feature, index) => <p key={index}>{feature}</p>)}<p>基础 {price.activity?.name && price.basePerCallCredits > price.perCallCredits ? <s>{formatModelPrice(price.basePerCallCredits)} Credits / 批</s> : <>{formatModelPrice(price.basePerCallCredits)} Credits / 批</>} · 当前 {formatModelPrice(price.multiplier)}x{price.discountRatio !== null ? ' · 当前 / 基础 ' + formatModelPrice(price.discountRatio) : ''}</p>{price.activity && <><p>活动时区：{price.activity.timezone} · 当前 {price.activity.name ?? '无活动'}</p>{price.activity.rules.map((rule, index) => <p key={index}>{rule.name}：{rule.enabled ? '启用' : '停用'}；{rule.startDate ?? '不限开始'} 至 {rule.endDate ? rule.endDate + '（不含）' : '不限结束'}；周{rule.weekdays.map(day => ['日', '一', '二', '三', '四', '五', '六'][day]).join('、')}；{rule.allDay ? '全天' : rule.startTime + '–' + rule.endTime + (rule.endTime < rule.startTime ? '（跨夜）' : '')}；{formatModelPrice(rule.multiplierBps / 10000)}x</p>)}{price.activity.nextSwitchAt && <p>下次切换：{new Intl.DateTimeFormat('zh-CN', { timeZone: price.activity.timezone, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(price.activity.nextSwitchAt))}（{price.activity.timezone}）</p>}</>}</div></details>}
-          {imageConfig.isError && <p className="text-xs text-[var(--text-tertiary)]">图片价格暂不可用。</p>}
-          <div className="grid gap-2">
-            <Button onClick={onGenerateImages} disabled={generatingImage} className="w-full justify-center">
-              {generatingImage ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ImagePlus className="h-4 w-4" />}
-              生成封面
-            </Button>
-            <Button
-              onClick={() => uploadInputRef.current?.click()}
-              variant="ghost"
-              className="w-full justify-center border border-[var(--border-subtle)]"
-            >
-              <Upload className="h-4 w-4" />
-              本地上传封面
-            </Button>
-            {generatingImage ? (
-              <div className="rounded-[18px] border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-4 py-3">
-                <div className="flex items-center justify-between gap-3 text-xs text-[var(--text-secondary)]">
-                  <span>正在生成封面候选图</span>
-                  <span>{Math.round(generationProgress)}%</span>
-                </div>
-                <div className="mt-2 h-2 overflow-hidden rounded-full bg-[rgba(15,23,42,0.08)]">
-                  <div
-                    className="h-full rounded-full bg-[var(--surface-contrast)] transition-[width] duration-[1067ms] ease-out"
-                    style={{ width: `${generationProgress}%` }}
-                  />
-                </div>
-                <p className="mt-2 text-xs leading-5 text-[var(--text-secondary)]">
-                  正在根据当前提示词生成封面，这一步通常会稍微久一点。
-                </p>
-              </div>
-            ) : null}
-          </div>
-
-          {coverKeywords.length ? (
-            <div className="flex flex-wrap gap-2">
-              {coverKeywords.map((keyword) => (
-                <Tag key={keyword}>{keyword}</Tag>
-              ))}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="space-y-3 border-t border-[var(--border-subtle)] pt-4">
-          <div className="flex items-center justify-between gap-3">
-            <h4 className="text-sm font-semibold text-[var(--text-primary)]">封面候选</h4>
-            <p className="text-xs leading-5 text-[var(--text-secondary)]">{coverMessage}</p>
-          </div>
-
+        <section aria-label="封面候选" className={cn(
+          'min-w-0 space-y-3 border-t border-[var(--border-subtle)] p-4',
+          modal && 'lg:overflow-y-auto lg:overscroll-contain lg:border-l lg:border-t-0 lg:p-6',
+        )}>
+          <h3 className="text-sm font-semibold">封面候选</h3>
           {selectedCover ? (
-            <div className="rounded-[20px] border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-4 py-4">
-              <div className="space-y-3">
-                <button
-                  type="button"
-                  onClick={() => setPreviewAsset(selectedCover)}
-                  className="block w-full cursor-zoom-in"
-                  aria-label="放大查看这张封面"
-                >
-                  <img
-                    src={selectedCover.imageUrl}
-                    alt="当前选中的封面候选"
-                    className="aspect-[3/4] w-full rounded-[18px] border border-[var(--border-subtle)] object-cover transition hover:opacity-90"
-                  />
-                </button>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Tag tone="accent">当前预览</Tag>
-                  {currentCoverId === selectedCover.id ? <Tag>当前封面</Tag> : null}
-                </div>
-                <p className="text-sm leading-7 text-[var(--text-secondary)]">
-                  {selectedCover.prompt ?? '这一张候选封面还没有额外说明。'}
-                </p>
-                <div className="grid gap-2">
-                  <Button
-                    onClick={onApplyCover}
-                    disabled={selectingCover || currentCoverId === selectedCover.id}
-                    className="w-full justify-center"
-                  >
-                    {selectingCover ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-                    {currentCoverId === selectedCover.id ? '已设为作品封面' : '设为作品封面'}
-                  </Button>
-                  <Button onClick={() => onSelectAsset(null)} variant="ghost" className="w-full justify-center">
-                    取消选择
-                  </Button>
-                  <Button
-                    onClick={() => onDownloadAsset(selectedCover)}
-                    variant="secondary"
-                    className="w-full justify-center"
-                  >
-                    <Download className="h-4 w-4" />
-                    下载这张封面
-                  </Button>
-                </div>
+            <div className="space-y-3 rounded-xl border border-[var(--border-subtle)] p-3">
+              <button
+                type="button"
+                onClick={() => setPreviewAsset(selectedCover)}
+                className="mx-auto block cursor-zoom-in rounded-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                aria-label="放大预览选中的封面"
+              >
+                <img src={selectedCover.imageUrl} alt="选中的封面候选" className="aspect-[3/4] w-32 max-w-full rounded-lg object-cover" />
+              </button>
+              {selectedCover.prompt ? (
+                <details className="group break-words">
+                  <summary className={disclosureClass}>
+                    <ChevronDown aria-hidden="true" className="h-4 w-4 shrink-0 -rotate-90 group-open:rotate-0" />查看这张封面的提示词
+                  </summary>
+                  <p className="whitespace-pre-wrap px-1 text-sm leading-6 text-[var(--text-secondary)]">{selectedCover.prompt}</p>
+                </details>
+              ) : null}
+              <div className="flex flex-wrap items-center justify-center gap-1.5">
+                <Button onClick={onApplyCover} disabled={selectingCover || currentSelected} className={controlClass}>
+                  {selectingCover ? <LoaderCircle aria-hidden="true" className="h-4 w-4 motion-safe:animate-spin" /> : <Check aria-hidden="true" className="h-4 w-4" />}
+                  {currentSelected ? '已设为作品封面' : '设为作品封面'}
+                </Button>
+                <Button onClick={() => onDownloadAsset(selectedCover)} variant="ghost" className={controlClass}>
+                  <Download aria-hidden="true" className="h-4 w-4" />下载这张封面
+                </Button>
+                <Button onClick={() => onSelectAsset(null)} variant="ghost" className={controlClass}>取消选择</Button>
               </div>
             </div>
           ) : null}
 
-          <div className="space-y-2">
-            {coverAssets.map((asset) => (
-              <CoverAssetItem
-                key={asset.id}
-                asset={asset}
-                selected={selectedCover?.id === asset.id}
-                currentCoverId={currentCoverId}
-                formatDateTime={formatDateTime}
-                onSelect={() => onSelectAsset(asset.id)}
-                onPreview={() => setPreviewAsset(asset)}
-                onApply={() => onApplyAsset(asset)}
-                onDownload={() => onDownloadAsset(asset)}
-              />
-            ))}
-          </div>
-        </div>
+          {coverAssets.length ? (
+            <ul className="divide-y divide-[var(--border-subtle)]">
+              {coverAssets.map((asset) => (
+                <CoverAssetItem
+                  key={asset.id}
+                  asset={asset}
+                  selected={selectedCover?.id === asset.id}
+                  currentCoverId={currentCoverId}
+                  selectingCover={selectingCover}
+                  formatDateTime={formatDateTime}
+                  onSelect={() => onSelectAsset(asset.id)}
+                  onPreview={() => setPreviewAsset(asset)}
+                  onApply={() => onApplyAsset(asset)}
+                  onDownload={() => onDownloadAsset(asset)}
+                />
+              ))}
+            </ul>
+          ) : (
+            <p className="flex min-h-32 items-center justify-center rounded-xl border border-dashed border-[var(--border-subtle)] px-4 text-sm text-[var(--text-secondary)]">暂无封面候选</p>
+          )}
+        </section>
       </div>
+
+      <footer className="shrink-0 space-y-2 border-t border-[var(--border-subtle)] px-4 py-3 lg:px-6">
+        {coverMessage ? <p role="status" className="break-words text-sm text-[var(--text-secondary)]">{coverMessage}</p> : null}
+        {generatingImage ? (
+          <div className="flex items-center gap-2.5 text-xs text-[var(--text-secondary)]">
+            <span>正在生成封面候选图</span>
+            <progress aria-label="生成封面进度" value={progress} max={100} className="h-1.5 min-w-0 flex-1 accent-[var(--surface-contrast)]" />
+            <span className="tabular-nums">{progress}%</span>
+          </div>
+        ) : null}
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button onClick={() => uploadInputRef.current?.click()} variant="secondary" className={controlClass}>
+            <Upload aria-hidden="true" className="h-4 w-4" />本地上传封面
+          </Button>
+          <Button onClick={onGenerateImages} variant="primary" disabled={generatingImage} className={controlClass}>
+            {generatingImage ? <LoaderCircle aria-hidden="true" className="h-4 w-4 motion-safe:animate-spin" /> : <ImagePlus aria-hidden="true" className="h-4 w-4" />}
+            生成封面
+          </Button>
+        </div>
+      </footer>
 
       {previewAsset ? (
         <ImageLightbox
           src={previewAsset.imageUrl}
           alt="封面候选图"
-          downloadName={`封面候选-${previewAsset.id}.jpg`}
+          downloadName={'封面候选-' + previewAsset.id + '.jpg'}
+          trapFocus
           onClose={() => setPreviewAsset(null)}
         />
       ) : null}
-    </ToolShell>
+    </section>
+  )
+
+  return modal ? (
+    <div className="fixed inset-0 z-[90] grid place-items-center bg-black/35 p-3 lg:p-6" onClick={(event) => { if (event.target === event.currentTarget) onClose() }}>
+      {panel}
+    </div>
+  ) : panel
+}
+
+function CoverPrice({ price }: { price: NonNullable<GetAiConfigResponse['data']['imageModel']> }) {
+  const base = formatModelPrice(price.basePerCallCredits) + ' Credits / 批'
+  const discounted = Boolean(price.activity?.name && price.basePerCallCredits > price.perCallCredits)
+  return (
+    <details className="group border-t border-[var(--border-subtle)] text-sm text-[var(--text-secondary)]">
+      <summary className={cn(disclosureClass, 'py-2.5')}>
+        <ChevronDown aria-hidden="true" className="h-4 w-4 shrink-0 -rotate-90 group-open:rotate-0" />
+        <span className="min-w-0 break-words">
+          {price.label}{price.activity?.name ? ' · ' + price.activity.name : ''} · {discounted ? <><s>{base}</s> → </> : null}
+          当前 {formatModelPrice(price.perCallCredits)} Credits / 批
+        </span>
+      </summary>
+      <div className="space-y-1.5 pb-2 text-xs leading-5">
+        <p>{price.publicDescription}</p>
+        {price.publicFeatures.map((feature, index) => <p key={index}>{feature}</p>)}
+        <p>基础 {discounted ? <s>{base}</s> : base} · 当前 {formatModelPrice(price.multiplier)}x{price.discountRatio !== null ? ' · 当前 / 基础 ' + formatModelPrice(price.discountRatio) : ''}</p>
+        {price.activity ? (
+          <>
+            <p>活动时区 {price.activity.timezone} · 当前 {price.activity.name ?? '无活动'}</p>
+            {price.activity.rules.map((rule, index) => (
+              <p key={index}>
+                {rule.name} · {rule.enabled ? '启用' : '停用'} · {rule.startDate ?? '不限开始'} 至 {rule.endDate ? rule.endDate + '（不含）' : '不限结束'} · 周{rule.weekdays.map(day => ['日', '一', '二', '三', '四', '五', '六'][day]).join('、')} · {rule.allDay ? '全天' : rule.startTime + '–' + rule.endTime + (rule.endTime < rule.startTime ? '（跨夜）' : '')} · {formatModelPrice(rule.multiplierBps / 10000)}x
+              </p>
+            ))}
+            {price.activity.nextSwitchAt ? <p>下次切换 {new Intl.DateTimeFormat('zh-CN', { timeZone: price.activity.timezone, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(price.activity.nextSwitchAt))}（{price.activity.timezone}）</p> : null}
+          </>
+        ) : null}
+      </div>
+    </details>
   )
 }
 
 function CoverAssetItem({
-  asset,
-  selected,
-  currentCoverId,
-  formatDateTime,
-  onSelect,
-  onPreview,
-  onApply,
-  onDownload,
+  asset, selected, currentCoverId, selectingCover, formatDateTime, onSelect, onPreview, onApply, onDownload,
 }: {
   asset: CoverAsset
   selected: boolean
   currentCoverId?: string | null
+  selectingCover: boolean
   formatDateTime: (value?: string | null) => string
   onSelect: () => void
   onPreview: () => void
   onApply: () => void
   onDownload: () => void
 }) {
+  const inUse = currentCoverId === asset.id
   return (
-    <div
-      className={
-        selected
-          ? 'rounded-[18px] border border-[var(--border-strong)] bg-[var(--surface-default)] px-3 py-3 transition-colors'
-          : 'rounded-[18px] border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-3 py-3 transition-colors hover:border-[var(--border-strong)]'
-      }
-    >
-      <div className="flex w-full items-center gap-3">
-        <button
-          type="button"
-          onClick={onPreview}
-          className="shrink-0 cursor-zoom-in"
-          aria-label="放大查看这张封面"
-        >
-          <img
-            src={asset.imageUrl}
-            alt="封面候选图"
-            className="aspect-[3/4] w-20 rounded-[14px] object-cover transition hover:opacity-90"
-          />
+    <li className="flex min-w-0 items-start gap-3 py-3">
+      <button type="button" onClick={onPreview} className="shrink-0 cursor-zoom-in rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2" aria-label="放大查看这张封面">
+        <img src={asset.imageUrl} alt="封面候选图" className="aspect-[3/4] w-14 rounded-md object-cover" />
+      </button>
+      <div className="min-w-0 flex-1">
+        <button type="button" aria-pressed={selected} onClick={onSelect} className="block min-h-11 w-full rounded-md text-left text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2">
+          <span className="block font-medium">{inUse ? '作品封面' : '封面候选'}{selected ? ' · 已选中' : ''}</span>
+          {asset.prompt ? <span className="line-clamp-1 break-words text-[var(--text-secondary)]">{asset.prompt}</span> : null}
+          <span className="block text-xs text-[var(--text-secondary)]">{formatDateTime(asset.createdAt)}</span>
         </button>
-        <button type="button" onClick={onSelect} className="min-w-0 flex-1 space-y-2 text-left">
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="text-sm font-medium text-[var(--text-primary)]">封面候选</p>
-            {currentCoverId === asset.id ? <Tag tone="accent">当前封面</Tag> : null}
-            {selected ? <Tag>当前预览</Tag> : null}
-          </div>
-          <p className="line-clamp-3 break-words text-sm leading-6 text-[var(--text-secondary)]">
-            {asset.prompt ?? '点击查看这张封面的完整预览。'}
-          </p>
-          <span className="block text-xs text-[var(--text-tertiary)]">{formatDateTime(asset.createdAt)}</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Button onClick={onApply} variant="ghost" disabled={selectingCover || inUse} className={cn(controlClass, 'px-2')}>
+            {inUse ? '已在使用' : '一键更换'}
+          </Button>
+          <Button onClick={onDownload} variant="ghost" className={cn(controlClass, 'px-2')} aria-label="下载这张候选封面">
+            <Download aria-hidden="true" className="h-4 w-4" />下载
+          </Button>
+        </div>
       </div>
-      <div className="mt-3 flex flex-wrap gap-2">
-        <Button
-          onClick={onApply}
-          disabled={currentCoverId === asset.id}
-          className="h-9 justify-center px-4"
-          size="sm"
-        >
-          <Check className="h-4 w-4" />
-          {currentCoverId === asset.id ? '已在使用' : '一键更换'}
-        </Button>
-        <Button onClick={onDownload} variant="secondary" className="h-9 justify-center px-4" size="sm">
-          <Download className="h-4 w-4" />
-          下载
-        </Button>
-      </div>
-    </div>
+    </li>
   )
 }

@@ -11,11 +11,13 @@ import {
   getNovelCoverPreviewMetrics,
   type NovelCoverCropState,
 } from '../cover-image'
+import { useDialogFocusTrap } from './use-dialog-focus-trap'
 
 type NovelCoverCropDialogProps = {
   file: File | null
   open: boolean
   busy?: boolean
+  trapFocus?: boolean
   onClose: () => void
   onConfirm: (crop: NovelCoverCropState) => void
 }
@@ -30,6 +32,7 @@ export default function NovelCoverCropDialog({
   file,
   open,
   busy = false,
+  trapFocus = false,
   onClose,
   onConfirm,
 }: NovelCoverCropDialogProps) {
@@ -39,6 +42,8 @@ export default function NovelCoverCropDialog({
   const [crop, setCrop] = useState<NovelCoverCropState>(INITIAL_CROP)
   const previewFrameRef = useRef<HTMLDivElement | null>(null)
   const [previewScale, setPreviewScale] = useState(1)
+  const panel = useRef<HTMLDivElement>(null)
+  useDialogFocusTrap({ panel, open: trapFocus && open && Boolean(file), onClose: () => { if (!busy) onClose() } })
 
   useEffect(() => {
     if (!open || !file) {
@@ -116,7 +121,7 @@ export default function NovelCoverCropDialog({
   }
 
   return (
-    <div className="studio-workspace fixed inset-0 z-[95] flex min-h-0 items-center justify-center overflow-hidden bg-[rgba(15,23,42,0.45)] p-4 backdrop-blur-[2px]" role="dialog" aria-modal="true" aria-label="裁切作品封面">
+    <div ref={panel} tabIndex={trapFocus ? -1 : undefined} className="studio-workspace fixed inset-0 z-[95] flex min-h-0 items-center justify-center overflow-hidden bg-[rgba(15,23,42,0.45)] p-4 backdrop-blur-[2px]" role="dialog" aria-modal="true" aria-label="裁切作品封面">
       <div className="absolute inset-0" onClick={() => !busy && onClose()} />
       <div className="relative z-[1] flex max-h-[calc(100dvh-2rem)] min-h-0 w-full max-w-[920px] flex-col overflow-hidden rounded-[24px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-0 shadow-[var(--shadow-soft)] sm:max-h-[calc(100dvh-3rem)] sm:p-6">
         <div className="flex shrink-0 items-start justify-between gap-4 px-6 pt-6 sm:px-0 sm:pt-0">

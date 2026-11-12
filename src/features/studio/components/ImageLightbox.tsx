@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Download, LoaderCircle, X } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
 
 import { downloadCoverAssetImage } from '../cover-image'
+import { useDialogFocusTrap } from './use-dialog-focus-trap'
 
 type ImageLightboxProps = {
   src: string
@@ -12,13 +13,17 @@ type ImageLightboxProps = {
   /** 下载时使用的文件名（不传则不显示下载按钮） */
   downloadName?: string
   onClose: () => void
+  trapFocus?: boolean
 }
 
 /** 图片查看器：全屏放大预览封面图，支持下载，Esc / 点击遮罩关闭 */
-export default function ImageLightbox({ src, alt, downloadName, onClose }: ImageLightboxProps) {
+export default function ImageLightbox({ src, alt, downloadName, onClose, trapFocus = false }: ImageLightboxProps) {
   const [downloading, setDownloading] = useState(false)
+  const panel = useRef<HTMLDivElement>(null)
+  useDialogFocusTrap({ panel, open: trapFocus, onClose })
 
   useEffect(() => {
+    if (trapFocus) return
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         onClose()
@@ -26,7 +31,7 @@ export default function ImageLightbox({ src, alt, downloadName, onClose }: Image
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [onClose])
+  }, [onClose, trapFocus])
 
   const handleDownload = async () => {
     if (!downloadName || downloading) return
@@ -40,6 +45,8 @@ export default function ImageLightbox({ src, alt, downloadName, onClose }: Image
 
   return createPortal(
     <div
+      ref={panel}
+      tabIndex={trapFocus ? -1 : undefined}
       className="fixed inset-0 z-[140] flex items-center justify-center bg-[rgba(15,23,42,0.72)] px-4 py-8 backdrop-blur-[4px]"
       onClick={onClose}
       role="dialog"

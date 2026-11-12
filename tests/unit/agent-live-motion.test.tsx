@@ -85,6 +85,22 @@ it('does not count hidden reply transport as an extra operation', () => {
   expect(result.blockInfoById.get('answer')?.ops).toBe(0)
 })
 
+it.each([{ label: 'empty', text: '' }, { label: 'protocol-only', text: '<tool_call>{"name":"task_respond"}</tool_call>' }])(
+  'lets the composer settle when a hidden tool-only turn has an $label final', ({ text }) => {
+    start()
+    event({ type: 'message.start', messageId: 'tool-turn' })
+    event({ type: 'text.final', messageId: 'tool-turn', text })
+    event({ type: 'tool.call', messageId: 'tool-turn', callId: 'reply', toolName: 'task_respond', title: '答复问题', args: {} })
+    event({ type: 'tool.result', messageId: 'tool-turn', callId: 'reply', toolName: 'task_respond', ok: true, summary: '已答复' })
+    event({ type: 'text.delta', messageId: 'answer', delta: '先显示这段临时文本。\n\n' })
+    expect(useAgentStore.getState().textRevealTargets.answer).toBeDefined()
+    event({ type: 'text.final', messageId: 'answer', text })
+    event({ type: 'run.finished', status: 'succeeded', nextPrompt: '复核刚保存的计划。', usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, artifacts: [] })
+    expect(useAgentStore.getState().textRevealTargets).toEqual({})
+    expect(useAgentStore.getState().nextPrompt).toEqual({ runId: 'run', text: '复核刚保存的计划。' })
+  },
+)
+
 it('keeps a prepared tool row stable through batched completion and exits without replay on history expand', async () => {
   vi.useFakeTimers(); start(); const view = render(<Harness />)
   act(() => event({ type: 'tool.delta', messageId: 'answer', callId: 'fast', toolName: 'chapter_read', argsChars: 4 }))
