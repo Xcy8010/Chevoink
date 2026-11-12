@@ -1,9 +1,7 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
-import { ChevronRight, Search, X, type LucideIcon } from 'lucide-react'
+import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { ChevronRight, Search, X } from 'lucide-react'
 
-import { cn } from '@/lib/utils'
-
-export type SettingsSectionLink = { id: string; label: string; icon: LucideIcon }
+export type SettingsSection = { id: string; label: string }
 
 type SearchResult = { key: string; label: string; group?: string; target: HTMLElement }
 
@@ -20,19 +18,17 @@ function jumpTo(target: HTMLElement | null | undefined) {
   })
 }
 
-export default function SettingsLayout({ backButton, links, children }: {
+export default function SettingsLayout({ backButton, sections, children }: {
   backButton: ReactNode
-  links: SettingsSectionLink[]
+  sections: SettingsSection[]
   children: ReactNode
 }) {
   const contentRef = useRef<HTMLDivElement>(null)
-  const railRef = useRef<HTMLElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const searchTarget = useRef<HTMLElement | null>(null)
   const resultsId = useId()
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<SearchResult[]>([])
-  const [activeId, setActiveId] = useState(links[0]?.id)
   const search = normalizeSearch(query)
 
   useLayoutEffect(() => {
@@ -47,7 +43,7 @@ export default function SettingsLayout({ backButton, links, children }: {
       return terms.every(term => value.includes(term))
     }
     const found: SearchResult[] = []
-    for (const { id, label } of links) {
+    for (const { id, label } of sections) {
       const section = document.getElementById(id)
       if (!section || !contentRef.current?.contains(section)) continue
       const heading = section.querySelector('h2')
@@ -60,41 +56,7 @@ export default function SettingsLayout({ backButton, links, children }: {
       }
     }
     setResults(found)
-  }, [links, search])
-
-  useEffect(() => {
-    const rail = railRef.current
-    const content = contentRef.current
-    if (!rail || !content) return
-    const sections = links.map(({ id }) => document.getElementById(id)).filter(section => section && content.contains(section))
-    let frame = 0
-    let railVisible = Boolean(rail.offsetWidth)
-    function syncActiveSection() {
-      frame = 0
-      if (!rail) return
-      const line = Number.parseFloat(getComputedStyle(rail).top) + 16
-      let current = links[0]?.id
-      for (const section of sections) {
-        if (section && section.getBoundingClientRect().top <= line) current = section.id
-      }
-      setActiveId(current)
-    }
-    const schedule = () => {
-      if (railVisible && !frame) frame = window.requestAnimationFrame(syncActiveSection)
-    }
-    const resize = () => {
-      railVisible = Boolean(rail.offsetWidth)
-      schedule()
-    }
-    schedule()
-    document.addEventListener('scroll', schedule, { capture: true, passive: true })
-    window.addEventListener('resize', resize)
-    return () => {
-      document.removeEventListener('scroll', schedule, true)
-      window.removeEventListener('resize', resize)
-      window.cancelAnimationFrame(frame)
-    }
-  }, [links])
+  }, [sections, search])
 
   function clearSearch() {
     setQuery('')
@@ -107,12 +69,12 @@ export default function SettingsLayout({ backButton, links, children }: {
   }
 
   return (
-    <div className="mx-auto w-full max-w-[64rem] pb-5">
+    <div className="mx-auto w-full max-w-[50rem] pb-5">
       <header className="mb-5 flex items-center gap-3 border-b border-[var(--border-subtle)] pb-4 pt-1 md:mb-6 md:gap-4 md:pb-5">
         {backButton}
         <h1 className="text-2xl font-semibold tracking-tight text-[var(--text-primary)] md:text-3xl">设置</h1>
       </header>
-      <form role="search" aria-label="搜索设置" className="mb-6 lg:hidden"
+      <form role="search" aria-label="搜索设置" className="mb-6"
         onSubmit={event => {
           event.preventDefault()
           if (search && results[0]) chooseResult(results[0].target)
@@ -150,26 +112,7 @@ export default function SettingsLayout({ backButton, links, children }: {
           ) : <p role="status" className="px-3.5 py-3 text-sm text-[var(--text-secondary)]">未找到匹配的设置</p>}
         </div>}
       </form>
-      <div className="grid items-start gap-6 lg:grid-cols-[12rem_minmax(0,1fr)]">
-        <nav ref={railRef} aria-label="设置分区"
-          className="hidden rounded-[var(--radius-xl)] border border-[var(--border-subtle)] bg-[var(--surface-solid)] lg:sticky lg:top-[calc(var(--app-header-height,0px)+1rem)] lg:block lg:max-h-[calc(100dvh-var(--app-header-height,0px)-2rem)] lg:overflow-y-auto">
-          <ul className="space-y-0.5 p-1.5">
-            {links.map(({ id, label, icon: Icon }) => (
-              <li key={id}>
-                <button type="button" aria-controls={id} aria-current={activeId === id ? 'location' : undefined}
-                  onClick={() => jumpTo(document.getElementById(id)?.querySelector('h2'))}
-                  className={cn('flex min-h-10 w-full items-center gap-2.5 rounded-[var(--radius-md)] px-3 text-left text-sm focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--color-brand)] motion-safe:transition-colors',
-                    activeId === id ? 'bg-[var(--color-brand-soft)] font-semibold text-[var(--color-brand)]'
-                      : 'font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]')}>
-                  <Icon aria-hidden="true" className="size-4 shrink-0" />
-                  {label}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </nav>
-        <div ref={contentRef} className="flex min-w-0 flex-col gap-7">{children}</div>
-      </div>
+      <div ref={contentRef} className="flex min-w-0 flex-col gap-7">{children}</div>
     </div>
   )
 }

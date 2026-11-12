@@ -7,7 +7,6 @@ import {
   Download,
   FileText,
   Image as ImageIcon,
-  Info,
   KeyRound,
   Lock,
   LogOut,
@@ -62,7 +61,7 @@ import {
   type SettingsDialogState,
 } from './settings/privacy'
 import { SectionTitle, SettingsGroup, SettingsRow } from './settings/settings-row'
-import SettingsLayout, { type SettingsSectionLink } from './settings/settings-layout'
+import SettingsLayout, { type SettingsSection } from './settings/settings-layout'
 import CustomModelSettingsDialog from '@/features/account/CustomModelSettingsDialog'
 import DesktopSettings from './settings/desktop-settings'
 import EmailAccountSettings from './settings/EmailAccountSettings'
@@ -741,10 +740,10 @@ export default function SettingsPage() {
     </section>
   )
 
-  const generalSectionLinks: SettingsSectionLink[] = []
-  if (aboutSection) generalSectionLinks.push({ id: 'settings-about', label: isWindowsDesktopApp() ? 'Windows 客户端' : '关于', icon: Info })
-  if (clientSection) generalSectionLinks.push({ id: 'settings-client', label: '客户端', icon: Download })
-  generalSectionLinks.push({ id: 'settings-policies', label: '协议与政策', icon: FileText })
+  const generalSections: SettingsSection[] = []
+  if (aboutSection) generalSections.push({ id: 'settings-about', label: isWindowsDesktopApp() ? 'Windows 客户端' : '关于' })
+  if (clientSection) generalSections.push({ id: 'settings-client', label: '客户端' })
+  generalSections.push({ id: 'settings-policies', label: '协议与政策' })
 
   if (authStatus === 'unavailable') {
     return (
@@ -760,7 +759,7 @@ export default function SettingsPage() {
 
   if (authStatus !== 'authenticated' || !sessionUser) {
     return (
-      <SettingsLayout backButton={backButton} links={[{ id: 'settings-display', label: '显示', icon: Sun }, ...generalSectionLinks]}>
+      <SettingsLayout backButton={backButton} sections={[{ id: 'settings-display', label: '显示' }, ...generalSections]}>
         <AppState
           icon={<UserRound aria-hidden="true" className="h-5 w-5 text-[var(--text-secondary)]" />}
           title="登录后可管理账户设置"
@@ -779,14 +778,14 @@ export default function SettingsPage() {
   }
 
   return (
-    <SettingsLayout backButton={backButton} links={[
-      { id: 'settings-profile', label: '账户', icon: UserRound },
-      { id: 'account-security', label: '账号安全', icon: ShieldCheck },
-      { id: 'settings-privacy', label: '隐私', icon: Lock },
-      { id: 'settings-models', label: 'AI 与模型', icon: Cpu },
-      { id: 'settings-display', label: '显示', icon: Sun },
-      { id: 'settings-session', label: '会话', icon: LogOut },
-      ...generalSectionLinks,
+    <SettingsLayout backButton={backButton} sections={[
+      { id: 'settings-profile', label: '账户' },
+      { id: 'account-security', label: '账号安全' },
+      { id: 'settings-privacy', label: '隐私' },
+      { id: 'settings-models', label: 'AI 与模型' },
+      { id: 'settings-display', label: '显示' },
+      { id: 'settings-session', label: '会话' },
+      ...generalSections,
     ]}>
       <input
         ref={avatarInputRef}
