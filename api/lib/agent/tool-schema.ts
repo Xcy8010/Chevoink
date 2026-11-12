@@ -37,8 +37,12 @@ function toolPresentation(tool: Pick<AgentTool, 'name' | 'description' | 'parame
       properties: Object.fromEntries(Object.entries(properties).filter(([key]) => key !== 'content')),
       required: (parameters.required as string[] ?? []).filter(key => key !== 'content') } }
   }
-  if (tool.name === 'novel_update_meta' && scope?.novelInitializationProtocol === 1 && scope.novelInitializationTarget === 'empty') {
+  if (tool.name === 'novel_update_meta' && scope?.novelInitializationProtocol && scope.novelInitializationTarget === 'empty') {
     return { description: `${tool.description} 完整初始化时一次提供title、summary与tags；缺字段不会保存任何内容。单项修改任务仍可只传所需字段。`, parameters }
+  }
+  if (tool.name === 'ask_user' && scope?.novelDirectionRequired) {
+    return { description: tool.description, parameters: { ...parameters,
+      required: [...new Set([...(parameters.required as string[] ?? []), 'purpose'])] } }
   }
   return { description: tool.description, parameters }
 }
@@ -76,7 +80,8 @@ export function originalToolParameterSchemas(tool: Pick<AgentTool, 'name' | 'des
     properties: Object.fromEntries(Object.entries(previousTerminal.properties).filter(([key]) => key !== 'terminalPatch')) } : null
   const previousVolumeCreate = tool.name === 'volume_create' ? { ...current, properties: Object.fromEntries(Object.entries(current.properties as Record<string, unknown>).filter(([key]) => key !== 'boundary' && key !== 'targetOrderIndex')) } : null
   const previousNovelMetadata = tool.name === 'novel_update_meta' ? { ...current, properties: Object.fromEntries(Object.entries(current.properties as Record<string, unknown>).filter(([key]) => key !== 'title')) } : null
-  return [current, toolPresentation(tool, current, scope).parameters, ...(previousNovelMetadata ? [previousNovelMetadata] : []), ...(previousVolumeCreate ? [previousVolumeCreate] : []), ...(previousConfiguration ? [previousConfiguration] : []), ...(legacy ? [legacy] : []), ...(previousPrepare ? [previousPrepare] : []),
+  const previousQuestion = tool.name === 'ask_user' && properties?.purpose ? { ...current, properties: Object.fromEntries(Object.entries(properties).filter(([key]) => key !== 'purpose')) } : null
+  return [current, toolPresentation(tool, current, scope).parameters, ...(previousQuestion ? [previousQuestion] : []), ...(previousNovelMetadata ? [previousNovelMetadata] : []), ...(previousVolumeCreate ? [previousVolumeCreate] : []), ...(previousConfiguration ? [previousConfiguration] : []), ...(legacy ? [legacy] : []), ...(previousPrepare ? [previousPrepare] : []),
     ...(previousPatch ? [previousPatch, withoutTopLevelProofs(previousPatch), ...(oldTerminal ? [oldTerminal, withoutTopLevelProofs(oldTerminal)] : [])] : []),
     ...(previousProofSelection.length ? previousProofSelection : previousTerminal ? [previousTerminal] : []), ...(previousResearch ? [previousResearch] : [])]
 }

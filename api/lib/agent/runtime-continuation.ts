@@ -76,8 +76,10 @@ export async function advanceDurableCompletionObligations(token: RunLeaseToken, 
     const { blockers } = z.object({ blockers: z.array(z.object({ code: z.string(), reference: z.string() }).strict()) }).parse(evidence.snapshot)
     if (!blockers.length) return null
     // Only already-adapted domain work can be requested automatically.
-    if (blockers.some(item => !['unfinished_todo', 'uncommitted_compilation'].includes(item.code))) return { kind: 'reconciliation_required' as const, blockers }
     const { frame, configuration, originalSpec } = await readExecutionStateInTransaction(tx, lease.taskRootId)
+    const latest = frame.state.messages.at(-1)
+    if (latest?.role === 'assistant' && latest.localCompletion
+      || blockers.some(item => !['unfinished_todo', 'uncommitted_compilation'].includes(item.code))) return { kind: 'reconciliation_required' as const, blockers }
     const effective = await (await import('./native-tool-policy.js')).readEffectiveNativeTooling(tx, lease, configuration, taskSpecSchema.parse(originalSpec))
     const requiredTools: string[] = blockers.map(item => item.code === 'unfinished_todo' ? 'todo_write' : 'chapter_bridge_commit')
     const observed = z.object({ reviewObservation: reviewObservationSchema.optional() }).parse(evidence.snapshot).reviewObservation

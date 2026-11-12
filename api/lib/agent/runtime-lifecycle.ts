@@ -59,11 +59,11 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
       await assertLimitedWritingDelivery(tx, subject, limited)
       if (candidate.content !== limited.text) return runtimeError('RUNTIME_COMPLETION_BLOCKED', '受限交付必须明确展示当前正文未复核的限制。')
     }
-    const savedPresentation = await readSavedWritingPresentation(tx, subject)
+    const savedPresentation = candidate.localCompletion ? null : await readSavedWritingPresentation(tx, subject)
     const chapterPresentation = savedPresentation && shouldUseSavedWritingPresentation(savedPresentation, candidate.content)
       ? savedChapterPresentationProof(subject, savedPresentation) : null
     let nextPrompt: string | undefined
-    if (configuration.nextPromptMarker && !goal && !parent && !limited && allowsNextPrompt(originalPrompt(originalRequest))) {
+    if (configuration.nextPromptMarker && !candidate.localCompletion && !goal && !parent && !limited && allowsNextPrompt(originalPrompt(originalRequest))) {
       const spec = taskSpecSchema.safeParse(originalSpec)
       if (spec.success && !spec.data.scope.writing?.titleAndBodyOnly) {
         const saved = z.object({
@@ -103,6 +103,7 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     await tx.agentTaskRoot.update({ where: { id: root.id }, data: { status: 'completed' } })
     const previousUsage = run.usage && typeof run.usage === 'object' && !Array.isArray(run.usage) ? run.usage : {}
     await tx.agentRun.update({ where: { id: run.id }, data: { status: 'completed', finishedAt: now, errorMessage: null,
+      ...(candidate.localCompletion ? { outputSummary: candidate.content.slice(0, 300) } : {}),
       ...(limited ? { usage: runtimeJson({ ...previousUsage, outcome: limited.outcome, deliveryProof: limited }).value } : {}) } })
     await tx.agentRunLease.updateMany({ where: { run: { taskRootId: root.id } },
       data: { enabled: false, ownerId: null, claimId: null, expiresAt: null } })

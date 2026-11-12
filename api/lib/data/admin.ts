@@ -7,15 +7,23 @@ import { presentTesterIdentity } from '../tester-entitlement.js'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import type {
+  AdminAgentRunDetailsPayload,
   AdminAgentSessionMessagesPayload,
+  AdminAgentToolEvent,
   AdminBriefUser,
   AdminCreationRecordsIndexPayload,
   AdminCreationRecordsPayload,
   AdminTokenManagementPayload,
   AdminUserFavoriteNovelRow,
   AdminUserFollowRow,
+  AgentMessagePart,
   Pagination,
 } from '../../../shared/contracts/index.js'
+import { projectAgentAuthorParts, projectAgentToolSummary } from '../../../shared/agent-author-view.js'
+import { publicReviewExecution } from '../../../shared/review-lifecycle.js'
+import { loadMessageTimings } from '../agent/message-timing.js'
+import { loadServerRunNotices } from '../agent/events.js'
+import { MAIN_RUN_FILTER } from '../agent/runtime-child.js'
 import { hashPassword, isLegacyPasswordHash, verifyPassword } from '../password.js'
 import { evictUserBanCache } from '../auth-session.js'
 import { prisma } from '../prisma.js'
@@ -31,6 +39,11 @@ function parseAgentUsage(value: Prisma.JsonValue | null | undefined): AgentUsage
   const promptTokens = Number(record.promptTokens) || 0
   const completionTokens = Number(record.completionTokens) || 0
   return { promptTokens, completionTokens, totalTokens: Number(record.totalTokens) || promptTokens + completionTokens }
+}
+
+function hasRecordedAgentUsage(value: Prisma.JsonValue): boolean {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value)
+    && [value.promptTokens, value.completionTokens].every(count => typeof count === 'number' && Number.isFinite(count) && count >= 0))
 }
 
 function totalRunTokens(runs: Array<{ usage: Prisma.JsonValue | null }>): number {
@@ -797,43 +810,41 @@ export async function getAdminCreationRecordsData(userId: string): Promise<Admin
 
 
 
+const adminTranscriptRunSelection = {
+  id: true, mode: true, action: true, status: true, inputSummary: true, outputSummary: true, errorMessage: true,
+  createdAt: true, startedAt: true, finishedAt: true, usage: true, runtimeProtocolVersion: true, taskRootId: true,
+  taskRoot: { select: { status: true } },
+  goalExecution: { select: { goalId: true, trigger: true } },
+  messages: {
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    select: { id: true, runId: true, role: true, parts: true, createdAt: true },
+  },
+} satisfies Prisma.AgentRunSelect
+
 /** 管理端：查看单个 Agent 会话的聊天记录（run + 消息）；按 run 轮次游标分页，
  *  默认返回最新 pageSize 轮，before 传本页最早 run id 加载更早一轮，避免长会话一次性拉全量消息 */
 export async function getAdminAgentSessionMessagesData(
   sessionId: string,
-  input: { before?: string; pageSize?: number } = {},
+  input: { before?: string; pageSize?: number; replay?: boolean; userId?: string } = {},
 ): Promise<AdminAgentSessionMessagesPayload | null> {
   const pageSize = Math.min(50, Math.max(1, input.pageSize ?? 20))
   const cursor = input.before ? { id: input.before } : undefined
   const loadRecord = (withCursor: boolean) =>
     prisma.agentSession.findUnique({
-      where: { id: sessionId },
+      where: { id: sessionId, ...(input.userId ? { userId: input.userId } : {}) },
       select: {
         id: true,
+        userId: true,
         title: true,
         createdAt: true,
         novel: { select: { id: true, title: true, displayTitle: true } },
         runs: {
           // 倒序多取一条判断 hasMore；游标存在时从该 run 往前（不含自身）
-          orderBy: { createdAt: 'desc' },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          ...(input.replay ? { where: MAIN_RUN_FILTER } : {}),
           ...(withCursor && cursor ? { cursor, skip: 1 } : {}),
           take: pageSize + 1,
-          select: {
-            id: true,
-            mode: true,
-            action: true,
-            status: true,
-            inputSummary: true,
-            outputSummary: true,
-            errorMessage: true,
-            createdAt: true,
-            finishedAt: true,
-            usage: true,
-            messages: {
-              orderBy: { createdAt: 'asc' },
-              select: { id: true, runId: true, role: true, parts: true, createdAt: true },
-            },
-          },
+          select: adminTranscriptRunSelection,
         },
       },
     })
@@ -850,7 +861,30 @@ export async function getAdminAgentSessionMessagesData(
   }
 
   const hasMore = record.runs.length > pageSize
-  const runs = record.runs.slice(0, pageSize).reverse()
+  const pageRuns = record.runs.slice(0, pageSize).reverse()
+  const rootIds = input.replay ? [...new Set(pageRuns.flatMap(run => run.runtimeProtocolVersion === 1 && run.taskRootId ? [run.taskRootId] : []))] : []
+  // Durable resumes can keep all message identities on a run outside the
+  // physical page. Bring its saved messages along without changing the cursor.
+  const [relatedRuns, pendingHistory] = rootIds.length ? await Promise.all([
+    prisma.agentRun.findMany({
+      where: { sessionId: record.id, userId: record.userId, ...MAIN_RUN_FILTER,
+        id: { notIn: pageRuns.map(run => run.id) }, taskRootId: { in: rootIds }, runtimeProtocolVersion: 1, messages: { some: {} } },
+      select: adminTranscriptRunSelection,
+    }),
+    prisma.agentExecutionOutbox.findFirst({
+      where: { taskRootId: { in: rootIds }, projections: { none: {} }, OR: [
+        { type: { in: ['execution.state.saved', 'writing.delivery.projected', 'question.requested'] } },
+        { type: 'execution.completion.decided', payload: { path: ['kind'], equals: 'completed' } },
+      ] },
+      select: { id: true },
+    }),
+  ]) : [[], null]
+  const runs = [...pageRuns, ...relatedRuns].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id))
+  const runIds = runs.map(run => run.id)
+  const [timings, notices] = input.replay ? await Promise.all([
+    loadMessageTimings(record.userId, record.id, runIds),
+    loadServerRunNotices(record.userId, runIds),
+  ]) : [new Map(), new Map()]
 
   return {
     session: {
@@ -871,16 +905,98 @@ export async function getAdminAgentSessionMessagesData(
       createdAt: run.createdAt.toISOString(),
       finishedAt: toIso(run.finishedAt),
       usage: parseAgentUsage(run.usage),
-      messages: run.messages.map((message) => ({
-        id: message.id,
-        runId: message.runId,
-        role: (message.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant',
-        parts: message.parts as unknown[],
-        createdAt: message.createdAt.toISOString(),
-      })),
+      ...(input.replay ? { startedAt: toIso(run.startedAt), usageRecorded: hasRecordedAgentUsage(run.usage) } : {}),
+      messages: run.messages.flatMap((message) => {
+        const role = message.role === 'assistant' ? 'assistant' as const : 'user' as const
+        const base = { id: message.id, runId: message.runId, role, createdAt: message.createdAt.toISOString() }
+        const parts = Array.isArray(message.parts) ? message.parts as unknown as AgentMessagePart[] : []
+        if (!input.replay) return [{ ...base, parts }]
+        const goal = run.goalExecution
+        const goalContinuation = Boolean(goal && (message.role === 'system'
+          || message.role === 'user' && goal.trigger === 'goal_auto' && run.messages[0]?.id === message.id))
+        if (message.role === 'system' && !goalContinuation) return []
+        const timing = timings.get(run.id)
+        return [{ ...base,
+          parts: goalContinuation ? [] : role === 'assistant'
+            ? replayAuthorParts(parts, notices.has(message.id), run.runtimeProtocolVersion === 1 ? run.taskRoot?.status : undefined)
+            : parts.filter(part => part.type === 'text' || part.type === 'attachment'),
+          runTiming: timing,
+          completedAt: role === 'assistant' ? timing?.completedAt ?? (run.status === 'completed' ? toIso(run.finishedAt) : null) : null,
+          goalId: goal?.goalId ?? null,
+          goalContinuation,
+        }]
+      }),
     })),
     hasMore,
-    nextCursor: runs.length > 0 ? runs[0].id : null,
+    nextCursor: pageRuns[0]?.id ?? null,
+    ...(pendingHistory ? { historyPending: true } : {}),
+  }
+}
+
+function replayAuthorParts(parts: AgentMessagePart[], serverNotice: boolean, taskStatus?: string): AgentMessagePart[] {
+  return projectAgentAuthorParts(parts.flatMap((part): AgentMessagePart[] => {
+    if (part.type === 'text') return serverNotice ? [] : [part]
+    if (part.type !== 'tool-call') return []
+    const args = part.args && typeof part.args === 'object' ? part.args as Record<string, unknown> : {}
+    const targets = Object.fromEntries(['chapterId', 'chapter_id', 'planId', 'volumeId'].flatMap(key =>
+      typeof args[key] === 'string' ? [[key, args[key]]] : []))
+    const stopped = part.status === 'running' && (taskStatus === 'paused' || taskStatus === 'completed')
+    return [publicReviewExecution({ ...part,
+      args: targets,
+      snapshot: undefined,
+      importWaiting: undefined,
+      ...(part.display?.kind === 'exportReady' ? { display: { ...part.display, downloadUrl: '' } } : {}),
+      ...(stopped ? { status: 'failed' as const, summary: taskStatus === 'paused' ? '已停止' : '已中断' } : {}),
+    })]
+  }))
+}
+
+/** Original tool receipt order, without model requests, arguments or provider responses. */
+export async function getAdminAgentRunDetailsData(sessionId: string, runId: string, after?: number): Promise<AdminAgentRunDetailsPayload | null> {
+  const run = await prisma.agentRun.findFirst({ where: { id: runId, sessionId }, select: { userId: true, novelId: true } })
+  if (!run) return null
+  const pageSize = 100
+  const [rows, usage, attempts] = await Promise.all([
+    prisma.agentRunEvent.findMany({
+      where: { runId, type: { in: ['tool.call', 'tool.result'] }, ...(after === undefined ? {} : { seq: { gt: after } }) },
+      orderBy: { seq: 'asc' }, take: pageSize + 1,
+      select: { seq: true, type: true, payload: true, createdAt: true },
+    }),
+    after === undefined ? prisma.aiUsageLog.groupBy({
+      by: ['modelName', 'billingStatus'],
+      where: { userId: run.userId, novelId: run.novelId, OR: [{ agentRunId: runId }, { targetType: 'agentRun', targetId: runId }] },
+      _sum: { creditChargeMilli: true },
+    }) : [],
+    after === undefined ? prisma.agentProviderAttempt.findMany({
+      where: { runId, dispatchedAt: { not: null } }, select: { model: true }, distinct: ['model'],
+    }) : [],
+  ])
+  const page = rows.slice(0, pageSize)
+  const events: AdminAgentToolEvent[] = page.flatMap(row => {
+    if (row.type !== 'tool.call' && row.type !== 'tool.result') return []
+    const payload = row.payload
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+      || typeof payload.toolName !== 'string' || typeof payload.callId !== 'string') return []
+    const display = payload.display
+    const unanswered = display && typeof display === 'object' && !Array.isArray(display)
+      && display.kind === 'question' && display.unanswered === true
+    const outcome = row.type === 'tool.call' ? 'dispatched' : unanswered ? 'unanswered'
+      : payload.ok === false ? 'failed' : payload.ok === true ? 'success' : 'unknown'
+    const summary = typeof payload.summary === 'string'
+      ? projectAgentToolSummary(payload.summary, outcome === 'failed' ? 'failed' : 'success') || null : null
+    const eventAt = typeof payload.ts === 'string' ? new Date(payload.ts) : row.createdAt
+    return [{ seq: row.seq, type: row.type, at: (Number.isNaN(eventAt.getTime()) ? row.createdAt : eventAt).toISOString(),
+      toolName: payload.toolName, callId: payload.callId, outcome, summary,
+      failureCode: typeof payload.failureCode === 'string' && /^[a-z][a-z0-9_]{0,63}$/i.test(payload.failureCode) ? payload.failureCode : null,
+      durationMs: typeof payload.durationMs === 'number' && payload.durationMs >= 0 ? payload.durationMs : null }]
+  })
+  const recordedCharges = usage.flatMap(row => row._sum.creditChargeMilli !== null
+    && (row.billingStatus === 'settled' || row._sum.creditChargeMilli > 0) ? [row._sum.creditChargeMilli] : [])
+  return {
+    events,
+    models: [...new Set([...usage.map(row => row.modelName), ...attempts.map(row => row.model)].filter(Boolean))].sort(),
+    creditsMilli: recordedCharges.length ? recordedCharges.reduce((sum, amount) => sum + amount, 0) : null,
+    nextAfter: rows.length > pageSize ? page.at(-1)!.seq : null,
   }
 }
 

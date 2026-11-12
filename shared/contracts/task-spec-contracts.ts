@@ -60,8 +60,9 @@ export const taskScopeSchema = z.object({
   /** Server-only fresh admission. Never added by a tool, resume or migration. */
   writingCoordinationProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
   /** Fresh server-only initialization and volume protocol; absent old tasks retain their authority. */
-  novelInitializationProtocol: z.literal(1).optional(),
+  novelInitializationProtocol: z.union([z.literal(1), z.literal(2)]).optional(),
   novelInitializationTarget: z.enum(['empty', 'existing']).optional(),
+  novelDirectionRequired: z.literal(true).optional(),
   volumeCreationProtocol: z.literal(1).optional(),
   /** A fresh author confirms only these named empty volumes from this exact conversation. */
   volumeCreateIntent: z.object({ version: z.literal(1), requestHash: z.string().regex(/^[a-f0-9]{64}$/),

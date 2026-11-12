@@ -668,7 +668,7 @@ const ORCHESTRATION_MODE_LABEL: Record<'spawn' | 'wait' | 'send', string> = {
 }
 
 /** 跨任务编排卡片：折叠行 = 并行窗口概况，展开列出每个窗口的状态与交付摘要，点标题直接切到那个任务窗口 */
-function TaskOrchestrationCard({ display, authorActivity }: ToolDetailCardProps<'taskOrchestration'>) {
+function TaskOrchestrationCard({ display, authorActivity, readOnly }: ToolDetailCardProps<'taskOrchestration'> & { readOnly: boolean }) {
   const [expanded, setExpanded] = useState(false)
   const detailsId = useId()
   const requestToolNavigation = useAgentStore((state) => state.requestToolNavigation)
@@ -694,13 +694,13 @@ function TaskOrchestrationCard({ display, authorActivity }: ToolDetailCardProps<
             {display.windows.map((taskWindow) => (
               <li key={taskWindow.sessionId} className="py-1">
                 <div className="flex items-center gap-2">
-                  <button
+                  {readOnly ? <span className="min-w-0 flex-1 truncate text-xs text-[var(--text-primary)]">{taskWindow.title}</span> : <button
                     type="button"
                     onClick={() => requestToolNavigation('task_open', { sessionId: taskWindow.sessionId }, display)}
                     className="min-w-0 flex-1 truncate text-left text-xs text-[var(--text-primary)] hover:underline"
                   >
                     {taskWindow.title}
-                  </button>
+                  </button>}
                   <span className="shrink-0 text-[10px] text-[var(--text-secondary)]">
                     {ORCHESTRATION_STATUS_LABEL[taskWindow.status]}
                     {taskWindow.inherit === 'transcript' ? ' · 分支副本' : ''}
@@ -724,10 +724,12 @@ export function ToolDisplayRenderer({
   display,
   onNavigateTarget,
   authorActivity = false,
+  readOnly = false,
 }: {
   display: AgentToolDisplayPayload
   onNavigateTarget?: () => void
   authorActivity?: boolean
+  readOnly?: boolean
 }) {
   switch (display.kind) {
     case 'chapterDiff':
@@ -753,7 +755,7 @@ export function ToolDisplayRenderer({
     case 'taskContext':
       return <TaskContextCard display={display} authorActivity={authorActivity} />
     case 'taskOrchestration':
-      return <TaskOrchestrationCard display={display} authorActivity={authorActivity} />
+      return <TaskOrchestrationCard display={display} authorActivity={authorActivity} readOnly={readOnly} />
     case 'chapterRef':
       return (
         <p className="text-[11px] text-[var(--text-secondary)]">
@@ -806,22 +808,28 @@ export function ToolDisplayRenderer({
               </p>
             </div>
           </div>
-          <a
+          {!readOnly ? <a
             href={buildApiUrl(display.downloadUrl)}
             download={display.fileName}
             className="mt-2 inline-flex h-8 items-center gap-1.5 rounded-full bg-[var(--surface-contrast)] px-3 text-xs font-medium text-[var(--text-contrast)] transition hover:bg-[var(--surface-contrast-hover)]"
           >
             <Download className="h-3.5 w-3.5" />
             下载导出包
-          </a>
+          </a> : null}
         </div>
       )
     case 'question':
       return (
         <div className="border-t border-[var(--border-subtle)] py-2 pl-5">
           <p className="break-words text-xs leading-6 text-[var(--text-primary)]">{display.question}</p>
+          {authorActivity && display.options?.length > 0 ? <ul className="mt-1 space-y-1 text-[11px] leading-5 text-[var(--text-secondary)]">
+            {display.options.map((option, index) => <li key={index}>
+              <span className="font-medium text-[var(--text-primary)]">{option.label}</span>
+              {option.detail ? <span> · {option.detail}</span> : null}
+            </li>)}
+          </ul> : null}
           <p className="mt-1 break-words text-[11px] leading-5 text-[var(--text-secondary)]">
-            {display.unanswered ? '尚未收到回答' : `你的回答：${display.answer ?? ''}`}
+            {display.answer ? `你的回答：${display.answer}` : '尚未收到回答'}
           </p>
           {display.scopeResolution && (
             <p className="mt-1 text-[11px] leading-5 text-[var(--text-secondary)]">

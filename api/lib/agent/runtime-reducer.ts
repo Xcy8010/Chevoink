@@ -12,12 +12,15 @@ import { readObservedBaseline } from './runtime-observed-baseline.js'
 import { formatDurableToolObservation, formatReferencedToolObservation, TOOL_OBSERVATION_INLINE_BYTES } from './runtime-common.js'
 import { executionContextReadTool } from './tools/task-context-tools.js'
 import { toOpenAIParameters } from './tool-schema.js'
+import { hasNovelDirectionDelivery, novelSetupNotice } from './novel-initialization.js'
+import { QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 export { formatDurableToolObservation } from './runtime-common.js'
 
 type Message = z.infer<typeof executionSnapshotSchema>['messages'][number]
 const successfulModel = z.object({ outcome: z.literal('succeeded'), result: durableChatResultSchema }).strict()
 const toolInput = z.object({ input: z.object({ callId: z.string().min(1), args: z.record(z.string(), z.unknown()), normalization: argumentNormalizationSchema.optional(), rejection: toolRejectionSchema.optional() }) })
-const toolResult = z.object({ toolResult: z.object({ output: z.string() }) })
+const toolResult = z.object({ toolResult: z.object({ output: z.string(), questionTimedOut: z.literal(true).optional(),
+  display: z.unknown().optional() }) })
 export const failedToolResultSchema = z.object({ outcome: z.literal('failed'), effectApplied: z.literal(false), code: z.string(),
   toolResult: z.object({ output: z.string(), summary: z.string() }) }).strict()
 
@@ -49,6 +52,7 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
     if (!operation || (operation.status !== 'succeeded' && !(operation.kind === 'tool' && operation.status === 'failed'))) return runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原操作没有确认终态，不能将部分结果当成交付。')
     if (!operation.inputSnapshot || runtimeJsonHash(operation.inputSnapshot) !== operation.inputHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原操作输入损坏。')
     let appended: Message
+    const followup: Message[] = []
     let emptyProviderReasoning = false
     if (operation.kind === 'provider') {
       const attempts = await tx.agentProviderAttempt.findMany({ where: { operationId: operation.id, status: 'succeeded', dispatchedAt: { not: null } }, take: 2 })
@@ -130,8 +134,31 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
         && Buffer.byteLength(output, 'utf8') > TOOL_OBSERVATION_INLINE_BYTES
         ? formatReferencedToolObservation(operation.action, output, { operationId: operation.id, resultHash: receipt.resultHash })
         : formatDurableToolObservation(operation.action, output) }
+      if (!failed && !lease.parent && assistant?.role === 'assistant' && ['ask_user', 'novel_create', 'novel_update_meta'].includes(operation.action)) {
+        const spec = taskSpecSchema.safeParse(current.originalSpec).data
+        const directionSetup = spec?.scope.novelInitializationProtocol === 2 && hasNovelDirectionDelivery(spec)
+        const tool = parsedResult.data.toolResult
+        const timeout = operation.action === 'ask_user' && tool.questionTimedOut
+        const display = z.object({ kind: z.literal('question'), answer: z.string().min(1) }).safeParse(tool.display)
+        const answeredDirection = operation.action === 'ask_user' && directionSetup
+          && parsedInput.data.input.args.purpose === 'novel_direction' && display.success
+        const metadata = z.object({ title: z.string().trim().min(1), summary: z.string().trim().min(1), tags: z.array(z.string()).min(1) })
+          .safeParse(parsedInput.data.input.args)
+        const setupTitle = operation.action !== 'ask_user' && directionSetup && metadata.success ? metadata.data.title : ''
+        if (timeout || answeredDirection || setupTitle) {
+          const finished = new Set(frame.state.messages.slice(assistantIndex + 1)
+            .flatMap(item => item.role === 'tool' ? [item.toolCallId] : []))
+          for (const sibling of assistant.toolCalls ?? []) {
+            if (sibling.id !== callId && !finished.has(sibling.id)) followup.push({ role: 'tool', toolCallId: sibling.id,
+              content: timeout || setupTitle ? '本轮已结束，此调用未执行。' : '此调用在作者回答前拟定，未执行。请按作者实际选择重新拟定下一步。' })
+          }
+        }
+        if (timeout || setupTitle) followup.push({ role: 'assistant',
+          content: timeout ? QUESTION_TIMEOUT_NOTICE : novelSetupNotice(setupTitle),
+          localCompletion: { kind: timeout ? 'question_timeout' : 'novel_setup', operationId: operation.id } })
+      }
     } else return runtimeError('RUNTIME_STATE_CONFLICT', '内部操作不能伪装成模型工具回复。')
-    const snapshot = { ...frame.state, phase: 'idle' as const, pendingOperationId: null, messages: [...frame.state.messages, appended] }
+    const snapshot = { ...frame.state, phase: 'idle' as const, pendingOperationId: null, messages: [...frame.state.messages, appended, ...followup] }
     if (emptyProviderReasoning && current.head.revision > cursor.expectedRevision && appended.role === 'assistant') {
       // Old reducers omitted a genuinely empty provider field. Replay only that
       // exact already-saved projection; the normal state writer still checks

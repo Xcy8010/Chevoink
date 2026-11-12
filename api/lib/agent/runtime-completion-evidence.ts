@@ -4,7 +4,7 @@ import { projectCurrentReviewNextStep, currentReviewNextStepGuidance } from './r
 import { countReportChineseCharacters } from '../../../shared/agent-output.js'
 import { runtimeError, runtimeJson, runtimeJsonHash, type RuntimeTx } from './runtime-common.js'
 import { withManuscriptRunLease, type RunLeaseToken } from './runtime-lease.js'
-import { readExecutionStateInTransaction } from './runtime-state.js'
+import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
 import { readTaskBudgetInTransaction } from './runtime-budget.js'
 import { collectDurableToolEvidence } from './runtime-evidence.js'
 import { readDurableTodoItems } from './tools/durable-todo.js'
@@ -14,6 +14,7 @@ import { collectDurableMemoryWork } from './runtime-memory.js'
 import { readCompletedWritingDelivery, readCompletedWritingPresentation, effectiveWritingTaskSpec } from './writing-scope.js'
 import { readOriginalTaskRequest } from './original-request.js'
 import { readLimitedWritingDelivery, limitedReviewDependency, verifyRunLimitedWritingOutcome, permitsLimitedWritingContract } from './writing-delivery-limitations.js'
+import { z } from 'zod'
 
 /** Review input, NOT a completion certificate. The goal/output/postcondition
  * obligations remain explicit and unverified until their domain checks run.
@@ -38,7 +39,20 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
     const evidence = await collectDurableToolEvidence(tx, root.id, frame.revision)
     const deliverables = await collectDurableDeliverables(tx, root, evidence.effects)
     const memoryWork = await collectDurableMemoryWork(tx, root, evidence.effects)
-    const postconditionChecks = await evaluateTaskPostconditions(tx, root)
+    const timedOut = last.localCompletion?.kind === 'question_timeout'
+    if (timedOut) {
+      const source = await readExecutionFrame(tx, root.id, frame.revision - 1)
+      const receipt = await tx.agentEffectReceipt.findUnique({ where: { operationId: last.localCompletion!.operationId }, include: { operation: true } })
+      if (source.state.pendingOperationId !== receipt?.operationId || !receipt || receipt.operation.taskRootId !== root.id
+        || receipt.operation.action !== 'ask_user' || receipt.operation.status !== 'succeeded'
+        || runtimeJsonHash(receipt.result) !== receipt.resultHash
+        || !z.object({ toolResult: z.object({ questionTimedOut: z.literal(true) }) }).safeParse(receipt.result).success) {
+        return runtimeError('RUNTIME_RECEIPT_INVALID', '提问超时收尾缺少原回执。')
+      }
+    }
+    const postconditionChecks = (await evaluateTaskPostconditions(tx, root)).map(check =>
+      timedOut && check.code === 'NOVEL_METADATA_INITIALIZED' && check.status === 'failed'
+        ? { ...check, status: 'deferred', deferredBy: 'question_timeout' } : check)
     const todos = await readDurableTodoItems(tx, root.id, frame.revision)
     const writingDelivery = await (spec.scope.agentWritingBinding ? readCompletedWritingPresentation : readCompletedWritingDelivery)(tx,
       { userId: lease.userId, novelId: root.novelId, runId: lease.runId })
@@ -63,12 +77,12 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
     const reportLengthChecks = spec.expectedOutputs.filter(output => output.required && output.minimumChineseCharacters !== undefined)
       .map(output => ({ description: output.description, required: output.minimumChineseCharacters!,
         actual: output.kind === 'text' || output.kind === 'validation_report' ? countReportChineseCharacters(last.content ?? '') : null }))
-    const blockers = [
+    const outstanding = [
       ...reportLengthChecks.filter(check => check.actual === null || check.actual < check.required)
         .map(check => ({ code: 'report_length_unmet', reference: check.description })),
       ...memoryWork.filter(item => !item.completed).map(item => ({ code: 'unresolved_memory_job', reference: item.job.id })),
       ...deliverables.filter(item => item.status === 'missing' || item.status === 'changed').map(item => ({ code: `deliverable_${item.status}`, reference: item.id })),
-      ...postconditionChecks.filter(item => item.severity === 'error' && item.status !== 'passed').map(item => ({ code: `postcondition_${item.status}`, reference: item.code })),
+      ...postconditionChecks.filter(item => item.severity === 'error' && item.status !== 'passed' && item.status !== 'deferred').map(item => ({ code: `postcondition_${item.status}`, reference: item.code })),
       ...todos.filter(item => !(limitedWritingDelivery && limitedReviewDependency(item.content))
         && (item.status === 'pending' || item.status === 'in_progress')).map(item => ({ code: 'unfinished_todo', reference: runtimeJsonHash({ content: item.content }) })),
       ...pendingOperations.map(item => ({ code: 'unresolved_operation', reference: item.id })),
@@ -76,6 +90,11 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
       ...limitedChildren.map(item => ({ code: 'limited_child_delivery', reference: item.childRunId })),
       ...(budget.unresolvedAttempts > 0n ? [{ code: 'unresolved_usage', reference: root.id }] : []),
     ]
+    // Ending the conversation defers known unfinished work without marking
+    // any output or todo complete. Unknown effects and child fences stay live.
+    const deferred = timedOut ? outstanding.filter(item => ['report_length_unmet', 'deliverable_missing', 'deliverable_changed',
+      'postcondition_failed', 'unfinished_todo'].includes(item.code)) : []
+    const blockers = outstanding.filter(item => !deferred.includes(item))
     const observations = []
     // Shared current facts do not upgrade an old durable continuation protocol.
     // Only roots admitted with the sidecar marker add these capability gates;
@@ -93,6 +112,7 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
       originalRequest: root.requestSnapshot,
       obligations: { goals: spec.goals, expectedOutputs: spec.expectedOutputs, postconditions: spec.postconditions, hardConstraints: spec.hardConstraints },
       verification: 'required', postconditionChecks, reportLengthChecks, deliverables, blockers, effects: evidence.effects, failedOperations, todos,
+      ...(timedOut ? { terminalReason: 'question_timeout', deferredBlockers: deferred } : {}),
       ...(reviewObservation ? { reviewObservation } : {}),
       ...(limitedWritingDelivery ? { limitedWritingDelivery } : {}),
       memoryJobs: memoryWork.map(item => ({ id: item.job.id, sourceOperationId: item.source.operationId, chapterId: item.job.chapterId,

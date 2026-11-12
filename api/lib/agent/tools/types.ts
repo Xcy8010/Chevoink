@@ -39,7 +39,7 @@ export type ToolContext = {
   /** Same execution’s observed content+link version; never populated from tool arguments. */
   planSemanticHashes?: Map<string, string>
   /** Actual answers from this execution’s question mailbox, never model arguments. */
-  authorQuestionAnswers?: Map<string, { userId: string; novelId: string; runId: string; question: string; answer: string }>
+  authorQuestionAnswers?: Map<string, { userId: string; novelId: string; runId: string; question: string; answer: string; purpose?: 'novel_direction' }>
   /** 作者明确要求“已有/前文保持不变”时，本轮启动前已存在的章节集合。 */
   protectedChapterIds?: ReadonlySet<string>
   /** Current server admission ceiling; inline children must inherit and intersect it. */
@@ -107,6 +107,8 @@ export type ToolContext = {
 export type ToolResult = {
   /** Trusted return-only terminal reply; never interpreted from output text. */
   terminalResponse?: import('../task-response.js').TaskResponse
+  /** True only when the wait for an authenticated author answer expired. */
+  questionTimedOut?: true
   observedAttachment?: { url: string; contentHash: string; offset: number; end: number; totalChars: number }
   /** Original-root DB observation allowance; not model input or manuscript progress. */
   platformBudget?: { version: 1; requestHash: string; charged: boolean }

@@ -6,7 +6,7 @@ import { projectApprovalEvent } from './runtime-approval.js'
 import { projectExecutionFrame, persistProjectedMessages } from './runtime-frame-events.js'
 import { durablePauseSchema } from './runtime-common.js'
 import { readExecutionFrame } from './runtime-state.js'
-import { durableQuestionSchema } from './runtime-question.js'
+import { durableQuestionContent, durableQuestionSchema } from './runtime-question.js'
 import { durableMessageId } from './runtime-frame-events.js'
 import { novelImportWaitingSchema } from '../novel-import-origin.js'
 import { importCommitWaitingSchema, importWaitingUrl } from './runtime-import.js'
@@ -128,10 +128,10 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
         const input = z.object({ input: z.object({ callId: z.string(), args: z.unknown(), normalization: z.object({ sourceRevision: z.number().int().nonnegative() }) }) }).safeParse(operation?.inputSnapshot)
         if (!operation || !input.success || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash || source.operationId !== operation.id
           || source.eventKey !== `question:${operation.id}` || input.data.input.callId !== question.callId
-          || runtimeJson(input.data.input.args).hash !== runtimeJson({ question: question.question, options: question.options }).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '提问事件缺少原工具参数。')
+          || runtimeJson(input.data.input.args).hash !== runtimeJson(durableQuestionContent.parse(question)).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '提问事件缺少原工具参数。')
         const frame = await readExecutionFrame(tx, root.id, input.data.input.normalization.sourceRevision)
         bodies = [{ type: 'tool.call', messageId: durableMessageId(root.id, frame.state.turn), callId: question.callId, toolName: 'ask_user', title: '向作者提问',
-          args: { question: question.question, options: question.options, requestId: source.id }, autoApproved: true }]
+          args: { ...durableQuestionContent.parse(question), requestId: source.id }, autoApproved: true }]
       } else if (source.type === 'execution.completion.decided') {
         const decision = z.object({ version: z.literal(1), kind: z.literal('completed'), reviewOperationId: z.string(), resultHash: z.string(),
           sourceRevision: z.number().int().nonnegative(), sourceHash: z.string(), revision: z.number().int().positive(), snapshotHash: z.string(),

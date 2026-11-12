@@ -5,6 +5,8 @@ import type { AgentStreamEventBody, AgentToolDisplayPayload, AgentMessagePart, A
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
 import { projectReviewWriteDeferral } from './runtime-review-deferral.js'
+import { novelSetupNotice } from './novel-initialization.js'
+import { QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 
 export const durableMessageId = (rootId: string, turn: number) => `dm-${runtimeJson({ rootId, turn }).hash.slice(0, 48)}`
 const sourceSchema = z.object({ revision: z.number().int().nonnegative(), snapshotHash: z.string(), previousHash: z.string().nullable() }).strict()
@@ -86,10 +88,11 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
     }
   }
   if (previous.state.phase === 'awaiting_operation' && frame.state.phase === 'idle') {
-    const appended = frame.state.messages.at(-1)
-    if (frame.state.messages.length !== previous.state.messages.length + 1 || !appended) return runtimeError('RUNTIME_RECEIPT_INVALID', '执行归约事件不符合消息追加合同。')
+    const [appended, ...followup] = frame.state.messages.slice(previous.state.messages.length)
+    if (!appended) return runtimeError('RUNTIME_RECEIPT_INVALID', '执行归约事件不符合消息追加合同。')
     const { humanizeAgentVisibleText } = await import('./visible-text.js')
     if (appended.role === 'assistant') {
+      if (followup.length) return runtimeError('RUNTIME_RECEIPT_INVALID', '模型归约事件不符合消息追加合同。')
       const events: AgentStreamEventBody[] = []
       if (appended.reasoning) events.push({ type: 'reasoning.delta', messageId, delta: appended.reasoning })
       events.push({ type: 'text.final', messageId, text: humanizeAgentVisibleText(appended.content ?? ''), asReasoning: false })
@@ -98,14 +101,40 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
     if (appended.role === 'tool') {
       const operation = await tx.agentOperation.findFirst({ where: { id: previous.state.pendingOperationId!, taskRootId: source.taskRootId }, include: { effectReceipt: true } })
       const receipt = operation?.effectReceipt
-      const parsedResult = z.object({ code: z.string().optional(), toolResult: z.object({ summary: z.string(), failureCode: z.string().optional(), reviewOutcome: z.enum(REVIEW_OUTCOMES).optional(), display: z.unknown().optional(), outcome: z.literal('failed').optional() }) }).safeParse(receipt?.result)
+      const parsedResult = z.object({ code: z.string().optional(), toolResult: z.object({ summary: z.string(), failureCode: z.string().optional(), reviewOutcome: z.enum(REVIEW_OUTCOMES).optional(), display: z.unknown().optional(), outcome: z.literal('failed').optional(), questionTimedOut: z.literal(true).optional() }) }).safeParse(receipt?.result)
       if (!operation || !receipt || !parsedResult.success || !['succeeded', 'failed'].includes(operation.status)
         || runtimeJson(receipt.result).hash !== receipt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '工具结果事件缺少完整回执。')
+      const last = followup.at(-1)
+      const terminal = last?.role === 'assistant' ? last : undefined
+      if (followup.length) {
+        const args = operationInput.parse(operation.inputSnapshot).input.args
+        const direction = z.object({ purpose: z.literal('novel_direction') }).safeParse(args).success
+          && z.object({ kind: z.literal('question'), answer: z.string().min(1) }).safeParse(parsedResult.data.toolResult.display).success
+        const title = z.object({ title: z.string().trim().min(1) }).safeParse(args)
+        const validTerminal = terminal?.localCompletion?.operationId === operation.id && !terminal.toolCalls?.length
+          && (terminal.localCompletion.kind === 'question_timeout' ? operation.action === 'ask_user' && parsedResult.data.toolResult.questionTimedOut
+            && terminal.content === QUESTION_TIMEOUT_NOTICE
+            : ['novel_create', 'novel_update_meta'].includes(operation.action) && title.success && terminal.content === novelSetupNotice(title.data.title))
+        const skipped = terminal ? followup.slice(0, -1) : followup
+        let assistantIndex = previous.state.messages.length - 1
+        while (previous.state.messages[assistantIndex]?.role === 'tool') assistantIndex--
+        const assistant = previous.state.messages[assistantIndex]
+        const answered = new Set(previous.state.messages.slice(assistantIndex + 1)
+          .flatMap(message => message.role === 'tool' ? [message.toolCallId] : []))
+        const expected = assistant?.role === 'assistant'
+          ? assistant.toolCalls?.filter(call => call.id !== appended.toolCallId && !answered.has(call.id)).map(call => call.id) ?? [] : []
+        if (operation.status !== 'succeeded' || (terminal ? !validTerminal : operation.action !== 'ask_user' || !direction)
+          || runtimeJson(frame.state.messages.slice(0, previous.state.messages.length)).hash !== runtimeJson(previous.state.messages).hash
+          || skipped.length !== expected.length || skipped.some((message, index) => message.role !== 'tool' || message.toolCallId !== expected[index])) {
+          return runtimeError('RUNTIME_RECEIPT_INVALID', '本轮收尾与原工具回执不一致。')
+        }
+      }
       return [{ type: 'tool.result', messageId, callId: appended.toolCallId, toolName: operation.action, ok: operation.status === 'succeeded' && parsedResult.data.toolResult.outcome !== 'failed',
         summary: humanizeAgentVisibleText(parsedResult.data.toolResult.summary), durationMs: Math.max(0, receipt.createdAt.getTime() - operation.createdAt.getTime()),
         ...(operation.action !== 'continuity_validate' && operation.action !== 'chapter_bridge_commit' && parsedResult.data.toolResult.reviewOutcome ? { reviewOutcome: parsedResult.data.toolResult.reviewOutcome } : {}),
         ...(parsedResult.data.code || parsedResult.data.toolResult.failureCode ? { failureCode: parsedResult.data.code ?? parsedResult.data.toolResult.failureCode } : {}),
-        ...(operation.status === 'succeeded' && parsedResult.data.toolResult.display ? { display: parsedResult.data.toolResult.display as AgentToolDisplayPayload } : {}) }]
+        ...(operation.status === 'succeeded' && parsedResult.data.toolResult.display ? { display: parsedResult.data.toolResult.display as AgentToolDisplayPayload } : {}) },
+      ...(terminal?.content ? [{ type: 'text.final' as const, messageId, text: terminal.content, asReasoning: false }] : [])]
     }
   }
   return [{ type: 'execution.progress', revision: frame.revision, stage: frame.state.phase === 'completed' ? 'finalizing' : 'checkpoint' }]

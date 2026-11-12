@@ -36,9 +36,10 @@ import { planSaveTool } from '../../api/lib/agent/tools/write-tools.js'
 import { retrievalTraceReadTool,styleProfileGetTool } from '../../api/lib/agent/tools/craft-library-tools.js'
 import { directiveListTool } from '../../api/lib/agent/tools/directive-tools.js'
 import { characterVoiceGetTool,experienceAnchorGetTool,qualityReportGetTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
-import { askUserTool } from '../../api/lib/agent/tools/interact-tools.js'
+import { askUserTool,QUESTION_TIMEOUT_NOTICE } from '../../api/lib/agent/tools/interact-tools.js'
 import { memoryReviewListTool } from '../../api/lib/agent/tools/memory-tools.js'
-import { coverPromptSetTool,novelRenameTool,novelUpdateMetaTool } from '../../api/lib/agent/tools/novel-tools.js'
+import { coverPromptSetTool,novelCreateTool,novelRenameTool,novelUpdateMetaTool } from '../../api/lib/agent/tools/novel-tools.js'
+import { BOOTSTRAP_NOVEL_SUMMARY } from '../../shared/contracts/novel-publish.js'
 import { chapterReadTool,novelGetContextTool,planReadTool } from '../../api/lib/agent/tools/read-tools.js'
 import { firstThreePrototypeGetTool,researchDossierGetTool } from '../../api/lib/agent/tools/research-dossier-tools.js'
 import { storyCharterGetTool } from '../../api/lib/agent/tools/story-compiler-tools.js'
@@ -501,7 +502,7 @@ describe.runIf(available)('durable question lifecycle', () => {
         if (scenario === 'expired') {
           await waitForDurableDecision(lease, new AbortController().signal, decisionWait)
           expect(await executeDurableToolStep(lease, new AbortController().signal)).toMatchObject({
-          kind: 'tool', result: { summary: '提问未获回答', display: { unanswered: true } },
+          kind: 'tool', result: { questionTimedOut: true, summary: '提问超时，未获回答', display: { unanswered: true } },
           })
         }
       }
@@ -533,6 +534,62 @@ describe.runIf(available)('durable question lifecycle', () => {
       }
       expect(await prisma.agentExecutionOutbox.count({ where: { taskRootId: f.rootId, type: 'question.requested' } })).toBe(1)
     })
+  })
+
+  it.each(['timeout', 'answered'] as const)('finishes novel setup after a %s direction question without dispatching the earlier model proposals', async scenario => {
+    const prompt = '帮我创建一部末日生存类型的小说'
+    await fixture(async f => {
+      await prisma.chapter.delete({ where: { id: f.chapterId } })
+      await prisma.novel.update({ where: { id: f.novelId }, data: { title: '未命名作品', displayTitle: null, summary: BOOTSTRAP_NOVEL_SUMMARY } })
+      const lease = await claim(f)
+      const tools = [askUserTool, novelCreateTool, planSaveTool]
+      const direction = { purpose: 'novel_direction', question: '你想写哪一种末日？', options: [{ label: '长期断电' }, { label: '冰期' }] }
+      const fields = { title: '漫长的停电', summary: '旧城区的幸存者互助求生。', tags: ['都市'] }
+      const signal = new AbortController().signal
+      await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+        model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+        tools: toOpenAITools(tools, f.spec.scope), toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false })),
+        protectedChapterIds: [], pinnedSkillVersions: [] },
+      snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+        messages: [{ role: 'user', content: prompt }, { role: 'assistant', content: null, toolCalls: [
+          { id: 'question-call', name: 'ask_user', arguments: JSON.stringify(direction) },
+          { id: 'guessed-create', name: 'novel_create', arguments: JSON.stringify(fields) },
+        ] }], successfulToolSignatures: [] } })
+      const waiting = await executeDurableToolStep(lease, signal)
+      if (waiting.kind !== 'waiting_question' || !waiting.requestId) throw new Error('Expected durable question')
+      const answer = { userId: f.userId, runId: f.runId, callId: 'question-call', requestId: waiting.requestId, answer: '长期断电' }
+      if (scenario === 'timeout') {
+        const request = await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { id: waiting.requestId } })
+        await prisma.agentExecutionOutbox.update({ where: { id: request.id }, data: { payload: {
+          ...(request.payload as Record<string, Prisma.InputJsonValue>), expiresAt: '2000-01-01T00:00:00.000Z',
+        } } })
+        await expect(resolveDurableQuestion(answer)).rejects.toMatchObject({ code: 'QUESTION_NOT_PENDING' })
+      } else {
+        expect(await resolveDurableQuestion(answer)).toEqual({ resolved: true })
+        expect(await executeDurableToolStep(lease, signal)).toMatchObject({ kind: 'tool', result: { display: { answer: '长期断电' } } })
+        const frame = (await loadExecutionState(f.userId, f.runId)).frame
+        expect(frame.state.messages.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'guessed-create', content: expect.stringContaining('未执行') })
+        await saveExecutionState(lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
+          snapshot: { ...frame.state, messages: [...frame.state.messages, { role: 'assistant', content: null, toolCalls: [
+            { id: 'confirmed-create', name: 'novel_create', arguments: JSON.stringify(fields) },
+            { id: 'premature-outline', name: 'plan_save', arguments: '{}' },
+          ] }] } })
+      }
+      expect(await runtimeExecutor.runReviewedDurableExecution(lease, signal)).toMatchObject({ kind: 'completed' })
+      const terminalText = scenario === 'timeout' ? QUESTION_TIMEOUT_NOTICE : '已保存《漫长的停电》的书名、简介和标签。要不要开始写大纲？'
+      const events = await publishDurableEvents(f.userId, f.runId, 200)
+      expect(events.filter(event => event.type === 'text.final' && event.text === terminalText)).toHaveLength(1)
+      expect(events.at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: terminalText })
+      expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, OR: [{ kind: 'provider' }, { action: 'plan_save' }] } })).toBe(0)
+      expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'novel_create' } })).toBe(scenario === 'timeout' ? 0 : 1)
+      const proof = await prisma.agentEffectReceipt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId, action: 'completion_finalize' } } })
+      expect(proof.result).toMatchObject({ evidence: { postconditionChecks: [scenario === 'timeout'
+        ? { code: 'NOVEL_METADATA_INITIALIZED', status: 'deferred', deferredBy: 'question_timeout', evidence: { status: 'incomplete' } }
+        : { code: 'NOVEL_METADATA_INITIALIZED', status: 'passed', evidence: { status: 'complete' } }] } })
+      expect(await prisma.novel.findUniqueOrThrow({ where: { id: f.novelId } })).toMatchObject(scenario === 'timeout'
+        ? { title: '未命名作品', summary: BOOTSTRAP_NOVEL_SUMMARY, tagNames: [] }
+        : { title: fields.title, summary: fields.summary, tagNames: fields.tags })
+    }, undefined, prompt, { novelInitializationProtocol: 2 })
   })
 })
 

@@ -123,7 +123,7 @@ export function getPendingApprovalCallIds(runId: string): string[] {
  * 提问信箱（ask_user 工具）：与审批信箱同构的挂起-唤醒模式。
  * - 工具 execute 内 waitForQuestionAnswer 挂起循环，等待作者作答
  * - POST /api/agent/runs/:runId/questions 调 resolveQuestionAnswer 唤醒
- * - 超时/停止时 answer 为 null，由工具把“未获回答”作为观察回填给模型自行继续
+ * - 超时和取消都没有回答；只有真正的超时可触发本轮直接收尾
  */
 
 export type QuestionAnswer = {
@@ -134,6 +134,7 @@ export type QuestionAnswer = {
 type PendingQuestion = {
   resolve: (result: QuestionAnswer) => void
   timer: NodeJS.Timeout
+  expiresAt: number
 }
 
 const pendingQuestionsByRun = new Map<string, Map<string, PendingQuestion>>()
@@ -165,11 +166,13 @@ export function waitForQuestionAnswer(
 
     const onAbort = () => settle({ answer: null, timedOut: false })
 
+    const expiresAt = Date.now() + timeoutMs
     const timer = setTimeout(() => settle({ answer: null, timedOut: true }), timeoutMs)
 
     pending.set(callId, {
       resolve: settle,
       timer,
+      expiresAt,
     })
 
     if (signal.aborted) {
@@ -185,6 +188,10 @@ export function resolveQuestionAnswer(runId: string, callId: string, answer: str
   const entry = pendingQuestionsByRun.get(runId)?.get(callId)
 
   if (!entry) {
+    return false
+  }
+  if (Date.now() >= entry.expiresAt) {
+    entry.resolve({ answer: null, timedOut: true })
     return false
   }
 

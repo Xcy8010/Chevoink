@@ -46,6 +46,7 @@ import {
   adminLoginByPhoneData,
   bindAdminPhoneData,
   findAdminByPhoneData,
+  getAdminAgentRunDetailsData,
   getAdminAgentSessionMessagesData,
   getAdminConversationMessagesData,
   getAdminCreationRecordsData,
@@ -734,9 +735,27 @@ router.get('/agent-sessions/:sessionId/messages', async (req: Request, res: Resp
     const payload = await getAdminAgentSessionMessagesData(req.params.sessionId, {
       before: typeof req.query.before === 'string' && req.query.before ? req.query.before : undefined,
       pageSize: parsePositiveInt(req.query.pageSize, 20),
+      replay: req.query.view === 'replay',
+      userId: typeof req.query.userId === 'string' && req.query.userId ? req.query.userId : undefined,
     })
     if (!payload) {
       res.status(404).json(buildError(requestId, 'NOT_FOUND', '会话不存在。'))
+      return
+    }
+    res.status(200).json(buildSuccess(requestId, payload))
+  } catch (error) {
+    sendRouteError(res, requestId, error)
+  }
+})
+
+router.get('/agent-sessions/:sessionId/runs/:runId', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try {
+    await requireAdmin(req)
+    const query = parseBody(z.object({ after: z.coerce.number().int().nonnegative().max(2_147_483_647).optional() }).strict(), req.query, '工具回执游标无效。')
+    const payload = await getAdminAgentRunDetailsData(req.params.sessionId, req.params.runId, query.after)
+    if (!payload) {
+      res.status(404).json(buildError(requestId, 'NOT_FOUND', '运行不存在。'))
       return
     }
     res.status(200).json(buildSuccess(requestId, payload))

@@ -1,4 +1,5 @@
 import type { Pagination } from './models.js'
+import type { AgentUIMessage } from './agent-events.js'
 
 /* ========================================================================== */
 /* 后台管理系统契约（方案 18）—— /api/admin/* 命名空间                            */
@@ -290,15 +291,30 @@ export type AdminAgentRunRow = {
   outputSummary: string | null
   errorMessage: string | null
   createdAt: string
+  startedAt?: string | null
   finishedAt: string | null
   usage: { promptTokens: number; completionTokens: number; totalTokens: number }
-  messages: Array<{
-    id: string
-    runId: string
-    role: 'user' | 'assistant'
-    parts: unknown[]
-    createdAt: string
-  }>
+  usageRecorded?: boolean
+  messages: AgentUIMessage[]
+}
+
+export type AdminAgentToolEvent = {
+  seq: number
+  type: 'tool.call' | 'tool.result'
+  at: string
+  toolName: string
+  callId: string
+  summary: string | null
+  failureCode: string | null
+  durationMs: number | null
+  outcome: 'dispatched' | 'success' | 'failed' | 'unanswered' | 'unknown'
+}
+
+export type AdminAgentRunDetailsPayload = {
+  models: string[]
+  creditsMilli: number | null
+  events: AdminAgentToolEvent[]
+  nextAfter: number | null
 }
 
 export type AdminAgentSessionMessagesPayload = {
@@ -310,6 +326,8 @@ export type AdminAgentSessionMessagesPayload = {
     createdAt: string
   }
   runs: AdminAgentRunRow[]
+  /** Durable history has a known source that has not entered the saved conversation. */
+  historyPending?: boolean
   /** 是否还有更早的 run（轮次分页） */
   hasMore: boolean
   /** 加载更早一轮时回传的游标（本页最早 run 的 id） */

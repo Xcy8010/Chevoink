@@ -3,7 +3,11 @@ import { volumeCreateTool } from '../../api/lib/agent/tools/structure-tools.js'
 import { beforeEach, expect, it, vi } from 'vitest'
 import type { Prisma } from '@prisma/client'
 import { novelCreateTool, novelUpdateMetaTool } from '../../api/lib/agent/tools/novel-tools.js'
-import { assertNovelMetadataIntent, readNovelInitializationCompletion } from '../../api/lib/agent/novel-initialization.js'
+import { assertNovelMetadataIntent, isEmptyNovelMetadata, readNovelInitializationCompletion } from '../../api/lib/agent/novel-initialization.js'
+import { enableAgentWritingScope } from '../../api/lib/agent/agent-writing-scope.js'
+import { BOOTSTRAP_NOVEL_SUMMARY } from '../../shared/contracts/novel-publish.js'
+import { toOpenAIToolPresentation } from '../../api/lib/agent/tool-schema.js'
+import { askUserTool } from '../../api/lib/agent/tools/interact-tools.js'
 import { buildTaskSpec, isNovelDirectionSetup, renderTaskSpec } from '../../api/lib/agent/task-spec.js'
 import { restrictToolsToTask } from '../../api/lib/agent/tool-authority.js'
 import { chapterWriteTool } from '../../api/lib/agent/tools/chapter-tools.js'
@@ -54,6 +58,57 @@ it.each(['首部占位', '普通新空作品'])('saves the actual approved title
   expect((await tool.execute(context('选择第一种方向，同意初始化。'), fields)).outcome).not.toBe('failed')
   expect(mocks.db.novel.update).toHaveBeenCalledExactlyOnceWith({ where: { id: 'n' }, data: { title: fields.title, displayTitle: fields.title, summary: fields.summary, tagNames: fields.tags } })
 })
+
+it('recognizes an authenticated direction choice independent of question phrasing and saves the placeholder in one write', async () => {
+  const prompt = '帮我创建一部末日生存类型的小说'
+  const spec = enableAgentWritingScope(buildTaskSpec({ runId: 'r', novelId: 'n', prompt, authorWritingProtocol: 2,
+    novelInitializationProtocol: 2, novelInitializationTarget: 'empty' }))
+  const placeholder = { ...empty, title: '未命名作品', summary: BOOTSTRAP_NOVEL_SUMMARY }
+  mocks.original.mockResolvedValue({ prompt, spec, sourceRunId: 'r', taskId: 'task' })
+  mocks.db.novel.findFirst.mockResolvedValue(placeholder)
+  expect(isEmptyNovelMetadata(placeholder)).toBe(true)
+  expect(isEmptyNovelMetadata({ ...placeholder, displayTitle: '作者已有的书名' })).toBe(false)
+  expect(renderTaskSpec(spec)).toContain('purpose=novel_direction')
+  expect(renderTaskSpec(spec)).toContain('要不要开始写大纲？')
+  expect(toOpenAIToolPresentation(askUserTool, spec.scope).parameters.required).toContain('purpose')
+  const choice = { ...who, question: '你想写哪一种末日？', answer: '长夜断电后的城市生存' }
+  const ctx = context()
+  ctx.authorQuestionAnswers?.set('q', choice)
+  await expect(novelUpdateMetaTool.execute(ctx, fields)).rejects.toMatchObject({ code: 'NOVEL_DIRECTION_REQUIRED' })
+  expect(mocks.db.novel.update).not.toHaveBeenCalled()
+  ctx.authorQuestionAnswers?.set('q', { ...choice, purpose: 'novel_direction' })
+  await expect(novelUpdateMetaTool.execute(ctx, fields)).resolves.toMatchObject({ summary: expect.any(String) })
+  expect(mocks.db.novel.update).toHaveBeenCalledExactlyOnceWith({ where: { id: 'n' },
+    data: { title: fields.title, displayTitle: fields.title, summary: fields.summary, tagNames: fields.tags } })
+})
+
+it('finishes only a placeholder rename proved by this setup and the current saved title', async () => {
+  const spec = buildTaskSpec({ runId: 'r', novelId: 'n', prompt: directionPrompt,
+    novelInitializationProtocol: 2, novelInitializationTarget: 'empty' })
+  mocks.original.mockResolvedValue({ prompt: directionPrompt, spec, sourceRunId: 'r', taskId: 'task' })
+  const renamed = { ...empty, title: '此前改了一半', displayTitle: '此前改了一半', summary: BOOTSTRAP_NOVEL_SUMMARY }
+  mocks.db.novel.findFirst.mockResolvedValue(renamed)
+  const ctx = context()
+  ctx.authorQuestionAnswers?.set('q', { ...who, question: '喜欢哪条线？', answer: '幻想冒险', purpose: 'novel_direction' })
+  await expect(novelUpdateMetaTool.execute(ctx, fields)).rejects.toMatchObject({ code: 'NOVEL_SETUP_AUTHORITY_REQUIRED' })
+  const rename = { type: 'tool-call', toolName: 'novel_rename', status: 'success', args: { title: renamed.title },
+    snapshot: { target: 'novel', targetId: 'another-novel', field: 'title', previousValue: '未命名作品' } }
+  mocks.db.agentMessage.findMany.mockResolvedValue([{ parts: [rename] }])
+  await expect(novelUpdateMetaTool.execute(ctx, fields)).rejects.toMatchObject({ code: 'NOVEL_SETUP_AUTHORITY_REQUIRED' })
+  mocks.db.agentMessage.findMany.mockResolvedValue([{ parts: [{ ...rename, snapshot: { ...rename.snapshot, targetId: who.novelId } }] }])
+  await expect(novelUpdateMetaTool.execute(ctx, fields)).resolves.toMatchObject({ summary: expect.any(String) })
+  expect(mocks.db.novel.update).toHaveBeenCalledOnce()
+})
+
+it('reuses a structured same-task answer in saved history without treating unrelated answers as direction approval', async () => {
+  const spec = { ...fresh(directionPrompt), scope: { ...fresh(directionPrompt).scope, novelInitializationProtocol: 2 } }
+  mocks.original.mockResolvedValue({ prompt: directionPrompt, spec, sourceRunId: 'r', taskId: 'task' })
+  const direction = { type: 'tool-call', toolName: 'ask_user', status: 'success', args: { purpose: 'novel_direction' },
+    display: { kind: 'question', question: '喜欢哪一项？', answer: '轻松的幻想冒险' } }
+  mocks.db.agentMessage.findMany.mockResolvedValue([{ parts: [direction, { ...direction, args: {}, display: { ...direction.display, answer: '只讨论配角' } }] }])
+  await expect(novelUpdateMetaTool.execute(context(), fields)).resolves.toMatchObject({ summary: expect.any(String) })
+  expect(mocks.db.novel.update).toHaveBeenCalledOnce()
+})
 it.each(['只讨论', '先别初始化', '都不满意'])('does not save after the real author answer %s', async answer => {
   await expect(novelUpdateMetaTool.execute(context(answer), fields)).rejects.toMatchObject({ code: 'NOVEL_DIRECTION_REQUIRED' })
   expect(mocks.db.novel.update).not.toHaveBeenCalled()
@@ -80,7 +135,9 @@ it.each(['text-only', 'saved', 'different-current-value', 'declined'] as const)(
     ...(scenario === 'declined' ? { display: { kind: 'question', question, answer: '先别初始化，只讨论。' } } : {}) }] }])
   const result = await readNovelInitializationCompletion(mocks.db as unknown as Prisma.TransactionClient, who)
   expect(result.status).toBe(scenario === 'saved' ? 'complete' : scenario === 'declined' ? 'declined' : 'incomplete')
-  expect(mocks.db.agentMessage.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { runId: { in: ['r'] }, role: 'assistant' } }))
+  expect(mocks.db.agentMessage.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: {
+    runId: { in: ['r'] }, role: 'assistant', run: { userId: who.userId, novelId: who.novelId },
+  } }))
 })
 it('does not turn a tag-only request into a full initialization obligation or rewrite old contracts', () => {
   expect(fresh('只更新当前作品标签。').postconditions.some(condition => condition.code === 'NOVEL_METADATA_INITIALIZED')).toBe(false)

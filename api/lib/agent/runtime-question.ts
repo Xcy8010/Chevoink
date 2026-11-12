@@ -3,26 +3,36 @@ import { z } from 'zod'
 import { env } from '../../config/env.js'
 import { databaseNow, lockRunRoot, runtimeError, runtimeJson, runtimeTransaction } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
-import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
+import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionStateInTransaction } from './runtime-state.js'
 import { argumentNormalizationSchema, prepareToolCursorOperation, type ToolExecutionCursor } from './runtime-tool-cursor.js'
-import { commitOperationEffectInTransaction } from './runtime-operations.js'
+import { commitOperationEffectInTransaction, recordToolFailure } from './runtime-operations.js'
 import { reduceExecutionReceipt } from './runtime-reducer.js'
 import { normalizeToolInput } from './tools/input-validation.js'
 import type { AgentTool, ToolContext, ToolResult } from './tools/types.js'
 import { assertGoalRevisionFence, readGoalExecution } from './goal-fence.js'
 import { recordWritingClarification } from './writing-clarification.js'
+import { DIRECTION_PURPOSE_REQUIRED, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
+import { readTaskBudgetInTransaction } from './runtime-budget.js'
 
-export const durableQuestionSchema = z.object({ version: z.literal(1), operationId: z.string(), callId: z.string(),
-  question: z.string(), options: z.array(z.object({ label: z.string(), detail: z.string().optional() })), expiresAt: z.string().datetime() }).strict()
+export const durableQuestionContent = z.object({ question: z.string(), options: z.array(z.object({ label: z.string(), detail: z.string().optional() })),
+  purpose: z.literal('novel_direction').optional() })
+export const durableQuestionSchema = durableQuestionContent.extend({ version: z.literal(1), operationId: z.string(), callId: z.string(),
+  expiresAt: z.string().datetime() }).strict()
 const answerSchema = z.object({ requestId: z.string(), requestHash: z.string(), answer: z.string(), userId: z.string() }).strict()
 
 export async function executeDurableQuestion(lease: RunLeaseToken, cursor: ToolExecutionCursor, ctx: ToolContext, tool: AgentTool, args: Record<string, unknown>) {
   const normalize = (raw: unknown) => tool.parameters.parse(normalizeToolInput(tool, raw))
-  const effective = z.object({ question: z.string(), options: z.array(z.object({ label: z.string(), detail: z.string().optional() })) }).parse(normalize(args))
+  const effective = durableQuestionContent.parse(normalize(args))
   const source = await withRunLease(lease, tx => readExecutionFrame(tx, lease.taskRootId, cursor.expectedRevision))
   const prepared = await prepareToolCursorOperation(lease, cursor, { key: `exec:${source.state.nextOperationSequence}`,
     action: 'ask_user', callId: ctx.callId, targetId: lease.taskRootId, effectDomain: 'read', normalize, effectiveArgs: effective,
     operationInput: runtimeJson({ callId: ctx.callId, args: effective }).value })
+  if (ctx.writingScope?.novelDirectionRequired && effective.purpose !== 'novel_direction') {
+    const result = { output: DIRECTION_PURPOSE_REQUIRED, summary: '提问未发送' }
+    await recordToolFailure(lease, { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: 'NOVEL_DIRECTION_PURPOSE_REQUIRED', ...result })
+    await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
+    return { kind: 'tool' as const, result: { ...result, outcome: 'failed' as const } }
+  }
   const waiting = await withRunLease(lease, async tx => {
     // Answer admission and timeout completion serialize on this same root lock.
     // Never carry a timeout decision into a later effect transaction: a valid
@@ -34,8 +44,9 @@ export async function executeDurableQuestion(lease: RunLeaseToken, cursor: ToolE
           { callId: ctx.callId, ...effective, answer, source: 'durable_question', requestId: request!.id })
         return runtimeJson({ toolResult: {
         ...(clarification ? { semanticTransition: clarification } : {}),
-        output, summary: answer === null ? '提问未获回答' : '作者已回答',
-        display: { kind: 'question', ...effective, ...(answer === null ? { unanswered: true } : { answer }),
+        output, summary: answer === null ? '提问超时，未获回答' : '作者已回答',
+        ...(answer === null ? { questionTimedOut: true } : {}),
+        display: { kind: 'question', question: effective.question, options: effective.options, ...(answer === null ? { unanswered: true } : { answer }),
           ...(clarification ? { scopeResolution: 'accepted' } : {}) },
       } }).value
       }) })
@@ -49,7 +60,7 @@ export async function executeDurableQuestion(lease: RunLeaseToken, cursor: ToolE
     }
     const question = durableQuestionSchema.parse(request.payload)
     if (request.taskRootId !== lease.taskRootId || request.type !== 'question.requested' || request.operationId !== prepared.operation.id || question.operationId !== prepared.operation.id
-      || question.callId !== ctx.callId || runtimeJson({ question: question.question, options: question.options }).hash !== runtimeJson(effective).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原提问内容已损坏。')
+      || question.callId !== ctx.callId || runtimeJson(durableQuestionContent.parse(question)).hash !== runtimeJson(effective).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原提问内容已损坏。')
     const response = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `question-answer:${request.id}` } })
     if (response) {
       const answer = answerSchema.parse(response.payload)
@@ -57,7 +68,7 @@ export async function executeDurableQuestion(lease: RunLeaseToken, cursor: ToolE
         || answer.requestHash !== runtimeJson(request.payload).hash || answer.userId !== lease.userId) return runtimeError('RUNTIME_RECEIPT_INVALID', '原提问回答回执不匹配。')
       return finish(`作者的回答：${answer.answer}`, answer.answer)
     }
-    if ((await databaseNow(tx)).getTime() >= Date.parse(question.expiresAt)) return finish('提问已超时。仅继续不依赖该决定且已获授权的工作；不能把未回答当作批准。', null)
+    if ((await databaseNow(tx)).getTime() >= Date.parse(question.expiresAt)) return finish(QUESTION_TIMEOUT_NOTICE, null)
     return { requestId: request.id }
   })
   if ('requestId' in waiting) return { kind: 'waiting_question' as const, requestId: waiting.requestId }
@@ -74,6 +85,25 @@ export async function validateHistoricalQuestionReceipt(lease: RunLeaseToken) {
     const { frame } = await readExecutionStateInTransaction(tx, lease.taskRootId)
     if (frame.state.phase !== 'idle') return null
     const messages = frame.state.messages
+    const last = messages.at(-1)
+    if (last?.role === 'assistant' && last.localCompletion) {
+      // A timeout is terminal for its run. Only an admitted author Resume can
+      // supersede this saved candidate, and never while an effect is unknown.
+      if (last.localCompletion.kind === 'question_timeout') {
+        const resumed = await tx.agentExecutionOutbox.findFirst({ where: { taskRootId: lease.taskRootId, runId: lease.runId, type: 'run.resume.queued' } })
+        const source = z.object({ revision: z.number(), snapshotHash: z.string(), runId: z.string(), pauseEventId: z.string() }).safeParse(resumed?.payload)
+        if (source.success && resumed?.eventKey === `resume:${source.data.pauseEventId}` && source.data.runId === lease.runId
+          && source.data.revision === frame.revision && source.data.snapshotHash === frame.snapshotHash
+          && !await tx.agentOperation.count({ where: { taskRootId: lease.taskRootId, status: { in: ['prepared', 'dispatched', 'unknown'] } } })
+          && (await readTaskBudgetInTransaction(tx, lease.taskRootId)).unresolvedAttempts === 0n) {
+          await saveExecutionStateInTransaction(tx, lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
+            snapshot: { ...frame.state, messages: [...messages, { role: 'system',
+              content: '作者已主动继续原任务。原提问已超时且没有回答；请核对已保存的进度，需要作者决定时重新提问。' }] } })
+          return null
+        }
+      }
+      return frame
+    }
     let at = messages.length - 1
     while (at >= 0 && messages[at].role === 'tool') at--
     const assistant = messages[at]
@@ -125,7 +155,7 @@ export async function resolveDurableQuestion(input: { userId: string; runId: str
     const original = z.object({ input: z.object({ callId: z.string(), args: z.unknown() }) }).safeParse(operation?.inputSnapshot)
     if (!operation || !original.success || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash
       || original.data.input.callId !== captured.callId
-      || runtimeJson(original.data.input.args).hash !== runtimeJson({ question: question.data.question, options: question.data.options }).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '提问与原工具请求不一致，不能保存回答。')
+      || runtimeJson(original.data.input.args).hash !== runtimeJson(durableQuestionContent.parse(question.data)).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '提问与原工具请求不一致，不能保存回答。')
     const payload = { requestId: request.id, requestHash: runtimeJson(request.payload).hash, answer: captured.answer, userId: captured.userId }
     const existing = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `question-answer:${request.id}` } })
     if (existing) {

@@ -71,6 +71,10 @@ function activitySummary(part: ActivityCall, runActive: boolean, titles?: Readon
   const review = presentation.phase === 'review'
   if (part.importWaiting && part.status === 'running' && runActive) return '等待你确认导入'
   if (part.toolName === 'ask_user' && part.status === 'running' && runActive) return '等待你回答'
+  if (display?.kind === 'question') {
+    if (display.unanswered) return '提问未获回答'
+    if (display.answer) return '已收到作者回答'
+  }
   if (part.status === 'running') {
     if (!runActive) return `${action}未完成`
     if (part.preparing) return `正在准备 · ${detail ? action : presentation.label}`
@@ -145,7 +149,7 @@ function savedReadDetail(part: ActivityCall) {
 }
 
 function ProjectSearchLocations({ display, onOpen }: {
-  display: Extract<AgentToolDisplayPayload, { kind: 'projectSearch' }>; onOpen: (chapterId: string) => void
+  display: Extract<AgentToolDisplayPayload, { kind: 'projectSearch' }>; onOpen?: (chapterId: string) => void
 }) {
   if (!display.matches.length) return null
   const byChapter = new Map<string, typeof display.matches>()
@@ -157,13 +161,16 @@ function ProjectSearchLocations({ display, onOpen }: {
   return <ActivityScrollArea detail><ul className="space-y-0.5 text-xs leading-5 text-[var(--text-secondary)]">
     {[...byChapter.values()].map(([hit, ...others]) => <li key={hit.chapterId} className="min-w-0 break-words">
       {hit.volumeTitle ? <span>{hit.volumeTitle} · </span> : null}
-      <button type="button" onClick={() => onOpen(hit.chapterId)} className="text-[var(--text-primary)] underline-offset-2 hover:underline focus-visible:underline">《{hit.chapterTitle}》</button>
+      {onOpen ? <button type="button" onClick={() => onOpen(hit.chapterId)} className="text-[var(--text-primary)] underline-offset-2 hover:underline focus-visible:underline">《{hit.chapterTitle}》</button>
+        : <span className="text-[var(--text-primary)]">《{hit.chapterTitle}》</span>}
       <span> · {hit.field === 'content' ? `正文第 ${hit.offset + 1} 字` : hit.field === 'summary' ? '章节摘要' : '章节标题'}{others.length ? '等' : ''}</span>
     </li>)}
   </ul></ActivityScrollArea>
 }
 
-const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles }: { part: ActivityCall; runActive: boolean; titles?: ReadonlyMap<string, string> }) {
+const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles, readOnly }: {
+  part: ActivityCall; runActive: boolean; titles?: ReadonlyMap<string, string>; readOnly?: boolean
+}) {
   const [open, setOpen] = useState(false)
   const detailsId = useId()
   const navigate = useAgentStore(state => state.requestToolNavigation)
@@ -173,25 +180,25 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles }:
   const chapterId = activityChapterId(part)
   const planId = part.toolName === 'plan_read' && !display ? (part.args as { planId?: unknown } | null)?.planId : undefined
   const navigable = Boolean(chapterId) || typeof planId === 'string' || display?.kind === 'planFile' || display?.kind === 'planDiff' || display?.kind === 'planRename'
-  const openTarget = navigable ? () => navigate(part.toolName, chapterId ? { chapterId } : part.args, display) : undefined
+  const openTarget = !readOnly && navigable ? () => navigate(part.toolName, chapterId ? { chapterId } : part.args, display) : undefined
   const label = savedReadDetail(part) ?? activitySummary(part, runActive, titles, true)
-  const memory = part.status === 'success' ? getMemorySpotlight(part.toolName, part.args) : null
+  const memory = !readOnly && part.status === 'success' ? getMemorySpotlight(part.toolName, part.args) : null
   const hasResultTarget = display?.kind === 'chapterDiff' || display?.kind === 'chapterRef' || display?.kind === 'planFile' || display?.kind === 'planDiff' || display?.kind === 'planRename'
   const collapsible = display?.kind === 'projectSearch' && new Set(display.matches.map(hit => hit.chapterId)).size > 4
     || display?.kind === 'readSources' && display.items.length > 4
     || display?.kind === 'subagentReport' && (display.report.length > 180 || display.report.split('\n').length > 4)
   const result = display ? <div className="agent-activity-detail min-w-0">
-    {display.kind === 'projectSearch' ? <ProjectSearchLocations display={display} onOpen={chapterId => navigate(part.toolName, { chapterId })} />
+    {display.kind === 'projectSearch' ? <ProjectSearchLocations display={display} onOpen={readOnly ? undefined : chapterId => navigate(part.toolName, { chapterId })} />
       : display.kind === 'readSources' ? <ActivityScrollArea detail><ul className="space-y-0.5 text-xs leading-5 text-[var(--text-secondary)]">
         {display.items.map(({ title, target }, index) => <li key={target?.id ?? index} className="min-w-0 break-words">
-          {target ? <button type="button" className="text-[var(--text-primary)] underline-offset-2 hover:underline focus-visible:underline"
+          {target && !readOnly ? <button type="button" className="text-[var(--text-primary)] underline-offset-2 hover:underline focus-visible:underline"
             onClick={() => navigate(part.toolName, target.kind === 'chapter' ? { chapterId: target.id } : { planId: target.id })}>《{title}》</button>
             : <p className="text-[var(--text-primary)]">{title}</p>}
         </li>)}
       </ul></ActivityScrollArea>
         : display.kind === 'subagentReport'
           ? <ActivityScrollArea detail><p className="whitespace-pre-wrap break-words text-xs leading-5 text-[var(--text-secondary)]">{projectAgentAuthorText(display.report)}</p></ActivityScrollArea>
-          : <ToolDisplayRenderer display={display} onNavigateTarget={openTarget} authorActivity />}
+          : <ToolDisplayRenderer display={display} onNavigateTarget={openTarget} authorActivity readOnly={readOnly} />}
   </div> : null
   return <li className="min-w-0 font-normal" data-activity-tool={part.toolName}>
     <div className="agent-activity-line min-h-7 items-start py-1 text-xs leading-5 text-[var(--text-secondary)]">
@@ -209,8 +216,8 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles }:
   </li>
 })
 
-const ActivityRow = memo(function ActivityRow({ group, runActive, active, workingLabel, titles }: {
-  group?: ActivityGroup; runActive: boolean; active: boolean; workingLabel?: string; titles?: ReadonlyMap<string, string>
+const ActivityRow = memo(function ActivityRow({ group, runActive, active, workingLabel, titles, readOnly }: {
+  group?: ActivityGroup; runActive: boolean; active: boolean; workingLabel?: string; titles?: ReadonlyMap<string, string>; readOnly?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const detailsId = useId()
@@ -263,11 +270,11 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
         </span>
       </span>
     </button>
-    {importWaiting?.importWaiting ? <a className="ml-6 text-xs underline" href={importWaiting.importWaiting.url}>核对原文并确认导入</a> : null}
+    {!readOnly && importWaiting?.importWaiting ? <a className="ml-6 text-xs underline" href={importWaiting.importWaiting.url}>核对原文并确认导入</a> : null}
     {group ? <AgentProcessRegion open={open} id={detailsId}>
       <ActivityScrollArea><ul>
         {calls.flatMap(call => [call, ...(group.childrenByCall.get(call.callId) ?? [])]).map(call =>
-          <ActivityDetail key={JSON.stringify([call.subagentCallId ?? null, call.callId])} part={call} runActive={runActive} titles={titles} />)}
+          <ActivityDetail key={JSON.stringify([call.subagentCallId ?? null, call.callId])} part={call} runActive={runActive} titles={titles} readOnly={readOnly} />)}
       </ul></ActivityScrollArea>
     </AgentProcessRegion> : null}
   </div>
@@ -291,7 +298,7 @@ export function AuthorProgressText({ text, className }: { text: string; classNam
 }
 
 export const AuthorActivityParts = memo(function AuthorActivityParts({
-  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, workingLabel, workingGroupId, revealText, onTextRevealed, activityChapterTitles,
+  parts, messageId, groups, activeGroupId, runActive, processOpen, collapseText = false, workingLabel, workingGroupId, revealText, onTextRevealed, activityChapterTitles, readOnly,
 }: {
   parts: AgentMessagePart[]
   messageId: string
@@ -305,6 +312,7 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
   revealText?: string
   onTextRevealed?: (messageId: string, text: string) => void
   activityChapterTitles?: ReadonlyMap<string, string>
+  readOnly?: boolean
 }) {
   const authorParts = useMemo(() => projectAgentAuthorParts(parts.filter(part => part.type !== 'reasoning'), false, { includePreparing: runActive }), [parts, runActive])
   const localGroups = useMemo(() => groups ?? projectActivityGroups([{ id: messageId, runId: '', role: 'assistant', parts }]).byMessage.get(messageId), [groups, messageId, parts])
@@ -337,7 +345,7 @@ export const AuthorActivityParts = memo(function AuthorActivityParts({
       rendered.add(group.id)
       return <AgentProcessRegion key={key} open={processOpen ?? true}>
         {group.transition ? <AuthorProgressText text={group.transition} className="mb-3" /> : null}
-        <ActivityRow key="activity" group={group} runActive={runActive} active={activeGroupId === group.id} titles={activityChapterTitles}
+        <ActivityRow key="activity" group={group} runActive={runActive} active={activeGroupId === group.id} titles={activityChapterTitles} readOnly={readOnly}
           workingLabel={liveGroupId === group.id ? workingLabel : undefined} />
       </AgentProcessRegion>
   })

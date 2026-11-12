@@ -1,6 +1,7 @@
 import type {
   AdminAgentEvalResults,
   AdminAgentEvalSuiteRow,
+  AdminAgentRunDetailsPayload,
   AdminAgentSessionMessagesPayload,
   AdminAgent3OperationsMetrics,
   AdminAuditLogRow,
@@ -313,10 +314,16 @@ export function getAdminCreationRecordsIndex(
 /** 单个会话聊天记录：按 run 轮次游标分页，before 传本页最早 run id 加载更早一轮 */
 export function getAdminAgentSessionMessages(
   sessionId: string,
-  options?: { before?: string; pageSize?: number },
+  options?: { before?: string; pageSize?: number; userId?: string },
 ): Promise<AdminAgentSessionMessagesPayload> {
   return requestJson<AdminAgentSessionMessagesPayload>(
-    `/api/admin/agent-sessions/${sessionId}/messages${buildQueryString({ before: options?.before, pageSize: options?.pageSize })}`,
+    `/api/admin/agent-sessions/${encodeURIComponent(sessionId)}/messages${buildQueryString({ view: 'replay', userId: options?.userId, before: options?.before, pageSize: options?.pageSize })}`,
+  )
+}
+
+export function getAdminAgentRunDetails(sessionId: string, runId: string, after?: number): Promise<AdminAgentRunDetailsPayload> {
+  return requestJson<AdminAgentRunDetailsPayload>(
+    `/api/admin/agent-sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}${buildQueryString({ after })}`,
   )
 }
 

@@ -1,6 +1,7 @@
 import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { freezeWritingScope, readWritingScope } from './writing-scope.js'
 import { enableAgentWritingScope } from './agent-writing-scope.js'
+import { isEmptyNovelMetadata } from './novel-initialization.js'
 import { isInternalAgentArtifact } from './artifact-visibility.js'
 import { syncBuiltinSkillCatalog } from './skills/service.js'
 import { readAuthorEnded } from './author-ended.js'
@@ -587,9 +588,8 @@ export async function startLoopRunLocked(
         // historical v1 HTTP envelope cannot acquire today's paid phases.
         ...(!options.goal || freshGoal?.continuityReportProtocol === 5 ? { continuityReportProtocol: 5 as const } : {}),
         terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2,
-        researchAdmission, researchNavigationAdmission: researchAdmission, networkAdmission, authorWritingProtocol: 2, novelInitializationProtocol: 1, novelInitializationTarget: manuscript.chapterCount === 0 && manuscript.wordCount === 0
-          && (!manuscript.summary.trim() || !manuscript.displayTitle?.trim() && manuscript.summary === '先创建一部作品，再继续完善简介、章节和封面。')
-          && manuscript.tagNames.length === 0 ? 'empty' : 'existing', volumeCreationProtocol: 1, volumeCreateIntent, creativeFreedom, qualityMode: input.qualityMode })
+        researchAdmission, researchNavigationAdmission: researchAdmission, networkAdmission, authorWritingProtocol: 2, novelInitializationProtocol: 2,
+        novelInitializationTarget: isEmptyNovelMetadata(manuscript) ? 'empty' : 'existing', volumeCreationProtocol: 1, volumeCreateIntent, creativeFreedom, qualityMode: input.qualityMode })
       if (input.agentWritingProtocol === 1 && options.humanOrigin === 'http' && !options.goal && !session.spawnedFromRunId
         && (input.agentProfile ?? 'orchestrator') === 'orchestrator') {
         if (input.mode !== 'build') throw new DataAccessError(400, 'INVALID_ARGUMENTS', '正文任务解释只适用于创作模式。')

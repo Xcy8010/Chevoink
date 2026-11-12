@@ -251,13 +251,15 @@ async function refreshDurableGoalModel(token: RunLeaseToken) {
 export async function executeDurableStep(token: RunLeaseToken, signal: AbortSignal) {
   const lease = { ...token }
   signal.throwIfAborted()
-  await validateHistoricalQuestionReceipt(lease)
+  const localCompletion = await validateHistoricalQuestionReceipt(lease)
+  if (localCompletion && (lease.parent || !await consumeDurableSteering(lease))) return { kind: 'completion_review' as const, frame: localCompletion,
+    evidence: await collectDurableCompletionEvidence(lease, { expectedRevision: localCompletion.revision, expectedHash: localCompletion.snapshotHash }) }
   const importBoundary = await readDurableImportBoundary(lease)
   if (importBoundary) return importBoundary
   // Goal continuations carry the author's real steering message in AgentMessage;
   // append it to the immutable execution frame only once, at an idle boundary.
   if (!lease.parent) {
-    await consumeDurableSteering(lease)
+    if (!localCompletion) await consumeDurableSteering(lease)
     await consumeDurableGoalConsent(lease)
     await consumeDurableConfigurationConsent(lease)
   }
@@ -420,7 +422,9 @@ export async function runReviewedDurableExecution(token: RunLeaseToken, signal: 
       const requestId = step.kind === 'waiting_question' ? step.requestId : step.approvalId
       if (!requestId) return runtimeError('RUNTIME_RECEIPT_INVALID', '等待状态缺少原请求身份。')
       const resolved = await waitForDurableDecision(lease, signal, { kind: step.kind, requestId })
-      if (!resolved) return step
+      if (!resolved && (step.kind === 'waiting_approval' || lease.parent)) return step
+      // Reenter the same question operation once to consume its saved answer
+      // or deadline under the existing root lock before any new dispatch.
       continue
     }
     if (step.kind !== 'completion_review') return step

@@ -197,6 +197,7 @@ vi.mock('../../api/lib/prisma.js', () => {
   chapterQualityReport: { findFirst: vi.fn(async () => null) },
   agentArtifact: { findMany: vi.fn(async () => []), findFirst: vi.fn(async () => null) },
   agentOperation: { count: vi.fn(async () => 0) },
+  agentEffectReceipt: { findMany: vi.fn(async () => []) },
   agentSubtaskRun: { count: vi.fn(async () => 0) },
   agentSession: { update: vi.fn(async () => ({})), findUnique: vi.fn(async () => null),
     findFirst: vi.fn(async (input: Query) => matches({ id: 'session', userId: 'user', novelId: 'novel' }, input.where) ? { spawnedFromRunId: null, spawnedFromSessionId: null } : null) },
@@ -4829,6 +4830,111 @@ describe('author-directed task ending in the real execution loop', () => {
     expect(persisted.find(part => part.type === 'tool-call' && part.callId === 'original-question')).toMatchObject({
       status: 'success', display: { kind: 'question', unanswered: true },
     })
+  })
+  it('ends the novel setup after a real timeout without a second model request or writes', async () => {
+    const prompt = '帮我创建一部末日生存类型的小说'
+    mocks.currentOriginal = { prompt, taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', prompt,
+      novelInitializationProtocol: 2, novelInitializationTarget: 'empty' }) }
+    const ask = tool('ask_user', async () => ({ questionTimedOut: true, output: '提问已超时', summary: '提问超时，未获回答',
+      display: { kind: 'question', question: '你想写哪一种末日？', options: [{ label: '长期断电' }, { label: '冰期' }], unanswered: true } }))
+    const write = tool('novel_update_meta', async () => { throw new Error('Do not write after a question timeout') }, false)
+    mocks.tools = [ask, write]
+    queue(response('', [call('direction', 'ask_user', '{"purpose":"novel_direction"}'), call('pre-answer-save', 'novel_update_meta')], 31))
+    await run(prompt)
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(ask.execute).toHaveBeenCalledOnce()
+    expect(write.execute).not.toHaveBeenCalled()
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', errorMessage: null, currentTurn: 1, usage: { totalTokens: 31 } })
+    expect(events().filter(event => event.type === 'text.final')).toEqual([
+      expect.objectContaining({ type: 'text.final', text: expect.stringContaining('提问已超时，本轮已结束') }),
+    ])
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    const saved = mocks.persist.mock.calls as unknown as Array<[{ create?: { parts?: AgentMessagePart[] } }]>
+    expect(saved.some(([entry]) => entry.create?.parts?.some(part => part.type === 'tool-call' && part.callId === 'direction'))).toBe(true)
+  })
+  it('reports omitted direction purpose before showing a question to the author', async () => {
+    const prompt = '帮我创建一部末日生存类型的小说'
+    mocks.currentOriginal = { prompt, taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', prompt,
+      novelInitializationProtocol: 2, novelInitializationTarget: 'empty' }) }
+    const question = { question: '你想写哪一种末日？', options: [{ label: '长期断电' }, { label: '冰期' }] }
+    const ask = tool('ask_user', async () => ({ questionTimedOut: true, output: '提问已超时',
+      display: { kind: 'question', ...question, unanswered: true } }))
+    mocks.tools = [ask]
+    queue(response('', [call('untyped', 'ask_user', JSON.stringify(question))]),
+      response('', [call('direction', 'ask_user', JSON.stringify({ ...question, purpose: 'novel_direction' }))]))
+    await run(prompt)
+    expect(ask.execute).toHaveBeenCalledOnce()
+    expect(events().find(event => event.type === 'tool.call' && event.callId === 'untyped')).toMatchObject({ args: null })
+    expect(events().find(event => event.type === 'tool.result' && event.callId === 'untyped')).toMatchObject({ ok: false, failureCode: 'NOVEL_DIRECTION_PURPOSE_REQUIRED' })
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+  })
+
+  it('waits for the actual direction before composing metadata and finishes with the outline invitation', async () => {
+    const { prisma } = await import('../../api/lib/prisma.js')
+    const prompt = '帮我创建一部末日生存类型的小说'
+    mocks.currentOriginal = { prompt, taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', prompt,
+      novelInitializationProtocol: 2, novelInitializationTarget: 'empty' }) }
+    const title = '漫长的停电'
+    const fields = { title, summary: '旧城区的幸存者互助求生。', tags: ['都市'] }
+    const args = JSON.stringify(fields)
+    const ask = tool('ask_user', async () => ({ output: '作者的回答：长期断电',
+      display: { kind: 'question', question: '你想写哪一种末日？', options: [{ label: '长期断电' }, { label: '冰期' }], answer: '长期断电' } }))
+    const save = tool('novel_update_meta', async () => ({ output: '书名、简介和标签已保存' }), false)
+    const outline = tool('plan_save', async () => { throw new Error('Wait for the next author request before writing an outline') }, false)
+    mocks.tools = [ask, save, outline]
+    const novels = vi.mocked(prisma.novel.findFirst), previousNovel = novels.getMockImplementation()!
+    const messages = vi.mocked(prisma.agentMessage.findMany), previousMessages = messages.getMockImplementation()!
+    novels.mockImplementation(async input => save.execute && vi.mocked(save.execute).mock.calls.length
+      ? { ...await previousNovel(input), ...fields, displayTitle: title, tagNames: fields.tags } as Awaited<ReturnType<typeof prisma.novel.findFirst>>
+      : previousNovel(input))
+    messages.mockImplementation(async input => input?.where?.role === 'assistant'
+      ? (mocks.persist.mock.calls as unknown as Array<[{ create?: { parts?: AgentMessagePart[] } }]>).flatMap(([entry]) => entry.create?.parts ? [{ parts: entry.create.parts }] : []) as Awaited<ReturnType<typeof prisma.agentMessage.findMany>>
+      : previousMessages(input))
+    try {
+      queue(response('', [call('direction', 'ask_user', '{"purpose":"novel_direction"}'), call('guessed-save', 'novel_update_meta', args)]),
+        response('', [call('confirmed-save', 'novel_update_meta', args), call('premature-outline', 'plan_save')]))
+      await run(prompt)
+      expect(mocks.chat).toHaveBeenCalledTimes(2)
+      expect(save.execute).toHaveBeenCalledOnce()
+      expect(outline.execute).not.toHaveBeenCalled()
+      expect(events().find(event => event.type === 'tool.call' && event.callId === 'guessed-save')).toBeUndefined()
+      expect(events().filter(event => event.type === 'text.final')).toEqual([
+        expect.objectContaining({ type: 'text.final', text: `已保存《${title}》的书名、简介和标签。要不要开始写大纲？` }),
+      ])
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    } finally {
+      novels.mockImplementation(previousNovel)
+      messages.mockImplementation(previousMessages)
+    }
+  })
+
+  it.each(['no-progress', 'authority-denial'] as const)('ends incomplete novel setup without repeating the same completion reminder: %s', async scenario => {
+    const { prisma } = await import('../../api/lib/prisma.js')
+    const prompt = '帮我创建一部末日生存类型的小说'
+    mocks.currentOriginal = { prompt, taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', prompt,
+      novelInitializationProtocol: 2, novelInitializationTarget: 'empty' }) }
+    const novels = vi.mocked(prisma.novel.findFirst), previous = novels.getMockImplementation()!
+    novels.mockImplementation(async input => {
+      const novel = await previous(input)
+      return novel ? { ...novel, title: '未命名作品', displayTitle: null, summary: '', tagNames: [] } : null
+    })
+    try {
+      const incomplete = response('已经全部保存完毕。')
+      if (scenario === 'authority-denial') {
+        const blocked = tool('novel_update_meta', async () => { throw new DataAccessError(409, 'NOVEL_SETUP_AUTHORITY_REQUIRED', '当前状态下不能保存作品信息') }, false)
+        mocks.tools = [blocked]
+        queue(response('', [call('failed-save', 'novel_update_meta')]), incomplete)
+      } else queue(incomplete, incomplete)
+      await run(prompt)
+      expect(mocks.chat).toHaveBeenCalledTimes(2)
+      expect(events().filter(event => event.type === 'text.final' && event.text)).toEqual([
+        expect.objectContaining({ text: expect.stringContaining('书名、简介、标签没有保存') }),
+      ])
+      expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'failed' })
+      expect(mocks.runs.get('run')).toMatchObject({ status: 'failed' })
+    } finally {
+      novels.mockImplementation(previous)
+    }
   })
   function answerTool(answer: string) {
     return tool('ask_user', async () => ({ output: `作者的回答：${answer}`, display: { kind: 'question', question: '如何处理剩余工作？', options: [{ label: '继续' }, { label: '结束' }], answer } }))

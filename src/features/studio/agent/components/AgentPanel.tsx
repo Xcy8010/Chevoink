@@ -5,7 +5,6 @@ import {
   CircleAlert,
   CircleCheck,
   Copy,
-  FileText,
   GitBranch,
   History,
   LoaderCircle,
@@ -97,6 +96,7 @@ import { AgentGoalBar } from './AgentGoalBar'
 import { GoalEditorDialog, type GoalEditBase } from './GoalEditorDialog'
 import { AgentQueueTray } from './AgentQueueTray'
 import { AuthorActivityParts, AuthorActivitySummary, AuthorProgressText } from './AuthorActivityParts'
+import { AuthorRequestBubble } from './AuthorRequestBubble'
 import { AgentProcessRegion } from './AgentProcessRegion'
 import { useMessageBlockExpansion } from './use-message-block-expansion'
 import { AgentPermissionCard } from './AgentPermissionCard'
@@ -1656,53 +1656,7 @@ export function AgentPanel({
                   onTouchEnd={cancelLongPress}
                   onTouchMove={cancelLongPress}
                 >
-                  <div className="flex max-w-[82%] flex-col items-end gap-1.5">
-                    {message.parts.some((part) => part.type === 'attachment') && (
-                      <div className="flex flex-wrap justify-end gap-1.5">
-                        {message.parts.map((part, partIndex) => {
-                          if (part.type !== 'attachment') {
-                            return null
-                          }
-                          if (part.kind === 'image') {
-                            return (
-                              <button
-                                key={`${message.id}-attach-${partIndex}`}
-                                type="button"
-                                onClick={() => setAttachmentPreview({ url: part.url, name: part.name })}
-                                className="cursor-zoom-in overflow-hidden rounded-[10px] border border-[var(--border-subtle)] transition hover:opacity-90"
-                                aria-label={`放大查看图片 ${part.name}`}
-                              >
-                                <img
-                                  src={part.url}
-                                  alt={part.name}
-                                  className="h-16 w-16 object-cover"
-                                  loading="lazy"
-                                />
-                              </button>
-                            )
-                          }
-                          return (
-                            <a
-                              key={`${message.id}-attach-${partIndex}`}
-                              href={part.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="inline-flex max-w-52 items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-2 py-1 text-[11px] text-[var(--text-primary)] transition hover:bg-[var(--surface-default)] hover:underline"
-                              title={`打开文件 ${part.name}`}
-                            >
-                              <FileText className="h-3 w-3 shrink-0 text-[var(--text-secondary)]" />
-                              <span className="truncate">{part.name}</span>
-                            </a>
-                          )
-                        })}
-                      </div>
-                    )}
-                    <div className="whitespace-pre-wrap break-words rounded-[20px] bg-[var(--surface-contrast)] px-4 py-3 text-sm leading-7 text-[var(--text-contrast)]">
-                      {message.parts
-                        .map((part) => (part.type === 'text' ? part.text : ''))
-                        .join('')}
-                    </div>
-                  </div>
+                  <AuthorRequestBubble parts={message.parts} onPreview={setAttachmentPreview} />
                   {message.delivery?.status === 'failed' ? <div className="flex max-w-full items-center gap-2 text-xs text-[var(--text-secondary)]">
                     <span role="alert">发送未确认：{message.delivery.error}</span>
                     <button type="button" onClick={() => useOutgoingMessages.getState().remove(message.id)} className="shrink-0 underline">移除这条本地消息</button>

@@ -123,7 +123,7 @@ export const novelUpdateMetaTool = defineTool({
     ctx.signal.throwIfAborted()
     const novel = await (ctx.transaction ?? prisma).novel.findFirst({
       where: { id: ctx.novelId, authorId: ctx.userId },
-      select: { title: true, summary: true, tagNames: true, chapterCount: true, wordCount: true },
+      select: { title: true, displayTitle: true, summary: true, tagNames: true, chapterCount: true, wordCount: true },
     })
 
     if (!novel) {

@@ -39,7 +39,7 @@ describe('legacy author questions are information, not permissions', () => {
     const { pending } = await start()
     await vi.advanceTimersByTimeAsync(env.agentApprovalTimeoutMs + 1)
     const result = await pending
-    expect(result).toMatchObject({ display: { kind: 'question', unanswered: true } })
+    expect(result).toMatchObject({ questionTimedOut: true, display: { kind: 'question', unanswered: true } })
     expect(result.outcome).toBeUndefined()
     expect(result.failureCode).toBeUndefined()
     expect(mocks.update).toHaveBeenCalledTimes(2)
@@ -54,8 +54,7 @@ describe('legacy author questions are information, not permissions', () => {
     await vi.advanceTimersByTimeAsync(env.agentApprovalTimeoutMs + 1)
     const result = await pending
     expect(result.failureCode).toBeUndefined()
-    expect(result.output).toContain('未回答不等于同意')
-    expect(result.output).toContain('不依赖此决定且已获授权的工作')
+    expect(result.output).toContain('提问已超时，本轮已结束')
     expect(result.output).not.toContain('默认方案继续')
     expect(result.display).not.toHaveProperty('scopeResolution')
     expect(mocks.update).toHaveBeenCalledTimes(2)
@@ -102,4 +101,13 @@ describe('legacy author questions are information, not permissions', () => {
     expect(mocks.update).toHaveBeenCalledOnce(); expect(mocks.clarification).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(0)
   })
+
+  it('rejects an answer at the deadline even if the timer callback has not run', async () => {
+    const { pending } = await start()
+    vi.setSystemTime(Date.now() + env.agentApprovalTimeoutMs)
+    expect(resolveQuestionAnswer('run', 'original-question', '第一章')).toBe(false)
+    expect(await pending).toMatchObject({ questionTimedOut: true, display: { unanswered: true } })
+    expect(mocks.clarification).not.toHaveBeenCalled()
+  })
+
 })

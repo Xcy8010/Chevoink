@@ -6,6 +6,9 @@ import { recordWritingClarification } from '../writing-clarification.js'
 import { waitForQuestionAnswer } from '../permissions.js'
 import { defineTool } from './types.js'
 
+export const QUESTION_TIMEOUT_NOTICE = '提问已超时，本轮已结束。已保存的内容会保留。'
+export const DIRECTION_PURPOSE_REQUIRED = '当前是在确认新作品的故事方向。请以 purpose=novel_direction 重新提交问题；本次问题未发送给作者。'
+
 /**
  * 交互类工具（plan/13 §4.3 扩展）：ask_user 向作者提问。
  * 与审批同构的挂起-唤醒模式：循环停在工具内等待作者作答，
@@ -13,6 +16,7 @@ import { defineTool } from './types.js'
  */
 
 const askUserParameters = z.object({
+  purpose: z.literal('novel_direction').optional().describe('仅在询问作者要采用哪个方向来初始化当前空作品时设为 novel_direction。'),
   question: z
     .string()
     .min(1)
@@ -62,7 +66,7 @@ function coerceAskUserArgs(raw: unknown): unknown {
   while (normalized.length < 2) {
     normalized.push({ label: `继续方案 ${normalized.length + 1}` })
   }
-  return { question, options: normalized }
+  return { question, options: normalized, ...(record.purpose !== undefined ? { purpose: record.purpose } : {}) }
 }
 
 export const askUserTool = defineTool({
@@ -98,8 +102,9 @@ export const askUserTool = defineTool({
     if (result.answer === null) {
       const reason = result.timedOut ? '作者长时间未回答' : '本次提问已取消'
       return {
-        output: `${reason}。未回答不等于同意，不选择依赖该回答的方向或扩大授权。只继续不依赖此决定且已获授权的工作；必要决定仍缺失时保留进度等待作者输入，不重复提问。`,
-        summary: '提问未获回答',
+        output: result.timedOut ? QUESTION_TIMEOUT_NOTICE : `${reason}。未回答不等于同意，不选择依赖该回答的方向或扩大授权。`,
+        summary: result.timedOut ? '提问超时，未获回答' : '提问未获回答',
+        ...(result.timedOut ? { questionTimedOut: true as const } : {}),
         display: {
           kind: 'question',
           question: args.question,
@@ -112,7 +117,7 @@ export const askUserTool = defineTool({
     ctx.signal.throwIfAborted()
     const clarification = await prisma.$transaction(tx => recordWritingClarification(tx, ctx,
       { callId: ctx.callId, ...args, answer: result.answer!, source: 'legacy_question' }))
-    ctx.authorQuestionAnswers?.set(ctx.callId, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, question: args.question + '\n' + args.options.map(option => option.label + ' ' + (option.detail ?? '')).join('\n'), answer: result.answer })
+    ctx.authorQuestionAnswers?.set(ctx.callId, { userId: ctx.userId, novelId: ctx.novelId, runId: ctx.runId, question: args.question + '\n' + args.options.map(option => option.label + ' ' + (option.detail ?? '')).join('\n'), answer: result.answer, purpose: args.purpose })
     return {
       ...(clarification ? { semanticTransition: clarification } : {}),
       output: `作者的回答：${result.answer}${clarification ? '\n已补全原请求缺失的目标或原文范围；继续原任务，保留原有检查、权限与预算。' : ''}`,

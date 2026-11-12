@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-const mocks = vi.hoisted(() => ({ tx: { agentExecutionOutbox: { findUnique: vi.fn(), count: vi.fn() }, agentOperation: { findMany: vi.fn() } },
-  scope: vi.fn(), assertScope: vi.fn(), clarify: vi.fn(), frame: vi.fn(), state: vi.fn(), prepare: vi.fn(), reduce: vi.fn(), commit: vi.fn(), now: vi.fn() }))
+const mocks = vi.hoisted(() => ({ tx: { agentExecutionOutbox: { findUnique: vi.fn(), findFirst: vi.fn(), count: vi.fn() }, agentOperation: { findMany: vi.fn(), count: vi.fn() } },
+  scope: vi.fn(), assertScope: vi.fn(), clarify: vi.fn(), frame: vi.fn(), state: vi.fn(), prepare: vi.fn(), reduce: vi.fn(), commit: vi.fn(), now: vi.fn(), save: vi.fn(), budget: vi.fn() }))
 vi.mock('../../api/lib/agent/runtime-lease.js', () => ({ withRunLease: async (_lease: unknown, work: (tx: unknown) => unknown) => work(mocks.tx) }))
-vi.mock('../../api/lib/agent/runtime-state.js', () => ({ readExecutionFrame: mocks.frame, readExecutionStateInTransaction: mocks.state }))
+vi.mock('../../api/lib/agent/runtime-state.js', () => ({ readExecutionFrame: mocks.frame, readExecutionStateInTransaction: mocks.state, saveExecutionStateInTransaction: mocks.save }))
+vi.mock('../../api/lib/agent/runtime-budget.js', () => ({ readTaskBudgetInTransaction: mocks.budget }))
 vi.mock('../../api/lib/agent/runtime-tool-cursor.js', async original => ({ ...await original<object>(), prepareToolCursorOperation: mocks.prepare }))
 vi.mock('../../api/lib/agent/runtime-operations.js', () => ({ commitOperationEffectInTransaction: mocks.commit, recordToolFailure: vi.fn() }))
 vi.mock('../../api/lib/agent/runtime-reducer.js', () => ({ reduceExecutionReceipt: mocks.reduce }))
@@ -43,6 +44,9 @@ beforeEach(() => {
   mocks.reduce.mockResolvedValue({ revision: 2, snapshotHash: 'reduced', state: { phase: 'idle' } })
   mocks.now.mockResolvedValue(new Date('2026-11-04T00:00:00.000Z'))
   mocks.tx.agentExecutionOutbox.count.mockResolvedValue(0)
+  mocks.tx.agentExecutionOutbox.findFirst.mockResolvedValue(null)
+  mocks.tx.agentOperation.count.mockResolvedValue(0)
+  mocks.budget.mockResolvedValue({ unresolvedAttempts: 0n })
   mocks.commit.mockImplementation(async (_tx, _lease, _id, _hash, effect: () => unknown) => ({ result: await effect() }))
   answer = { taskRootId: lease.taskRootId, operationId: 'operation', type: 'question.answered', payload: {
     requestId: request.id, requestHash: runtimeJson(request.payload).hash, answer: '第一章：启程（约4000字）', userId: lease.userId,
@@ -76,8 +80,28 @@ describe('durable question semantic scope receipts', () => {
   it('keeps an unanswered required scope unresolved without recording an author grant', async () => {
     answer = null
     mocks.now.mockResolvedValue(new Date('2031-01-01T00:00:00.000Z'))
-    expect(await executeDurableQuestion(lease, cursor, ctx, tool, args)).toMatchObject({ kind: 'tool', result: { display: { unanswered: true } } })
+    expect(await executeDurableQuestion(lease, cursor, ctx, tool, args)).toMatchObject({ kind: 'tool', result: { questionTimedOut: true, display: { unanswered: true } } })
     expect(mocks.clarify).not.toHaveBeenCalled()
+  })
+  it.each(['automatic', 'unknown', 'explicit'] as const)('supersedes an ended timeout only for a fenced author resume with settled effects: %s', async scenario => {
+    const frame = { revision: 2, snapshotHash: 'saved-timeout', state: { phase: 'idle', messages: [
+      { role: 'assistant', content: '提问已超时，本轮已结束。', localCompletion: { kind: 'question_timeout', operationId: 'operation' } },
+    ] } }
+    mocks.state.mockResolvedValue({ frame })
+    if (scenario !== 'automatic') mocks.tx.agentExecutionOutbox.findFirst.mockResolvedValue({ eventKey: 'resume:pause',
+      payload: { revision: frame.revision, snapshotHash: frame.snapshotHash, runId: lease.runId, pauseEventId: 'pause' } })
+    if (scenario === 'unknown') mocks.budget.mockResolvedValue({ unresolvedAttempts: 1n })
+    if (scenario !== 'explicit') {
+      expect(await validateHistoricalQuestionReceipt(lease)).toEqual(frame)
+      expect(mocks.save).not.toHaveBeenCalled()
+      return
+    }
+    expect(await validateHistoricalQuestionReceipt(lease)).toBeNull()
+    expect(mocks.save).toHaveBeenCalledExactlyOnceWith(mocks.tx, lease, expect.objectContaining({
+      expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
+      snapshot: expect.objectContaining({ messages: [...frame.state.messages,
+        expect.objectContaining({ role: 'system', content: expect.stringContaining('作者已主动继续原任务') })] }),
+    }))
   })
   it.each([true, false])('validates old required-scope receipts without pausing again, required=%s', async required => {
     const input = runtimeJson({ input: { callId: ctx.callId, args } })

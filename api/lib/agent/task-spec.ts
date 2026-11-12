@@ -283,7 +283,7 @@ export function buildTaskSpec(input: {
   networkAdmission?: 1
   /** Genuine fresh HTTP authority; legacy build/recovery retains its classifier. */
   authorWritingProtocol?: 2
-  novelInitializationProtocol?: 1
+  novelInitializationProtocol?: TaskSpec['scope']['novelInitializationProtocol']
   novelInitializationTarget?: 'empty' | 'existing'
   volumeCreationProtocol?: 1
   volumeCreateIntent?: TaskSpec['scope']['volumeCreateIntent']
@@ -328,9 +328,9 @@ export function buildTaskSpec(input: {
   const selection = input.chapterId && input.selection?.start !== undefined && input.selection.end !== undefined
     ? { chapterId: input.chapterId, start: input.selection.start, end: input.selection.end }
     : undefined
-  const directionSetup = input.novelInitializationProtocol === 1 && isNovelDirectionSetup(input.prompt)
+  const directionSetup = input.novelInitializationProtocol !== undefined && isNovelDirectionSetup(input.prompt)
   const existingDirection = directionSetup && input.novelInitializationTarget === 'existing'
-  const metadataSetup = input.novelInitializationProtocol === 1 && isExplicitNovelMetadataRequest(input.prompt) && !/(?:大纲|细纲|正文|章节|outline|chapter)/iu.test(input.prompt)
+  const metadataSetup = input.novelInitializationProtocol !== undefined && isExplicitNovelMetadataRequest(input.prompt) && !/(?:大纲|细纲|正文|章节|outline|chapter)/iu.test(input.prompt)
   const outputKind = directionSetup || metadataSetup ? 'text' : intent === 'global_transform'
     ? 'changeset'
     : intent === 'review' || intent === 'research_analysis' || intent === 'structure'
@@ -366,6 +366,7 @@ export function buildTaskSpec(input: {
     scope: {
       ...(input.novelInitializationProtocol ? { novelInitializationProtocol: input.novelInitializationProtocol } : {}), novelId: input.novelId, chapterIds, selection,
       ...(input.novelInitializationTarget ? { novelInitializationTarget: input.novelInitializationTarget } : {}),
+      ...(input.novelInitializationProtocol === 2 && directionSetup && !existingDirection ? { novelDirectionRequired: true as const } : {}),
       ...(input.volumeCreationProtocol ? { volumeCreationProtocol: input.volumeCreationProtocol } : {}),
       ...(input.volumeCreateIntent ? { volumeCreateIntent: input.volumeCreateIntent } : {}), ...(writingRequest ? { authorEffects: { version: 1 as const,
       requestHash: createHash('sha256').update(input.prompt).digest('hex'), manuscript: manuscriptRequested && !bookProposal, structure: structureRequested, artifact: artifactRequested } } : {}),
@@ -391,7 +392,7 @@ export function buildTaskSpec(input: {
       : `完成${intent}任务并给出可核验结果${minimumChineseCharacters ? `；报告至少${minimumChineseCharacters}个汉字（不计代码、URL、标点与重复段落）` : ''}`, required: true,
       ...(minimumChineseCharacters ? { minimumChineseCharacters } : {}) }],
     postconditions: [
-      ...(input.novelInitializationProtocol === 1 && requiresNovelInitialization(input.prompt) && !existingDirection ? [{ code: 'NOVEL_METADATA_INITIALIZED', description: '本任务实际保存的书名、简介与标签与当前作品一致；作者明确选择只讨论或暂不初始化时如实结束，不当作已保存', severity: 'error' as const }] : []),
+      ...(input.novelInitializationProtocol && requiresNovelInitialization(input.prompt) && !existingDirection ? [{ code: 'NOVEL_METADATA_INITIALIZED', description: '本任务实际保存的书名、简介与标签与当前作品一致；作者明确选择只讨论或暂不初始化时如实结束，不当作已保存', severity: 'error' as const }] : []),
       ...(intent === 'global_transform'
         ? [{ code: 'CHANGESET_VERIFIED', description: '全书变更通过预览、版本校验与原子应用', severity: 'error' as const }]
         : []),
@@ -423,8 +424,20 @@ const stableWritingGuidance = '兼顾情节推进、表达和一致性。根据�
 const boldWritingGuidance = '主动尝试更鲜明的场景、视角和结构，遵守作者约束与核心设定。作者要求写正文时交付完整正文，复查意见保留在报告中。'
 const strictRevisionGuidance = '在本任务可写的章节内，遇到有明确依据且能安全定位的连续性或表达问题，直接落实局部修订，无需逐项询问作者。报告没有自动落稿时，读取当前版本，用 chapter_edit_range 在原授权范围内合并可验证的修法。只看不改、仅评估、只读复核或该章不在本任务可写范围内时，检查工具传 readOnly=true，只交付报告。保留无法安全定位、证据不足或与作者意图冲突的意见。'
 
+function novelDirectionGuidance(spec: TaskSpec) {
+  if (!spec.scope.novelInitializationProtocol || !isNovelDirectionSetup(spec.goals.join('\n'))) return ''
+  if (spec.scope.novelInitializationTarget === 'existing') {
+    return '\n创作阶段：当前作品已有元信息或正文。先询问作者想要的方向，保留已有设置和正文，简述方向后结束本轮，不以缺少保存记录反复尝试。'
+  }
+  const purpose = spec.scope.novelInitializationProtocol === 2 ? '（purpose=novel_direction）' : '，并明确当前空作品的初始化'
+  return `\n创作阶段：先通过向作者提问工具${purpose}给出2–4个故事方向，收到真实回答后一次保存书名、简介和标签。保存后简述结果，在结束回复里问「要不要开始写大纲？」；不用提问工具等待下一步，不自动制作封面、写大纲或正文。`
+}
+
 export function renderTaskSpec(spec: TaskSpec): string {
-  if (spec.scope.agentWritingProtocol === 1 && !spec.scope.agentWritingBinding) return `[系统] 本任务由主Agent理解完整作者需求，词表推测不决定正文权限。\n创作模式：${CREATIVE_FREEDOM_LABELS[spec.creativeFreedom]}（${spec.creativeFreedom === 'balanced' ? strictRevisionGuidance : spec.creativeFreedom === 'stable' ? stableWritingGuidance : boldWritingGuidance}）\n${creativeFreedomScope}\n原始请求：${spec.goals.join('\n')}\n当前章节上下文：${JSON.stringify(spec.scope.chapterIds ?? [])}。需要作用于正文时，先按需读取目录、正文及同聊天已有真实作者要求，自主确定写作/修改/检查和目标，可直接用真实章节ID或全书序号调用对应普通工具；task_scope_bind仅用于可选计划记录，不是前置权限。在聊天交付正文或答复时直接输出，无需正文目标或绑定。不要因自然用语没有命中固定关键词要求作者重说；只有阅读后仍有影响操作的具体冲突才询问。真实选区、保护章、只读模式、权限、取消、版本和费用规则继续由系统校验；任务分类、计划步骤及检查报告状态不用于封锁普通工具。`
+  if (spec.scope.agentWritingProtocol === 1 && !spec.scope.agentWritingBinding) {
+    const direction = novelDirectionGuidance(spec)
+    return `[系统] 本任务由主Agent理解完整作者需求，词表推测不决定正文权限。\n创作模式：${CREATIVE_FREEDOM_LABELS[spec.creativeFreedom]}（${spec.creativeFreedom === 'balanced' ? strictRevisionGuidance : spec.creativeFreedom === 'stable' ? stableWritingGuidance : boldWritingGuidance}）\n${creativeFreedomScope}\n原始请求：${spec.goals.join('\n')}\n当前章节上下文：${JSON.stringify(spec.scope.chapterIds ?? [])}。需要作用于正文时，先按需读取目录、正文及同聊天已有真实作者要求，自主确定写作/修改/检查和目标，可直接用真实章节ID或全书序号调用对应普通工具；task_scope_bind仅用于可选计划记录，不是前置权限。在聊天交付正文或答复时直接输出，无需正文目标或绑定。不要因自然用语没有命中固定关键词要求作者重说；只有阅读后仍有影响操作的具体冲突才询问。真实选区、保护章、只读模式、权限、取消、版本和费用规则继续由系统校验；任务分类、计划步骤及检查报告状态不用于封锁普通工具。${direction}`
+  }
   const networkRule = spec.networkAccess === 'denied'
     ? '[系统] 原始请求明确禁止联网：本任务不提供或执行搜索、网页获取，不预约、不请求供应商、不收工具费。只使用已有获准材料并说明证据限制。\n' : ''
   const readRule = spec.researchReadAccess === 'denied'
@@ -449,7 +462,9 @@ function renderTaskSpecBody(spec: TaskSpec): string {
   const pacing = spec.writingPacing === 'conversation_only'
     ? '\n本轮是普通对话：直接回应当前任务的原始问候或问题；作品上下文只作背景，不代表写作授权，不继续其他窗口的创作、待办或历史计划。任务中止后仍回应该原始问题，不能将“继续”解释为继续写作品。'
     : spec.writingPacing === 'proposal_only'
-    ? spec.scope.novelInitializationProtocol === 1 && isExplicitNovelMetadataRequest(spec.goals.join('\n')) ? '\n创作阶段：作者已明确要求初始化或修改当前作品信息；按已授权的选择完成书名、简介与标签保存，不因宽泛题材重复询问。封面缺项如实说明并问是否补做，再简短问是否开始大纲，结束本轮，不自动写大纲或正文。' : spec.scope.novelInitializationProtocol === 1 && isNovelDirectionSetup(spec.goals.join('\n')) && spec.scope.novelInitializationTarget === 'existing' ? '\n创作阶段：当前作品已有元信息或正文。先向作者提问对齐故事方向，保留已有内容与作品设置；说明本轮未初始化或覆盖作品，简短询问下一步并结束，不以缺少保存记录反复尝试初始化。' : spec.scope.novelInitializationProtocol === 1 && isNovelDirectionSetup(spec.goals.join('\n')) ? '\n创作阶段：作者仅表达了想写某类小说。先通过向作者提问工具给出2–4个方向，并说明回答后将完善当前空作品的书名、简介和标签；收到真实回答后执行已授权初始化。既有非空作品的元信息修改仍需明确意图。初始化后简述故事方向，如实说明未完成封面等项目并问是否补做，再问是否开始大纲，结束本轮，不自动写大纲或正文。' : '\n创作阶段：本轮仅规划。宽泛整书目标不等于授权连续写正文。先利用已给条件形成可审阅的大纲（人物目标、核心冲突、主要转折、结局方向、卷章节奏），可用 plan_save 保存；说明假设和建议的首批章节范围，交付后收尾等待作者下一条明确写作指令。不要把调研完成、旧作品大纲、历史写作授权、普通继续或你自己的待办当作本轮正文授权；不能通过子任务或其它工具绕过。关键方向缺失可集中提问，但不必为每个细节重复确认。'
+    ? novelDirectionGuidance(spec) || (spec.scope.novelInitializationProtocol && isExplicitNovelMetadataRequest(spec.goals.join('\n'))
+      ? '\n创作阶段：作者已明确要求初始化或修改当前作品信息；按已授权的选择完成书名、简介与标签保存，不因宽泛题材重复询问。封面缺项如实说明并问是否补做，再简短问是否开始大纲，结束本轮，不自动写大纲或正文。'
+      : '\n创作阶段：本轮仅规划。宽泛整书目标不等于授权连续写正文。先利用已给条件形成可审阅的大纲（人物目标、核心冲突、主要转折、结局方向、卷章节奏），可用 plan_save 保存；说明假设和建议的首批章节范围，交付后收尾等待作者下一条明确写作指令。不要把调研完成、旧作品大纲、历史写作授权、普通继续或你自己的待办当作本轮正文授权；不能通过子任务或其它工具绕过。关键方向缺失可集中提问，但不必为每个细节重复确认。')
     : '\n创作节奏：写作严格限于本任务原始请求。面对宽泛整书目标先交可审阅的大纲并确认首批范围，再进入正文；用户明确授权自主整书创作时先保存大纲、按计划分批推进，每批回报真实进度与重大偏差。用户明确指定章节/续写范围时直接执行该范围，不反复确认，不擅自向后无限续章。调研结果和历史任务不是新的写作授权。'
   const clarificationRule = spec.scope.writingClarificationProtocol === 2 && (spec.scope.writing?.kind === 'needs_input' || spec.scope.localEditBoundary?.kind === 'needs_input')
     ? '\n原请求已有写作授权，目标章节或局部引文尚未明确。通过 ask_user 接收作者实际回答后在同一任务内补全该范围；提问选项不授予权限，原请求的动作、禁止事项和用量保持有效。目标或引文未定位前先完成可独立执行的读取，不反复尝试写入。'

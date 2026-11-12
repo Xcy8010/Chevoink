@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { prisma } from '../../api/lib/prisma.js'
 import { listAdminOperationCalls, listAdminOperationRuns, getAdminOperationsHealth } from '../../api/lib/admin-operations.js'
+import { getAdminAgentRunDetailsData, getAdminAgentSessionMessagesData } from '../../api/lib/data/admin.js'
 import { adminOperationCallsQuerySchema, adminOperationRunsQuerySchema, adminOperationsHealthQuerySchema } from '../../shared/contracts/admin-operations.js'
 import { verifyTestDatabase } from '../support/database-preflight.js'
 import { isTestDatabaseRequired } from '../support/database-availability.js'
@@ -51,6 +52,52 @@ describe.runIf(available)('admin operations safe record queries on isolated Post
       await prisma.aiUsageLog.deleteMany({ where: { userId } })
       await prisma.webToolCall.deleteMany({ where: { runId } })
       await prisma.agentRun.deleteMany({ where: { id: runId } })
+      await prisma.agentTaskRoot.deleteMany({ where: { id: rootId } })
+      await prisma.agentSession.deleteMany({ where: { id: sessionId } })
+      await prisma.novel.deleteMany({ where: { id: novelId } })
+      await prisma.user.deleteMany({ where: { id: userId } })
+    }
+  })
+
+  it('replays a resumed root across the physical cursor and reads scoped tool evidence without projecting history', async () => {
+    const [userId, novelId, sessionId, rootId, originalId, resumeId, messageId] = Array.from({ length: 7 }, () => randomUUID())
+    const createdAt = new Date('2026-11-12T16:04:21.000Z')
+    const resumedAt = new Date('2026-11-12T16:15:21.000Z')
+    await prisma.user.create({ data: { id: userId, nickname: '会话回看合成作者', passwordHash: 'synthetic-only' } })
+    try {
+      await prisma.novel.create({ data: { id: novelId, authorId: userId, title: '会话回看合成作品', slug: novelId, summary: 'synthetic-only' } })
+      await prisma.agentSession.create({ data: { id: sessionId, userId, novelId, title: '会话回看合成记录' } })
+      await prisma.agentTaskRoot.create({ data: { id: rootId, userId, sessionId, novelId, sourceMessageId: messageId,
+        inputHash: '0'.repeat(64), specSnapshot: {}, requestSnapshot: {} } })
+      const runScope = { userId, novelId, sessionId, taskRootId: rootId, runtimeProtocolVersion: 1, engine: 'loop', mode: 'act',
+        action: 'workspaceAgent', agentType: 'writingOrchestrator' } as const
+      await prisma.agentRun.createMany({ data: [
+        { ...runScope, id: originalId, createdAt, startedAt: createdAt, status: 'paused', usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 } },
+        { ...runScope, id: resumeId, createdAt: resumedAt, startedAt: resumedAt, status: 'paused', usage: { outcome: 'paused' } },
+      ] })
+      await prisma.agentMessage.create({ data: { id: messageId, runId: originalId, sessionId, role: 'user', createdAt,
+        parts: [{ type: 'text', text: '请给我两个海岛悬疑方向。' }] } })
+      await prisma.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: rootId, runId: resumeId, eventKey: `replay-test:${rootId}`,
+        type: 'question.requested', payload: { question: '合成待投影提问' }, createdAt: resumedAt } })
+      await prisma.agentRunEvent.create({ data: { runId: resumeId, seq: 1, type: 'tool.result', createdAt: resumedAt,
+        payload: { toolName: 'ask_user', callId: 'synthetic-question', ok: true, summary: '提问未获回答',
+          display: { kind: 'question', unanswered: true }, durationMs: 600_000, args: { internal: 'synthetic-private-tool-argument' } } } })
+
+      const replay = await getAdminAgentSessionMessagesData(sessionId, { userId, replay: true, pageSize: 1 })
+      expect(replay).toMatchObject({ hasMore: true, nextCursor: resumeId, historyPending: true, runs: [
+        { id: originalId, usageRecorded: true, messages: [{ id: messageId, parts: [{ type: 'text', text: '请给我两个海岛悬疑方向。' }] }] },
+        { id: resumeId, usageRecorded: false, messages: [] },
+      ] })
+      const earlier = await getAdminAgentSessionMessagesData(sessionId, { userId, replay: true, pageSize: 1, before: resumeId })
+      expect(earlier).toMatchObject({ hasMore: false, nextCursor: originalId })
+      expect(await getAdminAgentSessionMessagesData(sessionId, { userId: randomUUID(), replay: true })).toBeNull()
+      const details = await getAdminAgentRunDetailsData(sessionId, resumeId)
+      expect(details).toMatchObject({ creditsMilli: null, events: [{ seq: 1, toolName: 'ask_user', outcome: 'unanswered', durationMs: 600_000 }] })
+      expect(JSON.stringify(details)).not.toContain('synthetic-private-tool-argument')
+      expect(await getAdminAgentRunDetailsData(randomUUID(), resumeId)).toBeNull()
+      expect(await prisma.agentEventProjection.count({ where: { runId: { in: [originalId, resumeId] } } })).toBe(0)
+    } finally {
+      await prisma.agentRun.deleteMany({ where: { userId, sessionId } })
       await prisma.agentTaskRoot.deleteMany({ where: { id: rootId } })
       await prisma.agentSession.deleteMany({ where: { id: sessionId } })
       await prisma.novel.deleteMany({ where: { id: novelId } })

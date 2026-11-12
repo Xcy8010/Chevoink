@@ -25,6 +25,17 @@ export function useAdminSession() {
 
 /* ---------------- 时间格式化 ---------------- */
 
+const hongKong = new Intl.DateTimeFormat('sv-SE', {
+  timeZone: 'Asia/Hong_Kong', year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+})
+
+export function formatReplayTime(value: string | null | undefined): string {
+  if (!value) return '未记录'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '未记录' : `${hongKong.format(date)} 香港时间`
+}
+
 export function formatDateTime(value: string | null): string {
   if (!value) {
     return '—'
