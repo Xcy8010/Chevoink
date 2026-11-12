@@ -60,16 +60,6 @@ export function AccountDialog({ title, description, step, brand, children, onClo
         step && 'account-dialog-step md:grid md:min-h-[min(27rem,calc(100dvh-2rem))] md:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] md:grid-rows-[1fr_auto] md:items-start md:gap-x-12 md:gap-y-5 md:p-10',
       )}>
         <header className={cn('mb-5', step && 'md:mb-0')}>
-          {step && <div role="progressbar" aria-label="账户设置进度" aria-valuemin={0} aria-valuemax={3} aria-valuenow={step}
-            className="mb-3 flex items-center gap-2">
-            <span aria-hidden="true" className="grid w-20 grid-cols-3 gap-1">
-              {[1, 2, 3].map(segment => (
-                <span key={segment} className={cn('h-1.5 rounded-full',
-                  segment <= step ? 'bg-[var(--color-brand)]' : 'bg-[var(--surface-muted)]')} />
-              ))}
-            </span>
-            <span className="text-xs font-medium tabular-nums text-[var(--text-secondary)]">{step}/3</span>
-          </div>}
           <div className="flex items-center gap-3">
             {brand && <img src="/favicon.png" alt="" className="h-10 w-10 shrink-0 rounded-xl" />}
             <h2 id={titleId} tabIndex={-1} className={cn(

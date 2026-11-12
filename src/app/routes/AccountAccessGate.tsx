@@ -7,6 +7,7 @@ import ProfileSetupForm from '@/features/account/ProfileSetupForm'
 import { authError, postAuth } from '@/features/account/auth-api'
 import { useUpdateAccountSession } from '@/features/account/use-account-session'
 import { AccountDialog } from '@/features/account/VerificationCodeField'
+import { cn } from '@/lib/utils'
 import { useShellStore } from '@/store/useShellStore'
 import type { AuthSessionPayload, User } from '../../../shared/contracts'
 
@@ -57,10 +58,22 @@ function AccountSetupStep({ user, step }: { user: User; step: 1 | 2 | 3 }) {
               : <ProfileSetupForm user={user} disabled={pending} onSaving={setFormSaving} onSaved={onSaved} />}
         {error && <p role="alert" className="mt-3 text-sm text-[var(--color-danger,#dc2626)]">{error}</p>}
       </div>
-      <div className="mt-4 flex items-center justify-between gap-3 md:col-span-2 md:mt-0">
-        <Button variant="ghost" className="-ml-3" disabled={pending || formSaving} onClick={() => void finish('skip')}>跳过此步</Button>
-        {step > 1 && <Button variant="ghost" className="-mr-3" disabled={pending || formSaving} onClick={() => void finish('back')}>返回上一步</Button>}
-      </div>
+      <footer className="mt-4 flex items-center justify-between gap-2 md:col-span-2 md:mt-0">
+        <div role="progressbar" aria-label="账户设置进度" aria-valuemin={0} aria-valuemax={3} aria-valuenow={step}
+          className="flex min-w-0 items-center gap-2">
+          <span aria-hidden="true" className="grid w-14 grid-cols-3 gap-1 sm:w-20">
+            {[1, 2, 3].map(segment => (
+              <span key={segment} className={cn('h-1.5 rounded-full',
+                segment <= step ? 'bg-[var(--color-brand)]' : 'bg-[var(--surface-muted)]')} />
+            ))}
+          </span>
+          <span className="shrink-0 text-xs font-medium tabular-nums text-[var(--text-secondary)]">{step}/3</span>
+        </div>
+        <div className="-mr-2 flex shrink-0 items-center gap-1 sm:-mr-3 sm:gap-2">
+          <Button variant="ghost" className="px-2 sm:px-3" disabled={pending || formSaving} onClick={() => void finish('skip')}>跳过此步</Button>
+          {step > 1 && <Button variant="ghost" className="px-2 sm:px-3" disabled={pending || formSaving} onClick={() => void finish('back')}>返回上一步</Button>}
+        </div>
+      </footer>
     </>
   )
 }
