@@ -43,6 +43,20 @@ function isPublicResultUrl(value: string): boolean {
   catch { return false }
 }
 
+function isGeneratedImage(value: string): boolean {
+  const inlinePrefix = 'data:image/png;base64,'
+  if (!value.startsWith(inlinePrefix)) return isPublicResultUrl(value)
+  const encoded = value.slice(inlinePrefix.length)
+  if (!/^[a-z0-9+/]{32,}={0,2}$/i.test(encoded)) return false
+  const header = Buffer.from(encoded.slice(0, 32), 'base64')
+  // The provider wrapper uses a PNG data URL for any inline image encoding.
+  const png = header.subarray(0, 8).toString('hex') === '89504e470d0a1a0a'
+    && header.toString('ascii', 12, 16) === 'IHDR' && header.readUInt32BE(16) > 0 && header.readUInt32BE(20) > 0
+  const jpeg = header.subarray(0, 3).toString('hex') === 'ffd8ff'
+  const webp = header.toString('ascii', 0, 4) === 'RIFF' && header.toString('ascii', 8, 12) === 'WEBP'
+  return png || jpeg || webp
+}
+
 /** One synthetic request on the saved primary endpoint. No fallback, retries,
  * uploaded media, manuscript data, or author wallet operations. */
 export const prepareAdminModelConnection: PrepareDiagnosticConnection = async (model, maxOutputTokens) => {
@@ -127,7 +141,7 @@ export const prepareAdminModelConnection: PrepareDiagnosticConnection = async (m
       let outputTokens: number | null = null
       if (kind === 'image_generation') {
         const images = parseCoverImageResponse(response.status, raw)
-        valid = images.length === 1 && (isPublicResultUrl(images[0]) || /^data:image\/png;base64,[a-z0-9+/]{16,}={0,2}$/i.test(images[0]))
+        valid = images.length === 1 && isGeneratedImage(images[0])
       } else if (kind === 'web_search') {
         const result = bocha ? bochaResponseSchema.safeParse(payload) : deepseekSearchSchema.safeParse(payload)
         const items = result.success ? ('results' in result.data ? result.data.results : result.data.data.webPages.value) : null

@@ -76,6 +76,15 @@ it('retains reported tokens on truncated text and rejects unusable image or sear
   expect(await (await prepareAdminModelConnection({ ...base, modelKind: 'web_search', provider: 'bocha' }, 128))(signal, vi.fn())).toMatchObject({ valid: false })
 })
 
+it('recognizes inline image bytes and rejects non-image Base64', async () => {
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAGUlEQVQokWNgYPhPImIY1cAwGkr/h2fSAACS2/8B4hCvVAAAAABJRU5ErkJggg=='
+  const run = await prepareAdminModelConnection({ ...base, modelKind: 'image_generation' }, 128)
+  mocks.request.mockResolvedValueOnce({ response: new Response(JSON.stringify({ data: [{ b64_json: 'A'.repeat(png.length) }] })), close: mocks.close })
+    .mockResolvedValueOnce({ response: new Response(JSON.stringify({ data: [{ b64_json: png }] })), close: mocks.close })
+  expect(await run(signal, vi.fn())).toMatchObject({ valid: false })
+  expect(await run(signal, vi.fn())).toMatchObject({ valid: true })
+})
+
 it('never pairs a missing stored key with a different environment endpoint', () => {
   const configured = env.aiTextApiKeyConfigured
   env.aiTextApiKeyConfigured = true
