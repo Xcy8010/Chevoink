@@ -575,12 +575,18 @@ describe.runIf(available)('durable question lifecycle', () => {
             { id: 'premature-outline', name: 'plan_save', arguments: '{}' },
           ] }] } })
       }
+      const providerOperations = () => prisma.agentOperation.findMany({ where: { taskRootId: f.rootId, kind: 'provider' },
+        select: { id: true, action: true }, orderBy: { id: 'asc' } })
+      const fixtureProviders = await providerOperations()
+      expect(fixtureProviders).toHaveLength(scenario === 'timeout' ? 1 : 2)
+      expect(fixtureProviders.every(operation => operation.action === 'fixture_model_turn')).toBe(true)
       expect(await runtimeExecutor.runReviewedDurableExecution(lease, signal)).toMatchObject({ kind: 'completed' })
       const terminalText = scenario === 'timeout' ? QUESTION_TIMEOUT_NOTICE : '已保存《漫长的停电》的书名、简介和标签。要不要开始写大纲？'
       const events = await publishDurableEvents(f.userId, f.runId, 200)
       expect(events.filter(event => event.type === 'text.final' && event.text === terminalText)).toHaveLength(1)
       expect(events.at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: terminalText })
-      expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, OR: [{ kind: 'provider' }, { action: 'plan_save' }] } })).toBe(0)
+      expect(await providerOperations()).toEqual(fixtureProviders)
+      expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'plan_save' } })).toBe(0)
       expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'novel_create' } })).toBe(scenario === 'timeout' ? 0 : 1)
       const proof = await prisma.agentEffectReceipt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId, action: 'completion_finalize' } } })
       expect(proof.result).toMatchObject({ evidence: { postconditionChecks: [scenario === 'timeout'

@@ -45,7 +45,9 @@ export async function collectDurableToolEvidence(tx: RuntimeTx, taskRootId: stri
       if (!result.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '工具证据缺少完整结果。')
       const pending = await readExecutionFrame(tx, taskRootId, sourceRevision + 1)
       const reduced = await readExecutionFrame(tx, taskRootId, sourceRevision + 2)
-      const message = reduced.state.messages.at(-1)
+      // The reducer appends the verified receipt observation before any
+      // skipped sibling proposals or local terminal reply.
+      const message = reduced.state.messages[pending.state.messages.length]
       if (pending.state.pendingOperationId !== operation.id || reduced.state.phase !== 'idle' || message?.role !== 'tool'
         || message.toolCallId !== input.data.input.callId || !matchesToolObservation(operation.action, result.data.toolResult.output, message.content,
           { operationId: operation.id, resultHash: receipt.resultHash })) return runtimeError('RUNTIME_RECEIPT_INVALID', '工具证据未进入原执行上下文。')

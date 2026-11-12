@@ -98,7 +98,7 @@ export async function readObservedBaseline(tx: RuntimeTx, rootId: string, revisi
         || runtimeJson(event.payload).hash !== runtimeJson({ operationId: operation.id, resultHash: receipt.resultHash }).hash) runtimeError('RUNTIME_RECEIPT_INVALID', '写入基线缺少对应持久事件。')
       const pending = await readExecutionFrame(tx, rootId, sourceRevision + 1)
       const reduced = await readExecutionFrame(tx, rootId, sourceRevision + 2)
-      const observation = reduced.state.messages.at(-1)
+      const observation = reduced.state.messages[pending.state.messages.length]
       if (pending.state.pendingOperationId !== operation.id || reduced.state.phase !== 'idle' || observation?.role !== 'tool'
         || observation.toolCallId !== parsed.data.input.callId || !matchesToolObservation(operation.action, value.output, observation.content,
           { operationId: operation.id, resultHash: receipt.resultHash })) runtimeError('RUNTIME_RECEIPT_INVALID', '读取观察尚未进入原执行上下文。')

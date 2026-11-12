@@ -8,7 +8,7 @@ import * as scope from '../../api/lib/agent/writing-scope.js'
 
 afterEach(() => vi.restoreAllMocks())
 describe('terminal review progress in authenticated durable observations', () => {
-  it.each(['new', 'repeat', 'failed', 'foreign', 'wrong-action', 'unobserved', 'child'] as const)('preserves finite report handling and ownership for %s', async scenario => {
+  it.each(['new', 'repeat', 'failed', 'foreign', 'wrong-action', 'unobserved', 'followup', 'misplaced', 'child'] as const)('preserves finite report handling and ownership for %s', async scenario => {
     const spec = buildTaskSpec({ runId: 'root', novelId: 'novel', chapterId: 'chapter', prompt: '修改本章' })
     spec.scope.writing = { version: 1, kind: 'bounded', targets: [{ orderIndex: 5, chapterId: 'chapter' }], titleAndBodyOnly: false, repairAuthorized: true }
     const evidence = { taskId: 'root', userId: scenario === 'foreign' ? 'foreign' : 'owner', novelId: 'novel', chapterId: 'chapter', orderIndex: 5,
@@ -28,12 +28,17 @@ describe('terminal review progress in authenticated durable observations', () =>
     vi.spyOn(requests, 'readOriginalTaskRequest').mockResolvedValue({ taskId: 'root', spec, prompt: '修改本章', sourceRunId: 'run', parentRunId: scenario === 'child' ? 'parent' : null })
     vi.spyOn(scope, 'effectiveWritingTaskSpec').mockResolvedValue(spec)
     vi.spyOn(state, 'readExecutionFrame').mockImplementation(async (_tx, _root, revision) => {
-      const row = rows[Math.floor((revision - 1) / 2)]
-      return { state: revision % 2 ? { pendingOperationId: row.operation.id } : { phase: 'idle', messages: [{ role: 'tool', toolCallId: `call-${Math.floor((revision - 1) / 2)}`,
-        content: scenario === 'unobserved' ? 'Different output' : row.observation }] } } as Awaited<ReturnType<typeof state.readExecutionFrame>>
+      const index = Math.floor((revision - 1) / 2), row = rows[index]
+      const previous = [{ role: 'assistant' as const, content: null, toolCalls: [{ id: `call-${index}`, name: row.operation.action, arguments: '{}' }] }]
+      const observation = { role: 'tool' as const, toolCallId: `call-${index}`, content: row.observation }
+      const wrong = { ...observation, content: 'Different output' }
+      const appended = scenario === 'followup' ? [observation, { role: 'assistant' as const, content: '本轮已结束' }]
+        : scenario === 'misplaced' ? [wrong, observation] : [scenario === 'unobserved' ? wrong : observation]
+      return { state: revision % 2 ? { pendingOperationId: row.operation.id, messages: previous }
+        : { phase: 'idle', messages: [...previous, ...appended] } } as Awaited<ReturnType<typeof state.readExecutionFrame>>
     })
     const result = collectDurableToolEvidence(tx, 'root', rows.length * 2)
-    if (['foreign', 'wrong-action', 'unobserved'].includes(scenario)) await expect(result).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+    if (['foreign', 'wrong-action', 'unobserved', 'misplaced'].includes(scenario)) await expect(result).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
     else {
       const inspected = await result
       expect(inspected.progressSequence).toBe(scenario === 'failed' || scenario === 'child' ? '0' : '1')
