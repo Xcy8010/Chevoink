@@ -24,17 +24,18 @@ vi.mock('zod', async importOriginal => {
 describe('registered built-in parameter cache', () => {
   it('converts a registered base once and deeply isolates every returned nested object and array', () => {
     const tool = getToolByName('novel_import')!
-    const expected = toOpenAIParameters(tool.parameters), conversion = vi.mocked(z.toJSONSchema)
+    const expected = toOpenAIToolPresentation(tool).parameters, conversion = vi.mocked(z.toJSONSchema)
     conversion.mockClear()
     try {
       const first = toOpenAITools([tool])[0].function
       expect(conversion).toHaveBeenCalledTimes(1)
       const second = toOpenAITools([tool])[0].function
       expect(conversion).toHaveBeenCalledTimes(1)
-      const alternatives = first.parameters.oneOf as Array<{ properties: Record<string, Record<string, unknown>>; required: string[] }>
-      alternatives[0].properties.action.const = 'foreign-action'
-      alternatives[0].required.push('foreign-field')
-      alternatives.push({ properties: { foreign: { type: 'boolean' } }, required: ['foreign'] })
+      const properties = first.parameters.properties as Record<string, { enum: string[] }>
+      const required = first.parameters.required as string[]
+      properties.action.enum.push('foreign-action')
+      required.push('foreign-field')
+      properties.foreign = { enum: ['foreign'] }
       expect(second.parameters).toEqual(expected)
       expect(toOpenAITools([tool])[0].function.parameters).toEqual(expected)
       const renamed = toOpenAITools([{ ...tool, description: 'Current synthetic description' }])[0].function
@@ -43,7 +44,7 @@ describe('registered built-in parameter cache', () => {
       expect(renamed.parameters.type).toBe('object')
       expect(conversion).toHaveBeenCalledTimes(1)
       expect(first.parameters).not.toBe(second.parameters)
-      expect(first.parameters.oneOf).not.toBe(second.parameters.oneOf)
+      expect(first.parameters.properties).not.toBe(second.parameters.properties)
     } finally { conversion.mockClear() }
   })
   it('reapplies current scope presentation without leaking initialization guidance or nested mutations', () => {
@@ -71,7 +72,7 @@ describe('registered built-in parameter cache', () => {
       expect(first.description).toBe('Replacement schema')
       expect(first.parameters).toMatchObject({ type: 'object', additionalProperties: false, required: ['custom'] })
       expect(first.parameters.properties).toHaveProperty('optional')
-      expect(toOpenAITools([registered])[0].function.parameters).toHaveProperty('oneOf')
+      expect(toOpenAITools([registered])[0].function.parameters).toHaveProperty('properties.action.enum')
     } finally { conversion.mockClear() }
   })
   it('does not reuse a registered schema cache for a custom name sharing that same schema object', () => {
@@ -229,6 +230,44 @@ describe('tool schema provider contract', () => {
     const parameters = toOpenAIParameters(novelImportArguments)
     expect(parameters.type).toBe('object')
     expect(Array.isArray(parameters.oneOf)).toBe(true)
+  })
+
+  it('projects the built-in import as a plain object and validates each action at execution', () => {
+    const tool = getToolByName('novel_import')!
+    const scope: TaskSpec['scope'] = { novelId: 'synthetic' }
+    const oldParameters = toOpenAIParameters(novelImportArguments)
+    const [current] = toOpenAITools([tool], scope)
+    expect(current.function.parameters).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      required: ['action'],
+      properties: {
+        action: { type: 'string', enum: ['prepare', 'status', 'commit'] },
+        attachmentUrl: { type: 'string', maxLength: 1024 },
+        jobId: { type: 'string', format: 'uuid' },
+      },
+    })
+    expect(current.function.parameters).not.toHaveProperty('oneOf')
+    expect(originalToolParameterSchemas(tool, scope)).toEqual([oldParameters, current.function.parameters])
+
+    const old = { ...current, function: { ...current.function, parameters: oldParameters } }
+    const custom = { ...old, function: { ...old.function, parameters: { ...oldParameters, description: 'Custom restriction' } } }
+    const strict = { ...old, function: { ...old.function, strict: true } }
+    expect(projectNativeToolViews([old, custom, strict], [tool], scope)).toEqual([current, custom, strict])
+    expect(old.function.parameters).toHaveProperty('oneOf')
+
+    const execution = toolWithNativeView(tool, current).parameters
+    const jobId = 'e433ab53-1145-444b-97a3-25cb5146b6fe'
+    expect(execution.parse({ action: 'prepare', attachmentUrl: '/synthetic.docx' })).toEqual({ action: 'prepare', attachmentUrl: '/synthetic.docx' })
+    for (const action of ['status', 'commit']) {
+      expect(execution.parse({ action, jobId })).toEqual({ action, jobId })
+      expect(execution.safeParse({ action }).success).toBe(false)
+    }
+    for (const args of [
+      { action: 'prepare' },
+      { action: 'prepare', attachmentUrl: '/synthetic.docx', jobId },
+      { action: 'commit', jobId, confirmed: true },
+    ]) expect(execution.safeParse(args).success).toBe(false)
   })
 
   it('stored snapshots without top-level type are repaired identically to fresh conversion', () => {

@@ -4,7 +4,8 @@ import type { AgentTool } from './tools/types.js'
 import { retainedFindingSchema } from './tools/chapter-arguments.js'
 import { durableChatResultSchema, runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { readExecutionFrame } from './runtime-state.js'
-import { toOpenAIToolPresentation } from './tool-schema.js'
+import { toOpenAIParameters, toOpenAIToolPresentation } from './tool-schema.js'
+import { novelImportArguments } from './tools/import-arguments.js'
 
 export type NativeToolView = { type: 'function'; function: { name: string; strict?: boolean; description: string; parameters: Record<string, unknown> } }
 const simplified = new Set(['chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit', 'scene_task_build'])
@@ -35,6 +36,13 @@ export function projectNativeToolViews(frozen: readonly NativeToolView[], curren
     const definition = originalDefinition.function.strict === undefined
       ? { ...originalDefinition, function: { ...originalDefinition.function, strict: false } } : originalDefinition
     const tool = byName.get(definition.function.name)
+    if (tool?.name === 'novel_import' && tool.parameters === novelImportArguments && definition.function.strict === false
+      && runtimeJson(definition.function.parameters).hash === runtimeJson(toOpenAIParameters(novelImportArguments)).hash) {
+      // Only new requests use the compatible view. Prepared requests still use
+      // their exact saved definitions and are verified against the old schema.
+      const { parameters } = toOpenAIToolPresentation(tool, scope)
+      return { ...definition, function: { ...definition.function, parameters } }
+    }
     if (!tool || !simplified.has(tool.name)) return definition
     const next = toOpenAIToolPresentation(tool, scope), original = definition.function.parameters
     const old = properties(original), present = properties(next.parameters)

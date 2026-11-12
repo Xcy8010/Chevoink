@@ -1,14 +1,10 @@
-import { z } from 'zod'
 import { DataAccessError, prisma } from '../../prisma.js'
 import { defineTool } from './types.js'
 import type { ToolContext } from './types.js'
 import { assertNovelImportAttachment, getNovelImportStatus } from '../../novel-import-service.js'
+import { novelImportArguments } from './import-arguments.js'
 
-export const novelImportArguments = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('prepare'), attachmentUrl: z.string().min(1).max(1024) }).strict(),
-  z.object({ action: z.literal('status'), jobId: z.string().uuid() }).strict(),
-  z.object({ action: z.literal('commit'), jobId: z.string().uuid() }).strict(),
-])
+export { novelImportArguments } from './import-arguments.js'
 
 /** Only the durable adapter performs workflow effects. Human HTTP capabilities
  * remain the sole source of intent confirmations and manifest-bound approval. */

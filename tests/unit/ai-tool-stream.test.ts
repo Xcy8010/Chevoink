@@ -10,8 +10,9 @@ vi.mock('../../api/lib/billing/resolve-token-price.js', async original => ({ ...
 import { buildProviderToolChoice, chatWithTools, generateTextCompletion } from '../../api/lib/ai-service.js'
 import * as localTransport from '../../api/lib/local-model-transport.js'
 import { buildProviderCompatibilitySnapshot, type ProviderCompatibilityRoute } from '../../api/lib/agent/provider-compatibility.js'
-import { toOpenAIToolPresentation } from '../../api/lib/agent/tool-schema.js'
+import { toOpenAIParameters, toOpenAIToolPresentation } from '../../api/lib/agent/tool-schema.js'
 import { chapterCreateTool } from '../../api/lib/agent/tools/chapter-tools.js'
+import { novelImportTool } from '../../api/lib/agent/tools/import-tools.js'
 
 afterEach(() => vi.unstubAllGlobals())
 const delta = (args: string, first = false) => ({ choices: [{ delta: { tool_calls: [{ index: 0, ...(first ? { id: 'call', function: { name: 'scene_task_build', arguments: args } } : { function: { arguments: args } }) }] } }] })
@@ -66,6 +67,29 @@ describe('next prompt from the current response', () => {
   })
 })
 describe('lossless tool argument transport', () => {
+  it('sends the import tool as an object to a gateway that rejects root unions', async () => {
+    const presentation = toOpenAIToolPresentation(novelImportTool)
+    const old = { type: 'function' as const, function: {
+      name: novelImportTool.name, ...presentation, parameters: toOpenAIParameters(novelImportTool.parameters),
+    } }
+    const current = { ...old, function: { ...old.function, ...presentation } }
+    const fetch = vi.fn(async (_url, init) => {
+      const { tools: [tool] } = JSON.parse(String(init?.body))
+      if (tool.function.parameters.oneOf) {
+        expect(tool).toEqual(old)
+        return Response.json({ error: { param: 'tools[0].function.parameters' } }, { status: 400 })
+      }
+      expect(tool).toEqual(current)
+      expect(tool.function.parameters.properties.action.enum).toEqual(['prepare', 'status', 'commit'])
+      return new Response(`data: ${JSON.stringify(ending('stop'))}\n\ndata: [DONE]\n\n`)
+    })
+    vi.stubGlobal('fetch', fetch)
+    const options = { messages: [], providerApiKey: 'fake-test-key', usageLog: { userId: 'test', action: 'fixture' } }
+    await expect(chatWithTools({ ...options, tools: [old] })).rejects.toThrow()
+    expect(await chatWithTools({ ...options, tools: [current] })).toMatchObject({ finishReason: 'stop' })
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
   it('sends explicit non-strict optional tools unchanged before one compatible gateway response', async () => {
     const presentation = toOpenAIToolPresentation(chapterCreateTool, { novelId: 'synthetic', writing: {
       version: 1, kind: 'bounded', targets: [{ orderIndex: 7, chapterId: null }], titleAndBodyOnly: false, repairAuthorized: false,

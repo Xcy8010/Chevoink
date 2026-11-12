@@ -3,11 +3,9 @@ import { storyCharterInputSchema } from '../../../shared/contracts/story-compile
 import type { TaskSpec } from '../../../shared/contracts/index.js'
 import type { AgentTool } from './tools/types.js'
 import { coordinatedWriterActions, coordinatedWriterParameters } from './coordinated-writing-input.js'
+import { novelImportArguments, novelImportModelArguments } from './tools/import-arguments.js'
 
-/** 保证 function parameters 顶层 type 为 object。
- * 供应商（DeepSeek/OpenAI）要求函数参数顶层 type 必须是 object：顶层联合（oneOf/anyOf，
- * 如 novel_import 的 discriminatedUnion）转换后没有 type，会被供应商按 type null 拒绝，
- * 联合约束仍保留在 oneOf/anyOf 中，语义不变。 */
+/** 保证 function parameters 顶层 type 为 object，保留原有参数约束。 */
 export function withObjectType(schema: Record<string, unknown>): Record<string, unknown> {
   return schema.type === 'object' ? schema : { ...schema, type: 'object' }
 }
@@ -17,8 +15,9 @@ export function toOpenAIParameters(parameters: z.ZodType): Record<string, unknow
   return withObjectType(z.toJSONSchema(parameters, { io: 'input' }) as Record<string, unknown>)
 }
 
-/** Only a deterministic server-frozen global slot gets simpler presentation.
- * Execution still parses the original full schema and validates scope. */
+const importModelParameters = toOpenAIParameters(novelImportModelArguments)
+
+/** Execution still parses the original full schema and validates scope. */
 export function toOpenAIToolPresentation(tool: Pick<AgentTool, 'name' | 'description' | 'parameters'>, scope?: TaskSpec['scope'], baseParameters?: Record<string, unknown>): { strict: false; description: string; parameters: Record<string, unknown> } {
   // Chat defaults to non-strict; Responses may normalize an omitted strict
   // flag and make optional fields required. Keep our existing omission-based
@@ -26,7 +25,10 @@ export function toOpenAIToolPresentation(tool: Pick<AgentTool, 'name' | 'descrip
   return { strict: false, ...toolPresentation(tool, baseParameters ?? toOpenAIParameters(tool.parameters), scope) }
 }
 
-function toolPresentation(tool: Pick<AgentTool, 'name' | 'description'>, parameters: Record<string, unknown>, scope?: TaskSpec['scope']): { description: string; parameters: Record<string, unknown> } {
+function toolPresentation(tool: Pick<AgentTool, 'name' | 'description' | 'parameters'>, parameters: Record<string, unknown>, scope?: TaskSpec['scope']): { description: string; parameters: Record<string, unknown> } {
+  if (tool.name === 'novel_import' && tool.parameters === novelImportArguments) {
+    return { description: tool.description, parameters: structuredClone(importModelParameters) }
+  }
   // New model calls create identity/structure only. The execution schema keeps
   // content for already-frozen legacy requests; never rewrite their snapshots.
   if (tool.name === 'chapter_create') {
