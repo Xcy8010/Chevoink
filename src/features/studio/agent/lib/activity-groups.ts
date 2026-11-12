@@ -40,7 +40,7 @@ function savedReply(part: ActivityCall) {
 }
 
 export function activityWorkingLabel(part: ActivityCall | undefined) {
-  if (!part) return '梳理这次的创作要求'
+  if (!part) return '正在思考中'
   if (part.status === 'failed' || part.status === 'denied') return '核对刚才未完成的步骤'
   if (part.toolName === 'plan_save') return '核对计划保存结果'
   const { phase, label } = getAgentToolPresentation(part.toolName)
@@ -77,6 +77,24 @@ export function activityTarget(part: ActivityCall): string | undefined {
   if (typeof args?.volumeId === 'string') return `volume:${args.volumeId}`
 }
 
+const activityFamilies = new Map([
+  ['directive_list', 'settings'], ['memory_review_list', 'settings'], ['story_charter_get', 'settings'],
+  ['character_voice_get', 'settings'], ['experience_anchor_get', 'settings'], ['style_profile_get', 'settings'],
+  ['cover_prompt_set', 'cover'], ['cover_generate', 'cover'],
+  ['chapter_write', 'chapter-body'], ['chapter_append', 'chapter-body'],
+])
+
+function canGroup(current: ActivityGroup, next: ActivityCall, afterText: boolean): boolean {
+  const first = current.calls[0]
+  const family = activityFamilies.get(first.toolName)
+  if (afterText) return family === 'cover' && first.toolName === 'cover_prompt_set' && next.toolName === 'cover_generate'
+  if (family === 'chapter-body') {
+    const chapterId = activityChapterId(next)
+    return activityFamilies.get(next.toolName) === family && chapterId !== undefined && chapterId === activityChapterId(first)
+  }
+  return first.toolName === next.toolName || family !== undefined && family === activityFamilies.get(next.toolName)
+}
+
 /** Only presentation is grouped. Individual tool receipts retain their identity
  * and order, even when a preview is upgraded or a result is replayed. */
 export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'id' | 'role' | 'runId' | 'goalId' | 'parts'>[]) {
@@ -110,7 +128,6 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
     for (const part of parts) {
       if (part.type !== 'tool-call') {
         if (part.type === 'text') {
-          current = undefined
           publicTextSinceAction = true
           if (!openingByRun.has(message.runId)) openingByRun.set(message.runId, null)
         }
@@ -137,13 +154,13 @@ export function projectActivityGroups(messages: readonly Pick<AgentUIMessage, 'i
       const milestone = milestones[part.toolName === 'chapter_append' ? 'chapter_write' : part.toolName]
       const opening = !openingByRun.has(message.runId)
       if (opening) openingByRun.set(message.runId, phase === 'read' ? readOpening : milestone ?? activityOpening)
-      if (!current || current.calls[0].toolName !== part.toolName) {
+      if (!current || !canGroup(current, part, publicTextSinceAction)) {
         current = { id: JSON.stringify([message.id, part.callId]), runId: message.runId, messageId: message.id, firstCallId: part.callId, calls: [], childrenByCall: new Map() }
         if (!opening && !publicTextSinceAction && milestone && !announcedMilestones.has(milestone)) current.transition = milestone
         if (milestone) announcedMilestones.add(milestone)
-        publicTextSinceAction = false
         groups.push(current)
       }
+      publicTextSinceAction = false
       const group = current
       if (part.toolName === 'subagent_run' || part.toolName === 'subagent_delegate') {
         const calls = branches.get(identity) ?? []

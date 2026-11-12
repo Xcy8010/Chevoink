@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 export const adminModelDiagnosticRequestSchema = z.object({
   requestKey: z.string().regex(/^[A-Za-z0-9_-]{8,100}$/),
-  mode: z.enum(['configuration', 'gateway', 'capability']),
+  mode: z.enum(['configuration', 'gateway', 'capability', 'connection']),
   expectedRevision: z.string().min(1).max(96),
   costConfirmed: z.boolean().optional(),
 }).strict()
@@ -24,6 +24,7 @@ export type AdminModelDiagnosticResult = {
   createdAt: string
   finishedAt: string | null
   failure: { stage: AdminDiagnosticStage; code: string; message: string } | null
+  upstreamHttpStatus?: number
   checks: AdminDiagnosticCheck[]
   metrics: {
     responseHeadersMs: number | null

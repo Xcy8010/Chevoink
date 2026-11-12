@@ -111,11 +111,11 @@ export function assertWebSearchConfiguration(configured: ToolModelRuntime | null
 }
 
 const SNIPPET_MAX = 300
-const deepseekSearchSchema = z.object({ results: z.array(z.object({
+export const deepseekSearchSchema = z.object({ results: z.array(z.object({
   title: z.string(), url: z.string(), snippet: z.string(), summary: z.string(), content: z.string(),
   site_name: z.string().nullable().optional(),
 })).max(50) })
-const bochaResponseSchema = z.object({
+export const bochaResponseSchema = z.object({
   code: z.literal(200),
   data: z.object({ webPages: z.object({ value: z.array(z.object({
     name: z.string(), url: z.string(), snippet: z.string().nullish(),

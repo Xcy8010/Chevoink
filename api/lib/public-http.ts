@@ -1,6 +1,6 @@
 import dns from 'node:dns'
 import { BlockList, isIP, type LookupFunction } from 'node:net'
-import { Agent, fetch } from 'undici'
+import { Agent, fetch, type Response } from 'undici'
 
 // Conservative public egress policy. Special-purpose ranges are intentionally
 // excluded, even when a particular address within one is globally reachable.
@@ -56,6 +56,22 @@ export function parsePublicHttpUrl(value: string, allowHttp = false): URL {
   }
   url.hash = ''
   return url
+}
+
+/** Socket DNS is checked and pinned. Upstream credentials cannot follow a redirect. */
+export async function requestPublicProviderJson(endpoint: string, apiKey: string, body: unknown, signal: AbortSignal): Promise<{ response: Response; close: () => Promise<void> }> {
+  parsePublicHttpUrl(endpoint)
+  signal.throwIfAborted()
+  const dispatcher = new Agent({ connections: 1, maxHeaderSize: 16384, allowH2: false, connect: { lookup: publicEgressLookup, timeout: 8000 } })
+  try {
+    const response = await fetch(endpoint, {
+      dispatcher, method: 'POST', redirect: 'error', signal,
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    })
+    return { response, close: async () => {
+      try { if (response.body && !response.body.locked) await response.body.cancel() } finally { await dispatcher.destroy() }
+    } }
+  } catch (error) { await dispatcher.destroy(); throw error }
 }
 
 type ByteResponse = {

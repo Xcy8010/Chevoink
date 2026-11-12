@@ -20,6 +20,9 @@ const actionNames: Record<string, string> = {
   chapter_read: '查看章节', chapter_list_summaries: '查看章节摘要', project_search: '搜索前文',
   memory_search: '查找作品设定', web_search: '搜索网页', web_read: '查看网页', web_fetch: '查看网页',
   chapter_write: '写入正文', chapter_append: '续写正文', chapter_edit_range: '修改正文',
+  directive_list: '查看写作要求', memory_review_list: '核对记忆冲突', story_charter_get: '查看故事宪章',
+  character_voice_get: '查看人物声口', experience_anchor_get: '查看经历锚点', style_profile_get: '查看文风画像',
+  cover_prompt_set: '保存封面提示词', cover_generate: '生成封面候选图', cover_apply: '应用封面',
 }
 
 function toolIcon(part: ActivityCall) {
@@ -117,6 +120,12 @@ const readDetails: Record<string, RegExp> = {
   novel_get_context: /^读取《.+》上下文 · \d+ 章$/u,
   plan_read: /^读取计划《.+》$/u,
   memory_search: /^检索["“].+["”] · 命中 \d+ 条$/u,
+  directive_list: /^有效指令 · \d+ 条$/u,
+  memory_review_list: /^记忆审核箱 · \d+ 项$/u,
+  story_charter_get: /^当前尚未建立创作宪章$/u,
+  character_voice_get: /^人物声口 · \d+ 项$/u,
+  experience_anchor_get: /^经历锚点 · \d+ 项$/u,
+  style_profile_get: /^(?:未找到 Style DNA|读取 Style DNA「[^\n]+」)$/u,
 }
 
 function savedReadDetail(part: ActivityCall) {
@@ -189,7 +198,7 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
   const detailsId = useId()
   const calls = group?.calls ?? []
   const grouped = calls.length > 1
-  const latest = new Map(calls.map(part => [activityTarget(part), part]))
+  const latest = new Map(calls.map(part => [JSON.stringify([part.toolName, activityTarget(part)]), part]))
   // A successful retry for the same target supersedes the headline. The
   // failed receipt stays in the expanded list.
   const unresolved = [...latest.values()].find(hasCurrentFailure)

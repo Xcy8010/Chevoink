@@ -117,6 +117,44 @@ it('splits repeated tools at another tool even when their activity labels match'
   expect(projection.byMessage.get('last')?.get(last.callId)?.calls.map(part => part.callId)).toEqual([last.callId])
 })
 
+it('folds creation settings and the cover workflow while keeping the live row and ordered receipts', () => {
+  const setup = [
+    call('charter', 'story_charter_get'),
+    call('style', 'style_profile_get', { status: 'failed' }),
+    call('voice', 'character_voice_get', { status: 'running' }),
+  ]
+  const cover = call('prompt', 'cover_prompt_set', { display: { kind: 'markdown', markdown: '合成封面提示词。' } })
+  const generate = call('generate', 'cover_generate', { status: 'running' })
+  const messages = (settings: ActivityCall[], picture: ActivityCall) => [
+    message('settings', settings),
+    message('prompt', [cover]),
+    message('cover', [{ type: 'text', text: '用刚保存的构图生成候选。' }, picture]),
+  ]
+  const view = render(<Transcript active="r" messages={messages(setup, generate)} />)
+  const settingsRow = screen.getByRole('button', { name: '正在查看创作设定', exact: true })
+  const coverRow = screen.getByRole('button', { name: '正在制作封面', exact: true })
+  fireEvent.click(settingsRow)
+  fireEvent.click(coverRow)
+  expect(screen.queryByText('核对记忆冲突')).toBeNull()
+  expect(screen.getByText('查看文风画像未完成')).toBeTruthy()
+  expect(screen.getByText('正在查看人物声口')).toBeTruthy()
+  expect(screen.getByText('合成封面提示词。')).toBeTruthy()
+  const image = { ...generate, status: 'success' as const, display: { kind: 'coverImages' as const, images: [{ id: 'fixture', url: '/images/fixture.png' }] } }
+  view.rerender(<Transcript messages={messages(setup.map(item => item.status === 'running' ? { ...item, status: 'success' } : item), image)} />)
+  expect(screen.getByRole('button', { name: '查看创作设定有未完成项', expanded: true })).toBe(settingsRow)
+  expect(screen.getByRole('button', { name: '已制作封面', expanded: true })).toBe(coverRow)
+  expect(Array.from(view.container.querySelectorAll('[data-activity-tool]'), el => el.getAttribute('data-activity-tool')))
+    .toEqual(['story_charter_get', 'style_profile_get', 'character_voice_get', 'cover_prompt_set', 'cover_generate'])
+})
+
+it('combines writing and appending on one chapter but separates a different chapter', () => {
+  const projection = projectActivityGroups([message('a', [
+    saved('write'), saved('append', 'chapter_append'), call('other', 'chapter_write', { args: { chapterId: 'other-chapter' } }),
+  ])]).byMessage.get('a')
+  expect(projection?.get('write')?.calls.map(item => item.callId)).toEqual(['write', 'append'])
+  expect(projection?.get('other')?.calls.map(item => item.callId)).toEqual(['other'])
+})
+
 it('names review types and groups consecutive matching checks without exposing finding totals', () => {
   const continuity = call('continuity', 'continuity_validate', { display: {
     kind: 'storyCompiler', phase: 'check', title: '章节衔接复查', detail: '已检查', items: ['检查项仍可展开'], errorCount: 2, warningCount: 3,
@@ -263,7 +301,7 @@ it('hands the shimmer between model work, tool execution and the next step, then
   const view = render(<AuthorActivityParts parts={[opening, reasoning]} messageId="run" runActive workingLabel={activityWorkingLabel(undefined)} />)
   const shimmer = () => view.container.querySelectorAll('.agent-processing-shimmer')
   expect(shimmer()).toHaveLength(1)
-  expect(shimmer()[0].textContent).toBe('梳理这次的创作要求')
+  expect(shimmer()[0].textContent).toBe('正在思考中')
   const step = view.container.querySelector('[data-author-step] > button')
   const openingNode = screen.getByText(opening.text)
   expect(step?.querySelector('.lucide-brain')).toBeTruthy()

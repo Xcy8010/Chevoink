@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { Link, MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -72,7 +72,7 @@ it('edits Fetch as an independent tool and submits its dedicated endpoint withou
   mount()
   const title = await screen.findByText('Fetch tool')
   expect(title.closest('section')!.textContent).toContain('Fetch')
-  fireEvent.click(title.closest('section')!.querySelector('button')!)
+  fireEvent.click(within(title.closest('section')!).getByRole('button', { name: '编辑 Fetch tool' }))
   expect(screen.getByRole('combobox', { name: '网页工具协议' })).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: '计费' }))
   fireEvent.change(document.querySelector('[name="model-multiplier-fetch"]')!, { target: { value: '1.25' } })
@@ -323,13 +323,35 @@ it('locates required field errors and retains the draft after a server rejection
   expect(screen.getByRole('textbox', { name: '显示名称' }).getAttribute('value')).toBe('重试草稿')
 })
 
-it('keeps configuration checking local and separates cumulative tier usage from health', async () => {
-  mount('/admin/models?model=a&section=usage')
+it('tests the exact saved model on a row and in the editor and renders the upstream receipt', async () => {
+  mocks.get.mockResolvedValue({ models: [row('a', 'speed', '极速')], trend: [] })
+  mocks.diagnostic.mockImplementation(async (_id, input) => ({
+    id: input.requestKey, requestKey: input.requestKey, mode: 'connection', modelConfigId: 'a', configRevision: '1', modelName: 'fixture',
+    provider: 'openai', modelKind: 'text', status: 'succeeded', stale: false, createdAt: '2026-11-01T00:00:00Z',
+    checks: [], upstreamHttpStatus: 200, metrics: { totalMs: 148, outputTokens: 2 }, fee: { status: 'unknown' }, livePolicy: { enabled: false },
+  }))
+  mount()
+  const test = await screen.findByRole('button', { name: '测试连接 极速' })
+  const edit = screen.getByRole('button', { name: '编辑 极速' })
+  expect(test.compareDocumentPosition(edit) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(mocks.diagnostic).not.toHaveBeenCalled()
+  fireEvent.click(test)
+  let dialog = await screen.findByRole('dialog', { name: '测试连接 · 极速' })
+  expect(await within(dialog).findByText('连接测试通过')).toBeTruthy()
+  expect(within(dialog).getByText('200')).toBeTruthy()
+  expect(within(dialog).getByText('148 ms')).toBeTruthy()
+  fireEvent.click(within(dialog).getByRole('button', { name: '关闭' }))
+  fireEvent.click(edit)
+  fireEvent.click(screen.getByRole('button', { name: '用量与健康' }))
   await screen.findByText(/以下为档位 speed 的累计用量/)
-  expect(screen.getByText(/配置完整不代表可调用/)).toBeTruthy()
-  fireEvent.click(screen.getByRole('button', { name: '配置检查' }))
-  expect(screen.getByRole('status').textContent).toContain('未请求上游')
-  expect(screen.getByRole('status').textContent).toContain('未检测')
+  fireEvent.click(screen.getByRole('button', { name: '测试连接 极速' }))
+  dialog = await screen.findByRole('dialog', { name: '测试连接 · 极速' })
+  expect(await within(dialog).findByText('连接测试通过')).toBeTruthy()
+  expect(mocks.diagnostic).toHaveBeenCalledTimes(2)
+  for (const [id, input] of mocks.diagnostic.mock.calls) {
+    expect(id).toBe('a')
+    expect(input).toMatchObject({ mode: 'connection', expectedRevision: '1', requestKey: expect.any(String) })
+  }
   expect(mocks.update).not.toHaveBeenCalled()
   expect(mocks.create).not.toHaveBeenCalled()
 })
