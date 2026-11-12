@@ -37,7 +37,7 @@ import { planSaveTool } from '../../api/lib/agent/tools/write-tools.js'
 import { retrievalTraceReadTool,styleProfileGetTool } from '../../api/lib/agent/tools/craft-library-tools.js'
 import { directiveListTool } from '../../api/lib/agent/tools/directive-tools.js'
 import { characterVoiceGetTool,experienceAnchorGetTool,qualityReportGetTool } from '../../api/lib/agent/tools/humanity-quality-tools.js'
-import { askUserTool,QUESTION_TIMEOUT_NOTICE } from '../../api/lib/agent/tools/interact-tools.js'
+import { askUserTool,legacyAskUserParameters,QUESTION_CANCELLED_NOTICE,QUESTION_TIMEOUT_NOTICE } from '../../api/lib/agent/tools/interact-tools.js'
 import { memoryReviewListTool } from '../../api/lib/agent/tools/memory-tools.js'
 import { coverPromptSetTool,novelCreateTool,novelRenameTool,novelUpdateMetaTool } from '../../api/lib/agent/tools/novel-tools.js'
 import { BOOTSTRAP_NOVEL_SUMMARY } from '../../shared/contracts/novel-publish.js'
@@ -462,7 +462,7 @@ describe.runIf(available)('durable question lifecycle', () => {
       const tool = askUserTool
       await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
         model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
-        tools: [{ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(tool.parameters, { io: 'input' }) } }],
+        tools: [{ type: 'function', function: { name: tool.name, description: tool.description, parameters: z.toJSONSchema(legacyAskUserParameters, { io: 'input' }) } }],
         toolAuthority: [{ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
         snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
           messages: [{ role: 'user', content: '讨论剧情方向' }, { role: 'assistant', content: null, toolCalls: [{ id: 'question-call', name: 'ask_user',
@@ -537,7 +537,53 @@ describe.runIf(available)('durable question lifecycle', () => {
     })
   })
 
-  it.each(['timeout', 'answered', 'blocked'] as const)('settles novel setup in the %s scenario without extra model requests', async scenario => {
+  it('binds ordered batch answers to the same request and skips proposals made before they arrived', async () => {
+    const prompt = '先和我讨论剧情方向和叙述视角'
+    await fixture(async f => {
+      const lease = await claim(f)
+      const tools = [askUserTool, planSaveTool]
+      const questions = [
+        { question: '想采用哪个方向？', options: [{ label: '城市求生' }, { label: '海岛求生' }] },
+        { question: '想采用哪个视角？', options: [{ label: '第一人称' }, { label: '第三人称' }] },
+      ]
+      const answers = ['城市求生', '第三人称']
+      await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+        model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+        tools: toOpenAITools(tools, f.spec.scope), toolAuthority: tools.map(tool => ({ name: tool.name, permission: 'allow', alwaysConfirm: false, dangerous: false })),
+        protectedChapterIds: [], pinnedSkillVersions: [] },
+      snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+        messages: [{ role: 'user', content: prompt }, { role: 'assistant', content: null, toolCalls: [
+          { id: 'question-batch', name: 'ask_user', arguments: JSON.stringify({ questions }) },
+          { id: 'guessed-plan', name: 'plan_save', arguments: '{}' },
+        ] }], successfulToolSignatures: [] } })
+      const signal = new AbortController().signal
+      const waiting = await executeDurableToolStep(lease, signal)
+      if (waiting.kind !== 'waiting_question' || !waiting.requestId) throw new Error('Expected durable question batch')
+      const identity = { userId: f.userId, runId: f.runId, callId: 'question-batch', requestId: waiting.requestId }
+      expect(await publishDurableEvents(f.userId, f.runId)).toContainEqual(expect.objectContaining({ type: 'tool.call',
+        callId: identity.callId, args: { ...questions[0], questions, requestId: waiting.requestId } }))
+      await expect(resolveDurableQuestion({ ...identity, answer: answers[0] })).rejects.toMatchObject({ code: 'RUNTIME_INPUT_INVALID' })
+      await expect(resolveDurableQuestion({ ...identity, answers: answers.slice(0, 1) })).rejects.toMatchObject({ code: 'RUNTIME_INPUT_INVALID' })
+      expect(await prisma.agentExecutionOutbox.count({ where: { eventKey: `question-answer:${waiting.requestId}` } })).toBe(0)
+      expect(await resolveDurableQuestion({ ...identity, answers })).toEqual({ resolved: true })
+      expect(await resolveDurableQuestion({ ...identity, answers })).toEqual({ resolved: true })
+      await expect(resolveDurableQuestion({ ...identity, cancelled: true })).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+      expect(await waitForDurableDecision(lease, signal, { kind: 'waiting_question', requestId: waiting.requestId })).toBe(true)
+      const outcome = await executeDurableToolStep(lease, signal)
+      expect(outcome).toMatchObject({ kind: 'tool', result: { display: { kind: 'question', questions, answer: answers[0], answers } } })
+      const frame = (await loadExecutionState(f.userId, f.runId)).frame
+      expect(frame.state.messages.slice(-2)).toMatchObject([
+        { role: 'tool', toolCallId: identity.callId, content: expect.stringContaining('作者的回答：第三人称') },
+        { role: 'tool', toolCallId: 'guessed-plan', content: expect.stringContaining('未执行') },
+      ])
+      expect(await executeDurableToolStep(lease, signal)).toMatchObject({ kind: 'idle' })
+      expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'plan_save' } })).toBe(0)
+      expect(await publishDurableEvents(f.userId, f.runId)).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: identity.callId,
+        display: { kind: 'question', ...questions[0], questions, answer: answers[0], answers } }))
+    }, undefined, prompt, { agentQuestionProtocol: 1 })
+  })
+
+  it.each(['timeout', 'cancelled', 'answered', 'historical-answered', 'blocked'] as const)('settles novel setup in the %s scenario without extra model requests', async scenario => {
     const prompt = '帮我创建一部末日生存类型的小说'
     await fixture(async f => {
       await prisma.chapter.delete({ where: { id: f.chapterId } })
@@ -545,7 +591,12 @@ describe.runIf(available)('durable question lifecycle', () => {
       const lease = await claim(f)
       const tools = [askUserTool, novelCreateTool, planSaveTool, ...(scenario === 'blocked' ? [novelGetContextTool, novelUpdateMetaTool] : [])]
       const direction = { purpose: 'novel_direction', question: '你想写哪一种末日？', options: [{ label: '长期断电' }, { label: '冰期' }] }
+      const closedQuestion = scenario === 'timeout' || scenario === 'cancelled'
+      const questions = [{ question: direction.question, options: direction.options },
+        { question: '想采用哪个视角？', options: [{ label: '第一人称' }, { label: '第三人称' }] }]
       const fields = { title: '漫长的停电', summary: '旧城区的幸存者互助求生。', tags: ['都市'] }
+      const saveFields = { title: ` ${fields.title} `, summary: ` ${fields.summary} `, tags: [...fields.tags, ...fields.tags] }
+      const progress = '我会先整理已经确认的方向。'
       const authorSummary = '作者已自行保存的简介'
       const signal = new AbortController().signal
       await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
@@ -554,7 +605,7 @@ describe.runIf(available)('durable question lifecycle', () => {
         protectedChapterIds: [], pinnedSkillVersions: [] },
       snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
         messages: [{ role: 'user', content: prompt }, { role: 'assistant', content: null, toolCalls: [
-          { id: 'question-call', name: 'ask_user', arguments: JSON.stringify(direction) },
+          { id: 'question-call', name: 'ask_user', arguments: JSON.stringify(scenario === 'cancelled' ? { purpose: direction.purpose, questions } : direction) },
           { id: 'guessed-create', name: 'novel_create', arguments: JSON.stringify(fields) },
         ] }], successfulToolSignatures: [] } })
       const waiting = await executeDurableToolStep(lease, signal)
@@ -566,6 +617,15 @@ describe.runIf(available)('durable question lifecycle', () => {
           ...(request.payload as Record<string, Prisma.InputJsonValue>), expiresAt: '2000-01-01T00:00:00.000Z',
         } } })
         await expect(resolveDurableQuestion(answer)).rejects.toMatchObject({ code: 'QUESTION_NOT_PENDING' })
+      } else if (scenario === 'cancelled') {
+        const { answer: _answer, ...identity } = answer
+        const cancel = { ...identity, cancelled: true as const }
+        expect(await resolveDurableQuestion(cancel)).toEqual({ resolved: true })
+        expect(await resolveDurableQuestion(cancel)).toEqual({ resolved: true })
+        await expect(resolveDurableQuestion({ ...identity, answers: ['长期断电', '第三人称'] })).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+        expect(await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { eventKey: `question-answer:${waiting.requestId}` } })).toMatchObject({
+          type: 'question.cancelled', payload: { cancelled: true, requestId: waiting.requestId, userId: f.userId },
+        })
       } else {
         expect(await resolveDurableQuestion(answer)).toEqual({ resolved: true })
         expect(await executeDurableToolStep(lease, signal)).toMatchObject({ kind: 'tool', result: { display: { answer: '长期断电' } } })
@@ -575,9 +635,9 @@ describe.runIf(available)('durable question lifecycle', () => {
         const saveCalls = scenario === 'blocked'
           ? [{ id: 'current-context', name: 'novel_get_context', arguments: '{}' },
             { id: 'blocked-save', name: 'novel_update_meta', arguments: JSON.stringify(fields) }]
-          : [{ id: 'confirmed-create', name: 'novel_create', arguments: JSON.stringify(fields) }]
+          : [{ id: 'confirmed-create', name: 'novel_create', arguments: JSON.stringify(saveFields) }]
         await saveExecutionState(lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
-          snapshot: { ...frame.state, messages: [...frame.state.messages, { role: 'assistant', content: null, toolCalls: [
+          snapshot: { ...frame.state, messages: [...frame.state.messages, { role: 'assistant', content: progress, toolCalls: [
             ...saveCalls,
             { id: 'premature-outline', name: 'plan_save', arguments: '{}' },
           ] }] } })
@@ -585,17 +645,46 @@ describe.runIf(available)('durable question lifecycle', () => {
       const providerOperations = () => prisma.agentOperation.findMany({ where: { taskRootId: f.rootId, kind: 'provider' },
         select: { id: true, action: true }, orderBy: { id: 'asc' } })
       const fixtureProviders = await providerOperations()
-      expect(fixtureProviders).toHaveLength(scenario === 'timeout' ? 1 : 2)
+      expect(fixtureProviders).toHaveLength(closedQuestion ? 1 : 2)
       expect(fixtureProviders.every(operation => operation.action === 'fixture_model_turn')).toBe(true)
-      const result = await runtimeExecutor.runReviewedDurableExecution(lease, signal)
-      expect(result).toMatchObject({ kind: scenario === 'blocked' ? 'needs_attention' : 'completed' })
+      const execute = novelCreateTool.execute
+      const historical = scenario === 'historical-answered' ? vi.spyOn(novelCreateTool, 'execute').mockImplementation(async (ctx, args) => {
+        const { novelSetupRecap: _recap, ...originalReceipt } = await execute(ctx, args)
+        return originalReceipt
+      }) : undefined
+      const result = await runtimeExecutor.runReviewedDurableExecution(lease, signal).finally(() => historical?.mockRestore())
+      expect(result).toMatchObject({ kind: scenario === 'blocked' ? 'needs_attention' : scenario === 'cancelled' ? 'cancelled' : 'completed' })
       const terminalText = scenario === 'blocked' ? NOVEL_SETUP_BLOCKED_NOTICE
-        : scenario === 'timeout' ? QUESTION_TIMEOUT_NOTICE : '已保存《漫长的停电》的书名、简介和标签。要不要开始写大纲？'
+        : scenario === 'timeout' ? QUESTION_TIMEOUT_NOTICE : scenario === 'cancelled' ? QUESTION_CANCELLED_NOTICE
+          : scenario === 'historical-answered' ? '已保存《漫长的停电》的书名、简介和标签。要不要开始写大纲？'
+            : '已保存《漫长的停电》的作品信息。\n\n**简介**\n\n旧城区的幸存者互助求生。\n\n**标签** 都市\n\n要不要开始写大纲？'
       const events = await publishDurableEvents(f.userId, f.runId, 200)
-      expect(events.filter(event => event.type === 'text.final' && event.text === terminalText)).toHaveLength(1)
+      const recapEvents = events.filter(event => event.type === 'text.final' && event.text === terminalText)
+      expect(recapEvents).toHaveLength(1)
+      if (scenario === 'answered') {
+        const [recap] = recapEvents
+        if (recap.type !== 'text.final') throw new Error('Expected durable recap text')
+        expect(recap.afterTools).toBe(true)
+        const toolResult = events.find(event => event.type === 'tool.result' && event.callId === 'confirmed-create')
+        expect(toolResult).toMatchObject({ ok: true, messageId: recap.messageId, seq: expect.any(Number) })
+        expect(recap.seq).toBeGreaterThan(toolResult!.seq)
+        const history = await prisma.agentMessage.findUniqueOrThrow({ where: { id: recap.messageId } })
+        expect(history.parts).toMatchObject([
+          { type: 'text', text: progress },
+          { type: 'tool-call', callId: 'confirmed-create', status: 'success' },
+          { type: 'text', text: terminalText },
+        ])
+      } else if (scenario === 'cancelled') {
+        expect(recapEvents[0]).toMatchObject({ afterTools: true })
+        expect(events).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'question-call',
+          display: { kind: 'question', ...questions[0], questions, cancelled: true, unanswered: true } }))
+        expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId }, select: { status: true } })).toEqual({ status: 'cancelled' })
+        expect(await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId }, select: { status: true } })).toEqual({ status: 'cancelled' })
+      } else expect(recapEvents[0]).not.toHaveProperty('afterTools')
       expect(await providerOperations()).toEqual(fixtureProviders)
       expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'plan_save' } })).toBe(0)
-      expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'novel_create' } })).toBe(scenario === 'answered' ? 1 : 0)
+      expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'novel_create' } })).toBe(
+        scenario === 'answered' || scenario === 'historical-answered' ? 1 : 0)
       if (scenario === 'blocked') {
         expect(events.filter(event => event.type === 'tool.result' && event.callId === 'blocked-save')).toEqual([
           expect.objectContaining({ ok: false, failureCode: 'NOVEL_SETUP_AUTHORITY_REQUIRED' }),
@@ -613,15 +702,15 @@ describe.runIf(available)('durable question lifecycle', () => {
         expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'completion_finalize' } })).toBe(0)
         return
       }
-      expect(events.at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: terminalText })
+      expect(events.at(-1)).toMatchObject({ type: 'run.finished', status: scenario === 'cancelled' ? 'cancelled' : 'succeeded', outputSummary: terminalText })
       const proof = await prisma.agentEffectReceipt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId, action: 'completion_finalize' } } })
-      expect(proof.result).toMatchObject({ evidence: { postconditionChecks: [scenario === 'timeout'
-        ? { code: 'NOVEL_METADATA_INITIALIZED', status: 'deferred', deferredBy: 'question_timeout', evidence: { status: 'incomplete' } }
+      expect(proof.result).toMatchObject({ evidence: { postconditionChecks: [closedQuestion
+        ? { code: 'NOVEL_METADATA_INITIALIZED', status: 'deferred', deferredBy: scenario === 'cancelled' ? 'question_cancelled' : 'question_timeout', evidence: { status: 'incomplete' } }
         : { code: 'NOVEL_METADATA_INITIALIZED', status: 'passed', evidence: { status: 'complete' } }] } })
-      expect(await prisma.novel.findUniqueOrThrow({ where: { id: f.novelId } })).toMatchObject(scenario === 'timeout'
+      expect(await prisma.novel.findUniqueOrThrow({ where: { id: f.novelId } })).toMatchObject(closedQuestion
         ? { title: '未命名作品', summary: BOOTSTRAP_NOVEL_SUMMARY, tagNames: [] }
         : { title: fields.title, summary: fields.summary, tagNames: fields.tags })
-    }, undefined, prompt, { novelInitializationProtocol: 2 })
+    }, undefined, prompt, { novelInitializationProtocol: 2, ...(scenario === 'cancelled' ? { agentQuestionProtocol: 1 } : {}) })
   })
 })
 

@@ -31,6 +31,7 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
       OR: [{ type: { in: ['child.admitted', 'approval.requested', 'approval.resolved', 'execution.state.saved', 'writing.delivery.projected', 'question.requested', 'import.requested', 'import.commit_requested', 'goal.activation_registered', 'configuration.changed'] } },
         { type: { in: ['execution.bootstrap.paused', 'execution.bootstrap.resumed'] }, runId },
         { type: 'execution.completion.decided', runId, payload: { path: ['kind'], equals: 'completed' } },
+        { type: 'execution.completion.decided', runId, payload: { path: ['kind'], equals: 'cancelled' } },
         { type: 'run.paused', payload: { path: ['runIds'], array_contains: [runId] } }],
       projections: { none: { runId } } }, orderBy: { sequence: 'asc' }, take: limit })
     const latest = await tx.agentRunEvent.findFirst({ where: { runId }, orderBy: { seq: 'desc' }, select: { seq: true } })
@@ -133,23 +134,28 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
         bodies = [{ type: 'tool.call', messageId: durableMessageId(root.id, frame.state.turn), callId: question.callId, toolName: 'ask_user', title: '向作者提问',
           args: { ...durableQuestionContent.parse(question), requestId: source.id }, autoApproved: true }]
       } else if (source.type === 'execution.completion.decided') {
-        const decision = z.object({ version: z.literal(1), kind: z.literal('completed'), reviewOperationId: z.string(), resultHash: z.string(),
+        const decision = z.object({ version: z.literal(1), kind: z.enum(['completed', 'cancelled']), reviewOperationId: z.string(), resultHash: z.string(),
           sourceRevision: z.number().int().nonnegative(), sourceHash: z.string(), revision: z.number().int().positive(), snapshotHash: z.string(),
           outcome: limitedWritingOutcomeSchema.optional() }).parse(source.payload)
         const receipt = await tx.agentEffectReceipt.findUnique({ where: { operationId: decision.reviewOperationId }, include: { operation: true } })
         const verdict = z.object({ verdict: z.object({ verdict: z.literal('complete') }) }).safeParse(receipt?.result)
         const proof = z.object({ version: z.literal(1), sourceRevision: z.number(), sourceHash: z.string(),
-          candidateHash: z.string(), evidenceHash: z.string(), evidence: z.object({ blockers: z.array(z.never()) }).passthrough(),
+          candidateHash: z.string(), evidenceHash: z.string(), evidence: z.object({ blockers: z.array(z.never()),
+            terminalReason: z.enum(['question_timeout', 'question_cancelled']).optional() }).passthrough(),
           chapterPresentation: savedChapterPresentationSchema.optional(), limitedWritingDelivery: limitedWritingDeliverySchema.optional(),
           outcome: limitedWritingOutcomeSchema.optional() }).safeParse(receipt?.result)
         const frame = await readExecutionFrame(tx, root.id, decision.revision)
         const before = await readExecutionFrame(tx, root.id, decision.sourceRevision)
         const candidate = before.state.messages.at(-1)
         if (candidate?.role !== 'assistant') return runtimeError('RUNTIME_RECEIPT_INVALID', '完成事件缺少原候选答复。')
+        const cancelled = decision.kind === 'cancelled'
         const validProof = receipt?.operation.action === 'completion_finalize' && proof.success
           && proof.data.sourceRevision === decision.sourceRevision && proof.data.sourceHash === decision.sourceHash
           && runtimeJson(proof.data.evidence).hash === proof.data.evidenceHash
           && proof.data.candidateHash === runtimeJson({ content: candidate.content, reasoning: candidate.reasoning ?? null }).hash
+          && cancelled === (candidate.localCompletion?.kind === 'question_cancelled')
+          && cancelled === (proof.data.evidence.terminalReason === 'question_cancelled')
+          && (!cancelled || (!proof.data.outcome && !proof.data.chapterPresentation && !proof.data.limitedWritingDelivery))
           && (!proof.data.chapterPresentation || proof.data.chapterPresentation.targetRunId === source.runId)
           && (!proof.data.chapterPresentation || (() => {
             const admitted = z.object({ input: z.object({ chapterPresentation: savedChapterPresentationSchema }) }).safeParse(receipt.operation.inputSnapshot)
@@ -172,7 +178,7 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
           })())
           && (!!proof.data.outcome === !!proof.data.limitedWritingDelivery)
           && (!!decision.outcome === !!proof.data.outcome)
-        const legacyReview = receipt?.operation.action === 'completion_review' && verdict.success && !decision.outcome
+        const legacyReview = !cancelled && receipt?.operation.action === 'completion_review' && verdict.success && !decision.outcome
         if (!receipt || (!validProof && !legacyReview) || receipt.operation.taskRootId !== root.id
           || source.operationId !== receipt.operationId || source.eventKey !== `decision:${receipt.operationId}`
           || receipt.resultHash !== decision.resultHash || runtimeJson(receipt.result).hash !== decision.resultHash
@@ -186,10 +192,10 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
         const promptTokens = usage._sum.promptTokens ?? 0, completionTokens = usage._sum.completionTokens ?? 0
         const presentation = validProof && proof.success ? proof.data.chapterPresentation : null
         const receiptSuggestion = z.object({ nextPrompt: z.string().min(1).max(NEXT_PROMPT_MAX_LENGTH).nullable() }).safeParse(receipt.result)
-        const nextPrompt = validProof && proof.success && !proof.data.limitedWritingDelivery
+        const nextPrompt = !cancelled && validProof && proof.success && !proof.data.limitedWritingDelivery
           ? receiptSuggestion.success ? receiptSuggestion.data.nextPrompt : candidate.nextPrompt : undefined
         bodies = [...(presentation ? [{ type: 'text.final' as const, messageId: durableMessageId(root.id, before.state.turn), text: presentation.text, asReasoning: false }] : []),
-          { type: 'run.finished', status: 'succeeded', usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
+          { type: 'run.finished', status: cancelled ? 'cancelled' : 'succeeded', usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
             ...(validProof && proof.success && proof.data.limitedWritingDelivery ? { outcome: proof.data.limitedWritingDelivery.outcome } : {}),
             ...(nextPrompt ? { nextPrompt } : {}),
             artifacts: [], outputSummary: presentation?.text ?? candidate.content ?? '' }]

@@ -2,13 +2,14 @@ import { z } from 'zod'
 import { REVIEW_OUTCOMES } from '../../../shared/review-lifecycle.js'
 import type { AgentExecutionOutbox } from '@prisma/client'
 import type { AgentStreamEventBody, AgentToolDisplayPayload, AgentMessagePart, AgentRollbackSnapshot } from '../../../shared/contracts/index.js'
+import { appendAgentFinalTextAfterTools } from '../../../shared/agent-author-view.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { runtimeError, runtimeJson, type RuntimeTx } from './runtime-common.js'
 import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
 import { projectReviewWriteDeferral } from './runtime-review-deferral.js'
-import { hasNovelDirectionDelivery, isNovelSetupAuthorityFailure, NOVEL_SETUP_BLOCKED_NOTICE, novelSetupNotice } from './novel-initialization.js'
-import { failedToolResultSchema } from './runtime-reducer.js'
-import { QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
+import { formatNovelSetupRecap, hasNovelDirectionDelivery, isNovelSetupAuthorityFailure, NOVEL_SETUP_BLOCKED_NOTICE, novelSetupNotice, novelSetupRecapSchema } from './novel-initialization.js'
+import { failedToolResultSchema, hasAnsweredQuestionBatch } from './runtime-reducer.js'
+import { QUESTION_CANCELLED_NOTICE, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 
 export const durableMessageId = (rootId: string, turn: number) => `dm-${runtimeJson({ rootId, turn }).hash.slice(0, 48)}`
 const sourceSchema = z.object({ revision: z.number().int().nonnegative(), snapshotHash: z.string(), previousHash: z.string().nullable() }).strict()
@@ -30,6 +31,8 @@ export async function persistProjectedMessages(tx: RuntimeTx, source: AgentExecu
       const existing = parts.find(part => part.type === 'reasoning')
       parts = existing ? parts.map(part => part === existing ? { ...existing, text: existing.text + body.delta } : part)
         : [...parts, { type: 'reasoning', text: body.delta }]
+    } else if (body.type === 'text.final' && body.afterTools && !body.asReasoning) {
+      parts = appendAgentFinalTextAfterTools(parts, body.text)
     } else if (body.type === 'text.final') {
       parts = parts.filter(part => part.type !== 'text')
       if (body.text) parts = [...parts, { type: body.asReasoning ? 'reasoning' : 'text', text: body.text }]
@@ -103,15 +106,18 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
     if (appended.role === 'tool') {
       const operation = await tx.agentOperation.findFirst({ where: { id: previous.state.pendingOperationId!, taskRootId: source.taskRootId }, include: { effectReceipt: true } })
       const receipt = operation?.effectReceipt
-      const parsedResult = z.object({ code: z.string().optional(), toolResult: z.object({ summary: z.string(), failureCode: z.string().optional(), reviewOutcome: z.enum(REVIEW_OUTCOMES).optional(), display: z.unknown().optional(), outcome: z.literal('failed').optional(), questionTimedOut: z.literal(true).optional() }) }).safeParse(receipt?.result)
+      const parsedResult = z.object({ code: z.string().optional(), toolResult: z.object({ summary: z.string(), failureCode: z.string().optional(), reviewOutcome: z.enum(REVIEW_OUTCOMES).optional(), display: z.unknown().optional(), outcome: z.literal('failed').optional(), questionTimedOut: z.literal(true).optional(),
+        questionCancelled: z.literal(true).optional(), novelSetupRecap: novelSetupRecapSchema.optional() }) }).safeParse(receipt?.result)
       if (!operation || !receipt || !parsedResult.success || !['succeeded', 'failed'].includes(operation.status)
         || runtimeJson(receipt.result).hash !== receipt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '工具结果事件缺少完整回执。')
       const last = followup.at(-1)
       const terminal = last?.role === 'assistant' ? last : undefined
+      const recap = terminal?.localCompletion?.kind === 'novel_setup' ? parsedResult.data.toolResult.novelSetupRecap : undefined
       if (followup.length) {
         const args = operationInput.parse(operation.inputSnapshot).input.args
         const direction = z.object({ purpose: z.literal('novel_direction') }).safeParse(args).success
           && z.object({ kind: z.literal('question'), answer: z.string().min(1) }).safeParse(parsedResult.data.toolResult.display).success
+        const answeredBatch = hasAnsweredQuestionBatch(args, parsedResult.data.toolResult.display)
         const title = z.object({ title: z.string().trim().min(1) }).safeParse(args)
         const blocked = terminal?.localCompletion?.kind === 'novel_setup_blocked'
         let validTerminal = false
@@ -125,9 +131,12 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
           } else if (terminal.localCompletion.kind === 'question_timeout') {
             validTerminal = operation.action === 'ask_user' && parsedResult.data.toolResult.questionTimedOut === true
               && terminal.content === QUESTION_TIMEOUT_NOTICE
+          } else if (terminal.localCompletion.kind === 'question_cancelled') {
+            validTerminal = operation.action === 'ask_user' && parsedResult.data.toolResult.questionCancelled === true
+              && terminal.content === QUESTION_CANCELLED_NOTICE
           } else {
             validTerminal = ['novel_create', 'novel_update_meta'].includes(operation.action) && title.success
-              && terminal.content === novelSetupNotice(title.data.title)
+              && terminal.content === (recap ? formatNovelSetupRecap(recap) : novelSetupNotice(title.data.title))
           }
         }
         const skipped = terminal ? followup.slice(0, -1) : followup
@@ -138,7 +147,7 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
           .flatMap(message => message.role === 'tool' ? [message.toolCallId] : []))
         const expected = assistant?.role === 'assistant'
           ? assistant.toolCalls?.filter(call => call.id !== appended.toolCallId && !answered.has(call.id)).map(call => call.id) ?? [] : []
-        if (operation.status !== (blocked ? 'failed' : 'succeeded') || (terminal ? !validTerminal : operation.action !== 'ask_user' || !direction)
+        if (operation.status !== (blocked ? 'failed' : 'succeeded') || (terminal ? !validTerminal : operation.action !== 'ask_user' || (!direction && !answeredBatch))
           || runtimeJson(frame.state.messages.slice(0, previous.state.messages.length)).hash !== runtimeJson(previous.state.messages).hash
           || skipped.length !== expected.length || skipped.some((message, index) => message.role !== 'tool' || message.toolCallId !== expected[index])) {
           return runtimeError('RUNTIME_RECEIPT_INVALID', '本轮收尾与原工具回执不一致。')
@@ -149,7 +158,8 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
         ...(operation.action !== 'continuity_validate' && operation.action !== 'chapter_bridge_commit' && parsedResult.data.toolResult.reviewOutcome ? { reviewOutcome: parsedResult.data.toolResult.reviewOutcome } : {}),
         ...(parsedResult.data.code || parsedResult.data.toolResult.failureCode ? { failureCode: parsedResult.data.code ?? parsedResult.data.toolResult.failureCode } : {}),
         ...(operation.status === 'succeeded' && parsedResult.data.toolResult.display ? { display: parsedResult.data.toolResult.display as AgentToolDisplayPayload } : {}) },
-      ...(terminal?.content ? [{ type: 'text.final' as const, messageId, text: terminal.content, asReasoning: false }] : [])]
+      ...(terminal?.content ? [{ type: 'text.final' as const, messageId, text: terminal.content, asReasoning: false,
+        ...(recap || terminal.localCompletion?.kind === 'question_cancelled' ? { afterTools: true as const } : {}) }] : [])]
     }
   }
   return [{ type: 'execution.progress', revision: frame.revision, stage: frame.state.phase === 'completed' ? 'finalizing' : 'checkpoint' }]

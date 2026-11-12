@@ -89,7 +89,8 @@ function RunDetails({ sessionId, runs }: { sessionId: string; runs: AdminAgentRu
       <p className="mt-2 text-xs text-[var(--text-secondary)]">以下来自保存的消息，原始事件时间未记录。</p>
       <ol className="mt-1 max-h-[55vh] divide-y divide-[var(--border-subtle)] overflow-y-auto text-xs">
         {messageReceipts.map((part, index) => <li key={index} className="break-words py-2">
-          <span className="font-mono">{part.toolName}</span> · {part.display?.kind === 'question' && part.display.unanswered ? '未获回答'
+          <span className="font-mono">{part.toolName}</span> · {part.display?.kind === 'question' && part.display.cancelled ? '作者已取消'
+            : part.display?.kind === 'question' && part.display.unanswered ? '未获回答'
             : part.status === 'success' ? '成功' : part.status === 'failed' ? '失败' : part.status === 'denied' ? '未获准' : '结果未知'}
           {part.summary ? <p>{part.summary}</p> : null}
         </li>)}

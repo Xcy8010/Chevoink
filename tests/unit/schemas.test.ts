@@ -23,6 +23,7 @@ import {
   publishNovelSchema,
   resolveAgentApprovalSchema,
   resolveAgentQuestionSchema,
+  agentQuestionPromptsSchema,
   startAgentLoopRunSchema,
   updateChapterSchema,
   updateNovelSchema,
@@ -105,6 +106,16 @@ describe('P0 schema 行为对齐原路由断言', () => {
     ).toBe(false)
     expect(resolveAgentApprovalSchema.safeParse({ callId: 'c', approved: 'yes' }).success).toBe(false)
     expect(resolveAgentQuestionSchema.safeParse({ callId: 'c', answer: ' ' }).success).toBe(false)
+    expect(resolveAgentQuestionSchema.parse({ callId: 'c', answer: '旧案' })).toEqual({ callId: 'c', answer: '旧案' })
+    expect(resolveAgentQuestionSchema.parse({ callId: 'c', answers: ['旧案', '第一人称'] }))
+      .toEqual({ callId: 'c', answers: ['旧案', '第一人称'] })
+    expect(resolveAgentQuestionSchema.parse({ callId: 'c', cancelled: true })).toEqual({ callId: 'c', cancelled: true })
+    expect(resolveAgentQuestionSchema.safeParse({ callId: 'c', cancelled: true, answers: ['尚未提交'] }).success).toBe(false)
+    expect(resolveAgentQuestionSchema.safeParse({ callId: 'c', answers: ['旧案', ' '] }).success).toBe(false)
+    const prompt = { question: '故事主线？', options: [{ label: '旧案' }, { label: '失踪' }] }
+    expect(agentQuestionPromptsSchema.safeParse([prompt, prompt, prompt]).success).toBe(true)
+    expect(agentQuestionPromptsSchema.safeParse([{ ...prompt, question: ' ' }]).success).toBe(false)
+    expect(agentQuestionPromptsSchema.safeParse([prompt, prompt, prompt, prompt]).success).toBe(false)
     expect(uploadAgentAttachmentSchema.safeParse({ kind: 'image', name: 'n', dataUrl: 'd' }).success).toBe(true)
     expect(uploadAgentAttachmentSchema.safeParse({ kind: 'video', name: 'n', dataUrl: 'd' }).success).toBe(false)
     const run = startAgentLoopRunSchema.parse({

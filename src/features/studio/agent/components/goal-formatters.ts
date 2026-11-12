@@ -4,6 +4,7 @@ const goalReasonLabels: Record<string, string> = {
   GOAL_BUDGET_EXHAUSTED: '预算已用完',
   GOAL_COMPLETION_REVIEW_REQUIRED: '等待你确认完成',
   GOAL_SCOPE_DECISION_REQUIRED: '请明确目标范围',
+  GOAL_QUESTION_CANCELLED: '提问已取消，等待你的指示',
   GOAL_CHILD_EXECUTING: '等待子任务完成',
   GOAL_RECONCILIATION_REQUIRED: '等待核对执行结果',
   GOAL_RUN_HANDLE_MISSING: '等待恢复执行句柄',

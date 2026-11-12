@@ -48,6 +48,24 @@ describe.skipIf(!dbAvailable)('queue database transactions (isolated test DB)', 
     expect(execution).toHaveBeenCalledWith(expect.objectContaining({ runId: result.runId, admittedMessageId: original.id, prompt }))
     expect(await prisma.agentMessage.count({ where: { runId: result.runId, role: 'user' } })).toBe(1)
   })
+  it.each(['legacy-direct', 'current-direct', 'current-queued'] as const)('freezes question support from the admitted client: %s', async path => {
+    const input = { sessionId, novelId, mode: 'build' as const, prompt: '讨论两种剧情方向',
+      ...(path === 'legacy-direct' ? {} : { agentQuestionProtocol: 1 as const }) }
+    let runId: string
+    if (path === 'current-queued') {
+      const id = randomUUID()
+      await enqueueRequest(userId, id, input, 'http')
+      await dispatchQueuedRequests()
+      const row = await prisma.agentQueuedRequest.findUniqueOrThrow({ where: { id } })
+      if (!row.runId) throw new Error('Expected the admitted queue item to dispatch')
+      runId = row.runId
+    } else {
+      runId = (await startLoopRun(userId, input, { humanOrigin: 'http' })).runId
+    }
+    const stored = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } })
+    const spec = stored.taskSpec as { scope: { agentQuestionProtocol?: 1 } }
+    expect(spec.scope.agentQuestionProtocol).toBe(input.agentQuestionProtocol)
+  })
   it('serializes direct starts even before a queued run has a local controller', async () => {
     const input = { sessionId, novelId, mode: 'build' as const, prompt: '只执行一次' }
     const results = await Promise.allSettled([startLoopRun(userId, input), startLoopRun(userId, input)])

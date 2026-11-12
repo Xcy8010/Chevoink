@@ -1,4 +1,5 @@
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
+import { agentQuestionPromptsSchema } from '../../../shared/contracts/schemas.js'
 import { hasRetiredNativeArguments, verifiedAssistantToolViews } from './runtime-tool-view.js'
 import { parseToolArgsTolerant } from './tool-argument-parser.js'
 import { z } from 'zod'
@@ -12,15 +13,15 @@ import { readObservedBaseline } from './runtime-observed-baseline.js'
 import { formatDurableToolObservation, formatReferencedToolObservation, TOOL_OBSERVATION_INLINE_BYTES } from './runtime-common.js'
 import { executionContextReadTool } from './tools/task-context-tools.js'
 import { toOpenAIParameters } from './tool-schema.js'
-import { hasNovelDirectionDelivery, isNovelSetupAuthorityFailure, NOVEL_SETUP_BLOCKED_NOTICE, novelSetupNotice } from './novel-initialization.js'
-import { QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
+import { formatNovelSetupRecap, hasNovelDirectionDelivery, isNovelSetupAuthorityFailure, NOVEL_SETUP_BLOCKED_NOTICE, novelSetupNotice, novelSetupRecapSchema } from './novel-initialization.js'
+import { QUESTION_CANCELLED_NOTICE, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 export { formatDurableToolObservation } from './runtime-common.js'
 
 type Message = z.infer<typeof executionSnapshotSchema>['messages'][number]
 const successfulModel = z.object({ outcome: z.literal('succeeded'), result: durableChatResultSchema }).strict()
 const toolInput = z.object({ input: z.object({ callId: z.string().min(1), args: z.record(z.string(), z.unknown()), normalization: argumentNormalizationSchema.optional(), rejection: toolRejectionSchema.optional() }) })
-const toolResult = z.object({ toolResult: z.object({ output: z.string(), questionTimedOut: z.literal(true).optional(),
-  display: z.unknown().optional() }) })
+const toolResult = z.object({ toolResult: z.object({ output: z.string(), questionTimedOut: z.literal(true).optional(), questionCancelled: z.literal(true).optional(),
+  display: z.unknown().optional(), novelSetupRecap: novelSetupRecapSchema.optional() }) })
 export const failedToolResultSchema = z.object({ outcome: z.literal('failed'), effectApplied: z.literal(false), code: z.string(),
   toolResult: z.object({ output: z.string(), summary: z.string() }) }).strict()
 
@@ -28,6 +29,13 @@ export const failedToolResultSchema = z.object({ outcome: z.literal('failed'), e
 export function readFailedToolResult(value: unknown) {
   const failure = failedToolResultSchema.parse(value)
   return { ...failure.toolResult, outcome: 'failed' as const, failureCode: failure.code }
+}
+
+export function hasAnsweredQuestionBatch(args: unknown, display: unknown) {
+  const requested = z.object({ questions: agentQuestionPromptsSchema }).safeParse(args)
+  const answered = z.object({ kind: z.literal('question'), answer: z.string(), answers: z.array(z.string().min(1)) }).safeParse(display)
+  return requested.success && answered.success && requested.data.questions.length === answered.data.answers.length
+    && answered.data.answers[0] === answered.data.answer
 }
 
 /** Reduce a specific saved pending frame, never the latest conversational summary.
@@ -139,6 +147,8 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
         const directionSetup = spec?.scope.novelInitializationProtocol === 2 && hasNovelDirectionDelivery(spec)
         const tool = parsedResult.data.toolResult
         const timeout = !failed && operation.action === 'ask_user' && tool.questionTimedOut
+        const cancelled = !failed && operation.action === 'ask_user' && tool.questionCancelled
+        const answeredBatch = !failed && operation.action === 'ask_user' && hasAnsweredQuestionBatch(parsedInput.data.input.args, tool.display)
         const display = z.object({ kind: z.literal('question'), answer: z.string().min(1) }).safeParse(tool.display)
         const answeredDirection = !failed && operation.action === 'ask_user' && directionSetup
           && parsedInput.data.input.args.purpose === 'novel_direction' && display.success
@@ -146,17 +156,19 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
           .safeParse(parsedInput.data.input.args)
         const setupTitle = !failed && operation.action !== 'ask_user' && directionSetup && metadata.success ? metadata.data.title : ''
         const setupBlocked = directionSetup && isNovelSetupAuthorityFailure(operation.action, failure?.data?.code)
-        if (timeout || answeredDirection || setupTitle || setupBlocked) {
+        if (timeout || cancelled || answeredDirection || answeredBatch || setupTitle || setupBlocked) {
           const finished = new Set(frame.state.messages.slice(assistantIndex + 1)
             .flatMap(item => item.role === 'tool' ? [item.toolCallId] : []))
           for (const sibling of assistant.toolCalls ?? []) {
             if (sibling.id !== callId && !finished.has(sibling.id)) followup.push({ role: 'tool', toolCallId: sibling.id,
-              content: answeredDirection && !timeout ? '此调用在作者回答前拟定，未执行。请按作者实际选择重新拟定下一步。' : '本轮已结束，此调用未执行。' })
+              content: !timeout && !cancelled && (answeredDirection || answeredBatch)
+                ? '此调用在作者回答前拟定，未执行。请按作者实际选择重新拟定下一步。' : '本轮已结束，此调用未执行。' })
           }
         }
-        if (timeout || setupTitle) followup.push({ role: 'assistant',
-          content: timeout ? QUESTION_TIMEOUT_NOTICE : novelSetupNotice(setupTitle),
-          localCompletion: { kind: timeout ? 'question_timeout' : 'novel_setup', operationId: operation.id } })
+        if (cancelled || timeout || setupTitle) followup.push({ role: 'assistant',
+          content: cancelled ? QUESTION_CANCELLED_NOTICE : timeout ? QUESTION_TIMEOUT_NOTICE
+            : tool.novelSetupRecap ? formatNovelSetupRecap(tool.novelSetupRecap) : novelSetupNotice(setupTitle),
+          localCompletion: { kind: cancelled ? 'question_cancelled' : timeout ? 'question_timeout' : 'novel_setup', operationId: operation.id } })
         if (setupBlocked) followup.push({ role: 'assistant', content: NOVEL_SETUP_BLOCKED_NOTICE,
           localCompletion: { kind: 'novel_setup_blocked', operationId: operation.id } })
       }

@@ -1,9 +1,10 @@
 import { publicAgentProgressEvent } from '../../../../shared/agent-progress.js'
 import { create } from 'zustand'
-import { createAgentAuthorTextStream, projectAgentAuthorParts, projectAgentAuthorText, projectAgentToolSummary } from '../../../../shared/agent-author-view.js'
+import { appendAgentFinalTextAfterTools, createAgentAuthorTextStream, projectAgentAuthorParts, projectAgentAuthorText, projectAgentToolSummary } from '../../../../shared/agent-author-view.js'
 import { getAgentToolPresentation } from '../../../../shared/agent-tool-presentation.js'
 import { advanceRunTiming, settleRunTiming, timestamp } from '../../../../shared/agent-timing.js'
 import { qualityAppliedBodyChange } from '../../../../shared/agent-applied-body-change.js'
+import { agentQuestionPromptsSchema } from '../../../../shared/contracts/schemas.js'
 import { useOutgoingMessages } from './outgoing-messages'
 
 import type {
@@ -12,6 +13,7 @@ import type {
   AgentGoalSnapshot,
   AgentMessagePart,
   AgentNextPrompt,
+  AgentQuestionPrompt,
   AgentSessionRunStatus,
   AgentStreamEvent,
   AgentTodoItem,
@@ -63,11 +65,10 @@ export type SessionSignal = { runId: string; kind: SessionSignalKind; at: number
 export type AgentAuthorEnded = { fulfilled: boolean; todoItems?: AgentTodoItem[] }
 
 /** ask_user 工具挂起中的提问，驱动专门的提问卡片 UI */
-export type PendingQuestion = {
+export type PendingQuestion = AgentQuestionPrompt & {
   requestId?: string
   callId: string
-  question: string
-  options: Array<{ label: string; detail?: string }>
+  questions?: AgentQuestionPrompt[]
 }
 
 /** 从 ask_user 的 tool.call args 中防御性解析提问内容 */
@@ -75,21 +76,28 @@ function parseQuestionArgs(callId: string, args: unknown): PendingQuestion | nul
   if (!args || typeof args !== 'object') {
     return null
   }
-  const payload = args as { question?: unknown; options?: unknown; requestId?: unknown }
+  const payload = args as { question?: unknown; options?: unknown; requestId?: unknown; questions?: unknown }
+  const request = { callId, ...(typeof payload.requestId === 'string' ? { requestId: payload.requestId } : {}) }
+  if (payload.questions !== undefined) {
+    const parsed = agentQuestionPromptsSchema.safeParse(payload.questions)
+    if (!parsed.success) return null
+    return { ...request, ...parsed.data[0], questions: parsed.data }
+  }
   if (typeof payload.question !== 'string' || !payload.question.trim()) {
     return null
   }
   const options = Array.isArray(payload.options)
     ? payload.options
-        .filter((option): option is { label: string; detail?: string } =>
+        .filter((option): option is { label: string; detail?: unknown; coverAssetId?: unknown } =>
           Boolean(option && typeof option === 'object' && typeof (option as { label?: unknown }).label === 'string'),
         )
         .map((option) => ({
           label: option.label,
           detail: typeof option.detail === 'string' ? option.detail : undefined,
+          ...(typeof option.coverAssetId === 'string' ? { coverAssetId: option.coverAssetId } : {}),
         }))
     : []
-  return { callId, question: payload.question, options, ...(typeof payload.requestId === 'string' ? { requestId: payload.requestId } : {}) }
+  return { ...request, question: payload.question, options }
 }
 
 /** 本次 run 对工作区（章节/作品）的写入活动，驱动变更条 UI 与动效 */
@@ -1294,7 +1302,12 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           authorTextStreams.delete(`${event.runId}:${event.messageId}`)
           const text = event.asReasoning ? '' : projectAgentAuthorText(event.text)
           const replay = restoredMessageReplay.get(`${event.runId}:${event.messageId}`)
-          if (replay?.started) { replay.text = text; replay.lastPart = 'text' }
+          const messages = updateMessageParts(text ? owned : state.messages, event.messageId, parts =>
+            event.afterTools ? appendAgentFinalTextAfterTools(parts, text) : replaceAuthorText(parts, text, replay?.seenCalls))
+          const revealedText = event.afterTools
+            ? messages.find(message => message.id === event.messageId)?.parts.flatMap(part => part.type === 'text' ? [part.text] : []).join('') ?? ''
+            : text
+          if (replay?.started) { replay.text = revealedText; replay.lastPart = 'text' }
           const previousText = state.messages.find(message => message.id === event.messageId)?.parts
             .filter(part => part.type === 'text').map(part => part.text).join('') ?? ''
           // A tool-only turn may have no rendered assistant row to finish a
@@ -1303,16 +1316,16 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           const animateText = visible && state.motionAfterSeq !== null && event.seq > state.motionAfterSeq
           const revealTargets = animateText || (!visible && event.messageId in state.textRevealTargets) ? { ...state.textRevealTargets } : undefined
           if (revealTargets) {
-            if (animateText) revealTargets[event.messageId] = text
+            if (animateText) revealTargets[event.messageId] = revealedText
             else delete revealTargets[event.messageId]
           }
           return {
             ...base,
-            ...(visible && text !== previousText ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
+            ...(visible && revealedText !== previousText ? { lastVisibleOutput: { runId: event.runId, at: Date.now() } } : {}),
             ...(revealTargets ? { textRevealTargets: revealTargets } : {}),
             finalizedTextIds: state.finalizedTextIds.includes(event.messageId)
               ? state.finalizedTextIds : [...state.finalizedTextIds, event.messageId],
-            messages: updateMessageParts(text ? owned : state.messages, event.messageId, parts => replaceAuthorText(parts, text, replay?.seenCalls)),
+            messages,
           }
         }
 

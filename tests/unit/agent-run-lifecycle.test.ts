@@ -4861,6 +4861,59 @@ describe('author-directed task ending in the real execution loop', () => {
     const saved = mocks.persist.mock.calls as unknown as Array<[{ create?: { parts?: AgentMessagePart[] } }]>
     expect(saved.some(([entry]) => entry.create?.parts?.some(part => part.type === 'tool-call' && part.callId === 'direction'))).toBe(true)
   })
+  it('ends an explicitly cancelled question batch locally and persists the cancellation', async () => {
+    const { waitForQuestionAnswer } = await import('../../api/lib/agent/permissions.js')
+    const { askUserTool, QUESTION_CANCELLED_NOTICE } = await import('../../api/lib/agent/tools/interact-tools.js')
+    const questions = [
+      { question: '使用什么视角？', options: [{ label: '第一人称' }, { label: '第三人称' }] },
+      { question: '使用什么语气？', options: [{ label: '克制' }, { label: '明快' }] },
+    ]
+    const write = tool('plan_save', async () => { throw new Error('An explicitly cancelled question cannot start a sibling write') }, false)
+    mocks.tools = [askUserTool, write]
+    vi.mocked(waitForQuestionAnswer).mockResolvedValueOnce({ answer: null, timedOut: false, cancelled: true })
+    queue(response('', [call('batch', 'ask_user', JSON.stringify({ questions })), call('later-write', 'plan_save')], 31))
+    const prompt = '比较两种叙事方向'
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', prompt })
+    mocks.currentOriginal = { prompt, taskSpec: { ...taskSpec, scope: { ...taskSpec.scope, agentQuestionProtocol: 1 } } }
+    await run(prompt)
+    expect(mocks.chat).toHaveBeenCalledOnce()
+    expect(write.execute).not.toHaveBeenCalled()
+    expect(waitForQuestionAnswer).toHaveBeenCalledExactlyOnceWith('run', 'batch', expect.any(Number), expect.any(AbortSignal), 2)
+    expect(events().find(event => event.type === 'tool.result' && event.callId === 'batch')).toMatchObject({
+      ok: true, display: { kind: 'question', questions, cancelled: true, unanswered: true },
+    })
+    expect(events().filter(event => event.type === 'text.final')).toEqual([
+      expect.objectContaining({ text: QUESTION_CANCELLED_NOTICE }),
+    ])
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'cancelled' })
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'cancelled', usage: { totalTokens: 31 } })
+    const writes = mocks.persist.mock.calls as unknown as Array<[{ create?: { parts?: AgentMessagePart[] } }]>
+    expect(writes.flatMap(([entry]) => entry.create?.parts ?? [])).toContainEqual(
+      expect.objectContaining({ type: 'tool-call', callId: 'batch', display: expect.objectContaining({ cancelled: true }) }),
+    )
+  })
+  it('sends all answers from a question batch to the model before any further tool proposals', async () => {
+    const { waitForQuestionAnswer } = await import('../../api/lib/agent/permissions.js')
+    const { askUserTool } = await import('../../api/lib/agent/tools/interact-tools.js')
+    const questions = [
+      { question: '使用什么视角？', options: [{ label: '第一人称' }, { label: '第三人称' }] },
+      { question: '使用什么语气？', options: [{ label: '克制' }, { label: '明快' }] },
+    ]
+    const write = tool('plan_save', async () => { throw new Error('This proposal was made before the author answered') }, false)
+    mocks.tools = [askUserTool, write]
+    vi.mocked(waitForQuestionAnswer).mockResolvedValueOnce({ answer: '第三人称', answers: ['第三人称', '明快'], timedOut: false })
+    queue(response('', [call('batch', 'ask_user', JSON.stringify({ questions })), call('early-write', 'plan_save')]),
+      response('已记录两个选择。'))
+    const prompt = '比较两种叙事方向'
+    const taskSpec = buildTaskSpec({ runId: 'run', novelId: 'novel', prompt })
+    mocks.currentOriginal = { prompt, taskSpec: { ...taskSpec, scope: { ...taskSpec.scope, agentQuestionProtocol: 1 } } }
+    await run(prompt)
+    expect(mocks.chat).toHaveBeenCalledTimes(2)
+    expect(write.execute).not.toHaveBeenCalled()
+    const messages = mocks.chat.mock.calls[1][0].messages as Parameters<typeof chatType>[0]['messages']
+    expect(messages).toContainEqual(expect.objectContaining({ role: 'tool', toolCallId: 'batch',
+      content: expect.stringContaining('1. 使用什么视角？\n作者的回答：第三人称\n\n2. 使用什么语气？\n作者的回答：明快') }))
+  })
   it('reports omitted direction purpose before showing a question to the author', async () => {
     const prompt = '帮我创建一部末日生存类型的小说'
     mocks.currentOriginal = { prompt, taskSpec: buildTaskSpec({ runId: 'run', novelId: 'novel', prompt,
@@ -4908,7 +4961,8 @@ describe('author-directed task ending in the real execution loop', () => {
       expect(outline.execute).not.toHaveBeenCalled()
       expect(events().find(event => event.type === 'tool.call' && event.callId === 'guessed-save')).toBeUndefined()
       expect(events().filter(event => event.type === 'text.final')).toEqual([
-        expect.objectContaining({ type: 'text.final', text: `已保存《${title}》的书名、简介和标签。要不要开始写大纲？` }),
+        expect.objectContaining({ type: 'text.final', afterTools: true,
+          text: `已保存《${title}》的作品信息。\n\n**简介**\n\n${fields.summary}\n\n**标签** 都市\n\n要不要开始写大纲？` }),
       ])
       expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     } finally {
@@ -4949,12 +5003,14 @@ describe('author-directed task ending in the real execution loop', () => {
         ? [{ parts: create.parts }] : []) as Awaited<ReturnType<typeof prisma.agentMessage.findMany>>
     })
     vi.mocked(waitForQuestionAnswer).mockResolvedValueOnce({ answer: '长期断电', timedOut: false })
+    const progress = '我会先整理已经确认的方向。'
+    const recap = `已保存《${title}》的作品信息。\n\n**简介**\n\n${summary}\n\n**标签** 都市\n\n要不要开始写大纲？`
     try {
       queue(response('', [call('invalid-save', 'novel_update_meta', JSON.stringify({ title: '', summary, tags })),
         call('save-before-direction', 'novel_update_meta', JSON.stringify({ title, summary, tags })),
         call('direction', 'ask_user', JSON.stringify({ purpose: 'novel_direction',
         question: '你想写哪一种末日？', options: [{ label: '长期断电' }, { label: '冰期' }] }))]),
-      response('', [call('rename', 'novel_rename', JSON.stringify({ title })),
+      response(progress, [call('rename', 'novel_rename', JSON.stringify({ title })),
         call('metadata', 'novel_update_meta', JSON.stringify({ summary, tags })), call('premature-outline', 'plan_save')]))
       await run(prompt)
       expect(events().find(event => event.type === 'tool.result' && event.callId === 'invalid-save'))
@@ -4969,7 +5025,17 @@ describe('author-directed task ending in the real execution loop', () => {
       ])
       expect(outline.execute).not.toHaveBeenCalled()
       expect(events().filter(event => event.type === 'text.final')).toEqual([
-        expect.objectContaining({ text: `已保存《${title}》的书名、简介和标签。要不要开始写大纲？` }),
+        expect.objectContaining({ afterTools: true, text: recap }),
+      ])
+      expect(events().findIndex(event => event.type === 'text.final' && event.afterTools))
+        .toBeGreaterThan(events().findIndex(event => event.type === 'tool.result' && event.callId === 'metadata' && event.ok))
+      const saved = (mocks.persist.mock.calls as unknown as Array<[{ create?: { parts?: AgentMessagePart[] } }]>)
+        .map(([entry]) => entry.create?.parts).find(parts => parts?.some(part => part.type === 'text' && part.text === recap))
+      expect(saved).toMatchObject([
+        { type: 'text', text: progress },
+        { type: 'tool-call', callId: 'rename', status: 'success' },
+        { type: 'tool-call', callId: 'metadata', status: 'success' },
+        { type: 'text', text: recap },
       ])
       expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
     } finally {

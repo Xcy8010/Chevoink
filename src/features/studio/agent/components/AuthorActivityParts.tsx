@@ -72,6 +72,7 @@ function activitySummary(part: ActivityCall, runActive: boolean, titles?: Readon
   if (part.importWaiting && part.status === 'running' && runActive) return '等待你确认导入'
   if (part.toolName === 'ask_user' && part.status === 'running' && runActive) return '等待你回答'
   if (display?.kind === 'question') {
+    if (display.cancelled) return '作者已取消提问'
     if (display.unanswered) return '提问未获回答'
     if (display.answer) return '已收到作者回答'
   }
@@ -280,16 +281,19 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
   </div>
 })
 
-export function AuthorActivitySummary({ timing, active, open, onToggle }: { timing: AgentRunTiming; active: boolean; open: boolean; onToggle?: () => void }) {
+export function AuthorActivitySummary({ timing, active, open, onToggle, actions }: {
+  timing: AgentRunTiming; active: boolean; open: boolean; onToggle?: () => void; actions?: ReactNode
+}) {
   const label = active || timing.elapsedMs !== null
     ? <ProcessDuration timing={timing} active={active} />
     : <span className="text-sm leading-6 text-[var(--text-secondary)]">查看处理过程</span>
-  return <div className="mb-1 border-b border-[var(--border-subtle)] pb-1.5" data-author-timer>
+  return <div className="mb-1 flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] pb-1.5" data-author-timer>
     {onToggle ? <button type="button" aria-expanded={open} onClick={onToggle}
-      className="inline-flex min-h-7 items-center gap-1 text-left text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:underline focus-visible:outline-none">
+      className="inline-flex min-h-7 shrink-0 items-center gap-1 text-left text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:underline focus-visible:outline-none">
       {label}
       <ChevronDown aria-hidden className={cn('h-3.5 w-3.5 shrink-0 motion-safe:transition-transform', !open && '-rotate-90')} />
-    </button> : <div className="flex min-h-7 items-center">{label}</div>}
+    </button> : <div className="flex min-h-7 shrink-0 items-center">{label}</div>}
+    {actions}
   </div>
 }
 

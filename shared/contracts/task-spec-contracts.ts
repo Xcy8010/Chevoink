@@ -44,6 +44,7 @@ export const taskIntentSchema = z.enum([
 export const taskScopeSchema = z.object({
   /** Fresh main-Agent interpretation. Absence of a binding is not a denied user request. */
   agentWritingProtocol: z.literal(1).optional(),
+  agentQuestionProtocol: z.literal(1).optional(),
   agentWritingBinding: z.object({ sourceRunId: z.string().min(1), receiptHash: z.string().regex(/^[a-f0-9]{64}$/),
     requiredChecks: z.array(z.enum(['continuity', 'humanity'])) }).strict().optional(),
   novelId: z.string().min(1),

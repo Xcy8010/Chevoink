@@ -63,14 +63,16 @@ export const novelCreateTool = defineTool({
     }
 
     const title = args.title.trim()
+    const summary = args.summary.trim(), tagNames = dedupedTags.slice(0, MAX_NOVEL_TAGS)
     ctx.signal.throwIfAborted()
     await db.novel.update({
       where: { id: ctx.novelId },
-      data: { title, displayTitle: title, summary: args.summary.trim(), tagNames: dedupedTags.slice(0, MAX_NOVEL_TAGS) },
+      data: { title, displayTitle: title, summary, tagNames },
     })
     return {
       output: `已创建作品《${title}》，并写入简介与标签。`,
       summary: `创建作品《${title}》`,
+      ...(title && summary && tagNames.length ? { novelSetupRecap: { title, summary, tagNames } } : {}),
       snapshot: { target: 'novel', targetId: ctx.novelId, field: 'title', previousValue: novel.title },
     }
   },
@@ -156,12 +158,13 @@ export const novelUpdateMetaTool = defineTool({
       }
     }
 
+    const summary = args.summary?.trim() || undefined
     ctx.signal.throwIfAborted()
     await (ctx.transaction ?? prisma).novel.update({
       where: { id: ctx.novelId },
       data: {
         ...(args.title !== undefined ? { title: args.title, displayTitle: args.title } : {}),
-        summary: args.summary?.trim() || undefined,
+        summary,
         tagNames: nextTags ?? undefined,
       },
     })
@@ -174,6 +177,7 @@ export const novelUpdateMetaTool = defineTool({
     return {
       output: `已更新作品${changed}。${rejectedNote}`,
       summary: `更新作品${args.summary !== undefined ? '简介' : ''}${args.summary !== undefined && nextTags !== undefined ? '与' : ''}${nextTags !== undefined ? '标签' : ''}`,
+      ...(completeInitialization && args.title && summary && nextTags?.length ? { novelSetupRecap: { title: args.title, summary, tagNames: nextTags } } : {}),
       snapshot: { target: 'novel', targetId: ctx.novelId, field: args.title !== undefined ? 'title' : 'summary', previousValue: args.title !== undefined ? novel.title : novel.summary },
     }
   },

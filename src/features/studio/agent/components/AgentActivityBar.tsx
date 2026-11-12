@@ -15,6 +15,7 @@ type Props = {
   pendingReviewCount: number; reviewBusy: boolean
   onApproveAllReviews?: () => void; onRejectAllReviews?: () => void
   appearance?: 'inline' | 'dock'
+  behindQuestion?: boolean
 }
 function todoKey(item: DisplayTodo, index: number) {
   return item.id ?? `${item.status}:${item.content}:${index}`
@@ -60,9 +61,9 @@ function ReviewActions({ pendingReviewCount, reviewBusy, onApproveAllReviews, on
   </div>
 }
 /** Both capsules share positioning, surface, animation and viewport constraints. */
-function ActivityPopover({ anchor, open, label, onClose, onEnter, onLeave, children }: {
+function ActivityPopover({ anchor, open, label, behindQuestion, onClose, onEnter, onLeave, children }: {
   anchor: RefObject<HTMLDivElement>; open: boolean; label: string; onClose: () => void
-  onEnter?: () => void; onLeave?: () => void; children: ReactNode
+  behindQuestion?: boolean; onEnter?: () => void; onLeave?: () => void; children: ReactNode
 }) {
   const [retained, setRetained] = useState(false)
   const [position, setPosition] = useState({ left: 8, top: 8, width: 320, height: 240, above: true })
@@ -110,10 +111,11 @@ function ActivityPopover({ anchor, open, label, onClose, onEnter, onLeave, child
       window.visualViewport?.removeEventListener('resize', place); window.visualViewport?.removeEventListener('scroll', place)
       window.removeEventListener('pointerdown', outside); window.removeEventListener('focusin', outside); window.removeEventListener('keydown', escape)
     }
-  }, [open, anchor])
+  }, [open, anchor, behindQuestion])
   if (!open && !retained) return null
+  // Portals opened beside a question sit below the floating footer (z-index 80).
   return createPortal(<div ref={popup} role="dialog" tabIndex={-1} aria-hidden={!open} {...(!open ? { inert: '' } : {})} aria-label={label} onPointerEnter={onEnter} onPointerDown={onEnter} onPointerLeave={event => { if (!event.pointerType || event.pointerType === 'mouse') onLeave?.() }}
-    className="studio-workspace z-[110] touch-pan-y overflow-y-auto overscroll-contain rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-default)] text-[var(--text-primary)] shadow-xl animate-[studio-change-reveal_160ms_ease-out] motion-reduce:animate-none"
+    className={cn('studio-workspace touch-pan-y overflow-y-auto overscroll-contain rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-default)] text-[var(--text-primary)] shadow-xl animate-[studio-change-reveal_160ms_ease-out] motion-reduce:animate-none', behindQuestion ? 'z-[70]' : 'z-[110]')}
     style={{ opacity: open ? 1 : 0, pointerEvents: open ? undefined : 'none', transition: 'opacity 160ms ease-out', position: 'fixed', left: position.left, top: position.top, transform: position.above ? 'translateY(-100%)' : undefined, width: position.width, maxHeight: position.height }}>{children}</div>, document.fullscreenElement ?? document.body)
 }
 /** The right task-status card keeps its expanded, vertical lists; capsules belong only above the composer. */
@@ -150,7 +152,7 @@ export function AgentActivityBar(props: Props) {
   const visibleProps = { ...props, todos: props.todos.filter(item => item.status !== 'cancelled') }
   return props.appearance === 'dock' ? <AgentActivityDock {...visibleProps} /> : <AgentActivityCapsules {...visibleProps} />
 }
-function AgentActivityCapsules({ activities, todos, runActive, pendingReviewCount, reviewBusy, onApproveAllReviews, onRejectAllReviews }: Props) {
+function AgentActivityCapsules({ activities, todos, runActive, pendingReviewCount, reviewBusy, behindQuestion, onApproveAllReviews, onRejectAllReviews }: Props) {
   const [expanded, setExpanded] = useState<'todos' | 'changes' | null>(null)
   const todoAnchor = useRef<HTMLDivElement>(null), changeAnchor = useRef<HTMLDivElement>(null)
   const touchSummary = useRef(false)
@@ -175,7 +177,7 @@ function AgentActivityCapsules({ activities, todos, runActive, pendingReviewCoun
           <span className="min-w-0 max-w-48 truncate font-medium" title={currentLabel}>{currentLabel}</span>
           <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform duration-200', expanded === 'todos' && 'rotate-180')} />
         </button>
-        <ActivityPopover anchor={todoAnchor} open={expanded === 'todos'} label="任务待办列表" onClose={() => setExpanded(value => value === 'todos' ? null : value)}>
+        <ActivityPopover anchor={todoAnchor} open={expanded === 'todos'} label="任务待办列表" behindQuestion={behindQuestion} onClose={() => setExpanded(value => value === 'todos' ? null : value)}>
           <ul className="p-2">{activeTodos.map((item, index) => <TodoRow key={todoKey(item, index)} item={item} runActive={runActive} />)}</ul>
         </ActivityPopover>
       </div> : null}
@@ -191,7 +193,7 @@ function AgentActivityCapsules({ activities, todos, runActive, pendingReviewCoun
             useAgentStore.getState().requestToolNavigation(change.activity.toolName, { chapterId: change.activity.chapterId }, change.activity.display)
           }} className="flex min-h-9 min-w-0 items-center gap-2 px-3 py-1.5 mobile:min-h-11 mobile:w-full mobile:gap-1.5 mobile:px-2.5"><span className="truncate mobile:hidden">{changes.length} 个工作区变更</span><span className="hidden truncate mobile:inline">{changes.length} 项变更</span><Counts {...total} />{pendingReviewCount > 0 ? <span title={`${pendingReviewCount} 项待审`} className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"><span className="sr-only">{pendingReviewCount} 项待审</span></span> : null}</button>
         </div>
-        <ActivityPopover anchor={changeAnchor} open={expanded === 'changes'} label="工作区正文变更" onClose={() => setExpanded(value => value === 'changes' ? null : value)} onEnter={cancelClose} onLeave={closeSoon}>
+        <ActivityPopover anchor={changeAnchor} open={expanded === 'changes'} label="工作区正文变更" behindQuestion={behindQuestion} onClose={() => setExpanded(value => value === 'changes' ? null : value)} onEnter={cancelClose} onLeave={closeSoon}>
           {!changes.length ? <p className="px-4 py-3 text-xs text-[var(--text-secondary)]">暂无正文变更</p> : null}
           <ul className="p-1">{[...changes].reverse().map(change => <li key={change.key}><button type="button" onClick={() => {
             setExpanded(null)

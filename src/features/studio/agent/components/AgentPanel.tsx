@@ -122,6 +122,7 @@ type AgentPanelProps = {
   emptyStateSeed?: string
   chapterId?: EntityId | null
   activityChapterTitles?: ReadonlyMap<string, string>
+  coverAssets?: ReadonlyArray<{ id: string; imageUrl: string }>
   selection?: { text: string; start?: number; end?: number } | null
   ensureSession: () => Promise<EntityId>
   /** SSE 事件透传：宿主据此同步章节树/编辑器等工作区状态 */
@@ -187,6 +188,7 @@ export function AgentPanel({
   emptyStateSeed,
   chapterId,
   activityChapterTitles,
+  coverAssets,
   selection,
   ensureSession,
   onStreamEvent,
@@ -409,6 +411,28 @@ export function AgentPanel({
     !hasOutgoing && (shimmerHolding ||
     (!conversationReady &&
       (sessionResolving || (sessionId !== null && hydratingSessionId === sessionId) || !conversationSettled)))
+  const visibleQuestion = storeLoadedSessionId === sessionId && conversationReady && !conversationLoading && !workConversation.collapsed
+    ? pendingQuestion
+    : null
+  const questionCoverImages = useMemo(() => {
+    if (!visibleQuestion) return undefined
+    const ids = new Set((visibleQuestion.questions ?? [visibleQuestion]).flatMap(({ options }) =>
+      options.flatMap(({ coverAssetId }) => coverAssetId ? [coverAssetId] : [])))
+    if (!ids.size) return undefined
+    const images = new Map<string, string>()
+    for (const asset of coverAssets ?? []) {
+      if (ids.has(asset.id)) images.set(asset.id, asset.imageUrl)
+    }
+    for (const message of messages) {
+      for (const part of message.parts) {
+        if (part.type !== 'tool-call' || part.status !== 'success' || part.display?.kind !== 'coverImages') continue
+        for (const { id, url } of part.display.images) {
+          if (ids.has(id)) images.set(id, url)
+        }
+      }
+    }
+    return images
+  }, [visibleQuestion, coverAssets, messages])
   const [actionError, setActionError] = useState<string | null>(null)
   const [goalBusy, setGoalBusy] = useState(false)
   const [goalEditorOpen, setGoalEditorOpen] = useState(false)
@@ -1047,6 +1071,7 @@ export function AgentPanel({
             mode: 'build' as const,
             prompt,
             predictNextPrompt: true as const,
+            agentQuestionProtocol: 1 as const,
             selection: targetChapterId ? selection ?? null : null,
             attachments: attachments.length > 0 ? attachments : undefined,
             creativeFreedom: freedom,
@@ -1647,6 +1672,10 @@ export function AgentPanel({
                 const showSummary = headerActive || Boolean(block && (block.ops || timing?.elapsedMs != null))
                 const settling = block ? settlingBlocks.has(block.firstId) : false
                 const summaryOpen = headerActive || settling || isBlockExpanded(block, message.runId)
+                const messageActions = !message.delivery ? <UserMessageActions createdAt={message.createdAt} visible={touchActionsId === message.id} copied={copiedId === message.id} disabled={active}
+                  onCopy={() => void handleCopyText(message.id, getMessageText(message.parts, message.role))}
+                  onRollback={() => setConfirmAction({ kind: 'rollbackMessage', messageId: message.id })}
+                  onDelete={() => setConfirmAction({ kind: 'deleteMessage', messageId: message.id })} /> : null
                 return (
                 <div
                   key={message.presentationId ?? message.id}
@@ -1660,13 +1689,11 @@ export function AgentPanel({
                   {message.delivery?.status === 'failed' ? <div className="flex max-w-full items-center gap-2 text-xs text-[var(--text-secondary)]">
                     <span role="alert">发送未确认：{message.delivery.error}</span>
                     <button type="button" onClick={() => useOutgoingMessages.getState().remove(message.id)} className="shrink-0 underline">移除这条本地消息</button>
-                  </div> : !message.delivery ? <UserMessageActions createdAt={message.createdAt} visible={touchActionsId === message.id} copied={copiedId === message.id} disabled={active}
-                    onCopy={() => void handleCopyText(message.id, getMessageText(message.parts, message.role))}
-                    onRollback={() => setConfirmAction({ kind: 'rollbackMessage', messageId: message.id })}
-                    onDelete={() => setConfirmAction({ kind: 'deleteMessage', messageId: message.id })} /> : null}
-                  {/* The timer belongs to the request, before and after the first streamed paragraph. */}
+                  </div> : !showSummary ? messageActions : null}
+                  {/* Acknowledging the request adds controls to this row without moving the timer. */}
                   {showSummary ? <div className="agent-reading-column pt-3">
                     <AuthorActivitySummary timing={timing ?? unknownRunTiming()} active={headerActive} open={summaryOpen}
+                      actions={<div className="flex min-w-0 items-center mobile:min-h-10">{messageActions}</div>}
                       onToggle={block?.ops && !headerActive && !settling ? () => toggleBlock(block.firstId) : undefined} />
                   </div> : null}
                 </div>
@@ -1770,9 +1797,6 @@ export function AgentPanel({
             {pendingApproval ? (
               <AgentPermissionCard approval={pendingApproval} onResolve={handleResolveApproval} />
             ) : null}
-            {pendingQuestion ? (
-              <AgentQuestionCard question={pendingQuestion} onAnswer={handleResolveQuestion} />
-            ) : null}
           </div>
         ) : (
           <AgentEmptyWelcome
@@ -1799,6 +1823,7 @@ export function AgentPanel({
             runActive={activityRunActive}
             pendingReviewCount={pendingReviewCount}
             reviewBusy={reviewBusy}
+            behindQuestion={Boolean(visibleQuestion)}
             onApproveAllReviews={onApproveAllReviews}
             onRejectAllReviews={onRejectAllReviews}
           />
@@ -1888,6 +1913,9 @@ export function AgentPanel({
         onExpand={() => openGoalEditor()}
         onDismiss={goalBar.dismiss}
       /> : null}
+        {visibleQuestion ? (
+          <AgentQuestionCard key={JSON.stringify([runId, visibleQuestion.requestId, visibleQuestion.callId])} question={visibleQuestion} coverImages={questionCoverImages} onAnswer={handleResolveQuestion} />
+        ) : null}
         <AgentComposer
           novelId={novelId}
           voiceScopeKey={voiceScopeKey}

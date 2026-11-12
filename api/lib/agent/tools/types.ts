@@ -86,6 +86,8 @@ export type ToolContext = {
   registeredReview?: (name: 'continuity_validate' | 'quality_analyze', args: { compilationId: string }, options?: { readOnly?: boolean }) => Promise<ToolResult>
   /** Internal DB-only tool adapter; never accepted from tool arguments. */
   transaction?: import('@prisma/client').Prisma.TransactionClient
+  /** Publish the verified question only once its author mailbox is ready. */
+  publishQuestion?: () => void
   /** 当前工具调用的 callId：供 ask_user 等需要挂起等待前端回应的工具使用 */
   callId: string
   /** 当前轮 assistant 消息 id：子 Agent 等需要发进度事件的工具用它锚定直播位置 */
@@ -112,6 +114,10 @@ export type ToolResult = {
   terminalResponse?: import('../task-response.js').TaskResponse
   /** True only when the wait for an authenticated author answer expired. */
   questionTimedOut?: true
+  /** True only for an explicit cancellation submitted by the author. */
+  questionCancelled?: true
+  /** Actual normalized metadata saved together, for a durable setup recap. */
+  novelSetupRecap?: import('../novel-initialization.js').NovelSetupRecap
   observedAttachment?: { url: string; contentHash: string; offset: number; end: number; totalChars: number }
   /** Original-root DB observation allowance; not model input or manuscript progress. */
   platformBudget?: { version: 1; requestHash: string; charged: boolean }

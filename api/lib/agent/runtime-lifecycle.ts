@@ -45,7 +45,8 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     const childGrants = await tx.agentChildExecutionGrant.findMany({ where: { parentRootId: root.id }, include: { childRun: { include: { taskRoot: true } } } })
     if (childGrants.some(grant => grant.status !== 'completed' || grant.childRun.status !== 'completed' || grant.childRun.taskRoot?.status !== 'completed')) return runtimeError('RUNTIME_CHILD_COMPLETION_REQUIRED', '子任务尚未获得真实完成终态，父任务不能宣称完成。')
     await assertPinnedChildCompletion(tx, root.id)
-    const facts = z.object({ blockers: z.array(z.unknown()), candidateHash: z.string(), limitedWritingDelivery: limitedWritingDeliverySchema.optional() }).parse(evidence.snapshot)
+    const facts = z.object({ blockers: z.array(z.unknown()), candidateHash: z.string(), limitedWritingDelivery: limitedWritingDeliverySchema.optional(),
+      terminalReason: z.enum(['question_timeout', 'question_cancelled']).optional() }).parse(evidence.snapshot)
     const { frame, configuration, originalRequest, originalSpec } = await readExecutionStateInTransaction(tx, root.id)
     const candidate = frame.state.messages.at(-1)
     if (facts.blockers.length || candidate?.role !== 'assistant' || !candidate.content?.trim() || promisesFurtherAction(candidate.content)) {
@@ -54,7 +55,9 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     // Ordinary completion has already passed. Preserve the natural wrap-up;
     // a saved-only preference withdraws repeated prose, not the summary.
     const subject = { userId: lease.userId, novelId: root.novelId, runId: run.id }
-    const limited = facts.limitedWritingDelivery
+    const cancelled = facts.terminalReason === 'question_cancelled'
+    const status = cancelled ? 'cancelled' as const : 'completed' as const
+    const limited = cancelled ? undefined : facts.limitedWritingDelivery
     if (limited) {
       await assertLimitedWritingDelivery(tx, subject, limited)
       if (candidate.content !== limited.text) return runtimeError('RUNTIME_COMPLETION_BLOCKED', '受限交付必须明确展示当前正文未复核的限制。')
@@ -96,21 +99,21 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
       snapshot: { ...frame.state, phase: 'completed' } })
     await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: root.id, runId: run.id, operationId: operation.id,
       eventKey: `decision:${operation.id}`, type: 'execution.completion.decided', payload: {
-        version: 1, kind: 'completed', reviewOperationId: operation.id, resultHash: receipt.resultHash,
+        version: 1, kind: status, reviewOperationId: operation.id, resultHash: receipt.resultHash,
         sourceRevision: frame.revision, sourceHash: frame.snapshotHash, revision: next.revision, snapshotHash: next.snapshotHash,
         ...(limited ? { outcome: limited.outcome } : {}),
       } } })
-    await tx.agentTaskRoot.update({ where: { id: root.id }, data: { status: 'completed' } })
+    await tx.agentTaskRoot.update({ where: { id: root.id }, data: { status } })
     const previousUsage = run.usage && typeof run.usage === 'object' && !Array.isArray(run.usage) ? run.usage : {}
-    await tx.agentRun.update({ where: { id: run.id }, data: { status: 'completed', finishedAt: now, errorMessage: null,
+    await tx.agentRun.update({ where: { id: run.id }, data: { status, finishedAt: now, errorMessage: null,
       ...(candidate.localCompletion ? { outputSummary: candidate.content.slice(0, 300) } : {}),
       ...(limited ? { usage: runtimeJson({ ...previousUsage, outcome: limited.outcome, deliveryProof: limited }).value } : {}) } })
     await tx.agentRunLease.updateMany({ where: { run: { taskRootId: root.id } },
       data: { enabled: false, ownerId: null, claimId: null, expiresAt: null } })
     if (held.expiresAt <= await databaseNow(tx)) return runtimeError('RUNTIME_LEASE_LOST', '终态提交前原执行所有权已过期。')
     await assertChildParentFence(tx, run.id, lease.parent)
-    await tx.agentChildExecutionGrant.updateMany({ where: { childRunId: run.id }, data: { status: 'completed' } })
-    return { kind: 'completed' as const, frame: next }
+    if (!cancelled) await tx.agentChildExecutionGrant.updateMany({ where: { childRunId: run.id }, data: { status: 'completed' } })
+    return { kind: status, frame: next }
   }, { contentionScope, contentionBackoff: Boolean(lease.parent), deadline: contentionScope?.deadline, timeoutMs: 20_000 })
 }
 

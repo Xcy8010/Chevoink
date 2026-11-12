@@ -23,7 +23,7 @@ afterEach(async () => {
 export function fixture(work: (f: {
   userId: string; novelId: string; sessionId: string; chapterId: string; runId: string; sourceMessageId: string;
   spec: ReturnType<typeof buildTaskSpec>; rootId: string;
-}) => Promise<void>, tokenBudget?: number, prompt = '修改本章', options?: { agentWritingProtocol?: 1; freezeWriting?: boolean; reviewProtocol?: 1; writingCoordinationProtocol?: 1 | 2; researchNavigationAdmission?: 1; continuityEvidenceProtocol?: 1; continuityReportProtocol?: 5; terminalEvidenceProtocol?: 1 | 2; terminalQuoteAddressProtocol?: 1; terminalCoverageProtocol?: 1 | 2; novelInitializationProtocol?: 2; lifecycle?: DurableTestLifecycle }) {
+}) => Promise<void>, tokenBudget?: number, prompt = '修改本章', options?: { agentWritingProtocol?: 1; agentQuestionProtocol?: 1; freezeWriting?: boolean; reviewProtocol?: 1; writingCoordinationProtocol?: 1 | 2; researchNavigationAdmission?: 1; continuityEvidenceProtocol?: 1; continuityReportProtocol?: 5; terminalEvidenceProtocol?: 1 | 2; terminalQuoteAddressProtocol?: 1; terminalCoverageProtocol?: 1 | 2; novelInitializationProtocol?: 2; lifecycle?: DurableTestLifecycle }) {
   const lifecycle = options?.lifecycle
   let cleanupFailed = false
   const active = <T>(work: () => PromiseLike<T>) => lifecycle ? lifecycle.active(work) : Promise.resolve(work())
@@ -50,6 +50,7 @@ export function fixture(work: (f: {
         let spec = buildTaskSpec({ runId, novelId: novel.id, chapterId: chapter.id, prompt, reviewProtocol: options?.reviewProtocol, researchAdmission: options?.researchNavigationAdmission, researchNavigationAdmission: options?.researchNavigationAdmission, continuityEvidenceProtocol: options?.continuityEvidenceProtocol, continuityReportProtocol: options?.continuityReportProtocol, terminalEvidenceProtocol: options?.terminalEvidenceProtocol, terminalQuoteAddressProtocol: options?.terminalQuoteAddressProtocol, terminalCoverageProtocol: options?.terminalCoverageProtocol,
           ...(options?.novelInitializationProtocol ? { novelInitializationProtocol: options.novelInitializationProtocol, novelInitializationTarget: 'empty' as const } : {}) })
         if (options?.agentWritingProtocol) spec = enableAgentWritingScope(spec)
+        if (options?.agentQuestionProtocol) spec.scope.agentQuestionProtocol = options.agentQuestionProtocol
         await active(() => prisma.agentRun.create({ data: {
           id: runId, userId, novelId: novel.id, sessionId: session.id, chapterId: chapter.id, status: 'queued',
           mode: 'act', action: 'workspaceAgent', agentType: 'writingOrchestrator', engine: 'loop', taskSpec: JSON.parse(JSON.stringify(spec)),

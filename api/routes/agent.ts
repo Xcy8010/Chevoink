@@ -922,6 +922,7 @@ router.post('/runs', async (req: Request, res: Response): Promise<void> => {
       ...(body.predictNextPrompt ? { predictNextPrompt: true } : {}),
       selection: body.selection ?? null,
       ...(body.agentWritingProtocol ? { agentWritingProtocol: body.agentWritingProtocol } : {}),
+      ...(body.agentQuestionProtocol ? { agentQuestionProtocol: body.agentQuestionProtocol } : {}),
       attachments: body.attachments ?? [],
       creativeFreedom: body.creativeFreedom,
       qualityMode: body.qualityMode ?? 'premium',
@@ -992,9 +993,11 @@ router.post('/runs/:runId/questions', async (req: Request, res: Response): Promi
 
   try {
     const userId = requireSessionUserId(req)
-    const body = parseBody(resolveAgentQuestionSchema, req.body, '请提供 callId 与回答内容。')
+    const body = parseBody(resolveAgentQuestionSchema, req.body, '请提供提问标识及有效答复或取消结果。')
 
-    const payload = await resolveLoopRunQuestion(userId, req.params.runId, body.callId, body.answer.trim(), body.requestId)
+    const decision = 'answer' in body ? { answer: body.answer.trim() }
+      : 'answers' in body ? { answers: body.answers.map(answer => answer.trim()) } : { cancelled: true as const }
+    const payload = await resolveLoopRunQuestion(userId, req.params.runId, body.callId, decision, body.requestId)
     res.status(200).json(buildSuccess(requestId, payload))
   } catch (error) {
     sendRouteError(res, requestId, error)

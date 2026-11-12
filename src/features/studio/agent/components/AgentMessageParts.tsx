@@ -818,19 +818,27 @@ export function ToolDisplayRenderer({
           </a> : null}
         </div>
       )
-    case 'question':
+    case 'question': {
+      const questions = display.questions ?? [display]
       return (
         <div className="border-t border-[var(--border-subtle)] py-2 pl-5">
-          <p className="break-words text-xs leading-6 text-[var(--text-primary)]">{display.question}</p>
-          {authorActivity && display.options?.length > 0 ? <ul className="mt-1 space-y-1 text-[11px] leading-5 text-[var(--text-secondary)]">
-            {display.options.map((option, index) => <li key={index}>
-              <span className="font-medium text-[var(--text-primary)]">{option.label}</span>
-              {option.detail ? <span> · {option.detail}</span> : null}
-            </li>)}
-          </ul> : null}
-          <p className="mt-1 break-words text-[11px] leading-5 text-[var(--text-secondary)]">
-            {display.answer ? `你的回答：${display.answer}` : '尚未收到回答'}
-          </p>
+          <div className="space-y-2">
+            {questions.map((question, index) => {
+              const answer = display.answers?.[index] ?? (index === 0 ? display.answer : undefined)
+              return <div key={index}>
+                <p className="break-words text-xs leading-6 text-[var(--text-primary)]">{question.question}</p>
+                {authorActivity && question.options?.length > 0 ? <ul className="mt-1 space-y-1 text-[11px] leading-5 text-[var(--text-secondary)]">
+                  {question.options.map((option, optionIndex) => <li key={optionIndex}>
+                    <span className="font-medium text-[var(--text-primary)]">{option.label}</span>
+                    {option.detail ? <span> · {option.detail}</span> : null}
+                  </li>)}
+                </ul> : null}
+                {answer ? <p className="mt-1 break-words text-[11px] leading-5 text-[var(--text-secondary)]">你的回答：{answer}</p> : null}
+              </div>
+            })}
+          </div>
+          {display.cancelled || !display.answer && !display.answers?.length
+            ? <p className="mt-1 text-[11px] leading-5 text-[var(--text-secondary)]">{display.cancelled ? '作者已取消提问' : '尚未收到回答'}</p> : null}
           {display.scopeResolution && (
             <p className="mt-1 text-[11px] leading-5 text-[var(--text-secondary)]">
               {display.scopeResolution === 'accepted' ? '章节目标已确认' : '章节目标仍待确认，尚未开始写入'}
@@ -838,6 +846,7 @@ export function ToolDisplayRenderer({
           )}
         </div>
       )
+    }
     case 'todoList': {
       const completed = display.items.filter((item) => item.status === 'completed').length
       return (

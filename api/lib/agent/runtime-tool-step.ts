@@ -56,7 +56,7 @@ import { executeDurableContinuity } from './tools/durable-continuity.js'
 import { readCompilerObservation } from './runtime-compiler-observation.js'
 import { qualityAnalyzeTool } from './tools/humanity-quality-tools.js'
 import { executeDurableQuality } from './tools/durable-quality.js'
-import { askUserTool } from './tools/interact-tools.js'
+import { askUserTool, previousBatchAskUserParameters } from './tools/interact-tools.js'
 import { executeDurableQuestion } from './runtime-question.js'
 import { projectSearchTool, entityResolveTool, impactAnalyzeTool, structureValidateTool, bulkReplacePreviewTool, entityRenamePreviewTool, changeSetApplyTool, changeSetRollbackTool } from './tools/changeset-tools.js'
 import { CHANGESET_ACTIONS, executeDurableChangeSet } from './tools/durable-changeset.js'
@@ -224,6 +224,10 @@ async function executeGoalDurableToolStep(token: RunLeaseToken, signal: AbortSig
       published = source
     } else if (!sourceContract && !originalToolParameterSchemas(tool, originalScope).some(schema => runtimeJson(schema).hash === runtimeJson(definition.function.parameters).hash)) {
       runtimeError('RUNTIME_IDENTITY_CONFLICT', '工具 schema 与原任务不一致。')
+    }
+    if (call.name === 'ask_user') {
+      const fields = published.function.parameters.properties as { options?: { items?: { properties?: Record<string, unknown> } } } | undefined
+      if (!fields?.options?.items?.properties?.coverAssetId) tool = { ...tool, parameters: previousBatchAskUserParameters }
     }
     let raw: unknown
     try { raw = call.arguments ? parseToolArgsTolerant(call.arguments, false) : {} }

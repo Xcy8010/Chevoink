@@ -28,6 +28,7 @@ import type {
   AgentArtifactApplyStrategy,
   AgentExecutionAgent,
   AgentExecutionMode,
+  AgentQuestionDecision,
   AgentRouteDecision,
   AgentRuleBundle,
   AgentRun,
@@ -590,6 +591,9 @@ export async function startLoopRunLocked(
         terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2,
         researchAdmission, researchNavigationAdmission: researchAdmission, networkAdmission, authorWritingProtocol: 2, novelInitializationProtocol: 2,
         novelInitializationTarget: isEmptyNovelMetadata(manuscript) ? 'empty' : 'existing', volumeCreationProtocol: 1, volumeCreateIntent, creativeFreedom, qualityMode: input.qualityMode })
+      if (networkAdmission && input.agentQuestionProtocol === 1) {
+        fresh = { ...fresh, scope: { ...fresh.scope, agentQuestionProtocol: 1 } }
+      }
       if (input.agentWritingProtocol === 1 && options.humanOrigin === 'http' && !options.goal && !session.spawnedFromRunId
         && (input.agentProfile ?? 'orchestrator') === 'orchestrator') {
         if (input.mode !== 'build') throw new DataAccessError(400, 'INVALID_ARGUMENTS', '正文任务解释只适用于创作模式。')
@@ -884,16 +888,17 @@ export async function resolveLoopRunQuestion(
   userId: string,
   runId: string,
   callId: string,
-  answer: string,
+  response: AgentQuestionDecision | string,
   requestId?: string,
 ): Promise<{ resolved: boolean }> {
   const run = await findOwnedLoopRun(userId, runId)
+  const decision = typeof response === 'string' ? { answer: response } : response
   if (run.runtimeProtocolVersion > 0) {
     if (!requestId) throw new DataAccessError(409, 'QUESTION_REQUEST_REQUIRED', '请刷新原提问卡片后回答。')
-    return resolveDurableQuestion({ userId, runId, callId, answer, requestId })
+    return resolveDurableQuestion({ userId, runId, callId, requestId, ...decision })
   }
 
-  const resolved = await resolveCurrentGoalResponse(userId, runId, () => resolveQuestionAnswer(runId, callId, answer))
+  const resolved = await resolveCurrentGoalResponse(userId, runId, () => resolveQuestionAnswer(runId, callId, decision))
 
   if (!resolved) {
     throw new DataAccessError(409, 'QUESTION_NOT_PENDING', '该提问已处理或已超时。')

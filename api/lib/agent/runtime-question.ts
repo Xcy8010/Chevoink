@@ -1,24 +1,37 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
+import type { AgentQuestionDecision } from '../../../shared/contracts/index.js'
+import { agentQuestionDecisionSchema, agentQuestionOptionSchema, agentQuestionPromptsSchema } from '../../../shared/contracts/schemas.js'
 import { env } from '../../config/env.js'
 import { databaseNow, lockRunRoot, runtimeError, runtimeJson, runtimeTransaction } from './runtime-common.js'
 import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionStateInTransaction } from './runtime-state.js'
 import { argumentNormalizationSchema, prepareToolCursorOperation, type ToolExecutionCursor } from './runtime-tool-cursor.js'
-import { commitOperationEffectInTransaction, recordToolFailure } from './runtime-operations.js'
-import { reduceExecutionReceipt } from './runtime-reducer.js'
+import { commitOperationEffectInTransaction, recordToolFailure, recordToolFailureInTransaction } from './runtime-operations.js'
+import { readFailedToolResult, reduceExecutionReceipt } from './runtime-reducer.js'
 import { normalizeToolInput } from './tools/input-validation.js'
 import type { AgentTool, ToolContext, ToolResult } from './tools/types.js'
 import { assertGoalRevisionFence, readGoalExecution } from './goal-fence.js'
+import { setGoalRunPhaseInTransaction } from './goal-runtime.js'
 import { recordWritingClarification } from './writing-clarification.js'
-import { DIRECTION_PURPOSE_REQUIRED, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
+import { checkQuestionCoverOptions, DIRECTION_PURPOSE_REQUIRED, formatAuthorQuestionAnswer, formatAuthorQuestionAnswers,
+  QUESTION_CANCELLED_NOTICE, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 import { readTaskBudgetInTransaction } from './runtime-budget.js'
 
-export const durableQuestionContent = z.object({ question: z.string(), options: z.array(z.object({ label: z.string(), detail: z.string().optional() })),
-  purpose: z.literal('novel_direction').optional() })
+export const durableQuestionContent = z.object({ question: z.string(), options: z.array(z.object({ label: z.string(), detail: z.string().optional(),
+  coverAssetId: agentQuestionOptionSchema.shape.coverAssetId })),
+  purpose: z.literal('novel_direction').optional(), questions: agentQuestionPromptsSchema.optional() })
 export const durableQuestionSchema = durableQuestionContent.extend({ version: z.literal(1), operationId: z.string(), callId: z.string(),
   expiresAt: z.string().datetime() }).strict()
-const answerSchema = z.object({ requestId: z.string(), requestHash: z.string(), answer: z.string(), userId: z.string() }).strict()
+const decisionIdentity = z.object({ requestId: z.string(), requestHash: z.string(), userId: z.string() })
+export const questionCancellationReceiptSchema = decisionIdentity.extend({ cancelled: z.literal(true) }).strict()
+const decisionReceipt = z.union([decisionIdentity.extend({ answer: z.string() }).strict(),
+  decisionIdentity.extend({ answers: z.array(z.string().min(1).max(500).refine(answer => answer === answer.trim())).min(1).max(3) }).strict(),
+  questionCancellationReceiptSchema])
+
+function matchesQuestionDecision(question: z.infer<typeof durableQuestionContent>, decision: AgentQuestionDecision) {
+  return 'cancelled' in decision || (question.questions ? 'answers' in decision && decision.answers.length === question.questions.length : 'answer' in decision)
+}
 
 export async function executeDurableQuestion(lease: RunLeaseToken, cursor: ToolExecutionCursor, ctx: ToolContext, tool: AgentTool, args: Record<string, unknown>) {
   const normalize = (raw: unknown) => tool.parameters.parse(normalizeToolInput(tool, raw))
@@ -37,22 +50,40 @@ export async function executeDurableQuestion(lease: RunLeaseToken, cursor: ToolE
     // Answer admission and timeout completion serialize on this same root lock.
     // Never carry a timeout decision into a later effect transaction: a valid
     // answer may have committed between those transactions.
-    const finish = async (output: string, answer: string | null) => ({ receipt:
+    const finish = async (decision: AgentQuestionDecision | null) => ({ receipt:
       await commitOperationEffectInTransaction(tx, lease, prepared.operation.id, prepared.operation.inputHash, async () => {
         ctx.signal.throwIfAborted()
-        const clarification = answer === null ? null : await recordWritingClarification(tx, ctx,
-          { callId: ctx.callId, ...effective, answer, source: 'durable_question', requestId: request!.id })
+        const cancelled = decision !== null && 'cancelled' in decision
+        const answers = decision !== null && 'answers' in decision ? decision.answers : undefined
+        const answer = decision !== null && 'answer' in decision ? decision.answer : answers?.[0]
+        const output = answer === undefined ? cancelled ? QUESTION_CANCELLED_NOTICE : QUESTION_TIMEOUT_NOTICE
+          : answers && effective.questions ? formatAuthorQuestionAnswers(effective.questions, answers) : formatAuthorQuestionAnswer(effective.options, answer)
+        const clarification = answer === undefined ? null : await recordWritingClarification(tx, ctx,
+          { callId: ctx.callId, question: effective.question, options: effective.options, answer, source: 'durable_question', requestId: request!.id })
+        if (cancelled) {
+          const goal = await readGoalExecution(lease.userId, lease.runId, tx)
+          if (goal) await setGoalRunPhaseInTransaction(tx, goal, 'awaiting_input', 'GOAL_QUESTION_CANCELLED')
+        }
         return runtimeJson({ toolResult: {
-        ...(clarification ? { semanticTransition: clarification } : {}),
-        output, summary: answer === null ? '提问超时，未获回答' : '作者已回答',
-        ...(answer === null ? { questionTimedOut: true } : {}),
-        display: { kind: 'question', question: effective.question, options: effective.options, ...(answer === null ? { unanswered: true } : { answer }),
-          ...(clarification ? { scopeResolution: 'accepted' } : {}) },
-      } }).value
+          ...(clarification ? { semanticTransition: clarification } : {}),
+          output, summary: cancelled ? '作者已取消提问' : decision === null ? '提问超时，未获回答' : '作者已回答',
+          ...(decision === null ? { questionTimedOut: true } : {}),
+          ...(cancelled ? { questionCancelled: true } : {}),
+          display: { kind: 'question', question: effective.question, options: effective.options,
+            ...(effective.questions ? { questions: effective.questions } : {}), ...(answers ? { answers } : {}),
+            ...(answer === undefined ? { unanswered: true } : { answer }), ...(cancelled ? { cancelled: true } : {}),
+            ...(clarification ? { scopeResolution: 'accepted' } : {}) },
+        } }).value
       }) })
     const key = `question:${prepared.operation.id}`
     let request = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: key } })
     if (!request) {
+      if (effective.questions && ctx.writingScope?.agentQuestionProtocol !== 1) return { failure: await recordToolFailureInTransaction(tx, lease,
+        { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, code: 'TOOL_SCHEMA_INVALID',
+          output: '当前作者端只支持单题，请使用 question 和 options 发一道题。', summary: '提问未发送' }) }
+      const coverFailure = await checkQuestionCoverOptions(tx, ctx, effective)
+      if (coverFailure) return { failure: await recordToolFailureInTransaction(tx, lease,
+        { operationId: prepared.operation.id, inputHash: prepared.operation.inputHash, ...coverFailure, summary: '提问未发送' }) }
       const now = await databaseNow(tx)
       request = await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: lease.taskRootId, runId: lease.runId, operationId: prepared.operation.id,
         eventKey: key, type: 'question.requested', payload: { version: 1, operationId: prepared.operation.id, callId: ctx.callId, ...effective,
@@ -63,18 +94,21 @@ export async function executeDurableQuestion(lease: RunLeaseToken, cursor: ToolE
       || question.callId !== ctx.callId || runtimeJson(durableQuestionContent.parse(question)).hash !== runtimeJson(effective).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原提问内容已损坏。')
     const response = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `question-answer:${request.id}` } })
     if (response) {
-      const answer = answerSchema.parse(response.payload)
-      if (response.taskRootId !== lease.taskRootId || response.type !== 'question.answered' || response.operationId !== prepared.operation.id || answer.requestId !== request.id
-        || answer.requestHash !== runtimeJson(request.payload).hash || answer.userId !== lease.userId) return runtimeError('RUNTIME_RECEIPT_INVALID', '原提问回答回执不匹配。')
-      return finish(`作者的回答：${answer.answer}`, answer.answer)
+      const saved = decisionReceipt.safeParse(response.payload)
+      if (!saved.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '原提问回答回执不匹配。')
+      const { requestId, requestHash, userId, ...decision } = saved.data
+      if (response.taskRootId !== lease.taskRootId || response.type !== ('cancelled' in decision ? 'question.cancelled' : 'question.answered')
+        || response.operationId !== prepared.operation.id || requestId !== request.id || requestHash !== runtimeJson(request.payload).hash
+        || userId !== lease.userId || !matchesQuestionDecision(question, decision)) return runtimeError('RUNTIME_RECEIPT_INVALID', '原提问回答回执不匹配。')
+      return finish(decision)
     }
-    if ((await databaseNow(tx)).getTime() >= Date.parse(question.expiresAt)) return finish(QUESTION_TIMEOUT_NOTICE, null)
+    if ((await databaseNow(tx)).getTime() >= Date.parse(question.expiresAt)) return finish(null)
     return { requestId: request.id }
   })
   if ('requestId' in waiting) return { kind: 'waiting_question' as const, requestId: waiting.requestId }
-  const { receipt } = waiting
   await reduceExecutionReceipt(lease, { expectedRevision: prepared.pending.revision, expectedHash: prepared.pending.snapshotHash, operationId: prepared.operation.id })
-  const result = z.object({ toolResult: z.object({ output: z.string() }).passthrough() }).parse(receipt.result).toolResult as ToolResult
+  const result = 'failure' in waiting ? readFailedToolResult(waiting.failure.result)
+    : z.object({ toolResult: z.object({ output: z.string() }).passthrough() }).parse(waiting.receipt.result).toolResult as ToolResult
   return { kind: 'tool' as const, result }
 }
 
@@ -87,9 +121,9 @@ export async function validateHistoricalQuestionReceipt(lease: RunLeaseToken) {
     const messages = frame.state.messages
     const last = messages.at(-1)
     if (last?.role === 'assistant' && last.localCompletion) {
-      // A timeout is terminal for its run. Only an admitted author Resume can
+      // A closed question is terminal for its run. Only an admitted author Resume can
       // supersede this saved candidate, and never while an effect is unknown.
-      if (last.localCompletion.kind === 'question_timeout') {
+      if (last.localCompletion.kind === 'question_timeout' || last.localCompletion.kind === 'question_cancelled') {
         const resumed = await tx.agentExecutionOutbox.findFirst({ where: { taskRootId: lease.taskRootId, runId: lease.runId, type: 'run.resume.queued' } })
         const source = z.object({ revision: z.number(), snapshotHash: z.string(), runId: z.string(), pauseEventId: z.string() }).safeParse(resumed?.payload)
         if (source.success && resumed?.eventKey === `resume:${source.data.pauseEventId}` && source.data.runId === lease.runId
@@ -98,7 +132,7 @@ export async function validateHistoricalQuestionReceipt(lease: RunLeaseToken) {
           && (await readTaskBudgetInTransaction(tx, lease.taskRootId)).unresolvedAttempts === 0n) {
           await saveExecutionStateInTransaction(tx, lease, { expectedRevision: frame.revision, expectedHash: frame.snapshotHash,
             snapshot: { ...frame.state, messages: [...messages, { role: 'system',
-              content: '作者已主动继续原任务。原提问已超时且没有回答；请核对已保存的进度，需要作者决定时重新提问。' }] } })
+              content: `作者已主动继续原任务。原提问已${last.localCompletion.kind === 'question_cancelled' ? '取消' : '超时'}且没有回答；请核对已保存的进度，需要作者决定时重新提问。` }] } })
           return null
         }
       }
@@ -140,26 +174,32 @@ export async function validateHistoricalQuestionReceipt(lease: RunLeaseToken) {
   })
 }
 
-export async function resolveDurableQuestion(input: { userId: string; runId: string; callId: string; requestId: string; answer: string }) {
-  const captured = { ...input, answer: input.answer.trim() }
-  if (!captured.answer || captured.answer.length > 4000) return runtimeError('RUNTIME_INPUT_INVALID', '回答内容无效。')
+export async function resolveDurableQuestion(input: { userId: string; runId: string; callId: string; requestId: string } & AgentQuestionDecision) {
+  const { userId, runId, callId, requestId, ...decisionInput } = input
+  const decision = agentQuestionDecisionSchema.safeParse(decisionInput)
+  if (!decision.success) return runtimeError('RUNTIME_INPUT_INVALID', '回答内容无效。')
+  const captured: AgentQuestionDecision = 'answer' in decision.data ? { answer: decision.data.answer.trim() }
+    : 'answers' in decision.data ? { answers: decision.data.answers.map(answer => answer.trim()) } : decision.data
+  if ('answer' in captured && captured.answer.length > 4000) return runtimeError('RUNTIME_INPUT_INVALID', '回答内容无效。')
+  const type = 'cancelled' in captured ? 'question.cancelled' : 'question.answered'
   return runtimeTransaction(async tx => {
-    const goal = await readGoalExecution(captured.userId, captured.runId, tx)
+    const goal = await readGoalExecution(userId, runId, tx)
     if (goal) await assertGoalRevisionFence(tx, goal)
-    const { run, root } = await lockRunRoot(tx, captured.userId, captured.runId)
-    const request = await tx.agentExecutionOutbox.findFirst({ where: { id: captured.requestId, taskRootId: root.id, type: 'question.requested' } })
+    const { run, root } = await lockRunRoot(tx, userId, runId)
+    const request = await tx.agentExecutionOutbox.findFirst({ where: { id: requestId, taskRootId: root.id, type: 'question.requested' } })
     const question = durableQuestionSchema.safeParse(request?.payload)
-    if (!request || !question.success || question.data.callId !== captured.callId || request.operationId !== question.data.operationId
+    if (!request || !question.success || question.data.callId !== callId || request.operationId !== question.data.operationId
       || request.eventKey !== `question:${question.data.operationId}`) return runtimeError('QUESTION_NOT_PENDING', '回答不属于原提问。')
     const operation = await tx.agentOperation.findFirst({ where: { id: question.data.operationId, taskRootId: root.id, kind: 'tool', action: 'ask_user' } })
     const original = z.object({ input: z.object({ callId: z.string(), args: z.unknown() }) }).safeParse(operation?.inputSnapshot)
     if (!operation || !original.success || runtimeJson(operation.inputSnapshot).hash !== operation.inputHash
-      || original.data.input.callId !== captured.callId
+      || original.data.input.callId !== callId
       || runtimeJson(original.data.input.args).hash !== runtimeJson(durableQuestionContent.parse(question.data)).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '提问与原工具请求不一致，不能保存回答。')
-    const payload = { requestId: request.id, requestHash: runtimeJson(request.payload).hash, answer: captured.answer, userId: captured.userId }
+    if (!matchesQuestionDecision(question.data, captured)) return runtimeError('RUNTIME_INPUT_INVALID', '回答数量必须与原提问一致。')
+    const payload = { requestId: request.id, requestHash: runtimeJson(request.payload).hash, ...captured, userId }
     const existing = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `question-answer:${request.id}` } })
     if (existing) {
-      if (existing.taskRootId !== root.id || existing.type !== 'question.answered' || existing.operationId !== operation.id
+      if (existing.taskRootId !== root.id || existing.type !== type || existing.operationId !== operation.id
         || runtimeJson(existing.payload).hash !== runtimeJson(payload).hash) return runtimeError('RUNTIME_IDENTITY_CONFLICT', '原提问已有不同回答或回执损坏。')
       return { resolved: true }
     }
@@ -167,7 +207,7 @@ export async function resolveDurableQuestion(input: { userId: string; runId: str
     if (root.status !== 'active' || operation.status !== 'prepared' || !['queued', 'running'].includes(run.status) || frame.state.pendingOperationId !== question.data.operationId
       || (await databaseNow(tx)).getTime() >= Date.parse(question.data.expiresAt)) return runtimeError('QUESTION_NOT_PENDING', '提问已结束或任务已暂停，不能向旧问题提交新回答。')
     await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: root.id, runId: run.id, operationId: question.data.operationId,
-      eventKey: `question-answer:${request.id}`, type: 'question.answered', payload } })
+      eventKey: `question-answer:${request.id}`, type, payload } })
     return { resolved: true }
   })
 }

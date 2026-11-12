@@ -13,6 +13,7 @@ import { collectDurableDeliverables } from './runtime-deliverables.js'
 import { collectDurableMemoryWork } from './runtime-memory.js'
 import { readCompletedWritingDelivery, readCompletedWritingPresentation, effectiveWritingTaskSpec } from './writing-scope.js'
 import { readOriginalTaskRequest } from './original-request.js'
+import { durableQuestionContent, durableQuestionSchema, questionCancellationReceiptSchema } from './runtime-question.js'
 import { readLimitedWritingDelivery, limitedReviewDependency, verifyRunLimitedWritingOutcome, permitsLimitedWritingContract } from './writing-delivery-limitations.js'
 import { z } from 'zod'
 
@@ -39,20 +40,38 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
     const evidence = await collectDurableToolEvidence(tx, root.id, frame.revision)
     const deliverables = await collectDurableDeliverables(tx, root, evidence.effects)
     const memoryWork = await collectDurableMemoryWork(tx, root, evidence.effects)
-    const timedOut = last.localCompletion?.kind === 'question_timeout'
-    if (timedOut) {
+    const localCompletion = last.localCompletion
+    const closedQuestion = localCompletion?.kind === 'question_timeout' || localCompletion?.kind === 'question_cancelled' ? localCompletion : null
+    if (closedQuestion) {
       const source = await readExecutionFrame(tx, root.id, frame.revision - 1)
-      const receipt = await tx.agentEffectReceipt.findUnique({ where: { operationId: last.localCompletion!.operationId }, include: { operation: true } })
+      const receipt = await tx.agentEffectReceipt.findUnique({ where: { operationId: closedQuestion.operationId }, include: { operation: true } })
+      const flag = closedQuestion.kind === 'question_cancelled' ? 'questionCancelled' : 'questionTimedOut'
       if (source.state.pendingOperationId !== receipt?.operationId || !receipt || receipt.operation.taskRootId !== root.id
         || receipt.operation.action !== 'ask_user' || receipt.operation.status !== 'succeeded'
         || runtimeJsonHash(receipt.result) !== receipt.resultHash
-        || !z.object({ toolResult: z.object({ questionTimedOut: z.literal(true) }) }).safeParse(receipt.result).success) {
-        return runtimeError('RUNTIME_RECEIPT_INVALID', '提问超时收尾缺少原回执。')
+        || !z.object({ toolResult: z.object({ [flag]: z.literal(true) }) }).safeParse(receipt.result).success) {
+        return runtimeError('RUNTIME_RECEIPT_INVALID', '提问收尾缺少原回执。')
+      }
+      if (closedQuestion.kind === 'question_cancelled') {
+        const request = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `question:${receipt.operationId}` } })
+        const prompt = durableQuestionSchema.safeParse(request?.payload)
+        const original = z.object({ input: z.object({ callId: z.string(), args: z.unknown() }) }).safeParse(receipt.operation.inputSnapshot)
+        if (!request || request.type !== 'question.requested' || request.taskRootId !== root.id || request.operationId !== receipt.operationId
+          || !prompt.success || prompt.data.operationId !== receipt.operationId || !original.success
+          || original.data.input.callId !== prompt.data.callId || runtimeJsonHash(receipt.operation.inputSnapshot) !== receipt.operation.inputHash
+          || runtimeJsonHash(original.data.input.args) !== runtimeJsonHash(durableQuestionContent.parse(prompt.data))) {
+          return runtimeError('RUNTIME_RECEIPT_INVALID', '提问取消缺少原工具请求。')
+        }
+        const response = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `question-answer:${request.id}` } })
+        const decision = questionCancellationReceiptSchema.safeParse(response?.payload)
+        if (!response || response.type !== 'question.cancelled' || response.taskRootId !== root.id || response.operationId !== receipt.operationId
+          || !decision.success || decision.data.requestId !== request.id || decision.data.userId !== lease.userId
+          || decision.data.requestHash !== runtimeJsonHash(request.payload)) return runtimeError('RUNTIME_RECEIPT_INVALID', '提问取消缺少作者的原决定。')
       }
     }
     const postconditionChecks = (await evaluateTaskPostconditions(tx, root)).map(check =>
-      timedOut && check.code === 'NOVEL_METADATA_INITIALIZED' && check.status === 'failed'
-        ? { ...check, status: 'deferred', deferredBy: 'question_timeout' } : check)
+      closedQuestion && check.code === 'NOVEL_METADATA_INITIALIZED' && check.status === 'failed'
+        ? { ...check, status: 'deferred', deferredBy: closedQuestion.kind } : check)
     const todos = await readDurableTodoItems(tx, root.id, frame.revision)
     const writingDelivery = await (spec.scope.agentWritingBinding ? readCompletedWritingPresentation : readCompletedWritingDelivery)(tx,
       { userId: lease.userId, novelId: root.novelId, runId: lease.runId })
@@ -92,7 +111,7 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
     ]
     // Ending the conversation defers known unfinished work without marking
     // any output or todo complete. Unknown effects and child fences stay live.
-    const deferred = timedOut ? outstanding.filter(item => ['report_length_unmet', 'deliverable_missing', 'deliverable_changed',
+    const deferred = closedQuestion ? outstanding.filter(item => ['report_length_unmet', 'deliverable_missing', 'deliverable_changed',
       'postcondition_failed', 'unfinished_todo'].includes(item.code)) : []
     const blockers = outstanding.filter(item => !deferred.includes(item))
     const observations = []
@@ -112,7 +131,7 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
       originalRequest: root.requestSnapshot,
       obligations: { goals: spec.goals, expectedOutputs: spec.expectedOutputs, postconditions: spec.postconditions, hardConstraints: spec.hardConstraints },
       verification: 'required', postconditionChecks, reportLengthChecks, deliverables, blockers, effects: evidence.effects, failedOperations, todos,
-      ...(timedOut ? { terminalReason: 'question_timeout', deferredBlockers: deferred } : {}),
+      ...(closedQuestion ? { terminalReason: closedQuestion.kind, deferredBlockers: deferred } : {}),
       ...(reviewObservation ? { reviewObservation } : {}),
       ...(limitedWritingDelivery ? { limitedWritingDelivery } : {}),
       memoryJobs: memoryWork.map(item => ({ id: item.job.id, sourceOperationId: item.source.operationId, chapterId: item.job.chapterId,

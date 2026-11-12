@@ -1,15 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-const mocks = vi.hoisted(() => ({ tx: { agentExecutionOutbox: { findUnique: vi.fn(), findFirst: vi.fn(), count: vi.fn() }, agentOperation: { findMany: vi.fn(), count: vi.fn() } },
-  scope: vi.fn(), assertScope: vi.fn(), clarify: vi.fn(), frame: vi.fn(), state: vi.fn(), prepare: vi.fn(), reduce: vi.fn(), commit: vi.fn(), now: vi.fn(), save: vi.fn(), budget: vi.fn() }))
+const mocks = vi.hoisted(() => ({ tx: { agentExecutionOutbox: { findUnique: vi.fn(), findFirst: vi.fn(), count: vi.fn(), create: vi.fn() },
+  agentOperation: { findMany: vi.fn(), count: vi.fn() }, coverAsset: { findMany: vi.fn() } },
+  scope: vi.fn(), assertScope: vi.fn(), clarify: vi.fn(), frame: vi.fn(), state: vi.fn(), prepare: vi.fn(), reduce: vi.fn(), commit: vi.fn(), now: vi.fn(), save: vi.fn(), budget: vi.fn(),
+  goal: vi.fn(), setGoalPhase: vi.fn(), recordFailure: vi.fn() }))
 vi.mock('../../api/lib/agent/runtime-lease.js', () => ({ withRunLease: async (_lease: unknown, work: (tx: unknown) => unknown) => work(mocks.tx) }))
 vi.mock('../../api/lib/agent/runtime-state.js', () => ({ readExecutionFrame: mocks.frame, readExecutionStateInTransaction: mocks.state, saveExecutionStateInTransaction: mocks.save }))
 vi.mock('../../api/lib/agent/runtime-budget.js', () => ({ readTaskBudgetInTransaction: mocks.budget }))
 vi.mock('../../api/lib/agent/runtime-tool-cursor.js', async original => ({ ...await original<object>(), prepareToolCursorOperation: mocks.prepare }))
-vi.mock('../../api/lib/agent/runtime-operations.js', () => ({ commitOperationEffectInTransaction: mocks.commit, recordToolFailure: vi.fn() }))
-vi.mock('../../api/lib/agent/runtime-reducer.js', () => ({ reduceExecutionReceipt: mocks.reduce }))
+vi.mock('../../api/lib/agent/runtime-operations.js', () => ({ commitOperationEffectInTransaction: mocks.commit, recordToolFailure: vi.fn(), recordToolFailureInTransaction: mocks.recordFailure }))
+vi.mock('../../api/lib/agent/runtime-reducer.js', async original => ({ ...await original<object>(), reduceExecutionReceipt: mocks.reduce }))
 vi.mock('../../api/lib/agent/writing-scope.js', () => ({ readWritingScope: mocks.scope, assertQuestionWritingScope: mocks.assertScope }))
 vi.mock('../../api/lib/agent/writing-clarification.js', () => ({ recordWritingClarification: mocks.clarify }))
+vi.mock('../../api/lib/agent/goal-fence.js', () => ({ readGoalExecution: mocks.goal, assertGoalRevisionFence: vi.fn() }))
+vi.mock('../../api/lib/agent/goal-runtime.js', () => ({ setGoalRunPhaseInTransaction: mocks.setGoalPhase }))
 vi.mock('../../api/lib/agent/runtime-common.js', async original => ({ ...await original<object>(), databaseNow: mocks.now }))
 import { executeDurableQuestion, validateHistoricalQuestionReceipt } from '../../api/lib/agent/runtime-question.js'
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
@@ -17,6 +21,7 @@ import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import type { RunLeaseToken } from '../../api/lib/agent/runtime-lease.js'
 import type { ToolExecutionCursor } from '../../api/lib/agent/runtime-tool-cursor.js'
 import type { AgentTool, ToolContext } from '../../api/lib/agent/tools/types.js'
+import { askUserTool, QUESTION_CANCELLED_NOTICE } from '../../api/lib/agent/tools/interact-tools.js'
 
 const lease = { userId: 'author', runId: 'run', taskRootId: 'original-root', ownerId: 'worker', claimId: 'claim', epoch: 1n } as RunLeaseToken
 const ctx: ToolContext = { userId: lease.userId, novelId: 'novel', sessionId: 'session', runId: lease.runId,
@@ -41,6 +46,7 @@ beforeEach(() => {
   mocks.frame.mockResolvedValue({ state: { nextOperationSequence: 0 } })
   mocks.prepare.mockResolvedValue({ operation: { id: 'operation', inputHash: 'input' }, pending: { revision: 1, snapshotHash: 'pending' } })
   mocks.clarify.mockResolvedValue(null)
+  mocks.goal.mockResolvedValue(undefined)
   mocks.reduce.mockResolvedValue({ revision: 2, snapshotHash: 'reduced', state: { phase: 'idle' } })
   mocks.now.mockResolvedValue(new Date('2026-11-04T00:00:00.000Z'))
   mocks.tx.agentExecutionOutbox.count.mockResolvedValue(0)
@@ -76,6 +82,70 @@ describe('durable question semantic scope receipts', () => {
     if (result.kind !== 'tool') throw Error('fixture expected an answered question')
     expect(result.result.display).not.toHaveProperty('scopeResolution')
     expect(result.result.failureCode).toBeUndefined()
+  })
+  it.each(['owned', 'unavailable'] as const)('admits image-bearing durable questions only against scoped assets: %s', async scenario => {
+    const cover = { label: '第一张', detail: '蓝色调', coverAssetId: 'cover-id' }
+    const question = { question: '用哪张封面？', options: [cover, { label: '暂不应用' }] }
+    const batch = { ...args, questions: [args, question] }
+    const response = { ...answer!, payload: { requestId: request.id, userId: lease.userId, answers: ['第一章', '第一张（蓝色调）'] } }
+    let saved: typeof request | undefined
+    mocks.tx.agentExecutionOutbox.findUnique.mockImplementation(async ({ where }) => where.eventKey.startsWith('question-answer:')
+      ? saved && { ...response, payload: { ...response.payload, requestHash: runtimeJson(saved.payload).hash } } : saved)
+    mocks.tx.agentExecutionOutbox.create.mockImplementation(async ({ data }) => saved = { ...data, id: request.id })
+    mocks.tx.coverAsset.findMany.mockResolvedValue(scenario === 'owned' ? [{ id: 'cover-id' }] : [])
+    mocks.recordFailure.mockImplementation(async (_tx, _lease, { code, summary, output }) => ({ result: { code,
+      outcome: 'failed', effectApplied: false, toolResult: { summary, output } } }))
+    const compatible = { ...ctx, writingScope: { novelId: ctx.novelId, agentQuestionProtocol: 1 as const } }
+    const result = await executeDurableQuestion(lease, cursor, compatible, askUserTool, batch)
+    expect(mocks.tx.coverAsset.findMany).toHaveBeenCalledExactlyOnceWith({ where: { id: { in: ['cover-id'] }, ownerUserId: ctx.userId, novelId: ctx.novelId }, select: { id: true } })
+    if (scenario === 'unavailable') {
+      expect(result).toMatchObject({ kind: 'tool', result: { failureCode: 'QUESTION_COVER_UNAVAILABLE', outcome: 'failed' } })
+      expect(mocks.tx.agentExecutionOutbox.create).not.toHaveBeenCalled()
+      expect(mocks.clarify).not.toHaveBeenCalled()
+      return
+    }
+    expect(saved?.payload).toMatchObject(batch)
+    expect(result).toMatchObject({ kind: 'tool', result: { output: expect.stringContaining('作者选择的封面候选 coverAssetId：cover-id'),
+      display: { ...batch, answer: '第一章', answers: response.payload.answers } } })
+  })
+  it('rejects a fresh batch for an unmarked client before publishing a pending question', async () => {
+    mocks.tx.agentExecutionOutbox.findUnique.mockResolvedValue(null)
+    mocks.recordFailure.mockImplementation(async (_tx, _lease, { code, summary, output }) => ({ result: {
+      code, outcome: 'failed', effectApplied: false, toolResult: { summary, output },
+    } }))
+    const result = await executeDurableQuestion(lease, cursor, ctx, askUserTool, { questions: [args] })
+    expect(result).toMatchObject({ kind: 'tool', result: { failureCode: 'TOOL_SCHEMA_INVALID', outcome: 'failed' } })
+    expect(mocks.tx.agentExecutionOutbox.create).not.toHaveBeenCalled()
+  })
+  it.each(['answer', 'cancel', 'partial'] as const)('consumes a batch only with a full saved answer or explicit cancellation: %s', async scenario => {
+    const questions = [args, { question: '采用哪个视角？', options: [{ label: '第三人称' }, { label: '第一人称' }] }]
+    const batch = { ...request, payload: { ...request.payload, questions } }
+    const answers = ['第一章', '第三人称']
+    const goal = { goalId: 'goal', runId: lease.runId }
+    mocks.goal.mockResolvedValue(goal)
+    answer!.payload = { requestId: request.id, requestHash: runtimeJson(batch.payload).hash, userId: lease.userId,
+      ...(scenario === 'cancel' ? { cancelled: true } : { answers: scenario === 'partial' ? answers.slice(0, 1) : answers }) }
+    if (scenario === 'cancel') answer!.type = 'question.cancelled'
+    mocks.tx.agentExecutionOutbox.findUnique.mockImplementation(async ({ where }) => where.eventKey.startsWith('question-answer:') ? answer : batch)
+    const run = () => executeDurableQuestion(lease, cursor, ctx, askUserTool, { questions })
+    if (scenario === 'partial') {
+      await expect(run()).rejects.toMatchObject({ code: 'RUNTIME_RECEIPT_INVALID' })
+      expect(mocks.commit).not.toHaveBeenCalled()
+      expect(mocks.clarify).not.toHaveBeenCalled()
+      expect(mocks.setGoalPhase).not.toHaveBeenCalled()
+      return
+    }
+    if (scenario === 'cancel') {
+      expect(await run()).toMatchObject({ kind: 'tool', result: { output: QUESTION_CANCELLED_NOTICE, questionCancelled: true,
+        display: { kind: 'question', questions, cancelled: true, unanswered: true } } })
+      expect(mocks.clarify).not.toHaveBeenCalled()
+      expect(mocks.setGoalPhase).toHaveBeenCalledExactlyOnceWith(mocks.tx, goal, 'awaiting_input', 'GOAL_QUESTION_CANCELLED')
+    } else {
+      expect(await run()).toMatchObject({ kind: 'tool', result: { output: '1. 保存在哪一章？\n作者的回答：第一章\n\n2. 采用哪个视角？\n作者的回答：第三人称',
+        display: { kind: 'question', questions, answer: '第一章', answers } } })
+      expect(mocks.clarify).toHaveBeenCalledExactlyOnceWith(mocks.tx, ctx, expect.objectContaining({ ...args, answer: '第一章' }))
+      expect(mocks.setGoalPhase).not.toHaveBeenCalled()
+    }
   })
   it('keeps an unanswered required scope unresolved without recording an author grant', async () => {
     answer = null

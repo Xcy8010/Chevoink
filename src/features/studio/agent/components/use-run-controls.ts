@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
+import type { AgentQuestionDecision } from '../../../../../shared/contracts/agent-events.js'
 import { continueAgentLoopRun, resolveAgentApproval, resolveAgentQuestion, stopAgentLoopRun, type ContinueAgentLoopRunModel } from '../agentApi'
 import { isRunActive, useAgentStore, type AgentRunPhase, type PendingApproval, type PendingQuestion } from '../agentStore'
 
@@ -28,17 +29,20 @@ export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendi
     if (!isRunActive(phase) || stoppingRunId !== runId) setStoppingRunId(null)
   }, [phase, runId, stoppingRunId])
 
-  const command = useCallback(async <T,>(key: string, request: () => Promise<T>, success: (value: T) => void, fallback: string, failed?: () => void) => {
+  const command = useCallback(async <T,>(key: string, request: () => Promise<T>, success: (value: T) => void, fallback?: string, failed?: () => void) => {
     const owner = epoch.current
     const locks = pending.current
     if (locks.has(key)) return
     locks.add(key)
     try {
       const result = await request()
-      if (owner === epoch.current) success(result)
+      if (owner !== epoch.current) return
+      success(result)
+      return result
     } catch (error) {
       if (owner !== epoch.current) return
       failed?.()
+      if (fallback === undefined) throw error
       setActionError(error instanceof Error ? error.message : fallback)
     } finally {
       locks.delete(key)
@@ -68,11 +72,12 @@ export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendi
     }), () => {}, '提交失败，请稍后再试。')
   }, [runId, pendingApproval, command])
 
-  const handleResolveQuestion = useCallback(async (answer: string) => {
-    if (!runId || !pendingQuestion) return
-    await command(`question:${runId}:${pendingQuestion.callId}`, () => resolveAgentQuestion(runId, {
-      requestId: pendingQuestion.requestId, callId: pendingQuestion.callId, answer,
-    }), () => {}, '提交失败，请稍后再试。')
+  const handleResolveQuestion = useCallback(async (decision: AgentQuestionDecision) => {
+    if (!runId || !pendingQuestion) return false
+    const result = await command(`question:${runId}:${pendingQuestion.callId}`, () => resolveAgentQuestion(runId, {
+      requestId: pendingQuestion.requestId, callId: pendingQuestion.callId, ...decision,
+    }), () => {})
+    return result?.resolved === true
   }, [runId, pendingQuestion, command])
 
   return { stoppingRunId,

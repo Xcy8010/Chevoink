@@ -1,4 +1,5 @@
 import type { Prisma } from '@prisma/client'
+import { z } from 'zod'
 import { DataAccessError } from '../prisma.js'
 import { readOriginalTaskRequest, originalTaskRunIds } from './original-request.js'
 import { isExplicitNovelMetadataRequest, isNovelDirectionSetup, requiresManuscriptDelivery } from './task-spec.js'
@@ -28,6 +29,14 @@ export function hasNovelDirectionDelivery(spec: TaskSpec): boolean {
 
 export function novelSetupNotice(title: string): string {
   return `已保存《${title}》的书名、简介和标签。要不要开始写大纲？`
+}
+
+export const novelSetupRecapSchema = z.object({ title: z.string().min(1), summary: z.string().min(1),
+  tagNames: z.array(z.string().min(1)).min(1) }).strict()
+export type NovelSetupRecap = z.infer<typeof novelSetupRecapSchema>
+
+export function formatNovelSetupRecap({ title, summary, tagNames }: NovelSetupRecap): string {
+  return `已保存《${title}》的作品信息。\n\n**简介**\n\n${summary}\n\n**标签** ${tagNames.join('、')}\n\n要不要开始写大纲？`
 }
 
 export const NOVEL_SETUP_BLOCKED_NOTICE = '本轮无法保存作品信息，自动执行已停止。已保存的内容会保留。'
@@ -108,8 +117,8 @@ export async function assertNovelInitializationDirection(db: Prisma.TransactionC
 }
 
 /** Current saved fields plus this task's real successful writes. */
-export async function readNovelInitializationCompletion(db: Prisma.TransactionClient, ctx: Subject): Promise<
-  { status: 'complete'; title: string; missing: [] } | { status: 'declined' | 'incomplete'; missing: string[] }> {
+export async function readNovelInitializationCompletion(db: Prisma.TransactionClient, ctx: Subject, options?: { includeRecap: true }): Promise<
+  { status: 'complete'; title: string; missing: []; recap?: NovelSetupRecap } | { status: 'declined' | 'incomplete'; missing: string[] }> {
   const original = await readOriginalTaskRequest(db, ctx)
   const [novel, observations] = await Promise.all([
     db.novel.findFirst({ where: { id: ctx.novelId, authorId: ctx.userId }, select: { title: true, displayTitle: true, summary: true, tagNames: true } }),
@@ -131,7 +140,8 @@ export async function readNovelInitializationCompletion(db: Prisma.TransactionCl
     !novel?.summary.trim() || typeof writes.summary !== 'string' || writes.summary.trim() !== novel.summary ? '简介' : '',
     !novel?.tagNames.length || !Array.isArray(writes.tags) || JSON.stringify([...new Set(writes.tags.map(String).map(tag => tag.trim()))]) !== JSON.stringify(novel.tagNames) ? '标签' : '',
   ].filter(Boolean)
-  return !novel || missing.length ? { status: 'incomplete', missing } : { status: 'complete', title: novel.title, missing: [] }
+  return !novel || missing.length ? { status: 'incomplete', missing } : { status: 'complete', title: novel.title, missing: [],
+    ...(options?.includeRecap ? { recap: { title: novel.title, summary: novel.summary, tagNames: novel.tagNames } } : {}) }
 }
 
 async function hasSameTaskPlaceholderRename(db: Prisma.TransactionClient, ctx: ToolContext, original: Original, novel: NovelMetadata) {

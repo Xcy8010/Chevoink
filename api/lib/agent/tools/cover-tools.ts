@@ -56,7 +56,7 @@ export const coverGenerateTool = defineTool({
       .join('；')
 
     return {
-      output: `已生成 ${images.length} 张封面候选图：${candidates}。接下来必须先对每张候选调用 view_image（url 传上面给出的候选图 url，也可直传 coverAssetId）校验画面（主体/构图是否符合提示词、封面是否清晰包含书名标题文字，实际使用的提示词「${finalPrompt.slice(0, 120)}」），校验通过后再用 ask_user 询问作者是否应用（多张时问选哪张），得到确认后用 cover_apply 带对应 ID 应用；不要不问就结束任务。`,
+      output: `已生成 ${images.length} 张封面候选图：${candidates}。接下来必须先对每张候选调用 view_image（url 传候选图 url 或 coverAssetId）校验画面（主体/构图是否符合提示词、封面是否清晰包含书名标题文字，实际使用的提示词「${finalPrompt.slice(0, 120)}」），再用 ask_user 让作者选图。图片选项填写对应的 coverAssetId，留一个「暂不应用」选项；按作者选择用 cover_apply 应用已有 ID。`,
       summary: `生成 ${images.length} 张封面候选`,
       display: {
         kind: 'coverImages',
@@ -70,7 +70,7 @@ export const coverGenerateTool = defineTool({
 export const coverApplyTool = defineTool({
   name: 'cover_apply',
   title: '应用封面',
-  description: '按作者明确要求，把候选图或当前任务中作者上传的图片设为当前作品封面。候选图传 coverAssetId，上传图片传附件真实 attachmentUrl，二选一。直接应用作者指定图片，不要重新生成。',
+  description: '按作者明确要求，把候选图或当前任务中作者上传的图片设为当前作品封面。候选图传作者选定的 coverAssetId（例如 ask_user 返回的 ID），上传图片传附件真实 attachmentUrl，二选一。直接应用作者指定图片，不要重新生成。',
   parameters: z.object({
     coverAssetId: z.string().trim().min(1).max(64).optional().describe('要应用的封面候选资源 ID'),
     attachmentUrl: z.string().min(1).max(1024).optional().describe('当前任务的用户图片附件 URL'),

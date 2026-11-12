@@ -24,6 +24,57 @@ function event(body: AgentStreamEventBody) { useAgentStore.getState().applyEvent
 // Each call starts a separate synthetic execution; reusing a run id is an idempotent receipt.
 function start() { useAgentStore.getState().resetRun(); seq = 0; useAgentStore.getState().beginRun('run', '合成问题', 'session'); event({ type: 'message.start', messageId: 'answer' }) }
 const answer = '按照已经核对的卷纲，第一卷计划写二十章，人物冲突与阶段目标会分批推进。'
+it('keeps the entire pending batch on its original call and clears it on the cancel receipt', () => {
+  start()
+  const questions = [
+    { question: '故事主线？', options: [{ label: '旧案' }, { label: '失踪' }] },
+    { question: '叙事视角？', options: [{ label: '第一人称' }, { label: '第三人称' }] },
+  ]
+  event({ type: 'tool.call', messageId: 'answer', callId: 'batch', toolName: 'ask_user',
+    title: '向作者提问', args: { requestId: 'batch-request', questions } })
+  expect(useAgentStore.getState()).toMatchObject({
+    phase: 'awaiting_input', pendingQuestion: { callId: 'batch', requestId: 'batch-request', ...questions[0], questions },
+  })
+  event({ type: 'tool.result', messageId: 'answer', callId: 'batch', toolName: 'ask_user', ok: true,
+    summary: '作者已取消提问', display: { kind: 'question', ...questions[0], questions, cancelled: true } })
+  expect(useAgentStore.getState().pendingQuestion).toBeNull()
+  expect(useAgentStore.getState().messages.at(-1)?.parts.at(-1)).toMatchObject({ display: { cancelled: true } })
+})
+
+it('retains cover asset references from single and batched question events', () => {
+  const question = { question: '选择封面', options: [{ label: '雨夜车站', coverAssetId: 'sample-cover-1' }, { label: '暂不应用' }] }
+  for (const args of [question, { questions: [question] }]) {
+    start()
+    event({ type: 'tool.call', messageId: 'answer', callId: 'cover-question', toolName: 'ask_user', title: '向作者提问', args })
+    expect(useAgentStore.getState().pendingQuestion).toMatchObject({
+      callId: 'cover-question',
+      ...question,
+      ...('questions' in args ? args : {}),
+    })
+  }
+})
+
+it('keeps saved setup progress and tool results ahead of the terminal recap on live delivery and replay', () => {
+  start()
+  const progress = '先确认故事方向。'
+  const recap = '书名《雾港》，简介已保存。要不要开始写大纲？'
+  event({ type: 'text.final', messageId: 'answer', text: progress, asReasoning: false })
+  event({ type: 'tool.call', messageId: 'answer', callId: 'save', toolName: 'novel_update_meta', title: '更新作品信息', args: {} })
+  event({ type: 'tool.result', messageId: 'answer', callId: 'save', toolName: 'novel_update_meta', ok: true, summary: '已整理作品信息' })
+  const terminal = { type: 'text.final', messageId: 'answer', text: recap, asReasoning: false, afterTools: true } as const
+  event(terminal)
+  event(terminal)
+  const state = useAgentStore.getState()
+  expect(state.messages.at(-1)?.parts).toEqual([
+    { type: 'text', text: progress },
+    expect.objectContaining({ type: 'tool-call', callId: 'save', status: 'success' }),
+    { type: 'text', text: recap },
+  ])
+  expect(state.textRevealTargets.answer).toBe(progress + recap)
+  state.finishTextReveal('answer', progress + recap)
+  expect(useAgentStore.getState().textRevealTargets).toEqual({})
+})
+
 it('reveals an atomic final answer after real finish, then folds process rows with an exit transition', async () => {
   vi.useFakeTimers(); start()
   event({ type: 'tool.call', messageId: 'answer', callId: 'read', toolName: 'chapter_read', title: '读取正文', args: {} })

@@ -1,3 +1,5 @@
+import type { AgentQuestionDecision } from '../../../shared/contracts/index.js'
+
 /**
  * 权限裁决与审批信箱（plan/13 §4.3 / §4.9）。
  * - 'ask' 工具触发 permission.ask 事件后，循环在此挂起等待前端批复
@@ -123,18 +125,21 @@ export function getPendingApprovalCallIds(runId: string): string[] {
  * 提问信箱（ask_user 工具）：与审批信箱同构的挂起-唤醒模式。
  * - 工具 execute 内 waitForQuestionAnswer 挂起循环，等待作者作答
  * - POST /api/agent/runs/:runId/questions 调 resolveQuestionAnswer 唤醒
- * - 超时和取消都没有回答；只有真正的超时可触发本轮直接收尾
+ * - 只有作者提交的取消才作为决定，运行中断清理不冒充作者取消
  */
 
 export type QuestionAnswer = {
   answer: string | null
   timedOut: boolean
+  answers?: string[]
+  cancelled?: true
 }
 
 type PendingQuestion = {
   resolve: (result: QuestionAnswer) => void
   timer: NodeJS.Timeout
   expiresAt: number
+  batchQuestionCount?: number
 }
 
 const pendingQuestionsByRun = new Map<string, Map<string, PendingQuestion>>()
@@ -144,6 +149,7 @@ export function waitForQuestionAnswer(
   callId: string,
   timeoutMs: number,
   signal: AbortSignal,
+  batchQuestionCount?: number,
 ): Promise<QuestionAnswer> {
   return new Promise((resolve) => {
     let pending = pendingQuestionsByRun.get(runId)
@@ -173,6 +179,7 @@ export function waitForQuestionAnswer(
       resolve: settle,
       timer,
       expiresAt,
+      batchQuestionCount,
     })
 
     if (signal.aborted) {
@@ -183,8 +190,8 @@ export function waitForQuestionAnswer(
   })
 }
 
-/** 前端作答入口：返回 false 表示没有对应的挂起提问（已超时/已处理） */
-export function resolveQuestionAnswer(runId: string, callId: string, answer: string): boolean {
+/** Validate the author's decision against the active question before waking it. */
+export function resolveQuestionAnswer(runId: string, callId: string, decision: AgentQuestionDecision | string): boolean {
   const entry = pendingQuestionsByRun.get(runId)?.get(callId)
 
   if (!entry) {
@@ -195,7 +202,19 @@ export function resolveQuestionAnswer(runId: string, callId: string, answer: str
     return false
   }
 
-  entry.resolve({ answer, timedOut: false })
+  const submitted = typeof decision === 'string' ? { answer: decision } : decision
+  if ('cancelled' in submitted) {
+    entry.resolve({ answer: null, timedOut: false, cancelled: true })
+    return true
+  }
+  if ('answers' in submitted) {
+    if (submitted.answers.length !== entry.batchQuestionCount || submitted.answers.some(answer => !answer.trim() || answer.length > 500)) return false
+    const answers = submitted.answers.map(answer => answer.trim())
+    entry.resolve({ answer: answers[0], answers, timedOut: false })
+    return true
+  }
+  if (entry.batchQuestionCount !== undefined || !submitted.answer.trim()) return false
+  entry.resolve({ answer: submitted.answer, timedOut: false })
   return true
 }
 

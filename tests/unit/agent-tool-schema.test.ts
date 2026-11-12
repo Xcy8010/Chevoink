@@ -13,12 +13,62 @@ import { normalizeToolInput } from '../../api/lib/agent/tools/input-validation.j
 import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import type { TaskSpec } from '../../shared/contracts/index.js'
 import { configureAgentTool } from '../../api/lib/agent/tools/configuration-tools.js'
+import { askUserTool, formatAuthorQuestionAnswer, legacyAskUserParameters, previousBatchAskUserParameters } from '../../api/lib/agent/tools/interact-tools.js'
 import { agentModelSelectionSchema, modelReasoningEffortSchema } from '../../shared/contracts/agent-model-assignments.js'
 import { toolWithNativeView, projectNativeToolViews, hasRetiredNativeArguments, readFrozenModelToolViews, readPreparedModelRequest } from '../../api/lib/agent/runtime-tool-view.js'
 
 vi.mock('zod', async importOriginal => {
   const actual = await importOriginal<typeof import('zod')>()
   return { ...actual, z: { ...actual.z, toJSONSchema: vi.fn(actual.z.toJSONSchema) } }
+})
+
+it('advertises two to three options and a cover asset ID while retaining exact frozen question schemas', () => {
+  const scope: TaskSpec['scope'] = { novelId: 'novel', novelDirectionRequired: true, agentQuestionProtocol: 1 }
+  const current = toOpenAIToolPresentation(askUserTool, scope).parameters
+  expect(current).toMatchObject({ type: 'object', required: ['purpose'],
+    anyOf: [{ required: ['question', 'options'] }, { required: ['questions'] }],
+    properties: { options: { minItems: 2, maxItems: 3, items: { properties: { coverAssetId: { type: 'string' } } } },
+      questions: { type: 'array', minItems: 1, maxItems: 3, items: { properties: {
+        options: { minItems: 2, maxItems: 3, items: { properties: { coverAssetId: { type: 'string' } } } },
+      } } } },
+  })
+  const frozen = toOpenAIParameters(legacyAskUserParameters)
+  const { purpose: _purpose, ...withoutPurpose } = frozen.properties as Record<string, unknown>
+  const alternatives = originalToolParameterSchemas(askUserTool, scope)
+  expect(alternatives).toContainEqual(current)
+  expect(alternatives).toContainEqual(frozen)
+  expect(alternatives).toContainEqual({ ...frozen, required: ['question', 'options', 'purpose'] })
+  expect(alternatives).toContainEqual({ ...frozen, properties: withoutPurpose })
+  const batch = toOpenAIParameters(previousBatchAskUserParameters)
+  expect(alternatives).toContainEqual(batch)
+  expect(alternatives).toContainEqual(toOpenAIToolPresentation({ ...askUserTool, parameters: previousBatchAskUserParameters }, scope).parameters)
+  const options = ['一', '二', '三', '四'].map(label => ({ label }))
+  const question = { question: '选择什么？', options, purpose: 'novel_direction' }
+  const questions = [{ question: question.question, options }]
+  for (const raw of [question, { questions, purpose: question.purpose }]) {
+    const normalized = normalizeToolInput(askUserTool, raw)
+    expect(z.fromJSONSchema(current).safeParse(normalized).success).toBe(false)
+    expect(z.fromJSONSchema(batch).safeParse(normalized).success).toBe(true)
+    expect(askUserTool.parameters.parse(normalized).options).toEqual(options)
+  }
+  const cover = { label: '候选一', detail: '冷色调', coverAssetId: 'cover-one' }
+  const imageQuestion = normalizeToolInput(askUserTool, { question: '使用哪个封面？', options: [cover, { label: '暂不应用' }], purpose: question.purpose })
+  expect(z.fromJSONSchema(current).safeParse(imageQuestion).success).toBe(true)
+  expect(previousBatchAskUserParameters.parse(imageQuestion).options[0]).toEqual({ label: cover.label, detail: cover.detail })
+  expect(formatAuthorQuestionAnswer([cover], '候选一')).toBe('作者的回答：候选一')
+  expect(formatAuthorQuestionAnswer([cover, { label: '候选一（冷色调）' }], '候选一（冷色调）')).toBe('作者的回答：候选一（冷色调）')
+})
+
+it('presents a single-question tool to clients without the batch protocol', () => {
+  const scope: TaskSpec['scope'] = { novelId: 'novel', novelDirectionRequired: true }
+  const { description, parameters } = toOpenAIToolPresentation(askUserTool, scope)
+  const properties = parameters.properties as Record<string, unknown>
+  expect(description).toContain('一次发一道题')
+  expect(parameters.required).toEqual(['question', 'options', 'purpose'])
+  expect(properties.questions).toBeUndefined()
+  expect(properties.options).toMatchObject({ minItems: 2, maxItems: 3 })
+  expect(JSON.stringify(properties.options)).not.toContain('coverAssetId')
+  expect(originalToolParameterSchemas(askUserTool, scope)).toContainEqual(parameters)
 })
 
 describe('registered built-in parameter cache', () => {

@@ -1,6 +1,7 @@
 import { AGENT_TOOL_EXECUTION_POLICY } from './tool-execution-guidance.js'
-import { hasNovelDirectionDelivery, novelSetupNotice, readNovelInitializationCompletion } from './novel-initialization.js'
-import { DIRECTION_PURPOSE_REQUIRED, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
+import { formatNovelSetupRecap, hasNovelDirectionDelivery, readNovelInitializationCompletion } from './novel-initialization.js'
+import { appendAgentFinalTextAfterTools } from '../../../shared/agent-author-view.js'
+import { askUserTool, DIRECTION_PURPOSE_REQUIRED, QUESTION_CANCELLED_NOTICE, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { observedReviewOutcome, projectedReviewAction, type ReviewOutcome } from '../../../shared/review-lifecycle.js'
 import { readSettledQualityReviews, readQualityReviewAdmission } from './quality-review-admission.js'
@@ -267,6 +268,7 @@ const CONTEXT_SLIM_KEEP_RECENT_TOOL_OUTPUTS = 8
 type ToolCallOutcome = {
   terminalResponse?: TaskResponse
   questionTimedOut?: true
+  questionCancelled?: true
   reviewOutcome?: ReviewOutcome
   unresolvedTextRequest?: boolean
   reviewCompleted?: boolean
@@ -422,7 +424,10 @@ export async function handleToolCall(
 
   const directionPurposeMissing = !coercionFailed && call.name === 'ask_user' && ctx.writingScope?.novelDirectionRequired
     && (!parsedArgs || typeof parsedArgs !== 'object' || !('purpose' in parsedArgs) || parsedArgs.purpose !== 'novel_direction')
-  bus.emit({ type: 'tool.call', messageId, callId: call.id, toolName: call.name, title: basePart.title, args: directionPurposeMissing ? null : parsedArgs, autoApproved, ...subagentMark })
+  const publishToolCall = (args: unknown) => bus.emit({ type: 'tool.call', messageId, callId: call.id, toolName: call.name, title: basePart.title, args, autoApproved, ...subagentMark })
+  const questionCall = call.name === 'ask_user' && (directionPurposeMissing || tool.execute === askUserTool.execute)
+  let published = !questionCall
+  if (published) publishToolCall(parsedArgs)
 
   const requestTrace = createTextRequestTrace()
   // These tools expose execution success/failure. Review judgments remain
@@ -432,6 +437,7 @@ export async function handleToolCall(
   let failureCode: string | undefined
   let invalidFields: string[] | undefined
   const fail = (summary: string, observation: string, status: 'failed' | 'denied', reviewRequestFinished?: ToolCallOutcome['reviewRequestFinished'], reviewOutcome?: ReviewOutcome, display?: ToolCallOutcome['part']['display']): ToolCallOutcome => {
+    if (!published) publishToolCall(null)
     if (requestTrace.records.length) reviewRequestFinished = reviewSnapshot && textRequestsFinished(requestTrace) ? {
       version: 1, ...reviewSnapshot, usageIds: requestTrace.records.map(row => row.usageId),
     } : undefined
@@ -452,7 +458,7 @@ export async function handleToolCall(
     })
     return { observation, failureCode, reviewRequestFinished, reviewOutcome,
       unresolvedTextRequest: reviewOutcome === 'provider_unresolved' || requestTrace.records.length > 0 && !textRequestsFinished(requestTrace)
-        || failureCode === 'UNEXPECTED_TOOL_ERROR' && STATE_SENSITIVE_VALIDATORS.has(call.name), part: { ...basePart, args: parsedArgs, status, summary, ...(display ? { display } : {}), ...(exposeReviewOutcome && reviewOutcome ? { reviewOutcome } : {}) },
+        || failureCode === 'UNEXPECTED_TOOL_ERROR' && STATE_SENSITIVE_VALIDATORS.has(call.name), part: { ...basePart, args: published ? parsedArgs : null, status, summary, ...(display ? { display } : {}), ...(exposeReviewOutcome && reviewOutcome ? { reviewOutcome } : {}) },
 }
   }
 
@@ -472,6 +478,11 @@ export async function handleToolCall(
   if (directionPurposeMissing) {
     failureCode = 'NOVEL_DIRECTION_PURPOSE_REQUIRED'
     return rejectBeforeExecution('提问未发送', DIRECTION_PURPOSE_REQUIRED)
+  }
+  if (questionCall && ctx.writingScope?.agentQuestionProtocol !== 1
+    && parsedArgs && typeof parsedArgs === 'object' && 'questions' in parsedArgs) {
+    failureCode = 'TOOL_SCHEMA_INVALID'
+    return rejectBeforeExecution('提问未发送', '当前作者端只支持单题，请使用 question 和 options 发一道题。')
   }
 
   if (permission === 'deny') {
@@ -562,7 +573,10 @@ export async function handleToolCall(
       ctx.signal.throwIfAborted()
       await beforeExecute?.()
       ctx.signal.throwIfAborted()
-      return tool.execute({ ...ctx, inlineChild: Boolean(subagent) }, validated.data)
+      return tool.execute({ ...ctx, inlineChild: Boolean(subagent), publishQuestion: questionCall ? () => {
+        if (!published) publishToolCall(validated.data)
+        published = true
+      } : undefined }, validated.data)
     })))
     const reviewOutcome = requestTrace.records.length > 0 && !textRequestsFinished(requestTrace) && result.reviewOutcome
       ? 'provider_unresolved' as const : result.reviewOutcome
@@ -608,6 +622,7 @@ export async function handleToolCall(
       observedChapterRange: result.observedChapterRange,
       terminalResponse: call.name === 'task_respond' && !ctx.inlineChild ? result.terminalResponse : undefined,
       questionTimedOut: call.name === 'ask_user' && !ctx.inlineChild ? result.questionTimedOut : undefined,
+      questionCancelled: call.name === 'ask_user' && !ctx.inlineChild ? result.questionCancelled : undefined,
       part: {
         ...basePart,
         args: validated.data,
@@ -696,6 +711,8 @@ export async function handleToolCall(
   }
 }
 
+type LocalTerminalNoticeKind = 'question_timeout' | 'question_cancelled' | 'novel_setup'
+
 async function finalizeLegacyRun(
   runId: string,
   bus: RunEventBus,
@@ -715,10 +732,11 @@ async function finalizeLegacyRun(
   responseDelivery?: { subject: { userId: string; novelId: string; sessionId: string; runId: string }; expected: TaskResponse;
     signal: AbortSignal; messageId: string; parts: AgentMessagePart[]; assertObligations: () => void; nextPrompt?: string },
   nextPrompt?: string,
-  terminalNotice?: { kind: 'question_timeout' | 'novel_setup'; messageId: string; sessionId: string; text: string; parts: AgentMessagePart[]; signal: AbortSignal },
+  terminalNotice?: { kind: LocalTerminalNoticeKind; messageId: string; sessionId: string; text: string; parts: AgentMessagePart[]; signal: AbortSignal },
 ) {
   // 事件协议用 succeeded，DB 枚举用 completed
   const dbStatus = status === 'succeeded' ? 'completed' : status
+  const afterTools = terminalNotice?.kind === 'novel_setup' && status === 'succeeded'
   // Failure explanations belong to the existing run-status channel. Publish
   // them atomically with the confirmed failure, never as novel prose.
   const failureStatus = status === 'failed' && withFailureStatus && errorMessage
@@ -739,7 +757,8 @@ async function finalizeLegacyRun(
     if (terminalNotice) {
       terminalNotice.signal.throwIfAborted()
       const { messageId, sessionId, text } = terminalNotice
-      const parts = JSON.parse(JSON.stringify([...terminalNotice.parts.filter(part => part.type !== 'text'), { type: 'text', text }])) as Prisma.InputJsonValue
+      const parts = JSON.parse(JSON.stringify(afterTools ? appendAgentFinalTextAfterTools(terminalNotice.parts, text)
+        : [...terminalNotice.parts.filter(part => part.type !== 'text'), { type: 'text', text }])) as Prisma.InputJsonValue
       await tx.agentMessage.upsert({ where: { id: messageId, runId, sessionId, role: 'assistant' },
         create: { id: messageId, runId, sessionId, role: 'assistant', parts }, update: { parts } })
       terminalNotice.signal.throwIfAborted()
@@ -790,7 +809,8 @@ async function finalizeLegacyRun(
       },
       select: { userId: true, sessionId: true, novelId: true, taskSpec: true },
     })
-  }, terminalNotice ? [{ type: 'text.final', messageId: terminalNotice.messageId, text: terminalNotice.text, asReasoning: false }]
+  }, terminalNotice ? [{ type: 'text.final', messageId: terminalNotice.messageId, text: terminalNotice.text, asReasoning: false,
+    ...(afterTools ? { afterTools: true as const } : {}) }]
     : responseDelivery ? [{ type: 'text.final', messageId: responseDelivery.messageId, text: responseDelivery.expected.answer, asReasoning: false }] : writingDelivery ? [...(writingDelivery.replaceCandidate ? [] : [{ type: 'message.start' as const, messageId: writingDelivery.messageId, role: 'assistant' as const }]),
     { type: 'text.final', messageId: writingDelivery.messageId, text: writingDisplayText!, asReasoning: false }] : failureStatus ? [failureStatus] : limitedDelivery ? [
     { type: 'message.start', messageId: limitedDelivery.messageId, role: 'assistant' },
@@ -2167,7 +2187,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (authorContent) {
         parts.push({ type: 'text', text: authorContent })
       }
-      const finishWithNotice = async (kind: 'question_timeout' | 'novel_setup', text: string, status: 'succeeded' | 'failed' = 'succeeded') => {
+      const finishWithNotice = async (kind: LocalTerminalNoticeKind, text: string, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded') => {
         controller.signal.throwIfAborted()
         bus.emit({ type: 'step.finish', turn, usage: result.usage })
         await finalizeRun(runId, bus, status, usage, turn, text, status === 'failed' ? text : undefined, false, undefined, undefined, undefined,
@@ -2415,6 +2435,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       let batchProgress = false
       const novelSetupOnly = hasNovelDirectionDelivery(taskSpec)
       let questionTimedOut = false
+      let questionCancelled = false
       let novelSetupSaved = false
       const legacyBatchRenames: ToolCallOutcome['part'][] = []
       const decisionFeedback: NonNullable<ToolCallOutcome['reviewDecisionFeedback']>[] = []
@@ -2721,12 +2742,14 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         if (call.name === 'todo_write' && outcome.part.status === 'success' && outcome.part.display?.kind === 'todoList') {
           todoItems = outcome.part.display.items
         }
-        const questionAnswer = call.name === 'ask_user' && outcome.part.status === 'success'
-          && outcome.part.display?.kind === 'question' && !outcome.part.display.unanswered ? outcome.part.display.answer : undefined
-        if (questionAnswer && outcome.part.display?.kind === 'question' && isExplicitAuthorEnd(questionAnswer, outcome.part.display.options)) {
+        const questionDisplay = call.name === 'ask_user' && outcome.part.status === 'success'
+          && outcome.part.display?.kind === 'question' && !outcome.part.display.unanswered ? outcome.part.display : undefined
+        const questionAnswer = questionDisplay?.answer
+        if (questionAnswer && questionDisplay && isExplicitAuthorEnd(questionAnswer, questionDisplay.options)) {
           authorEndRequested = true
         }
         questionTimedOut = outcome.questionTimedOut === true
+        questionCancelled = outcome.questionCancelled === true
         novelSetupSaved = novelSetupOnly && outcome.part.status === 'success' && isNovelMetadataWrite
         parts.push(outcome.part)
         // 子 Agent 内嵌执行产生的内部工具卡片随父消息一并直播与落库，刷新后仍可展开查看
@@ -2734,7 +2757,8 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         messages.push({ role: 'tool', toolCallId: call.id, content: outcome.observation })
         // Tool proposals in the question's batch were generated before the
         // author's choice. The next model turn must see the actual choice.
-        if (forceWrapUpReason || authorEndRequested || questionTimedOut || novelSetupSaved || (novelSetupOnly && questionAnswer)) {
+        if (forceWrapUpReason || authorEndRequested || questionTimedOut || questionCancelled || novelSetupSaved
+          || (questionAnswer && (novelSetupOnly || questionDisplay?.answers))) {
           break
         }
         if (novelSetupOnly && isNovelMetadataWrite && initializationAuthorityBlocked && !pendingReviews.size) {
@@ -2750,18 +2774,20 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           messages.push({ role: 'tool', toolCallId: call.id, content: '[系统] 本轮安全保护已停止该调用，未执行。' })
         }
       }
-      if (questionTimedOut && !pendingReviews.size && !forceWrapUpReason) {
+      if ((questionTimedOut || questionCancelled) && !pendingReviews.size && !forceWrapUpReason) {
         const childRunning = await prisma.agentRun.count({ where: { userId: params.userId, novelId: params.novelId,
           OR: [{ session: { spawnedFromRunId: runId } }, { incomingChildGrant: { currentParentRunId: runId } }],
           status: { in: ['queued', 'running', 'awaiting_approval'] } } }) > 0
-        await finishWithNotice('question_timeout', QUESTION_TIMEOUT_NOTICE + (childRunning ? '已启动的子任务仍在各自的窗口运行。' : ''))
+        const notice = questionCancelled ? QUESTION_CANCELLED_NOTICE : QUESTION_TIMEOUT_NOTICE
+        await finishWithNotice(questionCancelled ? 'question_cancelled' : 'question_timeout',
+          notice + (childRunning ? '已启动的子任务仍在各自的窗口运行。' : ''), questionCancelled ? 'cancelled' : 'succeeded')
         return
       }
       await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)
       if (novelSetupSaved && !pendingReviews.size && !forceWrapUpReason) {
-        const saved = await readNovelInitializationCompletion(prisma, { userId: params.userId, novelId: params.novelId, runId })
-        if (saved.status === 'complete') {
-          await finishWithNotice('novel_setup', novelSetupNotice(saved.title))
+        const saved = await readNovelInitializationCompletion(prisma, { userId: params.userId, novelId: params.novelId, runId }, { includeRecap: true })
+        if (saved.status === 'complete' && saved.recap) {
+          await finishWithNotice('novel_setup', formatNovelSetupRecap(saved.recap))
           return
         }
       }

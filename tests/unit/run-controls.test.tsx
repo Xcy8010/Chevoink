@@ -3,6 +3,7 @@ import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { useRunControls } from '../../src/features/studio/agent/components/use-run-controls'
 import type { ContinueAgentLoopRunModel } from '../../src/features/studio/agent/agentApi'
+import type { PendingQuestion } from '../../src/features/studio/agent/agentStore'
 
 const mocks = vi.hoisted(() => ({ resume: vi.fn(), stop: vi.fn(), approval: vi.fn(), question: vi.fn(), begin: vi.fn(), restore: vi.fn() }))
 vi.mock('../../src/features/studio/agent/agentApi', () => ({
@@ -15,11 +16,11 @@ vi.mock('../../src/features/studio/agent/agentStore', () => ({
 }))
 afterEach(() => { cleanup(); vi.clearAllMocks() })
 
-function fixture(selectedModelRef?: { current: ContinueAgentLoopRunModel | null }) {
+function fixture(selectedModelRef?: { current: ContinueAgentLoopRunModel | null }, pendingQuestion?: PendingQuestion) {
   const connect = vi.fn(), setActionError = vi.fn()
   const hook = renderHook(({ sessionId, runId }) => useRunControls({
     sessionId, runId, resumeableRunId: null, phase: 'running',
-    pendingApproval: null, pendingQuestion: null, connect, setActionError, selectedModelRef,
+    pendingApproval: null, pendingQuestion: pendingQuestion ?? null, connect, setActionError, selectedModelRef,
   }), { initialProps: { sessionId: 'a', runId: 'run' } })
   return { ...hook, connect, setActionError }
 }
@@ -35,6 +36,28 @@ it('deduplicates concurrent resume clicks and connects once', async () => {
   expect(connect).toHaveBeenCalledExactlyOnceWith('resumed', 12704)
   expect(mocks.restore).toHaveBeenCalledExactlyOnceWith('resumed', 'a', undefined, 12704)
   expect(mocks.begin).not.toHaveBeenCalled()
+})
+
+it('sends the current question identity and leaves its submission error with the question card', async () => {
+  const question = { callId: 'call-1', requestId: 'request-1', question: '从哪里开始？', options: [] }
+  mocks.question.mockRejectedValueOnce(new Error('提交失败')).mockResolvedValueOnce({ resolved: true })
+  const { result, setActionError } = fixture(undefined, question)
+  await expect(result.current.handleResolveQuestion({ answer: '夜市' })).rejects.toThrow('提交失败')
+  expect(setActionError).not.toHaveBeenCalled()
+  await expect(result.current.handleResolveQuestion({ answer: '夜市' })).resolves.toBe(true)
+  expect(mocks.question).toHaveBeenLastCalledWith('run', { callId: 'call-1', requestId: 'request-1', answer: '夜市' })
+})
+
+it('sends a batch or cancellation as an atomic decision on the original call', async () => {
+  const prompt = { question: '从哪里开始？', options: [] }
+  const { result } = fixture(undefined, { callId: 'batch', requestId: 'request-2', ...prompt, questions: [prompt, prompt] })
+  mocks.question.mockResolvedValue({ resolved: true })
+  await expect(result.current.handleResolveQuestion({ answers: ['夜市', '第三人称'] })).resolves.toBe(true)
+  await expect(result.current.handleResolveQuestion({ cancelled: true })).resolves.toBe(true)
+  expect(mocks.question.mock.calls).toEqual([
+    ['run', { callId: 'batch', requestId: 'request-2', answers: ['夜市', '第三人称'] }],
+    ['run', { callId: 'batch', requestId: 'request-2', cancelled: true }],
+  ])
 })
 
 it('one Continue restores the original task and connects directly using the current model', async () => {

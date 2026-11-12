@@ -404,15 +404,15 @@ export async function waitForDurableDecision(token: RunLeaseToken, signal: Abort
         } })
         // This is only a wake-up signal, never authorization to apply an effect.
         // Malformed decisions are rejected by the original tool on the next step.
-        if (decision) return 'resolved' as const
+        if (decision) return question && decision.type === 'question.cancelled' ? 'cancelled' as const : 'resolved' as const
         return Date.parse(deadline.expiresAt) - (await databaseNow(tx)).getTime() <= 0 ? 'expired' as const : 'pending' as const
       })
-      if (outcome === 'resolved' || outcome === 'expired') return outcome === 'resolved'
+      if (outcome !== 'pending') return outcome
       await delay(1000, undefined, { signal: ownedSignal })
     }
   })
-  if (!signal.aborted && result) await setGoalRunPhase(token.userId, token.runId, 'executing')
-  return result
+  if (!signal.aborted && result === 'resolved') await setGoalRunPhase(token.userId, token.runId, 'executing')
+  return result !== 'expired'
 }
 
 /** Complete the existing domain checks without adding a paid completion critic. */
@@ -435,7 +435,9 @@ export async function runReviewedDurableExecution(token: RunLeaseToken, signal: 
       continue
     }
     if (step.kind !== 'completion_review') return step
-    const children = await withLeaseHeartbeat(lease, signal, ownedSignal => awaitDurableChildren(lease, ownedSignal))
+    const last = step.frame.state.messages.at(-1)
+    const cancelled = last?.role === 'assistant' && last.localCompletion?.kind === 'question_cancelled'
+    const children = await withLeaseHeartbeat(lease, signal, ownedSignal => awaitDurableChildren(lease, ownedSignal, cancelled ? { timeoutMs: 0 } : undefined))
     if (children.some(child => child.status !== 'completed' || child.childRun.status !== 'completed')) {
       await pauseDurableTaskForAttention(lease, { expectedRevision: step.frame.revision, expectedHash: step.frame.snapshotHash }, 'needs_input')
       return { kind: 'needs_attention' as const, reason: '子任务仍未完成或结果待核对，父任务已暂停并保留原进度。', frame: step.frame }

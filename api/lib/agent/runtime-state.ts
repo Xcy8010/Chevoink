@@ -22,7 +22,7 @@ const message = z.discriminatedUnion('role', [
     z.object({ type: z.literal('image_url'), image_url: z.object({ url: z.string(), detail: z.enum(['low', 'high', 'auto']).optional() }).strict() }).strict(),
   ]))]) }).strict(),
   z.object({ role: z.literal('assistant'), content: z.string().nullable(), reasoning: z.string().optional(), toolCalls: z.array(toolCall).optional(),
-    localCompletion: z.object({ kind: z.enum(['question_timeout', 'novel_setup', 'novel_setup_blocked']), operationId: id }).strict().optional(),
+    localCompletion: z.object({ kind: z.enum(['question_timeout', 'question_cancelled', 'novel_setup', 'novel_setup_blocked']), operationId: id }).strict().optional(),
     responsesContinuation: responsesContinuationSchema.optional(),
     nextPrompt: z.string().min(1).max(NEXT_PROMPT_MAX_LENGTH).optional(),
     nextPromptSuppressed: z.literal(true).optional() }).strict(),

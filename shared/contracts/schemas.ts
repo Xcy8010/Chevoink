@@ -128,6 +128,7 @@ const agentAttachmentsSchema = z.array(agentAttachmentMetaSchema)
 /** POST /api/agent/runs（原校验：四字段齐全；mode 管道保留但后端恒 build，见 agent.ts） */
 export const startAgentLoopRunSchema = z.object({
   agentWritingProtocol: z.literal(1).optional(),
+  agentQuestionProtocol: z.literal(1).optional(),
   predictNextPrompt: z.literal(true).optional(),
   clientRequestId: z.string().uuid().optional(),
   modelSelectionExplicit: z.literal(true).optional(),
@@ -170,12 +171,32 @@ export const resolveAgentApprovalSchema = z.object({
   alwaysAllow: z.boolean().optional(),
 })
 
-/** POST /api/agent/runs/:runId/questions（原校验：callId 真值 + answer trim 后非空） */
-export const resolveAgentQuestionSchema = z.object({
-  requestId: z.string().min(1).max(64).optional(),
-  callId: z.string().min(1),
-  answer: nonEmptyText,
+export const agentQuestionOptionSchema = z.object({
+  label: z.string().min(1).max(60).refine(value => Boolean(value.trim())),
+  detail: z.string().max(200).optional(),
+  coverAssetId: z.string().trim().min(1).max(64).optional().describe('当前作品已保存的封面候选资源 ID，仅图片选项填写。'),
 })
+
+export const agentQuestionPromptSchema = z.object({
+  question: z.string().min(1).max(500).refine(value => Boolean(value.trim())),
+  options: z.array(agentQuestionOptionSchema).min(2).max(4).describe('首项为推荐选项，界面会显示推荐标记。作者可自行输入回答，无需提供其他选项。'),
+})
+export const agentQuestionPromptsSchema = z.array(agentQuestionPromptSchema).min(1).max(3)
+
+const singleQuestionAnswer = z.object({ answer: nonEmptyText })
+const batchQuestionAnswers = z.object({ answers: z.array(nonEmptyText.and(z.string().max(500))).min(1).max(3) })
+const questionCancellation = z.object({ cancelled: z.literal(true) })
+export const agentQuestionDecisionSchema = z.union([
+  singleQuestionAnswer.strict(), batchQuestionAnswers.strict(), questionCancellation.strict(),
+])
+
+/** One answer form or explicit cancellation, bound to the original ask_user call. */
+const questionRequestIdentity = { requestId: z.string().min(1).max(64).optional(), callId: z.string().min(1) }
+export const resolveAgentQuestionSchema = z.union([
+  singleQuestionAnswer.extend(questionRequestIdentity).strict(),
+  batchQuestionAnswers.extend(questionRequestIdentity).strict(),
+  questionCancellation.extend(questionRequestIdentity).strict(),
+])
 
 /** POST /api/agent/attachments（原校验：kind 真值 + name/dataUrl trim 后非空；kind 枚举收紧为 image|file） */
 export const uploadAgentAttachmentSchema = z.object({

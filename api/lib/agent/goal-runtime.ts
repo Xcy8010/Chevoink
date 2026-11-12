@@ -1,10 +1,10 @@
 import type { AgentGoalPhase } from '../../../shared/contracts/agent-goal.js'
 import type { ChatMessage } from '../ai-service.js'
 import { prisma } from '../prisma.js'
-import { withoutGoalEffects } from './goal-context.js'
+import { withoutGoalEffects, type GoalExecutionContext } from './goal-context.js'
 import { assertGoalFence, assertGoalRevisionFence, readGoalExecution } from './goal-fence.js'
 import { changeGoal, closeGoalActivity } from './goal-store.js'
-import { databaseNow, runtimeTransaction } from './runtime-common.js'
+import { databaseNow, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
 
 /** Goal waits share the run's real decision boundary; no activity is charged while waiting for the author. */
 export async function setGoalRunPhase(userId: string, runId: string, phase: AgentGoalPhase, reasonCode: string | null = null) {
@@ -12,16 +12,21 @@ export async function setGoalRunPhase(userId: string, runId: string, phase: Agen
   if (!context) return
   await withoutGoalEffects(() => runtimeTransaction(async tx => {
     await assertGoalFence(tx, context)
-    const goal = await tx.agentGoal.findUniqueOrThrow({ where: { id: context.goalId } })
-    if (goal.currentRunId !== runId || goal.phase === phase && goal.reasonCode === reasonCode) return
-    const now = await databaseNow(tx)
-    const executing = phase === 'executing' || phase === 'reviewing' || Boolean(await tx.agentGoalExecution.count({
-      where: { goalId: goal.id, goalRevision: goal.currentRevision, epoch: goal.epoch, runId: { not: runId },
-        run: { status: { in: ['queued', 'running'] } } },
-    }))
-    if (!executing) await closeGoalActivity(tx, goal, now)
-    await changeGoal(tx, goal, { phase, reasonCode, activeSince: executing ? goal.activeSince ?? now : null }, 'phase.changed')
+    await setGoalRunPhaseInTransaction(tx, context, phase, reasonCode)
   }))
+}
+
+/** Caller has checked the run's current goal fence in this transaction. */
+export async function setGoalRunPhaseInTransaction(tx: RuntimeTx, context: GoalExecutionContext, phase: AgentGoalPhase, reasonCode: string | null) {
+  const goal = await tx.agentGoal.findUniqueOrThrow({ where: { id: context.goalId } })
+  if (goal.currentRunId !== context.runId || goal.phase === phase && goal.reasonCode === reasonCode) return
+  const now = await databaseNow(tx)
+  const executing = phase === 'executing' || phase === 'reviewing' || Boolean(await tx.agentGoalExecution.count({
+    where: { goalId: goal.id, goalRevision: goal.currentRevision, epoch: goal.epoch, runId: { not: context.runId },
+      run: { status: { in: ['queued', 'running'] } } },
+  }))
+  if (!executing) await closeGoalActivity(tx, goal, now)
+  await changeGoal(tx, goal, { phase, reasonCode, activeSince: executing ? goal.activeSince ?? now : null }, 'phase.changed')
 }
 
 export async function noteGoalRunFinished(userId: string, runId: string) {

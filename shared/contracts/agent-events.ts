@@ -136,11 +136,14 @@ export type AgentToolDisplayPayload =
   | {
       kind: 'question'
       question: string
-      options: Array<{ label: string; detail?: string }>
+      options: AgentQuestionOption[]
       /** 作者的回答：挂起期间为空，回答后随工具结果持久化 */
       answer?: string
       /** 超时或任务停止导致未获回答 */
       unanswered?: boolean
+      questions?: AgentQuestionPrompt[]
+      answers?: string[]
+      cancelled?: true
       /** Answer transport and acceptance of a missing writing target are separate. */
       scopeResolution?: 'accepted' | 'needs_input'
     }
@@ -390,7 +393,7 @@ export type AgentStreamEventBody =
   | { type: 'review.reconciled'; callId: string; chapterId: string; revision: number;
       compilationId: string | null; receipt: AgentReviewFailureReconciliation | AgentCancelledReviewRetirement | AgentAuthorReviewReplacement | AgentAuthorContinuedReview }
   | { type: 'text.delta'; messageId: string; delta: string }
-  | { type: 'text.final'; messageId: string; text: string; asReasoning: boolean }
+  | { type: 'text.final'; messageId: string; text: string; asReasoning: boolean; afterTools?: true }
   | { type: 'reasoning.delta'; messageId: string; delta: string; activity?: true }
   | {
       type: 'tool.call'
@@ -584,6 +587,7 @@ export interface AgentUIMessage {
 export interface StartAgentLoopRunRequest {
   /** Fresh main-Agent interpretation; historical tasks retain their contract. */
   agentWritingProtocol?: 1
+  agentQuestionProtocol?: 1
   /** Request one optional composer suggestion in the existing model reply. */
   predictNextPrompt?: true
   /** UUID for matching this author message to local delivery UI, without idempotency semantics. */
@@ -649,8 +653,24 @@ export interface ResolveAgentApprovalRequest {
 }
 
 /** POST /api/agent/runs/:runId/questions：回答 ask_user 工具的挂起提问 */
-export interface ResolveAgentQuestionRequest {
+export type AgentQuestionOption = {
+  label: string
+  detail?: string
+  coverAssetId?: string
+}
+
+export function formatAgentQuestionOption(option: AgentQuestionOption): string {
+  return (option.detail ? `${option.label}（${option.detail}）` : option.label).trim()
+}
+
+export type AgentQuestionPrompt = {
+  question: string
+  options: AgentQuestionOption[]
+}
+
+export type AgentQuestionDecision = { answer: string } | { answers: string[] } | { cancelled: true }
+
+export type ResolveAgentQuestionRequest = {
   requestId?: string
   callId: string
-  answer: string
-}
+} & AgentQuestionDecision
