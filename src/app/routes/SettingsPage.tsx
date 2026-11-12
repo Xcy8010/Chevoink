@@ -6,6 +6,8 @@ import {
   ChevronLeft,
   Download,
   FileText,
+  Image as ImageIcon,
+  Info,
   KeyRound,
   Lock,
   LogOut,
@@ -59,7 +61,8 @@ import {
   maskPhoneNumber,
   type SettingsDialogState,
 } from './settings/privacy'
-import { SectionTitle, SettingsRow } from './settings/settings-row'
+import { SectionTitle, SettingsGroup, SettingsRow } from './settings/settings-row'
+import SettingsLayout, { type SettingsSectionLink } from './settings/settings-layout'
 import CustomModelSettingsDialog from '@/features/account/CustomModelSettingsDialog'
 import DesktopSettings from './settings/desktop-settings'
 import EmailAccountSettings from './settings/EmailAccountSettings'
@@ -488,10 +491,11 @@ export default function SettingsPage() {
     }
   }
 
-  // 页内返回按钮（与帖子详情同款样式）：壳层大标题已隐藏，优先回上一页，无历史则回个人中心
+  // 页内返回优先使用浏览历史。
   const backButton = (
     <button
       type="button"
+      aria-label="返回"
       onClick={() => {
         if (window.history.length > 1) {
           navigate(-1)
@@ -499,10 +503,9 @@ export default function SettingsPage() {
           navigate('/me')
         }
       }}
-      className="press-feedback -ml-1 inline-flex items-center gap-1 rounded-[var(--radius-pill)] px-1.5 py-1 text-sm text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-primary)]"
+      className="inline-flex size-10 shrink-0 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--surface-solid)] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] active:bg-[var(--color-brand-soft)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-brand)] motion-safe:transition-colors"
     >
-      <ChevronLeft className="h-4 w-4" />
-      返回
+      <ChevronLeft aria-hidden="true" className="h-5 w-5" />
     </button>
   )
 
@@ -512,84 +515,83 @@ export default function SettingsPage() {
   }
 
   // 显示偏好行（主题 + 全屏）：登录与未登录均可使用，保存在本机
-  const appearanceRows = (
-    <div className="divide-y divide-[var(--border-subtle)]">
-      <div className="flex items-center gap-3.5 py-3.5">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--text-secondary)]">
-          {theme === 'dark' ? <Moon className="h-[18px] w-[18px]" /> : <Sun className="h-[18px] w-[18px]" />}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block text-[15px] font-medium text-[var(--text-primary)]">主题模式</span>
-          <span className="mt-0.5 block text-xs text-[var(--text-tertiary)]">深浅色跟随此处设置，保存在本机</span>
-        </span>
-        <div className="flex shrink-0 rounded-[var(--radius-pill)] bg-[var(--surface-muted)] p-1">
-          {(
-            [
-              { value: 'light', label: '浅色', icon: Sun },
-              { value: 'dark', label: '深色', icon: Moon },
-            ] as const
-          ).map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              onClick={() => setTheme(option.value)}
-              className={cn(
-                'press-feedback flex items-center gap-1.5 rounded-[var(--radius-pill)] px-3 py-1.5 text-[13px] transition-colors',
-                theme === option.value
-                  ? 'bg-[var(--surface-default)] font-medium text-[var(--text-primary)] shadow-sm'
-                  : 'text-[var(--text-tertiary)] hover:text-[var(--text-primary)]',
-              )}
-            >
-              <option.icon className="h-3.5 w-3.5" />
-              {option.label}
-            </button>
-          ))}
-        </div>
-      </div>
+  const appearanceSection = (
+    <section id="settings-display">
+      <SectionTitle>显示</SectionTitle>
+      <SettingsGroup>
+        <SettingsRow
+          icon={theme === 'dark' ? <Moon size={18} /> : <Sun size={18} />}
+          title="主题模式"
+          caption="保存在本机"
+          actions={
+            <span role="group" aria-label="主题模式" className="flex rounded-[var(--radius-pill)] bg-[var(--surface-muted)] p-1">
+              {([
+                { value: 'light', label: '浅色', icon: Sun },
+                { value: 'dark', label: '深色', icon: Moon },
+              ] as const).map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  aria-pressed={theme === option.value}
+                  onClick={() => setTheme(option.value)}
+                  className={cn(
+                    'flex min-h-8 items-center gap-1.5 whitespace-nowrap rounded-[var(--radius-pill)] px-2.5 text-[13px] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-brand)] motion-safe:transition-colors',
+                    theme === option.value
+                      ? 'bg-[var(--surface-solid)] font-medium text-[var(--text-primary)] shadow-sm'
+                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
+                  )}
+                >
+                  <option.icon aria-hidden="true" className="h-3.5 w-3.5" />
+                  {option.label}
+                </button>
+              ))}
+            </span>
+          }
+        />
 
-      {/* 全屏模式：仅网页版提供；APP 壳内天生全屏，隐藏此项 */}
-      {!isNativeApp() && (
-        <div className="flex items-center gap-3.5 py-3.5">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--text-secondary)]">
-            <Maximize className="h-[18px] w-[18px]" />
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="block text-[15px] font-medium text-[var(--text-primary)]">全屏模式</span>
-            <span className="mt-0.5 block text-xs text-[var(--text-tertiary)]">开启后点击页面任意位置自动进入沉浸全屏</span>
-          </span>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={fullscreenEnabled}
-            aria-label="全屏模式开关"
-            onClick={() => setFullscreenEnabled(!fullscreenEnabled)}
-            className={cn(
-              'relative h-7 w-12 shrink-0 rounded-full border transition-colors',
-              fullscreenEnabled
-                ? 'border-[var(--color-brand)] bg-[var(--color-brand)]'
-                : 'border-[var(--border-strong)] bg-[var(--surface-muted)]',
-            )}
-          >
-            <span
-              className={cn(
-                'absolute top-1/2 h-5 w-5 -translate-y-1/2 rounded-full bg-white shadow transition-[left] duration-200',
-                fullscreenEnabled ? 'left-[calc(100%-24px)]' : 'left-1',
-              )}
-            />
-          </button>
-        </div>
-      )}
-    </div>
+        {!isNativeApp() && (
+          <SettingsRow
+            icon={<Maximize size={18} />}
+            title="全屏模式"
+            caption="开启后点击页面任意位置进入全屏"
+            actions={
+              <button
+                type="button"
+                role="switch"
+                aria-checked={fullscreenEnabled}
+                aria-label="全屏模式开关"
+                onClick={() => setFullscreenEnabled(!fullscreenEnabled)}
+                className={cn(
+                  'relative h-7 w-12 shrink-0 rounded-full border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-brand)] motion-safe:transition-colors',
+                  fullscreenEnabled
+                    ? 'border-[var(--color-brand)] bg-[var(--color-brand)]'
+                    : 'border-[var(--border-strong)] bg-[var(--surface-muted)]',
+                )}
+              >
+                <span
+                  className={cn(
+                    'absolute left-[3px] top-[3px] size-5 rounded-full motion-safe:transition-[transform,background-color] motion-safe:duration-200',
+                    fullscreenEnabled
+                      ? 'translate-x-5 bg-[var(--surface-solid)]'
+                      : 'bg-[var(--text-secondary)]',
+                  )}
+                />
+              </button>
+            }
+          />
+        )}
+      </SettingsGroup>
+    </section>
   )
 
   /** 关于分组：仅 APP 壳内展示，提供手动检测更新入口；登录/未登录都可用。
    * 发现新版本不再在行下方内联展开，而是弹出版本弹窗（openDialog.kind === 'update'） */
   const aboutSection = isWindowsDesktopApp() ? <DesktopSettings /> : isNativeApp() ? (
-    <section>
+    <section id="settings-about">
       <SectionTitle>关于</SectionTitle>
-      <div className="divide-y divide-[var(--border-subtle)]">
+      <SettingsGroup>
         <SettingsRow
-          icon={<RefreshCw className={cn('h-[18px] w-[18px]', updateChecking && 'animate-spin')} />}
+          icon={<RefreshCw className={cn('h-[18px] w-[18px]', updateChecking && 'motion-safe:animate-spin')} />}
           title="检测更新"
           caption={`当前版本 ${getNativeAppVersion() ?? '未知'}`}
           value={
@@ -609,16 +611,16 @@ export default function SettingsPage() {
             void handleCheckUpdate()
           }}
         />
-      </div>
+      </SettingsGroup>
     </section>
   ) : null
 
   /** 两个平台共用原下载容器；原生壳不重复下载自己。 */
   const clientSection =
     !isNativeApp() && !isWindowsDesktopApp() && (mobileClient || windowsDownload) ? (
-      <section>
+      <section id="settings-client">
         <SectionTitle>客户端</SectionTitle>
-        <div className="divide-y divide-[var(--border-subtle)]">
+        <SettingsGroup>
           <SettingsRow
             icon={<Download className="h-[18px] w-[18px]" />}
             title={mobileClient ? '安装启创墨域客户端' : '下载客户端'}
@@ -629,7 +631,7 @@ export default function SettingsPage() {
               setClientDialogOpen(true)
             }}
           />
-        </div>
+        </SettingsGroup>
       </section>
     ) : null
 
@@ -638,7 +640,7 @@ export default function SettingsPage() {
     clientDialogOpen && typeof document !== 'undefined'
       ? createPortal(
           <div
-            className="fixed inset-0 z-[120] flex items-end justify-center bg-[rgba(15,23,42,0.28)] backdrop-blur-[2px] sm:items-center sm:px-4 sm:py-8"
+            className="fixed inset-0 z-[120] flex items-end justify-center bg-black/35 motion-safe:animate-[fade-in_var(--duration-fast)_var(--easing-default)_both] sm:items-center sm:px-4 sm:py-8"
             onClick={() => setClientDialogOpen(false)}
           >
             <div
@@ -659,7 +661,7 @@ export default function SettingsPage() {
                   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
                 }
               }}
-              className="w-full rounded-t-[28px] border border-[var(--border-subtle)] bg-[var(--surface-default)] p-6 pb-[calc(24px+var(--safe-bottom))] shadow-[0_24px_64px_rgba(15,23,42,0.18)] sm:max-w-[400px] sm:rounded-[28px] sm:pb-6"
+              className="max-h-[calc(100dvh-var(--safe-top))] w-full overflow-y-auto rounded-t-[var(--radius-xl)] border border-[var(--border-subtle)] bg-[var(--surface-solid)] p-6 pb-[calc(24px+var(--safe-bottom))] shadow-[var(--shadow-modal)] motion-safe:animate-[sheet-slide-up_var(--duration-normal)_var(--easing-default)_both] sm:max-w-[400px] sm:rounded-[var(--radius-xl)] sm:pb-6 sm:motion-safe:animate-[fade-in-up_var(--duration-normal)_var(--easing-default)_both]"
               onClick={(event) => event.stopPropagation()}
             >
               <div className="flex items-start justify-between gap-4">
@@ -689,9 +691,10 @@ export default function SettingsPage() {
                     <button
                       key={os.key}
                       type="button"
+                      aria-pressed={selected}
                       onClick={() => setSelectedClientOs(os.key)}
                       className={cn(
-                        'press-feedback flex flex-col items-center gap-2 rounded-[var(--radius-md)] border py-4 transition-colors',
+                        'flex flex-col items-center gap-2 rounded-[var(--radius-md)] border py-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-brand)] motion-safe:transition-colors',
                         selected
                           ? 'border-[var(--color-brand)] bg-[var(--color-brand-soft)]'
                           : 'border-[var(--border-subtle)] bg-[var(--surface-muted)] hover:bg-[var(--surface-default)]',
@@ -729,14 +732,19 @@ export default function SettingsPage() {
       : null
 
   const legalSection = (
-    <section>
+    <section id="settings-policies">
       <SectionTitle>协议与政策</SectionTitle>
-      <div className="divide-y divide-[var(--border-subtle)]">
+      <SettingsGroup>
         <SettingsRow icon={<FileText className="h-[18px] w-[18px]" />} title="用户协议" chevron="right" onClick={() => navigate('/legal?kind=terms')} />
         <SettingsRow icon={<ShieldCheck className="h-[18px] w-[18px]" />} title="隐私政策" chevron="right" onClick={() => navigate('/legal?kind=privacy')} />
-      </div>
+      </SettingsGroup>
     </section>
   )
+
+  const generalSectionLinks: SettingsSectionLink[] = []
+  if (aboutSection) generalSectionLinks.push({ id: 'settings-about', label: isWindowsDesktopApp() ? 'Windows 客户端' : '关于', icon: Info })
+  if (clientSection) generalSectionLinks.push({ id: 'settings-client', label: '客户端', icon: Download })
+  generalSectionLinks.push({ id: 'settings-policies', label: '协议与政策', icon: FileText })
 
   if (authStatus === 'unavailable') {
     return (
@@ -752,36 +760,34 @@ export default function SettingsPage() {
 
   if (authStatus !== 'authenticated' || !sessionUser) {
     return (
-      <div className="mx-auto max-w-[640px] space-y-8">
-        {backButton}
-
-        <section>
-          <SectionTitle>显示</SectionTitle>
-          {appearanceRows}
-        </section>
-
-        {aboutSection}
-
-        {legalSection}
-
+      <SettingsLayout backButton={backButton} links={[{ id: 'settings-display', label: '显示', icon: Sun }, ...generalSectionLinks]}>
         <AppState
-          title="登录后可管理完整的账户设置"
-          description="头像、昵称、个人封面、隐私与账号安全等设置，需要登录后才能使用。"
+          icon={<UserRound aria-hidden="true" className="h-5 w-5 text-[var(--text-secondary)]" />}
+          title="登录后可管理账户设置"
           primaryAction={{ label: '去登录', href: '/login?redirect=%2Fsettings' }}
           secondaryAction={{ label: '创建账户', href: '/register?redirect=%2Fsettings' }}
+          className="min-h-0 rounded-[var(--radius-xl)] border border-[var(--border-subtle)] bg-[var(--surface-solid)] py-5 md:min-h-0"
         />
 
+        {appearanceSection}
+        {aboutSection}
         {clientSection}
-
+        {legalSection}
         {clientDialog}
-      </div>
+      </SettingsLayout>
     )
   }
 
   return (
-    <div className="mx-auto max-w-[640px] space-y-8 pb-8">
-      {backButton}
-
+    <SettingsLayout backButton={backButton} links={[
+      { id: 'settings-profile', label: '账户', icon: UserRound },
+      { id: 'account-security', label: '账号安全', icon: ShieldCheck },
+      { id: 'settings-privacy', label: '隐私', icon: Lock },
+      { id: 'settings-models', label: 'AI 与模型', icon: Cpu },
+      { id: 'settings-display', label: '显示', icon: Sun },
+      { id: 'settings-session', label: '会话', icon: LogOut },
+      ...generalSectionLinks,
+    ]}>
       <input
         ref={avatarInputRef}
         type="file"
@@ -797,69 +803,39 @@ export default function SettingsPage() {
         onChange={handleCoverChange}
       />
 
-      {/* 分组一：账户 */}
-      <section>
+      <section id="settings-profile">
         <SectionTitle>账户</SectionTitle>
-        <div className="divide-y divide-[var(--border-subtle)]">
-          {/* 头像行：点击即选择文件 */}
-          <div className="flex items-center gap-3.5 py-3.5">
-            <Avatar name={sessionUser.nickname} src={sessionUser.avatarUrl} size="md" className="h-9 w-9 shrink-0" />
-            <span className="min-w-0 flex-1">
-              <span className="block text-[15px] font-medium text-[var(--text-primary)]">头像</span>
-              <span className="mt-0.5 block text-xs text-[var(--text-tertiary)]">PNG / JPG / WebP，不超过 {PROFILE_IMAGE_MAX_MB}MB</span>
-            </span>
-            {sessionUser.avatarUrl ? (
-              <button
-                type="button"
-                onClick={handleResetAvatar}
-                disabled={avatarSubmitting}
-                className="press-feedback shrink-0 text-sm text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-60"
-              >
-                恢复默认
-              </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => avatarInputRef.current?.click()}
-              disabled={avatarSubmitting}
-              className="press-feedback shrink-0 rounded-[var(--radius-pill)] border border-[var(--border-strong)] px-3.5 py-1.5 text-[13px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-60"
-            >
-              {avatarSubmitting ? '上传中…' : '更新'}
-            </button>
-          </div>
-
-          {/* 封面行：选择文件后进入裁剪弹窗 */}
-          <div className="flex items-center gap-3.5 py-3.5">
-            <span className="relative h-9 w-[68px] shrink-0 overflow-hidden rounded-[8px] bg-[linear-gradient(135deg,#28435f_0%,#16233a_58%,#1f2f47_100%)]">
-              {sessionUser.profileCoverUrl ? (
-                <img src={sessionUser.profileCoverUrl} alt="个人封面" className="absolute inset-0 h-full w-full object-cover" />
-              ) : null}
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block text-[15px] font-medium text-[var(--text-primary)]">个人主页封面</span>
-              <span className="mt-0.5 block text-xs text-[var(--text-tertiary)]">不超过 {PROFILE_IMAGE_MAX_MB}MB，上传后可裁剪为 3:1</span>
-            </span>
-            {sessionUser.profileCoverUrl ? (
-              <button
-                type="button"
-                onClick={handleResetCover}
-                disabled={coverSubmitting}
-                className="press-feedback shrink-0 text-sm text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-60"
-              >
-                移除
-              </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => coverInputRef.current?.click()}
-              disabled={coverSubmitting}
-              className="press-feedback shrink-0 rounded-[var(--radius-pill)] border border-[var(--border-strong)] px-3.5 py-1.5 text-[13px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)] disabled:opacity-60"
-            >
-              {coverSubmitting ? '上传中…' : sessionUser.profileCoverUrl ? '更换' : '设置'}
-            </button>
-          </div>
-
-          {/* 昵称与简介：点开弹出编辑弹窗，不在行下方展开 */}
+        <SettingsGroup>
+          <SettingsRow
+            bareIcon
+            icon={<Avatar name={sessionUser.nickname} src={sessionUser.avatarUrl} size="md" className="size-10" />}
+            title="头像"
+            caption={`PNG / JPG / WebP，不超过 ${PROFILE_IMAGE_MAX_MB}MB`}
+            actions={<>
+              {sessionUser.avatarUrl && (
+                <Button variant="ghost" size="sm" onClick={handleResetAvatar} disabled={avatarSubmitting} aria-label="恢复默认头像">恢复默认</Button>
+              )}
+              <Button size="sm" onClick={() => avatarInputRef.current?.click()} disabled={avatarSubmitting} aria-label="更新头像">
+                {avatarSubmitting ? '上传中…' : '更新'}
+              </Button>
+            </>}
+          />
+          <SettingsRow
+            icon={sessionUser.profileCoverUrl
+              ? <img src={sessionUser.profileCoverUrl} alt="" className="h-7 w-10 rounded-[var(--radius-sm)] object-cover" />
+              : <ImageIcon size={18} />}
+            bareIcon={Boolean(sessionUser.profileCoverUrl)}
+            title="个人主页封面"
+            caption={`不超过 ${PROFILE_IMAGE_MAX_MB}MB，上传后可裁剪为 3:1`}
+            actions={<>
+              {sessionUser.profileCoverUrl && (
+                <Button variant="ghost" size="sm" onClick={handleResetCover} disabled={coverSubmitting} aria-label="移除个人主页封面">移除</Button>
+              )}
+              <Button size="sm" onClick={() => coverInputRef.current?.click()} disabled={coverSubmitting} aria-label="设置个人主页封面">
+                {coverSubmitting ? '上传中…' : sessionUser.profileCoverUrl ? '更换' : '设置'}
+              </Button>
+            </>}
+          />
           <SettingsRow
             icon={<UserRound className="h-[18px] w-[18px]" />}
             title="昵称与简介"
@@ -868,13 +844,35 @@ export default function SettingsPage() {
             chevron="right"
             onClick={() => setOpenDialog({ kind: 'profile' })}
           />
-        </div>
+        </SettingsGroup>
       </section>
 
-      {/* 分组二：隐私 */}
-      <section>
+      {sessionUser.emailAuthEnabled ? <EmailAccountSettings user={sessionUser} /> : (
+        <section id="account-security">
+          <SectionTitle>账号安全</SectionTitle>
+          <SettingsGroup>
+            <SettingsRow
+              icon={<Smartphone className="h-[18px] w-[18px]" />}
+              title="手机号"
+              caption="登录入口统一使用手机号"
+              value={maskPhoneNumber(sessionUser.phone)}
+            />
+            <SettingsRow
+              icon={<KeyRound className="h-[18px] w-[18px]" />}
+              title="登录密码"
+              searchKeywords="修改密码 设置密码 更改密码"
+              caption={sessionUser.passwordConfigured ? '修改前需验证当前密码或手机验证码' : '设置后可使用手机号和密码登录'}
+              value={sessionUser.passwordConfigured ? '已设置' : '未设置'}
+              chevron="right"
+              onClick={() => setOpenDialog({ kind: 'password' })}
+            />
+          </SettingsGroup>
+        </section>
+      )}
+
+      <section id="settings-privacy">
         <SectionTitle>隐私</SectionTitle>
-        <div className="divide-y divide-[var(--border-subtle)]">
+        <SettingsGroup>
           {/* 隐私维度：点开弹出选项弹窗，不在行下方展开 */}
           {PRIVACY_ITEMS.map((item) => (
             <SettingsRow
@@ -895,13 +893,12 @@ export default function SettingsPage() {
               onClick={() => setOpenDialog({ kind: 'privacy', key: item.key })}
             />
           ))}
-        </div>
+        </SettingsGroup>
       </section>
 
-      {/* 分组三：显示 */}
-      <section>
+      <section id="settings-models">
         <SectionTitle>AI 与模型</SectionTitle>
-        <div className="divide-y divide-[var(--border-subtle)]">
+        <SettingsGroup>
           <SettingsRow
             icon={<Cpu className="h-[18px] w-[18px]" />}
             title="自定义模型"
@@ -910,42 +907,13 @@ export default function SettingsPage() {
             chevron="right"
             onClick={() => setCustomModelsOpen(true)}
           />
-        </div>
+        </SettingsGroup>
       </section>
 
-      {/* 分组三：显示 */}
-      <section>
-        <SectionTitle>显示</SectionTitle>
-        {appearanceRows}
-      </section>
-
-      {/* 分组四：账号安全 */}
-      {sessionUser.emailAuthEnabled ? <EmailAccountSettings user={sessionUser} /> : <section>
-        <SectionTitle>账号安全</SectionTitle>
-        <div className="divide-y divide-[var(--border-subtle)]">
-          <SettingsRow
-            icon={<Smartphone className="h-[18px] w-[18px]" />}
-            title="手机号"
-            caption="登录入口统一使用手机号"
-            value={maskPhoneNumber(sessionUser.phone)}
-          />
-
-          {/* 登录密码：点开弹出设置弹窗，不在行下方展开 */}
-          <SettingsRow
-            icon={<KeyRound className="h-[18px] w-[18px]" />}
-            title="登录密码"
-            caption={sessionUser.passwordConfigured ? '修改前需验证当前密码或手机验证码' : '设置后可使用手机号和密码登录'}
-            value={sessionUser.passwordConfigured ? '已设置' : '未设置'}
-            chevron="right"
-            onClick={() => setOpenDialog({ kind: 'password' })}
-          />
-        </div>
-      </section>}
-
-      {/* 分组五：会话 */}
-      <section>
+      {appearanceSection}
+      <section id="settings-session">
         <SectionTitle>会话</SectionTitle>
-        <div className="divide-y divide-[var(--border-subtle)]">
+        <SettingsGroup>
           <SettingsRow
             icon={<LogOut className="h-[18px] w-[18px]" />}
             title="退出登录"
@@ -953,17 +921,12 @@ export default function SettingsPage() {
             onClick={() => setLogoutConfirmOpen(true)}
             danger
           />
-        </div>
+        </SettingsGroup>
       </section>
 
-      {/* 分组六：关于（仅 APP 壳内） */}
       {aboutSection}
-
-      {legalSection}
-
-      {/* 分组七：客户端安装（仅手机浏览器） */}
       {clientSection}
-
+      {legalSection}
       {clientDialog}
 
       <CustomModelSettingsDialog open={customModelsOpen} onClose={() => setCustomModelsOpen(false)} />
@@ -1156,10 +1119,12 @@ export default function SettingsPage() {
                       type="password"
                       value={password}
                       onChange={(event) => setPassword(event.target.value)}
-                      placeholder="请输入至少 6 位密码"
+                      placeholder="请输入登录密码"
                       autoComplete="new-password"
+                      aria-describedby="settings-new-password-hint"
                       required
                     />
+                    <p id="settings-new-password-hint" className="text-xs text-[var(--text-secondary)]">密码需6位数以上</p>
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-medium text-[var(--text-primary)]" htmlFor="settings-new-password-confirm">
@@ -1221,6 +1186,6 @@ export default function SettingsPage() {
             document.body,
           )
         : null}
-    </div>
+    </SettingsLayout>
   )
 }

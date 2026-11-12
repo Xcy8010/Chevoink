@@ -31,12 +31,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
-          cache: npm
-      - name: 安装依赖
-        run: npm ci
       - name: 自动发现测试并生成均衡分片计划
         id: plan
-        run: npx tsx scripts/ci-test-plan.ts plan
+        run: node scripts/ci-test-plan.ts plan
       - name: 保存本次完整测试计划
         uses: actions/upload-artifact@v4
         with:

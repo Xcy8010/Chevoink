@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { ExternalLink, Info, RefreshCw } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { useToast } from '@/components/ui/toast-context'
-import { SectionTitle, SettingsRow } from './settings-row'
+import { SectionTitle, SettingsGroup, SettingsRow } from './settings-row'
 
 export default function DesktopSettings() {
   const toast = useToast()
@@ -26,12 +26,12 @@ export default function DesktopSettings() {
     catch { toast.error('客户端操作未完成，请稍后重试。') }
     finally { setBusy(false) }
   }
-  return <section>
+  return <section id="settings-about">
     <SectionTitle>Windows 客户端</SectionTitle>
-    <div className="divide-y divide-[var(--border-subtle)]">
+    <SettingsGroup>
       <SettingsRow icon={<RefreshCw className="h-[18px] w-[18px]" />} title="检查客户端更新" caption="当前测试版使用手动下载安装" onClick={() => void act('update')} />
       <SettingsRow icon={<ExternalLink className="h-[18px] w-[18px]" />} title="在浏览器打开官网" onClick={() => void act('browser')} />
       <SettingsRow icon={<Info className="h-[18px] w-[18px]" />} title="版本信息" caption={`Windows x64 · ${info?.version ?? navigator.userAgent.match(/ChevoinkDesktop\/([\d.]+)/)?.[1] ?? '未知'}`} chevron="none" />
-    </div>
+    </SettingsGroup>
   </section>
 }

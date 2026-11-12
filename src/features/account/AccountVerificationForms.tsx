@@ -126,7 +126,9 @@ export function SetupPasswordForm({ disabled, onSave }: { disabled: boolean; onS
       <div className="space-y-1.5">
         <label className="block text-sm font-medium" htmlFor={passwordId}>输入登录密码</label>
         <TextInput wrapperAs="span" id={passwordId} type="password" autoComplete="new-password" minLength={6} maxLength={128}
+          aria-describedby={`${passwordId}-hint`}
           value={password} onChange={event => { setPassword(event.target.value); setError('') }} disabled={disabled} required />
+        <p id={`${passwordId}-hint`} className="text-xs text-[var(--text-secondary)]">密码需6位数以上</p>
       </div>
       <div className="space-y-1.5">
         <label className="block text-sm font-medium" htmlFor={confirmationId}>确认登录密码</label>
@@ -206,8 +208,10 @@ export function PasswordVerificationForm({ user, onSaved, onSaving, disabled }: 
       <div className="space-y-1.5">
         <label className="block text-sm font-medium" htmlFor={passwordId}>新登录密码</label>
         <TextInput wrapperAs="span" id={passwordId} type="password" autoComplete="new-password" minLength={6} maxLength={128}
+          aria-describedby={`${passwordId}-hint`}
           placeholder="请输入新密码"
           value={password} onChange={event => setPassword(event.target.value)} disabled={saving || disabled} required />
+        <p id={`${passwordId}-hint`} className="text-xs text-[var(--text-secondary)]">密码需6位数以上</p>
       </div>
       <div className="space-y-1.5">
         <label className="block text-sm font-medium" htmlFor={confirmationId}>再次输入新密码</label>

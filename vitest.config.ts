@@ -2,6 +2,8 @@ import { fileURLToPath } from 'node:url'
 
 import { defineConfig } from 'vitest/config'
 
+import { testExclude, testInclude } from './scripts/lib/ci-test-discovery.js'
+
 export const ciCoverageThresholds = { statements: 30, branches: 73, functions: 52, lines: 30 } as const
 const coverageThresholds = process.env.CI
   ? ciCoverageThresholds
@@ -21,7 +23,8 @@ export default defineConfig({
     pool: 'forks',
     globalSetup: ['./tests/global-setup.ts'],
     setupFiles: ['./tests/setup.ts'],
-    include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
+    include: testInclude,
+    exclude: testExclude,
     coverage: {
       provider: 'v8',
       // 固定 3.2.7，沿用原全量文件集、默认 extension/exclude 与 v8-to-istanbul

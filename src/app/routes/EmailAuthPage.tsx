@@ -170,6 +170,7 @@ export default function EmailAuthPage({ mode, onClose }: { mode: AuthMode; onClo
             id={passwordId}
             type={passwordVisible ? 'text' : 'password'}
             autoComplete={isRecovery ? 'new-password' : 'current-password'}
+            aria-describedby={isRecovery ? `${passwordId}-hint` : undefined}
             placeholder={isRecovery ? '请输入新密码' : '请输入您的密码'}
             leading={<Lock aria-hidden="true" className="h-4 w-4 shrink-0" />}
             trailing={<button type="button" aria-label={passwordVisible ? '隐藏密码' : '显示密码'} onClick={() => setPasswordVisible(value => !value)} className="rounded p-1 focus-visible:outline focus-visible:outline-2">
@@ -182,6 +183,7 @@ export default function EmailAuthPage({ mode, onClose }: { mode: AuthMode; onClo
             minLength={isRecovery ? 6 : undefined}
             maxLength={isRecovery ? 128 : 1024}
           />
+          {isRecovery && <p id={`${passwordId}-hint`} className="text-xs text-[var(--text-secondary)]">密码需6位数以上</p>}
         </div>}
         {isRecovery && <label className="block space-y-1.5 text-sm font-medium">
           <span>再次输入新密码</span>

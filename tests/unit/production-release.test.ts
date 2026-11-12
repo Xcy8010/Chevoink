@@ -15,7 +15,7 @@ function ci(count = 10) {
       .map(name => ({ name, status: 'completed', conclusion: 'success' })) }
 }
 describe('production release gates', () => {
-  it.each([10, 13, 20])('accepts a complete successful %i-shard candidate', count => {
+  it.each([10, 13, 18, 20])('accepts a complete successful %i-shard candidate', count => {
     expect(assertReleaseCi(ci(count), sha)).toEqual({ revision: sha, testShards: count })
   })
   it.each(['headSha', 'workflowName', 'status', 'conclusion'] as const)('rejects mismatched %s before deployment', field => {

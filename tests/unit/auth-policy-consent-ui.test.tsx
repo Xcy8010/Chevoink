@@ -79,6 +79,14 @@ function submitEmailBinding(dialog: HTMLElement, email: string) {
   fireEvent.click(fields.getByRole('button', { name: '验证并绑定' }))
 }
 
+function expectNewPasswordHint(dialog: HTMLElement, label: string) {
+  const fields = within(dialog)
+  const password = fields.getByLabelText(label) as HTMLInputElement
+  const hint = fields.getByText('密码需6位数以上')
+  expect(password.getAttribute('aria-describedby')).toBe(hint.id)
+  expect([password.minLength, password.maxLength]).toEqual([6, 128])
+}
+
 beforeEach(() => {
   mocks.requestJson.mockReset()
   mocks.toastError.mockReset()
@@ -246,6 +254,7 @@ it('keeps password recovery available before email verification', async () => {
   expect(screen.getAllByRole('dialog')).toEqual([recovery])
   expect(screen.getByText('首页内容')).toBeTruthy()
   expect(within(recovery).getByRole('textbox', { name: '验证码' })).toBeTruthy()
+  expectNewPasswordHint(recovery, '新登录密码')
 })
 
 it('continues to require a verification code for password changes in settings', () => {
@@ -255,6 +264,7 @@ it('continues to require a verification code for password changes in settings', 
   expect(within(dialog).getByRole('textbox', { name: '验证码' })).toBeTruthy()
   expect(within(dialog).getByRole('button', { name: '获取验证码' })).toBeTruthy()
   expect(within(dialog).queryByRole('progressbar')).toBeNull()
+  expectNewPasswordHint(dialog, '新登录密码')
 })
 
 it.each([
@@ -358,7 +368,7 @@ it('verifies a stored email on request from account settings', async () => {
   mountApp('/settings', legacyUser)
   const background = screen.getByRole('heading', { name: '账号安全' })
   expect(screen.queryByRole('dialog')).toBeNull()
-  fireEvent.click(screen.getByRole('button', { name: /邮箱.*未验证/ }))
+  fireEvent.click(screen.getByRole('button', { name: /邮箱.*待验证/ }))
   const dialog = screen.getByRole('dialog', { name: '验证邮箱', exact: true })
   expect(dialog.hasAttribute('open')).toBe(true)
   expect(screen.getByRole('heading', { name: '账号安全' })).toBe(background)
@@ -403,6 +413,27 @@ it('verifies a stored email on request from account settings', async () => {
   expect(screen.getByRole('heading', { name: '账号安全' })).toBe(background)
 })
 
+it('shows phone verification as optional for an exempt administrator and distinguishes the reserved email', () => {
+  mountApp('/settings', {
+    ...legacyUser, role: 'admin', email: 'admin@chevoink.local', phone: null,
+    studioPhoneVerificationRequired: false,
+  })
+  const phone = screen.getByRole('button', { name: /手机号.*免验证/ })
+  expect(phone.textContent).toContain('超级管理员可选绑定')
+  expect(screen.queryByText('创作区需要已验证的手机号')).toBeNull()
+  fireEvent.click(phone)
+  const binding = screen.getByRole('dialog', { name: '绑定手机号' })
+  fireEvent.click(within(binding).getByRole('button', { name: '关闭' }))
+
+  const email = screen.getByRole('button', { name: /邮箱.*系统预留地址.*待绑定/ })
+  fireEvent.click(email)
+  const dialog = screen.getByRole('dialog', { name: '绑定邮箱' })
+  expect((within(dialog).getByRole('textbox', { name: '邮箱' }) as HTMLInputElement).value).toBe('')
+  expect(useShellStore.getState().sessionUser?.emailVerified).toBe(false)
+  expect(useShellStore.getState().sessionUser?.phoneVerified).toBe(false)
+  expect(mocks.requestJson).not.toHaveBeenCalled()
+})
+
 it('opens studio for a server-exempt administrator without changing their phone status or onboarding', () => {
   mountApp('/studio/novel/n1', { ...legacyUser, role: 'admin', accountSetupStep: 1, studioPhoneVerificationRequired: false })
   expect(screen.getByText('创作内容')).toBeTruthy()
@@ -439,6 +470,7 @@ it('sets the onboarding password with a matching pair and advances with the retu
   expect([password.type, confirmation.type]).toEqual(['password', 'password'])
   expect(within(dialog).getByText('设置后可使用密码登录。')).toBeTruthy()
   expect(within(dialog).queryByRole('button', { name: '获取验证码' })).toBeNull()
+  expectNewPasswordHint(dialog, '输入登录密码')
 
   fireEvent.change(password, { target: { value: 'synthetic-password' } })
   fireEvent.change(confirmation, { target: { value: 'different-password' } })

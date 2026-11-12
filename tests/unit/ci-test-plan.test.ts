@@ -23,12 +23,12 @@ describe('CI test discovery and balanced assignment', () => {
     validateTestPlan(plan, [...weights, extra].map(file => file.path), revision)
   })
 
-  it('scales between ten and twenty shards as estimated work grows, with no empty shard for small suites', () => {
+  it('fits growing suites within the 18 concurrent CI slots, with no empty shard for small suites', () => {
     expect(makeTestPlan(weights, revision).count).toBe(5)
     const files = Array.from({ length: 40 }, (_, index) => ({ path: `tests/unit/growing-${index}.test.ts`, durationMs: 20_000 }))
     expect(makeTestPlan(files, revision).count).toBe(10)
     expect(makeTestPlan(files.map(file => ({ ...file, durationMs: 30_000 })), revision).count).toBe(14)
-    expect(makeTestPlan(files.map(file => ({ ...file, durationMs: 100_000 })), revision).count).toBe(20)
+    expect(makeTestPlan(files.map(file => ({ ...file, durationMs: 100_000 })), revision).count).toBe(18)
   })
 
   it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])('rejects invalid duration %s', durationMs => {

@@ -8,7 +8,7 @@ import { IdentityVerificationForm, PasswordVerificationForm } from '@/features/a
 import { AccountDialog } from '@/features/account/VerificationCodeField'
 import type { User } from '../../../../shared/contracts'
 import { maskPhoneNumber } from './privacy'
-import { SectionTitle, SettingsRow } from './settings-row'
+import { SectionTitle, SettingsGroup, SettingsRow } from './settings-row'
 
 type AccountDialogKind = 'email' | 'phone' | 'password'
 
@@ -20,6 +20,10 @@ export default function EmailAccountSettings({ user }: { user: User }) {
   const allowedSection = (section === 'email' && !user.emailVerified) || (section === 'phone' && !user.phoneVerified) || section === 'password'
   const dialog = allowedSection && !requiresLegacyEmailBinding(user) ? section : null
   const hasPassword = user.hasPassword ?? user.passwordConfigured
+  const phoneExempt = user.role === 'admin' && user.studioPhoneVerificationRequired === false && !user.phoneVerified
+  const savedEmail = user.email?.trim()
+  const reservedAdminEmail = user.role === 'admin' && !user.emailVerified && savedEmail?.toLowerCase() === 'admin@chevoink.local'
+  const initialEmail = reservedAdminEmail ? undefined : savedEmail
 
   function open(next: AccountDialogKind | null) {
     setParams(current => {
@@ -30,29 +34,31 @@ export default function EmailAccountSettings({ user }: { user: User }) {
     }, { replace: true })
   }
 
-  const initialEmail = user.email?.trim()
   const title = dialog === 'email' ? (initialEmail ? '验证邮箱' : '绑定邮箱')
-    : dialog === 'phone' ? '验证手机号'
+    : dialog === 'phone' ? (phoneExempt ? '绑定手机号' : '验证手机号')
       : hasPassword ? '修改登录密码' : '设置登录密码'
 
   return (
     <section id="account-security">
       <SectionTitle>账号安全</SectionTitle>
-      <div className="divide-y divide-[var(--border-subtle)]">
+      <SettingsGroup>
         <SettingsRow icon={<Mail className="h-[18px] w-[18px]" />} title="邮箱"
-          caption={user.email ?? '可用邮箱登录和找回密码'}
-          value={user.emailVerified ? '已验证' : '未验证'}
+          caption={reservedAdminEmail ? `${savedEmail} · 系统预留地址` : savedEmail || '可用邮箱登录和找回密码'}
+          value={user.emailVerified ? '已验证' : initialEmail ? '待验证' : '待绑定'}
           chevron={user.emailVerified ? 'none' : 'right'} onClick={user.emailVerified ? undefined : () => open('email')} />
         <SettingsRow icon={<Smartphone className="h-[18px] w-[18px]" />} title="手机号"
-          caption={user.phone ? maskPhoneNumber(user.phone) : '创作区需要已验证的手机号'}
-          value={user.phoneVerified ? '已验证' : '未验证'}
+          caption={user.phone ? maskPhoneNumber(user.phone) : phoneExempt ? '超级管理员可选绑定' : '创作区需要已验证的手机号'}
+          value={user.phoneVerified ? '已验证' : phoneExempt ? '免验证' : '未验证'}
           chevron={user.phoneVerified ? 'none' : 'right'} onClick={user.phoneVerified ? undefined : () => open('phone')} />
         <SettingsRow icon={<KeyRound className="h-[18px] w-[18px]" />} title="登录密码"
+          searchKeywords="修改密码 设置密码 更改密码"
           caption="使用已验证的邮箱或手机验证码确认身份"
           value={hasPassword ? '已设置' : '未设置'}
           chevron="right" onClick={() => open('password')} />
-      </div>
-      {dialog && <AccountDialog key={dialog} title={title} onClose={() => { if (!saving) open(null) }}>
+      </SettingsGroup>
+      {dialog && <AccountDialog key={dialog} title={title}
+        description={dialog === 'email' && reservedAdminEmail ? '请填写可接收验证码的邮箱。' : undefined}
+        onClose={() => { if (!saving) open(null) }}>
         {dialog === 'password'
           ? <PasswordVerificationForm user={user} onSaved={() => { open(null); toast.success('登录密码已保存') }} onSaving={setSaving} />
           : <IdentityVerificationForm kind={dialog} initialValue={dialog === 'email' ? initialEmail : undefined}

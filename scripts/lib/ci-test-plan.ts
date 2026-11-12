@@ -43,7 +43,8 @@ export function makeTestPlan(weights: TestWeight[], revision: string, count?: nu
   if (!revision) throw new Error('Test plan requires a revision')
   if (weights.some(file => !Number.isFinite(file.durationMs) || file.durationMs <= 0)) throw new Error('Invalid test duration')
   const totalMs = weights.reduce((sum, file) => sum + file.durationMs, 0)
-  const shardCount = count ?? Math.min(weights.length, Math.max(10, Math.min(20, Math.ceil(totalMs / 90_000))))
+  // Fit the default matrix into the workflow's 18 concurrent runner slots.
+  const shardCount = count ?? Math.min(weights.length, Math.max(10, Math.min(18, Math.ceil(totalMs / 90_000))))
   if (!Number.isInteger(shardCount) || shardCount < 1 || shardCount > weights.length) throw new Error('Invalid shard count')
   const shards: TestShard[] = Array.from({ length: shardCount }, (_, index) => ({ index: index + 1, estimatedMs: 0, files: [] }))
   for (const file of [...weights].sort((a, b) => b.durationMs - a.durationMs || a.path.localeCompare(b.path, 'en'))) {
