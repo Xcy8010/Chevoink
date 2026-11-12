@@ -170,13 +170,16 @@ export function childContext(messages: ChildMessages, prompt: string, rolePrompt
  * remain the ceiling; parent model identity and tariff never leak into a child. */
 export function childModelForRuntime(inherited: ChildConfiguration['model'], runtime: NonNullable<ToolContext['modelRuntime']>, customModelId: string | null,
   price: import('../billing/token-price.js').TokenPrice): ChildConfiguration['model'] {
-  const { weightedRoute: _choice, modelConfigId: _id, modelConfigRevision: _revision, tokenPrice: _price, ...capabilities } = inherited
+  const { weightedRoute: _choice, modelConfigId: _id, modelConfigRevision: _revision, tokenPrice: _price,
+    toolCallingProtocol: _protocol, ...capabilities } = inherited
   const modelName = runtime.modelName ?? env.aiTextModel
   return { ...capabilities, ...(runtime.modelConfigId ? { modelConfigId: runtime.modelConfigId, modelConfigRevision: runtime.modelConfigRevision } : {}),
     tokenPrice: price, ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}), tier: runtime.tier, provider: runtime.provider,
     modelName, customModelId: runtime.tier === 'custom' ? customModelId : null, reasoningEffort: runtime.reasoningEffort,
+    ...(runtime.toolCallingProtocol ? { toolCallingProtocol: runtime.toolCallingProtocol } : {}),
     routeRevision: modelRouteRevision({ provider: runtime.provider, model: modelName,
       endpoint: `${(runtime.baseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`, reasoningEffort: runtime.reasoningEffort,
+      ...(runtime.toolCallingProtocol ? { toolCallingProtocol: runtime.toolCallingProtocol } : {}),
       ...(runtime.weightedRoute ? { weightedRoute: runtime.weightedRoute } : {}) }) }
 }
 

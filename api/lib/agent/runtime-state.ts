@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { AgentExecutionFrame } from '@prisma/client'
 import { z } from 'zod'
 import { NEXT_PROMPT_MAX_LENGTH } from './next-prompt.js'
+import { responsesContinuationSchema } from '../ai-responses-continuation.js'
 import { tokenPriceSchema } from '../billing/token-price.js'
 import { weightedRouteSelectionSchema } from '../../../shared/contracts/model-weighted-routes.js'
 import { lockRunRoot, runtimeError, runtimeJson, runtimeJsonHash, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
@@ -21,6 +22,7 @@ const message = z.discriminatedUnion('role', [
     z.object({ type: z.literal('image_url'), image_url: z.object({ url: z.string(), detail: z.enum(['low', 'high', 'auto']).optional() }).strict() }).strict(),
   ]))]) }).strict(),
   z.object({ role: z.literal('assistant'), content: z.string().nullable(), reasoning: z.string().optional(), toolCalls: z.array(toolCall).optional(),
+    responsesContinuation: responsesContinuationSchema.optional(),
     nextPrompt: z.string().min(1).max(NEXT_PROMPT_MAX_LENGTH).optional() }).strict(),
   z.object({ role: z.literal('tool'), toolCallId: z.string().min(1), content: z.string() }).strict(),
 ])
@@ -30,6 +32,7 @@ const configurationSchema = z.object({ version: z.literal(1), mode: z.enum(['pla
   creativeFreedom: z.enum(['stable', 'balanced', 'bold']), qualityMode: z.enum(['balanced', 'premium']),
   model: z.object({ modelConfigId: id.optional(), modelConfigRevision: z.number().int().positive().optional(), tokenPrice: tokenPriceSchema.optional(), weightedRoute: weightedRouteSelectionSchema.optional(), tier: z.string().min(1), provider: z.string().min(1), modelName: z.string().nullable(), customModelId: id.nullable(),
     reasoningEffort: z.string().min(1), routeRevision: z.string().regex(/^[a-f0-9]{64}$/),
+    toolCallingProtocol: z.enum(['chat', 'responses']).optional(),
     maxOutputTokens: z.number().int().positive().max(4000000).optional(),
     contextWindowTokens: z.number().int().positive().max(4000000).optional() }).strict(),
   tools: z.array(z.object({ type: z.literal('function'), function: z.object({ name: z.string().min(1), strict: z.boolean().optional(), description: z.string(), parameters: z.record(z.string(), z.unknown()) }).strict() }).strict()),

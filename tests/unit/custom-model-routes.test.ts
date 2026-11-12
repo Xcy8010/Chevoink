@@ -3,12 +3,12 @@ import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
-  count: vi.fn(), create: vi.fn(), findFirst: vi.fn(), updateMany: vi.fn(), validate: vi.fn(), owner: vi.fn(),
+  count: vi.fn(), create: vi.fn(), findFirst: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), validate: vi.fn(), owner: vi.fn(),
   encrypt: vi.fn((value: string) => `encrypted:${value}`), decrypt: vi.fn(() => 'stored-test-key'),
 }))
 vi.mock('../../api/lib/prisma.js', () => ({
   DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } },
-  prisma: { aiModelConfig: { count: mocks.count, create: mocks.create, findFirst: mocks.findFirst, updateMany: mocks.updateMany }, user: { findUniqueOrThrow: mocks.owner } },
+  prisma: { aiModelConfig: { count: mocks.count, create: mocks.create, findFirst: mocks.findFirst, findMany: mocks.findMany, updateMany: mocks.updateMany }, user: { findUniqueOrThrow: mocks.owner } },
   normalizeDataAccessError: () => ({ status: 500, code: 'DATA_ACCESS_ERROR', message: 'internal' }),
 }))
 vi.mock('../../api/lib/auth-session.js', () => ({ requireSessionUserId: () => 'owner' }))
@@ -39,6 +39,40 @@ beforeEach(() => {
 })
 
 describe('custom model routes capability validation', () => {
+  it('persists and exposes the selected remote tool calling protocol without exposing credentials', async () => {
+    await request(app).post('/credits/models').send({ ...body, toolCallingProtocol: 'responses' }).expect(201)
+    expect(mocks.validate).toHaveBeenCalledWith(expect.objectContaining({ toolCallingProtocol: 'responses' }))
+    expect(mocks.create).toHaveBeenCalledWith({ data: expect.objectContaining({ metadata: { ...verified, toolCallingProtocol: 'responses' } }) })
+    mocks.findMany.mockResolvedValue([{ ...target, displayName: 'Saved', createdAt: target.updatedAt, enabled: true,
+      metadata: { ...verified, toolCallingProtocol: 'responses' } }])
+    const response = await request(app).get('/credits/models').expect(200)
+    expect(response.body.data.models).toMatchObject([{ id: target.id, toolCallingProtocol: 'responses', apiKeyConfigured: true }])
+    expect(response.text).not.toContain(target.apiKeyCiphertext)
+  })
+  it('keeps a saved protocol during partial edits and clears it only on explicit auto', async () => {
+    mocks.findFirst.mockResolvedValue({ ...target, metadata: { ...target.metadata, toolCallingProtocol: 'responses' } })
+    await request(app).patch('/credits/models/model-id').send({ displayName: 'Renamed' }).expect(200)
+    expect(mocks.validate).toHaveBeenLastCalledWith(expect.objectContaining({ toolCallingProtocol: 'responses' }))
+    expect(mocks.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      metadata: expect.objectContaining({ toolCallingProtocol: 'responses' }),
+    }) }))
+    await request(app).patch('/credits/models/model-id').send({ toolCallingProtocol: null }).expect(200)
+    expect(mocks.validate).toHaveBeenLastCalledWith(expect.objectContaining({ toolCallingProtocol: null }))
+    expect(mocks.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      metadata: expect.objectContaining({ toolCallingProtocol: null }),
+    }) }))
+  })
+  it('rejects explicit Responses for new and existing local connectors without probing or persisting', async () => {
+    const local = { provider: 'local-openai', baseUrl: 'http://127.0.0.1:7863/v1' }
+    const created = await request(app).post('/credits/models').send({ ...body, ...local, apiKey: undefined, toolCallingProtocol: 'responses' }).expect(400)
+    expect(created.body.error.code).toBe('LOCAL_MODEL_RESPONSES_UNSUPPORTED')
+    mocks.findFirst.mockResolvedValue({ ...target, ...local })
+    const updated = await request(app).patch('/credits/models/model-id').send({ toolCallingProtocol: 'responses' }).expect(400)
+    expect(updated.body.error.code).toBe('LOCAL_MODEL_RESPONSES_UNSUPPORTED')
+    expect(mocks.validate).not.toHaveBeenCalled()
+    expect(mocks.create).not.toHaveBeenCalled()
+    expect(mocks.updateMany).not.toHaveBeenCalled()
+  })
   it('creates an unverified local profile without any model call or upstream API secret', async () => {
     const response = await request(app).post('/credits/models').send({ ...body, provider: 'local-openai', baseUrl: 'http://127.0.0.1:7863/v1', apiKey: undefined }).expect(201)
     expect(response.body.data.connectorSetup).toMatchObject({ version: 1, provider: 'local-openai', model: body.modelName, baseUrl: 'http://127.0.0.1:7863/v1' })

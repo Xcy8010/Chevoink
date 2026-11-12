@@ -17,7 +17,7 @@ export function scheduledToolHistoryIds(message: ChatMessage | undefined): Set<s
 /** Native assistant frames belong to the provider response. Server-scheduled
  * checks and recovered text calls remain readonly execution history; inventing
  * native calls for them also invents a provider reasoning/tool round. */
-export function toolTurnHistory(result: Pick<ChatCompletionResult, 'content' | 'reasoning' | 'toolCalls'>,
+export function toolTurnHistory(result: Pick<ChatCompletionResult, 'content' | 'reasoning' | 'toolCalls' | 'responsesContinuation'>,
   effectiveCalls: readonly ToolCallRequest[], options: { bootstrap?: boolean; recoveredText?: boolean; withholdText?: boolean } = {}): ChatMessage[] {
   const nativeCalls = options.bootstrap ? [] : result.toolCalls
   const nativeIds = new Set(nativeCalls.map(call => call.id))
@@ -26,6 +26,7 @@ export function toolTurnHistory(result: Pick<ChatCompletionResult, 'content' | '
   if (scheduled.length) messages.push({ role: 'user', content: scheduledHistoryPrefix
     + JSON.stringify(scheduled.map(call => ({ callId: call.id, toolName: call.name }))) })
   if (!options.bootstrap) messages.push({ role: 'assistant', content: options.recoveredText || options.withholdText ? null : result.content || null,
-    reasoning: result.reasoning, ...(nativeCalls.length ? { toolCalls: nativeCalls } : {}) })
+    reasoning: result.reasoning, ...(nativeCalls.length ? { toolCalls: nativeCalls,
+      ...(result.responsesContinuation ? { responsesContinuation: result.responsesContinuation } : {}) } : {}) })
   return messages
 }

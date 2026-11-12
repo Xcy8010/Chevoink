@@ -221,6 +221,7 @@ const adminModelUpdateSchema = z.object({
   selectable: z.boolean().optional(),
   testerSelectable: z.boolean().optional(),
   isDefault: z.boolean().optional(),
+  toolCallingProtocol: z.enum(['chat', 'responses']).nullable().optional(),
   reasoningParameterMode: z.enum(['native', 'omit']).nullable().optional(),
   outputTokenParameter: z.enum(['max_tokens', 'max_completion_tokens']).nullable().optional(),
   thinkingEnabled: z.boolean().nullable().optional(),

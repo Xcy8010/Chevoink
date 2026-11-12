@@ -12,7 +12,7 @@ import { baseModelMultiplier, effectiveModelMultiplier, readModelPromotion, mode
 
 import type { AdminCreditsManagementPayload, AdminModelManagementPayload } from '../../shared/contracts/index.js'
 import type { ImageQualityConfig } from '../../shared/contracts/image-model.js'
-import type { ModelReasoningEffort } from '../../shared/contracts/index.js'
+import type { ModelReasoningEffort, ToolCallingProtocol } from '../../shared/contracts/index.js'
 import { isBuiltInModelTier, isServerModelTier } from '../../shared/contracts/index.js'
 import { creditTransaction, lockCreditPolicy } from './credit-policy.js'
 import { buildNewCreditAccountData, ensureCreditAccount, getCreditWindow, parseModelCapabilities } from './credits.js'
@@ -320,6 +320,7 @@ export async function getAdminModelManagement(view: 'active' | 'archived' | 'all
         enabled: model.enabled || Boolean(fallback), selectable: model.selectable, testerSelectable: metadata.testerSelectable === true, isDefault: model.isDefault,
         apiKeyConfigured: Boolean(model.apiKeyCiphertext) || Boolean(fallback?.apiKeyConfigured), requestCount: row?._count._all ?? 0,
         requestTokens: row?._sum.requestTokens ?? 0, responseTokens: row?._sum.responseTokens ?? 0,
+        ...(modelKind === 'text' && capabilities.toolCallingProtocol ? { toolCallingProtocol: capabilities.toolCallingProtocol } : {}),
         ...(capabilities.reasoningParameterMode ? { reasoningParameterMode: capabilities.reasoningParameterMode } : {}),
         ...(capabilities.outputTokenParameter ? { outputTokenParameter: capabilities.outputTokenParameter } : {}),
         ...(capabilities.thinkingEnabled !== undefined ? { thinkingEnabled: capabilities.thinkingEnabled } : {}),
@@ -355,6 +356,7 @@ export type UpdateAdminModelInput = {
   selectable?: boolean
   testerSelectable?: boolean
   isDefault?: boolean
+  toolCallingProtocol?: ToolCallingProtocol | null
   reasoningParameterMode?: 'native' | 'omit' | null
   outputTokenParameter?: 'max_tokens' | 'max_completion_tokens' | null
   thinkingEnabled?: boolean | null
@@ -376,6 +378,9 @@ function assertProviderReasoningEfforts(provider: string, reasoningEfforts: Mode
 async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: string, input: UpdateAdminModelInput): Promise<{ before: AiModelConfig; after: AiModelConfig }> {
     const model = await tx.aiModelConfig.findFirstOrThrow({ where: { id: modelId, ownerUserId: null } })
     if (input.modelKind !== undefined && input.modelKind !== adminModelKind(model.metadata)) throw new DataAccessError(400, 'MODEL_KIND_IMMUTABLE', '已有配置的能力类型不能直接更改，请新建对应类型。')
+    if (input.toolCallingProtocol != null && adminModelKind(model.metadata) !== 'text') {
+      throw new DataAccessError(400, 'MODEL_KIND_INVALID', '工具调用协议仅适用于文本模型。')
+    }
     if (model.archivedAt) throw new DataAccessError(409, 'MODEL_ARCHIVED', '该模型已归档，请先恢复并重新确认配置。')
     if (input.expectedRevision !== undefined && input.expectedRevision !== model.revision) throw new DataAccessError(409, 'MODEL_CONFIG_CONFLICT', '配置已被修改，草稿已保留；请核对最新版本。')
     await captureAdminModelVersion(tx, model)
@@ -459,6 +464,7 @@ async function updateAdminModelWithTx(tx: Prisma.TransactionClient, modelId: str
           freePromotion,
           ...(isWebTool && input.webToolProtocol !== undefined ? { webToolProtocol: input.webToolProtocol } : {}),
           ...(input.imageQuality !== undefined ? { imageQuality: input.imageQuality } : {}),
+          ...(input.toolCallingProtocol !== undefined ? { toolCallingProtocol: input.toolCallingProtocol } : {}),
           ...(input.reasoningParameterMode !== undefined ? { reasoningParameterMode: input.reasoningParameterMode } : {}),
           ...(input.outputTokenParameter !== undefined ? { outputTokenParameter: input.outputTokenParameter } : {}),
           ...(input.thinkingEnabled !== undefined ? { thinkingEnabled: input.thinkingEnabled } : {}),

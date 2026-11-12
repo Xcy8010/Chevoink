@@ -13,6 +13,7 @@ import { observeGoalUsage } from './goal-budget.js'
 import { readGoalExecution } from './goal-fence.js'
 import { estimateChatMessagesTokens } from './context-budget.js'
 import { DataAccessError } from '../prisma.js'
+import { providerRequestOutputLimit } from '../ai-responses-route.js'
 
 export type DurableChatExecution = { lease: RunLeaseToken; operationKey: string; attemptKey: string; parentOperationId?: string; cursor?: ModelExecutionCursor;
   auxiliaryStep?: AuxiliaryModelStep;
@@ -104,9 +105,10 @@ export async function beginDurableChat(input: {
     if (attempt.status !== 'prepared') runtimeError('RUNTIME_RECONCILIATION_REQUIRED', '原模型请求已派发但结果未确认，不能自动重新请求。')
     let goalTokenEstimate: number | undefined
     if (goalContext) {
-      const body = (input.request as { body?: { messages?: unknown[]; max_tokens?: number; max_completion_tokens?: number } }).body
-      const estimate = estimateChatMessagesTokens([{ role: 'user', content: JSON.stringify(input.request) }])
-      goalTokenEstimate = estimate + Math.max(1, body?.max_completion_tokens ?? body?.max_tokens ?? 32768)
+      const output = providerRequestOutputLimit(request as Parameters<typeof providerRequestOutputLimit>[0])
+      const estimate = estimateChatMessagesTokens([{ role: 'user', content: JSON.stringify(request) }])
+      const reserve = typeof output === 'number' && Number.isSafeInteger(output) && output > 0 ? output : 32768
+      goalTokenEstimate = estimate + reserve
     }
     try {
       await input.admit()

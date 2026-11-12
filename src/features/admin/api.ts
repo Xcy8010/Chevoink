@@ -40,6 +40,7 @@ import type {
   CorpusSourceCreate,
   FeedbackKind,
   FeedbackStatus,
+  ToolCallingProtocol,
 } from '../../../shared/contracts/index.js'
 import { requestJson } from '@/app/api-client'
 
@@ -171,6 +172,7 @@ export function updateAdminModel(modelId: string, payload: {
   weightedRoutes?: import('../../../shared/contracts/model-weighted-routes').WeightedRoutesInput
   provider?: string; displayName?: string; modelName?: string; baseUrl?: string | null; apiKey?: string
   multiplier?: number; enabled?: boolean; selectable?: boolean; testerSelectable?: boolean; isDefault?: boolean
+  toolCallingProtocol?: ToolCallingProtocol | null
   reasoningParameterMode?: 'native' | 'omit' | null
   outputTokenParameter?: 'max_tokens' | 'max_completion_tokens' | null
   thinkingEnabled?: boolean | null

@@ -29,10 +29,80 @@ async function successfulProbe(_url: URL, init: { body: string }) {
   }
   return textResult(body)
 }
+async function successfulResponsesProbe(url: URL, init: { body: string }) {
+  const body = JSON.parse(init.body)
+  const content = body.input[0].content
+  const chatContent = Array.isArray(content) ? content.map(part => part.type === 'input_image'
+    ? { type: 'image_url', image_url: { url: part.image_url } } : { type: 'text', text: part.text }) : content
+  const chat = await successfulProbe(url, { body: JSON.stringify({ messages: [{ content: chatContent }], tools: body.tools }) })
+  const { choices: [{ message }] } = await chat.json()
+  const output = message.tool_calls
+    ? message.tool_calls.map(call => ({ type: 'function_call', call_id: 'call_probe', status: 'completed', ...call.function }))
+    : [{ type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: message.content }] }]
+  return response({ status: 'completed', output })
+}
 beforeEach(() => { vi.clearAllMocks(); mocks.fetch.mockImplementation(successfulProbe) })
 afterEach(() => vi.useRealTimers())
 
 describe('custom account capability validation', () => {
+  it.each([
+    { modelName: 'gpt-6-astra', baseUrl: 'https://api.openai.com/v1', toolCallingProtocol: null },
+    { modelName: 'provider-alias', baseUrl: 'https://models.example.com/gateway/v1/', toolCallingProtocol: 'responses' as const },
+  ])('verifies actual native text, vision and tools for $modelName without probing Chat', async selected => {
+    mocks.fetch.mockImplementation(successfulResponsesProbe)
+    expect(await validateCustomModelCapabilities({ ...input, ...selected })).toMatchObject({
+      reasoningEfforts: ['low', 'medium', 'high', 'max'], defaultReasoningEffort: 'high',
+      reasoningParameterMode: 'native', outputTokenParameter: null, visionEnabled: true,
+      capabilityValidation: { protocol: 'responses', text: 'verified', reasoning: 'parameter_accepted', vision: 'verified', tools: 'verified', requests: 6 },
+    })
+    const requests = mocks.fetch.mock.calls.map(([url, init]) => ({ url, init, body: JSON.parse(init.body) }))
+    expect(requests.slice(0, 4).map(({ body }) => body.reasoning.effort)).toEqual(['high', 'medium', 'low', 'max'])
+    expect(requests.every(({ url, init, body }) => url.href === selected.baseUrl.replace(/\/$/, '') + '/responses'
+      && init.redirect === 'manual' && body.max_output_tokens === 256 && body.stream === false && body.store === false
+      && !('messages' in body) && !('reasoning_effort' in body) && !('max_tokens' in body) && !('include' in body))).toBe(true)
+    expect(requests[4].body.input[0].content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'input_image', image_url: expect.stringMatching(/^data:image\/png;base64,/) }),
+    ]))
+    expect(requests[5].body.tools).toEqual([expect.objectContaining({ type: 'function', name: 'capability_probe' })])
+    expect(requests[5].body.tools[0]).not.toHaveProperty('function')
+  })
+
+  it('keeps the seven-request bound when Responses explicitly rejects reasoning.effort', async () => {
+    mocks.fetch.mockImplementation((url, init) => JSON.parse(init.body).reasoning ? unsupported('reasoning.effort') : successfulResponsesProbe(url, init))
+    expect(await validateCustomModelCapabilities({ ...input, toolCallingProtocol: 'responses' })).toMatchObject({
+      reasoningParameterMode: 'omit', reasoningEfforts: ['none'], capabilityValidation: { protocol: 'responses', requests: 7 },
+    })
+    expect(mocks.fetch.mock.calls.slice(4).every(([, init]) => !('reasoning' in JSON.parse(init.body)))).toBe(true)
+  })
+
+  it('honors explicit Chat on an official model and rejects native selection for a local relay', async () => {
+    await expect(validateCustomModelCapabilities({ ...input, baseUrl: 'https://api.openai.com/v1',
+      modelName: 'gpt-6.1-terra', toolCallingProtocol: 'chat' })).resolves.toMatchObject({ outputTokenParameter: 'max_tokens' })
+    expect(mocks.fetch.mock.calls.every(([url]) => url.pathname === '/v1/chat/completions')).toBe(true)
+    mocks.fetch.mockClear()
+    await expect(validateCustomModelCapabilities({ ...input, baseUrl: 'http://127.0.0.1:7863/v1', provider: 'local-openai',
+      toolCallingProtocol: 'responses' })).rejects.toMatchObject({ code: 'LOCAL_MODEL_RESPONSES_UNSUPPORTED' })
+    expect(mocks.fetch).not.toHaveBeenCalled()
+  })
+
+  it('does not accept a Chat-shaped success envelope as verified native Responses', async () => {
+    mocks.fetch.mockResolvedValue(response({ choices: [{ message: { content: 'canned' }, finish_reason: 'stop' }] }))
+    await expect(validateCustomModelCapabilities({ ...input, toolCallingProtocol: 'responses' }))
+      .rejects.toMatchObject({ code: 'CUSTOM_MODEL_INVALID_RESPONSE' })
+    expect(mocks.fetch).toHaveBeenCalledOnce()
+  })
+
+  it('does not certify a native tool reply with an extra incomplete function call', async () => {
+    mocks.fetch.mockImplementation(async (url, init) => {
+      const result = await successfulResponsesProbe(url, init)
+      if (!JSON.parse(init.body).tools) return result
+      const payload = await result.json()
+      return response({ ...payload, output: [...payload.output, { type: 'function_call', status: 'incomplete' }] })
+    })
+    await expect(validateCustomModelCapabilities({ ...input, toolCallingProtocol: 'responses' }))
+      .resolves.toMatchObject({ capabilityValidation: { vision: 'verified', tools: 'unconfirmed', requests: 6 } })
+  })
+
   it('tests all four native efforts and verifies actual image and native tool responses', async () => {
     const result = await validateCustomModelCapabilities(input)
     expect(result).toMatchObject({ reasoningEfforts: ['low', 'medium', 'high', 'max'], defaultReasoningEffort: 'high',

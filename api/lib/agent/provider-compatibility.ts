@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { buildProviderReasoningPayload, buildProviderToolChoice } from '../ai-service.js'
-import type { ModelReasoningEffort } from '../../../shared/contracts/index.js'
+import { resolveResponsesEndpoint } from '../ai-responses-route.js'
+import type { ModelReasoningEffort, ToolCallingProtocol } from '../../../shared/contracts/index.js'
 
 export const providerCompatibilityCapabilities = [
   'native_tool_stream', 'argument_fragments', 'multi_call_association', 'strict_schema_subset',
@@ -32,6 +33,7 @@ export type ProviderCompatibilityRoute = {
   purpose: 'tool_turn' | 'bounded_tool_review' | 'quality_review'
   reasoningEffort: ModelReasoningEffort
   reasoningParameterMode?: 'native' | 'omit'
+  toolCallingProtocol?: ToolCallingProtocol
   thinkingEnabled?: boolean
   reasoningEfforts?: ModelReasoningEffort[]
   outputTokenParameter?: 'max_tokens' | 'max_completion_tokens'
@@ -77,17 +79,19 @@ function safeEndpoint(baseUrl: string | null): { endpoint: string | null; host: 
 /** Whitelist fields: spreading a runtime object would leak apiKey/auth metadata. */
 function snapshotRoute(route: ProviderCompatibilityRoute) {
   const endpoint = safeEndpoint(route.baseUrl)
+  const responsesEndpoint = route.toolsPresent ? resolveResponsesEndpoint(route) : null
   return {
-    source: route.source, provider: route.provider, endpoint: endpoint.endpoint, model: route.model,
+    source: route.source, provider: route.provider, endpoint: responsesEndpoint ?? endpoint.endpoint, model: route.model,
     endpointHost: endpoint.host ?? route.endpointHost ?? null, endpointFingerprint: route.endpointFingerprint ?? null,
     modality: route.modality ?? 'text', enabled: route.enabled ?? true, selectable: route.selectable ?? null,
     isDefault: route.isDefault ?? null, tier: route.tier ?? null, visionEnabled: route.visionEnabled ?? null,
     contextWindowTokens: route.contextWindowTokens ?? null, configurationUpdatedAt: route.configurationUpdatedAt ?? null,
     executor: route.executor, purpose: route.purpose, reasoningEffort: route.reasoningEffort,
     reasoningParameterMode: route.reasoningParameterMode ?? null,
+    ...(route.toolCallingProtocol ? { toolCallingProtocol: route.toolCallingProtocol } : {}),
     thinkingEnabled: route.thinkingEnabled ?? null,
     reasoningEfforts: route.reasoningEfforts ? [...route.reasoningEfforts] : null,
-    outputTokenParameter: route.outputTokenParameter ?? null, maxOutputTokens: route.maxOutputTokens,
+    outputTokenParameter: responsesEndpoint ? 'max_output_tokens' : route.outputTokenParameter ?? null, maxOutputTokens: route.maxOutputTokens,
     toolsPresent: route.toolsPresent, toolChoice: route.toolChoice ?? null,
     schemaFingerprint: route.schemaFingerprint ?? null, evidenceReusable: endpoint.reusable,
   }
@@ -150,6 +154,7 @@ export function buildProviderCompatibilitySnapshot(input: {
     reasoningEffort: input.route.reasoningEffort, reasoningParameterMode: input.route.reasoningParameterMode,
     thinkingEnabled: input.route.thinkingEnabled, boundedReview: input.route.purpose === 'bounded_tool_review',
   }
+  const responses = route.endpoint?.endsWith('/responses')
   return {
     version: 1 as const, observedAt: input.observedAt, codeRevision: input.codeRevision,
     configurationFingerprint, route,
@@ -159,9 +164,12 @@ export function buildProviderCompatibilitySnapshot(input: {
     requestEncoding: input.route.purpose === 'quality_review' || route.modality !== 'text' || !route.enabled
       || !route.endpoint || route.maxOutputTokens === null || route.toolsPresent === null ? null : {
       verificationKind: 'configured' as const,
-      reasoning: buildProviderReasoningPayload(encoderInput),
-      toolChoice: input.route.toolsPresent ? buildProviderToolChoice(encoderInput, input.route.toolChoice) : {},
-      outputLimit: { [input.route.outputTokenParameter ?? 'max_tokens']: input.route.maxOutputTokens },
+      reasoning: responses
+        ? input.route.reasoningParameterMode === 'omit' ? {} : { reasoning: { effort: input.route.reasoningEffort } }
+        : buildProviderReasoningPayload(encoderInput),
+      toolChoice: responses ? input.route.toolChoice ? { tool_choice: input.route.toolChoice } : {}
+        : input.route.toolsPresent ? buildProviderToolChoice(encoderInput, input.route.toolChoice) : {},
+      outputLimit: { [route.outputTokenParameter ?? 'max_tokens']: input.route.maxOutputTokens },
       pointers: ['api/lib/ai-service.ts#chatWithToolsImpl', 'api/lib/ai-service.ts#buildProviderReasoningPayload', 'api/lib/ai-service.ts#buildProviderToolChoice'],
     },
     capabilities,

@@ -3,6 +3,7 @@ export * from './model-tier.js'
 
 /** OpenAI-compatible providers expose different subsets; the server validates per model. */
 export type ModelReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type ToolCallingProtocol = 'chat' | 'responses'
 
 export type CreditModelOption = {
   publicDescription?: string
@@ -148,6 +149,7 @@ export type CustomModelView = {
   baseUrl: string | null
   apiKeyConfigured: boolean
   localConnector?: { online: boolean; verified: boolean }
+  toolCallingProtocol?: ToolCallingProtocol | null
   enabled: boolean
   reasoningEfforts: ModelReasoningEffort[]
   defaultReasoningEffort: ModelReasoningEffort
@@ -167,6 +169,7 @@ export type SaveCustomModelRequest = {
   baseUrl: string
   apiKey?: string
   enabled?: boolean
+  toolCallingProtocol?: ToolCallingProtocol | null
   reasoningEfforts?: ModelReasoningEffort[]
   defaultReasoningEffort?: ModelReasoningEffort
   visionEnabled?: boolean

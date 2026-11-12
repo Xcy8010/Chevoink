@@ -14,7 +14,7 @@ import { runtimeJson } from '../../api/lib/agent/runtime-common.js'
 import type { TaskSpec } from '../../shared/contracts/index.js'
 import { configureAgentTool } from '../../api/lib/agent/tools/configuration-tools.js'
 import { agentModelSelectionSchema, modelReasoningEffortSchema } from '../../shared/contracts/agent-model-assignments.js'
-import { toolWithNativeView, projectNativeToolViews, hasRetiredNativeArguments } from '../../api/lib/agent/runtime-tool-view.js'
+import { toolWithNativeView, projectNativeToolViews, hasRetiredNativeArguments, readFrozenModelToolViews, readPreparedModelRequest } from '../../api/lib/agent/runtime-tool-view.js'
 
 vi.mock('zod', async importOriginal => {
   const actual = await importOriginal<typeof import('zod')>()
@@ -109,6 +109,21 @@ describe('registered built-in parameter cache', () => {
       expect(conversion).toHaveBeenCalledTimes(2)
     } finally { z.globalRegistry.remove(field); conversion.mockClear() }
   })
+})
+
+it('reads the actual prepared tool definitions in Chat and Responses snapshots', () => {
+  const [tool] = toOpenAITools([getToolByName('novel_import')!])
+  const model = 'gpt-6.1-terra'
+  const chat = { endpoint: 'https://yunshu.chevolink.com/v1/chat/completions', body: { model, stream: true, messages: [], tools: [tool] } }
+  const responses = { endpoint: 'https://yunshu.chevolink.com/v1/responses', body: {
+    model, stream: true, store: false, input: [], tools: [{ type: tool.type, ...tool.function }],
+  } }
+  for (const request of [chat, responses]) {
+    const snapshot = { input: { request } }
+    expect(readPreparedModelRequest(snapshot)).toEqual(request)
+    expect(readFrozenModelToolViews(snapshot)).toEqual([tool])
+  }
+  expect(() => readFrozenModelToolViews({ input: { request: { ...responses, endpoint: 'http://another.example/v1/responses' } } })).toThrow()
 })
 
 it('preserves the exact pre-window agent_configure parameter schema for frozen calls', () => {

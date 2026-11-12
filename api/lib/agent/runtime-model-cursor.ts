@@ -7,7 +7,9 @@ import { preparePricedProviderOperationInTransaction } from './runtime-settlemen
 import { readEffectiveNativeTooling } from './native-tool-policy.js'
 
 export type ModelExecutionCursor = { expectedRevision: number; expectedHash: string }
-export type FrozenModelRoute = { weightedRoute?: import('../../../shared/contracts/model-weighted-routes.js').WeightedRouteSelection; provider: string; model: string; endpoint: string; reasoningEffort: string }
+export type FrozenModelRoute = { weightedRoute?: import('../../../shared/contracts/model-weighted-routes.js').WeightedRouteSelection;
+  provider: string; model: string; endpoint: string; reasoningEffort: string;
+  toolCallingProtocol?: import('../../../shared/contracts/index.js').ToolCallingProtocol }
 
 function toolSubset(value: unknown, available: unknown) {
   if (!Array.isArray(value) || !Array.isArray(available)) return false

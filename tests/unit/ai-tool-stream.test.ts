@@ -67,6 +67,64 @@ describe('next prompt from the current response', () => {
   })
 })
 describe('lossless tool argument transport', () => {
+  it.each(['native', 'omit'] as const)('routes Terra tools through Responses with %s reasoning', async reasoningParameterMode => {
+    const tools = [{ type: 'function' as const, function: { name: 'chapter_read', description: 'Read a chapter',
+      strict: false, parameters: { type: 'object', properties: { chapterId: { type: 'string' } }, required: ['chapterId'] } } }]
+    const response = (items: unknown[], usage = { input_tokens: 23, output_tokens: 7, total_tokens: 30, input_tokens_details: { cached_tokens: 3 } }) =>
+      new Response(`data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', output: items, usage } })}\n\n`)
+    const reasoningItem = { type: 'reasoning', id: 'rs_synthetic', encrypted_content: 'opaque-synthetic', summary: [] }
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(response([reasoningItem, { type: 'function_call', id: 'fc_synthetic', call_id: 'call_synthetic',
+        name: 'chapter_read', status: 'completed', arguments: '{"chapterId":"synthetic"}' }]))
+      .mockResolvedValueOnce(response([{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Read.' }] }]))
+      .mockResolvedValueOnce(response([{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Read.' }] }]))
+    vi.stubGlobal('fetch', fetch)
+    const messages: ChatMessage[] = [{ role: 'user', content: 'Read the synthetic chapter' }]
+    const options = { model: 'gpt-6.1-terra', provider: 'custom', providerBaseUrl: 'https://yunshu.chevolink.com/v1/',
+      providerApiKey: 'fake-test-key', reasoningEffort: 'high' as const, reasoningParameterMode, maxOutputTokens: 2000,
+      usageLog: { userId: 'test', action: 'fixture' } }
+
+    const result = await chatWithTools({ ...options, messages, tools, toolChoice: 'required' })
+    expect(result).toMatchObject({ finishReason: 'tool_calls',
+      toolCalls: [{ id: 'call_synthetic', name: 'chapter_read', arguments: '{"chapterId":"synthetic"}' }],
+      usage: { promptTokens: 23, completionTokens: 7, promptCacheHitTokens: 3, promptCacheMissTokens: 20 } })
+    expect(fetch.mock.calls[0][0]).toBe('https://yunshu.chevolink.com/v1/responses')
+    expect(fetch.mock.calls[0][1].redirect).toBe('error')
+    const first = JSON.parse(fetch.mock.calls[0][1].body)
+    expect(first).toMatchObject({ model: options.model, input: messages, max_output_tokens: 2000, store: false,
+      stream: true, tool_choice: 'required', tools: [{ type: 'function', ...tools[0].function }] })
+    expect(first.reasoning).toEqual(reasoningParameterMode === 'native' ? { effort: 'high' } : undefined)
+    expect(first).not.toHaveProperty('reasoning_effort')
+    expect(first).not.toHaveProperty('max_tokens')
+
+    const next: ChatMessage[] = [...messages,
+      { role: 'assistant', content: null, toolCalls: result.toolCalls, responsesContinuation: result.responsesContinuation },
+      { role: 'tool', toolCallId: 'call_synthetic', content: 'Read receipt' }]
+    const answer = await chatWithTools({ ...options, tools: [], messages: next })
+    expect(answer).toMatchObject({ finishReason: 'stop', content: 'Read.' })
+    expect(fetch.mock.calls[1][0]).toBe('https://yunshu.chevolink.com/v1/responses')
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toMatchObject({ input: [...messages, reasoningItem,
+      { type: 'function_call', call_id: 'call_synthetic', name: 'chapter_read', arguments: '{"chapterId":"synthetic"}' },
+      { type: 'function_call_output', call_id: 'call_synthetic', output: 'Read receipt' }] })
+    await chatWithTools({ ...options, providerApiKey: 'another-fixture-key', tools: [], messages: next })
+    expect(JSON.parse(fetch.mock.calls[2][1].body).input).not.toContainEqual(reasoningItem)
+    expect(fetch).toHaveBeenCalledTimes(3)
+  })
+
+  it.each([
+    { model: 'gpt-6.1-terra', baseUrl: 'https://yunshu.chevolink.com/v1', withTools: false },
+    { model: 'gpt-6-luna', baseUrl: 'https://yunshu.chevolink.com/v1', withTools: true },
+    { model: 'gpt-6.1-terra', baseUrl: 'https://other-gateway.example/v1', withTools: true },
+  ])('keeps Chat Completions on other calls and gateways ($model / $withTools / $baseUrl)', async ({ model, baseUrl, withTools }) => {
+    const fetch = vi.fn(async (_url: unknown, _init: unknown) => new Response('data: [DONE]\n\n'))
+    vi.stubGlobal('fetch', fetch)
+    await chatWithTools({ model, providerBaseUrl: baseUrl, providerApiKey: 'fake-test-key', reasoningEffort: 'high',
+      messages: [], tools: withTools ? [{ type: 'function', function: { name: 'fixture', description: 'fixture', parameters: { type: 'object' } } }] : [],
+      usageLog: { userId: 'test', action: 'fixture' } })
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(fetch.mock.calls[0]).toMatchObject([`${baseUrl}/chat/completions`, { body: expect.stringContaining('"reasoning_effort":"high"') }])
+  })
+
   it('sends the import tool as an object to a gateway that rejects root unions', async () => {
     const presentation = toOpenAIToolPresentation(novelImportTool)
     const old = { type: 'function' as const, function: {

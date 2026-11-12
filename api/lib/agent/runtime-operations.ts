@@ -4,6 +4,7 @@ import { databaseNow, lockRunRoot, runtimeError, runtimeId, runtimeJson, runtime
 import { withManuscriptRunLease, withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { STRUCTURE_MUTATIONS } from './runtime-common.js'
 import { prisma } from '../prisma.js'
+import { providerRequestOutputLimit } from '../ai-responses-route.js'
 import { assertProviderBudget } from './runtime-budget.js'
 import { assertPendingProviderState } from './runtime-state.js'
 import { readAttemptContentionScope } from './runtime-parent-contention.js'
@@ -276,8 +277,8 @@ export async function markProviderDispatchedInTransaction(tx: RuntimeTx, token: 
         const run = await tx.agentRun.findUniqueOrThrow({ where: { id: token.runId }, select: { novelId: true } })
         if (!await tx.agentSubtask.findFirst({ where: { id: frozen.definitionId, userId: token.userId, novelId: run.novelId, enabled: true } })) return runtimeError('RUNTIME_CHILD_DEFINITION_REQUIRED', '原子 Agent 已停用或不属于原作者作品，尚未派发。')
       }
-      const request = attempt.requestSnapshot as { request?: { body?: { max_tokens?: unknown; max_completion_tokens?: unknown } } }
-      const output = request.request?.body?.max_completion_tokens ?? request.request?.body?.max_tokens
+      const snapshot = attempt.requestSnapshot as { request?: Parameters<typeof providerRequestOutputLimit>[0] }
+      const output = providerRequestOutputLimit(snapshot.request)
       if ((typeof output !== 'number' || !Number.isSafeInteger(output) || output < 1)
         && !await (await import('./runtime-cover-accounting.js')).readCoverAdmission(tx, attempt.id)) return runtimeError('RUNTIME_CHILD_REQUEST_BUDGET_REQUIRED', '子任务模型请求缺少可验证的输出上限。')
 

@@ -2020,6 +2020,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         provider: modelRuntime.provider,
         reasoningEffort: modelRuntime.reasoningEffort,
         reasoningParameterMode: modelRuntime.reasoningParameterMode,
+        toolCallingProtocol: modelRuntime.toolCallingProtocol,
         thinkingEnabled: modelRuntime.thinkingEnabled,
         outputTokenParameter: modelRuntime.outputTokenParameter,
         maxOutputTokens: requestOutputTokens,
@@ -2091,7 +2092,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       if (!bootstrapCall) observeTurnUsage(result.usage)
       await persistCheckpoint()
 
-      const recoveredToolCalls = !explanatoryResponse && result.toolCalls.length === 0
+      const recoveredToolCalls = !explanatoryResponse && result.finishReason !== 'length' && result.toolCalls.length === 0
         ? recoverAgentProtocolToolCalls(result.content).map((call, index) => ({
             id: `recovered_${messageId}_${index}`,
             name: call.name,

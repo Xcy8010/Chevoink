@@ -67,7 +67,9 @@ export const executionContextReadTool = defineTool({
       if (frame.snapshotHash !== args.hash) return { output: '提供的hash与该执行帧不一致，请使用归档提示中的准确位置。', outcome: 'failed' }
       const message = frame.state.messages[args.messageIndex!]
       if (!message) return { output: '原执行帧没有该消息。', outcome: 'failed' }
-      const raw = JSON.stringify(message)
+      const visibleMessage = { ...message }
+      if (visibleMessage.role === 'assistant') delete visibleMessage.responsesContinuation
+      const raw = JSON.stringify(visibleMessage)
       if (args.offset > raw.length) return { output: '读取位置超过原文长度。', outcome: 'failed' }
       const end = Math.min(raw.length, args.offset + args.limit)
       return { output: JSON.stringify({ revision: args.revision, hash: args.hash, messageIndex: args.messageIndex,

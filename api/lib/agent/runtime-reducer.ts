@@ -63,6 +63,7 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
       if (result.toolCalls.some(call => !call.id || !call.name) || new Set(result.toolCalls.map(call => call.id)).size !== result.toolCalls.length) runtimeError('RUNTIME_RECEIPT_INVALID', '模型工具调用身份缺失或重复。')
       appended = { role: 'assistant', content: result.content || null,
         reasoning: result.reasoning,
+        ...(result.responsesContinuation ? { responsesContinuation: result.responsesContinuation } : {}),
         ...(result.nextPrompt && result.finishReason === 'stop' && !result.toolCalls.length ? { nextPrompt: result.nextPrompt } : {}),
         ...(result.toolCalls.length ? { toolCalls: result.toolCalls } : {}) }
     } else if (operation.kind === 'tool') {

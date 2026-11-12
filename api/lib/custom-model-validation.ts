@@ -6,6 +6,9 @@ import { DataAccessError } from './prisma.js'
 import { parsePublicHttpUrl, publicEgressLookup, readBoundedPublicBody } from './public-http.js'
 import { isLocalModelProvider } from '../../shared/local-model.js'
 import { localModelFetch } from './local-model-transport.js'
+import type { OpenAIToolDefinition } from './ai-service.js'
+import { resolveResponsesEndpoint } from './ai-responses-route.js'
+import { buildResponsesToolRequest, responsesUsageToChat } from './ai-responses-tools.js'
 
 type CheckStatus = 'verified' | 'unsupported' | 'unconfirmed'
 export type CustomModelCapabilityValidation = {
@@ -13,7 +16,7 @@ export type CustomModelCapabilityValidation = {
   defaultReasoningEffort: ModelReasoningEffort
   visionEnabled: boolean
   reasoningParameterMode: 'native' | 'omit'
-  outputTokenParameter: 'max_tokens' | 'max_completion_tokens'
+  outputTokenParameter: 'max_tokens' | 'max_completion_tokens' | null
   thinkingEnabled: boolean
   capabilityValidation: {
     version: 1
@@ -23,9 +26,11 @@ export type CustomModelCapabilityValidation = {
     vision: CheckStatus
     tools: CheckStatus
     requests: number
+    protocol?: 'responses'
   }
 }
 type JsonObject = Record<string, unknown>
+type ValidationProbe = { messages: JsonObject[]; reasoning_effort?: ModelReasoningEffort; tools?: OpenAIToolDefinition[] }
 const object = (value: unknown): JsonObject => value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {}
 const invalidResponse = () => new DataAccessError(502, 'CUSTOM_MODEL_INVALID_RESPONSE', '模型未返回可核验的测试响应，请检查兼容接口和模型名称。')
 
@@ -43,6 +48,35 @@ function messageOf(payload: JsonObject): { message: JsonObject; finish: unknown 
   return { message: object(choice.message), finish: choice.finish_reason }
 }
 
+/** Convert only native, completed evidence. Truncated reasoning may prove
+ * parameter admission when measured, but never a completed vision/tool reply. */
+function responsesProbeEvidence(payload: JsonObject): JsonObject {
+  const completed = payload.status === 'completed'
+  const truncated = payload.status === 'incomplete' && object(payload.incomplete_details).reason === 'max_output_tokens'
+  if ((!completed && !truncated) || !Array.isArray(payload.output)) throw invalidResponse()
+  const text: string[] = [], tools: Array<{ function: { name: string; arguments: string } }> = []
+  if (completed) for (const raw of payload.output) {
+    const item = object(raw)
+    if (item.type === 'function_call') {
+      if ((item.status !== undefined && item.status !== 'completed') || typeof item.call_id !== 'string' || !item.call_id.trim()
+        || typeof item.name !== 'string' || typeof item.arguments !== 'string') throw invalidResponse()
+      tools.push({ function: { name: item.name, arguments: item.arguments } })
+      continue
+    }
+    if (item.status !== undefined && item.status !== 'completed') continue
+    if (item.type === 'message' && item.role === 'assistant' && Array.isArray(item.content)) {
+      for (const rawPart of item.content) {
+        const part = object(rawPart)
+        if (part.type === 'output_text' && typeof part.text === 'string') text.push(part.text)
+      }
+    }
+  }
+  try {
+    return { choices: [{ message: { content: text.join(''), tool_calls: tools }, finish_reason: truncated ? 'length' : 'stop' }],
+      usage: responsesUsageToChat(payload.usage) }
+  } catch { throw invalidResponse() }
+}
+
 /** At most 7 tiny synthetic requests. No manuscript, usage billing or external
  * tools are involved; these calls use only the supplied account/endpoint/model.
  * "parameter_accepted" means the endpoint accepted the tested setting, not a
@@ -52,18 +86,31 @@ export async function validateCustomModelCapabilities(input: {
   modelName: string
   baseUrl: string
   apiKey: string
+  toolCallingProtocol?: 'chat' | 'responses' | null
   signal?: AbortSignal
   userId?: string
 }): Promise<CustomModelCapabilityValidation> {
-  let endpoint: URL
-  try {
-    const base = isLocalModelProvider(input.provider) ? new URL(input.baseUrl) : parsePublicHttpUrl(input.baseUrl)
-    if (base.search || !input.modelName.trim() || !input.apiKey.trim() || /[\r\n]/.test(input.apiKey)) throw new Error('invalid')
-    base.pathname = `${base.pathname.replace(/\/+$/, '')}/chat/completions`
-    endpoint = base
-  } catch { throw new DataAccessError(400, 'CUSTOM_MODEL_URL_INVALID', '请填写有效的公网 HTTPS 模型接口地址、模型名称和 API Key。') }
-  const total = new AbortController()
   const local = isLocalModelProvider(input.provider)
+  if (local && input.toolCallingProtocol === 'responses') {
+    throw new DataAccessError(400, 'LOCAL_MODEL_RESPONSES_UNSUPPORTED', '本地模型连接器目前仅支持 Chat Completions 工具协议。')
+  }
+  let endpoint: URL
+  let responsesEndpoint: string | null
+  try {
+    const base = local ? new URL(input.baseUrl) : parsePublicHttpUrl(input.baseUrl)
+    if (base.search || !input.modelName.trim() || !input.apiKey.trim() || /[\r\n]/.test(input.apiKey)) throw new Error('invalid')
+    responsesEndpoint = local ? null : resolveResponsesEndpoint({ model: input.modelName, baseUrl: input.baseUrl,
+      reasoningEffort: 'high', toolCallingProtocol: input.toolCallingProtocol })
+    if (input.toolCallingProtocol === 'responses' && !responsesEndpoint) throw new Error('invalid')
+    if (responsesEndpoint) endpoint = parsePublicHttpUrl(responsesEndpoint)
+    else {
+      base.pathname = `${base.pathname.replace(/\/+$/, '')}/chat/completions`
+      endpoint = base
+    }
+  } catch { throw new DataAccessError(400, 'CUSTOM_MODEL_URL_INVALID', '请填写有效的公网 HTTPS 模型接口地址、模型名称和 API Key。') }
+  const useResponses = responsesEndpoint !== null
+  const reasoningField = useResponses ? /\breasoning(?:\.effort)?\b/i : /reasoning[_ -]?effort/i
+  const total = new AbortController()
   const totalTimer = setTimeout(() => total.abort(), local ? 600_000 : 50_000)
   const signal = input.signal ? AbortSignal.any([input.signal, total.signal]) : total.signal
   const dispatcher = new Agent({ connections: 1, pipelining: 1, maxHeaderSize: 16384, allowH2: false,
@@ -73,11 +120,11 @@ export async function validateCustomModelCapabilities(input: {
   let outputParameterConfirmed = false
   // An explicitly chosen protocol is a candidate to test, not inferred model
   // capability. The persisted flag reproduces the actual successful wire shape.
-  let thinkingEnabled = input.provider.trim().toLowerCase() === 'deepseek'
+  let thinkingEnabled = !useResponses && input.provider.trim().toLowerCase() === 'deepseek'
   const cancellation = () => input.signal?.aborted
     ? new DataAccessError(409, 'CUSTOM_MODEL_VALIDATION_CANCELLED', '模型验证已取消，未保存能力配置。')
     : new DataAccessError(504, 'CUSTOM_MODEL_VALIDATION_TIMEOUT', '模型验证超时，请稍后重试；未将超时判为能力不支持。')
-  const rawProbe = async (body: JsonObject): Promise<{ status: number; payload: JsonObject }> => {
+  const rawProbe = async (body: ValidationProbe): Promise<{ status: number; payload: JsonObject }> => {
     if (signal.aborted) throw cancellation()
     if (requests >= 7) throw new DataAccessError(409, 'CUSTOM_MODEL_VALIDATION_LIMIT', '本次模型验证已达到请求上限，请稍后重试。')
     requests++
@@ -86,8 +133,16 @@ export async function validateCustomModelCapabilities(input: {
     const requestSignal = AbortSignal.any([signal, attempt.signal])
     let response: Awaited<ReturnType<typeof fetch>> | Response | undefined
     try {
-      const bodyText = JSON.stringify({ model: input.modelName, stream: false, [outputTokenParameter]: 256,
-        ...(thinkingEnabled ? { thinking: { type: 'enabled' } } : {}), ...body })
+      const request: JsonObject = useResponses
+        ? buildResponsesToolRequest({ model: input.modelName, messages: body.messages, tools: body.tools ?? [],
+          reasoningEffort: body.reasoning_effort, maxOutputTokens: 256 })
+        : { model: input.modelName, stream: false, [outputTokenParameter]: 256,
+          ...(thinkingEnabled ? { thinking: { type: 'enabled' } } : {}), ...body }
+      if (useResponses) {
+        delete request.include // Tiny non-stream validation never needs continuation items.
+        request.stream = false
+      }
+      const bodyText = JSON.stringify(request)
       response = local ? await localModelFetch({ userId: input.userId!, provider: input.provider, baseUrl: input.baseUrl,
         apiKey: input.apiKey, body: bodyText, signal: requestSignal, validation: true }) : await fetch(endpoint, { method: 'POST', dispatcher, redirect: 'manual', signal: requestSignal,
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${input.apiKey}` },
@@ -103,7 +158,7 @@ export async function validateCustomModelCapabilities(input: {
       if (!Object.keys(payload).length || (response.ok && payload.error)) throw invalidResponse()
       if (!response.ok && ![400, 422].includes(response.status)) throw new DataAccessError(400, 'CUSTOM_MODEL_REQUEST_REJECTED', '模型接口拒绝测试请求，请检查接口地址和模型名称。')
       if (response.ok) outputParameterConfirmed = true
-      return { status: response.status, payload }
+      return { status: response.status, payload: useResponses && response.ok ? responsesProbeEvidence(payload) : payload }
     } catch (error) {
       if (requestSignal.aborted) throw cancellation()
       if (error instanceof DataAccessError) throw error
@@ -113,11 +168,12 @@ export async function validateCustomModelCapabilities(input: {
       await response?.body?.cancel().catch(() => undefined)
     }
   }
-  const probe = async (body: JsonObject) => {
+  const probe = async (body: ValidationProbe) => {
     // Each protocol option can change at most once; every attempt, including
     // replacements, uses the same global seven-call/time limit.
     for (;;) {
       const result = await rawProbe(body)
+      if (useResponses) return result
       const message = object(result.payload.error).message
       if (!outputParameterConfirmed && thinkingEnabled && [400, 422].includes(result.status)
         && explicitlyUnsupported(result.payload, /\bthinking\b/i)) {
@@ -161,7 +217,7 @@ export async function validateCustomModelCapabilities(input: {
         reasoningEfforts.push(effort)
         textVerified ||= nonceVerified
       }
-      else if (![400, 422].includes(result.status) || !explicitlyUnsupported(result.payload, /reasoning[_ -]?effort/i)) throw invalidResponse()
+      else if (![400, 422].includes(result.status) || !explicitlyUnsupported(result.payload, reasoningField)) throw invalidResponse()
     }
     // Local reviewers need a tested explicit non-thinking setting too. Keep
     // public-provider protocol/evidence unchanged and the same seven-call cap.
@@ -171,7 +227,7 @@ export async function validateCustomModelCapabilities(input: {
       const details = object(object(result.payload.usage).completion_tokens_details)
       if (result.status >= 200 && result.status < 300 && verifyText(result.payload)
         && !message.reasoning_content && !message.reasoning && !(typeof details.reasoning_tokens === 'number' && details.reasoning_tokens > 0)) reasoningEfforts.push('none')
-      else if (![400, 422].includes(result.status) || !explicitlyUnsupported(result.payload, /reasoning[_ -]?effort/i)) {
+      else if (![400, 422].includes(result.status) || !explicitlyUnsupported(result.payload, reasoningField)) {
         // An observed reasoning response cannot certify non-thinking; existing
         // accepted strengths remain usable, without granting reviewer proof.
       }
@@ -191,7 +247,7 @@ export async function validateCustomModelCapabilities(input: {
     const reasoning = reasoningParameterMode === 'native' ? { reasoning_effort: probeEffort } : {}
     let vision: CheckStatus = 'unconfirmed'
     let tools: CheckStatus = 'unconfirmed'
-    const optionalProbe = async (body: JsonObject, field: RegExp, verify: (payload: JsonObject) => boolean): Promise<CheckStatus> => {
+    const optionalProbe = async (body: ValidationProbe, field: RegExp, verify: (payload: JsonObject) => boolean): Promise<CheckStatus> => {
       if (input.signal?.aborted) throw cancellation()
       if (signal.aborted || requests >= 7) return 'unconfirmed'
       try {
@@ -229,9 +285,11 @@ export async function validateCustomModelCapabilities(input: {
       try { return object(JSON.parse(call.arguments)).token === token } catch { return false }
     })
     if (input.signal?.aborted) throw cancellation()
-    return { reasoningEfforts, defaultReasoningEffort, visionEnabled: vision === 'verified', reasoningParameterMode, outputTokenParameter, thinkingEnabled,
+    return { reasoningEfforts, defaultReasoningEffort, visionEnabled: vision === 'verified', reasoningParameterMode,
+      outputTokenParameter: useResponses ? null : outputTokenParameter, thinkingEnabled,
       capabilityValidation: { version: 1, checkedAt: new Date().toISOString(), text: 'verified',
-        reasoning: reasoningParameterMode === 'native' ? 'parameter_accepted' : 'parameter_unsupported', vision, tools, requests } }
+        reasoning: reasoningParameterMode === 'native' ? 'parameter_accepted' : 'parameter_unsupported', vision, tools, requests,
+        ...(useResponses ? { protocol: 'responses' as const } : {}) } }
   } finally {
     clearTimeout(totalTimer)
     await dispatcher.destroy().catch(() => undefined)

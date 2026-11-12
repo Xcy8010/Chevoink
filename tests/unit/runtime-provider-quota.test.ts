@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ attempt: vi.fn(), dispatch: vi.fn(), result: vi.fn(), usage: vi.fn(), goal: vi.fn() }))
+const mocks = vi.hoisted(() => ({ attempt: vi.fn(), dispatch: vi.fn(), result: vi.fn(), usage: vi.fn(), goal: vi.fn(), goalContext: vi.fn() }))
 vi.mock('../../api/lib/agent/runtime-common.js', () => ({
   runtimeJson: (value: unknown) => ({ value, hash: JSON.stringify(value) }),
   runtimeError: (code: string, message: string) => { throw Object.assign(new Error(message), { code }) },
@@ -15,9 +15,10 @@ vi.mock('../../api/lib/agent/runtime-auxiliary-model.js', () => ({ prepareAuxili
 vi.mock('../../api/lib/agent/runtime-lease.js', () => ({ withRunLease: vi.fn() }))
 vi.mock('../../api/lib/agent/runtime-reducer.js', () => ({ reduceExecutionReceipt: vi.fn() }))
 vi.mock('../../api/lib/agent/goal-budget.js', () => ({ observeGoalUsage: mocks.goal }))
-vi.mock('../../api/lib/agent/goal-fence.js', () => ({ readGoalExecution: vi.fn(async () => undefined) }))
+vi.mock('../../api/lib/agent/goal-fence.js', () => ({ readGoalExecution: mocks.goalContext }))
 
 import { beginDurableChat } from '../../api/lib/agent/runtime-provider.js'
+import { estimateChatMessagesTokens } from '../../api/lib/agent/context-budget.js'
 
 const input = { execution: { operationKey: 'operation', attemptKey: '1', lease: { userId: 'owner', runId: 'run', taskRootId: 'task', epoch: 1, leaseToken: 'fixture' } },
   userId: 'owner', agentRunId: 'run', action: 'fixture', provider: 'fixture', model: 'fixture', request: { body: {} },
@@ -27,9 +28,24 @@ beforeEach(() => {
   vi.clearAllMocks()
   mocks.attempt.mockResolvedValue({ id: 'attempt', requestHash: 'request', status: 'prepared' })
   mocks.dispatch.mockResolvedValue({ dispatchGranted: true })
+  mocks.goalContext.mockResolvedValue(undefined)
 })
 
 describe('durable supplier quota accounting', () => {
+  it.each([
+    { endpoint: 'https://yunshu.chevolink.com/v1/responses', body: { model: 'gpt-6.1-terra', input: [], stream: true, max_output_tokens: 1234 }, reserve: 1234 },
+    { endpoint: 'https://another.example/api/responses', body: { model: 'alias', input: [], stream: true, max_output_tokens: 1234 }, reserve: 1234 },
+    { endpoint: 'https://another.example/v1/responses', body: { model: 'gpt-6.1-terra', max_output_tokens: 1234 }, reserve: 32768 },
+    { endpoint: 'https://yunshu.chevolink.com/v1/responses', body: { model: 'gpt-6.1-terra', max_output_tokens: -2 }, reserve: 32768 },
+    { endpoint: 'https://yunshu.chevolink.com/v1/chat/completions', body: { model: 'gpt-6.1-terra', max_tokens: 4321 }, reserve: 4321 },
+  ])('reserves the verified output limit for $endpoint ($reserve tokens)', async ({ endpoint, body, reserve }) => {
+    const request = { endpoint, body }
+    const inputTokens = estimateChatMessagesTokens([{ role: 'user', content: JSON.stringify(request) }])
+    mocks.goalContext.mockResolvedValueOnce({ goalId: 'goal' })
+    await beginDurableChat({ ...input, request })
+    expect(mocks.dispatch).toHaveBeenCalledExactlyOnceWith(input.execution.lease, 'attempt', inputTokens + reserve)
+  })
+
   it('retains reported counts and failed quota identity without inventing settlement', async () => {
     const provider = await beginDurableChat(input)
     const usage = { source: 'reported' as const, promptTokens: 12, completionTokens: 3, cacheHitTokens: null, cacheMissTokens: null }

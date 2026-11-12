@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { setTimeout as contentionDelay } from 'node:timers/promises'
 import { z } from 'zod'
 import { NEXT_PROMPT_MAX_LENGTH } from './next-prompt.js'
+import { responsesContinuationSchema } from '../ai-responses-continuation.js'
 import { Prisma } from '@prisma/client'
 import { DataAccessError, prisma } from '../prisma.js'
 import { parentContentionGate, type ParentContentionScope } from './runtime-parent-contention.js'
@@ -170,6 +171,7 @@ export async function lockRunRootForLease(tx: RuntimeTx, userId: string, runId: 
 const count = z.number().int().nonnegative().max(2147483647)
 export const durableChatResultSchema = z.object({
   content: z.string(), reasoning: z.string(), finishReason: z.enum(['stop', 'tool_calls', 'length']),
+  responsesContinuation: responsesContinuationSchema.optional(),
   nextPrompt: z.string().min(1).max(NEXT_PROMPT_MAX_LENGTH).optional(),
   toolCalls: z.array(z.object({ id: z.string(), name: z.string(), arguments: z.string(), incomplete: z.boolean().optional() })),
   usage: z.object({ promptTokens: count, completionTokens: count, totalTokens: count, promptCacheHitTokens: count.nullable(), promptCacheMissTokens: count.nullable() }),

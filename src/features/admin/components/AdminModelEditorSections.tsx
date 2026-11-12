@@ -83,6 +83,15 @@ export function AdminModelEditorSections({ editing, form, setForm, section, fiel
         </div>
         <p className="mt-3 text-sm text-[var(--text-secondary)]">较高质量通常增加耗时和费用，具体取决于上游。</p>
       </fieldset> : null}
+      {editingTextModel ? <label className="mt-5 block max-w-md text-sm">工具调用协议
+        <select aria-label="工具调用协议" value={form.toolCallingProtocol ?? ''}
+          onChange={event => setForm(value => ({ ...value, toolCallingProtocol: event.target.value as typeof value.toolCallingProtocol }))}
+          className="mt-1.5 min-h-11 w-full rounded-full border border-[var(--border-strong)] bg-[var(--surface-default)] px-4">
+          <option value="">自动</option>
+          <option value="chat">Chat Completions</option>
+          <option value="responses">Responses</option>
+        </select>
+      </label> : null}
       {editingTextModel ? <div className="mt-5 grid gap-3 sm:grid-cols-3">
         <label className="text-sm">推理参数协议<select aria-label="推理参数协议" value={form.reasoningParameterMode} onChange={event => setForm(value => ({ ...value, reasoningParameterMode: event.target.value as typeof value.reasoningParameterMode }))} className="mt-1.5 min-h-11 w-full rounded-full border border-[var(--border-strong)] bg-[var(--surface-default)] px-4"><option value="">沿用兼容规则</option><option value="native">reasoning_effort</option><option value="omit">省略推理参数</option></select></label>
         <label className="text-sm">输出上限参数<select aria-label="输出上限参数" value={form.outputTokenParameter} onChange={event => setForm(value => ({ ...value, outputTokenParameter: event.target.value as typeof value.outputTokenParameter }))} className="mt-1.5 min-h-11 w-full rounded-full border border-[var(--border-strong)] bg-[var(--surface-default)] px-4"><option value="">沿用兼容规则</option><option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option></select></label>

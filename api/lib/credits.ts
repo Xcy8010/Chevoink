@@ -18,6 +18,7 @@ import type {
   CreditUsagePayload,
   TaskCreditUsagePayload,
   ModelReasoningEffort,
+  ToolCallingProtocol,
   ReferralPayload,
 } from '../../shared/contracts/index.js'
 import { lockCreditPolicy, creditTransaction } from './credit-policy.js'
@@ -77,6 +78,7 @@ export type ModelCapabilities = {
   maxOutputTokens?: number
   outputTokenParameter?: 'max_tokens' | 'max_completion_tokens'
   reasoningParameterMode?: 'native' | 'omit'
+  toolCallingProtocol?: ToolCallingProtocol
   reasoningEfforts: ModelReasoningEffort[]
   defaultReasoningEffort: ModelReasoningEffort
   visionEnabled: boolean
@@ -105,6 +107,8 @@ export function parseModelCapabilities(metadata: Prisma.JsonValue | null | undef
       ? { outputTokenParameter: record.outputTokenParameter } : {}),
     ...(record.reasoningParameterMode === 'native' || record.reasoningParameterMode === 'omit'
       ? { reasoningParameterMode: record.reasoningParameterMode } : {}),
+    ...(record.toolCallingProtocol === 'chat' || record.toolCallingProtocol === 'responses'
+      ? { toolCallingProtocol: record.toolCallingProtocol } : {}),
     reasoningEfforts,
     defaultReasoningEffort: reasoningEfforts.includes(configuredDefault) ? configuredDefault : reasoningEfforts[0] ?? 'high',
     visionEnabled: record.visionEnabled === true,
@@ -698,6 +702,7 @@ export async function getModelTierRuntime(tier: CreditModelTier = 'speed', userI
   outputTokenParameter?: 'max_tokens' | 'max_completion_tokens'
   reasoningParameterMode?: 'native' | 'omit'
   tier: CreditModelTier
+  toolCallingProtocol?: ToolCallingProtocol
   tokenPrice?: TokenPrice
   freePromotion?: import('../../shared/model-promotion.js').ModelPromotion | null
   multiplierBps: number

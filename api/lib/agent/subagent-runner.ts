@@ -204,6 +204,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
         provider: modelRuntime.provider,
         reasoningEffort: modelRuntime.reasoningEffort,
         reasoningParameterMode: modelRuntime.reasoningParameterMode,
+        toolCallingProtocol: modelRuntime.toolCallingProtocol,
         thinkingEnabled: modelRuntime.thinkingEnabled,
         outputTokenParameter: modelRuntime.outputTokenParameter,
         temperature: 0.6,
@@ -223,7 +224,7 @@ export async function runSubagentInline(params: SubagentInlineParams): Promise<S
       })
       addUsage(usage, result.usage)
 
-      const recoveredToolCalls = result.toolCalls.length === 0
+      const recoveredToolCalls = result.finishReason !== 'length' && result.toolCalls.length === 0
         ? recoverAgentProtocolToolCalls(result.content).map((call, index) => ({
             id: `subagent_${params.subtaskRunId}_${turns}_${index}`,
             name: call.name,

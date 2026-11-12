@@ -1,7 +1,8 @@
 import { publicImagePrice } from './billing/public-model-price.js'
 import { resolveSystemModelConfig } from './model-lifecycle.js'
 import { decryptSecret } from './secret-box.js'
-import { randomUUID } from 'node:crypto'
+import { createHmac, randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { scheduledHistoryPrefix, scheduledToolHistoryIds } from './agent/tool-turn-history.js'
 import { reviewResponseFormatPayload, type ReviewResponseFormat } from './ai-response-format.js'
 import type { Prisma } from '@prisma/client'
@@ -11,6 +12,9 @@ import { assertGoalProviderAdmission, reserveGoalUsage, syncGoalLegacyUsage } fr
 import { beginTextRequest, recordTextRequestFailure, type TextRequestRecord } from './text-request-trace.js'
 import { isKnownTextRequestBilling, isKnownZeroTextRequestBilling } from './agent/text-request-billing.js'
 import { SseDataDecoder, readWithIdleTimeout } from './ai-sse.js'
+import { buildResponsesToolRequest, createResponsesToolFrameAdapter, responsesUsageToChat } from './ai-responses-tools.js'
+import { resolveResponsesEndpoint } from './ai-responses-route.js'
+import type { ResponsesContinuation } from './ai-responses-continuation.js'
 import { createNextPromptStream, splitNextPrompt } from './agent/next-prompt.js'
 import { beginDurableChat, type DurableChatExecution } from './agent/runtime-provider.js'
 import { validateModelCursor } from './agent/runtime-model-cursor.js'
@@ -417,6 +421,7 @@ const providerRequestFields = new Set([
   'model', 'messages', 'tools', 'tool_choice', 'parallel_tool_calls', 'reasoning_effort', 'thinking',
   'stream', 'stream_options', 'max_tokens', 'max_completion_tokens', 'max_output_tokens', 'response_format',
   'temperature', 'top_p', 'logprobs', 'top_logprobs', 'frequency_penalty', 'presence_penalty', 'stop', 'seed',
+  'input', 'reasoning', 'store',
 ])
 
 function redactProviderErrorParam(param: unknown): string | null {
@@ -424,7 +429,7 @@ function redactProviderErrorParam(param: unknown): string | null {
   // Retain known wire fields and structural indices, never provider-supplied
   // tool property names, message contents, or arbitrary error text.
   const candidate = param.slice(0, 160)
-  const path = candidate.match(/^(tools(?:\[\d{1,4}\]|\.\d{1,4})\.function(?:\.(?:name|parameters|strict))?|messages(?:\[\d{1,4}\]|\.\d{1,4})\.(?:role|content|tool_calls|tool_call_id)|stream_options\.include_usage)(?=$|\.|\[)/)?.[1]
+  const path = candidate.match(/^(tools(?:\[\d{1,4}\]|\.\d{1,4})(?:\.function(?:\.(?:name|parameters|strict))?|\.(?:name|parameters|strict))|messages(?:\[\d{1,4}\]|\.\d{1,4})\.(?:role|content|tool_calls|tool_call_id)|stream_options\.include_usage|reasoning\.effort)(?=$|\.|\[)/)?.[1]
   if (path) return path
   const field = candidate.match(/^([a-z_]+)(?=$|\.|\[)/)?.[1]
   return field && providerRequestFields.has(field) ? field : null
@@ -441,7 +446,7 @@ async function readProviderHttpRejection(
     return payload
   } finally {
     const upstream = URL.parse(response.url)
-    const requestId = upstream?.origin === 'https://yunshu.chevolink.com' && upstream.pathname === '/v1/chat/completions'
+    const requestId = upstream?.origin === 'https://yunshu.chevolink.com' && ['/v1/chat/completions', '/v1/responses'].includes(upstream.pathname)
       ? response.headers.get('X-Oneapi-Request-Id')
       : null
     console.warn('[ai-provider-http-rejection]', JSON.stringify({
@@ -464,7 +469,7 @@ export type ChatTextContentPart = { type: 'text'; text: string }
 export type ChatMessage =
   | { role: 'system'; content: string }
   | { role: 'user'; content: string | Array<ChatTextContentPart | ChatImageContentPart> }
-  | { role: 'assistant'; content: string | null; reasoning?: string; toolCalls?: ToolCallRequest[] }
+  | { role: 'assistant'; content: string | null; reasoning?: string; toolCalls?: ToolCallRequest[]; responsesContinuation?: ResponsesContinuation }
   | { role: 'tool'; toolCallId: string; content: string }
 
 export type ToolCallRequest = {
@@ -548,6 +553,7 @@ export type ChatCompletionResult = {
   content: string
   nextPrompt?: string
   reasoning: string
+  responsesContinuation?: ResponsesContinuation
   toolCalls: ToolCallRequest[]
   finishReason: 'stop' | 'tool_calls' | 'length'
   usage: ChatTokenUsage
@@ -769,6 +775,8 @@ export type ChatWithToolsParams = {
   durableExecution?: DurableChatExecution
   /** Internal, hash-verified prepared auxiliary request. Never sourced from tool arguments. */
   preparedAuxiliaryRequest?: { endpoint: string; body: Record<string, unknown> }
+  /** Exact durable main request prepared before dispatch and recovered by cursor. */
+  preparedMainRequest?: { endpoint: string; body: Record<string, unknown> }
   messages: ChatMessage[]
   tools: OpenAIToolDefinition[]
   model?: string
@@ -782,6 +790,7 @@ export type ChatWithToolsParams = {
   outputTokenParameter?: 'max_tokens' | 'max_completion_tokens'
   reasoningParameterMode?: 'native' | 'omit'
   temperature?: number
+  toolCallingProtocol?: import('../../shared/contracts/index.js').ToolCallingProtocol
   onChunk?: (chunk: ChatStreamChunk) => void
   /** Internal output side channel for an opted-in author turn. */
   nextPromptMarker?: string
@@ -802,7 +811,7 @@ export type ChatWithToolsParams = {
   }
 }
 
-function toProviderMessages(messages: ChatMessage[]) {
+function toProviderMessages(messages: ChatMessage[], responsesBinding?: string) {
   const output: Array<Record<string, unknown>> = []
   const scheduledIds = messages.flatMap(message => [...scheduledToolHistoryIds(message)])
   const scheduledReceipt = (result: Extract<ChatMessage, { role: 'tool' }>) => {
@@ -846,6 +855,9 @@ function toProviderMessages(messages: ChatMessage[]) {
           type: 'function',
           function: { name: call.name, arguments: call.arguments },
         }))
+        if (valid.length === calls.length && responsesBinding && message.responsesContinuation?.binding === responsesBinding) {
+          payload.responses_reasoning = message.responsesContinuation.items
+        }
         if (typeof message.reasoning === 'string') payload.reasoning_content = message.reasoning
         output.push(payload)
         const ids = new Set(valid.map(call => call.id))
@@ -896,6 +908,7 @@ function snapshotDurableChatParams(params: ChatWithToolsParams): ChatWithToolsPa
   return { ...params, messages: JSON.parse(JSON.stringify(params.messages)), tools: JSON.parse(JSON.stringify(params.tools)),
     ...(params.reasoningEfforts ? { reasoningEfforts: [...params.reasoningEfforts] } : {}),
     ...(params.preparedAuxiliaryRequest ? { preparedAuxiliaryRequest: structuredClone(params.preparedAuxiliaryRequest) } : {}),
+    ...(params.preparedMainRequest ? { preparedMainRequest: structuredClone(params.preparedMainRequest) } : {}),
     durableExecution: { ...params.durableExecution, lease: { ...params.durableExecution.lease },
       ...(params.durableExecution.price ? { price: structuredClone(params.durableExecution.price) } : {}),
       ...(params.durableExecution.cursor ? { cursor: { ...params.durableExecution.cursor } } : {}) } }
@@ -926,14 +939,49 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   const startedAt = Date.now()
   const recoverySystem = JSON.stringify(params.messages), recoveryContent = JSON.stringify(params.tools)
   const model = params.model ?? env.aiTextModel
-  const endpoint = `${(params.providerBaseUrl ?? env.aiTextBaseUrl).replace(/\/$/, '')}/chat/completions`
-
+  const baseUrl = params.providerBaseUrl ?? env.aiTextBaseUrl
+  const chatEndpoint = `${baseUrl.replace(/\/$/, '')}/chat/completions`
   const reasoningEffort = params.reasoningEffort ?? env.aiReasoningEffort
-  const frozenRequest = params.preparedAuxiliaryRequest
-  if (frozenRequest && (!params.durableExecution?.auxiliaryStep || params.durableExecution.auxiliaryStep !== params.usageLog.action
-    || params.tools.length || frozenRequest.endpoint !== endpoint || frozenRequest.body.model !== model
-    || frozenRequest.body.stream !== true || !Array.isArray(frozenRequest.body.messages) || frozenRequest.body.tools !== undefined)) {
+  const responsesEndpoint = isLocalModelProvider(params.provider ?? '') ? null : resolveResponsesEndpoint({
+    model, baseUrl, reasoningEffort, reasoningParameterMode: params.reasoningParameterMode,
+    toolCallingProtocol: params.toolCallingProtocol,
+  })
+  const frozenAuxiliary = params.preparedAuxiliaryRequest
+  const frozenMain = params.preparedMainRequest
+  if (frozenAuxiliary && (!params.durableExecution?.auxiliaryStep || params.durableExecution.auxiliaryStep !== params.usageLog.action
+    || params.tools.length || frozenAuxiliary.endpoint !== chatEndpoint || frozenAuxiliary.body.model !== model
+    || frozenAuxiliary.body.stream !== true || !Array.isArray(frozenAuxiliary.body.messages) || frozenAuxiliary.body.tools !== undefined)) {
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原辅助请求与冻结路由不匹配。')
+  }
+  if (frozenMain && (!params.durableExecution?.cursor || frozenAuxiliary || params.durableExecution.auxiliaryStep
+    || (frozenMain.endpoint !== chatEndpoint && frozenMain.endpoint !== responsesEndpoint)
+    || frozenMain.body.model !== model || frozenMain.body.stream !== true
+    || !Array.isArray(frozenMain.endpoint === responsesEndpoint ? frozenMain.body.input : frozenMain.body.messages))) {
+    throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原主模型请求与冻结路由不匹配。')
+  }
+  const frozenRequest = frozenMain ?? frozenAuxiliary
+  const responsesBinding = responsesEndpoint ? createHmac('sha256', params.providerApiKey ?? env.aiTextApiKey ?? '')
+    .update(JSON.stringify(['responses-tool-continuation', params.usageLog.userId,
+      params.durableExecution?.lease.taskRootId ?? params.usageLog.agentRunId ?? null,
+      params.usageLog.targetId ?? null, params.provider ?? env.aiTextProvider, responsesEndpoint, model])).digest('hex') : undefined
+  const providerMessages = frozenRequest ? null : toProviderMessages(params.messages, responsesBinding)
+  const hasToolWork = params.tools.length > 0 || providerMessages?.some(message => message.role === 'tool')
+  if (params.toolCallingProtocol === 'responses' && !responsesEndpoint && hasToolWork) {
+    throw new DataAccessError(400, 'AI_TOOL_PROTOCOL_UNAVAILABLE', 'Responses 工具调用需要支持该接口的 HTTPS 模型地址。')
+  }
+  const useResponses = responsesEndpoint !== null && (frozenRequest
+    ? frozenRequest.endpoint === responsesEndpoint
+    : hasToolWork)
+  const endpoint = useResponses ? responsesEndpoint : chatEndpoint
+  if (useResponses && frozenMain) {
+    const opaqueItems = (frozenMain.body.input as Array<{ type?: unknown } | null>).filter(item => item?.type === 'reasoning')
+    if (opaqueItems.length) {
+      const currentItems = toProviderMessages(params.messages, responsesBinding).flatMap(message =>
+        Array.isArray(message.responses_reasoning) ? message.responses_reasoning : [])
+      if (!isDeepStrictEqual(opaqueItems, currentItems)) {
+        throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原模型的推理上下文与当前凭据不匹配，尚未派发请求。')
+      }
+    }
   }
   const auxiliaryReview = params.tools.length === 0 && params.durableExecution?.auxiliaryStep === params.usageLog.action
     && ['quality_critic', 'quality_format_recovery', 'quality_evidence_correction', 'quality_repair', 'quality_repair_retry',
@@ -942,7 +990,13 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   const reviewTransport = auxiliaryReview || params.tools.length === 0 && params.boundedReview === true
   const reviewReasoning = isolatedReview ? buildReviewReasoningPayload({ ...params, model,
     providerBaseUrl: params.providerBaseUrl ?? env.aiTextBaseUrl, reasoningEffort }) : undefined
-  const body: Record<string, unknown> = frozenRequest ? structuredClone(frozenRequest.body) : {
+  const body: Record<string, unknown> = frozenRequest ? structuredClone(frozenRequest.body)
+    : useResponses ? buildResponsesToolRequest({
+      model, messages: providerMessages!, tools: params.tools,
+      reasoningEffort: params.reasoningParameterMode === 'omit' ? undefined : reasoningEffort,
+      maxOutputTokens: params.maxOutputTokens ?? env.aiTextMaxOutputTokens,
+      toolChoice: params.toolChoice,
+    }) : {
     model,
     // Sampling is optional and not universally supported with reasoning. A
     // missing protocol declaration must not force a sampling parameter onto
@@ -953,11 +1007,11 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     [params.outputTokenParameter ?? 'max_tokens']: params.maxOutputTokens ?? env.aiTextMaxOutputTokens,
     stream: true,
     stream_options: { include_usage: true },
-    messages: toProviderMessages(params.messages),
+    messages: providerMessages,
     ...(params.tools.length === 0 ? reviewResponseFormatPayload(params.responseFormat, params.providerBaseUrl ?? env.aiTextBaseUrl, model) : {}),
   }
 
-  if (!frozenRequest) Object.assign(body, reviewReasoning ?? buildProviderReasoningPayload({
+  if (!frozenRequest && !useResponses) Object.assign(body, reviewReasoning ?? buildProviderReasoningPayload({
     boundedReview: params.boundedReview,
     thinkingEnabled: params.thinkingEnabled,
     reasoningParameterMode: params.reasoningParameterMode,
@@ -967,7 +1021,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     reasoningEffort,
   }))
 
-  if (params.tools.length > 0) {
+  if (!frozenRequest && !useResponses && params.tools.length > 0) {
     body.tools = params.tools
     Object.assign(body, buildProviderToolChoice({
       provider: params.provider ?? env.aiTextProvider,
@@ -981,7 +1035,11 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   if (params.durableExecution?.cursor) await validateModelCursor(params.durableExecution.lease, params.durableExecution.cursor, {
     operationKey: params.durableExecution.operationKey, parentOperationId: params.durableExecution.parentOperationId,
     messages: params.messages, tools: params.tools, tier,
-    route: { provider: params.provider ?? env.aiTextProvider, model, endpoint, reasoningEffort, ...(params.weightedRoute ? { weightedRoute: params.weightedRoute } : {}) },
+    // Keep the configured route digest stable for old tasks. The operation
+    // and provider attempt below separately bind the exact wire URL and body.
+    route: { provider: params.provider ?? env.aiTextProvider, model, endpoint: chatEndpoint, reasoningEffort,
+      ...(params.toolCallingProtocol ? { toolCallingProtocol: params.toolCallingProtocol } : {}),
+      ...(params.weightedRoute ? { weightedRoute: params.weightedRoute } : {}) },
   })
   if (params.durableExecution?.price && params.durableExecution.price.modelTier !== tier) throw new DataAccessError(409, 'RUNTIME_PRICE_INVALID', '冻结价目与模型档位不一致。')
   const durable = params.durableExecution ? await beginDurableChat({
@@ -1022,6 +1080,7 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     providerDispatched = true
     const requestInit = {
       method: 'POST',
+      ...(useResponses ? { redirect: 'error' as const } : {}),
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${params.providerApiKey ?? env.aiTextApiKey}`,
@@ -1068,17 +1127,22 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
       throw error
     }
     const quotaRejected = isProviderQuotaError(payload.error ?? (!response.ok ? payload : undefined))
-    const reportedPrompt = payload.usage?.prompt_tokens
-    const reportedCompletion = payload.usage?.completion_tokens
-    for (const count of [reportedPrompt, reportedCompletion]) {
-      if (count != null && (!Number.isSafeInteger(count) || count < 0 || count > 2147483647)) {
-        await durable?.rejected(response.status, { quotaExceeded: quotaRejected, usage: {
-          source: 'unknown', promptTokens: null, completionTokens: null, cacheHitTokens: null, cacheMissTokens: null,
-        } })
-        throw new DataAccessError(502, 'AI_USAGE_INVALID', '供应商返回了无效用量，不能据此结算。')
-      }
+    let observedUsage = payload.usage
+    let invalidResponsesUsage = false
+    if (useResponses) {
+      try { observedUsage = responsesUsageToChat(payload.usage) ?? observedUsage }
+      catch { invalidResponsesUsage = true }
     }
-    const cache = extractCacheTokens(payload.usage ?? {})
+    const reportedPrompt = observedUsage?.prompt_tokens
+    const reportedCompletion = observedUsage?.completion_tokens
+    if (invalidResponsesUsage || [reportedPrompt, reportedCompletion].some(count =>
+      count != null && (!Number.isSafeInteger(count) || count < 0 || count > 2147483647))) {
+      await durable?.rejected(response.status, { quotaExceeded: quotaRejected, usage: {
+        source: 'unknown', promptTokens: null, completionTokens: null, cacheHitTokens: null, cacheMissTokens: null,
+      } })
+      throw new DataAccessError(502, 'AI_USAGE_INVALID', '供应商返回了无效用量，不能据此结算。')
+    }
+    const cache = extractCacheTokens(observedUsage ?? {})
     await durable?.rejected(response.status, { quotaExceeded: quotaRejected, ...((reportedPrompt != null || reportedCompletion != null || quotaRejected || payload.usage != null) ? { usage: {
       source: reportedPrompt != null && reportedCompletion != null ? 'reported' : 'unknown',
       promptTokens: reportedPrompt ?? null, completionTokens: reportedCompletion ?? null,
@@ -1263,14 +1327,19 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     }
   }
 
+  const responsesFrame = useResponses ? createResponsesToolFrameAdapter() : null
   const frames = new SseDataDecoder(data => {
-    if (data.trim() === '[DONE]') { streamFinished = true; return }
+    if (data.trim() === '[DONE]') {
+      if (!responsesFrame) streamFinished = true
+      return
+    }
     if (!data.trim()) return
     let parsed: Parameters<typeof handleDelta>[0]
     try { parsed = JSON.parse(data) } catch {
       throw new Error('模型流式事件损坏，未执行工具；请重试当前任务。')
     }
-    handleDelta(parsed)
+    const frame = responsesFrame ? responsesFrame(parsed) : parsed
+    if (frame) handleDelta(frame)
   })
   try {
     for (;;) {
@@ -1338,7 +1407,10 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   const delivery = params.nextPromptMarker
     ? splitNextPrompt(content, params.nextPromptMarker, finishReason === 'stop' && toolCalls.length === 0)
     : { content }
-  const result = { ...delivery, reasoning, toolCalls, finishReason, usage }
+  const reasoningItems = responsesFrame?.reasoningItems()
+  const result: ChatCompletionResult = { ...delivery, reasoning, toolCalls, finishReason, usage,
+    ...(finishReason === 'tool_calls' && responsesBinding && reasoningItems?.length
+      ? { responsesContinuation: { binding: responsesBinding, items: reasoningItems } } : {}) }
   if (durable) return durable.finish(result)
 
   await recordStreamUsage(true)

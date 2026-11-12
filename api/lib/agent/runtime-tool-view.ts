@@ -6,6 +6,7 @@ import { durableChatResultSchema, runtimeError, runtimeJson, type RuntimeTx } fr
 import { readExecutionFrame } from './runtime-state.js'
 import { toOpenAIParameters, toOpenAIToolPresentation } from './tool-schema.js'
 import { novelImportArguments } from './tools/import-arguments.js'
+import { isResponsesToolRequest } from '../ai-responses-route.js'
 
 export type NativeToolView = { type: 'function'; function: { name: string; strict?: boolean; description: string; parameters: Record<string, unknown> } }
 const simplified = new Set(['chapter_create', 'chapter_write', 'chapter_append', 'chapter_edit_range', 'continuity_validate', 'quality_analyze', 'chapter_bridge_commit', 'scene_task_build'])
@@ -122,13 +123,35 @@ export function hasRetiredNativeArguments(action: string, args: unknown): boolea
   return (retiredFields[action] ?? []).some(key => Object.prototype.hasOwnProperty.call(object(args), key))
 }
 
-const toolViews = z.array(z.object({ type: z.literal('function'), function: z.object({ name: z.string(), strict: z.boolean().optional(), description: z.string(), parameters: z.record(z.string(), z.unknown()) }).strict() }).strict())
+const functionDefinition = z.object({ name: z.string(), strict: z.boolean().optional(), description: z.string(),
+  parameters: z.record(z.string(), z.unknown()) }).strict()
+const toolViews = z.array(z.object({ type: z.literal('function'), function: functionDefinition }).strict())
+const responsesToolViews = z.array(functionDefinition.extend({ type: z.literal('function') }))
+const frozenModelRequest = z.object({ input: z.object({ request: z.object({
+  endpoint: z.string().optional(), body: z.record(z.string(), z.unknown()),
+}) }) })
 const successful = z.object({ outcome: z.literal('succeeded'), result: durableChatResultSchema }).strict()
 
-export function readFrozenModelToolViews(snapshot: unknown): NativeToolView[] {
-  const parsed = z.object({ input: z.object({ request: z.object({ body: z.record(z.string(), z.unknown()) }) }) }).safeParse(snapshot)
+function modelRequestSnapshot(snapshot: unknown) {
+  const parsed = frozenModelRequest.safeParse(snapshot)
   if (!parsed.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '原主模型请求快照缺少实际请求体。')
-  const tools = toolViews.safeParse(parsed.data.input.request.body.tools ?? [])
+  return parsed.data.input.request
+}
+
+export function readPreparedModelRequest(snapshot: unknown) {
+  const { endpoint, body } = modelRequestSnapshot(snapshot)
+  if (!endpoint) return runtimeError('RUNTIME_RECEIPT_INVALID', '原主模型请求快照缺少接口地址。')
+  return { endpoint, body }
+}
+
+export function readFrozenModelToolViews(snapshot: unknown): NativeToolView[] {
+  const { endpoint, body } = modelRequestSnapshot(snapshot)
+  if (isResponsesToolRequest(endpoint, body)) {
+    const tools = responsesToolViews.safeParse(body.tools ?? [])
+    if (!tools.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '原主模型工具视图损坏。')
+    return tools.data.map(({ type, ...definition }) => ({ type, function: definition }))
+  }
+  const tools = toolViews.safeParse(body.tools ?? [])
   if (!tools.success) return runtimeError('RUNTIME_RECEIPT_INVALID', '原主模型工具视图损坏。')
   return tools.data
 }
@@ -163,6 +186,7 @@ export async function readAssistantToolViews(tx: RuntimeTx, taskRootId: string, 
       || runtimeJson(event.payload).hash !== runtimeJson({ attemptId: attempt.id, status: 'succeeded', resultHash: attempt.resultHash }).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原助手模型结果缺少对应持久事件。')
     const result = parsed.data.result
     const projected = { role: 'assistant', content: result.content || null, reasoning: result.reasoning,
+      ...(result.responsesContinuation ? { responsesContinuation: result.responsesContinuation } : {}),
       ...(result.toolCalls.length ? { toolCalls: result.toolCalls } : {}) }
     const legacyProjected = { ...projected } as Record<string, unknown>
     if (result.reasoning === '') delete legacyProjected.reasoning
@@ -171,7 +195,7 @@ export async function readAssistantToolViews(tx: RuntimeTx, taskRootId: string, 
     const request = object(object(attempt.requestSnapshot).request)
     const originalRequest = object(object(operation.inputSnapshot).input).request
     if (originalRequest === undefined || originalRequest === null || runtimeJson(request).hash !== runtimeJson(originalRequest).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '原助手请求不属于对应模型操作。')
-    return toolViews.parse(object(request.body).tools ?? [])
+    return readFrozenModelToolViews(operation.inputSnapshot)
   }
   return runtimeError('RUNTIME_SOURCE_REQUIRED', '没有产生当前助手调用的模型请求。')
 }
