@@ -1,4 +1,4 @@
-import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   BookOpenText,
   Bot,
@@ -35,6 +35,7 @@ import type {
 } from '../../../../../shared/contracts/index.js'
 import { AgentMarkdownText } from './AgentMarkdownText'
 import { AgentProcessRegion } from './AgentProcessRegion'
+import { ActivityScrollArea } from './ActivityScrollArea'
 import { useStreamingTextState } from '../../components/use-streaming-text'
 import { useAgentStore } from '../agentStore'
 import { projectAgentAuthorParts, projectAgentAuthorText } from '../../../../../shared/agent-author-view.js'
@@ -130,6 +131,26 @@ function computeLineDiff(before: string, after: string): DiffLine[] | null {
   return lines
 }
 
+function ToolResultDetails({ open, id, authorActivity, children }: { open: boolean; id: string; authorActivity: boolean; children: ReactNode }) {
+  if (!authorActivity) return open ? <div id={id}>{children}</div> : null
+  return <AgentProcessRegion open={open} id={id}><ActivityScrollArea detail>{children}</ActivityScrollArea></AgentProcessRegion>
+}
+
+type ToolDetailCardProps<Kind extends AgentToolDisplayPayload['kind']> = {
+  display: Extract<AgentToolDisplayPayload, { kind: Kind }>
+  authorActivity: boolean
+}
+
+function ChapterDiffBody({ display }: { display: Extract<AgentToolDisplayPayload, { kind: 'chapterDiff' }> }) {
+  const diffLines = useMemo(() => computeLineDiff(display.before, display.after), [display.before, display.after])
+  if (!diffLines) return <pre className="whitespace-pre-wrap break-words font-sans text-xs leading-6 text-[var(--text-primary)]">{display.after}</pre>
+  return <pre className="whitespace-pre-wrap break-words font-sans text-xs leading-6">
+    {diffLines.map((line, index) => <span key={index} className={cn('block', {
+      same: 'text-[var(--text-secondary)]', add: 'bg-emerald-50 text-emerald-700', del: 'bg-rose-50 text-rose-600 line-through',
+    }[line.type])}>{line.text || ' '}</span>)}
+  </pre>
+}
+
 function DiffCard({
   display,
   onNavigateTarget,
@@ -140,10 +161,7 @@ function DiffCard({
   authorActivity?: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
-  const diffLines = useMemo(
-    () => (expanded ? computeLineDiff(display.before, display.after) : null),
-    [expanded, display.before, display.after],
-  )
+  const detailsId = useId()
 
   const addedChars = display.after.length - display.before.length
 
@@ -154,6 +172,8 @@ function DiffCard({
           type="button"
           onClick={() => setExpanded((value) => !value)}
           aria-label={expanded ? '收起章节变更' : authorActivity ? '查看修改' : '展开章节变更'}
+          aria-controls={detailsId}
+          aria-expanded={expanded}
           className="absolute inset-0 z-0"
         />
         {onNavigateTarget ? (
@@ -185,33 +205,11 @@ function DiffCard({
           </span>
         </span>
       </div>
-      {expanded ? (
-        <div className="max-h-72 overflow-y-auto border-t border-[var(--border-subtle)] py-2 pl-5">
-          {diffLines ? (
-            <pre className="whitespace-pre-wrap break-words font-sans text-xs leading-6">
-              {diffLines.map((line, index) =>
-                line.type === 'same' ? (
-                  <span key={index} className="block text-[var(--text-secondary)]">
-                    {line.text || ' '}
-                  </span>
-                ) : line.type === 'add' ? (
-                  <span key={index} className="block bg-emerald-50 text-emerald-700">
-                    {line.text || ' '}
-                  </span>
-                ) : (
-                  <span key={index} className="block bg-rose-50 text-rose-600 line-through">
-                    {line.text || ' '}
-                  </span>
-                ),
-              )}
-            </pre>
-          ) : (
-            <pre className="whitespace-pre-wrap break-words font-sans text-xs leading-6 text-[var(--text-primary)]">
-              {display.after}
-            </pre>
-          )}
+      <ToolResultDetails open={expanded} id={detailsId} authorActivity={authorActivity}>
+        <div className={cn('border-t border-[var(--border-subtle)] py-2 pl-5', !authorActivity && 'max-h-72 overflow-y-auto')}>
+          <ChapterDiffBody display={display} />
         </div>
-      ) : null}
+      </ToolResultDetails>
     </div>
   )
 }
@@ -265,11 +263,11 @@ function StoryCompilerCard({ display, authorActivity = false }: { display: Extra
           </span>
         ) : null}
       </button>
-      {expanded && display.items.length > 0 ? (
-        <ul id={detailsId} className="space-y-1 pb-1.5 pl-[22px]">
+      <ToolResultDetails open={expanded && display.items.length > 0} id={detailsId} authorActivity={authorActivity}>
+        <ul className="space-y-1 pb-1.5 pl-[22px]">
           {display.items.map((item, index) => <li key={`${index}-${item}`} className="break-words text-[11px] leading-5 text-[var(--text-secondary)]">{projectAgentAuthorText(item)}</li>)}
         </ul>
-      ) : null}
+      </ToolResultDetails>
     </div>
   )
 }
@@ -294,8 +292,8 @@ function QualityReportCard({ display, authorActivity = false }: { display: Extra
         <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-secondary)]">{authorActivity ? '查看复查报告' : `质量报告 · r${display.chapterRevision} · ${display.findings.length} 条证据`}</span>
         {badge ? <span className={cn('shrink-0 text-[11px]', status || warnings > 0 ? 'text-amber-500' : 'text-emerald-600')}>{badge}</span> : null}
       </button>
-      {expanded ? (
-        <div id={detailsId} className="pl-[22px]">
+      <ToolResultDetails open={expanded} id={detailsId} authorActivity={authorActivity}>
+        <div className="pl-[22px]">
           {display.findings.length === 0 ? <p className="text-[11px] text-[var(--text-secondary)]">没有发现可定位的问题。</p> : null}
           {display.findings.map((finding) => {
             return (
@@ -311,7 +309,7 @@ function QualityReportCard({ display, authorActivity = false }: { display: Extra
             )
           })}
         </div>
-      ) : null}
+      </ToolResultDetails>
     </div>
   )
 }
@@ -355,12 +353,9 @@ function CoverImagesCard({
 }
 
 /** 联网搜索结果卡片：折叠行 = 已检索网络「query」· n 个结果，展开为标题+来源域名列表 */
-function WebSearchCard({
-  display,
-}: {
-  display: Extract<AgentToolDisplayPayload, { kind: 'webSearch' }>
-}) {
+function WebSearchCard({ display, authorActivity }: ToolDetailCardProps<'webSearch'>) {
   const [expanded, setExpanded] = useState(false)
+  const detailsId = useId()
   const unavailable = display.provider === 'unavailable'
 
   return (
@@ -368,6 +363,8 @@ function WebSearchCard({
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
+        aria-controls={detailsId}
+        aria-expanded={expanded}
         className="group flex w-full items-center gap-1.5 py-1.5 text-left"
       >
         <Search className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
@@ -378,8 +375,8 @@ function WebSearchCard({
         </span>
         <span className="relative inline-flex h-4 w-4 shrink-0 items-center justify-center text-[var(--text-tertiary)]"><Search className={cn('h-3.5 w-3.5 transition-opacity', !expanded && 'group-hover:opacity-0')} /><ChevronDown className={cn('absolute h-3.5 w-3.5 transition-[opacity,transform]', expanded ? 'rotate-180 opacity-100' : 'opacity-0 group-hover:opacity-100')} /></span>
       </button>
-      {expanded && display.results.length > 0 ? (
-        <ul className="max-h-72 overflow-y-auto border-t border-[var(--border-subtle)] py-1 pl-5">
+      <ToolResultDetails open={expanded && display.results.length > 0} id={detailsId} authorActivity={authorActivity}>
+        <ul className={cn('border-t border-[var(--border-subtle)] py-1 pl-5', !authorActivity && 'max-h-72 overflow-y-auto')}>
           {display.results.map((result, index) => (
             <li key={result.url || index}>
               <a
@@ -398,24 +395,23 @@ function WebSearchCard({
             </li>
           ))}
         </ul>
-      ) : null}
+      </ToolResultDetails>
     </div>
   )
 }
 
 /** 站内作品搜索结果卡片：折叠行 = 已搜索作品「query」· n 个结果，展开为书名+作者+状态徽标列表 */
-function PlatformNovelSearchCard({
-  display,
-}: {
-  display: Extract<AgentToolDisplayPayload, { kind: 'platformNovelSearch' }>
-}) {
+function PlatformNovelSearchCard({ display, authorActivity }: ToolDetailCardProps<'platformNovelSearch'>) {
   const [expanded, setExpanded] = useState(false)
+  const detailsId = useId()
 
   return (
     <div className="border-t border-[var(--border-subtle)]">
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
+        aria-controls={detailsId}
+        aria-expanded={expanded}
         className="group flex w-full items-center gap-1.5 py-1.5 text-left"
       >
         <Library className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
@@ -425,8 +421,8 @@ function PlatformNovelSearchCard({
         </span>
         <span className="relative inline-flex h-4 w-4 shrink-0 items-center justify-center text-[var(--text-tertiary)]"><Library className={cn('h-3.5 w-3.5 transition-opacity', !expanded && 'group-hover:opacity-0')} /><ChevronDown className={cn('absolute h-3.5 w-3.5 transition-[opacity,transform]', expanded ? 'rotate-180 opacity-100' : 'opacity-0 group-hover:opacity-100')} /></span>
       </button>
-      {expanded && display.results.length > 0 ? (
-        <ul className="max-h-72 overflow-y-auto border-t border-[var(--border-subtle)] py-1 pl-5">
+      <ToolResultDetails open={expanded && display.results.length > 0} id={detailsId} authorActivity={authorActivity}>
+        <ul className={cn('border-t border-[var(--border-subtle)] py-1 pl-5', !authorActivity && 'max-h-72 overflow-y-auto')}>
           {display.results.map((result, index) => (
             <li
               key={result.id || index}
@@ -444,24 +440,23 @@ function PlatformNovelSearchCard({
             </li>
           ))}
         </ul>
-      ) : null}
+      </ToolResultDetails>
     </div>
   )
 }
 
 /** 站内作品查看卡片：折叠行 = 已查看作品《title》· 作者 · n 章，展开为状态/标签/简介元信息 */
-function PlatformNovelCard({
-  display,
-}: {
-  display: Extract<AgentToolDisplayPayload, { kind: 'platformNovel' }>
-}) {
+function PlatformNovelCard({ display, authorActivity }: ToolDetailCardProps<'platformNovel'>) {
   const [expanded, setExpanded] = useState(false)
+  const detailsId = useId()
 
   return (
     <div className="border-t border-[var(--border-subtle)]">
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
+        aria-controls={detailsId}
+        aria-expanded={expanded}
         className="group flex w-full items-center gap-1.5 py-1.5 text-left"
       >
         <BookOpenText className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
@@ -470,7 +465,7 @@ function PlatformNovelCard({
         </span>
         <span className="relative inline-flex h-4 w-4 shrink-0 items-center justify-center text-[var(--text-tertiary)]"><BookOpenText className={cn('h-3.5 w-3.5 transition-opacity', !expanded && 'group-hover:opacity-0')} /><ChevronDown className={cn('absolute h-3.5 w-3.5 transition-[opacity,transform]', expanded ? 'rotate-180 opacity-100' : 'opacity-0 group-hover:opacity-100')} /></span>
       </button>
-      {expanded ? (
+      <ToolResultDetails open={expanded} id={detailsId} authorActivity={authorActivity}>
         <div className="border-t border-[var(--border-subtle)] py-2 pl-5">
           <p className="text-[11px] text-[var(--text-secondary)]">
             {display.published ? '已上架' : display.isOwn ? '我的·未公开' : '已下架'}
@@ -487,25 +482,24 @@ function PlatformNovelCard({
             </p>
           ) : null}
         </div>
-      ) : null}
+      </ToolResultDetails>
     </div>
   )
 }
 
 /** 视觉旁路查看图片卡片：折叠行「已查看图片 · n 张」，展开为缩略图行（点击放大）+ 视觉模型描述 */
-function ViewedImageCard({
-  display,
-}: {
-  display: Extract<AgentToolDisplayPayload, { kind: 'viewedImage' }>
-}) {
+function ViewedImageCard({ display, authorActivity }: ToolDetailCardProps<'viewedImage'>) {
   const [expanded, setExpanded] = useState(false)
   const [previewImage, setPreviewImage] = useState<{ id: string; url: string } | null>(null)
+  const detailsId = useId()
 
   return (
     <div className="border-t border-[var(--border-subtle)]">
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
+        aria-controls={detailsId}
+        aria-expanded={expanded}
         className="group flex w-full items-center gap-1.5 py-1.5 text-left"
       >
         <Eye className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
@@ -514,7 +508,7 @@ function ViewedImageCard({
         </span>
         <span className="relative inline-flex h-4 w-4 shrink-0 items-center justify-center text-[var(--text-tertiary)]"><Eye className={cn('h-3.5 w-3.5 transition-opacity', !expanded && 'group-hover:opacity-0')} /><ChevronDown className={cn('absolute h-3.5 w-3.5 transition-[opacity,transform]', expanded ? 'rotate-180 opacity-100' : 'opacity-0 group-hover:opacity-100')} /></span>
       </button>
-      {expanded ? (
+      <ToolResultDetails open={expanded} id={detailsId} authorActivity={authorActivity}>
         <div className="border-t border-[var(--border-subtle)] py-2 pl-5">
           <div className="flex flex-wrap gap-2">
             {display.images.map((image) => (
@@ -540,7 +534,7 @@ function ViewedImageCard({
             </p>
           ) : null}
         </div>
-      ) : null}
+      </ToolResultDetails>
       {previewImage ? (
         <ImageLightbox
           src={previewImage.url}
@@ -554,13 +548,10 @@ function ViewedImageCard({
 }
 
 /** markdown 内容卡片：长内容（读文件/读网页）默认折叠、点击展开收起；短内容（如封面提示词）直接展示 */
-function MarkdownCard({
-  display,
-}: {
-  display: Extract<AgentToolDisplayPayload, { kind: 'markdown' }>
-}) {
+function MarkdownCard({ display, authorActivity }: ToolDetailCardProps<'markdown'>) {
   const collapsible = display.markdown.length > 300
   const [expanded, setExpanded] = useState(false)
+  const detailsId = useId()
 
   if (!collapsible) {
     return (
@@ -577,6 +568,8 @@ function MarkdownCard({
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
+        aria-controls={detailsId}
+        aria-expanded={expanded}
         className="group flex w-full items-center gap-1.5 py-1.5 text-left"
       >
         <FileText className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
@@ -585,24 +578,21 @@ function MarkdownCard({
         </span>
         <span className="relative inline-flex h-4 w-4 shrink-0 items-center justify-center text-[var(--text-tertiary)]"><FileText className={cn('h-3.5 w-3.5 transition-opacity', !expanded && 'group-hover:opacity-0')} /><ChevronDown className={cn('absolute h-3.5 w-3.5 transition-[opacity,transform]', expanded ? 'rotate-180 opacity-100' : 'opacity-0 group-hover:opacity-100')} /></span>
       </button>
-      {expanded ? (
+      <ToolResultDetails open={expanded} id={detailsId} authorActivity={authorActivity}>
         <div className="border-t border-[var(--border-subtle)] py-2 pl-5">
-          <pre className="max-h-96 overflow-y-auto whitespace-pre-wrap break-words font-sans text-xs leading-6 text-[var(--text-primary)]">
+          <pre className={cn('whitespace-pre-wrap break-words font-sans text-xs leading-6 text-[var(--text-primary)]', !authorActivity && 'max-h-96 overflow-y-auto')}>
             {display.markdown}
           </pre>
         </div>
-      ) : null}
+      </ToolResultDetails>
     </div>
   )
 }
 
 /** 跨任务上下文卡片：折叠行 = 已读取任务「标题」，展开为任务归属与对话片段，作者可核对 Agent 到底读了哪个任务 */
-function TaskContextCard({
-  display,
-}: {
-  display: Extract<AgentToolDisplayPayload, { kind: 'taskContext' }>
-}) {
+function TaskContextCard({ display, authorActivity }: ToolDetailCardProps<'taskContext'>) {
   const [expanded, setExpanded] = useState(false)
+  const detailsId = useId()
   const primary = display.tasks[0]
   const headline = display.mode === 'list'
     ? `已列出历史任务 · ${display.tasks.length} 个`
@@ -615,14 +605,16 @@ function TaskContextCard({
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
+        aria-controls={detailsId}
+        aria-expanded={expanded}
         className="group flex w-full items-center gap-1.5 py-1.5 text-left"
       >
         <GitBranch className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
         <span className="min-w-0 flex-1 truncate text-xs text-[var(--text-primary)]">{headline}</span>
         <span className="relative inline-flex h-4 w-4 shrink-0 items-center justify-center text-[var(--text-tertiary)]"><GitBranch className={cn('h-3.5 w-3.5 transition-opacity', !expanded && 'group-hover:opacity-0')} /><ChevronDown className={cn('absolute h-3.5 w-3.5 transition-[opacity,transform]', expanded ? 'rotate-180 opacity-100' : 'opacity-0 group-hover:opacity-100')} /></span>
       </button>
-      {expanded ? (
-        <div className="max-h-72 overflow-y-auto border-t border-[var(--border-subtle)] py-1.5 pl-5">
+      <ToolResultDetails open={expanded} id={detailsId} authorActivity={authorActivity}>
+        <div className={cn('border-t border-[var(--border-subtle)] py-1.5 pl-5', !authorActivity && 'max-h-72 overflow-y-auto')}>
           <ul>
             {display.tasks.map((task) => (
               <li key={task.sessionId} className="flex items-center gap-2 py-1">
@@ -652,7 +644,7 @@ function TaskContextCard({
             </ul>
           ) : null}
         </div>
-      ) : null}
+      </ToolResultDetails>
     </div>
   )
 }
@@ -676,12 +668,9 @@ const ORCHESTRATION_MODE_LABEL: Record<'spawn' | 'wait' | 'send', string> = {
 }
 
 /** 跨任务编排卡片：折叠行 = 并行窗口概况，展开列出每个窗口的状态与交付摘要，点标题直接切到那个任务窗口 */
-function TaskOrchestrationCard({
-  display,
-}: {
-  display: Extract<AgentToolDisplayPayload, { kind: 'taskOrchestration' }>
-}) {
+function TaskOrchestrationCard({ display, authorActivity }: ToolDetailCardProps<'taskOrchestration'>) {
   const [expanded, setExpanded] = useState(false)
+  const detailsId = useId()
   const requestToolNavigation = useAgentStore((state) => state.requestToolNavigation)
   const headline = display.detail.trim()
     || `${ORCHESTRATION_MODE_LABEL[display.mode]} · ${display.windows.length} 个`
@@ -691,14 +680,16 @@ function TaskOrchestrationCard({
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
+        aria-controls={detailsId}
+        aria-expanded={expanded}
         className="group flex w-full items-center gap-1.5 py-1.5 text-left"
       >
         <GitBranch className="h-3.5 w-3.5 shrink-0 text-[var(--text-secondary)]" />
         <span className="min-w-0 flex-1 truncate text-xs text-[var(--text-primary)]">{headline}</span>
         <span className="relative inline-flex h-4 w-4 shrink-0 items-center justify-center text-[var(--text-tertiary)]"><GitBranch className={cn('h-3.5 w-3.5 transition-opacity', !expanded && 'group-hover:opacity-0')} /><ChevronDown className={cn('absolute h-3.5 w-3.5 transition-[opacity,transform]', expanded ? 'rotate-180 opacity-100' : 'opacity-0 group-hover:opacity-100')} /></span>
       </button>
-      {expanded ? (
-        <div className="max-h-72 overflow-y-auto border-t border-[var(--border-subtle)] py-1.5 pl-5">
+      <ToolResultDetails open={expanded} id={detailsId} authorActivity={authorActivity}>
+        <div className={cn('border-t border-[var(--border-subtle)] py-1.5 pl-5', !authorActivity && 'max-h-72 overflow-y-auto')}>
           <ul>
             {display.windows.map((taskWindow) => (
               <li key={taskWindow.sessionId} className="py-1">
@@ -724,7 +715,7 @@ function TaskOrchestrationCard({
             ))}
           </ul>
         </div>
-      ) : null}
+      </ToolResultDetails>
     </div>
   )
 }
@@ -750,19 +741,19 @@ export function ToolDisplayRenderer({
     case 'coverImages':
       return <CoverImagesCard display={display} />
     case 'webSearch':
-      return <WebSearchCard display={display} />
+      return <WebSearchCard display={display} authorActivity={authorActivity} />
     case 'platformNovelSearch':
-      return <PlatformNovelSearchCard display={display} />
+      return <PlatformNovelSearchCard display={display} authorActivity={authorActivity} />
     case 'platformNovel':
-      return <PlatformNovelCard display={display} />
+      return <PlatformNovelCard display={display} authorActivity={authorActivity} />
     case 'viewedImage':
-      return <ViewedImageCard display={display} />
+      return <ViewedImageCard display={display} authorActivity={authorActivity} />
     case 'markdown':
-      return <MarkdownCard display={display} />
+      return <MarkdownCard display={display} authorActivity={authorActivity} />
     case 'taskContext':
-      return <TaskContextCard display={display} />
+      return <TaskContextCard display={display} authorActivity={authorActivity} />
     case 'taskOrchestration':
-      return <TaskOrchestrationCard display={display} />
+      return <TaskOrchestrationCard display={display} authorActivity={authorActivity} />
     case 'chapterRef':
       return (
         <p className="text-[11px] text-[var(--text-secondary)]">

@@ -1062,9 +1062,51 @@ html.dark .studio-workspace .agent-composer-goal { background: #333333; }
 }
 
 /* Received Agent content settles without changing real task/tool status. */
+.agent-activity-line {
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr);
+  column-gap: .5rem;
+  padding-inline: .25rem;
+}
+.agent-activity-detail { margin-inline-start: 1.75rem; }
+.agent-activity-scroll-frame { position: relative; }
+.agent-activity-scroll {
+  overflow-y: auto;
+  max-block-size: min(14rem, 45dvh);
+  scrollbar-width: thin;
+  scroll-padding-block: .875rem;
+}
+.agent-activity-scroll,
+body.autohide-scrollbars .agent-activity-scroll { scrollbar-color: var(--border-strong) transparent; }
+body.autohide-scrollbars .agent-activity-scroll::-webkit-scrollbar-thumb { background: var(--border-strong); }
+.agent-activity-scroll[data-activity-scroll='detail'] { max-block-size: min(10.5rem, 32dvh); }
+.agent-activity-scroll:focus-visible { outline: 1px solid var(--focus-ring); outline-offset: -1px; }
+[data-studio-layout='ide'] .agent-activity-scroll-frame { --agent-activity-scroll-bg: var(--app-bg); }
+@media (max-width: 1023px) {
+  .studio-workspace .agent-activity-scroll-frame { --agent-activity-scroll-bg: var(--app-bg); }
+}
+.agent-activity-scroll-frame[data-activity-scroll-more]::after {
+  content: '';
+  position: absolute;
+  inset-inline: 0 .5rem;
+  inset-block-end: 0;
+  block-size: .875rem;
+  pointer-events: none;
+  background: linear-gradient(transparent, var(--agent-activity-scroll-bg, var(--surface-default)));
+}
+@supports (backdrop-filter: blur(1.5px)) {
+  .agent-activity-scroll-frame[data-activity-scroll-more]::after {
+    background: color-mix(in srgb, var(--agent-activity-scroll-bg, var(--surface-default)) 75%, transparent);
+    backdrop-filter: blur(1.5px);
+    mask-image: linear-gradient(transparent, #000);
+  }
+}
+@media (forced-colors: active), (prefers-reduced-transparency: reduce) {
+  .agent-activity-scroll-frame[data-activity-scroll-more]::after { display: none; }
+}
 @media (hover: hover) {
   .agent-activity-step .agent-activity-chevron { opacity: 0; }
-  .agent-activity-step:is(:hover, :focus-visible) .agent-activity-chevron { opacity: 1; }
+  .agent-activity-step:is(:hover, :focus-visible, [aria-expanded='true']) .agent-activity-chevron { opacity: 1; }
   .agent-activity-step:enabled:is(:hover, :focus-visible) .agent-activity-label { color: var(--text-primary); }
   html.dark .agent-activity-step:enabled:is(:hover, :focus-visible) .agent-activity-label { color: #fff; }
 }

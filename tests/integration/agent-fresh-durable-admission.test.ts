@@ -97,19 +97,27 @@ async function bootstrapDiagnostic(runId: string, failures: ReturnType<typeof ob
 }
 
 describe.runIf(available)('fresh native admission and unstarted bootstrap', () => {
-  it('carries an opted-in suggestion through the existing paid-turn receipt without storing it in the answer', () => fixture(async f => {
+  it.each(['chat', 'terra'] as const)('carries a %s suggestion through the existing model receipt without storing it in the answer', protocol => fixture(async f => {
     await ready(f)
+    const terra = protocol === 'terra'
+    if (terra) {
+      const runtime = await credits.getModelTierRuntime('speed', f.userId)
+      vi.mocked(credits.getModelTierRuntime).mockResolvedValue({ ...runtime, modelName: 'gpt-6.1-terra', baseUrl: 'https://yunshu.chevolink.com/v1' })
+    }
     const window = credits.getCreditWindow()
     await prisma.creditAccount.create({ data: { userId: f.userId, dailyAllowanceMilli: 100000,
       periodStartedAt: window.startedAt, periodEndsAt: window.endsAt } })
     const answer = '你好。', nextPrompt = '帮我想一个短篇故事的开头'
     const fetcher = vi.fn(async (_url: unknown, init: RequestInit) => {
       const request = JSON.parse(String(init.body))
-      const marker = String(request.messages[0]?.content).match(/\[\[CHEVOINK_NEXT_PROMPT_[a-f0-9]{8}\]\]/u)?.[0]
-      expect(request.messages[0]).toMatchObject({ role: 'system' })
+      const system = (terra ? request.input : request.messages).find((item: { role?: string }) => item.role === 'system')
+      const marker = String(system?.content).match(/\[\[CHEVOINK_NEXT_PROMPT_[a-f0-9]{8}\]\]/u)?.[0]
       expect(marker).toBeTruthy()
-      const frame = { choices: [{ delta: { content: `${answer}\n${marker} ${nextPrompt}` }, finish_reason: 'stop' }],
-        usage: { prompt_tokens: 20, completion_tokens: 5 } }
+      const text = [answer, [marker, nextPrompt].join(' ')].join(terra ? '\r\n  ' : '\n')
+      const frame = terra ? { type: 'response.completed', response: { status: 'completed', output: [
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] },
+      ], usage: { input_tokens: 20, output_tokens: 5 } } }
+        : { choices: [{ delta: { content: text }, finish_reason: 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 5 } }
       return new Response(`data: ${JSON.stringify(frame)}\n\ndata: [DONE]\n\n`)
     })
     vi.stubGlobal('fetch', fetcher)
@@ -119,16 +127,15 @@ describe.runIf(available)('fresh native admission and unstarted bootstrap', () =
     const state = await loadExecutionState(f.userId, run.runId)
     expect(state.frame.state).toMatchObject({ phase: 'completed' })
     expect(state.frame.state.messages.at(-1)).toMatchObject({ role: 'assistant', content: answer, nextPrompt })
-    await publishDurableEvents(f.userId, run.runId)
+    const history = await listLoopSessionMessages(f.userId, f.sessionId, { runLimit: 1 })
     const events = await loadDurableEvents(f.userId, run.runId, 0)
     expect(events.filter(event => event.type === 'text.final')).toEqual([expect.objectContaining({ text: answer })])
     expect(events.at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded', outputSummary: answer, nextPrompt })
     const saved = await prisma.agentMessage.findFirstOrThrow({ where: { runId: run.runId, role: 'assistant' } })
     expect(saved.parts).toEqual([{ type: 'text', text: answer }])
-    const history = await listLoopSessionMessages(f.userId, f.sessionId, { runLimit: 1 })
     expect(history.nextPrompt).toEqual({ runId: run.runId, text: nextPrompt })
     expect(history.messages.find(message => message.id === saved.id)?.parts).toEqual(saved.parts)
-    expect(fetcher).toHaveBeenCalledOnce()
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith(terra ? 'https://yunshu.chevolink.com/v1/responses' : 'https://provider.invalid/v1/chat/completions', expect.any(Object))
   }))
 
   it('does not opt a fresh durable HTTP task into legacy terminal response schemas', () => fixture(async f => {

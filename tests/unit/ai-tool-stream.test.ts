@@ -59,7 +59,7 @@ describe('next prompt from the current response', () => {
   })
 
   it('keeps an exact answer and normal line breaks if there is no reserved footer', async () => {
-    const body = '严格按格式：\n[[CHEVOINK_NEXT_PROMPT_foreign]]\n'
+    const body = '严格按格式：\r\n  [[CHEVOINK_NEXT_PROMPT_foreign]]\r\n'
     response(Array.from(body), 'stop')
     const visible: string[] = []
     const result = await chatWithTools({ ...options, onChunk: chunk => { if (chunk.type === 'text-delta') visible.push(chunk.delta) } })
@@ -68,14 +68,16 @@ describe('next prompt from the current response', () => {
     expect(visible.join('')).toBe(body)
   })
 
-  it.each(['completed', 'tool call', 'author opt-out'] as const)('handles a %s suggestion through Terra Responses', async scenario => {
+  it.each(['completed', 'indented CRLF', 'tool call', 'author opt-out'] as const)('handles a %s suggestion through Terra Responses', async scenario => {
     const answer = '计划已保存。', suggestion = '帮我复核刚保存的计划。'
     const messages: ChatMessage[] = [{ role: 'user', content: scenario === 'author opt-out' ? '只回复保存结果。不要给后续建议。' : '保存计划。' }]
     const nextPromptMarker = addNextPromptInstruction(messages)
-    const text = scenario === 'author opt-out' ? answer : [answer, [nextPromptMarker, suggestion].join(' ')].join('\n')
+    const separator = scenario === 'indented CRLF' ? '\r\n\t  ' : '\n'
+    const text = scenario === 'author opt-out' ? answer : [answer, [nextPromptMarker, suggestion].join(' ')].join(separator)
     const output = [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] }]
     stream([
-      { type: 'response.output_text.delta', delta: text.slice(0, answer.length + 5) },
+      { type: 'response.output_text.delta', delta: text.slice(0, answer.length + 1) },
+      { type: 'response.output_text.delta', delta: text.slice(answer.length + 1, answer.length + 20) },
       { type: 'response.completed', response: { status: 'completed', output: scenario === 'tool call' ? [...output,
         { type: 'function_call', id: 'fc_plan', call_id: 'call_plan', name: 'plan_read', status: 'completed', arguments: '{}' }] : output,
         usage: { input_tokens: 35, output_tokens: 20 } } },
@@ -85,11 +87,11 @@ describe('next prompt from the current response', () => {
       tools: [{ type: 'function', function: { name: 'plan_read', description: 'Synthetic', parameters: { type: 'object' } } }],
       onChunk: chunk => { if (chunk.type === 'text-delta') visible.push(chunk.delta) } })
     expect(fetch).toHaveBeenCalledExactlyOnceWith('https://yunshu.chevolink.com/v1/responses', expect.objectContaining({
-      body: expect.stringContaining('作者只要指定内容或不要建议'),
+      body: expect.stringContaining('作者明确要求只输出指定内容、明确不要建议'),
     }))
     expect(result).toMatchObject({ content: answer, finishReason: scenario === 'tool call' ? 'tool_calls' : 'stop',
       usage: { promptTokens: 35, completionTokens: 20 } })
-    expect(result.nextPrompt).toBe(scenario === 'completed' ? suggestion : undefined)
+    expect(result.nextPrompt).toBe(scenario === 'completed' || scenario === 'indented CRLF' ? suggestion : undefined)
     expect(visible.join('')).toBe(answer)
   })
 })

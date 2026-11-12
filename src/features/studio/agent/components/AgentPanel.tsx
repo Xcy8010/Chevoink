@@ -1020,7 +1020,6 @@ export function AgentPanel({
       // 用户主动发言视为回到对话最新处，重新开启自动跟随
       pinnedToBottomRef.current = true
       const sendingState = useAgentStore.getState()
-      const predictNextPrompt = sendingState.composerAcceptedNextPrompt !== prompt
       const previousRunId = sendingState.runId
       const lastCanonicalMessage = sendingState.loadedSessionId === sessionId ? sendingState.messages.at(-1) : undefined
       const clientRequestId = crypto.randomUUID()
@@ -1045,7 +1044,7 @@ export function AgentPanel({
             // Agent 默认最大权限：恒以 build 模式运行（后端路由也有强制兜底）
             mode: 'build' as const,
             prompt,
-            ...(predictNextPrompt ? { predictNextPrompt: true as const } : {}),
+            predictNextPrompt: true as const,
             selection: targetChapterId ? selection ?? null : null,
             attachments: attachments.length > 0 ? attachments : undefined,
             creativeFreedom: freedom,
@@ -1940,7 +1939,7 @@ export function AgentPanel({
           running={active}
           nextPrompt={nextPrompt?.text}
           onAcceptNextPrompt={() => {
-            if (nextPrompt) useAgentStore.setState({ composerAcceptedNextPrompt: nextPrompt.text, nextPrompt: null })
+            if (nextPrompt) useAgentStore.setState({ nextPrompt: null })
           }}
           onContinue={canContinue ? goalView.runBelongsToGoal && !goalView.terminal ? handleGoalResume : handleContinue : undefined}
           disabled={conversationLoading || modelPreference.loading}

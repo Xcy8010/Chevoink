@@ -1,4 +1,4 @@
-import { memo, useEffect, useId, useMemo, useState, type ReactNode } from 'react'
+import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { BookOpenText, Bot, Brain, ChevronDown, CircleHelp, ClipboardCheck, Download, FilePenLine, FileText, Globe2, Search } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -14,6 +14,7 @@ import type { AgentMessagePart, AgentToolDisplayPayload } from '../../../../../s
 import { AgentMarkdownText } from './AgentMarkdownText'
 import { ToolDisplayRenderer } from './AgentMessageParts'
 import { AgentProcessRegion } from './AgentProcessRegion'
+import { ActivityScrollArea } from './ActivityScrollArea'
 import { ProcessDuration } from './ProcessDuration'
 
 const actionNames: Record<string, string> = {
@@ -153,16 +154,18 @@ function ProjectSearchLocations({ display, onOpen }: {
     if (matches) matches.push(hit)
     else byChapter.set(hit.chapterId, [hit])
   }
-  return <ul className="space-y-0.5 text-xs leading-5 text-[var(--text-secondary)]">
+  return <ActivityScrollArea detail><ul className="space-y-0.5 text-xs leading-5 text-[var(--text-secondary)]">
     {[...byChapter.values()].map(([hit, ...others]) => <li key={hit.chapterId} className="min-w-0 break-words">
       {hit.volumeTitle ? <span>{hit.volumeTitle} · </span> : null}
       <button type="button" onClick={() => onOpen(hit.chapterId)} className="text-[var(--text-primary)] underline-offset-2 hover:underline focus-visible:underline">《{hit.chapterTitle}》</button>
       <span> · {hit.field === 'content' ? `正文第 ${hit.offset + 1} 字` : hit.field === 'summary' ? '章节摘要' : '章节标题'}{others.length ? '等' : ''}</span>
     </li>)}
-  </ul>
+  </ul></ActivityScrollArea>
 }
 
 const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles }: { part: ActivityCall; runActive: boolean; titles?: ReadonlyMap<string, string> }) {
+  const [open, setOpen] = useState(false)
+  const detailsId = useId()
   const navigate = useAgentStore(state => state.requestToolNavigation)
   const spotlight = useAgentStore(state => state.requestMemorySpotlight)
   const Icon = toolIcon(part)
@@ -171,29 +174,38 @@ const ActivityDetail = memo(function ActivityDetail({ part, runActive, titles }:
   const planId = part.toolName === 'plan_read' && !display ? (part.args as { planId?: unknown } | null)?.planId : undefined
   const navigable = Boolean(chapterId) || typeof planId === 'string' || display?.kind === 'planFile' || display?.kind === 'planDiff' || display?.kind === 'planRename'
   const openTarget = navigable ? () => navigate(part.toolName, chapterId ? { chapterId } : part.args, display) : undefined
-  const detail = savedReadDetail(part)
+  const label = savedReadDetail(part) ?? activitySummary(part, runActive, titles, true)
   const memory = part.status === 'success' ? getMemorySpotlight(part.toolName, part.args) : null
   const hasResultTarget = display?.kind === 'chapterDiff' || display?.kind === 'chapterRef' || display?.kind === 'planFile' || display?.kind === 'planDiff' || display?.kind === 'planRename'
-  return <li className="min-w-0 py-1 font-normal" data-activity-tool={part.toolName}>
-    <div className="flex min-w-0 items-start gap-2 text-xs leading-5 text-[var(--text-secondary)]">
-      <Icon aria-hidden className="mt-[3px] h-3.5 w-3.5 shrink-0 text-[var(--text-tertiary)]" />
-      <span className="min-w-0 break-words">{detail ?? activitySummary(part, runActive, titles, true)}</span>
-      {openTarget && !hasResultTarget ? <button type="button" onClick={openTarget} className="shrink-0 underline-offset-2 hover:underline focus-visible:underline">{typeof planId === 'string' ? '打开计划' : '打开章节'}</button> : null}
-      {memory ? <button type="button" onClick={() => spotlight(memory.type, memory.title)} className="shrink-0 underline-offset-2 hover:underline focus-visible:underline">查看设定</button> : null}
+  const collapsible = display?.kind === 'projectSearch' && new Set(display.matches.map(hit => hit.chapterId)).size > 4
+    || display?.kind === 'readSources' && display.items.length > 4
+    || display?.kind === 'subagentReport' && (display.report.length > 180 || display.report.split('\n').length > 4)
+  const result = display ? <div className="agent-activity-detail min-w-0">
+    {display.kind === 'projectSearch' ? <ProjectSearchLocations display={display} onOpen={chapterId => navigate(part.toolName, { chapterId })} />
+      : display.kind === 'readSources' ? <ActivityScrollArea detail><ul className="space-y-0.5 text-xs leading-5 text-[var(--text-secondary)]">
+        {display.items.map(({ title, target }, index) => <li key={target?.id ?? index} className="min-w-0 break-words">
+          {target ? <button type="button" className="text-[var(--text-primary)] underline-offset-2 hover:underline focus-visible:underline"
+            onClick={() => navigate(part.toolName, target.kind === 'chapter' ? { chapterId: target.id } : { planId: target.id })}>《{title}》</button>
+            : <p className="text-[var(--text-primary)]">{title}</p>}
+        </li>)}
+      </ul></ActivityScrollArea>
+        : display.kind === 'subagentReport'
+          ? <ActivityScrollArea detail><p className="whitespace-pre-wrap break-words text-xs leading-5 text-[var(--text-secondary)]">{projectAgentAuthorText(display.report)}</p></ActivityScrollArea>
+          : <ToolDisplayRenderer display={display} onNavigateTarget={openTarget} authorActivity />}
+  </div> : null
+  return <li className="min-w-0 font-normal" data-activity-tool={part.toolName}>
+    <div className="agent-activity-line min-h-7 items-start py-1 text-xs leading-5 text-[var(--text-secondary)]">
+      <Icon aria-hidden className="mt-0.5 h-4 w-4 text-[var(--text-tertiary)]" />
+      <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+        {collapsible ? <button type="button" aria-expanded={open} aria-controls={detailsId} onClick={() => setOpen(value => !value)}
+          data-activity-detail-toggle className="min-w-0 break-words text-left underline-offset-2 hover:underline focus-visible:underline">
+          {label}<ChevronDown aria-hidden className={cn('ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-transform', !open && '-rotate-90')} />
+        </button> : <span className="min-w-0 break-words">{label}</span>}
+        {openTarget && !hasResultTarget ? <button type="button" onClick={openTarget} className="shrink-0 underline-offset-2 hover:underline focus-visible:underline">{typeof planId === 'string' ? '打开计划' : '打开章节'}</button> : null}
+        {memory ? <button type="button" onClick={() => spotlight(memory.type, memory.title)} className="shrink-0 underline-offset-2 hover:underline focus-visible:underline">查看设定</button> : null}
+      </div>
     </div>
-    {display ? <div className="min-w-0 pl-[22px]">
-      {display.kind === 'projectSearch' ? <ProjectSearchLocations display={display} onOpen={chapterId => navigate(part.toolName, { chapterId })} />
-        : display.kind === 'readSources' ? <ul className="space-y-0.5 text-xs leading-5 text-[var(--text-secondary)]">
-          {display.items.map(({ title, target }, index) => <li key={target?.id ?? index} className="min-w-0 break-words">
-            {target ? <button type="button" className="text-[var(--text-primary)] underline-offset-2 hover:underline focus-visible:underline"
-              onClick={() => navigate(part.toolName, target.kind === 'chapter' ? { chapterId: target.id } : { planId: target.id })}>《{title}》</button>
-              : <p className="text-[var(--text-primary)]">{title}</p>}
-          </li>)}
-        </ul>
-          : display.kind === 'subagentReport'
-            ? <p className="line-clamp-2 break-words text-xs leading-5 text-[var(--text-secondary)]">{projectAgentAuthorText(display.report)}</p>
-            : <ToolDisplayRenderer display={display} onNavigateTarget={openTarget} authorActivity />}
-    </div> : null}
+    {collapsible ? <AgentProcessRegion open={open} id={detailsId}>{result}</AgentProcessRegion> : result}
   </li>
 })
 
@@ -215,33 +227,48 @@ const ActivityRow = memo(function ActivityRow({ group, runActive, active, workin
   const readLabel = group?.readLabel
   let label = workingLabel
   if (!label && part) {
-    if (readLabel && running) label = `${running.preparing ? '正在准备 · ' : '正在'}${readLabel}`
+    if (readLabel && running) label = activitySummary(running, runActive, titles, true)
     else if (readLabel) label = unresolved || [...latest.values()].some(call => call.status === 'running')
       ? `${readLabel}有未完成项` : `已${readLabel}`
     else if (grouped && !running && unresolved) label = `${getAgentToolPresentation(part.toolName).label}有未完成项`
     else label = activitySummary(part, runActive, titles, false, grouped)
   }
   const showingActivity = Boolean(active && running && !importWaiting && running.toolName !== 'ask_user')
+  const step = workingLabel ?? (part ? `${part.toolName}:${part.preparing ? 'preparing' : part.status}` : '')
+  const previousStep = useRef(step)
+  const headline = useRef<HTMLSpanElement>(null)
+  useLayoutEffect(() => {
+    const changed = previousStep.current !== step
+    previousStep.current = step
+    if (!changed || !runActive || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
+    const animation = headline.current?.animate?.(
+      [{ opacity: 0.5, transform: 'translateY(2px)' }, { opacity: 1, transform: 'translateY(0)' }],
+      { duration: 160, easing: 'ease-out' },
+    )
+    return () => animation?.cancel()
+  }, [runActive, step])
 
   return <div className="min-w-0" data-author-activity={group ? '' : undefined} data-author-working={workingLabel ? '' : undefined} data-author-step>
     <button type="button" aria-expanded={group ? open : undefined} aria-controls={group ? detailsId : undefined}
       disabled={!group} onClick={() => setOpen(value => !value)}
-      className="agent-activity-step flex min-h-7 w-fit max-w-full items-center gap-2 px-1 text-left text-sm font-medium leading-7 text-[var(--text-secondary)] focus-visible:underline focus-visible:outline-none">
-      <Icon aria-hidden className="h-4 w-4 shrink-0" />
-      <span className="min-w-0 break-words text-balance">
-        <span aria-live={active || running || workingLabel ? 'polite' : undefined}
-          data-activity-preparing={showingActivity && running?.preparing || undefined}
-          data-activity-running={showingActivity && !running?.preparing || undefined}
-          className={cn('agent-activity-label', (showingActivity || workingLabel) && 'agent-processing-shimmer')}>{label}</span>
-        {group ? <ChevronDown aria-hidden className={cn('agent-activity-chevron ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-[opacity,transform]', open ? 'rotate-0' : '-rotate-90')} /> : null}
+      className="agent-activity-step min-h-7 w-fit max-w-full text-left text-sm font-medium leading-7 text-[var(--text-secondary)] focus-visible:underline focus-visible:outline-none">
+      <span ref={headline} className="agent-activity-line items-center">
+        <Icon aria-hidden className="h-4 w-4" />
+        <span className="min-w-0 break-words text-balance">
+          <span aria-live={active || running || workingLabel ? 'polite' : undefined}
+            data-activity-preparing={showingActivity && running?.preparing || undefined}
+            data-activity-running={showingActivity && !running?.preparing || undefined}
+            className={cn('agent-activity-label', (showingActivity || workingLabel) && 'agent-processing-shimmer')}>{label}</span>
+          {group ? <ChevronDown aria-hidden className={cn('agent-activity-chevron ml-1 inline-block h-3.5 w-3.5 align-text-bottom motion-safe:transition-[opacity,transform]', open ? 'rotate-0' : '-rotate-90')} /> : null}
+        </span>
       </span>
     </button>
     {importWaiting?.importWaiting ? <a className="ml-6 text-xs underline" href={importWaiting.importWaiting.url}>核对原文并确认导入</a> : null}
     {group ? <AgentProcessRegion open={open} id={detailsId}>
-      <ul className="ml-2 border-l border-[var(--border-subtle)] pl-3">
+      <ActivityScrollArea><ul>
         {calls.flatMap(call => [call, ...(group.childrenByCall.get(call.callId) ?? [])]).map(call =>
           <ActivityDetail key={JSON.stringify([call.subagentCallId ?? null, call.callId])} part={call} runActive={runActive} titles={titles} />)}
-      </ul>
+      </ul></ActivityScrollArea>
     </AgentProcessRegion> : null}
   </div>
 })

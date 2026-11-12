@@ -251,7 +251,6 @@ type AgentStoreState = {
   goalEventSequence: number
   /** 输入框草稿：提升到全局 store，避免面板重挂载时丢失未发送内容 */
   composerDraft: string
-  composerAcceptedNextPrompt: string | null
   /** 目标输入模式属于任务窗口草稿，不能与普通发送模式混用。 */
   goalMode: boolean
   /** 输入框附件（已上传成功的元数据）：同草稿提升全局，沉浸/普通视图重挂载不丢 */
@@ -663,7 +662,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   goalSessionId: null,
   goalEventSequence: 0,
   composerDraft: '',
-  composerAcceptedNextPrompt: null,
   goalMode: false,
   composerAttachments: [],
   composerReferences: [],
@@ -1094,7 +1092,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       } : {}
     }),
 
-  setComposerDraft: (value) => set({ composerDraft: value, composerAcceptedNextPrompt: null }),
+  setComposerDraft: (value) => set({ composerDraft: value }),
 
   setComposerAttachments: (list) => set({ composerAttachments: list }),
 
@@ -1119,9 +1117,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   clearComposerReferences: () => set({ composerReferences: [] }),
 
-  setComposerContent: (draft, references) =>
-    set(state => ({ composerDraft: draft, composerReferences: references,
-      composerAcceptedNextPrompt: draft.trim() === state.composerAcceptedNextPrompt ? state.composerAcceptedNextPrompt : null })),
+  setComposerContent: (draft, references) => set({ composerDraft: draft, composerReferences: references }),
 
   bumpComposerUploading: (delta) =>
     set((state) => ({ composerUploading: Math.max(0, state.composerUploading + delta) })),

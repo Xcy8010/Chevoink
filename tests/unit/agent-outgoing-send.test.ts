@@ -3,6 +3,7 @@ import ts from 'typescript'
 import { afterEach, expect, it, vi } from 'vitest'
 import { projectOutgoingMessages, useOutgoingMessages } from '../../src/features/studio/agent/outgoing-messages'
 import { useAgentStore, readSessionMessagesCache } from '../../src/features/studio/agent/agentStore'
+import { activateComposerDraft } from '../../src/features/studio/agent/composer-drafts'
 import type { AgentUIMessage } from '../../shared/contracts/index'
 import { runElapsedMs } from '../../shared/agent-timing'
 import { projectBlockTimings, projectMessages } from '../../src/features/studio/agent/lib/message-projection'
@@ -35,22 +36,29 @@ function sending(overrides: Record<string, unknown> = {}) {
     AgentApiError: class extends Error {}, setQuotaDialogOpen: vi.fn(), refetchCredits: vi.fn(), ...overrides,
   }
   const send = loadCallback('handleSend', context) as (prompt: string, attachments: [], freedom: string, quality: string, skills: []) => Promise<void>
-  return { context, send: () => send('合成请求', [], 'balanced', 'premium', []) }
+  return { context, send: (prompt = '合成请求') => send(prompt, [], 'balanced', 'premium', []) }
 }
-it('requests a completion suggestion for a manual prompt but never chains a Tab-accepted prompt', async () => {
+it('requests a completion suggestion on every explicit send, including the text from a previous suggestion', async () => {
   const manual = sending()
   await manual.send()
   expect(manual.context.startAgentLoopRun).toHaveBeenCalledWith(expect.objectContaining({ predictNextPrompt: true }))
 
-  useAgentStore.getState().resetRun()
-  useAgentStore.setState({ composerAcceptedNextPrompt: '合成请求' })
+  const nextPrompt = '帮我复核刚保存的计划。'
+  useAgentStore.getState().applyEvent({ type: 'run.finished', runId: 'run-a', seq: 1, ts: '2026-11-11T00:00:00.000Z', status: 'succeeded',
+    usage: { promptTokens: 2, completionTokens: 3, totalTokens: 5 }, artifacts: [], nextPrompt })
+  expect(useAgentStore.getState().nextPrompt?.text).toBe(nextPrompt)
+  expect(manual.context.startAgentLoopRun).toHaveBeenCalledOnce()
+
+  // A draft saved before the fix still carries the previous one-shot flag.
+  vi.stubGlobal('localStorage', { getItem: () => JSON.stringify({ composerDraft: nextPrompt, composerAcceptedNextPrompt: nextPrompt,
+    composerAttachments: [], composerReferences: [], composerSkillIds: [] }), setItem: vi.fn() })
   try {
-    const accepted = sending()
-    await accepted.send()
-    expect(accepted.context.startAgentLoopRun).toHaveBeenCalledOnce()
-    expect(accepted.context.startAgentLoopRun.mock.calls[0]?.[0]).not.toHaveProperty('predictNextPrompt')
+    activateComposerDraft('previously-accepted-suggestion')
+    const accepted = sending({ startAgentLoopRun: vi.fn().mockResolvedValue({ runId: 'run-b', runGoalId: null }) })
+    await accepted.send(useAgentStore.getState().composerDraft)
+    expect(accepted.context.startAgentLoopRun).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ prompt: nextPrompt, predictNextPrompt: true }))
   } finally {
-    useAgentStore.setState({ composerAcceptedNextPrompt: null })
+    vi.unstubAllGlobals()
   }
 })
 

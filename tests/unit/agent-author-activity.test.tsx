@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { useState } from 'react'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import type { AgentMessagePart, AgentUIMessage } from '../../shared/contracts/index.js'
 import { AuthorActivityParts, AuthorActivitySummary } from '../../src/features/studio/agent/components/AuthorActivityParts'
 import { activityAnswerText, activityWorkingLabel, projectActivityGroups, type ActivityCall } from '../../src/features/studio/agent/lib/activity-groups'
@@ -133,6 +133,9 @@ it('shows one parameter preview and uses actual call events to advance the visib
   const timeline = (...parts: ActivityCall[]) => <Transcript active="r" messages={[message('batch', parts)]} />
   const view = render(timeline(plan, chapter, next))
   const toggle = screen.getByRole('button', { name: '正在准备 · 查看创作资料' })
+  const animate = vi.fn(() => ({ cancel: vi.fn() }))
+  Object.defineProperty(toggle.firstElementChild, 'animate', { value: animate })
+  toggle.focus()
   fireEvent.click(toggle)
   expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(1)
   expect(view.container.querySelectorAll('[data-activity-preparing]')).toHaveLength(1)
@@ -146,7 +149,9 @@ it('shows one parameter preview and uses actual call events to advance the visib
   expect(view.container.querySelectorAll('[data-author-activity]')).toHaveLength(1)
   expect(Array.from(view.container.querySelectorAll('[data-activity-tool]'), node => node.getAttribute('data-activity-tool')))
     .toEqual(['plan_read', 'chapter_read'])
-  expect(screen.getByRole('button', { name: '正在查看创作资料', expanded: true })).toBe(toggle)
+  expect(screen.getByRole('button', { name: '正在查看章节', expanded: true })).toBe(toggle)
+  expect(document.activeElement).toBe(toggle)
+  expect(animate).toHaveBeenCalledTimes(2)
 })
 
 it('folds creation settings and the cover workflow while keeping the live row and ordered receipts', () => {
@@ -391,6 +396,46 @@ it('shows one compact location per matching chapter and keeps read targets acces
   expect(screen.getByText('· 章节摘要')).toBeTruthy()
   expect(screen.getByRole('button', { name: '《全书大纲》' })).toBeTruthy()
   expect(view.container.textContent).not.toMatch(/PRIVATE_|她摸到一把|长段摘录|正文第 82 字/)
+})
+
+it('keeps lengthy read receipts collapsed and signals remaining content independently in each scroll area', () => {
+  const count = 12
+  const search = call('search', 'project_search', {
+    display: { kind: 'projectSearch', query: '钥匙', total: count, matches: Array.from({ length: count }, (_, index) => ({
+      chapterId: `chapter-${index}`, chapterTitle: `合成章节 ${index}`, field: 'content', offset: index,
+      length: 2, contextBefore: '', match: '钥匙', contextAfter: '',
+    })) },
+  })
+  const view = render(<Transcript messages={[message('read', [search, ...Array.from({ length: count }, (_, index) => call(`read-${index}`, 'chapter_read'))])]} />)
+  fireEvent.click(screen.getByRole('button', { name: '已核对前文' }))
+  const records = view.container.querySelector<HTMLElement>('[data-activity-scroll="records"]')!
+  const toggle = screen.getByRole('button', { name: '搜索「钥匙」 · 12 处', expanded: false })
+  expect(screen.queryByRole('button', { name: '《合成章节 11》' })).toBeNull()
+  expect(records.hasAttribute('tabindex')).toBe(false)
+
+  Object.defineProperties(records, { clientHeight: { value: 224 }, scrollHeight: { value: 364 } })
+  fireEvent.scroll(records)
+  expect(screen.getByRole('group', { name: '工具记录' })).toBe(records)
+  expect(records.parentElement?.getAttribute('data-activity-scroll-more')).toBe('true')
+  expect(records.tabIndex).toBe(0)
+
+  toggle.focus()
+  fireEvent.click(toggle)
+  const detail = records.querySelector<HTMLElement>('[data-activity-scroll="detail"]')!
+  Object.defineProperties(detail, { clientHeight: { value: 168 }, scrollHeight: { value: 264 } })
+  fireEvent.scroll(detail)
+  expect(screen.getByRole('group', { name: '工具详情' })).toBe(detail)
+  expect(detail.parentElement?.getAttribute('data-activity-scroll-more')).toBe('true')
+  expect(screen.getByRole('button', { name: '《合成章节 11》' })).toBeTruthy()
+  detail.scrollTop = 96
+  fireEvent.scroll(detail)
+  expect(detail.parentElement?.hasAttribute('data-activity-scroll-more')).toBe(false)
+  expect(detail.tabIndex).toBe(0)
+  expect(records.parentElement?.getAttribute('data-activity-scroll-more')).toBe('true')
+
+  fireEvent.click(toggle)
+  expect(screen.queryByRole('group', { name: '工具详情' })).toBeNull()
+  expect(document.activeElement).toBe(toggle)
 })
 
 it('shows the opening report before the pending activity and reuses that activity for the first tool', () => {
