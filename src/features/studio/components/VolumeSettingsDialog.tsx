@@ -45,16 +45,15 @@ function Session(props: Props & { volume: StudioPayload['volumes'][number] }) {
   const fail = (failure: unknown) => { if (live.current) setError(failure instanceof Error ? failure.message : '操作失败，请稍后重试。') }
 
   async function save(draft: VolumeSettingsDraft) {
+    if (draft.title === initialVolume.title && draft.summary === (initialVolume.summary ?? '')) return
     if (!begin()) throw new Error('正在处理，请稍候。')
     try {
       if (!await props.beforeChange()) throw new Error('请先确认当前章节保存成功，再重试。')
       if (!live.current) return
-      if (draft.title !== initialVolume.title || draft.summary !== (initialVolume.summary ?? '')) {
-        await updateVolume(props.novelId, initialVolume.id, { ...draft, expectedRevision: initialVolume.revision })
-        if (!live.current) return
-        setApplied(true)
-        await props.onChanged()
-      }
+      await updateVolume(props.novelId, initialVolume.id, { ...draft, expectedRevision: initialVolume.revision })
+      if (!live.current) return
+      setApplied(true)
+      await props.onChanged()
     } catch (failure) { fail(failure); throw failure } finally { end() }
   }
 

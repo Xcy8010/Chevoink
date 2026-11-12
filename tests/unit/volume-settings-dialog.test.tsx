@@ -42,6 +42,23 @@ describe('volume settings confirmation and operation ownership', () => {
     expect(props.onClose).not.toHaveBeenCalled()
     expect(api.updateVolume).toHaveBeenCalledWith('n', 'v1', { title: '保留的输入', summary: '', expectedRevision: 2 })
   })
+  it('closes unchanged settings during chapter review but guards actual edits', async () => {
+    const props = propsFor()
+    vi.mocked(props.beforeChange).mockResolvedValue(false)
+    const view = render(<VolumeSettingsDialog {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: '完成' }))
+    await waitFor(() => expect(props.onClose).toHaveBeenCalledOnce())
+    expect(props.beforeChange).not.toHaveBeenCalled()
+
+    view.rerender(<VolumeSettingsDialog {...props} open={false} />)
+    view.rerender(<VolumeSettingsDialog {...props} />)
+    fireEvent.change(screen.getByPlaceholderText('例如：第一卷 初入江湖'), { target: { value: '修改卷名' } })
+    fireEvent.click(screen.getByRole('button', { name: '完成' }))
+    await screen.findByText('请先确认当前章节保存成功，再重试。')
+    expect(props.beforeChange).toHaveBeenCalledOnce()
+    expect(api.updateVolume).not.toHaveBeenCalled()
+    expect(props.onClose).toHaveBeenCalledOnce()
+  })
   it('reads fresh revisions before confirmation and only moves chapters after explicit confirmation', async () => {
     const props = propsFor()
     api.getStudioPayload.mockResolvedValue({ ...payload(props), chapters: [{ ...props.chapters[0], revision: 7 }] })

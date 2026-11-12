@@ -2560,9 +2560,10 @@ export default function StudioWorkspace() {
     return workspaceOwnerRef.current === owner
   }
 
-  async function handleOpenVolumeSettings(volumeId: string) {
+  function handleOpenVolumeSettings(volumeId: string) {
     const owner = workspaceOwnerRef.current
-    if (await beforeVolumeChange() && workspaceOwnerRef.current === owner) setVolumeSettings({ novelId: activeNovelId, volumeId, epoch: owner.epoch })
+    if (owner.novelId !== activeNovelId || currentNovelStateRef.current?.id !== activeNovelId) return
+    setVolumeSettings({ novelId: activeNovelId, volumeId, epoch: owner.epoch })
   }
 
   async function refreshAfterVolumeChange() {
@@ -4093,7 +4094,7 @@ export default function StudioWorkspace() {
                   onSelectChapter={handleSelectChapter}
                   onSelectPlan={handleSelectPlanFromTree}
                   onOpenChapterSettings={(chapterId) => handleSelectChapter(chapterId, { openSettings: true })}
-                    onOpenVolumeSettings={(volumeId) => void handleOpenVolumeSettings(volumeId)}
+                  onOpenVolumeSettings={handleOpenVolumeSettings}
                   onOpenPlanSettings={setPlanSettingsPlanId}
                   onSelectCatalog={handleSelectCatalogFromTree}
                   onCreateChapter={handleRequestCreateChapter}
@@ -4338,7 +4339,7 @@ export default function StudioWorkspace() {
                     chapterCountLabel={chapterCountLabel} novelTitle={novelTitle} activeCoverLabel={coverLabel}
                     onSelectChapter={handleSelectWorkChapter} onSelectPlan={handleSelectPlanFromTree}
                     onOpenChapterSettings={(chapterId) => handleSelectChapter(chapterId, { openSettings: true })}
-                    onOpenVolumeSettings={(volumeId) => void handleOpenVolumeSettings(volumeId)}
+                    onOpenVolumeSettings={handleOpenVolumeSettings}
                     onOpenPlanSettings={setPlanSettingsPlanId} onSelectCatalog={handleSelectCatalogFromTree}
                     onCreateVolume={handleRequestCreateVolume} onCreateChapter={handleRequestCreateChapter} onCreatePlan={handleRequestCreatePlan}
                     onRequestDeleteChapter={handleRequestDeleteChapterById} onRequestDeletePlan={handleRequestDeletePlan}
@@ -4429,7 +4430,7 @@ export default function StudioWorkspace() {
                     onSelectChapter={handleSelectChapter}
                     onSelectPlan={handleSelectPlanFromTree}
                     onOpenChapterSettings={(chapterId) => handleSelectChapter(chapterId, { openSettings: true })}
-                    onOpenVolumeSettings={(volumeId) => void handleOpenVolumeSettings(volumeId)}
+                    onOpenVolumeSettings={handleOpenVolumeSettings}
                     onOpenPlanSettings={setPlanSettingsPlanId}
                     onSelectCatalog={handleSelectCatalogFromTree}
                     onCreateChapter={handleRequestCreateChapter}

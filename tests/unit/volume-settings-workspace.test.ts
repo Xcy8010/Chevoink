@@ -48,17 +48,41 @@ describe('volume settings parent wiring', () => {
     expect(await before()).toBe(false)
     expect(context.persistChapter).toHaveBeenCalledTimes(1)
   })
-  it('blocks saving/pending and fences switching away and back during save before opening', async () => {
+  it('opens the current volume during chapter review without running the write guard', () => {
+    const context = guardContext()
+    context.pendingChapterReviewsRef.current = [{}]
+    const beforeVolumeChange = vi.fn(callback('beforeVolumeChange', context))
+    const setVolumeSettings = vi.fn()
+    const open = callback('handleOpenVolumeSettings', { ...context, beforeVolumeChange, setVolumeSettings })
+    open('v')
+    expect(setVolumeSettings).toHaveBeenCalledExactlyOnceWith({ novelId: 'n', volumeId: 'v', epoch: 1 })
+    expect(beforeVolumeChange).not.toHaveBeenCalled()
+    expect(context.toast.error).not.toHaveBeenCalled()
+  })
+  it('ignores a volume settings request from a stale workspace', () => {
+    const context = guardContext()
+    const setVolumeSettings = vi.fn()
+    const beforeVolumeChange = vi.fn(async () => false)
+    const open = callback('handleOpenVolumeSettings', { ...context, beforeVolumeChange, setVolumeSettings })
+    context.workspaceOwnerRef.current = { novelId: 'other', epoch: 2 }
+    open('v')
+    context.workspaceOwnerRef.current = { novelId: 'n', epoch: 3 }
+    context.currentNovelStateRef.current = { id: 'other' }
+    open('v')
+    expect(setVolumeSettings).not.toHaveBeenCalled()
+  })
+  it('blocks volume writes while saving and drops save feedback from a stale workspace', async () => {
     const context = guardContext()
     expect(await callback('beforeVolumeChange', { ...context, chapterSaveState: 'saving' })()).toBe(false)
-    const gate = deferred<boolean>()
-    const setVolumeSettings = vi.fn()
-    const open = callback('handleOpenVolumeSettings', { ...context, beforeVolumeChange: () => gate.promise, setVolumeSettings })
-    const request = open('v')
+    context.toast.error.mockClear()
+    context.chapterDirtyRef.current = true
+    const gate = deferred<void>()
+    const before = callback('beforeVolumeChange', { ...context, persistChapter: () => gate.promise })
+    const request = before()
     context.workspaceOwnerRef.current = { novelId: 'n', epoch: 3 }
-    gate.resolve(true)
-    await request
-    expect(setVolumeSettings).not.toHaveBeenCalled()
+    gate.resolve(undefined)
+    await expect(request).resolves.toBe(false)
+    expect(context.toast.error).not.toHaveBeenCalled()
   })
   it('drops late workspace payloads when ownership changes', async () => {
     const context = guardContext(), gate = deferred<unknown>()
