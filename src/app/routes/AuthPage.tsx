@@ -261,7 +261,7 @@ function LegacyAuthPage({ mode }: AuthPageProps) {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (policyConsentPending) return
+    if (submitting || policyConsentPending) return
     setSubmitting(true)
     setErrorMessage('')
     setHintMessage('')
@@ -299,6 +299,7 @@ function LegacyAuthPage({ mode }: AuthPageProps) {
         unreadMessageCount: payload.user.unreadMessageCount,
         unreadNotificationCount: payload.user.unreadNotificationCount,
       })
+      toast.success(isSmsFlow && shouldCollectProfile ? '注册成功。' : '登录成功。')
 
       // 重新登录后：游客期的 /me 等缓存全部作废，并立即水合云端书架/阅读进度，
       // 避免个人中心的书架短暂为空（启动时的水合在游客态下已静默失败过）
@@ -321,7 +322,9 @@ function LegacyAuthPage({ mode }: AuthPageProps) {
 
       navigate(redirectPath, { replace: true })
     } catch (error) {
-      setErrorMessage(error instanceof ApiClientError ? error.message : '暂时无法完成提交，请稍后再试。')
+      const message = error instanceof ApiClientError ? error.message : '暂时无法完成提交，请稍后再试。'
+      setErrorMessage(message)
+      toast.error(message)
     } finally {
       setSubmitting(false)
     }
@@ -466,7 +469,7 @@ function LegacyAuthPage({ mode }: AuthPageProps) {
           )}
 
           {requiresPolicyConsent && (legal?.registrationAvailable ? (
-            <div className="flex items-center justify-center gap-2 text-sm leading-6">
+            <div className={cn('flex items-center gap-2 text-sm leading-6', !shouldCollectProfile && 'justify-center')}>
               <input
                 id="auth-policy-consent"
                 type="checkbox"
@@ -504,12 +507,12 @@ function LegacyAuthPage({ mode }: AuthPageProps) {
         </form>
 
         <p className="mt-6 text-center text-sm text-[var(--text-secondary)]">
-          {isRegisterPage ? '已经有账户？' : '还没有账户？'}{' '}
+          {isRegisterPage ? '已经有账户？ ' : null}
           <Link
             to={isRegisterPage ? `/login?redirect=${encodeURIComponent(redirectPath)}` : `/register?redirect=${encodeURIComponent(redirectPath)}`}
             className="font-semibold text-[var(--color-brand)]"
           >
-            {isRegisterPage ? '去登录' : '创建账户'}
+            {isRegisterPage ? '去登录' : '还没有账户？点击创建！'}
           </Link>
         </p>
 

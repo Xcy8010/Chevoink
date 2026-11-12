@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assertBlobNames, assertTestsPassed, makeTestPlan, selectShard, validateReceipts, validateTestPlan, type TestPlan } from '../../scripts/lib/ci-test-plan.js'
+import { assertBlobNames, assertCoverageBlobDigest, assertTestsPassed, makeTestPlan, selectShard, validateReceipts, validateTestPlan, type TestPlan } from '../../scripts/lib/ci-test-plan.js'
 
 const weights = [100, 80, 30, 20, 10].map((durationMs, index) => ({ path: `tests/unit/file-${index}.test.ts`, durationMs }))
 const revision = 'test-revision'
@@ -101,6 +101,16 @@ describe('CI report completeness gate', () => {
     for (const names of [['blob-1-2.json'], ['blob-1-2.json', 'blob-2-3.json'], ['blob-1-2.json', 'blob-2-2.json', 'blob-3-2.json'], ['blob-1-2.json', 'blob-1-2.json'], ['blob-1-2.json', 'blob-2-2.json', 'foreign.txt']]) {
       expect(() => assertBlobNames(names, 2)).toThrow()
     }
+  })
+
+  it('rejects a downloaded blob without the digest validated for its shard', () => {
+    const receipt = { revision, index: 1, count: 2, files: [weights[0].path] }
+    const digest = 'a'.repeat(64)
+    const sealed = { ...receipt, blobSha256: digest }
+    expect(() => assertCoverageBlobDigest(sealed, 1, digest)).not.toThrow()
+    expect(() => assertCoverageBlobDigest(receipt, 1, digest)).toThrow('coverage blob')
+    expect(() => assertCoverageBlobDigest(sealed, 1, 'b'.repeat(64))).toThrow('coverage blob')
+    expect(() => assertCoverageBlobDigest(sealed, 2, digest)).toThrow('coverage blob')
   })
 
   it('verifies each receipt belongs to this revision and contains exactly its assigned files', () => {

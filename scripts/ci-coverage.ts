@@ -1,16 +1,16 @@
-import { readFileSync, readdirSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { createHash } from 'node:crypto'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { validateCoverageBlob, validateCoverageSummary } from './lib/ci-coverage.js'
 
-const [command, target] = process.argv.slice(2)
-if (!target || process.argv.length !== 4) throw new Error('Expected blob <file>, blobs <directory>, or summary <file>')
-const read = (path: string): unknown => JSON.parse(readFileSync(path, 'utf8'))
-if (command === 'blob') {
-  console.log(JSON.stringify({ coverageBlob: target, ...validateCoverageBlob(read(target), process.cwd()) }))
-} else if (command === 'blobs') {
-  const names = readdirSync(target)
-  if (!names.length || names.some(name => !/^blob-\d+-\d+\.json$/u.test(name))) throw new Error('Missing or unexpected coverage blob files')
-  for (const name of names) console.log(JSON.stringify({ coverageBlob: name, ...validateCoverageBlob(read(resolve(target, name)), process.cwd()) }))
-} else if (command === 'summary') {
-  console.log(JSON.stringify({ mergedCoverage: target, ...validateCoverageSummary(read(target), process.cwd()) }))
-} else throw new Error('Expected blob, blobs, or summary')
+const [command, target, receiptPath, ...extra] = process.argv.slice(2)
+if (command === 'blob' && target && receiptPath && !extra.length) {
+  const bytes = readFileSync(target)
+  const coverage = validateCoverageBlob(JSON.parse(bytes.toString('utf8')), process.cwd())
+  const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'))
+  const blobSha256 = createHash('sha256').update(bytes).digest('hex')
+  writeFileSync(receiptPath, JSON.stringify({ ...receipt, blobSha256 }) + '\n')
+  console.log(JSON.stringify({ coverageBlob: target, ...coverage, blobSha256 }))
+} else if (command === 'summary' && target && !receiptPath) {
+  const summary = JSON.parse(readFileSync(target, 'utf8'))
+  console.log(JSON.stringify({ mergedCoverage: target, ...validateCoverageSummary(summary, process.cwd()) }))
+} else throw new Error('Expected blob <file> <receipt>, or summary <file>')

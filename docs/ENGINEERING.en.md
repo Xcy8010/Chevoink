@@ -119,10 +119,12 @@ React SPA + Express + PostgreSQL monolith for writing, reading, community and ad
 
 The candidate Windows shell in `desktop/windows/` loads the same-origin website using Tauri/WebView2, without duplicating business logic or running a local backend. Signing and real-device release acceptance are incomplete; see [Windows acceptance status](WINDOWS_DESKTOP.md). Its Node/Rust toolchain must not become a production API installation or deployment dependency.
 
+Web/API and current Windows source live on `main`. The `chevoink-windows` branch is historical. The Android native project lives in `android/` on the `android-shell` branch of the same repository and uses its own build and signing process. See [GIT-SYNC.md](GIT-SYNC.md).
+
 ### Windows change boundaries
 
 - Platform identifiers select compatibility paths, not authorization. Windows changes must preserve Android UA detection, APK updates and voice-plugin paths.
-- Keep native capabilities in the host and the two narrow remote commands. Any added command requires origin, ACL, payload and negative-test review; no generic shell or filesystem-path bridge.
+- Keep native capabilities in the host. The remote page uses narrow commands for version reporting, the save handshake, and allowlisted settings actions. Review origin, ACL, payloads, and negative tests for any added command.
 - Normal close/update must await the existing save pipeline. Unknown or failed saves and active recording/downloads keep the window open by default. Never auto-resolve reviews, resend tasks or settle charges.
 - Record web gates and Windows fmt/clippy/test/packaging separately against a specific commit. DOM tests cannot replace real WebView2, installation, updates, permissions or DPI acceptance.
 - Apply Authenticode before updater signing and hashes. Platform releases must not claim the repository-wide Latest flag. Do not advertise unverified stable downloads or present internal packages as stable releases.
@@ -137,10 +139,18 @@ The candidate Windows shell in `desktop/windows/` loads the same-origin website 
 | Durable execution | `runtime-identity.ts`, `runtime-lease.ts`, `runtime-state.ts`, `runtime-operations.ts`: identity, owner/epoch, checkpoints and receipts |
 | Research | `research-sources.ts`, `research-ranges.ts`, search/read tools: source versions, cursors, attempts and task budgets |
 | Billing | `ai-service.ts`, `credits.ts`, `billing/`: usage, wallets, frozen prices, reservations, calculations and replay |
-| Data | Prisma 6.12.0; 106 schema models and 72 migration directories |
+| Data | Prisma 6.12.0, with models in `prisma/schema.prisma` and migrations in `prisma/migrations/` |
 | Release | `scripts/deploy-production.ps1`, `deploy/deploy-production.sh`, nginx and PM2 |
 
 Node **22.23.2** and npm **10.9.8** are pinned in the runtime/manifest/lock contract. Production checks the actual API process binary, not only the build shell.
+
+From the repository root, run `node scripts/start-work.mjs` to check the checkout and `node scripts/cloud-setup.mjs --install` to install locked dependencies, verify the runtime, and generate Prisma Client. Dependency setup performs no database operations. Configure a dedicated development database before running `npm run prisma:migrate:deploy`, then start Vite and the API together with `npm run dev`. For full database tests, configure a separate isolated database using `tests/.env.test.example`, set `APP_ENV=test` and `TEST_DATABASE_REQUIRED=true`, then run `npm run test:db:verify`, `npm run test:db:migrate`, and `npx vitest run --coverage`.
+
+### Account flows
+
+- With email authentication enabled (`ACCOUNT_EMAIL_AUTH_ENABLED=true`), new users register with an email code and submit the effective Terms of Service and Privacy Policy versions. Existing users sign in with an email address or phone number and a password or verification code. When disabled, `/api/auth/options` selects the legacy SMS interface.
+- The three post-registration steps verify a phone number, set a password, and complete the profile. Users can skip any step. Step 2 uses the account owner's email-verified session for initial password setup, with two password fields. Password changes in Settings and account recovery still require a verification code.
+- Application releases with `legacyEmailBinding` require older phone accounts with no saved email address to add one. Users with a saved address can verify it in account security settings. Studio requires a verified phone, with a server-side exception for unbanned superadmins. See `api/routes/account-auth.ts`, `api/lib/account-access.ts`, and `src/app/routes/AccountAccessGate.tsx`.
 
 ## 2. Changes and behavior boundaries
 
@@ -236,7 +246,7 @@ Offline replay cutoff: 2026-09-08 15:40 UTC. Of 6,570 observations, only 51 Spee
 
 Fault tests establish control-flow invariants. There is **no published matched before/after experiment** for identical tasks, models and budgets, so no verified percentage Token saving, P95 improvement or cash-cost reduction is claimed. Model quality, chapter length and quality gates were not lowered to manufacture savings.
 
-## 5. Verification and performance snapshot
+## 5. Historical verification and performance snapshot
 
 Revision `71f7adc`, isolated remote PostgreSQL 16 with least-privileged role and Node 22.23.2; no rewriting production author content for tests.
 
@@ -265,11 +275,11 @@ Public-beta policy is independent of the global model-call pause. Toggling requi
 
 While stopped, Studio and account display the free plan and omit daily giveaway/reset/percentage promises, retaining real account balances. Anonymous plan/docs read only minimal public policy without initializing settings or exposing accounts. Additive fields default to beta enabled; deployment does not stop beta. After dynamic identities are persisted or beta is stopped, recovery must retain compatible identity parsing and policy handling rather than blindly restoring older code, deleting user tasks or down-migrating the database.
 
-Pipeline: pinned runtime → npm ci → Prisma generation → isolated DB/role validation → migrations → check → lint → coverage tests → Agent eval → build → both dependency audits.
+[GitHub CI](../.github/workflows/ci.yml) runs for pull requests and pushes to `main` or the historical `chevoink-windows` branch. The static job runs type checks, lint, the build, deterministic Agent evaluation, and both production and full dependency audits. The plan balances shards using Vitest's configured file discovery. Up to 18 shards run concurrently. Each gets a fresh PostgreSQL 16 service, verifies the least-privileged role before applying migrations, runs test files serially, and rejects skips and failures. Each shard validates coverage and records its report's SHA-256. The merge checks file completeness, receipts, and report digests before enforcing the original coverage floors of 30% statements, 73% branches, 52% functions, and 30% lines. The final status is `check / lint / test / build / audit`.
 
-Release archives use **git archive HEAD of the exact successful CI SHA**, not uncommitted drafts, secrets or private investigations. Current deployment still installs/builds in place and reloads PM2; old hashed assets remain and index.html is published last. Fully immutable application directories, atomic application switching and automated rollback are **not yet delivered**.
+Releases use `git archive HEAD` for the candidate SHA and require that SHA's original successful full CI run (attempt 1). The PowerShell entrypoint checks the candidate and expected live SHA. The host installs and builds in the candidate directory, then switches directories and restarts PM2. Frontend artifacts can be registered with a digest and assigned to stable or test channels. `-ApiOnly` switches the shared API independently. Full maintenance deployments preserve existing hashed assets and write the entry page last. The script has no automatic rollback. If the outcome is unknown, check the operation journal, running process, health, and version before any retry.
 
-`-SkipLocalChecks` is allowed only with authorization and equivalent controlled remote evidence for that SHA. It is not permission to skip validation. Interrupting active Agents requires deployment authorization.
+`-SkipLocalChecks` requires equivalent controlled remote evidence for that SHA. An authorized routine API restart uses the existing recovery flow. Actively canceling Agent tasks requires separate authorization.
 
 Authentication distinguishes verified / missing / unavailable. Unverifiable sessions return `AUTH_SESSION_UNAVAILABLE`; database failures must neither clear cookies as if logged out nor confer verified access. See `auth-session.ts` and `api/app.ts`.
 

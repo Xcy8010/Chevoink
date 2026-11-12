@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 
 import Button from '@/components/ui/Button'
+import { useToast } from '@/components/ui/toast-context'
 import { requiresLegacyEmailBinding } from '@/features/account/account-access'
 import { IdentityVerificationForm, SetupPasswordForm } from '@/features/account/AccountVerificationForms'
 import ProfileSetupForm from '@/features/account/ProfileSetupForm'
@@ -73,6 +74,7 @@ function AccountSetupStep({ user, step }: { user: User; step: 1 | 2 | 3 }) {
   const [formSaving, setFormSaving] = useState(false)
   const [error, setError] = useState('')
   const updateSession = useUpdateAccountSession()
+  const toast = useToast()
   const isPhone = step === 1
   const isPassword = step === 2
   const fulfilled = isPhone ? user.phoneVerified : isPassword ? user.hasPassword ?? user.passwordConfigured : false
@@ -86,15 +88,21 @@ function AccountSetupStep({ user, step }: { user: User; step: 1 | 2 | 3 }) {
     try {
       if (savingPassword) {
         const result = await postAuth<AuthSessionPayload>('/account/setup/password', request)
-        updateSession(result.user, result.tokens)
+        if (updateSession(result.user, result.tokens)) toast.success('登录密码已设置。')
       } else {
         const result = request === 'back'
           ? await postAuth<{ user: User }>('/account/setup/back', { step })
           : await postAuth<{ user: User }>('/account/setup', { step, skip: request === 'skip' })
-        updateSession(result.user)
+        if (updateSession(result.user)) {
+          if (request === 'back') toast.success('已返回上一步。')
+          else if (request === 'skip') toast.success(isPhone ? '已跳过手机号验证。' : isPassword ? '已跳过密码设置。' : '已跳过个人资料设置。')
+          else toast.success(isPhone ? '手机号已验证。' : isPassword ? '登录密码已设置。' : '个人资料设置已完成。')
+        }
       }
     } catch (error) {
-      setError(authError(error, savingPassword ? '暂时无法保存密码，请稍后重试。' : '暂时无法切换步骤，请稍后重试。'))
+      const message = authError(error, savingPassword ? '暂时无法保存密码，请稍后重试。' : '暂时无法切换步骤，请稍后重试。')
+      setError(message)
+      toast.error(message)
     } finally {
       requestPending.current = false
       setPending(false)
@@ -109,7 +117,7 @@ function AccountSetupStep({ user, step }: { user: User; step: 1 | 2 | 3 }) {
           {isPassword && <p className="text-sm text-[var(--text-secondary)]">已设置登录密码</p>}
           <Button variant="primary" className="w-full" disabled={pending} onClick={onSaved}>{pending ? '提交中…' : '继续'}</Button>
         </div>
-          : isPhone ? <IdentityVerificationForm kind="phone" submitLabel="验证并继续" disabled={pending} onSaving={setFormSaving} onSaved={onSaved} />
+          : isPhone ? <IdentityVerificationForm kind="phone" submitLabel="验证并继续" disabled={pending} notifySuccess={false} onSaving={setFormSaving} onSaved={onSaved} />
             : isPassword ? <SetupPasswordForm disabled={pending} onSave={password => { void finish({ password }) }} />
               : <ProfileSetupForm user={user} disabled={pending} onSaving={setFormSaving} onSaved={onSaved} />}
         {error && <p role="alert" className="mt-3 text-sm text-[var(--color-danger,#dc2626)]">{error}</p>}

@@ -5,6 +5,7 @@ import { RotateCw, X } from 'lucide-react'
 import { ApiClientError, requestJson } from '@/app/api-client'
 import Button from '@/components/ui/Button'
 import TextInput from '@/components/ui/TextInput'
+import { useToast } from '@/components/ui/toast-context'
 import { cn } from '@/lib/utils'
 import { authError, type CaptchaAnswer, type CodeReceipt } from './auth-api'
 
@@ -19,6 +20,7 @@ export function AccountDialog({ title, description, step, brand, children, onClo
   onClose?: () => void
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null)
+  const { registerDialog } = useToast()
   const transition = useRef({ step, backward: false })
   const titleId = useId()
   const descriptionId = useId()
@@ -28,15 +30,18 @@ export function AccountDialog({ title, description, step, brand, children, onClo
   useLayoutEffect(() => {
     transition.current = { step, backward }
   }, [step, backward])
-  useEffect(() => {
+  useLayoutEffect(() => {
     const dialog = dialogRef.current
+    if (!dialog) return
     const previousFocus = document.activeElement
-    dialog?.showModal()
+    dialog.showModal()
+    const unregister = registerDialog?.(dialog)
     return () => {
-      dialog?.close()
+      unregister?.()
+      dialog.close()
       if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus({ preventScroll: true })
     }
-  }, [])
+  }, [registerDialog])
   useEffect(() => {
     const dialog = dialogRef.current
     const field = step ? undefined : dialog?.querySelector<HTMLElement>('input:not([type="file"])')
@@ -90,6 +95,7 @@ function CaptchaPrompt({ onSend, onDone, onClose }: {
   const [loading, setLoading] = useState(true)
   const [sending, setSending] = useState(false)
   const answerId = useId()
+  const toast = useToast()
 
   async function refresh() {
     setLoading(true)
@@ -114,8 +120,11 @@ function CaptchaPrompt({ onSend, onDone, onClose }: {
     setError('')
     try {
       onDone(await onSend({ captchaId: captcha.captchaId, captchaAnswer: answer.trim() }))
+      toast.success('验证码请求已提交，请查收。')
     } catch (error) {
-      setError(authError(error, '暂时无法发送验证码，请重试。'))
+      const message = authError(error, '暂时无法发送验证码，请重试。')
+      setError(message)
+      toast.error(message)
       if (error instanceof ApiClientError && error.code === 'AUTH_CAPTCHA_INVALID') await refresh()
     } finally {
       setSending(false)

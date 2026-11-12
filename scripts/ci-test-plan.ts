@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto'
 import { appendFileSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createVitest } from 'vitest/node'
-import { assertBlobNames, makeTestPlan, testPath, validateReceipts, validateTestPlan, type TestPlan, type TestReceipt } from './lib/ci-test-plan.js'
+import { assertBlobNames, assertCoverageBlobDigest, makeTestPlan, testPath, validateReceipts, validateTestPlan, type TestPlan, type TestReceipt } from './lib/ci-test-plan.js'
 
 const root = process.cwd()
 const revision = process.env.GITHUB_SHA ?? process.env.CI_TEST_REVISION ?? ''
@@ -33,7 +34,16 @@ if (command === 'plan') {
   const names = readdirSync('.ci-test-reports')
   const expected = plan.shards.map(shard => `shard-${shard.index}.json`)
   if (names.length !== expected.length || expected.some(name => !names.includes(name))) throw new Error('Test receipt files differ from plan')
-  validateReceipts(names.map(name => JSON.parse(readFileSync(resolve('.ci-test-reports', name), 'utf8')) as TestReceipt), plan)
+  const receipts = expected.map(name => JSON.parse(readFileSync(resolve('.ci-test-reports', name), 'utf8')) as TestReceipt)
+  validateReceipts(receipts, plan)
+  // The owning shard validates the raw coverage map. Check the exact downloaded
+  // bytes before Vitest parses them for the merge.
+  for (const [offset, receipt] of receipts.entries()) {
+    const index = offset + 1
+    const blob = resolve('.vitest-reports', `blob-${index}-${plan.count}.json`)
+    const digest = createHash('sha256').update(readFileSync(blob)).digest('hex')
+    assertCoverageBlobDigest(receipt, index, digest)
+  }
   console.log(`Verified ${plan.count} blobs and receipts covering ${files.length} unique test files.`)
 } else {
   throw new Error('Expected plan or verify-reports')

@@ -127,6 +127,8 @@ Chevoink 是 React SPA + Express + PostgreSQL 的单体应用，包含小说创�
 
 Windows 候选壳位于 `desktop/windows/`，使用 Tauri/WebView2 加载同源网站，不复制业务、不启动本地后端。尚未完成签名和真机发布验收，见 [Windows 验收状态](WINDOWS_DESKTOP.md)。此目录的 Node/Rust 工具链不进入生产 API 安装或部署依赖。
 
+Web/API 与 Windows 当前源码均在 `main`；`chevoink-windows` 是历史分支。Android 原生工程在同仓库 `android-shell` 分支的 `android/`，构建与签名走 Android 自身流程。同步规则见 [GIT-SYNC.md](GIT-SYNC.md)。
+
 ### Windows 改动边界
 
 - 平台标识只作兼容分流，不是授权凭证；Windows 适配不能改写 Android 的 UA、APK 更新或语音插件路径。
@@ -145,10 +147,18 @@ Windows 候选壳位于 `desktop/windows/`，使用 Tauri/WebView2 加载同源�
 | 持久执行 | `runtime-identity.ts`、`runtime-lease.ts`、`runtime-state.ts`、`runtime-operations.ts`：身份、owner/epoch、检查点、操作回执 |
 | 研究 | `research-sources.ts`、`research-ranges.ts`、搜索/读取工具：来源版本、分页、失败尝试、任务范围预算 |
 | 计费 | `ai-service.ts` 用量与调用；`credits.ts` 钱包；`billing/` 价格、快照、预留、分项计算与回放 |
-| 数据 | Prisma 6.12.0；当前 schema 106 个 model、72 个迁移目录，非覆盖率或质量得分 |
+| 数据 | Prisma 6.12.0，模型在 `prisma/schema.prisma`，迁移在 `prisma/migrations/` |
 | 发布 | `scripts/deploy-production.ps1` + `deploy/deploy-production.sh`；nginx 与 PM2 |
 
 固定运行时：Node **22.23.2**、npm **10.9.8**，以 `.node-version`、package engines、锁文件和 `runtime:verify` 一致性检查为准。生产实际 API 进程也校验 Node，而非只检查构建 shell。
+
+从仓库根目录运行 `node scripts/start-work.mjs` 核对当前 checkout，使用 `node scripts/cloud-setup.mjs --install` 安装锁定依赖、校验运行时并生成 Prisma Client。依赖准备不操作数据库。配置专用开发库后，`npm run prisma:migrate:deploy` 应用迁移，`npm run dev` 并行启动 Vite 和 API。完整数据库测试使用独立的隔离测试库，以 `tests/.env.test.example` 为模板，设置 `APP_ENV=test` 和 `TEST_DATABASE_REQUIRED=true`，再用 `npm run test:db:verify`、`npm run test:db:migrate` 和 `npx vitest run --coverage` 验证。
+
+### 账号流程
+
+- 邮箱认证启用时（`ACCOUNT_EMAIL_AUTH_ENABLED=true`），新用户通过邮箱验证码注册并提交生效的服务条款及隐私政策版本。已有用户用邮箱或手机号配合密码或验证码登录。未开启时保留旧短信界面，由 `/api/auth/options` 返回的能力决定入口。
+- 注册后三步为验证手机号、设置登录密码、完善个人资料。三步可跳过；第 2 步首次设置密码使用已验邮箱的本人会话，界面只需输入两次密码。设置页修改密码和找回密码仍需验证码。
+- 启用 `legacyEmailBinding` 的应用版本要求没有保存邮箱的旧手机号账号补绑。已保存地址的用户可以在账号安全设置中验证。进入创作区需要已验证手机号，服务端对未封禁的超级管理员放行。入口见 `api/routes/account-auth.ts`、`api/lib/account-access.ts` 和 `src/app/routes/AccountAccessGate.tsx`。
 
 ## 2. 本轮修复与行为边界
 
@@ -248,7 +258,7 @@ BYOK Agent 的质量检查、连续性检查、修订、研究合成和会话命
 
 **结果边界**：故障测试证明上述控制流和不变量；目前没有发布后同任务、同模型、同预算配对的 Token/P95/质量统计，不能给出“节省 X%”或“速度提升 X 倍”。没有降模型、缩正文或绕过质量门来制造降本数据。
 
-## 5. 验证快照与性能
+## 5. 历史验证快照与性能
 
 基线 `71f7adc`，远端隔离 PostgreSQL 16、最小权限角色、Node 22.23.2；未在生产作者内容上做改写测试。
 
@@ -277,11 +287,11 @@ BYOK Agent 的质量检查、连续性检查、修订、研究合成和会话命
 
 公测停止时，创作区和 account 按实际政策显示免费版，隐藏每日赠送、重置和百分比提示，余额仍取真实账户。匿名套餐/文档只读取最小公共政策接口，不初始化设置或泄露账户。部署新增字段默认公测开启，不自动执行停止公测。写入动态档位或停止公测后，不能直接回退到不识别这些身份与政策的旧代码；恢复须保留兼容解析和政策处理，不删除用户任务或下迁移数据库。
 
-流水线：固定运行时 → `npm ci` → Prisma generate → 隔离库角色/URL 校验 → migrate → check → lint → coverage tests → Agent eval → build → 两类依赖 audit。
+[GitHub CI](../.github/workflows/ci.yml) 在 PR 以及向 `main` 或历史 `chevoink-windows` 分支推送时运行。静态作业执行类型检查、Lint、构建、Agent 确定性评测和生产及全依赖审计。测试计划按 Vitest 实际发现的文件均衡分片，最多 18 个分片同时运行。每个分片拥有独立 PostgreSQL 16，校验最小权限角色后迁移，逐文件执行并拒绝任何跳过或失败。分片先验证覆盖率并记录报告的 SHA-256，合并作业核对全量文件、回执及报告摘要，再执行原覆盖率门禁：语句 30%、分支 73%、函数 52%、行 30%。最终状态名为 `check / lint / test / build / audit`。
 
-发布使用 `git archive HEAD`，必须绑定 CI 成功的同一 SHA，不能打包未提交草稿、密钥或私有调查文件。远端当前仍原目录安装依赖、迁移及构建，再 PM2 重载；保留旧 hash 静态文件，最后发布 index.html。**尚不是完整不可变 release 目录/原子应用切换/自动回滚部署。**
+发布从候选 SHA 的 `git archive HEAD` 构建，要求该提交的 CI 首次运行（attempt 1）完整通过。PowerShell 入口校验候选和预期线上 SHA；远端在候选目录准备依赖和构建，再按维护流程切换目录并重启 PM2。Web 前端可登记为带摘要的应用版本，由稳定或测试通道分配；`-ApiOnly` 用于单独切换共享 API。全量维护发布保留旧哈希资源并最后写入入口页。脚本没有自动回滚；若结果未知，先核对操作日志、实际进程、健康与版本。
 
-`-SkipLocalChecks` 仅用于该 SHA 已通过受控远端等价门禁且得到授权的场景，不是跳过验证。停止运行中的 Agent 必须获得部署中断授权，暂停与迟到结果边界不能绕过。
+`-SkipLocalChecks` 仅接受受控的同 SHA 远端等价门禁。已授权的例行 API 重启沿用现有恢复流程，主动取消 Agent 任务需要单独授权。
 
 认证区分 verified / missing / unavailable；无法核实返回 `AUTH_SESSION_UNAVAILABLE`，不把数据库故障当“未登录”而清 Cookie，也不把未知状态视为已验证。入口见 `auth-session.ts`、`api/app.ts`。
 

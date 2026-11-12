@@ -9,12 +9,12 @@ import AppRouter from '../../src/app/AppRouter'
 import { useShellStore } from '../../src/store/useShellStore'
 import type { AuthSessionPayload, User } from '../../shared/contracts'
 
-const mocks = vi.hoisted(() => ({ requestJson: vi.fn(), hydrateReadingSync: vi.fn() }))
+const mocks = vi.hoisted(() => ({ requestJson: vi.fn(), hydrateReadingSync: vi.fn(), toastError: vi.fn(), toastSuccess: vi.fn() }))
 vi.mock('../../src/app/api-client', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../src/app/api-client')>(),
   requestJson: mocks.requestJson,
 }))
-vi.mock('../../src/components/ui/toast-context', () => ({ useToast: () => ({ error: vi.fn(), success: vi.fn() }) }))
+vi.mock('../../src/components/ui/toast-context', () => ({ useToast: () => ({ error: mocks.toastError, success: mocks.toastSuccess }) }))
 vi.mock('../../src/components/layout/AppShell', () => ({ default: () => null }))
 vi.mock('../../src/features/home/reading-sync', () => ({ hydrateReadingSync: mocks.hydrateReadingSync }))
 vi.mock('../../src/app/route-config', async () => {
@@ -81,6 +81,8 @@ function submitEmailBinding(dialog: HTMLElement, email: string) {
 
 beforeEach(() => {
   mocks.requestJson.mockReset()
+  mocks.toastError.mockReset()
+  mocks.toastSuccess.mockReset()
   mocks.hydrateReadingSync.mockReset().mockResolvedValue(false)
   useShellStore.getState().setGuest()
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value(this: HTMLDialogElement) { this.setAttribute('open', '') } })
@@ -95,11 +97,11 @@ afterEach(() => {
   window.history.replaceState(null, '', '/')
 })
 
-it.each(['login', 'register'] as const)('centers policy consent on %s and submits only after checking the current policies', async (mode) => {
+it.each(['login', 'register'] as const)('aligns policy consent on %s and submits only after checking the current policies', async (mode) => {
   mount(mode)
   const registering = mode === 'register'
   const checkbox = await screen.findByRole('checkbox', { name: /我已阅读并同意/ }) as HTMLInputElement
-  expect(checkbox.parentElement?.classList.contains('justify-center')).toBe(true)
+  expect(checkbox.parentElement?.classList.contains('justify-center')).toBe(!registering)
   expect(checkbox.parentElement?.classList.contains('items-center')).toBe(true)
   expect(screen.getByRole('link', { name: '服务条款' }).getAttribute('href')).toBe('/legal?kind=terms')
   expect(screen.getByRole('link', { name: '隐私政策' }).getAttribute('href')).toBe('/legal?kind=privacy')
@@ -153,6 +155,9 @@ it('registers by email with the current legal versions and preserves the referra
     method: 'POST',
     body: JSON.stringify({ email: 'reader@example.com', code: '123456', legalConsent: { termsVersionId: 'terms-1', privacyVersionId: 'privacy-1' }, referralCode: 'ABC' }),
   }))
+  expect((await screen.findByRole('alert')).textContent).toBe('暂时无法完成，请稍后重试。')
+  expect(mocks.toastError).toHaveBeenCalledExactlyOnceWith('暂时无法完成，请稍后重试。')
+  expect(mocks.toastSuccess).not.toHaveBeenCalled()
 })
 
 it('opens the signup code help without requesting a verification code', async () => {

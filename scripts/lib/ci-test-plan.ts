@@ -75,7 +75,13 @@ export function assertBlobNames(names: string[], count: number): void {
   if (names.length !== expected.length || new Set(names).size !== names.length || expected.some(name => !names.includes(name))) throw new Error('Missing, extra, or misnumbered Vitest blob report')
 }
 
-export interface TestReceipt { revision: string; index: number; count: number; files: string[] }
+export interface TestReceipt { revision: string; index: number; count: number; files: string[]; blobSha256?: string }
+export function assertCoverageBlobDigest(receipt: TestReceipt, index: number, digest: string): void {
+  if (receipt.index !== index || receipt.blobSha256 !== digest) {
+    throw new Error(`Missing or mismatched validated coverage blob for shard ${index}`)
+  }
+}
+
 export function validateReceipts(receipts: TestReceipt[], plan: TestPlan): void {
   if (receipts.length !== plan.count || new Set(receipts.map(receipt => receipt.index)).size !== plan.count) throw new Error('Missing or duplicate test receipt')
   for (const receipt of receipts) {

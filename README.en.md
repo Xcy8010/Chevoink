@@ -144,7 +144,7 @@ Studio settings let you assign built-in or custom models and reasoning efforts t
 | --- | --- |
 | Try the product now | [Live site](https://chevoink.chevolink.com) (web, no install needed) |
 | Install the Android app | [Download & install guide](#download--install-android-app) · [Releases page](https://github.com/Xcy8010/chevoink/releases) |
-| Windows client development | [Build instructions](desktop/windows/README.md) · [Development status](docs/WINDOWS_DESKTOP.md); internal candidate, not yet a signed public release |
+| Windows client | [Build instructions](desktop/windows/README.md) · [Acceptance status](docs/WINDOWS_DESKTOP.md). An unsigned, manually installed preview is available. |
 | Learn how to use it | [User guide](#user-guide) |
 | Explore features | [Feature overview](#feature-overview) |
 | Understand Agent 4.0 | [Runtime flow](#runtime-flow) · [System architecture](#system-architecture) |
@@ -159,8 +159,8 @@ Studio settings let you assign built-in or custom models and reasoning efforts t
 Pick either channel:
 
 1. **GitHub Releases (recommended)**
-   - Open the [Releases page](https://github.com/Xcy8010/chevoink/releases) and enter the latest version (e.g. `v1.50`);
-   - Download `chevoink-vX.XX.apk` from the Assets section;
+   - Open the [Releases page](https://github.com/Xcy8010/chevoink/releases) and select an Android release with an APK;
+   - Download the APK from the Assets section;
    - Tap to install. If the system warns about "unknown sources", allow "install anyway" in the dialog (the APK is signed with the release key).
 2. **Direct download from the official site**
    - Visit <https://chevoink.chevolink.com/download/chevoink.apk> in a mobile browser and install directly.
@@ -171,7 +171,7 @@ No manual upgrades needed afterwards: the app checks for new versions on launch,
 
 ### Readers
 
-1. **Sign in**: phone number + SMS verification code — no registration flow; the account is created on first login;
+1. **Create an account or sign in**. New users register with an email verification code and accept the current Terms of Service and Privacy Policy. After registration, you can verify your phone, set a password, and complete your profile. Each step can be skipped. Existing users can sign in with an email address or phone number using a password or a code sent to that address or number. Older phone accounts with no saved email address must add one after signing in.
 2. **Find books**: the bookstore home offers carousels, rankings and category recommendations, plus title/author search;
 3. **Read**: page-flip navigation inside the reader; tap the center to summon the menu for font size, typeface, paper theme and flip mode; reading progress and bookshelf sync to the cloud, so you can continue on another device;
 4. **Listen**: enable TTS narration in the reader, with selectable voices and speeds; flip mode shows a bottom playback capsule;
@@ -179,7 +179,7 @@ No manual upgrades needed afterwards: the app checks for new versions on launch,
 
 ### Authors
 
-1. Open the **Studio** to create a work or describe your story idea to the Agent.
+1. Verify your phone to enter **Studio**, then create a novel or describe your writing idea to the Agent.
 2. Write in the chapter editor or ask **Chevoink Agent 4.0** to help with research, settings, outlines, chapter drafts and revisions.
 3. Browse built-in skills and manage personal skills in **Work Skills**.
 4. Attach **images (up to 6) and files (up to 3, pdf/docx/txt/md)** to a prompt and view attachments in the conversation.
@@ -201,7 +201,7 @@ No manual upgrades needed afterwards: the app checks for new versions on launch,
 - **Reading**: bookstore home (carousels, rankings, category picks), cloud-synced bookshelf & reading progress, immersive reader, TTS narration
 - **Studio**: Codex-inspired Work/IDE workspace; Agent 4.0 with Research Dossier, Skill OS, Story Compiler, Chapter Bridge, human-quality gate, licensed craft retrieval, work-private Style DNA, first-three-chapter prototyping, and blind-review pipeline; cross-novel task search/pin/archive; branch/diff/conflict-safe merge; embedded subagents; schedules; permission sandbox; replay; multimodal attachments; web/in-platform research; cross-session memory; relationship graph; AI covers; and scoped ZIP export
 - **Community**: posts & topics, recommendation algorithm, comments/likes/bookmarks, follows & fans, direct messages with online presence
-- **Accounts**: phone + SMS-code login (Tencent Cloud SMS), HttpOnly Cookie session + Bearer fallback channel (survives Android shell process kills), public-beta Credits, and one-time referral rewards
+- **Accounts** with email-code registration, email or phone sign-in, code-based password recovery, HttpOnly cookie sessions and client Bearer tokens, public-beta Credits, and one-time referral rewards
 - **Admin console**: data dashboard, user/novel/content governance, encrypted built-in-model configuration, single-user and bulk Credits reset/pause controls, token ranking with user/novel/task drill-down, web-search and image-generation call counts, mobile-friendly
 - **Android client**: Capacitor shell loading the remote site, in-app update checks and APK distribution
 
@@ -214,7 +214,7 @@ No manual upgrades needed afterwards: the app checks for new versions on launch,
 | AI | DeepSeek text generation · Zhipu GLM-4.1V image understanding · OpenAI-compatible image generation · Edge TTS speech synthesis · Bocha web search (multi-engine fallback) |
 | Agent | Agent 4.0 Runtime (`api/lib/agent`): creative skills, project memory, chapter planning, research, review and real-time events |
 | Testing | Vitest + Supertest + Testing Library (unit, PostgreSQL integration and UI interaction) |
-| Deployment | PM2 + nginx (production) · GitHub Actions CI (type check / lint / unit / integration tests on push) · Android Capacitor shell project (separate directory) |
+| Deployment | PM2 + nginx · GitHub Actions (type check, lint, full coverage suite with isolated PostgreSQL, build, Agent evaluation, production and full dependency audits) |
 
 ## Directory Structure
 
@@ -227,25 +227,25 @@ No manual upgrades needed afterwards: the app checks for new versions on launch,
 ├── docs/              # Engineering docs (ENGINEERING & DEVELOPMENT-STANDARDS, both bilingual)
 ├── plan/              # Design proposals and roadmap
 ├── deploy/            # nginx config & server deployment scripts
-├── scripts/           # Deployment / push / data cleanup scripts
+├── scripts/           # Workspace checks, CI, evaluation, and releases
+├── desktop/windows/   # Tauri / WebView2 Windows client (main)
 └── public/            # Static assets
 ```
 
 ## Quick Start
 
-```bash
-# 1. Use pinned Node 22.23.2 / npm 10.9.8, then install locked dependencies
-npm ci
+Work from the repository root on `main` with Node **22.23.2** and npm **10.9.8**. The setup command installs locked dependencies, verifies the runtime, and generates Prisma Client.
 
-# 2. Configure environment variables (see .env.example; fill in DB connection, AI keys, etc.)
-copy .env.example .env   # or: cp .env.example .env on Unix
+```sh
+node scripts/start-work.mjs
+node scripts/cloud-setup.mjs --install
+cp .env.example .env
+```
 
-# 3. Initialize the database
-npm run prisma:generate
+Use `Copy-Item .env.example .env` in Windows PowerShell. Fill in your local development settings and connect to a dedicated development PostgreSQL database before applying migrations to it. Vite proxies `/api` to the default API port 3001.
+
+```sh
 npm run prisma:migrate:deploy
-npm run prisma:seed   # optional: seed data
-
-# 4. Start development (Vite frontend + nodemon backend in parallel)
 npm run dev
 ```
 
@@ -255,8 +255,8 @@ Common scripts:
 | --- | --- |
 | `npm run dev` | Frontend + backend parallel development |
 | `npm run check` | TypeScript type check |
-| `npm run test` | Run tests (Vitest) |
-| `npx vitest run --coverage` | Run tests with local/CI dual-baseline coverage gates |
+| `npm test` | Run Vitest. Full database checks require a separately configured isolated test database. |
+| `npx vitest run --coverage` | Generate coverage. CI applies its thresholds after merging all shards. |
 | `npm run agent3:eval` | Emit a versioned Agent 4.0 deterministic eval snapshot with hashes and code SHA |
 | `npm run lint` | ESLint check |
 | `npm run build` | Production build |
@@ -264,9 +264,9 @@ Common scripts:
 
 ## Deployment & Releases
 
-- **Web/API**: use the `scripts/deploy-production.ps1` entrypoint above with the full live SHA and a passing CI run for the candidate commit. See [engineering](docs/ENGINEERING.en.md) and [cloud development](docs/CLOUD-DEVELOPMENT.md) for configuration.
-- **Android**: build the separate Capacitor shell project and distribute APKs through [Releases](https://github.com/Xcy8010/chevoink/releases).
-- **Windows**: see the [Windows client guide](desktop/windows/README.md) for development and packaging.
+- **Web/API** releases from `main`. An authorized deployment uses the entrypoint above with the full live SHA and the candidate SHA's original successful full GitHub CI run. See [engineering](docs/ENGINEERING.en.md) and [cloud development](docs/CLOUD-DEVELOPMENT.md).
+- **Android** builds the Capacitor shell from `android/` on the `android-shell` branch of this repository. APKs are distributed through [Releases](https://github.com/Xcy8010/chevoink/releases).
+- **Windows** source lives in `desktop/windows/` on `main`. The `chevoink-windows` branch is historical. See the [Windows client guide](desktop/windows/README.md).
 
 ## Environment Variables
 

@@ -144,7 +144,7 @@ flowchart LR
 | --- | --- |
 | 直接体验产品 | [线上地址](https://chevoink.chevolink.com)（网页端，无需安装） |
 | 安装安卓 APP | [下载与安装教程](#下载与安装安卓-app) · [Releases 页面](https://github.com/Xcy8010/chevoink/releases) |
-| Windows 客户端开发 | [构建说明](desktop/windows/README.md) · [开发状态](docs/WINDOWS_DESKTOP.md)；当前为内部候选版，尚未正式签名发布 |
+| Windows 客户端 | [构建说明](desktop/windows/README.md) · [验收状态](docs/WINDOWS_DESKTOP.md)，目前提供未签名的手动安装预览版 |
 | 了解怎么用 | [使用教程](#使用教程) |
 | 了解功能 | [功能一览](#功能一览) |
 | 了解 Agent 4.0 | [运行流程](#运行流程) · [系统架构](#系统架构) |
@@ -159,8 +159,8 @@ flowchart LR
 两种方式任选其一：
 
 1. **GitHub Releases（推荐）**
-   - 打开 [Releases 页面](https://github.com/Xcy8010/chevoink/releases)，进入最新版本（如 `v1.50`）；
-   - 在 Assets 中下载 `chevoink-vX.XX.apk` 到手机；
+   - 打开 [Releases 页面](https://github.com/Xcy8010/chevoink/releases)，选择附有 APK 的 Android 版本；
+   - 在 Assets 中下载 APK 到手机；
    - 点击安装。系统若提示「未知来源应用」，在弹窗中允许「本次安装」即可（APK 已使用发布密钥签名）。
 2. **官网直装**
    - 手机浏览器访问 <https://chevoink.chevolink.com/download/chevoink.apk> 直接下载安装。
@@ -171,7 +171,7 @@ flowchart LR
 
 ### 读者
 
-1. **登录**：手机号 + 短信验证码，无需注册流程，首次登录自动建号；
+1. **注册与登录**：新账号使用邮箱验证码注册，并同意当前的服务条款和隐私政策。注册后可以依次验证手机号、设置登录密码和完善个人资料，三步均可跳过。已有账号可用邮箱或手机号登录，选择密码或对应渠道的验证码。旧手机号账号没有保存邮箱时，登录后须补绑邮箱。
 2. **找书**：书城首页有轮播、榜单与分类推荐，也可搜索书名/作者；
 3. **阅读**：进入正文后左右翻页，点击屏幕中央呼出菜单，可调字号、字体、纸色主题、翻页方式；阅读进度与书架自动云同步，换设备接着读；
 4. **听书**：阅读器内开启 TTS 听书，支持切换音色与语速，翻页模式下有底部播放胶囊；
@@ -179,7 +179,7 @@ flowchart LR
 
 ### 作者
 
-1. 进入**创作区**，创建作品或直接向 Agent 描述你的创作想法。
+1. 验证手机号后进入**创作区**，创建作品或直接向 Agent 描述你的创作想法。
 2. 在章节编辑器写作，或让 **Chevoink Agent 4.0** 协助资料研究、设定、大纲、章节起草与修订。
 3. 在**作品技能**区查看内置技能、管理个人技能，选择适合当前作品的写作方式。
 4. 随提示词附加**图片（≤6 张）与文件（≤3 个，pdf/docx/txt/md）**，在对话中查看附件内容。
@@ -201,7 +201,7 @@ flowchart LR
 - **阅读区**：书城首页（轮播、榜单、分类推荐）、书架与阅读进度云同步、沉浸式阅读器、TTS 听书
 - **创作区**：Codex 风格 Work/IDE 工作区、Agent 4.0（Research Dossier、Skill OS、Story Compiler、Chapter Bridge、人类感质量门、合法技法检索、作者私有 Style DNA、前三章试制与专家盲评链路）、跨作品任务搜索/置顶/归档、分支/差异/冲突安全合并、内嵌子 Agent、定时任务、权限沙箱、运行回放、多模态附件、联网与站内调研、跨会话记忆、作品关系网、AI 封面与范围化 ZIP 导出
 - **社区**：帖子与话题系统、推荐算法、评论/点赞/收藏、关注与粉丝、私信与在线状态
-- **账号体系**：手机号验证码登录（腾讯云短信）、HttpOnly Cookie 会话 + Bearer 备选通道（安卓壳杀后台不掉登录）、公测 Credits 与唯一邀请奖励
+- **账号体系**：邮箱验证码注册、邮箱或手机号登录、验证码找回密码、HttpOnly Cookie 会话与客户端 Bearer 通道、公测 Credits 与唯一邀请奖励
 - **管理后台**：数据看板、用户/作品/内容治理、内置模型与加密密钥管理、Credits 单用户与批量重置/暂停、Token 用量排行与创作任务下钻、联网/生图调用统计、移动端适配
 - **安卓客户端**：Capacitor 壳加载远程站点，应用内检测更新与 APK 分发
 
@@ -214,7 +214,7 @@ flowchart LR
 | AI | DeepSeek 文本生成 · 智谱 GLM-4.1V 图像理解 · OpenAI 兼容图像生成 · Edge TTS 语音合成 · 博查联网搜索（多引擎降级） |
 | Agent | Agent 4.0 Runtime（`api/lib/agent`）：创作技能、作品记忆、章节编排、研究与审校、实时事件流 |
 | 测试 | Vitest + Supertest + Testing Library（单元、PostgreSQL 集成与界面交互） |
-| 部署 | PM2 + nginx（生产）· GitHub Actions CI（push 即跑类型检查/lint/单测/集成测试）· 安卓 Capacitor 壳工程（独立仓库目录） |
+| 部署 | PM2 + nginx · GitHub Actions（类型检查、Lint、隔离 PostgreSQL 全量覆盖率测试、构建、Agent 评测、生产和全依赖审计） |
 
 ## 目录结构
 
@@ -227,25 +227,25 @@ flowchart LR
 ├── docs/              # 工程文档（ENGINEERING 与 DEVELOPMENT-STANDARDS，均中英文双语）
 ├── plan/              # 设计方案与路线图
 ├── deploy/            # nginx 配置与服务器部署脚本
-├── scripts/           # 部署 / 推送 / 数据清理脚本
+├── scripts/           # 开工检查、CI、评测与发布
+├── desktop/windows/   # Tauri / WebView2 Windows 客户端（main）
 └── public/            # 静态资源
 ```
 
 ## 快速开始
 
-```bash
-# 1. 使用 .node-version 指定的 Node 22.23.2 / npm 10.9.8，再安装锁定依赖
-npm ci
+从 `main` 的仓库根目录操作，使用 Node **22.23.2** 和 npm **10.9.8**。依赖准备会按锁文件安装、核对运行时并生成 Prisma Client。
 
-# 2. 配置环境变量（参考 .env.example，填入数据库连接、AI Key 等）
-copy .env.example .env
+```sh
+node scripts/start-work.mjs
+node scripts/cloud-setup.mjs --install
+cp .env.example .env
+```
 
-# 3. 初始化数据库
-npm run prisma:generate
+Windows PowerShell 用 `Copy-Item .env.example .env` 创建本地配置。按模板填写本地开发配置并连接专用开发 PostgreSQL，再向该库应用迁移。Vite 代理 `/api` 到默认的 API 端口 3001。
+
+```sh
 npm run prisma:migrate:deploy
-npm run prisma:seed   # 可选：种子数据
-
-# 4. 启动开发（前端 Vite + 后端 nodemon 并行）
 npm run dev
 ```
 
@@ -255,8 +255,8 @@ npm run dev
 | --- | --- |
 | `npm run dev` | 前后端并行开发 |
 | `npm run check` | TypeScript 类型检查 |
-| `npm run test` | 运行全部 Vitest 测试 |
-| `npx vitest run --coverage` | 运行测试并执行本地/CI 双基线覆盖率门禁 |
+| `npm test` | 运行 Vitest。完整数据库验证需要另行配置隔离测试库。 |
+| `npx vitest run --coverage` | 生成覆盖率。CI 合并全部分片后执行 CI 阈值。 |
 | `npm run agent3:eval` | 生成带版本、Hash 与代码 SHA 的 Agent 4.0 确定性评测快照 |
 | `npm run lint` | ESLint 检查 |
 | `npm run build` | 生产构建 |
@@ -264,9 +264,9 @@ npm run dev
 
 ## 部署与发布
 
-- **Web/API**：使用上方 `scripts/deploy-production.ps1` 入口，指定当前线上完整 SHA 和通过的同提交 CI；详细配置见[工程文档](docs/ENGINEERING.md)与[云端开发说明](docs/CLOUD-DEVELOPMENT.md)。
-- **Android**：由独立 Capacitor 壳工程构建，通过 [Releases](https://github.com/Xcy8010/chevoink/releases) 分发 APK。
-- **Windows**：开发和打包方式见[Windows 客户端说明](desktop/windows/README.md)。
+- **Web/API** 从 `main` 发布。授权部署使用上方入口，指定当前线上完整 SHA 和候选 SHA 的 GitHub CI 首跑编号。该首跑必须完整通过。见[工程文档](docs/ENGINEERING.md)与[云端开发说明](docs/CLOUD-DEVELOPMENT.md)。
+- **Android** 从同仓库的 `android-shell` 分支构建 Capacitor 壳，原生项目位于该分支的 `android/`。APK 通过 [Releases](https://github.com/Xcy8010/chevoink/releases) 分发。
+- **Windows** 当前源码在 `main` 的 `desktop/windows/`。`chevoink-windows` 是历史分支。见[Windows 客户端说明](desktop/windows/README.md)。
 
 ## 环境变量
 

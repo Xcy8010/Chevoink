@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { CheckCircle2, Info, XCircle } from 'lucide-react'
 
@@ -28,7 +28,26 @@ const toneConfig: Record<ToastTone, { icon: typeof Info; className: string }> = 
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([])
+  const [dialogs, setDialogs] = useState<HTMLDialogElement[]>([])
   const idRef = useRef(0)
+  const viewportRef = useRef<HTMLDivElement>(null)
+  const dialog = dialogs.at(-1)
+  const useTopLayer = Boolean(dialog && typeof HTMLElement.prototype.showPopover === 'function')
+
+  const registerDialog = useCallback((dialog: HTMLDialogElement) => {
+    setDialogs(current => [...current, dialog])
+    return () => setDialogs(current => current.filter(item => item !== dialog))
+  }, [])
+
+  // Native modal dialogs sit above document z-index and make outside content
+  // inert. Keep the single toast viewport inside the active account dialog.
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current
+    if (useTopLayer && viewport) {
+      viewport.setAttribute('popover', 'manual')
+      viewport.showPopover()
+    }
+  }, [dialog, useTopLayer])
 
   const dismiss = useCallback((id: number) => {
     setToasts((current) => current.filter((item) => item.id !== id))
@@ -50,16 +69,18 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       success: (message: string) => toast(message, 'success'),
       error: (message: string) => toast(message, 'error'),
       info: (message: string) => toast(message, 'info'),
+      registerDialog,
     }),
-    [toast],
+    [toast, registerDialog],
   )
 
   return (
     <ToastContext.Provider value={value}>
       {children}
-      {/* portal 到 body 并置于全站最高层级（高于沉浸层 90 / 弹窗 120 / 灯箱 140），避免被沉浸创作区等全屏浮层盖住 */}
       {createPortal(
-        <div className="pointer-events-none fixed inset-x-0 top-[calc(var(--safe-top)+12px)] z-[150] flex flex-col items-center gap-2 px-4">
+        <div ref={viewportRef}
+          className={cn('pointer-events-none inset-x-0 bottom-auto z-[150] m-0 flex w-full max-w-none flex-col items-center gap-2 border-0 bg-transparent px-4 py-0',
+            dialog && !useTopLayer ? 'absolute top-3' : 'fixed top-[calc(var(--safe-top)+12px)]')}>
           {toasts.map((item) => {
             const config = toneConfig[item.tone]
             const Icon = config.icon
@@ -78,7 +99,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             )
           })}
         </div>,
-        document.body,
+        dialog ?? document.body,
       )}
     </ToastContext.Provider>
   )

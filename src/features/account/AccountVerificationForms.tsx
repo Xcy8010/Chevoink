@@ -3,6 +3,7 @@ import { Mail, Smartphone } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
 import TextInput from '@/components/ui/TextInput'
+import { useToast } from '@/components/ui/toast-context'
 import type { AuthSessionPayload, User } from '../../../shared/contracts'
 import { authError, emailAddress, mainlandPhone, postAuth } from './auth-api'
 import { useUpdateAccountSession } from './use-account-session'
@@ -14,10 +15,11 @@ type FormCallbacks = {
   disabled?: boolean
 }
 
-export function IdentityVerificationForm({ kind, submitLabel, initialValue = '', onSaved, onSaving, disabled }: FormCallbacks & {
+export function IdentityVerificationForm({ kind, submitLabel, initialValue = '', onSaved, onSaving, disabled, notifySuccess = true }: FormCallbacks & {
   kind: 'email' | 'phone'
   submitLabel: string
   initialValue?: string
+  notifySuccess?: boolean
 }) {
   const [value, setValue] = useState(initialValue)
   const [code, setCode] = useState('')
@@ -25,6 +27,7 @@ export function IdentityVerificationForm({ kind, submitLabel, initialValue = '',
   const [saving, setSaving] = useState(false)
   const inputId = useId()
   const updateSession = useUpdateAccountSession()
+  const toast = useToast()
   const isEmail = kind === 'email'
   const target = isEmail ? emailAddress(value) : mainlandPhone(value)
   const label = isEmail ? '邮箱' : '手机号'
@@ -33,7 +36,9 @@ export function IdentityVerificationForm({ kind, submitLabel, initialValue = '',
     event.preventDefault()
     if (saving || disabled) return
     if (!target) {
-      setError(`请输入有效的${label}。`)
+      const message = `请输入有效的${label}。`
+      setError(message)
+      toast.error(message)
       return
     }
     setError('')
@@ -42,9 +47,14 @@ export function IdentityVerificationForm({ kind, submitLabel, initialValue = '',
     try {
       const payload = isEmail ? { email: target, code } : { phone: target, code }
       const result = await postAuth<{ user: User }>(`/account/${kind}`, payload)
-      if (updateSession(result.user)) onSaved()
+      if (updateSession(result.user)) {
+        if (notifySuccess) toast.success(`${label}已验证。`)
+        onSaved()
+      }
     } catch (error) {
-      setError(authError(error, '暂时无法完成验证，请稍后重试。'))
+      const message = authError(error, '暂时无法完成验证，请稍后重试。')
+      setError(message)
+      toast.error(message)
     } finally {
       setSaving(false)
       onSaving?.(false)
@@ -89,6 +99,7 @@ export function SetupPasswordForm({ disabled, onSave }: { disabled: boolean; onS
   const [password, setPassword] = useState('')
   const [confirmation, setConfirmation] = useState('')
   const [error, setError] = useState('')
+  const toast = useToast()
   const passwordId = useId()
   const confirmationId = useId()
 
@@ -97,11 +108,13 @@ export function SetupPasswordForm({ disabled, onSave }: { disabled: boolean; onS
     if (disabled) return
     if (password !== confirmation) {
       setError('两次输入的密码不一致。')
+      toast.error('两次输入的密码不一致。')
       return
     }
     const normalizedPassword = password.trim()
     if (normalizedPassword.length < 6 || normalizedPassword.length > 128) {
       setError('请输入 6 至 128 个字符的登录密码。')
+      toast.error('请输入 6 至 128 个字符的登录密码。')
       return
     }
     setError('')

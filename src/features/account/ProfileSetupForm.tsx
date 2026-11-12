@@ -4,6 +4,7 @@ import { requestJson } from '@/app/api-client'
 import Button from '@/components/ui/Button'
 import ImageCropperDialog from '@/components/ui/ImageCropperDialog'
 import TextInput from '@/components/ui/TextInput'
+import { useToast } from '@/components/ui/toast-context'
 import Avatar from '@/features/community/components/Avatar'
 import { getProfileImageUploadError, prepareAvatarImage, readFileAsDataUrl } from '@/lib/image-compress'
 import type { User } from '../../../shared/contracts'
@@ -27,20 +28,26 @@ export default function ProfileSetupForm({ user, disabled, onSaved, onSaving }: 
   const nicknameId = useId()
   const bioId = useId()
   const updateSession = useUpdateAccountSession()
+  const toast = useToast()
   const busy = disabled || preparing || saving
 
   async function prepare(file: File | undefined, kind: '头像' | '封面') {
     if (!file) return
     const validation = getProfileImageUploadError(file, kind)
     setError(validation ?? '')
-    if (validation) return
+    if (validation) {
+      toast.error(validation)
+      return
+    }
     setPreparing(true)
     onSaving(true)
     try {
       if (kind === '头像') setAvatar(await prepareAvatarImage(file))
       else setCropSource(await readFileAsDataUrl(file))
     } catch {
-      setError(`无法读取${kind}图片，请重新选择。`)
+      const message = `无法读取${kind}图片，请重新选择。`
+      setError(message)
+      toast.error(message)
     } finally {
       setPreparing(false)
       onSaving(false)
@@ -50,7 +57,11 @@ export default function ProfileSetupForm({ user, disabled, onSaved, onSaving }: 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (busy) return
-    if (!nickname.trim()) { setError('请输入昵称。'); return }
+    if (!nickname.trim()) {
+      setError('请输入昵称。')
+      toast.error('请输入昵称。')
+      return
+    }
     setSaving(true)
     onSaving(true)
     setError('')
@@ -73,7 +84,9 @@ export default function ProfileSetupForm({ user, disabled, onSaved, onSaving }: 
       }
       onSaved()
     } catch (error) {
-      setError(authError(error, '暂时无法保存个人资料，请稍后重试。'))
+      const message = authError(error, '暂时无法保存个人资料，请稍后重试。')
+      setError(message)
+      toast.error(message)
     } finally {
       setSaving(false)
       onSaving(false)

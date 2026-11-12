@@ -74,11 +74,14 @@ export default function EmailAuthPage({ mode, onClose }: { mode: AuthMode; onClo
     event.preventDefault()
     if (submitting || (isRegister && !legalConsent)) return
     if (!target) {
-      setError(isRegister ? '请输入有效的邮箱地址。' : '请输入有效的邮箱地址或手机号。')
+      const message = isRegister ? '请输入有效的邮箱地址。' : '请输入有效的邮箱地址或手机号。'
+      setError(message)
+      toast.error(message)
       return
     }
     if (isRecovery && password !== passwordConfirm) {
       setError('两次输入的密码不一致。')
+      toast.error('两次输入的密码不一致。')
       return
     }
     setSubmitting(true)
@@ -100,13 +103,16 @@ export default function EmailAuthPage({ mode, onClose }: { mode: AuthMode; onClo
       else if (email) result = await postAuth('/email/login', { email, code })
       else result = await postAuth('/sms/login', { phone, code })
       setAuthenticated({ user: result.user, tokens: result.tokens })
+      toast.success(isRegister ? '注册成功。' : '登录成功。')
       void queryClient.invalidateQueries()
       void hydrateReadingSync().then(changed => {
         if (changed) void queryClient.invalidateQueries({ queryKey: ['community', 'me'] })
       })
       navigate(redirect, { replace: true })
     } catch (error) {
-      setError(authError(error, '暂时无法完成，请稍后重试。'))
+      const message = authError(error, '暂时无法完成，请稍后重试。')
+      setError(message)
+      toast.error(message)
     } finally {
       setSubmitting(false)
     }
@@ -182,7 +188,7 @@ export default function EmailAuthPage({ mode, onClose }: { mode: AuthMode; onClo
           <TextInput wrapperAs="span" type="password" autoComplete="new-password" placeholder="请再次输入新密码" value={passwordConfirm} onChange={event => setPasswordConfirm(event.target.value)} required disabled={submitting} minLength={6} maxLength={128} />
         </label>}
         {isRegister && (policy?.registrationAvailable && consentKey ? (
-          <div className="-ml-2 flex items-start gap-2.5 text-left text-sm leading-6">
+          <div className="flex items-start gap-2.5 text-left text-sm leading-6">
             <input type="checkbox" id="email-auth-policy" className="mt-1 size-4 shrink-0" checked={Boolean(legalConsent)}
               onChange={event => setAcceptedPolicy(event.target.checked ? consentKey : '')} aria-labelledby="email-auth-policy-label" />
             <span id="email-auth-policy-label"><label htmlFor="email-auth-policy">我已阅读并同意</label>{' '}
@@ -201,7 +207,7 @@ export default function EmailAuthPage({ mode, onClose }: { mode: AuthMode; onClo
       <nav className="mt-5 flex flex-wrap items-center justify-between gap-3 text-sm text-[var(--color-brand)]" aria-label="账户操作">
         {isRegister && <button type="button" onClick={() => setCodeHelpOpen(true)}
           className="rounded text-blue-600 underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 dark:text-blue-400">收不到验证码</button>}
-        <Link to={mode === 'login' ? registerPath : loginPath}>{mode === 'login' ? '创建账户' : '返回登录'}</Link>
+        <Link to={mode === 'login' ? registerPath : loginPath}>{mode === 'login' ? '还没有账户？点击创建！' : '返回登录'}</Link>
         {mode === 'login' && <Link to={loginPath + '&recovery=1'}>找回密码</Link>}
       </nav>
       {codeHelpOpen && <AccountDialog title="收不到验证码" onClose={() => setCodeHelpOpen(false)}>
