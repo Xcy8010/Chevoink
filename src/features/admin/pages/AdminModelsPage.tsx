@@ -12,7 +12,7 @@ import { AdminModelEditorSections } from '../components/AdminModelEditorSections
 
 import Button from '@/components/ui/Button'
 import TextInput from '../components/AdminTextInput'
-import type { ModelReasoningEffort, ToolCallingProtocol } from '../../../../shared/contracts'
+import type { ModelReasoningEffort } from '../../../../shared/contracts'
 import type { WebToolProtocol } from '../../../../shared/contracts/web-tool'
 import { IMAGE_QUALITY_OPTIONS, type ImageQualityConfig } from '../../../../shared/contracts/image-model'
 import { AdminCard, AdminPageHeader, AdminPanelState, AdminSectionTabs, AdminToolbar } from '../AdminLayout'
@@ -35,7 +35,6 @@ const emptyForm = {
     imageQuality: undefined as ImageQualityConfig | undefined, imageQualityCustomValues: '',
     enabled: true, selectable: true, testerSelectable: false, isDefault: false,
     reasoningEfforts: ['high'] as ModelReasoningEffort[], defaultReasoningEffort: 'high' as ModelReasoningEffort,
-    toolCallingProtocol: '' as '' | ToolCallingProtocol,
     reasoningParameterMode: '' as '' | 'native' | 'omit',
     outputTokenParameter: '' as '' | 'max_tokens' | 'max_completion_tokens',
     thinkingEnabled: '' as '' | 'enabled' | 'disabled',
@@ -79,7 +78,6 @@ export default function AdminModelsPage() {
       baseUrl: editing.baseUrl ?? '', apiKey: '', multiplier: String(editing.baseMultiplier ?? editing.multiplier),
       enabled: editing.enabled, selectable: editing.selectable, testerSelectable: editing.testerSelectable ?? false, isDefault: editing.isDefault,
       reasoningEfforts: editing.reasoningEfforts, defaultReasoningEffort: editing.defaultReasoningEffort,
-      toolCallingProtocol: editing.toolCallingProtocol ?? '',
       reasoningParameterMode: editing.reasoningParameterMode ?? '',
       outputTokenParameter: editing.outputTokenParameter ?? '',
       thinkingEnabled: editing.thinkingEnabled === undefined ? '' : editing.thinkingEnabled ? 'enabled' : 'disabled',
@@ -122,7 +120,6 @@ export default function AdminModelsPage() {
       if (limitedFree && (!Number.isFinite(expires) || expires <= Date.now())) throw new Error('请选择未来的截止时间')
       const { limitedFree: _limited, freeUntil: _until, afterMultiplier: _after, imageQualityCustomValues: _customQuality, ...fields } = form
       const payload = { ...fields, testerSelectable: editingKind === 'text' && form.enabled && !form.selectable && form.testerSelectable, selectable: editingKind === 'text' ? form.selectable : false, isDefault: editingKind === 'text' ? form.isDefault : false, visionEnabled: editingKind === 'vision' ? true : form.visionEnabled, expectedRevision: editing.id ? editing.revision : undefined, webToolProtocol: (editingKind === 'web_search' || editingKind === 'web_fetch') && form.webToolProtocol ? form.webToolProtocol : undefined, publicFeatures: form.publicFeatures.map(value => value.trim()).filter(Boolean), activities: (editingKind === 'text' || editingKind === 'image_generation') && (editing.activities || form.activities.rules.length) ? form.activities : undefined, weightedRoutes: (editingKind === 'text' || editingKind === 'image_generation') && (editing.weightedRoutes || form.weightedRoutes.candidates.length) ? form.weightedRoutes : undefined, imageQuality: editingKind === 'image_generation' ? form.imageQuality : undefined, baseUrl: form.baseUrl || null, apiKey: form.apiKey || undefined, multiplier: Number(form.multiplier), contextWindowTokens: editingKind === 'text' ? Number(form.contextWindowTokens) : undefined,
-        toolCallingProtocol: editingKind === 'text' ? form.toolCallingProtocol || null : undefined,
         reasoningParameterMode: editingKind === 'text' ? form.reasoningParameterMode || null : undefined,
         outputTokenParameter: editingKind === 'text' ? form.outputTokenParameter || null : undefined,
         thinkingEnabled: editingKind === 'text' ? form.thinkingEnabled === '' ? null : form.thinkingEnabled === 'enabled' : undefined,

@@ -149,7 +149,6 @@ export type CustomModelView = {
   baseUrl: string | null
   apiKeyConfigured: boolean
   localConnector?: { online: boolean; verified: boolean }
-  toolCallingProtocol?: ToolCallingProtocol | null
   enabled: boolean
   reasoningEfforts: ModelReasoningEffort[]
   defaultReasoningEffort: ModelReasoningEffort
@@ -169,7 +168,6 @@ export type SaveCustomModelRequest = {
   baseUrl: string
   apiKey?: string
   enabled?: boolean
-  toolCallingProtocol?: ToolCallingProtocol | null
   reasoningEfforts?: ModelReasoningEffort[]
   defaultReasoningEffort?: ModelReasoningEffort
   visionEnabled?: boolean

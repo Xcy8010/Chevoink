@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { buildResponsesToolRequest, createResponsesToolFrameAdapter, responsesUsageToChat } from '../../api/lib/ai-responses-tools.js'
-import { resolveResponsesEndpoint } from '../../api/lib/ai-responses-route.js'
+import { requiresResponsesToolProtocol, resolveResponsesEndpoint } from '../../api/lib/ai-responses-route.js'
 
 describe('tool protocol selection', () => {
   const baseUrl = 'https://api.openai.com/v1'
@@ -20,6 +20,14 @@ describe('tool protocol selection', () => {
       .toBe('https://custom.example/api/v2/responses')
     expect(resolveResponsesEndpoint({ model, baseUrl, reasoningEffort: 'high', toolCallingProtocol: 'chat' })).toBeNull()
     expect(resolveResponsesEndpoint({ model, baseUrl: baseUrl + '?private=value', reasoningEffort: 'high', toolCallingProtocol: 'responses' })).toBeNull()
+  })
+  it('requires a directional protocol rejection from the provider', () => {
+    const detail = 'Function tools with reasoning_effort are not supported in /v1/chat/completions. To use function tools, use /v1/responses.'
+    expect(requiresResponsesToolProtocol(400, detail)).toBe(true)
+    expect(requiresResponsesToolProtocol(429, detail)).toBe(false)
+    expect(requiresResponsesToolProtocol(400, 'The Responses API does not support tools. Use Chat Completions.')).toBe(false)
+    expect(requiresResponsesToolProtocol(400, 'Do not use the Responses API for these function tools.')).toBe(false)
+    expect(requiresResponsesToolProtocol(400, 'Invalid reasoning effort.')).toBe(false)
   })
 })
 

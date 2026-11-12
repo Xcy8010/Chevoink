@@ -2,7 +2,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import type { CustomModelView } from '../../shared/contracts'
 
 const mocks = vi.hoisted(() => ({
   fetch: vi.fn(),
@@ -63,6 +62,7 @@ it('hides manually configured capabilities and sends only model identity setting
   setup()
   fireEvent.click(await screen.findByRole('button', { name: '添加模型' }))
 
+  expect(screen.queryByRole('combobox', { name: '工具调用协议' })).toBeNull()
   expect(screen.queryByText('支持的推理强度')).toBeNull()
   expect(screen.queryByText('默认强度')).toBeNull()
   expect(screen.queryByText('模型支持图片输入')).toBeNull()
@@ -84,37 +84,6 @@ it('hides manually configured capabilities and sends only model identity setting
   expect(mocks.create.mock.calls[0][0]).not.toHaveProperty('reasoningEfforts')
   expect(mocks.create.mock.calls[0][0]).not.toHaveProperty('defaultReasoningEffort')
   expect(mocks.create.mock.calls[0][0]).not.toHaveProperty('visionEnabled')
-})
-
-it('saves a tool protocol, restores it when editing and clears it when set to Automatic', async () => {
-  const model: CustomModelView = {
-    id: 'created-model', provider: 'openai', displayName: '我的模型', modelName: 'fixture-model',
-    baseUrl: 'https://api.openai.com/v1', apiKeyConfigured: true, enabled: true, contextWindowTokens: 128000,
-    reasoningEfforts: ['high'], defaultReasoningEffort: 'high', visionEnabled: false,
-    toolCallingProtocol: 'responses', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
-  }
-  mocks.create.mockImplementationOnce(async () => {
-    mocks.fetch.mockResolvedValue({ models: [model] })
-    return { id: model.id }
-  })
-  setup()
-  fireEvent.click(await screen.findByRole('button', { name: '添加模型' }))
-  const protocol = () => screen.getByRole('combobox', { name: '工具调用协议' }) as HTMLSelectElement
-  expect(protocol().value).toBe('')
-  fireEvent.change(screen.getByRole('combobox', { name: '供应商' }), { target: { value: 'openai' } })
-  fillRequiredFields()
-  fireEvent.change(protocol(), { target: { value: 'responses' } })
-  fireEvent.click(screen.getByRole('button', { name: '校验并保存' }))
-  expect(await screen.findByRole('button', { name: '编辑' })).toBeTruthy()
-  expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ toolCallingProtocol: 'responses' }))
-
-  fireEvent.click(screen.getByRole('button', { name: '编辑' }))
-  expect(protocol().value).toBe('responses')
-  fireEvent.change(protocol(), { target: { value: '' } })
-  fireEvent.click(screen.getByRole('button', { name: '校验并保存' }))
-  await waitFor(() => expect(mocks.update).toHaveBeenCalledWith(model.id, expect.objectContaining({
-    toolCallingProtocol: null,
-  })))
 })
 
 it('shows validation progress and fences the editor while saving', async () => {

@@ -32,7 +32,6 @@ const customModelCreateSchema = z.object({
   defaultReasoningEffort: modelReasoningEffortSchema.optional(),
   visionEnabled: z.boolean().optional(),
   contextWindowTokens: z.number().int().min(16_000).max(4_000_000).optional(),
-  toolCallingProtocol: z.enum(['chat', 'responses']).nullable().optional(),
 })
 const customModelUpdateSchema = customModelCreateSchema.partial()
 const validatingUsers = new Set<string>()
@@ -116,19 +115,22 @@ router.get('/models', async (req: Request, res: Response): Promise<void> => {
     const userId = requireSessionUserId(req)
     const models = await prisma.aiModelConfig.findMany({ where: { ownerUserId: userId }, orderBy: { updatedAt: 'desc' } })
     res.status(200).json(buildSuccess(requestId, {
-      models: models.map((model) => ({
-        ...parseModelCapabilities(model.metadata, model.provider),
-        id: model.id,
-        provider: model.provider,
-        displayName: model.displayName,
-        modelName: model.modelName,
-        baseUrl: model.baseUrl,
-        apiKeyConfigured: Boolean(model.apiKeyCiphertext),
-        ...(isLocalModelProvider(model.provider) ? { localConnector: { online: model.apiKeyCiphertext ? localModelBroker.online(connectorKey(decryptSecret(model.apiKeyCiphertext))) : false, verified: Boolean((model.metadata as Record<string, unknown> | null)?.capabilityValidation) } } : {}),
-        enabled: model.enabled,
-        createdAt: model.createdAt.toISOString(),
-        updatedAt: model.updatedAt.toISOString(),
-      })),
+      models: models.map((model) => {
+        const { toolCallingProtocol: _internal, ...capabilities } = parseModelCapabilities(model.metadata, model.provider)
+        return {
+          ...capabilities,
+          id: model.id,
+          provider: model.provider,
+          displayName: model.displayName,
+          modelName: model.modelName,
+          baseUrl: model.baseUrl,
+          apiKeyConfigured: Boolean(model.apiKeyCiphertext),
+          ...(isLocalModelProvider(model.provider) ? { localConnector: { online: model.apiKeyCiphertext ? localModelBroker.online(connectorKey(decryptSecret(model.apiKeyCiphertext))) : false, verified: Boolean((model.metadata as Record<string, unknown> | null)?.capabilityValidation) } } : {}),
+          enabled: model.enabled,
+          createdAt: model.createdAt.toISOString(),
+          updatedAt: model.updatedAt.toISOString(),
+        }
+      }),
     }))
   } catch (error) {
     sendRouteError(res, requestId, error)
@@ -143,7 +145,6 @@ router.post('/models', async (req: Request, res: Response): Promise<void> => {
     const count = await prisma.aiModelConfig.count({ where: { ownerUserId: userId } })
     if (count >= 10) throw new DataAccessError(409, 'CUSTOM_MODEL_LIMIT', '每个账户最多保存 10 个自定义模型。')
     if (isLocalModelProvider(body.provider)) {
-      if (body.toolCallingProtocol === 'responses') throw new DataAccessError(400, 'LOCAL_MODEL_RESPONSES_UNSUPPORTED', '本地模型连接器目前仅支持 Chat Completions 工具协议。')
       let baseUrl: string
       try { baseUrl = normalizeLocalModelUrl(body.baseUrl) } catch { throw new DataAccessError(400, 'LOCAL_MODEL_URL_INVALID', '请填写本机或明确的局域网 IP 模型地址。') }
       if (body.apiKey) throw new DataAccessError(400, 'LOCAL_MODEL_SECRET_LOCAL_ONLY', '本地模型 API Key 只填写在电脑上的连接配置中。')
@@ -152,7 +153,7 @@ router.post('/models', async (req: Request, res: Response): Promise<void> => {
       await prisma.aiModelConfig.create({ data: { id, key: `user:${userId}:${id}`, ownerUserId: userId, provider: body.provider,
         displayName: body.displayName, modelName: body.modelName, baseUrl, apiKeyCiphertext: encryptSecret(token), tier: null, multiplierBps: 0,
         enabled: false, selectable: true, metadata: { connectorOwnerTokenVersion: owner.tokenVersion, reasoningEfforts: ['none'], defaultReasoningEffort: 'none', visionEnabled: false,
-          contextWindowTokens: body.contextWindowTokens ?? 128000, ...(body.toolCallingProtocol !== undefined ? { toolCallingProtocol: body.toolCallingProtocol } : {}) } } })
+          contextWindowTokens: body.contextWindowTokens ?? 128000 } } })
       res.status(201).json(buildSuccess(requestId, { id, connectorSetup: { version: 1, server: env.webUrl, token, provider: body.provider, model: body.modelName, baseUrl, contextWindowTokens: body.contextWindowTokens ?? 128000 } }))
       return
     }
@@ -173,7 +174,6 @@ router.post('/models', async (req: Request, res: Response): Promise<void> => {
         selectable: true,
         metadata: {
           ...capabilities,
-          ...(body.toolCallingProtocol !== undefined ? { toolCallingProtocol: body.toolCallingProtocol } : {}),
           ...(body.contextWindowTokens ? { contextWindowTokens: body.contextWindowTokens } : {}),
         },
       },
@@ -192,7 +192,6 @@ router.patch('/models/:modelId', async (req: Request, res: Response): Promise<vo
     const target = await prisma.aiModelConfig.findFirst({ where: { id: req.params.modelId, ownerUserId: userId } })
     if (!target) throw new DataAccessError(404, 'CUSTOM_MODEL_NOT_FOUND', '自定义模型不存在。')
     if (isLocalModelProvider(target.provider)) {
-      if (body.toolCallingProtocol === 'responses') throw new DataAccessError(400, 'LOCAL_MODEL_RESPONSES_UNSUPPORTED', '本地模型连接器目前仅支持 Chat Completions 工具协议。')
       const localMetadata = target.metadata && typeof target.metadata === 'object' && !Array.isArray(target.metadata) ? target.metadata : {}
       if (body.apiKey || body.provider && body.provider !== target.provider || body.baseUrl && normalizeLocalModelUrl(body.baseUrl) !== target.baseUrl || body.modelName && body.modelName !== target.modelName
         || body.contextWindowTokens && body.contextWindowTokens !== localMetadata.contextWindowTokens) {
@@ -203,8 +202,7 @@ router.patch('/models/:modelId', async (req: Request, res: Response): Promise<vo
       const metadata = target.metadata && typeof target.metadata === 'object' && !Array.isArray(target.metadata) ? target.metadata : {}
       const updated = await prisma.aiModelConfig.updateMany({ where: { id: target.id, ownerUserId: userId, updatedAt: target.updatedAt }, data: {
         displayName: body.displayName, enabled: body.enabled === false ? false : true,
-        metadata: { ...metadata, ...capabilities, ...(body.contextWindowTokens ? { contextWindowTokens: body.contextWindowTokens } : {}),
-          ...(body.toolCallingProtocol !== undefined ? { toolCallingProtocol: body.toolCallingProtocol } : {}) },
+        metadata: { ...metadata, ...capabilities, ...(body.contextWindowTokens ? { contextWindowTokens: body.contextWindowTokens } : {}) },
       } })
       if (updated.count !== 1) throw new DataAccessError(409, 'CUSTOM_MODEL_CHANGED', '校验期间模型已变更，请重新打开配置后保存。')
       if (body.enabled === false) localModelBroker.revoke(connectorKey(token))
@@ -212,12 +210,11 @@ router.patch('/models/:modelId', async (req: Request, res: Response): Promise<vo
     }
     if (body.provider && isLocalModelProvider(body.provider)) throw new DataAccessError(409, 'LOCAL_MODEL_RECREATE_REQUIRED', '请添加新的本地模型配置。')
     const currentCapabilities = parseModelCapabilities(target.metadata, target.provider)
-    const toolCallingProtocol = body.toolCallingProtocol !== undefined ? body.toolCallingProtocol : currentCapabilities.toolCallingProtocol
     const apiKey = body.apiKey ?? (target.apiKeyCiphertext ? decryptSecret(target.apiKeyCiphertext) : null)
     if (!apiKey || !(body.baseUrl ?? target.baseUrl)) throw new DataAccessError(400, 'CUSTOM_MODEL_REQUIRED', '请填写模型地址和 API Key。')
     const capabilities = await validateModel(userId, res, {
       provider: body.provider ?? target.provider, modelName: body.modelName ?? target.modelName,
-      baseUrl: (body.baseUrl ?? target.baseUrl)!, apiKey, toolCallingProtocol,
+      baseUrl: (body.baseUrl ?? target.baseUrl)!, apiKey,
     })
     const updated = await prisma.aiModelConfig.updateMany({
       where: { id: target.id, ownerUserId: userId, updatedAt: target.updatedAt },
@@ -231,7 +228,6 @@ router.patch('/models/:modelId', async (req: Request, res: Response): Promise<vo
         metadata: {
           ...(target.metadata && typeof target.metadata === 'object' && !Array.isArray(target.metadata) ? target.metadata : {}),
           ...capabilities,
-          ...(body.toolCallingProtocol !== undefined ? { toolCallingProtocol: body.toolCallingProtocol } : {}),
           contextWindowTokens: body.contextWindowTokens ?? currentCapabilities.contextWindowTokens,
         },
       },

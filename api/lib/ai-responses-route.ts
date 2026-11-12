@@ -10,7 +10,7 @@ function httpsEndpoint(value: string): URL | null {
 
 /** OpenAI's documented tool-call rules apply to the direct API and to the
  * corresponding verified model names on the known OpenAI-compatible gateway.
- * An explicit selection also supports provider aliases and other HTTPS APIs.
+ * A verified capability also supports provider aliases and other HTTPS APIs.
  * https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters */
 export function resolveResponsesEndpoint(input: {
   model: string
@@ -32,6 +32,16 @@ export function resolveResponsesEndpoint(input: {
       || yunshu && input.model === 'gpt-6.1-terra')) return null
   }
   return url.origin + basePath + '/responses'
+}
+
+/** A supplier can reject before executing. Its error text never chooses a URL. */
+export function requiresResponsesToolProtocol(status: number, message: unknown): boolean {
+  if ((status !== 400 && status !== 422) || typeof message !== 'string') return false
+  const text = message.slice(0, 1500)
+  if (!/\b(?:function(?:s| calls?)?|tools?)\b/i.test(text)) return false
+  const responses = '(?:the\\s+)?(?:OpenAI\\s+)?(?:/v1/responses\\b|Responses\\s+API\\b)'
+  if (new RegExp('\\b(?:not|never|cannot|can\'t)\\s+use\\s+' + responses, 'i').test(text)) return false
+  return new RegExp('\\b(?:use|switch to|requires?|only available (?:in|via|on)|supported only (?:in|via|on))\\s+' + responses, 'i').test(text)
 }
 
 /** These fields come from the hash-verified, server-encoded request snapshot. */

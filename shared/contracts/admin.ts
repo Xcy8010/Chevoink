@@ -456,7 +456,6 @@ export type AdminModelManagementPayload = {
     requestCount: number
     requestTokens: number
     responseTokens: number
-    toolCallingProtocol?: import('./credits.js').ToolCallingProtocol | null
     reasoningParameterMode?: 'native' | 'omit'
     outputTokenParameter?: 'max_tokens' | 'max_completion_tokens'
     thinkingEnabled?: boolean

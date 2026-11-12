@@ -4,7 +4,7 @@ import { collapseEarlyToolRounds, releaseCompletedReasoning } from '../../api/li
 import { toolTurnHistory } from '../../api/lib/agent/tool-turn-history.js'
 import type { ChatMessage } from '../../api/lib/ai-service.js'
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: vi.fn(), reserveTokenCredits: vi.fn(), consumeTokenCredits: vi.fn(async () => ({ chargedMilli: 0 })) }))
-vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } }, prisma: { aiUsageLog: { create: vi.fn(async () => ({ id: 'usage' })), findUnique: vi.fn(async () => null), update: vi.fn(async () => ({ id: 'usage' })), updateMany: vi.fn(async () => ({ count: 1 })) } } }))
+vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message) } }, prisma: { aiUsageLog: { create: vi.fn(async () => ({ id: 'usage' })), findUnique: vi.fn(async () => null), update: vi.fn(async () => ({ id: 'usage' })), updateMany: vi.fn(async () => ({ count: 1 })) }, agentGoalUsage: { findUnique: vi.fn(async () => null) } } }))
 vi.mock('../../api/lib/billing/resolve-token-price.js', async original => ({ ...await original<object>(),
   resolveTokenPrice: async () => ({ version: 'credits-v1-exact', modelTier: 'speed', multiplierBps: 10000 }) }))
 import { buildProviderToolChoice, chatWithTools, generateTextCompletion } from '../../api/lib/ai-service.js'
@@ -13,6 +13,7 @@ import { buildProviderCompatibilitySnapshot, type ProviderCompatibilityRoute } f
 import { toOpenAIParameters, toOpenAIToolPresentation } from '../../api/lib/agent/tool-schema.js'
 import { chapterCreateTool } from '../../api/lib/agent/tools/chapter-tools.js'
 import { novelImportTool } from '../../api/lib/agent/tools/import-tools.js'
+import { prisma } from '../../api/lib/prisma.js'
 
 afterEach(() => vi.unstubAllGlobals())
 const delta = (args: string, first = false) => ({ choices: [{ delta: { tool_calls: [{ index: 0, ...(first ? { id: 'call', function: { name: 'scene_task_build', arguments: args } } : { function: { arguments: args } }) }] } }] })
@@ -67,6 +68,33 @@ describe('next prompt from the current response', () => {
   })
 })
 describe('lossless tool argument transport', () => {
+  it.each([true, false])('automatically changes protocol only with a known zero-charge rejection (%s)', async zeroCharge => {
+    const result = { type: 'response.completed', response: { status: 'completed', output: [], usage: { input_tokens: 8, output_tokens: 3 } } }
+    const fetch = vi.fn().mockResolvedValueOnce(Response.json({ error: { param: 'reasoning_effort',
+      message: 'Function tools with reasoning_effort are not supported in /v1/chat/completions. To use function tools, use /v1/responses.' },
+    }, { status: 400 })).mockResolvedValueOnce(new Response(`data: ${JSON.stringify(result)}\n\n`))
+    vi.stubGlobal('fetch', fetch)
+    const observedRejection = zeroCharge ? {
+      billingStatus: 'provider_rejected', usageSource: 'prepared', creditChargeMilli: 0, reservedCreditMilli: 0,
+      requestTokens: null, responseTokens: null, promptCacheHitTokens: null, promptCacheMissTokens: null, billingEvidence: null,
+    } as Awaited<ReturnType<typeof prisma.aiUsageLog.findUnique>> : null
+    vi.mocked(prisma.aiUsageLog.findUnique).mockResolvedValueOnce(observedRejection).mockResolvedValueOnce(observedRejection)
+    const baseUrl = 'https://adaptive.example/v1'
+    const invocation = chatWithTools({ provider: 'custom', model: 'unknown-alias', providerBaseUrl: baseUrl,
+      providerApiKey: 'synthetic-key-' + zeroCharge, reasoningEffort: 'high', messages: [{ role: 'user', content: 'Synthetic' }],
+      tools: [{ type: 'function', function: { name: 'inspect', description: 'fixture', parameters: { type: 'object' } } }],
+      usageLog: { userId: 'adaptive-test', action: 'fixture', modelTier: 'custom' },
+    })
+    if (zeroCharge) {
+      await expect(invocation).resolves.toMatchObject({ usage: { promptTokens: 8, completionTokens: 3 } })
+      expect(fetch.mock.calls.map(([url]) => url)).toEqual([baseUrl + '/chat/completions', baseUrl + '/responses'])
+      expect(JSON.parse(fetch.mock.calls[1][1].body)).toMatchObject({ reasoning: { effort: 'high' } })
+    } else {
+      await expect(invocation).rejects.toMatchObject({ code: 'AI_PROVIDER_ERROR' })
+      expect(fetch).toHaveBeenCalledOnce()
+    }
+  })
+
   it.each(['native', 'omit'] as const)('routes Terra tools through Responses with %s reasoning', async reasoningParameterMode => {
     const tools = [{ type: 'function' as const, function: { name: 'chapter_read', description: 'Read a chapter',
       strict: false, parameters: { type: 'object', properties: { chapterId: { type: 'string' } }, required: ['chapterId'] } } }]

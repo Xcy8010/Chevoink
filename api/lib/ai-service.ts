@@ -13,7 +13,7 @@ import { beginTextRequest, recordTextRequestFailure, type TextRequestRecord } fr
 import { isKnownTextRequestBilling, isKnownZeroTextRequestBilling } from './agent/text-request-billing.js'
 import { SseDataDecoder, readWithIdleTimeout } from './ai-sse.js'
 import { buildResponsesToolRequest, createResponsesToolFrameAdapter, responsesUsageToChat } from './ai-responses-tools.js'
-import { resolveResponsesEndpoint } from './ai-responses-route.js'
+import { requiresResponsesToolProtocol, resolveResponsesEndpoint } from './ai-responses-route.js'
 import type { ResponsesContinuation } from './ai-responses-continuation.js'
 import { createNextPromptStream, splitNextPrompt } from './agent/next-prompt.js'
 import { beginDurableChat, type DurableChatExecution } from './agent/runtime-provider.js'
@@ -903,6 +903,17 @@ export async function chatWithTools(params: ChatWithToolsParams): Promise<ChatCo
   return withGoalExecutionContext(context, () => withoutGoalEffects(() => chatWithGoalAccounting(frozenParams)))
 }
 
+class ResponsesToolProtocolRequired extends Error {}
+const responsesToolRouteHints = new Map<string, number>()
+
+function rememberResponsesToolRoute(key: string) {
+  if (responsesToolRouteHints.size >= 512 && !responsesToolRouteHints.has(key)) {
+    const oldest = responsesToolRouteHints.keys().next().value
+    if (oldest) responsesToolRouteHints.delete(oldest)
+  }
+  responsesToolRouteHints.set(key, Date.now() + 30 * 60_000)
+}
+
 function snapshotDurableChatParams(params: ChatWithToolsParams): ChatWithToolsParams {
   if (!params.durableExecution) return params
   return { ...params, messages: JSON.parse(JSON.stringify(params.messages)), tools: JSON.parse(JSON.stringify(params.tools)),
@@ -926,11 +937,18 @@ async function chatWithGoalAccounting(params: ChatWithToolsParams): Promise<Chat
     params = { ...params, operationPrice, usageLog: { ...params.usageLog, multiplierBps: operationModelMultiplier(operationPrice, params.usageLog.multiplierBps ?? 10000) } }
   }
   if (!params.durableExecution && params.operationPrice) params = { ...params, usageLog: { ...params.usageLog, multiplierBps: operationModelMultiplier(params.operationPrice, params.usageLog.multiplierBps ?? 10000) } }
-  if (!params.durableExecution) return withModelRoutePool(params, chatWithToolsImpl)
+  if (!params.durableExecution) return withModelRoutePool(params, async route => {
+    try { return await chatWithToolsImpl(route) }
+    catch (error) {
+      if (!(error instanceof ResponsesToolProtocolRequired)) throw error
+      route.signal?.throwIfAborted()
+      return chatWithToolsImpl(route, true)
+    }
+  })
   return withLeaseHeartbeat(params.durableExecution.lease, params.signal, signal => chatWithToolsImpl({ ...params, signal }))
 }
 
-async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompletionResult> {
+async function chatWithToolsImpl(params: ChatWithToolsParams, useConfirmedAlternative = false): Promise<ChatCompletionResult> {
   if (!params.durableExecution) {
     ensureTextProviderConfigured(params.providerApiKey)
     await assertCreditAccess(params.usageLog.userId, params.usageLog.modelTier ?? 'speed', false)
@@ -942,12 +960,19 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
   const baseUrl = params.providerBaseUrl ?? env.aiTextBaseUrl
   const chatEndpoint = `${baseUrl.replace(/\/$/, '')}/chat/completions`
   const reasoningEffort = params.reasoningEffort ?? env.aiReasoningEffort
-  const responsesEndpoint = isLocalModelProvider(params.provider ?? '') ? null : resolveResponsesEndpoint({
-    model, baseUrl, reasoningEffort, reasoningParameterMode: params.reasoningParameterMode,
-    toolCallingProtocol: params.toolCallingProtocol,
-  })
   const frozenAuxiliary = params.preparedAuxiliaryRequest
   const frozenMain = params.preparedMainRequest
+  const route = { model, baseUrl, reasoningEffort, reasoningParameterMode: params.reasoningParameterMode }
+  const localRoute = isLocalModelProvider(params.provider ?? '')
+  const possibleResponses = localRoute ? null : resolveResponsesEndpoint({ ...route, toolCallingProtocol: 'responses' })
+  const key = params.providerApiKey ?? env.aiTextApiKey ?? ''
+  const routeIdentity = [params.usageLog.userId, params.provider ?? env.aiTextProvider, possibleResponses, model]
+  const toolRouteKey = possibleResponses && key ? createHmac('sha256', key)
+    .update(JSON.stringify(['responses-tool-route', ...routeIdentity])).digest('hex') : null
+  const observed = toolRouteKey ? responsesToolRouteHints.get(toolRouteKey) : undefined
+  const responsesEndpoint = possibleResponses && (useConfirmedAlternative || frozenMain?.endpoint === possibleResponses
+    || (observed !== undefined && observed > Date.now())
+    || resolveResponsesEndpoint({ ...route, toolCallingProtocol: params.toolCallingProtocol })) ? possibleResponses : null
   if (frozenAuxiliary && (!params.durableExecution?.auxiliaryStep || params.durableExecution.auxiliaryStep !== params.usageLog.action
     || params.tools.length || frozenAuxiliary.endpoint !== chatEndpoint || frozenAuxiliary.body.model !== model
     || frozenAuxiliary.body.stream !== true || !Array.isArray(frozenAuxiliary.body.messages) || frozenAuxiliary.body.tools !== undefined)) {
@@ -960,10 +985,10 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
     throw new DataAccessError(409, 'RUNTIME_RECEIPT_INVALID', '原主模型请求与冻结路由不匹配。')
   }
   const frozenRequest = frozenMain ?? frozenAuxiliary
-  const responsesBinding = responsesEndpoint ? createHmac('sha256', params.providerApiKey ?? env.aiTextApiKey ?? '')
-    .update(JSON.stringify(['responses-tool-continuation', params.usageLog.userId,
+  const responsesBinding = responsesEndpoint ? createHmac('sha256', key)
+    .update(JSON.stringify(['responses-tool-continuation', ...routeIdentity,
       params.durableExecution?.lease.taskRootId ?? params.usageLog.agentRunId ?? null,
-      params.usageLog.targetId ?? null, params.provider ?? env.aiTextProvider, responsesEndpoint, model])).digest('hex') : undefined
+      params.usageLog.targetId ?? null])).digest('hex') : undefined
   const providerMessages = frozenRequest ? null : toProviderMessages(params.messages, responsesBinding)
   const hasToolWork = params.tools.length > 0 || providerMessages?.some(message => message.role === 'tool')
   if (params.toolCallingProtocol === 'responses' && !responsesEndpoint && hasToolWork) {
@@ -1160,6 +1185,16 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
       await syncGoalLegacyUsage(prepared.id)
     } else await markUnobservedUsage(prepared?.id)
     if (quotaRejected) throw providerQuotaError(tier === 'custom')
+    if (!useResponses && toolRouteKey && hasToolWork && !response.redirected && payload.usage == null
+      && requiresResponsesToolProtocol(response.status, payload.error?.message)) {
+      // Durable requests already have an exact failed receipt. Keep their
+      // immutable payload and choose the observed route on the next new turn.
+      if (durable) rememberResponsesToolRoute(toolRouteKey)
+      else if (!useConfirmedAlternative && await hasKnownZeroProviderRejection(prepared?.id, params.usageLog.userId, response.status)) {
+        rememberResponsesToolRoute(toolRouteKey)
+        throw new ResponsesToolProtocolRequired()
+      }
+    }
     if (routeRejectionMayRetry(response.status, reportedPrompt, reportedCompletion)
       && (durable || await hasKnownZeroProviderRejection(prepared?.id, params.usageLog.userId, response.status))) {
       throw new ModelRouteRejected(response.status, response.headers.get('retry-after'), undefined)

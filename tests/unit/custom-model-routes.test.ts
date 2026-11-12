@@ -24,7 +24,10 @@ import { DataAccessError } from '../../api/lib/prisma.js'
 const app = express().use(express.json()).use('/credits', router)
 const body = { provider: 'custom', displayName: 'my model', modelName: 'model', baseUrl: 'https://provider.example/v1/', apiKey: 'fixture-test-key' }
 const verified = { reasoningEfforts: ['none'], defaultReasoningEffort: 'none', visionEnabled: false, reasoningParameterMode: 'omit',
+  toolCallingProtocol: null,
   capabilityValidation: { version: 1, checkedAt: '2026-09-20T00:00:00Z', text: 'verified', reasoning: 'parameter_unsupported', vision: 'unsupported', tools: 'verified', requests: 4 } }
+const verifiedResponses = { ...verified, toolCallingProtocol: 'responses',
+  capabilityValidation: { ...verified.capabilityValidation, protocol: 'responses' } }
 const target = { id: 'model-id', ownerUserId: 'owner', provider: 'custom', modelName: 'old-model', baseUrl: 'https://provider.example/v1',
   apiKeyCiphertext: 'ciphertext', updatedAt: new Date('2026-09-19T00:00:00Z'), metadata: { reasoningParameterMode: 'native', visionEnabled: true, contextWindowTokens: 32000, legacySetting: 'keep' } }
 
@@ -39,39 +42,37 @@ beforeEach(() => {
 })
 
 describe('custom model routes capability validation', () => {
-  it('persists and exposes the selected remote tool calling protocol without exposing credentials', async () => {
-    await request(app).post('/credits/models').send({ ...body, toolCallingProtocol: 'responses' }).expect(201)
-    expect(mocks.validate).toHaveBeenCalledWith(expect.objectContaining({ toolCallingProtocol: 'responses' }))
-    expect(mocks.create).toHaveBeenCalledWith({ data: expect.objectContaining({ metadata: { ...verified, toolCallingProtocol: 'responses' } }) })
+  it('persists verified native protocol from server evidence without accepting a client preference', async () => {
+    mocks.validate.mockResolvedValue(verifiedResponses)
+    await request(app).post('/credits/models').send({ ...body, toolCallingProtocol: 'chat' }).expect(201)
+    expect(mocks.validate.mock.calls[0][0]).not.toHaveProperty('toolCallingProtocol')
+    expect(mocks.create).toHaveBeenCalledWith({ data: expect.objectContaining({ metadata: verifiedResponses }) })
     mocks.findMany.mockResolvedValue([{ ...target, displayName: 'Saved', createdAt: target.updatedAt, enabled: true,
-      metadata: { ...verified, toolCallingProtocol: 'responses' } }])
+      metadata: verifiedResponses }])
     const response = await request(app).get('/credits/models').expect(200)
-    expect(response.body.data.models).toMatchObject([{ id: target.id, toolCallingProtocol: 'responses', apiKeyConfigured: true }])
+    expect(response.body.data.models).toMatchObject([{ id: target.id, apiKeyConfigured: true }])
+    expect(response.body.data.models[0]).not.toHaveProperty('toolCallingProtocol')
     expect(response.text).not.toContain(target.apiKeyCiphertext)
   })
-  it('keeps a saved protocol during partial edits and clears it only on explicit auto', async () => {
-    mocks.findFirst.mockResolvedValue({ ...target, metadata: { ...target.metadata, toolCallingProtocol: 'responses' } })
-    await request(app).patch('/credits/models/model-id').send({ displayName: 'Renamed' }).expect(200)
-    expect(mocks.validate).toHaveBeenLastCalledWith(expect.objectContaining({ toolCallingProtocol: 'responses' }))
-    expect(mocks.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({
-      metadata: expect.objectContaining({ toolCallingProtocol: 'responses' }),
-    }) }))
-    await request(app).patch('/credits/models/model-id').send({ toolCallingProtocol: null }).expect(200)
-    expect(mocks.validate).toHaveBeenLastCalledWith(expect.objectContaining({ toolCallingProtocol: null }))
-    expect(mocks.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({
-      metadata: expect.objectContaining({ toolCallingProtocol: null }),
+  it('clears previously learned protocol when the new route or credentials lack native proof', async () => {
+    mocks.findFirst.mockResolvedValue({ ...target, metadata: { ...target.metadata, ...verifiedResponses } })
+    const baseUrl = 'https://replacement.example/v1', apiKey = 'replacement-test-key'
+    await request(app).patch('/credits/models/model-id').send({ baseUrl, apiKey, toolCallingProtocol: 'responses' }).expect(200)
+    expect(mocks.validate).toHaveBeenCalledWith(expect.objectContaining({ baseUrl, apiKey }))
+    expect(mocks.validate.mock.calls[0][0]).not.toHaveProperty('toolCallingProtocol')
+    expect(mocks.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      metadata: expect.objectContaining({ toolCallingProtocol: null, capabilityValidation: verified.capabilityValidation }),
     }) }))
   })
-  it('rejects explicit Responses for new and existing local connectors without probing or persisting', async () => {
+  it('ignores an attempted protocol override on local connectors', async () => {
     const local = { provider: 'local-openai', baseUrl: 'http://127.0.0.1:7863/v1' }
-    const created = await request(app).post('/credits/models').send({ ...body, ...local, apiKey: undefined, toolCallingProtocol: 'responses' }).expect(400)
-    expect(created.body.error.code).toBe('LOCAL_MODEL_RESPONSES_UNSUPPORTED')
-    mocks.findFirst.mockResolvedValue({ ...target, ...local })
-    const updated = await request(app).patch('/credits/models/model-id').send({ toolCallingProtocol: 'responses' }).expect(400)
-    expect(updated.body.error.code).toBe('LOCAL_MODEL_RESPONSES_UNSUPPORTED')
+    await request(app).post('/credits/models').send({ ...body, ...local, apiKey: undefined, toolCallingProtocol: 'responses' }).expect(201)
+    expect(mocks.create.mock.calls[0][0].data.metadata).not.toHaveProperty('toolCallingProtocol')
     expect(mocks.validate).not.toHaveBeenCalled()
-    expect(mocks.create).not.toHaveBeenCalled()
-    expect(mocks.updateMany).not.toHaveBeenCalled()
+    mocks.findFirst.mockResolvedValue({ ...target, ...local })
+    await request(app).patch('/credits/models/model-id').send({ toolCallingProtocol: 'responses' }).expect(200)
+    expect(mocks.validate.mock.calls[0][0]).not.toHaveProperty('toolCallingProtocol')
+    expect(mocks.updateMany.mock.calls[0][0].data.metadata.toolCallingProtocol).toBeNull()
   })
   it('creates an unverified local profile without any model call or upstream API secret', async () => {
     const response = await request(app).post('/credits/models').send({ ...body, provider: 'local-openai', baseUrl: 'http://127.0.0.1:7863/v1', apiKey: undefined }).expect(201)

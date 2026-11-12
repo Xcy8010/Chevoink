@@ -99,6 +99,8 @@ export function parseModelCapabilities(metadata: Prisma.JsonValue | null | undef
     ? record.defaultReasoningEffort as ModelReasoningEffort
     : 'high'
   const maxOutputTokens = record.max_output_tokens ?? record.maxOutputTokens
+  const validation = record.capabilityValidation && typeof record.capabilityValidation === 'object'
+    ? record.capabilityValidation as Record<string, unknown> : {}
   return {
     ...(typeof maxOutputTokens === 'number' && Number.isSafeInteger(maxOutputTokens) && maxOutputTokens > 0
       ? { maxOutputTokens } : {}),
@@ -107,7 +109,7 @@ export function parseModelCapabilities(metadata: Prisma.JsonValue | null | undef
       ? { outputTokenParameter: record.outputTokenParameter } : {}),
     ...(record.reasoningParameterMode === 'native' || record.reasoningParameterMode === 'omit'
       ? { reasoningParameterMode: record.reasoningParameterMode } : {}),
-    ...(record.toolCallingProtocol === 'chat' || record.toolCallingProtocol === 'responses'
+    ...(record.toolCallingProtocol === 'responses' && validation.protocol === 'responses' && validation.tools === 'verified'
       ? { toolCallingProtocol: record.toolCallingProtocol } : {}),
     reasoningEfforts,
     defaultReasoningEffort: reasoningEfforts.includes(configuredDefault) ? configuredDefault : reasoningEfforts[0] ?? 'high',

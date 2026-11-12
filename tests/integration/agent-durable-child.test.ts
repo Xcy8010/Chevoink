@@ -448,7 +448,7 @@ describe.runIf(available)('canonical durable child grants', () => {
     })
   })
 
-  it.each(['chat-output', 'responses-output', 'unverified-responses-output'] as const)('%s preserves finite per-request output admission independently of child storage', async kind => fixture(async f => {
+  it.each(['chat-output', 'responses-output', 'invalid-responses-output'] as const)('%s preserves finite per-request output admission independently of child storage', async kind => fixture(async f => {
     const grant = await admitChildExecution(f.lease, f.input)
     const child = await acquireRunLease({ userId: f.userId, runId: grant.childRunId, ownerId: 'child', claimId: randomUUID() })
     const state = await loadExecutionState(f.userId, child.runId)
@@ -456,10 +456,10 @@ describe.runIf(available)('canonical durable child grants', () => {
     const model = kind === 'chat-output' ? 'fixture' : 'gpt-6.1-terra'
     const request: Prisma.InputJsonObject = kind === 'chat-output' ? { body: { model, messages, max_tokens: 5000 } }
       : { endpoint: kind === 'responses-output' ? 'https://yunshu.chevolink.com/v1/responses' : 'https://another.example/v1/responses',
-        body: { model, input: messages, stream: true, max_output_tokens: 5000 } }
+        body: { model, input: messages, stream: kind === 'responses-output', max_output_tokens: 5000 } }
     const prepared = await prepareModelCursorOperation(child, { expectedRevision: state.frame.revision, expectedHash: state.frame.snapshotHash }, { key: `exec:${state.frame.state.nextOperationSequence}`, action: 'workspaceAgent', request, price })
     const attempt = await prepareProviderAttempt(child, { operationId: prepared.operation.id, attemptKey: '1', provider: 'fixture', model, request })
-    if (kind === 'unverified-responses-output') {
+    if (kind === 'invalid-responses-output') {
       await expect(markProviderDispatched(child, attempt.id)).rejects.toMatchObject({ code: 'RUNTIME_CHILD_REQUEST_BUDGET_REQUIRED' })
       expect((await prisma.agentProviderAttempt.findUniqueOrThrow({ where: { id: attempt.id } })).dispatchedAt).toBeNull()
     } else {
