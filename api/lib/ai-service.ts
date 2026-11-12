@@ -287,7 +287,7 @@ async function saveOutputEvidence(id: string, inputEstimate: number, output: str
  * Persist only counts, never manuscript text or credentials, for interruption billing. */
 async function readAuxiliaryResponse(response: Response, usageId: string, inputEstimate: number, custom: boolean, authorizationHeld = false,
   onObservedCompletion?: TextCompletionOptions['onObservedCompletion'], routeEvidence?: Prisma.InputJsonObject): Promise<JsonProviderPayload> {
-  if (!response.ok || !response.headers.get('content-type')?.includes('text/event-stream') || !response.body) return { ...await parseJsonResponse(response, env.aiTextStreamIdleMs), localOutputEstimate: undefined }
+  if (!response.headers.get('content-type')?.includes('text/event-stream') || !response.body) return { ...await parseJsonResponse(response, env.aiTextStreamIdleMs), localOutputEstimate: undefined }
   let content = '', reasoning = '', done = false, truncated = false, lastSaved = 0
   let finishReason: string | null = null
   const toolCalls: unknown[] = []
@@ -366,7 +366,7 @@ type JsonProviderPayload = {
   localOutputEstimate?: number
   /** 供应商报告的思考 token（completion_tokens_details.reasoning_tokens）；仅用于观测。 */
   reasoningTokens?: number
-  error?: { message?: unknown; code?: unknown; type?: unknown }
+  error?: { message?: unknown; code?: unknown; type?: unknown; param?: unknown }
   data?: unknown
   choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown[] }; finish_reason?: unknown }>
   usage?: {
@@ -410,6 +410,48 @@ async function parseJsonResponse(response: Response, idleMs?: number): Promise<J
       ? `模型网关超时（HTTP ${response.status}），未取得完整结果。`
       : `模型网关返回 HTTP ${response.status}，未取得有效响应。` } }
     throw new DataAccessError(502, 'AI_PROVIDER_INVALID_RESPONSE', '模型返回了无法解析的内容。')
+  }
+}
+
+const providerRequestFields = new Set([
+  'model', 'messages', 'tools', 'tool_choice', 'parallel_tool_calls', 'reasoning_effort', 'thinking',
+  'stream', 'stream_options', 'max_tokens', 'max_completion_tokens', 'max_output_tokens', 'response_format',
+  'temperature', 'top_p', 'logprobs', 'top_logprobs', 'frequency_penalty', 'presence_penalty', 'stop', 'seed',
+])
+
+function redactProviderErrorParam(param: unknown): string | null {
+  if (typeof param !== 'string') return null
+  // Retain known wire fields and structural indices, never provider-supplied
+  // tool property names, message contents, or arbitrary error text.
+  const candidate = param.slice(0, 160)
+  const path = candidate.match(/^(tools(?:\[\d{1,4}\]|\.\d{1,4})\.function(?:\.(?:name|parameters|strict))?|messages(?:\[\d{1,4}\]|\.\d{1,4})\.(?:role|content|tool_calls|tool_call_id)|stream_options\.include_usage)(?=$|\.|\[)/)?.[1]
+  if (path) return path
+  const field = candidate.match(/^([a-z_]+)(?=$|\.|\[)/)?.[1]
+  return field && providerRequestFields.has(field) ? field : null
+}
+
+async function readProviderHttpRejection(
+  response: Response,
+  context: { agentRunId?: string | null; action: string; turn?: number | null },
+  idleMs?: number,
+): Promise<JsonProviderPayload> {
+  let payload: JsonProviderPayload | undefined
+  try {
+    payload = await parseJsonResponse(response, idleMs)
+    return payload
+  } finally {
+    const upstream = URL.parse(response.url)
+    const requestId = upstream?.origin === 'https://yunshu.chevolink.com' && upstream.pathname === '/v1/chat/completions'
+      ? response.headers.get('X-Oneapi-Request-Id')
+      : null
+    console.warn('[ai-provider-http-rejection]', JSON.stringify({
+      agentRunId: context.agentRunId ?? null,
+      action: context.action,
+      turn: context.turn ?? null,
+      upstreamStatus: response.status,
+      errorParam: redactProviderErrorParam(payload?.error?.param),
+      gatewayRequestId: requestId && /^[0-9]{23}[0-9A-Za-z]{16}$/.test(requestId) ? requestId : null,
+    }))
   }
 }
 
@@ -1013,7 +1055,11 @@ async function chatWithToolsImpl(params: ChatWithToolsParams): Promise<ChatCompl
 
   if (!response.ok || !response.body) {
     let payload: JsonProviderPayload
-    try { payload = await parseJsonResponse(response, reviewTransport ? env.aiTextStreamIdleMs : undefined) }
+    const idleMs = reviewTransport ? env.aiTextStreamIdleMs : undefined
+    try {
+      payload = response.ok ? await parseJsonResponse(response, idleMs)
+        : await readProviderHttpRejection(response, params.usageLog, idleMs)
+    }
     catch (error) {
       if (reviewTransport) {
         await durable?.interrupted(params.signal?.aborted ? 'aborted' : 'stream_error')
@@ -1456,7 +1502,9 @@ async function generateTextCompletionImpl(systemPrompt: string, userPrompt: stri
     throw error
   } finally { clearTimeout(firstResponseTimer) }
 
-  const payload = await readAuxiliaryResponse(response, prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), modelRuntime.tier === 'custom', !!authorized, options.onObservedCompletion, routeEvidence)
+  const payload = response.ok
+    ? await readAuxiliaryResponse(response, prepared.id, estimateTokenCount(`${systemPrompt}\n${userPrompt}`), modelRuntime.tier === 'custom', !!authorized, options.onObservedCompletion, routeEvidence)
+    : { ...await readProviderHttpRejection(response, options, env.aiTextStreamIdleMs), localOutputEstimate: undefined }
   if (payload.reasoningTokens != null) console.info('[ai-reasoning-usage]', {
     action: options.action, model: modelRuntime.modelName ?? env.aiTextModel,
     reasoningTokens: payload.reasoningTokens, completionTokens: payload.usage?.completion_tokens ?? null, durationMs: Date.now() - startedAt,

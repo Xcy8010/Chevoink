@@ -4,7 +4,8 @@ const mocks = vi.hoisted(() => ({ findModel: vi.fn(), create: vi.fn(), update: v
   runtime: vi.fn(), begin: vi.fn(), rejected: vi.fn() }))
 vi.mock('../../api/lib/prisma.js', () => ({ DataAccessError: class extends Error {
   constructor(readonly status: number, readonly code: string, message: string) { super(message) }
-}, prisma: { agentModelAssignment: { findMany: vi.fn(async () => []) }, aiModelConfig: { findFirst: mocks.findModel },
+}, prisma: { agentModelAssignment: { findMany: vi.fn(async () => []) }, agentGoalExecution: { findUnique: vi.fn(async () => null) },
+  aiModelConfig: { findFirst: mocks.findModel },
   aiUsageLog: { create: mocks.create, update: mocks.update, updateMany: mocks.updateMany, findUnique: vi.fn(async () => null) } } }))
 vi.mock('../../api/lib/credits.js', () => ({ assertCreditAccess: mocks.access, reserveTokenCredits: vi.fn(), consumeTokenCredits: mocks.charge,
   getModelTierRuntime: mocks.runtime }))
@@ -29,6 +30,14 @@ const invokeAuxiliary = (custom = false) => generateTextCompletion('system', 'us
   modelRuntime: custom ? customRuntime : { ...customRuntime, tier: 'speed', multiplierBps: 10000 } })
 const stream = (frames: unknown[]) => new Response(frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join(''),
   { headers: { 'content-type': 'text/event-stream' } })
+const yunshuEndpoint = 'https://yunshu.chevolink.com/v1/chat/completions'
+const yunshuRequestId = '20261112120000123456789abcdef01AbCdEf12'
+
+function httpRejection(url: string, requestId: string, body: BodyInit, status = 400) {
+  const response = new Response(body, { status, headers: { 'X-Oneapi-Request-Id': requestId } })
+  Object.defineProperty(response, 'url', { value: url })
+  return response
+}
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -41,6 +50,71 @@ beforeEach(() => {
   mocks.begin.mockResolvedValue({ rejected: mocks.rejected })
 })
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
+
+describe('provider HTTP rejection diagnostics', () => {
+  const action = 'diagnostic-fixture'
+  const agentRunId = 'synthetic-run'
+  const context = { userId: 'owner', action, agentRunId }
+  const invokeAgent = () => chatWithTools({ messages: [], tools: [], providerBaseUrl: 'https://yunshu.chevolink.com/v1',
+    providerApiKey: 'fixture-key', usageLog: { ...context, turn: 3 } })
+  const invokeAux = () => generateTextCompletion('synthetic system', 'synthetic user', {
+    ...context, modelRuntime: { ...customRuntime, baseUrl: 'https://yunshu.chevolink.com/v1' },
+  })
+
+  it.each([
+    { channel: 'agent', invoke: invokeAgent, turn: 3 },
+    { channel: 'auxiliary', invoke: invokeAux, turn: null },
+  ])('$channel records safe fields and retains one-dispatch rejection accounting', async ({ invoke, turn }) => {
+    const log = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      const response = httpRejection(yunshuEndpoint, yunshuRequestId, JSON.stringify({
+        error: { message: 'synthetic private response', param: 'tools[17].function.parameters.properties.privateName' },
+      }))
+      const fetcher = vi.fn(async () => response)
+      vi.stubGlobal('fetch', fetcher)
+      await expect(invoke()).rejects.toMatchObject({ code: 'AI_PROVIDER_ERROR', message: '模型服务暂时不可用。' })
+      expect(log).toHaveBeenCalledExactlyOnceWith('[ai-provider-http-rejection]', JSON.stringify({
+        agentRunId, action, turn, upstreamStatus: 400, errorParam: 'tools[17].function.parameters', gatewayRequestId: yunshuRequestId,
+      }))
+      expect(fetcher).toHaveBeenCalledOnce()
+      expect(mocks.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        data: { billingStatus: 'provider_rejected', reservedCreditMilli: 0, reservationExpiresAt: null },
+      }))
+      expect(mocks.charge).not.toHaveBeenCalled()
+    } finally { log.mockRestore() }
+  })
+
+  it.each([
+    { url: 'https://elsewhere.example/v1/chat/completions', requestId: yunshuRequestId, body: '{"error":{"param":"private-text"}}', gatewayRequestId: null },
+    { url: yunshuEndpoint, requestId: 'unrecognized-id', body: 'synthetic private non-JSON body', gatewayRequestId: null },
+    { url: yunshuEndpoint, requestId: yunshuRequestId, body: 'synthetic private non-JSON body', gatewayRequestId: yunshuRequestId },
+  ])('records only trusted fields when the response is incomplete or untrusted', async ({ url, requestId, body, gatewayRequestId }) => {
+    const log = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      vi.stubGlobal('fetch', vi.fn(async () => httpRejection(url, requestId, body, 422)))
+      await expect(invokeAgent()).rejects.toMatchObject({ code: 'AI_PROVIDER_ERROR' })
+      expect(log).toHaveBeenCalledExactlyOnceWith('[ai-provider-http-rejection]', JSON.stringify({
+        agentRunId, action, turn: 3, upstreamStatus: 422, errorParam: null, gatewayRequestId,
+      }))
+      expect(fetch).toHaveBeenCalledOnce()
+    } finally { log.mockRestore() }
+  })
+
+  it('records response headers when reading the error body fails', async () => {
+    const log = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const failure = new Error('synthetic read failure')
+    try {
+      const body = new ReadableStream({ start(controller) { controller.error(failure) } })
+      vi.stubGlobal('fetch', vi.fn(async () => httpRejection(yunshuEndpoint, yunshuRequestId, body, 422)))
+      await expect(invokeAgent()).rejects.toBe(failure)
+      expect(log).toHaveBeenCalledExactlyOnceWith('[ai-provider-http-rejection]', JSON.stringify({
+        agentRunId, action, turn: 3, upstreamStatus: 422, errorParam: null, gatewayRequestId: yunshuRequestId,
+      }))
+      expect(fetch).toHaveBeenCalledOnce()
+      expect(mocks.charge).not.toHaveBeenCalled()
+    } finally { log.mockRestore() }
+  })
+})
 
 describe('supplier quota error boundary', () => {
   it.each([{ code: 'insufficient_quota' }, { type: 'insufficient_quota' }, { code: 'quota_exceeded' },
