@@ -43,9 +43,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     mkdirSync('.ci-test-diagnostics', { recursive: true })
     const output = `.ci-test-diagnostics/db-control-${index}.json`
     const pattern = targets.map(target => target.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$').join('|')
+    // Keep failure details in the job log even when the JSON artifact only shows hook errors.
     execFileSync(process.execPath, ['node_modules/vitest/vitest.mjs', 'run', ...new Set(targets.map(target => target.file)),
       '--config=./vitest.config.ts', '--testNamePattern=' + pattern, '--no-file-parallelism', '--coverage.enabled=false',
-      '--reporter=json', '--outputFile=' + output], { stdio: 'inherit', env: process.env })
+      '--reporter=default', '--reporter=json', '--outputFile.json=' + output], { stdio: 'inherit', env: process.env })
     const summary = summarizeDbChainControls(JSON.parse(readFileSync(output, 'utf8')), targets)
     const escape = value => value.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A').replace(/,/g, '%2C')
     for (const entry of summary) console.log(`::notice file=${escape(entry.file)},title=Database chain timing::${escape(JSON.stringify(entry))}`)
