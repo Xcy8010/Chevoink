@@ -14,6 +14,7 @@ import TopicPage from '@/pages/TopicPage'
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
 })
 
 function renderRoute(path: string, element: ReactNode, client = new QueryClient({
@@ -37,6 +38,14 @@ it('keeps loading on its original mark and maps an explicitly named empty scene'
   expect(screen.getByRole('heading', { name: '还没有作品' }).closest('[data-compact="true"]')).toBeTruthy()
   expect(container.querySelector('img')?.getAttribute('src')).toBe('/chevoink-agent-writing.webp')
   expect(screen.queryByRole('img')).toBeNull()
+})
+
+it('loads scene illustrations from the selected immutable release', () => {
+  vi.stubEnv('BASE_URL', '/api/app-releases/artifacts/test-scene-release/')
+  const { container, rerender } = render(<AppState scene="welcome" title="登录后继续" />)
+  expect(container.querySelector('img')?.getAttribute('src')).toBe('/api/app-releases/artifacts/test-scene-release/chevoink-agent-welcome.webp')
+  rerender(<AppState tone="error" title="加载失败" />)
+  expect(container.querySelector('img')?.getAttribute('src')).toBe('/api/app-releases/artifacts/test-scene-release/chevoink-agent-connection.webp')
 })
 
 it('locks an asynchronous retry until it settles and permits a new retry after failure', async () => {

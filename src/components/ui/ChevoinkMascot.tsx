@@ -11,7 +11,7 @@ export default function ChevoinkMascot({ pose, className, animate = true }: {
 }) {
   return (
     <img
-      src={`/chevoink-agent-${pose}.webp`}
+      src={`${import.meta.env.BASE_URL}chevoink-agent-${pose}.webp`}
       alt=""
       aria-hidden="true"
       width={128}
