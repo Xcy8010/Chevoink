@@ -30,8 +30,8 @@ powershell -File scripts/prepare-android-source.ps1 -InstallDependencies
 powershell -File scripts/build-android-release.ps1
 ```
 
-当前版本的构建文件：`android/app/build/outputs/apk/release/chevoink-v1.0.12.apk`（code 15）；验证后复制为
-`artifacts/android/chevoink-v1.0.12-<sha256前12位>.apk`。这些脚本不会上传或发布。
+当前版本的构建文件：`android/app/build/outputs/apk/release/chevoink-v1.0.13.apk`（code 16）；验证后复制为
+`artifacts/android/chevoink-v1.0.13-<sha256前12位>.apk`。这些脚本不会上传或发布。
 旧 `app-release.apk` 是签名基线，不能覆盖。完整前置条件见 `release/ANDROID-HANDOFF.md`。
 
 1.0.8 修复阅读全屏切换的系统栏恢复，并按 WebView 实际剩余安全区处理挖孔、横竖屏及系统栏变化；
@@ -53,6 +53,8 @@ CSS fallback，不改其 listener；保留自定义、IME 与相对方向 paddin
 1.0.12 支持新版网页在系统状态栏和手势栏下绘制背景，普通页面继续显示系统图标，阅读区保留沉浸模式。
 新版网页通过 `ImmersiveMode.enableEdgeToEdge()` 启用当前文档；旧网页继续使用系统预留空间，完整重载会重新协商。
 同一个文档中退出沉浸阅读时恢复该页面的布局。键盘占用的空间由原生窗口处理，安全区接口返回 CSS 像素。
+
+1.0.13 让新版网页的底栏背景延伸到手势区域时使用透明系统栏，系统按钮导航仍保留对比度保护。
 
 ## 签名配置（不入库）
 

@@ -8,11 +8,14 @@ import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 
+import java.util.function.Consumer;
+
 /** Adapts insets before Capacitor's WebView-parent listener, leaving Keyboard's listener intact. */
 public class EdgeToEdgeLayout extends FrameLayout {
     static final int SYSTEM_SAFE_AREA = WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout();
     private boolean enabled;
     private boolean immersive;
+    private Consumer<WindowInsetsCompat> onInsets;
 
     public EdgeToEdgeLayout(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -26,8 +29,13 @@ public class EdgeToEdgeLayout extends FrameLayout {
         ViewCompat.requestApplyInsets(this);
     }
 
+    void setEdgeInsetsListener(Consumer<WindowInsetsCompat> listener) {
+        onInsets = listener;
+    }
+
     WindowInsetsCompat applyInsets(WindowInsetsCompat insets) {
         if (!enabled) return insets;
+        if (onInsets != null) onInsets.accept(insets);
 
         Insets safe = insets.getInsets(SYSTEM_SAFE_AREA);
         int ime = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom;

@@ -1,7 +1,9 @@
 package com.chevoink.app;
 
 import android.graphics.Color;
+import android.os.Build;
 import android.os.SystemClock;
+import android.provider.Settings;
 import android.view.MotionEvent;
 import android.view.View;
 import android.webkit.WebView;
@@ -34,7 +36,13 @@ public class EdgeToEdgePresentationTest {
     @Test public void newDocumentStartsFittedAndReaderExitRestoresCurrentMode() {
         try (ActivityScenario<EdgeToEdgeTestActivity> scenario = ActivityScenario.launch(EdgeToEdgeTestActivity.class)) {
             await(scenario, "fitted startup", a -> hasLoaded(a) && topInWindow(webView(a)) > 0);
+            AtomicBoolean fittedContrast = new AtomicBoolean();
             scenario.onActivity(a -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    // Set the fitted value opposite to opt-in so reload must restore the snapshot.
+                    fittedContrast.set(!usesButtonNavigation(a));
+                    a.getWindow().setNavigationBarContrastEnforced(fittedContrast.get());
+                }
                 assertFalse(read(a).optBoolean("edgeToEdge"));
                 plugin(a).setSystemBarAppearance(new ResultCall(new JSObject().put("color", "#575757").put("dark", true)));
                 assertEquals(0xff575757, a.getWindow().getStatusBarColor());
@@ -57,6 +65,7 @@ public class EdgeToEdgePresentationTest {
             });
             await(scenario, "visible edge-to-edge bars", a -> barsVisible(a) && topInWindow(webView(a)) == 0);
             scenario.onActivity(a -> {
+                assertNavigationBarContrast(a);
                 assertTrue(read(a).optInt("top") > 0);
                 ResultCall enter = new ResultCall();
                 plugin(a).enter(enter);
@@ -68,11 +77,44 @@ public class EdgeToEdgePresentationTest {
             scenario.onActivity(a -> plugin(a).exit(new ResultCall()));
             await(scenario, "edge-to-edge reader exit", a -> barsVisible(a) && read(a).optBoolean("edgeToEdge") && topInWindow(webView(a)) == 0);
             scenario.onActivity(a -> {
+                assertNavigationBarContrast(a);
                 plugin(a).enter(new ResultCall());
                 webView(a).reload();
             });
             await(scenario, "reload restores fitted document", a -> hasLoaded(a) && barsVisible(a)
                     && topInWindow(webView(a)) > 0 && !read(a).optBoolean("edgeToEdge") && !read(a).optBoolean("immersive"));
+            scenario.onActivity(a -> {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return;
+                assertEquals(fittedContrast.get(), a.getWindow().isNavigationBarContrastEnforced());
+
+                // Model an in-place rotation or navigation setting change on the existing attached view.
+                plugin(a).enableEdgeToEdge(new ResultCall());
+                EdgeToEdgeLayout layout = a.findViewById(R.id.edgeToEdgeLayout);
+                int nav = WindowInsetsCompat.Type.navigationBars();
+                int tappable = WindowInsetsCompat.Type.tappableElement();
+                WindowInsetsCompat landscapeButtons = new WindowInsetsCompat.Builder()
+                        .setInsetsIgnoringVisibility(nav, Insets.of(0, 0, 40, 0))
+                        .setInsetsIgnoringVisibility(tappable, Insets.of(0, 0, 40, 0)).build();
+                layout.applyInsets(landscapeButtons);
+                assertTrue(a.getWindow().isNavigationBarContrastEnforced());
+                WindowInsetsCompat gestureBar = new WindowInsetsCompat.Builder(landscapeButtons)
+                        .setInsetsIgnoringVisibility(nav, Insets.of(0, 0, 0, 24))
+                        .setInsetsIgnoringVisibility(tappable, Insets.of(0, 0, 0, 0)).build();
+                layout.applyInsets(gestureBar);
+                assertFalse(a.getWindow().isNavigationBarContrastEnforced());
+            });
+        }
+    }
+
+    private static boolean usesButtonNavigation(EdgeToEdgeTestActivity a) {
+        int mode = Settings.Secure.getInt(a.getContentResolver(), "navigation_mode", -1);
+        if (mode >= 0) return mode != 2;
+        return !Insets.NONE.equals(rootInsets(a).getInsets(WindowInsetsCompat.Type.tappableElement()));
+    }
+
+    private static void assertNavigationBarContrast(EdgeToEdgeTestActivity a) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            assertEquals(usesButtonNavigation(a), a.getWindow().isNavigationBarContrastEnforced());
         }
     }
 

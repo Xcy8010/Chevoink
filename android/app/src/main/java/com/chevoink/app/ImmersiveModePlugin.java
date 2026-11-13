@@ -151,13 +151,27 @@ public class ImmersiveModePlugin extends Plugin {
     private void applyEdgeToEdge(Window window) {
         layoutAtWindowEdges(window);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) window.setNavigationBarDividerColor(Color.TRANSPARENT);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            window.setStatusBarContrastEnforced(false);
-            // Android keeps the contrast background for three-button navigation.
-            window.setNavigationBarContrastEnforced(true);
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) window.setStatusBarContrastEnforced(false);
+        updateNavigationBarContrast(window, ViewCompat.getRootWindowInsets(window.getDecorView()));
         edgeLayout().setPresentation(true, normalState != null);
         reapplyAppearance(window);
+    }
+
+    @SuppressWarnings("deprecation")
+    private static void updateNavigationBarContrast(Window window, WindowInsetsCompat insets) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return;
+        boolean buttonBar = false;
+        if (insets != null) {
+            Insets navigation = insets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.navigationBars());
+            Insets tappable = insets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.tappableElement());
+            // A button bar reserves a tappable inset on the same edge. Gesture bars let taps through.
+            buttonBar = (navigation.bottom > 0 && tappable.bottom > 0)
+                    || (navigation.left > 0 && tappable.left > 0)
+                    || (navigation.right > 0 && tappable.right > 0);
+        }
+        if (window.isNavigationBarContrastEnforced() != buttonBar) {
+            window.setNavigationBarContrastEnforced(buttonBar);
+        }
     }
 
     private View webViewParent() {
@@ -183,8 +197,10 @@ public class ImmersiveModePlugin extends Plugin {
     @Override
     public void load() {
         getActivity().runOnUiThread(() -> {
-            observedDecor = getActivity().getWindow().getDecorView();
-            // Observe only. Capacitor SystemBars and Keyboard own their apply-insets listeners.
+            Window window = getActivity().getWindow();
+            observedDecor = window.getDecorView();
+            edgeLayout().setEdgeInsetsListener(insets -> updateNavigationBarContrast(window, insets));
+            // Capacitor SystemBars and Keyboard keep their own apply-insets listeners.
             observedDecor.getViewTreeObserver().addOnGlobalLayoutListener(layoutListener);
             ViewCompat.requestApplyInsets(observedDecor);
         });
