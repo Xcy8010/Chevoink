@@ -21,6 +21,7 @@ describe('mobile welcome suggestions', () => {
   it('retains the existing suggestion-disabled state', () => {
     render(<AgentEmptyWelcome mobile novelName="测试作品" seed="mobile-polish" showSuggestions={false} />)
     expect(screen.queryAllByRole('button')).toHaveLength(0)
-    expect(screen.getByText(/在下方输入任务/)).toBeTruthy()
+    expect(screen.getByText('在下方输入你的任务。')).toBeTruthy()
+    expect(draft).not.toHaveBeenCalled()
   })
 })

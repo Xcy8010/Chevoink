@@ -88,7 +88,7 @@ describe('next prompt from the current response', () => {
       tools: [{ type: 'function', function: { name: 'plan_read', description: 'Synthetic', parameters: { type: 'object' } } }],
       onChunk: chunk => { if (chunk.type === 'text-delta') visible.push(chunk.delta) } })
     expect(fetch).toHaveBeenCalledExactlyOnceWith('https://yunshu.chevolink.com/v1/responses', expect.objectContaining({
-      body: expect.stringContaining('作者明确要求只输出指定内容、明确不要建议'),
+      body: expect.stringContaining('输入框是否显示建议由应用按作者偏好和任务状态决定'),
     }))
     expect(result).toMatchObject({ content: answer, finishReason: scenario === 'tool call' ? 'tool_calls' : 'stop',
       usage: { promptTokens: 35, completionTokens: 20 } })

@@ -15,7 +15,7 @@ describe('StudioSkeleton responsive layout', () => {
     expect(css).toContain('var(--skeleton-highlight, var(--surface-default)) 50%')
     expect(css).toContain("[data-studio-region='mobile-conversation']\n) { background-color: var(--surface-default); }")
     expect(css).toContain("[data-studio-region='mobile-composer']\n) { background-color: var(--studio-composer-bg); }")
-    expect(css).toContain('.studio-workspace .skeleton-shimmer { animation: none; }')
+    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.skeleton-shimmer \{ animation: none; \}/)
   })
   const markup = renderToStaticMarkup(createElement(StudioSkeleton))
   const { document } = parseHTML(markup)
