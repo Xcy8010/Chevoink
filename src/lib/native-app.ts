@@ -59,6 +59,7 @@ type ImmersiveModePlugin = {
   setSystemBarAppearance?: (options: { color: string; dark: boolean }) => Promise<void>
   enter?: () => Promise<ImmersiveInsets>
   exit?: () => Promise<ImmersiveInsets | void>
+  enableEdgeToEdge?: () => Promise<ImmersiveInsets>
   getInsets?: () => Promise<ImmersiveInsets>
   addListener?: (event: 'insetsChanged', listener: (insets: ImmersiveInsets) => void) => { remove: () => Promise<void> } | Promise<{ remove: () => Promise<void> }>
 }
@@ -70,6 +71,7 @@ export type ImmersiveInsets = {
   left?: number
   right?: number
   immersive?: boolean
+  edgeToEdge?: boolean
   measurement?: 'stable' | 'remaining'
 }
 
@@ -83,7 +85,9 @@ function validInsets(value: unknown): value is ImmersiveInsets {
 }
 
 function publishInsets(value: unknown) {
-  if (validInsets(value)) for (const listener of insetListeners) listener(value)
+  if (!validInsets(value)) return false
+  for (const listener of insetListeners) listener(value)
+  return true
 }
 
 /** New shells report WebView-relative geometry; older APKs omit this capability. */
@@ -98,17 +102,27 @@ export function observeNativeInsets(listener: (insets: ImmersiveInsets) => void)
   let handle: { remove: () => Promise<void> } | undefined
   insetListeners.add(listener)
   const plugin = nativePlugins()?.ImmersiveMode
-  if (plugin?.getInsets && plugin.addListener) {
-    const addListener = plugin.addListener.bind(plugin)
-    // Capacitor's injected bridge returns a synchronous handle; JS proxies may
-    // return a Promise. Neither shape nor a synchronous throw may stop startup.
-    void Promise.resolve().then(() => addListener('insetsChanged', publishInsets)).then(async subscription => {
-      if (disposed) await subscription.remove()
-      else { handle = subscription; await refreshNativeInsets() }
-    }).catch(() => { if (!disposed) void refreshNativeInsets() })
-  } else {
-    void refreshNativeInsets()
+  // Capacitor's injected bridge can return a synchronous handle or a Promise.
+  const subscription = Promise.resolve().then(() => plugin?.addListener?.('insetsChanged', publishInsets)).then(async value => {
+    if (disposed) await value?.remove()
+    else handle = value
+  }).catch(() => { /* Older bridges can expose no listener. */ })
+  const initialize = async () => {
+    await subscription
+    if (disposed) return
+    if (plugin?.enableEdgeToEdge) {
+      try {
+        const insets = await plugin.enableEdgeToEdge()
+        if (disposed) return
+        if (publishInsets(insets)) return
+      } catch { /* Fitted layout remains available on older shells. */ }
+    }
+    if (!disposed) await refreshNativeInsets()
   }
+  // A reader can mount while startup is awaiting native geometry. Serialize
+  // opt-in with its enter/exit calls so an immersive payload cannot arrive first.
+  if (plugin?.enableEdgeToEdge) void enqueueImmersive(initialize)
+  else void initialize()
   return () => {
     disposed = true
     insetListeners.delete(listener)

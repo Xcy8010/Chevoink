@@ -5,7 +5,7 @@ import SiteSupportLink from '@/features/site-content/SiteSupportLink'
 import { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode, UIEvent, useEffect, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Compass, FileText, Home, LoaderCircle, LogOut, MessageSquareMore, MoonStar, PenSquare, Settings, SunMedium, UserRound, Users, WifiOff } from 'lucide-react'
+import { ChevronLeft, ChevronRight, ChevronUp, Compass, FileText, Home, LoaderCircle, LogOut, MessageSquareMore, MoonStar, PenSquare, Settings, SunMedium, UserRound, Users, WifiOff } from 'lucide-react'
 
 import { requestJson } from '@/app/api-client'
 import { useToast } from '@/components/ui/toast-context'
@@ -461,14 +461,6 @@ export default function AppShell({ title, description, children }: AppShellProps
     )
   }
 
-  const topNavClass = ({ isActive }: { isActive: boolean }) =>
-    cn(
-      'flex h-16 shrink-0 items-center border-b-2 px-4 text-sm font-medium transition-colors',
-      isActive
-        ? 'border-[var(--color-brand)] text-[var(--text-primary)]'
-        : 'border-transparent text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)]',
-    )
-
   const railNavClass = ({ isActive }: { isActive: boolean }) =>
     cn(
       'flex w-full min-h-[44px] items-center justify-start rounded-[var(--radius-pill)] border border-transparent px-4 py-2.5 text-sm font-medium transition-colors',
@@ -653,7 +645,7 @@ export default function AppShell({ title, description, children }: AppShellProps
               ref={headerRef}
               data-site-header
               className={cn(
-                'site-reveal-header fixed left-0 right-0 top-0 z-40 border-b border-[var(--border-subtle)] bg-[var(--surface-default)] px-3 pt-[var(--safe-top)] md:px-5',
+                'site-reveal-header fixed left-0 right-0 top-0 z-40 border-b border-[var(--border-subtle)] bg-[var(--surface-default)] px-3 pt-[var(--safe-top)]',
                 isStudioRoute && 'hidden lg:hidden',
                 isReaderRoute && 'hidden md:hidden',
                 hideMobileHeader && !isStudioRoute && !isReaderRoute && 'hidden md:block',
@@ -662,32 +654,20 @@ export default function AppShell({ title, description, children }: AppShellProps
               onFocusCapture={event => setHeaderFocused(event.target.matches(':focus-visible'))}
               onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) setHeaderFocused(false) }}
             >
-              <div className="site-header-row relative flex h-14 items-center gap-2 md:h-16 md:gap-5">
+              <div className="site-header-row relative flex h-14 items-center gap-2 md:h-16">
                 <Link to="/" className="site-header-identity flex shrink-0 items-center gap-2" aria-label={effectiveSettings.name + '首页'}>
                   <AppImage src={!effectiveSettings.logoUrl || effectiveSettings.logoUrl === defaultSiteSettings.logoUrl ? '/chevoink-agent.png' : effectiveSettings.logoUrl} alt={effectiveSettings.name + ' Logo'} className="h-10 w-10 shrink-0 md:h-11 md:w-11" priority />
                   <span className="hidden text-base font-semibold md:block">{effectiveSettings.name}</span>
                 </Link>
-                <GlobalSearchBox onOpenChange={setHeaderSearchOpen} className="site-header-search min-w-0 flex-1 md:max-w-[360px]" />
-                <nav aria-label="站点导航" className="hidden min-w-0 flex-1 items-center justify-center overflow-x-auto md:flex">
+                <nav aria-label="站点导航" className="site-header-navigation hidden min-w-0 items-center overflow-x-auto md:flex">
                   {headerNavItems.map((item) => item.href.startsWith('/') ? (
-                    <NavLink key={item.href} to={item.href} className={topNavClass}>{item.label}</NavLink>
+                    <NavLink key={item.href} to={item.href}>{item.label}</NavLink>
                   ) : (
-                    <a key={item.href} href={item.href} target="_blank" rel="noopener noreferrer" className={topNavClass({isActive:false})}>{item.label}</a>
+                    <a key={item.href} href={item.href} target="_blank" rel="noopener noreferrer">{item.label}</a>
                   ))}
                 </nav>
-                {siteSettings?.navigation.length ? (
-                  <details className="site-navigation-menu relative md:hidden">
-                    <summary aria-label="站点导航菜单" className="grid h-11 w-9 cursor-pointer list-none place-items-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"><ChevronDown className="h-5 w-5" /></summary>
-                    <nav aria-label="站点导航" className="absolute right-0 top-full mt-2 min-w-40 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-default)] p-1 shadow-[var(--shadow-elevated)]" onClick={event => event.currentTarget.closest('details')?.removeAttribute('open')}>
-                      {headerNavItems.map(item => item.href.startsWith('/') ? (
-                        <NavLink key={item.href} to={item.href} className="block rounded-lg px-3 py-3 text-sm hover:bg-[var(--surface-muted)]">{item.label}</NavLink>
-                      ) : (
-                        <a key={item.href} href={item.href} target="_blank" rel="noopener noreferrer" className="block rounded-lg px-3 py-3 text-sm hover:bg-[var(--surface-muted)]">{item.label}</a>
-                      ))}
-                    </nav>
-                  </details>
-                ) : null}
-                <div className="site-header-actions ml-auto flex shrink-0 items-center gap-0.5 md:gap-1">
+                <GlobalSearchBox onOpenChange={setHeaderSearchOpen} className="site-header-search min-w-0 flex-1" />
+                <div className="site-header-actions flex shrink-0 items-center gap-0.5">
                   {!isStudioRoute && !isReaderRoute && <AnnouncementBell placement="site" />}
                   <Button onClick={toggleTheme} variant="ghost" className="hidden h-11 w-11 px-0 md:inline-flex" aria-label="切换主题">
                     {theme === 'light' ? <MoonStar className="h-5 w-5" /> : <SunMedium className="h-5 w-5" />}

@@ -19,9 +19,9 @@ const enter = vi.fn(async (): Promise<ImmersiveInsets> => {
 const exit = vi.fn(async () => { current = { ...normal }; return current })
 const background = vi.fn(async () => {})
 
-function installBridge(modern = true) {
+function installBridge(modern = true, enableEdgeToEdge?: () => Promise<ImmersiveInsets>) {
   Object.defineProperty(window, 'Capacitor', { configurable: true, value: { Plugins: {
-    ImmersiveMode: { enter, exit, ...(modern ? { getInsets, addListener: vi.fn((_event: string, listener: typeof notify) => { notify = listener; return { remove } }) } : {}) },
+    ImmersiveMode: { enter, exit, enableEdgeToEdge, ...(modern ? { getInsets, addListener: vi.fn((_event: string, listener: typeof notify) => { notify = listener; return { remove } }) } : {}) },
     StatusBar: { setBackgroundColor: background, setStyle: vi.fn(async () => {}) },
   } } })
 }
@@ -109,6 +109,49 @@ describe('native system-bar safe-area ownership', () => {
     current = { ...normal }
     window.dispatchEvent(new Event('orientationchange'))
     await waitFor(() => expect(document.documentElement.style.getPropertyValue('--safe-top')).toBe('0px'))
+  })
+
+  it('subscribes before opting into edge-to-edge and applies matching normal and immersive geometry', async () => {
+    const root = document.documentElement
+    let enable!: (insets: ImmersiveInsets) => void
+    const enableEdgeToEdge = vi.fn(() => new Promise<ImmersiveInsets>(resolve => { enable = resolve }))
+    installBridge(true, enableEdgeToEdge)
+    stop = setupSafeAreaFallback()
+    await waitFor(() => expect(enableEdgeToEdge).toHaveBeenCalledOnce())
+    expect(root.hasAttribute('data-native-edge-to-edge')).toBe(false)
+    current = { ...normal, edgeToEdge: true, top: 28, bottom: 24 }
+    notify(current)
+    enable(current)
+    await waitFor(() => expect(root.hasAttribute('data-native-edge-to-edge')).toBe(true))
+    expect(root.style.getPropertyValue('--safe-top')).toBe('28px')
+    expect(root.style.getPropertyValue('--safe-bottom')).toBe('24px')
+
+    notify({ ...current, bottom: 0 })
+    expect(root.style.getPropertyValue('--safe-bottom')).toBe('0px')
+    expect(enableEdgeToEdge).toHaveBeenCalledOnce()
+    setNativeImmersiveSafeArea(true, { top: 48, bottom: 0 })
+    notify({ ...current, top: 42, bottom: 0, immersive: true })
+    expect(root.hasAttribute('data-native-edge-to-edge')).toBe(false)
+    expect(root.style.getPropertyValue('--safe-top')).toBe('42px')
+    setNativeImmersiveSafeArea(false)
+    notify(current)
+    expect(root.hasAttribute('data-native-edge-to-edge')).toBe(true)
+    stop?.()
+    stop = undefined
+    expect(root.hasAttribute('data-native-edge-to-edge')).toBe(false)
+    expect(root.style.getPropertyValue('--safe-top')).toBe('')
+  })
+
+  it('keeps the fitted layout when an older proxy rejects edge-to-edge', async () => {
+    const root = document.documentElement
+    const enableEdgeToEdge = vi.fn(async () => { throw Error('UNIMPLEMENTED') })
+    installBridge(true, enableEdgeToEdge)
+    stop = setupSafeAreaFallback()
+    await waitFor(() => expect(getInsets).toHaveBeenCalledOnce())
+    expect(enableEdgeToEdge).toHaveBeenCalledOnce()
+    expect(root.hasAttribute('data-native-edge-to-edge')).toBe(false)
+    expect(root.style.getPropertyValue('--safe-top')).toBe('0px')
+    expect(root.style.getPropertyValue('--safe-bottom')).toBe('0px')
   })
 
   it('rejects malformed bridge insets and removes subscriptions resolved after cleanup', async () => {

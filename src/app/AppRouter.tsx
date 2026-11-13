@@ -52,7 +52,9 @@ function AppRoutes() {
             path={route.path}
             element={
               route.useShell === false ? (
-                <Suspense fallback={route.fallback ?? defaultRouteFallback}>{route.element}</Suspense>
+                <div className="app-standalone-route">
+                  <Suspense fallback={route.fallback ?? defaultRouteFallback}>{route.element}</Suspense>
+                </div>
               ) : (
                 // Suspense 放在壳内：顶栏/底栏立即可交互，只内容区显示骨架
                 <AppShell title={route.title} description={route.description}>

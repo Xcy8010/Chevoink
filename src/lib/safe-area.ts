@@ -25,24 +25,30 @@ function inset(value: number | undefined, fallback: number) {
 export function setupSafeAreaFallback(): (() => void) | undefined {
   if (typeof window === 'undefined' || typeof document === 'undefined' || !/Android/i.test(navigator.userAgent)) return
   const native = isNativeApp()
-  const probe = document.createElement('div')
-  probe.style.cssText = 'position:fixed;width:0;height:env(safe-area-inset-top,0px);pointer-events:none;visibility:hidden;'
-  document.documentElement.append(probe)
+  const root = document.documentElement
+  const probe = native ? null : document.createElement('div')
+  if (probe) {
+    probe.style.cssText = 'position:fixed;width:0;height:env(safe-area-inset-top,0px);pointer-events:none;visibility:hidden;'
+    root.append(probe)
+  }
   const apply = () => {
-    const style = document.documentElement.style
+    const style = root.style
     if (native) {
       // Native shells own layout. Measure only the safe space still overlapping
       // the WebView; screen-height guesses double-count island/bar animations.
       const current = measured?.immersive === nativeImmersive ? measured : null
       for (const edge of EDGES) {
         const fallback = nativeImmersive ? inset(nativeHint?.[edge], edge === 'top' ? 32 : edge === 'bottom' ? 24 : 0) : 0
-        style.setProperty(`--safe-${edge}`, `${inset(current?.[edge], fallback)}px`)
+        const property = `--safe-${edge}`
+        const value = `${inset(current?.[edge], fallback)}px`
+        if (style.getPropertyValue(property) !== value) style.setProperty(property, value)
       }
+      root.toggleAttribute('data-native-edge-to-edge', current?.edgeToEdge === true && !nativeImmersive)
       return
     }
     for (const edge of EDGES) style.removeProperty(`--safe-${edge}`)
     // Preserve the existing QQ/WeChat fallback outside the native shell.
-    if (!document.fullscreenElement && probe.getBoundingClientRect().height < 1 && window.innerHeight >= window.screen.height - 1) {
+    if (!document.fullscreenElement && probe && probe.getBoundingClientRect().height < 1 && window.innerHeight >= window.screen.height - 1) {
       style.setProperty('--safe-top', '32px')
     }
   }
@@ -58,7 +64,7 @@ export function setupSafeAreaFallback(): (() => void) | undefined {
   document.addEventListener('fullscreenchange', apply)
   return () => {
     stop()
-    probe.remove()
+    probe?.remove()
     window.removeEventListener('resize', refresh)
     window.removeEventListener('orientationchange', refresh)
     window.removeEventListener('pageshow', refresh)
@@ -68,6 +74,7 @@ export function setupSafeAreaFallback(): (() => void) | undefined {
     measured = null
     nativeHint = null
     nativeImmersive = false
-    for (const edge of EDGES) document.documentElement.style.removeProperty(`--safe-${edge}`)
+    root.removeAttribute('data-native-edge-to-edge')
+    for (const edge of EDGES) root.style.removeProperty(`--safe-${edge}`)
   }
 }

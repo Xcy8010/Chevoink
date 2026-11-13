@@ -505,7 +505,6 @@ describe('composer next-prompt completion', () => {
   const suggestion = '按刚才的风格再写一章'
   const defaultPlaceholder = '告诉我要做什么，我会自主完成…'
   const offer = () => screen.queryByRole('button', { name: '补全建议：' + suggestion })
-  const insert = () => screen.queryByRole('button', { name: '插入建议到草稿末尾：' + suggestion })
 
   it('keeps the preview out of the draft and accepts only a plain focused Tab', async () => {
     const input = { ...props(), nextPrompt: suggestion, onAcceptNextPrompt: vi.fn() }
@@ -537,27 +536,26 @@ describe('composer next-prompt completion', () => {
     expect(screen.getByText(defaultPlaceholder)).toBeTruthy()
   })
 
-  it('preserves an existing draft and the running placeholder, and supports tap acceptance', () => {
+  it('hides the suggestion while typing, then restores tap acceptance when the draft is cleared', () => {
     const input = { ...props(), nextPrompt: suggestion, onAcceptNextPrompt: vi.fn() }
     const view = render(<AgentComposer {...input} running />)
     expect(screen.getByText(defaultPlaceholder)).toBeTruthy()
     expect(offer()).toBeNull()
     view.rerender(<AgentComposer {...input} />)
+    expect(offer()).toBeTruthy()
     typeDraft('我想换个写法')
-    expect(offer()).toBeNull()
-    expect(insert()?.textContent).toContain(suggestion)
+    expect(screen.queryByText(suggestion)).toBeNull()
+    expect(editor().hasAttribute('aria-describedby')).toBe(false)
     expect(fireEvent.keyDown(editor(), { key: 'Tab' })).toBe(true)
+    expect(editor().textContent).toBe('我想换个写法')
     expect(useAgentStore.getState().composerDraft).toBe('我想换个写法')
-    fireEvent.click(insert()!)
-    expect(useAgentStore.getState().composerDraft).toBe('我想换个写法\n' + suggestion)
-    expect(input.onAcceptNextPrompt).toHaveBeenCalledOnce()
-    expect(input.onSend).not.toHaveBeenCalled()
+    expect(input.onAcceptNextPrompt).not.toHaveBeenCalled()
 
-    editor().textContent = ''
+    editor().replaceChildren(document.createElement('br'))
     fireEvent.input(editor())
     fireEvent.click(offer()!)
     expect(editor().textContent).toBe(suggestion)
-    expect(input.onAcceptNextPrompt).toHaveBeenCalledTimes(2)
+    expect(input.onAcceptNextPrompt).toHaveBeenCalledOnce()
     expect(input.onSend).not.toHaveBeenCalled()
   })
 })
