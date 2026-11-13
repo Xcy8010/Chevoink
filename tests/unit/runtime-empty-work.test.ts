@@ -18,6 +18,7 @@ beforeEach(() => {
   queued = vi.fn(async () => 0); eligible = vi.fn(async () => []); operations = vi.fn(async () => 0); pending = vi.fn(async () => null)
   mocks.tx = { agentRun: { findUniqueOrThrow: vi.fn(async () => ({ id: 'run', sessionId: 'session' })) },
     agentQueuedRequest: { count: queued }, agentChildExecutionGrant: { findMany: eligible },
+    agentExecutionOutbox: { findFirst: vi.fn(async () => null) },
     agentOperation: { count: operations, findUnique: pending }, agentTaskRoot: { findUniqueOrThrow: vi.fn(async () => ({ id: 'root', novelId: 'novel' })) } }
   mocks.state.mockResolvedValue({ frame: { state: { phase: 'idle', messages: [], pendingOperationId: null }, revision: 0 } })
   mocks.evidence.mockResolvedValue({ effects: [] }); mocks.adopt.mockResolvedValue(undefined)

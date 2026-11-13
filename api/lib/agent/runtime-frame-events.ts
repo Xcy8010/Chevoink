@@ -106,7 +106,7 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
     if (appended.role === 'tool') {
       const operation = await tx.agentOperation.findFirst({ where: { id: previous.state.pendingOperationId!, taskRootId: source.taskRootId }, include: { effectReceipt: true } })
       const receipt = operation?.effectReceipt
-      const parsedResult = z.object({ code: z.string().optional(), toolResult: z.object({ output: z.string(), summary: z.string(), failureCode: z.string().optional(), reviewOutcome: z.enum(REVIEW_OUTCOMES).optional(), display: z.unknown().optional(), outcome: z.literal('failed').optional(), questionTimedOut: z.literal(true).optional(),
+      const parsedResult = z.object({ code: z.string().optional(), toolResult: z.object({ output: z.string().optional(), summary: z.string(), failureCode: z.string().optional(), reviewOutcome: z.enum(REVIEW_OUTCOMES).optional(), display: z.unknown().optional(), outcome: z.literal('failed').optional(), questionTimedOut: z.literal(true).optional(),
         questionCancelled: z.literal(true).optional(), questionCancellationVersion: z.literal(2).optional(), novelSetupRecap: novelSetupRecapSchema.optional() }) }).safeParse(receipt?.result)
       if (!operation || !receipt || !parsedResult.success || !['succeeded', 'failed'].includes(operation.status)
         || runtimeJson(receipt.result).hash !== receipt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '工具结果事件缺少完整回执。')
@@ -136,6 +136,7 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
             const unanswered = result.questionCancellationVersion === 2
             validTerminal = operation.action === 'ask_user' && result.questionCancelled === true
               && unanswered === (terminal.localCompletion.kind === 'question_unanswered')
+              && (!unanswered || typeof result.output === 'string')
               && terminal.content === (unanswered ? result.output : QUESTION_CANCELLED_NOTICE)
           } else {
             validTerminal = ['novel_create', 'novel_update_meta'].includes(operation.action) && title.success

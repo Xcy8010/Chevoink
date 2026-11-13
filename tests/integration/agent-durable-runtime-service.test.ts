@@ -476,6 +476,9 @@ describe.runIf(available)('durable question lifecycle', () => {
           ] }], successfulToolSignatures: [] } })
       const step = await executeDurableToolStep(lease, signal)
       if (step.kind !== 'waiting_question' || !step.requestId) throw new Error('Expected original question')
+      const providerAttempts = () => prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })
+      const originalAttemptCount = await providerAttempts()
+      expect(originalAttemptCount).toBe(1) // The settled synthetic model that issued the question.
       const identity = { userId: f.userId, runId: f.runId, requestId: step.requestId, callId: 'long-question' }
       expect(step.longWait).toBe(true)
       const before = await loadExecutionState(f.userId, f.runId)
@@ -521,7 +524,7 @@ describe.runIf(available)('durable question lifecycle', () => {
         try {
           await expect(executePersistedLoopRun(f.userId, f.runId)).resolves.toMatchObject({ kind: 'completed' })
           expect(await prisma.agentEffectReceipt.count({ where: { operationId: original.operationId! } })).toBe(1)
-          expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+          expect(await providerAttempts()).toBe(originalAttemptCount)
         } finally {
           for (const run of busy) deregisterActiveRun(run.id)
         }
@@ -535,7 +538,7 @@ describe.runIf(available)('durable question lifecycle', () => {
       expect(await executeDurableToolStep(resumed, signal)).toMatchObject({ kind: 'tool',
         result: { display: { kind: 'question', answers: ['海岛', '第一人称'] } } })
       expect(await prisma.agentEffectReceipt.count({ where: { operationId: original.operationId! } })).toBe(1)
-      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+      expect(await providerAttempts()).toBe(originalAttemptCount)
     }, undefined, prompt, { agentQuestionProtocol: 2 })
   })
 

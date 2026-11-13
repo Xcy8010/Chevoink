@@ -267,23 +267,22 @@ async function executeOwnedPersistedLoopRun(run: AgentRunRecord) {
   const { userId, id: runId } = run
   if (run.runtimeProtocolVersion !== 1 || !run.taskRootId) throw new DataAccessError(409, 'RUNTIME_VERSION_MISMATCH', '仅能调度已初始化的持久任务。')
   if (getActiveRun(run.id) || hasActiveRunInSession(run.sessionId)) throw new DataAccessError(409, 'RUN_IN_PROGRESS', '该会话已有本地执行者。')
-  // Recovery shares the existing resume limit. A restart must not dispatch all
-  // discovered tasks at once and multiply the user's concurrent paid requests.
-  const questionCancellation = await hasCancelledDurableQuestion(prisma, run.taskRootId, run.id)
-  if (getActiveRun(run.id) || hasActiveRunInSession(run.sessionId)) throw new DataAccessError(409, 'RUN_IN_PROGRESS', '该会话已有本地执行者。')
-  if (!questionCancellation && countActiveRunsByUser(userId) >= env.agentUserMaxConcurrent) {
-    throw new DataAccessError(409, 'RUN_LIMIT', `同时进行的任务数已达上限（${env.agentUserMaxConcurrent}），请稍后再试。`)
-  }
   const controller = new AbortController()
-  // No await between reservation check and registration. This uses the same
-  // registry as legacy runs so stop and concurrency accounting remain shared.
-  registerActiveRun(run.id, { controller, userId, sessionId: run.sessionId, questionCancellation })
+  // Reserve the session synchronously. The account slot is claimed after the
+  // DB check classifies this as ordinary execution or receipt-only cleanup.
+  const active = { controller, userId, sessionId: run.sessionId, usesExecutionSlot: false }
+  registerActiveRun(run.id, active)
   let lease: RunLeaseToken | undefined
   let executionFailed = false
   let deletionVerified = false
   let result: Awaited<ReturnType<typeof import('./runtime-executor.js').runReviewedDurableExecution>>
   let cleanupFailure: { error: unknown } | undefined
   try {
+    const questionCancellation = await hasCancelledDurableQuestion(prisma, run.taskRootId, run.id)
+    if (!questionCancellation && countActiveRunsByUser(userId) >= env.agentUserMaxConcurrent) {
+      throw new DataAccessError(409, 'RUN_LIMIT', `同时进行的任务数已达上限（${env.agentUserMaxConcurrent}），请稍后再试。`)
+    }
+    active.usesExecutionSlot = !questionCancellation
     // Verify model availability before the lease can adopt child work.
     if (!questionCancellation) await assertRunModelNotArchived(run)
     lease = await acquireRunLease({ userId, runId: run.id, ownerId: durableProcessOwner, claimId: randomUUID() })

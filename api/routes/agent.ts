@@ -1006,7 +1006,7 @@ router.post('/runs/:runId/questions', async (req: Request, res: Response): Promi
 
   try {
     const userId = requireSessionUserId(req)
-    const body = parseBody(resolveAgentQuestionSchema, req.body, '请提供提问标识及有效答复或取消结果。')
+    const body = parseBody(resolveAgentQuestionSchema, req.body, '请提供 callId 与回答内容。')
 
     const decision = 'answer' in body ? { answer: body.answer.trim() }
       : 'answers' in body ? { answers: body.answers.map(answer => answer.trim()) } : { cancelled: true as const }

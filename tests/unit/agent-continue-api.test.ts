@@ -300,7 +300,15 @@ describe('continue API exact target', () => {
     mocks.count.mockResolvedValue(Number.MAX_SAFE_INTEGER)
     await expect(continueLoopRun('u', 'run19')).rejects.toMatchObject({ code: 'RUN_LIMIT' })
     expect(mocks.execute).not.toHaveBeenCalled()
-    expect(mocks.count).toHaveBeenCalledWith({ where: { incomingChildGrant: { isNot: { kind: 'inline' } }, userId: 'u', status: { in: ['queued', 'running', 'awaiting_approval'] } } })
+    expect(mocks.count).toHaveBeenCalledWith({ where: {
+      incomingChildGrant: { isNot: { kind: 'inline' } },
+      userId: 'u',
+      OR: [
+        { status: { in: ['queued', 'running', 'awaiting_approval'] }, taskRootId: null },
+        { status: { in: ['queued', 'running', 'awaiting_approval'] },
+          taskRoot: { is: { status: { notIn: ['waiting_question', 'closing_question'] } } } },
+      ],
+    } })
   })
   it('rejects stale resume after a newer task exists and never starts it', async () => {
     mocks.find.mockReset().mockResolvedValueOnce(run).mockResolvedValueOnce({ id: 'run20' })
