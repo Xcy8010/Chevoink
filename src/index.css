@@ -1296,12 +1296,6 @@ html.dark .site-reveal-header {
       -webkit-backdrop-filter: blur(16px) saturate(130%);
     }
   }
-  /* Keep status icons over the header's tint while its row collapses to search. */
-  html[data-native-edge-to-edge] .site-reveal-header[data-hidden='true'] {
-    background-image: linear-gradient(var(--surface-default), var(--surface-default));
-    background-repeat: no-repeat;
-    background-size: 100% var(--safe-top);
-  }
 }
 .site-reveal-header .site-header-search [data-global-search-field]:focus-within {
   border-color: var(--border-strong);
