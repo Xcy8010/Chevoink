@@ -20,6 +20,7 @@ import { enterImmersiveFullscreen } from '@/lib/immersive-fullscreen'
 import { isNativeApp } from '@/lib/native-app'
 import { isWindowsDesktopApp } from '@/lib/desktop-app'
 import { cn } from '@/lib/utils'
+import { useDeviceType } from '@/hooks/useDeviceType'
 import { useOnlineStatus } from '@/hooks/useOnlineStatus'
 import { useRevealHeader } from '@/hooks/useRevealHeader'
 import { preloadProfilePage } from '@/features/profile/load-profile-page'
@@ -97,8 +98,11 @@ export default function AppShell({ title, description, children }: AppShellProps
   const navRefreshAtRef = useRef(new Map<string, number>())
   const [bottomNavRefreshing, setBottomNavRefreshing] = useState(false)
   const [headerSearchOpen, setHeaderSearchOpen] = useState(false)
-  const [headerFocused, setHeaderFocused] = useState(false)
-  const { ref: headerRef, hidden: headerHidden } = useRevealHeader(headerSearchOpen || headerFocused, mainScrollRef, location.pathname)
+  const [headerFocus, setHeaderFocus] = useState<'search' | 'controls' | null>(null)
+  const mobileHeader = useDeviceType() === 'mobile'
+  // 手机收起顶栏后仍可使用搜索，桌面顶栏则需要为搜索保持可见。
+  const keepHeaderVisible = headerFocus === 'controls' || (!mobileHeader && (headerSearchOpen || headerFocus === 'search'))
+  const { ref: headerRef, hidden: headerHidden } = useRevealHeader(keepHeaderVisible, mainScrollRef, location.pathname)
   const desktopAccountMenuRef = useRef<HTMLDivElement | null>(null)
   // 默认折叠，保证内容区最大宽度；展开状态仅影响桌面端(lg)，平板端常驻收起导航轨
   const [sidebarExpanded, setSidebarExpanded] = useState(false)
@@ -651,8 +655,14 @@ export default function AppShell({ title, description, children }: AppShellProps
                 hideMobileHeader && !isStudioRoute && !isReaderRoute && 'hidden md:block',
               )}
               data-hidden={headerHidden}
-              onFocusCapture={event => setHeaderFocused(event.target.matches(':focus-visible'))}
-              onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) setHeaderFocused(false) }}
+              onFocusCapture={event => {
+                if (!event.target.matches(':focus-visible')) {
+                  setHeaderFocus(null)
+                  return
+                }
+                setHeaderFocus(event.target.closest('.site-header-search') ? 'search' : 'controls')
+              }}
+              onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) setHeaderFocus(null) }}
             >
               <div className="site-header-row relative flex h-14 items-center gap-2 md:h-16">
                 <Link to="/" className="site-header-identity flex shrink-0 items-center gap-2" aria-label={effectiveSettings.name + '首页'}>

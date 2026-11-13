@@ -11,7 +11,7 @@ import type { PublicSiteContent } from '../../shared/contracts/site-content'
 const mocks=vi.hoisted(()=>({request:vi.fn()}))
 vi.mock('../../src/app/api-client',()=>({requestJson:mocks.request}))
 vi.mock('../../src/components/ui/toast-context',()=>({useToast:()=>({error:vi.fn()})}))
-vi.mock('../../src/features/search/GlobalSearchBox',()=>({default:()=> <input aria-label="全局搜索"/>}))
+vi.mock('../../src/features/search/api',()=>({getHotSearchKeywords:async()=>({keywords:['玄幻']})}))
 vi.mock('../../src/components/layout/QuickCreateSheet',()=>({default:()=>null}))
 vi.mock('../../src/components/ui/AppImage',()=>({default:({src,alt}:{src:string;alt:string})=><img src={src} alt={alt}/>}))
 vi.mock('../../src/features/community/components/Avatar',()=>({default:()=> <span>头像</span>}))
@@ -30,7 +30,7 @@ it('renders published identity and safe configured desktop links before search w
   await screen.findByRole('img', {name: '配置后的站点 Logo'})
   expect(screen.getByRole('img', {name: '配置后的站点 Logo'}).getAttribute('src')).toBe('https://example.com/published-logo.png')
   const navigation = screen.getByRole('navigation', {name: '站点导航'})
-  expect(navigation.nextElementSibling).toBe(screen.getByRole('textbox', {name: '全局搜索'}))
+  expect(navigation.nextElementSibling?.contains(screen.getByRole('textbox', {name: '搜索作品、作者、讨论'}))).toBe(true)
   expect(screen.queryByLabelText('站点导航菜单')).toBeNull()
   const discover = within(navigation).getByRole('link', {name: '精选分类'})
   expect(discover.getAttribute('href')).toBe('/discover')
@@ -45,6 +45,31 @@ it('renders published identity and safe configured desktop links before search w
   expect(screen.queryByText('管理员')).toBeNull()
   const bell = screen.getByRole('button', {name: '通知中心'})
   expect(bell.nextElementSibling).toBe(screen.getByRole('button', {name: '切换主题'}))
+})
+
+it('keeps the mobile search wide on focus and still responds to scroll direction', async () => {
+  vi.stubGlobal('innerWidth', 390)
+  mount()
+  const header = screen.getByRole('banner')
+  const scroll = document.querySelector<HTMLElement>('[data-app-main-scroll]')!
+  Object.defineProperties(scroll, { scrollHeight: { value: 3000 }, clientHeight: { value: 800 } })
+  const scrollTo = (top: number) => {
+    scroll.scrollTop = top
+    fireEvent.scroll(scroll)
+  }
+  scrollTo(300)
+  await waitFor(() => expect(header.dataset.hidden).toBe('true'))
+  const input = screen.getByRole('textbox', {name: '搜索作品、作者、讨论'})
+  act(() => input.focus())
+  await screen.findByText('玄幻')
+  expect(header.dataset.hidden).toBe('true')
+  expect(document.activeElement).toBe(input)
+
+  scrollTo(200)
+  await waitFor(() => expect(header.dataset.hidden).toBe('false'))
+  scrollTo(450)
+  await waitFor(() => expect(header.dataset.hidden).toBe('true'))
+  expect(document.activeElement).toBe(input)
 })
 it('updates actual header only from published query data and preserves legacy identity/navigation when no settings are published',async()=>{
  const current=data();current.settings=null;mocks.request.mockResolvedValue(current)
