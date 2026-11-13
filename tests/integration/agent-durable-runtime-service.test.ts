@@ -7,7 +7,7 @@ import { env } from '../../api/config/env.js'
 import { countActiveRunsByUser,deregisterActiveRun,getActiveRun,registerActiveRun } from '../../api/lib/agent/active-runs.js'
 import * as agentDefinitions from '../../api/lib/agent/agents.js'
 import * as contextAssembler from '../../api/lib/agent/context.js'
-import { executePersistedLoopRun,initializePersistedLoopRun,recoverDurableLoopRuns,stopLoopRun } from '../../api/lib/agent/run-service.js'
+import { executePersistedLoopRun,initializePersistedLoopRun,readSessionPendingQuestion,recoverDurableLoopRuns,stopLoopRun } from '../../api/lib/agent/run-service.js'
 import { readTaskBudget } from '../../api/lib/agent/runtime-budget.js'
 import { advanceDurableContext } from '../../api/lib/agent/runtime-checkpoint-step.js'
 import { AGENT_TOOL_EXECUTION_POLICY } from '../../api/lib/agent/tool-execution-guidance.js'
@@ -18,10 +18,10 @@ import * as runtimeExecutor from '../../api/lib/agent/runtime-executor.js'
 import { executeDurableStep,waitForDurableDecision } from '../../api/lib/agent/runtime-executor.js'
 import * as runtimeLease from '../../api/lib/agent/runtime-lease.js'
 import { releaseRunLease,withRunLease } from '../../api/lib/agent/runtime-lease.js'
-import { pauseDurableTask } from '../../api/lib/agent/runtime-lifecycle.js'
+import { pauseDurableTask, pauseDurableTaskForAttention } from '../../api/lib/agent/runtime-lifecycle.js'
 import { readObservedBaseline } from '../../api/lib/agent/runtime-observed-baseline.js'
 import * as runtimeOperations from '../../api/lib/agent/runtime-operations.js'
-import { resolveDurableQuestion } from '../../api/lib/agent/runtime-question.js'
+import { parkDurableQuestion, resolveDurableQuestion } from '../../api/lib/agent/runtime-question.js'
 import { resumeDurableTask } from '../../api/lib/agent/runtime-resume.js'
 import { loadExecutionState } from '../../api/lib/agent/runtime-state.js'
 import { executeDurableToolStep } from '../../api/lib/agent/runtime-tool-step.js'
@@ -48,6 +48,7 @@ import { executionContextReadTool } from '../../api/lib/agent/tools/task-context
 import * as credits from '../../api/lib/credits.js'
 import { prisma } from '../../api/lib/prisma.js'
 import { available,claim,fixture } from '../support/agent-durable-runtime-fixture.js'
+import { interactiveRunSlots } from '../../api/lib/agent/run-slots.js'
 
 describe.runIf(available)('durable domain reads', () => {
   it.each(['research_dossier_get', 'first_three_prototype_get', 'style_profile_get', 'retrieval_trace_read', 'trace-missing', 'memory_review_list', 'character_voice_get', 'experience_anchor_get', 'directive_list', 'project_search', 'search-rollback', 'search-repeat', 'entity_resolve', 'impact_analyze', 'structure_validate', 'story_charter_get', 'quality_report_get'] as const)('%s records an observation or explicit missing-target failure', async scenario => {
@@ -456,6 +457,88 @@ describe.runIf(available)('durable context archive', () => {
 })
 
 describe.runIf(available)('durable question lifecycle', () => {
+  it.each(['waiting', 'stopped', 'cancelled', 'stopped-cancelled', 'attention'] as const)('persists long questions across owners and handles %s', async scenario => {
+    const prompt = '讨论剧情方向'
+    await fixture(async f => {
+      const lease = await claim(f)
+      const signal = new AbortController().signal
+      const questions = [
+        { question: '选择哪个方向？', options: [{ label: '城市' }, { label: '海岛' }] },
+        { question: '选择哪个视角？', options: [{ label: '第一人称' }, { label: '第三人称' }] },
+      ]
+      await initializeExecutionState(lease, { configuration: { version: 1, mode: 'build', agentType: 'orchestrator', creativeFreedom: 'balanced', qualityMode: 'premium',
+        model: { tier: 'speed', provider: 'fixture', modelName: 'fixture', customModelId: null, reasoningEffort: 'high', routeRevision: 'a'.repeat(64) },
+        tools: toOpenAITools([askUserTool], f.spec.scope),
+        toolAuthority: [{ name: 'ask_user', permission: 'allow', alwaysConfirm: false, dangerous: false }], protectedChapterIds: [], pinnedSkillVersions: [] },
+        snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
+          messages: [{ role: 'user', content: prompt }, { role: 'assistant', content: null, toolCalls: [
+            { id: 'long-question', name: 'ask_user', arguments: JSON.stringify({ questions }) },
+          ] }], successfulToolSignatures: [] } })
+      const step = await executeDurableToolStep(lease, signal)
+      if (step.kind !== 'waiting_question' || !step.requestId) throw new Error('Expected original question')
+      const identity = { userId: f.userId, runId: f.runId, requestId: step.requestId, callId: 'long-question' }
+      expect(step.longWait).toBe(true)
+      const before = await loadExecutionState(f.userId, f.runId)
+      if (scenario === 'attention') await pauseDurableTaskForAttention(lease, { expectedRevision: before.frame.revision, expectedHash: before.frame.snapshotHash }, 'needs_input')
+      else expect(await parkDurableQuestion(lease, step.requestId)).toBe(true)
+      await prisma.agentExecutionOutbox.update({ where: { id: step.requestId }, data: {
+        createdAt: new Date(Date.now() - 11 * 60 * 1000),
+      } })
+      const original = await prisma.agentExecutionOutbox.findUniqueOrThrow({ where: { id: step.requestId } })
+      expect(original.payload).toMatchObject({ version: 2, questions })
+      expect(original.payload).not.toHaveProperty('expiresAt')
+      expect(await prisma.agentRun.count({ where: { userId: f.userId, ...interactiveRunSlots } })).toBe(0)
+      expect(await prisma.agentRunLease.findUniqueOrThrow({ where: { runId: f.runId } })).toMatchObject({ ownerId: null, claimId: null, expiresAt: null })
+      await expect(claim(f, 'worker-after-restart')).rejects.toMatchObject({ code: 'RUNTIME_NOT_ACTIVE' })
+      await expect(readSessionPendingQuestion('another-user', f.sessionId)).rejects.toMatchObject({ code: 'AGENT_SESSION_FORBIDDEN' })
+      const stopped = scenario.startsWith('stopped') || scenario === 'attention'
+      if (stopped) {
+        if (scenario !== 'attention') await expect(stopLoopRun(f.userId, f.runId)).resolves.toEqual({ stopped: true })
+        const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'run.paused' } })
+        await expect(resumeDurableTask({ userId: f.userId, runId: f.runId, pauseEventId: pause.id })).rejects.toMatchObject({ code: 'QUESTION_ANSWER_REQUIRED' })
+      }
+      expect(await readSessionPendingQuestion(f.userId, f.sessionId)).toMatchObject({
+        question: { questions, runId: f.runId, requestId: step.requestId, state: stopped ? 'stopped' : 'waiting' },
+      })
+      const cancelled = scenario.endsWith('cancelled')
+      const answer = cancelled ? { ...identity, cancelled: true as const } : { ...identity, answers: ['海岛', '第一人称'] }
+      const [first, replay] = await Promise.all([resolveDurableQuestion(answer), resolveDurableQuestion(answer)])
+      expect(first).toEqual(replay)
+      expect(await readSessionPendingQuestion(f.userId, f.sessionId)).toEqual({ question: null })
+      expect(await prisma.agentExecutionOutbox.count({ where: { eventKey: `question-answer:${step.requestId}` } })).toBe(1)
+      await expect(resolveDurableQuestion({ ...identity, answers: ['城市', '第三人称'] })).rejects.toMatchObject({ code: 'RUNTIME_IDENTITY_CONFLICT' })
+      if (stopped) expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId } })).toMatchObject({ status: 'paused' })
+      if (stopped && cancelled) {
+        expect(await prisma.agentRun.count({ where: { taskRootId: f.rootId } })).toBe(1)
+        const pause = await prisma.agentExecutionOutbox.findFirstOrThrow({ where: { taskRootId: f.rootId, type: 'run.paused' } })
+        await expect(resumeDurableTask({ userId: f.userId, runId: f.runId, pauseEventId: pause.id })).rejects.toMatchObject({ code: 'QUESTION_CLOSED' })
+        return
+      }
+      if (cancelled) {
+        expect(await prisma.agentRun.count({ where: { userId: f.userId, ...interactiveRunSlots } })).toBe(0)
+        const busy = Array.from({ length: env.agentUserMaxConcurrent }, () => ({ id: randomUUID(), sessionId: randomUUID() }))
+        for (const run of busy) registerActiveRun(run.id, { controller: new AbortController(), userId: f.userId, sessionId: run.sessionId })
+        try {
+          await expect(executePersistedLoopRun(f.userId, f.runId)).resolves.toMatchObject({ kind: 'completed' })
+          expect(await prisma.agentEffectReceipt.count({ where: { operationId: original.operationId! } })).toBe(1)
+          expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+        } finally {
+          for (const run of busy) deregisterActiveRun(run.id)
+        }
+        return
+      }
+      const runId = first.runId ?? f.runId
+      expect(runId === f.runId).toBe(!stopped)
+      expect(await prisma.agentRun.count({ where: { taskRootId: f.rootId } })).toBe(stopped ? 2 : 1)
+      const resumed = await claim({ userId: f.userId, runId }, 'worker-after-restart')
+      expect((await loadExecutionState(f.userId, runId)).frame.snapshotHash).toBe(before.frame.snapshotHash)
+      expect(await executeDurableToolStep(resumed, signal)).toMatchObject({ kind: 'tool',
+        result: { display: { kind: 'question', answers: ['海岛', '第一人称'] } } })
+      expect(await prisma.agentEffectReceipt.count({ where: { operationId: original.operationId! } })).toBe(1)
+      expect(await prisma.agentProviderAttempt.count({ where: { operation: { taskRootId: f.rootId } } })).toBe(0)
+    }, undefined, prompt, { agentQuestionProtocol: 2 })
+  })
+
   it.each(['answer', 'replay', 'different-answer', 'wrong-request', 'stopped', 'resume', 'changed-question', 'changed-answer-type', 'expired', 'receipt-rollback'] as const)('%s binds answers to the displayed request', async scenario => {
     await fixture(async f => {
       let lease = await claim(f)
@@ -583,7 +666,7 @@ describe.runIf(available)('durable question lifecycle', () => {
     }, undefined, prompt, { agentQuestionProtocol: 1 })
   })
 
-  it.each(['timeout', 'cancelled', 'answered', 'historical-answered', 'blocked'] as const)('settles novel setup in the %s scenario without extra model requests', async scenario => {
+  it.each(['timeout', 'cancelled', 'historical-cancelled', 'answered', 'historical-answered', 'blocked'] as const)('settles novel setup in the %s scenario without extra model requests', async scenario => {
     const prompt = '帮我创建一部末日生存类型的小说'
     await fixture(async f => {
       await prisma.chapter.delete({ where: { id: f.chapterId } })
@@ -591,7 +674,8 @@ describe.runIf(available)('durable question lifecycle', () => {
       const lease = await claim(f)
       const tools = [askUserTool, novelCreateTool, planSaveTool, ...(scenario === 'blocked' ? [novelGetContextTool, novelUpdateMetaTool] : [])]
       const direction = { purpose: 'novel_direction', question: '你想写哪一种末日？', options: [{ label: '长期断电' }, { label: '冰期' }] }
-      const closedQuestion = scenario === 'timeout' || scenario === 'cancelled'
+      const cancelled = scenario === 'cancelled' || scenario === 'historical-cancelled'
+      const closedQuestion = scenario === 'timeout' || cancelled
       const questions = [{ question: direction.question, options: direction.options },
         { question: '想采用哪个视角？', options: [{ label: '第一人称' }, { label: '第三人称' }] }]
       const fields = { title: '漫长的停电', summary: '旧城区的幸存者互助求生。', tags: ['都市'] }
@@ -605,7 +689,7 @@ describe.runIf(available)('durable question lifecycle', () => {
         protectedChapterIds: [], pinnedSkillVersions: [] },
       snapshot: { version: 1, turn: 0, nextOperationSequence: 0, checkpointIndex: 0, phase: 'idle', pendingOperationId: null,
         messages: [{ role: 'user', content: prompt }, { role: 'assistant', content: null, toolCalls: [
-          { id: 'question-call', name: 'ask_user', arguments: JSON.stringify(scenario === 'cancelled' ? { purpose: direction.purpose, questions } : direction) },
+          { id: 'question-call', name: 'ask_user', arguments: JSON.stringify(cancelled ? { purpose: direction.purpose, questions } : direction) },
           { id: 'guessed-create', name: 'novel_create', arguments: JSON.stringify(fields) },
         ] }], successfulToolSignatures: [] } })
       const waiting = await executeDurableToolStep(lease, signal)
@@ -617,7 +701,7 @@ describe.runIf(available)('durable question lifecycle', () => {
           ...(request.payload as Record<string, Prisma.InputJsonValue>), expiresAt: '2000-01-01T00:00:00.000Z',
         } } })
         await expect(resolveDurableQuestion(answer)).rejects.toMatchObject({ code: 'QUESTION_NOT_PENDING' })
-      } else if (scenario === 'cancelled') {
+      } else if (cancelled) {
         const { answer: _answer, ...identity } = answer
         const cancel = { ...identity, cancelled: true as const }
         expect(await resolveDurableQuestion(cancel)).toEqual({ resolved: true })
@@ -652,10 +736,21 @@ describe.runIf(available)('durable question lifecycle', () => {
         const { novelSetupRecap: _recap, ...originalReceipt } = await execute(ctx, args)
         return originalReceipt
       }) : undefined
-      const result = await runtimeExecutor.runReviewedDurableExecution(lease, signal).finally(() => historical?.mockRestore())
-      expect(result).toMatchObject({ kind: scenario === 'blocked' ? 'needs_attention' : scenario === 'cancelled' ? 'cancelled' : 'completed' })
+      const commit = runtimeOperations.commitOperationEffectInTransaction
+      const historicalCancellation = scenario === 'historical-cancelled' ? vi.spyOn(runtimeOperations, 'commitOperationEffectInTransaction')
+        .mockImplementationOnce((tx, token, id, hash, work) => commit(tx, token, id, hash, async effectTx => {
+          const result = await work(effectTx) as { toolResult: Prisma.JsonObject }
+          const { questionCancellationVersion: _version, ...toolResult } = result.toolResult
+          return { toolResult: { ...toolResult, output: QUESTION_CANCELLED_NOTICE } } as Prisma.InputJsonValue
+        })) : undefined
+      const result = await runtimeExecutor.runReviewedDurableExecution(lease, signal).finally(() => {
+        historical?.mockRestore()
+        historicalCancellation?.mockRestore()
+      })
+      expect(result).toMatchObject({ kind: scenario === 'blocked' ? 'needs_attention' : scenario === 'historical-cancelled' ? 'cancelled' : 'completed' })
       const terminalText = scenario === 'blocked' ? NOVEL_SETUP_BLOCKED_NOTICE
-        : scenario === 'timeout' ? QUESTION_TIMEOUT_NOTICE : scenario === 'cancelled' ? QUESTION_CANCELLED_NOTICE
+        : scenario === 'timeout' ? QUESTION_TIMEOUT_NOTICE : scenario === 'cancelled' ? '已取消提问，作品方向还没确认，已保存的内容会保留。你想采用哪个方向？可以在下一条消息里告诉我。'
+          : scenario === 'historical-cancelled' ? QUESTION_CANCELLED_NOTICE
           : scenario === 'historical-answered' ? '已保存《漫长的停电》的书名、简介和标签。要不要开始写大纲？'
             : '已保存《漫长的停电》的作品信息。\n\n**简介**\n\n旧城区的幸存者互助求生。\n\n**标签** 都市\n\n要不要开始写大纲？'
       const events = await publishDurableEvents(f.userId, f.runId, 200)
@@ -674,12 +769,15 @@ describe.runIf(available)('durable question lifecycle', () => {
           { type: 'tool-call', callId: 'confirmed-create', status: 'success' },
           { type: 'text', text: terminalText },
         ])
-      } else if (scenario === 'cancelled') {
+      } else if (cancelled) {
+        const status = scenario === 'historical-cancelled' ? 'cancelled' : 'completed'
         expect(recapEvents[0]).toMatchObject({ afterTools: true })
         expect(events).toContainEqual(expect.objectContaining({ type: 'tool.result', callId: 'question-call',
           display: { kind: 'question', ...questions[0], questions, cancelled: true, unanswered: true } }))
-        expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId }, select: { status: true } })).toEqual({ status: 'cancelled' })
-        expect(await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId }, select: { status: true } })).toEqual({ status: 'cancelled' })
+        expect(await prisma.agentRun.findUniqueOrThrow({ where: { id: f.runId }, select: { status: true } })).toEqual({ status })
+        expect(await prisma.agentTaskRoot.findUniqueOrThrow({ where: { id: f.rootId }, select: { status: true } })).toEqual({ status })
+        expect((await loadExecutionState(f.userId, f.runId)).frame.state.messages.at(-1)).toMatchObject({ role: 'assistant',
+          localCompletion: { kind: scenario === 'historical-cancelled' ? 'question_cancelled' : 'question_unanswered' } })
       } else expect(recapEvents[0]).not.toHaveProperty('afterTools')
       expect(await providerOperations()).toEqual(fixtureProviders)
       expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'plan_save' } })).toBe(0)
@@ -702,15 +800,16 @@ describe.runIf(available)('durable question lifecycle', () => {
         expect(await prisma.agentOperation.count({ where: { taskRootId: f.rootId, action: 'completion_finalize' } })).toBe(0)
         return
       }
-      expect(events.at(-1)).toMatchObject({ type: 'run.finished', status: scenario === 'cancelled' ? 'cancelled' : 'succeeded', outputSummary: terminalText })
+      expect(events.at(-1)).toMatchObject({ type: 'run.finished', status: scenario === 'historical-cancelled' ? 'cancelled' : 'succeeded', outputSummary: terminalText })
       const proof = await prisma.agentEffectReceipt.findFirstOrThrow({ where: { operation: { taskRootId: f.rootId, action: 'completion_finalize' } } })
       expect(proof.result).toMatchObject({ evidence: { postconditionChecks: [closedQuestion
-        ? { code: 'NOVEL_METADATA_INITIALIZED', status: 'deferred', deferredBy: scenario === 'cancelled' ? 'question_cancelled' : 'question_timeout', evidence: { status: 'incomplete' } }
+        ? { code: 'NOVEL_METADATA_INITIALIZED', status: 'deferred', deferredBy: scenario === 'cancelled' ? 'question_unanswered'
+          : scenario === 'historical-cancelled' ? 'question_cancelled' : 'question_timeout', evidence: { status: 'incomplete' } }
         : { code: 'NOVEL_METADATA_INITIALIZED', status: 'passed', evidence: { status: 'complete' } }] } })
       expect(await prisma.novel.findUniqueOrThrow({ where: { id: f.novelId } })).toMatchObject(closedQuestion
         ? { title: '未命名作品', summary: BOOTSTRAP_NOVEL_SUMMARY, tagNames: [] }
         : { title: fields.title, summary: fields.summary, tagNames: fields.tags })
-    }, undefined, prompt, { novelInitializationProtocol: 2, ...(scenario === 'cancelled' ? { agentQuestionProtocol: 1 } : {}) })
+    }, undefined, prompt, { novelInitializationProtocol: 2, ...(['cancelled', 'historical-cancelled'].includes(scenario) ? { agentQuestionProtocol: 1 } : {}) })
   })
 })
 

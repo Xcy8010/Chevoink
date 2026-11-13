@@ -1,7 +1,7 @@
 import { AGENT_TOOL_EXECUTION_POLICY } from './tool-execution-guidance.js'
 import { formatNovelSetupRecap, hasNovelDirectionDelivery, readNovelInitializationCompletion } from './novel-initialization.js'
 import { appendAgentFinalTextAfterTools } from '../../../shared/agent-author-view.js'
-import { askUserTool, DIRECTION_PURPOSE_REQUIRED, QUESTION_CANCELLED_NOTICE, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
+import { askUserTool, DIRECTION_PURPOSE_REQUIRED, formatUnansweredQuestionWrapUp, QUESTION_TIMEOUT_NOTICE } from './tools/interact-tools.js'
 import { selectWeightedModelRuntime } from '../model-weighted-routing.js'
 import { observedReviewOutcome, projectedReviewAction, type ReviewOutcome } from '../../../shared/review-lifecycle.js'
 import { readSettledQualityReviews, readQualityReviewAdmission } from './quality-review-admission.js'
@@ -479,7 +479,7 @@ export async function handleToolCall(
     failureCode = 'NOVEL_DIRECTION_PURPOSE_REQUIRED'
     return rejectBeforeExecution('提问未发送', DIRECTION_PURPOSE_REQUIRED)
   }
-  if (questionCall && ctx.writingScope?.agentQuestionProtocol !== 1
+  if (questionCall && !ctx.writingScope?.agentQuestionProtocol
     && parsedArgs && typeof parsedArgs === 'object' && 'questions' in parsedArgs) {
     failureCode = 'TOOL_SCHEMA_INVALID'
     return rejectBeforeExecution('提问未发送', '当前作者端只支持单题，请使用 question 和 options 发一道题。')
@@ -736,7 +736,7 @@ async function finalizeLegacyRun(
 ) {
   // 事件协议用 succeeded，DB 枚举用 completed
   const dbStatus = status === 'succeeded' ? 'completed' : status
-  const afterTools = terminalNotice?.kind === 'novel_setup' && status === 'succeeded'
+  const afterTools = (terminalNotice?.kind === 'novel_setup' || terminalNotice?.kind === 'question_cancelled') && status === 'succeeded'
   // Failure explanations belong to the existing run-status channel. Publish
   // them atomically with the confirmed failure, never as novel prose.
   const failureStatus = status === 'failed' && withFailureStatus && errorMessage
@@ -2435,7 +2435,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
       let batchProgress = false
       const novelSetupOnly = hasNovelDirectionDelivery(taskSpec)
       let questionTimedOut = false
-      let questionCancelled = false
+      let cancelledQuestionWrapUp: string | null = null
       let novelSetupSaved = false
       const legacyBatchRenames: ToolCallOutcome['part'][] = []
       const decisionFeedback: NonNullable<ToolCallOutcome['reviewDecisionFeedback']>[] = []
@@ -2749,7 +2749,10 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           authorEndRequested = true
         }
         questionTimedOut = outcome.questionTimedOut === true
-        questionCancelled = outcome.questionCancelled === true
+        if (outcome.questionCancelled) {
+          const display = outcome.part.display
+          cancelledQuestionWrapUp = formatUnansweredQuestionWrapUp(display?.kind === 'question' ? display : { options: [] }, novelSetupOnly)
+        }
         novelSetupSaved = novelSetupOnly && outcome.part.status === 'success' && isNovelMetadataWrite
         parts.push(outcome.part)
         // 子 Agent 内嵌执行产生的内部工具卡片随父消息一并直播与落库，刷新后仍可展开查看
@@ -2757,7 +2760,7 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
         messages.push({ role: 'tool', toolCallId: call.id, content: outcome.observation })
         // Tool proposals in the question's batch were generated before the
         // author's choice. The next model turn must see the actual choice.
-        if (forceWrapUpReason || authorEndRequested || questionTimedOut || questionCancelled || novelSetupSaved
+        if (forceWrapUpReason || authorEndRequested || questionTimedOut || cancelledQuestionWrapUp || novelSetupSaved
           || (questionAnswer && (novelSetupOnly || questionDisplay?.answers))) {
           break
         }
@@ -2774,13 +2777,12 @@ async function executeAgentRunImpl(params: ExecuteAgentRunParams): Promise<void>
           messages.push({ role: 'tool', toolCallId: call.id, content: '[系统] 本轮安全保护已停止该调用，未执行。' })
         }
       }
-      if ((questionTimedOut || questionCancelled) && !pendingReviews.size && !forceWrapUpReason) {
+      if ((questionTimedOut || cancelledQuestionWrapUp) && !pendingReviews.size && !forceWrapUpReason) {
         const childRunning = await prisma.agentRun.count({ where: { userId: params.userId, novelId: params.novelId,
           OR: [{ session: { spawnedFromRunId: runId } }, { incomingChildGrant: { currentParentRunId: runId } }],
           status: { in: ['queued', 'running', 'awaiting_approval'] } } }) > 0
-        const notice = questionCancelled ? QUESTION_CANCELLED_NOTICE : QUESTION_TIMEOUT_NOTICE
-        await finishWithNotice(questionCancelled ? 'question_cancelled' : 'question_timeout',
-          notice + (childRunning ? '已启动的子任务仍在各自的窗口运行。' : ''), questionCancelled ? 'cancelled' : 'succeeded')
+        await finishWithNotice(cancelledQuestionWrapUp ? 'question_cancelled' : 'question_timeout',
+          (cancelledQuestionWrapUp ?? QUESTION_TIMEOUT_NOTICE) + (childRunning ? '已启动的子任务仍在各自的窗口运行。' : ''))
         return
       }
       await persistMessage(messageId, runId, params.sessionId, 'assistant', parts)

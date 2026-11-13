@@ -14,6 +14,8 @@ import type {
   ModelReasoningEffort,
   ResolveAgentApprovalRequest,
   ResolveAgentQuestionRequest,
+  ResolveAgentQuestionResponse,
+  PendingAgentQuestion,
   AgentRollbackImpactPreview,
   AgentRollbackResult,
   StartAgentLoopRunRequest,
@@ -138,11 +140,15 @@ export function resolveAgentApproval(
 export function resolveAgentQuestion(
   runId: string,
   input: ResolveAgentQuestionRequest,
-): Promise<{ resolved: boolean }> {
-  return requestData<{ resolved: boolean }>(`/api/agent/runs/${runId}/questions`, {
+): Promise<ResolveAgentQuestionResponse> {
+  return requestData(`/api/agent/runs/${encodeURIComponent(runId)}/questions`, {
     method: 'POST',
     body: JSON.stringify(input),
   })
+}
+
+export function fetchAgentSessionPendingQuestion(sessionId: string, signal?: AbortSignal): Promise<{ question: PendingAgentQuestion | null }> {
+  return requestData(`/api/agent/sessions/${encodeURIComponent(sessionId)}/questions/pending`, { signal })
 }
 
 /** 会话消息 + activeRunId（服务端仍在进行的 run，刷新后据此续接直播）；

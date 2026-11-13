@@ -29,6 +29,23 @@ it('includes resumed runs with no message row, using durable pause sources rathe
   expect(result.get('old')).toMatchObject({ scopeId: 'root:root', sourceRunId: 'new', lastSeq: 1 })
   expect(runElapsedMs(result.get('old')!, date(105).getTime())).toBe(15000)
 })
+it('counts the durable execution intervals around the persisted long question', async () => {
+  const parked = { id: 'run', status: 'awaiting_approval', startedAt: date(0), finishedAt: null, runtimeProtocolVersion: 1, taskRootId: 'root',
+    events: [transition('run.started', 1, 0), { type: 'run.question_wait', seq: 4, payload: { ts: date(10).toISOString(), waiting: true } }] }
+  db.agentRun.findMany.mockResolvedValueOnce([parked]).mockResolvedValueOnce([parked])
+  db.agentExecutionOutbox.findMany.mockResolvedValue([])
+  const waiting = (await loadMessageTimings('owner', 'session', ['run'])).get('run')!
+  expect(waiting).toMatchObject({ status: 'waiting', activeSince: null, elapsedMs: 10000, lastSeq: 4 })
+  expect(runElapsedMs(waiting, date(999).getTime())).toBe(10000)
+
+  const completed = { ...parked, status: 'completed', finishedAt: date(1005),
+    events: [...parked.events, { type: 'run.question_wait', seq: 5, payload: { ts: date(1000).toISOString(), waiting: false } },
+      transition('run.finished', 6, 1005)] }
+  db.agentRun.findMany.mockResolvedValue([completed])
+  expect((await loadMessageTimings('owner', 'session', ['run'])).get('run')).toMatchObject({
+    status: 'finished', elapsedMs: 15000, completedAt: date(1005).toISOString(), lastSeq: 6,
+  })
+})
 it('does not invent durations for malformed legacy events, missing pauses, or unstarted admissions', async () => {
   db.agentRun.findMany.mockResolvedValue([
     { id: 'queued', status: 'queued', startedAt: null, finishedAt: null, events: [] },

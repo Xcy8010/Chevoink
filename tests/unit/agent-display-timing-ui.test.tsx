@@ -59,6 +59,27 @@ it('ticks from the real start, then freezes and releases the clock on terminatio
   expect(document.querySelector('[data-process-duration]')?.textContent).toBe('用时 1 分钟 5 秒')
 })
 
+it('freezes the locally observed response clock while a question is parked', () => {
+  const outgoing = useOutgoingMessages.getState()
+  const id = outgoing.add('scope', 'novel', 'session', '合成请求', [])
+  outgoing.update(id, { runId: 'run', status: 'sent' })
+  outgoing.observeEvent({ type: 'text.delta', runId: 'run', messageId: 'm', seq: 1, ts: new Date().toISOString(), delta: '响应' })
+  function Display() {
+    const timing = useOutgoingMessages(state => state.requestClocks[0].timing)
+    return <ProcessDuration timing={timing} active />
+  }
+  render(<Display />)
+  act(() => vi.advanceTimersByTime(5000))
+  act(() => outgoing.observeEvent({ type: 'run.question_wait', waiting: true, runId: 'run', seq: 2, ts: new Date().toISOString() }))
+  expect(screen.getByLabelText('5 秒')).toBeTruthy()
+  expect(vi.getTimerCount()).toBe(0)
+  act(() => vi.advanceTimersByTime(601000))
+  expect(screen.getByLabelText('5 秒')).toBeTruthy()
+  act(() => outgoing.observeEvent({ type: 'run.question_wait', waiting: false, runId: 'run', seq: 3, ts: new Date().toISOString() }))
+  act(() => vi.advanceTimersByTime(1000))
+  expect(screen.getByLabelText('6 秒')).toBeTruthy()
+})
+
 it('shares a single clock among current summaries and gives historical messages none', () => {
   const { unmount } = render(<>
     {Array.from({ length: 100 }, (_, i) => <ProcessDuration key={i} timing={{ ...timing, activeSince: null, elapsedMs: 5000, status: 'finished' }} />)}

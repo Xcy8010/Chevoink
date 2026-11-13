@@ -225,9 +225,12 @@ async function buildPlanFolderDigest(userId: string, novelId: string): Promise<s
 ${lines.join('\n')}`
 }
 
-/** 封面候选清单：让模型跨轮拿到已生成的 coverAssetId，作者要求应用时直接 cover_apply，不要重新生成 */
-async function buildCoverCandidateDigest(userId: string, novelId: string): Promise<string | null> {
-  const [assets, novel] = await Promise.all([
+/** Follow-up ordinals refer to the previous visible card, not gallery recency. */
+async function buildCoverCandidateDigest(input: Pick<AssembleContextInput, 'userId' | 'novelId' | 'sessionId' | 'runId' | 'prompt'>): Promise<string | null> {
+  const { userId, novelId, sessionId, runId, prompt } = input
+  const ordinal = /^(?:(?:就|帮我|请)\s*)*(?:选|用|应用|使用)?\s*第\s*([一二三四1234])\s*张(?:图|封面)?[。！!\s]*$/u.exec(prompt.trim())?.[1]
+  const delegated = /^(?:随便(?:选(?:一张)?)?|(?:你|请你|帮我)(?:来|自己|直接|帮我)?选(?:一张|个)?(?:封面)?(?:吧|就好)?)[。！!\s]*$/u.test(prompt.trim())
+  const [assets, novel, history] = await Promise.all([
     prisma.coverAsset.findMany({
       where: { ownerUserId: userId, novelId },
       orderBy: { createdAt: 'desc' },
@@ -235,17 +238,53 @@ async function buildCoverCandidateDigest(userId: string, novelId: string): Promi
       select: { id: true },
     }),
     prisma.novel.findUnique({ where: { id: novelId }, select: { coverAssetId: true } }),
+    ordinal || delegated ? prisma.agentMessage.findMany({
+      where: { sessionId, runId: { not: runId }, role: 'assistant', run: { userId, novelId } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 16, select: { runId: true, parts: true },
+    }) : Promise.resolve([]),
   ])
 
-  if (assets.length === 0) {
-    return null
+  const recentRun = history[0]?.runId
+  let presented: Array<Array<{ id: string; label?: string }>> = []
+  for (const message of history) {
+    if (message.runId !== recentRun || !Array.isArray(message.parts)) break
+    const parts = message.parts as unknown as AgentMessagePart[]
+    for (const part of [...parts].reverse()) {
+      if (part.type !== 'tool-call' || part.status !== 'success') continue
+      const display = part.display
+      if (display?.kind === 'question') {
+        const prompts = display.questions ?? [display]
+        presented = prompts.map(({ options }) => (options ?? []).flatMap(option =>
+          option.coverAssetId ? [{ id: option.coverAssetId, label: option.label }] : [])).filter(options => options.length)
+      } else if (display?.kind === 'coverImages') {
+        if (display.images.length) presented = [display.images.map(({ id }) => ({ id }))]
+      }
+      if (presented.length) break
+    }
+    if (presented.length) break
   }
+  const currentIds = new Set(assets.map(({ id }) => id))
+  const missing = [...new Set(presented.flat().filter(({ id }) => !currentIds.has(id)).map(({ id }) => id))]
+  if (missing.length) {
+    const older = await prisma.coverAsset.findMany({ where: { ownerUserId: userId, novelId, id: { in: missing } }, select: { id: true } })
+    for (const { id } of older) currentIds.add(id)
+  }
+  const position = ordinal && ('一二三四'.includes(ordinal) ? '一二三四'.indexOf(ordinal) : Number(ordinal) - 1)
+  const selected = typeof position === 'number' && presented.length === 1 ? presented[0][position] : undefined
+  const recent = presented.map(group => group.map(({ id, label }, index) => ({ position: index + 1, label,
+    ...(currentIds.has(id) ? { coverAssetId: id } : { unavailable: true }) })))
+  const followUp = presented.length ? [
+    `同会话上次实际展示的封面顺序（位置不随封面库排序变化）：${JSON.stringify(recent)}`,
+    presented.length > 1 ? '上一批有多道封面题，本轮没有指明题目。先确认要处理哪一道，不按合并顺序猜测。'
+      : selected && currentIds.has(selected.id) ? `作者本轮指定的候选为 coverAssetId=${selected.id}。直接用 cover_apply 应用这张已有封面。`
+        : ordinal ? '作者指定的位置无可用候选。说明情况，请作者指出已有候选，不猜测位置。'
+          : '作者本轮明确委托你选。可从上面仍可用的候选中自行决定并用 cover_apply 应用，无需再提问。',
+  ].join('\n') : ordinal ? '当前会话最近一轮没有可核对的封面展示顺序。遇到仅给序号的回复，先确认对应候选。' : ''
 
-  const lines = assets.map(
-    (asset, index) => `${index + 1}. coverAssetId=${asset.id}${asset.id === novel?.coverAssetId ? '（当前正式封面）' : ''}`,
-  )
-  return `已生成的封面候选（最新在前）。作者要求应用已生成的封面（如「应用这个封面」）时，直接用 cover_apply 带对应 ID（未指明就用最新一张），严禁重新 cover_generate：
-${lines.join('\n')}`
+  const lines = assets.map(asset => `- coverAssetId=${asset.id}${asset.id === novel?.coverAssetId ? '（当前正式封面）' : ''}`)
+  if (!lines.length && !followUp) return null
+  return [followUp, '当前作品封面库（最新在前，顺序不对应提问位置）。作者指定或明确委托时用 cover_apply 应用已有候选；无法确认指代时询问，勿重新生成。',
+    ...lines].filter(Boolean).join('\n')
 }
 
 /** 会话待办清单摘要：续跑/新一轮任务时让模型接上上次的待办进度。
@@ -491,7 +530,7 @@ export async function assembleContext(input: AssembleContextInput): Promise<Asse
     buildNovelRuleBundle(input.novelId),
     buildStoryMemoryDigest(input.userId, input.novelId, input.prompt, input.taskSpec.scope.authorEffects !== undefined),
     (!focused || catalog.kind === 'writing') && hasCapability('plan_read', 'plan_save') ? buildPlanFolderDigest(input.userId, input.novelId) : Promise.resolve(null),
-    hasCapability('cover_generate', 'cover_apply') ? buildCoverCandidateDigest(input.userId, input.novelId) : Promise.resolve(null),
+    hasCapability('cover_generate', 'cover_apply') ? buildCoverCandidateDigest(input) : Promise.resolve(null),
     hasCapability('todo_write') ? buildTodoDigest(input.sessionId, input.taskSpec?.runId ?? input.runId) : Promise.resolve(null),
     listActiveDirectives(input.userId, input.novelId, { sessionId: input.sessionId, chapterId: input.chapterId, taskSpecId: input.taskSpec.id, runId: input.runId }),
     loadSessionHistory(input.sessionId, input.includeCurrentRunHistory ? '' : input.runId, historyBudgetTokens, checkpointState.sourceEndedAt

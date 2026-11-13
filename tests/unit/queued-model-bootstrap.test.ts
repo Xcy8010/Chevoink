@@ -2,6 +2,7 @@ import { beforeEach, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ run: vi.fn(), model: vi.fn(), runtime: vi.fn(), context: vi.fn(), transaction: vi.fn(), lease: vi.fn(), catalog: vi.fn() }))
 vi.mock('../../api/lib/prisma.js', () => ({
   prisma: { agentRun: { findFirst: mocks.run }, agentGoalExecution: { findUnique: vi.fn(async () => null) },
+    agentExecutionOutbox: { findFirst: vi.fn(async () => null) },
     agentMessage: { findFirst: vi.fn(async () => ({ id: 'original-message', parts: [{ type: 'text', text: '原始排队请求' }] })) },
     aiModelConfig: { findFirst: mocks.catalog, findUnique: mocks.model }, $transaction: mocks.transaction },
   DataAccessError: class extends Error { constructor(public status: number, public code: string, message: string) { super(message) } },

@@ -17,7 +17,7 @@ import { withRunLease, type RunLeaseToken } from './runtime-lease.js'
 import { withLeaseHeartbeat } from './runtime-heartbeat.js'
 import { readExecutionFrame, readExecutionStateInTransaction, saveExecutionStateInTransaction } from './runtime-state.js'
 import { executeDurableToolStep } from './runtime-tool-step.js'
-import { validateHistoricalQuestionReceipt } from './runtime-question.js'
+import { hasCancelledDurableQuestion, parkDurableQuestion, validateHistoricalQuestionReceipt } from './runtime-question.js'
 import { assertProviderBudget } from './runtime-budget.js'
 import { advanceDurableCheckpoint, advanceDurableContext } from './runtime-checkpoint-step.js'
 import { advanceDurableContinuation, advanceDurableCompletionObligations, advanceDurableToolStagnation } from './runtime-continuation.js'
@@ -380,6 +380,22 @@ export async function runDurableExecution(token: RunLeaseToken, signal: AbortSig
   return result
 }
 
+async function reduceCancelledQuestion(lease: RunLeaseToken, signal: AbortSignal) {
+  return withLeaseHeartbeat(lease, signal, async ownedSignal => {
+    if (!await withRunLease(lease, tx => hasCancelledDurableQuestion(tx, lease.taskRootId, lease.runId))) {
+      return runtimeError('RUNTIME_STATE_CONFLICT', '已取消提问的执行位置已变化。')
+    }
+    const current = await validateHistoricalQuestionReceipt(lease)
+    if (!current) await executeDurableToolStep(lease, ownedSignal)
+    const frame = current ?? await validateHistoricalQuestionReceipt(lease)
+    const last = frame?.state.messages.at(-1)
+    if (!frame || last?.role !== 'assistant' || last.localCompletion?.kind !== 'question_unanswered') {
+      return runtimeError('RUNTIME_STATE_CONFLICT', '已取消提问未生成原轮次收尾。')
+    }
+    return { kind: 'completion_review' as const, frame }
+  })
+}
+
 /** B0 keeps its single owner while waiting. Saved decisions (not an in-memory
  * notification) trigger the next step, including answers received before this
  * wait starts. The tool step still validates and consumes the actual decision. */
@@ -416,10 +432,10 @@ export async function waitForDurableDecision(token: RunLeaseToken, signal: Abort
 }
 
 /** Complete the existing domain checks without adding a paid completion critic. */
-export async function runReviewedDurableExecution(token: RunLeaseToken, signal: AbortSignal) {
+export async function runReviewedDurableExecution(token: RunLeaseToken, signal: AbortSignal, options?: { questionCancellation: true }) {
   const lease = { ...token }
   for (;;) {
-    const step = await runDurableExecution(lease, signal)
+    const step = options?.questionCancellation ? await reduceCancelledQuestion(lease, signal) : await runDurableExecution(lease, signal)
     if (step.kind === 'deletion_ready') return (await import('./runtime-novel-delete.js')).commitNovelDeletion(lease, step, signal)
     if (step.kind === 'waiting_import') {
       await waitForDurableImport(lease, signal, step.requestId)
@@ -428,6 +444,10 @@ export async function runReviewedDurableExecution(token: RunLeaseToken, signal: 
     if (step.kind === 'waiting_question' || step.kind === 'waiting_approval') {
       const requestId = step.kind === 'waiting_question' ? step.requestId : step.approvalId
       if (!requestId) return runtimeError('RUNTIME_RECEIPT_INVALID', '等待状态缺少原请求身份。')
+      if (step.kind === 'waiting_question' && step.longWait) {
+        if (await parkDurableQuestion(lease, requestId)) return step
+        continue
+      }
       const resolved = await waitForDurableDecision(lease, signal, { kind: step.kind, requestId })
       if (!resolved && (step.kind === 'waiting_approval' || lease.parent)) return step
       // Reenter the same question operation once to consume its saved answer
@@ -436,7 +456,7 @@ export async function runReviewedDurableExecution(token: RunLeaseToken, signal: 
     }
     if (step.kind !== 'completion_review') return step
     const last = step.frame.state.messages.at(-1)
-    const cancelled = last?.role === 'assistant' && last.localCompletion?.kind === 'question_cancelled'
+    const cancelled = last?.role === 'assistant' && (last.localCompletion?.kind === 'question_cancelled' || last.localCompletion?.kind === 'question_unanswered')
     const children = await withLeaseHeartbeat(lease, signal, ownedSignal => awaitDurableChildren(lease, ownedSignal, cancelled ? { timeoutMs: 0 } : undefined))
     if (children.some(child => child.status !== 'completed' || child.childRun.status !== 'completed')) {
       await pauseDurableTaskForAttention(lease, { expectedRevision: step.frame.revision, expectedHash: step.frame.snapshotHash }, 'needs_input')

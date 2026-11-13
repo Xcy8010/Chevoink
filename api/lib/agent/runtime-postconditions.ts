@@ -29,12 +29,15 @@ export async function recordTaskContentBaseline(tx: RuntimeTx, root: { id: strin
 }
 
 /** Deterministic checks only; passing these does not certify the user's whole goal. */
-export async function evaluateTaskPostconditions(tx: RuntimeTx, root: { id: string; novelId: string; userId: string; inputHash: string; specSnapshot: unknown }) {
+export async function evaluateTaskPostconditions(tx: RuntimeTx, root: { id: string; novelId: string; userId: string; inputHash: string; specSnapshot: unknown }, runId?: string) {
   const spec = taskSpecSchema.parse(root.specSnapshot)
   const results: { code: string; severity: string; status: 'passed' | 'failed' | 'unverified'; evidence: unknown }[] = []
   for (const condition of spec.postconditions) {
     if (condition.code === 'NOVEL_METADATA_INITIALIZED') {
-      const result = await readNovelInitializationCompletion(tx, { userId: root.userId, novelId: root.novelId, runId: spec.runId! })
+      const source = await tx.agentRun.findFirst({ where: { id: runId, taskRootId: root.id, userId: root.userId, novelId: root.novelId },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true } })
+      if (!source) return runtimeError('RUNTIME_RECEIPT_INVALID', '作品初始化核对缺少原执行轮次。')
+      const result = await readNovelInitializationCompletion(tx, { userId: root.userId, novelId: root.novelId, runId: source.id })
       results.push({ ...condition, status: result.status === 'incomplete' ? 'failed' : 'passed', evidence: result })
     } else if (condition.code === 'EARLIER_CONTENT_UNCHANGED') {
       const event = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `baseline:${root.id}` } })

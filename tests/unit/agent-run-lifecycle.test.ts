@@ -4861,9 +4861,9 @@ describe('author-directed task ending in the real execution loop', () => {
     const saved = mocks.persist.mock.calls as unknown as Array<[{ create?: { parts?: AgentMessagePart[] } }]>
     expect(saved.some(([entry]) => entry.create?.parts?.some(part => part.type === 'tool-call' && part.callId === 'direction'))).toBe(true)
   })
-  it('ends an explicitly cancelled question batch locally and persists the cancellation', async () => {
+  it('closes an explicitly cancelled question batch and finishes the run without cancelling it', async () => {
     const { waitForQuestionAnswer } = await import('../../api/lib/agent/permissions.js')
-    const { askUserTool, QUESTION_CANCELLED_NOTICE } = await import('../../api/lib/agent/tools/interact-tools.js')
+    const { askUserTool } = await import('../../api/lib/agent/tools/interact-tools.js')
     const questions = [
       { question: '使用什么视角？', options: [{ label: '第一人称' }, { label: '第三人称' }] },
       { question: '使用什么语气？', options: [{ label: '克制' }, { label: '明快' }] },
@@ -4883,10 +4883,10 @@ describe('author-directed task ending in the real execution loop', () => {
       ok: true, display: { kind: 'question', questions, cancelled: true, unanswered: true },
     })
     expect(events().filter(event => event.type === 'text.final')).toEqual([
-      expect.objectContaining({ text: QUESTION_CANCELLED_NOTICE }),
+      expect.objectContaining({ text: '已取消提问，已保存的内容会保留。你希望接下来怎么处理？', afterTools: true }),
     ])
-    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'cancelled' })
-    expect(mocks.runs.get('run')).toMatchObject({ status: 'cancelled', usage: { totalTokens: 31 } })
+    expect(events().at(-1)).toMatchObject({ type: 'run.finished', status: 'succeeded' })
+    expect(mocks.runs.get('run')).toMatchObject({ status: 'completed', usage: { totalTokens: 31 } })
     const writes = mocks.persist.mock.calls as unknown as Array<[{ create?: { parts?: AgentMessagePart[] } }]>
     expect(writes.flatMap(([entry]) => entry.create?.parts ?? [])).toContainEqual(
       expect.objectContaining({ type: 'tool-call', callId: 'batch', display: expect.objectContaining({ cancelled: true }) }),

@@ -21,7 +21,7 @@ import { buildTaskSpec } from '../../api/lib/agent/task-spec.js'
 import type { RunLeaseToken } from '../../api/lib/agent/runtime-lease.js'
 import type { ToolExecutionCursor } from '../../api/lib/agent/runtime-tool-cursor.js'
 import type { AgentTool, ToolContext } from '../../api/lib/agent/tools/types.js'
-import { askUserTool, QUESTION_CANCELLED_NOTICE } from '../../api/lib/agent/tools/interact-tools.js'
+import { askUserTool, formatUnansweredQuestionWrapUp } from '../../api/lib/agent/tools/interact-tools.js'
 
 const lease = { userId: 'author', runId: 'run', taskRootId: 'original-root', ownerId: 'worker', claimId: 'claim', epoch: 1n } as RunLeaseToken
 const ctx: ToolContext = { userId: lease.userId, novelId: 'novel', sessionId: 'session', runId: lease.runId,
@@ -136,7 +136,7 @@ describe('durable question semantic scope receipts', () => {
       return
     }
     if (scenario === 'cancel') {
-      expect(await run()).toMatchObject({ kind: 'tool', result: { output: QUESTION_CANCELLED_NOTICE, questionCancelled: true,
+      expect(await run()).toMatchObject({ kind: 'tool', result: { output: '已取消提问，已保存的内容会保留。你希望接下来怎么处理？', questionCancelled: true, questionCancellationVersion: 2,
         display: { kind: 'question', questions, cancelled: true, unanswered: true } } })
       expect(mocks.clarify).not.toHaveBeenCalled()
       expect(mocks.setGoalPhase).toHaveBeenCalledExactlyOnceWith(mocks.tx, goal, 'awaiting_input', 'GOAL_QUESTION_CANCELLED')
@@ -146,6 +146,11 @@ describe('durable question semantic scope receipts', () => {
       expect(mocks.clarify).toHaveBeenCalledExactlyOnceWith(mocks.tx, ctx, expect.objectContaining({ ...args, answer: '第一章' }))
       expect(mocks.setGoalPhase).not.toHaveBeenCalled()
     }
+  })
+  it('uses only the displayed order of image options for a cover follow-up and exposes no asset IDs', () => {
+    const options = [{ label: '暂不应用' }, { label: '山景', coverAssetId: 'asset-z' }, { label: '海景', coverAssetId: 'asset-a' }]
+    expect(formatUnansweredQuestionWrapUp({ options })).toBe('已取消提问，未根据这次提问应用封面。你可以回复「第一张」（山景）、「第二张」（海景），或说「你帮我选一张」。')
+    expect(formatUnansweredQuestionWrapUp({ options: options.slice(0, 2) })).not.toContain('第二张')
   })
   it('keeps an unanswered required scope unresolved without recording an author grant', async () => {
     answer = null

@@ -106,8 +106,8 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
     if (appended.role === 'tool') {
       const operation = await tx.agentOperation.findFirst({ where: { id: previous.state.pendingOperationId!, taskRootId: source.taskRootId }, include: { effectReceipt: true } })
       const receipt = operation?.effectReceipt
-      const parsedResult = z.object({ code: z.string().optional(), toolResult: z.object({ summary: z.string(), failureCode: z.string().optional(), reviewOutcome: z.enum(REVIEW_OUTCOMES).optional(), display: z.unknown().optional(), outcome: z.literal('failed').optional(), questionTimedOut: z.literal(true).optional(),
-        questionCancelled: z.literal(true).optional(), novelSetupRecap: novelSetupRecapSchema.optional() }) }).safeParse(receipt?.result)
+      const parsedResult = z.object({ code: z.string().optional(), toolResult: z.object({ output: z.string(), summary: z.string(), failureCode: z.string().optional(), reviewOutcome: z.enum(REVIEW_OUTCOMES).optional(), display: z.unknown().optional(), outcome: z.literal('failed').optional(), questionTimedOut: z.literal(true).optional(),
+        questionCancelled: z.literal(true).optional(), questionCancellationVersion: z.literal(2).optional(), novelSetupRecap: novelSetupRecapSchema.optional() }) }).safeParse(receipt?.result)
       if (!operation || !receipt || !parsedResult.success || !['succeeded', 'failed'].includes(operation.status)
         || runtimeJson(receipt.result).hash !== receipt.resultHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '工具结果事件缺少完整回执。')
       const last = followup.at(-1)
@@ -131,9 +131,12 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
           } else if (terminal.localCompletion.kind === 'question_timeout') {
             validTerminal = operation.action === 'ask_user' && parsedResult.data.toolResult.questionTimedOut === true
               && terminal.content === QUESTION_TIMEOUT_NOTICE
-          } else if (terminal.localCompletion.kind === 'question_cancelled') {
-            validTerminal = operation.action === 'ask_user' && parsedResult.data.toolResult.questionCancelled === true
-              && terminal.content === QUESTION_CANCELLED_NOTICE
+          } else if (terminal.localCompletion.kind === 'question_cancelled' || terminal.localCompletion.kind === 'question_unanswered') {
+            const result = parsedResult.data.toolResult
+            const unanswered = result.questionCancellationVersion === 2
+            validTerminal = operation.action === 'ask_user' && result.questionCancelled === true
+              && unanswered === (terminal.localCompletion.kind === 'question_unanswered')
+              && terminal.content === (unanswered ? result.output : QUESTION_CANCELLED_NOTICE)
           } else {
             validTerminal = ['novel_create', 'novel_update_meta'].includes(operation.action) && title.success
               && terminal.content === (recap ? formatNovelSetupRecap(recap) : novelSetupNotice(title.data.title))
@@ -159,7 +162,7 @@ export async function projectExecutionFrame(tx: RuntimeTx, source: AgentExecutio
         ...(parsedResult.data.code || parsedResult.data.toolResult.failureCode ? { failureCode: parsedResult.data.code ?? parsedResult.data.toolResult.failureCode } : {}),
         ...(operation.status === 'succeeded' && parsedResult.data.toolResult.display ? { display: parsedResult.data.toolResult.display as AgentToolDisplayPayload } : {}) },
       ...(terminal?.content ? [{ type: 'text.final' as const, messageId, text: terminal.content, asReasoning: false,
-        ...(recap || terminal.localCompletion?.kind === 'question_cancelled' ? { afterTools: true as const } : {}) }] : [])]
+        ...(recap || terminal.localCompletion?.kind === 'question_cancelled' || terminal.localCompletion?.kind === 'question_unanswered' ? { afterTools: true as const } : {}) }] : [])]
     }
   }
   return [{ type: 'execution.progress', revision: frame.revision, stage: frame.state.phase === 'completed' ? 'finalizing' : 'checkpoint' }]

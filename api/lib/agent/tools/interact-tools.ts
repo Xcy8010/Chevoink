@@ -10,6 +10,7 @@ import { waitForQuestionAnswer } from '../permissions.js'
 import { defineTool } from './types.js'
 
 export const QUESTION_TIMEOUT_NOTICE = '提问已超时，本轮已结束。已保存的内容会保留。'
+/** Exact observation retained for replay of earlier durable cancellations. */
 export const QUESTION_CANCELLED_NOTICE = '提问已取消，本轮已结束。已保存的内容会保留。'
 export const DIRECTION_PURPOSE_REQUIRED = '当前是在确认新作品的故事方向。请以 purpose=novel_direction 重新提交问题；本次问题未发送给作者。'
 export const QUESTION_OPTION_LIMIT = 3
@@ -79,6 +80,18 @@ export function formatAuthorQuestionAnswers(questions: readonly AgentQuestionPro
   return questions.map(({ question, options }, index) => `${index + 1}. ${question}\n${formatAuthorQuestionAnswer(options, answers[index])}`).join('\n\n')
 }
 
+export function formatUnansweredQuestionWrapUp(question: { options: AgentQuestionOption[]; questions?: AgentQuestionPrompt[] }, directionRequired = false): string {
+  const coverQuestions = (question.questions ?? [question]).map(prompt => prompt.options.filter(option => option.coverAssetId)).filter(options => options.length)
+  if (coverQuestions.length === 1) {
+    const ordinals = ['第一张', '第二张', '第三张', '第四张']
+    const choices = coverQuestions[0].map((option, index) => `「${ordinals[index]}」（${option.label}）`).join('、')
+    return `已取消提问，未根据这次提问应用封面。你可以回复${choices}，或说「你帮我选一张」。`
+  }
+  if (coverQuestions.length > 1) return '已取消提问，未根据这次提问应用封面。你可以回复每题选哪张，或说「你帮我选」。'
+  if (directionRequired) return '已取消提问，作品方向还没确认，已保存的内容会保留。你想采用哪个方向？可以在下一条消息里告诉我。'
+  return '已取消提问，已保存的内容会保留。你希望接下来怎么处理？'
+}
+
 /** 校验前兜底修复：Agent 构造 options 时最常见的小毛病在此收口，避免一次提问因选项格式被打成「参数校验失败」。
  * 逐项修复：options 缺失/为空时补默认选项；元素是字符串时升级为 {label}；detail 为 null 时剔除；
  * 数量超 4 个截断、不足 2 个补齐；label 超 60 字截断；顶层 null 剔除。只改形态，不改语义。 */
@@ -123,7 +136,7 @@ export const askUserTool = defineTool({
   name: 'ask_user',
   title: '向作者提问',
   description:
-    '仅当现有请求与上下文仍有影响执行的具体冲突、确实缺少目标，或作者明确要求亲自决定时，用本工具提问并等待回答。已绑定章节的明确修改、整章重写或保存请求直接执行，不重复确认相同目标；普通人物表达、文风、段落组织等创作细节按已知意图自行处理。先核对本轮章节绑定、同聊天真实作者已明确的目标与已有回答。每题提供 2–3 个候选选项，作者也可以自行输入答案。单题传 question 和 options，多题用 questions 一次提交最多三题；需要作者确认方向或章节目标时，把决定该目标的问题放在首题。封面选项填写当前作品候选的 coverAssetId，选项文字可说明画面，允许作者选择暂不应用；根据确认用 cover_apply 应用已有 ID。拿到回答后修订既有产物（如 plan_save 带 planId）。禁止把问题和选项写在回复正文里让作者"回复数字选择"——那样任务已经结束，作者的回答无法接上。',
+    '仅当现有请求与上下文仍有影响执行的具体冲突、确实缺少目标，或作者明确要求亲自决定时，用本工具提问并等待回答。已绑定章节的明确修改、整章重写或保存请求直接执行；普通创作细节和作者已交给你决定的低影响选择，按已知意图自行处理。先核对本轮章节绑定、同聊天真实作者已明确的目标与已有回答。每题提供 2–3 个候选选项，作者也可以自行输入答案。单题传 question 和 options，多题用 questions 一次提交最多三题；需要作者确认方向或章节目标时，把决定该目标的问题放在首题。封面选项填写当前作品候选的 coverAssetId，选项文字可说明画面，允许作者选择暂不应用；根据确认用 cover_apply 应用已有 ID。拿到回答后修订既有产物（如 plan_save 带 planId）。禁止把问题和选项写在回复正文里让作者"回复数字选择"——那样任务已经结束，作者的回答无法接上。',
   parameters: askUserParameters,
   coerceArgs: coerceAskUserArgs,
   permission: { plan: 'allow', build: 'allow', review: 'allow' },
@@ -163,7 +176,7 @@ export const askUserTool = defineTool({
     if (result.answer === null) {
       const reason = result.timedOut ? '作者长时间未回答' : '本次提问已取消'
       return {
-        output: result.cancelled ? QUESTION_CANCELLED_NOTICE : result.timedOut ? QUESTION_TIMEOUT_NOTICE : `${reason}。未回答不等于同意，不选择依赖该回答的方向或扩大授权。`,
+        output: result.cancelled ? formatUnansweredQuestionWrapUp(args, args.purpose === 'novel_direction') : result.timedOut ? QUESTION_TIMEOUT_NOTICE : `${reason}。未回答不等于同意，不选择依赖该回答的方向或扩大授权。`,
         summary: result.cancelled ? '作者已取消提问' : result.timedOut ? '提问超时，未获回答' : '提问未获回答',
         ...(result.timedOut ? { questionTimedOut: true as const } : {}),
         ...(result.cancelled ? { questionCancelled: true as const } : {}),

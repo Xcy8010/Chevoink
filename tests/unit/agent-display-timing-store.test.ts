@@ -37,6 +37,19 @@ it('pauses, resumes in the same run, and preserves time through cache and histor
   state.applyEvent(start(3, 100)) // already included in the snapshot
   expect(runElapsedMs(current(), Date.parse(ts(107)))).toBe(17000)
 })
+it('suspends the activity clock during long waits and resumes only on actual execution', () => {
+  const { applyEvent } = useAgentStore.getState()
+  applyEvent(start(1, 0))
+  applyEvent({ type: 'run.question_wait', waiting: true, runId: 'r', seq: 2, ts: ts(10) })
+  expect(useAgentStore.getState().phase).toBe('awaiting_input')
+  expect(runElapsedMs(current(), Date.parse(ts(1000)))).toBe(10000)
+  applyEvent({ type: 'run.question_wait', waiting: false, runId: 'foreign', seq: 3, ts: ts(1000) })
+  expect(useAgentStore.getState().phase).toBe('awaiting_input')
+  applyEvent({ type: 'run.question_wait', waiting: false, runId: 'r', seq: 3, ts: ts(1000) })
+  expect(useAgentStore.getState().phase).toBe('running')
+  applyEvent(finish('succeeded', 4, 1005))
+  expect(current()).toMatchObject({ status: 'finished', elapsedMs: 15000 })
+})
 it('rejects late events and timing responses after a session switch', () => {
   useAgentStore.getState().applyEvent(start(1, 0))
   const original = current()

@@ -35,6 +35,7 @@ import type {
   AgentStreamEvent,
   CreativeFreedom,
   EntityId,
+  PendingAgentQuestion,
   StoryCompilerMode,
 } from '../../../../../shared/contracts/index.js'
 import { fetchCreditSummary, fetchCustomModels, fetchReferral } from '@/features/account/credits-api'
@@ -58,6 +59,7 @@ import {
   deleteAgentSession,
   deleteAgentSessionMessage,
   fetchAgentSessionMessages,
+  fetchAgentSessionPendingQuestion,
   fetchAgentGoal,
   fetchAgentGoalCapabilities,
   fetchAgentGoalDetail,
@@ -123,6 +125,7 @@ type AgentPanelProps = {
   chapterId?: EntityId | null
   activityChapterTitles?: ReadonlyMap<string, string>
   coverAssets?: ReadonlyArray<{ id: string; imageUrl: string }>
+  questionAuthorId?: string
   selection?: { text: string; start?: number; end?: number } | null
   ensureSession: () => Promise<EntityId>
   /** SSE 事件透传：宿主据此同步章节树/编辑器等工作区状态 */
@@ -189,6 +192,7 @@ export function AgentPanel({
   chapterId,
   activityChapterTitles,
   coverAssets,
+  questionAuthorId,
   selection,
   ensureSession,
   onStreamEvent,
@@ -246,7 +250,36 @@ export function AgentPanel({
   const settlingBlocks = useMemo(() => new Set(Object.keys(textRevealTargets).map(id => blockInfoById.get(id)?.firstId)), [textRevealTargets, blockInfoById])
   const finishTextReveal = useAgentStore(state => state.finishTextReveal)
   const pendingApproval = useAgentStore((state) => state.pendingApproval)
-  const pendingQuestion = useAgentStore((state) => state.pendingQuestion)
+  const streamedQuestion = useAgentStore((state) => state.pendingQuestion)
+  const questionOwner = questionAuthorId ?? userId
+  const pendingQuestionKey = useMemo(() => ['agent', 'pending-question', questionOwner, sessionId] as const, [questionOwner, sessionId])
+  const pendingQuestionQuery = useQuery({
+    queryKey: pendingQuestionKey,
+    queryFn: ({ signal }) => fetchAgentSessionPendingQuestion(sessionId!, signal),
+    enabled: Boolean(questionOwner && sessionId),
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+    refetchInterval: (query) => query.state.data?.question ? 5_000 : false,
+    retry: false,
+  })
+  const questionFetchError = pendingQuestionQuery.error
+  const questionAccessLost = questionFetchError instanceof AgentApiError && [401, 403, 404].includes(questionFetchError.status)
+  const savedQuestion = pendingQuestionQuery.isFetchedAfterMount && !questionAccessLost ? pendingQuestionQuery.data?.question ?? null : null
+  const pendingQuestion = storeLoadedSessionId === sessionId && !pendingApproval
+    ? (streamedQuestion && !streamedQuestion.longWait ? streamedQuestion : savedQuestion)
+    : null
+  const refreshPendingQuestion = useCallback(() => {
+    if (!questionOwner || !sessionId) return
+    // A request issued before a stop, new question or terminal commit may
+    // still be in flight when the corresponding stream event arrives.
+    void queryClient.cancelQueries({ queryKey: pendingQuestionKey, exact: true }).then(() =>
+      queryClient.invalidateQueries({ queryKey: pendingQuestionKey, exact: true }))
+  }, [pendingQuestionKey, queryClient, questionOwner, sessionId])
+  const clearPendingQuestion = useCallback((requestId: string) => {
+    queryClient.setQueryData<{ question: PendingAgentQuestion | null }>(pendingQuestionKey, previous =>
+      previous?.question?.requestId === requestId ? { question: null } : previous)
+    refreshPendingQuestion()
+  }, [pendingQuestionKey, queryClient, refreshPendingQuestion])
   const usage = useAgentStore((state) => state.usage)
   const currentTurn = useAgentStore((state) => state.currentTurn)
   const errorMessage = useAgentStore((state) => state.errorMessage)
@@ -305,6 +338,14 @@ export function AgentPanel({
     onStreamEvent?.(event)
   }, [onStreamEvent])
   const { connect, disconnect } = useAgentStream(handleStreamEvent, reconcileActiveStreamError)
+  const streamedLongQuestionId = streamedQuestion?.longWait ? streamedQuestion.requestId : undefined
+  // These transitions include persisted terminal status discovered after a
+  // dropped final SSE frame and a replayed long-wait request after reconnect.
+  useEffect(() => {
+    if (storeLoadedSessionId === sessionId && (streamedLongQuestionId || runId && ['paused', 'succeeded', 'failed', 'cancelled'].includes(phase))) {
+      refreshPendingQuestion()
+    }
+  }, [phase, refreshPendingQuestion, runId, sessionId, storeLoadedSessionId, streamedLongQuestionId])
   const goalSnapshotHandler = useCallback((streamSessionId: string, snapshot: AgentGoalSnapshot | null, sequence: number) => {
     if (viewSession.current === streamSessionId) setGoalSnapshot(snapshot, streamSessionId, sequence)
   }, [setGoalSnapshot])
@@ -414,6 +455,11 @@ export function AgentPanel({
   const visibleQuestion = storeLoadedSessionId === sessionId && conversationReady && !conversationLoading && !workConversation.collapsed
     ? pendingQuestion
     : null
+  const questionRunId = visibleQuestion && 'runId' in visibleQuestion ? visibleQuestion.runId : runId
+  const questionDraftKey = visibleQuestion && questionOwner && sessionId && questionRunId
+    ? `chevoink:question-draft:v1:${JSON.stringify([questionOwner, sessionId,
+      visibleQuestion.requestId ? ['request', visibleQuestion.requestId] : ['call', questionRunId, visibleQuestion.callId]])}`
+    : undefined
   const questionCoverImages = useMemo(() => {
     if (!visibleQuestion) return undefined
     const ids = new Set((visibleQuestion.questions ?? [visibleQuestion]).flatMap(({ options }) =>
@@ -455,7 +501,8 @@ export function AgentPanel({
   const continueModelRef = useRef<ContinueAgentLoopRunModel | null>(null)
   const { stoppingRunId,
     handleStop, handleContinue, handleResolveApproval, handleResolveQuestion } = useRunControls({
-    runId, resumeableRunId, sessionId, phase, pendingApproval, pendingQuestion, connect, setActionError,
+    runId, resumeableRunId, sessionId, authorId: questionOwner, phase, pendingApproval, pendingQuestion, connect, setActionError,
+    refreshPendingQuestion, clearPendingQuestion,
     selectedModelRef: continueModelRef,
   })
   // 任务「更多」菜单与重命名弹窗（原 StudioCommandBar 任务三点按钮迁入）
@@ -542,7 +589,8 @@ export function AgentPanel({
   const goalView = selectAgentGoalView({ goal, goalSessionId, sessionId, runId, resumeableRunId, phase, runGoalId })
   const goalBar = useGoalBarVisibility(userId, sessionId, goalView.goal)
   const panelPhase = selectAgentPanelPhase(goalView, phase)
-  const active = isRunActive(panelPhase)
+  const waitingQuestion = pendingQuestion && 'runId' in pendingQuestion && pendingQuestion.state === 'waiting' ? pendingQuestion : null
+  const active = isRunActive(panelPhase) || Boolean(waitingQuestion)
   const nextPrompt = completedNextPrompt && sessionId && storeLoadedSessionId === sessionId
     && (panelPhase === 'idle' || panelPhase === 'succeeded' && runId === completedNextPrompt.runId)
     && (!lastUserRequest?.delivery || lastUserRequest.delivery.status === 'sent' && lastUserRequest.runId === completedNextPrompt.runId)
@@ -1071,7 +1119,7 @@ export function AgentPanel({
             mode: 'build' as const,
             prompt,
             predictNextPrompt: true as const,
-            agentQuestionProtocol: 1 as const,
+            agentQuestionProtocol: 2 as const,
             selection: targetChapterId ? selection ?? null : null,
             attachments: attachments.length > 0 ? attachments : undefined,
             creativeFreedom: freedom,
@@ -1164,7 +1212,8 @@ export function AgentPanel({
   )
 
 
-  const canContinue = !authorEnded && ((Boolean(runId) && (panelPhase === 'paused' || panelPhase === 'failed')) || (!runId && Boolean(resumeableRunId)))
+  const canContinue = savedQuestion?.state !== 'stopped' && !authorEnded
+    && ((Boolean(runId) && (panelPhase === 'paused' || panelPhase === 'failed')) || (!runId && Boolean(resumeableRunId)))
   const combinedError = actionError ?? windowConfiguration.error ?? errorMessage
 
   const handleCopyText = useCallback(async (id: string, text: string) => {
@@ -1914,7 +1963,10 @@ export function AgentPanel({
         onDismiss={goalBar.dismiss}
       /> : null}
         {visibleQuestion ? (
-          <AgentQuestionCard key={JSON.stringify([runId, visibleQuestion.requestId, visibleQuestion.callId])} question={visibleQuestion} coverImages={questionCoverImages} onAnswer={handleResolveQuestion} />
+          <AgentQuestionCard key={JSON.stringify([questionRunId, visibleQuestion.requestId, visibleQuestion.callId])}
+            question={visibleQuestion} coverImages={questionCoverImages} draftStorageKey={questionDraftKey}
+            submitLabel={'state' in visibleQuestion && visibleQuestion.state !== 'waiting' ? '提交并继续' : undefined}
+            onAnswer={handleResolveQuestion} />
         ) : null}
         <AgentComposer
           novelId={novelId}
@@ -1954,7 +2006,7 @@ export function AgentPanel({
             if (goalView.canPauseOwnedRun) void handleGoalAction('pause')
             else void handleStop()
           }}
-          stopping={(stoppingRunId === runId && runId !== null) || (goalBusy && goalView.ownedRun)}
+          stopping={(stoppingRunId !== null && (stoppingRunId === runId || stoppingRunId === waitingQuestion?.runId)) || (goalBusy && goalView.ownedRun)}
           goalActive={Boolean(goalView.goal && !goalView.terminal)}
           goalBusy={goalBusy}
           onGoalOpen={handleGoalOpen}

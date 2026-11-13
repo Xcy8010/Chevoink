@@ -46,6 +46,6 @@ export function coverProjection(images: Array<{ id: string; imageUrl: string }>)
   if (usable.length !== images.length) return { outcome: 'failed', failureCode: 'COVER_STORAGE_PENDING',
     output: `封面候选已保存：${images.map(image => `coverAssetId ${image.id}`).join('；')}。图片存储尚未完成；保留原候选及原响应，不能据此重新生成。可对原 coverAssetId 使用 view_image 核验，存储恢复仅处理这些候选。`,
     summary: '封面候选已保存，图片存储待恢复' }
-  return { output: `已生成 ${images.length} 张封面候选图：${images.map((image, index) => `候选${index + 1}：coverAssetId ${image.id}，候选图 url ${image.imageUrl}`).join('；')}。接下来先对每张候选调用 view_image 校验画面、构图和书名标题文字，再用 ask_user 让作者选图。图片选项填写对应的 coverAssetId，留一个「暂不应用」选项；按作者选择用 cover_apply 应用已有 ID。`,
+  return { output: `已生成 ${images.length} 张封面候选图：${images.map((image, index) => `候选${index + 1}：coverAssetId ${image.id}，候选图 url ${image.imageUrl}`).join('；')}。先用 view_image 校验构图和书名。作者明确委托选图时，选一张符合要求的已有候选并用 cover_apply 应用；否则用 ask_user，请作者选择，图片选项填写对应 coverAssetId，并留「暂不应用」。`,
     summary: `生成 ${images.length} 张封面候选`, display: { kind: 'coverImages', images: images.map(image => ({ id: image.id, url: image.imageUrl })) } }
 }

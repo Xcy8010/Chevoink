@@ -1,33 +1,39 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
-import type { AgentQuestionDecision } from '../../../../../shared/contracts/agent-events.js'
+import type { AgentQuestionDecision, PendingAgentQuestion } from '../../../../../shared/contracts/agent-events.js'
 import { continueAgentLoopRun, resolveAgentApproval, resolveAgentQuestion, stopAgentLoopRun, type ContinueAgentLoopRunModel } from '../agentApi'
 import { isRunActive, useAgentStore, type AgentRunPhase, type PendingApproval, type PendingQuestion } from '../agentStore'
 
 /** Commands are bound to a view epoch: late responses must never affect another task. */
-export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendingApproval, pendingQuestion, connect, setActionError, selectedModelRef }: {
+export function useRunControls({ runId, resumeableRunId, sessionId, authorId, phase, pendingApproval, pendingQuestion,
+  connect, setActionError, selectedModelRef, refreshPendingQuestion, clearPendingQuestion }: {
   runId: string | null
   resumeableRunId: string | null
   sessionId: string | null
+  authorId?: string | null
   phase: AgentRunPhase
   pendingApproval: PendingApproval | null
-  pendingQuestion: PendingQuestion | null
+  pendingQuestion: PendingQuestion | PendingAgentQuestion | null
   connect: (runId: string, sinceSeq?: number) => void
   setActionError: (error: string | null) => void
+  refreshPendingQuestion?: () => void
+  clearPendingQuestion?: (requestId: string) => void
   /** 续跑随请求携带作者当前模型选择：点击时从 ref 读取最新值，避免闭包过期 */
   selectedModelRef?: RefObject<ContinueAgentLoopRunModel | null>
 }) {
   const epoch = useRef(0)
   const pending = useRef(new Set<string>())
   const [stoppingRunId, setStoppingRunId] = useState<string | null>(null)
+  const waitingRunId = pendingQuestion && 'runId' in pendingQuestion && pendingQuestion.state === 'waiting' ? pendingQuestion.runId : null
+  const stoppableRunId = isRunActive(phase) ? runId ?? waitingRunId : waitingRunId
   useLayoutEffect(() => {
     const owner = ++epoch.current
     pending.current = new Set()
     setStoppingRunId(null)
     return () => { epoch.current = owner + 1 }
-  }, [sessionId, runId, resumeableRunId])
+  }, [sessionId, runId, resumeableRunId, authorId])
   useEffect(() => {
-    if (!isRunActive(phase) || stoppingRunId !== runId) setStoppingRunId(null)
-  }, [phase, runId, stoppingRunId])
+    if (stoppingRunId !== stoppableRunId) setStoppingRunId(null)
+  }, [stoppableRunId, stoppingRunId])
 
   const command = useCallback(async <T,>(key: string, request: () => Promise<T>, success: (value: T) => void, fallback?: string, failed?: () => void) => {
     const owner = epoch.current
@@ -36,8 +42,7 @@ export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendi
     locks.add(key)
     try {
       const result = await request()
-      if (owner !== epoch.current) return
-      success(result)
+      if (owner === epoch.current) success(result)
       return result
     } catch (error) {
       if (owner !== epoch.current) return
@@ -50,10 +55,12 @@ export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendi
   }, [setActionError])
 
   const handleStop = useCallback(async () => {
-    if (!runId || stoppingRunId === runId) return
-    setStoppingRunId(runId)
-    await command(`stop:${runId}`, () => stopAgentLoopRun(runId), () => {}, '停止失败，请稍后再试。', () => setStoppingRunId(null))
-  }, [runId, stoppingRunId, command])
+    if (!stoppableRunId || stoppingRunId === stoppableRunId) return
+    setStoppingRunId(stoppableRunId)
+    await command(`stop:${stoppableRunId}`, () => stopAgentLoopRun(stoppableRunId), () => {
+      refreshPendingQuestion?.()
+    }, '停止失败，请稍后再试。', () => setStoppingRunId(null))
+  }, [stoppableRunId, stoppingRunId, command, refreshPendingQuestion])
 
   const handleContinue = useCallback(async () => {
     const target = runId ?? resumeableRunId
@@ -73,12 +80,29 @@ export function useRunControls({ runId, resumeableRunId, sessionId, phase, pendi
   }, [runId, pendingApproval, command])
 
   const handleResolveQuestion = useCallback(async (decision: AgentQuestionDecision) => {
-    if (!runId || !pendingQuestion) return false
-    const result = await command(`question:${runId}:${pendingQuestion.callId}`, () => resolveAgentQuestion(runId, {
+    if (!pendingQuestion) return false
+    const authoritative = 'runId' in pendingQuestion
+    const target = authoritative ? pendingQuestion.runId : runId
+    if (!target) return false
+    const result = await command(`question:${target}:${pendingQuestion.requestId ?? pendingQuestion.callId}`, () => resolveAgentQuestion(target, {
       requestId: pendingQuestion.requestId, callId: pendingQuestion.callId, ...decision,
-    }), () => {})
+    }), ({ resolved, runId: resumedRunId, messageId }) => {
+      if (!resolved || !authoritative) return
+      clearPendingQuestion?.(pendingQuestion.requestId)
+      const live = useAgentStore.getState()
+      if (resumedRunId && messageId && pendingQuestion.state === 'completed' && 'answer' in decision) {
+        live.beginRun(resumedRunId, decision.answer, sessionId, undefined, null, messageId, runId)
+        const admitted = useAgentStore.getState()
+        if (admitted.runId === resumedRunId && isRunActive(admitted.phase)) connect(resumedRunId, 0)
+        return
+      }
+      if (!resumedRunId || live.runId === resumedRunId && isRunActive(live.phase)) return
+      if (pendingQuestion.state === 'stopped') live.resumeRun(resumedRunId, sessionId, null, undefined, target)
+      else live.resumeRun(resumedRunId, sessionId)
+      connect(resumedRunId, 0)
+    })
     return result?.resolved === true
-  }, [runId, pendingQuestion, command])
+  }, [runId, sessionId, pendingQuestion, command, clearPendingQuestion, connect])
 
   return { stoppingRunId,
     handleStop, handleContinue, handleResolveApproval, handleResolveQuestion }

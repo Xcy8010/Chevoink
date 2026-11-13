@@ -21,7 +21,7 @@ type Message = z.infer<typeof executionSnapshotSchema>['messages'][number]
 const successfulModel = z.object({ outcome: z.literal('succeeded'), result: durableChatResultSchema }).strict()
 const toolInput = z.object({ input: z.object({ callId: z.string().min(1), args: z.record(z.string(), z.unknown()), normalization: argumentNormalizationSchema.optional(), rejection: toolRejectionSchema.optional() }) })
 const toolResult = z.object({ toolResult: z.object({ output: z.string(), questionTimedOut: z.literal(true).optional(), questionCancelled: z.literal(true).optional(),
-  display: z.unknown().optional(), novelSetupRecap: novelSetupRecapSchema.optional() }) })
+  questionCancellationVersion: z.literal(2).optional(), display: z.unknown().optional(), novelSetupRecap: novelSetupRecapSchema.optional() }) })
 export const failedToolResultSchema = z.object({ outcome: z.literal('failed'), effectApplied: z.literal(false), code: z.string(),
   toolResult: z.object({ output: z.string(), summary: z.string() }) }).strict()
 
@@ -148,6 +148,7 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
         const tool = parsedResult.data.toolResult
         const timeout = !failed && operation.action === 'ask_user' && tool.questionTimedOut
         const cancelled = !failed && operation.action === 'ask_user' && tool.questionCancelled
+        const unanswered = cancelled && tool.questionCancellationVersion === 2
         const answeredBatch = !failed && operation.action === 'ask_user' && hasAnsweredQuestionBatch(parsedInput.data.input.args, tool.display)
         const display = z.object({ kind: z.literal('question'), answer: z.string().min(1) }).safeParse(tool.display)
         const answeredDirection = !failed && operation.action === 'ask_user' && directionSetup
@@ -166,9 +167,9 @@ export async function reduceExecutionReceipt(token: RunLeaseToken, input: {
           }
         }
         if (cancelled || timeout || setupTitle) followup.push({ role: 'assistant',
-          content: cancelled ? QUESTION_CANCELLED_NOTICE : timeout ? QUESTION_TIMEOUT_NOTICE
+          content: unanswered ? output : cancelled ? QUESTION_CANCELLED_NOTICE : timeout ? QUESTION_TIMEOUT_NOTICE
             : tool.novelSetupRecap ? formatNovelSetupRecap(tool.novelSetupRecap) : novelSetupNotice(setupTitle),
-          localCompletion: { kind: cancelled ? 'question_cancelled' : timeout ? 'question_timeout' : 'novel_setup', operationId: operation.id } })
+          localCompletion: { kind: unanswered ? 'question_unanswered' : cancelled ? 'question_cancelled' : timeout ? 'question_timeout' : 'novel_setup', operationId: operation.id } })
         if (setupBlocked) followup.push({ role: 'assistant', content: NOVEL_SETUP_BLOCKED_NOTICE,
           localCompletion: { kind: 'novel_setup_blocked', operationId: operation.id } })
       }

@@ -491,6 +491,7 @@ export type AgentStreamEventBody =
   | { type: 'permission.resolved'; callId: string; approved: boolean; approvalId?: string }
   | { type: 'step.finish'; turn: number; usage: AgentTokenUsage }
   | { type: 'run.paused'; reason: 'user_stop' | 'approval_timeout' | 'model_stalled' | 'needs_input' | 'review_receipt_pending' }
+  | { type: 'run.question_wait'; waiting: boolean }
   | {
       type: 'run.finished'
       /** Only an authenticated atomic deletion receipt may set this field. */
@@ -562,7 +563,7 @@ export type AgentRunTiming = {
   completedAt?: string | null
   elapsedMs: number | null
   activeSince: string | null
-  status: 'running' | 'paused' | 'finished' | 'unknown'
+  status: 'running' | 'waiting' | 'paused' | 'finished' | 'unknown'
   lastSeq: number
 }
 
@@ -587,7 +588,7 @@ export interface AgentUIMessage {
 export interface StartAgentLoopRunRequest {
   /** Fresh main-Agent interpretation; historical tasks retain their contract. */
   agentWritingProtocol?: 1
-  agentQuestionProtocol?: 1
+  agentQuestionProtocol?: 1 | 2
   /** Request one optional composer suggestion in the existing model reply. */
   predictNextPrompt?: true
   /** UUID for matching this author message to local delivery UI, without idempotency semantics. */
@@ -669,6 +670,17 @@ export type AgentQuestionPrompt = {
 }
 
 export type AgentQuestionDecision = { answer: string } | { answers: string[] } | { cancelled: true }
+
+export type PendingAgentQuestion = AgentQuestionPrompt & {
+  requestId: string
+  callId: string
+  runId: string
+  state: 'waiting' | 'stopped' | 'completed'
+  purpose?: 'novel_direction'
+  questions?: AgentQuestionPrompt[]
+}
+
+export type ResolveAgentQuestionResponse = { resolved: boolean; runId?: string; messageId?: string }
 
 export type ResolveAgentQuestionRequest = {
   requestId?: string

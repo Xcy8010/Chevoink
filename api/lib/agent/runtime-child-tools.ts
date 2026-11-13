@@ -37,6 +37,7 @@ export function dispatchDurableChild(userId: string, childRunId: string): Promis
 
 export async function wakeDurableChildren(parent: RunLeaseToken) {
   const grants = await withRunLease(parent, async tx => {
+    if (await (await import('./runtime-question.js')).hasCancelledDurableQuestion(tx, parent.taskRootId, parent.runId)) return []
     await adoptChildGrants(tx, parent)
     const eligible = await tx.agentChildExecutionGrant.findMany({ where: { parentRootId: parent.taskRootId,
       status: { in: ['admitted', 'running'] } }, select: { childRunId: true, parentOperationId: true } })

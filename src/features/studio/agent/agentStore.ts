@@ -69,6 +69,7 @@ export type PendingQuestion = AgentQuestionPrompt & {
   requestId?: string
   callId: string
   questions?: AgentQuestionPrompt[]
+  longWait?: true
 }
 
 /** 从 ask_user 的 tool.call args 中防御性解析提问内容 */
@@ -76,8 +77,9 @@ function parseQuestionArgs(callId: string, args: unknown): PendingQuestion | nul
   if (!args || typeof args !== 'object') {
     return null
   }
-  const payload = args as { question?: unknown; options?: unknown; requestId?: unknown; questions?: unknown }
-  const request = { callId, ...(typeof payload.requestId === 'string' ? { requestId: payload.requestId } : {}) }
+  const payload = args as { question?: unknown; options?: unknown; requestId?: unknown; questions?: unknown; longWait?: unknown }
+  const request = { callId, ...(typeof payload.requestId === 'string' ? { requestId: payload.requestId } : {}),
+    ...(payload.longWait === true ? { longWait: true as const } : {}) }
   if (payload.questions !== undefined) {
     const parsed = agentQuestionPromptsSchema.safeParse(payload.questions)
     if (!parsed.success) return null
@@ -300,7 +302,7 @@ type AgentStoreState = {
   applyEvent: (event: AgentStreamEvent) => void
   beginRun: (runId: string, userPrompt: string, sessionId: string | null, attachments?: AgentAttachmentMeta[], runGoalId?: string | null, optimisticMessageId?: string, expectedPreviousRunId?: string | null) => void
   /** 续接服务端仍在进行的 run（刷新后恢复）：不追加用户消息，从 seq 0 重放事件重建直播 */
-  resumeRun: (runId: string, sessionId: string | null, runGoalId?: string | null, motionAfterSeq?: number) => void
+  resumeRun: (runId: string, sessionId: string | null, runGoalId?: string | null, motionAfterSeq?: number, questionSourceRunId?: string) => void
   reconcileRunTimings: (messages: AgentUIMessage[], sessionId: string, runId: string) => void
   /** 记录刷新后从服务端派生的可续跑 run（拉历史消息时写入，续跑成功后清空） */
   noteResumeableRun: (runId: string | null) => void
@@ -776,13 +778,22 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       ],
     }) }),
 
-  resumeRun: (runId, sessionId, runGoalId = null, motionAfterSeq) =>
+  resumeRun: (runId, sessionId, runGoalId = null, motionAfterSeq, questionSourceRunId) =>
     set((state) => {
+      // The answer endpoint has admitted a new attempt of this stopped
+      // question's original root. Its replay reuses the same message IDs.
+      // The next history read supplies the new attempt's actual start time.
+      const messages = questionSourceRunId && state.loadedSessionId === sessionId ? state.messages.map(message => {
+        const timing = message.runTiming
+        if (!timing?.scopeId?.startsWith('root:') || timing.sourceRunId !== questionSourceRunId) return message
+        return { ...message, runTiming: { ...timing, sourceRunId: runId, lastSeq: 0, activeSince: null } }
+      }) : state.messages
       restoredMessageReplay.clear()
-      for (const message of state.messages) if (messageBelongsToRun(message, runId) && message.role === 'assistant') {
+      for (const message of messages) if (messageBelongsToRun(message, runId) && message.role === 'assistant') {
         restoredMessageReplay.set(`${runId}:${message.id}`, { started: false, text: '', reasoning: '', afterCallId: null, reasoningSlot: -1, lastPart: null, seenCalls: new Set() })
       }
       return ({
+      messages,
       textRevealTargets: {},
       motionAfterSeq: motionAfterSeq ?? null,
       liveToolCallIds: new Set<string>(),
@@ -1205,15 +1216,21 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       }
       // A late stream from another run cannot change the current message,
       // cursor or draft lifecycle, including preparation-end cleanup.
-      if (event.runId !== state.runId && ['run.started', 'message.start', 'text.delta', 'text.final', 'reasoning.delta', 'tool.call', 'tool.result', 'tool.delta', 'tool.deferred', 'tool.preparation.end', 'step.finish', 'run.paused', 'run.finished', 'error'].includes(event.type)) return {}
+      if (event.runId !== state.runId && ['run.started', 'message.start', 'text.delta', 'text.final', 'reasoning.delta', 'tool.call', 'tool.result', 'tool.delta', 'tool.deferred', 'tool.preparation.end', 'step.finish', 'run.paused', 'run.question_wait', 'run.finished', 'error'].includes(event.type)) return {}
 
       // Only accepted live events can establish a local response clock. Start
       // metadata and historical replay cannot masquerade as model output.
       if (state.motionAfterSeq !== null && event.seq > state.motionAfterSeq) useOutgoingMessages.getState().observeEvent(event)
 
-      const timingEvent = ['run.started', 'run.paused', 'run.finished'].includes(event.type) || event.type === 'error' && !event.recoverable
-      const timedMessages = timingEvent ? state.messages.map(message => (message.runTiming?.sourceRunId ?? message.runId) === event.runId
-        ? { ...message, runTiming: advanceRunTiming(message.runTiming, event) } : message) : state.messages
+      const timingEvent = ['run.started', 'run.paused', 'run.question_wait', 'run.finished'].includes(event.type) || event.type === 'error' && !event.recoverable
+      const timedMessages = timingEvent ? state.messages.map(message => {
+        const timing = message.runTiming
+        if ((timing?.sourceRunId ?? message.runId) !== event.runId) return message
+        // A new durable attempt replays the original root's admission event.
+        // Its actual start is supplied by the new attempt's history timing.
+        if (event.type === 'run.started' && message.runId !== event.runId && timing?.scopeId?.startsWith('root:') && !event.authorContinue) return message
+        return { ...message, runTiming: advanceRunTiming(timing, event) }
+      }) : state.messages
       const liveToolEvent = state.motionAfterSeq !== null && event.seq > state.motionAfterSeq
         && (event.type === 'tool.delta' || event.type === 'tool.call' || event.type === 'tool.result')
       const base = { lastSeq: event.seq, ...(timingEvent ? { messages: timedMessages } : {}),
@@ -1231,6 +1248,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         }
         case 'run.started':
           return { ...base, phase: 'running', agentTitle: event.agent.title }
+
+        case 'run.question_wait':
+          if (!isRunActive(state.phase)) return base
+          return event.waiting ? { ...base, phase: 'awaiting_input', ...noteSessionSignal(state, 'attention') }
+            : { ...base, phase: 'running', ...withoutActiveSessionSignal(state) }
 
         // 技能路由已由服务端完成：落到 store 才能告诉作者本轮到底用了哪些技能
         case 'skill.route':

@@ -216,6 +216,29 @@ it('reconciles retained durable message IDs using only the server-proven current
   expect(toolIds()).not.toContain('not-owned')
   expect(useAgentStore.getState().lastSeq).toBe(0)
 })
+it('a stopped answer attaches its original durable messages before the continued stream starts', () => {
+  const saved = history()
+  for (const message of saved) {
+    message.runId = 'stopped-attempt'
+    message.runTiming = { scopeId: 'root:task-a', sourceRunId: 'stopped-attempt', elapsedMs: 1000, activeSince: null, status: 'paused', lastSeq: 12 }
+  }
+  const unrelated = { ...saved[1], id: 'unrelated', runId: 'other-attempt',
+    runTiming: { ...saved[1].runTiming!, scopeId: 'root:other-task', sourceRunId: 'other-attempt' } }
+  const hook = renderHook(() => useAgentStream())
+  act(() => {
+    const store = useAgentStore.getState()
+    store.restoreMessages([unrelated, ...saved], 'session-a')
+    store.resumeRun('run-a', 'session-a', null, undefined, 'stopped-attempt')
+    hook.result.current.connect('run-a')
+    Source.opened[0].send(start(1))
+    Source.opened[0].send(result(2, 'after-answer'))
+  })
+  expect(useAgentStore.getState().messages.find(message => message.id === 'saved-a')).toMatchObject({
+    runId: 'stopped-attempt', runTiming: { sourceRunId: 'run-a', activeSince: null, elapsedMs: 1000 },
+  })
+  expect(toolIds()).toContain('after-answer')
+  expect(useAgentStore.getState().messages.find(message => message.id === 'unrelated')?.runTiming?.sourceRunId).toBe('other-attempt')
+})
 it('uses real tool boundaries to repair old flattened reasoning without duplicating its later segments', () => {
   const saved = history()
   saved[1].parts = [{ type: 'reasoning', text: '第一段。第二段。第三段。' }, saved[1].parts[2], saved[1].parts[3]]

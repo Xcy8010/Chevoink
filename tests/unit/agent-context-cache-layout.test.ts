@@ -721,6 +721,44 @@ describe('assembleContext 缓存友好布局（阶段二：动态上下文后移
     expect(String(messages[6].content)).toContain('把第三章开头改得更抓人')
   })
 
+  it.each([
+    ['第二张', '作者本轮指定的候选为 coverAssetId=cover-9'],
+    ['你自己选', '作者本轮明确委托你选'],
+    ['随便', '作者本轮明确委托你选'],
+    ['第二章', undefined],
+  ])('binds a cover follow-up to the visible order in the previous turn: %s', async (prompt, guidance) => {
+    const coverQuestion = { type: 'tool-call', toolName: 'ask_user', status: 'success',
+      display: { kind: 'question', question: '哪张封面？', cancelled: true, options: [
+        { label: '雨夜车站', coverAssetId: 'cover-1' }, { label: '档案室', coverAssetId: 'cover-9' }, { label: '暂不应用' },
+      ] } }
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([
+      { id: 'last-answer', runId: 'previous-run', role: 'assistant', parts: [coverQuestion] },
+    ] as never)
+    const { messages } = await assembleContext({ ...buildInput(), prompt })
+    const snapshot = String(messages.find(message => String(message.content).startsWith('[当前作品上下文快照]'))?.content)
+    if (guidance) {
+      expect(snapshot).toContain(guidance)
+      expect(snapshot).toContain('"position":1,"label":"雨夜车站","coverAssetId":"cover-1"')
+      expect(snapshot).toContain('"position":2,"label":"档案室","coverAssetId":"cover-9"')
+    } else expect(snapshot).not.toContain('上次实际展示的封面顺序')
+    expect(snapshot).not.toContain('未指明就用最新一张')
+  })
+
+  it('asks which cover question an unqualified ordinal refers to when the previous batch contains two', async () => {
+    const questions = [
+      { question: '哪张封面？', options: [{ label: '雨夜车站', coverAssetId: 'cover-1' }, { label: '暂不应用' }] },
+      { question: '哪个备用封面？', options: [{ label: '档案室', coverAssetId: 'cover-9' }, { label: '暂不应用' }] },
+    ]
+    vi.mocked(prisma.agentMessage.findMany).mockResolvedValue([{
+      id: 'last-answer', runId: 'previous-run', role: 'assistant', parts: [{ type: 'tool-call', toolName: 'ask_user', status: 'success',
+        display: { kind: 'question', ...questions[0], questions, cancelled: true } }],
+    }] as never)
+    const { messages } = await assembleContext({ ...buildInput(), prompt: '第二张' })
+    const snapshot = String(messages.find(message => String(message.content).startsWith('[当前作品上下文快照]'))?.content)
+    expect(snapshot).toContain('上一批有多道封面题')
+    expect(snapshot).not.toContain('作者本轮指定的候选为')
+  })
+
   it('跨 Run 数据与视觉能力变化时 system 逐字节不变，变化只出现在尾部消息', async () => {
     const first = await assembleContext(buildInput())
     const firstSystem = first.messages[0].content

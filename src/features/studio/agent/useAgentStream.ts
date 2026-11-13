@@ -29,6 +29,7 @@ const EVENT_TYPES = [
   'permission.resolved',
   'step.finish',
   'run.paused',
+  'run.question_wait',
   'run.finished',
   // 跨任务编排新增窗口：侧栏据此当帧登记任务窗并点亮运行中标记，漏订会导致派生窗口刷新后才可见
   'task.spawned',

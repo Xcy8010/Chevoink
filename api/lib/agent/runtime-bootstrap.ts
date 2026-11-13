@@ -158,7 +158,8 @@ export async function resumeFreshBootstrapInTransaction(tx: RuntimeTx, userId: s
       return runtimeError('RUN_IN_PROGRESS', '当前会话已有任务执行。')
     }
     const { env } = await import('../../config/env.js')
-    if (await tx.agentRun.count({ where: { userId, status: { in: ['queued', 'running', 'awaiting_approval'] }, ...MAIN_RUN_FILTER } }) >= env.agentUserMaxConcurrent) {
+    const { interactiveRunSlots } = await import('./run-slots.js')
+    if (await tx.agentRun.count({ where: { userId, ...interactiveRunSlots, ...MAIN_RUN_FILTER } }) >= env.agentUserMaxConcurrent) {
       return runtimeError('RUN_LIMIT', '同时进行的任务数已达上限。')
     }
     await tx.agentTaskRoot.update({ where: { id: root.id }, data: { status: 'active' } })

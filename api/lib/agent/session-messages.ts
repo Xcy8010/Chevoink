@@ -22,6 +22,7 @@ import { MAIN_RUN_FILTER, prepareChildGrantDeletion } from './runtime-child.js'
 import { historyClientRequest } from './message-client-request.js'
 import { loadMessageTimings } from './message-timing.js'
 import { projectLegacyQualityBodyChanges } from './quality-body-change-history.js'
+import { QUESTION_CLOSING_ROOT_STATUS, QUESTION_WAITING_ROOT_STATUS } from './run-slots.js'
 
 const historyRunState = { select: { userId: true, startRequest: true, runtimeProtocolVersion: true, status: true, finishedAt: true, taskRoot: { select: { status: true } },
   goalExecution: { select: { goalId: true, trigger: true } },
@@ -54,9 +55,16 @@ function visibleHistoryParts(parts: AgentMessagePart[], run: { runtimeProtocolVe
 }
 
 async function synchronizeDurableHistory(userId: string, runs: Array<{ id: string; runtimeProtocolVersion: number; taskRootId: string | null }>) {
+  const durableRuns = runs.filter(run => run.runtimeProtocolVersion === 1 && run.taskRootId)
+  if (!durableRuns.length) return
   const roots = new Set<string>()
-  for (const run of runs) {
-    if (run.runtimeProtocolVersion !== 1 || !run.taskRootId || roots.has(run.taskRootId)) continue
+  const questionWaits = await prisma.agentExecutionOutbox.findMany({
+    where: { runId: { in: durableRuns.map(run => run.id) }, type: 'question.parked' },
+    distinct: ['runId'], select: { runId: true },
+  })
+  const questionRuns = new Set(questionWaits.map(event => event.runId))
+  for (const run of durableRuns) {
+    if (!run.taskRootId || roots.has(run.taskRootId) && !questionRuns.has(run.id)) continue
     roots.add(run.taskRootId)
     // History must also work when no browser was connected during execution.
     // Batches are bounded; all writes remain the same root-locked projection.
@@ -117,8 +125,9 @@ async function getSessionRunState(sessionId: string, includeNextPrompt = false):
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     select: { id: true, status: true, usage: true, runtimeProtocolVersion: true, taskRoot: { select: { status: true } }, goalExecution: { select: { goalId: true } } },
   })
-  const durableActive = run?.runtimeProtocolVersion === 1 && run.taskRoot?.status === 'active'
+  const durableActive = run?.runtimeProtocolVersion === 1 && ((run.taskRoot?.status === 'active' || run.taskRoot?.status === QUESTION_CLOSING_ROOT_STATUS)
     && ['queued', 'running', 'awaiting_approval'].includes(run.status)
+    || run.taskRoot?.status === QUESTION_WAITING_ROOT_STATUS && run.status === 'awaiting_approval')
   const ending = readAuthorEnded(run?.usage)
   const terminal = includeNextPrompt && run?.status === 'completed'
     ? await prisma.agentRunEvent.findFirst({ where: { runId: run.id, type: 'run.finished' }, orderBy: { seq: 'desc' }, select: { payload: true } })

@@ -3,6 +3,7 @@ import { assertRunGoalFence } from './goal-fence.js'
 import { adoptChildGrants, assertChildParentFence, type ChildParentFence } from './runtime-child.js'
 import { readParentContentionScope } from './runtime-parent-contention.js'
 import { lockNovelActiveScope } from '../data/novel-write-lock.js'
+import { QUESTION_CLOSING_ROOT_STATUS } from './run-slots.js'
 
 export type RunLeaseToken = { userId: string; runId: string; taskRootId: string; ownerId: string; claimId: string; epoch: bigint; parent?: ChildParentFence }
 const MAX_EPOCH = 9_223_372_036_854_775_807n
@@ -14,7 +15,7 @@ function ttl(value: number): number {
 
 function active(run: { status: string }, root: { status: string; authorizationMode: string }): void {
   if (root.authorizationMode !== 'legacy') runtimeError('TASK_AUTHORIZATION_NOT_ACTIVATED', '阶段授权执行器尚未接入，不能按旧权限执行。')
-  if (!['queued', 'running'].includes(run.status) || root.status !== 'active') runtimeError('RUNTIME_NOT_ACTIVE', '任务已暂停或终止，不能继续产生效果。')
+  if (!['queued', 'running'].includes(run.status) || !['active', QUESTION_CLOSING_ROOT_STATUS].includes(root.status)) runtimeError('RUNTIME_NOT_ACTIVE', '任务已暂停或终止，不能继续产生效果。')
 }
 
 function nextEpoch(epoch: bigint): bigint {
@@ -53,7 +54,7 @@ export async function acquireRunLease(input: { userId: string; runId: string; ow
       ownerId: captured.ownerId, claimId: captured.claimId, epoch: nextEpoch(old.epoch), expiresAt: new Date(now.getTime() + ttlMs),
     } })
     const token = { userId: run.userId, runId: run.id, taskRootId: root.id, ownerId: captured.ownerId, claimId: captured.claimId, epoch: lease.epoch, ...(parent ? { parent } : {}) }
-    if (!parent) await adoptChildGrants(tx, token)
+    if (!parent && root.status !== QUESTION_CLOSING_ROOT_STATUS && !await (await import('./runtime-question.js')).hasCancelledDurableQuestion(tx, root.id, run.id)) await adoptChildGrants(tx, token)
     return token
   }, { contentionBackoff, contentionScope })
 }
@@ -63,6 +64,16 @@ export async function withRunLease<T>(token: RunLeaseToken, work: (tx: RuntimeTx
   const captured = { ...token }
   const contentionScope = await readParentContentionScope(captured.userId, captured.runId, true)
   return runtimeTransaction(tx => withRunLeaseInTransaction(tx, captured, work), { contentionBackoff: Boolean(captured.parent), contentionScope, deadline: contentionScope?.deadline, ...(options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) })
+}
+
+/** A parked executor has unwound its heartbeat and relinquishes ownership in
+ * the same transaction as the saved wait. A wake cannot race an old lease. */
+export async function parkRunLease(token: RunLeaseToken, work: (tx: RuntimeTx) => Promise<string[] | null>) {
+  return runtimeTransaction(async tx => {
+    const parked = await withRunLeaseInTransaction(tx, token, work)
+    if (parked) await tx.agentRunLease.update({ where: { runId: token.runId }, data: { ownerId: null, claimId: null, expiresAt: null } })
+    return parked
+  })
 }
 
 /** Manuscript adapters order domain locks before parent/run/root locks. The

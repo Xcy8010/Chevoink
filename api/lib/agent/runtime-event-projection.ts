@@ -30,6 +30,7 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
     const sources = await tx.agentExecutionOutbox.findMany({ where: { taskRootId: root.id,
       OR: [{ type: { in: ['child.admitted', 'approval.requested', 'approval.resolved', 'execution.state.saved', 'writing.delivery.projected', 'question.requested', 'import.requested', 'import.commit_requested', 'goal.activation_registered', 'configuration.changed'] } },
         { type: { in: ['execution.bootstrap.paused', 'execution.bootstrap.resumed'] }, runId },
+        { type: { in: ['question.parked', 'question.woken'] }, runId },
         { type: 'execution.completion.decided', runId, payload: { path: ['kind'], equals: 'completed' } },
         { type: 'execution.completion.decided', runId, payload: { path: ['kind'], equals: 'cancelled' } },
         { type: 'run.paused', payload: { path: ['runIds'], array_contains: [runId] } }],
@@ -132,7 +133,17 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
           || runtimeJson(input.data.input.args).hash !== runtimeJson(durableQuestionContent.parse(question)).hash) return runtimeError('RUNTIME_RECEIPT_INVALID', '提问事件缺少原工具参数。')
         const frame = await readExecutionFrame(tx, root.id, input.data.input.normalization.sourceRevision)
         bodies = [{ type: 'tool.call', messageId: durableMessageId(root.id, frame.state.turn), callId: question.callId, toolName: 'ask_user', title: '向作者提问',
-          args: { ...durableQuestionContent.parse(question), requestId: source.id }, autoApproved: true }]
+          args: { ...durableQuestionContent.parse(question), requestId: source.id, ...(question.version === 2 ? { longWait: true } : {}) }, autoApproved: true }]
+      } else if (source.type === 'question.parked' || source.type === 'question.woken') {
+        const { requestId } = z.object({ requestId: z.string() }).strict().parse(source.payload)
+        const request = await tx.agentExecutionOutbox.findUnique({ where: { id: requestId } })
+        const waiting = source.type === 'question.parked'
+        if (!request || request.taskRootId !== root.id || request.type !== 'question.requested' || request.operationId !== source.operationId
+          || request.runId !== source.runId || source.eventKey !== `question-${waiting ? 'park' : 'wake'}:${requestId}`
+          || durableQuestionSchema.parse(request.payload).version !== 2 || source.sequence <= request.sequence) {
+          return runtimeError('RUNTIME_RECEIPT_INVALID', '提问等待事件与原提问不一致。')
+        }
+        bodies = [{ type: 'run.question_wait', waiting }]
       } else if (source.type === 'execution.completion.decided') {
         const decision = z.object({ version: z.literal(1), kind: z.enum(['completed', 'cancelled']), reviewOperationId: z.string(), resultHash: z.string(),
           sourceRevision: z.number().int().nonnegative(), sourceHash: z.string(), revision: z.number().int().positive(), snapshotHash: z.string(),
@@ -141,7 +152,7 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
         const verdict = z.object({ verdict: z.object({ verdict: z.literal('complete') }) }).safeParse(receipt?.result)
         const proof = z.object({ version: z.literal(1), sourceRevision: z.number(), sourceHash: z.string(),
           candidateHash: z.string(), evidenceHash: z.string(), evidence: z.object({ blockers: z.array(z.never()),
-            terminalReason: z.enum(['question_timeout', 'question_cancelled']).optional() }).passthrough(),
+            terminalReason: z.enum(['question_timeout', 'question_cancelled', 'question_unanswered']).optional() }).passthrough(),
           chapterPresentation: savedChapterPresentationSchema.optional(), limitedWritingDelivery: limitedWritingDeliverySchema.optional(),
           outcome: limitedWritingOutcomeSchema.optional() }).safeParse(receipt?.result)
         const frame = await readExecutionFrame(tx, root.id, decision.revision)
@@ -155,7 +166,8 @@ export async function publishDurableEvents(userId: string, runId: string, limit 
           && proof.data.candidateHash === runtimeJson({ content: candidate.content, reasoning: candidate.reasoning ?? null }).hash
           && cancelled === (candidate.localCompletion?.kind === 'question_cancelled')
           && cancelled === (proof.data.evidence.terminalReason === 'question_cancelled')
-          && (!cancelled || (!proof.data.outcome && !proof.data.chapterPresentation && !proof.data.limitedWritingDelivery))
+          && (candidate.localCompletion?.kind === 'question_unanswered') === (proof.data.evidence.terminalReason === 'question_unanswered')
+          && (!(cancelled || candidate.localCompletion?.kind === 'question_unanswered') || (!proof.data.outcome && !proof.data.chapterPresentation && !proof.data.limitedWritingDelivery))
           && (!proof.data.chapterPresentation || proof.data.chapterPresentation.targetRunId === source.runId)
           && (!proof.data.chapterPresentation || (() => {
             const admitted = z.object({ input: z.object({ chapterPresentation: savedChapterPresentationSchema }) }).safeParse(receipt.operation.inputSnapshot)

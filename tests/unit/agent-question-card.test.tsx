@@ -13,7 +13,7 @@ const question = {
   ],
 }
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); localStorage.clear() })
 
 it('moves through a single native radio group and requires explicit confirmation before submitting', async () => {
   // jsdom does not implement the browser CSS.escape used by user-event's radio navigation.
@@ -264,4 +264,69 @@ it('leaves unresolved cover IDs as text choices in their original order', async 
   await user.click(screen.getByText('封面已找不到'))
   await user.click(screen.getByRole('button', { name: '提交回答' }))
   expect(onAnswer).toHaveBeenCalledExactlyOnceWith({ answer: '封面已找不到' })
+})
+
+it('restores only the owning question draft across reload and clears it after an acknowledged submit', async () => {
+  const user = userEvent.setup()
+  const onAnswer = vi.fn<(decision: AgentQuestionDecision) => Promise<boolean>>()
+    .mockRejectedValueOnce(new Error('稍后重试')).mockResolvedValueOnce(true)
+  const batch = { ...question, questions: [question, { question: '第二题', options: [{ label: '清晨' }] }] }
+  const key = 'chevoink:question-draft:v1:author-session-run-question'
+  const first = render(<AgentQuestionCard question={batch} draftStorageKey={key} submitLabel="提交并继续" onAnswer={onAnswer} />)
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '夜色中的地图' } })
+  await user.click(screen.getByRole('button', { name: '继续' }))
+  await user.click(screen.getByRole('radio', { name: '清晨' }))
+  first.unmount()
+  const other = render(<AgentQuestionCard question={batch} draftStorageKey="other-author-session-run-question" onAnswer={onAnswer} />)
+  expect(screen.getByText('1 / 2')).toBeTruthy()
+  expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('')
+  other.unmount()
+  render(<AgentQuestionCard question={batch} draftStorageKey={key} submitLabel="提交并继续" onAnswer={onAnswer} />)
+  expect(screen.getByText('2 / 2')).toBeTruthy()
+  expect((screen.getByRole('radio', { name: '清晨' }) as HTMLInputElement).checked).toBe(true)
+  await user.click(screen.getByRole('button', { name: '提交并继续' }))
+  expect(await screen.findByRole('alert')).toBeTruthy()
+  expect(localStorage.getItem(key)).toContain('夜色中的地图')
+  await user.click(screen.getByRole('button', { name: '提交并继续' }))
+  expect(await screen.findByRole('button', { name: '已提交' })).toBeTruthy()
+  expect(localStorage.getItem(key)).toBeNull()
+  expect(onAnswer).toHaveBeenLastCalledWith({ answers: ['夜色中的地图', '清晨'] })
+})
+
+it('uses no default storage and clears only acknowledged cancellation or an explicitly expired draft', async () => {
+  const user = userEvent.setup()
+  const onAnswer = vi.fn<(decision: AgentQuestionDecision) => Promise<boolean>>()
+    .mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+  const key = 'chevoink:question-draft:v1:explicit'
+  const unscoped = render(<AgentQuestionCard question={question} onAnswer={onAnswer} />)
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '不保存的回答' } })
+  expect(localStorage.length).toBe(0)
+  unscoped.unmount()
+  const scoped = render(<AgentQuestionCard question={question} draftStorageKey={key} onAnswer={onAnswer} />)
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '保留到确认' } })
+  await user.click(screen.getByRole('button', { name: '取消' }))
+  expect(await screen.findByRole('alert')).toBeTruthy()
+  expect(localStorage.getItem(key)).toContain('保留到确认')
+  await user.click(screen.getByRole('button', { name: '取消' }))
+  expect(await screen.findByRole('button', { name: '已取消' })).toBeTruthy()
+  expect(localStorage.getItem(key)).toBeNull()
+  scoped.unmount()
+  localStorage.setItem(key, JSON.stringify({ version: 1, step: 0, drafts: { 0: { choice: 'custom', customAnswer: '过期草稿' } } }))
+  render(<AgentQuestionCard question={question} draftStorageKey={key} draftExpiresAt="2001-01-01T00:00:00.000Z" onAnswer={onAnswer} />)
+  expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('')
+  expect(localStorage.getItem(key)).toBeNull()
+})
+
+it('keeps in-memory question controls usable when browser storage is disabled', async () => {
+  const error = new DOMException('Disabled', 'SecurityError')
+  vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw error })
+  vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw error })
+  vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => { throw error })
+  const onAnswer = vi.fn(async () => true)
+  const user = userEvent.setup()
+  render(<AgentQuestionCard question={question} draftStorageKey="blocked" onAnswer={onAnswer} />)
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '内存里的回答' } })
+  await user.click(screen.getByRole('button', { name: '提交回答' }))
+  expect(await screen.findByRole('button', { name: '已提交' })).toBeTruthy()
+  expect(onAnswer).toHaveBeenCalledExactlyOnceWith({ answer: '内存里的回答' })
 })

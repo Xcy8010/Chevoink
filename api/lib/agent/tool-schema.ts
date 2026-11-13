@@ -24,7 +24,7 @@ export function toOpenAIToolPresentation(tool: Pick<AgentTool, 'name' | 'descrip
   // flag and make optional fields required. Keep our existing omission-based
   // input contract explicit across compatible API gateways.
   const parameters = baseParameters ?? toOpenAIParameters(tool.parameters)
-  if (tool.name === 'ask_user' && scope?.agentQuestionProtocol !== 1) {
+  if (tool.name === 'ask_user' && !scope?.agentQuestionProtocol) {
     const legacy = toOpenAIParameters(legacyAskUserParameters)
     const properties = legacy.properties as Record<string, Record<string, unknown>>
     const single = { ...legacy, properties: { ...properties, options: { ...properties.options, maxItems: QUESTION_OPTION_LIMIT,

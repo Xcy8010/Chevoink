@@ -3832,6 +3832,7 @@ export default function StudioWorkspace() {
           sessionResolving={agentSessionsResolving}
           novelId={activeNovelId}
           coverAssets={studioQuery.data?.novel.id === activeNovelId ? studioQuery.data.coverAssets : undefined}
+          questionAuthorId={taskUiUserId}
           novelName={currentNovel?.displayTitle?.trim() || currentNovel?.title?.trim() || '未命名作品'}
           initializingNovel={currentNovel ? isBootstrapNovel(currentNovel) : false}
           // 空态推荐只跟作品绑定；重复点击“新对话”不应让四张示例卡片反复换文案。

@@ -29,6 +29,8 @@ import type {
   AgentExecutionAgent,
   AgentExecutionMode,
   AgentQuestionDecision,
+  PendingAgentQuestion,
+  ResolveAgentQuestionResponse,
   AgentRouteDecision,
   AgentRuleBundle,
   AgentRun,
@@ -76,7 +78,9 @@ import { databaseNow, runtimeTransaction } from './runtime-common.js'
 import { executeAgentRun } from './loop.js'
 import { resolveApproval, resolveQuestionAnswer } from './permissions.js'
 import { resolveDurableApproval } from './runtime-approval.js'
-import { resolveDurableQuestion } from './runtime-question.js'
+import { hasCancelledDurableQuestion, readPendingDurableQuestion, recordQuestionWake, resolveDurableQuestion } from './runtime-question.js'
+import { readCompletedQuestionDecision, readPendingCompletedQuestion, recordCompletedQuestionDecision } from './runtime-question-followup.js'
+import { interactiveRunSlots, QUESTION_CLOSING_ROOT_STATUS } from './run-slots.js'
 import { streamDurableRun } from './runtime-stream.js'
 import { isDefaultSessionTitle } from './session-title.js'
 import { withUserRunLock } from './run-lock.js'
@@ -110,6 +114,7 @@ export type StartLoopRunOptions = {
   queuedRequest?: { id: string; revision: number }
   /** Internal scheduler capability; never part of an HTTP or model-tool schema. */
   goal?: GoalRunAdmission
+  completedQuestion?: Omit<Parameters<typeof readCompletedQuestionDecision>[1], 'userId'>
 }
 
 const durableProcessOwner = `api:${randomUUID()}`
@@ -264,22 +269,23 @@ async function executeOwnedPersistedLoopRun(run: AgentRunRecord) {
   if (getActiveRun(run.id) || hasActiveRunInSession(run.sessionId)) throw new DataAccessError(409, 'RUN_IN_PROGRESS', '该会话已有本地执行者。')
   // Recovery shares the existing resume limit. A restart must not dispatch all
   // discovered tasks at once and multiply the user's concurrent paid requests.
-  if (countActiveRunsByUser(userId) >= env.agentUserMaxConcurrent) {
+  const questionCancellation = await hasCancelledDurableQuestion(prisma, run.taskRootId, run.id)
+  if (getActiveRun(run.id) || hasActiveRunInSession(run.sessionId)) throw new DataAccessError(409, 'RUN_IN_PROGRESS', '该会话已有本地执行者。')
+  if (!questionCancellation && countActiveRunsByUser(userId) >= env.agentUserMaxConcurrent) {
     throw new DataAccessError(409, 'RUN_LIMIT', `同时进行的任务数已达上限（${env.agentUserMaxConcurrent}），请稍后再试。`)
   }
   const controller = new AbortController()
   // No await between reservation check and registration. This uses the same
   // registry as legacy runs so stop and concurrency accounting remain shared.
-  registerActiveRun(run.id, { controller, userId, sessionId: run.sessionId })
+  registerActiveRun(run.id, { controller, userId, sessionId: run.sessionId, questionCancellation })
   let lease: RunLeaseToken | undefined
   let executionFailed = false
   let deletionVerified = false
   let result: Awaited<ReturnType<typeof import('./runtime-executor.js').runReviewedDurableExecution>>
   let cleanupFailure: { error: unknown } | undefined
   try {
-    // Reserve locally before this asynchronous admission check; duplicate
-    // Continue/recovery must observe the pending executor immediately.
-    await assertRunModelNotArchived(run)
+    // Verify model availability before the lease can adopt child work.
+    if (!questionCancellation) await assertRunModelNotArchived(run)
     lease = await acquireRunLease({ userId, runId: run.id, ownerId: durableProcessOwner, claimId: randomUUID() })
     controller.signal.throwIfAborted()
     await withRunLease(lease, async tx => {
@@ -299,10 +305,11 @@ async function executeOwnedPersistedLoopRun(run: AgentRunRecord) {
       }
       const current = await tx.agentRun.findUniqueOrThrow({ where: { id: run.id } })
       await tx.agentRun.update({ where: { id: run.id }, data: { status: 'running', startedAt: current.startedAt ?? await databaseNow(tx), errorMessage: null } })
+      if (state.frame.state.pendingOperationId) await recordQuestionWake(tx, lease!, state.frame.state.pendingOperationId)
     })
     const { runReviewedDurableExecution } = await import('./runtime-executor.js')
     controller.signal.throwIfAborted()
-    result = await runReviewedDurableExecution(lease, controller.signal)
+    result = await runReviewedDurableExecution(lease, controller.signal, questionCancellation ? { questionCancellation: true } : undefined)
     if (result.kind === 'novel_deleted') {
       const proof = await runtimeTransaction(tx => import('./runtime-novel-delete-read.js').then(module => module.readVerifiedNovelDeletion(tx, userId, runId)))
       if (!proof || proof.deletion.taskRootId !== lease.taskRootId || proof.deletion.operationId !== result.deletion.operationId) {
@@ -370,7 +377,7 @@ export async function startLoopRunLocked(
   input = persistedStartSchema.parse(JSON.parse(JSON.stringify(input)))
   if (!input.chapterId?.trim() && input.selection) input = { ...input, selection: null }
   let steering: StartAgentLoopRunRequest | undefined
-  if (!options.goal) {
+  if (!options.goal && !options.completedQuestion) {
     const resolved = await (await import('./goal-author-admission.js')).resolveGoalAuthorAdmission(userId, input,
       options.queuedRequest ? `goal-steer:${options.queuedRequest.id}:${options.queuedRequest.revision}` : `goal-steer:${randomUUID()}`,
       options.concurrencyScope === 'orchestration')
@@ -393,7 +400,7 @@ export async function startLoopRunLocked(
   await assertManagedAttachmentsAccess(input.attachments, userId)
 
   // A plain human Continue reuses the saved contract, progress and budget.
-  if (options.humanOrigin === 'http' && !options.goal && !options.queuedRequest && !session.spawnedFromRunId
+  if (options.humanOrigin === 'http' && !options.goal && !options.queuedRequest && !options.completedQuestion && !session.spawnedFromRunId
     && !input.selection && !input.attachments?.length && (isContinuationRequest(input.prompt) || isWritingContinuationRequest(input.prompt))) {
     const previous = await prisma.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, sessionId: session.id }, orderBy: { createdAt: 'desc' } })
     if (previous && ['paused', 'failed', 'running', 'awaiting_approval'].includes(previous.status)) {
@@ -510,6 +517,7 @@ export async function startLoopRunLocked(
   const admittedMessageId = randomUUID()
   let initializeGoalDurable = false
   let initializeFreshDurable = false
+  let replayedCompletedAnswer = false
   const admittedParts = [{ type: 'text', text: input.prompt }, ...(input.attachments ?? []).map(attachment => ({
     type: 'attachment', kind: attachment.kind, name: attachment.name, url: attachment.url, size: attachment.size,
   }))]
@@ -519,6 +527,15 @@ export async function startLoopRunLocked(
     // durable resume admission lock and count saved work before creating more.
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-admission:${userId}`}, 0))::text`
     await lockNovelActiveScope(tx, session.novelId)
+    const completedQuestion = options.completedQuestion && await readCompletedQuestionDecision(tx, { userId, ...options.completedQuestion })
+    if (completedQuestion?.kind === 'replay' && completedQuestion.result.runId) {
+      replayedCompletedAnswer = true
+      return tx.agentRun.findUniqueOrThrow({ where: { id: completedQuestion.result.runId } })
+    }
+    if (options.completedQuestion && (completedQuestion?.kind !== 'pending' || completedQuestion.prompt !== input.prompt
+      || completedQuestion.sessionId !== session.id || completedQuestion.novelId !== session.novelId)) {
+      throw new DataAccessError(409, 'QUESTION_NOT_PENDING', '原提问不属于本次续接。')
+    }
     if (!options.goal && await tx.agentGoal.count({ where: { sessionId: session.id, status: { notIn: ['completed', 'cancelled'] } } })) {
       throw new DataAccessError(409, 'GOAL_VERSION_CONFLICT', '窗口已有新目标，请重新发送补充。')
     }
@@ -532,7 +549,7 @@ export async function startLoopRunLocked(
     if (await tx.agentRun.count({ where: { ...MAIN_RUN_FILTER, sessionId: session.id, status: { in: [...live] } } })) {
       throw new DataAccessError(409, 'RUN_IN_PROGRESS', '当前会话已有任务在执行，请先停止或等待完成。')
     }
-    if (await tx.agentRun.count({ where: { ...MAIN_RUN_FILTER, userId, status: { in: [...live] } } }) >= concurrencyLimit) {
+    if (await tx.agentRun.count({ where: { ...MAIN_RUN_FILTER, userId, ...interactiveRunSlots } }) >= concurrencyLimit) {
       throw new DataAccessError(409, 'RUN_LIMIT', `同时进行的任务数已达上限（${concurrencyLimit}），请稍后再试。`)
     }
     if (queuedRequest) {
@@ -591,8 +608,8 @@ export async function startLoopRunLocked(
         terminalEvidenceProtocol: 2, terminalQuoteAddressProtocol: 1, terminalCoverageProtocol: 2,
         researchAdmission, researchNavigationAdmission: researchAdmission, networkAdmission, authorWritingProtocol: 2, novelInitializationProtocol: 2,
         novelInitializationTarget: isEmptyNovelMetadata(manuscript) ? 'empty' : 'existing', volumeCreationProtocol: 1, volumeCreateIntent, creativeFreedom, qualityMode: input.qualityMode })
-      if (networkAdmission && input.agentQuestionProtocol === 1) {
-        fresh = { ...fresh, scope: { ...fresh.scope, agentQuestionProtocol: 1 } }
+      if (networkAdmission && input.agentQuestionProtocol) {
+        fresh = { ...fresh, scope: { ...fresh.scope, agentQuestionProtocol: input.agentQuestionProtocol } }
       }
       if (input.agentWritingProtocol === 1 && options.humanOrigin === 'http' && !options.goal && !session.spawnedFromRunId
         && (input.agentProfile ?? 'orchestrator') === 'orchestrator') {
@@ -662,9 +679,12 @@ export async function startLoopRunLocked(
       await tx.agentGoalExecution.update({ where: { runId: created.id }, data: { taskRootId: root.id } })
     }
     if (queuedRequest) await tx.agentQueuedRequest.update({ where: { id: queuedRequest.id }, data: { runId: created.id } })
+    if (completedQuestion?.kind === 'pending') await recordCompletedQuestionDecision(tx, completedQuestion, created.id)
     return created
   })
 
+  if (replayedCompletedAnswer) return { runId: run.id, sessionId: run.sessionId, runGoalId: null, status: run.status,
+    streamUrl: `/api/agent/runs/${run.id}/stream` }
   void import('./writing-experiments.js').then(({ recordSevenDayContinuation }) => recordSevenDayContinuation(userId, session.novelId)).catch(() => {})
 
   // 异步执行循环，路由立即返回，前端连 stream 拿事件
@@ -890,12 +910,51 @@ export async function resolveLoopRunQuestion(
   callId: string,
   response: AgentQuestionDecision | string,
   requestId?: string,
-): Promise<{ resolved: boolean }> {
+): Promise<ResolveAgentQuestionResponse> {
   const run = await findOwnedLoopRun(userId, runId)
   const decision = typeof response === 'string' ? { answer: response } : response
   if (run.runtimeProtocolVersion > 0) {
     if (!requestId) throw new DataAccessError(409, 'QUESTION_REQUEST_REQUIRED', '请刷新原提问卡片后回答。')
-    return resolveDurableQuestion({ userId, runId, callId, requestId, ...decision })
+    return withUserRunLock(userId, async () => {
+      const identity = { runId, callId, requestId, decision }
+      const completed = run.status === 'completed' ? await runtimeTransaction(async tx => {
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-admission:${userId}`}, 0))::text`
+        const source = await readCompletedQuestionDecision(tx, { userId, ...identity })
+        if (source?.kind === 'pending' && 'cancelled' in decision) {
+          return { kind: 'replay' as const, result: await recordCompletedQuestionDecision(tx, source) }
+        }
+        return source
+      }) : null
+      if (completed?.kind === 'replay') return completed.result
+      if (completed?.kind === 'pending' && completed.prompt) {
+        const admitted = readAdmittedStart(run)
+        const next = await startLoopRunLocked(userId, { sessionId: run.sessionId, novelId: run.novelId, prompt: completed.prompt,
+          mode: run.mode === 'act' ? 'build' : run.mode,
+          modelTier: run.modelTier as CreditModelTier, customModelId: run.customModelId ?? undefined,
+          reasoningEffort: run.reasoningEffort as ModelReasoningEffort, modelSelectionExplicit: true, agentQuestionProtocol: 2,
+          ...(admitted?.agentProfile ? { agentProfile: admitted.agentProfile } : {}),
+          ...(admitted?.qualityMode ? { qualityMode: admitted.qualityMode } : {}),
+          ...(admitted?.creativeFreedom !== undefined ? { creativeFreedom: admitted.creativeFreedom } : {}),
+        }, { humanOrigin: 'http', completedQuestion: identity })
+        const admittedMessage = await prisma.agentMessage.findFirst({ where: { runId: next.runId, sessionId: run.sessionId, role: 'user' },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true } })
+        return { resolved: true, runId: next.runId, ...(admittedMessage ? { messageId: admittedMessage.id } : {}) }
+      }
+      const result = await resolveDurableQuestion({ userId, runId, callId, requestId, ...decision }, async (tx, source) => {
+        const admitted = readAdmittedStart(source)
+        await assertRunModelNotArchived(source, tx)
+        await assertManagedAttachmentsAccess(admitted?.attachments, userId, tx)
+      })
+      // Recovery also discovers this queued admission if the process exits before dispatch.
+      const target = result.runId ?? run.id
+      if (!getActiveRun(target)) {
+        const queued = await prisma.agentRun.findFirst({ where: { id: target, userId, status: 'queued', runtimeProtocolVersion: 1 } })
+        if (queued) void executeOwnedPersistedLoopRun(queued).catch(error => {
+          console.error('[agent-loop] 提问回答等待派发', { runId: target, code: error instanceof DataAccessError ? error.code : 'QUESTION_DISPATCH_FAILED' })
+        })
+      }
+      return result
+    })
   }
 
   const resolved = await resolveCurrentGoalResponse(userId, runId, () => resolveQuestionAnswer(runId, callId, decision))
@@ -905,6 +964,18 @@ export async function resolveLoopRunQuestion(
   }
 
   return { resolved: true }
+}
+
+export async function readSessionPendingQuestion(userId: string, sessionId: string): Promise<{ question: PendingAgentQuestion | null }> {
+  await ensureOwnedSession(userId, sessionId)
+  return runtimeTransaction(async tx => {
+    const latest = await tx.agentRun.findFirst({ where: { ...MAIN_RUN_FILTER, userId, sessionId },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { id: true, status: true, runtimeProtocolVersion: true } })
+    if (latest?.runtimeProtocolVersion !== 1) return { question: null }
+    const question = latest.status === 'completed' ? await readPendingCompletedQuestion(tx, { userId, sessionId, runId: latest.id })
+      : await readPendingDurableQuestion(tx, userId, latest.id)
+    return { question }
+  })
 }
 
 /** Serialize legacy mailbox consumption with goal controls; a stale card cannot wake an old epoch. */
@@ -1061,15 +1132,15 @@ export async function recoverDurableLoopRuns() {
     return tx.agentRunLease.findMany({
       where: { enabled: true, OR: [{ expiresAt: null }, { expiresAt: { lte: now } }],
         run: { engine: 'loop', runtimeProtocolVersion: 1, status: { in: ['queued', 'running'] },
-          taskRoot: { is: { status: 'active', authorizationMode: 'legacy', OR: [
+          taskRoot: { is: { status: { in: ['active', QUESTION_CLOSING_ROOT_STATUS] }, authorizationMode: 'legacy', OR: [
             { executionState: { isNot: null } }, { events: { some: { type: 'execution.bootstrap.admitted' } } },
           ] } } } },
       orderBy: [{ updatedAt: 'asc' }, { runId: 'asc' }], take: 32,
       select: { run: { select: { id: true, userId: true, sessionId: true, taskRoot: { select: { executionState: { select: { taskRootId: true } } } }, incomingChildGrant: { select: { kind: true } } } } },
     })
   })
-  // In B0, waiting tasks remain registered with a heartbeat. A concurrent scan
-  // may observe an old row, but cannot steal an active owner or resume a stop.
+  // Parked questions are absent from the scan until their decision is admitted.
+  // A concurrent scan cannot steal an active owner or resume a stop.
   return Promise.all(candidates.map(async ({ run }) => {
     if (getActiveRun(run.id) || run.incomingChildGrant?.kind !== 'inline' && hasActiveRunInSession(run.sessionId)) return { runId: run.id, status: 'skipped' as const }
     try {
@@ -1238,7 +1309,7 @@ async function continueLoopRunLocked(
   }
   // B0 still serializes service admissions with withUserRunLock. Include saved
   // queued/recovering work in the limit, not just controllers in this process.
-  if (await prisma.agentRun.count({ where: { ...MAIN_RUN_FILTER, userId, status: { in: ['queued', 'running', 'awaiting_approval'] } } }) >= env.agentUserMaxConcurrent) {
+  if (await prisma.agentRun.count({ where: { ...MAIN_RUN_FILTER, userId, ...interactiveRunSlots } }) >= env.agentUserMaxConcurrent) {
     throw new DataAccessError(409, 'RUN_LIMIT', '同时进行的任务数已达上限，请稍后再试。')
   }
   // Persist a model change only after the exact target/input/time checks pass.

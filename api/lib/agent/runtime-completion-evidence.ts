@@ -41,18 +41,21 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
     const deliverables = await collectDurableDeliverables(tx, root, evidence.effects)
     const memoryWork = await collectDurableMemoryWork(tx, root, evidence.effects)
     const localCompletion = last.localCompletion
-    const closedQuestion = localCompletion?.kind === 'question_timeout' || localCompletion?.kind === 'question_cancelled' ? localCompletion : null
+    const closedQuestion = localCompletion?.kind === 'question_timeout' || localCompletion?.kind === 'question_cancelled'
+      || localCompletion?.kind === 'question_unanswered' ? localCompletion : null
     if (closedQuestion) {
       const source = await readExecutionFrame(tx, root.id, frame.revision - 1)
       const receipt = await tx.agentEffectReceipt.findUnique({ where: { operationId: closedQuestion.operationId }, include: { operation: true } })
-      const flag = closedQuestion.kind === 'question_cancelled' ? 'questionCancelled' : 'questionTimedOut'
+      const cancelled = closedQuestion.kind !== 'question_timeout'
+      const flag = cancelled ? 'questionCancelled' : 'questionTimedOut'
+      const result = z.object({ toolResult: z.object({ [flag]: z.literal(true), questionCancellationVersion: z.literal(2).optional() }) }).safeParse(receipt?.result)
       if (source.state.pendingOperationId !== receipt?.operationId || !receipt || receipt.operation.taskRootId !== root.id
         || receipt.operation.action !== 'ask_user' || receipt.operation.status !== 'succeeded'
         || runtimeJsonHash(receipt.result) !== receipt.resultHash
-        || !z.object({ toolResult: z.object({ [flag]: z.literal(true) }) }).safeParse(receipt.result).success) {
+        || !result.success || (result.data.toolResult.questionCancellationVersion === 2) !== (closedQuestion.kind === 'question_unanswered')) {
         return runtimeError('RUNTIME_RECEIPT_INVALID', '提问收尾缺少原回执。')
       }
-      if (closedQuestion.kind === 'question_cancelled') {
+      if (cancelled) {
         const request = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `question:${receipt.operationId}` } })
         const prompt = durableQuestionSchema.safeParse(request?.payload)
         const original = z.object({ input: z.object({ callId: z.string(), args: z.unknown() }) }).safeParse(receipt.operation.inputSnapshot)
@@ -69,7 +72,7 @@ export async function collectCompletionEvidenceInTransaction(tx: RuntimeTx, leas
           || decision.data.requestHash !== runtimeJsonHash(request.payload)) return runtimeError('RUNTIME_RECEIPT_INVALID', '提问取消缺少作者的原决定。')
       }
     }
-    const postconditionChecks = (await evaluateTaskPostconditions(tx, root)).map(check =>
+    const postconditionChecks = (await evaluateTaskPostconditions(tx, root, lease.runId)).map(check =>
       closedQuestion && check.code === 'NOVEL_METADATA_INITIALIZED' && check.status === 'failed'
         ? { ...check, status: 'deferred', deferredBy: closedQuestion.kind } : check)
     const todos = await readDurableTodoItems(tx, root.id, frame.revision)

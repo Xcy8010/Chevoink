@@ -3,118 +3,136 @@ import { z } from 'zod'
 import { assertAgentManuscriptCurrent } from './manuscript-scope.js'
 import { env } from '../../config/env.js'
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
-import { databaseNow, lockRunRoot, runtimeError, runtimeId, runtimeJson, runtimeTransaction } from './runtime-common.js'
+import { databaseNow, lockRunRoot, runtimeError, runtimeId, runtimeJson, runtimeTransaction, type RuntimeTx } from './runtime-common.js'
 import { readExecutionFrame, readExecutionStateInTransaction } from './runtime-state.js'
 import { readTaskBudgetInTransaction, taskTurnLimit } from './runtime-budget.js'
 import { durablePauseSchema } from './runtime-common.js'
 import { MAIN_RUN_FILTER } from './runtime-child.js'
+import { interactiveRunSlots } from './run-slots.js'
 
 const pausePayload = durablePauseSchema
 const resumePayload = z.object({ sourceRunId: z.string(), runId: z.string(), pauseEventId: z.string(),
   revision: z.number().int().nonnegative(), snapshotHash: z.string(), configurationHash: z.string() }).strict()
 const live = ['queued', 'running', 'awaiting_approval'] as const
+type ResumeInput = { userId: string; runId: string; pauseEventId: string; activation?: { goalId: string; epoch: bigint } }
 
 /** Durable resume admission, shared by the service and recovery tests.
  * Caller supplies the exact original run/pause identity; an old tab cannot
  * authorize a later pause, task, or new objective.
  * This creates queued work, not a claim that an executor has started. */
-export async function resumeDurableTask(input: { userId: string; runId: string; pauseEventId: string; activation?: { goalId: string; epoch: bigint } }) {
-  const captured = { ...input }, resumedRunId = randomUUID(), eventId = randomUUID()
+export async function resumeDurableTask(input: ResumeInput) {
+  const captured = { ...input }
+  return runtimeTransaction(async tx => {
+    // All resume and fresh admissions share this account lock.
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-admission:${captured.userId}`}, 0))::text`
+    return resumeDurableTaskInTransaction(tx, captured)
+  })
+}
+
+/** Caller holds the account admission lock. */
+export async function resumeDurableTaskInTransaction(tx: RuntimeTx, captured: ResumeInput, questionRequestId?: string) {
+  const resumedRunId = randomUUID(), eventId = randomUUID()
   runtimeId(captured.userId); runtimeId(captured.runId); runtimeId(captured.pauseEventId)
   const concurrencyLimit = env.agentUserMaxConcurrent
   if (!Number.isSafeInteger(concurrencyLimit) || concurrencyLimit < 1) runtimeError('RUNTIME_INPUT_INVALID', '任务并发策略无效。')
-  return runtimeTransaction(async tx => {
-    // Shared by durable resume admissions across processes; never hold over HTTP.
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-admission:${captured.userId}`}, 0))::text`
-    let activationGoal: import('@prisma/client').AgentGoal | null = null
-    if (captured.activation) {
-      const source = await tx.agentRun.findFirst({ where: { id: captured.runId, userId: captured.userId } })
-      if (!source) return runtimeError('RUNTIME_SCOPE_MISMATCH', '原任务不存在。')
-      activationGoal = await (await import('./goal-store.js')).lockOwnedGoal(tx, captured.userId, source.sessionId, captured.activation.goalId)
-      if (activationGoal.status !== 'active' || activationGoal.currentRevision !== 1 || activationGoal.pendingRevision !== null
-        || activationGoal.epoch !== captured.activation.epoch || activationGoal.currentRunId !== source.id
-        || activationGoal.reasonCode !== 'GOAL_ACTIVATION_RESUME_READY') return runtimeError('GOAL_VERSION_CONFLICT', '原任务继续授权已变化。')
-      const consent = await tx.agentGoalEvidence.findUnique({ where: { goalId_revision_criterionId: { goalId: activationGoal.id, revision: 1, criterionId: 'activation-resume' } } })
-      if (consent?.status !== 'verified' || !consent.receipt || typeof consent.receipt !== 'object' || Array.isArray(consent.receipt)
-        || consent.receipt.epoch !== String(activationGoal.epoch) || consent.receipt.sourceRunId !== captured.runId) return runtimeError('GOAL_VERSION_CONFLICT', '缺少本次作者继续授权。')
-      const ready = await (await import('./goal-activation-supervisor.js')).reconcileGoalActivation(tx, activationGoal, await databaseNow(tx))
-      const original = await (await import('./goal-activation.js')).readGoalActivationReceipt(tx, activationGoal)
-      if (!ready || ready === true || ready.kind !== 'activation_continue' || ready.runId !== captured.runId || !original?.receipt.baselineBound) {
-        return runtimeError('GOAL_RECONCILIATION_REQUIRED', '原任务尚未具备本次安全继续条件。')
-      }
+  let activationGoal: import('@prisma/client').AgentGoal | null = null
+  if (captured.activation) {
+    const source = await tx.agentRun.findFirst({ where: { id: captured.runId, userId: captured.userId } })
+    if (!source) return runtimeError('RUNTIME_SCOPE_MISMATCH', '原任务不存在。')
+    activationGoal = await (await import('./goal-store.js')).lockOwnedGoal(tx, captured.userId, source.sessionId, captured.activation.goalId)
+    if (activationGoal.status !== 'active' || activationGoal.currentRevision !== 1 || activationGoal.pendingRevision !== null
+      || activationGoal.epoch !== captured.activation.epoch || activationGoal.currentRunId !== source.id
+      || activationGoal.reasonCode !== 'GOAL_ACTIVATION_RESUME_READY') return runtimeError('GOAL_VERSION_CONFLICT', '原任务继续授权已变化。')
+    const consent = await tx.agentGoalEvidence.findUnique({ where: { goalId_revision_criterionId: { goalId: activationGoal.id, revision: 1, criterionId: 'activation-resume' } } })
+    if (consent?.status !== 'verified' || !consent.receipt || typeof consent.receipt !== 'object' || Array.isArray(consent.receipt)
+      || consent.receipt.epoch !== String(activationGoal.epoch) || consent.receipt.sourceRunId !== captured.runId) return runtimeError('GOAL_VERSION_CONFLICT', '缺少本次作者继续授权。')
+    const ready = await (await import('./goal-activation-supervisor.js')).reconcileGoalActivation(tx, activationGoal, await databaseNow(tx))
+    const original = await (await import('./goal-activation.js')).readGoalActivationReceipt(tx, activationGoal)
+    if (!ready || ready === true || ready.kind !== 'activation_continue' || ready.runId !== captured.runId || !original?.receipt.baselineBound) {
+      return runtimeError('GOAL_RECONCILIATION_REQUIRED', '原任务尚未具备本次安全继续条件。')
     }
-    const { run, root } = await lockRunRoot(tx, captured.userId, captured.runId)
-    if (await tx.agentChildExecutionGrant.findFirst({ where: { childRun: { taskRootId: root.id } } })) return runtimeError('RUNTIME_CHILD_SOURCE_REQUIRED', '子任务只能由原父任务恢复，不能从普通继续入口取得新的执行授权。')
-    if (!activationGoal) await assertAgentManuscriptCurrent(tx, { userId: captured.userId, runId: run.id, novelId: run.novelId })
-    if (root.authorizationMode !== 'legacy') runtimeError('TASK_AUTHORIZATION_NOT_ACTIVATED', '阶段授权执行器尚未接入，不能降级恢复。')
-    const pause = await tx.agentExecutionOutbox.findUnique({ where: { id: captured.pauseEventId } })
-    const parsedPause = pausePayload.safeParse(pause?.payload)
-    const latestPause = await tx.agentExecutionOutbox.findFirst({ where: { taskRootId: root.id, type: 'run.paused' }, orderBy: { sequence: 'desc' } })
-    if (!pause || pause.taskRootId !== root.id || pause.type !== 'run.paused' || latestPause?.id !== pause.id
-      || pause.eventKey !== `pause:${pause.id}` || !parsedPause.success || !parsedPause.data.runIds.includes(run.id)) runtimeError('STALE_RESUME_TARGET', '继续请求不是当前任务本次暂停的授权。')
-    const state = await readExecutionStateInTransaction(tx, root.id)
-    if (parsedPause.success && parsedPause.data.reason !== 'user_stop') {
-      const source = await readExecutionFrame(tx, root.id, parsedPause.data.sourceRevision)
-      if (source.snapshotHash !== parsedPause.data.sourceHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '暂停判定的原执行位置损坏。')
+  }
+  const { run, root } = await lockRunRoot(tx, captured.userId, captured.runId)
+  if (await tx.agentChildExecutionGrant.findFirst({ where: { childRun: { taskRootId: root.id } } })) return runtimeError('RUNTIME_CHILD_SOURCE_REQUIRED', '子任务只能由原父任务恢复，不能从普通继续入口取得新的执行授权。')
+  if (!activationGoal) await assertAgentManuscriptCurrent(tx, { userId: captured.userId, runId: run.id, novelId: run.novelId })
+  if (root.authorizationMode !== 'legacy') runtimeError('TASK_AUTHORIZATION_NOT_ACTIVATED', '阶段授权执行器尚未接入，不能降级恢复。')
+  const pause = await tx.agentExecutionOutbox.findUnique({ where: { id: captured.pauseEventId } })
+  const parsedPause = pausePayload.safeParse(pause?.payload)
+  const latestPause = await tx.agentExecutionOutbox.findFirst({ where: { taskRootId: root.id, type: 'run.paused' }, orderBy: { sequence: 'desc' } })
+  if (!pause || pause.taskRootId !== root.id || pause.type !== 'run.paused' || latestPause?.id !== pause.id
+    || pause.eventKey !== `pause:${pause.id}` || !parsedPause.success || !parsedPause.data.runIds.includes(run.id)) runtimeError('STALE_RESUME_TARGET', '继续请求不是当前任务本次暂停的授权。')
+  const state = await readExecutionStateInTransaction(tx, root.id)
+  if (parsedPause.success && parsedPause.data.reason !== 'user_stop') {
+    const source = await readExecutionFrame(tx, root.id, parsedPause.data.sourceRevision)
+    if (source.snapshotHash !== parsedPause.data.sourceHash) return runtimeError('RUNTIME_RECEIPT_INVALID', '暂停判定的原执行位置损坏。')
+  }
+  const spec = taskSpecSchema.safeParse(state.originalSpec)
+  if (!spec.success || spec.data.id !== root.id || spec.data.scope.novelId !== root.novelId) return runtimeError('RUNTIME_RECEIPT_INVALID', '原任务合同缺失或范围不一致。')
+  const budget = await readTaskBudgetInTransaction(tx, root.id)
+  const turnLimit = taskTurnLimit(budget.policy, budget.budget.checkpointCount)
+  if (state.frame.state.checkpointIndex !== budget.budget.checkpointCount
+    || turnLimit !== null && state.frame.state.turn > turnLimit) runtimeError('RUNTIME_STATE_CONFLICT', '原执行位置与预算回执不一致。')
+  const eventKey = `resume:${pause.id}`
+  const existing = await tx.agentExecutionOutbox.findUnique({ where: { eventKey } })
+  const latestRun = await tx.agentRun.findFirst({ where: { sessionId: root.sessionId, ...MAIN_RUN_FILTER }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { id: true } })
+  if (existing) {
+    const parsed = resumePayload.safeParse(existing.payload)
+    if (!parsed.success || existing.taskRootId !== root.id || existing.type !== 'run.resume.queued'
+      || parsed.data.sourceRunId !== run.id || parsed.data.pauseEventId !== pause.id || existing.runId !== parsed.data.runId
+      || parsed.data.configurationHash !== state.head.configurationHash || existing.sequence <= pause.sequence) return runtimeError('RUNTIME_RECEIPT_INVALID', '原恢复准入回执不一致。')
+    const originalFrame = await readExecutionFrame(tx, root.id, parsed.data.revision)
+    if (originalFrame.snapshotHash !== parsed.data.snapshotHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原恢复位置摘要不一致。')
+    const resumed = await tx.agentRun.findFirst({ where: { id: parsed.data.runId, taskRootId: root.id, userId: run.userId } })
+    if (!resumed) return runtimeError('RUNTIME_RECEIPT_INVALID', '已准入的运行实例缺失，不能再建一个。')
+    if (latestRun?.id !== resumed.id) runtimeError('STALE_RESUME_TARGET', '当前会话已有后续任务，旧恢复回执不能启动它。')
+    await assertAgentManuscriptCurrent(tx, { userId: captured.userId, runId: resumed.id, novelId: resumed.novelId })
+    return { run: resumed, taskRootId: root.id, replay: true as const }
+  }
+  if (root.status !== 'paused' || run.status !== 'paused' || state.frame.state.phase === 'completed') runtimeError('RUN_NOT_PAUSED', '仅本次已暂停且未完成的任务可恢复。')
+  if (latestRun?.id !== run.id) runtimeError('STALE_RESUME_TARGET', '当前会话已有后续任务，请勿从旧入口恢复。')
+  if (state.frame.state.pendingOperationId) {
+    const request = await tx.agentExecutionOutbox.findFirst({ where: { taskRootId: root.id, operationId: state.frame.state.pendingOperationId,
+      type: 'question.requested', payload: { path: ['version'], equals: 2 } }, select: { id: true } })
+    if (request && request.id !== questionRequestId) {
+      const decision = await tx.agentExecutionOutbox.findUnique({ where: { eventKey: `question-answer:${request.id}` }, select: { type: true } })
+      if (!decision) return runtimeError('QUESTION_ANSWER_REQUIRED', '请先在原提问卡片上回答或取消。')
+      if (decision.type === 'question.cancelled') return runtimeError('QUESTION_CLOSED', '原提问已取消。如需继续，请发送新的要求。')
     }
-    const spec = taskSpecSchema.safeParse(state.originalSpec)
-    if (!spec.success || spec.data.id !== root.id || spec.data.scope.novelId !== root.novelId) return runtimeError('RUNTIME_RECEIPT_INVALID', '原任务合同缺失或范围不一致。')
-    const budget = await readTaskBudgetInTransaction(tx, root.id)
-    const turnLimit = taskTurnLimit(budget.policy, budget.budget.checkpointCount)
-    if (state.frame.state.checkpointIndex !== budget.budget.checkpointCount
-      || turnLimit !== null && state.frame.state.turn > turnLimit) runtimeError('RUNTIME_STATE_CONFLICT', '原执行位置与预算回执不一致。')
-    const eventKey = `resume:${pause.id}`
-    const existing = await tx.agentExecutionOutbox.findUnique({ where: { eventKey } })
-    const latestRun = await tx.agentRun.findFirst({ where: { sessionId: root.sessionId, ...MAIN_RUN_FILTER }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { id: true } })
-    if (existing) {
-      const parsed = resumePayload.safeParse(existing.payload)
-      if (!parsed.success || existing.taskRootId !== root.id || existing.type !== 'run.resume.queued'
-        || parsed.data.sourceRunId !== run.id || parsed.data.pauseEventId !== pause.id || existing.runId !== parsed.data.runId
-        || parsed.data.configurationHash !== state.head.configurationHash || existing.sequence <= pause.sequence) return runtimeError('RUNTIME_RECEIPT_INVALID', '原恢复准入回执不一致。')
-      const originalFrame = await readExecutionFrame(tx, root.id, parsed.data.revision)
-      if (originalFrame.snapshotHash !== parsed.data.snapshotHash) runtimeError('RUNTIME_RECEIPT_INVALID', '原恢复位置摘要不一致。')
-      const resumed = await tx.agentRun.findFirst({ where: { id: parsed.data.runId, taskRootId: root.id, userId: run.userId } })
-      if (!resumed) return runtimeError('RUNTIME_RECEIPT_INVALID', '已准入的运行实例缺失，不能再建一个。')
-      if (latestRun?.id !== resumed.id) runtimeError('STALE_RESUME_TARGET', '当前会话已有后续任务，旧恢复回执不能启动它。')
-      await assertAgentManuscriptCurrent(tx, { userId: captured.userId, runId: resumed.id, novelId: resumed.novelId })
-      return { run: resumed, taskRootId: root.id, replay: true as const }
-    }
-    if (root.status !== 'paused' || run.status !== 'paused' || state.frame.state.phase === 'completed') runtimeError('RUN_NOT_PAUSED', '仅本次已暂停且未完成的任务可恢复。')
-    if (latestRun?.id !== run.id) runtimeError('STALE_RESUME_TARGET', '当前会话已有后续任务，请勿从旧入口恢复。')
-    if (await tx.agentRun.count({ where: { sessionId: root.sessionId, status: { in: [...live] }, ...MAIN_RUN_FILTER } })) runtimeError('RUN_IN_PROGRESS', '当前会话已有任务执行。')
-    if (await tx.agentRun.count({ where: { userId: run.userId, status: { in: [...live] }, ...MAIN_RUN_FILTER } }) >= concurrencyLimit) runtimeError('RUN_LIMIT', '同时进行的任务数已达上限。')
-    // A pause is required to revoke every old owner; do not repair a corrupt fence
-    // by silently granting another executable run.
-    if (await tx.agentRunLease.count({ where: { run: { taskRootId: root.id }, enabled: true } })) runtimeError('RUNTIME_STATE_CONFLICT', '暂停的所有权撤销尚未完整，不能恢复。')
-    const now = await databaseNow(tx)
-    const resumed = await tx.agentRun.create({ data: { id: resumedRunId, userId: run.userId, sessionId: run.sessionId,
-      novelId: run.novelId, manuscriptRevision: run.manuscriptRevision, chapterId: run.chapterId, engine: 'loop', mode: state.configuration.mode === 'build' ? 'act' : state.configuration.mode,
-      action: run.action, agentType: run.agentType, status: 'queued', taskRootId: root.id, runtimeProtocolVersion: root.protocolVersion,
-      taskSpec: runtimeJson({ ...spec.data, runId: resumedRunId }).value, currentTurn: state.frame.state.turn,
-      ...(run.startRequest !== null ? { startRequest: runtimeJson(run.startRequest).value } : {}),
-      // Make queued recovery discoverable in the admission transaction, even
-      // if the process exits before the dispatcher first acquires its lease.
-      executionLease: { create: {} },
-      modelTier: state.configuration.model.tier, customModelId: state.configuration.model.customModelId,
-      reasoningEffort: state.configuration.model.reasoningEffort, createdAt: now } })
-    await tx.agentTaskRoot.update({ where: { id: root.id }, data: { status: 'active' } })
-    if (activationGoal) {
-      const index = activationGoal.continuationIndex + 1
-      await tx.agentGoalExecution.create({ data: { goalId: activationGoal.id, goalRevision: activationGoal.currentRevision, epoch: activationGoal.epoch,
-        taskRootId: root.id, runId: resumed.id, continuationIndex: index, trigger: 'author', sourceEventId: `activation-resume:${pause.id}` } })
-      // A paused source is an admission identity, not a live writer. The new
-      // attempt must pass the unchanged full effect fence before consuming consent.
-      await assertAgentManuscriptCurrent(tx, { userId: captured.userId, runId: resumed.id, novelId: resumed.novelId })
-      await tx.agentGoalEvidence.update({ where: { goalId_revision_criterionId: { goalId: activationGoal.id, revision: 1, criterionId: 'activation-resume' } }, data: { status: 'consumed' } })
-      await (await import('./goal-store.js')).changeGoal(tx, activationGoal, { continuationIndex: index, currentRunId: resumed.id,
-        phase: 'executing', reasonCode: null, nextEligibleAt: null, activeSince: now }, 'activation.continued')
-    }
-    await tx.agentExecutionOutbox.create({ data: { id: eventId, taskRootId: root.id, runId: resumed.id, eventKey, type: 'run.resume.queued',
-      payload: { sourceRunId: run.id, runId: resumed.id, pauseEventId: pause.id, revision: state.frame.revision,
-        snapshotHash: state.frame.snapshotHash, configurationHash: state.head.configurationHash } } })
-    // Budget, original request/configuration and frames remain untouched. Zero
-    // balance or unresolved usage does not erase results: provider admission still
-    // controls new spending separately. This does not approve pending tool effects.
-    return { run: resumed, taskRootId: root.id, replay: false as const }
-  })
+  }
+  if (await tx.agentRun.count({ where: { sessionId: root.sessionId, status: { in: [...live] }, ...MAIN_RUN_FILTER } })) runtimeError('RUN_IN_PROGRESS', '当前会话已有任务执行。')
+  if (await tx.agentRun.count({ where: { userId: run.userId, ...interactiveRunSlots, ...MAIN_RUN_FILTER } }) >= concurrencyLimit) runtimeError('RUN_LIMIT', '同时进行的任务数已达上限。')
+  // A pause is required to revoke every old owner; do not repair a corrupt fence
+  // by silently granting another executable run.
+  if (await tx.agentRunLease.count({ where: { run: { taskRootId: root.id }, enabled: true } })) runtimeError('RUNTIME_STATE_CONFLICT', '暂停的所有权撤销尚未完整，不能恢复。')
+  const now = await databaseNow(tx)
+  const resumed = await tx.agentRun.create({ data: { id: resumedRunId, userId: run.userId, sessionId: run.sessionId,
+    novelId: run.novelId, manuscriptRevision: run.manuscriptRevision, chapterId: run.chapterId, engine: 'loop', mode: state.configuration.mode === 'build' ? 'act' : state.configuration.mode,
+    action: run.action, agentType: run.agentType, status: 'queued', taskRootId: root.id, runtimeProtocolVersion: root.protocolVersion,
+    taskSpec: runtimeJson({ ...spec.data, runId: resumedRunId }).value, currentTurn: state.frame.state.turn,
+    ...(run.startRequest !== null ? { startRequest: runtimeJson(run.startRequest).value } : {}),
+    // Make queued recovery discoverable in the admission transaction, even
+    // if the process exits before the dispatcher first acquires its lease.
+    executionLease: { create: {} },
+    modelTier: state.configuration.model.tier, customModelId: state.configuration.model.customModelId,
+    modelConfigId: state.configuration.model.modelConfigId, modelConfigRevision: state.configuration.model.modelConfigRevision,
+    reasoningEffort: state.configuration.model.reasoningEffort, createdAt: now } })
+  await tx.agentTaskRoot.update({ where: { id: root.id }, data: { status: 'active' } })
+  if (activationGoal) {
+    const index = activationGoal.continuationIndex + 1
+    await tx.agentGoalExecution.create({ data: { goalId: activationGoal.id, goalRevision: activationGoal.currentRevision, epoch: activationGoal.epoch,
+      taskRootId: root.id, runId: resumed.id, continuationIndex: index, trigger: 'author', sourceEventId: `activation-resume:${pause.id}` } })
+    // A paused source is an admission identity, not a live writer. The new
+    // attempt must pass the unchanged full effect fence before consuming consent.
+    await assertAgentManuscriptCurrent(tx, { userId: captured.userId, runId: resumed.id, novelId: resumed.novelId })
+    await tx.agentGoalEvidence.update({ where: { goalId_revision_criterionId: { goalId: activationGoal.id, revision: 1, criterionId: 'activation-resume' } }, data: { status: 'consumed' } })
+    await (await import('./goal-store.js')).changeGoal(tx, activationGoal, { continuationIndex: index, currentRunId: resumed.id,
+      phase: 'executing', reasonCode: null, nextEligibleAt: null, activeSince: now }, 'activation.continued')
+  }
+  await tx.agentExecutionOutbox.create({ data: { id: eventId, taskRootId: root.id, runId: resumed.id, eventKey, type: 'run.resume.queued',
+    payload: { sourceRunId: run.id, runId: resumed.id, pauseEventId: pause.id, revision: state.frame.revision,
+      snapshotHash: state.frame.snapshotHash, configurationHash: state.head.configurationHash } } })
+  // Budget, original request/configuration and frames remain untouched. Zero
+  // balance or unresolved usage does not erase results: provider admission still
+  // controls new spending separately. This does not approve pending tool effects.
+  return { run: resumed, taskRootId: root.id, replay: false as const }
 }

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { AgentAttachmentMeta, AgentRunTiming, AgentUIMessage, AgentStreamEvent } from '../../../../shared/contracts/index'
-import { settleRunTiming, timestamp, unknownRunTiming } from '../../../../shared/agent-timing'
+import { advanceRunTiming, settleRunTiming, timestamp, unknownRunTiming } from '../../../../shared/agent-timing'
 
 type OutgoingAnchor = { messageId: string | null; runId: string | null; previousOutgoingId?: string; previousClientRequestId?: string }
 export type OutgoingMessage = { clientRequestId: string; anchor: OutgoingAnchor; id: string; scope: string; novelId: string; sessionId: string | null; runId?: string; status: 'sending' | 'failed' | 'sent'; error?: string; message: AgentUIMessage }
@@ -26,13 +26,14 @@ export const useOutgoingMessages = create<OutgoingState>((set, get) => ({
       || event.type === 'text.final' && Boolean(event.text.trim())
       || event.type === 'tool.call' || event.type === 'tool.delta' && event.argsChars > 0
     const stopped = event.type === 'run.paused' || event.type === 'run.finished' || event.type === 'error' && !event.recoverable
-    if (!response && !stopped && event.type !== 'run.started') return state
+    if (!response && !stopped && event.type !== 'run.started' && event.type !== 'run.question_wait') return state
     const now = new Date().toISOString()
     const requestClocks = state.requestClocks.map(clock => {
       if ((clock.timing.sourceRunId ?? clock.runId) !== event.runId) return clock
       let timing = clock.timing
       if (response && !clock.responded && timing.status === 'running') timing = { ...timing, elapsedMs: 0, activeSince: now, status: 'running', lastSeq: event.seq }
       else if (event.type === 'run.started' && timing.status !== 'running') timing = { ...timing, activeSince: clock.responded ? now : null, status: 'running', lastSeq: event.seq }
+      else if (event.type === 'run.question_wait') timing = advanceRunTiming(timing, { ...event, ts: now })
       else if (stopped) timing = { ...settleRunTiming(timing, now, event.type === 'run.paused'), lastSeq: event.seq }
       if (timing === clock.timing) return clock
       return { ...clock, responded: clock.responded || response, timing,
@@ -93,7 +94,7 @@ function observeRequestClock(clock: RequestClock, messages: AgentUIMessage[]): R
     if (changedSource) retiredRunIds = [...retiredRunIds, currentSource]
     timing = { ...timing, scopeId: server.scopeId ?? timing.scopeId, sourceRunId: source }
     const fresh = changedSource || server.lastSeq > clock.timing.lastSeq
-      || server.lastSeq === clock.timing.lastSeq && !(server.status === 'running' && ['paused', 'finished'].includes(clock.timing.status))
+      || server.lastSeq === clock.timing.lastSeq && !(server.status === 'running' && ['waiting', 'paused', 'finished'].includes(clock.timing.status))
     if (fresh && !responded && hasOutput && server.status === 'running') {
       // This is the first observed response to a local send, not evidence of
       // its earlier token time. Never backfill the server's admission interval.
@@ -102,7 +103,12 @@ function observeRequestClock(clock: RequestClock, messages: AgentUIMessage[]): R
     }
     else {
       if (fresh) {
-        if (server.status === 'finished' || server.status === 'paused') {
+        if (server.status === 'waiting') {
+          // A saved wait can be discovered after an offline interval. Use its
+          // actual accumulated time and leave the clock frozen.
+          timing = { ...server, scopeId: timing.scopeId, sourceRunId: timing.sourceRunId }
+          responded ||= hasOutput
+        } else if (server.status === 'finished' || server.status === 'paused') {
           const stoppedAt = timestamp(latest?.completedAt ?? server.completedAt)
           const stop = stoppedAt === null ? Date.now() : Math.min(Date.now(), Math.max(timestamp(timing.activeSince) ?? 0, stoppedAt + (clock.eventOffsetMs ?? 0)))
           timing = { ...settleRunTiming(timing, new Date(stop).toISOString(), server.status === 'paused'), lastSeq: server.lastSeq }

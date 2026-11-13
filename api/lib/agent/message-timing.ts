@@ -7,7 +7,7 @@ import { MAIN_RUN_FILTER } from './runtime-child.js'
 const timingSelection = {
   id: true, taskRootId: true, runtimeProtocolVersion: true, status: true, startedAt: true, finishedAt: true,
   events: {
-    where: { type: { in: ['run.started', 'run.paused', 'run.finished'] } },
+    where: { type: { in: ['run.started', 'run.paused', 'run.finished', 'run.question_wait'] } },
     orderBy: { seq: 'asc' }, select: { type: true, seq: true, payload: true },
   },
 } satisfies Prisma.AgentRunSelect
@@ -45,7 +45,12 @@ export async function loadMessageTimings(userId: string, sessionId: string, runI
   for (const [rootId, runs] of byRoot) {
     const intervals = runs.map(run => ({
       ...recoverSingleExecutionTiming({ status: run.status, startedAt: run.startedAt?.toISOString() ?? null,
-        finishedAt: run.finishedAt?.toISOString() ?? null }, pauseByRun.get(run.id) ?? null, run.events.at(-1)?.seq ?? 0),
+        finishedAt: run.finishedAt?.toISOString() ?? null }, pauseByRun.get(run.id) ?? null, run.events.at(-1)?.seq ?? 0,
+      run.events.filter(event => event.type === 'run.question_wait').map(event => {
+        const payload = event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload) ? event.payload : null
+        return { type: event.type, seq: event.seq, ts: typeof payload?.ts === 'string' ? payload.ts : '',
+          waiting: typeof payload?.waiting === 'boolean' ? payload.waiting : undefined }
+      })),
       sourceRunId: run.id,
       completedAt: run.status === 'completed' ? run.finishedAt?.toISOString() ?? null : null,
     }))

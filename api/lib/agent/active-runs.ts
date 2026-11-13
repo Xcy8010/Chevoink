@@ -16,6 +16,8 @@ export type ActiveRun = {
   /** Same-session delegated execution is discovered for stop/recovery, but is
    * never presented as the session's main run or its interactive admission. */
   internalChild?: boolean
+  /** Local reduction of a saved cancellation cannot dispatch model work. */
+  questionCancellation?: boolean
 }
 
 const activeRuns = new Map<string, ActiveRun>()
@@ -40,7 +42,7 @@ export function getActiveRunUserIds(): string[] {
 export function countActiveRunsByUser(userId: string): number {
   let count = 0
   for (const run of activeRuns.values()) {
-    if (run.userId === userId && !run.internalChild) {
+    if (run.userId === userId && !run.internalChild && !run.questionCancellation) {
       count += 1
     }
   }

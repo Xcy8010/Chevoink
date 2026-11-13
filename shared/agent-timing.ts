@@ -1,6 +1,6 @@
 import type { AgentRunTiming } from './contracts/agent-events.js'
 
-export type TimingEvent = { type: string; seq: number; ts: string; runId?: string; recoverable?: boolean }
+export type TimingEvent = { type: string; seq: number; ts: string; runId?: string; recoverable?: boolean; waiting?: boolean }
 export const timestamp = (value: string | null | undefined): number | null => {
   if (!value) return null
   const at = Date.parse(value)
@@ -14,13 +14,18 @@ export function advanceRunTiming(previous: AgentRunTiming | undefined, event: Ti
   if (event.seq <= current.lastSeq) return current
   const at = timestamp(event.ts)
   if (at === null) return { ...current, elapsedMs: null, activeSince: null, status: 'unknown', lastSeq: event.seq }
+  if (event.type === 'run.question_wait' && event.waiting === undefined) return { ...current, elapsedMs: null, activeSince: null, status: 'unknown', lastSeq: event.seq }
+  if (event.type === 'run.question_wait' && !event.waiting) {
+    if (current.status !== 'waiting') return { ...current, lastSeq: event.seq }
+    return { ...current, activeSince: event.ts, status: 'running', lastSeq: event.seq }
+  }
   if (event.type === 'run.started') {
     // Another actual admission without its preceding stop is incomplete
     // evidence. Replayed starts are already rejected by the sequence cursor.
     if (current.activeSince) return { ...current, elapsedMs: null, activeSince: event.ts, status: 'running', lastSeq: event.seq }
     return { ...current, elapsedMs: previous ? current.elapsedMs : 0, activeSince: event.ts, status: 'running', lastSeq: event.seq }
   }
-  const status = event.type === 'run.paused' ? 'paused' : 'finished'
+  const status = event.type === 'run.question_wait' ? 'waiting' : event.type === 'run.paused' ? 'paused' : 'finished'
   const since = timestamp(current.activeSince)
   const elapsedMs = current.elapsedMs === null || since !== null && at < since ? null
     : current.elapsedMs + (since === null ? 0 : at - since)
@@ -30,7 +35,7 @@ export function advanceRunTiming(previous: AgentRunTiming | undefined, event: Ti
 /** A status read has a real stop time, but must not invent an SSE sequence. */
 export function settleRunTiming(timing: AgentRunTiming | undefined, stoppedAt: string | null | undefined, paused = false): AgentRunTiming {
   const current = timing ?? unknownRunTiming()
-  if (!current.activeSince && ['paused', 'finished'].includes(current.status)) return { ...current, status: paused ? 'paused' : 'finished' }
+  if (!current.activeSince && ['paused', 'waiting', 'finished'].includes(current.status)) return { ...current, status: paused ? 'paused' : 'finished' }
   if (timestamp(stoppedAt) === null) return { ...current, elapsedMs: null, activeSince: null, status: paused ? 'paused' : 'finished' }
   return { ...advanceRunTiming(current, { type: paused ? 'run.paused' : 'run.finished', seq: current.lastSeq + 1, ts: stoppedAt! }), lastSeq: current.lastSeq }
 }
@@ -59,12 +64,14 @@ export function recoverRunTiming(run: { status: string; startedAt: string | null
 }
 
 /** Durable resume creates a new run; old root events are replay, not its start. */
-export function recoverSingleExecutionTiming(run: { status: string; startedAt: string | null; finishedAt: string | null }, pausedAt: string | null, lastSeq: number): AgentRunTiming {
+export function recoverSingleExecutionTiming(run: { status: string; startedAt: string | null; finishedAt: string | null }, pausedAt: string | null,
+  lastSeq: number, questionTransitions: TimingEvent[] = []): AgentRunTiming {
   // A queued activation has not executed yet; its empty interval must not
   // erase known time from earlier activations of the same durable task.
   if (run.status === 'queued' && run.startedAt === null) return { ...unknownRunTiming(), elapsedMs: 0, lastSeq }
   if (timestamp(run.startedAt) === null) return { ...unknownRunTiming(), lastSeq }
-  const timing: AgentRunTiming = { elapsedMs: 0, activeSince: run.startedAt, status: 'running', lastSeq }
+  const current: AgentRunTiming = { elapsedMs: 0, activeSince: run.startedAt, status: 'running', lastSeq: 0 }
+  const timing = { ...questionTransitions.reduce(advanceRunTiming, current), lastSeq }
   return ['queued', 'running', 'awaiting_approval'].includes(run.status) ? timing
     : settleRunTiming(timing, run.status === 'paused' ? pausedAt : run.finishedAt, run.status === 'paused')
 }

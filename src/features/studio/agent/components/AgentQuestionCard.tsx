@@ -11,15 +11,55 @@ type AgentQuestionCardProps = {
   question: PendingQuestion
   onAnswer: (decision: AgentQuestionDecision) => Promise<boolean>
   coverImages?: ReadonlyMap<string, string>
+  draftStorageKey?: string
+  draftExpiresAt?: string
+  submitLabel?: string
 }
 
 type Choice = number | 'custom'
 type QuestionChoice = { value: Choice; label: string; detail?: string; image?: string }
 type Draft = { choice: Choice | null; customAnswer: string }
+type DraftProgress = { step: number; drafts: Record<number, Draft> }
 type OpenDetail = { option: number; anchor: HTMLButtonElement }
 const emptyDraft: Draft = { choice: null, customAnswer: '' }
 const submissionFailed = '提交失败，请稍后再试。'
 const focusRing = 'focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-[var(--text-secondary)]'
+
+function draftHasExpired(expiresAt: string | undefined) {
+  return expiresAt !== undefined && Date.parse(expiresAt) <= Date.now()
+}
+
+function readDraftProgress(storageKey: string | undefined, prompts: AgentQuestionPrompt[], expiresAt?: string): DraftProgress {
+  const empty: DraftProgress = { step: 0, drafts: {} }
+  if (!storageKey || draftHasExpired(expiresAt)) return empty
+  try {
+    const raw = localStorage.getItem(storageKey)
+    if (!raw) return empty
+    const saved = JSON.parse(raw) as { version?: unknown; step?: unknown; drafts?: Record<number, Partial<Draft>> } | null
+    if (!saved || saved.version !== 1 || typeof saved.step !== 'number' || !Number.isInteger(saved.step)
+      || !saved.drafts || typeof saved.drafts !== 'object') return empty
+    const drafts: Record<number, Draft> = {}
+    for (const [index, prompt] of prompts.entries()) {
+      const draft = saved.drafts[index]
+      if (!draft || typeof draft.customAnswer !== 'string') continue
+      const { choice } = draft
+      if (choice !== null && choice !== 'custom'
+        && (typeof choice !== 'number' || !Number.isInteger(choice) || choice < 0 || choice >= prompt.options.length)) continue
+      drafts[index] = { choice, customAnswer: draft.customAnswer.slice(0, 500) }
+    }
+    let step = Math.max(0, Math.min(prompts.length - 1, saved.step))
+    const firstUnanswered = prompts.findIndex((prompt, index) => !readAnswer(prompt, drafts[index] ?? emptyDraft))
+    if (firstUnanswered !== -1) step = Math.min(step, firstUnanswered)
+    return { step, drafts }
+  } catch {
+    return empty
+  }
+}
+
+function clearDraftProgress(storageKey: string | undefined) {
+  if (!storageKey) return
+  try { localStorage.removeItem(storageKey) } catch { /* Browser storage can be unavailable. */ }
+}
 
 function readAnswer(prompt: AgentQuestionPrompt, draft: Draft) {
   if (draft.choice === 'custom' || !prompt.options.length) return draft.customAnswer.trim()
@@ -93,15 +133,17 @@ function OptionTooltip({ id, anchor, detail, onClose }: { id: string; anchor: HT
 }
 
 export function AgentQuestionCard(props: AgentQuestionCardProps) {
-  return <QuestionForm key={JSON.stringify([props.question.requestId, props.question.callId])} {...props} />
+  const expired = draftHasExpired(props.draftExpiresAt)
+  return <QuestionForm key={JSON.stringify([props.draftStorageKey, props.question.requestId, props.question.callId, expired])} {...props} />
 }
 
-function QuestionForm({ question, onAnswer, coverImages }: AgentQuestionCardProps) {
+function QuestionForm({ question, onAnswer, coverImages, draftStorageKey, draftExpiresAt, submitLabel = '提交回答' }: AgentQuestionCardProps) {
   const id = useId()
   const batch = question.questions?.length ? question.questions : undefined
   const prompts = batch ?? [question]
-  const [step, setStep] = useState(0)
-  const [drafts, setDrafts] = useState<Record<number, Draft>>({})
+  const [progress, setProgress] = useState(() => readDraftProgress(draftStorageKey, prompts, draftExpiresAt))
+  const progressRef = useRef(progress)
+  const { step, drafts } = progress
   const [openDetail, setOpenDetail] = useState<OpenDetail | null>(null)
   const [coverPreview, setCoverPreview] = useState<{ image: string; label: string } | null>(null)
   const closeDetail = useCallback(() => setOpenDetail(null), [])
@@ -137,14 +179,27 @@ function QuestionForm({ question, onAnswer, coverImages }: AgentQuestionCardProp
     heading.current?.focus({ preventScroll: true })
   }, [step])
 
+  useLayoutEffect(() => {
+    if (draftHasExpired(draftExpiresAt)) clearDraftProgress(draftStorageKey)
+  }, [draftExpiresAt, draftStorageKey])
+
+  function updateProgress(next: DraftProgress) {
+    progressRef.current = next
+    setProgress(next)
+    if (!draftStorageKey || draftHasExpired(draftExpiresAt)) return
+    try { localStorage.setItem(draftStorageKey, JSON.stringify({ version: 1, ...next })) }
+    catch { /* Keep the question usable when browser storage is full or disabled. */ }
+  }
+
   function updateDraft(update: Partial<Draft>) {
-    setDrafts(previous => ({ ...previous, [step]: { ...(previous[step] ?? emptyDraft), ...update } }))
+    const previous = progressRef.current
+    updateProgress({ ...previous, drafts: { ...previous.drafts, [step]: { ...(previous.drafts[step] ?? emptyDraft), ...update } } })
     setError(null)
   }
 
   function moveTo(index: number) {
     if (inFlight.current || index < 0 || index >= prompts.length) return
-    setStep(index)
+    updateProgress({ ...progressRef.current, step: index })
     setOpenDetail(null)
     setError(null)
   }
@@ -167,6 +222,7 @@ function QuestionForm({ question, onAnswer, coverImages }: AgentQuestionCardProp
     setPhase(cancelled ? 'cancelling' : 'sending')
     try {
       if (!await onAnswer(decision)) throw new Error(submissionFailed)
+      clearDraftProgress(draftStorageKey)
       setPhase(cancelled ? 'cancelled' : 'sent')
     } catch (failure) {
       inFlight.current = false
@@ -351,7 +407,7 @@ function QuestionForm({ question, onAnswer, coverImages }: AgentQuestionCardProp
             <button type="button" disabled={locked || !answer} onClick={advance}
               className={cn('inline-flex min-h-10 shrink-0 items-center justify-center gap-1.5 rounded-full bg-[#2c6b52] px-3.5 text-sm font-medium text-white hover:bg-[#347a5e] disabled:bg-[#254435] disabled:text-[#a3b5aa]', focusRing)}>
               {phase === 'sending' ? <LoaderCircle aria-hidden className="h-3.5 w-3.5 motion-safe:animate-spin" /> : null}
-              <span aria-live="polite">{phase === 'sending' ? '提交中…' : phase === 'sent' ? '已提交' : last ? '提交回答' : '继续'}</span>
+              <span aria-live="polite">{phase === 'sending' ? '提交中…' : phase === 'sent' ? '已提交' : last ? submitLabel : '继续'}</span>
               <CornerDownLeft aria-hidden className="h-4 w-4 shrink-0" />
             </button>
           </div>

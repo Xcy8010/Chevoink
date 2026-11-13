@@ -16,6 +16,8 @@ import { assertLimitedWritingDelivery, limitedWritingDeliverySchema } from './wr
 import { taskSpecSchema } from '../../../shared/contracts/task-spec-contracts.js'
 import { originalPrompt } from './original-request.js'
 import { allowsNextPrompt, selectCompletedNextPrompt } from './next-prompt.js'
+import { QUESTION_CLOSING_ROOT_STATUS, QUESTION_WAITING_ROOT_STATUS } from './run-slots.js'
+import { novelSetupFollowup, recordCompletedQuestionOffer } from './runtime-question-followup.js'
 
 const liveStatuses = ['queued', 'running', 'awaiting_approval'] as const
 const maxEpoch = 9223372036854775807n
@@ -38,7 +40,7 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     if (parent && !lease.parent) return runtimeError('RUNTIME_PARENT_LEASE_LOST', '子任务终态缺少父任务执行代次。')
     const held = await tx.agentRunLease.findUnique({ where: { runId: run.id } })
     const now = await databaseNow(tx)
-    if (root.id !== lease.taskRootId || root.authorizationMode !== 'legacy' || root.status !== 'active' || !['queued', 'running'].includes(run.status)
+    if (root.id !== lease.taskRootId || root.authorizationMode !== 'legacy' || !['active', QUESTION_CLOSING_ROOT_STATUS].includes(root.status) || !['queued', 'running'].includes(run.status)
       || !held?.enabled || held.ownerId !== lease.ownerId || held.claimId !== lease.claimId || held.epoch !== lease.epoch
       || !held.expiresAt || held.expiresAt <= now) return runtimeError('RUNTIME_LEASE_LOST', '终态提交已失去原执行所有权。')
     const evidence = await collectCompletionEvidenceInTransaction(tx, lease, expected)
@@ -46,7 +48,9 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     if (childGrants.some(grant => grant.status !== 'completed' || grant.childRun.status !== 'completed' || grant.childRun.taskRoot?.status !== 'completed')) return runtimeError('RUNTIME_CHILD_COMPLETION_REQUIRED', '子任务尚未获得真实完成终态，父任务不能宣称完成。')
     await assertPinnedChildCompletion(tx, root.id)
     const facts = z.object({ blockers: z.array(z.unknown()), candidateHash: z.string(), limitedWritingDelivery: limitedWritingDeliverySchema.optional(),
-      terminalReason: z.enum(['question_timeout', 'question_cancelled']).optional() }).parse(evidence.snapshot)
+      postconditionChecks: z.array(z.object({ code: z.string(), status: z.string(), evidence: z.unknown() })),
+      effects: z.array(z.object({ operationId: z.string(), action: z.string(), outcome: z.string() })),
+      terminalReason: z.enum(['question_timeout', 'question_cancelled', 'question_unanswered']).optional() }).parse(evidence.snapshot)
     const { frame, configuration, originalRequest, originalSpec } = await readExecutionStateInTransaction(tx, root.id)
     const candidate = frame.state.messages.at(-1)
     if (facts.blockers.length || candidate?.role !== 'assistant' || !candidate.content?.trim() || promisesFurtherAction(candidate.content)) {
@@ -57,7 +61,7 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     const subject = { userId: lease.userId, novelId: root.novelId, runId: run.id }
     const cancelled = facts.terminalReason === 'question_cancelled'
     const status = cancelled ? 'cancelled' as const : 'completed' as const
-    const limited = cancelled ? undefined : facts.limitedWritingDelivery
+    const limited = cancelled || facts.terminalReason === 'question_unanswered' ? undefined : facts.limitedWritingDelivery
     if (limited) {
       await assertLimitedWritingDelivery(tx, subject, limited)
       if (candidate.content !== limited.text) return runtimeError('RUNTIME_COMPLETION_BLOCKED', '受限交付必须明确展示当前正文未复核的限制。')
@@ -65,9 +69,15 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     const savedPresentation = candidate.localCompletion ? null : await readSavedWritingPresentation(tx, subject)
     const chapterPresentation = savedPresentation && shouldUseSavedWritingPresentation(savedPresentation, candidate.content)
       ? savedChapterPresentationProof(subject, savedPresentation) : null
+    const spec = taskSpecSchema.safeParse(originalSpec)
+    const setup = candidate.localCompletion?.kind === 'novel_setup' ? candidate.localCompletion : null
+    const metadataSaved = facts.postconditionChecks.some(check => check.code === 'NOVEL_METADATA_INITIALIZED' && check.status === 'passed'
+      && z.object({ status: z.literal('complete') }).safeParse(check.evidence).success)
+    const questionFollowup = setup && !goal && !parent && !limited && spec.data?.scope.agentQuestionProtocol === 2 && metadataSaved
+      && facts.effects.some(effect => effect.operationId === setup.operationId && effect.outcome === 'succeeded'
+        && (effect.action === 'novel_create' || effect.action === 'novel_update_meta')) ? novelSetupFollowup : null
     let nextPrompt: string | undefined
     if (configuration.nextPromptMarker && !candidate.localCompletion && !goal && !parent && !limited && allowsNextPrompt(originalPrompt(originalRequest))) {
-      const spec = taskSpecSchema.safeParse(originalSpec)
       if (spec.success && !spec.data.scope.writing?.titleAndBodyOnly) {
         const saved = z.object({
           deliverables: z.array(z.object({ kind: z.enum(['plan', 'chapter']), title: z.string(), status: z.string(), characters: z.number(), sourceOperationId: z.string() })),
@@ -92,17 +102,19 @@ export async function finalizeDurableTask(token: RunLeaseToken, cursor: { expect
     const receipt = await commitOperationEffectInTransaction(tx, lease, operation.id, operation.inputHash,
       async () => runtimeJson({ version: 1, sourceRevision: frame.revision, sourceHash: frame.snapshotHash,
         candidateHash: facts.candidateHash, evidenceHash: evidence.snapshotHash, evidence: evidence.snapshot,
+        ...(questionFollowup ? { questionFollowup } : {}),
         ...(configuration.nextPromptMarker ? { nextPrompt: nextPrompt ?? null } : {}),
         ...(limited ? { limitedWritingDelivery: limited, outcome: limited.outcome } : {}),
         ...(chapterPresentation ? { chapterPresentation } : {}) }).value)
     const next = await saveExecutionStateInTransaction(tx, lease, { ...expected,
       snapshot: { ...frame.state, phase: 'completed' } })
-    await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: root.id, runId: run.id, operationId: operation.id,
+    const completion = await tx.agentExecutionOutbox.create({ data: { id: randomUUID(), taskRootId: root.id, runId: run.id, operationId: operation.id,
       eventKey: `decision:${operation.id}`, type: 'execution.completion.decided', payload: {
         version: 1, kind: status, reviewOperationId: operation.id, resultHash: receipt.resultHash,
         sourceRevision: frame.revision, sourceHash: frame.snapshotHash, revision: next.revision, snapshotHash: next.snapshotHash,
         ...(limited ? { outcome: limited.outcome } : {}),
       } } })
+    if (questionFollowup) await recordCompletedQuestionOffer(tx, completion, questionFollowup)
     await tx.agentTaskRoot.update({ where: { id: root.id }, data: { status } })
     const previousUsage = run.usage && typeof run.usage === 'object' && !Array.isArray(run.usage) ? run.usage : {}
     await tx.agentRun.update({ where: { id: run.id }, data: { status, finishedAt: now, errorMessage: null,
@@ -149,7 +161,7 @@ async function pauseTask(userId: string, runId: string, attention?: { lease: Run
       const pausedRuns = await tx.agentRun.findMany({ where: { taskRootId: root.id, status: 'paused' }, select: { id: true } })
       return { stopped: true as const, runIds: pausedRuns.map(row => row.id) }
     }
-    if (root.status !== 'active' || !(liveStatuses as readonly string[]).includes(run.status)) runtimeError('RUN_NOT_ACTIVE', '任务不在运行中，不能从旧入口停止其他执行。')
+    if (!['active', QUESTION_WAITING_ROOT_STATUS, QUESTION_CLOSING_ROOT_STATUS].includes(root.status) || !(liveStatuses as readonly string[]).includes(run.status)) runtimeError('RUN_NOT_ACTIVE', '任务不在运行中，不能从旧入口停止其他执行。')
     let expiry: Date | null = null
     if (attention) {
       const held = await tx.agentRunLease.findUnique({ where: { runId } })

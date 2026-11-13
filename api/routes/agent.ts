@@ -35,6 +35,7 @@ import {
   listAgentSessionsData,
   searchAgentSessionsData,
   listSessionRunStatuses,
+  readSessionPendingQuestion,
   resolveLoopRunApproval,
   resolveLoopRunQuestion,
   startLoopRun,
@@ -981,6 +982,18 @@ router.post('/runs/:runId/approvals', async (req: Request, res: Response): Promi
       body.alwaysAllow ?? false,
       body.approvalId,
     )
+    res.status(200).json(buildSuccess(requestId, payload))
+  } catch (error) {
+    sendRouteError(res, requestId, error)
+  }
+})
+
+router.get('/sessions/:sessionId/questions/pending', async (req: Request, res: Response): Promise<void> => {
+  const requestId = createRequestId()
+  try {
+    const userId = requireSessionUserId(req)
+    const payload = await readSessionPendingQuestion(userId, req.params.sessionId)
+    res.setHeader('Cache-Control', 'no-store')
     res.status(200).json(buildSuccess(requestId, payload))
   } catch (error) {
     sendRouteError(res, requestId, error)

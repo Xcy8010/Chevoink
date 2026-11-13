@@ -102,9 +102,9 @@ export async function freshSystemModelTier(role: 'speed' | 'basic'): Promise<str
   if (!target?.tier || !target.enabled) throw new DataAccessError(409, 'MODEL_SELECTION_REQUIRED', '系统用途没有可用的替代配置。')
   return target.tier
 }
-export async function assertRunModelNotArchived(run: { modelTier: string; modelConfigId?: string | null }): Promise<void> {
+export async function assertRunModelNotArchived(run: { modelTier: string; modelConfigId?: string | null }, db: Db = prisma): Promise<void> {
   if (run.modelTier === 'custom') return
-  const row = await prisma.aiModelConfig.findFirst({ where: { ownerUserId: null, ...(run.modelConfigId ? { id: run.modelConfigId } : { tier: run.modelTier }) } })
+  const row = await db.aiModelConfig.findFirst({ where: { ownerUserId: null, ...(run.modelConfigId ? { id: run.modelConfigId } : { tier: run.modelTier }) } })
   if (row?.archivedAt) throw new DataAccessError(409, 'MODEL_SELECTION_REQUIRED', '原模型已归档。排队、暂停或恢复的任务须由作者明确重新选择；未切换模型、恢复或重算旧账。')
 }
 

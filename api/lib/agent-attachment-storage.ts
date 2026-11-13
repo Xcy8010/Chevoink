@@ -65,7 +65,8 @@ export function isManagedAttachmentOwnedBy(url: string, userId: string): boolean
   return segments.length === 2 && segments[0] === userId
 }
 
-export async function assertManagedAttachmentAccess(url: string, userId: string): Promise<{ diskPath: string; contentSha256: string | null }> {
+export async function assertManagedAttachmentAccess(url: string, userId: string,
+  db: Pick<typeof prisma, 'legacyAgentAttachmentGrant'> = prisma): Promise<{ diskPath: string; contentSha256: string | null }> {
   const diskPath = resolveManagedAttachmentPath(url)
   if (!diskPath || !userId) throw new DataAccessError(403, 'FORBIDDEN', '附件不存在或不属于当前用户。')
   if (isManagedAttachmentOwnedBy(url, userId)) return { diskPath, contentSha256: null }
@@ -74,7 +75,7 @@ export async function assertManagedAttachmentAccess(url: string, userId: string)
   }
   let grant
   try {
-    grant = await prisma.legacyAgentAttachmentGrant.findUnique({ where: { url } })
+    grant = await db.legacyAgentAttachmentGrant.findUnique({ where: { url } })
   } catch {
     throw new DataAccessError(503, 'ATTACHMENT_ACCESS_UNAVAILABLE', '暂时无法核验附件归属，请稍后重试。')
   }
@@ -84,8 +85,9 @@ export async function assertManagedAttachmentAccess(url: string, userId: string)
   return { diskPath, contentSha256: grant.contentSha256 }
 }
 
-export async function assertManagedAttachmentsAccess(attachments: readonly Pick<AgentAttachmentMeta, 'url'>[] | undefined, userId: string): Promise<void> {
-  for (const attachment of attachments ?? []) await assertManagedAttachmentAccess(attachment.url, userId)
+export async function assertManagedAttachmentsAccess(attachments: readonly Pick<AgentAttachmentMeta, 'url'>[] | undefined, userId: string,
+  db: Pick<typeof prisma, 'legacyAgentAttachmentGrant'> = prisma): Promise<void> {
+  for (const attachment of attachments ?? []) await assertManagedAttachmentAccess(attachment.url, userId, db)
 }
 
 /** Bounded local read shared by HTTP, tool calls and main-model vision inputs. */

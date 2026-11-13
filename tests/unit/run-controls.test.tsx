@@ -4,8 +4,9 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { useRunControls } from '../../src/features/studio/agent/components/use-run-controls'
 import type { ContinueAgentLoopRunModel } from '../../src/features/studio/agent/agentApi'
 import type { PendingQuestion } from '../../src/features/studio/agent/agentStore'
+import type { PendingAgentQuestion } from '../../shared/contracts/agent-events'
 
-const mocks = vi.hoisted(() => ({ resume: vi.fn(), stop: vi.fn(), approval: vi.fn(), question: vi.fn(), begin: vi.fn(), restore: vi.fn() }))
+const mocks = vi.hoisted(() => ({ resume: vi.fn(), stop: vi.fn(), approval: vi.fn(), question: vi.fn(), begin: vi.fn(), restore: vi.fn(), clearQuestion: vi.fn(), refreshQuestion: vi.fn() }))
 vi.mock('../../src/features/studio/agent/agentApi', () => ({
   continueAgentLoopRun: mocks.resume, stopAgentLoopRun: mocks.stop,
   resolveAgentApproval: mocks.approval, resolveAgentQuestion: mocks.question,
@@ -16,12 +17,13 @@ vi.mock('../../src/features/studio/agent/agentStore', () => ({
 }))
 afterEach(() => { cleanup(); vi.clearAllMocks() })
 
-function fixture(selectedModelRef?: { current: ContinueAgentLoopRunModel | null }, pendingQuestion?: PendingQuestion) {
+function fixture(selectedModelRef?: { current: ContinueAgentLoopRunModel | null }, pendingQuestion?: PendingQuestion | PendingAgentQuestion) {
   const connect = vi.fn(), setActionError = vi.fn()
   const hook = renderHook(({ sessionId, runId }) => useRunControls({
-    sessionId, runId, resumeableRunId: null, phase: 'running',
+    sessionId, runId, resumeableRunId: null, phase: runId ? 'running' : 'idle',
     pendingApproval: null, pendingQuestion: pendingQuestion ?? null, connect, setActionError, selectedModelRef,
-  }), { initialProps: { sessionId: 'a', runId: 'run' } })
+    clearPendingQuestion: mocks.clearQuestion, refreshPendingQuestion: mocks.refreshQuestion,
+  }), { initialProps: { sessionId: 'a', runId: 'run' as string | null } })
   return { ...hook, connect, setActionError }
 }
 
@@ -58,6 +60,51 @@ it('sends a batch or cancellation as an atomic decision on the original call', a
     ['run', { callId: 'batch', requestId: 'request-2', answers: ['夜市', '第三人称'] }],
     ['run', { callId: 'batch', requestId: 'request-2', cancelled: true }],
   ])
+})
+
+const savedQuestion = { runId: 'source-run', callId: 'source-call', requestId: 'saved-request', question: '接下来怎么写？', options: [] }
+
+it('submits a restored stopped question by original run and connects the admitted continuation', async () => {
+  const { result, rerender, connect } = fixture(undefined, { ...savedQuestion, state: 'stopped' })
+  rerender({ sessionId: 'a', runId: null })
+  mocks.question.mockResolvedValue({ resolved: true, runId: 'new-attempt' })
+
+  await expect(result.current.handleResolveQuestion({ answer: '从调查员视角继续' })).resolves.toBe(true)
+  expect(mocks.question).toHaveBeenCalledExactlyOnceWith('source-run', { callId: 'source-call', requestId: 'saved-request', answer: '从调查员视角继续' })
+  expect(mocks.clearQuestion).toHaveBeenCalledExactlyOnceWith('saved-request')
+  expect(mocks.restore).toHaveBeenCalledExactlyOnceWith('new-attempt', 'a', null, undefined, 'source-run')
+  expect(connect).toHaveBeenCalledExactlyOnceWith('new-attempt', 0)
+})
+
+it('renders the persisted author answer as a distinct new round after a completed question', async () => {
+  const { result, rerender } = fixture(undefined, { ...savedQuestion, state: 'completed' })
+  rerender({ sessionId: 'a', runId: null })
+  mocks.question.mockResolvedValue({ resolved: true, runId: 'new-attempt', messageId: 'admitted-answer' })
+  await expect(result.current.handleResolveQuestion({ answer: '继续大纲' })).resolves.toBe(true)
+  expect(mocks.begin).toHaveBeenCalledExactlyOnceWith('new-attempt', '继续大纲', 'a', undefined, null, 'admitted-answer', null)
+  expect(mocks.restore).not.toHaveBeenCalled()
+})
+it('stops the persisted waiting run after refresh and rereads the original request', async () => {
+  const { result, rerender } = fixture(undefined, { ...savedQuestion, state: 'waiting' })
+  rerender({ sessionId: 'a', runId: null })
+  mocks.stop.mockResolvedValue({ stopped: true })
+
+  await act(async () => { await result.current.handleStop() })
+  expect(mocks.stop).toHaveBeenCalledExactlyOnceWith('source-run')
+  expect(mocks.refreshQuestion).toHaveBeenCalledOnce()
+})
+
+it('a decision confirmed after leaving the session clears its own draft without connecting that run', async () => {
+  let finish!: (value: { resolved: boolean; runId: string }) => void
+  mocks.question.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+  const { result, rerender, connect } = fixture(undefined, { ...savedQuestion, state: 'stopped' })
+  const submission = result.current.handleResolveQuestion({ answer: '从这里继续' })
+  rerender({ sessionId: 'b', runId: 'new-run' })
+  finish({ resolved: true, runId: 'old-resume' })
+
+  await expect(submission).resolves.toBe(true)
+  expect(mocks.restore).not.toHaveBeenCalled()
+  expect(connect).not.toHaveBeenCalled()
 })
 
 it('one Continue restores the original task and connects directly using the current model', async () => {
